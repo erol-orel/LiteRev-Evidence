@@ -1,7 +1,8 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { ExternalLink } from 'lucide-react'
 import type { ProjectContext, RelevanceLabel, SearchFilters, SearchMode, SearchResult } from './types/search'
-import { searchDocuments } from './lib/api'
+import { getFilterOptions, searchDocuments } from './lib/api'
+import type { FilterOptions } from './lib/api'
 
 export default function App() {
   const [projectContext, setProjectContext] = useState<ProjectContext>('eva')
@@ -13,6 +14,11 @@ export default function App() {
   const [error, setError] = useState<string | null>(null)
   const [relevanceMap, setRelevanceMap] = useState<Record<number, RelevanceLabel>>({})
   const [selectedResult, setSelectedResult] = useState<SearchResult | null>(null)
+  const [filterOptions, setFilterOptions] = useState<FilterOptions | null>(null)
+
+  useEffect(() => {
+    getFilterOptions().then(setFilterOptions).catch(console.error)
+  }, [])
 
   const effectiveFilters = useMemo(
     () => ({ ...filters, project_context: projectContext }),
@@ -65,7 +71,6 @@ export default function App() {
                 Interface unifiée pour GeoAI4EI, GESICA et EVA, connectée au moteur FastAPI + PostgreSQL/pgvector.
               </p>
             </div>
-
             <div className="grid gap-3 sm:grid-cols-3">
               {[
                 ['geoai4ei', 'GeoAI4EI'],
@@ -102,16 +107,28 @@ export default function App() {
                   ['scenario_type', 'Type de scénario'],
                   ['geographic_scope', 'Zone géographique'],
                   ['evidence_category', 'Catégorie de preuve'],
-                ].map(([key, label]) => (
-                  <label key={key} className="block">
-                    <span className="mb-2 block text-sm font-medium text-slate-200">{label}</span>
-                    <input
-                      value={(filters as Record<string, string | undefined>)[key] ?? ''}
-                      onChange={(e) => setFilters((prev) => ({ ...prev, [key]: e.target.value || undefined }))}
-                      className="w-full rounded-2xl border border-white/10 bg-slate-950/80 px-3 py-3 text-sm text-white placeholder:text-slate-500 focus:border-cyan-400 focus:outline-none"
-                    />
-                  </label>
-                ))}
+                ].map(([key, label]) => {
+                  const options = filterOptions?.[key as keyof FilterOptions] ?? []
+                  return (
+                    <label key={key} className="block">
+                      <span className="mb-2 block text-sm font-medium text-slate-200">{label}</span>
+                      <select
+                        value={(filters as Record<string, string | undefined>)[key] ?? ''}
+                        onChange={(e) =>
+                          setFilters((prev) => ({ ...prev, [key]: e.target.value || undefined }))
+                        }
+                        className="w-full rounded-2xl border border-white/10 bg-slate-950/80 px-3 py-3 text-sm text-white focus:border-cyan-400 focus:outline-none appearance-none"
+                      >
+                        <option value="">Tous</option>
+                        {options.map((opt) => (
+                          <option key={String(opt.value)} value={String(opt.value)}>
+                            {opt.label}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                  )
+                })}
               </div>
             </div>
           </aside>
@@ -132,7 +149,6 @@ export default function App() {
                   </button>
                 ))}
               </div>
-
               <div className="flex flex-col gap-3 lg:flex-row">
                 <input
                   value={query}
@@ -175,29 +191,16 @@ export default function App() {
                       }`}
                     >
                       <div className="flex items-start justify-between gap-4">
-                        <button
-                          type="button"
-                          onClick={() => setSelectedResult(result)}
-                          className="text-left"
-                        >
-                          <h3 className="text-2xl font-semibold text-white hover:text-cyan-300">
-                            {result.title}
-                          </h3>
+                        <button type="button" onClick={() => setSelectedResult(result)} className="text-left">
+                          <h3 className="text-2xl font-semibold text-white hover:text-cyan-300">{result.title}</h3>
                         </button>
-
                         {result.url && (
-                          <a
-                            href={result.url}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            className="inline-flex items-center gap-2 rounded-xl border border-white/10 px-3 py-2 text-sm text-slate-200 hover:bg-white/10"
-                          >
-                            Source
-                            <ExternalLink size={16} />
+                          <a href={result.url} target="_blank" rel="noopener noreferrer"
+                            className="inline-flex items-center gap-2 rounded-xl border border-white/10 px-3 py-2 text-sm text-slate-200 hover:bg-white/10">
+                            Source <ExternalLink size={16} />
                           </a>
                         )}
                       </div>
-
                       <div className="mt-3 flex flex-wrap gap-2 text-xs text-slate-400">
                         <span className="rounded-full bg-white/5 px-2 py-1">Score {result.score.toFixed(3)}</span>
                         {result.source && <span className="rounded-full bg-white/5 px-2 py-1">{result.source}</span>}
@@ -206,23 +209,18 @@ export default function App() {
                           <span className="rounded-full bg-cyan-500/10 px-2 py-1 text-cyan-200">{result.project_context}</span>
                         )}
                       </div>
-
                       <p className="mt-4 max-w-none text-sm leading-6 text-slate-200">
                         {result.highlight || result.content}
                       </p>
-
                       <div className="mt-5 flex flex-wrap gap-2">
                         {(['pertinent', 'non_pertinent', 'incertain'] as RelevanceLabel[]).map((tag) => (
-                          <button
-                            key={tag}
-                            type="button"
+                          <button key={tag} type="button"
                             onClick={() => setRelevanceMap((prev) => ({ ...prev, [result.id]: tag }))}
                             className={`rounded-full border px-3 py-1 text-xs transition ${
                               relevanceMap[result.id] === tag
                                 ? 'border-cyan-400 bg-cyan-500/15 text-cyan-200'
                                 : 'border-white/10 bg-white/5 text-slate-400 hover:border-white/20 hover:text-slate-200'
-                            }`}
-                          >
+                            }`}>
                             {tag}
                           </button>
                         ))}
@@ -234,35 +232,25 @@ export default function App() {
                 <aside className="2xl:sticky 2xl:top-8 2xl:self-start">
                   <div className="rounded-3xl border border-white/10 bg-white/5 p-5 shadow-2xl min-h-[180px]">
                     {!selectedResult ? (
-                      <div className="text-sm leading-6 text-slate-300">
-                        Cliquez sur un résultat pour afficher le détail du document.
-                      </div>
+                      <div className="text-sm leading-6 text-slate-300">Cliquez sur un résultat pour afficher le détail.</div>
                     ) : (
                       <div className="space-y-5 text-sm text-slate-200">
                         <div>
                           <p className="text-xs uppercase tracking-[0.2em] text-cyan-300">Document detail</p>
                           <h2 className="mt-2 text-2xl font-semibold text-white">{selectedResult.title}</h2>
                         </div>
-
                         {selectedResult.url && (
-                          <a
-                            href={selectedResult.url}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            className="inline-flex items-center gap-2 rounded-xl border border-white/10 px-3 py-2 text-sm text-slate-200 hover:bg-white/10"
-                          >
-                            Open source
-                            <ExternalLink size={16} />
+                          <a href={selectedResult.url} target="_blank" rel="noopener noreferrer"
+                            className="inline-flex items-center gap-2 rounded-xl border border-white/10 px-3 py-2 text-sm text-slate-200 hover:bg-white/10">
+                            Open source <ExternalLink size={16} />
                           </a>
                         )}
-
                         <section>
                           <h3 className="mb-2 font-medium text-white">Extrait</h3>
                           <p className="rounded-2xl border border-white/10 bg-white/5 p-4 leading-6">
                             {selectedResult.highlight || selectedResult.content}
                           </p>
                         </section>
-
                         <section>
                           <h3 className="mb-2 font-medium text-white">Métadonnées</h3>
                           <dl className="grid grid-cols-1 gap-3 rounded-2xl border border-white/10 bg-white/5 p-4">
