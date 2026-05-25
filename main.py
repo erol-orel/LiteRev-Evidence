@@ -187,3 +187,37 @@ def search(payload: SearchIn) -> dict[str, Any]:
         )
 
     return {"results": results}
+
+
+@app.get("/documents/{doc_id}")
+def get_document(doc_id: int) -> dict[str, Any]:
+    sql = text("""
+        SELECT
+            d.id, d.source, d.title, d.abstract, d.year, d.url,
+            d.external_id, d.project_context, d.source_type,
+            d.disease_or_condition, d.scenario_type,
+            d.geographic_scope, d.evidence_category,
+            d.created_at, d.updated_at,
+            COALESCE(
+                json_agg(
+                    json_build_object(
+                        'id', c.id,
+                        'chunk_index', c.chunk_index,
+                        'content', c.content,
+                        'chunk_type', c.chunk_type,
+                        'section_label', c.section_label,
+                        'token_count', c.token_count
+                    ) ORDER BY c.chunk_index
+                ) FILTER (WHERE c.id IS NOT NULL),
+                '[]'
+            ) AS chunks
+        FROM literature_document d
+        LEFT JOIN document_chunk c ON c.document_id = d.id
+        WHERE d.id = :doc_id
+        GROUP BY d.id
+    """)
+    with engine.connect() as conn:
+        row = conn.execute(sql, {"doc_id": doc_id}).first()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Document not found")
+    return dict(row._mapping)
