@@ -9,6 +9,8 @@ export interface SearchFilters {
   scenario_type?: string
   geographic_scope?: string
   evidence_category?: string
+  year_min?: number
+  year_max?: number
 }
 
 export interface SearchResult {
@@ -28,6 +30,7 @@ export interface SearchResult {
   geographic_scope: string | null
   evidence_category: string | null
   highlight?: string | null
+  [key: string]: unknown
 }
 
 export interface SearchRequest {
