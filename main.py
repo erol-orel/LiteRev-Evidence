@@ -5,7 +5,7 @@ import logging
 import os
 from typing import Any
 
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from sentence_transformers import SentenceTransformer
 from sqlalchemy import create_engine, text
@@ -18,6 +18,7 @@ logging.basicConfig(level=logging.INFO)
 
 DB_URL = os.getenv("DB_URL")
 EMBED_MODEL_NAME = os.getenv("EMBED_MODEL_NAME", "BAAI/bge-m3")
+WRITE_API_KEY = os.getenv("WRITE_API_KEY", "")
 ALLOWED_ORIGINS = os.getenv(
     "ALLOWED_ORIGINS",
     "http://localhost:5173,http://127.0.0.1:5173,http://127.0.0.1",
@@ -39,6 +40,12 @@ search_service = SearchService(db_engine=engine, embedder=embedder)
 
 logger.info("Embedding model loaded: %s", EMBED_MODEL_NAME)
 logger.info("Search backend selected: %s", search_service.backend_name)
+
+
+# ── API Key guard (write endpoints only) ──────────────────────────────────────
+def require_api_key(x_api_key: str = Header(default="")) -> None:
+    if WRITE_API_KEY and x_api_key != WRITE_API_KEY:
+        raise HTTPException(status_code=401, detail="Invalid or missing API key")
 
 
 @app.on_event("startup")
@@ -65,7 +72,7 @@ def filter_options() -> dict[str, Any]:
 
 
 @app.post("/documents")
-def create_document(doc: DocumentIn) -> dict[str, Any]:
+def create_document(doc: DocumentIn, _: None = Depends(require_api_key)) -> dict[str, Any]:
     sql = text("""
         INSERT INTO literature_document (
             source, title, abstract, year, url, external_id,
@@ -103,7 +110,7 @@ def create_document(doc: DocumentIn) -> dict[str, Any]:
 
 
 @app.post("/chunks")
-def create_chunk(chunk: ChunkIn) -> dict[str, Any]:
+def create_chunk(chunk: ChunkIn, _: None = Depends(require_api_key)) -> dict[str, Any]:
     embedding = embedder.encode(chunk.content).tolist()
 
     sql = text("""
