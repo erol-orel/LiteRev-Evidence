@@ -221,3 +221,68 @@ def get_document(doc_id: int) -> dict[str, Any]:
     if row is None:
         raise HTTPException(status_code=404, detail="Document not found")
     return dict(row._mapping)
+
+
+# ── GET /documents/{doc_id} ─────────────────────────────────────────────────
+@app.get("/documents/{doc_id}")
+def get_document(doc_id: int) -> dict[str, Any]:
+    with engine.connect() as conn:
+        doc = conn.execute(
+            text("SELECT * FROM literature_document WHERE id = :id"),
+            {"id": doc_id}
+        ).mappings().first()
+        if not doc:
+            from fastapi import HTTPException
+            raise HTTPException(status_code=404, detail="Document not found")
+        chunks = conn.execute(
+            text("""SELECT chunk_index, content, chunk_type, section_label
+                    FROM document_chunk WHERE document_id = :id
+                    ORDER BY chunk_index"""),
+            {"id": doc_id}
+        ).mappings().all()
+    return {
+        "document": dict(doc),
+        "chunks": [dict(c) for c in chunks]
+    }
+
+
+# ── GET /evidence-summary/{doc_id} ─────────────────────────────────────────
+import re as _re
+
+def _extract_gesica(title: str, abstract: str) -> dict:
+    text_combined = f"{title} {abstract}".lower()
+    # Demand / forecast signals
+    demand_kw = ["demand forecast", "arrival rate", "call volume", "response time",
+                 "incident rate", "dispatch", "surge", "overcrowding"]
+    resource_kw = ["ambulance", "hospital bed", "icu", "staff", "resource allocation",
+                   "capacity", "equipment", "personnel"]
+    intervention_kw = ["algorithm", "machine learning", "neural network", "simulation",
+                       "optimization", "prediction model", "decision support", "ai"]
+    horizon_pat = _re.search(r'(\d+)\s*(hour|day|week|month|year)', text_combined)
+    return {
+        "demand_signals": [k for k in demand_kw if k in text_combined],
+        "resource_types": [k for k in resource_kw if k in text_combined],
+        "intervention_types": [k for k in intervention_kw if k in text_combined],
+        "forecast_horizon": horizon_pat.group(0) if horizon_pat else None,
+        "cross_border": any(w in text_combined for w in ["cross-border", "switzerland", "france", "suisse"]),
+    }
+
+@app.get("/evidence-summary/{doc_id}")
+def evidence_summary(doc_id: int) -> dict[str, Any]:
+    with engine.connect() as conn:
+        doc = conn.execute(
+            text("SELECT title, abstract, disease_or_condition, scenario_type, geographic_scope, evidence_category, project_context FROM literature_document WHERE id = :id"),
+            {"id": doc_id}
+        ).mappings().first()
+        if not doc:
+            from fastapi import HTTPException
+            raise HTTPException(status_code=404, detail="Document not found")
+    d = dict(doc)
+    gesica_struct = _extract_gesica(d.get("title") or "", d.get("abstract") or "")
+    return {
+        "doc_id": doc_id,
+        "title": d["title"],
+        "project_context": d["project_context"],
+        "metadata": {k: d[k] for k in ("disease_or_condition","scenario_type","geographic_scope","evidence_category")},
+        "gesica_extraction": gesica_struct,
+    }
