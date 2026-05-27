@@ -1,79 +1,114 @@
-import type { SearchRequest, SearchResponse } from "../types/search"
+import type {
+  SearchRequest,
+  SearchResponse,
+  SearchResult,
+} from "../types/search";
 
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "/api"
-
-export async function searchDocuments(payload: SearchRequest): Promise<SearchResponse> {
-  const response = await fetch(`${API_BASE_URL}/search`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
-  })
-  if (!response.ok) {
-    const text = await response.text()
-    throw new Error(text || `Search failed with status ${response.status}`)
-  }
-  return response.json()
-}
+const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "/api";
 
 export interface FilterOption {
-  value: string | number
-  label: string
+  value: string | number;
+  label: string;
 }
 
 export interface FilterOptions {
-  source: FilterOption[]
-  sourcetype: FilterOption[]
-  diseaseorcondition: FilterOption[]
-  scenariotype: FilterOption[]
-  geographicscope: FilterOption[]
-  evidencecategory: FilterOption[]
-  year: FilterOption[]
+  source?: FilterOption[];
+  sourcetype?: FilterOption[];
+  diseaseorcondition?: FilterOption[];
+  scenariotype?: FilterOption[];
+  geographicscope?: FilterOption[];
+  evidencecategory?: FilterOption[];
+  year?: FilterOption[];
 }
 
-export async function getFilterOptions(): Promise<FilterOptions> {
-  const response = await fetch(`${API_BASE_URL}/filtersoptions`)
-  if (!response.ok) {
-    throw new Error(`Filter options failed: ${response.status}`)
-  }
-  return response.json()
+export interface DocumentChunk {
+  id?: number;
+  chunk_index: number;
+  content: string;
+  chunk_type?: string | null;
+  section_label?: string | null;
+  char_start?: number | null;
+  char_end?: number | null;
+  token_count?: number | null;
+  chunk_weight?: number | null;
+  metadata_json?: Record<string, unknown> | null;
+}
+
+export interface DocumentDetail {
+  id: number;
+  source?: string | null;
+  title?: string | null;
+  abstract?: string | null;
+  year?: number | null;
+  url?: string | null;
+  external_id?: string | null;
+  project_context?: string | null;
+  source_type?: string | null;
+  disease_or_condition?: string | null;
+  scenario_type?: string | null;
+  geographic_scope?: string | null;
+  evidence_category?: string | null;
 }
 
 export interface DocumentDetailResponse {
-  id: number
-  source?: string | null
-  title?: string | null
-  abstract?: string | null
-  year?: number | null
-  url?: string | null
-  externalid?: string | null
-  projectcontext?: string | null
-  sourcetype?: string | null
-  diseaseorcondition?: string | null
-  scenariotype?: string | null
-  geographicscope?: string | null
-  evidencecategory?: string | null
+  document: DocumentDetail;
+  chunks: DocumentChunk[];
 }
 
-export async function getDocumentDetail(documentId: number): Promise<DocumentDetailResponse> {
-  const response = await fetch(`${API_BASE_URL}/documents/${documentId}`)
+export async function searchDocuments(
+  payload: SearchRequest,
+): Promise<SearchResponse> {
+  const response = await fetch(`${API_BASE_URL}/search`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(payload),
+  });
+
   if (!response.ok) {
-    throw new Error(`Document detail failed: ${response.status}`)
+    const text = await response.text();
+    throw new Error(text || `Search failed with status ${response.status}`);
   }
-  return response.json()
+
+  return response.json();
 }
 
-export interface EvidenceSummaryResponse {
-  doc_id: number
-  title?: string
-  project_context?: string
-  metadata?: Record<string, unknown>
-  gesica_extraction?: Record<string, unknown>
-}
+export async function getFilterOptions(): Promise<FilterOptions> {
+  const response = await fetch(`${API_BASE_URL}/filters-options`);
 
-export async function getEvidenceSummary(documentId: number): Promise<EvidenceSummaryResponse> {
-  const response = await fetch(`${API_BASE_URL}/evidence-summary/${documentId}`)
   if (!response.ok) {
-    throw new Error(`Evidence summary failed: ${response.status}`)
+    const text = await response.text();
+    throw new Error(
+      text || `Filter options failed with status ${response.status}`,
+    );
   }
-  return response.json()
+
+  return response.json();
+}
+
+export async function fetchDocumentDetail(
+  documentId: number,
+): Promise<DocumentDetailResponse> {
+  const response = await fetch(`${API_BASE_URL}/documents/${documentId}`);
+
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(
+      text || `Document detail failed with status ${response.status}`,
+    );
+  }
+
+  return response.json();
+}
+
+export function getReadableExcerpt(
+  result: SearchResult,
+  detail: DocumentDetailResponse | null,
+): string {
+  if (result.highlight?.trim()) return result.highlight;
+  if (result.content?.trim()) return result.content;
+  if (detail?.document?.abstract?.trim()) return detail.document.abstract;
+  if (detail?.chunks?.length) return detail.chunks[0]?.content ?? "";
+  return "";
 }

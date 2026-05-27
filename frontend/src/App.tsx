@@ -1,7 +1,14 @@
 import { useEffect, useMemo, useState } from "react";
 import { Download, ExternalLink, RotateCcw } from "lucide-react";
-import { getFilterOptions, searchDocuments } from "./lib/api";
-import type { FilterOptions } from "./lib/api";
+
+import {
+  fetchDocumentDetail,
+  getFilterOptions,
+  getReadableExcerpt,
+  type DocumentDetailResponse,
+  type FilterOptions,
+  searchDocuments,
+} from "./lib/api";
 import type {
   ProjectContext,
   RelevanceLabel,
@@ -9,22 +16,6 @@ import type {
   SearchMode,
   SearchResult,
 } from "./types/search";
-
-type DocumentDetail = {
-  id: number;
-  source?: string | null;
-  title?: string | null;
-  abstract?: string | null;
-  year?: number | null;
-  url?: string | null;
-  externalid?: string | null;
-  projectcontext?: string | null;
-  sourcetype?: string | null;
-  diseaseorcondition?: string | null;
-  scenariotype?: string | null;
-  geographicscope?: string | null;
-  evidencecategory?: string | null;
-};
 
 const FILTER_FIELDS: Array<[keyof FilterOptions, string]> = [
   ["sourcetype", "Type de source"],
@@ -35,32 +26,50 @@ const FILTER_FIELDS: Array<[keyof FilterOptions, string]> = [
 ];
 
 const PAGE_SIZE = 10;
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "http://127.0.0.1:8000";
 
-async function fetchDocumentDetail(documentId: number): Promise<DocumentDetail> {
-  const response = await fetch(`${API_BASE_URL}/documents/${documentId}`);
-  if (!response.ok) {
-    throw new Error(`Impossible de charger le document ${documentId}`);
-  }
-  return response.json();
+type DetailView = {
+  id: number | null;
+  title: string;
+  abstract: string;
+  excerpt: string;
+  source: string;
+  year: string;
+  url: string;
+  externalId: string;
+  projectContext: string;
+  sourceType: string;
+  disease: string;
+  scenario: string;
+  geography: string;
+  evidence: string;
+  chunkCount: number;
+};
+
+function csvEscape(value: unknown): string {
+  return JSON.stringify(value ?? "");
 }
 
 export default function App() {
-  const [projectContext, setProjectContext] = useState<ProjectContext>("eva");
+  const [projectContext, setProjectContext] = useState<ProjectContext>("gesica");
   const [mode, setMode] = useState<SearchMode>("semantic");
   const [query, setQuery] = useState("");
-  const [filters, setFilters] = useState<SearchFilters>({ projectcontext: "eva" });
+  const [filters, setFilters] = useState<SearchFilters>({
+    projectcontext: "gesica",
+  });
   const [yearRange, setYearRange] = useState<[number, number]>([
     2000,
     new Date().getFullYear(),
   ]);
   const [results, setResults] = useState<SearchResult[]>([]);
   const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [relevanceMap, setRelevanceMap] = useState<Record<number, RelevanceLabel>>({});
-  const [selectedResult, setSelectedResult] = useState<SearchResult | null>(null);
-  const [selectedDocument, setSelectedDocument] = useState<DocumentDetail | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [relevanceMap, setRelevanceMap] = useState<Record<number, RelevanceLabel>>(
+    {},
+  );
+  const [selectedResult, setSelectedResult] = useState<SearchResult | null>(null);
+  const [selectedDocument, setSelectedDocument] =
+    useState<DocumentDetailResponse | null>(null);
   const [filterOptions, setFilterOptions] = useState<FilterOptions | null>(null);
   const [page, setPage] = useState(1);
 
@@ -68,34 +77,45 @@ export default function App() {
     getFilterOptions()
       .then((opts) => {
         setFilterOptions(opts);
-        if (opts.year?.length) {
-          const years = opts.year
-            .map((y) => Number(y.value))
-            .filter((y) => Number.isFinite(y));
-          if (years.length) {
-            setYearRange([Math.min(...years), Math.max(...years)]);
-          }
+        const years =
+          opts.year
+            ?.map((y) => Number(y.value))
+            .filter((y) => Number.isFinite(y) && y > 0) ?? [];
+
+        if (years.length > 0) {
+          setYearRange([Math.min(...years), Math.max(...years)]);
         }
       })
-      .catch(console.error);
+      .catch((err) => {
+        console.error(err);
+      });
   }, []);
 
   useEffect(() => {
-    setFilters((prev) => ({ ...prev, projectcontext: projectContext }));
+    setFilters((prev) => ({
+      ...prev,
+      projectcontext: projectContext,
+    }));
+    setPage(1);
+    setSelectedResult(null);
+    setSelectedDocument(null);
   }, [projectContext]);
 
-  const effectiveFilters = useMemo(
+  const effectiveFilters = useMemo<SearchFilters>(
     () => ({
       ...filters,
       projectcontext: projectContext,
+      yearmin: yearRange[0],
+      yearmax: yearRange[1],
     }),
-    [filters, projectContext],
+    [filters, projectContext, yearRange],
   );
 
   const dedupedResults = useMemo(() => {
     const seen = new Set<string>();
-    return results.filter((r) => {
-      const key = `${r.documentid}-${r.chunkindex}-${r.content}`;
+
+    return results.filter((result) => {
+      const key = `${result.documentid}-${result.chunkindex}-${result.content}`;
       if (seen.has(key)) return false;
       seen.add(key);
       return true;
@@ -108,30 +128,6 @@ export default function App() {
     const start = (page - 1) * PAGE_SIZE;
     return dedupedResults.slice(start, start + PAGE_SIZE);
   }, [dedupedResults, page]);
-
-  const detailView = useMemo(() => {
-    if (!selectedResult) return null;
-
-    return {
-      id: selectedDocument?.id ?? selectedResult.documentid,
-      title: selectedDocument?.title ?? selectedResult.title,
-      abstract: selectedDocument?.abstract ?? selectedResult.abstract,
-      source: selectedDocument?.source ?? selectedResult.source,
-      year: selectedDocument?.year ?? selectedResult.year,
-      url: selectedDocument?.url ?? selectedResult.url,
-      externalid: selectedDocument?.externalid ?? null,
-      projectcontext: selectedDocument?.projectcontext ?? selectedResult.projectcontext,
-      sourcetype: selectedDocument?.sourcetype ?? selectedResult.sourcetype,
-      diseaseorcondition:
-        selectedDocument?.diseaseorcondition ?? selectedResult.diseaseorcondition,
-      scenariotype: selectedDocument?.scenariotype ?? selectedResult.scenariotype,
-      geographicscope:
-        selectedDocument?.geographicscope ?? selectedResult.geographicscope,
-      evidencecategory:
-        selectedDocument?.evidencecategory ?? selectedResult.evidencecategory,
-      excerpt: selectedResult.highlight ?? selectedResult.content,
-    };
-  }, [selectedDocument, selectedResult]);
 
   async function loadDocumentDetail(result: SearchResult) {
     setSelectedResult(result);
@@ -155,38 +151,39 @@ export default function App() {
     setLoading(true);
     setError(null);
     setPage(1);
+    setSelectedResult(null);
+    setSelectedDocument(null);
 
     try {
       const data = await searchDocuments({
         querytext: query,
         mode,
         limit: 100,
-        filters: {
-          ...effectiveFilters,
-          yearmin: yearRange[0],
-          yearmax: yearRange[1],
-        },
+        filters: effectiveFilters,
       });
 
       setResults(data.results);
 
       const first = data.results[0] ?? null;
       setSelectedResult(first);
-      setSelectedDocument(null);
 
       if (first) {
+        setDetailLoading(true);
         try {
           const detail = await fetchDocumentDetail(first.documentid);
           setSelectedDocument(detail);
         } catch (err) {
           console.error(err);
+          setSelectedDocument(null);
+        } finally {
+          setDetailLoading(false);
         }
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : "Erreur inconnue");
+      setResults([]);
       setSelectedResult(null);
       setSelectedDocument(null);
-      setResults([]);
     } finally {
       setLoading(false);
     }
@@ -194,27 +191,26 @@ export default function App() {
 
   function handleReset() {
     setFilters({ projectcontext: projectContext });
-    setSelectedDocument(null);
-    setSelectedResult(null);
     setResults([]);
+    setError(null);
     setPage(1);
+    setSelectedResult(null);
+    setSelectedDocument(null);
 
-    if (filterOptions?.year?.length) {
-      const years = filterOptions.year
-        .map((y) => Number(y.value))
-        .filter((y) => Number.isFinite(y));
-      if (years.length) {
-        setYearRange([Math.min(...years), Math.max(...years)]);
-      }
-    } else {
-      setYearRange([2000, new Date().getFullYear()]);
+    const years =
+      filterOptions?.year
+        ?.map((y) => Number(y.value))
+        .filter((y) => Number.isFinite(y) && y > 0) ?? [];
+
+    if (years.length > 0) {
+      setYearRange([Math.min(...years), Math.max(...years)]);
     }
   }
 
-  function handleExport(fmt: "csv" | "json") {
+  function handleExport(format: "csv" | "json") {
     if (!dedupedResults.length) return;
 
-    if (fmt === "json") {
+    if (format === "json") {
       const blob = new Blob([JSON.stringify(dedupedResults, null, 2)], {
         type: "application/json",
       });
@@ -241,14 +237,13 @@ export default function App() {
     ];
 
     const rows = dedupedResults.map((r) =>
-      headers
-        .map((h) => JSON.stringify((r as Record<string, unknown>)[h] ?? ""))
-        .join(","),
+      headers.map((h) => csvEscape((r as Record<string, unknown>)[h])).join(","),
     );
 
     const blob = new Blob([[headers.join(","), ...rows].join("\n")], {
       type: "text/csv;charset=utf-8",
     });
+
     const a = document.createElement("a");
     a.href = URL.createObjectURL(blob);
     a.download = "literev-results.csv";
@@ -257,6 +252,38 @@ export default function App() {
   }
 
   const hasResults = dedupedResults.length > 0;
+
+  const detailView = useMemo<DetailView | null>(() => {
+    if (!selectedResult) return null;
+
+    const doc = selectedDocument?.document;
+    const excerpt = getReadableExcerpt(selectedResult, selectedDocument);
+
+    return {
+      id: doc?.id ?? selectedResult.documentid ?? null,
+      title: doc?.title ?? selectedResult.title ?? "Sans titre",
+      abstract: doc?.abstract ?? "",
+      excerpt,
+      source: doc?.source ?? selectedResult.source ?? "—",
+      year:
+        doc?.year?.toString() ??
+        selectedResult.year?.toString() ??
+        "—",
+      url: doc?.url ?? selectedResult.url ?? "",
+      externalId: doc?.external_id ?? "—",
+      projectContext:
+        doc?.project_context ?? selectedResult.projectcontext ?? "—",
+      sourceType: doc?.source_type ?? selectedResult.sourcetype ?? "—",
+      disease:
+        doc?.disease_or_condition ?? selectedResult.diseaseorcondition ?? "—",
+      scenario: doc?.scenario_type ?? selectedResult.scenariotype ?? "—",
+      geography:
+        doc?.geographic_scope ?? selectedResult.geographicscope ?? "—",
+      evidence:
+        doc?.evidence_category ?? selectedResult.evidencecategory ?? "—",
+      chunkCount: selectedDocument?.chunks?.length ?? 0,
+    };
+  }, [selectedDocument, selectedResult]);
 
   return (
     <div className="min-h-screen bg-[radial-gradient(circle_at_top,rgba(34,211,238,0.10),transparent_30%),linear-gradient(180deg,#020617_0%,#081226_100%)] text-white">
@@ -272,25 +299,27 @@ export default function App() {
               </h1>
               <p className="mt-3 max-w-2xl text-sm leading-6 text-slate-300">
                 Interface unifiée pour GeoAI4EI, GESICA et EVA, connectée au moteur
-                FastAPI PostgreSQL/pgvector.
+                FastAPI + PostgreSQL/pgvector.
               </p>
             </div>
 
             <div className="grid gap-3 sm:grid-cols-3">
-              {[
-                ["geoai4ei", "GeoAI4EI"],
-                ["gesica", "GESICA"],
-                ["eva", "EVA"],
-              ].map(([value, label]) => (
+              {(
+                [
+                  ["geoai4ei", "GeoAI4EI"],
+                  ["gesica", "GESICA"],
+                  ["eva", "EVA"],
+                ] as const
+              ).map(([value, label]) => (
                 <button
                   key={value}
                   type="button"
-                  onClick={() => setProjectContext(value as ProjectContext)}
-                  className={
+                  onClick={() => setProjectContext(value)}
+                  className={`rounded-2xl border px-5 py-3 text-left transition ${
                     projectContext === value
-                      ? "rounded-2xl border border-cyan-400 bg-cyan-500/10 px-5 py-3 text-left text-white shadow-2xl transition"
-                      : "rounded-2xl border border-white/10 bg-white/5 px-5 py-3 text-left text-slate-300 transition hover:border-white/20 hover:bg-white/10"
-                  }
+                      ? "border-cyan-400 bg-cyan-500/10 text-white shadow-2xl"
+                      : "border-white/10 bg-white/5 text-slate-300 hover:border-white/20 hover:bg-white/10"
+                  }`}
                 >
                   <div className="text-sm font-semibold">{label}</div>
                 </button>
@@ -301,92 +330,92 @@ export default function App() {
       </header>
 
       <main className="mx-auto max-w-[1380px] px-6 py-8">
-        <div className="grid gap-6 xl:grid-cols-[320px_minmax(0,1fr)]">
-          <aside className="space-y-5 rounded-3xl border border-white/10 bg-white/5 p-5 shadow-2xl xl:sticky xl:top-6 xl:self-start">
-            <div className="flex items-center justify-between">
-              <div>
-                <div className="mb-2 text-xs font-semibold uppercase tracking-[0.22em] text-cyan-300">
-                  Filtres
-                </div>
-                <p className="text-sm text-slate-300">
-                  Affinez la recherche par métadonnées canoniques.
-                </p>
+        <div className="grid gap-6 xl:grid-cols-[280px_minmax(0,1fr)]">
+          <aside className="xl:sticky xl:top-8 xl:self-start">
+            <div className="rounded-3xl border border-white/10 bg-white/5 p-5 shadow-2xl">
+              <div className="flex items-center justify-between">
+                <h2 className="text-lg font-semibold text-white">Filtres</h2>
+                <button
+                  type="button"
+                  onClick={handleReset}
+                  title="Réinitialiser les filtres"
+                  className="flex items-center gap-1 rounded-xl border border-white/10 px-2 py-1 text-xs text-slate-400 transition hover:border-white/20 hover:text-slate-200"
+                >
+                  <RotateCcw size={12} />
+                  Reset
+                </button>
               </div>
 
-              <button
-                type="button"
-                onClick={handleReset}
-                title="Réinitialiser les filtres"
-                className="flex items-center gap-1 rounded-xl border border-white/10 px-2 py-1 text-xs text-slate-400 transition hover:border-white/20 hover:text-slate-200"
-              >
-                <RotateCcw size={12} />
-                Reset
-              </button>
-            </div>
+              <div className="mt-5 space-y-4">
+                {FILTER_FIELDS.map(([key, label]) => {
+                  const options = filterOptions?.[key] ?? [];
 
-            <div className="space-y-4">
-              {FILTER_FIELDS.map(([key, label]) => (
-                <label key={key} className="block space-y-2">
-                  <span className="text-sm text-slate-200">{label}</span>
-                  <select
-                    value={String((filters as Record<string, unknown>)[key] ?? "")}
-                    onChange={(e) =>
-                      setFilters((prev) => ({
-                        ...prev,
-                        [key]: e.target.value || undefined,
-                      }))
-                    }
-                    className="w-full rounded-2xl border border-white/10 bg-slate-950/80 px-4 py-3 text-sm text-white outline-none focus:border-cyan-400"
-                  >
-                    <option value="">Tous</option>
-                    {(filterOptions?.[key] ?? []).map((opt) => (
-                      <option key={String(opt.value)} value={String(opt.value)}>
-                        {opt.label}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-              ))}
+                  return (
+                    <label key={key} className="block">
+                      <span className="mb-2 block text-sm font-medium text-slate-200">
+                        {label}
+                      </span>
+                      <select
+                        value={(filters as Record<string, string | undefined>)[key] ?? ""}
+                        onChange={(e) =>
+                          setFilters((prev) => ({
+                            ...prev,
+                            [key]: e.target.value || undefined,
+                          }))
+                        }
+                        className="w-full appearance-none rounded-2xl border border-white/10 bg-slate-950/80 px-3 py-3 text-sm text-white focus:border-cyan-400 focus:outline-none"
+                      >
+                        <option value="">Tous</option>
+                        {options.map((opt) => (
+                          <option key={String(opt.value)} value={String(opt.value)}>
+                            {opt.label}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                  );
+                })}
 
-              <label className="block space-y-2">
-                <span className="flex items-center justify-between text-sm text-slate-200">
-                  <span>Année</span>
-                  <span className="font-mono text-cyan-300">
-                    {yearRange[0]} - {yearRange[1]}
+                <div>
+                  <span className="mb-2 block text-sm font-medium text-slate-200">
+                    Année{" "}
+                    <span className="font-mono text-cyan-300">
+                      {yearRange[0]} — {yearRange[1]}
+                    </span>
                   </span>
-                </span>
 
-                <div className="space-y-2">
-                  <input
-                    type="range"
-                    min={
-                      filterOptions?.year?.length
-                        ? Math.min(...filterOptions.year.map((y) => Number(y.value)))
-                        : 2000
-                    }
-                    max={yearRange[1]}
-                    value={yearRange[0]}
-                    onChange={(e) =>
-                      setYearRange([Number(e.target.value), yearRange[1]])
-                    }
-                    className="w-full accent-cyan-400"
-                  />
-                  <input
-                    type="range"
-                    min={yearRange[0]}
-                    max={
-                      filterOptions?.year?.length
-                        ? Math.max(...filterOptions.year.map((y) => Number(y.value)))
-                        : new Date().getFullYear()
-                    }
-                    value={yearRange[1]}
-                    onChange={(e) =>
-                      setYearRange([yearRange[0], Number(e.target.value)])
-                    }
-                    className="w-full accent-cyan-400"
-                  />
+                  <div className="space-y-2">
+                    <input
+                      type="range"
+                      min={
+                        filterOptions?.year?.length
+                          ? Math.min(...filterOptions.year.map((y) => Number(y.value)))
+                          : 2000
+                      }
+                      max={yearRange[1]}
+                      value={yearRange[0]}
+                      onChange={(e) =>
+                        setYearRange([Number(e.target.value), yearRange[1]])
+                      }
+                      className="w-full accent-cyan-400"
+                    />
+                    <input
+                      type="range"
+                      min={yearRange[0]}
+                      max={
+                        filterOptions?.year?.length
+                          ? Math.max(...filterOptions.year.map((y) => Number(y.value)))
+                          : new Date().getFullYear()
+                      }
+                      value={yearRange[1]}
+                      onChange={(e) =>
+                        setYearRange([yearRange[0], Number(e.target.value)])
+                      }
+                      className="w-full accent-cyan-400"
+                    />
+                  </div>
                 </div>
-              </label>
+              </div>
             </div>
           </aside>
 
@@ -398,11 +427,11 @@ export default function App() {
                     key={item}
                     type="button"
                     onClick={() => setMode(item)}
-                    className={
+                    className={`rounded-xl px-4 py-2 capitalize transition ${
                       mode === item
-                        ? "rounded-xl bg-cyan-500 px-4 py-2 text-slate-950 transition"
-                        : "rounded-xl px-4 py-2 text-slate-300 transition hover:bg-white/10"
-                    }
+                        ? "bg-cyan-500 text-slate-950"
+                        : "text-slate-300 hover:bg-white/10"
+                    }`}
                   >
                     {item === "semantic" ? "Sémantique" : "Booléen"}
                   </button>
@@ -413,13 +442,11 @@ export default function App() {
                 <input
                   value={query}
                   onChange={(e) => setQuery(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter") handleSearch();
-                  }}
+                  onKeyDown={(e) => e.key === "Enter" && handleSearch()}
                   placeholder={
                     mode === "semantic"
-                      ? "Ex. respiratory outbreak"
-                      : "Ex. respiratory AND outbreak"
+                      ? "Ex. ambulance demand forecasting"
+                      : "Ex. ambulance AND forecasting"
                   }
                   className="min-h-14 flex-1 rounded-2xl border border-white/10 bg-slate-950/80 px-4 text-white outline-none placeholder:text-slate-500 focus:border-cyan-400"
                 />
@@ -451,8 +478,7 @@ export default function App() {
                 <div className="flex items-center justify-between">
                   <p className="text-sm text-slate-400">
                     <span className="font-semibold text-white">{dedupedResults.length}</span>{" "}
-                    résultat{dedupedResults.length > 1 ? "s" : ""} · page{" "}
-                    <span className="text-white">{page}</span> / {totalPages}
+                    résultat{dedupedResults.length > 1 ? "s" : ""} · {totalPages > 1 ? `page ${page}/${totalPages}` : "1 page"}
                   </p>
 
                   <div className="flex gap-2">
@@ -475,16 +501,16 @@ export default function App() {
                   </div>
                 </div>
 
-                <div className="grid gap-6 2xl:grid-cols-[minmax(0,1fr)_340px]">
+                <div className="grid gap-6 2xl:grid-cols-[minmax(0,1fr)_360px]">
                   <div className="space-y-4">
                     {pagedResults.map((result) => (
                       <article
                         key={`${result.documentid}-${result.chunkindex}-${result.content}`}
-                        className={
+                        className={`rounded-3xl border bg-white/5 p-5 shadow-2xl transition ${
                           selectedResult?.id === result.id
-                            ? "rounded-3xl border border-cyan-400/60 bg-white/5 p-5 shadow-2xl transition"
-                            : "rounded-3xl border border-white/10 bg-white/5 p-5 shadow-2xl transition hover:border-cyan-400/40"
-                        }
+                            ? "border-cyan-400/60"
+                            : "border-white/10 hover:border-cyan-400/40"
+                        }`}
                       >
                         <div className="flex items-start justify-between gap-4">
                           <button
@@ -492,7 +518,7 @@ export default function App() {
                             onClick={() => loadDocumentDetail(result)}
                             className="text-left"
                           >
-                            <h3 className="text-2xl font-semibold text-white hover:text-cyan-300">
+                            <h3 className="text-xl font-semibold text-white hover:text-cyan-300">
                               {result.title}
                             </h3>
                           </button>
@@ -505,7 +531,7 @@ export default function App() {
                               className="inline-flex shrink-0 items-center gap-2 rounded-xl border border-white/10 px-3 py-2 text-sm text-slate-200 hover:bg-white/10"
                             >
                               Source
-                              <ExternalLink size={16} />
+                              <ExternalLink size={14} />
                             </a>
                           )}
                         </div>
@@ -531,12 +557,12 @@ export default function App() {
                           )}
                         </div>
 
-                        <p className="mt-4 max-w-none text-sm leading-6 text-slate-200">
-                          {result.highlight ?? result.content}
+                        <p className="mt-4 text-sm leading-6 text-slate-200">
+                          {result.highlight || result.content}
                         </p>
 
                         <div className="mt-5 flex flex-wrap gap-2">
-                          {(["pertinent", "non-pertinent", "incertain"] as RelevanceLabel[]).map(
+                          {(["pertinent", "nonpertinent", "incertain"] as RelevanceLabel[]).map(
                             (tag) => (
                               <button
                                 key={tag}
@@ -547,11 +573,11 @@ export default function App() {
                                     [result.id]: tag,
                                   }))
                                 }
-                                className={
+                                className={`rounded-full border px-3 py-1 text-xs transition ${
                                   relevanceMap[result.id] === tag
-                                    ? "rounded-full border border-cyan-400 bg-cyan-500/15 px-3 py-1 text-xs text-cyan-200 transition"
-                                    : "rounded-full border border-white/10 bg-white/5 px-3 py-1 text-xs text-slate-400 transition hover:border-white/20 hover:text-slate-200"
-                                }
+                                    ? "border-cyan-400 bg-cyan-500/15 text-cyan-200"
+                                    : "border-white/10 bg-white/5 text-slate-400 hover:border-white/20 hover:text-slate-200"
+                                }`}
                               >
                                 {tag}
                               </button>
@@ -562,25 +588,23 @@ export default function App() {
                     ))}
 
                     {totalPages > 1 && (
-                      <div className="flex items-center justify-center gap-3 pt-2">
+                      <div className="flex items-center justify-center gap-2 pt-2">
                         <button
                           type="button"
                           disabled={page === 1}
-                          onClick={() => setPage((p) => Math.max(1, p - 1))}
-                          className="rounded-xl border border-white/10 px-4 py-2 text-sm text-slate-300 transition hover:bg-white/10 disabled:opacity-40"
+                          onClick={() => setPage((p) => p - 1)}
+                          className="rounded-xl border border-white/10 px-4 py-2 text-sm text-slate-300 transition hover:bg-white/10 disabled:cursor-not-allowed disabled:opacity-30"
                         >
                           Précédent
                         </button>
-
-                        <span className="text-sm text-slate-300">
-                          Page <span className="text-white">{page}</span> / {totalPages}
+                        <span className="text-sm text-slate-400">
+                          {page} / {totalPages}
                         </span>
-
                         <button
                           type="button"
                           disabled={page === totalPages}
-                          onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
-                          className="rounded-xl border border-white/10 px-4 py-2 text-sm text-slate-300 transition hover:bg-white/10 disabled:opacity-40"
+                          onClick={() => setPage((p) => p + 1)}
+                          className="rounded-xl border border-white/10 px-4 py-2 text-sm text-slate-300 transition hover:bg-white/10 disabled:cursor-not-allowed disabled:opacity-30"
                         >
                           Suivant
                         </button>
@@ -589,14 +613,14 @@ export default function App() {
                   </div>
 
                   <aside className="2xl:sticky 2xl:top-8 2xl:self-start">
-                    <div className="min-h-[180px] rounded-3xl border border-white/10 bg-white/5 p-5 shadow-2xl">
+                    <div className="min-h-[220px] rounded-3xl border border-white/10 bg-white/5 p-5 shadow-2xl">
                       {!selectedResult ? (
                         <div className="text-sm leading-6 text-slate-300">
-                          Cliquez sur un résultat pour afficher le détail.
+                          Cliquez sur un résultat pour afficher le détail du document.
                         </div>
                       ) : detailLoading ? (
                         <div className="text-sm leading-6 text-slate-300">
-                          Chargement du document...
+                          Chargement du document complet...
                         </div>
                       ) : (
                         <div className="space-y-5 text-sm text-slate-200">
@@ -610,74 +634,47 @@ export default function App() {
                           </div>
 
                           {detailView?.url && (
-                            <a
-                              href={detailView.url}
-                              target="_blank"
-                              rel="noopener noreferrer"
-                              className="inline-flex items-center gap-2 rounded-xl border border-white/10 px-3 py-2 text-sm text-slate-200 hover:bg-white/10"
-                            >
-                              Open source
-                              <ExternalLink size={16} />
-                            </a>
+                            <div>
+                              <a
+                                href={detailView.url}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="inline-flex items-center gap-2 rounded-xl border border-white/10 px-3 py-2 text-sm text-slate-200 hover:bg-white/10"
+                              >
+                                Open source
+                                <ExternalLink size={16} />
+                              </a>
+                            </div>
                           )}
 
                           <section>
                             <h3 className="mb-2 font-medium text-white">Extrait</h3>
                             <p className="rounded-2xl border border-white/10 bg-white/5 p-4 leading-6">
-                              {detailView?.excerpt ?? ""}
+                              {detailView?.excerpt || "—"}
                             </p>
                           </section>
 
                           <section>
-                            <h3 className="mb-2 font-medium text-white">Résumé</h3>
+                            <h3 className="mb-2 font-medium text-white">Abstract</h3>
                             <p className="rounded-2xl border border-white/10 bg-white/5 p-4 leading-6">
-                              {detailView?.abstract ?? "—"}
+                              {detailView?.abstract || "—"}
                             </p>
                           </section>
 
                           <section>
                             <h3 className="mb-2 font-medium text-white">Métadonnées</h3>
                             <dl className="grid grid-cols-1 gap-3 rounded-2xl border border-white/10 bg-white/5 p-4">
-                              <div>
-                                <dt className="text-slate-400">ID</dt>
-                                <dd>{detailView?.id ?? "—"}</dd>
-                              </div>
-                              <div>
-                                <dt className="text-slate-400">Source</dt>
-                                <dd>{detailView?.source ?? "—"}</dd>
-                              </div>
-                              <div>
-                                <dt className="text-slate-400">Année</dt>
-                                <dd>{detailView?.year ?? "—"}</dd>
-                              </div>
-                              <div>
-                                <dt className="text-slate-400">External ID</dt>
-                                <dd>{detailView?.externalid ?? "—"}</dd>
-                              </div>
-                              <div>
-                                <dt className="text-slate-400">Projet</dt>
-                                <dd>{detailView?.projectcontext ?? "—"}</dd>
-                              </div>
-                              <div>
-                                <dt className="text-slate-400">Type</dt>
-                                <dd>{detailView?.sourcetype ?? "—"}</dd>
-                              </div>
-                              <div>
-                                <dt className="text-slate-400">Pathologie</dt>
-                                <dd>{detailView?.diseaseorcondition ?? "—"}</dd>
-                              </div>
-                              <div>
-                                <dt className="text-slate-400">Scénario</dt>
-                                <dd>{detailView?.scenariotype ?? "—"}</dd>
-                              </div>
-                              <div>
-                                <dt className="text-slate-400">Zone</dt>
-                                <dd>{detailView?.geographicscope ?? "—"}</dd>
-                              </div>
-                              <div>
-                                <dt className="text-slate-400">Preuve</dt>
-                                <dd>{detailView?.evidencecategory ?? "—"}</dd>
-                              </div>
+                              <div><dt className="text-slate-400">ID</dt><dd>{detailView?.id ?? "—"}</dd></div>
+                              <div><dt className="text-slate-400">Source</dt><dd>{detailView?.source}</dd></div>
+                              <div><dt className="text-slate-400">Année</dt><dd>{detailView?.year}</dd></div>
+                              <div><dt className="text-slate-400">External ID</dt><dd>{detailView?.externalId}</dd></div>
+                              <div><dt className="text-slate-400">Projet</dt><dd>{detailView?.projectContext}</dd></div>
+                              <div><dt className="text-slate-400">Type</dt><dd>{detailView?.sourceType}</dd></div>
+                              <div><dt className="text-slate-400">Pathologie</dt><dd>{detailView?.disease}</dd></div>
+                              <div><dt className="text-slate-400">Scénario</dt><dd>{detailView?.scenario}</dd></div>
+                              <div><dt className="text-slate-400">Zone</dt><dd>{detailView?.geography}</dd></div>
+                              <div><dt className="text-slate-400">Preuve</dt><dd>{detailView?.evidence}</dd></div>
+                              <div><dt className="text-slate-400">Chunks</dt><dd>{detailView?.chunkCount}</dd></div>
                             </dl>
                           </section>
                         </div>
