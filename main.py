@@ -1,4 +1,5 @@
 from __future__ import annotations
+import json
 import logging
 import os
 import re
@@ -187,8 +188,13 @@ def create_chunk(
         RETURNING id
     """)
     payload = chunk.model_dump()
-    if payload["metadata_json"] is None:
+    # Serialize metadata_json to a JSON string for the CAST(:x AS jsonb) binding
+    meta = payload.get("metadata_json")
+    if meta is None or meta == {}:
         payload["metadata_json"] = "{}"
+    elif isinstance(meta, dict):
+        payload["metadata_json"] = json.dumps(meta)
+    # else already a string — leave as-is
 
     with engine.begin() as conn:
         new_id = conn.execute(sql, payload).scalar_one()
