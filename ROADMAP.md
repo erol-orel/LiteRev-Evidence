@@ -1,7 +1,7 @@
 # Feuille de Route Stratégique et Technique : LiteRev-Evidence
 **Auteur :** Manus AI  
 **Date :** 27 mai 2026  
-**Version :** 2.0.0 — Révision enrichie GESICA + GeoAI4EI
+**Version :** 3.0.0 — Intégration complète des sources de données validées (GESICA + GeoAI4EI)
 
 ---
 
@@ -47,7 +47,58 @@ La structure des work packages de GeoAI4EI [^1] définit des besoins précis aux
 
 ---
 
-## 4. Architecture Technique Cible
+## 4. Matrice d'Intégration des Sources de Données
+
+Pour alimenter ce double graphe de connaissances et fournir une aide à la décision robuste, LiteRev-Evidence intègre une matrice de sources de données classées par priorité opérationnelle.
+
+### Priorité P0 — Littérature Scientifique (Moteur de Recherche de Preuves)
+*Ces sources constituent le corpus scientifique. La sélection se fait sur titre, résumé et métadonnées (screening). Pour les articles retenus, le texte intégral est extrait pour alimenter l'Evidence Panel et l'assistant QA.*
+- **A1 : PubMed** (NCBI API) — Référence biomédicale, EMS, épidémiologie et urgences [^4].
+- **A2 : PubMed Central (PMC)** (NCBI API) — Accès au texte intégral en accès libre.
+- **A3 : OpenAlex** (REST API) — Métadonnées ouvertes de 250M+ publications mondiales.
+- **A4 : CrossRef** (REST API) — Métadonnées DOI et liens d'éditeurs.
+
+### Priorité P1 — Données Opérationnelles GESICA MVP (Temps Réel et Contexte)
+*Données requises pour le tableau de bord d'aide à la décision et la prévision de charge immédiate dans la région transfrontalière.*
+- **D1 : SAMU / Centre 15 (France)** — Volume d'appels, temps de réponse, nature des interventions [^5] [^6].
+- **D2 : 144 Vaud / ORCA (Suisse)** — Données de régulation médicale Suisse romande [^5] [^6].
+- **D3 : HUG / CHUV Urgences** — Flux patients, taux d'occupation des lits, temps d'attente [^5] [^6].
+- **B1 : Météo-France API** — Alertes vigilance, températures extrêmes, précipitations [^4].
+- **B2 : MeteoSwiss API** — Données météo nationales et alertes de vigilance pour la Suisse [^4].
+- **G1 : Swisstopo & IGN** — Cartographie transfrontalière, limites cantonales, réseau routier [^6].
+- **G3 : OpenStreetMap (OSM)** — Géolocalisation des points d'intérêt (hôpitaux, casernes, héliports).
+
+### Priorité P2 — Données GESICA Enrichies (Normalisation et Modélisation)
+*Données utilisées pour affiner les modèles prédictifs et normaliser les taux de demande par bassin de population.*
+- **C1 : Réseau Sentinelles (France)** — Taux d'incidence hebdomadaires des maladies infectieuses (grippe, gastro).
+- **C5 : Santé publique France (OpenData)** — Passages aux urgences OS-Médecins et hospitalisations régionales.
+- **C6 : OFSP / Swissmedic (Suisse)** — Déclarations obligatoires et surveillance épidémique Suisse.
+- **E1 : INSEE (France)** — Données démographiques, densité et pyramide des âges par commune.
+- **E2 : OFS (Suisse)** — Démographie cantonale et structure de la population transfrontalière.
+- **F1 : HERE Traffic API** — Trafic temps réel et congestion routière pour le calcul dynamique des temps de réponse.
+- **F2 : OpenStreetMap + OSRM** — Routage d'urgence et calcul d'isochrones ambulance.
+
+### Priorité P3 — Données GeoAI4EI (Intelligence Épidémique Globale)
+*Données requises pour la détection précoce des épidémies et l'évaluation des contre-mesures médicales (MCMs).*
+- **C2 : ECDC API** — Surveillance épidémique européenne et alertes harmonisées [^1].
+- **C3 : WHO Global Health Observatory** — Indicateurs de santé mondiaux et épidémies à déclaration obligatoire.
+- **C4 : MOOD / ATHINA / ProMED** — Signaux informels de détection précoce d'épidémies émergentes [^1].
+- **B3 : Copernicus Climate Data Store** — Réanalyses climatiques ERA5 et indicateurs de vagues de chaleur [^1].
+- **I1 : ProMED / HealthMap** — Veille sanitaire collaborative et alertes épidémiques non officielles.
+- **I2 : GDELT Project** — Événements et signaux épidémiques extraits des médias mondiaux.
+
+### Priorité P4 — Sources d'Extension et Logistique
+*Données de logistique sanitaire et sources de littérature complémentaires.*
+- **A5 : Europe PMC** — Extraction de texte intégral XML structuré de haute qualité.
+- **A6 : Embase** — Littérature pharmacologique et d'urgence (accès payant).
+- **A7 : medRxiv / bioRxiv** — Signaux très précoces via les prépublications épidémiques.
+- **H1 : ANSM (France)** — Suivi des ruptures de stock de médicaments et contre-mesures médicales.
+- **H2 : Swissmedic** — Autorisations et alertes de sécurité sur les dispositifs médicaux en Suisse.
+- **H4 : Pharmacies de Garde (OSM)** — Géolocalisation des ressources pharmaceutiques de garde.
+
+---
+
+## 5. Architecture Technique Cible
 
 LiteRev-Evidence évolue d'un moteur de recherche documentaire vers un **système d'aide à la décision à double graphe de connaissances**.
 
@@ -93,7 +144,7 @@ LiteRev-Evidence évolue d'un moteur de recherche documentaire vers un **systèm
 
 ---
 
-## 5. Plan de Développement Détaillé
+## 6. Plan de Développement Détaillé
 
 Le développement est structuré en **six phases consécutives**, organisées pour livrer un MVP GESICA opérationnel en priorité, puis enrichir progressivement l'outil vers GeoAI4EI et les fonctionnalités transversales EVA.
 
@@ -105,7 +156,7 @@ Les corrections apportées comprennent la séparation stricte des types TypeScri
 
 ### Phase 2 — Backend GESICA : Signaux Structurés et Endpoints Dédiés
 
-**Objectif** : Transformer le backend en moteur d'extraction de preuves spécialisé pour les cinq axes GESICA, et exposer des endpoints permettant à l'interface d'afficher des Evidence Panels riches.
+**Objectif** : Transformer le backend en moteur d'extraction de preuves spécialisé pour les de la littérature d'urgence, et exposer des endpoints permettant à l'interface d'afficher des Evidence Panels riches.
 
 | Endpoint | Description | Données Retournées |
 | :--- | :--- | :--- |
@@ -138,22 +189,6 @@ L'assistant conversationnel permettra de poser des questions complexes sur le co
 **Objectif** : Livrer les fonctionnalités EVA (PRISMA, screening actif, export structuré) et préparer les matériaux de formation et de dissémination [^2] [^3].
 
 Les livrables incluent des workflows PRISMA-conformes pour la gestion des revues systématiques, un module de double-screening avec gestion des conflits entre relecteurs, un export structuré incluant les signaux GESICA extraits, ainsi que des modules pédagogiques pour les écoles d'été et hackathons GeoAI4EI [^1] [^2].
-
----
-
-## 6. Lacunes Identifiées dans la Version 1.0 de la Feuille de Route
-
-La révision vers la version 2.0 a permis d'identifier et de corriger plusieurs lacunes importantes :
-
-| Lacune v1.0 | Correction v2.0 |
-| :--- | :--- |
-| GeoAI4EI traité comme une simple extension de Phase 5 | GeoAI4EI intégré dès la Phase 2 avec ses propres endpoints et signaux d'extraction |
-| Absence de détail sur les WPs Horizon (T3.2, T3.3, T3.4, T3.5) | Tableau de traduction WP → LiteRev ajouté en Section 3 |
-| Couplage scénario GESICA ↔ GeoAI4EI non spécifié | Principe architectural explicité en Section 4 et Phase 5 |
-| Pas de mention des partenaires institutionnels (HUG, CHUV, HEIG-VD, TECHWAN) | Intégrés dans le tableau de positionnement stratégique |
-| Signaux GESICA listés sans mapping vers les champs DB | Tableau des signaux avec noms de champs DB ajouté en Section 2 |
-| Absence de WP-Z (Évaluation, Éthique, Dissémination) | Phase 6 dédiée aux fonctionnalités EVA et dissémination |
-| Calendrier en 3 semaines non réaliste pour un outil de production | Calendrier retiré — remplacé par une séquence de phases sans engagement de dates |
 
 ---
 
