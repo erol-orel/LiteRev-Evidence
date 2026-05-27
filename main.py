@@ -1,10 +1,8 @@
 from __future__ import annotations
-
 import logging
 import os
 import re
 from typing import Any
-
 from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
@@ -20,8 +18,7 @@ DB_URL = os.getenv(
 WRITE_API_KEY = os.getenv("WRITE_API_KEY", "")
 
 engine = create_engine(DB_URL, pool_pre_ping=True)
-
-app = FastAPI(title="LiteRev API", version="0.3.0")
+app = FastAPI(title="LiteRev API", version="0.4.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -31,20 +28,16 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-
 # ─────────────────────────────────────────────────────────────────────────────
 # Auth
 # ─────────────────────────────────────────────────────────────────────────────
-
 def require_api_key(x_api_key: str | None = Header(default=None)) -> None:
     if WRITE_API_KEY and x_api_key != WRITE_API_KEY:
         raise HTTPException(status_code=401, detail="Invalid API key")
 
-
 # ─────────────────────────────────────────────────────────────────────────────
 # Pydantic models
 # ─────────────────────────────────────────────────────────────────────────────
-
 class DocumentIn(BaseModel):
     source: str = Field(..., min_length=1)
     title: str = Field(..., min_length=1)
@@ -59,7 +52,6 @@ class DocumentIn(BaseModel):
     geographic_scope: str | None = None
     evidence_category: str | None = None
 
-
 class ChunkIn(BaseModel):
     document_id: int = Field(..., ge=1)
     chunk_index: int = Field(..., ge=0)
@@ -72,9 +64,7 @@ class ChunkIn(BaseModel):
     chunk_weight: float | None = Field(None, ge=0)
     metadata_json: dict[str, Any] | None = None
 
-
 class SearchIn(BaseModel):
-    # query_text is the canonical field; querytext kept for backward compat only
     query_text: str | None = None
     querytext: str | None = None
     filters: dict[str, Any] | None = None
@@ -90,33 +80,27 @@ class SearchIn(BaseModel):
             )
         return q
 
-
 # ─────────────────────────────────────────────────────────────────────────────
 # Startup
 # ─────────────────────────────────────────────────────────────────────────────
-
 @app.on_event("startup")
 def startup_event() -> None:
     with engine.connect() as conn:
         conn.execute(text("SELECT 1"))
     logger.info("Database connection OK")
 
-
 # ─────────────────────────────────────────────────────────────────────────────
 # Health
 # ─────────────────────────────────────────────────────────────────────────────
-
 @app.get("/health")
 def health() -> dict[str, Any]:
     with engine.connect() as conn:
         conn.execute(text("SELECT 1"))
     return {"status": "ok", "database": "ok"}
 
-
 # ─────────────────────────────────────────────────────────────────────────────
 # Filter options
 # ─────────────────────────────────────────────────────────────────────────────
-
 @app.get("/filters-options")
 def get_filter_options() -> dict[str, list[dict[str, Any]]]:
     fields = [
@@ -128,9 +112,7 @@ def get_filter_options() -> dict[str, list[dict[str, Any]]]:
         ("evidence_category", "evidence_category"),
         ("year", "year"),
     ]
-
     out: dict[str, list[dict[str, Any]]] = {}
-
     with engine.connect() as conn:
         for key, col in fields:
             rows = conn.execute(
@@ -141,7 +123,6 @@ def get_filter_options() -> dict[str, list[dict[str, Any]]]:
                     ORDER BY {col}
                 """)
             ).mappings().all()
-
             values = []
             for row in rows:
                 value = row["value"]
@@ -163,14 +144,11 @@ def get_filter_options() -> dict[str, list[dict[str, Any]]]:
                     )
                 values.append({"value": value, "label": label})
             out[key] = values
-
     return out
-
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Write endpoints (protected)
 # ─────────────────────────────────────────────────────────────────────────────
-
 @app.post("/documents")
 def create_document(
     doc: DocumentIn, _: None = Depends(require_api_key)
@@ -191,7 +169,6 @@ def create_document(
     with engine.begin() as conn:
         new_id = conn.execute(sql, doc.model_dump()).scalar_one()
     return {"id": new_id}
-
 
 @app.post("/chunks")
 def create_chunk(
@@ -217,11 +194,9 @@ def create_chunk(
         new_id = conn.execute(sql, payload).scalar_one()
     return {"id": new_id}
 
-
 # ─────────────────────────────────────────────────────────────────────────────
 # Search helpers
 # ─────────────────────────────────────────────────────────────────────────────
-
 def _build_where(filters: dict[str, Any] | None) -> tuple[str, dict[str, Any]]:
     if not filters:
         return "", {}
@@ -259,11 +234,9 @@ def _build_where(filters: dict[str, Any] | None) -> tuple[str, dict[str, Any]]:
 
     return " AND " + " AND ".join(clauses), params
 
-
 # ─────────────────────────────────────────────────────────────────────────────
 # Search
 # ─────────────────────────────────────────────────────────────────────────────
-
 @app.post("/search")
 def search(payload: SearchIn) -> dict[str, Any]:
     query = payload.resolved_query()
@@ -360,11 +333,9 @@ def search(payload: SearchIn) -> dict[str, Any]:
 
     return {"results": results, "count": len(results)}
 
-
 # ─────────────────────────────────────────────────────────────────────────────
 # Document detail
 # ─────────────────────────────────────────────────────────────────────────────
-
 @app.get("/documents/{document_id}")
 def get_document_detail(document_id: int) -> dict[str, Any]:
     sql_doc = text("""
@@ -385,7 +356,6 @@ def get_document_detail(document_id: int) -> dict[str, Any]:
         WHERE document_id = :document_id
         ORDER BY chunk_index ASC
     """)
-
     with engine.connect() as conn:
         doc = conn.execute(sql_doc, {"document_id": document_id}).mappings().first()
         if not doc:
@@ -393,66 +363,60 @@ def get_document_detail(document_id: int) -> dict[str, Any]:
         chunks = conn.execute(
             sql_chunks, {"document_id": document_id}
         ).mappings().all()
-
     return {
         "document": dict(doc),
         "chunks": [dict(c) for c in chunks],
     }
 
-
 # ─────────────────────────────────────────────────────────────────────────────
-# Evidence summary (GESICA signals)
+# GESICA Evidence Signals Extraction Engine
 # ─────────────────────────────────────────────────────────────────────────────
-
 def _extract_gesica_evidence(
-    title: str | None, abstract: str | None, chunks: list[dict[str, Any]] | None = None
+    title: str | None, abstract: str | None, chunks: list[dict[str, Any]]
 ) -> dict[str, Any]:
-    """Extract GESICA-relevant signals from title, abstract and optional chunks."""
-    parts = [title or "", abstract or ""]
-    if chunks:
-        parts.extend((c.get("content") or "") for c in chunks[:20])
-    text_blob = " ".join(parts).lower()
+    text_blob = " ".join([
+        title or "",
+        abstract or "",
+        " ".join([c.get("content", "") for c in chunks]),
+    ]).lower()
 
     demand_patterns = [
-        "demand forecast", "forecasting", "forecast", "call volume",
-        "arrival rate", "response time", "ems demand", "surge",
-        "overcrowding", "patient flow", "triage", "wait time",
-        "admission rate", "hospitalization rate", "incident rate", "queue",
+        "call volume", "demand forecasting", "arrival rate", "forecast",
+        "predict", "ambulance demand", "ems demand", "workload", "hourly",
+        "daily", "temporal", "timeseries", "time series", "xgboost", "lstm",
+        "prophet", "random forest", "neural network", "regression", "mae", "mape", "rmse",
     ]
     resource_patterns = [
-        "ambulance", "hospital bed", "icu", "bed", "beds", "staff",
-        "staffing", "personnel", "capacity", "resource allocation",
-        "dispatch", "hospital", "emergency department", "intensive care",
-        "routing",
-    ]
-    intervention_patterns = [
-        "machine learning", "artificial intelligence", "neural network",
-        "prediction model", "optimization", "optimisation", "decision support",
-        "simulation", "algorithm", "deep learning", "random forest",
-        "xgboost", "forecast model",
+        "ambulance", "dispatch", "allocation", "fleet", "staffing",
+        "crew", "response time", "location", "coverage", "optimization",
+        "heuristics", "genetic algorithm", "simulation", "queuing", "chuv", "hug",
     ]
     crisis_patterns = [
-        "pandemic", "epidemic", "mass casualty", "disaster",
-        "emergency department", "prehospital", "triage", "outbreak",
+        "disaster", "mass casualty", "mci", "crisis", "sanitarian",
+        "epidemic", "pandemic", "influenza", "heatwave", "canicule",
+        "flood", "evacuation", "surge", "capacity", "coordination",
+    ]
+    intervention_patterns = [
+        "triage", "priority", "protocol", "diversion", "routing",
+        "transfer", "telemedicine", "dispatch policy", "resource allocation",
     ]
     geography_patterns = [
-        "switzerland", "france", "geneva", "vaud", "neuchatel",
-        "cross-border", "transfrontal", "samu", "smur", "hug", "chuv",
+        "geneva", "geneve", "vaud", "lausanne", "neuchatel", "france",
+        "switzerland", "suisse", "cross-border", "transfrontalier", "rhone", "alps",
     ]
+
     setting_patterns = {
-        "prehospital_ems": ["ambulance", "prehospital", "ems", "dispatch"],
-        "emergency_department": ["emergency department", "ed overcrowding", "triage", "waiting room"],
-        "hospital_operations": ["icu", "bed management", "hospital capacity", "hospital surge"],
-        "public_health_surveillance": ["surveillance", "early warning", "outbreak detection"],
+        "dispatch_center": ["dispatch", "regulation", "centre 15", "144", "call center"],
+        "pre_hospital": ["ambulance", "smur", "paramedic", "ems", "pre-hospital", "rescue"],
+        "hospital_er": ["emergency department", "er", "urgences", "hospital", "icu", "bed"],
     }
     scenario_rules = {
-        "ems-demand-forecasting": ["demand forecast", "call volume", "arrival rate", "response time"],
-        "resource-allocation": ["resource allocation", "capacity", "bed", "staffing", "dispatch"],
-        "triage-support": ["triage", "acuity", "severity score"],
-        "surge-management": ["surge", "mass casualty", "overcrowding", "pandemic"],
-        "surveillance": ["surveillance", "early warning", "outbreak detection"],
-        "cross-border-coordination": ["cross-border", "transfrontal", "geneva", "vaud", "france", "switzerland"],
+        "epidemic-surge": ["pandemic", "epidemic", "influenza", "covid", "outbreak", "virus"],
+        "extreme-weather": ["heatwave", "canicule", "cold", "winter", "flood", "storm", "weather"],
+        "mass-casualty": ["mci", "mass casualty", "terrorist", "accident", "explosion", "disaster"],
+        "daily-operations": ["daily", "routine", "hourly", "weekday", "seasonal", "demand"],
     }
+
     metrics_patterns = [
         "auc", "auroc", "accuracy", "sensitivity", "specificity",
         "f1-score", "precision", "recall", "rmse", "mae", "mape",
@@ -488,7 +452,6 @@ def _extract_gesica_evidence(
         evidence_strength = "strong"
 
     return {
-        # Detailed signals (used by /evidence-summary)
         "demand_signals": matched(demand_patterns),
         "resource_types": matched(resource_patterns),
         "intervention_types": matched(intervention_patterns),
@@ -506,7 +469,6 @@ def _extract_gesica_evidence(
             matched(demand_patterns) or matched(resource_patterns) or matched(crisis_patterns)
         ),
     }
-
 
 @app.get("/evidence-summary/{document_id}")
 def get_evidence_summary(document_id: int) -> dict[str, Any]:
@@ -552,3 +514,165 @@ def get_evidence_summary(document_id: int) -> dict[str, Any]:
         "gesica_signals": signals,
         "chunk_count": len(chunks),
     }
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Phase 2 Endpoints: Stats and Scenarios
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.get("/corpus/stats")
+def get_corpus_stats() -> dict[str, Any]:
+    """Vue globale multi-projet du corpus."""
+    sql_totals = text("""
+        SELECT 
+            COALESCE(project_context, 'unassigned') as project,
+            COUNT(*) as count
+        FROM literature_document
+        GROUP BY project_context
+    """)
+    sql_sources = text("""
+        SELECT 
+            source,
+            COUNT(*) as count
+        FROM literature_document
+        GROUP BY source
+    """)
+    sql_years = text("""
+        SELECT 
+            year,
+            COUNT(*) as count
+        FROM literature_document
+        WHERE year IS NOT NULL
+        GROUP BY year
+        ORDER BY year DESC
+    """)
+    with engine.connect() as conn:
+        totals = {r["project"]: r["count"] for r in conn.execute(sql_totals).mappings().all()}
+        sources = {r["source"]: r["count"] for r in conn.execute(sql_sources).mappings().all()}
+        years = {r["year"]: r["count"] for r in conn.execute(sql_years).mappings().all()}
+        
+        total_docs = conn.execute(text("SELECT COUNT(*) FROM literature_document")).scalar() or 0
+        total_chunks = conn.execute(text("SELECT COUNT(*) FROM document_chunk")).scalar() or 0
+
+    return {
+        "total_documents": total_docs,
+        "total_chunks": total_chunks,
+        "by_project": totals,
+        "by_source": sources,
+        "by_year": years,
+    }
+
+@app.get("/gesica/stats")
+def get_gesica_stats() -> dict[str, Any]:
+    """Statistiques globales du corpus GESICA."""
+    sql_docs = text("""
+        SELECT id, title, abstract
+        FROM literature_document
+        WHERE project_context = 'gesica'
+    """)
+    with engine.connect() as conn:
+        docs = conn.execute(sql_docs).mappings().all()
+
+    total_gesica = len(docs)
+    horizons_count: dict[str, int] = {}
+    uncertainty_count: dict[str, int] = {}
+    evidence_strengths = {"weak": 0, "moderate": 0, "strong": 0}
+
+    for doc in docs:
+        signals = _extract_gesica_evidence(doc["title"], doc["abstract"], [])
+        
+        strength = signals["evidence_strength"]
+        evidence_strengths[strength] = evidence_strengths.get(strength, 0) + 1
+        
+        for m in signals["uncertainty_handling"]:
+            uncertainty_count[m] = uncertainty_count.get(m, 0) + 1
+            
+        if signals["forecast_horizon"]:
+            h = signals["forecast_horizon"]
+            horizons_count[h] = horizons_count.get(h, 0) + 1
+
+    return {
+        "total_documents": total_gesica,
+        "evidence_strength_distribution": evidence_strengths,
+        "uncertainty_methods": dict(sorted(uncertainty_count.items(), key=lambda x: x[1], reverse=True)),
+        "forecast_horizons": dict(sorted(horizons_count.items(), key=lambda x: x[1], reverse=True)),
+    }
+
+@app.get("/geoai4ei/stats")
+def get_geoai4ei_stats() -> dict[str, Any]:
+    """Statistiques globales du corpus GeoAI4EI."""
+    sql_diseases = text("""
+        SELECT disease_or_condition, COUNT(*) as count
+        FROM literature_document
+        WHERE project_context = 'geoai4ei' AND disease_or_condition IS NOT NULL
+        GROUP BY disease_or_condition
+        ORDER BY count DESC
+    """)
+    sql_geo = text("""
+        SELECT geographic_scope, COUNT(*) as count
+        FROM literature_document
+        WHERE project_context = 'geoai4ei' AND geographic_scope IS NOT NULL
+        GROUP BY geographic_scope
+        ORDER BY count DESC
+    """)
+    with engine.connect() as conn:
+        diseases = {r["disease_or_condition"]: r["count"] for r in conn.execute(sql_diseases).mappings().all()}
+        geo = {r["geographic_scope"]: r["count"] for r in conn.execute(sql_geo).mappings().all()}
+
+    return {
+        "diseases": diseases,
+        "geographic_scopes": geo,
+    }
+
+@app.get("/gesica/scenarios")
+def get_gesica_scenarios() -> list[dict[str, Any]]:
+    """Scénarios de crise prédéfinis avec preuves associées."""
+    scenarios = [
+        {
+            "id": "epidemic-surge",
+            "title": "Afflux Épidémique (Grippe / COVID-19)",
+            "description": "Scénario de crise hivernale combinant vagues d'appels d'urgence et saturation des lits d'hôpitaux.",
+            "recommended_actions": [
+                "Activer le protocole de régulation de crise au Centre 15 / 144",
+                "Déployer des équipes de télémédecine pré-hospitalière",
+                "Ajuster la capacité d'accueil des urgences HUG/CHUV selon les prévisions de charge",
+            ]
+        },
+        {
+            "id": "extreme-weather",
+            "title": "Canicule / Vague de Chaleur Extrême",
+            "description": "Anticipation des pics d'appels d'urgence liés aux températures extrêmes dans la région transfrontalière.",
+            "recommended_actions": [
+                "Renforcer la flotte d'ambulances d'intervention rapide en journée",
+                "Déclencher des alertes ciblées pour les populations vulnérables (EHPAD, personnes âgées isolées)",
+                "Mobiliser des lits de soins de suite transfrontaliers",
+            ]
+        },
+        {
+            "id": "mass-casualty",
+            "title": "Plan Blanc / Nombreuses Victimes (MCI)",
+            "description": "Gestion opérationnelle d'un accident ou événement majeur nécessitant une coordination franco-suisse.",
+            "recommended_actions": [
+                "Ouvrir la cellule de crise commune TECHWAN SAGA",
+                "Calculer les isochrones d'évacuation en temps réel vers les hôpitaux les plus proches",
+                "Répartir équitablement les victimes critiques entre HUG, CHUV et hôpitaux français",
+            ]
+        }
+    ]
+    
+    with engine.connect() as conn:
+        for s in scenarios:
+            sql = text("""
+                SELECT id, title, abstract, year, source
+                FROM literature_document
+                WHERE project_context = 'gesica' 
+                  AND (
+                    LOWER(title) LIKE :pattern 
+                    OR LOWER(abstract) LIKE :pattern
+                  )
+                LIMIT 3
+            """)
+            pattern = f"%{s['id'].split('-')[0]}%"
+            rows = conn.execute(sql, {"pattern": pattern}).mappings().all()
+            s["relevant_articles"] = [dict(r) for r in rows]
+            
+    return scenarios

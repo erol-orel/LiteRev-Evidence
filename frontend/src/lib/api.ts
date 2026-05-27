@@ -251,6 +251,174 @@ export async function fetchDocumentDetail(
   };
 }
 
+// --- GESICA / STATS TYPES ---
+
+export interface GesicaSignals {
+  demandSignals: string[];
+  resourceTypes: string[];
+  interventionTypes: string[];
+  operationalSettings: string[];
+  scenarioTags: string[];
+  forecastHorizon: string | null;
+  crossBorder: boolean;
+  crossBorderSignals: string[];
+  crisisSignals: string[];
+  evidenceStrength: "weak" | "moderate" | "strong";
+  uncertaintyHandling: string[];
+  reportedMetrics: string[];
+  isEmsOrCrisisRelevant: boolean;
+}
+
+export interface EvidenceSummaryResponse {
+  document: DocumentDetail;
+  summary: {
+    projectContext: string | null;
+    scenarioType: string | null;
+    evidenceCategory: string | null;
+    geographicScope: string | null;
+    diseaseOrCondition: string | null;
+  };
+  gesicaSignals: GesicaSignals;
+  chunkCount: number;
+}
+
+export interface ApiEvidenceSummaryResponse {
+  document: ApiDocumentDetail;
+  summary: {
+    project_context: string | null;
+    scenario_type: string | null;
+    evidence_category: string | null;
+    geographic_scope: string | null;
+    disease_or_condition: string | null;
+  };
+  gesica_signals: {
+    demand_signals: string[];
+    resource_types: string[];
+    intervention_types: string[];
+    operational_settings: string[];
+    scenario_tags: string[];
+    forecast_horizon: string | null;
+    cross_border: boolean;
+    cross_border_signals: string[];
+    crisis_signals: string[];
+    evidence_strength: "weak" | "moderate" | "strong";
+    uncertainty_handling: string[];
+    reported_metrics: string[];
+    is_ems_or_crisis_relevant: boolean;
+  };
+  chunk_count: number;
+}
+
+export interface CorpusStats {
+  totalDocuments: number;
+  totalChunks: number;
+  byProject: Record<string, number>;
+  bySource: Record<string, number>;
+  byYear: Record<string, number>;
+}
+
+export interface GesicaStats {
+  totalDocuments: number;
+  evidenceStrengthDistribution: Record<string, number>;
+  uncertaintyMethods: Record<string, number>;
+  forecastHorizons: Record<string, number>;
+}
+
+export interface GesicaScenario {
+  id: string;
+  title: string;
+  description: string;
+  recommendedActions: string[];
+  relevantArticles: Array<{
+    id: number;
+    title: string;
+    abstract: string | null;
+    year: number | null;
+    source: string;
+  }>;
+}
+
+export async function fetchEvidenceSummary(
+  documentId: number,
+): Promise<EvidenceSummaryResponse> {
+  const response = await fetch(`${API_BASE_URL}/evidence-summary/${documentId}`);
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(text || `Evidence summary failed with status ${response.status}`);
+  }
+  const apiData: ApiEvidenceSummaryResponse = await response.json();
+  return {
+    document: mapDocumentDetailFromApi(apiData.document),
+    summary: {
+      projectContext: apiData.summary.project_context,
+      scenarioType: apiData.summary.scenario_type,
+      evidenceCategory: apiData.summary.evidence_category,
+      geographicScope: apiData.summary.geographic_scope,
+      diseaseOrCondition: apiData.summary.disease_or_condition,
+    },
+    gesicaSignals: {
+      demandSignals: apiData.gesica_signals.demand_signals,
+      resourceTypes: apiData.gesica_signals.resource_types,
+      interventionTypes: apiData.gesica_signals.intervention_types,
+      operationalSettings: apiData.gesica_signals.operational_settings,
+      scenarioTags: apiData.gesica_signals.scenario_tags,
+      forecastHorizon: apiData.gesica_signals.forecast_horizon,
+      crossBorder: apiData.gesica_signals.cross_border,
+      crossBorderSignals: apiData.gesica_signals.cross_border_signals,
+      crisisSignals: apiData.gesica_signals.crisis_signals,
+      evidenceStrength: apiData.gesica_signals.evidence_strength,
+      uncertaintyHandling: apiData.gesica_signals.uncertainty_handling,
+      reportedMetrics: apiData.gesica_signals.reported_metrics,
+      isEmsOrCrisisRelevant: apiData.gesica_signals.is_ems_or_crisis_relevant,
+    },
+    chunkCount: apiData.chunk_count,
+  };
+}
+
+export async function fetchCorpusStats(): Promise<CorpusStats> {
+  const response = await fetch(`${API_BASE_URL}/corpus/stats`);
+  if (!response.ok) throw new Error(`Corpus stats failed with status ${response.status}`);
+  const data = await response.json();
+  return {
+    totalDocuments: data.total_documents,
+    totalChunks: data.total_chunks,
+    byProject: data.by_project,
+    bySource: data.by_source,
+    byYear: data.by_year,
+  };
+}
+
+export async function fetchGesicaStats(): Promise<GesicaStats> {
+  const response = await fetch(`${API_BASE_URL}/gesica/stats`);
+  if (!response.ok) throw new Error(`GESICA stats failed with status ${response.status}`);
+  const data = await response.json();
+  return {
+    totalDocuments: data.total_documents,
+    evidenceStrengthDistribution: data.evidence_strength_distribution,
+    uncertaintyMethods: data.uncertainty_methods,
+    forecastHorizons: data.forecast_horizons,
+  };
+}
+
+export async function fetchGesicaScenarios(): Promise<GesicaScenario[]> {
+  const response = await fetch(`${API_BASE_URL}/gesica/scenarios`);
+  if (!response.ok) throw new Error(`GESICA scenarios failed with status ${response.status}`);
+  const data: Array<{
+    id: string;
+    title: string;
+    description: string;
+    recommended_actions: string[];
+    relevant_articles: Array<{ id: number; title: string; abstract: string | null; year: number | null; source: string }>;
+  }> = await response.json();
+  return data.map((s) => ({
+    id: s.id,
+    title: s.title,
+    description: s.description,
+    recommendedActions: s.recommended_actions,
+    relevantArticles: s.relevant_articles,
+  }));
+}
+
 export function getReadableExcerpt(
   result: SearchResult,
   detail: DocumentDetailResponse | null,

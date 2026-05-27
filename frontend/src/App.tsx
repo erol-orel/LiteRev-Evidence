@@ -1,12 +1,20 @@
 import { useEffect, useMemo, useState } from "react";
-import { Download, ExternalLink, RotateCcw } from "lucide-react";
+import { Activity, BarChart2, BookOpen, Download, ExternalLink, RotateCcw, Zap } from "lucide-react";
 
 import {
   fetchDocumentDetail,
+  fetchEvidenceSummary,
+  fetchGesicaScenarios,
+  fetchGesicaStats,
+  fetchCorpusStats,
   getFilterOptions,
   getReadableExcerpt,
+  type CorpusStats,
   type DocumentDetailResponse,
+  type EvidenceSummaryResponse,
   type FilterOptions,
+  type GesicaScenario,
+  type GesicaStats,
   searchDocuments,
 } from "./lib/api";
 import type {
@@ -26,6 +34,8 @@ const FILTER_FIELDS: Array<[keyof FilterOptions, string]> = [
 ];
 
 const PAGE_SIZE = 10;
+
+type AppTab = "search" | "scenarios" | "stats";
 
 type DetailView = {
   id: number | null;
@@ -49,8 +59,251 @@ function csvEscape(value: unknown): string {
   return JSON.stringify(value ?? "");
 }
 
+function EvidenceStrengthBadge({ strength }: { strength: "weak" | "moderate" | "strong" | null }) {
+  if (!strength) return null;
+  const config = {
+    strong: { label: "Forte", className: "bg-emerald-500/20 text-emerald-300 border-emerald-500/30" },
+    moderate: { label: "Modérée", className: "bg-amber-500/20 text-amber-300 border-amber-500/30" },
+    weak: { label: "Faible", className: "bg-rose-500/20 text-rose-300 border-rose-500/30" },
+  };
+  const { label, className } = config[strength];
+  return (
+    <span className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-xs font-medium ${className}`}>
+      <Zap size={10} />
+      {label}
+    </span>
+  );
+}
+
+function SignalBadge({ label }: { label: string }) {
+  return (
+    <span className="rounded-full bg-cyan-500/10 border border-cyan-500/20 px-2 py-0.5 text-xs text-cyan-300">
+      {label}
+    </span>
+  );
+}
+
+function GesicaSignalsPanel({ summary }: { summary: EvidenceSummaryResponse }) {
+  const s = summary.gesicaSignals;
+  return (
+    <section className="space-y-3">
+      <div className="flex items-center justify-between">
+        <h3 className="font-medium text-white flex items-center gap-2">
+          <Zap size={14} className="text-cyan-400" />
+          Signaux GESICA
+        </h3>
+        <EvidenceStrengthBadge strength={s.evidenceStrength} />
+      </div>
+
+      {s.forecastHorizon && (
+        <div className="rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-xs text-slate-300">
+          <span className="text-slate-400">Horizon prévisionnel :</span>{" "}
+          <span className="font-mono text-cyan-300">{s.forecastHorizon}</span>
+        </div>
+      )}
+
+      {s.demandSignals.length > 0 && (
+        <div>
+          <p className="mb-1 text-xs text-slate-400">Signaux de demande</p>
+          <div className="flex flex-wrap gap-1">
+            {s.demandSignals.slice(0, 8).map((sig) => (
+              <SignalBadge key={sig} label={sig} />
+            ))}
+          </div>
+        </div>
+      )}
+
+      {s.scenarioTags.length > 0 && (
+        <div>
+          <p className="mb-1 text-xs text-slate-400">Scénarios détectés</p>
+          <div className="flex flex-wrap gap-1">
+            {s.scenarioTags.map((tag) => (
+              <span key={tag} className="rounded-full bg-violet-500/10 border border-violet-500/20 px-2 py-0.5 text-xs text-violet-300">
+                {tag}
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {s.reportedMetrics.length > 0 && (
+        <div>
+          <p className="mb-1 text-xs text-slate-400">Métriques rapportées</p>
+          <div className="flex flex-wrap gap-1">
+            {s.reportedMetrics.map((m) => (
+              <span key={m} className="rounded-full bg-slate-700/60 border border-white/10 px-2 py-0.5 text-xs text-slate-300 font-mono uppercase">
+                {m}
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {s.crossBorder && (
+        <div className="rounded-xl border border-amber-500/20 bg-amber-500/5 px-3 py-2 text-xs text-amber-300">
+          Pertinence transfrontalière détectée (France / Suisse)
+        </div>
+      )}
+    </section>
+  );
+}
+
+function StatsView({ corpusStats, gesicaStats }: { corpusStats: CorpusStats | null; gesicaStats: GesicaStats | null }) {
+  if (!corpusStats && !gesicaStats) {
+    return <div className="text-sm text-slate-400">Chargement des statistiques...</div>;
+  }
+
+  return (
+    <div className="space-y-6">
+      {corpusStats && (
+        <div className="rounded-3xl border border-white/10 bg-white/5 p-5 shadow-2xl">
+          <h2 className="mb-4 flex items-center gap-2 text-lg font-semibold text-white">
+            <BarChart2 size={18} className="text-cyan-400" />
+            Corpus global
+          </h2>
+          <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
+            <div className="rounded-2xl border border-white/10 bg-slate-900/60 p-4 text-center">
+              <p className="text-2xl font-bold text-cyan-300">{corpusStats.totalDocuments.toLocaleString()}</p>
+              <p className="mt-1 text-xs text-slate-400">Documents</p>
+            </div>
+            <div className="rounded-2xl border border-white/10 bg-slate-900/60 p-4 text-center">
+              <p className="text-2xl font-bold text-cyan-300">{corpusStats.totalChunks.toLocaleString()}</p>
+              <p className="mt-1 text-xs text-slate-400">Chunks</p>
+            </div>
+            <div className="rounded-2xl border border-white/10 bg-slate-900/60 p-4 text-center">
+              <p className="text-2xl font-bold text-cyan-300">{Object.keys(corpusStats.byProject).length}</p>
+              <p className="mt-1 text-xs text-slate-400">Projets</p>
+            </div>
+            <div className="rounded-2xl border border-white/10 bg-slate-900/60 p-4 text-center">
+              <p className="text-2xl font-bold text-cyan-300">{Object.keys(corpusStats.bySource).length}</p>
+              <p className="mt-1 text-xs text-slate-400">Sources</p>
+            </div>
+          </div>
+
+          <div className="mt-4 grid gap-4 sm:grid-cols-2">
+            <div>
+              <h3 className="mb-2 text-sm font-medium text-slate-300">Par projet</h3>
+              <div className="space-y-2">
+                {Object.entries(corpusStats.byProject).map(([proj, count]) => (
+                  <div key={proj} className="flex items-center justify-between rounded-xl border border-white/10 bg-slate-900/40 px-3 py-2 text-sm">
+                    <span className="text-slate-200 capitalize">{proj}</span>
+                    <span className="font-mono text-cyan-300">{count}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+            <div>
+              <h3 className="mb-2 text-sm font-medium text-slate-300">Par source</h3>
+              <div className="space-y-2">
+                {Object.entries(corpusStats.bySource).map(([src, count]) => (
+                  <div key={src} className="flex items-center justify-between rounded-xl border border-white/10 bg-slate-900/40 px-3 py-2 text-sm">
+                    <span className="text-slate-200">{src}</span>
+                    <span className="font-mono text-cyan-300">{count}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {gesicaStats && (
+        <div className="rounded-3xl border border-white/10 bg-white/5 p-5 shadow-2xl">
+          <h2 className="mb-4 flex items-center gap-2 text-lg font-semibold text-white">
+            <Activity size={18} className="text-cyan-400" />
+            Corpus GESICA
+          </h2>
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
+            {Object.entries(gesicaStats.evidenceStrengthDistribution).map(([strength, count]) => {
+              const colors: Record<string, string> = {
+                strong: "text-emerald-300",
+                moderate: "text-amber-300",
+                weak: "text-rose-300",
+              };
+              return (
+                <div key={strength} className="rounded-2xl border border-white/10 bg-slate-900/60 p-4 text-center">
+                  <p className={`text-2xl font-bold ${colors[strength] ?? "text-white"}`}>{count}</p>
+                  <p className="mt-1 text-xs text-slate-400 capitalize">Preuve {strength}</p>
+                </div>
+              );
+            })}
+          </div>
+
+          {Object.keys(gesicaStats.forecastHorizons).length > 0 && (
+            <div className="mt-4">
+              <h3 className="mb-2 text-sm font-medium text-slate-300">Horizons prévisionnels</h3>
+              <div className="flex flex-wrap gap-2">
+                {Object.entries(gesicaStats.forecastHorizons).slice(0, 10).map(([h, count]) => (
+                  <span key={h} className="rounded-full border border-cyan-500/20 bg-cyan-500/10 px-3 py-1 text-xs text-cyan-300">
+                    {h} <span className="opacity-60">({count})</span>
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ScenariosView({ scenarios }: { scenarios: GesicaScenario[] }) {
+  if (scenarios.length === 0) {
+    return <div className="text-sm text-slate-400">Chargement des scénarios...</div>;
+  }
+
+  return (
+    <div className="space-y-5">
+      {scenarios.map((scenario) => (
+        <div key={scenario.id} className="rounded-3xl border border-white/10 bg-white/5 p-5 shadow-2xl">
+          <div className="flex items-start gap-3">
+            <div className="mt-1 rounded-xl border border-cyan-500/20 bg-cyan-500/10 p-2">
+              <Activity size={16} className="text-cyan-400" />
+            </div>
+            <div className="flex-1">
+              <h3 className="text-lg font-semibold text-white">{scenario.title}</h3>
+              <p className="mt-1 text-sm leading-6 text-slate-300">{scenario.description}</p>
+            </div>
+          </div>
+
+          <div className="mt-4">
+            <h4 className="mb-2 text-xs font-semibold uppercase tracking-wider text-slate-400">
+              Actions recommandées
+            </h4>
+            <ul className="space-y-1.5">
+              {scenario.recommendedActions.map((action, i) => (
+                <li key={i} className="flex items-start gap-2 text-sm text-slate-200">
+                  <span className="mt-1 h-1.5 w-1.5 shrink-0 rounded-full bg-cyan-400" />
+                  {action}
+                </li>
+              ))}
+            </ul>
+          </div>
+
+          {scenario.relevantArticles.length > 0 && (
+            <div className="mt-4">
+              <h4 className="mb-2 text-xs font-semibold uppercase tracking-wider text-slate-400">
+                Articles associés
+              </h4>
+              <div className="space-y-2">
+                {scenario.relevantArticles.map((article) => (
+                  <div key={article.id} className="rounded-xl border border-white/10 bg-slate-900/40 px-3 py-2 text-sm">
+                    <p className="text-slate-200">{article.title}</p>
+                    <p className="mt-0.5 text-xs text-slate-400">{article.source} · {article.year ?? "—"}</p>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+      ))}
+    </div>
+  );
+}
+
 export default function App() {
   const [projectContext, setProjectContext] = useState<ProjectContext>("gesica");
+  const [activeTab, setActiveTab] = useState<AppTab>("search");
   const [mode, setMode] = useState<SearchMode>("semantic");
   const [query, setQuery] = useState("");
   const [filters, setFilters] = useState<SearchFilters>({
@@ -64,14 +317,15 @@ export default function App() {
   const [loading, setLoading] = useState(false);
   const [detailLoading, setDetailLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [relevanceMap, setRelevanceMap] = useState<Record<string, RelevanceLabel>>(
-    {},
-  );
+  const [relevanceMap, setRelevanceMap] = useState<Record<string, RelevanceLabel>>({});
   const [selectedResult, setSelectedResult] = useState<SearchResult | null>(null);
-  const [selectedDocument, setSelectedDocument] =
-    useState<DocumentDetailResponse | null>(null);
+  const [selectedDocument, setSelectedDocument] = useState<DocumentDetailResponse | null>(null);
+  const [evidenceSummary, setEvidenceSummary] = useState<EvidenceSummaryResponse | null>(null);
   const [filterOptions, setFilterOptions] = useState<FilterOptions | null>(null);
   const [page, setPage] = useState(1);
+  const [corpusStats, setCorpusStats] = useState<CorpusStats | null>(null);
+  const [gesicaStats, setGesicaStats] = useState<GesicaStats | null>(null);
+  const [gesicaScenarios, setGesicaScenarios] = useState<GesicaScenario[]>([]);
 
   useEffect(() => {
     getFilterOptions()
@@ -81,30 +335,35 @@ export default function App() {
           opts.year
             ?.map((y) => Number(y.value))
             .filter((y) => Number.isFinite(y) && y > 0) ?? [];
-
         if (years.length > 0) {
           setYearRange([Math.min(...years), Math.max(...years)]);
         }
       })
-      .catch((err) => {
-        console.error(err);
-      });
+      .catch((err) => console.error(err));
   }, []);
 
   useEffect(() => {
-    setFilters((prev) => ({
-      ...prev,
-      projectContext: projectContext,
-    }));
+    setFilters((prev) => ({ ...prev, projectContext }));
     setPage(1);
     setSelectedResult(null);
     setSelectedDocument(null);
+    setEvidenceSummary(null);
   }, [projectContext]);
+
+  useEffect(() => {
+    if (activeTab === "stats") {
+      fetchCorpusStats().then(setCorpusStats).catch(console.error);
+      fetchGesicaStats().then(setGesicaStats).catch(console.error);
+    }
+    if (activeTab === "scenarios") {
+      fetchGesicaScenarios().then(setGesicaScenarios).catch(console.error);
+    }
+  }, [activeTab]);
 
   const effectiveFilters = useMemo<SearchFilters>(
     () => ({
       ...filters,
-      projectContext: projectContext,
+      projectContext,
       yearMin: yearRange[0],
       yearMax: yearRange[1],
     }),
@@ -113,7 +372,6 @@ export default function App() {
 
   const dedupedResults = useMemo(() => {
     const seen = new Set<string>();
-
     return results.filter((result) => {
       const key = `${result.documentId}-${result.chunkIndex}-${result.content}`;
       if (seen.has(key)) return false;
@@ -132,14 +390,17 @@ export default function App() {
   async function loadDocumentDetail(result: SearchResult) {
     setSelectedResult(result);
     setSelectedDocument(null);
+    setEvidenceSummary(null);
     setDetailLoading(true);
-
     try {
-      const detail = await fetchDocumentDetail(result.documentId);
+      const [detail, summary] = await Promise.all([
+        fetchDocumentDetail(result.documentId),
+        fetchEvidenceSummary(result.documentId).catch(() => null),
+      ]);
       setSelectedDocument(detail);
+      setEvidenceSummary(summary);
     } catch (err) {
       console.error(err);
-      setSelectedDocument(null);
     } finally {
       setDetailLoading(false);
     }
@@ -147,13 +408,12 @@ export default function App() {
 
   async function handleSearch() {
     if (!query.trim()) return;
-
     setLoading(true);
     setError(null);
     setPage(1);
     setSelectedResult(null);
     setSelectedDocument(null);
-
+    setEvidenceSummary(null);
     try {
       const data = await searchDocuments({
         queryText: query,
@@ -161,47 +421,31 @@ export default function App() {
         limit: 100,
         filters: effectiveFilters,
       });
-
       setResults(data.results);
-
       const first = data.results[0] ?? null;
-      setSelectedResult(first);
-
       if (first) {
-        setDetailLoading(true);
-        try {
-          const detail = await fetchDocumentDetail(first.documentId);
-          setSelectedDocument(detail);
-        } catch (err) {
-          console.error(err);
-          setSelectedDocument(null);
-        } finally {
-          setDetailLoading(false);
-        }
+        await loadDocumentDetail(first);
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : "Erreur inconnue");
       setResults([]);
-      setSelectedResult(null);
-      setSelectedDocument(null);
     } finally {
       setLoading(false);
     }
   }
 
   function handleReset() {
-    setFilters({ projectContext: projectContext });
+    setFilters({ projectContext });
     setResults([]);
     setError(null);
     setPage(1);
     setSelectedResult(null);
     setSelectedDocument(null);
-
+    setEvidenceSummary(null);
     const years =
       filterOptions?.year
         ?.map((y) => Number(y.value))
         .filter((y) => Number.isFinite(y) && y > 0) ?? [];
-
     if (years.length > 0) {
       setYearRange([Math.min(...years), Math.max(...years)]);
     }
@@ -209,11 +453,8 @@ export default function App() {
 
   function handleExport(format: "csv" | "json") {
     if (!dedupedResults.length) return;
-
     if (format === "json") {
-      const blob = new Blob([JSON.stringify(dedupedResults, null, 2)], {
-        type: "application/json",
-      });
+      const blob = new Blob([JSON.stringify(dedupedResults, null, 2)], { type: "application/json" });
       const a = document.createElement("a");
       a.href = URL.createObjectURL(blob);
       a.download = "literev-results.json";
@@ -221,29 +462,11 @@ export default function App() {
       URL.revokeObjectURL(a.href);
       return;
     }
-
-    const headers = [
-      "title",
-      "score",
-      "source",
-      "year",
-      "projectContext",
-      "sourceType",
-      "diseaseOrCondition",
-      "scenarioType",
-      "geographicScope",
-      "evidenceCategory",
-      "url",
-    ];
-
+    const headers = ["title", "score", "source", "year", "projectContext", "sourceType", "diseaseOrCondition", "scenarioType", "geographicScope", "evidenceCategory", "url"];
     const rows = dedupedResults.map((r) =>
       headers.map((h) => csvEscape((r as Record<string, unknown>)[h])).join(","),
     );
-
-    const blob = new Blob([[headers.join(","), ...rows].join("\n")], {
-      type: "text/csv;charset=utf-8",
-    });
-
+    const blob = new Blob([[headers.join(","), ...rows].join("\n")], { type: "text/csv;charset=utf-8" });
     const a = document.createElement("a");
     a.href = URL.createObjectURL(blob);
     a.download = "literev-results.csv";
@@ -255,35 +478,32 @@ export default function App() {
 
   const detailView = useMemo<DetailView | null>(() => {
     if (!selectedResult) return null;
-
     const doc = selectedDocument?.document;
     const excerpt = getReadableExcerpt(selectedResult, selectedDocument);
-
     return {
       id: doc?.id ?? selectedResult.documentId ?? null,
       title: doc?.title ?? selectedResult.title ?? "Sans titre",
       abstract: doc?.abstract ?? "",
       excerpt,
       source: doc?.source ?? selectedResult.source ?? "—",
-      year:
-        doc?.year?.toString() ??
-        selectedResult.year?.toString() ??
-        "—",
+      year: doc?.year?.toString() ?? selectedResult.year?.toString() ?? "—",
       url: doc?.url ?? selectedResult.url ?? "",
       externalId: doc?.externalId ?? "—",
-      projectContext:
-        doc?.projectContext ?? selectedResult.projectContext ?? "—",
+      projectContext: doc?.projectContext ?? selectedResult.projectContext ?? "—",
       sourceType: doc?.sourceType ?? selectedResult.sourceType ?? "—",
-      disease:
-        doc?.diseaseOrCondition ?? selectedResult.diseaseOrCondition ?? "—",
+      disease: doc?.diseaseOrCondition ?? selectedResult.diseaseOrCondition ?? "—",
       scenario: doc?.scenarioType ?? selectedResult.scenarioType ?? "—",
-      geography:
-        doc?.geographicScope ?? selectedResult.geographicScope ?? "—",
-      evidence:
-        doc?.evidenceCategory ?? selectedResult.evidenceCategory ?? "—",
+      geography: doc?.geographicScope ?? selectedResult.geographicScope ?? "—",
+      evidence: doc?.evidenceCategory ?? selectedResult.evidenceCategory ?? "—",
       chunkCount: selectedDocument?.chunks?.length ?? 0,
     };
   }, [selectedDocument, selectedResult]);
+
+  const tabs: Array<{ id: AppTab; label: string; icon: React.ReactNode }> = [
+    { id: "search", label: "Recherche", icon: <BookOpen size={14} /> },
+    { id: "scenarios", label: "Scénarios GESICA", icon: <Activity size={14} /> },
+    { id: "stats", label: "Statistiques", icon: <BarChart2 size={14} /> },
+  ];
 
   return (
     <div className="min-h-screen bg-[radial-gradient(circle_at_top,rgba(34,211,238,0.10),transparent_30%),linear-gradient(180deg,#020617_0%,#081226_100%)] text-white">
@@ -298,8 +518,7 @@ export default function App() {
                 Evidence-to-scenario search
               </h1>
               <p className="mt-3 max-w-2xl text-sm leading-6 text-slate-300">
-                Interface unifiée pour GeoAI4EI, GESICA et EVA, connectée au moteur
-                FastAPI + PostgreSQL/pgvector.
+                Interface unifiée pour GeoAI4EI, GESICA et EVA — moteur FastAPI + PostgreSQL/pgvector.
               </p>
             </div>
 
@@ -326,366 +545,405 @@ export default function App() {
               ))}
             </div>
           </div>
+
+          <div className="mt-6 flex gap-1 rounded-2xl border border-white/10 bg-slate-900/60 p-1 w-fit">
+            {tabs.map((tab) => (
+              <button
+                key={tab.id}
+                type="button"
+                onClick={() => setActiveTab(tab.id)}
+                className={`flex items-center gap-2 rounded-xl px-4 py-2 text-sm transition ${
+                  activeTab === tab.id
+                    ? "bg-cyan-500 text-slate-950 font-semibold"
+                    : "text-slate-300 hover:bg-white/10"
+                }`}
+              >
+                {tab.icon}
+                {tab.label}
+              </button>
+            ))}
+          </div>
         </div>
       </header>
 
       <main className="mx-auto max-w-[1380px] px-6 py-8">
-        <div className="grid gap-6 xl:grid-cols-[280px_minmax(0,1fr)]">
-          <aside className="xl:sticky xl:top-8 xl:self-start">
-            <div className="rounded-3xl border border-white/10 bg-white/5 p-5 shadow-2xl">
-              <div className="flex items-center justify-between">
-                <h2 className="text-lg font-semibold text-white">Filtres</h2>
-                <button
-                  type="button"
-                  onClick={handleReset}
-                  title="Réinitialiser les filtres"
-                  className="flex items-center gap-1 rounded-xl border border-white/10 px-2 py-1 text-xs text-slate-400 transition hover:border-white/20 hover:text-slate-200"
-                >
-                  <RotateCcw size={12} />
-                  Reset
-                </button>
-              </div>
 
-              <div className="mt-5 space-y-4">
-                {FILTER_FIELDS.map(([key, label]) => {
-                  const options = filterOptions?.[key] ?? [];
+        {activeTab === "stats" && (
+          <StatsView corpusStats={corpusStats} gesicaStats={gesicaStats} />
+        )}
 
-                  return (
-                    <label key={key} className="block">
-                      <span className="mb-2 block text-sm font-medium text-slate-200">
-                        {label}
-                      </span>
-                      <select
-                        value={(filters as Record<string, string | undefined>)[key] ?? ""}
-                        onChange={(e) =>
-                          setFilters((prev) => ({
-                            ...prev,
-                            [key]: e.target.value || undefined,
-                          }))
-                        }
-                        className="w-full appearance-none rounded-2xl border border-white/10 bg-slate-950/80 px-3 py-3 text-sm text-white focus:border-cyan-400 focus:outline-none"
-                      >
-                        <option value="">Tous</option>
-                        {options.map((opt) => (
-                          <option key={String(opt.value)} value={String(opt.value)}>
-                            {opt.label}
-                          </option>
-                        ))}
-                      </select>
-                    </label>
-                  );
-                })}
+        {activeTab === "scenarios" && (
+          <ScenariosView scenarios={gesicaScenarios} />
+        )}
 
-                <div>
-                  <span className="mb-2 block text-sm font-medium text-slate-200">
-                    Année{" "}
-                    <span className="font-mono text-cyan-300">
-                      {yearRange[0]} — {yearRange[1]}
-                    </span>
-                  </span>
-
-                  <div className="space-y-2">
-                    <input
-                      type="range"
-                      min={
-                        filterOptions?.year?.length
-                          ? Math.min(...filterOptions.year.map((y) => Number(y.value)))
-                          : 2000
-                      }
-                      max={yearRange[1]}
-                      value={yearRange[0]}
-                      onChange={(e) =>
-                        setYearRange([Number(e.target.value), yearRange[1]])
-                      }
-                      className="w-full accent-cyan-400"
-                    />
-                    <input
-                      type="range"
-                      min={yearRange[0]}
-                      max={
-                        filterOptions?.year?.length
-                          ? Math.max(...filterOptions.year.map((y) => Number(y.value)))
-                          : new Date().getFullYear()
-                      }
-                      value={yearRange[1]}
-                      onChange={(e) =>
-                        setYearRange([yearRange[0], Number(e.target.value)])
-                      }
-                      className="w-full accent-cyan-400"
-                    />
-                  </div>
-                </div>
-              </div>
-            </div>
-          </aside>
-
-          <section className="space-y-6">
-            <section className="rounded-3xl border border-white/10 bg-white/5 p-5 shadow-2xl">
-              <div className="mb-4 flex items-center gap-2 rounded-2xl border border-white/10 bg-slate-900/80 p-1 text-sm">
-                {(["semantic", "boolean"] as SearchMode[]).map((item) => (
-                  <button
-                    key={item}
-                    type="button"
-                    onClick={() => setMode(item)}
-                    className={`rounded-xl px-4 py-2 capitalize transition ${
-                      mode === item
-                        ? "bg-cyan-500 text-slate-950"
-                        : "text-slate-300 hover:bg-white/10"
-                    }`}
-                  >
-                    {item}
-                  </button>
-                ))}
-              </div>
-
-              <div className="flex flex-col gap-3 lg:flex-row">
-                <input
-                  value={query}
-                  onChange={(e) => setQuery(e.target.value)}
-                  onKeyDown={(e) => e.key === "Enter" && handleSearch()}
-                  placeholder={
-                    mode === "semantic"
-                      ? "Ex. ambulance demand forecasting"
-                      : "Ex. ambulance AND forecasting"
-                  }
-                  className="min-h-14 flex-1 rounded-2xl border border-white/10 bg-slate-950/80 px-4 text-white outline-none placeholder:text-slate-500 focus:border-cyan-400"
-                />
-                <button
-                  type="button"
-                  onClick={handleSearch}
-                  disabled={loading}
-                  className="min-h-14 rounded-2xl bg-cyan-400 px-6 font-semibold text-slate-950 transition hover:bg-cyan-300 disabled:cursor-not-allowed disabled:opacity-60"
-                >
-                  {loading ? "Recherche..." : "Rechercher"}
-                </button>
-              </div>
-            </section>
-
-            {error && (
-              <div className="rounded-2xl border border-rose-400/30 bg-rose-500/10 p-4 text-sm text-rose-100">
-                {error}
-              </div>
-            )}
-
-            {!loading && !error && !hasResults && (
-              <div className="rounded-3xl border border-dashed border-white/10 bg-white/5 p-10 text-center text-slate-300">
-                Lancez une recherche pour afficher les résultats.
-              </div>
-            )}
-
-            {hasResults && (
-              <>
+        {activeTab === "search" && (
+          <div className="grid gap-6 xl:grid-cols-[280px_minmax(0,1fr)]">
+            <aside className="xl:sticky xl:top-8 xl:self-start">
+              <div className="rounded-3xl border border-white/10 bg-white/5 p-5 shadow-2xl">
                 <div className="flex items-center justify-between">
-                  <p className="text-sm text-slate-400">
-                    <span className="font-semibold text-white">{dedupedResults.length}</span>{" "}
-                    résultat{dedupedResults.length > 1 ? "s" : ""} · {totalPages > 1 ? `page ${page}/${totalPages}` : "1 page"}
-                  </p>
-
-                  <div className="flex gap-2">
-                    <button
-                      type="button"
-                      onClick={() => handleExport("csv")}
-                      className="flex items-center gap-1.5 rounded-xl border border-white/10 px-3 py-1.5 text-xs text-slate-300 transition hover:border-white/20 hover:text-white"
-                    >
-                      <Download size={12} />
-                      CSV
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => handleExport("json")}
-                      className="flex items-center gap-1.5 rounded-xl border border-white/10 px-3 py-1.5 text-xs text-slate-300 transition hover:border-white/20 hover:text-white"
-                    >
-                      <Download size={12} />
-                      JSON
-                    </button>
-                  </div>
+                  <h2 className="text-lg font-semibold text-white">Filtres</h2>
+                  <button
+                    type="button"
+                    onClick={handleReset}
+                    title="Réinitialiser les filtres"
+                    className="flex items-center gap-1 rounded-xl border border-white/10 px-2 py-1 text-xs text-slate-400 transition hover:border-white/20 hover:text-slate-200"
+                  >
+                    <RotateCcw size={12} />
+                    Reset
+                  </button>
                 </div>
 
-                <div className="grid gap-6 2xl:grid-cols-[minmax(0,1fr)_360px]">
-                  <div className="space-y-4">
-                    {pagedResults.map((result) => (
-                      <article
-                        key={`${result.documentId}-${result.chunkIndex}-${result.content}`}
-                        className={`rounded-3xl border bg-white/5 p-5 shadow-2xl transition ${
-                          selectedResult?.id === result.id
-                            ? "border-cyan-400/60"
-                            : "border-white/10 hover:border-cyan-400/40"
-                        }`}
-                      >
-                        <div className="flex items-start justify-between gap-4">
-                          <button
-                            type="button"
-                            onClick={() => loadDocumentDetail(result)}
-                            className="text-left"
-                          >
-                            <h3 className="text-xl font-semibold text-white hover:text-cyan-300">
-                              {result.title}
-                            </h3>
-                          </button>
-
-                          {result.url && (
-                            <a
-                              href={result.url}
-                              target="_blank"
-                              rel="noopener noreferrer"
-                              className="inline-flex shrink-0 items-center gap-2 rounded-xl border border-white/10 px-3 py-2 text-sm text-slate-200 hover:bg-white/10"
-                            >
-                              Source
-                              <ExternalLink size={14} />
-                            </a>
-                          )}
-                        </div>
-
-                        <div className="mt-3 flex flex-wrap gap-2 text-xs text-slate-400">
-                          <span className="rounded-full bg-white/5 px-2 py-1">
-                            Score {(result.score ?? 0).toFixed(3)}
-                          </span>
-                          {result.source && (
-                            <span className="rounded-full bg-white/5 px-2 py-1">
-                              {result.source}
-                            </span>
-                          )}
-                          {result.year && (
-                            <span className="rounded-full bg-white/5 px-2 py-1">
-                              {result.year}
-                            </span>
-                          )}
-                          {result.projectContext && (
-                            <span className="rounded-full bg-cyan-500/10 px-2 py-1 text-cyan-200">
-                              {result.projectContext}
-                            </span>
-                          )}
-                        </div>
-
-                        <p className="mt-4 text-sm leading-6 text-slate-200">
-                          {result.highlight || result.content}
-                        </p>
-
-                        <div className="mt-5 flex flex-wrap gap-2">
-                          {(["pertinent", "non-pertinent", "incertain"] as RelevanceLabel[]).map(
-                            (tag) => (
-                              <button
-                                key={tag}
-                                type="button"
-                                onClick={() =>
-                                  setRelevanceMap((prev) => ({
-                                    ...prev,
-                                    [result.id]: tag,
-                                  }))
-                                }
-                                className={`rounded-full border px-3 py-1 text-xs transition ${
-                                  relevanceMap[result.id] === tag
-                                    ? "border-cyan-400 bg-cyan-500/15 text-cyan-200"
-                                    : "border-white/10 bg-white/5 text-slate-400 hover:border-white/20 hover:text-slate-200"
-                                }`}
-                              >
-                                {tag}
-                              </button>
-                            ),
-                          )}
-                        </div>
-                      </article>
-                    ))}
-
-                    {totalPages > 1 && (
-                      <div className="flex items-center justify-center gap-2 pt-2">
-                        <button
-                          type="button"
-                          disabled={page === 1}
-                          onClick={() => setPage((p) => p - 1)}
-                          className="rounded-xl border border-white/10 px-4 py-2 text-sm text-slate-300 transition hover:bg-white/10 disabled:cursor-not-allowed disabled:opacity-30"
-                        >
-                          Précédent
-                        </button>
-                        <span className="text-sm text-slate-400">
-                          {page} / {totalPages}
+                <div className="mt-5 space-y-4">
+                  {FILTER_FIELDS.map(([key, label]) => {
+                    const options = filterOptions?.[key] ?? [];
+                    return (
+                      <label key={key} className="block">
+                        <span className="mb-2 block text-sm font-medium text-slate-200">
+                          {label}
                         </span>
-                        <button
-                          type="button"
-                          disabled={page === totalPages}
-                          onClick={() => setPage((p) => p + 1)}
-                          className="rounded-xl border border-white/10 px-4 py-2 text-sm text-slate-300 transition hover:bg-white/10 disabled:cursor-not-allowed disabled:opacity-30"
+                        <select
+                          value={(filters as Record<string, string | undefined>)[key] ?? ""}
+                          onChange={(e) =>
+                            setFilters((prev) => ({
+                              ...prev,
+                              [key]: e.target.value || undefined,
+                            }))
+                          }
+                          className="w-full appearance-none rounded-2xl border border-white/10 bg-slate-950/80 px-3 py-3 text-sm text-white focus:border-cyan-400 focus:outline-none"
                         >
-                          Suivant
-                        </button>
-                      </div>
-                    )}
+                          <option value="">Tous</option>
+                          {options.map((opt) => (
+                            <option key={String(opt.value)} value={String(opt.value)}>
+                              {opt.label}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                    );
+                  })}
+
+                  <div>
+                    <span className="mb-2 block text-sm font-medium text-slate-200">
+                      Année{" "}
+                      <span className="font-mono text-cyan-300">
+                        {yearRange[0]} — {yearRange[1]}
+                      </span>
+                    </span>
+                    <div className="space-y-2">
+                      <input
+                        type="range"
+                        min={
+                          filterOptions?.year?.length
+                            ? Math.min(...filterOptions.year.map((y) => Number(y.value)))
+                            : 2000
+                        }
+                        max={yearRange[1]}
+                        value={yearRange[0]}
+                        onChange={(e) =>
+                          setYearRange([Number(e.target.value), yearRange[1]])
+                        }
+                        className="w-full accent-cyan-400"
+                      />
+                      <input
+                        type="range"
+                        min={yearRange[0]}
+                        max={
+                          filterOptions?.year?.length
+                            ? Math.max(...filterOptions.year.map((y) => Number(y.value)))
+                            : new Date().getFullYear()
+                        }
+                        value={yearRange[1]}
+                        onChange={(e) =>
+                          setYearRange([yearRange[0], Number(e.target.value)])
+                        }
+                        className="w-full accent-cyan-400"
+                      />
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </aside>
+
+            <section className="space-y-6">
+              <section className="rounded-3xl border border-white/10 bg-white/5 p-5 shadow-2xl">
+                <div className="mb-4 flex items-center gap-2 rounded-2xl border border-white/10 bg-slate-900/80 p-1 text-sm">
+                  {(["semantic", "boolean"] as SearchMode[]).map((item) => (
+                    <button
+                      key={item}
+                      type="button"
+                      onClick={() => setMode(item)}
+                      className={`rounded-xl px-4 py-2 capitalize transition ${
+                        mode === item
+                          ? "bg-cyan-500 text-slate-950"
+                          : "text-slate-300 hover:bg-white/10"
+                      }`}
+                    >
+                      {item}
+                    </button>
+                  ))}
+                </div>
+
+                <div className="flex flex-col gap-3 lg:flex-row">
+                  <input
+                    value={query}
+                    onChange={(e) => setQuery(e.target.value)}
+                    onKeyDown={(e) => e.key === "Enter" && handleSearch()}
+                    placeholder={
+                      mode === "semantic"
+                        ? "Ex. ambulance demand forecasting"
+                        : "Ex. ambulance AND forecasting"
+                    }
+                    className="min-h-14 flex-1 rounded-2xl border border-white/10 bg-slate-950/80 px-4 text-white outline-none placeholder:text-slate-500 focus:border-cyan-400"
+                  />
+                  <button
+                    type="button"
+                    onClick={handleSearch}
+                    disabled={loading}
+                    className="min-h-14 rounded-2xl bg-cyan-400 px-6 font-semibold text-slate-950 transition hover:bg-cyan-300 disabled:cursor-not-allowed disabled:opacity-60"
+                  >
+                    {loading ? "Recherche..." : "Rechercher"}
+                  </button>
+                </div>
+              </section>
+
+              {error && (
+                <div className="rounded-2xl border border-rose-400/30 bg-rose-500/10 p-4 text-sm text-rose-100">
+                  {error}
+                </div>
+              )}
+
+              {!loading && !error && !hasResults && (
+                <div className="rounded-3xl border border-dashed border-white/10 bg-white/5 p-10 text-center text-slate-300">
+                  Lancez une recherche pour afficher les résultats.
+                </div>
+              )}
+
+              {hasResults && (
+                <>
+                  <div className="flex items-center justify-between">
+                    <p className="text-sm text-slate-400">
+                      <span className="font-semibold text-white">{dedupedResults.length}</span>{" "}
+                      résultat{dedupedResults.length > 1 ? "s" : ""} · {totalPages > 1 ? `page ${page}/${totalPages}` : "1 page"}
+                    </p>
+                    <div className="flex gap-2">
+                      <button
+                        type="button"
+                        onClick={() => handleExport("csv")}
+                        className="flex items-center gap-1.5 rounded-xl border border-white/10 px-3 py-1.5 text-xs text-slate-300 transition hover:border-white/20 hover:text-white"
+                      >
+                        <Download size={12} />
+                        CSV
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleExport("json")}
+                        className="flex items-center gap-1.5 rounded-xl border border-white/10 px-3 py-1.5 text-xs text-slate-300 transition hover:border-white/20 hover:text-white"
+                      >
+                        <Download size={12} />
+                        JSON
+                      </button>
+                    </div>
                   </div>
 
-                  <aside className="2xl:sticky 2xl:top-8 2xl:self-start">
-                    <div className="min-h-[220px] rounded-3xl border border-white/10 bg-white/5 p-5 shadow-2xl">
-                      {!selectedResult ? (
-                        <div className="text-sm leading-6 text-slate-300">
-                          Cliquez sur un résultat pour afficher le détail du document.
-                        </div>
-                      ) : detailLoading ? (
-                        <div className="text-sm leading-6 text-slate-300">
-                          Chargement du document complet...
-                        </div>
-                      ) : (
-                        <div className="space-y-5 text-sm text-slate-200">
-                          <div>
-                            <p className="text-xs uppercase tracking-[0.2em] text-cyan-300">
-                              Document detail
-                            </p>
-                            <h2 className="mt-2 text-xl font-semibold text-white">
-                              {detailView?.title}
-                            </h2>
-                          </div>
-
-                          {detailView?.url && (
-                            <div>
+                  <div className="grid gap-6 2xl:grid-cols-[minmax(0,1fr)_380px]">
+                    <div className="space-y-4">
+                      {pagedResults.map((result) => (
+                        <article
+                          key={`${result.documentId}-${result.chunkIndex}-${result.content}`}
+                          className={`rounded-3xl border bg-white/5 p-5 shadow-2xl transition ${
+                            selectedResult?.id === result.id
+                              ? "border-cyan-400/60"
+                              : "border-white/10 hover:border-cyan-400/40"
+                          }`}
+                        >
+                          <div className="flex items-start justify-between gap-4">
+                            <button
+                              type="button"
+                              onClick={() => loadDocumentDetail(result)}
+                              className="text-left"
+                            >
+                              <h3 className="text-xl font-semibold text-white hover:text-cyan-300">
+                                {result.title}
+                              </h3>
+                            </button>
+                            {result.url && (
                               <a
-                                href={detailView.url}
+                                href={result.url}
                                 target="_blank"
                                 rel="noopener noreferrer"
-                                className="inline-flex items-center gap-2 rounded-xl border border-white/10 px-3 py-2 text-sm text-slate-200 hover:bg-white/10"
+                                className="inline-flex shrink-0 items-center gap-2 rounded-xl border border-white/10 px-3 py-2 text-sm text-slate-200 hover:bg-white/10"
                               >
-                                Open source
-                                <ExternalLink size={16} />
+                                Source
+                                <ExternalLink size={14} />
                               </a>
-                            </div>
-                          )}
+                            )}
+                          </div>
 
-                          <section>
-                            <h3 className="mb-2 font-medium text-white">Extrait</h3>
-                            <p className="rounded-2xl border border-white/10 bg-white/5 p-4 leading-6">
-                              {detailView?.excerpt || "—"}
-                            </p>
-                          </section>
+                          <div className="mt-3 flex flex-wrap gap-2 text-xs text-slate-400">
+                            <span className="rounded-full bg-white/5 px-2 py-1">
+                              Score {(result.score ?? 0).toFixed(3)}
+                            </span>
+                            {result.source && (
+                              <span className="rounded-full bg-white/5 px-2 py-1">
+                                {result.source}
+                              </span>
+                            )}
+                            {result.year && (
+                              <span className="rounded-full bg-white/5 px-2 py-1">
+                                {result.year}
+                              </span>
+                            )}
+                            {result.projectContext && (
+                              <span className="rounded-full bg-cyan-500/10 px-2 py-1 text-cyan-200">
+                                {result.projectContext}
+                              </span>
+                            )}
+                            {result.scenarioType && (
+                              <span className="rounded-full bg-violet-500/10 px-2 py-1 text-violet-200">
+                                {result.scenarioType}
+                              </span>
+                            )}
+                            {result.evidenceCategory && (
+                              <span className="rounded-full bg-slate-700/60 px-2 py-1 text-slate-300">
+                                {result.evidenceCategory}
+                              </span>
+                            )}
+                          </div>
 
-                          <section>
-                            <h3 className="mb-2 font-medium text-white">Abstract</h3>
-                            <p className="rounded-2xl border border-white/10 bg-white/5 p-4 leading-6">
-                              {detailView?.abstract || "—"}
-                            </p>
-                          </section>
+                          <p className="mt-4 text-sm leading-6 text-slate-200">
+                            {result.highlight || result.content}
+                          </p>
 
-                          <section>
-                            <h3 className="mb-2 font-medium text-white">Métadonnées</h3>
-                            <dl className="grid grid-cols-1 gap-3 rounded-2xl border border-white/10 bg-white/5 p-4">
-                              <div><dt className="text-slate-400">ID</dt><dd>{detailView?.id ?? "—"}</dd></div>
-                              <div><dt className="text-slate-400">Source</dt><dd>{detailView?.source}</dd></div>
-                              <div><dt className="text-slate-400">Année</dt><dd>{detailView?.year}</dd></div>
-                              <div><dt className="text-slate-400">External ID</dt><dd>{detailView?.externalId}</dd></div>
-                              <div><dt className="text-slate-400">Projet</dt><dd>{detailView?.projectContext}</dd></div>
-                              <div><dt className="text-slate-400">Type</dt><dd>{detailView?.sourceType}</dd></div>
-                              <div><dt className="text-slate-400">Pathologie</dt><dd>{detailView?.disease}</dd></div>
-                              <div><dt className="text-slate-400">Scénario</dt><dd>{detailView?.scenario}</dd></div>
-                              <div><dt className="text-slate-400">Zone</dt><dd>{detailView?.geography}</dd></div>
-                              <div><dt className="text-slate-400">Preuve</dt><dd>{detailView?.evidence}</dd></div>
-                              <div><dt className="text-slate-400">Chunks</dt><dd>{detailView?.chunkCount}</dd></div>
-                            </dl>
-                          </section>
+                          <div className="mt-5 flex flex-wrap gap-2">
+                            {(["pertinent", "non-pertinent", "incertain"] as RelevanceLabel[]).map(
+                              (tag) => (
+                                <button
+                                  key={tag}
+                                  type="button"
+                                  onClick={() =>
+                                    setRelevanceMap((prev) => ({
+                                      ...prev,
+                                      [result.id]: tag,
+                                    }))
+                                  }
+                                  className={`rounded-full border px-3 py-1 text-xs transition ${
+                                    relevanceMap[result.id] === tag
+                                      ? "border-cyan-400 bg-cyan-500/15 text-cyan-200"
+                                      : "border-white/10 bg-white/5 text-slate-400 hover:border-white/20 hover:text-slate-200"
+                                  }`}
+                                >
+                                  {tag}
+                                </button>
+                              ),
+                            )}
+                          </div>
+                        </article>
+                      ))}
+
+                      {totalPages > 1 && (
+                        <div className="flex items-center justify-center gap-2 pt-2">
+                          <button
+                            type="button"
+                            disabled={page === 1}
+                            onClick={() => setPage((p) => p - 1)}
+                            className="rounded-xl border border-white/10 px-4 py-2 text-sm text-slate-300 transition hover:bg-white/10 disabled:cursor-not-allowed disabled:opacity-30"
+                          >
+                            Précédent
+                          </button>
+                          <span className="text-sm text-slate-400">
+                            {page} / {totalPages}
+                          </span>
+                          <button
+                            type="button"
+                            disabled={page === totalPages}
+                            onClick={() => setPage((p) => p + 1)}
+                            className="rounded-xl border border-white/10 px-4 py-2 text-sm text-slate-300 transition hover:bg-white/10 disabled:cursor-not-allowed disabled:opacity-30"
+                          >
+                            Suivant
+                          </button>
                         </div>
                       )}
                     </div>
-                  </aside>
-                </div>
-              </>
-            )}
-          </section>
-        </div>
+
+                    <aside className="2xl:sticky 2xl:top-8 2xl:self-start">
+                      <div className="min-h-[220px] rounded-3xl border border-white/10 bg-white/5 p-5 shadow-2xl">
+                        {!selectedResult ? (
+                          <div className="text-sm leading-6 text-slate-300">
+                            Cliquez sur un résultat pour afficher le détail du document.
+                          </div>
+                        ) : detailLoading ? (
+                          <div className="text-sm leading-6 text-slate-300">
+                            Chargement du document complet...
+                          </div>
+                        ) : (
+                          <div className="space-y-5 text-sm text-slate-200">
+                            <div>
+                              <p className="text-xs uppercase tracking-[0.2em] text-cyan-300">
+                                Document detail
+                              </p>
+                              <h2 className="mt-2 text-xl font-semibold text-white">
+                                {detailView?.title}
+                              </h2>
+                            </div>
+
+                            {detailView?.url && (
+                              <div>
+                                <a
+                                  href={detailView.url}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  className="inline-flex items-center gap-2 rounded-xl border border-white/10 px-3 py-2 text-sm text-slate-200 hover:bg-white/10"
+                                >
+                                  Open source
+                                  <ExternalLink size={16} />
+                                </a>
+                              </div>
+                            )}
+
+                            <section>
+                              <h3 className="mb-2 font-medium text-white">Extrait</h3>
+                              <p className="rounded-2xl border border-white/10 bg-white/5 p-4 leading-6">
+                                {detailView?.excerpt || "—"}
+                              </p>
+                            </section>
+
+                            <section>
+                              <h3 className="mb-2 font-medium text-white">Abstract</h3>
+                              <p className="rounded-2xl border border-white/10 bg-white/5 p-4 leading-6">
+                                {detailView?.abstract || "—"}
+                              </p>
+                            </section>
+
+                            {evidenceSummary && (
+                              <GesicaSignalsPanel summary={evidenceSummary} />
+                            )}
+
+                            <section>
+                              <h3 className="mb-2 font-medium text-white">Métadonnées</h3>
+                              <dl className="grid grid-cols-1 gap-3 rounded-2xl border border-white/10 bg-white/5 p-4">
+                                <div><dt className="text-slate-400">ID</dt><dd>{detailView?.id ?? "—"}</dd></div>
+                                <div><dt className="text-slate-400">Source</dt><dd>{detailView?.source}</dd></div>
+                                <div><dt className="text-slate-400">Année</dt><dd>{detailView?.year}</dd></div>
+                                <div><dt className="text-slate-400">External ID</dt><dd>{detailView?.externalId}</dd></div>
+                                <div><dt className="text-slate-400">Projet</dt><dd>{detailView?.projectContext}</dd></div>
+                                <div><dt className="text-slate-400">Type</dt><dd>{detailView?.sourceType}</dd></div>
+                                <div><dt className="text-slate-400">Pathologie</dt><dd>{detailView?.disease}</dd></div>
+                                <div><dt className="text-slate-400">Scénario</dt><dd>{detailView?.scenario}</dd></div>
+                                <div><dt className="text-slate-400">Zone</dt><dd>{detailView?.geography}</dd></div>
+                                <div><dt className="text-slate-400">Preuve</dt><dd>{detailView?.evidence}</dd></div>
+                                <div><dt className="text-slate-400">Chunks</dt><dd>{detailView?.chunkCount}</dd></div>
+                              </dl>
+                            </section>
+                          </div>
+                        )}
+                      </div>
+                    </aside>
+                  </div>
+                </>
+              )}
+            </section>
+          </div>
+        )}
       </main>
     </div>
   );

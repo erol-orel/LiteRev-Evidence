@@ -12,7 +12,7 @@ UPDATE literature_document SET
   scenario_type = COALESCE(scenario_type, CASE
     WHEN title ILIKE '%demand forecast%' OR abstract ILIKE '%demand forecast%'
       OR title ILIKE '%call volume%' OR abstract ILIKE '%arrival rate%'
-      THEN 'ems-demand-forecasting'
+      THEN 'demand-forecasting'
     WHEN title ILIKE '%resource allocation%' OR abstract ILIKE '%ambulance dispatch%'
       OR title ILIKE '%capacity planning%' OR abstract ILIKE '%bed management%'
       THEN 'resource-allocation'
