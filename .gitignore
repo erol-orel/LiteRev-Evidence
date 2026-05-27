@@ -37,3 +37,15 @@ node_modules/
 # Misc
 tmp/
 temp/
+
+# Backup folders
+*.bak*/
+*.bak/
+
+# Frontend build artifacts
+frontend/dist/
+frontend/node_modules/
+
+# Python cache
+__pycache__/
+*.pyc
