@@ -18,11 +18,11 @@ import type {
 } from "./types/search";
 
 const FILTER_FIELDS: Array<[keyof FilterOptions, string]> = [
-  ["sourcetype", "Type de source"],
-  ["diseaseorcondition", "Maladie / pathologie"],
-  ["scenariotype", "Type de scénario"],
-  ["geographicscope", "Zone géographique"],
-  ["evidencecategory", "Catégorie de preuve"],
+  ["sourceType", "Type de source"],
+  ["diseaseOrCondition", "Maladie / pathologie"],
+  ["scenarioType", "Type de scénario"],
+  ["geographicScope", "Zone géographique"],
+  ["evidenceCategory", "Catégorie de preuve"],
 ];
 
 const PAGE_SIZE = 10;
@@ -54,7 +54,7 @@ export default function App() {
   const [mode, setMode] = useState<SearchMode>("semantic");
   const [query, setQuery] = useState("");
   const [filters, setFilters] = useState<SearchFilters>({
-    projectcontext: "gesica",
+    projectContext: "gesica",
   });
   const [yearRange, setYearRange] = useState<[number, number]>([
     2000,
@@ -64,7 +64,7 @@ export default function App() {
   const [loading, setLoading] = useState(false);
   const [detailLoading, setDetailLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [relevanceMap, setRelevanceMap] = useState<Record<number, RelevanceLabel>>(
+  const [relevanceMap, setRelevanceMap] = useState<Record<string, RelevanceLabel>>(
     {},
   );
   const [selectedResult, setSelectedResult] = useState<SearchResult | null>(null);
@@ -94,7 +94,7 @@ export default function App() {
   useEffect(() => {
     setFilters((prev) => ({
       ...prev,
-      projectcontext: projectContext,
+      projectContext: projectContext,
     }));
     setPage(1);
     setSelectedResult(null);
@@ -104,9 +104,9 @@ export default function App() {
   const effectiveFilters = useMemo<SearchFilters>(
     () => ({
       ...filters,
-      projectcontext: projectContext,
-      yearmin: yearRange[0],
-      yearmax: yearRange[1],
+      projectContext: projectContext,
+      yearMin: yearRange[0],
+      yearMax: yearRange[1],
     }),
     [filters, projectContext, yearRange],
   );
@@ -115,7 +115,7 @@ export default function App() {
     const seen = new Set<string>();
 
     return results.filter((result) => {
-      const key = `${result.documentid}-${result.chunkindex}-${result.content}`;
+      const key = `${result.documentId}-${result.chunkIndex}-${result.content}`;
       if (seen.has(key)) return false;
       seen.add(key);
       return true;
@@ -135,7 +135,7 @@ export default function App() {
     setDetailLoading(true);
 
     try {
-      const detail = await fetchDocumentDetail(result.documentid);
+      const detail = await fetchDocumentDetail(result.documentId);
       setSelectedDocument(detail);
     } catch (err) {
       console.error(err);
@@ -156,7 +156,7 @@ export default function App() {
 
     try {
       const data = await searchDocuments({
-        querytext: query,
+        queryText: query,
         mode,
         limit: 100,
         filters: effectiveFilters,
@@ -170,7 +170,7 @@ export default function App() {
       if (first) {
         setDetailLoading(true);
         try {
-          const detail = await fetchDocumentDetail(first.documentid);
+          const detail = await fetchDocumentDetail(first.documentId);
           setSelectedDocument(detail);
         } catch (err) {
           console.error(err);
@@ -190,7 +190,7 @@ export default function App() {
   }
 
   function handleReset() {
-    setFilters({ projectcontext: projectContext });
+    setFilters({ projectContext: projectContext });
     setResults([]);
     setError(null);
     setPage(1);
@@ -227,12 +227,12 @@ export default function App() {
       "score",
       "source",
       "year",
-      "projectcontext",
-      "sourcetype",
-      "diseaseorcondition",
-      "scenariotype",
-      "geographicscope",
-      "evidencecategory",
+      "projectContext",
+      "sourceType",
+      "diseaseOrCondition",
+      "scenarioType",
+      "geographicScope",
+      "evidenceCategory",
       "url",
     ];
 
@@ -260,7 +260,7 @@ export default function App() {
     const excerpt = getReadableExcerpt(selectedResult, selectedDocument);
 
     return {
-      id: doc?.id ?? selectedResult.documentid ?? null,
+      id: doc?.id ?? selectedResult.documentId ?? null,
       title: doc?.title ?? selectedResult.title ?? "Sans titre",
       abstract: doc?.abstract ?? "",
       excerpt,
@@ -270,17 +270,17 @@ export default function App() {
         selectedResult.year?.toString() ??
         "—",
       url: doc?.url ?? selectedResult.url ?? "",
-      externalId: doc?.external_id ?? "—",
+      externalId: doc?.externalId ?? "—",
       projectContext:
-        doc?.project_context ?? selectedResult.projectcontext ?? "—",
-      sourceType: doc?.source_type ?? selectedResult.sourcetype ?? "—",
+        doc?.projectContext ?? selectedResult.projectContext ?? "—",
+      sourceType: doc?.sourceType ?? selectedResult.sourceType ?? "—",
       disease:
-        doc?.disease_or_condition ?? selectedResult.diseaseorcondition ?? "—",
-      scenario: doc?.scenario_type ?? selectedResult.scenariotype ?? "—",
+        doc?.diseaseOrCondition ?? selectedResult.diseaseOrCondition ?? "—",
+      scenario: doc?.scenarioType ?? selectedResult.scenarioType ?? "—",
       geography:
-        doc?.geographic_scope ?? selectedResult.geographicscope ?? "—",
+        doc?.geographicScope ?? selectedResult.geographicScope ?? "—",
       evidence:
-        doc?.evidence_category ?? selectedResult.evidencecategory ?? "—",
+        doc?.evidenceCategory ?? selectedResult.evidenceCategory ?? "—",
       chunkCount: selectedDocument?.chunks?.length ?? 0,
     };
   }, [selectedDocument, selectedResult]);
@@ -433,7 +433,7 @@ export default function App() {
                         : "text-slate-300 hover:bg-white/10"
                     }`}
                   >
-                    {item === "semantic" ? "Sémantique" : "Booléen"}
+                    {item}
                   </button>
                 ))}
               </div>
@@ -505,7 +505,7 @@ export default function App() {
                   <div className="space-y-4">
                     {pagedResults.map((result) => (
                       <article
-                        key={`${result.documentid}-${result.chunkindex}-${result.content}`}
+                        key={`${result.documentId}-${result.chunkIndex}-${result.content}`}
                         className={`rounded-3xl border bg-white/5 p-5 shadow-2xl transition ${
                           selectedResult?.id === result.id
                             ? "border-cyan-400/60"
@@ -550,9 +550,9 @@ export default function App() {
                               {result.year}
                             </span>
                           )}
-                          {result.projectcontext && (
+                          {result.projectContext && (
                             <span className="rounded-full bg-cyan-500/10 px-2 py-1 text-cyan-200">
-                              {result.projectcontext}
+                              {result.projectContext}
                             </span>
                           )}
                         </div>
@@ -562,7 +562,7 @@ export default function App() {
                         </p>
 
                         <div className="mt-5 flex flex-wrap gap-2">
-                          {(["pertinent", "nonpertinent", "incertain"] as RelevanceLabel[]).map(
+                          {(["pertinent", "non-pertinent", "incertain"] as RelevanceLabel[]).map(
                             (tag) => (
                               <button
                                 key={tag}
