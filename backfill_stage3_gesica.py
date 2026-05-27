@@ -69,7 +69,7 @@ with engine.begin() as conn:
     r = conn.execute(text(STAGE3_SQL))
     print(f"Rows updated: {r.rowcount}")
     for row in conn.execute(text(REPORT_SQL)).fetchall():
-        print(dict(row.mapping))
+        print(dict(row._mapping))
     print("\nScenario breakdown:")
     for row in conn.execute(text(BREAKDOWN_SQL)).fetchall():
-        print(dict(row.mapping))
+        print(dict(row._mapping))

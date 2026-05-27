@@ -1,55 +1,84 @@
 from __future__ import annotations
 
-import json
 import logging
 import os
+import re
 from typing import Any
 
 from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from sentence_transformers import SentenceTransformer
+from pydantic import BaseModel, Field
 from sqlalchemy import create_engine, text
 
-from app.schemas.api import ChunkIn, DocumentIn, SearchIn
-from app.search.service import SearchService
-
-logger = logging.getLogger("literev-api")
 logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("literev-api")
 
-DB_URL = os.getenv("DB_URL")
-EMBED_MODEL_NAME = os.getenv("EMBED_MODEL_NAME", "BAAI/bge-m3")
+DB_URL = os.getenv("DB_URL", "postgresql+psycopg://literev:MyNewStrongPassword!@10.10.1.10:5432/literev")
 WRITE_API_KEY = os.getenv("WRITE_API_KEY", "")
-ALLOWED_ORIGINS = os.getenv(
-    "ALLOWED_ORIGINS",
-    "http://localhost:5173,http://127.0.0.1:5173,http://127.0.0.1",
-).split(",")
+
+engine = create_engine(DB_URL, pool_pre_ping=True)
 
 app = FastAPI(title="LiteRev API", version="0.2.0")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=ALLOWED_ORIGINS,
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-engine = create_engine(DB_URL, pool_pre_ping=True)
-embedder = SentenceTransformer(EMBED_MODEL_NAME)
-search_service = SearchService(db_engine=engine, embedder=embedder)
 
-logger.info("Embedding model loaded: %s", EMBED_MODEL_NAME)
-logger.info("Search backend selected: %s", search_service.backend_name)
-
-
-# ── API Key guard (write endpoints only) ──────────────────────────────────────
-def require_api_key(x_api_key: str = Header(default="")) -> None:
+def require_api_key(x_api_key: str | None = Header(default=None)) -> None:
     if WRITE_API_KEY and x_api_key != WRITE_API_KEY:
-        raise HTTPException(status_code=401, detail="Invalid or missing API key")
+        raise HTTPException(status_code=401, detail="Invalid API key")
+
+
+class DocumentIn(BaseModel):
+    source: str = Field(..., min_length=1)
+    title: str = Field(..., min_length=1)
+    abstract: str | None = None
+    year: int | None = None
+    url: str | None = None
+    external_id: str | None = None
+    project_context: str | None = None
+    source_type: str | None = None
+    disease_or_condition: str | None = None
+    scenario_type: str | None = None
+    geographic_scope: str | None = None
+    evidence_category: str | None = None
+
+
+class ChunkIn(BaseModel):
+    document_id: int = Field(..., ge=1)
+    chunk_index: int = Field(..., ge=0)
+    content: str = Field(..., min_length=1)
+    chunk_type: str | None = None
+    section_label: str | None = None
+    char_start: int | None = Field(None, ge=0)
+    char_end: int | None = Field(None, ge=0)
+    token_count: int | None = Field(None, ge=0)
+    chunk_weight: float | None = Field(None, ge=0)
+    metadata_json: dict[str, Any] | None = None
+
+
+class SearchIn(BaseModel):
+    query_text: str | None = None
+    querytext: str | None = None
+    filters: dict[str, Any] | None = None
+    mode: str = Field(default="semantic")
+    limit: int = Field(default=10, ge=1, le=100)
+    offset: int = Field(default=0, ge=0)
+
+    def resolved_query(self) -> str:
+        q = (self.query_text or self.querytext or "").strip()
+        if not q:
+            raise HTTPException(status_code=422, detail="query_text or querytext is required")
+        return q
 
 
 @app.on_event("startup")
-def startup_event():
+def startup_event() -> None:
     with engine.connect() as conn:
         conn.execute(text("SELECT 1"))
     logger.info("Database connection OK")
@@ -57,69 +86,103 @@ def startup_event():
 
 @app.get("/health")
 def health() -> dict[str, Any]:
-    return {"status": "ok"}
+    with engine.connect() as conn:
+        conn.execute(text("SELECT 1"))
+    return {"status": "ok", "database": "ok"}
 
 
-@app.get("/embed-info")
-def embed_info() -> dict[str, Any]:
-    dim = embedder.get_sentence_embedding_dimension()
-    return {"model": EMBED_MODEL_NAME, "dimension": dim}
+@app.get("/filters-options")
+def get_filter_options() -> dict[str, list[dict[str, Any]]]:
+    fields = [
+        ("source", "source"),
+        ("source_type", "source_type"),
+        ("disease_or_condition", "disease_or_condition"),
+        ("scenario_type", "scenario_type"),
+        ("geographic_scope", "geographic_scope"),
+        ("evidence_category", "evidence_category"),
+        ("year", "year"),
+    ]
 
+    out: dict[str, list[dict[str, Any]]] = {}
 
-@app.get("/filters/options")
-def filter_options() -> dict[str, Any]:
-    return search_service.get_filter_options()
+    with engine.connect() as conn:
+        for key, col in fields:
+            rows = conn.execute(
+                text(f"""
+                    SELECT DISTINCT {col} AS value
+                    FROM literature_document
+                    WHERE {col} IS NOT NULL
+                    ORDER BY {col}
+                """)
+            ).mappings().all()
+
+            values = []
+            for row in rows:
+                value = row["value"]
+                if value is None:
+                    continue
+                if key == "year":
+                    label = str(value)
+                else:
+                    label = str(value).replace("_", " ").replace("-", " ").title()
+                    label = (
+                        label.replace("Covid 19", "COVID-19")
+                        .replace("Ems", "EMS")
+                        .replace("Ai", "AI")
+                        .replace("Uk", "UK")
+                        .replace("Usa", "USA")
+                    )
+                values.append({"value": value, "label": label})
+            out[key] = values
+
+    return out
 
 
 @app.post("/documents")
 def create_document(doc: DocumentIn, _: None = Depends(require_api_key)) -> dict[str, Any]:
     sql = text("""
         INSERT INTO literature_document (
-            source, title, abstract, year, url, external_id,
-            project_context, source_type, disease_or_condition,
-            scenario_type, geographic_scope, evidence_category
+            source,
+            title,
+            abstract,
+            year,
+            url,
+            external_id,
+            project_context,
+            source_type,
+            disease_or_condition,
+            scenario_type,
+            geographic_scope,
+            evidence_category
         )
         VALUES (
-            :source, :title, :abstract, :year, :url, :external_id,
-            :project_context, :source_type, :disease_or_condition,
-            :scenario_type, :geographic_scope, :evidence_category
+            :source,
+            :title,
+            :abstract,
+            :year,
+            :url,
+            :external_id,
+            :project_context,
+            :source_type,
+            :disease_or_condition,
+            :scenario_type,
+            :geographic_scope,
+            :evidence_category
         )
         RETURNING id
     """)
-
     with engine.begin() as conn:
-        row = conn.execute(
-            sql,
-            {
-                "source": doc.source,
-                "title": doc.title,
-                "abstract": doc.abstract,
-                "year": doc.year,
-                "url": doc.url,
-                "external_id": doc.external_id,
-                "project_context": doc.project_context,
-                "source_type": doc.source_type,
-                "disease_or_condition": doc.disease_or_condition,
-                "scenario_type": doc.scenario_type,
-                "geographic_scope": doc.geographic_scope,
-                "evidence_category": doc.evidence_category,
-            },
-        ).first()
-
-    return {"id": row.id, "status": "ok"}
+        new_id = conn.execute(sql, doc.model_dump()).scalar_one()
+    return {"id": new_id}
 
 
 @app.post("/chunks")
 def create_chunk(chunk: ChunkIn, _: None = Depends(require_api_key)) -> dict[str, Any]:
-    embedding = embedder.encode(chunk.content).tolist()
-
     sql = text("""
         INSERT INTO document_chunk (
             document_id,
             chunk_index,
             content,
-            embedding,
-            search_vector,
             chunk_type,
             section_label,
             char_start,
@@ -132,8 +195,6 @@ def create_chunk(chunk: ChunkIn, _: None = Depends(require_api_key)) -> dict[str
             :document_id,
             :chunk_index,
             :content,
-            CAST(:embedding AS vector),
-            to_tsvector('simple', :content),
             :chunk_type,
             :section_label,
             :char_start,
@@ -144,145 +205,473 @@ def create_chunk(chunk: ChunkIn, _: None = Depends(require_api_key)) -> dict[str
         )
         RETURNING id
     """)
+    payload = chunk.model_dump()
+    if payload["metadata_json"] is None:
+        payload["metadata_json"] = "{}"
 
     with engine.begin() as conn:
-        row = conn.execute(
-            sql,
-            {
-                "document_id": chunk.document_id,
-                "chunk_index": chunk.chunk_index,
-                "content": chunk.content,
-                "embedding": str(embedding),
-                "chunk_type": chunk.chunk_type,
-                "section_label": chunk.section_label,
-                "char_start": chunk.char_start,
-                "char_end": chunk.char_end,
-                "token_count": chunk.token_count,
-                "chunk_weight": chunk.chunk_weight,
-                "metadata_json": json.dumps(chunk.metadata_json or {}),
-            },
-        ).first()
+        new_id = conn.execute(sql, payload).scalar_one()
+    return {"id": new_id}
 
-    return {"id": row.id, "status": "ok"}
+
+def _build_where(filters: dict[str, Any] | None) -> tuple[str, dict[str, Any]]:
+    if not filters:
+        return "", {}
+
+    clauses: list[str] = []
+    params: dict[str, Any] = {}
+
+    mapping = {
+        "source": "d.source",
+        "source_type": "d.source_type",
+        "disease_or_condition": "d.disease_or_condition",
+        "scenario_type": "d.scenario_type",
+        "geographic_scope": "d.geographic_scope",
+        "evidence_category": "d.evidence_category",
+        "project_context": "d.project_context",
+    }
+
+    for key, column in mapping.items():
+        value = filters.get(key)
+        if value not in (None, "", []):
+            clauses.append(f"{column} = :{key}")
+            params[key] = value
+
+    year_min = filters.get("year_min")
+    year_max = filters.get("year_max")
+    if year_min not in (None, ""):
+        clauses.append("d.year >= :year_min")
+        params["year_min"] = int(year_min)
+    if year_max not in (None, ""):
+        clauses.append("d.year <= :year_max")
+        params["year_max"] = int(year_max)
+
+    if not clauses:
+        return "", {}
+
+    return " AND " + " AND ".join(clauses), params
 
 
 @app.post("/search")
 def search(payload: SearchIn) -> dict[str, Any]:
-    mode = (payload.mode or "semantic").lower()
+    query = payload.resolved_query()
+    filters = payload.filters or {}
+    where_sql, where_params = _build_where(filters)
 
-    if mode == "hybrid":
-        results = search_service.hybrid_search(
-            query=payload.query_text,
-            boolean_filters=payload.filters,
-            vector_weight=0.65,
-            bm25_weight=0.25,
-            limit=payload.limit,
+    query_terms = [t.strip() for t in re.split(r"\s+", query.lower()) if t.strip()]
+    if not query_terms:
+        raise HTTPException(status_code=422, detail="Empty query")
+
+    like_clauses = []
+    score_clauses = []
+    params: dict[str, Any] = {
+        "limit": payload.limit,
+        "offset": payload.offset,
+        **where_params,
+    }
+
+    for i, term in enumerate(query_terms):
+        key = f"term_{i}"
+        params[key] = f"%{term}%"
+        like_clauses.append(
+            f"""(
+                LOWER(COALESCE(d.title, '')) LIKE :{key}
+                OR LOWER(COALESCE(d.abstract, '')) LIKE :{key}
+                OR LOWER(COALESCE(c.content, '')) LIKE :{key}
+            )"""
         )
-    else:
-        results = search_service.search(
-            query=payload.query_text,
-            filters=payload.filters,
-            mode=mode,
-            limit=payload.limit,
+        score_clauses.append(
+            f"""
+            (CASE WHEN LOWER(COALESCE(d.title, '')) LIKE :{key} THEN 3 ELSE 0 END) +
+            (CASE WHEN LOWER(COALESCE(d.abstract, '')) LIKE :{key} THEN 2 ELSE 0 END) +
+            (CASE WHEN LOWER(COALESCE(c.content, '')) LIKE :{key} THEN 1 ELSE 0 END)
+            """
         )
 
-    return {"results": results}
+    any_match_sql = " OR ".join(like_clauses)
+    score_sql = " + ".join([f"({s})" for s in score_clauses])
 
-
-@app.get("/documents/{doc_id}")
-def get_document(doc_id: int) -> dict[str, Any]:
-    sql = text("""
+    sql = text(f"""
         SELECT
-            d.id, d.source, d.title, d.abstract, d.year, d.url,
-            d.external_id, d.project_context, d.source_type,
-            d.disease_or_condition, d.scenario_type,
-            d.geographic_scope, d.evidence_category,
-            d.created_at, d.updated_at,
-            COALESCE(
-                json_agg(
-                    json_build_object(
-                        'id', c.id,
-                        'chunk_index', c.chunk_index,
-                        'content', c.content,
-                        'chunk_type', c.chunk_type,
-                        'section_label', c.section_label,
-                        'token_count', c.token_count
-                    ) ORDER BY c.chunk_index
-                ) FILTER (WHERE c.id IS NOT NULL),
-                '[]'
-            ) AS chunks
-        FROM literature_document d
-        LEFT JOIN document_chunk c ON c.document_id = d.id
-        WHERE d.id = :doc_id
-        GROUP BY d.id
+            d.id AS document_id,
+            c.id AS chunk_id,
+            c.chunk_index,
+            d.title,
+            d.abstract,
+            d.source,
+            d.year,
+            d.url,
+            d.project_context,
+            d.source_type,
+            d.disease_or_condition,
+            d.scenario_type,
+            d.geographic_scope,
+            d.evidence_category,
+            c.content,
+            ({score_sql}) AS score
+        FROM document_chunk c
+        JOIN literature_document d ON d.id = c.document_id
+        WHERE ({any_match_sql})
+        {where_sql}
+        ORDER BY score DESC, d.year DESC NULLS LAST, d.id DESC
+        LIMIT :limit OFFSET :offset
     """)
+
     with engine.connect() as conn:
-        row = conn.execute(sql, {"doc_id": doc_id}).first()
-    if row is None:
-        raise HTTPException(status_code=404, detail="Document not found")
-    return dict(row._mapping)
+        rows = conn.execute(sql, params).mappings().all()
+
+    results = []
+    for row in rows:
+        content = row["content"] or ""
+        abstract = row["abstract"] or ""
+        highlight = content[:600] if content else abstract[:600]
+
+        results.append(
+            {
+                "id": f'{row["document_id"]}-{row["chunk_index"]}',
+                "document_id": row["document_id"],
+                "chunk_id": row["chunk_id"],
+                "chunk_index": row["chunk_index"],
+                "title": row["title"],
+                "abstract": abstract,
+                "content": content,
+                "highlight": highlight,
+                "score": float(row["score"] or 0.0),
+                "source": row["source"],
+                "year": row["year"],
+                "url": row["url"],
+                "project_context": row["project_context"],
+                "source_type": row["source_type"],
+                "disease_or_condition": row["disease_or_condition"],
+                "scenario_type": row["scenario_type"],
+                "geographic_scope": row["geographic_scope"],
+                "evidence_category": row["evidence_category"],
+            }
+        )
+
+    return {"results": results, "count": len(results)}
 
 
-# ── GET /documents/{doc_id} ─────────────────────────────────────────────────
-@app.get("/documents/{doc_id}")
-def get_document(doc_id: int) -> dict[str, Any]:
+@app.get("/documents/{document_id}")
+def get_document_detail(document_id: int) -> dict[str, Any]:
+    sql_doc = text("""
+        SELECT
+            id,
+            source,
+            title,
+            abstract,
+            year,
+            url,
+            external_id,
+            project_context,
+            source_type,
+            disease_or_condition,
+            scenario_type,
+            geographic_scope,
+            evidence_category
+        FROM literature_document
+        WHERE id = :document_id
+        LIMIT 1
+    """)
+    sql_chunks = text("""
+        SELECT
+            id,
+            document_id,
+            chunk_index,
+            content,
+            chunk_type,
+            section_label,
+            char_start,
+            char_end,
+            token_count,
+            chunk_weight,
+            metadata_json
+        FROM document_chunk
+        WHERE document_id = :document_id
+        ORDER BY chunk_index ASC
+    """)
+
     with engine.connect() as conn:
-        doc = conn.execute(
-            text("SELECT * FROM literature_document WHERE id = :id"),
-            {"id": doc_id}
-        ).mappings().first()
+        doc = conn.execute(sql_doc, {"document_id": document_id}).mappings().first()
         if not doc:
-            from fastapi import HTTPException
             raise HTTPException(status_code=404, detail="Document not found")
-        chunks = conn.execute(
-            text("""SELECT chunk_index, content, chunk_type, section_label
-                    FROM document_chunk WHERE document_id = :id
-                    ORDER BY chunk_index"""),
-            {"id": doc_id}
-        ).mappings().all()
+        chunks = conn.execute(sql_chunks, {"document_id": document_id}).mappings().all()
+
     return {
         "document": dict(doc),
-        "chunks": [dict(c) for c in chunks]
+        "chunks": [dict(c) for c in chunks],
     }
 
 
-# ── GET /evidence-summary/{doc_id} ─────────────────────────────────────────
+def _extract_gesica_evidence(title: str | None, abstract: str | None) -> dict[str, Any]:
+    text_blob = f"{title or ''} {abstract or ''}".lower()
+
+    demand_patterns = [
+        "demand forecast",
+        "forecasting",
+        "forecast",
+        "call volume",
+        "arrival rate",
+        "response time",
+        "ems demand",
+        "surge",
+        "overcrowding",
+        "patient flow",
+        "triage",
+        "wait time",
+        "admission rate",
+        "hospitalization rate",
+    ]
+    resource_patterns = [
+        "ambulance",
+        "icu",
+        "bed",
+        "beds",
+        "staff",
+        "staffing",
+        "personnel",
+        "capacity",
+        "resource allocation",
+        "dispatch",
+        "hospital",
+        "emergency department",
+        "intensive care",
+    ]
+    intervention_patterns = [
+        "machine learning",
+        "artificial intelligence",
+        "neural network",
+        "prediction model",
+        "optimization",
+        "optimisation",
+        "decision support",
+        "simulation",
+        "algorithm",
+        "deep learning",
+        "random forest",
+        "xgboost",
+    ]
+    setting_patterns = {
+        "prehospital_ems": ["ambulance", "prehospital", "ems", "dispatch"],
+        "emergency_department": ["emergency department", "ed overcrowding", "triage", "waiting room"],
+        "hospital_operations": ["icu", "bed management", "hospital capacity", "hospital surge"],
+        "public_health_surveillance": ["surveillance", "early warning", "outbreak detection"],
+    }
+    scenario_rules = {
+        "ems-demand-forecasting": ["demand forecast", "call volume", "arrival rate", "response time"],
+        "resource-allocation": ["resource allocation", "capacity", "bed", "staffing", "dispatch"],
+        "triage-support": ["triage", "acuity", "severity score"],
+        "surge-management": ["surge", "mass casualty", "overcrowding", "pandemic"],
+        "surveillance": ["surveillance", "early warning", "outbreak detection"],
+        "cross-border-coordination": ["cross-border", "transfrontal", "geneva", "vaud", "france", "switzerland"],
+    }
+
+    horizon_match = re.search(
+        r"(\d+)\s*(hour|hours|day|days|week|weeks|month|months|year|years)",
+        text_blob,
+    )
+
+    metrics_patterns = [
+        "auc",
+        "auroc",
+        "accuracy",
+        "sensitivity",
+        "specificity",
+        "f1-score",
+        "precision",
+        "recall",
+        "rmse",
+        "mae",
+        "mape",
+    ]
+    uncertainty_patterns = [
+        "confidence interval",
+        "uncertainty",
+        "calibration",
+        "probabilistic",
+        "bayesian",
+        "ensemble",
+    ]
+
+    detected_settings = [
+        setting for setting, keys in setting_patterns.items()
+        if any(k in text_blob for k in keys)
+    ]
+
+    detected_scenarios = [
+        scenario for scenario, keys in scenario_rules.items()
+        if any(k in text_blob for k in keys)
+    ]
+
+    evidence_strength = "weak"
+    if any(k in text_blob for k in metrics_patterns):
+        evidence_strength = "moderate"
+    if any(k in text_blob for k in metrics_patterns) and any(k in text_blob for k in uncertainty_patterns):
+        evidence_strength = "strong"
+
+    return {
+        "demand_signals": sorted({p for p in demand_patterns if p in text_blob}),
+        "resource_types": sorted({p for p in resource_patterns if p in text_blob}),
+        "intervention_types": sorted({p for p in intervention_patterns if p in text_blob}),
+        "operational_settings": detected_settings,
+        "scenario_tags": detected_scenarios,
+        "forecast_horizon": horizon_match.group(0) if horizon_match else None,
+        "cross_border": any(
+            x in text_blob for x in ["cross-border", "transfrontal", "switzerland", "france", "geneva", "vaud"]
+        ),
+        "evidence_strength": evidence_strength,
+        "uncertainty_handling": sorted({p for p in uncertainty_patterns if p in text_blob}),
+        "reported_metrics": sorted({p for p in metrics_patterns if p in text_blob}),
+    }
+
+
+@app.get("/evidence-summary/{document_id}")
+def get_evidence_summary(document_id: int) -> dict[str, Any]:
+    sql = text("""
+        SELECT
+            id,
+            title,
+            abstract,
+            project_context,
+            disease_or_condition,
+            scenario_type,
+            geographic_scope,
+            evidence_category
+        FROM literature_document
+        WHERE id = :document_id
+        LIMIT 1
+    """)
+
+    with engine.connect() as conn:
+        row = conn.execute(sql, {"document_id": document_id}).mappings().first()
+
+    if not row:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    row_dict = dict(row)
+    extraction = _extract_gesica_evidence(row_dict.get("title"), row_dict.get("abstract"))
+
+    return {
+        "document_id": row_dict["id"],
+        "title": row_dict["title"],
+        "project_context": row_dict["project_context"],
+        "metadata": {
+            "disease_or_condition": row_dict.get("disease_or_condition"),
+            "scenario_type": row_dict.get("scenario_type"),
+            "geographic_scope": row_dict.get("geographic_scope"),
+            "evidence_category": row_dict.get("evidence_category"),
+        },
+        "gesica_extraction": extraction,
+    }
 import re as _re
 
-def _extract_gesica(title: str, abstract: str) -> dict:
-    text_combined = f"{title} {abstract}".lower()
-    # Demand / forecast signals
-    demand_kw = ["demand forecast", "arrival rate", "call volume", "response time",
-                 "incident rate", "dispatch", "surge", "overcrowding"]
-    resource_kw = ["ambulance", "hospital bed", "icu", "staff", "resource allocation",
-                   "capacity", "equipment", "personnel"]
-    intervention_kw = ["algorithm", "machine learning", "neural network", "simulation",
-                       "optimization", "prediction model", "decision support", "ai"]
-    horizon_pat = _re.search(r'(\d+)\s*(hour|day|week|month|year)', text_combined)
+def _extract_gesica_signals(title: str, abstract: str | None, chunks: list[dict[str, Any]]) -> dict[str, Any]:
+    text_parts = [title or "", abstract or ""]
+    text_parts.extend([(c.get("content") or "") for c in chunks[:20]])
+    text_blob = " ".join(text_parts).lower()
+
+    demand_patterns = [
+        "demand forecast", "forecasting", "arrival rate", "call volume",
+        "response time", "incident rate", "overcrowding", "surge", "queue"
+    ]
+    resource_patterns = [
+        "ambulance", "hospital bed", "icu", "staff", "personnel",
+        "resource allocation", "capacity", "dispatch", "routing"
+    ]
+    intervention_patterns = [
+        "machine learning", "artificial intelligence", "neural network",
+        "random forest", "xgboost", "optimization", "simulation",
+        "decision support", "prediction model", "forecast model"
+    ]
+    crisis_patterns = [
+        "pandemic", "epidemic", "mass casualty", "disaster",
+        "emergency department", "prehospital", "triage", "outbreak"
+    ]
+    geography_patterns = [
+        "switzerland", "france", "geneva", "vaud", "neuchatel",
+        "cross-border", "transfrontal", "samu", "smur", "hug", "chuv"
+    ]
+
+    horizon_matches = _re.findall(r'\b(\d+\s*(?:hour|hours|day|days|week|weeks|month|months|year|years))\b', text_blob)
+
+    def matched(patterns: list[str]) -> list[str]:
+        return [p for p in patterns if p in text_blob]
+
     return {
-        "demand_signals": [k for k in demand_kw if k in text_combined],
-        "resource_types": [k for k in resource_kw if k in text_combined],
-        "intervention_types": [k for k in intervention_kw if k in text_combined],
-        "forecast_horizon": horizon_pat.group(0) if horizon_pat else None,
-        "cross_border": any(w in text_combined for w in ["cross-border", "switzerland", "france", "suisse"]),
+        "demand_signals": matched(demand_patterns),
+        "resource_signals": matched(resource_patterns),
+        "intervention_signals": matched(intervention_patterns),
+        "crisis_signals": matched(crisis_patterns),
+        "cross_border_signals": matched(geography_patterns),
+        "forecast_horizons": horizon_matches[:10],
+        "is_ems_or_crisis_relevant": any([
+            bool(matched(demand_patterns)),
+            bool(matched(resource_patterns)),
+            bool(matched(crisis_patterns)),
+        ]),
     }
 
-@app.get("/evidence-summary/{doc_id}")
-def evidence_summary(doc_id: int) -> dict[str, Any]:
+
+@app.get("/evidence-summary/{document_id}")
+def get_evidence_summary(document_id: int) -> dict[str, Any]:
+    sql_doc = text("""
+        SELECT
+            id,
+            source,
+            title,
+            abstract,
+            year,
+            url,
+            external_id,
+            project_context,
+            source_type,
+            disease_or_condition,
+            scenario_type,
+            geographic_scope,
+            evidence_category
+        FROM literature_document
+        WHERE id = :document_id
+        LIMIT 1
+    """)
+    sql_chunks = text("""
+        SELECT
+            id,
+            document_id,
+            chunk_index,
+            content,
+            chunk_type,
+            section_label,
+            char_start,
+            char_end,
+            token_count,
+            chunk_weight,
+            metadata_json
+        FROM document_chunk
+        WHERE document_id = :document_id
+        ORDER BY chunk_index
+    """)
+
     with engine.connect() as conn:
-        doc = conn.execute(
-            text("SELECT title, abstract, disease_or_condition, scenario_type, geographic_scope, evidence_category, project_context FROM literature_document WHERE id = :id"),
-            {"id": doc_id}
-        ).mappings().first()
-        if not doc:
-            from fastapi import HTTPException
+        doc_row = conn.execute(sql_doc, {"document_id": document_id}).mappings().first()
+        if not doc_row:
             raise HTTPException(status_code=404, detail="Document not found")
-    d = dict(doc)
-    gesica_struct = _extract_gesica(d.get("title") or "", d.get("abstract") or "")
+
+        chunk_rows = conn.execute(sql_chunks, {"document_id": document_id}).mappings().all()
+
+    document = dict(doc_row)
+    chunks = [dict(r) for r in chunk_rows]
+    signals = _extract_gesica_signals(document.get("title") or "", document.get("abstract"), chunks)
+
     return {
-        "doc_id": doc_id,
-        "title": d["title"],
-        "project_context": d["project_context"],
-        "metadata": {k: d[k] for k in ("disease_or_condition","scenario_type","geographic_scope","evidence_category")},
-        "gesica_extraction": gesica_struct,
+        "document": document,
+        "summary": {
+            "project_context": document.get("project_context"),
+            "scenario_type": document.get("scenario_type"),
+            "evidence_category": document.get("evidence_category"),
+            "geographic_scope": document.get("geographic_scope"),
+            "disease_or_condition": document.get("disease_or_condition"),
+        },
+        "gesica_signals": signals,
+        "chunk_count": len(chunks),
     }
+

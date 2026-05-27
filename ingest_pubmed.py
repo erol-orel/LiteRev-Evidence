@@ -1,18 +1,23 @@
 #!/usr/bin/env python3
-"""Ingest PubMed articles via Entrez API → POST /documents + /chunks."""
 from __future__ import annotations
 
+import argparse
+import os
+import sys
 import time
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
+
 import requests
 
-API_BASE = "http://127.0.0.1:8000"
+API_BASE = os.getenv("API_BASE", "http://127.0.0.1:8000")
 ENTREZ_BASE = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
-EMAIL = "literev@example.com"
+EMAIL = os.getenv("PUBMED_EMAIL", "literev@example.com")
+WRITE_API_KEY = os.getenv("WRITE_API_KEY", "LiteRev2026!")
+HEADERS = {"X-Api-Key": WRITE_API_KEY}
+MAX_PER_QUERY = 20
 
-# ── Requêtes par projet ──────────────────────────────────────────────────────
-QUERIES = {
+DEFAULT_QUERIES = {
     "geoai4ei": [
         "genomic epidemiology outbreak whole genome sequencing surveillance",
         "phylogenomics infectious disease outbreak detection",
@@ -30,9 +35,6 @@ QUERIES = {
     ],
 }
 
-MAX_PER_QUERY = 20  # articles max par requête
-
-
 @dataclass
 class PubMedArticle:
     pmid: str
@@ -41,128 +43,185 @@ class PubMedArticle:
     year: int | None
     url: str
 
-
 def esearch(query: str, retmax: int = MAX_PER_QUERY) -> list[str]:
-    r = requests.get(f"{ENTREZ_BASE}/esearch.fcgi", params={
-        "db": "pubmed", "term": query, "retmax": retmax,
-        "retmode": "json", "email": EMAIL,
-    }, timeout=30)
+    r = requests.get(
+        f"{ENTREZ_BASE}/esearch.fcgi",
+        params={
+            "db": "pubmed",
+            "term": query,
+            "retmax": retmax,
+            "retmode": "json",
+            "email": EMAIL,
+        },
+        timeout=30,
+    )
     r.raise_for_status()
     return r.json()["esearchresult"]["idlist"]
-
 
 def efetch(pmids: list[str]) -> list[PubMedArticle]:
     if not pmids:
         return []
-    r = requests.post(f"{ENTREZ_BASE}/efetch.fcgi", data={
-        "db": "pubmed", "id": ",".join(pmids),
-        "rettype": "xml", "retmode": "xml", "email": EMAIL,
-    }, timeout=60)
+
+    r = requests.post(
+        f"{ENTREZ_BASE}/efetch.fcgi",
+        data={
+            "db": "pubmed",
+            "id": ",".join(pmids),
+            "rettype": "xml",
+            "retmode": "xml",
+            "email": EMAIL,
+        },
+        timeout=60,
+    )
     r.raise_for_status()
     root = ET.fromstring(r.content)
-    articles = []
+
+    articles: list[PubMedArticle] = []
     for article in root.findall(".//PubmedArticle"):
         pmid = article.findtext(".//PMID") or ""
-        title = article.findtext(".//ArticleTitle") or ""
-        abstract = " ".join(
-            t.text or "" for t in article.findall(".//AbstractText")
-        ).strip()
+        title = "".join(article.find(".//ArticleTitle").itertext()).strip() if article.find(".//ArticleTitle") is not None else ""
+        abstract_parts = []
+        for node in article.findall(".//Abstract/AbstractText"):
+            txt = "".join(node.itertext()).strip()
+            if txt:
+                abstract_parts.append(txt)
+        abstract = " ".join(abstract_parts).strip()
+
+        year = None
         year_text = (
             article.findtext(".//PubDate/Year")
-            or article.findtext(".//PubDate/MedlineDate", "")[:4]
+            or article.findtext(".//ArticleDate/Year")
+            or ""
         )
-        try:
-            year = int(year_text)
-        except (ValueError, TypeError):
-            year = None
+        if year_text[:4].isdigit():
+            year = int(year_text[:4])
+
         url = f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/"
-        articles.append(PubMedArticle(pmid=pmid, title=title, abstract=abstract, year=year, url=url))
+        if pmid and title:
+            articles.append(PubMedArticle(pmid=pmid, title=title, abstract=abstract, year=year, url=url))
     return articles
 
-
 def already_exists(pmid: str) -> bool:
-    r = requests.get(f"{API_BASE}/search", json={
-        "query_text": pmid, "mode": "boolean", "limit": 1,
-        "filters": {},
-    }, timeout=10)
-    if r.ok:
-        results = r.json().get("results", [])
-        return any(str(res.get("external_id")) == pmid for res in results)
+    r = requests.post(
+        f"{API_BASE}/search",
+        json={
+            "query_text": pmid,
+            "mode": "boolean",
+            "limit": 3,
+            "filters": {},
+        },
+        timeout=20,
+    )
+    if not r.ok:
+        return False
+    results = r.json().get("results", [])
+    for res in results:
+        if str(res.get("external_id") or "") == str(pmid):
+            return True
     return False
-
 
 def ingest_article(article: PubMedArticle, project_context: str) -> bool:
     content = f"{article.title}\n\n{article.abstract}".strip()
-    if not content or len(content) < 50:
+    if len(content) < 50:
+        print(f"  skipped too short {article.pmid}")
         return False
 
-    # POST /documents
-    doc_r = requests.post(f"{API_BASE}/documents", json={
-        "source": "pubmed",
-        "title": article.title,
-        "abstract": article.abstract,
-        "year": article.year,
-        "url": article.url,
-        "external_id": article.pmid,
-        "project_context": project_context,
-        "source_type": "article",
-        "disease_or_condition": None,
-        "scenario_type": None,
-        "geographic_scope": None,
-        "evidence_category": None,
-    }, timeout=30)
+    doc_r = requests.post(
+        f"{API_BASE}/documents",
+        headers=HEADERS,
+        json={
+            "source": "pubmed",
+            "title": article.title,
+            "abstract": article.abstract or None,
+            "year": article.year,
+            "url": article.url,
+            "external_id": article.pmid,
+            "project_context": project_context,
+            "source_type": "article",
+            "disease_or_condition": None,
+            "scenario_type": None,
+            "geographic_scope": None,
+            "evidence_category": None,
+        },
+        timeout=30,
+    )
     doc_r.raise_for_status()
     doc_id = doc_r.json()["id"]
 
-    # POST /chunks
-    chunk_r = requests.post(f"{API_BASE}/chunks", json={
-        "document_id": doc_id,
-        "chunk_index": 0,
-        "content": content,
-        "chunk_type": "title_abstract",
-        "section_label": None,
-        "char_start": None,
-        "char_end": None,
-        "token_count": len(content.split()),
-        "chunk_weight": 1.0,
-        "metadata_json": {},
-    }, timeout=60)
+    chunk_r = requests.post(
+        f"{API_BASE}/chunks",
+        headers=HEADERS,
+        json={
+            "document_id": doc_id,
+            "chunk_index": 0,
+            "content": content,
+            "chunk_type": "title_abstract",
+            "section_label": None,
+            "char_start": None,
+            "char_end": None,
+            "token_count": len(content.split()),
+            "chunk_weight": 1.0,
+            "metadata_json": {},
+        },
+        timeout=60,
+    )
     chunk_r.raise_for_status()
     return True
 
-
-def main():
+def run_project(project: str, queries: list[str]) -> int:
+    print(f"\n=== {project.upper()} ===")
     total_new = 0
-    for project, queries in QUERIES.items():
-        print(f"\n── {project.upper()} ──")
-        seen_pmids: set[str] = set()
-        for query in queries:
-            print(f"  Query: {query[:60]}...")
-            try:
-                pmids = esearch(query)
-                articles = efetch(pmids)
-                time.sleep(0.35)  # Entrez rate limit
-            except Exception as e:
-                print(f"  ERROR fetch: {e}")
-                continue
+    seen: set[str] = set()
 
-            for art in articles:
-                if art.pmid in seen_pmids:
+    for query in queries:
+        print(f"Query: {query}")
+        try:
+            pmids = esearch(query)
+            articles = efetch(pmids)
+        except Exception as e:
+            print(f"  ERROR fetch: {e}")
+            continue
+
+        for art in articles:
+            if art.pmid in seen:
+                continue
+            seen.add(art.pmid)
+
+            try:
+                if already_exists(art.pmid):
+                    print(f"  SKIP exists {art.pmid}")
                     continue
-                seen_pmids.add(art.pmid)
-                try:
-                    ok = ingest_article(art, project)
-                    if ok:
-                        total_new += 1
-                        print(f"  ✅ [{art.year}] {art.title[:70]}")
-                    else:
-                        print(f"  ⏭  skipped (too short): {art.pmid}")
-                except Exception as e:
-                    print(f"  ❌ {art.pmid}: {e}")
-                time.sleep(0.1)
+                ok = ingest_article(art, project)
+                if ok:
+                    total_new += 1
+                    print(f"  OK {art.pmid}: {art.title[:90]}")
+            except Exception as e:
+                print(f"  FAIL {art.pmid}: {e}")
+
+            time.sleep(0.15)
+
+        time.sleep(0.35)
 
     print(f"\n✅ Ingestion terminée — {total_new} nouveaux articles")
+    return total_new
 
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--project", choices=["geoai4ei", "gesica", "eva"], help="Single project to ingest")
+    parser.add_argument("--query", help="Single query to ingest for the selected project")
+    args = parser.parse_args()
+
+    if args.project and args.query:
+        run_project(args.project, [args.query])
+        return 0
+
+    if args.project:
+        run_project(args.project, DEFAULT_QUERIES[args.project])
+        return 0
+
+    for project, queries in DEFAULT_QUERIES.items():
+        run_project(project, queries)
+    return 0
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
