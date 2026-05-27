@@ -1,40 +1,41 @@
-export type SearchMode = 'semantic' | 'boolean'
-export type ProjectContext = 'geoai4ei' | 'gesica' | 'eva'
-export type RelevanceLabel = 'pertinent' | 'non_pertinent' | 'incertain'
+export type SearchMode = "semantic" | "boolean"
+export type ProjectContext = "geoai4ei" | "gesica" | "eva"
+export type RelevanceLabel = "pertinent" | "non-pertinent" | "incertain"
 
 export interface SearchFilters {
-  project_context?: string
-  source_type?: string
-  disease_or_condition?: string
-  scenario_type?: string
-  geographic_scope?: string
-  evidence_category?: string
-  year_min?: number
-  year_max?: number
+  projectcontext?: string
+  sourcetype?: string
+  diseaseorcondition?: string
+  scenariotype?: string
+  geographicscope?: string
+  evidencecategory?: string
+  yearmin?: number
+  yearmax?: number
 }
 
 export interface SearchResult {
   id: number
-  document_id: number
-  chunk_index: number
+  documentid: number
+  chunkindex?: number
   content: string
-  score: number
+  score?: number
   title: string
-  source: string | null
-  year: number | null
-  url: string | null
-  project_context: string | null
-  source_type: string | null
-  disease_or_condition: string | null
-  scenario_type: string | null
-  geographic_scope: string | null
-  evidence_category: string | null
+  abstract?: string | null
+  source?: string | null
+  year?: number | null
+  url?: string | null
+  projectcontext?: string | null
+  sourcetype?: string | null
+  diseaseorcondition?: string | null
+  scenariotype?: string | null
+  geographicscope?: string | null
+  evidencecategory?: string | null
   highlight?: string | null
   [key: string]: unknown
 }
 
 export interface SearchRequest {
-  query_text: string
+  querytext: string
   mode: SearchMode
   limit: number
   filters?: SearchFilters
