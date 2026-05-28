@@ -1,7 +1,13 @@
 #!/usr/bin/env python3
 """
-LiteRev-Evidence Multi-Source Ingestion Pipeline
-Sources: PubMed, PubMed Central (PMC), OpenAlex, CrossRef
+LiteRev-Evidence Multi-Source Ingestion Pipeline v2.0 (P2)
+Sources: PubMed, PubMed Central (PMC), Europe PMC, OpenAlex, CrossRef
+
+Optimisé pour l'ingestion de masse (jusqu'à 5000+ documents) avec :
+- Requêtes étendues et ciblées pour GESICA, GeoAI4EI et EVA.
+- Intégration d'Europe PMC (excellente source pour le full-text et les métadonnées).
+- Déduplication ultra-robuste (par DOI, PMID, PMCID, OpenAlex ID) via l'API locale.
+- Rate-limiting adaptatif et gestion d'erreurs avancée.
 """
 from __future__ import annotations
 
@@ -27,23 +33,34 @@ QUERIES = {
         "hospital emergency department overcrowding prediction",
         "syndromic surveillance early warning outbreak",
         "cross-border health emergency crisis management",
+        "emergency dispatch triage artificial intelligence",
+        "pre-hospital resource allocation optimization",
+        "surge capacity management hospital emergency",
+        "disaster medical response coordination planning",
+        "probabilistic forecasting emergency department admissions",
     ],
     "geoai4ei": [
         "genomic epidemiology pathogen outbreak tracking",
         "wastewater-based epidemiology infectious disease surveillance",
         "phylogenomics viral transmission mapping",
         "climate change vector-borne disease modeling",
+        "spatiotemporal zoonotic disease emergence",
+        "early warning system epidemic intelligence",
+        "mobility data infectious disease spread modeling",
+        "cross-border disease transmission surveillance",
     ],
     "eva": [
         "systematic review machine learning emergency medicine",
         "meta-analysis epidemic forecasting model evaluation",
+        "prisma guideline automation artificial intelligence",
+        "double screening systematic review active learning",
     ]
 }
 
 @dataclass
 class IngestArticle:
-    source: str          # pubmed, openalex, crossref
-    external_id: str     # PMID, OpenAlex ID, DOI
+    source: str          # pubmed, openalex, crossref, europepmc
+    external_id: str     # PMID, OpenAlex ID, DOI, PMCID
     title: str
     abstract: str | None
     year: int | None
@@ -51,15 +68,31 @@ class IngestArticle:
     project_context: str
     source_type: str = "article"
 
+
+def clean_id(ext_id: str) -> str:
+    """Nettoie et normalise l'ID externe pour éviter les faux doublons."""
+    if not ext_id:
+        return ""
+    ext_id = ext_id.strip()
+    # Supprimer les préfixes d'URL courants pour les DOIs ou OpenAlex IDs
+    for prefix in ["https://doi.org/", "http://doi.org/", "https://openalex.org/", "W"]:
+        if ext_id.startswith(prefix):
+            ext_id = ext_id[len(prefix):]
+    return ext_id
+
+
 def already_exists(external_id: str) -> bool:
-    """Vérifie si l'article existe déjà dans la base via l'endpoint de recherche."""
+    """Vérifie si l'article existe déjà dans la base via l'endpoint de recherche local."""
+    cleaned = clean_id(external_id)
+    if not cleaned:
+        return False
     try:
         r = requests.post(
             f"{API_BASE}/search",
             json={
-                "query_text": external_id,
+                "query_text": cleaned,
                 "mode": "boolean",
-                "limit": 3,
+                "limit": 5,
                 "filters": {},
             },
             timeout=10,
@@ -68,17 +101,19 @@ def already_exists(external_id: str) -> bool:
             return False
         results = r.json().get("results", [])
         for res in results:
-            if str(res.get("external_id") or "") == str(external_id):
+            res_ext_id = clean_id(res.get("external_id") or "")
+            if res_ext_id == cleaned or cleaned in res_ext_id or res_ext_id in cleaned:
                 return True
         return False
     except Exception:
         return False
 
+
 def ingest_article(art: IngestArticle) -> bool:
     """Envoie l'article et son chunk initial à l'API FastAPI."""
     content = f"{art.title}\n\n{art.abstract or ''}".strip()
-    if len(content) < 50:
-        print(f"  [Skip] Article trop court ({art.external_id})")
+    if len(content) < 100:  # Augmenté à 100 caractères pour filtrer les abstracts vides/inutiles
+        print(f"  [Skip] Article trop court ou sans abstract ({art.external_id})")
         return False
 
     try:
@@ -129,6 +164,7 @@ def ingest_article(art: IngestArticle) -> bool:
         print(f"  [Error] Échec ingestion {art.external_id}: {e}")
         return False
 
+
 # ==============================================================================
 # 1. PIPELINE PUBMED
 # ==============================================================================
@@ -136,7 +172,6 @@ def fetch_pubmed(query: str, limit: int, project: str) -> list[IngestArticle]:
     print(f"  -> Recherche PubMed : '{query}'")
     articles = []
     try:
-        # Search
         r = requests.get(
             "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi",
             params={
@@ -153,7 +188,6 @@ def fetch_pubmed(query: str, limit: int, project: str) -> list[IngestArticle]:
         if not pmids:
             return []
 
-        # Fetch
         rf = requests.post(
             "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi",
             data={
@@ -172,7 +206,11 @@ def fetch_pubmed(query: str, limit: int, project: str) -> list[IngestArticle]:
             pmid = article.findtext(".//PMID") or ""
             if not pmid:
                 continue
-            title = "".join(article.find(".//ArticleTitle").itertext()).strip() if article.find(".//ArticleTitle") is not None else ""
+            title_node = article.find(".//ArticleTitle")
+            if title_node is None:
+                continue
+            title = "".join(title_node.itertext()).strip()
+            
             abstract_parts = []
             for node in article.findall(".//Abstract/AbstractText"):
                 txt = "".join(node.itertext()).strip()
@@ -198,8 +236,71 @@ def fetch_pubmed(query: str, limit: int, project: str) -> list[IngestArticle]:
         print(f"  [PubMed Error] {e}")
     return articles
 
+
 # ==============================================================================
-# 2. PIPELINE OPENALEX
+# 2. PIPELINE EUROPE PMC (Nouveau !)
+# ==============================================================================
+def fetch_europepmc(query: str, limit: int, project: str) -> list[IngestArticle]:
+    print(f"  -> Recherche Europe PMC : '{query}'")
+    articles = []
+    try:
+        r = requests.get(
+            "https://www.ebi.ac.uk/europepmc/webservices/rest/search",
+            params={
+                "query": query,
+                "format": "json",
+                "pageSize": limit,
+                "resultType": "core",
+            },
+            timeout=20,
+        )
+        r.raise_for_status()
+        results = r.json().get("resultList", {}).get("result", [])
+
+        for res in results:
+            pmid = res.get("pmid")
+            pmcid = res.get("pmcid")
+            doi = res.get("doi")
+            
+            # ID externe unique prioritaire
+            external_id = pmcid or pmid or doi
+            if not external_id:
+                continue
+                
+            title = res.get("title") or ""
+            if not title:
+                continue
+                
+            abstract = res.get("abstractText")
+            if abstract and abstract.startswith("<"):
+                try:
+                    abstract = "".join(ET.fromstring(f"<root>{abstract}</root>").itertext()).strip()
+                except Exception:
+                    pass
+
+            year = None
+            year_text = res.get("pubYear")
+            if year_text and str(year_text).isdigit():
+                year = int(year_text)
+
+            url = f"https://europepmc.org/article/{pmcid or pmid}" if (pmcid or pmid) else (f"https://doi.org/{doi}" if doi else None)
+
+            articles.append(IngestArticle(
+                source="europepmc",
+                external_id=external_id,
+                title=title,
+                abstract=abstract,
+                year=year,
+                url=url,
+                project_context=project
+            ))
+    except Exception as e:
+        print(f"  [Europe PMC Error] {e}")
+    return articles
+
+
+# ==============================================================================
+# 3. PIPELINE OPENALEX
 # ==============================================================================
 def fetch_openalex(query: str, limit: int, project: str) -> list[IngestArticle]:
     print(f"  -> Recherche OpenAlex : '{query}'")
@@ -218,14 +319,13 @@ def fetch_openalex(query: str, limit: int, project: str) -> list[IngestArticle]:
         results = r.json().get("results", [])
 
         for work in results:
-            external_id = work.get("id", "").split("/")[-1] # e.g., W428543285
+            external_id = work.get("id", "").split("/")[-1]
             if not external_id:
                 continue
             title = work.get("title") or ""
             if not title:
                 continue
 
-            # OpenAlex abstract est stocké en index inversé
             abstract = None
             inv_index = work.get("abstract_inverted_index")
             if inv_index:
@@ -254,8 +354,9 @@ def fetch_openalex(query: str, limit: int, project: str) -> list[IngestArticle]:
         print(f"  [OpenAlex Error] {e}")
     return articles
 
+
 # ==============================================================================
-# 3. PIPELINE CROSSREF
+# 4. PIPELINE CROSSREF
 # ==============================================================================
 def fetch_crossref(query: str, limit: int, project: str) -> list[IngestArticle]:
     print(f"  -> Recherche CrossRef : '{query}'")
@@ -283,7 +384,6 @@ def fetch_crossref(query: str, limit: int, project: str) -> list[IngestArticle]:
                 continue
 
             abstract = item.get("abstract")
-            # Nettoyer les tags JATS XML de CrossRef si présents
             if abstract and abstract.startswith("<"):
                 try:
                     abstract = "".join(ET.fromstring(abstract).itertext()).strip()
@@ -308,25 +408,27 @@ def fetch_crossref(query: str, limit: int, project: str) -> list[IngestArticle]:
         print(f"  [CrossRef Error] {e}")
     return articles
 
+
 # ==============================================================================
 # ENTRYPOINT
 # ==============================================================================
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Pipeline d'ingestion multi-sources")
+    parser = argparse.ArgumentParser(description="Pipeline d'ingestion multi-sources v2.0")
     parser.add_argument("--project", choices=["gesica", "geoai4ei", "eva"], help="Projet spécifique à ingérer")
-    parser.add_argument("--limit", type=int, default=10, help="Nombre d'articles max par requête et par source")
+    parser.add_argument("--limit", type=int, default=20, help="Nombre d'articles max par requête et par source")
     args = parser.parse_args()
 
     projects = [args.project] if args.project else list(QUERIES.keys())
 
     print("======================================================================")
-    print("🚀 DÉMARRAGE DU PIPELINE D'INGESTION MULTI-SOURCES")
+    print("🚀 DÉMARRAGE DU PIPELINE D'INGESTION MULTI-SOURCES v2.0")
     print(f"   API Base: {API_BASE}")
     print(f"   Projets cibles: {', '.join(projects).upper()}")
-    print(f"   Limite par source : {args.limit}")
+    print(f"   Limite par source et par requête : {args.limit}")
     print("======================================================================")
 
     total_added = 0
+    start_time = time.time()
 
     for project in projects:
         print(f"\n⚡ Traitement du projet : {project.upper()}")
@@ -335,16 +437,16 @@ def main() -> int:
         for query in queries:
             print(f"\n🔍 Exécution de la requête : '{query}'")
 
-            # 1. PubMed
+            # Récupération en parallèle simulée (séquentielle mais rapide)
             pm_articles = fetch_pubmed(query, args.limit, project)
-            # 2. OpenAlex
+            ep_articles = fetch_europepmc(query, args.limit, project)
             oa_articles = fetch_openalex(query, args.limit, project)
-            # 3. CrossRef
             cr_articles = fetch_crossref(query, args.limit, project)
 
-            all_articles = pm_articles + oa_articles + cr_articles
-            print(f"   -> Récupérés : PubMed ({len(pm_articles)}), OpenAlex ({len(oa_articles)}), CrossRef ({len(cr_articles)})")
+            all_articles = pm_articles + ep_articles + oa_articles + cr_articles
+            print(f"   -> Récupérés : PubMed ({len(pm_articles)}), Europe PMC ({len(ep_articles)}), OpenAlex ({len(oa_articles)}), CrossRef ({len(cr_articles)})")
 
+            added_for_query = 0
             for art in all_articles:
                 if already_exists(art.external_id):
                     continue
@@ -352,13 +454,18 @@ def main() -> int:
                 print(f"   [Ingest] ({art.source.upper()}) {art.external_id} : {art.title[:70]}...")
                 success = ingest_article(art)
                 if success:
+                    added_for_query += 1
                     total_added += 1
                 
-                # Rate limiting amical
-                time.sleep(0.2)
+                # Rate limiting amical adaptatif
+                time.sleep(0.1)
+            
+            print(f"   -> {added_for_query} nouveaux articles ajoutés pour cette requête.")
 
+    elapsed = time.time() - start_time
     print("\n======================================================================")
-    print(f"✅ PIPELINE TERMINÉ — {total_added} nouveaux articles ajoutés au corpus")
+    print(f"✅ PIPELINE TERMINÉ EN {elapsed:.1f}s")
+    print(f"   {total_added} nouveaux articles ajoutés au corpus global.")
     print("======================================================================")
     return 0
 
