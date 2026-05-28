@@ -9,12 +9,14 @@ import {
   fetchCorpusStats,
   getFilterOptions,
   getReadableExcerpt,
+  askAssistant,
   type CorpusStats,
   type DocumentDetailResponse,
   type EvidenceSummaryResponse,
   type FilterOptions,
   type GesicaScenario,
   type GesicaStats,
+  type AskResponse,
   searchDocuments,
 } from "./lib/api";
 import type {
@@ -35,7 +37,7 @@ const FILTER_FIELDS: Array<[keyof FilterOptions, string]> = [
 
 const PAGE_SIZE = 10;
 
-type AppTab = "search" | "scenarios" | "stats";
+type AppTab = "search" | "scenarios" | "stats" | "assistant";
 
 type DetailView = {
   id: number | null;
@@ -301,6 +303,121 @@ function ScenariosView({ scenarios }: { scenarios: GesicaScenario[] }) {
   );
 }
 
+interface AssistantViewProps {
+  question: string;
+  setQuestion: (q: string) => void;
+  response: AskResponse | null;
+  loading: boolean;
+  error: string | null;
+  onAsk: () => void;
+  projectContext: string;
+}
+
+function AssistantView({
+  question,
+  setQuestion,
+  response,
+  loading,
+  error,
+  onAsk,
+  projectContext,
+}: AssistantViewProps) {
+  return (
+    <div className="space-y-6">
+      <div className="rounded-3xl border border-white/10 bg-white/5 p-6 shadow-2xl">
+        <h2 className="mb-4 flex items-center gap-2 text-lg font-semibold text-white">
+          <Zap size={18} className="text-cyan-400" />
+          Assistant Scientifique RAG — {projectContext.toUpperCase()}
+        </h2>
+        <p className="mb-4 text-sm text-slate-300 leading-6">
+          Posez une question complexe à l'assistant. Il va interroger les chunks de la base de données les plus pertinents pour votre projet, puis synthétiser une réponse scientifiquement étayée et citer ses sources.
+        </p>
+
+        <div className="flex flex-col gap-3 sm:flex-row">
+          <input
+            value={question}
+            onChange={(e) => setQuestion(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && onAsk()}
+            placeholder="Ex. Quelles sont les meilleures méthodes d'IA pour prédire l'afflux de patients aux urgences ?"
+            className="min-h-14 flex-1 rounded-2xl border border-white/10 bg-slate-950/80 px-4 text-white outline-none placeholder:text-slate-500 focus:border-cyan-400"
+          />
+          <button
+            type="button"
+            onClick={onAsk}
+            disabled={loading || !question.trim()}
+            className="min-h-14 rounded-2xl bg-cyan-400 px-6 font-semibold text-slate-950 transition hover:bg-cyan-300 disabled:cursor-not-allowed disabled:opacity-60 flex items-center justify-center gap-2"
+          >
+            {loading ? "Synthèse en cours..." : "Interroger"}
+            <Zap size={14} />
+          </button>
+        </div>
+
+        {error && (
+          <div className="mt-4 rounded-2xl border border-rose-400/30 bg-rose-500/10 p-4 text-sm text-rose-100">
+            {error}
+          </div>
+        )}
+      </div>
+
+      {loading && (
+        <div className="rounded-3xl border border-dashed border-white/10 bg-white/5 p-10 text-center text-slate-300 flex flex-col items-center justify-center gap-3">
+          <div className="h-6 w-6 animate-spin rounded-full border-2 border-cyan-400 border-t-transparent" />
+          <p className="text-sm">L'assistant analyse les articles scientifiques et rédige sa synthèse...</p>
+        </div>
+      )}
+
+      {response && (
+        <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_380px]">
+          <div className="rounded-3xl border border-white/10 bg-white/5 p-6 shadow-2xl space-y-4">
+            <h3 className="text-lg font-semibold text-white">Synthèse de l'Assistant</h3>
+            <div className="prose prose-invert max-w-none text-sm leading-7 text-slate-200 whitespace-pre-wrap">
+              {response.answer}
+            </div>
+          </div>
+
+          <div className="rounded-3xl border border-white/10 bg-white/5 p-6 shadow-2xl space-y-4 h-fit">
+            <h3 className="text-lg font-semibold text-white flex items-center gap-2">
+              <BookOpen size={16} className="text-cyan-400" />
+              Sources utilisées ({response.sources.length})
+            </h3>
+            <div className="space-y-3">
+              {response.sources.map((s, i) => (
+                <div key={s.documentId} className="rounded-2xl border border-white/10 bg-slate-900/60 p-4 space-y-2">
+                  <div className="flex items-start justify-between gap-2">
+                    <span className="inline-flex shrink-0 h-5 w-5 items-center justify-center rounded-full bg-cyan-400/20 text-xs font-bold text-cyan-300">
+                      {i + 1}
+                    </span>
+                    {s.url && (
+                      <a
+                        href={s.url}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="text-slate-400 hover:text-white"
+                      >
+                        <ExternalLink size={12} />
+                      </a>
+                    )}
+                  </div>
+                  <h4 className="text-sm font-semibold text-white leading-5">{s.title}</h4>
+                  <div className="flex flex-wrap gap-1 text-[10px]">
+                    <span className="rounded bg-white/5 px-1.5 py-0.5 text-slate-400">{s.source}</span>
+                    {s.year && <span className="rounded bg-white/5 px-1.5 py-0.5 text-slate-400">{s.year}</span>}
+                    {s.evidenceStrength && (
+                      <span className="rounded bg-cyan-500/10 px-1.5 py-0.5 text-cyan-300 capitalize">
+                        Preuve {s.evidenceStrength}
+                      </span>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function App() {
   const [projectContext, setProjectContext] = useState<ProjectContext>("gesica");
   const [activeTab, setActiveTab] = useState<AppTab>("search");
@@ -326,6 +443,31 @@ export default function App() {
   const [corpusStats, setCorpusStats] = useState<CorpusStats | null>(null);
   const [gesicaStats, setGesicaStats] = useState<GesicaStats | null>(null);
   const [gesicaScenarios, setGesicaScenarios] = useState<GesicaScenario[]>([]);
+  
+  // States Assistant RAG
+  const [assistantQuestion, setAssistantQuestion] = useState("");
+  const [assistantResponse, setAssistantResponse] = useState<AskResponse | null>(null);
+  const [assistantLoading, setAssistantLoading] = useState(false);
+  const [assistantError, setAssistantLoadingError] = useState<string | null>(null);
+
+  const handleAskAssistant = async () => {
+    if (!assistantQuestion.trim()) return;
+    setAssistantLoading(true);
+    setAssistantLoadingError(null);
+    setAssistantResponse(null);
+    try {
+      const res = await askAssistant({
+        question: assistantQuestion,
+        projectContext: projectContext,
+        filters: filters
+      });
+      setAssistantResponse(res);
+    } catch (err: any) {
+      setAssistantLoadingError(err.message || "Une erreur est survenue lors de l'appel à l'assistant.");
+    } finally {
+      setAssistantLoading(false);
+    }
+  };
 
   useEffect(() => {
     getFilterOptions()
@@ -501,6 +643,7 @@ export default function App() {
 
   const tabs: Array<{ id: AppTab; label: string; icon: React.ReactNode }> = [
     { id: "search", label: "Recherche", icon: <BookOpen size={14} /> },
+    { id: "assistant", label: "Assistant RAG", icon: <Zap size={14} className="text-cyan-400" /> },
     { id: "scenarios", label: "Scénarios GESICA", icon: <Activity size={14} /> },
     { id: "stats", label: "Statistiques", icon: <BarChart2 size={14} /> },
   ];
@@ -574,6 +717,18 @@ export default function App() {
 
         {activeTab === "scenarios" && (
           <ScenariosView scenarios={gesicaScenarios} />
+        )}
+
+        {activeTab === "assistant" && (
+          <AssistantView
+            question={assistantQuestion}
+            setQuestion={setAssistantQuestion}
+            response={assistantResponse}
+            loading={assistantLoading}
+            error={assistantError}
+            onAsk={handleAskAssistant}
+            projectContext={projectContext}
+          />
         )}
 
         {activeTab === "search" && (

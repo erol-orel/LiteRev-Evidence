@@ -81,6 +81,11 @@ class SearchIn(BaseModel):
             )
         return q
 
+class AskIn(BaseModel):
+    question: str = Field(..., min_length=3)
+    project_context: str | None = None
+    filters: dict[str, Any] | None = None
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Startup
 # ─────────────────────────────────────────────────────────────────────────────
@@ -199,6 +204,160 @@ def create_chunk(
     with engine.begin() as conn:
         new_id = conn.execute(sql, payload).scalar_one()
     return {"id": new_id}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# RAG Assistant /ask
+# ─────────────────────────────────────────────────────────────────────────────
+@app.post("/ask")
+def ask_assistant(payload: AskIn) -> dict[str, Any]:
+    # 1. Rechercher les chunks pertinents dans la DB
+    # On réutilise la logique de recherche textuelle mais avec un filtre projet si spécifié
+    filters = payload.filters or {}
+    if payload.project_context:
+        filters["project_context"] = payload.project_context
+    
+    where_sql, where_params = _build_where(filters)
+    query_terms = [t.strip() for t in re.split(r"\s+", payload.question.lower()) if t.strip()]
+    
+    if not query_terms:
+        raise HTTPException(status_code=422, detail="Empty question")
+        
+    like_clauses = []
+    score_clauses = []
+    params = {"limit": 6, "offset": 0, **where_params}
+    
+    for i, term in enumerate(query_terms):
+        key = f"term_{i}"
+        params[key] = f"%{term}%"
+        like_clauses.append(
+            f"(LOWER(COALESCE(d.title, '')) LIKE :{key} OR LOWER(COALESCE(d.abstract, '')) LIKE :{key} OR LOWER(COALESCE(c.content, '')) LIKE :{key})"
+        )
+        score_clauses.append(
+            f"((CASE WHEN LOWER(COALESCE(d.title, '')) LIKE :{key} THEN 3 ELSE 0 END) + (CASE WHEN LOWER(COALESCE(d.abstract, '')) LIKE :{key} THEN 2 ELSE 0 END) + (CASE WHEN LOWER(COALESCE(c.content, '')) LIKE :{key} THEN 1 ELSE 0 END))"
+        )
+        
+    any_match_sql = " OR ".join(like_clauses)
+    score_sql = " + ".join(score_clauses)
+    
+    sql = text(f"""
+        SELECT 
+            d.id AS document_id,
+            d.title,
+            d.year,
+            d.url,
+            d.source,
+            d.project_context,
+            c.content,
+            c.metadata_json,
+            ({score_sql}) AS score
+        FROM document_chunk c
+        JOIN literature_document d ON d.id = c.document_id
+        WHERE ({any_match_sql})
+        {where_sql}
+        ORDER BY score DESC, d.year DESC NULLS LAST
+        LIMIT :limit
+    """)
+    
+    with engine.connect() as conn:
+        rows = conn.execute(sql, params).mappings().all()
+        
+    if not rows:
+        return {
+            "answer": "Je n'ai pas trouvé d'articles ou d'évidences scientifiques dans le corpus actuel pour répondre à votre question. Veuillez élargir vos termes de recherche ou ingérer de nouveaux articles.",
+            "sources": []
+        }
+        
+    # 2. Construire le contexte pour l'API OpenAI
+    context_blocks = []
+    sources = []
+    seen_docs = set()
+    
+    for i, r in enumerate(rows):
+        doc_id = r["document_id"]
+        # Récupérer la force des preuves si présente dans metadata_json
+        meta = r["metadata_json"] or {}
+        evidence_strength = meta.get("evidence_strength", "non spécifiée")
+        
+        context_blocks.append(
+            f"--- SOURCE {i+1} ---\n"
+            f"Titre: {r['title']}\n"
+            f"Année: {r['year'] or 'Inconnue'}\n"
+            f"Source: {r['source']}\n"
+            f"Projet: {r['project_context']}\n"
+            f"Force des preuves: {evidence_strength}\n"
+            f"Contenu: {r['content']}\n"
+        )
+        
+        if doc_id not in seen_docs:
+            seen_docs.add(doc_id)
+            sources.append({
+                "document_id": doc_id,
+                "title": r["title"],
+                "year": r["year"],
+                "url": r["url"],
+                "source": r["source"],
+                "project_context": r["project_context"],
+                "evidence_strength": evidence_strength
+            })
+            
+    context_str = "\n\n".join(context_blocks)
+    
+    # 3. Appeler l'API OpenAI (GPT-4o-mini)
+    openai_key = os.getenv("OPENAI_API_KEY")
+    if not openai_key:
+        # Fallback si pas de clé API configurée
+        lines = []
+        for s in sources:
+            url_str = s['url'] if s['url'] else "Pas d'URL"
+            year_str = str(s['year']) if s['year'] else "N/A"
+            lines.append(f"- **{s['title']}** ({year_str}) - {url_str}")
+        return {
+            "answer": "[Mode dégradé - Clé OpenAI manquante]\n\nVoici les sources trouvées pour répondre à votre question :\n\n" + "\n".join(lines),
+            "sources": sources
+        }
+        
+    try:
+        from openai import OpenAI
+        client = OpenAI(api_key=openai_key)
+        
+        system_prompt = (
+            "Vous êtes l'assistant scientifique expert de LiteRev-Evidence, spécialisé dans la synthèse d'évidences "
+            "pour les projets GESICA (Services de Secours / SMU), GeoAI4EI (Epidémiologie Génomique et IA) et EVA (Synthèse de preuves).\n\n"
+            "Votre tâche est de répondre à la question de l'utilisateur en vous basant STRICTEMENT sur le contexte fourni. "
+            "Ne faites pas d'affirmations qui ne sont pas étayées par les sources fournies.\n\n"
+            "Règles de rédaction :\n"
+            "1. Soyez précis, structuré et professionnel.\n"
+            "2. Citez toujours vos sources dans le texte en utilisant le format [SOURCE 1], [SOURCE 2] etc. correspondant aux blocs du contexte.\n"
+            "3. Mentionnez la force des preuves (forte, modérée, faible) quand elle est pertinente pour appuyer vos conclusions.\n"
+            "4. Si le contexte ne contient pas assez d'informations pour répondre, dites-le honnêtement."
+        )
+        
+        user_prompt = (
+            f"CONTEXTE :\n{context_str}\n\n"
+            f"QUESTION : {payload.question}"
+        )
+        
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
+            ],
+            temperature=0.2,
+            max_tokens=1000
+        )
+        
+        answer = response.choices[0].message.content
+        return {
+            "answer": answer,
+            "sources": sources
+        }
+    except Exception as e:
+        logger.error(f"Erreur OpenAI API: {e}")
+        return {
+            "answer": f"Une erreur est survenue lors de la génération de la réponse via l'IA : {str(e)}\n\nNéanmoins, voici les sources scientifiques trouvées dans la base :",
+            "sources": sources
+        }
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Search helpers

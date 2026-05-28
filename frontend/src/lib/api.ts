@@ -338,6 +338,25 @@ export interface GesicaScenario {
   }>;
 }
 
+export interface AskRequest {
+  question: string;
+  projectContext?: string;
+  filters?: Record<string, any>;
+}
+
+export interface AskResponse {
+  answer: string;
+  sources: {
+    documentId: number;
+    title: string;
+    year: number | null;
+    url: string | null;
+    source: string;
+    projectContext: string;
+    evidenceStrength: string;
+  }[];
+}
+
 export async function fetchEvidenceSummary(
   documentId: number,
 ): Promise<EvidenceSummaryResponse> {
@@ -417,6 +436,39 @@ export async function fetchGesicaScenarios(): Promise<GesicaScenario[]> {
     recommendedActions: s.recommended_actions,
     relevantArticles: s.relevant_articles,
   }));
+}
+
+export async function askAssistant(req: AskRequest): Promise<AskResponse> {
+  const response = await fetch(`${API_BASE_URL}/ask`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      question: req.question,
+      project_context: req.projectContext || null,
+      filters: req.filters || null,
+    }),
+  });
+
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(text || `Ask failed with status ${response.status}`);
+  }
+
+  const data = await response.json();
+  return {
+    answer: data.answer,
+    sources: (data.sources || []).map((s: any) => ({
+      documentId: s.document_id,
+      title: s.title,
+      year: s.year,
+      url: s.url,
+      source: s.source,
+      projectContext: s.project_context,
+      evidenceStrength: s.evidence_strength,
+    })),
+  };
 }
 
 export function getReadableExcerpt(
