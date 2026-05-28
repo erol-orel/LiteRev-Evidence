@@ -357,6 +357,46 @@ export interface AskResponse {
   }[];
 }
 
+export interface ScreeningDocument {
+  id: number;
+  title: string;
+  abstract: string | null;
+  year: number | null;
+  source: string;
+  projectContext: string;
+  screeningStatus: "included" | "excluded" | "pending" | null;
+  screeningReason: string | null;
+  screeningNotes: string | null;
+}
+
+export interface ScreeningDecision {
+  documentId: number;
+  status: "included" | "excluded" | "pending";
+  reason?: string;
+  notes?: string;
+}
+
+export interface PrismaFlow {
+  identification: {
+    totalRecords: number;
+    bySource: Record<string, number>;
+    duplicatesRemoved: number;
+  };
+  screening: {
+    recordsScreened: number;
+    recordsExcluded: number;
+  };
+  eligibility: {
+    fulltextAssessed: number;
+    fulltextExcluded: number;
+    reasons: Record<string, number>;
+  };
+  included: {
+    totalIncluded: number;
+    pendingAssessment: number;
+  };
+}
+
 export async function fetchEvidenceSummary(
   documentId: number,
 ): Promise<EvidenceSummaryResponse> {
@@ -436,6 +476,76 @@ export async function fetchGesicaScenarios(): Promise<GesicaScenario[]> {
     recommendedActions: s.recommended_actions,
     relevantArticles: s.relevant_articles,
   }));
+}
+
+export async function fetchScreeningList(projectContext?: string): Promise<ScreeningDocument[]> {
+  const url = projectContext 
+    ? `${API_BASE_URL}/screening?project_context=${projectContext}`
+    : `${API_BASE_URL}/screening`;
+  const response = await fetch(url);
+  if (!response.ok) throw new Error(`Screening list failed with status ${response.status}`);
+  const data = await response.json();
+  return data.map((d: any) => ({
+    id: d.id,
+    title: d.title,
+    abstract: d.abstract,
+    year: d.year,
+    source: d.source,
+    projectContext: d.project_context,
+    screeningStatus: d.screening_status,
+    screeningReason: d.screening_reason,
+    screeningNotes: d.screening_notes
+  }));
+}
+
+export async function submitScreeningDecision(decision: ScreeningDecision): Promise<void> {
+  const token = localStorage.getItem("api_key") || "";
+  const response = await fetch(`${API_BASE_URL}/screening/decision`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-API-Key": token
+    },
+    body: JSON.stringify({
+      document_id: decision.documentId,
+      status: decision.status,
+      reason: decision.reason,
+      notes: decision.notes
+    })
+  });
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(text || `Screening decision failed with status ${response.status}`);
+  }
+}
+
+export async function fetchPrismaFlow(projectContext?: string): Promise<PrismaFlow> {
+  const url = projectContext
+    ? `${API_BASE_URL}/screening/prisma?project_context=${projectContext}`
+    : `${API_BASE_URL}/screening/prisma`;
+  const response = await fetch(url);
+  if (!response.ok) throw new Error(`PRISMA flow failed with status ${response.status}`);
+  const d = await response.json();
+  return {
+    identification: {
+      totalRecords: d.identification.total_records,
+      bySource: d.identification.by_source,
+      duplicatesRemoved: d.identification.duplicates_removed
+    },
+    screening: {
+      recordsScreened: d.screening.records_screened,
+      recordsExcluded: d.screening.records_excluded
+    },
+    eligibility: {
+      fulltextAssessed: d.eligibility.fulltext_assessed,
+      fulltextExcluded: d.eligibility.fulltext_excluded,
+      reasons: d.eligibility.reasons
+    },
+    included: {
+      totalIncluded: d.included.total_included,
+      pendingAssessment: d.included.pending_assessment
+    }
+  };
 }
 
 export async function askAssistant(req: AskRequest): Promise<AskResponse> {

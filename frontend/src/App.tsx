@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { Activity, BarChart2, BookOpen, Download, ExternalLink, RotateCcw, Zap } from "lucide-react";
+import { Activity, BarChart2, BookOpen, Download, ExternalLink, RotateCcw, Zap, CheckSquare, XCircle, CheckCircle, HelpCircle, ArrowDown } from "lucide-react";
 
 import {
   fetchDocumentDetail,
@@ -10,6 +10,9 @@ import {
   getFilterOptions,
   getReadableExcerpt,
   askAssistant,
+  fetchScreeningList,
+  submitScreeningDecision,
+  fetchPrismaFlow,
   type CorpusStats,
   type DocumentDetailResponse,
   type EvidenceSummaryResponse,
@@ -17,6 +20,8 @@ import {
   type GesicaScenario,
   type GesicaStats,
   type AskResponse,
+  type ScreeningDocument,
+  type PrismaFlow,
   searchDocuments,
 } from "./lib/api";
 import type {
@@ -37,7 +42,7 @@ const FILTER_FIELDS: Array<[keyof FilterOptions, string]> = [
 
 const PAGE_SIZE = 10;
 
-type AppTab = "search" | "scenarios" | "stats" | "assistant";
+type AppTab = "search" | "scenarios" | "stats" | "assistant" | "screening";
 
 type DetailView = {
   id: number | null;
@@ -303,6 +308,226 @@ function ScenariosView({ scenarios }: { scenarios: GesicaScenario[] }) {
   );
 }
 
+interface ScreeningViewProps {
+  docs: ScreeningDocument[];
+  prismaFlow: PrismaFlow | null;
+  loading: boolean;
+  error: string | null;
+  selectedDoc: ScreeningDocument | null;
+  setSelectedDoc: (doc: ScreeningDocument | null) => void;
+  reason: string;
+  setReason: (r: string) => void;
+  notes: string;
+  setNotes: (n: string) => void;
+  onDecision: (status: "included" | "excluded") => void;
+  projectContext: string;
+}
+
+function ScreeningView({
+  docs,
+  prismaFlow,
+  loading,
+  error,
+  selectedDoc,
+  setSelectedDoc,
+  reason,
+  setReason,
+  notes,
+  setNotes,
+  onDecision,
+  projectContext,
+}: ScreeningViewProps) {
+  if (loading && docs.length === 0) {
+    return <div className="text-sm text-slate-400">Chargement du module de screening...</div>;
+  }
+
+  if (error) {
+    return <div className="text-sm text-rose-400">Erreur : {error}</div>;
+  }
+
+  const pendingDocs = docs.filter(d => !d.screeningStatus || d.screeningStatus === "pending");
+  const processedDocs = docs.filter(d => d.screeningStatus && d.screeningStatus !== "pending");
+
+  return (
+    <div className="space-y-6">
+      {/* Diagramme PRISMA */}
+      {prismaFlow && (
+        <div className="rounded-3xl border border-white/10 bg-white/5 p-6 shadow-2xl">
+          <h3 className="mb-4 text-lg font-semibold text-white flex items-center gap-2">
+            <CheckSquare size={18} className="text-emerald-400" />
+            Diagramme de Flux PRISMA — {projectContext.toUpperCase()}
+          </h3>
+          <div className="grid gap-4 md:grid-cols-4 text-center">
+            <div className="rounded-2xl border border-white/10 bg-slate-900/60 p-4">
+              <div className="text-2xl font-bold text-cyan-300">{prismaFlow.recordsIdentified}</div>
+              <div className="mt-1 text-xs text-slate-400 uppercase tracking-wider">Identifiés (Stage 1)</div>
+            </div>
+            <div className="flex flex-col justify-center items-center">
+              <ArrowDown size={16} className="text-slate-500 mb-2" />
+              <div className="rounded-2xl border border-white/10 bg-slate-900/60 p-4 w-full">
+                <div className="text-2xl font-bold text-yellow-400">{prismaFlow.recordsScreened}</div>
+                <div className="mt-1 text-xs text-slate-400 uppercase tracking-wider">Screenés (Titre/Abstract)</div>
+              </div>
+            </div>
+            <div className="flex flex-col justify-center items-center">
+              <div className="text-xs text-rose-400 font-semibold mb-1">-{prismaFlow.recordsExcluded} Exclus</div>
+              <ArrowDown size={16} className="text-slate-500 mb-2" />
+              <div className="rounded-2xl border border-emerald-500/20 bg-emerald-500/5 p-4 w-full">
+                <div className="text-2xl font-bold text-emerald-400">{prismaFlow.recordsIncluded}</div>
+                <div className="mt-1 text-xs text-slate-400 uppercase tracking-wider">Inclus (Full-text)</div>
+              </div>
+            </div>
+            <div className="rounded-2xl border border-white/10 bg-slate-900/60 p-4 flex flex-col justify-center">
+              <div className="text-xs text-slate-400">Taux d'Inclusion</div>
+              <div className="text-xl font-bold text-white mt-1">
+                {prismaFlow.recordsScreened > 0 
+                  ? `${((prismaFlow.recordsIncluded / prismaFlow.recordsScreened) * 100).toFixed(1)}%`
+                  : "0%"}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Interface de Screening Double-Panel */}
+      <div className="grid gap-6 xl:grid-cols-[320px_minmax(0,1fr)]">
+        {/* Liste des Documents */}
+        <aside className="space-y-4">
+          <div className="rounded-3xl border border-white/10 bg-white/5 p-4 shadow-2xl h-[600px] flex flex-col">
+            <h4 className="text-sm font-semibold text-white mb-3 px-2 flex items-center justify-between">
+              <span>Articles ({docs.length})</span>
+              <span className="text-xs text-slate-400 font-normal">{pendingDocs.length} en attente</span>
+            </h4>
+            <div className="flex-1 overflow-y-auto space-y-2 pr-1">
+              {docs.map((d) => (
+                <button
+                  key={d.id}
+                  onClick={() => {
+                    setSelectedDoc(d);
+                    setReason(d.screeningReason || "");
+                    setNotes(d.screeningNotes || "");
+                  }}
+                  className={`w-full text-left rounded-xl p-3 border transition flex flex-col gap-1.5 ${
+                    selectedDoc?.id === d.id
+                      ? "border-cyan-400 bg-cyan-500/10"
+                      : "border-white/5 bg-white/5 hover:border-white/20"
+                  }`}
+                >
+                  <span className="text-xs font-semibold text-slate-200 line-clamp-2">{d.title}</span>
+                  <div className="flex items-center justify-between text-[10px] text-slate-400 w-full">
+                    <span>{d.source} · {d.year ?? "—"}</span>
+                    {d.screeningStatus === "included" && (
+                      <span className="flex items-center gap-0.5 text-emerald-400 font-semibold">
+                        <CheckCircle size={10} /> Inclus
+                      </span>
+                    )}
+                    {d.screeningStatus === "excluded" && (
+                      <span className="flex items-center gap-0.5 text-rose-400 font-semibold">
+                        <XCircle size={10} /> Exclu
+                      </span>
+                    )}
+                    {(!d.screeningStatus || d.screeningStatus === "pending") && (
+                      <span className="flex items-center gap-0.5 text-yellow-400 font-semibold">
+                        <HelpCircle size={10} /> À screené
+                      </span>
+                    )}
+                  </div>
+                </button>
+              ))}
+            </div>
+          </div>
+        </aside>
+
+        {/* Détail et Décision */}
+        <section className="space-y-4">
+          {selectedDoc ? (
+            <div className="rounded-3xl border border-white/10 bg-white/5 p-6 shadow-2xl space-y-5">
+              <div>
+                <span className="rounded bg-white/5 px-2 py-1 text-xs text-slate-400">
+                  {selectedDoc.source} · {selectedDoc.year ?? "—"}
+                </span>
+                <h3 className="text-2xl font-semibold text-white mt-3">{selectedDoc.title}</h3>
+                {selectedDoc.url && (
+                  <a
+                    href={selectedDoc.url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="inline-flex items-center gap-1 text-xs text-cyan-400 hover:text-cyan-300 mt-2"
+                  >
+                    Voir l'article d'origine <ExternalLink size={10} />
+                  </a>
+                )}
+              </div>
+
+              <div>
+                <h4 className="text-xs font-semibold uppercase tracking-wider text-slate-400 mb-2">Abstract</h4>
+                <p className="rounded-2xl border border-white/10 bg-slate-950/60 p-4 leading-6 text-sm text-slate-200">
+                  {selectedDoc.abstract || "Aucun abstract disponible."}
+                </p>
+              </div>
+
+              {/* Formulaire de Décision */}
+              <div className="border-t border-white/10 pt-5 space-y-4">
+                <h4 className="text-sm font-semibold text-white">Décision de Screening (Inclusion / Exclusion)</h4>
+                
+                <div className="grid gap-4 md:grid-cols-2">
+                  <div>
+                    <label className="block text-xs text-slate-400 mb-1">Raison de l'exclusion (obligatoire si exclu)</label>
+                    <select
+                      value={reason}
+                      onChange={(e) => setReason(e.target.value)}
+                      className="w-full rounded-xl border border-white/10 bg-slate-950/80 p-3 text-sm text-white outline-none focus:border-cyan-400"
+                    >
+                      <option value="">-- Sélectionner une raison --</option>
+                      <option value="wrong-population">Population non cible</option>
+                      <option value="wrong-intervention">Pas d'IA / Méthode non cible</option>
+                      <option value="wrong-outcome">Pas de métriques d'évaluation</option>
+                      <option value="no-fulltext">Pas de texte intégral disponible</option>
+                      <option value="duplicate">Doublon d'un autre article</option>
+                      <option value="other">Autre (spécifier en notes)</option>
+                    </select>
+                  </div>
+
+                  <div>
+                    <label className="block text-xs text-slate-400 mb-1">Notes de screening</label>
+                    <input
+                      value={notes}
+                      onChange={(e) => setNotes(e.target.value)}
+                      placeholder="Ex. Excellente étude de prévision par LSTM à Genève"
+                      className="w-full rounded-xl border border-white/10 bg-slate-950/80 p-3 text-sm text-white outline-none focus:border-cyan-400"
+                    />
+                  </div>
+                </div>
+
+                <div className="flex gap-3 justify-end pt-2">
+                  <button
+                    onClick={() => onDecision("excluded")}
+                    className="rounded-xl border border-rose-500/30 bg-rose-500/10 hover:bg-rose-500/20 px-5 py-3 text-sm font-semibold text-rose-200 transition flex items-center gap-2"
+                  >
+                    <XCircle size={16} />
+                    Exclure l'article
+                  </button>
+                  <button
+                    onClick={() => onDecision("included")}
+                    className="rounded-xl border border-emerald-500/30 bg-emerald-500/10 hover:bg-emerald-500/20 px-5 py-3 text-sm font-semibold text-emerald-200 transition flex items-center gap-2"
+                  >
+                    <CheckCircle size={16} />
+                    Inclure dans le corpus final
+                  </button>
+                </div>
+              </div>
+            </div>
+          ) : (
+            <div className="rounded-3xl border border-white/10 bg-white/5 p-6 shadow-2xl text-center text-slate-400 py-20">
+              Sélectionnez un document dans la liste pour commencer le screening.
+            </div>
+          )}
+        </section>
+      </div>
+    </div>
+  );
+}
+
 interface AssistantViewProps {
   question: string;
   setQuestion: (q: string) => void;
@@ -468,6 +693,85 @@ export default function App() {
       setAssistantLoading(false);
     }
   };
+
+  // States Screening PRISMA
+  const [screeningDocs, setScreeningList] = useState<ScreeningDocument[]>([]);
+  const [prismaFlow, setPrismaFlow] = useState<PrismaFlow | null>(null);
+  const [screeningLoading, setScreeningLoading] = useState(false);
+  const [screeningError, setScreeningError] = useState<string | null>(null);
+  const [selectedScreeningDoc, setSelectedScreeningDoc] = useState<ScreeningDocument | null>(null);
+  const [decisionReason, setDecisionReason] = useState("");
+  const [decisionNotes, setDecisionNotes] = useState("");
+
+  const loadScreeningData = async () => {
+    setScreeningLoading(true);
+    setScreeningError(null);
+    try {
+      const [list, flow] = await Promise.all([
+        fetchScreeningList(projectContext),
+        fetchPrismaFlow(projectContext)
+      ]);
+      setScreeningList(list);
+      setPrismaFlow(flow);
+      if (list.length > 0 && !selectedScreeningDoc) {
+        setSelectedScreeningDoc(list[0]);
+      }
+    } catch (err: any) {
+      setScreeningError(err.message || "Erreur de chargement des données de screening.");
+    } finally {
+      setScreeningLoading(false);
+    }
+  };
+
+  const handleScreeningDecision = async (status: "included" | "excluded") => {
+    if (!selectedScreeningDoc) return;
+    try {
+      await submitScreeningDecision({
+        documentId: selectedScreeningDoc.id,
+        status,
+        reason: decisionReason || undefined,
+        notes: decisionNotes || undefined
+      });
+      
+      // Mettre à jour la liste locale
+      setScreeningList(prev => prev.map(d => 
+        d.id === selectedScreeningDoc.id 
+          ? { ...d, screeningStatus: status, screeningReason: decisionReason, screeningNotes: decisionNotes }
+          : d
+      ));
+      
+      // Recharger le diagramme PRISMA
+      const flow = await fetchPrismaFlow(projectContext);
+      setPrismaFlow(flow);
+      
+      // Sélectionner le document suivant s'il y en a un en attente
+      const currentIndex = screeningDocs.findIndex(d => d.id === selectedScreeningDoc.id);
+      const nextPending = screeningDocs.slice(currentIndex + 1).find(d => !d.screeningStatus || d.screeningStatus === "pending")
+                       || screeningDocs.slice(0, currentIndex).find(d => !d.screeningStatus || d.screeningStatus === "pending");
+      
+      if (nextPending) {
+        setSelectedScreeningDoc(nextPending);
+        setDecisionReason("");
+        setDecisionNotes("");
+      } else {
+        // Si aucun en attente, prendre juste le suivant de la liste globale
+        const nextDoc = screeningDocs[currentIndex + 1] || screeningDocs[0] || null;
+        setSelectedScreeningDoc(nextDoc);
+        if (nextDoc) {
+          setDecisionReason(nextDoc.screeningReason || "");
+          setDecisionNotes(nextDoc.screeningNotes || "");
+        }
+      }
+    } catch (err: any) {
+      alert(err.message || "Erreur lors de la soumission de la décision.");
+    }
+  };
+
+  useEffect(() => {
+    if (activeTab === "screening") {
+      loadScreeningData();
+    }
+  }, [activeTab, projectContext]);
 
   useEffect(() => {
     getFilterOptions()
@@ -644,6 +948,7 @@ export default function App() {
   const tabs: Array<{ id: AppTab; label: string; icon: React.ReactNode }> = [
     { id: "search", label: "Recherche", icon: <BookOpen size={14} /> },
     { id: "assistant", label: "Assistant RAG", icon: <Zap size={14} className="text-cyan-400" /> },
+    { id: "screening", label: "Screening PRISMA", icon: <CheckSquare size={14} className="text-emerald-400" /> },
     { id: "scenarios", label: "Scénarios GESICA", icon: <Activity size={14} /> },
     { id: "stats", label: "Statistiques", icon: <BarChart2 size={14} /> },
   ];
@@ -727,6 +1032,23 @@ export default function App() {
             loading={assistantLoading}
             error={assistantError}
             onAsk={handleAskAssistant}
+            projectContext={projectContext}
+          />
+        )}
+
+        {activeTab === "screening" && (
+          <ScreeningView
+            docs={screeningDocs}
+            prismaFlow={prismaFlow}
+            loading={screeningLoading}
+            error={screeningError}
+            selectedDoc={selectedScreeningDoc}
+            setSelectedDoc={setSelectedScreeningDoc}
+            reason={decisionReason}
+            setReason={setDecisionReason}
+            notes={decisionNotes}
+            setNotes={setDecisionNotes}
+            onDecision={handleScreeningDecision}
             projectContext={projectContext}
           />
         )}
