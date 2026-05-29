@@ -37,17 +37,33 @@ for _ep in ["/etc/literev/secrets", "/opt/literev-api/secrets.env"]:
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 
-# text-embedding-3-small : max 8192 tokens ≈ 32 000 chars
-# On tronque à 7000 tokens ≈ 28 000 chars pour rester confortablement sous la limite
-MAX_CHARS = 28_000
+# text-embedding-3-small : max 8192 tokens
+# 1 token ≈ 3–4 chars en anglais, mais certains chunks contiennent du HTML/XML dense
+# On tronque à 7500 tokens via tiktoken (fallback : 20 000 chars)
+MAX_TOKENS = 7_500
+MAX_CHARS_FALLBACK = 20_000
+
+try:
+    import tiktoken
+    _enc = tiktoken.get_encoding("cl100k_base")  # encodage utilisé par text-embedding-3-small
+    _USE_TIKTOKEN = True
+except ImportError:
+    _USE_TIKTOKEN = False
+    logger.warning("tiktoken non disponible — troncature par caractères (moins précise)")
 
 
 def truncate_text(text_to_embed: str) -> str:
-    """Tronque le texte à MAX_CHARS caractères si nécessaire."""
+    """Tronque le texte à MAX_TOKENS tokens (ou MAX_CHARS_FALLBACK chars si tiktoken absent)."""
     cleaned = text_to_embed.replace("\n", " ").strip()
-    if len(cleaned) > MAX_CHARS:
-        logger.warning(f"Chunk tronqué : {len(cleaned)} chars → {MAX_CHARS} chars")
-        return cleaned[:MAX_CHARS]
+    if _USE_TIKTOKEN:
+        tokens = _enc.encode(cleaned)
+        if len(tokens) > MAX_TOKENS:
+            logger.warning(f"Chunk tronqué : {len(tokens)} tokens → {MAX_TOKENS} tokens")
+            cleaned = _enc.decode(tokens[:MAX_TOKENS])
+    else:
+        if len(cleaned) > MAX_CHARS_FALLBACK:
+            logger.warning(f"Chunk tronqué : {len(cleaned)} chars → {MAX_CHARS_FALLBACK} chars")
+            cleaned = cleaned[:MAX_CHARS_FALLBACK]
     return cleaned
 
 
