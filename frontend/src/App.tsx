@@ -741,9 +741,9 @@ function ScenariosView({ scenarios, loading, error }: { scenarios: GesicaScenari
 
   // Widget de prévision de la demande EMS (Scénario 1 : demand-forecasting)
   const DemandForecastWidget = () => {
-    const [forecast, setForecast] = React.useState<DemandForecastResponse | null>(null);
-    const [loadingForecast, setLoadingForecast] = React.useState(false);
-    const [forecastError, setForecastError] = React.useState<string | null>(null);
+    const [forecast, setForecast] = useState<DemandForecastResponse | null>(null);
+    const [loadingForecast, setLoadingForecast] = useState(false);
+    const [forecastError, setForecastError] = useState<string | null>(null);
 
     const loadForecast = () => {
       setLoadingForecast(true);
@@ -834,9 +834,9 @@ function ScenariosView({ scenarios, loading, error }: { scenarios: GesicaScenari
 
   // Widget de détection précoce d'épidémies (Scénario : epidemic-early-warning)
   const EpidemicEarlyWarningWidget = () => {
-    const [data, setData] = React.useState<EpidemicEarlyWarningResponse | null>(null);
-    const [loading, setLoading] = React.useState(false);
-    const [error, setError] = React.useState<string | null>(null);
+    const [data, setData] = useState<EpidemicEarlyWarningResponse | null>(null);
+    const [loading, setLoading] = useState(false);
+    const [error, setError] = useState<string | null>(null);
 
     const load = () => {
       setLoading(true);
@@ -895,9 +895,9 @@ function ScenariosView({ scenarios, loading, error }: { scenarios: GesicaScenari
 
   // Widget d'optimisation des temps de réponse (Scénario : response-time-optimization)
   const ResponseTimeWidget = () => {
-    const [data, setData] = React.useState<ResponseTimeOptimizationResponse | null>(null);
-    const [loading, setLoading] = React.useState(false);
-    const [error, setError] = React.useState<string | null>(null);
+    const [data, setData] = useState<ResponseTimeOptimizationResponse | null>(null);
+    const [loading, setLoading] = useState(false);
+    const [error, setError] = useState<string | null>(null);
 
     const load = () => {
       setLoading(true);
