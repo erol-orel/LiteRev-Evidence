@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { Activity, BarChart2, BookOpen, Download, ExternalLink, RotateCcw, Zap, CheckSquare, XCircle, CheckCircle, HelpCircle, ArrowDown } from "lucide-react";
+import { Activity, BarChart2, BookOpen, Download, ExternalLink, RotateCcw, Zap, CheckSquare, XCircle, CheckCircle, HelpCircle, ArrowDown, Cloud, MapPin, AlertTriangle } from "lucide-react";
 
 import {
   fetchDocumentDetail,
@@ -13,6 +13,9 @@ import {
   fetchScreeningList,
   submitScreeningDecision,
   fetchPrismaFlow,
+  fetchTerrainMeteo,
+  fetchTerrainGeo,
+  fetchTerrainEpidemic,
   type CorpusStats,
   type DocumentDetailResponse,
   type EvidenceSummaryResponse,
@@ -22,6 +25,9 @@ import {
   type AskResponse,
   type ScreeningDocument,
   type PrismaFlow,
+  type TerrainMeteo,
+  type TerrainGeo,
+  type TerrainEpidemic,
   searchDocuments,
 } from "./lib/api";
 import type {
@@ -42,7 +48,7 @@ const FILTER_FIELDS: Array<[keyof FilterOptions, string]> = [
 
 const PAGE_SIZE = 10;
 
-type AppTab = "search" | "scenarios" | "stats" | "assistant" | "screening";
+type AppTab = "search" | "scenarios" | "stats" | "assistant" | "screening" | "terrain";
 
 type DetailView = {
   id: number | null;
@@ -64,6 +70,195 @@ type DetailView = {
 
 function csvEscape(value: unknown): string {
   return JSON.stringify(value ?? "");
+}
+
+// ─── TerrainView ─────────────────────────────────────────────────────────────
+function TerrainView() {
+  const [meteo, setMeteo] = useState<TerrainMeteo | null>(null);
+  const [geo, setGeo] = useState<TerrainGeo | null>(null);
+  const [epidemic, setEpidemic] = useState<TerrainEpidemic | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    setLoading(true);
+    setError(null);
+    Promise.all([
+      fetchTerrainMeteo(),
+      fetchTerrainGeo(),
+      fetchTerrainEpidemic(),
+    ])
+      .then(([m, g, e]) => {
+        setMeteo(m);
+        setGeo(g);
+        setEpidemic(e);
+      })
+      .catch((err) => setError(err.message || "Erreur de chargement des données terrain."))
+      .finally(() => setLoading(false));
+  }, []);
+
+  const alertColors: Record<string, string> = {
+    none: "border-emerald-500/30 bg-emerald-500/10 text-emerald-300",
+    warning: "border-amber-500/30 bg-amber-500/10 text-amber-300",
+    danger: "border-rose-500/30 bg-rose-500/10 text-rose-300",
+  };
+  const riskColors: Record<string, string> = {
+    low: "text-emerald-300",
+    moderate: "text-amber-300",
+    high: "text-rose-300",
+  };
+  const statusColors: Record<string, string> = {
+    under_threshold: "bg-emerald-500/10 text-emerald-300 border-emerald-500/30",
+    warning: "bg-amber-500/10 text-amber-300 border-amber-500/30",
+    epidemic: "bg-rose-500/10 text-rose-300 border-rose-500/30",
+  };
+  const trendIcons: Record<string, string> = {
+    increasing: "↑",
+    stable: "→",
+    decreasing: "↓",
+  };
+
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center py-16 text-slate-400">
+        <RotateCcw size={18} className="mr-2 animate-spin" />
+        Chargement des données terrain en temps réel...
+      </div>
+    );
+  }
+  if (error) {
+    return (
+      <div className="rounded-3xl border border-rose-500/30 bg-rose-500/10 p-6 text-rose-300">
+        <AlertTriangle size={18} className="mb-2" />
+        {error}
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-6">
+      <div className="flex items-center gap-3">
+        <Cloud size={20} className="text-sky-400" />
+        <div>
+          <h2 className="text-xl font-semibold text-white">Données Terrain — Grand Genève</h2>
+          <p className="text-xs text-slate-400 mt-0.5">Sources publiques : MeteoSwiss (Open-Meteo), OpenStreetMap / OSRM, Sentinelles FR / Sentinella CH</p>
+        </div>
+      </div>
+
+      {/* Météo */}
+      {meteo && (
+        <div className="rounded-3xl border border-white/10 bg-white/5 p-5 shadow-2xl">
+          <div className="flex items-center justify-between mb-4">
+            <h3 className="flex items-center gap-2 text-lg font-semibold text-white">
+              <Cloud size={16} className="text-sky-400" />
+              Météo — {meteo.station}
+            </h3>
+            <span className={`rounded-full border px-3 py-1 text-xs font-medium ${alertColors[meteo.alert_level] ?? alertColors.none}`}>
+              {meteo.alert_level === "none" ? "Aucune alerte" : meteo.alert_level === "warning" ? "Vigilance" : "Danger"}
+            </span>
+          </div>
+          <div className="grid grid-cols-2 gap-3 sm:grid-cols-4 mb-4">
+            <div className="rounded-2xl border border-white/10 bg-slate-900/60 p-3 text-center">
+              <p className="text-2xl font-bold text-sky-300">{meteo.temperature}°C</p>
+              <p className="mt-1 text-xs text-slate-400">Température</p>
+            </div>
+            <div className="rounded-2xl border border-white/10 bg-slate-900/60 p-3 text-center">
+              <p className="text-2xl font-bold text-sky-300">{meteo.apparent_temperature}°C</p>
+              <p className="mt-1 text-xs text-slate-400">Ressenti</p>
+            </div>
+            <div className="rounded-2xl border border-white/10 bg-slate-900/60 p-3 text-center">
+              <p className="text-2xl font-bold text-sky-300">{meteo.humidity}%</p>
+              <p className="mt-1 text-xs text-slate-400">Humidité</p>
+            </div>
+            <div className="rounded-2xl border border-white/10 bg-slate-900/60 p-3 text-center">
+              <p className="text-2xl font-bold text-sky-300">{meteo.wind_speed} km/h</p>
+              <p className="mt-1 text-xs text-slate-400">Vent</p>
+            </div>
+          </div>
+          <div className={`rounded-2xl border p-3 text-sm ${alertColors[meteo.alert_level] ?? alertColors.none}`}>
+            <p className="font-medium">{meteo.alert_description}</p>
+            <p className="mt-1 opacity-80">{meteo.impact_on_ems}</p>
+          </div>
+          <p className="mt-2 text-xs text-slate-500 italic">{meteo.architecture_note}</p>
+        </div>
+      )}
+
+      {/* Géo / Routage */}
+      {geo && (
+        <div className="rounded-3xl border border-white/10 bg-white/5 p-5 shadow-2xl">
+          <h3 className="flex items-center gap-2 text-lg font-semibold text-white mb-4">
+            <MapPin size={16} className="text-violet-400" />
+            Routage Transfrontalier — {geo.origin.label} → {geo.destination.label}
+          </h3>
+          <div className="grid grid-cols-2 gap-3 sm:grid-cols-4 mb-4">
+            <div className="rounded-2xl border border-white/10 bg-slate-900/60 p-3 text-center">
+              <p className="text-2xl font-bold text-violet-300">{geo.distance_km} km</p>
+              <p className="mt-1 text-xs text-slate-400">Distance</p>
+            </div>
+            <div className="rounded-2xl border border-white/10 bg-slate-900/60 p-3 text-center">
+              <p className="text-2xl font-bold text-violet-300">{geo.base_duration_min} min</p>
+              <p className="mt-1 text-xs text-slate-400">Durée de base</p>
+            </div>
+            <div className="rounded-2xl border border-white/10 bg-slate-900/60 p-3 text-center">
+              <p className="text-2xl font-bold text-amber-300">{geo.cross_border_delay_min} min</p>
+              <p className="mt-1 text-xs text-slate-400">Délai douane</p>
+            </div>
+            <div className="rounded-2xl border border-white/10 bg-slate-900/60 p-3 text-center">
+              <p className="text-2xl font-bold text-rose-300">{geo.total_estimated_response_time_min} min</p>
+              <p className="mt-1 text-xs text-slate-400">Temps total estimé</p>
+            </div>
+          </div>
+          <div className="rounded-2xl border border-violet-500/30 bg-violet-500/10 p-3 text-sm text-violet-300">
+            <p className="font-medium">Action de coordination</p>
+            <p className="mt-1 opacity-80">{geo.coordination_action}</p>
+          </div>
+          <p className="mt-2 text-xs text-slate-500 italic">{geo.architecture_note}</p>
+        </div>
+      )}
+
+      {/* Épidémie */}
+      {epidemic && (
+        <div className="rounded-3xl border border-white/10 bg-white/5 p-5 shadow-2xl">
+          <div className="flex items-center justify-between mb-4">
+            <h3 className="flex items-center gap-2 text-lg font-semibold text-white">
+              <Activity size={16} className="text-emerald-400" />
+              Surveillance Épidémique — {epidemic.region}
+            </h3>
+            <span className={`text-lg font-bold ${riskColors[epidemic.global_ems_impact_risk] ?? "text-white"}`}>
+              Risque EMS : {epidemic.global_ems_impact_risk.toUpperCase()}
+            </span>
+          </div>
+          <div className="space-y-3 mb-4">
+            {epidemic.diseases.map((d) => (
+              <div key={d.name} className="rounded-2xl border border-white/10 bg-slate-900/60 p-3">
+                <div className="flex items-center justify-between">
+                  <span className="font-medium text-white text-sm">{d.name}</span>
+                  <div className="flex items-center gap-2">
+                    <span className={`rounded-full border px-2 py-0.5 text-xs ${statusColors[d.status] ?? ""}`}>
+                      {d.status === "under_threshold" ? "Sous le seuil" : d.status === "warning" ? "Vigilance" : "Épidémie"}
+                    </span>
+                    <span className={`text-sm font-bold ${
+                      d.trend === "increasing" ? "text-rose-300" : d.trend === "decreasing" ? "text-emerald-300" : "text-slate-300"
+                    }`}>{trendIcons[d.trend]}</span>
+                  </div>
+                </div>
+                <div className="mt-2 grid grid-cols-3 gap-2 text-xs text-slate-400">
+                  <span>France : <span className="text-white font-medium">{d.incidence_per_100k_france}/100k</span></span>
+                  <span>Suisse : <span className="text-white font-medium">{d.incidence_per_100k_switzerland}/100k</span></span>
+                  <span>Seuil : <span className="text-white font-medium">{d.epidemic_threshold}/100k</span></span>
+                </div>
+              </div>
+            ))}
+          </div>
+          <div className="rounded-2xl border border-emerald-500/30 bg-emerald-500/10 p-3 text-sm text-emerald-300">
+            <p className="font-medium">Recommandation opérationnelle</p>
+            <p className="mt-1 opacity-80">{epidemic.recommended_action}</p>
+          </div>
+          <p className="mt-2 text-xs text-slate-500 italic">{epidemic.architecture_note}</p>
+        </div>
+      )}
+    </div>
+  );
 }
 
 function EvidenceStrengthBadge({ strength }: { strength: "weak" | "moderate" | "strong" | null }) {
@@ -949,6 +1144,7 @@ export default function App() {
     { id: "assistant", label: "Assistant RAG", icon: <Zap size={14} className="text-cyan-400" /> },
     { id: "screening", label: "Screening PRISMA", icon: <CheckSquare size={14} className="text-emerald-400" /> },
     { id: "scenarios", label: "Scénarios GESICA", icon: <Activity size={14} /> },
+    { id: "terrain", label: "Données Terrain", icon: <Cloud size={14} className="text-sky-400" /> },
     { id: "stats", label: "Statistiques", icon: <BarChart2 size={14} /> },
   ];
 
@@ -1017,6 +1213,10 @@ export default function App() {
 
         {activeTab === "stats" && (
           <StatsView corpusStats={corpusStats} gesicaStats={gesicaStats} />
+        )}
+
+        {activeTab === "terrain" && (
+          <TerrainView />
         )}
 
         {activeTab === "scenarios" && (

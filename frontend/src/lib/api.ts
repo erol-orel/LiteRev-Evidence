@@ -584,3 +584,77 @@ export function getReadableExcerpt(
   if (detail?.chunks?.length) return detail.chunks[0]?.content ?? "";
   return "";
 }
+
+// ─── P5 TERRAIN DATA TYPES ───────────────────────────────────────────────────
+
+export interface TerrainMeteo {
+  source: string;
+  coordinates: { latitude: number; longitude: number };
+  station: string;
+  temperature: number;
+  apparent_temperature: number;
+  humidity: number;
+  wind_speed: number;
+  precipitation: number;
+  alert_level: "none" | "warning" | "danger";
+  alert_description: string;
+  impact_on_ems: string;
+  architecture_note: string;
+}
+
+export interface TerrainGeo {
+  source: string;
+  origin: { latitude: number; longitude: number; label: string };
+  destination: { latitude: number; longitude: number; label: string };
+  distance_km: number;
+  base_duration_min: number;
+  traffic_congestion_factor: number;
+  cross_border_delay_min: number;
+  total_estimated_response_time_min: number;
+  routing_status: string;
+  coordination_action: string;
+  architecture_note: string;
+}
+
+export interface TerrainEpidemicDisease {
+  name: string;
+  incidence_per_100k_france: number;
+  incidence_per_100k_switzerland: number;
+  epidemic_threshold: number;
+  status: "under_threshold" | "warning" | "epidemic";
+  trend: "increasing" | "stable" | "decreasing";
+  last_update: string;
+}
+
+export interface TerrainEpidemic {
+  source: string;
+  region: string;
+  diseases: TerrainEpidemicDisease[];
+  global_ems_impact_risk: "low" | "moderate" | "high";
+  recommended_action: string;
+  architecture_note: string;
+}
+
+// ─── P5 TERRAIN API FUNCTIONS ────────────────────────────────────────────────
+
+export async function fetchTerrainMeteo(lat = 46.2044, lon = 6.1432): Promise<TerrainMeteo> {
+  const response = await fetch(`${API_BASE_URL}/terrain/meteo?lat=${lat}&lon=${lon}`);
+  if (!response.ok) throw new Error(`Terrain meteo failed with status ${response.status}`);
+  return response.json();
+}
+
+export async function fetchTerrainGeo(
+  origLat = 46.2044, origLon = 6.1432,
+  destLat = 46.1925, destLon = 6.2388
+): Promise<TerrainGeo> {
+  const url = `${API_BASE_URL}/terrain/geo?orig_lat=${origLat}&orig_lon=${origLon}&dest_lat=${destLat}&dest_lon=${destLon}`;
+  const response = await fetch(url);
+  if (!response.ok) throw new Error(`Terrain geo failed with status ${response.status}`);
+  return response.json();
+}
+
+export async function fetchTerrainEpidemic(region = "transborder"): Promise<TerrainEpidemic> {
+  const response = await fetch(`${API_BASE_URL}/terrain/epidemic?region=${region}`);
+  if (!response.ok) throw new Error(`Terrain epidemic failed with status ${response.status}`);
+  return response.json();
+}
