@@ -31,7 +31,7 @@ DB_URL = os.getenv(
     "DB_URL",
     "postgresql+psycopg://literev:MyNewStrongPassword!@10.10.1.10:5432/literev",
 )
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY") or "sk-emUeiQDcxW3dPn4Qo4WTG9"
 
 # text-embedding-3-small : max 8192 tokens ≈ 32 000 chars
 # On tronque à 7000 tokens ≈ 28 000 chars pour rester confortablement sous la limite

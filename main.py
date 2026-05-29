@@ -3,6 +3,7 @@ import json
 import logging
 import os
 import re
+from pathlib import Path
 from typing import Any
 from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -11,6 +12,28 @@ from sqlalchemy import create_engine, text
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("literev-api")
+
+# ─── Chargement .env (sans dépendance python-dotenv) ─────────────────────────────────
+def _load_env_file(path: str) -> None:
+    p = Path(path)
+    if not p.exists():
+        return
+    for line in p.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+        if key and key not in os.environ:
+            os.environ[key] = value
+
+for _ep in [".env", str(Path(__file__).parent / ".env"), "/opt/literev-api/.env", "/etc/literev/env"]:
+    _load_env_file(_ep)
+
+# Fallback clé OpenAI si absente de l'environnement
+if not os.environ.get("OPENAI_API_KEY"):
+    os.environ["OPENAI_API_KEY"] = "sk-emUeiQDcxW3dPn4Qo4WTG9"
 
 DB_URL = os.getenv(
     "DB_URL",
