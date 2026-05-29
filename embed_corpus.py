@@ -1,6 +1,5 @@
 import logging
 import os
-import json
 from sqlalchemy import create_engine, text
 
 logging.basicConfig(level=logging.INFO)
@@ -12,18 +11,31 @@ DB_URL = os.getenv(
 )
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 
+# text-embedding-3-small : max 8192 tokens ≈ 32 000 chars
+# On tronque à 7000 tokens ≈ 28 000 chars pour rester confortablement sous la limite
+MAX_CHARS = 28_000
+
+
+def truncate_text(text_to_embed: str) -> str:
+    """Tronque le texte à MAX_CHARS caractères si nécessaire."""
+    cleaned = text_to_embed.replace("\n", " ").strip()
+    if len(cleaned) > MAX_CHARS:
+        logger.warning(f"Chunk tronqué : {len(cleaned)} chars → {MAX_CHARS} chars")
+        return cleaned[:MAX_CHARS]
+    return cleaned
+
+
 def generate_embedding(client, text_to_embed: str) -> list[float]:
-    """Génère un embedding 1536-dim via l'API OpenAI."""
-    # Nettoyer le texte pour éviter les sauts de ligne excessifs
-    cleaned_text = text_to_embed.replace("\n", " ").strip()
-    if not cleaned_text:
+    """Génère un embedding 1536-dim via l'API OpenAI (text-embedding-3-small)."""
+    cleaned = truncate_text(text_to_embed)
+    if not cleaned:
         return [0.0] * 1536
-        
     response = client.embeddings.create(
-        input=[cleaned_text],
-        model="text-embedding-3-small"
+        input=[cleaned],
+        model="text-embedding-3-small",
     )
     return response.data[0].embedding
+
 
 def main():
     if not OPENAI_API_KEY:
@@ -41,12 +53,12 @@ def main():
 
     # 1. Récupérer les chunks sans embedding
     sql_fetch = text("""
-        SELECT id, content 
-        FROM document_chunk 
+        SELECT id, content
+        FROM document_chunk
         WHERE embedding IS NULL
         ORDER BY id ASC
     """)
-    
+
     with engine.connect() as conn:
         chunks = conn.execute(sql_fetch).mappings().all()
 
@@ -56,36 +68,46 @@ def main():
 
     logger.info(f"Trouvé {len(chunks)} chunks sans embedding à traiter.")
 
-    # 2. Générer et mettre à jour par lots (batch)
+    # 2. Générer et mettre à jour par lots de 50
     batch_size = 50
     sql_update = text("""
-        UPDATE document_chunk 
-        SET embedding = CAST(:embedding AS vector) 
+        UPDATE document_chunk
+        SET embedding = CAST(:embedding AS vector)
         WHERE id = :id
     """)
 
+    total_ok = 0
+    total_err = 0
+
     for i in range(0, len(chunks), batch_size):
-        batch = chunks[i:i+batch_size]
-        logger.info(f"Traitement du lot {i//batch_size + 1} ({i} à {i+len(batch)})...")
-        
+        batch = chunks[i : i + batch_size]
+        logger.info(
+            f"Lot {i // batch_size + 1}/{(len(chunks) + batch_size - 1) // batch_size}"
+            f" — chunks {i}–{i + len(batch) - 1}"
+        )
+
         updates = []
         for r in batch:
             try:
-                # Concaténer un peu de contexte pour améliorer l'embedding si nécessaire
-                emb = generate_embedding(client, r["content"])
+                emb = generate_embedding(client, r["content"] or "")
                 updates.append({
                     "id": r["id"],
-                    "embedding": str(emb) # psycopg3 attend la string de liste pour le cast vector
+                    "embedding": str(emb),
                 })
             except Exception as e:
-                logger.error(f"Erreur lors de la génération de l'embedding pour le chunk {r['id']}: {e}")
+                logger.error(f"Erreur embedding chunk {r['id']}: {e}")
+                total_err += 1
 
         if updates:
             with engine.begin() as conn:
                 conn.execute(sql_update, updates)
-            logger.info(f"Mis à jour {len(updates)} chunks avec succès.")
+            total_ok += len(updates)
+            logger.info(f"  → {len(updates)} embeddings sauvegardés.")
 
-    logger.info("Génération des embeddings terminée.")
+    logger.info(
+        f"Terminé — {total_ok} embeddings générés, {total_err} erreurs."
+    )
+
 
 if __name__ == "__main__":
     main()
