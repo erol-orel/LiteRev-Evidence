@@ -147,8 +147,8 @@ def insert_fulltext_chunks(engine, doc_id: int, chunks: list[str], source_label:
                 INSERT INTO document_chunk
                     (document_id, content, chunk_index, chunk_type, chunk_weight, metadata_json)
                 VALUES
-                    (:doc_id, :content, :idx, 'full_text', 1.0,
-                     jsonb_build_object('source', :src, 'chunk_index', :idx))
+                    (:doc_id, :content, :idx::integer, 'full_text', 1.0,
+                     jsonb_build_object('source', :src::text, 'chunk_index', :idx::integer))
             """), {"doc_id": doc_id, "content": chunk, "idx": i, "src": source_label})
             inserted += 1
         # Marquer open_access=true
@@ -160,9 +160,33 @@ def insert_fulltext_chunks(engine, doc_id: int, chunks: list[str], source_label:
 
 # ─── Source 1 : PubMed Central (NCBI) ─────────────────────────────────────────
 
+def _clean_pmcid(raw: str) -> Optional[str]:
+    """Normalise un PMCID brut vers le format 'PMCXXXXXXX'.
+    
+    Gère les formats :
+      - 'PMC1234567'          → 'PMC1234567'
+      - 'pmc-id: 1234567;'   → 'PMC1234567'
+      - 'PMCpmc-id: 1234567;'→ 'PMC1234567'
+      - '1234567'            → 'PMC1234567'
+    """
+    if not raw:
+        return None
+    raw = raw.strip()
+    # Extraire les chiffres depuis n'importe quel format
+    digits = re.search(r"(\d{5,10})", raw)
+    if digits:
+        return f"PMC{digits.group(1)}"
+    return None
+
+
 def resolve_pmcid(external_id: str, pmid: str = None, doi: str = None) -> Optional[str]:
     """Résout un PMCID depuis external_id, pmid ou doi."""
-    # Cas 1 : external_id est déjà un PMCID
+    # Cas 1 : external_id contient un PMCID (format propre ou brut)
+    if external_id and "PMC" in external_id.upper():
+        cleaned = _clean_pmcid(external_id)
+        if cleaned:
+            return cleaned
+    # Cas 1b : external_id est déjà un PMCID pur
     if external_id and re.match(r"^PMC\d+$", external_id.upper()):
         return external_id.upper()
 
