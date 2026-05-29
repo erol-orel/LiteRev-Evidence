@@ -687,7 +687,7 @@ function StatsView({ corpusStats, gesicaStats, fulltextStats }: { corpusStats: C
                 {fulltextStats.by_source.slice(0, 8).map((s) => (
                   <div key={s.source} className="flex items-center justify-between rounded-xl border border-white/10 bg-slate-900/40 px-3 py-1.5 text-xs">
                     <span className="text-slate-300 capitalize">{s.source}</span>
-                    <span className="font-mono text-emerald-300">{s.fulltext_count} / {s.total_count}</span>
+                    <span className="font-mono text-emerald-300">{s.with_fulltext} / {s.total}</span>
                   </div>
                 ))}
               </div>
