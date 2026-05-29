@@ -29,8 +29,68 @@ def get_pmcid_from_external_id(ext_id: str) -> str | None:
     if not ext_id:
         return None
     ext_id = ext_id.strip()
+    # Format direct : PMC1234567
     if ext_id.upper().startswith("PMC") and ext_id[3:].isdigit():
         return ext_id.upper()
+    # Format PMID:1234567 -> extraire le numérique
+    if ext_id.upper().startswith("PMID:"):
+        return None  # Sera résolu via esummary dans process_document_fulltext
+    return None
+
+
+def resolve_pmcid_from_any_id(ext_id: str) -> str | None:
+    """Tente de résoudre un PMCID depuis n'importe quel format d'ID externe."""
+    if not ext_id:
+        return None
+    ext_id = ext_id.strip()
+    
+    # Format direct PMC
+    if ext_id.upper().startswith("PMC") and ext_id[3:].isdigit():
+        return ext_id.upper()
+    
+    # Format PMID:1234567 ou numérique pur
+    pmid = None
+    if ext_id.upper().startswith("PMID:"):
+        pmid = ext_id[5:].strip()
+    elif ext_id.isdigit():
+        pmid = ext_id
+    
+    if pmid:
+        try:
+            r = requests.get(
+                "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi",
+                params={"db": "pubmed", "id": pmid, "retmode": "json"},
+                timeout=15,
+            )
+            if r.ok:
+                article_data = r.json().get("result", {}).get(pmid, {})
+                for articleid in article_data.get("articleids", []):
+                    if articleid.get("idtype") == "pmcid":
+                        pmcid = articleid.get("value", "")
+                        if pmcid:
+                            print(f"     [ID Resolve] PMID {pmid} -> PMCID {pmcid}")
+                            return pmcid
+        except Exception:
+            pass
+    
+    # Format DOI : tenter une résolution via Europe PMC ID converter
+    if ext_id.startswith("10."):
+        try:
+            r = requests.get(
+                "https://www.ebi.ac.uk/europepmc/webservices/rest/search",
+                params={"query": f"DOI:{ext_id}", "format": "json", "pageSize": 1},
+                timeout=15,
+            )
+            if r.ok:
+                results = r.json().get("resultList", {}).get("result", [])
+                if results:
+                    pmcid = results[0].get("pmcid", "")
+                    if pmcid:
+                        print(f"     [ID Resolve] DOI {ext_id} -> PMCID {pmcid}")
+                        return pmcid
+        except Exception:
+            pass
+    
     return None
 
 
@@ -122,30 +182,7 @@ def chunk_text(text: str, max_words: int = 400, overlap_words: int = 50) -> list
 
 def process_document_fulltext(doc_id: int, ext_id: str) -> bool:
     """Récupère, découpe et insère le full-text d'un document."""
-    pmcid = get_pmcid_from_external_id(ext_id)
-    if not pmcid:
-        # Tenter de chercher si l'ID externe est un PMID pour trouver son PMCID associé
-        if ext_id.isdigit():
-            try:
-                r = requests.get(
-                    "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi",
-                    params={
-                        "db": "pubmed",
-                        "id": ext_id,
-                        "retmode": "json"
-                    },
-                    timeout=15
-                )
-                if r.ok:
-                    article_data = r.json().get("result", {}).get(ext_id, {})
-                    for articleid in article_data.get("articleids", []):
-                        if articleid.get("idtype") == "pmcid":
-                            pmcid = articleid.get("value")
-                            print(f"     [ID Resolve] PMID {ext_id} -> PMCID {pmcid}")
-                            break
-            except Exception:
-                pass
-                
+    pmcid = resolve_pmcid_from_any_id(ext_id)
     if not pmcid:
         print(f"  [Skip] Pas de PMCID valide trouvé pour l'ID externe '{ext_id}'")
         return False
@@ -239,31 +276,53 @@ def main() -> int:
         # On utilise l'endpoint /search avec une recherche large ou un appel direct si existant.
         # Pour faire simple et robuste, on fait une recherche vide filtrée ou on parcourt.
         # Ici on interroge l'API locale pour trouver des candidats.
-        r = requests.post(
-            f"{API_BASE}/search",
-            json={
-                "query_text": "PMC",  # Cherche les documents contenant PMC dans leur URL ou ID
-                "mode": "boolean",
-                "limit": args.limit * 3,
-                "filters": {},
-            },
-            timeout=20,
-        )
-        r.raise_for_status()
-        results = r.json().get("results", [])
+        # Récupérer les documents via plusieurs requêtes thématiques pour maximiser la couverture
+        seen_docs: set[int] = set()
+        candidates: list[tuple[int, str]] = []
         
-        # Déduplication des documents uniques
-        seen_docs = set()
-        candidates = []
-        for res in results:
-            doc_id = res.get("document_id")
-            ext_id = res.get("external_id")
-            if doc_id and ext_id and doc_id not in seen_docs:
-                # Ne traiter que les PMC ou PMID
-                if ext_id.upper().startswith("PMC") or ext_id.isdigit():
-                    seen_docs.add(doc_id)
-                    candidates.append((doc_id, ext_id))
-                    
+        # Requêtes ciblées pour trouver des articles avec PMID ou DOI
+        search_queries = [
+            "emergency medical services artificial intelligence",
+            "machine learning ambulance demand forecasting",
+            "deep learning triage emergency",
+            "neural network EMS prediction",
+            "AI hospital capacity planning",
+        ]
+        
+        for query in search_queries:
+            if len(candidates) >= args.limit * 2:
+                break
+            try:
+                r = requests.post(
+                    f"{API_BASE}/search",
+                    json={
+                        "query_text": query,
+                        "mode": "boolean",
+                        "limit": 50,
+                        "filters": {},
+                    },
+                    timeout=20,
+                )
+                r.raise_for_status()
+                results = r.json().get("results", [])
+                
+                for res in results:
+                    doc_id = res.get("document_id")
+                    ext_id = res.get("external_id", "")
+                    if doc_id and ext_id and doc_id not in seen_docs:
+                        # Accepter PMC direct, PMID:xxx, numérique pur, ou DOI
+                        is_candidate = (
+                            ext_id.upper().startswith("PMC")
+                            or ext_id.upper().startswith("PMID:")
+                            or ext_id.isdigit()
+                            or ext_id.startswith("10.")
+                        )
+                        if is_candidate:
+                            seen_docs.add(doc_id)
+                            candidates.append((doc_id, ext_id))
+            except Exception as e:
+                print(f"  [Warn] Requête '{query}' échouée : {e}")
+                
         candidates = candidates[:args.limit]
         print(f"   -> {len(candidates)} documents candidats identifiés pour l'extraction full-text.")
         
