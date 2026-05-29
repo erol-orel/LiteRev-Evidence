@@ -350,7 +350,7 @@ export interface GesicaScenario {
     country: string | null;
     citation_count: number | null;
     open_access: boolean | null;
-    has_fulltext: boolean;
+    has_fulltext?: boolean;
   }>;
 }
 
@@ -536,6 +536,7 @@ export async function fetchGesicaScenarios(): Promise<GesicaScenario[]> {
       country: string | null;
       citation_count: number | null;
       open_access: boolean | null;
+      has_fulltext?: boolean;
     }>;
   }> = await response.json();
   return data.map((s) => ({

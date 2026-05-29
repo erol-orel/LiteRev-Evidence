@@ -593,7 +593,7 @@ function GesicaSignalsPanel({ summary }: { summary: EvidenceSummaryResponse }) {
   );
 }
 
-function StatsView({ corpusStats, gesicaStats }: { corpusStats: CorpusStats | null; gesicaStats: GesicaStats | null }) {
+function StatsView({ corpusStats, gesicaStats, fulltextStats }: { corpusStats: CorpusStats | null; gesicaStats: GesicaStats | null; fulltextStats: FulltextStats | null }) {
   if (!corpusStats && !gesicaStats) {
     return <div className="text-sm text-slate-400">Chargement des statistiques...</div>;
   }
@@ -649,6 +649,50 @@ function StatsView({ corpusStats, gesicaStats }: { corpusStats: CorpusStats | nu
               </div>
             </div>
           </div>
+        </div>
+      )}
+
+      {fulltextStats && (
+        <div className="rounded-3xl border border-white/10 bg-white/5 p-5 shadow-2xl">
+          <h2 className="mb-4 flex items-center gap-2 text-lg font-semibold text-white">
+            <BookOpen size={18} className="text-emerald-400" />
+            Couverture textuelle &amp; Hybrid Search
+          </h2>
+          <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
+            <div className="rounded-2xl border border-white/10 bg-slate-900/60 p-4 text-center">
+              <p className="text-2xl font-bold text-emerald-300">{fulltextStats.corpus.docs_with_fulltext.toLocaleString()}</p>
+              <p className="mt-1 text-xs text-slate-400">Full Text</p>
+            </div>
+            <div className="rounded-2xl border border-white/10 bg-slate-900/60 p-4 text-center">
+              <p className="text-2xl font-bold text-slate-300">{fulltextStats.corpus.docs_abstract_only.toLocaleString()}</p>
+              <p className="mt-1 text-xs text-slate-400">Abstract only</p>
+            </div>
+            <div className="rounded-2xl border border-white/10 bg-slate-900/60 p-4 text-center">
+              <p className={`text-2xl font-bold ${fulltextStats.corpus.fulltext_coverage_pct >= 20 ? 'text-emerald-300' : 'text-amber-300'}`}>
+                {fulltextStats.corpus.fulltext_coverage_pct.toFixed(1)}%
+              </p>
+              <p className="mt-1 text-xs text-slate-400">Couverture</p>
+            </div>
+            <div className="rounded-2xl border border-white/10 bg-slate-900/60 p-4 text-center">
+              <p className={`text-2xl font-bold ${fulltextStats.hybrid_search.active ? 'text-cyan-300' : 'text-rose-300'}`}>
+                {fulltextStats.hybrid_search.active ? 'HYBRID' : 'LEXICAL'}
+              </p>
+              <p className="mt-1 text-xs text-slate-400">Mode recherche</p>
+            </div>
+          </div>
+          {fulltextStats.by_source && fulltextStats.by_source.length > 0 && (
+            <div className="mt-4">
+              <h3 className="mb-2 text-sm font-medium text-slate-300">Full Text par source</h3>
+              <div className="space-y-1">
+                {fulltextStats.by_source.slice(0, 8).map((s) => (
+                  <div key={s.source} className="flex items-center justify-between rounded-xl border border-white/10 bg-slate-900/40 px-3 py-1.5 text-xs">
+                    <span className="text-slate-300 capitalize">{s.source}</span>
+                    <span className="font-mono text-emerald-300">{s.fulltext_count} / {s.total_count}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
         </div>
       )}
 
@@ -1575,6 +1619,7 @@ export default function App() {
   const [page, setPage] = useState(1);
   const [corpusStats, setCorpusStats] = useState<CorpusStats | null>(null);
   const [gesicaStats, setGesicaStats] = useState<GesicaStats | null>(null);
+  const [fulltextStats, setFulltextStats] = useState<FulltextStats | null>(null);
   const [gesicaScenarios, setGesicaScenarios] = useState<GesicaScenario[]>([]);
   const [loadingScenarios, setLoadingScenarios] = useState(false);
   const [scenariosError, setScenariosError] = useState<string | null>(null);
@@ -1710,6 +1755,7 @@ export default function App() {
     if (activeTab === "stats") {
       fetchCorpusStats().then(setCorpusStats).catch(console.error);
       fetchGesicaStats().then(setGesicaStats).catch(console.error);
+      fetchFulltextStats().then(setFulltextStats).catch(console.error);
     }
     if (activeTab === "scenarios") {
       setLoadingScenarios(true);
@@ -1932,7 +1978,7 @@ export default function App() {
       <main className="mx-auto max-w-[1380px] px-6 py-8">
 
         {activeTab === "stats" && (
-          <StatsView corpusStats={corpusStats} gesicaStats={gesicaStats} />
+          <StatsView corpusStats={corpusStats} gesicaStats={gesicaStats} fulltextStats={fulltextStats} />
         )}
 
         {activeTab === "terrain" && (
