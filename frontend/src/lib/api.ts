@@ -338,8 +338,17 @@ export interface GesicaScenario {
     abstract: string | null;
     year: number | null;
     source: string;
+    url: string | null;
     authors: string | null;
     doi: string | null;
+    journal: string | null;
+    keywords: string | null;
+    language: string | null;
+    study_design: string | null;
+    sample_size: number | null;
+    country: string | null;
+    citation_count: number | null;
+    open_access: boolean | null;
   }>;
 }
 
@@ -465,7 +474,24 @@ export async function fetchGesicaScenarios(): Promise<GesicaScenario[]> {
     article_count: number;
     living_evidence_note: string;
     recommended_actions: string[];
-    relevant_articles: Array<{ id: number; title: string; abstract: string | null; year: number | null; source: string; authors: string | null; doi: string | null }>;
+    relevant_articles: Array<{
+      id: number;
+      title: string;
+      abstract: string | null;
+      year: number | null;
+      source: string;
+      url: string | null;
+      authors: string | null;
+      doi: string | null;
+      journal: string | null;
+      keywords: string | null;
+      language: string | null;
+      study_design: string | null;
+      sample_size: number | null;
+      country: string | null;
+      citation_count: number | null;
+      open_access: boolean | null;
+    }>;
   }> = await response.json();
   return data.map((s) => ({
     id: s.id,
@@ -772,5 +798,129 @@ export interface TerrainClimate {
 export async function fetchTerrainClimate(lat = 46.2044, lon = 6.1432): Promise<TerrainClimate> {
   const response = await fetch(`${API_BASE_URL}/terrain/climate?lat=${lat}&lon=${lon}`);
   if (!response.ok) throw new Error(`Terrain climate failed with status ${response.status}`);
+  return response.json();
+}
+
+// ─── Demand Forecasting Model (Scénario 1) ───────────────────────────────────
+
+export interface DemandForecastPrediction {
+  date: string;
+  ds: string;
+  demand: number;
+  temp_estimated: number;
+  risk_level: "NORMAL" | "ÉLEVÉ" | "CRITIQUE";
+  color: "green" | "orange" | "red";
+  recommendation: string;
+}
+
+export interface DemandForecastResponse {
+  status: "success" | "fallback";
+  model: string;
+  last_trained: string;
+  input_features: {
+    current_temperature: number;
+    epidemic_index: number;
+    geographical_scope: string;
+  };
+  predictions: DemandForecastPrediction[];
+  error?: string;
+}
+
+export async function fetchDemandForecast(lat = 46.2044, lon = 6.1432, region = "Auvergne-Rhône-Alpes"): Promise<DemandForecastResponse> {
+  const response = await fetch(`${API_BASE_URL}/gesica/model/demand-forecasting?lat=${lat}&lon=${lon}&region=${encodeURIComponent(region)}`);
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  return response.json();
+}
+
+// ─── Epidemic Early Warning Model ────────────────────────────────────────────
+export interface EpidemicDailyPrediction {
+  date: string;
+  day_label: string;
+  incidence_per_100k: number;
+  alert_level: "NORMAL" | "VIGILANCE" | "ÉPIDÉMIE";
+  ems_impact: string;
+}
+export interface EpidemicDiseaseResult {
+  disease: string;
+  label: string;
+  current_incidence: number;
+  epidemic_threshold: number;
+  warning_threshold: number;
+  current_alert: "NORMAL" | "VIGILANCE" | "ÉPIDÉMIE";
+  max_alert_14d: "NORMAL" | "VIGILANCE" | "ÉPIDÉMIE";
+  peak_incidence_14d: number;
+  peak_day: number;
+  ems_impact: string;
+  recommendation: string;
+  data_source: string;
+  model_used: string;
+  daily_predictions: EpidemicDailyPrediction[];
+}
+export interface EpidemicEarlyWarningResponse {
+  model: string;
+  status: "live" | "fallback" | "error";
+  generated_at: string;
+  region: string;
+  overall_alert_level: "NORMAL" | "VIGILANCE" | "ÉPIDÉMIE";
+  horizon_days: number;
+  diseases: Record<string, EpidemicDiseaseResult>;
+  most_critical_disease: string;
+  global_recommendation: string;
+  ecdc_supplement: number | null;
+  data_sources: string[];
+}
+export async function fetchEpidemicEarlyWarning(forceRefresh = false): Promise<EpidemicEarlyWarningResponse> {
+  const response = await fetch(`${API_BASE_URL}/gesica/model/epidemic-early-warning?force_refresh=${forceRefresh}`);
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  return response.json();
+}
+
+// ─── Response Time Optimization Model ────────────────────────────────────────
+export interface ResponseTimeAssignment {
+  zone_id: string;
+  zone_label: string;
+  zone_priority: "high" | "medium" | "low";
+  base_id: string;
+  base_label: string;
+  base_country: "CH" | "FR";
+  distance_km: number;
+  base_travel_time_min: number;
+  border_delay_min: number;
+  border_crossing: string | null;
+  total_response_time_min: number;
+  response_status: "OPTIMAL" | "ACCEPTABLE" | "DÉGRADÉ";
+  cross_border: boolean;
+  recommendation: string;
+  route_source: string;
+}
+export interface ResponseTimeOptimizationResponse {
+  model: string;
+  status: "live" | "fallback" | "error";
+  generated_at: string;
+  region: string;
+  weather: {
+    temperature: number;
+    precipitation: number;
+    wind_speed: number;
+    weather_factor: number;
+    weather_description: string;
+    source: string;
+  };
+  metrics: {
+    mean_response_time_min: number;
+    max_response_time_min: number;
+    min_response_time_min: number;
+    cross_border_interventions: number;
+    degraded_zones: number;
+    coverage_rate_pct: number;
+  };
+  assignments: ResponseTimeAssignment[];
+  critical_zones: Array<{ zone_label: string; total_response_time_min: number; recommendation: string }>;
+  global_recommendation: string;
+  data_sources: string[];
+}
+export async function fetchResponseTimeOptimization(forceRefresh = false): Promise<ResponseTimeOptimizationResponse> {
+  const response = await fetch(`${API_BASE_URL}/gesica/model/response-time-optimization?force_refresh=${forceRefresh}`);
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
   return response.json();
 }

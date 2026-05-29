@@ -20,6 +20,9 @@ import {
   fetchTerrainPharmacies,
   fetchTerrainInformalSignals,
   fetchTerrainClimate,
+  fetchDemandForecast,
+  fetchEpidemicEarlyWarning,
+  fetchResponseTimeOptimization,
   type CorpusStats,
   type DocumentDetailResponse,
   type EvidenceSummaryResponse,
@@ -36,6 +39,11 @@ import {
   type TerrainPharmacies,
   type TerrainInformalSignals,
   type TerrainClimate,
+  type DemandForecastResponse,
+  type EpidemicEarlyWarningResponse,
+  type EpidemicDiseaseResult,
+  type ResponseTimeOptimizationResponse,
+  type ResponseTimeAssignment,
   searchDocuments,
 } from "./lib/api";
 import type {
@@ -731,6 +739,225 @@ function ScenariosView({ scenarios, loading, error }: { scenarios: GesicaScenari
     "Systèmes & IA": "border-cyan-500/30 bg-cyan-500/10 text-cyan-300",
   };
 
+  // Widget de prévision de la demande EMS (Scénario 1 : demand-forecasting)
+  const DemandForecastWidget = () => {
+    const [forecast, setForecast] = React.useState<DemandForecastResponse | null>(null);
+    const [loadingForecast, setLoadingForecast] = React.useState(false);
+    const [forecastError, setForecastError] = React.useState<string | null>(null);
+
+    const loadForecast = () => {
+      setLoadingForecast(true);
+      setForecastError(null);
+      fetchDemandForecast()
+        .then(setForecast)
+        .catch((e) => setForecastError(e.message))
+        .finally(() => setLoadingForecast(false));
+    };
+
+    if (!forecast && !loadingForecast && !forecastError) {
+      return (
+        <button
+          onClick={loadForecast}
+          className="w-full rounded-xl border border-violet-500/30 bg-violet-500/10 px-4 py-3 text-sm text-violet-300 hover:bg-violet-500/20 transition flex items-center justify-center gap-2"
+        >
+          <BarChart2 size={14} />
+          Lancer la prédiction J+7 (Prophet + LightGBM)
+        </button>
+      );
+    }
+
+    if (loadingForecast) {
+      return (
+        <div className="flex items-center justify-center py-4 text-violet-300 text-sm gap-2">
+          <RotateCcw size={14} className="animate-spin" />
+          Entraînement du modèle et calcul des prédictions...
+        </div>
+      );
+    }
+
+    if (forecastError) {
+      return (
+        <div className="rounded-xl border border-red-500/20 bg-red-500/10 px-3 py-2 text-xs text-red-300">
+          Erreur : {forecastError}
+          <button onClick={loadForecast} className="ml-2 underline">Reessayer</button>
+        </div>
+      );
+    }
+
+    if (!forecast) return null;
+
+    const riskColors = { NORMAL: "text-emerald-400", "ÉLEVÉ": "text-amber-400", CRITIQUE: "text-red-400" };
+    const riskBg = { NORMAL: "bg-emerald-500/10 border-emerald-500/20", "ÉLEVÉ": "bg-amber-500/10 border-amber-500/20", CRITIQUE: "bg-red-500/10 border-red-500/20" };
+
+    return (
+      <div className="space-y-3">
+        {/* Métadonnées du modèle */}
+        <div className="flex items-center gap-3 flex-wrap text-[10px] text-slate-400">
+          <span>Modèle : <span className="text-slate-300">{forecast.model}</span></span>
+          <span>Temp. actuelle : <span className="text-slate-300">{forecast.input_features.current_temperature}°C</span></span>
+          <span>Index épidémique : <span className="text-slate-300">{forecast.input_features.epidemic_index}</span></span>
+          {forecast.status === "fallback" && (
+            <span className="text-amber-400 border border-amber-500/20 bg-amber-500/10 px-1.5 py-0.5 rounded">Fallback analytique</span>
+          )}
+          <button onClick={loadForecast} className="ml-auto text-violet-400 hover:text-violet-300 flex items-center gap-1">
+            <RefreshCw size={10} /> Actualiser
+          </button>
+        </div>
+
+        {/* Grille des 7 jours */}
+        <div className="grid grid-cols-7 gap-1">
+          {forecast.predictions.map((pred) => (
+            <div
+              key={pred.ds}
+              className={`rounded-xl border p-2 text-center ${riskBg[pred.risk_level] ?? "bg-white/5 border-white/10"}`}
+              title={pred.recommendation}
+            >
+              <p className="text-[9px] text-slate-400 truncate">{pred.date.split(' ')[0]}</p>
+              <p className="text-[10px] text-slate-300">{pred.date.split(' ')[1]}/{pred.date.split(' ')[2]?.slice(0, 3)}</p>
+              <p className={`text-sm font-bold mt-1 ${riskColors[pred.risk_level] ?? "text-white"}`}>{pred.demand}</p>
+              <p className="text-[9px] text-slate-500">{pred.temp_estimated}°C</p>
+              <p className={`text-[9px] font-semibold mt-0.5 ${riskColors[pred.risk_level] ?? "text-white"}`}>{pred.risk_level}</p>
+            </div>
+          ))}
+        </div>
+
+        {/* Recommandation du jour le plus à risque */}
+        {forecast.predictions.some(p => p.risk_level !== "NORMAL") && (
+          <div className="rounded-xl border border-amber-500/20 bg-amber-500/5 px-3 py-2 text-xs text-amber-300">
+            <AlertTriangle size={10} className="inline mr-1" />
+            {forecast.predictions.find(p => p.risk_level !== "NORMAL")?.recommendation}
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  // Widget de détection précoce d'épidémies (Scénario : epidemic-early-warning)
+  const EpidemicEarlyWarningWidget = () => {
+    const [data, setData] = React.useState<EpidemicEarlyWarningResponse | null>(null);
+    const [loading, setLoading] = React.useState(false);
+    const [error, setError] = React.useState<string | null>(null);
+
+    const load = () => {
+      setLoading(true);
+      setError(null);
+      fetchEpidemicEarlyWarning()
+        .then(setData)
+        .catch((e) => setError(e.message))
+        .finally(() => setLoading(false));
+    };
+
+    if (!data && !loading && !error) {
+      return (
+        <button onClick={load} className="w-full rounded-xl border border-emerald-500/30 bg-emerald-500/10 px-4 py-3 text-sm text-emerald-300 hover:bg-emerald-500/20 transition flex items-center justify-center gap-2">
+          <Activity size={14} />
+          Lancer la surveillance épidémique J+14 (SARIMAX + Sentinelles)
+        </button>
+      );
+    }
+    if (loading) return <div className="flex items-center justify-center py-4 text-emerald-300 text-sm gap-2"><RotateCcw size={14} className="animate-spin" />Analyse des données Sentinelles FR...</div>;
+    if (error) return <div className="rounded-xl border border-red-500/20 bg-red-500/10 px-3 py-2 text-xs text-red-300">Erreur : {error} <button onClick={load} className="ml-2 underline">Réessayer</button></div>;
+    if (!data) return null;
+
+    const alertColors = { NORMAL: "text-emerald-400", VIGILANCE: "text-amber-400", "ÉPIDÉMIE": "text-red-400" };
+    const alertBg = { NORMAL: "bg-emerald-500/10 border-emerald-500/20", VIGILANCE: "bg-amber-500/10 border-amber-500/20", "ÉPIDÉMIE": "bg-red-500/10 border-red-500/20" };
+    const diseases = Object.values(data.diseases) as EpidemicDiseaseResult[];
+
+    return (
+      <div className="space-y-3">
+        <div className="flex items-center gap-3 flex-wrap text-[10px] text-slate-400">
+          <span>Modèle : <span className="text-slate-300">{data.model}</span></span>
+          <span>Région : <span className="text-slate-300">{data.region}</span></span>
+          <span className={`font-semibold px-2 py-0.5 rounded border ${alertBg[data.overall_alert_level] ?? ""} ${alertColors[data.overall_alert_level] ?? ""}`}>
+            Alerte globale : {data.overall_alert_level}
+          </span>
+          {data.status === "fallback" && <span className="text-amber-400 border border-amber-500/20 bg-amber-500/10 px-1.5 py-0.5 rounded">Fallback analytique</span>}
+          <button onClick={load} className="ml-auto text-emerald-400 hover:text-emerald-300 flex items-center gap-1"><RefreshCw size={10} /> Actualiser</button>
+        </div>
+
+        <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+          {diseases.map((d) => (
+            <div key={d.disease} className={`rounded-xl border p-3 ${alertBg[d.max_alert_14d] ?? "bg-white/5 border-white/10"}`}>
+              <p className="text-xs font-semibold text-white truncate">{d.label}</p>
+              <p className={`text-lg font-bold mt-1 ${alertColors[d.max_alert_14d] ?? "text-white"}`}>{d.current_incidence}</p>
+              <p className="text-[9px] text-slate-400">/100k — seuil {d.epidemic_threshold}</p>
+              <p className={`text-[9px] font-semibold mt-1 ${alertColors[d.max_alert_14d] ?? "text-white"}`}>{d.max_alert_14d}</p>
+            </div>
+          ))}
+        </div>
+
+        <div className={`rounded-xl border px-3 py-2 text-xs ${alertBg[data.overall_alert_level] ?? "border-white/10 bg-white/5"} ${alertColors[data.overall_alert_level] ?? "text-slate-300"}`}>
+          {data.global_recommendation}
+        </div>
+      </div>
+    );
+  };
+
+  // Widget d'optimisation des temps de réponse (Scénario : response-time-optimization)
+  const ResponseTimeWidget = () => {
+    const [data, setData] = React.useState<ResponseTimeOptimizationResponse | null>(null);
+    const [loading, setLoading] = React.useState(false);
+    const [error, setError] = React.useState<string | null>(null);
+
+    const load = () => {
+      setLoading(true);
+      setError(null);
+      fetchResponseTimeOptimization()
+        .then(setData)
+        .catch((e) => setError(e.message))
+        .finally(() => setLoading(false));
+    };
+
+    if (!data && !loading && !error) {
+      return (
+        <button onClick={load} className="w-full rounded-xl border border-sky-500/30 bg-sky-500/10 px-4 py-3 text-sm text-sky-300 hover:bg-sky-500/20 transition flex items-center justify-center gap-2">
+          <MapPin size={14} />
+          Optimiser les temps de réponse EMS (OSRM + Open-Meteo)
+        </button>
+      );
+    }
+    if (loading) return <div className="flex items-center justify-center py-4 text-sky-300 text-sm gap-2"><RotateCcw size={14} className="animate-spin" />Calcul des itinéraires optimaux via OSRM...</div>;
+    if (error) return <div className="rounded-xl border border-red-500/20 bg-red-500/10 px-3 py-2 text-xs text-red-300">Erreur : {error} <button onClick={load} className="ml-2 underline">Réessayer</button></div>;
+    if (!data) return null;
+
+    const statusColors = { OPTIMAL: "text-emerald-400", ACCEPTABLE: "text-amber-400", DÉGRADÉ: "text-red-400" };
+    const statusBg = { OPTIMAL: "bg-emerald-500/10 border-emerald-500/20", ACCEPTABLE: "bg-amber-500/10 border-amber-500/20", DÉGRADÉ: "bg-red-500/10 border-red-500/20" };
+
+    return (
+      <div className="space-y-3">
+        <div className="flex items-center gap-3 flex-wrap text-[10px] text-slate-400">
+          <span>Temp. : <span className="text-slate-300">{data.weather.temperature}°C</span></span>
+          <span>Facteur météo : <span className="text-slate-300">×{data.weather.weather_factor}</span></span>
+          <span>Couverture : <span className="text-emerald-300 font-semibold">{data.metrics.coverage_rate_pct}%</span></span>
+          <span>Temps moyen : <span className="text-sky-300 font-semibold">{data.metrics.mean_response_time_min} min</span></span>
+          {data.metrics.degraded_zones > 0 && (
+            <span className="text-red-400 border border-red-500/20 bg-red-500/10 px-1.5 py-0.5 rounded">{data.metrics.degraded_zones} zone(s) dégradée(s)</span>
+          )}
+          <button onClick={load} className="ml-auto text-sky-400 hover:text-sky-300 flex items-center gap-1"><RefreshCw size={10} /> Actualiser</button>
+        </div>
+
+        <div className="space-y-1.5 max-h-48 overflow-y-auto">
+          {(data.assignments as ResponseTimeAssignment[]).map((a) => (
+            <div key={a.zone_id} className={`rounded-xl border px-3 py-2 flex items-center justify-between gap-2 ${statusBg[a.response_status] ?? "bg-white/5 border-white/10"}`}>
+              <div className="flex-1 min-w-0">
+                <p className="text-xs font-semibold text-white truncate">{a.zone_label}</p>
+                <p className="text-[9px] text-slate-400 truncate">{a.base_label} {a.cross_border ? `→ via ${a.border_crossing}` : ""}</p>
+              </div>
+              <div className="text-right shrink-0">
+                <p className={`text-sm font-bold ${statusColors[a.response_status] ?? "text-white"}`}>{a.total_response_time_min} min</p>
+                <p className={`text-[9px] font-semibold ${statusColors[a.response_status] ?? "text-white"}`}>{a.response_status}</p>
+              </div>
+            </div>
+          ))}
+        </div>
+
+        <div className="rounded-xl border border-sky-500/20 bg-sky-500/5 px-3 py-2 text-xs text-sky-300">
+          {data.global_recommendation}
+        </div>
+      </div>
+    );
+  };
+
   const ScenarioCard = ({ scenario }: { scenario: GesicaScenario }) => {
     const isExpanded = expandedId === scenario.id;
     const hasArticles = scenario.articleCount > 0;
@@ -793,6 +1020,48 @@ function ScenariosView({ scenarios, loading, error }: { scenarios: GesicaScenari
               </ul>
             </div>
 
+            {/* Bouton Modèle Prédictif pour demand-forecasting */}
+            {scenario.id === "demand-forecasting" && (
+              <div className="rounded-2xl border border-violet-500/20 bg-violet-500/5 p-4">
+                <div className="flex items-center justify-between mb-3">
+                  <div className="flex items-center gap-2">
+                    <BarChart2 size={14} className="text-violet-400" />
+                    <span className="text-xs font-semibold text-violet-300 uppercase tracking-wider">Modèle Prédictif — Demande EMS J+7</span>
+                  </div>
+                  <span className="text-[10px] text-violet-400 bg-violet-500/10 border border-violet-500/20 px-2 py-0.5 rounded-full">Prophet + LightGBM</span>
+                </div>
+                <DemandForecastWidget />
+              </div>
+            )}
+
+            {/* Widget Epidemic Early Warning */}
+            {scenario.id === "epidemic-early-warning" && (
+              <div className="rounded-2xl border border-emerald-500/20 bg-emerald-500/5 p-4">
+                <div className="flex items-center justify-between mb-3">
+                  <div className="flex items-center gap-2">
+                    <Activity size={14} className="text-emerald-400" />
+                    <span className="text-xs font-semibold text-emerald-300 uppercase tracking-wider">Modèle Prédictif — Surveillance Épidémique J+14</span>
+                  </div>
+                  <span className="text-[10px] text-emerald-400 bg-emerald-500/10 border border-emerald-500/20 px-2 py-0.5 rounded-full">SARIMAX + Sentinelles FR</span>
+                </div>
+                <EpidemicEarlyWarningWidget />
+              </div>
+            )}
+
+            {/* Widget Response Time Optimization */}
+            {scenario.id === "response-time-optimization" && (
+              <div className="rounded-2xl border border-sky-500/20 bg-sky-500/5 p-4">
+                <div className="flex items-center justify-between mb-3">
+                  <div className="flex items-center gap-2">
+                    <MapPin size={14} className="text-sky-400" />
+                    <span className="text-xs font-semibold text-sky-300 uppercase tracking-wider">Modèle Prédictif — Optimisation Temps de Réponse</span>
+                  </div>
+                  <span className="text-[10px] text-sky-400 bg-sky-500/10 border border-sky-500/20 px-2 py-0.5 rounded-full">OSRM + Open-Meteo</span>
+                </div>
+                <ResponseTimeWidget />
+              </div>
+            )}
+
             {/* Articles associés */}
             {scenario.relevantArticles.length > 0 && (
               <div>
@@ -802,21 +1071,57 @@ function ScenariosView({ scenarios, loading, error }: { scenarios: GesicaScenari
                 <div className="space-y-2">
                   {scenario.relevantArticles.map((article) => (
                     <div key={article.id} className="rounded-xl border border-white/10 bg-slate-900/40 px-3 py-2">
-                      <p className="text-sm text-slate-200 leading-5">{article.title}</p>
-                      <div className="mt-1 flex items-center gap-2 flex-wrap">
+                      <p className="text-sm font-medium text-slate-200 leading-5">{article.title}</p>
+                      {article.authors && (
+                        <p className="text-xs text-slate-400 mt-0.5 line-clamp-1">Par {article.authors}</p>
+                      )}
+                      <div className="mt-1.5 flex items-center gap-2 flex-wrap">
+                        {article.journal && (
+                          <span className="text-xs font-semibold text-slate-300 bg-slate-800 px-1.5 py-0.5 rounded">
+                            {article.journal}
+                          </span>
+                        )}
                         <span className="text-xs text-slate-400">{article.source}</span>
                         {article.year && <span className="text-xs text-slate-500">{article.year}</span>}
-                        {article.doi && (
+                        
+                        {article.study_design && (
+                          <span className="text-xs text-amber-400 bg-amber-500/10 px-1.5 py-0.5 rounded font-mono">
+                            {article.study_design}
+                          </span>
+                        )}
+                        
+                        {article.open_access && (
+                          <span className="text-xs text-emerald-400 bg-emerald-500/10 px-1.5 py-0.5 rounded">
+                            OA
+                          </span>
+                        )}
+                        
+                        {article.citation_count !== null && article.citation_count > 0 && (
+                          <span className="text-xs text-slate-400">
+                            {article.citation_count} citation{article.citation_count > 1 ? 's' : ''}
+                          </span>
+                        )}
+
+                        {article.url && (
                           <a
-                            href={`https://doi.org/${article.doi}`}
+                            href={article.url}
                             target="_blank"
                             rel="noopener noreferrer"
-                            className="text-xs text-cyan-400 hover:underline flex items-center gap-1"
+                            className="text-xs text-cyan-400 hover:underline flex items-center gap-1 ml-auto"
                           >
-                            DOI <ExternalLink size={10} />
+                            Lien <ExternalLink size={10} />
                           </a>
                         )}
                       </div>
+                      {article.keywords && (
+                        <div className="mt-1 flex items-center gap-1 flex-wrap">
+                          {article.keywords.split(',').slice(0, 4).map((kw, idx) => (
+                            <span key={idx} className="text-[10px] text-slate-500 bg-slate-800/50 px-1 rounded">
+                              #{kw.trim()}
+                            </span>
+                          ))}
+                        </div>
+                      )}
                     </div>
                   ))}
                 </div>
