@@ -1,9 +1,31 @@
 import logging
 import os
+from pathlib import Path
 from sqlalchemy import create_engine, text
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("embed-corpus")
+
+# ─── Chargement de la clé API ─────────────────────────────────────────────────
+# Priorité : variable d'environnement > fichier .env > fichier /etc/literev/env
+def _load_env_file(path: str) -> None:
+    """Charge les variables KEY=VALUE d'un fichier dans os.environ (sans dépendance python-dotenv)."""
+    p = Path(path)
+    if not p.exists():
+        return
+    for line in p.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+        if key and key not in os.environ:
+            os.environ[key] = value
+
+# Chercher le .env dans le répertoire courant, le répertoire du script, puis /etc/literev/env
+for _env_path in [".env", str(Path(__file__).parent / ".env"), "/etc/literev/env", "/opt/literev-api/.env"]:
+    _load_env_file(_env_path)
 
 DB_URL = os.getenv(
     "DB_URL",
@@ -39,7 +61,14 @@ def generate_embedding(client, text_to_embed: str) -> list[float]:
 
 def main():
     if not OPENAI_API_KEY:
-        logger.error("OPENAI_API_KEY est requise pour générer les embeddings.")
+        logger.error(
+            "OPENAI_API_KEY est requise pour générer les embeddings.\n"
+            "Solutions (par ordre de priorité) :\n"
+            "  1. Variable d'environnement : export OPENAI_API_KEY=sk-...  && python3 embed_corpus.py\n"
+            "  2. Fichier /opt/literev-api/.env contenant : OPENAI_API_KEY=sk-...\n"
+            "  3. Service systemd : sudo systemctl edit literev-api → [Service] Environment=OPENAI_API_KEY=sk-...\n"
+            "  4. Inline : OPENAI_API_KEY=sk-... python3 embed_corpus.py --project gesica"
+        )
         return
 
     try:
