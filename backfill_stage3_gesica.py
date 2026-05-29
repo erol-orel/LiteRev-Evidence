@@ -16,7 +16,12 @@ engine = create_engine(DB_URL, pool_pre_ping=True)
 # ─── Mise à jour des documents (literature_document) ─────────────────────────
 STAGE3_DOC_SQL = """
 UPDATE literature_document SET
-  scenario_type = COALESCE(scenario_type, CASE
+  scenario_type = CASE 
+    WHEN scenario_type IS NULL OR scenario_type IN (
+      'demand-forecasting', 'resource-allocation', 'triage-support', 
+      'surge-management', 'surveillance', 'cross-border-coordination', 
+      'outbreak_detection', 'unassigned'
+    ) THEN CASE
     -- Cluster 0: Patient-centered prehospital critical care
     WHEN title ILIKE '%cardiac arrest%' OR abstract ILIKE '%out-of-hospital cardiac arrest%'
       OR abstract ILIKE '%OHCA%' OR abstract ILIKE '%ventricular fibrillation%'
@@ -114,8 +119,10 @@ UPDATE literature_document SET
       THEN 'cross-border-coordination'
     WHEN title ILIKE '%situational awareness%' OR abstract ILIKE '%situational awareness%'
       THEN 'real-time-situational-awareness'
-    ELSE NULL
-  END),
+    ELSE 'unassigned'
+  END
+  ELSE scenario_type
+  END,
   geographic_scope = COALESCE(geographic_scope, CASE
     WHEN title ILIKE '%switzerland%' OR abstract ILIKE '%switzerland%'
       OR title ILIKE '%suisse%' OR abstract ILIKE '%geneva%'
