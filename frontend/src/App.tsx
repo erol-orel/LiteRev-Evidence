@@ -23,6 +23,7 @@ import {
   fetchDemandForecast,
   fetchEpidemicEarlyWarning,
   fetchResponseTimeOptimization,
+  fetchFulltextStats,
   type CorpusStats,
   type DocumentDetailResponse,
   type EvidenceSummaryResponse,
@@ -44,6 +45,7 @@ import {
   type EpidemicDiseaseResult,
   type ResponseTimeOptimizationResponse,
   type ResponseTimeAssignment,
+  type FulltextStats,
   searchDocuments,
 } from "./lib/api";
 import type {
@@ -1090,6 +1092,27 @@ function ScenariosView({ scenarios, loading, error }: { scenarios: GesicaScenari
                           </span>
                         )}
                         
+                        {/* Badge couverture textuelle */}
+                        <span className={`text-[10px] font-semibold px-1.5 py-0.5 rounded border ${
+                          article.has_fulltext
+                            ? 'text-emerald-400 bg-emerald-500/10 border-emerald-500/20'
+                            : 'text-slate-500 bg-slate-800/50 border-white/5'
+                        }`} title={article.has_fulltext ? 'Texte intégral indexé' : 'Titre + résumé uniquement'}>
+                          {article.has_fulltext ? 'Full Text' : 'Abstract'}
+                        </span>
+
+                        {article.doi && (
+                          <a
+                            href={`https://doi.org/${article.doi}`}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="text-[10px] text-slate-400 hover:text-cyan-400 font-mono"
+                            title={`DOI: ${article.doi}`}
+                          >
+                            DOI
+                          </a>
+                        )}
+
                         {article.open_access && (
                           <span className="text-xs text-emerald-400 bg-emerald-500/10 px-1.5 py-0.5 rounded">
                             OA
@@ -2181,6 +2204,14 @@ export default function App() {
                                 {result.evidenceCategory}
                               </span>
                             )}
+                            {/* Badge couverture textuelle */}
+                            <span className={`rounded-full px-2 py-1 border text-[11px] font-semibold ${
+                              result.chunkType === 'fulltext_section'
+                                ? 'bg-emerald-500/10 border-emerald-500/20 text-emerald-400'
+                                : 'bg-slate-800/50 border-white/5 text-slate-500'
+                            }`} title={result.chunkType === 'fulltext_section' ? 'Texte intégral indexé' : 'Titre + résumé uniquement'}>
+                              {result.chunkType === 'fulltext_section' ? 'Full Text' : 'Abstract'}
+                            </span>
                           </div>
 
                           <p className="mt-4 text-sm leading-6 text-slate-200">

@@ -34,6 +34,7 @@ export interface SearchResult {
   geographicScope?: string | null;
   evidenceCategory?: string | null;
   highlight?: string | null;
+  chunkType?: string | null;
   [key: string]: unknown;
 }
 
@@ -80,6 +81,7 @@ export interface ApiSearchResult {
   scenario_type: string | null;
   geographic_scope: string | null;
   evidence_category: string | null;
+  chunk_type: string | null;
 }
 
 export interface ApiSearchRequest {

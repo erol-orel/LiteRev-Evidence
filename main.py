@@ -532,6 +532,7 @@ def search(payload: SearchIn) -> dict[str, Any]:
                 d.scenario_type,
                 d.geographic_scope,
                 d.evidence_category,
+                c.chunk_type,
                 c.content,
                 -- Score hybride = 0.7 * score_cosinus + 0.3 * score_textuel_normalise
                 (0.7 * (1 - (c.embedding <=> CAST(:query_embedding AS vector))) + 
@@ -563,6 +564,7 @@ def search(payload: SearchIn) -> dict[str, Any]:
                 d.scenario_type,
                 d.geographic_scope,
                 d.evidence_category,
+                c.chunk_type,
                 c.content,
                 (1 - (c.embedding <=> CAST(:query_embedding AS vector))) AS score
             FROM document_chunk c
@@ -591,6 +593,7 @@ def search(payload: SearchIn) -> dict[str, Any]:
                 d.scenario_type,
                 d.geographic_scope,
                 d.evidence_category,
+                c.chunk_type,
                 c.content,
                 ({score_sql})   AS score
             FROM document_chunk c
@@ -629,8 +632,8 @@ def search(payload: SearchIn) -> dict[str, Any]:
             "scenario_type": row["scenario_type"],
             "geographic_scope": row["geographic_scope"],
             "evidence_category": row["evidence_category"],
+            "chunk_type": row["chunk_type"],
         })
-
     return {"results": results, "count": len(results)}
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1358,13 +1361,18 @@ def get_gesica_scenarios() -> list[dict[str, Any]]:
             articles = []
             if article_count > 0:
                 sql_articles = text("""
-                    SELECT id, title, abstract, year, source, url,
-                           authors, doi, journal, keywords, language, study_design,
-                           sample_size, country, citation_count, open_access
-                    FROM literature_document
-                    WHERE project_context = 'gesica' 
-                      AND scenario_type = :scenario
-                    ORDER BY year DESC NULLS LAST, title ASC
+                    SELECT d.id, d.title, d.abstract, d.year, d.source, d.url,
+                           d.authors, d.doi, d.journal, d.keywords, d.language, d.study_design,
+                           d.sample_size, d.country, d.citation_count, d.open_access,
+                           EXISTS (
+                               SELECT 1 FROM document_chunk c
+                               WHERE c.document_id = d.id
+                                 AND c.chunk_type = 'fulltext_section'
+                           ) AS has_fulltext
+                    FROM literature_document d
+                    WHERE d.project_context = 'gesica' 
+                      AND d.scenario_type = :scenario
+                    ORDER BY d.year DESC NULLS LAST, d.title ASC
                     LIMIT 5
                 """)
                 articles = [dict(r) for r in conn.execute(sql_articles, {"scenario": scenario_id}).mappings().all()]
@@ -1996,3 +2004,101 @@ def get_response_time_optimization(force_refresh: bool = False):
             "model": "ResponseTimeOptimization",
             "message": "Erreur lors de l'exécution du modèle de temps de réponse.",
         }
+
+# ─── Endpoint : statistiques full-text et mode hybrid ────────────────────────
+@app.get("/corpus/fulltext-stats")
+def get_fulltext_stats() -> dict[str, Any]:
+    """
+    Statistiques de couverture textuelle du corpus.
+    Distingue les articles avec full-text (chunks 'fulltext_section')
+    des articles avec seulement titre+abstract ('title_abstract').
+    Expose aussi le statut du mode hybrid search.
+    """
+    with engine.connect() as conn:
+        total_docs = conn.execute(
+            text("SELECT COUNT(*) FROM literature_document")
+        ).scalar() or 0
+
+        docs_with_fulltext = conn.execute(text("""
+            SELECT COUNT(DISTINCT document_id)
+            FROM document_chunk
+            WHERE chunk_type = 'fulltext_section'
+        """)).scalar() or 0
+
+        chunks_with_embedding = conn.execute(text("""
+            SELECT COUNT(*) FROM document_chunk WHERE embedding IS NOT NULL
+        """)).scalar() or 0
+
+        total_chunks = conn.execute(
+            text("SELECT COUNT(*) FROM document_chunk")
+        ).scalar() or 0
+
+        source_coverage = conn.execute(text("""
+            SELECT
+                d.source,
+                COUNT(DISTINCT d.id) AS total,
+                COUNT(DISTINCT CASE WHEN c.chunk_type = 'fulltext_section' THEN d.id END) AS with_fulltext
+            FROM literature_document d
+            LEFT JOIN document_chunk c ON c.document_id = d.id
+            GROUP BY d.source
+            ORDER BY total DESC
+        """)).mappings().all()
+
+        sample_fulltext = conn.execute(text("""
+            SELECT DISTINCT d.id, d.title, d.source, d.year, d.url,
+                   d.authors, d.doi
+            FROM literature_document d
+            JOIN document_chunk c ON c.document_id = d.id
+            WHERE c.chunk_type = 'fulltext_section'
+            ORDER BY d.year DESC NULLS LAST
+            LIMIT 10
+        """)).mappings().all()
+
+    openai_key = os.getenv("OPENAI_API_KEY")
+    hybrid_active = bool(openai_key) and chunks_with_embedding > 0
+
+    return {
+        "corpus": {
+            "total_documents": total_docs,
+            "docs_with_fulltext": docs_with_fulltext,
+            "docs_abstract_only": total_docs - docs_with_fulltext,
+            "fulltext_coverage_pct": round(docs_with_fulltext / total_docs * 100, 1) if total_docs else 0,
+        },
+        "embeddings": {
+            "total_chunks": total_chunks,
+            "chunks_with_embedding": chunks_with_embedding,
+            "embedding_coverage_pct": round(chunks_with_embedding / total_chunks * 100, 1) if total_chunks else 0,
+        },
+        "hybrid_search": {
+            "active": hybrid_active,
+            "openai_key_present": bool(openai_key),
+            "embeddings_available": chunks_with_embedding > 0,
+            "mode": "hybrid" if hybrid_active else ("lexical_only" if not openai_key else "no_embeddings"),
+            "note": (
+                "Mode hybride actif (pgvector cosine + BM25)" if hybrid_active
+                else "Mode lexical uniquement — clé OpenAI absente ou embeddings non générés"
+            ),
+        },
+        "by_source": [
+            {
+                "source": r["source"],
+                "total": r["total"],
+                "with_fulltext": r["with_fulltext"],
+                "abstract_only": r["total"] - r["with_fulltext"],
+                "fulltext_pct": round(r["with_fulltext"] / r["total"] * 100, 1) if r["total"] else 0,
+            }
+            for r in source_coverage
+        ],
+        "sample_fulltext_docs": [
+            {
+                "id": r["id"],
+                "title": r["title"],
+                "source": r["source"],
+                "year": r["year"],
+                "url": r["url"],
+                "authors": r["authors"],
+                "doi": r["doi"],
+            }
+            for r in sample_fulltext
+        ],
+    }

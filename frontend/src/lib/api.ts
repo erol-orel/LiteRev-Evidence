@@ -139,6 +139,7 @@ function mapSearchResultFromApi(apiResult: ApiSearchResult): SearchResult {
     scenarioType: apiResult.scenario_type,
     geographicScope: apiResult.geographic_scope,
     evidenceCategory: apiResult.evidence_category,
+    chunkType: apiResult.chunk_type,
   };
 }
 
@@ -349,7 +350,51 @@ export interface GesicaScenario {
     country: string | null;
     citation_count: number | null;
     open_access: boolean | null;
+    has_fulltext: boolean;
   }>;
+}
+
+// ─── Fulltext Stats ───────────────────────────────────────────────────────────
+export interface FulltextStats {
+  corpus: {
+    total_documents: number;
+    docs_with_fulltext: number;
+    docs_abstract_only: number;
+    fulltext_coverage_pct: number;
+  };
+  embeddings: {
+    total_chunks: number;
+    chunks_with_embedding: number;
+    embedding_coverage_pct: number;
+  };
+  hybrid_search: {
+    active: boolean;
+    openai_key_present: boolean;
+    embeddings_available: boolean;
+    mode: string;
+    note: string;
+  };
+  by_source: Array<{
+    source: string;
+    total: number;
+    with_fulltext: number;
+    abstract_only: number;
+    fulltext_pct: number;
+  }>;
+  sample_fulltext_docs: Array<{
+    id: number;
+    title: string;
+    source: string;
+    year: number | null;
+    url: string | null;
+    authors: string | null;
+    doi: string | null;
+  }>;
+}
+export async function fetchFulltextStats(): Promise<FulltextStats> {
+  const response = await fetch(`${API_BASE_URL}/corpus/fulltext-stats`);
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  return response.json();
 }
 
 export interface AskRequest {
