@@ -346,7 +346,6 @@ function ScreeningView({
   }
 
   const pendingDocs = docs.filter(d => !d.screeningStatus || d.screeningStatus === "pending");
-  const processedDocs = docs.filter(d => d.screeningStatus && d.screeningStatus !== "pending");
 
   return (
     <div className="space-y-6">

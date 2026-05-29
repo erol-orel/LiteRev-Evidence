@@ -363,6 +363,8 @@ export interface ScreeningDocument {
   abstract: string | null;
   year: number | null;
   source: string;
+  url: string | null;
+  externalId: string | null;
   projectContext: string;
   screeningStatus: "included" | "excluded" | "pending" | null;
   screeningReason: string | null;
@@ -377,24 +379,12 @@ export interface ScreeningDecision {
 }
 
 export interface PrismaFlow {
-  identification: {
-    totalRecords: number;
-    bySource: Record<string, number>;
-    duplicatesRemoved: number;
-  };
-  screening: {
-    recordsScreened: number;
-    recordsExcluded: number;
-  };
-  eligibility: {
-    fulltextAssessed: number;
-    fulltextExcluded: number;
-    reasons: Record<string, number>;
-  };
-  included: {
-    totalIncluded: number;
-    pendingAssessment: number;
-  };
+  recordsIdentified: number;
+  recordsScreened: number;
+  recordsExcluded: number;
+  recordsIncluded: number;
+  exclusionReasons: Record<string, number>;
+  bySource: Record<string, number>;
 }
 
 export async function fetchEvidenceSummary(
@@ -491,10 +481,12 @@ export async function fetchScreeningList(projectContext?: string): Promise<Scree
     abstract: d.abstract,
     year: d.year,
     source: d.source,
+    url: d.url ?? null,
+    externalId: d.external_id ?? null,
     projectContext: d.project_context,
-    screeningStatus: d.screening_status,
-    screeningReason: d.screening_reason,
-    screeningNotes: d.screening_notes
+    screeningStatus: d.screening_status ?? "pending",
+    screeningReason: d.screening_reason ?? null,
+    screeningNotes: d.screening_notes ?? null,
   }));
 }
 
@@ -526,25 +518,26 @@ export async function fetchPrismaFlow(projectContext?: string): Promise<PrismaFl
   const response = await fetch(url);
   if (!response.ok) throw new Error(`PRISMA flow failed with status ${response.status}`);
   const d = await response.json();
+  // Support both flat (new) and nested (legacy) API response shapes
+  if (typeof d.records_identified !== "undefined") {
+    // New flat format from main.py
+    return {
+      recordsIdentified: d.records_identified ?? 0,
+      recordsScreened: d.records_screened ?? 0,
+      recordsExcluded: d.records_excluded ?? 0,
+      recordsIncluded: d.records_included ?? 0,
+      exclusionReasons: d.exclusion_reasons ?? {},
+      bySource: d.by_source ?? {},
+    };
+  }
+  // Legacy nested format fallback
   return {
-    identification: {
-      totalRecords: d.identification.total_records,
-      bySource: d.identification.by_source,
-      duplicatesRemoved: d.identification.duplicates_removed
-    },
-    screening: {
-      recordsScreened: d.screening.records_screened,
-      recordsExcluded: d.screening.records_excluded
-    },
-    eligibility: {
-      fulltextAssessed: d.eligibility.fulltext_assessed,
-      fulltextExcluded: d.eligibility.fulltext_excluded,
-      reasons: d.eligibility.reasons
-    },
-    included: {
-      totalIncluded: d.included.total_included,
-      pendingAssessment: d.included.pending_assessment
-    }
+    recordsIdentified: d.identification?.total_records ?? 0,
+    recordsScreened: d.screening?.records_screened ?? 0,
+    recordsExcluded: d.screening?.records_excluded ?? 0,
+    recordsIncluded: d.included?.total_included ?? 0,
+    exclusionReasons: d.eligibility?.reasons ?? {},
+    bySource: d.identification?.by_source ?? {},
   };
 }
 
