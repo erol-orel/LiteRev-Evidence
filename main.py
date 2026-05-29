@@ -31,9 +31,9 @@ def _load_env_file(path: str) -> None:
 for _ep in [".env", str(Path(__file__).parent / ".env"), "/opt/literev-api/.env", "/etc/literev/env"]:
     _load_env_file(_ep)
 
-# Fallback clé OpenAI si absente de l'environnement
-if not os.environ.get("OPENAI_API_KEY"):
-    os.environ["OPENAI_API_KEY"] = "sk-emUeiQDcxW3dPn4Qo4WTG9"
+# Charger aussi le fichier secrets hors-repo (jamais commité)
+for _ep in ["/etc/literev/secrets", "/opt/literev-api/secrets.env"]:
+    _load_env_file(_ep)
 
 DB_URL = os.getenv(
     "DB_URL",

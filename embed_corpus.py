@@ -31,7 +31,11 @@ DB_URL = os.getenv(
     "DB_URL",
     "postgresql+psycopg://literev:MyNewStrongPassword!@10.10.1.10:5432/literev",
 )
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY") or "sk-emUeiQDcxW3dPn4Qo4WTG9"
+# Charger aussi le fichier secrets hors-repo si présent
+for _ep in ["/etc/literev/secrets", "/opt/literev-api/secrets.env"]:
+    _load_env_file(_ep)
+
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 
 # text-embedding-3-small : max 8192 tokens ≈ 32 000 chars
 # On tronque à 7000 tokens ≈ 28 000 chars pour rester confortablement sous la limite
