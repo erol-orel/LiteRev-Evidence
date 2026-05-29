@@ -115,21 +115,34 @@ def _fetch_ecdc_flu() -> Optional[float]:
 def _generate_synthetic_series(disease: str, n_weeks: int = 104) -> List[float]:
     """
     Génère une série temporelle synthétique réaliste pour une maladie.
-    Utilise un modèle saisonnier avec bruit gaussien.
+    La saisonnalité est ancrée sur la semaine calendaire réelle (ISO week).
+    Pic hivernal : semaines 2–8 (janvier-février).
+    Hors saison (mai-septembre) : incidence basse.
     """
+    import datetime as _dt
     config = DISEASE_CONFIG.get(disease, DISEASE_CONFIG["grippe"])
-    baseline = config["warning_threshold"] * 0.4
-    amplitude = config["epidemic_threshold"] * 0.6
+    baseline = config["warning_threshold"] * 0.15  # Baseline basse hors saison
+    amplitude = config["epidemic_threshold"] * 0.65
     series = []
 
+    # Semaine ISO actuelle pour ancrer la fin de la série sur aujourd'hui
+    today_iso_week = _dt.date.today().isocalendar()[1]  # 1-52
+
     for i in range(n_weeks):
-        # Saisonnalité annuelle (pic hivernal semaine 2-8)
-        week_of_year = (i % 52) + 1
-        seasonal = amplitude * math.exp(-0.5 * ((week_of_year - 4) / 8) ** 2)
+        # Semaine calendaire réelle pour ce point de la série
+        # La série se termine à la semaine actuelle
+        weeks_ago = n_weeks - 1 - i
+        iso_week = ((today_iso_week - 1 - weeks_ago) % 52) + 1
+
+        # Saisonnalité : pic centré sur semaine 4 (janvier), largeur σ=6 semaines
+        # Gestion circulaire : distance minimale sur le cercle des 52 semaines
+        dist = min(abs(iso_week - 4), 52 - abs(iso_week - 4))
+        seasonal = amplitude * math.exp(-0.5 * (dist / 6) ** 2)
+
         # Tendance légèrement croissante sur 2 ans
-        trend = baseline + (i / n_weeks) * 10
-        # Bruit gaussien
-        noise = (hash(f"{disease}_{i}") % 100 - 50) * 0.3
+        trend = baseline + (i / n_weeks) * 8
+        # Bruit déterministe (reproductible)
+        noise = (hash(f"{disease}_{i}") % 100 - 50) * 0.25
         value = max(0, trend + seasonal + noise)
         series.append(round(value, 1))
 

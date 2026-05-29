@@ -38,15 +38,16 @@ EMS_BASES = [
 ]
 
 # Points d'intervention types (zones à risque Grand Genève)
+# Pays : CH = Suisse, FR = France
 INTERVENTION_ZONES = [
-    {"id": "centre_geneve", "label": "Centre-ville Genève", "lat": 46.2044, "lon": 6.1432, "priority": "high"},
-    {"id": "carouge", "label": "Carouge", "lat": 46.1822, "lon": 6.1417, "priority": "medium"},
-    {"id": "meyrin", "label": "Meyrin (CERN)", "lat": 46.2338, "lon": 6.0586, "priority": "medium"},
-    {"id": "lancy", "label": "Lancy", "lat": 46.1833, "lon": 6.1167, "priority": "medium"},
-    {"id": "annemasse_centre", "label": "Annemasse Centre", "lat": 46.1939, "lon": 6.2358, "priority": "high"},
-    {"id": "thonon_centre", "label": "Thonon-les-Bains", "lat": 46.3700, "lon": 6.4780, "priority": "low"},
-    {"id": "saint_genis", "label": "Saint-Genis-Pouilly", "lat": 46.2433, "lon": 6.0233, "priority": "medium"},
-    {"id": "ferney", "label": "Ferney-Voltaire", "lat": 46.2558, "lon": 6.1086, "priority": "medium"},
+    {"id": "centre_geneve", "label": "Centre-ville Genève", "lat": 46.2044, "lon": 6.1432, "priority": "high", "country": "CH"},
+    {"id": "carouge", "label": "Carouge", "lat": 46.1822, "lon": 6.1417, "priority": "medium", "country": "CH"},
+    {"id": "meyrin", "label": "Meyrin (CERN)", "lat": 46.2338, "lon": 6.0586, "priority": "medium", "country": "CH"},
+    {"id": "lancy", "label": "Lancy", "lat": 46.1833, "lon": 6.1167, "priority": "medium", "country": "CH"},
+    {"id": "annemasse_centre", "label": "Annemasse Centre", "lat": 46.1939, "lon": 6.2358, "priority": "high", "country": "FR"},
+    {"id": "thonon_centre", "label": "Thonon-les-Bains", "lat": 46.3700, "lon": 6.4780, "priority": "low", "country": "FR"},
+    {"id": "saint_genis", "label": "Saint-Genis-Pouilly", "lat": 46.2433, "lon": 6.0233, "priority": "medium", "country": "FR"},
+    {"id": "ferney", "label": "Ferney-Voltaire", "lat": 46.2558, "lon": 6.1086, "priority": "medium", "country": "FR"},
 ]
 
 # Postes frontières Genève/Haute-Savoie
@@ -165,6 +166,8 @@ def _haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
 
 def _osrm_route(origin: Dict, dest: Dict) -> Optional[Dict]:
     """Calcule le temps de trajet via OSRM entre deux points."""
+    # Temps minimum réaliste : 1 min (même si la base est sur la zone)
+    MIN_DURATION_MIN = 1.0
     try:
         url = f"{OSRM_BASE}/{origin['lon']},{origin['lat']};{dest['lon']},{dest['lat']}"
         resp = requests.get(url, params={"overview": "false"}, timeout=8)
@@ -172,10 +175,11 @@ def _osrm_route(origin: Dict, dest: Dict) -> Optional[Dict]:
             data = resp.json()
             if data.get("code") == "Ok" and data.get("routes"):
                 route = data["routes"][0]
+                duration_min = max(MIN_DURATION_MIN, round(route["duration"] / 60, 1))
                 return {
                     "duration_s": route["duration"],
                     "distance_m": route["distance"],
-                    "duration_min": round(route["duration"] / 60, 1),
+                    "duration_min": duration_min,
                     "distance_km": round(route["distance"] / 1000, 1),
                     "source": "OSRM (données réelles)",
                 }
@@ -185,7 +189,7 @@ def _osrm_route(origin: Dict, dest: Dict) -> Optional[Dict]:
     # Fallback : estimation par haversine × 1.4 (facteur de tortuosité)
     dist_km = _haversine_km(origin["lat"], origin["lon"], dest["lat"], dest["lon"])
     speed_kmh = 60.0  # Vitesse moyenne urbaine EMS
-    duration_min = (dist_km * 1.4 / speed_kmh) * 60
+    duration_min = max(MIN_DURATION_MIN, (dist_km * 1.4 / speed_kmh) * 60)
     return {
         "duration_s": duration_min * 60,
         "distance_m": dist_km * 1400,
@@ -199,7 +203,10 @@ def _osrm_route(origin: Dict, dest: Dict) -> Optional[Dict]:
 
 def _needs_border_crossing(origin: Dict, dest: Dict) -> Optional[Dict]:
     """Détermine si le trajet nécessite un franchissement de frontière."""
-    if origin["country"] == dest.get("country", "FR"):
+    # Les zones ont maintenant un champ 'country' explicite (CH ou FR)
+    origin_country = origin.get("country", "FR")
+    dest_country = dest.get("country", "FR")
+    if origin_country == dest_country:
         return None
 
     # Trouver le poste frontière le plus proche du trajet
