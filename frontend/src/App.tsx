@@ -19,6 +19,7 @@ import {
   fetchTerrainDemographics,
   fetchTerrainPharmacies,
   fetchTerrainInformalSignals,
+  fetchTerrainClimate,
   type CorpusStats,
   type DocumentDetailResponse,
   type EvidenceSummaryResponse,
@@ -34,6 +35,7 @@ import {
   type TerrainDemographics,
   type TerrainPharmacies,
   type TerrainInformalSignals,
+  type TerrainClimate,
   searchDocuments,
 } from "./lib/api";
 import type {
@@ -86,6 +88,7 @@ function TerrainView() {
   const [demographics, setDemographics] = useState<TerrainDemographics | null>(null);
   const [pharmacies, setPharmacies] = useState<TerrainPharmacies | null>(null);
   const [informalSignals, setInformalSignals] = useState<TerrainInformalSignals | null>(null);
+  const [climate, setClimate] = useState<TerrainClimate | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [lastRefresh, setLastRefresh] = useState<Date>(new Date());
@@ -100,14 +103,16 @@ function TerrainView() {
       fetchTerrainDemographics(),
       fetchTerrainPharmacies(),
       fetchTerrainInformalSignals(),
+      fetchTerrainClimate(),
     ])
-      .then(([m, g, e, d, p, s]) => {
+      .then(([m, g, e, d, p, s, c]) => {
         setMeteo(m);
         setGeo(g);
         setEpidemic(e);
         setDemographics(d);
         setPharmacies(p);
         setInformalSignals(s);
+        setClimate(c);
         setLastRefresh(new Date());
       })
       .catch((err) => setError(err.message || "Erreur de chargement des données terrain."))
@@ -181,7 +186,7 @@ function TerrainView() {
       </div>
 
       {/* Grille de KPIs sources */}
-      <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
+      <div className="grid grid-cols-2 gap-3 sm:grid-cols-4 lg:grid-cols-7">
         {[
           { label: "Météo", icon: <Cloud size={14} />, color: "text-sky-400", active: !!meteo },
           { label: "Routage", icon: <MapPin size={14} />, color: "text-violet-400", active: !!geo },
@@ -189,6 +194,7 @@ function TerrainView() {
           { label: "Démographie", icon: <Users size={14} />, color: "text-amber-400", active: !!demographics },
           { label: "Pharmacies", icon: <Pill size={14} />, color: "text-rose-400", active: !!pharmacies },
           { label: "Signaux", icon: <Radio size={14} />, color: "text-cyan-400", active: !!informalSignals },
+          { label: "Copernicus", icon: <Zap size={14} />, color: "text-orange-400", active: !!climate },
         ].map((s) => (
           <div key={s.label} className={`rounded-2xl border p-3 text-center transition ${
             s.active ? "border-white/10 bg-white/5" : "border-white/5 bg-white/2 opacity-40"
@@ -429,6 +435,59 @@ function TerrainView() {
             ))}
           </div>
           <p className="mt-3 text-xs text-slate-500 italic">{informalSignals.architecture_note}</p>
+        </div>
+      )}
+
+      {/* Copernicus Climate Data Store (CDS) */}
+      {climate && (
+        <div className="rounded-3xl border border-white/10 bg-white/5 p-5 shadow-2xl">
+          <div className="flex items-center justify-between mb-4">
+            <h3 className="flex items-center gap-2 text-lg font-semibold text-white">
+              <Zap size={16} className="text-orange-400" />
+              Copernicus Climate Data Store (CDS) — ERA5
+            </h3>
+            <span className={`rounded-full border px-3 py-1 text-xs font-medium ${
+              climate.api_status.includes("verified") ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-300" : "border-amber-500/30 bg-amber-500/10 text-amber-300"
+            }`}>
+              {climate.api_status === "connected_verified" ? "API Connectée" : "Mode simulé / Configuré"}
+            </span>
+          </div>
+          
+          {climate.message && (
+            <div className="mb-4 rounded-2xl border border-orange-500/20 bg-orange-500/5 p-3 text-xs text-orange-300">
+              {climate.message}
+            </div>
+          )}
+
+          <div className="grid grid-cols-2 gap-3 sm:grid-cols-4 mb-4">
+            <div className="rounded-2xl border border-white/10 bg-slate-900/60 p-3 text-center">
+              <p className="text-2xl font-bold text-orange-300">{climate.climatology.historical_mean_temp_may_c}°C</p>
+              <p className="mt-1 text-xs text-slate-400">Moyenne historique (Mai)</p>
+            </div>
+            <div className="rounded-2xl border border-white/10 bg-slate-900/60 p-3 text-center">
+              <p className="text-2xl font-bold text-orange-300">+{climate.climatology.current_anomaly_c}°C</p>
+              <p className="mt-1 text-xs text-slate-400">Anomalie thermique</p>
+            </div>
+            <div className="rounded-2xl border border-white/10 bg-slate-900/60 p-3 text-center">
+              <p className="text-2xl font-bold text-orange-300">{climate.climatology.soil_moisture_deficit_percent}%</p>
+              <p className="mt-1 text-xs text-slate-400">Déficit d'humidité des sols</p>
+            </div>
+            <div className="rounded-2xl border border-white/10 bg-slate-900/60 p-3 text-center">
+              <p className="text-2xl font-bold text-rose-300">{climate.climatology.heatwave_hazard_index.toUpperCase()}</p>
+              <p className="mt-1 text-xs text-slate-400">Risque canicule</p>
+            </div>
+          </div>
+
+          <div className="rounded-2xl border border-white/10 bg-slate-900/60 p-4">
+            <h4 className="text-xs font-semibold uppercase tracking-wider text-slate-400 mb-2">Projections climatiques horizon 2030 (Transfrontalier)</h4>
+            <ul className="space-y-1.5 text-xs text-slate-300">
+              <li>• Augmentation des jours de canicule extrême : <span className="text-white font-medium">+{climate.projections_2030.expected_heatwave_days_increase_per_year} jours/an</span></li>
+              <li>• Augmentation des précipitations extrêmes : <span className="text-white font-medium">+{climate.projections_2030.expected_heavy_precipitation_increase_percent}%</span></li>
+              <li>• Facteur de vulnérabilité EMS principal : <span className="text-white font-medium">{climate.projections_2030.ems_vulnerability_factor.replace(/_/g, " ")}</span></li>
+            </ul>
+          </div>
+          
+          <p className="mt-3 text-xs text-slate-500 italic">{climate.source}</p>
         </div>
       )}
     </div>

@@ -746,3 +746,31 @@ export async function fetchTerrainInformalSignals(): Promise<TerrainInformalSign
   if (!response.ok) throw new Error(`Terrain informal signals failed with status ${response.status}`);
   return response.json();
 }
+
+// ─── P5 TERRAIN CLIMATE (COPERNICUS CDS) ──────────────────────────────────────
+
+export interface TerrainClimate {
+  source: string;
+  region: string;
+  coordinates: { latitude: number; longitude: number };
+  climatology: {
+    historical_mean_temp_may_c: number;
+    current_anomaly_c: number;
+    heatwave_hazard_index: "low" | "moderate" | "high" | "critical";
+    soil_moisture_deficit_percent: number;
+    extreme_precipitation_risk: "low" | "moderate" | "high";
+  };
+  projections_2030: {
+    expected_heatwave_days_increase_per_year: number;
+    expected_heavy_precipitation_increase_percent: number;
+    ems_vulnerability_factor: string;
+  };
+  api_status: string;
+  message?: string;
+}
+
+export async function fetchTerrainClimate(lat = 46.2044, lon = 6.1432): Promise<TerrainClimate> {
+  const response = await fetch(`${API_BASE_URL}/terrain/climate?lat=${lat}&lon=${lon}`);
+  if (!response.ok) throw new Error(`Terrain climate failed with status ${response.status}`);
+  return response.json();
+}
