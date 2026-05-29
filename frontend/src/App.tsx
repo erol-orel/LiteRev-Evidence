@@ -682,9 +682,30 @@ function StatsView({ corpusStats, gesicaStats }: { corpusStats: CorpusStats | nu
   );
 }
 
-function ScenariosView({ scenarios }: { scenarios: GesicaScenario[] }) {
+function ScenariosView({ scenarios, loading, error }: { scenarios: GesicaScenario[]; loading?: boolean; error?: string | null }) {
   const [selectedCluster, setSelectedCluster] = useState<string>("all");
   const [expandedId, setExpandedId] = useState<string | null>(null);
+
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center py-16 text-slate-400">
+        <RotateCcw size={18} className="mr-2 animate-spin" />
+        Chargement des scénarios GESICA...
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div className="flex flex-col items-center justify-center py-16 gap-3">
+        <div className="rounded-2xl border border-red-500/30 bg-red-500/10 px-6 py-4 text-red-300 max-w-xl text-center">
+          <p className="font-semibold mb-1">Erreur de chargement des scénarios GESICA</p>
+          <p className="text-sm text-red-400 font-mono break-all">{error}</p>
+          <p className="text-xs text-slate-400 mt-2">Vérifiez que le service API est démarré sur app-01 et que <code>/api/gesica/scenarios</code> répond correctement.</p>
+        </div>
+      </div>
+    );
+  }
 
   if (scenarios.length === 0) {
     return (
@@ -1227,6 +1248,8 @@ export default function App() {
   const [corpusStats, setCorpusStats] = useState<CorpusStats | null>(null);
   const [gesicaStats, setGesicaStats] = useState<GesicaStats | null>(null);
   const [gesicaScenarios, setGesicaScenarios] = useState<GesicaScenario[]>([]);
+  const [loadingScenarios, setLoadingScenarios] = useState(false);
+  const [scenariosError, setScenariosError] = useState<string | null>(null);
   
   // States Assistant RAG
   const [assistantQuestion, setAssistantQuestion] = useState("");
@@ -1361,7 +1384,11 @@ export default function App() {
       fetchGesicaStats().then(setGesicaStats).catch(console.error);
     }
     if (activeTab === "scenarios") {
-      fetchGesicaScenarios().then(setGesicaScenarios).catch(console.error);
+      setLoadingScenarios(true);
+      setScenariosError(null);
+      fetchGesicaScenarios()
+        .then((data) => { setGesicaScenarios(data); setLoadingScenarios(false); })
+        .catch((err) => { setScenariosError(String(err)); setLoadingScenarios(false); });
     }
   }, [activeTab]);
 
@@ -1585,7 +1612,7 @@ export default function App() {
         )}
 
         {activeTab === "scenarios" && (
-          <ScenariosView scenarios={gesicaScenarios} />
+          <ScenariosView scenarios={gesicaScenarios} loading={loadingScenarios} error={scenariosError} />
         )}
 
         {activeTab === "assistant" && (
