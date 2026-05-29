@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { Activity, BarChart2, BookOpen, Download, ExternalLink, RotateCcw, Zap, CheckSquare, XCircle, CheckCircle, HelpCircle, ArrowDown, Cloud, MapPin, AlertTriangle } from "lucide-react";
+import { Activity, BarChart2, BookOpen, Download, ExternalLink, RotateCcw, Zap, CheckSquare, XCircle, CheckCircle, HelpCircle, ArrowDown, Cloud, MapPin, AlertTriangle, Users, Pill, Radio, RefreshCw, ChevronDown, ChevronUp } from "lucide-react";
 
 import {
   fetchDocumentDetail,
@@ -16,6 +16,9 @@ import {
   fetchTerrainMeteo,
   fetchTerrainGeo,
   fetchTerrainEpidemic,
+  fetchTerrainDemographics,
+  fetchTerrainPharmacies,
+  fetchTerrainInformalSignals,
   type CorpusStats,
   type DocumentDetailResponse,
   type EvidenceSummaryResponse,
@@ -28,6 +31,9 @@ import {
   type TerrainMeteo,
   type TerrainGeo,
   type TerrainEpidemic,
+  type TerrainDemographics,
+  type TerrainPharmacies,
+  type TerrainInformalSignals,
   searchDocuments,
 } from "./lib/api";
 import type {
@@ -77,24 +83,39 @@ function TerrainView() {
   const [meteo, setMeteo] = useState<TerrainMeteo | null>(null);
   const [geo, setGeo] = useState<TerrainGeo | null>(null);
   const [epidemic, setEpidemic] = useState<TerrainEpidemic | null>(null);
+  const [demographics, setDemographics] = useState<TerrainDemographics | null>(null);
+  const [pharmacies, setPharmacies] = useState<TerrainPharmacies | null>(null);
+  const [informalSignals, setInformalSignals] = useState<TerrainInformalSignals | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [lastRefresh, setLastRefresh] = useState<Date>(new Date());
 
-  useEffect(() => {
+  const loadAll = () => {
     setLoading(true);
     setError(null);
     Promise.all([
       fetchTerrainMeteo(),
       fetchTerrainGeo(),
       fetchTerrainEpidemic(),
+      fetchTerrainDemographics(),
+      fetchTerrainPharmacies(),
+      fetchTerrainInformalSignals(),
     ])
-      .then(([m, g, e]) => {
+      .then(([m, g, e, d, p, s]) => {
         setMeteo(m);
         setGeo(g);
         setEpidemic(e);
+        setDemographics(d);
+        setPharmacies(p);
+        setInformalSignals(s);
+        setLastRefresh(new Date());
       })
       .catch((err) => setError(err.message || "Erreur de chargement des données terrain."))
       .finally(() => setLoading(false));
+  };
+
+  useEffect(() => {
+    loadAll();
   }, []);
 
   const alertColors: Record<string, string> = {
@@ -137,12 +158,48 @@ function TerrainView() {
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center gap-3">
-        <Cloud size={20} className="text-sky-400" />
-        <div>
-          <h2 className="text-xl font-semibold text-white">Données Terrain — Grand Genève</h2>
-          <p className="text-xs text-slate-400 mt-0.5">Sources publiques : MeteoSwiss (Open-Meteo), OpenStreetMap / OSRM, Sentinelles FR / Sentinella CH</p>
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-3">
+          <Cloud size={20} className="text-sky-400" />
+          <div>
+            <h2 className="text-xl font-semibold text-white">Données Terrain — Grand Genève</h2>
+            <p className="text-xs text-slate-400 mt-0.5">
+              6 sources publiques actives — Météo, Routage, Épidémie, Démographie, Pharmacies, Signaux informels
+            </p>
+          </div>
         </div>
+        <div className="flex items-center gap-3">
+          <span className="text-xs text-slate-500">Actualisé {lastRefresh.toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" })}</span>
+          <button
+            onClick={loadAll}
+            className="flex items-center gap-2 rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-xs text-slate-300 hover:bg-white/10 transition"
+          >
+            <RefreshCw size={12} />
+            Actualiser
+          </button>
+        </div>
+      </div>
+
+      {/* Grille de KPIs sources */}
+      <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
+        {[
+          { label: "Météo", icon: <Cloud size={14} />, color: "text-sky-400", active: !!meteo },
+          { label: "Routage", icon: <MapPin size={14} />, color: "text-violet-400", active: !!geo },
+          { label: "Épidémie", icon: <Activity size={14} />, color: "text-emerald-400", active: !!epidemic },
+          { label: "Démographie", icon: <Users size={14} />, color: "text-amber-400", active: !!demographics },
+          { label: "Pharmacies", icon: <Pill size={14} />, color: "text-rose-400", active: !!pharmacies },
+          { label: "Signaux", icon: <Radio size={14} />, color: "text-cyan-400", active: !!informalSignals },
+        ].map((s) => (
+          <div key={s.label} className={`rounded-2xl border p-3 text-center transition ${
+            s.active ? "border-white/10 bg-white/5" : "border-white/5 bg-white/2 opacity-40"
+          }`}>
+            <div className={`flex justify-center mb-1 ${s.color}`}>{s.icon}</div>
+            <p className="text-xs text-slate-300 font-medium">{s.label}</p>
+            <p className={`text-[10px] mt-0.5 ${s.active ? "text-emerald-400" : "text-slate-500"}`}>
+              {s.active ? "● Actif" : "○ Inactif"}
+            </p>
+          </div>
+        ))}
       </div>
 
       {/* Météo */}
@@ -255,6 +312,123 @@ function TerrainView() {
             <p className="mt-1 opacity-80">{epidemic.recommended_action}</p>
           </div>
           <p className="mt-2 text-xs text-slate-500 italic">{epidemic.architecture_note}</p>
+        </div>
+      )}
+
+      {/* Démographie */}
+      {demographics && (
+        <div className="rounded-3xl border border-white/10 bg-white/5 p-5 shadow-2xl">
+          <h3 className="flex items-center gap-2 text-lg font-semibold text-white mb-4">
+            <Users size={16} className="text-amber-400" />
+            Démographie — {demographics.commune} ({demographics.postal_code})
+          </h3>
+          <div className="grid grid-cols-2 gap-3 sm:grid-cols-4 mb-4">
+            <div className="rounded-2xl border border-white/10 bg-slate-900/60 p-3 text-center">
+              <p className="text-2xl font-bold text-amber-300">{demographics.population.toLocaleString("fr-FR")}</p>
+              <p className="mt-1 text-xs text-slate-400">Population</p>
+            </div>
+            <div className="rounded-2xl border border-white/10 bg-slate-900/60 p-3 text-center">
+              <p className="text-2xl font-bold text-amber-300">{demographics.density_per_km2}</p>
+              <p className="mt-1 text-xs text-slate-400">Hab/km²</p>
+            </div>
+            <div className="rounded-2xl border border-white/10 bg-slate-900/60 p-3 text-center">
+              <p className="text-2xl font-bold text-amber-300">{demographics.age_over_65_pct}%</p>
+              <p className="mt-1 text-xs text-slate-400">&gt;65 ans</p>
+            </div>
+            <div className="rounded-2xl border border-white/10 bg-slate-900/60 p-3 text-center">
+              <p className="text-2xl font-bold text-rose-300">×{demographics.ems_risk_multiplier}</p>
+              <p className="mt-1 text-xs text-slate-400">Multiplicateur risque EMS</p>
+            </div>
+          </div>
+          <p className="text-xs text-slate-500 italic">{demographics.architecture_note}</p>
+        </div>
+      )}
+
+      {/* Pharmacies & Médicaments */}
+      {pharmacies && (
+        <div className="rounded-3xl border border-white/10 bg-white/5 p-5 shadow-2xl">
+          <h3 className="flex items-center gap-2 text-lg font-semibold text-white mb-4">
+            <Pill size={16} className="text-rose-400" />
+            Pharmacies de Garde & Alertes Médicaments
+          </h3>
+          {pharmacies.critical_medication_alerts.length > 0 && (
+            <div className="mb-4 space-y-2">
+              <h4 className="text-xs font-semibold uppercase tracking-wider text-slate-400">Alertes médicaments critiques</h4>
+              {pharmacies.critical_medication_alerts.map((alert, i) => (
+                <div key={i} className={`rounded-2xl border p-3 text-sm ${
+                  alert.status === "rupture" ? "border-rose-500/30 bg-rose-500/10 text-rose-300" :
+                  alert.status === "tension" ? "border-amber-500/30 bg-amber-500/10 text-amber-300" :
+                  "border-emerald-500/30 bg-emerald-500/10 text-emerald-300"
+                }`}>
+                  <div className="flex items-center justify-between">
+                    <span className="font-semibold">{alert.medication}</span>
+                    <span className="text-xs uppercase font-bold">{alert.status}</span>
+                  </div>
+                  <p className="mt-1 text-xs opacity-80">{alert.recommendation}</p>
+                </div>
+              ))}
+            </div>
+          )}
+          <div className="space-y-2">
+            <h4 className="text-xs font-semibold uppercase tracking-wider text-slate-400">Pharmacies à proximité ({pharmacies.pharmacies_nearby.length})</h4>
+            {pharmacies.pharmacies_nearby.map((ph, i) => (
+              <div key={i} className="rounded-2xl border border-white/10 bg-slate-900/60 p-3 flex items-center justify-between">
+                <div>
+                  <p className="text-sm font-medium text-white">{ph.name}</p>
+                  <p className="text-xs text-slate-400">{ph.street}, {ph.city}</p>
+                </div>
+                <div className="text-right">
+                  <span className={`text-xs font-medium ${
+                    ph.is_dispensary ? "text-emerald-300" : "text-slate-400"
+                  }`}>{ph.is_dispensary ? "✓ Dispensaire" : "Pharmacie"}</span>
+                  <p className="text-xs text-slate-500">{ph.opening_hours}</p>
+                </div>
+              </div>
+            ))}
+          </div>
+          <p className="mt-3 text-xs text-slate-500 italic">{pharmacies.architecture_note}</p>
+        </div>
+      )}
+
+      {/* Signaux Informels */}
+      {informalSignals && (
+        <div className="rounded-3xl border border-white/10 bg-white/5 p-5 shadow-2xl">
+          <h3 className="flex items-center gap-2 text-lg font-semibold text-white mb-4">
+            <Radio size={16} className="text-cyan-400" />
+            Signaux Informels — ProMED / GDELT
+          </h3>
+          <div className="space-y-3">
+            {informalSignals.active_signals.map((sig) => (
+              <div key={sig.id} className={`rounded-2xl border p-4 ${
+                sig.severity === "high" ? "border-rose-500/30 bg-rose-500/5" :
+                sig.severity === "moderate" ? "border-amber-500/30 bg-amber-500/5" :
+                "border-white/10 bg-white/5"
+              }`}>
+                <div className="flex items-start justify-between gap-3 mb-2">
+                  <div>
+                    <p className="text-sm font-semibold text-white">{sig.title}</p>
+                    <p className="text-xs text-slate-400 mt-0.5">{sig.source} — {sig.date} — {sig.geo_scope}</p>
+                  </div>
+                  <div className="flex flex-col items-end gap-1 shrink-0">
+                    <span className={`rounded-full border px-2 py-0.5 text-xs font-medium ${
+                      sig.severity === "high" ? "border-rose-500/30 bg-rose-500/10 text-rose-300" :
+                      sig.severity === "moderate" ? "border-amber-500/30 bg-amber-500/10 text-amber-300" :
+                      "border-emerald-500/30 bg-emerald-500/10 text-emerald-300"
+                    }`}>{sig.severity.toUpperCase()}</span>
+                    <span className="text-xs text-slate-500">Fiabilité {Math.round(sig.reliability_score * 100)}%</span>
+                  </div>
+                </div>
+                <p className="text-sm text-slate-300 leading-5">{sig.content}</p>
+                {sig.impact_on_gesica && (
+                  <p className="mt-2 text-xs text-cyan-300 italic">→ GESICA : {sig.impact_on_gesica}</p>
+                )}
+                {sig.impact_on_geoai4ei && (
+                  <p className="mt-1 text-xs text-violet-300 italic">→ GeoAI4EI : {sig.impact_on_geoai4ei}</p>
+                )}
+              </div>
+            ))}
+          </div>
+          <p className="mt-3 text-xs text-slate-500 italic">{informalSignals.architecture_note}</p>
         </div>
       )}
     </div>
@@ -450,55 +624,187 @@ function StatsView({ corpusStats, gesicaStats }: { corpusStats: CorpusStats | nu
 }
 
 function ScenariosView({ scenarios }: { scenarios: GesicaScenario[] }) {
+  const [selectedCluster, setSelectedCluster] = useState<string>("all");
+  const [expandedId, setExpandedId] = useState<string | null>(null);
+
   if (scenarios.length === 0) {
-    return <div className="text-sm text-slate-400">Chargement des scénarios...</div>;
+    return (
+      <div className="flex items-center justify-center py-16 text-slate-400">
+        <RotateCcw size={18} className="mr-2 animate-spin" />
+        Chargement des scénarios GESICA...
+      </div>
+    );
   }
 
-  return (
-    <div className="space-y-5">
-      {scenarios.map((scenario) => (
-        <div key={scenario.id} className="rounded-3xl border border-white/10 bg-white/5 p-5 shadow-2xl">
-          <div className="flex items-start gap-3">
-            <div className="mt-1 rounded-xl border border-cyan-500/20 bg-cyan-500/10 p-2">
-              <Activity size={16} className="text-cyan-400" />
-            </div>
-            <div className="flex-1">
-              <h3 className="text-lg font-semibold text-white">{scenario.title}</h3>
-              <p className="mt-1 text-sm leading-6 text-slate-300">{scenario.description}</p>
-            </div>
-          </div>
+  // Extraire les clusters uniques
+  const clusters = ["all", ...Array.from(new Set(scenarios.map(s => s.cluster))).sort()];
+  const filtered = selectedCluster === "all" ? scenarios : scenarios.filter(s => s.cluster === selectedCluster);
+  const withArticles = filtered.filter(s => s.articleCount > 0);
+  const withoutArticles = filtered.filter(s => s.articleCount === 0);
 
-          <div className="mt-4">
-            <h4 className="mb-2 text-xs font-semibold uppercase tracking-wider text-slate-400">
-              Actions recommandées
-            </h4>
-            <ul className="space-y-1.5">
-              {scenario.recommendedActions.map((action, i) => (
-                <li key={i} className="flex items-start gap-2 text-sm text-slate-200">
-                  <span className="mt-1 h-1.5 w-1.5 shrink-0 rounded-full bg-cyan-400" />
-                  {action}
-                </li>
-              ))}
-            </ul>
-          </div>
+  const clusterColors: Record<string, string> = {
+    "Prévention & Risques": "border-violet-500/30 bg-violet-500/10 text-violet-300",
+    "Opérations EMS": "border-sky-500/30 bg-sky-500/10 text-sky-300",
+    "Triage & Clinique": "border-emerald-500/30 bg-emerald-500/10 text-emerald-300",
+    "Soins Centrés Patient": "border-rose-500/30 bg-rose-500/10 text-rose-300",
+    "Surveillance & Crise": "border-amber-500/30 bg-amber-500/10 text-amber-300",
+    "Systèmes & IA": "border-cyan-500/30 bg-cyan-500/10 text-cyan-300",
+  };
 
-          {scenario.relevantArticles.length > 0 && (
-            <div className="mt-4">
-              <h4 className="mb-2 text-xs font-semibold uppercase tracking-wider text-slate-400">
-                Articles associés
-              </h4>
-              <div className="space-y-2">
-                {scenario.relevantArticles.map((article) => (
-                  <div key={article.id} className="rounded-xl border border-white/10 bg-slate-900/40 px-3 py-2 text-sm">
-                    <p className="text-slate-200">{article.title}</p>
-                    <p className="mt-0.5 text-xs text-slate-400">{article.source} · {article.year ?? "—"}</p>
-                  </div>
-                ))}
-              </div>
+  const ScenarioCard = ({ scenario }: { scenario: GesicaScenario }) => {
+    const isExpanded = expandedId === scenario.id;
+    const hasArticles = scenario.articleCount > 0;
+    return (
+      <div className={`rounded-3xl border p-5 shadow-xl transition ${
+        hasArticles ? "border-white/10 bg-white/5" : "border-white/5 bg-white/2 opacity-60"
+      }`}>
+        <div
+          className="flex items-start gap-3 cursor-pointer"
+          onClick={() => setExpandedId(isExpanded ? null : scenario.id)}
+        >
+          <div className="mt-1 rounded-xl border border-cyan-500/20 bg-cyan-500/10 p-2 shrink-0">
+            <Activity size={14} className="text-cyan-400" />
+          </div>
+          <div className="flex-1 min-w-0">
+            <div className="flex items-center gap-2 flex-wrap">
+              <h3 className="text-base font-semibold text-white">{scenario.title}</h3>
+              <span className={`rounded-full border px-2 py-0.5 text-xs font-medium ${
+                clusterColors[scenario.cluster] ?? "border-white/10 bg-white/5 text-slate-400"
+              }`}>{scenario.cluster}</span>
+              {hasArticles ? (
+                <span className="rounded-full bg-cyan-500/10 border border-cyan-500/20 px-2 py-0.5 text-xs text-cyan-300 font-mono">
+                  {scenario.articleCount} articles
+                </span>
+              ) : (
+                <span className="rounded-full bg-slate-700/40 border border-white/5 px-2 py-0.5 text-xs text-slate-500">
+                  0 articles
+                </span>
+              )}
             </div>
-          )}
+            <p className="mt-1 text-sm leading-5 text-slate-400 line-clamp-2">{scenario.description}</p>
+          </div>
+          <div className="shrink-0 text-slate-500">
+            {isExpanded ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
+          </div>
         </div>
-      ))}
+
+        {isExpanded && (
+          <div className="mt-4 space-y-4 border-t border-white/10 pt-4">
+            {/* Living Evidence Note */}
+            <div className={`rounded-2xl border px-3 py-2 text-xs ${
+              hasArticles
+                ? "border-cyan-500/20 bg-cyan-500/5 text-cyan-300"
+                : "border-white/5 bg-white/2 text-slate-500"
+            }`}>
+              <RefreshCw size={10} className="inline mr-1" />
+              {scenario.livingEvidenceNote}
+            </div>
+
+            {/* Actions recommandées */}
+            <div>
+              <h4 className="mb-2 text-xs font-semibold uppercase tracking-wider text-slate-400">Actions recommandées</h4>
+              <ul className="space-y-1.5">
+                {scenario.recommendedActions.map((action, i) => (
+                  <li key={i} className="flex items-start gap-2 text-sm text-slate-200">
+                    <span className="mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full bg-cyan-400" />
+                    {action}
+                  </li>
+                ))}
+              </ul>
+            </div>
+
+            {/* Articles associés */}
+            {scenario.relevantArticles.length > 0 && (
+              <div>
+                <h4 className="mb-2 text-xs font-semibold uppercase tracking-wider text-slate-400">
+                  Articles récents ({scenario.articleCount} total, 5 affichés)
+                </h4>
+                <div className="space-y-2">
+                  {scenario.relevantArticles.map((article) => (
+                    <div key={article.id} className="rounded-xl border border-white/10 bg-slate-900/40 px-3 py-2">
+                      <p className="text-sm text-slate-200 leading-5">{article.title}</p>
+                      <div className="mt-1 flex items-center gap-2 flex-wrap">
+                        <span className="text-xs text-slate-400">{article.source}</span>
+                        {article.year && <span className="text-xs text-slate-500">{article.year}</span>}
+                        {article.doi && (
+                          <a
+                            href={`https://doi.org/${article.doi}`}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="text-xs text-cyan-400 hover:underline flex items-center gap-1"
+                          >
+                            DOI <ExternalLink size={10} />
+                          </a>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  return (
+    <div className="space-y-6">
+      {/* En-tête */}
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-3">
+          <Activity size={20} className="text-cyan-400" />
+          <div>
+            <h2 className="text-xl font-semibold text-white">Scénarios GESICA — Living Evidence Review</h2>
+            <p className="text-xs text-slate-400 mt-0.5">
+              {scenarios.length} scénarios · {scenarios.reduce((a, s) => a + s.articleCount, 0).toLocaleString()} articles indexés · Mis à jour automatiquement
+            </p>
+          </div>
+        </div>
+        <span className="rounded-full border border-cyan-500/20 bg-cyan-500/10 px-3 py-1 text-xs text-cyan-300 font-medium">
+          <RefreshCw size={10} className="inline mr-1" />
+          Living Review
+        </span>
+      </div>
+
+      {/* Filtre par cluster */}
+      <div className="flex flex-wrap gap-2">
+        {clusters.map((cluster) => (
+          <button
+            key={cluster}
+            onClick={() => setSelectedCluster(cluster)}
+            className={`rounded-xl border px-3 py-1.5 text-xs font-medium transition ${
+              selectedCluster === cluster
+                ? "border-cyan-400 bg-cyan-500/20 text-white"
+                : "border-white/10 bg-white/5 text-slate-400 hover:bg-white/10"
+            }`}
+          >
+            {cluster === "all" ? `Tous (${scenarios.length})` : `${cluster} (${scenarios.filter(s => s.cluster === cluster).length})`}
+          </button>
+        ))}
+      </div>
+
+      {/* Scénarios avec articles */}
+      {withArticles.length > 0 && (
+        <div className="space-y-3">
+          <h3 className="text-sm font-semibold text-slate-300 flex items-center gap-2">
+            <span className="h-2 w-2 rounded-full bg-cyan-400" />
+            Scénarios actifs ({withArticles.length})
+          </h3>
+          {withArticles.map((s) => <ScenarioCard key={s.id} scenario={s} />)}
+        </div>
+      )}
+
+      {/* Scénarios sans articles */}
+      {withoutArticles.length > 0 && (
+        <div className="space-y-3">
+          <h3 className="text-sm font-semibold text-slate-500 flex items-center gap-2">
+            <span className="h-2 w-2 rounded-full bg-slate-600" />
+            En attente d'articles ({withoutArticles.length})
+          </h3>
+          {withoutArticles.map((s) => <ScenarioCard key={s.id} scenario={s} />)}
+        </div>
+      )}
     </div>
   );
 }

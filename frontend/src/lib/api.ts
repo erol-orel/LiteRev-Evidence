@@ -328,6 +328,9 @@ export interface GesicaScenario {
   id: string;
   title: string;
   description: string;
+  cluster: string;
+  articleCount: number;
+  livingEvidenceNote: string;
   recommendedActions: string[];
   relevantArticles: Array<{
     id: number;
@@ -335,6 +338,8 @@ export interface GesicaScenario {
     abstract: string | null;
     year: number | null;
     source: string;
+    authors: string | null;
+    doi: string | null;
   }>;
 }
 
@@ -456,13 +461,19 @@ export async function fetchGesicaScenarios(): Promise<GesicaScenario[]> {
     id: string;
     title: string;
     description: string;
+    cluster: string;
+    article_count: number;
+    living_evidence_note: string;
     recommended_actions: string[];
-    relevant_articles: Array<{ id: number; title: string; abstract: string | null; year: number | null; source: string }>;
+    relevant_articles: Array<{ id: number; title: string; abstract: string | null; year: number | null; source: string; authors: string | null; doi: string | null }>;
   }> = await response.json();
   return data.map((s) => ({
     id: s.id,
     title: s.title,
     description: s.description,
+    cluster: s.cluster,
+    articleCount: s.article_count,
+    livingEvidenceNote: s.living_evidence_note,
     recommendedActions: s.recommended_actions,
     relevantArticles: s.relevant_articles,
   }));
@@ -656,5 +667,82 @@ export async function fetchTerrainGeo(
 export async function fetchTerrainEpidemic(region = "transborder"): Promise<TerrainEpidemic> {
   const response = await fetch(`${API_BASE_URL}/terrain/epidemic?region=${region}`);
   if (!response.ok) throw new Error(`Terrain epidemic failed with status ${response.status}`);
+  return response.json();
+}
+
+// ─── P5 TERRAIN EXTENDED TYPES ────────────────────────────────────────────────
+
+export interface TerrainDemographics {
+  postal_code: string;
+  commune: string;
+  country: string;
+  population: number;
+  density_per_km2: number;
+  age_over_65_pct: number;
+  ems_risk_multiplier: number;
+  source: string;
+  architecture_note: string;
+}
+
+export interface TerrainPharmacy {
+  name: string;
+  street: string;
+  city: string;
+  is_dispensary: boolean;
+  opening_hours: string;
+  coordinates: { latitude: number | null; longitude: number | null };
+}
+
+export interface TerrainMedicationAlert {
+  medication: string;
+  status: "normal" | "tension" | "rupture";
+  country_affected: string;
+  recommendation: string;
+  source: string;
+}
+
+export interface TerrainPharmacies {
+  source: string;
+  pharmacies_nearby: TerrainPharmacy[];
+  critical_medication_alerts: TerrainMedicationAlert[];
+  architecture_note: string;
+}
+
+export interface TerrainSignal {
+  id: string;
+  source: string;
+  title: string;
+  content: string;
+  date: string;
+  reliability_score: number;
+  severity: "low" | "moderate" | "high";
+  geo_scope: string;
+  impact_on_gesica?: string;
+  impact_on_geoai4ei?: string;
+}
+
+export interface TerrainInformalSignals {
+  source: string;
+  active_signals: TerrainSignal[];
+  architecture_note: string;
+}
+
+// ─── P5 TERRAIN EXTENDED API FUNCTIONS ────────────────────────────────────────
+
+export async function fetchTerrainDemographics(postalCode = "74100"): Promise<TerrainDemographics> {
+  const response = await fetch(`${API_BASE_URL}/terrain/demographics?postal_code=${postalCode}`);
+  if (!response.ok) throw new Error(`Terrain demographics failed with status ${response.status}`);
+  return response.json();
+}
+
+export async function fetchTerrainPharmacies(lat = 46.2044, lon = 6.1432): Promise<TerrainPharmacies> {
+  const response = await fetch(`${API_BASE_URL}/terrain/pharmacies?lat=${lat}&lon=${lon}`);
+  if (!response.ok) throw new Error(`Terrain pharmacies failed with status ${response.status}`);
+  return response.json();
+}
+
+export async function fetchTerrainInformalSignals(): Promise<TerrainInformalSignals> {
+  const response = await fetch(`${API_BASE_URL}/terrain/informal-signals`);
+  if (!response.ok) throw new Error(`Terrain informal signals failed with status ${response.status}`);
   return response.json();
 }
