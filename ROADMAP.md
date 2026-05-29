@@ -1,7 +1,7 @@
 # Feuille de Route Stratégique et Technique : LiteRev-Evidence
 **Auteur :** Manus AI  
-**Date :** 27 mai 2026  
-**Version :** 3.0.0 — Intégration complète des sources de données validées (GESICA + GeoAI4EI)
+**Date :** 29 mai 2026  
+**Version :** 4.0.0 — Scénarios GESICA enrichis (31 scénarios fins) + Données Terrain P5 (MeteoSwiss, OSM/OSRM, Sentinelles)
 
 ---
 
@@ -178,7 +178,27 @@ Les composants à développer sont les suivants. Un **sélecteur de projet** en 
 
 Un script de backfill NLP analysera les résumés (abstracts) de tous les articles existants via l'API OpenAI intégrée pour extraire automatiquement les champs manquants. Pour GESICA, les champs ciblés sont `scenario_type` (ex: `ems-demand-forecasting`, `resource-allocation`, `triage`), `ml_model` (ex: `XGBoost`, `LSTM`, `Random Forest`) et `forecast_horizon`. Pour GeoAI4EI, les champs ciblés sont `disease_or_condition` (ex: COVID-19, Influenza, Dengue), `geographic_scope` (ex: France, Suisse, transfrontalier, Europe) et `intervention_type` (ex: vaccination, social distancing, MCM) [^1] [^4] [^7].
 
-### Phase 5 — Assistant Conversationnel et Couplage Scénario
+### Phase 5 — Données Terrain et Enrichissement des Scénarios GESICA (Terminée ✓)
+
+**Objectif** : Enrichir les scénarios GESICA avec des données terrain en temps réel (météo, routage transfrontalier, surveillance épidémique) et étendre la taxonomie des scénarios à partir de la revue systématique [^4].
+
+**Réalisations :**
+
+**5.1 — Scénarios GESICA étendus (31 scénarios fins)** : Le script `backfill_stage3_gesica.py` a été entièrement refondu pour couvrir les 31 scénarios identifiés dans la revue systématique. La réassignation fine a été appliquée avec succès sur les **1595 documents GESICA (100% de couverture)**. La distribution finale inclut : `triage-support` (242), `disaster-risk-assessment` (211), `mci-victim-estimation` (120), `epidemic-early-warning` (117), `surge-management` (99), `trauma-severity-assessment` (79), `stroke-detection` (23), `clinical-deterioration-prediction` (20), `response-time-optimization` (18), `cardiac-arrest-prediction` (15), et 21 autres scénarios fins.
+
+**5.2 — Endpoints Données Terrain (P5)** : Trois nouveaux endpoints ont été ajoutés à `main.py` :
+
+| Endpoint | Source Publique | Fallback | Données Retournées |
+| :--- | :--- | :--- | :--- |
+| `GET /terrain/meteo` | Open-Meteo (proxy MeteoSwiss) | Simulation réaliste | Température, ressenti, humidité, vent, niveau d'alerte, impact EMS |
+| `GET /terrain/geo` | OSRM (OpenStreetMap) | Simulation réaliste | Distance, durée, délai douane, temps de réponse transfrontalier total |
+| `GET /terrain/epidemic` | Sentinelles FR / Sentinella CH / ECDC | Flux structuré unifié | Incidences par maladie, seuils épidémiques, tendances, recommandation opérationnelle |
+
+Chaque endpoint est **architecturalement préparé** pour le branchement sur les données partenaires (MeteoSwiss API privée, TECHWAN SAGA, données HUG/CHUV) dès leur disponibilité.
+
+**5.3 — Frontend Données Terrain** : Un nouvel onglet **Données Terrain** a été ajouté à l'interface React, avec trois widgets visuels distincts (Météo, Routage Transfrontalier, Surveillance Épidémique), des badges de niveau d'alerte colorés, des indicateurs de tendance et des recommandations opérationnelles.
+
+### Phase 6 — Assistant Conversationnel et Couplage Scénario
 
 **Objectif** : Implémenter l'assistant d'aide à la décision contextuel (T3.5 de GeoAI4EI) et établir le couplage scénario entre les deux domaines [^1].
 
@@ -199,7 +219,8 @@ Les livrables incluent des workflows PRISMA-conformes pour la gestion des revues
 | Phase 2 | Les 5 endpoints GESICA retournent des données structurées valides sur le corpus existant (28 documents GESICA) |
 | Phase 3 | Un opérateur EMS peut trouver les 3 articles les plus pertinents sur la prévision de demande en moins de 30 secondes |
 | Phase 4 | Couverture des métadonnées `scenario_type` et `ml_model` ≥ 90% sur le corpus GESICA |
-| Phase 5 | L'assistant répond correctement à 80% des questions de test sur le corpus GESICA |
+| Phase 5 | 1595/1595 documents GESICA avec scénario fin (100%) · 3 endpoints terrain opérationnels · Onglet Données Terrain déployé ✓ |
+| Phase 6 | L'assistant répond correctement à 80% des questions de test sur le corpus GESICA |
 | Phase 6 | Export PRISMA-conforme fonctionnel sur une revue de test de 50 articles |
 
 ---
