@@ -24,6 +24,7 @@ Usage :
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import os
 import re
@@ -133,23 +134,30 @@ def chunk_text(text: str, chunk_size: int = CHUNK_SIZE, overlap: int = CHUNK_OVE
 
 
 def insert_fulltext_chunks(engine, doc_id: int, chunks: list[str], source_label: str, dry_run: bool) -> int:
-    """Insère les chunks full-text dans document_chunk via SQLAlchemy direct."""
+    """Insère les chunks full-text dans document_chunk via SQLAlchemy direct.
+    
+    Utilise le pattern stable CAST(:metadata_json AS jsonb) avec json.dumps,
+    identique à l'endpoint /chunks de main.py.
+    chunk_type = 'fulltext_section' pour être visible dans les stats et la recherche.
+    """
     if dry_run:
         return len(chunks)
     inserted = 0
     with engine.begin() as conn:
-        # Supprimer les anciens chunks full-text pour ce document
+        # Supprimer les anciens chunks full-text pour ce document (les deux conventions)
         conn.execute(text(
-            "DELETE FROM document_chunk WHERE document_id = :doc_id AND chunk_type = 'full_text'"
+            "DELETE FROM document_chunk WHERE document_id = :doc_id "
+            "AND chunk_type IN ('fulltext_section', 'full_text')"
         ), {"doc_id": doc_id})
         for i, chunk in enumerate(chunks):
+            meta = json.dumps({"source": source_label, "chunk_index": i})
             conn.execute(text("""
                 INSERT INTO document_chunk
                     (document_id, content, chunk_index, chunk_type, chunk_weight, metadata_json)
                 VALUES
-                    (:doc_id, :content, :idx::integer, 'full_text', 1.0,
-                     jsonb_build_object('source', :src::text, 'chunk_index', :idx::integer))
-            """), {"doc_id": doc_id, "content": chunk, "idx": i, "src": source_label})
+                    (:doc_id, :content, :idx, 'fulltext_section', 1.0,
+                     CAST(:metadata_json AS jsonb))
+            """), {"doc_id": doc_id, "content": chunk, "idx": i, "metadata_json": meta})
             inserted += 1
         # Marquer open_access=true
         conn.execute(text(
