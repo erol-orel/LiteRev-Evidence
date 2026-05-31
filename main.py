@@ -2170,3 +2170,135 @@ def get_heatwave_ems_impact():
             "model": "HeatwaveEMSImpact",
             "message": "Erreur lors de l'exécution du modèle canicule.",
         }
+
+# ─── Nouveaux endpoints modèles prédictifs ────────────────────────────────────
+
+from stroke_detection_model import stroke_model_singleton
+@app.get("/gesica/model/stroke-detection")
+def get_stroke_detection():
+    """
+    Modèle de détection précoce AVC et optimisation door-to-needle.
+    Calcule le risque circadien, estime le DTN pour chaque UNV du Grand Genève,
+    identifie la fenêtre thérapeutique restante (tPA 4h30, thrombectomie 24h).
+    Basé sur Fassbender (2013), Meretoja (2012), Powers (2019).
+    """
+    try:
+        return stroke_model_singleton.predict()
+    except Exception as e:
+        return {"status": "error", "error": str(e), "model": "StrokeDetection"}
+
+from triage_support_model import triage_model_singleton
+@app.get("/gesica/model/triage-support")
+def get_triage_support():
+    """
+    Aide à la décision de triage pré-hospitalier et urgences.
+    Référentiel CCMU, FRENCH-TRIAGE, NEWS2, red flags par système.
+    Charge actuelle estimée et délais d'attente par niveau de triage.
+    Basé sur Taboulet (2009), RCP UK NEWS2 (2017), Zachariasse (2019).
+    """
+    try:
+        return triage_model_singleton.predict()
+    except Exception as e:
+        return {"status": "error", "error": str(e), "model": "TriageSupport"}
+
+from undertriage_risk_model import undertriage_model_singleton
+@app.get("/gesica/model/undertriage-risk")
+def get_undertriage_risk():
+    """
+    Modèle de détection du risque de sous-triage EMS.
+    Score de risque basé sur les facteurs de risque identifiés dans la littérature.
+    Scénarios à haut risque avec recommandations de triage.
+    Basé sur Newgard (2011), Rehn (2011), Lerner (2011).
+    """
+    try:
+        return undertriage_model_singleton.predict()
+    except Exception as e:
+        return {"status": "error", "error": str(e), "model": "UndertriageRisk"}
+
+from trauma_care_model import trauma_model_singleton
+@app.get("/gesica/model/trauma-care")
+def get_trauma_care():
+    """
+    Modèle de prédiction de survie et optimisation des soins trauma.
+    Calcule ISS, RTS, TRISS pour 4 cas cliniques types.
+    Identifie les critères damage control et les protocoles transfusionnels.
+    Basé sur Boyd (1987), Holcomb PROPPR (2015), CRASH-2 (2010).
+    """
+    try:
+        return trauma_model_singleton.predict()
+    except Exception as e:
+        return {"status": "error", "error": str(e), "model": "TraumaCare"}
+
+from mass_casualty_model import mass_casualty_model_singleton
+@app.get("/gesica/model/mass-casualty")
+def get_mass_casualty(n_victims: int = 50, event_type: str = "transport_accident"):
+    """
+    Simulation Monte-Carlo pour événements à victimes multiples.
+    Distribution SALT (Immédiat/Différé/Minimal/Expectant/Décédé).
+    Calcul des besoins en ressources et planification hospitalière.
+    Basé sur Lerner SALT (2011), Frykberg (2002), Hick (2012).
+    """
+    try:
+        valid_types = ["explosion", "transport_accident", "chemical", "building_collapse", "mass_shooting", "industrial_accident"]
+        if event_type not in valid_types:
+            event_type = "transport_accident"
+        n_victims = max(1, min(n_victims, 500))
+        return mass_casualty_model_singleton.predict(n_victims=n_victims, event_type=event_type)
+    except Exception as e:
+        return {"status": "error", "error": str(e), "model": "MassCasualty"}
+
+
+# ─── Living Review Endpoints ──────────────────────────────────────────────────
+
+@app.get("/living-review/status")
+def living_review_status():
+    """Retourne le statut de la dernière exécution de la living review."""
+    import json as _json
+    report_path = Path("/opt/literev-api/living_review_last_run.json")
+    if not report_path.exists():
+        report_path = Path(__file__).parent / "living_review_last_run.json"
+    if report_path.exists():
+        try:
+            return _json.loads(report_path.read_text())
+        except Exception:
+            pass
+    return {
+        "status": "no_run_yet",
+        "message": "Aucune living review n'a encore été exécutée.",
+        "command": "python3 living_review_scheduler.py --all-scenarios",
+        "scenarios_available": list(SCENARIO_LIVING_REVIEW_IDS),
+    }
+
+
+@app.post("/living-review/run")
+def living_review_run(scenario_id: str = "all", days: int = 30, dry_run: bool = False):
+    """Lance la living review pour un scénario ou tous les scénarios (processus async)."""
+    import subprocess as _subprocess
+    import sys as _sys
+    script = str(Path(__file__).parent / "living_review_scheduler.py")
+    cmd = [_sys.executable, script, "--mode", "once", "--days", str(days)]
+    if scenario_id == "all":
+        cmd.append("--all-scenarios")
+    else:
+        cmd.extend(["--scenario", scenario_id])
+    if dry_run:
+        cmd.append("--dry-run")
+    try:
+        proc = _subprocess.Popen(cmd, stdout=_subprocess.PIPE, stderr=_subprocess.PIPE)
+        return {
+            "status": "started",
+            "pid": proc.pid,
+            "scenario": scenario_id,
+            "days": days,
+            "dry_run": dry_run,
+            "message": f"Living review lancée. Consultez /living-review/status pour le résultat.",
+        }
+    except Exception as e:
+        return {"status": "error", "error": str(e)}
+
+
+SCENARIO_LIVING_REVIEW_IDS = [
+    "epidemic-early-warning", "demand-forecasting", "response-time-optimization",
+    "cardiac-arrest-prediction", "heatwave-ems-impact", "stroke-detection",
+    "triage-support", "undertriage-risk", "trauma-care", "mass-casualty",
+]

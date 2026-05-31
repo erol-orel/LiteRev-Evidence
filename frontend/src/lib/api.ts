@@ -1084,3 +1084,121 @@ export async function fetchHeatwaveEMSImpact(): Promise<HeatwaveEMSImpactRespons
   if (!response.ok) throw new Error(`HTTP ${response.status}`);
   return response.json();
 }
+
+// ─── Stroke Detection ─────────────────────────────────────────────────────────
+export interface StrokeDetectionResponse {
+  model: string;
+  status: string;
+  generated_at: string;
+  region: string;
+  overall_alert_level: string;
+  circadian_risk: { hour: number; risk_level: string; risk_factor: number; rationale: string };
+  stroke_units: Array<{
+    name: string; city: string; country: string;
+    estimated_dtn_min: number; dtn_target_min: number; dtn_ok: boolean;
+    tpa_eligible: boolean; thrombectomy_eligible: boolean;
+    distance_km: number; transport_time_min: number;
+  }>;
+  therapeutic_windows: Record<string, { label: string; window_hours: number; evidence: string }>;
+  recommendations: string[];
+  scientific_references: string[];
+}
+export async function fetchStrokeDetection(): Promise<StrokeDetectionResponse> {
+  const response = await fetch(`${API_BASE_URL}/gesica/model/stroke-detection`);
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  return response.json();
+}
+
+// ─── Triage Support ───────────────────────────────────────────────────────────
+export interface TriageSupportResponse {
+  model: string;
+  status: string;
+  generated_at: string;
+  region: string;
+  overall_alert_level: string;
+  ccmu_levels: Record<string, { label: string; description: string; target_time_min: number; color: string }>;
+  current_load: { level: string; label: string; waiting_patients: number; mean_wait_min: number };
+  red_flags: Record<string, { category: string; flags: string[] }>;
+  news2_thresholds: Record<string, { label: string; score_range: string; action: string; color: string }>;
+  recommendations: string[];
+  scientific_references: string[];
+}
+export async function fetchTriageSupport(): Promise<TriageSupportResponse> {
+  const response = await fetch(`${API_BASE_URL}/gesica/model/triage-support`);
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  return response.json();
+}
+
+// ─── Undertriage Risk ─────────────────────────────────────────────────────────
+export interface UndertriageRiskResponse {
+  model: string;
+  status: string;
+  generated_at: string;
+  region: string;
+  overall_alert_level: string;
+  undertriage_rate_target_pct: number;
+  high_risk_scenarios: Array<{
+    scenario: string; risk_factors: string[];
+    undertriage_risk_pct: number; risk_level: string;
+    recommended_action: string;
+  }>;
+  recommendations: string[];
+  scientific_references: string[];
+}
+export async function fetchUndertriageRisk(): Promise<UndertriageRiskResponse> {
+  const response = await fetch(`${API_BASE_URL}/gesica/model/undertriage-risk`);
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  return response.json();
+}
+
+// ─── Trauma Care ──────────────────────────────────────────────────────────────
+export interface TraumaCareResponse {
+  model: string;
+  status: string;
+  generated_at: string;
+  region: string;
+  overall_alert_level: string;
+  case_examples: Array<{
+    case_name: string; mechanism: string; age: number;
+    scores: { rts: number; iss: number; iss_level: string; triss_survival_pct: number; predicted_mortality_pct: number };
+    damage_control_indicated: boolean;
+    damage_control_triggers: string[];
+    recommendations: string[];
+  }>;
+  cohort_summary: { n_cases: number; mean_survival_pct: number; damage_control_cases: number; damage_control_rate_pct: number };
+  transfusion_protocol: Record<string, { label: string; evidence: string }>;
+  recommendations: string[];
+  scientific_references: string[];
+}
+export async function fetchTraumaCare(): Promise<TraumaCareResponse> {
+  const response = await fetch(`${API_BASE_URL}/gesica/model/trauma-care`);
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  return response.json();
+}
+
+// ─── Mass Casualty ────────────────────────────────────────────────────────────
+export interface MassCasualtyResponse {
+  model: string;
+  status: string;
+  generated_at: string;
+  region: string;
+  overall_alert_level: string;
+  scenario: { n_victims: number; event_type: string; event_label: string; contamination_risk: boolean; blast_injuries: boolean };
+  salt_distribution: Record<string, { mean: number; median: number; ci95_low: number; ci95_high: number; label: string; color: string }>;
+  resource_needs: {
+    transport: { smur_needed: number; amu_needed: number; deficit_smur: number; deficit_amu: number };
+    personnel: { doctors_needed: number; nurses_needed: number };
+    hospital_capacity: { icu_beds_needed: number; surgery_rooms_needed: number; total_hospital_capacity_available: number };
+    mutual_aid_required: boolean;
+  };
+  hospital_distribution: Array<{ hospital: string; city: string; country: string; assigned_immediate: number; assigned_delayed: number; total_assigned: number; transport_time_min: number }>;
+  activation_checklist: Array<{ step: number | string; action: string; responsible: string; time_target: string }>;
+  mci_types: Record<string, { label: string; contamination_risk: boolean; blast_injuries: boolean }>;
+  recommendations: string[];
+  scientific_references: string[];
+}
+export async function fetchMassCasualty(nVictims = 50, eventType = "transport_accident"): Promise<MassCasualtyResponse> {
+  const response = await fetch(`${API_BASE_URL}/gesica/model/mass-casualty?n_victims=${nVictims}&event_type=${eventType}`);
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  return response.json();
+}

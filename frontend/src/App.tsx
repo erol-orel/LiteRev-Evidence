@@ -25,6 +25,11 @@ import {
   fetchResponseTimeOptimization,
   fetchCardiacArrestPrediction,
   fetchHeatwaveEMSImpact,
+  fetchStrokeDetection,
+  fetchTriageSupport,
+  fetchUndertriageRisk,
+  fetchTraumaCare,
+  fetchMassCasualty,
   fetchFulltextStats,
   type CorpusStats,
   type DocumentDetailResponse,
@@ -51,6 +56,11 @@ import {
   type OHCAForecastDay,
   type HeatwaveEMSImpactResponse,
   type HeatwaveForecastDay,
+  type StrokeDetectionResponse,
+  type TriageSupportResponse,
+  type UndertriageRiskResponse,
+  type TraumaCareResponse,
+  type MassCasualtyResponse,
   type FulltextStats,
   searchDocuments,
 } from "./lib/api";
@@ -1136,6 +1146,208 @@ function ScenariosView({ scenarios, loading, error }: { scenarios: GesicaScenari
     );
   };
 
+  // Widget Stroke Detection
+  const StrokeDetectionWidget = () => {
+    const [data, setData] = useState<StrokeDetectionResponse | null>(null);
+    const [loading, setLoading] = useState(false);
+    const [error, setError] = useState<string | null>(null);
+    const load = () => { setLoading(true); setError(null); fetchStrokeDetection().then(setData).catch((e) => setError(e.message)).finally(() => setLoading(false)); };
+    if (!data && !loading && !error) return <button onClick={load} className="w-full rounded-xl border border-cyan-500/30 bg-cyan-500/10 px-4 py-3 text-sm text-cyan-300 hover:bg-cyan-500/20 transition flex items-center justify-center gap-2"><Activity size={14} />Analyser les délais AVC — Door-to-Needle (XGBoost)</button>;
+    if (loading) return <div className="flex items-center justify-center py-4 text-cyan-300 text-sm gap-2"><RotateCcw size={14} className="animate-spin" />Calcul des délais AVC en cours...</div>;
+    if (error) return <div className="rounded-xl border border-red-500/20 bg-red-500/10 px-3 py-2 text-xs text-red-300">Erreur : {error} <button onClick={load} className="ml-2 underline">Réessayer</button></div>;
+    if (!data) return null;
+    const alertColors: Record<string, string> = { NORMAL: "text-emerald-400", VIGILANCE: "text-amber-400", ALERTE: "text-orange-400", CRITIQUE: "text-red-400" };
+    return (
+      <div className="space-y-3">
+        <div className="flex items-center gap-3 flex-wrap text-[10px] text-slate-400">
+          <span>Alerte : <span className={`font-bold ${alertColors[data.overall_alert_level] ?? "text-white"}`}>{data.overall_alert_level}</span></span>
+          <span>Risque circadien : <span className="text-cyan-300 font-semibold">{data.circadian_risk?.risk_level}</span></span>
+          <button onClick={load} className="ml-auto text-cyan-400 hover:text-cyan-300 flex items-center gap-1"><RefreshCw size={10} /> Actualiser</button>
+        </div>
+        <div className="space-y-1.5 max-h-48 overflow-y-auto">
+          {data.stroke_units?.map((u) => (
+            <div key={u.name} className={`rounded-xl border px-3 py-2 flex items-center justify-between gap-2 ${u.dtn_ok ? "bg-emerald-500/5 border-emerald-500/20" : "bg-amber-500/5 border-amber-500/20"}`}>
+              <div className="flex-1 min-w-0">
+                <p className="text-xs font-semibold text-white">{u.name} — {u.city} ({u.country})</p>
+                <p className="text-[9px] text-slate-400">{u.distance_km} km · {u.transport_time_min} min transport</p>
+              </div>
+              <div className="text-right shrink-0">
+                <p className={`text-sm font-bold ${u.dtn_ok ? "text-emerald-400" : "text-amber-400"}`}>{u.estimated_dtn_min} min DTN</p>
+                <p className="text-[9px] text-slate-400">{u.tpa_eligible ? "tPA ✓" : "tPA ✗"} {u.thrombectomy_eligible ? "· Thrombect. ✓" : ""}</p>
+              </div>
+            </div>
+          ))}
+        </div>
+        {data.recommendations?.length > 0 && <div className="rounded-xl border border-cyan-500/20 bg-cyan-500/5 px-3 py-2 text-xs text-cyan-300">{data.recommendations[0]}</div>}
+      </div>
+    );
+  };
+
+  // Widget Triage Support
+  const TriageSupportWidget = () => {
+    const [data, setData] = useState<TriageSupportResponse | null>(null);
+    const [loading, setLoading] = useState(false);
+    const [error, setError] = useState<string | null>(null);
+    const load = () => { setLoading(true); setError(null); fetchTriageSupport().then(setData).catch((e) => setError(e.message)).finally(() => setLoading(false)); };
+    if (!data && !loading && !error) return <button onClick={load} className="w-full rounded-xl border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm text-amber-300 hover:bg-amber-500/20 transition flex items-center justify-center gap-2"><CheckSquare size={14} />Charger l'aide au triage CCMU / NEWS2</button>;
+    if (loading) return <div className="flex items-center justify-center py-4 text-amber-300 text-sm gap-2"><RotateCcw size={14} className="animate-spin" />Chargement du référentiel triage...</div>;
+    if (error) return <div className="rounded-xl border border-red-500/20 bg-red-500/10 px-3 py-2 text-xs text-red-300">Erreur : {error} <button onClick={load} className="ml-2 underline">Réessayer</button></div>;
+    if (!data) return null;
+    const loadColors: Record<string, string> = { NORMAL: "text-emerald-400", MODÉRÉ: "text-amber-400", ÉLEVÉ: "text-orange-400", SATURÉ: "text-red-400" };
+    return (
+      <div className="space-y-3">
+        <div className="flex items-center gap-3 flex-wrap text-[10px] text-slate-400">
+          <span>Charge : <span className={`font-bold ${loadColors[data.current_load?.level] ?? "text-white"}`}>{data.current_load?.label}</span></span>
+          <span>Attente moy. : <span className="text-amber-300 font-semibold">{data.current_load?.mean_wait_min} min</span></span>
+          <button onClick={load} className="ml-auto text-amber-400 hover:text-amber-300 flex items-center gap-1"><RefreshCw size={10} /> Actualiser</button>
+        </div>
+        <div className="grid grid-cols-5 gap-1.5">
+          {Object.entries(data.ccmu_levels ?? {}).map(([k, v]) => (
+            <div key={k} className="rounded-xl border border-white/10 bg-slate-900/40 px-2 py-2 text-center">
+              <p className="text-xs font-bold text-white">{k}</p>
+              <p className="text-[9px] text-slate-400 mt-0.5 leading-tight">{v.label}</p>
+              <p className="text-[9px] text-slate-500 mt-0.5">{v.target_time_min} min</p>
+            </div>
+          ))}
+        </div>
+        {data.recommendations?.length > 0 && <div className="rounded-xl border border-amber-500/20 bg-amber-500/5 px-3 py-2 text-xs text-amber-300">{data.recommendations[0]}</div>}
+      </div>
+    );
+  };
+
+  // Widget Undertriage Risk
+  const UndertriageRiskWidget = () => {
+    const [data, setData] = useState<UndertriageRiskResponse | null>(null);
+    const [loading, setLoading] = useState(false);
+    const [error, setError] = useState<string | null>(null);
+    const load = () => { setLoading(true); setError(null); fetchUndertriageRisk().then(setData).catch((e) => setError(e.message)).finally(() => setLoading(false)); };
+    if (!data && !loading && !error) return <button onClick={load} className="w-full rounded-xl border border-rose-500/30 bg-rose-500/10 px-4 py-3 text-sm text-rose-300 hover:bg-rose-500/20 transition flex items-center justify-center gap-2"><AlertTriangle size={14} />Analyser les risques de sous-triage EMS</button>;
+    if (loading) return <div className="flex items-center justify-center py-4 text-rose-300 text-sm gap-2"><RotateCcw size={14} className="animate-spin" />Analyse des risques de sous-triage...</div>;
+    if (error) return <div className="rounded-xl border border-red-500/20 bg-red-500/10 px-3 py-2 text-xs text-red-300">Erreur : {error} <button onClick={load} className="ml-2 underline">Réessayer</button></div>;
+    if (!data) return null;
+    const riskColors: Record<string, string> = { FAIBLE: "text-emerald-400", MODÉRÉ: "text-amber-400", ÉLEVÉ: "text-orange-400", CRITIQUE: "text-red-400" };
+    return (
+      <div className="space-y-3">
+        <div className="flex items-center gap-3 flex-wrap text-[10px] text-slate-400">
+          <span>Alerte : <span className={`font-bold ${riskColors[data.overall_alert_level] ?? "text-white"}`}>{data.overall_alert_level}</span></span>
+          <span>Cible sous-triage : <span className="text-rose-300 font-semibold">≤{data.undertriage_rate_target_pct}%</span></span>
+          <button onClick={load} className="ml-auto text-rose-400 hover:text-rose-300 flex items-center gap-1"><RefreshCw size={10} /> Actualiser</button>
+        </div>
+        <div className="space-y-1.5 max-h-48 overflow-y-auto">
+          {data.high_risk_scenarios?.slice(0, 4).map((s, i) => (
+            <div key={i} className={`rounded-xl border px-3 py-2 ${s.risk_level === "CRITIQUE" || s.risk_level === "ÉLEVÉ" ? "border-rose-500/20 bg-rose-500/5" : "border-amber-500/20 bg-amber-500/5"}`}>
+              <div className="flex items-center justify-between">
+                <p className="text-xs font-semibold text-white">{s.scenario}</p>
+                <span className={`text-xs font-bold ${riskColors[s.risk_level] ?? "text-white"}`}>{s.undertriage_risk_pct}%</span>
+              </div>
+              <p className="text-[9px] text-slate-400 mt-0.5">{s.recommended_action}</p>
+            </div>
+          ))}
+        </div>
+        {data.recommendations?.length > 0 && <div className="rounded-xl border border-rose-500/20 bg-rose-500/5 px-3 py-2 text-xs text-rose-300">{data.recommendations[0]}</div>}
+      </div>
+    );
+  };
+
+  // Widget Trauma Care
+  const TraumaCareWidget = () => {
+    const [data, setData] = useState<TraumaCareResponse | null>(null);
+    const [loading, setLoading] = useState(false);
+    const [error, setError] = useState<string | null>(null);
+    const load = () => { setLoading(true); setError(null); fetchTraumaCare().then(setData).catch((e) => setError(e.message)).finally(() => setLoading(false)); };
+    if (!data && !loading && !error) return <button onClick={load} className="w-full rounded-xl border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-300 hover:bg-red-500/20 transition flex items-center justify-center gap-2"><Activity size={14} />Calculer ISS / RTS / TRISS — Cas Trauma</button>;
+    if (loading) return <div className="flex items-center justify-center py-4 text-red-300 text-sm gap-2"><RotateCcw size={14} className="animate-spin" />Calcul des scores trauma...</div>;
+    if (error) return <div className="rounded-xl border border-red-500/20 bg-red-500/10 px-3 py-2 text-xs text-red-300">Erreur : {error} <button onClick={load} className="ml-2 underline">Réessayer</button></div>;
+    if (!data) return null;
+    return (
+      <div className="space-y-3">
+        <div className="flex items-center gap-3 flex-wrap text-[10px] text-slate-400">
+          <span>Cas analysés : <span className="text-red-300 font-semibold">{data.cohort_summary?.n_cases}</span></span>
+          <span>Survie moy. : <span className="text-emerald-300 font-semibold">{data.cohort_summary?.mean_survival_pct}%</span></span>
+          <span>Damage Control : <span className="text-amber-300 font-semibold">{data.cohort_summary?.damage_control_cases}/{data.cohort_summary?.n_cases}</span></span>
+          <button onClick={load} className="ml-auto text-red-400 hover:text-red-300 flex items-center gap-1"><RefreshCw size={10} /> Actualiser</button>
+        </div>
+        <div className="space-y-1.5 max-h-48 overflow-y-auto">
+          {data.case_examples?.map((c, i) => (
+            <div key={i} className={`rounded-xl border px-3 py-2 flex items-center justify-between gap-2 ${c.damage_control_indicated ? "border-amber-500/20 bg-amber-500/5" : "border-white/10 bg-white/5"}`}>
+              <div className="flex-1 min-w-0">
+                <p className="text-xs font-semibold text-white">{c.case_name}</p>
+                <p className="text-[9px] text-slate-400">ISS {c.scores.iss} — {c.scores.iss_level} {c.damage_control_indicated ? "· DC ⚠" : ""}</p>
+              </div>
+              <div className="text-right shrink-0">
+                <p className={`text-sm font-bold ${c.scores.triss_survival_pct >= 75 ? "text-emerald-400" : c.scores.triss_survival_pct >= 50 ? "text-amber-400" : "text-red-400"}`}>{c.scores.triss_survival_pct}%</p>
+                <p className="text-[9px] text-slate-400">TRISS</p>
+              </div>
+            </div>
+          ))}
+        </div>
+        {data.recommendations?.length > 0 && <div className="rounded-xl border border-red-500/20 bg-red-500/5 px-3 py-2 text-xs text-red-300">{data.recommendations[0]}</div>}
+      </div>
+    );
+  };
+
+  // Widget Mass Casualty
+  const MassCasualtyWidget = () => {
+    const [data, setData] = useState<MassCasualtyResponse | null>(null);
+    const [loading, setLoading] = useState(false);
+    const [error, setError] = useState<string | null>(null);
+    const [nVictims, setNVictims] = useState(50);
+    const [eventType, setEventType] = useState("transport_accident");
+    const load = () => { setLoading(true); setError(null); fetchMassCasualty(nVictims, eventType).then(setData).catch((e) => setError(e.message)).finally(() => setLoading(false)); };
+    if (!data && !loading && !error) return (
+      <div className="space-y-3">
+        <div className="flex items-center gap-2 flex-wrap">
+          <select value={eventType} onChange={(e) => setEventType(e.target.value)} className="rounded-lg border border-white/10 bg-slate-900/60 px-2 py-1.5 text-xs text-slate-300">
+            <option value="transport_accident">Accident transport</option>
+            <option value="explosion">Explosion</option>
+            <option value="chemical">Intoxication chimique</option>
+            <option value="building_collapse">Effondrement</option>
+            <option value="mass_shooting">Fusillade</option>
+            <option value="industrial_accident">Accident industriel</option>
+          </select>
+          <input type="number" min={1} max={500} value={nVictims} onChange={(e) => setNVictims(parseInt(e.target.value) || 50)} className="w-20 rounded-lg border border-white/10 bg-slate-900/60 px-2 py-1.5 text-xs text-slate-300" placeholder="Victimes" />
+          <button onClick={load} className="rounded-xl border border-violet-500/30 bg-violet-500/10 px-4 py-1.5 text-sm text-violet-300 hover:bg-violet-500/20 transition flex items-center gap-2"><Users size={14} />Simuler</button>
+        </div>
+      </div>
+    );
+    if (loading) return <div className="flex items-center justify-center py-4 text-violet-300 text-sm gap-2"><RotateCcw size={14} className="animate-spin" />Simulation Monte-Carlo en cours...</div>;
+    if (error) return <div className="rounded-xl border border-red-500/20 bg-red-500/10 px-3 py-2 text-xs text-red-300">Erreur : {error} <button onClick={load} className="ml-2 underline">Réessayer</button></div>;
+    if (!data) return null;
+    const alertColors: Record<string, string> = { VIGILANCE: "text-amber-400", MODÉRÉ: "text-amber-400", ÉLEVÉ: "text-orange-400", CRITIQUE: "text-red-400" };
+    const saltColors: Record<string, string> = { immediate: "text-red-400", delayed: "text-amber-400", minimal: "text-emerald-400", expectant: "text-slate-400", deceased: "text-slate-600" };
+    return (
+      <div className="space-y-3">
+        <div className="flex items-center gap-3 flex-wrap text-[10px] text-slate-400">
+          <span>Alerte : <span className={`font-bold ${alertColors[data.overall_alert_level] ?? "text-white"}`}>{data.overall_alert_level}</span></span>
+          <span>Victimes : <span className="text-violet-300 font-semibold">{data.scenario?.n_victims}</span></span>
+          <span>Renforts : <span className={data.resource_needs?.mutual_aid_required ? "text-red-400 font-bold" : "text-emerald-400"}>{data.resource_needs?.mutual_aid_required ? "REQUIS" : "Non requis"}</span></span>
+          <button onClick={load} className="ml-auto text-violet-400 hover:text-violet-300 flex items-center gap-1"><RefreshCw size={10} /> Recalculer</button>
+        </div>
+        <div className="grid grid-cols-5 gap-1.5">
+          {Object.entries(data.salt_distribution ?? {}).map(([k, v]) => (
+            <div key={k} className="rounded-xl border border-white/10 bg-slate-900/40 px-2 py-2 text-center">
+              <p className={`text-sm font-bold ${saltColors[k] ?? "text-white"}`}>{v.mean}</p>
+              <p className="text-[9px] text-slate-400 mt-0.5 leading-tight">{v.label.split(" ")[0]}</p>
+            </div>
+          ))}
+        </div>
+        <div className="space-y-1 max-h-32 overflow-y-auto">
+          {data.hospital_distribution?.map((h, i) => (
+            <div key={i} className="rounded-xl border border-white/10 bg-slate-900/40 px-3 py-1.5 flex items-center justify-between gap-2">
+              <p className="text-xs text-slate-300">{h.hospital} ({h.country})</p>
+              <div className="flex items-center gap-3 text-[10px]">
+                <span className="text-red-400">{h.assigned_immediate} 🔴</span>
+                <span className="text-amber-400">{h.assigned_delayed} 🟡</span>
+                <span className="text-slate-400">{h.transport_time_min} min</span>
+              </div>
+            </div>
+          ))}
+        </div>
+        {data.recommendations?.length > 0 && <div className="rounded-xl border border-violet-500/20 bg-violet-500/5 px-3 py-2 text-xs text-violet-300">{data.recommendations[0]}</div>}
+      </div>
+    );
+  };
+
   const ScenarioCard = ({ scenario }: { scenario: GesicaScenario }) => {
     const isExpanded = expandedId === scenario.id;
     const hasArticles = scenario.articleCount > 0;
@@ -1265,6 +1477,76 @@ function ScenariosView({ scenarios, loading, error }: { scenarios: GesicaScenari
                   <span className="text-[10px] text-orange-400 bg-orange-500/10 border border-orange-500/20 px-2 py-0.5 rounded-full">DLNM + UTCI</span>
                 </div>
                 <HeatwaveEMSWidget />
+              </div>
+            )}
+
+            {/* Widget Stroke Detection */}
+            {scenario.id === "stroke-detection" && (
+              <div className="rounded-2xl border border-cyan-500/20 bg-cyan-500/5 p-4">
+                <div className="flex items-center justify-between mb-3">
+                  <div className="flex items-center gap-2">
+                    <Activity size={14} className="text-cyan-400" />
+                    <span className="text-xs font-semibold text-cyan-300 uppercase tracking-wider">Modèle Prédictif — AVC Door-to-Needle</span>
+                  </div>
+                  <span className="text-[10px] text-cyan-400 bg-cyan-500/10 border border-cyan-500/20 px-2 py-0.5 rounded-full">XGBoost + NIHSS</span>
+                </div>
+                <StrokeDetectionWidget />
+              </div>
+            )}
+
+            {/* Widget Triage Support */}
+            {scenario.id === "triage-support" && (
+              <div className="rounded-2xl border border-amber-500/20 bg-amber-500/5 p-4">
+                <div className="flex items-center justify-between mb-3">
+                  <div className="flex items-center gap-2">
+                    <CheckSquare size={14} className="text-amber-400" />
+                    <span className="text-xs font-semibold text-amber-300 uppercase tracking-wider">Aide au Triage — CCMU / NEWS2</span>
+                  </div>
+                  <span className="text-[10px] text-amber-400 bg-amber-500/10 border border-amber-500/20 px-2 py-0.5 rounded-full">CCMU + NEWS2 + LLM</span>
+                </div>
+                <TriageSupportWidget />
+              </div>
+            )}
+
+            {/* Widget Undertriage Risk */}
+            {scenario.id === "undertriage-risk" && (
+              <div className="rounded-2xl border border-rose-500/20 bg-rose-500/5 p-4">
+                <div className="flex items-center justify-between mb-3">
+                  <div className="flex items-center gap-2">
+                    <AlertTriangle size={14} className="text-rose-400" />
+                    <span className="text-xs font-semibold text-rose-300 uppercase tracking-wider">Détection Sous-Triage EMS</span>
+                  </div>
+                  <span className="text-[10px] text-rose-400 bg-rose-500/10 border border-rose-500/20 px-2 py-0.5 rounded-full">RF + Régression logistique</span>
+                </div>
+                <UndertriageRiskWidget />
+              </div>
+            )}
+
+            {/* Widget Trauma Care */}
+            {scenario.id === "trauma-care" && (
+              <div className="rounded-2xl border border-red-500/20 bg-red-500/5 p-4">
+                <div className="flex items-center justify-between mb-3">
+                  <div className="flex items-center gap-2">
+                    <Activity size={14} className="text-red-400" />
+                    <span className="text-xs font-semibold text-red-300 uppercase tracking-wider">Scores Trauma — ISS / RTS / TRISS</span>
+                  </div>
+                  <span className="text-[10px] text-red-400 bg-red-500/10 border border-red-500/20 px-2 py-0.5 rounded-full">Cox Survival + ISS</span>
+                </div>
+                <TraumaCareWidget />
+              </div>
+            )}
+
+            {/* Widget Mass Casualty */}
+            {scenario.id === "mass-casualty" && (
+              <div className="rounded-2xl border border-violet-500/20 bg-violet-500/5 p-4">
+                <div className="flex items-center justify-between mb-3">
+                  <div className="flex items-center gap-2">
+                    <Users size={14} className="text-violet-400" />
+                    <span className="text-xs font-semibold text-violet-300 uppercase tracking-wider">Simulation AME — SALT Triage</span>
+                  </div>
+                  <span className="text-[10px] text-violet-400 bg-violet-500/10 border border-violet-500/20 px-2 py-0.5 rounded-full">Monte-Carlo + SALT</span>
+                </div>
+                <MassCasualtyWidget />
               </div>
             )}
 
