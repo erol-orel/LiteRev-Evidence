@@ -63,95 +63,110 @@ def safe_get(url: str, params: dict = None, timeout: int = 15) -> Optional[dict]
 
 # ─── PubMed ───────────────────────────────────────────────────────────────────
 
+import xml.etree.ElementTree as ET
+
+
+def _xml_text(el, path: str, default: str = "") -> str:
+    """Extrait le texte d'un élément XML via un chemin XPath simple."""
+    node = el.find(path)
+    return (node.text or "").strip() if node is not None else default
+
+
 def fetch_pubmed_metadata(pmid: str) -> dict:
-    """Récupère les métadonnées complètes d'un article PubMed via efetch."""
-    data = safe_get(f"{PUBMED_BASE}/efetch.fcgi", {
-        "db": "pubmed", "id": pmid, "retmode": "json", "rettype": "abstract",
-        "tool": "literev", "email": EMAIL
-    })
-    if not data:
-        return {}
+    """Récupère les métadonnées complètes d'un article PubMed via efetch XML.
     
+    Note : efetch avec retmode=json ne fonctionne pas pour le type 'abstract'.
+    On utilise retmode=xml et on parse le XML avec ElementTree.
+    """
+    for attempt in range(3):
+        try:
+            r = requests.get(
+                f"{PUBMED_BASE}/efetch.fcgi",
+                params={
+                    "db": "pubmed", "id": pmid,
+                    "retmode": "xml", "rettype": "abstract",
+                    "tool": "literev", "email": EMAIL
+                },
+                timeout=20
+            )
+            if r.status_code == 200 and r.text.strip().startswith("<"):
+                break
+            elif r.status_code == 429:
+                log.warning(f"Rate limit PubMed, attente 10s...")
+                time.sleep(10)
+            else:
+                return {}
+        except Exception as e:
+            log.warning(f"Erreur réseau PubMed ({attempt+1}/3) : {e}")
+            time.sleep(2)
+    else:
+        return {}
+
     try:
-        article = data["PubmedArticleSet"]["PubmedArticle"][0]
-        medline = article["MedlineCitation"]
-        art = medline["Article"]
-        
+        root = ET.fromstring(r.text)
+        art_el = root.find(".//Article")
+        medline_el = root.find(".//MedlineCitation")
+        if art_el is None or medline_el is None:
+            return {}
+
         # Auteurs
         authors = []
-        for a in art.get("AuthorList", {}).get("Author", []):
-            last = a.get("LastName", "")
-            fore = a.get("ForeName", "")
+        for a in art_el.findall(".//Author"):
+            last = _xml_text(a, "LastName")
+            fore = _xml_text(a, "ForeName")
             if last:
                 authors.append(f"{last} {fore}".strip())
-        
+
         # Journal
-        journal_info = art.get("Journal", {})
-        journal = journal_info.get("Title", "") or journal_info.get("ISOAbbreviation", "")
-        
+        journal = _xml_text(art_el, ".//Journal/Title") or _xml_text(art_el, ".//Journal/ISOAbbreviation")
+
         # Volume, issue, pages
-        journal_issue = journal_info.get("JournalIssue", {})
-        volume = journal_issue.get("Volume", "")
-        issue = journal_issue.get("Issue", "")
-        pages = art.get("Pagination", {}).get("MedlinePgn", "")
-        
+        volume = _xml_text(art_el, ".//JournalIssue/Volume")
+        issue = _xml_text(art_el, ".//JournalIssue/Issue")
+        pages = _xml_text(art_el, ".//Pagination/MedlinePgn")
+
         # DOI
         doi = ""
-        for loc in art.get("ELocationID", []):
-            if isinstance(loc, dict) and loc.get("@EIdType") == "doi":
-                doi = loc.get("#text", "")
+        for loc in art_el.findall(".//ELocationID"):
+            if loc.get("EIdType") == "doi":
+                doi = (loc.text or "").strip()
                 break
-        
+
         # Keywords
-        keywords = []
-        for kw in medline.get("KeywordList", [{}]):
-            if isinstance(kw, dict):
-                for k in kw.get("Keyword", []):
-                    if isinstance(k, dict):
-                        keywords.append(k.get("#text", ""))
-                    elif isinstance(k, str):
-                        keywords.append(k)
-        
+        keywords = [kw.text.strip() for kw in medline_el.findall(".//Keyword") if kw.text]
+
         # MeSH terms
-        mesh_terms = []
-        for m in medline.get("MeshHeadingList", {}).get("MeshHeading", []):
-            if isinstance(m, dict):
-                desc = m.get("DescriptorName", {})
-                if isinstance(desc, dict):
-                    mesh_terms.append(desc.get("#text", ""))
-        
+        mesh_terms = [dn.text.strip() for dn in medline_el.findall(".//MeshHeading/DescriptorName") if dn.text]
+
         # Language
-        lang_raw = art.get("Language", ["en"])
-        language = lang_raw[0] if isinstance(lang_raw, list) else lang_raw
-        
+        lang_el = art_el.find(".//Language")
+        language = (lang_el.text or "en").strip()[:10] if lang_el is not None else "en"
+
         # Publication type
-        pub_types = []
-        for pt in art.get("PublicationTypeList", {}).get("PublicationType", []):
-            if isinstance(pt, dict):
-                pub_types.append(pt.get("#text", ""))
-        
+        pub_types = [pt.text.strip() for pt in art_el.findall(".//PublicationType") if pt.text]
+
         # Affiliations
-        affiliations = []
-        for a in art.get("AuthorList", {}).get("Author", []):
-            for aff in a.get("AffiliationInfo", []):
-                if isinstance(aff, dict) and aff.get("Affiliation"):
-                    affiliations.append(aff["Affiliation"])
-        
+        affiliations = list({
+            aff.text.strip()
+            for aff in art_el.findall(".//AffiliationInfo/Affiliation")
+            if aff.text
+        })
+
         return {
             "authors": ", ".join(authors) if authors else None,
             "doi": doi or None,
             "journal": journal or None,
             "keywords": ", ".join(keywords) if keywords else None,
-            "language": language[:10] if language else "en",
+            "language": language,
             "volume": volume or None,
             "issue": issue or None,
             "pages": pages or None,
             "mesh_terms": json.dumps(mesh_terms) if mesh_terms else None,
-            "affiliations": " | ".join(set(affiliations))[:1000] if affiliations else None,
+            "affiliations": " | ".join(affiliations)[:1000] if affiliations else None,
             "publication_type": ", ".join(pub_types[:3]) if pub_types else None,
         }
     except Exception as e:
-        log.debug(f"Erreur parsing PubMed {pmid}: {e}")
+        log.debug(f"Erreur parsing PubMed XML {pmid}: {e}")
         return {}
 
 
