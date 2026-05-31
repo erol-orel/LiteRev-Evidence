@@ -348,6 +348,8 @@ def main():
     parser.add_argument("--source", choices=["pubmed", "openalex", "crossref", "all"], default="all")
     parser.add_argument("--project", default="gesica", help="project_context à traiter")
     parser.add_argument("--only-missing", action="store_true", help="Traiter uniquement les docs sans authors")
+    parser.add_argument("--workers", type=int, default=1,
+                        help="Nombre de workers parallèles (défaut: 1, max recommandé: 3 pour respecter les rate limits)")
     args = parser.parse_args()
     
     with engine.connect() as conn:
