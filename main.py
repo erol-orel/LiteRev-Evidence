@@ -2125,3 +2125,48 @@ def get_fulltext_stats() -> dict[str, Any]:
             for r in sample_fulltext
         ],
     }
+
+# ─── Modèle Prédictif : Cardiac Arrest Prediction (OHCA) ─────────────────────
+from cardiac_arrest_prediction_model import cardiac_arrest_model_singleton
+
+@app.get("/gesica/model/cardiac-arrest-prediction")
+def get_cardiac_arrest_prediction():
+    """
+    Modèle de prédiction de l'incidence des arrêts cardiaques extra-hospitaliers (OHCA).
+    Combine LightGBM + features météo (Open-Meteo) + chronologiques.
+    Basé sur Nakashima et al. (2021, 2025) et Pál-Jakab et al. (2026).
+    Prévision sur 3 jours avec niveaux d'alerte et recommandations EMS.
+    """
+    try:
+        result = cardiac_arrest_model_singleton.predict()
+        return result
+    except Exception as e:
+        return {
+            "status": "error",
+            "error": str(e),
+            "model": "CardiacArrestPrediction",
+            "message": "Erreur lors de l'exécution du modèle OHCA.",
+        }
+
+
+# ─── Modèle Prédictif : Heatwave EMS Impact (DLNM + UTCI) ───────────────────
+from heatwave_ems_impact_model import heatwave_model_singleton
+
+@app.get("/gesica/model/heatwave-ems-impact")
+def get_heatwave_ems_impact():
+    """
+    Modèle d'impact des vagues de chaleur sur la demande EMS.
+    Combine DLNM (effets retardés) + UTCI (stress thermique) + détection vague de chaleur.
+    Prévision sur 7 jours avec impact EMS prédit et recommandations opérationnelles.
+    Basé sur Xu et al. (2023), Ke et al. (2023), Gasparrini et al. (2010).
+    """
+    try:
+        result = heatwave_model_singleton.predict()
+        return result
+    except Exception as e:
+        return {
+            "status": "error",
+            "error": str(e),
+            "model": "HeatwaveEMSImpact",
+            "message": "Erreur lors de l'exécution du modèle canicule.",
+        }

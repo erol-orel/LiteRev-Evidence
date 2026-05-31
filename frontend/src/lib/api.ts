@@ -970,3 +970,117 @@ export async function fetchResponseTimeOptimization(forceRefresh = false): Promi
   if (!response.ok) throw new Error(`HTTP ${response.status}`);
   return response.json();
 }
+
+// ─── Cardiac Arrest Prediction Model (OHCA) ──────────────────────────────────
+export interface OHCAForecastDay {
+  date: string;
+  day_name: string;
+  temp_max: number;
+  temp_min: number;
+  season: string;
+  risk_multiplier: number;
+  risk_pct_above_baseline: number;
+  ohca_per_100k_predicted: number;
+  ohca_absolute_predicted: number;
+  alert_level: "NORMAL" | "VIGILANCE" | "ÉLEVÉ" | "CRITIQUE";
+  active_risk_factors: string[];
+}
+export interface CardiacArrestPredictionResponse {
+  model: string;
+  status: "live" | "fallback" | "error";
+  generated_at: string;
+  region: string;
+  population_100k: number;
+  ohca_baseline_daily_per_100k: number;
+  ohca_baseline_annual_per_100k: number;
+  flu_epidemic_active: boolean;
+  overall_alert_level: "NORMAL" | "VIGILANCE" | "ÉLEVÉ" | "CRITIQUE";
+  max_risk_multiplier_3d: number;
+  avg_risk_multiplier_7d: number;
+  current_weather: {
+    temp_max: number;
+    temp_min: number;
+    temp_mean: number;
+    humidity: number;
+    wind_speed: number;
+    season: string;
+    source: string;
+  };
+  forecast_3d: OHCAForecastDay[];
+  recommendations: string[];
+  scientific_references: string[];
+  data_sources: string[];
+}
+export async function fetchCardiacArrestPrediction(): Promise<CardiacArrestPredictionResponse> {
+  const response = await fetch(`${API_BASE_URL}/gesica/model/cardiac-arrest-prediction`);
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  return response.json();
+}
+
+// ─── Heatwave EMS Impact Model (DLNM + UTCI) ─────────────────────────────────
+export interface HeatwaveForecastDay {
+  date: string;
+  temp_max: number;
+  temp_min: number;
+  utci: number;
+  utci_category: string;
+  is_heatwave_day: boolean;
+  ems_multiplier: number;
+  ems_calls_predicted: number;
+  ems_excess_calls: number;
+  ems_excess_pct: number;
+  alert_level: "NORMAL" | "VIGILANCE" | "ALERTE" | "URGENCE";
+  pathology_risks: Record<string, { label: string; risk_multiplier: number }>;
+}
+export interface HeatwaveEMSImpactResponse {
+  model: string;
+  status: "live" | "fallback" | "error";
+  generated_at: string;
+  region: string;
+  overall_alert_level: "NORMAL" | "VIGILANCE" | "ALERTE" | "URGENCE";
+  ems_baseline_daily: number;
+  current_weather: {
+    temp_max: number;
+    temp_min: number;
+    apparent_temp_max: number;
+    humidity: number;
+    wind_speed_ms: number;
+    utci: number;
+    utci_category: string;
+    source: string;
+  };
+  heatwave_status: {
+    active: boolean;
+    duration_days: number;
+    severity: string;
+    start_date: string | null;
+    consecutive_hw_days: number;
+    threshold_tmax: number;
+    threshold_tmin: number;
+  };
+  dlnm_analysis: {
+    multiplier: number;
+    ems_calls_today: number;
+    excess_calls_today: number;
+    excess_pct_today: number;
+    lag_contributions: Array<{
+      lag: number;
+      date: string;
+      utci: number;
+      utci_category: string;
+      ems_impact_factor: number;
+      weight: number;
+      contribution: number;
+    }>;
+  };
+  forecast_7d: HeatwaveForecastDay[];
+  max_ems_multiplier_7d: number;
+  recommendations: string[];
+  scientific_references: string[];
+  data_sources: string[];
+}
+export async function fetchHeatwaveEMSImpact(): Promise<HeatwaveEMSImpactResponse> {
+  const response = await fetch(`${API_BASE_URL}/gesica/model/heatwave-ems-impact`);
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  return response.json();
+}

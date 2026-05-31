@@ -23,6 +23,8 @@ import {
   fetchDemandForecast,
   fetchEpidemicEarlyWarning,
   fetchResponseTimeOptimization,
+  fetchCardiacArrestPrediction,
+  fetchHeatwaveEMSImpact,
   fetchFulltextStats,
   type CorpusStats,
   type DocumentDetailResponse,
@@ -45,6 +47,10 @@ import {
   type EpidemicDiseaseResult,
   type ResponseTimeOptimizationResponse,
   type ResponseTimeAssignment,
+  type CardiacArrestPredictionResponse,
+  type OHCAForecastDay,
+  type HeatwaveEMSImpactResponse,
+  type HeatwaveForecastDay,
   type FulltextStats,
   searchDocuments,
 } from "./lib/api";
@@ -1004,6 +1010,132 @@ function ScenariosView({ scenarios, loading, error }: { scenarios: GesicaScenari
     );
   };
 
+  // Widget Cardiac Arrest Prediction (OHCA)
+  const CardiacArrestWidget = () => {
+    const [data, setData] = useState<CardiacArrestPredictionResponse | null>(null);
+    const [loading, setLoading] = useState(false);
+    const [error, setError] = useState<string | null>(null);
+
+    const load = () => {
+      setLoading(true);
+      setError(null);
+      fetchCardiacArrestPrediction()
+        .then(setData)
+        .catch((e) => setError(e.message))
+        .finally(() => setLoading(false));
+    };
+
+    if (!data && !loading && !error) {
+      return (
+        <button onClick={load} className="w-full rounded-xl border border-rose-500/30 bg-rose-500/10 px-4 py-3 text-sm text-rose-300 hover:bg-rose-500/20 transition flex items-center justify-center gap-2">
+          <Activity size={14} />
+          Prédire le risque OHCA (LightGBM + météo)
+        </button>
+      );
+    }
+    if (loading) return <div className="flex items-center justify-center py-4 text-rose-300 text-sm gap-2"><RotateCcw size={14} className="animate-spin" />Calcul du risque OHCA en cours...</div>;
+    if (error) return <div className="rounded-xl border border-red-500/20 bg-red-500/10 px-3 py-2 text-xs text-red-300">Erreur : {error} <button onClick={load} className="ml-2 underline">Réessayer</button></div>;
+    if (!data) return null;
+
+    const alertColors: Record<string, string> = { NORMAL: "text-emerald-400", VIGILANCE: "text-amber-400", "ÉLEVÉ": "text-orange-400", CRITIQUE: "text-red-400" };
+    const alertBg: Record<string, string> = { NORMAL: "bg-emerald-500/10 border-emerald-500/20", VIGILANCE: "bg-amber-500/10 border-amber-500/20", "ÉLEVÉ": "bg-orange-500/10 border-orange-500/20", CRITIQUE: "bg-red-500/10 border-red-500/20" };
+
+    return (
+      <div className="space-y-3">
+        <div className="flex items-center gap-3 flex-wrap text-[10px] text-slate-400">
+          <span>Alerte : <span className={`font-bold ${alertColors[data.overall_alert_level] ?? "text-white"}`}>{data.overall_alert_level}</span></span>
+          <span>Risque max 3j : <span className="text-rose-300 font-semibold">×{data.max_risk_multiplier_3d}</span></span>
+          <span>T° max : <span className="text-slate-300">{data.current_weather.temp_max}°C</span></span>
+          <span>Saison : <span className="text-slate-300">{data.current_weather.season}</span></span>
+          {data.flu_epidemic_active && <span className="text-amber-400 border border-amber-500/20 bg-amber-500/10 px-1.5 py-0.5 rounded">Grippe active (+12%)</span>}
+          <button onClick={load} className="ml-auto text-rose-400 hover:text-rose-300 flex items-center gap-1"><RefreshCw size={10} /> Actualiser</button>
+        </div>
+        <div className="space-y-1.5">
+          {(data.forecast_3d as OHCAForecastDay[]).map((d) => (
+            <div key={d.date} className={`rounded-xl border px-3 py-2 flex items-center justify-between gap-2 ${alertBg[d.alert_level] ?? "bg-white/5 border-white/10"}`}>
+              <div className="flex-1 min-w-0">
+                <p className="text-xs font-semibold text-white">{d.date} ({d.day_name})</p>
+                <p className="text-[9px] text-slate-400 truncate">{d.active_risk_factors.length > 0 ? d.active_risk_factors[0] : "Pas de facteur de risque actif"}</p>
+              </div>
+              <div className="text-right shrink-0">
+                <p className={`text-sm font-bold ${alertColors[d.alert_level] ?? "text-white"}`}>{d.ohca_absolute_predicted} OHCA/j</p>
+                <p className={`text-[9px] font-semibold ${alertColors[d.alert_level] ?? "text-white"}`}>{d.risk_pct_above_baseline > 0 ? `+${d.risk_pct_above_baseline}%` : "Baseline"}</p>
+              </div>
+            </div>
+          ))}
+        </div>
+        {data.recommendations.length > 0 && (
+          <div className={`rounded-xl border px-3 py-2 text-xs ${alertBg[data.overall_alert_level] ?? "border-white/10 bg-white/5"} ${alertColors[data.overall_alert_level] ?? "text-slate-300"}`}>
+            {data.recommendations[0]}
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  // Widget Heatwave EMS Impact (DLNM + UTCI)
+  const HeatwaveEMSWidget = () => {
+    const [data, setData] = useState<HeatwaveEMSImpactResponse | null>(null);
+    const [loading, setLoading] = useState(false);
+    const [error, setError] = useState<string | null>(null);
+
+    const load = () => {
+      setLoading(true);
+      setError(null);
+      fetchHeatwaveEMSImpact()
+        .then(setData)
+        .catch((e) => setError(e.message))
+        .finally(() => setLoading(false));
+    };
+
+    if (!data && !loading && !error) {
+      return (
+        <button onClick={load} className="w-full rounded-xl border border-orange-500/30 bg-orange-500/10 px-4 py-3 text-sm text-orange-300 hover:bg-orange-500/20 transition flex items-center justify-center gap-2">
+          <Cloud size={14} />
+          Analyser l'impact canicule sur les EMS (DLNM + UTCI)
+        </button>
+      );
+    }
+    if (loading) return <div className="flex items-center justify-center py-4 text-orange-300 text-sm gap-2"><RotateCcw size={14} className="animate-spin" />Calcul de l'impact thermique en cours...</div>;
+    if (error) return <div className="rounded-xl border border-red-500/20 bg-red-500/10 px-3 py-2 text-xs text-red-300">Erreur : {error} <button onClick={load} className="ml-2 underline">Réessayer</button></div>;
+    if (!data) return null;
+
+    const alertColors: Record<string, string> = { NORMAL: "text-emerald-400", VIGILANCE: "text-amber-400", ALERTE: "text-orange-400", URGENCE: "text-red-400" };
+    const alertBg: Record<string, string> = { NORMAL: "bg-emerald-500/10 border-emerald-500/20", VIGILANCE: "bg-amber-500/10 border-amber-500/20", ALERTE: "bg-orange-500/10 border-orange-500/20", URGENCE: "bg-red-500/10 border-red-500/20" };
+
+    return (
+      <div className="space-y-3">
+        <div className="flex items-center gap-3 flex-wrap text-[10px] text-slate-400">
+          <span>Alerte : <span className={`font-bold ${alertColors[data.overall_alert_level] ?? "text-white"}`}>{data.overall_alert_level}</span></span>
+          <span>UTCI : <span className="text-orange-300 font-semibold">{data.current_weather.utci}°C</span></span>
+          <span>T° max : <span className="text-slate-300">{data.current_weather.temp_max}°C</span></span>
+          <span>EMS aujourd'hui : <span className="text-orange-300 font-semibold">{data.dlnm_analysis.ems_calls_today} appels</span></span>
+          {data.heatwave_status.active && <span className="text-red-400 border border-red-500/20 bg-red-500/10 px-1.5 py-0.5 rounded">Vague de chaleur ({data.heatwave_status.duration_days}j)</span>}
+          <button onClick={load} className="ml-auto text-orange-400 hover:text-orange-300 flex items-center gap-1"><RefreshCw size={10} /> Actualiser</button>
+        </div>
+        <div className="space-y-1.5 max-h-48 overflow-y-auto">
+          {(data.forecast_7d as HeatwaveForecastDay[]).map((d) => (
+            <div key={d.date} className={`rounded-xl border px-3 py-2 flex items-center justify-between gap-2 ${alertBg[d.alert_level] ?? "bg-white/5 border-white/10"}`}>
+              <div className="flex-1 min-w-0">
+                <p className="text-xs font-semibold text-white">{d.date}</p>
+                <p className="text-[9px] text-slate-400">UTCI {d.utci}°C — {d.utci_category.replace(/_/g, " ")} {d.is_heatwave_day ? "🔥" : ""}</p>
+              </div>
+              <div className="text-right shrink-0">
+                <p className={`text-sm font-bold ${alertColors[d.alert_level] ?? "text-white"}`}>{d.ems_calls_predicted} appels</p>
+                <p className={`text-[9px] font-semibold ${alertColors[d.alert_level] ?? "text-white"}`}>{d.ems_excess_pct > 0 ? `+${d.ems_excess_pct}%` : "Baseline"}</p>
+              </div>
+            </div>
+          ))}
+        </div>
+        {data.recommendations.length > 0 && (
+          <div className={`rounded-xl border px-3 py-2 text-xs ${alertBg[data.overall_alert_level] ?? "border-white/10 bg-white/5"} ${alertColors[data.overall_alert_level] ?? "text-slate-300"}`}>
+            {data.recommendations[0]}
+          </div>
+        )}
+      </div>
+    );
+  };
+
   const ScenarioCard = ({ scenario }: { scenario: GesicaScenario }) => {
     const isExpanded = expandedId === scenario.id;
     const hasArticles = scenario.articleCount > 0;
@@ -1105,6 +1237,34 @@ function ScenariosView({ scenarios, loading, error }: { scenarios: GesicaScenari
                   <span className="text-[10px] text-sky-400 bg-sky-500/10 border border-sky-500/20 px-2 py-0.5 rounded-full">OSRM + Open-Meteo</span>
                 </div>
                 <ResponseTimeWidget />
+              </div>
+            )}
+
+            {/* Widget Cardiac Arrest Prediction (OHCA) */}
+            {scenario.id === "cardiac-arrest-prediction" && (
+              <div className="rounded-2xl border border-rose-500/20 bg-rose-500/5 p-4">
+                <div className="flex items-center justify-between mb-3">
+                  <div className="flex items-center gap-2">
+                    <Activity size={14} className="text-rose-400" />
+                    <span className="text-xs font-semibold text-rose-300 uppercase tracking-wider">Modèle Prédictif — Arrêts Cardiaques OHCA J+3</span>
+                  </div>
+                  <span className="text-[10px] text-rose-400 bg-rose-500/10 border border-rose-500/20 px-2 py-0.5 rounded-full">LightGBM + Météo</span>
+                </div>
+                <CardiacArrestWidget />
+              </div>
+            )}
+
+            {/* Widget Heatwave EMS Impact */}
+            {scenario.id === "heatwave-ems-impact" && (
+              <div className="rounded-2xl border border-orange-500/20 bg-orange-500/5 p-4">
+                <div className="flex items-center justify-between mb-3">
+                  <div className="flex items-center gap-2">
+                    <Cloud size={14} className="text-orange-400" />
+                    <span className="text-xs font-semibold text-orange-300 uppercase tracking-wider">Modèle Prédictif — Impact Canicule EMS J+7</span>
+                  </div>
+                  <span className="text-[10px] text-orange-400 bg-orange-500/10 border border-orange-500/20 px-2 py-0.5 rounded-full">DLNM + UTCI</span>
+                </div>
+                <HeatwaveEMSWidget />
               </div>
             )}
 
