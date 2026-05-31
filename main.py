@@ -2302,3 +2302,96 @@ SCENARIO_LIVING_REVIEW_IDS = [
     "cardiac-arrest-prediction", "heatwave-ems-impact", "stroke-detection",
     "triage-support", "undertriage-risk", "trauma-care", "mass-casualty",
 ]
+
+# ─── Endpoints Groupe 1 (Critique) ───────────────────────────────────────────
+
+@app.get("/gesica/model/clinical-deterioration-prediction")
+def endpoint_clinical_deterioration():
+    from clinical_deterioration_model import clinical_deterioration_model_singleton
+    return clinical_deterioration_model_singleton.predict_demo()
+
+@app.get("/gesica/model/emergency-call-qualification")
+def endpoint_emergency_call_qualification():
+    from emergency_call_qualification_model import call_qualification_model_singleton
+    return call_qualification_model_singleton.predict_demo()
+
+@app.get("/gesica/model/call-prioritization")
+def endpoint_call_prioritization():
+    from emergency_call_qualification_model import call_prioritization_model_singleton
+    return call_prioritization_model_singleton.predict_demo()
+
+@app.get("/gesica/model/dispatch-decision-support")
+def endpoint_dispatch_decision_support():
+    from dispatch_decision_support_model import dispatch_model_singleton
+    return dispatch_model_singleton.predict_demo()
+
+# ─── Endpoints Groupe 2 (Haute priorité) ─────────────────────────────────────
+
+@app.get("/gesica/model/patient-pathway-optimization")
+def endpoint_patient_pathway():
+    from patient_pathway_optimization_model import patient_pathway_model_singleton
+    return patient_pathway_model_singleton.predict_demo()
+
+@app.get("/gesica/model/ambulance-dispatch-optimization")
+def endpoint_ambulance_dispatch():
+    from ambulance_dispatch_optimization_model import ambulance_dispatch_model_singleton
+    return ambulance_dispatch_model_singleton.predict_demo()
+
+@app.get("/gesica/model/hospital-capacity-forecasting")
+def endpoint_hospital_capacity():
+    from hospital_capacity_staffing_model import hospital_capacity_model_singleton
+    return hospital_capacity_model_singleton.predict_demo()
+
+@app.get("/gesica/model/staffing-level-prediction")
+def endpoint_staffing_level():
+    from hospital_capacity_staffing_model import hospital_capacity_model_singleton
+    return hospital_capacity_model_singleton.predict_demo()
+
+# ─── Endpoints Groupe 3 (Priorité moyenne) ───────────────────────────────────
+
+@app.get("/gesica/model/surveillance")
+def endpoint_surveillance():
+    from surveillance_surge_resource_model import surveillance_model_singleton
+    return surveillance_model_singleton.predict_demo()
+
+@app.get("/gesica/model/surge-management")
+def endpoint_surge_management():
+    from surveillance_surge_resource_model import surge_management_model_singleton
+    return surge_management_model_singleton.predict_demo()
+
+@app.get("/gesica/model/resource-allocation")
+def endpoint_resource_allocation():
+    from surveillance_surge_resource_model import resource_allocation_model_singleton
+    return resource_allocation_model_singleton.predict_demo()
+
+@app.get("/gesica/model/environmental-risk-forecasting")
+def endpoint_environmental_risk():
+    from surveillance_surge_resource_model import environmental_risk_model_singleton
+    return environmental_risk_model_singleton.predict_demo()
+
+# ─── Endpoints Groupe 4 (Stratégique) ────────────────────────────────────────
+
+@app.get("/gesica/model/pandemic-preparedness")
+def endpoint_pandemic():
+    from strategic_scenarios_model import pandemic_model_singleton
+    return pandemic_model_singleton.predict_demo()
+
+@app.get("/gesica/model/cross-border-coordination")
+def endpoint_cross_border():
+    from strategic_scenarios_model import cross_border_model_singleton
+    return cross_border_model_singleton.predict_demo()
+
+@app.get("/gesica/model/situational-awareness")
+def endpoint_situational_awareness():
+    from strategic_scenarios_model import situational_awareness_model_singleton
+    return situational_awareness_model_singleton.predict_demo()
+
+@app.get("/gesica/model/disaster-risk-assessment")
+def endpoint_disaster_risk():
+    from strategic_scenarios_model import disaster_risk_model_singleton
+    return disaster_risk_model_singleton.predict_demo()
+
+@app.get("/gesica/model/mci-victim-estimation")
+def endpoint_mci_victim():
+    from strategic_scenarios_model import mci_victim_model_singleton
+    return mci_victim_model_singleton.predict_demo()

@@ -62,6 +62,36 @@ import {
   type TraumaCareResponse,
   type MassCasualtyResponse,
   type FulltextStats,
+  fetchClinicalDeterioration,
+  fetchCallQualification,
+  fetchDispatchDecision,
+  fetchPatientPathway,
+  fetchAmbulanceDispatch,
+  fetchHospitalCapacity,
+  fetchSurveillance,
+  fetchSurgeManagement,
+  fetchResourceAllocation,
+  fetchEnvironmentalRisk,
+  fetchPandemicPreparedness,
+  fetchCrossBorder,
+  fetchSituationalAwareness,
+  fetchDisasterRisk,
+  fetchMCIVictim,
+  type ClinicalDeteriorationResponse,
+  type CallQualificationResponse,
+  type DispatchDecisionResponse,
+  type PatientPathwayResponse,
+  type AmbulanceDispatchResponse,
+  type HospitalCapacityResponse,
+  type SurveillanceResponse,
+  type SurgeManagementResponse,
+  type ResourceAllocationResponse,
+  type EnvironmentalRiskResponse,
+  type PandemicPreparednessResponse,
+  type CrossBorderResponse,
+  type SituationalAwarenessResponse,
+  type DisasterRiskResponse,
+  type MCIVictimResponse,
   searchDocuments,
 } from "./lib/api";
 import type {
@@ -1348,6 +1378,487 @@ function ScenariosView({ scenarios, loading, error }: { scenarios: GesicaScenari
     );
   };
 
+  // ─── Widget Clinical Deterioration ─────────────────────────────────────────
+  const ClinicalDeteriorationWidget = () => {
+    const [data, setData] = useState<ClinicalDeteriorationResponse | null>(null);
+    const [loading, setLoading] = useState(false);
+    const [error, setError] = useState<string | null>(null);
+    const load = () => { setLoading(true); setError(null); fetchClinicalDeterioration().then(setData).catch((e) => setError(e.message)).finally(() => setLoading(false)); };
+    if (!data && !loading && !error) return <button onClick={load} className="w-full rounded-xl border border-rose-500/30 bg-rose-500/10 px-4 py-3 text-sm text-rose-300 hover:bg-rose-500/20 transition flex items-center justify-center gap-2"><Activity size={14} />Analyser les signes vitaux — NEWS2 / MEWS</button>;
+    if (loading) return <div className="flex items-center justify-center py-4 text-rose-300 text-sm gap-2"><RotateCcw size={14} className="animate-spin" />Calcul des scores de dégradation...</div>;
+    if (error) return <div className="rounded-xl border border-red-500/20 bg-red-500/10 px-3 py-2 text-xs text-red-300">Erreur : {error} <button onClick={load} className="ml-2 underline">Réessayer</button></div>;
+    if (!data) return null;
+    const alertC: Record<string, string> = { NORMAL: "text-emerald-400", VIGILANCE: "text-amber-400", ALERTE: "text-orange-400", CRITIQUE: "text-red-400" };
+    return (
+      <div className="space-y-3">
+        <div className="flex items-center gap-3 flex-wrap text-[10px] text-slate-400">
+          <span>Alerte : <span className={`font-bold ${alertC[data.overall_alert] ?? "text-white"}`}>{data.overall_alert}</span></span>
+          <span>NEWS2 : <span className="text-rose-300 font-semibold">{data.news2_score}</span></span>
+          <span>MEWS : <span className="text-rose-300 font-semibold">{data.mews_score}</span></span>
+          <button onClick={load} className="ml-auto text-rose-400 hover:text-rose-300 flex items-center gap-1"><RefreshCw size={10} /> Actualiser</button>
+        </div>
+        <div className="grid grid-cols-2 gap-2">
+          {Object.entries(data.vital_signs ?? {}).map(([k, v]) => (
+            <div key={k} className="rounded-xl border border-white/10 bg-slate-900/40 px-2 py-1.5">
+              <p className="text-[9px] text-slate-500 uppercase">{k.replace(/_/g, " ")}</p>
+              <p className={`text-xs font-bold ${(v as {status: string; value: number; unit: string}).status === "NORMAL" ? "text-emerald-400" : "text-amber-400"}`}>{(v as {status: string; value: number; unit: string}).value} {(v as {status: string; value: number; unit: string}).unit}</p>
+            </div>
+          ))}
+        </div>
+        {data.recommendations?.length > 0 && <div className={`rounded-xl border px-3 py-2 text-xs ${alertC[data.overall_alert] === "text-red-400" ? "border-red-500/20 bg-red-500/5 text-red-300" : "border-amber-500/20 bg-amber-500/5 text-amber-300"}`}>{data.recommendations[0]}</div>}
+      </div>
+    );
+  };
+
+  // ─── Widget Call Qualification ────────────────────────────────────────────────
+  const CallQualificationWidget = () => {
+    const [data, setData] = useState<CallQualificationResponse | null>(null);
+    const [loading, setLoading] = useState(false);
+    const [error, setError] = useState<string | null>(null);
+    const load = () => { setLoading(true); setError(null); fetchCallQualification().then(setData).catch((e) => setError(e.message)).finally(() => setLoading(false)); };
+    if (!data && !loading && !error) return <button onClick={load} className="w-full rounded-xl border border-sky-500/30 bg-sky-500/10 px-4 py-3 text-sm text-sky-300 hover:bg-sky-500/20 transition flex items-center justify-center gap-2"><Radio size={14} />Analyser la qualification des appels (NLP)</button>;
+    if (loading) return <div className="flex items-center justify-center py-4 text-sky-300 text-sm gap-2"><RotateCcw size={14} className="animate-spin" />Analyse NLP des appels en cours...</div>;
+    if (error) return <div className="rounded-xl border border-red-500/20 bg-red-500/10 px-3 py-2 text-xs text-red-300">Erreur : {error} <button onClick={load} className="ml-2 underline">Réessayer</button></div>;
+    if (!data) return null;
+    const prioC: Record<number, string> = { 1: "text-red-400", 2: "text-orange-400", 3: "text-amber-400", 4: "text-emerald-400", 5: "text-slate-400" };
+    return (
+      <div className="space-y-3">
+        <div className="flex items-center gap-3 flex-wrap text-[10px] text-slate-400">
+          <span>Priorité globale : <span className={`font-bold ${prioC[data.overall_priority] ?? "text-white"}`}>{data.overall_label}</span></span>
+          <span>{data.calls_analyzed} appels analysés</span>
+          <button onClick={load} className="ml-auto text-sky-400 hover:text-sky-300 flex items-center gap-1"><RefreshCw size={10} /> Actualiser</button>
+        </div>
+        <div className="space-y-1.5 max-h-40 overflow-y-auto">
+          {data.sample_calls?.map((c) => (
+            <div key={c.call_id} className="rounded-xl border border-white/10 bg-slate-900/40 px-3 py-2 flex items-center justify-between gap-2">
+              <div className="flex-1 min-w-0">
+                <p className="text-xs font-medium text-white truncate">{c.chief_complaint}</p>
+                <p className="text-[9px] text-slate-400">{c.recommended_resource} · {c.confidence_pct}% confiance</p>
+              </div>
+              <span className={`text-sm font-bold shrink-0 ${prioC[c.priority] ?? "text-white"}`}>P{c.priority}</span>
+            </div>
+          ))}
+        </div>
+      </div>
+    );
+  };
+
+  // ─── Widget Dispatch Decision ─────────────────────────────────────────────────
+  const DispatchDecisionWidget = () => {
+    const [data, setData] = useState<DispatchDecisionResponse | null>(null);
+    const [loading, setLoading] = useState(false);
+    const [error, setError] = useState<string | null>(null);
+    const load = () => { setLoading(true); setError(null); fetchDispatchDecision().then(setData).catch((e) => setError(e.message)).finally(() => setLoading(false)); };
+    if (!data && !loading && !error) return <button onClick={load} className="w-full rounded-xl border border-indigo-500/30 bg-indigo-500/10 px-4 py-3 text-sm text-indigo-300 hover:bg-indigo-500/20 transition flex items-center justify-center gap-2"><MapPin size={14} />Analyser les décisions de dispatch</button>;
+    if (loading) return <div className="flex items-center justify-center py-4 text-indigo-300 text-sm gap-2"><RotateCcw size={14} className="animate-spin" />Calcul des recommandations dispatch...</div>;
+    if (error) return <div className="rounded-xl border border-red-500/20 bg-red-500/10 px-3 py-2 text-xs text-red-300">Erreur : {error} <button onClick={load} className="ml-2 underline">Réessayer</button></div>;
+    if (!data) return null;
+    return (
+      <div className="space-y-3">
+        <div className="flex items-center gap-3 flex-wrap text-[10px] text-slate-400">
+          <span>Statut : <span className="font-bold text-white">{data.overall_status}</span></span>
+          <span>{data.pending_incidents} incidents · {data.available_resources} ressources dispo</span>
+          <button onClick={load} className="ml-auto text-indigo-400 hover:text-indigo-300 flex items-center gap-1"><RefreshCw size={10} /> Actualiser</button>
+        </div>
+        <div className="space-y-1.5 max-h-40 overflow-y-auto">
+          {data.dispatch_recommendations?.map((r) => (
+            <div key={r.incident_id} className="rounded-xl border border-white/10 bg-slate-900/40 px-3 py-2 flex items-center justify-between gap-2">
+              <div className="flex-1 min-w-0">
+                <p className="text-xs font-medium text-white truncate">{r.category}</p>
+                <p className="text-[9px] text-slate-400">{r.recommended_resource} · ETA {r.eta_min} min</p>
+              </div>
+              <span className={`text-xs font-bold shrink-0 ${r.priority === 1 ? "text-red-400" : r.priority === 2 ? "text-amber-400" : "text-emerald-400"}`}>P{r.priority}</span>
+            </div>
+          ))}
+        </div>
+      </div>
+    );
+  };
+
+  // ─── Widget Patient Pathway ───────────────────────────────────────────────────
+  const PatientPathwayWidget = () => {
+    const [data, setData] = useState<PatientPathwayResponse | null>(null);
+    const [loading, setLoading] = useState(false);
+    const [error, setError] = useState<string | null>(null);
+    const load = () => { setLoading(true); setError(null); fetchPatientPathway().then(setData).catch((e) => setError(e.message)).finally(() => setLoading(false)); };
+    if (!data && !loading && !error) return <button onClick={load} className="w-full rounded-xl border border-teal-500/30 bg-teal-500/10 px-4 py-3 text-sm text-teal-300 hover:bg-teal-500/20 transition flex items-center justify-center gap-2"><MapPin size={14} />Optimiser le parcours patient transfrontalier</button>;
+    if (loading) return <div className="flex items-center justify-center py-4 text-teal-300 text-sm gap-2"><RotateCcw size={14} className="animate-spin" />Calcul des parcours optimaux...</div>;
+    if (error) return <div className="rounded-xl border border-red-500/20 bg-red-500/10 px-3 py-2 text-xs text-red-300">Erreur : {error} <button onClick={load} className="ml-2 underline">Réessayer</button></div>;
+    if (!data) return null;
+    return (
+      <div className="space-y-3">
+        <div className="flex items-center gap-3 flex-wrap text-[10px] text-slate-400">
+          <span>{data.summary?.total_cases} cas · {data.summary?.cross_border_cases} transfrontaliers · ETA moy. {data.summary?.mean_eta_min} min</span>
+          <button onClick={load} className="ml-auto text-teal-400 hover:text-teal-300 flex items-center gap-1"><RefreshCw size={10} /> Actualiser</button>
+        </div>
+        <div className="space-y-1.5 max-h-40 overflow-y-auto">
+          {data.cases?.map((c) => (
+            <div key={c.case_id} className={`rounded-xl border px-3 py-2 flex items-center justify-between gap-2 ${c.cross_border ? "border-amber-500/20 bg-amber-500/5" : "border-white/10 bg-slate-900/40"}`}>
+              <div className="flex-1 min-w-0">
+                <p className="text-xs font-medium text-white truncate">{c.condition}</p>
+                <p className="text-[9px] text-slate-400">{c.recommended} {c.cross_border ? "🌍 Transfrontalier" : ""}</p>
+              </div>
+              <span className="text-sm font-bold shrink-0 text-teal-300">{c.eta_min} min</span>
+            </div>
+          ))}
+        </div>
+      </div>
+    );
+  };
+
+  // ─── Widget Ambulance Dispatch ────────────────────────────────────────────────
+  const AmbulanceDispatchWidget = () => {
+    const [data, setData] = useState<AmbulanceDispatchResponse | null>(null);
+    const [loading, setLoading] = useState(false);
+    const [error, setError] = useState<string | null>(null);
+    const load = () => { setLoading(true); setError(null); fetchAmbulanceDispatch().then(setData).catch((e) => setError(e.message)).finally(() => setLoading(false)); };
+    if (!data && !loading && !error) return <button onClick={load} className="w-full rounded-xl border border-emerald-500/30 bg-emerald-500/10 px-4 py-3 text-sm text-emerald-300 hover:bg-emerald-500/20 transition flex items-center justify-center gap-2"><MapPin size={14} />Analyser la couverture ambulancière (VRP)</button>;
+    if (loading) return <div className="flex items-center justify-center py-4 text-emerald-300 text-sm gap-2"><RotateCcw size={14} className="animate-spin" />Optimisation VRP en cours...</div>;
+    if (error) return <div className="rounded-xl border border-red-500/20 bg-red-500/10 px-3 py-2 text-xs text-red-300">Erreur : {error} <button onClick={load} className="ml-2 underline">Réessayer</button></div>;
+    if (!data) return null;
+    return (
+      <div className="space-y-3">
+        <div className="flex items-center gap-3 flex-wrap text-[10px] text-slate-400">
+          <span>Couverture : <span className={`font-bold ${data.coverage.coverage_pct >= 80 ? "text-emerald-400" : data.coverage.coverage_pct >= 60 ? "text-amber-400" : "text-red-400"}`}>{data.coverage.coverage_pct}%</span></span>
+          <span>{data.coverage.uncovered_zones} zones non couvertes · {data.coverage.degraded_zones} dégradées</span>
+          <button onClick={load} className="ml-auto text-emerald-400 hover:text-emerald-300 flex items-center gap-1"><RefreshCw size={10} /> Actualiser</button>
+        </div>
+        <div className="space-y-1.5 max-h-40 overflow-y-auto">
+          {data.zone_details?.map((z) => (
+            <div key={z.zone_id} className={`rounded-xl border px-3 py-2 flex items-center justify-between gap-2 ${z.covered ? "border-emerald-500/20 bg-emerald-500/5" : "border-red-500/20 bg-red-500/5"}`}>
+              <div className="flex-1 min-w-0">
+                <p className="text-xs font-medium text-white truncate">{z.zone_name}</p>
+                <p className="text-[9px] text-slate-400">{z.best_base} · redondance ×{z.redundancy}</p>
+              </div>
+              <span className={`text-sm font-bold shrink-0 ${z.covered ? "text-emerald-400" : "text-red-400"}`}>{z.eta_min} min</span>
+            </div>
+          ))}
+        </div>
+      </div>
+    );
+  };
+
+  // ─── Widget Hospital Capacity ─────────────────────────────────────────────────
+  const HospitalCapacityWidget = () => {
+    const [data, setData] = useState<HospitalCapacityResponse | null>(null);
+    const [loading, setLoading] = useState(false);
+    const [error, setError] = useState<string | null>(null);
+    const load = () => { setLoading(true); setError(null); fetchHospitalCapacity().then(setData).catch((e) => setError(e.message)).finally(() => setLoading(false)); };
+    if (!data && !loading && !error) return <button onClick={load} className="w-full rounded-xl border border-blue-500/30 bg-blue-500/10 px-4 py-3 text-sm text-blue-300 hover:bg-blue-500/20 transition flex items-center justify-center gap-2"><BarChart2 size={14} />Analyser la capacité hospitalière et le staffing</button>;
+    if (loading) return <div className="flex items-center justify-center py-4 text-blue-300 text-sm gap-2"><RotateCcw size={14} className="animate-spin" />Calcul capacité & staffing...</div>;
+    if (error) return <div className="rounded-xl border border-red-500/20 bg-red-500/10 px-3 py-2 text-xs text-red-300">Erreur : {error} <button onClick={load} className="ml-2 underline">Réessayer</button></div>;
+    if (!data) return null;
+    return (
+      <div className="space-y-3">
+        <div className="grid grid-cols-2 gap-2">
+          <div className="rounded-xl border border-white/10 bg-slate-900/40 px-3 py-2 text-center">
+            <p className="text-lg font-bold text-blue-300">{data.current_status?.ed_occupancy_pct}%</p>
+            <p className="text-[9px] text-slate-400">Occupation Urgences</p>
+          </div>
+          <div className="rounded-xl border border-white/10 bg-slate-900/40 px-3 py-2 text-center">
+            <p className="text-lg font-bold text-blue-300">{data.current_status?.icu_occupancy_pct}%</p>
+            <p className="text-[9px] text-slate-400">Occupation Réa</p>
+          </div>
+        </div>
+        <div className={`rounded-xl border px-3 py-2 text-xs ${data.staffing_now?.status === "DÉFICIT" ? "border-red-500/20 bg-red-500/5 text-red-300" : "border-emerald-500/20 bg-emerald-500/5 text-emerald-300"}`}>
+          Staffing : {data.staffing_now?.current_crews}/{data.staffing_now?.required_crews} équipes — {data.staffing_now?.action}
+        </div>
+        <button onClick={load} className="text-[10px] text-blue-400 hover:text-blue-300 flex items-center gap-1"><RefreshCw size={10} /> Actualiser</button>
+      </div>
+    );
+  };
+
+  // ─── Widget Surveillance ──────────────────────────────────────────────────────
+  const SurveillanceWidget = () => {
+    const [data, setData] = useState<SurveillanceResponse | null>(null);
+    const [loading, setLoading] = useState(false);
+    const [error, setError] = useState<string | null>(null);
+    const load = () => { setLoading(true); setError(null); fetchSurveillance().then(setData).catch((e) => setError(e.message)).finally(() => setLoading(false)); };
+    if (!data && !loading && !error) return <button onClick={load} className="w-full rounded-xl border border-cyan-500/30 bg-cyan-500/10 px-4 py-3 text-sm text-cyan-300 hover:bg-cyan-500/20 transition flex items-center justify-center gap-2"><Activity size={14} />Lancer la surveillance des anomalies EMS</button>;
+    if (loading) return <div className="flex items-center justify-center py-4 text-cyan-300 text-sm gap-2"><RotateCcw size={14} className="animate-spin" />Détection d'anomalies en cours...</div>;
+    if (error) return <div className="rounded-xl border border-red-500/20 bg-red-500/10 px-3 py-2 text-xs text-red-300">Erreur : {error} <button onClick={load} className="ml-2 underline">Réessayer</button></div>;
+    if (!data) return null;
+    return (
+      <div className="space-y-3">
+        <div className="flex items-center gap-3 flex-wrap text-[10px] text-slate-400">
+          <span>Statut : <span className="font-bold text-white">{data.overall_status}</span></span>
+          <span>{data.active_alerts?.length ?? 0} alertes actives</span>
+          <button onClick={load} className="ml-auto text-cyan-400 hover:text-cyan-300 flex items-center gap-1"><RefreshCw size={10} /> Actualiser</button>
+        </div>
+        {data.active_alerts?.length > 0 && (
+          <div className="space-y-1.5">
+            {data.active_alerts.map((a, i) => (
+              <div key={i} className="rounded-xl border border-amber-500/20 bg-amber-500/5 px-3 py-2 text-xs text-amber-300">
+                <span className="font-semibold">{a.indicator}</span> — z={a.zscore.toFixed(2)} — {a.message}
+              </div>
+            ))}
+          </div>
+        )}
+        {data.active_alerts?.length === 0 && <div className="rounded-xl border border-emerald-500/20 bg-emerald-500/5 px-3 py-2 text-xs text-emerald-300">Aucune anomalie détectée — activité normale</div>}
+      </div>
+    );
+  };
+
+  // ─── Widget Surge Management ──────────────────────────────────────────────────
+  const SurgeManagementWidget = () => {
+    const [data, setData] = useState<SurgeManagementResponse | null>(null);
+    const [loading, setLoading] = useState(false);
+    const [error, setError] = useState<string | null>(null);
+    const load = () => { setLoading(true); setError(null); fetchSurgeManagement().then(setData).catch((e) => setError(e.message)).finally(() => setLoading(false)); };
+    if (!data && !loading && !error) return <button onClick={load} className="w-full rounded-xl border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm text-amber-300 hover:bg-amber-500/20 transition flex items-center justify-center gap-2"><Zap size={14} />Analyser le surge et la file d'attente EMS</button>;
+    if (loading) return <div className="flex items-center justify-center py-4 text-amber-300 text-sm gap-2"><RotateCcw size={14} className="animate-spin" />Modèle M/M/c en cours...</div>;
+    if (error) return <div className="rounded-xl border border-red-500/20 bg-red-500/10 px-3 py-2 text-xs text-red-300">Erreur : {error} <button onClick={load} className="ml-2 underline">Réessayer</button></div>;
+    if (!data) return null;
+    return (
+      <div className="space-y-3">
+        <div className="grid grid-cols-2 gap-2">
+          <div className="rounded-xl border border-white/10 bg-slate-900/40 px-3 py-2 text-center">
+            <p className="text-lg font-bold text-amber-300">{data.queue_metrics?.utilization_pct}%</p>
+            <p className="text-[9px] text-slate-400">Utilisation</p>
+          </div>
+          <div className="rounded-xl border border-white/10 bg-slate-900/40 px-3 py-2 text-center">
+            <p className="text-lg font-bold text-amber-300">{data.queue_metrics?.mean_wait_min} min</p>
+            <p className="text-[9px] text-slate-400">Attente moy.</p>
+          </div>
+        </div>
+        <div className={`rounded-xl border px-3 py-2 text-xs ${data.surge_status === "SURGE CRITIQUE" ? "border-red-500/20 bg-red-500/5 text-red-300" : data.surge_status === "SURGE MODÉRÉ" ? "border-amber-500/20 bg-amber-500/5 text-amber-300" : "border-emerald-500/20 bg-emerald-500/5 text-emerald-300"}`}>
+          {data.surge_status} — {data.staffing?.additional_needed > 0 ? `+${data.staffing?.additional_needed} équipes nécessaires` : "Staffing suffisant"}
+        </div>
+        <button onClick={load} className="text-[10px] text-amber-400 hover:text-amber-300 flex items-center gap-1"><RefreshCw size={10} /> Actualiser</button>
+      </div>
+    );
+  };
+
+  // ─── Widget Resource Allocation ───────────────────────────────────────────────
+  const ResourceAllocationWidget = () => {
+    const [data, setData] = useState<ResourceAllocationResponse | null>(null);
+    const [loading, setLoading] = useState(false);
+    const [error, setError] = useState<string | null>(null);
+    const load = () => { setLoading(true); setError(null); fetchResourceAllocation().then(setData).catch((e) => setError(e.message)).finally(() => setLoading(false)); };
+    if (!data && !loading && !error) return <button onClick={load} className="w-full rounded-xl border border-violet-500/30 bg-violet-500/10 px-4 py-3 text-sm text-violet-300 hover:bg-violet-500/20 transition flex items-center justify-center gap-2"><BarChart2 size={14} />Optimiser l'allocation des ressources</button>;
+    if (loading) return <div className="flex items-center justify-center py-4 text-violet-300 text-sm gap-2"><RotateCcw size={14} className="animate-spin" />Optimisation PL en cours...</div>;
+    if (error) return <div className="rounded-xl border border-red-500/20 bg-red-500/10 px-3 py-2 text-xs text-red-300">Erreur : {error} <button onClick={load} className="ml-2 underline">Réessayer</button></div>;
+    if (!data) return null;
+    return (
+      <div className="space-y-3">
+        <div className="flex items-center gap-3 flex-wrap text-[10px] text-slate-400">
+          <span>{data.summary?.allocated}/{data.summary?.total_incidents} incidents alloués</span>
+          {data.summary?.unmet > 0 && <span className="text-red-400">{data.summary?.unmet} non couverts</span>}
+          <button onClick={load} className="ml-auto text-violet-400 hover:text-violet-300 flex items-center gap-1"><RefreshCw size={10} /> Actualiser</button>
+        </div>
+        <div className="space-y-1.5 max-h-40 overflow-y-auto">
+          {data.allocations?.slice(0, 5).map((a) => (
+            <div key={a.incident_id} className="rounded-xl border border-white/10 bg-slate-900/40 px-3 py-2 flex items-center justify-between gap-2">
+              <div className="flex-1 min-w-0">
+                <p className="text-xs font-medium text-white truncate">{a.category}</p>
+                <p className="text-[9px] text-slate-400">{a.allocated}</p>
+              </div>
+              <span className={`text-xs font-bold shrink-0 ${a.status === "ALLOUÉ" ? "text-emerald-400" : "text-red-400"}`}>{a.status}</span>
+            </div>
+          ))}
+        </div>
+      </div>
+    );
+  };
+
+  // ─── Widget Environmental Risk ────────────────────────────────────────────────
+  const EnvironmentalRiskWidget = () => {
+    const [data, setData] = useState<EnvironmentalRiskResponse | null>(null);
+    const [loading, setLoading] = useState(false);
+    const [error, setError] = useState<string | null>(null);
+    const load = () => { setLoading(true); setError(null); fetchEnvironmentalRisk().then(setData).catch((e) => setError(e.message)).finally(() => setLoading(false)); };
+    if (!data && !loading && !error) return <button onClick={load} className="w-full rounded-xl border border-green-500/30 bg-green-500/10 px-4 py-3 text-sm text-green-300 hover:bg-green-500/20 transition flex items-center justify-center gap-2"><Cloud size={14} />Analyser la qualité de l'air et le risque EMS</button>;
+    if (loading) return <div className="flex items-center justify-center py-4 text-green-300 text-sm gap-2"><RotateCcw size={14} className="animate-spin" />Analyse qualité de l'air...</div>;
+    if (error) return <div className="rounded-xl border border-red-500/20 bg-red-500/10 px-3 py-2 text-xs text-red-300">Erreur : {error} <button onClick={load} className="ml-2 underline">Réessayer</button></div>;
+    if (!data) return null;
+    return (
+      <div className="space-y-3">
+        <div className="grid grid-cols-3 gap-2">
+          <div className="rounded-xl border border-white/10 bg-slate-900/40 px-2 py-1.5 text-center">
+            <p className="text-sm font-bold text-green-300">{data.air_quality?.pm2_5_ugm3}</p>
+            <p className="text-[9px] text-slate-400">PM2.5 µg/m³</p>
+          </div>
+          <div className="rounded-xl border border-white/10 bg-slate-900/40 px-2 py-1.5 text-center">
+            <p className="text-sm font-bold text-green-300">{data.air_quality?.ozone_ugm3}</p>
+            <p className="text-[9px] text-slate-400">O₃ µg/m³</p>
+          </div>
+          <div className="rounded-xl border border-white/10 bg-slate-900/40 px-2 py-1.5 text-center">
+            <p className="text-sm font-bold text-green-300">{data.air_quality?.no2_ugm3}</p>
+            <p className="text-[9px] text-slate-400">NO₂ µg/m³</p>
+          </div>
+        </div>
+        <div className={`rounded-xl border px-3 py-2 text-xs ${data.ems_impact?.risk_level === "ÉLEVÉ" ? "border-red-500/20 bg-red-500/5 text-red-300" : "border-emerald-500/20 bg-emerald-500/5 text-emerald-300"}`}>
+          IQA : {data.air_quality?.iqa_level} — Impact EMS : {data.ems_impact?.estimated_call_increase_pct > 0 ? `+${data.ems_impact?.estimated_call_increase_pct}%` : "Baseline"}
+        </div>
+        <button onClick={load} className="text-[10px] text-green-400 hover:text-green-300 flex items-center gap-1"><RefreshCw size={10} /> Actualiser</button>
+      </div>
+    );
+  };
+
+  // ─── Widget Pandemic Preparedness ────────────────────────────────────────────
+  const PandemicPreparednessWidget = () => {
+    const [data, setData] = useState<PandemicPreparednessResponse | null>(null);
+    const [loading, setLoading] = useState(false);
+    const [error, setError] = useState<string | null>(null);
+    const load = () => { setLoading(true); setError(null); fetchPandemicPreparedness().then(setData).catch((e) => setError(e.message)).finally(() => setLoading(false)); };
+    if (!data && !loading && !error) return <button onClick={load} className="w-full rounded-xl border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-300 hover:bg-red-500/20 transition flex items-center justify-center gap-2"><AlertTriangle size={14} />Simuler la préparation pandémique (SEIR)</button>;
+    if (loading) return <div className="flex items-center justify-center py-4 text-red-300 text-sm gap-2"><RotateCcw size={14} className="animate-spin" />Simulation SEIR + Monte-Carlo...</div>;
+    if (error) return <div className="rounded-xl border border-red-500/20 bg-red-500/10 px-3 py-2 text-xs text-red-300">Erreur : {error} <button onClick={load} className="ml-2 underline">Réessayer</button></div>;
+    if (!data) return null;
+    const forecast = data["30d_forecast"];
+    return (
+      <div className="space-y-3">
+        <div className="grid grid-cols-2 gap-2">
+          <div className="rounded-xl border border-white/10 bg-slate-900/40 px-3 py-2 text-center">
+            <p className="text-lg font-bold text-red-300">{forecast?.peak_infected?.toLocaleString()}</p>
+            <p className="text-[9px] text-slate-400">Pic infectés (J+{forecast?.peak_day})</p>
+          </div>
+          <div className="rounded-xl border border-white/10 bg-slate-900/40 px-3 py-2 text-center">
+            <p className={`text-lg font-bold ${forecast?.peak_icu_required > forecast?.icu_capacity ? "text-red-400" : "text-emerald-400"}`}>{forecast?.peak_icu_required}</p>
+            <p className="text-[9px] text-slate-400">Lits réa requis / {forecast?.icu_capacity} dispo</p>
+          </div>
+        </div>
+        <div className={`rounded-xl border px-3 py-2 text-xs ${data.preparedness_assessment?.includes("CRITIQUE") ? "border-red-500/20 bg-red-500/5 text-red-300" : "border-amber-500/20 bg-amber-500/5 text-amber-300"}`}>
+          R0={data.parameters?.R0} — {data.preparedness_assessment}
+        </div>
+        <button onClick={load} className="text-[10px] text-red-400 hover:text-red-300 flex items-center gap-1"><RefreshCw size={10} /> Actualiser</button>
+      </div>
+    );
+  };
+
+  // ─── Widget Cross-Border ──────────────────────────────────────────────────────
+  const CrossBorderWidget = () => {
+    const [data, setData] = useState<CrossBorderResponse | null>(null);
+    const [loading, setLoading] = useState(false);
+    const [error, setError] = useState<string | null>(null);
+    const load = () => { setLoading(true); setError(null); fetchCrossBorder().then(setData).catch((e) => setError(e.message)).finally(() => setLoading(false)); };
+    if (!data && !loading && !error) return <button onClick={load} className="w-full rounded-xl border border-indigo-500/30 bg-indigo-500/10 px-4 py-3 text-sm text-indigo-300 hover:bg-indigo-500/20 transition flex items-center justify-center gap-2"><MapPin size={14} />Analyser la coordination transfrontalière CH/FR</button>;
+    if (loading) return <div className="flex items-center justify-center py-4 text-indigo-300 text-sm gap-2"><RotateCcw size={14} className="animate-spin" />Analyse des accords bilatéraux...</div>;
+    if (error) return <div className="rounded-xl border border-red-500/20 bg-red-500/10 px-3 py-2 text-xs text-red-300">Erreur : {error} <button onClick={load} className="ml-2 underline">Réessayer</button></div>;
+    if (!data) return null;
+    return (
+      <div className="space-y-3">
+        <div className="flex items-center gap-3 flex-wrap text-[10px] text-slate-400">
+          <span>Statut : <span className="font-bold text-white">{data.coordination_status}</span></span>
+          <span>{data.active_agreements} accords actifs · {data.total_daily_capacity} interventions/j</span>
+          <button onClick={load} className="ml-auto text-indigo-400 hover:text-indigo-300 flex items-center gap-1"><RefreshCw size={10} /> Actualiser</button>
+        </div>
+        <div className="grid grid-cols-2 gap-2">
+          <div className="rounded-xl border border-white/10 bg-slate-900/40 px-3 py-2 text-center">
+            <p className="text-lg font-bold text-indigo-300">{data.available_resources?.CH}</p>
+            <p className="text-[9px] text-slate-400">Ressources CH</p>
+          </div>
+          <div className="rounded-xl border border-white/10 bg-slate-900/40 px-3 py-2 text-center">
+            <p className="text-lg font-bold text-indigo-300">{data.available_resources?.FR}</p>
+            <p className="text-[9px] text-slate-400">Ressources FR</p>
+          </div>
+        </div>
+      </div>
+    );
+  };
+
+  // ─── Widget Situational Awareness ────────────────────────────────────────────
+  const SituationalAwarenessWidget = () => {
+    const [data, setData] = useState<SituationalAwarenessResponse | null>(null);
+    const [loading, setLoading] = useState(false);
+    const [error, setError] = useState<string | null>(null);
+    const load = () => { setLoading(true); setError(null); fetchSituationalAwareness().then(setData).catch((e) => setError(e.message)).finally(() => setLoading(false)); };
+    if (!data && !loading && !error) return <button onClick={load} className="w-full rounded-xl border border-sky-500/30 bg-sky-500/10 px-4 py-3 text-sm text-sky-300 hover:bg-sky-500/20 transition flex items-center justify-center gap-2"><Activity size={14} />Afficher la conscience situationnelle temps réel</button>;
+    if (loading) return <div className="flex items-center justify-center py-4 text-sky-300 text-sm gap-2"><RotateCcw size={14} className="animate-spin" />Agrégation des sources temps réel...</div>;
+    if (error) return <div className="rounded-xl border border-red-500/20 bg-red-500/10 px-3 py-2 text-xs text-red-300">Erreur : {error} <button onClick={load} className="ml-2 underline">Réessayer</button></div>;
+    if (!data) return null;
+    const ind = data.real_time_indicators;
+    return (
+      <div className="space-y-3">
+        <div className="flex items-center gap-2 text-[10px] text-slate-400">
+          <span>Statut : <span className="font-bold text-white">{data.overall_status}</span></span>
+          <button onClick={load} className="ml-auto text-sky-400 hover:text-sky-300 flex items-center gap-1"><RefreshCw size={10} /> Actualiser</button>
+        </div>
+        <div className="grid grid-cols-3 gap-2">
+          {[
+            { label: "Incidents actifs", value: ind?.active_incidents, color: "text-sky-300" },
+            { label: "Équipes dispo", value: ind?.available_ems_crews, color: "text-emerald-300" },
+            { label: "Occupation URG", value: `${ind?.ed_occupancy_pct}%`, color: ind?.ed_occupancy_pct > 80 ? "text-red-400" : "text-amber-300" },
+            { label: "Appels en attente", value: ind?.pending_calls_in_queue, color: ind?.pending_calls_in_queue > 5 ? "text-red-400" : "text-slate-300" },
+            { label: "Trans. actifs", value: ind?.cross_border_active, color: "text-indigo-300" },
+            { label: "Risque météo", value: ind?.weather_risk, color: "text-amber-300" },
+          ].map((item) => (
+            <div key={item.label} className="rounded-xl border border-white/10 bg-slate-900/40 px-2 py-1.5 text-center">
+              <p className={`text-sm font-bold ${item.color}`}>{item.value}</p>
+              <p className="text-[9px] text-slate-400">{item.label}</p>
+            </div>
+          ))}
+        </div>
+      </div>
+    );
+  };
+
+  // ─── Widget Disaster Risk ─────────────────────────────────────────────────────
+  const DisasterRiskWidget = () => {
+    const [data, setData] = useState<DisasterRiskResponse | null>(null);
+    const [loading, setLoading] = useState(false);
+    const [error, setError] = useState<string | null>(null);
+    const load = () => { setLoading(true); setError(null); fetchDisasterRisk().then(setData).catch((e) => setError(e.message)).finally(() => setLoading(false)); };
+    if (!data && !loading && !error) return <button onClick={load} className="w-full rounded-xl border border-orange-500/30 bg-orange-500/10 px-4 py-3 text-sm text-orange-300 hover:bg-orange-500/20 transition flex items-center justify-center gap-2"><AlertTriangle size={14} />Évaluer les risques de catastrophes</button>;
+    if (loading) return <div className="flex items-center justify-center py-4 text-orange-300 text-sm gap-2"><RotateCcw size={14} className="animate-spin" />Analyse des risques géospatiaux...</div>;
+    if (error) return <div className="rounded-xl border border-red-500/20 bg-red-500/10 px-3 py-2 text-xs text-red-300">Erreur : {error} <button onClick={load} className="ml-2 underline">Réessayer</button></div>;
+    if (!data) return null;
+    const riskC: Record<string, string> = { FAIBLE: "text-emerald-400", MODÉRÉ: "text-amber-400", ÉLEVÉ: "text-orange-400", CRITIQUE: "text-red-400" };
+    return (
+      <div className="space-y-3">
+        <div className="flex items-center gap-3 flex-wrap text-[10px] text-slate-400">
+          <span>Risque global : <span className={`font-bold ${riskC[data.overall_risk_level] ?? "text-white"}`}>{data.overall_risk_level}</span></span>
+          <button onClick={load} className="ml-auto text-orange-400 hover:text-orange-300 flex items-center gap-1"><RefreshCw size={10} /> Actualiser</button>
+        </div>
+        <div className="space-y-1.5 max-h-40 overflow-y-auto">
+          {data.all_risks?.map((r, i) => (
+            <div key={i} className="rounded-xl border border-white/10 bg-slate-900/40 px-3 py-2 flex items-center justify-between gap-2">
+              <div className="flex-1 min-w-0">
+                <p className="text-xs font-medium text-white truncate">{r.type} — {r.zone}</p>
+                <p className="text-[9px] text-slate-400">{(r.probability_annual * 100).toFixed(0)}% annuel · {r.population_at_risk?.toLocaleString()} pers.</p>
+              </div>
+              <span className={`text-xs font-bold shrink-0 ${riskC[r.risk_level] ?? "text-white"}`}>{r.risk_level}</span>
+            </div>
+          ))}
+        </div>
+      </div>
+    );
+  };
+
+  // ─── Widget MCI Victim ────────────────────────────────────────────────────────
+  const MCIVictimWidget = () => {
+    const [data, setData] = useState<MCIVictimResponse | null>(null);
+    const [loading, setLoading] = useState(false);
+    const [error, setError] = useState<string | null>(null);
+    const load = () => { setLoading(true); setError(null); fetchMCIVictim().then(setData).catch((e) => setError(e.message)).finally(() => setLoading(false)); };
+    if (!data && !loading && !error) return <button onClick={load} className="w-full rounded-xl border border-rose-500/30 bg-rose-500/10 px-4 py-3 text-sm text-rose-300 hover:bg-rose-500/20 transition flex items-center justify-center gap-2"><Users size={14} />Estimer le nombre de victimes AME</button>;
+    if (loading) return <div className="flex items-center justify-center py-4 text-rose-300 text-sm gap-2"><RotateCcw size={14} className="animate-spin" />Estimation des victimes en cours...</div>;
+    if (error) return <div className="rounded-xl border border-red-500/20 bg-red-500/10 px-3 py-2 text-xs text-red-300">Erreur : {error} <button onClick={load} className="ml-2 underline">Réessayer</button></div>;
+    if (!data) return null;
+    return (
+      <div className="space-y-3">
+        <div className="flex items-center gap-3 flex-wrap text-[10px] text-slate-400">
+          <span>Incident : <span className="text-white font-semibold">{data.incident?.type}</span> — {data.incident?.location}</span>
+          <button onClick={load} className="ml-auto text-rose-400 hover:text-rose-300 flex items-center gap-1"><RefreshCw size={10} /> Actualiser</button>
+        </div>
+        <div className="grid grid-cols-2 gap-2">
+          <div className="rounded-xl border border-rose-500/20 bg-rose-500/5 px-3 py-2 text-center">
+            <p className="text-2xl font-bold text-rose-300">{data.estimated_victims}</p>
+            <p className="text-[9px] text-slate-400">Victimes estimées</p>
+          </div>
+          <div className="rounded-xl border border-white/10 bg-slate-900/40 px-3 py-2 text-center">
+            <p className="text-xs font-bold text-red-400">T1: {data.triage_distribution?.T1_critical}</p>
+            <p className="text-xs font-bold text-amber-400">T2: {data.triage_distribution?.T2_serious}</p>
+            <p className="text-xs font-bold text-emerald-400">T3: {data.triage_distribution?.T3_minor}</p>
+          </div>
+        </div>
+        <div className="rounded-xl border border-rose-500/20 bg-rose-500/5 px-3 py-2 text-xs text-rose-300">
+          SMUR: {data.recommended_resources?.SMUR} · AMB: {data.recommended_resources?.AMBULANCE} · Médecins: {data.recommended_resources?.MÉDECINS}
+        </div>
+      </div>
+    );
+  };
+
   const ScenarioCard = ({ scenario }: { scenario: GesicaScenario }) => {
     const isExpanded = expandedId === scenario.id;
     const hasArticles = scenario.articleCount > 0;
@@ -1547,6 +2058,216 @@ function ScenariosView({ scenarios, loading, error }: { scenarios: GesicaScenari
                   <span className="text-[10px] text-violet-400 bg-violet-500/10 border border-violet-500/20 px-2 py-0.5 rounded-full">Monte-Carlo + SALT</span>
                 </div>
                 <MassCasualtyWidget />
+              </div>
+            )}
+
+            {/* Widget Clinical Deterioration */}
+            {scenario.id === "clinical-deterioration-prediction" && (
+              <div className="rounded-2xl border border-rose-500/20 bg-rose-500/5 p-4">
+                <div className="flex items-center justify-between mb-3">
+                  <div className="flex items-center gap-2">
+                    <Activity size={14} className="text-rose-400" />
+                    <span className="text-xs font-semibold text-rose-300 uppercase tracking-wider">Détection Dégradation Clinique — NEWS2 / MEWS</span>
+                  </div>
+                  <span className="text-[10px] text-rose-400 bg-rose-500/10 border border-rose-500/20 px-2 py-0.5 rounded-full">NEWS2 + MEWS + LSTM</span>
+                </div>
+                <ClinicalDeteriorationWidget />
+              </div>
+            )}
+
+            {/* Widget Emergency Call Qualification */}
+            {(scenario.id === "emergency-call-qualification" || scenario.id === "call-prioritization") && (
+              <div className="rounded-2xl border border-sky-500/20 bg-sky-500/5 p-4">
+                <div className="flex items-center justify-between mb-3">
+                  <div className="flex items-center gap-2">
+                    <Radio size={14} className="text-sky-400" />
+                    <span className="text-xs font-semibold text-sky-300 uppercase tracking-wider">Qualification Appels — NLP + Prioritisation</span>
+                  </div>
+                  <span className="text-[10px] text-sky-400 bg-sky-500/10 border border-sky-500/20 px-2 py-0.5 rounded-full">NLP + Scoring</span>
+                </div>
+                <CallQualificationWidget />
+              </div>
+            )}
+
+            {/* Widget Dispatch Decision Support */}
+            {scenario.id === "dispatch-decision-support" && (
+              <div className="rounded-2xl border border-indigo-500/20 bg-indigo-500/5 p-4">
+                <div className="flex items-center justify-between mb-3">
+                  <div className="flex items-center gap-2">
+                    <MapPin size={14} className="text-indigo-400" />
+                    <span className="text-xs font-semibold text-indigo-300 uppercase tracking-wider">Aide à la Décision Dispatch</span>
+                  </div>
+                  <span className="text-[10px] text-indigo-400 bg-indigo-500/10 border border-indigo-500/20 px-2 py-0.5 rounded-full">Arbre de décision + VRP</span>
+                </div>
+                <DispatchDecisionWidget />
+              </div>
+            )}
+
+            {/* Widget Patient Pathway */}
+            {scenario.id === "patient-pathway-optimization" && (
+              <div className="rounded-2xl border border-teal-500/20 bg-teal-500/5 p-4">
+                <div className="flex items-center justify-between mb-3">
+                  <div className="flex items-center gap-2">
+                    <MapPin size={14} className="text-teal-400" />
+                    <span className="text-xs font-semibold text-teal-300 uppercase tracking-wider">Optimisation Parcours Patient Transfrontalier</span>
+                  </div>
+                  <span className="text-[10px] text-teal-400 bg-teal-500/10 border border-teal-500/20 px-2 py-0.5 rounded-full">OSRM + PL</span>
+                </div>
+                <PatientPathwayWidget />
+              </div>
+            )}
+
+            {/* Widget Ambulance Dispatch Optimization */}
+            {scenario.id === "ambulance-dispatch-optimization" && (
+              <div className="rounded-2xl border border-emerald-500/20 bg-emerald-500/5 p-4">
+                <div className="flex items-center justify-between mb-3">
+                  <div className="flex items-center gap-2">
+                    <MapPin size={14} className="text-emerald-400" />
+                    <span className="text-xs font-semibold text-emerald-300 uppercase tracking-wider">Optimisation Couverture Ambulancière — VRP</span>
+                  </div>
+                  <span className="text-[10px] text-emerald-400 bg-emerald-500/10 border border-emerald-500/20 px-2 py-0.5 rounded-full">VRP + Couverture spatiale</span>
+                </div>
+                <AmbulanceDispatchWidget />
+              </div>
+            )}
+
+            {/* Widget Hospital Capacity */}
+            {(scenario.id === "hospital-capacity-forecasting" || scenario.id === "staffing-level-prediction") && (
+              <div className="rounded-2xl border border-blue-500/20 bg-blue-500/5 p-4">
+                <div className="flex items-center justify-between mb-3">
+                  <div className="flex items-center gap-2">
+                    <BarChart2 size={14} className="text-blue-400" />
+                    <span className="text-xs font-semibold text-blue-300 uppercase tracking-wider">Capacité Hospitalière & Staffing EMS</span>
+                  </div>
+                  <span className="text-[10px] text-blue-400 bg-blue-500/10 border border-blue-500/20 px-2 py-0.5 rounded-full">Prophet + NEDOCS</span>
+                </div>
+                <HospitalCapacityWidget />
+              </div>
+            )}
+
+            {/* Widget Surveillance */}
+            {scenario.id === "surveillance" && (
+              <div className="rounded-2xl border border-cyan-500/20 bg-cyan-500/5 p-4">
+                <div className="flex items-center justify-between mb-3">
+                  <div className="flex items-center gap-2">
+                    <Activity size={14} className="text-cyan-400" />
+                    <span className="text-xs font-semibold text-cyan-300 uppercase tracking-wider">Surveillance Anomalies EMS</span>
+                  </div>
+                  <span className="text-[10px] text-cyan-400 bg-cyan-500/10 border border-cyan-500/20 px-2 py-0.5 rounded-full">Isolation Forest + Z-score</span>
+                </div>
+                <SurveillanceWidget />
+              </div>
+            )}
+
+            {/* Widget Surge Management */}
+            {scenario.id === "surge-management" && (
+              <div className="rounded-2xl border border-amber-500/20 bg-amber-500/5 p-4">
+                <div className="flex items-center justify-between mb-3">
+                  <div className="flex items-center gap-2">
+                    <Zap size={14} className="text-amber-400" />
+                    <span className="text-xs font-semibold text-amber-300 uppercase tracking-wider">Gestion de Surge — File d'Attente</span>
+                  </div>
+                  <span className="text-[10px] text-amber-400 bg-amber-500/10 border border-amber-500/20 px-2 py-0.5 rounded-full">M/M/c + Erlang</span>
+                </div>
+                <SurgeManagementWidget />
+              </div>
+            )}
+
+            {/* Widget Resource Allocation */}
+            {scenario.id === "resource-allocation" && (
+              <div className="rounded-2xl border border-violet-500/20 bg-violet-500/5 p-4">
+                <div className="flex items-center justify-between mb-3">
+                  <div className="flex items-center gap-2">
+                    <BarChart2 size={14} className="text-violet-400" />
+                    <span className="text-xs font-semibold text-violet-300 uppercase tracking-wider">Allocation Optimale des Ressources</span>
+                  </div>
+                  <span className="text-[10px] text-violet-400 bg-violet-500/10 border border-violet-500/20 px-2 py-0.5 rounded-full">Optimisation PL</span>
+                </div>
+                <ResourceAllocationWidget />
+              </div>
+            )}
+
+            {/* Widget Environmental Risk */}
+            {scenario.id === "environmental-risk-forecasting" && (
+              <div className="rounded-2xl border border-green-500/20 bg-green-500/5 p-4">
+                <div className="flex items-center justify-between mb-3">
+                  <div className="flex items-center gap-2">
+                    <Cloud size={14} className="text-green-400" />
+                    <span className="text-xs font-semibold text-green-300 uppercase tracking-wider">Risque Environnemental — Qualité de l'Air</span>
+                  </div>
+                  <span className="text-[10px] text-green-400 bg-green-500/10 border border-green-500/20 px-2 py-0.5 rounded-full">XGBoost + PM2.5/O3</span>
+                </div>
+                <EnvironmentalRiskWidget />
+              </div>
+            )}
+
+            {/* Widget Pandemic Preparedness */}
+            {scenario.id === "pandemic-preparedness" && (
+              <div className="rounded-2xl border border-red-500/20 bg-red-500/5 p-4">
+                <div className="flex items-center justify-between mb-3">
+                  <div className="flex items-center gap-2">
+                    <AlertTriangle size={14} className="text-red-400" />
+                    <span className="text-xs font-semibold text-red-300 uppercase tracking-wider">Préparation Pandémique — Modèle SEIR</span>
+                  </div>
+                  <span className="text-[10px] text-red-400 bg-red-500/10 border border-red-500/20 px-2 py-0.5 rounded-full">SEIR + Monte-Carlo</span>
+                </div>
+                <PandemicPreparednessWidget />
+              </div>
+            )}
+
+            {/* Widget Cross-Border Coordination */}
+            {scenario.id === "cross-border-coordination" && (
+              <div className="rounded-2xl border border-indigo-500/20 bg-indigo-500/5 p-4">
+                <div className="flex items-center justify-between mb-3">
+                  <div className="flex items-center gap-2">
+                    <MapPin size={14} className="text-indigo-400" />
+                    <span className="text-xs font-semibold text-indigo-300 uppercase tracking-wider">Coordination Transfrontalière CH/FR</span>
+                  </div>
+                  <span className="text-[10px] text-indigo-400 bg-indigo-500/10 border border-indigo-500/20 px-2 py-0.5 rounded-full">Accords bilatéraux</span>
+                </div>
+                <CrossBorderWidget />
+              </div>
+            )}
+
+            {/* Widget Situational Awareness */}
+            {scenario.id === "situational-awareness" && (
+              <div className="rounded-2xl border border-sky-500/20 bg-sky-500/5 p-4">
+                <div className="flex items-center justify-between mb-3">
+                  <div className="flex items-center gap-2">
+                    <Activity size={14} className="text-sky-400" />
+                    <span className="text-xs font-semibold text-sky-300 uppercase tracking-wider">Conscience Situationnelle Temps Réel</span>
+                  </div>
+                  <span className="text-[10px] text-sky-400 bg-sky-500/10 border border-sky-500/20 px-2 py-0.5 rounded-full">Dashboard multi-sources</span>
+                </div>
+                <SituationalAwarenessWidget />
+              </div>
+            )}
+
+            {/* Widget Disaster Risk */}
+            {scenario.id === "disaster-risk-assessment" && (
+              <div className="rounded-2xl border border-orange-500/20 bg-orange-500/5 p-4">
+                <div className="flex items-center justify-between mb-3">
+                  <div className="flex items-center gap-2">
+                    <AlertTriangle size={14} className="text-orange-400" />
+                    <span className="text-xs font-semibold text-orange-300 uppercase tracking-wider">Évaluation Risques Catastrophes</span>
+                  </div>
+                  <span className="text-[10px] text-orange-400 bg-orange-500/10 border border-orange-500/20 px-2 py-0.5 rounded-full">Risque géospatial</span>
+                </div>
+                <DisasterRiskWidget />
+              </div>
+            )}
+
+            {/* Widget MCI Victim Estimation */}
+            {scenario.id === "mci-victim-estimation" && (
+              <div className="rounded-2xl border border-rose-500/20 bg-rose-500/5 p-4">
+                <div className="flex items-center justify-between mb-3">
+                  <div className="flex items-center gap-2">
+                    <Users size={14} className="text-rose-400" />
+                    <span className="text-xs font-semibold text-rose-300 uppercase tracking-wider">Estimation Victimes AME — Régression spatiale</span>
+                  </div>
+                  <span className="text-[10px] text-rose-400 bg-rose-500/10 border border-rose-500/20 px-2 py-0.5 rounded-full">Régression spatiale</span>
+                </div>
+                <MCIVictimWidget />
               </div>
             )}
 

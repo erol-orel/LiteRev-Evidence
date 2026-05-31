@@ -1202,3 +1202,205 @@ export async function fetchMassCasualty(nVictims = 50, eventType = "transport_ac
   if (!response.ok) throw new Error(`HTTP ${response.status}`);
   return response.json();
 }
+
+// ─── Clinical Deterioration ───────────────────────────────────────────────────
+export interface ClinicalDeteriorationResponse {
+  model: string; status: string; generated_at: string;
+  overall_alert: string; overall_color: string;
+  news2_score: number; mews_score: number;
+  vital_signs: Record<string, { value: number; unit: string; status: string }>;
+  alerts: Array<{ score: string; value: number; threshold: number; level: string; recommendation: string }>;
+  recommendations: string[];
+}
+export async function fetchClinicalDeterioration(): Promise<ClinicalDeteriorationResponse> {
+  const response = await fetch(`${API_BASE_URL}/gesica/model/clinical-deterioration-prediction`);
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  return response.json();
+}
+
+// ─── Emergency Call Qualification ────────────────────────────────────────────
+export interface CallQualificationResponse {
+  model: string; status: string; generated_at: string;
+  overall_priority: number; overall_label: string; overall_color: string;
+  calls_analyzed: number;
+  sample_calls: Array<{ call_id: string; chief_complaint: string; priority: number; priority_label: string; recommended_resource: string; confidence_pct: number }>;
+  resource_summary: Record<string, number>;
+}
+export async function fetchCallQualification(): Promise<CallQualificationResponse> {
+  const response = await fetch(`${API_BASE_URL}/gesica/model/emergency-call-qualification`);
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  return response.json();
+}
+
+// ─── Dispatch Decision Support ────────────────────────────────────────────────
+export interface DispatchDecisionResponse {
+  model: string; status: string; generated_at: string;
+  overall_status: string; overall_color: string;
+  pending_incidents: number; available_resources: number;
+  dispatch_recommendations: Array<{ incident_id: string; priority: number; category: string; recommended_resource: string; eta_min: number; rationale: string }>;
+  resource_status: Record<string, { available: number; deployed: number; total: number }>;
+}
+export async function fetchDispatchDecision(): Promise<DispatchDecisionResponse> {
+  const response = await fetch(`${API_BASE_URL}/gesica/model/dispatch-decision-support`);
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  return response.json();
+}
+
+// ─── Patient Pathway Optimization ────────────────────────────────────────────
+export interface PatientPathwayResponse {
+  model: string; status: string; generated_at: string;
+  cases: Array<{ case_id: string; condition: string; recommended: string; eta_min: number; rationale: string; cross_border: boolean }>;
+  summary: { total_cases: number; cross_border_cases: number; mean_eta_min: number };
+}
+export async function fetchPatientPathway(): Promise<PatientPathwayResponse> {
+  const response = await fetch(`${API_BASE_URL}/gesica/model/patient-pathway-optimization`);
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  return response.json();
+}
+
+// ─── Ambulance Dispatch Optimization ─────────────────────────────────────────
+export interface AmbulanceDispatchResponse {
+  model: string; status: string; generated_at: string;
+  coverage: { coverage_pct: number; covered_population: number; total_population: number; uncovered_zones: number; degraded_zones: number };
+  zone_details: Array<{ zone_id: string; zone_name: string; covered: boolean; best_base: string; eta_min: number; redundancy: number }>;
+  recommendations: Array<{ type: string; zone: string; action: string; priority: string }>;
+  total_units_deployed: number;
+}
+export async function fetchAmbulanceDispatch(): Promise<AmbulanceDispatchResponse> {
+  const response = await fetch(`${API_BASE_URL}/gesica/model/ambulance-dispatch-optimization`);
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  return response.json();
+}
+
+// ─── Hospital Capacity & Staffing ────────────────────────────────────────────
+export interface HospitalCapacityResponse {
+  model: string; status: string; generated_at: string;
+  current_status: { ed_occupancy_pct: number; icu_occupancy_pct: number; nedocs_score: number; nedocs_level: string; nedocs_color: string; hospital_status: string; hospital_color: string };
+  staffing_now: { required_crews: number; current_crews: number; delta: number; status: string; color: string; action: string };
+  peak_demand: { hour: string; calls_per_hour: number };
+  max_staffing_deficit: { hour: string; required: number; current: number; deficit: number };
+}
+export async function fetchHospitalCapacity(): Promise<HospitalCapacityResponse> {
+  const response = await fetch(`${API_BASE_URL}/gesica/model/hospital-capacity-forecasting`);
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  return response.json();
+}
+
+// ─── Surveillance ─────────────────────────────────────────────────────────────
+export interface SurveillanceResponse {
+  model: string; status: string; generated_at: string;
+  overall_status: string; overall_color: string;
+  indicators: Record<string, { anomaly: boolean; zscore: number; current: number; mean: number }>;
+  active_alerts: Array<{ indicator: string; zscore: number; message: string; severity: string }>;
+}
+export async function fetchSurveillance(): Promise<SurveillanceResponse> {
+  const response = await fetch(`${API_BASE_URL}/gesica/model/surveillance`);
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  return response.json();
+}
+
+// ─── Surge Management ────────────────────────────────────────────────────────
+export interface SurgeManagementResponse {
+  model: string; status: string; generated_at: string;
+  queue_metrics: { arrival_rate_per_hour: number; utilization_pct: number; prob_waiting_pct: number; mean_wait_min: number };
+  surge_status: string; surge_color: string;
+  staffing: { available_crews: number; required_crews: number; additional_needed: number };
+}
+export async function fetchSurgeManagement(): Promise<SurgeManagementResponse> {
+  const response = await fetch(`${API_BASE_URL}/gesica/model/surge-management`);
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  return response.json();
+}
+
+// ─── Resource Allocation ──────────────────────────────────────────────────────
+export interface ResourceAllocationResponse {
+  model: string; status: string; generated_at: string;
+  summary: { total_incidents: number; allocated: number; unmet: number };
+  allocations: Array<{ incident_id: string; priority: number; category: string; allocated: string; status: string }>;
+  unmet_incidents: Array<{ incident_id: string; priority: number; category: string; status: string }>;
+  remaining_resources: Record<string, number>;
+}
+export async function fetchResourceAllocation(): Promise<ResourceAllocationResponse> {
+  const response = await fetch(`${API_BASE_URL}/gesica/model/resource-allocation`);
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  return response.json();
+}
+
+// ─── Environmental Risk ───────────────────────────────────────────────────────
+export interface EnvironmentalRiskResponse {
+  model: string; status: string; generated_at: string;
+  air_quality: { pm2_5_ugm3: number; ozone_ugm3: number; no2_ugm3: number; iqa_level: string; iqa_color: string; source: string };
+  ems_impact: { estimated_call_increase_pct: number; risk_level: string; risk_color: string };
+  recommendations: string[];
+}
+export async function fetchEnvironmentalRisk(): Promise<EnvironmentalRiskResponse> {
+  const response = await fetch(`${API_BASE_URL}/gesica/model/environmental-risk-forecasting`);
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  return response.json();
+}
+
+// ─── Pandemic Preparedness ────────────────────────────────────────────────────
+export interface PandemicPreparednessResponse {
+  model: string; status: string; generated_at: string;
+  parameters: { R0: number; population: number; current_infected: number };
+  "30d_forecast": { peak_infected: number; peak_day: number; peak_icu_required: number; icu_capacity: number; total_cases: number };
+  preparedness_assessment: string; preparedness_color: string;
+}
+export async function fetchPandemicPreparedness(): Promise<PandemicPreparednessResponse> {
+  const response = await fetch(`${API_BASE_URL}/gesica/model/pandemic-preparedness`);
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  return response.json();
+}
+
+// ─── Cross-Border Coordination ────────────────────────────────────────────────
+export interface CrossBorderResponse {
+  model: string; status: string; generated_at: string;
+  coordination_status: string; coordination_color: string;
+  active_agreements: number; total_daily_capacity: number; pending_incidents: number;
+  available_resources: { CH: number; FR: number };
+  agreements: Array<{ id: string; name: string; type: string; active: boolean; legal_basis: string }>;
+}
+export async function fetchCrossBorder(): Promise<CrossBorderResponse> {
+  const response = await fetch(`${API_BASE_URL}/gesica/model/cross-border-coordination`);
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  return response.json();
+}
+
+// ─── Situational Awareness ────────────────────────────────────────────────────
+export interface SituationalAwarenessResponse {
+  model: string; status: string; generated_at: string;
+  overall_status: string; overall_color: string;
+  real_time_indicators: { active_incidents: number; available_ems_crews: number; ed_occupancy_pct: number; pending_calls_in_queue: number; cross_border_active: number; weather_risk: string };
+}
+export async function fetchSituationalAwareness(): Promise<SituationalAwarenessResponse> {
+  const response = await fetch(`${API_BASE_URL}/gesica/model/situational-awareness`);
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  return response.json();
+}
+
+// ─── Disaster Risk Assessment ─────────────────────────────────────────────────
+export interface DisasterRiskResponse {
+  model: string; status: string; generated_at: string;
+  top_risk: { type: string; zone: string; probability_annual: number; severity: number; risk_score: number; risk_level: string };
+  all_risks: Array<{ type: string; zone: string; probability_annual: number; severity: number; population_at_risk: number; risk_score: number; risk_level: string }>;
+  overall_risk_level: string;
+}
+export async function fetchDisasterRisk(): Promise<DisasterRiskResponse> {
+  const response = await fetch(`${API_BASE_URL}/gesica/model/disaster-risk-assessment`);
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  return response.json();
+}
+
+// ─── MCI Victim Estimation ────────────────────────────────────────────────────
+export interface MCIVictimResponse {
+  model: string; status: string; generated_at: string;
+  incident: { type: string; vehicles: number; location: string; time: string };
+  estimated_victims: number;
+  triage_distribution: { T1_critical: number; T2_serious: number; T3_minor: number };
+  recommended_resources: { SMUR: number; AMBULANCE: number; MÉDECINS: number };
+}
+export async function fetchMCIVictim(): Promise<MCIVictimResponse> {
+  const response = await fetch(`${API_BASE_URL}/gesica/model/mci-victim-estimation`);
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  return response.json();
+}
