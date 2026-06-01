@@ -5,7 +5,7 @@ import {
   Layers, MessageSquare, RefreshCw, RotateCcw, Search,
   Shield, Terminal, Zap, AlertTriangle,
   Globe, Upload, CheckCircle2, AlertCircle, Info,
-  Microscope, Loader2
+  Microscope, Loader2, Download, Table2, BookOpen
 } from "lucide-react";
 import {
   fetchScenarioDetail,
@@ -18,6 +18,8 @@ import {
   uploadScenarioDataset,
   screenArticle,
   fetchArticlePico,
+  fetchScenarioPicoBulk,
+  fetchEvidenceBrief,
   type ScenarioDetail,
   type ScenarioCorpus,
   type ModelStatus,
@@ -28,6 +30,8 @@ import {
   type ClusterResult,
   type ClusterPoint,
   type PicoData,
+  type PicoBulkResponse,
+  type EvidenceBriefData,
 } from "../lib/api";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -62,7 +66,7 @@ function SectionHeader({ icon, title, subtitle }: { icon: React.ReactNode; title
       <div className="rounded-xl border border-white/10 bg-white/5 p-2 shrink-0">{icon}</div>
       <div>
         <h3 className="text-sm font-semibold text-white uppercase tracking-wider">{title}</h3>
-        {subtitle && <p className="text-xs text-forest-400 mt-0.5">{subtitle}</p>}
+        {subtitle && <p className="text-xs text-white/50 mt-0.5">{subtitle}</p>}
       </div>
     </div>
   );
@@ -70,7 +74,7 @@ function SectionHeader({ icon, title, subtitle }: { icon: React.ReactNode; title
 
 function LoadingSpinner({ text }: { text?: string }) {
   return (
-    <div className="flex items-center justify-center py-8 text-forest-400 gap-2">
+    <div className="flex items-center justify-center py-8 text-white/50 gap-2">
       <RotateCcw size={16} className="animate-spin" />
       <span className="text-sm">{text ?? "Chargement..."}</span>
     </div>
@@ -123,7 +127,7 @@ function QueriesSection({ detail }: { detail: ScenarioDetail }) {
               </a>
             </div>
           )) : (
-            <p className="text-xs text-forest-500 italic">Aucune requête booléenne définie pour ce scénario.</p>
+            <p className="text-xs text-white/35 italic">Aucune requête booléenne définie pour ce scénario.</p>
           )}
         </div>
       </div>
@@ -144,7 +148,7 @@ function QueriesSection({ detail }: { detail: ScenarioDetail }) {
               </div>
             </div>
           )) : (
-            <p className="text-xs text-forest-500 italic">Aucune requête NL définie pour ce scénario.</p>
+            <p className="text-xs text-white/35 italic">Aucune requête NL définie pour ce scénario.</p>
           )}
         </div>
       </div>
@@ -263,7 +267,7 @@ function VariablesSection({ detail, scenarioId }: { detail: ScenarioDetail; scen
           <div className="overflow-x-auto">
             <table className="w-full border-collapse text-left">
               <thead>
-                <tr className="border-b border-white/5 text-[10px] text-forest-400 uppercase tracking-wider">
+                <tr className="border-b border-white/5 text-[10px] text-white/50 uppercase tracking-wider">
                   <th className="py-2.5 px-3">Variable</th>
                   <th className="py-2.5 px-3">Définition clinique / Rôle</th>
                   <th className="py-2.5 px-3">Source de données</th>
@@ -274,8 +278,8 @@ function VariablesSection({ detail, scenarioId }: { detail: ScenarioDetail; scen
                 {variables.map(([name, varInfo]) => (
                   <tr key={name} className="hover:bg-white/1">
                     <td className="py-3 px-3 font-mono text-brand-300 font-medium">{name}</td>
-                    <td className="py-3 px-3 text-forest-300 leading-5">{varInfo.definition}</td>
-                    <td className="py-3 px-3 text-forest-400 font-mono text-[11px]">{varInfo.source}</td>
+                    <td className="py-3 px-3 text-white/70 leading-5">{varInfo.definition}</td>
+                    <td className="py-3 px-3 text-white/50 font-mono text-[11px]">{varInfo.source}</td>
                     <td className="py-3 px-3 text-center">
                       {varInfo.plugged ? (
                         <span className="inline-flex items-center gap-1 rounded-full bg-brand-500/15 border border-brand-500/20 px-2 py-0.5 text-[10px] text-brand-300">
@@ -307,13 +311,13 @@ function VariablesSection({ detail, scenarioId }: { detail: ScenarioDetail; scen
           <div className="space-y-2">
             {detail.databases && detail.databases.length > 0 ? (
               detail.databases.map((db, i) => (
-                <div key={i} className="flex items-center gap-2.5 rounded-xl border border-white/5 bg-white/3 px-3 py-2.5 text-xs text-forest-300">
+                <div key={i} className="flex items-center gap-2.5 rounded-xl border border-white/5 bg-white/3 px-3 py-2.5 text-xs text-white/70">
                   <Database size={12} className="text-brand-400 shrink-0" />
                   <span>{db}</span>
                 </div>
               ))
             ) : (
-              <p className="text-xs text-forest-500 italic">Aucune base de données répertoriée.</p>
+              <p className="text-xs text-white/35 italic">Aucune base de données répertoriée.</p>
             )}
           </div>
         </div>
@@ -339,9 +343,9 @@ function VariablesSection({ detail, scenarioId }: { detail: ScenarioDetail; scen
               accept=".csv,.xlsx,.xls"
               className="hidden"
             />
-            <Upload size={24} className="text-forest-500" />
-            <p className="text-xs text-forest-300 font-medium">Glissez-déposez votre fichier ici</p>
-            <p className="text-[10px] text-forest-500">Formats acceptés : CSV, Excel (.xlsx, .xls)</p>
+            <Upload size={24} className="text-white/35" />
+            <p className="text-xs text-white/70 font-medium">Glissez-déposez votre fichier ici</p>
+            <p className="text-[10px] text-white/35">Formats acceptés : CSV, Excel (.xlsx, .xls)</p>
             {file && (
               <div className="mt-2 rounded-lg bg-brand-500/10 border border-brand-500/20 px-2.5 py-1 text-[11px] text-brand-300 font-mono">
                 {file.name} ({(file.size / 1024).toFixed(1)} KB)
@@ -367,14 +371,14 @@ function VariablesSection({ detail, scenarioId }: { detail: ScenarioDetail; scen
               <div className="flex items-center gap-1.5 text-brand-300 text-xs font-semibold">
                 <CheckCircle2 size={14} /> Importation réussie !
               </div>
-              <p className="text-[11px] text-forest-300 leading-4">
+              <p className="text-[11px] text-white/70 leading-4">
                 {uploadResult.message}
               </p>
-              <div className="rounded-lg bg-forest-900/50 p-2 text-[10px] font-mono text-forest-400 space-y-1">
+              <div className="rounded-lg bg-forest-900/50 p-2 text-[10px] font-mono text-white/50 space-y-1">
                 <div>Lignes détectées : <span className="text-brand-300">{uploadResult.detected_rows}</span></div>
                 <div>Colonnes : <span className="text-brand-300">{uploadResult.detected_columns?.slice(0, 5).join(", ")}{uploadResult.detected_columns?.length > 5 ? "..." : ""}</span></div>
               </div>
-              <div className="flex items-start gap-1 text-[10px] text-forest-500">
+              <div className="flex items-start gap-1 text-[10px] text-white/35">
                 <Info size={10} className="shrink-0 mt-0.5" />
                 <span>Les variables manquantes du modèle seront automatiquement branchées lors du prochain recalcul.</span>
               </div>
@@ -431,7 +435,7 @@ function ModelSection({ scenarioId }: { scenarioId: string }) {
       <div className={`rounded-3xl border ${colors.border} ${colors.bg} p-6 flex flex-col justify-between space-y-6 lg:col-span-1`}>
         <div>
           <div className="flex items-center justify-between">
-            <span className="text-[10px] font-bold uppercase tracking-wider text-forest-400">Statut Live du Modèle</span>
+            <span className="text-[10px] font-bold uppercase tracking-wider text-white/50">Statut Live du Modèle</span>
             <span className="flex h-2 w-2 rounded-full relative">
               <span className={`animate-ping absolute inline-flex h-full w-full rounded-full opacity-75 ${colors.dot}`} />
               <span className={`relative inline-flex rounded-full h-2 w-2 ${colors.dot}`} />
@@ -440,18 +444,18 @@ function ModelSection({ scenarioId }: { scenarioId: string }) {
           <p className="mt-4 text-3xl font-extrabold text-white">{data.status_label}</p>
           {data.model_result && data.model_result.value !== undefined && (
             <div className="mt-4 rounded-2xl bg-white/5 p-4 border border-white/5">
-              <p className="text-[10px] text-forest-400 uppercase tracking-wider">Dernière valeur live calculée</p>
+              <p className="text-[10px] text-white/50 uppercase tracking-wider">Dernière valeur live calculée</p>
               <p className="text-3xl font-black text-brand-300 mt-1 font-mono">
                 {typeof data.model_result.value === "number" ? data.model_result.value.toLocaleString() : data.model_result.value}
-                {data.model_result.unit && <span className="text-sm font-normal ml-1 text-forest-400">{data.model_result.unit}</span>}
+                {data.model_result.unit && <span className="text-sm font-normal ml-1 text-white/50">{data.model_result.unit}</span>}
               </p>
-              <p className="text-[10px] text-forest-500 mt-1.5 font-mono">Calculé le {new Date(data.timestamp).toLocaleString()}</p>
+              <p className="text-[10px] text-white/35 mt-1.5 font-mono">Calculé le {new Date(data.timestamp).toLocaleString()}</p>
             </div>
           )}
         </div>
 
         <div className="space-y-3">
-          <div className="flex items-center gap-2 text-xs text-forest-400">
+          <div className="flex items-center gap-2 text-xs text-white/50">
             <RefreshCw size={12} />
             <span>Mise à jour automatique à chaque nouvelle valeur</span>
           </div>
@@ -477,15 +481,15 @@ function ModelSection({ scenarioId }: { scenarioId: string }) {
           />
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 text-xs">
             <div className="rounded-xl border border-white/5 bg-white/2 px-3 py-2">
-              <span className="text-forest-500">Modèle mathématique</span>
+              <span className="text-white/35">Modèle mathématique</span>
               <p className="font-semibold text-white mt-1">{data.model_info.algorithm}</p>
             </div>
             <div className="rounded-xl border border-white/5 bg-white/2 px-3 py-2">
-              <span className="text-forest-500">Fréquence de calcul</span>
+              <span className="text-white/35">Fréquence de calcul</span>
               <p className="font-semibold text-white mt-1">{data.model_info.update_frequency}</p>
             </div>
             <div className="rounded-xl border border-white/5 bg-white/2 px-3 py-2 sm:col-span-2">
-              <span className="text-forest-500">Indicateur de sortie (Outcome)</span>
+              <span className="text-white/35">Indicateur de sortie (Outcome)</span>
               <p className="font-semibold text-white mt-1">{data.model_info.output}</p>
             </div>
           </div>
@@ -501,18 +505,18 @@ function ModelSection({ scenarioId }: { scenarioId: string }) {
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-3 text-xs">
             <div className="rounded-xl border border-brand-500/10 bg-brand-500/5 px-3 py-2.5">
               <span className="font-semibold text-brand-300">Vert (Situation normale)</span>
-              <p className="text-forest-400 mt-1 font-mono">{data.alert_thresholds.green.condition}</p>
-              <p className="text-[10px] text-forest-500 mt-1">{data.alert_thresholds.green.label}</p>
+              <p className="text-white/50 mt-1 font-mono">{data.alert_thresholds.green.condition}</p>
+              <p className="text-[10px] text-white/35 mt-1">{data.alert_thresholds.green.label}</p>
             </div>
             <div className="rounded-xl border border-gold-500/10 bg-gold-500/5 px-3 py-2.5">
               <span className="font-semibold text-gold-300">Orange (Vigilance)</span>
-              <p className="text-forest-400 mt-1 font-mono">{data.alert_thresholds.orange.condition}</p>
-              <p className="text-[10px] text-forest-500 mt-1">{data.alert_thresholds.orange.label}</p>
+              <p className="text-white/50 mt-1 font-mono">{data.alert_thresholds.orange.condition}</p>
+              <p className="text-[10px] text-white/35 mt-1">{data.alert_thresholds.orange.label}</p>
             </div>
             <div className="rounded-xl border border-rose-500/10 bg-rose-500/5 px-3 py-2.5">
               <span className="font-semibold text-rose-300">Rouge (Alerte critique)</span>
-              <p className="text-forest-400 mt-1 font-mono">{data.alert_thresholds.red.condition}</p>
-              <p className="text-[10px] text-forest-500 mt-1">{data.alert_thresholds.red.label}</p>
+              <p className="text-white/50 mt-1 font-mono">{data.alert_thresholds.red.condition}</p>
+              <p className="text-[10px] text-white/35 mt-1">{data.alert_thresholds.red.label}</p>
             </div>
           </div>
         </div>
@@ -563,7 +567,7 @@ function CorpusSection({ scenarioId }: { scenarioId: string; detail: ScenarioDet
               }}
             />
           )) : (
-            <p className="text-xs text-forest-500 italic">Aucun article dans ce corpus.</p>
+            <p className="text-xs text-white/35 italic">Aucun article dans ce corpus.</p>
           )}
         </div>
       </div>
@@ -579,14 +583,14 @@ function CorpusSection({ scenarioId }: { scenarioId: string; detail: ScenarioDet
           <div className="space-y-2 text-xs">
             {data.year_distribution.slice(0, 6).map((item) => (
               <div key={item.year} className="flex items-center gap-3">
-                <span className="w-10 text-forest-400 font-mono">{item.year}</span>
+                <span className="w-10 text-white/50 font-mono">{item.year}</span>
                 <div className="flex-1 h-2 bg-white/5 rounded-full overflow-hidden">
                   <div
                     className="h-full bg-brand-500 rounded-full"
                     style={{ width: `${(item.count / data.total) * 100}%` }}
                   />
                 </div>
-                <span className="w-6 text-right text-forest-300 font-mono">{item.count}</span>
+                <span className="w-6 text-right text-white/70 font-mono">{item.count}</span>
               </div>
             ))}
           </div>
@@ -601,14 +605,14 @@ function CorpusSection({ scenarioId }: { scenarioId: string; detail: ScenarioDet
           <div className="space-y-2 text-xs">
             {data.source_distribution.map((item) => (
               <div key={item.source} className="flex items-center gap-3">
-                <span className="w-20 text-forest-400 uppercase font-mono tracking-wider">{item.source}</span>
+                <span className="w-20 text-white/50 uppercase font-mono tracking-wider">{item.source}</span>
                 <div className="flex-1 h-2 bg-white/5 rounded-full overflow-hidden">
                   <div
                     className="h-full bg-brand-500 rounded-full"
                     style={{ width: `${(item.count / data.total) * 100}%` }}
                   />
                 </div>
-                <span className="w-6 text-right text-forest-300 font-mono">{item.count}</span>
+                <span className="w-6 text-right text-white/70 font-mono">{item.count}</span>
               </div>
             ))}
           </div>
@@ -672,7 +676,7 @@ function ArticleRow({
     included: 'bg-brand-500/20 text-brand-300 border border-brand-500/30',
     excluded: 'bg-rose-500/20 text-rose-300 border border-rose-500/30',
     pending: 'bg-gold-500/10 text-gold-400 border border-gold-500/20',
-  }[screeningStatus] ?? 'bg-white/5 text-forest-400 border border-white/10';
+  }[screeningStatus] ?? 'bg-white/5 text-white/50 border border-white/10';
 
   const statusLabel = { included: 'Inclus', excluded: 'Exclu', pending: 'En attente' }[screeningStatus] ?? screeningStatus;
 
@@ -685,11 +689,11 @@ function ArticleRow({
       <div onClick={onToggle} className="p-4 flex items-start gap-3 cursor-pointer">
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2 flex-wrap">
-            <span className="rounded bg-white/5 px-1.5 py-0.5 text-[10px] font-mono text-forest-400 uppercase tracking-wider">
+            <span className="rounded bg-white/5 px-1.5 py-0.5 text-[10px] font-mono text-white/50 uppercase tracking-wider">
               {article.source}
             </span>
             {article.year && (
-              <span className="text-[10px] font-mono text-forest-500">{article.year}</span>
+              <span className="text-[10px] font-mono text-white/35">{article.year}</span>
             )}
             {article.has_fulltext && (
               <span className="rounded-full bg-brand-500/10 border border-brand-500/20 px-2 py-0.5 text-[9px] text-brand-300 font-medium">
@@ -702,10 +706,10 @@ function ArticleRow({
           </div>
           <h4 className="text-sm font-semibold text-white mt-1.5 leading-5">{article.title}</h4>
           {article.authors && (
-            <p className="text-xs text-forest-500 mt-1 truncate">{article.authors}</p>
+            <p className="text-xs text-white/35 mt-1 truncate">{article.authors}</p>
           )}
         </div>
-        <button className="text-forest-500 hover:text-white shrink-0 mt-1">
+        <button className="text-white/35 hover:text-white shrink-0 mt-1">
           {isExpanded ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
         </button>
       </div>
@@ -714,9 +718,9 @@ function ArticleRow({
         <div className="border-t border-white/5 bg-white/1 p-4 text-xs space-y-4">
           {/* Screening PRISMA */}
           <div className="flex items-center gap-2 flex-wrap">
-            <span className="text-forest-400 font-medium mr-1">Screening PRISMA :</span>
+            <span className="text-white/50 font-medium mr-1">Screening PRISMA :</span>
             {screeningLoading ? (
-              <Loader2 size={14} className="animate-spin text-forest-400" />
+              <Loader2 size={14} className="animate-spin text-white/50" />
             ) : (
               <>
                 <button
@@ -724,7 +728,7 @@ function ArticleRow({
                   className={`px-2.5 py-1 rounded-full text-[10px] font-semibold border transition ${
                     screeningStatus === 'included'
                       ? 'bg-brand-500/30 text-brand-200 border-brand-500/50'
-                      : 'bg-white/5 text-forest-400 border-white/10 hover:bg-brand-500/10 hover:text-brand-300'
+                      : 'bg-white/5 text-white/50 border-white/10 hover:bg-brand-500/10 hover:text-brand-300'
                   }`}
                 >
                   <CheckCircle2 size={10} className="inline mr-1" />Inclure
@@ -734,7 +738,7 @@ function ArticleRow({
                   className={`px-2.5 py-1 rounded-full text-[10px] font-semibold border transition ${
                     screeningStatus === 'excluded'
                       ? 'bg-rose-500/30 text-rose-200 border-rose-500/50'
-                      : 'bg-white/5 text-forest-400 border-white/10 hover:bg-rose-500/10 hover:text-rose-300'
+                      : 'bg-white/5 text-white/50 border-white/10 hover:bg-rose-500/10 hover:text-rose-300'
                   }`}
                 >
                   <AlertCircle size={10} className="inline mr-1" />Exclure
@@ -744,7 +748,7 @@ function ArticleRow({
                   className={`px-2.5 py-1 rounded-full text-[10px] font-semibold border transition ${
                     screeningStatus === 'pending'
                       ? 'bg-gold-500/20 text-gold-300 border-gold-500/30'
-                      : 'bg-white/5 text-forest-400 border-white/10 hover:bg-gold-500/10 hover:text-gold-400'
+                      : 'bg-white/5 text-white/50 border-white/10 hover:bg-gold-500/10 hover:text-gold-400'
                   }`}
                 >
                   En attente
@@ -755,42 +759,42 @@ function ArticleRow({
 
           {/* PICO */}
           {picoLoading ? (
-            <div className="flex items-center gap-2 text-forest-500">
+            <div className="flex items-center gap-2 text-white/35">
               <Loader2 size={12} className="animate-spin" />
               <span>Chargement PICO...</span>
             </div>
           ) : pico ? (
             <div className="rounded-xl border border-white/5 bg-white/2 p-3 space-y-2">
-              <p className="text-[10px] font-semibold text-forest-400 uppercase tracking-wider flex items-center gap-1">
+              <p className="text-[10px] font-semibold text-white/50 uppercase tracking-wider flex items-center gap-1">
                 <Microscope size={10} />PICO
                 {pico.pico_confidence != null && (
-                  <span className="ml-auto font-mono text-forest-500">Confiance : {Math.round(pico.pico_confidence * 100)}%</span>
+                  <span className="ml-auto font-mono text-white/35">Confiance : {Math.round(pico.pico_confidence * 100)}%</span>
                 )}
               </p>
               <div className="grid grid-cols-2 gap-2">
                 {[['P', 'Population', pico.P], ['I', 'Intervention', pico.I], ['C', 'Comparateur', pico.C], ['O', 'Outcome', pico.O]].map(([key, label, val]) => val && (
                   <div key={key} className="rounded-lg bg-white/3 border border-white/5 p-2">
                     <span className="text-[9px] font-bold text-brand-400 uppercase">{key} — {label}</span>
-                    <p className="text-forest-300 mt-0.5 leading-4">{val as string}</p>
+                    <p className="text-white/70 mt-0.5 leading-4">{val as string}</p>
                   </div>
                 ))}
               </div>
               {pico.study_design && (
-                <p className="text-[10px] text-forest-500">Type d'étude : <span className="text-forest-300">{pico.study_design}</span></p>
+                <p className="text-[10px] text-white/35">Type d'étude : <span className="text-white/70">{pico.study_design}</span></p>
               )}
             </div>
           ) : picoLoaded ? (
-            <p className="text-[10px] text-forest-600 italic">PICO non encore extrait pour cet article.</p>
+            <p className="text-[10px] text-white/25 italic">PICO non encore extrait pour cet article.</p>
           ) : null}
 
           {article.abstract && (
             <div>
-              <p className="font-semibold text-forest-400 mb-1">Abstract</p>
-              <p className="text-forest-300 leading-5">{article.abstract}</p>
+              <p className="font-semibold text-white/50 mb-1">Abstract</p>
+              <p className="text-white/70 leading-5">{article.abstract}</p>
             </div>
           )}
-          <div className="flex items-center gap-4 flex-wrap text-forest-400 font-mono text-[10px] pt-1">
-            {article.journal && <span>Journal: <span className="text-forest-300">{article.journal}</span></span>}
+          <div className="flex items-center gap-4 flex-wrap text-white/50 font-mono text-[10px] pt-1">
+            {article.journal && <span>Journal: <span className="text-white/70">{article.journal}</span></span>}
             {article.doi && (
               <span>
                 DOI:{" "}
@@ -815,14 +819,14 @@ function ArticleRow({
               </a>
             )}
             {article.country && (
-              <span className="text-[10px] text-forest-500 border border-white/5 rounded px-1.5 py-0.5">
+              <span className="text-[10px] text-white/35 border border-white/5 rounded px-1.5 py-0.5">
                 <Globe size={9} className="inline mr-0.5" />{article.country}
               </span>
             )}
             {article.keywords && (
               <div className="flex flex-wrap gap-1">
                 {article.keywords.split(",").slice(0, 5).map((kw, i) => (
-                  <span key={i} className="text-[10px] text-forest-500 bg-forest-800/50 px-1 rounded">
+                  <span key={i} className="text-[10px] text-white/35 bg-forest-800/50 px-1 rounded">
                     #{kw.trim()}
                   </span>
                 ))}
@@ -968,7 +972,7 @@ function ClusteringSection({ scenarioId }: { scenarioId: string }) {
 
                 {/* Sélecteur de cluster de gauche */}
                 <div className="space-y-2">
-                  <span className="text-[10px] font-bold uppercase tracking-wider text-forest-400 block px-1">Sélectionner un groupe</span>
+                  <span className="text-[10px] font-bold uppercase tracking-wider text-white/50 block px-1">Sélectionner un groupe</span>
                   <div className="space-y-1 max-h-64 overflow-y-auto pr-1">
                     {data.clusters.map((c) => (
                       <button
@@ -977,7 +981,7 @@ function ClusteringSection({ scenarioId }: { scenarioId: string }) {
                         className={`w-full text-left rounded-xl px-3 py-2 text-xs transition flex items-center justify-between border ${
                           selectedCluster === c.cluster_id
                             ? "border-brand-500/30 bg-brand-500/10 text-brand-300"
-                            : "border-transparent text-forest-400 hover:text-white hover:bg-white/3"
+                            : "border-transparent text-white/50 hover:text-white hover:bg-white/3"
                         }`}
                       >
                         <div className="flex items-center gap-2">
@@ -1007,7 +1011,7 @@ function ClusteringSection({ scenarioId }: { scenarioId: string }) {
                         />
                         <div>
                           <h4 className="text-sm font-bold text-white uppercase tracking-wider">{activeClusterData.cluster_name}</h4>
-                          <p className="text-xs text-forest-400 mt-0.5">{activeClusterData.n_docs} articles scientifiques denses dans ce groupe</p>
+                          <p className="text-xs text-white/50 mt-0.5">{activeClusterData.n_docs} articles scientifiques denses dans ce groupe</p>
                         </div>
                       </div>
                     </div>
@@ -1025,12 +1029,12 @@ function ClusteringSection({ scenarioId }: { scenarioId: string }) {
 
                     {/* Mots-clés TF-IDF */}
                     <div className="space-y-2">
-                      <p className="text-[10px] font-bold uppercase tracking-wider text-forest-400">Mots-clés prépondérants</p>
+                      <p className="text-[10px] font-bold uppercase tracking-wider text-white/50">Mots-clés prépondérants</p>
                       <div className="flex flex-wrap gap-1.5">
                         {activeClusterData.top_words.map((w, i) => (
                           <span
                             key={i}
-                            className="rounded-lg border border-white/10 bg-white/5 px-2 py-1 text-[10px] text-forest-300 font-mono"
+                            className="rounded-lg border border-white/10 bg-white/5 px-2 py-1 text-[10px] text-white/70 font-mono"
                           >
                             {w}
                           </span>
@@ -1040,9 +1044,9 @@ function ClusteringSection({ scenarioId }: { scenarioId: string }) {
 
                     {/* Article représentatif */}
                     <div className="space-y-2 border-t border-white/5 pt-4">
-                      <p className="text-[10px] font-bold uppercase tracking-wider text-forest-400">Article le plus central / représentatif</p>
+                      <p className="text-[10px] font-bold uppercase tracking-wider text-white/50">Article le plus central / représentatif</p>
                       <div className="rounded-xl border border-white/5 bg-white/3 p-3">
-                        <div className="flex items-center gap-1.5 text-[10px] text-forest-500 font-mono">
+                        <div className="flex items-center gap-1.5 text-[10px] text-white/35 font-mono">
                           <span>ID: #{activeClusterData.representative_doc.id}</span>
                           {activeClusterData.representative_doc.year && <span>• {activeClusterData.representative_doc.year}</span>}
                           {activeClusterData.representative_doc.journal && <span>• {activeClusterData.representative_doc.journal}</span>}
@@ -1097,55 +1101,210 @@ function expandHull(hull: Array<{x:number;y:number}>, margin: number): Array<{x:
 }
 // Knowledge Graph — nœuds = clusters, arêtes = mots-clés partagés
 function KnowledgeGraph({clusters,selectedCluster,onSelectCluster}:{clusters:ClusterResult[];selectedCluster:number|null;onSelectCluster:(id:number)=>void}) {
-  const W=420,H=340,CX=W/2,CY=H/2;
+  const W=560,H=420;
   const denseC=clusters.filter(c=>!c.is_noise);
+  const [hoveredNode,setHoveredNode]=React.useState<string|null>(null);
+  const [tooltip,setTooltip]=React.useState<{x:number;y:number;text:string}|null>(null);
   if (!denseC.length) return <span className="text-xs text-white/40">Aucun cluster.</span>;
-  const r0=Math.min(W,H)*0.32;
-  const nodes=denseC.map((c,i)=>{
-    const angle=(2*Math.PI*i)/denseC.length-Math.PI/2;
-    return{...c,x:CX+r0*Math.cos(angle),y:CY+r0*Math.sin(angle),r:Math.max(18,Math.min(36,12+c.n_docs/8))};
+
+  // Build keyword nodes + cluster nodes
+  type GNode={id:string;label:string;type:'cluster'|'keyword';cluster_id?:number;count?:number;x:number;y:number;r:number;color:string};
+  type GEdge={from:string;to:string;weight:number};
+
+  // Gather top keywords across all clusters
+  const kwMap=new Map<string,{clusters:number[];count:number}>();
+  denseC.forEach(c=>{
+    (c.top_words||[]).slice(0,8).forEach((w,i)=>{
+      const key=w.toLowerCase();
+      if(!kwMap.has(key)) kwMap.set(key,{clusters:[],count:0});
+      const entry=kwMap.get(key)!;
+      entry.clusters.push(c.cluster_id);
+      entry.count+=8-i; // TF-IDF-like weight: first words have higher weight
+    });
   });
-  const edges: Array<{a:number;b:number;weight:number;words:string[]}>=[];
-  for(let i=0;i<nodes.length;i++) for(let j=i+1;j<nodes.length;j++){
-    const wA=new Set(nodes[i].top_words||[]);
-    const shared=(nodes[j].top_words||[]).filter(w=>wA.has(w));
-    if(shared.length>0) edges.push({a:i,b:j,weight:shared.length,words:shared.slice(0,3)});
+
+  // Keep only keywords that appear in ≥1 cluster (all are interesting) but limit to top 20
+  const sortedKw=[...kwMap.entries()]
+    .sort((a,b)=>b[1].count-a[1].count)
+    .slice(0,Math.min(20,kwMap.size));
+
+  // Layout: clusters in outer ring, keywords in inner area
+  const clusterNodes:GNode[]=denseC.map((c,i)=>{
+    const angle=(2*Math.PI*i)/denseC.length-Math.PI/2;
+    const r0=Math.min(W,H)*0.36;
+    return{
+      id:`c_${c.cluster_id}`,
+      label:c.cluster_name,
+      type:'cluster',
+      cluster_id:c.cluster_id,
+      count:c.n_docs,
+      x:W/2+r0*Math.cos(angle),
+      y:H/2+r0*Math.sin(angle),
+      r:Math.max(22,Math.min(42,14+c.n_docs/6)),
+      color:getClusterColor(c.cluster_id,false),
+    };
+  });
+
+  const kwNodes:GNode[]=sortedKw.map(([w,info],i)=>{
+    // Position keywords in a grid-like inner area
+    const cols=Math.ceil(Math.sqrt(sortedKw.length));
+    const row=Math.floor(i/cols);
+    const col=i%cols;
+    const cellW=(W*0.5)/cols;
+    const cellH=(H*0.5)/Math.ceil(sortedKw.length/cols);
+    const jitter=(Math.random()-0.5)*cellW*0.3;
+    return{
+      id:`k_${w}`,
+      label:w,
+      type:'keyword',
+      count:info.count,
+      x:W*0.25+col*cellW+cellW/2+jitter,
+      y:H*0.25+row*cellH+cellH/2,
+      r:Math.max(10,Math.min(20,6+info.count*1.5)),
+      color:'rgba(227,172,59,0.85)',
+    };
+  });
+
+  const allNodes=[...clusterNodes,...kwNodes];
+
+  // Edges: cluster → keyword
+  const edges:GEdge[]=[];
+  sortedKw.forEach(([w,info])=>{
+    info.clusters.forEach(cid=>{
+      edges.push({from:`c_${cid}`,to:`k_${w}`,weight:1});
+    });
+  });
+  // Cross-cluster edges (shared keywords)
+  for(let i=0;i<denseC.length;i++){
+    for(let j=i+1;j<denseC.length;j++){
+      const wA=new Set((denseC[i].top_words||[]).map(w=>w.toLowerCase()));
+      const shared=(denseC[j].top_words||[]).filter(w=>wA.has(w.toLowerCase()));
+      if(shared.length>0){
+        edges.push({from:`c_${denseC[i].cluster_id}`,to:`c_${denseC[j].cluster_id}`,weight:shared.length});
+      }
+    }
   }
+
+  const nodeMap=new Map(allNodes.map(n=>[n.id,n]));
+
+  const isActive=(id:string)=>{
+    if(!selectedCluster) return true;
+    if(id===`c_${selectedCluster}`) return true;
+    return edges.some(e=>(e.from===id||e.to===id)&&(e.from===`c_${selectedCluster}`||e.to===`c_${selectedCluster}`));
+  };
+
   return (
     <div className="w-full">
-      <p className="text-[10px] text-white/40 leading-4 mb-2">Nœuds = clusters. Connexions = mots-clés partagés. Taille = nb articles.</p>
-      <svg width="100%" viewBox={`0 0 ${W} ${H}`} className="bg-[#0a1410] rounded-xl border border-white/5 overflow-visible">
+      <p className="text-[10px] text-white/35 leading-4 mb-2">
+        <span className="inline-block w-2 h-2 rounded-full bg-brand-400 mr-1 align-middle"/>Clusters (taille = nb articles)
+        <span className="inline-block w-2 h-2 rounded-full bg-gold-400 ml-3 mr-1 align-middle"/>Concepts cliniques clés
+        <span className="ml-3">— Connexions = co-occurrence dans le corpus</span>
+      </p>
+      <svg width="100%" viewBox={`0 0 ${W} ${H}`} className="bg-[#0a1410] rounded-2xl border border-white/5 overflow-visible" style={{maxHeight:420}}>
         <defs>
-          {nodes.map(n=>(
-            <radialGradient key={`ng-${n.cluster_id}`} id={`ng-${n.cluster_id}`} cx="50%" cy="50%" r="50%">
-              <stop offset="0%" stopColor={getClusterColor(n.cluster_id,false)} stopOpacity="0.9"/>
-              <stop offset="100%" stopColor={getClusterColor(n.cluster_id,false)} stopOpacity="0.35"/>
+          <filter id="kglow2"><feGaussianBlur stdDeviation="4" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+          <filter id="kwglow"><feGaussianBlur stdDeviation="2" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+          {clusterNodes.map(n=>(
+            <radialGradient key={`rg-${n.id}`} id={`rg-${n.id}`} cx="50%" cy="50%" r="50%">
+              <stop offset="0%" stopColor={n.color} stopOpacity="1"/>
+              <stop offset="100%" stopColor={n.color} stopOpacity="0.4"/>
             </radialGradient>
           ))}
-          <filter id="kglow"><feGaussianBlur stdDeviation="3" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
         </defs>
+        {/* Grid lines subtle */}
+        {[0.25,0.5,0.75].map(f=>(
+          <React.Fragment key={f}>
+            <line x1={W*f} y1={0} x2={W*f} y2={H} stroke="rgba(255,255,255,0.02)" strokeWidth="1"/>
+            <line x1={0} y1={H*f} x2={W} y2={H*f} stroke="rgba(255,255,255,0.02)" strokeWidth="1"/>
+          </React.Fragment>
+        ))}
+        {/* Edges */}
         {edges.map((e,i)=>{
-          const na=nodes[e.a],nb=nodes[e.b];
-          const mx=(na.x+nb.x)/2,my=(na.y+nb.y)/2;
-          const active=selectedCluster===na.cluster_id||selectedCluster===nb.cluster_id;
-          return(<g key={i}>
-            <line x1={na.x} y1={na.y} x2={nb.x} y2={nb.y} stroke={active?"rgba(255,255,255,0.22)":"rgba(255,255,255,0.06)"} strokeWidth={active?e.weight*1.2:e.weight*0.5} strokeDasharray={active?"none":"4,3"}/>
-            {active&&e.words.length>0&&<text x={mx} y={my-4} textAnchor="middle" fontSize="7" fill="rgba(255,255,255,0.45)" className="pointer-events-none select-none">{e.words.join(", ")}</text>}
-          </g>);
+          const na=nodeMap.get(e.from),nb=nodeMap.get(e.to);
+          if(!na||!nb) return null;
+          const bothCluster=na.type==='cluster'&&nb.type==='cluster';
+          const active=isActive(e.from)&&isActive(e.to);
+          const selEdge=selectedCluster&&(e.from===`c_${selectedCluster}`||e.to===`c_${selectedCluster}`);
+          return(
+            <line key={i}
+              x1={na.x} y1={na.y} x2={nb.x} y2={nb.y}
+              stroke={bothCluster?(selEdge?"rgba(255,255,255,0.35)":"rgba(255,255,255,0.08)"):(selEdge?"rgba(227,172,59,0.5)":"rgba(227,172,59,0.12)")}
+              strokeWidth={bothCluster?(selEdge?e.weight*1.5:e.weight*0.6):(selEdge?1.5:0.8)}
+              strokeDasharray={bothCluster?"none":"3,2"}
+              opacity={active?1:0.2}
+            />
+          );
         })}
-        {nodes.map(n=>{
+        {/* Keyword nodes */}
+        {kwNodes.map(n=>{
+          const active=isActive(n.id);
+          const hov=hoveredNode===n.id;
+          return(
+            <g key={n.id} className="cursor-pointer"
+              onMouseEnter={()=>{setHoveredNode(n.id);setTooltip({x:n.x,y:n.y-n.r-8,text:n.label});}}
+              onMouseLeave={()=>{setHoveredNode(null);setTooltip(null);}}
+            >
+              <circle cx={n.x} cy={n.y} r={hov?n.r+3:n.r}
+                fill="rgba(227,172,59,0.15)"
+                stroke={hov?"rgba(227,172,59,0.9)":"rgba(227,172,59,0.4)"}
+                strokeWidth={hov?1.5:0.8}
+                opacity={active?1:0.2}
+                filter={hov?"url(#kwglow)":undefined}
+              />
+              {(n.r>12||hov)&&<text x={n.x} y={n.y} textAnchor="middle" dominantBaseline="middle"
+                fontSize={hov?"8":"7"} fill="rgba(227,172,59,0.9)" fontWeight="600"
+                opacity={active?1:0.3}
+                className="pointer-events-none select-none"
+              >{n.label}</text>}
+            </g>
+          );
+        })}
+        {/* Cluster nodes */}
+        {clusterNodes.map(n=>{
           const sel=selectedCluster===n.cluster_id;
-          return(<g key={n.cluster_id} className="cursor-pointer" onClick={()=>onSelectCluster(n.cluster_id)}>
-            {sel&&<circle cx={n.x} cy={n.y} r={n.r+9} fill={getClusterColor(n.cluster_id,false)} opacity={0.13}/>}
-            <circle cx={n.x} cy={n.y} r={n.r} fill={`url(#ng-${n.cluster_id})`} stroke={sel?"#fff":getClusterColor(n.cluster_id,false)} strokeWidth={sel?2:1} strokeOpacity={sel?0.9:0.35} filter={sel?"url(#kglow)":undefined}/>
-            <text x={n.x} y={n.y-2} textAnchor="middle" dominantBaseline="middle" fontSize="8" fontWeight="700" fill="#fff" opacity={0.9} className="pointer-events-none select-none">{n.cluster_name.replace("Cluster ","C")}</text>
-            <text x={n.x} y={n.y+9} textAnchor="middle" dominantBaseline="middle" fontSize="7" fill="rgba(255,255,255,0.5)" className="pointer-events-none select-none">{n.n_docs}</text>
-          </g>);
+          const active=isActive(n.id);
+          const hov=hoveredNode===n.id;
+          return(
+            <g key={n.id} className="cursor-pointer"
+              onClick={()=>n.cluster_id!=null&&onSelectCluster(n.cluster_id)}
+              onMouseEnter={()=>{setHoveredNode(n.id);setTooltip({x:n.x,y:n.y-n.r-10,text:`${n.label} — ${n.count} articles`});}}
+              onMouseLeave={()=>{setHoveredNode(null);setTooltip(null);}}
+            >
+              {(sel||hov)&&<circle cx={n.x} cy={n.y} r={n.r+10} fill={n.color} opacity={0.12}/>}
+              {sel&&<circle cx={n.x} cy={n.y} r={n.r+6} fill="none" stroke={n.color} strokeWidth="1.5" strokeDasharray="4,2" opacity={0.6}/>}
+              <circle cx={n.x} cy={n.y} r={n.r}
+                fill={`url(#rg-${n.id})`}
+                stroke={sel?"#fff":n.color}
+                strokeWidth={sel?2:1}
+                strokeOpacity={sel?0.9:0.5}
+                opacity={active?1:0.3}
+                filter={(sel||hov)?"url(#kglow2)":undefined}
+              />
+              <text x={n.x} y={n.y-3} textAnchor="middle" dominantBaseline="middle"
+                fontSize="8" fontWeight="800" fill="#fff" opacity={active?0.95:0.3}
+                className="pointer-events-none select-none"
+              >{n.label.replace("Cluster ","C")}</text>
+              <text x={n.x} y={n.y+8} textAnchor="middle" dominantBaseline="middle"
+                fontSize="7" fill="rgba(255,255,255,0.6)" opacity={active?1:0.3}
+                className="pointer-events-none select-none"
+              >{n.count}</text>
+            </g>
+          );
         })}
+        {/* Tooltip */}
+        {tooltip&&(
+          <g>
+            <rect x={tooltip.x-tooltip.text.length*2.8} y={tooltip.y-14} width={tooltip.text.length*5.6+8} height={16}
+              rx="4" fill="rgba(10,20,16,0.92)" stroke="rgba(255,255,255,0.12)" strokeWidth="0.8"/>
+            <text x={tooltip.x} y={tooltip.y-5} textAnchor="middle" fontSize="8" fill="rgba(255,255,255,0.9)"
+              className="pointer-events-none select-none">{tooltip.text}</text>
+          </g>
+        )}
       </svg>
     </div>
   );
 }
+
 // Scatter plot UMAP moderne avec nuages pastel
 function UmapScatterPlot({clusters,selectedCluster,onSelectCluster}:{clusters:ClusterResult[];selectedCluster:number|null;onSelectCluster:(id:number)=>void}) {
   const allPoints: Array<ClusterPoint&{cluster_id:number;is_noise:boolean}>=[];
@@ -1248,7 +1407,7 @@ function RagSection({ scenarioId, detail }: { scenarioId: string; detail: Scenar
       {/* Questions suggérées */}
       {suggestedQuestions.length > 0 && (
         <div className="space-y-2">
-          <p className="text-[10px] font-bold uppercase tracking-wider text-forest-500">Questions cliniques suggérées</p>
+          <p className="text-[10px] font-bold uppercase tracking-wider text-white/35">Questions cliniques suggérées</p>
           <div className="flex flex-wrap gap-2">
             {suggestedQuestions.map((q, i) => (
               <button
@@ -1258,7 +1417,7 @@ function RagSection({ scenarioId, detail }: { scenarioId: string; detail: Scenar
                   ask(q);
                 }}
                 disabled={loading}
-                className="text-left rounded-xl border border-white/5 bg-white/2 hover:bg-white/5 px-3 py-2 text-xs text-forest-300 hover:text-white transition disabled:opacity-50"
+                className="text-left rounded-xl border border-white/5 bg-white/2 hover:bg-white/5 px-3 py-2 text-xs text-white/70 hover:text-white transition disabled:opacity-50"
               >
                 {q}
               </button>
@@ -1287,25 +1446,40 @@ function RagSection({ scenarioId, detail }: { scenarioId: string; detail: Scenar
         </button>
       </div>
 
-      {loading && <LoadingSpinner text="Recherche sémantique et génération de la réponse..." />}
+      {loading && (
+        <div className="rounded-2xl border border-brand-500/15 bg-brand-500/5 p-4 space-y-3">
+          <div className="flex items-center gap-2 text-xs text-brand-300">
+            <Loader2 size={12} className="animate-spin"/>
+            <span>Recherche sémantique en cours...</span>
+          </div>
+          <div className="space-y-1.5">
+            {['Analyse de la question clinique','Recherche vectorielle dans le corpus','Sélection des sources pertinentes','Génération de la réponse'].map((step,i)=>(
+              <div key={i} className="flex items-center gap-2 text-[10px] text-white/40">
+                <div className="h-1 w-1 rounded-full bg-brand-400 animate-pulse" style={{animationDelay:`${i*0.3}s`}}/>
+                {step}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
       {error && <ErrorBox message={error} />}
 
       {result && !loading && (
         <div className="grid grid-cols-1 gap-6 lg:grid-cols-3 border-t border-white/5 pt-5">
           {/* Réponse */}
           <div className="lg:col-span-2 space-y-3">
-            <p className="text-[10px] font-bold uppercase tracking-wider text-forest-400">Réponse de l'Assistant</p>
+            <p className="text-[10px] font-bold uppercase tracking-wider text-white/50">Réponse de l'Assistant</p>
             <div className="rounded-2xl border border-white/5 bg-white/2 p-4 text-xs text-white/80 leading-6 whitespace-pre-wrap">
               {result.answer}
             </div>
             {result.model && (
-              <p className="text-[10px] text-forest-500 font-mono text-right">Généré via {result.model}</p>
+              <p className="text-[10px] text-white/35 font-mono text-right">Généré via {result.model}</p>
             )}
           </div>
 
           {/* Sources citées */}
           <div className="space-y-3">
-            <p className="text-[10px] font-bold uppercase tracking-wider text-forest-400">Sources scientifiques citées</p>
+            <p className="text-[10px] font-bold uppercase tracking-wider text-white/50">Sources scientifiques citées</p>
             <div className="space-y-2 max-h-[300px] overflow-y-auto pr-1">
               {result.sources.map((src, i) => (
                 <div key={i} className="rounded-xl border border-white/5 bg-white/3 p-2.5 text-xs">
@@ -1313,10 +1487,10 @@ function RagSection({ scenarioId, detail }: { scenarioId: string; detail: Scenar
                     <span className="rounded bg-brand-500/10 border border-brand-500/20 px-1.5 py-0.5 text-[9px] text-brand-300 font-mono">
                       SOURCE {i + 1}
                     </span>
-                    <span className="text-[10px] text-forest-500 font-mono">Pertinence: {(src.score * 100).toFixed(0)}%</span>
+                    <span className="text-[10px] text-white/35 font-mono">Pertinence: {(src.score * 100).toFixed(0)}%</span>
                   </div>
                   <h5 className="font-semibold text-white mt-1.5 leading-4 line-clamp-2">{src.title}</h5>
-                  <p className="text-[10px] text-forest-500 mt-1 truncate">
+                  <p className="text-[10px] text-white/35 mt-1 truncate">
                     {src.authors} • {src.year || "N/A"}
                   </p>
                 </div>
@@ -1621,7 +1795,7 @@ function PrismaSection({ scenarioId }: { scenarioId: string }) {
 
       {/* Summary table */}
       <div className="border-t border-white/5 pt-4">
-        <p className="text-[10px] text-forest-500 uppercase tracking-wider mb-3">Résumé des étapes</p>
+        <p className="text-[10px] text-white/35 uppercase tracking-wider mb-3">Résumé des étapes</p>
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
           {[
             { label: "Identifiés", value: ident.total_records_identified, sub: `${ident.duplicates_removed} doublons` },
@@ -1634,9 +1808,9 @@ function PrismaSection({ scenarioId }: { scenarioId: string }) {
             },
           ].map(({ label, value, sub }) => (
             <div key={label} className="rounded-xl border border-white/10 bg-white/3 p-3 text-center">
-              <p className="text-[9px] uppercase tracking-wider text-forest-400 mb-1">{label}</p>
+              <p className="text-[9px] uppercase tracking-wider text-white/50 mb-1">{label}</p>
               <p className="text-xl font-bold font-mono text-white">{value.toLocaleString()}</p>
-              <p className="text-[9px] text-forest-500 mt-0.5">{sub}</p>
+              <p className="text-[9px] text-white/35 mt-0.5">{sub}</p>
             </div>
           ))}
         </div>
@@ -1653,17 +1827,394 @@ function PrismaSection({ scenarioId }: { scenarioId: string }) {
   );
 }
 
+
+// ─── Section: PICO Tableau Comparatif ─────────────────────────────────────────
+function PicoSection({ scenarioId }: { scenarioId: string }) {
+  const [data, setData] = React.useState<PicoBulkResponse | null>(null);
+  const [loading, setLoading] = React.useState(true);
+  const [error, setError] = React.useState<string | null>(null);
+  const [filter, setFilter] = React.useState<'all'|'with_pico'|'without_pico'>('all');
+  const [search, setSearch] = React.useState('');
+  const [sortBy, setSortBy] = React.useState<'year'|'confidence'|'design'>('year');
+
+  React.useEffect(() => {
+    setLoading(true);
+    fetchScenarioPicoBulk(scenarioId, 200, 0)
+      .then(setData)
+      .catch(e => setError(e.message))
+      .finally(() => setLoading(false));
+  }, [scenarioId]);
+
+  const exportCsv = () => {
+    if (!data) return;
+    const headers = ['ID','Titre','Année','Journal','Type étude','Confiance','Population (P)','Intervention (I)','Comparateur (C)','Outcome (O)','Notes'];
+    const rows = data.articles.filter(a => a.has_pico).map(a => [
+      a.id, `"${(a.title||'').replace(/"/g,'""')}"`, a.year||'',
+      `"${(a.journal||'').replace(/"/g,'""')}"`,
+      a.study_design||'', a.pico_confidence!=null?Math.round(a.pico_confidence*100)+'%':'',
+      `"${(a.P||'').replace(/"/g,'""')}"`,
+      `"${(a.I||'').replace(/"/g,'""')}"`,
+      `"${(a.C||'').replace(/"/g,'""')}"`,
+      `"${(a.O||'').replace(/"/g,'""')}"`,
+      `"${(a.pico_notes||'').replace(/"/g,'""')}"`,
+    ]);
+    const csv = [headers.join(','), ...rows.map(r => r.join(','))].join('\n');
+    const blob = new Blob([csv], {type:'text/csv;charset=utf-8'});
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = `pico_${scenarioId}.csv`; a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  if (loading) return <LoadingSpinner text="Chargement des données PICO..." />;
+  if (error || !data) return <ErrorBox message={error ?? "Erreur PICO"} />;
+
+  const filtered = data.articles
+    .filter(a => filter === 'all' || (filter === 'with_pico' ? a.has_pico : !a.has_pico))
+    .filter(a => !search || a.title.toLowerCase().includes(search.toLowerCase()))
+    .sort((a,b) => {
+      if (sortBy === 'year') return (b.year||0)-(a.year||0);
+      if (sortBy === 'confidence') return (b.pico_confidence||0)-(a.pico_confidence||0);
+      return (a.study_design||'').localeCompare(b.study_design||'');
+    });
+
+  const coverage = data.total > 0 ? Math.round(data.with_pico/data.total*100) : 0;
+
+  return (
+    <div className="space-y-5">
+      <SectionHeader
+        icon={<Table2 size={14} className="text-brand-400" />}
+        title="Tableau Comparatif PICO"
+        subtitle="Vue synthétique de tous les articles avec extraction PICO structurée"
+      />
+      {/* Stats bar */}
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+        {[
+          {label:'Total articles',value:data.total,color:'text-white'},
+          {label:'Avec PICO extrait',value:data.with_pico,color:'text-brand-300'},
+          {label:'Couverture PICO',value:coverage+'%',color:coverage>70?'text-brand-300':coverage>40?'text-gold-400':'text-rose-300'},
+          {label:'Sans PICO',value:data.total-data.with_pico,color:'text-white/50'},
+        ].map(s=>(
+          <div key={s.label} className="rounded-2xl border border-white/5 bg-white/3 p-3 text-center">
+            <div className={`text-xl font-bold ${s.color}`}>{s.value}</div>
+            <div className="text-[10px] text-white/40 mt-0.5">{s.label}</div>
+          </div>
+        ))}
+      </div>
+      {/* Coverage bar */}
+      <div className="rounded-xl border border-white/5 bg-white/2 p-3">
+        <div className="flex justify-between text-[10px] text-white/40 mb-1.5">
+          <span>Couverture PICO</span><span>{data.with_pico}/{data.total}</span>
+        </div>
+        <div className="h-2 bg-white/5 rounded-full overflow-hidden">
+          <div className="h-full bg-brand-500 rounded-full transition-all" style={{width:`${coverage}%`}}/>
+        </div>
+      </div>
+      {/* Controls */}
+      <div className="flex flex-wrap gap-2 items-center">
+        <input
+          type="text" placeholder="Rechercher un article..." value={search}
+          onChange={e=>setSearch(e.target.value)}
+          className="flex-1 min-w-[200px] rounded-xl border border-white/10 bg-white/5 px-3 py-1.5 text-xs text-white focus:outline-none focus:border-brand-500/50"
+        />
+        <div className="flex gap-1">
+          {(['all','with_pico','without_pico'] as const).map(f=>(
+            <button key={f} onClick={()=>setFilter(f)}
+              className={`px-2.5 py-1.5 rounded-lg text-[10px] font-medium transition border ${
+                filter===f?'bg-brand-500/20 text-brand-300 border-brand-500/30':'bg-white/3 text-white/50 border-white/10 hover:text-white'
+              }`}
+            >
+              {f==='all'?'Tous':f==='with_pico'?'Avec PICO':'Sans PICO'}
+            </button>
+          ))}
+        </div>
+        <select value={sortBy} onChange={e=>setSortBy(e.target.value as any)}
+          className="rounded-lg border border-white/10 bg-white/5 px-2 py-1.5 text-[10px] text-white/70 focus:outline-none"
+        >
+          <option value="year">Trier par année</option>
+          <option value="confidence">Trier par confiance</option>
+          <option value="design">Trier par type étude</option>
+        </select>
+        {data.with_pico > 0 && (
+          <button onClick={exportCsv}
+            className="flex items-center gap-1.5 rounded-xl border border-brand-500/30 bg-brand-500/10 px-3 py-1.5 text-[10px] text-brand-300 hover:bg-brand-500/20 transition"
+          >
+            <Download size={10}/>Export CSV
+          </button>
+        )}
+      </div>
+      {/* Table */}
+      <div className="overflow-x-auto rounded-2xl border border-white/5">
+        <table className="w-full text-[10px] border-collapse">
+          <thead>
+            <tr className="border-b border-white/5 bg-white/3">
+              {['Titre','Année','Type étude','Confiance','P — Population','I — Intervention','C — Comparateur','O — Outcome'].map(h=>(
+                <th key={h} className="text-left px-3 py-2 text-white/40 font-semibold uppercase tracking-wider whitespace-nowrap">{h}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {filtered.slice(0,100).map((a,i)=>(
+              <tr key={a.id} className={`border-b border-white/3 transition ${i%2===0?'bg-white/1':'bg-transparent'} hover:bg-white/4`}>
+                <td className="px-3 py-2 max-w-[200px]">
+                  <div className="flex items-start gap-1.5">
+                    {a.has_pico
+                      ? <span className="mt-0.5 h-1.5 w-1.5 rounded-full bg-brand-400 shrink-0"/>
+                      : <span className="mt-0.5 h-1.5 w-1.5 rounded-full bg-white/20 shrink-0"/>
+                    }
+                    <span className="text-white/70 leading-4 line-clamp-2">{a.title}</span>
+                  </div>
+                </td>
+                <td className="px-3 py-2 text-white/50 font-mono whitespace-nowrap">{a.year||'—'}</td>
+                <td className="px-3 py-2 whitespace-nowrap">
+                  {a.study_design
+                    ? <span className="rounded-md bg-brand-500/10 border border-brand-500/20 px-1.5 py-0.5 text-brand-300">{a.study_design}</span>
+                    : <span className="text-white/25">—</span>
+                  }
+                </td>
+                <td className="px-3 py-2 whitespace-nowrap">
+                  {a.pico_confidence!=null
+                    ? <span className={`font-mono font-semibold ${a.pico_confidence>0.7?'text-brand-300':a.pico_confidence>0.4?'text-gold-400':'text-rose-300'}`}>
+                        {Math.round(a.pico_confidence*100)}%
+                      </span>
+                    : <span className="text-white/25">—</span>
+                  }
+                </td>
+                {(['P','I','C','O'] as const).map(key=>(
+                  <td key={key} className="px-3 py-2 max-w-[160px]">
+                    <span className="text-white/60 leading-4 line-clamp-3">{(a as any)[key]||<span className="text-white/20">—</span>}</span>
+                  </td>
+                ))}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        {filtered.length > 100 && (
+          <div className="text-center py-3 text-[10px] text-white/35">
+            Affichage des 100 premiers résultats sur {filtered.length}. Utilisez la recherche pour filtrer.
+          </div>
+        )}
+        {filtered.length === 0 && (
+          <div className="text-center py-8 text-xs text-white/35">Aucun article ne correspond aux filtres.</div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ─── Section: Evidence Brief PDF ──────────────────────────────────────────────
+function EvidenceBriefSection({ scenarioId, detail }: { scenarioId: string; detail: ScenarioDetail }) {
+  const [data, setData] = React.useState<EvidenceBriefData | null>(null);
+  const [loading, setLoading] = React.useState(true);
+  const [error, setError] = React.useState<string | null>(null);
+  const [generating, setGenerating] = React.useState(false);
+
+  React.useEffect(() => {
+    setLoading(true);
+    fetchEvidenceBrief(scenarioId)
+      .then(setData)
+      .catch(e => setError(e.message))
+      .finally(() => setLoading(false));
+  }, [scenarioId]);
+
+  const generatePdf = async () => {
+    if (!data) return;
+    setGenerating(true);
+    try {
+      // Build HTML for PDF
+      const html = `<!DOCTYPE html><html><head><meta charset="utf-8">
+<title>Evidence Brief — ${detail.title}</title>
+<style>
+  body{font-family:Georgia,serif;max-width:800px;margin:40px auto;color:#1a1a1a;line-height:1.6}
+  h1{color:#0A3621;border-bottom:3px solid #E3AC3B;padding-bottom:8px}
+  h2{color:#0A3621;margin-top:32px;font-size:1.1em;text-transform:uppercase;letter-spacing:.05em}
+  h3{color:#2d7a52;font-size:.95em}
+  .meta{color:#666;font-size:.85em;margin-bottom:24px}
+  .stat-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin:16px 0}
+  .stat{background:#f0f7f3;border:1px solid #aed4bc;border-radius:8px;padding:12px;text-align:center}
+  .stat-val{font-size:1.8em;font-weight:700;color:#0A3621}
+  .stat-label{font-size:.75em;color:#4d7461;margin-top:4px}
+  table{width:100%;border-collapse:collapse;font-size:.82em;margin-top:12px}
+  th{background:#0A3621;color:#fff;padding:8px 10px;text-align:left}
+  td{padding:6px 10px;border-bottom:1px solid #e0e8e3}
+  tr:nth-child(even) td{background:#f9fafb}
+  .badge{display:inline-block;background:#d6eade;color:#0A3621;border-radius:4px;padding:2px 6px;font-size:.75em;font-weight:600}
+  .bar-container{background:#e0e8e3;border-radius:4px;height:8px;margin-top:4px}
+  .bar{background:#2d7a52;border-radius:4px;height:8px}
+  .article-card{border:1px solid #e0e8e3;border-radius:8px;padding:12px;margin-bottom:10px}
+  .article-title{font-weight:600;color:#0A3621;margin-bottom:4px}
+  .article-meta{font-size:.8em;color:#666}
+  .article-abstract{font-size:.82em;color:#444;margin-top:6px;font-style:italic}
+  footer{margin-top:40px;padding-top:16px;border-top:1px solid #e0e8e3;font-size:.75em;color:#999;text-align:center}
+</style></head><body>
+<h1>Evidence Brief</h1>
+<div class="meta">
+  <strong>${detail.title}</strong> — Scénario GESICA<br>
+  Généré le ${new Date(data.generated_at).toLocaleDateString('fr-FR', {year:'numeric',month:'long',day:'numeric'})}<br>
+  Projet : LiteRev — Evidence to Scenario
+</div>
+
+<h2>Résumé Exécutif</h2>
+<p>${detail.description}</p>
+
+<h2>Statistiques du Corpus</h2>
+<div class="stat-grid">
+  <div class="stat"><div class="stat-val">${data.corpus_stats.total}</div><div class="stat-label">Articles identifiés</div></div>
+  <div class="stat"><div class="stat-val">${data.corpus_stats.total - data.corpus_stats.duplicates}</div><div class="stat-label">Articles uniques</div></div>
+  <div class="stat"><div class="stat-val">${data.corpus_stats.included}</div><div class="stat-label">Inclus (screening)</div></div>
+  <div class="stat"><div class="stat-val">${data.corpus_stats.with_pico}</div><div class="stat-label">Avec PICO extrait</div></div>
+</div>
+${data.corpus_stats.year_min && data.corpus_stats.year_max ? `<p class="meta">Couverture temporelle : ${data.corpus_stats.year_min} – ${data.corpus_stats.year_max}</p>` : ''}
+
+<h2>Distribution par Type d'Étude</h2>
+<table>
+  <tr><th>Type d'étude</th><th>Nombre</th><th>Proportion</th></tr>
+  ${data.study_design_distribution.slice(0,8).map(d=>`
+  <tr>
+    <td><span class="badge">${d.design}</span></td>
+    <td>${d.count}</td>
+    <td>
+      <div class="bar-container"><div class="bar" style="width:${Math.round(d.count/(data.corpus_stats.total||1)*100)}%"></div></div>
+      ${Math.round(d.count/(data.corpus_stats.total||1)*100)}%
+    </td>
+  </tr>`).join('')}
+</table>
+
+<h2>Articles Représentatifs</h2>
+${data.top_articles.slice(0,8).map((a,i)=>`
+<div class="article-card">
+  <div class="article-title">${i+1}. ${a.title}</div>
+  <div class="article-meta">
+    ${a.year||'N/A'} • ${a.journal||'Journal non renseigné'}
+    ${a.study_design?` • <span class="badge">${a.study_design}</span>`:''}
+    ${a.citation_count?` • ${a.citation_count} citations`:''}
+    ${a.doi?` • <a href="https://doi.org/${a.doi}">DOI</a>`:''}
+  </div>
+  ${a.abstract_excerpt?`<div class="article-abstract">"${a.abstract_excerpt}..."</div>`:''}
+</div>`).join('')}
+
+<footer>
+  LiteRev — Evidence to Scenario | Projet GESICA | ${new Date().getFullYear()}<br>
+  Ce document est généré automatiquement à partir de la base de données de littérature scientifique.
+</footer>
+</body></html>`;
+
+      const blob = new Blob([html], {type:'text/html;charset=utf-8'});
+      const url = URL.createObjectURL(blob);
+      const win = window.open(url, '_blank');
+      if (win) {
+        setTimeout(() => { win.print(); }, 800);
+      }
+      URL.revokeObjectURL(url);
+    } finally {
+      setGenerating(false);
+    }
+  };
+
+  if (loading) return <LoadingSpinner text="Chargement des données pour l'Evidence Brief..." />;
+  if (error || !data) return <ErrorBox message={error ?? "Erreur Evidence Brief"} />;
+
+  return (
+    <div className="space-y-6">
+      <SectionHeader
+        icon={<BookOpen size={14} className="text-brand-400" />}
+        title="Evidence Brief"
+        subtitle="Rapport synthétique exportable pour les décideurs et cliniciens"
+      />
+      {/* Preview card */}
+      <div className="rounded-3xl border border-white/10 bg-white/3 p-6 space-y-5">
+        <div className="flex items-start justify-between gap-4 flex-wrap">
+          <div>
+            <h3 className="text-sm font-bold text-white">{detail.title}</h3>
+            <p className="text-xs text-white/50 mt-1">Scénario GESICA — LiteRev Evidence to Scenario</p>
+            <p className="text-xs text-white/35 mt-0.5">Généré le {new Date(data.generated_at).toLocaleDateString('fr-FR',{year:'numeric',month:'long',day:'numeric'})}</p>
+          </div>
+          <button
+            onClick={generatePdf}
+            disabled={generating}
+            className="flex items-center gap-2 rounded-2xl bg-brand-500 hover:bg-brand-400 text-white font-semibold px-5 py-2.5 text-sm transition disabled:opacity-50 shrink-0"
+          >
+            {generating ? <Loader2 size={14} className="animate-spin"/> : <Download size={14}/>}
+            {generating ? 'Génération...' : 'Exporter PDF'}
+          </button>
+        </div>
+        {/* Stats preview */}
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+          {[
+            {label:'Articles identifiés',value:data.corpus_stats.total,color:'text-white'},
+            {label:'Articles uniques',value:data.corpus_stats.total-data.corpus_stats.duplicates,color:'text-brand-300'},
+            {label:'Inclus (screening)',value:data.corpus_stats.included,color:'text-brand-300'},
+            {label:'PICO extraits',value:data.corpus_stats.with_pico,color:'text-gold-400'},
+          ].map(s=>(
+            <div key={s.label} className="rounded-2xl border border-white/5 bg-white/2 p-3 text-center">
+              <div className={`text-2xl font-bold ${s.color}`}>{s.value}</div>
+              <div className="text-[10px] text-white/35 mt-0.5">{s.label}</div>
+            </div>
+          ))}
+        </div>
+        {/* Coverage temporelle */}
+        {data.corpus_stats.year_min && data.corpus_stats.year_max && (
+          <p className="text-xs text-white/50">
+            Couverture temporelle : <span className="text-white/70 font-semibold">{data.corpus_stats.year_min} – {data.corpus_stats.year_max}</span>
+          </p>
+        )}
+        {/* Study designs */}
+        <div className="space-y-2">
+          <p className="text-[10px] font-bold uppercase tracking-wider text-white/40">Distribution par type d'étude</p>
+          <div className="space-y-1.5">
+            {data.study_design_distribution.slice(0,6).map(d=>(
+              <div key={d.design} className="flex items-center gap-3 text-xs">
+                <span className="w-32 text-white/60 truncate">{d.design}</span>
+                <div className="flex-1 h-1.5 bg-white/5 rounded-full overflow-hidden">
+                  <div className="h-full bg-brand-500 rounded-full" style={{width:`${Math.round(d.count/(data.corpus_stats.total||1)*100)}%`}}/>
+                </div>
+                <span className="w-8 text-right text-white/40 font-mono">{d.count}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+        {/* Top articles preview */}
+        <div className="space-y-2">
+          <p className="text-[10px] font-bold uppercase tracking-wider text-white/40">Articles les plus cités</p>
+          <div className="space-y-2">
+            {data.top_articles.slice(0,4).map((a,i)=>(
+              <div key={a.id} className="rounded-xl border border-white/5 bg-white/2 p-3">
+                <div className="flex items-start gap-2">
+                  <span className="text-[10px] font-mono text-brand-300 shrink-0 mt-0.5">#{i+1}</span>
+                  <div>
+                    <p className="text-xs font-semibold text-white/80 leading-4 line-clamp-2">{a.title}</p>
+                    <p className="text-[10px] text-white/40 mt-1">
+                      {a.year||'N/A'} • {a.journal||'—'}
+                      {a.study_design && <span className="ml-2 rounded bg-brand-500/10 border border-brand-500/20 px-1 text-brand-300">{a.study_design}</span>}
+                      {a.citation_count && <span className="ml-2">{a.citation_count} citations</span>}
+                    </p>
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+        <p className="text-[10px] text-white/25 italic">
+          Le PDF généré inclut : résumé exécutif, statistiques complètes, distribution temporelle, types d'étude et articles représentatifs avec abstracts.
+        </p>
+      </div>
+    </div>
+  );
+}
+
 // ─── Main Component ───────────────────────────────────────────────────────────
 
-type SectionKey = "corpus" | "prisma" | "rag" | "variables" | "model" | "clustering" | "queries";
+type SectionKey = "corpus" | "pico" | "prisma" | "rag" | "variables" | "model" | "clustering" | "brief" | "queries";
 
 const SECTIONS: Array<{ key: SectionKey; label: string; icon: React.ReactNode }> = [
   { key: "corpus",     label: "Corpus",                   icon: <FileText size={13} /> },
+  { key: "pico",       label: "PICO",                     icon: <Table2 size={13} /> },
   { key: "prisma",     label: "PRISMA",                   icon: <Shield size={13} /> },
   { key: "rag",        label: "Evidence (RAG)",            icon: <MessageSquare size={13} /> },
   { key: "variables", label: "Données & Variables",       icon: <Database size={13} /> },
   { key: "model",     label: "Modèle prédictif",          icon: <Brain size={13} /> },
   { key: "clustering",label: "Clustering & Topics",       icon: <Layers size={13} /> },
+  { key: "brief",     label: "Evidence Brief",            icon: <BookOpen size={13} /> },
   { key: "queries",   label: "Stratégie de recherche",    icon: <Search size={13} /> },
 ];
 
@@ -1689,7 +2240,7 @@ export function ScenarioDetailPage({ scenarioId, onBack }: ScenarioDetailPagePro
 
   if (loading) {
     return (
-      <div className="flex items-center justify-center py-24 text-forest-400 gap-2">
+      <div className="flex items-center justify-center py-24 text-white/50 gap-2">
         <RotateCcw size={18} className="animate-spin" />
         <span>Chargement du scénario...</span>
       </div>
@@ -1699,7 +2250,7 @@ export function ScenarioDetailPage({ scenarioId, onBack }: ScenarioDetailPagePro
   if (error || !detail) {
     return (
       <div className="space-y-4">
-        <button onClick={onBack} className="flex items-center gap-2 text-sm text-forest-400 hover:text-white transition">
+        <button onClick={onBack} className="flex items-center gap-2 text-sm text-white/50 hover:text-white transition">
           <ArrowLeft size={14} /> Retour aux scénarios
         </button>
         <ErrorBox message={error ?? "Scénario introuvable"} />
@@ -1713,7 +2264,7 @@ export function ScenarioDetailPage({ scenarioId, onBack }: ScenarioDetailPagePro
       <div className="flex items-start gap-4">
         <button
           onClick={onBack}
-          className="mt-1 flex items-center gap-1.5 rounded-xl border border-white/10 bg-white/5 px-3 py-1.5 text-xs text-forest-400 hover:text-white hover:bg-white/10 transition shrink-0"
+          className="mt-1 flex items-center gap-1.5 rounded-xl border border-white/10 bg-white/5 px-3 py-1.5 text-xs text-white/50 hover:text-white hover:bg-white/10 transition shrink-0"
         >
           <ArrowLeft size={12} /> Retour
         </button>
@@ -1723,16 +2274,16 @@ export function ScenarioDetailPage({ scenarioId, onBack }: ScenarioDetailPagePro
             <span className="rounded-full border border-brand-500/20 bg-brand-500/10 px-2 py-0.5 text-xs text-brand-300">
               {detail.cluster}
             </span>
-            <span className="rounded-full border border-white/10 bg-white/5 px-2 py-0.5 text-xs text-forest-400 font-mono">
+            <span className="rounded-full border border-white/10 bg-white/5 px-2 py-0.5 text-xs text-white/50 font-mono">
               {detail.corpus_stats.total} articles
             </span>
           </div>
-          <p className="mt-1 text-sm text-forest-400 leading-5">{detail.description}</p>
+          <p className="mt-1 text-sm text-white/50 leading-5">{detail.description}</p>
           {/* Actions recommandées */}
           {detail.recommended_actions.length > 0 && (
             <div className="mt-3 flex flex-wrap gap-2">
               {detail.recommended_actions.slice(0, 2).map((action, i) => (
-                <span key={i} className="flex items-center gap-1.5 rounded-xl border border-white/5 bg-white/3 px-2.5 py-1 text-xs text-forest-300">
+                <span key={i} className="flex items-center gap-1.5 rounded-xl border border-white/5 bg-white/3 px-2.5 py-1 text-xs text-white/70">
                   <span className="h-1.5 w-1.5 rounded-full bg-brand-400 shrink-0" />
                   {action.length > 80 ? action.slice(0, 80) + "..." : action}
                 </span>
@@ -1751,7 +2302,7 @@ export function ScenarioDetailPage({ scenarioId, onBack }: ScenarioDetailPagePro
             className={`flex items-center gap-1.5 rounded-xl px-3 py-1.5 text-xs font-medium transition ${
               activeSection === section.key
                 ? "border border-brand-500/30 bg-brand-500/10 text-brand-300"
-                : "border border-transparent text-forest-400 hover:text-white hover:bg-white/5"
+                : "border border-transparent text-white/50 hover:text-white hover:bg-white/5"
             }`}
           >
             {section.icon}
@@ -1765,9 +2316,11 @@ export function ScenarioDetailPage({ scenarioId, onBack }: ScenarioDetailPagePro
       {activeSection === "variables" && <VariablesSection detail={detail} scenarioId={scenarioId} />}
       {activeSection === "model" && <ModelSection scenarioId={scenarioId} />}
       {activeSection === "corpus" && <CorpusSection scenarioId={scenarioId} detail={detail} />}
+      {activeSection === "pico" && <PicoSection scenarioId={scenarioId} />}
       {activeSection === "clustering" && <ClusteringSection scenarioId={scenarioId} />}
       {activeSection === "rag" && <RagSection scenarioId={scenarioId} detail={detail} />}
       {activeSection === "prisma" && <PrismaSection scenarioId={scenarioId} />}
+      {activeSection === "brief" && <EvidenceBriefSection scenarioId={scenarioId} detail={detail} />}
     </div>
   );
 }

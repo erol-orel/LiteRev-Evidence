@@ -187,7 +187,7 @@ class EMSTransnationalDemandModel:
                 prophet_pred = self.prophet_model.predict(future_df)["yhat"].values[0]
             else:
                 # Fallback statistique simple si Prophet absent
-                dayofweek = target_date.dayofweek
+                dayofweek = target_date.weekday()
                 weekly_factor = {0: -5, 1: -8, 2: -6, 3: -2, 4: 12, 5: 15, 6: -6}.get(dayofweek, 0)
                 month_factor = 10 * np.cos(2 * np.pi * (target_date.timetuple().tm_yday - 15) / 365)
                 prophet_pred = 150.0 + weekly_factor + month_factor
@@ -199,7 +199,7 @@ class EMSTransnationalDemandModel:
                 features_pred = pd.DataFrame({
                     "temp": [day_temp],
                     "epidemic_impact": [epidemic_level],
-                    "dayofweek": [target_date.dayofweek],
+                    "dayofweek": [target_date.weekday()],
                     "month": [target_date.month],
                     "lag_1": [prophet_pred],  # Approximation
                     "lag_7": [prophet_pred]

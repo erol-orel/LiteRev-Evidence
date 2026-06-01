@@ -1759,3 +1759,77 @@ export async function extractPicoBatch(
   if (!response.ok) throw new Error(`HTTP ${response.status}`);
   return response.json();
 }
+
+// ─── PICO Bulk ────────────────────────────────────────────────────────────────
+export interface PicoBulkArticle {
+  id: number;
+  title: string;
+  year: number | null;
+  source: string;
+  authors: string | null;
+  doi: string | null;
+  journal: string | null;
+  study_design: string | null;
+  pico_confidence: number | null;
+  P: string | null;
+  I: string | null;
+  C: string | null;
+  O: string | null;
+  pico_notes: string | null;
+  has_pico: boolean;
+  pico_extracted_at: string | null;
+  screening_status: string | null;
+}
+
+export interface PicoBulkResponse {
+  scenario_id: string;
+  total: number;
+  with_pico: number;
+  offset: number;
+  limit: number;
+  articles: PicoBulkArticle[];
+}
+
+export async function fetchScenarioPicoBulk(
+  scenarioId: string,
+  limit = 200,
+  offset = 0
+): Promise<PicoBulkResponse> {
+  const r = await fetch(`${API_BASE_URL}/gesica/scenarios/${scenarioId}/pico-bulk?limit=${limit}&offset=${offset}`);
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  return r.json();
+}
+
+// ─── Evidence Brief ───────────────────────────────────────────────────────────
+export interface EvidenceBriefData {
+  scenario_id: string;
+  generated_at: string;
+  corpus_stats: {
+    total: number;
+    duplicates: number;
+    with_pico: number;
+    included: number;
+    excluded: number;
+    year_min: number | null;
+    year_max: number | null;
+  };
+  top_articles: Array<{
+    id: number;
+    title: string;
+    year: number | null;
+    journal: string | null;
+    authors: string | null;
+    doi: string | null;
+    study_design: string | null;
+    citation_count: number | null;
+    abstract_excerpt: string;
+  }>;
+  study_design_distribution: Array<{ design: string; count: number }>;
+  year_distribution: Array<{ year: number; count: number }>;
+}
+
+export async function fetchEvidenceBrief(scenarioId: string): Promise<EvidenceBriefData> {
+  const r = await fetch(`${API_BASE_URL}/gesica/scenarios/${scenarioId}/evidence-brief`);
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  return r.json();
+}

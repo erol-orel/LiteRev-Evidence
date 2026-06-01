@@ -663,7 +663,7 @@ def search(payload: SearchIn) -> dict[str, Any]:
             "evidence_category": row["evidence_category"],
             "chunk_type": row["chunk_type"],
         })
-    return {"results": results, "count": len(results)}
+    return {"results": results, "count": len(results), "total": len(results)}
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Document detail
@@ -1480,13 +1480,13 @@ def get_demand_forecasting_prediction(lat: float = 46.2044, lon: float = 6.1432,
             "predictions": predictions
         }
     except Exception as e:
-        log.error(f"Erreur lors de la prédiction de la demande : {str(e)}")
+        logger.error(f"Erreur lors de la prédiction de la demande : {str(e)}")
         # Fallback statique robuste
         start_date = datetime.now()
         fallback_preds = []
         for i in range(1, 8):
             target_date = start_date + timedelta(days=i)
-            dayofweek = target_date.dayofweek
+            dayofweek = target_date.weekday()
             demand = 145 + (15 if dayofweek in [4, 5] else -5) + int(np.random.normal(0, 5))
             fallback_preds.append({
                 "date": target_date.strftime("%A %d %B %Y"),
@@ -3596,4 +3596,141 @@ def get_scenario_screening_progress(scenario_id: str) -> dict[str, Any]:
         "awaiting": unique - screened,
         "progress_pct": pct,
         "screening_complete": pct >= 100,
+    }
+
+# ─── PICO Bulk : tous les articles d'un scénario avec PICO ───────────────────
+@app.get("/gesica/scenarios/{scenario_id}/pico-bulk")
+def get_scenario_pico_bulk(scenario_id: str, limit: int = 200, offset: int = 0) -> dict[str, Any]:
+    """Retourne tous les articles d'un scénario avec leur PICO extrait (pour le tableau comparatif)."""
+    with engine.connect() as conn:
+        rows = conn.execute(text("""
+            SELECT
+                id, title, abstract, year, source, authors, doi, journal,
+                study_design, pico_json, pico_extracted_at,
+                screening_status
+            FROM literature_document
+            WHERE scenario_type = :scenario_id
+              AND project_context = 'gesica'
+              AND is_duplicate IS NOT TRUE
+            ORDER BY
+                CASE WHEN pico_json IS NOT NULL THEN 0 ELSE 1 END,
+                year DESC NULLS LAST,
+                id DESC
+            LIMIT :limit OFFSET :offset
+        """), {"scenario_id": scenario_id, "limit": limit, "offset": offset}).mappings().fetchall()
+        total_row = conn.execute(text("""
+            SELECT COUNT(*) AS total,
+                   COUNT(*) FILTER (WHERE pico_json IS NOT NULL) AS with_pico
+            FROM literature_document
+            WHERE scenario_type = :scenario_id
+              AND project_context = 'gesica'
+              AND is_duplicate IS NOT TRUE
+        """), {"scenario_id": scenario_id}).mappings().fetchone()
+    articles = []
+    for r in rows:
+        pico = r["pico_json"] if r["pico_json"] else None
+        articles.append({
+            "id": r["id"],
+            "title": r["title"],
+            "year": r["year"],
+            "source": r["source"],
+            "authors": r["authors"],
+            "doi": r["doi"],
+            "journal": r["journal"],
+            "study_design": pico.get("study_design") if pico else r["study_design"],
+            "pico_confidence": float(pico.get("pico_confidence", 0)) if pico else None,
+            "P": pico.get("P") if pico else None,
+            "I": pico.get("I") if pico else None,
+            "C": pico.get("C") if pico else None,
+            "O": pico.get("O") if pico else None,
+            "pico_notes": pico.get("pico_notes") if pico else None,
+            "has_pico": pico is not None,
+            "pico_extracted_at": r["pico_extracted_at"].isoformat() if r["pico_extracted_at"] else None,
+            "screening_status": r["screening_status"],
+        })
+    return {
+        "scenario_id": scenario_id,
+        "total": int(total_row["total"]) if total_row else 0,
+        "with_pico": int(total_row["with_pico"]) if total_row else 0,
+        "offset": offset,
+        "limit": limit,
+        "articles": articles,
+    }
+
+# ─── Evidence Brief PDF ───────────────────────────────────────────────────────
+@app.get("/gesica/scenarios/{scenario_id}/evidence-brief")
+def get_evidence_brief(scenario_id: str) -> dict[str, Any]:
+    """Retourne les données structurées pour générer un Evidence Brief PDF côté client."""
+    with engine.connect() as conn:
+        # Stats du corpus
+        corpus_stats = conn.execute(text("""
+            SELECT
+                COUNT(*) AS total,
+                COUNT(*) FILTER (WHERE is_duplicate IS TRUE) AS duplicates,
+                COUNT(*) FILTER (WHERE pico_json IS NOT NULL) AS with_pico,
+                COUNT(*) FILTER (WHERE screening_status = 'included') AS included,
+                COUNT(*) FILTER (WHERE screening_status = 'excluded') AS excluded,
+                MIN(year) AS year_min,
+                MAX(year) AS year_max
+            FROM literature_document
+            WHERE scenario_type = :sid AND project_context = 'gesica'
+        """), {"sid": scenario_id}).mappings().fetchone()
+        # Top articles (représentatifs)
+        top_articles = conn.execute(text("""
+            SELECT id, title, abstract, year, journal, authors, doi,
+                   study_design, pico_json, citation_count
+            FROM literature_document
+            WHERE scenario_type = :sid
+              AND project_context = 'gesica'
+              AND is_duplicate IS NOT TRUE
+              AND abstract IS NOT NULL
+            ORDER BY citation_count DESC NULLS LAST, year DESC NULLS LAST
+            LIMIT 10
+        """), {"sid": scenario_id}).mappings().fetchall()
+        # Distribution par type d'étude
+        study_designs = conn.execute(text("""
+            SELECT
+                COALESCE(study_design, pico_json->>'study_design', 'Non classifié') AS design,
+                COUNT(*) AS n
+            FROM literature_document
+            WHERE scenario_type = :sid AND project_context = 'gesica'
+              AND is_duplicate IS NOT TRUE
+            GROUP BY 1 ORDER BY 2 DESC LIMIT 10
+        """), {"sid": scenario_id}).mappings().fetchall()
+        # Distribution par année
+        year_dist = conn.execute(text("""
+            SELECT year, COUNT(*) AS n
+            FROM literature_document
+            WHERE scenario_type = :sid AND project_context = 'gesica'
+              AND is_duplicate IS NOT TRUE AND year IS NOT NULL
+            GROUP BY year ORDER BY year DESC LIMIT 15
+        """), {"sid": scenario_id}).mappings().fetchall()
+    return {
+        "scenario_id": scenario_id,
+        "generated_at": __import__('datetime').datetime.now().isoformat(),
+        "corpus_stats": {
+            "total": int(corpus_stats["total"] or 0),
+            "duplicates": int(corpus_stats["duplicates"] or 0),
+            "with_pico": int(corpus_stats["with_pico"] or 0),
+            "included": int(corpus_stats["included"] or 0),
+            "excluded": int(corpus_stats["excluded"] or 0),
+            "year_min": corpus_stats["year_min"],
+            "year_max": corpus_stats["year_max"],
+        },
+        "top_articles": [
+            {
+                "id": r["id"],
+                "title": r["title"],
+                "year": r["year"],
+                "journal": r["journal"],
+                "authors": r["authors"],
+                "doi": r["doi"],
+                "study_design": r["study_design"] or (r["pico_json"].get("study_design") if r["pico_json"] else None),
+                "citation_count": r["citation_count"],
+                "abstract_excerpt": (r["abstract"] or "")[:300],
+            }
+            for r in top_articles
+        ],
+        "study_design_distribution": [{"design": d["design"], "count": int(d["n"])} for d in study_designs],
+        "year_distribution": [{"year": d["year"], "count": int(d["n"])} for d in year_dist],
     }
