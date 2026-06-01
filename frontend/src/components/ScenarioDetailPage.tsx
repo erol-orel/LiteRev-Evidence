@@ -30,18 +30,18 @@ import {
 
 const STATUS_COLORS = {
   green: {
-    bg: "bg-emerald-500/10",
-    border: "border-emerald-500/30",
-    text: "text-emerald-300",
-    dot: "bg-emerald-400",
-    badge: "bg-emerald-500/20 text-emerald-300 border-emerald-500/30",
+    bg: "bg-brand-500/10",
+    border: "border-brand-500/30",
+    text: "text-brand-300",
+    dot: "bg-brand-400",
+    badge: "bg-brand-500/20 text-brand-300 border-brand-500/30",
   },
   orange: {
-    bg: "bg-amber-500/10",
-    border: "border-amber-500/30",
-    text: "text-amber-300",
-    dot: "bg-amber-400",
-    badge: "bg-amber-500/20 text-amber-300 border-amber-500/30",
+    bg: "bg-gold-500/10",
+    border: "border-gold-500/30",
+    text: "text-gold-300",
+    dot: "bg-gold-400",
+    badge: "bg-gold-500/20 text-gold-300 border-gold-500/30",
   },
   red: {
     bg: "bg-rose-500/10",
@@ -58,7 +58,7 @@ function SectionHeader({ icon, title, subtitle }: { icon: React.ReactNode; title
       <div className="rounded-xl border border-white/10 bg-white/5 p-2 shrink-0">{icon}</div>
       <div>
         <h3 className="text-sm font-semibold text-white uppercase tracking-wider">{title}</h3>
-        {subtitle && <p className="text-xs text-slate-400 mt-0.5">{subtitle}</p>}
+        {subtitle && <p className="text-xs text-forest-400 mt-0.5">{subtitle}</p>}
       </div>
     </div>
   );
@@ -66,7 +66,7 @@ function SectionHeader({ icon, title, subtitle }: { icon: React.ReactNode; title
 
 function LoadingSpinner({ text }: { text?: string }) {
   return (
-    <div className="flex items-center justify-center py-8 text-slate-400 gap-2">
+    <div className="flex items-center justify-center py-8 text-forest-400 gap-2">
       <RotateCcw size={16} className="animate-spin" />
       <span className="text-sm">{text ?? "Chargement..."}</span>
     </div>
@@ -89,58 +89,58 @@ function QueriesSection({ detail }: { detail: ScenarioDetail }) {
   return (
     <div className="rounded-3xl border border-white/10 bg-white/3 p-5 space-y-5">
       <SectionHeader
-        icon={<Search size={14} className="text-cyan-400" />}
+        icon={<Search size={14} className="text-brand-400" />}
         title="Stratégie de Recherche"
         subtitle="Requêtes utilisées pour récupérer les articles du corpus"
       />
       {/* Boolean Queries PubMed */}
       <div>
         <div className="flex items-center gap-2 mb-3">
-          <Terminal size={12} className="text-violet-400" />
-          <span className="text-xs font-semibold text-violet-300 uppercase tracking-wider">
+          <Terminal size={12} className="text-brand-400" />
+          <span className="text-xs font-semibold text-brand-300 uppercase tracking-wider">
             Requêtes Booléennes PubMed ({detail.boolean_queries.length})
           </span>
         </div>
         <div className="space-y-2">
           {detail.boolean_queries.length > 0 ? detail.boolean_queries.map((q, i) => (
-            <div key={i} className="group relative rounded-xl border border-violet-500/10 bg-violet-500/5 px-3 py-2">
+            <div key={i} className="group relative rounded-xl border border-brand-500/10 bg-brand-500/5 px-3 py-2">
               <div className="flex items-start gap-2">
-                <span className="text-[10px] font-mono text-violet-500 shrink-0 mt-0.5">Q{i + 1}</span>
-                <code className="text-xs text-violet-200 font-mono break-all leading-5">{q}</code>
+                <span className="text-[10px] font-mono text-brand-500 shrink-0 mt-0.5">Q{i + 1}</span>
+                <code className="text-xs text-brand-200 font-mono break-all leading-5">{q}</code>
               </div>
               <a
                 href={`https://pubmed.ncbi.nlm.nih.gov/?term=${encodeURIComponent(q)}`}
                 target="_blank"
                 rel="noopener noreferrer"
-                className="absolute top-2 right-2 opacity-0 group-hover:opacity-100 transition text-violet-400 hover:text-violet-300"
+                className="absolute top-2 right-2 opacity-0 group-hover:opacity-100 transition text-brand-400 hover:text-brand-300"
                 title="Ouvrir dans PubMed"
               >
                 <ExternalLink size={11} />
               </a>
             </div>
           )) : (
-            <p className="text-xs text-slate-500 italic">Aucune requête booléenne définie pour ce scénario.</p>
+            <p className="text-xs text-forest-500 italic">Aucune requête booléenne définie pour ce scénario.</p>
           )}
         </div>
       </div>
       {/* Natural Language Queries */}
       <div>
         <div className="flex items-center gap-2 mb-3">
-          <MessageSquare size={12} className="text-sky-400" />
-          <span className="text-xs font-semibold text-sky-300 uppercase tracking-wider">
+          <MessageSquare size={12} className="text-brand-400" />
+          <span className="text-xs font-semibold text-brand-300 uppercase tracking-wider">
             Requêtes Langage Naturel — Recherche Sémantique ({detail.nl_queries.length})
           </span>
         </div>
         <div className="space-y-2">
           {detail.nl_queries.length > 0 ? detail.nl_queries.map((q, i) => (
-            <div key={i} className="rounded-xl border border-sky-500/10 bg-sky-500/5 px-3 py-2">
+            <div key={i} className="rounded-xl border border-brand-500/10 bg-brand-500/5 px-3 py-2">
               <div className="flex items-start gap-2">
-                <span className="text-[10px] font-mono text-sky-500 shrink-0 mt-0.5">NL{i + 1}</span>
-                <span className="text-xs text-sky-200 leading-5">{q}</span>
+                <span className="text-[10px] font-mono text-brand-500 shrink-0 mt-0.5">NL{i + 1}</span>
+                <span className="text-xs text-brand-200 leading-5">{q}</span>
               </div>
             </div>
           )) : (
-            <p className="text-xs text-slate-500 italic">Aucune requête NL définie pour ce scénario.</p>
+            <p className="text-xs text-forest-500 italic">Aucune requête NL définie pour ce scénario.</p>
           )}
         </div>
       </div>
@@ -149,14 +149,14 @@ function QueriesSection({ detail }: { detail: ScenarioDetail }) {
         <div>
           <button
             onClick={() => setShowPrompt(!showPrompt)}
-            className="flex items-center gap-2 text-xs font-semibold text-amber-300 uppercase tracking-wider hover:text-amber-200 transition"
+            className="flex items-center gap-2 text-xs font-semibold text-gold-300 uppercase tracking-wider hover:text-gold-200 transition"
           >
             {showPrompt ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
             {showPrompt ? "Masquer" : "Afficher"} le prompt LLM d'extraction d'évidence
           </button>
           {showPrompt && (
-            <div className="mt-3 rounded-xl border border-amber-500/15 bg-amber-500/5 p-4">
-              <pre className="text-xs text-amber-100 font-mono whitespace-pre-wrap leading-5">
+            <div className="mt-3 rounded-xl border border-gold-500/15 bg-gold-500/5 p-4">
+              <pre className="text-xs text-gold-100 font-mono whitespace-pre-wrap leading-5">
                 {detail.evidence_extraction_prompt}
               </pre>
             </div>
@@ -225,12 +225,12 @@ function VariablesSection({ detail, scenarioId }: { detail: ScenarioDetail; scen
         {/* Outcome */}
         <div className="rounded-3xl border border-white/10 bg-white/3 p-5 space-y-4">
           <SectionHeader
-            icon={<Zap size={14} className="text-amber-400" />}
+            icon={<Zap size={14} className="text-gold-400" />}
             title="Outcome étudié & surveillé"
             subtitle="Définition clinique de l'indicateur principal du modèle"
           />
-          <div className="rounded-2xl border border-amber-500/10 bg-amber-500/5 p-4">
-            <p className="text-sm font-medium text-amber-200 leading-6">
+          <div className="rounded-2xl border border-gold-500/10 bg-gold-500/5 p-4">
+            <p className="text-sm font-medium text-gold-200 leading-6">
               {detail.outcome_definition || "Outcome clinique non spécifié."}
             </p>
           </div>
@@ -240,12 +240,12 @@ function VariablesSection({ detail, scenarioId }: { detail: ScenarioDetail; scen
         <div className="rounded-3xl border border-white/10 bg-white/3 p-5 space-y-4">
           <div className="flex items-center justify-between flex-wrap gap-2">
             <SectionHeader
-              icon={<Database size={14} className="text-cyan-400" />}
+              icon={<Database size={14} className="text-brand-400" />}
               title="Variables du modèle"
               subtitle="Paramètres d'entrée du modèle prédictif"
             />
             <div className="flex gap-2">
-              <span className="rounded-full bg-emerald-500/10 border border-emerald-500/20 px-2.5 py-1 text-[10px] font-semibold text-emerald-300">
+              <span className="rounded-full bg-brand-500/10 border border-brand-500/20 px-2.5 py-1 text-[10px] font-semibold text-brand-300">
                 {pluggedVars} branchées
               </span>
               {missingVars > 0 && (
@@ -259,7 +259,7 @@ function VariablesSection({ detail, scenarioId }: { detail: ScenarioDetail; scen
           <div className="overflow-x-auto">
             <table className="w-full border-collapse text-left">
               <thead>
-                <tr className="border-b border-white/5 text-[10px] text-slate-400 uppercase tracking-wider">
+                <tr className="border-b border-white/5 text-[10px] text-forest-400 uppercase tracking-wider">
                   <th className="py-2.5 px-3">Variable</th>
                   <th className="py-2.5 px-3">Définition clinique / Rôle</th>
                   <th className="py-2.5 px-3">Source de données</th>
@@ -269,12 +269,12 @@ function VariablesSection({ detail, scenarioId }: { detail: ScenarioDetail; scen
               <tbody className="divide-y divide-white/5 text-xs">
                 {variables.map(([name, varInfo]) => (
                   <tr key={name} className="hover:bg-white/1">
-                    <td className="py-3 px-3 font-mono text-cyan-300 font-medium">{name}</td>
-                    <td className="py-3 px-3 text-slate-300 leading-5">{varInfo.definition}</td>
-                    <td className="py-3 px-3 text-slate-400 font-mono text-[11px]">{varInfo.source}</td>
+                    <td className="py-3 px-3 font-mono text-brand-300 font-medium">{name}</td>
+                    <td className="py-3 px-3 text-forest-300 leading-5">{varInfo.definition}</td>
+                    <td className="py-3 px-3 text-forest-400 font-mono text-[11px]">{varInfo.source}</td>
                     <td className="py-3 px-3 text-center">
                       {varInfo.plugged ? (
-                        <span className="inline-flex items-center gap-1 rounded-full bg-emerald-500/15 border border-emerald-500/20 px-2 py-0.5 text-[10px] text-emerald-300">
+                        <span className="inline-flex items-center gap-1 rounded-full bg-brand-500/15 border border-brand-500/20 px-2 py-0.5 text-[10px] text-brand-300">
                           <CheckCircle2 size={10} /> Connecté
                         </span>
                       ) : (
@@ -296,20 +296,20 @@ function VariablesSection({ detail, scenarioId }: { detail: ScenarioDetail; scen
         {/* Bases de données utilisées */}
         <div className="rounded-3xl border border-white/10 bg-white/3 p-5 space-y-4">
           <SectionHeader
-            icon={<Globe size={14} className="text-violet-400" />}
+            icon={<Globe size={14} className="text-brand-400" />}
             title="Bases de données requises"
             subtitle="Flux d'informations à connecter pour ce scénario"
           />
           <div className="space-y-2">
             {detail.databases && detail.databases.length > 0 ? (
               detail.databases.map((db, i) => (
-                <div key={i} className="flex items-center gap-2.5 rounded-xl border border-white/5 bg-white/3 px-3 py-2.5 text-xs text-slate-300">
-                  <Database size={12} className="text-violet-400 shrink-0" />
+                <div key={i} className="flex items-center gap-2.5 rounded-xl border border-white/5 bg-white/3 px-3 py-2.5 text-xs text-forest-300">
+                  <Database size={12} className="text-brand-400 shrink-0" />
                   <span>{db}</span>
                 </div>
               ))
             ) : (
-              <p className="text-xs text-slate-500 italic">Aucune base de données répertoriée.</p>
+              <p className="text-xs text-forest-500 italic">Aucune base de données répertoriée.</p>
             )}
           </div>
         </div>
@@ -317,7 +317,7 @@ function VariablesSection({ detail, scenarioId }: { detail: ScenarioDetail; scen
         {/* Zone d'upload interactif */}
         <div className="rounded-3xl border border-white/10 bg-white/3 p-5 space-y-4">
           <SectionHeader
-            icon={<Upload size={14} className="text-sky-400" />}
+            icon={<Upload size={14} className="text-brand-400" />}
             title="Importer des données réelles"
             subtitle="Uploadez vos fichiers CSV/Excel pour alimenter les variables manquantes"
           />
@@ -326,7 +326,7 @@ function VariablesSection({ detail, scenarioId }: { detail: ScenarioDetail; scen
             onDragOver={handleDragOver}
             onDrop={handleDrop}
             onClick={() => fileInputRef.current?.click()}
-            className="border-2 border-dashed border-white/10 hover:border-sky-500/30 bg-white/2 hover:bg-white/5 rounded-2xl p-6 text-center cursor-pointer transition flex flex-col items-center gap-2"
+            className="border-2 border-dashed border-white/10 hover:border-brand-500/30 bg-white/2 hover:bg-white/5 rounded-2xl p-6 text-center cursor-pointer transition flex flex-col items-center gap-2"
           >
             <input
               type="file"
@@ -335,11 +335,11 @@ function VariablesSection({ detail, scenarioId }: { detail: ScenarioDetail; scen
               accept=".csv,.xlsx,.xls"
               className="hidden"
             />
-            <Upload size={24} className="text-slate-500" />
-            <p className="text-xs text-slate-300 font-medium">Glissez-déposez votre fichier ici</p>
-            <p className="text-[10px] text-slate-500">Formats acceptés : CSV, Excel (.xlsx, .xls)</p>
+            <Upload size={24} className="text-forest-500" />
+            <p className="text-xs text-forest-300 font-medium">Glissez-déposez votre fichier ici</p>
+            <p className="text-[10px] text-forest-500">Formats acceptés : CSV, Excel (.xlsx, .xls)</p>
             {file && (
-              <div className="mt-2 rounded-lg bg-sky-500/10 border border-sky-500/20 px-2.5 py-1 text-[11px] text-sky-300 font-mono">
+              <div className="mt-2 rounded-lg bg-brand-500/10 border border-brand-500/20 px-2.5 py-1 text-[11px] text-brand-300 font-mono">
                 {file.name} ({(file.size / 1024).toFixed(1)} KB)
               </div>
             )}
@@ -349,7 +349,7 @@ function VariablesSection({ detail, scenarioId }: { detail: ScenarioDetail; scen
             <button
               onClick={handleUpload}
               disabled={uploading}
-              className="w-full flex items-center justify-center gap-1.5 rounded-xl bg-sky-500 hover:bg-sky-400 text-slate-950 font-semibold py-2 text-xs transition disabled:opacity-50"
+              className="w-full flex items-center justify-center gap-1.5 rounded-xl bg-brand-500 hover:bg-brand-400 text-forest-950 font-semibold py-2 text-xs transition disabled:opacity-50"
             >
               <RotateCcw size={12} className={uploading ? "animate-spin" : ""} />
               {uploading ? "Importation..." : "Lancer l'importation"}
@@ -359,18 +359,18 @@ function VariablesSection({ detail, scenarioId }: { detail: ScenarioDetail; scen
           {uploadError && <ErrorBox message={uploadError} />}
 
           {uploadResult && (
-            <div className="rounded-2xl border border-emerald-500/20 bg-emerald-500/5 p-4 space-y-3">
-              <div className="flex items-center gap-1.5 text-emerald-300 text-xs font-semibold">
+            <div className="rounded-2xl border border-brand-500/20 bg-brand-500/5 p-4 space-y-3">
+              <div className="flex items-center gap-1.5 text-brand-300 text-xs font-semibold">
                 <CheckCircle2 size={14} /> Importation réussie !
               </div>
-              <p className="text-[11px] text-slate-300 leading-4">
+              <p className="text-[11px] text-forest-300 leading-4">
                 {uploadResult.message}
               </p>
-              <div className="rounded-lg bg-slate-900/50 p-2 text-[10px] font-mono text-slate-400 space-y-1">
-                <div>Lignes détectées : <span className="text-emerald-300">{uploadResult.detected_rows}</span></div>
-                <div>Colonnes : <span className="text-cyan-300">{uploadResult.detected_columns?.slice(0, 5).join(", ")}{uploadResult.detected_columns?.length > 5 ? "..." : ""}</span></div>
+              <div className="rounded-lg bg-forest-900/50 p-2 text-[10px] font-mono text-forest-400 space-y-1">
+                <div>Lignes détectées : <span className="text-brand-300">{uploadResult.detected_rows}</span></div>
+                <div>Colonnes : <span className="text-brand-300">{uploadResult.detected_columns?.slice(0, 5).join(", ")}{uploadResult.detected_columns?.length > 5 ? "..." : ""}</span></div>
               </div>
-              <div className="flex items-start gap-1 text-[10px] text-slate-500">
+              <div className="flex items-start gap-1 text-[10px] text-forest-500">
                 <Info size={10} className="shrink-0 mt-0.5" />
                 <span>Les variables manquantes du modèle seront automatiquement branchées lors du prochain recalcul.</span>
               </div>
@@ -427,7 +427,7 @@ function ModelSection({ scenarioId }: { scenarioId: string }) {
       <div className={`rounded-3xl border ${colors.border} ${colors.bg} p-6 flex flex-col justify-between space-y-6 lg:col-span-1`}>
         <div>
           <div className="flex items-center justify-between">
-            <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400">Statut Live du Modèle</span>
+            <span className="text-[10px] font-bold uppercase tracking-wider text-forest-400">Statut Live du Modèle</span>
             <span className="flex h-2 w-2 rounded-full relative">
               <span className={`animate-ping absolute inline-flex h-full w-full rounded-full opacity-75 ${colors.dot}`} />
               <span className={`relative inline-flex rounded-full h-2 w-2 ${colors.dot}`} />
@@ -436,25 +436,25 @@ function ModelSection({ scenarioId }: { scenarioId: string }) {
           <p className="mt-4 text-3xl font-extrabold text-white">{data.status_label}</p>
           {data.model_result && data.model_result.value !== undefined && (
             <div className="mt-4 rounded-2xl bg-white/5 p-4 border border-white/5">
-              <p className="text-[10px] text-slate-400 uppercase tracking-wider">Dernière valeur live calculée</p>
-              <p className="text-3xl font-black text-cyan-300 mt-1 font-mono">
+              <p className="text-[10px] text-forest-400 uppercase tracking-wider">Dernière valeur live calculée</p>
+              <p className="text-3xl font-black text-brand-300 mt-1 font-mono">
                 {typeof data.model_result.value === "number" ? data.model_result.value.toLocaleString() : data.model_result.value}
-                {data.model_result.unit && <span className="text-sm font-normal ml-1 text-slate-400">{data.model_result.unit}</span>}
+                {data.model_result.unit && <span className="text-sm font-normal ml-1 text-forest-400">{data.model_result.unit}</span>}
               </p>
-              <p className="text-[10px] text-slate-500 mt-1.5 font-mono">Calculé le {new Date(data.timestamp).toLocaleString()}</p>
+              <p className="text-[10px] text-forest-500 mt-1.5 font-mono">Calculé le {new Date(data.timestamp).toLocaleString()}</p>
             </div>
           )}
         </div>
 
         <div className="space-y-3">
-          <div className="flex items-center gap-2 text-xs text-slate-400">
+          <div className="flex items-center gap-2 text-xs text-forest-400">
             <RefreshCw size={12} />
             <span>Mise à jour automatique à chaque nouvelle valeur</span>
           </div>
           <button
             onClick={runModel}
             disabled={recalculating}
-            className="w-full flex items-center justify-center gap-1.5 rounded-xl bg-white text-slate-950 font-semibold py-2 text-xs hover:bg-slate-200 transition disabled:opacity-50"
+            className="w-full flex items-center justify-center gap-1.5 rounded-xl bg-white text-forest-950 font-semibold py-2 text-xs hover:bg-forest-200 transition disabled:opacity-50"
           >
             <RotateCcw size={12} className={recalculating ? "animate-spin" : ""} />
             {recalculating ? "Recalcul..." : "Rerun le modèle manuellement"}
@@ -467,21 +467,21 @@ function ModelSection({ scenarioId }: { scenarioId: string }) {
         {/* Info algorithme */}
         <div className="rounded-3xl border border-white/10 bg-white/3 p-5 space-y-4">
           <SectionHeader
-            icon={<Brain size={14} className="text-cyan-400" />}
+            icon={<Brain size={14} className="text-brand-400" />}
             title="Algorithme & Paramètres"
             subtitle="Spécifications techniques du modèle prédictif"
           />
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 text-xs">
             <div className="rounded-xl border border-white/5 bg-white/2 px-3 py-2">
-              <span className="text-slate-500">Modèle mathématique</span>
+              <span className="text-forest-500">Modèle mathématique</span>
               <p className="font-semibold text-white mt-1">{data.model_info.algorithm}</p>
             </div>
             <div className="rounded-xl border border-white/5 bg-white/2 px-3 py-2">
-              <span className="text-slate-500">Fréquence de calcul</span>
+              <span className="text-forest-500">Fréquence de calcul</span>
               <p className="font-semibold text-white mt-1">{data.model_info.update_frequency}</p>
             </div>
             <div className="rounded-xl border border-white/5 bg-white/2 px-3 py-2 sm:col-span-2">
-              <span className="text-slate-500">Indicateur de sortie (Outcome)</span>
+              <span className="text-forest-500">Indicateur de sortie (Outcome)</span>
               <p className="font-semibold text-white mt-1">{data.model_info.output}</p>
             </div>
           </div>
@@ -490,25 +490,25 @@ function ModelSection({ scenarioId }: { scenarioId: string }) {
         {/* Seuils d'alerte */}
         <div className="rounded-3xl border border-white/10 bg-white/3 p-5 space-y-4">
           <SectionHeader
-            icon={<Shield size={14} className="text-violet-400" />}
+            icon={<Shield size={14} className="text-brand-400" />}
             title="Seuils d'alerte et de décision"
             subtitle="Séparations définissant la couleur d'alerte"
           />
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-3 text-xs">
-            <div className="rounded-xl border border-emerald-500/10 bg-emerald-500/5 px-3 py-2.5">
-              <span className="font-semibold text-emerald-300">Vert (Situation normale)</span>
-              <p className="text-slate-400 mt-1 font-mono">{data.alert_thresholds.green.condition}</p>
-              <p className="text-[10px] text-slate-500 mt-1">{data.alert_thresholds.green.label}</p>
+            <div className="rounded-xl border border-brand-500/10 bg-brand-500/5 px-3 py-2.5">
+              <span className="font-semibold text-brand-300">Vert (Situation normale)</span>
+              <p className="text-forest-400 mt-1 font-mono">{data.alert_thresholds.green.condition}</p>
+              <p className="text-[10px] text-forest-500 mt-1">{data.alert_thresholds.green.label}</p>
             </div>
-            <div className="rounded-xl border border-amber-500/10 bg-amber-500/5 px-3 py-2.5">
-              <span className="font-semibold text-amber-300">Orange (Vigilance)</span>
-              <p className="text-slate-400 mt-1 font-mono">{data.alert_thresholds.orange.condition}</p>
-              <p className="text-[10px] text-slate-500 mt-1">{data.alert_thresholds.orange.label}</p>
+            <div className="rounded-xl border border-gold-500/10 bg-gold-500/5 px-3 py-2.5">
+              <span className="font-semibold text-gold-300">Orange (Vigilance)</span>
+              <p className="text-forest-400 mt-1 font-mono">{data.alert_thresholds.orange.condition}</p>
+              <p className="text-[10px] text-forest-500 mt-1">{data.alert_thresholds.orange.label}</p>
             </div>
             <div className="rounded-xl border border-rose-500/10 bg-rose-500/5 px-3 py-2.5">
               <span className="font-semibold text-rose-300">Rouge (Alerte critique)</span>
-              <p className="text-slate-400 mt-1 font-mono">{data.alert_thresholds.red.condition}</p>
-              <p className="text-[10px] text-slate-500 mt-1">{data.alert_thresholds.red.label}</p>
+              <p className="text-forest-400 mt-1 font-mono">{data.alert_thresholds.red.condition}</p>
+              <p className="text-[10px] text-forest-500 mt-1">{data.alert_thresholds.red.label}</p>
             </div>
           </div>
         </div>
@@ -542,7 +542,7 @@ function CorpusSection({ scenarioId }: { scenarioId: string; detail: ScenarioDet
       {/* Liste des articles */}
       <div className="lg:col-span-2 space-y-4">
         <SectionHeader
-          icon={<FileText size={14} className="text-cyan-400" />}
+          icon={<FileText size={14} className="text-brand-400" />}
           title={`Corpus d'évidences (${data.articles.length} articles validés)`}
           subtitle="Articles validés pour l'extraction de l'évidence"
         />
@@ -555,7 +555,7 @@ function CorpusSection({ scenarioId }: { scenarioId: string; detail: ScenarioDet
               onToggle={() => setExpandedId(expandedId === article.id ? null : article.id)}
             />
           )) : (
-            <p className="text-xs text-slate-500 italic">Aucun article dans ce corpus.</p>
+            <p className="text-xs text-forest-500 italic">Aucun article dans ce corpus.</p>
           )}
         </div>
       </div>
@@ -565,20 +565,20 @@ function CorpusSection({ scenarioId }: { scenarioId: string; detail: ScenarioDet
         {/* Années */}
         <div className="rounded-3xl border border-white/10 bg-white/3 p-5 space-y-4">
           <SectionHeader
-            icon={<Globe size={14} className="text-violet-400" />}
+            icon={<Globe size={14} className="text-brand-400" />}
             title="Distribution par Année"
           />
           <div className="space-y-2 text-xs">
             {data.year_distribution.slice(0, 6).map((item) => (
               <div key={item.year} className="flex items-center gap-3">
-                <span className="w-10 text-slate-400 font-mono">{item.year}</span>
+                <span className="w-10 text-forest-400 font-mono">{item.year}</span>
                 <div className="flex-1 h-2 bg-white/5 rounded-full overflow-hidden">
                   <div
-                    className="h-full bg-violet-500 rounded-full"
+                    className="h-full bg-brand-500 rounded-full"
                     style={{ width: `${(item.count / data.total) * 100}%` }}
                   />
                 </div>
-                <span className="w-6 text-right text-slate-300 font-mono">{item.count}</span>
+                <span className="w-6 text-right text-forest-300 font-mono">{item.count}</span>
               </div>
             ))}
           </div>
@@ -587,20 +587,20 @@ function CorpusSection({ scenarioId }: { scenarioId: string; detail: ScenarioDet
         {/* Sources */}
         <div className="rounded-3xl border border-white/10 bg-white/3 p-5 space-y-4">
           <SectionHeader
-            icon={<Database size={14} className="text-sky-400" />}
+            icon={<Database size={14} className="text-brand-400" />}
             title="Sources Littérature"
           />
           <div className="space-y-2 text-xs">
             {data.source_distribution.map((item) => (
               <div key={item.source} className="flex items-center gap-3">
-                <span className="w-20 text-slate-400 uppercase font-mono tracking-wider">{item.source}</span>
+                <span className="w-20 text-forest-400 uppercase font-mono tracking-wider">{item.source}</span>
                 <div className="flex-1 h-2 bg-white/5 rounded-full overflow-hidden">
                   <div
-                    className="h-full bg-sky-500 rounded-full"
+                    className="h-full bg-brand-500 rounded-full"
                     style={{ width: `${(item.count / data.total) * 100}%` }}
                   />
                 </div>
-                <span className="w-6 text-right text-slate-300 font-mono">{item.count}</span>
+                <span className="w-6 text-right text-forest-300 font-mono">{item.count}</span>
               </div>
             ))}
           </div>
@@ -624,24 +624,24 @@ function ArticleRow({
       <div onClick={onToggle} className="p-4 flex items-start gap-3 cursor-pointer">
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2 flex-wrap">
-            <span className="rounded bg-white/5 px-1.5 py-0.5 text-[10px] font-mono text-slate-400 uppercase tracking-wider">
+            <span className="rounded bg-white/5 px-1.5 py-0.5 text-[10px] font-mono text-forest-400 uppercase tracking-wider">
               {article.source}
             </span>
             {article.year && (
-              <span className="text-[10px] font-mono text-slate-500">{article.year}</span>
+              <span className="text-[10px] font-mono text-forest-500">{article.year}</span>
             )}
             {article.has_fulltext && (
-              <span className="rounded-full bg-cyan-500/10 border border-cyan-500/20 px-2 py-0.5 text-[9px] text-cyan-300 font-medium">
+              <span className="rounded-full bg-brand-500/10 border border-brand-500/20 px-2 py-0.5 text-[9px] text-brand-300 font-medium">
                 Full-text
               </span>
             )}
           </div>
           <h4 className="text-sm font-semibold text-white mt-1.5 leading-5">{article.title}</h4>
           {article.authors && (
-            <p className="text-xs text-slate-500 mt-1 truncate">{article.authors}</p>
+            <p className="text-xs text-forest-500 mt-1 truncate">{article.authors}</p>
           )}
         </div>
-        <button className="text-slate-500 hover:text-white shrink-0 mt-1">
+        <button className="text-forest-500 hover:text-white shrink-0 mt-1">
           {isExpanded ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
         </button>
       </div>
@@ -650,12 +650,12 @@ function ArticleRow({
         <div className="border-t border-white/5 bg-white/1 p-4 text-xs space-y-3">
           {article.abstract && (
             <div>
-              <p className="font-semibold text-slate-400 mb-1">Abstract</p>
-              <p className="text-slate-300 leading-5">{article.abstract}</p>
+              <p className="font-semibold text-forest-400 mb-1">Abstract</p>
+              <p className="text-forest-300 leading-5">{article.abstract}</p>
             </div>
           )}
-          <div className="flex items-center gap-4 flex-wrap text-slate-400 font-mono text-[10px] pt-1">
-            {article.journal && <span>Journal: <span className="text-slate-300">{article.journal}</span></span>}
+          <div className="flex items-center gap-4 flex-wrap text-forest-400 font-mono text-[10px] pt-1">
+            {article.journal && <span>Journal: <span className="text-forest-300">{article.journal}</span></span>}
             {article.doi && (
               <span>
                 DOI:{" "}
@@ -663,7 +663,7 @@ function ArticleRow({
                   href={`https://doi.org/${article.doi}`}
                   target="_blank"
                   rel="noopener noreferrer"
-                  className="text-cyan-400 hover:underline"
+                  className="text-brand-400 hover:underline"
                 >
                   {article.doi}
                 </a>
@@ -674,20 +674,20 @@ function ArticleRow({
                 href={article.url}
                 target="_blank"
                 rel="noopener noreferrer"
-                className="flex items-center gap-1 text-cyan-400 hover:underline"
+                className="flex items-center gap-1 text-brand-400 hover:underline"
               >
                 Lien direct <ExternalLink size={10} />
               </a>
             )}
             {article.country && (
-              <span className="text-[10px] text-slate-500 border border-white/5 rounded px-1.5 py-0.5">
+              <span className="text-[10px] text-forest-500 border border-white/5 rounded px-1.5 py-0.5">
                 <Globe size={9} className="inline mr-0.5" />{article.country}
               </span>
             )}
             {article.keywords && (
               <div className="flex flex-wrap gap-1">
                 {article.keywords.split(",").slice(0, 5).map((kw, i) => (
-                  <span key={i} className="text-[10px] text-slate-500 bg-slate-800/50 px-1 rounded">
+                  <span key={i} className="text-[10px] text-forest-500 bg-forest-800/50 px-1 rounded">
                     #{kw.trim()}
                   </span>
                 ))}
@@ -736,14 +736,14 @@ function ClusteringSection({ scenarioId }: { scenarioId: string }) {
     <div className="rounded-3xl border border-white/10 bg-white/3 p-5 space-y-5">
       <div className="flex items-center justify-between flex-wrap gap-2">
         <SectionHeader
-          icon={<Layers size={14} className="text-emerald-400" />}
+          icon={<Layers size={14} className="text-brand-400" />}
           title="Clustering & Topic Modelling Avancé"
           subtitle="UMAP (Réduction 2D) + HDBSCAN (Clustering à densité) + Résumés LLM"
         />
         <button
           onClick={load}
           disabled={loading}
-          className="flex items-center gap-1.5 rounded-xl border border-emerald-500/20 bg-emerald-500/10 px-3 py-1.5 text-xs text-emerald-300 hover:bg-emerald-500/20 transition disabled:opacity-50"
+          className="flex items-center gap-1.5 rounded-xl border border-brand-500/20 bg-brand-500/10 px-3 py-1.5 text-xs text-brand-300 hover:bg-brand-500/20 transition disabled:opacity-50"
         >
           <RotateCcw size={11} className={loading ? "animate-spin" : ""} />
           {loading ? "Calcul..." : "Recalculer"}
@@ -756,7 +756,7 @@ function ClusteringSection({ scenarioId }: { scenarioId: string }) {
       {data && !loading && (
         <>
           {data.message && (
-            <div className="rounded-xl border border-amber-500/20 bg-amber-500/5 px-3 py-2.5 text-xs text-amber-300">
+            <div className="rounded-xl border border-gold-500/20 bg-gold-500/5 px-3 py-2.5 text-xs text-gold-300">
               <Info size={12} className="inline mr-1.5 shrink-0" />
               {data.message}
             </div>
@@ -768,12 +768,12 @@ function ClusteringSection({ scenarioId }: { scenarioId: string }) {
               <div className="lg:col-span-1 space-y-4">
                 <div className="rounded-2xl border border-white/5 bg-white/2 p-4 flex flex-col justify-between">
                   <div>
-                    <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400">Visualisation 2D (UMAP)</span>
-                    <p className="text-xs text-slate-500 mt-1 leading-4">Chaque point représente un article scientifique. Les articles proches traitent de sujets similaires.</p>
+                    <span className="text-[10px] font-bold uppercase tracking-wider text-forest-400">Visualisation 2D (UMAP)</span>
+                    <p className="text-xs text-forest-500 mt-1 leading-4">Chaque point représente un article scientifique. Les articles proches traitent de sujets similaires.</p>
                   </div>
 
                   {/* Graphique de dispersion SVG interactif */}
-                  <div className="relative aspect-square w-full bg-slate-950/40 rounded-xl border border-white/5 mt-4 overflow-hidden flex items-center justify-center">
+                  <div className="relative aspect-square w-full bg-forest-950/40 rounded-xl border border-white/5 mt-4 overflow-hidden flex items-center justify-center">
                     <UmapScatterPlot
                       clusters={data.clusters}
                       selectedCluster={selectedCluster}
@@ -781,7 +781,7 @@ function ClusteringSection({ scenarioId }: { scenarioId: string }) {
                     />
                   </div>
 
-                  <div className="flex items-center justify-between text-[10px] text-slate-500 mt-3 font-mono">
+                  <div className="flex items-center justify-between text-[10px] text-forest-500 mt-3 font-mono">
                     <span>Axe X (UMAP 1)</span>
                     <span>Axe Y (UMAP 2)</span>
                   </div>
@@ -789,7 +789,7 @@ function ClusteringSection({ scenarioId }: { scenarioId: string }) {
 
                 {/* Sélecteur de cluster de gauche */}
                 <div className="space-y-2">
-                  <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 block px-1">Sélectionner un groupe</span>
+                  <span className="text-[10px] font-bold uppercase tracking-wider text-forest-400 block px-1">Sélectionner un groupe</span>
                   <div className="space-y-1 max-h-64 overflow-y-auto pr-1">
                     {data.clusters.map((c) => (
                       <button
@@ -797,8 +797,8 @@ function ClusteringSection({ scenarioId }: { scenarioId: string }) {
                         onClick={() => setSelectedCluster(c.cluster_id)}
                         className={`w-full text-left rounded-xl px-3 py-2 text-xs transition flex items-center justify-between border ${
                           selectedCluster === c.cluster_id
-                            ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-300"
-                            : "border-transparent text-slate-400 hover:text-white hover:bg-white/3"
+                            ? "border-brand-500/30 bg-brand-500/10 text-brand-300"
+                            : "border-transparent text-forest-400 hover:text-white hover:bg-white/3"
                         }`}
                       >
                         <div className="flex items-center gap-2">
@@ -828,30 +828,30 @@ function ClusteringSection({ scenarioId }: { scenarioId: string }) {
                         />
                         <div>
                           <h4 className="text-sm font-bold text-white uppercase tracking-wider">{activeClusterData.cluster_name}</h4>
-                          <p className="text-xs text-slate-400 mt-0.5">{activeClusterData.n_docs} articles scientifiques denses dans ce groupe</p>
+                          <p className="text-xs text-forest-400 mt-0.5">{activeClusterData.n_docs} articles scientifiques denses dans ce groupe</p>
                         </div>
                       </div>
                     </div>
 
                     {/* Résumé clinique LLM */}
                     <div className="space-y-2">
-                      <div className="flex items-center gap-1.5 text-xs font-semibold text-emerald-300 uppercase tracking-wider">
+                      <div className="flex items-center gap-1.5 text-xs font-semibold text-brand-300 uppercase tracking-wider">
                         <Brain size={13} />
                         Synthèse IA du groupe (GPT-4o-mini)
                       </div>
-                      <div className="rounded-2xl border border-emerald-500/15 bg-emerald-500/5 p-4 text-xs text-slate-200 leading-6 italic">
+                      <div className="rounded-2xl border border-brand-500/15 bg-brand-500/5 p-4 text-xs text-forest-200 leading-6 italic">
                         "{activeClusterData.summary}"
                       </div>
                     </div>
 
                     {/* Mots-clés TF-IDF */}
                     <div className="space-y-2">
-                      <p className="text-[10px] font-bold uppercase tracking-wider text-slate-400">Mots-clés prépondérants (TF-IDF)</p>
+                      <p className="text-[10px] font-bold uppercase tracking-wider text-forest-400">Mots-clés prépondérants (TF-IDF)</p>
                       <div className="flex flex-wrap gap-1.5">
                         {activeClusterData.top_words.map((w, i) => (
                           <span
                             key={i}
-                            className="rounded-lg border border-white/10 bg-white/5 px-2 py-1 text-[10px] text-slate-300 font-mono"
+                            className="rounded-lg border border-white/10 bg-white/5 px-2 py-1 text-[10px] text-forest-300 font-mono"
                           >
                             {w}
                           </span>
@@ -861,9 +861,9 @@ function ClusteringSection({ scenarioId }: { scenarioId: string }) {
 
                     {/* Article représentatif */}
                     <div className="space-y-2 border-t border-white/5 pt-4">
-                      <p className="text-[10px] font-bold uppercase tracking-wider text-slate-400">Article le plus central / représentatif</p>
+                      <p className="text-[10px] font-bold uppercase tracking-wider text-forest-400">Article le plus central / représentatif</p>
                       <div className="rounded-xl border border-white/5 bg-white/3 p-3">
-                        <div className="flex items-center gap-1.5 text-[10px] text-slate-500 font-mono">
+                        <div className="flex items-center gap-1.5 text-[10px] text-forest-500 font-mono">
                           <span>ID: #{activeClusterData.representative_doc.id}</span>
                           {activeClusterData.representative_doc.year && <span>• {activeClusterData.representative_doc.year}</span>}
                           {activeClusterData.representative_doc.journal && <span>• {activeClusterData.representative_doc.journal}</span>}
@@ -903,7 +903,7 @@ function UmapScatterPlot({
   });
 
   if (allPoints.length === 0) {
-    return <span className="text-xs text-slate-500">Aucun point à afficher.</span>;
+    return <span className="text-xs text-forest-500">Aucun point à afficher.</span>;
   }
 
   const xs = allPoints.map((p) => p.x);
@@ -1001,7 +1001,7 @@ function RagSection({ scenarioId, detail }: { scenarioId: string; detail: Scenar
   return (
     <div className="rounded-3xl border border-white/10 bg-white/3 p-5 space-y-5">
       <SectionHeader
-        icon={<MessageSquare size={14} className="text-cyan-400" />}
+        icon={<MessageSquare size={14} className="text-brand-400" />}
         title="Assistant Scientifique RAG Dédié"
         subtitle="Posez des questions directement sur le corpus validé de ce scénario"
       />
@@ -1009,7 +1009,7 @@ function RagSection({ scenarioId, detail }: { scenarioId: string; detail: Scenar
       {/* Questions suggérées */}
       {suggestedQuestions.length > 0 && (
         <div className="space-y-2">
-          <p className="text-[10px] font-bold uppercase tracking-wider text-slate-500">Questions cliniques suggérées</p>
+          <p className="text-[10px] font-bold uppercase tracking-wider text-forest-500">Questions cliniques suggérées</p>
           <div className="flex flex-wrap gap-2">
             {suggestedQuestions.map((q, i) => (
               <button
@@ -1019,7 +1019,7 @@ function RagSection({ scenarioId, detail }: { scenarioId: string; detail: Scenar
                   ask(q);
                 }}
                 disabled={loading}
-                className="text-left rounded-xl border border-white/5 bg-white/2 hover:bg-white/5 px-3 py-2 text-xs text-slate-300 hover:text-white transition disabled:opacity-50"
+                className="text-left rounded-xl border border-white/5 bg-white/2 hover:bg-white/5 px-3 py-2 text-xs text-forest-300 hover:text-white transition disabled:opacity-50"
               >
                 {q}
               </button>
@@ -1037,12 +1037,12 @@ function RagSection({ scenarioId, detail }: { scenarioId: string; detail: Scenar
           onKeyDown={(e) => e.key === "Enter" && ask(question)}
           placeholder="Posez votre question clinique ou opérationnelle..."
           disabled={loading}
-          className="flex-1 rounded-xl border border-white/10 bg-white/5 px-4 py-2.5 text-xs text-white focus:outline-none focus:border-cyan-500/50 transition disabled:opacity-50"
+          className="flex-1 rounded-xl border border-white/10 bg-white/5 px-4 py-2.5 text-xs text-white focus:outline-none focus:border-brand-500/50 transition disabled:opacity-50"
         />
         <button
           onClick={() => ask(question)}
           disabled={loading || !question.trim()}
-          className="rounded-xl bg-cyan-500 hover:bg-cyan-400 text-slate-950 font-semibold px-4 text-xs transition disabled:opacity-50 shrink-0"
+          className="rounded-xl bg-brand-500 hover:bg-brand-400 text-forest-950 font-semibold px-4 text-xs transition disabled:opacity-50 shrink-0"
         >
           Poser
         </button>
@@ -1055,29 +1055,29 @@ function RagSection({ scenarioId, detail }: { scenarioId: string; detail: Scenar
         <div className="grid grid-cols-1 gap-6 lg:grid-cols-3 border-t border-white/5 pt-5">
           {/* Réponse */}
           <div className="lg:col-span-2 space-y-3">
-            <p className="text-[10px] font-bold uppercase tracking-wider text-slate-400">Réponse de l'Assistant</p>
-            <div className="rounded-2xl border border-white/5 bg-white/2 p-4 text-xs text-slate-200 leading-6 whitespace-pre-wrap">
+            <p className="text-[10px] font-bold uppercase tracking-wider text-forest-400">Réponse de l'Assistant</p>
+            <div className="rounded-2xl border border-white/5 bg-white/2 p-4 text-xs text-forest-200 leading-6 whitespace-pre-wrap">
               {result.answer}
             </div>
             {result.model && (
-              <p className="text-[10px] text-slate-500 font-mono text-right">Généré via {result.model}</p>
+              <p className="text-[10px] text-forest-500 font-mono text-right">Généré via {result.model}</p>
             )}
           </div>
 
           {/* Sources citées */}
           <div className="space-y-3">
-            <p className="text-[10px] font-bold uppercase tracking-wider text-slate-400">Sources scientifiques citées</p>
+            <p className="text-[10px] font-bold uppercase tracking-wider text-forest-400">Sources scientifiques citées</p>
             <div className="space-y-2 max-h-[300px] overflow-y-auto pr-1">
               {result.sources.map((src, i) => (
                 <div key={i} className="rounded-xl border border-white/5 bg-white/3 p-2.5 text-xs">
                   <div className="flex items-center justify-between gap-2">
-                    <span className="rounded bg-cyan-500/10 border border-cyan-500/20 px-1.5 py-0.5 text-[9px] text-cyan-300 font-mono">
+                    <span className="rounded bg-brand-500/10 border border-brand-500/20 px-1.5 py-0.5 text-[9px] text-brand-300 font-mono">
                       SOURCE {i + 1}
                     </span>
-                    <span className="text-[10px] text-slate-500 font-mono">Pertinence: {(src.score * 100).toFixed(0)}%</span>
+                    <span className="text-[10px] text-forest-500 font-mono">Pertinence: {(src.score * 100).toFixed(0)}%</span>
                   </div>
                   <h5 className="font-semibold text-white mt-1.5 leading-4 line-clamp-2">{src.title}</h5>
-                  <p className="text-[10px] text-slate-500 mt-1 truncate">
+                  <p className="text-[10px] text-forest-500 mt-1 truncate">
                     {src.authors} • {src.year || "N/A"}
                   </p>
                 </div>
@@ -1117,7 +1117,7 @@ function PrismaSection({ scenarioId }: { scenarioId: string }) {
   return (
     <div className="rounded-3xl border border-white/10 bg-white/3 p-5 space-y-6">
       <SectionHeader
-        icon={<Shield size={14} className="text-cyan-400" />}
+        icon={<Shield size={14} className="text-brand-400" />}
         title="Flow PRISMA de Sélection de l'Évidence"
         subtitle="Visualisation du filtrage systématique du corpus"
       />
@@ -1164,21 +1164,21 @@ function PrismaSection({ scenarioId }: { scenarioId: string }) {
 
           {/* Distribution par source */}
           <div className="w-full max-w-sm border-t border-white/5 pt-4 mt-2">
-            <p className="text-[10px] text-slate-500 uppercase tracking-wider mb-2">Articles identifiés par source</p>
+            <p className="text-[10px] text-forest-500 uppercase tracking-wider mb-2">Articles identifiés par source</p>
             <div className="flex flex-wrap gap-2">
               {Object.entries(data.identification.by_source)
                 .filter(([, v]) => v > 0)
                 .sort(([, a], [, b]) => b - a)
                 .map(([source, count]) => (
-                  <span key={source} className="rounded-lg border border-white/10 bg-white/5 px-2 py-0.5 text-[10px] text-slate-300">
-                    {source}: <span className="text-cyan-300 font-mono">{count}</span>
+                  <span key={source} className="rounded-lg border border-white/10 bg-white/5 px-2 py-0.5 text-[10px] text-forest-300">
+                    {source}: <span className="text-brand-300 font-mono">{count}</span>
                   </span>
                 ))}
             </div>
           </div>
 
           {data.included.note && (
-            <p className="text-[10px] text-slate-500 italic">{data.included.note}</p>
+            <p className="text-[10px] text-forest-500 italic">{data.included.note}</p>
           )}
         </div>
       )}
@@ -1198,10 +1198,10 @@ function PrismaBox({
   subtitle?: string;
 }) {
   const colors = {
-    sky: "border-sky-500/30 bg-sky-500/10 text-sky-300",
-    violet: "border-violet-500/30 bg-violet-500/10 text-violet-300",
-    amber: "border-amber-500/30 bg-amber-500/10 text-amber-300",
-    emerald: "border-emerald-500/30 bg-emerald-500/10 text-emerald-300",
+    sky: "border-brand-500/30 bg-brand-500/10 text-brand-300",
+    violet: "border-brand-500/30 bg-brand-500/10 text-brand-300",
+    amber: "border-gold-500/30 bg-gold-500/10 text-gold-300",
+    emerald: "border-brand-500/30 bg-brand-500/10 text-brand-300",
   };
   return (
     <div className={`rounded-2xl border ${colors[color]} px-6 py-3 w-full max-w-sm text-center`}>
@@ -1215,9 +1215,9 @@ function PrismaBox({
 function PrismaArrow({ value }: { value: string }) {
   return (
     <div className="flex flex-col items-center gap-0.5">
-      <div className="h-4 w-px bg-slate-600" />
-      <span className="text-[10px] text-slate-500 italic">{value}</span>
-      <div className="h-4 w-px bg-slate-600" />
+      <div className="h-4 w-px bg-forest-600" />
+      <span className="text-[10px] text-forest-500 italic">{value}</span>
+      <div className="h-4 w-px bg-forest-600" />
     </div>
   );
 }
@@ -1258,7 +1258,7 @@ export function ScenarioDetailPage({ scenarioId, onBack }: ScenarioDetailPagePro
 
   if (loading) {
     return (
-      <div className="flex items-center justify-center py-24 text-slate-400 gap-2">
+      <div className="flex items-center justify-center py-24 text-forest-400 gap-2">
         <RotateCcw size={18} className="animate-spin" />
         <span>Chargement du scénario...</span>
       </div>
@@ -1268,7 +1268,7 @@ export function ScenarioDetailPage({ scenarioId, onBack }: ScenarioDetailPagePro
   if (error || !detail) {
     return (
       <div className="space-y-4">
-        <button onClick={onBack} className="flex items-center gap-2 text-sm text-slate-400 hover:text-white transition">
+        <button onClick={onBack} className="flex items-center gap-2 text-sm text-forest-400 hover:text-white transition">
           <ArrowLeft size={14} /> Retour aux scénarios
         </button>
         <ErrorBox message={error ?? "Scénario introuvable"} />
@@ -1282,27 +1282,27 @@ export function ScenarioDetailPage({ scenarioId, onBack }: ScenarioDetailPagePro
       <div className="flex items-start gap-4">
         <button
           onClick={onBack}
-          className="mt-1 flex items-center gap-1.5 rounded-xl border border-white/10 bg-white/5 px-3 py-1.5 text-xs text-slate-400 hover:text-white hover:bg-white/10 transition shrink-0"
+          className="mt-1 flex items-center gap-1.5 rounded-xl border border-white/10 bg-white/5 px-3 py-1.5 text-xs text-forest-400 hover:text-white hover:bg-white/10 transition shrink-0"
         >
           <ArrowLeft size={12} /> Retour
         </button>
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2 flex-wrap">
             <h2 className="text-xl font-semibold text-white">{detail.title}</h2>
-            <span className="rounded-full border border-cyan-500/20 bg-cyan-500/10 px-2 py-0.5 text-xs text-cyan-300">
+            <span className="rounded-full border border-brand-500/20 bg-brand-500/10 px-2 py-0.5 text-xs text-brand-300">
               {detail.cluster}
             </span>
-            <span className="rounded-full border border-white/10 bg-white/5 px-2 py-0.5 text-xs text-slate-400 font-mono">
+            <span className="rounded-full border border-white/10 bg-white/5 px-2 py-0.5 text-xs text-forest-400 font-mono">
               {detail.corpus_stats.total} articles
             </span>
           </div>
-          <p className="mt-1 text-sm text-slate-400 leading-5">{detail.description}</p>
+          <p className="mt-1 text-sm text-forest-400 leading-5">{detail.description}</p>
           {/* Actions recommandées */}
           {detail.recommended_actions.length > 0 && (
             <div className="mt-3 flex flex-wrap gap-2">
               {detail.recommended_actions.slice(0, 2).map((action, i) => (
-                <span key={i} className="flex items-center gap-1.5 rounded-xl border border-white/5 bg-white/3 px-2.5 py-1 text-xs text-slate-300">
-                  <span className="h-1.5 w-1.5 rounded-full bg-cyan-400 shrink-0" />
+                <span key={i} className="flex items-center gap-1.5 rounded-xl border border-white/5 bg-white/3 px-2.5 py-1 text-xs text-forest-300">
+                  <span className="h-1.5 w-1.5 rounded-full bg-brand-400 shrink-0" />
                   {action.length > 80 ? action.slice(0, 80) + "..." : action}
                 </span>
               ))}
@@ -1319,8 +1319,8 @@ export function ScenarioDetailPage({ scenarioId, onBack }: ScenarioDetailPagePro
             onClick={() => setActiveSection(section.key)}
             className={`flex items-center gap-1.5 rounded-xl px-3 py-1.5 text-xs font-medium transition ${
               activeSection === section.key
-                ? "border border-cyan-500/30 bg-cyan-500/10 text-cyan-300"
-                : "border border-transparent text-slate-400 hover:text-white hover:bg-white/5"
+                ? "border border-brand-500/30 bg-brand-500/10 text-brand-300"
+                : "border border-transparent text-forest-400 hover:text-white hover:bg-white/5"
             }`}
           >
             {section.icon}

@@ -2,16 +2,42 @@
 @tailwind components;
 @tailwind utilities;
 
+/* ── Variables CSS LiteRev ─────────────────────────────────────── */
 :root {
   color-scheme: dark;
   font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+
+  --color-brand:       #0A3621;
+  --color-brand-mid:   #1f5c3c;
+  --color-brand-light: #2d7a52;
+  --color-gold:        #E3AC3B;
+  --color-gold-dark:   #d4941a;
+
+  --bg-base:    #0a1410;
+  --bg-surface: #121e19;
+  --bg-panel:   #1e3028;
+  --bg-card:    #2c4739;
+
+  --text-primary:   #e8f0eb;
+  --text-secondary: #9ab4a4;
+  --text-muted:     #4d7461;
 }
 
 body {
   margin: 0;
   min-width: 320px;
+  background-color: var(--bg-base);
+  color: var(--text-primary);
 }
 
 * {
   box-sizing: border-box;
 }
+
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: var(--bg-surface); }
+::-webkit-scrollbar-thumb { background: var(--color-brand-mid); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: var(--color-brand-light); }
+
+::selection { background: rgba(227, 172, 59, 0.30); color: #fff; }
+:focus-visible { outline: 2px solid var(--color-gold); outline-offset: 2px; }
