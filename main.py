@@ -1486,7 +1486,7 @@ def get_demand_forecasting_prediction(lat: float = 46.2044, lon: float = 6.1432,
         return {
             "status": "success",
             "model": "Hybride Prophet + LightGBM (Living Evidence Integrated)",
-            "last_trained": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "last_trained": __import__('datetime').datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "input_features": {
                 "current_temperature": current_temp,
                 "epidemic_index": round(epidemic_level, 1),
@@ -4193,11 +4193,11 @@ async def ask_stream(payload: dict[str, Any]) -> StreamingResponse:
         with engine.connect() as conn:
             rows = conn.execute(text(f"""
                 SELECT c.content, d.title, d.year, d.doi, d.id AS doc_id,
-                       1 - (c.embedding <=> :emb::vector) AS similarity
+                       1 - (c.embedding <=> CAST(:emb AS vector)) AS similarity
                 FROM document_chunk c
                 JOIN literature_document d ON d.id = c.document_id
                 WHERE c.embedding IS NOT NULL {where_extra}
-                ORDER BY c.embedding <=> :emb::vector
+                ORDER BY c.embedding <=> CAST(:emb AS vector)
                 LIMIT :top_k
             """), params_extra).mappings().all()
 
