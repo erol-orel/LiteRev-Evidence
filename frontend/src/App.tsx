@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { ScenarioDetailPage } from "./components/ScenarioDetailPage";
 import { Activity, BarChart2, BookOpen, Download, ExternalLink, RotateCcw, Zap, CheckSquare, XCircle, CheckCircle, HelpCircle, ArrowDown, Cloud, MapPin, AlertTriangle, Users, Pill, Radio, RefreshCw, ChevronDown, ChevronUp } from "lucide-react";
 
 import {
@@ -785,6 +786,12 @@ function StatsView({ corpusStats, gesicaStats, fulltextStats }: { corpusStats: C
 function ScenariosView({ scenarios, loading, error }: { scenarios: GesicaScenario[]; loading?: boolean; error?: string | null }) {
   const [selectedCluster, setSelectedCluster] = useState<string>("all");
   const [expandedId, setExpandedId] = useState<string | null>(null);
+  const [detailScenarioId, setDetailScenarioId] = useState<string | null>(null);
+
+  // Page détail d'un scénario
+  if (detailScenarioId) {
+    return <ScenarioDetailPage scenarioId={detailScenarioId} onBack={() => setDetailScenarioId(null)} />;
+  }
 
   if (loading) {
     return (
@@ -1891,8 +1898,15 @@ function ScenariosView({ scenarios, loading, error }: { scenarios: GesicaScenari
             </div>
             <p className="mt-1 text-sm leading-5 text-slate-400 line-clamp-2">{scenario.description}</p>
           </div>
-          <div className="shrink-0 text-slate-500">
-            {isExpanded ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
+          <div className="shrink-0 flex items-center gap-2">
+            <button
+              onClick={(e) => { e.stopPropagation(); setDetailScenarioId(scenario.id); }}
+              className="rounded-xl border border-cyan-500/20 bg-cyan-500/10 px-2.5 py-1 text-[10px] text-cyan-300 hover:bg-cyan-500/20 transition font-medium"
+              title="Ouvrir la page détail du scénario"
+            >
+              Page détail
+            </button>
+            {isExpanded ? <ChevronUp size={16} className="text-slate-500" /> : <ChevronDown size={16} className="text-slate-500" />}
           </div>
         </div>
 

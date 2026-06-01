@@ -1404,3 +1404,234 @@ export async function fetchMCIVictim(): Promise<MCIVictimResponse> {
   if (!response.ok) throw new Error(`HTTP ${response.status}`);
   return response.json();
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GESICA Scenario Detail — Phase 2 Enrichissement
+// ─────────────────────────────────────────────────────────────────────────────
+
+export interface AlertThreshold {
+  label: string;
+  condition: string;
+}
+
+export interface ModelInfo {
+  algorithm: string;
+  variables: string[];
+  output: string;
+  update_frequency: string;
+}
+
+export interface ScenarioDetail {
+  id: string;
+  title: string;
+  description: string;
+  cluster: string;
+  recommended_actions: string[];
+  boolean_queries: string[];
+  nl_queries: string[];
+  evidence_extraction_prompt: string;
+  model_info: ModelInfo;
+  alert_thresholds: {
+    green: AlertThreshold;
+    orange: AlertThreshold;
+    red: AlertThreshold;
+  };
+  corpus_stats: {
+    total: number;
+    with_fulltext: number;
+    years_covered: number;
+    journals_count: number;
+    year_min: number | null;
+    year_max: number | null;
+  };
+}
+
+export interface CorpusArticle {
+  id: number;
+  title: string;
+  abstract: string | null;
+  year: number | null;
+  source: string;
+  url: string | null;
+  authors: string | null;
+  doi: string | null;
+  journal: string | null;
+  keywords: string | null;
+  language: string | null;
+  study_design: string | null;
+  sample_size: number | null;
+  country: string | null;
+  citation_count: number | null;
+  open_access: boolean | null;
+  has_fulltext: boolean;
+}
+
+export interface ScenarioCorpus {
+  scenario_id: string;
+  total: number;
+  offset: number;
+  limit: number;
+  articles: CorpusArticle[];
+  year_distribution: Array<{ year: number; count: number }>;
+  source_distribution: Array<{ source: string; count: number }>;
+}
+
+export interface ModelStatus {
+  scenario_id: string;
+  status_color: 'green' | 'orange' | 'red';
+  status_label: string;
+  model_info: ModelInfo;
+  alert_thresholds: {
+    green: AlertThreshold;
+    orange: AlertThreshold;
+    red: AlertThreshold;
+  };
+  model_result: Record<string, any> | null;
+  model_error: string | null;
+  recent_articles_30d: number;
+  timestamp: string;
+}
+
+export interface ClusterTopic {
+  topic_id: number;
+  top_words: string[];
+  weight: number;
+}
+
+export interface ClusterResult {
+  cluster_id: number;
+  n_docs: number;
+  top_words: string[];
+  representative_doc: {
+    id: number;
+    title: string;
+    year: number | null;
+    journal: string | null;
+  };
+  recent_docs: Array<{ id: number; title: string; year: number | null }>;
+}
+
+export interface ScenarioClustering {
+  scenario_id: string;
+  n_docs: number;
+  n_clusters?: number;
+  clusters: ClusterResult[];
+  topics: ClusterTopic[];
+  message?: string;
+}
+
+export interface ScenarioRagResponse {
+  answer: string;
+  sources: Array<{
+    document_id: number;
+    title: string;
+    year: number | null;
+    url: string | null;
+    source: string;
+    authors: string | null;
+    journal: string | null;
+    doi: string | null;
+    score: number;
+  }>;
+  scenario_id: string;
+  model?: string;
+}
+
+export interface ScenarioPrisma {
+  scenario_id: string;
+  scenario_title: string;
+  identification: {
+    total_records_identified: number;
+    by_source: Record<string, number>;
+    duplicates_removed: number;
+  };
+  screening: {
+    records_screened: number;
+    records_excluded_title_abstract: number;
+    records_pending: number;
+  };
+  eligibility: {
+    fulltext_retrieved: number;
+    fulltext_not_retrieved: number;
+    fulltext_excluded: number;
+  };
+  included: {
+    total_included: number;
+    pending_assessment: number;
+    note: string;
+  };
+}
+
+export async function fetchScenarioDetail(scenarioId: string): Promise<ScenarioDetail> {
+  const response = await fetch(`${API_BASE_URL}/gesica/scenarios/${scenarioId}/detail`);
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  return response.json();
+}
+
+export async function fetchScenarioCorpus(
+  scenarioId: string,
+  options?: {
+    limit?: number;
+    offset?: number;
+    yearFrom?: number;
+    yearTo?: number;
+    fulltextOnly?: boolean;
+    source?: string;
+  }
+): Promise<ScenarioCorpus> {
+  const params = new URLSearchParams();
+  if (options?.limit) params.set('limit', String(options.limit));
+  if (options?.offset) params.set('offset', String(options.offset));
+  if (options?.yearFrom) params.set('year_from', String(options.yearFrom));
+  if (options?.yearTo) params.set('year_to', String(options.yearTo));
+  if (options?.fulltextOnly) params.set('fulltext_only', 'true');
+  if (options?.source) params.set('source', options.source);
+  const url = `${API_BASE_URL}/gesica/scenarios/${scenarioId}/corpus?${params}`;
+  const response = await fetch(url);
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  return response.json();
+}
+
+export async function fetchScenarioModelStatus(scenarioId: string): Promise<ModelStatus> {
+  const response = await fetch(`${API_BASE_URL}/gesica/scenarios/${scenarioId}/model-status`);
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  return response.json();
+}
+
+export async function runScenarioModel(scenarioId: string): Promise<ModelStatus> {
+  const response = await fetch(`${API_BASE_URL}/gesica/scenarios/${scenarioId}/model-run`, {
+    method: 'POST',
+  });
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  return response.json();
+}
+
+export async function fetchScenarioClustering(
+  scenarioId: string,
+  nClusters?: number
+): Promise<ScenarioClustering> {
+  const params = nClusters ? `?n_clusters=${nClusters}` : '';
+  const response = await fetch(`${API_BASE_URL}/gesica/scenarios/${scenarioId}/clustering${params}`);
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  return response.json();
+}
+
+export async function askScenarioRag(
+  scenarioId: string,
+  question: string,
+  filters?: Record<string, any>
+): Promise<ScenarioRagResponse> {
+  const response = await fetch(`${API_BASE_URL}/gesica/scenarios/${scenarioId}/rag`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ question, filters }),
+  });
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  return response.json();
+}
+
+export async function fetchScenarioPrisma(scenarioId: string): Promise<ScenarioPrisma> {
+  const response = await fetch(`${API_BASE_URL}/gesica/scenarios/${scenarioId}/prisma`);
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  return response.json();
+}

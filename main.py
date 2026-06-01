@@ -5,6 +5,12 @@ import os
 import re
 from pathlib import Path
 from typing import Any
+
+# Import des métadonnées enrichies (queries, prompts, variables, seuils)
+try:
+    from gesica_scenario_enriched_metadata import GESICA_ENRICHED
+except ImportError:
+    GESICA_ENRICHED: dict = {}
 from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
@@ -1148,6 +1154,16 @@ GESICA_SCENARIO_METADATA: dict[str, dict[str, Any]] = {
             "Identifier les casernes et voies d'accès ambulances situées en zone inondable (crues de l'Arve/Rhône)",
             "Établir des points de rassemblement des secours hors des zones à risque",
             "Simuler des scénarios de rupture d'alimentation électrique ou de télécommunications"
+        ]
+    },
+    "heatwave-ems-impact": {
+        "title": "Impact des Canicules sur les EMS",
+        "description": "Modélisation de l'impact des vagues de chaleur extrêmes sur la demande EMS et les pathologies liées à la chaleur (coup de chaleur, hyperthermie).",
+        "cluster": "Environmental & Disaster Risk Forecasting",
+        "recommended_actions": [
+            "Anticiper une hausse de 20-40% des appels EMS lors des épisodes de canicule (UTCI > 38°C)",
+            "Activer les protocoles de prise en charge préhospitalière des coups de chaleur",
+            "Renforcer les équipages avec du matériel de refroidissement rapide (poches de glace, brumisateurs)"
         ]
     },
     "climate-impact-on-ems": {
@@ -2424,3 +2440,646 @@ def endpoint_disaster_risk():
 def endpoint_mci_victim():
     from strategic_scenarios_model import mci_victim_model_singleton
     return mci_victim_model_singleton.predict_demo()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# GESICA Scenario Detail Endpoints (Phase 2 — Refonte interface)
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.get("/gesica/scenarios/{scenario_id}/detail")
+def get_scenario_detail(scenario_id: str) -> dict[str, Any]:
+    """
+    Retourne toutes les informations enrichies d'un scénario GESICA :
+    - Métadonnées de base (titre, description, cluster, actions recommandées)
+    - Queries booléennes PubMed et requêtes NL pour la recherche sémantique
+    - Prompt d'extraction d'évidence spécifique au scénario
+    - Informations sur le modèle IA (algorithme, variables, fréquence de mise à jour)
+    - Seuils d'alerte vert/orange/rouge
+    """
+    meta = GESICA_SCENARIO_METADATA.get(scenario_id)
+    if not meta:
+        raise HTTPException(status_code=404, detail=f"Scénario '{scenario_id}' non trouvé")
+    enriched = GESICA_ENRICHED.get(scenario_id, {})
+    with engine.connect() as conn:
+        stats = conn.execute(text("""
+            SELECT
+                COUNT(*) AS total,
+                SUM(CASE WHEN EXISTS (
+                    SELECT 1 FROM document_chunk c
+                    WHERE c.document_id = d.id AND c.chunk_type = 'fulltext_section'
+                ) THEN 1 ELSE 0 END) AS with_fulltext,
+                COUNT(DISTINCT d.year) AS years_covered,
+                COUNT(DISTINCT d.journal) AS journals_count,
+                MIN(d.year) AS year_min,
+                MAX(d.year) AS year_max
+            FROM literature_document d
+            WHERE d.project_context = 'gesica'
+              AND d.scenario_type = :sid
+              AND (d.is_duplicate IS NULL OR d.is_duplicate = FALSE)
+        """), {"sid": scenario_id}).mappings().first()
+    return {
+        "id": scenario_id,
+        "title": meta["title"],
+        "description": meta["description"],
+        "cluster": meta["cluster"],
+        "recommended_actions": meta.get("recommended_actions", []),
+        "boolean_queries": enriched.get("boolean_queries", []),
+        "nl_queries": enriched.get("nl_queries", []),
+        "evidence_extraction_prompt": enriched.get("evidence_extraction_prompt", ""),
+        "model_info": enriched.get("model_info", {}),
+        "alert_thresholds": enriched.get("alert_thresholds", {}),
+        "corpus_stats": {
+            "total": int(stats["total"] or 0),
+            "with_fulltext": int(stats["with_fulltext"] or 0),
+            "years_covered": int(stats["years_covered"] or 0),
+            "journals_count": int(stats["journals_count"] or 0),
+            "year_min": stats["year_min"],
+            "year_max": stats["year_max"],
+        },
+    }
+
+
+@app.get("/gesica/scenarios/{scenario_id}/corpus")
+def get_scenario_corpus(
+    scenario_id: str,
+    limit: int = 50,
+    offset: int = 0,
+    year_from: int | None = None,
+    year_to: int | None = None,
+    fulltext_only: bool = False,
+    source: str | None = None,
+) -> dict[str, Any]:
+    """
+    Retourne le corpus d'articles pour un scénario GESICA avec statistiques.
+    Supporte la pagination, le filtrage par année, source et full-text.
+    """
+    meta = GESICA_SCENARIO_METADATA.get(scenario_id)
+    if not meta:
+        raise HTTPException(status_code=404, detail=f"Scénario '{scenario_id}' non trouvé")
+    conditions = [
+        "d.project_context = 'gesica'",
+        "d.scenario_type = :sid",
+        "(d.is_duplicate IS NULL OR d.is_duplicate = FALSE)",
+    ]
+    params: dict[str, Any] = {"sid": scenario_id, "limit": limit, "offset": offset}
+    if year_from:
+        conditions.append("d.year >= :year_from")
+        params["year_from"] = year_from
+    if year_to:
+        conditions.append("d.year <= :year_to")
+        params["year_to"] = year_to
+    if source:
+        conditions.append("d.source = :source")
+        params["source"] = source
+    if fulltext_only:
+        conditions.append("""EXISTS (
+            SELECT 1 FROM document_chunk c
+            WHERE c.document_id = d.id AND c.chunk_type = 'fulltext_section'
+        )""")
+    where = " AND ".join(conditions)
+    with engine.connect() as conn:
+        # Comptage total
+        count_row = conn.execute(text(f"""
+            SELECT COUNT(*) AS total
+            FROM literature_document d
+            WHERE {where}
+        """), params).mappings().first()
+        total = int(count_row["total"] or 0)
+        # Articles paginés
+        articles = conn.execute(text(f"""
+            SELECT
+                d.id, d.title, d.abstract, d.year, d.source, d.url,
+                d.authors, d.doi, d.journal, d.keywords, d.language,
+                d.study_design, d.sample_size, d.country, d.citation_count,
+                d.open_access, d.pmid, d.publication_type, d.quality_score,
+                EXISTS (
+                    SELECT 1 FROM document_chunk c
+                    WHERE c.document_id = d.id AND c.chunk_type = 'fulltext_section'
+                ) AS has_fulltext
+            FROM literature_document d
+            WHERE {where}
+            ORDER BY d.year DESC NULLS LAST, d.citation_count DESC NULLS LAST, d.title ASC
+            LIMIT :limit OFFSET :offset
+        """), params).mappings().all()
+        # Stats par année
+        year_dist = conn.execute(text(f"""
+            SELECT d.year, COUNT(*) AS cnt
+            FROM literature_document d
+            WHERE {where.replace(' LIMIT :limit OFFSET :offset', '')}
+            GROUP BY d.year
+            ORDER BY d.year
+        """), {k: v for k, v in params.items() if k not in ('limit', 'offset')}).mappings().all()
+        # Stats par source
+        source_dist = conn.execute(text(f"""
+            SELECT d.source, COUNT(*) AS cnt
+            FROM literature_document d
+            WHERE {where.replace(' LIMIT :limit OFFSET :offset', '')}
+            GROUP BY d.source
+            ORDER BY cnt DESC
+        """), {k: v for k, v in params.items() if k not in ('limit', 'offset')}).mappings().all()
+    return {
+        "scenario_id": scenario_id,
+        "total": total,
+        "offset": offset,
+        "limit": limit,
+        "articles": [dict(r) for r in articles],
+        "year_distribution": [{"year": r["year"], "count": r["cnt"]} for r in year_dist if r["year"]],
+        "source_distribution": [{"source": r["source"], "count": r["cnt"]} for r in source_dist],
+    }
+
+
+@app.get("/gesica/scenarios/{scenario_id}/model-status")
+def get_scenario_model_status(scenario_id: str) -> dict[str, Any]:
+    """
+    Retourne le statut coloré du modèle pour un scénario GESICA.
+    Exécute le modèle correspondant et évalue le statut vert/orange/rouge.
+    """
+    meta = GESICA_SCENARIO_METADATA.get(scenario_id)
+    if not meta:
+        raise HTTPException(status_code=404, detail=f"Scénario '{scenario_id}' non trouvé")
+    enriched = GESICA_ENRICHED.get(scenario_id, {})
+    model_info = enriched.get("model_info", {})
+    thresholds = enriched.get("alert_thresholds", {})
+    # Mapping scenario_id -> endpoint de modèle existant
+    MODEL_ENDPOINT_MAP = {
+        "demand-forecasting": "demand_forecasting_model",
+        "epidemic-early-warning": "epidemic_early_warning_model",
+        "response-time-optimization": "response_time_optimization_model",
+        "cardiac-arrest-prediction": "cardiac_arrest_prediction_model",
+        "heatwave-ems-impact": "heatwave_ems_impact_model",
+        "stroke-detection": "stroke_detection_model",
+        "triage-support": "triage_support_model",
+        "undertriage-detection": "undertriage_risk_model",
+        "trauma-severity-assessment": "trauma_care_model",
+        "mci-victim-estimation": "mass_casualty_model",
+        "clinical-deterioration-prediction": "clinical_deterioration_model",
+        "emergency-call-qualification": "emergency_call_qualification_model",
+        "call-prioritization": "emergency_call_qualification_model",
+        "dispatch-decision-support": "dispatch_decision_support_model",
+        "patient-pathway-optimization": "patient_pathway_optimization_model",
+        "ambulance-dispatch-optimization": "ambulance_dispatch_optimization_model",
+        "hospital-capacity-forecasting": "hospital_capacity_staffing_model",
+        "staffing-level-prediction": "hospital_capacity_staffing_model",
+        "surveillance": "surveillance_surge_resource_model",
+        "surge-management": "surveillance_surge_resource_model",
+        "resource-allocation": "surveillance_surge_resource_model",
+        "environmental-risk-forecasting": "surveillance_surge_resource_model",
+        "pandemic-preparedness": "strategic_scenarios_model",
+        "cross-border-coordination": "strategic_scenarios_model",
+        "situational-awareness": "strategic_scenarios_model",
+        "disaster-risk-assessment": "strategic_scenarios_model",
+        "mass-casualty-triage": "mass_casualty_model",
+    }
+    model_module = MODEL_ENDPOINT_MAP.get(scenario_id)
+    model_result = None
+    model_error = None
+    if model_module:
+        try:
+            import importlib
+            mod = importlib.import_module(model_module)
+            # Trouver le singleton approprié
+            singleton_names = [
+                f"{scenario_id.replace('-', '_')}_model_singleton",
+                "model_singleton",
+            ]
+            for attr in dir(mod):
+                if "singleton" in attr.lower():
+                    singleton_names.insert(0, attr)
+                    break
+            singleton = None
+            for name in singleton_names:
+                if hasattr(mod, name):
+                    singleton = getattr(mod, name)
+                    break
+            if singleton and hasattr(singleton, "predict_demo"):
+                model_result = singleton.predict_demo()
+        except Exception as e:
+            model_error = str(e)
+    # Déterminer le statut coloré
+    status_color = "green"
+    status_label = thresholds.get("green", {}).get("label", "Normal")
+    if model_result:
+        # Logique de statut basée sur le résultat du modèle
+        result_status = str(model_result.get("status", "")).upper()
+        if "RED" in result_status or "ALERT" in result_status or "CRITIQUE" in result_status:
+            status_color = "red"
+            status_label = thresholds.get("red", {}).get("label", "Alerte critique")
+        elif "ORANGE" in result_status or "WARNING" in result_status or "VIGILANCE" in result_status:
+            status_color = "orange"
+            status_label = thresholds.get("orange", {}).get("label", "Vigilance")
+        else:
+            status_color = "green"
+            status_label = thresholds.get("green", {}).get("label", "Normal")
+    # Compter les articles récents (30 derniers jours)
+    with engine.connect() as conn:
+        recent_count = conn.execute(text("""
+            SELECT COUNT(*) AS cnt
+            FROM literature_document d
+            WHERE d.project_context = 'gesica'
+              AND d.scenario_type = :sid
+              AND d.created_at >= NOW() - INTERVAL '30 days'
+        """), {"sid": scenario_id}).scalar()
+    from datetime import datetime, timezone
+    return {
+        "scenario_id": scenario_id,
+        "status_color": status_color,
+        "status_label": status_label,
+        "model_info": model_info,
+        "alert_thresholds": thresholds,
+        "model_result": model_result,
+        "model_error": model_error,
+        "recent_articles_30d": int(recent_count or 0),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+@app.post("/gesica/scenarios/{scenario_id}/model-run")
+def run_scenario_model(scenario_id: str) -> dict[str, Any]:
+    """
+    Re-run manuel du modèle pour un scénario GESICA.
+    Retourne le résultat frais avec statut coloré.
+    """
+    return get_scenario_model_status(scenario_id)
+
+
+@app.get("/gesica/scenarios/{scenario_id}/clustering")
+def get_scenario_clustering(scenario_id: str, n_clusters: int = 5) -> dict[str, Any]:
+    """
+    Clustering K-means + topic modelling LDA sur le corpus du scénario.
+    Retourne les topics principaux et la distribution des articles par cluster.
+    """
+    meta = GESICA_SCENARIO_METADATA.get(scenario_id)
+    if not meta:
+        raise HTTPException(status_code=404, detail=f"Scénario '{scenario_id}' non trouvé")
+    with engine.connect() as conn:
+        docs = conn.execute(text("""
+            SELECT d.id, d.title, d.abstract, d.year, d.journal
+            FROM literature_document d
+            WHERE d.project_context = 'gesica'
+              AND d.scenario_type = :sid
+              AND (d.is_duplicate IS NULL OR d.is_duplicate = FALSE)
+              AND d.abstract IS NOT NULL
+              AND LENGTH(d.abstract) > 50
+            ORDER BY d.year DESC NULLS LAST
+            LIMIT 500
+        """), {"sid": scenario_id}).mappings().all()
+    if len(docs) < 5:
+        return {
+            "scenario_id": scenario_id,
+            "n_docs": len(docs),
+            "message": "Corpus insuffisant pour le clustering (< 5 articles avec abstract)",
+            "clusters": [],
+            "topics": [],
+        }
+    try:
+        from sklearn.feature_extraction.text import TfidfVectorizer
+        from sklearn.cluster import KMeans
+        from sklearn.decomposition import LatentDirichletAllocation
+        import numpy as np
+        texts = [f"{d['title']} {d['abstract'] or ''}" for d in docs]
+        # TF-IDF vectorisation
+        vectorizer = TfidfVectorizer(
+            max_features=500,
+            stop_words=None,  # Corpus multilingue
+            min_df=2,
+            max_df=0.9,
+            ngram_range=(1, 2),
+        )
+        X = vectorizer.fit_transform(texts)
+        # K-means clustering
+        n_clusters_actual = min(n_clusters, len(docs) // 3, 10)
+        kmeans = KMeans(n_clusters=n_clusters_actual, random_state=42, n_init=10)
+        labels = kmeans.fit_predict(X)
+        # LDA topic modelling
+        lda = LatentDirichletAllocation(
+            n_components=min(n_clusters_actual, 5),
+            random_state=42,
+            max_iter=20,
+        )
+        lda.fit(X)
+        feature_names = vectorizer.get_feature_names_out()
+        # Extraire les top mots par topic
+        topics = []
+        for topic_idx, topic in enumerate(lda.components_):
+            top_indices = topic.argsort()[-10:][::-1]
+            top_words = [feature_names[i] for i in top_indices]
+            topics.append({
+                "topic_id": topic_idx,
+                "top_words": top_words,
+                "weight": float(topic.sum()),
+            })
+        # Construire les clusters avec articles représentatifs
+        clusters = []
+        for cluster_id in range(n_clusters_actual):
+            cluster_docs = [docs[i] for i, l in enumerate(labels) if l == cluster_id]
+            if not cluster_docs:
+                continue
+            # Trouver le document le plus central (plus proche du centroïde)
+            cluster_indices = [i for i, l in enumerate(labels) if l == cluster_id]
+            cluster_matrix = X[cluster_indices]
+            centroid = kmeans.cluster_centers_[cluster_id]
+            distances = np.linalg.norm(cluster_matrix.toarray() - centroid, axis=1)
+            central_idx = cluster_indices[int(np.argmin(distances))]
+            central_doc = docs[central_idx]
+            # Top mots du cluster
+            cluster_tfidf = X[cluster_indices].mean(axis=0).A1
+            top_cluster_indices = cluster_tfidf.argsort()[-8:][::-1]
+            top_cluster_words = [feature_names[i] for i in top_cluster_indices if cluster_tfidf[i] > 0]
+            clusters.append({
+                "cluster_id": cluster_id,
+                "n_docs": len(cluster_docs),
+                "top_words": top_cluster_words,
+                "representative_doc": {
+                    "id": central_doc["id"],
+                    "title": central_doc["title"],
+                    "year": central_doc["year"],
+                    "journal": central_doc["journal"],
+                },
+                "recent_docs": [
+                    {"id": d["id"], "title": d["title"], "year": d["year"]}
+                    for d in sorted(cluster_docs, key=lambda x: x["year"] or 0, reverse=True)[:3]
+                ],
+            })
+        return {
+            "scenario_id": scenario_id,
+            "n_docs": len(docs),
+            "n_clusters": n_clusters_actual,
+            "clusters": sorted(clusters, key=lambda x: -x["n_docs"]),
+            "topics": topics,
+        }
+    except ImportError:
+        return {
+            "scenario_id": scenario_id,
+            "n_docs": len(docs),
+            "message": "sklearn non disponible pour le clustering",
+            "clusters": [],
+            "topics": [],
+        }
+    except Exception as e:
+        logger.error(f"Erreur clustering {scenario_id}: {e}")
+        return {
+            "scenario_id": scenario_id,
+            "n_docs": len(docs),
+            "message": f"Erreur clustering: {str(e)}",
+            "clusters": [],
+            "topics": [],
+        }
+
+
+@app.post("/gesica/scenarios/{scenario_id}/rag")
+def scenario_rag_assistant(scenario_id: str, payload: AskIn) -> dict[str, Any]:
+    """
+    Assistant RAG dédié par scénario GESICA.
+    Utilise le corpus filtré du scénario + le prompt d'extraction d'évidence spécifique.
+    """
+    meta = GESICA_SCENARIO_METADATA.get(scenario_id)
+    if not meta:
+        raise HTTPException(status_code=404, detail=f"Scénario '{scenario_id}' non trouvé")
+    enriched = GESICA_ENRICHED.get(scenario_id, {})
+    evidence_prompt = enriched.get("evidence_extraction_prompt", "")
+    # Forcer le filtre sur le scénario
+    payload.filters = payload.filters or {}
+    payload.filters["scenario_type"] = scenario_id
+    payload.filters["project_context"] = "gesica"
+    # Construire la question enrichie avec le contexte du scénario
+    enriched_question = payload.question
+    if evidence_prompt:
+        # Injecter le contexte du scénario dans la question
+        enriched_question = f"[Contexte scénario: {meta['title']}]\n{payload.question}"
+    # Appeler l'assistant RAG générique avec le prompt enrichi
+    openai_key = os.getenv("OPENAI_API_KEY")
+    # Recherche vectorielle filtrée sur le scénario
+    query_embedding = None
+    if openai_key:
+        try:
+            from openai import OpenAI
+            client = OpenAI(api_key=openai_key)
+            response = client.embeddings.create(
+                input=[payload.question.replace("\n", " ").strip()],
+                model="text-embedding-3-small"
+            )
+            query_embedding = response.data[0].embedding
+        except Exception as e:
+            logger.error(f"Erreur embedding RAG scénario {scenario_id}: {e}")
+    with engine.connect() as conn:
+        if query_embedding:
+            rows = conn.execute(text("""
+                SELECT
+                    d.id AS document_id, d.title, d.year, d.url, d.source,
+                    d.authors, d.journal, d.doi,
+                    c.content, c.metadata_json,
+                    (1 - (c.embedding <=> CAST(:emb AS vector))) AS score
+                FROM document_chunk c
+                JOIN literature_document d ON d.id = c.document_id
+                WHERE c.embedding IS NOT NULL
+                  AND d.project_context = 'gesica'
+                  AND d.scenario_type = :sid
+                  AND (d.is_duplicate IS NULL OR d.is_duplicate = FALSE)
+                ORDER BY c.embedding <=> CAST(:emb AS vector)
+                LIMIT 8
+            """), {"emb": str(query_embedding), "sid": scenario_id}).mappings().all()
+        else:
+            # Fallback textuel
+            terms = [t.strip() for t in re.split(r"\s+", payload.question.lower()) if t.strip()]
+            if not terms:
+                return {"answer": "Question vide.", "sources": []}
+            like_clauses = " OR ".join(
+                f"(LOWER(COALESCE(d.title,'')) LIKE :t{i} OR LOWER(COALESCE(c.content,'')) LIKE :t{i})"
+                for i in range(len(terms))
+            )
+            params: dict[str, Any] = {"sid": scenario_id}
+            for i, t in enumerate(terms):
+                params[f"t{i}"] = f"%{t}%"
+            rows = conn.execute(text(f"""
+                SELECT
+                    d.id AS document_id, d.title, d.year, d.url, d.source,
+                    d.authors, d.journal, d.doi,
+                    c.content, c.metadata_json, 1.0 AS score
+                FROM document_chunk c
+                JOIN literature_document d ON d.id = c.document_id
+                WHERE ({like_clauses})
+                  AND d.project_context = 'gesica'
+                  AND d.scenario_type = :sid
+                ORDER BY d.year DESC NULLS LAST
+                LIMIT 8
+            """), params).mappings().all()
+    if not rows:
+        return {
+            "answer": f"Aucun article trouvé dans le corpus du scénario '{meta['title']}' pour cette question. "
+                      "Essayez d'élargir votre recherche ou d'ingérer de nouveaux articles via la living review.",
+            "sources": [],
+            "scenario_id": scenario_id,
+        }
+    # Construire le contexte
+    context_blocks = []
+    sources = []
+    seen = set()
+    for i, r in enumerate(rows):
+        doc_id = r["document_id"]
+        context_blocks.append(
+            f"--- SOURCE {i+1} ---\n"
+            f"Titre: {r['title']}\n"
+            f"Auteurs: {r.get('authors','') or 'N/A'}\n"
+            f"Journal: {r.get('journal','') or 'N/A'} ({r['year'] or 'N/A'})\n"
+            f"DOI: {r.get('doi','') or 'N/A'}\n"
+            f"Contenu: {r['content']}\n"
+        )
+        if doc_id not in seen:
+            seen.add(doc_id)
+            sources.append({
+                "document_id": doc_id,
+                "title": r["title"],
+                "year": r["year"],
+                "url": r["url"],
+                "source": r["source"],
+                "authors": r.get("authors"),
+                "journal": r.get("journal"),
+                "doi": r.get("doi"),
+                "score": float(r.get("score", 0)),
+            })
+    context_str = "\n\n".join(context_blocks)
+    if not openai_key:
+        return {
+            "answer": "[Mode dégradé - Clé OpenAI manquante]\n\nSources trouvées :\n" +
+                      "\n".join(f"- {s['title']} ({s['year']})" for s in sources),
+            "sources": sources,
+            "scenario_id": scenario_id,
+        }
+    try:
+        from openai import OpenAI
+        client = OpenAI(api_key=openai_key)
+        system_prompt = (
+            f"Vous êtes l'assistant scientifique expert de LiteRev-Evidence pour le scénario GESICA : "
+            f"**{meta['title']}**.\n\n"
+            f"{evidence_prompt}\n\n"
+            "Règles de rédaction :\n"
+            "1. Basez-vous STRICTEMENT sur les sources fournies dans le contexte.\n"
+            "2. Citez vos sources avec [SOURCE 1], [SOURCE 2], etc.\n"
+            "3. Mentionnez les niveaux de preuve (RCT, méta-analyse, étude observationnelle).\n"
+            "4. Soyez précis et structuré. Si le contexte est insuffisant, dites-le.\n"
+            "5. Adaptez votre réponse au contexte opérationnel Grand Genève (CH/FR)."
+        )
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": f"CONTEXTE :\n{context_str}\n\nQUESTION : {payload.question}"},
+            ],
+            temperature=0.2,
+            max_tokens=1200,
+        )
+        return {
+            "answer": response.choices[0].message.content,
+            "sources": sources,
+            "scenario_id": scenario_id,
+            "model": "gpt-4o-mini",
+        }
+    except Exception as e:
+        logger.error(f"Erreur OpenAI RAG scénario {scenario_id}: {e}")
+        return {
+            "answer": f"Erreur lors de la génération de la réponse : {str(e)}",
+            "sources": sources,
+            "scenario_id": scenario_id,
+        }
+
+
+@app.get("/gesica/scenarios/{scenario_id}/prisma")
+def get_scenario_prisma(scenario_id: str) -> dict[str, Any]:
+    """
+    Flow PRISMA pour un scénario GESICA spécifique.
+    Calcule les métriques d'identification, screening, éligibilité et inclusion.
+    """
+    meta = GESICA_SCENARIO_METADATA.get(scenario_id)
+    if not meta:
+        raise HTTPException(status_code=404, detail=f"Scénario '{scenario_id}' non trouvé")
+    with engine.connect() as conn:
+        stats = conn.execute(text("""
+            SELECT
+                COUNT(*) AS total,
+                SUM(CASE WHEN d.source = 'pubmed' THEN 1 ELSE 0 END) AS pubmed,
+                SUM(CASE WHEN d.source = 'pmc' THEN 1 ELSE 0 END) AS pmc,
+                SUM(CASE WHEN d.source IN ('biorxiv','medrxiv') THEN 1 ELSE 0 END) AS preprints,
+                SUM(CASE WHEN d.source = 'openalex' THEN 1 ELSE 0 END) AS openalex,
+                SUM(CASE WHEN d.source = 'europepmc' THEN 1 ELSE 0 END) AS europepmc,
+                SUM(CASE WHEN d.screening_status = 'included' THEN 1 ELSE 0 END) AS included,
+                SUM(CASE WHEN d.screening_status = 'excluded' THEN 1 ELSE 0 END) AS excluded,
+                SUM(CASE WHEN d.screening_status = 'pending' OR d.screening_status IS NULL THEN 1 ELSE 0 END) AS pending,
+                SUM(CASE WHEN d.is_duplicate = TRUE THEN 1 ELSE 0 END) AS duplicates,
+                SUM(CASE WHEN EXISTS (
+                    SELECT 1 FROM document_chunk c
+                    WHERE c.document_id = d.id AND c.chunk_type = 'fulltext_section'
+                ) THEN 1 ELSE 0 END) AS with_fulltext
+            FROM literature_document d
+            WHERE d.project_context = 'gesica'
+              AND d.scenario_type = :sid
+        """), {"sid": scenario_id}).mappings().first()
+    total = int(stats["total"] or 0)
+    duplicates = int(stats["duplicates"] or 0)
+    included = int(stats["included"] or 0)
+    excluded = int(stats["excluded"] or 0)
+    pending = int(stats["pending"] or 0)
+    with_fulltext = int(stats["with_fulltext"] or 0)
+    records_after_dedup = total - duplicates
+    return {
+        "scenario_id": scenario_id,
+        "scenario_title": meta["title"],
+        "identification": {
+            "total_records_identified": total + duplicates,
+            "by_source": {
+                "pubmed": int(stats["pubmed"] or 0),
+                "pmc": int(stats["pmc"] or 0),
+                "preprints": int(stats["preprints"] or 0),
+                "openalex": int(stats["openalex"] or 0),
+                "europepmc": int(stats["europepmc"] or 0),
+            },
+            "duplicates_removed": duplicates,
+        },
+        "screening": {
+            "records_screened": records_after_dedup,
+            "records_excluded_title_abstract": excluded,
+            "records_pending": pending,
+        },
+        "eligibility": {
+            "fulltext_retrieved": with_fulltext,
+            "fulltext_not_retrieved": records_after_dedup - with_fulltext,
+            "fulltext_excluded": 0,
+        },
+        "included": {
+            "total_included": included if included > 0 else records_after_dedup,
+            "pending_assessment": pending,
+            "note": "Tous les articles non exclus sont considérés inclus par défaut (screening automatique).",
+        },
+    }
+
+
+@app.get("/gesica/deduplication/status")
+def get_deduplication_status() -> dict[str, Any]:
+    """
+    Retourne le statut de la déduplication du corpus GESICA.
+    """
+    with engine.connect() as conn:
+        stats = conn.execute(text("""
+            SELECT
+                COUNT(*) AS total,
+                SUM(CASE WHEN is_duplicate = TRUE THEN 1 ELSE 0 END) AS duplicates,
+                SUM(CASE WHEN is_duplicate IS NULL OR is_duplicate = FALSE THEN 1 ELSE 0 END) AS canonical,
+                SUM(CASE WHEN title_hash IS NOT NULL THEN 1 ELSE 0 END) AS with_title_hash,
+                SUM(CASE WHEN quality_score > 0 THEN 1 ELSE 0 END) AS with_quality_score
+            FROM literature_document
+            WHERE project_context = 'gesica'
+        """)).mappings().first()
+    return {
+        "total_documents": int(stats["total"] or 0),
+        "canonical_documents": int(stats["canonical"] or 0),
+        "duplicate_documents": int(stats["duplicates"] or 0),
+        "with_title_hash": int(stats["with_title_hash"] or 0),
+        "with_quality_score": int(stats["with_quality_score"] or 0),
+        "deduplication_rate": round(
+            int(stats["duplicates"] or 0) / max(int(stats["total"] or 1), 1) * 100, 1
+        ),
+        "instructions": {
+            "dry_run": "python3 deduplicate_corpus.py --dry-run",
+            "execute": "python3 deduplicate_corpus.py --execute",
+            "execute_delete": "python3 deduplicate_corpus.py --execute --delete",
+        },
+    }
