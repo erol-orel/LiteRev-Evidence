@@ -220,23 +220,41 @@ def find_duplicate_groups(docs: list[dict]) -> list[list[dict]]:
             used_ids.update(d['id'] for d in ungrouped)
 
     # Groupes par similarité de titre (Levenshtein ≥ 0.92)
+    # Optimisation par blocage : on ne compare que les titres qui partagent le même premier mot
+    # et qui ont des longueurs similaires (différence < 15%)
     remaining = [d for d in docs if d['id'] not in used_ids]
-    normalized_titles = [(d, normalize_title(d.get('title'))) for d in remaining]
-    normalized_titles = [(d, nt) for d, nt in normalized_titles if nt]
+    normalized_titles = []
+    for d in remaining:
+        nt = normalize_title(d.get('title'))
+        if nt:
+            first_word = nt.split()[0] if nt.split() else ""
+            normalized_titles.append((d, nt, first_word, len(nt)))
 
-    for i, (doc_i, title_i) in enumerate(normalized_titles):
-        if doc_i['id'] in used_ids:
+    # Indexation par premier mot pour recherche rapide
+    first_word_index: dict[str, list[tuple]] = {}
+    for item in normalized_titles:
+        first_word_index.setdefault(item[2], []).append(item)
+
+    for first_word, items in first_word_index.items():
+        if not first_word or len(items) < 2:
             continue
-        similar_group = [doc_i]
-        for j, (doc_j, title_j) in enumerate(normalized_titles):
-            if i == j or doc_j['id'] in used_ids:
+        # On compare les éléments du même groupe
+        for i, (doc_i, title_i, _, len_i) in enumerate(items):
+            if doc_i['id'] in used_ids:
                 continue
-            ratio = levenshtein_ratio(title_i, title_j)
-            if ratio >= 0.92:
-                similar_group.append(doc_j)
-        if len(similar_group) >= 2:
-            groups.append(similar_group)
-            used_ids.update(d['id'] for d in similar_group)
+            similar_group = [doc_i]
+            for j, (doc_j, title_j, _, len_j) in enumerate(items):
+                if i == j or doc_j['id'] in used_ids:
+                    continue
+                # Filtre de longueur rapide (différence max 15%)
+                if abs(len_i - len_j) / max(len_i, len_j) > 0.15:
+                    continue
+                ratio = levenshtein_ratio(title_i, title_j)
+                if ratio >= 0.92:
+                    similar_group.append(doc_j)
+            if len(similar_group) >= 2:
+                groups.append(similar_group)
+                used_ids.update(d['id'] for d in similar_group)
 
     return groups
 
