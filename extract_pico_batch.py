@@ -51,17 +51,30 @@ DB_URL = os.environ.get(
 engine = create_engine(DB_URL, pool_pre_ping=True)
 
 # ── OpenAI ────────────────────────────────────────────────────────────────────
-# Charger la clé depuis .env si non définie dans l'environnement shell
+# Charger la clé depuis les fichiers d'environnement si non définie dans le shell
 if not os.environ.get("OPENAI_API_KEY"):
-    env_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
-    if os.path.exists(env_file):
-        with open(env_file) as _ef:
-            for _line in _ef:
-                _line = _line.strip()
-                if _line.startswith("OPENAI_API_KEY=") and not _line.startswith("#"):
-                    os.environ["OPENAI_API_KEY"] = _line.split("=", 1)[1].strip().strip('"').strip("'")
-                    log.info("Clé OpenAI chargée depuis .env")
+    # Ordre de priorité : fichier systemd > .env du projet
+    _env_candidates = [
+        "/etc/literev-api.env",           # Fichier systemd EnvironmentFile
+        "/opt/literev-api/.env",           # .env du projet sur le serveur
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"),  # .env local
+    ]
+    for env_file in _env_candidates:
+        if os.path.exists(env_file):
+            try:
+                with open(env_file) as _ef:
+                    for _line in _ef:
+                        _line = _line.strip().strip('"')  # enlever les guillemets systemd
+                        if _line.startswith("OPENAI_API_KEY=") and not _line.startswith("#"):
+                            _val = _line.split("=", 1)[1].strip().strip('"').strip("'")
+                            if _val:
+                                os.environ["OPENAI_API_KEY"] = _val
+                                log.info(f"Clé OpenAI chargée depuis {env_file}")
+                                break
+                if os.environ.get("OPENAI_API_KEY"):
                     break
+            except Exception as _e:
+                log.debug(f"Impossible de lire {env_file}: {_e}")
 
 try:
     from openai import OpenAI
