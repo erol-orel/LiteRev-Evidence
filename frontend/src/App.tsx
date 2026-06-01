@@ -3097,14 +3097,9 @@ export default function App() {
         <div className="mx-auto max-w-[1380px] px-6 py-6">
           <div className="flex flex-col gap-6 xl:flex-row xl:items-end xl:justify-between">
             <div className="max-w-3xl">
-              <div className="flex items-center gap-4 mb-2">
-                <img src="/logo.jpg" alt="LiteRev arbre" className="h-16 w-16 rounded-2xl object-cover shadow-lg" />
-                <div>
-                  <div className="flex items-center gap-2">
-                    <img src="/literev-logo.png" alt="LiteRev" className="h-9 w-auto object-contain" />
-                    <span className="text-2xl font-semibold tracking-tight text-white/80">— Evidence to Scenario</span>
-                  </div>
-                </div>
+              <div className="flex items-center gap-3 mb-2">
+                <img src="/literev-logo.png" alt="LiteRev" className="h-10 w-auto object-contain" />
+                <h1 className="text-3xl font-bold tracking-tight text-white">- Evidence to Scenario</h1>
               </div>
             </div>
 
