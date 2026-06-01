@@ -51,13 +51,37 @@ DB_URL = os.environ.get(
 engine = create_engine(DB_URL, pool_pre_ping=True)
 
 # ── OpenAI ────────────────────────────────────────────────────────────────────
+# Charger la clé depuis .env si non définie dans l'environnement shell
+if not os.environ.get("OPENAI_API_KEY"):
+    env_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+    if os.path.exists(env_file):
+        with open(env_file) as _ef:
+            for _line in _ef:
+                _line = _line.strip()
+                if _line.startswith("OPENAI_API_KEY=") and not _line.startswith("#"):
+                    os.environ["OPENAI_API_KEY"] = _line.split("=", 1)[1].strip().strip('"').strip("'")
+                    log.info("Clé OpenAI chargée depuis .env")
+                    break
+
 try:
     from openai import OpenAI
-    client = OpenAI()  # Utilise OPENAI_API_KEY + base_url de l'environnement
+    _api_key = os.environ.get("OPENAI_API_KEY")
+    if not _api_key:
+        raise RuntimeError(
+            "OPENAI_API_KEY non définie.\n"
+            "Solutions :\n"
+            "  1. export OPENAI_API_KEY=sk-...  && python3 extract_pico_batch.py\n"
+            "  2. OPENAI_API_KEY=sk-... python3 extract_pico_batch.py\n"
+            "  3. Ajouter OPENAI_API_KEY=sk-... dans /opt/literev-api/.env"
+        )
+    client = OpenAI(api_key=_api_key)
     OPENAI_AVAILABLE = True
 except ImportError:
     OPENAI_AVAILABLE = False
     log.warning("openai non installé — pip3 install openai")
+except RuntimeError as e:
+    log.error(str(e))
+    sys.exit(1)
 
 # ── Prompt PICO ───────────────────────────────────────────────────────────────
 SYSTEM_PROMPT = """You are a systematic review expert specializing in emergency medicine, 
