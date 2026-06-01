@@ -1559,6 +1559,8 @@ export interface ScenarioRagResponse {
   model?: string;
 }
 
+export type ScenarioRagSource = ScenarioRagResponse['sources'][number];
+
 export interface ScenarioPrisma {
   scenario_id: string;
   scenario_title: string;
@@ -1830,6 +1832,240 @@ export interface EvidenceBriefData {
 
 export async function fetchEvidenceBrief(scenarioId: string): Promise<EvidenceBriefData> {
   const r = await fetch(`${API_BASE_URL}/gesica/scenarios/${scenarioId}/evidence-brief`);
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  return r.json();
+}
+
+// ─── Knowledge Graph (co-citations / similarité cosinus) ─────────────────────
+
+export interface KGNode {
+  id: number;
+  title: string;
+  year: number | null;
+  journal: string | null;
+  design: string;
+  quality: number;
+  cluster: number;
+  degree: number;
+}
+
+export interface KGEdge {
+  source: number;
+  target: number;
+  weight: number;
+}
+
+export interface KGCluster {
+  id: number;
+  size: number;
+  years: number[];
+  designs: string[];
+  top_articles: string[];
+}
+
+export interface KnowledgeGraphData {
+  scenario_id: string;
+  n_nodes: number;
+  n_edges: number;
+  n_clusters: number;
+  min_similarity: number;
+  nodes: KGNode[];
+  edges: KGEdge[];
+  clusters: KGCluster[];
+}
+
+export async function fetchKnowledgeGraph(
+  scenarioId: string,
+  maxNodes = 80,
+  minSimilarity = 0.35,
+): Promise<KnowledgeGraphData> {
+  const r = await fetch(
+    `${API_BASE_URL}/gesica/scenarios/${scenarioId}/knowledge-graph?max_nodes=${maxNodes}&min_similarity=${minSimilarity}`,
+  );
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  return r.json();
+}
+
+// ─── Streaming RAG SSE ────────────────────────────────────────────────────────
+
+export interface RagStreamCallbacks {
+  onSources: (sources: ScenarioRagSource[]) => void;
+  onToken: (token: string) => void;
+  onDone: () => void;
+  onError: (err: string) => void;
+}
+
+export function askScenarioRagStream(
+  scenarioId: string,
+  question: string,
+  callbacks: RagStreamCallbacks,
+): () => void {
+  let aborted = false;
+  const controller = new AbortController();
+
+  (async () => {
+    try {
+      const resp = await fetch(`${API_BASE_URL}/ask/stream`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          question,
+          project_context: "gesica",
+          scenario_id: scenarioId,
+          top_k: 8,
+        }),
+        signal: controller.signal,
+      });
+
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      if (!resp.body) throw new Error("No response body");
+
+      const reader = resp.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+
+      while (!aborted) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() ?? "";
+
+        for (const line of lines) {
+          if (line.startsWith("event: sources")) continue;
+          if (line.startsWith("event: error")) continue;
+          if (line.startsWith("event: done")) {
+            callbacks.onDone();
+            return;
+          }
+          if (line.startsWith("data: ")) {
+            const raw = line.slice(6).trim();
+            if (!raw || raw === "{}") continue;
+            try {
+              const parsed = JSON.parse(raw);
+              if (parsed.token !== undefined) {
+                callbacks.onToken(parsed.token);
+              } else if (Array.isArray(parsed)) {
+                callbacks.onSources(parsed as ScenarioRagSource[]);
+              } else if (parsed.error) {
+                callbacks.onError(parsed.error);
+              }
+            } catch {}
+          }
+        }
+      }
+      callbacks.onDone();
+    } catch (e: any) {
+      if (!aborted) callbacks.onError(e.message ?? "Erreur streaming");
+    }
+  })();
+
+  return () => {
+    aborted = true;
+    controller.abort();
+  };
+}
+
+// ─── Double-aveugle screening + Kappa de Cohen ───────────────────────────────
+
+export interface KappaStats {
+  scenario_id: string;
+  n_evaluated: number;
+  kappa: number | null;
+  po_observed: number;
+  pe_expected: number;
+  interpretation: string;
+  conflicts: number;
+  agreements: Record<string, number>;
+  matrix: Record<string, Record<string, number>>;
+}
+
+export interface DoubleBlindDecision {
+  article_id: number;
+  reviewer: 1 | 2;
+  status: "included" | "excluded" | "pending";
+  reason?: string;
+}
+
+export async function submitDoubleBlindDecision(
+  scenarioId: string,
+  payload: DoubleBlindDecision,
+): Promise<{ id: number; agreement: boolean | null; final_status: string | null }> {
+  const r = await fetch(
+    `${API_BASE_URL}/gesica/scenarios/${scenarioId}/double-blind/decision`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    },
+  );
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  return r.json();
+}
+
+export async function fetchKappaStats(scenarioId: string): Promise<KappaStats> {
+  const r = await fetch(
+    `${API_BASE_URL}/gesica/scenarios/${scenarioId}/double-blind/kappa`,
+  );
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  return r.json();
+}
+
+export async function fetchDoubleBlindConflicts(
+  scenarioId: string,
+): Promise<any[]> {
+  const r = await fetch(
+    `${API_BASE_URL}/gesica/scenarios/${scenarioId}/double-blind/conflicts`,
+  );
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  return r.json();
+}
+
+// ─── Evidence Brief PDF côté serveur ─────────────────────────────────────────
+
+export function getEvidenceBriefPdfUrl(scenarioId: string): string {
+  return `${API_BASE_URL}/gesica/scenarios/${scenarioId}/evidence-brief/pdf`;
+}
+
+// ─── Alertes email ────────────────────────────────────────────────────────────
+
+export async function subscribeAlerts(
+  email: string,
+  scenarioId: string,
+  frequency: "daily" | "weekly" | "immediate" = "weekly",
+): Promise<{ status: string; message: string }> {
+  const r = await fetch(`${API_BASE_URL}/alerts/subscribe`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ email, scenario_id: scenarioId, frequency }),
+  });
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  return r.json();
+}
+
+export async function unsubscribeAlerts(
+  email: string,
+  scenarioId: string,
+): Promise<{ status: string }> {
+  const r = await fetch(
+    `${API_BASE_URL}/alerts/unsubscribe?email=${encodeURIComponent(email)}&scenario_id=${encodeURIComponent(scenarioId)}`,
+    { method: "DELETE" },
+  );
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  return r.json();
+}
+
+// ─── Living Review ────────────────────────────────────────────────────────────
+
+export async function triggerLivingReview(
+  scenarioId?: string,
+  dryRun = true,
+): Promise<{ status: string; message: string; scenarios: any[] }> {
+  const params = new URLSearchParams({ dry_run: String(dryRun) });
+  if (scenarioId) params.set("scenario_id", scenarioId);
+  const r = await fetch(`${API_BASE_URL}/gesica/living-review/trigger?${params}`, {
+    method: "POST",
+  });
   if (!r.ok) throw new Error(`HTTP ${r.status}`);
   return r.json();
 }

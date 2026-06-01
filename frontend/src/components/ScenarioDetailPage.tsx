@@ -5,7 +5,8 @@ import {
   Layers, MessageSquare, RefreshCw, RotateCcw, Search,
   Shield, Terminal, Zap, AlertTriangle,
   Globe, Upload, CheckCircle2, AlertCircle, Info,
-  Microscope, Loader2, Download, Table2, BookOpen
+  Microscope, Loader2, Download, Table2, BookOpen,
+  Network, Bell, Users, Rss
 } from "lucide-react";
 import {
   fetchScenarioDetail,
@@ -13,13 +14,19 @@ import {
   fetchScenarioModelStatus,
   runScenarioModel,
   fetchScenarioClustering,
-  askScenarioRag,
+  askScenarioRagStream,
   fetchScenarioPrisma,
   uploadScenarioDataset,
   screenArticle,
   fetchArticlePico,
   fetchScenarioPicoBulk,
   fetchEvidenceBrief,
+  fetchKnowledgeGraph,
+  fetchKappaStats,
+  fetchDoubleBlindConflicts,
+  submitDoubleBlindDecision,
+  subscribeAlerts,
+  triggerLivingReview,
   type ScenarioDetail,
   type ScenarioCorpus,
   type ModelStatus,
@@ -32,6 +39,9 @@ import {
   type PicoData,
   type PicoBulkResponse,
   type EvidenceBriefData,
+  type KnowledgeGraphData,
+  type KGNode,
+  type KappaStats,
 } from "../lib/api";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -1376,22 +1386,47 @@ function UmapScatterPlot({clusters,selectedCluster,onSelectCluster}:{clusters:Cl
 
 function RagSection({ scenarioId, detail }: { scenarioId: string; detail: ScenarioDetail }) {
   const [question, setQuestion] = useState("");
-  const [loading, setLoading] = useState(false);
-  const [result, setResult] = useState<ScenarioRagResponse | null>(null);
+  const [streaming, setStreaming] = useState(false);
+  const [streamedText, setStreamedText] = useState("");
+  const [sources, setSources] = useState<ScenarioRagResponse['sources']>([]);
   const [error, setError] = useState<string | null>(null);
+  const [done, setDone] = useState(false);
+  const cancelRef = useRef<(() => void) | null>(null);
+  const answerRef = useRef<HTMLDivElement>(null);
 
-  const ask = async (qText: string) => {
-    if (!qText.trim()) return;
-    setLoading(true);
+  const ask = (qText: string) => {
+    if (!qText.trim() || streaming) return;
+    // Cancel previous
+    if (cancelRef.current) cancelRef.current();
+    setStreaming(true);
+    setStreamedText("");
+    setSources([]);
     setError(null);
-    try {
-      const res = await askScenarioRag(scenarioId, qText);
-      setResult(res);
-    } catch (e: any) {
-      setError(e.message);
-    } finally {
-      setLoading(false);
-    }
+    setDone(false);
+
+    const cancel = askScenarioRagStream(scenarioId, qText, {
+      onSources: (s) => setSources(s),
+      onToken: (t) => {
+        setStreamedText(prev => prev + t);
+        // Auto-scroll
+        if (answerRef.current) {
+          answerRef.current.scrollTop = answerRef.current.scrollHeight;
+        }
+      },
+      onDone: () => { setStreaming(false); setDone(true); },
+      onError: (e) => { setError(e); setStreaming(false); },
+    });
+    cancelRef.current = cancel;
+  };
+
+  const reset = () => {
+    if (cancelRef.current) cancelRef.current();
+    setStreamedText("");
+    setSources([]);
+    setError(null);
+    setDone(false);
+    setStreaming(false);
+    setQuestion("");
   };
 
   const suggestedQuestions = detail.nl_queries.slice(0, 3);
@@ -1401,22 +1436,19 @@ function RagSection({ scenarioId, detail }: { scenarioId: string; detail: Scenar
       <SectionHeader
         icon={<MessageSquare size={14} className="text-brand-400" />}
         title="Assistant Scientifique RAG Dédié"
-        subtitle="Posez des questions directement sur le corpus validé de ce scénario"
+        subtitle="Réponses en temps réel avec streaming · Sources issues du corpus validé"
       />
 
       {/* Questions suggérées */}
-      {suggestedQuestions.length > 0 && (
+      {suggestedQuestions.length > 0 && !streamedText && !streaming && (
         <div className="space-y-2">
           <p className="text-[10px] font-bold uppercase tracking-wider text-white/35">Questions cliniques suggérées</p>
           <div className="flex flex-wrap gap-2">
             {suggestedQuestions.map((q, i) => (
               <button
                 key={i}
-                onClick={() => {
-                  setQuestion(q);
-                  ask(q);
-                }}
-                disabled={loading}
+                onClick={() => { setQuestion(q); ask(q); }}
+                disabled={streaming}
                 className="text-left rounded-xl border border-white/5 bg-white/2 hover:bg-white/5 px-3 py-2 text-xs text-white/70 hover:text-white transition disabled:opacity-50"
               >
                 {q}
@@ -1434,69 +1466,80 @@ function RagSection({ scenarioId, detail }: { scenarioId: string; detail: Scenar
           onChange={(e) => setQuestion(e.target.value)}
           onKeyDown={(e) => e.key === "Enter" && ask(question)}
           placeholder="Posez votre question clinique ou opérationnelle..."
-          disabled={loading}
+          disabled={streaming}
           className="flex-1 rounded-xl border border-white/10 bg-white/5 px-4 py-2.5 text-xs text-white focus:outline-none focus:border-brand-500/50 transition disabled:opacity-50"
         />
-        <button
-          onClick={() => ask(question)}
-          disabled={loading || !question.trim()}
-          className="rounded-xl bg-brand-500 hover:bg-brand-400 text-forest-950 font-semibold px-4 text-xs transition disabled:opacity-50 shrink-0"
-        >
-          Poser
-        </button>
+        {streaming ? (
+          <button onClick={reset}
+            className="rounded-xl bg-rose-500/20 border border-rose-500/30 hover:bg-rose-500/30 text-rose-300 font-semibold px-4 text-xs transition shrink-0"
+          >Arrêter</button>
+        ) : (
+          <button
+            onClick={() => ask(question)}
+            disabled={!question.trim()}
+            className="rounded-xl bg-brand-500 hover:bg-brand-400 text-forest-950 font-semibold px-4 text-xs transition disabled:opacity-50 shrink-0"
+          >Poser</button>
+        )}
       </div>
 
-      {loading && (
-        <div className="rounded-2xl border border-brand-500/15 bg-brand-500/5 p-4 space-y-3">
-          <div className="flex items-center gap-2 text-xs text-brand-300">
-            <Loader2 size={12} className="animate-spin"/>
-            <span>Recherche sémantique en cours...</span>
-          </div>
-          <div className="space-y-1.5">
-            {['Analyse de la question clinique','Recherche vectorielle dans le corpus','Sélection des sources pertinentes','Génération de la réponse'].map((step,i)=>(
-              <div key={i} className="flex items-center gap-2 text-[10px] text-white/40">
-                <div className="h-1 w-1 rounded-full bg-brand-400 animate-pulse" style={{animationDelay:`${i*0.3}s`}}/>
-                {step}
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
       {error && <ErrorBox message={error} />}
 
-      {result && !loading && (
+      {(streaming || streamedText) && (
         <div className="grid grid-cols-1 gap-6 lg:grid-cols-3 border-t border-white/5 pt-5">
-          {/* Réponse */}
+          {/* Réponse streaming */}
           <div className="lg:col-span-2 space-y-3">
-            <p className="text-[10px] font-bold uppercase tracking-wider text-white/50">Réponse de l'Assistant</p>
-            <div className="rounded-2xl border border-white/5 bg-white/2 p-4 text-xs text-white/80 leading-6 whitespace-pre-wrap">
-              {result.answer}
+            <div className="flex items-center justify-between">
+              <p className="text-[10px] font-bold uppercase tracking-wider text-white/50">Réponse de l'Assistant</p>
+              {streaming && (
+                <div className="flex items-center gap-1.5 text-[10px] text-brand-300">
+                  <span className="h-1.5 w-1.5 rounded-full bg-brand-400 animate-pulse"/>
+                  Génération en cours...
+                </div>
+              )}
+              {done && (
+                <button onClick={reset} className="text-[10px] text-white/30 hover:text-white transition">Nouvelle question</button>
+              )}
             </div>
-            {result.model && (
-              <p className="text-[10px] text-white/35 font-mono text-right">Généré via {result.model}</p>
-            )}
+            <div
+              ref={answerRef}
+              className="rounded-2xl border border-white/5 bg-white/2 p-4 text-xs text-white/80 leading-6 whitespace-pre-wrap max-h-[400px] overflow-y-auto"
+            >
+              {streamedText}
+              {streaming && <span className="inline-block w-0.5 h-3 bg-brand-400 animate-pulse ml-0.5 align-middle"/>}
+            </div>
           </div>
 
           {/* Sources citées */}
-          <div className="space-y-3">
-            <p className="text-[10px] font-bold uppercase tracking-wider text-white/50">Sources scientifiques citées</p>
-            <div className="space-y-2 max-h-[300px] overflow-y-auto pr-1">
-              {result.sources.map((src, i) => (
-                <div key={i} className="rounded-xl border border-white/5 bg-white/3 p-2.5 text-xs">
-                  <div className="flex items-center justify-between gap-2">
-                    <span className="rounded bg-brand-500/10 border border-brand-500/20 px-1.5 py-0.5 text-[9px] text-brand-300 font-mono">
-                      SOURCE {i + 1}
-                    </span>
-                    <span className="text-[10px] text-white/35 font-mono">Pertinence: {(src.score * 100).toFixed(0)}%</span>
+          {sources.length > 0 && (
+            <div className="space-y-3">
+              <p className="text-[10px] font-bold uppercase tracking-wider text-white/50">Sources scientifiques citées</p>
+              <div className="space-y-2 max-h-[400px] overflow-y-auto pr-1">
+                {sources.map((src, i) => (
+                  <div key={i} className="rounded-xl border border-white/5 bg-white/3 p-2.5 text-xs">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="rounded bg-brand-500/10 border border-brand-500/20 px-1.5 py-0.5 text-[9px] text-brand-300 font-mono">
+                        SOURCE {i + 1}
+                      </span>
+                      <span className="text-[10px] text-white/35 font-mono">Pertinence: {(src.score * 100).toFixed(0)}%</span>
+                    </div>
+                    <h5 className="font-semibold text-white mt-1.5 leading-4 line-clamp-2">{src.title}</h5>
+                    <p className="text-[10px] text-white/35 mt-1 truncate">
+                      {src.authors} • {src.year || "N/A"}
+                    </p>
                   </div>
-                  <h5 className="font-semibold text-white mt-1.5 leading-4 line-clamp-2">{src.title}</h5>
-                  <p className="text-[10px] text-white/35 mt-1 truncate">
-                    {src.authors} • {src.year || "N/A"}
-                  </p>
-                </div>
-              ))}
+                ))}
+              </div>
             </div>
-          </div>
+          )}
+          {streaming && sources.length === 0 && (
+            <div className="space-y-2">
+              <p className="text-[10px] font-bold uppercase tracking-wider text-white/50">Sources scientifiques citées</p>
+              <div className="rounded-xl border border-white/5 bg-white/2 p-3 text-center text-[10px] text-white/30">
+                <Loader2 size={12} className="animate-spin mx-auto mb-1"/>
+                Chargement des sources...
+              </div>
+            </div>
+          )}
         </div>
       )}
     </div>
@@ -2202,20 +2245,538 @@ ${data.top_articles.slice(0,8).map((a,i)=>`
   );
 }
 
+// ─── Section: Knowledge Graph (co-citations) ─────────────────────────────────
+
+function KnowledgeGraphSection({ scenarioId }: { scenarioId: string }) {
+  const [data, setData] = React.useState<KnowledgeGraphData | null>(null);
+  const [loading, setLoading] = React.useState(true);
+  const [error, setError] = React.useState<string | null>(null);
+  const [hoveredNode, setHoveredNode] = React.useState<number | null>(null);
+  const [selectedNode, setSelectedNode] = React.useState<number | null>(null);
+  const [tooltip, setTooltip] = React.useState<{x:number;y:number;node:KGNode}|null>(null);
+  const [minSim, setMinSim] = React.useState(0.35);
+
+  React.useEffect(() => {
+    setLoading(true);
+    fetchKnowledgeGraph(scenarioId, 80, minSim)
+      .then(setData)
+      .catch(e => setError(e.message))
+      .finally(() => setLoading(false));
+  }, [scenarioId, minSim]);
+
+  if (loading) return <LoadingSpinner text="Calcul du graphe de connaissances..." />;
+  if (error || !data) return <ErrorBox message={error ?? "Erreur Knowledge Graph"} />;
+  if (!data.nodes.length) return <div className="text-xs text-white/40 p-4">Aucun article avec embeddings disponible.</div>;
+
+  const W = 700, H = 500;
+  const CLUSTER_COLORS = [
+    "#22c55e","#38bdf8","#a78bfa","#fb923c","#f472b6",
+    "#34d399","#fbbf24","#60a5fa","#e879f9","#4ade80",
+  ];
+  const PASTEL = [
+    "rgba(34,197,94,0.08)","rgba(56,189,248,0.08)","rgba(167,139,250,0.08)",
+    "rgba(251,146,60,0.08)","rgba(244,114,182,0.08)","rgba(52,211,153,0.08)",
+    "rgba(251,191,36,0.08)","rgba(96,165,250,0.08)","rgba(232,121,249,0.08)",
+  ];
+
+  // Force-directed layout simulation (static, pre-computed)
+  // Use cluster assignment to position nodes in cluster groups
+  const clusterCenters: Record<number, {x:number;y:number}> = {};
+  const uniqueClusters = [...new Set(data.nodes.map(n => n.cluster))];
+  uniqueClusters.forEach((cid, i) => {
+    const angle = (2 * Math.PI * i) / uniqueClusters.length - Math.PI / 2;
+    const r = Math.min(W, H) * 0.3;
+    clusterCenters[cid] = { x: W/2 + r * Math.cos(angle), y: H/2 + r * Math.sin(angle) };
+  });
+
+  // Position nodes around their cluster center with jitter based on degree
+  const nodePositions: Record<number, {x:number;y:number}> = {};
+  const clusterNodeCounts: Record<number, number> = {};
+  data.nodes.forEach(n => { clusterNodeCounts[n.cluster] = (clusterNodeCounts[n.cluster] || 0) + 1; });
+  const clusterNodeIdx: Record<number, number> = {};
+  data.nodes.forEach(n => {
+    const idx = clusterNodeIdx[n.cluster] || 0;
+    clusterNodeIdx[n.cluster] = idx + 1;
+    const count = clusterNodeCounts[n.cluster];
+    const center = clusterCenters[n.cluster] || {x: W/2, y: H/2};
+    const spread = Math.min(80, 20 + count * 4);
+    const angle2 = (2 * Math.PI * idx) / count;
+    const r2 = spread * (0.3 + 0.7 * (idx / count));
+    nodePositions[n.id] = {
+      x: Math.max(20, Math.min(W-20, center.x + r2 * Math.cos(angle2))),
+      y: Math.max(20, Math.min(H-20, center.y + r2 * Math.sin(angle2))),
+    };
+  });
+
+  const nodeMap = new Map(data.nodes.map(n => [n.id, n]));
+  const maxDegree = Math.max(1, ...data.nodes.map(n => n.degree));
+
+  const isActive = (nodeId: number) => {
+    if (!selectedNode) return true;
+    if (nodeId === selectedNode) return true;
+    return data.edges.some(e =>
+      (e.source === nodeId || e.target === nodeId) &&
+      (e.source === selectedNode || e.target === selectedNode)
+    );
+  };
+
+  const selectedNodeData = selectedNode ? nodeMap.get(selectedNode) : null;
+
+  return (
+    <div className="space-y-4">
+      <SectionHeader
+        icon={<Network size={14} className="text-brand-400" />}
+        title="Knowledge Graph — Réseau de Co-citations"
+        subtitle={`${data.n_nodes} articles · ${data.n_edges} connexions · ${data.n_clusters} groupes thématiques · similarité cosinus sur embeddings`}
+      />
+
+      {/* Contrôles */}
+      <div className="flex flex-wrap items-center gap-4">
+        <div className="flex items-center gap-2 text-xs text-white/50">
+          <span>Seuil similarité :</span>
+          <input type="range" min={0.2} max={0.7} step={0.05} value={minSim}
+            onChange={e => setMinSim(parseFloat(e.target.value))}
+            className="w-28 accent-brand-500"
+          />
+          <span className="font-mono text-brand-300">{minSim.toFixed(2)}</span>
+        </div>
+        <div className="flex flex-wrap gap-2">
+          {uniqueClusters.slice(0,5).map((cid, i) => (
+            <button key={cid}
+              onClick={() => setSelectedNode(null)}
+              className="flex items-center gap-1.5 rounded-lg border border-white/10 bg-white/3 px-2 py-1 text-[10px] text-white/50 hover:text-white transition"
+            >
+              <span className="h-2 w-2 rounded-full" style={{background: CLUSTER_COLORS[i % CLUSTER_COLORS.length]}}/>
+              Groupe {cid + 1} ({data.clusters.find(c => c.id === cid)?.size || 0} articles)
+            </button>
+          ))}
+        </div>
+      </div>
+
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+        {/* SVG Graph */}
+        <div className="lg:col-span-2">
+          <svg width="100%" viewBox={`0 0 ${W} ${H}`}
+            className="bg-[#070f0a] rounded-2xl border border-white/5 overflow-visible"
+            style={{maxHeight: 500}}
+          >
+            <defs>
+              <filter id="kg-glow"><feGaussianBlur stdDeviation="3" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+              <filter id="kg-glow-sm"><feGaussianBlur stdDeviation="1.5" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+              {uniqueClusters.map((cid, i) => (
+                <radialGradient key={cid} id={`kg-rg-${cid}`} cx="50%" cy="50%" r="50%">
+                  <stop offset="0%" stopColor={CLUSTER_COLORS[i % CLUSTER_COLORS.length]} stopOpacity="0.9"/>
+                  <stop offset="100%" stopColor={CLUSTER_COLORS[i % CLUSTER_COLORS.length]} stopOpacity="0.3"/>
+                </radialGradient>
+              ))}
+            </defs>
+
+            {/* Cluster halos */}
+            {uniqueClusters.map((cid, i) => {
+              const center = clusterCenters[cid];
+              const count = clusterNodeCounts[cid] || 1;
+              const r = Math.min(90, 30 + count * 5);
+              return (
+                <ellipse key={cid}
+                  cx={center.x} cy={center.y}
+                  rx={r * 1.4} ry={r}
+                  fill={PASTEL[i % PASTEL.length]}
+                  stroke={CLUSTER_COLORS[i % CLUSTER_COLORS.length]}
+                  strokeWidth="0.5" strokeOpacity="0.3"
+                />
+              );
+            })}
+
+            {/* Edges */}
+            {data.edges.map((e, i) => {
+              const pa = nodePositions[e.source];
+              const pb = nodePositions[e.target];
+              if (!pa || !pb) return null;
+              const active = isActive(e.source) && isActive(e.target);
+              const highlighted = selectedNode && (e.source === selectedNode || e.target === selectedNode);
+              return (
+                <line key={i}
+                  x1={pa.x} y1={pa.y} x2={pb.x} y2={pb.y}
+                  stroke={highlighted ? "rgba(255,255,255,0.4)" : "rgba(255,255,255,0.06)"}
+                  strokeWidth={highlighted ? e.weight * 2 : e.weight * 0.5}
+                  opacity={active ? 1 : 0.1}
+                />
+              );
+            })}
+
+            {/* Nodes */}
+            {data.nodes.map(n => {
+              const pos = nodePositions[n.id];
+              if (!pos) return null;
+              const ci = uniqueClusters.indexOf(n.cluster);
+              const color = CLUSTER_COLORS[ci % CLUSTER_COLORS.length];
+              const r = Math.max(4, Math.min(12, 3 + (n.degree / maxDegree) * 9));
+              const active = isActive(n.id);
+              const sel = selectedNode === n.id;
+              const hov = hoveredNode === n.id;
+              return (
+                <g key={n.id}
+                  className="cursor-pointer"
+                  onClick={() => setSelectedNode(sel ? null : n.id)}
+                  onMouseEnter={_e => { setHoveredNode(n.id); setTooltip({x: pos.x, y: pos.y, node: n}); }}
+                  onMouseLeave={() => { setHoveredNode(null); setTooltip(null); }}
+                >
+                  {(sel || hov) && <circle cx={pos.x} cy={pos.y} r={r + 6} fill={color} opacity={0.15}/>}
+                  {sel && <circle cx={pos.x} cy={pos.y} r={r + 4} fill="none" stroke={color} strokeWidth="1.5" strokeDasharray="3,2" opacity={0.7}/>}
+                  <circle
+                    cx={pos.x} cy={pos.y} r={sel || hov ? r + 2 : r}
+                    fill={`url(#kg-rg-${n.cluster})`}
+                    stroke={sel ? "#fff" : color}
+                    strokeWidth={sel ? 1.5 : 0.8}
+                    opacity={active ? 1 : 0.15}
+                    filter={(sel || hov) ? "url(#kg-glow)" : undefined}
+                  />
+                </g>
+              );
+            })}
+
+            {/* Tooltip */}
+            {tooltip && (() => {
+              const n = tooltip.node;
+              const x = tooltip.x;
+              const y = tooltip.y;
+              const title = (n.title || '').slice(0, 50);
+              const meta = `${n.year || 'N/A'} · ${n.design} · ${n.degree} connexions`;
+              const tw = Math.max(title.length, meta.length) * 4.5 + 16;
+              const tx = Math.max(tw/2 + 4, Math.min(W - tw/2 - 4, x));
+              const ty = y - 30;
+              return (
+                <g>
+                  <rect x={tx - tw/2} y={ty - 22} width={tw} height={28}
+                    rx="5" fill="rgba(7,15,10,0.95)" stroke="rgba(255,255,255,0.15)" strokeWidth="0.8"/>
+                  <text x={tx} y={ty - 10} textAnchor="middle" fontSize="7.5" fill="rgba(255,255,255,0.9)"
+                    className="pointer-events-none select-none" fontWeight="600">{title}</text>
+                  <text x={tx} y={ty + 1} textAnchor="middle" fontSize="6.5" fill="rgba(255,255,255,0.45)"
+                    className="pointer-events-none select-none">{meta}</text>
+                </g>
+              );
+            })()}
+          </svg>
+        </div>
+
+        {/* Panel latéral */}
+        <div className="space-y-3">
+          {selectedNodeData ? (
+            <div className="rounded-2xl border border-white/10 bg-white/3 p-4 space-y-3">
+              <div className="flex items-start justify-between gap-2">
+                <p className="text-xs font-bold text-white leading-4">{selectedNodeData.title}</p>
+                <button onClick={() => setSelectedNode(null)} className="text-white/30 hover:text-white text-xs shrink-0">✕</button>
+              </div>
+              <div className="space-y-1.5 text-[10px] text-white/50">
+                <div className="flex justify-between"><span>Année</span><span className="text-white/70">{selectedNodeData.year || 'N/A'}</span></div>
+                <div className="flex justify-between"><span>Journal</span><span className="text-white/70 text-right max-w-[120px] truncate">{selectedNodeData.journal || '—'}</span></div>
+                <div className="flex justify-between"><span>Type étude</span><span className="rounded bg-brand-500/10 border border-brand-500/20 px-1 text-brand-300">{selectedNodeData.design}</span></div>
+                <div className="flex justify-between"><span>Connexions</span><span className="text-brand-300 font-semibold">{selectedNodeData.degree}</span></div>
+                <div className="flex justify-between"><span>Qualité</span><span className="text-gold-400 font-semibold">{selectedNodeData.quality > 0 ? Math.round(selectedNodeData.quality * 100) + '%' : '—'}</span></div>
+              </div>
+            </div>
+          ) : (
+            <div className="rounded-2xl border border-white/5 bg-white/2 p-4 text-center">
+              <Network size={20} className="text-white/20 mx-auto mb-2"/>
+              <p className="text-[10px] text-white/35">Cliquez sur un nœud pour voir les détails de l'article</p>
+            </div>
+          )}
+
+          {/* Légende clusters */}
+          <div className="rounded-2xl border border-white/5 bg-white/2 p-3 space-y-2">
+            <p className="text-[10px] font-bold uppercase tracking-wider text-white/40">Groupes thématiques</p>
+            {data.clusters.slice(0, 6).map((c, i) => (
+              <div key={c.id} className="flex items-center justify-between text-[10px]">
+                <div className="flex items-center gap-1.5">
+                  <span className="h-2 w-2 rounded-full shrink-0" style={{background: CLUSTER_COLORS[i % CLUSTER_COLORS.length]}}/>
+                  <span className="text-white/60">Groupe {c.id + 1}</span>
+                </div>
+                <span className="text-white/40 font-mono">{c.size} articles</span>
+              </div>
+            ))}
+          </div>
+
+          {/* Stats */}
+          <div className="grid grid-cols-2 gap-2">
+            {[
+              {label: 'Articles', value: data.n_nodes},
+              {label: 'Connexions', value: data.n_edges},
+              {label: 'Groupes', value: data.n_clusters},
+              {label: 'Seuil', value: data.min_similarity.toFixed(2)},
+            ].map(s => (
+              <div key={s.label} className="rounded-xl border border-white/5 bg-white/2 p-2 text-center">
+                <div className="text-sm font-bold text-brand-300">{s.value}</div>
+                <div className="text-[9px] text-white/35">{s.label}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── Section: Double-aveugle Screening + Kappa ────────────────────────────────
+
+function DoubleBlindSection({ scenarioId }: { scenarioId: string }) {
+  const [kappa, setKappa] = React.useState<KappaStats | null>(null);
+  const [conflicts, setConflicts] = React.useState<any[]>([]);
+  const [loading, setLoading] = React.useState(true);
+  const [reviewer, setReviewer] = React.useState<1|2>(1);
+  const [submitting, setSubmitting] = React.useState<number|null>(null);
+
+  const reload = React.useCallback(() => {
+    setLoading(true);
+    Promise.all([
+      fetchKappaStats(scenarioId),
+      fetchDoubleBlindConflicts(scenarioId),
+    ]).then(([k, c]) => { setKappa(k); setConflicts(c); })
+      .catch(() => {})
+      .finally(() => setLoading(false));
+  }, [scenarioId]);
+
+  React.useEffect(() => { reload(); }, [reload]);
+
+  const decide = async (articleId: number, status: "included"|"excluded") => {
+    setSubmitting(articleId);
+    try {
+      await submitDoubleBlindDecision(scenarioId, { article_id: articleId, reviewer, status });
+      reload();
+    } catch (e: any) {
+      alert(e.message);
+    } finally {
+      setSubmitting(null);
+    }
+  };
+
+  if (loading) return <LoadingSpinner text="Chargement du screening double-aveugle..." />;
+
+  const kappaColor = !kappa?.kappa ? 'text-white/40'
+    : kappa.kappa >= 0.61 ? 'text-brand-300'
+    : kappa.kappa >= 0.41 ? 'text-gold-400'
+    : 'text-rose-300';
+
+  return (
+    <div className="space-y-5">
+      <SectionHeader
+        icon={<Users size={14} className="text-brand-400" />}
+        title="Screening Double-Aveugle"
+        subtitle="Évaluation indépendante par deux reviewers avec calcul du score Kappa de Cohen"
+      />
+
+      {/* Sélecteur reviewer */}
+      <div className="flex items-center gap-3">
+        <span className="text-xs text-white/50">Vous êtes :</span>
+        {([1, 2] as const).map(r => (
+          <button key={r} onClick={() => setReviewer(r)}
+            className={`px-3 py-1.5 rounded-xl text-xs font-semibold transition border ${
+              reviewer === r
+                ? 'bg-brand-500/20 text-brand-300 border-brand-500/30'
+                : 'bg-white/3 text-white/50 border-white/10 hover:text-white'
+            }`}
+          >Reviewer {r}</button>
+        ))}
+      </div>
+
+      {/* Score Kappa */}
+      {kappa && (
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+          {[
+            {label: 'Articles évalués', value: kappa.n_evaluated, color: 'text-white'},
+            {label: 'Score Kappa', value: kappa.kappa != null ? kappa.kappa.toFixed(3) : 'N/A', color: kappaColor},
+            {label: 'Accord observé', value: kappa.po_observed != null ? Math.round(kappa.po_observed * 100) + '%' : 'N/A', color: 'text-brand-300'},
+            {label: 'Conflits', value: kappa.conflicts, color: kappa.conflicts > 0 ? 'text-gold-400' : 'text-white/40'},
+          ].map(s => (
+            <div key={s.label} className="rounded-2xl border border-white/5 bg-white/3 p-3 text-center">
+              <div className={`text-xl font-bold ${s.color}`}>{s.value}</div>
+              <div className="text-[10px] text-white/35 mt-0.5">{s.label}</div>
+            </div>
+          ))}
+        </div>
+      )}
+      {kappa?.kappa != null && (
+        <div className="rounded-xl border border-white/5 bg-white/2 p-3 flex items-center gap-3">
+          <div className={`text-sm font-bold ${kappaColor}`}>{kappa.kappa.toFixed(3)}</div>
+          <div>
+            <div className="text-xs font-semibold text-white/70">{kappa.interpretation}</div>
+            <div className="text-[10px] text-white/35">Accord attendu par hasard : {Math.round((kappa.pe_expected || 0) * 100)}%</div>
+          </div>
+        </div>
+      )}
+      {kappa?.n_evaluated === 0 && (
+        <div className="rounded-xl border border-gold-500/20 bg-gold-500/5 p-3 text-xs text-gold-300">
+          Aucune évaluation double-aveugle n'a encore été soumise. Commencez à évaluer les articles dans la section Corpus.
+        </div>
+      )}
+
+      {/* Conflits */}
+      {conflicts.length > 0 && (
+        <div className="space-y-3">
+          <p className="text-[10px] font-bold uppercase tracking-wider text-gold-400">
+            {conflicts.length} conflit(s) à résoudre
+          </p>
+          <div className="space-y-2 max-h-[400px] overflow-y-auto">
+            {conflicts.map(art => (
+              <div key={art.id} className="rounded-xl border border-gold-500/20 bg-gold-500/5 p-3 space-y-2">
+                <p className="text-xs font-semibold text-white/80 leading-4">{art.title}</p>
+                <div className="flex items-center gap-4 text-[10px] text-white/50">
+                  <span>Reviewer 1 : <span className={art.reviewer_1_status === 'included' ? 'text-brand-300' : 'text-rose-300'}>{art.reviewer_1_status}</span></span>
+                  <span>Reviewer 2 : <span className={art.reviewer_2_status === 'included' ? 'text-brand-300' : 'text-rose-300'}>{art.reviewer_2_status}</span></span>
+                </div>
+                <div className="flex gap-2">
+                  <button onClick={() => decide(art.id, 'included')} disabled={submitting === art.id}
+                    className="flex-1 rounded-lg bg-brand-500/20 border border-brand-500/30 text-brand-300 text-[10px] py-1.5 hover:bg-brand-500/30 transition disabled:opacity-50"
+                  >Inclure (arbitrage)</button>
+                  <button onClick={() => decide(art.id, 'excluded')} disabled={submitting === art.id}
+                    className="flex-1 rounded-lg bg-rose-500/10 border border-rose-500/20 text-rose-300 text-[10px] py-1.5 hover:bg-rose-500/20 transition disabled:opacity-50"
+                  >Exclure (arbitrage)</button>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── Section: Alertes & Living Review ────────────────────────────────────────
+
+function AlertsSection({ scenarioId }: { scenarioId: string }) {
+  const [email, setEmail] = React.useState('');
+  const [frequency, setFrequency] = React.useState<'daily'|'weekly'|'immediate'>('weekly');
+  const [subscribed, setSubscribed] = React.useState(false);
+  const [subscribing, setSubscribing] = React.useState(false);
+  const [lrStatus, setLrStatus] = React.useState<any>(null);
+  const [lrLoading, setLrLoading] = React.useState(false);
+
+  const handleSubscribe = async () => {
+    if (!email.trim()) return;
+    setSubscribing(true);
+    try {
+      await subscribeAlerts(email, scenarioId, frequency);
+      setSubscribed(true);
+    } catch (e: any) {
+      alert(e.message);
+    } finally {
+      setSubscribing(false);
+    }
+  };
+
+  const handleDryRun = async () => {
+    setLrLoading(true);
+    try {
+      const res = await triggerLivingReview(scenarioId, true);
+      setLrStatus(res);
+    } catch (e: any) {
+      alert(e.message);
+    } finally {
+      setLrLoading(false);
+    }
+  };
+
+  return (
+    <div className="space-y-6">
+      <SectionHeader
+        icon={<Bell size={14} className="text-brand-400" />}
+        title="Alertes & Living Review"
+        subtitle="Abonnez-vous aux nouvelles publications et gérez le pipeline de mise à jour automatique"
+      />
+
+      {/* Alertes email */}
+      <div className="rounded-3xl border border-white/10 bg-white/3 p-5 space-y-4">
+        <div className="flex items-center gap-2">
+          <Bell size={13} className="text-gold-400"/>
+          <h4 className="text-sm font-semibold text-white">Alertes email</h4>
+        </div>
+        <p className="text-xs text-white/50">Recevez une notification quand de nouveaux articles sont ajoutés à ce scénario.</p>
+        {subscribed ? (
+          <div className="rounded-xl border border-brand-500/20 bg-brand-500/5 p-3 flex items-center gap-2 text-xs text-brand-300">
+            <CheckCircle2 size={13}/>
+            Abonnement confirmé pour <strong>{email}</strong> — fréquence : {frequency}
+          </div>
+        ) : (
+          <div className="space-y-3">
+            <input
+              type="email" value={email} onChange={e => setEmail(e.target.value)}
+              placeholder="votre@email.com"
+              className="w-full rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-xs text-white focus:outline-none focus:border-brand-500/50"
+            />
+            <div className="flex gap-2">
+              {(['immediate','daily','weekly'] as const).map(f => (
+                <button key={f} onClick={() => setFrequency(f)}
+                  className={`px-3 py-1.5 rounded-lg text-[10px] font-medium transition border ${
+                    frequency === f
+                      ? 'bg-brand-500/20 text-brand-300 border-brand-500/30'
+                      : 'bg-white/3 text-white/50 border-white/10 hover:text-white'
+                  }`}
+                >{f === 'immediate' ? 'Immédiat' : f === 'daily' ? 'Quotidien' : 'Hebdomadaire'}</button>
+              ))}
+            </div>
+            <button onClick={handleSubscribe} disabled={subscribing || !email.trim()}
+              className="flex items-center gap-2 rounded-xl bg-brand-500 hover:bg-brand-400 text-white font-semibold px-4 py-2 text-xs transition disabled:opacity-50"
+            >
+              {subscribing ? <Loader2 size={12} className="animate-spin"/> : <Bell size={12}/>}
+              S'abonner aux alertes
+            </button>
+          </div>
+        )}
+      </div>
+
+      {/* Living Review */}
+      <div className="rounded-3xl border border-white/10 bg-white/3 p-5 space-y-4">
+        <div className="flex items-center gap-2">
+          <Rss size={13} className="text-brand-400"/>
+          <h4 className="text-sm font-semibold text-white">Pipeline Living Review</h4>
+        </div>
+        <p className="text-xs text-white/50">
+          Le pipeline Living Review interroge automatiquement PubMed avec la requête booléenne de ce scénario,
+          insère les nouveaux articles, génère les embeddings et recalcule le clustering.
+        </p>
+        <div className="rounded-xl border border-white/5 bg-white/2 p-3 space-y-1.5 text-[10px] text-white/40">
+          {['Interrogation PubMed avec requête booléenne','Insertion des nouveaux articles','Génération des embeddings (text-embedding-3-small)','Déduplication automatique','Recalcul du clustering UMAP + HDBSCAN','Mise à jour des résumés de clusters'].map((step, i) => (
+            <div key={i} className="flex items-center gap-2">
+              <span className="h-1 w-1 rounded-full bg-brand-400"/>
+              {step}
+            </div>
+          ))}
+        </div>
+        <button onClick={handleDryRun} disabled={lrLoading}
+          className="flex items-center gap-2 rounded-xl border border-brand-500/30 bg-brand-500/10 hover:bg-brand-500/20 text-brand-300 font-semibold px-4 py-2 text-xs transition disabled:opacity-50"
+        >
+          {lrLoading ? <Loader2 size={12} className="animate-spin"/> : <RefreshCw size={12}/>}
+          Simuler (dry run)
+        </button>
+        {lrStatus && (
+          <div className="rounded-xl border border-brand-500/20 bg-brand-500/5 p-3 text-xs text-brand-300 space-y-1">
+            <div className="font-semibold">{lrStatus.message}</div>
+            {lrStatus.scenarios?.map((s: any, i: number) => (
+              <div key={i} className="text-[10px] text-white/50">• {s.title} — {s.action}</div>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 // ─── Main Component ───────────────────────────────────────────────────────────
 
-type SectionKey = "corpus" | "pico" | "prisma" | "rag" | "variables" | "model" | "clustering" | "brief" | "queries";
+type SectionKey = "corpus" | "pico" | "prisma" | "rag" | "variables" | "model" | "clustering" | "brief" | "queries" | "kg" | "screening" | "alerts";
 
 const SECTIONS: Array<{ key: SectionKey; label: string; icon: React.ReactNode }> = [
   { key: "corpus",     label: "Corpus",                   icon: <FileText size={13} /> },
   { key: "pico",       label: "PICO",                     icon: <Table2 size={13} /> },
   { key: "prisma",     label: "PRISMA",                   icon: <Shield size={13} /> },
+  { key: "screening",  label: "Double-Aveugle",           icon: <Users size={13} /> },
   { key: "rag",        label: "Evidence (RAG)",            icon: <MessageSquare size={13} /> },
   { key: "variables", label: "Données & Variables",       icon: <Database size={13} /> },
   { key: "model",     label: "Modèle prédictif",          icon: <Brain size={13} /> },
   { key: "clustering",label: "Clustering & Topics",       icon: <Layers size={13} /> },
+  { key: "kg",         label: "Knowledge Graph",           icon: <Network size={13} /> },
   { key: "brief",     label: "Evidence Brief",            icon: <BookOpen size={13} /> },
   { key: "queries",   label: "Stratégie de recherche",    icon: <Search size={13} /> },
+  { key: "alerts",    label: "Alertes & Living Review",   icon: <Bell size={13} /> },
 ];
 
 interface ScenarioDetailPageProps {
@@ -2318,9 +2879,12 @@ export function ScenarioDetailPage({ scenarioId, onBack }: ScenarioDetailPagePro
       {activeSection === "corpus" && <CorpusSection scenarioId={scenarioId} detail={detail} />}
       {activeSection === "pico" && <PicoSection scenarioId={scenarioId} />}
       {activeSection === "clustering" && <ClusteringSection scenarioId={scenarioId} />}
+      {activeSection === "kg" && <KnowledgeGraphSection scenarioId={scenarioId} />}
       {activeSection === "rag" && <RagSection scenarioId={scenarioId} detail={detail} />}
       {activeSection === "prisma" && <PrismaSection scenarioId={scenarioId} />}
+      {activeSection === "screening" && <DoubleBlindSection scenarioId={scenarioId} />}
       {activeSection === "brief" && <EvidenceBriefSection scenarioId={scenarioId} detail={detail} />}
+      {activeSection === "alerts" && <AlertsSection scenarioId={scenarioId} />}
     </div>
   );
 }

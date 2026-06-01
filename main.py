@@ -131,6 +131,19 @@ def startup_event() -> None:
     with engine.connect() as conn:
         conn.execute(text("SELECT 1"))
     logger.info("Database connection OK")
+    # Entraîner le modèle demand-forecasting en arrière-plan au démarrage
+    import threading
+    def _train_demand_model():
+        try:
+            from demand_forecasting_model import model_singleton, generate_synthetic_historical_data
+            if not model_singleton.is_trained:
+                logger.info("Entraînement du modèle demand-forecasting (Prophet + LightGBM)...")
+                df_hist = generate_synthetic_historical_data(days=730)
+                model_singleton.train(df_hist)
+                logger.info("Modèle demand-forecasting prêt.")
+        except Exception as e:
+            logger.error(f"Erreur entraînement demand-forecasting: {e}")
+    threading.Thread(target=_train_demand_model, daemon=True).start()
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Health
@@ -3737,4 +3750,928 @@ def get_evidence_brief(scenario_id: str) -> dict[str, Any]:
         ],
         "study_design_distribution": [{"design": d["design"], "count": int(d["n"])} for d in study_designs],
         "year_distribution": [{"year": d["year"], "count": int(d["n"])} for d in year_dist],
+    }
+
+
+# ─── DOUBLE-AVEUGLE SCREENING + KAPPA DE COHEN ───────────────────────────────
+
+def _ensure_double_blind_columns():
+    """Crée les colonnes reviewer_1_status/reviewer_2_status si elles n'existent pas."""
+    with engine.begin() as conn:
+        conn.execute(text("""
+            ALTER TABLE literature_document
+            ADD COLUMN IF NOT EXISTS reviewer_1_status  VARCHAR(20) DEFAULT NULL,
+            ADD COLUMN IF NOT EXISTS reviewer_1_reason  TEXT        DEFAULT NULL,
+            ADD COLUMN IF NOT EXISTS reviewer_2_status  VARCHAR(20) DEFAULT NULL,
+            ADD COLUMN IF NOT EXISTS reviewer_2_reason  TEXT        DEFAULT NULL,
+            ADD COLUMN IF NOT EXISTS kappa_resolved     BOOLEAN     DEFAULT FALSE,
+            ADD COLUMN IF NOT EXISTS kappa_final_status VARCHAR(20) DEFAULT NULL
+        """))
+    logger.info("Colonnes double-aveugle vérifiées/créées.")
+
+# Appel au démarrage
+try:
+    _ensure_double_blind_columns()
+except Exception as _e:
+    logger.warning(f"_ensure_double_blind_columns: {_e}")
+
+
+class DoubleBlindDecisionIn(BaseModel):
+    article_id: int
+    reviewer: int  # 1 ou 2
+    status: str    # 'included' | 'excluded' | 'pending'
+    reason: str | None = None
+
+
+@app.post("/gesica/scenarios/{scenario_id}/double-blind/decision")
+def submit_double_blind_decision(
+    scenario_id: str,
+    payload: DoubleBlindDecisionIn
+) -> dict[str, Any]:
+    """
+    Soumet la décision d'un reviewer (1 ou 2) pour le screening double-aveugle.
+    Si les deux reviewers ont statué, calcule automatiquement la concordance.
+    """
+    if payload.reviewer not in (1, 2):
+        raise HTTPException(status_code=422, detail="reviewer doit être 1 ou 2")
+    if payload.status not in ("included", "excluded", "pending"):
+        raise HTTPException(status_code=422, detail="status invalide")
+
+    col_status = f"reviewer_{payload.reviewer}_status"
+    col_reason = f"reviewer_{payload.reviewer}_reason"
+
+    with engine.begin() as conn:
+        row = conn.execute(text(f"""
+            UPDATE literature_document
+            SET {col_status} = :status,
+                {col_reason} = :reason
+            WHERE id = :article_id
+              AND project_context = 'gesica'
+              AND scenario_type = :scenario_id
+            RETURNING id, reviewer_1_status, reviewer_2_status
+        """), {
+            "status": payload.status,
+            "reason": payload.reason,
+            "article_id": payload.article_id,
+            "scenario_id": scenario_id,
+        }).first()
+
+        if not row:
+            raise HTTPException(status_code=404, detail="Article non trouvé")
+
+        r1 = row["reviewer_1_status"]
+        r2 = row["reviewer_2_status"]
+        agreement = None
+        final_status = None
+
+        # Si les deux ont statué → calculer concordance et résoudre
+        if r1 and r2:
+            agreement = r1 == r2
+            if agreement:
+                final_status = r1
+            else:
+                # Désaccord → statut "conflict" (à résoudre manuellement)
+                final_status = "conflict"
+
+            conn.execute(text("""
+                UPDATE literature_document
+                SET kappa_resolved = :resolved,
+                    kappa_final_status = :final,
+                    screening_status = :screening
+                WHERE id = :article_id
+            """), {
+                "resolved": agreement,
+                "final": final_status,
+                "screening": final_status if agreement else "pending",
+                "article_id": payload.article_id,
+            })
+
+    return {
+        "id": payload.article_id,
+        "reviewer": payload.reviewer,
+        "status": payload.status,
+        "reviewer_1_status": r1 if payload.reviewer == 2 else payload.status,
+        "reviewer_2_status": r2 if payload.reviewer == 1 else payload.status,
+        "agreement": agreement,
+        "final_status": final_status,
+    }
+
+
+@app.get("/gesica/scenarios/{scenario_id}/double-blind/kappa")
+def get_kappa_stats(scenario_id: str) -> dict[str, Any]:
+    """
+    Calcule le score Kappa de Cohen inter-évaluateurs pour un scénario.
+    Kappa = (Po - Pe) / (1 - Pe)
+    où Po = accord observé, Pe = accord attendu par hasard.
+    """
+    with engine.connect() as conn:
+        rows = conn.execute(text("""
+            SELECT reviewer_1_status, reviewer_2_status
+            FROM literature_document
+            WHERE project_context = 'gesica'
+              AND scenario_type = :sid
+              AND reviewer_1_status IS NOT NULL
+              AND reviewer_2_status IS NOT NULL
+        """), {"sid": scenario_id}).mappings().all()
+
+    if not rows:
+        return {
+            "scenario_id": scenario_id,
+            "n_evaluated": 0,
+            "kappa": None,
+            "interpretation": "Aucune évaluation double-aveugle disponible",
+            "agreements": {},
+            "conflicts": 0,
+        }
+
+    n = len(rows)
+    categories = ["included", "excluded", "pending"]
+
+    # Matrice de confusion
+    matrix = {c1: {c2: 0 for c2 in categories} for c1 in categories}
+    for r in rows:
+        r1 = r["reviewer_1_status"] if r["reviewer_1_status"] in categories else "pending"
+        r2 = r["reviewer_2_status"] if r["reviewer_2_status"] in categories else "pending"
+        matrix[r1][r2] += 1
+
+    # Accord observé (Po)
+    po = sum(matrix[c][c] for c in categories) / n
+
+    # Accord attendu par hasard (Pe)
+    pe = 0.0
+    for c in categories:
+        row_sum = sum(matrix[c][c2] for c2 in categories)
+        col_sum = sum(matrix[c1][c] for c1 in categories)
+        pe += (row_sum / n) * (col_sum / n)
+
+    # Kappa
+    kappa = (po - pe) / (1 - pe) if pe < 1.0 else 1.0
+
+    # Interprétation
+    if kappa >= 0.81:
+        interpretation = "Quasi-parfait (≥ 0.81)"
+    elif kappa >= 0.61:
+        interpretation = "Substantiel (0.61–0.80)"
+    elif kappa >= 0.41:
+        interpretation = "Modéré (0.41–0.60)"
+    elif kappa >= 0.21:
+        interpretation = "Faible (0.21–0.40)"
+    else:
+        interpretation = "Médiocre (< 0.21)"
+
+    # Compter les conflits
+    conflicts = sum(
+        matrix[r1][r2]
+        for r1 in categories
+        for r2 in categories
+        if r1 != r2
+    )
+
+    return {
+        "scenario_id": scenario_id,
+        "n_evaluated": n,
+        "kappa": round(kappa, 4),
+        "po_observed": round(po, 4),
+        "pe_expected": round(pe, 4),
+        "interpretation": interpretation,
+        "conflicts": conflicts,
+        "agreements": {c: matrix[c][c] for c in categories},
+        "matrix": matrix,
+    }
+
+
+@app.get("/gesica/scenarios/{scenario_id}/double-blind/conflicts")
+def get_conflicts(scenario_id: str) -> list[dict[str, Any]]:
+    """Retourne les articles en conflit entre les deux reviewers."""
+    with engine.connect() as conn:
+        rows = conn.execute(text("""
+            SELECT id, title, abstract, year, journal,
+                   reviewer_1_status, reviewer_1_reason,
+                   reviewer_2_status, reviewer_2_reason,
+                   kappa_final_status
+            FROM literature_document
+            WHERE project_context = 'gesica'
+              AND scenario_type = :sid
+              AND reviewer_1_status IS NOT NULL
+              AND reviewer_2_status IS NOT NULL
+              AND reviewer_1_status != reviewer_2_status
+            ORDER BY id
+        """), {"sid": scenario_id}).mappings().all()
+    return [dict(r) for r in rows]
+
+
+@app.post("/gesica/scenarios/{scenario_id}/double-blind/resolve")
+def resolve_conflict(
+    scenario_id: str,
+    article_id: int,
+    final_status: str,
+    arbitrator_notes: str | None = None,
+) -> dict[str, Any]:
+    """Résout un conflit entre reviewers (arbitrage par un tiers)."""
+    if final_status not in ("included", "excluded"):
+        raise HTTPException(status_code=422, detail="final_status doit être 'included' ou 'excluded'")
+
+    with engine.begin() as conn:
+        row = conn.execute(text("""
+            UPDATE literature_document
+            SET kappa_final_status = :final,
+                kappa_resolved = TRUE,
+                screening_status = :final,
+                screening_notes = :notes
+            WHERE id = :article_id
+              AND project_context = 'gesica'
+              AND scenario_type = :scenario_id
+            RETURNING id
+        """), {
+            "final": final_status,
+            "notes": arbitrator_notes,
+            "article_id": article_id,
+            "scenario_id": scenario_id,
+        }).first()
+    if not row:
+        raise HTTPException(status_code=404, detail="Article non trouvé")
+    return {"id": row[0], "final_status": final_status, "resolved": True}
+
+
+# ─── KNOWLEDGE GRAPH CO-CITATIONS ────────────────────────────────────────────
+
+@app.get("/gesica/scenarios/{scenario_id}/knowledge-graph")
+def get_knowledge_graph(
+    scenario_id: str,
+    max_nodes: int = 80,
+    min_similarity: float = 0.35,
+) -> dict[str, Any]:
+    """
+    Construit un graphe de connaissance basé sur la similarité cosinus des embeddings.
+    Nœuds = articles (top max_nodes par qualité/année)
+    Arêtes = paires d'articles avec similarité cosinus > min_similarity
+    Retourne aussi les concepts cliniques les plus fréquents par cluster de nœuds.
+    """
+    with engine.connect() as conn:
+        # Récupérer les articles avec embeddings (via document_chunk)
+        rows = conn.execute(text("""
+            SELECT DISTINCT ON (d.id)
+                d.id,
+                d.title,
+                d.year,
+                d.journal,
+                d.study_design,
+                d.quality_score,
+                c.embedding::text AS emb_str,
+                COALESCE(
+                    (d.pico_json->>'study_design'),
+                    d.study_design,
+                    'unknown'
+                ) AS design
+            FROM literature_document d
+            JOIN document_chunk c ON c.document_id = d.id
+            WHERE d.project_context = 'gesica'
+              AND d.scenario_type = :sid
+              AND d.is_duplicate IS NOT TRUE
+              AND c.embedding IS NOT NULL
+              AND d.abstract IS NOT NULL
+            ORDER BY d.id, c.id
+            LIMIT :max_nodes
+        """), {"sid": scenario_id, "max_nodes": max_nodes}).mappings().all()
+
+    if not rows:
+        return {"nodes": [], "edges": [], "clusters": []}
+
+    import numpy as np
+    import re
+
+    # Parser les embeddings
+    nodes_data = []
+    for r in rows:
+        try:
+            emb_str = r["emb_str"]
+            # Format pgvector: [0.1,0.2,...]
+            nums = re.findall(r"[-+]?[0-9]*\.?[0-9]+(?:[eE][-+]?[0-9]+)?", emb_str)
+            emb = np.array([float(x) for x in nums], dtype=np.float32)
+            if len(emb) > 0:
+                nodes_data.append({
+                    "id": r["id"],
+                    "title": r["title"],
+                    "year": r["year"],
+                    "journal": r["journal"],
+                    "design": r["design"],
+                    "quality": float(r["quality_score"] or 0),
+                    "emb": emb,
+                })
+        except Exception:
+            continue
+
+    if not nodes_data:
+        return {"nodes": [], "edges": [], "clusters": []}
+
+    # Normaliser les embeddings
+    embeddings = np.array([n["emb"] for n in nodes_data])
+    norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
+    norms[norms == 0] = 1
+    embeddings_norm = embeddings / norms
+
+    # Calculer la matrice de similarité cosinus
+    sim_matrix = embeddings_norm @ embeddings_norm.T
+
+    # Construire les arêtes (paires avec similarité > seuil)
+    edges = []
+    n = len(nodes_data)
+    for i in range(n):
+        for j in range(i + 1, n):
+            sim = float(sim_matrix[i, j])
+            if sim >= min_similarity:
+                edges.append({
+                    "source": nodes_data[i]["id"],
+                    "target": nodes_data[j]["id"],
+                    "weight": round(sim, 3),
+                })
+
+    # Clustering simple par similarité (greedy community detection)
+    # Assigner chaque nœud au cluster du nœud le plus similaire déjà assigné
+    cluster_ids = [-1] * n
+    cluster_counter = 0
+    for i in range(n):
+        if cluster_ids[i] == -1:
+            cluster_ids[i] = cluster_counter
+            for j in range(i + 1, n):
+                if cluster_ids[j] == -1 and float(sim_matrix[i, j]) >= 0.5:
+                    cluster_ids[j] = cluster_counter
+            cluster_counter += 1
+
+    # Construire les nœuds finaux
+    nodes = []
+    for idx, nd in enumerate(nodes_data):
+        nodes.append({
+            "id": nd["id"],
+            "title": nd["title"][:80] + ("..." if len(nd["title"] or "") > 80 else ""),
+            "year": nd["year"],
+            "journal": nd["journal"],
+            "design": nd["design"],
+            "quality": nd["quality"],
+            "cluster": cluster_ids[idx],
+            "degree": sum(
+                1 for e in edges
+                if e["source"] == nd["id"] or e["target"] == nd["id"]
+            ),
+        })
+
+    # Résumé des clusters
+    from collections import defaultdict
+    clusters_map = defaultdict(list)
+    for nd in nodes:
+        clusters_map[nd["cluster"]].append(nd)
+
+    clusters = []
+    for cid, members in sorted(clusters_map.items(), key=lambda x: -len(x[1])):
+        clusters.append({
+            "id": cid,
+            "size": len(members),
+            "years": sorted(set(m["year"] for m in members if m["year"])),
+            "designs": list(set(m["design"] for m in members if m["design"] and m["design"] != "unknown")),
+            "top_articles": [m["title"] for m in sorted(members, key=lambda x: -x["quality"])[:3]],
+        })
+
+    return {
+        "scenario_id": scenario_id,
+        "n_nodes": len(nodes),
+        "n_edges": len(edges),
+        "n_clusters": len(clusters),
+        "min_similarity": min_similarity,
+        "nodes": nodes,
+        "edges": edges,
+        "clusters": clusters,
+    }
+
+
+# ─── STREAMING RAG SSE ────────────────────────────────────────────────────────
+
+from fastapi.responses import StreamingResponse
+
+@app.post("/ask/stream")
+async def ask_stream(payload: dict[str, Any]) -> StreamingResponse:
+    """
+    Version streaming (SSE) de l'endpoint /ask.
+    Retourne les tokens au fur et à mesure via Server-Sent Events.
+    """
+    import asyncio
+    from openai import AsyncOpenAI
+
+    question = payload.get("question", "")
+    project_context = payload.get("project_context", "gesica")
+    scenario_id = payload.get("scenario_id", None)
+    top_k = int(payload.get("top_k", 8))
+
+    if not question:
+        raise HTTPException(status_code=422, detail="question est requis")
+
+    # Récupérer le contexte RAG (chunks pertinents)
+    try:
+        from openai import OpenAI as SyncOpenAI
+        sync_client = SyncOpenAI()
+        emb_resp = sync_client.embeddings.create(
+            model="text-embedding-3-small",
+            input=question[:2000],
+        )
+        q_emb = emb_resp.data[0].embedding
+        emb_str = "[" + ",".join(str(x) for x in q_emb) + "]"
+    except Exception as e:
+        logger.error(f"Embedding error in /ask/stream: {e}")
+        emb_str = None
+
+    context_chunks = []
+    sources = []
+    if emb_str:
+        where_extra = ""
+        params_extra: dict[str, Any] = {"top_k": top_k, "emb": emb_str}
+        if project_context:
+            where_extra += " AND d.project_context = :project_context"
+            params_extra["project_context"] = project_context
+        if scenario_id:
+            where_extra += " AND d.scenario_type = :scenario_id"
+            params_extra["scenario_id"] = scenario_id
+
+        with engine.connect() as conn:
+            rows = conn.execute(text(f"""
+                SELECT c.content, d.title, d.year, d.doi, d.id AS doc_id,
+                       1 - (c.embedding <=> :emb::vector) AS similarity
+                FROM document_chunk c
+                JOIN literature_document d ON d.id = c.document_id
+                WHERE c.embedding IS NOT NULL {where_extra}
+                ORDER BY c.embedding <=> :emb::vector
+                LIMIT :top_k
+            """), params_extra).mappings().all()
+
+        for r in rows:
+            context_chunks.append(r["content"])
+            sources.append({
+                "id": r["doc_id"],
+                "title": r["title"],
+                "year": r["year"],
+                "doi": r["doi"],
+                "similarity": round(float(r["similarity"]), 3),
+            })
+
+    context_text = "\n\n---\n\n".join(context_chunks[:top_k]) if context_chunks else "Aucun contexte disponible."
+
+    system_prompt = """Tu es un assistant expert en médecine d'urgence et en revue systématique de la littérature scientifique.
+Tu réponds en français de manière précise, factuelle et synthétique.
+Base-toi exclusivement sur le contexte fourni. Si l'information n'est pas dans le contexte, dis-le clairement.
+Cite les articles pertinents par leur titre quand tu les mentionnes."""
+
+    user_prompt = f"""Contexte scientifique (extraits d'articles) :
+{context_text}
+
+Question : {question}
+
+Réponds de manière structurée et cite les sources pertinentes du contexte."""
+
+    async def event_generator():
+        # D'abord envoyer les sources
+        import json as _json
+        sources_event = f"event: sources\ndata: {_json.dumps(sources)}\n\n"
+        yield sources_event
+
+        # Puis streamer la réponse LLM
+        try:
+            async_client = AsyncOpenAI()
+            stream = await async_client.chat.completions.create(
+                model="gpt-4.1-mini",
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                stream=True,
+                temperature=0.2,
+                max_tokens=1200,
+            )
+            async for chunk in stream:
+                delta = chunk.choices[0].delta
+                if delta.content:
+                    token_event = f"data: {_json.dumps({'token': delta.content})}\n\n"
+                    yield token_event
+        except Exception as e:
+            yield f"event: error\ndata: {_json.dumps({'error': str(e)})}\n\n"
+
+        yield "event: done\ndata: {}\n\n"
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+# ─── PDF EVIDENCE BRIEF CÔTÉ SERVEUR ─────────────────────────────────────────
+
+@app.get("/gesica/scenarios/{scenario_id}/evidence-brief/pdf")
+def get_evidence_brief_pdf(scenario_id: str):
+    """
+    Génère un PDF Evidence Brief complet côté serveur avec ReportLab.
+    Inclut : titre, stats corpus, distribution études, top articles, résumé clustering.
+    """
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.lib.units import cm
+    from reportlab.lib import colors
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, HRFlowable
+    from reportlab.lib.enums import TA_CENTER, TA_LEFT
+    import io
+
+    meta = GESICA_SCENARIO_METADATA.get(scenario_id)
+    if not meta:
+        raise HTTPException(status_code=404, detail=f"Scénario '{scenario_id}' non trouvé")
+
+    # Récupérer les données
+    with engine.connect() as conn:
+        corpus_stats = conn.execute(text("""
+            SELECT
+                COUNT(*) AS total,
+                SUM(CASE WHEN is_duplicate IS NOT TRUE THEN 1 ELSE 0 END) AS unique_docs,
+                MIN(year) AS year_min, MAX(year) AS year_max,
+                SUM(CASE WHEN screening_status = 'included' THEN 1 ELSE 0 END) AS included,
+                SUM(CASE WHEN pico_json IS NOT NULL THEN 1 ELSE 0 END) AS with_pico
+            FROM literature_document
+            WHERE project_context = 'gesica' AND scenario_type = :sid
+        """), {"sid": scenario_id}).mappings().first()
+
+        top_articles = conn.execute(text("""
+            SELECT title, year, journal, authors,
+                   COALESCE((pico_json->>'study_design'), study_design, 'N/A') AS design
+            FROM literature_document
+            WHERE project_context = 'gesica' AND scenario_type = :sid
+              AND is_duplicate IS NOT TRUE AND abstract IS NOT NULL
+            ORDER BY quality_score DESC NULLS LAST, year DESC NULLS LAST
+            LIMIT 10
+        """), {"sid": scenario_id}).mappings().all()
+
+        study_designs = conn.execute(text("""
+            SELECT
+                COALESCE((pico_json->>'study_design'), study_design, 'Non classifié') AS design,
+                COUNT(*) AS n
+            FROM literature_document
+            WHERE project_context = 'gesica' AND scenario_type = :sid
+              AND is_duplicate IS NOT TRUE
+            GROUP BY 1 ORDER BY 2 DESC LIMIT 8
+        """), {"sid": scenario_id}).mappings().all()
+
+    # Construire le PDF
+    buffer = io.BytesIO()
+    doc = SimpleDocTemplate(
+        buffer,
+        pagesize=A4,
+        rightMargin=2*cm, leftMargin=2*cm,
+        topMargin=2*cm, bottomMargin=2*cm,
+    )
+
+    styles = getSampleStyleSheet()
+    # Couleurs LiteRev
+    dark_green = colors.HexColor("#1a3a2a")
+    brand_green = colors.HexColor("#22c55e")
+    gold = colors.HexColor("#E3AC3B")
+    light_text = colors.HexColor("#374151")
+
+    title_style = ParagraphStyle(
+        "LiteRevTitle",
+        parent=styles["Title"],
+        fontSize=22,
+        textColor=dark_green,
+        spaceAfter=6,
+        fontName="Helvetica-Bold",
+    )
+    h2_style = ParagraphStyle(
+        "LiteRevH2",
+        parent=styles["Heading2"],
+        fontSize=13,
+        textColor=dark_green,
+        spaceBefore=14,
+        spaceAfter=4,
+        fontName="Helvetica-Bold",
+    )
+    body_style = ParagraphStyle(
+        "LiteRevBody",
+        parent=styles["Normal"],
+        fontSize=9,
+        textColor=light_text,
+        spaceAfter=4,
+        leading=14,
+    )
+    small_style = ParagraphStyle(
+        "LiteRevSmall",
+        parent=styles["Normal"],
+        fontSize=8,
+        textColor=colors.HexColor("#6b7280"),
+        spaceAfter=2,
+    )
+
+    story = []
+
+    # En-tête
+    story.append(Paragraph("LiteRev — Evidence to Scenario", small_style))
+    story.append(Paragraph(f"Evidence Brief : {meta['title']}", title_style))
+    story.append(Paragraph(
+        f"Scénario GESICA · Généré le {__import__('datetime').datetime.now().strftime('%d/%m/%Y à %H:%M')}",
+        small_style
+    ))
+    story.append(HRFlowable(width="100%", thickness=2, color=brand_green, spaceAfter=12))
+
+    # Stats corpus
+    total = int(corpus_stats["total"] or 0)
+    unique = int(corpus_stats["unique_docs"] or 0)
+    included = int(corpus_stats["included"] or 0)
+    with_pico = int(corpus_stats["with_pico"] or 0)
+    year_min = corpus_stats["year_min"] or "N/A"
+    year_max = corpus_stats["year_max"] or "N/A"
+
+    story.append(Paragraph("Corpus documentaire", h2_style))
+    stats_data = [
+        ["Indicateur", "Valeur"],
+        ["Total articles identifiés", str(total)],
+        ["Articles uniques (après déduplication)", str(unique)],
+        ["Articles inclus (screening)", str(included) if included > 0 else "En attente de screening"],
+        ["Articles avec extraction PICO", str(with_pico)],
+        ["Période couverte", f"{year_min} – {year_max}"],
+    ]
+    stats_table = Table(stats_data, colWidths=[10*cm, 6*cm])
+    stats_table.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), dark_green),
+        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+        ("FONTSIZE", (0, 0), (-1, -1), 9),
+        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.HexColor("#f9fafb"), colors.white]),
+        ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#e5e7eb")),
+        ("PADDING", (0, 0), (-1, -1), 6),
+    ]))
+    story.append(stats_table)
+
+    # Distribution par type d'étude
+    if study_designs:
+        story.append(Paragraph("Distribution par type d'étude", h2_style))
+        design_data = [["Type d'étude", "Nombre d'articles"]]
+        for d in study_designs:
+            design_data.append([str(d["design"]), str(d["n"])])
+        design_table = Table(design_data, colWidths=[10*cm, 6*cm])
+        design_table.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, 0), dark_green),
+            ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+            ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+            ("FONTSIZE", (0, 0), (-1, -1), 9),
+            ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.HexColor("#f9fafb"), colors.white]),
+            ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#e5e7eb")),
+            ("PADDING", (0, 0), (-1, -1), 6),
+        ]))
+        story.append(design_table)
+
+    # Top articles
+    if top_articles:
+        story.append(Paragraph("Articles les plus pertinents", h2_style))
+        for i, art in enumerate(top_articles, 1):
+            title_text = art["title"] or "Sans titre"
+            authors_text = (art["authors"] or "")[:80]
+            meta_text = f"{art['year'] or 'N/A'} · {art['journal'] or 'Journal inconnu'} · {art['design']}"
+            story.append(Paragraph(
+                f"<b>{i}. {title_text[:120]}</b>",
+                ParagraphStyle("art_title", parent=body_style, fontSize=9, textColor=dark_green)
+            ))
+            story.append(Paragraph(authors_text, small_style))
+            story.append(Paragraph(meta_text, small_style))
+            story.append(Spacer(1, 4))
+
+    # Footer
+    story.append(HRFlowable(width="100%", thickness=1, color=colors.HexColor("#e5e7eb"), spaceBefore=16))
+    story.append(Paragraph(
+        "Ce document a été généré automatiquement par LiteRev — Evidence to Scenario. "
+        "Il ne constitue pas un avis médical. Pour usage interne uniquement.",
+        small_style
+    ))
+
+    doc.build(story)
+    buffer.seek(0)
+
+    from fastapi.responses import Response
+    return Response(
+        content=buffer.read(),
+        media_type="application/pdf",
+        headers={
+            "Content-Disposition": f'attachment; filename="evidence_brief_{scenario_id}.pdf"'
+        }
+    )
+
+
+# ─── PIPELINE LIVING REVIEW AUTOMATISÉ ───────────────────────────────────────
+
+@app.post("/gesica/living-review/trigger")
+def trigger_living_review(
+    scenario_id: str | None = None,
+    dry_run: bool = True,
+) -> dict[str, Any]:
+    """
+    Déclenche le pipeline Living Review :
+    1. Interroge PubMed avec la requête booléenne du scénario
+    2. Insère les nouveaux articles
+    3. Génère les embeddings
+    4. Invalide le cache clustering
+    Retourne un rapport de ce qui a été fait (ou ce qui serait fait en dry_run).
+    """
+    import threading
+
+    scenarios_to_update = []
+    if scenario_id:
+        meta = GESICA_SCENARIO_METADATA.get(scenario_id)
+        if not meta:
+            raise HTTPException(status_code=404, detail=f"Scénario '{scenario_id}' non trouvé")
+        scenarios_to_update = [(scenario_id, meta)]
+    else:
+        scenarios_to_update = list(GESICA_SCENARIO_METADATA.items())
+
+    report = {
+        "dry_run": dry_run,
+        "triggered_at": __import__("datetime").datetime.now().isoformat(),
+        "scenarios": [],
+        "status": "triggered" if not dry_run else "dry_run",
+    }
+
+    for sid, smeta in scenarios_to_update:
+        scenario_report = {
+            "scenario_id": sid,
+            "title": smeta.get("title", sid),
+            "query": smeta.get("pubmed_query", smeta.get("boolean_query", "N/A")),
+            "action": "would_fetch" if dry_run else "fetching",
+        }
+        report["scenarios"].append(scenario_report)
+
+    if not dry_run:
+        def _run_living_review():
+            try:
+                import subprocess
+                result = subprocess.run(
+                    ["python3", "ingest_pubmed.py", "--all-scenarios"],
+                    capture_output=True, text=True, timeout=600,
+                    cwd="/opt/literev-api"
+                )
+                logger.info(f"Living Review pipeline: {result.stdout[:500]}")
+                if result.returncode != 0:
+                    logger.error(f"Living Review error: {result.stderr[:500]}")
+                # Invalider le cache clustering
+                import glob, os
+                for f in glob.glob("/tmp/literev_clustering_cache_*.pkl"):
+                    os.remove(f)
+                    logger.info(f"Cache clustering invalidé: {f}")
+            except Exception as e:
+                logger.error(f"Living Review pipeline error: {e}")
+
+        threading.Thread(target=_run_living_review, daemon=True).start()
+        report["message"] = "Pipeline Living Review déclenché en arrière-plan. Vérifiez les logs dans 5-10 minutes."
+    else:
+        report["message"] = f"Dry run : {len(scenarios_to_update)} scénario(s) seraient mis à jour."
+
+    return report
+
+
+# ─── ALERTES EMAIL ────────────────────────────────────────────────────────────
+
+class AlertSubscriptionIn(BaseModel):
+    email: str
+    scenario_id: str
+    frequency: str = "weekly"  # "daily" | "weekly" | "immediate"
+
+
+@app.post("/alerts/subscribe")
+def subscribe_alerts(payload: AlertSubscriptionIn) -> dict[str, Any]:
+    """
+    Enregistre une alerte email pour un scénario.
+    L'utilisateur sera notifié quand de nouveaux articles sont ajoutés.
+    """
+    with engine.begin() as conn:
+        # Créer la table si elle n'existe pas
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS alert_subscriptions (
+                id SERIAL PRIMARY KEY,
+                email VARCHAR(255) NOT NULL,
+                scenario_id VARCHAR(100) NOT NULL,
+                frequency VARCHAR(20) DEFAULT 'weekly',
+                created_at TIMESTAMP DEFAULT NOW(),
+                last_notified_at TIMESTAMP DEFAULT NULL,
+                is_active BOOLEAN DEFAULT TRUE,
+                UNIQUE(email, scenario_id)
+            )
+        """))
+        conn.execute(text("""
+            INSERT INTO alert_subscriptions (email, scenario_id, frequency)
+            VALUES (:email, :scenario_id, :frequency)
+            ON CONFLICT (email, scenario_id) DO UPDATE
+            SET frequency = :frequency, is_active = TRUE
+        """), payload.model_dump())
+
+    return {
+        "status": "subscribed",
+        "email": payload.email,
+        "scenario_id": payload.scenario_id,
+        "frequency": payload.frequency,
+        "message": f"Vous recevrez des alertes {payload.frequency} pour le scénario '{payload.scenario_id}'.",
+    }
+
+
+@app.delete("/alerts/unsubscribe")
+def unsubscribe_alerts(email: str, scenario_id: str) -> dict[str, Any]:
+    """Désabonnement des alertes email."""
+    with engine.begin() as conn:
+        conn.execute(text("""
+            UPDATE alert_subscriptions
+            SET is_active = FALSE
+            WHERE email = :email AND scenario_id = :scenario_id
+        """), {"email": email, "scenario_id": scenario_id})
+    return {"status": "unsubscribed", "email": email, "scenario_id": scenario_id}
+
+
+@app.get("/alerts/subscriptions")
+def list_subscriptions(email: str) -> list[dict[str, Any]]:
+    """Liste les abonnements actifs pour un email."""
+    try:
+        with engine.connect() as conn:
+            rows = conn.execute(text("""
+                SELECT scenario_id, frequency, created_at, last_notified_at, is_active
+                FROM alert_subscriptions
+                WHERE email = :email AND is_active = TRUE
+                ORDER BY created_at DESC
+            """), {"email": email}).mappings().all()
+        return [dict(r) for r in rows]
+    except Exception:
+        return []
+
+
+@app.post("/alerts/send-digest")
+def send_alert_digest(
+    scenario_id: str | None = None,
+    dry_run: bool = True,
+) -> dict[str, Any]:
+    """
+    Envoie les digests email aux abonnés.
+    En production, utilise SMTP (configurable via env vars SMTP_HOST, SMTP_USER, SMTP_PASS).
+    """
+    smtp_host = os.getenv("SMTP_HOST", "")
+    smtp_user = os.getenv("SMTP_USER", "")
+    smtp_pass = os.getenv("SMTP_PASS", "")
+
+    if not smtp_host:
+        return {
+            "status": "not_configured",
+            "message": "SMTP non configuré. Définissez SMTP_HOST, SMTP_USER, SMTP_PASS dans les variables d'environnement.",
+            "dry_run": dry_run,
+        }
+
+    try:
+        with engine.connect() as conn:
+            query = """
+                SELECT s.email, s.scenario_id, s.frequency, s.last_notified_at
+                FROM alert_subscriptions s
+                WHERE s.is_active = TRUE
+            """
+            params: dict[str, Any] = {}
+            if scenario_id:
+                query += " AND s.scenario_id = :scenario_id"
+                params["scenario_id"] = scenario_id
+            rows = conn.execute(text(query), params).mappings().all()
+    except Exception:
+        rows = []
+
+    sent = 0
+    if not dry_run and rows:
+        import smtplib
+        from email.mime.text import MIMEText
+        from email.mime.multipart import MIMEMultipart
+
+        for sub in rows:
+            try:
+                msg = MIMEMultipart("alternative")
+                msg["Subject"] = f"[LiteRev] Nouveaux articles — Scénario {sub['scenario_id']}"
+                msg["From"] = smtp_user
+                msg["To"] = sub["email"]
+
+                body = f"""
+                <html><body>
+                <h2 style="color:#1a3a2a">LiteRev — Nouveaux articles disponibles</h2>
+                <p>De nouveaux articles ont été ajoutés au scénario <strong>{sub['scenario_id']}</strong>.</p>
+                <p><a href="http://62.238.39.50/#scenario/{sub['scenario_id']}" style="color:#22c55e">
+                Consulter le scénario</a></p>
+                <hr><p style="font-size:11px;color:#6b7280">
+                Pour vous désabonner, visitez les paramètres de LiteRev.</p>
+                </body></html>
+                """
+                msg.attach(MIMEText(body, "html"))
+
+                with smtplib.SMTP_SSL(smtp_host, 465) as server:
+                    server.login(smtp_user, smtp_pass)
+                    server.sendmail(smtp_user, sub["email"], msg.as_string())
+                sent += 1
+            except Exception as e:
+                logger.error(f"Email error for {sub['email']}: {e}")
+
+    return {
+        "status": "sent" if not dry_run else "dry_run",
+        "subscriptions_found": len(rows),
+        "emails_sent": sent,
+        "dry_run": dry_run,
     }
