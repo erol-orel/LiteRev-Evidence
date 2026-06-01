@@ -3084,12 +3084,36 @@ def get_scenario_prisma(scenario_id: str) -> dict[str, Any]:
     excluded = int(stats["excluded"] or 0)
     pending = int(stats["pending"] or 0)
     with_fulltext = int(stats["with_fulltext"] or 0)
-    records_after_dedup = total - duplicates
+
+    # ── Logique PRISMA 2020 correcte ──────────────────────────────────────────
+    # Étape 1 — Identification : tous les articles trouvés (y compris doublons)
+    # Les doublons sont des entrées séparées en DB marquées is_duplicate=True
+    total_identified = total  # total en DB inclut déjà les doublons marqués
+    records_after_dedup = total - duplicates  # articles uniques après dédup
+
+    # Étape 2 — Screening : les articles uniques sont screenés titre/résumé
+    # excluded = ceux rejetés au screening titre/résumé
+    # pending  = pas encore screenés manuellement (statut par défaut)
+    records_screened = records_after_dedup
+    excluded_title_abstract = excluded
+
+    # Étape 3 — Éligibilité : articles passant au fulltext
+    # = screenés - exclus titre/résumé
+    eligible_for_fulltext = records_screened - excluded_title_abstract
+    fulltext_not_retrieved = eligible_for_fulltext - with_fulltext
+
+    # Étape 4 — Inclus : articles retenus après évaluation fulltext
+    # Si aucun screening manuel n'a été fait (tout est pending),
+    # on indique le nombre d'articles disponibles (eligible) comme "à évaluer"
+    screening_done = (included + excluded) > 0
+    total_included_final = included if screening_done else 0
+    awaiting_assessment = pending if not screening_done else 0
+
     return {
         "scenario_id": scenario_id,
         "scenario_title": meta["title"],
         "identification": {
-            "total_records_identified": total + duplicates,
+            "total_records_identified": total_identified,
             "by_source": {
                 "pubmed": int(stats["pubmed"] or 0),
                 "pmc": int(stats["pmc"] or 0),
@@ -3100,19 +3124,21 @@ def get_scenario_prisma(scenario_id: str) -> dict[str, Any]:
             "duplicates_removed": duplicates,
         },
         "screening": {
-            "records_screened": records_after_dedup,
-            "records_excluded_title_abstract": excluded,
+            "records_screened": records_screened,
+            "records_excluded_title_abstract": excluded_title_abstract,
             "records_pending": pending,
         },
         "eligibility": {
+            "fulltext_assessed": eligible_for_fulltext,
             "fulltext_retrieved": with_fulltext,
-            "fulltext_not_retrieved": records_after_dedup - with_fulltext,
+            "fulltext_not_retrieved": max(0, fulltext_not_retrieved),
             "fulltext_excluded": 0,
         },
         "included": {
-            "total_included": included if included > 0 else records_after_dedup,
-            "pending_assessment": pending,
-            "note": "Tous les articles non exclus sont considérés inclus par défaut (screening automatique).",
+            "total_included": total_included_final,
+            "awaiting_assessment": awaiting_assessment,
+            "screening_complete": screening_done,
+            "note": "Screening manuel non encore effectué — tous les articles sont en attente d'évaluation." if not screening_done else "",
         },
     }
 

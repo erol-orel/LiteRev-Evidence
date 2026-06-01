@@ -1573,13 +1573,15 @@ export interface ScenarioPrisma {
     records_pending: number;
   };
   eligibility: {
+    fulltext_assessed: number;
     fulltext_retrieved: number;
     fulltext_not_retrieved: number;
     fulltext_excluded: number;
   };
   included: {
     total_included: number;
-    pending_assessment: number;
+    awaiting_assessment: number;
+    screening_complete: boolean;
     note: string;
   };
 }

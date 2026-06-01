@@ -1092,6 +1092,163 @@ function RagSection({ scenarioId, detail }: { scenarioId: string; detail: Scenar
 
 // ─── Section: PRISMA ──────────────────────────────────────────────────────────
 
+// ─── PRISMA 2020 SVG Diagram ──────────────────────────────────────────────────
+// Layout : colonne centrale (étapes) + boîtes d'exclusion à droite reliées
+// Inspiré du template officiel PRISMA 2020 (Page, McKenzie et al. 2021)
+
+const PRISMA_COLORS = {
+  identification: { fill: "#0e2d1f", stroke: "#1a6640", text: "#6ee7a0", label: "#a7f3c4" },
+  screening:      { fill: "#1a1a0a", stroke: "#7a6000", text: "#fbbf24", label: "#fde68a" },
+  eligibility:    { fill: "#1a0a0a", stroke: "#7a2020", text: "#f87171", label: "#fca5a5" },
+  included:       { fill: "#0a1a2a", stroke: "#1a4a7a", text: "#60a5fa", label: "#93c5fd" },
+  exclusion:      { fill: "#1a0e0e", stroke: "#6b2020", text: "#fca5a5", label: "#fecaca" },
+};
+
+interface PrismaNode {
+  id: string;
+  phase: keyof typeof PRISMA_COLORS;
+  title: string;
+  count: number;
+  lines: string[];
+  exclusion?: { title: string; count: number; lines: string[] };
+}
+
+function PrismaSVGDiagram({ nodes }: { nodes: PrismaNode[] }) {
+  // Dimensions
+  const W = 780;
+  const BOX_W = 300;
+  const BOX_H = 80;
+  const EXCL_W = 220;
+  const EXCL_H = 70;
+  const COL_X = 80;          // left edge of main column
+  const EXCL_X = COL_X + BOX_W + 60; // left edge of exclusion column
+  const ROW_GAP = 50;        // gap between boxes
+  const START_Y = 20;
+
+  // Compute y positions
+  const positions = nodes.map((_, i) => START_Y + i * (BOX_H + ROW_GAP));
+  const totalH = START_Y + nodes.length * (BOX_H + ROW_GAP) + 20;
+
+  return (
+    <svg
+      viewBox={`0 0 ${W} ${totalH}`}
+      width="100%"
+      style={{ fontFamily: "ui-monospace, monospace", overflow: "visible" }}
+      aria-label="Diagramme PRISMA 2020"
+    >
+      {nodes.map((node, i) => {
+        const y = positions[i];
+        const c = PRISMA_COLORS[node.phase];
+        const cx = COL_X + BOX_W / 2; // center x of main box
+        const nextY = positions[i + 1];
+        const hasNext = i < nodes.length - 1;
+        const excl = node.exclusion;
+        const ec = PRISMA_COLORS.exclusion;
+
+        // Exclusion box center y
+        const exclCY = y + BOX_H / 2;
+
+        return (
+          <g key={node.id}>
+            {/* ── Main box ── */}
+            <rect
+              x={COL_X} y={y}
+              width={BOX_W} height={BOX_H}
+              rx={10} ry={10}
+              fill={c.fill} stroke={c.stroke} strokeWidth={1.5}
+            />
+            {/* Phase label */}
+            <text x={COL_X + 12} y={y + 18} fontSize={9} fill={c.label}
+              fontWeight="700" letterSpacing="1.5" textAnchor="start">
+              {node.phase.toUpperCase()}
+            </text>
+            {/* Title */}
+            <text x={COL_X + 12} y={y + 34} fontSize={11} fill={c.text}
+              fontWeight="600" textAnchor="start">
+              {node.title}
+            </text>
+            {/* Count */}
+            <text x={COL_X + BOX_W - 12} y={y + 34} fontSize={20} fill={c.text}
+              fontWeight="800" textAnchor="end" fontFamily="ui-monospace">
+              {node.count.toLocaleString()}
+            </text>
+            {/* Sub-lines */}
+            {node.lines.map((line, li) => (
+              <text key={li} x={COL_X + 12} y={y + 50 + li * 13}
+                fontSize={9} fill={c.label} opacity={0.75} textAnchor="start">
+                {line}
+              </text>
+            ))}
+
+            {/* ── Vertical connector to next box ── */}
+            {hasNext && (
+              <>
+                <line
+                  x1={cx} y1={y + BOX_H}
+                  x2={cx} y2={nextY}
+                  stroke="#2d5a3d" strokeWidth={1.5}
+                  strokeDasharray={excl ? "0" : "4 2"}
+                />
+                {/* Arrow head */}
+                <polygon
+                  points={`${cx - 5},${nextY - 8} ${cx + 5},${nextY - 8} ${cx},${nextY}`}
+                  fill="#2d5a3d"
+                />
+              </>
+            )}
+
+            {/* ── Exclusion box to the right ── */}
+            {excl && (
+              <>
+                {/* Horizontal connector from main box right edge to exclusion box */}
+                <line
+                  x1={COL_X + BOX_W} y1={exclCY}
+                  x2={EXCL_X} y2={exclCY}
+                  stroke="#7a2020" strokeWidth={1.5}
+                />
+                {/* Arrow head pointing right */}
+                <polygon
+                  points={`${EXCL_X - 8},${exclCY - 5} ${EXCL_X - 8},${exclCY + 5} ${EXCL_X},${exclCY}`}
+                  fill="#7a2020"
+                />
+                {/* Exclusion box */}
+                <rect
+                  x={EXCL_X} y={exclCY - EXCL_H / 2}
+                  width={EXCL_W} height={EXCL_H}
+                  rx={8} ry={8}
+                  fill={ec.fill} stroke={ec.stroke} strokeWidth={1.5}
+                />
+                <text x={EXCL_X + 10} y={exclCY - EXCL_H / 2 + 16}
+                  fontSize={9} fill={ec.label} fontWeight="700"
+                  letterSpacing="1.2" textAnchor="start">
+                  EXCLUS
+                </text>
+                <text x={EXCL_X + 10} y={exclCY - EXCL_H / 2 + 30}
+                  fontSize={11} fill={ec.text} fontWeight="600" textAnchor="start">
+                  {excl.title}
+                </text>
+                <text x={EXCL_X + EXCL_W - 10} y={exclCY - EXCL_H / 2 + 30}
+                  fontSize={18} fill={ec.text} fontWeight="800"
+                  textAnchor="end" fontFamily="ui-monospace">
+                  {excl.count.toLocaleString()}
+                </text>
+                {excl.lines.map((line, li) => (
+                  <text key={li}
+                    x={EXCL_X + 10}
+                    y={exclCY - EXCL_H / 2 + 44 + li * 12}
+                    fontSize={8.5} fill={ec.label} opacity={0.7} textAnchor="start">
+                    {line}
+                  </text>
+                ))}
+              </>
+            )}
+          </g>
+        );
+      })}
+    </svg>
+  );
+}
+
 function PrismaSection({ scenarioId }: { scenarioId: string }) {
   const [data, setData] = useState<ScenarioPrisma | null>(null);
   const [loading, setLoading] = useState(true);
@@ -1114,110 +1271,145 @@ function PrismaSection({ scenarioId }: { scenarioId: string }) {
   const elig = data.eligibility;
   const inc = data.included;
 
+  // Sources breakdown string
+  const sourceLines = Object.entries(ident.by_source)
+    .filter(([, v]) => v > 0)
+    .sort(([, a], [, b]) => b - a)
+    .map(([src, n]) => `${src.toUpperCase()}: ${n}`)
+    .join("  ·  ");
+
+  const nodes: PrismaNode[] = [
+    {
+      id: "identification",
+      phase: "identification",
+      title: "Enregistrements identifiés",
+      count: ident.total_records_identified,
+      lines: [
+        sourceLines || "Sources non disponibles",
+        `dont ${ident.duplicates_removed} doublons retirés`,
+      ],
+      exclusion: ident.duplicates_removed > 0 ? {
+        title: "Doublons supprimés",
+        count: ident.duplicates_removed,
+        lines: ["Fusion par DOI / PMID / titre normalisé"],
+      } : undefined,
+    },
+    {
+      id: "screening",
+      phase: "screening",
+      title: "Enregistrements screenés",
+      count: screen.records_screened,
+      lines: [
+        `Screening titre / résumé`,
+        screen.records_pending > 0
+          ? `${screen.records_pending} en attente d'évaluation manuelle`
+          : `${screen.records_excluded_title_abstract} exclus`,
+      ],
+      exclusion: screen.records_excluded_title_abstract > 0 ? {
+        title: "Exclus — titre / résumé",
+        count: screen.records_excluded_title_abstract,
+        lines: ["Hors sujet, doublons résiduels"],
+      } : undefined,
+    },
+    {
+      id: "eligibility",
+      phase: "eligibility",
+      title: "Textes intégraux évalués",
+      count: elig.fulltext_assessed,
+      lines: [
+        `${elig.fulltext_retrieved} textes intégraux récupérés`,
+        elig.fulltext_not_retrieved > 0
+          ? `${elig.fulltext_not_retrieved} non récupérables (accès restreint)`
+          : "Tous les textes récupérés",
+      ],
+      exclusion: (elig.fulltext_not_retrieved + elig.fulltext_excluded) > 0 ? {
+        title: "Exclus — plein texte",
+        count: elig.fulltext_not_retrieved + elig.fulltext_excluded,
+        lines: [
+          elig.fulltext_not_retrieved > 0 ? `${elig.fulltext_not_retrieved} non accessibles` : "",
+          elig.fulltext_excluded > 0 ? `${elig.fulltext_excluded} hors critères` : "",
+        ].filter(Boolean),
+      } : undefined,
+    },
+    {
+      id: "included",
+      phase: "included",
+      title: inc.screening_complete ? "Études incluses" : "Articles disponibles",
+      count: inc.screening_complete ? inc.total_included : elig.fulltext_retrieved,
+      lines: inc.screening_complete
+        ? [`Inclus dans la synthèse qualitative`]
+        : [
+            `Screening manuel non encore effectué`,
+            `${inc.awaiting_assessment} articles en attente d'évaluation`,
+          ],
+    },
+  ];
+
   return (
-    <div className="rounded-3xl border border-white/10 bg-white/3 p-5 space-y-6">
+    <div className="rounded-3xl border border-white/10 bg-white/3 p-5 space-y-5">
       <SectionHeader
         icon={<Shield size={14} className="text-brand-400" />}
-        title="Flow PRISMA de Sélection de l'Évidence"
-        subtitle="Visualisation du filtrage systématique du corpus"
+        title="Diagramme PRISMA 2020 — Flow de Sélection"
+        subtitle="Visualisation standardisée du processus de sélection systématique des articles"
       />
 
-      {data && (
-        <div className="flex flex-col items-center gap-4 py-4">
-          {/* Identification */}
-          <PrismaBox
-            color="sky"
-            title="Identification"
-            value={ident.total_records_identified}
-            subtitle={`${ident.duplicates_removed} doublons retirés`}
-          />
+      {/* Legend */}
+      <div className="flex flex-wrap gap-3 text-[10px]">
+        {([
+          { phase: "identification" as const, label: "Identification" },
+          { phase: "screening" as const, label: "Screening" },
+          { phase: "eligibility" as const, label: "Éligibilité" },
+          { phase: "included" as const, label: "Inclus" },
+          { phase: "exclusion" as const, label: "Exclusions" },
+        ]).map(({ phase, label }) => (
+          <span key={phase} className="flex items-center gap-1.5">
+            <span
+              className="inline-block w-3 h-3 rounded-sm border"
+              style={{
+                backgroundColor: PRISMA_COLORS[phase].fill,
+                borderColor: PRISMA_COLORS[phase].stroke,
+              }}
+            />
+            <span style={{ color: PRISMA_COLORS[phase].label }}>{label}</span>
+          </span>
+        ))}
+      </div>
 
-          <PrismaArrow value={`Déduplication`} />
+      {/* SVG Diagram */}
+      <div className="overflow-x-auto">
+        <PrismaSVGDiagram nodes={nodes} />
+      </div>
 
-          {/* Screening */}
-          <PrismaBox
-            color="violet"
-            title="Screening"
-            value={screen.records_screened}
-            subtitle={`${screen.records_excluded_title_abstract} exclus sur titre/abstract`}
-          />
-
-          <PrismaArrow value={`Sélection plein-texte`} />
-
-          {/* Éligibilité */}
-          <PrismaBox
-            color="amber"
-            title="Éligibilité"
-            value={elig.fulltext_retrieved}
-            subtitle={`${elig.fulltext_not_retrieved} non récupérables`}
-          />
-
-          <PrismaArrow value={`Évaluation de la qualité`} />
-
-          {/* Inclus */}
-          <PrismaBox
-            color="emerald"
-            title="Inclus"
-            value={inc.total_included}
-            subtitle={`${inc.pending_assessment} en cours d'évaluation`}
-          />
-
-          {/* Distribution par source */}
-          <div className="w-full max-w-sm border-t border-white/5 pt-4 mt-2">
-            <p className="text-[10px] text-forest-500 uppercase tracking-wider mb-2">Articles identifiés par source</p>
-            <div className="flex flex-wrap gap-2">
-              {Object.entries(data.identification.by_source)
-                .filter(([, v]) => v > 0)
-                .sort(([, a], [, b]) => b - a)
-                .map(([source, count]) => (
-                  <span key={source} className="rounded-lg border border-white/10 bg-white/5 px-2 py-0.5 text-[10px] text-forest-300">
-                    {source}: <span className="text-brand-300 font-mono">{count}</span>
-                  </span>
-                ))}
+      {/* Summary table */}
+      <div className="border-t border-white/5 pt-4">
+        <p className="text-[10px] text-forest-500 uppercase tracking-wider mb-3">Résumé des étapes</p>
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+          {[
+            { label: "Identifiés", value: ident.total_records_identified, sub: `${ident.duplicates_removed} doublons` },
+            { label: "Screenés", value: screen.records_screened, sub: `${screen.records_excluded_title_abstract} exclus` },
+            { label: "Éligibles", value: elig.fulltext_assessed, sub: `${elig.fulltext_retrieved} textes récupérés` },
+            {
+              label: inc.screening_complete ? "Inclus" : "Disponibles",
+              value: inc.screening_complete ? inc.total_included : elig.fulltext_retrieved,
+              sub: inc.screening_complete ? "synthèse qualitative" : "screening en attente",
+            },
+          ].map(({ label, value, sub }) => (
+            <div key={label} className="rounded-xl border border-white/10 bg-white/3 p-3 text-center">
+              <p className="text-[9px] uppercase tracking-wider text-forest-400 mb-1">{label}</p>
+              <p className="text-xl font-bold font-mono text-white">{value.toLocaleString()}</p>
+              <p className="text-[9px] text-forest-500 mt-0.5">{sub}</p>
             </div>
-          </div>
+          ))}
+        </div>
+      </div>
 
-          {data.included.note && (
-            <p className="text-[10px] text-forest-500 italic">{data.included.note}</p>
-          )}
+      {!inc.screening_complete && (
+        <div className="rounded-xl border border-gold-500/20 bg-gold-500/5 px-4 py-3">
+          <p className="text-[10px] text-gold-400">
+            <span className="font-semibold">Screening manuel non effectué</span> — Les articles sont disponibles pour évaluation dans l'onglet Corpus. Utilisez l'interface de screening pour inclure ou exclure chaque article.
+          </p>
         </div>
       )}
-    </div>
-  );
-}
-
-function PrismaBox({
-  color,
-  title,
-  value,
-  subtitle,
-}: {
-  color: "sky" | "violet" | "amber" | "emerald";
-  title: string;
-  value: number;
-  subtitle?: string;
-}) {
-  const colors = {
-    sky: "border-brand-500/30 bg-brand-500/10 text-brand-300",
-    violet: "border-brand-500/30 bg-brand-500/10 text-brand-300",
-    amber: "border-gold-500/30 bg-gold-500/10 text-gold-300",
-    emerald: "border-brand-500/30 bg-brand-500/10 text-brand-300",
-  };
-  return (
-    <div className={`rounded-2xl border ${colors[color]} px-6 py-3 w-full max-w-sm text-center`}>
-      <p className="text-[10px] uppercase tracking-wider opacity-70 mb-1">{title}</p>
-      <p className="text-2xl font-bold font-mono">{value.toLocaleString()}</p>
-      {subtitle && <p className="text-[10px] opacity-60 mt-0.5">{subtitle}</p>}
-    </div>
-  );
-}
-
-function PrismaArrow({ value }: { value: string }) {
-  return (
-    <div className="flex flex-col items-center gap-0.5">
-      <div className="h-4 w-px bg-forest-600" />
-      <span className="text-[10px] text-forest-500 italic">{value}</span>
-      <div className="h-4 w-px bg-forest-600" />
     </div>
   );
 }
