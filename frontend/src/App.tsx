@@ -3122,8 +3122,8 @@ export default function App() {
                   onClick={() => setProjectContext(value)}
                   className={`rounded-2xl border px-5 py-3 text-left transition ${
                     projectContext === value
-                      ? "border-brand-400 bg-brand-500/10 text-white shadow-2xl"
-                      : "border-white/10 bg-white/5 text-forest-300 hover:border-white/20 hover:bg-white/10"
+                      ? "border-gold-400 bg-brand-700/60 text-gold-400 font-semibold shadow-2xl"
+                      : "border-white/15 bg-white/5 text-white/75 hover:border-white/25 hover:bg-white/10 hover:text-white"
                   }`}
                 >
                   <div className="text-sm font-semibold">{label}</div>
@@ -3138,10 +3138,10 @@ export default function App() {
                 key={tab.id}
                 type="button"
                 onClick={() => setActiveTab(tab.id)}
-                className={`flex items-center gap-2 rounded-xl px-4 py-2 text-sm transition ${
+                  className={`flex items-center gap-2 rounded-xl px-4 py-2 text-sm transition ${
                   activeTab === tab.id
-                    ? "bg-brand-500 text-forest-950 font-semibold"
-                    : "text-forest-300 hover:bg-white/10"
+                    ? "bg-brand-700 text-gold-400 font-semibold shadow-inner"
+                    : "text-white/80 hover:text-white hover:bg-white/8"
                 }`}
               >
                 {tab.icon}
