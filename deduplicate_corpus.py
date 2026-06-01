@@ -20,7 +20,11 @@ Usage :
   python3 deduplicate_corpus.py --dry-run          # Affiche les doublons sans modifier la DB
   python3 deduplicate_corpus.py --execute           # Applique la déduplication
   python3 deduplicate_corpus.py --execute --delete  # Supprime les doublons (cascade chunks)
+
+Dépendances : sqlalchemy, psycopg (déjà installés dans l'environnement LiteRev)
 """
+
+from __future__ import annotations
 
 import argparse
 import hashlib
@@ -29,10 +33,9 @@ import os
 import re
 import unicodedata
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
-import psycopg2
-import psycopg2.extras
+from sqlalchemy import create_engine, text
 
 logging.basicConfig(
     level=logging.INFO,
@@ -42,11 +45,35 @@ logging.basicConfig(
 logger = logging.getLogger("dedup")
 
 # ─── Configuration ─────────────────────────────────────────────────────────────
+def _load_env_file(path: str) -> None:
+    p = Path(path)
+    if not p.exists():
+        return
+    for line in p.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+        if key and key not in os.environ:
+            os.environ[key] = value
+
+for _ep in [".env", "/opt/literev-api/.env", "/opt/literev-api/secrets.env", "/etc/literev/secrets"]:
+    _load_env_file(_ep)
+
 DB_URL = os.environ.get(
-    "DATABASE_URL",
-    "postgresql://literev:MyNewStrongPassword!@10.10.1.10:5432/literev"
+    "DB_URL",
+    os.environ.get(
+        "DATABASE_URL",
+        "postgresql+psycopg://literev:MyNewStrongPassword!@10.10.1.10:5432/literev"
+    )
 )
 
+engine = create_engine(DB_URL, pool_pre_ping=True)
+
+
+# ─── Fonctions utilitaires ──────────────────────────────────────────────────────
 
 def normalize_doi(doi: Optional[str]) -> Optional[str]:
     """Normalise un DOI : minuscules, sans espaces, sans préfixe https://doi.org/."""
@@ -62,12 +89,9 @@ def normalize_title(title: Optional[str]) -> Optional[str]:
     """Normalise un titre pour la comparaison : minuscules, sans accents, sans ponctuation."""
     if not title:
         return None
-    # Normalisation Unicode (supprime les accents)
     title = unicodedata.normalize('NFKD', title)
     title = ''.join(c for c in title if not unicodedata.combining(c))
-    # Minuscules
     title = title.lower()
-    # Supprime la ponctuation et les espaces multiples
     title = re.sub(r'[^\w\s]', ' ', title)
     title = re.sub(r'\s+', ' ', title).strip()
     return title if len(title) >= 10 else None
@@ -87,8 +111,7 @@ def levenshtein_ratio(s1: str, s2: str) -> float:
         return 0.0
     len1, len2 = len(s1), len(s2)
     if abs(len1 - len2) / max(len1, len2) > 0.2:
-        return 0.0  # Optimisation : skip si longueurs trop différentes
-    # Matrice DP
+        return 0.0
     dp = list(range(len2 + 1))
     for i in range(1, len1 + 1):
         prev = dp[:]
@@ -110,7 +133,7 @@ def compute_quality_score(doc: dict, has_fulltext: bool) -> float:
     elif doc.get('abstract'):
         score += 10.0
     citations = doc.get('citation_count') or 0
-    score += min(citations / 10.0, 20.0)  # Max 20 points pour les citations
+    score += min(citations / 10.0, 20.0)
     if doc.get('doi'):
         score += 5.0
     if doc.get('authors'):
@@ -122,15 +145,12 @@ def compute_quality_score(doc: dict, has_fulltext: bool) -> float:
     return min(score, 100.0)
 
 
-def get_connection():
-    """Crée une connexion PostgreSQL."""
-    return psycopg2.connect(DB_URL)
+# ─── Lecture des documents ──────────────────────────────────────────────────────
 
-
-def fetch_all_documents(conn) -> list[dict]:
+def fetch_all_documents() -> list[dict]:
     """Récupère tous les documents GESICA avec leurs métadonnées."""
-    with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-        cur.execute("""
+    with engine.connect() as conn:
+        rows = conn.execute(text("""
             SELECT
                 d.id, d.title, d.abstract, d.year, d.source, d.external_id,
                 d.doi, d.pmid, d.authors, d.journal, d.citation_count,
@@ -144,15 +164,14 @@ def fetch_all_documents(conn) -> list[dict]:
             WHERE d.project_context = 'gesica'
               AND (d.is_duplicate IS NULL OR d.is_duplicate = FALSE)
             ORDER BY d.id ASC
-        """)
-        return [dict(r) for r in cur.fetchall()]
+        """)).mappings().all()
+    return [dict(r) for r in rows]
 
+
+# ─── Détection des doublons ─────────────────────────────────────────────────────
 
 def find_duplicate_groups(docs: list[dict]) -> list[list[dict]]:
-    """
-    Identifie les groupes de doublons.
-    Retourne une liste de groupes, chaque groupe contant ≥2 documents.
-    """
+    """Identifie les groupes de doublons. Retourne une liste de groupes (≥2 docs)."""
     groups: list[list[dict]] = []
     used_ids: set[int] = set()
 
@@ -178,14 +197,14 @@ def find_duplicate_groups(docs: list[dict]) -> list[list[dict]]:
                 groups.append(group)
                 used_ids.update(ids)
 
-    # Groupes par PMID (pour les non encore groupés)
+    # Groupes par PMID
     for pmid, group in pmid_index.items():
         ungrouped = [d for d in group if d['id'] not in used_ids]
         if len(ungrouped) >= 2:
             groups.append(ungrouped)
             used_ids.update(d['id'] for d in ungrouped)
 
-    # Groupes par titre normalisé (hash exact d'abord)
+    # Groupes par hash de titre exact
     title_hash_index: dict[str, list[dict]] = {}
     for doc in docs:
         if doc['id'] in used_ids:
@@ -224,23 +243,20 @@ def find_duplicate_groups(docs: list[dict]) -> list[list[dict]]:
 
 def choose_canonical(group: list[dict]) -> dict:
     """Choisit le document maître dans un groupe de doublons."""
-    # Trier par score de qualité décroissant
     scored = [(doc, compute_quality_score(doc, doc.get('has_fulltext', False))) for doc in group]
     scored.sort(key=lambda x: (-x[1], x[0]['id']))
     return scored[0][0]
 
 
 def merge_metadata(canonical: dict, duplicates: list[dict]) -> dict:
-    """
-    Fusionne les métadonnées manquantes du canonique avec celles des doublons.
-    Retourne un dict des champs à mettre à jour sur le canonique.
-    """
-    updates = {}
-    fields_to_merge = ['doi', 'pmid', 'authors', 'journal', 'citation_count',
-                       'abstract', 'year', 'keywords', 'language', 'study_design',
-                       'sample_size', 'country', 'open_access', 'affiliations',
-                       'mesh_terms', 'structured_abstract', 'publication_type']
-
+    """Fusionne les métadonnées manquantes du canonique avec celles des doublons."""
+    updates: dict[str, Any] = {}
+    fields_to_merge = [
+        'doi', 'pmid', 'authors', 'journal', 'citation_count',
+        'abstract', 'year', 'keywords', 'language', 'study_design',
+        'sample_size', 'country', 'open_access', 'affiliations',
+        'mesh_terms', 'structured_abstract', 'publication_type',
+    ]
     for field in fields_to_merge:
         if not canonical.get(field):
             for dup in duplicates:
@@ -248,23 +264,18 @@ def merge_metadata(canonical: dict, duplicates: list[dict]) -> dict:
                     updates[field] = dup[field]
                     break
         elif field == 'citation_count':
-            # Prendre le maximum des citations
             max_citations = max(
                 (d.get('citation_count') or 0) for d in [canonical] + duplicates
             )
             if max_citations > (canonical.get('citation_count') or 0):
                 updates['citation_count'] = max_citations
-
     return updates
 
 
-def apply_deduplication(conn, groups: list[list[dict]], delete_duplicates: bool = False) -> dict:
-    """
-    Applique la déduplication en base :
-    - Marque les doublons avec is_duplicate=TRUE et canonical_id
-    - Fusionne les métadonnées manquantes vers le canonique
-    - Optionnel : supprime les doublons (cascade sur document_chunk)
-    """
+# ─── Application de la déduplication ───────────────────────────────────────────
+
+def apply_deduplication(groups: list[list[dict]], delete_duplicates: bool = False) -> dict:
+    """Applique la déduplication en base via SQLAlchemy."""
     stats = {
         'groups_processed': 0,
         'duplicates_marked': 0,
@@ -273,7 +284,7 @@ def apply_deduplication(conn, groups: list[list[dict]], delete_duplicates: bool 
         'errors': 0,
     }
 
-    with conn.cursor() as cur:
+    with engine.begin() as conn:
         for group in groups:
             try:
                 canonical = choose_canonical(group)
@@ -282,42 +293,45 @@ def apply_deduplication(conn, groups: list[list[dict]], delete_duplicates: bool 
                 # Fusionner les métadonnées
                 updates = merge_metadata(canonical, duplicates)
                 if updates:
-                    set_clause = ', '.join(f"{k} = %({k})s" for k in updates)
-                    updates['id'] = canonical['id']
-                    cur.execute(
-                        f"UPDATE literature_document SET {set_clause} WHERE id = %(id)s",
+                    set_parts = ", ".join(f"{k} = :{k}" for k in updates)
+                    updates['_id'] = canonical['id']
+                    conn.execute(
+                        text(f"UPDATE literature_document SET {set_parts} WHERE id = :_id"),
                         updates
                     )
                     stats['metadata_merged'] += 1
 
-                # Mettre à jour le quality_score du canonique
-                qs = compute_quality_score(canonical, canonical.get('has_fulltext', False))
-                cur.execute(
-                    "UPDATE literature_document SET quality_score = %s, title_hash = %s WHERE id = %s",
-                    (qs, title_hash(canonical.get('title')), canonical['id'])
-                )
+                # Mettre à jour quality_score et title_hash du canonique
+                qs = compute_quality_score(canonical, bool(canonical.get('has_fulltext')))
+                conn.execute(text("""
+                    UPDATE literature_document
+                    SET quality_score = :qs, title_hash = :th
+                    WHERE id = :id
+                """), {"qs": qs, "th": title_hash(canonical.get('title')), "id": canonical['id']})
 
                 if delete_duplicates:
-                    # Supprimer les doublons (cascade sur document_chunk via FK)
                     dup_ids = [d['id'] for d in duplicates]
-                    cur.execute(
-                        "DELETE FROM literature_document WHERE id = ANY(%s)",
-                        (dup_ids,)
+                    conn.execute(
+                        text("DELETE FROM literature_document WHERE id = ANY(:ids)"),
+                        {"ids": dup_ids}
                     )
                     stats['duplicates_deleted'] += len(dup_ids)
                 else:
-                    # Marquer les doublons
                     for dup in duplicates:
-                        dup_qs = compute_quality_score(dup, dup.get('has_fulltext', False))
-                        cur.execute(
-                            """UPDATE literature_document
-                               SET is_duplicate = TRUE,
-                                   canonical_id = %s,
-                                   quality_score = %s,
-                                   title_hash = %s
-                               WHERE id = %s""",
-                            (canonical['id'], dup_qs, title_hash(dup.get('title')), dup['id'])
-                        )
+                        dup_qs = compute_quality_score(dup, bool(dup.get('has_fulltext')))
+                        conn.execute(text("""
+                            UPDATE literature_document
+                            SET is_duplicate = TRUE,
+                                canonical_id  = :cid,
+                                quality_score = :qs,
+                                title_hash    = :th
+                            WHERE id = :id
+                        """), {
+                            "cid": canonical['id'],
+                            "qs": dup_qs,
+                            "th": title_hash(dup.get('title')),
+                            "id": dup['id'],
+                        })
                         stats['duplicates_marked'] += 1
 
                 stats['groups_processed'] += 1
@@ -325,90 +339,92 @@ def apply_deduplication(conn, groups: list[list[dict]], delete_duplicates: bool 
             except Exception as e:
                 logger.error(f"Erreur groupe {[d['id'] for d in group]}: {e}")
                 stats['errors'] += 1
-                conn.rollback()
                 continue
-
-        conn.commit()
 
     return stats
 
 
+# ─── Mise à jour des title_hash ─────────────────────────────────────────────────
+
+def update_title_hashes() -> int:
+    """Met à jour les title_hash pour tous les documents sans hash."""
+    with engine.connect() as conn:
+        rows = conn.execute(text("""
+            SELECT id, title FROM literature_document
+            WHERE project_context = 'gesica'
+              AND title_hash IS NULL
+              AND (is_duplicate IS NULL OR is_duplicate = FALSE)
+        """)).mappings().all()
+
+    updated = 0
+    with engine.begin() as conn:
+        for row in rows:
+            th = title_hash(row['title'])
+            if th:
+                conn.execute(
+                    text("UPDATE literature_document SET title_hash = :th WHERE id = :id"),
+                    {"th": th, "id": row['id']}
+                )
+                updated += 1
+    return updated
+
+
+# ─── Point d'entrée ─────────────────────────────────────────────────────────────
+
 def run_dedup(dry_run: bool = True, delete_duplicates: bool = False) -> None:
-    """Point d'entrée principal."""
     logger.info("=== Déduplication du corpus GESICA ===")
 
-    conn = get_connection()
-    try:
-        # 1. Récupérer tous les documents
-        logger.info("Chargement des documents...")
-        docs = fetch_all_documents(conn)
-        logger.info(f"  {len(docs)} documents chargés")
+    # 1. Charger les documents
+    logger.info("Chargement des documents...")
+    docs = fetch_all_documents()
+    logger.info(f"  {len(docs)} documents chargés")
 
-        # 2. Trouver les groupes de doublons
-        logger.info("Recherche des doublons...")
-        groups = find_duplicate_groups(docs)
-        total_dups = sum(len(g) - 1 for g in groups)
-        logger.info(f"  {len(groups)} groupes de doublons trouvés ({total_dups} doublons)")
+    # 2. Trouver les groupes de doublons
+    logger.info("Recherche des doublons...")
+    groups = find_duplicate_groups(docs)
+    total_dups = sum(len(g) - 1 for g in groups)
+    logger.info(f"  {len(groups)} groupes de doublons trouvés ({total_dups} doublons)")
 
-        if not groups:
-            logger.info("Aucun doublon trouvé. Corpus propre.")
-            return
+    if not groups:
+        logger.info("Aucun doublon trouvé. Corpus propre.")
+        return
 
-        # 3. Afficher les groupes trouvés
-        for i, group in enumerate(groups[:20]):  # Afficher max 20 groupes
-            canonical = choose_canonical(group)
-            dups = [d for d in group if d['id'] != canonical['id']]
-            logger.info(f"\nGroupe {i+1} ({len(group)} docs) :")
-            logger.info(f"  MAÎTRE [id={canonical['id']}] {canonical['title'][:80]}")
-            logger.info(f"    DOI={canonical.get('doi','')}, PMID={canonical.get('pmid','')}, "
-                       f"fulltext={canonical.get('has_fulltext',False)}, "
-                       f"citations={canonical.get('citation_count',0)}")
-            for dup in dups:
-                logger.info(f"  DOUBLON [id={dup['id']}] {dup['title'][:80]}")
-                logger.info(f"    DOI={dup.get('doi','')}, PMID={dup.get('pmid','')}, "
-                           f"fulltext={dup.get('has_fulltext',False)}, "
-                           f"citations={dup.get('citation_count',0)}")
+    # 3. Afficher les groupes (max 20)
+    for i, group in enumerate(groups[:20]):
+        canonical = choose_canonical(group)
+        dups = [d for d in group if d['id'] != canonical['id']]
+        logger.info(f"\nGroupe {i+1} ({len(group)} docs) :")
+        logger.info(f"  MAÎTRE [id={canonical['id']}] {(canonical['title'] or '')[:80]}")
+        logger.info(f"    DOI={canonical.get('doi','')}, PMID={canonical.get('pmid','')}, "
+                    f"fulltext={canonical.get('has_fulltext', False)}, "
+                    f"citations={canonical.get('citation_count', 0)}")
+        for dup in dups:
+            logger.info(f"  DOUBLON [id={dup['id']}] {(dup['title'] or '')[:80]}")
+            logger.info(f"    DOI={dup.get('doi','')}, PMID={dup.get('pmid','')}, "
+                        f"fulltext={dup.get('has_fulltext', False)}, "
+                        f"citations={dup.get('citation_count', 0)}")
 
-        if len(groups) > 20:
-            logger.info(f"  ... et {len(groups) - 20} autres groupes")
+    if len(groups) > 20:
+        logger.info(f"  ... et {len(groups) - 20} autres groupes")
 
-        if dry_run:
-            logger.info("\n[DRY RUN] Aucune modification appliquée. Utilisez --execute pour appliquer.")
-            return
+    if dry_run:
+        logger.info("\n[DRY RUN] Aucune modification appliquée. Utilisez --execute pour appliquer.")
+        return
 
-        # 4. Appliquer la déduplication
-        logger.info("\nApplication de la déduplication...")
-        stats = apply_deduplication(conn, groups, delete_duplicates=delete_duplicates)
-        logger.info(f"\n=== Résultats ===")
-        logger.info(f"  Groupes traités : {stats['groups_processed']}")
-        logger.info(f"  Doublons marqués : {stats['duplicates_marked']}")
-        logger.info(f"  Doublons supprimés : {stats['duplicates_deleted']}")
-        logger.info(f"  Métadonnées fusionnées : {stats['metadata_merged']}")
-        logger.info(f"  Erreurs : {stats['errors']}")
+    # 4. Appliquer la déduplication
+    logger.info("\nApplication de la déduplication...")
+    stats = apply_deduplication(groups, delete_duplicates=delete_duplicates)
+    logger.info("\n=== Résultats ===")
+    logger.info(f"  Groupes traités      : {stats['groups_processed']}")
+    logger.info(f"  Doublons marqués     : {stats['duplicates_marked']}")
+    logger.info(f"  Doublons supprimés   : {stats['duplicates_deleted']}")
+    logger.info(f"  Métadonnées fusionnées: {stats['metadata_merged']}")
+    logger.info(f"  Erreurs              : {stats['errors']}")
 
-        # 5. Mettre à jour les title_hash pour tous les documents non-doublons
-        logger.info("\nMise à jour des title_hash...")
-        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            cur.execute("""
-                SELECT id, title FROM literature_document
-                WHERE project_context = 'gesica'
-                  AND title_hash IS NULL
-                  AND (is_duplicate IS NULL OR is_duplicate = FALSE)
-            """)
-            rows = cur.fetchall()
-        with conn.cursor() as cur:
-            for row in rows:
-                th = title_hash(row['title'])
-                if th:
-                    cur.execute(
-                        "UPDATE literature_document SET title_hash = %s WHERE id = %s",
-                        (th, row['id'])
-                    )
-            conn.commit()
-        logger.info(f"  {len(rows)} title_hash mis à jour")
-
-    finally:
-        conn.close()
+    # 5. Mettre à jour les title_hash
+    logger.info("\nMise à jour des title_hash...")
+    n = update_title_hashes()
+    logger.info(f"  {n} title_hash mis à jour")
 
 
 if __name__ == "__main__":
@@ -420,6 +436,5 @@ if __name__ == "__main__":
     parser.add_argument("--delete", action="store_true",
                         help="Supprime les doublons (au lieu de les marquer)")
     args = parser.parse_args()
-
     dry = not args.execute
     run_dedup(dry_run=dry, delete_duplicates=args.delete)

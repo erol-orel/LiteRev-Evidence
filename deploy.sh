@@ -23,6 +23,7 @@ fi
 
 # ── Step 3: sync frontend source from repo to build folder ───────────────────
 echo "==> [2/5] Sync frontend sources"
+# Sync complet du dossier src/ (inclut components/, lib/, etc.)
 rsync -a --delete "$FRONTEND_SRC_DIR/src/"    "$FRONTEND_BUILD_DIR/src/"
 rsync -a --delete "$FRONTEND_SRC_DIR/public/" "$FRONTEND_BUILD_DIR/public/" 2>/dev/null || true
 cp -f "$FRONTEND_SRC_DIR/index.html"          "$FRONTEND_BUILD_DIR/index.html" 2>/dev/null || true
@@ -32,6 +33,15 @@ cp -f "$FRONTEND_SRC_DIR/tsconfig.json"       "$FRONTEND_BUILD_DIR/tsconfig.json
 cp -f "$FRONTEND_SRC_DIR/vite.config.ts"      "$FRONTEND_BUILD_DIR/vite.config.ts"
 cp -f "$FRONTEND_SRC_DIR/tailwind.config.js"  "$FRONTEND_BUILD_DIR/tailwind.config.js"
 cp -f "$FRONTEND_SRC_DIR/postcss.config.js"   "$FRONTEND_BUILD_DIR/postcss.config.js"
+# Copier le lock file pour éviter les réinstallations inutiles
+cp -f "$FRONTEND_SRC_DIR/pnpm-lock.yaml"      "$FRONTEND_BUILD_DIR/pnpm-lock.yaml" 2>/dev/null || true
+
+# Vérification : s'assurer que ScenarioDetailPage est bien présent
+if [ ! -f "$FRONTEND_BUILD_DIR/src/components/ScenarioDetailPage.tsx" ]; then
+  echo "ERREUR : ScenarioDetailPage.tsx manquant après sync !" >&2
+  exit 1
+fi
+echo "  ✓ ScenarioDetailPage.tsx présent"
 
 # ── Step 4: build ─────────────────────────────────────────────────────────────
 echo "==> [3/5] Frontend build"

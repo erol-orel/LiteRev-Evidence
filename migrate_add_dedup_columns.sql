@@ -1,5 +1,8 @@
 -- Migration : Ajout des colonnes de déduplication à literature_document
--- À exécuter sur db-01 : psql -U literev -d literev -h 10.10.1.10 -f migrate_add_dedup_columns.sql
+-- ─────────────────────────────────────────────────────────────────────────────
+-- Commande d'exécution (sans prompt de mot de passe) :
+--   PGPASSWORD="MyNewStrongPassword!" psql -U literev -d literev -h 10.10.1.10 -f /opt/literev-api/migrate_add_dedup_columns.sql
+-- ─────────────────────────────────────────────────────────────────────────────
 -- Idempotent : utilise ADD COLUMN IF NOT EXISTS
 
 BEGIN;
