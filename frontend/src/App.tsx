@@ -3104,11 +3104,8 @@ export default function App() {
                 </p>
               </div>
               <h1 className="mt-3 text-4xl font-semibold tracking-tight text-white">
-                Evidence-to-scenario search
+                Evidence-to-scenario
               </h1>
-              <p className="mt-3 max-w-2xl text-sm leading-6 text-forest-300">
-                Interface unifiée pour GeoAI4EI, GESICA et EVA — moteur FastAPI + PostgreSQL/pgvector.
-              </p>
             </div>
 
             <div className="grid gap-3 sm:grid-cols-3">
