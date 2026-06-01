@@ -2913,7 +2913,7 @@ def _run_clustering_background(scenario_id: str, force_refresh: bool = False) ->
                     _client = _OAI(api_key=openai_key)
                     top5 = np.argsort(distances)[:5]
                     llm_ctx = "\n\n".join(
-                        f"Titre: {docs[cluster_indices[int(t)]][' title']}\nRésumé: {(docs[cluster_indices[int(t)]][' abstract'] or '')[:350]}"
+                        f"Titre: {docs[cluster_indices[int(t)]]['title']}\nRésumé: {(docs[cluster_indices[int(t)]]['abstract'] or '')[:350]}"
                         for t in top5
                     )
                     completion = _client.chat.completions.create(

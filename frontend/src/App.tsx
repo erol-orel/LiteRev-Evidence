@@ -678,7 +678,7 @@ function StatsView({ corpusStats, gesicaStats, fulltextStats }: { corpusStats: C
               <div className="space-y-2">
                 {Object.entries(corpusStats.byProject).map(([proj, count]) => (
                   <div key={proj} className="flex items-center justify-between rounded-xl border border-white/10 bg-forest-900/40 px-3 py-2 text-sm">
-                    <span className="text-forest-200 capitalize">{proj}</span>
+                    <span className="text-white/80 capitalize">{proj}</span>
                     <span className="font-mono text-brand-300">{count}</span>
                   </div>
                 ))}
@@ -689,7 +689,7 @@ function StatsView({ corpusStats, gesicaStats, fulltextStats }: { corpusStats: C
               <div className="space-y-2">
                 {Object.entries(corpusStats.bySource).map(([src, count]) => (
                   <div key={src} className="flex items-center justify-between rounded-xl border border-white/10 bg-forest-900/40 px-3 py-2 text-sm">
-                    <span className="text-forest-200">{src}</span>
+                    <span className="text-white/80">{src}</span>
                     <span className="font-mono text-brand-300">{count}</span>
                   </div>
                 ))}
@@ -1927,7 +1927,7 @@ function ScenariosView({ scenarios, loading, error }: { scenarios: GesicaScenari
               <h4 className="mb-2 text-xs font-semibold uppercase tracking-wider text-forest-400">Actions recommandées</h4>
               <ul className="space-y-1.5">
                 {scenario.recommendedActions.map((action, i) => (
-                  <li key={i} className="flex items-start gap-2 text-sm text-forest-200">
+                  <li key={i} className="flex items-start gap-2 text-sm text-white/80">
                     <span className="mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full bg-brand-400" />
                     {action}
                   </li>
@@ -2294,7 +2294,7 @@ function ScenariosView({ scenarios, loading, error }: { scenarios: GesicaScenari
                 <div className="space-y-2">
                   {scenario.relevantArticles.map((article) => (
                     <div key={article.id} className="rounded-xl border border-white/10 bg-forest-900/40 px-3 py-2">
-                      <p className="text-sm font-medium text-forest-200 leading-5">{article.title}</p>
+                      <p className="text-sm font-medium text-white/80 leading-5">{article.title}</p>
                       {article.authors && (
                         <p className="text-xs text-forest-400 mt-0.5 line-clamp-1">Par {article.authors}</p>
                       )}
@@ -2542,7 +2542,7 @@ function ScreeningView({
                       : "border-white/5 bg-white/5 hover:border-white/20"
                   }`}
                 >
-                  <span className="text-xs font-semibold text-forest-200 line-clamp-2">{d.title}</span>
+                  <span className="text-xs font-semibold text-white/80 line-clamp-2">{d.title}</span>
                   <div className="flex items-center justify-between text-[10px] text-forest-400 w-full">
                     <span>{d.source} · {d.year ?? "—"}</span>
                     {d.screeningStatus === "included" && (
@@ -2590,7 +2590,7 @@ function ScreeningView({
 
               <div>
                 <h4 className="text-xs font-semibold uppercase tracking-wider text-forest-400 mb-2">Abstract</h4>
-                <p className="rounded-2xl border border-white/10 bg-forest-950/60 p-4 leading-6 text-sm text-forest-200">
+                <p className="rounded-2xl border border-white/10 bg-forest-950/60 p-4 leading-6 text-sm text-white/80">
                   {selectedDoc.abstract || "Aucun abstract disponible."}
                 </p>
               </div>
@@ -2724,7 +2724,7 @@ function AssistantView({
         <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_380px]">
           <div className="rounded-3xl border border-white/10 bg-white/5 p-6 shadow-2xl space-y-4">
             <h3 className="text-lg font-semibold text-white">Synthèse de l'Assistant</h3>
-            <div className="prose prose-invert max-w-none text-sm leading-7 text-forest-200 whitespace-pre-wrap">
+            <div className="prose prose-invert max-w-none text-sm leading-7 text-white/80 whitespace-pre-wrap">
               {response.answer}
             </div>
           </div>
@@ -3097,13 +3097,15 @@ export default function App() {
         <div className="mx-auto max-w-[1380px] px-6 py-6">
           <div className="flex flex-col gap-6 xl:flex-row xl:items-end xl:justify-between">
             <div className="max-w-3xl">
-              <div className="flex items-center gap-3 mb-2">
-                <img src="/logo.jpg" alt="LiteRev arbre" className="h-14 w-14 rounded-xl object-cover" />
+              <div className="flex items-center gap-4 mb-2">
+                <img src="/logo.jpg" alt="LiteRev arbre" className="h-16 w-16 rounded-2xl object-cover shadow-lg" />
+                <div>
+                  <div className="flex items-center gap-2">
+                    <img src="/literev-logo.png" alt="LiteRev" className="h-9 w-auto object-contain" />
+                    <span className="text-2xl font-semibold tracking-tight text-white/80">— Evidence to Scenario</span>
+                  </div>
+                </div>
               </div>
-              <h1 className="mt-3 flex items-center gap-3">
-                <img src="/literev-logo.png" alt="LiteRev" className="h-10 w-auto object-contain" />
-                <span className="text-4xl font-semibold tracking-tight text-white">- Evidence to Scenario</span>
-              </h1>
             </div>
 
             <div className="grid gap-3 sm:grid-cols-3">
@@ -3203,7 +3205,7 @@ export default function App() {
                     type="button"
                     onClick={handleReset}
                     title="Réinitialiser les filtres"
-                    className="flex items-center gap-1 rounded-xl border border-white/10 px-2 py-1 text-xs text-forest-400 transition hover:border-white/20 hover:text-forest-200"
+                    className="flex items-center gap-1 rounded-xl border border-white/10 px-2 py-1 text-xs text-forest-400 transition hover:border-white/20 hover:text-white/80"
                   >
                     <RotateCcw size={12} />
                     Reset
@@ -3215,7 +3217,7 @@ export default function App() {
                     const options = filterOptions?.[key] ?? [];
                     return (
                       <label key={key} className="block">
-                        <span className="mb-2 block text-sm font-medium text-forest-200">
+                        <span className="mb-2 block text-sm font-medium text-white/80">
                           {label}
                         </span>
                         <select
@@ -3240,7 +3242,7 @@ export default function App() {
                   })}
 
                   <div>
-                    <span className="mb-2 block text-sm font-medium text-forest-200">
+                    <span className="mb-2 block text-sm font-medium text-white/80">
                       Année{" "}
                       <span className="font-mono text-brand-300">
                         {yearRange[0]} — {yearRange[1]}
@@ -3388,7 +3390,7 @@ export default function App() {
                                 href={result.url}
                                 target="_blank"
                                 rel="noopener noreferrer"
-                                className="inline-flex shrink-0 items-center gap-2 rounded-xl border border-white/10 px-3 py-2 text-sm text-forest-200 hover:bg-white/10"
+                                className="inline-flex shrink-0 items-center gap-2 rounded-xl border border-white/10 px-3 py-2 text-sm text-white/80 hover:bg-white/10"
                               >
                                 Source
                                 <ExternalLink size={14} />
@@ -3435,7 +3437,7 @@ export default function App() {
                             </span>
                           </div>
 
-                          <p className="mt-4 text-sm leading-6 text-forest-200">
+                          <p className="mt-4 text-sm leading-6 text-white/80">
                             {result.highlight || result.content}
                           </p>
 
@@ -3454,7 +3456,7 @@ export default function App() {
                                   className={`rounded-full border px-3 py-1 text-xs transition ${
                                     relevanceMap[result.id] === tag
                                       ? "border-brand-400 bg-brand-500/15 text-brand-200"
-                                      : "border-white/10 bg-white/5 text-forest-400 hover:border-white/20 hover:text-forest-200"
+                                      : "border-white/10 bg-white/5 text-forest-400 hover:border-white/20 hover:text-white/80"
                                   }`}
                                 >
                                   {tag}
@@ -3501,7 +3503,7 @@ export default function App() {
                             Chargement du document complet...
                           </div>
                         ) : (
-                          <div className="space-y-5 text-sm text-forest-200">
+                          <div className="space-y-5 text-sm text-white/80">
                             <div>
                               <p className="text-xs uppercase tracking-[0.2em] text-brand-300">
                                 Document detail
@@ -3517,7 +3519,7 @@ export default function App() {
                                   href={detailView.url}
                                   target="_blank"
                                   rel="noopener noreferrer"
-                                  className="inline-flex items-center gap-2 rounded-xl border border-white/10 px-3 py-2 text-sm text-forest-200 hover:bg-white/10"
+                                  className="inline-flex items-center gap-2 rounded-xl border border-white/10 px-3 py-2 text-sm text-white/80 hover:bg-white/10"
                                 >
                                   Open source
                                   <ExternalLink size={16} />

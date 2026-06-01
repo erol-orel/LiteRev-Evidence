@@ -902,6 +902,7 @@ function ClusteringSection({ scenarioId }: { scenarioId: string }) {
     return () => stopPolling();
   }, [load, stopPolling]);
 
+  const [vizTab, setVizTab] = useState<'scatter'|'graph'>('scatter');
   const activeClusterData = data?.clusters.find((c) => c.cluster_id === selectedCluster);
 
   return (
@@ -943,25 +944,26 @@ function ClusteringSection({ scenarioId }: { scenarioId: string }) {
             <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
               {/* Carte UMAP 2D (SVG) */}
               <div className="lg:col-span-1 space-y-4">
-                <div className="rounded-2xl border border-white/5 bg-white/2 p-4 flex flex-col justify-between">
-                  <div>
-                    <span className="text-[10px] font-bold uppercase tracking-wider text-forest-400">Visualisation 2D (UMAP)</span>
-                    <p className="text-xs text-forest-500 mt-1 leading-4">Chaque point représente un article scientifique. Les articles proches traitent de sujets similaires.</p>
+                <div className="rounded-2xl border border-white/5 bg-white/2 p-4 flex flex-col gap-3">
+                  <div className="flex items-center gap-1">
+                    <button onClick={()=>setVizTab("scatter")} className={`px-3 py-1 rounded-lg text-[10px] font-semibold uppercase tracking-wider transition ${vizTab==="scatter"?"bg-brand-500/20 text-brand-300 border border-brand-500/30":"text-white/40 hover:text-white/70"}`}>UMAP 2D</button>
+                    <button onClick={()=>setVizTab("graph")} className={`px-3 py-1 rounded-lg text-[10px] font-semibold uppercase tracking-wider transition ${vizTab==="graph"?"bg-gold-500/20 text-gold-300 border border-gold-500/30":"text-white/40 hover:text-white/70"}`}>Knowledge Graph</button>
                   </div>
-
-                  {/* Graphique de dispersion SVG interactif */}
-                  <div className="relative aspect-square w-full bg-forest-950/40 rounded-xl border border-white/5 mt-4 overflow-hidden flex items-center justify-center">
-                    <UmapScatterPlot
-                      clusters={data.clusters}
-                      selectedCluster={selectedCluster}
-                      onSelectCluster={setSelectedCluster}
-                    />
-                  </div>
-
-                  <div className="flex items-center justify-between text-[10px] text-forest-500 mt-3 font-mono">
-                    <span>Axe X (UMAP 1)</span>
-                    <span>Axe Y (UMAP 2)</span>
-                  </div>
+                  {vizTab==="scatter"&&(
+                    <>
+                      <p className="text-[10px] text-white/40 leading-4">Points = articles. Proximité = similarité. Nuages = groupes thématiques.</p>
+                      <div className="w-full bg-[#0a1410] rounded-xl border border-white/5 overflow-hidden">
+                        <UmapScatterPlot clusters={data.clusters} selectedCluster={selectedCluster} onSelectCluster={setSelectedCluster}/>
+                      </div>
+                      <div className="flex items-center justify-between text-[10px] text-white/25 font-mono">
+                        <span>← UMAP dim 1 →</span>
+                        <span>{data.n_docs} articles · {data.n_clusters} clusters</span>
+                      </div>
+                    </>
+                  )}
+                  {vizTab==="graph"&&(
+                    <KnowledgeGraph clusters={data.clusters} selectedCluster={selectedCluster} onSelectCluster={setSelectedCluster}/>
+                  )}
                 </div>
 
                 {/* Sélecteur de cluster de gauche */}
@@ -1016,7 +1018,7 @@ function ClusteringSection({ scenarioId }: { scenarioId: string }) {
                         <Brain size={13} />
                         Synthèse du groupe
                       </div>
-                      <div className="rounded-2xl border border-brand-500/15 bg-brand-500/5 p-4 text-xs text-forest-200 leading-6 italic">
+                      <div className="rounded-2xl border border-brand-500/15 bg-brand-500/5 p-4 text-xs text-white/80 leading-6 italic">
                         "{activeClusterData.summary}"
                       </div>
                     </div>
@@ -1059,98 +1061,158 @@ function ClusteringSection({ scenarioId }: { scenarioId: string }) {
   );
 }
 
-// Composant interne pour dessiner les points UMAP en SVG
-function UmapScatterPlot({
-  clusters,
-  selectedCluster,
-  onSelectCluster
-}: {
-  clusters: ClusterResult[];
-  selectedCluster: number | null;
-  onSelectCluster: (id: number) => void;
-}) {
-  // Aplatir tous les points pour trouver les min/max et normaliser les coordonnées
-  const allPoints: Array<ClusterPoint & { cluster_id: number; is_noise: boolean }> = [];
-  clusters.forEach((c) => {
-    if (c.points) {
-      c.points.forEach((p) => {
-        allPoints.push({ ...p, cluster_id: c.cluster_id, is_noise: c.is_noise });
-      });
-    }
-  });
-
-  if (allPoints.length === 0) {
-    return <span className="text-xs text-forest-500">Aucun point à afficher.</span>;
+// Palette de couleurs pour les clusters
+const CLUSTER_VIVID = [
+  "#34d399","#38bdf8","#a78bfa","#fbbf24","#f472b6","#60a5fa","#2dd4bf","#c084fc","#fb7185",
+];
+function getClusterColor(clusterId: number, isNoise: boolean): string {
+  if (isNoise) return "#94a3b8";
+  return CLUSTER_VIVID[clusterId % CLUSTER_VIVID.length];
+}
+// Convex hull (gift wrapping)
+function convexHull(pts: Array<{x:number;y:number}>): Array<{x:number;y:number}> {
+  if (pts.length < 3) return pts;
+  const sorted = [...pts].sort((a,b) => a.x-b.x||a.y-b.y);
+  const cross = (o:{x:number;y:number},a:{x:number;y:number},b:{x:number;y:number}) =>
+    (a.x-o.x)*(b.y-o.y)-(a.y-o.y)*(b.x-o.x);
+  const lower: Array<{x:number;y:number}> = [];
+  for (const p of sorted) {
+    while (lower.length>=2 && cross(lower[lower.length-2],lower[lower.length-1],p)<=0) lower.pop();
+    lower.push(p);
   }
-
-  const xs = allPoints.map((p) => p.x);
-  const ys = allPoints.map((p) => p.y);
-  const minX = Math.min(...xs);
-  const maxX = Math.max(...xs);
-  const minY = Math.min(...ys);
-  const maxY = Math.max(...ys);
-
-  const rangeX = maxX - minX || 1;
-  const rangeY = maxY - minY || 1;
-
-  // Dimensions de la boîte de visualisation SVG
-  const width = 300;
-  const height = 300;
-  const padding = 20;
-
+  const upper: Array<{x:number;y:number}> = [];
+  for (let i=sorted.length-1;i>=0;i--) {
+    const p=sorted[i];
+    while (upper.length>=2 && cross(upper[upper.length-2],upper[upper.length-1],p)<=0) upper.pop();
+    upper.push(p);
+  }
+  upper.pop(); lower.pop();
+  return lower.concat(upper);
+}
+function expandHull(hull: Array<{x:number;y:number}>, margin: number): Array<{x:number;y:number}> {
+  if (!hull.length) return hull;
+  const cx=hull.reduce((s,p)=>s+p.x,0)/hull.length;
+  const cy=hull.reduce((s,p)=>s+p.y,0)/hull.length;
+  return hull.map(p=>{const dx=p.x-cx,dy=p.y-cy,d=Math.sqrt(dx*dx+dy*dy)||1;return{x:p.x+(dx/d)*margin,y:p.y+(dy/d)*margin};});
+}
+// Knowledge Graph — nœuds = clusters, arêtes = mots-clés partagés
+function KnowledgeGraph({clusters,selectedCluster,onSelectCluster}:{clusters:ClusterResult[];selectedCluster:number|null;onSelectCluster:(id:number)=>void}) {
+  const W=420,H=340,CX=W/2,CY=H/2;
+  const denseC=clusters.filter(c=>!c.is_noise);
+  if (!denseC.length) return <span className="text-xs text-white/40">Aucun cluster.</span>;
+  const r0=Math.min(W,H)*0.32;
+  const nodes=denseC.map((c,i)=>{
+    const angle=(2*Math.PI*i)/denseC.length-Math.PI/2;
+    return{...c,x:CX+r0*Math.cos(angle),y:CY+r0*Math.sin(angle),r:Math.max(18,Math.min(36,12+c.n_docs/8))};
+  });
+  const edges: Array<{a:number;b:number;weight:number;words:string[]}>=[];
+  for(let i=0;i<nodes.length;i++) for(let j=i+1;j<nodes.length;j++){
+    const wA=new Set(nodes[i].top_words||[]);
+    const shared=(nodes[j].top_words||[]).filter(w=>wA.has(w));
+    if(shared.length>0) edges.push({a:i,b:j,weight:shared.length,words:shared.slice(0,3)});
+  }
   return (
-    <svg width="100%" height="100%" viewBox={`0 0 ${width} ${height}`} className="overflow-visible">
-      {/* Grille de fond discrète */}
-      <line x1={padding} y1={height / 2} x2={width - padding} y2={height / 2} stroke="rgba(255,255,255,0.05)" strokeDasharray="3,3" />
-      <line x1={width / 2} y1={padding} x2={width / 2} y2={height - padding} stroke="rgba(255,255,255,0.05)" strokeDasharray="3,3" />
-
-      {/* Tracer tous les points */}
-      {allPoints.map((p) => {
-        // Normalisation
-        const cx = padding + ((p.x - minX) / rangeX) * (width - 2 * padding);
-        const cy = height - padding - ((p.y - minY) / rangeY) * (height - 2 * padding); // Inverser Y pour le SVG
-
-        const isSelected = selectedCluster === p.cluster_id;
-        const color = getClusterColor(p.cluster_id, p.is_noise);
-
-        return (
-          <circle
-            key={p.id}
-            cx={cx}
-            cy={cy}
-            r={isSelected ? 6 : p.is_noise ? 2 : 4}
-            fill={color}
-            opacity={isSelected ? 1.0 : p.is_noise ? 0.2 : 0.6}
-            stroke={isSelected ? "#ffffff" : "transparent"}
-            strokeWidth={1.5}
-            className="cursor-pointer transition-all duration-200 hover:scale-150 hover:opacity-100"
-            onClick={() => onSelectCluster(p.cluster_id)}
-          >
-            <title>{p.title} ({p.year || "Année inconnue"})</title>
+    <div className="w-full">
+      <p className="text-[10px] text-white/40 leading-4 mb-2">Nœuds = clusters. Connexions = mots-clés partagés. Taille = nb articles.</p>
+      <svg width="100%" viewBox={`0 0 ${W} ${H}`} className="bg-[#0a1410] rounded-xl border border-white/5 overflow-visible">
+        <defs>
+          {nodes.map(n=>(
+            <radialGradient key={`ng-${n.cluster_id}`} id={`ng-${n.cluster_id}`} cx="50%" cy="50%" r="50%">
+              <stop offset="0%" stopColor={getClusterColor(n.cluster_id,false)} stopOpacity="0.9"/>
+              <stop offset="100%" stopColor={getClusterColor(n.cluster_id,false)} stopOpacity="0.35"/>
+            </radialGradient>
+          ))}
+          <filter id="kglow"><feGaussianBlur stdDeviation="3" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+        </defs>
+        {edges.map((e,i)=>{
+          const na=nodes[e.a],nb=nodes[e.b];
+          const mx=(na.x+nb.x)/2,my=(na.y+nb.y)/2;
+          const active=selectedCluster===na.cluster_id||selectedCluster===nb.cluster_id;
+          return(<g key={i}>
+            <line x1={na.x} y1={na.y} x2={nb.x} y2={nb.y} stroke={active?"rgba(255,255,255,0.22)":"rgba(255,255,255,0.06)"} strokeWidth={active?e.weight*1.2:e.weight*0.5} strokeDasharray={active?"none":"4,3"}/>
+            {active&&e.words.length>0&&<text x={mx} y={my-4} textAnchor="middle" fontSize="7" fill="rgba(255,255,255,0.45)" className="pointer-events-none select-none">{e.words.join(", ")}</text>}
+          </g>);
+        })}
+        {nodes.map(n=>{
+          const sel=selectedCluster===n.cluster_id;
+          return(<g key={n.cluster_id} className="cursor-pointer" onClick={()=>onSelectCluster(n.cluster_id)}>
+            {sel&&<circle cx={n.x} cy={n.y} r={n.r+9} fill={getClusterColor(n.cluster_id,false)} opacity={0.13}/>}
+            <circle cx={n.x} cy={n.y} r={n.r} fill={`url(#ng-${n.cluster_id})`} stroke={sel?"#fff":getClusterColor(n.cluster_id,false)} strokeWidth={sel?2:1} strokeOpacity={sel?0.9:0.35} filter={sel?"url(#kglow)":undefined}/>
+            <text x={n.x} y={n.y-2} textAnchor="middle" dominantBaseline="middle" fontSize="8" fontWeight="700" fill="#fff" opacity={0.9} className="pointer-events-none select-none">{n.cluster_name.replace("Cluster ","C")}</text>
+            <text x={n.x} y={n.y+9} textAnchor="middle" dominantBaseline="middle" fontSize="7" fill="rgba(255,255,255,0.5)" className="pointer-events-none select-none">{n.n_docs}</text>
+          </g>);
+        })}
+      </svg>
+    </div>
+  );
+}
+// Scatter plot UMAP moderne avec nuages pastel
+function UmapScatterPlot({clusters,selectedCluster,onSelectCluster}:{clusters:ClusterResult[];selectedCluster:number|null;onSelectCluster:(id:number)=>void}) {
+  const allPoints: Array<ClusterPoint&{cluster_id:number;is_noise:boolean}>=[];
+  clusters.forEach(c=>{if(c.points) c.points.forEach(p=>allPoints.push({...p,cluster_id:c.cluster_id,is_noise:c.is_noise}));});
+  if(!allPoints.length) return <span className="text-xs text-white/40">Aucun point.</span>;
+  const xs=allPoints.map(p=>p.x),ys=allPoints.map(p=>p.y);
+  const minX=Math.min(...xs),maxX=Math.max(...xs),minY=Math.min(...ys),maxY=Math.max(...ys);
+  const rX=maxX-minX||1,rY=maxY-minY||1;
+  const W=420,H=370,PAD=28;
+  const sv=(x:number,y:number)=>({cx:PAD+((x-minX)/rX)*(W-2*PAD),cy:H-PAD-((y-minY)/rY)*(H-2*PAD)});
+  const hulls: Record<number,string>={};
+  clusters.filter(c=>!c.is_noise&&c.points&&c.points.length>=3).forEach(c=>{
+    const pts=c.points!.map(p=>{const s=sv(p.x,p.y);return{x:s.cx,y:s.cy};});
+    const hull=expandHull(convexHull(pts),16);
+    if(hull.length>=3) hulls[c.cluster_id]=hull.map(p=>`${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(" ");
+  });
+  const pastelColors=["rgba(52,211,153,0.13)","rgba(56,189,248,0.13)","rgba(167,139,250,0.13)","rgba(251,191,36,0.13)","rgba(244,114,182,0.13)","rgba(96,165,250,0.13)","rgba(45,212,191,0.13)","rgba(192,132,252,0.13)","rgba(251,113,133,0.13)"];
+  return (
+    <svg width="100%" viewBox={`0 0 ${W} ${H}`} className="overflow-visible">
+      <defs>
+        <filter id="ptglow"><feGaussianBlur stdDeviation="2.5" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+      </defs>
+      {[0.25,0.5,0.75].map(f=>(
+        <React.Fragment key={f}>
+          <line x1={PAD} y1={PAD+f*(H-2*PAD)} x2={W-PAD} y2={PAD+f*(H-2*PAD)} stroke="rgba(255,255,255,0.04)" strokeDasharray="4,4"/>
+          <line x1={PAD+f*(W-2*PAD)} y1={PAD} x2={PAD+f*(W-2*PAD)} y2={H-PAD} stroke="rgba(255,255,255,0.04)" strokeDasharray="4,4"/>
+        </React.Fragment>
+      ))}
+      {Object.entries(hulls).map(([cid,pts])=>{
+        const id=parseInt(cid),sel=selectedCluster===id;
+        return(<polygon key={`h-${cid}`} points={pts}
+          fill={pastelColors[id%pastelColors.length]}
+          stroke={getClusterColor(id,false)} strokeWidth={sel?1.5:0.7}
+          strokeOpacity={sel?0.55:0.2} strokeDasharray={sel?"none":"5,3"}
+          className="transition-all duration-300 cursor-pointer" onClick={()=>onSelectCluster(id)}/>);
+      })}
+      {allPoints.map(p=>{
+        const{cx,cy}=sv(p.x,p.y);
+        const sel=selectedCluster===p.cluster_id;
+        const col=getClusterColor(p.cluster_id,p.is_noise);
+        const r=p.is_noise?2.5:sel?7:4.5;
+        return(<g key={p.id} className="cursor-pointer" onClick={()=>onSelectCluster(p.cluster_id)}>
+          {sel&&!p.is_noise&&<circle cx={cx} cy={cy} r={r+6} fill={col} opacity={0.14}/>}
+          <circle cx={cx} cy={cy} r={r} fill={col}
+            opacity={p.is_noise?0.22:sel?1:0.78}
+            stroke={sel?"#fff":p.is_noise?"transparent":col}
+            strokeWidth={sel?2:0.5} strokeOpacity={0.5}
+            filter={sel?"url(#ptglow)":undefined}
+            className="transition-all duration-200">
+            <title>{p.title} ({p.year||"?"})</title>
           </circle>
-        );
+        </g>);
+      })}
+      {clusters.filter(c=>!c.is_noise&&c.points&&c.points.length>0).map(c=>{
+        const pts=c.points!.map(p=>sv(p.x,p.y));
+        const mx=pts.reduce((s,p)=>s+p.cx,0)/pts.length;
+        const my=pts.reduce((s,p)=>s+p.cy,0)/pts.length;
+        const sel=selectedCluster===c.cluster_id;
+        return(<text key={`lbl-${c.cluster_id}`} x={mx} y={my} textAnchor="middle" dominantBaseline="middle"
+          fontSize="9" fontWeight="700" fill={getClusterColor(c.cluster_id,false)}
+          opacity={sel?1:0.5} letterSpacing="0.05em" className="pointer-events-none select-none uppercase">
+          {c.cluster_name.replace("Cluster ","C")}
+        </text>);
       })}
     </svg>
   );
 }
-
-// Palette de couleurs pour les clusters
-function getClusterColor(clusterId: number, isNoise: boolean): string {
-  if (isNoise) return "#64748b"; // Gris ardoise pour le bruit
-  const colors = [
-    "#10b981", // Émeraude (Cluster 0)
-    "#06b6d4", // Cyan (Cluster 1)
-    "#8b5cf6", // Violet (Cluster 2)
-    "#f59e0b", // Ambre (Cluster 3)
-    "#ec4899", // Rose (Cluster 4)
-    "#3b82f6", // Bleu (Cluster 5)
-    "#14b8a6", // Sarcelle (Cluster 6)
-    "#a855f7", // Mauve (Cluster 7)
-    "#f43f5e", // Rose vif (Cluster 8)
-  ];
-  return colors[clusterId % colors.length];
-}
-
 // ─── Section: RAG ─────────────────────────────────────────────────────────────
 
 function RagSection({ scenarioId, detail }: { scenarioId: string; detail: ScenarioDetail }) {
@@ -1233,7 +1295,7 @@ function RagSection({ scenarioId, detail }: { scenarioId: string; detail: Scenar
           {/* Réponse */}
           <div className="lg:col-span-2 space-y-3">
             <p className="text-[10px] font-bold uppercase tracking-wider text-forest-400">Réponse de l'Assistant</p>
-            <div className="rounded-2xl border border-white/5 bg-white/2 p-4 text-xs text-forest-200 leading-6 whitespace-pre-wrap">
+            <div className="rounded-2xl border border-white/5 bg-white/2 p-4 text-xs text-white/80 leading-6 whitespace-pre-wrap">
               {result.answer}
             </div>
             {result.model && (
