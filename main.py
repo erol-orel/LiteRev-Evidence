@@ -97,13 +97,15 @@ class ChunkIn(BaseModel):
 class SearchIn(BaseModel):
     query_text: str | None = None
     querytext: str | None = None
+    query: str | None = None  # alias pour compatibilité frontend
     filters: dict[str, Any] | None = None
     mode: str = Field(default="hybrid") # Mode par défaut hybride
     limit: int = Field(default=10, ge=1, le=100)
     offset: int = Field(default=0, ge=0)
+    project_context: str | None = None  # alias pour filtres projet
 
     def resolved_query(self) -> str:
-        q = (self.query_text or self.querytext or "").strip()
+        q = (self.query_text or self.querytext or self.query or "").strip()
         if not q:
             raise HTTPException(
                 status_code=422, detail="query_text is required"
@@ -1482,10 +1484,12 @@ def get_demand_forecasting_prediction(lat: float = 46.2044, lon: float = 6.1432,
     except Exception as e:
         logger.error(f"Erreur lors de la prédiction de la demande : {str(e)}")
         # Fallback statique robuste
-        start_date = datetime.now()
+        from datetime import datetime as _dt, timedelta as _td
+        import numpy as np
+        start_date = _dt.now()
         fallback_preds = []
         for i in range(1, 8):
-            target_date = start_date + timedelta(days=i)
+            target_date = start_date + _td(days=i)
             dayofweek = target_date.weekday()
             demand = 145 + (15 if dayofweek in [4, 5] else -5) + int(np.random.normal(0, 5))
             fallback_preds.append({
