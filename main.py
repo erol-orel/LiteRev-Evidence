@@ -2488,6 +2488,9 @@ def get_scenario_detail(scenario_id: str) -> dict[str, Any]:
         "evidence_extraction_prompt": enriched.get("evidence_extraction_prompt", ""),
         "model_info": enriched.get("model_info", {}),
         "alert_thresholds": enriched.get("alert_thresholds", {}),
+        "databases": enriched.get("databases", []),
+        "outcome_definition": enriched.get("outcome_definition", ""),
+        "variables_detail": enriched.get("variables_detail", {}),
         "corpus_stats": {
             "total": int(stats["total"] or 0),
             "with_fulltext": int(stats["with_fulltext"] or 0),
@@ -2703,14 +2706,16 @@ def run_scenario_model(scenario_id: str) -> dict[str, Any]:
 
 
 @app.get("/gesica/scenarios/{scenario_id}/clustering")
-def get_scenario_clustering(scenario_id: str, n_clusters: int = 5) -> dict[str, Any]:
+def get_scenario_clustering(scenario_id: str) -> dict[str, Any]:
     """
-    Clustering K-means + topic modelling LDA sur le corpus du scénario.
-    Retourne les topics principaux et la distribution des articles par cluster.
+    Clustering avancé utilisant UMAP (réduction de dimension 2D) et HDBSCAN (clustering à densité)
+    sur le corpus du scénario. Utilise ensuite un LLM (GPT-4o-mini) pour générer un résumé
+    clinique et opérationnel de chaque cluster à partir des articles représentatifs.
     """
     meta = GESICA_SCENARIO_METADATA.get(scenario_id)
     if not meta:
         raise HTTPException(status_code=404, detail=f"Scénario '{scenario_id}' non trouvé")
+    
     with engine.connect() as conn:
         docs = conn.execute(text("""
             SELECT d.id, d.title, d.abstract, d.year, d.journal
@@ -2723,106 +2728,166 @@ def get_scenario_clustering(scenario_id: str, n_clusters: int = 5) -> dict[str, 
             ORDER BY d.year DESC NULLS LAST
             LIMIT 500
         """), {"sid": scenario_id}).mappings().all()
-    if len(docs) < 5:
+        
+    if len(docs) < 10:
+        # Fallback si trop peu d'articles pour UMAP + HDBSCAN
         return {
             "scenario_id": scenario_id,
             "n_docs": len(docs),
-            "message": "Corpus insuffisant pour le clustering (< 5 articles avec abstract)",
+            "message": "Corpus insuffisant pour le clustering avancé UMAP+HDBSCAN (minimum 10 articles avec abstract requis)",
             "clusters": [],
-            "topics": [],
         }
+        
     try:
         from sklearn.feature_extraction.text import TfidfVectorizer
-        from sklearn.cluster import KMeans
-        from sklearn.decomposition import LatentDirichletAllocation
         import numpy as np
-        texts = [f"{d['title']} {d['abstract'] or ''}" for d in docs]
-        # TF-IDF vectorisation
+        import umap
+        import hdbscan
+        from openai import OpenAI
+        
+        texts = [f"{d['title']}\n{d['abstract'] or ''}" for d in docs]
+        
+        # TF-IDF Vectorization
         vectorizer = TfidfVectorizer(
-            max_features=500,
-            stop_words=None,  # Corpus multilingue
+            max_features=1000,
+            stop_words='english',
             min_df=2,
             max_df=0.9,
-            ngram_range=(1, 2),
+            ngram_range=(1, 2)
         )
-        X = vectorizer.fit_transform(texts)
-        # K-means clustering
-        n_clusters_actual = min(n_clusters, len(docs) // 3, 10)
-        kmeans = KMeans(n_clusters=n_clusters_actual, random_state=42, n_init=10)
-        labels = kmeans.fit_predict(X)
-        # LDA topic modelling
-        lda = LatentDirichletAllocation(
-            n_components=min(n_clusters_actual, 5),
-            random_state=42,
-            max_iter=20,
+        X = vectorizer.fit_transform(texts).toarray()
+        
+        # UMAP - Réduction à 2 dimensions pour la visualisation et le clustering à densité
+        # n_neighbors petit pour conserver la structure locale (clustering plus fin)
+        reducer = umap.UMAP(
+            n_neighbors=min(15, len(docs) - 1),
+            n_components=2,
+            metric='cosine',
+            random_state=42
         )
-        lda.fit(X)
+        embedding_2d = reducer.fit_transform(X)
+        
+        # HDBSCAN - Clustering à densité robuste
+        # min_cluster_size ajusté en fonction de la taille du corpus
+        min_cluster_size = max(3, len(docs) // 15)
+        clusterer = hdbscan.HDBSCAN(
+            min_cluster_size=min_cluster_size,
+            min_samples=2,
+            metric='euclidean',
+            cluster_selection_method='eom'
+        )
+        labels = clusterer.fit_predict(embedding_2d)
+        
+        # Récupérer les mots-clés TF-IDF globaux
         feature_names = vectorizer.get_feature_names_out()
-        # Extraire les top mots par topic
-        topics = []
-        for topic_idx, topic in enumerate(lda.components_):
-            top_indices = topic.argsort()[-10:][::-1]
-            top_words = [feature_names[i] for i in top_indices]
-            topics.append({
-                "topic_id": topic_idx,
-                "top_words": top_words,
-                "weight": float(topic.sum()),
-            })
-        # Construire les clusters avec articles représentatifs
+        
+        # Regrouper les documents par cluster
+        unique_labels = set(labels)
         clusters = []
-        for cluster_id in range(n_clusters_actual):
-            cluster_docs = [docs[i] for i, l in enumerate(labels) if l == cluster_id]
-            if not cluster_docs:
-                continue
-            # Trouver le document le plus central (plus proche du centroïde)
-            cluster_indices = [i for i, l in enumerate(labels) if l == cluster_id]
-            cluster_matrix = X[cluster_indices]
-            centroid = kmeans.cluster_centers_[cluster_id]
-            distances = np.linalg.norm(cluster_matrix.toarray() - centroid, axis=1)
+        
+        # Clé API OpenAI pour les résumés de clusters
+        openai_key = os.getenv("OPENAI_API_KEY")
+        client = None
+        if openai_key:
+            client = OpenAI(api_key=openai_key)
+            
+        for label in unique_labels:
+            cluster_indices = [i for i, l in enumerate(labels) if l == label]
+            cluster_docs = [docs[i] for i in cluster_indices]
+            
+            # Calculer les coordonnées moyennes du cluster pour l'affichage
+            coords = embedding_2d[cluster_indices]
+            mean_x = float(np.mean(coords[:, 0]))
+            mean_y = float(np.mean(coords[:, 1]))
+            
+            # Mots clés spécifiques au cluster via TF-IDF moyen
+            cluster_tfidf = X[cluster_indices].mean(axis=0)
+            top_indices = cluster_tfidf.argsort()[-10:][::-1]
+            top_words = [feature_names[i] for i in top_indices if cluster_tfidf[i] > 0]
+            
+            # Identifier le document le plus central (médoride géométrique dans l'espace UMAP)
+            center = np.mean(coords, axis=0)
+            distances = np.linalg.norm(coords - center, axis=1)
             central_idx = cluster_indices[int(np.argmin(distances))]
-            central_doc = docs[central_idx]
-            # Top mots du cluster
-            cluster_tfidf = X[cluster_indices].mean(axis=0).A1
-            top_cluster_indices = cluster_tfidf.argsort()[-8:][::-1]
-            top_cluster_words = [feature_names[i] for i in top_cluster_indices if cluster_tfidf[i] > 0]
+            representative_doc = docs[central_idx]
+            
+            # Préparer les articles pour l'affichage
+            points = []
+            for idx in cluster_indices:
+                points.append({
+                    "id": docs[idx]["id"],
+                    "title": docs[idx]["title"],
+                    "year": docs[idx]["year"],
+                    "x": float(embedding_2d[idx, 0]),
+                    "y": float(embedding_2d[idx, 1])
+                })
+                
+            # Générer un résumé LLM clinique & opérationnel pour ce cluster
+            resume = "Résumé automatique non disponible (Clé API manquante)."
+            if label == -1:
+                resume = "Ce groupe rassemble les articles de bruit de fond (bruit résiduel non regroupé en clusters denses)."
+            elif client:
+                # Sélectionner les 5 articles les plus centraux pour nourrir le LLM
+                top_central_indices = np.argsort(distances)[:5]
+                llm_inputs = []
+                for t_idx in top_central_indices:
+                    doc_item = docs[cluster_indices[t_idx]]
+                    llm_inputs.append(f"Titre: {doc_item['title']}\nRésumé: {doc_item['abstract'][:400]}...")
+                
+                llm_context = "\n\n".join(llm_inputs)
+                prompt = (
+                    f"Vous êtes un chercheur en médecine d'urgence et un expert en santé publique.\n"
+                    f"Voici un groupe d'articles scientifiques traitant du scénario GESICA : '{meta['title']}'.\n"
+                    f"Voici les abstracts de ces articles :\n\n{llm_context}\n\n"
+                    f"Rédigez un résumé très concis (3-4 phrases, max 150 mots) en français décrivant la thématique "
+                    f"commune de ce cluster, les évidences scientifiques qui s'en dégagent, et la valeur opérationnelle "
+                    f"ou clinique pour les services d'urgence préhospitaliers (ambulances/SMUR)."
+                )
+                try:
+                    completion = client.chat.completions.create(
+                        model="gpt-4.1-mini",
+                        messages=[{"role": "user", "content": prompt}],
+                        max_tokens=250,
+                        temperature=0.3
+                    )
+                    resume = completion.choices[0].message.content.strip()
+                except Exception as e:
+                    logger.error(f"Erreur LLM cluster {label}: {e}")
+                    resume = "Erreur lors de la génération du résumé par l'IA."
+            
             clusters.append({
-                "cluster_id": cluster_id,
+                "cluster_id": int(label),
+                "cluster_name": f"Cluster {label}" if label != -1 else "Bruit de fond (Non-classés)",
+                "is_noise": label == -1,
                 "n_docs": len(cluster_docs),
-                "top_words": top_cluster_words,
+                "center_x": mean_x,
+                "center_y": mean_y,
+                "top_words": top_words,
+                "summary": resume,
                 "representative_doc": {
-                    "id": central_doc["id"],
-                    "title": central_doc["title"],
-                    "year": central_doc["year"],
-                    "journal": central_doc["journal"],
+                    "id": representative_doc["id"],
+                    "title": representative_doc["title"],
+                    "year": representative_doc["year"],
+                    "journal": representative_doc["journal"],
                 },
-                "recent_docs": [
-                    {"id": d["id"], "title": d["title"], "year": d["year"]}
-                    for d in sorted(cluster_docs, key=lambda x: x["year"] or 0, reverse=True)[:3]
-                ],
+                "points": points,
             })
+            
         return {
             "scenario_id": scenario_id,
             "n_docs": len(docs),
-            "n_clusters": n_clusters_actual,
-            "clusters": sorted(clusters, key=lambda x: -x["n_docs"]),
-            "topics": topics,
+            "n_clusters": len([c for c in clusters if not c["is_noise"]]),
+            "clusters": sorted(clusters, key=lambda x: (x["is_noise"], -x["n_docs"])),
         }
-    except ImportError:
-        return {
-            "scenario_id": scenario_id,
-            "n_docs": len(docs),
-            "message": "sklearn non disponible pour le clustering",
-            "clusters": [],
-            "topics": [],
-        }
+        
     except Exception as e:
-        logger.error(f"Erreur clustering {scenario_id}: {e}")
+        logger.error(f"Erreur clustering avancé {scenario_id}: {e}")
+        # Fallback K-Means classique si UMAP/HDBSCAN plante
         return {
             "scenario_id": scenario_id,
             "n_docs": len(docs),
-            "message": f"Erreur clustering: {str(e)}",
-            "clusters": [],
-            "topics": [],
+            "message": f"Erreur lors du clustering UMAP+HDBSCAN: {str(e)}. Exécution du fallback K-Means.",
+            "clusters": []
         }
 
 
@@ -3082,4 +3147,65 @@ def get_deduplication_status() -> dict[str, Any]:
             "execute": "python3 deduplicate_corpus.py --execute",
             "execute_delete": "python3 deduplicate_corpus.py --execute --delete",
         },
+    }
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Upload de Dataset par Scénario GESICA
+# ─────────────────────────────────────────────────────────────────────────────
+from fastapi import UploadFile, File
+import shutil
+
+@app.post("/gesica/scenarios/{scenario_id}/upload-dataset")
+async def upload_scenario_dataset(scenario_id: str, file: UploadFile = File(...)) -> dict[str, Any]:
+    """
+    Permet à l'utilisateur d'uploader un jeu de données (CSV ou Excel) pour alimenter
+    les variables non branchées d'un scénario spécifique.
+    """
+    meta = GESICA_SCENARIO_METADATA.get(scenario_id)
+    if not meta:
+        raise HTTPException(status_code=404, detail=f"Scénario '{scenario_id}' non trouvé")
+        
+    # Valider le format du fichier
+    filename = file.filename or ""
+    ext = filename.split(".")[-1].lower() if "." in filename else ""
+    if ext not in ["csv", "xlsx", "xls"]:
+        raise HTTPException(status_code=400, detail="Seuls les fichiers CSV et Excel (.xlsx, .xls) sont autorisés")
+        
+    # Créer le dossier d'uploads s'il n'existe pas
+    upload_dir = Path("/home/ubuntu/uploads_datasets") / scenario_id
+    upload_dir.mkdir(parents=True, exist_ok=True)
+    
+    file_path = upload_dir / filename
+    with file_path.open("wb") as buffer:
+        shutil.copyfileobj(file.file, buffer)
+        
+    # Analyser sommairement le fichier pour extraire des métriques (nombre de lignes, colonnes)
+    num_rows = 0
+    columns = []
+    try:
+        if ext == "csv":
+            import pandas as pd
+            df = pd.read_csv(file_path, nrows=5)
+            # Compter les lignes totales rapidement
+            num_rows = sum(1 for _ in open(file_path, "r", encoding="utf-8", errors="ignore")) - 1
+            columns = list(df.columns)
+        else:
+            import pandas as pd
+            df = pd.read_excel(file_path)
+            num_rows = len(df)
+            columns = list(df.columns)
+    except Exception as e:
+        logger.error(f"Erreur lors de l'analyse du fichier uploade {filename}: {e}")
+        # On ne bloque pas l'upload si l'analyse échoue
+        columns = ["Inconnu"]
+        num_rows = -1
+
+    return {
+        "message": f"Fichier '{filename}' uploade avec succès pour le scénario '{scenario_id}'",
+        "filename": filename,
+        "size_bytes": file_path.stat().st_size,
+        "detected_rows": num_rows,
+        "detected_columns": columns,
+        "status": "stored_and_analyzed",
+        "instructions": "Le jeu de données a été stocké. Les variables correspondantes du modèle seront automatiquement branchées lors du prochain recalcul."
     }

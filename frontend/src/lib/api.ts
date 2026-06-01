@@ -1421,6 +1421,12 @@ export interface ModelInfo {
   update_frequency: string;
 }
 
+export interface VariableDetail {
+  definition: string;
+  plugged: boolean;
+  source: string;
+}
+
 export interface ScenarioDetail {
   id: string;
   title: string;
@@ -1436,6 +1442,9 @@ export interface ScenarioDetail {
     orange: AlertThreshold;
     red: AlertThreshold;
   };
+  databases?: string[];
+  outcome_definition?: string;
+  variables_detail?: Record<string, VariableDetail>;
   corpus_stats: {
     total: number;
     with_fulltext: number;
@@ -1498,17 +1507,30 @@ export interface ClusterTopic {
   weight: number;
 }
 
+export interface ClusterPoint {
+  id: number;
+  title: string;
+  year: number | null;
+  x: number;
+  y: number;
+}
+
 export interface ClusterResult {
   cluster_id: number;
+  cluster_name: string;
+  is_noise: boolean;
   n_docs: number;
+  center_x: number;
+  center_y: number;
   top_words: string[];
+  summary: string;
   representative_doc: {
     id: number;
     title: string;
     year: number | null;
     journal: string | null;
   };
-  recent_docs: Array<{ id: number; title: string; year: number | null }>;
+  points?: ClusterPoint[];
 }
 
 export interface ScenarioClustering {
@@ -1633,5 +1655,35 @@ export async function askScenarioRag(
 export async function fetchScenarioPrisma(scenarioId: string): Promise<ScenarioPrisma> {
   const response = await fetch(`${API_BASE_URL}/gesica/scenarios/${scenarioId}/prisma`);
   if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  return response.json();
+}
+
+export interface UploadDatasetResponse {
+  message: string;
+  filename: string;
+  size_bytes: number;
+  detected_rows: number;
+  detected_columns: string[];
+  status: string;
+  instructions: string;
+}
+
+export async function uploadScenarioDataset(
+  scenarioId: string,
+  file: File
+): Promise<UploadDatasetResponse> {
+  const formData = new FormData();
+  formData.append('file', file);
+  
+  const response = await fetch(`${API_BASE_URL}/gesica/scenarios/${scenarioId}/upload-dataset`, {
+    method: 'POST',
+    body: formData,
+  });
+  
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(text || `Upload failed with status ${response.status}`);
+  }
+  
   return response.json();
 }
