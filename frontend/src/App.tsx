@@ -3098,10 +3098,7 @@ export default function App() {
           <div className="flex flex-col gap-6 xl:flex-row xl:items-end xl:justify-between">
             <div className="max-w-3xl">
               <div className="flex items-center gap-3 mb-2">
-                <img src="/logo.jpg" alt="LiteRev logo" className="h-10 w-10 rounded-lg object-contain bg-white p-0.5" />
-                <p className="text-sm font-bold uppercase tracking-[0.22em] text-gold-400">
-                  LiteRev
-                </p>
+                <img src="/literev-logo.png" alt="LiteRev logo" className="h-12 w-auto rounded-lg object-contain" />
               </div>
               <h1 className="mt-3 text-4xl font-semibold tracking-tight text-white">
                 LiteRev - Evidence to Scenario
