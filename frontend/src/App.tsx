@@ -2027,7 +2027,7 @@ function ScenariosView({ scenarios, loading, error }: { scenarios: GesicaScenari
                     <CheckSquare size={14} className="text-gold-400" />
                     <span className="text-xs font-semibold text-gold-300 uppercase tracking-wider">Aide au Triage — CCMU / NEWS2</span>
                   </div>
-                  <span className="text-[10px] text-gold-400 bg-gold-500/10 border border-gold-500/20 px-2 py-0.5 rounded-full">CCMU + NEWS2 + LLM</span>
+                  <span className="text-[10px] text-gold-400 bg-gold-500/10 border border-gold-500/20 px-2 py-0.5 rounded-full">CCMU + NEWS2</span>
                 </div>
                 <TriageSupportWidget />
               </div>
@@ -2384,7 +2384,7 @@ function ScenariosView({ scenarios, loading, error }: { scenarios: GesicaScenari
         <div className="flex items-center gap-3">
           <Activity size={20} className="text-brand-400" />
           <div>
-            <h2 className="text-xl font-semibold text-white">Scénarios GESICA — Living Evidence Review</h2>
+            <h2 className="text-xl font-semibold text-white">Scénarios GESICA — LiteRev - Evidence to Scenario</h2>
             <p className="text-xs text-forest-400 mt-0.5">
               {scenarios.length} scénarios · {scenarios.reduce((a, s) => a + s.articleCount, 0).toLocaleString()} articles indexés · Mis à jour automatiquement
             </p>
@@ -3104,7 +3104,7 @@ export default function App() {
                 </p>
               </div>
               <h1 className="mt-3 text-4xl font-semibold tracking-tight text-white">
-                Evidence-to-scenario
+                LiteRev - Evidence to Scenario
               </h1>
             </div>
 
@@ -3123,7 +3123,7 @@ export default function App() {
                   className={`rounded-2xl border px-5 py-3 text-left transition ${
                     projectContext === value
                       ? "border-gold-400 bg-brand-700/60 text-gold-400 font-semibold shadow-2xl"
-                      : "border-white/15 bg-white/5 text-white/75 hover:border-white/25 hover:bg-white/10 hover:text-white"
+                      : "border-white/20 bg-white/5 text-white/90 hover:border-gold-400/40 hover:bg-white/10 hover:text-white"
                   }`}
                 >
                   <div className="text-sm font-semibold">{label}</div>
@@ -3141,7 +3141,7 @@ export default function App() {
                   className={`flex items-center gap-2 rounded-xl px-4 py-2 text-sm transition ${
                   activeTab === tab.id
                     ? "bg-brand-700 text-gold-400 font-semibold shadow-inner"
-                    : "text-white/80 hover:text-white hover:bg-white/8"
+                    : "text-white hover:text-gold-300 hover:bg-white/8"
                 }`}
               >
                 {tab.icon}

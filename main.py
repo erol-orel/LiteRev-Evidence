@@ -2705,218 +2705,307 @@ def run_scenario_model(scenario_id: str) -> dict[str, Any]:
     return get_scenario_model_status(scenario_id)
 
 
-@app.get("/gesica/scenarios/{scenario_id}/clustering")
-def get_scenario_clustering(scenario_id: str, force_refresh: bool = False) -> dict[str, Any]:
-    """
-    Clustering UMAP+HDBSCAN avec cache fichier (TTL 24h) et fallback K-Means rapide.
-    Le premier appel peut prendre 30-60s ; les suivants sont instantanés (cache).
-    """
-    import json as _json
+# ── Encoder JSON pour types numpy ────────────────────────────────────────────
+class _NumpyEncoder(json.JSONEncoder):
+    def default(self, obj):
+        import numpy as np
+        if isinstance(obj, (np.integer,)): return int(obj)
+        if isinstance(obj, (np.floating,)): return float(obj)
+        if isinstance(obj, np.ndarray): return obj.tolist()
+        return super().default(obj)
+
+# ── Tâches de clustering en cours ────────────────────────────────────────────
+_clustering_jobs: dict[str, dict] = {}  # scenario_id -> {"status": "running"|"done"|"error", "result": ...}
+
+
+def _run_clustering_background(scenario_id: str, force_refresh: bool = False) -> None:
+    """Calcule le clustering dans un thread séparé et stocke le résultat en cache."""
     import time as _time
     import threading
 
-    meta = GESICA_SCENARIO_METADATA.get(scenario_id)
-    if not meta:
-        raise HTTPException(status_code=404, detail=f"Scénario '{scenario_id}' non trouvé")
-
-    # ── Cache fichier (TTL 24h) ────────────────────────────────────────────────
     cache_dir = "/tmp/literev_clustering_cache"
     os.makedirs(cache_dir, exist_ok=True)
     cache_file = os.path.join(cache_dir, f"{scenario_id}.json")
-    TTL = 86400  # 24 heures
+    TTL = 86400
 
+    # Vérifier le cache d'abord
     if not force_refresh and os.path.exists(cache_file):
         try:
             mtime = os.path.getmtime(cache_file)
             if _time.time() - mtime < TTL:
                 with open(cache_file, "r") as f:
-                    cached = _json.load(f)
+                    cached = json.load(f)
                 cached["from_cache"] = True
-                return cached
+                _clustering_jobs[scenario_id] = {"status": "done", "result": cached}
+                return
         except Exception:
             pass
 
-    # ── Chargement des articles ────────────────────────────────────────────────
-    with engine.connect() as conn:
-        docs = conn.execute(text("""
-            SELECT d.id, d.title, d.abstract, d.year, d.journal
-            FROM literature_document d
-            WHERE d.project_context = 'gesica'
-              AND d.scenario_type = :sid
-              AND (d.is_duplicate IS NULL OR d.is_duplicate = FALSE)
-              AND d.abstract IS NOT NULL
-              AND LENGTH(d.abstract) > 50
-            ORDER BY d.year DESC NULLS LAST
-            LIMIT 400
-        """), {"sid": scenario_id}).mappings().all()
+    meta = GESICA_SCENARIO_METADATA.get(scenario_id, {})
+    try:
+        import numpy as np
+        from sklearn.feature_extraction.text import TfidfVectorizer
+        from sklearn.cluster import KMeans
+        from sklearn.decomposition import TruncatedSVD, PCA
 
-    docs = list(docs)
-    if len(docs) < 5:
-        return {
-            "scenario_id": scenario_id,
-            "n_docs": len(docs),
-            "message": "Corpus insuffisant pour le clustering (minimum 5 articles avec abstract requis)",
-            "clusters": [],
-            "from_cache": False,
-        }
+        with engine.connect() as conn:
+            docs = list(conn.execute(text("""
+                SELECT d.id, d.title, d.abstract, d.year, d.journal,
+                       d.embedding::text AS embedding_str
+                FROM literature_document d
+                WHERE d.project_context = 'gesica'
+                  AND d.scenario_type = :sid
+                  AND (d.is_duplicate IS NULL OR d.is_duplicate = FALSE)
+                  AND d.abstract IS NOT NULL
+                  AND LENGTH(d.abstract) > 50
+                ORDER BY d.year DESC NULLS LAST
+                LIMIT 400
+            """), {"sid": scenario_id}).mappings().all())
 
-    from sklearn.feature_extraction.text import TfidfVectorizer
-    from sklearn.cluster import KMeans
-    from sklearn.decomposition import TruncatedSVD
-    import numpy as np
+        if len(docs) < 5:
+            result = {
+                "scenario_id": scenario_id, "n_docs": len(docs),
+                "message": "Corpus insuffisant pour le clustering (minimum 5 articles avec abstract requis)",
+                "clusters": [], "from_cache": False,
+            }
+            _clustering_jobs[scenario_id] = {"status": "done", "result": result}
+            return
 
-    texts = [f"{d['title']} {d['abstract'] or ''}" for d in docs]
+        texts = [f"{d['title']} {d['abstract'] or ''}" for d in docs]
 
-    vectorizer = TfidfVectorizer(
-        max_features=800, stop_words='english', min_df=2, max_df=0.9, ngram_range=(1, 2)
-    )
-    X = vectorizer.fit_transform(texts)
-    feature_names = vectorizer.get_feature_names_out()
-
-    # ── Tentative UMAP+HDBSCAN avec timeout 45s ──────────────────────────────
-    embedding_2d = None
-    labels = None
-    method_used = "kmeans_fallback"
-
-    umap_result = {"embedding": None, "error": None}
-
-    def run_umap():
-        try:
-            import umap as umap_lib
-            reducer = umap_lib.UMAP(
-                n_neighbors=min(10, len(docs) - 1),
-                n_components=2,
-                metric='cosine',
-                random_state=42,
-                low_memory=True,
-                n_epochs=200,  # réduit pour accélérer
-            )
-            umap_result["embedding"] = reducer.fit_transform(X.toarray())
-        except Exception as e:
-            umap_result["error"] = str(e)
-
-    umap_thread = threading.Thread(target=run_umap, daemon=True)
-    umap_thread.start()
-    umap_thread.join(timeout=45)  # 45s max pour UMAP
-
-    if umap_result["embedding"] is not None:
-        embedding_2d = umap_result["embedding"]
-        # HDBSCAN sur l'espace UMAP
-        try:
-            import hdbscan as hdbscan_lib
-            min_cluster_size = max(3, len(docs) // 15)
-            clusterer = hdbscan_lib.HDBSCAN(
-                min_cluster_size=min_cluster_size, min_samples=2,
-                metric='euclidean', cluster_selection_method='eom'
-            )
-            labels = clusterer.fit_predict(embedding_2d)
-            method_used = "umap_hdbscan"
-        except Exception as e:
-            logger.warning(f"HDBSCAN failed: {e}, falling back to KMeans")
-
-    # ── Fallback K-Means + SVD (rapide, <2s) ───────────────────────────────
-    if labels is None:
-        n_clusters = max(3, min(8, len(docs) // 15))
-        svd = TruncatedSVD(n_components=min(50, len(docs) - 1), random_state=42)
-        X_reduced = svd.fit_transform(X)
-        km = KMeans(n_clusters=n_clusters, random_state=42, n_init=5, max_iter=100)
-        labels = km.fit_predict(X_reduced)
-        # PCA 2D pour la visualisation
-        from sklearn.decomposition import PCA
-        pca = PCA(n_components=2, random_state=42)
-        embedding_2d = pca.fit_transform(X_reduced)
+        # ── Tentative embeddings OpenAI → UMAP → HDBSCAN ────────────────────
+        embedding_2d = None
+        labels = None
         method_used = "kmeans_fallback"
+        openai_key = os.getenv("OPENAI_API_KEY")
 
-    # ── Construction des clusters ────────────────────────────────────────────────
-    X_dense = X.toarray()
-    openai_key = os.getenv("OPENAI_API_KEY")
-    clusters = []
+        # Essayer d'utiliser les embeddings stockés en DB (pgvector)
+        embeddings_matrix = None
+        if any(d.get("embedding_str") for d in docs):
+            try:
+                import ast
+                vecs = []
+                for d in docs:
+                    es = d.get("embedding_str")
+                    if es:
+                        # Format pgvector: [0.1,0.2,...]
+                        vec = [float(x) for x in es.strip("[]").split(",")]
+                        vecs.append(vec)
+                    else:
+                        vecs.append(None)
+                # Remplacer les None par la moyenne
+                valid = [v for v in vecs if v is not None]
+                if valid:
+                    mean_vec = np.mean(valid, axis=0).tolist()
+                    vecs = [v if v is not None else mean_vec for v in vecs]
+                    embeddings_matrix = np.array(vecs, dtype=np.float32)
+                    logger.info(f"Clustering {scenario_id}: {len(docs)} embeddings DB chargés")
+            except Exception as e:
+                logger.warning(f"Clustering {scenario_id}: embeddings DB non utilisables: {e}")
 
-    for label in sorted(set(labels)):
-        cluster_indices = [i for i, l in enumerate(labels) if l == label]
-        cluster_docs = [docs[i] for i in cluster_indices]
-        coords = embedding_2d[cluster_indices]
-        mean_x = float(np.mean(coords[:, 0]))
-        mean_y = float(np.mean(coords[:, 1]))
-
-        # Mots-clés TF-IDF du cluster
-        cluster_tfidf = X_dense[cluster_indices].mean(axis=0)
-        top_indices = cluster_tfidf.argsort()[-10:][::-1]
-        top_words = [feature_names[i] for i in top_indices if cluster_tfidf[i] > 0]
-
-        # Document représentatif (médroïde)
-        center = np.mean(coords, axis=0)
-        distances = np.linalg.norm(coords - center, axis=1)
-        central_idx = cluster_indices[int(np.argmin(distances))]
-        representative_doc = docs[central_idx]
-
-        points = [
-            {"id": docs[i]["id"], "title": docs[i]["title"],
-             "year": docs[i]["year"],
-             "x": float(embedding_2d[i, 0]), "y": float(embedding_2d[i, 1])}
-            for i in cluster_indices
-        ]
-
-        # Résumé LLM
-        resume = "Bruit de fond (articles non regroupés)." if label == -1 else "Résumé non disponible."
-        if label != -1 and openai_key:
+        # Si pas d'embeddings en DB, générer via OpenAI API (batch)
+        if embeddings_matrix is None and openai_key:
             try:
                 from openai import OpenAI as _OAI
-                _client = _OAI(api_key=openai_key)
-                top5 = np.argsort(distances)[:5]
-                llm_ctx = "\n\n".join(
-                    f"Titre: {docs[cluster_indices[t]]['title']}\nRésumé: {(docs[cluster_indices[t]]['abstract'] or '')[:350]}"
-                    for t in top5
-                )
-                completion = _client.chat.completions.create(
-                    model="gpt-4.1-mini",
-                    messages=[{"role": "user", "content": (
-                        f"Scénario GESICA : {meta['title']}.\n"
-                        f"Articles représentatifs du cluster :\n{llm_ctx}\n\n"
-                        f"Rédigez un résumé concis (3-4 phrases, max 120 mots) en français : "
-                        f"thématique commune, évidences clés, valeur opérationnelle pour les urgences préhospitalières."
-                    )}],
-                    max_tokens=200, temperature=0.3
-                )
-                resume = completion.choices[0].message.content.strip()
+                _oai = _OAI(api_key=openai_key)
+                batch_texts = [t[:2000] for t in texts]  # tronquer
+                # Batch de 100 max
+                all_vecs = []
+                for i in range(0, len(batch_texts), 100):
+                    resp = _oai.embeddings.create(
+                        model="text-embedding-3-small",
+                        input=batch_texts[i:i+100]
+                    )
+                    all_vecs.extend([e.embedding for e in resp.data])
+                embeddings_matrix = np.array(all_vecs, dtype=np.float32)
+                logger.info(f"Clustering {scenario_id}: {len(docs)} embeddings OpenAI générés")
             except Exception as e:
-                logger.error(f"LLM cluster {label}: {e}")
+                logger.warning(f"Clustering {scenario_id}: embeddings OpenAI échoués: {e}")
 
-        clusters.append({
-            "cluster_id": int(label),
-            "cluster_name": f"Cluster {label + 1}" if label != -1 else "Non-classés",
-            "is_noise": label == -1,
-            "n_docs": len(cluster_docs),
-            "center_x": mean_x,
-            "center_y": mean_y,
-            "top_words": top_words,
-            "summary": resume,
-            "representative_doc": {
-                "id": representative_doc["id"],
-                "title": representative_doc["title"],
-                "year": representative_doc["year"],
-                "journal": representative_doc["journal"],
-            },
-            "points": points,
-        })
+        # ── UMAP sur les embeddings (ou TF-IDF si pas d'embeddings) ─────────
+        vectorizer = TfidfVectorizer(max_features=800, stop_words='english', min_df=2, max_df=0.9, ngram_range=(1, 2))
+        X_tfidf = vectorizer.fit_transform(texts)
+        feature_names = vectorizer.get_feature_names_out()
 
-    result = {
-        "scenario_id": scenario_id,
-        "n_docs": len(docs),
-        "n_clusters": len([c for c in clusters if not c["is_noise"]]),
-        "method": method_used,
-        "clusters": sorted(clusters, key=lambda x: (x["is_noise"], -x["n_docs"])),
-        "from_cache": False,
-    }
+        umap_input = embeddings_matrix if embeddings_matrix is not None else X_tfidf.toarray()
+        umap_metric = 'cosine'
 
-    # Sauvegarder en cache
-    try:
-        with open(cache_file, "w") as f:
-            _json.dump(result, f)
-    except Exception:
-        pass
+        umap_result = {"embedding": None, "error": None}
+        def run_umap():
+            try:
+                import umap as umap_lib
+                reducer = umap_lib.UMAP(
+                    n_neighbors=min(10, len(docs) - 1), n_components=2,
+                    metric=umap_metric, random_state=42, low_memory=True, n_epochs=200,
+                )
+                umap_result["embedding"] = reducer.fit_transform(umap_input)
+            except Exception as e:
+                umap_result["error"] = str(e)
 
-    return result
+        umap_thread = threading.Thread(target=run_umap, daemon=True)
+        umap_thread.start()
+        umap_thread.join(timeout=60)
+
+        if umap_result["embedding"] is not None:
+            embedding_2d = umap_result["embedding"]
+            try:
+                import hdbscan as hdbscan_lib
+                min_cluster_size = max(3, len(docs) // 15)
+                clusterer = hdbscan_lib.HDBSCAN(
+                    min_cluster_size=min_cluster_size, min_samples=2,
+                    metric='euclidean', cluster_selection_method='eom'
+                )
+                labels = clusterer.fit_predict(embedding_2d)
+                method_used = "embeddings_umap_hdbscan" if embeddings_matrix is not None else "tfidf_umap_hdbscan"
+            except Exception as e:
+                logger.warning(f"HDBSCAN failed: {e}")
+
+        # ── Fallback K-Means + SVD ───────────────────────────────────────────
+        if labels is None:
+            n_clusters = max(3, min(8, len(docs) // 15))
+            svd = TruncatedSVD(n_components=min(50, len(docs) - 1), random_state=42)
+            X_reduced = svd.fit_transform(X_tfidf)
+            km = KMeans(n_clusters=n_clusters, random_state=42, n_init=5, max_iter=100)
+            labels = km.fit_predict(X_reduced)
+            pca = PCA(n_components=2, random_state=42)
+            embedding_2d = pca.fit_transform(X_reduced)
+            method_used = "kmeans_fallback"
+
+        # ── Construction des clusters ────────────────────────────────────────
+        X_dense = X_tfidf.toarray()
+        clusters = []
+
+        for label in sorted(set(labels)):
+            label_int = int(label)
+            cluster_indices = [i for i, l in enumerate(labels) if int(l) == label_int]
+            cluster_docs = [docs[i] for i in cluster_indices]
+            coords = embedding_2d[cluster_indices]
+            mean_x = float(np.mean(coords[:, 0]))
+            mean_y = float(np.mean(coords[:, 1]))
+
+            cluster_tfidf = X_dense[cluster_indices].mean(axis=0)
+            top_indices = cluster_tfidf.argsort()[-10:][::-1]
+            top_words = [str(feature_names[i]) for i in top_indices if cluster_tfidf[i] > 0]
+
+            center = np.mean(coords, axis=0)
+            distances = np.linalg.norm(coords - center, axis=1)
+            central_idx = cluster_indices[int(np.argmin(distances))]
+            representative_doc = docs[central_idx]
+
+            points = [
+                {"id": int(docs[i]["id"]), "title": str(docs[i]["title"] or ""),
+                 "year": int(docs[i]["year"]) if docs[i]["year"] else None,
+                 "x": float(embedding_2d[i, 0]), "y": float(embedding_2d[i, 1])}
+                for i in cluster_indices
+            ]
+
+            resume = "Bruit de fond (articles non regroupés)." if label_int == -1 else "Résumé non disponible."
+            if label_int != -1 and openai_key:
+                try:
+                    from openai import OpenAI as _OAI
+                    _client = _OAI(api_key=openai_key)
+                    top5 = np.argsort(distances)[:5]
+                    llm_ctx = "\n\n".join(
+                        f"Titre: {docs[cluster_indices[int(t)]][' title']}\nRésumé: {(docs[cluster_indices[int(t)]][' abstract'] or '')[:350]}"
+                        for t in top5
+                    )
+                    completion = _client.chat.completions.create(
+                        model="gpt-4.1-mini",
+                        messages=[{"role": "user", "content": (
+                            f"Scénario : {meta.get('title', scenario_id)}.\n"
+                            f"Articles représentatifs du cluster :\n{llm_ctx}\n\n"
+                            f"Rédigez un résumé concis (3-4 phrases, max 120 mots) en français : "
+                            f"thématique commune, évidences clés, valeur opérationnelle pour les urgences préhospitalières."
+                        )}],
+                        max_tokens=200, temperature=0.3
+                    )
+                    resume = completion.choices[0].message.content.strip()
+                except Exception as e:
+                    logger.error(f"Résumé cluster {label_int}: {e}")
+
+            clusters.append({
+                "cluster_id": label_int,
+                "cluster_name": f"Cluster {label_int + 1}" if label_int != -1 else "Non-classés",
+                "is_noise": label_int == -1,
+                "n_docs": len(cluster_docs),
+                "center_x": mean_x, "center_y": mean_y,
+                "top_words": top_words,
+                "summary": resume,
+                "representative_doc": {
+                    "id": int(representative_doc["id"]),
+                    "title": str(representative_doc["title"] or ""),
+                    "year": int(representative_doc["year"]) if representative_doc["year"] else None,
+                    "journal": str(representative_doc["journal"] or ""),
+                },
+                "points": points,
+            })
+
+        result = {
+            "scenario_id": scenario_id,
+            "n_docs": len(docs),
+            "n_clusters": len([c for c in clusters if not c["is_noise"]]),
+            "method": method_used,
+            "embedding_source": "db_pgvector" if embeddings_matrix is not None and any(d.get("embedding_str") for d in docs) else ("openai_api" if embeddings_matrix is not None else "tfidf"),
+            "clusters": sorted(clusters, key=lambda x: (x["is_noise"], -x["n_docs"])),
+            "from_cache": False,
+        }
+        # Sauvegarder en cache (encoder numpy)
+        try:
+            with open(cache_file, "w") as f:
+                json.dump(result, f, cls=_NumpyEncoder)
+        except Exception:
+            pass
+        _clustering_jobs[scenario_id] = {"status": "done", "result": result}
+
+    except Exception as e:
+        logger.error(f"Clustering {scenario_id} error: {e}", exc_info=True)
+        _clustering_jobs[scenario_id] = {"status": "error", "error": str(e)}
+
+
+@app.get("/gesica/scenarios/{scenario_id}/clustering")
+def get_scenario_clustering(scenario_id: str, force_refresh: bool = False) -> dict[str, Any]:
+    """
+    Clustering UMAP+HDBSCAN avec architecture async : retour immédiat, calcul en arrière-plan.
+    Appeler /clustering/status pour vérifier si le résultat est prêt.
+    """
+    import threading
+    meta = GESICA_SCENARIO_METADATA.get(scenario_id)
+    if not meta:
+        raise HTTPException(status_code=404, detail=f"Scénario '{scenario_id}' non trouvé")
+
+    # Si résultat en cache mémoire, retourner immédiatement
+    job = _clustering_jobs.get(scenario_id)
+    if job and job["status"] == "done" and not force_refresh:
+        return job["result"]
+    if job and job["status"] == "error" and not force_refresh:
+        return {"scenario_id": scenario_id, "status": "error", "error": job.get("error"), "clusters": []}
+
+    # Lancer le calcul en arrière-plan si pas déjà en cours
+    if not job or job.get("status") not in ("running",) or force_refresh:
+        _clustering_jobs[scenario_id] = {"status": "running"}
+        t = threading.Thread(target=_run_clustering_background, args=(scenario_id, force_refresh), daemon=True)
+        t.start()
+
+    return {"scenario_id": scenario_id, "status": "running",
+            "message": "Calcul en cours (embeddings + UMAP + HDBSCAN). Revenez dans 30-60s ou utilisez /clustering/status.",
+            "clusters": []}
+
+
+@app.get("/gesica/scenarios/{scenario_id}/clustering/status")
+def get_clustering_status(scenario_id: str) -> dict:
+    """Vérifie si le clustering est terminé et retourne le résultat si disponible."""
+    job = _clustering_jobs.get(scenario_id)
+    if not job:
+        return {"scenario_id": scenario_id, "status": "not_started",
+                "message": "Aucun calcul lancé. Appelez GET /clustering d'abord."}
+    if job["status"] == "running":
+        return {"scenario_id": scenario_id, "status": "running",
+                "message": "Calcul en cours..."}
+    if job["status"] == "error":
+        return {"scenario_id": scenario_id, "status": "error",
+                "error": job.get("error", "Erreur inconnue")}
+    # done
+    return job["result"]
 
 
 @app.post("/gesica/scenarios/{scenario_id}/rag")

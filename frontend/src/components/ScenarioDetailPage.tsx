@@ -156,7 +156,7 @@ function QueriesSection({ detail }: { detail: ScenarioDetail }) {
             className="flex items-center gap-2 text-xs font-semibold text-gold-300 uppercase tracking-wider hover:text-gold-200 transition"
           >
             {showPrompt ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
-            {showPrompt ? "Masquer" : "Afficher"} le prompt LLM d'extraction d'évidence
+            {showPrompt ? "Masquer" : "Afficher"} le prompt d'extraction d'évidence
           </button>
           {showPrompt && (
             <div className="mt-3 rounded-xl border border-gold-500/15 bg-gold-500/5 p-4">
@@ -840,30 +840,67 @@ function ArticleRow({
 function ClusteringSection({ scenarioId }: { scenarioId: string }) {
   const [data, setData] = useState<ScenarioClustering | null>(null);
   const [loading, setLoading] = useState(false);
+  const [polling, setPolling] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [selectedCluster, setSelectedCluster] = useState<number | null>(null);
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  const stopPolling = useCallback(() => {
+    if (pollRef.current) {
+      clearInterval(pollRef.current);
+      pollRef.current = null;
+    }
+    setPolling(false);
+  }, []);
+
+  const handleResult = useCallback((result: ScenarioClustering) => {
+    setData(result);
+    if (result.clusters && result.clusters.length > 0) {
+      const firstDense = result.clusters.find((c: any) => !c.is_noise);
+      setSelectedCluster(firstDense ? firstDense.cluster_id : result.clusters[0].cluster_id);
+    }
+  }, []);
 
   const load = useCallback(async () => {
     setLoading(true);
     setError(null);
+    stopPolling();
     try {
       const result = await fetchScenarioClustering(scenarioId);
-      setData(result);
-      if (result.clusters && result.clusters.length > 0) {
-        // Sélectionner le premier cluster dense par défaut
-        const firstDense = result.clusters.find((c: any) => !c.is_noise);
-        setSelectedCluster(firstDense ? firstDense.cluster_id : result.clusters[0].cluster_id);
+      // Si le backend répond "running", démarrer le polling
+      if ((result as any).status === "running") {
+        setLoading(false);
+        setPolling(true);
+        setData(result);
+        pollRef.current = setInterval(async () => {
+          try {
+            const BASE = (import.meta as any).env?.VITE_API_BASE ?? "/api";
+            const r = await fetch(`${BASE}/gesica/scenarios/${scenarioId}/clustering/status`);
+            if (!r.ok) return;
+            const status = await r.json();
+            if (status.status === "done" || (status.clusters && status.clusters.length > 0)) {
+              stopPolling();
+              handleResult(status);
+            } else if (status.status === "error") {
+              stopPolling();
+              setError(status.error || "Erreur lors du clustering");
+            }
+          } catch (_) {}
+        }, 5000);
+      } else {
+        handleResult(result);
+        setLoading(false);
       }
     } catch (e: any) {
       setError(e.message);
-    } finally {
       setLoading(false);
     }
-  }, [scenarioId]);
+  }, [scenarioId, stopPolling, handleResult]);
 
   useEffect(() => {
     load();
-  }, [load]);
+    return () => stopPolling();
+  }, [load, stopPolling]);
 
   const activeClusterData = data?.clusters.find((c) => c.cluster_id === selectedCluster);
 
@@ -873,7 +910,7 @@ function ClusteringSection({ scenarioId }: { scenarioId: string }) {
         <SectionHeader
           icon={<Layers size={14} className="text-brand-400" />}
           title="Clustering & Topic Modelling Avancé"
-          subtitle="UMAP (Réduction 2D) + HDBSCAN (Clustering à densité) + Résumés LLM"
+          subtitle="UMAP (Réduction 2D) + HDBSCAN (Clustering à densité) + Synthèses automatiques"
         />
         <button
           onClick={load}
@@ -885,7 +922,12 @@ function ClusteringSection({ scenarioId }: { scenarioId: string }) {
         </button>
       </div>
 
-      {loading && <LoadingSpinner text="Analyse du corpus en cours (TF-IDF → UMAP 2D → HDBSCAN → Résumé GPT-4o-mini)..." />}
+      {(loading || polling) && (
+        <LoadingSpinner text={polling
+          ? "Calcul en cours en arrière-plan (UMAP + HDBSCAN)... Mise à jour automatique toutes les 5s"
+          : "Lancement de l'analyse (Embeddings → UMAP 2D → HDBSCAN)..."
+        } />
+      )}
       {error && <ErrorBox message={error} />}
 
       {data && !loading && (
@@ -972,7 +1014,7 @@ function ClusteringSection({ scenarioId }: { scenarioId: string }) {
                     <div className="space-y-2">
                       <div className="flex items-center gap-1.5 text-xs font-semibold text-brand-300 uppercase tracking-wider">
                         <Brain size={13} />
-                        Synthèse IA du groupe (GPT-4o-mini)
+                        Synthèse du groupe
                       </div>
                       <div className="rounded-2xl border border-brand-500/15 bg-brand-500/5 p-4 text-xs text-forest-200 leading-6 italic">
                         "{activeClusterData.summary}"
@@ -981,7 +1023,7 @@ function ClusteringSection({ scenarioId }: { scenarioId: string }) {
 
                     {/* Mots-clés TF-IDF */}
                     <div className="space-y-2">
-                      <p className="text-[10px] font-bold uppercase tracking-wider text-forest-400">Mots-clés prépondérants (TF-IDF)</p>
+                      <p className="text-[10px] font-bold uppercase tracking-wider text-forest-400">Mots-clés prépondérants</p>
                       <div className="flex flex-wrap gap-1.5">
                         {activeClusterData.top_words.map((w, i) => (
                           <span
