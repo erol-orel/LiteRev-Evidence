@@ -2751,7 +2751,14 @@ def _run_clustering_background(scenario_id: str, force_refresh: bool = False) ->
         with engine.connect() as conn:
             docs = list(conn.execute(text("""
                 SELECT d.id, d.title, d.abstract, d.year, d.journal,
-                       d.embedding::text AS embedding_str
+                       (
+                           SELECT c.embedding::text
+                           FROM document_chunk c
+                           WHERE c.document_id = d.id
+                             AND c.embedding IS NOT NULL
+                           ORDER BY c.id
+                           LIMIT 1
+                       ) AS embedding_str
                 FROM literature_document d
                 WHERE d.project_context = 'gesica'
                   AND d.scenario_type = :sid

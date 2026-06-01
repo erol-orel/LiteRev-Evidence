@@ -3098,10 +3098,11 @@ export default function App() {
           <div className="flex flex-col gap-6 xl:flex-row xl:items-end xl:justify-between">
             <div className="max-w-3xl">
               <div className="flex items-center gap-3 mb-2">
-                <img src="/literev-logo.png" alt="LiteRev logo" className="h-12 w-auto rounded-lg object-contain" />
+                <img src="/logo.jpg" alt="LiteRev arbre" className="h-14 w-14 rounded-xl object-cover" />
               </div>
-              <h1 className="mt-3 text-4xl font-semibold tracking-tight text-white">
-                LiteRev - Evidence to Scenario
+              <h1 className="mt-3 flex items-center gap-3">
+                <img src="/literev-logo.png" alt="LiteRev" className="h-10 w-auto object-contain" />
+                <span className="text-4xl font-semibold tracking-tight text-white">- Evidence to Scenario</span>
               </h1>
             </div>
 
