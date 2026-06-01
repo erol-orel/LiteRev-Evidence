@@ -2298,9 +2298,38 @@ def living_review_run(scenario_id: str = "all", days: int = 30, dry_run: bool = 
 
 
 SCENARIO_LIVING_REVIEW_IDS = [
-    "epidemic-early-warning", "demand-forecasting", "response-time-optimization",
-    "cardiac-arrest-prediction", "heatwave-ems-impact", "stroke-detection",
-    "triage-support", "undertriage-risk", "trauma-care", "mass-casualty",
+    # Cluster 1 — Patient-centered prehospital critical care
+    "cardiac-arrest-prediction",
+    "stroke-detection",
+    "trauma-severity-assessment",
+    "clinical-deterioration-prediction",
+    "patient-pathway-optimization",
+    "mci-victim-estimation",
+    # Cluster 2 — Environmental & Disaster Risk
+    "environmental-risk-forecasting",
+    "disaster-risk-assessment",
+    "climate-impact-on-ems",
+    # Cluster 3 — Prehospital Triage & Risk Stratification
+    "emergency-call-qualification",
+    "call-prioritization",
+    "mass-casualty-triage",
+    "undertriage-detection",
+    "dispatch-decision-support",
+    "triage-support",
+    # Cluster 4 — EMS Operations & Resource Management
+    "response-time-optimization",
+    "ambulance-dispatch-optimization",
+    "staffing-level-prediction",
+    "hospital-capacity-forecasting",
+    "demand-forecasting",
+    "resource-allocation",
+    # Cluster 5 — Epidemiological & Strategic Surveillance
+    "epidemic-early-warning",
+    "surveillance",
+    "surge-management",
+    "pandemic-preparedness",
+    "cross-border-coordination",
+    "situational-awareness",
 ]
 
 # ─── Endpoints Groupe 1 (Critique) ───────────────────────────────────────────
