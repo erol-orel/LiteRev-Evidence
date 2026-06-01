@@ -4,7 +4,8 @@ import {
   ChevronDown, ChevronUp, Database, ExternalLink, FileText,
   Layers, MessageSquare, RefreshCw, RotateCcw, Search,
   Shield, Terminal, Zap, AlertTriangle,
-  Globe, Upload, CheckCircle2, AlertCircle, Info
+  Globe, Upload, CheckCircle2, AlertCircle, Info,
+  Microscope, Loader2
 } from "lucide-react";
 import {
   fetchScenarioDetail,
@@ -15,6 +16,8 @@ import {
   askScenarioRag,
   fetchScenarioPrisma,
   uploadScenarioDataset,
+  screenArticle,
+  fetchArticlePico,
   type ScenarioDetail,
   type ScenarioCorpus,
   type ModelStatus,
@@ -23,7 +26,8 @@ import {
   type ScenarioPrisma,
   type CorpusArticle,
   type ClusterResult,
-  type ClusterPoint
+  type ClusterPoint,
+  type PicoData,
 } from "../lib/api";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -551,8 +555,12 @@ function CorpusSection({ scenarioId }: { scenarioId: string; detail: ScenarioDet
             <ArticleRow
               key={article.id}
               article={article}
+              scenarioId={scenarioId}
               isExpanded={expandedId === article.id}
               onToggle={() => setExpandedId(expandedId === article.id ? null : article.id)}
+              onScreeningChange={(_id, _status) => {
+                // Rafraîchir les stats PRISMA si nécessaire
+              }}
             />
           )) : (
             <p className="text-xs text-forest-500 italic">Aucun article dans ce corpus.</p>
@@ -612,15 +620,68 @@ function CorpusSection({ scenarioId }: { scenarioId: string; detail: ScenarioDet
 
 function ArticleRow({
   article,
+  scenarioId,
   isExpanded,
   onToggle,
+  onScreeningChange,
 }: {
-  article: CorpusArticle;
+  article: CorpusArticle & { screening_status?: string };
+  scenarioId: string;
   isExpanded: boolean;
   onToggle: () => void;
+  onScreeningChange?: (id: number, status: string) => void;
 }) {
+  const [screeningStatus, setScreeningStatus] = React.useState<string>(article.screening_status ?? 'pending');
+  const [screeningLoading, setScreeningLoading] = React.useState(false);
+  const [pico, setPico] = React.useState<PicoData | null>(null);
+  const [picoLoading, setPicoLoading] = React.useState(false);
+  const [picoLoaded, setPicoLoaded] = React.useState(false);
+
+  const handleScreen = async (status: 'included' | 'excluded' | 'pending') => {
+    setScreeningLoading(true);
+    try {
+      await screenArticle(scenarioId, article.id, status);
+      setScreeningStatus(status);
+      onScreeningChange?.(article.id, status);
+    } catch (e) {
+      console.error('Screening error:', e);
+    } finally {
+      setScreeningLoading(false);
+    }
+  };
+
+  const loadPico = async () => {
+    if (picoLoaded) return;
+    setPicoLoading(true);
+    try {
+      const res = await fetchArticlePico(scenarioId, article.id);
+      setPico(res.pico);
+      setPicoLoaded(true);
+    } catch (e) {
+      console.error('PICO error:', e);
+    } finally {
+      setPicoLoading(false);
+    }
+  };
+
+  React.useEffect(() => {
+    if (isExpanded && !picoLoaded) loadPico();
+  }, [isExpanded]);
+
+  const statusBadge = {
+    included: 'bg-brand-500/20 text-brand-300 border border-brand-500/30',
+    excluded: 'bg-rose-500/20 text-rose-300 border border-rose-500/30',
+    pending: 'bg-gold-500/10 text-gold-400 border border-gold-500/20',
+  }[screeningStatus] ?? 'bg-white/5 text-forest-400 border border-white/10';
+
+  const statusLabel = { included: 'Inclus', excluded: 'Exclu', pending: 'En attente' }[screeningStatus] ?? screeningStatus;
+
   return (
-    <div className="rounded-2xl border border-white/5 bg-white/2 hover:bg-white/3 transition overflow-hidden">
+    <div className={`rounded-2xl border transition overflow-hidden ${
+      screeningStatus === 'included' ? 'border-brand-500/20 bg-brand-500/3' :
+      screeningStatus === 'excluded' ? 'border-rose-500/15 bg-rose-500/3 opacity-60' :
+      'border-white/5 bg-white/2 hover:bg-white/3'
+    }`}>
       <div onClick={onToggle} className="p-4 flex items-start gap-3 cursor-pointer">
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2 flex-wrap">
@@ -635,6 +696,9 @@ function ArticleRow({
                 Full-text
               </span>
             )}
+            <span className={`rounded-full px-2 py-0.5 text-[9px] font-medium ${statusBadge}`}>
+              {statusLabel}
+            </span>
           </div>
           <h4 className="text-sm font-semibold text-white mt-1.5 leading-5">{article.title}</h4>
           {article.authors && (
@@ -647,7 +711,78 @@ function ArticleRow({
       </div>
 
       {isExpanded && (
-        <div className="border-t border-white/5 bg-white/1 p-4 text-xs space-y-3">
+        <div className="border-t border-white/5 bg-white/1 p-4 text-xs space-y-4">
+          {/* Screening PRISMA */}
+          <div className="flex items-center gap-2 flex-wrap">
+            <span className="text-forest-400 font-medium mr-1">Screening PRISMA :</span>
+            {screeningLoading ? (
+              <Loader2 size={14} className="animate-spin text-forest-400" />
+            ) : (
+              <>
+                <button
+                  onClick={(e) => { e.stopPropagation(); handleScreen('included'); }}
+                  className={`px-2.5 py-1 rounded-full text-[10px] font-semibold border transition ${
+                    screeningStatus === 'included'
+                      ? 'bg-brand-500/30 text-brand-200 border-brand-500/50'
+                      : 'bg-white/5 text-forest-400 border-white/10 hover:bg-brand-500/10 hover:text-brand-300'
+                  }`}
+                >
+                  <CheckCircle2 size={10} className="inline mr-1" />Inclure
+                </button>
+                <button
+                  onClick={(e) => { e.stopPropagation(); handleScreen('excluded'); }}
+                  className={`px-2.5 py-1 rounded-full text-[10px] font-semibold border transition ${
+                    screeningStatus === 'excluded'
+                      ? 'bg-rose-500/30 text-rose-200 border-rose-500/50'
+                      : 'bg-white/5 text-forest-400 border-white/10 hover:bg-rose-500/10 hover:text-rose-300'
+                  }`}
+                >
+                  <AlertCircle size={10} className="inline mr-1" />Exclure
+                </button>
+                <button
+                  onClick={(e) => { e.stopPropagation(); handleScreen('pending'); }}
+                  className={`px-2.5 py-1 rounded-full text-[10px] font-semibold border transition ${
+                    screeningStatus === 'pending'
+                      ? 'bg-gold-500/20 text-gold-300 border-gold-500/30'
+                      : 'bg-white/5 text-forest-400 border-white/10 hover:bg-gold-500/10 hover:text-gold-400'
+                  }`}
+                >
+                  En attente
+                </button>
+              </>
+            )}
+          </div>
+
+          {/* PICO */}
+          {picoLoading ? (
+            <div className="flex items-center gap-2 text-forest-500">
+              <Loader2 size={12} className="animate-spin" />
+              <span>Chargement PICO...</span>
+            </div>
+          ) : pico ? (
+            <div className="rounded-xl border border-white/5 bg-white/2 p-3 space-y-2">
+              <p className="text-[10px] font-semibold text-forest-400 uppercase tracking-wider flex items-center gap-1">
+                <Microscope size={10} />PICO
+                {pico.pico_confidence != null && (
+                  <span className="ml-auto font-mono text-forest-500">Confiance : {Math.round(pico.pico_confidence * 100)}%</span>
+                )}
+              </p>
+              <div className="grid grid-cols-2 gap-2">
+                {[['P', 'Population', pico.P], ['I', 'Intervention', pico.I], ['C', 'Comparateur', pico.C], ['O', 'Outcome', pico.O]].map(([key, label, val]) => val && (
+                  <div key={key} className="rounded-lg bg-white/3 border border-white/5 p-2">
+                    <span className="text-[9px] font-bold text-brand-400 uppercase">{key} — {label}</span>
+                    <p className="text-forest-300 mt-0.5 leading-4">{val as string}</p>
+                  </div>
+                ))}
+              </div>
+              {pico.study_design && (
+                <p className="text-[10px] text-forest-500">Type d'étude : <span className="text-forest-300">{pico.study_design}</span></p>
+              )}
+            </div>
+          ) : picoLoaded ? (
+            <p className="text-[10px] text-forest-600 italic">PICO non encore extrait pour cet article.</p>
+          ) : null}
+
           {article.abstract && (
             <div>
               <p className="font-semibold text-forest-400 mb-1">Abstract</p>
@@ -1301,8 +1436,8 @@ function PrismaSection({ scenarioId }: { scenarioId: string }) {
       count: screen.records_screened,
       lines: [
         `Screening titre / résumé`,
-        screen.records_pending > 0
-          ? `${screen.records_pending} en attente d'évaluation manuelle`
+        screen.records_awaiting_screening > 0
+          ? `${screen.records_awaiting_screening} en attente d'évaluation manuelle`
           : `${screen.records_excluded_title_abstract} exclus`,
       ],
       exclusion: screen.records_excluded_title_abstract > 0 ? {
@@ -1416,16 +1551,16 @@ function PrismaSection({ scenarioId }: { scenarioId: string }) {
 
 // ─── Main Component ───────────────────────────────────────────────────────────
 
-type SectionKey = "queries" | "variables" | "model" | "corpus" | "clustering" | "rag" | "prisma";
+type SectionKey = "corpus" | "prisma" | "rag" | "variables" | "model" | "clustering" | "queries";
 
 const SECTIONS: Array<{ key: SectionKey; label: string; icon: React.ReactNode }> = [
-  { key: "queries", label: "Stratégie de recherche", icon: <Search size={13} /> },
-  { key: "variables", label: "Bases de données & Variables", icon: <Database size={13} /> },
-  { key: "model", label: "Modèle prédictif", icon: <Brain size={13} /> },
-  { key: "corpus", label: "Corpus", icon: <FileText size={13} /> },
-  { key: "clustering", label: "Clustering & Topics", icon: <Layers size={13} /> },
-  { key: "rag", label: "Assistant RAG", icon: <MessageSquare size={13} /> },
-  { key: "prisma", label: "PRISMA", icon: <Shield size={13} /> },
+  { key: "corpus",     label: "Corpus",                   icon: <FileText size={13} /> },
+  { key: "prisma",     label: "PRISMA",                   icon: <Shield size={13} /> },
+  { key: "rag",        label: "Evidence (RAG)",            icon: <MessageSquare size={13} /> },
+  { key: "variables", label: "Données & Variables",       icon: <Database size={13} /> },
+  { key: "model",     label: "Modèle prédictif",          icon: <Brain size={13} /> },
+  { key: "clustering",label: "Clustering & Topics",       icon: <Layers size={13} /> },
+  { key: "queries",   label: "Stratégie de recherche",    icon: <Search size={13} /> },
 ];
 
 interface ScenarioDetailPageProps {
@@ -1437,7 +1572,7 @@ export function ScenarioDetailPage({ scenarioId, onBack }: ScenarioDetailPagePro
   const [detail, setDetail] = useState<ScenarioDetail | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [activeSection, setActiveSection] = useState<SectionKey>("queries");
+  const [activeSection, setActiveSection] = useState<SectionKey>("corpus");
 
   useEffect(() => {
     setLoading(true);

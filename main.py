@@ -2706,16 +2706,37 @@ def run_scenario_model(scenario_id: str) -> dict[str, Any]:
 
 
 @app.get("/gesica/scenarios/{scenario_id}/clustering")
-def get_scenario_clustering(scenario_id: str) -> dict[str, Any]:
+def get_scenario_clustering(scenario_id: str, force_refresh: bool = False) -> dict[str, Any]:
     """
-    Clustering avancé utilisant UMAP (réduction de dimension 2D) et HDBSCAN (clustering à densité)
-    sur le corpus du scénario. Utilise ensuite un LLM (GPT-4o-mini) pour générer un résumé
-    clinique et opérationnel de chaque cluster à partir des articles représentatifs.
+    Clustering UMAP+HDBSCAN avec cache fichier (TTL 24h) et fallback K-Means rapide.
+    Le premier appel peut prendre 30-60s ; les suivants sont instantanés (cache).
     """
+    import json as _json
+    import time as _time
+    import threading
+
     meta = GESICA_SCENARIO_METADATA.get(scenario_id)
     if not meta:
         raise HTTPException(status_code=404, detail=f"Scénario '{scenario_id}' non trouvé")
-    
+
+    # ── Cache fichier (TTL 24h) ────────────────────────────────────────────────
+    cache_dir = "/tmp/literev_clustering_cache"
+    os.makedirs(cache_dir, exist_ok=True)
+    cache_file = os.path.join(cache_dir, f"{scenario_id}.json")
+    TTL = 86400  # 24 heures
+
+    if not force_refresh and os.path.exists(cache_file):
+        try:
+            mtime = os.path.getmtime(cache_file)
+            if _time.time() - mtime < TTL:
+                with open(cache_file, "r") as f:
+                    cached = _json.load(f)
+                cached["from_cache"] = True
+                return cached
+        except Exception:
+            pass
+
+    # ── Chargement des articles ────────────────────────────────────────────────
     with engine.connect() as conn:
         docs = conn.execute(text("""
             SELECT d.id, d.title, d.abstract, d.year, d.journal
@@ -2726,169 +2747,176 @@ def get_scenario_clustering(scenario_id: str) -> dict[str, Any]:
               AND d.abstract IS NOT NULL
               AND LENGTH(d.abstract) > 50
             ORDER BY d.year DESC NULLS LAST
-            LIMIT 500
+            LIMIT 400
         """), {"sid": scenario_id}).mappings().all()
-        
-    if len(docs) < 10:
-        # Fallback si trop peu d'articles pour UMAP + HDBSCAN
+
+    docs = list(docs)
+    if len(docs) < 5:
         return {
             "scenario_id": scenario_id,
             "n_docs": len(docs),
-            "message": "Corpus insuffisant pour le clustering avancé UMAP+HDBSCAN (minimum 10 articles avec abstract requis)",
+            "message": "Corpus insuffisant pour le clustering (minimum 5 articles avec abstract requis)",
             "clusters": [],
+            "from_cache": False,
         }
-        
-    try:
-        from sklearn.feature_extraction.text import TfidfVectorizer
-        import numpy as np
-        import umap
-        import hdbscan
-        from openai import OpenAI
-        
-        texts = [f"{d['title']}\n{d['abstract'] or ''}" for d in docs]
-        
-        # TF-IDF Vectorization
-        vectorizer = TfidfVectorizer(
-            max_features=1000,
-            stop_words='english',
-            min_df=2,
-            max_df=0.9,
-            ngram_range=(1, 2)
-        )
-        X = vectorizer.fit_transform(texts).toarray()
-        
-        # UMAP - Réduction à 2 dimensions pour la visualisation et le clustering à densité
-        # n_neighbors petit pour conserver la structure locale (clustering plus fin)
-        reducer = umap.UMAP(
-            n_neighbors=min(15, len(docs) - 1),
-            n_components=2,
-            metric='cosine',
-            random_state=42
-        )
-        embedding_2d = reducer.fit_transform(X)
-        
-        # HDBSCAN - Clustering à densité robuste
-        # min_cluster_size ajusté en fonction de la taille du corpus
-        min_cluster_size = max(3, len(docs) // 15)
-        clusterer = hdbscan.HDBSCAN(
-            min_cluster_size=min_cluster_size,
-            min_samples=2,
-            metric='euclidean',
-            cluster_selection_method='eom'
-        )
-        labels = clusterer.fit_predict(embedding_2d)
-        
-        # Récupérer les mots-clés TF-IDF globaux
-        feature_names = vectorizer.get_feature_names_out()
-        
-        # Regrouper les documents par cluster
-        unique_labels = set(labels)
-        clusters = []
-        
-        # Clé API OpenAI pour les résumés de clusters
-        openai_key = os.getenv("OPENAI_API_KEY")
-        client = None
-        if openai_key:
-            client = OpenAI(api_key=openai_key)
-            
-        for label in unique_labels:
-            cluster_indices = [i for i, l in enumerate(labels) if l == label]
-            cluster_docs = [docs[i] for i in cluster_indices]
-            
-            # Calculer les coordonnées moyennes du cluster pour l'affichage
-            coords = embedding_2d[cluster_indices]
-            mean_x = float(np.mean(coords[:, 0]))
-            mean_y = float(np.mean(coords[:, 1]))
-            
-            # Mots clés spécifiques au cluster via TF-IDF moyen
-            cluster_tfidf = X[cluster_indices].mean(axis=0)
-            top_indices = cluster_tfidf.argsort()[-10:][::-1]
-            top_words = [feature_names[i] for i in top_indices if cluster_tfidf[i] > 0]
-            
-            # Identifier le document le plus central (médoride géométrique dans l'espace UMAP)
-            center = np.mean(coords, axis=0)
-            distances = np.linalg.norm(coords - center, axis=1)
-            central_idx = cluster_indices[int(np.argmin(distances))]
-            representative_doc = docs[central_idx]
-            
-            # Préparer les articles pour l'affichage
-            points = []
-            for idx in cluster_indices:
-                points.append({
-                    "id": docs[idx]["id"],
-                    "title": docs[idx]["title"],
-                    "year": docs[idx]["year"],
-                    "x": float(embedding_2d[idx, 0]),
-                    "y": float(embedding_2d[idx, 1])
-                })
-                
-            # Générer un résumé LLM clinique & opérationnel pour ce cluster
-            resume = "Résumé automatique non disponible (Clé API manquante)."
-            if label == -1:
-                resume = "Ce groupe rassemble les articles de bruit de fond (bruit résiduel non regroupé en clusters denses)."
-            elif client:
-                # Sélectionner les 5 articles les plus centraux pour nourrir le LLM
-                top_central_indices = np.argsort(distances)[:5]
-                llm_inputs = []
-                for t_idx in top_central_indices:
-                    doc_item = docs[cluster_indices[t_idx]]
-                    llm_inputs.append(f"Titre: {doc_item['title']}\nRésumé: {doc_item['abstract'][:400]}...")
-                
-                llm_context = "\n\n".join(llm_inputs)
-                prompt = (
-                    f"Vous êtes un chercheur en médecine d'urgence et un expert en santé publique.\n"
-                    f"Voici un groupe d'articles scientifiques traitant du scénario GESICA : '{meta['title']}'.\n"
-                    f"Voici les abstracts de ces articles :\n\n{llm_context}\n\n"
-                    f"Rédigez un résumé très concis (3-4 phrases, max 150 mots) en français décrivant la thématique "
-                    f"commune de ce cluster, les évidences scientifiques qui s'en dégagent, et la valeur opérationnelle "
-                    f"ou clinique pour les services d'urgence préhospitaliers (ambulances/SMUR)."
+
+    from sklearn.feature_extraction.text import TfidfVectorizer
+    from sklearn.cluster import KMeans
+    from sklearn.decomposition import TruncatedSVD
+    import numpy as np
+
+    texts = [f"{d['title']} {d['abstract'] or ''}" for d in docs]
+
+    vectorizer = TfidfVectorizer(
+        max_features=800, stop_words='english', min_df=2, max_df=0.9, ngram_range=(1, 2)
+    )
+    X = vectorizer.fit_transform(texts)
+    feature_names = vectorizer.get_feature_names_out()
+
+    # ── Tentative UMAP+HDBSCAN avec timeout 45s ──────────────────────────────
+    embedding_2d = None
+    labels = None
+    method_used = "kmeans_fallback"
+
+    umap_result = {"embedding": None, "error": None}
+
+    def run_umap():
+        try:
+            import umap as umap_lib
+            reducer = umap_lib.UMAP(
+                n_neighbors=min(10, len(docs) - 1),
+                n_components=2,
+                metric='cosine',
+                random_state=42,
+                low_memory=True,
+                n_epochs=200,  # réduit pour accélérer
+            )
+            umap_result["embedding"] = reducer.fit_transform(X.toarray())
+        except Exception as e:
+            umap_result["error"] = str(e)
+
+    umap_thread = threading.Thread(target=run_umap, daemon=True)
+    umap_thread.start()
+    umap_thread.join(timeout=45)  # 45s max pour UMAP
+
+    if umap_result["embedding"] is not None:
+        embedding_2d = umap_result["embedding"]
+        # HDBSCAN sur l'espace UMAP
+        try:
+            import hdbscan as hdbscan_lib
+            min_cluster_size = max(3, len(docs) // 15)
+            clusterer = hdbscan_lib.HDBSCAN(
+                min_cluster_size=min_cluster_size, min_samples=2,
+                metric='euclidean', cluster_selection_method='eom'
+            )
+            labels = clusterer.fit_predict(embedding_2d)
+            method_used = "umap_hdbscan"
+        except Exception as e:
+            logger.warning(f"HDBSCAN failed: {e}, falling back to KMeans")
+
+    # ── Fallback K-Means + SVD (rapide, <2s) ───────────────────────────────
+    if labels is None:
+        n_clusters = max(3, min(8, len(docs) // 15))
+        svd = TruncatedSVD(n_components=min(50, len(docs) - 1), random_state=42)
+        X_reduced = svd.fit_transform(X)
+        km = KMeans(n_clusters=n_clusters, random_state=42, n_init=5, max_iter=100)
+        labels = km.fit_predict(X_reduced)
+        # PCA 2D pour la visualisation
+        from sklearn.decomposition import PCA
+        pca = PCA(n_components=2, random_state=42)
+        embedding_2d = pca.fit_transform(X_reduced)
+        method_used = "kmeans_fallback"
+
+    # ── Construction des clusters ────────────────────────────────────────────────
+    X_dense = X.toarray()
+    openai_key = os.getenv("OPENAI_API_KEY")
+    clusters = []
+
+    for label in sorted(set(labels)):
+        cluster_indices = [i for i, l in enumerate(labels) if l == label]
+        cluster_docs = [docs[i] for i in cluster_indices]
+        coords = embedding_2d[cluster_indices]
+        mean_x = float(np.mean(coords[:, 0]))
+        mean_y = float(np.mean(coords[:, 1]))
+
+        # Mots-clés TF-IDF du cluster
+        cluster_tfidf = X_dense[cluster_indices].mean(axis=0)
+        top_indices = cluster_tfidf.argsort()[-10:][::-1]
+        top_words = [feature_names[i] for i in top_indices if cluster_tfidf[i] > 0]
+
+        # Document représentatif (médroïde)
+        center = np.mean(coords, axis=0)
+        distances = np.linalg.norm(coords - center, axis=1)
+        central_idx = cluster_indices[int(np.argmin(distances))]
+        representative_doc = docs[central_idx]
+
+        points = [
+            {"id": docs[i]["id"], "title": docs[i]["title"],
+             "year": docs[i]["year"],
+             "x": float(embedding_2d[i, 0]), "y": float(embedding_2d[i, 1])}
+            for i in cluster_indices
+        ]
+
+        # Résumé LLM
+        resume = "Bruit de fond (articles non regroupés)." if label == -1 else "Résumé non disponible."
+        if label != -1 and openai_key:
+            try:
+                from openai import OpenAI as _OAI
+                _client = _OAI(api_key=openai_key)
+                top5 = np.argsort(distances)[:5]
+                llm_ctx = "\n\n".join(
+                    f"Titre: {docs[cluster_indices[t]]['title']}\nRésumé: {(docs[cluster_indices[t]]['abstract'] or '')[:350]}"
+                    for t in top5
                 )
-                try:
-                    completion = client.chat.completions.create(
-                        model="gpt-4.1-mini",
-                        messages=[{"role": "user", "content": prompt}],
-                        max_tokens=250,
-                        temperature=0.3
-                    )
-                    resume = completion.choices[0].message.content.strip()
-                except Exception as e:
-                    logger.error(f"Erreur LLM cluster {label}: {e}")
-                    resume = "Erreur lors de la génération du résumé par l'IA."
-            
-            clusters.append({
-                "cluster_id": int(label),
-                "cluster_name": f"Cluster {label}" if label != -1 else "Bruit de fond (Non-classés)",
-                "is_noise": label == -1,
-                "n_docs": len(cluster_docs),
-                "center_x": mean_x,
-                "center_y": mean_y,
-                "top_words": top_words,
-                "summary": resume,
-                "representative_doc": {
-                    "id": representative_doc["id"],
-                    "title": representative_doc["title"],
-                    "year": representative_doc["year"],
-                    "journal": representative_doc["journal"],
-                },
-                "points": points,
-            })
-            
-        return {
-            "scenario_id": scenario_id,
-            "n_docs": len(docs),
-            "n_clusters": len([c for c in clusters if not c["is_noise"]]),
-            "clusters": sorted(clusters, key=lambda x: (x["is_noise"], -x["n_docs"])),
-        }
-        
-    except Exception as e:
-        logger.error(f"Erreur clustering avancé {scenario_id}: {e}")
-        # Fallback K-Means classique si UMAP/HDBSCAN plante
-        return {
-            "scenario_id": scenario_id,
-            "n_docs": len(docs),
-            "message": f"Erreur lors du clustering UMAP+HDBSCAN: {str(e)}. Exécution du fallback K-Means.",
-            "clusters": []
-        }
+                completion = _client.chat.completions.create(
+                    model="gpt-4.1-mini",
+                    messages=[{"role": "user", "content": (
+                        f"Scénario GESICA : {meta['title']}.\n"
+                        f"Articles représentatifs du cluster :\n{llm_ctx}\n\n"
+                        f"Rédigez un résumé concis (3-4 phrases, max 120 mots) en français : "
+                        f"thématique commune, évidences clés, valeur opérationnelle pour les urgences préhospitalières."
+                    )}],
+                    max_tokens=200, temperature=0.3
+                )
+                resume = completion.choices[0].message.content.strip()
+            except Exception as e:
+                logger.error(f"LLM cluster {label}: {e}")
+
+        clusters.append({
+            "cluster_id": int(label),
+            "cluster_name": f"Cluster {label + 1}" if label != -1 else "Non-classés",
+            "is_noise": label == -1,
+            "n_docs": len(cluster_docs),
+            "center_x": mean_x,
+            "center_y": mean_y,
+            "top_words": top_words,
+            "summary": resume,
+            "representative_doc": {
+                "id": representative_doc["id"],
+                "title": representative_doc["title"],
+                "year": representative_doc["year"],
+                "journal": representative_doc["journal"],
+            },
+            "points": points,
+        })
+
+    result = {
+        "scenario_id": scenario_id,
+        "n_docs": len(docs),
+        "n_clusters": len([c for c in clusters if not c["is_noise"]]),
+        "method": method_used,
+        "clusters": sorted(clusters, key=lambda x: (x["is_noise"], -x["n_docs"])),
+        "from_cache": False,
+    }
+
+    # Sauvegarder en cache
+    try:
+        with open(cache_file, "w") as f:
+            _json.dump(result, f)
+    except Exception:
+        pass
+
+    return result
 
 
 @app.post("/gesica/scenarios/{scenario_id}/rag")
@@ -3086,28 +3114,29 @@ def get_scenario_prisma(scenario_id: str) -> dict[str, Any]:
     with_fulltext = int(stats["with_fulltext"] or 0)
 
     # ── Logique PRISMA 2020 correcte ──────────────────────────────────────────
-    # Étape 1 — Identification : tous les articles trouvés (y compris doublons)
-    # Les doublons sont des entrées séparées en DB marquées is_duplicate=True
-    total_identified = total  # total en DB inclut déjà les doublons marqués
-    records_after_dedup = total - duplicates  # articles uniques après dédup
+    # Étape 1 — Identification
+    # total_identified = tous les enregistrements en DB (doublons inclus)
+    # records_after_dedup = articles uniques = total - doublons marqués
+    total_identified = total
+    records_after_dedup = total - duplicates  # articles uniques
 
-    # Étape 2 — Screening : les articles uniques sont screenés titre/résumé
-    # excluded = ceux rejetés au screening titre/résumé
-    # pending  = pas encore screenés manuellement (statut par défaut)
+    # Étape 2 — Screening titre/résumé
+    # En attente de screening = tous les articles uniques non encore évalués
+    # = records_after_dedup (la valeur correcte demandée)
     records_screened = records_after_dedup
-    excluded_title_abstract = excluded
-
-    # Étape 3 — Éligibilité : articles passant au fulltext
-    # = screenés - exclus titre/résumé
-    eligible_for_fulltext = records_screened - excluded_title_abstract
-    fulltext_not_retrieved = eligible_for_fulltext - with_fulltext
-
-    # Étape 4 — Inclus : articles retenus après évaluation fulltext
-    # Si aucun screening manuel n'a été fait (tout est pending),
-    # on indique le nombre d'articles disponibles (eligible) comme "à évaluer"
+    excluded_title_abstract = excluded  # ceux rejetés manuellement
+    # En attente = articles uniques - ceux déjà screenés (included + excluded)
     screening_done = (included + excluded) > 0
+    screened_manually = included + excluded
+    awaiting_screening = records_after_dedup - screened_manually  # = en attente
+
+    # Étape 3 — Éligibilité fulltext
+    eligible_for_fulltext = records_screened - excluded_title_abstract
+    fulltext_not_retrieved = max(0, eligible_for_fulltext - with_fulltext)
+
+    # Étape 4 — Inclus
     total_included_final = included if screening_done else 0
-    awaiting_assessment = pending if not screening_done else 0
+    awaiting_assessment = awaiting_screening if not screening_done else max(0, awaiting_screening)
 
     return {
         "scenario_id": scenario_id,
@@ -3126,19 +3155,20 @@ def get_scenario_prisma(scenario_id: str) -> dict[str, Any]:
         "screening": {
             "records_screened": records_screened,
             "records_excluded_title_abstract": excluded_title_abstract,
-            "records_pending": pending,
+            "records_included_screening": included,
+            "records_awaiting_screening": awaiting_screening,
         },
         "eligibility": {
             "fulltext_assessed": eligible_for_fulltext,
             "fulltext_retrieved": with_fulltext,
-            "fulltext_not_retrieved": max(0, fulltext_not_retrieved),
+            "fulltext_not_retrieved": fulltext_not_retrieved,
             "fulltext_excluded": 0,
         },
         "included": {
             "total_included": total_included_final,
             "awaiting_assessment": awaiting_assessment,
             "screening_complete": screening_done,
-            "note": "Screening manuel non encore effectué — tous les articles sont en attente d'évaluation." if not screening_done else "",
+            "note": "Screening manuel non encore effectué — tous les articles uniques sont en attente d'évaluation." if not screening_done else "",
         },
     }
 
@@ -3234,4 +3264,240 @@ async def upload_scenario_dataset(scenario_id: str, file: UploadFile = File(...)
         "detected_columns": columns,
         "status": "stored_and_analyzed",
         "instructions": "Le jeu de données a été stocké. Les variables correspondantes du modèle seront automatiquement branchées lors du prochain recalcul."
+    }
+
+
+# ─── PICO Extraction Endpoints ───────────────────────────────────────────────
+
+@app.get("/gesica/scenarios/{scenario_id}/articles/{article_id}/pico")
+def get_article_pico(scenario_id: str, article_id: int):
+    """Retourne le PICO extrait pour un article donné (ou null si non encore extrait)."""
+    with engine.connect() as conn:
+        row = conn.execute(text("""
+            SELECT id, title, abstract,
+                   pico_json, pico_extracted_at
+            FROM literature_document
+            WHERE id = :article_id
+              AND project_context = 'gesica'
+        """), {"article_id": article_id}).mappings().fetchone()
+
+    if not row:
+        raise HTTPException(status_code=404, detail="Article non trouvé")
+
+    return {
+        "article_id": article_id,
+        "scenario_id": scenario_id,
+        "title": row["title"],
+        "pico": row["pico_json"],
+        "pico_extracted_at": row["pico_extracted_at"].isoformat() if row["pico_extracted_at"] else None,
+        "has_pico": row["pico_json"] is not None,
+    }
+
+
+@app.post("/gesica/scenarios/{scenario_id}/articles/{article_id}/pico/extract")
+def extract_article_pico(scenario_id: str, article_id: int):
+    """Extrait (ou re-extrait) le PICO pour un article via LLM à la demande."""
+    with engine.connect() as conn:
+        row = conn.execute(text("""
+            SELECT id, title, abstract
+            FROM literature_document
+            WHERE id = :article_id
+              AND project_context = 'gesica'
+        """), {"article_id": article_id}).mappings().fetchone()
+
+    if not row:
+        raise HTTPException(status_code=404, detail="Article non trouvé")
+
+    title = row["title"] or ""
+    abstract = row["abstract"] or ""
+
+    if not abstract or len(abstract) < 50:
+        raise HTTPException(status_code=422, detail="Abstract trop court pour extraction PICO")
+
+    openai_key = os.getenv("OPENAI_API_KEY")
+    if not openai_key:
+        raise HTTPException(status_code=503, detail="Clé OpenAI non configurée")
+
+    system_prompt = (
+        "You are a systematic review expert in emergency medicine. "
+        "Extract PICO elements and return ONLY valid JSON:\n"
+        '{"P":"Population","I":"Intervention","C":"Comparator or Not specified",'
+        '"O":"Outcome(s)","study_design":"RCT|Cohort|Systematic review|etc",'
+        '"pico_confidence":0.0-1.0,"pico_notes":""}\n'
+        "Be concise (max 2 sentences per field). Return ONLY the JSON."
+    )
+    user_content = f"Title: {title}\n\nAbstract: {abstract[:3000]}"
+
+    try:
+        from openai import OpenAI as _OAI
+        from datetime import datetime, timezone
+        _client = _OAI(api_key=openai_key)
+        response = _client.chat.completions.create(
+            model="gpt-4.1-mini",
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_content},
+            ],
+            temperature=0.1,
+            max_tokens=400,
+            response_format={"type": "json_object"},
+        )
+        pico = json.loads(response.choices[0].message.content)
+
+        required = {"P", "I", "C", "O", "study_design", "pico_confidence"}
+        if not required.issubset(pico.keys()):
+            raise HTTPException(status_code=500, detail="PICO incomplet retourné par le LLM")
+
+        pico["pico_confidence"] = float(pico.get("pico_confidence", 0.5))
+        pico["pico_notes"] = pico.get("pico_notes", "")
+
+        with engine.begin() as conn:
+            conn.execute(text("""
+                UPDATE literature_document
+                SET pico_json = CAST(:pico AS jsonb),
+                    pico_extracted_at = :ts
+                WHERE id = :article_id
+            """), {
+                "pico": json.dumps(pico),
+                "ts": datetime.now(timezone.utc),
+                "article_id": article_id,
+            })
+
+        return {
+            "article_id": article_id,
+            "scenario_id": scenario_id,
+            "pico": pico,
+            "extracted_at": datetime.now(timezone.utc).isoformat(),
+            "status": "extracted",
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Erreur extraction PICO article {article_id}: {e}")
+        raise HTTPException(status_code=500, detail=f"Erreur LLM: {str(e)}")
+
+
+@app.get("/gesica/scenarios/{scenario_id}/pico-stats")
+def get_scenario_pico_stats(scenario_id: str):
+    """Statistiques PICO pour un scénario."""
+    with engine.connect() as conn:
+        counts = conn.execute(text("""
+            SELECT
+                COUNT(*)                                            AS total,
+                COUNT(*) FILTER (WHERE pico_json IS NOT NULL)       AS with_pico,
+                COUNT(*) FILTER (WHERE pico_json IS NULL)           AS without_pico,
+                ROUND(AVG((pico_json->>'pico_confidence')::float)
+                    FILTER (WHERE pico_json IS NOT NULL)::numeric, 2) AS avg_confidence
+            FROM literature_document
+            WHERE scenario_type = :scenario_id
+              AND project_context = 'gesica'
+        """), {"scenario_id": scenario_id}).mappings().fetchone()
+
+        designs = conn.execute(text("""
+            SELECT
+                COALESCE(pico_json->>'study_design', 'Non extrait') AS design,
+                COUNT(*) AS n
+            FROM literature_document
+            WHERE scenario_type = :scenario_id
+              AND project_context = 'gesica'
+              AND pico_json IS NOT NULL
+            GROUP BY 1
+            ORDER BY 2 DESC
+        """), {"scenario_id": scenario_id}).mappings().fetchall()
+
+    total = counts["total"] if counts else 0
+    with_pico = counts["with_pico"] if counts else 0
+
+    return {
+        "scenario_id": scenario_id,
+        "total": total,
+        "with_pico": with_pico,
+        "without_pico": counts["without_pico"] if counts else 0,
+        "coverage_pct": round((with_pico / total * 100) if total > 0 else 0, 1),
+        "avg_confidence": float(counts["avg_confidence"]) if counts and counts["avg_confidence"] else None,
+        "study_design_distribution": [
+            {"design": d["design"], "count": d["n"]} for d in designs
+        ],
+    }
+
+
+# ─── Screening PRISMA par article dans un scénario ───────────────────────────
+
+@app.post("/gesica/scenarios/{scenario_id}/articles/{article_id}/screen")
+def screen_scenario_article(
+    scenario_id: str,
+    article_id: int,
+    status: str,
+    reason: str | None = None,
+    notes: str | None = None,
+):
+    """
+    Décision de screening PRISMA pour un article d'un scénario GESICA.
+    status: 'included' | 'excluded' | 'pending'
+    Pas de clé API requise pour permettre le screening depuis l'interface.
+    """
+    if status not in ("included", "excluded", "pending"):
+        raise HTTPException(status_code=422, detail="status doit être 'included', 'excluded' ou 'pending'")
+
+    with engine.begin() as conn:
+        row = conn.execute(text("""
+            UPDATE literature_document
+            SET screening_status = :status,
+                screening_reason = :reason,
+                screening_notes  = :notes
+            WHERE id = :article_id
+              AND project_context = 'gesica'
+              AND scenario_type   = :scenario_id
+            RETURNING id
+        """), {
+            "status": status,
+            "reason": reason,
+            "notes": notes,
+            "article_id": article_id,
+            "scenario_id": scenario_id,
+        }).first()
+
+    if not row:
+        raise HTTPException(status_code=404, detail="Article non trouvé dans ce scénario")
+
+    return {"id": row[0], "status": status, "updated": True}
+
+
+@app.get("/gesica/scenarios/{scenario_id}/screening-progress")
+def get_scenario_screening_progress(scenario_id: str) -> dict[str, Any]:
+    """Retourne la progression du screening PRISMA pour un scénario."""
+    with engine.connect() as conn:
+        stats = conn.execute(text("""
+            SELECT
+                COUNT(*) AS total,
+                SUM(CASE WHEN is_duplicate = TRUE THEN 1 ELSE 0 END) AS duplicates,
+                SUM(CASE WHEN screening_status = 'included' THEN 1 ELSE 0 END) AS included,
+                SUM(CASE WHEN screening_status = 'excluded' THEN 1 ELSE 0 END) AS excluded,
+                SUM(CASE WHEN screening_status IS NULL OR screening_status = 'pending' THEN 1 ELSE 0 END) AS pending
+            FROM literature_document
+            WHERE project_context = 'gesica'
+              AND scenario_type = :sid
+        """), {"sid": scenario_id}).mappings().first()
+
+    total = int(stats["total"] or 0)
+    duplicates = int(stats["duplicates"] or 0)
+    unique = total - duplicates
+    included = int(stats["included"] or 0)
+    excluded = int(stats["excluded"] or 0)
+    pending = int(stats["pending"] or 0)
+    screened = included + excluded
+    pct = round(screened / unique * 100, 1) if unique > 0 else 0
+
+    return {
+        "scenario_id": scenario_id,
+        "total_in_db": total,
+        "duplicates": duplicates,
+        "unique_articles": unique,
+        "screened": screened,
+        "included": included,
+        "excluded": excluded,
+        "awaiting": unique - screened,
+        "progress_pct": pct,
+        "screening_complete": pct >= 100,
     }

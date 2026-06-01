@@ -1570,7 +1570,8 @@ export interface ScenarioPrisma {
   screening: {
     records_screened: number;
     records_excluded_title_abstract: number;
-    records_pending: number;
+    records_included_screening: number;
+    records_awaiting_screening: number;
   };
   eligibility: {
     fulltext_assessed: number;
@@ -1584,6 +1585,29 @@ export interface ScenarioPrisma {
     screening_complete: boolean;
     note: string;
   };
+}
+
+export interface ScreeningProgress {
+  scenario_id: string;
+  total_in_db: number;
+  duplicates: number;
+  unique_articles: number;
+  screened: number;
+  included: number;
+  excluded: number;
+  awaiting: number;
+  progress_pct: number;
+  screening_complete: boolean;
+}
+
+export interface PicoData {
+  P: string | null;
+  I: string | null;
+  C: string | null;
+  O: string | null;
+  study_design: string | null;
+  pico_confidence: number | null;
+  pico_notes: string | null;
 }
 
 export async function fetchScenarioDetail(scenarioId: string): Promise<ScenarioDetail> {
@@ -1687,5 +1711,51 @@ export async function uploadScenarioDataset(
     throw new Error(text || `Upload failed with status ${response.status}`);
   }
   
+  return response.json();
+}
+
+export async function screenArticle(
+  scenarioId: string,
+  articleId: number,
+  status: 'included' | 'excluded' | 'pending',
+  reason?: string,
+  notes?: string
+): Promise<{ id: number; status: string; updated: boolean }> {
+  const params = new URLSearchParams({ status });
+  if (reason) params.set('reason', reason);
+  if (notes) params.set('notes', notes);
+  const response = await fetch(
+    `${API_BASE_URL}/gesica/scenarios/${scenarioId}/articles/${articleId}/screen?${params}`,
+    { method: 'POST' }
+  );
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  return response.json();
+}
+
+export async function fetchScreeningProgress(scenarioId: string): Promise<ScreeningProgress> {
+  const response = await fetch(`${API_BASE_URL}/gesica/scenarios/${scenarioId}/screening-progress`);
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  return response.json();
+}
+
+export async function fetchArticlePico(
+  scenarioId: string,
+  articleId: number
+): Promise<{ article_id: number; pico: PicoData | null; extracted_at: string | null }> {
+  const response = await fetch(
+    `${API_BASE_URL}/gesica/scenarios/${scenarioId}/articles/${articleId}/pico`
+  );
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  return response.json();
+}
+
+export async function extractPicoBatch(
+  scenarioId?: string,
+  limit = 50
+): Promise<{ extracted: number; skipped: number; errors: number; message: string }> {
+  const params = new URLSearchParams({ limit: String(limit) });
+  if (scenarioId) params.set('scenario_id', scenarioId);
+  const response = await fetch(`${API_BASE_URL}/pico/extract?${params}`, { method: 'POST' });
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
   return response.json();
 }
