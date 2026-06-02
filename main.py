@@ -417,7 +417,7 @@ def ask_assistant(payload: AskIn) -> dict[str, Any]:
         
         system_prompt = (
             "Vous êtes l'assistant scientifique expert de LiteRev-Evidence, spécialisé dans la synthèse d'évidences "
-            "pour les projets GESICA (Services de Secours / SMU), GeoAI4EI (Epidémiologie Génomique et IA) et EVA (Synthèse de preuves).\n\n"
+            "pour la médecine d'urgence suisse (SMUR/EMS Genève et HUG).\n\n"
             "Votre tâche est de répondre à la question de l'utilisateur en vous basant STRICTEMENT sur le contexte fourni. "
             "Ne faites pas d'affirmations qui ne sont pas étayées par les sources fournies.\n\n"
             "Règles de rédaction :\n"
@@ -460,6 +460,10 @@ def ask_assistant(payload: AskIn) -> dict[str, Any]:
 def _build_where(filters: dict[str, Any] | None) -> tuple[str, dict[str, Any]]:
     if not filters:
         return "", {}
+
+    # Normaliser project_context : gesica/geoai4ei/eva -> literev (migration)
+    if filters.get("project_context") in ("gesica", "geoai4ei", "eva"):
+        filters = {**filters, "project_context": "literev"}
 
     clauses: list[str] = []
     params: dict[str, Any] = {}
@@ -1026,11 +1030,11 @@ def get_corpus_stats() -> dict[str, Any]:
 
 @app.get("/gesica/stats")
 def get_gesica_stats() -> dict[str, Any]:
-    """Statistiques globales du corpus GESICA."""
+    """Statistiques globales du corpus LiteRev."""
     sql_docs = text("""
         SELECT id, title, abstract
         FROM literature_document
-        WHERE project_context = 'gesica'
+        WHERE project_context = 'literev'
     """)
     with engine.connect() as conn:
         docs = conn.execute(sql_docs).mappings().all()
@@ -1062,18 +1066,18 @@ def get_gesica_stats() -> dict[str, Any]:
 
 @app.get("/geoai4ei/stats")
 def get_geoai4ei_stats() -> dict[str, Any]:
-    """Statistiques globales du corpus GeoAI4EI."""
+    """Statistiques globales du corpus Urgences Hospitalières."""
     sql_diseases = text("""
         SELECT disease_or_condition, COUNT(*) as count
         FROM literature_document
-        WHERE project_context = 'geoai4ei' AND disease_or_condition IS NOT NULL
+        WHERE project_context = 'literev' AND disease_or_condition IS NOT NULL
         GROUP BY disease_or_condition
         ORDER BY count DESC
     """)
     sql_geo = text("""
         SELECT geographic_scope, COUNT(*) as count
         FROM literature_document
-        WHERE project_context = 'geoai4ei' AND geographic_scope IS NOT NULL
+        WHERE project_context = 'literev' AND geographic_scope IS NOT NULL
         GROUP BY geographic_scope
         ORDER BY count DESC
     """)
@@ -1402,7 +1406,7 @@ GESICA_SCENARIO_METADATA: dict[str, dict[str, Any]] = {
     "unassigned": {
         "hidden": True,
         "title": "Scénarios Non Classés",
-        "description": "Documents GESICA en attente de classification dans un scénario spécifique.",
+        "description": "Documents en attente de classification dans un scénario spécifique.",
         "cluster": "Non classé",
         "recommended_actions": [
             "Relancer le script de backfill pour réassigner ces documents",
@@ -1425,7 +1429,7 @@ def get_gesica_scenarios() -> list[dict[str, Any]]:
         sql_counts = text("""
             SELECT scenario_type, COUNT(*) as article_count
             FROM literature_document
-            WHERE project_context = 'gesica' 
+            WHERE project_context = 'literev' 
               AND scenario_type IS NOT NULL 
               AND scenario_type != 'unassigned'
             GROUP BY scenario_type;
@@ -1455,7 +1459,7 @@ def get_gesica_scenarios() -> list[dict[str, Any]]:
                                  AND c.chunk_type = 'fulltext_section'
                            ) AS has_fulltext
                     FROM literature_document d
-                    WHERE d.project_context = 'gesica' 
+                    WHERE d.project_context = 'literev' 
                       AND d.scenario_type = :scenario
                     ORDER BY d.year DESC NULLS LAST, d.title ASC
                     LIMIT 5
@@ -1960,7 +1964,7 @@ def get_terrain_informal_signals() -> dict[str, Any]:
             "reliability_score": 0.85,
             "severity": "moderate",
             "geo_scope": "Genève (Suisse)",
-            "impact_on_geoai4ei": "Signal d'entrée critique pour la modélisation de propagation d'agents pathogènes émergents."
+            "impact_on_hospital": "Signal d'entrée pour la modélisation épidémiologique hospitalière."
         },
         {
             "id": "sig-002",
@@ -1971,7 +1975,7 @@ def get_terrain_informal_signals() -> dict[str, Any]:
             "reliability_score": 0.92,
             "severity": "high",
             "geo_scope": "Haute-Savoie (France)",
-            "impact_on_gesica": "Impact direct sur les itinéraires ambulances transfrontaliers (isochrones rallongés)."
+            "impact_on_ems": "Impact direct sur les itinéraires ambulances et la couverture opérationnelle."
         }
     ]
     
@@ -1987,7 +1991,7 @@ def get_terrain_climate(lat: float = 46.2044, lon: float = 6.1432) -> dict[str, 
     """
     Endpoint P5 : Intégration Copernicus Climate Data Store (CDS) - ERA5 & Projections Climatiques.
     Permet de récupérer les anomalies de température, vagues de chaleur et risques climatiques (inondations, canicules)
-    pour les modèles de prévision de demande EMS (GESICA) et surveillance épidémique (GeoAI4EI).
+    pour les modèles de prévision de demande EMS et surveillance épidémique.
     """
     import os
     import tempfile
@@ -2497,7 +2501,7 @@ def endpoint_mci_victim():
 @app.get("/gesica/scenarios/{scenario_id}/detail")
 def get_scenario_detail(scenario_id: str) -> dict[str, Any]:
     """
-    Retourne toutes les informations enrichies d'un scénario GESICA :
+    Retourne toutes les informations enrichies d'un scénario :
     - Métadonnées de base (titre, description, cluster, actions recommandées)
     - Queries booléennes PubMed et requêtes NL pour la recherche sémantique
     - Prompt d'extraction d'évidence spécifique au scénario
@@ -2521,7 +2525,7 @@ def get_scenario_detail(scenario_id: str) -> dict[str, Any]:
                 MIN(d.year) AS year_min,
                 MAX(d.year) AS year_max
             FROM literature_document d
-            WHERE d.project_context = 'gesica'
+            WHERE d.project_context = 'literev'
               AND d.scenario_type = :sid
               AND (d.is_duplicate IS NULL OR d.is_duplicate = FALSE)
         """), {"sid": scenario_id}).mappings().first()
@@ -2561,14 +2565,14 @@ def get_scenario_corpus(
     source: str | None = None,
 ) -> dict[str, Any]:
     """
-    Retourne le corpus d'articles pour un scénario GESICA avec statistiques.
+    Retourne le corpus d'articles pour un scénario avec statistiques.
     Supporte la pagination, le filtrage par année, source et full-text.
     """
     meta = GESICA_SCENARIO_METADATA.get(scenario_id)
     if not meta:
         raise HTTPException(status_code=404, detail=f"Scénario '{scenario_id}' non trouvé")
     conditions = [
-        "d.project_context = 'gesica'",
+        "d.project_context = 'literev'",
         "d.scenario_type = :sid",
         "(d.is_duplicate IS NULL OR d.is_duplicate = FALSE)",
     ]
@@ -2642,7 +2646,7 @@ def get_scenario_corpus(
 @app.get("/gesica/scenarios/{scenario_id}/model-status")
 def get_scenario_model_status(scenario_id: str) -> dict[str, Any]:
     """
-    Retourne le statut coloré du modèle pour un scénario GESICA.
+    Retourne le statut coloré du modèle pour un scénario.
     Exécute le modèle correspondant et évalue le statut vert/orange/rouge.
     """
     meta = GESICA_SCENARIO_METADATA.get(scenario_id)
@@ -2726,7 +2730,7 @@ def get_scenario_model_status(scenario_id: str) -> dict[str, Any]:
         recent_count = conn.execute(text("""
             SELECT COUNT(*) AS cnt
             FROM literature_document d
-            WHERE d.project_context = 'gesica'
+            WHERE d.project_context = 'literev'
               AND d.scenario_type = :sid
               AND d.created_at >= NOW() - INTERVAL '30 days'
         """), {"sid": scenario_id}).scalar()
@@ -2747,7 +2751,7 @@ def get_scenario_model_status(scenario_id: str) -> dict[str, Any]:
 @app.post("/gesica/scenarios/{scenario_id}/model-run")
 def run_scenario_model(scenario_id: str) -> dict[str, Any]:
     """
-    Re-run manuel du modèle pour un scénario GESICA.
+    Re-run manuel du modèle pour un scénario.
     Retourne le résultat frais avec statut coloré.
     """
     return get_scenario_model_status(scenario_id)
@@ -2808,7 +2812,7 @@ def _run_clustering_background(scenario_id: str, force_refresh: bool = False) ->
                            LIMIT 1
                        ) AS embedding_str
                 FROM literature_document d
-                WHERE d.project_context = 'gesica'
+                WHERE d.project_context = 'literev'
                   AND d.scenario_type = :sid
                   AND (d.is_duplicate IS NULL OR d.is_duplicate = FALSE)
                   AND d.abstract IS NOT NULL
@@ -3066,7 +3070,7 @@ def get_clustering_status(scenario_id: str) -> dict:
 @app.post("/gesica/scenarios/{scenario_id}/rag")
 def scenario_rag_assistant(scenario_id: str, payload: AskIn) -> dict[str, Any]:
     """
-    Assistant RAG dédié par scénario GESICA.
+    Assistant RAG dédié par scénario.
     Utilise le corpus filtré du scénario + le prompt d'extraction d'évidence spécifique.
     """
     meta = GESICA_SCENARIO_METADATA.get(scenario_id)
@@ -3077,7 +3081,7 @@ def scenario_rag_assistant(scenario_id: str, payload: AskIn) -> dict[str, Any]:
     # Forcer le filtre sur le scénario
     payload.filters = payload.filters or {}
     payload.filters["scenario_type"] = scenario_id
-    payload.filters["project_context"] = "gesica"
+    payload.filters["project_context"] = "literev"
     # Construire la question enrichie avec le contexte du scénario
     enriched_question = payload.question
     if evidence_prompt:
@@ -3109,7 +3113,7 @@ def scenario_rag_assistant(scenario_id: str, payload: AskIn) -> dict[str, Any]:
                 FROM document_chunk c
                 JOIN literature_document d ON d.id = c.document_id
                 WHERE c.embedding IS NOT NULL
-                  AND d.project_context = 'gesica'
+                  AND d.project_context = 'literev'
                   AND d.scenario_type = :sid
                   AND (d.is_duplicate IS NULL OR d.is_duplicate = FALSE)
                 ORDER BY c.embedding <=> CAST(:emb AS vector)
@@ -3135,7 +3139,7 @@ def scenario_rag_assistant(scenario_id: str, payload: AskIn) -> dict[str, Any]:
                 FROM document_chunk c
                 JOIN literature_document d ON d.id = c.document_id
                 WHERE ({like_clauses})
-                  AND d.project_context = 'gesica'
+                  AND d.project_context = 'literev'
                   AND d.scenario_type = :sid
                 ORDER BY d.year DESC NULLS LAST
                 LIMIT 8
@@ -3186,7 +3190,7 @@ def scenario_rag_assistant(scenario_id: str, payload: AskIn) -> dict[str, Any]:
         from openai import OpenAI
         client = OpenAI(api_key=openai_key)
         system_prompt = (
-            f"Vous êtes l'assistant scientifique expert de LiteRev-Evidence pour le scénario GESICA : "
+            f"Vous êtes l'assistant scientifique expert de LiteRev-Evidence pour le scénario : "
             f"**{meta['title']}**.\n\n"
             f"{evidence_prompt}\n\n"
             "Règles de rédaction :\n"
@@ -3209,7 +3213,7 @@ def scenario_rag_assistant(scenario_id: str, payload: AskIn) -> dict[str, Any]:
             "answer": response.choices[0].message.content,
             "sources": sources,
             "scenario_id": scenario_id,
-            "model": "gpt-4o-mini",
+            "model": "Assistant IA",
         }
     except Exception as e:
         logger.error(f"Erreur OpenAI RAG scénario {scenario_id}: {e}")
@@ -3223,7 +3227,7 @@ def scenario_rag_assistant(scenario_id: str, payload: AskIn) -> dict[str, Any]:
 @app.get("/gesica/scenarios/{scenario_id}/prisma")
 def get_scenario_prisma(scenario_id: str) -> dict[str, Any]:
     """
-    Flow PRISMA pour un scénario GESICA spécifique.
+    Flow PRISMA pour un scénario spécifique.
     Calcule les métriques d'identification, screening, éligibilité et inclusion.
     """
     meta = GESICA_SCENARIO_METADATA.get(scenario_id)
@@ -3247,7 +3251,7 @@ def get_scenario_prisma(scenario_id: str) -> dict[str, Any]:
                     WHERE c.document_id = d.id AND c.chunk_type = 'fulltext_section'
                 ) THEN 1 ELSE 0 END) AS with_fulltext
             FROM literature_document d
-            WHERE d.project_context = 'gesica'
+            WHERE d.project_context = 'literev'
               AND d.scenario_type = :sid
         """), {"sid": scenario_id}).mappings().first()
     total = int(stats["total"] or 0)
@@ -3320,7 +3324,7 @@ def get_scenario_prisma(scenario_id: str) -> dict[str, Any]:
 @app.get("/gesica/deduplication/status")
 def get_deduplication_status() -> dict[str, Any]:
     """
-    Retourne le statut de la déduplication du corpus GESICA.
+    Retourne le statut de la déduplication du corpus.
     """
     with engine.connect() as conn:
         stats = conn.execute(text("""
@@ -3331,7 +3335,7 @@ def get_deduplication_status() -> dict[str, Any]:
                 SUM(CASE WHEN title_hash IS NOT NULL THEN 1 ELSE 0 END) AS with_title_hash,
                 SUM(CASE WHEN quality_score > 0 THEN 1 ELSE 0 END) AS with_quality_score
             FROM literature_document
-            WHERE project_context = 'gesica'
+            WHERE project_context = 'literev'
         """)).mappings().first()
     return {
         "total_documents": int(stats["total"] or 0),
@@ -3422,7 +3426,7 @@ def get_article_pico(scenario_id: str, article_id: int):
                    pico_json, pico_extracted_at
             FROM literature_document
             WHERE id = :article_id
-              AND project_context = 'gesica'
+              AND project_context = 'literev'
         """), {"article_id": article_id}).mappings().fetchone()
 
     if not row:
@@ -3446,7 +3450,7 @@ def extract_article_pico(scenario_id: str, article_id: int):
             SELECT id, title, abstract
             FROM literature_document
             WHERE id = :article_id
-              AND project_context = 'gesica'
+              AND project_context = 'literev'
         """), {"article_id": article_id}).mappings().fetchone()
 
     if not row:
@@ -3535,7 +3539,7 @@ def get_scenario_pico_stats(scenario_id: str):
                     FILTER (WHERE pico_json IS NOT NULL)::numeric, 2) AS avg_confidence
             FROM literature_document
             WHERE scenario_type = :scenario_id
-              AND project_context = 'gesica'
+              AND project_context = 'literev'
         """), {"scenario_id": scenario_id}).mappings().fetchone()
 
         designs = conn.execute(text("""
@@ -3544,7 +3548,7 @@ def get_scenario_pico_stats(scenario_id: str):
                 COUNT(*) AS n
             FROM literature_document
             WHERE scenario_type = :scenario_id
-              AND project_context = 'gesica'
+              AND project_context = 'literev'
               AND pico_json IS NOT NULL
             GROUP BY 1
             ORDER BY 2 DESC
@@ -3577,7 +3581,7 @@ def screen_scenario_article(
     notes: str | None = None,
 ):
     """
-    Décision de screening PRISMA pour un article d'un scénario GESICA.
+    Décision de screening PRISMA pour un article d'un scénario.
     status: 'included' | 'excluded' | 'pending'
     Pas de clé API requise pour permettre le screening depuis l'interface.
     """
@@ -3591,7 +3595,7 @@ def screen_scenario_article(
                 screening_reason = :reason,
                 screening_notes  = :notes
             WHERE id = :article_id
-              AND project_context = 'gesica'
+              AND project_context = 'literev'
               AND scenario_type   = :scenario_id
             RETURNING id
         """), {
@@ -3620,7 +3624,7 @@ def get_scenario_screening_progress(scenario_id: str) -> dict[str, Any]:
                 SUM(CASE WHEN screening_status = 'excluded' THEN 1 ELSE 0 END) AS excluded,
                 SUM(CASE WHEN screening_status IS NULL OR screening_status = 'pending' THEN 1 ELSE 0 END) AS pending
             FROM literature_document
-            WHERE project_context = 'gesica'
+            WHERE project_context = 'literev'
               AND scenario_type = :sid
         """), {"sid": scenario_id}).mappings().first()
 
@@ -3658,7 +3662,7 @@ def get_scenario_pico_bulk(scenario_id: str, limit: int = 200, offset: int = 0) 
                 screening_status
             FROM literature_document
             WHERE scenario_type = :scenario_id
-              AND project_context = 'gesica'
+              AND project_context = 'literev'
               AND is_duplicate IS NOT TRUE
             ORDER BY
                 CASE WHEN pico_json IS NOT NULL THEN 0 ELSE 1 END,
@@ -3671,7 +3675,7 @@ def get_scenario_pico_bulk(scenario_id: str, limit: int = 200, offset: int = 0) 
                    COUNT(*) FILTER (WHERE pico_json IS NOT NULL) AS with_pico
             FROM literature_document
             WHERE scenario_type = :scenario_id
-              AND project_context = 'gesica'
+              AND project_context = 'literev'
               AND is_duplicate IS NOT TRUE
         """), {"scenario_id": scenario_id}).mappings().fetchone()
     articles = []
@@ -3721,7 +3725,7 @@ def get_evidence_brief(scenario_id: str) -> dict[str, Any]:
                 MIN(year) AS year_min,
                 MAX(year) AS year_max
             FROM literature_document
-            WHERE scenario_type = :sid AND project_context = 'gesica'
+            WHERE scenario_type = :sid AND project_context = 'literev'
         """), {"sid": scenario_id}).mappings().fetchone()
         # Top articles (représentatifs)
         top_articles = conn.execute(text("""
@@ -3729,7 +3733,7 @@ def get_evidence_brief(scenario_id: str) -> dict[str, Any]:
                    study_design, pico_json, citation_count
             FROM literature_document
             WHERE scenario_type = :sid
-              AND project_context = 'gesica'
+              AND project_context = 'literev'
               AND is_duplicate IS NOT TRUE
               AND abstract IS NOT NULL
             ORDER BY citation_count DESC NULLS LAST, year DESC NULLS LAST
@@ -3741,7 +3745,7 @@ def get_evidence_brief(scenario_id: str) -> dict[str, Any]:
                 COALESCE(study_design, pico_json->>'study_design', 'Non classifié') AS design,
                 COUNT(*) AS n
             FROM literature_document
-            WHERE scenario_type = :sid AND project_context = 'gesica'
+            WHERE scenario_type = :sid AND project_context = 'literev'
               AND is_duplicate IS NOT TRUE
             GROUP BY 1 ORDER BY 2 DESC LIMIT 10
         """), {"sid": scenario_id}).mappings().fetchall()
@@ -3749,7 +3753,7 @@ def get_evidence_brief(scenario_id: str) -> dict[str, Any]:
         year_dist = conn.execute(text("""
             SELECT year, COUNT(*) AS n
             FROM literature_document
-            WHERE scenario_type = :sid AND project_context = 'gesica'
+            WHERE scenario_type = :sid AND project_context = 'literev'
               AND is_duplicate IS NOT TRUE AND year IS NOT NULL
             GROUP BY year ORDER BY year DESC LIMIT 15
         """), {"sid": scenario_id}).mappings().fetchall()
@@ -3837,7 +3841,7 @@ def submit_double_blind_decision(
             SET {col_status} = :status,
                 {col_reason} = :reason
             WHERE id = :article_id
-              AND project_context = 'gesica'
+              AND project_context = 'literev'
               AND scenario_type = :scenario_id
             RETURNING id, reviewer_1_status, reviewer_2_status
         """), {
@@ -3899,7 +3903,7 @@ def get_kappa_stats(scenario_id: str) -> dict[str, Any]:
         rows = conn.execute(text("""
             SELECT reviewer_1_status, reviewer_2_status
             FROM literature_document
-            WHERE project_context = 'gesica'
+            WHERE project_context = 'literev'
               AND scenario_type = :sid
               AND reviewer_1_status IS NOT NULL
               AND reviewer_2_status IS NOT NULL
@@ -3981,7 +3985,7 @@ def get_conflicts(scenario_id: str) -> list[dict[str, Any]]:
                    reviewer_2_status, reviewer_2_reason,
                    kappa_final_status
             FROM literature_document
-            WHERE project_context = 'gesica'
+            WHERE project_context = 'literev'
               AND scenario_type = :sid
               AND reviewer_1_status IS NOT NULL
               AND reviewer_2_status IS NOT NULL
@@ -4010,7 +4014,7 @@ def resolve_conflict(
                 screening_status = :final,
                 screening_notes = :notes
             WHERE id = :article_id
-              AND project_context = 'gesica'
+              AND project_context = 'literev'
               AND scenario_type = :scenario_id
             RETURNING id
         """), {
@@ -4056,7 +4060,7 @@ def get_knowledge_graph(
                 ) AS design
             FROM literature_document d
             JOIN document_chunk c ON c.document_id = d.id
-            WHERE d.project_context = 'gesica'
+            WHERE d.project_context = 'literev'
               AND d.scenario_type = :sid
               AND d.is_duplicate IS NOT TRUE
               AND c.embedding IS NOT NULL
@@ -4188,7 +4192,7 @@ async def ask_stream(payload: dict[str, Any]) -> StreamingResponse:
     from openai import AsyncOpenAI
 
     question = payload.get("question", "")
-    project_context = payload.get("project_context", "gesica")
+    project_context = payload.get("project_context", "literev")
     scenario_id = payload.get("scenario_id", None)
     top_k = int(payload.get("top_k", 8))
 
@@ -4325,14 +4329,14 @@ def get_evidence_brief_pdf(scenario_id: str):
                 SUM(CASE WHEN screening_status = 'included' THEN 1 ELSE 0 END) AS included,
                 SUM(CASE WHEN pico_json IS NOT NULL THEN 1 ELSE 0 END) AS with_pico
             FROM literature_document
-            WHERE project_context = 'gesica' AND scenario_type = :sid
+            WHERE project_context = 'literev' AND scenario_type = :sid
         """), {"sid": scenario_id}).mappings().first()
 
         top_articles = conn.execute(text("""
             SELECT title, year, journal, authors,
                    COALESCE((pico_json->>'study_design'), study_design, 'N/A') AS design
             FROM literature_document
-            WHERE project_context = 'gesica' AND scenario_type = :sid
+            WHERE project_context = 'literev' AND scenario_type = :sid
               AND is_duplicate IS NOT TRUE AND abstract IS NOT NULL
             ORDER BY quality_score DESC NULLS LAST, year DESC NULLS LAST
             LIMIT 10
@@ -4343,7 +4347,7 @@ def get_evidence_brief_pdf(scenario_id: str):
                 COALESCE((pico_json->>'study_design'), study_design, 'Non classifié') AS design,
                 COUNT(*) AS n
             FROM literature_document
-            WHERE project_context = 'gesica' AND scenario_type = :sid
+            WHERE project_context = 'literev' AND scenario_type = :sid
               AND is_duplicate IS NOT TRUE
             GROUP BY 1 ORDER BY 2 DESC LIMIT 8
         """), {"sid": scenario_id}).mappings().all()
@@ -4403,7 +4407,7 @@ def get_evidence_brief_pdf(scenario_id: str):
     story.append(Paragraph("LiteRev — Evidence to Scenario", small_style))
     story.append(Paragraph(f"Evidence Brief : {meta['title']}", title_style))
     story.append(Paragraph(
-        f"Scénario GESICA · Généré le {__import__('datetime').datetime.now().strftime('%d/%m/%Y à %H:%M')}",
+        f"Scénario LiteRev · Généré le {__import__('datetime').datetime.now().strftime('%d/%m/%Y à %H:%M')}",
         small_style
     ))
     story.append(HRFlowable(width="100%", thickness=2, color=brand_green, spaceAfter=12))

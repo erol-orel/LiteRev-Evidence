@@ -512,11 +512,11 @@ function TerrainView() {
                   </div>
                 </div>
                 <p className="text-sm text-forest-300 leading-5">{sig.content}</p>
-                {sig.impact_on_gesica && (
-                  <p className="mt-2 text-xs text-brand-300 italic">→ GESICA : {sig.impact_on_gesica}</p>
+                {sig.impact_on_ems && (
+                  <p className="mt-2 text-xs text-brand-300 italic">→ Urgences Pré-hospitalières : {sig.impact_on_ems}</p>
                 )}
-                {sig.impact_on_geoai4ei && (
-                  <p className="mt-1 text-xs text-violet-300 italic">→ GeoAI4EI : {sig.impact_on_geoai4ei}</p>
+                {sig.impact_on_hospital && (
+                  <p className="mt-1 text-xs text-violet-300 italic">→ Urgences Hospitalières : {sig.impact_on_hospital}</p>
                 )}
               </div>
             ))}
@@ -581,19 +581,42 @@ function TerrainView() {
   );
 }
 
-function EvidenceStrengthBadge({ strength }: { strength: "weak" | "moderate" | "strong" | null }) {
+function EvidenceStrengthBadge({ strength, showTooltip = false }: { strength: "weak" | "moderate" | "strong" | null; showTooltip?: boolean }) {
   if (!strength) return null;
   const config = {
-    strong: { label: "Forte", className: "bg-brand-500/20 text-brand-300 border-brand-500/30" },
-    moderate: { label: "Modérée", className: "bg-gold-500/20 text-gold-300 border-gold-500/30" },
-    weak: { label: "Faible", className: "bg-rose-500/20 text-rose-300 border-rose-500/30" },
+    strong: { label: "Forte", className: "bg-brand-500/20 text-brand-300 border-brand-500/30", tooltip: "Preuve forte : méta-analyse, revue systématique ou ECR de haute qualité. Score qualité ≥ 0.7." },
+    moderate: { label: "Modérée", className: "bg-gold-500/20 text-gold-300 border-gold-500/30", tooltip: "Preuve modérée : étude de cohorte, étude cas-témoins ou ECR de qualité moyenne. Score qualité 0.4–0.7." },
+    weak: { label: "Faible", className: "bg-rose-500/20 text-rose-300 border-rose-500/30", tooltip: "Preuve faible : étude transversale, série de cas, rapport d'expert ou qualité insuffisante. Score qualité < 0.4." },
   };
-  const { label, className } = config[strength];
+  const { label, className, tooltip } = config[strength];
   return (
-    <span className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-xs font-medium ${className}`}>
+    <span
+      className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-xs font-medium ${className} ${showTooltip ? 'cursor-help' : ''}`}
+      title={showTooltip ? tooltip : undefined}
+    >
       <Zap size={10} />
       {label}
     </span>
+  );
+}
+
+function EvidenceLegend() {
+  return (
+    <div className="rounded-2xl border border-white/10 bg-white/5 p-4 text-xs space-y-2">
+      <p className="font-semibold text-white/70 mb-2 flex items-center gap-1"><Zap size={11} className="text-brand-400" /> Niveaux de preuve</p>
+      <div className="flex items-start gap-2">
+        <span className="inline-flex items-center gap-1 rounded-full border border-brand-500/30 bg-brand-500/20 px-2 py-0.5 text-xs font-medium text-brand-300 shrink-0">Forte</span>
+        <span className="text-white/50">Méta-analyse, revue systématique ou ECR de haute qualité (score ≥ 0.7)</span>
+      </div>
+      <div className="flex items-start gap-2">
+        <span className="inline-flex items-center gap-1 rounded-full border border-gold-500/30 bg-gold-500/20 px-2 py-0.5 text-xs font-medium text-gold-300 shrink-0">Modérée</span>
+        <span className="text-white/50">Étude de cohorte, cas-témoins ou ECR de qualité moyenne (score 0.4–0.7)</span>
+      </div>
+      <div className="flex items-start gap-2">
+        <span className="inline-flex items-center gap-1 rounded-full border border-rose-500/30 bg-rose-500/20 px-2 py-0.5 text-xs font-medium text-rose-300 shrink-0">Faible</span>
+        <span className="text-white/50">Étude transversale, série de cas, avis d'expert (score &lt; 0.4)</span>
+      </div>
+    </div>
   );
 }
 
@@ -612,9 +635,9 @@ function GesicaSignalsPanel({ summary }: { summary: EvidenceSummaryResponse }) {
       <div className="flex items-center justify-between">
         <h3 className="font-medium text-white flex items-center gap-2">
           <Zap size={14} className="text-brand-400" />
-          Signaux GESICA
+          Signaux EMS
         </h3>
-        <EvidenceStrengthBadge strength={s.evidenceStrength} />
+        <EvidenceStrengthBadge strength={s.evidenceStrength} showTooltip={true} />
       </div>
 
       {s.forecastHorizon && (
@@ -777,10 +800,15 @@ function StatsView({ corpusStats, gesicaStats, fulltextStats }: { corpusStats: C
         <div className="rounded-3xl border border-white/10 bg-white/5 p-5 shadow-2xl">
           <h2 className="mb-4 flex items-center gap-2 text-lg font-semibold text-white">
             <Activity size={18} className="text-brand-400" />
-            Corpus GESICA
+            Corpus LiteRev
           </h2>
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
             {Object.entries(gesicaStats.evidenceStrengthDistribution).map(([strength, count]) => {
+              const strengthLabels: Record<string, string> = {
+                strong: "Forte",
+                moderate: "Modérée",
+                weak: "Faible",
+              };
               const colors: Record<string, string> = {
                 strong: "text-brand-300",
                 moderate: "text-gold-300",
@@ -789,10 +817,13 @@ function StatsView({ corpusStats, gesicaStats, fulltextStats }: { corpusStats: C
               return (
                 <div key={strength} className="rounded-2xl border border-white/10 bg-forest-900/60 p-4 text-center">
                   <p className={`text-2xl font-bold ${colors[strength] ?? "text-white"}`}>{count}</p>
-                  <p className="mt-1 text-xs text-forest-400 capitalize">Preuve {strength}</p>
+                  <p className="mt-1 text-xs text-forest-400">Preuve {strengthLabels[strength] ?? strength}</p>
                 </div>
               );
             })}
+          </div>
+          <div className="mt-4">
+            <EvidenceLegend />
           </div>
 
           {Object.keys(gesicaStats.forecastHorizons).length > 0 && (
@@ -827,7 +858,7 @@ function ScenariosView({ scenarios, loading, error }: { scenarios: GesicaScenari
     return (
       <div className="flex items-center justify-center py-16 text-forest-400">
         <RotateCcw size={18} className="mr-2 animate-spin" />
-        Chargement des scénarios GESICA...
+        Chargement des scénarios...
       </div>
     );
   }
@@ -836,9 +867,9 @@ function ScenariosView({ scenarios, loading, error }: { scenarios: GesicaScenari
     return (
       <div className="flex flex-col items-center justify-center py-16 gap-3">
         <div className="rounded-2xl border border-red-500/30 bg-red-500/10 px-6 py-4 text-red-300 max-w-xl text-center">
-          <p className="font-semibold mb-1">Erreur de chargement des scénarios GESICA</p>
+          <p className="font-semibold mb-1">Erreur de chargement des scénarios</p>
           <p className="text-sm text-red-400 font-mono break-all">{error}</p>
-          <p className="text-xs text-forest-400 mt-2">Vérifiez que le service API est démarré sur app-01 et que <code>/api/gesica/scenarios</code> répond correctement.</p>
+          <p className="text-xs text-forest-400 mt-2">Vérifiez que le service API est démarré et que <code>/api/gesica/scenarios</code> répond correctement.</p>
         </div>
       </div>
     );
@@ -848,7 +879,7 @@ function ScenariosView({ scenarios, loading, error }: { scenarios: GesicaScenari
     return (
       <div className="flex items-center justify-center py-16 text-forest-400">
         <RotateCcw size={18} className="mr-2 animate-spin" />
-        Chargement des scénarios GESICA...
+        Chargement des scénarios...
       </div>
     );
   }
@@ -2414,7 +2445,7 @@ function ScenariosView({ scenarios, loading, error }: { scenarios: GesicaScenari
         <div className="flex items-center gap-3">
           <Activity size={20} className="text-brand-400" />
           <div>
-            <h2 className="text-xl font-semibold text-white">Scénarios GESICA — LiteRev - Evidence to Scenario</h2>
+            <h2 className="text-xl font-semibold text-white">Scénarios — LiteRev Evidence to Scenario</h2>
             <p className="text-xs text-forest-400 mt-0.5">
               {scenarios.length} scénarios · {scenarios.reduce((a, s) => a + s.articleCount, 0).toLocaleString()} articles indexés · Mis à jour automatiquement
             </p>
@@ -2787,9 +2818,7 @@ function AssistantView({
                     <span className="rounded bg-white/5 px-1.5 py-0.5 text-forest-400">{s.source}</span>
                     {s.year && <span className="rounded bg-white/5 px-1.5 py-0.5 text-forest-400">{s.year}</span>}
                     {s.evidenceStrength && (
-                      <span className="rounded bg-brand-500/10 px-1.5 py-0.5 text-brand-300 capitalize">
-                        Preuve {s.evidenceStrength}
-                      </span>
+                      <EvidenceStrengthBadge strength={s.evidenceStrength as "weak" | "moderate" | "strong"} showTooltip={true} />
                     )}
                   </div>
                 </div>
@@ -3195,7 +3224,7 @@ export default function App() {
     { id: "history", label: `Historique${savedSearches.length > 0 ? ` (${savedSearches.length})` : ""}`, icon: <RefreshCw size={14} /> },
     { id: "assistant", label: "Assistant RAG", icon: <Zap size={14} className="text-brand-400" /> },
     { id: "screening", label: "Screening PRISMA", icon: <CheckSquare size={14} className="text-brand-400" /> },
-    { id: "scenarios", label: "Scénarios GESICA", icon: <Activity size={14} /> },
+    { id: "scenarios", label: "Scénarios", icon: <Activity size={14} /> },
     { id: "terrain", label: "Données Terrain", icon: <Cloud size={14} className="text-brand-400" /> },
     { id: "stats", label: "Statistiques", icon: <BarChart2 size={14} /> },
   ];

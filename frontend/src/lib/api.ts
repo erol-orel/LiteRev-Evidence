@@ -252,7 +252,7 @@ export async function fetchDocumentDetail(
   };
 }
 
-// --- GESICA / STATS TYPES ---
+// --- EMS / STATS TYPES ---
 
 export interface GesicaSignals {
   demandSignals: string[];
@@ -498,7 +498,7 @@ export async function fetchCorpusStats(): Promise<CorpusStats> {
 
 export async function fetchGesicaStats(): Promise<GesicaStats> {
   const response = await fetch(`${API_BASE_URL}/gesica/stats`);
-  if (!response.ok) throw new Error(`GESICA stats failed with status ${response.status}`);
+  if (!response.ok) throw new Error(`LiteRev stats failed with status ${response.status}`);
   const data = await response.json();
   return {
     totalDocuments: data.total_documents,
@@ -510,7 +510,7 @@ export async function fetchGesicaStats(): Promise<GesicaStats> {
 
 export async function fetchGesicaScenarios(): Promise<GesicaScenario[]> {
   const response = await fetch(`${API_BASE_URL}/gesica/scenarios`);
-  if (!response.ok) throw new Error(`GESICA scenarios failed with status ${response.status}`);
+  if (!response.ok) throw new Error(`LiteRev scenarios failed with status ${response.status}`);
   const data: Array<{
     id: string;
     title: string;
@@ -789,8 +789,10 @@ export interface TerrainSignal {
   reliability_score: number;
   severity: "low" | "moderate" | "high";
   geo_scope: string;
-  impact_on_gesica?: string;
-  impact_on_geoai4ei?: string;
+  impact_on_ems?: string;
+  impact_on_hospital?: string;
+  impact_on_gesica?: string;  // legacy
+  impact_on_geoai4ei?: string;  // legacy
 }
 
 export interface TerrainInformalSignals {
@@ -1406,7 +1408,7 @@ export async function fetchMCIVictim(): Promise<MCIVictimResponse> {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// GESICA Scenario Detail — Phase 2 Enrichissement
+// LiteRev Scenario Detail — Phase 2 Enrichissement
 // ─────────────────────────────────────────────────────────────────────────────
 
 export interface AlertThreshold {
@@ -1910,7 +1912,7 @@ export function askScenarioRagStream(
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           question,
-          project_context: "gesica",
+          project_context: "literev",
           scenario_id: scenarioId,
           top_k: 8,
         }),

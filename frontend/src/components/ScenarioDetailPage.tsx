@@ -2092,7 +2092,7 @@ function EvidenceBriefSection({ scenarioId, detail }: { scenarioId: string; deta
 </style></head><body>
 <h1>Evidence Brief</h1>
 <div class="meta">
-  <strong>${detail.title}</strong> — Scénario GESICA<br>
+  <strong>${detail.title}</strong> — Scénario LiteRev<br>
   Généré le ${new Date(data.generated_at).toLocaleDateString('fr-FR', {year:'numeric',month:'long',day:'numeric'})}<br>
   Projet : LiteRev — Evidence to Scenario
 </div>
@@ -2137,7 +2137,7 @@ ${data.top_articles.slice(0,8).map((a,i)=>`
 </div>`).join('')}
 
 <footer>
-  LiteRev — Evidence to Scenario | Projet GESICA | ${new Date().getFullYear()}<br>
+  LiteRev — Evidence to Scenario | LiteRev Evidence | ${new Date().getFullYear()}<br>
   Ce document est généré automatiquement à partir de la base de données de littérature scientifique.
 </footer>
 </body></html>`;
@@ -2169,7 +2169,7 @@ ${data.top_articles.slice(0,8).map((a,i)=>`
         <div className="flex items-start justify-between gap-4 flex-wrap">
           <div>
             <h3 className="text-sm font-bold text-white">{detail.title}</h3>
-            <p className="text-xs text-white/50 mt-1">Scénario GESICA — LiteRev Evidence to Scenario</p>
+            <p className="text-xs text-white/50 mt-1">LiteRev Evidence to Scenario</p>
             <p className="text-xs text-white/35 mt-0.5">Généré le {new Date(data.generated_at).toLocaleDateString('fr-FR',{year:'numeric',month:'long',day:'numeric'})}</p>
           </div>
           <button
