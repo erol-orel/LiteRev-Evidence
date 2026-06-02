@@ -647,14 +647,17 @@ function ArticleRow({
 }) {
   const [screeningStatus, setScreeningStatus] = React.useState<string>(article.screening_status ?? 'pending');
   const [screeningLoading, setScreeningLoading] = React.useState(false);
+  const [exclusionReason, setExclusionReason] = React.useState('');
+  const [screeningNotes, setScreeningNotes] = React.useState('');
   const [pico, setPico] = React.useState<PicoData | null>(null);
   const [picoLoading, setPicoLoading] = React.useState(false);
   const [picoLoaded, setPicoLoaded] = React.useState(false);
 
   const handleScreen = async (status: 'included' | 'excluded' | 'pending') => {
+    if (status === 'excluded' && !exclusionReason) return;
     setScreeningLoading(true);
     try {
-      await screenArticle(scenarioId, article.id, status);
+      await screenArticle(scenarioId, article.id, status, exclusionReason || undefined, screeningNotes || undefined);
       setScreeningStatus(status);
       onScreeningChange?.(article.id, status);
     } catch (e) {
@@ -726,44 +729,78 @@ function ArticleRow({
 
       {isExpanded && (
         <div className="border-t border-white/5 bg-white/1 p-4 text-xs space-y-4">
-          {/* Screening PRISMA */}
-          <div className="flex items-center gap-2 flex-wrap">
-            <span className="text-white/50 font-medium mr-1">Screening PRISMA :</span>
-            {screeningLoading ? (
-              <Loader2 size={14} className="animate-spin text-white/50" />
-            ) : (
-              <>
-                <button
-                  onClick={(e) => { e.stopPropagation(); handleScreen('included'); }}
-                  className={`px-2.5 py-1 rounded-full text-[10px] font-semibold border transition ${
-                    screeningStatus === 'included'
-                      ? 'bg-brand-500/30 text-brand-200 border-brand-500/50'
-                      : 'bg-white/5 text-white/50 border-white/10 hover:bg-brand-500/10 hover:text-brand-300'
-                  }`}
+          {/* Screening PRISMA — Interface avancée */}
+          <div className="rounded-xl border border-white/8 bg-white/3 p-3 space-y-3">
+            <h5 className="text-[10px] font-semibold text-white/50 uppercase tracking-wider flex items-center gap-1">
+              <CheckCircle2 size={10} />Décision de Screening (Inclusion / Exclusion)
+            </h5>
+            <div className="grid gap-3 sm:grid-cols-2">
+              <div>
+                <label className="block text-[10px] text-white/40 mb-1">Raison de l'exclusion (obligatoire si exclu)</label>
+                <select
+                  value={exclusionReason}
+                  onChange={(e) => { e.stopPropagation(); setExclusionReason(e.target.value); }}
+                  onClick={(e) => e.stopPropagation()}
+                  className="w-full rounded-lg border border-white/10 bg-forest-950/80 px-2.5 py-1.5 text-xs text-white outline-none focus:border-brand-400"
                 >
-                  <CheckCircle2 size={10} className="inline mr-1" />Inclure
-                </button>
+                  <option value="">-- Sélectionner une raison --</option>
+                  <option value="wrong-population">Population non cible</option>
+                  <option value="wrong-intervention">Méthode non cible</option>
+                  <option value="wrong-outcome">Pas de métriques d'évaluation</option>
+                  <option value="no-fulltext">Pas de texte intégral disponible</option>
+                  <option value="duplicate">Doublon d'un autre article</option>
+                  <option value="other">Autre (spécifier en notes)</option>
+                </select>
+              </div>
+              <div>
+                <label className="block text-[10px] text-white/40 mb-1">Notes de screening</label>
+                <input
+                  value={screeningNotes}
+                  onChange={(e) => { e.stopPropagation(); setScreeningNotes(e.target.value); }}
+                  onClick={(e) => e.stopPropagation()}
+                  placeholder="Observations, commentaires..."
+                  className="w-full rounded-lg border border-white/10 bg-forest-950/80 px-2.5 py-1.5 text-xs text-white outline-none focus:border-brand-400"
+                />
+              </div>
+            </div>
+            {screeningLoading ? (
+              <div className="flex items-center gap-2 text-white/40 text-xs">
+                <Loader2 size={12} className="animate-spin" />Enregistrement...
+              </div>
+            ) : (
+              <div className="flex items-center gap-2 flex-wrap">
                 <button
                   onClick={(e) => { e.stopPropagation(); handleScreen('excluded'); }}
-                  className={`px-2.5 py-1 rounded-full text-[10px] font-semibold border transition ${
+                  disabled={!exclusionReason}
+                  className={`flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs font-semibold transition ${
                     screeningStatus === 'excluded'
-                      ? 'bg-rose-500/30 text-rose-200 border-rose-500/50'
-                      : 'bg-white/5 text-white/50 border-white/10 hover:bg-rose-500/10 hover:text-rose-300'
+                      ? 'border-rose-500/50 bg-rose-500/20 text-rose-200'
+                      : 'border-rose-500/30 bg-rose-500/10 hover:bg-rose-500/20 text-rose-300 disabled:opacity-40 disabled:cursor-not-allowed'
                   }`}
                 >
-                  <AlertCircle size={10} className="inline mr-1" />Exclure
+                  <AlertCircle size={11} />Exclure l'article
+                </button>
+                <button
+                  onClick={(e) => { e.stopPropagation(); handleScreen('included'); }}
+                  className={`flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs font-semibold transition ${
+                    screeningStatus === 'included'
+                      ? 'border-brand-500/50 bg-brand-500/20 text-brand-200'
+                      : 'border-brand-500/30 bg-brand-500/10 hover:bg-brand-500/20 text-brand-300'
+                  }`}
+                >
+                  <CheckCircle2 size={11} />Inclure dans le corpus final
                 </button>
                 <button
                   onClick={(e) => { e.stopPropagation(); handleScreen('pending'); }}
-                  className={`px-2.5 py-1 rounded-full text-[10px] font-semibold border transition ${
+                  className={`flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs font-semibold transition ${
                     screeningStatus === 'pending'
-                      ? 'bg-gold-500/20 text-gold-300 border-gold-500/30'
-                      : 'bg-white/5 text-white/50 border-white/10 hover:bg-gold-500/10 hover:text-gold-400'
+                      ? 'border-gold-500/30 bg-gold-500/15 text-gold-300'
+                      : 'border-white/10 bg-white/5 hover:bg-white/10 text-white/50'
                   }`}
                 >
                   En attente
                 </button>
-              </>
+              </div>
             )}
           </div>
 
