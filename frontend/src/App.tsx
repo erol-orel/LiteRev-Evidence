@@ -3517,10 +3517,6 @@ export default function App() {
 
             <div className="flex items-center gap-6">
               <img src="/logo.jpg" alt="LiteRev arbre" className="h-20 w-20 rounded-2xl object-cover shadow-xl opacity-90" />
-              <div className="rounded-2xl border border-brand-500/30 bg-brand-700/20 px-5 py-3">
-                <div className="text-sm font-semibold text-gold-400">Corpus LiteRev</div>
-                <div className="text-xs text-white/50 mt-0.5">Corpus unifié · Revue systématique</div>
-              </div>
             </div>
           </div>
 
