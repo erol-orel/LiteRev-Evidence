@@ -3095,15 +3095,17 @@ export default function App() {
     <div className="min-h-screen bg-[radial-gradient(circle_at_top,rgba(10,54,33,0.18),transparent_35%),linear-gradient(180deg,#0a1410_0%,#121e19_100%)] text-white">
       <header className="border-b border-white/8 bg-[#0a1410]/80 backdrop-blur-xl">
         <div className="mx-auto max-w-[1380px] px-6 py-6">
-          <div className="flex flex-col gap-6 xl:flex-row xl:items-end xl:justify-between">
+          <div className="flex flex-col gap-6 xl:flex-row xl:items-center xl:justify-between">
             <div className="max-w-3xl">
-              <div className="flex items-center gap-3 mb-2">
-                <img src="/literev-logo.png" alt="LiteRev" className="h-10 w-auto object-contain" />
+              <div className="flex items-center gap-4 mb-2">
+                <img src="/literev-logo.png" alt="LiteRev" className="h-14 w-auto object-contain" />
                 <h1 className="text-3xl font-bold tracking-tight text-white">- Evidence to Scenario</h1>
               </div>
             </div>
 
-            <div className="grid gap-3 sm:grid-cols-3">
+            <div className="flex items-center gap-6">
+              <img src="/logo.jpg" alt="LiteRev arbre" className="h-20 w-20 rounded-2xl object-cover shadow-xl opacity-90" />
+              <div className="grid gap-3 sm:grid-cols-3">
               {(
                 [
                   ["geoai4ei", "GeoAI4EI"],
@@ -3124,6 +3126,7 @@ export default function App() {
                   <div className="text-sm font-semibold">{label}</div>
                 </button>
               ))}
+              </div>
             </div>
           </div>
 
