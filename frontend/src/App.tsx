@@ -3652,10 +3652,10 @@ export default function App() {
                       key={item}
                       type="button"
                       onClick={() => setMode(item)}
-                      className={`rounded-xl px-4 py-2 capitalize transition ${
+                      className={`rounded-xl px-4 py-2 capitalize transition font-medium ${
                         mode === item
-                          ? "bg-brand-500 text-forest-950"
-                          : "text-forest-300 hover:bg-white/10"
+                          ? "bg-brand-700 text-gold-400 font-semibold"
+                          : "text-white/60 hover:text-white hover:bg-white/8"
                       }`}
                     >
                       {item}
