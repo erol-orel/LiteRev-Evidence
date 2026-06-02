@@ -42,9 +42,7 @@ GESICA_ENRICHED: dict = {
             "variables": ["température", "humidité", "heure_du_jour", "jour_semaine", "saison", "historique_OHCA_7j"],
             "output": "Probabilité OHCA par zone géographique (J+1)",
             "update_frequency": "Toutes les 6h (données météo temps réel)",
-                "keywords": ["Arrêt cardiaque", "OHCA", "Chaîne de survie", "DEA", "Premiers répondants", "Gasping", "Réanimation cardiopulmonaire"],
-        "clinical_rationale": """L'arrêt cardiaque extra-hospitalier (OHCA) reste une cause majeure de mortalité. Chaque minute sans réanimation réduit les chances de survie de 10%. La prédiction spatio-temporelle et l'identification précoce (notamment via l'analyse acoustique des appels) permettent de déployer les premiers répondants et d'ajuster le positionnement des ambulances pour intervenir dans la 'minute d'or'.""",
-},
+        },
         "alert_thresholds": {
             "green": {"label": "Risque normal", "condition": "score < 0.3"},
             "orange": {"label": "Risque modéré — vigilance", "condition": "0.3 ≤ score < 0.6"},
@@ -87,7 +85,11 @@ GESICA_ENRICHED: dict = {
                 "plugged": False,
                 "source": "Registre Cantonal OHCA (Manquant - Dataset requis)"
             }
-        }
+        },
+        "keywords": ["Arrêt cardiaque", "OHCA", "Chaîne de survie", "DEA", "Premiers répondants", "Gasping", "Réanimation cardiopulmonaire"],
+        "clinical_rationale": (
+            "L'arrêt cardiaque extra-hospitalier (OHCA) reste une cause majeure de mortalité. Chaque minute sans réanimation réduit les chances de survie de 10%. La prédiction spatio-temporelle et l'identification précoce (notamment via l'analyse acoustique des appels) permettent de déployer les premiers répondants et d'ajuster le positionnement des ambulances pour intervenir dans la 'minute d'or'."
+        ),
     },
 
     "stroke-detection": {
@@ -113,9 +115,7 @@ GESICA_ENRICHED: dict = {
             "variables": ["score_FAST", "age", "pression_arterielle", "glycemie", "heure_debut_symptomes", "distance_UNV"],
             "output": "Probabilité AVC ischémique + recommandation orientation (UNV/thrombectomie)",
             "update_frequency": "À chaque appel (temps réel)",
-                "keywords": ["AVC", "Thrombolyse", "Thrombectomie", "Score FAST", "Score NIHSS", "Occlusion grand vaisseau", "Time is brain"],
-        "clinical_rationale": """Dans l'accident vasculaire cérébral (AVC), chaque minute perdue équivaut à la perte de 1,9 million de neurones. Une détection préhospitalière fiable permet de contourner les urgences générales pour orienter le patient directement vers une Unité Neurovasculaire (UNV) apte à réaliser une thrombolyse ou une thrombectomie mécanique.""",
-},
+        },
         "alert_thresholds": {
             "green": {"label": "Suspicion faible", "condition": "score < 0.4"},
             "orange": {"label": "Suspicion modérée — activer protocole AVC", "condition": "0.4 ≤ score < 0.7"},
@@ -158,7 +158,11 @@ GESICA_ENRICHED: dict = {
                 "plugged": True,
                 "source": "OSRM API (Live)"
             }
-        }
+        },
+        "keywords": ["AVC", "Thrombolyse", "Thrombectomie", "Score FAST", "Score NIHSS", "Occlusion grand vaisseau", "Time is brain"],
+        "clinical_rationale": (
+            "Dans l'accident vasculaire cérébral (AVC), chaque minute perdue équivaut à la perte de 1,9 million de neurones. Une détection préhospitalière fiable permet de contourner les urgences générales pour orienter le patient directement vers une Unité Neurovasculaire (UNV) apte à réaliser une thrombolyse ou une thrombectomie mécanique."
+        ),
     },
 
     "trauma-severity-assessment": {
@@ -184,9 +188,7 @@ GESICA_ENRICHED: dict = {
             "variables": ["GCS", "pression_arterielle_systolique", "frequence_respiratoire", "mecanisme_traumatisme", "age", "ISS_estime"],
             "output": "Score de mortalité à 30 jours + recommandation d'orientation vers Trauma Center niveau 1",
             "update_frequency": "Temps réel à l'intervention",
-                "keywords": ["Traumatisme grave", "Polytraumatisé", "Trauma Center", "Score ISS", "Transfusion massive", "Damage Control"],
-        "clinical_rationale": """Les traumatismes graves (accidents de la route, de montagne) nécessitent une orientation immédiate vers un Trauma Center de niveau 1 pour réduire la mortalité évitable. Une stratification précoce du risque permet de déclencher les protocoles de transfusion massive et de damage control dès la phase préhospitalière.""",
-},
+        },
         "alert_thresholds": {
             "green": {"label": "Traumatisme mineur", "condition": "TRISS_survival ≥ 0.90"},
             "orange": {"label": "Traumatisme modéré — surveillance étroite", "condition": "0.75 ≤ TRISS_survival < 0.90"},
@@ -229,7 +231,11 @@ GESICA_ENRICHED: dict = {
                 "plugged": False,
                 "source": "Algorithme clinique SMUR (Manquant - Dataset requis)"
             }
-        }
+        },
+        "keywords": ["Traumatisme grave", "Polytraumatisé", "Trauma Center", "Score ISS", "Transfusion massive", "Damage Control"],
+        "clinical_rationale": (
+            "Les traumatismes graves (accidents de la route, de montagne) nécessitent une orientation immédiate vers un Trauma Center de niveau 1 pour réduire la mortalité évitable. Une stratification précoce du risque permet de déclencher les protocoles de transfusion massive et de damage control dès la phase préhospitalière."
+        ),
     },
 
     "clinical-deterioration-prediction": {
@@ -713,9 +719,7 @@ GESICA_ENRICHED: dict = {
             "variables": ["audio_stream_call", "mots_cles_detectes", "ton_de_la_voix", "temps_appel", "historique_appelant"],
             "output": "Catégorie de motif suspectée (ex: Douleur thoracique, AVC, Traumatisme) + Niveau de gravité estimé",
             "update_frequency": "Temps réel pendant l'appel (latence < 2s)",
-                "keywords": ["Régulation médicale", "Speech-to-Text", "NLP", "CamemBERT", "Classification des motifs", "Transcription temps réel"],
-        "clinical_rationale": """La centrale de régulation reçoit des flux d'appels massifs sous haute tension. L'utilisation du traitement automatique du langage naturel (NLP) et de la transcription en temps réel assiste le régulateur en extrayant instantanément les signaux faibles et les symptômes critiques, réduisant le temps de qualification de l'appel.""",
-},
+        },
         "alert_thresholds": {
             "green": {"label": "Qualification normale", "condition": "confidence_score ≥ 0.80"},
             "orange": {"label": "Incertitude — poser questions complémentaires", "condition": "0.50 ≤ confidence_score < 0.80"},
@@ -753,7 +757,11 @@ GESICA_ENRICHED: dict = {
                 "plugged": False,
                 "source": "Base SAGA (Manquant - Dataset requis)"
             }
-        }
+        },
+        "keywords": ["Régulation médicale", "Speech-to-Text", "NLP", "CamemBERT", "Classification des motifs", "Transcription temps réel"],
+        "clinical_rationale": (
+            "La centrale de régulation reçoit des flux d'appels massifs sous haute tension. L'utilisation du traitement automatique du langage naturel (NLP) et de la transcription en temps réel assiste le régulateur en extrayant instantanément les signaux faibles et les symptômes critiques, réduisant le temps de qualification de l'appel."
+        ),
     },
 
     "call-prioritization": {
@@ -779,9 +787,7 @@ GESICA_ENRICHED: dict = {
             "variables": ["age", "motif_appel", "constantes_vitales_declarees", "nombre_ambulances_dispo", "temps_attente_moyen"],
             "output": "Niveau de priorité de la mission (P1: Urgence vitale immédiate, P2: Urgence relative, P3: Transport différable)",
             "update_frequency": "Instantané à la saisie de l'appel",
-                "keywords": ["Priorisation", "File d'attente", "Triage des appels", "Sous-triage", "Algorithme de tri", "Urgence vitale"],
-        "clinical_rationale": """Lors de pics d'activité, la priorisation automatisée des appels entrants garantit que les détresses vitales absolues (infarctus, arrêt cardiaque) soient traitées en priorité absolue par les régulateurs, évitant les pertes de chances liées à l'attente téléphonique.""",
-},
+        },
         "alert_thresholds": {
             "green": {"label": "Priorité adéquate", "condition": "risque_sous_triage < 5%"},
             "orange": {"label": "Risque de sous-triage modéré — réévaluation par médecin régulateur", "condition": "5% ≤ risque_sous_triage < 15%"},
@@ -819,7 +825,11 @@ GESICA_ENRICHED: dict = {
                 "plugged": True,
                 "source": "Calculé à partir des données de file d'attente"
             }
-        }
+        },
+        "keywords": ["Priorisation", "File d'attente", "Triage des appels", "Sous-triage", "Algorithme de tri", "Urgence vitale"],
+        "clinical_rationale": (
+            "Lors de pics d'activité, la priorisation automatisée des appels entrants garantit que les détresses vitales absolues (infarctus, arrêt cardiaque) soient traitées en priorité absolue par les régulateurs, évitant les pertes de chances liées à l'attente téléphonique."
+        ),
     },
 
     "mass-casualty-triage": {
@@ -978,9 +988,7 @@ GESICA_ENRICHED: dict = {
             "variables": ["symptome_principal", "antecedents_medicaux", "age", "frequence_cardiaque", "saturation_O2", "douleur_score"],
             "output": "Recommandation de niveau de tri de gravité (Échelle suisse du tri - EST ou échelle de Rouen)",
             "update_frequency": "Instantané au cours de la saisie des symptômes",
-                "keywords": ["Triage urgences", "Infirmier d'accueil", "Échelle de tri", "EST", "Orientation patient", "Concordance de tri"],
-        "clinical_rationale": """À l'arrivée aux urgences, le tri clinique par l'infirmier organisateur d'accueil (IOA) détermine le délai maximal d'attente sécuritaire. L'assistance par IA améliore la concordance inter-observateur, réduit le risque d'erreur de tri et anticipe les besoins d'hospitalisation d'aval.""",
-},
+        },
         "alert_thresholds": {
             "green": {"label": "Tri assisté fiable", "condition": "discrepance_tri_expert < 10%"},
             "orange": {"label": "Incohérence mineure — réévaluation recommandée", "condition": "10% ≤ discrepance_tri_expert < 20%"},
@@ -1023,7 +1031,11 @@ GESICA_ENRICHED: dict = {
                 "plugged": False,
                 "source": "Interrogatoire (Manquant - Dataset requis)"
             }
-        }
+        },
+        "keywords": ["Triage urgences", "Infirmier d'accueil", "Échelle de tri", "EST", "Orientation patient", "Concordance de tri"],
+        "clinical_rationale": (
+            "À l'arrivée aux urgences, le tri clinique par l'infirmier organisateur d'accueil (IOA) détermine le délai maximal d'attente sécuritaire. L'assistance par IA améliore la concordance inter-observateur, réduit le risque d'erreur de tri et anticipe les besoins d'hospitalisation d'aval."
+        ),
     },
 
     "dispatch-decision-support": {
@@ -1049,9 +1061,7 @@ GESICA_ENRICHED: dict = {
             "variables": ["gravite_suspectee", "localisation_incident", "dispo_ambulances_proches", "dispo_smur_proche", "temps_arrivee_estime"],
             "output": "Moyen de secours recommandé à envoyer immédiatement (Ambulance seule, Ambulance + SMUR, Hélicoptère)",
             "update_frequency": "Instantané à la qualification de l'appel",
-                "keywords": ["Aide à la décision", "Dispatch", "Moyen de secours", "SMUR transfrontalier", "Adéquation d'envoi", "Over-dispatch"],
-        "clinical_rationale": """Le choix de la ressource à envoyer (ambulance simple, équipe médicale SMUR, hélicoptère) est crucial. Un outil d'aide à la décision permet d'optimiser l'adéquation d'envoi, évitant la sur-médicalisation inutile (over-dispatch) tout en sécurisant l'envoi rapide d'équipes médicales pour les cas critiques.""",
-},
+        },
         "alert_thresholds": {
             "green": {"label": "Ressource optimale disponible", "condition": "temps_arrivee_smur_estime < 15 min"},
             "orange": {"label": "SMUR local indisponible — envoi SMUR secondaire", "condition": "15 min ≤ temps_arrivee_smur_estime < 25 min"},
@@ -1089,7 +1099,11 @@ GESICA_ENRICHED: dict = {
                 "plugged": True,
                 "source": "OSRM API (Live)"
             }
-        }
+        },
+        "keywords": ["Aide à la décision", "Dispatch", "Moyen de secours", "SMUR transfrontalier", "Adéquation d'envoi", "Over-dispatch"],
+        "clinical_rationale": (
+            "Le choix de la ressource à envoyer (ambulance simple, équipe médicale SMUR, hélicoptère) est crucial. Un outil d'aide à la décision permet d'optimiser l'adéquation d'envoi, évitant la sur-médicalisation inutile (over-dispatch) tout en sécurisant l'envoi rapide d'équipes médicales pour les cas critiques."
+        ),
     },
 
     "response-time-optimization": {
@@ -1115,9 +1129,7 @@ GESICA_ENRICHED: dict = {
             "variables": ["heure_depart", "coordonnees_depart", "coordonnees_arrivee", "densite_trafic_live", "conditions_meteo"],
             "output": "Itinéraire d'urgence optimal + Temps de trajet estimé en minutes",
             "update_frequency": "Temps réel à l'envoi de la mission",
-                "keywords": ["Temps de réponse", "Routage dynamique", "Trafic temps réel", "Itinéraire d'urgence", "Priorité aux feux"],
-        "clinical_rationale": """Le temps de réponse des secours est un déterminant majeur de la survie dans les urgences temps-dépendantes. L'optimisation des itinéraires via des algorithmes prédictifs prenant en compte la congestion urbaine et les goulots d'étranglement transfrontaliers permet de gagner des minutes précieuses.""",
-},
+        },
         "alert_thresholds": {
             "green": {"label": "Temps de réponse optimal", "condition": "temps_reponse_estime < 8 min"},
             "orange": {"label": "Temps de réponse limite (congestion)", "condition": "8 min ≤ temps_reponse_estime < 15 min"},
@@ -1155,7 +1167,11 @@ GESICA_ENRICHED: dict = {
                 "plugged": True,
                 "source": "Open-Meteo API (Live)"
             }
-        }
+        },
+        "keywords": ["Temps de réponse", "Routage dynamique", "Trafic temps réel", "Itinéraire d'urgence", "Priorité aux feux"],
+        "clinical_rationale": (
+            "Le temps de réponse des secours est un déterminant majeur de la survie dans les urgences temps-dépendantes. L'optimisation des itinéraires via des algorithmes prédictifs prenant en compte la congestion urbaine et les goulots d'étranglement transfrontaliers permet de gagner des minutes précieuses."
+        ),
     },
 
     "ambulance-dispatch-optimization": {
@@ -1181,9 +1197,7 @@ GESICA_ENRICHED: dict = {
             "variables": ["ambulances_disponibles_total", "zones_sous_couvertes", "probabilite_appels_secteur", "temps_relocalisation_moyen"],
             "output": "Recommandation de relocalisation préventive pour l'ambulance X vers la base d'attente Y",
             "update_frequency": "Toutes les 5 minutes",
-                "keywords": ["Gestion de flotte", "Couverture opérationnelle", "Relocalisation dynamique", "Modèle MCLP", "Positionnement préventif"],
-        "clinical_rationale": """Plutôt que d'attendre passivement dans les bases, les ambulances peuvent être relocalisées préventivement en fonction des risques prédictifs de demande. Cela permet de maintenir une couverture territoriale homogène et de garantir un temps d'accès inférieur à 10 minutes pour toute la population.""",
-},
+        },
         "alert_thresholds": {
             "green": {"label": "Couverture optimale du territoire", "condition": "couverture_population_10min ≥ 95%"},
             "orange": {"label": "Couverture dégradée — relocalisation requise", "condition": "85% ≤ couverture_population_10min < 95%"},
@@ -1216,7 +1230,11 @@ GESICA_ENRICHED: dict = {
                 "plugged": True,
                 "source": "OSRM API (Live)"
             }
-        }
+        },
+        "keywords": ["Gestion de flotte", "Couverture opérationnelle", "Relocalisation dynamique", "Modèle MCLP", "Positionnement préventif"],
+        "clinical_rationale": (
+            "Plutôt que d'attendre passivement dans les bases, les ambulances peuvent être relocalisées préventivement en fonction des risques prédictifs de demande. Cela permet de maintenir une couverture territoriale homogène et de garantir un temps d'accès inférieur à 10 minutes pour toute la population."
+        ),
     },
 
     "staffing-level-prediction": {
@@ -1306,9 +1324,7 @@ GESICA_ENRICHED: dict = {
             "variables": ["patients_urgences_actuels", "temps_attente_moyen", "prevision_entrees_24h", "taux_occupation_lits_aval", "sorties_prevues_24h"],
             "output": "Indice de saturation des urgences (score NEDOCS) prévu pour les prochaines 12 heures",
             "update_frequency": "Toutes les heures",
-                "keywords": ["Capacité hospitalière", "Gestion des lits", "Saturation urgences", "Score NEDOCS", "Lits d'aval", "Ambulance diversion"],
-        "clinical_rationale": """L'engorgement des urgences nuit gravement à la sécurité des patients. Prédire la saturation hospitalière à 24-48h permet d'anticiper la libération de l'aval, d'organiser des transferts fluides et d'éviter les situations de déviation des ambulances (ambulance diversion) vers d'autres établissements.""",
-},
+        },
         "alert_thresholds": {
             "green": {"label": "Urgences fluides", "condition": "nedocs < 100"},
             "orange": {"label": "Urgences surchargées — activer mesures de fluidification", "condition": "100 ≤ nedocs < 140"},
@@ -1346,7 +1362,11 @@ GESICA_ENRICHED: dict = {
                 "plugged": False,
                 "source": "Gestionnaire de lits (Manquant - Dataset requis)"
             }
-        }
+        },
+        "keywords": ["Capacité hospitalière", "Gestion des lits", "Saturation urgences", "Score NEDOCS", "Lits d'aval", "Ambulance diversion"],
+        "clinical_rationale": (
+            "L'engorgement des urgences nuit gravement à la sécurité des patients. Prédire la saturation hospitalière à 24-48h permet d'anticiper la libération de l'aval, d'organiser des transferts fluides et d'éviter les situations de déviation des ambulances (ambulance diversion) vers d'autres établissements."
+        ),
     },
 
     "demand-forecasting": {
@@ -1372,9 +1392,7 @@ GESICA_ENRICHED: dict = {
             "variables": ["historique_appels_7j", "temperature", "precipitations", "jour_semaine", "feries", "incidence_grippale"],
             "output": "Prévision demande EMS J+1 à J+7 par heure et par zone",
             "update_frequency": "Quotidienne (6h UTC)",
-                "keywords": ["Prévision de la demande", "Séries temporelles", "Météo-sensibilité", "Surveillance épidémique", "Planification des effectifs"],
-        "clinical_rationale": """La demande en secours préhospitaliers fluctue selon la météo, le calendrier et les épidémies. Prédire précisément ces variations permet de dimensionner adéquatement les équipes de régulation et les ambulances de garde, évitant la surcharge du système ou le gaspillage de ressources.""",
-},
+        },
         "alert_thresholds": {
             "green": {"label": "Demande normale attendue", "condition": "erreur_prevision < 10%"},
             "orange": {"label": "Hausse significative de la demande (+15%) — adapter effectifs", "condition": "10% ≤ erreur_prevision < 20%"},
@@ -1417,7 +1435,11 @@ GESICA_ENRICHED: dict = {
                 "plugged": False,
                 "source": "Réseau Sentinelles (Manquant - Dataset requis)"
             }
-        }
+        },
+        "keywords": ["Prévision de la demande", "Séries temporelles", "Météo-sensibilité", "Surveillance épidémique", "Planification des effectifs"],
+        "clinical_rationale": (
+            "La demande en secours préhospitaliers fluctue selon la météo, le calendrier et les épidémies. Prédire précisément ces variations permet de dimensionner adéquatement les équipes de régulation et les ambulances de garde, évitant la surcharge du système ou le gaspillage de ressources."
+        ),
     },
 
     "resource-allocation": {
