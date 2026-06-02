@@ -1438,14 +1438,11 @@ def get_gesica_scenarios() -> list[dict[str, Any]]:
     with engine.connect() as conn:
         # Récupérer les comptages depuis la DB pour tous les scénarios présents
         sql_counts = text("""
-            SELECT scenario_type, COUNT(*) as article_count
-            FROM literature_document
-            WHERE project_context = 'literev' 
-              AND scenario_type IS NOT NULL 
-              AND scenario_type != 'unassigned'
-            GROUP BY scenario_type;
+            SELECT scenario_id, COUNT(DISTINCT document_id) as article_count
+            FROM article_scenarios
+            GROUP BY scenario_id;
         """)
-        db_counts = {row["scenario_type"]: row["article_count"] for row in conn.execute(sql_counts).mappings().all()}
+        db_counts = {row["scenario_id"]: row["article_count"] for row in conn.execute(sql_counts).mappings().all()}
         
         result = []
         # Itérer sur TOUS les 31 scénarios définis dans les métadonnées statiques
@@ -1470,8 +1467,8 @@ def get_gesica_scenarios() -> list[dict[str, Any]]:
                                  AND c.chunk_type = 'fulltext_section'
                            ) AS has_fulltext
                     FROM literature_document d
-                    WHERE d.project_context = 'literev' 
-                      AND d.scenario_type = :scenario
+                    JOIN article_scenarios ars ON ars.document_id = d.id
+                    WHERE ars.scenario_id = :scenario
                     ORDER BY d.year DESC NULLS LAST, d.title ASC
                     LIMIT 5
                 """)
@@ -1486,7 +1483,7 @@ def get_gesica_scenarios() -> list[dict[str, Any]]:
                 "recommended_actions": meta["recommended_actions"],
                 "relevant_articles": articles,
                 "living_evidence_note": (
-                    f"Living Evidence Review — {article_count} articles indexés. Mis à jour automatiquement à chaque ingestion."
+                    f"Living Evidence Review · {article_count} articles indexés. Mis à jour automatiquement à chaque ingestion."
                     if article_count > 0
                     else "Aucun article indexé pour ce scénario. En attente d'ingestion de nouvelles sources."
                 )
@@ -2126,24 +2123,22 @@ def get_corpus_stats_by_year() -> dict[str, Any]:
 
         # Articles par année ET par scénario (2000+)
         rows_scenario_year = conn.execute(text("""
-            SELECT year, scenario_type, COUNT(*) as count
-            FROM literature_document
-            WHERE year >= 2000
-              AND year IS NOT NULL
-              AND scenario_type IS NOT NULL
-              AND scenario_type != 'unassigned'
-            GROUP BY year, scenario_type
-            ORDER BY year ASC
+            SELECT d.year, ars.scenario_id, COUNT(*) as count
+            FROM literature_document d
+            JOIN article_scenarios ars ON ars.document_id = d.id
+            WHERE d.year >= 2000
+              AND d.year IS NOT NULL
+            GROUP BY d.year, ars.scenario_id
+            ORDER BY d.year ASC
         """)).mappings().all()
 
         # Articles par scénario ET par source (heatmap)
         rows_heatmap = conn.execute(text("""
-            SELECT scenario_type, source, COUNT(*) as count
-            FROM literature_document
-            WHERE scenario_type IS NOT NULL
-              AND scenario_type != 'unassigned'
-            GROUP BY scenario_type, source
-            ORDER BY scenario_type, count DESC
+            SELECT ars.scenario_id, d.source, COUNT(*) as count
+            FROM literature_document d
+            JOIN article_scenarios ars ON ars.document_id = d.id
+            GROUP BY ars.scenario_id, d.source
+            ORDER BY ars.scenario_id, count DESC
         """)).mappings().all()
 
     by_year = {str(r["year"]): r["count"] for r in rows_year}
@@ -2151,7 +2146,7 @@ def get_corpus_stats_by_year() -> dict[str, Any]:
     # Construire la matrice scénario × année
     scenario_year: dict[str, dict[str, int]] = {}
     for r in rows_scenario_year:
-        sid = r["scenario_type"]
+        sid = r["scenario_id"]
         yr = str(r["year"])
         if sid not in scenario_year:
             scenario_year[sid] = {}
@@ -2160,7 +2155,7 @@ def get_corpus_stats_by_year() -> dict[str, Any]:
     # Construire la matrice scénario × source
     heatmap: dict[str, dict[str, int]] = {}
     for r in rows_heatmap:
-        sid = r["scenario_type"]
+        sid = r["scenario_id"]
         src = r["source"]
         if sid not in heatmap:
             heatmap[sid] = {}
@@ -2171,6 +2166,33 @@ def get_corpus_stats_by_year() -> dict[str, Any]:
         "scenario_by_year": scenario_year,
         "heatmap_scenario_source": heatmap,
     }
+
+
+# ─── Endpoint : scénarios multiples d'un article ────────────────────────────
+@app.get("/documents/{doc_id}/scenarios")
+def get_document_scenarios(doc_id: int) -> dict[str, Any]:
+    """
+    Retourne tous les scénarios auxquels un article est assigné (relation N:N).
+    Utile pour l'affichage multi-scénario dans l'interface.
+    """
+    with engine.connect() as conn:
+        rows = conn.execute(text("""
+            SELECT ars.scenario_id, ars.similarity_score, ars.assigned_at
+            FROM article_scenarios ars
+            WHERE ars.document_id = :doc_id
+            ORDER BY ars.similarity_score DESC NULLS LAST
+        """), {"doc_id": doc_id}).mappings().all()
+    scenarios = []
+    for r in rows:
+        sid = r["scenario_id"]
+        meta = GESICA_SCENARIO_METADATA.get(sid, {})
+        scenarios.append({
+            "scenario_id": sid,
+            "title": meta.get("title", sid),
+            "similarity_score": float(r["similarity_score"]) if r["similarity_score"] else None,
+            "assigned_at": r["assigned_at"].isoformat() if r["assigned_at"] else None,
+        })
+    return {"document_id": doc_id, "scenarios": scenarios, "count": len(scenarios)}
 
 
 # ─── Endpoint : statistiques full-text et mode hybrid ────────────────────────
@@ -2602,8 +2624,8 @@ def get_scenario_detail(scenario_id: str) -> dict[str, Any]:
                 MIN(d.year) AS year_min,
                 MAX(d.year) AS year_max
             FROM literature_document d
-            WHERE d.project_context = 'literev'
-              AND d.scenario_type = :sid
+            JOIN article_scenarios ars ON ars.document_id = d.id
+            WHERE ars.scenario_id = :sid
               AND (d.is_duplicate IS NULL OR d.is_duplicate = FALSE)
         """), {"sid": scenario_id}).mappings().first()
     return {
@@ -2651,8 +2673,7 @@ def get_scenario_corpus(
     if not meta:
         raise HTTPException(status_code=404, detail=f"Scénario '{scenario_id}' non trouvé")
     conditions = [
-        "d.project_context = 'literev'",
-        "d.scenario_type = :sid",
+        "EXISTS (SELECT 1 FROM article_scenarios ars WHERE ars.document_id = d.id AND ars.scenario_id = :sid)",
         "(d.is_duplicate IS NULL OR d.is_duplicate = FALSE)",
     ]
     params: dict[str, Any] = {"sid": scenario_id, "limit": limit, "offset": offset}
@@ -3192,8 +3213,7 @@ def scenario_rag_assistant(scenario_id: str, payload: AskIn) -> dict[str, Any]:
                 FROM document_chunk c
                 JOIN literature_document d ON d.id = c.document_id
                 WHERE c.embedding IS NOT NULL
-                  AND d.project_context = 'literev'
-                  AND d.scenario_type = :sid
+                  AND EXISTS (SELECT 1 FROM article_scenarios ars WHERE ars.document_id = d.id AND ars.scenario_id = :sid)
                   AND (d.is_duplicate IS NULL OR d.is_duplicate = FALSE)
                 ORDER BY c.embedding <=> CAST(:emb AS vector)
                 LIMIT 8
@@ -3218,8 +3238,7 @@ def scenario_rag_assistant(scenario_id: str, payload: AskIn) -> dict[str, Any]:
                 FROM document_chunk c
                 JOIN literature_document d ON d.id = c.document_id
                 WHERE ({like_clauses})
-                  AND d.project_context = 'literev'
-                  AND d.scenario_type = :sid
+                  AND EXISTS (SELECT 1 FROM article_scenarios ars WHERE ars.document_id = d.id AND ars.scenario_id = :sid)
                 ORDER BY d.year DESC NULLS LAST
                 LIMIT 8
             """), params).mappings().all()
@@ -3616,19 +3635,19 @@ def get_scenario_pico_stats(scenario_id: str):
                 COUNT(*) FILTER (WHERE pico_json IS NULL)           AS without_pico,
                 ROUND(AVG((pico_json->>'pico_confidence')::float)
                     FILTER (WHERE pico_json IS NOT NULL)::numeric, 2) AS avg_confidence
-            FROM literature_document
-            WHERE scenario_type = :scenario_id
-              AND project_context = 'literev'
+            FROM literature_document d
+            JOIN article_scenarios ars ON ars.document_id = d.id
+            WHERE ars.scenario_id = :scenario_id
         """), {"scenario_id": scenario_id}).mappings().fetchone()
 
         designs = conn.execute(text("""
             SELECT
-                COALESCE(pico_json->>'study_design', 'Non extrait') AS design,
+                COALESCE(d.pico_json->>'study_design', 'Non extrait') AS design,
                 COUNT(*) AS n
-            FROM literature_document
-            WHERE scenario_type = :scenario_id
-              AND project_context = 'literev'
-              AND pico_json IS NOT NULL
+            FROM literature_document d
+            JOIN article_scenarios ars ON ars.document_id = d.id
+            WHERE ars.scenario_id = :scenario_id
+              AND d.pico_json IS NOT NULL
             GROUP BY 1
             ORDER BY 2 DESC
         """), {"scenario_id": scenario_id}).mappings().fetchall()

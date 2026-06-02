@@ -1,5 +1,5 @@
 export type SearchMode = "semantic" | "boolean";
-export type ProjectContext = "geoai4ei" | "gesica" | "eva";
+export type ProjectContext = "literev";
 export type RelevanceLabel = "pertinent" | "non-pertinent" | "incertain";
 
 // --- FRONTEND UI DOMAIN TYPES (camelCase) ---

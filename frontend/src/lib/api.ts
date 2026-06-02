@@ -1425,7 +1425,7 @@ export async function fetchMCIVictim(): Promise<MCIVictimResponse> {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// LiteRev Scenario Detail — Phase 2 Enrichissement
+// LiteRev Scenario Detail : Phase 2 Enrichissement
 // ─────────────────────────────────────────────────────────────────────────────
 
 export interface AlertThreshold {

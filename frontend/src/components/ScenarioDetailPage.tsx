@@ -146,7 +146,7 @@ function QueriesSection({ detail }: { detail: ScenarioDetail }) {
         <div className="flex items-center gap-2 mb-3">
           <MessageSquare size={12} className="text-brand-400" />
           <span className="text-xs font-semibold text-brand-300 uppercase tracking-wider">
-            Requêtes Langage Naturel — Recherche Sémantique ({detail.nl_queries.length})
+            Requêtes Langage Naturel : Recherche Sémantique ({detail.nl_queries.length})
           </span>
         </div>
         <div className="space-y-2">
@@ -784,7 +784,7 @@ function ArticleRow({
               <div className="grid grid-cols-2 gap-2">
                 {[['P', 'Population', pico.P], ['I', 'Intervention', pico.I], ['C', 'Comparateur', pico.C], ['O', 'Outcome', pico.O]].map(([key, label, val]) => val && (
                   <div key={key} className="rounded-lg bg-white/3 border border-white/5 p-2">
-                    <span className="text-[9px] font-bold text-brand-400 uppercase">{key} — {label}</span>
+                    <span className="text-[9px] font-bold text-brand-400 uppercase">{key} : {label}</span>
                     <p className="text-white/70 mt-0.5 leading-4">{val as string}</p>
                   </div>
                 ))}
@@ -1109,7 +1109,7 @@ function expandHull(hull: Array<{x:number;y:number}>, margin: number): Array<{x:
   const cy=hull.reduce((s,p)=>s+p.y,0)/hull.length;
   return hull.map(p=>{const dx=p.x-cx,dy=p.y-cy,d=Math.sqrt(dx*dx+dy*dy)||1;return{x:p.x+(dx/d)*margin,y:p.y+(dy/d)*margin};});
 }
-// Knowledge Graph — nœuds = clusters, arêtes = mots-clés partagés
+// Knowledge Graph : nœuds = clusters, arêtes = mots-clés partagés
 function KnowledgeGraph({clusters,selectedCluster,onSelectCluster}:{clusters:ClusterResult[];selectedCluster:number|null;onSelectCluster:(id:number)=>void}) {
   const W=560,H=420;
   const denseC=clusters.filter(c=>!c.is_noise);
@@ -1208,7 +1208,7 @@ function KnowledgeGraph({clusters,selectedCluster,onSelectCluster}:{clusters:Clu
       <p className="text-[10px] text-white/35 leading-4 mb-2">
         <span className="inline-block w-2 h-2 rounded-full bg-brand-400 mr-1 align-middle"/>Clusters (taille = nb articles)
         <span className="inline-block w-2 h-2 rounded-full bg-gold-400 ml-3 mr-1 align-middle"/>Concepts cliniques clés
-        <span className="ml-3">— Connexions = co-occurrence dans le corpus</span>
+        <span className="ml-3">· Connexions = co-occurrence dans le corpus</span>
       </p>
       <svg width="100%" viewBox={`0 0 ${W} ${H}`} className="bg-[#0a1410] rounded-2xl border border-white/5 overflow-visible" style={{maxHeight:420}}>
         <defs>
@@ -1277,7 +1277,7 @@ function KnowledgeGraph({clusters,selectedCluster,onSelectCluster}:{clusters:Clu
           return(
             <g key={n.id} className="cursor-pointer"
               onClick={()=>n.cluster_id!=null&&onSelectCluster(n.cluster_id)}
-              onMouseEnter={()=>{setHoveredNode(n.id);setTooltip({x:n.x,y:n.y-n.r-10,text:`${n.label} — ${n.count} articles`});}}
+              onMouseEnter={()=>{setHoveredNode(n.id);setTooltip({x:n.x,y:n.y-n.r-10,text:`${n.label} · ${n.count} articles`});}}
               onMouseLeave={()=>{setHoveredNode(null);setTooltip(null);}}
             >
               {(sel||hov)&&<circle cx={n.x} cy={n.y} r={n.r+10} fill={n.color} opacity={0.12}/>}
@@ -1762,7 +1762,7 @@ function PrismaSection({ scenarioId }: { scenarioId: string }) {
           : `${screen.records_excluded_title_abstract} exclus`,
       ],
       exclusion: screen.records_excluded_title_abstract > 0 ? {
-        title: "Exclus — titre / résumé",
+        title: "Exclus : titre / résumé",
         count: screen.records_excluded_title_abstract,
         lines: ["Hors sujet, doublons résiduels"],
       } : undefined,
@@ -1779,7 +1779,7 @@ function PrismaSection({ scenarioId }: { scenarioId: string }) {
           : "Tous les textes récupérés",
       ],
       exclusion: (elig.fulltext_not_retrieved + elig.fulltext_excluded) > 0 ? {
-        title: "Exclus — plein texte",
+        title: "Exclus : plein texte",
         count: elig.fulltext_not_retrieved + elig.fulltext_excluded,
         lines: [
           elig.fulltext_not_retrieved > 0 ? `${elig.fulltext_not_retrieved} non accessibles` : "",
@@ -1805,7 +1805,7 @@ function PrismaSection({ scenarioId }: { scenarioId: string }) {
     <div className="rounded-3xl border border-white/10 bg-white/3 p-5 space-y-5">
       <SectionHeader
         icon={<Shield size={14} className="text-brand-400" />}
-        title="Diagramme PRISMA 2020 — Flow de Sélection"
+        title="Diagramme PRISMA 2020 : Flow de Sélection"
         subtitle="Visualisation standardisée du processus de sélection systématique des articles"
       />
 
@@ -1862,7 +1862,7 @@ function PrismaSection({ scenarioId }: { scenarioId: string }) {
       {!inc.screening_complete && (
         <div className="rounded-xl border border-gold-500/20 bg-gold-500/5 px-4 py-3">
           <p className="text-[10px] text-gold-400">
-            <span className="font-semibold">Screening manuel non effectué</span> — Les articles sont disponibles pour évaluation dans l'onglet Corpus. Utilisez l'interface de screening pour inclure ou exclure chaque article.
+            <span className="font-semibold">Screening manuel non effectué</span> · Les articles sont disponibles pour évaluation dans l'onglet Corpus. Utilisez l'interface de screening pour inclure ou exclure chaque article.
           </p>
         </div>
       )}
@@ -1991,7 +1991,7 @@ function PicoSection({ scenarioId }: { scenarioId: string }) {
         <table className="w-full text-[10px] border-collapse">
           <thead>
             <tr className="border-b border-white/5 bg-white/3">
-              {['Titre','Année','Type étude','Confiance','P — Population','I — Intervention','C — Comparateur','O — Outcome'].map(h=>(
+              {['Titre','Année','Type étude','Confiance','P : Population','I : Intervention','C : Comparateur','O : Outcome'].map(h=>(
                 <th key={h} className="text-left px-3 py-2 text-white/40 font-semibold uppercase tracking-wider whitespace-nowrap">{h}</th>
               ))}
             </tr>
@@ -2066,7 +2066,7 @@ function EvidenceBriefSection({ scenarioId, detail }: { scenarioId: string; deta
     try {
       // Build HTML for PDF
       const html = `<!DOCTYPE html><html><head><meta charset="utf-8">
-<title>Evidence Brief — ${detail.title}</title>
+<title>Evidence Brief : ${detail.title}</title>
 <style>
   body{font-family:Georgia,serif;max-width:800px;margin:40px auto;color:#1a1a1a;line-height:1.6}
   h1{color:#0A3621;border-bottom:3px solid #E3AC3B;padding-bottom:8px}
@@ -2092,9 +2092,9 @@ function EvidenceBriefSection({ scenarioId, detail }: { scenarioId: string; deta
 </style></head><body>
 <h1>Evidence Brief</h1>
 <div class="meta">
-  <strong>${detail.title}</strong> — Scénario LiteRev<br>
+  <strong>${detail.title}</strong> · Scénario LiteRev<br>
   Généré le ${new Date(data.generated_at).toLocaleDateString('fr-FR', {year:'numeric',month:'long',day:'numeric'})}<br>
-  Projet : LiteRev — Evidence to Scenario
+  Projet : LiteRev Evidence
 </div>
 
 <h2>Résumé Exécutif</h2>
@@ -2137,7 +2137,7 @@ ${data.top_articles.slice(0,8).map((a,i)=>`
 </div>`).join('')}
 
 <footer>
-  LiteRev — Evidence to Scenario | LiteRev Evidence | ${new Date().getFullYear()}<br>
+  LiteRev Evidence | LiteRev Evidence | ${new Date().getFullYear()}<br>
   Ce document est généré automatiquement à partir de la base de données de littérature scientifique.
 </footer>
 </body></html>`;
@@ -2326,7 +2326,7 @@ function KnowledgeGraphSection({ scenarioId }: { scenarioId: string }) {
     <div className="space-y-4">
       <SectionHeader
         icon={<Network size={14} className="text-brand-400" />}
-        title="Knowledge Graph — Réseau de Co-citations"
+        title="Knowledge Graph : Réseau de Co-citations"
         subtitle={`${data.n_nodes} articles · ${data.n_edges} connexions · ${data.n_clusters} groupes thématiques · similarité cosinus sur embeddings`}
       />
 
@@ -2693,7 +2693,7 @@ function AlertsSection({ scenarioId }: { scenarioId: string }) {
         {subscribed ? (
           <div className="rounded-xl border border-brand-500/20 bg-brand-500/5 p-3 flex items-center gap-2 text-xs text-brand-300">
             <CheckCircle2 size={13}/>
-            Abonnement confirmé pour <strong>{email}</strong> — fréquence : {frequency}
+            Abonnement confirmé pour <strong>{email}</strong> · fréquence : {frequency}
           </div>
         ) : (
           <div className="space-y-3">
@@ -2751,7 +2751,7 @@ function AlertsSection({ scenarioId }: { scenarioId: string }) {
           <div className="rounded-xl border border-brand-500/20 bg-brand-500/5 p-3 text-xs text-brand-300 space-y-1">
             <div className="font-semibold">{lrStatus.message}</div>
             {lrStatus.scenarios?.map((s: any, i: number) => (
-              <div key={i} className="text-[10px] text-white/50">• {s.title} — {s.action}</div>
+              <div key={i} className="text-[10px] text-white/50">• {s.title} · {s.action}</div>
             ))}
           </div>
         )}

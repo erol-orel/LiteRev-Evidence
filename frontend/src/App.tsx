@@ -256,9 +256,9 @@ function TerrainView() {
         <div className="flex items-center gap-3">
           <Cloud size={20} className="text-brand-400" />
           <div>
-            <h2 className="text-xl font-semibold text-white">Données Terrain — Grand Genève</h2>
+            <h2 className="text-xl font-semibold text-white">Données Terrain : Grand Genève</h2>
             <p className="text-xs text-forest-400 mt-0.5">
-              6 sources publiques actives — Météo, Routage, Épidémie, Démographie, Pharmacies, Signaux informels
+              6 sources publiques actives · Météo, Routage, Épidémie, Démographie, Pharmacies, Signaux informels
             </p>
           </div>
         </div>
@@ -303,7 +303,7 @@ function TerrainView() {
           <div className="flex items-center justify-between mb-4">
             <h3 className="flex items-center gap-2 text-lg font-semibold text-white">
               <Cloud size={16} className="text-brand-400" />
-              Météo — {meteo.station}
+              Météo : {meteo.station}
             </h3>
             <span className={`rounded-full border px-3 py-1 text-xs font-medium ${alertColors[meteo.alert_level] ?? alertColors.none}`}>
               {meteo.alert_level === "none" ? "Aucune alerte" : meteo.alert_level === "warning" ? "Vigilance" : "Danger"}
@@ -340,7 +340,7 @@ function TerrainView() {
         <div className="rounded-3xl border border-white/10 bg-white/5 p-5 shadow-2xl">
           <h3 className="flex items-center gap-2 text-lg font-semibold text-white mb-4">
             <MapPin size={16} className="text-violet-400" />
-            Routage Transfrontalier — {geo.origin.label} → {geo.destination.label}
+            Routage Transfrontalier : {geo.origin.label} → {geo.destination.label}
           </h3>
           <div className="grid grid-cols-2 gap-3 sm:grid-cols-4 mb-4">
             <div className="rounded-2xl border border-white/10 bg-forest-900/60 p-3 text-center">
@@ -374,7 +374,7 @@ function TerrainView() {
           <div className="flex items-center justify-between mb-4">
             <h3 className="flex items-center gap-2 text-lg font-semibold text-white">
               <Activity size={16} className="text-brand-400" />
-              Surveillance Épidémique — {epidemic.region}
+              Surveillance Épidémique : {epidemic.region}
             </h3>
             <span className={`text-lg font-bold ${riskColors[epidemic.global_ems_impact_risk] ?? "text-white"}`}>
               Risque EMS : {epidemic.global_ems_impact_risk.toUpperCase()}
@@ -415,7 +415,7 @@ function TerrainView() {
         <div className="rounded-3xl border border-white/10 bg-white/5 p-5 shadow-2xl">
           <h3 className="flex items-center gap-2 text-lg font-semibold text-white mb-4">
             <Users size={16} className="text-gold-400" />
-            Démographie — {demographics.commune} ({demographics.postal_code})
+            Démographie : {demographics.commune} ({demographics.postal_code})
           </h3>
           <div className="grid grid-cols-2 gap-3 sm:grid-cols-4 mb-4">
             <div className="rounded-2xl border border-white/10 bg-forest-900/60 p-3 text-center">
@@ -490,7 +490,7 @@ function TerrainView() {
         <div className="rounded-3xl border border-white/10 bg-white/5 p-5 shadow-2xl">
           <h3 className="flex items-center gap-2 text-lg font-semibold text-white mb-4">
             <Radio size={16} className="text-brand-400" />
-            Signaux Informels — ProMED / GDELT
+            Signaux Informels : ProMED / GDELT
           </h3>
           <div className="space-y-3">
             {informalSignals.active_signals.map((sig) => (
@@ -502,7 +502,7 @@ function TerrainView() {
                 <div className="flex items-start justify-between gap-3 mb-2">
                   <div>
                     <p className="text-sm font-semibold text-white">{sig.title}</p>
-                    <p className="text-xs text-forest-400 mt-0.5">{sig.source} — {sig.date} — {sig.geo_scope}</p>
+                    <p className="text-xs text-forest-400 mt-0.5">{sig.source} · {sig.date} · {sig.geo_scope}</p>
                   </div>
                   <div className="flex flex-col items-end gap-1 shrink-0">
                     <span className={`rounded-full border px-2 py-0.5 text-xs font-medium ${
@@ -533,7 +533,7 @@ function TerrainView() {
           <div className="flex items-center justify-between mb-4">
             <h3 className="flex items-center gap-2 text-lg font-semibold text-white">
               <Zap size={16} className="text-gold-400" />
-              Copernicus Climate Data Store (CDS) — ERA5
+              Copernicus Climate Data Store (CDS) · ERA5
             </h3>
             <span className={`rounded-full border px-3 py-1 text-xs font-medium ${
               climate.api_status.includes("verified") ? "border-brand-500/30 bg-brand-500/10 text-brand-300" : "border-gold-500/30 bg-gold-500/10 text-gold-300"
@@ -931,7 +931,7 @@ function StatsView({ corpusStats, gesicaStats, fulltextStats, scenarios, statsBy
               </div>
             );
           })()}
-          <p className="mt-3 text-xs text-forest-400 italic">Les années 2020+ sont mises en évidence (vert vif) — reflètent la croissance de la littérature IA en médecine d’urgence.</p>
+          <p className="mt-3 text-xs text-forest-400 italic">Les années 2020+ sont mises en évidence (vert vif) · reflètent la croissance de la littérature IA en médecine d’urgence.</p>
         </div>
       )}
 
@@ -1212,7 +1212,7 @@ function ScenariosView({ scenarios, loading, error }: { scenarios: GesicaScenari
             <div key={d.disease} className={`rounded-xl border p-3 ${alertBg[d.max_alert_14d] ?? "bg-white/5 border-white/10"}`}>
               <p className="text-xs font-semibold text-white truncate">{d.label}</p>
               <p className={`text-lg font-bold mt-1 ${alertColors[d.max_alert_14d] ?? "text-white"}`}>{d.current_incidence}</p>
-              <p className="text-[9px] text-forest-400">/100k — seuil {d.epidemic_threshold}</p>
+              <p className="text-[9px] text-forest-400">/100k · seuil {d.epidemic_threshold}</p>
               <p className={`text-[9px] font-semibold mt-1 ${alertColors[d.max_alert_14d] ?? "text-white"}`}>{d.max_alert_14d}</p>
             </div>
           ))}
@@ -1398,7 +1398,7 @@ function ScenariosView({ scenarios, loading, error }: { scenarios: GesicaScenari
             <div key={d.date} className={`rounded-xl border px-3 py-2 flex items-center justify-between gap-2 ${alertBg[d.alert_level] ?? "bg-white/5 border-white/10"}`}>
               <div className="flex-1 min-w-0">
                 <p className="text-xs font-semibold text-white">{d.date}</p>
-                <p className="text-[9px] text-forest-400">UTCI {d.utci}°C — {d.utci_category.replace(/_/g, " ")} {d.is_heatwave_day ? "🔥" : ""}</p>
+                <p className="text-[9px] text-forest-400">UTCI {d.utci}°C · {d.utci_category.replace(/_/g, " ")} {d.is_heatwave_day ? "🔥" : ""}</p>
               </div>
               <div className="text-right shrink-0">
                 <p className={`text-sm font-bold ${alertColors[d.alert_level] ?? "text-white"}`}>{d.ems_calls_predicted} appels</p>
@@ -1422,7 +1422,7 @@ function ScenariosView({ scenarios, loading, error }: { scenarios: GesicaScenari
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState<string | null>(null);
     const load = () => { setLoading(true); setError(null); fetchStrokeDetection().then(setData).catch((e) => setError(e.message)).finally(() => setLoading(false)); };
-    if (!data && !loading && !error) return <button onClick={load} className="w-full rounded-xl border border-brand-500/30 bg-brand-500/10 px-4 py-3 text-sm text-brand-300 hover:bg-brand-500/20 transition flex items-center justify-center gap-2"><Activity size={14} />Analyser les délais AVC — Door-to-Needle (XGBoost)</button>;
+    if (!data && !loading && !error) return <button onClick={load} className="w-full rounded-xl border border-brand-500/30 bg-brand-500/10 px-4 py-3 text-sm text-brand-300 hover:bg-brand-500/20 transition flex items-center justify-center gap-2"><Activity size={14} />Analyser les délais AVC : Door-to-Needle (XGBoost)</button>;
     if (loading) return <div className="flex items-center justify-center py-4 text-brand-300 text-sm gap-2"><RotateCcw size={14} className="animate-spin" />Calcul des délais AVC en cours...</div>;
     if (error) return <div className="rounded-xl border border-red-500/20 bg-red-500/10 px-3 py-2 text-xs text-red-300">Erreur : {error} <button onClick={load} className="ml-2 underline">Réessayer</button></div>;
     if (!data) return null;
@@ -1438,7 +1438,7 @@ function ScenariosView({ scenarios, loading, error }: { scenarios: GesicaScenari
           {data.stroke_units?.map((u) => (
             <div key={u.name} className={`rounded-xl border px-3 py-2 flex items-center justify-between gap-2 ${u.dtn_ok ? "bg-brand-500/5 border-brand-500/20" : "bg-gold-500/5 border-gold-500/20"}`}>
               <div className="flex-1 min-w-0">
-                <p className="text-xs font-semibold text-white">{u.name} — {u.city} ({u.country})</p>
+                <p className="text-xs font-semibold text-white">{u.name} · {u.city} ({u.country})</p>
                 <p className="text-[9px] text-forest-400">{u.distance_km} km · {u.transport_time_min} min transport</p>
               </div>
               <div className="text-right shrink-0">
@@ -1525,7 +1525,7 @@ function ScenariosView({ scenarios, loading, error }: { scenarios: GesicaScenari
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState<string | null>(null);
     const load = () => { setLoading(true); setError(null); fetchTraumaCare().then(setData).catch((e) => setError(e.message)).finally(() => setLoading(false)); };
-    if (!data && !loading && !error) return <button onClick={load} className="w-full rounded-xl border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-300 hover:bg-red-500/20 transition flex items-center justify-center gap-2"><Activity size={14} />Calculer ISS / RTS / TRISS — Cas Trauma</button>;
+    if (!data && !loading && !error) return <button onClick={load} className="w-full rounded-xl border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-300 hover:bg-red-500/20 transition flex items-center justify-center gap-2"><Activity size={14} />Calculer ISS / RTS / TRISS : Cas Trauma</button>;
     if (loading) return <div className="flex items-center justify-center py-4 text-red-300 text-sm gap-2"><RotateCcw size={14} className="animate-spin" />Calcul des scores trauma...</div>;
     if (error) return <div className="rounded-xl border border-red-500/20 bg-red-500/10 px-3 py-2 text-xs text-red-300">Erreur : {error} <button onClick={load} className="ml-2 underline">Réessayer</button></div>;
     if (!data) return null;
@@ -1542,7 +1542,7 @@ function ScenariosView({ scenarios, loading, error }: { scenarios: GesicaScenari
             <div key={i} className={`rounded-xl border px-3 py-2 flex items-center justify-between gap-2 ${c.damage_control_indicated ? "border-gold-500/20 bg-gold-500/5" : "border-white/10 bg-white/5"}`}>
               <div className="flex-1 min-w-0">
                 <p className="text-xs font-semibold text-white">{c.case_name}</p>
-                <p className="text-[9px] text-forest-400">ISS {c.scores.iss} — {c.scores.iss_level} {c.damage_control_indicated ? "· DC ⚠" : ""}</p>
+                <p className="text-[9px] text-forest-400">ISS {c.scores.iss} · {c.scores.iss_level} {c.damage_control_indicated ? "· DC ⚠" : ""}</p>
               </div>
               <div className="text-right shrink-0">
                 <p className={`text-sm font-bold ${c.scores.triss_survival_pct >= 75 ? "text-brand-400" : c.scores.triss_survival_pct >= 50 ? "text-gold-400" : "text-red-400"}`}>{c.scores.triss_survival_pct}%</p>
@@ -1624,7 +1624,7 @@ function ScenariosView({ scenarios, loading, error }: { scenarios: GesicaScenari
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState<string | null>(null);
     const load = () => { setLoading(true); setError(null); fetchClinicalDeterioration().then(setData).catch((e) => setError(e.message)).finally(() => setLoading(false)); };
-    if (!data && !loading && !error) return <button onClick={load} className="w-full rounded-xl border border-rose-500/30 bg-rose-500/10 px-4 py-3 text-sm text-rose-300 hover:bg-rose-500/20 transition flex items-center justify-center gap-2"><Activity size={14} />Analyser les signes vitaux — NEWS2 / MEWS</button>;
+    if (!data && !loading && !error) return <button onClick={load} className="w-full rounded-xl border border-rose-500/30 bg-rose-500/10 px-4 py-3 text-sm text-rose-300 hover:bg-rose-500/20 transition flex items-center justify-center gap-2"><Activity size={14} />Analyser les signes vitaux : NEWS2 / MEWS</button>;
     if (loading) return <div className="flex items-center justify-center py-4 text-rose-300 text-sm gap-2"><RotateCcw size={14} className="animate-spin" />Calcul des scores de dégradation...</div>;
     if (error) return <div className="rounded-xl border border-red-500/20 bg-red-500/10 px-3 py-2 text-xs text-red-300">Erreur : {error} <button onClick={load} className="ml-2 underline">Réessayer</button></div>;
     if (!data) return null;
@@ -1801,7 +1801,7 @@ function ScenariosView({ scenarios, loading, error }: { scenarios: GesicaScenari
           </div>
         </div>
         <div className={`rounded-xl border px-3 py-2 text-xs ${data.staffing_now?.status === "DÉFICIT" ? "border-red-500/20 bg-red-500/5 text-red-300" : "border-brand-500/20 bg-brand-500/5 text-brand-300"}`}>
-          Staffing : {data.staffing_now?.current_crews}/{data.staffing_now?.required_crews} équipes — {data.staffing_now?.action}
+          Staffing : {data.staffing_now?.current_crews}/{data.staffing_now?.required_crews} équipes · {data.staffing_now?.action}
         </div>
         <button onClick={load} className="text-[10px] text-brand-400 hover:text-brand-300 flex items-center gap-1"><RefreshCw size={10} /> Actualiser</button>
       </div>
@@ -1829,12 +1829,12 @@ function ScenariosView({ scenarios, loading, error }: { scenarios: GesicaScenari
           <div className="space-y-1.5">
             {data.active_alerts.map((a, i) => (
               <div key={i} className="rounded-xl border border-gold-500/20 bg-gold-500/5 px-3 py-2 text-xs text-gold-300">
-                <span className="font-semibold">{a.indicator}</span> — z={a.zscore.toFixed(2)} — {a.message}
+                <span className="font-semibold">{a.indicator}</span> · z={a.zscore.toFixed(2)} · {a.message}
               </div>
             ))}
           </div>
         )}
-        {data.active_alerts?.length === 0 && <div className="rounded-xl border border-brand-500/20 bg-brand-500/5 px-3 py-2 text-xs text-brand-300">Aucune anomalie détectée — activité normale</div>}
+        {data.active_alerts?.length === 0 && <div className="rounded-xl border border-brand-500/20 bg-brand-500/5 px-3 py-2 text-xs text-brand-300">Aucune anomalie détectée · activité normale</div>}
       </div>
     );
   };
@@ -1862,7 +1862,7 @@ function ScenariosView({ scenarios, loading, error }: { scenarios: GesicaScenari
           </div>
         </div>
         <div className={`rounded-xl border px-3 py-2 text-xs ${data.surge_status === "SURGE CRITIQUE" ? "border-red-500/20 bg-red-500/5 text-red-300" : data.surge_status === "SURGE MODÉRÉ" ? "border-gold-500/20 bg-gold-500/5 text-gold-300" : "border-brand-500/20 bg-brand-500/5 text-brand-300"}`}>
-          {data.surge_status} — {data.staffing?.additional_needed > 0 ? `+${data.staffing?.additional_needed} équipes nécessaires` : "Staffing suffisant"}
+          {data.surge_status} · {data.staffing?.additional_needed > 0 ? `+${data.staffing?.additional_needed} équipes nécessaires` : "Staffing suffisant"}
         </div>
         <button onClick={load} className="text-[10px] text-gold-400 hover:text-gold-300 flex items-center gap-1"><RefreshCw size={10} /> Actualiser</button>
       </div>
@@ -1928,7 +1928,7 @@ function ScenariosView({ scenarios, loading, error }: { scenarios: GesicaScenari
           </div>
         </div>
         <div className={`rounded-xl border px-3 py-2 text-xs ${data.ems_impact?.risk_level === "ÉLEVÉ" ? "border-red-500/20 bg-red-500/5 text-red-300" : "border-brand-500/20 bg-brand-500/5 text-brand-300"}`}>
-          IQA : {data.air_quality?.iqa_level} — Impact EMS : {data.ems_impact?.estimated_call_increase_pct > 0 ? `+${data.ems_impact?.estimated_call_increase_pct}%` : "Baseline"}
+          IQA : {data.air_quality?.iqa_level} · Impact EMS : {data.ems_impact?.estimated_call_increase_pct > 0 ? `+${data.ems_impact?.estimated_call_increase_pct}%` : "Baseline"}
         </div>
         <button onClick={load} className="text-[10px] text-green-400 hover:text-green-300 flex items-center gap-1"><RefreshCw size={10} /> Actualiser</button>
       </div>
@@ -1959,7 +1959,7 @@ function ScenariosView({ scenarios, loading, error }: { scenarios: GesicaScenari
           </div>
         </div>
         <div className={`rounded-xl border px-3 py-2 text-xs ${data.preparedness_assessment?.includes("CRITIQUE") ? "border-red-500/20 bg-red-500/5 text-red-300" : "border-gold-500/20 bg-gold-500/5 text-gold-300"}`}>
-          R0={data.parameters?.R0} — {data.preparedness_assessment}
+          R0={data.parameters?.R0} · {data.preparedness_assessment}
         </div>
         <button onClick={load} className="text-[10px] text-red-400 hover:text-red-300 flex items-center gap-1"><RefreshCw size={10} /> Actualiser</button>
       </div>
@@ -2054,7 +2054,7 @@ function ScenariosView({ scenarios, loading, error }: { scenarios: GesicaScenari
           {data.all_risks?.map((r, i) => (
             <div key={i} className="rounded-xl border border-white/10 bg-forest-900/40 px-3 py-2 flex items-center justify-between gap-2">
               <div className="flex-1 min-w-0">
-                <p className="text-xs font-medium text-white truncate">{r.type} — {r.zone}</p>
+                <p className="text-xs font-medium text-white truncate">{r.type} · {r.zone}</p>
                 <p className="text-[9px] text-forest-400">{(r.probability_annual * 100).toFixed(0)}% annuel · {r.population_at_risk?.toLocaleString()} pers.</p>
               </div>
               <span className={`text-xs font-bold shrink-0 ${riskC[r.risk_level] ?? "text-white"}`}>{r.risk_level}</span>
@@ -2078,7 +2078,7 @@ function ScenariosView({ scenarios, loading, error }: { scenarios: GesicaScenari
     return (
       <div className="space-y-3">
         <div className="flex items-center gap-3 flex-wrap text-[10px] text-forest-400">
-          <span>Incident : <span className="text-white font-semibold">{data.incident?.type}</span> — {data.incident?.location}</span>
+          <span>Incident : <span className="text-white font-semibold">{data.incident?.type}</span> · {data.incident?.location}</span>
           <button onClick={load} className="ml-auto text-rose-400 hover:text-rose-300 flex items-center gap-1"><RefreshCw size={10} /> Actualiser</button>
         </div>
         <div className="grid grid-cols-2 gap-2">
@@ -2174,7 +2174,7 @@ function ScenariosView({ scenarios, loading, error }: { scenarios: GesicaScenari
                 <div className="flex items-center justify-between mb-3">
                   <div className="flex items-center gap-2">
                     <BarChart2 size={14} className="text-violet-400" />
-                    <span className="text-xs font-semibold text-violet-300 uppercase tracking-wider">Modèle Prédictif — Demande EMS J+7</span>
+                    <span className="text-xs font-semibold text-violet-300 uppercase tracking-wider">Modèle Prédictif : Demande EMS J+7</span>
                   </div>
                   <span className="text-[10px] text-violet-400 bg-violet-500/10 border border-violet-500/20 px-2 py-0.5 rounded-full">Prophet + LightGBM</span>
                 </div>
@@ -2188,7 +2188,7 @@ function ScenariosView({ scenarios, loading, error }: { scenarios: GesicaScenari
                 <div className="flex items-center justify-between mb-3">
                   <div className="flex items-center gap-2">
                     <Activity size={14} className="text-brand-400" />
-                    <span className="text-xs font-semibold text-brand-300 uppercase tracking-wider">Modèle Prédictif — Surveillance Épidémique J+14</span>
+                    <span className="text-xs font-semibold text-brand-300 uppercase tracking-wider">Modèle Prédictif : Surveillance Épidémique J+14</span>
                   </div>
                   <span className="text-[10px] text-brand-400 bg-brand-500/10 border border-brand-500/20 px-2 py-0.5 rounded-full">SARIMAX + Sentinelles FR</span>
                 </div>
@@ -2202,7 +2202,7 @@ function ScenariosView({ scenarios, loading, error }: { scenarios: GesicaScenari
                 <div className="flex items-center justify-between mb-3">
                   <div className="flex items-center gap-2">
                     <MapPin size={14} className="text-brand-400" />
-                    <span className="text-xs font-semibold text-brand-300 uppercase tracking-wider">Modèle Prédictif — Optimisation Temps de Réponse</span>
+                    <span className="text-xs font-semibold text-brand-300 uppercase tracking-wider">Modèle Prédictif : Optimisation Temps de Réponse</span>
                   </div>
                   <span className="text-[10px] text-brand-400 bg-brand-500/10 border border-brand-500/20 px-2 py-0.5 rounded-full">OSRM + Open-Meteo</span>
                 </div>
@@ -2216,7 +2216,7 @@ function ScenariosView({ scenarios, loading, error }: { scenarios: GesicaScenari
                 <div className="flex items-center justify-between mb-3">
                   <div className="flex items-center gap-2">
                     <Activity size={14} className="text-rose-400" />
-                    <span className="text-xs font-semibold text-rose-300 uppercase tracking-wider">Modèle Prédictif — Arrêts Cardiaques OHCA J+3</span>
+                    <span className="text-xs font-semibold text-rose-300 uppercase tracking-wider">Modèle Prédictif : Arrêts Cardiaques OHCA J+3</span>
                   </div>
                   <span className="text-[10px] text-rose-400 bg-rose-500/10 border border-rose-500/20 px-2 py-0.5 rounded-full">LightGBM + Météo</span>
                 </div>
@@ -2230,7 +2230,7 @@ function ScenariosView({ scenarios, loading, error }: { scenarios: GesicaScenari
                 <div className="flex items-center justify-between mb-3">
                   <div className="flex items-center gap-2">
                     <Cloud size={14} className="text-gold-400" />
-                    <span className="text-xs font-semibold text-gold-300 uppercase tracking-wider">Modèle Prédictif — Impact Canicule EMS J+7</span>
+                    <span className="text-xs font-semibold text-gold-300 uppercase tracking-wider">Modèle Prédictif : Impact Canicule EMS J+7</span>
                   </div>
                   <span className="text-[10px] text-gold-400 bg-gold-500/10 border border-gold-500/20 px-2 py-0.5 rounded-full">DLNM + UTCI</span>
                 </div>
@@ -2244,7 +2244,7 @@ function ScenariosView({ scenarios, loading, error }: { scenarios: GesicaScenari
                 <div className="flex items-center justify-between mb-3">
                   <div className="flex items-center gap-2">
                     <Activity size={14} className="text-brand-400" />
-                    <span className="text-xs font-semibold text-brand-300 uppercase tracking-wider">Modèle Prédictif — AVC Door-to-Needle</span>
+                    <span className="text-xs font-semibold text-brand-300 uppercase tracking-wider">Modèle Prédictif : AVC Door-to-Needle</span>
                   </div>
                   <span className="text-[10px] text-brand-400 bg-brand-500/10 border border-brand-500/20 px-2 py-0.5 rounded-full">XGBoost + NIHSS</span>
                 </div>
@@ -2258,7 +2258,7 @@ function ScenariosView({ scenarios, loading, error }: { scenarios: GesicaScenari
                 <div className="flex items-center justify-between mb-3">
                   <div className="flex items-center gap-2">
                     <CheckSquare size={14} className="text-gold-400" />
-                    <span className="text-xs font-semibold text-gold-300 uppercase tracking-wider">Aide au Triage — CCMU / NEWS2</span>
+                    <span className="text-xs font-semibold text-gold-300 uppercase tracking-wider">Aide au Triage : CCMU / NEWS2</span>
                   </div>
                   <span className="text-[10px] text-gold-400 bg-gold-500/10 border border-gold-500/20 px-2 py-0.5 rounded-full">CCMU + NEWS2</span>
                 </div>
@@ -2286,7 +2286,7 @@ function ScenariosView({ scenarios, loading, error }: { scenarios: GesicaScenari
                 <div className="flex items-center justify-between mb-3">
                   <div className="flex items-center gap-2">
                     <Activity size={14} className="text-red-400" />
-                    <span className="text-xs font-semibold text-red-300 uppercase tracking-wider">Scores Trauma — ISS / RTS / TRISS</span>
+                    <span className="text-xs font-semibold text-red-300 uppercase tracking-wider">Scores Trauma : ISS / RTS / TRISS</span>
                   </div>
                   <span className="text-[10px] text-red-400 bg-red-500/10 border border-red-500/20 px-2 py-0.5 rounded-full">Cox Survival + ISS</span>
                 </div>
@@ -2300,7 +2300,7 @@ function ScenariosView({ scenarios, loading, error }: { scenarios: GesicaScenari
                 <div className="flex items-center justify-between mb-3">
                   <div className="flex items-center gap-2">
                     <Users size={14} className="text-violet-400" />
-                    <span className="text-xs font-semibold text-violet-300 uppercase tracking-wider">Simulation AME — SALT Triage</span>
+                    <span className="text-xs font-semibold text-violet-300 uppercase tracking-wider">Simulation AME : SALT Triage</span>
                   </div>
                   <span className="text-[10px] text-violet-400 bg-violet-500/10 border border-violet-500/20 px-2 py-0.5 rounded-full">Monte-Carlo + SALT</span>
                 </div>
@@ -2314,7 +2314,7 @@ function ScenariosView({ scenarios, loading, error }: { scenarios: GesicaScenari
                 <div className="flex items-center justify-between mb-3">
                   <div className="flex items-center gap-2">
                     <Activity size={14} className="text-rose-400" />
-                    <span className="text-xs font-semibold text-rose-300 uppercase tracking-wider">Détection Dégradation Clinique — NEWS2 / MEWS</span>
+                    <span className="text-xs font-semibold text-rose-300 uppercase tracking-wider">Détection Dégradation Clinique : NEWS2 / MEWS</span>
                   </div>
                   <span className="text-[10px] text-rose-400 bg-rose-500/10 border border-rose-500/20 px-2 py-0.5 rounded-full">NEWS2 + MEWS + LSTM</span>
                 </div>
@@ -2328,7 +2328,7 @@ function ScenariosView({ scenarios, loading, error }: { scenarios: GesicaScenari
                 <div className="flex items-center justify-between mb-3">
                   <div className="flex items-center gap-2">
                     <Radio size={14} className="text-brand-400" />
-                    <span className="text-xs font-semibold text-brand-300 uppercase tracking-wider">Qualification Appels — NLP + Prioritisation</span>
+                    <span className="text-xs font-semibold text-brand-300 uppercase tracking-wider">Qualification Appels : NLP + Prioritisation</span>
                   </div>
                   <span className="text-[10px] text-brand-400 bg-brand-500/10 border border-brand-500/20 px-2 py-0.5 rounded-full">NLP + Scoring</span>
                 </div>
@@ -2370,7 +2370,7 @@ function ScenariosView({ scenarios, loading, error }: { scenarios: GesicaScenari
                 <div className="flex items-center justify-between mb-3">
                   <div className="flex items-center gap-2">
                     <MapPin size={14} className="text-brand-400" />
-                    <span className="text-xs font-semibold text-brand-300 uppercase tracking-wider">Optimisation Couverture Ambulancière — VRP</span>
+                    <span className="text-xs font-semibold text-brand-300 uppercase tracking-wider">Optimisation Couverture Ambulancière : VRP</span>
                   </div>
                   <span className="text-[10px] text-brand-400 bg-brand-500/10 border border-brand-500/20 px-2 py-0.5 rounded-full">VRP + Couverture spatiale</span>
                 </div>
@@ -2412,7 +2412,7 @@ function ScenariosView({ scenarios, loading, error }: { scenarios: GesicaScenari
                 <div className="flex items-center justify-between mb-3">
                   <div className="flex items-center gap-2">
                     <Zap size={14} className="text-gold-400" />
-                    <span className="text-xs font-semibold text-gold-300 uppercase tracking-wider">Gestion de Surge — File d'Attente</span>
+                    <span className="text-xs font-semibold text-gold-300 uppercase tracking-wider">Gestion de Surge : File d'Attente</span>
                   </div>
                   <span className="text-[10px] text-gold-400 bg-gold-500/10 border border-gold-500/20 px-2 py-0.5 rounded-full">M/M/c + Erlang</span>
                 </div>
@@ -2440,7 +2440,7 @@ function ScenariosView({ scenarios, loading, error }: { scenarios: GesicaScenari
                 <div className="flex items-center justify-between mb-3">
                   <div className="flex items-center gap-2">
                     <Cloud size={14} className="text-green-400" />
-                    <span className="text-xs font-semibold text-green-300 uppercase tracking-wider">Risque Environnemental — Qualité de l'Air</span>
+                    <span className="text-xs font-semibold text-green-300 uppercase tracking-wider">Risque Environnemental : Qualité de l'Air</span>
                   </div>
                   <span className="text-[10px] text-green-400 bg-green-500/10 border border-green-500/20 px-2 py-0.5 rounded-full">XGBoost + PM2.5/O3</span>
                 </div>
@@ -2454,7 +2454,7 @@ function ScenariosView({ scenarios, loading, error }: { scenarios: GesicaScenari
                 <div className="flex items-center justify-between mb-3">
                   <div className="flex items-center gap-2">
                     <AlertTriangle size={14} className="text-red-400" />
-                    <span className="text-xs font-semibold text-red-300 uppercase tracking-wider">Préparation Pandémique — Modèle SEIR</span>
+                    <span className="text-xs font-semibold text-red-300 uppercase tracking-wider">Préparation Pandémique : Modèle SEIR</span>
                   </div>
                   <span className="text-[10px] text-red-400 bg-red-500/10 border border-red-500/20 px-2 py-0.5 rounded-full">SEIR + Monte-Carlo</span>
                 </div>
@@ -2510,7 +2510,7 @@ function ScenariosView({ scenarios, loading, error }: { scenarios: GesicaScenari
                 <div className="flex items-center justify-between mb-3">
                   <div className="flex items-center gap-2">
                     <Users size={14} className="text-rose-400" />
-                    <span className="text-xs font-semibold text-rose-300 uppercase tracking-wider">Estimation Victimes AME — Régression spatiale</span>
+                    <span className="text-xs font-semibold text-rose-300 uppercase tracking-wider">Estimation Victimes AME : Régression spatiale</span>
                   </div>
                   <span className="text-[10px] text-rose-400 bg-rose-500/10 border border-rose-500/20 px-2 py-0.5 rounded-full">Régression spatiale</span>
                 </div>
@@ -2617,7 +2617,7 @@ function ScenariosView({ scenarios, loading, error }: { scenarios: GesicaScenari
         <div className="flex items-center gap-3">
           <Activity size={20} className="text-brand-400" />
           <div>
-            <h2 className="text-xl font-semibold text-white">Scénarios — LiteRev Evidence to Scenario</h2>
+            <h2 className="text-xl font-semibold text-white">Scénarios LiteRev</h2>
             <p className="text-xs text-forest-400 mt-0.5">
               {scenarios.length} scénarios · {scenarios.reduce((a, s) => a + s.articleCount, 0).toLocaleString()} articles indexés · Mis à jour automatiquement
             </p>
@@ -2698,7 +2698,6 @@ function ScreeningView({
   notes,
   setNotes,
   onDecision,
-  projectContext,
 }: ScreeningViewProps) {
   if (loading && docs.length === 0) {
     return <div className="text-sm text-forest-400">Chargement du module de screening...</div>;
@@ -2717,7 +2716,7 @@ function ScreeningView({
         <div className="rounded-3xl border border-white/10 bg-white/5 p-6 shadow-2xl">
           <h3 className="mb-4 text-lg font-semibold text-white flex items-center gap-2">
             <CheckSquare size={18} className="text-brand-400" />
-            Diagramme de Flux PRISMA — {projectContext.toUpperCase()}
+            Diagramme de Flux PRISMA
           </h3>
           <div className="grid gap-4 md:grid-cols-4 text-center">
             <div className="rounded-2xl border border-white/10 bg-forest-900/60 p-4">
@@ -2907,14 +2906,13 @@ function AssistantView({
   loading,
   error,
   onAsk,
-  projectContext,
 }: AssistantViewProps) {
   return (
     <div className="space-y-6">
       <div className="rounded-3xl border border-white/10 bg-white/5 p-6 shadow-2xl">
         <h2 className="mb-4 flex items-center gap-2 text-lg font-semibold text-white">
           <Zap size={18} className="text-brand-400" />
-          Assistant Scientifique RAG — {projectContext.toUpperCase()}
+          Assistant Scientifique
         </h2>
         <p className="mb-4 text-sm text-forest-300 leading-6">
           Posez une question complexe à l'assistant. Il va interroger les chunks de la base de données les plus pertinents pour votre projet, puis synthétiser une réponse scientifiquement étayée et citer ses sources.
@@ -3004,12 +3002,12 @@ function AssistantView({
 }
 
 export default function App() {
-  const [projectContext, setProjectContext] = useState<ProjectContext>("gesica");
+  const [projectContext, setProjectContext] = useState<ProjectContext>("literev");
   const [activeTab, setActiveTab] = useState<AppTab>("search");
   const [mode, setMode] = useState<SearchMode>("semantic");
   const [query, setQuery] = useState("");
   const [filters, setFilters] = useState<SearchFilters>({
-    projectContext: "gesica",
+    projectContext: "literev",
   });
   const [yearRange, setYearRange] = useState<[number, number]>([
     2000,
@@ -3417,27 +3415,9 @@ export default function App() {
 
             <div className="flex items-center gap-6">
               <img src="/logo.jpg" alt="LiteRev arbre" className="h-20 w-20 rounded-2xl object-cover shadow-xl opacity-90" />
-              <div className="grid gap-3 sm:grid-cols-2">
-              {(
-                [
-                  ["gesica", "Urgences Pré-hospitalières", "Données 144 Genève"],
-                  ["geoai4ei", "Urgences Hospitalières", "Données HUG"],
-                ] as [string, string, string][]
-              ).map(([value, label, sublabel]) => (
-                <button
-                  key={value}
-                  type="button"
-                  onClick={() => setProjectContext(value as ProjectContext)}
-                  className={`rounded-2xl border px-5 py-3 text-left transition ${
-                    projectContext === value
-                      ? "border-gold-400 bg-brand-700/60 text-gold-400 font-semibold shadow-2xl"
-                      : "border-white/20 bg-white/5 text-white/90 hover:border-gold-400/40 hover:bg-white/10 hover:text-white"
-                  }`}
-                >
-                  <div className="text-sm font-semibold">{label}</div>
-                  <div className="text-xs opacity-60 mt-0.5">{sublabel}</div>
-                </button>
-              ))}
+              <div className="rounded-2xl border border-brand-500/30 bg-brand-700/20 px-5 py-3">
+                <div className="text-sm font-semibold text-gold-400">Corpus LiteRev</div>
+                <div className="text-xs text-white/50 mt-0.5">Corpus unifié · Urgences pré et intra-hospitalières</div>
               </div>
             </div>
           </div>
@@ -3502,7 +3482,7 @@ export default function App() {
                           <Activity size={14} className="text-gold-400 shrink-0" />
                           <div className="flex-1 min-w-0">
                             <p className="text-sm font-semibold text-white truncate">{s.name || s.query}</p>
-                            <p className="text-xs text-white/40 truncate">{s.mode === "semantic" ? "Sémantique" : "Booléen"} · {s.projectContext === "gesica" ? "Urgences Pré-hospitalières" : "Urgences Hospitalières"} · {s.resultCount} résultats · {new Date(s.timestamp).toLocaleDateString("fr-CH")}</p>
+                            <p className="text-xs text-white/40 truncate">{s.mode === "semantic" ? "Sémantique" : "Booléen"} · {s.resultCount} résultats · {new Date(s.timestamp).toLocaleDateString("fr-CH")}</p>
                             {s.name && <p className="text-xs text-white/30 truncate font-mono">{s.query}</p>}
                           </div>
                           <button type="button" onClick={() => handleReplaySearch(s)} className="shrink-0 rounded-xl bg-brand-500/20 border border-brand-500/30 px-3 py-1.5 text-xs text-brand-300 hover:bg-brand-500/30 transition">Relancer</button>
@@ -3524,7 +3504,7 @@ export default function App() {
                           <BookOpen size={14} className="text-white/30 shrink-0" />
                           <div className="flex-1 min-w-0">
                             <p className="text-sm text-white/80 truncate">{s.query}</p>
-                            <p className="text-xs text-white/30 truncate">{s.mode === "semantic" ? "Sémantique" : "Booléen"} · {s.projectContext === "gesica" ? "Urgences Pré-hospitalières" : "Urgences Hospitalières"} · {s.resultCount} résultats · {new Date(s.timestamp).toLocaleDateString("fr-CH")}</p>
+                            <p className="text-xs text-white/30 truncate">{s.mode === "semantic" ? "Sémantique" : "Booléen"} · {s.resultCount} résultats · {new Date(s.timestamp).toLocaleDateString("fr-CH")}</p>
                           </div>
                           <button type="button" onClick={() => handleReplaySearch(s)} className="shrink-0 rounded-xl bg-white/5 border border-white/10 px-3 py-1.5 text-xs text-white/60 hover:text-white hover:bg-white/10 transition">Relancer</button>
                           <button type="button" onClick={() => handleTogglePin(s.id)} className="shrink-0 rounded-xl border border-white/10 px-2 py-1.5 text-xs text-white/30 hover:text-gold-400 hover:border-gold-400/30 transition" title="Épingler comme scénario">☆</button>
@@ -3838,11 +3818,7 @@ export default function App() {
                                 {result.year}
                               </span>
                             )}
-                            {result.projectContext && (
-                              <span className="rounded-full bg-brand-500/10 px-2 py-1 text-brand-200">
-                                {result.projectContext}
-                              </span>
-                            )}
+
                             {result.scenarioType && (
                               <span className="rounded-full bg-violet-500/10 px-2 py-1 text-violet-200">
                                 {result.scenarioType}
