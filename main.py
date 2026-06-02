@@ -2754,8 +2754,9 @@ def get_scenario_corpus(
             SELECT d.year, COUNT(*) AS cnt
             FROM literature_document d
             WHERE {where.replace(' LIMIT :limit OFFSET :offset', '')}
+              AND d.year >= 2000
             GROUP BY d.year
-            ORDER BY d.year
+            ORDER BY d.year DESC
         """), {k: v for k, v in params.items() if k not in ('limit', 'offset')}).mappings().all()
         # Stats par source
         source_dist = conn.execute(text(f"""
@@ -4171,7 +4172,7 @@ def get_evidence_brief(scenario_id: str) -> dict[str, Any]:
                 COUNT(*) FILTER (WHERE screening_status = 'included') AS included,
                 COUNT(*) FILTER (WHERE screening_status = 'excluded') AS excluded,
                 COUNT(*) FILTER (WHERE screening_status = 'pending' OR screening_status IS NULL) AS pending,
-                COUNT(*) FILTER (WHERE full_text IS NOT NULL OR chunk_count > 0) AS with_fulltext,
+                COUNT(*) FILTER (WHERE EXISTS (SELECT 1 FROM document_chunk dc WHERE dc.document_id = ld.id AND dc.chunk_type = 'fulltext_section')) AS with_fulltext,
                 MIN(year) AS year_min,
                 MAX(year) AS year_max,
                 AVG(citation_count) FILTER (WHERE citation_count IS NOT NULL) AS avg_citations,

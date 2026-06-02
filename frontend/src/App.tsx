@@ -851,7 +851,7 @@ function StatsView({ corpusStats, gesicaStats, fulltextStats, scenarios, statsBy
         <div className="rounded-3xl border border-white/10 bg-white/5 p-5 shadow-2xl">
           <h2 className="mb-4 flex items-center gap-2 text-lg font-semibold text-white">
             <Activity size={18} className="text-brand-400" />
-            Corpus LiteRev
+            Corpus LiteRev — Niveaux de preuve
           </h2>
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
             {Object.entries(gesicaStats.evidenceStrengthDistribution).map(([strength, count]) => {
@@ -889,6 +889,51 @@ function StatsView({ corpusStats, gesicaStats, fulltextStats, scenarios, statsBy
               </div>
             </div>
           )}
+        </div>
+      )}
+
+      {/* Progression du Screening par Scénario */}
+      {scenarios && scenarios.length > 0 && (
+        <div className="rounded-3xl border border-white/10 bg-white/5 p-6 shadow-2xl">
+          <h3 className="mb-4 text-base font-semibold text-white flex items-center gap-2">
+            <Activity size={16} className="text-brand-400" />
+            Progression du Screening par Scénario
+          </h3>
+          <div className="space-y-2">
+            {scenarios.filter(s => !s.hidden && s.articleCount > 0).map(s => {
+              const total = s.articleCount ?? 0;
+              const included = s.included_count ?? 0;
+              const excluded = s.excluded_count ?? 0;
+              const pending = Math.max(0, total - included - excluded);
+              const pctIncluded = total > 0 ? Math.round(included / total * 100) : 0;
+              const pctExcluded = total > 0 ? Math.round(excluded / total * 100) : 0;
+              const pctPending = total > 0 ? Math.round(pending / total * 100) : 0;
+              return (
+                <div key={s.id} className="rounded-2xl border border-white/5 bg-white/2 p-3">
+                  <div className="flex items-center justify-between mb-1.5">
+                    <span className="text-xs font-semibold text-white/80 truncate max-w-[220px]">{s.title}</span>
+                    <div className="flex items-center gap-3 text-[10px] shrink-0">
+                      <span className="text-brand-300">{included} inclus</span>
+                      <span className="text-red-400">{excluded} exclus</span>
+                      <span className="text-white/35">{pending} en attente</span>
+                      <span className="text-white/50 font-mono">{total} total</span>
+                    </div>
+                  </div>
+                  <div className="h-1.5 bg-white/5 rounded-full overflow-hidden flex">
+                    <div className="h-full bg-brand-500 transition-all" style={{width:`${pctIncluded}%`}}/>
+                    <div className="h-full bg-red-500/60 transition-all" style={{width:`${pctExcluded}%`}}/>
+                    <div className="h-full bg-white/10 transition-all" style={{width:`${pctPending}%`}}/>
+                  </div>
+                  <div className="flex gap-3 mt-1 text-[9px] text-white/30">
+                    <span className="flex items-center gap-1"><span className="h-1.5 w-1.5 rounded-full bg-brand-500 inline-block"/>Inclus {pctIncluded}%</span>
+                    <span className="flex items-center gap-1"><span className="h-1.5 w-1.5 rounded-full bg-red-500/60 inline-block"/>Exclus {pctExcluded}%</span>
+                    <span className="flex items-center gap-1"><span className="h-1.5 w-1.5 rounded-full bg-white/10 inline-block"/>En attente {pctPending}%</span>
+                    {s.kappa_score != null && <span className="ml-auto text-white/40">Kappa: <span className="font-mono">{s.kappa_score.toFixed(2)}</span></span>}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
         </div>
       )}
 
@@ -1005,50 +1050,6 @@ function StatsView({ corpusStats, gesicaStats, fulltextStats, scenarios, statsBy
               </div>
             );
           })()}
-        </div>
-      )}
-      {/* Progression du Screening par Scénario */}
-      {scenarios && scenarios.length > 0 && (
-        <div className="rounded-3xl border border-white/10 bg-white/5 p-6 shadow-2xl">
-          <h3 className="mb-4 text-base font-semibold text-white flex items-center gap-2">
-            <Activity size={16} className="text-brand-400" />
-            Progression du Screening par Scénario
-          </h3>
-          <div className="space-y-2">
-            {scenarios.filter(s => !s.hidden && s.articleCount > 0).map(s => {
-              const total = s.articleCount ?? 0;
-              const included = s.included_count ?? 0;
-              const excluded = s.excluded_count ?? 0;
-              const pending = Math.max(0, total - included - excluded);
-              const pctIncluded = total > 0 ? Math.round(included / total * 100) : 0;
-              const pctExcluded = total > 0 ? Math.round(excluded / total * 100) : 0;
-              const pctPending = total > 0 ? Math.round(pending / total * 100) : 0;
-              return (
-                <div key={s.id} className="rounded-2xl border border-white/5 bg-white/2 p-3">
-                  <div className="flex items-center justify-between mb-1.5">
-                    <span className="text-xs font-semibold text-white/80 truncate max-w-[220px]">{s.title}</span>
-                    <div className="flex items-center gap-3 text-[10px] shrink-0">
-                      <span className="text-brand-300">{included} inclus</span>
-                      <span className="text-red-400">{excluded} exclus</span>
-                      <span className="text-white/35">{pending} en attente</span>
-                      <span className="text-white/50 font-mono">{total} total</span>
-                    </div>
-                  </div>
-                  <div className="h-1.5 bg-white/5 rounded-full overflow-hidden flex">
-                    <div className="h-full bg-brand-500 transition-all" style={{width:`${pctIncluded}%`}}/>
-                    <div className="h-full bg-red-500/60 transition-all" style={{width:`${pctExcluded}%`}}/>
-                    <div className="h-full bg-white/10 transition-all" style={{width:`${pctPending}%`}}/>
-                  </div>
-                  <div className="flex gap-3 mt-1 text-[9px] text-white/30">
-                    <span className="flex items-center gap-1"><span className="h-1.5 w-1.5 rounded-full bg-brand-500 inline-block"/>Inclus {pctIncluded}%</span>
-                    <span className="flex items-center gap-1"><span className="h-1.5 w-1.5 rounded-full bg-red-500/60 inline-block"/>Exclus {pctExcluded}%</span>
-                    <span className="flex items-center gap-1"><span className="h-1.5 w-1.5 rounded-full bg-white/10 inline-block"/>En attente {pctPending}%</span>
-                    {s.kappa_score != null && <span className="ml-auto text-white/40">Kappa: <span className="font-mono">{s.kappa_score.toFixed(2)}</span></span>}
-                  </div>
-                </div>
-              );
-            })}
-          </div>
         </div>
       )}
     </div>
