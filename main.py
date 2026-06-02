@@ -1092,6 +1092,7 @@ def get_geoai4ei_stats() -> dict[str, Any]:
 
 GESICA_SCENARIO_METADATA: dict[str, dict[str, Any]] = {
     "cardiac-arrest-prediction": {
+        "hidden": False,
         "title": "Prédiction de l'Arrêt Cardiaque Extra-Hospitalier (OHCA)",
         "description": "Modèles de prédiction et d'identification précoce des arrêts cardiorespiratoires pour optimiser la chaîne de survie.",
         "cluster": "Patient-centered prehospital critical care",
@@ -1102,6 +1103,7 @@ GESICA_SCENARIO_METADATA: dict[str, dict[str, Any]] = {
         ]
     },
     "stroke-detection": {
+        "hidden": False,
         "title": "Détection Préhospitalière de l'AVC",
         "description": "Outils d'aide à la décision pour identifier les AVC et orienter vers la bonne filière (thrombolyse/thrombectomie).",
         "cluster": "Patient-centered prehospital critical care",
@@ -1112,6 +1114,7 @@ GESICA_SCENARIO_METADATA: dict[str, dict[str, Any]] = {
         ]
     },
     "trauma-severity-assessment": {
+        "hidden": False,
         "title": "Évaluation de la Gravité des Traumatismes",
         "description": "Stratification du risque pour les traumatisés graves (accidents de la route, chutes) afin d'orienter vers les trauma centers adaptés.",
         "cluster": "Patient-centered prehospital critical care",
@@ -1122,6 +1125,7 @@ GESICA_SCENARIO_METADATA: dict[str, dict[str, Any]] = {
         ]
     },
     "clinical-deterioration-prediction": {
+        "hidden": True,
         "title": "Prédiction de la Détérioration Clinique en Transit",
         "description": "Surveillance intelligente des patients critiques durant leur transport en ambulance ou hélicoptère.",
         "cluster": "Patient-centered prehospital critical care",
@@ -1132,6 +1136,7 @@ GESICA_SCENARIO_METADATA: dict[str, dict[str, Any]] = {
         ]
     },
     "patient-pathway-optimization": {
+        "hidden": True,
         "title": "Optimisation du Parcours Patient Transfrontalier",
         "description": "Planification du transfert des patients vers les structures de soins appropriées en optimisant les capacités des deux côtés de la frontière.",
         "cluster": "Patient-centered prehospital critical care",
@@ -1142,6 +1147,7 @@ GESICA_SCENARIO_METADATA: dict[str, dict[str, Any]] = {
         ]
     },
     "mci-victim-estimation": {
+        "hidden": True,
         "title": "Estimation des Victimes en Situation de Catastrophe (MCI)",
         "description": "Évaluation rapide du nombre et de la gravité des victimes lors d'événements majeurs pour dimensionner la réponse.",
         "cluster": "Patient-centered prehospital critical care",
@@ -1152,6 +1158,7 @@ GESICA_SCENARIO_METADATA: dict[str, dict[str, Any]] = {
         ]
     },
     "environmental-risk-forecasting": {
+        "hidden": True,
         "title": "Prévision des Risques Environnementaux",
         "description": "Anticipation des pics de pollution de l'air, d'ozone ou d'allergènes et de leur impact direct sur les urgences respiratoires.",
         "cluster": "Environmental & Disaster Risk Forecasting",
@@ -1162,6 +1169,7 @@ GESICA_SCENARIO_METADATA: dict[str, dict[str, Any]] = {
         ]
     },
     "disaster-risk-assessment": {
+        "hidden": True,
         "title": "Évaluation des Risques de Catastrophes Naturelles",
         "description": "Modélisation de l'impact sanitaire des inondations, séismes locaux, ou glissements de terrain sur les infrastructures EMS.",
         "cluster": "Environmental & Disaster Risk Forecasting",
@@ -1172,6 +1180,7 @@ GESICA_SCENARIO_METADATA: dict[str, dict[str, Any]] = {
         ]
     },
     "heatwave-ems-impact": {
+        "hidden": True,
         "title": "Impact des Canicules sur les EMS",
         "description": "Modélisation de l'impact des vagues de chaleur extrêmes sur la demande EMS et les pathologies liées à la chaleur (coup de chaleur, hyperthermie).",
         "cluster": "Environmental & Disaster Risk Forecasting",
@@ -1182,6 +1191,7 @@ GESICA_SCENARIO_METADATA: dict[str, dict[str, Any]] = {
         ]
     },
     "climate-impact-on-ems": {
+        "hidden": True,
         "title": "Impact du Changement Climatique sur les EMS",
         "description": "Analyse à long terme et saisonnière de l'évolution des pathologies d'urgence liées au réchauffement climatique.",
         "cluster": "Environmental & Disaster Risk Forecasting",
@@ -1192,6 +1202,7 @@ GESICA_SCENARIO_METADATA: dict[str, dict[str, Any]] = {
         ]
     },
     "emergency-call-qualification": {
+        "hidden": False,
         "title": "Qualification Automatisée des Appels d'Urgence",
         "description": "Analyse sémantique et acoustique des appels au Centre 15/144 pour assister l'assistant de régulation médicale (ARM).",
         "cluster": "Prehospital Emergency Triage & Risk Stratification",
@@ -1202,6 +1213,7 @@ GESICA_SCENARIO_METADATA: dict[str, dict[str, Any]] = {
         ]
     },
     "call-prioritization": {
+        "hidden": False,
         "title": "Priorisation des Appels de Régulation",
         "description": "Algorithmes de tri pour classer les appels d'urgence par niveau de gravité et réduire le temps d'attente des cas critiques.",
         "cluster": "Prehospital Emergency Triage & Risk Stratification",
@@ -1212,6 +1224,7 @@ GESICA_SCENARIO_METADATA: dict[str, dict[str, Any]] = {
         ]
     },
     "mass-casualty-triage": {
+        "hidden": True,
         "title": "Tri en Situation de Nombreuses Victimes",
         "description": "Algorithmes d'aide au tri de masse sur le terrain pour classer rapidement les victimes (Urgence Absolue, Urgence Relative).",
         "cluster": "Prehospital Emergency Triage & Risk Stratification",
@@ -1222,6 +1235,7 @@ GESICA_SCENARIO_METADATA: dict[str, dict[str, Any]] = {
         ]
     },
     "undertriage-detection": {
+        "hidden": True,
         "title": "Détection du Sous-Tri (Undertriage)",
         "description": "Algorithmes de contrôle qualité pour identifier les patients graves classés à tort en faible priorité.",
         "cluster": "Prehospital Emergency Triage & Risk Stratification",
@@ -1232,6 +1246,7 @@ GESICA_SCENARIO_METADATA: dict[str, dict[str, Any]] = {
         ]
     },
     "dispatch-decision-support": {
+        "hidden": False,
         "title": "Aide à la Décision de Dispatch",
         "description": "Recommandation du moyen de secours le plus adapté (VSAV, SMUR, hélicoptère, médecin généraliste) selon le motif d'appel.",
         "cluster": "Prehospital Emergency Triage & Risk Stratification",
@@ -1242,6 +1257,7 @@ GESICA_SCENARIO_METADATA: dict[str, dict[str, Any]] = {
         ]
     },
     "triage-support": {
+        "hidden": False,
         "title": "Support au Tri Clinique aux Urgences",
         "description": "Systèmes d'aide à la décision pour orienter et prioriser les patients dès leur arrivée dans le service des urgences.",
         "cluster": "Prehospital Emergency Triage & Risk Stratification",
@@ -1252,6 +1268,7 @@ GESICA_SCENARIO_METADATA: dict[str, dict[str, Any]] = {
         ]
     },
     "response-time-optimization": {
+        "hidden": False,
         "title": "Optimisation des Temps de Réponse EMS",
         "description": "Algorithmes de routage dynamique et de prépositionnement pour réduire le délai d'arrivée des secours sur les lieux.",
         "cluster": "Demand Forecasting, Response Time & Resource Management",
@@ -1262,6 +1279,7 @@ GESICA_SCENARIO_METADATA: dict[str, dict[str, Any]] = {
         ]
     },
     "ambulance-dispatch-optimization": {
+        "hidden": False,
         "title": "Optimisation de la Flotte d'Ambulances",
         "description": "Gestion dynamique de la couverture opérationnelle en déplaçant préventivement des ambulances vers les zones à risque.",
         "cluster": "Demand Forecasting, Response Time & Resource Management",
@@ -1272,6 +1290,7 @@ GESICA_SCENARIO_METADATA: dict[str, dict[str, Any]] = {
         ]
     },
     "staffing-level-prediction": {
+        "hidden": True,
         "title": "Prévision des Effectifs Requis",
         "description": "Modèles prédictifs pour dimensionner les équipes de régulation et les équipages d'ambulances selon la charge attendue.",
         "cluster": "Demand Forecasting, Response Time & Resource Management",
@@ -1282,6 +1301,7 @@ GESICA_SCENARIO_METADATA: dict[str, dict[str, Any]] = {
         ]
     },
     "hospital-capacity-forecasting": {
+        "hidden": False,
         "title": "Prévision de la Capacité Hospitalière",
         "description": "Anticipation de la saturation des lits de réanimation, de soins continus et d'hospitalisation conventionnelle.",
         "cluster": "Demand Forecasting, Response Time & Resource Management",
@@ -1292,6 +1312,7 @@ GESICA_SCENARIO_METADATA: dict[str, dict[str, Any]] = {
         ]
     },
     "demand-forecasting": {
+        "hidden": False,
         "title": "Prévision de la Demande EMS",
         "description": "Modèles de séries temporelles et de machine learning pour prévoir le volume d'appels d'urgence à court et moyen terme.",
         "cluster": "Demand Forecasting, Response Time & Resource Management",
@@ -1302,6 +1323,7 @@ GESICA_SCENARIO_METADATA: dict[str, dict[str, Any]] = {
         ]
     },
     "resource-allocation": {
+        "hidden": True,
         "title": "Allocation Optimisée des Ressources",
         "description": "Distribution des moyens humains et matériels de manière à maximiser l'efficacité de la réponse d'urgence.",
         "cluster": "Demand Forecasting, Response Time & Resource Management",
@@ -1312,6 +1334,7 @@ GESICA_SCENARIO_METADATA: dict[str, dict[str, Any]] = {
         ]
     },
     "epidemic-early-warning": {
+        "hidden": True,
         "title": "Alerte Précoce Épidémique",
         "description": "Détection précoce des signaux faibles épidémiques à partir des motifs d'appels de régulation médicale.",
         "cluster": "Surveillance & Epidemic Management",
@@ -1322,6 +1345,7 @@ GESICA_SCENARIO_METADATA: dict[str, dict[str, Any]] = {
         ]
     },
     "surveillance": {
+        "hidden": True,
         "title": "Surveillance Syndromique Active",
         "description": "Suivi continu des indicateurs de santé de la population pour identifier des anomalies ou des clusters inhabituels.",
         "cluster": "Surveillance & Epidemic Management",
@@ -1332,6 +1356,7 @@ GESICA_SCENARIO_METADATA: dict[str, dict[str, Any]] = {
         ]
     },
     "surge-management": {
+        "hidden": True,
         "title": "Gestion des Pics d'Afflux (Surge)",
         "description": "Stratégies opérationnelles pour faire face à une hausse soudaine et massive de la demande de soins d'urgence.",
         "cluster": "Surveillance & Epidemic Management",
@@ -1342,6 +1367,7 @@ GESICA_SCENARIO_METADATA: dict[str, dict[str, Any]] = {
         ]
     },
     "pandemic-preparedness": {
+        "hidden": True,
         "title": "Préparation aux Pandémies",
         "description": "Planification stratégique et modélisation à long terme pour renforcer la résilience du système de santé face à des crises globales.",
         "cluster": "Surveillance & Epidemic Management",
@@ -1352,6 +1378,7 @@ GESICA_SCENARIO_METADATA: dict[str, dict[str, Any]] = {
         ]
     },
     "cross-border-coordination": {
+        "hidden": True,
         "title": "Coordination Sanitaire Transfrontalière",
         "description": "Protocoles et outils de communication pour harmoniser la réponse d'urgence entre la France et la Suisse (Grand Genève).",
         "cluster": "Cross-border & Operational Coordination",
@@ -1362,6 +1389,7 @@ GESICA_SCENARIO_METADATA: dict[str, dict[str, Any]] = {
         ]
     },
     "situational-awareness": {
+        "hidden": True,
         "title": "Conscience Situationnelle Opérationnelle",
         "description": "Tableau de bord en temps réel intégrant toutes les sources de données pour une vue unifiée de la situation d'urgence.",
         "cluster": "Cross-border & Operational Coordination",
@@ -1372,6 +1400,7 @@ GESICA_SCENARIO_METADATA: dict[str, dict[str, Any]] = {
         ]
     },
     "unassigned": {
+        "hidden": True,
         "title": "Scénarios Non Classés",
         "description": "Documents GESICA en attente de classification dans un scénario spécifique.",
         "cluster": "Non classé",
@@ -1408,6 +1437,8 @@ def get_gesica_scenarios() -> list[dict[str, Any]]:
         for scenario_id, meta in GESICA_SCENARIO_METADATA.items():
             if scenario_id == "unassigned":
                 continue  # Exclure le scénario "non classé" de l'affichage
+            if meta.get("hidden", False):
+                continue  # Scénario masqué (code conservé, non affiché)
             
             article_count = db_counts.get(scenario_id, 0)
             

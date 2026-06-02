@@ -113,7 +113,37 @@ const FILTER_FIELDS: Array<[keyof FilterOptions, string]> = [
 
 const PAGE_SIZE = 10;
 
-type AppTab = "search" | "scenarios" | "stats" | "assistant" | "screening" | "terrain";
+type AppTab = "search" | "scenarios" | "stats" | "assistant" | "screening" | "terrain" | "history";
+
+interface SavedSearch {
+  id: string;
+  query: string;
+  mode: SearchMode;
+  projectContext: ProjectContext;
+  timestamp: number;
+  resultCount: number;
+  name?: string;
+  pinned?: boolean;
+}
+
+const SAVED_SEARCHES_KEY = "literev_saved_searches";
+
+function loadSavedSearches(): SavedSearch[] {
+  try {
+    const raw = localStorage.getItem(SAVED_SEARCHES_KEY);
+    return raw ? JSON.parse(raw) : [];
+  } catch {
+    return [];
+  }
+}
+
+function persistSavedSearches(searches: SavedSearch[]): void {
+  try {
+    localStorage.setItem(SAVED_SEARCHES_KEY, JSON.stringify(searches));
+  } catch {
+    // ignore
+  }
+}
 
 type DetailView = {
   id: number | null;
@@ -2800,6 +2830,9 @@ export default function App() {
   const [gesicaScenarios, setGesicaScenarios] = useState<GesicaScenario[]>([]);
   const [loadingScenarios, setLoadingScenarios] = useState(false);
   const [scenariosError, setScenariosError] = useState<string | null>(null);
+  const [savedSearches, setSavedSearches] = useState<SavedSearch[]>(() => loadSavedSearches());
+  const [saveSearchName, setSaveSearchName] = useState("");
+  const [showSaveDialog, setShowSaveDialog] = useState(false);
   
   // States Assistant RAG
   const [assistantQuestion, setAssistantQuestion] = useState("");
@@ -3009,12 +3042,87 @@ export default function App() {
       if (first) {
         await loadDocumentDetail(first);
       }
+      // Sauvegarder automatiquement dans l'historique
+      const newEntry: SavedSearch = {
+        id: `search_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+        query: query.trim(),
+        mode,
+        projectContext,
+        timestamp: Date.now(),
+        resultCount: data.results.length,
+      };
+      setSavedSearches(prev => {
+        // Dédupliquer par query+mode+projectContext (garder la plus récente)
+        const filtered = prev.filter(s => !(s.query === newEntry.query && s.mode === newEntry.mode && s.projectContext === newEntry.projectContext && !s.pinned));
+        const updated = [newEntry, ...filtered].slice(0, 50); // max 50 entrées
+        persistSavedSearches(updated);
+        return updated;
+      });
     } catch (err) {
       setError(err instanceof Error ? err.message : "Erreur inconnue");
       setResults([]);
     } finally {
       setLoading(false);
     }
+  }
+
+  function handleSaveAsScenario() {
+    if (!query.trim()) return;
+    const name = saveSearchName.trim() || query.trim();
+    setSavedSearches(prev => {
+      const updated = prev.map(s =>
+        s.query === query && s.mode === mode && s.projectContext === projectContext && !s.pinned
+          ? { ...s, name, pinned: true }
+          : s
+      );
+      // Si pas encore dans l'historique, créer une entrée épinglée
+      const exists = updated.some(s => s.query === query && s.mode === mode && s.projectContext === projectContext && s.pinned);
+      if (!exists) {
+        const entry: SavedSearch = {
+          id: `scenario_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+          query: query.trim(),
+          mode,
+          projectContext,
+          timestamp: Date.now(),
+          resultCount: results.length,
+          name,
+          pinned: true,
+        };
+        updated.unshift(entry);
+      }
+      persistSavedSearches(updated);
+      return updated;
+    });
+    setShowSaveDialog(false);
+    setSaveSearchName("");
+  }
+
+  function handleReplaySearch(s: SavedSearch) {
+    setQuery(s.query);
+    setMode(s.mode);
+    setProjectContext(s.projectContext);
+    setActiveTab("search");
+    // Déclencher la recherche après mise à jour du state
+    setTimeout(() => {
+      const btn = document.getElementById("search-btn");
+      if (btn) btn.click();
+    }, 100);
+  }
+
+  function handleDeleteSavedSearch(id: string) {
+    setSavedSearches(prev => {
+      const updated = prev.filter(s => s.id !== id);
+      persistSavedSearches(updated);
+      return updated;
+    });
+  }
+
+  function handleTogglePin(id: string) {
+    setSavedSearches(prev => {
+      const updated = prev.map(s => s.id === id ? { ...s, pinned: !s.pinned } : s);
+      persistSavedSearches(updated);
+      return updated;
+    });
   }
 
   function handleReset() {
@@ -3084,6 +3192,7 @@ export default function App() {
 
   const tabs: Array<{ id: AppTab; label: string; icon: React.ReactNode }> = [
     { id: "search", label: "Recherche", icon: <BookOpen size={14} /> },
+    { id: "history", label: `Historique${savedSearches.length > 0 ? ` (${savedSearches.length})` : ""}`, icon: <RefreshCw size={14} /> },
     { id: "assistant", label: "Assistant RAG", icon: <Zap size={14} className="text-brand-400" /> },
     { id: "screening", label: "Screening PRISMA", icon: <CheckSquare size={14} className="text-brand-400" /> },
     { id: "scenarios", label: "Scénarios GESICA", icon: <Activity size={14} /> },
@@ -3105,18 +3214,17 @@ export default function App() {
 
             <div className="flex items-center gap-6">
               <img src="/logo.jpg" alt="LiteRev arbre" className="h-20 w-20 rounded-2xl object-cover shadow-xl opacity-90" />
-              <div className="grid gap-3 sm:grid-cols-3">
+              <div className="grid gap-3 sm:grid-cols-2">
               {(
                 [
-                  ["geoai4ei", "GeoAI4EI"],
-                  ["gesica", "GESICA"],
-                  ["eva", "EVA"],
-                ] as const
-              ).map(([value, label]) => (
+                  ["gesica", "Urgences Pré-hospitalières", "Données 144 Genève"],
+                  ["geoai4ei", "Urgences Hospitalières", "Données HUG"],
+                ] as [string, string, string][]
+              ).map(([value, label, sublabel]) => (
                 <button
                   key={value}
                   type="button"
-                  onClick={() => setProjectContext(value)}
+                  onClick={() => setProjectContext(value as ProjectContext)}
                   className={`rounded-2xl border px-5 py-3 text-left transition ${
                     projectContext === value
                       ? "border-gold-400 bg-brand-700/60 text-gold-400 font-semibold shadow-2xl"
@@ -3124,6 +3232,7 @@ export default function App() {
                   }`}
                 >
                   <div className="text-sm font-semibold">{label}</div>
+                  <div className="text-xs opacity-60 mt-0.5">{sublabel}</div>
                 </button>
               ))}
               </div>
@@ -3154,6 +3263,77 @@ export default function App() {
 
         {activeTab === "stats" && (
           <StatsView corpusStats={corpusStats} gesicaStats={gesicaStats} fulltextStats={fulltextStats} />
+        )}
+
+        {activeTab === "history" && (
+          <div className="space-y-6">
+            <div className="flex items-center justify-between">
+              <div>
+                <h2 className="text-2xl font-bold text-white">Historique des recherches</h2>
+                <p className="text-sm text-white/50 mt-1">Vos recherches récentes et scénarios sauvegardés. Cliquez sur une entrée pour relancer la recherche.</p>
+              </div>
+              {savedSearches.length > 0 && (
+                <button
+                  type="button"
+                  onClick={() => { setSavedSearches([]); persistSavedSearches([]); }}
+                  className="rounded-xl border border-red-500/20 bg-red-500/10 px-3 py-1.5 text-xs text-red-300 hover:bg-red-500/20 transition"
+                >
+                  Tout effacer
+                </button>
+              )}
+            </div>
+
+            {savedSearches.length === 0 ? (
+              <div className="rounded-3xl border border-dashed border-white/10 bg-white/5 p-10 text-center text-white/40">
+                Aucune recherche dans l'historique. Lancez une recherche pour la voir apparaître ici.
+              </div>
+            ) : (
+              <div className="space-y-3">
+                {/* Scénarios épinglés */}
+                {savedSearches.filter(s => s.pinned).length > 0 && (
+                  <div>
+                    <h3 className="text-xs font-semibold text-gold-400 uppercase tracking-widest mb-2">Scénarios sauvegardés</h3>
+                    <div className="space-y-2">
+                      {savedSearches.filter(s => s.pinned).map(s => (
+                        <div key={s.id} className="flex items-center gap-3 rounded-2xl border border-gold-400/30 bg-gold-500/5 px-4 py-3 hover:bg-gold-500/10 transition">
+                          <Activity size={14} className="text-gold-400 shrink-0" />
+                          <div className="flex-1 min-w-0">
+                            <p className="text-sm font-semibold text-white truncate">{s.name || s.query}</p>
+                            <p className="text-xs text-white/40 truncate">{s.mode === "semantic" ? "Sémantique" : "Booléen"} · {s.projectContext === "gesica" ? "Urgences Pré-hospitalières" : "Urgences Hospitalières"} · {s.resultCount} résultats · {new Date(s.timestamp).toLocaleDateString("fr-CH")}</p>
+                            {s.name && <p className="text-xs text-white/30 truncate font-mono">{s.query}</p>}
+                          </div>
+                          <button type="button" onClick={() => handleReplaySearch(s)} className="shrink-0 rounded-xl bg-brand-500/20 border border-brand-500/30 px-3 py-1.5 text-xs text-brand-300 hover:bg-brand-500/30 transition">Relancer</button>
+                          <button type="button" onClick={() => handleTogglePin(s.id)} className="shrink-0 rounded-xl border border-gold-400/20 px-2 py-1.5 text-xs text-gold-400 hover:bg-gold-500/10 transition" title="Désépingler">★</button>
+                          <button type="button" onClick={() => handleDeleteSavedSearch(s.id)} className="shrink-0 rounded-xl border border-red-500/20 px-2 py-1.5 text-xs text-red-400 hover:bg-red-500/10 transition" title="Supprimer">✕</button>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* Historique récent */}
+                {savedSearches.filter(s => !s.pinned).length > 0 && (
+                  <div>
+                    <h3 className="text-xs font-semibold text-white/40 uppercase tracking-widest mb-2 mt-4">Recherches récentes</h3>
+                    <div className="space-y-2">
+                      {savedSearches.filter(s => !s.pinned).map(s => (
+                        <div key={s.id} className="flex items-center gap-3 rounded-2xl border border-white/8 bg-white/3 px-4 py-3 hover:bg-white/8 transition">
+                          <BookOpen size={14} className="text-white/30 shrink-0" />
+                          <div className="flex-1 min-w-0">
+                            <p className="text-sm text-white/80 truncate">{s.query}</p>
+                            <p className="text-xs text-white/30 truncate">{s.mode === "semantic" ? "Sémantique" : "Booléen"} · {s.projectContext === "gesica" ? "Urgences Pré-hospitalières" : "Urgences Hospitalières"} · {s.resultCount} résultats · {new Date(s.timestamp).toLocaleDateString("fr-CH")}</p>
+                          </div>
+                          <button type="button" onClick={() => handleReplaySearch(s)} className="shrink-0 rounded-xl bg-white/5 border border-white/10 px-3 py-1.5 text-xs text-white/60 hover:text-white hover:bg-white/10 transition">Relancer</button>
+                          <button type="button" onClick={() => handleTogglePin(s.id)} className="shrink-0 rounded-xl border border-white/10 px-2 py-1.5 text-xs text-white/30 hover:text-gold-400 hover:border-gold-400/30 transition" title="Épingler comme scénario">☆</button>
+                          <button type="button" onClick={() => handleDeleteSavedSearch(s.id)} className="shrink-0 rounded-xl border border-white/10 px-2 py-1.5 text-xs text-white/30 hover:text-red-400 hover:border-red-500/20 transition" title="Supprimer">✕</button>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
         )}
 
         {activeTab === "terrain" && (
@@ -3313,6 +3493,7 @@ export default function App() {
                     className="min-h-14 flex-1 rounded-2xl border border-white/10 bg-forest-950/80 px-4 text-white outline-none placeholder:text-forest-500 focus:border-brand-400"
                   />
                   <button
+                    id="search-btn"
                     type="button"
                     onClick={handleSearch}
                     disabled={loading}
@@ -3345,6 +3526,15 @@ export default function App() {
                     <div className="flex gap-2">
                       <button
                         type="button"
+                        onClick={() => setShowSaveDialog(true)}
+                        className="flex items-center gap-1.5 rounded-xl border border-gold-400/40 bg-gold-500/10 px-3 py-1.5 text-xs text-gold-300 transition hover:border-gold-400/70 hover:bg-gold-500/20"
+                        title="Sauvegarder cette recherche comme scénario"
+                      >
+                        <BookOpen size={12} />
+                        Sauvegarder comme scénario
+                      </button>
+                      <button
+                        type="button"
                         onClick={() => handleExport("csv")}
                         className="flex items-center gap-1.5 rounded-xl border border-white/10 px-3 py-1.5 text-xs text-forest-300 transition hover:border-white/20 hover:text-white"
                       >
@@ -3361,6 +3551,41 @@ export default function App() {
                       </button>
                     </div>
                   </div>
+
+                  {/* Modal de sauvegarde comme scénario */}
+                  {showSaveDialog && (
+                    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
+                      <div className="w-full max-w-md rounded-3xl border border-gold-400/30 bg-[#0a1410] p-6 shadow-2xl">
+                        <h3 className="text-lg font-bold text-white mb-1">Sauvegarder comme scénario</h3>
+                        <p className="text-sm text-white/60 mb-4">Donnez un nom à ce scénario pour le retrouver facilement dans l'historique.</p>
+                        <input
+                          type="text"
+                          value={saveSearchName}
+                          onChange={e => setSaveSearchName(e.target.value)}
+                          onKeyDown={e => e.key === "Enter" && handleSaveAsScenario()}
+                          placeholder={query}
+                          className="w-full rounded-2xl border border-white/10 bg-forest-950/80 px-4 py-3 text-white outline-none placeholder:text-forest-500 focus:border-gold-400 mb-4"
+                          autoFocus
+                        />
+                        <div className="flex gap-3 justify-end">
+                          <button
+                            type="button"
+                            onClick={() => { setShowSaveDialog(false); setSaveSearchName(""); }}
+                            className="rounded-xl border border-white/10 px-4 py-2 text-sm text-white/60 hover:text-white transition"
+                          >
+                            Annuler
+                          </button>
+                          <button
+                            type="button"
+                            onClick={handleSaveAsScenario}
+                            className="rounded-xl bg-gold-400 px-4 py-2 text-sm font-semibold text-forest-950 hover:bg-gold-300 transition"
+                          >
+                            Sauvegarder
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  )}
 
                   <div className="grid gap-6 2xl:grid-cols-[minmax(0,1fr)_380px]">
                     <div className="space-y-4">
