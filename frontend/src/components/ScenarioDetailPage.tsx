@@ -2840,6 +2840,29 @@ export function ScenarioDetailPage({ scenarioId, onBack }: ScenarioDetailPagePro
             </span>
           </div>
           <p className="mt-1 text-sm text-white/50 leading-5">{detail.description}</p>
+          
+          {/* Mots-clés */}
+          {detail.keywords && detail.keywords.length > 0 && (
+            <div className="mt-2 flex flex-wrap gap-1.5">
+              {detail.keywords.map((kw, i) => (
+                <span key={i} className="rounded-md border border-white/5 bg-white/2 px-1.5 py-0.5 text-[10px] text-white/40 font-medium tracking-wide">
+                  #{kw}
+                </span>
+              ))}
+            </div>
+          )}
+
+          {/* Contexte Clinique */}
+          {detail.clinical_rationale && (
+            <div className="mt-3 rounded-xl border border-brand-500/10 bg-brand-500/3 p-3.5 text-xs text-brand-200/90 leading-relaxed flex gap-2.5 items-start">
+              <span className="mt-0.5 flex h-4 w-4 items-center justify-center rounded-full bg-brand-500/10 text-brand-400 shrink-0 text-[10px] font-bold">i</span>
+              <div>
+                <strong className="text-brand-300 font-semibold block mb-0.5">Enjeu Clinique & Décisionnel :</strong>
+                {detail.clinical_rationale}
+              </div>
+            </div>
+          )}
+
           {/* Actions recommandées */}
           {detail.recommended_actions.length > 0 && (
             <div className="mt-3 flex flex-wrap gap-2">

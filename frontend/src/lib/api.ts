@@ -496,6 +496,23 @@ export async function fetchCorpusStats(): Promise<CorpusStats> {
   };
 }
 
+export interface CorpusStatsByYear {
+  byYear: Record<string, number>;
+  scenarioByYear: Record<string, Record<string, number>>;
+  heatmapScenarioSource: Record<string, Record<string, number>>;
+}
+
+export async function fetchCorpusStatsByYear(): Promise<CorpusStatsByYear> {
+  const response = await fetch(`${API_BASE_URL}/corpus/stats/by-year`);
+  if (!response.ok) throw new Error(`Corpus stats by-year failed with status ${response.status}`);
+  const data = await response.json();
+  return {
+    byYear: data.by_year,
+    scenarioByYear: data.scenario_by_year,
+    heatmapScenarioSource: data.heatmap_scenario_source,
+  };
+}
+
 export async function fetchGesicaStats(): Promise<GesicaStats> {
   const response = await fetch(`${API_BASE_URL}/gesica/stats`);
   if (!response.ok) throw new Error(`LiteRev stats failed with status ${response.status}`);
@@ -1447,6 +1464,8 @@ export interface ScenarioDetail {
   databases?: string[];
   outcome_definition?: string;
   variables_detail?: Record<string, VariableDetail>;
+  keywords?: string[];
+  clinical_rationale?: string;
   corpus_stats: {
     total: number;
     with_fulltext: number;

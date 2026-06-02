@@ -1098,34 +1098,37 @@ GESICA_SCENARIO_METADATA: dict[str, dict[str, Any]] = {
     "cardiac-arrest-prediction": {
         "hidden": False,
         "title": "Prédiction de l'Arrêt Cardiaque Extra-Hospitalier (OHCA)",
-        "description": "Modèles de prédiction et d'identification précoce des arrêts cardiorespiratoires pour optimiser la chaîne de survie.",
+        "description": "Modèles de prédiction spatio-temporelle de l'incidence des arrêts cardiorespiratoires (OHCA) basés sur l'apprentissage automatique, les rythmes circadiens, les données climatiques et météorologiques, visant à optimiser la chaîne de survie et le positionnement préventif des ressources.",
         "cluster": "Patient-centered prehospital critical care",
         "recommended_actions": [
-            "Déployer des algorithmes de détection acoustique de l'agonie respiratoire (gasping) au Centre 15/144",
-            "Optimiser le dispatch des premiers répondants équipés de DEA via l'application locale",
-            "Ajuster le positionnement des SMUR en fonction des zones à forte probabilité d'OHCA"
+            "Déployer des algorithmes de détection acoustique de l'agonie respiratoire (gasping) assistés par IA au Centre 15/144",
+            "Optimiser la couverture et le dispatch des premiers répondants (citizen responders) équipés de DEA via géolocalisation dynamique",
+            "Ajuster préventivement le positionnement des SMUR et des ambulances de réanimation dans les zones à haut risque d'OHCA",
+            "Intégrer les données de défibrillateurs connectés (IoT) pour une cartographie temps réel de l'accessibilité des DEA"
         ]
     },
     "stroke-detection": {
         "hidden": False,
         "title": "Détection Préhospitalière de l'AVC",
-        "description": "Outils d'aide à la décision pour identifier les AVC et orienter vers la bonne filière (thrombolyse/thrombectomie).",
+        "description": "Systèmes d'aide à la décision clinique pour l'identification précoce des accidents vasculaires cérébraux (AVC) sur le terrain, l'évaluation de la sévérité via des scores automatisés (FAST, NIHSS, LVO) et l'orientation optimale et directe vers les centres de reperfusion (thrombolyse/thrombectomie).",
         "cluster": "Patient-centered prehospital critical care",
         "recommended_actions": [
-            "Intégrer des scores cliniques préhospitaliers automatisés dans le dossier patient embarqué",
-            "Orienter directement vers l'unité de soins intensifs neurovasculaires (UNV) des HUG ou du CHUV",
-            "Pré-alerter l'équipe d'angioradiologie dès la confirmation de suspicion d'occlusion de gros vaisseau (LVO)"
+            "Intégrer des échelles cliniques d'AVC automatisées et guidées par IA dans le dossier patient embarqué des ambulanciers",
+            "Orienter directement et sans transit par les urgences générales vers l'Unité Neurovasculaire (UNV) de référence (HUG/CHUV)",
+            "Déclencher une pré-alerte automatique pour l'équipe de neuroradiologie interventionnelle en cas de forte suspicion d'occlusion de gros vaisseau (LVO)",
+            "Optimiser le délai porte-aiguille (door-to-needle) par la transmission préhospitalière sécurisée des données cliniques"
         ]
     },
     "trauma-severity-assessment": {
         "hidden": False,
         "title": "Évaluation de la Gravité des Traumatismes",
-        "description": "Stratification du risque pour les traumatisés graves (accidents de la route, chutes) afin d'orienter vers les trauma centers adaptés.",
+        "description": "Modèles prédictifs et scores de stratification du risque (ISS, RTS, TRISS) pour l'évaluation immédiate des traumatisés graves (accidents de la route, chutes, traumatismes de montagne) afin d'orienter sans délai vers les Trauma Centers de niveau adapté.",
         "cluster": "Patient-centered prehospital critical care",
         "recommended_actions": [
-            "Utiliser des modèles prédictifs de transfusion massive dès la prise en charge terrain",
-            "Orienter les traumatismes sévères vers le Trauma Center de niveau 1 (HUG ou CHUV)",
-            "Partager en temps réel les constantes vitales avec la salle de déchocage"
+            "Déployer des modèles prédictifs de besoin de transfusion massive (score de choc, score d'hémorragie) dès la prise en charge terrain",
+            "Orienter systématiquement les traumatismes sévères (ISS > 15) vers un Trauma Center de niveau 1 agréé (HUG ou CHUV)",
+            "Partager en flux continu et en temps réel les constantes vitales et l'échographie FAST avec la salle de déchocage hospitalière",
+            "Implémenter des protocoles de réanimation de contrôle des dommages (damage control resuscitation) guidés par des algorithmes d'aide à la décision"
         ]
     },
     "clinical-deterioration-prediction": {
@@ -1208,23 +1211,25 @@ GESICA_SCENARIO_METADATA: dict[str, dict[str, Any]] = {
     "emergency-call-qualification": {
         "hidden": False,
         "title": "Qualification Automatisée des Appels d'Urgence",
-        "description": "Analyse sémantique et acoustique des appels au Centre 15/144 pour assister l'assistant de régulation médicale (ARM).",
+        "description": "Outils de traitement du langage naturel (NLP) et de reconnaissance vocale en temps réel pour assister les assistants de régulation médicale (ARM) dans la transcription, la détection automatique de mots-clés cliniques et la qualification rapide des motifs d'appels d'urgence.",
         "cluster": "Prehospital Emergency Triage & Risk Stratification",
         "recommended_actions": [
-            "Activer la transcription vocale en temps réel avec détection des mots-clés critiques",
-            "Analyser les bruits de fond et les signaux acoustiques pour détecter le stress ou l'inconscience",
-            "Suggérer des protocoles de questionnement adaptés au profil de l'appelant"
+            "Activer la transcription vocale continue à faible latence (Speech-to-Text) intégrée au système de téléphonie de régulation",
+            "Utiliser des modèles NLP spécialisés (type CamemBERT médical) pour extraire automatiquement les entités cliniques et les symptômes clés",
+            "Analyser les caractéristiques acoustiques et les bruits de fond de l'appel pour détecter la détresse respiratoire ou la panique",
+            "Suggérer de manière adaptative et dynamique les questions de protocoles de régulation selon les premiers mots transcrits"
         ]
     },
     "call-prioritization": {
         "hidden": False,
         "title": "Priorisation des Appels de Régulation",
-        "description": "Algorithmes de tri pour classer les appels d'urgence par niveau de gravité et réduire le temps d'attente des cas critiques.",
+        "description": "Algorithmes d'apprentissage automatique pour le tri et la priorisation dynamique de la file d'attente des appels entrants en centrale de régulation médicale, garantissant une prise en charge immédiate des détresses vitales et minimisant le risque de sous-triage.",
         "cluster": "Prehospital Emergency Triage & Risk Stratification",
         "recommended_actions": [
-            "Placer automatiquement en tête de file les appels suspects d'arrêt cardiaque",
-            "Ajuster dynamiquement les seuils de priorisation en période de forte surcharge",
-            "Fournir un tableau de bord visuel des appels en attente avec un score de risque estimé"
+            "Placer automatiquement en priorité absolue de file d'attente les appels identifiés comme suspicion d'arrêt cardiorespiratoire ou d'étouffement",
+            "Ajuster dynamiquement les seuils de tri et les files d'attente lors de situations de saturation de la centrale (pics d'appels)",
+            "Fournir aux régulateurs un tableau de bord prédictif du niveau de risque clinique estimé pour chaque appel en attente",
+            "Mesurer en continu le taux d'adéquation de la priorisation pour minimiser le sous-triage sous la barre stricte de 5%"
         ]
     },
     "mass-casualty-triage": {
@@ -1252,45 +1257,49 @@ GESICA_SCENARIO_METADATA: dict[str, dict[str, Any]] = {
     "dispatch-decision-support": {
         "hidden": False,
         "title": "Aide à la Décision de Dispatch",
-        "description": "Recommandation du moyen de secours le plus adapté (VSAV, SMUR, hélicoptère, médecin généraliste) selon le motif d'appel.",
+        "description": "Systèmes experts et modèles prédictifs d'aide à la décision pour recommander instantanément le moyen de secours préhospitalier optimal (ambulance de soins d'urgence, équipe médicale SMUR, hélicoptère ou médecin généraliste de garde) en fonction de la gravité clinique suspectée et des ressources disponibles.",
         "cluster": "Prehospital Emergency Triage & Risk Stratification",
         "recommended_actions": [
-            "Suggérer l'envoi d'un SMUR transfrontalier si le temps de trajet est inférieur au SMUR national",
-            "Prendre en compte la disponibilité et la spécialisation des équipes de garde",
-            "Proposer une régulation libérale ou un conseil médical pour les motifs non urgents"
+            "Suggérer automatiquement l'envoi d'un SMUR transfrontalier (FR/CH) si son délai d'arrivée estimé est inférieur à la ressource nationale",
+            "Intégrer les données de géolocalisation live (GPS) et le statut opérationnel des véhicules pour proposer la ressource la plus rapide",
+            "Suggérer des alternatives de régulation libérale, de conseil médical ou de transport sanitaire non urgent pour les motifs de faible gravité",
+            "Implémenter un modèle d'adéquation d'envoi pour réduire les envois inutiles d'équipes médicalisées (over-dispatch) tout en sécurisant les patients"
         ]
     },
     "triage-support": {
         "hidden": False,
         "title": "Support au Tri Clinique aux Urgences",
-        "description": "Systèmes d'aide à la décision pour orienter et prioriser les patients dès leur arrivée dans le service des urgences.",
+        "description": "Algorithmes de classification clinique pour assister le personnel infirmier d'accueil (IOA) dans la détermination rapide du niveau de gravité des patients aux urgences selon des échelles validées (Échelle Suisse de Tri, Échelle de Rouen), optimisant les délais d'accès aux soins.",
         "cluster": "Prehospital Emergency Triage & Risk Stratification",
         "recommended_actions": [
-            "Calculer automatiquement le score d'orientation (French Emergency Nurses Association ou suisse)",
-            "Estimer le risque de réadmission ou d'hospitalisation dès l'accueil",
-            "Alerter l'infirmier organisateur d'accueil (IOA) en cas de constantes vitales anormales"
+            "Calculer automatiquement le niveau de gravité clinique théorique en intégrant les constantes vitales et le motif de consultation saisi",
+            "Prédire dès l'accueil le risque d'hospitalisation d'aval ou de passage en réanimation pour anticiper l'orientation des patients",
+            "Générer des alertes visuelles et sonores immédiates pour l'infirmier d'accueil en cas d'anomalie physiologique majeure",
+            "Mesurer la concordance inter-observateur (Kappa de Cohen) entre le tri assisté par IA et l'évaluation finale par le médecin"
         ]
     },
     "response-time-optimization": {
         "hidden": False,
         "title": "Optimisation des Temps de Réponse EMS",
-        "description": "Algorithmes de routage dynamique et de prépositionnement pour réduire le délai d'arrivée des secours sur les lieux.",
+        "description": "Modèles de routage prédictif intégrant les conditions de trafic en temps réel, la météorologie et la topologie urbaine pour guider les véhicules d'urgence par l'itinéraire le plus rapide et minimiser le délai d'accès aux soins critiques.",
         "cluster": "Demand Forecasting, Response Time & Resource Management",
         "recommended_actions": [
-            "Utiliser les données de trafic en temps réel (HERE/OSRM) pour calculer l'itinéraire le plus rapide",
-            "Activer la priorité aux feux tricolores pour les véhicules d'urgence sur les axes majeurs",
-            "Analyser les goulots d'étranglement transfrontaliers (douanes, ponts) pour adapter les trajets"
+            "Calculer des itinéraires d'urgence dynamiques intégrant les données de congestion du trafic en temps réel et l'historique de circulation",
+            "Interfacer le système de navigation des ambulances avec la gestion des feux tricolores (priorité de passage) sur les axes critiques",
+            "Modéliser spécifiquement les délais de passage transfrontaliers (douanes du Grand Genève, ponts sur le lac) pour adapter les trajets",
+            "Évaluer en continu la courbe d'efficacité temps-dépendante du temps de réponse réel sur la survie des détresses vitales"
         ]
     },
     "ambulance-dispatch-optimization": {
         "hidden": False,
         "title": "Optimisation de la Flotte d'Ambulances",
-        "description": "Gestion dynamique de la couverture opérationnelle en déplaçant préventivement des ambulances vers les zones à risque.",
+        "description": "Modèles mathématiques de couverture spatio-temporelle maximale (MCLP, DSM) pour la gestion et le repositionnement préventif et dynamique de la flotte d'ambulances, garantissant une couverture territoriale optimale en fonction des risques prédictifs.",
         "cluster": "Demand Forecasting, Response Time & Resource Management",
         "recommended_actions": [
-            "Repositionner temporairement une ambulance si une zone se retrouve sans couverture",
-            "Prédire les pics de demande par secteur géographique pour y pré-positionner des moyens",
-            "Coordonner le dispatch des ambulances privées et publiques sur une plateforme unique"
+            "Repositionner dynamiquement et de manière préventive les ambulances disponibles en attente pour combler les failles de couverture",
+            "Prédire les micro-zones à haut risque d'appels d'urgence à l'échelle horaire pour y pré-positionner des équipages",
+            "Coordonner de manière transparente sur une plateforme unique le dispatch des ambulances publiques, privées et associatives",
+            "Suivre en temps réel le taux de couverture de la population cible à moins de 10 minutes d'une ambulance disponible"
         ]
     },
     "staffing-level-prediction": {
@@ -1307,23 +1316,25 @@ GESICA_SCENARIO_METADATA: dict[str, dict[str, Any]] = {
     "hospital-capacity-forecasting": {
         "hidden": False,
         "title": "Prévision de la Capacité Hospitalière",
-        "description": "Anticipation de la saturation des lits de réanimation, de soins continus et d'hospitalisation conventionnelle.",
+        "description": "Modèles prédictifs de séries temporelles pour anticiper la saturation des services d'urgences et l'occupation des lits de réanimation, de soins continus et d'hospitalisation conventionnelle (lits d'aval), facilitant la gestion proactive des flux de patients.",
         "cluster": "Demand Forecasting, Response Time & Resource Management",
         "recommended_actions": [
-            "Prédire le taux d'occupation des lits à 24h/48h pour anticiper les tensions",
-            "Coordonner les sorties d'hospitalisation et les transferts vers les soins de suite (SSR)",
-            "Déclencher des cellules de crise de gestion des lits (Bed Management) transfrontalières"
+            "Prédire l'afflux de patients aux urgences et le taux d'occupation des lits à 24h et 48h (score NEDOCS prédictif)",
+            "Coordonner en temps réel les sorties de patients hospitalisés et les transferts vers les unités de soins de suite et de réadaptation (SSR)",
+            "Déclencher des alertes automatiques et des cellules de crise de gestion des lits (Bed Management) transfrontalières en cas de tension",
+            "Modéliser l'impact de la saturation des urgences (overcrowding) sur les délais de libération et de transfert des ambulances (ambulance diversion)"
         ]
     },
     "demand-forecasting": {
         "hidden": False,
         "title": "Prévision de la Demande EMS",
-        "description": "Modèles de séries temporelles et de machine learning pour prévoir le volume d'appels d'urgence à court et moyen terme.",
+        "description": "Modèles de prévision hybrides (Prophet, LightGBM, LSTM) intégrant les données météorologiques, le calendrier, les vacances scolaires et la surveillance épidémiologique pour estimer avec précision le volume d'appels d'urgence et dimensionner les équipes.",
         "cluster": "Demand Forecasting, Response Time & Resource Management",
         "recommended_actions": [
-            "Intégrer les prévisions météo et épidémiques dans les modèles de prévision de charge",
-            "Visualiser les tendances d'appels par tranche horaire et par motif d'appel",
-            "Alerter si le volume d'appels réel s'écarte significativement de la prévision de base"
+            "Intégrer des flux météorologiques locaux (Open-Meteo) et épidémiques (Réseau Sentinelles) en temps réel pour affiner les prévisions",
+            "Visualiser la prévision de la demande EMS à l'échelle horaire par secteur géographique sur un horizon de J+1 à J+7",
+            "Alerter automatiquement les cadres opérationnels en cas d'écart significatif (> 15%) entre le volume réel d'appels et la prévision de base",
+            "Utiliser les prévisions de demande pour adapter dynamiquement la planification des gardes et le nombre de véhicules opérationnels"
         ]
     },
     "resource-allocation": {
@@ -2096,6 +2107,72 @@ def get_response_time_optimization(force_refresh: bool = False):
             "message": "Erreur lors de l'exécution du modèle de temps de réponse.",
         }
 
+# ─── Endpoint : évolution temporelle et heatmap ─────────────────────────────
+@app.get("/corpus/stats/by-year")
+def get_corpus_stats_by_year() -> dict[str, Any]:
+    """
+    Distribution des articles par année (2000+), pour le graphique temporel.
+    Retourne aussi la distribution par année ET par scénario pour la heatmap.
+    """
+    with engine.connect() as conn:
+        # Articles par année (2000+)
+        rows_year = conn.execute(text("""
+            SELECT year, COUNT(*) as count
+            FROM literature_document
+            WHERE year >= 2000 AND year IS NOT NULL
+            GROUP BY year
+            ORDER BY year ASC
+        """)).mappings().all()
+
+        # Articles par année ET par scénario (2000+)
+        rows_scenario_year = conn.execute(text("""
+            SELECT year, scenario_type, COUNT(*) as count
+            FROM literature_document
+            WHERE year >= 2000
+              AND year IS NOT NULL
+              AND scenario_type IS NOT NULL
+              AND scenario_type != 'unassigned'
+            GROUP BY year, scenario_type
+            ORDER BY year ASC
+        """)).mappings().all()
+
+        # Articles par scénario ET par source (heatmap)
+        rows_heatmap = conn.execute(text("""
+            SELECT scenario_type, source, COUNT(*) as count
+            FROM literature_document
+            WHERE scenario_type IS NOT NULL
+              AND scenario_type != 'unassigned'
+            GROUP BY scenario_type, source
+            ORDER BY scenario_type, count DESC
+        """)).mappings().all()
+
+    by_year = {str(r["year"]): r["count"] for r in rows_year}
+
+    # Construire la matrice scénario × année
+    scenario_year: dict[str, dict[str, int]] = {}
+    for r in rows_scenario_year:
+        sid = r["scenario_type"]
+        yr = str(r["year"])
+        if sid not in scenario_year:
+            scenario_year[sid] = {}
+        scenario_year[sid][yr] = r["count"]
+
+    # Construire la matrice scénario × source
+    heatmap: dict[str, dict[str, int]] = {}
+    for r in rows_heatmap:
+        sid = r["scenario_type"]
+        src = r["source"]
+        if sid not in heatmap:
+            heatmap[sid] = {}
+        heatmap[sid][src] = r["count"]
+
+    return {
+        "by_year": by_year,
+        "scenario_by_year": scenario_year,
+        "heatmap_scenario_source": heatmap,
+    }
+
+
 # ─── Endpoint : statistiques full-text et mode hybrid ────────────────────────
 @app.get("/corpus/fulltext-stats")
 def get_fulltext_stats() -> dict[str, Any]:
@@ -2543,6 +2620,8 @@ def get_scenario_detail(scenario_id: str) -> dict[str, Any]:
         "databases": enriched.get("databases", []),
         "outcome_definition": enriched.get("outcome_definition", ""),
         "variables_detail": enriched.get("variables_detail", {}),
+        "keywords": enriched.get("keywords", []),
+        "clinical_rationale": enriched.get("clinical_rationale", ""),
         "corpus_stats": {
             "total": int(stats["total"] or 0),
             "with_fulltext": int(stats["with_fulltext"] or 0),

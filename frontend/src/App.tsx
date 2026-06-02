@@ -32,7 +32,9 @@ import {
   fetchTraumaCare,
   fetchMassCasualty,
   fetchFulltextStats,
+  fetchCorpusStatsByYear,
   type CorpusStats,
+  type CorpusStatsByYear,
   type DocumentDetailResponse,
   type EvidenceSummaryResponse,
   type FilterOptions,
@@ -693,7 +695,7 @@ function GesicaSignalsPanel({ summary }: { summary: EvidenceSummaryResponse }) {
   );
 }
 
-function StatsView({ corpusStats, gesicaStats, fulltextStats, scenarios }: { corpusStats: CorpusStats | null; gesicaStats: GesicaStats | null; fulltextStats: FulltextStats | null; scenarios?: GesicaScenario[] }) {
+function StatsView({ corpusStats, gesicaStats, fulltextStats, scenarios, statsByYear }: { corpusStats: CorpusStats | null; gesicaStats: GesicaStats | null; fulltextStats: FulltextStats | null; scenarios?: GesicaScenario[]; statsByYear?: CorpusStatsByYear | null }) {
   if (!corpusStats && !gesicaStats) {
     return <div className="text-sm text-forest-400">Chargement des statistiques...</div>;
   }
@@ -892,6 +894,122 @@ function StatsView({ corpusStats, gesicaStats, fulltextStats, scenarios }: { cor
               </div>
             </div>
           )}
+        </div>
+      )}
+
+      {/* Graphique évolution temporelle */}
+      {statsByYear && Object.keys(statsByYear.byYear).length > 0 && (
+        <div className="rounded-3xl border border-white/10 bg-white/5 p-5 shadow-2xl">
+          <h2 className="mb-4 flex items-center gap-2 text-lg font-semibold text-white">
+            <BarChart2 size={18} className="text-brand-400" />
+            Évolution temporelle du corpus (2000–2026)
+          </h2>
+          {(() => {
+            const entries = Object.entries(statsByYear.byYear)
+              .filter(([y]) => parseInt(y) >= 2000)
+              .sort((a, b) => parseInt(a[0]) - parseInt(b[0]));
+            const maxVal = Math.max(...entries.map(([, v]) => v));
+            const recentThreshold = 2020;
+            return (
+              <div className="space-y-1">
+                {entries.map(([year, count]) => (
+                  <div key={year} className="flex items-center gap-3">
+                    <span className="w-10 shrink-0 text-right text-xs text-forest-400 font-mono">{year}</span>
+                    <div className="flex-1 h-5 bg-white/5 rounded overflow-hidden relative">
+                      <div
+                        className={`h-full rounded transition-all ${
+                          parseInt(year) >= recentThreshold
+                            ? 'bg-gradient-to-r from-brand-600 to-brand-400'
+                            : 'bg-gradient-to-r from-forest-600 to-forest-500'
+                        }`}
+                        style={{ width: `${Math.round((count / maxVal) * 100)}%` }}
+                      />
+                    </div>
+                    <span className="w-14 shrink-0 text-right text-xs font-mono text-brand-300">{count.toLocaleString()}</span>
+                  </div>
+                ))}
+              </div>
+            );
+          })()}
+          <p className="mt-3 text-xs text-forest-400 italic">Les années 2020+ sont mises en évidence (vert vif) — reflètent la croissance de la littérature IA en médecine d’urgence.</p>
+        </div>
+      )}
+
+      {/* Heatmap scénario × source */}
+      {statsByYear && Object.keys(statsByYear.heatmapScenarioSource).length > 0 && (
+        <div className="rounded-3xl border border-white/10 bg-white/5 p-5 shadow-2xl">
+          <h2 className="mb-4 flex items-center gap-2 text-lg font-semibold text-white">
+            <Activity size={18} className="text-brand-400" />
+            Heatmap : scénarios × sources
+          </h2>
+          {(() => {
+            const scenarioLabels: Record<string, string> = {
+              "hospital-capacity-forecasting": "Capacité hosp.",
+              "demand-forecasting": "Prévision demande",
+              "cardiac-arrest-prediction": "Arrêt cardiaque",
+              "ambulance-dispatch-optimization": "Dispatch amb.",
+              "triage-support": "Triage",
+              "dispatch-decision-support": "Décision dispatch",
+              "response-time-optimization": "Temps réponse",
+              "trauma-severity-assessment": "Trauma",
+              "stroke-detection": "AVC",
+              "call-prioritization": "Priorisation",
+              "emergency-call-qualification": "Qualification",
+            };
+            const heatmap = statsByYear.heatmapScenarioSource;
+            const allSources = Array.from(
+              new Set(Object.values(heatmap).flatMap(s => Object.keys(s)))
+            ).sort();
+            const scenarios = Object.entries(heatmap).sort((a, b) => {
+              const totalA = Object.values(a[1]).reduce((s, v) => s + v, 0);
+              const totalB = Object.values(b[1]).reduce((s, v) => s + v, 0);
+              return totalB - totalA;
+            });
+            const globalMax = Math.max(...scenarios.flatMap(([, srcMap]) => Object.values(srcMap)));
+            return (
+              <div className="overflow-x-auto">
+                <table className="w-full text-xs">
+                  <thead>
+                    <tr>
+                      <th className="text-left text-forest-400 font-normal pb-2 pr-3 min-w-[120px]">Scénario</th>
+                      {allSources.map(src => (
+                        <th key={src} className="text-center text-forest-400 font-normal pb-2 px-1 capitalize">{src}</th>
+                      ))}
+                      <th className="text-right text-forest-400 font-normal pb-2 pl-2">Total</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {scenarios.map(([sid, srcMap]) => {
+                      const total = Object.values(srcMap).reduce((s, v) => s + v, 0);
+                      return (
+                        <tr key={sid} className="border-t border-white/5">
+                          <td className="py-1.5 pr-3 text-white/70">{scenarioLabels[sid] ?? sid}</td>
+                          {allSources.map(src => {
+                            const val = srcMap[src] ?? 0;
+                            const intensity = globalMax > 0 ? val / globalMax : 0;
+                            const bg = intensity > 0
+                              ? `rgba(52, 211, 153, ${Math.max(0.08, intensity * 0.85)})`
+                              : 'transparent';
+                            return (
+                              <td
+                                key={src}
+                                className="text-center py-1.5 px-1 font-mono rounded"
+                                style={{ backgroundColor: bg, color: val > 0 ? '#d1fae5' : '#374151' }}
+                                title={val > 0 ? `${val} articles` : undefined}
+                              >
+                                {val > 0 ? val : '—'}
+                              </td>
+                            );
+                          })}
+                          <td className="text-right py-1.5 pl-2 font-mono text-brand-300 font-semibold">{total.toLocaleString()}</td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            );
+          })()}
         </div>
       )}
     </div>
@@ -2910,6 +3028,7 @@ export default function App() {
   const [corpusStats, setCorpusStats] = useState<CorpusStats | null>(null);
   const [gesicaStats, setGesicaStats] = useState<GesicaStats | null>(null);
   const [fulltextStats, setFulltextStats] = useState<FulltextStats | null>(null);
+  const [corpusStatsByYear, setCorpusStatsByYear] = useState<CorpusStatsByYear | null>(null);
   const [gesicaScenarios, setGesicaScenarios] = useState<GesicaScenario[]>([]);
   const [loadingScenarios, setLoadingScenarios] = useState(false);
   const [scenariosError, setScenariosError] = useState<string | null>(null);
@@ -3049,6 +3168,7 @@ export default function App() {
       fetchCorpusStats().then(setCorpusStats).catch(console.error);
       fetchGesicaStats().then(setGesicaStats).catch(console.error);
       fetchFulltextStats().then(setFulltextStats).catch(console.error);
+      fetchCorpusStatsByYear().then(setCorpusStatsByYear).catch(console.error);
     }
     if (activeTab === "scenarios") {
       setLoadingScenarios(true);
@@ -3345,7 +3465,7 @@ export default function App() {
       <main className="mx-auto max-w-[1380px] px-6 py-8">
 
         {activeTab === "stats" && (
-          <StatsView corpusStats={corpusStats} gesicaStats={gesicaStats} fulltextStats={fulltextStats} scenarios={gesicaScenarios} />
+          <StatsView corpusStats={corpusStats} gesicaStats={gesicaStats} fulltextStats={fulltextStats} scenarios={gesicaScenarios} statsByYear={corpusStatsByYear} />
         )}
 
         {activeTab === "history" && (
