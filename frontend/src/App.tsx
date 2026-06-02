@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { ScenarioDetailPage } from "./components/ScenarioDetailPage";
-import { Activity, BarChart2, BookOpen, Download, ExternalLink, RotateCcw, Zap, CheckSquare, XCircle, CheckCircle, HelpCircle, ArrowDown, Cloud, MapPin, AlertTriangle, Users, Pill, Radio, RefreshCw, ChevronDown, ChevronUp } from "lucide-react";
+import { Activity, BarChart2, BookOpen, CheckSquare, Cloud, Download, ExternalLink, MapPin, AlertTriangle, Users, Pill, Radio, RefreshCw, RotateCcw, ChevronDown, ChevronUp, Zap } from "lucide-react";
 
 import {
   fetchDocumentDetail,
@@ -10,10 +10,7 @@ import {
   fetchCorpusStats,
   getFilterOptions,
   getReadableExcerpt,
-  askAssistant,
-  fetchScreeningList,
-  submitScreeningDecision,
-  fetchPrismaFlow,
+
   fetchTerrainMeteo,
   fetchTerrainGeo,
   fetchTerrainEpidemic,
@@ -40,9 +37,7 @@ import {
   type FilterOptions,
   type GesicaScenario,
   type GesicaStats,
-  type AskResponse,
-  type ScreeningDocument,
-  type PrismaFlow,
+
   type TerrainMeteo,
   type TerrainGeo,
   type TerrainEpidemic,
@@ -115,7 +110,7 @@ const FILTER_FIELDS: Array<[keyof FilterOptions, string]> = [
 
 const PAGE_SIZE = 10;
 
-type AppTab = "search" | "scenarios" | "stats" | "assistant" | "screening" | "terrain" | "history";
+type AppTab = "search" | "scenarios" | "stats" | "terrain";
 
 interface SavedSearch {
   id: string;
@@ -1060,7 +1055,23 @@ function StatsView({ corpusStats, gesicaStats, fulltextStats, scenarios, statsBy
   );
 }
 
-function ScenariosView({ scenarios, loading, error }: { scenarios: GesicaScenario[]; loading?: boolean; error?: string | null }) {
+function ScenariosView({
+  scenarios,
+  loading,
+  error,
+  savedSearches = [],
+  onReplaySearch,
+  onDeleteSearch,
+  onTogglePin,
+}: {
+  scenarios: GesicaScenario[];
+  loading?: boolean;
+  error?: string | null;
+  savedSearches?: SavedSearch[];
+  onReplaySearch?: (s: SavedSearch) => void;
+  onDeleteSearch?: (id: string) => void;
+  onTogglePin?: (id: string) => void;
+}) {
   const [selectedCluster, setSelectedCluster] = useState<string>("all");
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [detailScenarioId, setDetailScenarioId] = useState<string | null>(null);
@@ -2711,392 +2722,68 @@ function ScenariosView({ scenarios, loading, error }: { scenarios: GesicaScenari
           {withoutArticles.map((s) => <ScenarioCard key={s.id} scenario={s} />)}
         </div>
       )}
-    </div>
-  );
-}
 
-interface ScreeningViewProps {
-  docs: ScreeningDocument[];
-  prismaFlow: PrismaFlow | null;
-  loading: boolean;
-  error: string | null;
-  selectedDoc: ScreeningDocument | null;
-  setSelectedDoc: (doc: ScreeningDocument | null) => void;
-  reason: string;
-  setReason: (r: string) => void;
-  notes: string;
-  setNotes: (n: string) => void;
-  onDecision: (status: "included" | "excluded") => void;
-  projectContext: string;
-}
+      {/* ── Recherches sauvegardées ─────────────────────────────────────── */}
+      {savedSearches.length > 0 && (
+        <div className="mt-8 space-y-4">
+          <div className="flex items-center gap-3">
+            <RefreshCw size={18} className="text-gold-400" />
+            <div>
+              <h2 className="text-xl font-semibold text-white">Mes recherches sauvegardées</h2>
+              <p className="text-xs text-forest-400 mt-0.5">Recherches épinglées et récentes — cliquez pour relancer</p>
+            </div>
+          </div>
 
-function ScreeningView({
-  docs,
-  prismaFlow,
-  loading,
-  error,
-  selectedDoc,
-  setSelectedDoc,
-  reason,
-  setReason,
-  notes,
-  setNotes,
-  onDecision,
-}: ScreeningViewProps) {
-  const [dashboardScenarios, setDashboardScenarios] = useState<any[]>([]);
-  const [dashboardLoading, setDashboardLoading] = useState(true);
-
-  useEffect(() => {
-    fetch('/gesica/scenarios')
-      .then(r => r.json())
-      .then(data => setDashboardScenarios(Array.isArray(data) ? data : (data.scenarios ?? [])))
-      .catch(() => {})
-      .finally(() => setDashboardLoading(false));
-  }, []);
-
-  if (loading && docs.length === 0) {
-    return <div className="text-sm text-forest-400">Chargement du module de screening...</div>;
-  }
-
-  if (error) {
-    return <div className="text-sm text-rose-400">Erreur : {error}</div>;
-  }
-
-  const pendingDocs = docs.filter(d => !d.screeningStatus || d.screeningStatus === "pending");
-
-  return (
-    <div className="space-y-6">
-      {/* Tableau de bord de progression par scénario */}
-      <div className="rounded-3xl border border-white/10 bg-white/5 p-6 shadow-2xl">
-        <h3 className="mb-4 text-base font-semibold text-white flex items-center gap-2">
-          <Activity size={16} className="text-brand-400" />
-          Progression du Screening par Scénario
-        </h3>
-        {dashboardLoading ? (
-          <div className="text-xs text-white/40">Chargement...</div>
-        ) : (
-          <div className="space-y-2">
-            {dashboardScenarios.filter(s => !s.hidden).map(s => {
-              const total = s.article_count ?? 0;
-              const included = s.included_count ?? 0;
-              const excluded = s.excluded_count ?? 0;
-              const pending = total - included - excluded;
-              const pctIncluded = total > 0 ? Math.round(included / total * 100) : 0;
-              const pctExcluded = total > 0 ? Math.round(excluded / total * 100) : 0;
-              const pctPending = total > 0 ? Math.round(pending / total * 100) : 0;
-              return (
-                <div key={s.id} className="rounded-2xl border border-white/5 bg-white/2 p-3">
-                  <div className="flex items-center justify-between mb-1.5">
-                    <span className="text-xs font-semibold text-white/80 truncate max-w-[220px]">{s.title}</span>
-                    <div className="flex items-center gap-3 text-[10px] shrink-0">
-                      <span className="text-brand-300">{included} inclus</span>
-                      <span className="text-red-400">{excluded} exclus</span>
-                      <span className="text-white/35">{pending} en attente</span>
-                      <span className="text-white/50 font-mono">{total} total</span>
-                    </div>
+          {/* Épinglées */}
+          {savedSearches.filter(s => s.pinned).length > 0 && (
+            <div className="space-y-2">
+              <h3 className="text-xs font-semibold text-gold-400 uppercase tracking-widest">Scénarios épinglés</h3>
+              {savedSearches.filter(s => s.pinned).map(s => (
+                <div key={s.id} className="flex items-center gap-3 rounded-2xl border border-gold-400/30 bg-gold-500/5 px-4 py-3 hover:bg-gold-500/10 transition">
+                  <Activity size={14} className="text-gold-400 shrink-0" />
+                  <div className="flex-1 min-w-0">
+                    <p className="text-sm font-semibold text-white truncate">{s.name || s.query}</p>
+                    <p className="text-xs text-white/40 truncate">{s.mode === "semantic" ? "Sémantique" : "Booléen"} · {s.resultCount} résultats · {new Date(s.timestamp).toLocaleDateString("fr-CH")}</p>
+                    {s.name && <p className="text-xs text-white/30 truncate font-mono">{s.query}</p>}
                   </div>
-                  <div className="h-1.5 bg-white/5 rounded-full overflow-hidden flex">
-                    <div className="h-full bg-brand-500 transition-all" style={{width:`${pctIncluded}%`}}/>
-                    <div className="h-full bg-red-500/60 transition-all" style={{width:`${pctExcluded}%`}}/>
-                    <div className="h-full bg-white/10 transition-all" style={{width:`${pctPending}%`}}/>
-                  </div>
-                  <div className="flex gap-3 mt-1 text-[9px] text-white/30">
-                    <span className="flex items-center gap-1"><span className="h-1.5 w-1.5 rounded-full bg-brand-500 inline-block"/>Inclus {pctIncluded}%</span>
-                    <span className="flex items-center gap-1"><span className="h-1.5 w-1.5 rounded-full bg-red-500/60 inline-block"/>Exclus {pctExcluded}%</span>
-                    <span className="flex items-center gap-1"><span className="h-1.5 w-1.5 rounded-full bg-white/10 inline-block"/>En attente {pctPending}%</span>
-                    {s.kappa_score != null && <span className="ml-auto text-white/40">Kappa: <span className="font-mono">{s.kappa_score.toFixed(2)}</span></span>}
-                  </div>
+                  {onReplaySearch && (
+                    <button type="button" onClick={() => onReplaySearch(s)} className="shrink-0 rounded-xl bg-brand-500/20 border border-brand-500/30 px-3 py-1.5 text-xs text-brand-300 hover:bg-brand-500/30 transition">Relancer</button>
+                  )}
+                  {onTogglePin && (
+                    <button type="button" onClick={() => onTogglePin(s.id)} className="shrink-0 rounded-xl border border-gold-400/20 px-2 py-1.5 text-xs text-gold-400 hover:bg-gold-500/10 transition" title="Désépingler">★</button>
+                  )}
+                  {onDeleteSearch && (
+                    <button type="button" onClick={() => onDeleteSearch(s.id)} className="shrink-0 rounded-xl border border-white/10 px-2 py-1.5 text-xs text-white/30 hover:text-red-400 hover:border-red-500/20 transition" title="Supprimer">✕</button>
+                  )}
                 </div>
-              );
-            })}
-          </div>
-        )}
-      </div>
-
-      {/* Diagramme PRISMA */}
-      {prismaFlow && (
-        <div className="rounded-3xl border border-white/10 bg-white/5 p-6 shadow-2xl">
-          <h3 className="mb-4 text-lg font-semibold text-white flex items-center gap-2">
-            <CheckSquare size={18} className="text-brand-400" />
-            Diagramme de Flux PRISMA
-          </h3>
-          <div className="grid gap-4 md:grid-cols-4 text-center">
-            <div className="rounded-2xl border border-white/10 bg-forest-900/60 p-4">
-              <div className="text-2xl font-bold text-brand-300">{prismaFlow.recordsIdentified}</div>
-              <div className="mt-1 text-xs text-forest-400 uppercase tracking-wider">Identifiés (Stage 1)</div>
-            </div>
-            <div className="flex flex-col justify-center items-center">
-              <ArrowDown size={16} className="text-forest-500 mb-2" />
-              <div className="rounded-2xl border border-white/10 bg-forest-900/60 p-4 w-full">
-                <div className="text-2xl font-bold text-gold-400">{prismaFlow.recordsScreened}</div>
-                <div className="mt-1 text-xs text-forest-400 uppercase tracking-wider">Screenés (Titre/Abstract)</div>
-              </div>
-            </div>
-            <div className="flex flex-col justify-center items-center">
-              <div className="text-xs text-rose-400 font-semibold mb-1">-{prismaFlow.recordsExcluded} Exclus</div>
-              <ArrowDown size={16} className="text-forest-500 mb-2" />
-              <div className="rounded-2xl border border-brand-500/20 bg-brand-500/5 p-4 w-full">
-                <div className="text-2xl font-bold text-brand-400">{prismaFlow.recordsIncluded}</div>
-                <div className="mt-1 text-xs text-forest-400 uppercase tracking-wider">Inclus (Full-text)</div>
-              </div>
-            </div>
-            <div className="rounded-2xl border border-white/10 bg-forest-900/60 p-4 flex flex-col justify-center">
-              <div className="text-xs text-forest-400">Taux d'Inclusion</div>
-              <div className="text-xl font-bold text-white mt-1">
-                {prismaFlow.recordsScreened > 0 
-                  ? `${((prismaFlow.recordsIncluded / prismaFlow.recordsScreened) * 100).toFixed(1)}%`
-                  : "0%"}
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Interface de Screening Double-Panel */}
-      <div className="grid gap-6 xl:grid-cols-[320px_minmax(0,1fr)]">
-        {/* Liste des Documents */}
-        <aside className="space-y-4">
-          <div className="rounded-3xl border border-white/10 bg-white/5 p-4 shadow-2xl h-[600px] flex flex-col">
-            <h4 className="text-sm font-semibold text-white mb-3 px-2 flex items-center justify-between">
-              <span>Articles ({docs.length})</span>
-              <span className="text-xs text-forest-400 font-normal">{pendingDocs.length} en attente</span>
-            </h4>
-            <div className="flex-1 overflow-y-auto space-y-2 pr-1">
-              {docs.map((d) => (
-                <button
-                  key={d.id}
-                  onClick={() => {
-                    setSelectedDoc(d);
-                    setReason(d.screeningReason || "");
-                    setNotes(d.screeningNotes || "");
-                  }}
-                  className={`w-full text-left rounded-xl p-3 border transition flex flex-col gap-1.5 ${
-                    selectedDoc?.id === d.id
-                      ? "border-brand-400 bg-brand-500/10"
-                      : "border-white/5 bg-white/5 hover:border-white/20"
-                  }`}
-                >
-                  <span className="text-xs font-semibold text-white/80 line-clamp-2">{d.title}</span>
-                  <div className="flex items-center justify-between text-[10px] text-forest-400 w-full">
-                    <span>{d.source} · {d.year ?? "—"}</span>
-                    {d.screeningStatus === "included" && (
-                      <span className="flex items-center gap-0.5 text-brand-400 font-semibold">
-                        <CheckCircle size={10} /> Inclus
-                      </span>
-                    )}
-                    {d.screeningStatus === "excluded" && (
-                      <span className="flex items-center gap-0.5 text-rose-400 font-semibold">
-                        <XCircle size={10} /> Exclu
-                      </span>
-                    )}
-                    {(!d.screeningStatus || d.screeningStatus === "pending") && (
-                      <span className="flex items-center gap-0.5 text-gold-400 font-semibold">
-                        <HelpCircle size={10} /> À screené
-                      </span>
-                    )}
-                  </div>
-                </button>
               ))}
-            </div>
-          </div>
-        </aside>
-
-        {/* Détail et Décision */}
-        <section className="space-y-4">
-          {selectedDoc ? (
-            <div className="rounded-3xl border border-white/10 bg-white/5 p-6 shadow-2xl space-y-5">
-              <div>
-                <span className="rounded bg-white/5 px-2 py-1 text-xs text-forest-400">
-                  {selectedDoc.source} · {selectedDoc.year ?? "—"}
-                </span>
-                <h3 className="text-2xl font-semibold text-white mt-3">{selectedDoc.title}</h3>
-                {selectedDoc.url && (
-                  <a
-                    href={selectedDoc.url}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="inline-flex items-center gap-1 text-xs text-brand-400 hover:text-brand-300 mt-2"
-                  >
-                    Voir l'article d'origine <ExternalLink size={10} />
-                  </a>
-                )}
-              </div>
-
-              <div>
-                <h4 className="text-xs font-semibold uppercase tracking-wider text-forest-400 mb-2">Abstract</h4>
-                <p className="rounded-2xl border border-white/10 bg-forest-950/60 p-4 leading-6 text-sm text-white/80">
-                  {selectedDoc.abstract || "Aucun abstract disponible."}
-                </p>
-              </div>
-
-              {/* Formulaire de Décision */}
-              <div className="border-t border-white/10 pt-5 space-y-4">
-                <h4 className="text-sm font-semibold text-white">Décision de Screening (Inclusion / Exclusion)</h4>
-                
-                <div className="grid gap-4 md:grid-cols-2">
-                  <div>
-                    <label className="block text-xs text-forest-400 mb-1">Raison de l'exclusion (obligatoire si exclu)</label>
-                    <select
-                      value={reason}
-                      onChange={(e) => setReason(e.target.value)}
-                      className="w-full rounded-xl border border-white/10 bg-forest-950/80 p-3 text-sm text-white outline-none focus:border-brand-400"
-                    >
-                      <option value="">-- Sélectionner une raison --</option>
-                      <option value="wrong-population">Population non cible</option>
-                      <option value="wrong-intervention">Pas d'IA / Méthode non cible</option>
-                      <option value="wrong-outcome">Pas de métriques d'évaluation</option>
-                      <option value="no-fulltext">Pas de texte intégral disponible</option>
-                      <option value="duplicate">Doublon d'un autre article</option>
-                      <option value="other">Autre (spécifier en notes)</option>
-                    </select>
-                  </div>
-
-                  <div>
-                    <label className="block text-xs text-forest-400 mb-1">Notes de screening</label>
-                    <input
-                      value={notes}
-                      onChange={(e) => setNotes(e.target.value)}
-                      placeholder="Ex. Excellente étude de prévision par LSTM à Genève"
-                      className="w-full rounded-xl border border-white/10 bg-forest-950/80 p-3 text-sm text-white outline-none focus:border-brand-400"
-                    />
-                  </div>
-                </div>
-
-                <div className="flex gap-3 justify-end pt-2">
-                  <button
-                    onClick={() => onDecision("excluded")}
-                    className="rounded-xl border border-rose-500/30 bg-rose-500/10 hover:bg-rose-500/20 px-5 py-3 text-sm font-semibold text-rose-200 transition flex items-center gap-2"
-                  >
-                    <XCircle size={16} />
-                    Exclure l'article
-                  </button>
-                  <button
-                    onClick={() => onDecision("included")}
-                    className="rounded-xl border border-brand-500/30 bg-brand-500/10 hover:bg-brand-500/20 px-5 py-3 text-sm font-semibold text-brand-200 transition flex items-center gap-2"
-                  >
-                    <CheckCircle size={16} />
-                    Inclure dans le corpus final
-                  </button>
-                </div>
-              </div>
-            </div>
-          ) : (
-            <div className="rounded-3xl border border-white/10 bg-white/5 p-6 shadow-2xl text-center text-forest-400 py-20">
-              Sélectionnez un document dans la liste pour commencer le screening.
             </div>
           )}
-        </section>
-      </div>
-    </div>
-  );
-}
 
-interface AssistantViewProps {
-  question: string;
-  setQuestion: (q: string) => void;
-  response: AskResponse | null;
-  loading: boolean;
-  error: string | null;
-  onAsk: () => void;
-  projectContext: string;
-}
-
-function AssistantView({
-  question,
-  setQuestion,
-  response,
-  loading,
-  error,
-  onAsk,
-}: AssistantViewProps) {
-  return (
-    <div className="space-y-6">
-      <div className="rounded-3xl border border-white/10 bg-white/5 p-6 shadow-2xl">
-        <h2 className="mb-4 flex items-center gap-2 text-lg font-semibold text-white">
-          <Zap size={18} className="text-brand-400" />
-          Assistant Scientifique
-        </h2>
-        <p className="mb-4 text-sm text-forest-300 leading-6">
-          Posez une question complexe à l'assistant. Il va interroger les chunks de la base de données les plus pertinents pour votre projet, puis synthétiser une réponse scientifiquement étayée et citer ses sources.
-        </p>
-
-        <div className="flex flex-col gap-3 sm:flex-row">
-          <input
-            value={question}
-            onChange={(e) => setQuestion(e.target.value)}
-            onKeyDown={(e) => e.key === "Enter" && onAsk()}
-            placeholder="Ex. Quelles sont les meilleures méthodes d'IA pour prédire l'afflux de patients aux urgences ?"
-            className="min-h-14 flex-1 rounded-2xl border border-white/10 bg-forest-950/80 px-4 text-white outline-none placeholder:text-forest-500 focus:border-brand-400"
-          />
-          <button
-            type="button"
-            onClick={onAsk}
-            disabled={loading || !question.trim()}
-            className="min-h-14 rounded-2xl bg-brand-400 px-6 font-semibold text-forest-950 transition hover:bg-brand-300 disabled:cursor-not-allowed disabled:opacity-60 flex items-center justify-center gap-2"
-          >
-            {loading ? "Synthèse en cours..." : "Interroger"}
-            <Zap size={14} />
-          </button>
-        </div>
-
-        {error && (
-          <div className="mt-4 rounded-2xl border border-rose-400/30 bg-rose-500/10 p-4 text-sm text-rose-100">
-            {error}
-          </div>
-        )}
-      </div>
-
-      {loading && (
-        <div className="rounded-3xl border border-dashed border-white/10 bg-white/5 p-10 text-center text-forest-300 flex flex-col items-center justify-center gap-3">
-          <div className="h-6 w-6 animate-spin rounded-full border-2 border-brand-400 border-t-transparent" />
-          <p className="text-sm">L'assistant analyse les articles scientifiques et rédige sa synthèse...</p>
-        </div>
-      )}
-
-      {response && (
-        <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_380px]">
-          <div className="rounded-3xl border border-white/10 bg-white/5 p-6 shadow-2xl space-y-4">
-            <h3 className="text-lg font-semibold text-white">Synthèse de l'Assistant</h3>
-            <div className="prose prose-invert max-w-none text-sm leading-7 text-white/80 whitespace-pre-wrap">
-              {response.answer}
-            </div>
-          </div>
-
-          <div className="rounded-3xl border border-white/10 bg-white/5 p-6 shadow-2xl space-y-4 h-fit">
-            <h3 className="text-lg font-semibold text-white flex items-center gap-2">
-              <BookOpen size={16} className="text-brand-400" />
-              Sources utilisées ({response.sources.length})
-            </h3>
-            <div className="space-y-3">
-              {response.sources.map((s, i) => (
-                <div key={s.documentId} className="rounded-2xl border border-white/10 bg-forest-900/60 p-4 space-y-2">
-                  <div className="flex items-start justify-between gap-2">
-                    <span className="inline-flex shrink-0 h-5 w-5 items-center justify-center rounded-full bg-brand-400/20 text-xs font-bold text-brand-300">
-                      {i + 1}
-                    </span>
-                    {s.url && (
-                      <a
-                        href={s.url}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="text-forest-400 hover:text-white"
-                      >
-                        <ExternalLink size={12} />
-                      </a>
-                    )}
+          {/* Récentes non épinglées */}
+          {savedSearches.filter(s => !s.pinned).length > 0 && (
+            <div className="space-y-2">
+              <h3 className="text-xs font-semibold text-white/40 uppercase tracking-widest">Recherches récentes</h3>
+              {savedSearches.filter(s => !s.pinned).map(s => (
+                <div key={s.id} className="flex items-center gap-3 rounded-2xl border border-white/8 bg-white/3 px-4 py-3 hover:bg-white/8 transition">
+                  <BookOpen size={14} className="text-white/30 shrink-0" />
+                  <div className="flex-1 min-w-0">
+                    <p className="text-sm text-white/80 truncate">{s.query}</p>
+                    <p className="text-xs text-white/30 truncate">{s.mode === "semantic" ? "Sémantique" : "Booléen"} · {s.resultCount} résultats · {new Date(s.timestamp).toLocaleDateString("fr-CH")}</p>
                   </div>
-                  <h4 className="text-sm font-semibold text-white leading-5">{s.title}</h4>
-                  <div className="flex flex-wrap gap-1 text-[10px]">
-                    <span className="rounded bg-white/5 px-1.5 py-0.5 text-forest-400">{s.source}</span>
-                    {s.year && <span className="rounded bg-white/5 px-1.5 py-0.5 text-forest-400">{s.year}</span>}
-                    {s.evidenceStrength && (
-                      <EvidenceStrengthBadge strength={s.evidenceStrength as "weak" | "moderate" | "strong"} showTooltip={true} />
-                    )}
-                  </div>
+                  {onReplaySearch && (
+                    <button type="button" onClick={() => onReplaySearch(s)} className="shrink-0 rounded-xl bg-white/5 border border-white/10 px-3 py-1.5 text-xs text-white/60 hover:text-white hover:bg-white/10 transition">Relancer</button>
+                  )}
+                  {onTogglePin && (
+                    <button type="button" onClick={() => onTogglePin(s.id)} className="shrink-0 rounded-xl border border-white/10 px-2 py-1.5 text-xs text-white/30 hover:text-gold-400 hover:border-gold-400/30 transition" title="Épingler">☆</button>
+                  )}
+                  {onDeleteSearch && (
+                    <button type="button" onClick={() => onDeleteSearch(s.id)} className="shrink-0 rounded-xl border border-white/10 px-2 py-1.5 text-xs text-white/30 hover:text-red-400 hover:border-red-500/20 transition" title="Supprimer">✕</button>
+                  )}
                 </div>
               ))}
             </div>
-          </div>
+          )}
         </div>
       )}
     </div>
@@ -3136,109 +2823,6 @@ export default function App() {
   const [saveSearchName, setSaveSearchName] = useState("");
   const [showSaveDialog, setShowSaveDialog] = useState(false);
   
-  // States Assistant RAG
-  const [assistantQuestion, setAssistantQuestion] = useState("");
-  const [assistantResponse, setAssistantResponse] = useState<AskResponse | null>(null);
-  const [assistantLoading, setAssistantLoading] = useState(false);
-  const [assistantError, setAssistantLoadingError] = useState<string | null>(null);
-
-  const handleAskAssistant = async () => {
-    if (!assistantQuestion.trim()) return;
-    setAssistantLoading(true);
-    setAssistantLoadingError(null);
-    setAssistantResponse(null);
-    try {
-      const res = await askAssistant({
-        question: assistantQuestion,
-        projectContext: projectContext,
-        filters: filters
-      });
-      setAssistantResponse(res);
-    } catch (err: any) {
-      setAssistantLoadingError(err.message || "Une erreur est survenue lors de l'appel à l'assistant.");
-    } finally {
-      setAssistantLoading(false);
-    }
-  };
-
-  // States Screening PRISMA
-  const [screeningDocs, setScreeningList] = useState<ScreeningDocument[]>([]);
-  const [prismaFlow, setPrismaFlow] = useState<PrismaFlow | null>(null);
-  const [screeningLoading, setScreeningLoading] = useState(false);
-  const [screeningError, setScreeningError] = useState<string | null>(null);
-  const [selectedScreeningDoc, setSelectedScreeningDoc] = useState<ScreeningDocument | null>(null);
-  const [decisionReason, setDecisionReason] = useState("");
-  const [decisionNotes, setDecisionNotes] = useState("");
-
-  const loadScreeningData = async () => {
-    setScreeningLoading(true);
-    setScreeningError(null);
-    try {
-      const [list, flow] = await Promise.all([
-        fetchScreeningList(projectContext),
-        fetchPrismaFlow(projectContext)
-      ]);
-      setScreeningList(list);
-      setPrismaFlow(flow);
-      if (list.length > 0 && !selectedScreeningDoc) {
-        setSelectedScreeningDoc(list[0]);
-      }
-    } catch (err: any) {
-      setScreeningError(err.message || "Erreur de chargement des données de screening.");
-    } finally {
-      setScreeningLoading(false);
-    }
-  };
-
-  const handleScreeningDecision = async (status: "included" | "excluded") => {
-    if (!selectedScreeningDoc) return;
-    try {
-      await submitScreeningDecision({
-        documentId: selectedScreeningDoc.id,
-        status,
-        reason: decisionReason || undefined,
-        notes: decisionNotes || undefined
-      });
-      
-      // Mettre à jour la liste locale
-      setScreeningList(prev => prev.map(d => 
-        d.id === selectedScreeningDoc.id 
-          ? { ...d, screeningStatus: status, screeningReason: decisionReason, screeningNotes: decisionNotes }
-          : d
-      ));
-      
-      // Recharger le diagramme PRISMA
-      const flow = await fetchPrismaFlow(projectContext);
-      setPrismaFlow(flow);
-      
-      // Sélectionner le document suivant s'il y en a un en attente
-      const currentIndex = screeningDocs.findIndex(d => d.id === selectedScreeningDoc.id);
-      const nextPending = screeningDocs.slice(currentIndex + 1).find(d => !d.screeningStatus || d.screeningStatus === "pending")
-                       || screeningDocs.slice(0, currentIndex).find(d => !d.screeningStatus || d.screeningStatus === "pending");
-      
-      if (nextPending) {
-        setSelectedScreeningDoc(nextPending);
-        setDecisionReason("");
-        setDecisionNotes("");
-      } else {
-        // Si aucun en attente, prendre juste le suivant de la liste globale
-        const nextDoc = screeningDocs[currentIndex + 1] || screeningDocs[0] || null;
-        setSelectedScreeningDoc(nextDoc);
-        if (nextDoc) {
-          setDecisionReason(nextDoc.screeningReason || "");
-          setDecisionNotes(nextDoc.screeningNotes || "");
-        }
-      }
-    } catch (err: any) {
-      alert(err.message || "Erreur lors de la soumission de la décision.");
-    }
-  };
-
-  useEffect(() => {
-    if (activeTab === "screening") {
-      loadScreeningData();
-    }
-  }, [activeTab, projectContext]);
 
   useEffect(() => {
     getFilterOptions()
@@ -3495,9 +3079,6 @@ export default function App() {
 
   const tabs: Array<{ id: AppTab; label: string; icon: React.ReactNode }> = [
     { id: "search", label: "Recherche", icon: <BookOpen size={14} /> },
-    { id: "history", label: `Historique${savedSearches.length > 0 ? ` (${savedSearches.length})` : ""}`, icon: <RefreshCw size={14} /> },
-    { id: "assistant", label: "Assistant RAG", icon: <Zap size={14} className="text-brand-400" /> },
-    { id: "screening", label: "Screening", icon: <CheckSquare size={14} className="text-brand-400" /> },
     { id: "scenarios", label: "Scénarios", icon: <Activity size={14} /> },
     { id: "terrain", label: "Données Terrain", icon: <Cloud size={14} className="text-brand-400" /> },
     { id: "stats", label: "Statistiques", icon: <BarChart2 size={14} /> },
@@ -3546,113 +3127,24 @@ export default function App() {
           <StatsView corpusStats={corpusStats} gesicaStats={gesicaStats} fulltextStats={fulltextStats} scenarios={gesicaScenarios} statsByYear={corpusStatsByYear} />
         )}
 
-        {activeTab === "history" && (
-          <div className="space-y-6">
-            <div className="flex items-center justify-between">
-              <div>
-                <h2 className="text-2xl font-bold text-white">Historique des recherches</h2>
-                <p className="text-sm text-white/50 mt-1">Vos recherches récentes et scénarios sauvegardés. Cliquez sur une entrée pour relancer la recherche.</p>
-              </div>
-              {savedSearches.length > 0 && (
-                <button
-                  type="button"
-                  onClick={() => { setSavedSearches([]); persistSavedSearches([]); }}
-                  className="rounded-xl border border-red-500/20 bg-red-500/10 px-3 py-1.5 text-xs text-red-300 hover:bg-red-500/20 transition"
-                >
-                  Tout effacer
-                </button>
-              )}
-            </div>
-
-            {savedSearches.length === 0 ? (
-              <div className="rounded-3xl border border-dashed border-white/10 bg-white/5 p-10 text-center text-white/40">
-                Aucune recherche dans l'historique. Lancez une recherche pour la voir apparaître ici.
-              </div>
-            ) : (
-              <div className="space-y-3">
-                {/* Scénarios épinglés */}
-                {savedSearches.filter(s => s.pinned).length > 0 && (
-                  <div>
-                    <h3 className="text-xs font-semibold text-gold-400 uppercase tracking-widest mb-2">Scénarios sauvegardés</h3>
-                    <div className="space-y-2">
-                      {savedSearches.filter(s => s.pinned).map(s => (
-                        <div key={s.id} className="flex items-center gap-3 rounded-2xl border border-gold-400/30 bg-gold-500/5 px-4 py-3 hover:bg-gold-500/10 transition">
-                          <Activity size={14} className="text-gold-400 shrink-0" />
-                          <div className="flex-1 min-w-0">
-                            <p className="text-sm font-semibold text-white truncate">{s.name || s.query}</p>
-                            <p className="text-xs text-white/40 truncate">{s.mode === "semantic" ? "Sémantique" : "Booléen"} · {s.resultCount} résultats · {new Date(s.timestamp).toLocaleDateString("fr-CH")}</p>
-                            {s.name && <p className="text-xs text-white/30 truncate font-mono">{s.query}</p>}
-                          </div>
-                          <button type="button" onClick={() => handleReplaySearch(s)} className="shrink-0 rounded-xl bg-brand-500/20 border border-brand-500/30 px-3 py-1.5 text-xs text-brand-300 hover:bg-brand-500/30 transition">Relancer</button>
-                          <button type="button" onClick={() => handleTogglePin(s.id)} className="shrink-0 rounded-xl border border-gold-400/20 px-2 py-1.5 text-xs text-gold-400 hover:bg-gold-500/10 transition" title="Désépingler">★</button>
-                          <button type="button" onClick={() => handleDeleteSavedSearch(s.id)} className="shrink-0 rounded-xl border border-red-500/20 px-2 py-1.5 text-xs text-red-400 hover:bg-red-500/10 transition" title="Supprimer">✕</button>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                )}
-
-                {/* Historique récent */}
-                {savedSearches.filter(s => !s.pinned).length > 0 && (
-                  <div>
-                    <h3 className="text-xs font-semibold text-white/40 uppercase tracking-widest mb-2 mt-4">Recherches récentes</h3>
-                    <div className="space-y-2">
-                      {savedSearches.filter(s => !s.pinned).map(s => (
-                        <div key={s.id} className="flex items-center gap-3 rounded-2xl border border-white/8 bg-white/3 px-4 py-3 hover:bg-white/8 transition">
-                          <BookOpen size={14} className="text-white/30 shrink-0" />
-                          <div className="flex-1 min-w-0">
-                            <p className="text-sm text-white/80 truncate">{s.query}</p>
-                            <p className="text-xs text-white/30 truncate">{s.mode === "semantic" ? "Sémantique" : "Booléen"} · {s.resultCount} résultats · {new Date(s.timestamp).toLocaleDateString("fr-CH")}</p>
-                          </div>
-                          <button type="button" onClick={() => handleReplaySearch(s)} className="shrink-0 rounded-xl bg-white/5 border border-white/10 px-3 py-1.5 text-xs text-white/60 hover:text-white hover:bg-white/10 transition">Relancer</button>
-                          <button type="button" onClick={() => handleTogglePin(s.id)} className="shrink-0 rounded-xl border border-white/10 px-2 py-1.5 text-xs text-white/30 hover:text-gold-400 hover:border-gold-400/30 transition" title="Épingler comme scénario">☆</button>
-                          <button type="button" onClick={() => handleDeleteSavedSearch(s.id)} className="shrink-0 rounded-xl border border-white/10 px-2 py-1.5 text-xs text-white/30 hover:text-red-400 hover:border-red-500/20 transition" title="Supprimer">✕</button>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                )}
-              </div>
-            )}
-          </div>
-        )}
 
         {activeTab === "terrain" && (
           <TerrainView />
         )}
 
         {activeTab === "scenarios" && (
-          <ScenariosView scenarios={gesicaScenarios} loading={loadingScenarios} error={scenariosError} />
-        )}
-
-        {activeTab === "assistant" && (
-          <AssistantView
-            question={assistantQuestion}
-            setQuestion={setAssistantQuestion}
-            response={assistantResponse}
-            loading={assistantLoading}
-            error={assistantError}
-            onAsk={handleAskAssistant}
-            projectContext={projectContext}
+          <ScenariosView
+            scenarios={gesicaScenarios}
+            loading={loadingScenarios}
+            error={scenariosError}
+            savedSearches={savedSearches}
+            onReplaySearch={handleReplaySearch}
+            onDeleteSearch={handleDeleteSavedSearch}
+            onTogglePin={handleTogglePin}
           />
         )}
 
-        {activeTab === "screening" && (
-          <ScreeningView
-            docs={screeningDocs}
-            prismaFlow={prismaFlow}
-            loading={screeningLoading}
-            error={screeningError}
-            selectedDoc={selectedScreeningDoc}
-            setSelectedDoc={setSelectedScreeningDoc}
-            reason={decisionReason}
-            setReason={setDecisionReason}
-            notes={decisionNotes}
-            setNotes={setDecisionNotes}
-            onDecision={handleScreeningDecision}
-            projectContext={projectContext}
-          />
-        )}
+
 
         {activeTab === "search" && (
           <div className="grid gap-6 xl:grid-cols-[280px_minmax(0,1fr)]">

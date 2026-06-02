@@ -2138,3 +2138,63 @@ export async function triggerLivingReview(
   if (!r.ok) throw new Error(`HTTP ${r.status}`);
   return r.json();
 }
+
+// ─── Enrichissement LLM Batch ─────────────────────────────────────────────────
+
+export interface EnrichmentBatchResult {
+  extracted: number;
+  skipped: number;
+  errors: number;
+  message: string;
+}
+
+export interface EnrichmentStatus {
+  scenario_id: string | null;
+  total: number;
+  pico: { count: number; pct: number };
+  metadata: { count: number; pct: number };
+  fulltext: { count: number; pct: number };
+}
+
+export async function extractPicoBatchGlobal(
+  scenarioId?: string,
+  limit = 50,
+): Promise<EnrichmentBatchResult> {
+  const params = new URLSearchParams({ limit: String(limit) });
+  if (scenarioId) params.set('scenario_id', scenarioId);
+  const r = await fetch(`${API_BASE_URL}/pico/extract?${params}`, { method: 'POST' });
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  return r.json();
+}
+
+export async function extractMetadataBatch(
+  scenarioId?: string,
+  limit = 50,
+): Promise<EnrichmentBatchResult> {
+  const params = new URLSearchParams({ limit: String(limit) });
+  if (scenarioId) params.set('scenario_id', scenarioId);
+  const r = await fetch(`${API_BASE_URL}/metadata/extract?${params}`, { method: 'POST' });
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  return r.json();
+}
+
+export async function fetchFulltextBatch(
+  scenarioId?: string,
+  limit = 20,
+): Promise<EnrichmentBatchResult & { fetched: number; not_available: number }> {
+  const params = new URLSearchParams({ limit: String(limit) });
+  if (scenarioId) params.set('scenario_id', scenarioId);
+  const r = await fetch(`${API_BASE_URL}/fulltext/fetch?${params}`, { method: 'POST' });
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  return r.json();
+}
+
+export async function fetchEnrichmentStatus(
+  scenarioId?: string,
+): Promise<EnrichmentStatus> {
+  const params = new URLSearchParams();
+  if (scenarioId) params.set('scenario_id', scenarioId);
+  const r = await fetch(`${API_BASE_URL}/enrichment/status?${params}`);
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  return r.json();
+}

@@ -27,6 +27,11 @@ import {
   submitDoubleBlindDecision,
   subscribeAlerts,
   triggerLivingReview,
+  extractPicoBatchGlobal,
+  extractMetadataBatch,
+  fetchFulltextBatch,
+  fetchEnrichmentStatus,
+  type EnrichmentStatus,
   type ScenarioDetail,
   type ScenarioCorpus,
   type ModelStatus,
@@ -3009,6 +3014,159 @@ function AlertsSection({ scenarioId }: { scenarioId: string }) {
   );
 }
 
+// ─── Section: Enrichissement LLM Batch ────────────────────────────────────────
+
+function EnrichmentSection({ scenarioId }: { scenarioId: string }) {
+  const [status, setStatus] = React.useState<EnrichmentStatus | null>(null);
+  const [loadingStatus, setLoadingStatus] = React.useState(false);
+  const [running, setRunning] = React.useState<string | null>(null);
+  const [lastResult, setLastResult] = React.useState<{ type: string; msg: string } | null>(null);
+  const [limit, setLimit] = React.useState(50);
+
+  const loadStatus = React.useCallback(async () => {
+    setLoadingStatus(true);
+    try {
+      const s = await fetchEnrichmentStatus(scenarioId);
+      setStatus(s);
+    } catch {/* ignore */} finally {
+      setLoadingStatus(false);
+    }
+  }, [scenarioId]);
+
+  React.useEffect(() => { loadStatus(); }, [loadStatus]);
+
+  const run = async (type: "pico" | "metadata" | "fulltext") => {
+    setRunning(type);
+    setLastResult(null);
+    try {
+      let res;
+      if (type === "pico") res = await extractPicoBatchGlobal(scenarioId, limit);
+      else if (type === "metadata") res = await extractMetadataBatch(scenarioId, limit);
+      else res = await fetchFulltextBatch(scenarioId, Math.min(limit, 20));
+      setLastResult({ type, msg: res.message });
+      await loadStatus();
+    } catch (e: any) {
+      setLastResult({ type, msg: `Erreur : ${e.message}` });
+    } finally {
+      setRunning(null);
+    }
+  };
+
+  const JOBS = [
+    {
+      key: "pico" as const,
+      label: "Extraction PICO",
+      desc: "Extrait Population, Intervention, Comparateur, Outcome via LLM pour chaque article sans PICO.",
+      icon: <Microscope size={15} className="text-brand-400" />,
+      stat: status ? `${status.pico.count} / ${status.total} (${status.pico.pct}%)` : "—",
+      pct: status ? status.pico.pct : 0,
+      color: "bg-brand-500",
+    },
+    {
+      key: "metadata" as const,
+      label: "Enrichissement Métadonnées",
+      desc: "Complète le type d'étude, la taille d'échantillon, le pays, le risque de biais via LLM.",
+      icon: <Database size={15} className="text-gold-400" />,
+      stat: status ? `${status.metadata.count} / ${status.total} (${status.metadata.pct}%)` : "—",
+      pct: status ? status.metadata.pct : 0,
+      color: "bg-gold-500",
+    },
+    {
+      key: "fulltext" as const,
+      label: "Récupération Full-Text",
+      desc: "Recherche le texte intégral en accès libre via Unpaywall (DOI requis).",
+      icon: <Globe size={15} className="text-forest-300" />,
+      stat: status ? `${status.fulltext.count} / ${status.total} (${status.fulltext.pct}%)` : "—",
+      pct: status ? status.fulltext.pct : 0,
+      color: "bg-forest-400",
+    },
+  ];
+
+  return (
+    <div className="space-y-5">
+      <SectionHeader
+        icon={<Zap size={16} className="text-gold-400" />}
+        title="Enrichissement LLM"
+        subtitle="Lancez les enrichissements automatiques sur les articles de ce scénario"
+      />
+
+      {/* Paramètre lot */}
+      <div className="flex items-center gap-3 rounded-2xl border border-white/8 bg-white/3 px-4 py-3">
+        <label className="text-xs text-white/50 shrink-0">Taille du lot :</label>
+        <input
+          type="number"
+          min={5} max={200} step={5}
+          value={limit}
+          onChange={e => setLimit(Number(e.target.value))}
+          className="w-20 rounded-lg border border-white/10 bg-white/5 px-2 py-1 text-xs text-white text-center focus:outline-none focus:border-brand-500/50"
+        />
+        <span className="text-xs text-white/30">articles par exécution</span>
+        <button
+          onClick={loadStatus}
+          disabled={loadingStatus}
+          className="ml-auto flex items-center gap-1.5 rounded-xl border border-white/10 px-3 py-1.5 text-xs text-white/50 hover:text-white hover:bg-white/8 transition"
+        >
+          <RefreshCw size={11} className={loadingStatus ? "animate-spin" : ""} />
+          Actualiser
+        </button>
+      </div>
+
+      {/* Cartes de jobs */}
+      <div className="grid gap-4 sm:grid-cols-3">
+        {JOBS.map(job => (
+          <div key={job.key} className="rounded-2xl border border-white/8 bg-white/3 p-4 space-y-3">
+            <div className="flex items-start gap-2.5">
+              {job.icon}
+              <div className="flex-1 min-w-0">
+                <p className="text-sm font-semibold text-white">{job.label}</p>
+                <p className="text-xs text-white/40 mt-0.5 leading-relaxed">{job.desc}</p>
+              </div>
+            </div>
+
+            {/* Barre de progression */}
+            <div className="space-y-1">
+              <div className="flex justify-between text-[10px] text-white/40">
+                <span>Couverture</span>
+                <span>{job.stat}</span>
+              </div>
+              <div className="h-1.5 rounded-full bg-white/5 overflow-hidden">
+                <div
+                  className={`h-full rounded-full transition-all ${job.color}`}
+                  style={{ width: `${job.pct}%` }}
+                />
+              </div>
+            </div>
+
+            <button
+              onClick={() => run(job.key)}
+              disabled={running !== null}
+              className="w-full flex items-center justify-center gap-2 rounded-xl bg-brand-500/15 border border-brand-500/25 py-2 text-xs font-medium text-brand-300 hover:bg-brand-500/25 transition disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              {running === job.key ? (
+                <><Loader2 size={12} className="animate-spin" /> En cours...</>
+              ) : (
+                <><Zap size={12} /> Lancer ({limit} articles)</>
+              )}
+            </button>
+          </div>
+        ))}
+      </div>
+
+      {/* Résultat dernier job */}
+      {lastResult && (
+        <div className={`flex items-start gap-2.5 rounded-2xl border px-4 py-3 text-xs ${
+          lastResult.msg.startsWith("Erreur")
+            ? "border-red-500/20 bg-red-500/5 text-red-300"
+            : "border-brand-500/20 bg-brand-500/5 text-brand-200"
+        }`}>
+          {lastResult.msg.startsWith("Erreur") ? <AlertCircle size={13} className="mt-0.5 shrink-0" /> : <CheckCircle2 size={13} className="mt-0.5 shrink-0" />}
+          <span><strong className="font-semibold capitalize">{lastResult.type}</strong> — {lastResult.msg}</span>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ─── Composite Tabs ──────────────────────────────────────────────────────────
 
 /** ReviewTab : Corpus + PRISMA + Double-Aveugle (sous-tabs) */
@@ -3115,16 +3273,17 @@ function VariablesModelTab({ scenarioId, detail }: { scenarioId: string; detail:
 
 // ─── Main Component ───────────────────────────────────────────────────────────
 
-type SectionKey = "review" | "evidence" | "assistant" | "viz" | "variables" | "queries" | "alerts";
+type SectionKey = "review" | "evidence" | "assistant" | "viz" | "variables" | "queries" | "alerts" | "enrichment";
 
 const SECTIONS: Array<{ key: SectionKey; label: string; icon: React.ReactNode }> = [
-  { key: "review",    label: "Corpus & Revue",            icon: <FileText size={13} /> },
-  { key: "evidence",  label: "PICO & Evidence",           icon: <BookOpen size={13} /> },
-  { key: "assistant", label: "Assistant IA",              icon: <MessageSquare size={13} /> },
-  { key: "viz",       label: "Visualisation",             icon: <Layers size={13} /> },
-  { key: "variables", label: "Variables & Modèle",        icon: <Database size={13} /> },
-  { key: "queries",   label: "Stratégie",                icon: <Search size={13} /> },
-  { key: "alerts",    label: "Alertes",                   icon: <Bell size={13} /> },
+  { key: "review",      label: "Corpus & Revue",      icon: <FileText size={13} /> },
+  { key: "evidence",    label: "PICO & Evidence",     icon: <BookOpen size={13} /> },
+  { key: "assistant",   label: "Assistant IA",        icon: <MessageSquare size={13} /> },
+  { key: "viz",         label: "Visualisation",       icon: <Layers size={13} /> },
+  { key: "variables",   label: "Variables & Modèle",  icon: <Database size={13} /> },
+  { key: "queries",     label: "Stratégie",          icon: <Search size={13} /> },
+  { key: "enrichment",  label: "Enrichissement LLM", icon: <Zap size={13} className="text-gold-400" /> },
+  { key: "alerts",      label: "Alertes",             icon: <Bell size={13} /> },
 ];
 
 interface ScenarioDetailPageProps {
@@ -3250,6 +3409,7 @@ export function ScenarioDetailPage({ scenarioId, onBack }: ScenarioDetailPagePro
       {activeSection === "viz" && <VizTab scenarioId={scenarioId} />}
       {activeSection === "variables" && <VariablesModelTab detail={detail} scenarioId={scenarioId} />}
       {activeSection === "queries" && <QueriesSection detail={detail} />}
+      {activeSection === "enrichment" && <EnrichmentSection scenarioId={scenarioId} />}
       {activeSection === "alerts" && <AlertsSection scenarioId={scenarioId} />}
     </div>
   );
