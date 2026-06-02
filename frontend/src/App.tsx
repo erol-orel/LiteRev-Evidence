@@ -693,7 +693,7 @@ function GesicaSignalsPanel({ summary }: { summary: EvidenceSummaryResponse }) {
   );
 }
 
-function StatsView({ corpusStats, gesicaStats, fulltextStats }: { corpusStats: CorpusStats | null; gesicaStats: GesicaStats | null; fulltextStats: FulltextStats | null }) {
+function StatsView({ corpusStats, gesicaStats, fulltextStats, scenarios }: { corpusStats: CorpusStats | null; gesicaStats: GesicaStats | null; fulltextStats: FulltextStats | null; scenarios?: GesicaScenario[] }) {
   if (!corpusStats && !gesicaStats) {
     return <div className="text-sm text-forest-400">Chargement des statistiques...</div>;
   }
@@ -716,8 +716,8 @@ function StatsView({ corpusStats, gesicaStats, fulltextStats }: { corpusStats: C
               <p className="mt-1 text-xs text-forest-400">Chunks</p>
             </div>
             <div className="rounded-2xl border border-white/10 bg-forest-900/60 p-4 text-center">
-              <p className="text-2xl font-bold text-brand-300">{Object.keys(corpusStats.byProject).length}</p>
-              <p className="mt-1 text-xs text-forest-400">Projets</p>
+              <p className="text-2xl font-bold text-brand-300">{scenarios ? scenarios.filter(s => s.articleCount > 0).length : Object.keys(corpusStats.byProject).length}</p>
+              <p className="mt-1 text-xs text-forest-400">Scénarios</p>
             </div>
             <div className="rounded-2xl border border-white/10 bg-forest-900/60 p-4 text-center">
               <p className="text-2xl font-bold text-brand-300">{Object.keys(corpusStats.bySource).length}</p>
@@ -726,26 +726,80 @@ function StatsView({ corpusStats, gesicaStats, fulltextStats }: { corpusStats: C
           </div>
 
           <div className="mt-4 grid gap-4 sm:grid-cols-2">
+            {/* Par scénario */}
             <div>
-              <h3 className="mb-2 text-sm font-medium text-forest-300">Par projet</h3>
-              <div className="space-y-2">
-                {Object.entries(corpusStats.byProject).map(([proj, count]) => (
-                  <div key={proj} className="flex items-center justify-between rounded-xl border border-white/10 bg-forest-900/40 px-3 py-2 text-sm">
-                    <span className="text-white/80 capitalize">{proj}</span>
-                    <span className="font-mono text-brand-300">{count}</span>
-                  </div>
-                ))}
+              <h3 className="mb-3 text-sm font-medium text-forest-300 flex items-center gap-1.5">
+                <Activity size={13} className="text-brand-400" />
+                Par scénario
+              </h3>
+              <div className="space-y-1.5">
+                {scenarios && scenarios.length > 0 ? (() => {
+                  const maxCount = Math.max(...scenarios.map(s => s.articleCount));
+                  const scenarioLabels: Record<string, string> = {
+                    "hospital-capacity-forecasting": "Capacité hospitalière",
+                    "demand-forecasting": "Prévision de demande",
+                    "cardiac-arrest-prediction": "Arrêt cardiaque",
+                    "ambulance-dispatch-optimization": "Dispatch ambulances",
+                    "triage-support": "Aide au triage",
+                    "dispatch-decision-support": "Décision dispatch",
+                    "response-time-optimization": "Temps de réponse",
+                    "trauma-severity-assessment": "Sévérité trauma",
+                    "stroke-detection": "Détection AVC",
+                    "call-prioritization": "Priorisation appels",
+                    "emergency-call-qualification": "Qualification appels",
+                  };
+                  return scenarios
+                    .filter(s => s.articleCount > 0)
+                    .sort((a, b) => b.articleCount - a.articleCount)
+                    .map(s => (
+                      <div key={s.id} className="group">
+                        <div className="flex items-center justify-between text-xs mb-0.5">
+                          <span className="text-white/70 truncate max-w-[70%]">{scenarioLabels[s.id] ?? s.title}</span>
+                          <span className="font-mono text-brand-300 shrink-0 ml-2">{s.articleCount.toLocaleString()}</span>
+                        </div>
+                        <div className="h-1.5 w-full rounded-full bg-white/5 overflow-hidden">
+                          <div
+                            className="h-full rounded-full bg-gradient-to-r from-brand-500 to-brand-400 transition-all"
+                            style={{ width: `${Math.round((s.articleCount / maxCount) * 100)}%` }}
+                          />
+                        </div>
+                      </div>
+                    ));
+                })() : (
+                  Object.entries(corpusStats.byProject).map(([proj, count]) => (
+                    <div key={proj} className="flex items-center justify-between rounded-xl border border-white/10 bg-forest-900/40 px-3 py-2 text-sm">
+                      <span className="text-white/80 capitalize">{proj}</span>
+                      <span className="font-mono text-brand-300">{(count as number).toLocaleString()}</span>
+                    </div>
+                  ))
+                )}
               </div>
             </div>
+            {/* Par source */}
             <div>
-              <h3 className="mb-2 text-sm font-medium text-forest-300">Par source</h3>
-              <div className="space-y-2">
-                {Object.entries(corpusStats.bySource).map(([src, count]) => (
-                  <div key={src} className="flex items-center justify-between rounded-xl border border-white/10 bg-forest-900/40 px-3 py-2 text-sm">
-                    <span className="text-white/80">{src}</span>
-                    <span className="font-mono text-brand-300">{count}</span>
-                  </div>
-                ))}
+              <h3 className="mb-3 text-sm font-medium text-forest-300 flex items-center gap-1.5">
+                <BookOpen size={13} className="text-brand-400" />
+                Par source
+              </h3>
+              <div className="space-y-1.5">
+                {(() => {
+                  const entries = Object.entries(corpusStats.bySource).sort((a, b) => (b[1] as number) - (a[1] as number));
+                  const maxVal = Math.max(...entries.map(([, v]) => v as number));
+                  return entries.map(([src, count]) => (
+                    <div key={src}>
+                      <div className="flex items-center justify-between text-xs mb-0.5">
+                        <span className="text-white/70 capitalize">{src}</span>
+                        <span className="font-mono text-brand-300">{(count as number).toLocaleString()}</span>
+                      </div>
+                      <div className="h-1.5 w-full rounded-full bg-white/5 overflow-hidden">
+                        <div
+                          className="h-full rounded-full bg-gradient-to-r from-gold-500 to-gold-400 transition-all"
+                          style={{ width: `${Math.round(((count as number) / maxVal) * 100)}%` }}
+                        />
+                      </div>
+                    </div>
+                  ));
+                })()}
               </div>
             </div>
           </div>
@@ -3291,7 +3345,7 @@ export default function App() {
       <main className="mx-auto max-w-[1380px] px-6 py-8">
 
         {activeTab === "stats" && (
-          <StatsView corpusStats={corpusStats} gesicaStats={gesicaStats} fulltextStats={fulltextStats} />
+          <StatsView corpusStats={corpusStats} gesicaStats={gesicaStats} fulltextStats={fulltextStats} scenarios={gesicaScenarios} />
         )}
 
         {activeTab === "history" && (
