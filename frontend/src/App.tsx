@@ -515,10 +515,10 @@ function TerrainView() {
                 </div>
                 <p className="text-sm text-forest-300 leading-5">{sig.content}</p>
                 {sig.impact_on_ems && (
-                  <p className="mt-2 text-xs text-brand-300 italic">→ Urgences Pré-hospitalières : {sig.impact_on_ems}</p>
+                  <p className="mt-2 text-xs text-brand-300 italic">→ Impact SMUR/EMS : {sig.impact_on_ems}</p>
                 )}
                 {sig.impact_on_hospital && (
-                  <p className="mt-1 text-xs text-violet-300 italic">→ Urgences Hospitalières : {sig.impact_on_hospital}</p>
+                  <p className="mt-1 text-xs text-violet-300 italic">→ Impact hospitalier : {sig.impact_on_hospital}</p>
                 )}
               </div>
             ))}
