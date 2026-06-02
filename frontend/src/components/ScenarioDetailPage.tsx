@@ -2154,93 +2154,225 @@ ${data.top_articles.slice(0,8).map((a,i)=>`
     }
   };
 
-  if (loading) return <LoadingSpinner text="Chargement des données pour l'Evidence Brief..." />;
+  if (loading) return <LoadingSpinner text="Chargement de l'Evidence Brief..." />;
   if (error || !data) return <ErrorBox message={error ?? "Erreur Evidence Brief"} />;
+
+  const total = data.corpus_stats.total || 1;
+  const picoRows = data.pico_table ?? [];
+  const dbs = data.double_blind_stats ?? { reviewer_1_done:0, reviewer_2_done:0, both_done:0, agreements:0, conflicts:0 };
+  const kappaRaw = dbs.both_done > 0 ? ((dbs.agreements / dbs.both_done) * 2 - 1) : null;
+  const kappa = kappaRaw !== null ? Math.max(0, Math.min(1, kappaRaw)).toFixed(2) : 'N/A';
 
   return (
     <div className="space-y-6">
       <SectionHeader
         icon={<BookOpen size={14} className="text-brand-400" />}
         title="Evidence Brief"
-        subtitle="Rapport synthétique exportable pour les décideurs et cliniciens"
+        subtitle="Rapport synthétique complet : corpus, PICO, screening, niveau de preuve"
       />
-      {/* Preview card */}
-      <div className="rounded-3xl border border-white/10 bg-white/3 p-6 space-y-5">
-        <div className="flex items-start justify-between gap-4 flex-wrap">
-          <div>
-            <h3 className="text-sm font-bold text-white">{detail.title}</h3>
-            <p className="text-xs text-white/50 mt-1">LiteRev Evidence to Scenario</p>
-            <p className="text-xs text-white/35 mt-0.5">Généré le {new Date(data.generated_at).toLocaleDateString('fr-FR',{year:'numeric',month:'long',day:'numeric'})}</p>
+
+      {/* Header avec export */}
+      <div className="flex items-start justify-between gap-4 flex-wrap">
+        <div>
+          <h3 className="text-sm font-bold text-white">{detail.title}</h3>
+          <p className="text-[10px] text-white/35 mt-0.5">Généré le {new Date(data.generated_at).toLocaleDateString('fr-FR',{year:'numeric',month:'long',day:'numeric'})}</p>
+        </div>
+        <button onClick={generatePdf} disabled={generating}
+          className="flex items-center gap-2 rounded-2xl bg-brand-500 hover:bg-brand-400 text-white font-semibold px-4 py-2 text-xs transition disabled:opacity-50 shrink-0">
+          {generating ? <Loader2 size={12} className="animate-spin"/> : <Download size={12}/>}
+          {generating ? 'Génération...' : 'Exporter PDF'}
+        </button>
+      </div>
+
+      {/* KPIs principaux */}
+      <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-6 gap-2.5">
+        {[
+          {label:'Articles total',value:data.corpus_stats.total,color:'text-white',sub:null},
+          {label:'Inclus',value:data.corpus_stats.included,color:'text-brand-300',sub:`${Math.round(data.corpus_stats.included/total*100)}%`},
+          {label:'Exclus',value:data.corpus_stats.excluded,color:'text-red-400',sub:`${Math.round(data.corpus_stats.excluded/total*100)}%`},
+          {label:'En attente',value:data.corpus_stats.pending ?? (total - data.corpus_stats.included - data.corpus_stats.excluded),color:'text-white/50',sub:null},
+          {label:'PICO extraits',value:data.corpus_stats.with_pico,color:'text-gold-400',sub:`${Math.round(data.corpus_stats.pico_coverage_pct ?? data.corpus_stats.with_pico/total*100)}%`},
+          {label:'Texte intégral',value:data.corpus_stats.with_fulltext ?? 0,color:'text-blue-300',sub:null},
+        ].map(s=>(
+          <div key={s.label} className="rounded-2xl border border-white/5 bg-white/2 p-3 text-center">
+            <div className={`text-xl font-bold ${s.color}`}>{s.value}</div>
+            {s.sub && <div className="text-[9px] text-white/30 font-mono">{s.sub}</div>}
+            <div className="text-[9px] text-white/35 mt-0.5 leading-tight">{s.label}</div>
           </div>
-          <button
-            onClick={generatePdf}
-            disabled={generating}
-            className="flex items-center gap-2 rounded-2xl bg-brand-500 hover:bg-brand-400 text-white font-semibold px-5 py-2.5 text-sm transition disabled:opacity-50 shrink-0"
-          >
-            {generating ? <Loader2 size={14} className="animate-spin"/> : <Download size={14}/>}
-            {generating ? 'Génération...' : 'Exporter PDF'}
-          </button>
+        ))}
+      </div>
+
+      {/* Couverture temporelle + citations */}
+      {data.corpus_stats.year_min && data.corpus_stats.year_max && (
+        <div className="flex flex-wrap gap-4 text-xs text-white/50">
+          <span>Couverture : <span className="text-white/70 font-semibold">{data.corpus_stats.year_min} – {data.corpus_stats.year_max}</span></span>
+          {data.corpus_stats.avg_citations != null && <span>Citations moy. : <span className="text-white/70 font-semibold">{data.corpus_stats.avg_citations.toFixed(1)}</span></span>}
+          {data.corpus_stats.max_citations != null && <span>Max citations : <span className="text-white/70 font-semibold">{data.corpus_stats.max_citations}</span></span>}
         </div>
-        {/* Stats preview */}
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-          {[
-            {label:'Articles identifiés',value:data.corpus_stats.total,color:'text-white'},
-            {label:'Articles uniques',value:data.corpus_stats.total-data.corpus_stats.duplicates,color:'text-brand-300'},
-            {label:'Inclus (screening)',value:data.corpus_stats.included,color:'text-brand-300'},
-            {label:'PICO extraits',value:data.corpus_stats.with_pico,color:'text-gold-400'},
-          ].map(s=>(
-            <div key={s.label} className="rounded-2xl border border-white/5 bg-white/2 p-3 text-center">
-              <div className={`text-2xl font-bold ${s.color}`}>{s.value}</div>
-              <div className="text-[10px] text-white/35 mt-0.5">{s.label}</div>
-            </div>
-          ))}
+      )}
+
+      {/* Double-aveugle stats */}
+      {dbs.both_done > 0 && (
+        <div className="rounded-2xl border border-white/5 bg-white/2 p-4 space-y-2">
+          <p className="text-[10px] font-bold uppercase tracking-wider text-white/40">Revue Double-Aveugle</p>
+          <div className="grid grid-cols-2 sm:grid-cols-5 gap-2">
+            {[
+              {label:'R1 terminé',value:dbs.reviewer_1_done},
+              {label:'R2 terminé',value:dbs.reviewer_2_done},
+              {label:'Double-rev.',value:dbs.both_done},
+              {label:'Accords',value:dbs.agreements,color:'text-brand-300'},
+              {label:'Conflits',value:dbs.conflicts,color:'text-red-400'},
+            ].map(s=>(
+              <div key={s.label} className="text-center">
+                <div className={`text-lg font-bold ${(s as {color?:string}).color ?? 'text-white'}`}>{s.value}</div>
+                <div className="text-[9px] text-white/35">{s.label}</div>
+              </div>
+            ))}
+          </div>
+          <div className="text-[10px] text-white/40">
+            Accord inter-reviewers (Kappa approx.) : <span className="text-white/60 font-mono font-semibold">{kappa}</span>
+            {kappaRaw !== null && (
+              <span className="ml-2">
+                {kappaRaw >= 0.8 ? '(excellent)' : kappaRaw >= 0.6 ? '(bon)' : kappaRaw >= 0.4 ? '(modéré)' : '(faible)'}
+              </span>
+            )}
+          </div>
         </div>
-        {/* Coverage temporelle */}
-        {data.corpus_stats.year_min && data.corpus_stats.year_max && (
-          <p className="text-xs text-white/50">
-            Couverture temporelle : <span className="text-white/70 font-semibold">{data.corpus_stats.year_min} – {data.corpus_stats.year_max}</span>
-          </p>
-        )}
-        {/* Study designs */}
-        <div className="space-y-2">
-          <p className="text-[10px] font-bold uppercase tracking-wider text-white/40">Distribution par type d'étude</p>
+      )}
+
+      {/* Distributions : type d'étude + source + niveau de preuve */}
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+        {/* Types d'étude */}
+        <div className="rounded-2xl border border-white/5 bg-white/2 p-4 space-y-2">
+          <p className="text-[10px] font-bold uppercase tracking-wider text-white/40">Types d'étude</p>
           <div className="space-y-1.5">
             {data.study_design_distribution.slice(0,6).map(d=>(
-              <div key={d.design} className="flex items-center gap-3 text-xs">
-                <span className="w-32 text-white/60 truncate">{d.design}</span>
-                <div className="flex-1 h-1.5 bg-white/5 rounded-full overflow-hidden">
-                  <div className="h-full bg-brand-500 rounded-full" style={{width:`${Math.round(d.count/(data.corpus_stats.total||1)*100)}%`}}/>
+              <div key={d.design} className="flex items-center gap-2 text-[10px]">
+                <span className="w-28 text-white/60 truncate">{d.design}</span>
+                <div className="flex-1 h-1 bg-white/5 rounded-full overflow-hidden">
+                  <div className="h-full bg-brand-500 rounded-full" style={{width:`${Math.round(d.count/total*100)}%`}}/>
                 </div>
-                <span className="w-8 text-right text-white/40 font-mono">{d.count}</span>
+                <span className="w-7 text-right text-white/40 font-mono">{d.count}</span>
               </div>
             ))}
           </div>
         </div>
-        {/* Top articles preview */}
-        <div className="space-y-2">
-          <p className="text-[10px] font-bold uppercase tracking-wider text-white/40">Articles les plus cités</p>
-          <div className="space-y-2">
-            {data.top_articles.slice(0,4).map((a,i)=>(
-              <div key={a.id} className="rounded-xl border border-white/5 bg-white/2 p-3">
-                <div className="flex items-start gap-2">
-                  <span className="text-[10px] font-mono text-brand-300 shrink-0 mt-0.5">#{i+1}</span>
-                  <div>
-                    <p className="text-xs font-semibold text-white/80 leading-4 line-clamp-2">{a.title}</p>
-                    <p className="text-[10px] text-white/40 mt-1">
-                      {a.year||'N/A'} • {a.journal||'—'}
-                      {a.study_design && <span className="ml-2 rounded bg-brand-500/10 border border-brand-500/20 px-1 text-brand-300">{a.study_design}</span>}
-                      {a.citation_count && <span className="ml-2">{a.citation_count} citations</span>}
-                    </p>
-                  </div>
+        {/* Sources */}
+        <div className="rounded-2xl border border-white/5 bg-white/2 p-4 space-y-2">
+          <p className="text-[10px] font-bold uppercase tracking-wider text-white/40">Sources</p>
+          <div className="space-y-1.5">
+            {(data.source_distribution ?? []).slice(0,6).map(d=>(
+              <div key={d.source} className="flex items-center gap-2 text-[10px]">
+                <span className="w-28 text-white/60 truncate capitalize">{d.source}</span>
+                <div className="flex-1 h-1 bg-white/5 rounded-full overflow-hidden">
+                  <div className="h-full bg-blue-500/60 rounded-full" style={{width:`${Math.round(d.count/total*100)}%`}}/>
                 </div>
+                <span className="w-7 text-right text-white/40 font-mono">{d.count}</span>
               </div>
             ))}
           </div>
         </div>
-        <p className="text-[10px] text-white/25 italic">
-          Le PDF généré inclut : résumé exécutif, statistiques complètes, distribution temporelle, types d'étude et articles représentatifs avec abstracts.
-        </p>
+        {/* Niveaux de preuve */}
+        <div className="rounded-2xl border border-white/5 bg-white/2 p-4 space-y-2">
+          <p className="text-[10px] font-bold uppercase tracking-wider text-white/40">Niveaux de preuve</p>
+          <div className="space-y-1.5">
+            {(data.evidence_level_distribution ?? []).slice(0,6).map(d=>(
+              <div key={d.level} className="flex items-center gap-2 text-[10px]">
+                <span className="w-28 text-white/60 truncate capitalize">{d.level}</span>
+                <div className="flex-1 h-1 bg-white/5 rounded-full overflow-hidden">
+                  <div className="h-full bg-gold-400/60 rounded-full" style={{width:`${Math.round(d.count/total*100)}%`}}/>
+                </div>
+                <span className="w-7 text-right text-white/40 font-mono">{d.count}</span>
+              </div>
+            ))}
+          </div>
+        </div>
       </div>
+
+      {/* Top articles avec PICO */}
+      <div className="space-y-3">
+        <p className="text-[10px] font-bold uppercase tracking-wider text-white/40">Articles représentatifs avec extraction PICO</p>
+        {data.top_articles.slice(0,5).map((a,i)=>(
+          <div key={a.id} className="rounded-2xl border border-white/5 bg-white/2 p-4 space-y-2">
+            <div className="flex items-start gap-2">
+              <span className="text-[10px] font-mono text-brand-300 shrink-0 mt-0.5">#{i+1}</span>
+              <div className="flex-1 min-w-0">
+                <p className="text-xs font-semibold text-white/85 leading-4 line-clamp-2">{a.title}</p>
+                <div className="flex flex-wrap gap-2 mt-1 text-[9px] text-white/40">
+                  <span>{a.year||'N/A'}</span>
+                  {a.journal && <span className="truncate max-w-[160px]">{a.journal}</span>}
+                  {a.study_design && <span className="rounded bg-brand-500/10 border border-brand-500/20 px-1 text-brand-300">{a.study_design}</span>}
+                  {a.citation_count != null && <span>{a.citation_count} cit.</span>}
+                  {a.similarity_score != null && <span className="text-gold-400/70">sim. {a.similarity_score.toFixed(2)}</span>}
+                  {a.screening_status && (
+                    <span className={`rounded px-1 ${
+                      a.screening_status === 'included' ? 'bg-brand-500/15 text-brand-300' :
+                      a.screening_status === 'excluded' ? 'bg-red-500/15 text-red-400' : 'bg-white/5 text-white/40'
+                    }`}>{a.screening_status === 'included' ? 'Inclus' : a.screening_status === 'excluded' ? 'Exclu' : 'En attente'}</span>
+                  )}
+                </div>
+              </div>
+            </div>
+            {a.pico_summary && (
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 mt-1">
+                {[
+                  {label:'P',title:'Population',val:a.pico_summary.population},
+                  {label:'I',title:'Intervention',val:a.pico_summary.intervention},
+                  {label:'O',title:'Outcome',val:a.pico_summary.outcome},
+                  {label:'Conclusion',title:'Conclusion clé',val:a.pico_summary.key_finding},
+                ].map(p=>(
+                  <div key={p.label} className="rounded-xl border border-white/5 bg-white/2 p-2">
+                    <div className="text-[8px] font-bold uppercase text-white/30 mb-0.5">{p.title}</div>
+                    <div className="text-[9px] text-white/65 leading-3.5 line-clamp-3">{p.val || '—'}</div>
+                  </div>
+                ))}
+              </div>
+            )}
+            {a.abstract_excerpt && !a.pico_summary && (
+              <p className="text-[9px] text-white/40 italic line-clamp-2">"{a.abstract_excerpt}..."</p>
+            )}
+          </div>
+        ))}
+      </div>
+
+      {/* Tableau PICO comparatif */}
+      {picoRows.length > 0 && (
+        <div className="space-y-2">
+          <p className="text-[10px] font-bold uppercase tracking-wider text-white/40">Tableau comparatif PICO ({picoRows.length} articles)</p>
+          <div className="overflow-x-auto rounded-2xl border border-white/5">
+            <table className="w-full text-[9px]">
+              <thead>
+                <tr className="border-b border-white/5">
+                  {['Titre','Année','Design','P','I','C','O','Conclusion','Niveau'].map(h=>(
+                    <th key={h} className="px-2 py-2 text-left text-[8px] font-bold uppercase text-white/30 whitespace-nowrap">{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {picoRows.slice(0,20).map((row,i)=>(
+                  <tr key={row.id} className={i%2===0?'bg-white/1':''} >
+                    <td className="px-2 py-1.5 text-white/70 max-w-[160px]"><span className="line-clamp-2 leading-3.5">{row.title}</span></td>
+                    <td className="px-2 py-1.5 text-white/40 whitespace-nowrap">{row.year||'N/A'}</td>
+                    <td className="px-2 py-1.5"><span className="rounded bg-brand-500/10 border border-brand-500/20 px-1 text-brand-300 whitespace-nowrap">{row.study_design||'N/A'}</span></td>
+                    <td className="px-2 py-1.5 text-white/55 max-w-[100px]"><span className="line-clamp-2">{row.pico.population||'—'}</span></td>
+                    <td className="px-2 py-1.5 text-white/55 max-w-[100px]"><span className="line-clamp-2">{row.pico.intervention||'—'}</span></td>
+                    <td className="px-2 py-1.5 text-white/55 max-w-[80px]"><span className="line-clamp-2">{row.pico.comparator||'—'}</span></td>
+                    <td className="px-2 py-1.5 text-white/55 max-w-[100px]"><span className="line-clamp-2">{row.pico.outcome||'—'}</span></td>
+                    <td className="px-2 py-1.5 text-white/55 max-w-[120px]"><span className="line-clamp-2">{row.pico.key_finding||'—'}</span></td>
+                    <td className="px-2 py-1.5 whitespace-nowrap">
+                      <span className={`rounded px-1 ${
+                        row.pico.evidence_level === 'forte' ? 'bg-brand-500/15 text-brand-300' :
+                        row.pico.evidence_level === 'modérée' ? 'bg-gold-400/15 text-gold-400' : 'bg-white/5 text-white/40'
+                      }`}>{row.pico.evidence_level||'N/A'}</span>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          {picoRows.length > 20 && <p className="text-[9px] text-white/30 text-right">{picoRows.length - 20} articles supplémentaires dans le PDF exporté</p>}
+        </div>
+      )}
     </div>
   );
 }
@@ -2518,12 +2650,64 @@ function KnowledgeGraphSection({ scenarioId }: { scenarioId: string }) {
 
 // ─── Section: Double-aveugle Screening + Kappa ────────────────────────────────
 
+// Reviewer code storage key
+const REVIEWER_CODE_KEY = 'literev_reviewer_code';
+const REVIEWER_ROLE_KEY = 'literev_reviewer_role';
+
 function DoubleBlindSection({ scenarioId }: { scenarioId: string }) {
   const [kappa, setKappa] = React.useState<KappaStats | null>(null);
   const [conflicts, setConflicts] = React.useState<any[]>([]);
   const [loading, setLoading] = React.useState(true);
-  const [reviewer, setReviewer] = React.useState<1|2>(1);
   const [submitting, setSubmitting] = React.useState<number|null>(null);
+
+  // Reviewer identity system
+  const [reviewerCode, setReviewerCode] = React.useState<string>(
+    () => localStorage.getItem(REVIEWER_CODE_KEY) ?? ''
+  );
+  const [reviewerRole, setReviewerRole] = React.useState<1|2|null>(
+    () => { const r = localStorage.getItem(REVIEWER_ROLE_KEY); return r ? (parseInt(r) as 1|2) : null; }
+  );
+  const [codeInput, setCodeInput] = React.useState('');
+  const [codeError, setCodeError] = React.useState('');
+  const reviewer: 1|2 = reviewerRole ?? 1;
+
+  const handleCodeSubmit = () => {
+    const code = codeInput.trim().toUpperCase();
+    if (!/^R-?\d{4}$/.test(code) && !/^\d{4}$/.test(code)) {
+      setCodeError('Format invalide. Utilisez 4 chiffres (ex: 2847) ou R-2847');
+      return;
+    }
+    const normalized = code.startsWith('R-') ? code : `R-${code}`;
+    // Assign role based on existing registrations
+    const existingCode = localStorage.getItem(REVIEWER_CODE_KEY);
+    const existingRole = localStorage.getItem(REVIEWER_ROLE_KEY);
+    let role: 1|2;
+    if (existingCode === normalized && existingRole) {
+      role = parseInt(existingRole) as 1|2;
+    } else {
+      // Check if R1 slot is taken (stored in sessionStorage for cross-tab)
+      const r1Code = sessionStorage.getItem(`literev_r1_${scenarioId}`);
+      if (!r1Code || r1Code === normalized) {
+        role = 1;
+        sessionStorage.setItem(`literev_r1_${scenarioId}`, normalized);
+      } else {
+        role = 2;
+      }
+    }
+    localStorage.setItem(REVIEWER_CODE_KEY, normalized);
+    localStorage.setItem(REVIEWER_ROLE_KEY, String(role));
+    setReviewerCode(normalized);
+    setReviewerRole(role);
+    setCodeError('');
+  };
+
+  const handleResetCode = () => {
+    localStorage.removeItem(REVIEWER_CODE_KEY);
+    localStorage.removeItem(REVIEWER_ROLE_KEY);
+    setReviewerCode('');
+    setReviewerRole(null);
+    setCodeInput('');
+  };
 
   const reload = React.useCallback(() => {
     setLoading(true);
@@ -2538,9 +2722,10 @@ function DoubleBlindSection({ scenarioId }: { scenarioId: string }) {
   React.useEffect(() => { reload(); }, [reload]);
 
   const decide = async (articleId: number, status: "included"|"excluded") => {
+    if (!reviewerCode) { alert('Veuillez d\'abord saisir votre code reviewer'); return; }
     setSubmitting(articleId);
     try {
-      await submitDoubleBlindDecision(scenarioId, { article_id: articleId, reviewer, status });
+      await submitDoubleBlindDecision(scenarioId, { article_id: articleId, reviewer, status, reviewer_code: reviewerCode });
       reload();
     } catch (e: any) {
       alert(e.message);
@@ -2561,22 +2746,49 @@ function DoubleBlindSection({ scenarioId }: { scenarioId: string }) {
       <SectionHeader
         icon={<Users size={14} className="text-brand-400" />}
         title="Screening Double-Aveugle"
-        subtitle="Évaluation indépendante par deux reviewers avec calcul du score Kappa de Cohen"
+        subtitle="Évaluation indépendante par deux reviewers identifiés par code — score Kappa de Cohen"
       />
 
-      {/* Sélecteur reviewer */}
-      <div className="flex items-center gap-3">
-        <span className="text-xs text-white/50">Vous êtes :</span>
-        {([1, 2] as const).map(r => (
-          <button key={r} onClick={() => setReviewer(r)}
-            className={`px-3 py-1.5 rounded-xl text-xs font-semibold transition ${
-              reviewer === r
-                ? 'bg-brand-700 text-gold-400'
-                : 'text-white/60 hover:text-white hover:bg-white/8'
-            }`}
-          >Reviewer {r}</button>
-        ))}
-      </div>
+      {/* Identification reviewer */}
+      {!reviewerCode ? (
+        <div className="rounded-2xl border border-white/10 bg-white/3 p-5 space-y-3">
+          <p className="text-xs font-semibold text-white/70">Identification Reviewer</p>
+          <p className="text-[10px] text-white/40 leading-relaxed">
+            Saisissez votre code reviewer à 4 chiffres pour commencer l'évaluation.
+            Ce code vous identifie de manière unique et détermine si vous êtes Reviewer 1 ou Reviewer 2.
+          </p>
+          <div className="flex gap-2">
+            <input
+              type="text"
+              value={codeInput}
+              onChange={e => { setCodeInput(e.target.value); setCodeError(''); }}
+              onKeyDown={e => e.key === 'Enter' && handleCodeSubmit()}
+              placeholder="Ex: 2847 ou R-2847"
+              maxLength={7}
+              className="flex-1 rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-xs text-white placeholder-white/25 focus:outline-none focus:border-brand-500/50"
+            />
+            <button onClick={handleCodeSubmit}
+              className="rounded-xl bg-brand-500 hover:bg-brand-400 text-white font-semibold px-4 py-2 text-xs transition">
+              Confirmer
+            </button>
+          </div>
+          {codeError && <p className="text-[10px] text-red-400">{codeError}</p>}
+          <p className="text-[9px] text-white/25 italic">Votre code est sauvegardé localement dans ce navigateur.</p>
+        </div>
+      ) : (
+        <div className="flex items-center justify-between gap-3 rounded-2xl border border-brand-500/20 bg-brand-500/5 px-4 py-3">
+          <div className="flex items-center gap-3">
+            <div className="h-8 w-8 rounded-xl bg-brand-500/20 flex items-center justify-center">
+              <span className="text-xs font-bold text-brand-300">R{reviewer}</span>
+            </div>
+            <div>
+              <p className="text-xs font-semibold text-white/80">Reviewer {reviewer} — <span className="font-mono text-brand-300">{reviewerCode}</span></p>
+              <p className="text-[9px] text-white/35">Identité sauvegardée dans ce navigateur</p>
+            </div>
+          </div>
+          <button onClick={handleResetCode} className="text-[9px] text-white/25 hover:text-white/50 transition">Changer</button>
+        </div>
+      )}
 
       {/* Score Kappa */}
       {kappa && (
@@ -2620,8 +2832,8 @@ function DoubleBlindSection({ scenarioId }: { scenarioId: string }) {
               <div key={art.id} className="rounded-xl border border-gold-500/20 bg-gold-500/5 p-3 space-y-2">
                 <p className="text-xs font-semibold text-white/80 leading-4">{art.title}</p>
                 <div className="flex items-center gap-4 text-[10px] text-white/50">
-                  <span>Reviewer 1 : <span className={art.reviewer_1_status === 'included' ? 'text-brand-300' : 'text-rose-300'}>{art.reviewer_1_status}</span></span>
-                  <span>Reviewer 2 : <span className={art.reviewer_2_status === 'included' ? 'text-brand-300' : 'text-rose-300'}>{art.reviewer_2_status}</span></span>
+                  <span>R1 {art.reviewer_1_code ? <span className="font-mono text-white/40">[{art.reviewer_1_code}]</span> : ''} : <span className={art.reviewer_1_status === 'included' ? 'text-brand-300' : 'text-rose-300'}>{art.reviewer_1_status}</span></span>
+                  <span>R2 {art.reviewer_2_code ? <span className="font-mono text-white/40">[{art.reviewer_2_code}]</span> : ''} : <span className={art.reviewer_2_status === 'included' ? 'text-brand-300' : 'text-rose-300'}>{art.reviewer_2_status}</span></span>
                 </div>
                 <div className="flex gap-2">
                   <button onClick={() => decide(art.id, 'included')} disabled={submitting === art.id}
@@ -2760,23 +2972,122 @@ function AlertsSection({ scenarioId }: { scenarioId: string }) {
   );
 }
 
+// ─── Composite Tabs ──────────────────────────────────────────────────────────
+
+/** ReviewTab : Corpus + PRISMA + Double-Aveugle (sous-tabs) */
+function ReviewTab({ scenarioId, detail }: { scenarioId: string; detail: ScenarioDetail }) {
+  const [sub, setSub] = React.useState<"corpus" | "prisma" | "screening">("corpus");
+  const SUB = [
+    { key: "corpus" as const,    label: "Corpus",         icon: <FileText size={12} /> },
+    { key: "prisma" as const,    label: "PRISMA",         icon: <Shield size={12} /> },
+    { key: "screening" as const, label: "Double-Aveugle", icon: <Users size={12} /> },
+  ];
+  return (
+    <div className="space-y-4">
+      <div className="flex gap-1.5 border-b border-white/5 pb-3">
+        {SUB.map(s => (
+          <button key={s.key} onClick={() => setSub(s.key)}
+            className={`flex items-center gap-1.5 rounded-xl px-3 py-1.5 text-xs font-medium transition ${
+              sub === s.key ? "bg-brand-700 text-gold-400 font-semibold" : "text-white/60 hover:text-white hover:bg-white/8"
+            }`}>
+            {s.icon}{s.label}
+          </button>
+        ))}
+      </div>
+      {sub === "corpus" && <CorpusSection scenarioId={scenarioId} detail={detail} />}
+      {sub === "prisma" && <PrismaSection scenarioId={scenarioId} />}
+      {sub === "screening" && <DoubleBlindSection scenarioId={scenarioId} />}
+    </div>
+  );
+}
+
+/** EvidenceTab : PICO + Evidence Brief enrichi (sous-tabs) */
+function EvidenceTab({ scenarioId, detail }: { scenarioId: string; detail: ScenarioDetail }) {
+  const [sub, setSub] = React.useState<"pico" | "brief">("brief");
+  const SUB = [
+    { key: "brief" as const, label: "Evidence Brief", icon: <BookOpen size={12} /> },
+    { key: "pico" as const,  label: "Tableau PICO",   icon: <Table2 size={12} /> },
+  ];
+  return (
+    <div className="space-y-4">
+      <div className="flex gap-1.5 border-b border-white/5 pb-3">
+        {SUB.map(s => (
+          <button key={s.key} onClick={() => setSub(s.key)}
+            className={`flex items-center gap-1.5 rounded-xl px-3 py-1.5 text-xs font-medium transition ${
+              sub === s.key ? "bg-brand-700 text-gold-400 font-semibold" : "text-white/60 hover:text-white hover:bg-white/8"
+            }`}>
+            {s.icon}{s.label}
+          </button>
+        ))}
+      </div>
+      {sub === "brief" && <EvidenceBriefSection scenarioId={scenarioId} detail={detail} />}
+      {sub === "pico" && <PicoSection scenarioId={scenarioId} />}
+    </div>
+  );
+}
+
+/** VizTab : Clustering + Knowledge Graph (sous-tabs) */
+function VizTab({ scenarioId }: { scenarioId: string }) {
+  const [sub, setSub] = React.useState<"clustering" | "kg">("clustering");
+  const SUB = [
+    { key: "clustering" as const, label: "Clustering & Topics", icon: <Layers size={12} /> },
+    { key: "kg" as const,         label: "Knowledge Graph",     icon: <Network size={12} /> },
+  ];
+  return (
+    <div className="space-y-4">
+      <div className="flex gap-1.5 border-b border-white/5 pb-3">
+        {SUB.map(s => (
+          <button key={s.key} onClick={() => setSub(s.key)}
+            className={`flex items-center gap-1.5 rounded-xl px-3 py-1.5 text-xs font-medium transition ${
+              sub === s.key ? "bg-brand-700 text-gold-400 font-semibold" : "text-white/60 hover:text-white hover:bg-white/8"
+            }`}>
+            {s.icon}{s.label}
+          </button>
+        ))}
+      </div>
+      {sub === "clustering" && <ClusteringSection scenarioId={scenarioId} />}
+      {sub === "kg" && <KnowledgeGraphSection scenarioId={scenarioId} />}
+    </div>
+  );
+}
+
+/** VariablesModelTab : Variables & Données + Modèle prédictif (sous-tabs) */
+function VariablesModelTab({ scenarioId, detail }: { scenarioId: string; detail: ScenarioDetail }) {
+  const [sub, setSub] = React.useState<"variables" | "model">("variables");
+  const SUB = [
+    { key: "variables" as const, label: "Données & Variables", icon: <Database size={12} /> },
+    { key: "model" as const,     label: "Modèle Prédictif",   icon: <Brain size={12} /> },
+  ];
+  return (
+    <div className="space-y-4">
+      <div className="flex gap-1.5 border-b border-white/5 pb-3">
+        {SUB.map(s => (
+          <button key={s.key} onClick={() => setSub(s.key)}
+            className={`flex items-center gap-1.5 rounded-xl px-3 py-1.5 text-xs font-medium transition ${
+              sub === s.key ? "bg-brand-700 text-gold-400 font-semibold" : "text-white/60 hover:text-white hover:bg-white/8"
+            }`}>
+            {s.icon}{s.label}
+          </button>
+        ))}
+      </div>
+      {sub === "variables" && <VariablesSection detail={detail} scenarioId={scenarioId} />}
+      {sub === "model" && <ModelSection scenarioId={scenarioId} />}
+    </div>
+  );
+}
+
 // ─── Main Component ───────────────────────────────────────────────────────────
 
-type SectionKey = "corpus" | "pico" | "prisma" | "rag" | "variables" | "model" | "clustering" | "brief" | "queries" | "kg" | "screening" | "alerts";
+type SectionKey = "review" | "evidence" | "assistant" | "viz" | "variables" | "queries" | "alerts";
 
 const SECTIONS: Array<{ key: SectionKey; label: string; icon: React.ReactNode }> = [
-  { key: "corpus",     label: "Corpus",                   icon: <FileText size={13} /> },
-  { key: "pico",       label: "PICO",                     icon: <Table2 size={13} /> },
-  { key: "prisma",     label: "PRISMA",                   icon: <Shield size={13} /> },
-  { key: "screening",  label: "Double-Aveugle",           icon: <Users size={13} /> },
-  { key: "rag",        label: "Evidence (RAG)",            icon: <MessageSquare size={13} /> },
-  { key: "variables", label: "Données & Variables",       icon: <Database size={13} /> },
-  { key: "model",     label: "Modèle prédictif",          icon: <Brain size={13} /> },
-  { key: "clustering",label: "Clustering & Topics",       icon: <Layers size={13} /> },
-  { key: "kg",         label: "Knowledge Graph",           icon: <Network size={13} /> },
-  { key: "brief",     label: "Evidence Brief",            icon: <BookOpen size={13} /> },
-  { key: "queries",   label: "Stratégie de recherche",    icon: <Search size={13} /> },
-  { key: "alerts",    label: "Alertes & Living Review",   icon: <Bell size={13} /> },
+  { key: "review",    label: "Corpus & Revue",            icon: <FileText size={13} /> },
+  { key: "evidence",  label: "PICO & Evidence",           icon: <BookOpen size={13} /> },
+  { key: "assistant", label: "Assistant IA",              icon: <MessageSquare size={13} /> },
+  { key: "viz",       label: "Visualisation",             icon: <Layers size={13} /> },
+  { key: "variables", label: "Variables & Modèle",        icon: <Database size={13} /> },
+  { key: "queries",   label: "Stratégie",                icon: <Search size={13} /> },
+  { key: "alerts",    label: "Alertes",                   icon: <Bell size={13} /> },
 ];
 
 interface ScenarioDetailPageProps {
@@ -2788,7 +3099,7 @@ export function ScenarioDetailPage({ scenarioId, onBack }: ScenarioDetailPagePro
   const [detail, setDetail] = useState<ScenarioDetail | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [activeSection, setActiveSection] = useState<SectionKey>("corpus");
+  const [activeSection, setActiveSection] = useState<SectionKey>("review");
 
   useEffect(() => {
     setLoading(true);
@@ -2896,17 +3207,12 @@ export function ScenarioDetailPage({ scenarioId, onBack }: ScenarioDetailPagePro
       </div>
 
       {/* Contenu de la section active */}
+      {activeSection === "review" && <ReviewTab scenarioId={scenarioId} detail={detail} />}
+      {activeSection === "evidence" && <EvidenceTab scenarioId={scenarioId} detail={detail} />}
+      {activeSection === "assistant" && <RagSection scenarioId={scenarioId} detail={detail} />}
+      {activeSection === "viz" && <VizTab scenarioId={scenarioId} />}
+      {activeSection === "variables" && <VariablesModelTab detail={detail} scenarioId={scenarioId} />}
       {activeSection === "queries" && <QueriesSection detail={detail} />}
-      {activeSection === "variables" && <VariablesSection detail={detail} scenarioId={scenarioId} />}
-      {activeSection === "model" && <ModelSection scenarioId={scenarioId} />}
-      {activeSection === "corpus" && <CorpusSection scenarioId={scenarioId} detail={detail} />}
-      {activeSection === "pico" && <PicoSection scenarioId={scenarioId} />}
-      {activeSection === "clustering" && <ClusteringSection scenarioId={scenarioId} />}
-      {activeSection === "kg" && <KnowledgeGraphSection scenarioId={scenarioId} />}
-      {activeSection === "rag" && <RagSection scenarioId={scenarioId} detail={detail} />}
-      {activeSection === "prisma" && <PrismaSection scenarioId={scenarioId} />}
-      {activeSection === "screening" && <DoubleBlindSection scenarioId={scenarioId} />}
-      {activeSection === "brief" && <EvidenceBriefSection scenarioId={scenarioId} detail={detail} />}
       {activeSection === "alerts" && <AlertsSection scenarioId={scenarioId} />}
     </div>
   );

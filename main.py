@@ -1444,6 +1444,34 @@ def get_gesica_scenarios() -> list[dict[str, Any]]:
         """)
         db_counts = {row["scenario_id"]: row["article_count"] for row in conn.execute(sql_counts).mappings().all()}
         
+        # Récupérer les comptages de screening par scénario
+        sql_screening = text("""
+            SELECT
+                ars.scenario_id,
+                COUNT(CASE WHEN d.screening_status = 'included' THEN 1 END) as included_count,
+                COUNT(CASE WHEN d.screening_status = 'excluded' THEN 1 END) as excluded_count
+            FROM article_scenarios ars
+            JOIN literature_document d ON d.id = ars.document_id
+            GROUP BY ars.scenario_id;
+        """)
+        screening_counts = {
+            row["scenario_id"]: {"included": row["included_count"], "excluded": row["excluded_count"]}
+            for row in conn.execute(sql_screening).mappings().all()
+        }
+        
+        # Récupérer les scores Kappa par scénario
+        sql_kappa = text("""
+            SELECT scenario_id, kappa_score
+            FROM scenario_kappa_cache
+        """) if False else None  # Table optionnelle - fallback si inexistante
+        kappa_scores: dict = {}
+        try:
+            if sql_kappa is None:
+                raise Exception("skip")
+            kappa_scores = {row["scenario_id"]: row["kappa_score"] for row in conn.execute(sql_kappa).mappings().all()}
+        except Exception:
+            pass
+        
         result = []
         # Itérer sur TOUS les 31 scénarios définis dans les métadonnées statiques
         for scenario_id, meta in GESICA_SCENARIO_METADATA.items():
@@ -1453,6 +1481,7 @@ def get_gesica_scenarios() -> list[dict[str, Any]]:
                 continue  # Scénario masqué (code conservé, non affiché)
             
             article_count = db_counts.get(scenario_id, 0)
+            sc = screening_counts.get(scenario_id, {"included": 0, "excluded": 0})
             
             # Récupérer les 5 articles les plus récents et pertinents pour ce scénario
             articles = []
@@ -1480,6 +1509,10 @@ def get_gesica_scenarios() -> list[dict[str, Any]]:
                 "description": meta["description"],
                 "cluster": meta["cluster"],
                 "article_count": article_count,
+                "included_count": sc["included"],
+                "excluded_count": sc["excluded"],
+                "kappa_score": kappa_scores.get(scenario_id),
+                "hidden": meta.get("hidden", False),
                 "recommended_actions": meta["recommended_actions"],
                 "relevant_articles": articles,
                 "living_evidence_note": (
@@ -3810,7 +3843,7 @@ def get_scenario_pico_bulk(scenario_id: str, limit: int = 200, offset: int = 0) 
 # ─── Evidence Brief PDF ───────────────────────────────────────────────────────
 @app.get("/gesica/scenarios/{scenario_id}/evidence-brief")
 def get_evidence_brief(scenario_id: str) -> dict[str, Any]:
-    """Retourne les données structurées pour générer un Evidence Brief PDF côté client."""
+    """Retourne les données structurées enrichies pour l'Evidence Brief (PICO, synthèse, designs, années)."""
     with engine.connect() as conn:
         # Stats du corpus
         corpus_stats = conn.execute(text("""
@@ -3820,41 +3853,139 @@ def get_evidence_brief(scenario_id: str) -> dict[str, Any]:
                 COUNT(*) FILTER (WHERE pico_json IS NOT NULL) AS with_pico,
                 COUNT(*) FILTER (WHERE screening_status = 'included') AS included,
                 COUNT(*) FILTER (WHERE screening_status = 'excluded') AS excluded,
+                COUNT(*) FILTER (WHERE screening_status = 'pending' OR screening_status IS NULL) AS pending,
+                COUNT(*) FILTER (WHERE full_text IS NOT NULL OR chunk_count > 0) AS with_fulltext,
                 MIN(year) AS year_min,
-                MAX(year) AS year_max
-            FROM literature_document
-            WHERE scenario_type = :sid AND project_context = 'literev'
+                MAX(year) AS year_max,
+                AVG(citation_count) FILTER (WHERE citation_count IS NOT NULL) AS avg_citations,
+                MAX(citation_count) AS max_citations
+            FROM literature_document ld
+            WHERE EXISTS (
+                SELECT 1 FROM article_scenarios asn
+                WHERE asn.document_id = ld.id AND asn.scenario_id = :sid
+            ) AND project_context = 'literev'
         """), {"sid": scenario_id}).mappings().fetchone()
-        # Top articles (représentatifs)
+
+        # Top articles par citations (inclus en priorité)
         top_articles = conn.execute(text("""
-            SELECT id, title, abstract, year, journal, authors, doi,
-                   study_design, pico_json, citation_count
-            FROM literature_document
-            WHERE scenario_type = :sid
-              AND project_context = 'literev'
-              AND is_duplicate IS NOT TRUE
-              AND abstract IS NOT NULL
-            ORDER BY citation_count DESC NULLS LAST, year DESC NULLS LAST
-            LIMIT 10
+            SELECT ld.id, ld.title, ld.abstract, ld.year, ld.journal, ld.authors, ld.doi,
+                   ld.study_design, ld.pico_json, ld.citation_count, ld.screening_status,
+                   ld.quality_score, asn.similarity_score
+            FROM literature_document ld
+            JOIN article_scenarios asn ON asn.document_id = ld.id AND asn.scenario_id = :sid
+            WHERE ld.project_context = 'literev'
+              AND ld.is_duplicate IS NOT TRUE
+              AND ld.abstract IS NOT NULL
+            ORDER BY
+                CASE WHEN ld.screening_status = 'included' THEN 0 ELSE 1 END,
+                ld.citation_count DESC NULLS LAST,
+                ld.year DESC NULLS LAST
+            LIMIT 15
         """), {"sid": scenario_id}).mappings().fetchall()
+
         # Distribution par type d'étude
         study_designs = conn.execute(text("""
             SELECT
-                COALESCE(study_design, pico_json->>'study_design', 'Non classifié') AS design,
+                COALESCE(ld.study_design, ld.pico_json->>'study_design', 'Non classifié') AS design,
                 COUNT(*) AS n
-            FROM literature_document
-            WHERE scenario_type = :sid AND project_context = 'literev'
-              AND is_duplicate IS NOT TRUE
-            GROUP BY 1 ORDER BY 2 DESC LIMIT 10
+            FROM literature_document ld
+            JOIN article_scenarios asn ON asn.document_id = ld.id AND asn.scenario_id = :sid
+            WHERE ld.project_context = 'literev'
+              AND ld.is_duplicate IS NOT TRUE
+            GROUP BY 1 ORDER BY 2 DESC LIMIT 12
         """), {"sid": scenario_id}).mappings().fetchall()
-        # Distribution par année
+
+        # Distribution par année (20 dernières années)
         year_dist = conn.execute(text("""
-            SELECT year, COUNT(*) AS n
-            FROM literature_document
-            WHERE scenario_type = :sid AND project_context = 'literev'
-              AND is_duplicate IS NOT TRUE AND year IS NOT NULL
-            GROUP BY year ORDER BY year DESC LIMIT 15
+            SELECT ld.year, COUNT(*) AS n
+            FROM literature_document ld
+            JOIN article_scenarios asn ON asn.document_id = ld.id AND asn.scenario_id = :sid
+            WHERE ld.project_context = 'literev'
+              AND ld.is_duplicate IS NOT TRUE AND ld.year IS NOT NULL
+              AND ld.year >= 2000
+            GROUP BY ld.year ORDER BY ld.year ASC
         """), {"sid": scenario_id}).mappings().fetchall()
+
+        # Distribution par source
+        source_dist = conn.execute(text("""
+            SELECT ld.source, COUNT(*) AS n
+            FROM literature_document ld
+            JOIN article_scenarios asn ON asn.document_id = ld.id AND asn.scenario_id = :sid
+            WHERE ld.project_context = 'literev'
+              AND ld.is_duplicate IS NOT TRUE
+            GROUP BY ld.source ORDER BY n DESC LIMIT 8
+        """), {"sid": scenario_id}).mappings().fetchall()
+
+        # Stats PICO détaillées (P, I, C, O extraits)
+        pico_articles = conn.execute(text("""
+            SELECT ld.id, ld.title, ld.year, ld.journal, ld.citation_count,
+                   ld.pico_json, ld.study_design, ld.screening_status, asn.similarity_score
+            FROM literature_document ld
+            JOIN article_scenarios asn ON asn.document_id = ld.id AND asn.scenario_id = :sid
+            WHERE ld.project_context = 'literev'
+              AND ld.pico_json IS NOT NULL
+              AND ld.is_duplicate IS NOT TRUE
+            ORDER BY
+                CASE WHEN ld.screening_status = 'included' THEN 0 ELSE 1 END,
+                ld.citation_count DESC NULLS LAST
+            LIMIT 20
+        """), {"sid": scenario_id}).mappings().fetchall()
+
+        # Distribution des niveaux de preuve
+        evidence_levels = conn.execute(text("""
+            SELECT
+                CASE
+                    WHEN quality_score >= 0.7 THEN 'Forte'
+                    WHEN quality_score >= 0.4 THEN 'Modérée'
+                    WHEN quality_score IS NOT NULL THEN 'Faible'
+                    ELSE 'Non évaluée'
+                END AS level,
+                COUNT(*) AS n
+            FROM literature_document ld
+            JOIN article_scenarios asn ON asn.document_id = ld.id AND asn.scenario_id = :sid
+            WHERE ld.project_context = 'literev'
+              AND ld.is_duplicate IS NOT TRUE
+            GROUP BY 1 ORDER BY 2 DESC
+        """), {"sid": scenario_id}).mappings().fetchall()
+
+        # Double-aveugle stats
+        blind_stats = conn.execute(text("""
+            SELECT
+                COUNT(*) FILTER (WHERE reviewer_1_status IS NOT NULL) AS r1_done,
+                COUNT(*) FILTER (WHERE reviewer_2_status IS NOT NULL) AS r2_done,
+                COUNT(*) FILTER (WHERE reviewer_1_status IS NOT NULL AND reviewer_2_status IS NOT NULL) AS both_done,
+                COUNT(*) FILTER (WHERE kappa_resolved IS TRUE) AS agreements,
+                COUNT(*) FILTER (WHERE kappa_final_status = 'conflict') AS conflicts
+            FROM literature_document ld
+            JOIN article_scenarios asn ON asn.document_id = ld.id AND asn.scenario_id = :sid
+            WHERE ld.project_context = 'literev'
+        """), {"sid": scenario_id}).mappings().fetchone()
+
+    # Construire le tableau comparatif PICO
+    pico_table = []
+    for r in pico_articles:
+        pj = r["pico_json"] or {}
+        pico_table.append({
+            "id": r["id"],
+            "title": (r["title"] or "")[:120],
+            "year": r["year"],
+            "journal": r["journal"],
+            "citation_count": r["citation_count"],
+            "study_design": r["study_design"] or pj.get("study_design", ""),
+            "screening_status": r["screening_status"],
+            "similarity_score": round(float(r["similarity_score"]), 3) if r["similarity_score"] else None,
+            "pico": {
+                "population": pj.get("population", pj.get("P", "")),
+                "intervention": pj.get("intervention", pj.get("I", "")),
+                "comparator": pj.get("comparator", pj.get("C", "")),
+                "outcome": pj.get("outcome", pj.get("O", "")),
+                "study_design": pj.get("study_design", ""),
+                "key_finding": pj.get("key_finding", pj.get("conclusion", "")),
+                "limitations": pj.get("limitations", ""),
+                "evidence_level": pj.get("evidence_level", ""),
+            }
+        })
+
     return {
         "scenario_id": scenario_id,
         "generated_at": __import__('datetime').datetime.now().isoformat(),
@@ -3862,10 +3993,22 @@ def get_evidence_brief(scenario_id: str) -> dict[str, Any]:
             "total": int(corpus_stats["total"] or 0),
             "duplicates": int(corpus_stats["duplicates"] or 0),
             "with_pico": int(corpus_stats["with_pico"] or 0),
+            "with_fulltext": int(corpus_stats["with_fulltext"] or 0),
             "included": int(corpus_stats["included"] or 0),
             "excluded": int(corpus_stats["excluded"] or 0),
+            "pending": int(corpus_stats["pending"] or 0),
             "year_min": corpus_stats["year_min"],
             "year_max": corpus_stats["year_max"],
+            "avg_citations": round(float(corpus_stats["avg_citations"]), 1) if corpus_stats["avg_citations"] else None,
+            "max_citations": int(corpus_stats["max_citations"]) if corpus_stats["max_citations"] else None,
+            "pico_coverage_pct": round(100 * int(corpus_stats["with_pico"] or 0) / max(int(corpus_stats["total"] or 1), 1), 1),
+        },
+        "double_blind_stats": {
+            "reviewer_1_done": int(blind_stats["r1_done"] or 0),
+            "reviewer_2_done": int(blind_stats["r2_done"] or 0),
+            "both_done": int(blind_stats["both_done"] or 0),
+            "agreements": int(blind_stats["agreements"] or 0),
+            "conflicts": int(blind_stats["conflicts"] or 0),
         },
         "top_articles": [
             {
@@ -3877,12 +4020,24 @@ def get_evidence_brief(scenario_id: str) -> dict[str, Any]:
                 "doi": r["doi"],
                 "study_design": r["study_design"] or (r["pico_json"].get("study_design") if r["pico_json"] else None),
                 "citation_count": r["citation_count"],
-                "abstract_excerpt": (r["abstract"] or "")[:300],
+                "screening_status": r["screening_status"],
+                "quality_score": round(float(r["quality_score"]), 2) if r["quality_score"] else None,
+                "similarity_score": round(float(r["similarity_score"]), 3) if r["similarity_score"] else None,
+                "abstract_excerpt": (r["abstract"] or "")[:500],
+                "pico_summary": {
+                    "population": r["pico_json"].get("population", r["pico_json"].get("P", "")) if r["pico_json"] else "",
+                    "intervention": r["pico_json"].get("intervention", r["pico_json"].get("I", "")) if r["pico_json"] else "",
+                    "outcome": r["pico_json"].get("outcome", r["pico_json"].get("O", "")) if r["pico_json"] else "",
+                    "key_finding": r["pico_json"].get("key_finding", r["pico_json"].get("conclusion", "")) if r["pico_json"] else "",
+                } if r["pico_json"] else None,
             }
             for r in top_articles
         ],
+        "pico_table": pico_table,
         "study_design_distribution": [{"design": d["design"], "count": int(d["n"])} for d in study_designs],
         "year_distribution": [{"year": d["year"], "count": int(d["n"])} for d in year_dist],
+        "source_distribution": [{"source": s["source"], "count": int(s["n"])} for s in source_dist],
+        "evidence_level_distribution": [{"level": e["level"], "count": int(e["n"])} for e in evidence_levels],
     }
 
 
@@ -3914,6 +4069,7 @@ class DoubleBlindDecisionIn(BaseModel):
     reviewer: int  # 1 ou 2
     status: str    # 'included' | 'excluded' | 'pending'
     reason: str | None = None
+    reviewer_code: str | None = None  # Code reviewer (ex: R-2847)
 
 
 @app.post("/gesica/scenarios/{scenario_id}/double-blind/decision")
@@ -3932,22 +4088,47 @@ def submit_double_blind_decision(
 
     col_status = f"reviewer_{payload.reviewer}_status"
     col_reason = f"reviewer_{payload.reviewer}_reason"
+    col_code = f"reviewer_{payload.reviewer}_code"
 
     with engine.begin() as conn:
-        row = conn.execute(text(f"""
-            UPDATE literature_document
-            SET {col_status} = :status,
-                {col_reason} = :reason
-            WHERE id = :article_id
-              AND project_context = 'literev'
-              AND scenario_type = :scenario_id
-            RETURNING id, reviewer_1_status, reviewer_2_status
-        """), {
-            "status": payload.status,
-            "reason": payload.reason,
-            "article_id": payload.article_id,
-            "scenario_id": scenario_id,
-        }).first()
+        # Vérifier que l'article appartient bien au scénario (via article_scenarios)
+        exists = conn.execute(text("""
+            SELECT 1 FROM article_scenarios
+            WHERE document_id = :article_id AND scenario_id = :scenario_id
+        """), {"article_id": payload.article_id, "scenario_id": scenario_id}).first()
+        
+        if not exists:
+            raise HTTPException(status_code=404, detail="Article non trouvé dans ce scénario")
+        
+        # Mettre à jour le statut reviewer (colonnes sur literature_document)
+        # Ajouter reviewer_N_code si la colonne existe
+        try:
+            row = conn.execute(text(f"""
+                UPDATE literature_document
+                SET {col_status} = :status,
+                    {col_reason} = :reason,
+                    {col_code} = :reviewer_code
+                WHERE id = :article_id
+                RETURNING id, reviewer_1_status, reviewer_2_status
+            """), {
+                "status": payload.status,
+                "reason": payload.reason,
+                "reviewer_code": payload.reviewer_code,
+                "article_id": payload.article_id,
+            }).first()
+        except Exception:
+            # Fallback si la colonne reviewer_N_code n'existe pas encore
+            row = conn.execute(text(f"""
+                UPDATE literature_document
+                SET {col_status} = :status,
+                    {col_reason} = :reason
+                WHERE id = :article_id
+                RETURNING id, reviewer_1_status, reviewer_2_status
+            """), {
+                "status": payload.status,
+                "reason": payload.reason,
+                "article_id": payload.article_id,
+            }).first()
 
         if not row:
             raise HTTPException(status_code=404, detail="Article non trouvé")

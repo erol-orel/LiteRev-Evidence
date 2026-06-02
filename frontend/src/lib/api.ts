@@ -333,6 +333,10 @@ export interface GesicaScenario {
   articleCount: number;
   livingEvidenceNote: string;
   recommendedActions: string[];
+  hidden?: boolean;
+  included_count?: number;
+  excluded_count?: number;
+  kappa_score?: number | null;
   relevantArticles: Array<{
     id: number;
     title: string;
@@ -1831,10 +1835,22 @@ export interface EvidenceBriefData {
     total: number;
     duplicates: number;
     with_pico: number;
+    with_fulltext: number;
     included: number;
     excluded: number;
+    pending: number;
     year_min: number | null;
     year_max: number | null;
+    avg_citations: number | null;
+    max_citations: number | null;
+    pico_coverage_pct: number;
+  };
+  double_blind_stats: {
+    reviewer_1_done: number;
+    reviewer_2_done: number;
+    both_done: number;
+    agreements: number;
+    conflicts: number;
   };
   top_articles: Array<{
     id: number;
@@ -1845,10 +1861,41 @@ export interface EvidenceBriefData {
     doi: string | null;
     study_design: string | null;
     citation_count: number | null;
+    screening_status: string | null;
+    quality_score: number | null;
+    similarity_score: number | null;
     abstract_excerpt: string;
+    pico_summary: {
+      population: string;
+      intervention: string;
+      outcome: string;
+      key_finding: string;
+    } | null;
+  }>;
+  pico_table: Array<{
+    id: number;
+    title: string;
+    year: number | null;
+    journal: string | null;
+    citation_count: number | null;
+    study_design: string;
+    screening_status: string | null;
+    similarity_score: number | null;
+    pico: {
+      population: string;
+      intervention: string;
+      comparator: string;
+      outcome: string;
+      study_design: string;
+      key_finding: string;
+      limitations: string;
+      evidence_level: string;
+    };
   }>;
   study_design_distribution: Array<{ design: string; count: number }>;
   year_distribution: Array<{ year: number; count: number }>;
+  source_distribution: Array<{ source: string; count: number }>;
+  evidence_level_distribution: Array<{ level: string; count: number }>;
 }
 
 export async function fetchEvidenceBrief(scenarioId: string): Promise<EvidenceBriefData> {
@@ -2006,6 +2053,7 @@ export interface DoubleBlindDecision {
   reviewer: 1 | 2;
   status: "included" | "excluded" | "pending";
   reason?: string;
+  reviewer_code?: string;
 }
 
 export async function submitDoubleBlindDecision(
