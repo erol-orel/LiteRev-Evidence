@@ -47,6 +47,7 @@ import {
   type KnowledgeGraphData,
   type KGNode,
   type KappaStats,
+  scenarioBase,
 } from "../lib/api";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -930,8 +931,7 @@ function ClusteringSection({ scenarioId }: { scenarioId: string }) {
         setData(result);
         pollRef.current = setInterval(async () => {
           try {
-            const BASE = (import.meta as any).env?.VITE_API_BASE ?? "/api";
-            const r = await fetch(`${BASE}/gesica/scenarios/${scenarioId}/clustering/status`);
+            const r = await fetch(`${scenarioBase(scenarioId)}/${scenarioId}/clustering/status`);
             if (!r.ok) return;
             const status = await r.json();
             if (status.status === "done" || (status.clusters && status.clusters.length > 0)) {

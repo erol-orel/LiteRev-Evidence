@@ -5307,3 +5307,1354 @@ def send_alert_digest(
         "emails_sent": sent,
         "dry_run": dry_run,
     }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# USER SCENARIOS — Recherches sauvegardées persistées en base
+# ─────────────────────────────────────────────────────────────────────────────
+# Chaque recherche sauvegardée devient un vrai scénario utilisateur avec :
+#   - son propre corpus (articles ingérés via PubMed)
+#   - tous les onglets du ScenarioDetailPage (corpus, PICO, screening, RAG, etc.)
+#   - un ID de la forme "usr-<uuid4_court>"
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _ensure_user_scenarios_table() -> None:
+    """Crée la table user_scenarios si elle n'existe pas."""
+    with engine.begin() as conn:
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS user_scenarios (
+                id          VARCHAR(40)  PRIMARY KEY,
+                name        VARCHAR(255) NOT NULL,
+                query       TEXT         NOT NULL,
+                mode        VARCHAR(20)  NOT NULL DEFAULT 'hybrid',
+                filters     JSONB        NOT NULL DEFAULT '{}',
+                result_count INTEGER     DEFAULT 0,
+                pinned      BOOLEAN      DEFAULT FALSE,
+                created_at  TIMESTAMP    DEFAULT NOW(),
+                updated_at  TIMESTAMP    DEFAULT NOW()
+            )
+        """))
+    logger.info("Table user_scenarios vérifiée/créée.")
+
+try:
+    _ensure_user_scenarios_table()
+except Exception as _e:
+    logger.warning(f"_ensure_user_scenarios_table: {_e}")
+
+
+class UserScenarioIn(BaseModel):
+    name: str = Field(..., min_length=1, max_length=255)
+    query: str = Field(..., min_length=1)
+    mode: str = Field(default="hybrid")
+    filters: dict[str, Any] = Field(default_factory=dict)
+    result_count: int = Field(default=0, ge=0)
+    pinned: bool = Field(default=False)
+
+
+class UserScenarioPatch(BaseModel):
+    name: str | None = None
+    pinned: bool | None = None
+    mode: str | None = None
+    filters: dict[str, Any] | None = None
+
+
+# ── Helpers internes ──────────────────────────────────────────────────────────
+
+def _get_user_scenario_or_404(scenario_id: str) -> dict[str, Any]:
+    """Retourne la ligne user_scenarios ou lève 404."""
+    with engine.connect() as conn:
+        row = conn.execute(text("""
+            SELECT id, name, query, mode, filters, result_count, pinned, created_at, updated_at
+            FROM user_scenarios WHERE id = :id
+        """), {"id": scenario_id}).mappings().first()
+    if not row:
+        raise HTTPException(status_code=404, detail=f"Scénario utilisateur '{scenario_id}' non trouvé")
+    return dict(row)
+
+
+def _user_scenario_to_gesica_format(row: dict[str, Any]) -> dict[str, Any]:
+    """Convertit une ligne user_scenarios au format GesicaScenario (liste)."""
+    with engine.connect() as conn:
+        counts = conn.execute(text("""
+            SELECT
+                COUNT(DISTINCT ars.document_id) AS article_count,
+                COUNT(DISTINCT ars.document_id) FILTER (
+                    WHERE d.screening_status = 'included'
+                ) AS included_count,
+                COUNT(DISTINCT ars.document_id) FILTER (
+                    WHERE d.screening_status = 'excluded'
+                ) AS excluded_count
+            FROM article_scenarios ars
+            JOIN literature_document d ON d.id = ars.document_id
+            WHERE ars.scenario_id = :sid
+        """), {"sid": row["id"]}).mappings().first()
+
+    article_count = int(counts["article_count"] or 0) if counts else 0
+    included = int(counts["included_count"] or 0) if counts else 0
+    excluded = int(counts["excluded_count"] or 0) if counts else 0
+
+    return {
+        "id": row["id"],
+        "title": row["name"],
+        "description": f"Recherche sauvegardée : {row['query']}",
+        "cluster": "user",
+        "article_count": article_count,
+        "included_count": included,
+        "excluded_count": excluded,
+        "kappa_score": None,
+        "hidden": False,
+        "recommended_actions": [],
+        "relevant_articles": [],
+        "living_evidence_note": (
+            f"Scénario utilisateur · {article_count} articles indexés."
+            if article_count > 0
+            else "Aucun article indexé. Lancez la population via PubMed."
+        ),
+        "pinned": bool(row.get("pinned", False)),
+        "query": row["query"],
+        "mode": row["mode"],
+        "filters": row.get("filters") or {},
+        "result_count": row.get("result_count", 0),
+        "created_at": row["created_at"].isoformat() if row.get("created_at") else None,
+        "updated_at": row["updated_at"].isoformat() if row.get("updated_at") else None,
+        "is_user_scenario": True,
+    }
+
+
+# ── CRUD ──────────────────────────────────────────────────────────────────────
+
+@app.get("/user-scenarios")
+def list_user_scenarios() -> list[dict[str, Any]]:
+    """Liste tous les scénarios utilisateur (recherches sauvegardées)."""
+    with engine.connect() as conn:
+        rows = conn.execute(text("""
+            SELECT id, name, query, mode, filters, result_count, pinned, created_at, updated_at
+            FROM user_scenarios
+            ORDER BY pinned DESC, created_at DESC
+        """)).mappings().all()
+    return [_user_scenario_to_gesica_format(dict(r)) for r in rows]
+
+
+@app.post("/user-scenarios", status_code=201)
+def create_user_scenario(payload: UserScenarioIn) -> dict[str, Any]:
+    """Crée un nouveau scénario utilisateur depuis une recherche sauvegardée."""
+    import uuid
+    new_id = "usr-" + str(uuid.uuid4()).replace("-", "")[:12]
+    with engine.begin() as conn:
+        conn.execute(text("""
+            INSERT INTO user_scenarios (id, name, query, mode, filters, result_count, pinned)
+            VALUES (:id, :name, :query, :mode, CAST(:filters AS jsonb), :result_count, :pinned)
+        """), {
+            "id": new_id,
+            "name": payload.name,
+            "query": payload.query,
+            "mode": payload.mode,
+            "filters": json.dumps(payload.filters),
+            "result_count": payload.result_count,
+            "pinned": payload.pinned,
+        })
+    row = _get_user_scenario_or_404(new_id)
+    return _user_scenario_to_gesica_format(row)
+
+
+@app.delete("/user-scenarios/{scenario_id}", status_code=200)
+def delete_user_scenario(scenario_id: str) -> dict[str, Any]:
+    """Supprime un scénario utilisateur et ses associations article_scenarios."""
+    _get_user_scenario_or_404(scenario_id)
+    with engine.begin() as conn:
+        # Supprimer les associations article_scenarios pour ce scénario utilisateur
+        conn.execute(text("""
+            DELETE FROM article_scenarios WHERE scenario_id = :sid
+        """), {"sid": scenario_id})
+        conn.execute(text("""
+            DELETE FROM user_scenarios WHERE id = :id
+        """), {"id": scenario_id})
+    return {"deleted": True, "id": scenario_id}
+
+
+@app.patch("/user-scenarios/{scenario_id}")
+def patch_user_scenario(scenario_id: str, payload: UserScenarioPatch) -> dict[str, Any]:
+    """Met à jour le nom, le pin, le mode ou les filtres d'un scénario utilisateur."""
+    _get_user_scenario_or_404(scenario_id)
+    updates = []
+    params: dict[str, Any] = {"id": scenario_id}
+    if payload.name is not None:
+        updates.append("name = :name")
+        params["name"] = payload.name
+    if payload.pinned is not None:
+        updates.append("pinned = :pinned")
+        params["pinned"] = payload.pinned
+    if payload.mode is not None:
+        updates.append("mode = :mode")
+        params["mode"] = payload.mode
+    if payload.filters is not None:
+        updates.append("filters = CAST(:filters AS jsonb)")
+        params["filters"] = json.dumps(payload.filters)
+    if not updates:
+        row = _get_user_scenario_or_404(scenario_id)
+        return _user_scenario_to_gesica_format(row)
+    updates.append("updated_at = NOW()")
+    with engine.begin() as conn:
+        conn.execute(text(f"""
+            UPDATE user_scenarios SET {', '.join(updates)} WHERE id = :id
+        """), params)
+    row = _get_user_scenario_or_404(scenario_id)
+    return _user_scenario_to_gesica_format(row)
+
+
+# ── Detail (compatible ScenarioDetail frontend) ───────────────────────────────
+
+@app.get("/user-scenarios/{scenario_id}/detail")
+def get_user_scenario_detail(scenario_id: str) -> dict[str, Any]:
+    """
+    Retourne les informations enrichies d'un scénario utilisateur au format ScenarioDetail.
+    Compatible avec ScenarioDetailPage (boolean_queries, nl_queries, corpus_stats, etc.)
+    """
+    row = _get_user_scenario_or_404(scenario_id)
+    with engine.connect() as conn:
+        stats = conn.execute(text("""
+            SELECT
+                COUNT(*) AS total,
+                SUM(CASE WHEN EXISTS (
+                    SELECT 1 FROM document_chunk c
+                    WHERE c.document_id = d.id AND c.chunk_type = 'fulltext_section'
+                ) THEN 1 ELSE 0 END) AS with_fulltext,
+                COUNT(DISTINCT d.year) AS years_covered,
+                COUNT(DISTINCT d.journal) AS journals_count,
+                MIN(d.year) AS year_min,
+                MAX(d.year) AS year_max
+            FROM literature_document d
+            JOIN article_scenarios ars ON ars.document_id = d.id
+            WHERE ars.scenario_id = :sid
+              AND (d.is_duplicate IS NULL OR d.is_duplicate = FALSE)
+        """), {"sid": scenario_id}).mappings().first()
+
+    # Construire les boolean_queries à partir de la requête sauvegardée
+    query_text = row["query"]
+    boolean_queries = [query_text] if query_text else []
+    nl_queries = [query_text] if query_text else []
+
+    return {
+        "id": scenario_id,
+        "title": row["name"],
+        "description": f"Scénario utilisateur basé sur la recherche : {query_text}",
+        "cluster": "user",
+        "recommended_actions": [],
+        "boolean_queries": boolean_queries,
+        "nl_queries": nl_queries,
+        "evidence_extraction_prompt": "",
+        "model_info": {},
+        "alert_thresholds": {
+            "green": {"label": "Normal", "threshold": 0},
+            "orange": {"label": "Vigilance", "threshold": 50},
+            "red": {"label": "Alerte", "threshold": 80},
+        },
+        "databases": ["PubMed"],
+        "outcome_definition": "",
+        "variables_detail": {},
+        "keywords": [w for w in query_text.split() if len(w) > 3][:10],
+        "clinical_rationale": "",
+        "corpus_stats": {
+            "total": int(stats["total"] or 0) if stats else 0,
+            "with_fulltext": int(stats["with_fulltext"] or 0) if stats else 0,
+            "years_covered": int(stats["years_covered"] or 0) if stats else 0,
+            "journals_count": int(stats["journals_count"] or 0) if stats else 0,
+            "year_min": stats["year_min"] if stats else None,
+            "year_max": stats["year_max"] if stats else None,
+        },
+        "is_user_scenario": True,
+        "query": query_text,
+        "mode": row["mode"],
+        "filters": row.get("filters") or {},
+        "pinned": bool(row.get("pinned", False)),
+        "created_at": row["created_at"].isoformat() if row.get("created_at") else None,
+    }
+
+
+# ── Corpus (compatible fetchScenarioCorpus frontend) ──────────────────────────
+
+@app.get("/user-scenarios/{scenario_id}/corpus")
+def get_user_scenario_corpus(
+    scenario_id: str,
+    limit: int = 50,
+    offset: int = 0,
+    year_from: int | None = None,
+    year_to: int | None = None,
+    fulltext_only: bool = False,
+    source: str | None = None,
+) -> dict[str, Any]:
+    """
+    Retourne le corpus d'articles pour un scénario utilisateur.
+    Compatible avec fetchScenarioCorpus (même format de réponse).
+    """
+    row = _get_user_scenario_or_404(scenario_id)
+    conditions = [
+        "EXISTS (SELECT 1 FROM article_scenarios ars WHERE ars.document_id = d.id AND ars.scenario_id = :sid)",
+        "(d.is_duplicate IS NULL OR d.is_duplicate = FALSE)",
+    ]
+    params: dict[str, Any] = {"sid": scenario_id, "limit": limit, "offset": offset}
+    if year_from:
+        conditions.append("d.year >= :year_from")
+        params["year_from"] = year_from
+    if year_to:
+        conditions.append("d.year <= :year_to")
+        params["year_to"] = year_to
+    if source:
+        conditions.append("d.source = :source")
+        params["source"] = source
+    if fulltext_only:
+        conditions.append("""EXISTS (
+            SELECT 1 FROM document_chunk c
+            WHERE c.document_id = d.id AND c.chunk_type = 'fulltext_section'
+        )""")
+    where = " AND ".join(conditions)
+    with engine.connect() as conn:
+        count_row = conn.execute(text(f"""
+            SELECT COUNT(*) AS total FROM literature_document d WHERE {where}
+        """), params).mappings().first()
+        total = int(count_row["total"] or 0)
+        articles = conn.execute(text(f"""
+            SELECT
+                d.id, d.title, d.abstract, d.year, d.source, d.url,
+                d.authors, d.doi, d.journal, d.keywords, d.language,
+                d.study_design, d.sample_size, d.country, d.citation_count,
+                d.open_access, d.pmid, d.publication_type, d.quality_score,
+                EXISTS (
+                    SELECT 1 FROM document_chunk c
+                    WHERE c.document_id = d.id AND c.chunk_type = 'fulltext_section'
+                ) AS has_fulltext
+            FROM literature_document d
+            WHERE {where}
+            ORDER BY d.year DESC NULLS LAST, d.citation_count DESC NULLS LAST, d.title ASC
+            LIMIT :limit OFFSET :offset
+        """), params).mappings().all()
+        year_dist = conn.execute(text(f"""
+            SELECT d.year, COUNT(*) AS cnt
+            FROM literature_document d
+            WHERE {where.replace(' LIMIT :limit OFFSET :offset', '')}
+              AND d.year >= 2000
+            GROUP BY d.year ORDER BY d.year DESC
+        """), {k: v for k, v in params.items() if k not in ('limit', 'offset')}).mappings().all()
+        source_dist = conn.execute(text(f"""
+            SELECT d.source, COUNT(*) AS cnt
+            FROM literature_document d
+            WHERE {where.replace(' LIMIT :limit OFFSET :offset', '')}
+            GROUP BY d.source ORDER BY cnt DESC LIMIT 8
+        """), {k: v for k, v in params.items() if k not in ('limit', 'offset')}).mappings().all()
+
+    return {
+        "scenario_id": scenario_id,
+        "scenario_title": row["name"],
+        "total": total,
+        "offset": offset,
+        "limit": limit,
+        "articles": [dict(a) for a in articles],
+        "year_distribution": [{"year": r["year"], "count": int(r["cnt"])} for r in year_dist],
+        "source_distribution": [{"source": r["source"], "count": int(r["cnt"])} for r in source_dist],
+        "is_user_scenario": True,
+    }
+
+
+# ── Populate : ingestion PubMed en arrière-plan ───────────────────────────────
+
+_user_scenario_populate_jobs: dict[str, dict] = {}
+
+
+def _run_user_scenario_populate(scenario_id: str, query: str, filters: dict, max_results: int = 30) -> None:
+    """
+    Ingère des articles PubMed pour un scénario utilisateur en arrière-plan.
+    Assigne chaque article ingéré à article_scenarios avec le scenario_id utilisateur.
+    """
+    import time as _time
+    import xml.etree.ElementTree as ET
+    import requests as _requests
+
+    _user_scenario_populate_jobs[scenario_id] = {"status": "running", "ingested": 0, "errors": 0}
+
+    ENTREZ_BASE = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
+    EMAIL = os.getenv("PUBMED_EMAIL", "literev@example.com")
+    WRITE_KEY = os.getenv("WRITE_API_KEY", "LiteRev2026!")
+    HEADERS_LOCAL = {"X-Api-Key": WRITE_KEY}
+    API_LOCAL = "http://127.0.0.1:8000"
+
+    try:
+        # 1. Recherche PubMed
+        r = _requests.get(
+            f"{ENTREZ_BASE}/esearch.fcgi",
+            params={
+                "db": "pubmed",
+                "term": query,
+                "retmax": max_results,
+                "retmode": "json",
+                "email": EMAIL,
+            },
+            timeout=30,
+        )
+        r.raise_for_status()
+        pmids = r.json()["esearchresult"]["idlist"]
+
+        if not pmids:
+            _user_scenario_populate_jobs[scenario_id] = {
+                "status": "done", "ingested": 0, "errors": 0,
+                "message": "Aucun article trouvé sur PubMed pour cette requête."
+            }
+            return
+
+        # 2. Fetch XML PubMed
+        r2 = _requests.post(
+            f"{ENTREZ_BASE}/efetch.fcgi",
+            data={
+                "db": "pubmed",
+                "id": ",".join(pmids),
+                "rettype": "xml",
+                "retmode": "xml",
+                "email": EMAIL,
+            },
+            timeout=60,
+        )
+        r2.raise_for_status()
+        root = ET.fromstring(r2.content)
+
+        ingested = 0
+        errors = 0
+
+        for article_elem in root.findall(".//PubmedArticle"):
+            pmid = article_elem.findtext(".//PMID") or ""
+            title_elem = article_elem.find(".//ArticleTitle")
+            title = "".join(title_elem.itertext()).strip() if title_elem is not None else ""
+            abstract_parts = []
+            for node in article_elem.findall(".//Abstract/AbstractText"):
+                txt = "".join(node.itertext()).strip()
+                if txt:
+                    abstract_parts.append(txt)
+            abstract = " ".join(abstract_parts).strip()
+
+            year = None
+            year_text = (
+                article_elem.findtext(".//PubDate/Year")
+                or article_elem.findtext(".//ArticleDate/Year")
+                or ""
+            )
+            if year_text[:4].isdigit():
+                year = int(year_text[:4])
+
+            if not pmid or not title:
+                continue
+
+            url = f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/"
+            content = f"{title}\n\n{abstract}".strip()
+            if len(content) < 30:
+                continue
+
+            try:
+                # Vérifier si l'article existe déjà en DB
+                with engine.connect() as conn:
+                    existing = conn.execute(text("""
+                        SELECT id FROM literature_document
+                        WHERE external_id = :pmid AND project_context = 'literev'
+                        LIMIT 1
+                    """), {"pmid": pmid}).mappings().first()
+
+                if existing:
+                    doc_id = existing["id"]
+                else:
+                    # Ingérer via l'API locale
+                    doc_r = _requests.post(
+                        f"{API_LOCAL}/documents",
+                        headers=HEADERS_LOCAL,
+                        json={
+                            "source": "pubmed",
+                            "title": title,
+                            "abstract": abstract or None,
+                            "year": year,
+                            "url": url,
+                            "external_id": pmid,
+                            "project_context": "literev",
+                            "source_type": "article",
+                            "disease_or_condition": None,
+                            "scenario_type": scenario_id,
+                            "geographic_scope": None,
+                            "evidence_category": None,
+                        },
+                        timeout=30,
+                    )
+                    doc_r.raise_for_status()
+                    doc_id = doc_r.json()["id"]
+
+                    # Créer le chunk
+                    _requests.post(
+                        f"{API_LOCAL}/chunks",
+                        headers=HEADERS_LOCAL,
+                        json={
+                            "document_id": doc_id,
+                            "chunk_index": 0,
+                            "content": content,
+                            "chunk_type": "title_abstract",
+                            "section_label": None,
+                            "char_start": None,
+                            "char_end": None,
+                            "token_count": len(content.split()),
+                            "chunk_weight": 1.0,
+                            "metadata_json": {},
+                        },
+                        timeout=60,
+                    )
+
+                # Assigner l'article au scénario utilisateur dans article_scenarios
+                with engine.begin() as conn:
+                    conn.execute(text("""
+                        INSERT INTO article_scenarios (document_id, scenario_id, similarity_score)
+                        VALUES (:doc_id, :sid, 1.0)
+                        ON CONFLICT (document_id, scenario_id) DO NOTHING
+                    """), {"doc_id": doc_id, "sid": scenario_id})
+
+                ingested += 1
+                _user_scenario_populate_jobs[scenario_id]["ingested"] = ingested
+
+            except Exception as e:
+                logger.warning(f"Populate user_scenario {scenario_id} - PMID {pmid}: {e}")
+                errors += 1
+
+            _time.sleep(0.15)
+
+        # Mettre à jour le compteur dans user_scenarios
+        with engine.begin() as conn:
+            conn.execute(text("""
+                UPDATE user_scenarios
+                SET result_count = (
+                    SELECT COUNT(DISTINCT document_id) FROM article_scenarios WHERE scenario_id = :sid
+                ),
+                updated_at = NOW()
+                WHERE id = :sid
+            """), {"sid": scenario_id})
+
+        _user_scenario_populate_jobs[scenario_id] = {
+            "status": "done",
+            "ingested": ingested,
+            "errors": errors,
+            "message": f"{ingested} articles ingérés depuis PubMed, {errors} erreurs.",
+        }
+        logger.info(f"Populate user_scenario {scenario_id}: {ingested} articles ingérés.")
+
+    except Exception as e:
+        logger.error(f"Populate user_scenario {scenario_id} fatal: {e}", exc_info=True)
+        _user_scenario_populate_jobs[scenario_id] = {
+            "status": "error",
+            "error": str(e),
+            "ingested": _user_scenario_populate_jobs.get(scenario_id, {}).get("ingested", 0),
+        }
+
+
+@app.post("/user-scenarios/{scenario_id}/populate")
+def populate_user_scenario(
+    scenario_id: str,
+    max_results: int = 30,
+) -> dict[str, Any]:
+    """
+    Déclenche l'ingestion PubMed en arrière-plan pour un scénario utilisateur.
+    Utilise la requête sauvegardée du scénario pour interroger PubMed.
+    Retourne immédiatement ; vérifier /user-scenarios/{id}/populate/status pour le résultat.
+    """
+    import threading
+    row = _get_user_scenario_or_404(scenario_id)
+    query = row["query"]
+
+    job = _user_scenario_populate_jobs.get(scenario_id)
+    if job and job.get("status") == "running":
+        return {
+            "scenario_id": scenario_id,
+            "status": "already_running",
+            "message": "Une ingestion est déjà en cours pour ce scénario.",
+            "ingested": job.get("ingested", 0),
+        }
+
+    _user_scenario_populate_jobs[scenario_id] = {"status": "running", "ingested": 0, "errors": 0}
+    t = threading.Thread(
+        target=_run_user_scenario_populate,
+        args=(scenario_id, query, row.get("filters") or {}, max_results),
+        daemon=True,
+    )
+    t.start()
+
+    return {
+        "scenario_id": scenario_id,
+        "status": "started",
+        "query": query,
+        "max_results": max_results,
+        "message": f"Ingestion PubMed lancée en arrière-plan pour '{row['name']}'. "
+                   "Utilisez /user-scenarios/{id}/populate/status pour suivre la progression.",
+    }
+
+
+@app.get("/user-scenarios/{scenario_id}/populate/status")
+def get_user_scenario_populate_status(scenario_id: str) -> dict[str, Any]:
+    """Retourne l'état de l'ingestion PubMed en cours pour un scénario utilisateur."""
+    _get_user_scenario_or_404(scenario_id)
+    job = _user_scenario_populate_jobs.get(scenario_id)
+    if not job:
+        return {
+            "scenario_id": scenario_id,
+            "status": "not_started",
+            "message": "Aucune ingestion lancée. Appelez POST /user-scenarios/{id}/populate.",
+        }
+    return {"scenario_id": scenario_id, **job}
+
+
+# ── Proxy endpoints : rediriger les appels /gesica/scenarios/{usr-*}/... ──────
+# Les endpoints existants (screening, pico, evidence-brief, clustering, rag, etc.)
+# utilisent GESICA_SCENARIO_METADATA.get(scenario_id) pour valider l'ID.
+# Pour les scénarios utilisateur (usr-*), on intercepte avant ce check.
+
+@app.get("/user-scenarios/{scenario_id}/screening-progress")
+def get_user_scenario_screening_progress(scenario_id: str) -> dict[str, Any]:
+    """Progression du screening PRISMA pour un scénario utilisateur."""
+    _get_user_scenario_or_404(scenario_id)
+    with engine.connect() as conn:
+        stats = conn.execute(text("""
+            SELECT
+                COUNT(*) AS total,
+                SUM(CASE WHEN d.is_duplicate = TRUE THEN 1 ELSE 0 END) AS duplicates,
+                SUM(CASE WHEN d.screening_status = 'included' THEN 1 ELSE 0 END) AS included,
+                SUM(CASE WHEN d.screening_status = 'excluded' THEN 1 ELSE 0 END) AS excluded,
+                SUM(CASE WHEN d.screening_status IS NULL OR d.screening_status = 'pending' THEN 1 ELSE 0 END) AS pending
+            FROM article_scenarios ars
+            JOIN literature_document d ON d.id = ars.document_id
+            WHERE ars.scenario_id = :sid
+        """), {"sid": scenario_id}).mappings().first()
+    total = int(stats["total"] or 0)
+    duplicates = int(stats["duplicates"] or 0)
+    unique = total - duplicates
+    included = int(stats["included"] or 0)
+    excluded = int(stats["excluded"] or 0)
+    screened = included + excluded
+    pct = round(screened / unique * 100, 1) if unique > 0 else 0
+    return {
+        "scenario_id": scenario_id,
+        "total_in_db": total,
+        "duplicates": duplicates,
+        "unique_articles": unique,
+        "screened": screened,
+        "included": included,
+        "excluded": excluded,
+        "awaiting": unique - screened,
+        "progress_pct": pct,
+        "screening_complete": pct >= 100,
+    }
+
+
+@app.get("/user-scenarios/{scenario_id}/pico-stats")
+def get_user_scenario_pico_stats(scenario_id: str) -> dict[str, Any]:
+    """Statistiques PICO pour un scénario utilisateur."""
+    _get_user_scenario_or_404(scenario_id)
+    with engine.connect() as conn:
+        counts = conn.execute(text("""
+            SELECT
+                COUNT(*) AS total,
+                COUNT(*) FILTER (WHERE d.pico_json IS NOT NULL) AS with_pico,
+                COUNT(*) FILTER (WHERE d.pico_json IS NULL) AS without_pico,
+                ROUND(AVG((d.pico_json->>'pico_confidence')::float)
+                    FILTER (WHERE d.pico_json IS NOT NULL)::numeric, 2) AS avg_confidence
+            FROM article_scenarios ars
+            JOIN literature_document d ON d.id = ars.document_id
+            WHERE ars.scenario_id = :sid
+        """), {"sid": scenario_id}).mappings().fetchone()
+        designs = conn.execute(text("""
+            SELECT
+                COALESCE(d.pico_json->>'study_design', 'Non extrait') AS design,
+                COUNT(*) AS n
+            FROM article_scenarios ars
+            JOIN literature_document d ON d.id = ars.document_id
+            WHERE ars.scenario_id = :sid AND d.pico_json IS NOT NULL
+            GROUP BY 1 ORDER BY 2 DESC
+        """), {"sid": scenario_id}).mappings().fetchall()
+    total = counts["total"] if counts else 0
+    with_pico = counts["with_pico"] if counts else 0
+    return {
+        "scenario_id": scenario_id,
+        "total": total,
+        "with_pico": with_pico,
+        "without_pico": counts["without_pico"] if counts else 0,
+        "coverage_pct": round((with_pico / total * 100) if total > 0 else 0, 1),
+        "avg_confidence": float(counts["avg_confidence"]) if counts and counts["avg_confidence"] else None,
+        "study_design_distribution": [{"design": d["design"], "count": d["n"]} for d in designs],
+    }
+
+
+@app.get("/user-scenarios/{scenario_id}/prisma")
+def get_user_scenario_prisma(scenario_id: str) -> dict[str, Any]:
+    """Flow PRISMA pour un scénario utilisateur."""
+    row = _get_user_scenario_or_404(scenario_id)
+    with engine.connect() as conn:
+        stats = conn.execute(text("""
+            SELECT
+                COUNT(*) AS total,
+                SUM(CASE WHEN d.source = 'pubmed' THEN 1 ELSE 0 END) AS pubmed,
+                SUM(CASE WHEN d.source = 'pmc' THEN 1 ELSE 0 END) AS pmc,
+                SUM(CASE WHEN d.source IN ('biorxiv','medrxiv') THEN 1 ELSE 0 END) AS preprints,
+                SUM(CASE WHEN d.source = 'openalex' THEN 1 ELSE 0 END) AS openalex,
+                SUM(CASE WHEN d.source = 'europepmc' THEN 1 ELSE 0 END) AS europepmc,
+                SUM(CASE WHEN d.screening_status = 'included' THEN 1 ELSE 0 END) AS included,
+                SUM(CASE WHEN d.screening_status = 'excluded' THEN 1 ELSE 0 END) AS excluded,
+                SUM(CASE WHEN d.screening_status = 'pending' OR d.screening_status IS NULL THEN 1 ELSE 0 END) AS pending,
+                SUM(CASE WHEN d.is_duplicate = TRUE THEN 1 ELSE 0 END) AS duplicates,
+                SUM(CASE WHEN EXISTS (
+                    SELECT 1 FROM document_chunk c
+                    WHERE c.document_id = d.id AND c.chunk_type = 'fulltext_section'
+                ) THEN 1 ELSE 0 END) AS with_fulltext
+            FROM article_scenarios ars
+            JOIN literature_document d ON d.id = ars.document_id
+            WHERE ars.scenario_id = :sid
+        """), {"sid": scenario_id}).mappings().first()
+    total = int(stats["total"] or 0)
+    duplicates = int(stats["duplicates"] or 0)
+    included = int(stats["included"] or 0)
+    excluded = int(stats["excluded"] or 0)
+    with_fulltext = int(stats["with_fulltext"] or 0)
+    records_after_dedup = total - duplicates
+    screened_manually = included + excluded
+    awaiting_screening = records_after_dedup - screened_manually
+    screening_done = screened_manually > 0
+    return {
+        "scenario_id": scenario_id,
+        "scenario_title": row["name"],
+        "identification": {
+            "total_records_identified": total,
+            "by_source": {
+                "pubmed": int(stats["pubmed"] or 0),
+                "pmc": int(stats["pmc"] or 0),
+                "preprints": int(stats["preprints"] or 0),
+                "openalex": int(stats["openalex"] or 0),
+                "europepmc": int(stats["europepmc"] or 0),
+            },
+            "duplicates_removed": duplicates,
+        },
+        "screening": {
+            "records_screened": records_after_dedup,
+            "records_excluded_title_abstract": excluded,
+            "records_included_screening": included,
+            "records_awaiting_screening": awaiting_screening,
+        },
+        "eligibility": {
+            "fulltext_assessed": records_after_dedup - excluded,
+            "fulltext_retrieved": with_fulltext,
+            "fulltext_not_retrieved": max(0, (records_after_dedup - excluded) - with_fulltext),
+            "fulltext_excluded": 0,
+        },
+        "included": {
+            "total_included": included if screening_done else 0,
+            "awaiting_assessment": awaiting_screening,
+            "screening_complete": screening_done,
+            "note": "" if screening_done else "Screening manuel non encore effectué.",
+        },
+    }
+
+
+@app.get("/user-scenarios/{scenario_id}/evidence-brief")
+def get_user_scenario_evidence_brief(scenario_id: str) -> dict[str, Any]:
+    """Evidence Brief pour un scénario utilisateur (même format que GESICA)."""
+    row = _get_user_scenario_or_404(scenario_id)
+    with engine.connect() as conn:
+        corpus_stats = conn.execute(text("""
+            SELECT
+                COUNT(*) AS total,
+                COUNT(*) FILTER (WHERE d.is_duplicate IS TRUE) AS duplicates,
+                COUNT(*) FILTER (WHERE d.pico_json IS NOT NULL) AS with_pico,
+                COUNT(*) FILTER (WHERE d.screening_status = 'included') AS included,
+                COUNT(*) FILTER (WHERE d.screening_status = 'excluded') AS excluded,
+                COUNT(*) FILTER (WHERE d.screening_status = 'pending' OR d.screening_status IS NULL) AS pending,
+                COUNT(*) FILTER (WHERE EXISTS (SELECT 1 FROM document_chunk dc WHERE dc.document_id = d.id AND dc.chunk_type = 'fulltext_section')) AS with_fulltext,
+                MIN(d.year) AS year_min,
+                MAX(d.year) AS year_max,
+                AVG(d.citation_count) FILTER (WHERE d.citation_count IS NOT NULL) AS avg_citations,
+                MAX(d.citation_count) AS max_citations
+            FROM article_scenarios ars
+            JOIN literature_document d ON d.id = ars.document_id
+            WHERE ars.scenario_id = :sid
+        """), {"sid": scenario_id}).mappings().fetchone()
+
+        top_articles = conn.execute(text("""
+            SELECT d.id, d.title, d.abstract, d.year, d.journal, d.authors, d.doi,
+                   d.study_design, d.pico_json, d.citation_count, d.screening_status,
+                   d.quality_score, ars.similarity_score
+            FROM article_scenarios ars
+            JOIN literature_document d ON d.id = ars.document_id
+            WHERE ars.scenario_id = :sid
+              AND d.is_duplicate IS NOT TRUE AND d.abstract IS NOT NULL
+            ORDER BY
+                CASE WHEN d.screening_status = 'included' THEN 0 ELSE 1 END,
+                d.citation_count DESC NULLS LAST, d.year DESC NULLS LAST
+            LIMIT 15
+        """), {"sid": scenario_id}).mappings().fetchall()
+
+        study_designs = conn.execute(text("""
+            SELECT COALESCE(d.study_design, d.pico_json->>'study_design', 'Non classifié') AS design,
+                   COUNT(*) AS n
+            FROM article_scenarios ars
+            JOIN literature_document d ON d.id = ars.document_id
+            WHERE ars.scenario_id = :sid AND d.is_duplicate IS NOT TRUE
+            GROUP BY 1 ORDER BY 2 DESC LIMIT 12
+        """), {"sid": scenario_id}).mappings().fetchall()
+
+        year_dist = conn.execute(text("""
+            SELECT d.year, COUNT(*) AS n
+            FROM article_scenarios ars
+            JOIN literature_document d ON d.id = ars.document_id
+            WHERE ars.scenario_id = :sid AND d.is_duplicate IS NOT TRUE
+              AND d.year IS NOT NULL AND d.year >= 2000
+            GROUP BY d.year ORDER BY d.year ASC
+        """), {"sid": scenario_id}).mappings().fetchall()
+
+        source_dist = conn.execute(text("""
+            SELECT d.source, COUNT(*) AS n
+            FROM article_scenarios ars
+            JOIN literature_document d ON d.id = ars.document_id
+            WHERE ars.scenario_id = :sid AND d.is_duplicate IS NOT TRUE
+            GROUP BY d.source ORDER BY n DESC LIMIT 8
+        """), {"sid": scenario_id}).mappings().fetchall()
+
+        evidence_levels = conn.execute(text("""
+            SELECT
+                CASE
+                    WHEN d.quality_score >= 0.7 THEN 'Forte'
+                    WHEN d.quality_score >= 0.4 THEN 'Modérée'
+                    WHEN d.quality_score IS NOT NULL THEN 'Faible'
+                    ELSE 'Non évaluée'
+                END AS level,
+                COUNT(*) AS n
+            FROM article_scenarios ars
+            JOIN literature_document d ON d.id = ars.document_id
+            WHERE ars.scenario_id = :sid AND d.is_duplicate IS NOT TRUE
+            GROUP BY 1 ORDER BY 2 DESC
+        """), {"sid": scenario_id}).mappings().fetchall()
+
+    pico_table = []
+    for r in top_articles:
+        pj = r["pico_json"] or {}
+        pico_table.append({
+            "id": r["id"],
+            "title": (r["title"] or "")[:120],
+            "year": r["year"],
+            "journal": r["journal"],
+            "citation_count": r["citation_count"],
+            "study_design": r["study_design"] or pj.get("study_design", ""),
+            "screening_status": r["screening_status"],
+            "similarity_score": round(float(r["similarity_score"]), 3) if r["similarity_score"] else None,
+            "pico": {
+                "population": pj.get("population", pj.get("P", "")),
+                "intervention": pj.get("intervention", pj.get("I", "")),
+                "comparator": pj.get("comparator", pj.get("C", "")),
+                "outcome": pj.get("outcome", pj.get("O", "")),
+                "study_design": pj.get("study_design", ""),
+                "key_finding": pj.get("key_finding", pj.get("conclusion", "")),
+                "limitations": pj.get("limitations", ""),
+                "evidence_level": pj.get("evidence_level", ""),
+            }
+        })
+
+    return {
+        "scenario_id": scenario_id,
+        "generated_at": __import__('datetime').datetime.now().isoformat(),
+        "corpus_stats": {
+            "total": int(corpus_stats["total"] or 0),
+            "duplicates": int(corpus_stats["duplicates"] or 0),
+            "with_pico": int(corpus_stats["with_pico"] or 0),
+            "with_fulltext": int(corpus_stats["with_fulltext"] or 0),
+            "included": int(corpus_stats["included"] or 0),
+            "excluded": int(corpus_stats["excluded"] or 0),
+            "pending": int(corpus_stats["pending"] or 0),
+            "year_min": corpus_stats["year_min"],
+            "year_max": corpus_stats["year_max"],
+            "avg_citations": round(float(corpus_stats["avg_citations"]), 1) if corpus_stats["avg_citations"] else None,
+            "max_citations": int(corpus_stats["max_citations"]) if corpus_stats["max_citations"] else None,
+            "pico_coverage_pct": round(
+                100 * int(corpus_stats["with_pico"] or 0) / max(int(corpus_stats["total"] or 1), 1), 1
+            ),
+        },
+        "double_blind_stats": {"reviewer_1_done": 0, "reviewer_2_done": 0, "both_done": 0, "agreements": 0, "conflicts": 0},
+        "top_articles": [
+            {
+                "id": r["id"],
+                "title": r["title"],
+                "year": r["year"],
+                "journal": r["journal"],
+                "authors": r["authors"],
+                "doi": r["doi"],
+                "study_design": r["study_design"] or (r["pico_json"].get("study_design") if r["pico_json"] else None),
+                "citation_count": r["citation_count"],
+                "screening_status": r["screening_status"],
+                "quality_score": round(float(r["quality_score"]), 2) if r["quality_score"] else None,
+                "similarity_score": round(float(r["similarity_score"]), 3) if r["similarity_score"] else None,
+                "abstract_excerpt": (r["abstract"] or "")[:500],
+                "pico_summary": {
+                    "population": r["pico_json"].get("population", r["pico_json"].get("P", "")) if r["pico_json"] else "",
+                    "intervention": r["pico_json"].get("intervention", r["pico_json"].get("I", "")) if r["pico_json"] else "",
+                    "outcome": r["pico_json"].get("outcome", r["pico_json"].get("O", "")) if r["pico_json"] else "",
+                    "key_finding": r["pico_json"].get("key_finding", r["pico_json"].get("conclusion", "")) if r["pico_json"] else "",
+                } if r["pico_json"] else None,
+            }
+            for r in top_articles
+        ],
+        "pico_table": pico_table,
+        "study_design_distribution": [{"design": d["design"], "count": int(d["n"])} for d in study_designs],
+        "year_distribution": [{"year": d["year"], "count": int(d["n"])} for d in year_dist],
+        "source_distribution": [{"source": s["source"], "count": int(s["n"])} for s in source_dist],
+        "evidence_level_distribution": [{"level": e["level"], "count": int(e["n"])} for e in evidence_levels],
+    }
+
+
+@app.get("/user-scenarios/{scenario_id}/pico-bulk")
+def get_user_scenario_pico_bulk(scenario_id: str, limit: int = 200, offset: int = 0) -> dict[str, Any]:
+    """Tous les articles d'un scénario utilisateur avec leur PICO extrait."""
+    _get_user_scenario_or_404(scenario_id)
+    with engine.connect() as conn:
+        rows = conn.execute(text("""
+            SELECT d.id, d.title, d.abstract, d.year, d.source, d.authors, d.doi, d.journal,
+                   d.study_design, d.pico_json, d.pico_extracted_at, d.screening_status
+            FROM article_scenarios ars
+            JOIN literature_document d ON d.id = ars.document_id
+            WHERE ars.scenario_id = :sid AND d.is_duplicate IS NOT TRUE
+            ORDER BY
+                CASE WHEN d.pico_json IS NOT NULL THEN 0 ELSE 1 END,
+                d.year DESC NULLS LAST, d.id DESC
+            LIMIT :limit OFFSET :offset
+        """), {"sid": scenario_id, "limit": limit, "offset": offset}).mappings().fetchall()
+        total_row = conn.execute(text("""
+            SELECT COUNT(*) AS total,
+                   COUNT(*) FILTER (WHERE d.pico_json IS NOT NULL) AS with_pico
+            FROM article_scenarios ars
+            JOIN literature_document d ON d.id = ars.document_id
+            WHERE ars.scenario_id = :sid AND d.is_duplicate IS NOT TRUE
+        """), {"sid": scenario_id}).mappings().fetchone()
+    articles = []
+    for r in rows:
+        pico = r["pico_json"] if r["pico_json"] else None
+        articles.append({
+            "id": r["id"],
+            "title": r["title"],
+            "year": r["year"],
+            "source": r["source"],
+            "authors": r["authors"],
+            "doi": r["doi"],
+            "journal": r["journal"],
+            "study_design": pico.get("study_design") if pico else r["study_design"],
+            "pico_confidence": float(pico.get("pico_confidence", 0)) if pico else None,
+            "P": pico.get("P") if pico else None,
+            "I": pico.get("I") if pico else None,
+            "C": pico.get("C") if pico else None,
+            "O": pico.get("O") if pico else None,
+            "pico_notes": pico.get("pico_notes") if pico else None,
+            "has_pico": pico is not None,
+            "pico_extracted_at": r["pico_extracted_at"].isoformat() if r["pico_extracted_at"] else None,
+            "screening_status": r["screening_status"],
+        })
+    return {
+        "scenario_id": scenario_id,
+        "total": int(total_row["total"]) if total_row else 0,
+        "with_pico": int(total_row["with_pico"]) if total_row else 0,
+        "offset": offset,
+        "limit": limit,
+        "articles": articles,
+    }
+
+
+@app.get("/user-scenarios/{scenario_id}/knowledge-graph")
+def get_user_scenario_knowledge_graph(
+    scenario_id: str,
+    max_nodes: int = 80,
+    min_similarity: float = 0.35,
+) -> dict[str, Any]:
+    """Knowledge graph pour un scénario utilisateur (délègue à l'implémentation GESICA)."""
+    _get_user_scenario_or_404(scenario_id)
+    # Réutiliser la même logique que GESICA en injectant le scenario_id usr-*
+    # Les articles sont dans article_scenarios avec ce scenario_id
+    with engine.connect() as conn:
+        rows = conn.execute(text("""
+            SELECT DISTINCT ON (d.id)
+                d.id, d.title, d.year, d.journal, d.study_design, d.quality_score,
+                c.embedding::text AS emb_str,
+                COALESCE((d.pico_json->>'study_design'), d.study_design, 'unknown') AS design
+            FROM article_scenarios ars
+            JOIN literature_document d ON d.id = ars.document_id
+            JOIN document_chunk c ON c.document_id = d.id
+            WHERE ars.scenario_id = :sid
+              AND d.is_duplicate IS NOT TRUE
+              AND c.embedding IS NOT NULL
+              AND d.abstract IS NOT NULL
+            ORDER BY d.id, c.id
+            LIMIT :max_nodes
+        """), {"sid": scenario_id, "max_nodes": max_nodes}).mappings().all()
+
+    if not rows:
+        return {"nodes": [], "edges": [], "clusters": []}
+
+    import numpy as np
+    nodes_data = []
+    for r in rows:
+        try:
+            emb_str = r["emb_str"]
+            nums = re.findall(r"[-+]?[0-9]*\.?[0-9]+(?:[eE][-+]?[0-9]+)?", emb_str)
+            emb = np.array([float(x) for x in nums], dtype=np.float32)
+            if len(emb) > 0:
+                nodes_data.append({
+                    "id": r["id"], "title": r["title"], "year": r["year"],
+                    "journal": r["journal"], "design": r["design"],
+                    "quality": float(r["quality_score"] or 0), "emb": emb,
+                })
+        except Exception:
+            continue
+
+    if not nodes_data:
+        return {"nodes": [], "edges": [], "clusters": []}
+
+    embeddings = np.array([n["emb"] for n in nodes_data])
+    norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
+    norms[norms == 0] = 1
+    embeddings_norm = embeddings / norms
+    sim_matrix = embeddings_norm @ embeddings_norm.T
+
+    edges = []
+    n = len(nodes_data)
+    for i in range(n):
+        for j in range(i + 1, n):
+            sim = float(sim_matrix[i, j])
+            if sim >= min_similarity:
+                edges.append({"source": nodes_data[i]["id"], "target": nodes_data[j]["id"], "weight": round(sim, 3)})
+
+    cluster_ids = [-1] * n
+    cluster_counter = 0
+    for i in range(n):
+        if cluster_ids[i] == -1:
+            cluster_ids[i] = cluster_counter
+            for j in range(i + 1, n):
+                if cluster_ids[j] == -1 and float(sim_matrix[i, j]) >= 0.5:
+                    cluster_ids[j] = cluster_counter
+            cluster_counter += 1
+
+    nodes = []
+    for idx, nd in enumerate(nodes_data):
+        nodes.append({
+            "id": nd["id"],
+            "title": nd["title"][:80] + ("..." if len(nd["title"] or "") > 80 else ""),
+            "year": nd["year"], "journal": nd["journal"], "design": nd["design"],
+            "quality": nd["quality"], "cluster": cluster_ids[idx],
+            "degree": sum(1 for e in edges if e["source"] == nd["id"] or e["target"] == nd["id"]),
+        })
+
+    from collections import defaultdict
+    clusters_map = defaultdict(list)
+    for nd in nodes:
+        clusters_map[nd["cluster"]].append(nd)
+    clusters = []
+    for cid, members in sorted(clusters_map.items(), key=lambda x: -len(x[1])):
+        clusters.append({
+            "id": cid, "size": len(members),
+            "years": sorted(set(m["year"] for m in members if m["year"])),
+            "designs": list(set(m["design"] for m in members if m["design"] and m["design"] != "unknown")),
+            "top_articles": [m["title"] for m in sorted(members, key=lambda x: -x["quality"])[:3]],
+        })
+
+    return {
+        "scenario_id": scenario_id,
+        "n_nodes": len(nodes), "n_edges": len(edges), "n_clusters": len(clusters),
+        "min_similarity": min_similarity, "nodes": nodes, "edges": edges, "clusters": clusters,
+    }
+
+
+@app.post("/user-scenarios/{scenario_id}/rag")
+def user_scenario_rag_assistant(scenario_id: str, payload: AskIn) -> dict[str, Any]:
+    """Assistant RAG pour un scénario utilisateur (délègue au RAG générique filtré)."""
+    row = _get_user_scenario_or_404(scenario_id)
+    payload.filters = payload.filters or {}
+    payload.filters["project_context"] = "literev"
+
+    openai_key = os.getenv("OPENAI_API_KEY")
+    query_embedding = None
+    if openai_key:
+        try:
+            from openai import OpenAI
+            client = OpenAI(api_key=openai_key)
+            response = client.embeddings.create(
+                input=[payload.question.replace("\n", " ").strip()],
+                model="text-embedding-3-small"
+            )
+            query_embedding = response.data[0].embedding
+        except Exception as e:
+            logger.error(f"Erreur embedding RAG user_scenario {scenario_id}: {e}")
+
+    with engine.connect() as conn:
+        if query_embedding:
+            rows = conn.execute(text("""
+                SELECT d.id AS document_id, d.title, d.year, d.url, d.source,
+                       d.authors, d.journal, d.doi,
+                       c.content, c.metadata_json,
+                       (1 - (c.embedding <=> CAST(:emb AS vector))) AS score
+                FROM document_chunk c
+                JOIN literature_document d ON d.id = c.document_id
+                WHERE c.embedding IS NOT NULL
+                  AND EXISTS (SELECT 1 FROM article_scenarios ars WHERE ars.document_id = d.id AND ars.scenario_id = :sid)
+                  AND (d.is_duplicate IS NULL OR d.is_duplicate = FALSE)
+                ORDER BY c.embedding <=> CAST(:emb AS vector)
+                LIMIT 8
+            """), {"emb": str(query_embedding), "sid": scenario_id}).mappings().all()
+        else:
+            terms = [t.strip() for t in re.split(r"\s+", payload.question.lower()) if t.strip()]
+            if not terms:
+                return {"answer": "Question vide.", "sources": []}
+            like_clauses = " OR ".join(
+                f"(LOWER(COALESCE(d.title,'')) LIKE :t{i} OR LOWER(COALESCE(c.content,'')) LIKE :t{i})"
+                for i in range(len(terms))
+            )
+            params: dict[str, Any] = {"sid": scenario_id}
+            for i, t in enumerate(terms):
+                params[f"t{i}"] = f"%{t}%"
+            rows = conn.execute(text(f"""
+                SELECT d.id AS document_id, d.title, d.year, d.url, d.source,
+                       d.authors, d.journal, d.doi,
+                       c.content, c.metadata_json, 1.0 AS score
+                FROM document_chunk c
+                JOIN literature_document d ON d.id = c.document_id
+                WHERE ({like_clauses})
+                  AND EXISTS (SELECT 1 FROM article_scenarios ars WHERE ars.document_id = d.id AND ars.scenario_id = :sid)
+                ORDER BY d.year DESC NULLS LAST
+                LIMIT 8
+            """), params).mappings().all()
+
+    if not rows:
+        return {
+            "answer": f"Aucun article trouvé dans le corpus du scénario '{row['name']}' pour cette question.",
+            "sources": [], "scenario_id": scenario_id,
+        }
+
+    context_blocks = []
+    sources = []
+    seen: set = set()
+    for i, r in enumerate(rows):
+        doc_id = r["document_id"]
+        context_blocks.append(
+            f"--- SOURCE {i+1} ---\nTitre: {r['title']}\n"
+            f"Auteurs: {r.get('authors','') or 'N/A'}\n"
+            f"Journal: {r.get('journal','') or 'N/A'} ({r['year'] or 'N/A'})\n"
+            f"DOI: {r.get('doi','') or 'N/A'}\nContenu: {r['content']}\n"
+        )
+        if doc_id not in seen:
+            seen.add(doc_id)
+            sources.append({
+                "document_id": doc_id, "title": r["title"], "year": r["year"],
+                "url": r["url"], "source": r["source"], "authors": r.get("authors"),
+                "journal": r.get("journal"), "doi": r.get("doi"),
+                "score": float(r.get("score", 0)),
+            })
+
+    context_str = "\n\n".join(context_blocks)
+    if not openai_key:
+        return {
+            "answer": "[Mode dégradé]\n\nSources :\n" + "\n".join(f"- {s['title']} ({s['year']})" for s in sources),
+            "sources": sources, "scenario_id": scenario_id,
+        }
+
+    try:
+        from openai import OpenAI
+        client = OpenAI(api_key=openai_key)
+        system_prompt = (
+            f"Vous êtes l'assistant scientifique expert de LiteRev-Evidence pour la recherche : "
+            f"**{row['name']}**.\n\n"
+            "Règles de rédaction :\n"
+            "1. Basez-vous STRICTEMENT sur les sources fournies dans le contexte.\n"
+            "2. Citez vos sources avec [SOURCE 1], [SOURCE 2], etc.\n"
+            "3. Mentionnez les niveaux de preuve (RCT, méta-analyse, étude observationnelle).\n"
+            "4. Soyez précis et structuré. Si le contexte est insuffisant, dites-le.\n"
+        )
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": f"CONTEXTE :\n{context_str}\n\nQUESTION : {payload.question}"},
+            ],
+            temperature=0.2,
+            max_tokens=1200,
+        )
+        return {
+            "answer": response.choices[0].message.content,
+            "sources": sources, "scenario_id": scenario_id, "model": "Assistant IA",
+        }
+    except Exception as e:
+        logger.error(f"Erreur OpenAI RAG user_scenario {scenario_id}: {e}")
+        return {"answer": f"Erreur : {str(e)}", "sources": sources, "scenario_id": scenario_id}
+
+
+@app.get("/user-scenarios/{scenario_id}/double-blind/kappa")
+def get_user_scenario_kappa(scenario_id: str) -> dict[str, Any]:
+    """Kappa de Cohen pour un scénario utilisateur."""
+    _get_user_scenario_or_404(scenario_id)
+    with engine.connect() as conn:
+        rows = conn.execute(text("""
+            SELECT d.reviewer_1_status, d.reviewer_2_status
+            FROM article_scenarios ars
+            JOIN literature_document d ON d.id = ars.document_id
+            WHERE ars.scenario_id = :sid
+              AND d.reviewer_1_status IS NOT NULL
+              AND d.reviewer_2_status IS NOT NULL
+        """), {"sid": scenario_id}).mappings().all()
+    if not rows:
+        return {
+            "scenario_id": scenario_id, "n_evaluated": 0, "kappa": None,
+            "interpretation": "Aucune évaluation double-aveugle disponible",
+            "agreements": {}, "conflicts": 0,
+        }
+    n = len(rows)
+    categories = ["included", "excluded", "pending"]
+    matrix = {c1: {c2: 0 for c2 in categories} for c1 in categories}
+    for r in rows:
+        r1 = r["reviewer_1_status"] if r["reviewer_1_status"] in categories else "pending"
+        r2 = r["reviewer_2_status"] if r["reviewer_2_status"] in categories else "pending"
+        matrix[r1][r2] += 1
+    po = sum(matrix[c][c] for c in categories) / n
+    pe = sum((sum(matrix[c][c2] for c2 in categories) / n) * (sum(matrix[c1][c] for c1 in categories) / n) for c in categories)
+    kappa = (po - pe) / (1 - pe) if pe < 1.0 else 1.0
+    if kappa >= 0.81: interpretation = "Quasi-parfait (≥ 0.81)"
+    elif kappa >= 0.61: interpretation = "Substantiel (0.61–0.80)"
+    elif kappa >= 0.41: interpretation = "Modéré (0.41–0.60)"
+    elif kappa >= 0.21: interpretation = "Faible (0.21–0.40)"
+    else: interpretation = "Médiocre (< 0.21)"
+    conflicts = sum(matrix[r1][r2] for r1 in categories for r2 in categories if r1 != r2)
+    return {
+        "scenario_id": scenario_id, "n_evaluated": n, "kappa": round(kappa, 4),
+        "po_observed": round(po, 4), "pe_expected": round(pe, 4),
+        "interpretation": interpretation, "conflicts": conflicts,
+        "agreements": {c: matrix[c][c] for c in categories}, "matrix": matrix,
+    }
+
+
+@app.get("/user-scenarios/{scenario_id}/double-blind/conflicts")
+def get_user_scenario_conflicts(scenario_id: str) -> list[dict[str, Any]]:
+    """Conflits double-aveugle pour un scénario utilisateur."""
+    _get_user_scenario_or_404(scenario_id)
+    with engine.connect() as conn:
+        rows = conn.execute(text("""
+            SELECT d.id, d.title, d.abstract, d.year, d.journal,
+                   d.reviewer_1_status, d.reviewer_1_reason,
+                   d.reviewer_2_status, d.reviewer_2_reason, d.kappa_final_status
+            FROM article_scenarios ars
+            JOIN literature_document d ON d.id = ars.document_id
+            WHERE ars.scenario_id = :sid
+              AND d.reviewer_1_status IS NOT NULL
+              AND d.reviewer_2_status IS NOT NULL
+              AND d.reviewer_1_status != d.reviewer_2_status
+            ORDER BY d.id
+        """), {"sid": scenario_id}).mappings().all()
+    return [dict(r) for r in rows]
+
+
+@app.post("/user-scenarios/{scenario_id}/double-blind/decision")
+def submit_user_scenario_double_blind_decision(
+    scenario_id: str,
+    payload: DoubleBlindDecisionIn,
+) -> dict[str, Any]:
+    """Décision double-aveugle pour un article d'un scénario utilisateur."""
+    _get_user_scenario_or_404(scenario_id)
+    # Vérifier que l'article appartient au scénario
+    with engine.connect() as conn:
+        exists = conn.execute(text("""
+            SELECT 1 FROM article_scenarios WHERE document_id = :doc_id AND scenario_id = :sid
+        """), {"doc_id": payload.article_id, "sid": scenario_id}).first()
+    if not exists:
+        raise HTTPException(status_code=404, detail="Article non trouvé dans ce scénario utilisateur")
+    # Déléguer à l'implémentation existante
+    return submit_double_blind_decision(scenario_id, payload)
+
+
+@app.get("/user-scenarios/{scenario_id}/clustering")
+def get_user_scenario_clustering(scenario_id: str, force_refresh: bool = False) -> dict[str, Any]:
+    """Clustering pour un scénario utilisateur."""
+    import threading
+    _get_user_scenario_or_404(scenario_id)
+    job = _clustering_jobs.get(scenario_id)
+    if job and job["status"] == "done" and not force_refresh:
+        return job["result"]
+    if not job or job.get("status") not in ("running",) or force_refresh:
+        _clustering_jobs[scenario_id] = {"status": "running"}
+        t = threading.Thread(target=_run_clustering_background, args=(scenario_id, force_refresh), daemon=True)
+        t.start()
+    return {
+        "scenario_id": scenario_id, "status": "running",
+        "message": "Calcul en cours. Revenez dans 30-60s.",
+        "clusters": [],
+    }
+
+
+@app.get("/user-scenarios/{scenario_id}/clustering/status")
+def get_user_scenario_clustering_status(scenario_id: str) -> dict:
+    """Statut du clustering pour un scénario utilisateur."""
+    _get_user_scenario_or_404(scenario_id)
+    job = _clustering_jobs.get(scenario_id)
+    if not job:
+        return {"scenario_id": scenario_id, "status": "not_started", "message": "Aucun calcul lancé."}
+    if job["status"] == "running":
+        return {"scenario_id": scenario_id, "status": "running", "message": "Calcul en cours..."}
+    if job["status"] == "error":
+        return {"scenario_id": scenario_id, "status": "error", "error": job.get("error", "Erreur inconnue")}
+    return job["result"]
+
+
+@app.post("/user-scenarios/{scenario_id}/articles/{article_id}/screen")
+def screen_user_scenario_article(
+    scenario_id: str,
+    article_id: int,
+    status: str,
+    reason: str | None = None,
+    notes: str | None = None,
+) -> dict[str, Any]:
+    """Screening PRISMA pour un article d'un scénario utilisateur."""
+    _get_user_scenario_or_404(scenario_id)
+    if status not in ("included", "excluded", "pending"):
+        raise HTTPException(status_code=422, detail="status doit être 'included', 'excluded' ou 'pending'")
+    with engine.connect() as conn:
+        exists = conn.execute(text("""
+            SELECT 1 FROM article_scenarios WHERE document_id = :doc_id AND scenario_id = :sid
+        """), {"doc_id": article_id, "sid": scenario_id}).first()
+    if not exists:
+        raise HTTPException(status_code=404, detail="Article non trouvé dans ce scénario utilisateur")
+    with engine.begin() as conn:
+        row = conn.execute(text("""
+            UPDATE literature_document
+            SET screening_status = :status, screening_reason = :reason, screening_notes = :notes
+            WHERE id = :article_id AND project_context = 'literev'
+            RETURNING id
+        """), {"status": status, "reason": reason, "notes": notes, "article_id": article_id}).first()
+    if not row:
+        raise HTTPException(status_code=404, detail="Article non trouvé")
+    return {"id": row[0], "status": status, "updated": True}
+
+
+@app.post("/user-scenarios/{scenario_id}/articles/{article_id}/pico/extract")
+def extract_user_scenario_article_pico(scenario_id: str, article_id: int) -> dict[str, Any]:
+    """Extraction PICO pour un article d'un scénario utilisateur (délègue à l'endpoint GESICA)."""
+    _get_user_scenario_or_404(scenario_id)
+    return extract_article_pico(scenario_id, article_id)
+
+
+@app.get("/user-scenarios/{scenario_id}/articles/{article_id}/pico")
+def get_user_scenario_article_pico(scenario_id: str, article_id: int) -> dict[str, Any]:
+    """PICO d'un article dans un scénario utilisateur."""
+    _get_user_scenario_or_404(scenario_id)
+    return get_article_pico(scenario_id, article_id)
+
+
+@app.get("/user-scenarios/{scenario_id}/evidence-brief/pdf")
+def get_user_scenario_evidence_brief_pdf(scenario_id: str):
+    """PDF Evidence Brief pour un scénario utilisateur."""
+    row = _get_user_scenario_or_404(scenario_id)
+    # Injecter temporairement dans GESICA_SCENARIO_METADATA pour réutiliser la fonction PDF
+    _tmp_meta = {
+        "title": row["name"],
+        "description": f"Scénario utilisateur : {row['query']}",
+        "cluster": "user",
+        "recommended_actions": [],
+    }
+    GESICA_SCENARIO_METADATA[scenario_id] = _tmp_meta
+    try:
+        result = get_evidence_brief_pdf(scenario_id)
+    finally:
+        # Retirer l'entrée temporaire
+        GESICA_SCENARIO_METADATA.pop(scenario_id, None)
+    return result

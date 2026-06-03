@@ -91,6 +91,12 @@ import {
   type DisasterRiskResponse,
   type MCIVictimResponse,
   searchDocuments,
+  fetchUserScenarios,
+  createUserScenario,
+  deleteUserScenario,
+  patchUserScenario,
+  populateUserScenario,
+  type UserScenario,
 } from "./lib/api";
 import type {
   ProjectContext,
@@ -123,24 +129,7 @@ interface SavedSearch {
   pinned?: boolean;
 }
 
-const SAVED_SEARCHES_KEY = "literev_saved_searches";
-
-function loadSavedSearches(): SavedSearch[] {
-  try {
-    const raw = localStorage.getItem(SAVED_SEARCHES_KEY);
-    return raw ? JSON.parse(raw) : [];
-  } catch {
-    return [];
-  }
-}
-
-function persistSavedSearches(searches: SavedSearch[]): void {
-  try {
-    localStorage.setItem(SAVED_SEARCHES_KEY, JSON.stringify(searches));
-  } catch {
-    // ignore
-  }
-}
+// localStorage supprimé — les recherches sauvegardées sont désormais persistées en backend (table user_scenarios)
 
 type DetailView = {
   id: number | null;
@@ -1061,23 +1050,29 @@ function ScenariosView({
   loading,
   error,
   savedSearches = [],
+  userScenarios = [],
   onReplaySearch,
   onDeleteSearch,
   onTogglePin,
+  onPopulateUserScenario,
+  populatingId,
 }: {
   scenarios: GesicaScenario[];
   loading?: boolean;
   error?: string | null;
   savedSearches?: SavedSearch[];
+  userScenarios?: UserScenario[];
   onReplaySearch?: (s: SavedSearch) => void;
   onDeleteSearch?: (id: string) => void;
   onTogglePin?: (id: string) => void;
+  onPopulateUserScenario?: (id: string) => void;
+  populatingId?: string | null;
 }) {
   const [selectedCluster, setSelectedCluster] = useState<string>("all");
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [detailScenarioId, setDetailScenarioId] = useState<string | null>(null);
 
-  // Page détail d'un scénario
+  // Page détail d'un scénario (GESICA ou utilisateur)
   if (detailScenarioId) {
     return <ScenarioDetailPage scenarioId={detailScenarioId} onBack={() => setDetailScenarioId(null)} />;
   }
@@ -2724,31 +2719,57 @@ function ScenariosView({
         </div>
       )}
 
-      {/* ── Recherches sauvegardées ─────────────────────────────────────── */}
-      {savedSearches.length > 0 && (
+      {/* ── Scénarios Utilisateur (recherches sauvegardées backend) ────────── */}
+      {userScenarios.length > 0 && (
         <div className="mt-8 space-y-4">
           <div className="flex items-center gap-3">
             <RefreshCw size={18} className="text-gold-400" />
             <div>
-              <h2 className="text-xl font-semibold text-white">Mes recherches sauvegardées</h2>
-              <p className="text-xs text-forest-400 mt-0.5">Recherches épinglées et récentes — cliquez pour relancer</p>
+              <h2 className="text-xl font-semibold text-white">Mes scénarios personnels</h2>
+              <p className="text-xs text-forest-400 mt-0.5">
+                Recherches sauvegardées — cliquez sur un scénario pour accéder à tous les onglets (corpus, PICO, screening, RAG, Evidence Brief...)
+              </p>
             </div>
           </div>
 
-          {/* Épinglées */}
-          {savedSearches.filter(s => s.pinned).length > 0 && (
+          {/* Épinglés */}
+          {userScenarios.filter(s => s.pinned).length > 0 && (
             <div className="space-y-2">
-              <h3 className="text-xs font-semibold text-gold-400 uppercase tracking-widest">Scénarios épinglés</h3>
-              {savedSearches.filter(s => s.pinned).map(s => (
-                <div key={s.id} className="flex items-center gap-3 rounded-2xl border border-gold-400/30 bg-gold-500/5 px-4 py-3 hover:bg-gold-500/10 transition">
+              <h3 className="text-xs font-semibold text-gold-400 uppercase tracking-widest">Épinglés</h3>
+              {userScenarios.filter(s => s.pinned).map(s => (
+                <div key={s.id} className="flex items-center gap-3 rounded-2xl border border-gold-400/30 bg-gold-500/5 px-4 py-3 hover:bg-gold-500/10 transition group">
                   <Activity size={14} className="text-gold-400 shrink-0" />
-                  <div className="flex-1 min-w-0">
-                    <p className="text-sm font-semibold text-white truncate">{s.name || s.query}</p>
-                    <p className="text-xs text-white/40 truncate">{s.mode === "semantic" ? "Sémantique" : "Booléen"} · {s.resultCount} résultats · {new Date(s.timestamp).toLocaleDateString("fr-CH")}</p>
-                    {s.name && <p className="text-xs text-white/30 truncate font-mono">{s.query}</p>}
+                  <div className="flex-1 min-w-0 cursor-pointer" onClick={() => setDetailScenarioId(s.id)}>
+                    <p className="text-sm font-semibold text-white truncate group-hover:text-gold-300 transition">{s.title}</p>
+                    <p className="text-xs text-white/40 truncate">
+                      {s.mode === "semantic" ? "Sémantique" : "Booléen"} · {s.articleCount} articles indexés
+                      {s.created_at && <> · {new Date(s.created_at).toLocaleDateString("fr-CH")}</>}
+                    </p>
+                    {s.title !== s.query && <p className="text-xs text-white/25 truncate font-mono">{s.query}</p>}
                   </div>
+                  <button
+                    type="button"
+                    onClick={() => setDetailScenarioId(s.id)}
+                    className="shrink-0 rounded-xl bg-brand-500/20 border border-brand-500/30 px-3 py-1.5 text-xs text-brand-300 hover:bg-brand-500/30 transition"
+                  >
+                    Ouvrir
+                  </button>
+                  {onPopulateUserScenario && (
+                    <button
+                      type="button"
+                      onClick={() => onPopulateUserScenario(s.id)}
+                      disabled={populatingId === s.id}
+                      className="shrink-0 rounded-xl border border-forest-500/30 px-2 py-1.5 text-xs text-forest-300 hover:bg-forest-500/10 transition disabled:opacity-50"
+                      title="Ingérer des articles PubMed"
+                    >
+                      {populatingId === s.id ? <RotateCcw size={11} className="animate-spin" /> : <Zap size={11} />}
+                    </button>
+                  )}
                   {onReplaySearch && (
-                    <button type="button" onClick={() => onReplaySearch(s)} className="shrink-0 rounded-xl bg-brand-500/20 border border-brand-500/30 px-3 py-1.5 text-xs text-brand-300 hover:bg-brand-500/30 transition">Relancer</button>
+                    <button type="button" onClick={() => {
+                      const saved = savedSearches.find(ss => ss.id === s.id);
+                      if (saved) onReplaySearch(saved);
+                    }} className="shrink-0 rounded-xl border border-white/10 px-2 py-1.5 text-xs text-white/40 hover:text-white hover:bg-white/10 transition" title="Relancer la recherche">&#8635;</button>
                   )}
                   {onTogglePin && (
                     <button type="button" onClick={() => onTogglePin(s.id)} className="shrink-0 rounded-xl border border-gold-400/20 px-2 py-1.5 text-xs text-gold-400 hover:bg-gold-500/10 transition" title="Désépingler">★</button>
@@ -2761,19 +2782,43 @@ function ScenariosView({
             </div>
           )}
 
-          {/* Récentes non épinglées */}
-          {savedSearches.filter(s => !s.pinned).length > 0 && (
+          {/* Non épinglés */}
+          {userScenarios.filter(s => !s.pinned).length > 0 && (
             <div className="space-y-2">
               <h3 className="text-xs font-semibold text-white/40 uppercase tracking-widest">Recherches récentes</h3>
-              {savedSearches.filter(s => !s.pinned).map(s => (
-                <div key={s.id} className="flex items-center gap-3 rounded-2xl border border-white/8 bg-white/3 px-4 py-3 hover:bg-white/8 transition">
+              {userScenarios.filter(s => !s.pinned).map(s => (
+                <div key={s.id} className="flex items-center gap-3 rounded-2xl border border-white/8 bg-white/3 px-4 py-3 hover:bg-white/8 transition group">
                   <BookOpen size={14} className="text-white/30 shrink-0" />
-                  <div className="flex-1 min-w-0">
-                    <p className="text-sm text-white/80 truncate">{s.query}</p>
-                    <p className="text-xs text-white/30 truncate">{s.mode === "semantic" ? "Sémantique" : "Booléen"} · {s.resultCount} résultats · {new Date(s.timestamp).toLocaleDateString("fr-CH")}</p>
+                  <div className="flex-1 min-w-0 cursor-pointer" onClick={() => setDetailScenarioId(s.id)}>
+                    <p className="text-sm text-white/80 truncate group-hover:text-white transition">{s.title}</p>
+                    <p className="text-xs text-white/30 truncate">
+                      {s.mode === "semantic" ? "Sémantique" : "Booléen"} · {s.articleCount} articles
+                      {s.created_at && <> · {new Date(s.created_at).toLocaleDateString("fr-CH")}</>}
+                    </p>
                   </div>
+                  <button
+                    type="button"
+                    onClick={() => setDetailScenarioId(s.id)}
+                    className="shrink-0 rounded-xl bg-white/5 border border-white/10 px-3 py-1.5 text-xs text-white/60 hover:text-white hover:bg-white/10 transition"
+                  >
+                    Ouvrir
+                  </button>
+                  {onPopulateUserScenario && (
+                    <button
+                      type="button"
+                      onClick={() => onPopulateUserScenario(s.id)}
+                      disabled={populatingId === s.id}
+                      className="shrink-0 rounded-xl border border-forest-500/30 px-2 py-1.5 text-xs text-forest-300 hover:bg-forest-500/10 transition disabled:opacity-50"
+                      title="Ingérer des articles PubMed"
+                    >
+                      {populatingId === s.id ? <RotateCcw size={11} className="animate-spin" /> : <Zap size={11} />}
+                    </button>
+                  )}
                   {onReplaySearch && (
-                    <button type="button" onClick={() => onReplaySearch(s)} className="shrink-0 rounded-xl bg-white/5 border border-white/10 px-3 py-1.5 text-xs text-white/60 hover:text-white hover:bg-white/10 transition">Relancer</button>
+                    <button type="button" onClick={() => {
+                      const saved = savedSearches.find(ss => ss.id === s.id);
+                      if (saved) onReplaySearch(saved);
+                    }} className="shrink-0 rounded-xl border border-white/10 px-2 py-1.5 text-xs text-white/40 hover:text-white hover:bg-white/10 transition" title="Relancer">&#8635;</button>
                   )}
                   {onTogglePin && (
                     <button type="button" onClick={() => onTogglePin(s.id)} className="shrink-0 rounded-xl border border-white/10 px-2 py-1.5 text-xs text-white/30 hover:text-gold-400 hover:border-gold-400/30 transition" title="Épingler">☆</button>
@@ -2820,9 +2865,11 @@ export default function App() {
   const [gesicaScenarios, setGesicaScenarios] = useState<GesicaScenario[]>([]);
   const [loadingScenarios, setLoadingScenarios] = useState(false);
   const [scenariosError, setScenariosError] = useState<string | null>(null);
-  const [savedSearches, setSavedSearches] = useState<SavedSearch[]>(() => loadSavedSearches());
+  const [savedSearches, setSavedSearches] = useState<SavedSearch[]>([]);
+  const [userScenarios, setUserScenarios] = useState<UserScenario[]>([]);
   const [saveSearchName, setSaveSearchName] = useState("");
   const [showSaveDialog, setShowSaveDialog] = useState(false);
+  const [populatingId, setPopulatingId] = useState<string | null>(null);
   
 
   useEffect(() => {
@@ -2858,8 +2905,26 @@ export default function App() {
     if (activeTab === "scenarios") {
       setLoadingScenarios(true);
       setScenariosError(null);
-      fetchGesicaScenarios()
-        .then((data) => { setGesicaScenarios(data); setLoadingScenarios(false); })
+      Promise.all([
+        fetchGesicaScenarios(),
+        fetchUserScenarios(),
+      ])
+        .then(([gesica, user]) => {
+          setGesicaScenarios(gesica);
+          setUserScenarios(user);
+          // Synchroniser savedSearches avec les user_scenarios backend
+          setSavedSearches(user.map(u => ({
+            id: u.id,
+            query: u.query,
+            mode: u.mode as SearchMode,
+            projectContext: (u.filters?.projectContext ?? "literev") as ProjectContext,
+            timestamp: u.created_at ? new Date(u.created_at).getTime() : Date.now(),
+            resultCount: u.result_count ?? 0,
+            name: u.title !== u.query ? u.title : undefined,
+            pinned: u.pinned,
+          })));
+          setLoadingScenarios(false);
+        })
         .catch((err) => { setScenariosError(String(err)); setLoadingScenarios(false); });
     }
   }, [activeTab]);
@@ -2930,22 +2995,34 @@ export default function App() {
       if (first) {
         await loadDocumentDetail(first);
       }
-      // Sauvegarder automatiquement dans l'historique
-      const newEntry: SavedSearch = {
-        id: `search_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+      // Sauvegarder automatiquement dans le backend (user_scenarios)
+      createUserScenario({
+        name: query.trim(),
         query: query.trim(),
         mode,
-        projectContext,
-        timestamp: Date.now(),
-        resultCount: data.results.length,
-      };
-      setSavedSearches(prev => {
-        // Dédupliquer par query+mode+projectContext (garder la plus récente)
-        const filtered = prev.filter(s => !(s.query === newEntry.query && s.mode === newEntry.mode && s.projectContext === newEntry.projectContext && !s.pinned));
-        const updated = [newEntry, ...filtered].slice(0, 50); // max 50 entrées
-        persistSavedSearches(updated);
-        return updated;
-      });
+        filters: { projectContext },
+        result_count: data.results.length,
+        pinned: false,
+      }).then(newScenario => {
+        setUserScenarios(prev => {
+          // Dédupliquer par query+mode (garder la plus récente)
+          const filtered = prev.filter(s => !(s.query === newScenario.query && s.mode === newScenario.mode && !s.pinned));
+          return [newScenario, ...filtered].slice(0, 50);
+        });
+        setSavedSearches(prev => {
+          const filtered = prev.filter(s => !(s.query === query.trim() && s.mode === mode && !s.pinned));
+          return [{
+            id: newScenario.id,
+            query: newScenario.query,
+            mode: newScenario.mode as SearchMode,
+            projectContext: (newScenario.filters?.projectContext ?? projectContext) as ProjectContext,
+            timestamp: newScenario.created_at ? new Date(newScenario.created_at).getTime() : Date.now(),
+            resultCount: newScenario.result_count ?? data.results.length,
+            name: undefined,
+            pinned: false,
+          }, ...filtered].slice(0, 50);
+        });
+      }).catch(err => console.warn('Auto-save user_scenario failed:', err));
     } catch (err) {
       setError(err instanceof Error ? err.message : "Erreur inconnue");
       setResults([]);
@@ -2957,30 +3034,39 @@ export default function App() {
   function handleSaveAsScenario() {
     if (!query.trim()) return;
     const name = saveSearchName.trim() || query.trim();
-    setSavedSearches(prev => {
-      const updated = prev.map(s =>
-        s.query === query && s.mode === mode && s.projectContext === projectContext && !s.pinned
-          ? { ...s, name, pinned: true }
-          : s
-      );
-      // Si pas encore dans l'historique, créer une entrée épinglée
-      const exists = updated.some(s => s.query === query && s.mode === mode && s.projectContext === projectContext && s.pinned);
-      if (!exists) {
-        const entry: SavedSearch = {
-          id: `scenario_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
-          query: query.trim(),
-          mode,
-          projectContext,
-          timestamp: Date.now(),
-          resultCount: results.length,
+    // Chercher si une entrée non-épinglée existe déjà pour cette requête
+    const existing = userScenarios.find(s => s.query === query && s.mode === mode && !s.pinned);
+    if (existing) {
+      // Mettre à jour : renommer + épingler
+      patchUserScenario(existing.id, { name, pinned: true })
+        .then(updated => {
+          setUserScenarios(prev => prev.map(s => s.id === updated.id ? updated : s));
+          setSavedSearches(prev => prev.map(s => s.id === updated.id ? { ...s, name, pinned: true } : s));
+        })
+        .catch(err => console.warn('Patch user_scenario failed:', err));
+    } else {
+      // Créer un nouveau scénario épinglé
+      createUserScenario({
+        name,
+        query: query.trim(),
+        mode,
+        filters: { projectContext },
+        result_count: results.length,
+        pinned: true,
+      }).then(newScenario => {
+        setUserScenarios(prev => [newScenario, ...prev]);
+        setSavedSearches(prev => [{
+          id: newScenario.id,
+          query: newScenario.query,
+          mode: newScenario.mode as SearchMode,
+          projectContext: (newScenario.filters?.projectContext ?? projectContext) as ProjectContext,
+          timestamp: newScenario.created_at ? new Date(newScenario.created_at).getTime() : Date.now(),
+          resultCount: newScenario.result_count ?? results.length,
           name,
           pinned: true,
-        };
-        updated.unshift(entry);
-      }
-      persistSavedSearches(updated);
-      return updated;
-    });
+        }, ...prev]);
+      }).catch(err => console.warn('Create user_scenario failed:', err));
+    }
     setShowSaveDialog(false);
     setSaveSearchName("");
   }
@@ -2998,19 +3084,50 @@ export default function App() {
   }
 
   function handleDeleteSavedSearch(id: string) {
-    setSavedSearches(prev => {
-      const updated = prev.filter(s => s.id !== id);
-      persistSavedSearches(updated);
-      return updated;
-    });
+    deleteUserScenario(id)
+      .then(() => {
+        setUserScenarios(prev => prev.filter(s => s.id !== id));
+        setSavedSearches(prev => prev.filter(s => s.id !== id));
+      })
+      .catch(err => console.warn('Delete user_scenario failed:', err));
   }
 
   function handleTogglePin(id: string) {
-    setSavedSearches(prev => {
-      const updated = prev.map(s => s.id === id ? { ...s, pinned: !s.pinned } : s);
-      persistSavedSearches(updated);
-      return updated;
-    });
+    const current = userScenarios.find(s => s.id === id);
+    if (!current) return;
+    patchUserScenario(id, { pinned: !current.pinned })
+      .then(updated => {
+        setUserScenarios(prev => prev.map(s => s.id === updated.id ? updated : s));
+        setSavedSearches(prev => prev.map(s => s.id === id ? { ...s, pinned: !s.pinned } : s));
+      })
+      .catch(err => console.warn('Toggle pin user_scenario failed:', err));
+  }
+
+  async function handlePopulateUserScenario(id: string) {
+    setPopulatingId(id);
+    try {
+      await populateUserScenario(id, 30);
+      // Rafraîchir après 5s pour voir les articles ingérés
+      setTimeout(() => {
+        fetchUserScenarios().then(data => {
+          setUserScenarios(data);
+          setSavedSearches(data.map(u => ({
+            id: u.id,
+            query: u.query,
+            mode: u.mode as SearchMode,
+            projectContext: (u.filters?.projectContext ?? "literev") as ProjectContext,
+            timestamp: u.created_at ? new Date(u.created_at).getTime() : Date.now(),
+            resultCount: u.result_count ?? 0,
+            name: u.title !== u.query ? u.title : undefined,
+            pinned: u.pinned,
+          })));
+        }).catch(console.warn);
+        setPopulatingId(null);
+      }, 8000);
+    } catch (err) {
+      console.warn('Populate user_scenario failed:', err);
+      setPopulatingId(null);
+    }
   }
 
   function handleReset() {
@@ -3139,9 +3256,12 @@ export default function App() {
             loading={loadingScenarios}
             error={scenariosError}
             savedSearches={savedSearches}
+            userScenarios={userScenarios}
             onReplaySearch={handleReplaySearch}
             onDeleteSearch={handleDeleteSavedSearch}
             onTogglePin={handleTogglePin}
+            onPopulateUserScenario={handlePopulateUserScenario}
+            populatingId={populatingId}
           />
         )}
 

@@ -1638,7 +1638,8 @@ export interface PicoData {
 }
 
 export async function fetchScenarioDetail(scenarioId: string): Promise<ScenarioDetail> {
-  const response = await fetch(`${API_BASE_URL}/gesica/scenarios/${scenarioId}/detail`);
+  const base = scenarioBase(scenarioId);
+  const response = await fetch(`${base}/${scenarioId}/detail`);
   if (!response.ok) throw new Error(`HTTP ${response.status}`);
   return response.json();
 }
@@ -1661,7 +1662,8 @@ export async function fetchScenarioCorpus(
   if (options?.yearTo) params.set('year_to', String(options.yearTo));
   if (options?.fulltextOnly) params.set('fulltext_only', 'true');
   if (options?.source) params.set('source', options.source);
-  const url = `${API_BASE_URL}/gesica/scenarios/${scenarioId}/corpus?${params}`;
+  const base = scenarioBase(scenarioId);
+  const url = `${base}/${scenarioId}/corpus?${params}`;
   const response = await fetch(url);
   if (!response.ok) throw new Error(`HTTP ${response.status}`);
   return response.json();
@@ -1686,7 +1688,8 @@ export async function fetchScenarioClustering(
   nClusters?: number
 ): Promise<ScenarioClustering> {
   const params = nClusters ? `?n_clusters=${nClusters}` : '';
-  const response = await fetch(`${API_BASE_URL}/gesica/scenarios/${scenarioId}/clustering${params}`);
+  const base = scenarioBase(scenarioId);
+  const response = await fetch(`${base}/${scenarioId}/clustering${params}`);
   if (!response.ok) throw new Error(`HTTP ${response.status}`);
   return response.json();
 }
@@ -1696,7 +1699,8 @@ export async function askScenarioRag(
   question: string,
   filters?: Record<string, any>
 ): Promise<ScenarioRagResponse> {
-  const response = await fetch(`${API_BASE_URL}/gesica/scenarios/${scenarioId}/rag`, {
+  const base = scenarioBase(scenarioId);
+  const response = await fetch(`${base}/${scenarioId}/rag`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ question, filters }),
@@ -1706,7 +1710,8 @@ export async function askScenarioRag(
 }
 
 export async function fetchScenarioPrisma(scenarioId: string): Promise<ScenarioPrisma> {
-  const response = await fetch(`${API_BASE_URL}/gesica/scenarios/${scenarioId}/prisma`);
+  const base = scenarioBase(scenarioId);
+  const response = await fetch(`${base}/${scenarioId}/prisma`);
   if (!response.ok) throw new Error(`HTTP ${response.status}`);
   return response.json();
 }
@@ -1728,7 +1733,8 @@ export async function uploadScenarioDataset(
   const formData = new FormData();
   formData.append('file', file);
   
-  const response = await fetch(`${API_BASE_URL}/gesica/scenarios/${scenarioId}/upload-dataset`, {
+  const base = scenarioBase(scenarioId);
+  const response = await fetch(`${base}/${scenarioId}/upload-dataset`, {
     method: 'POST',
     body: formData,
   });
@@ -1751,8 +1757,9 @@ export async function screenArticle(
   const params = new URLSearchParams({ status });
   if (reason) params.set('reason', reason);
   if (notes) params.set('notes', notes);
+  const base = scenarioBase(scenarioId);
   const response = await fetch(
-    `${API_BASE_URL}/gesica/scenarios/${scenarioId}/articles/${articleId}/screen?${params}`,
+    `${base}/${scenarioId}/articles/${articleId}/screen?${params}`,
     { method: 'POST' }
   );
   if (!response.ok) throw new Error(`HTTP ${response.status}`);
@@ -1760,7 +1767,8 @@ export async function screenArticle(
 }
 
 export async function fetchScreeningProgress(scenarioId: string): Promise<ScreeningProgress> {
-  const response = await fetch(`${API_BASE_URL}/gesica/scenarios/${scenarioId}/screening-progress`);
+  const base = scenarioBase(scenarioId);
+  const response = await fetch(`${base}/${scenarioId}/screening-progress`);
   if (!response.ok) throw new Error(`HTTP ${response.status}`);
   return response.json();
 }
@@ -1769,8 +1777,9 @@ export async function fetchArticlePico(
   scenarioId: string,
   articleId: number
 ): Promise<{ article_id: number; pico: PicoData | null; extracted_at: string | null }> {
+  const base = scenarioBase(scenarioId);
   const response = await fetch(
-    `${API_BASE_URL}/gesica/scenarios/${scenarioId}/articles/${articleId}/pico`
+    `${base}/${scenarioId}/articles/${articleId}/pico`
   );
   if (!response.ok) throw new Error(`HTTP ${response.status}`);
   return response.json();
@@ -1822,7 +1831,8 @@ export async function fetchScenarioPicoBulk(
   limit = 200,
   offset = 0
 ): Promise<PicoBulkResponse> {
-  const r = await fetch(`${API_BASE_URL}/gesica/scenarios/${scenarioId}/pico-bulk?limit=${limit}&offset=${offset}`);
+  const base = scenarioBase(scenarioId);
+  const r = await fetch(`${base}/${scenarioId}/pico-bulk?limit=${limit}&offset=${offset}`);
   if (!r.ok) throw new Error(`HTTP ${r.status}`);
   return r.json();
 }
@@ -1899,7 +1909,8 @@ export interface EvidenceBriefData {
 }
 
 export async function fetchEvidenceBrief(scenarioId: string): Promise<EvidenceBriefData> {
-  const r = await fetch(`${API_BASE_URL}/gesica/scenarios/${scenarioId}/evidence-brief`);
+  const base = scenarioBase(scenarioId);
+  const r = await fetch(`${base}/${scenarioId}/evidence-brief`);
   if (!r.ok) throw new Error(`HTTP ${r.status}`);
   return r.json();
 }
@@ -1947,8 +1958,9 @@ export async function fetchKnowledgeGraph(
   maxNodes = 80,
   minSimilarity = 0.35,
 ): Promise<KnowledgeGraphData> {
+  const base = scenarioBase(scenarioId);
   const r = await fetch(
-    `${API_BASE_URL}/gesica/scenarios/${scenarioId}/knowledge-graph?max_nodes=${maxNodes}&min_similarity=${minSimilarity}`,
+    `${base}/${scenarioId}/knowledge-graph?max_nodes=${maxNodes}&min_similarity=${minSimilarity}`,
   );
   if (!r.ok) throw new Error(`HTTP ${r.status}`);
   return r.json();
@@ -2060,8 +2072,9 @@ export async function submitDoubleBlindDecision(
   scenarioId: string,
   payload: DoubleBlindDecision,
 ): Promise<{ id: number; agreement: boolean | null; final_status: string | null }> {
+  const base = scenarioBase(scenarioId);
   const r = await fetch(
-    `${API_BASE_URL}/gesica/scenarios/${scenarioId}/double-blind/decision`,
+    `${base}/${scenarioId}/double-blind/decision`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -2073,8 +2086,9 @@ export async function submitDoubleBlindDecision(
 }
 
 export async function fetchKappaStats(scenarioId: string): Promise<KappaStats> {
+  const base = scenarioBase(scenarioId);
   const r = await fetch(
-    `${API_BASE_URL}/gesica/scenarios/${scenarioId}/double-blind/kappa`,
+    `${base}/${scenarioId}/double-blind/kappa`,
   );
   if (!r.ok) throw new Error(`HTTP ${r.status}`);
   return r.json();
@@ -2083,8 +2097,9 @@ export async function fetchKappaStats(scenarioId: string): Promise<KappaStats> {
 export async function fetchDoubleBlindConflicts(
   scenarioId: string,
 ): Promise<any[]> {
+  const base = scenarioBase(scenarioId);
   const r = await fetch(
-    `${API_BASE_URL}/gesica/scenarios/${scenarioId}/double-blind/conflicts`,
+    `${base}/${scenarioId}/double-blind/conflicts`,
   );
   if (!r.ok) throw new Error(`HTTP ${r.status}`);
   return r.json();
@@ -2093,7 +2108,121 @@ export async function fetchDoubleBlindConflicts(
 // ─── Evidence Brief PDF côté serveur ─────────────────────────────────────────
 
 export function getEvidenceBriefPdfUrl(scenarioId: string): string {
-  return `${API_BASE_URL}/gesica/scenarios/${scenarioId}/evidence-brief/pdf`;
+  const base = scenarioBase(scenarioId);
+  return `${base}/${scenarioId}/evidence-brief/pdf`;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// USER SCENARIOS — Helpers de routage et CRUD
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Retourne true si l'ID est un scénario utilisateur (préfixe "usr-").
+ * Utilisé pour router vers /user-scenarios/... au lieu de /gesica/scenarios/...
+ */
+export function isUserScenario(scenarioId: string): boolean {
+  return scenarioId.startsWith('usr-');
+}
+
+/**
+ * Retourne le préfixe d'URL correct selon le type de scénario.
+ * - Scénario GESICA : /gesica/scenarios
+ * - Scénario utilisateur : /user-scenarios
+ */
+export function scenarioBase(scenarioId: string): string {
+  return isUserScenario(scenarioId)
+    ? `${API_BASE_URL}/user-scenarios`
+    : `${API_BASE_URL}/gesica/scenarios`;
+}
+
+// ─── Types user-scenarios ─────────────────────────────────────────────────────
+
+export interface UserScenario extends GesicaScenario {
+  query: string;
+  mode: string;
+  filters: Record<string, any>;
+  result_count: number;
+  pinned: boolean;
+  created_at: string | null;
+  updated_at: string | null;
+  is_user_scenario: true;
+}
+
+export interface UserScenarioCreatePayload {
+  name: string;
+  query: string;
+  mode: string;
+  filters: Record<string, any>;
+  result_count?: number;
+  pinned?: boolean;
+}
+
+export interface UserScenarioPopulateStatus {
+  scenario_id: string;
+  status: 'not_started' | 'running' | 'done' | 'error' | 'already_running';
+  ingested?: number;
+  errors?: number;
+  message?: string;
+  error?: string;
+}
+
+// ─── CRUD user-scenarios ──────────────────────────────────────────────────────
+
+export async function fetchUserScenarios(): Promise<UserScenario[]> {
+  const r = await fetch(`${API_BASE_URL}/user-scenarios`);
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  return r.json();
+}
+
+export async function createUserScenario(
+  payload: UserScenarioCreatePayload,
+): Promise<UserScenario> {
+  const r = await fetch(`${API_BASE_URL}/user-scenarios`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  return r.json();
+}
+
+export async function deleteUserScenario(scenarioId: string): Promise<{ deleted: boolean; id: string }> {
+  const r = await fetch(`${API_BASE_URL}/user-scenarios/${scenarioId}`, { method: 'DELETE' });
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  return r.json();
+}
+
+export async function patchUserScenario(
+  scenarioId: string,
+  patch: { name?: string; pinned?: boolean; mode?: string; filters?: Record<string, any> },
+): Promise<UserScenario> {
+  const r = await fetch(`${API_BASE_URL}/user-scenarios/${scenarioId}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(patch),
+  });
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  return r.json();
+}
+
+export async function populateUserScenario(
+  scenarioId: string,
+  maxResults = 30,
+): Promise<{ scenario_id: string; status: string; query: string; message: string }> {
+  const r = await fetch(
+    `${API_BASE_URL}/user-scenarios/${scenarioId}/populate?max_results=${maxResults}`,
+    { method: 'POST' },
+  );
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  return r.json();
+}
+
+export async function fetchUserScenarioPopulateStatus(
+  scenarioId: string,
+): Promise<UserScenarioPopulateStatus> {
+  const r = await fetch(`${API_BASE_URL}/user-scenarios/${scenarioId}/populate/status`);
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  return r.json();
 }
 
 // ─── Alertes email ────────────────────────────────────────────────────────────
