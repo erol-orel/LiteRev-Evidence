@@ -1672,13 +1672,15 @@ export async function fetchScenarioCorpus(
 }
 
 export async function fetchScenarioModelStatus(scenarioId: string): Promise<ModelStatus> {
-  const response = await fetch(`${API_BASE_URL}/gesica/scenarios/${scenarioId}/model-status`);
+  const base = scenarioBase(scenarioId);
+  const response = await fetch(`${base}/${scenarioId}/model-status`);
   if (!response.ok) throw new Error(`HTTP ${response.status}`);
   return response.json();
 }
 
 export async function runScenarioModel(scenarioId: string): Promise<ModelStatus> {
-  const response = await fetch(`${API_BASE_URL}/gesica/scenarios/${scenarioId}/model-run`, {
+  const base = scenarioBase(scenarioId);
+  const response = await fetch(`${base}/${scenarioId}/model-run`, {
     method: 'POST',
   });
   if (!response.ok) throw new Error(`HTTP ${response.status}`);

@@ -1088,7 +1088,6 @@ function ScenariosView({
   onRenameFolder?: (folderId: string, name: string, color: string) => Promise<void>;
   onAssignFolder?: (scenarioId: string, folderId: string | null) => Promise<void>;
 }) {
-  const [selectedCluster, setSelectedCluster] = useState<string>("all");
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [detailScenarioId, setDetailScenarioId] = useState<string | null>(null);
   const [showNewFolderDialog, setShowNewFolderDialog] = useState(false);
@@ -1135,10 +1134,6 @@ function ScenariosView({
   }
 
   // Extraire les clusters uniques
-  const clusters = ["all", ...Array.from(new Set(scenarios.map(s => s.cluster))).sort()];
-  const filtered = selectedCluster === "all" ? scenarios : scenarios.filter(s => s.cluster === selectedCluster);
-  const withArticles = filtered.filter(s => s.articleCount > 0);
-  const withoutArticles = filtered.filter(s => s.articleCount === 0);
 
   const clusterColors: Record<string, string> = {
     "Prévention & Risques": "border-violet-500/30 bg-violet-500/10 text-violet-300",
@@ -2688,88 +2683,58 @@ function ScenariosView({
     );
   };
 
+  // Construire les dossiers GESICA (un par cluster)
+  const gesicaClusters = Array.from(new Set(scenarios.map(s => s.cluster))).sort();
+  const totalArticles = scenarios.reduce((a, s) => a + s.articleCount, 0)
+    + userScenarios.reduce((a, s) => a + (s.articleCount ?? 0), 0);
+  const totalScenarios = scenarios.length + userScenarios.length;
+
   return (
     <div className="space-y-6">
-      {/* En-tête */}
+      {/* En-tête unifié */}
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-3">
           <Activity size={20} className="text-brand-400" />
           <div>
-            <h2 className="text-xl font-semibold text-white">Scénarios LiteRev</h2>
+            <h2 className="text-xl font-semibold text-white">Tous les scénarios</h2>
             <p className="text-xs text-forest-400 mt-0.5">
-              {scenarios.length} scénarios · {scenarios.reduce((a, s) => a + s.articleCount, 0).toLocaleString()} articles indexés · Mis à jour automatiquement
+              {totalScenarios} scénarios · {totalArticles.toLocaleString()} articles indexés
             </p>
           </div>
         </div>
-        <span className="rounded-full border border-brand-500/20 bg-brand-500/10 px-3 py-1 text-xs text-brand-300 font-medium">
-          <RefreshCw size={10} className="inline mr-1" />
-          Living Review
-        </span>
-      </div>
-
-      {/* Filtre par cluster */}
-      <div className="flex flex-wrap gap-2">
-        {clusters.map((cluster) => (
+        {onCreateFolder && (
           <button
-            key={cluster}
-            onClick={() => setSelectedCluster(cluster)}
-            className={`rounded-xl border px-3 py-1.5 text-xs font-medium transition ${
-              selectedCluster === cluster
-                ? "border-brand-400 bg-brand-500/20 text-white"
-                : "border-white/10 bg-white/5 text-forest-400 hover:bg-white/10"
-            }`}
+            type="button"
+            onClick={() => setShowNewFolderDialog(true)}
+            className="shrink-0 flex items-center gap-1.5 rounded-xl border border-white/10 bg-white/5 px-3 py-1.5 text-xs text-white/60 hover:text-white hover:bg-white/10 transition"
           >
-            {cluster === "all" ? `Tous (${scenarios.length})` : `${cluster} (${scenarios.filter(s => s.cluster === cluster).length})`}
+            <FolderOpen size={13} />
+            Nouveau dossier
           </button>
-        ))}
+        )}
       </div>
 
-      {/* Scénarios avec articles */}
-      {withArticles.length > 0 && (
-        <div className="space-y-3">
-          <h3 className="text-sm font-semibold text-forest-300 flex items-center gap-2">
-            <span className="h-2 w-2 rounded-full bg-brand-400" />
-            Scénarios actifs ({withArticles.length})
-          </h3>
-          {withArticles.map((s) => <ScenarioCard key={s.id} scenario={s} />)}
-        </div>
-      )}
-
-      {/* Scénarios sans articles */}
-      {withoutArticles.length > 0 && (
-        <div className="space-y-3">
-          <h3 className="text-sm font-semibold text-forest-500 flex items-center gap-2">
-            <span className="h-2 w-2 rounded-full bg-forest-600" />
-            En attente d'articles ({withoutArticles.length})
-          </h3>
-          {withoutArticles.map((s) => <ScenarioCard key={s.id} scenario={s} />)}
-        </div>
-      )}
-
-      {/* ── Scénarios Utilisateur (recherches sauvegardées backend) ────────── */}
-      {(userScenarios.length > 0 || onCreateFolder) && (
-        <div className="mt-8 space-y-4">
-          <div className="flex items-center justify-between gap-3">
-            <div className="flex items-center gap-3">
-              <RefreshCw size={18} className="text-gold-400" />
-              <div>
-                <h2 className="text-xl font-semibold text-white">Mes scénarios personnels</h2>
-                <p className="text-xs text-forest-400 mt-0.5">
-                  Recherches sauvegardées — cliquez pour accéder à tous les onglets (corpus, PICO, screening, RAG, Evidence Brief...)
-                </p>
-              </div>
+      {/* ── Dossiers GESICA (un par cluster) ── */}
+      {gesicaClusters.map(cluster => {
+        const clusterScenarios = scenarios.filter(s => s.cluster === cluster);
+        return (
+          <div key={cluster} className="rounded-2xl border border-brand-500/20 bg-brand-500/5 p-4 space-y-2">
+            <div className="flex items-center justify-between">
+              <h3 className="text-sm font-semibold flex items-center gap-1.5 text-brand-300">
+                <FolderOpen size={14} />
+                {cluster} <span className="text-xs font-normal opacity-60">({clusterScenarios.length})</span>
+              </h3>
+              <span className="rounded-full border border-brand-500/20 bg-brand-500/10 px-2 py-0.5 text-[10px] text-brand-400 font-medium">
+                <RefreshCw size={8} className="inline mr-1" />Living Review
+              </span>
             </div>
-            {onCreateFolder && (
-              <button
-                type="button"
-                onClick={() => setShowNewFolderDialog(true)}
-                className="shrink-0 flex items-center gap-1.5 rounded-xl border border-white/10 bg-white/5 px-3 py-1.5 text-xs text-white/60 hover:text-white hover:bg-white/10 transition"
-              >
-                <FolderOpen size={13} />
-                Nouveau dossier
-              </button>
-            )}
+            {clusterScenarios.map(s => <ScenarioCard key={s.id} scenario={s} />)}
           </div>
+        );
+      })}
+
+      {/* ── Dossiers personnels + scénarios utilisateur ── */}
+      <div className="space-y-4">
 
           {/* Dialog création dossier */}
           {showNewFolderDialog && (
@@ -2920,7 +2885,8 @@ function ScenariosView({
                         <span className="text-xs text-white/25">
                           {(['pubmed','pico','metadata','fulltext','clustering'] as const).map(step => {
                             const st = pipelineStatuses[s.id]?.steps?.[step]?.status;
-                            return <span key={step} className={`inline-block w-1.5 h-1.5 rounded-full mx-0.5 ${st === 'done' ? 'bg-forest-400' : st === 'running' ? 'bg-brand-400 animate-pulse' : st === 'error' ? 'bg-red-400' : 'bg-white/20'}`} title={step} />;
+                            const dotCls = st === 'done' ? 'bg-forest-400' : st === 'running' ? 'bg-brand-400 animate-pulse' : st === 'error' ? 'bg-red-400' : 'bg-white/20';
+                            return <span key={step} className={`inline-block w-1.5 h-1.5 rounded-full mx-0.5 ${dotCls}`} title={step} />;
                           })}
                         </span>
                       </div>
@@ -2944,14 +2910,14 @@ function ScenariosView({
                       className="shrink-0 rounded-xl border border-forest-500/30 px-2 py-1.5 text-xs text-forest-300 hover:bg-forest-500/10 transition disabled:opacity-50"
                       title="Ingérer des articles PubMed"
                     >
-                      {populatingId === s.id ? <RotateCcw size={11} className="animate-spin" /> : <Zap size={11} />}
+                      {populatingId === s.id ? (<RotateCcw size={11} className="animate-spin" />) : (<Zap size={11} />)}
                     </button>
                   )}
                   {onReplaySearch && (
                     <button type="button" onClick={() => {
                       const saved = savedSearches.find(ss => ss.id === s.id);
                       if (saved) onReplaySearch(saved);
-                    }} className="shrink-0 rounded-xl border border-white/10 px-2 py-1.5 text-xs text-white/40 hover:text-white hover:bg-white/10 transition" title="Relancer la recherche">&#8635;</button>
+                    }} className="shrink-0 rounded-xl border border-white/10 px-2 py-1.5 text-xs text-white/40 hover:text-white hover:bg-white/10 transition" title="Relancer la recherche">↻</button>
                   )}
                   {onAssignFolder && (
                     <button type="button" onClick={() => setAssigningScenarioId(s.id)} className="shrink-0 rounded-xl border border-white/10 px-2 py-1.5 text-xs text-white/30 hover:text-white hover:bg-white/10 transition" title="Assigner à un dossier"><FolderOpen size={11} /></button>
@@ -3013,14 +2979,14 @@ function ScenariosView({
                       className="shrink-0 rounded-xl border border-forest-500/30 px-2 py-1.5 text-xs text-forest-300 hover:bg-forest-500/10 transition disabled:opacity-50"
                       title="Ingérer des articles PubMed"
                     >
-                      {populatingId === s.id ? <RotateCcw size={11} className="animate-spin" /> : <Zap size={11} />}
+                      {populatingId === s.id ? (<RotateCcw size={11} className="animate-spin" />) : (<Zap size={11} />)}
                     </button>
                   )}
                   {onReplaySearch && (
                     <button type="button" onClick={() => {
                       const saved = savedSearches.find(ss => ss.id === s.id);
                       if (saved) onReplaySearch(saved);
-                    }} className="shrink-0 rounded-xl border border-white/10 px-2 py-1.5 text-xs text-white/40 hover:text-white hover:bg-white/10 transition" title="Relancer">&#8635;</button>
+                    }} className="shrink-0 rounded-xl border border-white/10 px-2 py-1.5 text-xs text-white/40 hover:text-white hover:bg-white/10 transition" title="Relancer">↻</button>
                   )}
                   {onAssignFolder && (
                     <button type="button" onClick={() => setAssigningScenarioId(s.id)} className="shrink-0 rounded-xl border border-white/10 px-2 py-1.5 text-xs text-white/30 hover:text-white hover:bg-white/10 transition" title="Assigner à un dossier"><FolderOpen size={11} /></button>
@@ -3036,7 +3002,6 @@ function ScenariosView({
             </div>
           )}
         </div>
-      )}
     </div>
   );
 }

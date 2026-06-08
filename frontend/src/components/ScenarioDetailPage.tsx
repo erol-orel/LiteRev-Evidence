@@ -562,13 +562,21 @@ function CorpusSection({ scenarioId }: { scenarioId: string; detail: ScenarioDet
   if (error || !data) return <ErrorBox message={error ?? "Erreur corpus"} />;
 
   return (
+    <div className="space-y-4">
+      {/* Bannière avertissement sélection automatique */}
+      <div className="rounded-2xl border border-gold-500/20 bg-gold-500/5 px-4 py-3 flex items-start gap-3">
+        <AlertTriangle size={14} className="text-gold-400 shrink-0 mt-0.5" />
+        <div className="text-xs text-gold-200/80 leading-relaxed">
+          <strong className="text-gold-300">Sélection automatique</strong> — Ces articles ont été récupérés par recherche lexicale (requête PubMed) et/ou sémantique (similarité vectorielle). <strong>Aucun n'a été validé par un relecteur humain.</strong> Pour une revue systématique formelle, un screening humain en double-aveugle est requis (onglet Revue).
+        </div>
+      </div>
     <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
       {/* Liste des articles */}
       <div className="lg:col-span-2 space-y-4">
         <SectionHeader
           icon={<FileText size={14} className="text-brand-400" />}
-          title={`Corpus d'évidences (${data.articles.length} articles validés)`}
-          subtitle="Articles validés pour l'extraction de l'évidence"
+          title={`Corpus d'articles (${data.articles.length} articles indexés)`}
+          subtitle="Articles sélectionnés automatiquement — en attente de validation humaine (screening)"
         />
         <div className="space-y-3">
           {data.articles.length > 0 ? data.articles.map((article) => (
@@ -634,6 +642,7 @@ function CorpusSection({ scenarioId }: { scenarioId: string; detail: ScenarioDet
           </div>
         </div>
       </div>
+    </div>
     </div>
   );
 }
@@ -2212,6 +2221,16 @@ ${data.top_articles.slice(0,8).map((a,i)=>`
         title="Evidence Brief"
         subtitle="Rapport synthétique complet : corpus, PICO, screening, niveau de preuve"
       />
+
+      {/* Bannière sélection automatique */}
+      {(data.corpus_stats.included === 0) && (
+        <div className="rounded-2xl border border-gold-500/20 bg-gold-500/5 px-4 py-3 flex items-start gap-3">
+          <AlertTriangle size={14} className="text-gold-400 shrink-0 mt-0.5" />
+          <div className="text-xs text-gold-200/80 leading-relaxed">
+            <strong className="text-gold-300">Aucun article validé par un relecteur humain</strong> — Les articles présentés dans cet Evidence Brief ont été sélectionnés automatiquement par recherche PubMed (lexicale) et/ou similarité sémantique. Pour une revue systématique formelle, un screening humain en double-aveugle est nécessaire avant d’utiliser ces résultats.
+          </div>
+        </div>
+      )}
 
       {/* Header avec export */}
       <div className="flex items-start justify-between gap-4 flex-wrap">
