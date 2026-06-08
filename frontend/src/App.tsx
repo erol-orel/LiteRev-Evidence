@@ -3077,7 +3077,6 @@ export default function App() {
   const [populatingId, setPopulatingId] = useState<string | null>(null);
   const [pipelineStatuses, setPipelineStatuses] = useState<Record<string, UserScenarioPipelineStatus>>({});
   const pipelinePollRef = useRef<Record<string, ReturnType<typeof setInterval>>>({});
-  const [searchTotalDocs, setSearchTotalDocs] = useState<number | null>(null);
   const [searchSourceBreakdown, setSearchSourceBreakdown] = useState<Record<string, number> | null>(null);
   const [folders, setFolders] = useState<ScenarioFolder[]>([]);
   
@@ -3161,6 +3160,12 @@ export default function App() {
     });
   }, [results]);
 
+  // Nombre de documents uniques (un document peut avoir plusieurs chunks dans dedupedResults)
+  const uniqueDocCount = useMemo(() => {
+    const docIds = new Set(dedupedResults.map(r => r.documentId));
+    return docIds.size;
+  }, [dedupedResults]);
+
   const totalPages = Math.max(1, Math.ceil(dedupedResults.length / PAGE_SIZE));
 
   const pagedResults = useMemo(() => {
@@ -3203,7 +3208,6 @@ export default function App() {
         filters: effectiveFilters,
       });
       setResults(data.results);
-      setSearchTotalDocs(data.totalUniqueDocs ?? data.results.length);
       setSearchSourceBreakdown(data.sourceBreakdown ?? null);
       const first = data.results[0] ?? null;
       if (first) {
@@ -3667,10 +3671,10 @@ export default function App() {
                   <div className="flex items-center justify-between">
                     <div className="space-y-1">
                       <p className="text-sm text-forest-400">
-                        <span className="font-semibold text-white">{dedupedResults.length}</span>{" "}
-                        résultat{dedupedResults.length > 1 ? "s" : ""} affichés
-                        {searchTotalDocs !== null && searchTotalDocs > dedupedResults.length && (
-                          <span className="text-white/40"> (sur <span className="font-semibold text-white/70">{searchTotalDocs}</span> trouvés)</span>
+                        <span className="font-semibold text-white">{uniqueDocCount}</span>{" "}
+                        document{uniqueDocCount > 1 ? "s" : ""} uniques
+                        {dedupedResults.length > uniqueDocCount && (
+                          <span className="text-white/30"> ({dedupedResults.length} passages)</span>
                         )}
                         {" "}· {totalPages > 1 ? `page ${page}/${totalPages}` : "1 page"}
                       </p>

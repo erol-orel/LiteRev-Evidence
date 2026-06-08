@@ -688,18 +688,28 @@ def search(payload: SearchIn) -> dict[str, Any]:
         doc_id = row["document_id"]
         if doc_id not in seen_doc_ids:
             seen_doc_ids.add(doc_id)
-            src = (row["source"] or "Inconnu").strip()
+            raw_src = (row["source"] or "").strip()
+            # Normaliser : vide/null → "Autre"
+            src = raw_src if raw_src else "Autre"
             source_counts[src] = source_counts.get(src, 0) + 1
 
-    # Compter le total de documents uniques correspondant à la requête (sans LIMIT)
-    total_unique_docs = len(seen_doc_ids)
+    # Le total de documents uniques = somme du breakdown (cohérent avec le frontend)
+    total_unique_docs = sum(source_counts.values())
+
+    # Trier le breakdown : Autre en dernier, reste par ordre décroissant
+    sorted_breakdown = dict(
+        sorted(
+            source_counts.items(),
+            key=lambda x: (x[0] == "Autre", -x[1])
+        )
+    )
 
     return {
         "results": results,
         "count": len(results),
         "total": len(results),
         "total_unique_docs": total_unique_docs,
-        "source_breakdown": source_counts,
+        "source_breakdown": sorted_breakdown,
     }
 
 # ─────────────────────────────────────────────────────────────────────────────
