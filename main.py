@@ -5868,13 +5868,13 @@ def _run_user_scenario_populate(
     scenario_id: str,
     query: str,
     filters: dict,
-    max_results: int = 500,
+    max_results: int = 1000,
     _pipeline_callback=None,
 ) -> int:
     """
-    Ingère des articles PubMed pour un scénario utilisateur en arrière-plan.
-    Utilise usehistory=y pour paginer sans limite NCBI (retmax max=10000 par page).
-    Retourne le nombre d'articles ingérés.
+    Ingère des articles pour un scénario utilisateur en arrière-plan (7 sources).
+    Limite : 1 000 articles max par source.
+    Retourne le nombre total d'articles ingérés.
     """
     import time as _time
     import xml.etree.ElementTree as ET
@@ -6081,76 +6081,99 @@ def _run_user_scenario_populate(
 
         # ── Ingestion OpenAlex ────────────────────────────────────────────────
         try:
-            oa_resp = _requests.get(
-                "https://api.openalex.org/works",
-                params={"search": query, "per_page": min(200, max_results), "mailto": "literev@gesica.ch"},
-                timeout=20,
-            )
-            oa_resp.raise_for_status()
-            for work in oa_resp.json().get("results", []):
-                ext_id = work.get("id", "").split("/")[-1]
-                title = work.get("title") or ""
-                if not ext_id or not title:
-                    continue
-                # Décoder l'abstract inverted index
-                abstract = None
-                inv = work.get("abstract_inverted_index")
-                if inv:
+            # OpenAlex : per_page max = 200, pagination jusqu'à 1 000 articles
+            _oa_page = 1
+            _oa_fetched_count = 0
+            _oa_limit = min(1000, max_results)
+            while _oa_fetched_count < _oa_limit:
+                _oa_batch = min(200, _oa_limit - _oa_fetched_count)
+                oa_resp = _requests.get(
+                    "https://api.openalex.org/works",
+                    params={"search": query, "per_page": _oa_batch, "page": _oa_page, "mailto": "literev@gesica.ch"},
+                    timeout=20,
+                )
+                oa_resp.raise_for_status()
+                _oa_results = oa_resp.json().get("results", [])
+                if not _oa_results:
+                    break
+                for work in _oa_results:
+                    ext_id = work.get("id", "").split("/")[-1]
+                    title = work.get("title") or ""
+                    if not ext_id or not title:
+                        continue
+                    # Décoder l'abstract inverted index
+                    abstract = None
+                    inv = work.get("abstract_inverted_index")
+                    if inv:
+                        try:
+                            words = {}
+                            for w, positions in inv.items():
+                                for pos in positions:
+                                    words[pos] = w
+                            abstract = " ".join([words[i] for i in sorted(words.keys())])
+                        except Exception:
+                            pass
+                    year = work.get("publication_year")
+                    doi = work.get("doi")
+                    url = doi or f"https://openalex.org/{ext_id}"
+                    content_text = f"{title}\n\n{abstract or ''}".strip()
+                    if len(content_text) < 30:
+                        continue
                     try:
-                        words = {}
-                        for w, positions in inv.items():
-                            for pos in positions:
-                                words[pos] = w
-                        abstract = " ".join([words[i] for i in sorted(words.keys())])
-                    except Exception:
-                        pass
-                year = work.get("publication_year")
-                doi = work.get("doi")
-                url = doi or f"https://openalex.org/{ext_id}"
-                content_text = f"{title}\n\n{abstract or ''}".strip()
-                if len(content_text) < 30:
-                    continue
-                try:
-                    with engine.connect() as _c:
-                        existing = _c.execute(text("""
-                            SELECT id FROM literature_document
-                            WHERE external_id = :eid AND project_context = 'literev' LIMIT 1
-                        """), {"eid": ext_id}).mappings().first()
-                    if existing:
-                        doc_id = existing["id"]
-                    else:
-                        doc_r = _requests.post(f"{API_LOCAL}/documents", headers=HEADERS_LOCAL, json={
-                            "source": "openalex", "title": title, "abstract": abstract or None,
-                            "year": year, "url": url, "external_id": ext_id,
-                            "project_context": "literev", "source_type": "article", "doi": doi,
-                        }, timeout=30)
-                        doc_r.raise_for_status()
-                        doc_id = doc_r.json()["id"]
-                        _requests.post(f"{API_LOCAL}/chunks", headers=HEADERS_LOCAL, json={
-                            "document_id": doc_id, "chunk_index": 0, "content": content_text,
-                            "chunk_type": "title_abstract", "token_count": len(content_text.split()), "chunk_weight": 1.0, "metadata_json": {},
-                        }, timeout=60)
-                    with engine.begin() as _c:
-                        _c.execute(text("""
-                            INSERT INTO article_scenarios (document_id, scenario_id, similarity_score)
-                            VALUES (:doc_id, :sid, 1.0) ON CONFLICT (document_id, scenario_id) DO NOTHING
-                        """), {"doc_id": doc_id, "sid": scenario_id})
-                    ingested += 1
-                except Exception as _e:
-                    errors += 1
-                _time.sleep(0.05)
+                        with engine.connect() as _c:
+                            existing = _c.execute(text("""
+                                SELECT id FROM literature_document
+                                WHERE external_id = :eid AND project_context = 'literev' LIMIT 1
+                            """), {"eid": ext_id}).mappings().first()
+                        if existing:
+                            doc_id = existing["id"]
+                        else:
+                            doc_r = _requests.post(f"{API_LOCAL}/documents", headers=HEADERS_LOCAL, json={
+                                "source": "openalex", "title": title, "abstract": abstract or None,
+                                "year": year, "url": url, "external_id": ext_id,
+                                "project_context": "literev", "source_type": "article", "doi": doi,
+                            }, timeout=30)
+                            doc_r.raise_for_status()
+                            doc_id = doc_r.json()["id"]
+                            _requests.post(f"{API_LOCAL}/chunks", headers=HEADERS_LOCAL, json={
+                                "document_id": doc_id, "chunk_index": 0, "content": content_text,
+                                "chunk_type": "title_abstract", "token_count": len(content_text.split()), "chunk_weight": 1.0, "metadata_json": {},
+                            }, timeout=60)
+                        with engine.begin() as _c:
+                            _c.execute(text("""
+                                INSERT INTO article_scenarios (document_id, scenario_id, similarity_score)
+                                VALUES (:doc_id, :sid, 1.0) ON CONFLICT (document_id, scenario_id) DO NOTHING
+                            """), {"doc_id": doc_id, "sid": scenario_id})
+                        ingested += 1
+                        _oa_fetched_count += 1
+                    except Exception as _e:
+                        errors += 1
+                    _time.sleep(0.05)
+                if len(_oa_results) < _oa_batch:
+                    break  # Plus de résultats disponibles
+                _oa_page += 1
+                _time.sleep(0.3)
         except Exception as _e:
             logger.warning(f"OpenAlex populate {scenario_id}: {_e}")
 
         # ── Ingestion Crossref ────────────────────────────────────────────────
         try:
-            cr_resp = _requests.get(
-                "https://api.crossref.org/works",
-                params={"query": query, "rows": min(100, max_results), "mailto": "literev@gesica.ch"},
-                timeout=20,
-            )
-            cr_resp.raise_for_status()
-            for item in cr_resp.json().get("message", {}).get("items", []):
+            # Crossref : rows max = 1000, pagination par offset
+            _cr_offset = 0
+            _cr_fetched_count = 0
+            _cr_limit = min(1000, max_results)
+            _cr_rows = min(100, _cr_limit)  # Crossref recommande max 100 par page
+            while _cr_fetched_count < _cr_limit:
+                cr_resp = _requests.get(
+                    "https://api.crossref.org/works",
+                    params={"query": query, "rows": _cr_rows, "offset": _cr_offset, "mailto": "literev@gesica.ch"},
+                    timeout=20,
+                )
+                cr_resp.raise_for_status()
+                _cr_items = cr_resp.json().get("message", {}).get("items", [])
+                if not _cr_items:
+                    break
+            for item in _cr_items:
                 doi = item.get("DOI")
                 titles = item.get("title", [])
                 title = titles[0] if titles else ""
@@ -6197,21 +6220,36 @@ def _run_user_scenario_populate(
                             VALUES (:doc_id, :sid, 1.0) ON CONFLICT (document_id, scenario_id) DO NOTHING
                         """), {"doc_id": doc_id, "sid": scenario_id})
                     ingested += 1
+                    _cr_fetched_count += 1
                 except Exception as _e:
                     errors += 1
                 _time.sleep(0.05)
+            if len(_cr_items) < _cr_rows:
+                break  # Plus de résultats
+            _cr_offset += _cr_rows
+            _time.sleep(0.3)
         except Exception as _e:
             logger.warning(f"Crossref populate {scenario_id}: {_e}")
 
-        # ── Ingestion Europe PMC ──────────────────────────────────────────
+        # ── Ingestion Europe PMC (pagination par curseur) ────────────────────
         try:
-            ep_resp = _requests.get(
-                "https://www.ebi.ac.uk/europepmc/webservices/rest/search",
-                params={"query": query, "format": "json", "pageSize": min(200, max_results), "resultType": "core"},
-                timeout=20,
-            )
-            ep_resp.raise_for_status()
-            for res in ep_resp.json().get("resultList", {}).get("result", []):
+            _ep_cursor_mark = "*"
+            _ep_fetched_count = 0
+            _ep_limit = min(1000, max_results)
+            _ep_page_size = 200
+            while _ep_fetched_count < _ep_limit:
+                ep_resp = _requests.get(
+                    "https://www.ebi.ac.uk/europepmc/webservices/rest/search",
+                    params={"query": query, "format": "json", "pageSize": _ep_page_size,
+                            "resultType": "core", "cursorMark": _ep_cursor_mark},
+                    timeout=20,
+                )
+                ep_resp.raise_for_status()
+                _ep_data = ep_resp.json()
+                _ep_results = _ep_data.get("resultList", {}).get("result", [])
+                if not _ep_results:
+                    break
+            for res in _ep_results:
                 pmid = res.get("pmid")
                 pmcid = res.get("pmcid")
                 doi = res.get("doi")
@@ -6260,14 +6298,20 @@ def _run_user_scenario_populate(
                             VALUES (:doc_id, :sid, 1.0) ON CONFLICT (document_id, scenario_id) DO NOTHING
                         """), {"doc_id": doc_id, "sid": scenario_id})
                     ingested += 1
+                    _ep_fetched_count += 1
                 except Exception as _e:
                     errors += 1
                 _time.sleep(0.05)
+            # Avancer le curseur EuropePMC
+            _ep_next_cursor = _ep_data.get("nextCursorMark")
+            if not _ep_next_cursor or _ep_next_cursor == _ep_cursor_mark or len(_ep_results) < _ep_page_size:
+                break
+            _ep_cursor_mark = _ep_next_cursor
+            _time.sleep(0.3)
         except Exception as _e:
             logger.warning(f"EuropePMC populate {scenario_id}: {_e}")
 
-        # ── Ingestion medRxiv ────────────────────────────────────────────────
-        # medRxiv : recherche par date (90 derniers jours) + filtrage par mots-clés de la query
+        # ── Ingestion medRxiv / bioRxiv (90 derniers jours, filtrés, max 1 000 chacun) ──
         try:
             import datetime as _dt
             _date_to = _dt.date.today().isoformat()
@@ -6276,7 +6320,7 @@ def _run_user_scenario_populate(
             for _server in ["medrxiv", "biorxiv"]:
                 _cursor = 0
                 _fetched = 0
-                while _fetched < 200:
+                while _fetched < min(1000, max_results):
                     _url = f"https://api.biorxiv.org/details/{_server}/{_date_from}/{_date_to}/{_cursor}/json"
                     _r = _requests.get(_url, timeout=30)
                     if _r.status_code != 200:
@@ -6354,7 +6398,7 @@ def _run_user_scenario_populate(
                 params={
                     "db": "pubmed",
                     "term": f'({query}) AND ("systematic review"[Publication Type] OR "meta-analysis"[Publication Type])',
-                    "retmax": 50,
+                    "retmax": min(1000, max_results),
                     "retmode": "json",
                     "sort": "relevance",
                 },
@@ -6363,14 +6407,19 @@ def _run_user_scenario_populate(
             _prospero_resp.raise_for_status()
             _pmids = _prospero_resp.json().get("esearchresult", {}).get("idlist", [])
             if _pmids:
-                _fetch_resp = _requests.get(
-                    "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi",
-                    params={"db": "pubmed", "id": ",".join(_pmids[:30]), "retmode": "xml"},
-                    timeout=30,
-                )
-                _fetch_resp.raise_for_status()
                 import xml.etree.ElementTree as _ET3
-                _root = _ET3.fromstring(_fetch_resp.text)
+                # Fetch par batches de 200 (limite NCBI efetch)
+                _pmids_to_fetch = _pmids[:min(1000, max_results)]
+                for _batch_start in range(0, len(_pmids_to_fetch), 200):
+                    _batch_ids = _pmids_to_fetch[_batch_start:_batch_start + 200]
+                    _fetch_resp = _requests.get(
+                        "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi",
+                        params={"db": "pubmed", "id": ",".join(_batch_ids), "retmode": "xml"},
+                        timeout=30,
+                    )
+                    _fetch_resp.raise_for_status()
+                    _root = _ET3.fromstring(_fetch_resp.text)
+                    _time.sleep(0.3)
                 for _art in _root.findall(".//PubmedArticle"):
                     _pmid_el = _art.find(".//PMID")
                     _pmid_val = _pmid_el.text if _pmid_el is not None else None
