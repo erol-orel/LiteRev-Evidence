@@ -2161,9 +2161,38 @@ export interface UserScenarioPopulateStatus {
   scenario_id: string;
   status: 'not_started' | 'running' | 'done' | 'error' | 'already_running';
   ingested?: number;
+  total_found?: number;
   errors?: number;
   message?: string;
   error?: string;
+}
+
+export interface PipelineStepStatus {
+  status: 'pending' | 'running' | 'done' | 'error' | 'skipped';
+  ingested?: number;
+  extracted?: number;
+  fetched?: number;
+  n_clusters?: number;
+  n_docs?: number;
+  found?: number;
+  errors?: number;
+  reason?: string;
+  error?: string;
+}
+
+export interface UserScenarioPipelineStatus {
+  scenario_id: string;
+  overall_status: 'not_started' | 'starting' | 'running' | 'done' | 'error';
+  current_step?: string;
+  message?: string;
+  error?: string;
+  steps: {
+    pubmed?: PipelineStepStatus;
+    pico?: PipelineStepStatus;
+    metadata?: PipelineStepStatus;
+    fulltext?: PipelineStepStatus;
+    clustering?: PipelineStepStatus;
+  };
 }
 
 // ─── CRUD user-scenarios ──────────────────────────────────────────────────────
@@ -2207,12 +2236,32 @@ export async function patchUserScenario(
 
 export async function populateUserScenario(
   scenarioId: string,
-  maxResults = 30,
+  maxResults = 500,
 ): Promise<{ scenario_id: string; status: string; query: string; message: string }> {
   const r = await fetch(
     `${API_BASE_URL}/user-scenarios/${scenarioId}/populate?max_results=${maxResults}`,
     { method: 'POST' },
   );
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  return r.json();
+}
+
+export async function startUserScenarioPipeline(
+  scenarioId: string,
+  maxResults = 500,
+): Promise<{ scenario_id: string; status: string; message: string; steps: string[] }> {
+  const r = await fetch(
+    `${API_BASE_URL}/user-scenarios/${scenarioId}/pipeline?max_results=${maxResults}`,
+    { method: 'POST' },
+  );
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  return r.json();
+}
+
+export async function fetchUserScenarioPipelineStatus(
+  scenarioId: string,
+): Promise<UserScenarioPipelineStatus> {
+  const r = await fetch(`${API_BASE_URL}/user-scenarios/${scenarioId}/pipeline/status`);
   if (!r.ok) throw new Error(`HTTP ${r.status}`);
   return r.json();
 }

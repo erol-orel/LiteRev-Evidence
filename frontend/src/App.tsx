@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { ScenarioDetailPage } from "./components/ScenarioDetailPage";
 import { Activity, BarChart2, BookOpen, CheckSquare, Cloud, Download, ExternalLink, MapPin, AlertTriangle, Users, Pill, Radio, RefreshCw, RotateCcw, ChevronDown, ChevronUp, Zap } from "lucide-react";
 
@@ -95,8 +95,10 @@ import {
   createUserScenario,
   deleteUserScenario,
   patchUserScenario,
-  populateUserScenario,
+  startUserScenarioPipeline,
+  fetchUserScenarioPipelineStatus,
   type UserScenario,
+  type UserScenarioPipelineStatus,
 } from "./lib/api";
 import type {
   ProjectContext,
@@ -1056,6 +1058,7 @@ function ScenariosView({
   onTogglePin,
   onPopulateUserScenario,
   populatingId,
+  pipelineStatuses = {},
 }: {
   scenarios: GesicaScenario[];
   loading?: boolean;
@@ -1067,6 +1070,7 @@ function ScenariosView({
   onTogglePin?: (id: string) => void;
   onPopulateUserScenario?: (id: string) => void;
   populatingId?: string | null;
+  pipelineStatuses?: Record<string, import('./lib/api').UserScenarioPipelineStatus>;
 }) {
   const [selectedCluster, setSelectedCluster] = useState<string>("all");
   const [expandedId, setExpandedId] = useState<string | null>(null);
@@ -2746,6 +2750,29 @@ function ScenariosView({
                       {s.created_at && <> · {new Date(s.created_at).toLocaleDateString("fr-CH")}</>}
                     </p>
                     {s.title !== s.query && <p className="text-xs text-white/25 truncate font-mono">{s.query}</p>}
+                    {pipelineStatuses[s.id] && pipelineStatuses[s.id].overall_status !== 'done' && (
+                      <div className="mt-1 flex items-center gap-2">
+                        <RotateCcw size={10} className="text-brand-400 animate-spin shrink-0" />
+                        <span className="text-xs text-brand-300">
+                          {pipelineStatuses[s.id].overall_status === 'error' ? '⚠ Erreur pipeline' :
+                            pipelineStatuses[s.id].current_step === 'pubmed' ? 'Ingestion PubMed...' :
+                            pipelineStatuses[s.id].current_step === 'pico' ? 'Extraction PICO...' :
+                            pipelineStatuses[s.id].current_step === 'metadata' ? 'Extraction métadonnées...' :
+                            pipelineStatuses[s.id].current_step === 'fulltext' ? 'Récupération full-text...' :
+                            pipelineStatuses[s.id].current_step === 'clustering' ? 'Clustering thématique...' :
+                            'Pipeline en cours...'}
+                        </span>
+                        <span className="text-xs text-white/25">
+                          {(['pubmed','pico','metadata','fulltext','clustering'] as const).map(step => {
+                            const st = pipelineStatuses[s.id]?.steps?.[step]?.status;
+                            return <span key={step} className={`inline-block w-1.5 h-1.5 rounded-full mx-0.5 ${st === 'done' ? 'bg-forest-400' : st === 'running' ? 'bg-brand-400 animate-pulse' : st === 'error' ? 'bg-red-400' : 'bg-white/20'}`} title={step} />;
+                          })}
+                        </span>
+                      </div>
+                    )}
+                    {pipelineStatuses[s.id]?.overall_status === 'done' && (
+                      <p className="text-xs text-forest-400 mt-0.5">✓ Pipeline terminé — {pipelineStatuses[s.id]?.message}</p>
+                    )}
                   </div>
                   <button
                     type="button"
@@ -2795,6 +2822,23 @@ function ScenariosView({
                       {s.mode === "semantic" ? "Sémantique" : "Booléen"} · {s.articleCount} articles
                       {s.created_at && <> · {new Date(s.created_at).toLocaleDateString("fr-CH")}</>}
                     </p>
+                    {pipelineStatuses[s.id] && pipelineStatuses[s.id].overall_status !== 'done' && (
+                      <div className="mt-1 flex items-center gap-2">
+                        <RotateCcw size={10} className="text-brand-400 animate-spin shrink-0" />
+                        <span className="text-xs text-brand-300">
+                          {pipelineStatuses[s.id].overall_status === 'error' ? '⚠ Erreur pipeline' :
+                            pipelineStatuses[s.id].current_step === 'pubmed' ? 'Ingestion PubMed...' :
+                            pipelineStatuses[s.id].current_step === 'pico' ? 'Extraction PICO...' :
+                            pipelineStatuses[s.id].current_step === 'metadata' ? 'Extraction métadonnées...' :
+                            pipelineStatuses[s.id].current_step === 'fulltext' ? 'Récupération full-text...' :
+                            pipelineStatuses[s.id].current_step === 'clustering' ? 'Clustering thématique...' :
+                            'Pipeline en cours...'}
+                        </span>
+                      </div>
+                    )}
+                    {pipelineStatuses[s.id]?.overall_status === 'done' && (
+                      <p className="text-xs text-forest-400 mt-0.5">✓ Pipeline terminé</p>
+                    )}
                   </div>
                   <button
                     type="button"
@@ -2870,6 +2914,8 @@ export default function App() {
   const [saveSearchName, setSaveSearchName] = useState("");
   const [showSaveDialog, setShowSaveDialog] = useState(false);
   const [populatingId, setPopulatingId] = useState<string | null>(null);
+  const [pipelineStatuses, setPipelineStatuses] = useState<Record<string, UserScenarioPipelineStatus>>({});
+  const pipelinePollRef = useRef<Record<string, ReturnType<typeof setInterval>>>({});
   
 
   useEffect(() => {
@@ -3031,21 +3077,55 @@ export default function App() {
     }
   }
 
+  function _launchPipelineForScenario(scenarioId: string) {
+    // Déclencher le pipeline complet dès qu'un scénario est épinglé
+    startUserScenarioPipeline(scenarioId, 500)
+      .then(() => {
+        // Démarrer le polling de statut
+        const pollInterval = setInterval(() => {
+          fetchUserScenarioPipelineStatus(scenarioId)
+            .then(status => {
+              setPipelineStatuses(prev => ({ ...prev, [scenarioId]: status }));
+              if (status.overall_status === 'done' || status.overall_status === 'error') {
+                clearInterval(pollInterval);
+                delete pipelinePollRef.current[scenarioId];
+                // Rafraîchir la liste des scénarios pour mettre à jour article_count
+                fetchUserScenarios().then(data => {
+                  setUserScenarios(data);
+                  setSavedSearches(data.map(u => ({
+                    id: u.id, query: u.query, mode: u.mode as SearchMode,
+                    projectContext: (u.filters?.projectContext ?? 'literev') as ProjectContext,
+                    timestamp: u.created_at ? new Date(u.created_at).getTime() : Date.now(),
+                    resultCount: u.result_count ?? 0,
+                    name: u.title !== u.query ? u.title : undefined,
+                    pinned: u.pinned,
+                  })));
+                }).catch(console.warn);
+              }
+            })
+            .catch(console.warn);
+        }, 5000);
+        pipelinePollRef.current[scenarioId] = pollInterval;
+      })
+      .catch(err => console.warn('Pipeline launch failed:', err));
+  }
+
   function handleSaveAsScenario() {
     if (!query.trim()) return;
     const name = saveSearchName.trim() || query.trim();
     // Chercher si une entrée non-épinglée existe déjà pour cette requête
     const existing = userScenarios.find(s => s.query === query && s.mode === mode && !s.pinned);
     if (existing) {
-      // Mettre à jour : renommer + épingler
+      // Mettre à jour : renommer + épingler + lancer pipeline
       patchUserScenario(existing.id, { name, pinned: true })
         .then(updated => {
           setUserScenarios(prev => prev.map(s => s.id === updated.id ? updated : s));
           setSavedSearches(prev => prev.map(s => s.id === updated.id ? { ...s, name, pinned: true } : s));
+          _launchPipelineForScenario(updated.id);
         })
         .catch(err => console.warn('Patch user_scenario failed:', err));
     } else {
-      // Créer un nouveau scénario épinglé
+      // Créer un nouveau scénario épinglé + lancer pipeline
       createUserScenario({
         name,
         query: query.trim(),
@@ -3065,6 +3145,7 @@ export default function App() {
           name,
           pinned: true,
         }, ...prev]);
+        _launchPipelineForScenario(newScenario.id);
       }).catch(err => console.warn('Create user_scenario failed:', err));
     }
     setShowSaveDialog(false);
@@ -3104,28 +3185,13 @@ export default function App() {
   }
 
   async function handlePopulateUserScenario(id: string) {
+    // Lancer le pipeline complet (PubMed + PICO + metadata + fulltext + clustering)
     setPopulatingId(id);
     try {
-      await populateUserScenario(id, 30);
-      // Rafraîchir après 5s pour voir les articles ingérés
-      setTimeout(() => {
-        fetchUserScenarios().then(data => {
-          setUserScenarios(data);
-          setSavedSearches(data.map(u => ({
-            id: u.id,
-            query: u.query,
-            mode: u.mode as SearchMode,
-            projectContext: (u.filters?.projectContext ?? "literev") as ProjectContext,
-            timestamp: u.created_at ? new Date(u.created_at).getTime() : Date.now(),
-            resultCount: u.result_count ?? 0,
-            name: u.title !== u.query ? u.title : undefined,
-            pinned: u.pinned,
-          })));
-        }).catch(console.warn);
-        setPopulatingId(null);
-      }, 8000);
+      _launchPipelineForScenario(id);
     } catch (err) {
-      console.warn('Populate user_scenario failed:', err);
+      console.warn('Pipeline launch failed:', err);
+    } finally {
       setPopulatingId(null);
     }
   }
@@ -3262,6 +3328,7 @@ export default function App() {
             onTogglePin={handleTogglePin}
             onPopulateUserScenario={handlePopulateUserScenario}
             populatingId={populatingId}
+            pipelineStatuses={pipelineStatuses}
           />
         )}
 
