@@ -6079,7 +6079,131 @@ def _run_user_scenario_populate(
             if batch_idx < n_batches - 1:
                 _time.sleep(0.5)
 
-        # Mettre à jour le compteur dans user_scenarios
+        # ── Ingestion OpenAlex ────────────────────────────────────────────────
+        try:
+            oa_resp = _requests.get(
+                "https://api.openalex.org/works",
+                params={"search": query, "per_page": min(200, max_results), "mailto": "literev@gesica.ch"},
+                timeout=20,
+            )
+            oa_resp.raise_for_status()
+            for work in oa_resp.json().get("results", []):
+                ext_id = work.get("id", "").split("/")[-1]
+                title = work.get("title") or ""
+                if not ext_id or not title:
+                    continue
+                # Décoder l'abstract inverted index
+                abstract = None
+                inv = work.get("abstract_inverted_index")
+                if inv:
+                    try:
+                        words = {}
+                        for w, positions in inv.items():
+                            for pos in positions:
+                                words[pos] = w
+                        abstract = " ".join([words[i] for i in sorted(words.keys())])
+                    except Exception:
+                        pass
+                year = work.get("publication_year")
+                doi = work.get("doi")
+                url = doi or f"https://openalex.org/{ext_id}"
+                content_text = f"{title}\n\n{abstract or ''}".strip()
+                if len(content_text) < 30:
+                    continue
+                try:
+                    with engine.connect() as _c:
+                        existing = _c.execute(text("""
+                            SELECT id FROM literature_document
+                            WHERE external_id = :eid AND project_context = 'literev' LIMIT 1
+                        """), {"eid": ext_id}).mappings().first()
+                    if existing:
+                        doc_id = existing["id"]
+                    else:
+                        doc_r = _requests.post(f"{API_LOCAL}/documents", headers=HEADERS_LOCAL, json={
+                            "source": "openalex", "title": title, "abstract": abstract or None,
+                            "year": year, "url": url, "external_id": ext_id,
+                            "project_context": "literev", "source_type": "article", "doi": doi,
+                        }, timeout=30)
+                        doc_r.raise_for_status()
+                        doc_id = doc_r.json()["id"]
+                        _requests.post(f"{API_LOCAL}/chunks", headers=HEADERS_LOCAL, json={
+                            "document_id": doc_id, "chunk_index": 0, "content": content_text,
+                            "chunk_type": "title_abstract", "token_count": len(content_text.split()), "chunk_weight": 1.0, "metadata_json": {},
+                        }, timeout=60)
+                    with engine.begin() as _c:
+                        _c.execute(text("""
+                            INSERT INTO article_scenarios (document_id, scenario_id, similarity_score)
+                            VALUES (:doc_id, :sid, 1.0) ON CONFLICT (document_id, scenario_id) DO NOTHING
+                        """), {"doc_id": doc_id, "sid": scenario_id})
+                    ingested += 1
+                except Exception as _e:
+                    errors += 1
+                _time.sleep(0.05)
+        except Exception as _e:
+            logger.warning(f"OpenAlex populate {scenario_id}: {_e}")
+
+        # ── Ingestion Crossref ────────────────────────────────────────────────
+        try:
+            cr_resp = _requests.get(
+                "https://api.crossref.org/works",
+                params={"query": query, "rows": min(100, max_results), "mailto": "literev@gesica.ch"},
+                timeout=20,
+            )
+            cr_resp.raise_for_status()
+            for item in cr_resp.json().get("message", {}).get("items", []):
+                doi = item.get("DOI")
+                titles = item.get("title", [])
+                title = titles[0] if titles else ""
+                if not doi or not title:
+                    continue
+                abstract = item.get("abstract")
+                if abstract and abstract.startswith("<"):
+                    try:
+                        import xml.etree.ElementTree as _ET
+                        abstract = "".join(_ET.fromstring(abstract).itertext()).strip()
+                    except Exception:
+                        pass
+                year = None
+                created = item.get("created", {}).get("date-parts", [])
+                if created and created[0]:
+                    year = created[0][0]
+                url = f"https://doi.org/{doi}"
+                content_text = f"{title}\n\n{abstract or ''}".strip()
+                if len(content_text) < 30:
+                    continue
+                try:
+                    with engine.connect() as _c:
+                        existing = _c.execute(text("""
+                            SELECT id FROM literature_document
+                            WHERE external_id = :eid AND project_context = 'literev' LIMIT 1
+                        """), {"eid": doi}).mappings().first()
+                    if existing:
+                        doc_id = existing["id"]
+                    else:
+                        doc_r = _requests.post(f"{API_LOCAL}/documents", headers=HEADERS_LOCAL, json={
+                            "source": "crossref", "title": title, "abstract": abstract or None,
+                            "year": year, "url": url, "external_id": doi,
+                            "project_context": "literev", "source_type": "article", "doi": doi,
+                        }, timeout=30)
+                        doc_r.raise_for_status()
+                        doc_id = doc_r.json()["id"]
+                        _requests.post(f"{API_LOCAL}/chunks", headers=HEADERS_LOCAL, json={
+                            "document_id": doc_id, "chunk_index": 0, "content": content_text,
+                            "chunk_type": "title_abstract", "token_count": len(content_text.split()), "chunk_weight": 1.0, "metadata_json": {},
+                        }, timeout=60)
+                    with engine.begin() as _c:
+                        _c.execute(text("""
+                            INSERT INTO article_scenarios (document_id, scenario_id, similarity_score)
+                            VALUES (:doc_id, :sid, 1.0) ON CONFLICT (document_id, scenario_id) DO NOTHING
+                        """), {"doc_id": doc_id, "sid": scenario_id})
+                    ingested += 1
+                except Exception as _e:
+                    errors += 1
+                _time.sleep(0.05)
+        except Exception as _e:
+            logger.warning(f"Crossref populate {scenario_id}: {_e}")
+
+        # ── Mettre à jour le compteur dans user_scenarios ────────────────────────
         with engine.begin() as conn:
             conn.execute(text("""
                 UPDATE user_scenarios
@@ -6100,9 +6224,9 @@ def _run_user_scenario_populate(
                 "ingested": ingested,
                 "errors": errors,
                 "total_found": total_found,
-                "message": f"{ingested} articles ingérés depuis PubMed ({total_found} trouvés), {errors} erreurs.",
+                "message": f"{ingested} articles ingérés (PubMed + OpenAlex + Crossref), {errors} erreurs.",
             }
-        logger.info(f"Populate user_scenario {scenario_id}: {ingested}/{total_found} articles ingérés.")
+        logger.info(f"Populate user_scenario {scenario_id}: {ingested} articles ingérés (multi-sources).")
         return ingested
 
     except Exception as e:
