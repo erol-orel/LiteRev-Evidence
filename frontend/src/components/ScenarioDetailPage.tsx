@@ -3316,7 +3316,9 @@ function EvidencesSection({ scenarioId, detail }: { scenarioId: string; detail: 
     try {
       const llm = llmData;
       const b = briefData;
-      const total = b.corpus_stats.total || 1;
+      const dups_pdf = b.corpus_stats.duplicates ?? 0;
+      const uniqueTotal_pdf = b.corpus_stats.total - dups_pdf;
+      const total = uniqueTotal_pdf || 1;
       const html = `<!DOCTYPE html><html><head><meta charset="utf-8">
 <title>Evidences : ${detail.title}</title>
 <style>
@@ -3325,7 +3327,7 @@ function EvidencesSection({ scenarioId, detail }: { scenarioId: string; detail: 
   h2{color:#0A3621;margin-top:32px;font-size:1.05em;text-transform:uppercase;letter-spacing:.06em;border-bottom:1px solid #d0e8d8;padding-bottom:4px}
   h3{color:#2d7a52;font-size:.95em;margin-top:16px}
   .meta{color:#666;font-size:.82em;margin-bottom:24px}
-  .stat-grid{display:grid;grid-template-columns:repeat(6,1fr);gap:8px;margin:14px 0}
+  .stat-grid{display:grid;grid-template-columns:repeat(7,1fr);gap:8px;margin:14px 0}
   .stat{background:#f0f7f3;border:1px solid #aed4bc;border-radius:8px;padding:10px;text-align:center}
   .stat-val{font-size:1.6em;font-weight:700;color:#0A3621}
   .stat-sub{font-size:.7em;color:#888;font-family:monospace}
@@ -3384,10 +3386,11 @@ function EvidencesSection({ scenarioId, detail }: { scenarioId: string; detail: 
 
 <h2>Statistiques du Corpus</h2>
 <div class="stat-grid">
-  <div class="stat"><div class="stat-val">${b.corpus_stats.total}</div><div class="stat-label">Articles total</div></div>
+  <div class="stat"><div class="stat-val">${b.corpus_stats.total}</div>${dups_pdf>0?`<div class="stat-sub">${dups_pdf} doublons</div>`:''}<div class="stat-label">Articles total</div></div>
+  <div class="stat"><div class="stat-val">${uniqueTotal_pdf}</div><div class="stat-label">Uniques</div></div>
   <div class="stat"><div class="stat-val" style="color:#2d7a52">${b.corpus_stats.included}</div><div class="stat-sub">${Math.round(b.corpus_stats.included/total*100)}%</div><div class="stat-label">Inclus</div></div>
   <div class="stat"><div class="stat-val" style="color:#dc2626">${b.corpus_stats.excluded}</div><div class="stat-sub">${Math.round(b.corpus_stats.excluded/total*100)}%</div><div class="stat-label">Exclus</div></div>
-  <div class="stat"><div class="stat-val" style="color:#888">${b.corpus_stats.pending ?? (total - b.corpus_stats.included - b.corpus_stats.excluded)}</div><div class="stat-label">En attente</div></div>
+  <div class="stat"><div class="stat-val" style="color:#888">${b.corpus_stats.pending ?? (uniqueTotal_pdf - b.corpus_stats.included - b.corpus_stats.excluded)}</div><div class="stat-label">En attente</div></div>
   <div class="stat"><div class="stat-val" style="color:#d97706">${b.corpus_stats.with_pico}</div><div class="stat-sub">${Math.round(b.corpus_stats.pico_coverage_pct ?? b.corpus_stats.with_pico/total*100)}%</div><div class="stat-label">PICO extraits</div></div>
   <div class="stat"><div class="stat-val" style="color:#3b82f6">${b.corpus_stats.with_fulltext ?? 0}</div><div class="stat-label">Texte intégral</div></div>
 </div>
@@ -3530,15 +3533,21 @@ ${llm.future_research ? `<h3>Directions de recherche futures</h3><p class="llm-t
       {briefData && (
         <>
           {/* KPIs */}
-          <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-6 gap-2.5">
-            {[
-              {label:'Articles total',  value:briefData.corpus_stats.total,                                                                           color:'text-white',      sub:null},
-              {label:'Inclus',          value:briefData.corpus_stats.included,                                                                        color:'text-brand-300',  sub:`${Math.round(briefData.corpus_stats.included/total*100)}%`},
-              {label:'Exclus',          value:briefData.corpus_stats.excluded,                                                                        color:'text-red-400',    sub:`${Math.round(briefData.corpus_stats.excluded/total*100)}%`},
-              {label:'En attente',      value:briefData.corpus_stats.pending ?? (total - briefData.corpus_stats.included - briefData.corpus_stats.excluded), color:'text-white/50',   sub:null},
-              {label:'PICO extraits',   value:briefData.corpus_stats.with_pico,                                                                       color:'text-gold-400',   sub:`${Math.round(briefData.corpus_stats.pico_coverage_pct ?? briefData.corpus_stats.with_pico/total*100)}%`},
-              {label:'Texte intégral',  value:briefData.corpus_stats.with_fulltext ?? 0,                                                              color:'text-blue-300',   sub:null},
-            ].map(s=>(
+          <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-7 gap-2.5">
+            {(()=>{
+              const dups = briefData.corpus_stats.duplicates ?? 0;
+              const uniqueTotal = briefData.corpus_stats.total - dups;
+              const uTotal = uniqueTotal || 1;
+              return [
+                {label:'Articles total',  value:briefData.corpus_stats.total,                                                                                  color:'text-white',      sub:dups>0?`dont ${dups} doublons`:null},
+                {label:'Uniques',         value:uniqueTotal,                                                                                                    color:'text-white/80',   sub:null},
+                {label:'Inclus',          value:briefData.corpus_stats.included,                                                                               color:'text-brand-300',  sub:`${Math.round(briefData.corpus_stats.included/uTotal*100)}%`},
+                {label:'Exclus',          value:briefData.corpus_stats.excluded,                                                                               color:'text-red-400',    sub:`${Math.round(briefData.corpus_stats.excluded/uTotal*100)}%`},
+                {label:'En attente',      value:briefData.corpus_stats.pending ?? (uniqueTotal - briefData.corpus_stats.included - briefData.corpus_stats.excluded), color:'text-white/50',   sub:null},
+                {label:'PICO extraits',   value:briefData.corpus_stats.with_pico,                                                                               color:'text-gold-400',   sub:`${Math.round(briefData.corpus_stats.pico_coverage_pct ?? briefData.corpus_stats.with_pico/uTotal*100)}%`},
+                {label:'Texte intégral',  value:briefData.corpus_stats.with_fulltext ?? 0,                                                                     color:'text-blue-300',   sub:null},
+              ];
+            })().map(s=>(
               <div key={s.label} className="rounded-2xl border border-white/5 bg-white/2 p-3 text-center">
                 <div className={`text-xl font-bold ${s.color}`}>{s.value}</div>
                 {s.sub && <div className="text-[9px] text-white/30 font-mono">{s.sub}</div>}

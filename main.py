@@ -4223,7 +4223,7 @@ def get_evidence_brief(scenario_id: str) -> dict[str, Any]:
                 COUNT(*) FILTER (WHERE screening_status = 'included') AS included,
                 COUNT(*) FILTER (WHERE screening_status = 'excluded') AS excluded,
                 COUNT(*) FILTER (WHERE screening_status = 'pending' OR screening_status IS NULL) AS pending,
-                COUNT(*) FILTER (WHERE EXISTS (SELECT 1 FROM document_chunk dc WHERE dc.document_id = ld.id AND dc.chunk_type = 'fulltext_section')) AS with_fulltext,
+                COUNT(*) FILTER (WHERE has_fulltext IS TRUE) AS with_fulltext,
                 MIN(year) AS year_min,
                 MAX(year) AS year_max,
                 AVG(citation_count) FILTER (WHERE citation_count IS NOT NULL) AS avg_citations,
@@ -6116,6 +6116,51 @@ def _run_user_scenario_populate(
         return 0
 
 
+def _run_semantic_rerank_inline(scenario_id: str, query: str) -> int:
+    """Calcule le score cosinus entre la requête et chaque abstract, met à jour similarity_score."""
+    import time as _time
+    try:
+        from openai import OpenAI as _OAI
+        _client = _OAI()
+        q_emb_resp = _client.embeddings.create(model="text-embedding-3-small", input=query[:2000])
+        q_emb = q_emb_resp.data[0].embedding
+        with engine.connect() as _conn:
+            _rows = _conn.execute(text("""
+                SELECT ld.id, ld.title, ld.abstract
+                FROM literature_document ld
+                JOIN article_scenarios asn ON asn.document_id = ld.id AND asn.scenario_id = :sid
+                WHERE ld.project_context = 'literev'
+                  AND ld.abstract IS NOT NULL AND length(ld.abstract) > 30
+                ORDER BY ld.id
+            """), {"sid": scenario_id}).mappings().fetchall()
+        updated = 0
+        for i in range(0, len(_rows), 100):
+            batch = _rows[i:i+100]
+            texts = [f"{r['title']}\n\n{(r['abstract'] or '')[:1500]}" for r in batch]
+            try:
+                emb_resp = _client.embeddings.create(model="text-embedding-3-small", input=texts)
+                for j, emb_data in enumerate(emb_resp.data):
+                    doc_emb = emb_data.embedding
+                    dot = sum(a * b for a, b in zip(q_emb, doc_emb))
+                    norm_q = sum(a * a for a in q_emb) ** 0.5
+                    norm_d = sum(b * b for b in doc_emb) ** 0.5
+                    sim = max(0.0, min(1.0, dot / (norm_q * norm_d) if norm_q and norm_d else 0.0))
+                    with engine.begin() as _c:
+                        _c.execute(text("""
+                            UPDATE article_scenarios SET similarity_score = :score
+                            WHERE document_id = :doc_id AND scenario_id = :sid
+                        """), {"score": sim, "doc_id": batch[j]["id"], "sid": scenario_id})
+                    updated += 1
+            except Exception as _e:
+                logger.warning(f"Rerank inline batch {i}: {_e}")
+            _time.sleep(0.2)
+        logger.info(f"Rerank inline {scenario_id}: {updated} articles rerankés.")
+        return updated
+    except Exception as _e:
+        logger.error(f"Rerank inline {scenario_id} fatal: {_e}", exc_info=True)
+        return 0
+
+
 def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict, max_results: int = 500) -> None:
     """
     Pipeline complet d'enrichissement pour un scénario utilisateur :
@@ -6128,7 +6173,7 @@ def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict
     """
     import time as _time
 
-    STEP_ORDER = ["pubmed", "pico", "metadata", "fulltext", "clustering"]
+    STEP_ORDER = ["pubmed", "pico", "metadata", "fulltext", "clustering", "rerank"]
 
     def update_step(step: str, status: str, **kwargs):
         job = _user_scenario_pipeline_jobs.get(scenario_id, {})
@@ -6167,6 +6212,7 @@ def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict
             "metadata": {"status": "pending"},
             "fulltext": {"status": "pending"},
             "clustering": {"status": "pending"},
+            "rerank": {"status": "pending"},
         },
     }
 
@@ -6407,6 +6453,24 @@ def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict
                 update_step("clustering", "skipped", reason=f"Corpus insuffisant ({len(cl_docs)} articles)")
         except Exception as e:
             update_step("clustering", "error", error=str(e))
+
+        # ── Étape 6 : Rerank sémantique (calcul des vrais scores cosinus) ────
+        update_step("rerank", "running")
+        try:
+            openai_key = os.getenv("OPENAI_API_KEY")
+            if openai_key:
+                # Récupérer la requête du scénario pour le rerank
+                with engine.connect() as _conn:
+                    _us_row = _conn.execute(text(
+                        "SELECT query FROM user_scenarios WHERE id = :sid"
+                    ), {"sid": scenario_id}).mappings().fetchone()
+                _rerank_query = (_us_row["query"] if _us_row else query) or query
+                n_reranked = _run_semantic_rerank_inline(scenario_id, _rerank_query)
+                update_step("rerank", "done", updated=n_reranked)
+            else:
+                update_step("rerank", "skipped", reason="Clé OpenAI non configurée")
+        except Exception as e:
+            update_step("rerank", "error", error=str(e))
 
         # ── Fin du pipeline ───────────────────────────────────────────────────
         _user_scenario_pipeline_jobs[scenario_id]["overall_status"] = "done"
@@ -6730,7 +6794,7 @@ def get_user_scenario_evidence_brief(scenario_id: str) -> dict[str, Any]:
                 COUNT(*) FILTER (WHERE d.screening_status = 'included') AS included,
                 COUNT(*) FILTER (WHERE d.screening_status = 'excluded') AS excluded,
                 COUNT(*) FILTER (WHERE d.screening_status = 'pending' OR d.screening_status IS NULL) AS pending,
-                COUNT(*) FILTER (WHERE EXISTS (SELECT 1 FROM document_chunk dc WHERE dc.document_id = d.id AND dc.chunk_type = 'fulltext_section')) AS with_fulltext,
+                COUNT(*) FILTER (WHERE d.has_fulltext IS TRUE) AS with_fulltext,
                 MIN(d.year) AS year_min,
                 MAX(d.year) AS year_max,
                 AVG(d.citation_count) FILTER (WHERE d.citation_count IS NOT NULL) AS avg_citations,
