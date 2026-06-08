@@ -100,7 +100,7 @@ class SearchIn(BaseModel):
     query: str | None = None  # alias pour compatibilité frontend
     filters: dict[str, Any] | None = None
     mode: str = Field(default="hybrid") # Mode par défaut hybride
-    limit: int = Field(default=100, ge=1, le=2000)
+    limit: int = Field(default=500, ge=1, le=50000)
     offset: int = Field(default=0, ge=0)
     project_context: str | None = None  # alias pour filtres projet
 
@@ -560,66 +560,118 @@ def search(payload: SearchIn) -> dict[str, Any]:
     score_sql = " + ".join(score_clauses)
 
     if use_vector and payload.mode == "hybrid":
-        # 1. Recherche Hybride Réelle (Fusion RRF ou Score Linéaire normalisé)
-        # On calcule le score cosinus normalisé [0, 1] + le score textuel pondéré
+        # 1. Recherche Hybride : articles avec embedding (score cosinus + textuel)
+        # + articles sans embedding (score textuel seul) — UNION pour tout inclure
         params["query_embedding"] = str(query_embedding)
         sql = text(f"""
-            SELECT
-                d.id            AS document_id,
-                c.id            AS chunk_id,
-                c.chunk_index,
-                d.title,
-                d.abstract,
-                d.source,
-                d.year,
-                d.url,
-                d.external_id,
-                d.project_context,
-                d.source_type,
-                d.disease_or_condition,
-                d.scenario_type,
-                d.geographic_scope,
-                d.evidence_category,
-                c.chunk_type,
-                c.content,
-                -- Score hybride = 0.7 * score_cosinus + 0.3 * score_textuel_normalise
-                (0.7 * (1 - (c.embedding <=> CAST(:query_embedding AS vector))) + 
-                 0.3 * (CASE WHEN ({any_match_sql}) THEN GREATEST(1.0, ({score_sql})::float / 10.0) ELSE 0.0 END)) AS score
-            FROM document_chunk c
-            JOIN literature_document d ON d.id = c.document_id
-            WHERE c.embedding IS NOT NULL
-            {where_sql}
-            ORDER BY score DESC, d.year DESC NULLS LAST
+            SELECT * FROM (
+                SELECT
+                    d.id            AS document_id,
+                    c.id            AS chunk_id,
+                    c.chunk_index,
+                    d.title,
+                    d.abstract,
+                    d.source,
+                    d.year,
+                    d.url,
+                    d.external_id,
+                    d.project_context,
+                    d.source_type,
+                    d.disease_or_condition,
+                    d.scenario_type,
+                    d.geographic_scope,
+                    d.evidence_category,
+                    c.chunk_type,
+                    c.content,
+                    (0.7 * (1 - (c.embedding <=> CAST(:query_embedding AS vector))) +
+                     0.3 * (CASE WHEN ({any_match_sql}) THEN GREATEST(1.0, ({score_sql})::float / 10.0) ELSE 0.0 END)) AS score
+                FROM document_chunk c
+                JOIN literature_document d ON d.id = c.document_id
+                WHERE c.embedding IS NOT NULL
+                {where_sql}
+                UNION ALL
+                SELECT
+                    d.id            AS document_id,
+                    c.id            AS chunk_id,
+                    c.chunk_index,
+                    d.title,
+                    d.abstract,
+                    d.source,
+                    d.year,
+                    d.url,
+                    d.external_id,
+                    d.project_context,
+                    d.source_type,
+                    d.disease_or_condition,
+                    d.scenario_type,
+                    d.geographic_scope,
+                    d.evidence_category,
+                    c.chunk_type,
+                    c.content,
+                    (CASE WHEN ({any_match_sql}) THEN GREATEST(0.1, ({score_sql})::float / 10.0) ELSE 0.05 END) AS score
+                FROM document_chunk c
+                JOIN literature_document d ON d.id = c.document_id
+                WHERE c.embedding IS NULL
+                {where_sql}
+            ) combined
+            ORDER BY score DESC, year DESC NULLS LAST
             LIMIT :limit OFFSET :offset
         """)
     elif use_vector and payload.mode == "semantic":
-        # 2. Recherche Sémantique Vectorielle Pure
+        # 2. Recherche Sémantique : articles avec embedding triés par cosinus
+        # + articles sans embedding ajoutés à la fin (score 0)
         params["query_embedding"] = str(query_embedding)
         sql = text(f"""
-            SELECT
-                d.id            AS document_id,
-                c.id            AS chunk_id,
-                c.chunk_index,
-                d.title,
-                d.abstract,
-                d.source,
-                d.year,
-                d.url,
-                d.external_id,
-                d.project_context,
-                d.source_type,
-                d.disease_or_condition,
-                d.scenario_type,
-                d.geographic_scope,
-                d.evidence_category,
-                c.chunk_type,
-                c.content,
-                (1 - (c.embedding <=> CAST(:query_embedding AS vector))) AS score
-            FROM document_chunk c
-            JOIN literature_document d ON d.id = c.document_id
-            WHERE c.embedding IS NOT NULL
-            {where_sql}
-            ORDER BY c.embedding <=> CAST(:query_embedding AS vector)
+            SELECT * FROM (
+                SELECT
+                    d.id            AS document_id,
+                    c.id            AS chunk_id,
+                    c.chunk_index,
+                    d.title,
+                    d.abstract,
+                    d.source,
+                    d.year,
+                    d.url,
+                    d.external_id,
+                    d.project_context,
+                    d.source_type,
+                    d.disease_or_condition,
+                    d.scenario_type,
+                    d.geographic_scope,
+                    d.evidence_category,
+                    c.chunk_type,
+                    c.content,
+                    (1 - (c.embedding <=> CAST(:query_embedding AS vector))) AS score
+                FROM document_chunk c
+                JOIN literature_document d ON d.id = c.document_id
+                WHERE c.embedding IS NOT NULL
+                {where_sql}
+                UNION ALL
+                SELECT
+                    d.id            AS document_id,
+                    c.id            AS chunk_id,
+                    c.chunk_index,
+                    d.title,
+                    d.abstract,
+                    d.source,
+                    d.year,
+                    d.url,
+                    d.external_id,
+                    d.project_context,
+                    d.source_type,
+                    d.disease_or_condition,
+                    d.scenario_type,
+                    d.geographic_scope,
+                    d.evidence_category,
+                    c.chunk_type,
+                    c.content,
+                    0.0 AS score
+                FROM document_chunk c
+                JOIN literature_document d ON d.id = c.document_id
+                WHERE c.embedding IS NULL
+                {where_sql}
+            ) combined
+            ORDER BY score DESC, year DESC NULLS LAST
             LIMIT :limit OFFSET :offset
         """)
     else:
@@ -6909,11 +6961,11 @@ def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict
 @app.post("/user-scenarios/{scenario_id}/populate")
 def populate_user_scenario(
     scenario_id: str,
-    max_results: int = 500,
+    max_results: int = 10000,
 ) -> dict[str, Any]:
     """
-    Déclenche l'ingestion PubMed en arrière-plan pour un scénario utilisateur.
-    Sans limite fixe — max_results par défaut à 500, peut aller jusqu'à 10000.
+    Déclenche l'ingéstion multi-sources en arrière-plan pour un scénario utilisateur.
+    Sans limite fixe — max_results par défaut à 10000 (1000 par source).
     """
     import threading
     row = _get_user_scenario_or_404(scenario_id)
@@ -6963,7 +7015,7 @@ def get_user_scenario_populate_status(scenario_id: str) -> dict[str, Any]:
 @app.post("/user-scenarios/{scenario_id}/pipeline")
 def start_user_scenario_pipeline(
     scenario_id: str,
-    max_results: int = 500,
+    max_results: int = 10000,
 ) -> dict[str, Any]:
     """
     Déclenche le pipeline complet d'enrichissement en arrière-plan :

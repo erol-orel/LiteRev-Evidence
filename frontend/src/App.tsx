@@ -3202,7 +3202,7 @@ export default function App() {
       const data = await searchDocuments({
         queryText: query,
         mode,
-        limit: 500,
+        limit: 10000,
         filters: effectiveFilters,
       });
       setResults(data.results);
