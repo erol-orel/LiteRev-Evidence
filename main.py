@@ -6203,6 +6203,231 @@ def _run_user_scenario_populate(
         except Exception as _e:
             logger.warning(f"Crossref populate {scenario_id}: {_e}")
 
+        # ── Ingestion Europe PMC ──────────────────────────────────────────
+        try:
+            ep_resp = _requests.get(
+                "https://www.ebi.ac.uk/europepmc/webservices/rest/search",
+                params={"query": query, "format": "json", "pageSize": min(200, max_results), "resultType": "core"},
+                timeout=20,
+            )
+            ep_resp.raise_for_status()
+            for res in ep_resp.json().get("resultList", {}).get("result", []):
+                pmid = res.get("pmid")
+                pmcid = res.get("pmcid")
+                doi = res.get("doi")
+                ext_id = pmcid or pmid or doi
+                title = res.get("title") or ""
+                if not ext_id or not title:
+                    continue
+                abstract = res.get("abstractText")
+                if abstract and abstract.startswith("<"):
+                    try:
+                        import xml.etree.ElementTree as _ET2
+                        abstract = "".join(_ET2.fromstring(f"<root>{abstract}</root>").itertext()).strip()
+                    except Exception:
+                        pass
+                year = None
+                yt = res.get("pubYear")
+                if yt and str(yt).isdigit():
+                    year = int(yt)
+                url = f"https://europepmc.org/article/{pmcid or pmid}" if (pmcid or pmid) else (f"https://doi.org/{doi}" if doi else None)
+                content_text = f"{title}\n\n{abstract or ''}".strip()
+                if len(content_text) < 30:
+                    continue
+                try:
+                    with engine.connect() as _c:
+                        existing = _c.execute(text("""
+                            SELECT id FROM literature_document
+                            WHERE external_id = :eid AND project_context = 'literev' LIMIT 1
+                        """), {"eid": ext_id}).mappings().first()
+                    if existing:
+                        doc_id = existing["id"]
+                    else:
+                        doc_r = _requests.post(f"{API_LOCAL}/documents", headers=HEADERS_LOCAL, json={
+                            "source": "europepmc", "title": title, "abstract": abstract or None,
+                            "year": year, "url": url, "external_id": ext_id,
+                            "project_context": "literev", "source_type": "article", "doi": doi,
+                        }, timeout=30)
+                        doc_r.raise_for_status()
+                        doc_id = doc_r.json()["id"]
+                        _requests.post(f"{API_LOCAL}/chunks", headers=HEADERS_LOCAL, json={
+                            "document_id": doc_id, "chunk_index": 0, "content": content_text,
+                            "chunk_type": "title_abstract", "token_count": len(content_text.split()), "chunk_weight": 1.0, "metadata_json": {},
+                        }, timeout=60)
+                    with engine.begin() as _c:
+                        _c.execute(text("""
+                            INSERT INTO article_scenarios (document_id, scenario_id, similarity_score)
+                            VALUES (:doc_id, :sid, 1.0) ON CONFLICT (document_id, scenario_id) DO NOTHING
+                        """), {"doc_id": doc_id, "sid": scenario_id})
+                    ingested += 1
+                except Exception as _e:
+                    errors += 1
+                _time.sleep(0.05)
+        except Exception as _e:
+            logger.warning(f"EuropePMC populate {scenario_id}: {_e}")
+
+        # ── Ingestion medRxiv ────────────────────────────────────────────────
+        # medRxiv : recherche par date (90 derniers jours) + filtrage par mots-clés de la query
+        try:
+            import datetime as _dt
+            _date_to = _dt.date.today().isoformat()
+            _date_from = (_dt.date.today() - _dt.timedelta(days=90)).isoformat()
+            _query_words = set(query.lower().split())
+            for _server in ["medrxiv", "biorxiv"]:
+                _cursor = 0
+                _fetched = 0
+                while _fetched < 200:
+                    _url = f"https://api.biorxiv.org/details/{_server}/{_date_from}/{_date_to}/{_cursor}/json"
+                    _r = _requests.get(_url, timeout=30)
+                    if _r.status_code != 200:
+                        break
+                    _data = _r.json()
+                    _collection = _data.get("collection", [])
+                    if not _collection:
+                        break
+                    for _p in _collection:
+                        _title = (_p.get("title") or "").strip()
+                        _abstract = (_p.get("abstract") or "").strip()
+                        _doi = _p.get("doi") or ""
+                        if not _title or not _doi:
+                            continue
+                        # Filtrage par pertinence : au moins 2 mots de la query dans title+abstract
+                        _combined = f"{_title} {_abstract}".lower()
+                        _matches = sum(1 for w in _query_words if len(w) > 3 and w in _combined)
+                        if _matches < 2:
+                            continue
+                        _year = None
+                        _date_str = _p.get("date") or ""
+                        if _date_str[:4].isdigit():
+                            _year = int(_date_str[:4])
+                        _ext_id = f"{_server}:{_doi}"
+                        _url_art = f"https://doi.org/{_doi}"
+                        _content = f"{_title}\n\n{_abstract}".strip()
+                        if len(_content) < 30:
+                            continue
+                        try:
+                            with engine.connect() as _c:
+                                _ex = _c.execute(text("""
+                                    SELECT id FROM literature_document
+                                    WHERE external_id = :eid AND project_context = 'literev' LIMIT 1
+                                """), {"eid": _ext_id}).mappings().first()
+                            if _ex:
+                                _doc_id = _ex["id"]
+                            else:
+                                _dr = _requests.post(f"{API_LOCAL}/documents", headers=HEADERS_LOCAL, json={
+                                    "source": _server, "title": _title, "abstract": _abstract or None,
+                                    "year": _year, "url": _url_art, "external_id": _ext_id,
+                                    "project_context": "literev", "source_type": "preprint", "doi": _doi,
+                                }, timeout=30)
+                                _dr.raise_for_status()
+                                _doc_id = _dr.json()["id"]
+                                _requests.post(f"{API_LOCAL}/chunks", headers=HEADERS_LOCAL, json={
+                                    "document_id": _doc_id, "chunk_index": 0, "content": _content,
+                                    "chunk_type": "title_abstract", "token_count": len(_content.split()), "chunk_weight": 1.0, "metadata_json": {},
+                                }, timeout=60)
+                            with engine.begin() as _c:
+                                _c.execute(text("""
+                                    INSERT INTO article_scenarios (document_id, scenario_id, similarity_score)
+                                    VALUES (:doc_id, :sid, 1.0) ON CONFLICT (document_id, scenario_id) DO NOTHING
+                                """), {"doc_id": _doc_id, "sid": scenario_id})
+                            ingested += 1
+                            _fetched += 1
+                        except Exception:
+                            errors += 1
+                        _time.sleep(0.03)
+                    _msgs = _data.get("messages", [])
+                    _total_srv = 0
+                    for _m in _msgs:
+                        if isinstance(_m, dict) and "total" in _m:
+                            _total_srv = int(_m["total"])
+                    if _fetched >= _total_srv or len(_collection) < 100:
+                        break
+                    _cursor += 100
+                    _time.sleep(0.5)
+        except Exception as _e:
+            logger.warning(f"medRxiv/bioRxiv populate {scenario_id}: {_e}")
+
+        # ── Ingestion PROSPERO (via PubMed systematic reviews) ────────────────
+        try:
+            _prospero_resp = _requests.get(
+                "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi",
+                params={
+                    "db": "pubmed",
+                    "term": f'({query}) AND ("systematic review"[Publication Type] OR "meta-analysis"[Publication Type])',
+                    "retmax": 50,
+                    "retmode": "json",
+                    "sort": "relevance",
+                },
+                timeout=20,
+            )
+            _prospero_resp.raise_for_status()
+            _pmids = _prospero_resp.json().get("esearchresult", {}).get("idlist", [])
+            if _pmids:
+                _fetch_resp = _requests.get(
+                    "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi",
+                    params={"db": "pubmed", "id": ",".join(_pmids[:30]), "retmode": "xml"},
+                    timeout=30,
+                )
+                _fetch_resp.raise_for_status()
+                import xml.etree.ElementTree as _ET3
+                _root = _ET3.fromstring(_fetch_resp.text)
+                for _art in _root.findall(".//PubmedArticle"):
+                    _pmid_el = _art.find(".//PMID")
+                    _pmid_val = _pmid_el.text if _pmid_el is not None else None
+                    _title_el = _art.find(".//ArticleTitle")
+                    _title_val = "".join(_title_el.itertext()).strip() if _title_el is not None else ""
+                    if not _pmid_val or not _title_val:
+                        continue
+                    _abs_parts = []
+                    for _ab in _art.findall(".//AbstractText"):
+                        _t = "".join(_ab.itertext()).strip()
+                        if _t:
+                            _abs_parts.append(_t)
+                    _abstract_val = " ".join(_abs_parts).strip() or None
+                    _doi_val = None
+                    for _id_el in _art.findall(".//ArticleId"):
+                        if _id_el.get("IdType") == "doi":
+                            _doi_val = _id_el.text
+                            break
+                    _year_el = _art.find(".//PubDate/Year")
+                    _year_val = int(_year_el.text) if _year_el is not None and _year_el.text else None
+                    _ext_id_p = f"prospero:pubmed:{_pmid_val}"
+                    _content_p = f"{_title_val}\n\n{_abstract_val or ''}".strip()
+                    if len(_content_p) < 30:
+                        continue
+                    try:
+                        with engine.connect() as _c:
+                            _ex = _c.execute(text("""
+                                SELECT id FROM literature_document
+                                WHERE external_id = :eid AND project_context = 'literev' LIMIT 1
+                            """), {"eid": _ext_id_p}).mappings().first()
+                        if _ex:
+                            _doc_id = _ex["id"]
+                        else:
+                            _dr = _requests.post(f"{API_LOCAL}/documents", headers=HEADERS_LOCAL, json={
+                                "source": "prospero", "title": _title_val, "abstract": _abstract_val,
+                                "year": _year_val, "url": f"https://pubmed.ncbi.nlm.nih.gov/{_pmid_val}/",
+                                "external_id": _ext_id_p, "project_context": "literev",
+                                "source_type": "systematic_review", "doi": _doi_val,
+                            }, timeout=30)
+                            _dr.raise_for_status()
+                            _doc_id = _dr.json()["id"]
+                            _requests.post(f"{API_LOCAL}/chunks", headers=HEADERS_LOCAL, json={
+                                "document_id": _doc_id, "chunk_index": 0, "content": _content_p,
+                                "chunk_type": "title_abstract", "token_count": len(_content_p.split()), "chunk_weight": 1.0, "metadata_json": {},
+                            }, timeout=60)
+                        with engine.begin() as _c:
+                            _c.execute(text("""
+                                INSERT INTO article_scenarios (document_id, scenario_id, similarity_score)
+                                VALUES (:doc_id, :sid, 1.0) ON CONFLICT (document_id, scenario_id) DO NOTHING
+                            """), {"doc_id": _doc_id, "sid": scenario_id})
+                        ingested += 1
+                    except Exception:
+                        errors += 1
+                    _time.sleep(0.1)
+        except Exception as _e:
+            logger.warning(f"PROSPERO populate {scenario_id}: {_e}")
+
         # ── Mettre à jour le compteur dans user_scenarios ────────────────────────
         with engine.begin() as conn:
             conn.execute(text("""
@@ -6224,9 +6449,9 @@ def _run_user_scenario_populate(
                 "ingested": ingested,
                 "errors": errors,
                 "total_found": total_found,
-                "message": f"{ingested} articles ingérés (PubMed + OpenAlex + Crossref), {errors} erreurs.",
+                "message": f"{ingested} articles ingérés (PubMed + OpenAlex + Crossref + EuropePMC + medRxiv + bioRxiv + PROSPERO), {errors} erreurs.",
             }
-        logger.info(f"Populate user_scenario {scenario_id}: {ingested} articles ingérés (multi-sources).")
+        logger.info(f"Populate user_scenario {scenario_id}: {ingested} articles ingérés (7 sources).")
         return ingested
 
     except Exception as e:
