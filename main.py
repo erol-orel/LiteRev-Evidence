@@ -100,7 +100,7 @@ class SearchIn(BaseModel):
     query: str | None = None  # alias pour compatibilité frontend
     filters: dict[str, Any] | None = None
     mode: str = Field(default="hybrid") # Mode par défaut hybride
-    limit: int = Field(default=10, ge=1, le=100)
+    limit: int = Field(default=100, ge=1, le=2000)
     offset: int = Field(default=0, ge=0)
     project_context: str | None = None  # alias pour filtres projet
 
@@ -656,6 +656,8 @@ def search(payload: SearchIn) -> dict[str, Any]:
         rows = conn.execute(sql, params).mappings().all()
 
     results = []
+    source_counts: dict[str, int] = {}
+    seen_doc_ids: set = set()
     for row in rows:
         content = row["content"] or ""
         abstract = row["abstract"] or ""
@@ -682,7 +684,23 @@ def search(payload: SearchIn) -> dict[str, Any]:
             "evidence_category": row["evidence_category"],
             "chunk_type": row["chunk_type"],
         })
-    return {"results": results, "count": len(results), "total": len(results)}
+        # Compter par source (unique par document)
+        doc_id = row["document_id"]
+        if doc_id not in seen_doc_ids:
+            seen_doc_ids.add(doc_id)
+            src = (row["source"] or "Inconnu").strip()
+            source_counts[src] = source_counts.get(src, 0) + 1
+
+    # Compter le total de documents uniques correspondant à la requête (sans LIMIT)
+    total_unique_docs = len(seen_doc_ids)
+
+    return {
+        "results": results,
+        "count": len(results),
+        "total": len(results),
+        "total_unique_docs": total_unique_docs,
+        "source_breakdown": source_counts,
+    }
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Document detail
@@ -3680,8 +3698,9 @@ def extract_pico_batch(
             rows = conn.execute(text("""
                 SELECT ld.id, ld.title, ld.abstract
                 FROM literature_document ld
-                JOIN gesica_scenario_article gsa ON gsa.article_id = ld.id
-                WHERE gsa.scenario_id = :sid
+                LEFT JOIN gesica_scenario_article gsa ON gsa.article_id = ld.id AND gsa.scenario_id = :sid
+                LEFT JOIN article_scenarios asn ON asn.document_id = ld.id AND asn.scenario_id = :sid
+                WHERE (gsa.scenario_id = :sid OR asn.scenario_id = :sid)
                   AND ld.project_context = 'literev'
                   AND (ld.pico_json IS NULL OR (ld.pico_json->>'pico_confidence')::float < 0.5)
                 ORDER BY ld.id
@@ -3783,8 +3802,9 @@ def extract_metadata_batch(
             rows = conn.execute(text("""
                 SELECT ld.id, ld.title, ld.abstract, ld.source, ld.year
                 FROM literature_document ld
-                JOIN gesica_scenario_article gsa ON gsa.article_id = ld.id
-                WHERE gsa.scenario_id = :sid
+                LEFT JOIN gesica_scenario_article gsa ON gsa.article_id = ld.id AND gsa.scenario_id = :sid
+                LEFT JOIN article_scenarios asn ON asn.document_id = ld.id AND asn.scenario_id = :sid
+                WHERE (gsa.scenario_id = :sid OR asn.scenario_id = :sid)
                   AND ld.project_context = 'literev'
                   AND (ld.metadata_json IS NULL OR ld.metadata_json = '{}'::jsonb)
                 ORDER BY ld.id
@@ -3879,8 +3899,9 @@ def fetch_fulltext_batch(
             rows = conn.execute(text("""
                 SELECT ld.id, ld.title, ld.doi, ld.url
                 FROM literature_document ld
-                JOIN gesica_scenario_article gsa ON gsa.article_id = ld.id
-                WHERE gsa.scenario_id = :sid
+                LEFT JOIN gesica_scenario_article gsa ON gsa.article_id = ld.id AND gsa.scenario_id = :sid
+                LEFT JOIN article_scenarios asn ON asn.document_id = ld.id AND asn.scenario_id = :sid
+                WHERE (gsa.scenario_id = :sid OR asn.scenario_id = :sid)
                   AND ld.project_context = 'literev'
                   AND (ld.has_fulltext IS NULL OR ld.has_fulltext = false)
                   AND ld.doi IS NOT NULL
@@ -3951,8 +3972,11 @@ def get_enrichment_status(scenario_id: Optional[str] = None):
                     COUNT(CASE WHEN ld.metadata_json IS NOT NULL AND ld.metadata_json != '{}'::jsonb THEN 1 END) as with_metadata,
                     COUNT(CASE WHEN ld.has_fulltext = true THEN 1 END) as with_fulltext
                 FROM literature_document ld
-                JOIN gesica_scenario_article gsa ON gsa.article_id = ld.id
-                WHERE gsa.scenario_id = :sid AND ld.project_context = 'literev'
+                WHERE ld.project_context = 'literev'
+                  AND (
+                    EXISTS (SELECT 1 FROM gesica_scenario_article gsa WHERE gsa.article_id = ld.id AND gsa.scenario_id = :sid)
+                    OR EXISTS (SELECT 1 FROM article_scenarios asn WHERE asn.document_id = ld.id AND asn.scenario_id = :sid)
+                  )
             """), {"sid": scenario_id}).mappings().fetchone()
         else:
             row = conn.execute(text("""
@@ -5319,8 +5343,19 @@ def send_alert_digest(
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _ensure_user_scenarios_table() -> None:
-    """Crée la table user_scenarios si elle n'existe pas."""
+    """Crée la table user_scenarios et user_scenario_folders si elles n'existent pas."""
     with engine.begin() as conn:
+        # Table des dossiers
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS user_scenario_folders (
+                id          VARCHAR(40)  PRIMARY KEY,
+                name        VARCHAR(255) NOT NULL,
+                color       VARCHAR(20)  DEFAULT '#6366f1',
+                sort_order  INTEGER      DEFAULT 0,
+                created_at  TIMESTAMP    DEFAULT NOW()
+            )
+        """))
+        # Table des scénarios (avec folder_id optionnel)
         conn.execute(text("""
             CREATE TABLE IF NOT EXISTS user_scenarios (
                 id          VARCHAR(40)  PRIMARY KEY,
@@ -5330,11 +5365,17 @@ def _ensure_user_scenarios_table() -> None:
                 filters     JSONB        NOT NULL DEFAULT '{}',
                 result_count INTEGER     DEFAULT 0,
                 pinned      BOOLEAN      DEFAULT FALSE,
+                folder_id   VARCHAR(40)  REFERENCES user_scenario_folders(id) ON DELETE SET NULL,
                 created_at  TIMESTAMP    DEFAULT NOW(),
                 updated_at  TIMESTAMP    DEFAULT NOW()
             )
         """))
-    logger.info("Table user_scenarios vérifiée/créée.")
+        # Ajouter folder_id si la table existait déjà sans cette colonne
+        conn.execute(text("""
+            ALTER TABLE user_scenarios ADD COLUMN IF NOT EXISTS folder_id VARCHAR(40)
+            REFERENCES user_scenario_folders(id) ON DELETE SET NULL
+        """))
+    logger.info("Tables user_scenarios et user_scenario_folders vérifiées/créées.")
 
 try:
     _ensure_user_scenarios_table()
@@ -5349,6 +5390,7 @@ class UserScenarioIn(BaseModel):
     filters: dict[str, Any] = Field(default_factory=dict)
     result_count: int = Field(default=0, ge=0)
     pinned: bool = Field(default=False)
+    folder_id: str | None = None
 
 
 class UserScenarioPatch(BaseModel):
@@ -5356,6 +5398,13 @@ class UserScenarioPatch(BaseModel):
     pinned: bool | None = None
     mode: str | None = None
     filters: dict[str, Any] | None = None
+    folder_id: str | None = None  # Assigner à un dossier (None = hors dossier)
+
+
+class FolderIn(BaseModel):
+    name: str = Field(..., min_length=1, max_length=255)
+    color: str = Field(default='#6366f1')
+    sort_order: int = Field(default=0)
 
 
 # ── Helpers internes ──────────────────────────────────────────────────────────
@@ -5364,7 +5413,7 @@ def _get_user_scenario_or_404(scenario_id: str) -> dict[str, Any]:
     """Retourne la ligne user_scenarios ou lève 404."""
     with engine.connect() as conn:
         row = conn.execute(text("""
-            SELECT id, name, query, mode, filters, result_count, pinned, created_at, updated_at
+            SELECT id, name, query, mode, filters, result_count, pinned, folder_id, created_at, updated_at
             FROM user_scenarios WHERE id = :id
         """), {"id": scenario_id}).mappings().first()
     if not row:
@@ -5415,6 +5464,7 @@ def _user_scenario_to_gesica_format(row: dict[str, Any]) -> dict[str, Any]:
         "mode": row["mode"],
         "filters": row.get("filters") or {},
         "result_count": row.get("result_count", 0),
+        "folder_id": row.get("folder_id"),
         "created_at": row["created_at"].isoformat() if row.get("created_at") else None,
         "updated_at": row["updated_at"].isoformat() if row.get("updated_at") else None,
         "is_user_scenario": True,
@@ -5428,7 +5478,7 @@ def list_user_scenarios() -> list[dict[str, Any]]:
     """Liste tous les scénarios utilisateur (recherches sauvegardées)."""
     with engine.connect() as conn:
         rows = conn.execute(text("""
-            SELECT id, name, query, mode, filters, result_count, pinned, created_at, updated_at
+            SELECT id, name, query, mode, filters, result_count, pinned, folder_id, created_at, updated_at
             FROM user_scenarios
             ORDER BY pinned DESC, created_at DESC
         """)).mappings().all()
@@ -5442,8 +5492,8 @@ def create_user_scenario(payload: UserScenarioIn) -> dict[str, Any]:
     new_id = "usr-" + str(uuid.uuid4()).replace("-", "")[:12]
     with engine.begin() as conn:
         conn.execute(text("""
-            INSERT INTO user_scenarios (id, name, query, mode, filters, result_count, pinned)
-            VALUES (:id, :name, :query, :mode, CAST(:filters AS jsonb), :result_count, :pinned)
+            INSERT INTO user_scenarios (id, name, query, mode, filters, result_count, pinned, folder_id)
+            VALUES (:id, :name, :query, :mode, CAST(:filters AS jsonb), :result_count, :pinned, :folder_id)
         """), {
             "id": new_id,
             "name": payload.name,
@@ -5452,6 +5502,7 @@ def create_user_scenario(payload: UserScenarioIn) -> dict[str, Any]:
             "filters": json.dumps(payload.filters),
             "result_count": payload.result_count,
             "pinned": payload.pinned,
+            "folder_id": payload.folder_id,
         })
     row = _get_user_scenario_or_404(new_id)
     return _user_scenario_to_gesica_format(row)
@@ -5490,6 +5541,10 @@ def patch_user_scenario(scenario_id: str, payload: UserScenarioPatch) -> dict[st
     if payload.filters is not None:
         updates.append("filters = CAST(:filters AS jsonb)")
         params["filters"] = json.dumps(payload.filters)
+    if payload.folder_id is not None:
+        # Permettre d'assigner ou de retirer d'un dossier ("" = retirer)
+        updates.append("folder_id = :folder_id")
+        params["folder_id"] = payload.folder_id if payload.folder_id != "" else None
     if not updates:
         row = _get_user_scenario_or_404(scenario_id)
         return _user_scenario_to_gesica_format(row)
@@ -5500,6 +5555,90 @@ def patch_user_scenario(scenario_id: str, payload: UserScenarioPatch) -> dict[st
         """), params)
     row = _get_user_scenario_or_404(scenario_id)
     return _user_scenario_to_gesica_format(row)
+
+
+# ── Dossiers (folders) ────────────────────────────────────────────────────────
+
+@app.get("/user-scenario-folders")
+def list_folders() -> list[dict[str, Any]]:
+    """Liste tous les dossiers de scénarios utilisateur."""
+    with engine.connect() as conn:
+        rows = conn.execute(text("""
+            SELECT f.id, f.name, f.color, f.sort_order, f.created_at,
+                   COUNT(s.id) AS scenario_count
+            FROM user_scenario_folders f
+            LEFT JOIN user_scenarios s ON s.folder_id = f.id
+            GROUP BY f.id, f.name, f.color, f.sort_order, f.created_at
+            ORDER BY f.sort_order ASC, f.created_at ASC
+        """)).mappings().all()
+    return [
+        {
+            "id": r["id"],
+            "name": r["name"],
+            "color": r["color"],
+            "sort_order": r["sort_order"],
+            "scenario_count": r["scenario_count"],
+            "created_at": r["created_at"].isoformat() if r.get("created_at") else None,
+        }
+        for r in rows
+    ]
+
+
+@app.post("/user-scenario-folders", status_code=201)
+def create_folder(payload: FolderIn) -> dict[str, Any]:
+    """Crée un nouveau dossier."""
+    import uuid
+    new_id = "fld-" + str(uuid.uuid4()).replace("-", "")[:12]
+    with engine.begin() as conn:
+        conn.execute(text("""
+            INSERT INTO user_scenario_folders (id, name, color, sort_order)
+            VALUES (:id, :name, :color, :sort_order)
+        """), {"id": new_id, "name": payload.name, "color": payload.color, "sort_order": payload.sort_order})
+    with engine.connect() as conn:
+        row = conn.execute(text("SELECT id, name, color, sort_order, created_at FROM user_scenario_folders WHERE id = :id"), {"id": new_id}).mappings().first()
+    return {
+        "id": row["id"], "name": row["name"], "color": row["color"],
+        "sort_order": row["sort_order"], "scenario_count": 0,
+        "created_at": row["created_at"].isoformat() if row.get("created_at") else None,
+    }
+
+
+@app.patch("/user-scenario-folders/{folder_id}")
+def patch_folder(folder_id: str, payload: FolderIn) -> dict[str, Any]:
+    """Renomme ou recolore un dossier."""
+    with engine.begin() as conn:
+        result = conn.execute(text("""
+            UPDATE user_scenario_folders
+            SET name = :name, color = :color, sort_order = :sort_order
+            WHERE id = :id
+        """), {"id": folder_id, "name": payload.name, "color": payload.color, "sort_order": payload.sort_order})
+        if result.rowcount == 0:
+            raise HTTPException(status_code=404, detail="Dossier non trouvé")
+    with engine.connect() as conn:
+        row = conn.execute(text("""
+            SELECT f.id, f.name, f.color, f.sort_order, f.created_at, COUNT(s.id) AS scenario_count
+            FROM user_scenario_folders f
+            LEFT JOIN user_scenarios s ON s.folder_id = f.id
+            WHERE f.id = :id
+            GROUP BY f.id, f.name, f.color, f.sort_order, f.created_at
+        """), {"id": folder_id}).mappings().first()
+    return {
+        "id": row["id"], "name": row["name"], "color": row["color"],
+        "sort_order": row["sort_order"], "scenario_count": row["scenario_count"],
+        "created_at": row["created_at"].isoformat() if row.get("created_at") else None,
+    }
+
+
+@app.delete("/user-scenario-folders/{folder_id}")
+def delete_folder(folder_id: str) -> dict[str, Any]:
+    """Supprime un dossier (les scénarios sont conservés, leur folder_id devient NULL)."""
+    with engine.begin() as conn:
+        # Désassocier les scénarios
+        conn.execute(text("UPDATE user_scenarios SET folder_id = NULL WHERE folder_id = :id"), {"id": folder_id})
+        result = conn.execute(text("DELETE FROM user_scenario_folders WHERE id = :id"), {"id": folder_id})
+        if result.rowcount == 0:
+            raise HTTPException(status_code=404, detail="Dossier non trouvé")
+    return {"deleted": True, "id": folder_id}
 
 
 # ── Detail (compatible ScenarioDetail frontend) ───────────────────────────────

@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { ScenarioDetailPage } from "./components/ScenarioDetailPage";
-import { Activity, BarChart2, BookOpen, CheckSquare, Cloud, Download, ExternalLink, MapPin, AlertTriangle, Users, Pill, Radio, RefreshCw, RotateCcw, ChevronDown, ChevronUp, Zap } from "lucide-react";
+import { Activity, BarChart2, BookOpen, CheckSquare, Cloud, Download, ExternalLink, FolderOpen, MapPin, AlertTriangle, Users, Pill, Radio, RefreshCw, RotateCcw, ChevronDown, ChevronUp, Zap } from "lucide-react";
 
 import {
   fetchDocumentDetail,
@@ -97,8 +97,14 @@ import {
   patchUserScenario,
   startUserScenarioPipeline,
   fetchUserScenarioPipelineStatus,
+  fetchFolders,
+  createFolder,
+  updateFolder,
+  deleteFolder,
+  assignScenarioToFolder,
   type UserScenario,
   type UserScenarioPipelineStatus,
+  type ScenarioFolder,
 } from "./lib/api";
 import type {
   ProjectContext,
@@ -1059,6 +1065,11 @@ function ScenariosView({
   onPopulateUserScenario,
   populatingId,
   pipelineStatuses = {},
+  folders = [],
+  onCreateFolder,
+  onDeleteFolder,
+  onRenameFolder,
+  onAssignFolder,
 }: {
   scenarios: GesicaScenario[];
   loading?: boolean;
@@ -1071,10 +1082,22 @@ function ScenariosView({
   onPopulateUserScenario?: (id: string) => void;
   populatingId?: string | null;
   pipelineStatuses?: Record<string, import('./lib/api').UserScenarioPipelineStatus>;
+  folders?: ScenarioFolder[];
+  onCreateFolder?: (name: string, color: string) => Promise<void>;
+  onDeleteFolder?: (folderId: string) => Promise<void>;
+  onRenameFolder?: (folderId: string, name: string, color: string) => Promise<void>;
+  onAssignFolder?: (scenarioId: string, folderId: string | null) => Promise<void>;
 }) {
   const [selectedCluster, setSelectedCluster] = useState<string>("all");
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [detailScenarioId, setDetailScenarioId] = useState<string | null>(null);
+  const [showNewFolderDialog, setShowNewFolderDialog] = useState(false);
+  const [newFolderName, setNewFolderName] = useState('');
+  const [newFolderColor, setNewFolderColor] = useState('#6366f1');
+  const [assigningScenarioId, setAssigningScenarioId] = useState<string | null>(null);
+  const [editingFolderId, setEditingFolderId] = useState<string | null>(null);
+  const [editFolderName, setEditFolderName] = useState('');
+  const [editFolderColor, setEditFolderColor] = useState('#6366f1');
 
   // Page détail d'un scénario (GESICA ou utilisateur)
   if (detailScenarioId) {
@@ -2724,23 +2747,155 @@ function ScenariosView({
       )}
 
       {/* ── Scénarios Utilisateur (recherches sauvegardées backend) ────────── */}
-      {userScenarios.length > 0 && (
+      {(userScenarios.length > 0 || onCreateFolder) && (
         <div className="mt-8 space-y-4">
-          <div className="flex items-center gap-3">
-            <RefreshCw size={18} className="text-gold-400" />
-            <div>
-              <h2 className="text-xl font-semibold text-white">Mes scénarios personnels</h2>
-              <p className="text-xs text-forest-400 mt-0.5">
-                Recherches sauvegardées — cliquez sur un scénario pour accéder à tous les onglets (corpus, PICO, screening, RAG, Evidence Brief...)
-              </p>
+          <div className="flex items-center justify-between gap-3">
+            <div className="flex items-center gap-3">
+              <RefreshCw size={18} className="text-gold-400" />
+              <div>
+                <h2 className="text-xl font-semibold text-white">Mes scénarios personnels</h2>
+                <p className="text-xs text-forest-400 mt-0.5">
+                  Recherches sauvegardées — cliquez pour accéder à tous les onglets (corpus, PICO, screening, RAG, Evidence Brief...)
+                </p>
+              </div>
             </div>
+            {onCreateFolder && (
+              <button
+                type="button"
+                onClick={() => setShowNewFolderDialog(true)}
+                className="shrink-0 flex items-center gap-1.5 rounded-xl border border-white/10 bg-white/5 px-3 py-1.5 text-xs text-white/60 hover:text-white hover:bg-white/10 transition"
+              >
+                <FolderOpen size={13} />
+                Nouveau dossier
+              </button>
+            )}
           </div>
 
-          {/* Épinglés */}
-          {userScenarios.filter(s => s.pinned).length > 0 && (
+          {/* Dialog création dossier */}
+          {showNewFolderDialog && (
+            <div className="rounded-2xl border border-white/10 bg-white/5 p-4 space-y-3">
+              <h4 className="text-sm font-semibold text-white">Nouveau dossier</h4>
+              <div className="flex gap-2">
+                <input
+                  type="text"
+                  value={newFolderName}
+                  onChange={e => setNewFolderName(e.target.value)}
+                  placeholder="Nom du dossier"
+                  className="flex-1 rounded-xl border border-white/10 bg-white/5 px-3 py-1.5 text-sm text-white placeholder-white/30 focus:outline-none focus:border-brand-400"
+                />
+                <input
+                  type="color"
+                  value={newFolderColor}
+                  onChange={e => setNewFolderColor(e.target.value)}
+                  className="w-10 h-9 rounded-xl border border-white/10 bg-white/5 cursor-pointer"
+                  title="Couleur du dossier"
+                />
+              </div>
+              <div className="flex gap-2">
+                <button
+                  type="button"
+                  onClick={async () => {
+                    if (!newFolderName.trim() || !onCreateFolder) return;
+                    await onCreateFolder(newFolderName.trim(), newFolderColor);
+                    setNewFolderName('');
+                    setNewFolderColor('#6366f1');
+                    setShowNewFolderDialog(false);
+                  }}
+                  className="rounded-xl bg-brand-500/20 border border-brand-500/30 px-3 py-1.5 text-xs text-brand-300 hover:bg-brand-500/30 transition"
+                >
+                  Créer
+                </button>
+                <button type="button" onClick={() => setShowNewFolderDialog(false)} className="rounded-xl border border-white/10 px-3 py-1.5 text-xs text-white/40 hover:text-white transition">
+                  Annuler
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* Dialog assignation dossier */}
+          {assigningScenarioId && (
+            <div className="rounded-2xl border border-white/10 bg-white/5 p-4 space-y-2">
+              <h4 className="text-sm font-semibold text-white">Assigner à un dossier</h4>
+              <div className="flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  onClick={async () => {
+                    if (onAssignFolder) await onAssignFolder(assigningScenarioId, null);
+                    setAssigningScenarioId(null);
+                  }}
+                  className="rounded-xl border border-white/10 px-3 py-1.5 text-xs text-white/50 hover:text-white hover:bg-white/10 transition"
+                >
+                  Sans dossier
+                </button>
+                {folders.map(f => (
+                  <button
+                    key={f.id}
+                    type="button"
+                    onClick={async () => {
+                      if (onAssignFolder) await onAssignFolder(assigningScenarioId, f.id);
+                      setAssigningScenarioId(null);
+                    }}
+                    className="rounded-xl border px-3 py-1.5 text-xs hover:opacity-80 transition"
+                    style={{ borderColor: f.color + '60', backgroundColor: f.color + '20', color: f.color }}
+                  >
+                    {f.name}
+                  </button>
+                ))}
+                <button type="button" onClick={() => setAssigningScenarioId(null)} className="rounded-xl border border-white/10 px-3 py-1.5 text-xs text-white/30 hover:text-white transition">Annuler</button>
+              </div>
+            </div>
+          )}
+
+          {/* Dossiers */}
+          {folders.map(folder => {
+            const folderScenarios = userScenarios.filter(s => (s as any).folder_id === folder.id);
+            return (
+              <div key={folder.id} className="rounded-2xl border p-4 space-y-2" style={{ borderColor: folder.color + '40', backgroundColor: folder.color + '08' }}>
+                <div className="flex items-center justify-between">
+                  {editingFolderId === folder.id ? (
+                    <div className="flex gap-2 flex-1">
+                      <input type="text" value={editFolderName} onChange={e => setEditFolderName(e.target.value)} className="flex-1 rounded-xl border border-white/10 bg-white/5 px-2 py-1 text-sm text-white focus:outline-none focus:border-brand-400" />
+                      <input type="color" value={editFolderColor} onChange={e => setEditFolderColor(e.target.value)} className="w-8 h-8 rounded border border-white/10 bg-white/5 cursor-pointer" />
+                      <button type="button" onClick={async () => { if (onRenameFolder) await onRenameFolder(folder.id, editFolderName, editFolderColor); setEditingFolderId(null); }} className="rounded-xl bg-brand-500/20 border border-brand-500/30 px-2 py-1 text-xs text-brand-300">OK</button>
+                      <button type="button" onClick={() => setEditingFolderId(null)} className="rounded-xl border border-white/10 px-2 py-1 text-xs text-white/30">✕</button>
+                    </div>
+                  ) : (
+                    <h3 className="text-sm font-semibold flex items-center gap-1.5" style={{ color: folder.color }}>
+                      <FolderOpen size={14} />
+                      {folder.name} <span className="text-xs font-normal opacity-60">({folderScenarios.length})</span>
+                    </h3>
+                  )}
+                  {editingFolderId !== folder.id && (
+                    <div className="flex gap-1">
+                      <button type="button" onClick={() => { setEditingFolderId(folder.id); setEditFolderName(folder.name); setEditFolderColor(folder.color); }} className="rounded-lg border border-white/10 px-2 py-1 text-xs text-white/30 hover:text-white transition" title="Renommer">✏</button>
+                      <button type="button" onClick={() => onDeleteFolder && onDeleteFolder(folder.id)} className="rounded-lg border border-white/10 px-2 py-1 text-xs text-white/30 hover:text-red-400 transition" title="Supprimer">✕</button>
+                    </div>
+                  )}
+                </div>
+                {folderScenarios.length === 0 && (
+                  <p className="text-xs text-white/30 italic">Aucun scénario dans ce dossier</p>
+                )}
+                {folderScenarios.map(s => (
+                  <div key={s.id} className="flex items-center gap-3 rounded-xl border border-white/8 bg-white/3 px-3 py-2 hover:bg-white/8 transition group">
+                    <div className="flex-1 min-w-0 cursor-pointer" onClick={() => setDetailScenarioId(s.id)}>
+                      <p className="text-sm text-white/80 truncate group-hover:text-white transition">{s.title}</p>
+                      <p className="text-xs text-white/30 truncate">{s.articleCount} articles</p>
+                    </div>
+                    <button type="button" onClick={() => setDetailScenarioId(s.id)} className="shrink-0 rounded-xl bg-white/5 border border-white/10 px-2 py-1 text-xs text-white/50 hover:text-white transition">Ouvrir</button>
+                    {onAssignFolder && <button type="button" onClick={() => setAssigningScenarioId(s.id)} className="shrink-0 rounded-xl border border-white/10 px-2 py-1 text-xs text-white/30 hover:text-white transition" title="Changer de dossier"><FolderOpen size={11} /></button>}
+                    {onTogglePin && <button type="button" onClick={() => onTogglePin(s.id)} className="shrink-0 rounded-xl border border-white/10 px-2 py-1 text-xs text-white/30 hover:text-gold-400 transition" title="Épingler">☆</button>}
+                    {onDeleteSearch && <button type="button" onClick={() => onDeleteSearch(s.id)} className="shrink-0 rounded-xl border border-white/10 px-2 py-1 text-xs text-white/30 hover:text-red-400 transition" title="Supprimer">✕</button>}
+                  </div>
+                ))}
+              </div>
+            );
+          })}
+
+          {/* Épinglés (hors dossier) */}
+          {userScenarios.filter(s => s.pinned && !(s as any).folder_id).length > 0 && (
             <div className="space-y-2">
               <h3 className="text-xs font-semibold text-gold-400 uppercase tracking-widest">Épinglés</h3>
-              {userScenarios.filter(s => s.pinned).map(s => (
+              {userScenarios.filter(s => s.pinned && !(s as any).folder_id).map(s => (
                 <div key={s.id} className="flex items-center gap-3 rounded-2xl border border-gold-400/30 bg-gold-500/5 px-4 py-3 hover:bg-gold-500/10 transition group">
                   <Activity size={14} className="text-gold-400 shrink-0" />
                   <div className="flex-1 min-w-0 cursor-pointer" onClick={() => setDetailScenarioId(s.id)}>
@@ -2798,6 +2953,9 @@ function ScenariosView({
                       if (saved) onReplaySearch(saved);
                     }} className="shrink-0 rounded-xl border border-white/10 px-2 py-1.5 text-xs text-white/40 hover:text-white hover:bg-white/10 transition" title="Relancer la recherche">&#8635;</button>
                   )}
+                  {onAssignFolder && (
+                    <button type="button" onClick={() => setAssigningScenarioId(s.id)} className="shrink-0 rounded-xl border border-white/10 px-2 py-1.5 text-xs text-white/30 hover:text-white hover:bg-white/10 transition" title="Assigner à un dossier"><FolderOpen size={11} /></button>
+                  )}
                   {onTogglePin && (
                     <button type="button" onClick={() => onTogglePin(s.id)} className="shrink-0 rounded-xl border border-gold-400/20 px-2 py-1.5 text-xs text-gold-400 hover:bg-gold-500/10 transition" title="Désépingler">★</button>
                   )}
@@ -2809,11 +2967,11 @@ function ScenariosView({
             </div>
           )}
 
-          {/* Non épinglés */}
-          {userScenarios.filter(s => !s.pinned).length > 0 && (
+          {/* Non épinglés (hors dossier) */}
+          {userScenarios.filter(s => !s.pinned && !(s as any).folder_id).length > 0 && (
             <div className="space-y-2">
               <h3 className="text-xs font-semibold text-white/40 uppercase tracking-widest">Recherches récentes</h3>
-              {userScenarios.filter(s => !s.pinned).map(s => (
+              {userScenarios.filter(s => !s.pinned && !(s as any).folder_id).map(s => (
                 <div key={s.id} className="flex items-center gap-3 rounded-2xl border border-white/8 bg-white/3 px-4 py-3 hover:bg-white/8 transition group">
                   <BookOpen size={14} className="text-white/30 shrink-0" />
                   <div className="flex-1 min-w-0 cursor-pointer" onClick={() => setDetailScenarioId(s.id)}>
@@ -2863,6 +3021,9 @@ function ScenariosView({
                       const saved = savedSearches.find(ss => ss.id === s.id);
                       if (saved) onReplaySearch(saved);
                     }} className="shrink-0 rounded-xl border border-white/10 px-2 py-1.5 text-xs text-white/40 hover:text-white hover:bg-white/10 transition" title="Relancer">&#8635;</button>
+                  )}
+                  {onAssignFolder && (
+                    <button type="button" onClick={() => setAssigningScenarioId(s.id)} className="shrink-0 rounded-xl border border-white/10 px-2 py-1.5 text-xs text-white/30 hover:text-white hover:bg-white/10 transition" title="Assigner à un dossier"><FolderOpen size={11} /></button>
                   )}
                   {onTogglePin && (
                     <button type="button" onClick={() => onTogglePin(s.id)} className="shrink-0 rounded-xl border border-white/10 px-2 py-1.5 text-xs text-white/30 hover:text-gold-400 hover:border-gold-400/30 transition" title="Épingler">☆</button>
@@ -2916,6 +3077,9 @@ export default function App() {
   const [populatingId, setPopulatingId] = useState<string | null>(null);
   const [pipelineStatuses, setPipelineStatuses] = useState<Record<string, UserScenarioPipelineStatus>>({});
   const pipelinePollRef = useRef<Record<string, ReturnType<typeof setInterval>>>({});
+  const [searchTotalDocs, setSearchTotalDocs] = useState<number | null>(null);
+  const [searchSourceBreakdown, setSearchSourceBreakdown] = useState<Record<string, number> | null>(null);
+  const [folders, setFolders] = useState<ScenarioFolder[]>([]);
   
 
   useEffect(() => {
@@ -2954,10 +3118,12 @@ export default function App() {
       Promise.all([
         fetchGesicaScenarios(),
         fetchUserScenarios(),
+        fetchFolders(),
       ])
-        .then(([gesica, user]) => {
+        .then(([gesica, user, foldersData]) => {
           setGesicaScenarios(gesica);
           setUserScenarios(user);
+          setFolders(foldersData);
           // Synchroniser savedSearches avec les user_scenarios backend
           setSavedSearches(user.map(u => ({
             id: u.id,
@@ -3033,10 +3199,12 @@ export default function App() {
       const data = await searchDocuments({
         queryText: query,
         mode,
-        limit: 100,
+        limit: 500,
         filters: effectiveFilters,
       });
       setResults(data.results);
+      setSearchTotalDocs(data.totalUniqueDocs ?? data.results.length);
+      setSearchSourceBreakdown(data.sourceBreakdown ?? null);
       const first = data.results[0] ?? null;
       if (first) {
         await loadDocumentDetail(first);
@@ -3329,6 +3497,23 @@ export default function App() {
             onPopulateUserScenario={handlePopulateUserScenario}
             populatingId={populatingId}
             pipelineStatuses={pipelineStatuses}
+            folders={folders}
+            onCreateFolder={async (name: string, color: string) => {
+              const f = await createFolder(name, color);
+              setFolders(prev => [...prev, f]);
+            }}
+            onDeleteFolder={async (folderId: string) => {
+              await deleteFolder(folderId);
+              setFolders(prev => prev.filter(f => f.id !== folderId));
+            }}
+            onRenameFolder={async (folderId: string, name: string, color: string) => {
+              const f = await updateFolder(folderId, name, color, 0);
+              setFolders(prev => prev.map(x => x.id === folderId ? f : x));
+            }}
+            onAssignFolder={async (scenarioId: string, folderId: string | null) => {
+              await assignScenarioToFolder(scenarioId, folderId);
+              setUserScenarios(prev => prev.map(s => s.id === scenarioId ? { ...s, folder_id: folderId } : s));
+            }}
           />
         )}
 
@@ -3480,10 +3665,25 @@ export default function App() {
               {hasResults && (
                 <>
                   <div className="flex items-center justify-between">
-                    <p className="text-sm text-forest-400">
-                      <span className="font-semibold text-white">{dedupedResults.length}</span>{" "}
-                      résultat{dedupedResults.length > 1 ? "s" : ""} · {totalPages > 1 ? `page ${page}/${totalPages}` : "1 page"}
-                    </p>
+                    <div className="space-y-1">
+                      <p className="text-sm text-forest-400">
+                        <span className="font-semibold text-white">{dedupedResults.length}</span>{" "}
+                        résultat{dedupedResults.length > 1 ? "s" : ""} affichés
+                        {searchTotalDocs !== null && searchTotalDocs > dedupedResults.length && (
+                          <span className="text-white/40"> (sur <span className="font-semibold text-white/70">{searchTotalDocs}</span> trouvés)</span>
+                        )}
+                        {" "}· {totalPages > 1 ? `page ${page}/${totalPages}` : "1 page"}
+                      </p>
+                      {searchSourceBreakdown && Object.keys(searchSourceBreakdown).length > 0 && (
+                        <div className="flex flex-wrap gap-1.5">
+                          {Object.entries(searchSourceBreakdown).map(([src, count]) => (
+                            <span key={src} className="rounded-lg border border-white/10 bg-white/5 px-2 py-0.5 text-xs text-white/50">
+                              {src}: <span className="font-semibold text-white/70">{count}</span>
+                            </span>
+                          ))}
+                        </div>
+                      )}
+                    </div>
                     <div className="flex gap-2">
                       <button
                         type="button"

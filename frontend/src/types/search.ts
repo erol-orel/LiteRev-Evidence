@@ -47,6 +47,8 @@ export interface SearchRequest {
 
 export interface SearchResponse {
   results: SearchResult[];
+  totalUniqueDocs?: number;
+  sourceBreakdown?: Record<string, number>;
 }
 
 // --- BACKEND API RAW TYPES (snake_case) ---
@@ -94,4 +96,6 @@ export interface ApiSearchRequest {
 export interface ApiSearchResponse {
   results: ApiSearchResult[];
   count: number;
+  total_unique_docs?: number;
+  source_breakdown?: Record<string, number>;
 }

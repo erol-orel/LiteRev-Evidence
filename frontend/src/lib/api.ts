@@ -216,6 +216,8 @@ export async function searchDocuments(
   const apiData: ApiSearchResponse = await response.json();
   return {
     results: (apiData.results || []).map(mapSearchResultFromApi),
+    totalUniqueDocs: apiData.total_unique_docs,
+    sourceBreakdown: apiData.source_breakdown,
   };
 }
 
@@ -2223,7 +2225,7 @@ export async function deleteUserScenario(scenarioId: string): Promise<{ deleted:
 
 export async function patchUserScenario(
   scenarioId: string,
-  patch: { name?: string; pinned?: boolean; mode?: string; filters?: Record<string, any> },
+  patch: { name?: string; pinned?: boolean; mode?: string; filters?: Record<string, any>; folder_id?: string | null },
 ): Promise<UserScenario> {
   const r = await fetch(`${API_BASE_URL}/user-scenarios/${scenarioId}`, {
     method: 'PATCH',
@@ -2375,4 +2377,63 @@ export async function fetchEnrichmentStatus(
   const r = await fetch(`${API_BASE_URL}/enrichment/status?${params}`);
   if (!r.ok) throw new Error(`HTTP ${r.status}`);
   return r.json();
+}
+
+// ─── Dossiers de scénarios ────────────────────────────────────────────────────
+
+export interface ScenarioFolder {
+  id: string;
+  name: string;
+  color: string;
+  sort_order: number;
+  scenario_count: number;
+  created_at: string | null;
+}
+
+export async function fetchFolders(): Promise<ScenarioFolder[]> {
+  const r = await fetch(`${API_BASE_URL}/user-scenario-folders`);
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  return r.json();
+}
+
+export async function createFolder(
+  name: string,
+  color = '#6366f1',
+  sort_order = 0,
+): Promise<ScenarioFolder> {
+  const r = await fetch(`${API_BASE_URL}/user-scenario-folders`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name, color, sort_order }),
+  });
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  return r.json();
+}
+
+export async function updateFolder(
+  folderId: string,
+  name: string,
+  color: string,
+  sort_order: number,
+): Promise<ScenarioFolder> {
+  const r = await fetch(`${API_BASE_URL}/user-scenario-folders/${folderId}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name, color, sort_order }),
+  });
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  return r.json();
+}
+
+export async function deleteFolder(folderId: string): Promise<{ deleted: boolean; id: string }> {
+  const r = await fetch(`${API_BASE_URL}/user-scenario-folders/${folderId}`, { method: 'DELETE' });
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  return r.json();
+}
+
+export async function assignScenarioToFolder(
+  scenarioId: string,
+  folderId: string | null,
+): Promise<UserScenario> {
+  return patchUserScenario(scenarioId, { folder_id: folderId ?? '' });
 }
