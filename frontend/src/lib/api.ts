@@ -2439,3 +2439,291 @@ export async function assignScenarioToFolder(
 ): Promise<UserScenario> {
   return patchUserScenario(scenarioId, { folder_id: folderId ?? '' });
 }
+
+// ─── Scoring sémantique + Paramètres par scénario ────────────────────────────
+
+export interface ScenarioSettings {
+  scenario_id: string;
+  similarity_threshold: number;
+  evidence_brief_json: Record<string, unknown> | null;
+  brief_generated_at: string | null;
+  variables_json: Record<string, unknown> | null;
+  variables_validated: boolean;
+  variables_generated_at: string | null;
+}
+
+export async function getScenarioSettings(scenarioId: string): Promise<ScenarioSettings> {
+  const r = await fetch(`${API_BASE_URL}/scenarios/${scenarioId}/settings`);
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  return r.json();
+}
+
+export async function patchScenarioSettings(
+  scenarioId: string,
+  payload: Partial<Pick<ScenarioSettings, 'similarity_threshold' | 'variables_json' | 'variables_validated'>>,
+): Promise<{ status: string; scenario_id: string; updated: string[] }> {
+  const r = await fetch(`${API_BASE_URL}/scenarios/${scenarioId}/settings`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  return r.json();
+}
+
+export async function triggerRerank(
+  scenarioId: string,
+  query?: string,
+): Promise<{ status: string; scenario_id: string; query?: string }> {
+  const params = query ? `?query=${encodeURIComponent(query)}` : '';
+  const r = await fetch(`${API_BASE_URL}/scenarios/${scenarioId}/rerank${params}`, {
+    method: 'POST',
+  });
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  return r.json();
+}
+
+export async function getRerankStatus(
+  scenarioId: string,
+): Promise<{ status: string; updated?: number; error?: string }> {
+  const r = await fetch(`${API_BASE_URL}/scenarios/${scenarioId}/rerank/status`);
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  return r.json();
+}
+
+// ─── Evidence Brief LLM ──────────────────────────────────────────────────────
+
+export interface LlmEvidenceBrief {
+  executive_summary?: string;
+  clinical_context?: string;
+  key_findings?: string[];
+  recommended_actions?: string[];
+  evidence_synthesis?: string;
+  population_summary?: string;
+  intervention_summary?: string;
+  outcome_summary?: string;
+  methodological_quality?: string;
+  limitations?: string[];
+  research_gaps?: string[];
+  clinical_implications?: string;
+  implementation_recommendations?: string[];
+  evidence_level?: string;
+  grade_recommendation?: string;
+  future_research?: string;
+  key_references?: Array<{ title: string; year: number | null; journal: string; key_contribution: string }>;
+  _meta?: {
+    scenario_id: string;
+    scenario_name: string;
+    generated_at: string;
+    articles_used: number;
+    articles_above_threshold: number;
+    threshold: number;
+    human_validated: number;
+    year_range: string;
+    study_designs: Record<string, number>;
+    auto_generated: boolean;
+    model: string;
+  };
+  _cached?: boolean;
+  _generated_at?: string | null;
+  status?: string;
+  message?: string;
+  error?: string;
+}
+
+export async function getLlmEvidenceBrief(scenarioId: string): Promise<LlmEvidenceBrief> {
+  const r = await fetch(`${API_BASE_URL}/scenarios/${scenarioId}/evidence-brief/llm`);
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  return r.json();
+}
+
+export async function generateEvidenceBrief(
+  scenarioId: string,
+  force = false,
+): Promise<{ status: string; scenario_id: string }> {
+  const r = await fetch(
+    `${API_BASE_URL}/scenarios/${scenarioId}/evidence-brief/generate?force=${force}`,
+    { method: 'POST' },
+  );
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  return r.json();
+}
+
+export async function getBriefGenerationStatus(
+  scenarioId: string,
+): Promise<{ status: string; generated_at?: string; error?: string }> {
+  const r = await fetch(`${API_BASE_URL}/scenarios/${scenarioId}/evidence-brief/generate/status`);
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  return r.json();
+}
+
+// ─── Variables & Modele auto-rempli ──────────────────────────────────────────
+
+export interface ScenarioVariables {
+  primary_outcome?: {
+    name: string;
+    definition: string;
+    measurement: string;
+    timeframe: string;
+  };
+  secondary_outcomes?: Array<{ name: string; definition: string }>;
+  predictor_variables?: Array<{
+    name: string;
+    type: string;
+    definition: string;
+    data_source: string;
+    importance: 'high' | 'medium' | 'low';
+    evidence_level: string;
+  }>;
+  recommended_algorithm?: {
+    primary: string;
+    alternatives: string[];
+    rationale: string;
+    validation_method: string;
+  };
+  required_databases?: string[];
+  sample_size_recommendation?: string;
+  update_frequency?: string;
+  alert_thresholds?: {
+    green: { label: string; description: string };
+    orange: { label: string; description: string };
+    red: { label: string; description: string };
+  };
+  implementation_notes?: string;
+  validation_status?: string;
+  _meta?: {
+    scenario_id: string;
+    generated_at: string;
+    pico_articles_used: number;
+    auto_generated: boolean;
+    validation_status: string;
+  };
+  _validated?: boolean;
+  _generated_at?: string | null;
+  status?: string;
+  message?: string;
+  error?: string;
+}
+
+export async function getScenarioVariables(scenarioId: string): Promise<ScenarioVariables> {
+  const r = await fetch(`${API_BASE_URL}/scenarios/${scenarioId}/variables`);
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  return r.json();
+}
+
+export async function generateScenarioVariables(
+  scenarioId: string,
+): Promise<{ status: string; scenario_id?: string }> {
+  const r = await fetch(`${API_BASE_URL}/scenarios/${scenarioId}/variables/generate`, {
+    method: 'POST',
+  });
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  return r.json();
+}
+
+export async function getVariablesGenerationStatus(
+  scenarioId: string,
+): Promise<{ status: string; generated_at?: string; variables_count?: number; error?: string }> {
+  const r = await fetch(`${API_BASE_URL}/scenarios/${scenarioId}/variables/generate/status`);
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  return r.json();
+}
+
+export async function validateScenarioVariables(
+  scenarioId: string,
+  payload: { variables_json?: Record<string, unknown> },
+): Promise<{ status: string; scenario_id: string; validated_at: string }> {
+  const r = await fetch(`${API_BASE_URL}/scenarios/${scenarioId}/variables/validate`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  return r.json();
+}
+
+// ─── Heatmap avec vrais noms ──────────────────────────────────────────────────
+
+export async function fetchCorpusStatsByYearNamed(): Promise<CorpusStatsByYear> {
+  const r = await fetch(`${API_BASE_URL}/corpus/stats/by-year/named`);
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  const data = await r.json();
+  return {
+    byYear: data.by_year,
+    scenarioByYear: data.scenario_by_year,
+    heatmapScenarioSource: data.heatmap_scenario_source,
+  };
+}
+
+// ─── Assistant IA filtre par seuil ───────────────────────────────────────────
+
+export function askScenarioRagStreamFiltered(
+  scenarioId: string,
+  question: string,
+  callbacks: RagStreamCallbacks,
+): () => void {
+  let aborted = false;
+  const controller = new AbortController();
+
+  (async () => {
+    try {
+      const resp = await fetch(`${API_BASE_URL}/ask/stream/filtered`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          question,
+          project_context: 'literev',
+          scenario_id: scenarioId,
+          top_k: 12,
+        }),
+        signal: controller.signal,
+      });
+
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      if (!resp.body) throw new Error('No response body');
+
+      const reader = resp.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+
+      while (!aborted) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop() ?? '';
+
+        for (const line of lines) {
+          if (line.startsWith('event: sources')) continue;
+          if (line.startsWith('event: error')) continue;
+          if (line.startsWith('event: done')) {
+            callbacks.onDone();
+            return;
+          }
+          if (line.startsWith('data: ')) {
+            const raw = line.slice(6).trim();
+            if (!raw || raw === '{}') continue;
+            try {
+              const parsed = JSON.parse(raw);
+              if (parsed.token !== undefined) {
+                callbacks.onToken(parsed.token);
+              } else if (Array.isArray(parsed)) {
+                callbacks.onSources(parsed as ScenarioRagSource[]);
+              } else if (parsed.error) {
+                callbacks.onError(parsed.error);
+              }
+            } catch {}
+          }
+        }
+      }
+      callbacks.onDone();
+    } catch (e: any) {
+      if (!aborted) callbacks.onError(e.message ?? 'Erreur streaming');
+    }
+  })();
+
+  return () => {
+    aborted = true;
+    controller.abort();
+  };
+}

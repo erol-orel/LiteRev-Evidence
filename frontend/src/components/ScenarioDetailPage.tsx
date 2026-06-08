@@ -14,13 +14,24 @@ import {
   fetchScenarioModelStatus,
   runScenarioModel,
   fetchScenarioClustering,
-  askScenarioRagStream,
+  askScenarioRagStreamFiltered,
   fetchScenarioPrisma,
   uploadScenarioDataset,
   screenArticle,
   fetchArticlePico,
   fetchScenarioPicoBulk,
   fetchEvidenceBrief,
+  getLlmEvidenceBrief,
+  generateEvidenceBrief,
+  getBriefGenerationStatus,
+  getScenarioVariables,
+  generateScenarioVariables,
+  getVariablesGenerationStatus,
+  validateScenarioVariables,
+  getScenarioSettings,
+  patchScenarioSettings,
+  triggerRerank,
+  getRerankStatus,
   fetchKnowledgeGraph,
   fetchKappaStats,
   fetchDoubleBlindConflicts,
@@ -44,6 +55,8 @@ import {
   type PicoData,
   type PicoBulkResponse,
   type EvidenceBriefData,
+  type LlmEvidenceBrief,
+  type ScenarioVariables,
   type KnowledgeGraphData,
   type KGNode,
   type KappaStats,
@@ -200,6 +213,87 @@ function VariablesSection({ detail, scenarioId }: { detail: ScenarioDetail; scen
   const [uploadError, setUploadError] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
+  // LLM Variables auto-fill
+  const [llmVars, setLlmVars] = useState<ScenarioVariables | null>(null);
+  const [llmLoading, setLlmLoading] = useState(false);
+  const [llmGenerating, setLlmGenerating] = useState(false);
+  const [llmGenStatus, setLlmGenStatus] = useState<string | null>(null);
+  const [llmValidating, setLlmValidating] = useState(false);
+  const [llmError, setLlmError] = useState<string | null>(null);
+  const llmPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  const loadLlmVars = React.useCallback(() => {
+    setLlmLoading(true);
+    getScenarioVariables(scenarioId)
+      .then(d => { setLlmVars(d); setLlmLoading(false); })
+      .catch(() => { setLlmLoading(false); });
+  }, [scenarioId]);
+
+  React.useEffect(() => {
+    loadLlmVars();
+    return () => { if (llmPollRef.current) clearInterval(llmPollRef.current); };
+  }, [loadLlmVars]);
+
+  // Polling si generation en cours
+  React.useEffect(() => {
+    if (!llmVars || llmVars.status !== 'generating') return;
+    setLlmGenStatus('Generation en cours...');
+    llmPollRef.current = setInterval(() => {
+      getVariablesGenerationStatus(scenarioId).then(s => {
+        if (s.status === 'done') {
+          if (llmPollRef.current) clearInterval(llmPollRef.current);
+          setLlmGenStatus(null);
+          loadLlmVars();
+        } else if (s.status === 'error') {
+          if (llmPollRef.current) clearInterval(llmPollRef.current);
+          setLlmGenStatus(null);
+          setLlmError(s.error ?? 'Erreur de generation');
+        }
+      });
+    }, 5000);
+    return () => { if (llmPollRef.current) clearInterval(llmPollRef.current); };
+  }, [llmVars, scenarioId, loadLlmVars]);
+
+  const handleGenerateLlm = async () => {
+    setLlmGenerating(true);
+    setLlmGenStatus('Lancement de la generation...');
+    setLlmError(null);
+    try {
+      await generateScenarioVariables(scenarioId);
+      llmPollRef.current = setInterval(() => {
+        getVariablesGenerationStatus(scenarioId).then(s => {
+          if (s.status === 'done') {
+            if (llmPollRef.current) clearInterval(llmPollRef.current);
+            setLlmGenStatus(null);
+            setLlmGenerating(false);
+            loadLlmVars();
+          } else if (s.status === 'error') {
+            if (llmPollRef.current) clearInterval(llmPollRef.current);
+            setLlmGenStatus(null);
+            setLlmGenerating(false);
+            setLlmError(s.error ?? 'Erreur de generation');
+          }
+        });
+      }, 5000);
+    } catch (e: any) {
+      setLlmGenerating(false);
+      setLlmGenStatus(null);
+      setLlmError(e.message);
+    }
+  };
+
+  const handleValidateLlm = async () => {
+    setLlmValidating(true);
+    try {
+      await validateScenarioVariables(scenarioId, {});
+      loadLlmVars();
+    } catch (e: any) {
+      setLlmError(e.message);
+    } finally {
+      setLlmValidating(false);
+    }
+  };
+
   const handleDragOver = (e: React.DragEvent) => {
     e.preventDefault();
   };
@@ -243,6 +337,128 @@ function VariablesSection({ detail, scenarioId }: { detail: ScenarioDetail; scen
   const missingVars = totalVars - pluggedVars;
 
   return (
+    <div className="space-y-4">
+
+      {/* Banniere LLM Variables - pretes a valider */}
+      {llmVars && !llmVars.status && !llmVars._validated && llmVars.predictor_variables && llmVars.predictor_variables.length > 0 && (
+        <div className="rounded-2xl border border-gold-500/30 bg-gold-500/8 px-4 py-3 flex items-start gap-3">
+          <Bell size={14} className="text-gold-400 shrink-0 mt-0.5" />
+          <div className="flex-1 min-w-0">
+            <p className="text-xs font-semibold text-gold-300 mb-1">
+              Variables & Modele generes automatiquement - validation requise
+            </p>
+            <p className="text-[10px] text-gold-200/70 leading-relaxed">
+              {llmVars.predictor_variables?.length ?? 0} variables predictives et le modele recommande ont ete extraits automatiquement depuis les PICO de {llmVars._meta?.pico_articles_used ?? '?'} articles. Verifiez et validez avant utilisation.
+            </p>
+          </div>
+          <button onClick={handleValidateLlm} disabled={llmValidating}
+            className="shrink-0 flex items-center gap-1.5 rounded-xl bg-gold-500/20 hover:bg-gold-500/30 border border-gold-500/30 text-gold-300 font-semibold px-3 py-1.5 text-xs transition disabled:opacity-50">
+            {llmValidating ? (<Loader2 size={11} className="animate-spin" />) : (<CheckCircle2 size={11} />)}
+            Valider
+          </button>
+        </div>
+      )}
+
+      {/* Banniere : variables validees */}
+      {llmVars && llmVars._validated && (
+        <div className="rounded-2xl border border-brand-500/20 bg-brand-500/5 px-4 py-2.5 flex items-center gap-2">
+          <CheckCircle2 size={12} className="text-brand-400 shrink-0" />
+          <p className="text-[10px] text-brand-300">
+            Variables & Modele valides par un relecteur humain le {llmVars._generated_at ? new Date(llmVars._generated_at).toLocaleDateString('fr-FR') : ''}.
+          </p>
+        </div>
+      )}
+
+      {/* Bouton generer + erreur */}
+      <div className="flex items-center gap-3 flex-wrap">
+        <button onClick={handleGenerateLlm} disabled={llmGenerating || llmLoading}
+          className="flex items-center gap-1.5 rounded-xl border border-brand-500/30 bg-brand-500/10 hover:bg-brand-500/20 text-brand-300 font-medium px-3 py-1.5 text-xs transition disabled:opacity-50">
+          {llmGenerating ? (<Loader2 size={11} className="animate-spin" />) : (<Brain size={11} />)}
+          Generer automatiquement depuis les PICO
+        </button>
+        {llmGenStatus && (
+          <span className="text-[10px] text-gold-400 flex items-center gap-1">
+            <Loader2 size={10} className="animate-spin" />{llmGenStatus}
+          </span>
+        )}
+        {llmError && <span className="text-[10px] text-rose-400">{llmError}</span>}
+      </div>
+
+      {/* Variables LLM generees */}
+      {llmVars && !llmVars.status && llmVars.predictor_variables && llmVars.predictor_variables.length > 0 && (
+        <div className="rounded-3xl border border-white/10 bg-white/3 p-5 space-y-4">
+          <div className="flex items-center justify-between flex-wrap gap-2">
+            <SectionHeader
+              icon={<Brain size={14} className="text-brand-400" />}
+              title="Variables generees par LLM"
+              subtitle={`Extraites depuis les PICO de ${llmVars._meta?.pico_articles_used ?? '?'} articles`}
+            />
+            <div className="flex gap-2">
+              {llmVars._validated ? (
+                <span className="rounded-full bg-brand-500/10 border border-brand-500/20 px-2.5 py-1 text-[10px] font-semibold text-brand-300">Validees</span>
+              ) : (
+                <span className="rounded-full bg-gold-500/10 border border-gold-500/20 px-2.5 py-1 text-[10px] font-semibold text-gold-300">En attente de validation</span>
+              )}
+            </div>
+          </div>
+
+          {/* Outcome principal LLM */}
+          {llmVars.primary_outcome && (
+            <div className="rounded-2xl border border-gold-500/10 bg-gold-500/5 p-4 space-y-1">
+              <p className="text-[10px] font-bold uppercase tracking-wider text-gold-400">Outcome principal</p>
+              <p className="text-sm font-medium text-gold-200">{llmVars.primary_outcome.name}</p>
+              <p className="text-xs text-white/55">{llmVars.primary_outcome.definition}</p>
+              <p className="text-[10px] text-white/35">Mesure : {llmVars.primary_outcome.measurement} - Horizon : {llmVars.primary_outcome.timeframe}</p>
+            </div>
+          )}
+
+          <div className="overflow-x-auto">
+            <table className="w-full border-collapse text-left">
+              <thead>
+                <tr className="border-b border-white/5 text-[10px] text-white/50 uppercase tracking-wider">
+                  <th className="py-2.5 px-3">Variable</th>
+                  <th className="py-2.5 px-3">Type</th>
+                  <th className="py-2.5 px-3">Definition</th>
+                  <th className="py-2.5 px-3">Source</th>
+                  <th className="py-2.5 px-3 text-center">Importance</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-white/5 text-xs">
+                {llmVars.predictor_variables?.map((v, i) => (
+                  <tr key={i} className="hover:bg-white/1">
+                    <td className="py-3 px-3 font-mono text-brand-300 font-medium">{v.name}</td>
+                    <td className="py-3 px-3">
+                      <span className="rounded bg-white/5 border border-white/10 px-1.5 py-0.5 text-[10px] text-white/50">{v.type}</span>
+                    </td>
+                    <td className="py-3 px-3 text-white/70 leading-5 max-w-[200px]">{v.definition}</td>
+                    <td className="py-3 px-3 text-white/50 font-mono text-[11px]">{v.data_source}</td>
+                    <td className="py-3 px-3 text-center">
+                      <span className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${
+                        v.importance === 'high' ? 'bg-brand-500/15 text-brand-300' :
+                        v.importance === 'medium' ? 'bg-gold-500/15 text-gold-300' :
+                        'bg-white/5 text-white/40'
+                      }`}>{v.importance}</span>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+
+          {/* Algorithme recommande */}
+          {llmVars.recommended_algorithm && (
+            <div className="rounded-2xl border border-white/8 bg-white/3 p-4 space-y-2">
+              <p className="text-[10px] font-bold uppercase tracking-wider text-white/35">Algorithme recommande</p>
+              <p className="text-sm font-semibold text-white">{llmVars.recommended_algorithm.primary}</p>
+              <p className="text-xs text-white/55">{llmVars.recommended_algorithm.rationale}</p>
+              {llmVars.recommended_algorithm.alternatives?.length > 0 && (
+                <p className="text-[10px] text-white/35">Alternatives : {llmVars.recommended_algorithm.alternatives.join(', ')}</p>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+
     <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
       {/* Colonne de gauche: Variables & Outcomes */}
       <div className="lg:col-span-2 space-y-6">
@@ -402,6 +618,7 @@ function VariablesSection({ detail, scenarioId }: { detail: ScenarioDetail; scen
           )}
         </div>
       </div>
+    </div>
     </div>
   );
 }
@@ -1455,7 +1672,7 @@ function RagSection({ scenarioId, detail }: { scenarioId: string; detail: Scenar
     setError(null);
     setDone(false);
 
-    const cancel = askScenarioRagStream(scenarioId, qText, {
+    const cancel = askScenarioRagStreamFiltered(scenarioId, qText, {
       onSources: (s) => setSources(s),
       onToken: (t) => {
         setStreamedText(prev => prev + t);
@@ -1486,8 +1703,8 @@ function RagSection({ scenarioId, detail }: { scenarioId: string; detail: Scenar
     <div className="rounded-3xl border border-white/10 bg-white/3 p-5 space-y-5">
       <SectionHeader
         icon={<MessageSquare size={14} className="text-brand-400" />}
-        title="Assistant Scientifique RAG Dédié"
-        subtitle="Réponses en temps réel avec streaming · Sources issues du corpus validé"
+        title="Assistant Scientifique"
+        subtitle="Réponses en temps réel avec streaming · Articles filtrés par seuil de pertinence + articles validés"
       />
 
       {/* Questions suggérées */}
@@ -2438,6 +2655,311 @@ ${data.top_articles.slice(0,8).map((a,i)=>`
   );
 }
 
+// ─── Section: LLM Evidence Brief narratif ────────────────────────────────────
+
+function LlmEvidenceBriefSection({ scenarioId }: { scenarioId: string }) {
+  const [data, setData] = React.useState<LlmEvidenceBrief | null>(null);
+  const [loading, setLoading] = React.useState(true);
+  const [error, setError] = React.useState<string | null>(null);
+  const [regenerating, setRegenerating] = React.useState(false);
+  const [genStatus, setGenStatus] = React.useState<string | null>(null);
+  const pollRef = React.useRef<ReturnType<typeof setInterval> | null>(null);
+
+  const load = React.useCallback(() => {
+    setLoading(true);
+    getLlmEvidenceBrief(scenarioId)
+      .then(d => { setData(d); setLoading(false); })
+      .catch(e => { setError(e.message); setLoading(false); });
+  }, [scenarioId]);
+
+  React.useEffect(() => {
+    load();
+    return () => { if (pollRef.current) clearInterval(pollRef.current); };
+  }, [load]);
+
+  // Polling si generation en cours
+  React.useEffect(() => {
+    if (!data || data.status !== 'generating') return;
+    setGenStatus('Génération en cours...');
+    pollRef.current = setInterval(() => {
+      getBriefGenerationStatus(scenarioId).then(s => {
+        if (s.status === 'done') {
+          if (pollRef.current) clearInterval(pollRef.current);
+          setGenStatus(null);
+          load();
+        } else if (s.status === 'error') {
+          if (pollRef.current) clearInterval(pollRef.current);
+          setGenStatus(null);
+          setError(s.error ?? 'Erreur de génération');
+        }
+      });
+    }, 5000);
+    return () => { if (pollRef.current) clearInterval(pollRef.current); };
+  }, [data, scenarioId, load]);
+
+  const handleRegenerate = async () => {
+    setRegenerating(true);
+    setGenStatus('Régénération lancée...');
+    try {
+      await generateEvidenceBrief(scenarioId, true);
+      pollRef.current = setInterval(() => {
+        getBriefGenerationStatus(scenarioId).then(s => {
+          if (s.status === 'done') {
+            if (pollRef.current) clearInterval(pollRef.current);
+            setGenStatus(null);
+            setRegenerating(false);
+            load();
+          } else if (s.status === 'error') {
+            if (pollRef.current) clearInterval(pollRef.current);
+            setGenStatus(null);
+            setRegenerating(false);
+            setError(s.error ?? 'Erreur de régénération');
+          }
+        });
+      }, 5000);
+    } catch (e: any) {
+      setRegenerating(false);
+      setGenStatus(null);
+      setError(e.message);
+    }
+  };
+
+  if (loading) return <LoadingSpinner text="Chargement du brief narratif LLM..." />;
+  if (error) return <ErrorBox message={error} />;
+  if (!data) return null;
+
+  // Si génération en cours
+  if (data.status === 'generating') {
+    return (
+      <div className="rounded-2xl border border-gold-500/20 bg-gold-500/5 px-5 py-4 flex items-start gap-3">
+        <Loader2 size={14} className="text-gold-400 animate-spin shrink-0 mt-0.5" />
+        <div className="text-xs text-gold-200/80">
+          <strong className="text-gold-300">Brief LLM en cours de génération</strong> — {data.message ?? 'Réessayez dans 30 secondes.'}
+        </div>
+      </div>
+    );
+  }
+
+  const meta = data._meta;
+  const hasContent = !!(data.executive_summary || data.key_findings?.length);
+
+  return (
+    <div className="space-y-5">
+      {/* Header + Régénérer */}
+      <div className="flex items-start justify-between gap-4 flex-wrap">
+        <div>
+          <p className="text-[10px] text-white/35 mt-0.5">
+            {meta ? (
+              <>Généré le {new Date(meta.generated_at).toLocaleDateString('fr-FR', {year:'numeric',month:'long',day:'numeric'})} · {meta.articles_used} articles · seuil {meta.threshold?.toFixed(2)} · {meta.human_validated} validés humainement</>
+            ) : (
+              data._generated_at ? <>Généré le {new Date(data._generated_at).toLocaleDateString('fr-FR', {year:'numeric',month:'long',day:'numeric'})}</> : null
+            )}
+          </p>
+        </div>
+        <div className="flex items-center gap-2">
+          {genStatus && (
+            <span className="text-[10px] text-gold-400 flex items-center gap-1">
+              <Loader2 size={10} className="animate-spin" />{genStatus}
+            </span>
+          )}
+          <button onClick={handleRegenerate} disabled={regenerating}
+            className="flex items-center gap-1.5 rounded-xl border border-brand-500/30 bg-brand-500/10 hover:bg-brand-500/20 text-brand-300 font-medium px-3 py-1.5 text-xs transition disabled:opacity-50">
+            {regenerating ? (<Loader2 size={11} className="animate-spin" />) : (<RefreshCw size={11} />)}
+            Régénérer
+          </button>
+        </div>
+      </div>
+
+      {!hasContent && (
+        <div className="rounded-2xl border border-white/10 bg-white/3 px-4 py-6 text-center text-xs text-white/40">
+          Aucun brief LLM disponible. Cliquez sur "Régénérer" pour lancer la génération.
+        </div>
+      )}
+
+      {hasContent && (
+        <>
+          {/* Niveau de preuve + Grade */}
+          {(data.evidence_level || data.grade_recommendation) && (
+            <div className="flex flex-wrap gap-2">
+              {data.evidence_level && (
+                <span className={`rounded-xl px-3 py-1 text-xs font-semibold border ${
+                  data.evidence_level.toLowerCase().includes('fort') ? 'bg-brand-500/15 border-brand-500/30 text-brand-300' :
+                  data.evidence_level.toLowerCase().includes('mod') ? 'bg-gold-500/15 border-gold-500/30 text-gold-300' :
+                  'bg-white/5 border-white/10 text-white/50'
+                }`}>
+                  Niveau : {data.evidence_level}
+                </span>
+              )}
+              {data.grade_recommendation && (
+                <span className="rounded-xl px-3 py-1 text-xs font-semibold border bg-brand-500/10 border-brand-500/20 text-brand-200">
+                  Grade {data.grade_recommendation}
+                </span>
+              )}
+            </div>
+          )}
+
+          {/* Résumé exécutif */}
+          {data.executive_summary && (
+            <div className="rounded-2xl border border-brand-500/20 bg-brand-500/5 p-4">
+              <p className="text-[10px] font-bold uppercase tracking-wider text-brand-400 mb-2">Résumé exécutif</p>
+              <p className="text-sm text-white/80 leading-relaxed">{data.executive_summary}</p>
+            </div>
+          )}
+
+          {/* Contexte clinique */}
+          {data.clinical_context && (
+            <div className="space-y-1">
+              <p className="text-[10px] font-bold uppercase tracking-wider text-white/35">Contexte clinique</p>
+              <p className="text-xs text-white/65 leading-relaxed">{data.clinical_context}</p>
+            </div>
+          )}
+
+          {/* Résultats clés */}
+          {data.key_findings && data.key_findings.length > 0 && (
+            <div className="space-y-2">
+              <p className="text-[10px] font-bold uppercase tracking-wider text-white/35">Résultats clés</p>
+              <ul className="space-y-1.5">
+                {data.key_findings.map((f, i) => (
+                  <li key={i} className="flex items-start gap-2 text-xs text-white/70">
+                    <span className="shrink-0 mt-0.5 h-4 w-4 rounded-full bg-brand-500/20 border border-brand-500/30 flex items-center justify-center text-[9px] font-bold text-brand-300">{i+1}</span>
+                    {f}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+
+          {/* Synthèse des évidences */}
+          {data.evidence_synthesis && (
+            <div className="space-y-1">
+              <p className="text-[10px] font-bold uppercase tracking-wider text-white/35">Synthèse des évidences</p>
+              <p className="text-xs text-white/65 leading-relaxed whitespace-pre-line">{data.evidence_synthesis}</p>
+            </div>
+          )}
+
+          {/* PICO Summary */}
+          {(data.population_summary || data.intervention_summary || data.outcome_summary) && (
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+              {data.population_summary && (
+                <div className="rounded-xl border border-white/8 bg-white/3 p-3">
+                  <p className="text-[9px] font-bold uppercase tracking-wider text-white/30 mb-1">Population</p>
+                  <p className="text-xs text-white/60 leading-relaxed">{data.population_summary}</p>
+                </div>
+              )}
+              {data.intervention_summary && (
+                <div className="rounded-xl border border-white/8 bg-white/3 p-3">
+                  <p className="text-[9px] font-bold uppercase tracking-wider text-white/30 mb-1">Intervention</p>
+                  <p className="text-xs text-white/60 leading-relaxed">{data.intervention_summary}</p>
+                </div>
+              )}
+              {data.outcome_summary && (
+                <div className="rounded-xl border border-white/8 bg-white/3 p-3">
+                  <p className="text-[9px] font-bold uppercase tracking-wider text-white/30 mb-1">Outcome</p>
+                  <p className="text-xs text-white/60 leading-relaxed">{data.outcome_summary}</p>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Actions recommandées */}
+          {data.recommended_actions && data.recommended_actions.length > 0 && (
+            <div className="rounded-2xl border border-gold-500/20 bg-gold-500/5 p-4 space-y-2">
+              <p className="text-[10px] font-bold uppercase tracking-wider text-gold-400">Actions recommandées</p>
+              <ul className="space-y-1.5">
+                {data.recommended_actions.map((a, i) => (
+                  <li key={i} className="flex items-start gap-2 text-xs text-gold-200/80">
+                    <Zap size={10} className="shrink-0 mt-0.5 text-gold-400" />
+                    {a}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+
+          {/* Implications cliniques */}
+          {data.clinical_implications && (
+            <div className="space-y-1">
+              <p className="text-[10px] font-bold uppercase tracking-wider text-white/35">Implications cliniques</p>
+              <p className="text-xs text-white/65 leading-relaxed">{data.clinical_implications}</p>
+            </div>
+          )}
+
+          {/* Recommandations d'implémentation */}
+          {data.implementation_recommendations && data.implementation_recommendations.length > 0 && (
+            <div className="space-y-2">
+              <p className="text-[10px] font-bold uppercase tracking-wider text-white/35">Recommandations d'implémentation</p>
+              <ul className="space-y-1">
+                {data.implementation_recommendations.map((r, i) => (
+                  <li key={i} className="flex items-start gap-2 text-xs text-white/60">
+                    <CheckCircle2 size={10} className="shrink-0 mt-0.5 text-brand-400" />
+                    {r}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+
+          {/* Limites + Lacunes */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            {data.limitations && data.limitations.length > 0 && (
+              <div className="space-y-1.5">
+                <p className="text-[10px] font-bold uppercase tracking-wider text-white/35">Limites</p>
+                <ul className="space-y-1">
+                  {data.limitations.map((l, i) => (
+                    <li key={i} className="flex items-start gap-1.5 text-xs text-white/50">
+                      <AlertCircle size={9} className="shrink-0 mt-0.5 text-rose-400" />
+                      {l}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+            {data.research_gaps && data.research_gaps.length > 0 && (
+              <div className="space-y-1.5">
+                <p className="text-[10px] font-bold uppercase tracking-wider text-white/35">Lacunes de recherche</p>
+                <ul className="space-y-1">
+                  {data.research_gaps.map((g, i) => (
+                    <li key={i} className="flex items-start gap-1.5 text-xs text-white/50">
+                      <Search size={9} className="shrink-0 mt-0.5 text-gold-400" />
+                      {g}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+          </div>
+
+          {/* Recherches futures */}
+          {data.future_research && (
+            <div className="space-y-1">
+              <p className="text-[10px] font-bold uppercase tracking-wider text-white/35">Directions de recherche futures</p>
+              <p className="text-xs text-white/55 leading-relaxed">{data.future_research}</p>
+            </div>
+          )}
+
+          {/* Références clés */}
+          {data.key_references && data.key_references.length > 0 && (
+            <div className="space-y-2">
+              <p className="text-[10px] font-bold uppercase tracking-wider text-white/35">Références clés</p>
+              <div className="space-y-1.5">
+                {data.key_references.slice(0, 6).map((ref, i) => (
+                  <div key={i} className="rounded-xl border border-white/8 bg-white/2 px-3 py-2">
+                    <p className="text-xs font-medium text-white/70">{ref.title}</p>
+                    <p className="text-[10px] text-white/35 mt-0.5">{ref.year} · {ref.journal}</p>
+                    {ref.key_contribution && (
+                      <p className="text-[10px] text-white/45 mt-0.5 italic">{ref.key_contribution}</p>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
 // ─── Section: Knowledge Graph (co-citations) ─────────────────────────────────
 
 function KnowledgeGraphSection({ scenarioId }: { scenarioId: string }) {
@@ -3188,6 +3710,90 @@ function EnrichmentSection({ scenarioId }: { scenarioId: string }) {
 
 // ─── Composite Tabs ──────────────────────────────────────────────────────────
 
+
+// ─── Seuil de similarite ajustable ─────────────────────────────────────────
+
+function SeuilSection({ scenarioId }: { scenarioId: string }) {
+  const [threshold, setThreshold] = React.useState<number>(0.45);
+  const [saving, setSaving] = React.useState(false);
+  const [saved, setSaved] = React.useState(false);
+  const [rerankStatus, setRerankStatus] = React.useState<string | null>(null);
+  const pollRef = React.useRef<ReturnType<typeof setInterval> | null>(null);
+
+  React.useEffect(() => {
+    getScenarioSettings(scenarioId)
+      .then(s => setThreshold(s.similarity_threshold ?? 0.45))
+      .catch(() => {});
+    return () => { if (pollRef.current) clearInterval(pollRef.current); };
+  }, [scenarioId]);
+
+  const handleSave = async () => {
+    setSaving(true);
+    setSaved(false);
+    try {
+      await patchScenarioSettings(scenarioId, { similarity_threshold: threshold });
+      setSaved(true);
+      setTimeout(() => setSaved(false), 2000);
+    } catch {}
+    setSaving(false);
+  };
+
+  const handleRerank = async () => {
+    setRerankStatus("Lancement du scoring...");
+    try {
+      await triggerRerank(scenarioId);
+      pollRef.current = setInterval(() => {
+        getRerankStatus(scenarioId).then(s => {
+          if (s.status === "done") {
+            if (pollRef.current) clearInterval(pollRef.current);
+            setRerankStatus("Scoring termine : " + (s.updated ?? "?") + " articles mis a jour.");
+            setTimeout(() => setRerankStatus(null), 4000);
+          } else if (s.status === "error") {
+            if (pollRef.current) clearInterval(pollRef.current);
+            setRerankStatus("Erreur de scoring.");
+          }
+        });
+      }, 3000);
+    } catch (e: any) {
+      setRerankStatus("Erreur : " + e.message);
+    }
+  };
+
+  return (
+    <div className="rounded-2xl border border-white/8 bg-white/2 px-4 py-3 flex flex-wrap items-center gap-4">
+      <div className="flex items-center gap-2 text-xs text-white/60">
+        <Zap size={12} className="text-brand-400 shrink-0" />
+        <span className="font-medium text-white/70">Seuil de pertinence semantique :</span>
+        <input
+          type="range" min={0.1} max={0.9} step={0.05}
+          value={threshold}
+          onChange={e => setThreshold(parseFloat(e.target.value))}
+          className="w-28 accent-brand-500"
+        />
+        <span className="font-mono text-brand-300 w-10 text-center">{threshold.toFixed(2)}</span>
+      </div>
+      <div className="flex items-center gap-2">
+        <button onClick={handleSave} disabled={saving}
+          className="flex items-center gap-1 rounded-lg bg-brand-500/15 hover:bg-brand-500/25 border border-brand-500/20 text-brand-300 px-2.5 py-1 text-[11px] font-medium transition disabled:opacity-50">
+          {saving ? (<Loader2 size={10} className="animate-spin" />) : (<CheckCircle2 size={10} />)}
+          {saved ? "Sauvegarde !" : "Sauvegarder"}
+        </button>
+        <button onClick={handleRerank}
+          className="flex items-center gap-1 rounded-lg bg-white/5 hover:bg-white/10 border border-white/10 text-white/50 hover:text-white/70 px-2.5 py-1 text-[11px] font-medium transition">
+          <RefreshCw size={10} />
+          Recalculer scores
+        </button>
+        {rerankStatus && (
+          <span className="text-[10px] text-gold-400">{rerankStatus}</span>
+        )}
+      </div>
+      <p className="text-[10px] text-white/30 w-full">
+        Les articles avec un score de similarite superieur a ce seuil (ou valides humainement) sont utilises dans l'Evidence Brief, l'Assistant IA et les Variables.
+      </p>
+    </div>
+  );
+}
+
 /** ReviewTab : Corpus + PRISMA + Double-Aveugle (sous-tabs) */
 function ReviewTab({ scenarioId, detail }: { scenarioId: string; detail: ScenarioDetail }) {
   const [sub, setSub] = React.useState<"corpus" | "prisma" | "screening">("corpus");
@@ -3208,7 +3814,12 @@ function ReviewTab({ scenarioId, detail }: { scenarioId: string; detail: Scenari
           </button>
         ))}
       </div>
-      {sub === "corpus" && <CorpusSection scenarioId={scenarioId} detail={detail} />}
+      {sub === "corpus" && (
+        <div className="space-y-4">
+          <SeuilSection scenarioId={scenarioId} />
+          <CorpusSection scenarioId={scenarioId} detail={detail} />
+        </div>
+      )}
       {sub === "prisma" && <PrismaSection scenarioId={scenarioId} />}
       {sub === "screening" && <DoubleBlindSection scenarioId={scenarioId} />}
     </div>
@@ -3217,10 +3828,11 @@ function ReviewTab({ scenarioId, detail }: { scenarioId: string; detail: Scenari
 
 /** EvidenceTab : PICO + Evidence Brief enrichi (sous-tabs) */
 function EvidenceTab({ scenarioId, detail }: { scenarioId: string; detail: ScenarioDetail }) {
-  const [sub, setSub] = React.useState<"pico" | "brief">("brief");
+  const [sub, setSub] = React.useState<"llm" | "brief" | "pico">("llm");
   const SUB = [
-    { key: "brief" as const, label: "Evidence Brief", icon: <BookOpen size={12} /> },
-    { key: "pico" as const,  label: "Tableau PICO",   icon: <Table2 size={12} /> },
+    { key: "llm" as const,   label: "Brief Narratif LLM", icon: <Brain size={12} /> },
+    { key: "brief" as const, label: "Evidence Brief",     icon: <BookOpen size={12} /> },
+    { key: "pico" as const,  label: "Tableau PICO",       icon: <Table2 size={12} /> },
   ];
   return (
     <div className="space-y-4">
@@ -3234,6 +3846,7 @@ function EvidenceTab({ scenarioId, detail }: { scenarioId: string; detail: Scena
           </button>
         ))}
       </div>
+      {sub === "llm" && <LlmEvidenceBriefSection scenarioId={scenarioId} />}
       {sub === "brief" && <EvidenceBriefSection scenarioId={scenarioId} detail={detail} />}
       {sub === "pico" && <PicoSection scenarioId={scenarioId} />}
     </div>

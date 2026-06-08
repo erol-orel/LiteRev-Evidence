@@ -30,6 +30,7 @@ import {
   fetchMassCasualty,
   fetchFulltextStats,
   fetchCorpusStatsByYear,
+  fetchCorpusStatsByYearNamed,
   type CorpusStats,
   type CorpusStatsByYear,
   type DocumentDetailResponse,
@@ -3074,7 +3075,7 @@ export default function App() {
       fetchCorpusStats().then(setCorpusStats).catch(console.error);
       fetchGesicaStats().then(setGesicaStats).catch(console.error);
       fetchFulltextStats().then(setFulltextStats).catch(console.error);
-      fetchCorpusStatsByYear().then(setCorpusStatsByYear).catch(console.error);
+      fetchCorpusStatsByYearNamed().then(setCorpusStatsByYear).catch(() => fetchCorpusStatsByYear().then(setCorpusStatsByYear).catch(console.error));
     }
     if (activeTab === "scenarios") {
       setLoadingScenarios(true);
