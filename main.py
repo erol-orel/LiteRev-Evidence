@@ -3708,10 +3708,8 @@ def extract_pico_batch(
             rows = conn.execute(text("""
                 SELECT ld.id, ld.title, ld.abstract
                 FROM literature_document ld
-                LEFT JOIN gesica_scenario_article gsa ON gsa.article_id = ld.id AND gsa.scenario_id = :sid
-                LEFT JOIN article_scenarios asn ON asn.document_id = ld.id AND asn.scenario_id = :sid
-                WHERE (gsa.scenario_id = :sid OR asn.scenario_id = :sid)
-                  AND ld.project_context = 'literev'
+                JOIN article_scenarios asn ON asn.document_id = ld.id AND asn.scenario_id = :sid
+                WHERE ld.project_context = 'literev'
                   AND (ld.pico_json IS NULL OR (ld.pico_json->>'pico_confidence')::float < 0.5)
                 ORDER BY ld.id
                 LIMIT :lim
@@ -3812,10 +3810,8 @@ def extract_metadata_batch(
             rows = conn.execute(text("""
                 SELECT ld.id, ld.title, ld.abstract, ld.source, ld.year
                 FROM literature_document ld
-                LEFT JOIN gesica_scenario_article gsa ON gsa.article_id = ld.id AND gsa.scenario_id = :sid
-                LEFT JOIN article_scenarios asn ON asn.document_id = ld.id AND asn.scenario_id = :sid
-                WHERE (gsa.scenario_id = :sid OR asn.scenario_id = :sid)
-                  AND ld.project_context = 'literev'
+                JOIN article_scenarios asn ON asn.document_id = ld.id AND asn.scenario_id = :sid
+                WHERE ld.project_context = 'literev'
                   AND (ld.metadata_json IS NULL OR ld.metadata_json = '{}'::jsonb)
                 ORDER BY ld.id
                 LIMIT :lim
@@ -3909,10 +3905,8 @@ def fetch_fulltext_batch(
             rows = conn.execute(text("""
                 SELECT ld.id, ld.title, ld.doi, ld.url
                 FROM literature_document ld
-                LEFT JOIN gesica_scenario_article gsa ON gsa.article_id = ld.id AND gsa.scenario_id = :sid
-                LEFT JOIN article_scenarios asn ON asn.document_id = ld.id AND asn.scenario_id = :sid
-                WHERE (gsa.scenario_id = :sid OR asn.scenario_id = :sid)
-                  AND ld.project_context = 'literev'
+                JOIN article_scenarios asn ON asn.document_id = ld.id AND asn.scenario_id = :sid
+                WHERE ld.project_context = 'literev'
                   AND (ld.has_fulltext IS NULL OR ld.has_fulltext = false)
                   AND ld.doi IS NOT NULL
                 ORDER BY ld.id
@@ -3984,8 +3978,7 @@ def get_enrichment_status(scenario_id: Optional[str] = None):
                 FROM literature_document ld
                 WHERE ld.project_context = 'literev'
                   AND (
-                    EXISTS (SELECT 1 FROM gesica_scenario_article gsa WHERE gsa.article_id = ld.id AND gsa.scenario_id = :sid)
-                    OR EXISTS (SELECT 1 FROM article_scenarios asn WHERE asn.document_id = ld.id AND asn.scenario_id = :sid)
+                    EXISTS (SELECT 1 FROM article_scenarios asn WHERE asn.document_id = ld.id AND asn.scenario_id = :sid)
                   )
             """), {"sid": scenario_id}).mappings().fetchone()
         else:
@@ -8136,3 +8129,73 @@ def trigger_full_pipeline_with_brief(scenario_id: str) -> dict[str, Any]:
 
     threading.Thread(target=_run, daemon=True).start()
     return {"status": "started", "scenario_id": scenario_id, "steps": ["rerank", "evidence_brief", "variables"]}
+
+
+# ─── Endpoint model-status pour user_scenarios ───────────────────────────────
+@app.get("/user-scenarios/{scenario_id}/model-status")
+def get_user_scenario_model_status(scenario_id: str) -> dict[str, Any]:
+    """
+    Statut du modèle pour un scénario utilisateur.
+    Retourne un statut neutre (pas de modèle prédictif pour les scénarios utilisateurs).
+    """
+    _get_user_scenario_or_404(scenario_id)
+    from datetime import datetime, timezone
+    # Compter les articles récents (30 derniers jours)
+    with engine.connect() as conn:
+        recent_count = conn.execute(text("""
+            SELECT COUNT(*) AS cnt
+            FROM literature_document d
+            JOIN article_scenarios asn ON asn.document_id = d.id AND asn.scenario_id = :sid
+            WHERE d.project_context = 'literev'
+              AND d.created_at >= NOW() - INTERVAL '30 days'
+        """), {"sid": scenario_id}).scalar()
+    return {
+        "scenario_id": scenario_id,
+        "status_color": "blue",
+        "status_label": "Scénario personnalisé",
+        "model_info": {
+            "name": "N/A",
+            "description": "Les scénarios personnalisés ne disposent pas d'un modèle prédictif intégré. Utilisez l'onglet Variables & Données pour configurer votre propre modèle.",
+            "type": "user_defined",
+        },
+        "alert_thresholds": {},
+        "model_result": None,
+        "model_error": None,
+        "recent_articles_30d": int(recent_count or 0),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+
+@app.post("/user-scenarios/{scenario_id}/model-run")
+def run_user_scenario_model(scenario_id: str) -> dict[str, Any]:
+    """Re-run du modèle pour un scénario utilisateur (retourne le statut neutre)."""
+    return get_user_scenario_model_status(scenario_id)
+
+# ─── Alias GESICA : /gesica/scenarios/{id}/pico -> pico-bulk ─────────────────
+@app.get("/gesica/scenarios/{scenario_id}/pico")
+def get_gesica_scenario_pico_alias(
+    scenario_id: str,
+    limit: int = 3,
+) -> dict[str, Any]:
+    """Alias vers pico-bulk pour compatibilité frontend."""
+    return get_scenario_pico_bulk(scenario_id, limit=limit)
+
+# ─── Alias GESICA : /gesica/scenarios/{id}/screening -> screening-progress ───
+@app.get("/gesica/scenarios/{scenario_id}/screening")
+def get_gesica_scenario_screening_alias(scenario_id: str) -> dict[str, Any]:
+    """Alias vers screening-progress pour compatibilité frontend."""
+    return get_scenario_screening_progress(scenario_id)
+
+# ─── Alias user-scenarios : /user-scenarios/{id}/pico -> pico-bulk ───────────
+@app.get("/user-scenarios/{scenario_id}/pico")
+def get_user_scenario_pico_alias(
+    scenario_id: str,
+    limit: int = 3,
+) -> dict[str, Any]:
+    """Alias vers pico-bulk pour compatibilité frontend."""
+    return get_user_scenario_pico_bulk(scenario_id, limit=limit)
+
+# ─── Alias user-scenarios : /user-scenarios/{id}/screening -> screening-progress
+@app.get("/user-scenarios/{scenario_id}/screening")
+def get_user_scenario_screening_alias(scenario_id: str) -> dict[str, Any]:
+    """Alias vers screening-progress pour compatibilité frontend."""
+    return get_user_scenario_screening_progress(scenario_id)

@@ -61,6 +61,7 @@ import {
   type KGNode,
   type KappaStats,
   scenarioBase,
+  isUserScenario,
 } from "../lib/api";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -3623,6 +3624,8 @@ function EnrichmentSection({ scenarioId }: { scenarioId: string }) {
     },
   ];
 
+  const userScenario = isUserScenario(scenarioId);
+
   return (
     <div className="space-y-5">
       <SectionHeader
@@ -3630,6 +3633,15 @@ function EnrichmentSection({ scenarioId }: { scenarioId: string }) {
         title="Enrichissement LLM"
         subtitle="Lancez les enrichissements automatiques sur les articles de ce scénario"
       />
+
+      {userScenario && (
+        <div className="rounded-2xl border border-brand-500/20 bg-brand-500/5 px-4 py-3 flex items-start gap-3">
+          <Info size={14} className="text-brand-400 shrink-0 mt-0.5" />
+          <div className="text-xs text-brand-200/80 leading-relaxed">
+            <strong className="text-brand-300">Enrichissement automatique actif</strong> — Le pipeline de votre scénario lance automatiquement l'extraction PICO et l'enrichissement des métadonnées lors de l'ingéstion des articles. Utilisez les boutons ci-dessous uniquement pour compléter les articles qui auraient été manqués ou pour relancer un enrichissement spécifique.
+          </div>
+        </div>
+      )}
 
       {/* Paramètre lot */}
       <div className="flex items-center gap-3 rounded-2xl border border-white/8 bg-white/3 px-4 py-3">
@@ -3880,16 +3892,17 @@ function VizTab({ scenarioId }: { scenarioId: string }) {
 
 /** VariablesModelTab : Variables & Données + Modèle prédictif (sous-tabs) */
 function VariablesModelTab({ scenarioId, detail }: { scenarioId: string; detail: ScenarioDetail }) {
+  const userScenario = isUserScenario(scenarioId);
   const [sub, setSub] = React.useState<"variables" | "model">("variables");
   const SUB = [
     { key: "variables" as const, label: "Données & Variables", icon: <Database size={12} /> },
-    { key: "model" as const,     label: "Modèle Prédictif",   icon: <Brain size={12} /> },
+    ...(!userScenario ? [{ key: "model" as const, label: "Modèle Prédictif", icon: <Brain size={12} /> }] : []),
   ];
   return (
     <div className="space-y-4">
       <div className="flex gap-1.5 border-b border-white/5 pb-3">
         {SUB.map(s => (
-          <button key={s.key} onClick={() => setSub(s.key)}
+          <button key={s.key} onClick={() => setSub(s.key as "variables" | "model")}
             className={`flex items-center gap-1.5 rounded-xl px-3 py-1.5 text-xs font-medium transition ${
               sub === s.key ? "bg-brand-700 text-gold-400 font-semibold" : "text-white/60 hover:text-white hover:bg-white/8"
             }`}>
@@ -3898,7 +3911,7 @@ function VariablesModelTab({ scenarioId, detail }: { scenarioId: string; detail:
         ))}
       </div>
       {sub === "variables" && <VariablesSection detail={detail} scenarioId={scenarioId} />}
-      {sub === "model" && <ModelSection scenarioId={scenarioId} />}
+      {sub === "model" && !userScenario && <ModelSection scenarioId={scenarioId} />}
     </div>
   );
 }
