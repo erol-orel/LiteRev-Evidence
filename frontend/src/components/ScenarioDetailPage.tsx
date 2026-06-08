@@ -791,11 +791,25 @@ function CorpusSection({ scenarioId }: { scenarioId: string; detail: ScenarioDet
     <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
       {/* Liste des articles */}
       <div className="lg:col-span-2 space-y-4">
-        <SectionHeader
-          icon={<FileText size={14} className="text-brand-400" />}
-          title={`Corpus d'articles (${data.articles.length} articles indexés)`}
-          subtitle="Articles sélectionnés automatiquement — en attente de validation humaine (screening)"
-        />
+        <div className="flex items-center justify-between flex-wrap gap-2">
+          <SectionHeader
+            icon={<FileText size={14} className="text-brand-400" />}
+            title={`Corpus d'articles (${data.total} articles indexés)`}
+            subtitle="Articles sélectionnés automatiquement — en attente de validation humaine (screening)"
+          />
+          {data.above_threshold !== undefined && (
+            <div className="flex items-center gap-2">
+              <span className="rounded-full bg-brand-500/15 border border-brand-500/30 px-3 py-1 text-[10px] font-semibold text-brand-300">
+                {data.above_threshold} auto-sélectionnés (seuil)
+              </span>
+              {data.total > data.above_threshold && (
+                <span className="rounded-full bg-white/5 border border-white/10 px-3 py-1 text-[10px] text-white/40">
+                  {data.total - data.above_threshold} sous le seuil
+                </span>
+              )}
+            </div>
+          )}
+        </div>
         <div className="space-y-3">
           {data.articles.length > 0 ? data.articles.map((article) => (
             <ArticleRow
@@ -872,7 +886,7 @@ function ArticleRow({
   onToggle,
   onScreeningChange,
 }: {
-  article: CorpusArticle & { screening_status?: string };
+  article: CorpusArticle;
   scenarioId: string;
   isExpanded: boolean;
   onToggle: () => void;
@@ -944,6 +958,15 @@ function ArticleRow({
             {article.has_fulltext && (
               <span className="rounded-full bg-brand-500/10 border border-brand-500/20 px-2 py-0.5 text-[9px] text-brand-300 font-medium">
                 Full-text
+              </span>
+            )}
+            {article.similarity_score !== undefined && article.similarity_score !== null && (
+              <span className={`rounded-full px-2 py-0.5 text-[9px] font-medium ${
+                article.similarity_score >= 0.45
+                  ? 'bg-brand-500/15 border border-brand-500/30 text-brand-300'
+                  : 'bg-white/5 border border-white/10 text-white/30'
+              }`}>
+                sim {article.similarity_score.toFixed(2)}
               </span>
             )}
             <span className={`rounded-full px-2 py-0.5 text-[9px] font-medium ${statusBadge}`}>

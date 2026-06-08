@@ -1500,16 +1500,25 @@ export interface CorpusArticle {
   citation_count: number | null;
   open_access: boolean | null;
   has_fulltext: boolean;
+  similarity_score?: number | null;
+  screening_status?: string | null;
+  reviewer_1_status?: string | null;
+  pmid?: string | null;
+  publication_type?: string | null;
+  quality_score?: number | null;
 }
 
 export interface ScenarioCorpus {
   scenario_id: string;
   total: number;
+  above_threshold?: number;
   offset: number;
   limit: number;
   articles: CorpusArticle[];
   year_distribution: Array<{ year: number; count: number }>;
   source_distribution: Array<{ source: string; count: number }>;
+  is_user_scenario?: boolean;
+  scenario_title?: string;
 }
 
 export interface ModelStatus {

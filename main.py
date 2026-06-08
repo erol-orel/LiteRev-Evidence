@@ -2719,7 +2719,7 @@ def get_scenario_detail(scenario_id: str) -> dict[str, Any]:
 @app.get("/gesica/scenarios/{scenario_id}/corpus")
 def get_scenario_corpus(
     scenario_id: str,
-    limit: int = 50,
+    limit: int = 500,
     offset: int = 0,
     year_from: int | None = None,
     year_to: int | None = None,
@@ -2733,8 +2733,8 @@ def get_scenario_corpus(
     meta = GESICA_SCENARIO_METADATA.get(scenario_id)
     if not meta:
         raise HTTPException(status_code=404, detail=f"Scénario '{scenario_id}' non trouvé")
+    # Conditions de filtre (sans la condition article_scenarios qui est gérée par JOIN)
     conditions = [
-        "EXISTS (SELECT 1 FROM article_scenarios ars WHERE ars.document_id = d.id AND ars.scenario_id = :sid)",
         "(d.is_duplicate IS NULL OR d.is_duplicate = FALSE)",
     ]
     params: dict[str, Any] = {"sid": scenario_id, "limit": limit, "offset": offset}
@@ -2754,10 +2754,11 @@ def get_scenario_corpus(
         )""")
     where = " AND ".join(conditions)
     with engine.connect() as conn:
-        # Comptage total
+        # Comptage total (via JOIN article_scenarios)
         count_row = conn.execute(text(f"""
             SELECT COUNT(*) AS total
             FROM literature_document d
+            JOIN article_scenarios ars ON ars.document_id = d.id AND ars.scenario_id = :sid
             WHERE {where}
         """), params).mappings().first()
         total = int(count_row["total"] or 0)
@@ -2768,20 +2769,37 @@ def get_scenario_corpus(
                 d.authors, d.doi, d.journal, d.keywords, d.language,
                 d.study_design, d.sample_size, d.country, d.citation_count,
                 d.open_access, d.pmid, d.publication_type, d.quality_score,
+                d.screening_status, d.reviewer_1_status,
+                COALESCE(ars.similarity_score, 1.0) AS similarity_score,
                 EXISTS (
                     SELECT 1 FROM document_chunk c
                     WHERE c.document_id = d.id AND c.chunk_type = 'fulltext_section'
                 ) AS has_fulltext
             FROM literature_document d
+            JOIN article_scenarios ars ON ars.document_id = d.id AND ars.scenario_id = :sid
             WHERE {where}
-            ORDER BY d.year DESC NULLS LAST, d.citation_count DESC NULLS LAST, d.title ASC
+            ORDER BY
+                CASE WHEN COALESCE(ars.similarity_score, 1.0) >= :threshold THEN 0 ELSE 1 END ASC,
+                COALESCE(ars.similarity_score, 1.0) DESC,
+                d.year DESC NULLS LAST,
+                d.citation_count DESC NULLS LAST,
+                d.title ASC
             LIMIT :limit OFFSET :offset
-        """), params).mappings().all()
+        """), {**params, 'threshold': 0.45}).mappings().all()
+        # Comptage au-dessus du seuil
+        above_row = conn.execute(text(f"""
+            SELECT COUNT(*) AS cnt
+            FROM literature_document d
+            JOIN article_scenarios ars ON ars.document_id = d.id AND ars.scenario_id = :sid
+            WHERE {where} AND COALESCE(ars.similarity_score, 1.0) >= :threshold
+        """), {**{k: v for k, v in params.items() if k not in ('limit', 'offset')}, 'threshold': 0.45}).mappings().first()
+        above_threshold = int(above_row['cnt'] or 0)
         # Stats par année
         year_dist = conn.execute(text(f"""
             SELECT d.year, COUNT(*) AS cnt
             FROM literature_document d
-            WHERE {where.replace(' LIMIT :limit OFFSET :offset', '')}
+            JOIN article_scenarios ars ON ars.document_id = d.id AND ars.scenario_id = :sid
+            WHERE {where}
               AND d.year >= 2000
             GROUP BY d.year
             ORDER BY d.year DESC
@@ -2790,13 +2808,15 @@ def get_scenario_corpus(
         source_dist = conn.execute(text(f"""
             SELECT d.source, COUNT(*) AS cnt
             FROM literature_document d
-            WHERE {where.replace(' LIMIT :limit OFFSET :offset', '')}
+            JOIN article_scenarios ars ON ars.document_id = d.id AND ars.scenario_id = :sid
+            WHERE {where}
             GROUP BY d.source
             ORDER BY cnt DESC
         """), {k: v for k, v in params.items() if k not in ('limit', 'offset')}).mappings().all()
     return {
         "scenario_id": scenario_id,
         "total": total,
+        "above_threshold": above_threshold,
         "offset": offset,
         "limit": limit,
         "articles": [dict(r) for r in articles],
@@ -5718,7 +5738,7 @@ def get_user_scenario_detail(scenario_id: str) -> dict[str, Any]:
 @app.get("/user-scenarios/{scenario_id}/corpus")
 def get_user_scenario_corpus(
     scenario_id: str,
-    limit: int = 50,
+    limit: int = 500,
     offset: int = 0,
     year_from: int | None = None,
     year_to: int | None = None,
@@ -5730,8 +5750,8 @@ def get_user_scenario_corpus(
     Compatible avec fetchScenarioCorpus (même format de réponse).
     """
     row = _get_user_scenario_or_404(scenario_id)
+    # Conditions de filtre (article_scenarios géré par JOIN)
     conditions = [
-        "EXISTS (SELECT 1 FROM article_scenarios ars WHERE ars.document_id = d.id AND ars.scenario_id = :sid)",
         "(d.is_duplicate IS NULL OR d.is_duplicate = FALSE)",
     ]
     params: dict[str, Any] = {"sid": scenario_id, "limit": limit, "offset": offset}
@@ -5752,7 +5772,10 @@ def get_user_scenario_corpus(
     where = " AND ".join(conditions)
     with engine.connect() as conn:
         count_row = conn.execute(text(f"""
-            SELECT COUNT(*) AS total FROM literature_document d WHERE {where}
+            SELECT COUNT(*) AS total
+            FROM literature_document d
+            JOIN article_scenarios ars ON ars.document_id = d.id AND ars.scenario_id = :sid
+            WHERE {where}
         """), params).mappings().first()
         total = int(count_row["total"] or 0)
         articles = conn.execute(text(f"""
@@ -5761,26 +5784,44 @@ def get_user_scenario_corpus(
                 d.authors, d.doi, d.journal, d.keywords, d.language,
                 d.study_design, d.sample_size, d.country, d.citation_count,
                 d.open_access, d.pmid, d.publication_type, d.quality_score,
+                d.screening_status, d.reviewer_1_status,
+                COALESCE(ars.similarity_score, 1.0) AS similarity_score,
                 EXISTS (
                     SELECT 1 FROM document_chunk c
                     WHERE c.document_id = d.id AND c.chunk_type = 'fulltext_section'
                 ) AS has_fulltext
             FROM literature_document d
+            JOIN article_scenarios ars ON ars.document_id = d.id AND ars.scenario_id = :sid
             WHERE {where}
-            ORDER BY d.year DESC NULLS LAST, d.citation_count DESC NULLS LAST, d.title ASC
+            ORDER BY
+                CASE WHEN COALESCE(ars.similarity_score, 1.0) >= :threshold THEN 0 ELSE 1 END ASC,
+                COALESCE(ars.similarity_score, 1.0) DESC,
+                d.year DESC NULLS LAST,
+                d.citation_count DESC NULLS LAST,
+                d.title ASC
             LIMIT :limit OFFSET :offset
-        """), params).mappings().all()
+        """), {**params, 'threshold': 0.45}).mappings().all()
+        # Comptage au-dessus du seuil
+        above_row = conn.execute(text(f"""
+            SELECT COUNT(*) AS cnt
+            FROM literature_document d
+            JOIN article_scenarios ars ON ars.document_id = d.id AND ars.scenario_id = :sid
+            WHERE {where} AND COALESCE(ars.similarity_score, 1.0) >= :threshold
+        """), {**{k: v for k, v in params.items() if k not in ('limit', 'offset')}, 'threshold': 0.45}).mappings().first()
+        above_threshold = int(above_row['cnt'] or 0)
         year_dist = conn.execute(text(f"""
             SELECT d.year, COUNT(*) AS cnt
             FROM literature_document d
-            WHERE {where.replace(' LIMIT :limit OFFSET :offset', '')}
+            JOIN article_scenarios ars ON ars.document_id = d.id AND ars.scenario_id = :sid
+            WHERE {where}
               AND d.year >= 2000
             GROUP BY d.year ORDER BY d.year DESC
         """), {k: v for k, v in params.items() if k not in ('limit', 'offset')}).mappings().all()
         source_dist = conn.execute(text(f"""
             SELECT d.source, COUNT(*) AS cnt
             FROM literature_document d
-            WHERE {where.replace(' LIMIT :limit OFFSET :offset', '')}
+            JOIN article_scenarios ars ON ars.document_id = d.id AND ars.scenario_id = :sid
+            WHERE {where}
             GROUP BY d.source ORDER BY cnt DESC LIMIT 8
         """), {k: v for k, v in params.items() if k not in ('limit', 'offset')}).mappings().all()
 
@@ -5788,6 +5829,7 @@ def get_user_scenario_corpus(
         "scenario_id": scenario_id,
         "scenario_title": row["name"],
         "total": total,
+        "above_threshold": above_threshold,
         "offset": offset,
         "limit": limit,
         "articles": [dict(a) for a in articles],
