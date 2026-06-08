@@ -5491,6 +5491,10 @@ def _user_scenario_to_gesica_format(row: dict[str, Any]) -> dict[str, Any]:
         "created_at": row["created_at"].isoformat() if row.get("created_at") else None,
         "updated_at": row["updated_at"].isoformat() if row.get("updated_at") else None,
         "is_user_scenario": True,
+        "populate_status": row.get("populate_status", "idle"),
+        "pipeline_status": row.get("pipeline_status", "idle"),
+        "pipeline_step": row.get("pipeline_step"),
+        "pipeline_progress": row.get("pipeline_progress", 0),
     }
 
 
@@ -5501,9 +5505,17 @@ def list_user_scenarios() -> list[dict[str, Any]]:
     """Liste tous les scénarios utilisateur (recherches sauvegardées)."""
     with engine.connect() as conn:
         rows = conn.execute(text("""
-            SELECT id, name, query, mode, filters, result_count, pinned, folder_id, created_at, updated_at
-            FROM user_scenarios
-            ORDER BY pinned DESC, created_at DESC
+            SELECT
+                us.id, us.name, us.query, us.mode, us.filters,
+                us.pinned, us.folder_id, us.created_at, us.updated_at,
+                us.populate_status, us.pipeline_status, us.pipeline_step, us.pipeline_progress,
+                COALESCE((
+                    SELECT COUNT(DISTINCT document_id)
+                    FROM article_scenarios
+                    WHERE scenario_id = us.id
+                ), 0) AS result_count
+            FROM user_scenarios us
+            ORDER BY us.pinned DESC, us.created_at DESC
         """)).mappings().all()
     return [_user_scenario_to_gesica_format(dict(r)) for r in rows]
 
@@ -6067,6 +6079,10 @@ def _run_user_scenario_populate(
                 SET result_count = (
                     SELECT COUNT(DISTINCT document_id) FROM article_scenarios WHERE scenario_id = :sid
                 ),
+                article_count = (
+                    SELECT COUNT(DISTINCT document_id) FROM article_scenarios WHERE scenario_id = :sid
+                ),
+                populate_status = 'done',
                 updated_at = NOW()
                 WHERE id = :sid
             """), {"sid": scenario_id})
@@ -6105,6 +6121,8 @@ def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict
     """
     import time as _time
 
+    STEP_ORDER = ["pubmed", "pico", "metadata", "fulltext", "clustering"]
+
     def update_step(step: str, status: str, **kwargs):
         job = _user_scenario_pipeline_jobs.get(scenario_id, {})
         job["current_step"] = step
@@ -6112,6 +6130,21 @@ def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict
         job["steps"][step] = {"status": status, **kwargs}
         job["overall_status"] = "running"
         _user_scenario_pipeline_jobs[scenario_id] = job
+        # Persister dans la DB
+        step_idx = STEP_ORDER.index(step) if step in STEP_ORDER else 0
+        progress = int((step_idx / len(STEP_ORDER)) * 100)
+        try:
+            with engine.begin() as _conn:
+                _conn.execute(text("""
+                    UPDATE user_scenarios
+                    SET pipeline_status = 'running',
+                        pipeline_step = :step,
+                        pipeline_progress = :progress,
+                        pipeline_started_at = COALESCE(pipeline_started_at, NOW())
+                    WHERE id = :sid
+                """), {"step": step, "progress": progress, "sid": scenario_id})
+        except Exception as _e:
+            logger.warning(f"update_step DB write failed: {_e}")
         logger.info(f"Pipeline {scenario_id} [{step}]: {status} {kwargs}")
 
     def pubmed_callback(event: str, value):
@@ -6373,6 +6406,29 @@ def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict
         _user_scenario_pipeline_jobs[scenario_id]["message"] = (
             f"Pipeline terminé : {ingested} articles ingérés et enrichis."
         )
+        # Persister pipeline_status = done et mettre à jour article_count
+        try:
+            with engine.begin() as _conn:
+                _conn.execute(text("""
+                    UPDATE user_scenarios
+                    SET pipeline_status = 'done',
+                        pipeline_step = 'done',
+                        pipeline_progress = 100,
+                        article_count = (
+                            SELECT COUNT(DISTINCT document_id)
+                            FROM article_scenarios
+                            WHERE scenario_id = :sid
+                        ),
+                        result_count = (
+                            SELECT COUNT(DISTINCT document_id)
+                            FROM article_scenarios
+                            WHERE scenario_id = :sid
+                        ),
+                        updated_at = NOW()
+                    WHERE id = :sid
+                """), {"sid": scenario_id})
+        except Exception as _e:
+            logger.warning(f"Pipeline final DB update failed: {_e}")
         logger.info(f"Pipeline complet {scenario_id}: terminé.")
 
     except Exception as e:

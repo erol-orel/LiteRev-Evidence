@@ -2159,6 +2159,10 @@ export interface UserScenario extends GesicaScenario {
   created_at: string | null;
   updated_at: string | null;
   is_user_scenario: true;
+  populate_status?: string;
+  pipeline_status?: string;
+  pipeline_step?: string | null;
+  pipeline_progress?: number;
 }
 
 export interface UserScenarioCreatePayload {
@@ -2210,10 +2214,29 @@ export interface UserScenarioPipelineStatus {
 
 // ─── CRUD user-scenarios ──────────────────────────────────────────────────────
 
+function _mapUserScenario(u: any): UserScenario {
+  return {
+    ...u,
+    articleCount: u.article_count ?? u.articleCount ?? u.result_count ?? 0,
+    livingEvidenceNote: u.living_evidence_note ?? u.livingEvidenceNote ?? '',
+    recommendedActions: u.recommended_actions ?? u.recommendedActions ?? [],
+    relevantArticles: u.relevant_articles ?? u.relevantArticles ?? [],
+    hidden: u.hidden ?? false,
+    cluster: u.cluster ?? 'user',
+    title: u.title ?? u.name ?? '',
+    description: u.description ?? `Recherche : ${u.query ?? ''}`,
+    populate_status: u.populate_status ?? 'idle',
+    pipeline_status: u.pipeline_status ?? 'idle',
+    pipeline_step: u.pipeline_step ?? null,
+    pipeline_progress: u.pipeline_progress ?? 0,
+  };
+}
+
 export async function fetchUserScenarios(): Promise<UserScenario[]> {
   const r = await fetch(`${API_BASE_URL}/user-scenarios`);
   if (!r.ok) throw new Error(`HTTP ${r.status}`);
-  return r.json();
+  const data: any[] = await r.json();
+  return data.map(_mapUserScenario);
 }
 
 export async function createUserScenario(
@@ -2225,7 +2248,7 @@ export async function createUserScenario(
     body: JSON.stringify(payload),
   });
   if (!r.ok) throw new Error(`HTTP ${r.status}`);
-  return r.json();
+  return _mapUserScenario(await r.json());
 }
 
 export async function deleteUserScenario(scenarioId: string): Promise<{ deleted: boolean; id: string }> {
@@ -2244,7 +2267,7 @@ export async function patchUserScenario(
     body: JSON.stringify(patch),
   });
   if (!r.ok) throw new Error(`HTTP ${r.status}`);
-  return r.json();
+  return _mapUserScenario(await r.json());
 }
 
 export async function populateUserScenario(

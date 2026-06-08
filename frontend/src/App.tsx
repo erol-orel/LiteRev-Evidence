@@ -2841,18 +2841,47 @@ function ScenariosView({
                 {folderScenarios.length === 0 && (
                   <p className="text-xs text-white/30 italic">Aucun scénario dans ce dossier</p>
                 )}
-                {folderScenarios.map(s => (
+                {folderScenarios.map(s => {
+                  const pStatus = pipelineStatuses[s.id];
+                  const isPipelineRunning = pStatus && pStatus.overall_status !== 'done' && pStatus.overall_status !== 'not_started';
+                  const isPipelineDone = pStatus?.overall_status === 'done';
+                  const dbPipelineDone = (s as any).pipeline_status === 'done';
+                  return (
                   <div key={s.id} className="flex items-center gap-3 rounded-xl border border-white/8 bg-white/3 px-3 py-2 hover:bg-white/8 transition group">
                     <div className="flex-1 min-w-0 cursor-pointer" onClick={() => setDetailScenarioId(s.id)}>
                       <p className="text-sm text-white/80 truncate group-hover:text-white transition">{s.title}</p>
-                      <p className="text-xs text-white/30 truncate">{s.articleCount} articles</p>
+                      <p className="text-xs text-white/30 truncate">
+                        {s.articleCount > 0 ? `${s.articleCount} articles` : 'Aucun article'}
+                        {(isPipelineDone || dbPipelineDone) && s.articleCount > 0 && <span className="ml-1 text-forest-400">✓</span>}
+                      </p>
+                      {isPipelineRunning && (
+                        <div className="mt-0.5 flex items-center gap-1.5">
+                          <RotateCcw size={9} className="text-brand-400 animate-spin shrink-0" />
+                          <span className="text-xs text-brand-300">
+                            {pStatus.current_step === 'pubmed' ? 'Ingestion PubMed...' :
+                             pStatus.current_step === 'pico' ? 'Extraction PICO...' :
+                             pStatus.current_step === 'metadata' ? 'Metadonnees...' :
+                             pStatus.current_step === 'fulltext' ? 'Full-text...' :
+                             pStatus.current_step === 'clustering' ? 'Clustering...' : 'Pipeline...'}
+                          </span>
+                        </div>
+                      )}
+                      {!pStatus && !dbPipelineDone && s.articleCount === 0 && (
+                        <p className="text-xs text-white/20 italic">Pipeline non lance</p>
+                      )}
                     </div>
                     <button type="button" onClick={() => setDetailScenarioId(s.id)} className="shrink-0 rounded-xl bg-white/5 border border-white/10 px-2 py-1 text-xs text-white/50 hover:text-white transition">Ouvrir</button>
+                    {onPopulateUserScenario && s.articleCount === 0 && (
+                      <button type="button" onClick={() => onPopulateUserScenario(s.id)} disabled={populatingId === s.id} className="shrink-0 rounded-xl border border-forest-500/30 px-2 py-1 text-xs text-forest-300 hover:bg-forest-500/10 transition disabled:opacity-50" title="Lancer le pipeline">
+                        {populatingId === s.id ? <RotateCcw size={10} className="animate-spin" /> : <Zap size={10} />}
+                      </button>
+                    )}
                     {onAssignFolder && <button type="button" onClick={() => setAssigningScenarioId(s.id)} className="shrink-0 rounded-xl border border-white/10 px-2 py-1 text-xs text-white/30 hover:text-white transition" title="Changer de dossier"><FolderOpen size={11} /></button>}
                     {onTogglePin && <button type="button" onClick={() => onTogglePin(s.id)} className="shrink-0 rounded-xl border border-white/10 px-2 py-1 text-xs text-white/30 hover:text-gold-400 transition" title="Épingler">☆</button>}
                     {onDeleteSearch && <button type="button" onClick={() => onDeleteSearch(s.id)} className="shrink-0 rounded-xl border border-white/10 px-2 py-1 text-xs text-white/30 hover:text-red-400 transition" title="Supprimer">✕</button>}
                   </div>
-                ))}
+                  );
+                })}
               </div>
             );
           })}
