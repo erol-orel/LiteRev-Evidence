@@ -3450,7 +3450,7 @@ ${llm.clinical_implications ? `<h3>Implications cliniques</h3><p class="llm-text
 ${(llm.implementation_recommendations?.length??0)>0 ? `<h3>Recommandations d'implémentation</h3><ul class="llm-list">${llm.implementation_recommendations!.map(r=>`<li>${r}</li>`).join('')}</ul>` : ''}
 ${((llm.limitations?.length??0)>0||(llm.research_gaps?.length??0)>0) ? `<div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:12px">${(llm.limitations?.length??0)>0?`<div><h3>Limites</h3><ul class="llm-list">${llm.limitations!.map(l=>`<li>${l}</li>`).join('')}</ul></div>`:''} ${(llm.research_gaps?.length??0)>0?`<div><h3>Lacunes de recherche</h3><ul class="llm-list">${llm.research_gaps!.map(g=>`<li>${g}</li>`).join('')}</ul></div>`:''}</div>` : ''}
 ${llm.future_research ? `<h3>Directions de recherche futures</h3><p class="llm-text">${llm.future_research}</p>` : ''}
-${(llm.key_references?.length??0)>0 ? `<h3>Références clés</h3>${llm.key_references!.slice(0,6).map(r=>`<div class="ref-card"><div class="ref-title">${r.title}</div><div class="ref-meta">${r.year||'N/A'} · ${r.journal}</div>${r.key_contribution?`<div class="ref-contrib">${r.key_contribution}</div>`:''}</div>`).join('')}` : ''}
+
 ` : ''}
 
 <footer>
@@ -3847,23 +3847,7 @@ ${(llm.key_references?.length??0)>0 ? `<h3>Références clés</h3>${llm.key_refe
               <p className="text-xs text-white/55 leading-relaxed">{llmData.future_research}</p>
             </div>
           )}
-          {/* Références clés */}
-          {llmData.key_references && llmData.key_references.length > 0 && (
-            <div className="space-y-2">
-              <p className="text-[10px] font-bold uppercase tracking-wider text-white/35">Références clés</p>
-              <div className="space-y-1.5">
-                {llmData.key_references.slice(0, 6).map((ref, i) => (
-                  <div key={i} className="rounded-xl border border-white/8 bg-white/2 px-3 py-2">
-                    <p className="text-xs font-medium text-white/70">{ref.title}</p>
-                    <p className="text-[10px] text-white/35 mt-0.5">{ref.year} · {ref.journal}</p>
-                    {ref.key_contribution && (
-                      <p className="text-[10px] text-white/45 mt-0.5 italic">{ref.key_contribution}</p>
-                    )}
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
+
         </div>
       )}
     </div>
