@@ -6173,61 +6173,61 @@ def _run_user_scenario_populate(
                 _cr_items = cr_resp.json().get("message", {}).get("items", [])
                 if not _cr_items:
                     break
-            for item in _cr_items:
-                doi = item.get("DOI")
-                titles = item.get("title", [])
-                title = titles[0] if titles else ""
-                if not doi or not title:
-                    continue
-                abstract = item.get("abstract")
-                if abstract and abstract.startswith("<"):
+                for item in _cr_items:
+                    doi = item.get("DOI")
+                    titles = item.get("title", [])
+                    title = titles[0] if titles else ""
+                    if not doi or not title:
+                        continue
+                    abstract = item.get("abstract")
+                    if abstract and abstract.startswith("<"):
+                        try:
+                            import xml.etree.ElementTree as _ET
+                            abstract = "".join(_ET.fromstring(abstract).itertext()).strip()
+                        except Exception:
+                            pass
+                    year = None
+                    created = item.get("created", {}).get("date-parts", [])
+                    if created and created[0]:
+                        year = created[0][0]
+                    url = f"https://doi.org/{doi}"
+                    content_text = f"{title}\n\n{abstract or ''}".strip()
+                    if len(content_text) < 30:
+                        continue
                     try:
-                        import xml.etree.ElementTree as _ET
-                        abstract = "".join(_ET.fromstring(abstract).itertext()).strip()
-                    except Exception:
-                        pass
-                year = None
-                created = item.get("created", {}).get("date-parts", [])
-                if created and created[0]:
-                    year = created[0][0]
-                url = f"https://doi.org/{doi}"
-                content_text = f"{title}\n\n{abstract or ''}".strip()
-                if len(content_text) < 30:
-                    continue
-                try:
-                    with engine.connect() as _c:
-                        existing = _c.execute(text("""
-                            SELECT id FROM literature_document
-                            WHERE external_id = :eid AND project_context = 'literev' LIMIT 1
-                        """), {"eid": doi}).mappings().first()
-                    if existing:
-                        doc_id = existing["id"]
-                    else:
-                        doc_r = _requests.post(f"{API_LOCAL}/documents", headers=HEADERS_LOCAL, json={
-                            "source": "crossref", "title": title, "abstract": abstract or None,
-                            "year": year, "url": url, "external_id": doi,
-                            "project_context": "literev", "source_type": "article", "doi": doi,
-                        }, timeout=30)
-                        doc_r.raise_for_status()
-                        doc_id = doc_r.json()["id"]
-                        _requests.post(f"{API_LOCAL}/chunks", headers=HEADERS_LOCAL, json={
-                            "document_id": doc_id, "chunk_index": 0, "content": content_text,
-                            "chunk_type": "title_abstract", "token_count": len(content_text.split()), "chunk_weight": 1.0, "metadata_json": {},
-                        }, timeout=60)
-                    with engine.begin() as _c:
-                        _c.execute(text("""
-                            INSERT INTO article_scenarios (document_id, scenario_id, similarity_score)
-                            VALUES (:doc_id, :sid, 1.0) ON CONFLICT (document_id, scenario_id) DO NOTHING
-                        """), {"doc_id": doc_id, "sid": scenario_id})
-                    ingested += 1
-                    _cr_fetched_count += 1
-                except Exception as _e:
-                    errors += 1
-                _time.sleep(0.05)
-            if len(_cr_items) < _cr_rows:
-                break  # Plus de résultats
-            _cr_offset += _cr_rows
-            _time.sleep(0.3)
+                        with engine.connect() as _c:
+                            existing = _c.execute(text("""
+                                SELECT id FROM literature_document
+                                WHERE external_id = :eid AND project_context = 'literev' LIMIT 1
+                            """), {"eid": doi}).mappings().first()
+                        if existing:
+                            doc_id = existing["id"]
+                        else:
+                            doc_r = _requests.post(f"{API_LOCAL}/documents", headers=HEADERS_LOCAL, json={
+                                "source": "crossref", "title": title, "abstract": abstract or None,
+                                "year": year, "url": url, "external_id": doi,
+                                "project_context": "literev", "source_type": "article", "doi": doi,
+                            }, timeout=30)
+                            doc_r.raise_for_status()
+                            doc_id = doc_r.json()["id"]
+                            _requests.post(f"{API_LOCAL}/chunks", headers=HEADERS_LOCAL, json={
+                                "document_id": doc_id, "chunk_index": 0, "content": content_text,
+                                "chunk_type": "title_abstract", "token_count": len(content_text.split()), "chunk_weight": 1.0, "metadata_json": {},
+                            }, timeout=60)
+                        with engine.begin() as _c:
+                            _c.execute(text("""
+                                INSERT INTO article_scenarios (document_id, scenario_id, similarity_score)
+                                VALUES (:doc_id, :sid, 1.0) ON CONFLICT (document_id, scenario_id) DO NOTHING
+                            """), {"doc_id": doc_id, "sid": scenario_id})
+                        ingested += 1
+                        _cr_fetched_count += 1
+                    except Exception as _e:
+                        errors += 1
+                    _time.sleep(0.05)
+                if len(_cr_items) < _cr_rows:
+                    break  # Plus de résultats
+                _cr_offset += _cr_rows
+                _time.sleep(0.3)
         except Exception as _e:
             logger.warning(f"Crossref populate {scenario_id}: {_e}")
 
@@ -6249,65 +6249,65 @@ def _run_user_scenario_populate(
                 _ep_results = _ep_data.get("resultList", {}).get("result", [])
                 if not _ep_results:
                     break
-            for res in _ep_results:
-                pmid = res.get("pmid")
-                pmcid = res.get("pmcid")
-                doi = res.get("doi")
-                ext_id = pmcid or pmid or doi
-                title = res.get("title") or ""
-                if not ext_id or not title:
-                    continue
-                abstract = res.get("abstractText")
-                if abstract and abstract.startswith("<"):
+                for res in _ep_results:
+                    pmid = res.get("pmid")
+                    pmcid = res.get("pmcid")
+                    doi = res.get("doi")
+                    ext_id = pmcid or pmid or doi
+                    title = res.get("title") or ""
+                    if not ext_id or not title:
+                        continue
+                    abstract = res.get("abstractText")
+                    if abstract and abstract.startswith("<"):
+                        try:
+                            import xml.etree.ElementTree as _ET2
+                            abstract = "".join(_ET2.fromstring(f"<root>{abstract}</root>").itertext()).strip()
+                        except Exception:
+                            pass
+                    year = None
+                    yt = res.get("pubYear")
+                    if yt and str(yt).isdigit():
+                        year = int(yt)
+                    url = f"https://europepmc.org/article/{pmcid or pmid}" if (pmcid or pmid) else (f"https://doi.org/{doi}" if doi else None)
+                    content_text = f"{title}\n\n{abstract or ''}".strip()
+                    if len(content_text) < 30:
+                        continue
                     try:
-                        import xml.etree.ElementTree as _ET2
-                        abstract = "".join(_ET2.fromstring(f"<root>{abstract}</root>").itertext()).strip()
-                    except Exception:
-                        pass
-                year = None
-                yt = res.get("pubYear")
-                if yt and str(yt).isdigit():
-                    year = int(yt)
-                url = f"https://europepmc.org/article/{pmcid or pmid}" if (pmcid or pmid) else (f"https://doi.org/{doi}" if doi else None)
-                content_text = f"{title}\n\n{abstract or ''}".strip()
-                if len(content_text) < 30:
-                    continue
-                try:
-                    with engine.connect() as _c:
-                        existing = _c.execute(text("""
-                            SELECT id FROM literature_document
-                            WHERE external_id = :eid AND project_context = 'literev' LIMIT 1
-                        """), {"eid": ext_id}).mappings().first()
-                    if existing:
-                        doc_id = existing["id"]
-                    else:
-                        doc_r = _requests.post(f"{API_LOCAL}/documents", headers=HEADERS_LOCAL, json={
-                            "source": "europepmc", "title": title, "abstract": abstract or None,
-                            "year": year, "url": url, "external_id": ext_id,
-                            "project_context": "literev", "source_type": "article", "doi": doi,
-                        }, timeout=30)
-                        doc_r.raise_for_status()
-                        doc_id = doc_r.json()["id"]
-                        _requests.post(f"{API_LOCAL}/chunks", headers=HEADERS_LOCAL, json={
-                            "document_id": doc_id, "chunk_index": 0, "content": content_text,
-                            "chunk_type": "title_abstract", "token_count": len(content_text.split()), "chunk_weight": 1.0, "metadata_json": {},
-                        }, timeout=60)
-                    with engine.begin() as _c:
-                        _c.execute(text("""
-                            INSERT INTO article_scenarios (document_id, scenario_id, similarity_score)
-                            VALUES (:doc_id, :sid, 1.0) ON CONFLICT (document_id, scenario_id) DO NOTHING
-                        """), {"doc_id": doc_id, "sid": scenario_id})
-                    ingested += 1
-                    _ep_fetched_count += 1
-                except Exception as _e:
-                    errors += 1
-                _time.sleep(0.05)
-            # Avancer le curseur EuropePMC
-            _ep_next_cursor = _ep_data.get("nextCursorMark")
-            if not _ep_next_cursor or _ep_next_cursor == _ep_cursor_mark or len(_ep_results) < _ep_page_size:
-                break
-            _ep_cursor_mark = _ep_next_cursor
-            _time.sleep(0.3)
+                        with engine.connect() as _c:
+                            existing = _c.execute(text("""
+                                SELECT id FROM literature_document
+                                WHERE external_id = :eid AND project_context = 'literev' LIMIT 1
+                            """), {"eid": ext_id}).mappings().first()
+                        if existing:
+                            doc_id = existing["id"]
+                        else:
+                            doc_r = _requests.post(f"{API_LOCAL}/documents", headers=HEADERS_LOCAL, json={
+                                "source": "europepmc", "title": title, "abstract": abstract or None,
+                                "year": year, "url": url, "external_id": ext_id,
+                                "project_context": "literev", "source_type": "article", "doi": doi,
+                            }, timeout=30)
+                            doc_r.raise_for_status()
+                            doc_id = doc_r.json()["id"]
+                            _requests.post(f"{API_LOCAL}/chunks", headers=HEADERS_LOCAL, json={
+                                "document_id": doc_id, "chunk_index": 0, "content": content_text,
+                                "chunk_type": "title_abstract", "token_count": len(content_text.split()), "chunk_weight": 1.0, "metadata_json": {},
+                            }, timeout=60)
+                        with engine.begin() as _c:
+                            _c.execute(text("""
+                                INSERT INTO article_scenarios (document_id, scenario_id, similarity_score)
+                                VALUES (:doc_id, :sid, 1.0) ON CONFLICT (document_id, scenario_id) DO NOTHING
+                            """), {"doc_id": doc_id, "sid": scenario_id})
+                        ingested += 1
+                        _ep_fetched_count += 1
+                    except Exception as _e:
+                        errors += 1
+                    _time.sleep(0.05)
+                # Avancer le curseur EuropePMC
+                _ep_next_cursor = _ep_data.get("nextCursorMark")
+                if not _ep_next_cursor or _ep_next_cursor == _ep_cursor_mark or len(_ep_results) < _ep_page_size:
+                    break
+                _ep_cursor_mark = _ep_next_cursor
+                _time.sleep(0.3)
         except Exception as _e:
             logger.warning(f"EuropePMC populate {scenario_id}: {_e}")
 
