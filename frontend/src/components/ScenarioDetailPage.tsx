@@ -2346,664 +2346,6 @@ function PicoSection({ scenarioId }: { scenarioId: string }) {
   );
 }
 
-// ─── Section: Evidence Brief PDF ──────────────────────────────────────────────
-function EvidenceBriefSection({ scenarioId, detail }: { scenarioId: string; detail: ScenarioDetail }) {
-  const [data, setData] = React.useState<EvidenceBriefData | null>(null);
-  const [loading, setLoading] = React.useState(true);
-  const [error, setError] = React.useState<string | null>(null);
-  const [generating, setGenerating] = React.useState(false);
-
-  React.useEffect(() => {
-    setLoading(true);
-    fetchEvidenceBrief(scenarioId)
-      .then(setData)
-      .catch(e => setError(e.message))
-      .finally(() => setLoading(false));
-  }, [scenarioId]);
-
-  const generatePdf = async () => {
-    if (!data) return;
-    setGenerating(true);
-    try {
-      // Build HTML for PDF
-      const html = `<!DOCTYPE html><html><head><meta charset="utf-8">
-<title>Evidence Brief : ${detail.title}</title>
-<style>
-  body{font-family:Georgia,serif;max-width:800px;margin:40px auto;color:#1a1a1a;line-height:1.6}
-  h1{color:#0A3621;border-bottom:3px solid #E3AC3B;padding-bottom:8px}
-  h2{color:#0A3621;margin-top:32px;font-size:1.1em;text-transform:uppercase;letter-spacing:.05em}
-  h3{color:#2d7a52;font-size:.95em}
-  .meta{color:#666;font-size:.85em;margin-bottom:24px}
-  .stat-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin:16px 0}
-  .stat{background:#f0f7f3;border:1px solid #aed4bc;border-radius:8px;padding:12px;text-align:center}
-  .stat-val{font-size:1.8em;font-weight:700;color:#0A3621}
-  .stat-label{font-size:.75em;color:#4d7461;margin-top:4px}
-  table{width:100%;border-collapse:collapse;font-size:.82em;margin-top:12px}
-  th{background:#0A3621;color:#fff;padding:8px 10px;text-align:left}
-  td{padding:6px 10px;border-bottom:1px solid #e0e8e3}
-  tr:nth-child(even) td{background:#f9fafb}
-  .badge{display:inline-block;background:#d6eade;color:#0A3621;border-radius:4px;padding:2px 6px;font-size:.75em;font-weight:600}
-  .bar-container{background:#e0e8e3;border-radius:4px;height:8px;margin-top:4px}
-  .bar{background:#2d7a52;border-radius:4px;height:8px}
-  .article-card{border:1px solid #e0e8e3;border-radius:8px;padding:12px;margin-bottom:10px}
-  .article-title{font-weight:600;color:#0A3621;margin-bottom:4px}
-  .article-meta{font-size:.8em;color:#666}
-  .article-abstract{font-size:.82em;color:#444;margin-top:6px;font-style:italic}
-  footer{margin-top:40px;padding-top:16px;border-top:1px solid #e0e8e3;font-size:.75em;color:#999;text-align:center}
-</style></head><body>
-<h1>Evidence Brief</h1>
-<div class="meta">
-  <strong>${detail.title}</strong> · Scénario LiteRev<br>
-  Généré le ${new Date(data.generated_at).toLocaleDateString('fr-FR', {year:'numeric',month:'long',day:'numeric'})}<br>
-  Projet : LiteRev Evidence
-</div>
-
-<h2>Résumé Exécutif</h2>
-<p>${detail.description}</p>
-
-<h2>Statistiques du Corpus</h2>
-<div class="stat-grid">
-  <div class="stat"><div class="stat-val">${data.corpus_stats.total}</div><div class="stat-label">Articles identifiés</div></div>
-  <div class="stat"><div class="stat-val">${data.corpus_stats.total - data.corpus_stats.duplicates}</div><div class="stat-label">Articles uniques</div></div>
-  <div class="stat"><div class="stat-val">${data.corpus_stats.included}</div><div class="stat-label">Inclus (screening)</div></div>
-  <div class="stat"><div class="stat-val">${data.corpus_stats.with_pico}</div><div class="stat-label">Avec PICO extrait</div></div>
-</div>
-${data.corpus_stats.year_min && data.corpus_stats.year_max ? `<p class="meta">Couverture temporelle : ${data.corpus_stats.year_min} – ${data.corpus_stats.year_max}</p>` : ''}
-
-<h2>Distribution par Type d'Étude</h2>
-<table>
-  <tr><th>Type d'étude</th><th>Nombre</th><th>Proportion</th></tr>
-  ${data.study_design_distribution.slice(0,8).map(d=>`
-  <tr>
-    <td><span class="badge">${d.design}</span></td>
-    <td>${d.count}</td>
-    <td>
-      <div class="bar-container"><div class="bar" style="width:${Math.round(d.count/(data.corpus_stats.total||1)*100)}%"></div></div>
-      ${Math.round(d.count/(data.corpus_stats.total||1)*100)}%
-    </td>
-  </tr>`).join('')}
-</table>
-
-<h2>Articles Représentatifs</h2>
-${data.top_articles.slice(0,8).map((a,i)=>`
-<div class="article-card">
-  <div class="article-title">${i+1}. ${a.title}</div>
-  <div class="article-meta">
-    ${a.year||'N/A'} • ${a.journal||'Journal non renseigné'}
-    ${a.study_design?` • <span class="badge">${a.study_design}</span>`:''}
-    ${a.citation_count?` • ${a.citation_count} citations`:''}
-    ${a.doi?` • <a href="https://doi.org/${a.doi}">DOI</a>`:''}
-  </div>
-  ${a.abstract_excerpt?`<div class="article-abstract">"${a.abstract_excerpt}..."</div>`:''}
-</div>`).join('')}
-
-<footer>
-  LiteRev Evidence | LiteRev Evidence | ${new Date().getFullYear()}<br>
-  Ce document est généré automatiquement à partir de la base de données de littérature scientifique.
-</footer>
-</body></html>`;
-
-      const blob = new Blob([html], {type:'text/html;charset=utf-8'});
-      const url = URL.createObjectURL(blob);
-      const win = window.open(url, '_blank');
-      if (win) {
-        setTimeout(() => { win.print(); }, 800);
-      }
-      URL.revokeObjectURL(url);
-    } finally {
-      setGenerating(false);
-    }
-  };
-
-  if (loading) return <LoadingSpinner text="Chargement de l'Evidence Brief..." />;
-  if (error || !data) return <ErrorBox message={error ?? "Erreur Evidence Brief"} />;
-
-  const total = data.corpus_stats.total || 1;
-  const picoRows = data.pico_table ?? [];
-  const dbs = data.double_blind_stats ?? { reviewer_1_done:0, reviewer_2_done:0, both_done:0, agreements:0, conflicts:0 };
-  const kappaRaw = dbs.both_done > 0 ? ((dbs.agreements / dbs.both_done) * 2 - 1) : null;
-  const kappa = kappaRaw !== null ? Math.max(0, Math.min(1, kappaRaw)).toFixed(2) : 'N/A';
-
-  return (
-    <div className="space-y-6">
-      <SectionHeader
-        icon={<BookOpen size={14} className="text-brand-400" />}
-        title="Evidence Brief"
-        subtitle="Rapport synthétique complet : corpus, PICO, screening, niveau de preuve"
-      />
-
-      {/* Bannière sélection automatique */}
-      {(data.corpus_stats.included === 0) && (
-        <div className="rounded-2xl border border-gold-500/20 bg-gold-500/5 px-4 py-3 flex items-start gap-3">
-          <AlertTriangle size={14} className="text-gold-400 shrink-0 mt-0.5" />
-          <div className="text-xs text-gold-200/80 leading-relaxed">
-            <strong className="text-gold-300">Aucun article validé par un relecteur humain</strong> — Les articles présentés dans cet Evidence Brief ont été sélectionnés automatiquement par recherche PubMed (lexicale) et/ou similarité sémantique. Pour une revue systématique formelle, un screening humain en double-aveugle est nécessaire avant d’utiliser ces résultats.
-          </div>
-        </div>
-      )}
-
-      {/* Header avec export */}
-      <div className="flex items-start justify-between gap-4 flex-wrap">
-        <div>
-          <h3 className="text-sm font-bold text-white">{detail.title}</h3>
-          <p className="text-[10px] text-white/35 mt-0.5">Généré le {new Date(data.generated_at).toLocaleDateString('fr-FR',{year:'numeric',month:'long',day:'numeric'})}</p>
-        </div>
-        <button onClick={generatePdf} disabled={generating}
-          className="flex items-center gap-2 rounded-2xl bg-brand-500 hover:bg-brand-400 text-white font-semibold px-4 py-2 text-xs transition disabled:opacity-50 shrink-0">
-          {generating ? <Loader2 size={12} className="animate-spin"/> : <Download size={12}/>}
-          {generating ? 'Génération...' : 'Exporter PDF'}
-        </button>
-      </div>
-
-      {/* KPIs principaux */}
-      <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-6 gap-2.5">
-        {[
-          {label:'Articles total',value:data.corpus_stats.total,color:'text-white',sub:null},
-          {label:'Inclus',value:data.corpus_stats.included,color:'text-brand-300',sub:`${Math.round(data.corpus_stats.included/total*100)}%`},
-          {label:'Exclus',value:data.corpus_stats.excluded,color:'text-red-400',sub:`${Math.round(data.corpus_stats.excluded/total*100)}%`},
-          {label:'En attente',value:data.corpus_stats.pending ?? (total - data.corpus_stats.included - data.corpus_stats.excluded),color:'text-white/50',sub:null},
-          {label:'PICO extraits',value:data.corpus_stats.with_pico,color:'text-gold-400',sub:`${Math.round(data.corpus_stats.pico_coverage_pct ?? data.corpus_stats.with_pico/total*100)}%`},
-          {label:'Texte intégral',value:data.corpus_stats.with_fulltext ?? 0,color:'text-blue-300',sub:null},
-        ].map(s=>(
-          <div key={s.label} className="rounded-2xl border border-white/5 bg-white/2 p-3 text-center">
-            <div className={`text-xl font-bold ${s.color}`}>{s.value}</div>
-            {s.sub && <div className="text-[9px] text-white/30 font-mono">{s.sub}</div>}
-            <div className="text-[9px] text-white/35 mt-0.5 leading-tight">{s.label}</div>
-          </div>
-        ))}
-      </div>
-
-      {/* Couverture temporelle + citations */}
-      {data.corpus_stats.year_min && data.corpus_stats.year_max && (
-        <div className="flex flex-wrap gap-4 text-xs text-white/50">
-          <span>Couverture : <span className="text-white/70 font-semibold">{data.corpus_stats.year_min} – {data.corpus_stats.year_max}</span></span>
-          {data.corpus_stats.avg_citations != null && <span>Citations moy. : <span className="text-white/70 font-semibold">{data.corpus_stats.avg_citations.toFixed(1)}</span></span>}
-          {data.corpus_stats.max_citations != null && <span>Max citations : <span className="text-white/70 font-semibold">{data.corpus_stats.max_citations}</span></span>}
-        </div>
-      )}
-
-      {/* Double-aveugle stats */}
-      {dbs.both_done > 0 && (
-        <div className="rounded-2xl border border-white/5 bg-white/2 p-4 space-y-2">
-          <p className="text-[10px] font-bold uppercase tracking-wider text-white/40">Revue Double-Aveugle</p>
-          <div className="grid grid-cols-2 sm:grid-cols-5 gap-2">
-            {[
-              {label:'R1 terminé',value:dbs.reviewer_1_done},
-              {label:'R2 terminé',value:dbs.reviewer_2_done},
-              {label:'Double-rev.',value:dbs.both_done},
-              {label:'Accords',value:dbs.agreements,color:'text-brand-300'},
-              {label:'Conflits',value:dbs.conflicts,color:'text-red-400'},
-            ].map(s=>(
-              <div key={s.label} className="text-center">
-                <div className={`text-lg font-bold ${(s as {color?:string}).color ?? 'text-white'}`}>{s.value}</div>
-                <div className="text-[9px] text-white/35">{s.label}</div>
-              </div>
-            ))}
-          </div>
-          <div className="text-[10px] text-white/40">
-            Accord inter-reviewers (Kappa approx.) : <span className="text-white/60 font-mono font-semibold">{kappa}</span>
-            {kappaRaw !== null && (
-              <span className="ml-2">
-                {kappaRaw >= 0.8 ? '(excellent)' : kappaRaw >= 0.6 ? '(bon)' : kappaRaw >= 0.4 ? '(modéré)' : '(faible)'}
-              </span>
-            )}
-          </div>
-        </div>
-      )}
-
-      {/* Distributions : type d'étude + source + niveau de preuve */}
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-        {/* Types d'étude */}
-        <div className="rounded-2xl border border-white/5 bg-white/2 p-4 space-y-2">
-          <p className="text-[10px] font-bold uppercase tracking-wider text-white/40">Types d'étude</p>
-          <div className="space-y-1.5">
-            {data.study_design_distribution.slice(0,6).map(d=>(
-              <div key={d.design} className="flex items-center gap-2 text-[10px]">
-                <span className="w-28 text-white/60 truncate">{d.design}</span>
-                <div className="flex-1 h-1 bg-white/5 rounded-full overflow-hidden">
-                  <div className="h-full bg-brand-500 rounded-full" style={{width:`${Math.round(d.count/total*100)}%`}}/>
-                </div>
-                <span className="w-7 text-right text-white/40 font-mono">{d.count}</span>
-              </div>
-            ))}
-          </div>
-        </div>
-        {/* Sources */}
-        <div className="rounded-2xl border border-white/5 bg-white/2 p-4 space-y-2">
-          <p className="text-[10px] font-bold uppercase tracking-wider text-white/40">Sources</p>
-          <div className="space-y-1.5">
-            {(data.source_distribution ?? []).slice(0,6).map(d=>(
-              <div key={d.source} className="flex items-center gap-2 text-[10px]">
-                <span className="w-28 text-white/60 truncate capitalize">{d.source}</span>
-                <div className="flex-1 h-1 bg-white/5 rounded-full overflow-hidden">
-                  <div className="h-full bg-blue-500/60 rounded-full" style={{width:`${Math.round(d.count/total*100)}%`}}/>
-                </div>
-                <span className="w-7 text-right text-white/40 font-mono">{d.count}</span>
-              </div>
-            ))}
-          </div>
-        </div>
-        {/* Niveaux de preuve */}
-        <div className="rounded-2xl border border-white/5 bg-white/2 p-4 space-y-2">
-          <p className="text-[10px] font-bold uppercase tracking-wider text-white/40">Niveaux de preuve</p>
-          <div className="space-y-1.5">
-            {(data.evidence_level_distribution ?? []).slice(0,6).map(d=>(
-              <div key={d.level} className="flex items-center gap-2 text-[10px]">
-                <span className="w-28 text-white/60 truncate capitalize">{d.level}</span>
-                <div className="flex-1 h-1 bg-white/5 rounded-full overflow-hidden">
-                  <div className="h-full bg-gold-400/60 rounded-full" style={{width:`${Math.round(d.count/total*100)}%`}}/>
-                </div>
-                <span className="w-7 text-right text-white/40 font-mono">{d.count}</span>
-              </div>
-            ))}
-          </div>
-        </div>
-      </div>
-
-      {/* Top articles avec PICO */}
-      <div className="space-y-3">
-        <p className="text-[10px] font-bold uppercase tracking-wider text-white/40">Articles représentatifs avec extraction PICO</p>
-        {data.top_articles.slice(0,5).map((a,i)=>(
-          <div key={a.id} className="rounded-2xl border border-white/5 bg-white/2 p-4 space-y-2">
-            <div className="flex items-start gap-2">
-              <span className="text-[10px] font-mono text-brand-300 shrink-0 mt-0.5">#{i+1}</span>
-              <div className="flex-1 min-w-0">
-                <p className="text-xs font-semibold text-white/85 leading-4 line-clamp-2">{a.title}</p>
-                <div className="flex flex-wrap gap-2 mt-1 text-[9px] text-white/40">
-                  <span>{a.year||'N/A'}</span>
-                  {a.journal && <span className="truncate max-w-[160px]">{a.journal}</span>}
-                  {a.study_design && <span className="rounded bg-brand-500/10 border border-brand-500/20 px-1 text-brand-300">{a.study_design}</span>}
-                  {a.citation_count != null && <span>{a.citation_count} cit.</span>}
-                  {a.similarity_score != null && <span className="text-gold-400/70">sim. {a.similarity_score.toFixed(2)}</span>}
-                  {a.screening_status && (
-                    <span className={`rounded px-1 ${
-                      a.screening_status === 'included' ? 'bg-brand-500/15 text-brand-300' :
-                      a.screening_status === 'excluded' ? 'bg-red-500/15 text-red-400' : 'bg-white/5 text-white/40'
-                    }`}>{a.screening_status === 'included' ? 'Inclus' : a.screening_status === 'excluded' ? 'Exclu' : 'En attente'}</span>
-                  )}
-                </div>
-              </div>
-            </div>
-            {a.pico_summary && (
-              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 mt-1">
-                {[
-                  {label:'P',title:'Population',val:a.pico_summary.population},
-                  {label:'I',title:'Intervention',val:a.pico_summary.intervention},
-                  {label:'O',title:'Outcome',val:a.pico_summary.outcome},
-                  {label:'Conclusion',title:'Conclusion clé',val:a.pico_summary.key_finding},
-                ].map(p=>(
-                  <div key={p.label} className="rounded-xl border border-white/5 bg-white/2 p-2">
-                    <div className="text-[8px] font-bold uppercase text-white/30 mb-0.5">{p.title}</div>
-                    <div className="text-[9px] text-white/65 leading-3.5 line-clamp-3">{p.val || '—'}</div>
-                  </div>
-                ))}
-              </div>
-            )}
-            {a.abstract_excerpt && !a.pico_summary && (
-              <p className="text-[9px] text-white/40 italic line-clamp-2">"{a.abstract_excerpt}..."</p>
-            )}
-          </div>
-        ))}
-      </div>
-
-      {/* Tableau PICO comparatif */}
-      {picoRows.length > 0 && (
-        <div className="space-y-2">
-          <p className="text-[10px] font-bold uppercase tracking-wider text-white/40">Tableau comparatif PICO ({picoRows.length} articles)</p>
-          <div className="overflow-x-auto rounded-2xl border border-white/5">
-            <table className="w-full text-[9px]">
-              <thead>
-                <tr className="border-b border-white/5">
-                  {['Titre','Année','Design','P','I','C','O','Conclusion','Niveau'].map(h=>(
-                    <th key={h} className="px-2 py-2 text-left text-[8px] font-bold uppercase text-white/30 whitespace-nowrap">{h}</th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {picoRows.slice(0,20).map((row,i)=>(
-                  <tr key={row.id} className={i%2===0?'bg-white/1':''} >
-                    <td className="px-2 py-1.5 text-white/70 max-w-[160px]"><span className="line-clamp-2 leading-3.5">{row.title}</span></td>
-                    <td className="px-2 py-1.5 text-white/40 whitespace-nowrap">{row.year||'N/A'}</td>
-                    <td className="px-2 py-1.5"><span className="rounded bg-brand-500/10 border border-brand-500/20 px-1 text-brand-300 whitespace-nowrap">{row.study_design||'N/A'}</span></td>
-                    <td className="px-2 py-1.5 text-white/55 max-w-[100px]"><span className="line-clamp-2">{row.pico.population||'—'}</span></td>
-                    <td className="px-2 py-1.5 text-white/55 max-w-[100px]"><span className="line-clamp-2">{row.pico.intervention||'—'}</span></td>
-                    <td className="px-2 py-1.5 text-white/55 max-w-[80px]"><span className="line-clamp-2">{row.pico.comparator||'—'}</span></td>
-                    <td className="px-2 py-1.5 text-white/55 max-w-[100px]"><span className="line-clamp-2">{row.pico.outcome||'—'}</span></td>
-                    <td className="px-2 py-1.5 text-white/55 max-w-[120px]"><span className="line-clamp-2">{row.pico.key_finding||'—'}</span></td>
-                    <td className="px-2 py-1.5 whitespace-nowrap">
-                      <span className={`rounded px-1 ${
-                        row.pico.evidence_level === 'forte' ? 'bg-brand-500/15 text-brand-300' :
-                        row.pico.evidence_level === 'modérée' ? 'bg-gold-400/15 text-gold-400' : 'bg-white/5 text-white/40'
-                      }`}>{row.pico.evidence_level||'N/A'}</span>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-          {picoRows.length > 20 && <p className="text-[9px] text-white/30 text-right">{picoRows.length - 20} articles supplémentaires dans le PDF exporté</p>}
-        </div>
-      )}
-    </div>
-  );
-}
-
-// ─── Section: LLM Evidence Brief narratif ────────────────────────────────────
-
-function LlmEvidenceBriefSection({ scenarioId }: { scenarioId: string }) {
-  const [data, setData] = React.useState<LlmEvidenceBrief | null>(null);
-  const [loading, setLoading] = React.useState(true);
-  const [error, setError] = React.useState<string | null>(null);
-  const [regenerating, setRegenerating] = React.useState(false);
-  const [genStatus, setGenStatus] = React.useState<string | null>(null);
-  const pollRef = React.useRef<ReturnType<typeof setInterval> | null>(null);
-
-  const load = React.useCallback(() => {
-    setLoading(true);
-    getLlmEvidenceBrief(scenarioId)
-      .then(d => { setData(d); setLoading(false); })
-      .catch(e => { setError(e.message); setLoading(false); });
-  }, [scenarioId]);
-
-  React.useEffect(() => {
-    load();
-    return () => { if (pollRef.current) clearInterval(pollRef.current); };
-  }, [load]);
-
-  // Polling si generation en cours
-  React.useEffect(() => {
-    if (!data || data.status !== 'generating') return;
-    setGenStatus('Génération en cours...');
-    pollRef.current = setInterval(() => {
-      getBriefGenerationStatus(scenarioId).then(s => {
-        if (s.status === 'done') {
-          if (pollRef.current) clearInterval(pollRef.current);
-          setGenStatus(null);
-          load();
-        } else if (s.status === 'error') {
-          if (pollRef.current) clearInterval(pollRef.current);
-          setGenStatus(null);
-          setError(s.error ?? 'Erreur de génération');
-        }
-      });
-    }, 5000);
-    return () => { if (pollRef.current) clearInterval(pollRef.current); };
-  }, [data, scenarioId, load]);
-
-  const handleRegenerate = async () => {
-    setRegenerating(true);
-    setGenStatus('Régénération lancée...');
-    try {
-      await generateEvidenceBrief(scenarioId, true);
-      pollRef.current = setInterval(() => {
-        getBriefGenerationStatus(scenarioId).then(s => {
-          if (s.status === 'done') {
-            if (pollRef.current) clearInterval(pollRef.current);
-            setGenStatus(null);
-            setRegenerating(false);
-            load();
-          } else if (s.status === 'error') {
-            if (pollRef.current) clearInterval(pollRef.current);
-            setGenStatus(null);
-            setRegenerating(false);
-            setError(s.error ?? 'Erreur de régénération');
-          }
-        });
-      }, 5000);
-    } catch (e: any) {
-      setRegenerating(false);
-      setGenStatus(null);
-      setError(e.message);
-    }
-  };
-
-  if (loading) return <LoadingSpinner text="Chargement du brief narratif LLM..." />;
-  if (error) return <ErrorBox message={error} />;
-  if (!data) return null;
-
-  // Si aucun article disponible
-  if (data.status === 'empty') {
-    return (
-      <div className="rounded-2xl border border-slate-500/20 bg-slate-500/5 px-5 py-4 flex items-start gap-3">
-        <div className="text-xs text-slate-300/80">
-          <strong className="text-slate-200">Aucun article disponible</strong> — {data.message ?? 'Ajoutez des articles ou abaissez le seuil de similarité.'}
-        </div>
-      </div>
-    );
-  }
-
-  // Si génération en cours
-  if (data.status === 'generating') {
-    return (
-      <div className="rounded-2xl border border-gold-500/20 bg-gold-500/5 px-5 py-4 flex items-start gap-3">
-        <Loader2 size={14} className="text-gold-400 animate-spin shrink-0 mt-0.5" />
-        <div className="text-xs text-gold-200/80">
-          <strong className="text-gold-300">Brief LLM en cours de génération</strong> — {data.message ?? 'Réessayez dans 30 secondes.'}
-        </div>
-      </div>
-    );
-  }
-
-  const meta = data._meta;
-  const hasContent = !!(data.executive_summary || data.key_findings?.length);
-
-  return (
-    <div className="space-y-5">
-      {/* Header + Régénérer */}
-      <div className="flex items-start justify-between gap-4 flex-wrap">
-        <div>
-          <p className="text-[10px] text-white/35 mt-0.5">
-            {meta ? (
-              <>Généré le {new Date(meta.generated_at).toLocaleDateString('fr-FR', {year:'numeric',month:'long',day:'numeric'})} · {meta.articles_used} articles · seuil {meta.threshold?.toFixed(2)} · {meta.human_validated} validés humainement</>
-            ) : (
-              data._generated_at ? <>Généré le {new Date(data._generated_at).toLocaleDateString('fr-FR', {year:'numeric',month:'long',day:'numeric'})}</> : null
-            )}
-          </p>
-        </div>
-        <div className="flex items-center gap-2">
-          {genStatus && (
-            <span className="text-[10px] text-gold-400 flex items-center gap-1">
-              <Loader2 size={10} className="animate-spin" />{genStatus}
-            </span>
-          )}
-          <button onClick={handleRegenerate} disabled={regenerating}
-            className="flex items-center gap-1.5 rounded-xl border border-brand-500/30 bg-brand-500/10 hover:bg-brand-500/20 text-brand-300 font-medium px-3 py-1.5 text-xs transition disabled:opacity-50">
-            {regenerating ? (<Loader2 size={11} className="animate-spin" />) : (<RefreshCw size={11} />)}
-            Régénérer
-          </button>
-        </div>
-      </div>
-
-      {!hasContent && (
-        <div className="rounded-2xl border border-white/10 bg-white/3 px-4 py-6 text-center text-xs text-white/40">
-          Aucun brief LLM disponible. Cliquez sur "Régénérer" pour lancer la génération.
-        </div>
-      )}
-
-      {hasContent && (
-        <>
-          {/* Niveau de preuve + Grade */}
-          {(data.evidence_level || data.grade_recommendation) && (
-            <div className="flex flex-wrap gap-2">
-              {data.evidence_level && (
-                <span className={`rounded-xl px-3 py-1 text-xs font-semibold border ${
-                  data.evidence_level.toLowerCase().includes('fort') ? 'bg-brand-500/15 border-brand-500/30 text-brand-300' :
-                  data.evidence_level.toLowerCase().includes('mod') ? 'bg-gold-500/15 border-gold-500/30 text-gold-300' :
-                  'bg-white/5 border-white/10 text-white/50'
-                }`}>
-                  Niveau : {data.evidence_level}
-                </span>
-              )}
-              {data.grade_recommendation && (
-                <span className="rounded-xl px-3 py-1 text-xs font-semibold border bg-brand-500/10 border-brand-500/20 text-brand-200">
-                  Grade {data.grade_recommendation}
-                </span>
-              )}
-            </div>
-          )}
-
-          {/* Résumé exécutif */}
-          {data.executive_summary && (
-            <div className="rounded-2xl border border-brand-500/20 bg-brand-500/5 p-4">
-              <p className="text-[10px] font-bold uppercase tracking-wider text-brand-400 mb-2">Résumé exécutif</p>
-              <p className="text-sm text-white/80 leading-relaxed">{data.executive_summary}</p>
-            </div>
-          )}
-
-          {/* Contexte clinique */}
-          {data.clinical_context && (
-            <div className="space-y-1">
-              <p className="text-[10px] font-bold uppercase tracking-wider text-white/35">Contexte clinique</p>
-              <p className="text-xs text-white/65 leading-relaxed">{data.clinical_context}</p>
-            </div>
-          )}
-
-          {/* Résultats clés */}
-          {data.key_findings && data.key_findings.length > 0 && (
-            <div className="space-y-2">
-              <p className="text-[10px] font-bold uppercase tracking-wider text-white/35">Résultats clés</p>
-              <ul className="space-y-1.5">
-                {data.key_findings.map((f, i) => (
-                  <li key={i} className="flex items-start gap-2 text-xs text-white/70">
-                    <span className="shrink-0 mt-0.5 h-4 w-4 rounded-full bg-brand-500/20 border border-brand-500/30 flex items-center justify-center text-[9px] font-bold text-brand-300">{i+1}</span>
-                    {f}
-                  </li>
-                ))}
-              </ul>
-            </div>
-          )}
-
-          {/* Synthèse des évidences */}
-          {data.evidence_synthesis && (
-            <div className="space-y-1">
-              <p className="text-[10px] font-bold uppercase tracking-wider text-white/35">Synthèse des évidences</p>
-              <p className="text-xs text-white/65 leading-relaxed whitespace-pre-line">{data.evidence_synthesis}</p>
-            </div>
-          )}
-
-          {/* PICO Summary */}
-          {(data.population_summary || data.intervention_summary || data.outcome_summary) && (
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-              {data.population_summary && (
-                <div className="rounded-xl border border-white/8 bg-white/3 p-3">
-                  <p className="text-[9px] font-bold uppercase tracking-wider text-white/30 mb-1">Population</p>
-                  <p className="text-xs text-white/60 leading-relaxed">{data.population_summary}</p>
-                </div>
-              )}
-              {data.intervention_summary && (
-                <div className="rounded-xl border border-white/8 bg-white/3 p-3">
-                  <p className="text-[9px] font-bold uppercase tracking-wider text-white/30 mb-1">Intervention</p>
-                  <p className="text-xs text-white/60 leading-relaxed">{data.intervention_summary}</p>
-                </div>
-              )}
-              {data.outcome_summary && (
-                <div className="rounded-xl border border-white/8 bg-white/3 p-3">
-                  <p className="text-[9px] font-bold uppercase tracking-wider text-white/30 mb-1">Outcome</p>
-                  <p className="text-xs text-white/60 leading-relaxed">{data.outcome_summary}</p>
-                </div>
-              )}
-            </div>
-          )}
-
-          {/* Actions recommandées */}
-          {data.recommended_actions && data.recommended_actions.length > 0 && (
-            <div className="rounded-2xl border border-gold-500/20 bg-gold-500/5 p-4 space-y-2">
-              <p className="text-[10px] font-bold uppercase tracking-wider text-gold-400">Actions recommandées</p>
-              <ul className="space-y-1.5">
-                {data.recommended_actions.map((a, i) => (
-                  <li key={i} className="flex items-start gap-2 text-xs text-gold-200/80">
-                    <Zap size={10} className="shrink-0 mt-0.5 text-gold-400" />
-                    {a}
-                  </li>
-                ))}
-              </ul>
-            </div>
-          )}
-
-          {/* Implications cliniques */}
-          {data.clinical_implications && (
-            <div className="space-y-1">
-              <p className="text-[10px] font-bold uppercase tracking-wider text-white/35">Implications cliniques</p>
-              <p className="text-xs text-white/65 leading-relaxed">{data.clinical_implications}</p>
-            </div>
-          )}
-
-          {/* Recommandations d'implémentation */}
-          {data.implementation_recommendations && data.implementation_recommendations.length > 0 && (
-            <div className="space-y-2">
-              <p className="text-[10px] font-bold uppercase tracking-wider text-white/35">Recommandations d'implémentation</p>
-              <ul className="space-y-1">
-                {data.implementation_recommendations.map((r, i) => (
-                  <li key={i} className="flex items-start gap-2 text-xs text-white/60">
-                    <CheckCircle2 size={10} className="shrink-0 mt-0.5 text-brand-400" />
-                    {r}
-                  </li>
-                ))}
-              </ul>
-            </div>
-          )}
-
-          {/* Limites + Lacunes */}
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-            {data.limitations && data.limitations.length > 0 && (
-              <div className="space-y-1.5">
-                <p className="text-[10px] font-bold uppercase tracking-wider text-white/35">Limites</p>
-                <ul className="space-y-1">
-                  {data.limitations.map((l, i) => (
-                    <li key={i} className="flex items-start gap-1.5 text-xs text-white/50">
-                      <AlertCircle size={9} className="shrink-0 mt-0.5 text-rose-400" />
-                      {l}
-                    </li>
-                  ))}
-                </ul>
-              </div>
-            )}
-            {data.research_gaps && data.research_gaps.length > 0 && (
-              <div className="space-y-1.5">
-                <p className="text-[10px] font-bold uppercase tracking-wider text-white/35">Lacunes de recherche</p>
-                <ul className="space-y-1">
-                  {data.research_gaps.map((g, i) => (
-                    <li key={i} className="flex items-start gap-1.5 text-xs text-white/50">
-                      <Search size={9} className="shrink-0 mt-0.5 text-gold-400" />
-                      {g}
-                    </li>
-                  ))}
-                </ul>
-              </div>
-            )}
-          </div>
-
-          {/* Recherches futures */}
-          {data.future_research && (
-            <div className="space-y-1">
-              <p className="text-[10px] font-bold uppercase tracking-wider text-white/35">Directions de recherche futures</p>
-              <p className="text-xs text-white/55 leading-relaxed">{data.future_research}</p>
-            </div>
-          )}
-
-          {/* Références clés */}
-          {data.key_references && data.key_references.length > 0 && (
-            <div className="space-y-2">
-              <p className="text-[10px] font-bold uppercase tracking-wider text-white/35">Références clés</p>
-              <div className="space-y-1.5">
-                {data.key_references.slice(0, 6).map((ref, i) => (
-                  <div key={i} className="rounded-xl border border-white/8 bg-white/2 px-3 py-2">
-                    <p className="text-xs font-medium text-white/70">{ref.title}</p>
-                    <p className="text-[10px] text-white/35 mt-0.5">{ref.year} · {ref.journal}</p>
-                    {ref.key_contribution && (
-                      <p className="text-[10px] text-white/45 mt-0.5 italic">{ref.key_contribution}</p>
-                    )}
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
-        </>
-      )}
-    </div>
-  );
-}
-
 // ─── Section: Knowledge Graph (co-citations) ─────────────────────────────────
 
 function KnowledgeGraphSection({ scenarioId }: { scenarioId: string }) {
@@ -3881,13 +3223,659 @@ function ReviewTab({ scenarioId, detail }: { scenarioId: string; detail: Scenari
   );
 }
 
-/** EvidenceTab : PICO + Evidence Brief enrichi (sous-tabs) */
+/** EvidencesSection : Stats corpus + 5 articles PICO + Brief narratif LLM fusionnés */
+function EvidencesSection({ scenarioId, detail }: { scenarioId: string; detail: ScenarioDetail }) {
+  // ── Evidence Brief data ──────────────────────────────────────────────────────
+  const [briefData, setBriefData] = React.useState<EvidenceBriefData | null>(null);
+  const [briefLoading, setBriefLoading] = React.useState(true);
+  const [briefError, setBriefError] = React.useState<string | null>(null);
+
+  // ── LLM Brief data ───────────────────────────────────────────────────────────
+  const [llmData, setLlmData] = React.useState<LlmEvidenceBrief | null>(null);
+  const [llmLoading, setLlmLoading] = React.useState(true);
+  const [llmError, setLlmError] = React.useState<string | null>(null);
+  const [regenerating, setRegenerating] = React.useState(false);
+  const [genStatus, setGenStatus] = React.useState<string | null>(null);
+  const pollRef = React.useRef<ReturnType<typeof setInterval> | null>(null);
+
+  // ── PDF export ───────────────────────────────────────────────────────────────
+  const [exporting, setExporting] = React.useState(false);
+
+  // ── Load both ────────────────────────────────────────────────────────────────
+  React.useEffect(() => {
+    setBriefLoading(true);
+    fetchEvidenceBrief(scenarioId)
+      .then(setBriefData)
+      .catch(e => setBriefError(e.message))
+      .finally(() => setBriefLoading(false));
+  }, [scenarioId]);
+
+  const loadLlm = React.useCallback(() => {
+    setLlmLoading(true);
+    getLlmEvidenceBrief(scenarioId)
+      .then(d => { setLlmData(d); setLlmLoading(false); })
+      .catch(e => { setLlmError(e.message); setLlmLoading(false); });
+  }, [scenarioId]);
+
+  React.useEffect(() => {
+    loadLlm();
+    return () => { if (pollRef.current) clearInterval(pollRef.current); };
+  }, [loadLlm]);
+
+  // Polling si génération LLM en cours
+  React.useEffect(() => {
+    if (!llmData || llmData.status !== 'generating') return;
+    setGenStatus('Génération en cours...');
+    pollRef.current = setInterval(() => {
+      getBriefGenerationStatus(scenarioId).then(s => {
+        if (s.status === 'done') {
+          if (pollRef.current) clearInterval(pollRef.current);
+          setGenStatus(null);
+          loadLlm();
+        } else if (s.status === 'error') {
+          if (pollRef.current) clearInterval(pollRef.current);
+          setGenStatus(null);
+          setLlmError(s.error ?? 'Erreur de génération');
+        }
+      });
+    }, 5000);
+    return () => { if (pollRef.current) clearInterval(pollRef.current); };
+  }, [llmData, scenarioId, loadLlm]);
+
+  const handleRegenerate = async () => {
+    setRegenerating(true);
+    setGenStatus('Régénération lancée...');
+    try {
+      await generateEvidenceBrief(scenarioId, true);
+      pollRef.current = setInterval(() => {
+        getBriefGenerationStatus(scenarioId).then(s => {
+          if (s.status === 'done') {
+            if (pollRef.current) clearInterval(pollRef.current);
+            setGenStatus(null);
+            setRegenerating(false);
+            loadLlm();
+          } else if (s.status === 'error') {
+            if (pollRef.current) clearInterval(pollRef.current);
+            setGenStatus(null);
+            setRegenerating(false);
+            setLlmError(s.error ?? 'Erreur de régénération');
+          }
+        });
+      }, 5000);
+    } catch (e: any) {
+      setRegenerating(false);
+      setGenStatus(null);
+      setLlmError(e.message);
+    }
+  };
+
+  // ── PDF export ───────────────────────────────────────────────────────────────
+  const handleExport = async () => {
+    if (!briefData) return;
+    setExporting(true);
+    try {
+      const llm = llmData;
+      const b = briefData;
+      const total = b.corpus_stats.total || 1;
+      const html = `<!DOCTYPE html><html><head><meta charset="utf-8">
+<title>Evidences : ${detail.title}</title>
+<style>
+  body{font-family:Georgia,serif;max-width:820px;margin:40px auto;color:#1a1a1a;line-height:1.65;font-size:13px}
+  h1{color:#0A3621;border-bottom:3px solid #E3AC3B;padding-bottom:8px;font-size:1.6em}
+  h2{color:#0A3621;margin-top:32px;font-size:1.05em;text-transform:uppercase;letter-spacing:.06em;border-bottom:1px solid #d0e8d8;padding-bottom:4px}
+  h3{color:#2d7a52;font-size:.95em;margin-top:16px}
+  .meta{color:#666;font-size:.82em;margin-bottom:24px}
+  .stat-grid{display:grid;grid-template-columns:repeat(6,1fr);gap:8px;margin:14px 0}
+  .stat{background:#f0f7f3;border:1px solid #aed4bc;border-radius:8px;padding:10px;text-align:center}
+  .stat-val{font-size:1.6em;font-weight:700;color:#0A3621}
+  .stat-sub{font-size:.7em;color:#888;font-family:monospace}
+  .stat-label{font-size:.7em;color:#4d7461;margin-top:3px}
+  .dist-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin:12px 0}
+  .dist-box{background:#f9fafb;border:1px solid #e0e8e3;border-radius:8px;padding:12px}
+  .dist-title{font-size:.72em;font-weight:700;text-transform:uppercase;letter-spacing:.05em;color:#666;margin-bottom:8px}
+  .bar-row{display:flex;align-items:center;gap:6px;margin-bottom:4px;font-size:.75em}
+  .bar-label{width:110px;color:#555;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .bar-track{flex:1;background:#e0e8e3;border-radius:4px;height:6px}
+  .bar-fill-green{background:#2d7a52;border-radius:4px;height:6px}
+  .bar-fill-blue{background:#3b82f6;border-radius:4px;height:6px}
+  .bar-fill-gold{background:#d97706;border-radius:4px;height:6px}
+  .bar-count{width:28px;text-align:right;color:#888;font-family:monospace}
+  .article-card{border:1px solid #e0e8e3;border-radius:10px;padding:14px;margin-bottom:14px;page-break-inside:avoid}
+  .article-num{font-size:.75em;font-family:monospace;color:#2d7a52;font-weight:700}
+  .article-title{font-weight:700;color:#0A3621;font-size:.95em;margin:4px 0}
+  .article-meta{font-size:.75em;color:#666;margin-bottom:8px}
+  .badge{display:inline-block;background:#d6eade;color:#0A3621;border-radius:4px;padding:1px 5px;font-size:.72em;font-weight:600;margin-right:4px}
+  .badge-status-included{background:#d6eade;color:#0A3621}
+  .badge-status-pending{background:#f3f4f6;color:#555}
+  .badge-status-excluded{background:#fee2e2;color:#991b1b}
+  .badge-sim{background:#fef3c7;color:#92400e}
+  .pico-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-top:8px}
+  .pico-cell{background:#f9fafb;border:1px solid #e0e8e3;border-radius:6px;padding:8px}
+  .pico-label{font-size:.65em;font-weight:700;text-transform:uppercase;color:#888;margin-bottom:3px}
+  .pico-val{font-size:.78em;color:#333;line-height:1.4}
+  .doi-link{font-size:.75em;color:#2d7a52;text-decoration:none}
+  .section-divider{border:none;border-top:2px solid #e3ac3b;margin:28px 0}
+  .llm-box{background:#f0f7f3;border:1px solid #aed4bc;border-radius:10px;padding:16px;margin-bottom:16px}
+  .llm-label{font-size:.72em;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:#2d7a52;margin-bottom:6px}
+  .llm-text{font-size:.85em;color:#1a1a1a;line-height:1.6}
+  .llm-gold{background:#fffbeb;border:1px solid #fde68a;border-radius:10px;padding:14px;margin-bottom:14px}
+  .llm-gold-label{font-size:.72em;font-weight:700;text-transform:uppercase;color:#92400e;margin-bottom:6px}
+  ul.llm-list{margin:0;padding-left:18px}
+  ul.llm-list li{font-size:.85em;color:#1a1a1a;line-height:1.6;margin-bottom:4px}
+  .pico-summary-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-top:10px}
+  .pico-summary-cell{background:#f9fafb;border:1px solid #e0e8e3;border-radius:6px;padding:10px}
+  .ref-card{border:1px solid #e0e8e3;border-radius:6px;padding:8px 10px;margin-bottom:6px}
+  .ref-title{font-size:.82em;font-weight:600;color:#0A3621}
+  .ref-meta{font-size:.73em;color:#666}
+  .ref-contrib{font-size:.73em;color:#555;font-style:italic}
+  footer{margin-top:40px;padding-top:14px;border-top:1px solid #e0e8e3;font-size:.72em;color:#999;text-align:center}
+  .level-badge-forte{background:#d6eade;color:#0A3621;border-radius:6px;padding:3px 10px;font-weight:700;font-size:.85em;display:inline-block}
+  .level-badge-mod{background:#fef3c7;color:#92400e;border-radius:6px;padding:3px 10px;font-weight:700;font-size:.85em;display:inline-block}
+  .level-badge-faible{background:#f3f4f6;color:#555;border-radius:6px;padding:3px 10px;font-weight:700;font-size:.85em;display:inline-block}
+  .grade-badge{background:#0A3621;color:#E3AC3B;border-radius:6px;padding:3px 10px;font-weight:700;font-size:.85em;display:inline-block;margin-left:6px}
+  @media print{.no-print{display:none}}
+</style></head><body>
+<h1>Evidences</h1>
+<div class="meta">
+  <strong>${detail.title}</strong> · LiteRev Evidence<br>
+  Généré le ${new Date().toLocaleDateString('fr-FR',{year:'numeric',month:'long',day:'numeric'})}
+  ${llm?._meta ? ` · ${llm._meta.articles_used} articles · seuil ${llm._meta.threshold?.toFixed(2)}` : ''}
+</div>
+
+<h2>Statistiques du Corpus</h2>
+<div class="stat-grid">
+  <div class="stat"><div class="stat-val">${b.corpus_stats.total}</div><div class="stat-label">Articles total</div></div>
+  <div class="stat"><div class="stat-val" style="color:#2d7a52">${b.corpus_stats.included}</div><div class="stat-sub">${Math.round(b.corpus_stats.included/total*100)}%</div><div class="stat-label">Inclus</div></div>
+  <div class="stat"><div class="stat-val" style="color:#dc2626">${b.corpus_stats.excluded}</div><div class="stat-sub">${Math.round(b.corpus_stats.excluded/total*100)}%</div><div class="stat-label">Exclus</div></div>
+  <div class="stat"><div class="stat-val" style="color:#888">${b.corpus_stats.pending ?? (total - b.corpus_stats.included - b.corpus_stats.excluded)}</div><div class="stat-label">En attente</div></div>
+  <div class="stat"><div class="stat-val" style="color:#d97706">${b.corpus_stats.with_pico}</div><div class="stat-sub">${Math.round(b.corpus_stats.pico_coverage_pct ?? b.corpus_stats.with_pico/total*100)}%</div><div class="stat-label">PICO extraits</div></div>
+  <div class="stat"><div class="stat-val" style="color:#3b82f6">${b.corpus_stats.with_fulltext ?? 0}</div><div class="stat-label">Texte intégral</div></div>
+</div>
+${b.corpus_stats.year_min && b.corpus_stats.year_max ? `<p class="meta">Couverture : <strong>${b.corpus_stats.year_min} – ${b.corpus_stats.year_max}</strong>${b.corpus_stats.avg_citations != null ? ` · Citations moy. : <strong>${b.corpus_stats.avg_citations.toFixed(1)}</strong>` : ''}</p>` : ''}
+
+<div class="dist-grid">
+  <div class="dist-box">
+    <div class="dist-title">Types d'étude</div>
+    ${b.study_design_distribution.slice(0,6).map(d=>`<div class="bar-row"><span class="bar-label">${d.design}</span><div class="bar-track"><div class="bar-fill-green" style="width:${Math.round(d.count/total*100)}%"></div></div><span class="bar-count">${d.count}</span></div>`).join('')}
+  </div>
+  <div class="dist-box">
+    <div class="dist-title">Sources</div>
+    ${(b.source_distribution??[]).slice(0,6).map(d=>`<div class="bar-row"><span class="bar-label">${d.source}</span><div class="bar-track"><div class="bar-fill-blue" style="width:${Math.round(d.count/total*100)}%"></div></div><span class="bar-count">${d.count}</span></div>`).join('')}
+  </div>
+  <div class="dist-box">
+    <div class="dist-title">Niveaux de preuve</div>
+    ${(b.evidence_level_distribution??[]).slice(0,6).map(d=>`<div class="bar-row"><span class="bar-label">${d.level}</span><div class="bar-track"><div class="bar-fill-gold" style="width:${Math.round(d.count/total*100)}%"></div></div><span class="bar-count">${d.count}</span></div>`).join('')}
+  </div>
+</div>
+
+<hr class="section-divider">
+<h2>Articles représentatifs avec extraction PICO</h2>
+${b.top_articles.slice(0,5).map((a,i)=>{
+  const statusCls = a.screening_status==='included'?'badge-status-included':a.screening_status==='excluded'?'badge-status-excluded':'badge-status-pending';
+  const statusLabel = a.screening_status==='included'?'Inclus':a.screening_status==='excluded'?'Exclu':'En attente';
+  const doiUrl = a.doi ? `https://doi.org/${a.doi}` : null;
+  return `<div class="article-card">
+  <div class="article-num">#${i+1}</div>
+  <div class="article-title">${a.title}</div>
+  <div class="article-meta">
+    ${a.year||'N/A'}
+    ${a.journal ? ` · ${a.journal}` : ''}
+    ${a.study_design ? ` · <span class="badge">${a.study_design}</span>` : ''}
+    ${a.similarity_score != null ? ` · <span class="badge badge-sim">sim. ${a.similarity_score.toFixed(2)}</span>` : ''}
+    ${a.screening_status ? ` · <span class="badge ${statusCls}">${statusLabel}</span>` : ''}
+    ${a.citation_count ? ` · ${a.citation_count} citations` : ''}
+    ${doiUrl ? ` · <a href="${doiUrl}" class="doi-link">${doiUrl}</a>` : ''}
+  </div>
+  ${a.pico_summary ? `<div class="pico-grid">
+    <div class="pico-cell"><div class="pico-label">Population</div><div class="pico-val">${a.pico_summary.population||'—'}</div></div>
+    <div class="pico-cell"><div class="pico-label">Intervention</div><div class="pico-val">${a.pico_summary.intervention||'—'}</div></div>
+    <div class="pico-cell"><div class="pico-label">Outcome</div><div class="pico-val">${a.pico_summary.outcome||'—'}</div></div>
+    <div class="pico-cell"><div class="pico-label">Conclusion clé</div><div class="pico-val">${a.pico_summary.key_finding||'—'}</div></div>
+  </div>` : a.abstract_excerpt ? `<p style="font-size:.8em;color:#555;font-style:italic;margin-top:6px">"${a.abstract_excerpt}..."</p>` : ''}
+</div>`;
+}).join('')}
+
+${llm && (llm.executive_summary || (llm.key_findings?.length ?? 0) > 0) ? `
+<hr class="section-divider">
+<h2>Brief Narratif LLM</h2>
+${llm._meta ? `<p class="meta">${llm._meta.articles_used} articles analysés · seuil ${llm._meta.threshold?.toFixed(2)} · ${llm._meta.human_validated} validés humainement · ${llm._meta.year_range}</p>` : ''}
+${(llm.evidence_level||llm.grade_recommendation) ? `<p>${llm.evidence_level?`<span class="level-badge-${llm.evidence_level.toLowerCase().includes('fort')?'forte':llm.evidence_level.toLowerCase().includes('mod')?'mod':'faible'}">Niveau : ${llm.evidence_level}</span>`:''} ${llm.grade_recommendation?`<span class="grade-badge">Grade ${llm.grade_recommendation}</span>`:''}</p>` : ''}
+${llm.executive_summary ? `<div class="llm-box"><div class="llm-label">Résumé exécutif</div><div class="llm-text">${llm.executive_summary}</div></div>` : ''}
+${llm.clinical_context ? `<h3>Contexte clinique</h3><p class="llm-text">${llm.clinical_context}</p>` : ''}
+${(llm.key_findings?.length??0)>0 ? `<h3>Résultats clés</h3><ul class="llm-list">${llm.key_findings!.map(f=>`<li>${f}</li>`).join('')}</ul>` : ''}
+${llm.evidence_synthesis ? `<h3>Synthèse des évidences</h3><p class="llm-text">${llm.evidence_synthesis}</p>` : ''}
+${(llm.population_summary||llm.intervention_summary||llm.outcome_summary) ? `<div class="pico-summary-grid">${llm.population_summary?`<div class="pico-summary-cell"><div class="pico-label">Population</div><div class="llm-text">${llm.population_summary}</div></div>`:''} ${llm.intervention_summary?`<div class="pico-summary-cell"><div class="pico-label">Intervention</div><div class="llm-text">${llm.intervention_summary}</div></div>`:''} ${llm.outcome_summary?`<div class="pico-summary-cell"><div class="pico-label">Outcome</div><div class="llm-text">${llm.outcome_summary}</div></div>`:''}</div>` : ''}
+${(llm.recommended_actions?.length??0)>0 ? `<div class="llm-gold"><div class="llm-gold-label">Actions recommandées</div><ul class="llm-list">${llm.recommended_actions!.map(a=>`<li>${a}</li>`).join('')}</ul></div>` : ''}
+${llm.clinical_implications ? `<h3>Implications cliniques</h3><p class="llm-text">${llm.clinical_implications}</p>` : ''}
+${(llm.implementation_recommendations?.length??0)>0 ? `<h3>Recommandations d'implémentation</h3><ul class="llm-list">${llm.implementation_recommendations!.map(r=>`<li>${r}</li>`).join('')}</ul>` : ''}
+${((llm.limitations?.length??0)>0||(llm.research_gaps?.length??0)>0) ? `<div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:12px">${(llm.limitations?.length??0)>0?`<div><h3>Limites</h3><ul class="llm-list">${llm.limitations!.map(l=>`<li>${l}</li>`).join('')}</ul></div>`:''} ${(llm.research_gaps?.length??0)>0?`<div><h3>Lacunes de recherche</h3><ul class="llm-list">${llm.research_gaps!.map(g=>`<li>${g}</li>`).join('')}</ul></div>`:''}</div>` : ''}
+${llm.future_research ? `<h3>Directions de recherche futures</h3><p class="llm-text">${llm.future_research}</p>` : ''}
+${(llm.key_references?.length??0)>0 ? `<h3>Références clés</h3>${llm.key_references!.slice(0,6).map(r=>`<div class="ref-card"><div class="ref-title">${r.title}</div><div class="ref-meta">${r.year||'N/A'} · ${r.journal}</div>${r.key_contribution?`<div class="ref-contrib">${r.key_contribution}</div>`:''}</div>`).join('')}` : ''}
+` : ''}
+
+<footer>
+  LiteRev Evidence · ${new Date().getFullYear()} · Généré automatiquement depuis la base de données de littérature scientifique.
+</footer>
+</body></html>`;
+      const blob = new Blob([html], {type:'text/html;charset=utf-8'});
+      const url = URL.createObjectURL(blob);
+      const win = window.open(url, '_blank');
+      if (win) setTimeout(() => { win.print(); }, 800);
+      URL.revokeObjectURL(url);
+    } finally {
+      setExporting(false);
+    }
+  };
+
+  const total = briefData ? (briefData.corpus_stats.total || 1) : 1;
+  const meta = llmData?._meta;
+  const hasLlmContent = !!(llmData?.executive_summary || (llmData?.key_findings?.length ?? 0) > 0);
+
+  return (
+    <div className="space-y-6">
+      {/* ─── HEADER ─────────────────────────────────────────────────────────── */}
+      <div className="flex items-start justify-between gap-4 flex-wrap">
+        <div>
+          <SectionHeader
+            icon={<BookOpen size={14} className="text-brand-400" />}
+            title="Evidences"
+            subtitle="Rapport synthétique complet : corpus, PICO, screening, brief narratif"
+          />
+          {meta && (
+            <p className="text-[10px] text-white/35 mt-1">
+              {meta.articles_used} articles analysés · seuil {meta.threshold?.toFixed(2)} · {meta.human_validated} validés humainement
+              {meta.year_range ? ` · ${meta.year_range}` : ''}
+            </p>
+          )}
+          {!meta && briefData && (
+            <p className="text-[10px] text-white/35 mt-1">
+              Généré le {new Date(briefData.generated_at).toLocaleDateString('fr-FR',{year:'numeric',month:'long',day:'numeric'})}
+            </p>
+          )}
+        </div>
+        <div className="flex items-center gap-2 flex-wrap">
+          {genStatus && (
+            <span className="text-[10px] text-gold-400 flex items-center gap-1">
+              <Loader2 size={10} className="animate-spin" />{genStatus}
+            </span>
+          )}
+          <button onClick={handleRegenerate} disabled={regenerating || llmLoading}
+            className="flex items-center gap-1.5 rounded-xl border border-brand-500/30 bg-brand-500/10 hover:bg-brand-500/20 text-brand-300 font-medium px-3 py-1.5 text-xs transition disabled:opacity-50">
+            {regenerating ? (<Loader2 size={11} className="animate-spin" />) : (<RefreshCw size={11} />)}
+            Régénérer brief
+          </button>
+          {briefData && (
+            <button onClick={handleExport} disabled={exporting}
+              className="flex items-center gap-2 rounded-2xl bg-brand-500 hover:bg-brand-400 text-white font-semibold px-4 py-2 text-xs transition disabled:opacity-50">
+              {exporting ? <Loader2 size={12} className="animate-spin"/> : <Download size={12}/>}
+              {exporting ? 'Génération...' : 'Exporter PDF'}
+            </button>
+          )}
+        </div>
+      </div>
+
+      {/* ─── BANNIÈRE AVERTISSEMENT ──────────────────────────────────────────── */}
+      {briefData && briefData.corpus_stats.included === 0 && (
+        <div className="rounded-2xl border border-gold-500/20 bg-gold-500/5 px-4 py-3 flex items-start gap-3">
+          <AlertTriangle size={14} className="text-gold-400 shrink-0 mt-0.5" />
+          <div className="text-xs text-gold-200/80 leading-relaxed">
+            <strong className="text-gold-300">Aucun article validé par un relecteur humain</strong> — Les articles présentés ont été sélectionnés automatiquement. Un screening humain en double-aveugle est nécessaire pour une revue systématique formelle.
+          </div>
+        </div>
+      )}
+
+      {/* ─── STATS CORPUS ────────────────────────────────────────────────────── */}
+      {briefLoading && <LoadingSpinner text="Chargement des statistiques corpus..." />}
+      {briefError && <ErrorBox message={briefError} />}
+      {briefData && (
+        <>
+          {/* KPIs */}
+          <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-6 gap-2.5">
+            {[
+              {label:'Articles total',  value:briefData.corpus_stats.total,                                                                           color:'text-white',      sub:null},
+              {label:'Inclus',          value:briefData.corpus_stats.included,                                                                        color:'text-brand-300',  sub:`${Math.round(briefData.corpus_stats.included/total*100)}%`},
+              {label:'Exclus',          value:briefData.corpus_stats.excluded,                                                                        color:'text-red-400',    sub:`${Math.round(briefData.corpus_stats.excluded/total*100)}%`},
+              {label:'En attente',      value:briefData.corpus_stats.pending ?? (total - briefData.corpus_stats.included - briefData.corpus_stats.excluded), color:'text-white/50',   sub:null},
+              {label:'PICO extraits',   value:briefData.corpus_stats.with_pico,                                                                       color:'text-gold-400',   sub:`${Math.round(briefData.corpus_stats.pico_coverage_pct ?? briefData.corpus_stats.with_pico/total*100)}%`},
+              {label:'Texte intégral',  value:briefData.corpus_stats.with_fulltext ?? 0,                                                              color:'text-blue-300',   sub:null},
+            ].map(s=>(
+              <div key={s.label} className="rounded-2xl border border-white/5 bg-white/2 p-3 text-center">
+                <div className={`text-xl font-bold ${s.color}`}>{s.value}</div>
+                {s.sub && <div className="text-[9px] text-white/30 font-mono">{s.sub}</div>}
+                <div className="text-[9px] text-white/35 mt-0.5 leading-tight">{s.label}</div>
+              </div>
+            ))}
+          </div>
+
+          {/* Couverture temporelle */}
+          {briefData.corpus_stats.year_min && briefData.corpus_stats.year_max && (
+            <div className="flex flex-wrap gap-4 text-xs text-white/50">
+              <span>Couverture : <span className="text-white/70 font-semibold">{briefData.corpus_stats.year_min} – {briefData.corpus_stats.year_max}</span></span>
+              {briefData.corpus_stats.avg_citations != null && <span>Citations moy. : <span className="text-white/70 font-semibold">{briefData.corpus_stats.avg_citations.toFixed(1)}</span></span>}
+              {briefData.corpus_stats.max_citations != null && <span>Max : <span className="text-white/70 font-semibold">{briefData.corpus_stats.max_citations}</span></span>}
+            </div>
+          )}
+
+          {/* Distributions */}
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+            <div className="rounded-2xl border border-white/5 bg-white/2 p-4 space-y-2">
+              <p className="text-[10px] font-bold uppercase tracking-wider text-white/40">Types d'étude</p>
+              <div className="space-y-1.5">
+                {briefData.study_design_distribution.slice(0,6).map(d=>(
+                  <div key={d.design} className="flex items-center gap-2 text-[10px]">
+                    <span className="w-28 text-white/60 truncate">{d.design}</span>
+                    <div className="flex-1 h-1 bg-white/5 rounded-full overflow-hidden">
+                      <div className="h-full bg-brand-500 rounded-full" style={{width:`${Math.round(d.count/total*100)}%`}}/>
+                    </div>
+                    <span className="w-7 text-right text-white/40 font-mono">{d.count}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+            <div className="rounded-2xl border border-white/5 bg-white/2 p-4 space-y-2">
+              <p className="text-[10px] font-bold uppercase tracking-wider text-white/40">Sources</p>
+              <div className="space-y-1.5">
+                {(briefData.source_distribution ?? []).slice(0,6).map(d=>(
+                  <div key={d.source} className="flex items-center gap-2 text-[10px]">
+                    <span className="w-28 text-white/60 truncate capitalize">{d.source}</span>
+                    <div className="flex-1 h-1 bg-white/5 rounded-full overflow-hidden">
+                      <div className="h-full bg-blue-500/60 rounded-full" style={{width:`${Math.round(d.count/total*100)}%`}}/>
+                    </div>
+                    <span className="w-7 text-right text-white/40 font-mono">{d.count}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+            <div className="rounded-2xl border border-white/5 bg-white/2 p-4 space-y-2">
+              <p className="text-[10px] font-bold uppercase tracking-wider text-white/40">Niveaux de preuve</p>
+              <div className="space-y-1.5">
+                {(briefData.evidence_level_distribution ?? []).slice(0,6).map(d=>(
+                  <div key={d.level} className="flex items-center gap-2 text-[10px]">
+                    <span className="w-28 text-white/60 truncate capitalize">{d.level}</span>
+                    <div className="flex-1 h-1 bg-white/5 rounded-full overflow-hidden">
+                      <div className="h-full bg-gold-400/60 rounded-full" style={{width:`${Math.round(d.count/total*100)}%`}}/>
+                    </div>
+                    <span className="w-7 text-right text-white/40 font-mono">{d.count}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+        </>
+      )}
+
+      {/* ─── ARTICLES REPRÉSENTATIFS ─────────────────────────────────────────── */}
+      {briefData && briefData.top_articles.length > 0 && (
+        <div className="space-y-3">
+          <p className="text-[10px] font-bold uppercase tracking-wider text-white/40">Articles représentatifs avec extraction PICO</p>
+          {briefData.top_articles.slice(0,5).map((a,i)=>(
+            <div key={a.id} className="rounded-2xl border border-white/5 bg-white/2 p-4 space-y-2">
+              <div className="flex items-start gap-2">
+                <span className="text-[10px] font-mono text-brand-300 shrink-0 mt-0.5">#{i+1}</span>
+                <div className="flex-1 min-w-0">
+                  {a.doi ? (
+                    <a href={`https://doi.org/${a.doi}`} target="_blank" rel="noopener noreferrer"
+                      className="text-xs font-semibold text-white/85 leading-4 hover:text-brand-300 transition line-clamp-2">
+                      {a.title}
+                    </a>
+                  ) : (
+                    <p className="text-xs font-semibold text-white/85 leading-4 line-clamp-2">{a.title}</p>
+                  )}
+                  <div className="flex flex-wrap gap-2 mt-1.5 text-[9px] text-white/40 items-center">
+                    <span>{a.year||'N/A'}</span>
+                    {a.journal && <span className="truncate max-w-[160px]">{a.journal}</span>}
+                    {a.study_design && (
+                      <span className="rounded bg-brand-500/10 border border-brand-500/20 px-1.5 py-0.5 text-brand-300">{a.study_design}</span>
+                    )}
+                    {a.similarity_score != null && (
+                      <span className="rounded bg-gold-500/10 border border-gold-500/20 px-1.5 py-0.5 text-gold-400">sim. {a.similarity_score.toFixed(2)}</span>
+                    )}
+                    {a.screening_status && (
+                      <span className={`rounded px-1.5 py-0.5 ${
+                        a.screening_status === 'included' ? 'bg-brand-500/15 text-brand-300' :
+                        a.screening_status === 'excluded' ? 'bg-red-500/15 text-red-400' : 'bg-white/5 text-white/40'
+                      }`}>{a.screening_status === 'included' ? 'Inclus' : a.screening_status === 'excluded' ? 'Exclu' : 'En attente'}</span>
+                    )}
+                    {a.citation_count != null && <span>{a.citation_count} cit.</span>}
+                    {a.doi && (
+                      <a href={`https://doi.org/${a.doi}`} target="_blank" rel="noopener noreferrer"
+                        className="rounded bg-white/5 border border-white/10 px-1.5 py-0.5 text-white/50 hover:text-brand-300 hover:border-brand-500/30 transition flex items-center gap-1">
+                        <ExternalLink size={8} /> DOI
+                      </a>
+                    )}
+                  </div>
+                </div>
+              </div>
+              {a.pico_summary && (
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 mt-1">
+                  {[
+                    {label:'Population',     val:a.pico_summary.population},
+                    {label:'Intervention',   val:a.pico_summary.intervention},
+                    {label:'Outcome',        val:a.pico_summary.outcome},
+                    {label:'Conclusion clé', val:a.pico_summary.key_finding},
+                  ].map(p=>(
+                    <div key={p.label} className="rounded-xl border border-white/5 bg-white/2 p-2">
+                      <div className="text-[8px] font-bold uppercase text-white/30 mb-0.5">{p.label}</div>
+                      <div className="text-[9px] text-white/65 leading-3.5 line-clamp-3">{p.val || '—'}</div>
+                    </div>
+                  ))}
+                </div>
+              )}
+              {a.abstract_excerpt && !a.pico_summary && (
+                <p className="text-[9px] text-white/40 italic line-clamp-2">"{a.abstract_excerpt}..."</p>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* ─── SÉPARATEUR ─────────────────────────────────────────────────────── */}
+      {briefData && (hasLlmContent || llmLoading) && (
+        <div className="border-t border-gold-500/20 pt-2">
+          <p className="text-[10px] font-bold uppercase tracking-wider text-gold-400/60">Brief narratif LLM</p>
+        </div>
+      )}
+
+      {/* ─── BRIEF LLM ──────────────────────────────────────────────────────── */}
+      {llmLoading && <LoadingSpinner text="Chargement du brief narratif LLM..." />}
+      {llmError && <ErrorBox message={llmError} />}
+      {llmData && llmData.status === 'empty' && (
+        <div className="rounded-2xl border border-slate-500/20 bg-slate-500/5 px-4 py-3">
+          <p className="text-xs text-slate-300/80">
+            <strong className="text-slate-200">Aucun article disponible pour le brief LLM</strong> — {llmData.message ?? 'Ajoutez des articles ou abaissez le seuil de similarité.'}
+          </p>
+        </div>
+      )}
+      {llmData && llmData.status === 'generating' && (
+        <div className="rounded-2xl border border-gold-500/20 bg-gold-500/5 px-5 py-4 flex items-start gap-3">
+          <Loader2 size={14} className="text-gold-400 animate-spin shrink-0 mt-0.5" />
+          <div className="text-xs text-gold-200/80">
+            <strong className="text-gold-300">Brief LLM en cours de génération</strong> — {llmData.message ?? 'Réessayez dans 30 secondes.'}
+          </div>
+        </div>
+      )}
+      {llmData && !llmData.status && !hasLlmContent && (
+        <div className="rounded-2xl border border-white/10 bg-white/3 px-4 py-6 text-center text-xs text-white/40">
+          Aucun brief LLM disponible. Cliquez sur "Régénérer brief" pour lancer la génération.
+        </div>
+      )}
+      {llmData && hasLlmContent && (
+        <div className="space-y-5">
+          {/* Niveau de preuve + Grade */}
+          {(llmData.evidence_level || llmData.grade_recommendation) && (
+            <div className="flex flex-wrap gap-2">
+              {llmData.evidence_level && (
+                <span className={`rounded-xl px-3 py-1 text-xs font-semibold border ${
+                  llmData.evidence_level.toLowerCase().includes('fort') ? 'bg-brand-500/15 border-brand-500/30 text-brand-300' :
+                  llmData.evidence_level.toLowerCase().includes('mod') ? 'bg-gold-500/15 border-gold-500/30 text-gold-300' :
+                  'bg-white/5 border-white/10 text-white/50'
+                }`}>Niveau : {llmData.evidence_level}</span>
+              )}
+              {llmData.grade_recommendation && (
+                <span className="rounded-xl px-3 py-1 text-xs font-semibold border bg-brand-500/10 border-brand-500/20 text-brand-200">
+                  Grade {llmData.grade_recommendation}
+                </span>
+              )}
+            </div>
+          )}
+          {/* Résumé exécutif */}
+          {llmData.executive_summary && (
+            <div className="rounded-2xl border border-brand-500/20 bg-brand-500/5 p-4">
+              <p className="text-[10px] font-bold uppercase tracking-wider text-brand-400 mb-2">Résumé exécutif</p>
+              <p className="text-sm text-white/80 leading-relaxed">{llmData.executive_summary}</p>
+            </div>
+          )}
+          {/* Contexte clinique */}
+          {llmData.clinical_context && (
+            <div className="space-y-1">
+              <p className="text-[10px] font-bold uppercase tracking-wider text-white/35">Contexte clinique</p>
+              <p className="text-xs text-white/65 leading-relaxed">{llmData.clinical_context}</p>
+            </div>
+          )}
+          {/* Résultats clés */}
+          {llmData.key_findings && llmData.key_findings.length > 0 && (
+            <div className="space-y-2">
+              <p className="text-[10px] font-bold uppercase tracking-wider text-white/35">Résultats clés</p>
+              <ul className="space-y-1.5">
+                {llmData.key_findings.map((f, i) => (
+                  <li key={i} className="flex items-start gap-2 text-xs text-white/70">
+                    <span className="shrink-0 mt-0.5 h-4 w-4 rounded-full bg-brand-500/20 border border-brand-500/30 flex items-center justify-center text-[9px] font-bold text-brand-300">{i+1}</span>
+                    {f}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+          {/* Synthèse des évidences */}
+          {llmData.evidence_synthesis && (
+            <div className="space-y-1">
+              <p className="text-[10px] font-bold uppercase tracking-wider text-white/35">Synthèse des évidences</p>
+              <p className="text-xs text-white/65 leading-relaxed whitespace-pre-line">{llmData.evidence_synthesis}</p>
+            </div>
+          )}
+          {/* PICO Summary */}
+          {(llmData.population_summary || llmData.intervention_summary || llmData.outcome_summary) && (
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+              {llmData.population_summary && (
+                <div className="rounded-xl border border-white/8 bg-white/3 p-3">
+                  <p className="text-[9px] font-bold uppercase tracking-wider text-white/30 mb-1">Population</p>
+                  <p className="text-xs text-white/60 leading-relaxed">{llmData.population_summary}</p>
+                </div>
+              )}
+              {llmData.intervention_summary && (
+                <div className="rounded-xl border border-white/8 bg-white/3 p-3">
+                  <p className="text-[9px] font-bold uppercase tracking-wider text-white/30 mb-1">Intervention</p>
+                  <p className="text-xs text-white/60 leading-relaxed">{llmData.intervention_summary}</p>
+                </div>
+              )}
+              {llmData.outcome_summary && (
+                <div className="rounded-xl border border-white/8 bg-white/3 p-3">
+                  <p className="text-[9px] font-bold uppercase tracking-wider text-white/30 mb-1">Outcome</p>
+                  <p className="text-xs text-white/60 leading-relaxed">{llmData.outcome_summary}</p>
+                </div>
+              )}
+            </div>
+          )}
+          {/* Actions recommandées */}
+          {llmData.recommended_actions && llmData.recommended_actions.length > 0 && (
+            <div className="rounded-2xl border border-gold-500/20 bg-gold-500/5 p-4 space-y-2">
+              <p className="text-[10px] font-bold uppercase tracking-wider text-gold-400">Actions recommandées</p>
+              <ul className="space-y-1.5">
+                {llmData.recommended_actions.map((a, i) => (
+                  <li key={i} className="flex items-start gap-2 text-xs text-gold-200/80">
+                    <Zap size={10} className="shrink-0 mt-0.5 text-gold-400" />
+                    {a}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+          {/* Implications cliniques */}
+          {llmData.clinical_implications && (
+            <div className="space-y-1">
+              <p className="text-[10px] font-bold uppercase tracking-wider text-white/35">Implications cliniques</p>
+              <p className="text-xs text-white/65 leading-relaxed">{llmData.clinical_implications}</p>
+            </div>
+          )}
+          {/* Recommandations d'implémentation */}
+          {llmData.implementation_recommendations && llmData.implementation_recommendations.length > 0 && (
+            <div className="space-y-2">
+              <p className="text-[10px] font-bold uppercase tracking-wider text-white/35">Recommandations d'implémentation</p>
+              <ul className="space-y-1">
+                {llmData.implementation_recommendations.map((r, i) => (
+                  <li key={i} className="flex items-start gap-2 text-xs text-white/60">
+                    <CheckCircle2 size={10} className="shrink-0 mt-0.5 text-brand-400" />
+                    {r}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+          {/* Limites + Lacunes */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            {llmData.limitations && llmData.limitations.length > 0 && (
+              <div className="space-y-1.5">
+                <p className="text-[10px] font-bold uppercase tracking-wider text-white/35">Limites</p>
+                <ul className="space-y-1">
+                  {llmData.limitations.map((l, i) => (
+                    <li key={i} className="flex items-start gap-1.5 text-xs text-white/50">
+                      <AlertCircle size={9} className="shrink-0 mt-0.5 text-rose-400" />
+                      {l}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+            {llmData.research_gaps && llmData.research_gaps.length > 0 && (
+              <div className="space-y-1.5">
+                <p className="text-[10px] font-bold uppercase tracking-wider text-white/35">Lacunes de recherche</p>
+                <ul className="space-y-1">
+                  {llmData.research_gaps.map((g, i) => (
+                    <li key={i} className="flex items-start gap-1.5 text-xs text-white/50">
+                      <Search size={9} className="shrink-0 mt-0.5 text-gold-400" />
+                      {g}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+          </div>
+          {/* Recherches futures */}
+          {llmData.future_research && (
+            <div className="space-y-1">
+              <p className="text-[10px] font-bold uppercase tracking-wider text-white/35">Directions de recherche futures</p>
+              <p className="text-xs text-white/55 leading-relaxed">{llmData.future_research}</p>
+            </div>
+          )}
+          {/* Références clés */}
+          {llmData.key_references && llmData.key_references.length > 0 && (
+            <div className="space-y-2">
+              <p className="text-[10px] font-bold uppercase tracking-wider text-white/35">Références clés</p>
+              <div className="space-y-1.5">
+                {llmData.key_references.slice(0, 6).map((ref, i) => (
+                  <div key={i} className="rounded-xl border border-white/8 bg-white/2 px-3 py-2">
+                    <p className="text-xs font-medium text-white/70">{ref.title}</p>
+                    <p className="text-[10px] text-white/35 mt-0.5">{ref.year} · {ref.journal}</p>
+                    {ref.key_contribution && (
+                      <p className="text-[10px] text-white/45 mt-0.5 italic">{ref.key_contribution}</p>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** EvidenceTab : Evidences fusionnées + Tableau PICO (sous-tabs) */
 function EvidenceTab({ scenarioId, detail }: { scenarioId: string; detail: ScenarioDetail }) {
-  const [sub, setSub] = React.useState<"llm" | "brief" | "pico">("llm");
+  const [sub, setSub] = React.useState<"evidences" | "pico">("evidences");
   const SUB = [
-    { key: "llm" as const,   label: "Brief Narratif LLM", icon: <Brain size={12} /> },
-    { key: "brief" as const, label: "Evidence Brief",     icon: <BookOpen size={12} /> },
-    { key: "pico" as const,  label: "Tableau PICO",       icon: <Table2 size={12} /> },
+    { key: "evidences" as const, label: "Evidences", icon: <BookOpen size={12} /> },
+    { key: "pico" as const,      label: "Tableau PICO", icon: <Table2 size={12} /> },
   ];
   return (
     <div className="space-y-4">
@@ -3901,8 +3889,7 @@ function EvidenceTab({ scenarioId, detail }: { scenarioId: string; detail: Scena
           </button>
         ))}
       </div>
-      {sub === "llm" && <LlmEvidenceBriefSection scenarioId={scenarioId} />}
-      {sub === "brief" && <EvidenceBriefSection scenarioId={scenarioId} detail={detail} />}
+      {sub === "evidences" && <EvidencesSection scenarioId={scenarioId} detail={detail} />}
       {sub === "pico" && <PicoSection scenarioId={scenarioId} />}
     </div>
   );
