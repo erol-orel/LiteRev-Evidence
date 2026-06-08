@@ -1533,6 +1533,7 @@ def get_gesica_scenarios() -> list[dict[str, Any]]:
             
             result.append({
                 "id": scenario_id,
+                "name": meta["title"],
                 "title": meta["title"],
                 "description": meta["description"],
                 "cluster": meta["cluster"],
@@ -2771,6 +2772,7 @@ def get_scenario_corpus(
                 d.open_access, d.pmid, d.publication_type, d.quality_score,
                 d.screening_status, d.reviewer_1_status,
                 COALESCE(ars.similarity_score, 1.0) AS similarity_score,
+                (COALESCE(ars.similarity_score, 1.0) >= :threshold) AS above_threshold,
                 EXISTS (
                     SELECT 1 FROM document_chunk c
                     WHERE c.document_id = d.id AND c.chunk_type = 'fulltext_section'
@@ -4136,17 +4138,19 @@ def get_scenario_screening_progress(scenario_id: str) -> dict[str, Any]:
     return {
         "scenario_id": scenario_id,
         "total_in_db": total,
+        "total": total,
         "duplicates": duplicates,
         "unique_articles": unique,
         "screened": screened,
         "included": included,
         "excluded": excluded,
         "awaiting": unique - screened,
+        "pending": unique - screened,
         "progress_pct": pct,
         "screening_complete": pct >= 100,
     }
 
-# ─── PICO Bulk : tous les articles d'un scénario avec PICO ───────────────────
+# ─── PICO Bulk : tous les articles d'un scénario avec PICO ────────────────────────────────────────────
 @app.get("/gesica/scenarios/{scenario_id}/pico-bulk")
 def get_scenario_pico_bulk(scenario_id: str, limit: int = 200, offset: int = 0) -> dict[str, Any]:
     """Retourne tous les articles d'un scénario avec leur PICO extrait (pour le tableau comparatif)."""
@@ -5467,6 +5471,7 @@ def _user_scenario_to_gesica_format(row: dict[str, Any]) -> dict[str, Any]:
 
     return {
         "id": row["id"],
+        "name": row["name"],
         "title": row["name"],
         "description": f"Recherche sauvegardée : {row['query']}",
         "cluster": "user",
@@ -5710,6 +5715,7 @@ def get_user_scenario_detail(scenario_id: str) -> dict[str, Any]:
 
     return {
         "id": scenario_id,
+        "name": row["name"],
         "title": row["name"],
         "description": f"Scénario utilisateur basé sur la recherche : {query_text}",
         "cluster": "user",
@@ -5798,6 +5804,7 @@ def get_user_scenario_corpus(
                 d.open_access, d.pmid, d.publication_type, d.quality_score,
                 d.screening_status, d.reviewer_1_status,
                 COALESCE(ars.similarity_score, 1.0) AS similarity_score,
+                (COALESCE(ars.similarity_score, 1.0) >= :threshold) AS above_threshold,
                 EXISTS (
                     SELECT 1 FROM document_chunk c
                     WHERE c.document_id = d.id AND c.chunk_type = 'fulltext_section'
@@ -6590,12 +6597,14 @@ def get_user_scenario_screening_progress(scenario_id: str) -> dict[str, Any]:
     return {
         "scenario_id": scenario_id,
         "total_in_db": total,
+        "total": total,
         "duplicates": duplicates,
         "unique_articles": unique,
         "screened": screened,
         "included": included,
         "excluded": excluded,
         "awaiting": unique - screened,
+        "pending": unique - screened,
         "progress_pct": pct,
         "screening_complete": pct >= 100,
     }
@@ -7555,6 +7564,22 @@ def update_scenario_settings(scenario_id: str, payload: dict[str, Any]) -> dict[
                 WHERE scenario_id = :sid
             """), {"val": val, "sid": scenario_id})
 
+    # Retourner l'objet settings complet mis à jour
+    with engine.connect() as conn:
+        updated_row = conn.execute(text("""
+            SELECT scenario_id, similarity_threshold, brief_generated_at,
+                   variables_validated, variables_generated_at, updated_at
+            FROM scenario_settings WHERE scenario_id = :sid
+        """), {"sid": scenario_id}).mappings().first()
+    if updated_row:
+        return {
+            "status": "updated",
+            "scenario_id": scenario_id,
+            "updated": list(updates.keys()),
+            "similarity_threshold": float(updated_row["similarity_threshold"]) if updated_row["similarity_threshold"] is not None else 0.45,
+            "variables_validated": bool(updated_row["variables_validated"]),
+            "updated_at": updated_row["updated_at"].isoformat() if updated_row["updated_at"] else None,
+        }
     return {"status": "updated", "scenario_id": scenario_id, "updated": list(updates.keys())}
 
 
@@ -7762,6 +7787,12 @@ def get_llm_evidence_brief(scenario_id: str) -> dict[str, Any]:
         brief["_generated_at"] = row["brief_generated_at"].isoformat() if row["brief_generated_at"] else None
         return brief
 
+    # Vérifier qu'il y a des articles avant de déclencher la génération
+    threshold = _get_scenario_threshold(scenario_id)
+    articles = _get_above_threshold_articles(scenario_id, threshold)
+    if not articles:
+        return {"status": "empty", "message": "Aucun article au-dessus du seuil. Ajoutez des articles ou abaissez le seuil de similarité."}
+
     # Pas de brief en cache : déclencher la génération
     generate_evidence_brief(scenario_id)
     return {"status": "generating", "message": "Génération en cours, réessayez dans 30 secondes."}
@@ -7946,6 +7977,12 @@ def get_scenario_variables(scenario_id: str) -> dict[str, Any]:
         result["_validated"] = row["variables_validated"]
         result["_generated_at"] = row["variables_generated_at"].isoformat() if row["variables_generated_at"] else None
         return result
+
+    # Vérifier qu'il y a des articles avant de déclencher la génération
+    threshold = _get_scenario_threshold(scenario_id)
+    articles = _get_above_threshold_articles(scenario_id, threshold)
+    if not articles:
+        return {"status": "empty", "message": "Aucun article au-dessus du seuil. Ajoutez des articles ou abaissez le seuil de similarité."}
 
     # Déclencher la génération
     generate_scenario_variables(scenario_id)
@@ -8297,3 +8334,9 @@ def get_user_scenario_pico_alias(
 def get_user_scenario_screening_alias(scenario_id: str) -> dict[str, Any]:
     """Alias vers screening-progress pour compatibilité frontend."""
     return get_user_scenario_screening_progress(scenario_id)
+
+# ─── Alias GESICA : /gesica/scenarios/{id} → /gesica/scenarios/{id}/detail ───
+@app.get("/gesica/scenarios/{scenario_id}")
+def get_gesica_scenario_root_alias(scenario_id: str) -> dict[str, Any]:
+    """Alias vers /detail pour compatibilité frontend (évite les 404 sur la route racine)."""
+    return get_scenario_detail(scenario_id)

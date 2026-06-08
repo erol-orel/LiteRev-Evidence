@@ -370,6 +370,15 @@ function VariablesSection({ detail, scenarioId }: { detail: ScenarioDetail; scen
         </div>
       )}
 
+      {/* Etat vide : pas d'articles disponibles */}
+      {llmVars && llmVars.status === 'empty' && (
+        <div className="rounded-2xl border border-slate-500/20 bg-slate-500/5 px-4 py-3 flex items-start gap-3">
+          <div className="text-xs text-slate-300/80">
+            <strong className="text-slate-200">Aucun article disponible</strong> — {(llmVars as any).message ?? 'Ajoutez des articles ou abaissez le seuil de similarité pour générer les variables.'}
+          </div>
+        </div>
+      )}
+
       {/* Bouton generer + erreur */}
       <div className="flex items-center gap-3 flex-wrap">
         <button onClick={handleGenerateLlm} disabled={llmGenerating || llmLoading}
@@ -2751,6 +2760,17 @@ function LlmEvidenceBriefSection({ scenarioId }: { scenarioId: string }) {
   if (loading) return <LoadingSpinner text="Chargement du brief narratif LLM..." />;
   if (error) return <ErrorBox message={error} />;
   if (!data) return null;
+
+  // Si aucun article disponible
+  if (data.status === 'empty') {
+    return (
+      <div className="rounded-2xl border border-slate-500/20 bg-slate-500/5 px-5 py-4 flex items-start gap-3">
+        <div className="text-xs text-slate-300/80">
+          <strong className="text-slate-200">Aucun article disponible</strong> — {data.message ?? 'Ajoutez des articles ou abaissez le seuil de similarité.'}
+        </div>
+      </div>
+    );
+  }
 
   // Si génération en cours
   if (data.status === 'generating') {

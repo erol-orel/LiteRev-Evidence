@@ -2843,31 +2843,34 @@ function ScenariosView({
                 )}
                 {folderScenarios.map(s => {
                   const pStatus = pipelineStatuses[s.id];
-                  const isPipelineRunning = pStatus && pStatus.overall_status !== 'done' && pStatus.overall_status !== 'not_started';
+                  const isPipelineRunning = pStatus && pStatus.overall_status !== 'done' && pStatus.overall_status !== 'not_started' && pStatus.overall_status !== 'error';
                   const isPipelineDone = pStatus?.overall_status === 'done';
                   const dbPipelineDone = (s as any).pipeline_status === 'done';
+                  const dbPopulateDone = (s as any).populate_status === 'done';
                   return (
                   <div key={s.id} className="flex items-center gap-3 rounded-xl border border-white/8 bg-white/3 px-3 py-2 hover:bg-white/8 transition group">
                     <div className="flex-1 min-w-0 cursor-pointer" onClick={() => setDetailScenarioId(s.id)}>
                       <p className="text-sm text-white/80 truncate group-hover:text-white transition">{s.title}</p>
                       <p className="text-xs text-white/30 truncate">
                         {s.articleCount > 0 ? `${s.articleCount} articles` : 'Aucun article'}
-                        {(isPipelineDone || dbPipelineDone) && s.articleCount > 0 && <span className="ml-1 text-forest-400">✓</span>}
+                        {(isPipelineDone || dbPipelineDone) && s.articleCount > 0 && <span className="ml-1 text-forest-400">✓ Pipeline terminé</span>}
+                        {!isPipelineDone && !dbPipelineDone && dbPopulateDone && s.articleCount > 0 && <span className="ml-1 text-gold-400">✓ Articles ingérés</span>}
                       </p>
                       {isPipelineRunning && (
                         <div className="mt-0.5 flex items-center gap-1.5">
                           <RotateCcw size={9} className="text-brand-400 animate-spin shrink-0" />
                           <span className="text-xs text-brand-300">
-                            {pStatus.current_step === 'pubmed' ? 'Ingestion PubMed...' :
+                            {pStatus.overall_status === 'error' ? '⚠ Erreur pipeline' :
+                             pStatus.current_step === 'pubmed' ? 'Ingération PubMed...' :
                              pStatus.current_step === 'pico' ? 'Extraction PICO...' :
-                             pStatus.current_step === 'metadata' ? 'Metadonnees...' :
+                             pStatus.current_step === 'metadata' ? 'Métadonnées...' :
                              pStatus.current_step === 'fulltext' ? 'Full-text...' :
-                             pStatus.current_step === 'clustering' ? 'Clustering...' : 'Pipeline...'}
+                             pStatus.current_step === 'clustering' ? 'Clustering...' : 'Pipeline en cours...'}
                           </span>
                         </div>
                       )}
-                      {!pStatus && !dbPipelineDone && s.articleCount === 0 && (
-                        <p className="text-xs text-white/20 italic">Pipeline non lance</p>
+                      {!pStatus && !dbPipelineDone && !dbPopulateDone && s.articleCount === 0 && (
+                        <p className="text-xs text-white/20 italic">Pipeline non lancé</p>
                       )}
                     </div>
                     <button type="button" onClick={() => setDetailScenarioId(s.id)} className="shrink-0 rounded-xl bg-white/5 border border-white/10 px-2 py-1 text-xs text-white/50 hover:text-white transition">Ouvrir</button>
