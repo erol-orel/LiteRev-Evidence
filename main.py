@@ -81,6 +81,12 @@ class DocumentIn(BaseModel):
     scenario_type: str | None = None
     geographic_scope: str | None = None
     evidence_category: str | None = None
+    # Champs bibliographiques enrichis
+    doi: str | None = None
+    pmid: str | None = None
+    authors: str | None = None
+    journal: str | None = None
+    open_access: bool | None = None
 
 class ChunkIn(BaseModel):
     document_id: int = Field(..., ge=1)
@@ -247,12 +253,14 @@ def create_document(
         INSERT INTO literature_document (
             source, title, abstract, year, url, external_id,
             project_context, source_type, disease_or_condition,
-            scenario_type, geographic_scope, evidence_category
+            scenario_type, geographic_scope, evidence_category,
+            doi, pmid, authors, journal, open_access
         )
         VALUES (
             :source, :title, :abstract, :year, :url, :external_id,
             :project_context, :source_type, :disease_or_condition,
-            :scenario_type, :geographic_scope, :evidence_category
+            :scenario_type, :geographic_scope, :evidence_category,
+            :doi, :pmid, :authors, :journal, :open_access
         )
         RETURNING id
     """)
@@ -6929,45 +6937,345 @@ def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict
         except Exception as e:
             update_step("metadata", "error", error=str(e))
 
-        # ── Étape 4 : Full-text (Unpaywall) ──────────────────────────────────
+        # ── Étape 4 : Full-text multi-sources (PMC → EuropePMC → Unpaywall → bioRxiv → Semantic Scholar → OpenAlex) ──
         update_step("fulltext", "running")
         try:
-            import urllib.request as _urllib_req
+            import re as _re
+            import subprocess as _subprocess
+            import tempfile as _tempfile
+            import xml.etree.ElementTree as _ET_ft
+
+            _NCBI_BASE_FT = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
+            _EPMC_BASE_FT = "https://www.ebi.ac.uk/europepmc/webservices/rest"
+            _UNPAYWALL_EMAIL = os.getenv("UNPAYWALL_EMAIL", "literev@gesica.ch")
+            _CHUNK_SIZE_FT = 4000
+            _CHUNK_OVERLAP_FT = 400
+
+            def _ft_get(url, params=None, timeout=20):
+                for _att in range(3):
+                    try:
+                        _r = _requests.get(url, params=params, timeout=timeout,
+                                           headers={"User-Agent": "LiteRev-Evidence/1.0"})
+                        if _r.status_code == 429:
+                            _time.sleep(int(_r.headers.get("Retry-After", 10)))
+                            continue
+                        return _r
+                    except Exception:
+                        _time.sleep(1)
+                return None
+
+            def _parse_pmc_xml_ft(xml_str):
+                _skip = {"ref-list","ack","fn-group","glossary","app-group","notes","bio","author-notes"}
+                try:
+                    _root = _ET_ft.fromstring(xml_str)
+                except _ET_ft.ParseError:
+                    xml_str = _re.sub(r"&(?!amp;|lt;|gt;|apos;|quot;)", "&amp;", xml_str)
+                    try:
+                        _root = _ET_ft.fromstring(xml_str)
+                    except Exception:
+                        return None
+                _parts = []
+                def _walk(n):
+                    _tag = n.tag.split("}")[-1] if "}" in n.tag else n.tag
+                    if _tag in _skip:
+                        return
+                    if n.text and n.text.strip():
+                        _parts.append(n.text.strip())
+                    for _ch in n:
+                        _walk(_ch)
+                    if n.tail and n.tail.strip():
+                        _parts.append(n.tail.strip())
+                _walk(_root)
+                _txt = _re.sub(r"\s+", " ", " ".join(_parts)).strip()
+                return _txt if len(_txt) > 50 else None
+
+            def _extract_pdf_text_ft(pdf_url):
+                try:
+                    _r = _requests.get(pdf_url, timeout=30, stream=True,
+                                       headers={"User-Agent": "LiteRev-Evidence/1.0"})
+                    if _r.status_code != 200:
+                        return None
+                    _ct = _r.headers.get("content-type", "")
+                    if "pdf" not in _ct.lower() and not pdf_url.lower().endswith(".pdf"):
+                        _txt = _re.sub(r"<[^>]+>", " ", _r.text)
+                        _txt = _re.sub(r"\s+", " ", _txt).strip()
+                        return _txt if len(_txt) > 500 else None
+                    with _tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as _f:
+                        for _chunk in _r.iter_content(chunk_size=8192):
+                            _f.write(_chunk)
+                        _tmp = _f.name
+                    _res = _subprocess.run(["pdftotext", "-layout", _tmp, "-"],
+                                           capture_output=True, text=True, timeout=30)
+                    os.unlink(_tmp)
+                    if _res.returncode == 0 and _res.stdout.strip():
+                        _txt = _re.sub(r"\s+", " ", _res.stdout).strip()
+                        return _txt if len(_txt) > 500 else None
+                except Exception:
+                    pass
+                return None
+
+            def _resolve_pmcid_ft(ext_id, pmid_val, doi_val):
+                if ext_id and "PMC" in ext_id.upper():
+                    _m = _re.search(r"(\d{5,10})", ext_id)
+                    if _m:
+                        return f"PMC{_m.group(1)}"
+                if ext_id and _re.match(r"^PMC\d+$", ext_id.upper()):
+                    return ext_id.upper()
+                _cand = None
+                if ext_id and ext_id.isdigit():
+                    _cand = ext_id
+                elif pmid_val:
+                    _cand = str(pmid_val).replace("PMID:", "").strip()
+                if _cand:
+                    _r2 = _ft_get(f"{_NCBI_BASE_FT}/esummary.fcgi",
+                                  params={"db": "pubmed", "id": _cand, "retmode": "json"})
+                    if _r2 and _r2.status_code == 200:
+                        try:
+                            _aids = _r2.json().get("result", {}).get(_cand, {}).get("articleids", [])
+                            for _aid in _aids:
+                                if _aid.get("idtype") == "pmcid":
+                                    _pmc = _aid.get("value", "").replace("PMC", "")
+                                    if _pmc:
+                                        return f"PMC{_pmc}"
+                        except Exception:
+                            pass
+                if doi_val:
+                    _r3 = _ft_get("https://www.ncbi.nlm.nih.gov/pmc/utils/idconv/v1.0/",
+                                  params={"ids": doi_val, "format": "json",
+                                          "tool": "literev", "email": _UNPAYWALL_EMAIL})
+                    if _r3 and _r3.status_code == 200:
+                        try:
+                            _recs = _r3.json().get("records", [])
+                            if _recs and _recs[0].get("pmcid"):
+                                return _recs[0]["pmcid"]
+                        except Exception:
+                            pass
+                return None
+
+            def _chunk_text_ft(text_str):
+                text_str = _re.sub(r"\s+", " ", text_str).strip()
+                if not text_str:
+                    return []
+                _chunks = []
+                _start = 0
+                while _start < len(text_str):
+                    _end = min(_start + _CHUNK_SIZE_FT, len(text_str))
+                    if _end < len(text_str):
+                        _cut = text_str.rfind(" ", _start, _end)
+                        if _cut > _start:
+                            _end = _cut
+                    _chunks.append(text_str[_start:_end].strip())
+                    _start = _end - _CHUNK_OVERLAP_FT if _end - _CHUNK_OVERLAP_FT > _start else _end
+                return [c for c in _chunks if len(c) > 50]
+
+            def _insert_fulltext_chunks_ft(doc_id, chunks, source_label, emb_client=None):
+                """Insère les chunks fulltext_section et les embedde immédiatement si possible."""
+                with engine.begin() as _c:
+                    _c.execute(text(
+                        "DELETE FROM document_chunk WHERE document_id = :did "
+                        "AND chunk_type IN ('fulltext_section', 'full_text')"
+                    ), {"did": doc_id})
+                    for _i, _chunk_text in enumerate(chunks):
+                        _meta = json.dumps({"source": source_label, "chunk_index": _i})
+                        _c.execute(text("""
+                            INSERT INTO document_chunk
+                                (document_id, content, chunk_index, chunk_type, chunk_weight, metadata_json)
+                            VALUES (:did, :content, :idx, 'fulltext_section', 1.0, CAST(:meta AS jsonb))
+                        """), {"did": doc_id, "content": _chunk_text, "idx": _i, "meta": _meta})
+                    _c.execute(text(
+                        "UPDATE literature_document SET has_fulltext = true, open_access = true WHERE id = :did"
+                    ), {"did": doc_id})
+                # Embedder les nouveaux chunks immédiatement si client OpenAI disponible
+                if emb_client and chunks:
+                    try:
+                        with engine.connect() as _c2:
+                            _new_chunks = _c2.execute(text("""
+                                SELECT id, content FROM document_chunk
+                                WHERE document_id = :did AND chunk_type = 'fulltext_section'
+                                  AND embedding IS NULL ORDER BY chunk_index
+                            """), {"did": doc_id}).mappings().fetchall()
+                        for _bi in range(0, len(_new_chunks), 50):
+                            _batch = _new_chunks[_bi:_bi+50]
+                            _texts = [r["content"][:8000] for r in _batch]
+                            _emb_resp = emb_client.embeddings.create(
+                                model="text-embedding-3-small", input=_texts)
+                            for _k, _ed in enumerate(_emb_resp.data):
+                                _vec = "[" + ",".join(str(x) for x in _ed.embedding) + "]"
+                                with engine.begin() as _c3:
+                                    _c3.execute(text(
+                                        "UPDATE document_chunk SET embedding = CAST(:vec AS vector) WHERE id = :cid"
+                                    ), {"vec": _vec, "cid": _batch[_k]["id"]})
+                            _time.sleep(0.1)
+                    except Exception as _emb_e:
+                        logger.warning(f"Fulltext embed doc {doc_id}: {_emb_e}")
+                return len(chunks)
+
+            # Récupérer tous les documents du scénario sans full-text
             with engine.connect() as conn:
                 ft_rows = conn.execute(text("""
-                    SELECT ld.id, ld.doi
+                    SELECT ld.id, ld.external_id, ld.doi, ld.pmid, ld.source
                     FROM literature_document ld
                     JOIN article_scenarios asn ON asn.document_id = ld.id
                     WHERE asn.scenario_id = :sid
                       AND ld.project_context = 'literev'
                       AND (ld.has_fulltext IS NULL OR ld.has_fulltext = false)
-                      AND ld.doi IS NOT NULL
                     ORDER BY ld.id
                 """), {"sid": scenario_id}).mappings().fetchall()
 
             ft_fetched = 0
             ft_errors = 0
-            for row in ft_rows:
+            ft_total = len(ft_rows)
+
+            # Initialiser le client OpenAI pour l'embedding des chunks fulltext
+            _ft_emb_client = None
+            try:
+                from openai import OpenAI as _OAI_ft
+                _ft_emb_client = _OAI_ft(api_key=os.getenv("OPENAI_API_KEY"))
+            except Exception:
+                pass
+
+            for _ft_idx, row in enumerate(ft_rows):
+                _ext_id = row["external_id"] or ""
+                _doi = row["doi"] or ""
+                _pmid = row["pmid"] or ""
+                _source = row["source"] or ""
+                _fulltext = None
+                _source_used = None
+
                 try:
-                    unpaywall_url = f"https://api.unpaywall.org/v2/{row['doi']}?email=literev@gesica.ch"
-                    req = _urllib_req.Request(unpaywall_url, headers={"User-Agent": "LiteRev/1.0"})
-                    with _urllib_req.urlopen(req, timeout=8) as resp:
-                        data = json.loads(resp.read())
-                    oa_url = None
-                    if data.get("is_oa") and data.get("best_oa_location"):
-                        oa_url = data["best_oa_location"].get("url_for_pdf") or data["best_oa_location"].get("url")
-                    if oa_url:
-                        with engine.begin() as conn:
-                            conn.execute(text("""
-                                UPDATE literature_document
-                                SET has_fulltext = true, url = :url
-                                WHERE id = :article_id
-                            """), {"url": oa_url, "article_id": row["id"]})
-                        ft_fetched += 1
-                except Exception as e:
+                    # Source 1 : PMC (via PMCID résolu)
+                    _pmcid = _resolve_pmcid_ft(_ext_id, _pmid, _doi)
+                    if _pmcid:
+                        _r_pmc = _ft_get(f"{_EPMC_BASE_FT}/{_pmcid}/fullTextXML", timeout=30)
+                        if _r_pmc and _r_pmc.status_code == 200 and _r_pmc.text.strip().startswith("<"):
+                            _fulltext = _parse_pmc_xml_ft(_r_pmc.text)
+                            if _fulltext and len(_fulltext) > 500:
+                                _source_used = f"europepmc:{_pmcid}"
+                        if not _fulltext:
+                            _pmcid_num = _pmcid.replace("PMC", "")
+                            _r_ncbi = _ft_get(f"{_NCBI_BASE_FT}/efetch.fcgi",
+                                             params={"db": "pmc", "id": _pmcid_num,
+                                                     "rettype": "full", "retmode": "xml"}, timeout=30)
+                            if _r_ncbi and _r_ncbi.status_code == 200 and _r_ncbi.text.strip().startswith("<"):
+                                _fulltext = _parse_pmc_xml_ft(_r_ncbi.text)
+                                if _fulltext and len(_fulltext) > 500:
+                                    _source_used = f"pmc:{_pmcid}"
+                                else:
+                                    _fulltext = None
+                        _time.sleep(0.35)
+
+                    # Source 2 : Unpaywall (DOI → PDF)
+                    if not _fulltext and _doi and _doi.startswith("10."):
+                        _r_uw = _ft_get(f"https://api.unpaywall.org/v2/{_doi}",
+                                        params={"email": _UNPAYWALL_EMAIL})
+                        if _r_uw and _r_uw.status_code == 200:
+                            try:
+                                _uw_data = _r_uw.json()
+                                _pdf_url = None
+                                _best = _uw_data.get("best_oa_location") or {}
+                                _pdf_url = _best.get("url_for_pdf") or _best.get("url")
+                                if not _pdf_url:
+                                    for _loc in _uw_data.get("oa_locations", []):
+                                        if _loc.get("url_for_pdf"):
+                                            _pdf_url = _loc["url_for_pdf"]
+                                            break
+                                if _pdf_url:
+                                    _fulltext = _extract_pdf_text_ft(_pdf_url)
+                                    if _fulltext and len(_fulltext) > 500:
+                                        _source_used = "unpaywall"
+                                    else:
+                                        _fulltext = None
+                            except Exception:
+                                pass
+                        _time.sleep(1.0)
+
+                    # Source 3 : bioRxiv/medRxiv (DOI 10.1101/...)
+                    if not _fulltext and _doi and _doi.startswith("10.1101/"):
+                        for _srv in ["biorxiv", "medrxiv"]:
+                            _r_bx = _ft_get(f"https://api.biorxiv.org/details/{_srv}/{_doi}/na/json")
+                            if _r_bx and _r_bx.status_code == 200:
+                                try:
+                                    _coll = _r_bx.json().get("collection", [])
+                                    if _coll:
+                                        _pdf_url = f"https://www.{_srv}.org/content/{_doi}.full.pdf"
+                                        _fulltext = _extract_pdf_text_ft(_pdf_url)
+                                        if _fulltext and len(_fulltext) > 500:
+                                            _source_used = _srv
+                                            break
+                                        else:
+                                            _fulltext = None
+                                except Exception:
+                                    pass
+                        _time.sleep(0.5)
+
+                    # Source 4 : Semantic Scholar
+                    if not _fulltext:
+                        _ss_id = None
+                        if _doi:
+                            _ss_id = f"DOI:{_doi}"
+                        elif _pmid:
+                            _ss_id = f"PMID:{_pmid}"
+                        elif _ext_id and _ext_id.upper().startswith("PMC"):
+                            _ss_id = f"PMCID:{_ext_id}"
+                        if _ss_id:
+                            _r_ss = _ft_get(
+                                f"https://api.semanticscholar.org/graph/v1/paper/{_ss_id}",
+                                params={"fields": "openAccessPdf,abstract"},
+                            )
+                            if _r_ss and _r_ss.status_code == 200:
+                                try:
+                                    _ss_data = _r_ss.json()
+                                    _oa_pdf = _ss_data.get("openAccessPdf")
+                                    if _oa_pdf and _oa_pdf.get("url"):
+                                        _fulltext = _extract_pdf_text_ft(_oa_pdf["url"])
+                                        if _fulltext and len(_fulltext) > 500:
+                                            _source_used = "semanticscholar"
+                                        else:
+                                            _fulltext = None
+                                except Exception:
+                                    pass
+                        _time.sleep(1.0)
+
+                    # Source 5 : OpenAlex (open_access.oa_url)
+                    if not _fulltext and (_ext_id.startswith("W") or _doi):
+                        _oa_work_url = (
+                            f"https://api.openalex.org/works/{_ext_id}"
+                            if _ext_id.startswith("W")
+                            else f"https://api.openalex.org/works/doi:{_doi}"
+                        )
+                        _r_oa = _ft_get(_oa_work_url, params={"select": "open_access"})
+                        if _r_oa and _r_oa.status_code == 200:
+                            try:
+                                _oa_info = _r_oa.json().get("open_access", {})
+                                _oa_url = _oa_info.get("oa_url")
+                                if _oa_url:
+                                    _fulltext = _extract_pdf_text_ft(_oa_url)
+                                    if _fulltext and len(_fulltext) > 500:
+                                        _source_used = "openalex_oa"
+                                    else:
+                                        _fulltext = None
+                            except Exception:
+                                pass
+                        _time.sleep(0.2)
+
+                    if _fulltext and _source_used:
+                        _chunks_ft = _chunk_text_ft(_fulltext)
+                        if _chunks_ft:
+                            _insert_fulltext_chunks_ft(row["id"], _chunks_ft, _source_used, _ft_emb_client)
+                            ft_fetched += 1
+                        else:
+                            ft_errors += 1
+                    # Mise à jour progression
+                    if (_ft_idx + 1) % 10 == 0:
+                        update_step("fulltext", "running",
+                                    done=ft_fetched, total=ft_total,
+                                    pct=round((_ft_idx + 1) / ft_total * 100, 1) if ft_total > 0 else 0)
+                except Exception as _ft_e:
                     ft_errors += 1
-                _time.sleep(0.1)
-            update_step("fulltext", "done", fetched=ft_fetched, errors=ft_errors)
+                    logger.warning(f"Fulltext doc {row['id']}: {_ft_e}")
+                _time.sleep(0.05)
+
+            update_step("fulltext", "done", fetched=ft_fetched, total=ft_total, errors=ft_errors)
         except Exception as e:
             update_step("fulltext", "error", error=str(e))
 
