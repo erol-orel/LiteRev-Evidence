@@ -49,6 +49,8 @@ export interface SearchResponse {
   results: SearchResult[];
   totalUniqueDocs?: number;
   sourceBreakdown?: Record<string, number>;
+  scoreType?: "lexical" | "semantic" | "hybrid";
+  scoreLabel?: string;
 }
 
 // --- BACKEND API RAW TYPES (snake_case) ---
@@ -98,4 +100,6 @@ export interface ApiSearchResponse {
   count: number;
   total_unique_docs?: number;
   source_breakdown?: Record<string, number>;
+  score_type?: "lexical" | "semantic" | "hybrid";
+  score_label?: string;
 }

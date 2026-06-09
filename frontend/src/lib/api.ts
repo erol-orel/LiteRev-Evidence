@@ -218,6 +218,8 @@ export async function searchDocuments(
     results: (apiData.results || []).map(mapSearchResultFromApi),
     totalUniqueDocs: apiData.total_unique_docs,
     sourceBreakdown: apiData.source_breakdown,
+    scoreType: apiData.score_type,
+    scoreLabel: apiData.score_label,
   };
 }
 
@@ -2182,6 +2184,15 @@ export interface UserScenarioPopulateStatus {
   errors?: number;
   message?: string;
   error?: string;
+  sources?: {
+    pubmed?: number;
+    openalex?: number;
+    crossref?: number;
+    europepmc?: number;
+    medrxiv?: number;
+    biorxiv?: number;
+    prospero?: number;
+  };
 }
 
 export interface PipelineStepStatus {
@@ -2195,6 +2206,13 @@ export interface PipelineStepStatus {
   errors?: number;
   reason?: string;
   error?: string;
+  // embed step
+  done?: number;
+  total?: number;
+  pct?: number;
+  embedded?: number;
+  // rerank step
+  updated?: number;
 }
 
 export interface UserScenarioPipelineStatus {
@@ -2205,10 +2223,40 @@ export interface UserScenarioPipelineStatus {
   error?: string;
   steps: {
     pubmed?: PipelineStepStatus;
+    embed?: PipelineStepStatus;
     pico?: PipelineStepStatus;
     metadata?: PipelineStepStatus;
     fulltext?: PipelineStepStatus;
     clustering?: PipelineStepStatus;
+    rerank?: PipelineStepStatus;
+  };
+}
+
+export interface EmbeddingChunkType {
+  type: string;
+  total: number;
+  embedded: number;
+  pct: number;
+}
+
+export interface EmbeddingStatus {
+  scenario_id: string;
+  status: 'none' | 'partial' | 'complete';
+  status_label: string;
+  total_articles: number;
+  articles_embedded: number;
+  articles_pending_embedding: number;
+  total_chunks: number;
+  chunks_embedded: number;
+  chunks_pending: number;
+  embedding_pct: number;
+  fulltext_chunks: number;
+  chunk_types: EmbeddingChunkType[];
+  score_availability: {
+    lexical: boolean;
+    semantic: boolean;
+    hybrid: boolean;
+    rerank: boolean;
   };
 }
 
@@ -2499,6 +2547,14 @@ export async function patchScenarioSettings(
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
   });
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  return r.json();
+}
+
+export async function fetchUserScenarioEmbeddingStatus(
+  scenarioId: string,
+): Promise<EmbeddingStatus> {
+  const r = await fetch(`${API_BASE_URL}/user-scenarios/${scenarioId}/embedding-status`);
   if (!r.ok) throw new Error(`HTTP ${r.status}`);
   return r.json();
 }

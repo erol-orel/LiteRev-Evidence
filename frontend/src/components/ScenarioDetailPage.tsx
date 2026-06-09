@@ -42,7 +42,9 @@ import {
   extractMetadataBatch,
   fetchFulltextBatch,
   fetchEnrichmentStatus,
+  fetchUserScenarioEmbeddingStatus,
   type EnrichmentStatus,
+  type EmbeddingStatus,
   type ScenarioDetail,
   type ScenarioCorpus,
   type ModelStatus,
@@ -136,7 +138,7 @@ function QueriesSection({ detail }: { detail: ScenarioDetail }) {
         <div className="flex items-center gap-2 mb-3">
           <Terminal size={12} className="text-brand-400" />
           <span className="text-xs font-semibold text-brand-300 uppercase tracking-wider">
-            Requêtes Booléennes PubMed ({detail.boolean_queries.length})
+            Requêtes Booléennes ({detail.boolean_queries.length})
           </span>
         </div>
         <div className="space-y-2">
@@ -775,6 +777,7 @@ function CorpusSection({ scenarioId }: { scenarioId: string; detail: ScenarioDet
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [expandedId, setExpandedId] = useState<number | null>(null);
+  const [embeddingStatus, setEmbeddingStatus] = useState<EmbeddingStatus | null>(null);
 
   useEffect(() => {
     setLoading(true);
@@ -783,6 +786,10 @@ function CorpusSection({ scenarioId }: { scenarioId: string; detail: ScenarioDet
       .then(setData)
       .catch((e) => setError(e.message))
       .finally(() => setLoading(false));
+    // Charger le statut d'embedding si c'est un user-scenario
+    fetchUserScenarioEmbeddingStatus(scenarioId)
+      .then(setEmbeddingStatus)
+      .catch(() => {}); // Silencieux si pas un user-scenario
   }, [scenarioId]);
 
   if (loading) return <LoadingSpinner text="Chargement du corpus d'articles..." />;
@@ -794,9 +801,68 @@ function CorpusSection({ scenarioId }: { scenarioId: string; detail: ScenarioDet
       <div className="rounded-2xl border border-gold-500/20 bg-gold-500/5 px-4 py-3 flex items-start gap-3">
         <AlertTriangle size={14} className="text-gold-400 shrink-0 mt-0.5" />
         <div className="text-xs text-gold-200/80 leading-relaxed">
-          <strong className="text-gold-300">Sélection automatique</strong> — Ces articles ont été récupérés par recherche lexicale (requête PubMed) et/ou sémantique (similarité vectorielle). <strong>Aucun n'a été validé par un relecteur humain.</strong> Pour une revue systématique formelle, un screening humain en double-aveugle est requis (onglet Revue).
+          <strong className="text-gold-300">Sélection automatique</strong> — Ces articles ont été récupérés depuis 7 bases de données (PubMed, OpenAlex, Crossref, EuropePMC, medRxiv, bioRxiv, PROSPERO) par recherche lexicale et/ou sémantique. <strong>Aucun n'a été validé par un relecteur humain.</strong> Pour une revue systématique formelle, un screening humain en double-aveugle est requis (onglet Revue).
         </div>
       </div>
+
+      {/* Statut des embeddings */}
+      {embeddingStatus && (
+        <div className={`rounded-2xl border px-4 py-3 flex items-start gap-3 ${
+          embeddingStatus.status === 'complete'
+            ? 'border-forest-500/20 bg-forest-500/5'
+            : embeddingStatus.status === 'partial'
+            ? 'border-gold-500/20 bg-gold-500/5'
+            : 'border-white/10 bg-white/3'
+        }`}>
+          <div className="shrink-0 mt-0.5">
+            {embeddingStatus.status === 'complete' ? <CheckCircle2 size={14} className="text-forest-400" /> :
+             embeddingStatus.status === 'partial' ? <Loader2 size={14} className="text-gold-400 animate-spin" /> :
+             <AlertCircle size={14} className="text-white/30" />}
+          </div>
+          <div className="flex-1 min-w-0">
+            <div className="flex items-center gap-2 flex-wrap">
+              <span className={`text-xs font-semibold ${
+                embeddingStatus.status === 'complete' ? 'text-forest-300' :
+                embeddingStatus.status === 'partial' ? 'text-gold-300' : 'text-white/40'
+              }`}>
+                Embeddings : {embeddingStatus.status_label}
+              </span>
+              <span className="text-[10px] text-white/35">
+                {embeddingStatus.chunks_embedded}/{embeddingStatus.total_chunks} chunks ({embeddingStatus.embedding_pct.toFixed(0)}%)
+              </span>
+              {embeddingStatus.fulltext_chunks > 0 && (
+                <span className="rounded-full bg-brand-500/10 border border-brand-500/20 px-2 py-0.5 text-[9px] text-brand-300">
+                  {embeddingStatus.fulltext_chunks} chunks full-text
+                </span>
+              )}
+            </div>
+            <div className="mt-1.5 flex items-center gap-3 flex-wrap">
+              {Object.entries(embeddingStatus.score_availability).map(([type, available]) => (
+                <span key={type} className={`text-[10px] flex items-center gap-1 ${
+                  available ? 'text-forest-400' : 'text-white/25'
+                }`}>
+                  {available ? '✓' : '✗'} Score {type === 'lexical' ? '≡ Lexical' : type === 'semantic' ? '◎ Sémantique' : type === 'hybrid' ? '⊕ Hybride' : '★ Rerank'}
+                </span>
+              ))}
+            </div>
+            {embeddingStatus.status !== 'complete' && (
+              <p className="text-[10px] text-white/30 mt-1">
+                Les scores sémantiques et hybrides seront disponibles une fois tous les embeddings générés. Lancez le pipeline pour accélérer.
+              </p>
+            )}
+          </div>
+          <div className="shrink-0">
+            <div className="w-16 h-1.5 bg-white/10 rounded-full overflow-hidden">
+              <div
+                className={`h-full rounded-full transition-all ${
+                  embeddingStatus.status === 'complete' ? 'bg-forest-400' : 'bg-gold-400'
+                }`}
+                style={{ width: `${embeddingStatus.embedding_pct}%` }}
+              />
+            </div>
+          </div>
+        </div>
+      )}
     <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
       {/* Liste des articles */}
       <div className="lg:col-span-2 space-y-4">
@@ -971,11 +1037,14 @@ function ArticleRow({
             )}
             {article.similarity_score !== undefined && article.similarity_score !== null && (
               <span className={`rounded-full px-2 py-0.5 text-[9px] font-medium ${
-                article.similarity_score >= 0.45
+                article.similarity_score >= 0.9
+                  ? 'bg-white/5 border border-white/10 text-white/30'
+                  : article.similarity_score >= 0.45
                   ? 'bg-brand-500/15 border border-brand-500/30 text-brand-300'
                   : 'bg-white/5 border border-white/10 text-white/30'
-              }`}>
-                sim {article.similarity_score.toFixed(2)}
+              }`}
+              title={article.similarity_score >= 0.99 ? 'Score lexical (BM25) — embedding non encore disponible' : 'Score sémantique (cosinus)'}>
+                {article.similarity_score >= 0.99 ? '≡' : '◎'} {article.similarity_score.toFixed(3)}
               </span>
             )}
             <span className={`rounded-full px-2 py-0.5 text-[9px] font-medium ${statusBadge}`}>
@@ -2911,11 +2980,19 @@ function AlertsSection({ scenarioId }: { scenarioId: string }) {
           <h4 className="text-sm font-semibold text-white">Pipeline Living Review</h4>
         </div>
         <p className="text-xs text-white/50">
-          Le pipeline Living Review interroge automatiquement PubMed avec la requête booléenne de ce scénario,
-          insère les nouveaux articles, génère les embeddings et recalcule le clustering.
+          Le pipeline Living Review interroge automatiquement 7 bases de données (PubMed, OpenAlex, Crossref, EuropePMC, medRxiv, bioRxiv, PROSPERO)
+          avec la requête de ce scénario, insère les nouveaux articles, génère les embeddings et recalcule le clustering.
         </p>
         <div className="rounded-xl border border-white/5 bg-white/2 p-3 space-y-1.5 text-[10px] text-white/40">
-          {['Interrogation PubMed avec requête booléenne','Insertion des nouveaux articles','Génération des embeddings (text-embedding-3-small)','Déduplication automatique','Recalcul du clustering UMAP + HDBSCAN','Mise à jour des résumés de clusters'].map((step, i) => (
+          {[
+            'Interrogation multi-sources : PubMed + OpenAlex + Crossref + EuropePMC + medRxiv + bioRxiv + PROSPERO',
+            'Insertion des nouveaux articles (déduplication automatique)',
+            'Génération des embeddings (text-embedding-3-small) — active les scores sémantiques et hybrides',
+            'Extraction PICO par LLM (GPT-4.1-mini)',
+            'Récupération full-text via Unpaywall',
+            'Recalcul du clustering thématique',
+            'Rerank sémantique (scores cosinus mis à jour)',
+          ].map((step, i) => (
             <div key={i} className="flex items-center gap-2">
               <span className="h-1 w-1 rounded-full bg-brand-400"/>
               {step}
@@ -3186,7 +3263,8 @@ function SeuilSection({ scenarioId, onSaved }: { scenarioId: string; onSaved?: (
         )}
       </div>
       <p className="text-[10px] text-white/30 w-full">
-        Les articles avec un score de similarite superieur a ce seuil (ou valides humainement) sont utilises dans l'Evidence Brief, l'Assistant IA et les Variables.
+        Les articles avec un score de similarité supérieur à ce seuil (ou validés humainement) sont utilisés dans l'Evidence Brief, l'Assistant IA et les Variables.
+        <span className="ml-1 text-white/20">— Score ≡ = lexical BM25 (avant embedding) · Score ◎ = sémantique cosinus (après embedding) · "Recalculer scores" lance le rerank sémantique.</span>
       </p>
     </div>
   );

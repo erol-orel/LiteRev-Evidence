@@ -790,12 +790,24 @@ def search(payload: SearchIn) -> dict[str, Any]:
         )
     )
 
+    # Déterminer le type de score réellement utilisé
+    if use_vector and payload.mode == "hybrid":
+        score_type = "hybrid"
+        score_label = "Hybride (sémantique 70% + lexical 30%)"
+    elif use_vector and payload.mode == "semantic":
+        score_type = "semantic"
+        score_label = "Sémantique (similarité cosinus vectorielle)"
+    else:
+        score_type = "lexical"
+        score_label = "Lexical (BM25 simulé — score normalisé entre 0 et 1)"
     return {
         "results": results,
         "count": len(results),
         "total": len(results),
         "total_unique_docs": total_unique_docs,
         "source_breakdown": sorted_breakdown,
+        "score_type": score_type,
+        "score_label": score_label,
     }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -5568,9 +5580,9 @@ def _user_scenario_to_gesica_format(row: dict[str, Any]) -> dict[str, Any]:
         "recommended_actions": [],
         "relevant_articles": [],
         "living_evidence_note": (
-            f"Scénario utilisateur · {article_count} articles indexés."
+            f"Scénario utilisateur · {article_count} articles indexés (7 sources)."
             if article_count > 0
-            else "Aucun article indexé. Lancez la population via PubMed."
+            else "Aucun article indexé. Lancez l'ingéstion multi-sources (PubMed, OpenAlex, Crossref, EuropePMC, medRxiv, bioRxiv, PROSPERO)."
         ),
         "pinned": bool(row.get("pinned", False)),
         "query": row["query"],
@@ -5967,7 +5979,13 @@ def _run_user_scenario_populate(
     import math
 
     if _pipeline_callback is None:
-        _user_scenario_populate_jobs[scenario_id] = {"status": "running", "ingested": 0, "errors": 0, "total_found": 0}
+        _user_scenario_populate_jobs[scenario_id] = {
+            "status": "running", "ingested": 0, "errors": 0, "total_found": 0,
+            "sources": {
+                "pubmed": 0, "openalex": 0, "crossref": 0,
+                "europepmc": 0, "medrxiv": 0, "biorxiv": 0, "prospero": 0
+            }
+        }
 
     ENTREZ_BASE = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
     EMAIL = os.getenv("PUBMED_EMAIL", "literev@example.com")
@@ -6153,6 +6171,8 @@ def _run_user_scenario_populate(
                     ingested += 1
                     if _pipeline_callback is None:
                         _user_scenario_populate_jobs[scenario_id]["ingested"] = ingested
+                        _user_scenario_populate_jobs[scenario_id]["sources"]["pubmed"] = \
+                            _user_scenario_populate_jobs[scenario_id]["sources"].get("pubmed", 0) + 1
 
                 except Exception as e:
                     logger.warning(f"Populate user_scenario {scenario_id} - PMID {pmid}: {e}")
@@ -6231,6 +6251,9 @@ def _run_user_scenario_populate(
                             """), {"doc_id": doc_id, "sid": scenario_id})
                         ingested += 1
                         _oa_fetched_count += 1
+                        if _pipeline_callback is None:
+                            _user_scenario_populate_jobs[scenario_id]["sources"]["openalex"] = \
+                                _user_scenario_populate_jobs[scenario_id]["sources"].get("openalex", 0) + 1
                     except Exception as _e:
                         errors += 1
                     _time.sleep(0.05)
@@ -6306,6 +6329,9 @@ def _run_user_scenario_populate(
                             """), {"doc_id": doc_id, "sid": scenario_id})
                         ingested += 1
                         _cr_fetched_count += 1
+                        if _pipeline_callback is None:
+                            _user_scenario_populate_jobs[scenario_id]["sources"]["crossref"] = \
+                                _user_scenario_populate_jobs[scenario_id]["sources"].get("crossref", 0) + 1
                     except Exception as _e:
                         errors += 1
                     _time.sleep(0.05)
@@ -6384,6 +6410,9 @@ def _run_user_scenario_populate(
                             """), {"doc_id": doc_id, "sid": scenario_id})
                         ingested += 1
                         _ep_fetched_count += 1
+                        if _pipeline_callback is None:
+                            _user_scenario_populate_jobs[scenario_id]["sources"]["europepmc"] = \
+                                _user_scenario_populate_jobs[scenario_id]["sources"].get("europepmc", 0) + 1
                     except Exception as _e:
                         errors += 1
                     _time.sleep(0.05)
@@ -6461,6 +6490,9 @@ def _run_user_scenario_populate(
                                 """), {"doc_id": _doc_id, "sid": scenario_id})
                             ingested += 1
                             _fetched += 1
+                            if _pipeline_callback is None:
+                                _user_scenario_populate_jobs[scenario_id]["sources"][_server] = \
+                                    _user_scenario_populate_jobs[scenario_id]["sources"].get(_server, 0) + 1
                         except Exception:
                             errors += 1
                         _time.sleep(0.03)
@@ -6556,6 +6588,9 @@ def _run_user_scenario_populate(
                                 VALUES (:doc_id, :sid, 1.0) ON CONFLICT (document_id, scenario_id) DO NOTHING
                             """), {"doc_id": _doc_id, "sid": scenario_id})
                         ingested += 1
+                        if _pipeline_callback is None:
+                            _user_scenario_populate_jobs[scenario_id]["sources"]["prospero"] = \
+                                _user_scenario_populate_jobs[scenario_id]["sources"].get("prospero", 0) + 1
                     except Exception:
                         errors += 1
                     _time.sleep(0.1)
@@ -6578,12 +6613,16 @@ def _run_user_scenario_populate(
             """), {"sid": scenario_id})
 
         if _pipeline_callback is None:
+            _sources_final = _user_scenario_populate_jobs.get(scenario_id, {}).get("sources", {})
+            _src_parts = [f"{src}: {cnt}" for src, cnt in _sources_final.items() if cnt > 0]
+            _src_summary = " | ".join(_src_parts) if _src_parts else "aucune source"
             _user_scenario_populate_jobs[scenario_id] = {
                 "status": "done",
                 "ingested": ingested,
                 "errors": errors,
                 "total_found": total_found,
-                "message": f"{ingested} articles ingérés (PubMed + OpenAlex + Crossref + EuropePMC + medRxiv + bioRxiv + PROSPERO), {errors} erreurs.",
+                "sources": _sources_final,
+                "message": f"{ingested} articles ingérés depuis 7 sources ({_src_summary}), {errors} erreurs.",
             }
         logger.info(f"Populate user_scenario {scenario_id}: {ingested} articles ingérés (7 sources).")
         return ingested
@@ -6656,7 +6695,7 @@ def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict
     """
     import time as _time
 
-    STEP_ORDER = ["pubmed", "pico", "metadata", "fulltext", "clustering", "rerank"]
+    STEP_ORDER = ["pubmed", "embed", "pico", "metadata", "fulltext", "clustering", "rerank"]
 
     def update_step(step: str, status: str, **kwargs):
         job = _user_scenario_pipeline_jobs.get(scenario_id, {})
@@ -6691,6 +6730,7 @@ def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict
         "current_step": "pubmed",
         "steps": {
             "pubmed": {"status": "pending"},
+            "embed": {"status": "pending"},
             "pico": {"status": "pending"},
             "metadata": {"status": "pending"},
             "fulltext": {"status": "pending"},
@@ -6700,7 +6740,7 @@ def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict
     }
 
     try:
-        # ── Étape 1 : Ingestion PubMed ────────────────────────────────────────
+        # ── Étape 1 : Ingéstion multi-sources (PubMed+OpenAlex+Crossref+EuropePMC+medRxiv+bioRxiv+PROSPERO) ──
         update_step("pubmed", "running")
         ingested = _run_user_scenario_populate(
             scenario_id, query, filters, max_results, _pipeline_callback=pubmed_callback
@@ -6709,10 +6749,64 @@ def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict
 
         if ingested == 0:
             _user_scenario_pipeline_jobs[scenario_id]["overall_status"] = "done"
-            _user_scenario_pipeline_jobs[scenario_id]["message"] = "Aucun article trouvé sur PubMed."
+            _user_scenario_pipeline_jobs[scenario_id]["message"] = "Aucun article trouvé (7 sources interrogées)."
             return
 
-        # ── Étape 2 : Extraction PICO ─────────────────────────────────────────
+        # ── Étape 1b : Génération des embeddings (chunks title_abstract sans embedding) ───
+        update_step("embed", "running")
+        try:
+            openai_key = os.getenv("OPENAI_API_KEY")
+            if openai_key:
+                from openai import OpenAI as _OAI_emb
+                _emb_client = _OAI_emb(api_key=openai_key)
+                with engine.connect() as _conn_emb:
+                    _chunks_to_embed = _conn_emb.execute(text("""
+                        SELECT c.id, c.content
+                        FROM document_chunk c
+                        JOIN article_scenarios ars ON ars.document_id = c.document_id
+                        WHERE ars.scenario_id = :sid
+                          AND c.embedding IS NULL
+                          AND c.chunk_type = 'title_abstract'
+                          AND LENGTH(c.content) > 20
+                        ORDER BY c.id
+                    """), {"sid": scenario_id}).mappings().fetchall()
+                _emb_total = len(_chunks_to_embed)
+                _emb_done = 0
+                _emb_errors = 0
+                _emb_batch_size = 100
+                for _bi in range(0, _emb_total, _emb_batch_size):
+                    _batch = _chunks_to_embed[_bi:_bi + _emb_batch_size]
+                    try:
+                        _texts = [r["content"][:8000] for r in _batch]
+                        _emb_resp = _emb_client.embeddings.create(
+                            model="text-embedding-3-small",
+                            input=_texts
+                        )
+                        for _k, _emb_data in enumerate(_emb_resp.data):
+                            _vec_str = "[" + ",".join(str(x) for x in _emb_data.embedding) + "]"
+                            with engine.begin() as _conn_upd:
+                                _conn_upd.execute(text("""
+                                    UPDATE document_chunk
+                                    SET embedding = CAST(:vec AS vector)
+                                    WHERE id = :cid
+                                """), {"vec": _vec_str, "cid": _batch[_k]["id"]})
+                            _emb_done += 1
+                    except Exception as _emb_e:
+                        _emb_errors += len(_batch)
+                        logger.warning(f"Embed batch {_bi}: {_emb_e}")
+                    _time.sleep(0.2)
+                    # Mettre à jour la progression
+                    update_step("embed", "running",
+                                done=_emb_done, total=_emb_total,
+                                pct=round(_emb_done / _emb_total * 100, 1) if _emb_total > 0 else 0)
+                update_step("embed", "done",
+                            embedded=_emb_done, total=_emb_total, errors=_emb_errors)
+            else:
+                update_step("embed", "skipped", reason="Clé OpenAI non configurée")
+        except Exception as _emb_ex:
+            update_step("embed", "error", error=str(_emb_ex))
+
+        # ── Étape 2 : Extraction PICO ─────────────────────────────────────────────────────
         update_step("pico", "running")
         try:
             openai_key = os.getenv("OPENAI_API_KEY")
@@ -7013,7 +7107,10 @@ def populate_user_scenario(
             "ingested": job.get("ingested", 0),
         }
 
-    _user_scenario_populate_jobs[scenario_id] = {"status": "running", "ingested": 0, "errors": 0, "total_found": 0}
+    _user_scenario_populate_jobs[scenario_id] = {
+        "status": "running", "ingested": 0, "errors": 0, "total_found": 0,
+        "sources": {"pubmed": 0, "openalex": 0, "crossref": 0, "europepmc": 0, "medrxiv": 0, "biorxiv": 0, "prospero": 0}
+    }
     t = threading.Thread(
         target=_run_user_scenario_populate,
         args=(scenario_id, query, row.get("filters") or {}, max_results, None),
@@ -7026,14 +7123,15 @@ def populate_user_scenario(
         "status": "started",
         "query": query,
         "max_results": max_results,
-        "message": f"Ingestion PubMed lancée en arrière-plan pour '{row['name']}'. "
+        "message": f"Ingération multi-sources lancée en arrière-plan pour '{row['name']}' "
+                   "(PubMed + OpenAlex + Crossref + EuropePMC + medRxiv + bioRxiv + PROSPERO). "
                    "Utilisez /user-scenarios/{id}/populate/status pour suivre la progression.",
     }
 
 
 @app.get("/user-scenarios/{scenario_id}/populate/status")
 def get_user_scenario_populate_status(scenario_id: str) -> dict[str, Any]:
-    """Retourne l'état de l'ingestion PubMed en cours pour un scénario utilisateur."""
+    """Retourne l'état de l'ingéstion multi-sources en cours pour un scénario utilisateur."""
     _get_user_scenario_or_404(scenario_id)
     job = _user_scenario_populate_jobs.get(scenario_id)
     if not job:
@@ -7073,10 +7171,12 @@ def start_user_scenario_pipeline(
         "current_step": "pubmed",
         "steps": {
             "pubmed": {"status": "pending"},
+            "embed": {"status": "pending"},
             "pico": {"status": "pending"},
             "metadata": {"status": "pending"},
             "fulltext": {"status": "pending"},
             "clustering": {"status": "pending"},
+            "rerank": {"status": "pending"},
         },
     }
 
@@ -7092,9 +7192,10 @@ def start_user_scenario_pipeline(
         "status": "started",
         "query": query,
         "max_results": max_results,
-        "message": f"Pipeline complet lancé pour '{row['name']}'. "
+        "message": f"Pipeline complet lancé pour '{row['name']}' "
+                   "(ingéstion 7 sources → embeddings → PICO → métadonnées → full-text → clustering → rerank). "
                    "Suivez la progression via GET /user-scenarios/{id}/pipeline/status.",
-        "steps": ["pubmed", "pico", "metadata", "fulltext", "clustering"],
+        "steps": ["pubmed", "embed", "pico", "metadata", "fulltext", "clustering", "rerank"],
     }
 
 
@@ -7111,6 +7212,88 @@ def get_user_scenario_pipeline_status(scenario_id: str) -> dict[str, Any]:
             "steps": {},
         }
     return {"scenario_id": scenario_id, **job}
+
+
+@app.get("/user-scenarios/{scenario_id}/embedding-status")
+def get_user_scenario_embedding_status(scenario_id: str) -> dict[str, Any]:
+    """
+    Retourne l'état des embeddings pour un scénario utilisateur.
+    Indique combien d'articles ont des chunks embedés et combien sont en attente.
+    """
+    _get_user_scenario_or_404(scenario_id)
+    with engine.connect() as conn:
+        stats = conn.execute(text("""
+            SELECT
+                COUNT(DISTINCT ars.document_id) AS total_articles,
+                COUNT(DISTINCT CASE WHEN c.embedding IS NOT NULL THEN ars.document_id END) AS articles_embedded,
+                COUNT(DISTINCT c.id) AS total_chunks,
+                COUNT(DISTINCT CASE WHEN c.embedding IS NOT NULL THEN c.id END) AS chunks_embedded,
+                COUNT(DISTINCT CASE WHEN c.embedding IS NULL THEN c.id END) AS chunks_pending,
+                COUNT(DISTINCT CASE WHEN c.chunk_type = 'fulltext_section' THEN c.id END) AS fulltext_chunks
+            FROM article_scenarios ars
+            LEFT JOIN document_chunk c ON c.document_id = ars.document_id
+            WHERE ars.scenario_id = :sid
+        """), {"sid": scenario_id}).mappings().first()
+
+        # Statistiques par type de chunk
+        chunk_types = conn.execute(text("""
+            SELECT
+                c.chunk_type,
+                COUNT(c.id) AS total,
+                COUNT(CASE WHEN c.embedding IS NOT NULL THEN 1 END) AS embedded
+            FROM article_scenarios ars
+            JOIN document_chunk c ON c.document_id = ars.document_id
+            WHERE ars.scenario_id = :sid
+            GROUP BY c.chunk_type
+            ORDER BY total DESC
+        """), {"sid": scenario_id}).mappings().all()
+
+    total_articles = int(stats["total_articles"] or 0)
+    articles_embedded = int(stats["articles_embedded"] or 0)
+    total_chunks = int(stats["total_chunks"] or 0)
+    chunks_embedded = int(stats["chunks_embedded"] or 0)
+    chunks_pending = int(stats["chunks_pending"] or 0)
+    embedding_pct = round(chunks_embedded / total_chunks * 100, 1) if total_chunks > 0 else 0
+
+    # Déterminer le statut
+    if chunks_pending == 0 and total_chunks > 0:
+        status = "complete"
+        status_label = "Tous les chunks sont embedés — scores sémantiques et hybrides disponibles"
+    elif chunks_embedded == 0:
+        status = "none"
+        status_label = "Aucun embedding disponible — seul le score lexical (BM25) est actif"
+    else:
+        status = "partial"
+        status_label = f"{chunks_embedded}/{total_chunks} chunks embedés ({embedding_pct}%) — scores hybrides partiellement disponibles"
+
+    return {
+        "scenario_id": scenario_id,
+        "status": status,
+        "status_label": status_label,
+        "total_articles": total_articles,
+        "articles_embedded": articles_embedded,
+        "articles_pending_embedding": total_articles - articles_embedded,
+        "total_chunks": total_chunks,
+        "chunks_embedded": chunks_embedded,
+        "chunks_pending": chunks_pending,
+        "embedding_pct": embedding_pct,
+        "fulltext_chunks": int(stats["fulltext_chunks"] or 0),
+        "chunk_types": [
+            {
+                "type": r["chunk_type"] or "unknown",
+                "total": int(r["total"]),
+                "embedded": int(r["embedded"]),
+                "pct": round(int(r["embedded"]) / int(r["total"]) * 100, 1) if int(r["total"]) > 0 else 0
+            }
+            for r in chunk_types
+        ],
+        "score_availability": {
+            "lexical": True,
+            "semantic": chunks_embedded > 0,
+            "hybrid": chunks_embedded > 0,
+            "rerank": chunks_embedded > 0,
+        }
+    }
 
 
 # ── Proxy endpoints : rediriger les appels /gesica/scenarios/{usr-*}/... ──────
@@ -7208,6 +7391,10 @@ def get_user_scenario_prisma(scenario_id: str) -> dict[str, Any]:
                 SUM(CASE WHEN d.source IN ('biorxiv','medrxiv') THEN 1 ELSE 0 END) AS preprints,
                 SUM(CASE WHEN d.source = 'openalex' THEN 1 ELSE 0 END) AS openalex,
                 SUM(CASE WHEN d.source = 'europepmc' THEN 1 ELSE 0 END) AS europepmc,
+                SUM(CASE WHEN d.source = 'crossref' THEN 1 ELSE 0 END) AS crossref,
+                SUM(CASE WHEN d.source = 'medrxiv' THEN 1 ELSE 0 END) AS medrxiv,
+                SUM(CASE WHEN d.source = 'biorxiv' THEN 1 ELSE 0 END) AS biorxiv,
+                SUM(CASE WHEN d.source = 'prospero' THEN 1 ELSE 0 END) AS prospero,
                 SUM(CASE WHEN d.screening_status = 'included' THEN 1 ELSE 0 END) AS included,
                 SUM(CASE WHEN d.screening_status = 'excluded' THEN 1 ELSE 0 END) AS excluded,
                 SUM(CASE WHEN d.screening_status = 'pending' OR d.screening_status IS NULL THEN 1 ELSE 0 END) AS pending,
@@ -7240,6 +7427,10 @@ def get_user_scenario_prisma(scenario_id: str) -> dict[str, Any]:
                 "preprints": int(stats["preprints"] or 0),
                 "openalex": int(stats["openalex"] or 0),
                 "europepmc": int(stats["europepmc"] or 0),
+                "crossref": int(stats.get("crossref") or 0),
+                "medrxiv": int(stats.get("medrxiv") or 0),
+                "biorxiv": int(stats.get("biorxiv") or 0),
+                "prospero": int(stats.get("prospero") or 0),
             },
             "duplicates_removed": duplicates,
         },

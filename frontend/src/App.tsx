@@ -2861,11 +2861,13 @@ function ScenariosView({
                           <RotateCcw size={9} className="text-brand-400 animate-spin shrink-0" />
                           <span className="text-xs text-brand-300">
                             {pStatus.overall_status === 'error' ? '⚠ Erreur pipeline' :
-                             pStatus.current_step === 'pubmed' ? 'Ingération PubMed...' :
+                             pStatus.current_step === 'pubmed' ? 'Ingéstion multi-sources (7 bases)...' :
+                             pStatus.current_step === 'embed' ? 'Génération embeddings...' :
                              pStatus.current_step === 'pico' ? 'Extraction PICO...' :
                              pStatus.current_step === 'metadata' ? 'Métadonnées...' :
-                             pStatus.current_step === 'fulltext' ? 'Full-text...' :
-                             pStatus.current_step === 'clustering' ? 'Clustering...' : 'Pipeline en cours...'}
+                             pStatus.current_step === 'fulltext' ? 'Récupération full-text...' :
+                             pStatus.current_step === 'clustering' ? 'Clustering...' :
+                             pStatus.current_step === 'rerank' ? 'Rerank sémantique...' : 'Pipeline en cours...'}
                           </span>
                         </div>
                       )}
@@ -2908,18 +2910,29 @@ function ScenariosView({
                         <RotateCcw size={10} className="text-brand-400 animate-spin shrink-0" />
                         <span className="text-xs text-brand-300">
                           {pipelineStatuses[s.id].overall_status === 'error' ? '⚠ Erreur pipeline' :
-                            pipelineStatuses[s.id].current_step === 'pubmed' ? 'Ingestion PubMed...' :
+                            pipelineStatuses[s.id].current_step === 'pubmed' ? 'Ingéstion multi-sources (7 bases)...' :
+                            pipelineStatuses[s.id].current_step === 'embed' ? 'Génération embeddings...' :
                             pipelineStatuses[s.id].current_step === 'pico' ? 'Extraction PICO...' :
                             pipelineStatuses[s.id].current_step === 'metadata' ? 'Extraction métadonnées...' :
                             pipelineStatuses[s.id].current_step === 'fulltext' ? 'Récupération full-text...' :
                             pipelineStatuses[s.id].current_step === 'clustering' ? 'Clustering thématique...' :
+                            pipelineStatuses[s.id].current_step === 'rerank' ? 'Rerank sémantique...' :
                             'Pipeline en cours...'}
                         </span>
                         <span className="text-xs text-white/25">
-                          {(['pubmed','pico','metadata','fulltext','clustering'] as const).map(step => {
+                          {(['pubmed','embed','pico','metadata','fulltext','clustering','rerank'] as const).map(step => {
                             const st = pipelineStatuses[s.id]?.steps?.[step]?.status;
                             const dotCls = st === 'done' ? 'bg-forest-400' : st === 'running' ? 'bg-brand-400 animate-pulse' : st === 'error' ? 'bg-red-400' : 'bg-white/20';
-                            return <span key={step} className={`inline-block w-1.5 h-1.5 rounded-full mx-0.5 ${dotCls}`} title={step} />;
+                            const stepLabel: Record<string, string> = {
+                              pubmed: 'Ingéstion (7 sources)',
+                              embed: 'Embeddings',
+                              pico: 'PICO',
+                              metadata: 'Métadonnées',
+                              fulltext: 'Full-text',
+                              clustering: 'Clustering',
+                              rerank: 'Rerank sémantique',
+                            };
+                            return <span key={step} className={`inline-block w-1.5 h-1.5 rounded-full mx-0.5 ${dotCls}`} title={`${stepLabel[step] ?? step}: ${st ?? 'pending'}`} />;
                           })}
                         </span>
                       </div>
@@ -2984,11 +2997,13 @@ function ScenariosView({
                         <RotateCcw size={10} className="text-brand-400 animate-spin shrink-0" />
                         <span className="text-xs text-brand-300">
                           {pipelineStatuses[s.id].overall_status === 'error' ? '⚠ Erreur pipeline' :
-                            pipelineStatuses[s.id].current_step === 'pubmed' ? 'Ingestion PubMed...' :
+                            pipelineStatuses[s.id].current_step === 'pubmed' ? 'Ingéstion multi-sources (7 bases)...' :
+                            pipelineStatuses[s.id].current_step === 'embed' ? 'Génération embeddings...' :
                             pipelineStatuses[s.id].current_step === 'pico' ? 'Extraction PICO...' :
                             pipelineStatuses[s.id].current_step === 'metadata' ? 'Extraction métadonnées...' :
                             pipelineStatuses[s.id].current_step === 'fulltext' ? 'Récupération full-text...' :
                             pipelineStatuses[s.id].current_step === 'clustering' ? 'Clustering thématique...' :
+                            pipelineStatuses[s.id].current_step === 'rerank' ? 'Rerank sémantique...' :
                             'Pipeline en cours...'}
                         </span>
                       </div>
@@ -3077,6 +3092,8 @@ export default function App() {
   const [pipelineStatuses, setPipelineStatuses] = useState<Record<string, UserScenarioPipelineStatus>>({});
   const pipelinePollRef = useRef<Record<string, ReturnType<typeof setInterval>>>({});
   const [searchSourceBreakdown, setSearchSourceBreakdown] = useState<Record<string, number> | null>(null);
+  const [searchScoreType, setSearchScoreType] = useState<string | null>(null);
+  const [searchScoreLabel, setSearchScoreLabel] = useState<string | null>(null);
   const [folders, setFolders] = useState<ScenarioFolder[]>([]);
   
 
@@ -3208,6 +3225,8 @@ export default function App() {
       });
       setResults(data.results);
       setSearchSourceBreakdown(data.sourceBreakdown ?? null);
+      setSearchScoreType(data.scoreType ?? null);
+      setSearchScoreLabel(data.scoreLabel ?? null);
       const first = data.results[0] ?? null;
       if (first) {
         await loadDocumentDetail(first);
@@ -3837,8 +3856,14 @@ export default function App() {
                           </div>
 
                           <div className="mt-3 flex flex-wrap gap-2 text-xs text-forest-400">
-                            <span className="rounded-full bg-white/5 px-2 py-1">
-                              Score {(result.score ?? 0).toFixed(3)}
+                            <span className={`rounded-full px-2 py-1 ${
+                              searchScoreType === 'hybrid' ? 'bg-violet-500/20 text-violet-300' :
+                              searchScoreType === 'semantic' ? 'bg-blue-500/20 text-blue-300' :
+                              'bg-white/5'
+                            }`} title={searchScoreLabel ?? undefined}>
+                              {searchScoreType === 'hybrid' ? '⊕ Hybride' :
+                               searchScoreType === 'semantic' ? '◎ Sémantique' :
+                               '≡ Lexical'} {(result.score ?? 0).toFixed(3)}
                             </span>
                             {result.source && (
                               <span className="rounded-full bg-white/5 px-2 py-1">
