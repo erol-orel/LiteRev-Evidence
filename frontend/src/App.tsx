@@ -2699,7 +2699,7 @@ function ScenariosView({
           <div>
             <h2 className="text-xl font-semibold text-white">Tous les scénarios</h2>
             <p className="text-xs text-forest-400 mt-0.5">
-              {totalScenarios} scénarios · {totalArticles.toLocaleString()} articles indexés
+              {totalScenarios} scénarios · {totalArticles.toLocaleString()} articles
             </p>
           </div>
         </div>
@@ -2861,7 +2861,7 @@ function ScenariosView({
                           <RotateCcw size={9} className="text-brand-400 animate-spin shrink-0" />
                           <span className="text-xs text-brand-300">
                             {pStatus.overall_status === 'error' ? '⚠ Erreur pipeline' :
-                             pStatus.current_step === 'pubmed' ? 'Ingéstion multi-sources (7 bases)...' :
+                             pStatus.current_step === 'pubmed' ? 'Ingéstion multi-sources (8 sources)...' :
                              pStatus.current_step === 'embed' ? 'Génération embeddings...' :
                              pStatus.current_step === 'pico' ? 'Extraction PICO...' :
                              pStatus.current_step === 'metadata' ? 'Métadonnées...' :
@@ -2901,8 +2901,7 @@ function ScenariosView({
                   <div className="flex-1 min-w-0 cursor-pointer" onClick={() => setDetailScenarioId(s.id)}>
                     <p className="text-sm font-semibold text-white truncate group-hover:text-gold-300 transition">{s.title}</p>
                     <p className="text-xs text-white/40 truncate">
-                      {s.mode === "semantic" ? "Sémantique" : "Booléen"} · {s.articleCount} articles indexés
-                      {s.created_at && <> · {new Date(s.created_at).toLocaleDateString("fr-CH")}</>}
+                      {s.articleCount} articles · {new Date(s.created_at ?? '').toLocaleDateString("fr-CH")}
                     </p>
                     {s.title !== s.query && <p className="text-xs text-white/25 truncate font-mono">{s.query}</p>}
                     {pipelineStatuses[s.id] && pipelineStatuses[s.id].overall_status !== 'done' && (
@@ -2910,7 +2909,7 @@ function ScenariosView({
                         <RotateCcw size={10} className="text-brand-400 animate-spin shrink-0" />
                         <span className="text-xs text-brand-300">
                           {pipelineStatuses[s.id].overall_status === 'error' ? '⚠ Erreur pipeline' :
-                            pipelineStatuses[s.id].current_step === 'pubmed' ? 'Ingéstion multi-sources (7 bases)...' :
+                            pipelineStatuses[s.id].current_step === 'pubmed' ? 'Ingéstion multi-sources (8 sources)...' :
                             pipelineStatuses[s.id].current_step === 'embed' ? 'Génération embeddings...' :
                             pipelineStatuses[s.id].current_step === 'pico' ? 'Extraction PICO...' :
                             pipelineStatuses[s.id].current_step === 'metadata' ? 'Extraction métadonnées...' :
@@ -2924,7 +2923,7 @@ function ScenariosView({
                             const st = pipelineStatuses[s.id]?.steps?.[step]?.status;
                             const dotCls = st === 'done' ? 'bg-forest-400' : st === 'running' ? 'bg-brand-400 animate-pulse' : st === 'error' ? 'bg-red-400' : 'bg-white/20';
                             const stepLabel: Record<string, string> = {
-                              pubmed: 'Ingéstion (7 sources)',
+                              pubmed: 'Ingéstion (8 sources)',
                               embed: 'Embeddings',
                               pico: 'PICO',
                               metadata: 'Métadonnées',
@@ -2989,15 +2988,14 @@ function ScenariosView({
                   <div className="flex-1 min-w-0 cursor-pointer" onClick={() => setDetailScenarioId(s.id)}>
                     <p className="text-sm text-white/80 truncate group-hover:text-white transition">{s.title}</p>
                     <p className="text-xs text-white/30 truncate">
-                      {s.mode === "semantic" ? "Sémantique" : "Booléen"} · {s.articleCount} articles
-                      {s.created_at && <> · {new Date(s.created_at).toLocaleDateString("fr-CH")}</>}
+                      {s.articleCount} articles · {new Date(s.created_at ?? '').toLocaleDateString("fr-CH")}
                     </p>
                     {pipelineStatuses[s.id] && pipelineStatuses[s.id].overall_status !== 'done' && (
                       <div className="mt-1 flex items-center gap-2">
                         <RotateCcw size={10} className="text-brand-400 animate-spin shrink-0" />
                         <span className="text-xs text-brand-300">
                           {pipelineStatuses[s.id].overall_status === 'error' ? '⚠ Erreur pipeline' :
-                            pipelineStatuses[s.id].current_step === 'pubmed' ? 'Ingéstion multi-sources (7 bases)...' :
+                            pipelineStatuses[s.id].current_step === 'pubmed' ? 'Ingéstion multi-sources (8 sources)...' :
                             pipelineStatuses[s.id].current_step === 'embed' ? 'Génération embeddings...' :
                             pipelineStatuses[s.id].current_step === 'pico' ? 'Extraction PICO...' :
                             pipelineStatuses[s.id].current_step === 'metadata' ? 'Extraction métadonnées...' :
@@ -3690,7 +3688,7 @@ export default function App() {
                         <div className="group relative">
                           <span className="cursor-help text-xs text-white/25 hover:text-brand-300 transition px-1">ⓘ</span>
                           <div className="pointer-events-none absolute bottom-full left-1/2 z-50 mb-2 w-64 -translate-x-1/2 rounded-xl border border-white/10 bg-forest-900 p-3 text-xs text-white/70 opacity-0 shadow-xl transition-opacity group-hover:opacity-100">
-                            <p className="font-semibold text-white mb-1">{item === "semantic" ? "Recherche Sémantique" : "Recherche Booléenne"}</p>
+                            <p className="font-semibold text-white mb-1">{item === "semantic" ? "Recherche par Vecteurs" : "Recherche Booléenne"}</p>
                             {tooltipText}
                           </div>
                         </div>

@@ -3529,6 +3529,12 @@ def get_scenario_prisma(scenario_id: str) -> dict[str, Any]:
                 SUM(CASE WHEN d.source IN ('biorxiv','medrxiv') THEN 1 ELSE 0 END) AS preprints,
                 SUM(CASE WHEN d.source = 'openalex' THEN 1 ELSE 0 END) AS openalex,
                 SUM(CASE WHEN d.source = 'europepmc' THEN 1 ELSE 0 END) AS europepmc,
+                SUM(CASE WHEN d.source = 'crossref' THEN 1 ELSE 0 END) AS crossref,
+                SUM(CASE WHEN d.source = 'medrxiv' THEN 1 ELSE 0 END) AS medrxiv,
+                SUM(CASE WHEN d.source = 'biorxiv' THEN 1 ELSE 0 END) AS biorxiv,
+                SUM(CASE WHEN d.source = 'prospero' THEN 1 ELSE 0 END) AS prospero,
+                SUM(CASE WHEN d.source = 'cochrane' THEN 1 ELSE 0 END) AS cochrane,
+                SUM(CASE WHEN d.source = 'db_cache' THEN 1 ELSE 0 END) AS db_cache,
                 SUM(CASE WHEN d.screening_status = 'included' THEN 1 ELSE 0 END) AS included,
                 SUM(CASE WHEN d.screening_status = 'excluded' THEN 1 ELSE 0 END) AS excluded,
                 SUM(CASE WHEN d.screening_status = 'pending' OR d.screening_status IS NULL THEN 1 ELSE 0 END) AS pending,
@@ -3584,6 +3590,12 @@ def get_scenario_prisma(scenario_id: str) -> dict[str, Any]:
                 "preprints": int(stats["preprints"] or 0),
                 "openalex": int(stats["openalex"] or 0),
                 "europepmc": int(stats["europepmc"] or 0),
+                "crossref": int(stats.get("crossref") or 0),
+                "medrxiv": int(stats.get("medrxiv") or 0),
+                "biorxiv": int(stats.get("biorxiv") or 0),
+                "prospero": int(stats.get("prospero") or 0),
+                "cochrane": int(stats.get("cochrane") or 0),
+                "db_cache": int(stats.get("db_cache") or 0),
             },
             "duplicates_removed": duplicates,
         },
@@ -5990,10 +6002,13 @@ def _run_user_scenario_populate(
         _user_scenario_populate_jobs[scenario_id] = {
             "status": "running", "ingested": 0, "errors": 0, "total_found": 0,
             "sources": {
-                "pubmed": 0, "openalex": 0, "crossref": 0,
-                "europepmc": 0, "medrxiv": 0, "biorxiv": 0, "prospero": 0
+                "db_cache": 0, "pubmed": 0, "openalex": 0, "crossref": 0,
+                "europepmc": 0, "medrxiv": 0, "biorxiv": 0, "prospero": 0, "cochrane": 0
             }
         }
+
+    # L'étape DB-cache est déplacée à la fin pour compter d'abord les sources externes, puis dédupliquer !
+    db_cached_count = 0
 
     ENTREZ_BASE = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
     EMAIL = os.getenv("PUBMED_EMAIL", "literev@example.com")
@@ -6605,6 +6620,212 @@ def _run_user_scenario_populate(
         except Exception as _e:
             logger.warning(f"PROSPERO populate {scenario_id}: {_e}")
 
+        # ── Ingestion Cochrane (via API publique ou fallback PubMed CDSR) ──────
+        try:
+            _cochrane_results = []
+            # On tente de requêter l'API Cochrane Library directement
+            try:
+                _coch_resp = _requests.get(
+                    "https://www.cochranelibrary.com/search",
+                    params={
+                        "searchBy": "6",
+                        "searchText": query,
+                        "selectedType": "review",
+                        "isWordVariations": "true",
+                        "resultPerPage": "20",
+                        "searchType": "basic",
+                        "orderBy": "relevancy",
+                        "displayPerPage": "20",
+                    },
+                    headers={
+                        "Accept": "application/json",
+                        "User-Agent": "LiteRev-Evidence/1.0 (academic research tool)",
+                    },
+                    timeout=15,
+                )
+                if _coch_resp.status_code == 200:
+                    _coch_data = _coch_resp.json()
+                    _reviews = _coch_data.get("results", _coch_data.get("items", []))
+                    for _r in _reviews[:min(50, max_results)]:
+                        _title = _r.get("title", "")
+                        if not _title:
+                            continue
+                        _doi = _r.get("doi", _r.get("DOI", ""))
+                        _cochrane_results.append({
+                            "title": _title,
+                            "abstract": _r.get("abstract", _r.get("description", "")),
+                            "authors": _r.get("authors", ""),
+                            "doi": _doi,
+                            "url": _r.get("url", f"https://www.cochranelibrary.com/cdsr/doi/{_doi}" if _doi else None),
+                            "year": _r.get("year", _r.get("publishYear")),
+                            "external_id": f"cochrane:{_doi or _title[:50]}",
+                        })
+            except Exception as _e_coch_api:
+                logger.info(f"Cochrane direct API non disponible pour '{query}', fallback PubMed CDSR: {_e_coch_api}")
+
+            # Fallback PubMed CDSR si aucun résultat direct de l'API Cochrane
+            if not _cochrane_results:
+                try:
+                    _coch_term = f'("Cochrane Database Syst Rev"[Journal]) AND ({query})'
+                    _coch_esearch = _requests.get(
+                        "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi",
+                        params={
+                            "db": "pubmed",
+                            "term": _coch_term,
+                            "retmax": min(50, max_results),
+                            "retmode": "json",
+                            "sort": "relevance",
+                        },
+                        timeout=20,
+                    )
+                    _coch_esearch.raise_for_status()
+                    _coch_pmids = _coch_esearch.json().get("esearchresult", {}).get("idlist", [])
+                    if _coch_pmids:
+                        _coch_efetch = _requests.get(
+                            "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi",
+                            params={"db": "pubmed", "id": ",".join(_coch_pmids), "retmode": "xml"},
+                            timeout=30,
+                        )
+                        _coch_efetch.raise_for_status()
+                        _coch_root = ET.fromstring(_coch_efetch.text)
+                        for _art in _coch_root.findall(".//PubmedArticle"):
+                            _pmid_el = _art.find(".//PMID")
+                            _pmid_val = _pmid_el.text if _pmid_el is not None else None
+                            _title_el = _art.find(".//ArticleTitle")
+                            _title_val = "".join(_title_el.itertext()).strip() if _title_el is not None else ""
+                            if not _pmid_val or not _title_val:
+                                continue
+                            _abs_parts = []
+                            for _ab in _art.findall(".//AbstractText"):
+                                _t = "".join(_ab.itertext()).strip()
+                                if _t:
+                                    _abs_parts.append(_t)
+                            _abstract_val = " ".join(_abs_parts).strip() or None
+                            _doi_val = None
+                            for _id_el in _art.findall(".//ArticleId"):
+                                if _id_el.get("IdType") == "doi":
+                                    _doi_val = _id_el.text
+                                    break
+                            _year_el = _art.find(".//PubDate/Year")
+                            _year_val = int(_year_el.text) if _year_el is not None and _year_el.text else None
+                            
+                            _authors_list = []
+                            for _author in _art.findall(".//Author"):
+                                _last = _author.findtext("LastName", "")
+                                _fore = _author.findtext("ForeName", "")
+                                if _last:
+                                    _authors_list.append(f"{_last} {_fore}".strip())
+
+                            _cochrane_results.append({
+                                "title": _title_val,
+                                "abstract": _abstract_val,
+                                "authors": "; ".join(_authors_list[:10]) or None,
+                                "doi": _doi_val,
+                                "url": f"https://pubmed.ncbi.nlm.nih.gov/{_pmid_val}/",
+                                "year": _year_val,
+                                "external_id": f"cochrane:pubmed:{_pmid_val}",
+                            })
+                except Exception as _e_coch_fb:
+                    logger.error(f"Erreur fallback Cochrane PubMed: {_e_coch_fb}")
+
+            # Insertion des articles Cochrane trouvés
+            for _item in _cochrane_results:
+                _content_c = f"{_item['title']}\n\n{_item['abstract'] or ''}".strip()
+                if len(_content_c) < 30:
+                    continue
+                try:
+                    with engine.connect() as _c:
+                        _ex = _c.execute(text("""
+                            SELECT id FROM literature_document
+                            WHERE external_id = :eid AND project_context = 'literev' LIMIT 1
+                        """), {"eid": _item["external_id"]}).mappings().first()
+                    if _ex:
+                        _doc_id = _ex["id"]
+                    else:
+                        _dr = _requests.post(f"{API_LOCAL}/documents", headers=HEADERS_LOCAL, json={
+                            "source": "cochrane", "title": _item["title"], "abstract": _item["abstract"],
+                            "year": _item["year"], "url": _item["url"], "external_id": _item["external_id"],
+                            "project_context": "literev", "source_type": "systematic_review", "doi": _item["doi"],
+                            "authors": _item["authors"], "journal": "Cochrane Database of Systematic Reviews",
+                        }, timeout=30)
+                        _dr.raise_for_status()
+                        _doc_id = _dr.json()["id"]
+                        _requests.post(f"{API_LOCAL}/chunks", headers=HEADERS_LOCAL, json={
+                            "document_id": _doc_id, "chunk_index": 0, "content": _content_c,
+                            "chunk_type": "title_abstract", "token_count": len(_content_c.split()), "chunk_weight": 1.0, "metadata_json": {},
+                        }, timeout=60)
+                    with engine.begin() as _c:
+                        _c.execute(text("""
+                            INSERT INTO article_scenarios (document_id, scenario_id, similarity_score)
+                            VALUES (:doc_id, :sid, 1.0) ON CONFLICT (document_id, scenario_id) DO NOTHING
+                        """), {"doc_id": _doc_id, "sid": scenario_id})
+                    ingested += 1
+                    if _pipeline_callback is None:
+                        _user_scenario_populate_jobs[scenario_id]["sources"]["cochrane"] = \
+                            _user_scenario_populate_jobs[scenario_id]["sources"].get("cochrane", 0) + 1
+                except Exception as _e_ins:
+                    errors += 1
+                    logger.warning(f"Erreur insertion Cochrane article {_item.get('external_id')}: {_e_ins}")
+                _time.sleep(0.05)
+        except Exception as _e_coch_global:
+            logger.warning(f"Cochrane global populate {scenario_id}: {_e_coch_global}")
+
+        # ── Étape 9 : Récupération des articles déjà en DB (DB-cache) avec déduplication ──
+        db_cached_count = 0
+        try:
+            query_terms = [t.strip() for t in re.split(r"\s+", query.lower()) if t.strip()]
+            if query_terms:
+                like_clauses = []
+                params = {"sid": scenario_id}
+                for i, term in enumerate(query_terms):
+                    key = f"term_{i}"
+                    params[key] = f"%{term}%"
+                    like_clauses.append(
+                        f"""(
+                            LOWER(COALESCE(title, '')) LIKE :{key}
+                            OR LOWER(COALESCE(abstract, '')) LIKE :{key}
+                        )"""
+                    )
+                any_match_sql = " OR ".join(like_clauses)
+                
+                # Récupérer les articles existants qui matchent la requête dans la base globale
+                with engine.connect() as conn:
+                    existing_docs = conn.execute(text(f"""
+                        SELECT id FROM literature_document
+                        WHERE project_context = 'literev'
+                          AND ({any_match_sql})
+                    """), params).mappings().all()
+                
+                if existing_docs:
+                    # Récupérer les IDs des documents déjà assignés à ce scénario par les sources externes
+                    with engine.connect() as conn:
+                        assigned_docs = conn.execute(text("""
+                            SELECT document_id FROM article_scenarios
+                            WHERE scenario_id = :sid
+                        """), {"sid": scenario_id}).scalars().all()
+                    assigned_set = set(assigned_docs)
+                    
+                    # N'insérer et ne compter que les documents qui ne sont pas déjà assignés
+                    docs_to_assign = [doc for doc in existing_docs if doc["id"] not in assigned_set]
+                    
+                    if docs_to_assign:
+                        with engine.begin() as conn:
+                            for doc in docs_to_assign:
+                                conn.execute(text("""
+                                    INSERT INTO article_scenarios (document_id, scenario_id, similarity_score)
+                                    VALUES (:doc_id, :sid, 1.0)
+                                    ON CONFLICT (document_id, scenario_id) DO NOTHING
+                                """), {"doc_id": doc["id"], "sid": scenario_id})
+                                db_cached_count += 1
+                                ingested += 1
+                        
+                        if _pipeline_callback is None:
+                            _user_scenario_populate_jobs[scenario_id]["ingested"] += db_cached_count
+                            _user_scenario_populate_jobs[scenario_id]["sources"]["db_cache"] = db_cached_count
+                        logger.info(f"DB-cache: {db_cached_count} nouveaux articles déjà en DB assignés au scénario {scenario_id}")
+        except Exception as _e_db:
+            logger.warning(f"Erreur lors de la récupération du DB-cache: {_e_db}")
+
         # ── Mettre à jour le compteur dans user_scenarios ────────────────────────
         with engine.begin() as conn:
             conn.execute(text("""
@@ -6630,9 +6851,9 @@ def _run_user_scenario_populate(
                 "errors": errors,
                 "total_found": total_found,
                 "sources": _sources_final,
-                "message": f"{ingested} articles ingérés depuis 7 sources ({_src_summary}), {errors} erreurs.",
+                "message": f"{ingested} articles ingérés depuis 8 sources ({_src_summary}), {errors} erreurs.",
             }
-        logger.info(f"Populate user_scenario {scenario_id}: {ingested} articles ingérés (7 sources).")
+        logger.info(f"Populate user_scenario {scenario_id}: {ingested} articles ingérés (8 sources).")
         return ingested
 
     except Exception as e:
@@ -7417,7 +7638,7 @@ def populate_user_scenario(
 
     _user_scenario_populate_jobs[scenario_id] = {
         "status": "running", "ingested": 0, "errors": 0, "total_found": 0,
-        "sources": {"pubmed": 0, "openalex": 0, "crossref": 0, "europepmc": 0, "medrxiv": 0, "biorxiv": 0, "prospero": 0}
+        "sources": {"db_cache": 0, "pubmed": 0, "openalex": 0, "crossref": 0, "europepmc": 0, "medrxiv": 0, "biorxiv": 0, "prospero": 0, "cochrane": 0}
     }
     t = threading.Thread(
         target=_run_user_scenario_populate,
@@ -7432,7 +7653,7 @@ def populate_user_scenario(
         "query": query,
         "max_results": max_results,
         "message": f"Ingération multi-sources lancée en arrière-plan pour '{row['name']}' "
-                   "(PubMed + OpenAlex + Crossref + EuropePMC + medRxiv + bioRxiv + PROSPERO). "
+                   "(DB Cache + PubMed + OpenAlex + Crossref + EuropePMC + medRxiv + bioRxiv + PROSPERO + Cochrane). "
                    "Utilisez /user-scenarios/{id}/populate/status pour suivre la progression.",
     }
 
@@ -7501,7 +7722,7 @@ def start_user_scenario_pipeline(
         "query": query,
         "max_results": max_results,
         "message": f"Pipeline complet lancé pour '{row['name']}' "
-                   "(ingéstion 7 sources → embeddings → PICO → métadonnées → full-text → clustering → rerank). "
+                   "(ingéstion 8 sources → embeddings → PICO → métadonnées → full-text → clustering → rerank). "
                    "Suivez la progression via GET /user-scenarios/{id}/pipeline/status.",
         "steps": ["pubmed", "embed", "pico", "metadata", "fulltext", "clustering", "rerank"],
     }
@@ -7703,6 +7924,8 @@ def get_user_scenario_prisma(scenario_id: str) -> dict[str, Any]:
                 SUM(CASE WHEN d.source = 'medrxiv' THEN 1 ELSE 0 END) AS medrxiv,
                 SUM(CASE WHEN d.source = 'biorxiv' THEN 1 ELSE 0 END) AS biorxiv,
                 SUM(CASE WHEN d.source = 'prospero' THEN 1 ELSE 0 END) AS prospero,
+                SUM(CASE WHEN d.source = 'cochrane' THEN 1 ELSE 0 END) AS cochrane,
+                SUM(CASE WHEN d.source = 'db_cache' THEN 1 ELSE 0 END) AS db_cache,
                 SUM(CASE WHEN d.screening_status = 'included' THEN 1 ELSE 0 END) AS included,
                 SUM(CASE WHEN d.screening_status = 'excluded' THEN 1 ELSE 0 END) AS excluded,
                 SUM(CASE WHEN d.screening_status = 'pending' OR d.screening_status IS NULL THEN 1 ELSE 0 END) AS pending,
@@ -7739,6 +7962,8 @@ def get_user_scenario_prisma(scenario_id: str) -> dict[str, Any]:
                 "medrxiv": int(stats.get("medrxiv") or 0),
                 "biorxiv": int(stats.get("biorxiv") or 0),
                 "prospero": int(stats.get("prospero") or 0),
+                "cochrane": int(stats.get("cochrane") or 0),
+                "db_cache": int(stats.get("db_cache") or 0),
             },
             "duplicates_removed": duplicates,
         },

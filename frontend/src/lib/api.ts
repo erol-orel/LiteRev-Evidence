@@ -2185,6 +2185,7 @@ export interface UserScenarioPopulateStatus {
   message?: string;
   error?: string;
   sources?: {
+    db_cache?: number;
     pubmed?: number;
     openalex?: number;
     crossref?: number;
@@ -2192,6 +2193,8 @@ export interface UserScenarioPopulateStatus {
     medrxiv?: number;
     biorxiv?: number;
     prospero?: number;
+    cochrane?: number;
+    [key: string]: number | undefined;
   };
 }
 

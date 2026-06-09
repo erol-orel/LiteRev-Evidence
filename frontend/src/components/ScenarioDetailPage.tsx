@@ -184,7 +184,7 @@ function QueriesSection({ detail }: { detail: ScenarioDetail }) {
         <div className="flex items-center gap-2 mb-3">
           <MessageSquare size={12} className="text-brand-400" />
           <span className="text-xs font-semibold text-brand-300 uppercase tracking-wider">
-            Requêtes Langage Naturel : Recherche Sémantique ({detail.nl_queries.length})
+            Requêtes Langage Naturel ({detail.nl_queries.length})
           </span>
         </div>
         <div className="space-y-2">
@@ -817,7 +817,7 @@ function CorpusSection({ scenarioId }: { scenarioId: string; detail: ScenarioDet
       <div className="rounded-2xl border border-gold-500/20 bg-gold-500/5 px-4 py-3 flex items-start gap-3">
         <AlertTriangle size={14} className="text-gold-400 shrink-0 mt-0.5" />
         <div className="text-xs text-gold-200/80 leading-relaxed">
-          <strong className="text-gold-300">Sélection automatique</strong> : Ces articles ont été récupérés depuis 7 bases de données (PubMed, OpenAlex, Crossref, EuropePMC, medRxiv, bioRxiv, PROSPERO) par recherche lexicale et/ou sémantique. <strong>Aucun n'a été validé par un relecteur humain.</strong> Pour une revue systématique formelle, un screening humain en double-aveugle est requis (onglet Revue).
+          <strong className="text-gold-300">Sélection automatique</strong> : Ces articles ont été récupérés depuis 8 sources (DB Cache + PubMed, OpenAlex, Crossref, EuropePMC, medRxiv, bioRxiv, PROSPERO, Cochrane) par recherche multi-sources. <strong>Aucun n'a été validé par un relecteur humain.</strong> Pour une revue systématique formelle, un screening humain en double-aveugle est requis (onglet Revue).
         </div>
       </div>
 
@@ -885,7 +885,7 @@ function CorpusSection({ scenarioId }: { scenarioId: string; detail: ScenarioDet
         <div className="flex items-center justify-between flex-wrap gap-2">
           <SectionHeader
             icon={<FileText size={14} className="text-brand-400" />}
-            title={`Corpus d'articles (${data.total} articles indexés)`}
+            title={`Corpus d'articles (${data.total} articles)`}
             subtitle="Articles sélectionnés automatiquement : en attente de validation humaine (screening)"
           />
           {data.above_threshold !== undefined && (
@@ -1960,6 +1960,8 @@ const SOURCE_LABELS: Record<string, string> = {
   medrxiv: "medRxiv",
   biorxiv: "bioRxiv",
   prospero: "PROSPERO",
+  cochrane: "Cochrane",
+  db_cache: "DB Cache",
   preprints: "Preprints",
 };
 
@@ -3149,12 +3151,12 @@ function AlertsSection({ scenarioId }: { scenarioId: string }) {
           <h4 className="text-sm font-semibold text-white">Pipeline Living Review</h4>
         </div>
         <p className="text-xs text-white/50">
-          Le pipeline Living Review interroge automatiquement 7 bases de données (PubMed, OpenAlex, Crossref, EuropePMC, medRxiv, bioRxiv, PROSPERO)
+          Le pipeline Living Review interroge automatiquement 8 sources (DB Cache + PubMed, OpenAlex, Crossref, EuropePMC, medRxiv, bioRxiv, PROSPERO, Cochrane)
           avec la requête de ce scénario, insère les nouveaux articles, génère les embeddings et recalcule le clustering.
         </p>
         <div className="rounded-xl border border-white/5 bg-white/2 p-3 space-y-1.5 text-[10px] text-white/40">
           {[
-            'Interrogation multi-sources : PubMed + OpenAlex + Crossref + EuropePMC + medRxiv + bioRxiv + PROSPERO',
+            'Interrogation multi-sources : DB Cache + PubMed + OpenAlex + Crossref + EuropePMC + medRxiv + bioRxiv + PROSPERO + Cochrane',
             'Insertion des nouveaux articles (déduplication automatique)',
             'Génération des embeddings (text-embedding-3-small) : active les scores sémantiques et hybrides',
             'Extraction PICO par LLM (GPT-4.1-mini)',
