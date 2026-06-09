@@ -1,4 +1,4 @@
-export type SearchMode = "semantic" | "boolean";
+export type SearchMode = "semantic" | "boolean" | "lexical" | "hybrid";
 export type ProjectContext = "literev";
 export type RelevanceLabel = "pertinent" | "non-pertinent" | "incertain";
 

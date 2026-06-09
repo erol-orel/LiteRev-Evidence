@@ -133,7 +133,7 @@ function QueriesSection({ detail }: { detail: ScenarioDetail }) {
         title="Stratégie de Recherche"
         subtitle="Requêtes utilisées pour récupérer les articles du corpus"
       />
-      {/* Boolean Queries PubMed */}
+      {/* Boolean Queries multi-sources */}
       <div>
         <div className="flex items-center gap-2 mb-3">
           <Terminal size={12} className="text-brand-400" />
@@ -148,15 +148,31 @@ function QueriesSection({ detail }: { detail: ScenarioDetail }) {
                 <span className="text-[10px] font-mono text-brand-500 shrink-0 mt-0.5">Q{i + 1}</span>
                 <code className="text-xs text-brand-200 font-mono break-all leading-5">{q}</code>
               </div>
-              <a
-                href={`https://pubmed.ncbi.nlm.nih.gov/?term=${encodeURIComponent(q)}`}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="absolute top-2 right-2 opacity-0 group-hover:opacity-100 transition text-brand-400 hover:text-brand-300"
-                title="Ouvrir dans PubMed"
-              >
-                <ExternalLink size={11} />
-              </a>
+              <div className="absolute top-2 right-2 opacity-0 group-hover:opacity-100 transition flex gap-1">
+                <a
+                  href={`https://pubmed.ncbi.nlm.nih.gov/?term=${encodeURIComponent(q)}`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-brand-400 hover:text-brand-300 text-[9px] font-mono"
+                  title="Ouvrir dans PubMed"
+                >PubMed</a>
+                <span className="text-white/20">|</span>
+                <a
+                  href={`https://scholar.google.com/scholar?q=${encodeURIComponent(q)}`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-brand-400 hover:text-brand-300 text-[9px] font-mono"
+                  title="Ouvrir dans Google Scholar"
+                >Scholar</a>
+                <span className="text-white/20">|</span>
+                <a
+                  href={`https://europepmc.org/search?query=${encodeURIComponent(q)}`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-brand-400 hover:text-brand-300 text-[9px] font-mono"
+                  title="Ouvrir dans EuropePMC"
+                >EuropePMC</a>
+              </div>
             </div>
           )) : (
             <p className="text-xs text-white/35 italic">Aucune requête booléenne définie pour ce scénario.</p>
