@@ -138,7 +138,7 @@ interface SavedSearch {
   pinned?: boolean;
 }
 
-// localStorage supprimé — les recherches sauvegardées sont désormais persistées en backend (table user_scenarios)
+// localStorage supprimé : les recherches sauvegardées sont désormais persistées en backend (table user_scenarios)
 
 type DetailView = {
   id: number | null;
@@ -849,7 +849,7 @@ function StatsView({ corpusStats, gesicaStats, fulltextStats, scenarios, statsBy
         <div className="rounded-3xl border border-white/10 bg-white/5 p-5 shadow-2xl">
           <h2 className="mb-4 flex items-center gap-2 text-lg font-semibold text-white">
             <Activity size={18} className="text-brand-400" />
-            Corpus LiteRev — Niveaux de preuve
+            Corpus LiteRev : Niveaux de preuve
           </h2>
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
             {Object.entries(gesicaStats.evidenceStrengthDistribution).map(([strength, count]) => {
@@ -2938,7 +2938,7 @@ function ScenariosView({
                       </div>
                     )}
                     {pipelineStatuses[s.id]?.overall_status === 'done' && (
-                      <p className="text-xs text-forest-400 mt-0.5">✓ Pipeline terminé — {pipelineStatuses[s.id]?.message}</p>
+                      <p className="text-xs text-forest-400 mt-0.5">✓ Pipeline terminé : {pipelineStatuses[s.id]?.message}</p>
                     )}
                   </div>
                   <button
@@ -3466,7 +3466,7 @@ export default function App() {
             <div className="max-w-3xl">
               <div className="flex items-center gap-4 mb-2">
                 <img src="/literev-logo.png" alt="LiteRev" className="h-14 w-auto object-contain" />
-                <h1 className="text-3xl font-bold tracking-tight text-white">- Evidence to Scenario</h1>
+                <h1 className="text-3xl font-bold tracking-tight text-white">Evidence to Scenario</h1>
               </div>
             </div>
 
@@ -3604,7 +3604,7 @@ export default function App() {
                     <span className="mb-2 block text-sm font-medium text-white/80">
                       Années{" "}
                       <span className="font-mono text-brand-300 text-xs">
-                        {yearRange[0]} — {yearRange[1]}
+                        {yearRange[0]} - {yearRange[1]}
                       </span>
                     </span>
                     {(() => {
@@ -3664,7 +3664,7 @@ export default function App() {
                   {(["semantic", "boolean"] as SearchMode[]).map((item) => {
                     const tooltipText = item === "semantic"
                       ? "Recherche par sens et contexte (vecteurs). Résultats variés, non-déterministes, triés par pertinence sémantique. Idéal pour explorer un sujet large. Qualité élevée, quantité variable."
-                      : "Recherche par mots-clés exacts (AND, OR, NOT). Résultats déterministes et reproductibles — les mêmes mots donnent toujours les mêmes résultats. Idéal pour des requêtes précises.";
+                      : "Recherche par mots-clés exacts (AND, OR, NOT). Résultats déterministes et reproductibles. Les mêmes mots donnent toujours les mêmes résultats. Idéal pour des requêtes précises.";
                     return (
                       <div key={item} className="relative flex items-center gap-0.5">
                         <button

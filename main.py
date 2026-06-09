@@ -291,7 +291,7 @@ def create_chunk(
         payload["metadata_json"] = "{}"
     elif isinstance(meta, dict):
         payload["metadata_json"] = json.dumps(meta)
-    # else already a string — leave as-is
+    # else already a string : leave as-is
 
     with engine.begin() as conn:
         new_id = conn.execute(sql, payload).scalar_one()
@@ -603,7 +603,7 @@ def search(payload: SearchIn) -> dict[str, Any]:
 
     if use_vector and payload.mode == "hybrid":
         # 1. Recherche Hybride : articles avec embedding (score cosinus + textuel)
-        # + articles sans embedding (score textuel seul) — UNION pour tout inclure
+        # + articles sans embedding (score textuel seul) : UNION pour tout inclure
         params["query_embedding"] = str(query_embedding)
         sql = text(f"""
             SELECT * FROM (
@@ -807,7 +807,7 @@ def search(payload: SearchIn) -> dict[str, Any]:
         score_label = "Sémantique (similarité cosinus vectorielle)"
     else:
         score_type = "lexical"
-        score_label = "Lexical (BM25 simulé — score normalisé entre 0 et 1)"
+        score_label = "Lexical (BM25 simulé : score normalisé entre 0 et 1)"
     return {
         "results": results,
         "count": len(results),
@@ -1225,7 +1225,7 @@ def get_geoai4ei_stats() -> dict[str, Any]:
     }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# GESICA Scenarios Metadata — 31 scénarios fins issus de la revue systématique
+# GESICA Scenarios Metadata : 31 scénarios fins issus de la revue systématique
 # ─────────────────────────────────────────────────────────────────────────────
 
 GESICA_SCENARIO_METADATA: dict[str, dict[str, Any]] = {
@@ -2433,7 +2433,7 @@ def get_fulltext_stats() -> dict[str, Any]:
             "mode": "hybrid" if hybrid_active else ("lexical_only" if not openai_key else "no_embeddings"),
             "note": (
                 "Mode hybride actif (pgvector cosine + BM25)" if hybrid_active
-                else "Mode lexical uniquement — clé OpenAI absente ou embeddings non générés"
+                else "Mode lexical uniquement : clé OpenAI absente ou embeddings non générés"
             ),
         },
         "by_source": [
@@ -2632,32 +2632,32 @@ def living_review_run(scenario_id: str = "all", days: int = 30, dry_run: bool = 
 
 
 SCENARIO_LIVING_REVIEW_IDS = [
-    # Cluster 1 — Patient-centered prehospital critical care
+    # Cluster 1 : Patient-centered prehospital critical care
     "cardiac-arrest-prediction",
     "stroke-detection",
     "trauma-severity-assessment",
     "clinical-deterioration-prediction",
     "patient-pathway-optimization",
     "mci-victim-estimation",
-    # Cluster 2 — Environmental & Disaster Risk
+    # Cluster 2 : Environmental & Disaster Risk
     "environmental-risk-forecasting",
     "disaster-risk-assessment",
     "climate-impact-on-ems",
-    # Cluster 3 — Prehospital Triage & Risk Stratification
+    # Cluster 3 : Prehospital Triage & Risk Stratification
     "emergency-call-qualification",
     "call-prioritization",
     "mass-casualty-triage",
     "undertriage-detection",
     "dispatch-decision-support",
     "triage-support",
-    # Cluster 4 — EMS Operations & Resource Management
+    # Cluster 4 : EMS Operations & Resource Management
     "response-time-optimization",
     "ambulance-dispatch-optimization",
     "staffing-level-prediction",
     "hospital-capacity-forecasting",
     "demand-forecasting",
     "resource-allocation",
-    # Cluster 5 — Epidemiological & Strategic Surveillance
+    # Cluster 5 : Epidemiological & Strategic Surveillance
     "epidemic-early-warning",
     "surveillance",
     "surge-management",
@@ -2761,7 +2761,7 @@ def endpoint_mci_victim():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# GESICA Scenario Detail Endpoints (Phase 2 — Refonte interface)
+# GESICA Scenario Detail Endpoints (Phase 2 : Refonte interface)
 # ─────────────────────────────────────────────────────────────────────────────
 
 @app.get("/gesica/scenarios/{scenario_id}/detail")
@@ -3549,13 +3549,13 @@ def get_scenario_prisma(scenario_id: str) -> dict[str, Any]:
     with_fulltext = int(stats["with_fulltext"] or 0)
 
     # ── Logique PRISMA 2020 correcte ──────────────────────────────────────────
-    # Étape 1 — Identification
+    # Étape 1 : Identification
     # total_identified = tous les enregistrements en DB (doublons inclus)
     # records_after_dedup = articles uniques = total - doublons marqués
     total_identified = total
     records_after_dedup = total - duplicates  # articles uniques
 
-    # Étape 2 — Screening titre/résumé
+    # Étape 2 : Screening titre/résumé
     # En attente de screening = tous les articles uniques non encore évalués
     # = records_after_dedup (la valeur correcte demandée)
     records_screened = records_after_dedup
@@ -3565,11 +3565,11 @@ def get_scenario_prisma(scenario_id: str) -> dict[str, Any]:
     screened_manually = included + excluded
     awaiting_screening = records_after_dedup - screened_manually  # = en attente
 
-    # Étape 3 — Éligibilité fulltext
+    # Étape 3 : Éligibilité fulltext
     eligible_for_fulltext = records_screened - excluded_title_abstract
     fulltext_not_retrieved = max(0, eligible_for_fulltext - with_fulltext)
 
-    # Étape 4 — Inclus
+    # Étape 4 : Inclus
     total_included_final = included if screening_done else 0
     awaiting_assessment = awaiting_screening if not screening_done else max(0, awaiting_screening)
 
@@ -3603,7 +3603,7 @@ def get_scenario_prisma(scenario_id: str) -> dict[str, Any]:
             "total_included": total_included_final,
             "awaiting_assessment": awaiting_assessment,
             "screening_complete": screening_done,
-            "note": "Screening manuel non encore effectué — tous les articles uniques sont en attente d'évaluation." if not screening_done else "",
+            "note": "Screening manuel non encore effectué : tous les articles uniques sont en attente d'évaluation." if not screening_done else "",
         },
     }
 
@@ -5157,7 +5157,7 @@ def get_evidence_brief_pdf(scenario_id: str):
     story = []
 
     # En-tête
-    story.append(Paragraph("LiteRev — Evidence to Scenario", small_style))
+    story.append(Paragraph("LiteRev : Evidence to Scenario", small_style))
     story.append(Paragraph(f"Evidence Brief : {meta['title']}", title_style))
     story.append(Paragraph(
         f"Scénario LiteRev · Généré le {__import__('datetime').datetime.now().strftime('%d/%m/%Y à %H:%M')}",
@@ -5230,7 +5230,7 @@ def get_evidence_brief_pdf(scenario_id: str):
     # Footer
     story.append(HRFlowable(width="100%", thickness=1, color=colors.HexColor("#e5e7eb"), spaceBefore=16))
     story.append(Paragraph(
-        "Ce document a été généré automatiquement par LiteRev — Evidence to Scenario. "
+        "Ce document a été généré automatiquement par LiteRev : Evidence to Scenario. "
         "Il ne constitue pas un avis médical. Pour usage interne uniquement.",
         small_style
     ))
@@ -5434,13 +5434,13 @@ def send_alert_digest(
         for sub in rows:
             try:
                 msg = MIMEMultipart("alternative")
-                msg["Subject"] = f"[LiteRev] Nouveaux articles — Scénario {sub['scenario_id']}"
+                msg["Subject"] = f"[LiteRev] Nouveaux articles : Scénario {sub['scenario_id']}"
                 msg["From"] = smtp_user
                 msg["To"] = sub["email"]
 
                 body = f"""
                 <html><body>
-                <h2 style="color:#1a3a2a">LiteRev — Nouveaux articles disponibles</h2>
+                <h2 style="color:#1a3a2a">LiteRev : Nouveaux articles disponibles</h2>
                 <p>De nouveaux articles ont été ajoutés au scénario <strong>{sub['scenario_id']}</strong>.</p>
                 <p><a href="http://62.238.39.50/#scenario/{sub['scenario_id']}" style="color:#22c55e">
                 Consulter le scénario</a></p>
@@ -5466,7 +5466,7 @@ def send_alert_digest(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# USER SCENARIOS — Recherches sauvegardées persistées en base
+# USER SCENARIOS : Recherches sauvegardées persistées en base
 # ─────────────────────────────────────────────────────────────────────────────
 # Chaque recherche sauvegardée devient un vrai scénario utilisateur avec :
 #   - son propre corpus (articles ingérés via PubMed)
@@ -7400,7 +7400,7 @@ def populate_user_scenario(
 ) -> dict[str, Any]:
     """
     Déclenche l'ingéstion multi-sources en arrière-plan pour un scénario utilisateur.
-    Sans limite fixe — max_results par défaut à 10000 (1000 par source).
+    Sans limite fixe : max_results par défaut à 10000 (1000 par source).
     """
     import threading
     row = _get_user_scenario_or_404(scenario_id)
@@ -7566,13 +7566,13 @@ def get_user_scenario_embedding_status(scenario_id: str) -> dict[str, Any]:
     # Déterminer le statut
     if chunks_pending == 0 and total_chunks > 0:
         status = "complete"
-        status_label = "Tous les chunks sont embedés — scores sémantiques et hybrides disponibles"
+        status_label = "Tous les chunks sont embedés : scores sémantiques et hybrides disponibles"
     elif chunks_embedded == 0:
         status = "none"
-        status_label = "Aucun embedding disponible — seul le score lexical (BM25) est actif"
+        status_label = "Aucun embedding disponible : seul le score lexical (BM25) est actif"
     else:
         status = "partial"
-        status_label = f"{chunks_embedded}/{total_chunks} chunks embedés ({embedding_pct}%) — scores hybrides partiellement disponibles"
+        status_label = f"{chunks_embedded}/{total_chunks} chunks embedés ({embedding_pct}%) : scores hybrides partiellement disponibles"
 
     return {
         "scenario_id": scenario_id,
@@ -7776,7 +7776,10 @@ def get_user_scenario_evidence_brief(scenario_id: str) -> dict[str, Any]:
                 COUNT(*) FILTER (WHERE d.screening_status = 'included') AS included,
                 COUNT(*) FILTER (WHERE d.screening_status = 'excluded') AS excluded,
                 COUNT(*) FILTER (WHERE d.screening_status = 'pending' OR d.screening_status IS NULL) AS pending,
-                COUNT(*) FILTER (WHERE d.has_fulltext IS TRUE) AS with_fulltext,
+                COUNT(*) FILTER (WHERE EXISTS (
+                    SELECT 1 FROM document_chunk c
+                    WHERE c.document_id = d.id AND c.chunk_type = 'fulltext_section'
+                )) AS with_fulltext,
                 MIN(d.year) AS year_min,
                 MAX(d.year) AS year_max,
                 AVG(d.citation_count) FILTER (WHERE d.citation_count IS NOT NULL) AS avg_citations,

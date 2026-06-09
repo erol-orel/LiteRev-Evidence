@@ -2128,7 +2128,7 @@ export function getEvidenceBriefPdfUrl(scenarioId: string): string {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// USER SCENARIOS — Helpers de routage et CRUD
+// USER SCENARIOS : Helpers de routage et CRUD
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
