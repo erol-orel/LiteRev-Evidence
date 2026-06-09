@@ -6542,90 +6542,103 @@ def _run_user_scenario_populate(
 
         # ── Ingestion PROSPERO (via PubMed systematic reviews) ────────────────
         try:
-            _prospero_resp = _requests.get(
-                "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi",
-                params={
-                    "db": "pubmed",
-                    "term": f'({query}) AND ("systematic review"[Publication Type] OR "meta-analysis"[Publication Type])',
-                    "retmax": min(1000, max_results),
-                    "retmode": "json",
-                    "sort": "relevance",
-                },
-                timeout=20,
-            )
-            _prospero_resp.raise_for_status()
-            _pmids = _prospero_resp.json().get("esearchresult", {}).get("idlist", [])
+            # Retry jusqu'à 3 fois en cas d'erreur 500 PubMed
+            _prospero_resp = None
+            for _retry_p in range(3):
+                try:
+                    _prospero_resp = _requests.get(
+                        "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi",
+                        params={
+                            "db": "pubmed",
+                            "term": f'({query}) AND ("systematic review"[Publication Type] OR "meta-analysis"[Publication Type])',
+                            "retmax": min(1000, max_results),
+                            "retmode": "json",
+                            "sort": "relevance",
+                        },
+                        timeout=30,
+                    )
+                    _prospero_resp.raise_for_status()
+                    break
+                except Exception as _ep:
+                    logger.warning(f"PROSPERO esearch tentative {_retry_p+1}/3: {_ep}")
+                    _time.sleep(3 * (_retry_p + 1))
+            _pmids = (_prospero_resp.json().get("esearchresult", {}).get("idlist", []) if _prospero_resp else [])
             if _pmids:
                 import xml.etree.ElementTree as _ET3
                 # Fetch par batches de 200 (limite NCBI efetch)
                 _pmids_to_fetch = _pmids[:min(1000, max_results)]
                 for _batch_start in range(0, len(_pmids_to_fetch), 200):
                     _batch_ids = _pmids_to_fetch[_batch_start:_batch_start + 200]
-                    _fetch_resp = _requests.get(
-                        "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi",
-                        params={"db": "pubmed", "id": ",".join(_batch_ids), "retmode": "xml"},
-                        timeout=30,
-                    )
-                    _fetch_resp.raise_for_status()
+                    try:
+                        _fetch_resp = _requests.get(
+                            "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi",
+                            params={"db": "pubmed", "id": ",".join(_batch_ids), "retmode": "xml"},
+                            timeout=45,
+                        )
+                        _fetch_resp.raise_for_status()
+                    except Exception as _ep2:
+                        logger.warning(f"PROSPERO efetch batch {_batch_start}: {_ep2}")
+                        _time.sleep(2)
+                        continue
                     _root = _ET3.fromstring(_fetch_resp.text)
                     _time.sleep(0.3)
-                for _art in _root.findall(".//PubmedArticle"):
-                    _pmid_el = _art.find(".//PMID")
-                    _pmid_val = _pmid_el.text if _pmid_el is not None else None
-                    _title_el = _art.find(".//ArticleTitle")
-                    _title_val = "".join(_title_el.itertext()).strip() if _title_el is not None else ""
-                    if not _pmid_val or not _title_val:
-                        continue
-                    _abs_parts = []
-                    for _ab in _art.findall(".//AbstractText"):
-                        _t = "".join(_ab.itertext()).strip()
-                        if _t:
-                            _abs_parts.append(_t)
-                    _abstract_val = " ".join(_abs_parts).strip() or None
-                    _doi_val = None
-                    for _id_el in _art.findall(".//ArticleId"):
-                        if _id_el.get("IdType") == "doi":
-                            _doi_val = _id_el.text
-                            break
-                    _year_el = _art.find(".//PubDate/Year")
-                    _year_val = int(_year_el.text) if _year_el is not None and _year_el.text else None
-                    _ext_id_p = f"prospero:pubmed:{_pmid_val}"
-                    _content_p = f"{_title_val}\n\n{_abstract_val or ''}".strip()
-                    if len(_content_p) < 30:
-                        continue
-                    try:
-                        with engine.connect() as _c:
-                            _ex = _c.execute(text("""
-                                SELECT id FROM literature_document
-                                WHERE external_id = :eid AND project_context = 'literev' LIMIT 1
-                            """), {"eid": _ext_id_p}).mappings().first()
-                        if _ex:
-                            _doc_id = _ex["id"]
-                        else:
-                            _dr = _requests.post(f"{API_LOCAL}/documents", headers=HEADERS_LOCAL, json={
-                                "source": "prospero", "title": _title_val, "abstract": _abstract_val,
-                                "year": _year_val, "url": f"https://pubmed.ncbi.nlm.nih.gov/{_pmid_val}/",
-                                "external_id": _ext_id_p, "project_context": "literev",
-                                "source_type": "systematic_review", "doi": _doi_val,
-                            }, timeout=30)
-                            _dr.raise_for_status()
-                            _doc_id = _dr.json()["id"]
-                            _requests.post(f"{API_LOCAL}/chunks", headers=HEADERS_LOCAL, json={
-                                "document_id": _doc_id, "chunk_index": 0, "content": _content_p,
-                                "chunk_type": "title_abstract", "token_count": len(_content_p.split()), "chunk_weight": 1.0, "metadata_json": {},
-                            }, timeout=60)
-                        with engine.begin() as _c:
-                            _c.execute(text("""
-                                INSERT INTO article_scenarios (document_id, scenario_id, similarity_score)
-                                VALUES (:doc_id, :sid, 1.0) ON CONFLICT (document_id, scenario_id) DO NOTHING
-                            """), {"doc_id": _doc_id, "sid": scenario_id})
-                        ingested += 1
-                        if _pipeline_callback is None:
-                            _user_scenario_populate_jobs[scenario_id]["sources"]["prospero"] = \
-                                _user_scenario_populate_jobs[scenario_id]["sources"].get("prospero", 0) + 1
-                    except Exception:
-                        errors += 1
-                    _time.sleep(0.1)
+                    for _art in _root.findall(".//PubmedArticle"):
+                        _pmid_el = _art.find(".//PMID")
+                        _pmid_val = _pmid_el.text if _pmid_el is not None else None
+                        _title_el = _art.find(".//ArticleTitle")
+                        _title_val = "".join(_title_el.itertext()).strip() if _title_el is not None else ""
+                        if not _pmid_val or not _title_val:
+                            continue
+                        _abs_parts = []
+                        for _ab in _art.findall(".//AbstractText"):
+                            _t = "".join(_ab.itertext()).strip()
+                            if _t:
+                                _abs_parts.append(_t)
+                        _abstract_val = " ".join(_abs_parts).strip() or None
+                        _doi_val = None
+                        for _id_el in _art.findall(".//ArticleId"):
+                            if _id_el.get("IdType") == "doi":
+                                _doi_val = _id_el.text
+                                break
+                        _year_el = _art.find(".//PubDate/Year")
+                        _year_val = int(_year_el.text) if _year_el is not None and _year_el.text else None
+                        _ext_id_p = f"prospero:pubmed:{_pmid_val}"
+                        _content_p = f"{_title_val}\n\n{_abstract_val or ''}".strip()
+                        if len(_content_p) < 30:
+                            continue
+                        try:
+                            with engine.connect() as _c:
+                                _ex = _c.execute(text("""
+                                    SELECT id FROM literature_document
+                                    WHERE external_id = :eid AND project_context = 'literev' LIMIT 1
+                                """), {"eid": _ext_id_p}).mappings().first()
+                            if _ex:
+                                _doc_id = _ex["id"]
+                            else:
+                                _dr = _requests.post(f"{API_LOCAL}/documents", headers=HEADERS_LOCAL, json={
+                                    "source": "prospero", "title": _title_val, "abstract": _abstract_val,
+                                    "year": _year_val, "url": f"https://pubmed.ncbi.nlm.nih.gov/{_pmid_val}/",
+                                    "external_id": _ext_id_p, "project_context": "literev",
+                                    "source_type": "systematic_review", "doi": _doi_val,
+                                }, timeout=30)
+                                _dr.raise_for_status()
+                                _doc_id = _dr.json()["id"]
+                                _requests.post(f"{API_LOCAL}/chunks", headers=HEADERS_LOCAL, json={
+                                    "document_id": _doc_id, "chunk_index": 0, "content": _content_p,
+                                    "chunk_type": "title_abstract", "token_count": len(_content_p.split()), "chunk_weight": 1.0, "metadata_json": {},
+                                }, timeout=60)
+                            with engine.begin() as _c:
+                                _c.execute(text("""
+                                    INSERT INTO article_scenarios (document_id, scenario_id, similarity_score)
+                                    VALUES (:doc_id, :sid, 1.0) ON CONFLICT (document_id, scenario_id) DO NOTHING
+                                """), {"doc_id": _doc_id, "sid": scenario_id})
+                            ingested += 1
+                            if _pipeline_callback is None:
+                                _user_scenario_populate_jobs[scenario_id]["sources"]["prospero"] = \
+                                    _user_scenario_populate_jobs[scenario_id]["sources"].get("prospero", 0) + 1
+                        except Exception:
+                            errors += 1
+                        _time.sleep(0.1)
         except Exception as _e:
             logger.warning(f"PROSPERO populate {scenario_id}: {_e}")
 
@@ -6676,26 +6689,43 @@ def _run_user_scenario_populate(
             if not _cochrane_results:
                 try:
                     _coch_term = f'("Cochrane Database Syst Rev"[Journal]) AND ({query})'
-                    _coch_esearch = _requests.get(
-                        "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi",
-                        params={
-                            "db": "pubmed",
-                            "term": _coch_term,
-                            "retmax": min(50, max_results),
-                            "retmode": "json",
-                            "sort": "relevance",
-                        },
-                        timeout=20,
-                    )
-                    _coch_esearch.raise_for_status()
-                    _coch_pmids = _coch_esearch.json().get("esearchresult", {}).get("idlist", [])
+                    # Retry jusqu'à 3 fois en cas d'erreur 500 PubMed
+                    _coch_esearch = None
+                    for _retry_c in range(3):
+                        try:
+                            _coch_esearch = _requests.get(
+                                "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi",
+                                params={
+                                    "db": "pubmed",
+                                    "term": _coch_term,
+                                    "retmax": min(50, max_results),
+                                    "retmode": "json",
+                                    "sort": "relevance",
+                                },
+                                timeout=30,
+                            )
+                            _coch_esearch.raise_for_status()
+                            break
+                        except Exception as _ec:
+                            logger.warning(f"Cochrane fallback esearch tentative {_retry_c+1}/3: {_ec}")
+                            _time.sleep(3 * (_retry_c + 1))
+                    _coch_pmids = (_coch_esearch.json().get("esearchresult", {}).get("idlist", []) if _coch_esearch else [])
                     if _coch_pmids:
-                        _coch_efetch = _requests.get(
-                            "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi",
-                            params={"db": "pubmed", "id": ",".join(_coch_pmids), "retmode": "xml"},
-                            timeout=30,
-                        )
-                        _coch_efetch.raise_for_status()
+                        _coch_efetch = None
+                        for _retry_cf in range(3):
+                            try:
+                                _coch_efetch = _requests.get(
+                                    "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi",
+                                    params={"db": "pubmed", "id": ",".join(_coch_pmids), "retmode": "xml"},
+                                    timeout=45,
+                                )
+                                _coch_efetch.raise_for_status()
+                                break
+                            except Exception as _ecf:
+                                logger.warning(f"Cochrane fallback efetch tentative {_retry_cf+1}/3: {_ecf}")
+                                _time.sleep(3 * (_retry_cf + 1))
+                        if not _coch_efetch:
+                            raise Exception("Cochrane fallback efetch échoué après 3 tentatives")
                         _coch_root = ET.fromstring(_coch_efetch.text)
                         for _art in _coch_root.findall(".//PubmedArticle"):
                             _pmid_el = _art.find(".//PMID")
