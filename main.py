@@ -6060,23 +6060,32 @@ def _run_user_scenario_populate(
             retmax_batch = min(BATCH_SIZE, effective_max - retstart)
             if retmax_batch <= 0:
                 break
+            # Guard : PubMed retourne 400 si retstart >= total_found
+            if retstart >= total_found:
+                break
 
             # 2. Fetch XML PubMed (par batch)
-            r2 = _requests.post(
-                f"{ENTREZ_BASE}/efetch.fcgi",
-                data={
-                    "db": "pubmed",
-                    "WebEnv": web_env,
-                    "query_key": query_key,
-                    "retstart": retstart,
-                    "retmax": retmax_batch,
-                    "rettype": "xml",
-                    "retmode": "xml",
-                    "email": EMAIL,
-                },
-                timeout=90,
-            )
-            r2.raise_for_status()
+            try:
+                r2 = _requests.post(
+                    f"{ENTREZ_BASE}/efetch.fcgi",
+                    data={
+                        "db": "pubmed",
+                        "WebEnv": web_env,
+                        "query_key": query_key,
+                        "retstart": retstart,
+                        "retmax": retmax_batch,
+                        "rettype": "xml",
+                        "retmode": "xml",
+                        "email": EMAIL,
+                    },
+                    timeout=90,
+                )
+                r2.raise_for_status()
+            except Exception as _e_fetch:
+                logger.warning(f"PubMed efetch batch {batch_idx} (retstart={retstart}): {_e_fetch} — batch ignoré")
+                errors += 1
+                _time.sleep(1)
+                continue
             root = ET.fromstring(r2.content)
 
             for article_elem in root.findall(".//PubmedArticle"):
