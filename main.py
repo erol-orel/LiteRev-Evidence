@@ -169,6 +169,34 @@ def get_filter_options() -> dict[str, list[dict[str, Any]]]:
         ("year", "year"),
     ]
     out: dict[str, list[dict[str, Any]]] = {}
+
+    # Normalisation des valeurs : fusionne les variantes avec tiret/underscore
+    def _normalize_key(val: str) -> str:
+        return val.lower().replace("-", "_").strip()
+
+    def _make_label(val: str) -> str:
+        return (
+            str(val)
+            .replace("_", " ")
+            .replace("-", " ")
+            .title()
+            .replace("Covid 19", "COVID-19")
+            .replace("Ems", "EMS")
+            .replace("Ai", "AI")
+            .replace("Uk", "UK")
+            .replace("Usa", "USA")
+        )
+
+    # Pays/régions qui sont des combinaisons (contiennent virgule, 'and', chiffres+Countries)
+    import re as _re
+    def _is_singleton_geo(val: str) -> bool:
+        v = str(val).strip()
+        if _re.search(r'\d+\s+(Countries|Cities|Regions)', v, _re.IGNORECASE):
+            return False
+        if ',' in v or ' and ' in v.lower() or ' & ' in v:
+            return False
+        return True
+
     with engine.connect() as conn:
         for key, col in fields:
             rows = conn.execute(
@@ -179,27 +207,33 @@ def get_filter_options() -> dict[str, list[dict[str, Any]]]:
                     ORDER BY {col}
                 """)
             ).mappings().all()
-            values = []
+
+            seen_normalized: dict[str, dict[str, str]] = {}  # normalized_key -> {value, label}
             for row in rows:
                 value = row["value"]
                 if value is None:
                     continue
+
+                # Filtrer les scénarios usr-XXXX dans scenario_type
+                if key == "scenario_type" and str(value).startswith("usr-"):
+                    continue
+
+                # Pour geographic_scope : ne garder que les pays/régions singletons
+                if key == "geographic_scope" and not _is_singleton_geo(str(value)):
+                    continue
+
                 if key == "year":
                     label = str(value)
+                    norm = str(value)
                 else:
-                    label = (
-                        str(value)
-                        .replace("_", " ")
-                        .replace("-", " ")
-                        .title()
-                        .replace("Covid 19", "COVID-19")
-                        .replace("Ems", "EMS")
-                        .replace("Ai", "AI")
-                        .replace("Uk", "UK")
-                        .replace("Usa", "USA")
-                    )
-                values.append({"value": value, "label": label})
-            out[key] = values
+                    label = _make_label(str(value))
+                    norm = _normalize_key(str(value))
+
+                # Dédoublonnage par clé normalisée (ex: systematic-review == systematic_review)
+                if norm not in seen_normalized:
+                    seen_normalized[norm] = {"value": value, "label": label}
+
+            out[key] = list(seen_normalized.values())
     return out
 
 # ─────────────────────────────────────────────────────────────────────────────

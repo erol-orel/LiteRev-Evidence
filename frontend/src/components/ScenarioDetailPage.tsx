@@ -3110,7 +3110,7 @@ function EnrichmentSection({ scenarioId }: { scenarioId: string }) {
 
 // ─── Seuil de similarite ajustable ─────────────────────────────────────────
 
-function SeuilSection({ scenarioId }: { scenarioId: string }) {
+function SeuilSection({ scenarioId, onSaved }: { scenarioId: string; onSaved?: () => void }) {
   const [threshold, setThreshold] = React.useState<number>(0.45);
   const [saving, setSaving] = React.useState(false);
   const [saved, setSaved] = React.useState(false);
@@ -3131,6 +3131,7 @@ function SeuilSection({ scenarioId }: { scenarioId: string }) {
       await patchScenarioSettings(scenarioId, { similarity_threshold: threshold });
       setSaved(true);
       setTimeout(() => setSaved(false), 2000);
+      onSaved?.();
     } catch {}
     setSaving(false);
   };
@@ -3194,6 +3195,7 @@ function SeuilSection({ scenarioId }: { scenarioId: string }) {
 /** ReviewTab : Corpus + PRISMA + Double-Aveugle (sous-tabs) */
 function ReviewTab({ scenarioId, detail }: { scenarioId: string; detail: ScenarioDetail }) {
   const [sub, setSub] = React.useState<"corpus" | "prisma" | "screening">("corpus");
+  const [corpusRefreshKey, setCorpusRefreshKey] = React.useState(0);
   const SUB = [
     { key: "corpus" as const,    label: "Corpus",         icon: <FileText size={12} /> },
     { key: "prisma" as const,    label: "PRISMA",         icon: <Shield size={12} /> },
@@ -3213,8 +3215,8 @@ function ReviewTab({ scenarioId, detail }: { scenarioId: string; detail: Scenari
       </div>
       {sub === "corpus" && (
         <div className="space-y-4">
-          <SeuilSection scenarioId={scenarioId} />
-          <CorpusSection scenarioId={scenarioId} detail={detail} />
+          <SeuilSection scenarioId={scenarioId} onSaved={() => setCorpusRefreshKey(k => k + 1)} />
+          <CorpusSection key={corpusRefreshKey} scenarioId={scenarioId} detail={detail} />
         </div>
       )}
       {sub === "prisma" && <PrismaSection scenarioId={scenarioId} />}

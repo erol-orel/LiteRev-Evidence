@@ -3047,6 +3047,7 @@ export default function App() {
   const [filters, setFilters] = useState<SearchFilters>({
     projectContext: "literev",
   });
+  const [diseaseSearch, setDiseaseSearch] = useState<string>("");
   const [yearRange, setYearRange] = useState<[number, number]>([
     2000,
     new Date().getFullYear(),
@@ -3541,11 +3542,24 @@ export default function App() {
                 <div className="mt-5 space-y-4">
                   {FILTER_FIELDS.map(([key, label]) => {
                     const options = filterOptions?.[key] ?? [];
+                    const isDiseaseField = key === "diseaseOrCondition";
+                    const filteredOptions = isDiseaseField && diseaseSearch
+                      ? options.filter(o => o.label.toLowerCase().includes(diseaseSearch.toLowerCase()))
+                      : options;
                     return (
-                      <label key={key} className="block">
+                      <div key={key} className="block">
                         <span className="mb-2 block text-sm font-medium text-white/80">
                           {label}
                         </span>
+                        {isDiseaseField && (
+                          <input
+                            type="text"
+                            placeholder="Rechercher une maladie..."
+                            value={diseaseSearch}
+                            onChange={e => setDiseaseSearch(e.target.value)}
+                            className="w-full rounded-xl border border-white/10 bg-forest-950/80 px-3 py-2 text-xs text-white placeholder-white/30 focus:border-brand-400 focus:outline-none mb-1"
+                          />
+                        )}
                         <select
                           value={(filters as Record<string, string | undefined>)[key] ?? ""}
                           onChange={(e) =>
@@ -3557,52 +3571,68 @@ export default function App() {
                           className="w-full appearance-none rounded-2xl border border-white/10 bg-forest-950/80 px-3 py-3 text-sm text-white focus:border-brand-400 focus:outline-none"
                         >
                           <option value="">Tous</option>
-                          {options.map((opt) => (
+                          {filteredOptions.map((opt) => (
                             <option key={String(opt.value)} value={String(opt.value)}>
                               {opt.label}
                             </option>
                           ))}
                         </select>
-                      </label>
+                      </div>
                     );
                   })}
 
                   <div>
                     <span className="mb-2 block text-sm font-medium text-white/80">
-                      Année{" "}
-                      <span className="font-mono text-brand-300">
+                      Années{" "}
+                      <span className="font-mono text-brand-300 text-xs">
                         {yearRange[0]} — {yearRange[1]}
                       </span>
                     </span>
-                    <div className="space-y-2">
-                      <input
-                        type="range"
-                        min={
-                          filterOptions?.year?.length
-                            ? Math.min(...filterOptions.year.map((y) => Number(y.value)))
-                            : 2000
-                        }
-                        max={yearRange[1]}
-                        value={yearRange[0]}
-                        onChange={(e) =>
-                          setYearRange([Number(e.target.value), yearRange[1]])
-                        }
-                        className="w-full accent-gold-400"
-                      />
-                      <input
-                        type="range"
-                        min={yearRange[0]}
-                        max={
-                          filterOptions?.year?.length
-                            ? Math.max(...filterOptions.year.map((y) => Number(y.value)))
-                            : new Date().getFullYear()
-                        }
-                        value={yearRange[1]}
-                        onChange={(e) =>
-                          setYearRange([yearRange[0], Number(e.target.value)])
-                        }
-                        className="w-full accent-gold-400"
-                      />
+                    {(() => {
+                      const minYear = filterOptions?.year?.length
+                        ? Math.min(...filterOptions.year.map((y) => Number(y.value)))
+                        : 2000;
+                      const maxYear = filterOptions?.year?.length
+                        ? Math.max(...filterOptions.year.map((y) => Number(y.value)))
+                        : new Date().getFullYear();
+                      const range = maxYear - minYear || 1;
+                      const leftPct = ((yearRange[0] - minYear) / range) * 100;
+                      const rightPct = ((yearRange[1] - minYear) / range) * 100;
+                      return (
+                        <div className="relative h-8 flex items-center">
+                          <div className="absolute w-full h-1.5 rounded-full bg-white/10" />
+                          <div
+                            className="absolute h-1.5 rounded-full bg-brand-500"
+                            style={{ left: `${leftPct}%`, width: `${rightPct - leftPct}%` }}
+                          />
+                          <input
+                            type="range"
+                            min={minYear} max={maxYear}
+                            value={yearRange[0]}
+                            onChange={(e) => {
+                              const v = Number(e.target.value);
+                              if (v <= yearRange[1]) setYearRange([v, yearRange[1]]);
+                            }}
+                            className="absolute w-full h-1.5 appearance-none bg-transparent cursor-pointer accent-gold-400"
+                            style={{ zIndex: yearRange[0] > maxYear - 10 ? 5 : 3 }}
+                          />
+                          <input
+                            type="range"
+                            min={minYear} max={maxYear}
+                            value={yearRange[1]}
+                            onChange={(e) => {
+                              const v = Number(e.target.value);
+                              if (v >= yearRange[0]) setYearRange([yearRange[0], v]);
+                            }}
+                            className="absolute w-full h-1.5 appearance-none bg-transparent cursor-pointer accent-gold-400"
+                            style={{ zIndex: 4 }}
+                          />
+                        </div>
+                      );
+                    })()}
+                    <div className="flex justify-between text-[10px] text-white/30 mt-1">
+                      <span>{filterOptions?.year?.length ? Math.min(...filterOptions.year.map(y => Number(y.value))) : 2000}</span>
+                      <span>{filterOptions?.year?.length ? Math.max(...filterOptions.year.map(y => Number(y.value))) : new Date().getFullYear()}</span>
                     </div>
                   </div>
                 </div>
@@ -3612,20 +3642,42 @@ export default function App() {
             <section className="space-y-6">
               <section className="rounded-3xl border border-white/10 bg-white/5 p-5 shadow-2xl">
                 <div className="mb-4 flex items-center gap-2 rounded-2xl border border-white/10 bg-forest-900/80 p-1 text-sm">
-                  {(["semantic", "boolean"] as SearchMode[]).map((item) => (
-                    <button
-                      key={item}
-                      type="button"
-                      onClick={() => setMode(item)}
-                      className={`rounded-xl px-4 py-2 capitalize transition font-medium ${
-                        mode === item
-                          ? "bg-brand-700 text-gold-400 font-semibold"
-                          : "text-white/60 hover:text-white hover:bg-white/8"
-                      }`}
-                    >
-                      {item}
-                    </button>
-                  ))}
+                  {(["semantic", "boolean"] as SearchMode[]).map((item) => {
+                    const tooltipText = item === "semantic"
+                      ? "Recherche par sens et contexte (vecteurs). Résultats variés, non-déterministes, triés par pertinence sémantique. Idéal pour explorer un sujet large. Qualité élevée, quantité variable."
+                      : "Recherche par mots-clés exacts (AND, OR, NOT). Résultats déterministes et reproductibles — les mêmes mots donnent toujours les mêmes résultats. Idéal pour des requêtes précises.";
+                    return (
+                      <div key={item} className="relative flex items-center gap-0.5">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            if (item !== mode) {
+                              setMode(item);
+                              setResults([]);
+                              setPage(1);
+                              setSearchSourceBreakdown(null);
+                              setSelectedResult(null);
+                              setSelectedDocument(null);
+                            }
+                          }}
+                          className={`rounded-xl px-4 py-2 capitalize transition font-medium ${
+                            mode === item
+                              ? "bg-brand-700 text-gold-400 font-semibold"
+                              : "text-white/60 hover:text-white hover:bg-white/8"
+                          }`}
+                        >
+                          {item === "semantic" ? "Sémantique" : "Booléen"}
+                        </button>
+                        <div className="group relative">
+                          <span className="cursor-help text-xs text-white/25 hover:text-brand-300 transition px-1">ⓘ</span>
+                          <div className="pointer-events-none absolute bottom-full left-1/2 z-50 mb-2 w-64 -translate-x-1/2 rounded-xl border border-white/10 bg-forest-900 p-3 text-xs text-white/70 opacity-0 shadow-xl transition-opacity group-hover:opacity-100">
+                            <p className="font-semibold text-white mb-1">{item === "semantic" ? "Recherche Sémantique" : "Recherche Booléenne"}</p>
+                            {tooltipText}
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })}
                 </div>
 
                 <div className="flex flex-col gap-3 lg:flex-row">
@@ -3825,25 +3877,29 @@ export default function App() {
 
                           <div className="mt-5 flex flex-wrap gap-2">
                             {(["pertinent", "non-pertinent", "incertain"] as RelevanceLabel[]).map(
-                              (tag) => (
-                                <button
-                                  key={tag}
-                                  type="button"
-                                  onClick={() =>
-                                    setRelevanceMap((prev) => ({
-                                      ...prev,
-                                      [result.id]: tag,
-                                    }))
-                                  }
-                                  className={`rounded-full border px-3 py-1 text-xs transition ${
-                                    relevanceMap[result.id] === tag
-                                      ? "border-brand-400 bg-brand-500/15 text-brand-200"
-                                      : "border-white/10 bg-white/5 text-forest-400 hover:border-white/20 hover:text-white/80"
-                                  }`}
-                                >
-                                  {tag}
-                                </button>
-                              ),
+                              (tag) => {
+                                const isSelected = relevanceMap[result.id] === tag;
+                                const colorCls = tag === "pertinent"
+                                  ? isSelected ? "border-emerald-400 bg-emerald-500/20 text-emerald-300" : "border-white/10 bg-white/5 text-forest-400 hover:border-emerald-400/50 hover:text-emerald-300"
+                                  : tag === "non-pertinent"
+                                  ? isSelected ? "border-red-400 bg-red-500/20 text-red-300" : "border-white/10 bg-white/5 text-forest-400 hover:border-red-400/50 hover:text-red-300"
+                                  : isSelected ? "border-amber-400 bg-amber-500/20 text-amber-300" : "border-white/10 bg-white/5 text-forest-400 hover:border-amber-400/50 hover:text-amber-300";
+                                return (
+                                  <button
+                                    key={tag}
+                                    type="button"
+                                    onClick={() =>
+                                      setRelevanceMap((prev) => ({
+                                        ...prev,
+                                        [result.id]: tag,
+                                      }))
+                                    }
+                                    className={`rounded-full border px-3 py-1 text-xs transition font-medium ${colorCls}`}
+                                  >
+                                    {tag === "pertinent" ? "✓ Pertinent" : tag === "non-pertinent" ? "✕ Non-pertinent" : "● Incertain"}
+                                  </button>
+                                );
+                              },
                             )}
                           </div>
                         </article>
@@ -3888,7 +3944,7 @@ export default function App() {
                           <div className="space-y-5 text-sm text-white/80">
                             <div>
                               <p className="text-xs uppercase tracking-[0.2em] text-brand-300">
-                                Document detail
+                                Détail de l'article sélectionné
                               </p>
                               <h2 className="mt-2 text-xl font-semibold text-white">
                                 {detailView?.title}
