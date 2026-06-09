@@ -100,7 +100,7 @@ class SearchIn(BaseModel):
     query: str | None = None  # alias pour compatibilité frontend
     filters: dict[str, Any] | None = None
     mode: str = Field(default="hybrid") # Mode par défaut hybride
-    limit: int = Field(default=500, ge=1, le=50000)
+    limit: int = Field(default=500, ge=1, le=1000000)
     offset: int = Field(default=0, ge=0)
     project_context: str | None = None  # alias pour filtres projet
 
@@ -1613,7 +1613,6 @@ def get_gesica_scenarios() -> list[dict[str, Any]]:
                     JOIN article_scenarios ars ON ars.document_id = d.id
                     WHERE ars.scenario_id = :scenario
                     ORDER BY d.year DESC NULLS LAST, d.title ASC
-                    LIMIT 5
                 """)
                 articles = [dict(r) for r in conn.execute(sql_articles, {"scenario": scenario_id}).mappings().all()]
             
@@ -2389,7 +2388,7 @@ def get_fulltext_stats() -> dict[str, Any]:
             JOIN document_chunk c ON c.document_id = d.id
             WHERE c.chunk_type = 'fulltext_section'
             ORDER BY d.year DESC NULLS LAST
-            LIMIT 10
+            LIMIT 100000
         """)).mappings().all()
 
     openai_key = os.getenv("OPENAI_API_KEY")
@@ -2806,7 +2805,7 @@ def get_scenario_detail(scenario_id: str) -> dict[str, Any]:
 @app.get("/gesica/scenarios/{scenario_id}/corpus")
 def get_scenario_corpus(
     scenario_id: str,
-    limit: int = 500,
+    limit: int = 100000,
     offset: int = 0,
     year_from: int | None = None,
     year_to: int | None = None,
@@ -3088,7 +3087,7 @@ def _run_clustering_background(scenario_id: str, force_refresh: bool = False) ->
                   AND d.abstract IS NOT NULL
                   AND LENGTH(d.abstract) > 50
                 ORDER BY d.year DESC NULLS LAST
-                LIMIT 400
+                LIMIT 100000
             """), {"sid": scenario_id}).mappings().all())
 
         if len(docs) < 5:
@@ -3800,7 +3799,7 @@ def extract_article_pico(scenario_id: str, article_id: int):
 @app.post("/pico/extract")
 def extract_pico_batch(
     scenario_id: Optional[str] = None,
-    limit: int = 50,
+    limit: int = 100000,
 ):
     """
     Extrait le PICO pour un lot d'articles (par scénario ou tout le corpus).
@@ -3904,7 +3903,7 @@ def extract_pico_batch(
 @app.post("/metadata/extract")
 def extract_metadata_batch(
     scenario_id: Optional[str] = None,
-    limit: int = 50,
+    limit: int = 100000,
 ):
     """
     Enrichit les métadonnées (type d'étude, année, journal) via LLM pour un lot d'articles.
@@ -4000,7 +3999,7 @@ def extract_metadata_batch(
 @app.post("/fulltext/fetch")
 def fetch_fulltext_batch(
     scenario_id: Optional[str] = None,
-    limit: int = 20,
+    limit: int = 100000,
 ):
     """
     Tente de récupérer le texte intégral (via DOI/URL) pour un lot d'articles.
@@ -4238,7 +4237,7 @@ def get_scenario_screening_progress(scenario_id: str) -> dict[str, Any]:
 
 # ─── PICO Bulk : tous les articles d'un scénario avec PICO ────────────────────────────────────────────
 @app.get("/gesica/scenarios/{scenario_id}/pico-bulk")
-def get_scenario_pico_bulk(scenario_id: str, limit: int = 200, offset: int = 0) -> dict[str, Any]:
+def get_scenario_pico_bulk(scenario_id: str, limit: int = 100000, offset: int = 0) -> dict[str, Any]:
     """Retourne tous les articles d'un scénario avec leur PICO extrait (pour le tableau comparatif)."""
     with engine.connect() as conn:
         rows = conn.execute(text("""
@@ -4383,7 +4382,7 @@ def get_evidence_brief(scenario_id: str) -> dict[str, Any]:
             ORDER BY
                 CASE WHEN ld.screening_status = 'included' THEN 0 ELSE 1 END,
                 ld.citation_count DESC NULLS LAST
-            LIMIT 20
+            LIMIT 100000
         """), {"sid": scenario_id}).mappings().fetchall()
 
         # Distribution des niveaux de preuve
@@ -5073,7 +5072,7 @@ def get_evidence_brief_pdf(scenario_id: str):
             WHERE project_context = 'literev' AND scenario_type = :sid
               AND is_duplicate IS NOT TRUE AND abstract IS NOT NULL
             ORDER BY quality_score DESC NULLS LAST, year DESC NULLS LAST
-            LIMIT 10
+            LIMIT 100000
         """), {"sid": scenario_id}).mappings().all()
 
         study_designs = conn.execute(text("""
@@ -5842,7 +5841,7 @@ def get_user_scenario_detail(scenario_id: str) -> dict[str, Any]:
 @app.get("/user-scenarios/{scenario_id}/corpus")
 def get_user_scenario_corpus(
     scenario_id: str,
-    limit: int = 500,
+    limit: int = 100000,
     offset: int = 0,
     year_from: int | None = None,
     year_to: int | None = None,
@@ -6645,7 +6644,7 @@ def _run_semantic_rerank_inline(scenario_id: str, query: str) -> int:
         return 0
 
 
-def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict, max_results: int = 500) -> None:
+def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict, max_results: int = 100000) -> None:
     """
     Pipeline complet d'enrichissement pour un scénario utilisateur :
     1. Ingestion PubMed (sans limite)
@@ -6896,7 +6895,7 @@ def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict
                       AND d.abstract IS NOT NULL
                       AND LENGTH(d.abstract) > 50
                     ORDER BY d.year DESC NULLS LAST
-                    LIMIT 500
+                    LIMIT 100000
                 """), {"sid": scenario_id}).mappings().all())
 
             if len(cl_docs) >= 5:
@@ -6995,7 +6994,7 @@ def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict
 @app.post("/user-scenarios/{scenario_id}/populate")
 def populate_user_scenario(
     scenario_id: str,
-    max_results: int = 10000,
+    max_results: int = 100000,
 ) -> dict[str, Any]:
     """
     Déclenche l'ingéstion multi-sources en arrière-plan pour un scénario utilisateur.
@@ -7049,7 +7048,7 @@ def get_user_scenario_populate_status(scenario_id: str) -> dict[str, Any]:
 @app.post("/user-scenarios/{scenario_id}/pipeline")
 def start_user_scenario_pipeline(
     scenario_id: str,
-    max_results: int = 10000,
+    max_results: int = 100000,
 ) -> dict[str, Any]:
     """
     Déclenche le pipeline complet d'enrichissement en arrière-plan :
@@ -7419,7 +7418,7 @@ def get_user_scenario_evidence_brief(scenario_id: str) -> dict[str, Any]:
 
 
 @app.get("/user-scenarios/{scenario_id}/pico-bulk")
-def get_user_scenario_pico_bulk(scenario_id: str, limit: int = 200, offset: int = 0) -> dict[str, Any]:
+def get_user_scenario_pico_bulk(scenario_id: str, limit: int = 100000, offset: int = 0) -> dict[str, Any]:
     """Tous les articles d'un scénario utilisateur avec leur PICO extrait."""
     _get_user_scenario_or_404(scenario_id)
     with engine.connect() as conn:
@@ -8857,7 +8856,7 @@ def run_user_scenario_model(scenario_id: str) -> dict[str, Any]:
 @app.get("/gesica/scenarios/{scenario_id}/pico")
 def get_gesica_scenario_pico_alias(
     scenario_id: str,
-    limit: int = 3,
+    limit: int = 100000,
 ) -> dict[str, Any]:
     """Alias vers pico-bulk pour compatibilité frontend."""
     return get_scenario_pico_bulk(scenario_id, limit=limit)
@@ -8872,7 +8871,7 @@ def get_gesica_scenario_screening_alias(scenario_id: str) -> dict[str, Any]:
 @app.get("/user-scenarios/{scenario_id}/pico")
 def get_user_scenario_pico_alias(
     scenario_id: str,
-    limit: int = 3,
+    limit: int = 100000,
 ) -> dict[str, Any]:
     """Alias vers pico-bulk pour compatibilité frontend."""
     return get_user_scenario_pico_bulk(scenario_id, limit=limit)

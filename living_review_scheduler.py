@@ -377,7 +377,7 @@ def run_living_review_for_scenario(
 
     # PubMed
     for query in config.get("pubmed_queries", []):
-        articles = fetch_pubmed_new(query, days=days, max_results=30)
+        articles = fetch_pubmed_new(query, days=days, max_results=1000)
         for art in articles:
             art["scenario_type"] = scenario_id
             art["project_context"] = "gesica"

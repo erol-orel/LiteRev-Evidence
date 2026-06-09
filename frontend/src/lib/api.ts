@@ -1800,7 +1800,7 @@ export async function fetchArticlePico(
 
 export async function extractPicoBatch(
   scenarioId?: string,
-  limit = 50
+  limit = 100000
 ): Promise<{ extracted: number; skipped: number; errors: number; message: string }> {
   const params = new URLSearchParams({ limit: String(limit) });
   if (scenarioId) params.set('scenario_id', scenarioId);
@@ -1841,7 +1841,7 @@ export interface PicoBulkResponse {
 
 export async function fetchScenarioPicoBulk(
   scenarioId: string,
-  limit = 200,
+  limit = 100000,
   offset = 0
 ): Promise<PicoBulkResponse> {
   const base = scenarioBase(scenarioId);
@@ -1968,7 +1968,7 @@ export interface KnowledgeGraphData {
 
 export async function fetchKnowledgeGraph(
   scenarioId: string,
-  maxNodes = 80,
+  maxNodes = 10000,
   minSimilarity = 0.35,
 ): Promise<KnowledgeGraphData> {
   const base = scenarioBase(scenarioId);
@@ -2272,7 +2272,7 @@ export async function patchUserScenario(
 
 export async function populateUserScenario(
   scenarioId: string,
-  maxResults = 500,
+  maxResults = 100000,
 ): Promise<{ scenario_id: string; status: string; query: string; message: string }> {
   const r = await fetch(
     `${API_BASE_URL}/user-scenarios/${scenarioId}/populate?max_results=${maxResults}`,
@@ -2284,7 +2284,7 @@ export async function populateUserScenario(
 
 export async function startUserScenarioPipeline(
   scenarioId: string,
-  maxResults = 500,
+  maxResults = 100000,
 ): Promise<{ scenario_id: string; status: string; message: string; steps: string[] }> {
   const r = await fetch(
     `${API_BASE_URL}/user-scenarios/${scenarioId}/pipeline?max_results=${maxResults}`,
@@ -2372,7 +2372,7 @@ export interface EnrichmentStatus {
 
 export async function extractPicoBatchGlobal(
   scenarioId?: string,
-  limit = 50,
+  limit = 100000,
 ): Promise<EnrichmentBatchResult> {
   const params = new URLSearchParams({ limit: String(limit) });
   if (scenarioId) params.set('scenario_id', scenarioId);
@@ -2383,7 +2383,7 @@ export async function extractPicoBatchGlobal(
 
 export async function extractMetadataBatch(
   scenarioId?: string,
-  limit = 50,
+  limit = 100000,
 ): Promise<EnrichmentBatchResult> {
   const params = new URLSearchParams({ limit: String(limit) });
   if (scenarioId) params.set('scenario_id', scenarioId);
@@ -2394,7 +2394,7 @@ export async function extractMetadataBatch(
 
 export async function fetchFulltextBatch(
   scenarioId?: string,
-  limit = 20,
+  limit = 100000,
 ): Promise<EnrichmentBatchResult & { fetched: number; not_available: number }> {
   const params = new URLSearchParams({ limit: String(limit) });
   if (scenarioId) params.set('scenario_id', scenarioId);

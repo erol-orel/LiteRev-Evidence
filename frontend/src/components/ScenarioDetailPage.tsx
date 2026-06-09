@@ -2948,7 +2948,7 @@ function EnrichmentSection({ scenarioId }: { scenarioId: string }) {
   const [loadingStatus, setLoadingStatus] = React.useState(false);
   const [running, setRunning] = React.useState<string | null>(null);
   const [lastResult, setLastResult] = React.useState<{ type: string; msg: string } | null>(null);
-  const [limit, setLimit] = React.useState(50);
+  const [limit, setLimit] = React.useState(100000);
 
   const loadStatus = React.useCallback(async () => {
     setLoadingStatus(true);
@@ -2969,7 +2969,7 @@ function EnrichmentSection({ scenarioId }: { scenarioId: string }) {
       let res;
       if (type === "pico") res = await extractPicoBatchGlobal(scenarioId, limit);
       else if (type === "metadata") res = await extractMetadataBatch(scenarioId, limit);
-      else res = await fetchFulltextBatch(scenarioId, Math.min(limit, 20));
+      else res = await fetchFulltextBatch(scenarioId, Math.min(limit, 1000));
       setLastResult({ type, msg: res.message });
       await loadStatus();
     } catch (e: any) {
@@ -3033,7 +3033,7 @@ function EnrichmentSection({ scenarioId }: { scenarioId: string }) {
         <label className="text-xs text-white/50 shrink-0">Taille du lot :</label>
         <input
           type="number"
-          min={5} max={200} step={5}
+          min={5} max={100000} step={100}
           value={limit}
           onChange={e => setLimit(Number(e.target.value))}
           className="w-20 rounded-lg border border-white/10 bg-white/5 px-2 py-1 text-xs text-white text-center focus:outline-none focus:border-brand-500/50"
