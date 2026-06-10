@@ -41,18 +41,114 @@ for _ep in [".env", str(Path(__file__).parent / ".env"), "/opt/literev-api/.env"
 for _ep in ["/etc/literev/secrets", "/opt/literev-api/secrets.env"]:
     _load_env_file(_ep)
 
-DB_URL = os.getenv(
-    "DB_URL",
-    "postgresql+psycopg://literev:MyNewStrongPassword!@10.10.1.10:5432/literev",
-)
-WRITE_API_KEY = os.getenv("WRITE_API_KEY", "")
+DB_URL = os.getenv("DB_URL")
+if not DB_URL:
+    raise RuntimeError("La variable d'environnement DB_URL est requise et n'est pas configurée.")
 
-engine = create_engine(DB_URL, pool_pre_ping=True)
+WRITE_API_KEY = os.getenv("WRITE_API_KEY")
+if not WRITE_API_KEY:
+    raise RuntimeError("La variable d'environnement WRITE_API_KEY est requise et n'est pas configurée.")
+
+# Configurer le pool DB de manière optimale pour éviter la saturation (M-3)
+engine = create_engine(
+    DB_URL,
+    pool_pre_ping=True,
+    pool_size=10,         # Taille de base du pool de connexions (M-3)
+    max_overflow=20,      # Nombre max de connexions temporaires supplémentaires (M-3)
+    pool_timeout=30,      # Timeout d'attente d'une connexion du pool (M-3)
+    pool_recycle=1800,    # Recycle les connexions toutes les 30 minutes pour éviter les coupures (M-3)
+)
 app = FastAPI(title="LiteRev API", version="0.4.0")
+
+# ─── Middleware de Rate Limiting In-Memory (H-2) ──────────────────────────────────
+import time
+from fastapi import Request
+from collections import defaultdict
+
+# Limiteur de débit in-memory robuste par IP (H-2)
+class InMemoryRateLimiter:
+    def __init__(self, requests_limit: int, window_seconds: int):
+        self.requests_limit = requests_limit
+        self.window_seconds = window_seconds
+        # Stocke les timestamps des requêtes pour chaque IP
+        self.history: dict[str, list[float]] = defaultdict(list)
+
+    def is_allowed(self, ip: str) -> bool:
+        now = time.time()
+        # Filtrer les anciens timestamps hors de la fenêtre
+        self.history[ip] = [t for t in self.history[ip] if now - t < self.window_seconds]
+        if len(self.history[ip]) >= self.requests_limit:
+            return False
+        self.history[ip].append(now)
+        return True
+
+# 100 requêtes par minute pour les endpoints généraux, 10 par minute pour les coûteux
+general_limiter = InMemoryRateLimiter(requests_limit=100, window_seconds=60)
+expensive_limiter = InMemoryRateLimiter(requests_limit=10, window_seconds=60)
+
+# Endpoints coûteux à protéger (RAG, search, génération de briefs)
+EXPENSIVE_PATHS = {
+    "/search",
+    "/ask",
+    "/ask/stream",
+    "/user-scenarios/{scenario_id}/rag",
+}
+
+@app.middleware("http")
+async def rate_limit_middleware(request: Request, call_next):
+    # Récupérer l'IP réelle du client (gère le proxy reverse de production)
+    forwarded_for = request.headers.get("X-Forwarded-For")
+    if forwarded_for:
+        client_ip = forwarded_for.split(",")[0].strip()
+    else:
+        client_ip = request.client.host if request.client else "unknown"
+
+    path = request.url.path
+
+    # Ignorer le rate limiting pour l'endpoint health
+    if path == "/health":
+        return await call_next(request)
+
+    # Vérifier si le chemin est coûteux
+    is_expensive = any(
+        path == exp_path or (
+            "{" in exp_path and 
+            path.startswith(exp_path.split("{")[0])
+        )
+        for exp_path in EXPENSIVE_PATHS
+    )
+
+    limiter = expensive_limiter if is_expensive else general_limiter
+    if not limiter.is_allowed(client_ip):
+        logger.warning(f"Rate limit exceeded for IP: {client_ip} on path: {path}")
+        raise HTTPException(
+            status_code=429,
+            detail="Too many requests. Please try again later."
+        )
+
+    return await call_next(request)
+
+# Restreindre les origines CORS à localhost et aux domaines de production
+ALLOWED_ORIGINS = [
+    "http://localhost",
+    "http://localhost:3000",
+    "http://localhost:80",
+    "http://localhost:8333",
+    "http://127.0.0.1",
+    "http://127.0.0.1:3000",
+    "http://127.0.0.1:80",
+    "http://127.0.0.1:8333",
+    "https://literev.im",  # Exemple de domaine de production
+    "http://literev.im",
+]
+# On peut aussi ajouter les variables d'environnement de domaine si elles existent
+FRONTEND_URL = os.getenv("FRONTEND_URL")
+if FRONTEND_URL:
+    ALLOWED_ORIGINS.append(FRONTEND_URL)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -62,7 +158,9 @@ app.add_middleware(
 # Auth
 # ─────────────────────────────────────────────────────────────────────────────
 def require_api_key(x_api_key: str | None = Header(default=None)) -> None:
-    if WRITE_API_KEY and x_api_key != WRITE_API_KEY:
+    if not WRITE_API_KEY:
+        raise HTTPException(status_code=503, detail="Server not configured for authenticated writes")
+    if x_api_key != WRITE_API_KEY:
         raise HTTPException(status_code=401, detail="Invalid API key")
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -101,12 +199,12 @@ class ChunkIn(BaseModel):
     metadata_json: dict[str, Any] | None = None
 
 class SearchIn(BaseModel):
-    query_text: str | None = None
-    querytext: str | None = None
-    query: str | None = None  # alias pour compatibilité frontend
+    query_text: str | None = Field(None, max_length=1000)
+    querytext: str | None = Field(None, max_length=1000)
+    query: str | None = Field(None, max_length=1000)  # alias pour compatibilité frontend
     filters: dict[str, Any] | None = None
     mode: str = Field(default="hybrid") # Mode par défaut hybride
-    limit: int = Field(default=500, ge=1, le=1000000)
+    limit: int = Field(default=200, ge=1, le=1000)  # Limite max ramenée de 1M à 1000 (M-5)
     offset: int = Field(default=0, ge=0)
     project_context: str | None = None  # alias pour filtres projet
 
@@ -119,7 +217,7 @@ class SearchIn(BaseModel):
         return q
 
 class AskIn(BaseModel):
-    question: str = Field(..., min_length=3)
+    question: str = Field(..., min_length=3, max_length=2000)  # Limite d'entrée RAG (H-5)
     project_context: str | None = None
     filters: dict[str, Any] | None = None
 
@@ -549,9 +647,17 @@ def search(payload: SearchIn) -> dict[str, Any]:
     filters = payload.filters or {}
     where_sql, where_params = _build_where(filters)
 
-    query_terms = [t.strip() for t in re.split(r"\s+", query.lower()) if t.strip()]
+    # Nettoyage strict des termes de recherche pour ne garder que des caractères sûrs (H-1)
+    raw_terms = [t.strip() for t in re.split(r"\s+", query.lower()) if t.strip()]
+    query_terms = []
+    for t in raw_terms:
+        # Ne garder que les caractères alphanumériques et les tirets/underscores
+        clean_t = re.sub(r"[^a-zA-Z0-9\-_]", "", t)
+        if clean_t:
+            query_terms.append(clean_t)
+
     if not query_terms:
-        raise HTTPException(status_code=422, detail="Empty query")
+        raise HTTPException(status_code=422, detail="Empty query or query contains only invalid characters")
 
     # Déterminer si on peut utiliser pgvector (requiert OpenAI pour l'embedding de la requête)
     openai_key = os.getenv("OPENAI_API_KEY")
@@ -5643,7 +5749,7 @@ def list_user_scenarios() -> list[dict[str, Any]]:
 
 
 @app.post("/user-scenarios", status_code=201)
-def create_user_scenario(payload: UserScenarioIn) -> dict[str, Any]:
+def create_user_scenario(payload: UserScenarioIn, _: None = Depends(require_api_key)) -> dict[str, Any]:
     """Crée un nouveau scénario utilisateur depuis une recherche sauvegardée."""
     import uuid
     new_id = "usr-" + str(uuid.uuid4()).replace("-", "")[:12]
@@ -5666,7 +5772,7 @@ def create_user_scenario(payload: UserScenarioIn) -> dict[str, Any]:
 
 
 @app.delete("/user-scenarios/{scenario_id}", status_code=200)
-def delete_user_scenario(scenario_id: str) -> dict[str, Any]:
+def delete_user_scenario(scenario_id: str, _: None = Depends(require_api_key)) -> dict[str, Any]:
     """Supprime un scénario utilisateur et ses associations article_scenarios."""
     _get_user_scenario_or_404(scenario_id)
     with engine.begin() as conn:
@@ -5681,7 +5787,7 @@ def delete_user_scenario(scenario_id: str) -> dict[str, Any]:
 
 
 @app.patch("/user-scenarios/{scenario_id}")
-def patch_user_scenario(scenario_id: str, payload: UserScenarioPatch) -> dict[str, Any]:
+def patch_user_scenario(scenario_id: str, payload: UserScenarioPatch, _: None = Depends(require_api_key)) -> dict[str, Any]:
     """Met à jour le nom, le pin, le mode ou les filtres d'un scénario utilisateur."""
     _get_user_scenario_or_404(scenario_id)
     updates = []
@@ -5742,7 +5848,7 @@ def list_folders() -> list[dict[str, Any]]:
 
 
 @app.post("/user-scenario-folders", status_code=201)
-def create_folder(payload: FolderIn) -> dict[str, Any]:
+def create_folder(payload: FolderIn, _: None = Depends(require_api_key)) -> dict[str, Any]:
     """Crée un nouveau dossier."""
     import uuid
     new_id = "fld-" + str(uuid.uuid4()).replace("-", "")[:12]
@@ -5761,7 +5867,7 @@ def create_folder(payload: FolderIn) -> dict[str, Any]:
 
 
 @app.patch("/user-scenario-folders/{folder_id}")
-def patch_folder(folder_id: str, payload: FolderIn) -> dict[str, Any]:
+def patch_folder(folder_id: str, payload: FolderIn, _: None = Depends(require_api_key)) -> dict[str, Any]:
     """Renomme ou recolore un dossier."""
     with engine.begin() as conn:
         result = conn.execute(text("""
@@ -5787,7 +5893,7 @@ def patch_folder(folder_id: str, payload: FolderIn) -> dict[str, Any]:
 
 
 @app.delete("/user-scenario-folders/{folder_id}")
-def delete_folder(folder_id: str) -> dict[str, Any]:
+def delete_folder(folder_id: str, _: None = Depends(require_api_key)) -> dict[str, Any]:
     """Supprime un dossier (les scénarios sont conservés, leur folder_id devient NULL)."""
     with engine.begin() as conn:
         # Désassocier les scénarios
@@ -5976,6 +6082,12 @@ def get_user_scenario_corpus(
 
 
 # ── Populate : ingestion PubMed en arrière-plan ───────────────────────────────
+
+import threading
+
+# Verrous pour protéger l'accès concurrent aux états de jobs en mémoire (H-4)
+_populate_jobs_lock = threading.Lock()
+_pipeline_jobs_lock = threading.Lock()
 
 _user_scenario_populate_jobs: dict[str, dict] = {}
 _user_scenario_pipeline_jobs: dict[str, dict] = {}
@@ -7657,6 +7769,7 @@ def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict
 def populate_user_scenario(
     scenario_id: str,
     max_results: int = 100000,
+    _: None = Depends(require_api_key),
 ) -> dict[str, Any]:
     """
     Déclenche l'ingéstion multi-sources en arrière-plan pour un scénario utilisateur.
@@ -7666,19 +7779,20 @@ def populate_user_scenario(
     row = _get_user_scenario_or_404(scenario_id)
     query = row["query"]
 
-    job = _user_scenario_populate_jobs.get(scenario_id)
-    if job and job.get("status") == "running":
-        return {
-            "scenario_id": scenario_id,
-            "status": "already_running",
-            "message": "Une ingestion est déjà en cours pour ce scénario.",
-            "ingested": job.get("ingested", 0),
-        }
+    with _populate_jobs_lock:
+        job = _user_scenario_populate_jobs.get(scenario_id)
+        if job and job.get("status") == "running":
+            return {
+                "scenario_id": scenario_id,
+                "status": "already_running",
+                "message": "Une ingestion est déjà en cours pour ce scénario.",
+                "ingested": job.get("ingested", 0),
+            }
 
-    _user_scenario_populate_jobs[scenario_id] = {
-        "status": "running", "ingested": 0, "errors": 0, "total_found": 0,
-        "sources": {"db_cache": 0, "pubmed": 0, "openalex": 0, "crossref": 0, "europepmc": 0, "medrxiv": 0, "biorxiv": 0, "prospero": 0, "cochrane": 0}
-    }
+        _user_scenario_populate_jobs[scenario_id] = {
+            "status": "running", "ingested": 0, "errors": 0, "total_found": 0,
+            "sources": {"db_cache": 0, "pubmed": 0, "openalex": 0, "crossref": 0, "europepmc": 0, "medrxiv": 0, "biorxiv": 0, "prospero": 0, "cochrane": 0}
+        }
     t = threading.Thread(
         target=_run_user_scenario_populate,
         args=(scenario_id, query, row.get("filters") or {}, max_results, None),
@@ -7715,6 +7829,7 @@ def get_user_scenario_populate_status(scenario_id: str) -> dict[str, Any]:
 def start_user_scenario_pipeline(
     scenario_id: str,
     max_results: int = 100000,
+    _: None = Depends(require_api_key),
 ) -> dict[str, Any]:
     """
     Déclenche le pipeline complet d'enrichissement en arrière-plan :
@@ -7725,28 +7840,29 @@ def start_user_scenario_pipeline(
     row = _get_user_scenario_or_404(scenario_id)
     query = row["query"]
 
-    job = _user_scenario_pipeline_jobs.get(scenario_id)
-    if job and job.get("overall_status") == "running":
-        return {
-            "scenario_id": scenario_id,
-            "status": "already_running",
-            "message": "Un pipeline est déjà en cours pour ce scénario.",
-            "current_step": job.get("current_step"),
-        }
+    with _pipeline_jobs_lock:
+        job = _user_scenario_pipeline_jobs.get(scenario_id)
+        if job and job.get("overall_status") == "running":
+            return {
+                "scenario_id": scenario_id,
+                "status": "already_running",
+                "message": "Un pipeline est déjà en cours pour ce scénario.",
+                "current_step": job.get("current_step"),
+            }
 
-    _user_scenario_pipeline_jobs[scenario_id] = {
-        "overall_status": "starting",
-        "current_step": "pubmed",
-        "steps": {
-            "pubmed": {"status": "pending"},
-            "embed": {"status": "pending"},
-            "pico": {"status": "pending"},
-            "metadata": {"status": "pending"},
-            "fulltext": {"status": "pending"},
-            "clustering": {"status": "pending"},
-            "rerank": {"status": "pending"},
-        },
-    }
+        _user_scenario_pipeline_jobs[scenario_id] = {
+            "overall_status": "starting",
+            "current_step": "pubmed",
+            "steps": {
+                "pubmed": {"status": "pending"},
+                "embed": {"status": "pending"},
+                "pico": {"status": "pending"},
+                "metadata": {"status": "pending"},
+                "fulltext": {"status": "pending"},
+                "clustering": {"status": "pending"},
+                "rerank": {"status": "pending"},
+            },
+        }
 
     t = threading.Thread(
         target=_run_user_scenario_full_pipeline,
@@ -8530,6 +8646,7 @@ def get_user_scenario_conflicts(scenario_id: str) -> list[dict[str, Any]]:
 def submit_user_scenario_double_blind_decision(
     scenario_id: str,
     payload: DoubleBlindDecisionIn,
+    _: None = Depends(require_api_key),
 ) -> dict[str, Any]:
     """Décision double-aveugle pour un article d'un scénario utilisateur."""
     _get_user_scenario_or_404(scenario_id)
@@ -8584,6 +8701,7 @@ def screen_user_scenario_article(
     status: str,
     reason: str | None = None,
     notes: str | None = None,
+    _: None = Depends(require_api_key),
 ) -> dict[str, Any]:
     """Screening PRISMA pour un article d'un scénario utilisateur."""
     _get_user_scenario_or_404(scenario_id)
@@ -8608,7 +8726,7 @@ def screen_user_scenario_article(
 
 
 @app.post("/user-scenarios/{scenario_id}/articles/{article_id}/pico/extract")
-def extract_user_scenario_article_pico(scenario_id: str, article_id: int) -> dict[str, Any]:
+def extract_user_scenario_article_pico(scenario_id: str, article_id: int, _: None = Depends(require_api_key)) -> dict[str, Any]:
     """Extraction PICO pour un article d'un scénario utilisateur (délègue à l'endpoint GESICA)."""
     _get_user_scenario_or_404(scenario_id)
     return extract_article_pico(scenario_id, article_id)
@@ -8796,7 +8914,7 @@ def _run_semantic_rerank(scenario_id: str, query: str) -> int:
 
 
 @app.post("/scenarios/{scenario_id}/rerank")
-def trigger_rerank(scenario_id: str) -> dict[str, Any]:
+def trigger_rerank(scenario_id: str, _: None = Depends(require_api_key)) -> dict[str, Any]:
     """
     Déclenche le scoring sémantique post-ingestion pour un scénario.
     Fonctionne pour GESICA et user_scenarios.
@@ -8853,7 +8971,7 @@ def get_scenario_settings(scenario_id: str) -> dict[str, Any]:
 
 
 @app.patch("/scenarios/{scenario_id}/settings")
-def update_scenario_settings(scenario_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+def update_scenario_settings(scenario_id: str, payload: dict[str, Any], _: None = Depends(require_api_key)) -> dict[str, Any]:
     """Met à jour les paramètres du scénario (seuil, variables validées, etc.)."""
     allowed = {"similarity_threshold", "variables_json", "variables_validated"}
     updates = {k: v for k, v in payload.items() if k in allowed}
@@ -9053,7 +9171,7 @@ Retourne UNIQUEMENT le JSON valide."""
 
 
 @app.post("/scenarios/{scenario_id}/evidence-brief/generate")
-def generate_evidence_brief(scenario_id: str, force: bool = False) -> dict[str, Any]:
+def generate_evidence_brief(scenario_id: str, force: bool = False, _: None = Depends(require_api_key)) -> dict[str, Any]:
     """
     Déclenche la génération asynchrone de l'Evidence Brief LLM.
     Fonctionne pour GESICA et user_scenarios.
@@ -9243,7 +9361,7 @@ Retourne UNIQUEMENT le JSON valide."""
 
 
 @app.post("/scenarios/{scenario_id}/variables/generate")
-def generate_scenario_variables(scenario_id: str) -> dict[str, Any]:
+def generate_scenario_variables(scenario_id: str, _: None = Depends(require_api_key)) -> dict[str, Any]:
     """Déclenche la génération asynchrone des Variables & Modèle depuis les PICO."""
     import threading
 
@@ -9303,7 +9421,7 @@ def get_scenario_variables(scenario_id: str) -> dict[str, Any]:
 
 
 @app.post("/scenarios/{scenario_id}/variables/validate")
-def validate_scenario_variables(scenario_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+def validate_scenario_variables(scenario_id: str, payload: dict[str, Any], _: None = Depends(require_api_key)) -> dict[str, Any]:
     """
     Valide (ou modifie) les variables & modèle générés par LLM.
     payload peut contenir les variables modifiées.
@@ -9545,7 +9663,7 @@ Réponds de manière structurée et cite les sources pertinentes du contexte."""
 # ─── PIPELINE COMPLET AVEC BRIEF LLM ─────────────────────────────────────────
 
 @app.post("/scenarios/{scenario_id}/full-pipeline")
-def trigger_full_pipeline_with_brief(scenario_id: str) -> dict[str, Any]:
+def trigger_full_pipeline_with_brief(scenario_id: str, _: None = Depends(require_api_key)) -> dict[str, Any]:
     """
     Déclenche le pipeline complet incluant :
     1. Reranking sémantique
@@ -9614,7 +9732,7 @@ def get_user_scenario_model_status(scenario_id: str) -> dict[str, Any]:
     }
 
 @app.post("/user-scenarios/{scenario_id}/model-run")
-def run_user_scenario_model(scenario_id: str) -> dict[str, Any]:
+def run_user_scenario_model(scenario_id: str, _: None = Depends(require_api_key)) -> dict[str, Any]:
     """Re-run du modèle pour un scénario utilisateur (retourne le statut neutre)."""
     return get_user_scenario_model_status(scenario_id)
 

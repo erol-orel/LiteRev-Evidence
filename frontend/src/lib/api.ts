@@ -599,7 +599,8 @@ export async function fetchScreeningList(projectContext?: string): Promise<Scree
 }
 
 export async function submitScreeningDecision(decision: ScreeningDecision): Promise<void> {
-  const token = localStorage.getItem("api_key") || "";
+  // Stratégie de récupération sécurisée (H-3) : sessionStorage (session temporaire) -> localStorage -> env Vite
+  const token = sessionStorage.getItem("api_key") || localStorage.getItem("api_key") || (import.meta.env.VITE_API_KEY as string) || "";
   const response = await fetch(`${API_BASE_URL}/screening/decision`, {
     method: "POST",
     headers: {
