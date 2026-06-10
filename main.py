@@ -3,6 +3,7 @@ import json
 import logging
 import os
 import re
+import secrets as _secrets
 from pathlib import Path
 from typing import Any, Optional
 
@@ -99,7 +100,9 @@ async def rate_limit_middleware(request: Request, call_next):
     # Récupérer l'IP réelle du client (gère le proxy reverse de production)
     forwarded_for = request.headers.get("X-Forwarded-For")
     if forwarded_for:
-        client_ip = forwarded_for.split(",")[0].strip()
+        # Ne faire confiance qu'au dernier saut (ajouté par notre reverse proxy),
+        # les entrées précédentes sont contrôlables par le client (spoofing).
+        client_ip = forwarded_for.split(",")[-1].strip()
     else:
         client_ip = request.client.host if request.client else "unknown"
 
@@ -160,7 +163,7 @@ app.add_middleware(
 def require_api_key(x_api_key: str | None = Header(default=None)) -> None:
     if not WRITE_API_KEY:
         raise HTTPException(status_code=503, detail="Server not configured for authenticated writes")
-    if x_api_key != WRITE_API_KEY:
+    if not x_api_key or not _secrets.compare_digest(x_api_key, WRITE_API_KEY):
         raise HTTPException(status_code=401, detail="Invalid API key")
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -2711,7 +2714,7 @@ def living_review_status():
 
 
 @app.post("/living-review/run")
-def living_review_run(scenario_id: str = "all", days: int = 30, dry_run: bool = False):
+def living_review_run(scenario_id: str = "all", days: int = 30, dry_run: bool = False, _: None = Depends(require_api_key)):
     """Lance la living review pour un scénario ou tous les scénarios (processus async)."""
     import subprocess as _subprocess
     import sys as _sys
@@ -3144,7 +3147,7 @@ def get_scenario_model_status(scenario_id: str) -> dict[str, Any]:
 
 
 @app.post("/gesica/scenarios/{scenario_id}/model-run")
-def run_scenario_model(scenario_id: str) -> dict[str, Any]:
+def run_scenario_model(scenario_id: str, _: None = Depends(require_api_key)) -> dict[str, Any]:
     """
     Re-run manuel du modèle pour un scénario.
     Retourne le résultat frais avec statut coloré.
@@ -3848,7 +3851,7 @@ def get_article_pico(scenario_id: str, article_id: int):
 
 
 @app.post("/gesica/scenarios/{scenario_id}/articles/{article_id}/pico/extract")
-def extract_article_pico(scenario_id: str, article_id: int):
+def extract_article_pico(scenario_id: str, article_id: int, _: None = Depends(require_api_key)):
     """Extrait (ou re-extrait) le PICO pour un article via LLM à la demande."""
     with engine.connect() as conn:
         row = conn.execute(text("""
@@ -3938,6 +3941,7 @@ def extract_article_pico(scenario_id: str, article_id: int):
 def extract_pico_batch(
     scenario_id: Optional[str] = None,
     limit: int = 100000,
+    _: None = Depends(require_api_key),
 ):
     """
     Extrait le PICO pour un lot d'articles (par scénario ou tout le corpus).
@@ -4042,6 +4046,7 @@ def extract_pico_batch(
 def extract_metadata_batch(
     scenario_id: Optional[str] = None,
     limit: int = 100000,
+    _: None = Depends(require_api_key),
 ):
     """
     Enrichit les métadonnées (type d'étude, année, journal) via LLM pour un lot d'articles.
@@ -4138,6 +4143,7 @@ def extract_metadata_batch(
 def fetch_fulltext_batch(
     scenario_id: Optional[str] = None,
     limit: int = 100000,
+    _: None = Depends(require_api_key),
 ):
     """
     Tente de récupérer le texte intégral (via DOI/URL) pour un lot d'articles.
@@ -4300,6 +4306,7 @@ def screen_scenario_article(
     status: str,
     reason: str | None = None,
     notes: str | None = None,
+    _: None = Depends(require_api_key),
 ):
     """
     Décision de screening PRISMA pour un article d'un scénario.
@@ -4667,7 +4674,8 @@ class DoubleBlindDecisionIn(BaseModel):
 @app.post("/gesica/scenarios/{scenario_id}/double-blind/decision")
 def submit_double_blind_decision(
     scenario_id: str,
-    payload: DoubleBlindDecisionIn
+    payload: DoubleBlindDecisionIn,
+    _: None = Depends(require_api_key),
 ) -> dict[str, Any]:
     """
     Soumet la décision d'un reviewer (1 ou 2) pour le screening double-aveugle.
@@ -4872,6 +4880,7 @@ def resolve_conflict(
     article_id: int,
     final_status: str,
     arbitrator_notes: str | None = None,
+    _: None = Depends(require_api_key),
 ) -> dict[str, Any]:
     """Résout un conflit entre reviewers (arbitrage par un tiers)."""
     if final_status not in ("included", "excluded"):
@@ -5372,6 +5381,7 @@ def get_evidence_brief_pdf(scenario_id: str):
 def trigger_living_review(
     scenario_id: str | None = None,
     dry_run: bool = True,
+    _: None = Depends(require_api_key),
 ) -> dict[str, Any]:
     """
     Déclenche le pipeline Living Review :
@@ -5512,6 +5522,7 @@ def list_subscriptions(email: str) -> list[dict[str, Any]]:
 def send_alert_digest(
     scenario_id: str | None = None,
     dry_run: bool = True,
+    _: None = Depends(require_api_key),
 ) -> dict[str, Any]:
     """
     Envoie les digests email aux abonnés.
@@ -6124,7 +6135,7 @@ def _run_user_scenario_populate(
 
     ENTREZ_BASE = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
     EMAIL = os.getenv("PUBMED_EMAIL", "literev@example.com")
-    WRITE_KEY = os.getenv("WRITE_API_KEY", "LiteRev2026!")
+    WRITE_KEY = os.getenv("WRITE_API_KEY", "")
     HEADERS_LOCAL = {"X-Api-Key": WRITE_KEY}
     API_LOCAL = "http://127.0.0.1:8000"
     BATCH_SIZE = 200  # efetch max par requête

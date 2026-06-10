@@ -51,10 +51,9 @@ def _load_secrets() -> str:
                 pass
     return key
 
-DB_URL = os.environ.get(
-    "DATABASE_URL",
-    "postgresql://literev:MyNewStrongPassword!@10.10.1.10:5432/literev"
-)
+DB_URL = os.environ.get("DATABASE_URL") or os.environ.get("DB_URL")
+if not DB_URL:
+    raise RuntimeError("DATABASE_URL (or DB_URL) environment variable is required")
 
 # ─── Queries PubMed par scénario ──────────────────────────────────────────────
 

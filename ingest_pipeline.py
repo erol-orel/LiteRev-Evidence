@@ -22,7 +22,7 @@ from typing import Any
 import requests
 
 API_BASE = os.getenv("API_BASE", "http://127.0.0.1:8000")
-WRITE_API_KEY = os.getenv("WRITE_API_KEY", "LiteRev2026!")
+WRITE_API_KEY = os.getenv("WRITE_API_KEY", "")
 HEADERS = {"X-Api-Key": WRITE_API_KEY}
 
 # --- CONFIGURATION DES REQUÊTES PAR PROJET ---

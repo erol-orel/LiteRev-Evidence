@@ -6,8 +6,10 @@ import subprocess
 import sys
 import time
 
-os.environ.setdefault("DB_URL", "postgresql+psycopg://literev:MyNewStrongPassword!@10.10.1.10:5432/literev")
-os.environ.setdefault("WRITE_API_KEY", "LiteRev2026!")
+if not os.environ.get("DB_URL"):
+    raise RuntimeError("DB_URL environment variable is required")
+if not os.environ.get("WRITE_API_KEY"):
+    raise RuntimeError("WRITE_API_KEY environment variable is required")
 os.environ.setdefault("EMBED_MODEL_NAME", "BAAI/bge-m3")
 
 GESICA_QUERIES = [

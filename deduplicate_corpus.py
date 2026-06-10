@@ -62,13 +62,9 @@ def _load_env_file(path: str) -> None:
 for _ep in [".env", "/opt/literev-api/.env", "/opt/literev-api/secrets.env", "/etc/literev/secrets"]:
     _load_env_file(_ep)
 
-DB_URL = os.environ.get(
-    "DB_URL",
-    os.environ.get(
-        "DATABASE_URL",
-        "postgresql+psycopg://literev:MyNewStrongPassword!@10.10.1.10:5432/literev"
-    )
-)
+DB_URL = os.environ.get("DB_URL") or os.environ.get("DATABASE_URL")
+if not DB_URL:
+    raise RuntimeError("DB_URL (or DATABASE_URL) environment variable is required")
 
 engine = create_engine(DB_URL, pool_pre_ping=True)
 

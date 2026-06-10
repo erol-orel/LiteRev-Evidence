@@ -65,10 +65,9 @@ for _ep in [".env", str(Path(__file__).parent / ".env"), "/opt/literev-api/.env"
             "/opt/literev-api/secrets.env", "/etc/literev/secrets"]:
     _load_env_file(_ep)
 
-DB_URL = os.getenv(
-    "DB_URL",
-    "postgresql+psycopg://literev:MyNewStrongPassword!@10.10.1.10:5432/literev",
-)
+DB_URL = os.getenv("DB_URL") or os.getenv("DATABASE_URL")
+if not DB_URL:
+    raise RuntimeError("DB_URL (or DATABASE_URL) environment variable is required")
 API_BASE = os.getenv("LITEREV_API_BASE", "http://localhost:8000")
 WRITE_API_KEY = os.getenv("WRITE_API_KEY", "")
 UNPAYWALL_EMAIL = os.getenv("UNPAYWALL_EMAIL", "")  # requis pour Unpaywall

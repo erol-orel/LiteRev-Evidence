@@ -1,6 +1,6 @@
 -- Migration : ajout de la colonne pico_json pour stocker l'extraction PICO par article
 -- Exécuter avec :
---   PGPASSWORD="MyNewStrongPassword!" psql -U literev -d literev -h 10.10.1.10 -f migrate_add_pico.sql
+--   PGPASSWORD="$DB_PASSWORD" psql -U literev -d literev -h 10.10.1.10 -f migrate_add_pico.sql
 
 BEGIN;
 

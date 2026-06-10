@@ -303,7 +303,7 @@ pip install -r requirements.txt
 pip install statsmodels prophet lightgbm scikit-learn tiktoken xgboost
 
 # 5. Exécuter la migration de base de données pour ajouter les colonnes bibliographiques
-PGPASSWORD='MyNewStrongPassword!' psql \
+PGPASSWORD='<votre-mot-de-passe>' psql \
   -h 10.10.1.10 -U literev -d literev \
   -f /opt/literev-api/migrate_add_bibliographic_columns.sql
 

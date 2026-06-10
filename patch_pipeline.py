@@ -29,7 +29,7 @@ def _run_user_scenario_populate(scenario_id: str, query: str, filters: dict, max
 
     ENTREZ_BASE = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
     EMAIL = os.getenv("PUBMED_EMAIL", "literev@example.com")
-    WRITE_KEY = os.getenv("WRITE_API_KEY", "LiteRev2026!")
+    WRITE_KEY = os.getenv("WRITE_API_KEY", "")
     HEADERS_LOCAL = {"X-Api-Key": WRITE_KEY}
     API_LOCAL = "http://127.0.0.1:8000"
 
@@ -89,7 +89,7 @@ def _run_user_scenario_populate(
 
     ENTREZ_BASE = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
     EMAIL = os.getenv("PUBMED_EMAIL", "literev@example.com")
-    WRITE_KEY = os.getenv("WRITE_API_KEY", "LiteRev2026!")
+    WRITE_KEY = os.getenv("WRITE_API_KEY", "")
     HEADERS_LOCAL = {"X-Api-Key": WRITE_KEY}
     API_LOCAL = "http://127.0.0.1:8000"
     BATCH_SIZE = 200  # efetch max par requête

@@ -13,7 +13,7 @@ import requests
 API_BASE = os.getenv("API_BASE", "http://127.0.0.1:8000")
 ENTREZ_BASE = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
 EMAIL = os.getenv("PUBMED_EMAIL", "literev@example.com")
-WRITE_API_KEY = os.getenv("WRITE_API_KEY", "LiteRev2026!")
+WRITE_API_KEY = os.getenv("WRITE_API_KEY", "")
 HEADERS = {"X-Api-Key": WRITE_API_KEY}
 MAX_PER_QUERY = 20
 

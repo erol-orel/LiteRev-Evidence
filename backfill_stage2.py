@@ -16,10 +16,9 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 logger = logging.getLogger("backfill-stage2")
 
 # Database URL
-DB_URL = os.getenv(
-    "DB_URL",
-    "postgresql+psycopg://literev:MyNewStrongPassword!@10.10.1.10:5432/literev",
-)
+DB_URL = os.getenv("DB_URL") or os.getenv("DATABASE_URL")
+if not DB_URL:
+    raise RuntimeError("DB_URL (or DATABASE_URL) environment variable is required")
 
 engine = create_engine(DB_URL, pool_pre_ping=True)
 

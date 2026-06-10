@@ -8,7 +8,9 @@ import sys
 import traceback
 
 # Simuler exactement ce que fait l'endpoint
-DB_URL = os.getenv("DB_URL", "postgresql+psycopg://literev:MyNewStrongPassword!@10.10.1.10:5432/literev")
+DB_URL = os.getenv("DB_URL") or os.getenv("DATABASE_URL")
+if not DB_URL:
+    raise RuntimeError("DB_URL (or DATABASE_URL) environment variable is required")
 print(f"[1] DB_URL = {DB_URL[:40]}...")
 
 try:

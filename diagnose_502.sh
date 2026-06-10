@@ -50,7 +50,11 @@ echo "9. Connexion à la base de données :"
 python3 -c "
 from sqlalchemy import create_engine, text
 try:
-    engine = create_engine('postgresql+psycopg://literev:MyNewStrongPassword!@10.10.1.10:5432/literev')
+    import os
+    db_url = os.environ.get('DB_URL') or os.environ.get('DATABASE_URL')
+    if not db_url:
+        raise RuntimeError('DB_URL non défini')
+    engine = create_engine(db_url)
     with engine.connect() as conn:
         result = conn.execute(text('SELECT COUNT(*) FROM literature_document'))
         print(f'  ✓ DB OK — {result.scalar()} documents')

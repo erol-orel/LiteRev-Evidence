@@ -43,10 +43,9 @@ logger = logging.getLogger("ingest-living-reviews")
 
 # ─── Configuration ────────────────────────────────────────────────────────────
 
-DB_URL = os.getenv(
-    "DB_URL",
-    "postgresql+psycopg://literev:MyNewStrongPassword!@10.10.1.10:5432/literev",
-)
+DB_URL = os.getenv("DB_URL") or os.getenv("DATABASE_URL")
+if not DB_URL:
+    raise RuntimeError("DB_URL (or DATABASE_URL) environment variable is required")
 
 PUBMED_ESEARCH = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi"
 PUBMED_EFETCH  = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi"

@@ -44,10 +44,9 @@ logging.basicConfig(
 log = logging.getLogger("pico")
 
 # ── DB ────────────────────────────────────────────────────────────────────────
-DB_URL = os.environ.get(
-    "DATABASE_URL",
-    "postgresql+psycopg://literev:MyNewStrongPassword!@10.10.1.10:5432/literev",
-)
+DB_URL = os.environ.get("DATABASE_URL") or os.environ.get("DB_URL")
+if not DB_URL:
+    raise RuntimeError("DATABASE_URL (or DB_URL) environment variable is required")
 engine = create_engine(DB_URL, pool_pre_ping=True)
 
 # ── OpenAI ────────────────────────────────────────────────────────────────────

@@ -7,10 +7,9 @@ from __future__ import annotations
 import os
 from sqlalchemy import create_engine, text
 
-DB_URL = os.getenv(
-    "DB_URL",
-    "postgresql+psycopg://literev:MyNewStrongPassword!@10.10.1.10:5432/literev",
-)
+DB_URL = os.getenv("DB_URL") or os.getenv("DATABASE_URL")
+if not DB_URL:
+    raise RuntimeError("DB_URL (or DATABASE_URL) environment variable is required")
 engine = create_engine(DB_URL, pool_pre_ping=True)
 
 # ─── Mise à jour des documents (literature_document) ─────────────────────────

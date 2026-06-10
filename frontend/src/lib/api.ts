@@ -10,6 +10,17 @@ import type {
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "/api";
 
+// Stratégie de récupération sécurisée (H-3) : sessionStorage -> localStorage -> env Vite.
+// Joint la clé X-API-Key à toutes les requêtes de mutation (endpoints protégés côté serveur).
+function authHeaders(extra: Record<string, string> = {}): Record<string, string> {
+  const token =
+    sessionStorage.getItem("api_key") ||
+    localStorage.getItem("api_key") ||
+    (import.meta.env.VITE_API_KEY as string) ||
+    "";
+  return token ? { "X-API-Key": token, ...extra } : { ...extra };
+}
+
 export interface FilterOption {
   value: string | number;
   label: string;
@@ -202,9 +213,7 @@ export async function searchDocuments(
 
   const response = await fetch(`${API_BASE_URL}/search`, {
     method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-    },
+    headers: authHeaders({ "Content-Type": "application/json" }),
     body: JSON.stringify(apiPayload),
   });
 
@@ -599,14 +608,9 @@ export async function fetchScreeningList(projectContext?: string): Promise<Scree
 }
 
 export async function submitScreeningDecision(decision: ScreeningDecision): Promise<void> {
-  // Stratégie de récupération sécurisée (H-3) : sessionStorage (session temporaire) -> localStorage -> env Vite
-  const token = sessionStorage.getItem("api_key") || localStorage.getItem("api_key") || (import.meta.env.VITE_API_KEY as string) || "";
   const response = await fetch(`${API_BASE_URL}/screening/decision`, {
     method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "X-API-Key": token
-    },
+    headers: authHeaders({ "Content-Type": "application/json" }),
     body: JSON.stringify({
       document_id: decision.documentId,
       status: decision.status,
@@ -653,9 +657,7 @@ export async function fetchPrismaFlow(projectContext?: string): Promise<PrismaFl
 export async function askAssistant(req: AskRequest): Promise<AskResponse> {
   const response = await fetch(`${API_BASE_URL}/ask`, {
     method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-    },
+    headers: authHeaders({ "Content-Type": "application/json" }),
     body: JSON.stringify({
       question: req.question,
       project_context: req.projectContext || null,
@@ -1692,9 +1694,7 @@ export async function fetchScenarioModelStatus(scenarioId: string): Promise<Mode
 
 export async function runScenarioModel(scenarioId: string): Promise<ModelStatus> {
   const base = scenarioBase(scenarioId);
-  const response = await fetch(`${base}/${scenarioId}/model-run`, {
-    method: 'POST',
-  });
+  const response = await fetch(`${base}/${scenarioId}/model-run`, { method: 'POST', headers: authHeaders() });
   if (!response.ok) throw new Error(`HTTP ${response.status}`);
   return response.json();
 }
@@ -1718,7 +1718,7 @@ export async function askScenarioRag(
   const base = scenarioBase(scenarioId);
   const response = await fetch(`${base}/${scenarioId}/rag`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: authHeaders({ "Content-Type": "application/json" }),
     body: JSON.stringify({ question, filters }),
   });
   if (!response.ok) throw new Error(`HTTP ${response.status}`);
@@ -1752,6 +1752,7 @@ export async function uploadScenarioDataset(
   const base = scenarioBase(scenarioId);
   const response = await fetch(`${base}/${scenarioId}/upload-dataset`, {
     method: 'POST',
+    headers: authHeaders(),
     body: formData,
   });
   
@@ -1776,7 +1777,7 @@ export async function screenArticle(
   const base = scenarioBase(scenarioId);
   const response = await fetch(
     `${base}/${scenarioId}/articles/${articleId}/screen?${params}`,
-    { method: 'POST' }
+    { method: 'POST', headers: authHeaders() }
   );
   if (!response.ok) throw new Error(`HTTP ${response.status}`);
   return response.json();
@@ -1807,7 +1808,7 @@ export async function extractPicoBatch(
 ): Promise<{ extracted: number; skipped: number; errors: number; message: string }> {
   const params = new URLSearchParams({ limit: String(limit) });
   if (scenarioId) params.set('scenario_id', scenarioId);
-  const response = await fetch(`${API_BASE_URL}/pico/extract?${params}`, { method: 'POST' });
+  const response = await fetch(`${API_BASE_URL}/pico/extract?${params}`, { method: 'POST', headers: authHeaders() });
   if (!response.ok) throw new Error(`HTTP ${response.status}`);
   return response.json();
 }
@@ -2003,7 +2004,7 @@ export function askScenarioRagStream(
     try {
       const resp = await fetch(`${API_BASE_URL}/ask/stream`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: authHeaders({ "Content-Type": "application/json" }),
         body: JSON.stringify({
           question,
           project_context: "literev",
@@ -2093,7 +2094,7 @@ export async function submitDoubleBlindDecision(
     `${base}/${scenarioId}/double-blind/decision`,
     {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: authHeaders({ "Content-Type": "application/json" }),
       body: JSON.stringify(payload),
     },
   );
@@ -2296,7 +2297,7 @@ export async function createUserScenario(
 ): Promise<UserScenario> {
   const r = await fetch(`${API_BASE_URL}/user-scenarios`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: authHeaders({ "Content-Type": "application/json" }),
     body: JSON.stringify(payload),
   });
   if (!r.ok) throw new Error(`HTTP ${r.status}`);
@@ -2304,7 +2305,7 @@ export async function createUserScenario(
 }
 
 export async function deleteUserScenario(scenarioId: string): Promise<{ deleted: boolean; id: string }> {
-  const r = await fetch(`${API_BASE_URL}/user-scenarios/${scenarioId}`, { method: 'DELETE' });
+  const r = await fetch(`${API_BASE_URL}/user-scenarios/${scenarioId}`, { method: 'DELETE', headers: authHeaders() });
   if (!r.ok) throw new Error(`HTTP ${r.status}`);
   return r.json();
 }
@@ -2315,7 +2316,7 @@ export async function patchUserScenario(
 ): Promise<UserScenario> {
   const r = await fetch(`${API_BASE_URL}/user-scenarios/${scenarioId}`, {
     method: 'PATCH',
-    headers: { 'Content-Type': 'application/json' },
+    headers: authHeaders({ "Content-Type": "application/json" }),
     body: JSON.stringify(patch),
   });
   if (!r.ok) throw new Error(`HTTP ${r.status}`);
@@ -2328,7 +2329,7 @@ export async function populateUserScenario(
 ): Promise<{ scenario_id: string; status: string; query: string; message: string }> {
   const r = await fetch(
     `${API_BASE_URL}/user-scenarios/${scenarioId}/populate?max_results=${maxResults}`,
-    { method: 'POST' },
+    { method: 'POST', headers: authHeaders() },
   );
   if (!r.ok) throw new Error(`HTTP ${r.status}`);
   return r.json();
@@ -2340,7 +2341,7 @@ export async function startUserScenarioPipeline(
 ): Promise<{ scenario_id: string; status: string; message: string; steps: string[] }> {
   const r = await fetch(
     `${API_BASE_URL}/user-scenarios/${scenarioId}/pipeline?max_results=${maxResults}`,
-    { method: 'POST' },
+    { method: 'POST', headers: authHeaders() },
   );
   if (!r.ok) throw new Error(`HTTP ${r.status}`);
   return r.json();
@@ -2371,7 +2372,7 @@ export async function subscribeAlerts(
 ): Promise<{ status: string; message: string }> {
   const r = await fetch(`${API_BASE_URL}/alerts/subscribe`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: authHeaders({ "Content-Type": "application/json" }),
     body: JSON.stringify({ email, scenario_id: scenarioId, frequency }),
   });
   if (!r.ok) throw new Error(`HTTP ${r.status}`);
@@ -2384,7 +2385,7 @@ export async function unsubscribeAlerts(
 ): Promise<{ status: string }> {
   const r = await fetch(
     `${API_BASE_URL}/alerts/unsubscribe?email=${encodeURIComponent(email)}&scenario_id=${encodeURIComponent(scenarioId)}`,
-    { method: "DELETE" },
+    { method: 'DELETE', headers: authHeaders() },
   );
   if (!r.ok) throw new Error(`HTTP ${r.status}`);
   return r.json();
@@ -2398,9 +2399,7 @@ export async function triggerLivingReview(
 ): Promise<{ status: string; message: string; scenarios: any[] }> {
   const params = new URLSearchParams({ dry_run: String(dryRun) });
   if (scenarioId) params.set("scenario_id", scenarioId);
-  const r = await fetch(`${API_BASE_URL}/gesica/living-review/trigger?${params}`, {
-    method: "POST",
-  });
+  const r = await fetch(`${API_BASE_URL}/gesica/living-review/trigger?${params}`, { method: 'POST', headers: authHeaders() });
   if (!r.ok) throw new Error(`HTTP ${r.status}`);
   return r.json();
 }
@@ -2428,7 +2427,7 @@ export async function extractPicoBatchGlobal(
 ): Promise<EnrichmentBatchResult> {
   const params = new URLSearchParams({ limit: String(limit) });
   if (scenarioId) params.set('scenario_id', scenarioId);
-  const r = await fetch(`${API_BASE_URL}/pico/extract?${params}`, { method: 'POST' });
+  const r = await fetch(`${API_BASE_URL}/pico/extract?${params}`, { method: 'POST', headers: authHeaders() });
   if (!r.ok) throw new Error(`HTTP ${r.status}`);
   return r.json();
 }
@@ -2439,7 +2438,7 @@ export async function extractMetadataBatch(
 ): Promise<EnrichmentBatchResult> {
   const params = new URLSearchParams({ limit: String(limit) });
   if (scenarioId) params.set('scenario_id', scenarioId);
-  const r = await fetch(`${API_BASE_URL}/metadata/extract?${params}`, { method: 'POST' });
+  const r = await fetch(`${API_BASE_URL}/metadata/extract?${params}`, { method: 'POST', headers: authHeaders() });
   if (!r.ok) throw new Error(`HTTP ${r.status}`);
   return r.json();
 }
@@ -2450,7 +2449,7 @@ export async function fetchFulltextBatch(
 ): Promise<EnrichmentBatchResult & { fetched: number; not_available: number }> {
   const params = new URLSearchParams({ limit: String(limit) });
   if (scenarioId) params.set('scenario_id', scenarioId);
-  const r = await fetch(`${API_BASE_URL}/fulltext/fetch?${params}`, { method: 'POST' });
+  const r = await fetch(`${API_BASE_URL}/fulltext/fetch?${params}`, { method: 'POST', headers: authHeaders() });
   if (!r.ok) throw new Error(`HTTP ${r.status}`);
   return r.json();
 }
@@ -2489,7 +2488,7 @@ export async function createFolder(
 ): Promise<ScenarioFolder> {
   const r = await fetch(`${API_BASE_URL}/user-scenario-folders`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: authHeaders({ "Content-Type": "application/json" }),
     body: JSON.stringify({ name, color, sort_order }),
   });
   if (!r.ok) throw new Error(`HTTP ${r.status}`);
@@ -2504,7 +2503,7 @@ export async function updateFolder(
 ): Promise<ScenarioFolder> {
   const r = await fetch(`${API_BASE_URL}/user-scenario-folders/${folderId}`, {
     method: 'PATCH',
-    headers: { 'Content-Type': 'application/json' },
+    headers: authHeaders({ "Content-Type": "application/json" }),
     body: JSON.stringify({ name, color, sort_order }),
   });
   if (!r.ok) throw new Error(`HTTP ${r.status}`);
@@ -2512,7 +2511,7 @@ export async function updateFolder(
 }
 
 export async function deleteFolder(folderId: string): Promise<{ deleted: boolean; id: string }> {
-  const r = await fetch(`${API_BASE_URL}/user-scenario-folders/${folderId}`, { method: 'DELETE' });
+  const r = await fetch(`${API_BASE_URL}/user-scenario-folders/${folderId}`, { method: 'DELETE', headers: authHeaders() });
   if (!r.ok) throw new Error(`HTTP ${r.status}`);
   return r.json();
 }
@@ -2548,7 +2547,7 @@ export async function patchScenarioSettings(
 ): Promise<{ status: string; scenario_id: string; updated: string[] }> {
   const r = await fetch(`${API_BASE_URL}/scenarios/${scenarioId}/settings`, {
     method: 'PATCH',
-    headers: { 'Content-Type': 'application/json' },
+    headers: authHeaders({ "Content-Type": "application/json" }),
     body: JSON.stringify(payload),
   });
   if (!r.ok) throw new Error(`HTTP ${r.status}`);
@@ -2568,9 +2567,7 @@ export async function triggerRerank(
   query?: string,
 ): Promise<{ status: string; scenario_id: string; query?: string }> {
   const params = query ? `?query=${encodeURIComponent(query)}` : '';
-  const r = await fetch(`${API_BASE_URL}/scenarios/${scenarioId}/rerank${params}`, {
-    method: 'POST',
-  });
+  const r = await fetch(`${API_BASE_URL}/scenarios/${scenarioId}/rerank${params}`, { method: 'POST', headers: authHeaders() });
   if (!r.ok) throw new Error(`HTTP ${r.status}`);
   return r.json();
 }
@@ -2635,7 +2632,7 @@ export async function generateEvidenceBrief(
 ): Promise<{ status: string; scenario_id: string }> {
   const r = await fetch(
     `${API_BASE_URL}/scenarios/${scenarioId}/evidence-brief/generate?force=${force}`,
-    { method: 'POST' },
+    { method: 'POST', headers: authHeaders() },
   );
   if (!r.ok) throw new Error(`HTTP ${r.status}`);
   return r.json();
@@ -2706,9 +2703,7 @@ export async function getScenarioVariables(scenarioId: string): Promise<Scenario
 export async function generateScenarioVariables(
   scenarioId: string,
 ): Promise<{ status: string; scenario_id?: string }> {
-  const r = await fetch(`${API_BASE_URL}/scenarios/${scenarioId}/variables/generate`, {
-    method: 'POST',
-  });
+  const r = await fetch(`${API_BASE_URL}/scenarios/${scenarioId}/variables/generate`, { method: 'POST', headers: authHeaders() });
   if (!r.ok) throw new Error(`HTTP ${r.status}`);
   return r.json();
 }
@@ -2727,7 +2722,7 @@ export async function validateScenarioVariables(
 ): Promise<{ status: string; scenario_id: string; validated_at: string }> {
   const r = await fetch(`${API_BASE_URL}/scenarios/${scenarioId}/variables/validate`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: authHeaders({ "Content-Type": "application/json" }),
     body: JSON.stringify(payload),
   });
   if (!r.ok) throw new Error(`HTTP ${r.status}`);
@@ -2761,7 +2756,7 @@ export function askScenarioRagStreamFiltered(
     try {
       const resp = await fetch(`${API_BASE_URL}/ask/stream/filtered`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: authHeaders({ "Content-Type": "application/json" }),
         body: JSON.stringify({
           question,
           project_context: 'literev',
