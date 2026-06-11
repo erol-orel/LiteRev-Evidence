@@ -940,11 +940,16 @@ function StatsView({ corpusStats, gesicaStats, fulltextStats, scenarios, statsBy
         <div className="rounded-3xl border border-white/10 bg-white/5 p-5 shadow-2xl">
           <h2 className="mb-4 flex items-center gap-2 text-lg font-semibold text-white">
             <BarChart2 size={18} className="text-brand-400" />
-            Évolution temporelle du corpus (2000–2026)
+            {(() => {
+              const yrs = Object.keys(statsByYear.byYear).map((y) => parseInt(y)).filter((y) => !isNaN(y));
+              const lo = yrs.length ? Math.min(...yrs) : 1900;
+              const hi = yrs.length ? Math.max(...yrs) : new Date().getFullYear();
+              return `Évolution temporelle du corpus (${lo}–${hi})`;
+            })()}
           </h2>
           {(() => {
             const entries = Object.entries(statsByYear.byYear)
-              .filter(([y]) => parseInt(y) >= 2000)
+              .filter(([y]) => parseInt(y) >= 1900)
               .sort((a, b) => parseInt(a[0]) - parseInt(b[0]));
             const maxVal = Math.max(...entries.map(([, v]) => v));
             const recentThreshold = 2020;
@@ -3062,7 +3067,7 @@ export default function App() {
   });
   const [diseaseSearch, setDiseaseSearch] = useState<string>("");
   const [yearRange, setYearRange] = useState<[number, number]>([
-    2000,
+    1900,
     new Date().getFullYear(),
   ]);
   const [results, setResults] = useState<SearchResult[]>([]);
@@ -3090,6 +3095,7 @@ export default function App() {
   const [pipelineStatuses, setPipelineStatuses] = useState<Record<string, UserScenarioPipelineStatus>>({});
   const pipelinePollRef = useRef<Record<string, ReturnType<typeof setInterval>>>({});
   const [searchSourceBreakdown, setSearchSourceBreakdown] = useState<Record<string, number> | null>(null);
+  const [searchTotalMatching, setSearchTotalMatching] = useState<number | null>(null);
   const [searchScoreType, setSearchScoreType] = useState<string | null>(null);
   const [searchScoreLabel, setSearchScoreLabel] = useState<string | null>(null);
   const [folders, setFolders] = useState<ScenarioFolder[]>([]);
@@ -3222,6 +3228,7 @@ export default function App() {
         filters: effectiveFilters,
       });
       setResults(data.results);
+      setSearchTotalMatching(data.totalMatchingDocs ?? null);
       setSearchSourceBreakdown(data.sourceBreakdown ?? null);
       setSearchScoreType(data.scoreType ?? null);
       setSearchScoreLabel(data.scoreLabel ?? null);
@@ -3569,13 +3576,34 @@ export default function App() {
                           {label}
                         </span>
                         {isDiseaseField && (
-                          <input
-                            type="text"
-                            placeholder="Rechercher une maladie..."
-                            value={diseaseSearch}
-                            onChange={e => setDiseaseSearch(e.target.value)}
-                            className="w-full rounded-xl border border-white/10 bg-forest-950/80 px-3 py-2 text-xs text-white placeholder-white/30 focus:border-brand-400 focus:outline-none mb-1"
-                          />
+                          <div className="relative mb-1">
+                            <input
+                              type="text"
+                              placeholder="Rechercher une maladie..."
+                              value={diseaseSearch}
+                              onChange={e => setDiseaseSearch(e.target.value)}
+                              className="w-full rounded-xl border border-white/10 bg-forest-950/80 px-3 py-2 text-xs text-white placeholder-white/30 focus:border-brand-400 focus:outline-none"
+                            />
+                            {diseaseSearch.trim() && filteredOptions.length > 0 &&
+                              !(filteredOptions.length === 1 && filteredOptions[0].label.toLowerCase() === diseaseSearch.trim().toLowerCase()) && (
+                              <ul className="absolute z-20 mt-1 max-h-56 w-full overflow-auto rounded-xl border border-white/10 bg-forest-950 shadow-2xl">
+                                {filteredOptions.slice(0, 10).map((opt) => (
+                                  <li key={String(opt.value)}>
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        setFilters((prev) => ({ ...prev, [key]: String(opt.value) }));
+                                        setDiseaseSearch(opt.label);
+                                      }}
+                                      className="block w-full px-3 py-2 text-left text-xs text-white/80 transition hover:bg-brand-500/20 hover:text-white"
+                                    >
+                                      {opt.label}
+                                    </button>
+                                  </li>
+                                ))}
+                              </ul>
+                            )}
+                          </div>
                         )}
                         <select
                           value={(filters as Record<string, string | undefined>)[key] ?? ""}
@@ -3607,8 +3635,8 @@ export default function App() {
                     </span>
                     {(() => {
                       const minYear = filterOptions?.year?.length
-                        ? Math.min(...filterOptions.year.map((y) => Number(y.value)))
-                        : 2000;
+                        ? Math.min(1900, ...filterOptions.year.map((y) => Number(y.value)))
+                        : 1900;
                       const maxYear = filterOptions?.year?.length
                         ? Math.max(...filterOptions.year.map((y) => Number(y.value)))
                         : new Date().getFullYear();
@@ -3648,7 +3676,7 @@ export default function App() {
                       );
                     })()}
                     <div className="flex justify-between text-[10px] text-white/30 mt-1">
-                      <span>{filterOptions?.year?.length ? Math.min(...filterOptions.year.map(y => Number(y.value))) : 2000}</span>
+                      <span>{filterOptions?.year?.length ? Math.min(1900, ...filterOptions.year.map(y => Number(y.value))) : 1900}</span>
                       <span>{filterOptions?.year?.length ? Math.max(...filterOptions.year.map(y => Number(y.value))) : new Date().getFullYear()}</span>
                     </div>
                   </div>
@@ -3673,6 +3701,7 @@ export default function App() {
                               setResults([]);
                               setPage(1);
                               setSearchSourceBreakdown(null);
+                              setSearchTotalMatching(null);
                               setSelectedResult(null);
                               setSelectedDocument(null);
                             }
@@ -3738,8 +3767,18 @@ export default function App() {
                   <div className="flex items-center justify-between">
                     <div className="space-y-1">
                       <p className="text-sm text-forest-400">
-                        <span className="font-semibold text-white">{uniqueDocCount}</span>{" "}
-                        document{uniqueDocCount > 1 ? "s" : ""} uniques
+                        {searchTotalMatching != null && searchTotalMatching > uniqueDocCount ? (
+                          <>
+                            <span className="font-semibold text-white">{searchTotalMatching.toLocaleString()}</span>{" "}
+                            document{searchTotalMatching > 1 ? "s" : ""} pertinent{searchTotalMatching > 1 ? "s" : ""}
+                            <span className="text-white/30"> ({uniqueDocCount} affichés)</span>
+                          </>
+                        ) : (
+                          <>
+                            <span className="font-semibold text-white">{uniqueDocCount}</span>{" "}
+                            document{uniqueDocCount > 1 ? "s" : ""} uniques
+                          </>
+                        )}
                         {dedupedResults.length > uniqueDocCount && (
                           <span className="text-white/30"> ({dedupedResults.length} passages)</span>
                         )}

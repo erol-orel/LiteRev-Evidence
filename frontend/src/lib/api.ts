@@ -226,6 +226,7 @@ export async function searchDocuments(
   return {
     results: (apiData.results || []).map(mapSearchResultFromApi),
     totalUniqueDocs: apiData.total_unique_docs,
+    totalMatchingDocs: apiData.total_matching_docs ?? apiData.total,
     sourceBreakdown: apiData.source_breakdown,
     scoreType: apiData.score_type,
     scoreLabel: apiData.score_label,
