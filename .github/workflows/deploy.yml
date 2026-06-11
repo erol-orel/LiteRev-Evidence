@@ -20,8 +20,11 @@ jobs:
 
       - name: Python syntax check (backend)
         run: |
-          python -m py_compile main.py backend_additions.py
+          python -m compileall -q *.py
           python -m compileall -q app
+
+      - name: Validate requirements.txt is resolvable
+        run: pip install --dry-run -r requirements.txt
 
       - uses: actions/setup-node@v4
         with:

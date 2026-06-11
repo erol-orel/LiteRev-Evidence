@@ -14,7 +14,7 @@ except ImportError:
     GESICA_ENRICHED: dict = {}
 from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import create_engine, text
 
 logging.basicConfig(level=logging.INFO)
@@ -90,9 +90,10 @@ expensive_limiter = InMemoryRateLimiter(requests_limit=10, window_seconds=60)
 # Endpoints coûteux à protéger (RAG, search, génération de briefs)
 EXPENSIVE_PATHS = {
     "/search",
-    "/ask",
-    "/ask/stream",
+    "/ask",  # couvre /ask, /ask/stream, /ask/stream/filtered (préfixe)
     "/user-scenarios/{scenario_id}/rag",
+    "/gesica/scenarios/{scenario_id}/rag",
+    "/scenarios/{scenario_id}/full-pipeline",
 }
 
 @app.middleware("http")
@@ -112,12 +113,12 @@ async def rate_limit_middleware(request: Request, call_next):
     if path == "/health":
         return await call_next(request)
 
-    # Vérifier si le chemin est coûteux
+    # Vérifier si le chemin est coûteux.
+    # - Chemins paramétrés ({...}) : match sur le préfixe avant le premier '{'.
+    # - Chemins fixes : match exact OU sous-chemin (ex. /ask couvre /ask/stream/filtered).
     is_expensive = any(
-        path == exp_path or (
-            "{" in exp_path and 
-            path.startswith(exp_path.split("{")[0])
-        )
+        path.startswith(exp_path.split("{")[0]) if "{" in exp_path
+        else (path == exp_path or path.startswith(exp_path + "/"))
         for exp_path in EXPENSIVE_PATHS
     )
 
@@ -1174,7 +1175,8 @@ def get_prisma_flow(project_context: str | None = None) -> dict[str, Any]:
             SUM(CASE WHEN source = 'europepmc' THEN 1 ELSE 0 END) as europepmc,
             SUM(CASE WHEN screening_status = 'included' THEN 1 ELSE 0 END) as included,
             SUM(CASE WHEN screening_status = 'excluded' THEN 1 ELSE 0 END) as excluded,
-            SUM(CASE WHEN screening_status = 'pending' OR screening_status IS NULL THEN 1 ELSE 0 END) as pending
+            SUM(CASE WHEN screening_status = 'pending' OR screening_status IS NULL THEN 1 ELSE 0 END) as pending,
+            SUM(CASE WHEN is_duplicate IS TRUE THEN 1 ELSE 0 END) as duplicates
         FROM literature_document
         {where_clause}
     """)
@@ -1193,14 +1195,15 @@ def get_prisma_flow(project_context: str | None = None) -> dict[str, Any]:
     excluded = stats["excluded"] or 0
     pending = stats["pending"] or 0
     
-    # Doublons simulés pour le diagramme (environ 15% du total pour faire réaliste)
-    duplicates_removed = int(total * 0.15)
-    records_screened = total
+    # Doublons réels détectés (colonne is_duplicate alimentée par deduplicate_corpus.py)
+    duplicates_removed = stats["duplicates"] or 0
+    # Les lignes is_duplicate sont encore présentes dans `total` : on les retire après dédoublonnage
+    records_screened = total - duplicates_removed
     records_excluded = excluded
     
     return {
         "identification": {
-            "total_records": total + duplicates_removed,
+            "total_records": total,
             "by_source": {
                 "pubmed": pubmed,
                 "pmc": pmc,
@@ -2280,9 +2283,9 @@ def get_terrain_climate(lat: float = 46.2044, lon: float = 6.1432) -> dict[str, 
     import os
     import tempfile
     
-    # Configuration des identifiants Copernicus CDS fournis par l'utilisateur
-    cds_url = "https://cds.climate.copernicus.eu/api"
-    cds_key = "364613a4-31fa-479d-b6d0-61cdc4ff697e"
+    # Configuration des identifiants Copernicus CDS (depuis l'environnement)
+    cds_url = os.getenv("CDS_API_URL", "https://cds.climate.copernicus.eu/api")
+    cds_key = os.getenv("CDS_API_KEY")
     
     # Nous créons temporairement le fichier .cdsapirc requis par le client cdsapi si importé
     # ou nous utilisons directement l'API HTTP REST de Copernicus pour éviter d'écrire sur le disque en prod.
@@ -2307,10 +2310,15 @@ def get_terrain_climate(lat: float = 46.2044, lon: float = 6.1432) -> dict[str, 
         "api_status": "configured_and_ready"
     }
     
+    if not cds_key:
+        climate_data["api_status"] = "not_configured"
+        climate_data["message"] = "Variable d'environnement CDS_API_KEY non définie. Configurez-la côté serveur pour activer Copernicus CDS."
+        return climate_data
+
     try:
         # Essayer d'importer cdsapi
         import cdsapi
-        
+
         # Écrire temporairement le fichier de config cdsapi si nécessaire
         home = os.path.expanduser("~")
         cdsapirc_path = os.path.join(home, ".cdsapirc")
@@ -3768,7 +3776,11 @@ from fastapi import UploadFile, File
 import shutil
 
 @app.post("/gesica/scenarios/{scenario_id}/upload-dataset")
-async def upload_scenario_dataset(scenario_id: str, file: UploadFile = File(...)) -> dict[str, Any]:
+async def upload_scenario_dataset(
+    scenario_id: str,
+    file: UploadFile = File(...),
+    _: None = Depends(require_api_key),
+) -> dict[str, Any]:
     """
     Permet à l'utilisateur d'uploader un jeu de données (CSV ou Excel) pour alimenter
     les variables non branchées d'un scénario spécifique.
@@ -3776,18 +3788,23 @@ async def upload_scenario_dataset(scenario_id: str, file: UploadFile = File(...)
     meta = GESICA_SCENARIO_METADATA.get(scenario_id)
     if not meta:
         raise HTTPException(status_code=404, detail=f"Scénario '{scenario_id}' non trouvé")
-        
+
     # Valider le format du fichier
     filename = file.filename or ""
     ext = filename.split(".")[-1].lower() if "." in filename else ""
     if ext not in ["csv", "xlsx", "xls"]:
         raise HTTPException(status_code=400, detail="Seuls les fichiers CSV et Excel (.xlsx, .xls) sont autorisés")
-        
+
+    # Neutraliser tout chemin dans le nom de fichier (anti path-traversal)
+    safe_filename = Path(filename).name
+    if not safe_filename or safe_filename in (".", ".."):
+        raise HTTPException(status_code=400, detail="Nom de fichier invalide")
+
     # Créer le dossier d'uploads s'il n'existe pas
     upload_dir = Path("/home/ubuntu/uploads_datasets") / scenario_id
     upload_dir.mkdir(parents=True, exist_ok=True)
-    
-    file_path = upload_dir / filename
+
+    file_path = upload_dir / safe_filename
     with file_path.open("wb") as buffer:
         shutil.copyfileobj(file.file, buffer)
         
@@ -5449,9 +5466,24 @@ def trigger_living_review(
 # ─── ALERTES EMAIL ────────────────────────────────────────────────────────────
 
 class AlertSubscriptionIn(BaseModel):
-    email: str
-    scenario_id: str
+    email: str = Field(..., max_length=255)
+    scenario_id: str = Field(..., min_length=1, max_length=100)
     frequency: str = "weekly"  # "daily" | "weekly" | "immediate"
+
+    @field_validator("email")
+    @classmethod
+    def _validate_email(cls, v: str) -> str:
+        v = v.strip()
+        if not re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", v):
+            raise ValueError("Adresse email invalide")
+        return v
+
+    @field_validator("frequency")
+    @classmethod
+    def _validate_frequency(cls, v: str) -> str:
+        if v not in ("daily", "weekly", "immediate"):
+            raise ValueError("frequency doit être 'daily', 'weekly' ou 'immediate'")
+        return v
 
 
 @app.post("/alerts/subscribe")
@@ -5636,6 +5668,16 @@ def _ensure_user_scenarios_table() -> None:
             ALTER TABLE user_scenarios ADD COLUMN IF NOT EXISTS folder_id VARCHAR(40)
             REFERENCES user_scenario_folders(id) ON DELETE SET NULL
         """))
+        # Colonnes du pipeline d'ingestion/populate (sur tables préexistantes)
+        for _ddl in (
+            "ALTER TABLE user_scenarios ADD COLUMN IF NOT EXISTS populate_status VARCHAR(20)",
+            "ALTER TABLE user_scenarios ADD COLUMN IF NOT EXISTS pipeline_status VARCHAR(20)",
+            "ALTER TABLE user_scenarios ADD COLUMN IF NOT EXISTS pipeline_step VARCHAR(80)",
+            "ALTER TABLE user_scenarios ADD COLUMN IF NOT EXISTS pipeline_progress INTEGER DEFAULT 0",
+            "ALTER TABLE user_scenarios ADD COLUMN IF NOT EXISTS pipeline_started_at TIMESTAMP",
+            "ALTER TABLE user_scenarios ADD COLUMN IF NOT EXISTS article_count INTEGER DEFAULT 0",
+        ):
+            conn.execute(text(_ddl))
     logger.info("Tables user_scenarios et user_scenario_folders vérifiées/créées.")
 
 try:
