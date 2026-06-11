@@ -3,7 +3,9 @@
 # Script de diagnostic 502 — LiteRev API
 # Exécuter sur app-01 (62.238.39.50) avec : sudo bash diagnose_502.sh
 # ═══════════════════════════════════════════════════════════════════════
-set -e
+# Pas de `set -e` : un diagnostic doit continuer même quand une commande
+# échoue (c'est précisément le cas qu'on diagnostique — API down, port
+# fermé, grep sans correspondance qui renvoie un code non nul).
 echo "═══════════════════════════════════════════════════════"
 echo "  DIAGNOSTIC 502 — LiteRev API"
 echo "═══════════════════════════════════════════════════════"
@@ -18,11 +20,11 @@ journalctl -u literev-api --no-pager -n 50 2>&1
 
 echo ""
 echo "3. Processus Python actifs :"
-ps aux | grep -E "python|uvicorn|gunicorn" | grep -v grep
+ps aux | grep -E "python|uvicorn|gunicorn" | grep -v grep || echo "  (aucun processus python/uvicorn/gunicorn — l'API est probablement arrêtée)"
 
 echo ""
 echo "4. Ports en écoute :"
-ss -tlnp | grep -E "8000|8001|8080|8765|5000"
+ss -tlnp | grep -E "8000|8001|8080|8765|5000" || echo "  (aucun port applicatif en écoute — l'API n'écoute pas)"
 
 echo ""
 echo "5. Version du code sur le serveur :"
@@ -67,8 +69,8 @@ echo "════════════════════════�
 echo "  RÉSOLUTION : Exécuter les commandes suivantes :"
 echo "═══════════════════════════════════════════════════════"
 echo ""
-echo "  # 1. Installer les dépendances manquantes"
-echo "  pip3 install umap-learn hdbscan"
+echo "  # 1. Installer les dépendances (source de vérité : requirements.txt)"
+echo "  pip3 install -r /opt/literev-api/requirements.txt"
 echo ""
 echo "  # 2. Mettre à jour le code"
 echo "  cd /opt/literev-api && git pull origin main"

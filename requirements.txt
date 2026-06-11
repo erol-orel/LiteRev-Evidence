@@ -1,15 +1,28 @@
+# ── API web ──────────────────────────────────────────────────────────────────
 fastapi>=0.100.0
 uvicorn>=0.22.0
 pydantic>=2.0.0
+python-multipart>=0.0.6
+# ── Base de données ──────────────────────────────────────────────────────────
 sqlalchemy>=2.0.0
 psycopg>=3.1.0
+# ── Clients externes / LLM ───────────────────────────────────────────────────
 requests>=2.31.0
 openai>=1.0.0
+tiktoken>=0.5.0
+# ── Données & ML ─────────────────────────────────────────────────────────────
 numpy>=1.24.0
 scikit-learn>=1.2.0
 pandas>=2.0.0
-jinja2>=3.1.0
-weasyprint>=59.0
-beautifulsoup4>=4.12.0
-lxml>=4.9.0
-python-multipart>=0.0.6
+umap-learn>=0.5.4
+hdbscan>=0.8.33
+prophet>=1.1.5
+lightgbm>=4.0.0
+statsmodels>=0.14.0
+# ── Génération PDF (Evidence Brief) ──────────────────────────────────────────
+reportlab>=4.0.0
+# ── Climat (Copernicus CDS, optionnel mais importé en garde) ─────────────────
+cdsapi>=0.6.1
+# ── Migrations ───────────────────────────────────────────────────────────────
+alembic>=1.12.0
+python-dotenv>=1.0.0

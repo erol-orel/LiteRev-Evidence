@@ -1,0 +1,66 @@
+name: Server command (manual)
+
+# Permet d'exécuter une commande ponctuelle et journalisée sur le serveur
+# de production, via SSH, sans accès shell direct. Déclenchement manuel
+# uniquement (onglet Actions → Server command (manual) → Run workflow).
+
+on:
+  workflow_dispatch:
+    inputs:
+      command:
+        description: "Commande à exécuter sur le serveur (cwd = /opt/literev-api)"
+        required: true
+        type: choice
+        default: diagnose
+        options:
+          - diagnose            # bash diagnose_502.sh
+          - migrate             # alembic upgrade head
+          - restart             # systemctl restart literev-api + health
+          - logs                # 100 dernières lignes du service
+          - deploy              # bash deploy.sh (déploiement complet)
+          - custom              # commande libre (champ custom_command)
+      custom_command:
+        description: "Commande libre (utilisée seulement si command = custom)"
+        required: false
+        type: string
+
+jobs:
+  run:
+    name: Run on production
+    runs-on: ubuntu-latest
+    environment: production
+    concurrency:
+      group: production-deploy
+      cancel-in-progress: false
+    steps:
+      - name: Resolve command
+        id: resolve
+        run: |
+          case "${{ inputs.command }}" in
+            diagnose) echo 'cmd=bash /opt/literev-api/diagnose_502.sh' >> "$GITHUB_OUTPUT" ;;
+            migrate)  echo 'cmd=cd /opt/literev-api && python3 -m alembic upgrade head' >> "$GITHUB_OUTPUT" ;;
+            restart)  echo 'cmd=systemctl restart literev-api && sleep 3 && curl -fsS http://localhost:8000/health' >> "$GITHUB_OUTPUT" ;;
+            logs)     echo 'cmd=journalctl -u literev-api --no-pager -n 100' >> "$GITHUB_OUTPUT" ;;
+            deploy)   echo 'cmd=cd /opt/literev-api && bash deploy.sh' >> "$GITHUB_OUTPUT" ;;
+            custom)
+              if [ -z "${{ inputs.custom_command }}" ]; then
+                echo "custom_command est vide" >&2; exit 1
+              fi
+              echo 'cmd=${{ inputs.custom_command }}' >> "$GITHUB_OUTPUT" ;;
+            *) echo "commande inconnue" >&2; exit 1 ;;
+          esac
+
+      - name: Execute over SSH
+        env:
+          SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh -o StrictHostKeyChecking=accept-new \
+              -o ConnectTimeout=15 \
+              -i ~/.ssh/deploy_key \
+              "$DEPLOY_USER@$DEPLOY_HOST" \
+              "${{ steps.resolve.outputs.cmd }}"

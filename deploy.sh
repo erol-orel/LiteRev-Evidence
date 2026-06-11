@@ -8,13 +8,23 @@
 #   Servi nginx : /var/www/literev-frontend/  (seul chemin public)
 #   API         : localhost:8000 (uvicorn /opt/literev-api/main.py)
 #
+# Garanties :
+#   - un build frontend qui échoue ABORTE le déploiement (le site live reste intact)
+#   - bascule atomique du frontend (aucune fenêtre où le site est vide)
+#   - dépendances backend installées + migrations alembic appliquées
+#   - health check bloquant : un /health non OK fait échouer le déploiement
+#
 # Usage : bash /opt/literev-api/deploy.sh
 # =============================================================
-set -e
+set -euo pipefail
 
 REPO_DIR="/opt/literev-api"
 FRONTEND_DIR="$REPO_DIR/frontend"
 NGINX_ROOT="/var/www/literev-frontend"
+VENV_PY="$REPO_DIR/.venv/bin/python3"
+VENV_PIP="$REPO_DIR/.venv/bin/pip"
+[ -x "$VENV_PY" ] || VENV_PY="python3"
+[ -x "$VENV_PIP" ] || VENV_PIP="pip3"
 
 echo ""
 echo "========================================"
@@ -22,49 +32,84 @@ echo "  LiteRev Deploy — $(date '+%Y-%m-%d %H:%M:%S')"
 echo "========================================"
 
 # ── 1. Git pull ───────────────────────────────────────────────
-echo "[1/5] Git pull..."
+echo "[1/7] Git pull..."
 cd "$REPO_DIR"
 git pull origin main
 echo "  OK — $(git log --oneline -1)"
 
 # Re-exec pour utiliser le deploy.sh fraichement tiré
-if [ -z "$DEPLOY_REEXEC" ]; then
+if [ -z "${DEPLOY_REEXEC:-}" ]; then
   export DEPLOY_REEXEC=1
   exec bash "$REPO_DIR/deploy.sh"
 fi
 
-# ── 2. Vérification syntaxe Python ───────────────────────────
-echo "[2/5] Vérification syntaxe Python..."
-python3 -m py_compile "$REPO_DIR/main.py"
-echo "  OK — main.py ($(md5sum $REPO_DIR/main.py | cut -d' ' -f1))"
+# ── 2. Vérification syntaxe Python (tous les modules importés) ─
+echo "[2/7] Vérification syntaxe Python..."
+"$VENV_PY" -m compileall -q "$REPO_DIR"/*.py
+echo "  OK — $(md5sum $REPO_DIR/main.py | cut -d' ' -f1)"
 
-# ── 3. Build frontend ─────────────────────────────────────────
-echo "[3/5] Build frontend..."
+# ── 3. Dépendances backend ────────────────────────────────────
+echo "[3/7] Installation dépendances backend..."
+"$VENV_PIP" install -q -r "$REPO_DIR/requirements.txt"
+echo "  OK"
+
+# ── 4. Migrations base de données ─────────────────────────────
+echo "[4/7] Migrations alembic..."
+if [ -f "$REPO_DIR/alembic.ini" ]; then
+  ( cd "$REPO_DIR" && "$VENV_PY" -m alembic upgrade head ) || {
+    echo "  ATTENTION : alembic upgrade a échoué — déploiement interrompu."
+    exit 1
+  }
+  echo "  OK"
+else
+  echo "  (pas d'alembic.ini, étape ignorée)"
+fi
+
+# ── 5. Build frontend (dans un répertoire temporaire) ─────────
+echo "[5/7] Build frontend..."
 cd "$FRONTEND_DIR"
-npm install --silent
-# Nettoyer les anciens assets AVANT le build
-rm -rf "$FRONTEND_DIR/dist/assets/"
-npm run build 2>&1 | grep -E "built in|error|Error" || true
-TITLE=$(grep -o '<title>.*</title>' "$FRONTEND_DIR/dist/index.html" 2>/dev/null || echo "TITRE NON TROUVE")
-BUNDLE=$(ls "$FRONTEND_DIR/dist/assets/"*.js 2>/dev/null | xargs basename || echo "ERREUR")
+npm ci --silent
+rm -rf "$FRONTEND_DIR/dist"
+npm run build            # set -e fait échouer le deploy si le build casse
+TITLE=$(grep -o '<title>.*</title>' "$FRONTEND_DIR/dist/index.html")
+BUNDLE=$(ls "$FRONTEND_DIR/dist/assets/"*.js | xargs -n1 basename | head -1)
 echo "  OK — $TITLE | $BUNDLE"
 
-# ── 4. Déploiement vers nginx (chemin unique) ─────────────────
-echo "[4/5] Déploiement vers $NGINX_ROOT..."
-# Supprimer TOUT pour éviter les résidus
-rm -rf "$NGINX_ROOT"/*
-# Copier le nouveau build
-cp -r "$FRONTEND_DIR/dist/"* "$NGINX_ROOT/"
-# Vérification
+# ── 6. Déploiement atomique vers nginx ────────────────────────
+echo "[6/7] Bascule atomique vers $NGINX_ROOT..."
+STAGING="${NGINX_ROOT}.new"
+PREVIOUS="${NGINX_ROOT}.prev"
+rm -rf "$STAGING"
+mkdir -p "$STAGING"
+cp -r "$FRONTEND_DIR/dist/"* "$STAGING/"
+# Conserver la version précédente pour rollback, puis basculer
+rm -rf "$PREVIOUS"
+[ -d "$NGINX_ROOT" ] && mv "$NGINX_ROOT" "$PREVIOUS"
+mv "$STAGING" "$NGINX_ROOT"
 echo "  OK — $(grep -o '<title>.*</title>' $NGINX_ROOT/index.html)"
-echo "  Assets: $(ls $NGINX_ROOT/assets/)"
+echo "  Rollback dispo : $PREVIOUS"
 
-# ── 5. Redémarrage API + health check ────────────────────────
-echo "[5/5] Redémarrage API..."
+# ── 7. Redémarrage API + health check bloquant ────────────────
+echo "[7/7] Redémarrage API..."
 systemctl restart literev-api
-sleep 3
+HEALTH=""
+for i in 1 2 3 4 5 6; do
+  sleep 2
+  HEALTH=$(curl -fsS --max-time 5 http://localhost:8000/health 2>/dev/null || true)
+  [ -n "$HEALTH" ] && break
+done
+if [ -z "$HEALTH" ]; then
+  echo "  ÉCHEC — /health ne répond pas. Rollback du frontend..."
+  if [ -d "$PREVIOUS" ]; then
+    rm -rf "$NGINX_ROOT"
+    mv "$PREVIOUS" "$NGINX_ROOT"
+    echo "  Frontend restauré depuis $PREVIOUS."
+  fi
+  echo "  Service : $(systemctl is-active literev-api || true)"
+  exit 1
+fi
 echo "  Service : $(systemctl is-active literev-api)"
-echo "  Health  : $(curl -s --max-time 5 http://localhost:8000/health)"
+echo "  Health  : $HEALTH"
 
 echo ""
 echo "========================================"

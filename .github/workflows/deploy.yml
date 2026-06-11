@@ -1,0 +1,62 @@
+name: CI / Deploy
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  ci:
+    name: Build & checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Python syntax check (backend)
+        run: python -m compileall -q *.py
+
+      - name: Validate requirements.txt is resolvable
+        run: pip install --dry-run -r requirements.txt
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Frontend install & build
+        working-directory: frontend
+        run: |
+          npm ci
+          npm run build
+
+  deploy:
+    name: Deploy to production
+    if: github.event_name != 'pull_request'
+    needs: ci
+    runs-on: ubuntu-latest
+    environment: production
+    concurrency:
+      group: production-deploy
+      cancel-in-progress: false
+    steps:
+      - name: Deploy via SSH (runs deploy.sh on the server)
+        env:
+          SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh -o StrictHostKeyChecking=accept-new \
+              -o ConnectTimeout=15 \
+              -i ~/.ssh/deploy_key \
+              "$DEPLOY_USER@$DEPLOY_HOST" \
+              'cd /opt/literev-api && bash deploy.sh'
