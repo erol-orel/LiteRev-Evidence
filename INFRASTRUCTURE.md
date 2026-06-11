@@ -17,36 +17,37 @@ PGPASSWORD='...' psql -h 10.10.1.10 -U literev -d literev
 
 ### Automatique (CI/CD — GitHub Actions)
 
-Chaque push/merge sur `main` déclenche `.github/workflows/deploy.yml` :
+Deux workflows GitHub Actions :
 
-1. **CI** : vérification syntaxe Python (`main.py`, `backend_additions.py`, `app/`) + build frontend (`npm ci && npm run build`). Les pull requests vers `main` exécutent la CI seule (pas de déploiement).
-2. **Deploy** : connexion SSH au serveur app et exécution de `deploy.sh` (git pull, build, copie nginx, restart `literev-api`).
-
-Déclenchement manuel possible : onglet *Actions* → *CI / Deploy* → *Run workflow*.
+1. **`deploy.yml`** — sur chaque PR : CI (syntaxe Python `compileall` + résolution `requirements.txt` + build frontend `npm ci && npm run build`). Sur chaque push/merge sur `main` : déploiement SSH (exécute `deploy.sh` : git pull, deps, migrations, build, bascule nginx atomique, restart + health check bloquant).
+2. **`server-command.yml`** — déclenchement manuel (onglet *Actions* → *Server command (manual)* → *Run workflow*) pour lancer une commande ponctuelle et journalisée sur le serveur : `diagnose`, `migrate`, `restart`, `logs`, `deploy`, ou une commande libre (`custom`).
 
 #### Configuration initiale (une seule fois)
 
-1. Générer une clé SSH dédiée au déploiement (sur votre machine) :
+1. **Clé SSH** : la clé publique `claude-code-session` est déjà installée dans `/root/.ssh/authorized_keys` sur app-01. La clé privée correspondante sert de secret GitHub. *(Pour une rotation propre, régénérer une paire `ssh-keygen -t ed25519`, remplacer la ligne dans `authorized_keys`, et mettre à jour le secret.)*
 
-   ```bash
-   ssh-keygen -t ed25519 -f ~/.ssh/literev_deploy -N "" -C "github-actions-deploy"
-   ```
-
-2. Installer la clé publique sur le serveur app, restreinte au seul script de déploiement :
-
-   ```bash
-   ssh root@62.238.39.50 "echo 'command=\"cd /opt/literev-api && bash deploy.sh\",no-port-forwarding,no-agent-forwarding,no-X11-forwarding $(cat ~/.ssh/literev_deploy.pub)' >> /root/.ssh/authorized_keys"
-   ```
-
-   La restriction `command="..."` garantit que cette clé ne peut QUE déployer, rien d'autre.
-
-3. Dans GitHub → repo → **Settings → Secrets and variables → Actions → New repository secret**, créer 3 secrets :
+2. Dans GitHub → repo → **Settings → Secrets and variables → Actions → New repository secret**, créer 3 secrets :
 
    | Secret | Valeur |
    |--------|--------|
-   | `DEPLOY_SSH_KEY` | contenu du fichier `~/.ssh/literev_deploy` (clé privée, bloc complet `-----BEGIN...END-----`) |
+   | `DEPLOY_SSH_KEY` | clé privée correspondant à `claude-code-session` (bloc complet `-----BEGIN...END-----`) |
    | `DEPLOY_HOST` | `62.238.39.50` |
    | `DEPLOY_USER` | `root` |
+
+   > La clé n'est volontairement PAS restreinte à `deploy.sh` (pas de `command=`) car le workflow manuel a besoin d'exécuter `migrate`/`logs`/`custom`. Toute commande passe donc par GitHub Actions et y est journalisée.
+
+#### Secrets serveur (env)
+
+Le service `literev-api` lit ses secrets depuis `/opt/literev-api/secrets.env` (mode 600), chargé par l'unité systemd. Variables attendues :
+
+| Variable | Rôle |
+|----------|------|
+| `DB_URL` | `postgresql+psycopg://literev:<pass>@10.10.1.10:5432/literev` |
+| `WRITE_API_KEY` | clé d'authentification des endpoints de mutation |
+| `OPENAI_API_KEY` | embeddings RAG + triage LLM |
+| `CDS_API_KEY` | (optionnel) Copernicus Climate Data Store |
+
+Après modification : `systemctl restart literev-api`.
 
 ### Manuel (secours)
 
@@ -60,7 +61,7 @@ cd /opt/literev-api && ./deploy.sh
 - **Frontend** : React 19 + Vite 8 + Tailwind 3 + TypeScript
 - **DB** : PostgreSQL 15 + pgvector
 - **Web** : Nginx (reverse proxy + static files)
-- **Embeddings** : BGE-M3
+- **Embeddings** : OpenAI `text-embedding-3-small`
 
 ## Tables DB
 
