@@ -208,7 +208,7 @@ class SearchIn(BaseModel):
     query: str | None = Field(None, max_length=1000)  # alias pour compatibilité frontend
     filters: dict[str, Any] | None = None
     mode: str = Field(default="hybrid") # Mode par défaut hybride
-    limit: int = Field(default=200, ge=1, le=1000)  # Limite max ramenée de 1M à 1000 (M-5)
+    limit: int = Field(default=200, ge=1, le=10000)  # Cap à 10000 (le frontend récupère tout le corpus classé pour pagination côté client)
     offset: int = Field(default=0, ge=0)
     project_context: str | None = None  # alias pour filtres projet
 
@@ -856,8 +856,32 @@ def search(payload: SearchIn) -> dict[str, Any]:
             LIMIT :limit OFFSET :offset
         """)
 
+    # Comptage réel du nombre de documents distincts correspondant à la requête,
+    # indépendamment de la pagination (LIMIT/OFFSET). En lexical : docs contenant
+    # un terme. En sémantique/hybride : tout le corpus filtré (univers classé).
+    if use_vector and payload.mode in ("hybrid", "semantic"):
+        count_sql = text(f"""
+            SELECT COUNT(DISTINCT d.id)
+            FROM document_chunk c
+            JOIN literature_document d ON d.id = c.document_id
+            WHERE TRUE {where_sql}
+        """)
+        count_params = dict(where_params)
+    else:
+        count_sql = text(f"""
+            SELECT COUNT(DISTINCT d.id)
+            FROM document_chunk c
+            JOIN literature_document d ON d.id = c.document_id
+            WHERE ({any_match_sql}) {where_sql}
+        """)
+        count_params = {
+            **where_params,
+            **{f"term_{i}": f"%{t}%" for i, t in enumerate(query_terms)},
+        }
+
     with engine.connect() as conn:
         rows = conn.execute(sql, params).mappings().all()
+        total_matching_docs = conn.execute(count_sql, count_params).scalar() or 0
 
     results = []
     source_counts: dict[str, int] = {}
@@ -921,8 +945,13 @@ def search(payload: SearchIn) -> dict[str, Any]:
     return {
         "results": results,
         "count": len(results),
-        "total": len(results),
+        # total = nombre réel de documents distincts correspondant à la requête
+        # (tout le corpus filtré en sémantique/hybride, docs avec terme en lexical),
+        # indépendant de la pagination.
+        "total": total_matching_docs,
+        "total_matching_docs": total_matching_docs,
         "total_unique_docs": total_unique_docs,
+        "returned_docs": total_unique_docs,
         "source_breakdown": sorted_breakdown,
         "score_type": score_type,
         "score_label": score_label,
@@ -2392,25 +2421,25 @@ def get_response_time_optimization(force_refresh: bool = False):
 @app.get("/corpus/stats/by-year")
 def get_corpus_stats_by_year() -> dict[str, Any]:
     """
-    Distribution des articles par année (2000+), pour le graphique temporel.
+    Distribution des articles par année (1900+), pour le graphique temporel.
     Retourne aussi la distribution par année ET par scénario pour la heatmap.
     """
     with engine.connect() as conn:
-        # Articles par année (2000+)
+        # Articles par année (1900+)
         rows_year = conn.execute(text("""
             SELECT year, COUNT(*) as count
             FROM literature_document
-            WHERE year >= 2000 AND year IS NOT NULL
+            WHERE year >= 1900 AND year IS NOT NULL
             GROUP BY year
             ORDER BY year ASC
         """)).mappings().all()
 
-        # Articles par année ET par scénario (2000+)
+        # Articles par année ET par scénario (1900+)
         rows_scenario_year = conn.execute(text("""
             SELECT d.year, ars.scenario_id, COUNT(*) as count
             FROM literature_document d
             JOIN article_scenarios ars ON ars.document_id = d.id
-            WHERE d.year >= 2000
+            WHERE d.year >= 1900
               AND d.year IS NOT NULL
             GROUP BY d.year, ars.scenario_id
             ORDER BY d.year ASC

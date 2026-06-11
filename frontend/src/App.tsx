@@ -3095,6 +3095,7 @@ export default function App() {
   const [pipelineStatuses, setPipelineStatuses] = useState<Record<string, UserScenarioPipelineStatus>>({});
   const pipelinePollRef = useRef<Record<string, ReturnType<typeof setInterval>>>({});
   const [searchSourceBreakdown, setSearchSourceBreakdown] = useState<Record<string, number> | null>(null);
+  const [searchTotalMatching, setSearchTotalMatching] = useState<number | null>(null);
   const [searchScoreType, setSearchScoreType] = useState<string | null>(null);
   const [searchScoreLabel, setSearchScoreLabel] = useState<string | null>(null);
   const [folders, setFolders] = useState<ScenarioFolder[]>([]);
@@ -3227,6 +3228,7 @@ export default function App() {
         filters: effectiveFilters,
       });
       setResults(data.results);
+      setSearchTotalMatching(data.totalMatchingDocs ?? null);
       setSearchSourceBreakdown(data.sourceBreakdown ?? null);
       setSearchScoreType(data.scoreType ?? null);
       setSearchScoreLabel(data.scoreLabel ?? null);
@@ -3699,6 +3701,7 @@ export default function App() {
                               setResults([]);
                               setPage(1);
                               setSearchSourceBreakdown(null);
+                              setSearchTotalMatching(null);
                               setSelectedResult(null);
                               setSelectedDocument(null);
                             }
@@ -3764,8 +3767,18 @@ export default function App() {
                   <div className="flex items-center justify-between">
                     <div className="space-y-1">
                       <p className="text-sm text-forest-400">
-                        <span className="font-semibold text-white">{uniqueDocCount}</span>{" "}
-                        document{uniqueDocCount > 1 ? "s" : ""} uniques
+                        {searchTotalMatching != null && searchTotalMatching > uniqueDocCount ? (
+                          <>
+                            <span className="font-semibold text-white">{searchTotalMatching.toLocaleString()}</span>{" "}
+                            document{searchTotalMatching > 1 ? "s" : ""} pertinent{searchTotalMatching > 1 ? "s" : ""}
+                            <span className="text-white/30"> ({uniqueDocCount} affichés)</span>
+                          </>
+                        ) : (
+                          <>
+                            <span className="font-semibold text-white">{uniqueDocCount}</span>{" "}
+                            document{uniqueDocCount > 1 ? "s" : ""} uniques
+                          </>
+                        )}
                         {dedupedResults.length > uniqueDocCount && (
                           <span className="text-white/30"> ({dedupedResults.length} passages)</span>
                         )}

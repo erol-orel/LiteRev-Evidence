@@ -48,6 +48,7 @@ export interface SearchRequest {
 export interface SearchResponse {
   results: SearchResult[];
   totalUniqueDocs?: number;
+  totalMatchingDocs?: number;
   sourceBreakdown?: Record<string, number>;
   scoreType?: "lexical" | "semantic" | "hybrid";
   scoreLabel?: string;
@@ -98,7 +99,9 @@ export interface ApiSearchRequest {
 export interface ApiSearchResponse {
   results: ApiSearchResult[];
   count: number;
+  total?: number;
   total_unique_docs?: number;
+  total_matching_docs?: number;
   source_breakdown?: Record<string, number>;
   score_type?: "lexical" | "semantic" | "hybrid";
   score_label?: string;

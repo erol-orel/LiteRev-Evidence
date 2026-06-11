@@ -54,13 +54,16 @@ echo "[3/7] Installation dépendances backend..."
 echo "  OK"
 
 # ── 4. Migrations base de données ─────────────────────────────
-echo "[4/7] Migrations alembic..."
+# Non bloquant : le schéma est aussi garanti au démarrage par les fonctions
+# _ensure_*() de main.py. Un échec alembic est journalisé mais n'interrompt
+# pas le déploiement (l'app applique ses DDL idempotentes au boot).
+echo "[4/7] Migrations alembic (non bloquant)..."
 if [ -f "$REPO_DIR/alembic.ini" ]; then
-  ( cd "$REPO_DIR" && "$VENV_PY" -m alembic upgrade head ) || {
-    echo "  ATTENTION : alembic upgrade a échoué — déploiement interrompu."
-    exit 1
-  }
-  echo "  OK"
+  if ( cd "$REPO_DIR" && "$VENV_PY" -m alembic upgrade head ); then
+    echo "  OK"
+  else
+    echo "  AVERTISSEMENT : alembic upgrade a échoué — on continue (DDL au boot)."
+  fi
 else
   echo "  (pas d'alembic.ini, étape ignorée)"
 fi
