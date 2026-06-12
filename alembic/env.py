@@ -5,10 +5,15 @@ from dotenv import load_dotenv
 from sqlalchemy import engine_from_config, pool
 from alembic import context
 
-# Charger .env à la racine du projet (si présent)
-load_dotenv(os.path.join(os.path.dirname(__file__), "..", ".env"))
+# Charger les env files dans le même ordre que main.py
+for _ep in [
+    os.path.join(os.path.dirname(__file__), "..", ".env"),
+    "/etc/literev-api.env",
+    "/etc/literev/secrets",
+    "/opt/literev-api/secrets.env",
+]:
+    load_dotenv(_ep, override=False)
 
-# DB_URL est lue directement depuis l'environnement (même source que main.py)
 DB_URL = os.environ.get("DB_URL")
 if not DB_URL:
     raise RuntimeError("DB_URL environment variable is required")
