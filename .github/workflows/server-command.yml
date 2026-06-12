@@ -35,6 +35,8 @@ jobs:
     steps:
       - name: Resolve command
         id: resolve
+        env:
+          CUSTOM_CMD: ${{ inputs.custom_command }}
         run: |
           case "${{ inputs.command }}" in
             diagnose) echo 'cmd=bash /opt/literev-api/diagnose_502.sh' >> "$GITHUB_OUTPUT" ;;
@@ -43,10 +45,12 @@ jobs:
             logs)     echo 'cmd=journalctl -u literev-api --no-pager -n 100' >> "$GITHUB_OUTPUT" ;;
             deploy)   echo 'cmd=cd /opt/literev-api && bash deploy.sh' >> "$GITHUB_OUTPUT" ;;
             custom)
-              if [ -z "${{ inputs.custom_command }}" ]; then
+              if [ -z "$CUSTOM_CMD" ]; then
                 echo "custom_command est vide" >&2; exit 1
               fi
-              echo 'cmd=${{ inputs.custom_command }}' >> "$GITHUB_OUTPUT" ;;
+              # Use multiline GITHUB_OUTPUT to safely handle quotes/special chars
+              DELIM="CMD_EOF_$(head -c 8 /dev/urandom | xxd -p)"
+              { echo "cmd<<${DELIM}"; printf '%s' "$CUSTOM_CMD"; echo ""; echo "${DELIM}"; } >> "$GITHUB_OUTPUT" ;;
             *) echo "commande inconnue" >&2; exit 1 ;;
           esac
 
@@ -55,12 +59,13 @@ jobs:
           SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
           DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
           DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          REMOTE_CMD: ${{ steps.resolve.outputs.cmd }}
         run: |
           mkdir -p ~/.ssh
           printf '%s\n' "$SSH_KEY" > ~/.ssh/deploy_key
           chmod 600 ~/.ssh/deploy_key
-          ssh -o StrictHostKeyChecking=accept-new \
+          echo "$REMOTE_CMD" | ssh -o StrictHostKeyChecking=accept-new \
               -o ConnectTimeout=15 \
               -i ~/.ssh/deploy_key \
               "$DEPLOY_USER@$DEPLOY_HOST" \
-              "${{ steps.resolve.outputs.cmd }}"
+              bash

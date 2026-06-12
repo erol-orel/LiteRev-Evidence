@@ -2228,13 +2228,13 @@ export interface UserScenarioPipelineStatus {
   message?: string;
   error?: string;
   steps: {
-    pubmed?: PipelineStepStatus;
+    ingest?: PipelineStepStatus;
+    fulltext?: PipelineStepStatus;
     embed?: PipelineStepStatus;
+    rerank?: PipelineStepStatus;
     pico?: PipelineStepStatus;
     metadata?: PipelineStepStatus;
-    fulltext?: PipelineStepStatus;
     clustering?: PipelineStepStatus;
-    rerank?: PipelineStepStatus;
   };
 }
 

@@ -736,7 +736,7 @@ def search(payload: SearchIn) -> dict[str, Any]:
                     c.chunk_type,
                     c.content,
                     (0.7 * (1 - (c.embedding <=> CAST(:query_embedding AS vector))) +
-                     0.3 * (CASE WHEN ({any_match_sql}) THEN GREATEST(1.0, ({score_sql})::float / 10.0) ELSE 0.0 END)) AS score
+                     0.3 * (CASE WHEN ({any_match_sql}) THEN LEAST(1.0, ({score_sql})::float / 6.0) ELSE 0.0 END)) AS score
                 FROM document_chunk c
                 JOIN literature_document d ON d.id = c.document_id
                 WHERE c.embedding IS NOT NULL
@@ -760,7 +760,7 @@ def search(payload: SearchIn) -> dict[str, Any]:
                     d.evidence_category,
                     c.chunk_type,
                     c.content,
-                    (CASE WHEN ({any_match_sql}) THEN GREATEST(0.1, ({score_sql})::float / 10.0) ELSE 0.05 END) AS score
+                    (CASE WHEN ({any_match_sql}) THEN LEAST(1.0, ({score_sql})::float / 6.0) ELSE 0.0 END) AS score
                 FROM document_chunk c
                 JOIN literature_document d ON d.id = c.document_id
                 WHERE c.embedding IS NULL
@@ -6480,6 +6480,7 @@ def _run_user_scenario_populate(
                         if _pipeline_callback is None:
                             _user_scenario_populate_jobs[scenario_id]["sources"]["openalex"] = \
                                 _user_scenario_populate_jobs[scenario_id]["sources"].get("openalex", 0) + 1
+                            _user_scenario_populate_jobs[scenario_id]["ingested"] = ingested
                     except Exception as _e:
                         errors += 1
                     _time.sleep(0.05)
@@ -6558,6 +6559,7 @@ def _run_user_scenario_populate(
                         if _pipeline_callback is None:
                             _user_scenario_populate_jobs[scenario_id]["sources"]["crossref"] = \
                                 _user_scenario_populate_jobs[scenario_id]["sources"].get("crossref", 0) + 1
+                            _user_scenario_populate_jobs[scenario_id]["ingested"] = ingested
                     except Exception as _e:
                         errors += 1
                     _time.sleep(0.05)
@@ -6639,6 +6641,7 @@ def _run_user_scenario_populate(
                         if _pipeline_callback is None:
                             _user_scenario_populate_jobs[scenario_id]["sources"]["europepmc"] = \
                                 _user_scenario_populate_jobs[scenario_id]["sources"].get("europepmc", 0) + 1
+                            _user_scenario_populate_jobs[scenario_id]["ingested"] = ingested
                     except Exception as _e:
                         errors += 1
                     _time.sleep(0.05)
@@ -6719,6 +6722,7 @@ def _run_user_scenario_populate(
                             if _pipeline_callback is None:
                                 _user_scenario_populate_jobs[scenario_id]["sources"][_server] = \
                                     _user_scenario_populate_jobs[scenario_id]["sources"].get(_server, 0) + 1
+                                _user_scenario_populate_jobs[scenario_id]["ingested"] = ingested
                         except Exception:
                             errors += 1
                         _time.sleep(0.03)
@@ -6830,6 +6834,7 @@ def _run_user_scenario_populate(
                             if _pipeline_callback is None:
                                 _user_scenario_populate_jobs[scenario_id]["sources"]["prospero"] = \
                                     _user_scenario_populate_jobs[scenario_id]["sources"].get("prospero", 0) + 1
+                                _user_scenario_populate_jobs[scenario_id]["ingested"] = ingested
                         except Exception:
                             errors += 1
                         _time.sleep(0.1)
@@ -6996,6 +7001,7 @@ def _run_user_scenario_populate(
                     if _pipeline_callback is None:
                         _user_scenario_populate_jobs[scenario_id]["sources"]["cochrane"] = \
                             _user_scenario_populate_jobs[scenario_id]["sources"].get("cochrane", 0) + 1
+                        _user_scenario_populate_jobs[scenario_id]["ingested"] = ingested
                 except Exception as _e_ins:
                     errors += 1
                     logger.warning(f"Erreur insertion Cochrane article {_item.get('external_id')}: {_e_ins}")
@@ -7147,17 +7153,19 @@ def _run_semantic_rerank_inline(scenario_id: str, query: str) -> int:
 
 def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict, max_results: int = 100000) -> None:
     """
-    Pipeline complet d'enrichissement pour un scénario utilisateur :
-    1. Ingestion PubMed (sans limite)
-    2. Extraction PICO (LLM batch)
-    3. Extraction métadonnées (LLM batch)
-    4. Récupération full-text (Unpaywall)
-    5. Clustering thématique
-    Chaque étape met à jour _user_scenario_pipeline_jobs[scenario_id].
+    Pipeline complet d'enrichissement pour un scénario utilisateur.
+    Ordre optimal :
+    1. ingest    – Ingestion multi-sources (PubMed+OpenAlex+Crossref+EuropePMC+medRxiv+bioRxiv+PROSPERO+Cochrane)
+    2. fulltext  – Récupération full-text (PMC→EuropePMC→Unpaywall) pendant que les IDs sont frais
+    3. embed     – Embeddings sur title+abstract+fulltext chunks (contenu enrichi)
+    4. rerank    – Score cosinus via pgvector (pas de re-embedding API)
+    5. pico      – Extraction PICO (LLM, utilise fulltext si dispo)
+    6. metadata  – Extraction métadonnées étude (LLM)
+    7. clustering – K-means sur embeddings pgvector
     """
     import time as _time
 
-    STEP_ORDER = ["pubmed", "embed", "pico", "metadata", "fulltext", "clustering", "rerank"]
+    STEP_ORDER = ["ingest", "fulltext", "embed", "rerank", "pico", "metadata", "clustering"]
 
     def update_step(step: str, status: str, **kwargs):
         job = _user_scenario_pipeline_jobs.get(scenario_id, {})
@@ -7166,7 +7174,6 @@ def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict
         job["steps"][step] = {"status": status, **kwargs}
         job["overall_status"] = "running"
         _user_scenario_pipeline_jobs[scenario_id] = job
-        # Persister dans la DB
         step_idx = STEP_ORDER.index(step) if step in STEP_ORDER else 0
         progress = int((step_idx / len(STEP_ORDER)) * 100)
         try:
@@ -7183,215 +7190,38 @@ def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict
             logger.warning(f"update_step DB write failed: {_e}")
         logger.info(f"Pipeline {scenario_id} [{step}]: {status} {kwargs}")
 
-    def pubmed_callback(event: str, value):
+    def ingest_callback(event: str, value):
         if event == "pubmed_found":
-            update_step("pubmed", "running", found=value)
+            update_step("ingest", "running", found=value)
 
     _user_scenario_pipeline_jobs[scenario_id] = {
         "overall_status": "running",
-        "current_step": "pubmed",
+        "current_step": "ingest",
         "steps": {
-            "pubmed": {"status": "pending"},
+            "ingest": {"status": "pending"},
+            "fulltext": {"status": "pending"},
             "embed": {"status": "pending"},
+            "rerank": {"status": "pending"},
             "pico": {"status": "pending"},
             "metadata": {"status": "pending"},
-            "fulltext": {"status": "pending"},
             "clustering": {"status": "pending"},
-            "rerank": {"status": "pending"},
         },
     }
 
     try:
-        # ── Étape 1 : Ingéstion multi-sources (PubMed+OpenAlex+Crossref+EuropePMC+medRxiv+bioRxiv+PROSPERO) ──
-        update_step("pubmed", "running")
+        # ── Étape 1 : Ingestion multi-sources ────────────────────────────────────
+        update_step("ingest", "running")
         ingested = _run_user_scenario_populate(
-            scenario_id, query, filters, max_results, _pipeline_callback=pubmed_callback
+            scenario_id, query, filters, max_results, _pipeline_callback=ingest_callback
         )
-        update_step("pubmed", "done", ingested=ingested)
+        update_step("ingest", "done", ingested=ingested)
 
         if ingested == 0:
             _user_scenario_pipeline_jobs[scenario_id]["overall_status"] = "done"
             _user_scenario_pipeline_jobs[scenario_id]["message"] = "Aucun article trouvé (7 sources interrogées)."
             return
 
-        # ── Étape 1b : Génération des embeddings (chunks title_abstract sans embedding) ───
-        update_step("embed", "running")
-        try:
-            openai_key = os.getenv("OPENAI_API_KEY")
-            if openai_key:
-                from openai import OpenAI as _OAI_emb
-                _emb_client = _OAI_emb(api_key=openai_key)
-                with engine.connect() as _conn_emb:
-                    _chunks_to_embed = _conn_emb.execute(text("""
-                        SELECT c.id, c.content
-                        FROM document_chunk c
-                        JOIN article_scenarios ars ON ars.document_id = c.document_id
-                        WHERE ars.scenario_id = :sid
-                          AND c.embedding IS NULL
-                          AND c.chunk_type = 'title_abstract'
-                          AND LENGTH(c.content) > 20
-                        ORDER BY c.id
-                    """), {"sid": scenario_id}).mappings().fetchall()
-                _emb_total = len(_chunks_to_embed)
-                _emb_done = 0
-                _emb_errors = 0
-                _emb_batch_size = 100
-                for _bi in range(0, _emb_total, _emb_batch_size):
-                    _batch = _chunks_to_embed[_bi:_bi + _emb_batch_size]
-                    try:
-                        _texts = [r["content"][:8000] for r in _batch]
-                        _emb_resp = _emb_client.embeddings.create(
-                            model="text-embedding-3-small",
-                            input=_texts
-                        )
-                        for _k, _emb_data in enumerate(_emb_resp.data):
-                            _vec_str = "[" + ",".join(str(x) for x in _emb_data.embedding) + "]"
-                            with engine.begin() as _conn_upd:
-                                _conn_upd.execute(text("""
-                                    UPDATE document_chunk
-                                    SET embedding = CAST(:vec AS vector)
-                                    WHERE id = :cid
-                                """), {"vec": _vec_str, "cid": _batch[_k]["id"]})
-                            _emb_done += 1
-                    except Exception as _emb_e:
-                        _emb_errors += len(_batch)
-                        logger.warning(f"Embed batch {_bi}: {_emb_e}")
-                    _time.sleep(0.2)
-                    # Mettre à jour la progression
-                    update_step("embed", "running",
-                                done=_emb_done, total=_emb_total,
-                                pct=round(_emb_done / _emb_total * 100, 1) if _emb_total > 0 else 0)
-                update_step("embed", "done",
-                            embedded=_emb_done, total=_emb_total, errors=_emb_errors)
-            else:
-                update_step("embed", "skipped", reason="Clé OpenAI non configurée")
-        except Exception as _emb_ex:
-            update_step("embed", "error", error=str(_emb_ex))
-
-        # ── Étape 2 : Extraction PICO ─────────────────────────────────────────────────────
-        update_step("pico", "running")
-        try:
-            openai_key = os.getenv("OPENAI_API_KEY")
-            if openai_key:
-                from openai import OpenAI as _OAI
-                from datetime import datetime, timezone
-                _client = _OAI(api_key=openai_key)
-                system_prompt_pico = (
-                    "You are a systematic review expert in emergency medicine. "
-                    "Extract PICO elements and return ONLY valid JSON:\n"
-                    '{"P":"Population","I":"Intervention","C":"Comparator or Not specified",'
-                    '"O":"Outcome(s)","study_design":"RCT|Cohort|Systematic review|etc",'
-                    '"pico_confidence":0.0-1.0,"pico_notes":""}\n'
-                    "Be concise (max 2 sentences per field). Return ONLY the JSON."
-                )
-                with engine.connect() as conn:
-                    pico_rows = conn.execute(text("""
-                        SELECT ld.id, ld.title, ld.abstract
-                        FROM literature_document ld
-                        JOIN article_scenarios asn ON asn.document_id = ld.id
-                        WHERE asn.scenario_id = :sid
-                          AND ld.project_context = 'literev'
-                          AND (ld.pico_json IS NULL OR (ld.pico_json->>'pico_confidence')::float < 0.5)
-                          AND ld.abstract IS NOT NULL AND length(ld.abstract) > 50
-                        ORDER BY ld.id
-                    """), {"sid": scenario_id}).mappings().fetchall()
-
-                pico_extracted = 0
-                pico_errors = 0
-                for row in pico_rows:
-                    try:
-                        response = _client.chat.completions.create(
-                            model="gpt-4.1-mini",
-                            messages=[
-                                {"role": "system", "content": system_prompt_pico},
-                                {"role": "user", "content": f"Title: {row['title']}\n\nAbstract: {(row['abstract'] or '')[:3000]}"},
-                            ],
-                            temperature=0.1,
-                            max_tokens=400,
-                            response_format={"type": "json_object"},
-                        )
-                        pico = json.loads(response.choices[0].message.content)
-                        required = {"P", "I", "C", "O", "study_design", "pico_confidence"}
-                        if required.issubset(pico.keys()):
-                            pico["pico_confidence"] = float(pico.get("pico_confidence", 0.5))
-                            with engine.begin() as conn:
-                                conn.execute(text("""
-                                    UPDATE literature_document
-                                    SET pico_json = CAST(:pico AS jsonb), pico_extracted_at = :ts
-                                    WHERE id = :article_id
-                                """), {"pico": json.dumps(pico), "ts": datetime.now(timezone.utc), "article_id": row["id"]})
-                            pico_extracted += 1
-                    except Exception as e:
-                        logger.warning(f"Pipeline PICO article {row['id']}: {e}")
-                        pico_errors += 1
-                    _time.sleep(0.05)
-                update_step("pico", "done", extracted=pico_extracted, errors=pico_errors)
-            else:
-                update_step("pico", "skipped", reason="Clé OpenAI non configurée")
-        except Exception as e:
-            update_step("pico", "error", error=str(e))
-
-        # ── Étape 3 : Extraction métadonnées ─────────────────────────────────
-        update_step("metadata", "running")
-        try:
-            openai_key = os.getenv("OPENAI_API_KEY")
-            if openai_key:
-                from openai import OpenAI as _OAI2
-                from datetime import datetime, timezone
-                _client2 = _OAI2(api_key=openai_key)
-                system_prompt_meta = (
-                    "You are a biomedical librarian. Extract metadata from this article and return ONLY valid JSON:\n"
-                    '{"study_type":"RCT|Cohort|Case-control|Cross-sectional|Systematic review|Meta-analysis|Case report|Editorial|Other",'
-                    '"sample_size":null,"country":"ISO2 or null","setting":"hospital|prehospital|community|other|null",'
-                    '"primary_outcome":"brief description or null","funding":"public|industry|mixed|not reported",'
-                    '"bias_risk":"low|moderate|high|unclear","metadata_confidence":0.0-1.0}\n'
-                    "Return ONLY the JSON."
-                )
-                with engine.connect() as conn:
-                    meta_rows = conn.execute(text("""
-                        SELECT ld.id, ld.title, ld.abstract, ld.source, ld.year
-                        FROM literature_document ld
-                        JOIN article_scenarios asn ON asn.document_id = ld.id
-                        WHERE asn.scenario_id = :sid
-                          AND ld.project_context = 'literev'
-                          AND (ld.metadata_json IS NULL OR ld.metadata_json = '{}'::jsonb)
-                        ORDER BY ld.id
-                    """), {"sid": scenario_id}).mappings().fetchall()
-
-                meta_extracted = 0
-                meta_errors = 0
-                for row in meta_rows:
-                    try:
-                        response = _client2.chat.completions.create(
-                            model="gpt-4.1-mini",
-                            messages=[
-                                {"role": "system", "content": system_prompt_meta},
-                                {"role": "user", "content": f"Title: {row['title']}\n\nAbstract: {(row['abstract'] or '')[:2000]}"},
-                            ],
-                            temperature=0.1,
-                            max_tokens=300,
-                            response_format={"type": "json_object"},
-                        )
-                        metadata = json.loads(response.choices[0].message.content)
-                        metadata["metadata_confidence"] = float(metadata.get("metadata_confidence", 0.5))
-                        with engine.begin() as conn:
-                            conn.execute(text("""
-                                UPDATE literature_document
-                                SET metadata_json = CAST(:meta AS jsonb)
-                                WHERE id = :article_id
-                            """), {"meta": json.dumps(metadata), "article_id": row["id"]})
-                        meta_extracted += 1
-                    except Exception as e:
-                        logger.warning(f"Pipeline metadata article {row['id']}: {e}")
-                        meta_errors += 1
-                    _time.sleep(0.05)
-                update_step("metadata", "done", extracted=meta_extracted, errors=meta_errors)
-            else:
-                update_step("metadata", "skipped", reason="Clé OpenAI non configurée")
-        except Exception as e:
-            update_step("metadata", "error", error=str(e))
-
-        # ── Étape 4 : Full-text multi-sources (PMC → EuropePMC → Unpaywall → bioRxiv → Semantic Scholar → OpenAlex) ──
+        # ── Étape 2 : Full-text multi-sources (avant embedding pour enrichir les chunks) (PMC → EuropePMC → Unpaywall → bioRxiv → Semantic Scholar → OpenAlex) ──
         update_step("fulltext", "running")
         try:
             import re as _re
@@ -7733,7 +7563,218 @@ def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict
         except Exception as e:
             update_step("fulltext", "error", error=str(e))
 
-        # ── Étape 5 : Clustering ──────────────────────────────────────────────
+        # ── Étape 3 : Embeddings (title_abstract + fulltext_section — contenu enrichi) ────────
+        update_step("embed", "running")
+        try:
+            openai_key = os.getenv("OPENAI_API_KEY")
+            if openai_key:
+                from openai import OpenAI as _OAI_emb
+                _emb_client = _OAI_emb(api_key=openai_key)
+                with engine.connect() as _conn_emb:
+                    _chunks_to_embed = _conn_emb.execute(text("""
+                        SELECT c.id, c.content
+                        FROM document_chunk c
+                        JOIN article_scenarios ars ON ars.document_id = c.document_id
+                        WHERE ars.scenario_id = :sid
+                          AND c.embedding IS NULL
+                          AND c.chunk_type IN ('title_abstract', 'fulltext_section')
+                          AND LENGTH(c.content) > 20
+                        ORDER BY c.id
+                    """), {"sid": scenario_id}).mappings().fetchall()
+                _emb_total = len(_chunks_to_embed)
+                _emb_done = 0
+                _emb_errors = 0
+                _emb_batch_size = 100
+                for _bi in range(0, _emb_total, _emb_batch_size):
+                    _batch = _chunks_to_embed[_bi:_bi + _emb_batch_size]
+                    try:
+                        _texts = [r["content"][:8000] for r in _batch]
+                        _emb_resp = _emb_client.embeddings.create(
+                            model="text-embedding-3-small",
+                            input=_texts
+                        )
+                        for _k, _emb_data in enumerate(_emb_resp.data):
+                            _vec_str = "[" + ",".join(str(x) for x in _emb_data.embedding) + "]"
+                            with engine.begin() as _conn_upd:
+                                _conn_upd.execute(text("""
+                                    UPDATE document_chunk
+                                    SET embedding = CAST(:vec AS vector)
+                                    WHERE id = :cid
+                                """), {"vec": _vec_str, "cid": _batch[_k]["id"]})
+                            _emb_done += 1
+                    except Exception as _emb_e:
+                        _emb_errors += len(_batch)
+                        logger.warning(f"Embed batch {_bi}: {_emb_e}")
+                    _time.sleep(0.2)
+                    # Mettre à jour la progression
+                    update_step("embed", "running",
+                                done=_emb_done, total=_emb_total,
+                                pct=round(_emb_done / _emb_total * 100, 1) if _emb_total > 0 else 0)
+                update_step("embed", "done",
+                            embedded=_emb_done, total=_emb_total, errors=_emb_errors)
+            else:
+                update_step("embed", "skipped", reason="Clé OpenAI non configurée")
+        except Exception as _emb_ex:
+            update_step("embed", "error", error=str(_emb_ex))
+
+        # ── Étape 4 : Rerank via pgvector (cosinus sur embeddings stockés) ──────────────
+        update_step("rerank", "running")
+        try:
+            openai_key = os.getenv("OPENAI_API_KEY")
+            if openai_key:
+                from openai import OpenAI as _OAI_rr
+                _rr_client = _OAI_rr(api_key=openai_key)
+                _rr_resp = _rr_client.embeddings.create(
+                    model="text-embedding-3-small", input=query[:2000])
+                _q_vec = "[" + ",".join(str(x) for x in _rr_resp.data[0].embedding) + "]"
+                with engine.begin() as _rr_conn:
+                    _rr_result = _rr_conn.execute(text("""
+                        UPDATE article_scenarios ars
+                        SET similarity_score = sub.best_sim
+                        FROM (
+                            SELECT c.document_id,
+                                   MAX(1.0 - (c.embedding <=> CAST(:q_vec AS vector))) AS best_sim
+                            FROM document_chunk c
+                            JOIN article_scenarios a ON a.document_id = c.document_id
+                            WHERE a.scenario_id = :sid
+                              AND c.embedding IS NOT NULL
+                              AND c.chunk_type IN ('title_abstract', 'fulltext_section')
+                            GROUP BY c.document_id
+                        ) sub
+                        WHERE ars.scenario_id = :sid
+                          AND ars.document_id = sub.document_id
+                    """), {"q_vec": _q_vec, "sid": scenario_id})
+                n_reranked = _rr_result.rowcount
+                update_step("rerank", "done", updated=n_reranked)
+            else:
+                update_step("rerank", "skipped", reason="Clé OpenAI non configurée")
+        except Exception as e:
+            update_step("rerank", "error", error=str(e))
+
+        # ── Étape 5 : Extraction PICO ─────────────────────────────────────────────────────
+        update_step("pico", "running")
+        try:
+            openai_key = os.getenv("OPENAI_API_KEY")
+            if openai_key:
+                from openai import OpenAI as _OAI
+                from datetime import datetime, timezone
+                _client = _OAI(api_key=openai_key)
+                system_prompt_pico = (
+                    "You are a systematic review expert in emergency medicine. "
+                    "Extract PICO elements and return ONLY valid JSON:\n"
+                    '{"P":"Population","I":"Intervention","C":"Comparator or Not specified",'
+                    '"O":"Outcome(s)","study_design":"RCT|Cohort|Systematic review|etc",'
+                    '"pico_confidence":0.0-1.0,"pico_notes":""}\n'
+                    "Be concise (max 2 sentences per field). Return ONLY the JSON."
+                )
+                with engine.connect() as conn:
+                    pico_rows = conn.execute(text("""
+                        SELECT ld.id, ld.title, ld.abstract
+                        FROM literature_document ld
+                        JOIN article_scenarios asn ON asn.document_id = ld.id
+                        WHERE asn.scenario_id = :sid
+                          AND ld.project_context = 'literev'
+                          AND (ld.pico_json IS NULL OR (ld.pico_json->>'pico_confidence')::float < 0.5)
+                          AND ld.abstract IS NOT NULL AND length(ld.abstract) > 50
+                        ORDER BY ld.id
+                    """), {"sid": scenario_id}).mappings().fetchall()
+
+                pico_extracted = 0
+                pico_errors = 0
+                for row in pico_rows:
+                    try:
+                        response = _client.chat.completions.create(
+                            model="gpt-4.1-mini",
+                            messages=[
+                                {"role": "system", "content": system_prompt_pico},
+                                {"role": "user", "content": f"Title: {row['title']}\n\nAbstract: {(row['abstract'] or '')[:3000]}"},
+                            ],
+                            temperature=0.1,
+                            max_tokens=400,
+                            response_format={"type": "json_object"},
+                        )
+                        pico = json.loads(response.choices[0].message.content)
+                        required = {"P", "I", "C", "O", "study_design", "pico_confidence"}
+                        if required.issubset(pico.keys()):
+                            pico["pico_confidence"] = float(pico.get("pico_confidence", 0.5))
+                            with engine.begin() as conn:
+                                conn.execute(text("""
+                                    UPDATE literature_document
+                                    SET pico_json = CAST(:pico AS jsonb), pico_extracted_at = :ts
+                                    WHERE id = :article_id
+                                """), {"pico": json.dumps(pico), "ts": datetime.now(timezone.utc), "article_id": row["id"]})
+                            pico_extracted += 1
+                    except Exception as e:
+                        logger.warning(f"Pipeline PICO article {row['id']}: {e}")
+                        pico_errors += 1
+                    _time.sleep(0.05)
+                update_step("pico", "done", extracted=pico_extracted, errors=pico_errors)
+            else:
+                update_step("pico", "skipped", reason="Clé OpenAI non configurée")
+        except Exception as e:
+            update_step("pico", "error", error=str(e))
+
+        # ── Étape 6 : Extraction métadonnées ─────────────────────────────────
+        update_step("metadata", "running")
+        try:
+            openai_key = os.getenv("OPENAI_API_KEY")
+            if openai_key:
+                from openai import OpenAI as _OAI2
+                from datetime import datetime, timezone
+                _client2 = _OAI2(api_key=openai_key)
+                system_prompt_meta = (
+                    "You are a biomedical librarian. Extract metadata from this article and return ONLY valid JSON:\n"
+                    '{"study_type":"RCT|Cohort|Case-control|Cross-sectional|Systematic review|Meta-analysis|Case report|Editorial|Other",'
+                    '"sample_size":null,"country":"ISO2 or null","setting":"hospital|prehospital|community|other|null",'
+                    '"primary_outcome":"brief description or null","funding":"public|industry|mixed|not reported",'
+                    '"bias_risk":"low|moderate|high|unclear","metadata_confidence":0.0-1.0}\n'
+                    "Return ONLY the JSON."
+                )
+                with engine.connect() as conn:
+                    meta_rows = conn.execute(text("""
+                        SELECT ld.id, ld.title, ld.abstract, ld.source, ld.year
+                        FROM literature_document ld
+                        JOIN article_scenarios asn ON asn.document_id = ld.id
+                        WHERE asn.scenario_id = :sid
+                          AND ld.project_context = 'literev'
+                          AND (ld.metadata_json IS NULL OR ld.metadata_json = '{}'::jsonb)
+                        ORDER BY ld.id
+                    """), {"sid": scenario_id}).mappings().fetchall()
+
+                meta_extracted = 0
+                meta_errors = 0
+                for row in meta_rows:
+                    try:
+                        response = _client2.chat.completions.create(
+                            model="gpt-4.1-mini",
+                            messages=[
+                                {"role": "system", "content": system_prompt_meta},
+                                {"role": "user", "content": f"Title: {row['title']}\n\nAbstract: {(row['abstract'] or '')[:2000]}"},
+                            ],
+                            temperature=0.1,
+                            max_tokens=300,
+                            response_format={"type": "json_object"},
+                        )
+                        metadata = json.loads(response.choices[0].message.content)
+                        metadata["metadata_confidence"] = float(metadata.get("metadata_confidence", 0.5))
+                        with engine.begin() as conn:
+                            conn.execute(text("""
+                                UPDATE literature_document
+                                SET metadata_json = CAST(:meta AS jsonb)
+                                WHERE id = :article_id
+                            """), {"meta": json.dumps(metadata), "article_id": row["id"]})
+                        meta_extracted += 1
+                    except Exception as e:
+                        logger.warning(f"Pipeline metadata article {row['id']}: {e}")
+                        meta_errors += 1
+                    _time.sleep(0.05)
+                update_step("metadata", "done", extracted=meta_extracted, errors=meta_errors)
+            else:
+                update_step("metadata", "skipped", reason="Clé OpenAI non configurée")
+        except Exception as e:
+            update_step("metadata", "error", error=str(e))
+
+        # ── Étape 7 : Clustering ──────────────────────────────────────────────
         update_step("clustering", "running")
         try:
             import numpy as np
@@ -7792,24 +7833,6 @@ def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict
                 update_step("clustering", "skipped", reason=f"Corpus insuffisant ({len(cl_docs)} articles)")
         except Exception as e:
             update_step("clustering", "error", error=str(e))
-
-        # ── Étape 6 : Rerank sémantique (calcul des vrais scores cosinus) ────
-        update_step("rerank", "running")
-        try:
-            openai_key = os.getenv("OPENAI_API_KEY")
-            if openai_key:
-                # Récupérer la requête du scénario pour le rerank
-                with engine.connect() as _conn:
-                    _us_row = _conn.execute(text(
-                        "SELECT query FROM user_scenarios WHERE id = :sid"
-                    ), {"sid": scenario_id}).mappings().fetchone()
-                _rerank_query = (_us_row["query"] if _us_row else query) or query
-                n_reranked = _run_semantic_rerank_inline(scenario_id, _rerank_query)
-                update_step("rerank", "done", updated=n_reranked)
-            else:
-                update_step("rerank", "skipped", reason="Clé OpenAI non configurée")
-        except Exception as e:
-            update_step("rerank", "error", error=str(e))
 
         # ── Fin du pipeline ───────────────────────────────────────────────────
         _user_scenario_pipeline_jobs[scenario_id]["overall_status"] = "done"
@@ -7934,15 +7957,15 @@ def start_user_scenario_pipeline(
 
         _user_scenario_pipeline_jobs[scenario_id] = {
             "overall_status": "starting",
-            "current_step": "pubmed",
+            "current_step": "ingest",
             "steps": {
-                "pubmed": {"status": "pending"},
+                "ingest": {"status": "pending"},
+                "fulltext": {"status": "pending"},
                 "embed": {"status": "pending"},
+                "rerank": {"status": "pending"},
                 "pico": {"status": "pending"},
                 "metadata": {"status": "pending"},
-                "fulltext": {"status": "pending"},
                 "clustering": {"status": "pending"},
-                "rerank": {"status": "pending"},
             },
         }
 
@@ -7959,9 +7982,9 @@ def start_user_scenario_pipeline(
         "query": query,
         "max_results": max_results,
         "message": f"Pipeline complet lancé pour '{row['name']}' "
-                   "(ingéstion 8 sources → embeddings → PICO → métadonnées → full-text → clustering → rerank). "
+                   "(ingest 8 sources → fulltext → embeddings → rerank → PICO → métadonnées → clustering). "
                    "Suivez la progression via GET /user-scenarios/{id}/pipeline/status.",
-        "steps": ["pubmed", "embed", "pico", "metadata", "fulltext", "clustering", "rerank"],
+        "steps": ["ingest", "fulltext", "embed", "rerank", "pico", "metadata", "clustering"],
     }
 
 
