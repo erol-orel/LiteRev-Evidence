@@ -6480,6 +6480,7 @@ def _run_user_scenario_populate(
                         if _pipeline_callback is None:
                             _user_scenario_populate_jobs[scenario_id]["sources"]["openalex"] = \
                                 _user_scenario_populate_jobs[scenario_id]["sources"].get("openalex", 0) + 1
+                            _user_scenario_populate_jobs[scenario_id]["ingested"] = ingested
                     except Exception as _e:
                         errors += 1
                     _time.sleep(0.05)
@@ -6558,6 +6559,7 @@ def _run_user_scenario_populate(
                         if _pipeline_callback is None:
                             _user_scenario_populate_jobs[scenario_id]["sources"]["crossref"] = \
                                 _user_scenario_populate_jobs[scenario_id]["sources"].get("crossref", 0) + 1
+                            _user_scenario_populate_jobs[scenario_id]["ingested"] = ingested
                     except Exception as _e:
                         errors += 1
                     _time.sleep(0.05)
@@ -6639,6 +6641,7 @@ def _run_user_scenario_populate(
                         if _pipeline_callback is None:
                             _user_scenario_populate_jobs[scenario_id]["sources"]["europepmc"] = \
                                 _user_scenario_populate_jobs[scenario_id]["sources"].get("europepmc", 0) + 1
+                            _user_scenario_populate_jobs[scenario_id]["ingested"] = ingested
                     except Exception as _e:
                         errors += 1
                     _time.sleep(0.05)
@@ -6719,6 +6722,7 @@ def _run_user_scenario_populate(
                             if _pipeline_callback is None:
                                 _user_scenario_populate_jobs[scenario_id]["sources"][_server] = \
                                     _user_scenario_populate_jobs[scenario_id]["sources"].get(_server, 0) + 1
+                                _user_scenario_populate_jobs[scenario_id]["ingested"] = ingested
                         except Exception:
                             errors += 1
                         _time.sleep(0.03)
@@ -6830,6 +6834,7 @@ def _run_user_scenario_populate(
                             if _pipeline_callback is None:
                                 _user_scenario_populate_jobs[scenario_id]["sources"]["prospero"] = \
                                     _user_scenario_populate_jobs[scenario_id]["sources"].get("prospero", 0) + 1
+                                _user_scenario_populate_jobs[scenario_id]["ingested"] = ingested
                         except Exception:
                             errors += 1
                         _time.sleep(0.1)
@@ -6996,6 +7001,7 @@ def _run_user_scenario_populate(
                     if _pipeline_callback is None:
                         _user_scenario_populate_jobs[scenario_id]["sources"]["cochrane"] = \
                             _user_scenario_populate_jobs[scenario_id]["sources"].get("cochrane", 0) + 1
+                        _user_scenario_populate_jobs[scenario_id]["ingested"] = ingested
                 except Exception as _e_ins:
                     errors += 1
                     logger.warning(f"Erreur insertion Cochrane article {_item.get('external_id')}: {_e_ins}")
