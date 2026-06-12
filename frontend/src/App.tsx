@@ -2866,7 +2866,7 @@ function ScenariosView({
                           <RotateCcw size={9} className="text-brand-400 animate-spin shrink-0" />
                           <span className="text-xs text-brand-300">
                             {pStatus.overall_status === 'error' ? '⚠ Erreur pipeline' :
-                             pStatus.current_step === 'pubmed' ? 'Ingéstion multi-sources (8 sources)...' :
+                             pStatus.current_step === 'ingest' ? 'Ingéstion multi-sources (8 sources)...' :
                              pStatus.current_step === 'embed' ? 'Génération embeddings...' :
                              pStatus.current_step === 'pico' ? 'Extraction PICO...' :
                              pStatus.current_step === 'metadata' ? 'Métadonnées...' :
@@ -2914,7 +2914,7 @@ function ScenariosView({
                         <RotateCcw size={10} className="text-brand-400 animate-spin shrink-0" />
                         <span className="text-xs text-brand-300">
                           {pipelineStatuses[s.id].overall_status === 'error' ? '⚠ Erreur pipeline' :
-                            pipelineStatuses[s.id].current_step === 'pubmed' ? 'Ingéstion multi-sources (8 sources)...' :
+                            pipelineStatuses[s.id].current_step === 'ingest' ? 'Ingéstion multi-sources (8 sources)...' :
                             pipelineStatuses[s.id].current_step === 'embed' ? 'Génération embeddings...' :
                             pipelineStatuses[s.id].current_step === 'pico' ? 'Extraction PICO...' :
                             pipelineStatuses[s.id].current_step === 'metadata' ? 'Extraction métadonnées...' :
@@ -2924,11 +2924,11 @@ function ScenariosView({
                             'Pipeline en cours...'}
                         </span>
                         <span className="text-xs text-white/25">
-                          {(['pubmed','embed','pico','metadata','fulltext','clustering','rerank'] as const).map(step => {
+                          {(['ingest','fulltext','embed','rerank','pico','metadata','clustering'] as const).map(step => {
                             const st = pipelineStatuses[s.id]?.steps?.[step]?.status;
                             const dotCls = st === 'done' ? 'bg-forest-400' : st === 'running' ? 'bg-brand-400 animate-pulse' : st === 'error' ? 'bg-red-400' : 'bg-white/20';
                             const stepLabel: Record<string, string> = {
-                              pubmed: 'Ingéstion (8 sources)',
+                              ingest: 'Ingestion (8 sources)',
                               embed: 'Embeddings',
                               pico: 'PICO',
                               metadata: 'Métadonnées',
@@ -3000,7 +3000,7 @@ function ScenariosView({
                         <RotateCcw size={10} className="text-brand-400 animate-spin shrink-0" />
                         <span className="text-xs text-brand-300">
                           {pipelineStatuses[s.id].overall_status === 'error' ? '⚠ Erreur pipeline' :
-                            pipelineStatuses[s.id].current_step === 'pubmed' ? 'Ingéstion multi-sources (8 sources)...' :
+                            pipelineStatuses[s.id].current_step === 'ingest' ? 'Ingéstion multi-sources (8 sources)...' :
                             pipelineStatuses[s.id].current_step === 'embed' ? 'Génération embeddings...' :
                             pipelineStatuses[s.id].current_step === 'pico' ? 'Extraction PICO...' :
                             pipelineStatuses[s.id].current_step === 'metadata' ? 'Extraction métadonnées...' :
