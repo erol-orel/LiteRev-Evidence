@@ -35,6 +35,9 @@ export interface SearchResult {
   evidenceCategory?: string | null;
   highlight?: string | null;
   chunkType?: string | null;
+  semanticScore?: number | null;
+  lexicalScore?: number | null;
+  hasFulltext?: boolean | null;
   [key: string]: unknown;
 }
 
@@ -87,6 +90,9 @@ export interface ApiSearchResult {
   geographic_scope: string | null;
   evidence_category: string | null;
   chunk_type: string | null;
+  semantic_score?: number | null;
+  lexical_score?: number | null;
+  has_fulltext?: boolean | null;
 }
 
 export interface ApiSearchRequest {

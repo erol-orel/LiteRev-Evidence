@@ -151,6 +151,9 @@ function mapSearchResultFromApi(apiResult: ApiSearchResult): SearchResult {
     geographicScope: apiResult.geographic_scope,
     evidenceCategory: apiResult.evidence_category,
     chunkType: apiResult.chunk_type,
+    semanticScore: apiResult.semantic_score ?? null,
+    lexicalScore: apiResult.lexical_score ?? null,
+    hasFulltext: apiResult.has_fulltext ?? null,
   };
 }
 
@@ -2814,4 +2817,55 @@ export function askScenarioRagStreamFiltered(
     aborted = true;
     controller.abort();
   };
+}
+
+// ─── Live Federated Search ────────────────────────────────────────────────────
+
+export interface LiveSearchResult {
+  title: string;
+  abstract?: string | null;
+  doi?: string | null;
+  year?: number | null;
+  authors?: string[];
+  journal?: string | null;
+  url?: string | null;
+  external_id?: string | null;
+  source_name: string;
+  in_local_db: boolean;
+}
+
+export interface LiveSearchResponse {
+  results: LiveSearchResult[];
+  total: number;
+  new_count: number;
+  sources_queried: string[];
+  ingesting_background: boolean;
+}
+
+export async function searchLive(
+  scenarioId: string,
+  maxPerSource = 50,
+): Promise<LiveSearchResponse> {
+  const r = await fetch(
+    `${API_BASE_URL}/user-scenarios/${scenarioId}/search/live?max_per_source=${maxPerSource}`,
+    { method: 'POST', headers: authHeaders() },
+  );
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  return r.json();
+}
+
+export interface SearchStrategy {
+  general: string;
+  pubmed: string;
+  explanation: string;
+  synonyms: string[][];
+}
+
+export async function getSearchStrategy(scenarioId: string): Promise<SearchStrategy> {
+  const r = await fetch(
+    `${API_BASE_URL}/user-scenarios/${scenarioId}/search-strategy`,
+    { headers: authHeaders() },
+  );
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  return r.json();
 }
