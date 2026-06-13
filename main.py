@@ -857,7 +857,7 @@ def search(payload: SearchIn) -> dict[str, Any]:
         """)
 
     # Comptage réel du nombre de documents distincts correspondant à la requête.
-    # En sémantique/hybride : docs avec au moins un chunk dont la similarité cosinus > 0.15
+    # En sémantique/hybride : docs avec au moins un chunk dont la similarité cosinus > 0.35
     # (seuil bas mais élimine les docs sans aucun rapport avec la requête).
     # En lexical : docs contenant au moins un terme de la requête.
     if use_vector and payload.mode in ("hybrid", "semantic"):
@@ -866,7 +866,7 @@ def search(payload: SearchIn) -> dict[str, Any]:
             FROM document_chunk c
             JOIN literature_document d ON d.id = c.document_id
             WHERE c.embedding IS NOT NULL
-              AND (1 - (c.embedding <=> CAST(:count_q_emb AS vector))) > 0.15
+              AND (1 - (c.embedding <=> CAST(:count_q_emb AS vector))) > 0.35
               {where_sql}
         """)
         count_params = {**where_params, "count_q_emb": str(query_embedding)}
