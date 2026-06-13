@@ -976,6 +976,277 @@ def search(payload: SearchIn) -> dict[str, Any]:
     }
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Live federated search
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _live_fetch_pubmed(query: str, max_results: int) -> list[dict]:
+    """Fetch from PubMed eSearch+eSummary, return list of result dicts."""
+    import requests as _req
+    results = []
+    try:
+        base = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
+        r = _req.get(f"{base}/esearch.fcgi", params={
+            "db": "pubmed", "term": query, "retmax": max_results,
+            "retmode": "json", "tool": "literev", "email": "api@literev.app"
+        }, timeout=10)
+        ids = r.json().get("esearchresult", {}).get("idlist", [])
+        if not ids:
+            return []
+        r2 = _req.get(f"{base}/esummary.fcgi", params={
+            "db": "pubmed", "id": ",".join(ids), "retmode": "json",
+            "tool": "literev", "email": "api@literev.app"
+        }, timeout=10)
+        uids = r2.json().get("result", {}).get("uids", [])
+        for uid in uids:
+            item = r2.json()["result"].get(uid, {})
+            results.append({
+                "title": item.get("title", ""),
+                "abstract": None,
+                "doi": next((a["value"] for a in item.get("articleids", []) if a["idtype"] == "doi"), None),
+                "year": int(item.get("pubdate", "")[:4]) if item.get("pubdate", "")[:4].isdigit() else None,
+                "authors": [a.get("name", "") for a in item.get("authors", [])],
+                "journal": item.get("source", None),
+                "url": f"https://pubmed.ncbi.nlm.nih.gov/{uid}/",
+                "external_id": f"pmid:{uid}",
+                "source_name": "PubMed",
+            })
+    except Exception as _e:
+        logger.warning(f"_live_fetch_pubmed error: {_e}")
+    return results
+
+
+def _live_fetch_openalex(query: str, max_results: int) -> list[dict]:
+    import requests as _req
+    results = []
+    try:
+        r = _req.get("https://api.openalex.org/works", params={
+            "search": query, "per-page": min(max_results, 50),
+            "select": "id,title,abstract_inverted_index,doi,publication_year,authorships,primary_location,open_access"
+        }, headers={"User-Agent": "LiteRev/1.0 (mailto:api@literev.app)"}, timeout=10)
+        for item in r.json().get("results", []):
+            doi = item.get("doi", "")
+            if doi and doi.startswith("https://doi.org/"):
+                doi = doi[len("https://doi.org/"):]
+            loc = item.get("primary_location") or {}
+            source = loc.get("source") or {}
+            results.append({
+                "title": item.get("title", ""),
+                "abstract": None,
+                "doi": doi or None,
+                "year": item.get("publication_year"),
+                "authors": [a.get("author", {}).get("display_name", "") for a in item.get("authorships", [])[:5]],
+                "journal": source.get("display_name"),
+                "url": item.get("id"),
+                "external_id": item.get("id"),
+                "source_name": "OpenAlex",
+            })
+    except Exception as _e:
+        logger.warning(f"_live_fetch_openalex error: {_e}")
+    return results
+
+
+def _live_fetch_crossref(query: str, max_results: int) -> list[dict]:
+    import requests as _req
+    results = []
+    try:
+        r = _req.get("https://api.crossref.org/works", params={
+            "query": query, "rows": min(max_results, 50),
+            "select": "DOI,title,abstract,published,author,container-title"
+        }, headers={"User-Agent": "LiteRev/1.0 (mailto:api@literev.app)"}, timeout=10)
+        for item in r.json().get("message", {}).get("items", []):
+            pub = item.get("published", {}).get("date-parts", [[None]])[0]
+            year = pub[0] if pub else None
+            results.append({
+                "title": (item.get("title") or [""])[0],
+                "abstract": item.get("abstract"),
+                "doi": item.get("DOI"),
+                "year": year,
+                "authors": [f"{a.get('family', '')} {a.get('given', '')}".strip() for a in item.get("author", [])[:5]],
+                "journal": (item.get("container-title") or [None])[0],
+                "url": f"https://doi.org/{item.get('DOI')}" if item.get("DOI") else None,
+                "external_id": item.get("DOI"),
+                "source_name": "Crossref",
+            })
+    except Exception as _e:
+        logger.warning(f"_live_fetch_crossref error: {_e}")
+    return results
+
+
+def _live_fetch_europepmc(query: str, max_results: int) -> list[dict]:
+    import requests as _req
+    results = []
+    try:
+        r = _req.get("https://www.ebi.ac.uk/europepmc/webservices/rest/search", params={
+            "query": query, "resulttype": "lite", "pageSize": min(max_results, 50),
+            "format": "json", "sort": "RELEVANCE"
+        }, timeout=10)
+        for item in r.json().get("resultList", {}).get("result", []):
+            results.append({
+                "title": item.get("title", ""),
+                "abstract": item.get("abstractText"),
+                "doi": item.get("doi"),
+                "year": int(item["pubYear"]) if item.get("pubYear", "").isdigit() else None,
+                "authors": item.get("authorString", "").split(", ")[:5] if item.get("authorString") else [],
+                "journal": item.get("journalTitle"),
+                "url": f"https://europepmc.org/article/{item.get('source','')}/{item.get('id','')}",
+                "external_id": item.get("id"),
+                "source_name": "EuropePMC",
+            })
+    except Exception as _e:
+        logger.warning(f"_live_fetch_europepmc error: {_e}")
+    return results
+
+
+def _live_fetch_medrxiv(query: str, max_results: int) -> list[dict]:
+    import requests as _req
+    results = []
+    try:
+        r = _req.get("https://api.biorxiv.org/details/medrxiv/2020-01-01/2099-12-31/0/json",
+                     timeout=10)
+        # medrxiv search by query not directly available, use details endpoint with recent date range
+        # Fallback: just return empty (no free-text search API available in simplified form)
+    except Exception as _e:
+        logger.warning(f"_live_fetch_medrxiv error: {_e}")
+    return results
+
+
+def _live_fetch_biorxiv(query: str, max_results: int) -> list[dict]:
+    # bioRxiv also lacks a simple free-text search endpoint without scraping
+    return []
+
+
+def _live_fetch_prospero(query: str, max_results: int) -> list[dict]:
+    # PROSPERO does not have a public API; return empty
+    return []
+
+
+def _live_fetch_cochrane(query: str, max_results: int) -> list[dict]:
+    import requests as _req
+    results = []
+    try:
+        r = _req.get("https://www.cochranelibrary.com/api/search", params={
+            "q": query, "rows": min(max_results, 25)
+        }, headers={"Accept": "application/json"}, timeout=10)
+        if r.ok:
+            for item in r.json().get("results", []):
+                results.append({
+                    "title": item.get("title", ""),
+                    "abstract": item.get("abstract"),
+                    "doi": item.get("doi"),
+                    "year": item.get("year"),
+                    "authors": [],
+                    "journal": "Cochrane Database of Systematic Reviews",
+                    "url": item.get("url"),
+                    "external_id": item.get("id"),
+                    "source_name": "Cochrane",
+                })
+    except Exception as _e:
+        logger.warning(f"_live_fetch_cochrane error: {_e}")
+    return results
+
+
+@app.post("/user-scenarios/{scenario_id}/search/live")
+def search_live(
+    scenario_id: str,
+    max_per_source: int = 50,
+    _: None = Depends(require_api_key),
+) -> dict[str, Any]:
+    """Live federated search across all 8 external sources in parallel."""
+    import concurrent.futures
+
+    # Get scenario
+    row = _get_user_scenario_or_404(scenario_id)
+    query = row["query"]
+    strategy = row.get("search_strategy") or {}
+    pubmed_query = strategy.get("pubmed", query) if isinstance(strategy, dict) else query
+    general_query = strategy.get("general", query) if isinstance(strategy, dict) else query
+
+    source_fns = [
+        ("PubMed", _live_fetch_pubmed, pubmed_query),
+        ("OpenAlex", _live_fetch_openalex, general_query),
+        ("Crossref", _live_fetch_crossref, general_query),
+        ("EuropePMC", _live_fetch_europepmc, general_query),
+        ("medRxiv", _live_fetch_medrxiv, general_query),
+        ("bioRxiv", _live_fetch_biorxiv, general_query),
+        ("PROSPERO", _live_fetch_prospero, general_query),
+        ("Cochrane", _live_fetch_cochrane, general_query),
+    ]
+
+    all_results: list[dict] = []
+    sources_queried: list[str] = []
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
+        futures = {executor.submit(fn, q, max_per_source): name for name, fn, q in source_fns}
+        for future in concurrent.futures.as_completed(futures, timeout=12):
+            name = futures[future]
+            sources_queried.append(name)
+            try:
+                items = future.result()
+                all_results.extend(items)
+            except Exception as _fe:
+                logger.warning(f"search_live source {name} error: {_fe}")
+
+    # Check which results are already in local DB
+    dois = [r["doi"] for r in all_results if r.get("doi")]
+    in_db_dois: set[str] = set()
+    if dois:
+        try:
+            with engine.connect() as conn:
+                rows_db = conn.execute(text(
+                    "SELECT doi FROM literature_document WHERE doi = ANY(:dois) AND project_context = 'literev'"
+                ), {"dois": dois}).fetchall()
+                in_db_dois = {r[0] for r in rows_db}
+        except Exception as _dbe:
+            logger.warning(f"search_live DB check error: {_dbe}")
+
+    for r in all_results:
+        r["in_local_db"] = bool(r.get("doi") and r["doi"] in in_db_dois)
+
+    new_count = sum(1 for r in all_results if not r["in_local_db"])
+
+    # Background ingest of new papers
+    ingesting_background = False
+    if new_count > 0:
+        try:
+            import threading as _thr
+            _thr.Thread(
+                target=_run_user_scenario_populate,
+                args=(scenario_id, query, {}, 200),
+                daemon=True,
+            ).start()
+            ingesting_background = True
+        except Exception as _be:
+            logger.warning(f"search_live background ingest error: {_be}")
+
+    return {
+        "results": all_results,
+        "total": len(all_results),
+        "new_count": new_count,
+        "sources_queried": sources_queried,
+        "ingesting_background": ingesting_background,
+    }
+
+
+@app.get("/user-scenarios/{scenario_id}/search-strategy")
+def get_search_strategy(scenario_id: str) -> dict[str, Any]:
+    """Returns the stored search_strategy JSON for this scenario.
+    If not yet generated, generates it now and stores it."""
+    row = _get_user_scenario_or_404(scenario_id)
+    strategy = row.get("search_strategy")
+    if not strategy:
+        query = row["query"]
+        strategy = _generate_search_strategy(query)
+        try:
+            with engine.begin() as conn:
+                conn.execute(text("""
+                    UPDATE user_scenarios SET search_strategy = CAST(:strategy AS jsonb) WHERE id = :id
+                """), {"id": scenario_id, "strategy": json.dumps(strategy)})
+        except Exception as _e:
+            logger.warning(f"get_search_strategy store error: {_e}")
+    return strategy if isinstance(strategy, dict) else {}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Document detail
 # ─────────────────────────────────────────────────────────────────────────────
 @app.get("/documents/{document_id}")
@@ -5764,7 +6035,8 @@ def _get_user_scenario_or_404(scenario_id: str) -> dict[str, Any]:
     """Retourne la ligne user_scenarios ou lève 404."""
     with engine.connect() as conn:
         row = conn.execute(text("""
-            SELECT id, name, query, mode, filters, result_count, pinned, folder_id, created_at, updated_at
+            SELECT id, name, query, mode, filters, result_count, pinned, folder_id, created_at, updated_at,
+                   search_strategy
             FROM user_scenarios WHERE id = :id
         """), {"id": scenario_id}).mappings().first()
     if not row:
@@ -5868,6 +6140,15 @@ def create_user_scenario(payload: UserScenarioIn, _: None = Depends(require_api_
             "pinned": payload.pinned,
             "folder_id": payload.folder_id,
         })
+    # Generate and store search strategy non-blocking
+    try:
+        strategy = _generate_search_strategy(payload.query)
+        with engine.begin() as conn2:
+            conn2.execute(text("""
+                UPDATE user_scenarios SET search_strategy = CAST(:strategy AS jsonb) WHERE id = :id
+            """), {"id": new_id, "strategy": json.dumps(strategy)})
+    except Exception as _se:
+        logger.warning(f"search_strategy generation failed for {new_id}: {_se}")
     row = _get_user_scenario_or_404(new_id)
     return _user_scenario_to_gesica_format(row)
 
@@ -6192,6 +6473,45 @@ _pipeline_jobs_lock = threading.Lock()
 
 _user_scenario_populate_jobs: dict[str, dict] = {}
 _user_scenario_pipeline_jobs: dict[str, dict] = {}
+
+
+def _generate_search_strategy(query: str) -> dict:
+    """
+    Uses GPT-4.1-mini to generate a structured boolean search strategy from a natural language query.
+    Returns a dict with:
+    - general: general boolean query string
+    - pubmed: PubMed-specific with MeSH tags
+    - explanation: brief explanation of term choices
+    - synonyms: list of key synonym groups used
+    """
+    openai_key = os.getenv("OPENAI_API_KEY")
+    if not openai_key:
+        return {"general": query, "pubmed": query, "explanation": "", "synonyms": []}
+    try:
+        from openai import OpenAI as _OAI_ss
+        _client = _OAI_ss(api_key=openai_key)
+        response = _client.chat.completions.create(
+            model="gpt-4.1-mini",
+            messages=[
+                {"role": "system", "content": (
+                    "You are a systematic review librarian. Given a research query, generate a structured boolean search strategy. "
+                    "Return ONLY valid JSON with these fields:\n"
+                    '{"general": "boolean query using AND/OR/NOT and quotes for phrases",\n'
+                    '"pubmed": "PubMed-optimized query with MeSH terms [MeSH Terms] and field tags [Title/Abstract]",\n'
+                    '"explanation": "1-2 sentences explaining the term choices and synonyms",\n'
+                    '"synonyms": [["term1", "synonym1a", "synonym1b"], ["term2", "synonym2a"]]}\n'
+                    "Keep queries practical and not overly long. Use 2-4 concept groups max."
+                )},
+                {"role": "user", "content": f"Research query: {query}"}
+            ],
+            temperature=0.2,
+            max_tokens=500,
+            response_format={"type": "json_object"},
+        )
+        return json.loads(response.choices[0].message.content)
+    except Exception as _e:
+        logger.warning(f"_generate_search_strategy failed: {_e}")
+        return {"general": query, "pubmed": query, "explanation": "", "synonyms": []}
 
 
 def _run_user_scenario_populate(

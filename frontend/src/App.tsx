@@ -92,6 +92,8 @@ import {
   type DisasterRiskResponse,
   type MCIVictimResponse,
   searchDocuments,
+  searchLive as _searchLive,
+  getSearchStrategy as _getSearchStrategy,
   fetchUserScenarios,
   createUserScenario,
   deleteUserScenario,
@@ -106,6 +108,9 @@ import {
   type UserScenario,
   type UserScenarioPipelineStatus,
   type ScenarioFolder,
+  type LiveSearchResult as _LiveSearchResult,
+  type LiveSearchResponse as _LiveSearchResponse,
+  type SearchStrategy as _SearchStrategy,
 } from "./lib/api";
 import type {
   ProjectContext,
@@ -3099,7 +3104,14 @@ export default function App() {
   const [searchScoreType, setSearchScoreType] = useState<string | null>(null);
   const [searchScoreLabel, setSearchScoreLabel] = useState<string | null>(null);
   const [folders, setFolders] = useState<ScenarioFolder[]>([]);
-  
+  const [sortBy, setSortBy] = useState<"score" | "semantic" | "lexical" | "year_desc" | "year_asc" | "fulltext_first">("score");
+  // Live search / search strategy state (reserved for future panel)
+  const [_liveSearchData, _setLiveSearchData] = useState<_LiveSearchResponse | null>(null);
+  const [_liveSearchLoading, _setLiveSearchLoading] = useState(false);
+  const [_liveSearchScenarioId, _setLiveSearchScenarioId] = useState<string | null>(null);
+  const [_searchStrategy, _setSearchStrategy] = useState<_SearchStrategy | null>(null);
+  const [_strategyScenarioId, _setStrategyScenarioId] = useState<string | null>(null);
+
 
   useEffect(() => {
     getFilterOptions()
@@ -3172,13 +3184,27 @@ export default function App() {
 
   const dedupedResults = useMemo(() => {
     const seen = new Set<string>();
-    return results.filter((result) => {
+    const deduped = results.filter((result) => {
       const key = `${result.documentId}-${result.chunkIndex}-${result.content}`;
       if (seen.has(key)) return false;
       seen.add(key);
       return true;
     });
-  }, [results]);
+    // Apply sort
+    return [...deduped].sort((a, b) => {
+      if (sortBy === "semantic") return (b.semanticScore ?? 0) - (a.semanticScore ?? 0);
+      if (sortBy === "lexical") return (b.lexicalScore ?? 0) - (a.lexicalScore ?? 0);
+      if (sortBy === "year_desc") return (b.year ?? 0) - (a.year ?? 0);
+      if (sortBy === "year_asc") return (a.year ?? 0) - (b.year ?? 0);
+      if (sortBy === "fulltext_first") {
+        const af = a.hasFulltext ? 1 : 0;
+        const bf = b.hasFulltext ? 1 : 0;
+        if (bf !== af) return bf - af;
+        return (b.score ?? 0) - (a.score ?? 0);
+      }
+      return (b.score ?? 0) - (a.score ?? 0);
+    });
+  }, [results, sortBy]);
 
   // Nombre de documents uniques (un document peut avoir plusieurs chunks dans dedupedResults)
   const uniqueDocCount = useMemo(() => {
@@ -3858,8 +3884,60 @@ export default function App() {
                     </div>
                   )}
 
+                  {/* Sort controls */}
+                  <div className="flex flex-wrap items-center gap-2 mb-2 mt-1">
+                    <span className="text-xs text-forest-500">Trier :</span>
+                    {([
+                      ["score", "Score global"],
+                      ["semantic", "Sémantique"],
+                      ["lexical", "Lexical"],
+                      ["year_desc", "Année ↓"],
+                      ["year_asc", "Année ↑"],
+                      ["fulltext_first", "Full-text d'abord"],
+                    ] as [typeof sortBy, string][]).map(([val, label]) => (
+                      <button
+                        key={val}
+                        type="button"
+                        onClick={() => { setSortBy(val); setPage(1); }}
+                        className={`rounded-full border px-2.5 py-1 text-xs transition ${
+                          sortBy === val
+                            ? "border-brand-400/60 bg-brand-500/20 text-brand-300"
+                            : "border-white/10 bg-white/5 text-forest-400 hover:border-white/20 hover:text-white"
+                        }`}
+                      >
+                        {label}
+                      </button>
+                    ))}
+                  </div>
+
                   <div className="grid gap-6 2xl:grid-cols-[minmax(0,1fr)_380px]">
                     <div className="space-y-4">
+                      {hasResults && (
+                        <div className="flex flex-wrap items-center gap-2 text-xs text-forest-400 mb-2">
+                          <span className="text-white/60">Trier par :</span>
+                          {([
+                            ['score', 'Score hybride'],
+                            ['semantic', 'Sémantique'],
+                            ['lexical', 'Lexical'],
+                            ['year_desc', 'Année (récent)'],
+                            ['year_asc', 'Année (ancien)'],
+                            ['fulltext_first', "Texte intégral d'abord"],
+                          ] as [typeof sortBy, string][]).map(([val, label]) => (
+                            <button
+                              key={val}
+                              type="button"
+                              onClick={() => setSortBy(val)}
+                              className={`rounded-full border px-3 py-1 transition ${
+                                sortBy === val
+                                  ? 'border-brand-400 bg-brand-500/20 text-brand-300'
+                                  : 'border-white/10 bg-white/5 hover:border-white/20'
+                              }`}
+                            >
+                              {label}
+                            </button>
+                          ))}
+                        </div>
+                      )}
                       {pagedResults.map((result) => (
                         <article
                           key={`${result.documentId}-${result.chunkIndex}-${result.content}`}
@@ -3893,14 +3971,32 @@ export default function App() {
                           </div>
 
                           <div className="mt-3 flex flex-wrap gap-2 text-xs text-forest-400">
+                            {/* Score chip */}
                             <span className={`rounded-full px-2 py-1 ${
                               searchScoreType === 'hybrid' ? 'bg-violet-500/20 text-violet-300' :
                               searchScoreType === 'semantic' ? 'bg-blue-500/20 text-blue-300' :
                               'bg-white/5'
                             }`} title={searchScoreLabel ?? undefined}>
-                              {searchScoreType === 'hybrid' ? '⊕ Hybride' :
-                               searchScoreType === 'semantic' ? '◎ Sémantique' :
-                               '≡ Lexical'} {(result.score ?? 0).toFixed(3)}
+                              {searchScoreType === 'hybrid' ? '⊕' :
+                               searchScoreType === 'semantic' ? '◎' :
+                               '≡'} {(result.score ?? 0).toFixed(3)}
+                            </span>
+                            {/* Semantic score chip (hybrid or semantic mode) */}
+                            {searchScoreType !== 'lexical' && result.semanticScore != null && (
+                              <span className="rounded-full bg-blue-500/10 px-2 py-1 text-blue-300 border border-blue-500/20" title="Semantic score">
+                                S: {(result.semanticScore).toFixed(2)}
+                              </span>
+                            )}
+                            {/* Lexical score chip (hybrid or lexical mode) */}
+                            {searchScoreType !== 'semantic' && result.lexicalScore != null && (
+                              <span className="rounded-full bg-amber-500/10 px-2 py-1 text-amber-300 border border-amber-500/20" title="Lexical score">
+                                L: {(result.lexicalScore).toFixed(2)}
+                              </span>
+                            )}
+                            {/* Fulltext dot */}
+                            <span title={result.hasFulltext ? 'Texte intégral disponible' : 'Résumé uniquement'}
+                                  className={`rounded-full px-1.5 py-1 ${result.hasFulltext ? 'text-emerald-400' : 'text-forest-600'}`}>
+                              {result.hasFulltext ? '●' : '○'}
                             </span>
                             {result.source && (
                               <span className="rounded-full bg-white/5 px-2 py-1">
