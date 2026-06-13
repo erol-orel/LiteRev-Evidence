@@ -942,7 +942,7 @@ function StatsView({ corpusStats, gesicaStats, fulltextStats, scenarios, statsBy
             <BarChart2 size={18} className="text-brand-400" />
             {(() => {
               const yrs = Object.keys(statsByYear.byYear).map((y) => parseInt(y)).filter((y) => !isNaN(y));
-              const lo = yrs.length ? Math.min(...yrs) : 1900;
+              const lo = yrs.length ? Math.max(1900, Math.min(...yrs)) : 1900;
               const hi = yrs.length ? Math.max(...yrs) : new Date().getFullYear();
               return `Évolution temporelle du corpus (${lo}–${hi})`;
             })()}
@@ -3110,7 +3110,7 @@ export default function App() {
             ?.map((y) => Number(y.value))
             .filter((y) => Number.isFinite(y) && y > 0) ?? [];
         if (years.length > 0) {
-          setYearRange([Math.min(...years), Math.max(...years)]);
+          setYearRange([Math.max(1900, Math.min(...years)), Math.max(...years)]);
         }
       })
       .catch((err) => console.error(err));
@@ -3404,7 +3404,7 @@ export default function App() {
         ?.map((y) => Number(y.value))
         .filter((y) => Number.isFinite(y) && y > 0) ?? [];
     if (years.length > 0) {
-      setYearRange([Math.min(...years), Math.max(...years)]);
+      setYearRange([Math.max(1900, Math.min(...years)), Math.max(...years)]);
     }
   }
 
@@ -3635,7 +3635,7 @@ export default function App() {
                     </span>
                     {(() => {
                       const minYear = filterOptions?.year?.length
-                        ? Math.min(1900, ...filterOptions.year.map((y) => Number(y.value)))
+                        ? Math.max(1900, Math.min(...filterOptions.year.map((y) => Number(y.value))))
                         : 1900;
                       const maxYear = filterOptions?.year?.length
                         ? Math.max(...filterOptions.year.map((y) => Number(y.value)))
@@ -3676,7 +3676,7 @@ export default function App() {
                       );
                     })()}
                     <div className="flex justify-between text-[10px] text-white/30 mt-1">
-                      <span>{filterOptions?.year?.length ? Math.min(1900, ...filterOptions.year.map(y => Number(y.value))) : 1900}</span>
+                      <span>{filterOptions?.year?.length ? Math.max(1900, Math.min(...filterOptions.year.map(y => Number(y.value)))) : 1900}</span>
                       <span>{filterOptions?.year?.length ? Math.max(...filterOptions.year.map(y => Number(y.value))) : new Date().getFullYear()}</span>
                     </div>
                   </div>

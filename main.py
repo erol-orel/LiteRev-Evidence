@@ -856,17 +856,20 @@ def search(payload: SearchIn) -> dict[str, Any]:
             LIMIT :limit OFFSET :offset
         """)
 
-    # Comptage réel du nombre de documents distincts correspondant à la requête,
-    # indépendamment de la pagination (LIMIT/OFFSET). En lexical : docs contenant
-    # un terme. En sémantique/hybride : tout le corpus filtré (univers classé).
+    # Comptage réel du nombre de documents distincts correspondant à la requête.
+    # En sémantique/hybride : docs avec au moins un chunk dont la similarité cosinus > 0.15
+    # (seuil bas mais élimine les docs sans aucun rapport avec la requête).
+    # En lexical : docs contenant au moins un terme de la requête.
     if use_vector and payload.mode in ("hybrid", "semantic"):
         count_sql = text(f"""
             SELECT COUNT(DISTINCT d.id)
             FROM document_chunk c
             JOIN literature_document d ON d.id = c.document_id
-            WHERE TRUE {where_sql}
+            WHERE c.embedding IS NOT NULL
+              AND (1 - (c.embedding <=> CAST(:count_q_emb AS vector))) > 0.15
+              {where_sql}
         """)
-        count_params = dict(where_params)
+        count_params = {**where_params, "count_q_emb": str(query_embedding)}
     else:
         count_sql = text(f"""
             SELECT COUNT(DISTINCT d.id)
@@ -2934,7 +2937,7 @@ def get_scenario_detail(scenario_id: str) -> dict[str, Any]:
                 ) THEN 1 ELSE 0 END) AS with_fulltext,
                 COUNT(DISTINCT d.year) AS years_covered,
                 COUNT(DISTINCT d.journal) AS journals_count,
-                MIN(d.year) AS year_min,
+                GREATEST(1900, MIN(d.year)) AS year_min,
                 MAX(d.year) AS year_max
             FROM literature_document d
             JOIN article_scenarios ars ON ars.document_id = d.id
@@ -4500,7 +4503,7 @@ def get_evidence_brief(scenario_id: str) -> dict[str, Any]:
                 COUNT(*) FILTER (WHERE screening_status = 'excluded') AS excluded,
                 COUNT(*) FILTER (WHERE screening_status = 'pending' OR screening_status IS NULL) AS pending,
                 COUNT(*) FILTER (WHERE has_fulltext IS TRUE) AS with_fulltext,
-                MIN(year) AS year_min,
+                GREATEST(1900, MIN(year)) AS year_min,
                 MAX(year) AS year_max,
                 AVG(citation_count) FILTER (WHERE citation_count IS NOT NULL) AS avg_citations,
                 MAX(citation_count) AS max_citations
@@ -5251,7 +5254,7 @@ def get_evidence_brief_pdf(scenario_id: str):
             SELECT
                 COUNT(*) AS total,
                 SUM(CASE WHEN is_duplicate IS NOT TRUE THEN 1 ELSE 0 END) AS unique_docs,
-                MIN(year) AS year_min, MAX(year) AS year_max,
+                GREATEST(1900, MIN(year)) AS year_min, MAX(year) AS year_max,
                 SUM(CASE WHEN screening_status = 'included' THEN 1 ELSE 0 END) AS included,
                 SUM(CASE WHEN pico_json IS NOT NULL THEN 1 ELSE 0 END) AS with_pico
             FROM literature_document
@@ -6005,7 +6008,7 @@ def get_user_scenario_detail(scenario_id: str) -> dict[str, Any]:
                 ) THEN 1 ELSE 0 END) AS with_fulltext,
                 COUNT(DISTINCT d.year) AS years_covered,
                 COUNT(DISTINCT d.journal) AS journals_count,
-                MIN(d.year) AS year_min,
+                GREATEST(1900, MIN(d.year)) AS year_min,
                 MAX(d.year) AS year_max
             FROM literature_document d
             JOIN article_scenarios ars ON ars.document_id = d.id
@@ -8265,7 +8268,7 @@ def get_user_scenario_evidence_brief(scenario_id: str) -> dict[str, Any]:
                     SELECT 1 FROM document_chunk c
                     WHERE c.document_id = d.id AND c.chunk_type = 'fulltext_section'
                 )) AS with_fulltext,
-                MIN(d.year) AS year_min,
+                GREATEST(1900, MIN(d.year)) AS year_min,
                 MAX(d.year) AS year_max,
                 AVG(d.citation_count) FILTER (WHERE d.citation_count IS NOT NULL) AS avg_citations,
                 MAX(d.citation_count) AS max_citations
