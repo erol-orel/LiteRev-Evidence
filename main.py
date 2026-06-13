@@ -735,6 +735,9 @@ def search(payload: SearchIn) -> dict[str, Any]:
                     d.evidence_category,
                     c.chunk_type,
                     c.content,
+                    d.has_fulltext,
+                    (1 - (c.embedding <=> CAST(:query_embedding AS vector))) AS semantic_score,
+                    (CASE WHEN ({any_match_sql}) THEN LEAST(1.0, ({score_sql})::float / 6.0) ELSE 0.0 END) AS lexical_score,
                     (0.7 * (1 - (c.embedding <=> CAST(:query_embedding AS vector))) +
                      0.3 * (CASE WHEN ({any_match_sql}) THEN LEAST(1.0, ({score_sql})::float / 6.0) ELSE 0.0 END)) AS score
                 FROM document_chunk c
@@ -760,6 +763,9 @@ def search(payload: SearchIn) -> dict[str, Any]:
                     d.evidence_category,
                     c.chunk_type,
                     c.content,
+                    d.has_fulltext,
+                    0.0 AS semantic_score,
+                    (CASE WHEN ({any_match_sql}) THEN LEAST(1.0, ({score_sql})::float / 6.0) ELSE 0.0 END) AS lexical_score,
                     (CASE WHEN ({any_match_sql}) THEN LEAST(1.0, ({score_sql})::float / 6.0) ELSE 0.0 END) AS score
                 FROM document_chunk c
                 JOIN literature_document d ON d.id = c.document_id
@@ -793,6 +799,9 @@ def search(payload: SearchIn) -> dict[str, Any]:
                     d.evidence_category,
                     c.chunk_type,
                     c.content,
+                    d.has_fulltext,
+                    (1 - (c.embedding <=> CAST(:query_embedding AS vector))) AS semantic_score,
+                    0.0 AS lexical_score,
                     (1 - (c.embedding <=> CAST(:query_embedding AS vector))) AS score
                 FROM document_chunk c
                 JOIN literature_document d ON d.id = c.document_id
@@ -817,6 +826,9 @@ def search(payload: SearchIn) -> dict[str, Any]:
                     d.evidence_category,
                     c.chunk_type,
                     c.content,
+                    d.has_fulltext,
+                    0.0 AS semantic_score,
+                    0.0 AS lexical_score,
                     0.0 AS score
                 FROM document_chunk c
                 JOIN literature_document d ON d.id = c.document_id
@@ -847,7 +859,10 @@ def search(payload: SearchIn) -> dict[str, Any]:
                 d.evidence_category,
                 c.chunk_type,
                 c.content,
-                ({score_sql})   AS score
+                d.has_fulltext,
+                0.0 AS semantic_score,
+                LEAST(1.0, ({score_sql})::float / 6.0) AS lexical_score,
+                LEAST(1.0, ({score_sql})::float / 6.0) AS score
             FROM document_chunk c
             JOIN literature_document d ON d.id = c.document_id
             WHERE ({any_match_sql})
@@ -900,6 +915,9 @@ def search(payload: SearchIn) -> dict[str, Any]:
             "content": content,
             "highlight": highlight,
             "score": float(row["score"] or 0.0),
+            "semantic_score": float(row["semantic_score"] or 0.0),
+            "lexical_score": float(row["lexical_score"] or 0.0),
+            "has_fulltext": bool(row["has_fulltext"]) if row["has_fulltext"] is not None else False,
             "source": row["source"],
             "year": row["year"],
             "url": row["url"],
@@ -5705,6 +5723,7 @@ def _ensure_user_scenarios_table() -> None:
             "ALTER TABLE user_scenarios ADD COLUMN IF NOT EXISTS pipeline_progress INTEGER DEFAULT 0",
             "ALTER TABLE user_scenarios ADD COLUMN IF NOT EXISTS pipeline_started_at TIMESTAMP",
             "ALTER TABLE user_scenarios ADD COLUMN IF NOT EXISTS article_count INTEGER DEFAULT 0",
+            "ALTER TABLE user_scenarios ADD COLUMN IF NOT EXISTS search_strategy JSONB",
         ):
             conn.execute(text(_ddl))
     logger.info("Tables user_scenarios et user_scenario_folders vérifiées/créées.")
