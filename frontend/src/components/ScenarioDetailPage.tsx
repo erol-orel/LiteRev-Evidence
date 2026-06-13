@@ -43,6 +43,11 @@ import {
   fetchFulltextBatch,
   fetchEnrichmentStatus,
   fetchUserScenarioEmbeddingStatus,
+  searchLive,
+  getSearchStrategy,
+  type LiveSearchResult,
+  type LiveSearchResponse,
+  type SearchStrategy,
   type EnrichmentStatus,
   type EmbeddingStatus,
   type ScenarioDetail,
@@ -124,8 +129,35 @@ function ErrorBox({ message }: { message: string }) {
 
 // ─── Section: Queries ─────────────────────────────────────────────────────────
 
-function QueriesSection({ detail }: { detail: ScenarioDetail }) {
+function QueriesSection({ detail, scenarioId }: { detail: ScenarioDetail; scenarioId: string }) {
   const [showPrompt, setShowPrompt] = useState(false);
+  const [strategy, setStrategy] = useState<SearchStrategy | null>(null);
+  const [strategyLoading, setStrategyLoading] = useState(false);
+  const [strategyError, setStrategyError] = useState<string | null>(null);
+  const [liveData, setLiveData] = useState<LiveSearchResponse | null>(null);
+  const [liveLoading, setLiveLoading] = useState(false);
+  const [liveError, setLiveError] = useState<string | null>(null);
+
+  function loadStrategy() {
+    if (!isUserScenario(scenarioId)) return;
+    setStrategyLoading(true);
+    setStrategyError(null);
+    getSearchStrategy(scenarioId)
+      .then(setStrategy)
+      .catch(e => setStrategyError(e.message))
+      .finally(() => setStrategyLoading(false));
+  }
+
+  function runLiveSearch() {
+    if (!isUserScenario(scenarioId)) return;
+    setLiveLoading(true);
+    setLiveError(null);
+    searchLive(scenarioId)
+      .then(setLiveData)
+      .catch(e => setLiveError(e.message))
+      .finally(() => setLiveLoading(false));
+  }
+
   return (
     <div className="rounded-3xl border border-white/10 bg-white/3 p-5 space-y-5">
       <SectionHeader
@@ -215,6 +247,124 @@ function QueriesSection({ detail }: { detail: ScenarioDetail }) {
               <pre className="text-xs text-gold-100 font-mono whitespace-pre-wrap leading-5">
                 {detail.evidence_extraction_prompt}
               </pre>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* AI Search Strategy (user scenarios only) */}
+      {isUserScenario(scenarioId) && (
+        <div>
+          <div className="flex items-center gap-2 mb-3">
+            <Brain size={12} className="text-violet-400" />
+            <span className="text-xs font-semibold text-violet-300 uppercase tracking-wider">
+              Stratégie Booléenne IA
+            </span>
+            <button
+              onClick={loadStrategy}
+              disabled={strategyLoading}
+              className="ml-auto rounded-xl border border-violet-500/30 bg-violet-500/10 px-2.5 py-1 text-[10px] text-violet-300 hover:bg-violet-500/20 transition disabled:opacity-50"
+            >
+              {strategyLoading ? <Loader2 size={10} className="animate-spin inline" /> : "Générer / Rafraîchir"}
+            </button>
+          </div>
+          {strategyError && <p className="text-xs text-rose-400">{strategyError}</p>}
+          {strategy && (
+            <div className="space-y-3">
+              <div className="rounded-xl border border-violet-500/15 bg-violet-500/5 p-3">
+                <p className="text-[10px] font-semibold text-violet-400 uppercase tracking-wider mb-1">Requête générale</p>
+                <code className="text-xs text-violet-200 font-mono break-all leading-5">{strategy.general}</code>
+              </div>
+              <div className="rounded-xl border border-blue-500/15 bg-blue-500/5 p-3">
+                <div className="flex items-center justify-between mb-1">
+                  <p className="text-[10px] font-semibold text-blue-400 uppercase tracking-wider">Requête PubMed (avec MeSH)</p>
+                  <a
+                    href={`https://pubmed.ncbi.nlm.nih.gov/?term=${encodeURIComponent(strategy.pubmed)}`}
+                    target="_blank" rel="noopener noreferrer"
+                    className="text-[9px] text-blue-400 hover:text-blue-300"
+                  >Ouvrir dans PubMed →</a>
+                </div>
+                <code className="text-xs text-blue-200 font-mono break-all leading-5">{strategy.pubmed}</code>
+              </div>
+              {strategy.explanation && (
+                <div className="rounded-xl border border-white/10 bg-white/3 p-3">
+                  <p className="text-[10px] font-semibold text-white/50 uppercase tracking-wider mb-1">Explication</p>
+                  <p className="text-xs text-white/70 leading-5">{strategy.explanation}</p>
+                </div>
+              )}
+              {strategy.synonyms && strategy.synonyms.length > 0 && (
+                <div>
+                  <p className="text-[10px] font-semibold text-white/50 uppercase tracking-wider mb-2">Groupes de synonymes</p>
+                  <div className="flex flex-wrap gap-2">
+                    {strategy.synonyms.map((group, i) => (
+                      <div key={i} className="rounded-xl border border-white/10 bg-white/3 px-3 py-1.5 flex gap-1.5 flex-wrap">
+                        {group.map((term, j) => (
+                          <span key={j} className={`text-[10px] rounded-full px-1.5 py-0.5 ${j === 0 ? 'bg-brand-500/20 text-brand-300' : 'bg-white/5 text-white/60'}`}>
+                            {term}
+                          </span>
+                        ))}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Live Federated Search (user scenarios only) */}
+      {isUserScenario(scenarioId) && (
+        <div>
+          <div className="flex items-center gap-2 mb-3">
+            <Globe size={12} className="text-brand-400" />
+            <span className="text-xs font-semibold text-brand-300 uppercase tracking-wider">
+              Recherche en direct (8 sources)
+            </span>
+            <button
+              onClick={runLiveSearch}
+              disabled={liveLoading}
+              className="ml-auto rounded-xl border border-brand-500/30 bg-brand-500/10 px-2.5 py-1 text-[10px] text-brand-300 hover:bg-brand-500/20 transition disabled:opacity-50 flex items-center gap-1"
+            >
+              {liveLoading ? <><Loader2 size={10} className="animate-spin" /> Recherche...</> : "Rechercher toutes les sources"}
+            </button>
+          </div>
+          {liveError && <p className="text-xs text-rose-400">{liveError}</p>}
+          {liveData && (
+            <div className="space-y-3">
+              <div className="flex flex-wrap items-center gap-3 text-xs text-forest-400">
+                <span className="text-white font-semibold">{liveData.total} résultats</span>
+                <span>·</span>
+                {liveData.new_count > 0 && (
+                  <span className="rounded-full border border-amber-500/40 bg-amber-500/10 px-2 py-0.5 text-amber-300">
+                    {liveData.new_count} nouveaux non-indexés
+                    {liveData.ingesting_background && " — ingestion en cours..."}
+                  </span>
+                )}
+                <span>{liveData.sources_queried.join(", ")}</span>
+              </div>
+              <div className="space-y-2 max-h-96 overflow-y-auto">
+                {liveData.results.map((r: LiveSearchResult, i: number) => (
+                  <div key={i} className={`rounded-xl border p-3 ${r.in_local_db ? 'border-white/10 bg-white/3' : 'border-amber-500/30 bg-amber-500/5'}`}>
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="flex-1 min-w-0">
+                        <p className="text-xs font-medium text-white leading-5 truncate">{r.title || "(Sans titre)"}</p>
+                        <div className="flex flex-wrap gap-1.5 mt-1">
+                          <span className="text-[10px] text-forest-400">{r.source_name}</span>
+                          {r.year && <span className="text-[10px] text-forest-400">{r.year}</span>}
+                          {r.journal && <span className="text-[10px] text-forest-500 truncate max-w-[120px]">{r.journal}</span>}
+                          {!r.in_local_db && <span className="text-[10px] rounded-full border border-amber-500/40 bg-amber-500/10 px-1.5 py-0.5 text-amber-300">Non indexé</span>}
+                        </div>
+                      </div>
+                      {r.url && (
+                        <a href={r.url} target="_blank" rel="noopener noreferrer" className="shrink-0 text-[10px] text-brand-400 hover:text-brand-300">
+                          <ExternalLink size={10} />
+                        </a>
+                      )}
+                    </div>
+                  </div>
+                ))}
+              </div>
             </div>
           )}
         </div>
@@ -4327,7 +4477,7 @@ export function ScenarioDetailPage({ scenarioId, onBack }: ScenarioDetailPagePro
       {activeSection === "assistant" && <RagSection scenarioId={scenarioId} detail={detail} />}
       {activeSection === "viz" && <VizTab scenarioId={scenarioId} />}
       {activeSection === "variables" && <VariablesModelTab detail={detail} scenarioId={scenarioId} />}
-      {activeSection === "queries" && <QueriesSection detail={detail} />}
+      {activeSection === "queries" && <QueriesSection detail={detail} scenarioId={scenarioId} />}
       {activeSection === "enrichment" && <EnrichmentSection scenarioId={scenarioId} />}
       {activeSection === "alerts" && <AlertsSection scenarioId={scenarioId} />}
     </div>

@@ -92,8 +92,6 @@ import {
   type DisasterRiskResponse,
   type MCIVictimResponse,
   searchDocuments,
-  searchLive as _searchLive,
-  getSearchStrategy as _getSearchStrategy,
   fetchUserScenarios,
   createUserScenario,
   deleteUserScenario,
@@ -108,9 +106,6 @@ import {
   type UserScenario,
   type UserScenarioPipelineStatus,
   type ScenarioFolder,
-  type LiveSearchResult as _LiveSearchResult,
-  type LiveSearchResponse as _LiveSearchResponse,
-  type SearchStrategy as _SearchStrategy,
 } from "./lib/api";
 import type {
   ProjectContext,
@@ -3105,12 +3100,6 @@ export default function App() {
   const [searchScoreLabel, setSearchScoreLabel] = useState<string | null>(null);
   const [folders, setFolders] = useState<ScenarioFolder[]>([]);
   const [sortBy, setSortBy] = useState<"score" | "semantic" | "lexical" | "year_desc" | "year_asc" | "fulltext_first">("score");
-  // Live search / search strategy state (reserved for future panel)
-  const [_liveSearchData, _setLiveSearchData] = useState<_LiveSearchResponse | null>(null);
-  const [_liveSearchLoading, _setLiveSearchLoading] = useState(false);
-  const [_liveSearchScenarioId, _setLiveSearchScenarioId] = useState<string | null>(null);
-  const [_searchStrategy, _setSearchStrategy] = useState<_SearchStrategy | null>(null);
-  const [_strategyScenarioId, _setStrategyScenarioId] = useState<string | null>(null);
 
 
   useEffect(() => {
