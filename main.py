@@ -307,11 +307,12 @@ def get_filter_options() -> dict[str, list[dict[str, Any]]]:
 
     with engine.connect() as conn:
         for key, col in fields:
+            extra_where = "AND year >= 1900" if key == "year" else ""
             rows = conn.execute(
                 text(f"""
                     SELECT DISTINCT {col} AS value
                     FROM literature_document
-                    WHERE {col} IS NOT NULL
+                    WHERE {col} IS NOT NULL {extra_where}
                     ORDER BY {col}
                 """)
             ).mappings().all()
