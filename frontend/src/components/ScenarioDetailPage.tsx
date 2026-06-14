@@ -993,12 +993,24 @@ function ModelSection({ scenarioId }: { scenarioId: string }) {
 
 // ─── Section: Corpus ──────────────────────────────────────────────────────────
 
-function CorpusSection({ scenarioId }: { scenarioId: string; detail: ScenarioDetail }) {
+function CorpusSection({ scenarioId, threshold }: { scenarioId: string; detail: ScenarioDetail; threshold?: number }) {
   const [data, setData] = useState<ScenarioCorpus | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [expandedId, setExpandedId] = useState<number | null>(null);
   const [embeddingStatus, setEmbeddingStatus] = useState<EmbeddingStatus | null>(null);
+
+  // Recharge le corpus quand le seuil (curseur) change, avec un léger debounce.
+  useEffect(() => {
+    if (threshold == null) return;
+    const t = setTimeout(() => {
+      fetchScenarioCorpus(scenarioId, { threshold })
+        .then(setData)
+        .catch(() => {});
+    }, 250);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [threshold]);
 
   useEffect(() => {
     setLoading(true);
@@ -3563,7 +3575,7 @@ function EnrichmentSection({ scenarioId }: { scenarioId: string }) {
 
 // ─── Seuil de similarite ajustable ─────────────────────────────────────────
 
-function SeuilSection({ scenarioId, onSaved }: { scenarioId: string; onSaved?: () => void }) {
+function SeuilSection({ scenarioId, onSaved, onThresholdChange }: { scenarioId: string; onSaved?: () => void; onThresholdChange?: (v: number) => void }) {
   const [threshold, setThreshold] = React.useState<number>(0.45);
   const [saving, setSaving] = React.useState(false);
   const [saved, setSaved] = React.useState(false);
@@ -3618,7 +3630,7 @@ function SeuilSection({ scenarioId, onSaved }: { scenarioId: string; onSaved?: (
         <input
           type="range" min={0.1} max={0.9} step={0.05}
           value={threshold}
-          onChange={e => setThreshold(parseFloat(e.target.value))}
+          onChange={e => { const v = parseFloat(e.target.value); setThreshold(v); onThresholdChange?.(v); }}
           className="w-28 accent-brand-500"
         />
         <span className="font-mono text-brand-300 w-10 text-center">{threshold.toFixed(2)}</span>
@@ -3650,6 +3662,7 @@ function SeuilSection({ scenarioId, onSaved }: { scenarioId: string; onSaved?: (
 function ReviewTab({ scenarioId, detail }: { scenarioId: string; detail: ScenarioDetail }) {
   const [sub, setSub] = React.useState<"corpus" | "prisma" | "screening">("corpus");
   const [corpusRefreshKey, setCorpusRefreshKey] = React.useState(0);
+  const [liveThreshold, setLiveThreshold] = React.useState<number | undefined>(undefined);
   const SUB = [
     { key: "corpus" as const,    label: "Corpus",         icon: <FileText size={12} /> },
     { key: "prisma" as const,    label: "PRISMA",         icon: <Shield size={12} /> },
@@ -3669,8 +3682,8 @@ function ReviewTab({ scenarioId, detail }: { scenarioId: string; detail: Scenari
       </div>
       {sub === "corpus" && (
         <div className="space-y-4">
-          <SeuilSection scenarioId={scenarioId} onSaved={() => setCorpusRefreshKey(k => k + 1)} />
-          <CorpusSection key={corpusRefreshKey} scenarioId={scenarioId} detail={detail} />
+          <SeuilSection scenarioId={scenarioId} onSaved={() => setCorpusRefreshKey(k => k + 1)} onThresholdChange={setLiveThreshold} />
+          <CorpusSection key={corpusRefreshKey} scenarioId={scenarioId} detail={detail} threshold={liveThreshold} />
         </div>
       )}
       {sub === "prisma" && <PrismaSection scenarioId={scenarioId} />}

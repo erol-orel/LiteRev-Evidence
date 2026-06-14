@@ -1681,6 +1681,7 @@ export async function fetchScenarioCorpus(
     yearTo?: number;
     fulltextOnly?: boolean;
     source?: string;
+    threshold?: number;
   }
 ): Promise<ScenarioCorpus> {
   const params = new URLSearchParams();
@@ -1690,6 +1691,7 @@ export async function fetchScenarioCorpus(
   if (options?.yearTo) params.set('year_to', String(options.yearTo));
   if (options?.fulltextOnly) params.set('fulltext_only', 'true');
   if (options?.source) params.set('source', options.source);
+  if (options?.threshold != null) params.set('threshold', String(options.threshold));
   const base = scenarioBase(scenarioId);
   const url = `${base}/${scenarioId}/corpus?${params}`;
   const response = await fetch(url);
