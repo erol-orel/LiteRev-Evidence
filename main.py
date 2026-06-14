@@ -1243,9 +1243,12 @@ def _live_fetch_europepmc(query: str, max_results: int) -> list[dict]:
     import requests as _req
     results = []
     try:
+        # NB : ne PAS passer sort=RELEVANCE — c'est une valeur invalide pour
+        # EuropePMC qui renvoie alors une liste vide. Sans 'sort', l'API trie
+        # par pertinence par défaut.
         r = _req.get("https://www.ebi.ac.uk/europepmc/webservices/rest/search", params={
-            "query": query, "resulttype": "lite", "pageSize": min(max_results, 50),
-            "format": "json", "sort": "RELEVANCE"
+            "query": query, "resultType": "lite", "pageSize": min(max_results, 50),
+            "format": "json"
         }, timeout=10)
         for item in r.json().get("resultList", {}).get("result", []):
             results.append({
@@ -1318,7 +1321,7 @@ def _live_fetch_preprint_server(server: str, source_name: str, query: str, max_r
         date_from = date_to - _dt.timedelta(days=180)
         cursor = 0
         scanned = 0
-        max_scan = 600  # plafond pour rester dans le budget temps
+        max_scan = 300  # plafond pour rester dans le budget temps de la fédération
         while scanned < max_scan and len(results) < max_results:
             url = (f"https://api.biorxiv.org/details/{server}/"
                    f"{date_from.isoformat()}/{date_to.isoformat()}/{cursor}/json")
@@ -7692,9 +7695,17 @@ def _run_user_scenario_populate(
             logger.warning(f"Cochrane global populate {scenario_id}: {_e_coch_global}")
 
         # ── Étape 9 : Récupération des articles déjà en DB (DB-cache) avec déduplication ──
+        # IMPORTANT : on exige que TOUS les termes significatifs de la requête soient
+        # présents (ET logique), pas seulement UN (OU). Avec un OU, des mots courants
+        # comme « demand » ou « forecast » rattachaient des milliers de documents sans
+        # rapport au scénario (corpus surdimensionné, comptages faux).
         db_cached_count = 0
         try:
-            query_terms = [t.strip() for t in re.split(r"\s+", query.lower()) if t.strip()]
+            _STOP = {"the", "a", "an", "of", "in", "on", "for", "and", "or", "to",
+                     "with", "by", "from", "using", "based", "via", "de", "la", "le",
+                     "des", "les", "un", "une", "et", "ou", "dans", "pour"}
+            query_terms = [t for t in re.split(r"\s+", re.sub(r"[^a-z0-9\s]", " ", query.lower()))
+                           if len(t) >= 3 and t not in _STOP]
             if query_terms:
                 like_clauses = []
                 params = {"sid": scenario_id}
@@ -7707,14 +7718,16 @@ def _run_user_scenario_populate(
                             OR LOWER(COALESCE(abstract, '')) LIKE :{key}
                         )"""
                     )
-                any_match_sql = " OR ".join(like_clauses)
-                
-                # Récupérer les articles existants qui matchent la requête dans la base globale
+                # ET : tous les termes doivent matcher → précision élevée.
+                all_match_sql = " AND ".join(like_clauses)
+
+                # Récupérer les articles existants pertinents (cap de sécurité).
                 with engine.connect() as conn:
                     existing_docs = conn.execute(text(f"""
                         SELECT id FROM literature_document
                         WHERE project_context = 'literev'
-                          AND ({any_match_sql})
+                          AND ({all_match_sql})
+                        LIMIT 5000
                     """), params).mappings().all()
                 
                 if existing_docs:
