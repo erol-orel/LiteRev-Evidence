@@ -83,9 +83,11 @@ class InMemoryRateLimiter:
         self.history[ip].append(now)
         return True
 
-# 100 requêtes par minute pour les endpoints généraux, 10 par minute pour les coûteux
-general_limiter = InMemoryRateLimiter(requests_limit=100, window_seconds=60)
-expensive_limiter = InMemoryRateLimiter(requests_limit=10, window_seconds=60)
+# Le frontend est volubile (tableau de bord = nombreux appels, recherche = gros
+# payloads) : limites généreuses pour éviter les faux positifs, plus strictes
+# sur les endpoints coûteux (RAG, recherche, génération de briefs).
+general_limiter = InMemoryRateLimiter(requests_limit=600, window_seconds=60)
+expensive_limiter = InMemoryRateLimiter(requests_limit=30, window_seconds=60)
 
 # Endpoints coûteux à protéger (RAG, search, génération de briefs)
 EXPENSIVE_PATHS = {
@@ -125,9 +127,13 @@ async def rate_limit_middleware(request: Request, call_next):
     limiter = expensive_limiter if is_expensive else general_limiter
     if not limiter.is_allowed(client_ip):
         logger.warning(f"Rate limit exceeded for IP: {client_ip} on path: {path}")
-        raise HTTPException(
+        # IMPORTANT : dans un BaseHTTPMiddleware, lever HTTPException ne passe pas
+        # par les gestionnaires d'exceptions FastAPI → cela remonte en 500.
+        # On retourne donc directement une réponse 429 propre.
+        from starlette.responses import JSONResponse as _JSONResponse
+        return _JSONResponse(
             status_code=429,
-            detail="Too many requests. Please try again later."
+            content={"detail": "Too many requests. Please try again later."},
         )
 
     return await call_next(request)
