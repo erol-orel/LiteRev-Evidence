@@ -3061,6 +3061,7 @@ export default function App() {
   const [projectContext, setProjectContext] = useState<ProjectContext>("literev");
   const [activeTab, setActiveTab] = useState<AppTab>("search");
   const [mode, setMode] = useState<SearchMode>("semantic");
+  const [includeLive, setIncludeLive] = useState(false);
   const [query, setQuery] = useState("");
   const [filters, setFilters] = useState<SearchFilters>({
     projectContext: "literev",
@@ -3243,6 +3244,7 @@ export default function App() {
         mode,
         limit: 10000,
         filters: effectiveFilters,
+        includeLive,
       });
       setResults(data.results);
       setSearchTotalMatching(data.totalMatchingDocs ?? null);
@@ -3769,6 +3771,19 @@ export default function App() {
                     {loading ? "Recherche..." : "Rechercher"}
                   </button>
                 </div>
+
+                <label className="mt-3 flex items-center gap-2 text-xs text-forest-300 cursor-pointer select-none">
+                  <input
+                    type="checkbox"
+                    checked={includeLive}
+                    onChange={(e) => setIncludeLive(e.target.checked)}
+                    className="h-4 w-4 accent-brand-400"
+                  />
+                  <span>
+                    Inclure les sources API en direct (PubMed, OpenAlex, Crossref, EuropePMC, medRxiv, bioRxiv, PROSPERO, Cochrane)
+                    <span className="text-forest-500"> — recherche plus lente, ajoute les articles non encore indexés</span>
+                  </span>
+                </label>
               </section>
 
               {error && (
@@ -4002,11 +4017,18 @@ export default function App() {
                             }`} title={result.chunkType === 'fulltext_section' ? 'Texte intégral indexé' : 'Titre + résumé uniquement'}>
                               {result.chunkType === 'fulltext_section' ? 'Full Text' : 'Abstract'}
                             </span>
-                            {/* Base locale : tout résultat provient de la base indexée */}
-                            <span className="rounded-full px-2 py-1 border text-[11px] bg-emerald-500/10 border-emerald-500/20 text-emerald-300"
-                                  title="Présent dans la base locale LiteRev">
-                              Base locale
-                            </span>
+                            {/* Provenance : base locale indexée vs source API en direct */}
+                            {result.isLive ? (
+                              <span className="rounded-full px-2 py-1 border text-[11px] bg-amber-500/10 border-amber-500/30 text-amber-300"
+                                    title="Récupéré en direct via API externe — pas encore indexé dans la base locale">
+                                API live
+                              </span>
+                            ) : (
+                              <span className="rounded-full px-2 py-1 border text-[11px] bg-emerald-500/10 border-emerald-500/20 text-emerald-300"
+                                    title="Présent dans la base locale LiteRev">
+                                Base locale
+                              </span>
+                            )}
                             {/* Statut d'embedding (vectorisation) */}
                             {result.isEmbedded != null && (
                               <span className={`rounded-full px-2 py-1 border text-[11px] ${

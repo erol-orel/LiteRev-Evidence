@@ -155,6 +155,8 @@ function mapSearchResultFromApi(apiResult: ApiSearchResult): SearchResult {
     lexicalScore: apiResult.lexical_score ?? null,
     hasFulltext: apiResult.has_fulltext ?? null,
     isEmbedded: apiResult.is_embedded ?? null,
+    isLive: (apiResult as { is_live?: boolean }).is_live ?? false,
+    inLocalDb: (apiResult as { in_local_db?: boolean }).in_local_db ?? null,
   };
 }
 
@@ -213,6 +215,7 @@ export async function searchDocuments(
     mode: payload.mode,
     limit: payload.limit,
     filters: mapFiltersToApi(payload.filters),
+    include_live: payload.includeLive ?? false,
   };
 
   const response = await fetch(`${API_BASE_URL}/search`, {
@@ -234,6 +237,8 @@ export async function searchDocuments(
     sourceBreakdown: apiData.source_breakdown,
     fulltextDocs: apiData.fulltext_docs,
     abstractDocs: apiData.abstract_docs,
+    liveSourcesQueried: apiData.live_sources_queried,
+    liveNewCount: apiData.live_new_count,
     scoreType: apiData.score_type,
     scoreLabel: apiData.score_label,
   };

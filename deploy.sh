@@ -73,6 +73,20 @@ echo "[5/7] Build frontend..."
 cd "$FRONTEND_DIR"
 npm ci --silent
 rm -rf "$FRONTEND_DIR/dist"
+# Injection de la clé d'écriture dans le build : authHeaders() côté front lit
+# VITE_API_KEY pour signer les mutations (création/suppression de scénarios,
+# populate, etc.). On la lit depuis l'env du service (source unique de vérité,
+# jamais committée dans le dépôt) afin que les écritures fonctionnent.
+SERVICE_ENV="/etc/literev-api.env"
+if [ -z "${VITE_API_KEY:-}" ] && [ -r "$SERVICE_ENV" ]; then
+  WK=$(grep -E '^WRITE_API_KEY=' "$SERVICE_ENV" | head -1 | cut -d= -f2- | tr -d '"'"'"' \r')
+  if [ -n "$WK" ]; then
+    export VITE_API_KEY="$WK"
+    echo "  VITE_API_KEY injectée depuis $SERVICE_ENV (longueur ${#WK})"
+  else
+    echo "  AVERTISSEMENT : WRITE_API_KEY introuvable dans $SERVICE_ENV — les écritures front échoueront (401)."
+  fi
+fi
 npm run build            # set -e fait échouer le deploy si le build casse
 TITLE=$(grep -o '<title>.*</title>' "$FRONTEND_DIR/dist/index.html")
 BUNDLE=$(ls "$FRONTEND_DIR/dist/assets/"*.js | xargs -n1 basename | head -1)

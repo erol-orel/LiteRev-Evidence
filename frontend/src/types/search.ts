@@ -39,6 +39,8 @@ export interface SearchResult {
   lexicalScore?: number | null;
   hasFulltext?: boolean | null;
   isEmbedded?: boolean | null;
+  isLive?: boolean | null;
+  inLocalDb?: boolean | null;
   [key: string]: unknown;
 }
 
@@ -47,6 +49,7 @@ export interface SearchRequest {
   mode: SearchMode;
   limit: number;
   filters?: SearchFilters;
+  includeLive?: boolean;
 }
 
 export interface SearchResponse {
@@ -56,6 +59,8 @@ export interface SearchResponse {
   sourceBreakdown?: Record<string, number>;
   fulltextDocs?: number;
   abstractDocs?: number;
+  liveSourcesQueried?: string[];
+  liveNewCount?: number;
   scoreType?: "lexical" | "semantic" | "hybrid";
   scoreLabel?: string;
 }
@@ -104,6 +109,7 @@ export interface ApiSearchRequest {
   mode: SearchMode;
   limit: number;
   filters?: ApiSearchFilters;
+  include_live?: boolean;
 }
 
 export interface ApiSearchResponse {
@@ -115,6 +121,8 @@ export interface ApiSearchResponse {
   source_breakdown?: Record<string, number>;
   fulltext_docs?: number;
   abstract_docs?: number;
+  live_sources_queried?: string[];
+  live_new_count?: number;
   score_type?: "lexical" | "semantic" | "hybrid";
   score_label?: string;
 }
