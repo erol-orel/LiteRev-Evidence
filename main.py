@@ -7760,6 +7760,21 @@ def _run_user_scenario_populate(
         except Exception as _e_db:
             logger.warning(f"Erreur lors de la récupération du DB-cache: {_e_db}")
 
+        # ── Règle qualité : un article SANS abstract exploitable n'est pas retenu
+        #    dans le corpus (titre seul = non sélectionnable). ──
+        try:
+            with engine.begin() as conn:
+                _removed = conn.execute(text("""
+                    DELETE FROM article_scenarios a
+                    USING literature_document d
+                    WHERE a.document_id = d.id AND a.scenario_id = :sid
+                      AND (d.abstract IS NULL OR length(TRIM(d.abstract)) < 30)
+                """), {"sid": scenario_id}).rowcount
+            if _removed:
+                logger.info(f"Populate {scenario_id}: {_removed} articles sans abstract retirés du corpus.")
+        except Exception as _e_noabs:
+            logger.warning(f"Suppression articles sans abstract {scenario_id}: {_e_noabs}")
+
         # ── Mettre à jour le compteur dans user_scenarios ────────────────────────
         with engine.begin() as conn:
             conn.execute(text("""
