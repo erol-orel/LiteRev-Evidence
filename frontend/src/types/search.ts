@@ -38,6 +38,7 @@ export interface SearchResult {
   semanticScore?: number | null;
   lexicalScore?: number | null;
   hasFulltext?: boolean | null;
+  isEmbedded?: boolean | null;
   [key: string]: unknown;
 }
 
@@ -95,6 +96,7 @@ export interface ApiSearchResult {
   semantic_score?: number | null;
   lexical_score?: number | null;
   has_fulltext?: boolean | null;
+  is_embedded?: boolean | null;
 }
 
 export interface ApiSearchRequest {

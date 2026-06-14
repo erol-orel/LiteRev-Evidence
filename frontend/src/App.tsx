@@ -3788,11 +3788,13 @@ export default function App() {
                   <div className="flex items-center justify-between">
                     <div className="space-y-1">
                       <p className="text-sm text-forest-400">
-                        {searchTotalMatching != null && searchTotalMatching > uniqueDocCount ? (
+                        {searchTotalMatching != null ? (
                           <>
                             <span className="font-semibold text-white">{searchTotalMatching.toLocaleString()}</span>{" "}
-                            document{searchTotalMatching > 1 ? "s" : ""} pertinent{searchTotalMatching > 1 ? "s" : ""}
-                            <span className="text-white/30"> ({uniqueDocCount} affichés)</span>
+                            document{searchTotalMatching > 1 ? "s" : ""} pertinent{searchTotalMatching > 1 ? "s" : ""} indexé{searchTotalMatching > 1 ? "s" : ""}
+                            {uniqueDocCount !== searchTotalMatching && (
+                              <span className="text-white/30"> ({uniqueDocCount.toLocaleString()} affichés)</span>
+                            )}
                           </>
                         ) : (
                           <>
@@ -3801,7 +3803,7 @@ export default function App() {
                           </>
                         )}
                         {dedupedResults.length > uniqueDocCount && (
-                          <span className="text-white/30"> ({dedupedResults.length} passages)</span>
+                          <span className="text-white/30"> ({dedupedResults.length.toLocaleString()} passages)</span>
                         )}
                         {" "}· {totalPages > 1 ? `page ${page}/${totalPages}` : "1 page"}
                       </p>
@@ -4000,6 +4002,21 @@ export default function App() {
                             }`} title={result.chunkType === 'fulltext_section' ? 'Texte intégral indexé' : 'Titre + résumé uniquement'}>
                               {result.chunkType === 'fulltext_section' ? 'Full Text' : 'Abstract'}
                             </span>
+                            {/* Base locale : tout résultat provient de la base indexée */}
+                            <span className="rounded-full px-2 py-1 border text-[11px] bg-emerald-500/10 border-emerald-500/20 text-emerald-300"
+                                  title="Présent dans la base locale LiteRev">
+                              Base locale
+                            </span>
+                            {/* Statut d'embedding (vectorisation) */}
+                            {result.isEmbedded != null && (
+                              <span className={`rounded-full px-2 py-1 border text-[11px] ${
+                                result.isEmbedded
+                                  ? 'bg-violet-500/10 border-violet-500/20 text-violet-300'
+                                  : 'bg-forest-800/50 border-white/5 text-forest-500'
+                              }`} title={result.isEmbedded ? 'Vectorisé (embedding présent → recherche sémantique)' : 'Non vectorisé (lexical uniquement)'}>
+                                {result.isEmbedded ? 'Vectorisé' : 'Non vectorisé'}
+                              </span>
+                            )}
                           </div>
 
                           <p className="mt-4 text-sm leading-6 text-white/80">
