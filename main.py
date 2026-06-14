@@ -3605,6 +3605,7 @@ def get_scenario_corpus(
     year_to: int | None = None,
     fulltext_only: bool = False,
     source: str | None = None,
+    threshold: float | None = None,
 ) -> dict[str, Any]:
     """
     Retourne le corpus d'articles pour un scénario avec statistiques.
@@ -3613,6 +3614,19 @@ def get_scenario_corpus(
     meta = GESICA_SCENARIO_METADATA.get(scenario_id)
     if not meta:
         raise HTTPException(status_code=404, detail=f"Scénario '{scenario_id}' non trouvé")
+    # Seuil effectif : paramètre > seuil sauvegardé > défaut 0.45.
+    eff_threshold = 0.45
+    try:
+        with engine.connect() as _tc:
+            _ts = _tc.execute(text(
+                "SELECT similarity_threshold FROM scenario_settings WHERE scenario_id = :sid"
+            ), {"sid": scenario_id}).scalar()
+        if _ts is not None:
+            eff_threshold = float(_ts)
+    except Exception:
+        pass
+    if threshold is not None:
+        eff_threshold = float(threshold)
     # Conditions de filtre (sans la condition article_scenarios qui est gérée par JOIN)
     conditions = [
         "(d.is_duplicate IS NULL OR d.is_duplicate = FALSE)",
@@ -3666,14 +3680,14 @@ def get_scenario_corpus(
                 d.citation_count DESC NULLS LAST,
                 d.title ASC
             LIMIT :limit OFFSET :offset
-        """), {**params, 'threshold': 0.45}).mappings().all()
+        """), {**params, 'threshold': eff_threshold}).mappings().all()
         # Comptage au-dessus du seuil
         above_row = conn.execute(text(f"""
             SELECT COUNT(*) AS cnt
             FROM literature_document d
             JOIN article_scenarios ars ON ars.document_id = d.id AND ars.scenario_id = :sid
             WHERE {where} AND COALESCE(ars.similarity_score, 1.0) >= :threshold
-        """), {**{k: v for k, v in params.items() if k not in ('limit', 'offset')}, 'threshold': 0.45}).mappings().first()
+        """), {**{k: v for k, v in params.items() if k not in ('limit', 'offset')}, 'threshold': eff_threshold}).mappings().first()
         above_threshold = int(above_row['cnt'] or 0)
         # Stats par année
         year_dist = conn.execute(text(f"""
@@ -6713,12 +6727,28 @@ def get_user_scenario_corpus(
     year_to: int | None = None,
     fulltext_only: bool = False,
     source: str | None = None,
+    threshold: float | None = None,
 ) -> dict[str, Any]:
     """
     Retourne le corpus d'articles pour un scénario utilisateur.
     Compatible avec fetchScenarioCorpus (même format de réponse).
     """
     row = _get_user_scenario_or_404(scenario_id)
+    # Seuil effectif : paramètre explicite (curseur en direct) > seuil sauvegardé
+    # dans scenario_settings > défaut 0.45. (Auparavant codé en dur à 0.45, donc
+    # le compteur « auto-sélectionnés » ne suivait jamais le curseur.)
+    eff_threshold = 0.45
+    try:
+        with engine.connect() as _tc:
+            _ts = _tc.execute(text(
+                "SELECT similarity_threshold FROM scenario_settings WHERE scenario_id = :sid"
+            ), {"sid": scenario_id}).scalar()
+        if _ts is not None:
+            eff_threshold = float(_ts)
+    except Exception:
+        pass
+    if threshold is not None:
+        eff_threshold = float(threshold)
     # Conditions de filtre (article_scenarios géré par JOIN)
     conditions = [
         "(d.is_duplicate IS NULL OR d.is_duplicate = FALSE)",
@@ -6770,14 +6800,14 @@ def get_user_scenario_corpus(
                 d.citation_count DESC NULLS LAST,
                 d.title ASC
             LIMIT :limit OFFSET :offset
-        """), {**params, 'threshold': 0.45}).mappings().all()
+        """), {**params, 'threshold': eff_threshold}).mappings().all()
         # Comptage au-dessus du seuil
         above_row = conn.execute(text(f"""
             SELECT COUNT(*) AS cnt
             FROM literature_document d
             JOIN article_scenarios ars ON ars.document_id = d.id AND ars.scenario_id = :sid
             WHERE {where} AND COALESCE(ars.similarity_score, 1.0) >= :threshold
-        """), {**{k: v for k, v in params.items() if k not in ('limit', 'offset')}, 'threshold': 0.45}).mappings().first()
+        """), {**{k: v for k, v in params.items() if k not in ('limit', 'offset')}, 'threshold': eff_threshold}).mappings().first()
         above_threshold = int(above_row['cnt'] or 0)
         year_dist = conn.execute(text(f"""
             SELECT d.year, COUNT(*) AS cnt
@@ -6800,6 +6830,7 @@ def get_user_scenario_corpus(
         "scenario_title": row["name"],
         "total": total,
         "above_threshold": above_threshold,
+        "threshold": eff_threshold,
         "offset": offset,
         "limit": limit,
         "articles": [dict(a) for a in articles],
