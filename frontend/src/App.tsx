@@ -3096,6 +3096,8 @@ export default function App() {
   const pipelinePollRef = useRef<Record<string, ReturnType<typeof setInterval>>>({});
   const [searchSourceBreakdown, setSearchSourceBreakdown] = useState<Record<string, number> | null>(null);
   const [searchTotalMatching, setSearchTotalMatching] = useState<number | null>(null);
+  const [searchFulltextDocs, setSearchFulltextDocs] = useState<number | null>(null);
+  const [searchAbstractDocs, setSearchAbstractDocs] = useState<number | null>(null);
   const [searchScoreType, setSearchScoreType] = useState<string | null>(null);
   const [searchScoreLabel, setSearchScoreLabel] = useState<string | null>(null);
   const [folders, setFolders] = useState<ScenarioFolder[]>([]);
@@ -3245,6 +3247,8 @@ export default function App() {
       setResults(data.results);
       setSearchTotalMatching(data.totalMatchingDocs ?? null);
       setSearchSourceBreakdown(data.sourceBreakdown ?? null);
+      setSearchFulltextDocs(data.fulltextDocs ?? null);
+      setSearchAbstractDocs(data.abstractDocs ?? null);
       setSearchScoreType(data.scoreType ?? null);
       setSearchScoreLabel(data.scoreLabel ?? null);
       const first = data.results[0] ?? null;
@@ -3673,8 +3677,8 @@ export default function App() {
                               const v = Number(e.target.value);
                               if (v <= yearRange[1]) setYearRange([v, yearRange[1]]);
                             }}
-                            className="absolute w-full h-1.5 appearance-none bg-transparent cursor-pointer accent-gold-400"
-                            style={{ zIndex: yearRange[0] > maxYear - 10 ? 5 : 3 }}
+                            className="range-dual absolute w-full h-1.5 bg-transparent cursor-pointer"
+                            style={{ zIndex: 4 }}
                           />
                           <input
                             type="range"
@@ -3684,8 +3688,8 @@ export default function App() {
                               const v = Number(e.target.value);
                               if (v >= yearRange[0]) setYearRange([yearRange[0], v]);
                             }}
-                            className="absolute w-full h-1.5 appearance-none bg-transparent cursor-pointer accent-gold-400"
-                            style={{ zIndex: 4 }}
+                            className="range-dual absolute w-full h-1.5 bg-transparent cursor-pointer"
+                            style={{ zIndex: 5 }}
                           />
                         </div>
                       );
@@ -3717,6 +3721,8 @@ export default function App() {
                               setPage(1);
                               setSearchSourceBreakdown(null);
                               setSearchTotalMatching(null);
+                              setSearchFulltextDocs(null);
+                              setSearchAbstractDocs(null);
                               setSelectedResult(null);
                               setSelectedDocument(null);
                             }
@@ -3806,6 +3812,16 @@ export default function App() {
                               {src}: <span className="font-semibold text-white/70">{count}</span>
                             </span>
                           ))}
+                        </div>
+                      )}
+                      {(searchFulltextDocs != null || searchAbstractDocs != null) && (
+                        <div className="flex flex-wrap gap-1.5">
+                          <span className="rounded-lg border border-brand-500/20 bg-brand-500/10 px-2 py-0.5 text-xs text-brand-300">
+                            Texte intégral : <span className="font-semibold">{(searchFulltextDocs ?? 0).toLocaleString()}</span>
+                          </span>
+                          <span className="rounded-lg border border-white/10 bg-white/5 px-2 py-0.5 text-xs text-white/50">
+                            Résumé seul : <span className="font-semibold text-white/70">{(searchAbstractDocs ?? 0).toLocaleString()}</span>
+                          </span>
                         </div>
                       )}
                     </div>
@@ -3901,32 +3917,6 @@ export default function App() {
 
                   <div className="grid gap-6 2xl:grid-cols-[minmax(0,1fr)_380px]">
                     <div className="space-y-4">
-                      {hasResults && (
-                        <div className="flex flex-wrap items-center gap-2 text-xs text-forest-400 mb-2">
-                          <span className="text-white/60">Trier par :</span>
-                          {([
-                            ['score', 'Score hybride'],
-                            ['semantic', 'Sémantique'],
-                            ['lexical', 'Lexical'],
-                            ['year_desc', 'Année (récent)'],
-                            ['year_asc', 'Année (ancien)'],
-                            ['fulltext_first', "Texte intégral d'abord"],
-                          ] as [typeof sortBy, string][]).map(([val, label]) => (
-                            <button
-                              key={val}
-                              type="button"
-                              onClick={() => setSortBy(val)}
-                              className={`rounded-full border px-3 py-1 transition ${
-                                sortBy === val
-                                  ? 'border-brand-400 bg-brand-500/20 text-brand-300'
-                                  : 'border-white/10 bg-white/5 hover:border-white/20'
-                              }`}
-                            >
-                              {label}
-                            </button>
-                          ))}
-                        </div>
-                      )}
                       {pagedResults.map((result) => (
                         <article
                           key={`${result.documentId}-${result.chunkIndex}-${result.content}`}
@@ -3970,23 +3960,17 @@ export default function App() {
                                searchScoreType === 'semantic' ? '◎' :
                                '≡'} {(result.score ?? 0).toFixed(3)}
                             </span>
-                            {/* Semantic score chip (hybrid or semantic mode) */}
-                            {searchScoreType !== 'lexical' && result.semanticScore != null && (
-                              <span className="rounded-full bg-blue-500/10 px-2 py-1 text-blue-300 border border-blue-500/20" title="Semantic score">
-                                S: {(result.semanticScore).toFixed(2)}
+                            {/* Décomposition (hybride uniquement : sinon redondant avec le score global) */}
+                            {searchScoreType === 'hybrid' && result.semanticScore != null && (
+                              <span className="rounded-full bg-blue-500/10 px-2 py-1 text-blue-300 border border-blue-500/20" title="Composante sémantique (cosinus)">
+                                Sém. {(result.semanticScore).toFixed(2)}
                               </span>
                             )}
-                            {/* Lexical score chip (hybrid or lexical mode) */}
-                            {searchScoreType !== 'semantic' && result.lexicalScore != null && (
-                              <span className="rounded-full bg-amber-500/10 px-2 py-1 text-amber-300 border border-amber-500/20" title="Lexical score">
-                                L: {(result.lexicalScore).toFixed(2)}
+                            {searchScoreType === 'hybrid' && result.lexicalScore != null && (
+                              <span className="rounded-full bg-amber-500/10 px-2 py-1 text-amber-300 border border-amber-500/20" title="Composante lexicale (BM25)">
+                                Lex. {(result.lexicalScore).toFixed(2)}
                               </span>
                             )}
-                            {/* Fulltext dot */}
-                            <span title={result.hasFulltext ? 'Texte intégral disponible' : 'Résumé uniquement'}
-                                  className={`rounded-full px-1.5 py-1 ${result.hasFulltext ? 'text-emerald-400' : 'text-forest-600'}`}>
-                              {result.hasFulltext ? '●' : '○'}
-                            </span>
                             {result.source && (
                               <span className="rounded-full bg-white/5 px-2 py-1">
                                 {result.source}

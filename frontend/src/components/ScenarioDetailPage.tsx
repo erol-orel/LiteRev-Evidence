@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useRef } from "react";
+import React, { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import {
   ArrowLeft, Brain,
   ChevronDown, ChevronUp, Database, ExternalLink, FileText,
@@ -137,6 +137,19 @@ function QueriesSection({ detail, scenarioId }: { detail: ScenarioDetail; scenar
   const [liveData, setLiveData] = useState<LiveSearchResponse | null>(null);
   const [liveLoading, setLiveLoading] = useState(false);
   const [liveError, setLiveError] = useState<string | null>(null);
+  const [liveSort, setLiveSort] = useState<"hybrid" | "semantic" | "lexical" | "year_desc">("hybrid");
+
+  const sortedLiveResults = useMemo(() => {
+    if (!liveData) return [];
+    const arr = [...liveData.results];
+    arr.sort((a, b) => {
+      if (liveSort === "semantic") return (b.semantic_score ?? 0) - (a.semantic_score ?? 0);
+      if (liveSort === "lexical") return (b.lexical_score ?? 0) - (a.lexical_score ?? 0);
+      if (liveSort === "year_desc") return (b.year ?? 0) - (a.year ?? 0);
+      return (b.hybrid_score ?? 0) - (a.hybrid_score ?? 0);
+    });
+    return arr;
+  }, [liveData, liveSort]);
 
   function loadStrategy() {
     if (!isUserScenario(scenarioId)) return;
@@ -343,17 +356,59 @@ function QueriesSection({ detail, scenarioId }: { detail: ScenarioDetail; scenar
                 )}
                 <span>{liveData.sources_queried.join(", ")}</span>
               </div>
+              <div className="flex flex-wrap items-center gap-1.5 text-[11px]">
+                <span className="text-forest-500">Trier :</span>
+                {([
+                  ["hybrid", "Score hybride"],
+                  ["semantic", "Sémantique"],
+                  ["lexical", "Lexical"],
+                  ["year_desc", "Année"],
+                ] as [typeof liveSort, string][]).map(([val, label]) => (
+                  <button
+                    key={val}
+                    type="button"
+                    onClick={() => setLiveSort(val)}
+                    className={`rounded-full border px-2 py-0.5 transition ${
+                      liveSort === val
+                        ? "border-brand-400/60 bg-brand-500/20 text-brand-300"
+                        : "border-white/10 bg-white/5 text-forest-400 hover:border-white/20 hover:text-white"
+                    }`}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
               <div className="space-y-2 max-h-96 overflow-y-auto">
-                {liveData.results.map((r: LiveSearchResult, i: number) => (
+                {sortedLiveResults.map((r: LiveSearchResult, i: number) => (
                   <div key={i} className={`rounded-xl border p-3 ${r.in_local_db ? 'border-white/10 bg-white/3' : 'border-amber-500/30 bg-amber-500/5'}`}>
                     <div className="flex items-start justify-between gap-2">
                       <div className="flex-1 min-w-0">
                         <p className="text-xs font-medium text-white leading-5 truncate">{r.title || "(Sans titre)"}</p>
-                        <div className="flex flex-wrap gap-1.5 mt-1">
+                        <div className="flex flex-wrap gap-1.5 mt-1 items-center">
+                          {r.hybrid_score != null && (
+                            <span className="text-[10px] rounded-full bg-violet-500/20 px-1.5 py-0.5 text-violet-300" title="Score hybride (0.7·sémantique + 0.3·lexical)">
+                              ⊕ {r.hybrid_score.toFixed(2)}
+                            </span>
+                          )}
+                          {r.semantic_score != null && (
+                            <span className="text-[10px] rounded-full bg-blue-500/10 px-1.5 py-0.5 text-blue-300 border border-blue-500/20" title="Composante sémantique">
+                              Sém. {r.semantic_score.toFixed(2)}
+                            </span>
+                          )}
+                          {r.lexical_score != null && (
+                            <span className="text-[10px] rounded-full bg-amber-500/10 px-1.5 py-0.5 text-amber-300 border border-amber-500/20" title="Composante lexicale">
+                              Lex. {r.lexical_score.toFixed(2)}
+                            </span>
+                          )}
                           <span className="text-[10px] text-forest-400">{r.source_name}</span>
+                          {r.also_in_sources && r.also_in_sources.length > 0 && (
+                            <span className="text-[10px] text-forest-500">+{r.also_in_sources.join(", ")}</span>
+                          )}
                           {r.year && <span className="text-[10px] text-forest-400">{r.year}</span>}
                           {r.journal && <span className="text-[10px] text-forest-500 truncate max-w-[120px]">{r.journal}</span>}
-                          {!r.in_local_db && <span className="text-[10px] rounded-full border border-amber-500/40 bg-amber-500/10 px-1.5 py-0.5 text-amber-300">Non indexé</span>}
+                          {r.in_local_db
+                            ? <span className="text-[10px] rounded-full border border-emerald-500/40 bg-emerald-500/10 px-1.5 py-0.5 text-emerald-300">Déjà indexé</span>
+                            : <span className="text-[10px] rounded-full border border-amber-500/40 bg-amber-500/10 px-1.5 py-0.5 text-amber-300">Non indexé</span>}
                         </div>
                       </div>
                       {r.url && (

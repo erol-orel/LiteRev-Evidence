@@ -41,3 +41,33 @@ body {
 
 ::selection { background: rgba(227, 172, 59, 0.30); color: #fff; }
 :focus-visible { outline: 2px solid var(--color-gold); outline-offset: 2px; }
+
+/* Dual-range slider (year filter): track ignores pointer events so both
+   thumbs stay grabbable across the full width; only thumbs capture clicks. */
+.range-dual {
+  -webkit-appearance: none;
+  appearance: none;
+  pointer-events: none;
+  background: transparent;
+}
+.range-dual::-webkit-slider-runnable-track { background: transparent; height: 6px; }
+.range-dual::-moz-range-track { background: transparent; height: 6px; }
+.range-dual::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  pointer-events: auto;
+  height: 16px; width: 16px;
+  border-radius: 9999px;
+  background: var(--color-gold);
+  border: 2px solid #0a1410;
+  cursor: pointer;
+  margin-top: -5px;
+}
+.range-dual::-moz-range-thumb {
+  pointer-events: auto;
+  height: 16px; width: 16px;
+  border-radius: 9999px;
+  background: var(--color-gold);
+  border: 2px solid #0a1410;
+  cursor: pointer;
+}
