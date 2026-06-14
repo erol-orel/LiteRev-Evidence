@@ -803,6 +803,7 @@ def search(payload: SearchIn) -> dict[str, Any]:
                     d.has_fulltext,
                     (1 - (c.embedding <=> CAST(:query_embedding AS vector))) AS semantic_score,
                     0.0 AS lexical_score,
+                    TRUE AS is_embedded,
                     (1 - (c.embedding <=> CAST(:query_embedding AS vector))) AS score
                 FROM document_chunk c
                 JOIN literature_document d ON d.id = c.document_id
@@ -830,6 +831,7 @@ def search(payload: SearchIn) -> dict[str, Any]:
                     d.has_fulltext,
                     0.0 AS semantic_score,
                     0.0 AS lexical_score,
+                    FALSE AS is_embedded,
                     0.0 AS score
                 FROM document_chunk c
                 JOIN literature_document d ON d.id = c.document_id
@@ -863,6 +865,7 @@ def search(payload: SearchIn) -> dict[str, Any]:
                 d.has_fulltext,
                 0.0 AS semantic_score,
                 LEAST(1.0, ({score_sql})::float / 6.0) AS lexical_score,
+                (c.embedding IS NOT NULL) AS is_embedded,
                 LEAST(1.0, ({score_sql})::float / 6.0) AS score
             FROM document_chunk c
             JOIN literature_document d ON d.id = c.document_id
@@ -965,6 +968,7 @@ def search(payload: SearchIn) -> dict[str, Any]:
             "semantic_score": float(row["semantic_score"] or 0.0),
             "lexical_score": float(row["lexical_score"] or 0.0),
             "has_fulltext": bool(row["has_fulltext"]) if row["has_fulltext"] is not None else False,
+            "is_embedded": bool(row["is_embedded"]) if row.get("is_embedded") is not None else None,
             "source": row["source"],
             "year": row["year"],
             "url": row["url"],

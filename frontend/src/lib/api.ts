@@ -154,6 +154,7 @@ function mapSearchResultFromApi(apiResult: ApiSearchResult): SearchResult {
     semanticScore: apiResult.semantic_score ?? null,
     lexicalScore: apiResult.lexical_score ?? null,
     hasFulltext: apiResult.has_fulltext ?? null,
+    isEmbedded: apiResult.is_embedded ?? null,
   };
 }
 
