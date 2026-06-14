@@ -1008,7 +1008,7 @@ def search(payload: SearchIn) -> dict[str, Any]:
     live_new_count = 0
     if payload.include_live:
         try:
-            live_results, live_sources_queried = _federated_live_search(
+            live_results, live_sources_queried, _live_raw = _federated_live_search(
                 query, max_per_source=payload.live_max_per_source
             )
             existing_dois = {
@@ -1092,30 +1092,82 @@ def search(payload: SearchIn) -> dict[str, Any]:
 # Live federated search
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _plain_keywords(query: str, max_words: int = 8) -> str:
+    """Convertit une requête booléenne en mots-clés simples pour les API qui
+    n'acceptent PAS la syntaxe booléenne (OpenAlex `search` renvoie 400, les
+    serveurs de prépublications n'ont pas de recherche plein-texte). On retire
+    les opérateurs AND/OR/NOT, parenthèses, guillemets et jokers, en gardant
+    les termes significatifs uniques."""
+    import re as _re
+    raw = _re.sub(r'["()\[\]*]', " ", query or "")
+    words = []
+    for w in _re.split(r"\s+", raw):
+        wl = w.strip().lower()
+        if not wl or wl in ("and", "or", "not"):
+            continue
+        if wl not in words:
+            words.append(wl)
+        if len(words) >= max_words:
+            break
+    return " ".join(words)
+
+
+# NCBI eutils sans clé API = 3 requêtes/seconde par IP. Les 3 fetchers basés
+# sur PubMed (PubMed, PROSPERO, Cochrane) s'exécutent en parallèle et se
+# privaient mutuellement (→ résultats vides). On sérialise/espace les appels
+# eutils via un verrou global et on réessaie en cas de 429.
+import threading as _threading_ncbi
+_NCBI_LOCK = _threading_ncbi.Lock()
+_NCBI_LAST = [0.0]
+_NCBI_MIN_INTERVAL = 0.4  # ~2.5 req/s, sous la limite de 3/s
+
+
+def _ncbi_get(url: str, params: dict, timeout: int = 12):
+    """GET eutils throttlé (verrou global) avec un petit retry sur 429/erreur."""
+    import requests as _req
+    import time as _time
+    key = os.getenv("NCBI_API_KEY")
+    if key:
+        params = {**params, "api_key": key}
+    for attempt in range(3):
+        with _NCBI_LOCK:
+            wait = _NCBI_MIN_INTERVAL - (_time.time() - _NCBI_LAST[0])
+            if wait > 0:
+                _time.sleep(wait)
+            try:
+                r = _req.get(url, params=params, timeout=timeout)
+            finally:
+                _NCBI_LAST[0] = _time.time()
+        if r.status_code == 429:
+            _time.sleep(0.6 * (attempt + 1))
+            continue
+        return r
+    return r
+
+
 def _live_fetch_pubmed(query: str, max_results: int) -> list[dict]:
     """Fetch from PubMed eSearch+eSummary, return list of result dicts."""
-    import requests as _req
     results = []
     try:
         base = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
-        r = _req.get(f"{base}/esearch.fcgi", params={
+        r = _ncbi_get(f"{base}/esearch.fcgi", {
             "db": "pubmed", "term": query, "retmax": max_results,
             "retmode": "json", "tool": "literev", "email": "api@literev.app"
-        }, timeout=10)
+        })
         ids = r.json().get("esearchresult", {}).get("idlist", [])
         if not ids:
             return []
-        r2 = _req.get(f"{base}/esummary.fcgi", params={
+        r2 = _ncbi_get(f"{base}/esummary.fcgi", {
             "db": "pubmed", "id": ",".join(ids), "retmode": "json",
             "tool": "literev", "email": "api@literev.app"
-        }, timeout=10)
-        uids = r2.json().get("result", {}).get("uids", [])
-        for uid in uids:
-            item = r2.json()["result"].get(uid, {})
+        })
+        res2 = r2.json().get("result", {})
+        for uid in res2.get("uids", []):
+            item = res2.get(uid, {})
             results.append({
                 "title": item.get("title", ""),
                 "abstract": None,
-                "doi": next((a["value"] for a in item.get("articleids", []) if a["idtype"] == "doi"), None),
+                "doi": next((a["value"] for a in item.get("articleids", []) if a.get("idtype") == "doi"), None),
                 "year": int(item.get("pubdate", "")[:4]) if item.get("pubdate", "")[:4].isdigit() else None,
                 "authors": [a.get("name", "") for a in item.get("authors", [])],
                 "journal": item.get("source", None),
@@ -1132,8 +1184,10 @@ def _live_fetch_openalex(query: str, max_results: int) -> list[dict]:
     import requests as _req
     results = []
     try:
+        # OpenAlex `search` n'accepte pas la syntaxe booléenne (renvoie HTTP 400)
+        # → on lui passe des mots-clés simples.
         r = _req.get("https://api.openalex.org/works", params={
-            "search": query, "per-page": min(max_results, 50),
+            "search": _plain_keywords(query), "per-page": min(max_results, 50),
             "select": "id,title,abstract_inverted_index,doi,publication_year,authorships,primary_location,open_access"
         }, headers={"User-Agent": "LiteRev/1.0 (mailto:api@literev.app)"}, timeout=10)
         for item in r.json().get("results", []):
@@ -1213,21 +1267,20 @@ def _live_fetch_europepmc(query: str, max_results: int) -> list[dict]:
 def _live_fetch_pubmed_term(term: str, source_name: str, id_prefix: str, max_results: int) -> list[dict]:
     """Helper PubMed générique (esearch+esummary) avec un terme/filtre arbitraire.
     Sert de proxy pour les sources sans API libre (PROSPERO, Cochrane)."""
-    import requests as _req
     results = []
     try:
         base = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
-        r = _req.get(f"{base}/esearch.fcgi", params={
+        r = _ncbi_get(f"{base}/esearch.fcgi", {
             "db": "pubmed", "term": term, "retmax": max_results,
             "retmode": "json", "tool": "literev", "email": "api@literev.app"
-        }, timeout=10)
+        })
         ids = r.json().get("esearchresult", {}).get("idlist", [])
         if not ids:
             return []
-        r2 = _req.get(f"{base}/esummary.fcgi", params={
+        r2 = _ncbi_get(f"{base}/esummary.fcgi", {
             "db": "pubmed", "id": ",".join(ids), "retmode": "json",
             "tool": "literev", "email": "api@literev.app"
-        }, timeout=10)
+        })
         res = r2.json().get("result", {})
         for uid in res.get("uids", []):
             item = res.get(uid, {})
@@ -1254,10 +1307,13 @@ def _live_fetch_preprint_server(server: str, source_name: str, query: str, max_r
     import datetime as _dt
     results = []
     try:
-        # Mots significatifs de la requête (>3 lettres) pour un filtrage simple
-        import re as _re
-        words = [w for w in _re.findall(r"[a-zA-Z]{4,}", (query or "").lower())]
-        words = list(dict.fromkeys(words))  # dédoublonne en gardant l'ordre
+        # Mots-clés significatifs (booléen nettoyé). Les 2 premiers sont les
+        # termes "primaires" (concept central) : on EXIGE qu'au moins un soit
+        # présent, plus un nombre minimal de correspondances totales — sinon le
+        # filtre laisse passer n'importe quel preprint contenant 2 mots courants.
+        words = _plain_keywords(query, max_words=12).split()
+        primary = words[:2]
+        min_hits = min(3, len(words)) if len(words) >= 3 else 1
         date_to = _dt.date.today()
         date_from = date_to - _dt.timedelta(days=180)
         cursor = 0
@@ -1276,11 +1332,10 @@ def _live_fetch_preprint_server(server: str, source_name: str, query: str, max_r
             for item in coll:
                 scanned += 1
                 hay = (item.get("title", "") + " " + item.get("abstract", "")).lower()
-                # garde si au moins 2 mots significatifs correspondent (ou 1 si requête courte)
                 if words:
                     hits = sum(1 for w in words if w in hay)
-                    threshold = 1 if len(words) <= 2 else 2
-                    if hits < threshold:
+                    has_primary = any(p in hay for p in primary) if primary else True
+                    if not (has_primary and hits >= min_hits):
                         continue
                 yr = None
                 d = item.get("date", "")
@@ -1336,13 +1391,14 @@ def _federated_live_search(
     max_per_source: int = 50,
     pubmed_query: str | None = None,
     general_query: str | None = None,
-) -> tuple[list[dict], list[str]]:
+) -> tuple[list[dict], list[str], dict[str, int]]:
     """Interroge les 8 sources externes en parallèle, déduplique (par DOI puis
     titre normalisé), marque in_local_db, et score chaque résultat
     (sémantique cosinus + lexical + hybride). Réutilisé par /search (fédéré)
     et par la recherche live des scénarios.
 
-    Retourne (results triés par hybrid_score desc, sources_queried)."""
+    Retourne (results triés par hybrid_score desc, sources_queried,
+    raw_counts par source avant déduplication)."""
     import concurrent.futures
     pubmed_query = pubmed_query or query
     general_query = general_query or query
@@ -1360,14 +1416,17 @@ def _federated_live_search(
 
     all_results: list[dict] = []
     sources_queried: list[str] = []
+    raw_counts: dict[str, int] = {name: 0 for name, _, _ in source_fns}
     with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
         futures = {executor.submit(fn, q, max_per_source): name for name, fn, q in source_fns}
         try:
-            for future in concurrent.futures.as_completed(futures, timeout=15):
+            for future in concurrent.futures.as_completed(futures, timeout=30):
                 name = futures[future]
                 sources_queried.append(name)
                 try:
-                    all_results.extend(future.result())
+                    items = future.result()
+                    raw_counts[name] = len(items)
+                    all_results.extend(items)
                 except Exception as _fe:
                     logger.warning(f"federated source {name} error: {_fe}")
         except concurrent.futures.TimeoutError:
@@ -1459,7 +1518,7 @@ def _federated_live_search(
         r["hybrid_score"] = round(0.7 * sem + 0.3 * lex, 4)
 
     deduped_list.sort(key=lambda r: r.get("hybrid_score", 0.0), reverse=True)
-    return deduped_list, sources_queried
+    return deduped_list, sources_queried, raw_counts
 
 
 @app.post("/user-scenarios/{scenario_id}/search/live")
@@ -1475,7 +1534,7 @@ def search_live(
     pubmed_query = strategy.get("pubmed", query) if isinstance(strategy, dict) else query
     general_query = strategy.get("general", query) if isinstance(strategy, dict) else query
 
-    all_results, sources_queried = _federated_live_search(
+    all_results, sources_queried, raw_counts = _federated_live_search(
         query, max_per_source, pubmed_query=pubmed_query, general_query=general_query
     )
     new_count = sum(1 for r in all_results if not r["in_local_db"])
@@ -1499,6 +1558,7 @@ def search_live(
         "total": len(all_results),
         "new_count": new_count,
         "sources_queried": sources_queried,
+        "source_raw_counts": raw_counts,
         "ingesting_background": ingesting_background,
     }
 
