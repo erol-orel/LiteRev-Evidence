@@ -7775,6 +7775,13 @@ def _run_user_scenario_populate(
                 WHERE id = :sid
             """), {"sid": scenario_id})
 
+        # ── Scores réels : remplace le 1.0 par défaut par la similarité cosinus
+        #    sémantique requête↔article (sinon tous les scores valent 1.0). ──
+        try:
+            _run_semantic_rerank_inline(scenario_id, query)
+        except Exception as _e_rr:
+            logger.warning(f"rerank post-populate {scenario_id}: {_e_rr}")
+
         if _pipeline_callback is None:
             _sources_final = _user_scenario_populate_jobs.get(scenario_id, {}).get("sources", {})
             _src_parts = [f"{src}: {cnt}" for src, cnt in _sources_final.items() if cnt > 0]
