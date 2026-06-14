@@ -211,6 +211,8 @@ class SearchIn(BaseModel):
     limit: int = Field(default=200, ge=1, le=10000)  # Cap à 10000 (le frontend récupère tout le corpus classé pour pagination côté client)
     offset: int = Field(default=0, ge=0)
     project_context: str | None = None  # alias pour filtres projet
+    include_live: bool = Field(default=False)  # fédère aussi les 8 sources API en direct
+    live_max_per_source: int = Field(default=25, ge=1, le=100)
 
     def resolved_query(self) -> str:
         q = (self.query_text or self.querytext or self.query or "").strip()
@@ -993,6 +995,64 @@ def search(payload: SearchIn) -> dict[str, Any]:
         )
     )
 
+    # ── Fédération live des 8 sources API (optionnelle) ───────────────────────
+    # Ajoute aux résultats locaux les articles trouvés en direct via les API
+    # externes qui ne sont PAS déjà dans la base locale (déduplication par DOI).
+    live_sources_queried: list[str] = []
+    live_new_count = 0
+    if payload.include_live:
+        try:
+            live_results, live_sources_queried = _federated_live_search(
+                query, max_per_source=payload.live_max_per_source
+            )
+            existing_dois = {
+                (r.get("external_id") or "").lower()
+                for r in results if r.get("external_id")
+            }
+            neg_idx = -1
+            for lr in live_results:
+                if lr.get("in_local_db"):
+                    continue  # déjà présent dans la base locale → évite les doublons
+                doi = (lr.get("doi") or "").lower()
+                if doi and doi in existing_dois:
+                    continue
+                src = lr.get("source_name") or "API"
+                results.append({
+                    "id": f"live-{neg_idx}",
+                    "document_id": neg_idx,
+                    "chunk_id": None,
+                    "chunk_index": 0,
+                    "title": lr.get("title", ""),
+                    "abstract": lr.get("abstract") or "",
+                    "content": lr.get("abstract") or lr.get("title", ""),
+                    "highlight": (lr.get("abstract") or lr.get("title", ""))[:600],
+                    "score": float(lr.get("hybrid_score") or 0.0),
+                    "semantic_score": float(lr.get("semantic_score") or 0.0),
+                    "lexical_score": float(lr.get("lexical_score") or 0.0),
+                    "has_fulltext": False,
+                    "is_embedded": False,
+                    "is_live": True,
+                    "in_local_db": False,
+                    "also_in_sources": lr.get("also_in_sources") or [],
+                    "source": src,
+                    "year": lr.get("year"),
+                    "url": lr.get("url"),
+                    "external_id": lr.get("doi"),
+                    "project_context": "literev",
+                    "source_type": None,
+                    "disease_or_condition": None,
+                    "scenario_type": None,
+                    "geographic_scope": None,
+                    "evidence_category": None,
+                    "chunk_type": "live_api",
+                })
+                neg_idx -= 1
+                live_new_count += 1
+                src_label = src + " (live)"
+                sorted_breakdown[src_label] = sorted_breakdown.get(src_label, 0) + 1
+        except Exception as _le:
+            logger.warning(f"search include_live error: {_le}")
+
     # Déterminer le type de score réellement utilisé
     if use_vector and payload.mode == "hybrid":
         score_type = "hybrid"
@@ -1016,6 +1076,8 @@ def search(payload: SearchIn) -> dict[str, Any]:
         "source_breakdown": sorted_breakdown,
         "fulltext_docs": fulltext_docs,
         "abstract_docs": abstract_docs,
+        "live_sources_queried": live_sources_queried,
+        "live_new_count": live_new_count,
         "score_type": score_type,
         "score_label": score_label,
     }
@@ -1263,21 +1325,21 @@ def _live_fetch_cochrane(query: str, max_results: int) -> list[dict]:
     return _live_fetch_pubmed_term(term, "Cochrane", "cochrane", max_results)
 
 
-@app.post("/user-scenarios/{scenario_id}/search/live")
-def search_live(
-    scenario_id: str,
+def _federated_live_search(
+    query: str,
     max_per_source: int = 50,
-    _: None = Depends(require_api_key),
-) -> dict[str, Any]:
-    """Live federated search across all 8 external sources in parallel."""
-    import concurrent.futures
+    pubmed_query: str | None = None,
+    general_query: str | None = None,
+) -> tuple[list[dict], list[str]]:
+    """Interroge les 8 sources externes en parallèle, déduplique (par DOI puis
+    titre normalisé), marque in_local_db, et score chaque résultat
+    (sémantique cosinus + lexical + hybride). Réutilisé par /search (fédéré)
+    et par la recherche live des scénarios.
 
-    # Get scenario
-    row = _get_user_scenario_or_404(scenario_id)
-    query = row["query"]
-    strategy = row.get("search_strategy") or {}
-    pubmed_query = strategy.get("pubmed", query) if isinstance(strategy, dict) else query
-    general_query = strategy.get("general", query) if isinstance(strategy, dict) else query
+    Retourne (results triés par hybrid_score desc, sources_queried)."""
+    import concurrent.futures
+    pubmed_query = pubmed_query or query
+    general_query = general_query or query
 
     source_fns = [
         ("PubMed", _live_fetch_pubmed, pubmed_query),
@@ -1292,19 +1354,20 @@ def search_live(
 
     all_results: list[dict] = []
     sources_queried: list[str] = []
-
     with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
         futures = {executor.submit(fn, q, max_per_source): name for name, fn, q in source_fns}
-        for future in concurrent.futures.as_completed(futures, timeout=12):
-            name = futures[future]
-            sources_queried.append(name)
-            try:
-                items = future.result()
-                all_results.extend(items)
-            except Exception as _fe:
-                logger.warning(f"search_live source {name} error: {_fe}")
+        try:
+            for future in concurrent.futures.as_completed(futures, timeout=15):
+                name = futures[future]
+                sources_queried.append(name)
+                try:
+                    all_results.extend(future.result())
+                except Exception as _fe:
+                    logger.warning(f"federated source {name} error: {_fe}")
+        except concurrent.futures.TimeoutError:
+            logger.warning("federated search: certaines sources ont dépassé le délai")
 
-    # Check which results are already in local DB
+    # Marquage in_local_db (par DOI)
     dois = [r["doi"] for r in all_results if r.get("doi")]
     in_db_dois: set[str] = set()
     if dois:
@@ -1315,12 +1378,11 @@ def search_live(
                 ), {"dois": dois}).fetchall()
                 in_db_dois = {r[0] for r in rows_db}
         except Exception as _dbe:
-            logger.warning(f"search_live DB check error: {_dbe}")
-
+            logger.warning(f"federated DB check error: {_dbe}")
     for r in all_results:
         r["in_local_db"] = bool(r.get("doi") and r["doi"] in in_db_dois)
 
-    # ── Déduplication par DOI (sinon par titre normalisé) avec suivi des sources ──
+    # Déduplication par DOI (sinon titre normalisé), suivi des sources
     import re as _re2
     def _norm_title(t: str) -> str:
         return _re2.sub(r"[^a-z0-9]+", " ", (t or "").lower()).strip()
@@ -1334,7 +1396,6 @@ def search_live(
             srcs = existing.setdefault("also_in_sources", [])
             if r.get("source_name") and r["source_name"] not in srcs and r["source_name"] != existing.get("source_name"):
                 srcs.append(r["source_name"])
-            # complète les champs manquants
             for f in ("abstract", "year", "url", "doi"):
                 if not existing.get(f) and r.get(f):
                     existing[f] = r[f]
@@ -1342,23 +1403,22 @@ def search_live(
         else:
             r.setdefault("also_in_sources", [])
             deduped[key] = r
-    all_results = list(deduped.values())
+    deduped_list = list(deduped.values())
 
-    # ── Scoring sémantique + lexical + hybride ──
+    # Scoring sémantique + lexical + hybride
     def _lexical_overlap(q_words: set[str], text_blob: str) -> float:
         if not q_words:
             return 0.0
         hay = set(_re2.findall(r"[a-z0-9]{3,}", (text_blob or "").lower()))
         if not hay:
             return 0.0
-        inter = len(q_words & hay)
-        return min(1.0, inter / max(1, len(q_words)))
+        return min(1.0, len(q_words & hay) / max(1, len(q_words)))
 
     q_words = set(_re2.findall(r"[a-z0-9]{3,}", (query or "").lower()))
     openai_key = os.getenv("OPENAI_API_KEY")
     q_emb = None
-    res_embs: list[list[float] | None] = [None] * len(all_results)
-    if openai_key and all_results:
+    res_embs: list[list[float] | None] = [None] * len(deduped_list)
+    if openai_key and deduped_list:
         try:
             from openai import OpenAI as _OAI
             _client = _OAI(api_key=openai_key, timeout=20.0)
@@ -1366,16 +1426,14 @@ def search_live(
                 input=[(query or "").replace("\n", " ").strip()],
                 model="text-embedding-3-small",
             ).data[0].embedding
-            # embed des résultats par lots de 256
             texts = [((r.get("title", "") or "") + ". " + (r.get("abstract") or "")).replace("\n", " ").strip()[:2000]
-                     for r in all_results]
+                     for r in deduped_list]
             for i in range(0, len(texts), 256):
-                chunk = texts[i:i + 256]
-                emb_resp = _client.embeddings.create(input=chunk, model="text-embedding-3-small")
+                emb_resp = _client.embeddings.create(input=texts[i:i + 256], model="text-embedding-3-small")
                 for j, d in enumerate(emb_resp.data):
                     res_embs[i + j] = d.embedding
         except Exception as _ee:
-            logger.warning(f"search_live scoring embed error: {_ee}")
+            logger.warning(f"federated scoring embed error: {_ee}")
             q_emb = None
 
     def _cosine(a, b) -> float:
@@ -1383,24 +1441,37 @@ def search_live(
             return 0.0
         import math as _m
         dot = sum(x * y for x, y in zip(a, b))
-        na = _m.sqrt(sum(x * x for x in a))
-        nb = _m.sqrt(sum(y * y for y in b))
-        if na == 0 or nb == 0:
-            return 0.0
-        return dot / (na * nb)
+        na = _m.sqrt(sum(x * x for x in a)); nb = _m.sqrt(sum(y * y for y in b))
+        return dot / (na * nb) if na and nb else 0.0
 
-    for i, r in enumerate(all_results):
+    for i, r in enumerate(deduped_list):
         blob = (r.get("title", "") or "") + " " + (r.get("abstract") or "")
         lex = _lexical_overlap(q_words, blob)
-        sem = _cosine(q_emb, res_embs[i]) if (q_emb and res_embs[i]) else 0.0
-        sem = max(0.0, sem)
-        hyb = 0.7 * sem + 0.3 * lex
+        sem = max(0.0, _cosine(q_emb, res_embs[i])) if (q_emb and res_embs[i]) else 0.0
         r["semantic_score"] = round(sem, 4)
         r["lexical_score"] = round(lex, 4)
-        r["hybrid_score"] = round(hyb, 4)
+        r["hybrid_score"] = round(0.7 * sem + 0.3 * lex, 4)
 
-    all_results.sort(key=lambda r: r.get("hybrid_score", 0.0), reverse=True)
+    deduped_list.sort(key=lambda r: r.get("hybrid_score", 0.0), reverse=True)
+    return deduped_list, sources_queried
 
+
+@app.post("/user-scenarios/{scenario_id}/search/live")
+def search_live(
+    scenario_id: str,
+    max_per_source: int = 50,
+    _: None = Depends(require_api_key),
+) -> dict[str, Any]:
+    """Live federated search across all 8 external sources in parallel."""
+    row = _get_user_scenario_or_404(scenario_id)
+    query = row["query"]
+    strategy = row.get("search_strategy") or {}
+    pubmed_query = strategy.get("pubmed", query) if isinstance(strategy, dict) else query
+    general_query = strategy.get("general", query) if isinstance(strategy, dict) else query
+
+    all_results, sources_queried = _federated_live_search(
+        query, max_per_source, pubmed_query=pubmed_query, general_query=general_query
+    )
     new_count = sum(1 for r in all_results if not r["in_local_db"])
 
     # Background ingest of new papers
