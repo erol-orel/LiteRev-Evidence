@@ -231,6 +231,8 @@ export async function searchDocuments(
     totalUniqueDocs: apiData.total_unique_docs,
     totalMatchingDocs: apiData.total_matching_docs ?? apiData.total,
     sourceBreakdown: apiData.source_breakdown,
+    fulltextDocs: apiData.fulltext_docs,
+    abstractDocs: apiData.abstract_docs,
     scoreType: apiData.score_type,
     scoreLabel: apiData.score_label,
   };
@@ -2832,6 +2834,10 @@ export interface LiveSearchResult {
   external_id?: string | null;
   source_name: string;
   in_local_db: boolean;
+  semantic_score?: number | null;
+  lexical_score?: number | null;
+  hybrid_score?: number | null;
+  also_in_sources?: string[];
 }
 
 export interface LiveSearchResponse {

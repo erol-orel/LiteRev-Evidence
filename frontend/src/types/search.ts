@@ -53,6 +53,8 @@ export interface SearchResponse {
   totalUniqueDocs?: number;
   totalMatchingDocs?: number;
   sourceBreakdown?: Record<string, number>;
+  fulltextDocs?: number;
+  abstractDocs?: number;
   scoreType?: "lexical" | "semantic" | "hybrid";
   scoreLabel?: string;
 }
@@ -109,6 +111,8 @@ export interface ApiSearchResponse {
   total_unique_docs?: number;
   total_matching_docs?: number;
   source_breakdown?: Record<string, number>;
+  fulltext_docs?: number;
+  abstract_docs?: number;
   score_type?: "lexical" | "semantic" | "hybrid";
   score_label?: string;
 }

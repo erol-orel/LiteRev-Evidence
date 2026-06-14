@@ -898,13 +898,56 @@ def search(payload: SearchIn) -> dict[str, Any]:
             **{f"term_{i}": f"%{t}%" for i, t in enumerate(query_terms)},
         }
 
+    # Répartition par source + comptage texte-intégral/résumé, calculés sur
+    # EXACTEMENT le même ensemble pertinent que total_matching_docs (même seuil
+    # cosinus 0.35 en sémantique/hybride ; même correspondance de termes en lexical).
+    # Une seule agrégation SQL → cohérence garantie avec le total affiché.
+    if use_vector and payload.mode in ("hybrid", "semantic"):
+        breakdown_sql = text(f"""
+            SELECT
+                COALESCE(NULLIF(TRIM(d.source), ''), 'Autre') AS src,
+                COUNT(DISTINCT d.id) AS doc_count,
+                COUNT(DISTINCT d.id) FILTER (WHERE d.has_fulltext) AS ft_count
+            FROM document_chunk c
+            JOIN literature_document d ON d.id = c.document_id
+            WHERE c.embedding IS NOT NULL
+              AND (1 - (c.embedding <=> CAST(:count_q_emb AS vector))) > 0.35
+              {where_sql}
+            GROUP BY 1
+        """)
+        breakdown_params = {**where_params, "count_q_emb": str(query_embedding)}
+    else:
+        breakdown_sql = text(f"""
+            SELECT
+                COALESCE(NULLIF(TRIM(d.source), ''), 'Autre') AS src,
+                COUNT(DISTINCT d.id) AS doc_count,
+                COUNT(DISTINCT d.id) FILTER (WHERE d.has_fulltext) AS ft_count
+            FROM document_chunk c
+            JOIN literature_document d ON d.id = c.document_id
+            WHERE ({any_match_sql}) {where_sql}
+            GROUP BY 1
+        """)
+        breakdown_params = {
+            **where_params,
+            **{f"term_{i}": f"%{t}%" for i, t in enumerate(query_terms)},
+        }
+
     with engine.connect() as conn:
         rows = conn.execute(sql, params).mappings().all()
         total_matching_docs = conn.execute(count_sql, count_params).scalar() or 0
+        breakdown_rows = conn.execute(breakdown_sql, breakdown_params).mappings().all()
+
+    source_counts: dict[str, int] = {}
+    fulltext_docs = 0
+    abstract_docs = 0
+    for br in breakdown_rows:
+        dc = int(br["doc_count"] or 0)
+        ft = int(br["ft_count"] or 0)
+        source_counts[br["src"]] = dc
+        fulltext_docs += ft
+        abstract_docs += (dc - ft)
 
     results = []
-    source_counts: dict[str, int] = {}
-    seen_doc_ids: set = set()
     for row in rows:
         content = row["content"] or ""
         abstract = row["abstract"] or ""
@@ -934,16 +977,8 @@ def search(payload: SearchIn) -> dict[str, Any]:
             "evidence_category": row["evidence_category"],
             "chunk_type": row["chunk_type"],
         })
-        # Compter par source (unique par document)
-        doc_id = row["document_id"]
-        if doc_id not in seen_doc_ids:
-            seen_doc_ids.add(doc_id)
-            raw_src = (row["source"] or "").strip()
-            # Normaliser : vide/null → "Autre"
-            src = raw_src if raw_src else "Autre"
-            source_counts[src] = source_counts.get(src, 0) + 1
 
-    # Le total de documents uniques = somme du breakdown (cohérent avec le frontend)
+    # Le total de documents uniques = somme du breakdown pertinent (== total_matching_docs)
     total_unique_docs = sum(source_counts.values())
 
     # Trier le breakdown : Autre en dernier, reste par ordre décroissant
@@ -975,6 +1010,8 @@ def search(payload: SearchIn) -> dict[str, Any]:
         "total_unique_docs": total_unique_docs,
         "returned_docs": total_unique_docs,
         "source_breakdown": sorted_breakdown,
+        "fulltext_docs": fulltext_docs,
+        "abstract_docs": abstract_docs,
         "score_type": score_type,
         "score_label": score_label,
     }
@@ -1101,52 +1138,125 @@ def _live_fetch_europepmc(query: str, max_results: int) -> list[dict]:
     return results
 
 
-def _live_fetch_medrxiv(query: str, max_results: int) -> list[dict]:
+def _live_fetch_pubmed_term(term: str, source_name: str, id_prefix: str, max_results: int) -> list[dict]:
+    """Helper PubMed générique (esearch+esummary) avec un terme/filtre arbitraire.
+    Sert de proxy pour les sources sans API libre (PROSPERO, Cochrane)."""
     import requests as _req
     results = []
     try:
-        r = _req.get("https://api.biorxiv.org/details/medrxiv/2020-01-01/2099-12-31/0/json",
-                     timeout=10)
-        # medrxiv search by query not directly available, use details endpoint with recent date range
-        # Fallback: just return empty (no free-text search API available in simplified form)
+        base = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
+        r = _req.get(f"{base}/esearch.fcgi", params={
+            "db": "pubmed", "term": term, "retmax": max_results,
+            "retmode": "json", "tool": "literev", "email": "api@literev.app"
+        }, timeout=10)
+        ids = r.json().get("esearchresult", {}).get("idlist", [])
+        if not ids:
+            return []
+        r2 = _req.get(f"{base}/esummary.fcgi", params={
+            "db": "pubmed", "id": ",".join(ids), "retmode": "json",
+            "tool": "literev", "email": "api@literev.app"
+        }, timeout=10)
+        res = r2.json().get("result", {})
+        for uid in res.get("uids", []):
+            item = res.get(uid, {})
+            results.append({
+                "title": item.get("title", ""),
+                "abstract": None,
+                "doi": next((a["value"] for a in item.get("articleids", []) if a.get("idtype") == "doi"), None),
+                "year": int(item.get("pubdate", "")[:4]) if item.get("pubdate", "")[:4].isdigit() else None,
+                "authors": [a.get("name", "") for a in item.get("authors", [])],
+                "journal": item.get("source", None),
+                "url": f"https://pubmed.ncbi.nlm.nih.gov/{uid}/",
+                "external_id": f"{id_prefix}:{uid}",
+                "source_name": source_name,
+            })
     except Exception as _e:
-        logger.warning(f"_live_fetch_medrxiv error: {_e}")
+        logger.warning(f"_live_fetch_pubmed_term({source_name}) error: {_e}")
     return results
 
 
-def _live_fetch_biorxiv(query: str, max_results: int) -> list[dict]:
-    # bioRxiv also lacks a simple free-text search endpoint without scraping
-    return []
-
-
-def _live_fetch_prospero(query: str, max_results: int) -> list[dict]:
-    # PROSPERO does not have a public API; return empty
-    return []
-
-
-def _live_fetch_cochrane(query: str, max_results: int) -> list[dict]:
+def _live_fetch_preprint_server(server: str, source_name: str, query: str, max_results: int) -> list[dict]:
+    """Récupère les prépublications récentes (biorxiv/medrxiv API) puis filtre par
+    correspondance de mots-clés de la requête (pas d'API plein-texte côté serveur)."""
     import requests as _req
+    import datetime as _dt
     results = []
     try:
-        r = _req.get("https://www.cochranelibrary.com/api/search", params={
-            "q": query, "rows": min(max_results, 25)
-        }, headers={"Accept": "application/json"}, timeout=10)
-        if r.ok:
-            for item in r.json().get("results", []):
+        # Mots significatifs de la requête (>3 lettres) pour un filtrage simple
+        import re as _re
+        words = [w for w in _re.findall(r"[a-zA-Z]{4,}", (query or "").lower())]
+        words = list(dict.fromkeys(words))  # dédoublonne en gardant l'ordre
+        date_to = _dt.date.today()
+        date_from = date_to - _dt.timedelta(days=180)
+        cursor = 0
+        scanned = 0
+        max_scan = 600  # plafond pour rester dans le budget temps
+        while scanned < max_scan and len(results) < max_results:
+            url = (f"https://api.biorxiv.org/details/{server}/"
+                   f"{date_from.isoformat()}/{date_to.isoformat()}/{cursor}/json")
+            r = _req.get(url, timeout=10)
+            if not r.ok:
+                break
+            payload = r.json()
+            coll = payload.get("collection", []) or []
+            if not coll:
+                break
+            for item in coll:
+                scanned += 1
+                hay = (item.get("title", "") + " " + item.get("abstract", "")).lower()
+                # garde si au moins 2 mots significatifs correspondent (ou 1 si requête courte)
+                if words:
+                    hits = sum(1 for w in words if w in hay)
+                    threshold = 1 if len(words) <= 2 else 2
+                    if hits < threshold:
+                        continue
+                yr = None
+                d = item.get("date", "")
+                if len(d) >= 4 and d[:4].isdigit():
+                    yr = int(d[:4])
+                doi = item.get("doi")
                 results.append({
                     "title": item.get("title", ""),
                     "abstract": item.get("abstract"),
-                    "doi": item.get("doi"),
-                    "year": item.get("year"),
-                    "authors": [],
-                    "journal": "Cochrane Database of Systematic Reviews",
-                    "url": item.get("url"),
-                    "external_id": item.get("id"),
-                    "source_name": "Cochrane",
+                    "doi": doi,
+                    "year": yr,
+                    "authors": [a.strip() for a in (item.get("authors", "") or "").split(";")[:5] if a.strip()],
+                    "journal": source_name,
+                    "url": f"https://doi.org/{doi}" if doi else None,
+                    "external_id": doi,
+                    "source_name": source_name,
                 })
+                if len(results) >= max_results:
+                    break
+            total = int(payload.get("messages", [{}])[0].get("total", 0) or 0)
+            cursor += len(coll)
+            if cursor >= total:
+                break
     except Exception as _e:
-        logger.warning(f"_live_fetch_cochrane error: {_e}")
+        logger.warning(f"_live_fetch_preprint_server({server}) error: {_e}")
     return results
+
+
+def _live_fetch_medrxiv(query: str, max_results: int) -> list[dict]:
+    return _live_fetch_preprint_server("medrxiv", "medRxiv", query, max_results)
+
+
+def _live_fetch_biorxiv(query: str, max_results: int) -> list[dict]:
+    return _live_fetch_preprint_server("biorxiv", "bioRxiv", query, max_results)
+
+
+def _live_fetch_prospero(query: str, max_results: int) -> list[dict]:
+    # PROSPERO n'a pas d'API publique : proxy via PubMed restreint aux revues
+    # systématiques / méta-analyses (protocoles enregistrés y sont indexés).
+    term = f'({query}) AND ("systematic review"[Publication Type] OR "meta-analysis"[Publication Type])'
+    return _live_fetch_pubmed_term(term, "PROSPERO", "prospero", max_results)
+
+
+def _live_fetch_cochrane(query: str, max_results: int) -> list[dict]:
+    # La Cochrane Library n'expose pas d'API JSON simple : proxy via PubMed
+    # restreint au journal Cochrane Database of Systematic Reviews (CDSR).
+    term = f'("Cochrane Database Syst Rev"[Journal]) AND ({query})'
+    return _live_fetch_pubmed_term(term, "Cochrane", "cochrane", max_results)
 
 
 @app.post("/user-scenarios/{scenario_id}/search/live")
@@ -1205,6 +1315,87 @@ def search_live(
 
     for r in all_results:
         r["in_local_db"] = bool(r.get("doi") and r["doi"] in in_db_dois)
+
+    # ── Déduplication par DOI (sinon par titre normalisé) avec suivi des sources ──
+    import re as _re2
+    def _norm_title(t: str) -> str:
+        return _re2.sub(r"[^a-z0-9]+", " ", (t or "").lower()).strip()
+    deduped: dict[str, dict] = {}
+    for r in all_results:
+        key = ("doi:" + r["doi"].lower()) if r.get("doi") else ("ttl:" + _norm_title(r.get("title", "")))
+        if not key or key in ("ttl:", "doi:"):
+            key = "id:" + str(id(r))
+        if key in deduped:
+            existing = deduped[key]
+            srcs = existing.setdefault("also_in_sources", [])
+            if r.get("source_name") and r["source_name"] not in srcs and r["source_name"] != existing.get("source_name"):
+                srcs.append(r["source_name"])
+            # complète les champs manquants
+            for f in ("abstract", "year", "url", "doi"):
+                if not existing.get(f) and r.get(f):
+                    existing[f] = r[f]
+            existing["in_local_db"] = existing.get("in_local_db") or r.get("in_local_db")
+        else:
+            r.setdefault("also_in_sources", [])
+            deduped[key] = r
+    all_results = list(deduped.values())
+
+    # ── Scoring sémantique + lexical + hybride ──
+    def _lexical_overlap(q_words: set[str], text_blob: str) -> float:
+        if not q_words:
+            return 0.0
+        hay = set(_re2.findall(r"[a-z0-9]{3,}", (text_blob or "").lower()))
+        if not hay:
+            return 0.0
+        inter = len(q_words & hay)
+        return min(1.0, inter / max(1, len(q_words)))
+
+    q_words = set(_re2.findall(r"[a-z0-9]{3,}", (query or "").lower()))
+    openai_key = os.getenv("OPENAI_API_KEY")
+    q_emb = None
+    res_embs: list[list[float] | None] = [None] * len(all_results)
+    if openai_key and all_results:
+        try:
+            from openai import OpenAI as _OAI
+            _client = _OAI(api_key=openai_key, timeout=20.0)
+            q_emb = _client.embeddings.create(
+                input=[(query or "").replace("\n", " ").strip()],
+                model="text-embedding-3-small",
+            ).data[0].embedding
+            # embed des résultats par lots de 256
+            texts = [((r.get("title", "") or "") + ". " + (r.get("abstract") or "")).replace("\n", " ").strip()[:2000]
+                     for r in all_results]
+            for i in range(0, len(texts), 256):
+                chunk = texts[i:i + 256]
+                emb_resp = _client.embeddings.create(input=chunk, model="text-embedding-3-small")
+                for j, d in enumerate(emb_resp.data):
+                    res_embs[i + j] = d.embedding
+        except Exception as _ee:
+            logger.warning(f"search_live scoring embed error: {_ee}")
+            q_emb = None
+
+    def _cosine(a, b) -> float:
+        if not a or not b:
+            return 0.0
+        import math as _m
+        dot = sum(x * y for x, y in zip(a, b))
+        na = _m.sqrt(sum(x * x for x in a))
+        nb = _m.sqrt(sum(y * y for y in b))
+        if na == 0 or nb == 0:
+            return 0.0
+        return dot / (na * nb)
+
+    for i, r in enumerate(all_results):
+        blob = (r.get("title", "") or "") + " " + (r.get("abstract") or "")
+        lex = _lexical_overlap(q_words, blob)
+        sem = _cosine(q_emb, res_embs[i]) if (q_emb and res_embs[i]) else 0.0
+        sem = max(0.0, sem)
+        hyb = 0.7 * sem + 0.3 * lex
+        r["semantic_score"] = round(sem, 4)
+        r["lexical_score"] = round(lex, 4)
+        r["hybrid_score"] = round(hyb, 4)
+
+    all_results.sort(key=lambda r: r.get("hybrid_score", 0.0), reverse=True)
 
     new_count = sum(1 for r in all_results if not r["in_local_db"])
 
@@ -6144,15 +6335,22 @@ def create_user_scenario(payload: UserScenarioIn, _: None = Depends(require_api_
             "pinned": payload.pinned,
             "folder_id": payload.folder_id,
         })
-    # Generate and store search strategy non-blocking
+    # Génération de la stratégie de recherche en arrière-plan : l'appel OpenAI
+    # ne doit JAMAIS bloquer (ni faire échouer) la création du scénario.
+    def _bg_strategy(sid: str, q: str) -> None:
+        try:
+            strategy = _generate_search_strategy(q)
+            with engine.begin() as conn2:
+                conn2.execute(text("""
+                    UPDATE user_scenarios SET search_strategy = CAST(:strategy AS jsonb) WHERE id = :id
+                """), {"id": sid, "strategy": json.dumps(strategy)})
+        except Exception as _se:
+            logger.warning(f"search_strategy generation failed for {sid}: {_se}")
     try:
-        strategy = _generate_search_strategy(payload.query)
-        with engine.begin() as conn2:
-            conn2.execute(text("""
-                UPDATE user_scenarios SET search_strategy = CAST(:strategy AS jsonb) WHERE id = :id
-            """), {"id": new_id, "strategy": json.dumps(strategy)})
-    except Exception as _se:
-        logger.warning(f"search_strategy generation failed for {new_id}: {_se}")
+        import threading as _threading
+        _threading.Thread(target=_bg_strategy, args=(new_id, payload.query), daemon=True).start()
+    except Exception as _te:
+        logger.warning(f"could not start strategy thread for {new_id}: {_te}")
     row = _get_user_scenario_or_404(new_id)
     return _user_scenario_to_gesica_format(row)
 
