@@ -7377,7 +7377,8 @@ def _run_user_scenario_populate(
                         _inc("openalex")
                     except Exception:
                         _inc("openalex", 0, 1)
-                if len(_oa_results) < _oa_batch:
+                _oa_fetched += len(_oa_results)
+                if len(_oa_results) < _oa_batch or _oa_fetched >= _oa_limit:
                     break
                 _oa_page += 1
                 _time.sleep(0.3)
@@ -7433,7 +7434,8 @@ def _run_user_scenario_populate(
                         _inc("crossref")
                     except Exception:
                         _inc("crossref", 0, 1)
-                if len(_cr_items) < _cr_rows:
+                _cr_fetched += len(_cr_items)
+                if len(_cr_items) < _cr_rows or _cr_fetched >= _cr_limit:
                     break
                 _cr_offset += _cr_rows
                 _time.sleep(0.3)
@@ -7494,8 +7496,9 @@ def _run_user_scenario_populate(
                         _inc("europepmc")
                     except Exception:
                         _inc("europepmc", 0, 1)
+                _ep_fetched += len(_ep_results)
                 _ep_next_cursor = _ep_data.get("nextCursorMark")
-                if not _ep_next_cursor or _ep_next_cursor == _ep_cursor_mark or len(_ep_results) < _ep_page_size:
+                if not _ep_next_cursor or _ep_next_cursor == _ep_cursor_mark or len(_ep_results) < _ep_page_size or _ep_fetched >= _ep_limit:
                     break
                 _ep_cursor_mark = _ep_next_cursor
                 _time.sleep(0.3)
