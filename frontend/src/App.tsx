@@ -2913,19 +2913,34 @@ function ScenariosView({
                       <div className="mt-1 flex items-center gap-2">
                         <RotateCcw size={10} className="text-brand-400 animate-spin shrink-0" />
                         <span className="text-xs text-brand-300">
-                          {pipelineStatuses[s.id].overall_status === 'error' ? '⚠ Erreur pipeline' :
-                            pipelineStatuses[s.id].current_step === 'ingest' ? 'Ingéstion multi-sources (8 sources)...' :
-                            pipelineStatuses[s.id].current_step === 'embed' ? 'Génération embeddings...' :
-                            pipelineStatuses[s.id].current_step === 'pico' ? 'Extraction PICO...' :
-                            pipelineStatuses[s.id].current_step === 'metadata' ? 'Extraction métadonnées...' :
-                            pipelineStatuses[s.id].current_step === 'fulltext' ? 'Récupération full-text...' :
-                            pipelineStatuses[s.id].current_step === 'clustering' ? 'Clustering thématique...' :
-                            pipelineStatuses[s.id].current_step === 'rerank' ? 'Rerank sémantique...' :
-                            'Pipeline en cours...'}
+                          {(() => {
+                            const ps = pipelineStatuses[s.id];
+                            if (ps.overall_status === 'error') return '⚠ Erreur pipeline';
+                            const step = ps.current_step;
+                            const st = ps.steps?.[step as keyof typeof ps.steps];
+                            if (step === 'embed') {
+                              const d = st?.docs_done ?? 0; const t = st?.docs_total ?? 0;
+                              return t > 0 ? `Embeddings ${d}/${t} docs...` : 'Génération embeddings...';
+                            }
+                            if (step === 'pico') {
+                              const ext = (st as any)?.extracted_this_run ?? 0;
+                              return ext > 0 ? `PICO ${ext} extraits...` : 'Extraction PICO...';
+                            }
+                            if (step === 'metadata') {
+                              const ext = (st as any)?.extracted_this_run ?? 0;
+                              return ext > 0 ? `Métadonnées ${ext} extraites...` : 'Extraction métadonnées...';
+                            }
+                            if (step === 'ingest') return 'Ingestion multi-sources (8 sources)...';
+                            if (step === 'fulltext') return 'Récupération full-text...';
+                            if (step === 'clustering') return 'Clustering thématique...';
+                            if (step === 'rerank') return 'Rerank sémantique...';
+                            return 'Pipeline en cours...';
+                          })()}
                         </span>
                         <span className="text-xs text-white/25">
                           {(['ingest','fulltext','embed','rerank','pico','metadata','clustering'] as const).map(step => {
                             const st = pipelineStatuses[s.id]?.steps?.[step]?.status;
+                            const stepSt = pipelineStatuses[s.id]?.steps?.[step];
                             const dotCls = st === 'done' ? 'bg-forest-400' : st === 'running' ? 'bg-brand-400 animate-pulse' : st === 'error' ? 'bg-red-400' : 'bg-white/20';
                             const stepLabel: Record<string, string> = {
                               ingest: 'Ingestion (8 sources)',
@@ -2936,7 +2951,8 @@ function ScenariosView({
                               clustering: 'Clustering',
                               rerank: 'Rerank sémantique',
                             };
-                            return <span key={step} className={`inline-block w-1.5 h-1.5 rounded-full mx-0.5 ${dotCls}`} title={`${stepLabel[step] ?? step}: ${st ?? 'pending'}`} />;
+                            const pctHint = step === 'embed' && stepSt?.pct != null ? ` · ${stepSt.pct}%` : '';
+                            return <span key={step} className={`inline-block w-1.5 h-1.5 rounded-full mx-0.5 ${dotCls}`} title={`${stepLabel[step] ?? step}: ${st ?? 'pending'}${pctHint}`} />;
                           })}
                         </span>
                       </div>
@@ -2999,15 +3015,29 @@ function ScenariosView({
                       <div className="mt-1 flex items-center gap-2">
                         <RotateCcw size={10} className="text-brand-400 animate-spin shrink-0" />
                         <span className="text-xs text-brand-300">
-                          {pipelineStatuses[s.id].overall_status === 'error' ? '⚠ Erreur pipeline' :
-                            pipelineStatuses[s.id].current_step === 'ingest' ? 'Ingéstion multi-sources (8 sources)...' :
-                            pipelineStatuses[s.id].current_step === 'embed' ? 'Génération embeddings...' :
-                            pipelineStatuses[s.id].current_step === 'pico' ? 'Extraction PICO...' :
-                            pipelineStatuses[s.id].current_step === 'metadata' ? 'Extraction métadonnées...' :
-                            pipelineStatuses[s.id].current_step === 'fulltext' ? 'Récupération full-text...' :
-                            pipelineStatuses[s.id].current_step === 'clustering' ? 'Clustering thématique...' :
-                            pipelineStatuses[s.id].current_step === 'rerank' ? 'Rerank sémantique...' :
-                            'Pipeline en cours...'}
+                          {(() => {
+                            const ps = pipelineStatuses[s.id];
+                            if (ps.overall_status === 'error') return '⚠ Erreur pipeline';
+                            const step = ps.current_step;
+                            const st = ps.steps?.[step as keyof typeof ps.steps];
+                            if (step === 'embed') {
+                              const d = st?.docs_done ?? 0; const t = st?.docs_total ?? 0;
+                              return t > 0 ? `Embeddings ${d}/${t} docs...` : 'Génération embeddings...';
+                            }
+                            if (step === 'pico') {
+                              const ext = (st as any)?.extracted_this_run ?? 0;
+                              return ext > 0 ? `PICO ${ext} extraits...` : 'Extraction PICO...';
+                            }
+                            if (step === 'metadata') {
+                              const ext = (st as any)?.extracted_this_run ?? 0;
+                              return ext > 0 ? `Métadonnées ${ext} extraites...` : 'Extraction métadonnées...';
+                            }
+                            if (step === 'ingest') return 'Ingestion multi-sources (8 sources)...';
+                            if (step === 'fulltext') return 'Récupération full-text...';
+                            if (step === 'clustering') return 'Clustering thématique...';
+                            if (step === 'rerank') return 'Rerank sémantique...';
+                            return 'Pipeline en cours...';
+                          })()}
                         </span>
                       </div>
                     )}

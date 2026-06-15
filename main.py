@@ -8557,7 +8557,7 @@ def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict
                 _emb_client = _OAI_emb(api_key=openai_key)
                 with engine.connect() as _conn_emb:
                     _chunks_to_embed = _conn_emb.execute(text("""
-                        SELECT c.id, c.content
+                        SELECT c.id, c.document_id, c.content
                         FROM document_chunk c
                         JOIN article_scenarios ars ON ars.document_id = c.document_id
                         WHERE ars.scenario_id = :sid
@@ -8567,7 +8567,9 @@ def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict
                         ORDER BY c.id
                     """), {"sid": scenario_id}).mappings().fetchall()
                 _emb_total = len(_chunks_to_embed)
+                _emb_docs_total = len({r["document_id"] for r in _chunks_to_embed})
                 _emb_done = 0
+                _emb_docs_done: set = set()
                 _emb_errors = 0
                 _emb_batch_size = 100
                 for _bi in range(0, _emb_total, _emb_batch_size):
@@ -8588,14 +8590,18 @@ def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict
                                     WHERE id = :cid
                                 """), {"vec": _vec_str, "cid": _batch[_k]["id"]})
                                 _emb_done += 1
+                                _emb_docs_done.add(_batch[_k]["document_id"])
                     except Exception as _emb_e:
                         _emb_errors += len(_batch)
                         logger.warning(f"Embed batch {_bi}: {_emb_e}")
                     update_step("embed", "running",
-                                done=_emb_done, total=_emb_total,
+                                docs_done=len(_emb_docs_done), docs_total=_emb_docs_total,
+                                chunks_done=_emb_done, chunks_total=_emb_total,
                                 pct=round(_emb_done / _emb_total * 100, 1) if _emb_total > 0 else 0)
                 update_step("embed", "done",
-                            embedded=_emb_done, total=_emb_total, errors=_emb_errors)
+                            docs_embedded=len(_emb_docs_done), docs_total=_emb_docs_total,
+                            chunks_embedded=_emb_done, chunks_total=_emb_total,
+                            errors=_emb_errors)
             else:
                 update_step("embed", "skipped", reason="Clé OpenAI non configurée")
         except Exception as _emb_ex:
@@ -8733,7 +8739,22 @@ def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict
                         logger.warning(f"Pipeline PICO article {row['id']}: {e}")
                         pico_errors += 1
                     _time.sleep(0.05)
-                update_step("pico", "done", extracted=pico_extracted, errors=pico_errors)
+                # Total coverage from DB (includes previously extracted articles)
+                with engine.connect() as _pico_stat_conn:
+                    _pico_total_in_scenario = _pico_stat_conn.execute(text("""
+                        SELECT COUNT(*) FROM article_scenarios WHERE scenario_id = :sid
+                    """), {"sid": scenario_id}).scalar() or 0
+                    _pico_total_with = _pico_stat_conn.execute(text("""
+                        SELECT COUNT(*) FROM literature_document ld
+                        JOIN article_scenarios ars ON ars.document_id = ld.id
+                        WHERE ars.scenario_id = :sid AND ld.pico_json IS NOT NULL
+                    """), {"sid": scenario_id}).scalar() or 0
+                update_step("pico", "done",
+                            extracted_this_run=pico_extracted,
+                            total_with_pico=_pico_total_with,
+                            total_articles=_pico_total_in_scenario,
+                            pct=round(_pico_total_with / _pico_total_in_scenario * 100, 1) if _pico_total_in_scenario > 0 else 0,
+                            errors=pico_errors)
             else:
                 update_step("pico", "skipped", reason="Clé OpenAI non configurée")
         except Exception as e:
@@ -8793,7 +8814,23 @@ def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict
                         logger.warning(f"Pipeline metadata article {row['id']}: {e}")
                         meta_errors += 1
                     _time.sleep(0.05)
-                update_step("metadata", "done", extracted=meta_extracted, errors=meta_errors)
+                # Total coverage from DB (includes previously extracted articles)
+                with engine.connect() as _meta_stat_conn:
+                    _meta_total_in_scenario = _meta_stat_conn.execute(text("""
+                        SELECT COUNT(*) FROM article_scenarios WHERE scenario_id = :sid
+                    """), {"sid": scenario_id}).scalar() or 0
+                    _meta_total_with = _meta_stat_conn.execute(text("""
+                        SELECT COUNT(*) FROM literature_document ld
+                        JOIN article_scenarios ars ON ars.document_id = ld.id
+                        WHERE ars.scenario_id = :sid
+                          AND ld.metadata_json IS NOT NULL AND ld.metadata_json != '{}'::jsonb
+                    """), {"sid": scenario_id}).scalar() or 0
+                update_step("metadata", "done",
+                            extracted_this_run=meta_extracted,
+                            total_with_metadata=_meta_total_with,
+                            total_articles=_meta_total_in_scenario,
+                            pct=round(_meta_total_with / _meta_total_in_scenario * 100, 1) if _meta_total_in_scenario > 0 else 0,
+                            errors=meta_errors)
             else:
                 update_step("metadata", "skipped", reason="Clé OpenAI non configurée")
         except Exception as e:

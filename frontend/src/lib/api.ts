@@ -2250,6 +2250,7 @@ export interface PipelineStepStatus {
   status: 'pending' | 'running' | 'done' | 'error' | 'skipped';
   ingested?: number;
   extracted?: number;
+  extracted_this_run?: number;
   fetched?: number;
   n_clusters?: number;
   n_docs?: number;
@@ -2257,11 +2258,18 @@ export interface PipelineStepStatus {
   errors?: number;
   reason?: string;
   error?: string;
-  // embed step
-  done?: number;
-  total?: number;
+  // embed step (docs and chunks)
+  docs_done?: number;
+  docs_total?: number;
+  docs_embedded?: number;
+  chunks_done?: number;
+  chunks_total?: number;
+  chunks_embedded?: number;
   pct?: number;
-  embedded?: number;
+  // pico/metadata coverage
+  total_with_pico?: number;
+  total_with_metadata?: number;
+  total_articles?: number;
   // rerank step
   updated?: number;
 }
