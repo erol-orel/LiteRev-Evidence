@@ -216,6 +216,7 @@ export async function searchDocuments(
     limit: payload.limit,
     filters: mapFiltersToApi(payload.filters),
     include_live: payload.includeLive ?? false,
+    similarity_threshold: payload.similarityThreshold,
   };
 
   const response = await fetch(`${API_BASE_URL}/search`, {

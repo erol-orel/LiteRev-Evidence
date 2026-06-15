@@ -220,6 +220,7 @@ class SearchIn(BaseModel):
     project_context: str | None = None
     include_live: bool = Field(default=False)
     live_max_per_source: int = Field(default=25, ge=1, le=100)
+    similarity_threshold: float = 0.45
 
     @model_validator(mode="after")
     def _resolve_query(self) -> "SearchIn":
@@ -744,7 +745,7 @@ def _search_local_doc_ids(
     mode: str,
     filters: dict,
     limit: int = 10_000,
-    threshold: float = 0.35,
+    threshold: float = 0.45,
 ) -> list[str]:
     """Run the same local-DB search logic as /search and return matching doc IDs.
 
@@ -863,6 +864,7 @@ def search(payload: SearchIn) -> dict[str, Any]:
         "limit": payload.limit,
         "offset": payload.offset,
         "ts_query_str": query.strip(),
+        "sim_threshold": payload.similarity_threshold,
         **where_params,
     }
 
@@ -925,7 +927,7 @@ def search(payload: SearchIn) -> dict[str, Any]:
                 FROM document_chunk c
                 JOIN literature_document d ON d.id = c.document_id
                 WHERE c.embedding IS NOT NULL
-                  AND (1 - (c.embedding <=> CAST(:query_embedding AS vector))) > 0.45
+                  AND (1 - (c.embedding <=> CAST(:query_embedding AS vector))) > :sim_threshold
                 {where_sql}
                 UNION ALL
                 SELECT
@@ -991,7 +993,7 @@ def search(payload: SearchIn) -> dict[str, Any]:
                 FROM document_chunk c
                 JOIN literature_document d ON d.id = c.document_id
                 WHERE c.embedding IS NOT NULL
-                  AND (1 - (c.embedding <=> CAST(:query_embedding AS vector))) > 0.45
+                  AND (1 - (c.embedding <=> CAST(:query_embedding AS vector))) > :sim_threshold
                 {where_sql}
             ) combined
             ORDER BY score DESC, year DESC NULLS LAST
@@ -1040,10 +1042,10 @@ def search(payload: SearchIn) -> dict[str, Any]:
             FROM document_chunk c
             JOIN literature_document d ON d.id = c.document_id
             WHERE c.embedding IS NOT NULL
-              AND (1 - (c.embedding <=> CAST(:count_q_emb AS vector))) > 0.45
+              AND (1 - (c.embedding <=> CAST(:count_q_emb AS vector))) > :sim_threshold
               {where_sql}
         """)
-        count_params = {**where_params, "count_q_emb": str(query_embedding)}
+        count_params = {**where_params, "count_q_emb": str(query_embedding), "sim_threshold": payload.similarity_threshold}
     else:
         count_sql = text(f"""
             SELECT COUNT(DISTINCT d.id)
@@ -1069,11 +1071,11 @@ def search(payload: SearchIn) -> dict[str, Any]:
             FROM document_chunk c
             JOIN literature_document d ON d.id = c.document_id
             WHERE c.embedding IS NOT NULL
-              AND (1 - (c.embedding <=> CAST(:count_q_emb AS vector))) > 0.45
+              AND (1 - (c.embedding <=> CAST(:count_q_emb AS vector))) > :sim_threshold
               {where_sql}
             GROUP BY 1
         """)
-        breakdown_params = {**where_params, "count_q_emb": str(query_embedding)}
+        breakdown_params = {**where_params, "count_q_emb": str(query_embedding), "sim_threshold": payload.similarity_threshold}
     else:
         breakdown_sql = text(f"""
             SELECT
@@ -7157,28 +7159,14 @@ def _run_user_scenario_populate(
                     ingested += 1
             logger.info(f"Populate {scenario_id}: {local_linked} docs liés depuis la base locale")
 
-        # If local DB already covers the expected result count, we're done —
-        # no need to wait for external API calls.
-        _stored_count = 0
-        with engine.connect() as _cc:
-            _stored_count = _cc.execute(
-                text("SELECT result_count FROM user_scenarios WHERE id = :sid"),
-                {"sid": scenario_id}
-            ).scalar() or 0
-        if local_linked > 0 and local_linked >= _stored_count:
-            logger.info(
-                f"Populate {scenario_id}: local DB covers {local_linked}/{_stored_count} — skipping external APIs"
-            )
-            if _pipeline_callback is None:
-                _user_scenario_populate_jobs[scenario_id] = {
-                    "status": "done", "ingested": local_linked, "errors": 0,
-                    "total_found": local_linked,
-                    "sources": {"db_cache": local_linked, "pubmed": 0, "openalex": 0,
-                                "crossref": 0, "europepmc": 0, "medrxiv": 0,
-                                "biorxiv": 0, "prospero": 0, "cochrane": 0},
-                    "message": f"{local_linked} articles liés depuis la base locale."
-                }
-            return local_linked
+        # Update article count immediately so the UI shows local results right away
+        if local_linked > 0:
+            with engine.begin() as _uc:
+                _uc.execute(text("""
+                    UPDATE user_scenarios
+                    SET result_count = :cnt, article_count = :cnt
+                    WHERE id = :sid
+                """), {"cnt": local_linked, "sid": scenario_id})
 
     except Exception as _e_local:
         logger.warning(f"Local DB link failed for {scenario_id}: {_e_local}")

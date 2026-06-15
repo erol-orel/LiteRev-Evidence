@@ -50,6 +50,7 @@ export interface SearchRequest {
   limit: number;
   filters?: SearchFilters;
   includeLive?: boolean;
+  similarityThreshold?: number;
 }
 
 export interface SearchResponse {
@@ -110,6 +111,7 @@ export interface ApiSearchRequest {
   limit: number;
   filters?: ApiSearchFilters;
   include_live?: boolean;
+  similarity_threshold?: number;
 }
 
 export interface ApiSearchResponse {

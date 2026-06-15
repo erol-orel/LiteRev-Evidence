@@ -3061,6 +3061,7 @@ export default function App() {
   const [projectContext, setProjectContext] = useState<ProjectContext>("literev");
   const [activeTab, setActiveTab] = useState<AppTab>("search");
   const [mode, setMode] = useState<SearchMode>("semantic");
+  const [semanticThreshold, setSemanticThreshold] = useState(0.45);
   const [includeLive, setIncludeLive] = useState(false);
   const [query, setQuery] = useState("");
   const [filters, setFilters] = useState<SearchFilters>({
@@ -3246,6 +3247,7 @@ export default function App() {
         limit: 10000,
         filters: effectiveFilters,
         includeLive,
+        similarityThreshold: mode === "semantic" || mode === "hybrid" ? semanticThreshold : undefined,
       });
       setResults(data.results);
       setSearchTotalMatching(data.totalMatchingDocs ?? null);
@@ -3265,7 +3267,7 @@ export default function App() {
         query: query.trim(),
         mode,
         filters: { projectContext },
-        result_count: data.results.length,
+        result_count: data.totalMatchingDocs ?? data.results.length,
         pinned: false,
       }).then(newScenario => {
         setUserScenarios(prev => {
@@ -3349,7 +3351,7 @@ export default function App() {
         query: query.trim(),
         mode,
         filters: { projectContext },
-        result_count: results.length,
+        result_count: searchTotalMatching ?? results.length,
         pinned: true,
       }).then(newScenario => {
         setUserScenarios(prev => [newScenario, ...prev]);
@@ -3750,6 +3752,22 @@ export default function App() {
                     );
                   })}
                 </div>
+
+                {(mode === "semantic" || mode === "hybrid") && (
+                  <div className="mb-3 flex items-center gap-3 text-xs text-forest-300">
+                    <span className="whitespace-nowrap">Seuil sémantique</span>
+                    <input
+                      type="range"
+                      min={0.1}
+                      max={0.9}
+                      step={0.05}
+                      value={semanticThreshold}
+                      onChange={(e) => setSemanticThreshold(parseFloat(e.target.value))}
+                      className="flex-1 accent-brand-400"
+                    />
+                    <span className="w-8 text-right font-mono text-brand-300">{semanticThreshold.toFixed(2)}</span>
+                  </div>
+                )}
 
                 <div className="flex flex-col gap-3 lg:flex-row">
                   <input
