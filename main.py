@@ -6455,8 +6455,22 @@ def _user_scenario_to_gesica_format(row: dict[str, Any]) -> dict[str, Any]:
 
 @app.get("/user-scenarios")
 def list_user_scenarios() -> list[dict[str, Any]]:
-    """Liste tous les scénarios utilisateur (recherches sauvegardées)."""
-    with engine.connect() as conn:
+    """Liste tous les scénarios utilisateur (recherches sauvegardées).
+    Déduplique au passage les recherches récentes (non épinglées) par query+mode
+    en ne conservant que la plus récente de chaque groupe."""
+    with engine.begin() as conn:
+        # Delete stale duplicates: for unpinned/unfoldered scenarios keep only
+        # the most recent row per (query, mode) pair.
+        conn.execute(text("""
+            DELETE FROM user_scenarios
+            WHERE pinned = false AND folder_id IS NULL
+              AND id NOT IN (
+                SELECT DISTINCT ON (query, mode) id
+                FROM user_scenarios
+                WHERE pinned = false AND folder_id IS NULL
+                ORDER BY query, mode, created_at DESC
+              )
+        """))
         rows = conn.execute(text("""
             SELECT
                 us.id, us.name, us.query, us.mode, us.filters,
@@ -6475,8 +6489,32 @@ def list_user_scenarios() -> list[dict[str, Any]]:
 
 @app.post("/user-scenarios", status_code=201)
 def create_user_scenario(payload: UserScenarioIn, _: None = Depends(require_api_key)) -> dict[str, Any]:
-    """Crée un nouveau scénario utilisateur depuis une recherche sauvegardée."""
+    """Crée ou met à jour un scénario utilisateur depuis une recherche sauvegardée.
+    Pour les recherches récentes (non épinglées, sans dossier), upsert par query+mode
+    afin d'éviter l'accumulation de doublons lors des relances de recherche."""
     import uuid
+    # For unpinned auto-saved searches: upsert by query+mode to avoid duplicates
+    if not payload.pinned and not payload.folder_id:
+        with engine.begin() as conn:
+            existing = conn.execute(text("""
+                SELECT id FROM user_scenarios
+                WHERE query = :query AND mode = :mode AND pinned = false AND folder_id IS NULL
+                ORDER BY created_at DESC LIMIT 1
+            """), {"query": payload.query, "mode": payload.mode}).scalar()
+            if existing:
+                conn.execute(text("""
+                    UPDATE user_scenarios
+                    SET name = :name, filters = CAST(:filters AS jsonb),
+                        result_count = :result_count, created_at = now()
+                    WHERE id = :id
+                """), {
+                    "id": existing,
+                    "name": payload.name,
+                    "filters": json.dumps(payload.filters),
+                    "result_count": payload.result_count,
+                })
+                row = _get_user_scenario_or_404(existing)
+                return _user_scenario_to_gesica_format(row)
     new_id = "usr-" + str(uuid.uuid4()).replace("-", "")[:12]
     with engine.begin() as conn:
         conn.execute(text("""

@@ -4128,7 +4128,7 @@ function VariablesModelTab({ scenarioId, detail }: { scenarioId: string; detail:
   const [sub, setSub] = React.useState<"variables" | "model">("variables");
   const SUB = [
     { key: "variables" as const, label: "Données & Variables", icon: <Database size={12} /> },
-    ...(!userScenario ? [{ key: "model" as const, label: "Modèle Prédictif", icon: <Brain size={12} /> }] : []),
+    { key: "model" as const, label: "Modèle Prédictif", icon: <Brain size={12} /> },
   ];
   return (
     <div className="space-y-4">
@@ -4143,7 +4143,7 @@ function VariablesModelTab({ scenarioId, detail }: { scenarioId: string; detail:
         ))}
       </div>
       {sub === "variables" && <VariablesSection detail={detail} scenarioId={scenarioId} />}
-      {sub === "model" && !userScenario && <ModelSection scenarioId={scenarioId} />}
+      {sub === "model" && <ModelSection scenarioId={scenarioId} />}
     </div>
   );
 }
