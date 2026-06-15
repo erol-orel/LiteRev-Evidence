@@ -8716,6 +8716,7 @@ def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict
                     pass
                 try:
                     with engine.begin() as _clean_conn:
+                        # Supprimer les articles sous le seuil de similarité (ont un embedding)
                         _deleted_below = _clean_conn.execute(text("""
                             DELETE FROM article_scenarios ars
                             WHERE ars.scenario_id = :sid
@@ -8726,17 +8727,19 @@ def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict
                                     AND c.embedding IS NOT NULL
                               )
                         """), {"sid": scenario_id, "thr": _filter_threshold}).rowcount
+
+                        # Final cleanup: remove articles still unscored after embed+rerank.
+                        # These are articles with no abstract and no stored embedding — they cannot
+                        # appear in semantic search results, so they must not be in the corpus count.
+                        # IMPORTANT: must be inside the same 'with' block so _clean_conn is still open.
+                        _deleted_null = _clean_conn.execute(text("""
+                            DELETE FROM article_scenarios
+                            WHERE scenario_id = :sid
+                              AND similarity_score IS NULL
+                        """), {"sid": scenario_id}).rowcount
+
                     if _deleted_below:
                         logger.info(f"Pipeline {scenario_id}: removed {_deleted_below} below-threshold papers after rerank")
-
-                    # Final cleanup: remove articles still unscored after embed+rerank.
-                    # These are articles with no abstract and no stored embedding — they cannot
-                    # appear in semantic search results, so they must not be in the corpus count.
-                    _deleted_null = _clean_conn.execute(text("""
-                        DELETE FROM article_scenarios
-                        WHERE scenario_id = :sid
-                          AND similarity_score IS NULL
-                    """), {"sid": scenario_id}).rowcount
                     if _deleted_null:
                         logger.info(f"Pipeline {scenario_id}: removed {_deleted_null} unscored articles (no abstract/embedding)")
 
