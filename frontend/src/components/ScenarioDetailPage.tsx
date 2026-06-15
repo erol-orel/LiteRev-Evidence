@@ -4124,7 +4124,6 @@ function VizTab({ scenarioId }: { scenarioId: string }) {
 
 /** VariablesModelTab : Variables & Données + Modèle prédictif (sous-tabs) */
 function VariablesModelTab({ scenarioId, detail }: { scenarioId: string; detail: ScenarioDetail }) {
-  const userScenario = isUserScenario(scenarioId);
   const [sub, setSub] = React.useState<"variables" | "model">("variables");
   const SUB = [
     { key: "variables" as const, label: "Données & Variables", icon: <Database size={12} /> },
