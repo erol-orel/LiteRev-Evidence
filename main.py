@@ -1175,17 +1175,29 @@ def search(payload: SearchIn) -> dict[str, Any]:
             live_results, live_sources_queried, _live_raw = _federated_live_search(
                 query, max_per_source=payload.live_max_per_source
             )
-            existing_dois = {
+            existing_ext_ids = {
                 (r.get("external_id") or "").lower()
                 for r in results if r.get("external_id")
             }
+            # Also build a set of normalized titles to catch DOI-less duplicates
+            import re as _re_live
+            def _ntitle(t): return _re_live.sub(r"[^a-z0-9]+", " ", (t or "").lower()).strip()
+            existing_titles = {_ntitle(r.get("title", "")) for r in results if r.get("title")}
+            live_threshold = payload.similarity_threshold  # filter live by same threshold
             neg_idx = -1
             for lr in live_results:
                 if lr.get("in_local_db"):
-                    continue  # déjà présent dans la base locale → évite les doublons
+                    continue  # already in local DB → avoid double-counting
                 doi = (lr.get("doi") or "").lower()
-                if doi and doi in existing_dois:
-                    continue
+                if doi and doi in existing_ext_ids:
+                    continue  # matched by external_id/DOI
+                title_key = _ntitle(lr.get("title", ""))
+                if title_key and title_key in existing_titles:
+                    continue  # matched by title (for papers without DOI)
+                # Filter by semantic threshold in semantic/hybrid mode
+                if use_vector and payload.mode in ("semantic", "hybrid"):
+                    if float(lr.get("semantic_score") or 0.0) < live_threshold:
+                        continue
                 src = lr.get("source_name") or "API"
                 results.append({
                     "id": f"live-{neg_idx}",
@@ -1601,20 +1613,24 @@ def _federated_live_search(
         except concurrent.futures.TimeoutError:
             logger.warning("federated search: certaines sources ont dépassé le délai")
 
-    # Marquage in_local_db (par DOI)
-    dois = [r["doi"] for r in all_results if r.get("doi")]
+    # Marquage in_local_db — literature_document has no doi column; match via
+    # external_id which stores DOIs for OpenAlex/Crossref/EuropePMC, and
+    # pmid:<id> for PubMed. Normalize DOIs to lowercase for comparison.
+    dois = [r["doi"].lower() for r in all_results if r.get("doi")]
     in_db_dois: set[str] = set()
     if dois:
         try:
             with engine.connect() as conn:
+                # external_id stores raw DOIs (e.g. "10.1234/foo") for most sources
                 rows_db = conn.execute(text(
-                    "SELECT doi FROM literature_document WHERE doi = ANY(:dois) AND project_context = 'literev'"
+                    "SELECT LOWER(external_id) FROM literature_document "
+                    "WHERE LOWER(external_id) = ANY(:dois) AND project_context = 'literev'"
                 ), {"dois": dois}).fetchall()
                 in_db_dois = {r[0] for r in rows_db}
         except Exception as _dbe:
             logger.warning(f"federated DB check error: {_dbe}")
     for r in all_results:
-        r["in_local_db"] = bool(r.get("doi") and r["doi"] in in_db_dois)
+        r["in_local_db"] = bool(r.get("doi") and r["doi"].lower() in in_db_dois)
 
     # Déduplication par DOI (sinon titre normalisé), suivi des sources
     import re as _re2
