@@ -744,6 +744,7 @@ def _search_local_doc_ids(
     mode: str,
     filters: dict,
     limit: int = 10_000,
+    threshold: float = 0.35,
 ) -> list[str]:
     """Run the same local-DB search logic as /search and return matching doc IDs.
 
@@ -789,12 +790,13 @@ def _search_local_doc_ids(
 
     if use_vector:
         params["q_emb"] = str(query_embedding)
+        params["threshold"] = threshold
         sql = text(f"""
             SELECT DISTINCT d.id
             FROM document_chunk c
             JOIN literature_document d ON d.id = c.document_id
             WHERE c.embedding IS NOT NULL
-              AND (1 - (c.embedding <=> CAST(:q_emb AS vector))) > 0.45
+              AND (1 - (c.embedding <=> CAST(:q_emb AS vector))) > :threshold
               {where_sql}
             LIMIT :limit
         """)
@@ -7141,7 +7143,7 @@ def _run_user_scenario_populate(
             if _mr:
                 _scenario_mode = _mr
 
-        _local_ids = _search_local_doc_ids(query, _scenario_mode, filters, limit=max_results)
+        _local_ids = _search_local_doc_ids(query, _scenario_mode, filters, limit=100_000)
 
         if _local_ids:
             with engine.begin() as _lc2:
