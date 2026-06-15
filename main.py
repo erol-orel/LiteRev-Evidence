@@ -8049,16 +8049,27 @@ def _run_user_scenario_populate(
         except Exception:
             pass
         try:
-            _run_semantic_rerank_inline(scenario_id, query)
+            _n_scored = _run_semantic_rerank_inline(scenario_id, query)
             with engine.begin() as _cconn:
+                # Remove articles that scored below threshold
                 _n_removed = _cconn.execute(text("""
                     DELETE FROM article_scenarios
                     WHERE scenario_id = :sid
                       AND similarity_score IS NOT NULL
                       AND similarity_score < :thr
                 """), {"sid": scenario_id, "thr": _clean_thr}).rowcount
-            if _n_removed:
-                logger.info(f"Post-populate cleanup {scenario_id}: {_n_removed} articles sous le seuil supprimés")
+                # Remove articles still unscored after inline rerank (no abstract — can't be validated)
+                # Only do this if inline rerank actually ran and scored at least some articles,
+                # to avoid wiping everything when OpenAI key is absent.
+                _n_null_removed = 0
+                if _n_scored > 0:
+                    _n_null_removed = _cconn.execute(text("""
+                        DELETE FROM article_scenarios
+                        WHERE scenario_id = :sid
+                          AND similarity_score IS NULL
+                    """), {"sid": scenario_id}).rowcount
+            if _n_removed or _n_null_removed:
+                logger.info(f"Post-populate cleanup {scenario_id}: {_n_removed} sous seuil + {_n_null_removed} non scorés supprimés")
                 with engine.begin() as _ac:
                     _ac.execute(text("""
                         UPDATE user_scenarios
@@ -8717,6 +8728,19 @@ def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict
                         """), {"sid": scenario_id, "thr": _filter_threshold}).rowcount
                     if _deleted_below:
                         logger.info(f"Pipeline {scenario_id}: removed {_deleted_below} below-threshold papers after rerank")
+
+                    # Final cleanup: remove articles still unscored after embed+rerank.
+                    # These are articles with no abstract and no stored embedding — they cannot
+                    # appear in semantic search results, so they must not be in the corpus count.
+                    _deleted_null = _clean_conn.execute(text("""
+                        DELETE FROM article_scenarios
+                        WHERE scenario_id = :sid
+                          AND similarity_score IS NULL
+                    """), {"sid": scenario_id}).rowcount
+                    if _deleted_null:
+                        logger.info(f"Pipeline {scenario_id}: removed {_deleted_null} unscored articles (no abstract/embedding)")
+
+                    if _deleted_below or _deleted_null:
                         with engine.begin() as _ac:
                             _ac.execute(text("""
                                 UPDATE user_scenarios
