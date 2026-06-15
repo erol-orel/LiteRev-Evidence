@@ -8380,18 +8380,23 @@ def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict
             except Exception:
                 pass
 
-            for _ft_idx, row in enumerate(ft_rows):
+            from concurrent.futures import ThreadPoolExecutor, as_completed
+            import threading
+            
+            _ft_lock = threading.Lock()
+            _ft_done_count = 0
+            
+            def _process_ft_row(row):
                 _ext_id = row["external_id"] or ""
-                # Normaliser le DOI : retirer les préfixes URL (https://doi.org/, etc.)
                 _doi = _normalize_doi(row["doi"] or "") or ""
                 _pmid = row["pmid"] or ""
                 _source = row["source"] or ""
                 _fulltext = None
                 _source_used = None
-
-                _ft_fail_reasons: list[str] = []
+                _ft_fail_reasons = []
+                
                 try:
-                    # Source 1 : PMC (via PMCID résolu)
+                    # Source 1 : PMC
                     _pmcid = _resolve_pmcid_ft(_ext_id, _pmid, _doi)
                     if _pmcid:
                         _r_pmc = _ft_get(f"{_EPMC_BASE_FT}/{_pmcid}/fullTextXML", timeout=30)
@@ -8403,6 +8408,7 @@ def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict
                                 _ft_fail_reasons.append(f"europepmc:{_pmcid}:xml_parse_empty")
                         elif _r_pmc:
                             _ft_fail_reasons.append(f"europepmc:{_pmcid}:http_{_r_pmc.status_code}")
+                        
                         if not _fulltext:
                             _pmcid_num = _pmcid.replace("PMC", "")
                             _r_ncbi = _ft_get(f"{_NCBI_BASE_FT}/efetch.fcgi",
@@ -8419,9 +8425,8 @@ def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict
                                 _ft_fail_reasons.append(f"pmc:{_pmcid}:http_{_r_ncbi.status_code}")
                     else:
                         _ft_fail_reasons.append("pmcid:not_resolved")
-                    _time.sleep(0.35)
-
-                    # Source 2 : Unpaywall (DOI → PDF)
+                    
+                    # Source 2 : Unpaywall
                     if not _fulltext and _doi and _doi.startswith("10."):
                         _r_uw = _ft_get(f"https://api.unpaywall.org/v2/{_doi}",
                                         params={"email": _UNPAYWALL_EMAIL})
@@ -8451,11 +8456,10 @@ def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict
                             _ft_fail_reasons.append(f"unpaywall:http_{_r_uw.status_code}")
                         else:
                             _ft_fail_reasons.append("unpaywall:no_doi" if not _doi else "unpaywall:timeout")
-                        _time.sleep(1.0)
                     elif not _doi:
                         _ft_fail_reasons.append("unpaywall:skipped_no_doi")
-
-                    # Source 3 : bioRxiv/medRxiv (DOI 10.1101/...)
+                    
+                    # Source 3 : bioRxiv/medRxiv
                     if not _fulltext and _doi and _doi.startswith("10.1101/"):
                         for _srv in ["biorxiv", "medrxiv"]:
                             _r_bx = _ft_get(f"https://api.biorxiv.org/details/{_srv}/{_doi}/na/json")
@@ -8475,8 +8479,7 @@ def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict
                                         _ft_fail_reasons.append(f"{_srv}:not_found")
                                 except Exception as _bx_e:
                                     _ft_fail_reasons.append(f"{_srv}:parse_error:{_bx_e}")
-                        _time.sleep(0.5)
-
+                    
                     # Source 4 : Semantic Scholar
                     if not _fulltext:
                         _ss_id = None
@@ -8510,9 +8513,8 @@ def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict
                                 _ft_fail_reasons.append(f"semanticscholar:http_{_r_ss.status_code}")
                         else:
                             _ft_fail_reasons.append("semanticscholar:no_identifier")
-                        _time.sleep(1.0)
-
-                    # Source 5 : OpenAlex (open_access.oa_url)
+                    
+                    # Source 5 : OpenAlex
                     if not _fulltext and (_ext_id.startswith("W") or _doi):
                         _oa_work_url = (
                             f"https://api.openalex.org/works/{_ext_id}"
@@ -8537,29 +8539,43 @@ def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict
                                 _ft_fail_reasons.append(f"openalex:parse_error:{_oa_e}")
                         elif _r_oa:
                             _ft_fail_reasons.append(f"openalex:http_{_r_oa.status_code}")
-                        _time.sleep(0.2)
-
+                    
                     if _fulltext and _source_used:
                         _chunks_ft = _chunk_text_ft(_fulltext)
                         if _chunks_ft:
                             _insert_fulltext_chunks_ft(row["id"], _chunks_ft, _source_used, _ft_emb_client)
-                            ft_fetched += 1
+                            return True, None
                         else:
-                            ft_errors += 1
                             logger.warning(f"Fulltext doc {row['id']}: text retrieved but produced 0 chunks (source={_source_used})")
+                            return False, "0_chunks"
                     else:
-                        # Aucune source n'a fourni de texte intégral
-                        ft_errors += 1
                         logger.info(f"Fulltext unavailable doc {row['id']} (ext_id={_ext_id}, doi={_doi}): {' | '.join(_ft_fail_reasons) or 'no_sources_tried'}")
-                    # Mise à jour progression
-                    if (_ft_idx + 1) % 10 == 0:
-                        update_step("fulltext", "running",
-                                    done=ft_fetched, total=ft_total, paywall=ft_errors,
-                                    pct=round((_ft_idx + 1) / ft_total * 100, 1) if ft_total > 0 else 0)
+                        return False, "not_found"
                 except Exception as _ft_e:
-                    ft_errors += 1
                     logger.warning(f"Fulltext doc {row['id']}: {_ft_e}")
-                _time.sleep(0.05)
+                    return False, str(_ft_e)
+
+            with ThreadPoolExecutor(max_workers=5) as executor:
+                futures = {executor.submit(_process_ft_row, row): row for row in ft_rows}
+                for future in as_completed(futures):
+                    try:
+                        success, _ = future.result()
+                        with _ft_lock:
+                            _ft_done_count += 1
+                            if success:
+                                ft_fetched += 1
+                            else:
+                                ft_errors += 1
+                            
+                            if _ft_done_count % 10 == 0 or _ft_done_count == ft_total:
+                                update_step("fulltext", "running",
+                                            done=_ft_done_count, total=ft_total, paywall=ft_errors,
+                                            pct=round((_ft_done_count) / ft_total * 100, 1) if ft_total > 0 else 0)
+                    except Exception as e:
+                        with _ft_lock:
+                            _ft_done_count += 1
+                            ft_errors += 1
+                            logger.error(f"Error in fulltext worker: {e}")
 
             update_step("fulltext", "done", fetched=ft_fetched, total=ft_total,
                         paywall_or_failed=ft_errors)
