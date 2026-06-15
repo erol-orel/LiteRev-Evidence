@@ -47,7 +47,7 @@ jobs:
             deploy)   echo 'cmd=cd /opt/literev-api && bash deploy.sh' >> "$GITHUB_OUTPUT" ;;
             pipeline-status)
               cat >> "$GITHUB_OUTPUT" << 'PIPELINE_EOF'
-cmd=ps aux | grep -E 'fetch_fulltext|embed_corpus' | grep -v grep; echo '---db-stats---'; source /etc/literev-api.env && sudo -u postgres psql literev -c "SELECT COUNT(*) as fulltext_chunks FROM document_chunks WHERE chunk_type='fulltext_section';" -c "SELECT COUNT(*) as embedded FROM document_chunks WHERE chunk_type='fulltext_section' AND embedding IS NOT NULL;" -c "SELECT COUNT(DISTINCT doc_id) as docs_with_fulltext FROM document_chunks WHERE chunk_type='fulltext_section';"
+cmd=ps aux | grep -E 'fetch_fulltext|embed_corpus' | grep -v grep; echo '---reprocess log (last 20 lines)---'; tail -20 /tmp/fulltext_reprocess.log 2>/dev/null || echo 'not started'; echo '---new docs log (last 5 lines)---'; tail -5 /tmp/fulltext_new.log 2>/dev/null || echo 'not started'; echo '---embed log (last 5 lines)---'; tail -5 /tmp/embed_after_fulltext.log 2>/dev/null || echo 'not started'
 PIPELINE_EOF
               ;;
             custom)
