@@ -7190,7 +7190,7 @@ def _run_user_scenario_populate(
                 for _lid in _local_ids:
                     _lc2.execute(text("""
                         INSERT INTO article_scenarios (document_id, scenario_id, similarity_score)
-                        VALUES (:doc_id, :sid, 0.9)
+                        VALUES (:doc_id, :sid, NULL)
                         ON CONFLICT (document_id, scenario_id) DO NOTHING
                     """), {"doc_id": _lid, "sid": scenario_id})
                     local_linked += 1
