@@ -895,6 +895,7 @@ def _search_local_doc_ids(
             JOIN literature_document d ON d.id = c.document_id
             WHERE c.embedding IS NOT NULL
               AND (1 - (c.embedding <=> CAST(:q_emb AS vector))) > :threshold
+              AND d.abstract IS NOT NULL AND length(TRIM(d.abstract)) >= 30
               {where_sql}
             LIMIT :limit
         """)
@@ -904,6 +905,7 @@ def _search_local_doc_ids(
             FROM document_chunk c
             JOIN literature_document d ON d.id = c.document_id
             WHERE ({any_match_sql})
+              AND d.abstract IS NOT NULL AND length(TRIM(d.abstract)) >= 30
               {where_sql}
             LIMIT :limit
         """)
@@ -6838,6 +6840,11 @@ def delete_user_scenario(scenario_id: str, _: None = Depends(require_api_key)) -
         conn.execute(text("""
             DELETE FROM article_scenarios WHERE scenario_id = :sid
         """), {"sid": scenario_id})
+        # Supprimer les paramètres du scénario
+        conn.execute(text("""
+            DELETE FROM scenario_settings WHERE scenario_id = :sid
+        """), {"sid": scenario_id})
+        # Supprimer le scénario lui-même
         conn.execute(text("""
             DELETE FROM user_scenarios WHERE id = :id
         """), {"id": scenario_id})
