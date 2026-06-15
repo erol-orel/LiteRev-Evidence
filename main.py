@@ -176,6 +176,21 @@ def require_api_key(x_api_key: str | None = Header(default=None)) -> None:
 # ─────────────────────────────────────────────────────────────────────────────
 # Pydantic models
 # ─────────────────────────────────────────────────────────────────────────────
+def _normalize_doi(doi: str | None) -> str | None:
+    """Normalise un DOI en retirant les préfixes URL courants.
+    Exemples : 'https://doi.org/10.1016/...' → '10.1016/...'
+               'http://dx.doi.org/10.1016/...' → '10.1016/...'
+    """
+    if not doi:
+        return doi
+    doi = doi.strip()
+    for prefix in ("https://doi.org/", "http://doi.org/",
+                   "https://dx.doi.org/", "http://dx.doi.org/"):
+        if doi.lower().startswith(prefix):
+            return doi[len(prefix):]
+    return doi
+
+
 class DocumentIn(BaseModel):
     source: str = Field(..., min_length=1)
     title: str = Field(..., min_length=1)
@@ -195,6 +210,11 @@ class DocumentIn(BaseModel):
     authors: str | None = None
     journal: str | None = None
     open_access: bool | None = None
+
+    @field_validator("doi", mode="before")
+    @classmethod
+    def _clean_doi(cls, v: str | None) -> str | None:
+        return _normalize_doi(v)
 
 class ChunkIn(BaseModel):
     document_id: int = Field(..., ge=1)
@@ -7444,7 +7464,7 @@ def _run_user_scenario_populate(
                         except Exception:
                             pass
                     year = work.get("publication_year")
-                    doi = work.get("doi")
+                    doi = _normalize_doi(work.get("doi"))  # Normalise https://doi.org/ prefix
                     url = doi or f"https://openalex.org/{ext_id}"
                     content_text = f"{title}\n\n{abstract or ''}".strip()
                     if len(content_text) < 30:
@@ -7508,7 +7528,7 @@ def _run_user_scenario_populate(
                 if not _cr_items:
                     break
                 for item in _cr_items:
-                    doi = item.get("DOI")
+                    doi = _normalize_doi(item.get("DOI"))  # Normalise https://doi.org/ prefix
                     titles = item.get("title", [])
                     title = titles[0] if titles else ""
                     if not doi or not title:
@@ -7590,7 +7610,7 @@ def _run_user_scenario_populate(
                 for res in _ep_results:
                     pmid = res.get("pmid")
                     pmcid = res.get("pmcid")
-                    doi = res.get("doi")
+                    doi = _normalize_doi(res.get("doi"))  # Normalise https://doi.org/ prefix
                     ext_id = pmcid or pmid or doi
                     title = res.get("title") or ""
                     if not ext_id or not title:
@@ -7870,7 +7890,7 @@ def _run_user_scenario_populate(
                         _title = _r.get("title", "")
                         if not _title:
                             continue
-                        _doi = _r.get("doi", _r.get("DOI", ""))
+                        _doi = _normalize_doi(_r.get("doi", _r.get("DOI", "")))  # Normalise https://doi.org/ prefix
                         _cochrane_results.append({
                             "title": _title,
                             "abstract": _r.get("abstract", _r.get("description", "")),
@@ -8427,7 +8447,8 @@ def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict
 
             for _ft_idx, row in enumerate(ft_rows):
                 _ext_id = row["external_id"] or ""
-                _doi = row["doi"] or ""
+                # Normaliser le DOI : retirer les préfixes URL (https://doi.org/, etc.)
+                _doi = _normalize_doi(row["doi"] or "") or ""
                 _pmid = row["pmid"] or ""
                 _source = row["source"] or ""
                 _fulltext = None
