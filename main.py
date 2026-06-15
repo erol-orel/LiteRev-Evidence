@@ -7088,6 +7088,71 @@ def _generate_search_strategy(query: str) -> dict:
         return {"general": query, "pubmed": query, "explanation": "", "synonyms": []}
 
 
+def _ingest_doc_direct(
+    source: str,
+    title: str,
+    abstract: str | None,
+    year: int | None,
+    url: str | None,
+    external_id: str | None,
+    doi: str | None,
+    authors: str | None = None,
+    journal: str | None = None,
+    source_type: str = "article",
+    project_context: str = "literev",
+) -> int:
+    """INSERT SQL direct d'un document + chunk title_abstract.
+    Évite les appels HTTP à l'API locale (POST /documents + POST /chunks).
+    Retourne l'ID du document (existant ou nouvellement créé).
+    """
+    doi = _normalize_doi(doi)
+    content_text = f"{title}\n\n{abstract or ''}".strip()
+
+    # Vérifier si le document existe déjà
+    with engine.connect() as _c:
+        existing = _c.execute(text("""
+            SELECT id FROM literature_document
+            WHERE external_id = :eid AND project_context = :ctx LIMIT 1
+        """), {"eid": external_id, "ctx": project_context}).scalar()
+    if existing:
+        return existing
+
+    # INSERT direct du document
+    with engine.begin() as _c:
+        doc_id = _c.execute(text("""
+            INSERT INTO literature_document (
+                source, title, abstract, year, url, external_id,
+                project_context, source_type, doi, authors, journal
+            ) VALUES (
+                :source, :title, :abstract, :year, :url, :external_id,
+                :project_context, :source_type, :doi, :authors, :journal
+            ) RETURNING id
+        """), {
+            "source": source, "title": title, "abstract": abstract,
+            "year": year, "url": url, "external_id": external_id,
+            "project_context": project_context, "source_type": source_type,
+            "doi": doi, "authors": authors, "journal": journal,
+        }).scalar_one()
+
+    # INSERT direct du chunk title_abstract
+    if len(content_text) >= 30:
+        with engine.begin() as _c:
+            _c.execute(text("""
+                INSERT INTO document_chunk (
+                    document_id, chunk_index, content, chunk_type,
+                    token_count, chunk_weight, metadata_json
+                ) VALUES (
+                    :doc_id, 0, :content, 'title_abstract',
+                    :token_count, 1.0, '{}'
+                )
+            """), {
+                "doc_id": doc_id,
+                "content": content_text,
+                "token_count": len(content_text.split()),
+            })
+    return doc_id
+
+
 def _run_user_scenario_populate(
     scenario_id: str,
     query: str,
@@ -7284,85 +7349,25 @@ def _run_user_scenario_populate(
                     continue
 
                 try:
-                    # Vérifier si l'article existe déjà en DB
-                    with engine.connect() as conn:
-                        existing = conn.execute(text("""
-                            SELECT id FROM literature_document
-                            WHERE external_id = :pmid AND project_context = 'literev'
-                            LIMIT 1
-                        """), {"pmid": pmid}).mappings().first()
-
-                    if existing:
-                        doc_id = existing["id"]
-                    else:
-                        # Ingérer via l'API locale
-                        doc_r = _requests.post(
-                            f"{API_LOCAL}/documents",
-                            headers=HEADERS_LOCAL,
-                            json={
-                                "source": "pubmed",
-                                "title": title,
-                                "abstract": abstract or None,
-                                "year": year,
-                                "url": url,
-                                "external_id": pmid,
-                                "project_context": "literev",
-                                "source_type": "article",
-                                "disease_or_condition": None,
-                                "scenario_type": scenario_id,
-                                "geographic_scope": None,
-                                "evidence_category": None,
-                                "authors": authors,
-                                "journal": journal,
-                                "doi": doi,
-                            },
-                            timeout=30,
-                        )
-                        doc_r.raise_for_status()
-                        doc_id = doc_r.json()["id"]
-
-                        # Créer le chunk
-                        _requests.post(
-                            f"{API_LOCAL}/chunks",
-                            headers=HEADERS_LOCAL,
-                            json={
-                                "document_id": doc_id,
-                                "chunk_index": 0,
-                                "content": content_text,
-                                "chunk_type": "title_abstract",
-                                "section_label": None,
-                                "char_start": None,
-                                "char_end": None,
-                                "token_count": len(content_text.split()),
-                                "chunk_weight": 1.0,
-                                "metadata_json": {},
-                            },
-                            timeout=60,
-                        )
-
-                    # Assigner l'article au scénario utilisateur dans article_scenarios
+                    doc_id = _ingest_doc_direct(
+                        source="pubmed", title=title, abstract=abstract or None,
+                        year=year, url=url, external_id=pmid, doi=doi,
+                        authors=authors, journal=journal,
+                    )
                     with engine.begin() as conn:
                         conn.execute(text("""
                             INSERT INTO article_scenarios (document_id, scenario_id, similarity_score)
                             VALUES (:doc_id, :sid, NULL)
                             ON CONFLICT (document_id, scenario_id) DO NOTHING
                         """), {"doc_id": doc_id, "sid": scenario_id})
-
                     ingested += 1
                     if _pipeline_callback is None:
                         _user_scenario_populate_jobs[scenario_id]["ingested"] = ingested
                         _user_scenario_populate_jobs[scenario_id]["sources"]["pubmed"] = \
                             _user_scenario_populate_jobs[scenario_id]["sources"].get("pubmed", 0) + 1
-
                 except Exception as e:
                     logger.warning(f"Populate user_scenario {scenario_id} - PMID {pmid}: {e}")
                     errors += 1
-
-                _time.sleep(0.1)
-
-            # Pause entre batches pour respecter les limites NCBI
-            if batch_idx < n_batches - 1:
-                _time.sleep(0.5)
 
         # ── Ingestion OpenAlex ────────────────────────────────────────────────
         try:
@@ -7405,25 +7410,10 @@ def _run_user_scenario_populate(
                     if len(content_text) < 30:
                         continue
                     try:
-                        with engine.connect() as _c:
-                            existing = _c.execute(text("""
-                                SELECT id FROM literature_document
-                                WHERE external_id = :eid AND project_context = 'literev' LIMIT 1
-                            """), {"eid": ext_id}).mappings().first()
-                        if existing:
-                            doc_id = existing["id"]
-                        else:
-                            doc_r = _requests.post(f"{API_LOCAL}/documents", headers=HEADERS_LOCAL, json={
-                                "source": "openalex", "title": title, "abstract": abstract or None,
-                                "year": year, "url": url, "external_id": ext_id,
-                                "project_context": "literev", "source_type": "article", "doi": doi,
-                            }, timeout=30)
-                            doc_r.raise_for_status()
-                            doc_id = doc_r.json()["id"]
-                            _requests.post(f"{API_LOCAL}/chunks", headers=HEADERS_LOCAL, json={
-                                "document_id": doc_id, "chunk_index": 0, "content": content_text,
-                                "chunk_type": "title_abstract", "token_count": len(content_text.split()), "chunk_weight": 1.0, "metadata_json": {},
-                            }, timeout=60)
+                        doc_id = _ingest_doc_direct(
+                            source="openalex", title=title, abstract=abstract or None,
+                            year=year, url=url, external_id=ext_id, doi=doi,
+                        )
                         with engine.begin() as _c:
                             _c.execute(text("""
                                 INSERT INTO article_scenarios (document_id, scenario_id, similarity_score)
@@ -7437,7 +7427,6 @@ def _run_user_scenario_populate(
                             _user_scenario_populate_jobs[scenario_id]["ingested"] = ingested
                     except Exception as _e:
                         errors += 1
-                    _time.sleep(0.05)
                 if len(_oa_results) < _oa_batch:
                     break  # Plus de résultats disponibles
                 _oa_page += 1
@@ -7484,25 +7473,10 @@ def _run_user_scenario_populate(
                     if len(content_text) < 30:
                         continue
                     try:
-                        with engine.connect() as _c:
-                            existing = _c.execute(text("""
-                                SELECT id FROM literature_document
-                                WHERE external_id = :eid AND project_context = 'literev' LIMIT 1
-                            """), {"eid": doi}).mappings().first()
-                        if existing:
-                            doc_id = existing["id"]
-                        else:
-                            doc_r = _requests.post(f"{API_LOCAL}/documents", headers=HEADERS_LOCAL, json={
-                                "source": "crossref", "title": title, "abstract": abstract or None,
-                                "year": year, "url": url, "external_id": doi,
-                                "project_context": "literev", "source_type": "article", "doi": doi,
-                            }, timeout=30)
-                            doc_r.raise_for_status()
-                            doc_id = doc_r.json()["id"]
-                            _requests.post(f"{API_LOCAL}/chunks", headers=HEADERS_LOCAL, json={
-                                "document_id": doc_id, "chunk_index": 0, "content": content_text,
-                                "chunk_type": "title_abstract", "token_count": len(content_text.split()), "chunk_weight": 1.0, "metadata_json": {},
-                            }, timeout=60)
+                        doc_id = _ingest_doc_direct(
+                            source="crossref", title=title, abstract=abstract or None,
+                            year=year, url=url, external_id=doi, doi=doi,
+                        )
                         with engine.begin() as _c:
                             _c.execute(text("""
                                 INSERT INTO article_scenarios (document_id, scenario_id, similarity_score)
@@ -7516,7 +7490,6 @@ def _run_user_scenario_populate(
                             _user_scenario_populate_jobs[scenario_id]["ingested"] = ingested
                     except Exception as _e:
                         errors += 1
-                    _time.sleep(0.05)
                 if len(_cr_items) < _cr_rows:
                     break  # Plus de résultats
                 _cr_offset += _cr_rows
@@ -7566,25 +7539,10 @@ def _run_user_scenario_populate(
                     if len(content_text) < 30:
                         continue
                     try:
-                        with engine.connect() as _c:
-                            existing = _c.execute(text("""
-                                SELECT id FROM literature_document
-                                WHERE external_id = :eid AND project_context = 'literev' LIMIT 1
-                            """), {"eid": ext_id}).mappings().first()
-                        if existing:
-                            doc_id = existing["id"]
-                        else:
-                            doc_r = _requests.post(f"{API_LOCAL}/documents", headers=HEADERS_LOCAL, json={
-                                "source": "europepmc", "title": title, "abstract": abstract or None,
-                                "year": year, "url": url, "external_id": ext_id,
-                                "project_context": "literev", "source_type": "article", "doi": doi,
-                            }, timeout=30)
-                            doc_r.raise_for_status()
-                            doc_id = doc_r.json()["id"]
-                            _requests.post(f"{API_LOCAL}/chunks", headers=HEADERS_LOCAL, json={
-                                "document_id": doc_id, "chunk_index": 0, "content": content_text,
-                                "chunk_type": "title_abstract", "token_count": len(content_text.split()), "chunk_weight": 1.0, "metadata_json": {},
-                            }, timeout=60)
+                        doc_id = _ingest_doc_direct(
+                            source="europepmc", title=title, abstract=abstract or None,
+                            year=year, url=url, external_id=ext_id, doi=doi,
+                        )
                         with engine.begin() as _c:
                             _c.execute(text("""
                                 INSERT INTO article_scenarios (document_id, scenario_id, similarity_score)
@@ -7598,7 +7556,6 @@ def _run_user_scenario_populate(
                             _user_scenario_populate_jobs[scenario_id]["ingested"] = ingested
                     except Exception as _e:
                         errors += 1
-                    _time.sleep(0.05)
                 # Avancer le curseur EuropePMC
                 _ep_next_cursor = _ep_data.get("nextCursorMark")
                 if not _ep_next_cursor or _ep_next_cursor == _ep_cursor_mark or len(_ep_results) < _ep_page_size:
@@ -7647,25 +7604,11 @@ def _run_user_scenario_populate(
                         if len(_content) < 30:
                             continue
                         try:
-                            with engine.connect() as _c:
-                                _ex = _c.execute(text("""
-                                    SELECT id FROM literature_document
-                                    WHERE external_id = :eid AND project_context = 'literev' LIMIT 1
-                                """), {"eid": _ext_id}).mappings().first()
-                            if _ex:
-                                _doc_id = _ex["id"]
-                            else:
-                                _dr = _requests.post(f"{API_LOCAL}/documents", headers=HEADERS_LOCAL, json={
-                                    "source": _server, "title": _title, "abstract": _abstract or None,
-                                    "year": _year, "url": _url_art, "external_id": _ext_id,
-                                    "project_context": "literev", "source_type": "preprint", "doi": _doi,
-                                }, timeout=30)
-                                _dr.raise_for_status()
-                                _doc_id = _dr.json()["id"]
-                                _requests.post(f"{API_LOCAL}/chunks", headers=HEADERS_LOCAL, json={
-                                    "document_id": _doc_id, "chunk_index": 0, "content": _content,
-                                    "chunk_type": "title_abstract", "token_count": len(_content.split()), "chunk_weight": 1.0, "metadata_json": {},
-                                }, timeout=60)
+                            _doc_id = _ingest_doc_direct(
+                                source=_server, title=_title, abstract=_abstract or None,
+                                year=_year, url=_url_art, external_id=_ext_id, doi=_doi,
+                                source_type="preprint",
+                            )
                             with engine.begin() as _c:
                                 _c.execute(text("""
                                     INSERT INTO article_scenarios (document_id, scenario_id, similarity_score)
@@ -7679,7 +7622,6 @@ def _run_user_scenario_populate(
                                 _user_scenario_populate_jobs[scenario_id]["ingested"] = ingested
                         except Exception:
                             errors += 1
-                        _time.sleep(0.03)
                     _msgs = _data.get("messages", [])
                     _total_srv = 0
                     for _m in _msgs:
@@ -7759,26 +7701,12 @@ def _run_user_scenario_populate(
                         if len(_content_p) < 30:
                             continue
                         try:
-                            with engine.connect() as _c:
-                                _ex = _c.execute(text("""
-                                    SELECT id FROM literature_document
-                                    WHERE external_id = :eid AND project_context = 'literev' LIMIT 1
-                                """), {"eid": _ext_id_p}).mappings().first()
-                            if _ex:
-                                _doc_id = _ex["id"]
-                            else:
-                                _dr = _requests.post(f"{API_LOCAL}/documents", headers=HEADERS_LOCAL, json={
-                                    "source": "prospero", "title": _title_val, "abstract": _abstract_val,
-                                    "year": _year_val, "url": f"https://pubmed.ncbi.nlm.nih.gov/{_pmid_val}/",
-                                    "external_id": _ext_id_p, "project_context": "literev",
-                                    "source_type": "systematic_review", "doi": _doi_val,
-                                }, timeout=30)
-                                _dr.raise_for_status()
-                                _doc_id = _dr.json()["id"]
-                                _requests.post(f"{API_LOCAL}/chunks", headers=HEADERS_LOCAL, json={
-                                    "document_id": _doc_id, "chunk_index": 0, "content": _content_p,
-                                    "chunk_type": "title_abstract", "token_count": len(_content_p.split()), "chunk_weight": 1.0, "metadata_json": {},
-                                }, timeout=60)
+                            _doc_id = _ingest_doc_direct(
+                                source="prospero", title=_title_val, abstract=_abstract_val,
+                                year=_year_val, url=f"https://pubmed.ncbi.nlm.nih.gov/{_pmid_val}/",
+                                external_id=_ext_id_p, doi=_doi_val,
+                                source_type="systematic_review",
+                            )
                             with engine.begin() as _c:
                                 _c.execute(text("""
                                     INSERT INTO article_scenarios (document_id, scenario_id, similarity_score)
@@ -7791,7 +7719,6 @@ def _run_user_scenario_populate(
                                 _user_scenario_populate_jobs[scenario_id]["ingested"] = ingested
                         except Exception:
                             errors += 1
-                        _time.sleep(0.1)
         except Exception as _e:
             logger.warning(f"PROSPERO populate {scenario_id}: {_e}")
 
@@ -7926,26 +7853,13 @@ def _run_user_scenario_populate(
                 if len(_content_c) < 30:
                     continue
                 try:
-                    with engine.connect() as _c:
-                        _ex = _c.execute(text("""
-                            SELECT id FROM literature_document
-                            WHERE external_id = :eid AND project_context = 'literev' LIMIT 1
-                        """), {"eid": _item["external_id"]}).mappings().first()
-                    if _ex:
-                        _doc_id = _ex["id"]
-                    else:
-                        _dr = _requests.post(f"{API_LOCAL}/documents", headers=HEADERS_LOCAL, json={
-                            "source": "cochrane", "title": _item["title"], "abstract": _item["abstract"],
-                            "year": _item["year"], "url": _item["url"], "external_id": _item["external_id"],
-                            "project_context": "literev", "source_type": "systematic_review", "doi": _item["doi"],
-                            "authors": _item["authors"], "journal": "Cochrane Database of Systematic Reviews",
-                        }, timeout=30)
-                        _dr.raise_for_status()
-                        _doc_id = _dr.json()["id"]
-                        _requests.post(f"{API_LOCAL}/chunks", headers=HEADERS_LOCAL, json={
-                            "document_id": _doc_id, "chunk_index": 0, "content": _content_c,
-                            "chunk_type": "title_abstract", "token_count": len(_content_c.split()), "chunk_weight": 1.0, "metadata_json": {},
-                        }, timeout=60)
+                    _doc_id = _ingest_doc_direct(
+                        source="cochrane", title=_item["title"], abstract=_item["abstract"],
+                        year=_item["year"], url=_item["url"], external_id=_item["external_id"],
+                        doi=_item["doi"], authors=_item["authors"],
+                        journal="Cochrane Database of Systematic Reviews",
+                        source_type="systematic_review",
+                    )
                     with engine.begin() as _c:
                         _c.execute(text("""
                             INSERT INTO article_scenarios (document_id, scenario_id, similarity_score)
@@ -7959,7 +7873,6 @@ def _run_user_scenario_populate(
                 except Exception as _e_ins:
                     errors += 1
                     logger.warning(f"Erreur insertion Cochrane article {_item.get('external_id')}: {_e_ins}")
-                _time.sleep(0.05)
         except Exception as _e_coch_global:
             logger.warning(f"Cochrane global populate {scenario_id}: {_e_coch_global}")
 
