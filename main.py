@@ -7154,6 +7154,30 @@ def _run_user_scenario_populate(
                     local_linked += 1
                     ingested += 1
             logger.info(f"Populate {scenario_id}: {local_linked} docs liés depuis la base locale")
+
+        # If local DB already covers the expected result count, we're done —
+        # no need to wait for external API calls.
+        _stored_count = 0
+        with engine.connect() as _cc:
+            _stored_count = _cc.execute(
+                text("SELECT result_count FROM user_scenarios WHERE id = :sid"),
+                {"sid": scenario_id}
+            ).scalar() or 0
+        if local_linked > 0 and local_linked >= _stored_count:
+            logger.info(
+                f"Populate {scenario_id}: local DB covers {local_linked}/{_stored_count} — skipping external APIs"
+            )
+            if _pipeline_callback is None:
+                _user_scenario_populate_jobs[scenario_id] = {
+                    "status": "done", "ingested": local_linked, "errors": 0,
+                    "total_found": local_linked,
+                    "sources": {"db_cache": local_linked, "pubmed": 0, "openalex": 0,
+                                "crossref": 0, "europepmc": 0, "medrxiv": 0,
+                                "biorxiv": 0, "prospero": 0, "cochrane": 0},
+                    "message": f"{local_linked} articles liés depuis la base locale."
+                }
+            return local_linked
+
     except Exception as _e_local:
         logger.warning(f"Local DB link failed for {scenario_id}: {_e_local}")
 
