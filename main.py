@@ -8202,9 +8202,15 @@ def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict
         ingested = _run_user_scenario_populate(
             scenario_id, query, filters, max_results, _pipeline_callback=ingest_callback
         )
-        update_step("ingest", "done", ingested=ingested)
+        # `ingested` from populate is a raw cumulative counter (includes ON CONFLICT duplicates
+        # and DB-cache articles). Get the real unique count from DB as the source of truth.
+        with engine.connect() as _ic:
+            _real_ingested = _ic.execute(text(
+                "SELECT COUNT(DISTINCT document_id) FROM article_scenarios WHERE scenario_id = :sid"
+            ), {"sid": scenario_id}).scalar() or 0
+        update_step("ingest", "done", ingested=_real_ingested, api_results_raw=ingested)
 
-        if ingested == 0:
+        if _real_ingested == 0:
             _user_scenario_pipeline_jobs[scenario_id]["overall_status"] = "done"
             _user_scenario_pipeline_jobs[scenario_id]["message"] = "Aucun article trouvé (7 sources interrogées)."
             return
@@ -8232,8 +8238,10 @@ def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict
                             _time.sleep(int(_r.headers.get("Retry-After", 10)))
                             continue
                         return _r
-                    except Exception:
+                    except Exception as _fe:
+                        logger.debug(f"_ft_get {url}: attempt {_att+1} failed: {_fe}")
                         _time.sleep(1)
+                logger.debug(f"_ft_get {url}: all retries exhausted")
                 return None
 
             def _parse_pmc_xml_ft(xml_str):
@@ -8414,6 +8422,7 @@ def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict
                 _fulltext = None
                 _source_used = None
 
+                _ft_fail_reasons: list[str] = []
                 try:
                     # Source 1 : PMC (via PMCID résolu)
                     _pmcid = _resolve_pmcid_ft(_ext_id, _pmid, _doi)
@@ -8423,6 +8432,10 @@ def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict
                             _fulltext = _parse_pmc_xml_ft(_r_pmc.text)
                             if _fulltext and len(_fulltext) > 500:
                                 _source_used = f"europepmc:{_pmcid}"
+                            else:
+                                _ft_fail_reasons.append(f"europepmc:{_pmcid}:xml_parse_empty")
+                        elif _r_pmc:
+                            _ft_fail_reasons.append(f"europepmc:{_pmcid}:http_{_r_pmc.status_code}")
                         if not _fulltext:
                             _pmcid_num = _pmcid.replace("PMC", "")
                             _r_ncbi = _ft_get(f"{_NCBI_BASE_FT}/efetch.fcgi",
@@ -8434,7 +8447,12 @@ def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict
                                     _source_used = f"pmc:{_pmcid}"
                                 else:
                                     _fulltext = None
-                        _time.sleep(0.35)
+                                    _ft_fail_reasons.append(f"pmc:{_pmcid}:xml_parse_empty")
+                            elif _r_ncbi:
+                                _ft_fail_reasons.append(f"pmc:{_pmcid}:http_{_r_ncbi.status_code}")
+                    else:
+                        _ft_fail_reasons.append("pmcid:not_resolved")
+                    _time.sleep(0.35)
 
                     # Source 2 : Unpaywall (DOI → PDF)
                     if not _fulltext and _doi and _doi.startswith("10."):
@@ -8457,9 +8475,18 @@ def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict
                                         _source_used = "unpaywall"
                                     else:
                                         _fulltext = None
-                            except Exception:
-                                pass
+                                        _ft_fail_reasons.append("unpaywall:pdf_empty")
+                                else:
+                                    _ft_fail_reasons.append(f"unpaywall:not_oa(is_oa={_uw_data.get('is_oa')})")
+                            except Exception as _uw_e:
+                                _ft_fail_reasons.append(f"unpaywall:parse_error:{_uw_e}")
+                        elif _r_uw:
+                            _ft_fail_reasons.append(f"unpaywall:http_{_r_uw.status_code}")
+                        else:
+                            _ft_fail_reasons.append("unpaywall:no_doi" if not _doi else "unpaywall:timeout")
                         _time.sleep(1.0)
+                    elif not _doi:
+                        _ft_fail_reasons.append("unpaywall:skipped_no_doi")
 
                     # Source 3 : bioRxiv/medRxiv (DOI 10.1101/...)
                     if not _fulltext and _doi and _doi.startswith("10.1101/"):
@@ -8476,8 +8503,11 @@ def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict
                                             break
                                         else:
                                             _fulltext = None
-                                except Exception:
-                                    pass
+                                            _ft_fail_reasons.append(f"{_srv}:pdf_empty")
+                                    else:
+                                        _ft_fail_reasons.append(f"{_srv}:not_found")
+                                except Exception as _bx_e:
+                                    _ft_fail_reasons.append(f"{_srv}:parse_error:{_bx_e}")
                         _time.sleep(0.5)
 
                     # Source 4 : Semantic Scholar
@@ -8504,8 +8534,15 @@ def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict
                                             _source_used = "semanticscholar"
                                         else:
                                             _fulltext = None
-                                except Exception:
-                                    pass
+                                            _ft_fail_reasons.append("semanticscholar:pdf_empty")
+                                    else:
+                                        _ft_fail_reasons.append(f"semanticscholar:no_oa_pdf")
+                                except Exception as _ss_e:
+                                    _ft_fail_reasons.append(f"semanticscholar:parse_error:{_ss_e}")
+                            elif _r_ss:
+                                _ft_fail_reasons.append(f"semanticscholar:http_{_r_ss.status_code}")
+                        else:
+                            _ft_fail_reasons.append("semanticscholar:no_identifier")
                         _time.sleep(1.0)
 
                     # Source 5 : OpenAlex (open_access.oa_url)
@@ -8526,8 +8563,13 @@ def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict
                                         _source_used = "openalex_oa"
                                     else:
                                         _fulltext = None
-                            except Exception:
-                                pass
+                                        _ft_fail_reasons.append("openalex:pdf_empty")
+                                else:
+                                    _ft_fail_reasons.append(f"openalex:not_oa(is_oa={_oa_info.get('is_oa')})")
+                            except Exception as _oa_e:
+                                _ft_fail_reasons.append(f"openalex:parse_error:{_oa_e}")
+                        elif _r_oa:
+                            _ft_fail_reasons.append(f"openalex:http_{_r_oa.status_code}")
                         _time.sleep(0.2)
 
                     if _fulltext and _source_used:
@@ -8537,10 +8579,11 @@ def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict
                             ft_fetched += 1
                         else:
                             ft_errors += 1
+                            logger.warning(f"Fulltext doc {row['id']}: text retrieved but produced 0 chunks (source={_source_used})")
                     else:
-                        # Pas de texte intégral accessible (paywall, PDF inaccessible, etc.)
+                        # Aucune source n'a fourni de texte intégral
                         ft_errors += 1
-                        logger.debug(f"Fulltext indisponible doc {row['id']} (paywall ou accès restreint)")
+                        logger.info(f"Fulltext unavailable doc {row['id']} (ext_id={_ext_id}, doi={_doi}): {' | '.join(_ft_fail_reasons) or 'no_sources_tried'}")
                     # Mise à jour progression
                     if (_ft_idx + 1) % 10 == 0:
                         update_step("fulltext", "running",

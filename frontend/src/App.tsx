@@ -2953,7 +2953,9 @@ function ScenariosView({
                             };
                             const pctHint = step === 'embed' && stepSt?.pct != null ? ` · ${stepSt.pct}%` : '';
                             const methodHint = step === 'clustering' && stepSt?.method ? ` · ${stepSt.method}` : '';
-                            return <span key={step} className={`inline-block w-1.5 h-1.5 rounded-full mx-0.5 ${dotCls}`} title={`${stepLabel[step] ?? step}: ${st ?? 'pending'}${pctHint}${methodHint}`} />;
+                            const ingestHint = step === 'ingest' && stepSt?.ingested != null
+                              ? ` · ${stepSt.ingested} uniq${stepSt.api_results_raw != null ? ` (${stepSt.api_results_raw} bruts)` : ''}` : '';
+                            return <span key={step} className={`inline-block w-1.5 h-1.5 rounded-full mx-0.5 ${dotCls}`} title={`${stepLabel[step] ?? step}: ${st ?? 'pending'}${ingestHint}${pctHint}${methodHint}`} />;
                           })}
                         </span>
                       </div>

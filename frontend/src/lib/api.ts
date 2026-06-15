@@ -2249,6 +2249,7 @@ export interface UserScenarioPopulateStatus {
 export interface PipelineStepStatus {
   status: 'pending' | 'running' | 'done' | 'error' | 'skipped';
   ingested?: number;
+  api_results_raw?: number;
   extracted?: number;
   extracted_this_run?: number;
   fetched?: number;
