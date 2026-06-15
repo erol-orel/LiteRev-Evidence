@@ -6659,11 +6659,7 @@ def list_user_scenarios() -> list[dict[str, Any]]:
                 us.id, us.name, us.query, us.mode, us.filters,
                 us.pinned, us.folder_id, us.created_at, us.updated_at,
                 us.populate_status, us.pipeline_status, us.pipeline_step, us.pipeline_progress,
-                CASE
-                    WHEN (SELECT COUNT(*) FROM article_scenarios WHERE scenario_id = us.id) > 0
-                    THEN (SELECT COUNT(DISTINCT document_id) FROM article_scenarios WHERE scenario_id = us.id)
-                    ELSE COALESCE(us.result_count, 0)
-                END AS result_count
+                COALESCE(us.result_count, 0) AS result_count
             FROM user_scenarios us
             ORDER BY us.pinned DESC, us.created_at DESC
         """)).mappings().all()
@@ -7175,13 +7171,11 @@ def _run_user_scenario_populate(
                     ingested += 1
             logger.info(f"Populate {scenario_id}: {local_linked} docs liés depuis la base locale")
 
-        # Update article count immediately so the UI shows local results right away
+        # Update article_count immediately (not result_count — that stays as the search count)
         if local_linked > 0:
             with engine.begin() as _uc:
                 _uc.execute(text("""
-                    UPDATE user_scenarios
-                    SET result_count = :cnt, article_count = :cnt
-                    WHERE id = :sid
+                    UPDATE user_scenarios SET article_count = :cnt WHERE id = :sid
                 """), {"cnt": local_linked, "sid": scenario_id})
 
     except Exception as _e_local:
@@ -7988,74 +7982,7 @@ def _run_user_scenario_populate(
         except Exception as _e_coch_global:
             logger.warning(f"Cochrane global populate {scenario_id}: {_e_coch_global}")
 
-        # ── Étape 9 : Récupération des articles déjà en DB (DB-cache) avec déduplication ──
-        # IMPORTANT : on exige que TOUS les termes significatifs de la requête soient
-        # présents (ET logique), pas seulement UN (OU). Avec un OU, des mots courants
-        # comme « demand » ou « forecast » rattachaient des milliers de documents sans
-        # rapport au scénario (corpus surdimensionné, comptages faux).
-        db_cached_count = 0
-        try:
-            _STOP = {"the", "a", "an", "of", "in", "on", "for", "and", "or", "to",
-                     "with", "by", "from", "using", "based", "via", "de", "la", "le",
-                     "des", "les", "un", "une", "et", "ou", "dans", "pour"}
-            query_terms = [t for t in re.split(r"\s+", re.sub(r"[^a-z0-9\s]", " ", query.lower()))
-                           if len(t) >= 3 and t not in _STOP]
-            if query_terms:
-                like_clauses = []
-                params = {"sid": scenario_id}
-                for i, term in enumerate(query_terms):
-                    key = f"term_{i}"
-                    params[key] = f"%{term}%"
-                    like_clauses.append(
-                        f"""(
-                            LOWER(COALESCE(title, '')) LIKE :{key}
-                            OR LOWER(COALESCE(abstract, '')) LIKE :{key}
-                        )"""
-                    )
-                # ET : tous les termes doivent matcher → précision élevée.
-                all_match_sql = " AND ".join(like_clauses)
-
-                # Récupérer les articles existants pertinents (cap de sécurité).
-                with engine.connect() as conn:
-                    existing_docs = conn.execute(text(f"""
-                        SELECT id FROM literature_document
-                        WHERE project_context = 'literev'
-                          AND ({all_match_sql})
-                        LIMIT 5000
-                    """), params).mappings().all()
-                
-                if existing_docs:
-                    # Récupérer les IDs des documents déjà assignés à ce scénario par les sources externes
-                    with engine.connect() as conn:
-                        assigned_docs = conn.execute(text("""
-                            SELECT document_id FROM article_scenarios
-                            WHERE scenario_id = :sid
-                        """), {"sid": scenario_id}).scalars().all()
-                    assigned_set = set(assigned_docs)
-                    
-                    # N'insérer et ne compter que les documents qui ne sont pas déjà assignés
-                    docs_to_assign = [doc for doc in existing_docs if doc["id"] not in assigned_set]
-                    
-                    if docs_to_assign:
-                        with engine.begin() as conn:
-                            for doc in docs_to_assign:
-                                conn.execute(text("""
-                                    INSERT INTO article_scenarios (document_id, scenario_id, similarity_score)
-                                    VALUES (:doc_id, :sid, 1.0)
-                                    ON CONFLICT (document_id, scenario_id) DO NOTHING
-                                """), {"doc_id": doc["id"], "sid": scenario_id})
-                                db_cached_count += 1
-                                ingested += 1
-                        
-                        if _pipeline_callback is None:
-                            _user_scenario_populate_jobs[scenario_id]["ingested"] += db_cached_count
-                            _user_scenario_populate_jobs[scenario_id]["sources"]["db_cache"] = db_cached_count
-                        logger.info(f"DB-cache: {db_cached_count} nouveaux articles déjà en DB assignés au scénario {scenario_id}")
-        except Exception as _e_db:
-            logger.warning(f"Erreur lors de la récupération du DB-cache: {_e_db}")
-
-        # ── Règle qualité : un article SANS abstract exploitable n'est pas retenu
-        #    dans le corpus (titre seul = non sélectionnable). ──
+        # ── Règle qualité : articles SANS abstract retirés du corpus ───────────
         try:
             with engine.begin() as conn:
                 _removed = conn.execute(text("""
@@ -8065,18 +7992,15 @@ def _run_user_scenario_populate(
                       AND (d.abstract IS NULL OR length(TRIM(d.abstract)) < 30)
                 """), {"sid": scenario_id}).rowcount
             if _removed:
-                logger.info(f"Populate {scenario_id}: {_removed} articles sans abstract retirés du corpus.")
+                logger.info(f"Populate {scenario_id}: {_removed} articles sans abstract retirés.")
         except Exception as _e_noabs:
             logger.warning(f"Suppression articles sans abstract {scenario_id}: {_e_noabs}")
 
-        # ── Mettre à jour le compteur dans user_scenarios ────────────────────────
+        # ── Mettre à jour article_count uniquement (result_count = count from search, never overwritten) ──
         with engine.begin() as conn:
             conn.execute(text("""
                 UPDATE user_scenarios
-                SET result_count = (
-                    SELECT COUNT(DISTINCT document_id) FROM article_scenarios WHERE scenario_id = :sid
-                ),
-                article_count = (
+                SET article_count = (
                     SELECT COUNT(DISTINCT document_id) FROM article_scenarios WHERE scenario_id = :sid
                 ),
                 populate_status = 'done',
@@ -8859,11 +8783,6 @@ def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict
                         pipeline_step = 'done',
                         pipeline_progress = 100,
                         article_count = (
-                            SELECT COUNT(DISTINCT document_id)
-                            FROM article_scenarios
-                            WHERE scenario_id = :sid
-                        ),
-                        result_count = (
                             SELECT COUNT(DISTINCT document_id)
                             FROM article_scenarios
                             WHERE scenario_id = :sid
