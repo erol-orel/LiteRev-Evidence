@@ -696,7 +696,7 @@ def search(payload: SearchIn) -> dict[str, Any]:
     params: dict[str, Any] = {
         "limit": payload.limit,
         "offset": payload.offset,
-        "ts_query_str": payload.query.strip(),
+        "ts_query_str": query.strip(),
         **where_params,
     }
 
