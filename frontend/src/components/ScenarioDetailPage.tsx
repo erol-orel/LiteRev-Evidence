@@ -6,7 +6,7 @@ import {
   Shield, Terminal, Zap, AlertTriangle,
   Globe, Upload, CheckCircle2, AlertCircle, Info,
   Microscope, Loader2, Download, Table2, BookOpen,
-  Network, Bell, Users, Rss
+  Network, Bell, Users, Rss, Sparkles, ClipboardList
 } from "lucide-react";
 import {
   fetchScenarioDetail,
@@ -2160,15 +2160,7 @@ function RagSection({ scenarioId, detail }: { scenarioId: string; detail: Scenar
 //   Phase 5 : Inclus
 // Inspiré du template officiel PRISMA 2020 (Page, McKenzie et al. 2021)
 
-const PRISMA_COLORS = {
-  identification: { fill: "#0e2d1f", stroke: "#1a6640", text: "#6ee7a0", label: "#a7f3c4" },
-  screening:      { fill: "#1a1a0a", stroke: "#7a6000", text: "#fbbf24", label: "#fde68a" },
-  eligibility:    { fill: "#1a0a0a", stroke: "#7a2020", text: "#f87171", label: "#fca5a5" },
-  included:       { fill: "#0a1a2a", stroke: "#1a4a7a", text: "#60a5fa", label: "#93c5fd" },
-  exclusion:      { fill: "#1a0e0e", stroke: "#6b2020", text: "#fca5a5", label: "#fecaca" },
-};
-
-const SOURCE_LABELS: Record<string, string> = {
+const SOURCE_LABELS_MAP: Record<string, string> = {
   pubmed: "PubMed",
   pmc: "PMC",
   openalex: "OpenAlex",
@@ -2182,270 +2174,54 @@ const SOURCE_LABELS: Record<string, string> = {
   preprints: "Preprints",
 };
 
-interface PrismaNode {
-  id: string;
-  phase: keyof typeof PRISMA_COLORS;
-  title: string;
-  count: number;
-  lines: string[];
-  exclusion?: { title: string; count: number; lines: string[] };
-}
-
-interface PrismaSourceEntry {
-  source: string;
-  count: number;
-}
-
-function PrismaSVGDiagram({
-  nodes,
-  sources,
-  totalIdentified,
-  duplicatesRemoved,
+function PrismaStageCard({
+  color,
+  label,
+  icon,
+  children,
 }: {
-  nodes: PrismaNode[];
-  sources: PrismaSourceEntry[];
-  totalIdentified: number;
-  duplicatesRemoved: number;
+  color: string;
+  label: string;
+  icon: React.ReactNode;
+  children: React.ReactNode;
 }) {
-  // ── Layout constants ──────────────────────────────────────────────────────
-  const W = 860;
-  const SRC_BOX_W = 140;   // width of each source box
-  const SRC_BOX_H = 60;    // height of each source box
-  const SRC_GAP = 12;      // gap between source boxes
-  const MAIN_BOX_W = 300;  // width of main flow boxes
-  const MAIN_BOX_H = 80;
-  const EXCL_W = 200;
-  const EXCL_H = 65;
-  const ROW_GAP = 50;
-
-  // Source boxes: arrange in a row at the top
-  const nSrc = sources.length;
-  const srcRowW = nSrc * SRC_BOX_W + (nSrc - 1) * SRC_GAP;
-  const srcStartX = (W - srcRowW) / 2;
-  const srcY = 20;
-
-  // Main flow: centered column below sources
-  const mainColX = (W - MAIN_BOX_W) / 2;
-  const EXCL_X = mainColX + MAIN_BOX_W + 40;
-
-  // Merge node ("Enregistrements regroupés") sits between sources and main flow
-  const mergeY = srcY + SRC_BOX_H + 60;
-  const MERGE_BOX_H = 70;
-
-  // Main flow starts below merge node
-  const mainStartY = mergeY + MERGE_BOX_H + 60;
-  const positions = nodes.map((_, i) => mainStartY + i * (MAIN_BOX_H + ROW_GAP));
-  const totalH = mainStartY + nodes.length * (MAIN_BOX_H + ROW_GAP) + 30;
-
-  const ic = PRISMA_COLORS.identification;
-  const ec = PRISMA_COLORS.exclusion;
-
   return (
-    <svg
-      viewBox={`0 0 ${W} ${totalH}`}
-      width="100%"
-      style={{ fontFamily: "ui-monospace, monospace", overflow: "visible" }}
-      aria-label="Diagramme PRISMA 2020"
-    >
-      {/* ── Source boxes (top row) ── */}
-      {sources.map((src, i) => {
-        const bx = srcStartX + i * (SRC_BOX_W + SRC_GAP);
-        const bcx = bx + SRC_BOX_W / 2;
-        return (
-          <g key={src.source}>
-            <rect x={bx} y={srcY} width={SRC_BOX_W} height={SRC_BOX_H}
-              rx={8} ry={8} fill={ic.fill} stroke={ic.stroke} strokeWidth={1.5} />
-            <text x={bcx} y={srcY + 18} fontSize={8} fill={ic.label}
-              fontWeight="700" letterSpacing="1" textAnchor="middle">
-              IDENTIFICATION
-            </text>
-            <text x={bcx} y={srcY + 32} fontSize={10} fill={ic.text}
-              fontWeight="600" textAnchor="middle">
-              {SOURCE_LABELS[src.source] ?? src.source.toUpperCase()}
-            </text>
-            <text x={bcx} y={srcY + 50} fontSize={16} fill={ic.text}
-              fontWeight="800" textAnchor="middle" fontFamily="ui-monospace">
-              {src.count.toLocaleString()}
-            </text>
-            {/* Connector down to merge node */}
-            <line
-              x1={bcx} y1={srcY + SRC_BOX_H}
-              x2={bcx} y2={mergeY - 10}
-              stroke={ic.stroke} strokeWidth={1} strokeDasharray="3 2"
-            />
-            <line
-              x1={bcx} y1={mergeY - 10}
-              x2={mainColX + MAIN_BOX_W / 2} y2={mergeY - 10}
-              stroke={ic.stroke} strokeWidth={1} strokeDasharray="3 2"
-            />
-          </g>
-        );
-      })}
+    <div className={`rounded-2xl border p-4 space-y-3 ${color}`}>
+      <div className="flex items-center gap-2">
+        {icon}
+        <span className="text-[10px] font-bold uppercase tracking-widest opacity-70">{label}</span>
+      </div>
+      {children}
+    </div>
+  );
+}
 
-      {/* Vertical connector from horizontal line to merge box */}
-      <line
-        x1={mainColX + MAIN_BOX_W / 2} y1={mergeY - 10}
-        x2={mainColX + MAIN_BOX_W / 2} y2={mergeY}
-        stroke={ic.stroke} strokeWidth={1.5}
-      />
-      <polygon
-        points={`${mainColX + MAIN_BOX_W / 2 - 5},${mergeY - 8} ${mainColX + MAIN_BOX_W / 2 + 5},${mergeY - 8} ${mainColX + MAIN_BOX_W / 2},${mergeY}`}
-        fill={ic.stroke}
-      />
+function PrismaBigNum({ value, sub }: { value: number; sub?: string }) {
+  return (
+    <div>
+      <span className="text-3xl font-black font-mono">{value.toLocaleString()}</span>
+      {sub && <p className="text-[10px] opacity-60 mt-0.5">{sub}</p>}
+    </div>
+  );
+}
 
-      {/* ── Merge / Regroupement box ── */}
-      <rect x={mainColX} y={mergeY} width={MAIN_BOX_W} height={MERGE_BOX_H}
-        rx={10} ry={10} fill={ic.fill} stroke={ic.stroke} strokeWidth={2} />
-      <text x={mainColX + 12} y={mergeY + 18} fontSize={9} fill={ic.label}
-        fontWeight="700" letterSpacing="1.5" textAnchor="start">
-        REGROUPEMENT
-      </text>
-      <text x={mainColX + 12} y={mergeY + 36} fontSize={11} fill={ic.text}
-        fontWeight="600" textAnchor="start">
-        Total enregistrements identifiés
-      </text>
-      <text x={mainColX + MAIN_BOX_W - 12} y={mergeY + 36} fontSize={20} fill={ic.text}
-        fontWeight="800" textAnchor="end" fontFamily="ui-monospace">
-        {totalIdentified.toLocaleString()}
-      </text>
-      <text x={mainColX + 12} y={mergeY + 52} fontSize={9} fill={ic.label}
-        opacity={0.75} textAnchor="start">
-        {nSrc} base{nSrc > 1 ? "s" : ""} de données interrogées
-      </text>
-      <text x={mainColX + 12} y={mergeY + 64} fontSize={9} fill={ic.label}
-        opacity={0.75} textAnchor="start">
-        dont {duplicatesRemoved} doublons retirés
-      </text>
+function PrismaRow({ label, value, accent }: { label: string; value: number | string; accent?: string }) {
+  return (
+    <div className="flex items-center justify-between text-[11px]">
+      <span className="opacity-60">{label}</span>
+      <span className={`font-mono font-semibold ${accent ?? ""}`}>{typeof value === "number" ? value.toLocaleString() : value}</span>
+    </div>
+  );
+}
 
-      {/* Exclusion box for duplicates */}
-      {duplicatesRemoved > 0 && (
-        <>
-          <line
-            x1={mainColX + MAIN_BOX_W} y1={mergeY + MERGE_BOX_H / 2}
-            x2={EXCL_X} y2={mergeY + MERGE_BOX_H / 2}
-            stroke="#7a2020" strokeWidth={1.5}
-          />
-          <polygon
-            points={`${EXCL_X - 8},${mergeY + MERGE_BOX_H / 2 - 5} ${EXCL_X - 8},${mergeY + MERGE_BOX_H / 2 + 5} ${EXCL_X},${mergeY + MERGE_BOX_H / 2}`}
-            fill="#7a2020"
-          />
-          <rect x={EXCL_X} y={mergeY + MERGE_BOX_H / 2 - EXCL_H / 2}
-            width={EXCL_W} height={EXCL_H}
-            rx={8} ry={8} fill={ec.fill} stroke={ec.stroke} strokeWidth={1.5} />
-          <text x={EXCL_X + 10} y={mergeY + MERGE_BOX_H / 2 - EXCL_H / 2 + 16}
-            fontSize={9} fill={ec.label} fontWeight="700" letterSpacing="1.2" textAnchor="start">
-            EXCLUS
-          </text>
-          <text x={EXCL_X + 10} y={mergeY + MERGE_BOX_H / 2 - EXCL_H / 2 + 30}
-            fontSize={11} fill={ec.text} fontWeight="600" textAnchor="start">
-            Doublons supprimés
-          </text>
-          <text x={EXCL_X + EXCL_W - 10} y={mergeY + MERGE_BOX_H / 2 - EXCL_H / 2 + 30}
-            fontSize={18} fill={ec.text} fontWeight="800" textAnchor="end" fontFamily="ui-monospace">
-            {duplicatesRemoved.toLocaleString()}
-          </text>
-          <text x={EXCL_X + 10} y={mergeY + MERGE_BOX_H / 2 - EXCL_H / 2 + 44}
-            fontSize={8.5} fill={ec.label} opacity={0.7} textAnchor="start">
-            Fusion par DOI / PMID / titre
-          </text>
-        </>
-      )}
-
-      {/* Connector from merge to first main node */}
-      <line
-        x1={mainColX + MAIN_BOX_W / 2} y1={mergeY + MERGE_BOX_H}
-        x2={mainColX + MAIN_BOX_W / 2} y2={mainStartY}
-        stroke="#2d5a3d" strokeWidth={1.5}
-      />
-      <polygon
-        points={`${mainColX + MAIN_BOX_W / 2 - 5},${mainStartY - 8} ${mainColX + MAIN_BOX_W / 2 + 5},${mainStartY - 8} ${mainColX + MAIN_BOX_W / 2},${mainStartY}`}
-        fill="#2d5a3d"
-      />
-
-      {/* ── Main flow nodes ── */}
-      {nodes.map((node, i) => {
-        const y = positions[i];
-        const c = PRISMA_COLORS[node.phase];
-        const cx = mainColX + MAIN_BOX_W / 2;
-        const nextY = positions[i + 1];
-        const hasNext = i < nodes.length - 1;
-        const excl = node.exclusion;
-
-        const exclCY = y + MAIN_BOX_H / 2;
-
-        return (
-          <g key={node.id}>
-            <rect x={mainColX} y={y} width={MAIN_BOX_W} height={MAIN_BOX_H}
-              rx={10} ry={10} fill={c.fill} stroke={c.stroke} strokeWidth={1.5} />
-            <text x={mainColX + 12} y={y + 18} fontSize={9} fill={c.label}
-              fontWeight="700" letterSpacing="1.5" textAnchor="start">
-              {node.phase.toUpperCase()}
-            </text>
-            <text x={mainColX + 12} y={y + 34} fontSize={11} fill={c.text}
-              fontWeight="600" textAnchor="start">
-              {node.title}
-            </text>
-            <text x={mainColX + MAIN_BOX_W - 12} y={y + 34} fontSize={20} fill={c.text}
-              fontWeight="800" textAnchor="end" fontFamily="ui-monospace">
-              {node.count.toLocaleString()}
-            </text>
-            {node.lines.map((line, li) => (
-              <text key={li} x={mainColX + 12} y={y + 50 + li * 13}
-                fontSize={9} fill={c.label} opacity={0.75} textAnchor="start">
-                {line}
-              </text>
-            ))}
-
-            {hasNext && (
-              <>
-                <line x1={cx} y1={y + MAIN_BOX_H} x2={cx} y2={nextY}
-                  stroke="#2d5a3d" strokeWidth={1.5} strokeDasharray={excl ? "0" : "4 2"} />
-                <polygon
-                  points={`${cx - 5},${nextY - 8} ${cx + 5},${nextY - 8} ${cx},${nextY}`}
-                  fill="#2d5a3d"
-                />
-              </>
-            )}
-
-            {excl && (
-              <>
-                <line
-                  x1={mainColX + MAIN_BOX_W} y1={exclCY}
-                  x2={EXCL_X} y2={exclCY}
-                  stroke="#7a2020" strokeWidth={1.5}
-                />
-                <polygon
-                  points={`${EXCL_X - 8},${exclCY - 5} ${EXCL_X - 8},${exclCY + 5} ${EXCL_X},${exclCY}`}
-                  fill="#7a2020"
-                />
-                <rect x={EXCL_X} y={exclCY - EXCL_H / 2}
-                  width={EXCL_W} height={EXCL_H}
-                  rx={8} ry={8} fill={ec.fill} stroke={ec.stroke} strokeWidth={1.5} />
-                <text x={EXCL_X + 10} y={exclCY - EXCL_H / 2 + 16}
-                  fontSize={9} fill={ec.label} fontWeight="700" letterSpacing="1.2" textAnchor="start">
-                  EXCLUS
-                </text>
-                <text x={EXCL_X + 10} y={exclCY - EXCL_H / 2 + 30}
-                  fontSize={11} fill={ec.text} fontWeight="600" textAnchor="start">
-                  {excl.title}
-                </text>
-                <text x={EXCL_X + EXCL_W - 10} y={exclCY - EXCL_H / 2 + 30}
-                  fontSize={18} fill={ec.text} fontWeight="800" textAnchor="end" fontFamily="ui-monospace">
-                  {excl.count.toLocaleString()}
-                </text>
-                {excl.lines.map((line, li) => (
-                  <text key={li} x={EXCL_X + 10}
-                    y={exclCY - EXCL_H / 2 + 44 + li * 12}
-                    fontSize={8.5} fill={ec.label} opacity={0.7} textAnchor="start">
-                    {line}
-                  </text>
-                ))}
-              </>
-            )}
-          </g>
-        );
-      })}
-    </svg>
+function PrismaConnector() {
+  return (
+    <div className="flex justify-center">
+      <div className="flex flex-col items-center gap-0.5">
+        <div className="w-px h-3 bg-white/20" />
+        <div className="w-0 h-0 border-l-[5px] border-l-transparent border-r-[5px] border-r-transparent border-t-[6px] border-t-white/20" />
+      </div>
+    </div>
   );
 }
 
@@ -2466,161 +2242,125 @@ function PrismaSection({ scenarioId }: { scenarioId: string }) {
   if (loading) return <LoadingSpinner text="Calcul du flow PRISMA..." />;
   if (error || !data) return <ErrorBox message={error ?? "Erreur PRISMA"} />;
 
-  const ident = data.identification;
-  const screen = data.screening;
-  const elig = data.eligibility;
-  const inc = data.included;
+  const { identification: ident, semantic_screening: sem, full_text: ft, manual_curation: mc, evidence: ev } = data;
 
-  // Sources actives (count > 0), triées par ordre décroissant
-  const activeSources: PrismaSourceEntry[] = Object.entries(ident.by_source)
+  const activeSources = Object.entries(ident.by_source)
     .filter(([, v]) => v > 0)
-    .sort(([, a], [, b]) => b - a)
-    .map(([source, count]) => ({ source, count: count as number }));
+    .sort(([, a], [, b]) => (b as number) - (a as number));
 
-  const nodes: PrismaNode[] = [
-    {
-      id: "screening",
-      phase: "screening",
-      title: "Enregistrements screenés",
-      count: screen.records_screened,
-      lines: [
-        `Screening titre / résumé`,
-        screen.records_awaiting_screening > 0
-          ? `${screen.records_awaiting_screening} en attente d'évaluation manuelle`
-          : `${screen.records_excluded_title_abstract} exclus`,
-      ],
-      exclusion: screen.records_excluded_title_abstract > 0 ? {
-        title: "Exclus : titre / résumé",
-        count: screen.records_excluded_title_abstract,
-        lines: ["Hors sujet, doublons résiduels"],
-      } : undefined,
-    },
-    {
-      id: "eligibility",
-      phase: "eligibility",
-      title: "Textes intégraux évalués",
-      count: elig.fulltext_assessed,
-      lines: [
-        `${elig.fulltext_retrieved} textes intégraux récupérés`,
-        elig.fulltext_not_retrieved > 0
-          ? `${elig.fulltext_not_retrieved} non récupérables (accès restreint)`
-          : "Tous les textes récupérés",
-      ],
-      exclusion: (elig.fulltext_not_retrieved + elig.fulltext_excluded) > 0 ? {
-        title: "Exclus : plein texte",
-        count: elig.fulltext_not_retrieved + elig.fulltext_excluded,
-        lines: [
-          elig.fulltext_not_retrieved > 0 ? `${elig.fulltext_not_retrieved} non accessibles` : "",
-          elig.fulltext_excluded > 0 ? `${elig.fulltext_excluded} hors critères` : "",
-        ].filter(Boolean),
-      } : undefined,
-    },
-    {
-      id: "included",
-      phase: "included",
-      title: inc.screening_complete ? "Études incluses" : "Articles disponibles",
-      count: inc.screening_complete ? inc.total_included : elig.fulltext_retrieved,
-      lines: inc.screening_complete
-        ? [`Inclus dans la synthèse qualitative`]
-        : [
-            `Screening manuel non encore effectué`,
-            `${inc.awaiting_assessment} articles en attente d'évaluation`,
-          ],
-    },
-  ];
+  const totalRecords = ident.total_records ?? ident.total_records_identified ?? 0;
+  const evidenceTotal = ev.ai_auto_selected + ev.manually_rescued;
 
   return (
-    <div className="rounded-3xl border border-white/10 bg-white/3 p-5 space-y-5">
+    <div className="rounded-3xl border border-white/10 bg-white/3 p-5 space-y-4">
       <SectionHeader
         icon={<Shield size={14} className="text-brand-400" />}
-        title="Diagramme PRISMA 2020 : Flow de Sélection"
-        subtitle="Visualisation standardisée du processus de sélection systématique des articles"
+        title="AI-Assisted PRISMA 2020"
+        subtitle="Modern systematic review flow with semantic AI pre-screening and manual curation"
       />
 
-      {/* Legend */}
-      <div className="flex flex-wrap gap-3 text-[10px]">
-        {([
-          { phase: "identification" as const, label: "Identification" },
-          { phase: "screening" as const, label: "Screening" },
-          { phase: "eligibility" as const, label: "Éligibilité" },
-          { phase: "included" as const, label: "Inclus" },
-          { phase: "exclusion" as const, label: "Exclusions" },
-        ]).map(({ phase, label }) => (
-          <span key={phase} className="flex items-center gap-1.5">
-            <span
-              className="inline-block w-3 h-3 rounded-sm border"
-              style={{
-                backgroundColor: PRISMA_COLORS[phase].fill,
-                borderColor: PRISMA_COLORS[phase].stroke,
-              }}
-            />
-            <span style={{ color: PRISMA_COLORS[phase].label }}>{label}</span>
-          </span>
-        ))}
-      </div>
+      <div className="max-w-xl mx-auto space-y-1">
 
-      {/* SVG Diagram */}
-      <div className="overflow-x-auto">
-        <PrismaSVGDiagram
-          nodes={nodes}
-          sources={activeSources}
-          totalIdentified={ident.total_records_identified}
-          duplicatesRemoved={ident.duplicates_removed}
-        />
-      </div>
-
-      {/* Summary table */}
-      <div className="border-t border-white/5 pt-4 space-y-4">
-        <p className="text-[10px] text-white/35 uppercase tracking-wider">Résumé des étapes</p>
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-          {[
-            { label: "Identifiés", value: ident.total_records_identified, sub: `${ident.duplicates_removed} doublons` },
-            { label: "Screenés", value: screen.records_screened, sub: `${screen.records_excluded_title_abstract} exclus` },
-            { label: "Éligibles", value: elig.fulltext_assessed, sub: `${elig.fulltext_retrieved} textes récupérés` },
-            {
-              label: inc.screening_complete ? "Inclus" : "Disponibles",
-              value: inc.screening_complete ? inc.total_included : elig.fulltext_retrieved,
-              sub: inc.screening_complete ? "synthèse qualitative" : "screening en attente",
-            },
-          ].map(({ label, value, sub }) => (
-            <div key={label} className="rounded-xl border border-white/10 bg-white/3 p-3 text-center">
-              <p className="text-[9px] uppercase tracking-wider text-white/50 mb-1">{label}</p>
-              <p className="text-xl font-bold font-mono text-white">{value.toLocaleString()}</p>
-              <p className="text-[9px] text-white/35 mt-0.5">{sub}</p>
-            </div>
-          ))}
-        </div>
-
-        {/* Détail par source */}
-        {activeSources.length > 0 && (
-          <div>
-            <p className="text-[10px] text-white/35 uppercase tracking-wider mb-2">Détail par base de données</p>
-            <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-5 gap-2">
-              {activeSources.map(({ source, count }) => (
-                <div key={source} className="rounded-lg border border-white/8 bg-white/2 p-2 text-center">
-                  <p className="text-[9px] font-mono text-white/40 mb-0.5">
-                    {SOURCE_LABELS[source] ?? source.toUpperCase()}
-                  </p>
-                  <p className="text-base font-bold font-mono"
-                    style={{ color: PRISMA_COLORS.identification.text }}>
-                    {count.toLocaleString()}
-                  </p>
-                  <p className="text-[8px] text-white/25">
-                    {ident.total_records_identified > 0
-                      ? `${((count / ident.total_records_identified) * 100).toFixed(1)}%`
-                      : ""}
-                  </p>
-                </div>
+        {/* ── Stage 1: Identification ── */}
+        <PrismaStageCard
+          color="border-emerald-800/50 bg-emerald-950/30 text-emerald-200"
+          label="Stage 1 — Identification"
+          icon={<Database size={13} className="text-emerald-400" />}
+        >
+          <PrismaBigNum value={totalRecords} sub={`${activeSources.length} source${activeSources.length !== 1 ? "s" : ""} searched`} />
+          <div className="space-y-1">
+            <PrismaRow label="Embedded (searchable)" value={ident.embedded} />
+            <PrismaRow label="Duplicates removed" value={ident.duplicates_removed} />
+          </div>
+          {activeSources.length > 0 && (
+            <div className="flex flex-wrap gap-1.5 pt-1 border-t border-white/5">
+              {activeSources.map(([src, cnt]) => (
+                <span key={src} className="rounded px-2 py-0.5 bg-emerald-900/40 text-[10px] font-mono text-emerald-300">
+                  {SOURCE_LABELS_MAP[src] ?? src.toUpperCase()} {(cnt as number).toLocaleString()}
+                </span>
               ))}
             </div>
+          )}
+        </PrismaStageCard>
+
+        <PrismaConnector />
+
+        {/* ── Stage 2: AI Semantic Pre-screening ── */}
+        <PrismaStageCard
+          color="border-violet-800/50 bg-violet-950/30 text-violet-200"
+          label="Stage 2 — AI Semantic Pre-screening"
+          icon={<Sparkles size={13} className="text-violet-400" />}
+        >
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <PrismaBigNum value={sem.above_threshold} sub="Above threshold → pre-selected" />
+            </div>
+            <div>
+              <PrismaBigNum value={sem.below_threshold} sub="Below threshold → deprioritised" />
+            </div>
           </div>
-        )}
+          <div className="space-y-1">
+            <PrismaRow label="Similarity threshold" value={`≥ ${(sem.threshold * 100).toFixed(0)}%`} />
+            <PrismaRow label="Method" value={sem.method} />
+            <PrismaRow
+              label="Full texts available"
+              value={`${ft.with_fulltext.toLocaleString()} (${ft.pct.toFixed(0)}%)`}
+              accent="text-violet-300"
+            />
+          </div>
+          <p className="text-[9px] opacity-40 italic">{ft.note}</p>
+        </PrismaStageCard>
+
+        <PrismaConnector />
+
+        {/* ── Stage 3: Manual Curation ── */}
+        <PrismaStageCard
+          color="border-amber-800/50 bg-amber-950/30 text-amber-200"
+          label="Stage 3 — Manual Curation"
+          icon={<ClipboardList size={13} className="text-amber-400" />}
+        >
+          <div className="grid grid-cols-3 gap-3">
+            <div>
+              <PrismaBigNum value={mc.included} sub="Included" />
+            </div>
+            <div>
+              <PrismaBigNum value={mc.excluded} sub="Excluded" />
+            </div>
+            <div>
+              <PrismaBigNum value={mc.pending} sub="Pending" />
+            </div>
+          </div>
+          <div className="space-y-1 border-t border-white/5 pt-2">
+            <PrismaRow label="Rescued (below threshold, manually included)" value={mc.manually_rescued} accent="text-green-400" />
+            <PrismaRow label="Vetoed (above threshold, manually excluded)" value={mc.manually_vetoed} accent="text-red-400" />
+            <PrismaRow label="Screening complete" value={mc.screening_complete ? "Yes" : "In progress"} />
+          </div>
+        </PrismaStageCard>
+
+        <PrismaConnector />
+
+        {/* ── Stage 4: Evidence Synthesis ── */}
+        <PrismaStageCard
+          color="border-cyan-800/50 bg-cyan-950/30 text-cyan-200"
+          label="Stage 4 — Evidence Synthesis"
+          icon={<BookOpen size={13} className="text-cyan-400" />}
+        >
+          <PrismaBigNum
+            value={evidenceTotal}
+            sub={mc.screening_complete ? "Final evidence set" : "Evidence set (screening in progress)"}
+          />
+          <div className="space-y-1">
+            <PrismaRow label="AI pre-selected (above threshold, not vetoed)" value={ev.ai_auto_selected} />
+            <PrismaRow label="Manually rescued" value={ev.manually_rescued} accent="text-green-400" />
+            <PrismaRow label="With full text" value={`${ev.with_fulltext.toLocaleString()} of ${evidenceTotal.toLocaleString()}`} />
+          </div>
+        </PrismaStageCard>
       </div>
 
-      {!inc.screening_complete && (
-        <div className="rounded-xl border border-gold-500/20 bg-gold-500/5 px-4 py-3">
-          <p className="text-[10px] text-gold-400">
-            <span className="font-semibold">Screening manuel non effectué</span> · Les articles sont disponibles pour évaluation dans l'onglet Corpus. Utilisez l'interface de screening pour inclure ou exclure chaque article.
+      {!mc.screening_complete && (
+        <div className="rounded-xl border border-amber-500/20 bg-amber-500/5 px-4 py-3 mt-2">
+          <p className="text-[10px] text-amber-400">
+            <span className="font-semibold">Manual screening in progress</span> · {mc.pending.toLocaleString()} articles still pending evaluation. Visit the Corpus tab to include or exclude articles.
           </p>
         </div>
       )}
