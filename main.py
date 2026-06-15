@@ -7157,7 +7157,7 @@ def _run_user_scenario_populate(
     scenario_id: str,
     query: str,
     filters: dict,
-    max_results: int = 1000,
+    max_results: int = 500,
     _pipeline_callback=None,
 ) -> int:
     """
@@ -7332,7 +7332,7 @@ def _run_user_scenario_populate(
         try:
             _oa_page = 1
             _oa_fetched = 0
-            _oa_limit = min(1000, max_results)
+            _oa_limit = min(max_results, max_results)
             while _oa_fetched < _oa_limit:
                 _oa_batch = min(200, _oa_limit - _oa_fetched)
                 oa_resp = _requests.get(
@@ -7390,7 +7390,7 @@ def _run_user_scenario_populate(
         try:
             _cr_offset = 0
             _cr_fetched = 0
-            _cr_limit = min(1000, max_results)
+            _cr_limit = min(max_results, max_results)
             _cr_rows = min(100, _cr_limit)
             while _cr_fetched < _cr_limit:
                 cr_resp = _requests.get(
@@ -7446,7 +7446,7 @@ def _run_user_scenario_populate(
         try:
             _ep_cursor_mark = "*"
             _ep_fetched = 0
-            _ep_limit = min(1000, max_results)
+            _ep_limit = min(max_results, max_results)
             _ep_page_size = 200
             while _ep_fetched < _ep_limit:
                 ep_resp = _requests.get(
@@ -7513,7 +7513,7 @@ def _run_user_scenario_populate(
             for _server in ["medrxiv", "biorxiv"]:
                 _cursor = 0
                 _fetched = 0
-                while _fetched < min(1000, max_results):
+                while _fetched < min(max_results, max_results):
                     _url = f"https://api.biorxiv.org/details/{_server}/{_date_from}/{_date_to}/{_cursor}/json"
                     _r = _requests.get(_url, timeout=30)
                     if _r.status_code != 200:
@@ -7576,7 +7576,7 @@ def _run_user_scenario_populate(
                         params={
                             "db": "pubmed",
                             "term": f'({query}) AND ("systematic review"[Publication Type] OR "meta-analysis"[Publication Type])',
-                            "retmax": min(1000, max_results),
+                            "retmax": min(max_results, max_results),
                             "retmode": "json",
                             "sort": "relevance",
                         },
@@ -7590,7 +7590,7 @@ def _run_user_scenario_populate(
             _pmids = (_prospero_resp.json().get("esearchresult", {}).get("idlist", []) if _prospero_resp else [])
             if _pmids:
                 import xml.etree.ElementTree as _ET3
-                _pmids_to_fetch = _pmids[:min(1000, max_results)]
+                _pmids_to_fetch = _pmids[:min(max_results, max_results)]
                 for _batch_start in range(0, len(_pmids_to_fetch), 200):
                     _batch_ids = _pmids_to_fetch[_batch_start:_batch_start + 200]
                     try:
@@ -7931,7 +7931,7 @@ def _run_semantic_rerank_inline(scenario_id: str, query: str) -> int:
         return 0
 
 
-def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict, max_results: int = 100000) -> None:
+def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict, max_results: int = 500) -> None:
     """
     Pipeline complet d'enrichissement pour un scénario utilisateur.
     Ordre optimal :
@@ -8982,7 +8982,7 @@ def get_user_scenario_populate_status(scenario_id: str) -> dict[str, Any]:
 @app.post("/user-scenarios/{scenario_id}/pipeline")
 def start_user_scenario_pipeline(
     scenario_id: str,
-    max_results: int = 100000,
+    max_results: int = 500,
     _: None = Depends(require_api_key),
 ) -> dict[str, Any]:
     """
