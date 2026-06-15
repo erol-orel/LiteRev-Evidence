@@ -1618,23 +1618,54 @@ export interface ScenarioPrisma {
   scenario_id: string;
   scenario_title: string;
   identification: {
-    total_records_identified: number;
+    total_records: number;
     by_source: Record<string, number>;
     duplicates_removed: number;
+    embedded: number;
+    // legacy
+    total_records_identified?: number;
   };
-  screening: {
+  semantic_screening: {
+    threshold: number;
+    above_threshold: number;
+    below_threshold: number;
+    method: string;
+  };
+  full_text: {
+    with_fulltext: number;
+    without_fulltext: number;
+    pct: number;
+    note: string;
+  };
+  manual_curation: {
+    included: number;
+    excluded: number;
+    pending: number;
+    screening_complete: boolean;
+    manually_rescued: number;
+    manually_vetoed: number;
+  };
+  evidence: {
+    total: number;
+    ai_auto_selected: number;
+    manually_rescued: number;
+    with_fulltext: number;
+    screening_complete: boolean;
+  };
+  // legacy fields kept for backward compat
+  screening?: {
     records_screened: number;
     records_excluded_title_abstract: number;
     records_included_screening: number;
     records_awaiting_screening: number;
   };
-  eligibility: {
+  eligibility?: {
     fulltext_assessed: number;
     fulltext_retrieved: number;
     fulltext_not_retrieved: number;
     fulltext_excluded: number;
   };
-  included: {
+  included?: {
     total_included: number;
     awaiting_assessment: number;
     screening_complete: boolean;
