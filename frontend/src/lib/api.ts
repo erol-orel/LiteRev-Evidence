@@ -2272,6 +2272,8 @@ export interface PipelineStepStatus {
   total_articles?: number;
   // rerank step
   updated?: number;
+  // clustering step
+  method?: string;
 }
 
 export interface UserScenarioPipelineStatus {

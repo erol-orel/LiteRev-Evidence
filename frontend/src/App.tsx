@@ -2952,7 +2952,8 @@ function ScenariosView({
                               rerank: 'Rerank sémantique',
                             };
                             const pctHint = step === 'embed' && stepSt?.pct != null ? ` · ${stepSt.pct}%` : '';
-                            return <span key={step} className={`inline-block w-1.5 h-1.5 rounded-full mx-0.5 ${dotCls}`} title={`${stepLabel[step] ?? step}: ${st ?? 'pending'}${pctHint}`} />;
+                            const methodHint = step === 'clustering' && stepSt?.method ? ` · ${stepSt.method}` : '';
+                            return <span key={step} className={`inline-block w-1.5 h-1.5 rounded-full mx-0.5 ${dotCls}`} title={`${stepLabel[step] ?? step}: ${st ?? 'pending'}${pctHint}${methodHint}`} />;
                           })}
                         </span>
                       </div>

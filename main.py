@@ -266,8 +266,16 @@ def startup_event() -> None:
                     updated_at      = NOW()
                 WHERE pipeline_status IN ('running', 'starting')
             """)).rowcount
+            _pop_orphans = _startup_conn.execute(text("""
+                UPDATE user_scenarios
+                SET populate_status = 'error',
+                    updated_at      = NOW()
+                WHERE populate_status = 'running'
+            """)).rowcount
         if _orphans:
-            logger.warning(f"Startup: {_orphans} pipeline(s) orphelin(s) réinitialisé(s) à 'failed'.")
+            logger.warning(f"Startup: {_orphans} pipeline(s) orphelin(s) reinitialisé(s) à 'failed'.")
+        if _pop_orphans:
+            logger.warning(f"Startup: {_pop_orphans} populate(s) orphelin(s) reinitialisé(s) à 'error'.")
     except Exception as _se:
         logger.error(f"Startup cleanup pipelines orphelins: {_se}")
 
@@ -8836,17 +8844,25 @@ def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict
         except Exception as e:
             update_step("metadata", "error", error=str(e))
 
-        # ── Étape 7 : Clustering ──────────────────────────────────────────────
+        # ── Étape 7 : Clustering (UMAP+HDBSCAN avec fallback KMeans) ────────────
         update_step("clustering", "running")
         try:
             import numpy as np
             from sklearn.feature_extraction.text import TfidfVectorizer
             from sklearn.cluster import KMeans
-            from sklearn.decomposition import TruncatedSVD
+            from sklearn.decomposition import TruncatedSVD, PCA
 
             with engine.connect() as conn:
                 cl_docs = list(conn.execute(text("""
-                    SELECT d.id, d.title, d.abstract, d.year, d.journal
+                    SELECT d.id, d.title, d.abstract, d.year, d.journal,
+                           (
+                               SELECT c.embedding::text
+                               FROM document_chunk c
+                               WHERE c.document_id = d.id
+                                 AND c.embedding IS NOT NULL
+                               ORDER BY c.id
+                               LIMIT 1
+                           ) AS embedding_str
                     FROM literature_document d
                     JOIN article_scenarios asn ON asn.document_id = d.id
                     WHERE asn.scenario_id = :sid
@@ -8859,16 +8875,85 @@ def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict
 
             if len(cl_docs) >= 5:
                 texts = [f"{d['title']} {d['abstract'] or ''}" for d in cl_docs]
-                n_clusters = min(max(3, len(cl_docs) // 15), 12)
-                vectorizer = TfidfVectorizer(max_features=500, stop_words="english", min_df=1)
-                X = vectorizer.fit_transform(texts)
-                if X.shape[1] > 50:
-                    X = TruncatedSVD(n_components=min(50, X.shape[1] - 1)).fit_transform(X)
-                km = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
-                labels = km.fit_predict(X)
 
-                # Persister les clusters en DB (article_scenarios.cluster_id / cluster_label)
-                # pour qu'ils survivent aux redémarrages du serveur.
+                # ── TF-IDF (toujours calculé pour les top_words) ─────────────
+                vectorizer = TfidfVectorizer(max_features=800, stop_words="english", min_df=1, max_df=0.9, ngram_range=(1, 2))
+                X_tfidf = vectorizer.fit_transform(texts)
+                feature_names = vectorizer.get_feature_names_out()
+
+                # ── Charger les embeddings depuis DB ─────────────────────────
+                embeddings_matrix = None
+                if any(d.get("embedding_str") for d in cl_docs):
+                    try:
+                        vecs = []
+                        for d in cl_docs:
+                            es = d.get("embedding_str")
+                            if es:
+                                vec = [float(x) for x in es.strip("[]").split(",")]
+                                vecs.append(vec)
+                            else:
+                                vecs.append(None)
+                        valid = [v for v in vecs if v is not None]
+                        if valid:
+                            mean_vec = np.mean(valid, axis=0).tolist()
+                            vecs = [v if v is not None else mean_vec for v in vecs]
+                            embeddings_matrix = np.array(vecs, dtype=np.float32)
+                            logger.info(f"Pipeline clustering {scenario_id}: {len(cl_docs)} embeddings DB chargés")
+                    except Exception as _emb_err:
+                        logger.warning(f"Pipeline clustering {scenario_id}: embeddings DB inutilisables: {_emb_err}")
+
+                umap_input = embeddings_matrix if embeddings_matrix is not None else X_tfidf.toarray()
+
+                # ── UMAP (60s timeout) ────────────────────────────────────────
+                umap_result: dict = {"embedding": None}
+                def _run_umap_cl():
+                    try:
+                        import umap as umap_lib
+                        reducer = umap_lib.UMAP(
+                            n_neighbors=min(10, len(cl_docs) - 1), n_components=2,
+                            metric="cosine", random_state=42, low_memory=True, n_epochs=200,
+                        )
+                        umap_result["embedding"] = reducer.fit_transform(umap_input)
+                    except Exception as _ue:
+                        logger.warning(f"Pipeline UMAP {scenario_id}: {_ue}")
+
+                _umap_thread = threading.Thread(target=_run_umap_cl, daemon=True)
+                _umap_thread.start()
+                _umap_thread.join(timeout=60)
+
+                embedding_2d = umap_result["embedding"]
+                labels = None
+                method_used = "kmeans_fallback"
+
+                if embedding_2d is not None:
+                    try:
+                        import hdbscan as hdbscan_lib
+                        _min_cs = max(3, len(cl_docs) // 15)
+                        _clusterer = hdbscan_lib.HDBSCAN(
+                            min_cluster_size=_min_cs, min_samples=2,
+                            metric="euclidean", cluster_selection_method="eom"
+                        )
+                        labels = _clusterer.fit_predict(embedding_2d)
+                        method_used = "embeddings_umap_hdbscan" if embeddings_matrix is not None else "tfidf_umap_hdbscan"
+                        logger.info(f"Pipeline clustering {scenario_id}: UMAP+HDBSCAN OK ({len(set(labels))} clusters)")
+                    except Exception as _he:
+                        logger.warning(f"Pipeline HDBSCAN {scenario_id}: {_he}")
+
+                # ── Fallback KMeans ───────────────────────────────────────────
+                if labels is None:
+                    n_clusters_km = max(3, min(8, len(cl_docs) // 15))
+                    _svd = TruncatedSVD(n_components=min(50, X_tfidf.shape[1] - 1), random_state=42)
+                    X_red = _svd.fit_transform(X_tfidf)
+                    _km = KMeans(n_clusters=n_clusters_km, random_state=42, n_init=5, max_iter=100)
+                    labels = _km.fit_predict(X_red)
+                    if embedding_2d is None:
+                        _pca = PCA(n_components=2, random_state=42)
+                        embedding_2d = _pca.fit_transform(X_red)
+                    method_used = "kmeans_fallback"
+
+                n_clusters = len(set(int(l) for l in labels if int(l) != -1))
+
+                # ── Persister en DB ───────────────────────────────────────────
                 with engine.begin() as _cl_conn:
                     for _cl_idx, _cl_doc in enumerate(cl_docs):
                         _cl_id = int(labels[_cl_idx])
@@ -8878,34 +8963,56 @@ def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict
                             WHERE scenario_id = :sid AND document_id = :did
                         """), {
                             "cid": _cl_id,
-                            "clabel": f"Cluster {_cl_id + 1}",
+                            "clabel": f"Cluster {_cl_id + 1}" if _cl_id != -1 else "Non-classés",
                             "sid": scenario_id,
                             "did": _cl_doc["id"],
                         })
 
-                # Conserver aussi le cache JSON pour l'endpoint de visualisation
+                # ── Cache JSON pour l'endpoint de visualisation ───────────────
                 import os as _os
                 cache_dir = "/tmp/literev_clustering_cache"
                 _os.makedirs(cache_dir, exist_ok=True)
+                X_dense = X_tfidf.toarray()
                 clusters_data = []
-                for ci in range(n_clusters):
-                    idxs = [i for i, l in enumerate(labels) if l == ci]
-                    cluster_docs = [cl_docs[i] for i in idxs]
+                for _cl_label in sorted(set(int(l) for l in labels)):
+                    _idxs = [i for i, l in enumerate(labels) if int(l) == _cl_label]
+                    _cl_docs_sub = [cl_docs[i] for i in _idxs]
+                    _coords = embedding_2d[_idxs] if embedding_2d is not None else np.zeros((len(_idxs), 2))
+                    _tfidf_mean = X_dense[_idxs].mean(axis=0)
+                    _top_idx = _tfidf_mean.argsort()[-10:][::-1]
+                    _top_words = [str(feature_names[i]) for i in _top_idx if _tfidf_mean[i] > 0]
+                    _center = np.mean(_coords, axis=0)
+                    _dists = np.linalg.norm(_coords - _center, axis=1)
+                    _rep_idx = _idxs[int(np.argmin(_dists))]
                     clusters_data.append({
-                        "id": ci,
-                        "size": len(idxs),
-                        "articles": [{"id": d["id"], "title": d["title"], "year": d["year"]} for d in cluster_docs[:5]],
+                        "cluster_id": _cl_label,
+                        "cluster_name": f"Cluster {_cl_label + 1}" if _cl_label != -1 else "Non-classés",
+                        "is_noise": _cl_label == -1,
+                        "n_docs": len(_idxs),
+                        "center_x": float(_center[0]),
+                        "center_y": float(_center[1]),
+                        "top_words": _top_words,
+                        "summary": "",
+                        "representative": {"id": int(cl_docs[_rep_idx]["id"]), "title": str(cl_docs[_rep_idx]["title"] or "")},
+                        "points": [
+                            {"id": int(cl_docs[i]["id"]), "title": str(cl_docs[i]["title"] or ""),
+                             "year": int(cl_docs[i]["year"]) if cl_docs[i]["year"] else None,
+                             "x": float(embedding_2d[i, 0]) if embedding_2d is not None else 0.0,
+                             "y": float(embedding_2d[i, 1]) if embedding_2d is not None else 0.0}
+                            for i in _idxs
+                        ],
                     })
                 result_cache = {
                     "scenario_id": scenario_id,
                     "n_docs": len(cl_docs),
                     "n_clusters": n_clusters,
+                    "method": method_used,
                     "clusters": clusters_data,
                     "from_cache": False,
                 }
                 with open(f"{cache_dir}/{scenario_id}.json", "w") as f:
                     json.dump(result_cache, f)
-                update_step("clustering", "done", n_clusters=n_clusters, n_docs=len(cl_docs))
+                update_step("clustering", "done", n_clusters=n_clusters, n_docs=len(cl_docs), method=method_used)
             else:
                 update_step("clustering", "skipped", reason=f"Corpus insuffisant ({len(cl_docs)} articles)")
         except Exception as e:
