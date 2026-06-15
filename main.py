@@ -359,6 +359,153 @@ def startup_event() -> None:
             logger.error(f"Erreur entraînement demand-forecasting: {e}")
     threading.Thread(target=_train_demand_model, daemon=True).start()
 
+    # ── Worker d'enrichissement automatique (embedding + PICO) ──────────────
+    # Tourne en permanence en arrière-plan. Chaque cycle :
+    #   1. Embède tous les chunks title_abstract/fulltext_section sans embedding
+    #   2. Extrait le PICO pour tous les articles avec abstract mais sans pico_json
+    def _background_enrichment_worker():
+        import time as _time
+        from openai import OpenAI as _OAI_bg
+        from concurrent.futures import ThreadPoolExecutor as _TPE
+        from datetime import datetime, timezone
+
+        _EMBED_BATCH   = 100   # chunks par appel OpenAI embeddings
+        _PICO_WORKERS  = 5     # threads parallèles pour extraction PICO
+        _CYCLE_SLEEP   = 30    # secondes entre deux cycles
+        _PICO_BATCH    = 50    # articles PICO par cycle
+
+        _system_pico = (
+            "You are a systematic review expert. "
+            "Extract PICO elements and return ONLY valid JSON:\n"
+            '{"P":"Population","I":"Intervention","C":"Comparator or Not specified",'
+            '"O":"Outcome(s)","study_design":"RCT|Cohort|Systematic review|etc",'
+            '"pico_confidence":0.0-1.0,"pico_notes":""}\n'
+            "Be concise (max 2 sentences per field). Return ONLY the JSON."
+        )
+
+        def _extract_pico_one(row, client):
+            try:
+                title    = row["title"] or ""
+                abstract = row["abstract"] or ""
+                resp = client.chat.completions.create(
+                    model="gpt-4.1-mini",
+                    messages=[
+                        {"role": "system", "content": _system_pico},
+                        {"role": "user",   "content": f"Title: {title}\n\nAbstract: {abstract[:3000]}"},
+                    ],
+                    temperature=0.1,
+                    max_tokens=400,
+                    response_format={"type": "json_object"},
+                )
+                pico = json.loads(resp.choices[0].message.content)
+                required = {"P", "I", "C", "O", "study_design", "pico_confidence"}
+                if not required.issubset(pico.keys()):
+                    return None
+                pico["pico_confidence"] = float(pico.get("pico_confidence", 0.5))
+                pico["pico_notes"]      = pico.get("pico_notes", "")
+                with engine.begin() as _c:
+                    _c.execute(text("""
+                        UPDATE literature_document
+                        SET pico_json = CAST(:pico AS jsonb),
+                            pico_extracted_at = :ts
+                        WHERE id = :doc_id
+                    """), {
+                        "pico":   json.dumps(pico),
+                        "ts":     datetime.now(timezone.utc),
+                        "doc_id": row["id"],
+                    })
+                return row["id"]
+            except Exception as _pe:
+                logger.debug(f"BG PICO doc {row['id']}: {_pe}")
+                return None
+
+        logger.info("Background enrichment worker started (embedding + PICO).")
+        while True:
+            try:
+                openai_key = os.getenv("OPENAI_API_KEY")
+                if not openai_key:
+                    _time.sleep(_CYCLE_SLEEP)
+                    continue
+
+                _client = _OAI_bg(api_key=openai_key)
+
+                # ── 1. EMBEDDING ──────────────────────────────────────────────
+                # Priorité : fulltext_section d'abord, puis title_abstract
+                # Si un article a des chunks fulltext, on n'embède PAS son
+                # title_abstract (le fulltext est plus riche).
+                with engine.connect() as _conn:
+                    _chunks = _conn.execute(text("""
+                        SELECT c.id, c.content
+                        FROM document_chunk c
+                        WHERE c.embedding IS NULL
+                          AND c.chunk_type IN ('title_abstract', 'fulltext_section')
+                          AND LENGTH(c.content) > 20
+                          AND (
+                            c.chunk_type = 'fulltext_section'
+                            OR NOT EXISTS (
+                                SELECT 1 FROM document_chunk c2
+                                WHERE c2.document_id = c.document_id
+                                  AND c2.chunk_type = 'fulltext_section'
+                            )
+                          )
+                        ORDER BY c.chunk_type DESC, c.id
+                        LIMIT 500
+                    """)).mappings().fetchall()
+
+                if _chunks:
+                    _emb_done = 0
+                    for _bi in range(0, len(_chunks), _EMBED_BATCH):
+                        _batch = _chunks[_bi:_bi + _EMBED_BATCH]
+                        try:
+                            _resp = _client.embeddings.create(
+                                model="text-embedding-3-small",
+                                input=[r["content"][:8000] for r in _batch],
+                            )
+                            with engine.begin() as _cu:
+                                for _k, _ed in enumerate(_resp.data):
+                                    _vec = "[" + ",".join(str(x) for x in _ed.embedding) + "]"
+                                    _cu.execute(text("""
+                                        UPDATE document_chunk
+                                        SET embedding = CAST(:vec AS vector)
+                                        WHERE id = :cid
+                                    """), {"vec": _vec, "cid": _batch[_k]["id"]})
+                            _emb_done += len(_batch)
+                        except Exception as _ee:
+                            logger.warning(f"BG embed batch {_bi}: {_ee}")
+                    if _emb_done:
+                        logger.info(f"BG worker: {_emb_done} chunks embedded.")
+
+                # ── 2. PICO ───────────────────────────────────────────────────
+                with engine.connect() as _conn:
+                    _pico_rows = _conn.execute(text("""
+                        SELECT id, title, abstract
+                        FROM literature_document
+                        WHERE project_context = 'literev'
+                          AND pico_json IS NULL
+                          AND abstract IS NOT NULL
+                          AND LENGTH(abstract) > 50
+                        ORDER BY id
+                        LIMIT :lim
+                    """), {"lim": _PICO_BATCH}).mappings().fetchall()
+
+                if _pico_rows:
+                    _pico_done = 0
+                    with _TPE(max_workers=_PICO_WORKERS) as _pool:
+                        _futs = {_pool.submit(_extract_pico_one, r, _client): r["id"] for r in _pico_rows}
+                        for _f in _futs:
+                            if _f.result() is not None:
+                                _pico_done += 1
+                    if _pico_done:
+                        logger.info(f"BG worker: {_pico_done} PICO extracted.")
+
+            except Exception as _we:
+                logger.error(f"BG enrichment worker error: {_we}")
+
+            _time.sleep(_CYCLE_SLEEP)
+
+    threading.Thread(target=_background_enrichment_worker, daemon=True, name="bg-enrichment").start()
+    logger.info("Background enrichment worker launched.")
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Health
 # ─────────────────────────────────────────────────────────────────────────────
