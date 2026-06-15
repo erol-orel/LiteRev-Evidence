@@ -34,6 +34,8 @@ echo "========================================"
 # ── 1. Git pull ───────────────────────────────────────────────
 echo "[1/7] Git pull..."
 cd "$REPO_DIR"
+git reset --hard HEAD          # discard any server-side manual edits
+git clean -fd                  # remove untracked files
 git pull origin main
 echo "  OK — $(git log --oneline -1)"
 
