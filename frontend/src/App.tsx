@@ -3176,16 +3176,20 @@ export default function App() {
     [filters, projectContext, yearRange],
   );
 
+  // Deduplicate to ONE entry per document (keep the highest-scoring chunk per doc).
+  // The backend returns one row per chunk; multiple chunks from the same document
+  // must not produce multiple paginated entries — that causes the same paper to
+  // appear on multiple pages and makes the page count meaningless.
   const dedupedResults = useMemo(() => {
-    const seen = new Set<string>();
-    const deduped = results.filter((result) => {
-      const key = `${result.documentId}-${result.chunkIndex}-${result.content}`;
-      if (seen.has(key)) return false;
-      seen.add(key);
-      return true;
-    });
-    // Apply sort
-    return [...deduped].sort((a, b) => {
+    const byDoc = new Map<number, SearchResult>();
+    for (const r of results) {
+      const prev = byDoc.get(r.documentId);
+      if (!prev || (r.score ?? 0) > (prev.score ?? 0)) {
+        byDoc.set(r.documentId, r);
+      }
+    }
+    const deduped = Array.from(byDoc.values());
+    return deduped.sort((a, b) => {
       if (sortBy === "semantic") return (b.semanticScore ?? 0) - (a.semanticScore ?? 0);
       if (sortBy === "lexical") return (b.lexicalScore ?? 0) - (a.lexicalScore ?? 0);
       if (sortBy === "year_desc") return (b.year ?? 0) - (a.year ?? 0);
@@ -3200,11 +3204,7 @@ export default function App() {
     });
   }, [results, sortBy]);
 
-  // Nombre de documents uniques (un document peut avoir plusieurs chunks dans dedupedResults)
-  const uniqueDocCount = useMemo(() => {
-    const docIds = new Set(dedupedResults.map(r => r.documentId));
-    return docIds.size;
-  }, [dedupedResults]);
+  const uniqueDocCount = dedupedResults.length;
 
   const totalPages = Math.max(1, Math.ceil(dedupedResults.length / PAGE_SIZE));
 

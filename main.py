@@ -6986,13 +6986,17 @@ def get_user_scenario_corpus(
         )""")
     where = " AND ".join(conditions)
     with engine.connect() as conn:
-        count_row = conn.execute(text(f"""
-            SELECT COUNT(*) AS total
+        # Single query for both total and above_threshold to avoid race condition
+        counts_row = conn.execute(text(f"""
+            SELECT
+                COUNT(*) AS total,
+                COUNT(*) FILTER (WHERE COALESCE(ars.similarity_score, 1.0) >= :threshold) AS above_threshold
             FROM literature_document d
             JOIN article_scenarios ars ON ars.document_id = d.id AND ars.scenario_id = :sid
             WHERE {where}
-        """), params).mappings().first()
-        total = int(count_row["total"] or 0)
+        """), {**{k: v for k, v in params.items() if k not in ('limit', 'offset')}, 'threshold': eff_threshold}).mappings().first()
+        total = int(counts_row["total"] or 0)
+        above_threshold = int(counts_row["above_threshold"] or 0)
         articles = conn.execute(text(f"""
             SELECT
                 d.id, d.title, d.abstract, d.year, d.source, d.url,
@@ -7017,14 +7021,6 @@ def get_user_scenario_corpus(
                 d.title ASC
             LIMIT :limit OFFSET :offset
         """), {**params, 'threshold': eff_threshold}).mappings().all()
-        # Comptage au-dessus du seuil
-        above_row = conn.execute(text(f"""
-            SELECT COUNT(*) AS cnt
-            FROM literature_document d
-            JOIN article_scenarios ars ON ars.document_id = d.id AND ars.scenario_id = :sid
-            WHERE {where} AND COALESCE(ars.similarity_score, 1.0) >= :threshold
-        """), {**{k: v for k, v in params.items() if k not in ('limit', 'offset')}, 'threshold': eff_threshold}).mappings().first()
-        above_threshold = int(above_row['cnt'] or 0)
         year_dist = conn.execute(text(f"""
             SELECT d.year, COUNT(*) AS cnt
             FROM literature_document d
@@ -7363,7 +7359,7 @@ def _run_user_scenario_populate(
                     with engine.begin() as conn:
                         conn.execute(text("""
                             INSERT INTO article_scenarios (document_id, scenario_id, similarity_score)
-                            VALUES (:doc_id, :sid, 1.0)
+                            VALUES (:doc_id, :sid, NULL)
                             ON CONFLICT (document_id, scenario_id) DO NOTHING
                         """), {"doc_id": doc_id, "sid": scenario_id})
 
@@ -7446,7 +7442,7 @@ def _run_user_scenario_populate(
                         with engine.begin() as _c:
                             _c.execute(text("""
                                 INSERT INTO article_scenarios (document_id, scenario_id, similarity_score)
-                                VALUES (:doc_id, :sid, 1.0) ON CONFLICT (document_id, scenario_id) DO NOTHING
+                                VALUES (:doc_id, :sid, NULL) ON CONFLICT (document_id, scenario_id) DO NOTHING
                             """), {"doc_id": doc_id, "sid": scenario_id})
                         ingested += 1
                         _oa_fetched_count += 1
@@ -7525,7 +7521,7 @@ def _run_user_scenario_populate(
                         with engine.begin() as _c:
                             _c.execute(text("""
                                 INSERT INTO article_scenarios (document_id, scenario_id, similarity_score)
-                                VALUES (:doc_id, :sid, 1.0) ON CONFLICT (document_id, scenario_id) DO NOTHING
+                                VALUES (:doc_id, :sid, NULL) ON CONFLICT (document_id, scenario_id) DO NOTHING
                             """), {"doc_id": doc_id, "sid": scenario_id})
                         ingested += 1
                         _cr_fetched_count += 1
@@ -7607,7 +7603,7 @@ def _run_user_scenario_populate(
                         with engine.begin() as _c:
                             _c.execute(text("""
                                 INSERT INTO article_scenarios (document_id, scenario_id, similarity_score)
-                                VALUES (:doc_id, :sid, 1.0) ON CONFLICT (document_id, scenario_id) DO NOTHING
+                                VALUES (:doc_id, :sid, NULL) ON CONFLICT (document_id, scenario_id) DO NOTHING
                             """), {"doc_id": doc_id, "sid": scenario_id})
                         ingested += 1
                         _ep_fetched_count += 1
@@ -7688,7 +7684,7 @@ def _run_user_scenario_populate(
                             with engine.begin() as _c:
                                 _c.execute(text("""
                                     INSERT INTO article_scenarios (document_id, scenario_id, similarity_score)
-                                    VALUES (:doc_id, :sid, 1.0) ON CONFLICT (document_id, scenario_id) DO NOTHING
+                                    VALUES (:doc_id, :sid, NULL) ON CONFLICT (document_id, scenario_id) DO NOTHING
                                 """), {"doc_id": _doc_id, "sid": scenario_id})
                             ingested += 1
                             _fetched += 1
@@ -7801,7 +7797,7 @@ def _run_user_scenario_populate(
                             with engine.begin() as _c:
                                 _c.execute(text("""
                                     INSERT INTO article_scenarios (document_id, scenario_id, similarity_score)
-                                    VALUES (:doc_id, :sid, 1.0) ON CONFLICT (document_id, scenario_id) DO NOTHING
+                                    VALUES (:doc_id, :sid, NULL) ON CONFLICT (document_id, scenario_id) DO NOTHING
                                 """), {"doc_id": _doc_id, "sid": scenario_id})
                             ingested += 1
                             if _pipeline_callback is None:
@@ -7968,7 +7964,7 @@ def _run_user_scenario_populate(
                     with engine.begin() as _c:
                         _c.execute(text("""
                             INSERT INTO article_scenarios (document_id, scenario_id, similarity_score)
-                            VALUES (:doc_id, :sid, 1.0) ON CONFLICT (document_id, scenario_id) DO NOTHING
+                            VALUES (:doc_id, :sid, NULL) ON CONFLICT (document_id, scenario_id) DO NOTHING
                         """), {"doc_id": _doc_id, "sid": scenario_id})
                     ingested += 1
                     if _pipeline_callback is None:
@@ -8008,10 +8004,37 @@ def _run_user_scenario_populate(
                 WHERE id = :sid
             """), {"sid": scenario_id})
 
-        # ── Scores réels : remplace le 1.0 par défaut par la similarité cosinus
-        #    sémantique requête↔article (sinon tous les scores valent 1.0). ──
+        # ── Scores réels + nettoyage sous le seuil ───────────────────────────
+        # 1. Calcul cosinus réel pour chaque article (remplace NULL/0.9 initial).
+        # 2. Supprime les articles dont le score confirmé est < seuil.
+        #    Les articles sans score (NULL après échec d'embedding) sont conservés.
+        _clean_thr = 0.45
+        try:
+            with engine.connect() as _stc:
+                _sts = _stc.execute(text(
+                    "SELECT similarity_threshold FROM scenario_settings WHERE scenario_id = :sid"
+                ), {"sid": scenario_id}).scalar()
+                if _sts is not None:
+                    _clean_thr = float(_sts)
+        except Exception:
+            pass
         try:
             _run_semantic_rerank_inline(scenario_id, query)
+            with engine.begin() as _cconn:
+                _n_removed = _cconn.execute(text("""
+                    DELETE FROM article_scenarios
+                    WHERE scenario_id = :sid
+                      AND similarity_score IS NOT NULL
+                      AND similarity_score < :thr
+                """), {"sid": scenario_id, "thr": _clean_thr}).rowcount
+            if _n_removed:
+                logger.info(f"Post-populate cleanup {scenario_id}: {_n_removed} articles sous le seuil supprimés")
+                with engine.begin() as _ac:
+                    _ac.execute(text("""
+                        UPDATE user_scenarios
+                        SET article_count = (SELECT COUNT(DISTINCT document_id) FROM article_scenarios WHERE scenario_id = :sid)
+                        WHERE id = :sid
+                    """), {"sid": scenario_id})
         except Exception as _e_rr:
             logger.warning(f"rerank post-populate {scenario_id}: {_e_rr}")
 
