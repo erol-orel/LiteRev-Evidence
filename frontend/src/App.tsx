@@ -3099,6 +3099,7 @@ export default function App() {
   const [searchTotalMatching, setSearchTotalMatching] = useState<number | null>(null);
   const [searchFulltextDocs, setSearchFulltextDocs] = useState<number | null>(null);
   const [searchAbstractDocs, setSearchAbstractDocs] = useState<number | null>(null);
+  const [searchLiveNewCount, setSearchLiveNewCount] = useState<number | null>(null);
   const [searchScoreType, setSearchScoreType] = useState<string | null>(null);
   const [searchScoreLabel, setSearchScoreLabel] = useState<string | null>(null);
   const [folders, setFolders] = useState<ScenarioFolder[]>([]);
@@ -3251,6 +3252,7 @@ export default function App() {
       setSearchSourceBreakdown(data.sourceBreakdown ?? null);
       setSearchFulltextDocs(data.fulltextDocs ?? null);
       setSearchAbstractDocs(data.abstractDocs ?? null);
+      setSearchLiveNewCount(data.liveNewCount ?? null);
       setSearchScoreType(data.scoreType ?? null);
       setSearchScoreLabel(data.scoreLabel ?? null);
       const first = data.results[0] ?? null;
@@ -3772,16 +3774,16 @@ export default function App() {
                   </button>
                 </div>
 
-                <label className="mt-3 flex items-center gap-2 text-xs text-forest-300 cursor-pointer select-none">
+                <label className="mt-3 flex items-start gap-2 text-xs text-forest-300 cursor-pointer select-none">
                   <input
                     type="checkbox"
                     checked={includeLive}
                     onChange={(e) => setIncludeLive(e.target.checked)}
-                    className="h-4 w-4 accent-brand-400"
+                    className="mt-0.5 h-4 w-4 accent-brand-400 shrink-0"
                   />
                   <span>
-                    Inclure les sources API en direct (PubMed, OpenAlex, Crossref, EuropePMC, medRxiv, bioRxiv, PROSPERO, Cochrane)
-                    <span className="text-forest-500"> — recherche plus lente, ajoute les articles non encore indexés</span>
+                    <span>Inclure les sources API en direct (PubMed, OpenAlex, Crossref, EuropePMC, medRxiv, bioRxiv, PROSPERO, Cochrane)</span>
+                    <span className="block text-forest-500 mt-0.5">Recherche plus lente, ajoute les articles non encore indexes</span>
                   </span>
                 </label>
               </section>
@@ -3822,22 +3824,45 @@ export default function App() {
                         )}
                         {" "}· {totalPages > 1 ? `page ${page}/${totalPages}` : "1 page"}
                       </p>
-                      {searchSourceBreakdown && Object.keys(searchSourceBreakdown).length > 0 && (
-                        <div className="flex flex-wrap gap-1.5">
-                          {Object.entries(searchSourceBreakdown).map(([src, count]) => (
-                            <span key={src} className="rounded-lg border border-white/10 bg-white/5 px-2 py-0.5 text-xs text-white/50">
-                              {src}: <span className="font-semibold text-white/70">{count}</span>
-                            </span>
-                          ))}
-                        </div>
-                      )}
+                      {searchSourceBreakdown && Object.keys(searchSourceBreakdown).length > 0 && (() => {
+                        const localEntries = Object.entries(searchSourceBreakdown).filter(([k]) => !k.endsWith(" (live)"));
+                        const liveEntries = Object.entries(searchSourceBreakdown).filter(([k]) => k.endsWith(" (live)"));
+                        return (
+                          <>
+                            {localEntries.length > 0 && (
+                              <div className="flex flex-wrap items-center gap-1.5">
+                                <span className="text-[10px] text-white/25 uppercase tracking-wider">Base locale</span>
+                                {localEntries.map(([src, count]) => (
+                                  <span key={src} className="rounded-lg border border-white/10 bg-white/5 px-2 py-0.5 text-xs text-white/50">
+                                    {src}: <span className="font-semibold text-white/70">{count}</span>
+                                  </span>
+                                ))}
+                              </div>
+                            )}
+                            {liveEntries.length > 0 && (
+                              <div className="flex flex-wrap items-center gap-1.5">
+                                <span className="text-[10px] text-emerald-500/60 uppercase tracking-wider">API en direct</span>
+                                {liveEntries.map(([src, count]) => (
+                                  <span key={src} className="rounded-lg border border-emerald-500/20 bg-emerald-500/5 px-2 py-0.5 text-xs text-emerald-400/70">
+                                    {src.replace(" (live)", "")}: <span className="font-semibold text-emerald-300">{count}</span>
+                                  </span>
+                                ))}
+                                {searchLiveNewCount != null && searchLiveNewCount > 0 && (
+                                  <span className="text-[10px] text-emerald-500/50">+{searchLiveNewCount} nouvelles references</span>
+                                )}
+                              </div>
+                            )}
+                          </>
+                        );
+                      })()}
                       {(searchFulltextDocs != null || searchAbstractDocs != null) && (
-                        <div className="flex flex-wrap gap-1.5">
+                        <div className="flex flex-wrap items-center gap-1.5">
+                          <span className="text-[10px] text-white/25 uppercase tracking-wider">Contenu</span>
                           <span className="rounded-lg border border-brand-500/20 bg-brand-500/10 px-2 py-0.5 text-xs text-brand-300">
-                            Texte intégral : <span className="font-semibold">{(searchFulltextDocs ?? 0).toLocaleString()}</span>
+                            Texte integral : <span className="font-semibold">{(searchFulltextDocs ?? 0).toLocaleString()}</span>
                           </span>
                           <span className="rounded-lg border border-white/10 bg-white/5 px-2 py-0.5 text-xs text-white/50">
-                            Résumé seul : <span className="font-semibold text-white/70">{(searchAbstractDocs ?? 0).toLocaleString()}</span>
+                            Resume seul : <span className="font-semibold text-white/70">{(searchAbstractDocs ?? 0).toLocaleString()}</span>
                           </span>
                         </div>
                       )}
@@ -4020,7 +4045,7 @@ export default function App() {
                             {/* Provenance : base locale indexée vs source API en direct */}
                             {result.isLive ? (
                               <span className="rounded-full px-2 py-1 border text-[11px] bg-amber-500/10 border-amber-500/30 text-amber-300"
-                                    title="Récupéré en direct via API externe — pas encore indexé dans la base locale">
+                                    title="Recupere en direct via API externe, pas encore indexe dans la base locale">
                                 API live
                               </span>
                             ) : (

@@ -351,7 +351,7 @@ function QueriesSection({ detail, scenarioId }: { detail: ScenarioDetail; scenar
                 {liveData.new_count > 0 && (
                   <span className="rounded-full border border-amber-500/40 bg-amber-500/10 px-2 py-0.5 text-amber-300">
                     {liveData.new_count} nouveaux non-indexés
-                    {liveData.ingesting_background && " — ingestion en cours..."}
+                    {liveData.ingesting_background && " (ingestion en cours...)"}
                   </span>
                 )}
                 <span>{liveData.sources_queried.join(", ")}</span>
@@ -2264,7 +2264,7 @@ function PrismaSection({ scenarioId }: { scenarioId: string }) {
         {/* ── Stage 1: Identification ── */}
         <PrismaStageCard
           color="border-emerald-800/50 bg-emerald-950/30 text-emerald-200"
-          label="Stage 1 — Identification"
+          label="Stage 1: Identification"
           icon={<Database size={13} className="text-emerald-400" />}
         >
           <PrismaBigNum value={totalRecords} sub={`${activeSources.length} source${activeSources.length !== 1 ? "s" : ""} searched`} />
@@ -2288,7 +2288,7 @@ function PrismaSection({ scenarioId }: { scenarioId: string }) {
         {/* ── Stage 2: AI Semantic Pre-screening ── */}
         <PrismaStageCard
           color="border-violet-800/50 bg-violet-950/30 text-violet-200"
-          label="Stage 2 — AI Semantic Pre-screening"
+          label="Stage 2: AI Semantic Pre-screening"
           icon={<Sparkles size={13} className="text-violet-400" />}
         >
           <div className="grid grid-cols-2 gap-3">
@@ -2316,7 +2316,7 @@ function PrismaSection({ scenarioId }: { scenarioId: string }) {
         {/* ── Stage 3: Manual Curation ── */}
         <PrismaStageCard
           color="border-amber-800/50 bg-amber-950/30 text-amber-200"
-          label="Stage 3 — Manual Curation"
+          label="Stage 3: Manual Curation"
           icon={<ClipboardList size={13} className="text-amber-400" />}
         >
           <div className="grid grid-cols-3 gap-3">
@@ -2342,7 +2342,7 @@ function PrismaSection({ scenarioId }: { scenarioId: string }) {
         {/* ── Stage 4: Evidence Synthesis ── */}
         <PrismaStageCard
           color="border-cyan-800/50 bg-cyan-950/30 text-cyan-200"
-          label="Stage 4 — Evidence Synthesis"
+          label="Stage 4: Evidence Synthesis"
           icon={<BookOpen size={13} className="text-cyan-400" />}
         >
           <PrismaBigNum
@@ -3392,7 +3392,7 @@ function SeuilSection({ scenarioId, onSaved, onThresholdChange }: { scenarioId: 
       </div>
       <p className="text-[10px] text-white/30 w-full">
         Les articles avec un score de similarité supérieur à ce seuil (ou validés humainement) sont utilisés dans l'Evidence Brief, l'Assistant IA et les Variables.
-        <span className="ml-1 text-white/20">— Score ≡ = lexical BM25 (avant embedding) · Score ◎ = sémantique cosinus (après embedding) · "Recalculer scores" lance le rerank sémantique.</span>
+        <span className="ml-1 text-white/20">Score ≡ = lexical BM25 (avant embedding) · Score ◎ = semantique cosinus (apres embedding) · "Recalculer scores" lance le rerank semantique.</span>
       </p>
     </div>
   );
