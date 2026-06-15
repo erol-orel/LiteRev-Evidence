@@ -12,7 +12,7 @@ try:
     from gesica_scenario_enriched_metadata import GESICA_ENRICHED
 except ImportError:
     GESICA_ENRICHED: dict = {}
-from fastapi import Depends, FastAPI, Header, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import create_engine, text
