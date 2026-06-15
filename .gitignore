@@ -49,3 +49,4 @@ frontend/node_modules/
 # Python cache
 __pycache__/
 *.pyc
+.claude/
