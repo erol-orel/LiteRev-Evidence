@@ -14,7 +14,7 @@ except ImportError:
     GESICA_ENRICHED: dict = {}
 from fastapi import Depends, FastAPI, Header, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 from sqlalchemy import create_engine, text
 
 logging.basicConfig(level=logging.INFO)
@@ -209,24 +209,28 @@ class ChunkIn(BaseModel):
     metadata_json: dict[str, Any] | None = None
 
 class SearchIn(BaseModel):
+    # Accept all three field names for backwards compat; normalised to `query` at parse time.
     query_text: str | None = Field(None, max_length=1000)
     querytext: str | None = Field(None, max_length=1000)
-    query: str | None = Field(None, max_length=1000)  # alias pour compatibilité frontend
+    query: str = Field(default="", max_length=1000)
     filters: dict[str, Any] | None = None
-    mode: str = Field(default="hybrid") # Mode par défaut hybride
-    limit: int = Field(default=200, ge=1, le=10000)  # Cap à 10000 (le frontend récupère tout le corpus classé pour pagination côté client)
+    mode: str = Field(default="hybrid")
+    limit: int = Field(default=200, ge=1, le=10000)
     offset: int = Field(default=0, ge=0)
-    project_context: str | None = None  # alias pour filtres projet
-    include_live: bool = Field(default=False)  # fédère aussi les 8 sources API en direct
+    project_context: str | None = None
+    include_live: bool = Field(default=False)
     live_max_per_source: int = Field(default=25, ge=1, le=100)
 
-    def resolved_query(self) -> str:
+    @model_validator(mode="after")
+    def _resolve_query(self) -> "SearchIn":
         q = (self.query_text or self.querytext or self.query or "").strip()
         if not q:
-            raise HTTPException(
-                status_code=422, detail="query_text is required"
-            )
-        return q
+            raise ValueError("query_text is required")
+        self.query = q
+        return self
+
+    def resolved_query(self) -> str:
+        return self.query
 
 class AskIn(BaseModel):
     question: str = Field(..., min_length=3, max_length=2000)  # Limite d'entrée RAG (H-5)
