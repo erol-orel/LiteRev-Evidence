@@ -275,29 +275,79 @@ def startup_event() -> None:
 
     # Pipelines orphelins : tout pipeline marqué 'running' ou 'starting' au
     # démarrage du serveur est forcément mort (le thread a été tué lors du
-    # redémarrage précédent). On le marque 'failed' pour que l'utilisateur
-    # puisse le relancer depuis l'interface.
+    # redémarrage précédent).
+    # Stratégie : on les relance automatiquement en arrière-plan plutôt que
+    # de les marquer 'failed' et forcer l'utilisateur à les relancer manuellement.
     try:
-        with engine.begin() as _startup_conn:
-            _orphans = _startup_conn.execute(text("""
-                UPDATE user_scenarios
-                SET pipeline_status = 'failed',
-                    pipeline_step   = NULL,
-                    updated_at      = NOW()
+        with engine.connect() as _startup_conn:
+            _orphan_rows = _startup_conn.execute(text("""
+                SELECT id, query, filters
+                FROM user_scenarios
                 WHERE pipeline_status IN ('running', 'starting')
-            """)).rowcount
+            """)).mappings().fetchall()
             _pop_orphans = _startup_conn.execute(text("""
-                UPDATE user_scenarios
-                SET populate_status = 'error',
-                    updated_at      = NOW()
+                SELECT COUNT(*) FROM user_scenarios
                 WHERE populate_status = 'running'
-            """)).rowcount
-        if _orphans:
-            logger.warning(f"Startup: {_orphans} pipeline(s) orphelin(s) reinitialisé(s) à 'failed'.")
+            """)).scalar() or 0
+
+        # Réinitialiser les populate orphelins à 'error'
         if _pop_orphans:
+            with engine.begin() as _c:
+                _c.execute(text("""
+                    UPDATE user_scenarios
+                    SET populate_status = 'error', updated_at = NOW()
+                    WHERE populate_status = 'running'
+                """))
             logger.warning(f"Startup: {_pop_orphans} populate(s) orphelin(s) reinitialisé(s) à 'error'.")
+
+        # Relancer automatiquement les pipelines interrompus
+        if _orphan_rows:
+            import threading as _startup_threading
+            logger.warning(
+                f"Startup: {len(_orphan_rows)} pipeline(s) interrompu(s) détecté(s) — "
+                f"relance automatique en arrière-plan."
+            )
+            for _orphan in _orphan_rows:
+                _oid = _orphan["id"]
+                _oquery = _orphan["query"] or ""
+                _ofilters = _orphan["filters"] or {}
+                if not _oquery:
+                    # Pas de requête → on ne peut pas relancer, marquer failed
+                    with engine.begin() as _c:
+                        _c.execute(text("""
+                            UPDATE user_scenarios
+                            SET pipeline_status = 'failed',
+                                pipeline_step   = NULL,
+                                updated_at      = NOW()
+                            WHERE id = :sid
+                        """), {"sid": _oid})
+                    logger.warning(f"Startup: pipeline {_oid} sans requête → marqué 'failed'.")
+                    continue
+                # Initialiser le job en mémoire
+                with _pipeline_jobs_lock:
+                    _user_scenario_pipeline_jobs[_oid] = {
+                        "overall_status": "starting",
+                        "current_step": "ingest",
+                        "auto_restarted": True,
+                        "steps": {
+                            "ingest":     {"status": "pending"},
+                            "fulltext":   {"status": "pending"},
+                            "embed":      {"status": "pending"},
+                            "rerank":     {"status": "pending"},
+                            "pico":       {"status": "pending"},
+                            "metadata":   {"status": "pending"},
+                            "clustering": {"status": "pending"},
+                        },
+                    }
+                _t = _startup_threading.Thread(
+                    target=_run_user_scenario_full_pipeline,
+                    args=(_oid, _oquery, _ofilters),
+                    daemon=True,
+                )
+                _t.start()
+                logger.info(f"Startup: pipeline {_oid} relancé automatiquement (query={_oquery[:60]!r}).")
     except Exception as _se:
-        logger.error(f"Startup cleanup pipelines orphelins: {_se}")
+        logger.error(f"Startup cleanup/relance pipelines orphelins: {_se}")
 
     # Entraîner le modèle demand-forecasting en arrière-plan au démarrage
     import threading
