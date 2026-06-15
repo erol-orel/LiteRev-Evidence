@@ -123,7 +123,7 @@ const FILTER_FIELDS: Array<[keyof FilterOptions, string]> = [
   ["evidenceCategory", "Catégorie de preuve"],
 ];
 
-const PAGE_SIZE = 10;
+const PAGE_SIZE = 20;
 
 type AppTab = "search" | "scenarios" | "stats" | "terrain";
 
@@ -3805,24 +3805,17 @@ export default function App() {
                   <div className="flex items-center justify-between">
                     <div className="space-y-1">
                       <p className="text-sm text-forest-400">
-                        {searchTotalMatching != null ? (
-                          <>
-                            <span className="font-semibold text-white">{searchTotalMatching.toLocaleString()}</span>{" "}
-                            document{searchTotalMatching > 1 ? "s" : ""} pertinent{searchTotalMatching > 1 ? "s" : ""} indexé{searchTotalMatching > 1 ? "s" : ""}
-                            {uniqueDocCount !== searchTotalMatching && (
-                              <span className="text-white/30"> ({uniqueDocCount.toLocaleString()} affichés)</span>
-                            )}
-                          </>
-                        ) : (
-                          <>
-                            <span className="font-semibold text-white">{uniqueDocCount}</span>{" "}
-                            document{uniqueDocCount > 1 ? "s" : ""} uniques
-                          </>
-                        )}
-                        {dedupedResults.length > uniqueDocCount && (
-                          <span className="text-white/30"> ({dedupedResults.length.toLocaleString()} passages)</span>
-                        )}
-                        {" "}· {totalPages > 1 ? `page ${page}/${totalPages}` : "1 page"}
+                        <>
+                          <span className="font-semibold text-white">{uniqueDocCount.toLocaleString()}</span>{" "}
+                          document{uniqueDocCount > 1 ? "s" : ""} pertinent{uniqueDocCount > 1 ? "s" : ""}
+                          {searchTotalMatching != null && searchTotalMatching !== uniqueDocCount && (
+                            <span className="text-white/30"> ({searchTotalMatching.toLocaleString()} indexés)</span>
+                          )}
+                          {dedupedResults.length > uniqueDocCount && (
+                            <span className="text-white/30">, {dedupedResults.length.toLocaleString()} extraits</span>
+                          )}
+                          {" "}· {totalPages > 1 ? `page ${page}/${totalPages}` : "1 page"}
+                        </>
                       </p>
                       {searchSourceBreakdown && Object.keys(searchSourceBreakdown).length > 0 && (() => {
                         const localEntries = Object.entries(searchSourceBreakdown).filter(([k]) => !k.endsWith(" (live)"));
@@ -3848,7 +3841,7 @@ export default function App() {
                                   </span>
                                 ))}
                                 {searchLiveNewCount != null && searchLiveNewCount > 0 && (
-                                  <span className="text-[10px] text-emerald-500/50">+{searchLiveNewCount} nouvelles references</span>
+                                  <span className="text-[10px] text-emerald-500/50">+{searchLiveNewCount} nouvelles références</span>
                                 )}
                               </div>
                             )}
