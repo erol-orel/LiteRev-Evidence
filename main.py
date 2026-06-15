@@ -655,6 +655,86 @@ def _build_where(filters: dict[str, Any] | None) -> tuple[str, dict[str, Any]]:
 
     return " AND " + " AND ".join(clauses), params
 
+def _parse_boolean_query(query: str) -> tuple[list[str], list[str], list[str]]:
+    """Parse a boolean query into (required, optional, excluded) term lists.
+    Handles quoted phrases, AND/OR/NOT operators.
+    Default between adjacent terms is AND (like PubMed).
+    Returns (required_terms, optional_terms, excluded_terms).
+    """
+    required: list[str] = []
+    optional_terms: list[str] = []
+    excluded: list[str] = []
+
+    # Tokenize preserving quoted phrases
+    tokens = re.findall(r'"[^"]*"|\S+', query)
+    pending_op = "AND"
+    i = 0
+    while i < len(tokens):
+        tok = tokens[i]
+        upper = tok.upper()
+        if upper == "AND":
+            pending_op = "AND"
+        elif upper == "OR":
+            pending_op = "OR"
+        elif upper in ("NOT", "-"):
+            # next token is excluded
+            if i + 1 < len(tokens):
+                i += 1
+                raw = tokens[i].strip('"')
+                clean = re.sub(r"[^a-zA-Z0-9\-_ ]", "", raw).lower().strip()
+                if clean:
+                    excluded.append(clean)
+        else:
+            raw = tok.strip('"')
+            clean = re.sub(r"[^a-zA-Z0-9\-_ ]", "", raw).lower().strip()
+            if clean:
+                if pending_op == "OR":
+                    optional_terms.append(clean)
+                else:
+                    required.append(clean)
+            pending_op = "AND"
+        i += 1
+    return required, optional_terms, excluded
+
+
+def _build_boolean_match_sql(required: list[str], optional_terms: list[str],
+                              excluded: list[str], params: dict) -> str:
+    """Build SQL WHERE fragment for boolean mode with AND/OR/NOT logic."""
+    and_clauses: list[str] = []
+
+    for i, term in enumerate(required):
+        key = f"bool_req_{i}"
+        params[key] = f"%{term}%"
+        and_clauses.append(
+            f"(LOWER(COALESCE(d.title,'')) LIKE :{key}"
+            f" OR LOWER(COALESCE(d.abstract,'')) LIKE :{key}"
+            f" OR LOWER(COALESCE(c.content,'')) LIKE :{key})"
+        )
+
+    if optional_terms:
+        or_parts: list[str] = []
+        for i, term in enumerate(optional_terms):
+            key = f"bool_opt_{i}"
+            params[key] = f"%{term}%"
+            or_parts.append(
+                f"(LOWER(COALESCE(d.title,'')) LIKE :{key}"
+                f" OR LOWER(COALESCE(d.abstract,'')) LIKE :{key}"
+                f" OR LOWER(COALESCE(c.content,'')) LIKE :{key})"
+            )
+        and_clauses.append("(" + " OR ".join(or_parts) + ")")
+
+    for i, term in enumerate(excluded):
+        key = f"bool_excl_{i}"
+        params[key] = f"%{term}%"
+        and_clauses.append(
+            f"NOT (LOWER(COALESCE(d.title,'')) LIKE :{key}"
+            f" OR LOWER(COALESCE(d.abstract,'')) LIKE :{key}"
+            f" OR LOWER(COALESCE(c.content,'')) LIKE :{key})"
+        )
+
+    return " AND ".join(and_clauses) if and_clauses else "TRUE"
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Search (Hybride & Vectorielle pgvector)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -664,16 +744,22 @@ def search(payload: SearchIn) -> dict[str, Any]:
     filters = payload.filters or {}
     where_sql, where_params = _build_where(filters)
 
-    # Nettoyage strict des termes de recherche pour ne garder que des caractères sûrs (H-1)
-    raw_terms = [t.strip() for t in re.split(r"\s+", query.lower()) if t.strip()]
-    query_terms = []
-    for t in raw_terms:
-        # Ne garder que les caractères alphanumériques et les tirets/underscores
-        clean_t = re.sub(r"[^a-zA-Z0-9\-_]", "", t)
-        if clean_t:
-            query_terms.append(clean_t)
+    # Boolean mode: parse the query keeping AND/OR/NOT/phrases semantics.
+    # Other modes: clean terms for LIKE matching (OR-joined across all terms).
+    if payload.mode == "boolean":
+        bool_required, bool_optional, bool_excluded = _parse_boolean_query(query)
+        # For query_terms (used in lexical scoring ts_rank), flatten all terms
+        all_bool_terms = bool_required + bool_optional
+        query_terms = [t for t in all_bool_terms if t] or [""]
+    else:
+        raw_terms = [t.strip() for t in re.split(r"\s+", query.lower()) if t.strip()]
+        query_terms = []
+        for t in raw_terms:
+            clean_t = re.sub(r"[^a-zA-Z0-9\-_]", "", t)
+            if clean_t:
+                query_terms.append(clean_t)
 
-    if not query_terms:
+    if not query_terms or all(t == "" for t in query_terms):
         raise HTTPException(status_code=422, detail="Empty query or query contains only invalid characters")
 
     # Déterminer si on peut utiliser pgvector (requiert OpenAI pour l'embedding de la requête)
@@ -704,18 +790,22 @@ def search(payload: SearchIn) -> dict[str, Any]:
         **where_params,
     }
 
-    for i, term in enumerate(query_terms):
-        key = f"term_{i}"
-        params[key] = f"%{term}%"
-        like_clauses.append(
-            f"""(
-                LOWER(COALESCE(d.title, '')) LIKE :{key}
-                OR LOWER(COALESCE(d.abstract, '')) LIKE :{key}
-                OR LOWER(COALESCE(c.content, '')) LIKE :{key}
-            )"""
+    if payload.mode == "boolean":
+        any_match_sql = _build_boolean_match_sql(
+            bool_required, bool_optional, bool_excluded, params
         )
-
-    any_match_sql = " OR ".join(like_clauses)
+    else:
+        for i, term in enumerate(query_terms):
+            key = f"term_{i}"
+            params[key] = f"%{term}%"
+            like_clauses.append(
+                f"""(
+                    LOWER(COALESCE(d.title, '')) LIKE :{key}
+                    OR LOWER(COALESCE(d.abstract, '')) LIKE :{key}
+                    OR LOWER(COALESCE(c.content, '')) LIKE :{key}
+                )"""
+            )
+        any_match_sql = " OR ".join(like_clauses)
 
     # ts_rank on title+abstract: same field for every doc regardless of full-text
     # presence. plainto_tsquery handles stemming & special chars safely.
@@ -6476,11 +6566,11 @@ def list_user_scenarios() -> list[dict[str, Any]]:
                 us.id, us.name, us.query, us.mode, us.filters,
                 us.pinned, us.folder_id, us.created_at, us.updated_at,
                 us.populate_status, us.pipeline_status, us.pipeline_step, us.pipeline_progress,
-                COALESCE((
-                    SELECT COUNT(DISTINCT document_id)
-                    FROM article_scenarios
-                    WHERE scenario_id = us.id
-                ), 0) AS result_count
+                CASE
+                    WHEN (SELECT COUNT(*) FROM article_scenarios WHERE scenario_id = us.id) > 0
+                    THEN (SELECT COUNT(DISTINCT document_id) FROM article_scenarios WHERE scenario_id = us.id)
+                    ELSE COALESCE(us.result_count, 0)
+                END AS result_count
             FROM user_scenarios us
             ORDER BY us.pinned DESC, us.created_at DESC
         """)).mappings().all()
