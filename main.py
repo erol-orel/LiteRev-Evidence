@@ -738,6 +738,80 @@ def _build_boolean_match_sql(required: list[str], optional_terms: list[str],
 # ─────────────────────────────────────────────────────────────────────────────
 # Search (Hybride & Vectorielle pgvector)
 # ─────────────────────────────────────────────────────────────────────────────
+
+def _search_local_doc_ids(
+    query: str,
+    mode: str,
+    filters: dict,
+    limit: int = 10_000,
+) -> list[str]:
+    """Run the same local-DB search logic as /search and return matching doc IDs.
+
+    Used by the pipeline to link already-ingested docs to a new scenario
+    without re-querying external APIs.
+    """
+    where_sql, where_params = _build_where(filters)
+
+    openai_key = os.getenv("OPENAI_API_KEY")
+    use_vector = mode in ("semantic", "hybrid") and bool(openai_key)
+
+    query_embedding = None
+    if use_vector:
+        try:
+            from openai import OpenAI
+            client = OpenAI(api_key=openai_key)
+            query_embedding = client.embeddings.create(
+                input=[query.replace("\n", " ").strip()],
+                model="text-embedding-3-small",
+            ).data[0].embedding
+        except Exception as e:
+            logger.error(f"_search_local_doc_ids embedding error: {e}")
+            use_vector = False
+
+    params: dict[str, Any] = {**where_params, "limit": limit}
+
+    if mode == "boolean":
+        bool_required, bool_optional, bool_excluded = _parse_boolean_query(query)
+        any_match_sql = _build_boolean_match_sql(bool_required, bool_optional, bool_excluded, params)
+    else:
+        raw_terms = [t.strip() for t in re.split(r"\s+", query.lower()) if t.strip()]
+        query_terms = [re.sub(r"[^a-zA-Z0-9\-_]", "", t) for t in raw_terms if re.sub(r"[^a-zA-Z0-9\-_]", "", t)]
+        like_clauses: list[str] = []
+        for i, term in enumerate(query_terms):
+            key = f"lsd_term_{i}"
+            params[key] = f"%{term}%"
+            like_clauses.append(
+                f"(LOWER(COALESCE(d.title,'')) LIKE :{key}"
+                f" OR LOWER(COALESCE(d.abstract,'')) LIKE :{key}"
+                f" OR LOWER(COALESCE(c.content,'')) LIKE :{key})"
+            )
+        any_match_sql = " OR ".join(like_clauses) if like_clauses else "TRUE"
+
+    if use_vector:
+        params["q_emb"] = str(query_embedding)
+        sql = text(f"""
+            SELECT DISTINCT d.id
+            FROM document_chunk c
+            JOIN literature_document d ON d.id = c.document_id
+            WHERE c.embedding IS NOT NULL
+              AND (1 - (c.embedding <=> CAST(:q_emb AS vector))) > 0.45
+              {where_sql}
+            LIMIT :limit
+        """)
+    else:
+        sql = text(f"""
+            SELECT DISTINCT d.id
+            FROM document_chunk c
+            JOIN literature_document d ON d.id = c.document_id
+            WHERE ({any_match_sql})
+              {where_sql}
+            LIMIT :limit
+        """)
+
+    with engine.connect() as conn:
+        return conn.execute(sql, params).scalars().all()
+
+
 @app.post("/search")
 def search(payload: SearchIn) -> dict[str, Any]:
     query = payload.resolved_query()
@@ -849,7 +923,7 @@ def search(payload: SearchIn) -> dict[str, Any]:
                 FROM document_chunk c
                 JOIN literature_document d ON d.id = c.document_id
                 WHERE c.embedding IS NOT NULL
-                  AND (1 - (c.embedding <=> CAST(:query_embedding AS vector))) > 0.35
+                  AND (1 - (c.embedding <=> CAST(:query_embedding AS vector))) > 0.45
                 {where_sql}
                 UNION ALL
                 SELECT
@@ -915,7 +989,7 @@ def search(payload: SearchIn) -> dict[str, Any]:
                 FROM document_chunk c
                 JOIN literature_document d ON d.id = c.document_id
                 WHERE c.embedding IS NOT NULL
-                  AND (1 - (c.embedding <=> CAST(:query_embedding AS vector))) > 0.35
+                  AND (1 - (c.embedding <=> CAST(:query_embedding AS vector))) > 0.45
                 {where_sql}
             ) combined
             ORDER BY score DESC, year DESC NULLS LAST
@@ -956,8 +1030,7 @@ def search(payload: SearchIn) -> dict[str, Any]:
         """)
 
     # Comptage réel du nombre de documents distincts correspondant à la requête.
-    # En sémantique/hybride : docs avec au moins un chunk dont la similarité cosinus > 0.35
-    # (seuil bas mais élimine les docs sans aucun rapport avec la requête).
+    # En sémantique/hybride : docs avec au moins un chunk dont la similarité cosinus > 0.45.
     # En lexical : docs contenant au moins un terme de la requête.
     if use_vector and payload.mode in ("hybrid", "semantic"):
         count_sql = text(f"""
@@ -965,7 +1038,7 @@ def search(payload: SearchIn) -> dict[str, Any]:
             FROM document_chunk c
             JOIN literature_document d ON d.id = c.document_id
             WHERE c.embedding IS NOT NULL
-              AND (1 - (c.embedding <=> CAST(:count_q_emb AS vector))) > 0.35
+              AND (1 - (c.embedding <=> CAST(:count_q_emb AS vector))) > 0.45
               {where_sql}
         """)
         count_params = {**where_params, "count_q_emb": str(query_embedding)}
@@ -983,7 +1056,7 @@ def search(payload: SearchIn) -> dict[str, Any]:
 
     # Répartition par source + comptage texte-intégral/résumé, calculés sur
     # EXACTEMENT le même ensemble pertinent que total_matching_docs (même seuil
-    # cosinus 0.35 en sémantique/hybride ; même correspondance de termes en lexical).
+    # cosinus 0.45 en sémantique/hybride ; même correspondance de termes en lexical).
     # Une seule agrégation SQL → cohérence garantie avec le total affiché.
     if use_vector and payload.mode in ("hybrid", "semantic"):
         breakdown_sql = text(f"""
@@ -994,7 +1067,7 @@ def search(payload: SearchIn) -> dict[str, Any]:
             FROM document_chunk c
             JOIN literature_document d ON d.id = c.document_id
             WHERE c.embedding IS NOT NULL
-              AND (1 - (c.embedding <=> CAST(:count_q_emb AS vector))) > 0.35
+              AND (1 - (c.embedding <=> CAST(:count_q_emb AS vector))) > 0.45
               {where_sql}
             GROUP BY 1
         """)
@@ -7055,14 +7128,12 @@ def _run_user_scenario_populate(
     API_LOCAL = "http://127.0.0.1:8000"
     BATCH_SIZE = 200  # efetch max par requête
 
-    # ── Étape 0 : Linking sémantique depuis la base locale ───────────────────
-    # Avant toute requête externe, on lie au scénario TOUS les documents déjà
-    # indexés qui correspondent à la requête (même logique que /search).
-    # Pour les modes semantic/hybrid : similarité cosinus > 0.35 via pgvector.
-    # Pour les autres modes : OR des termes significatifs.
+    # ── Étape 0 : Linking depuis la base locale ──────────────────────────────
+    # Reuse the exact same search logic as /search to link all already-ingested
+    # documents that match the query. This makes the scenario article count match
+    # the search result count immediately, before any external API is queried.
     local_linked = 0
     try:
-        _openai_key_pop = os.getenv("OPENAI_API_KEY")
         _scenario_mode = "hybrid"
         with engine.connect() as _mc:
             _mr = _mc.execute(text("SELECT mode FROM user_scenarios WHERE id = :sid"),
@@ -7070,47 +7141,7 @@ def _run_user_scenario_populate(
             if _mr:
                 _scenario_mode = _mr
 
-        _local_where_sql, _local_where_params = _build_where(filters)
-
-        if _scenario_mode in ("semantic", "hybrid") and _openai_key_pop:
-            from openai import OpenAI as _OAI_pop
-            _pop_client = _OAI_pop(api_key=_openai_key_pop)
-            _pop_emb = _pop_client.embeddings.create(
-                input=[query.replace("\n", " ").strip()],
-                model="text-embedding-3-small"
-            ).data[0].embedding
-            _local_params = {**_local_where_params, "q_emb": str(_pop_emb), "limit": max_results}
-            with engine.connect() as _lc:
-                _local_ids = _lc.execute(text(f"""
-                    SELECT DISTINCT d.id
-                    FROM document_chunk c
-                    JOIN literature_document d ON d.id = c.document_id
-                    WHERE c.embedding IS NOT NULL
-                      AND (1 - (c.embedding <=> CAST(:q_emb AS vector))) > 0.35
-                      {_local_where_sql}
-                    LIMIT :limit
-                """), _local_params).scalars().all()
-        else:
-            _stop_pop = {"the","a","an","of","in","on","for","and","or","to","with",
-                         "by","from","using","based","via","support","this","that"}
-            _qt = [t for t in re.split(r"[^a-z0-9]+", query.lower())
-                   if len(t) >= 3 and t not in _stop_pop][:10]
-            if _qt:
-                _lk = []
-                _lp = {**_local_where_params, "limit": max_results}
-                for _li, _lt in enumerate(_qt):
-                    _lk_key = f"lt_{_li}"
-                    _lp[_lk_key] = f"%{_lt}%"
-                    _lk.append(f"(LOWER(COALESCE(d.title,'')) LIKE :{_lk_key}"
-                                f" OR LOWER(COALESCE(d.abstract,'')) LIKE :{_lk_key})")
-                with engine.connect() as _lc:
-                    _local_ids = _lc.execute(text(f"""
-                        SELECT DISTINCT d.id FROM literature_document d
-                        WHERE ({' OR '.join(_lk)}) {_local_where_sql}
-                        LIMIT :limit
-                    """), _lp).scalars().all()
-            else:
-                _local_ids = []
+        _local_ids = _search_local_doc_ids(query, _scenario_mode, filters, limit=max_results)
 
         if _local_ids:
             with engine.begin() as _lc2:
