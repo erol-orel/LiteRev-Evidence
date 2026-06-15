@@ -113,23 +113,67 @@ def _get(url: str, params: dict = None, timeout: int = 20, headers: dict = None)
     return None
 
 
-def chunk_text(text: str, chunk_size: int = CHUNK_SIZE, overlap: int = CHUNK_OVERLAP) -> list[str]:
-    """Découpe un texte en chunks avec overlap."""
-    text = re.sub(r"\s+", " ", text).strip()
+def chunk_text(text: str, chunk_size: int = 3000, overlap_chars: int = 300) -> list[str]:
+    """Paragraph-aware chunking.
+
+    Splits on blank lines first, then merges paragraphs up to chunk_size.
+    Very long paragraphs (e.g. no line breaks) are split at sentence
+    boundaries. Overlap is carried at the paragraph level.
+    """
+    # Normalise line endings and excessive blank lines
+    text = re.sub(r"\r\n?", "\n", text)
+    text = re.sub(r"\n{3,}", "\n\n", text).strip()
     if not text:
         return []
-    chunks = []
-    start = 0
-    while start < len(text):
-        end = min(start + chunk_size, len(text))
-        # Couper sur un espace si possible
-        if end < len(text):
-            cut = text.rfind(" ", start, end)
-            if cut > start:
-                end = cut
-        chunks.append(text[start:end].strip())
-        start = end - overlap if end - overlap > start else end
-    return [c for c in chunks if len(c) > 50]
+
+    # Split into paragraphs
+    raw_paras = [p.strip() for p in text.split("\n\n") if p.strip()]
+
+    # If a paragraph exceeds chunk_size, split it at sentence boundaries
+    paragraphs: list[str] = []
+    for para in raw_paras:
+        if len(para) <= chunk_size:
+            paragraphs.append(para)
+        else:
+            # Split on sentence-ending punctuation
+            sentences = re.split(r"(?<=[.!?])\s+", para)
+            buf = ""
+            for sent in sentences:
+                if buf and len(buf) + len(sent) + 1 > chunk_size:
+                    paragraphs.append(buf.strip())
+                    buf = sent
+                else:
+                    buf = (buf + " " + sent).strip() if buf else sent
+            if buf:
+                paragraphs.append(buf.strip())
+
+    # Merge paragraphs into chunks; carry overlap at paragraph granularity
+    chunks: list[str] = []
+    current: list[str] = []
+    current_len = 0
+
+    for para in paragraphs:
+        para_len = len(para)
+        if current and current_len + 2 + para_len > chunk_size:
+            chunks.append("\n\n".join(current))
+            # Overlap: keep trailing paragraphs up to overlap_chars
+            overlap: list[str] = []
+            olen = 0
+            for p in reversed(current):
+                if olen + len(p) <= overlap_chars:
+                    overlap.insert(0, p)
+                    olen += len(p)
+                else:
+                    break
+            current = overlap
+            current_len = sum(len(p) + 2 for p in current)
+        current.append(para)
+        current_len += para_len + 2
+
+    if current:
+        chunks.append("\n\n".join(current))
+
+    return [c for c in chunks if len(c) > 100]
 
 
 def insert_fulltext_chunks(engine, doc_id: int, chunks: list[str], source_label: str, dry_run: bool) -> int:
@@ -619,8 +663,8 @@ def main():
                         help="Simulation : ne rien écrire en base")
     parser.add_argument("--limit", type=int, default=0,
                         help="Nombre max de documents à traiter (0 = tous)")
-    parser.add_argument("--project", type=str, default="gesica",
-                        help="Filtre sur project_context")
+    parser.add_argument("--project", type=str, default="",
+                        help="Filtre sur project_context (vide = tous les projets)")
     parser.add_argument("--source", type=str, default="all",
                         choices=["all", "pmc", "europepmc", "unpaywall", "biorxiv", "semanticscholar", "openalex"],
                         help="Source à utiliser (défaut : all)")
@@ -648,17 +692,20 @@ def main():
 
     # ── Récupérer les documents sans full-text ──
     with engine.connect() as conn:
+        project_filter = "AND d.project_context = :project" if args.project else ""
+
         if args.reprocess:
-            # Tous les documents du projet
-            where_clause = "WHERE d.project_context = :project"
+            # Tous les documents (optionnellement filtrés par projet)
+            where_clause = f"WHERE 1=1 {project_filter}"
         else:
-            # Documents sans aucun chunk full_text
-            where_clause = """
-                WHERE d.project_context = :project
-                  AND NOT EXISTS (
-                      SELECT 1 FROM document_chunk c
-                      WHERE c.document_id = d.id AND c.chunk_type = 'full_text'
-                  )
+            # Documents sans aucun chunk fulltext_section déjà présent
+            where_clause = f"""
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM document_chunk c
+                    WHERE c.document_id = d.id
+                      AND c.chunk_type IN ('fulltext_section', 'full_text')
+                )
+                {project_filter}
             """
 
         query = text(f"""
@@ -669,7 +716,9 @@ def main():
             ORDER BY d.id ASC
             {"LIMIT :limit" if args.limit > 0 else ""}
         """)
-        params = {"project": args.project}
+        params = {}
+        if args.project:
+            params["project"] = args.project
         if args.limit > 0:
             params["limit"] = args.limit
 
