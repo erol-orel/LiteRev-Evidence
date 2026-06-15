@@ -59,7 +59,7 @@ jobs:
               -o ConnectTimeout=15 \
               -i ~/.ssh/deploy_key \
               "$DEPLOY_USER@$DEPLOY_HOST" \
-              'cd /opt/literev-api && bash deploy.sh'
+              'cd /opt/literev-api && git reset --hard HEAD && bash deploy.sh'
 
       - name: Smoke test (health + search)
         env:
