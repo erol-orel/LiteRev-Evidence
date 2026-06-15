@@ -3805,17 +3805,18 @@ export default function App() {
                   <div className="flex items-center justify-between">
                     <div className="space-y-1">
                       <p className="text-sm text-forest-400">
-                        <>
-                          <span className="font-semibold text-white">{uniqueDocCount.toLocaleString()}</span>{" "}
-                          document{uniqueDocCount > 1 ? "s" : ""} pertinent{uniqueDocCount > 1 ? "s" : ""}
-                          {searchTotalMatching != null && searchTotalMatching !== uniqueDocCount && (
-                            <span className="text-white/30"> ({searchTotalMatching.toLocaleString()} indexés)</span>
-                          )}
-                          {dedupedResults.length > uniqueDocCount && (
-                            <span className="text-white/30">, {dedupedResults.length.toLocaleString()} extraits</span>
-                          )}
-                          {" "}· {totalPages > 1 ? `page ${page}/${totalPages}` : "1 page"}
-                        </>
+                        {(() => {
+                          const base = searchTotalMatching ?? uniqueDocCount;
+                          const live = searchLiveNewCount ?? 0;
+                          const total = base + live;
+                          return (
+                            <>
+                              <span className="font-semibold text-white">{total.toLocaleString()}</span>{" "}
+                              document{total > 1 ? "s" : ""} pertinent{total > 1 ? "s" : ""}
+                              {" "}· {totalPages > 1 ? `page ${page}/${totalPages}` : "1 page"}
+                            </>
+                          );
+                        })()}
                       </p>
                       {searchSourceBreakdown && Object.keys(searchSourceBreakdown).length > 0 && (() => {
                         const localEntries = Object.entries(searchSourceBreakdown).filter(([k]) => !k.endsWith(" (live)"));
