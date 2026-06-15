@@ -2294,20 +2294,29 @@ export interface EmbeddingStatus {
   scenario_id: string;
   status: 'none' | 'partial' | 'complete';
   status_label: string;
-  total_articles: number;
-  articles_embedded: number;
-  articles_pending_embedding: number;
-  total_chunks: number;
-  chunks_embedded: number;
-  chunks_pending: number;
-  embedding_pct: number;
-  fulltext_chunks: number;
-  chunk_types: EmbeddingChunkType[];
+  abstract_only: {
+    total_docs: number;
+    embedded_docs: number;
+    pending_docs: number;
+  };
+  title_abstract_chunks: {
+    total_docs: number;
+    embedded_docs: number;
+    pending_docs: number;
+  };
+  fulltext: {
+    total_docs: number;
+    docs_fully_embedded: number;
+    docs_pending: number;
+    total_chunks: number;
+    embedded_chunks: number;
+    pending_chunks: number;
+  };
+  total_pending_chunks: number;
   score_availability: {
     lexical: boolean;
     semantic: boolean;
     hybrid: boolean;
-    rerank: boolean;
   };
 }
 

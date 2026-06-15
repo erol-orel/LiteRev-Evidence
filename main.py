@@ -8528,20 +8528,19 @@ def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict
                             model="text-embedding-3-small",
                             input=_texts
                         )
-                        for _k, _emb_data in enumerate(_emb_resp.data):
-                            _vec_str = "[" + ",".join(str(x) for x in _emb_data.embedding) + "]"
-                            with engine.begin() as _conn_upd:
+                        # Batch all updates in a single transaction (not one per chunk)
+                        with engine.begin() as _conn_upd:
+                            for _k, _emb_data in enumerate(_emb_resp.data):
+                                _vec_str = "[" + ",".join(str(x) for x in _emb_data.embedding) + "]"
                                 _conn_upd.execute(text("""
                                     UPDATE document_chunk
                                     SET embedding = CAST(:vec AS vector)
                                     WHERE id = :cid
                                 """), {"vec": _vec_str, "cid": _batch[_k]["id"]})
-                            _emb_done += 1
+                                _emb_done += 1
                     except Exception as _emb_e:
                         _emb_errors += len(_batch)
                         logger.warning(f"Embed batch {_bi}: {_emb_e}")
-                    _time.sleep(0.2)
-                    # Mettre à jour la progression
                     update_step("embed", "running",
                                 done=_emb_done, total=_emb_total,
                                 pct=round(_emb_done / _emb_total * 100, 1) if _emb_total > 0 else 0)
@@ -8936,81 +8935,105 @@ def get_user_scenario_pipeline_status(scenario_id: str) -> dict[str, Any]:
 @app.get("/user-scenarios/{scenario_id}/embedding-status")
 def get_user_scenario_embedding_status(scenario_id: str) -> dict[str, Any]:
     """
-    Retourne l'état des embeddings pour un scénario utilisateur.
-    Indique combien d'articles ont des chunks embedés et combien sont en attente.
+    Embedding status for a user scenario.
+    Reports separately:
+    - title+abstract docs pending (1 chunk each)
+    - fulltext papers pending (N chunks each)
     """
     _get_user_scenario_or_404(scenario_id)
     with engine.connect() as conn:
-        stats = conn.execute(text("""
+        # Title+abstract: one chunk per doc, check if that chunk is embedded
+        ta = conn.execute(text("""
             SELECT
-                COUNT(DISTINCT ars.document_id) AS total_articles,
-                COUNT(DISTINCT CASE WHEN c.embedding IS NOT NULL THEN ars.document_id END) AS articles_embedded,
-                COUNT(DISTINCT c.id) AS total_chunks,
-                COUNT(DISTINCT CASE WHEN c.embedding IS NOT NULL THEN c.id END) AS chunks_embedded,
-                COUNT(DISTINCT CASE WHEN c.embedding IS NULL THEN c.id END) AS chunks_pending,
-                COUNT(DISTINCT CASE WHEN c.chunk_type = 'fulltext_section' THEN c.id END) AS fulltext_chunks
+                COUNT(DISTINCT ars.document_id) AS total_docs,
+                COUNT(DISTINCT CASE WHEN c.embedding IS NOT NULL THEN ars.document_id END) AS embedded_docs,
+                COUNT(DISTINCT CASE WHEN c.embedding IS NULL THEN ars.document_id END) AS pending_docs
             FROM article_scenarios ars
-            LEFT JOIN document_chunk c ON c.document_id = ars.document_id
+            JOIN document_chunk c ON c.document_id = ars.document_id
+                AND c.chunk_type = 'title_abstract'
             WHERE ars.scenario_id = :sid
         """), {"sid": scenario_id}).mappings().first()
 
-        # Statistiques par type de chunk
-        chunk_types = conn.execute(text("""
+        # Full-text: multiple chunks per doc
+        ft = conn.execute(text("""
             SELECT
-                c.chunk_type,
-                COUNT(c.id) AS total,
-                COUNT(CASE WHEN c.embedding IS NOT NULL THEN 1 END) AS embedded
-            FROM article_scenarios ars
-            JOIN document_chunk c ON c.document_id = ars.document_id
-            WHERE ars.scenario_id = :sid
-            GROUP BY c.chunk_type
-            ORDER BY total DESC
-        """), {"sid": scenario_id}).mappings().all()
+                COUNT(DISTINCT d.document_id) AS total_ft_docs,
+                COUNT(DISTINCT CASE WHEN ft_emb.pending_chunks = 0 THEN d.document_id END) AS ft_docs_complete,
+                COUNT(DISTINCT CASE WHEN ft_emb.pending_chunks > 0 THEN d.document_id END) AS ft_docs_pending,
+                COALESCE(SUM(ft_emb.total_chunks), 0) AS total_ft_chunks,
+                COALESCE(SUM(ft_emb.pending_chunks), 0) AS pending_ft_chunks,
+                COALESCE(SUM(ft_emb.embedded_chunks), 0) AS embedded_ft_chunks
+            FROM (
+                SELECT DISTINCT ars.document_id
+                FROM article_scenarios ars
+                JOIN document_chunk c ON c.document_id = ars.document_id
+                    AND c.chunk_type = 'fulltext_section'
+                WHERE ars.scenario_id = :sid
+            ) d
+            JOIN (
+                SELECT
+                    c.document_id,
+                    COUNT(*) AS total_chunks,
+                    COUNT(*) FILTER (WHERE c.embedding IS NULL) AS pending_chunks,
+                    COUNT(*) FILTER (WHERE c.embedding IS NOT NULL) AS embedded_chunks
+                FROM document_chunk c
+                WHERE c.chunk_type = 'fulltext_section'
+                GROUP BY c.document_id
+            ) ft_emb ON ft_emb.document_id = d.document_id
+        """), {"sid": scenario_id}).mappings().first()
 
-    total_articles = int(stats["total_articles"] or 0)
-    articles_embedded = int(stats["articles_embedded"] or 0)
-    total_chunks = int(stats["total_chunks"] or 0)
-    chunks_embedded = int(stats["chunks_embedded"] or 0)
-    chunks_pending = int(stats["chunks_pending"] or 0)
-    embedding_pct = round(chunks_embedded / total_chunks * 100, 1) if total_chunks > 0 else 0
+    ta_total = int(ta["total_docs"] or 0)
+    ta_embedded = int(ta["embedded_docs"] or 0)
+    ta_pending = int(ta["pending_docs"] or 0)
 
-    # Déterminer le statut
-    if chunks_pending == 0 and total_chunks > 0:
+    ft_total = int(ft["total_ft_docs"] or 0)
+    ft_pending_docs = int(ft["ft_docs_pending"] or 0)
+    ft_total_chunks = int(ft["total_ft_chunks"] or 0)
+    ft_pending_chunks = int(ft["pending_ft_chunks"] or 0)
+    ft_embedded_chunks = int(ft["embedded_ft_chunks"] or 0)
+
+    # Docs without any fulltext = abstract-only
+    abstract_only_total = ta_total - ft_total
+    # Total pending embedding work
+    total_pending_chunks = ta_pending + ft_pending_chunks
+
+    if total_pending_chunks == 0 and ta_total > 0:
         status = "complete"
-        status_label = "Tous les chunks sont embedés : scores sémantiques et hybrides disponibles"
-    elif chunks_embedded == 0:
+        status_label = "All embeddings complete"
+    elif ta_embedded == 0 and ft_embedded_chunks == 0:
         status = "none"
-        status_label = "Aucun embedding disponible : seul le score lexical (BM25) est actif"
+        status_label = "No embeddings yet — only lexical search available"
     else:
         status = "partial"
-        status_label = f"{chunks_embedded}/{total_chunks} chunks embedés ({embedding_pct}%) : scores hybrides partiellement disponibles"
+        status_label = f"{ta_pending} abstract-only docs + {ft_pending_chunks} fulltext chunks still to embed"
 
     return {
         "scenario_id": scenario_id,
         "status": status,
         "status_label": status_label,
-        "total_articles": total_articles,
-        "articles_embedded": articles_embedded,
-        "articles_pending_embedding": total_articles - articles_embedded,
-        "total_chunks": total_chunks,
-        "chunks_embedded": chunks_embedded,
-        "chunks_pending": chunks_pending,
-        "embedding_pct": embedding_pct,
-        "fulltext_chunks": int(stats["fulltext_chunks"] or 0),
-        "chunk_types": [
-            {
-                "type": r["chunk_type"] or "unknown",
-                "total": int(r["total"]),
-                "embedded": int(r["embedded"]),
-                "pct": round(int(r["embedded"]) / int(r["total"]) * 100, 1) if int(r["total"]) > 0 else 0
-            }
-            for r in chunk_types
-        ],
+        "abstract_only": {
+            "total_docs": abstract_only_total,
+            "embedded_docs": max(0, abstract_only_total - ta_pending),
+            "pending_docs": ta_pending,
+        },
+        "title_abstract_chunks": {
+            "total_docs": ta_total,
+            "embedded_docs": ta_embedded,
+            "pending_docs": ta_pending,
+        },
+        "fulltext": {
+            "total_docs": ft_total,
+            "docs_fully_embedded": int(ft["ft_docs_complete"] or 0),
+            "docs_pending": ft_pending_docs,
+            "total_chunks": ft_total_chunks,
+            "embedded_chunks": ft_embedded_chunks,
+            "pending_chunks": ft_pending_chunks,
+        },
+        "total_pending_chunks": total_pending_chunks,
         "score_availability": {
             "lexical": True,
-            "semantic": chunks_embedded > 0,
-            "hybrid": chunks_embedded > 0,
-            "rerank": chunks_embedded > 0,
+            "semantic": ta_embedded > 0 or ft_embedded_chunks > 0,
+            "hybrid": ta_embedded > 0 or ft_embedded_chunks > 0,
         }
     }
 

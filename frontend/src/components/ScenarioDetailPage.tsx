@@ -1052,47 +1052,41 @@ function CorpusSection({ scenarioId, threshold }: { scenarioId: string; detail: 
              embeddingStatus.status === 'partial' ? <Loader2 size={14} className="text-gold-400 animate-spin" /> :
              <AlertCircle size={14} className="text-white/30" />}
           </div>
-          <div className="flex-1 min-w-0">
-            <div className="flex items-center gap-2 flex-wrap">
-              <span className={`text-xs font-semibold ${
-                embeddingStatus.status === 'complete' ? 'text-forest-300' :
-                embeddingStatus.status === 'partial' ? 'text-gold-300' : 'text-white/40'
-              }`}>
-                Embeddings : {embeddingStatus.status_label}
+          <div className="flex-1 min-w-0 space-y-1.5">
+            <span className={`text-xs font-semibold ${
+              embeddingStatus.status === 'complete' ? 'text-forest-300' :
+              embeddingStatus.status === 'partial' ? 'text-gold-300' : 'text-white/40'
+            }`}>
+              Embeddings
+            </span>
+            <div className="flex flex-wrap gap-x-4 gap-y-1 text-[10px]">
+              {/* Abstract-only row */}
+              <span className={embeddingStatus.abstract_only.pending_docs > 0 ? 'text-gold-300' : 'text-forest-400'}>
+                {embeddingStatus.abstract_only.embedded_docs}/{embeddingStatus.abstract_only.total_docs} résumés
+                {embeddingStatus.abstract_only.pending_docs > 0 && ` · ${embeddingStatus.abstract_only.pending_docs} en attente`}
               </span>
-              <span className="text-[10px] text-white/35">
-                {embeddingStatus.chunks_embedded}/{embeddingStatus.total_chunks} chunks ({embeddingStatus.embedding_pct.toFixed(0)}%)
-              </span>
-              {embeddingStatus.fulltext_chunks > 0 && (
-                <span className="rounded-full bg-brand-500/10 border border-brand-500/20 px-2 py-0.5 text-[9px] text-brand-300">
-                  {embeddingStatus.fulltext_chunks} chunks full-text
+              {/* Full-text row */}
+              {embeddingStatus.fulltext.total_docs > 0 && (
+                <span className={embeddingStatus.fulltext.pending_chunks > 0 ? 'text-gold-300' : 'text-forest-400'}>
+                  {embeddingStatus.fulltext.docs_fully_embedded}/{embeddingStatus.fulltext.total_docs} textes intégraux
+                  {embeddingStatus.fulltext.pending_chunks > 0 && (
+                    <> · {embeddingStatus.fulltext.docs_pending} articles ({embeddingStatus.fulltext.pending_chunks} chunks) en attente</>
+                  )}
                 </span>
               )}
             </div>
-            <div className="mt-1.5 flex items-center gap-3 flex-wrap">
+            <div className="flex items-center gap-3 flex-wrap">
               {Object.entries(embeddingStatus.score_availability).map(([type, available]) => (
-                <span key={type} className={`text-[10px] flex items-center gap-1 ${
-                  available ? 'text-forest-400' : 'text-white/25'
-                }`}>
-                  {available ? '✓' : '✗'} Score {type === 'lexical' ? '≡ Lexical' : type === 'semantic' ? '◎ Sémantique' : type === 'hybrid' ? '⊕ Hybride' : '★ Rerank'}
+                <span key={type} className={`text-[10px] flex items-center gap-1 ${available ? 'text-forest-400' : 'text-white/25'}`}>
+                  {available ? '✓' : '✗'} {type === 'lexical' ? 'Lexical' : type === 'semantic' ? 'Sémantique' : 'Hybride'}
                 </span>
               ))}
             </div>
-            {embeddingStatus.status !== 'complete' && (
-              <p className="text-[10px] text-white/30 mt-1">
-                Les scores sémantiques et hybrides seront disponibles une fois tous les embeddings générés. Lancez le pipeline pour accélérer.
+            {embeddingStatus.total_pending_chunks > 0 && (
+              <p className="text-[10px] text-white/30">
+                {embeddingStatus.total_pending_chunks} chunks restants. Le pipeline completera les embeddings manquants.
               </p>
             )}
-          </div>
-          <div className="shrink-0">
-            <div className="w-16 h-1.5 bg-white/10 rounded-full overflow-hidden">
-              <div
-                className={`h-full rounded-full transition-all ${
-                  embeddingStatus.status === 'complete' ? 'bg-forest-400' : 'bg-gold-400'
-                }`}
-                style={{ width: `${embeddingStatus.embedding_pct}%` }}
-              />
-            </div>
           </div>
         </div>
       )}
