@@ -7162,6 +7162,7 @@ def _run_user_scenario_populate(
 ) -> int:
     """
     Ingère des articles pour un scénario utilisateur en arrière-plan (7 sources).
+    Les 7 sources externes sont interrogées EN PARALLÈLE via ThreadPoolExecutor.
     Limite : 1 000 articles max par source.
     Retourne le nombre total d'articles ingérés.
     """
@@ -7169,6 +7170,8 @@ def _run_user_scenario_populate(
     import xml.etree.ElementTree as ET
     import requests as _requests
     import math
+    import threading
+    from concurrent.futures import ThreadPoolExecutor, as_completed
 
     if _pipeline_callback is None:
         _user_scenario_populate_jobs[scenario_id] = {
@@ -7179,21 +7182,32 @@ def _run_user_scenario_populate(
             }
         }
 
-    # L'étape DB-cache est déplacée à la fin pour compter d'abord les sources externes, puis dédupliquer !
-    db_cached_count = 0
-    ingested = 0
-
     ENTREZ_BASE = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
     EMAIL = os.getenv("PUBMED_EMAIL", "literev@example.com")
-    WRITE_KEY = os.getenv("WRITE_API_KEY", "")
-    HEADERS_LOCAL = {"X-Api-Key": WRITE_KEY}
-    API_LOCAL = "http://127.0.0.1:8000"
-    BATCH_SIZE = 200  # efetch max par requête
+    BATCH_SIZE = 200
 
-    # ── Étape 0 : Linking depuis la base locale ──────────────────────────────
-    # Reuse the exact same search logic as /search to link all already-ingested
-    # documents that match the query. This makes the scenario article count match
-    # the search result count immediately, before any external API is queried.
+    # Compteurs partagés thread-safe
+    _counter_lock = threading.Lock()
+    _ingested_total = [0]
+    _errors_total = [0]
+
+    def _link_to_scenario(doc_id):
+        with engine.begin() as _c:
+            _c.execute(text("""
+                INSERT INTO article_scenarios (document_id, scenario_id, similarity_score)
+                VALUES (:doc_id, :sid, NULL) ON CONFLICT (document_id, scenario_id) DO NOTHING
+            """), {"doc_id": doc_id, "sid": scenario_id})
+
+    def _inc(source_name, count=1, err=0):
+        with _counter_lock:
+            _ingested_total[0] += count
+            _errors_total[0] += err
+            if _pipeline_callback is None:
+                _user_scenario_populate_jobs[scenario_id]["ingested"] = _ingested_total[0]
+                _user_scenario_populate_jobs[scenario_id]["sources"][source_name] = \
+                    _user_scenario_populate_jobs[scenario_id]["sources"].get(source_name, 0) + count
+
+    # ── Étape 0 : Linking depuis la base locale (séquentiel, rapide) ─────────
     local_linked = 0
     try:
         _scenario_mode = "hybrid"
@@ -7214,10 +7228,9 @@ def _run_user_scenario_populate(
                         ON CONFLICT (document_id, scenario_id) DO NOTHING
                     """), {"doc_id": _lid, "sid": scenario_id})
                     local_linked += 1
-                    ingested += 1
+            _inc("db_cache", local_linked)
             logger.info(f"Populate {scenario_id}: {local_linked} docs liés depuis la base locale")
 
-        # Update article_count immediately (not result_count — that stays as the search count)
         if local_linked > 0:
             with engine.begin() as _uc:
                 _uc.execute(text("""
@@ -7227,159 +7240,105 @@ def _run_user_scenario_populate(
     except Exception as _e_local:
         logger.warning(f"Local DB link failed for {scenario_id}: {_e_local}")
 
-    try:
-        # 1. Recherche PubMed avec usehistory pour paginer
-        r = _requests.get(
-            f"{ENTREZ_BASE}/esearch.fcgi",
-            params={
-                "db": "pubmed",
-                "term": query,
-                "retmax": 0,          # On veut juste le count + WebEnv
-                "retmode": "json",
-                "usehistory": "y",
-                "email": EMAIL,
-            },
-            timeout=30,
-        )
-        r.raise_for_status()
-        search_result = r.json()["esearchresult"]
-        total_found = int(search_result.get("count", 0))
-        web_env = search_result.get("webenv", "")
-        query_key = search_result.get("querykey", "1")
+    # ── Étape 1 : Interrogation parallèle des 7 sources externes ─────────────
 
-        effective_max = min(max_results, total_found)
-        if _pipeline_callback:
-            _pipeline_callback("pubmed_found", total_found)
-        else:
-            _user_scenario_populate_jobs[scenario_id]["total_found"] = total_found
-
-        if total_found == 0:
-            if _pipeline_callback is None:
-                _user_scenario_populate_jobs[scenario_id] = {
-                    "status": "done", "ingested": local_linked, "errors": 0, "total_found": local_linked,
-                    "message": f"PubMed: aucun résultat. {local_linked} articles liés depuis la base locale."
-                }
-            if local_linked > 0:
-                # Don't skip remaining sources — fall through to rest of function
-                pass
-            else:
-                return local_linked
-
-        errors = 0
-        n_batches = math.ceil(effective_max / BATCH_SIZE)
-
-        for batch_idx in range(n_batches):
-            retstart = batch_idx * BATCH_SIZE
-            retmax_batch = min(BATCH_SIZE, effective_max - retstart)
-            if retmax_batch <= 0:
-                break
-            # Guard : PubMed retourne 400 si retstart >= total_found
-            if retstart >= total_found:
-                break
-
-            # 2. Fetch XML PubMed (par batch)
-            try:
-                r2 = _requests.post(
-                    f"{ENTREZ_BASE}/efetch.fcgi",
-                    data={
-                        "db": "pubmed",
-                        "WebEnv": web_env,
-                        "query_key": query_key,
-                        "retstart": retstart,
-                        "retmax": retmax_batch,
-                        "rettype": "xml",
-                        "retmode": "xml",
-                        "email": EMAIL,
-                    },
-                    timeout=90,
-                )
-                r2.raise_for_status()
-            except Exception as _e_fetch:
-                logger.warning(f"PubMed efetch batch {batch_idx} (retstart={retstart}): {_e_fetch} — batch ignoré")
-                errors += 1
-                _time.sleep(1)
-                continue
-            root = ET.fromstring(r2.content)
-
-            for article_elem in root.findall(".//PubmedArticle"):
-                pmid = article_elem.findtext(".//PMID") or ""
-                title_elem = article_elem.find(".//ArticleTitle")
-                title = "".join(title_elem.itertext()).strip() if title_elem is not None else ""
-                abstract_parts = []
-                for node in article_elem.findall(".//Abstract/AbstractText"):
-                    txt = "".join(node.itertext()).strip()
-                    if txt:
-                        abstract_parts.append(txt)
-                abstract = " ".join(abstract_parts).strip()
-
-                year = None
-                year_text = (
-                    article_elem.findtext(".//PubDate/Year")
-                    or article_elem.findtext(".//ArticleDate/Year")
-                    or ""
-                )
-                if year_text[:4].isdigit():
-                    year = int(year_text[:4])
-
-                # Auteurs
-                authors_list = []
-                for author in article_elem.findall(".//AuthorList/Author"):
-                    last = author.findtext("LastName") or ""
-                    first = author.findtext("ForeName") or ""
-                    if last:
-                        authors_list.append(f"{last} {first}".strip())
-                authors = "; ".join(authors_list[:6]) if authors_list else None
-
-                # Journal
-                journal = article_elem.findtext(".//Journal/Title") or article_elem.findtext(".//ISOAbbreviation") or None
-
-                # DOI
-                doi = None
-                for id_elem in article_elem.findall(".//ArticleIdList/ArticleId"):
-                    if id_elem.get("IdType") == "doi":
-                        doi = id_elem.text
-                        break
-
-                if not pmid or not title:
-                    continue
-
-                url = f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/"
-                content_text = f"{title}\n\n{abstract}".strip()
-                if len(content_text) < 30:
-                    continue
-
-                try:
-                    doc_id = _ingest_doc_direct(
-                        source="pubmed", title=title, abstract=abstract or None,
-                        year=year, url=url, external_id=pmid, doi=doi,
-                        authors=authors, journal=journal,
-                    )
-                    with engine.begin() as conn:
-                        conn.execute(text("""
-                            INSERT INTO article_scenarios (document_id, scenario_id, similarity_score)
-                            VALUES (:doc_id, :sid, NULL)
-                            ON CONFLICT (document_id, scenario_id) DO NOTHING
-                        """), {"doc_id": doc_id, "sid": scenario_id})
-                    ingested += 1
-                    if _pipeline_callback is None:
-                        _user_scenario_populate_jobs[scenario_id]["ingested"] = ingested
-                        _user_scenario_populate_jobs[scenario_id]["sources"]["pubmed"] = \
-                            _user_scenario_populate_jobs[scenario_id]["sources"].get("pubmed", 0) + 1
-                except Exception as e:
-                    logger.warning(f"Populate user_scenario {scenario_id} - PMID {pmid}: {e}")
-                    errors += 1
-
-        # ── Ingestion OpenAlex ────────────────────────────────────────────────
+    def _fetch_pubmed():
+        count = 0
         try:
-            # OpenAlex : per_page max = 200, pagination jusqu'à 1 000 articles
+            r = _requests.get(
+                f"{ENTREZ_BASE}/esearch.fcgi",
+                params={"db": "pubmed", "term": query, "retmax": 0,
+                        "retmode": "json", "usehistory": "y", "email": EMAIL},
+                timeout=30,
+            )
+            r.raise_for_status()
+            search_result = r.json()["esearchresult"]
+            total_found = int(search_result.get("count", 0))
+            web_env = search_result.get("webenv", "")
+            query_key = search_result.get("querykey", "1")
+            if _pipeline_callback:
+                _pipeline_callback("pubmed_found", total_found)
+            effective_max = min(max_results, total_found)
+            n_batches = math.ceil(effective_max / BATCH_SIZE) if effective_max > 0 else 0
+            for batch_idx in range(n_batches):
+                retstart = batch_idx * BATCH_SIZE
+                retmax_batch = min(BATCH_SIZE, effective_max - retstart)
+                if retmax_batch <= 0 or retstart >= total_found:
+                    break
+                try:
+                    r2 = _requests.post(
+                        f"{ENTREZ_BASE}/efetch.fcgi",
+                        data={"db": "pubmed", "WebEnv": web_env, "query_key": query_key,
+                              "retstart": retstart, "retmax": retmax_batch,
+                              "rettype": "xml", "retmode": "xml", "email": EMAIL},
+                        timeout=90,
+                    )
+                    r2.raise_for_status()
+                except Exception as _e_fetch:
+                    logger.warning(f"PubMed efetch batch {batch_idx}: {_e_fetch}")
+                    _time.sleep(1)
+                    continue
+                root = ET.fromstring(r2.content)
+                for article_elem in root.findall(".//PubmedArticle"):
+                    pmid = article_elem.findtext(".//PMID") or ""
+                    title_elem = article_elem.find(".//ArticleTitle")
+                    title = "".join(title_elem.itertext()).strip() if title_elem is not None else ""
+                    abstract_parts = []
+                    for node in article_elem.findall(".//Abstract/AbstractText"):
+                        txt = "".join(node.itertext()).strip()
+                        if txt:
+                            abstract_parts.append(txt)
+                    abstract = " ".join(abstract_parts).strip()
+                    year_text = (article_elem.findtext(".//PubDate/Year")
+                                 or article_elem.findtext(".//ArticleDate/Year") or "")
+                    year = int(year_text[:4]) if year_text[:4].isdigit() else None
+                    authors_list = []
+                    for author in article_elem.findall(".//AuthorList/Author"):
+                        last = author.findtext("LastName") or ""
+                        first = author.findtext("ForeName") or ""
+                        if last:
+                            authors_list.append(f"{last} {first}".strip())
+                    authors = "; ".join(authors_list[:6]) if authors_list else None
+                    journal = (article_elem.findtext(".//Journal/Title")
+                               or article_elem.findtext(".//ISOAbbreviation") or None)
+                    doi = None
+                    for id_elem in article_elem.findall(".//ArticleIdList/ArticleId"):
+                        if id_elem.get("IdType") == "doi":
+                            doi = id_elem.text
+                            break
+                    if not pmid or not title:
+                        continue
+                    content_text = f"{title}\n\n{abstract}".strip()
+                    if len(content_text) < 30:
+                        continue
+                    try:
+                        doc_id = _ingest_doc_direct(
+                            source="pubmed", title=title, abstract=abstract or None,
+                            year=year, url=f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/",
+                            external_id=pmid, doi=doi, authors=authors, journal=journal,
+                        )
+                        _link_to_scenario(doc_id)
+                        count += 1
+                        _inc("pubmed")
+                    except Exception as e:
+                        logger.warning(f"PubMed PMID {pmid}: {e}")
+                        _inc("pubmed", 0, 1)
+        except Exception as _e:
+            logger.warning(f"PubMed populate {scenario_id}: {_e}")
+        return ("pubmed", count)
+
+    def _fetch_openalex():
+        count = 0
+        try:
             _oa_page = 1
-            _oa_fetched_count = 0
+            _oa_fetched = 0
             _oa_limit = min(1000, max_results)
-            while _oa_fetched_count < _oa_limit:
-                _oa_batch = min(200, _oa_limit - _oa_fetched_count)
+            while _oa_fetched < _oa_limit:
+                _oa_batch = min(200, _oa_limit - _oa_fetched)
                 oa_resp = _requests.get(
                     "https://api.openalex.org/works",
-                    params={"search": query, "per_page": _oa_batch, "page": _oa_page, "mailto": "literev@gesica.ch"},
+                    params={"search": query, "per_page": _oa_batch, "page": _oa_page,
+                            "mailto": "literev@gesica.ch"},
                     timeout=20,
                 )
                 oa_resp.raise_for_status()
@@ -7391,7 +7350,6 @@ def _run_user_scenario_populate(
                     title = work.get("title") or ""
                     if not ext_id or not title:
                         continue
-                    # Décoder l'abstract inverted index
                     abstract = None
                     inv = work.get("abstract_inverted_index")
                     if inv:
@@ -7404,7 +7362,7 @@ def _run_user_scenario_populate(
                         except Exception:
                             pass
                     year = work.get("publication_year")
-                    doi = _normalize_doi(work.get("doi"))  # Normalise https://doi.org/ prefix
+                    doi = _normalize_doi(work.get("doi"))
                     url = doi or f"https://openalex.org/{ext_id}"
                     content_text = f"{title}\n\n{abstract or ''}".strip()
                     if len(content_text) < 30:
@@ -7414,37 +7372,31 @@ def _run_user_scenario_populate(
                             source="openalex", title=title, abstract=abstract or None,
                             year=year, url=url, external_id=ext_id, doi=doi,
                         )
-                        with engine.begin() as _c:
-                            _c.execute(text("""
-                                INSERT INTO article_scenarios (document_id, scenario_id, similarity_score)
-                                VALUES (:doc_id, :sid, NULL) ON CONFLICT (document_id, scenario_id) DO NOTHING
-                            """), {"doc_id": doc_id, "sid": scenario_id})
-                        ingested += 1
-                        _oa_fetched_count += 1
-                        if _pipeline_callback is None:
-                            _user_scenario_populate_jobs[scenario_id]["sources"]["openalex"] = \
-                                _user_scenario_populate_jobs[scenario_id]["sources"].get("openalex", 0) + 1
-                            _user_scenario_populate_jobs[scenario_id]["ingested"] = ingested
-                    except Exception as _e:
-                        errors += 1
+                        _link_to_scenario(doc_id)
+                        count += 1
+                        _inc("openalex")
+                    except Exception:
+                        _inc("openalex", 0, 1)
                 if len(_oa_results) < _oa_batch:
-                    break  # Plus de résultats disponibles
+                    break
                 _oa_page += 1
                 _time.sleep(0.3)
         except Exception as _e:
             logger.warning(f"OpenAlex populate {scenario_id}: {_e}")
+        return ("openalex", count)
 
-        # ── Ingestion Crossref ────────────────────────────────────────────────
+    def _fetch_crossref():
+        count = 0
         try:
-            # Crossref : rows max = 1000, pagination par offset
             _cr_offset = 0
-            _cr_fetched_count = 0
+            _cr_fetched = 0
             _cr_limit = min(1000, max_results)
-            _cr_rows = min(100, _cr_limit)  # Crossref recommande max 100 par page
-            while _cr_fetched_count < _cr_limit:
+            _cr_rows = min(100, _cr_limit)
+            while _cr_fetched < _cr_limit:
                 cr_resp = _requests.get(
                     "https://api.crossref.org/works",
-                    params={"query": query, "rows": _cr_rows, "offset": _cr_offset, "mailto": "literev@gesica.ch"},
+                    params={"query": query, "rows": _cr_rows, "offset": _cr_offset,
+                            "mailto": "literev@gesica.ch"},
                     timeout=20,
                 )
                 cr_resp.raise_for_status()
@@ -7452,7 +7404,7 @@ def _run_user_scenario_populate(
                 if not _cr_items:
                     break
                 for item in _cr_items:
-                    doi = _normalize_doi(item.get("DOI"))  # Normalise https://doi.org/ prefix
+                    doi = _normalize_doi(item.get("DOI"))
                     titles = item.get("title", [])
                     title = titles[0] if titles else ""
                     if not doi or not title:
@@ -7468,42 +7420,35 @@ def _run_user_scenario_populate(
                     created = item.get("created", {}).get("date-parts", [])
                     if created and created[0]:
                         year = created[0][0]
-                    url = f"https://doi.org/{doi}"
                     content_text = f"{title}\n\n{abstract or ''}".strip()
                     if len(content_text) < 30:
                         continue
                     try:
                         doc_id = _ingest_doc_direct(
                             source="crossref", title=title, abstract=abstract or None,
-                            year=year, url=url, external_id=doi, doi=doi,
+                            year=year, url=f"https://doi.org/{doi}", external_id=doi, doi=doi,
                         )
-                        with engine.begin() as _c:
-                            _c.execute(text("""
-                                INSERT INTO article_scenarios (document_id, scenario_id, similarity_score)
-                                VALUES (:doc_id, :sid, NULL) ON CONFLICT (document_id, scenario_id) DO NOTHING
-                            """), {"doc_id": doc_id, "sid": scenario_id})
-                        ingested += 1
-                        _cr_fetched_count += 1
-                        if _pipeline_callback is None:
-                            _user_scenario_populate_jobs[scenario_id]["sources"]["crossref"] = \
-                                _user_scenario_populate_jobs[scenario_id]["sources"].get("crossref", 0) + 1
-                            _user_scenario_populate_jobs[scenario_id]["ingested"] = ingested
-                    except Exception as _e:
-                        errors += 1
+                        _link_to_scenario(doc_id)
+                        count += 1
+                        _inc("crossref")
+                    except Exception:
+                        _inc("crossref", 0, 1)
                 if len(_cr_items) < _cr_rows:
-                    break  # Plus de résultats
+                    break
                 _cr_offset += _cr_rows
                 _time.sleep(0.3)
         except Exception as _e:
             logger.warning(f"Crossref populate {scenario_id}: {_e}")
+        return ("crossref", count)
 
-        # ── Ingestion Europe PMC (pagination par curseur) ────────────────────
+    def _fetch_europepmc():
+        count = 0
         try:
             _ep_cursor_mark = "*"
-            _ep_fetched_count = 0
+            _ep_fetched = 0
             _ep_limit = min(1000, max_results)
             _ep_page_size = 200
-            while _ep_fetched_count < _ep_limit:
+            while _ep_fetched < _ep_limit:
                 ep_resp = _requests.get(
                     "https://www.ebi.ac.uk/europepmc/webservices/rest/search",
                     params={"query": query, "format": "json", "pageSize": _ep_page_size,
@@ -7518,7 +7463,7 @@ def _run_user_scenario_populate(
                 for res in _ep_results:
                     pmid = res.get("pmid")
                     pmcid = res.get("pmcid")
-                    doi = _normalize_doi(res.get("doi"))  # Normalise https://doi.org/ prefix
+                    doi = _normalize_doi(res.get("doi"))
                     ext_id = pmcid or pmid or doi
                     title = res.get("title") or ""
                     if not ext_id or not title:
@@ -7534,7 +7479,8 @@ def _run_user_scenario_populate(
                     yt = res.get("pubYear")
                     if yt and str(yt).isdigit():
                         year = int(yt)
-                    url = f"https://europepmc.org/article/{pmcid or pmid}" if (pmcid or pmid) else (f"https://doi.org/{doi}" if doi else None)
+                    url = (f"https://europepmc.org/article/{pmcid or pmid}" if (pmcid or pmid)
+                           else (f"https://doi.org/{doi}" if doi else None))
                     content_text = f"{title}\n\n{abstract or ''}".strip()
                     if len(content_text) < 30:
                         continue
@@ -7543,20 +7489,11 @@ def _run_user_scenario_populate(
                             source="europepmc", title=title, abstract=abstract or None,
                             year=year, url=url, external_id=ext_id, doi=doi,
                         )
-                        with engine.begin() as _c:
-                            _c.execute(text("""
-                                INSERT INTO article_scenarios (document_id, scenario_id, similarity_score)
-                                VALUES (:doc_id, :sid, NULL) ON CONFLICT (document_id, scenario_id) DO NOTHING
-                            """), {"doc_id": doc_id, "sid": scenario_id})
-                        ingested += 1
-                        _ep_fetched_count += 1
-                        if _pipeline_callback is None:
-                            _user_scenario_populate_jobs[scenario_id]["sources"]["europepmc"] = \
-                                _user_scenario_populate_jobs[scenario_id]["sources"].get("europepmc", 0) + 1
-                            _user_scenario_populate_jobs[scenario_id]["ingested"] = ingested
-                    except Exception as _e:
-                        errors += 1
-                # Avancer le curseur EuropePMC
+                        _link_to_scenario(doc_id)
+                        count += 1
+                        _inc("europepmc")
+                    except Exception:
+                        _inc("europepmc", 0, 1)
                 _ep_next_cursor = _ep_data.get("nextCursorMark")
                 if not _ep_next_cursor or _ep_next_cursor == _ep_cursor_mark or len(_ep_results) < _ep_page_size:
                     break
@@ -7564,8 +7501,10 @@ def _run_user_scenario_populate(
                 _time.sleep(0.3)
         except Exception as _e:
             logger.warning(f"EuropePMC populate {scenario_id}: {_e}")
+        return ("europepmc", count)
 
-        # ── Ingestion medRxiv / bioRxiv (90 derniers jours, filtrés, max 1 000 chacun) ──
+    def _fetch_preprints():
+        count = 0
         try:
             import datetime as _dt
             _date_to = _dt.date.today().isoformat()
@@ -7589,7 +7528,6 @@ def _run_user_scenario_populate(
                         _doi = _p.get("doi") or ""
                         if not _title or not _doi:
                             continue
-                        # Filtrage par pertinence : au moins 2 mots de la query dans title+abstract
                         _combined = f"{_title} {_abstract}".lower()
                         _matches = sum(1 for w in _query_words if len(w) > 3 and w in _combined)
                         if _matches < 2:
@@ -7598,30 +7536,22 @@ def _run_user_scenario_populate(
                         _date_str = _p.get("date") or ""
                         if _date_str[:4].isdigit():
                             _year = int(_date_str[:4])
-                        _ext_id = f"{_server}:{_doi}"
-                        _url_art = f"https://doi.org/{_doi}"
                         _content = f"{_title}\n\n{_abstract}".strip()
                         if len(_content) < 30:
                             continue
                         try:
                             _doc_id = _ingest_doc_direct(
                                 source=_server, title=_title, abstract=_abstract or None,
-                                year=_year, url=_url_art, external_id=_ext_id, doi=_doi,
+                                year=_year, url=f"https://doi.org/{_doi}",
+                                external_id=f"{_server}:{_doi}", doi=_doi,
                                 source_type="preprint",
                             )
-                            with engine.begin() as _c:
-                                _c.execute(text("""
-                                    INSERT INTO article_scenarios (document_id, scenario_id, similarity_score)
-                                    VALUES (:doc_id, :sid, NULL) ON CONFLICT (document_id, scenario_id) DO NOTHING
-                                """), {"doc_id": _doc_id, "sid": scenario_id})
-                            ingested += 1
+                            _link_to_scenario(_doc_id)
+                            count += 1
                             _fetched += 1
-                            if _pipeline_callback is None:
-                                _user_scenario_populate_jobs[scenario_id]["sources"][_server] = \
-                                    _user_scenario_populate_jobs[scenario_id]["sources"].get(_server, 0) + 1
-                                _user_scenario_populate_jobs[scenario_id]["ingested"] = ingested
+                            _inc(_server)
                         except Exception:
-                            errors += 1
+                            _inc(_server, 0, 1)
                     _msgs = _data.get("messages", [])
                     _total_srv = 0
                     for _m in _msgs:
@@ -7633,10 +7563,11 @@ def _run_user_scenario_populate(
                     _time.sleep(0.5)
         except Exception as _e:
             logger.warning(f"medRxiv/bioRxiv populate {scenario_id}: {_e}")
+        return ("preprints", count)
 
-        # ── Ingestion PROSPERO (via PubMed systematic reviews) ────────────────
+    def _fetch_prospero():
+        count = 0
         try:
-            # Retry jusqu'à 3 fois en cas d'erreur 500 PubMed
             _prospero_resp = None
             for _retry_p in range(3):
                 try:
@@ -7659,7 +7590,6 @@ def _run_user_scenario_populate(
             _pmids = (_prospero_resp.json().get("esearchresult", {}).get("idlist", []) if _prospero_resp else [])
             if _pmids:
                 import xml.etree.ElementTree as _ET3
-                # Fetch par batches de 200 (limite NCBI efetch)
                 _pmids_to_fetch = _pmids[:min(1000, max_results)]
                 for _batch_start in range(0, len(_pmids_to_fetch), 200):
                     _batch_ids = _pmids_to_fetch[_batch_start:_batch_start + 200]
@@ -7696,7 +7626,6 @@ def _run_user_scenario_populate(
                                 break
                         _year_el = _art.find(".//PubDate/Year")
                         _year_val = int(_year_el.text) if _year_el is not None and _year_el.text else None
-                        _ext_id_p = f"prospero:pubmed:{_pmid_val}"
                         _content_p = f"{_title_val}\n\n{_abstract_val or ''}".strip()
                         if len(_content_p) < 30:
                             continue
@@ -7704,45 +7633,30 @@ def _run_user_scenario_populate(
                             _doc_id = _ingest_doc_direct(
                                 source="prospero", title=_title_val, abstract=_abstract_val,
                                 year=_year_val, url=f"https://pubmed.ncbi.nlm.nih.gov/{_pmid_val}/",
-                                external_id=_ext_id_p, doi=_doi_val,
+                                external_id=f"prospero:pubmed:{_pmid_val}", doi=_doi_val,
                                 source_type="systematic_review",
                             )
-                            with engine.begin() as _c:
-                                _c.execute(text("""
-                                    INSERT INTO article_scenarios (document_id, scenario_id, similarity_score)
-                                    VALUES (:doc_id, :sid, NULL) ON CONFLICT (document_id, scenario_id) DO NOTHING
-                                """), {"doc_id": _doc_id, "sid": scenario_id})
-                            ingested += 1
-                            if _pipeline_callback is None:
-                                _user_scenario_populate_jobs[scenario_id]["sources"]["prospero"] = \
-                                    _user_scenario_populate_jobs[scenario_id]["sources"].get("prospero", 0) + 1
-                                _user_scenario_populate_jobs[scenario_id]["ingested"] = ingested
+                            _link_to_scenario(_doc_id)
+                            count += 1
+                            _inc("prospero")
                         except Exception:
-                            errors += 1
+                            _inc("prospero", 0, 1)
         except Exception as _e:
             logger.warning(f"PROSPERO populate {scenario_id}: {_e}")
+        return ("prospero", count)
 
-        # ── Ingestion Cochrane (via API publique ou fallback PubMed CDSR) ──────
+    def _fetch_cochrane():
+        count = 0
         try:
             _cochrane_results = []
-            # On tente de requêter l'API Cochrane Library directement
             try:
                 _coch_resp = _requests.get(
                     "https://www.cochranelibrary.com/search",
-                    params={
-                        "searchBy": "6",
-                        "searchText": query,
-                        "selectedType": "review",
-                        "isWordVariations": "true",
-                        "resultPerPage": "20",
-                        "searchType": "basic",
-                        "orderBy": "relevancy",
-                        "displayPerPage": "20",
-                    },
-                    headers={
-                        "Accept": "application/json",
-                        "User-Agent": "LiteRev-Evidence/1.0 (academic research tool)",
-                    },
+                    params={"searchBy": "6", "searchText": query, "selectedType": "review",
+                            "isWordVariations": "true", "resultPerPage": "20",
+                            "searchType": "basic", "orderBy": "relevancy", "displayPerPage": "20"},
+                    headers={"Accept": "application/json",
+                             "User-Agent": "LiteRev-Evidence/1.0 (academic research tool)"},
                     timeout=15,
                 )
                 if _coch_resp.status_code == 200:
@@ -7752,7 +7666,7 @@ def _run_user_scenario_populate(
                         _title = _r.get("title", "")
                         if not _title:
                             continue
-                        _doi = _normalize_doi(_r.get("doi", _r.get("DOI", "")))  # Normalise https://doi.org/ prefix
+                        _doi = _normalize_doi(_r.get("doi", _r.get("DOI", "")))
                         _cochrane_results.append({
                             "title": _title,
                             "abstract": _r.get("abstract", _r.get("description", "")),
@@ -7763,25 +7677,19 @@ def _run_user_scenario_populate(
                             "external_id": f"cochrane:{_doi or _title[:50]}",
                         })
             except Exception as _e_coch_api:
-                logger.info(f"Cochrane direct API non disponible pour '{query}', fallback PubMed CDSR: {_e_coch_api}")
+                logger.info(f"Cochrane direct API non disponible, fallback PubMed CDSR: {_e_coch_api}")
 
-            # Fallback PubMed CDSR si aucun résultat direct de l'API Cochrane
             if not _cochrane_results:
                 try:
                     _coch_term = f'("Cochrane Database Syst Rev"[Journal]) AND ({query})'
-                    # Retry jusqu'à 3 fois en cas d'erreur 500 PubMed
                     _coch_esearch = None
                     for _retry_c in range(3):
                         try:
                             _coch_esearch = _requests.get(
                                 "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi",
-                                params={
-                                    "db": "pubmed",
-                                    "term": _coch_term,
-                                    "retmax": min(50, max_results),
-                                    "retmode": "json",
-                                    "sort": "relevance",
-                                },
+                                params={"db": "pubmed", "term": _coch_term,
+                                        "retmax": min(50, max_results),
+                                        "retmode": "json", "sort": "relevance"},
                                 timeout=30,
                             )
                             _coch_esearch.raise_for_status()
@@ -7827,14 +7735,12 @@ def _run_user_scenario_populate(
                                     break
                             _year_el = _art.find(".//PubDate/Year")
                             _year_val = int(_year_el.text) if _year_el is not None and _year_el.text else None
-                            
                             _authors_list = []
                             for _author in _art.findall(".//Author"):
                                 _last = _author.findtext("LastName", "")
                                 _fore = _author.findtext("ForeName", "")
                                 if _last:
                                     _authors_list.append(f"{_last} {_fore}".strip())
-
                             _cochrane_results.append({
                                 "title": _title_val,
                                 "abstract": _abstract_val,
@@ -7847,7 +7753,6 @@ def _run_user_scenario_populate(
                 except Exception as _e_coch_fb:
                     logger.error(f"Erreur fallback Cochrane PubMed: {_e_coch_fb}")
 
-            # Insertion des articles Cochrane trouvés
             for _item in _cochrane_results:
                 _content_c = f"{_item['title']}\n\n{_item['abstract'] or ''}".strip()
                 if len(_content_c) < 30:
@@ -7860,23 +7765,39 @@ def _run_user_scenario_populate(
                         journal="Cochrane Database of Systematic Reviews",
                         source_type="systematic_review",
                     )
-                    with engine.begin() as _c:
-                        _c.execute(text("""
-                            INSERT INTO article_scenarios (document_id, scenario_id, similarity_score)
-                            VALUES (:doc_id, :sid, NULL) ON CONFLICT (document_id, scenario_id) DO NOTHING
-                        """), {"doc_id": _doc_id, "sid": scenario_id})
-                    ingested += 1
-                    if _pipeline_callback is None:
-                        _user_scenario_populate_jobs[scenario_id]["sources"]["cochrane"] = \
-                            _user_scenario_populate_jobs[scenario_id]["sources"].get("cochrane", 0) + 1
-                        _user_scenario_populate_jobs[scenario_id]["ingested"] = ingested
+                    _link_to_scenario(_doc_id)
+                    count += 1
+                    _inc("cochrane")
                 except Exception as _e_ins:
-                    errors += 1
+                    _inc("cochrane", 0, 1)
                     logger.warning(f"Erreur insertion Cochrane article {_item.get('external_id')}: {_e_ins}")
         except Exception as _e_coch_global:
             logger.warning(f"Cochrane global populate {scenario_id}: {_e_coch_global}")
+        return ("cochrane", count)
 
-        # ── Règle qualité : articles SANS abstract retirés du corpus ───────────
+    # Lancer toutes les sources en parallèle
+    source_funcs = [
+        _fetch_pubmed, _fetch_openalex, _fetch_crossref,
+        _fetch_europepmc, _fetch_preprints, _fetch_prospero, _fetch_cochrane,
+    ]
+    t_start = _time.time()
+    with ThreadPoolExecutor(max_workers=7) as executor:
+        futures = {executor.submit(fn): fn.__name__ for fn in source_funcs}
+        for future in as_completed(futures):
+            try:
+                src_name, src_count = future.result()
+                logger.info(f"Populate {scenario_id} [{src_name}]: {src_count} articles ingérés")
+            except Exception as _fe:
+                logger.warning(f"Populate {scenario_id} source future error: {_fe}")
+    t_elapsed = _time.time() - t_start
+    logger.info(f"Populate {scenario_id}: toutes sources terminées en {t_elapsed:.1f}s")
+
+    ingested = _ingested_total[0]
+    errors = _errors_total[0]
+    total_found = ingested  # Approximation — PubMed callback met à jour séparément
+
+    try:
+        # ── Règle qualité : articles SANS abstract retirés du corpus ─────────
         try:
             with engine.begin() as conn:
                 _removed = conn.execute(text("""
@@ -7890,7 +7811,7 @@ def _run_user_scenario_populate(
         except Exception as _e_noabs:
             logger.warning(f"Suppression articles sans abstract {scenario_id}: {_e_noabs}")
 
-        # ── Mettre à jour article_count uniquement (result_count = count from search, never overwritten) ──
+        # ── Mettre à jour article_count ───────────────────────────────────────
         with engine.begin() as conn:
             conn.execute(text("""
                 UPDATE user_scenarios
@@ -7902,10 +7823,7 @@ def _run_user_scenario_populate(
                 WHERE id = :sid
             """), {"sid": scenario_id})
 
-        # ── Scores réels + nettoyage sous le seuil ───────────────────────────
-        # 1. Calcul cosinus réel pour chaque article (remplace NULL/0.9 initial).
-        # 2. Supprime les articles dont le score confirmé est < seuil.
-        #    Les articles sans score (NULL après échec d'embedding) sont conservés.
+        # ── Scores sémantiques + nettoyage sous le seuil ─────────────────────
         _clean_thr = 0.45
         try:
             with engine.connect() as _stc:
@@ -7919,16 +7837,12 @@ def _run_user_scenario_populate(
         try:
             _n_scored = _run_semantic_rerank_inline(scenario_id, query)
             with engine.begin() as _cconn:
-                # Remove articles that scored below threshold
                 _n_removed = _cconn.execute(text("""
                     DELETE FROM article_scenarios
                     WHERE scenario_id = :sid
                       AND similarity_score IS NOT NULL
                       AND similarity_score < :thr
                 """), {"sid": scenario_id, "thr": _clean_thr}).rowcount
-                # Remove articles still unscored after inline rerank (no abstract — can't be validated)
-                # Only do this if inline rerank actually ran and scored at least some articles,
-                # to avoid wiping everything when OpenAI key is absent.
                 _n_null_removed = 0
                 if _n_scored > 0:
                     _n_null_removed = _cconn.execute(text("""
@@ -7959,7 +7873,7 @@ def _run_user_scenario_populate(
                 "sources": _sources_final,
                 "message": f"{ingested} articles ingérés depuis 8 sources ({_src_summary}), {errors} erreurs.",
             }
-        logger.info(f"Populate user_scenario {scenario_id}: {ingested} articles ingérés (8 sources).")
+        logger.info(f"Populate user_scenario {scenario_id}: {ingested} articles ingérés (8 sources, parallèle).")
         return ingested
 
     except Exception as e:
@@ -7968,10 +7882,9 @@ def _run_user_scenario_populate(
             _user_scenario_populate_jobs[scenario_id] = {
                 "status": "error",
                 "error": str(e),
-                "ingested": _user_scenario_populate_jobs.get(scenario_id, {}).get("ingested", 0),
+                "ingested": _ingested_total[0],
             }
         return 0
-
 
 def _run_semantic_rerank_inline(scenario_id: str, query: str) -> int:
     """Calcule le score cosinus entre la requête et chaque abstract, met à jour similarity_score."""
