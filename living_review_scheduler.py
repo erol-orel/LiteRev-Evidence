@@ -191,9 +191,9 @@ def _insert_document(conn, doc: dict) -> Optional[int]:
         with conn.cursor() as cur:
             cur.execute("""
                 INSERT INTO literature_document
-                    (title, abstract, source, external_id, url, publication_year,
+                    (title, abstract, source, external_id, url, year,
                      project_context, scenario_type, evidence_category, source_type,
-                     metadata, created_at, updated_at)
+                     metadata_json, created_at, updated_at)
                 VALUES
                     (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, CAST(%s AS jsonb), NOW(), NOW())
                 ON CONFLICT (external_id, source) DO NOTHING
@@ -226,7 +226,7 @@ def _insert_chunk(conn, doc_id: int, content: str, chunk_type: str, metadata: di
         with conn.cursor() as cur:
             cur.execute("""
                 INSERT INTO document_chunk
-                    (document_id, content, chunk_type, chunk_index, metadata, created_at)
+                    (document_id, content, chunk_type, chunk_index, metadata_json, created_at)
                 VALUES (%s, %s, %s, 0, CAST(%s AS jsonb), NOW())
             """, (doc_id, content[:8000], chunk_type, json.dumps(metadata)))
             conn.commit()

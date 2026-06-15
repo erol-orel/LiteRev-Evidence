@@ -252,6 +252,25 @@ def startup_event() -> None:
     with engine.connect() as conn:
         conn.execute(text("SELECT 1"))
     logger.info("Database connection OK")
+
+    # Pipelines orphelins : tout pipeline marqué 'running' ou 'starting' au
+    # démarrage du serveur est forcément mort (le thread a été tué lors du
+    # redémarrage précédent). On le marque 'failed' pour que l'utilisateur
+    # puisse le relancer depuis l'interface.
+    try:
+        with engine.begin() as _startup_conn:
+            _orphans = _startup_conn.execute(text("""
+                UPDATE user_scenarios
+                SET pipeline_status = 'failed',
+                    pipeline_step   = NULL,
+                    updated_at      = NOW()
+                WHERE pipeline_status IN ('running', 'starting')
+            """)).rowcount
+        if _orphans:
+            logger.warning(f"Startup: {_orphans} pipeline(s) orphelin(s) réinitialisé(s) à 'failed'.")
+    except Exception as _se:
+        logger.error(f"Startup cleanup pipelines orphelins: {_se}")
+
     # Entraîner le modèle demand-forecasting en arrière-plan au démarrage
     import threading
     def _train_demand_model():
@@ -6530,6 +6549,9 @@ def _ensure_user_scenarios_table() -> None:
             "ALTER TABLE user_scenarios ADD COLUMN IF NOT EXISTS pipeline_started_at TIMESTAMP",
             "ALTER TABLE user_scenarios ADD COLUMN IF NOT EXISTS article_count INTEGER DEFAULT 0",
             "ALTER TABLE user_scenarios ADD COLUMN IF NOT EXISTS search_strategy JSONB",
+            # Clustering persisté en base (sinon perdu au redémarrage du serveur)
+            "ALTER TABLE article_scenarios ADD COLUMN IF NOT EXISTS cluster_id INTEGER",
+            "ALTER TABLE article_scenarios ADD COLUMN IF NOT EXISTS cluster_label TEXT",
         ):
             conn.execute(text(_ddl))
     logger.info("Tables user_scenarios et user_scenario_folders vérifiées/créées.")
@@ -8507,17 +8529,22 @@ def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict
                             ft_fetched += 1
                         else:
                             ft_errors += 1
+                    else:
+                        # Pas de texte intégral accessible (paywall, PDF inaccessible, etc.)
+                        ft_errors += 1
+                        logger.debug(f"Fulltext indisponible doc {row['id']} (paywall ou accès restreint)")
                     # Mise à jour progression
                     if (_ft_idx + 1) % 10 == 0:
                         update_step("fulltext", "running",
-                                    done=ft_fetched, total=ft_total,
+                                    done=ft_fetched, total=ft_total, paywall=ft_errors,
                                     pct=round((_ft_idx + 1) / ft_total * 100, 1) if ft_total > 0 else 0)
                 except Exception as _ft_e:
                     ft_errors += 1
                     logger.warning(f"Fulltext doc {row['id']}: {_ft_e}")
                 _time.sleep(0.05)
 
-            update_step("fulltext", "done", fetched=ft_fetched, total=ft_total, errors=ft_errors)
+            update_step("fulltext", "done", fetched=ft_fetched, total=ft_total,
+                        paywall_or_failed=ft_errors)
         except Exception as e:
             update_step("fulltext", "error", error=str(e))
 
@@ -8803,7 +8830,23 @@ def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict
                 km = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
                 labels = km.fit_predict(X)
 
-                # Sauvegarder en cache
+                # Persister les clusters en DB (article_scenarios.cluster_id / cluster_label)
+                # pour qu'ils survivent aux redémarrages du serveur.
+                with engine.begin() as _cl_conn:
+                    for _cl_idx, _cl_doc in enumerate(cl_docs):
+                        _cl_id = int(labels[_cl_idx])
+                        _cl_conn.execute(text("""
+                            UPDATE article_scenarios
+                            SET cluster_id = :cid, cluster_label = :clabel
+                            WHERE scenario_id = :sid AND document_id = :did
+                        """), {
+                            "cid": _cl_id,
+                            "clabel": f"Cluster {_cl_id + 1}",
+                            "sid": scenario_id,
+                            "did": _cl_doc["id"],
+                        })
+
+                # Conserver aussi le cache JSON pour l'endpoint de visualisation
                 import os as _os
                 cache_dir = "/tmp/literev_clustering_cache"
                 _os.makedirs(cache_dir, exist_ok=True)
@@ -8811,7 +8854,6 @@ def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict
                 for ci in range(n_clusters):
                     idxs = [i for i, l in enumerate(labels) if l == ci]
                     cluster_docs = [cl_docs[i] for i in idxs]
-                    top_terms = vectorizer.get_feature_names_out()
                     clusters_data.append({
                         "id": ci,
                         "size": len(idxs),
@@ -8835,24 +8877,26 @@ def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict
         # ── Fin du pipeline ───────────────────────────────────────────────────
         _user_scenario_pipeline_jobs[scenario_id]["overall_status"] = "done"
         _user_scenario_pipeline_jobs[scenario_id]["message"] = (
-            f"Pipeline terminé : {ingested} articles ingérés et enrichis."
+            f"Pipeline terminé."
         )
-        # Persister pipeline_status = done et mettre à jour article_count
+        # Persister pipeline_status = done et mettre à jour article_count (source de vérité = DB)
         try:
             with engine.begin() as _conn:
+                _final_count = _conn.execute(text("""
+                    SELECT COUNT(DISTINCT document_id) FROM article_scenarios WHERE scenario_id = :sid
+                """), {"sid": scenario_id}).scalar() or 0
                 _conn.execute(text("""
                     UPDATE user_scenarios
                     SET pipeline_status = 'done',
                         pipeline_step = 'done',
                         pipeline_progress = 100,
-                        article_count = (
-                            SELECT COUNT(DISTINCT document_id)
-                            FROM article_scenarios
-                            WHERE scenario_id = :sid
-                        ),
+                        article_count = :cnt,
                         updated_at = NOW()
                     WHERE id = :sid
-                """), {"sid": scenario_id})
+                """), {"sid": scenario_id, "cnt": _final_count})
+            _user_scenario_pipeline_jobs[scenario_id]["message"] = (
+                f"Pipeline terminé : {_final_count} articles dans le corpus."
+            )
         except Exception as _e:
             logger.warning(f"Pipeline final DB update failed: {_e}")
         logger.info(f"Pipeline complet {scenario_id}: terminé.")
