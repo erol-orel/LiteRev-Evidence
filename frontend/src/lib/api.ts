@@ -446,36 +446,6 @@ export interface AskResponse {
   }[];
 }
 
-export interface ScreeningDocument {
-  id: number;
-  title: string;
-  abstract: string | null;
-  year: number | null;
-  source: string;
-  url: string | null;
-  externalId: string | null;
-  projectContext: string;
-  screeningStatus: "included" | "excluded" | "pending" | null;
-  screeningReason: string | null;
-  screeningNotes: string | null;
-}
-
-export interface ScreeningDecision {
-  documentId: number;
-  status: "included" | "excluded" | "pending";
-  reason?: string;
-  notes?: string;
-}
-
-export interface PrismaFlow {
-  recordsIdentified: number;
-  recordsScreened: number;
-  recordsExcluded: number;
-  recordsIncluded: number;
-  exclusionReasons: Record<string, number>;
-  bySource: Record<string, number>;
-}
-
 export async function fetchEvidenceSummary(
   documentId: number,
 ): Promise<EvidenceSummaryResponse> {
@@ -596,75 +566,6 @@ export async function fetchGesicaScenarios(): Promise<GesicaScenario[]> {
     recommendedActions: s.recommended_actions,
     relevantArticles: s.relevant_articles,
   }));
-}
-
-export async function fetchScreeningList(projectContext?: string): Promise<ScreeningDocument[]> {
-  const url = projectContext 
-    ? `${API_BASE_URL}/screening?project_context=${projectContext}`
-    : `${API_BASE_URL}/screening`;
-  const response = await fetch(url);
-  if (!response.ok) throw new Error(`Screening list failed with status ${response.status}`);
-  const data = await response.json();
-  return data.map((d: any) => ({
-    id: d.id,
-    title: d.title,
-    abstract: d.abstract,
-    year: d.year,
-    source: d.source,
-    url: d.url ?? null,
-    externalId: d.external_id ?? null,
-    projectContext: d.project_context,
-    screeningStatus: d.screening_status ?? "pending",
-    screeningReason: d.screening_reason ?? null,
-    screeningNotes: d.screening_notes ?? null,
-  }));
-}
-
-export async function submitScreeningDecision(decision: ScreeningDecision): Promise<void> {
-  const response = await fetch(`${API_BASE_URL}/screening/decision`, {
-    method: "POST",
-    headers: authHeaders({ "Content-Type": "application/json" }),
-    body: JSON.stringify({
-      document_id: decision.documentId,
-      status: decision.status,
-      reason: decision.reason,
-      notes: decision.notes
-    })
-  });
-  if (!response.ok) {
-    const text = await response.text();
-    throw new Error(text || `Screening decision failed with status ${response.status}`);
-  }
-}
-
-export async function fetchPrismaFlow(projectContext?: string): Promise<PrismaFlow> {
-  const url = projectContext
-    ? `${API_BASE_URL}/screening/prisma?project_context=${projectContext}`
-    : `${API_BASE_URL}/screening/prisma`;
-  const response = await fetch(url);
-  if (!response.ok) throw new Error(`PRISMA flow failed with status ${response.status}`);
-  const d = await response.json();
-  // Support both flat (new) and nested (legacy) API response shapes
-  if (typeof d.records_identified !== "undefined") {
-    // New flat format from main.py
-    return {
-      recordsIdentified: d.records_identified ?? 0,
-      recordsScreened: d.records_screened ?? 0,
-      recordsExcluded: d.records_excluded ?? 0,
-      recordsIncluded: d.records_included ?? 0,
-      exclusionReasons: d.exclusion_reasons ?? {},
-      bySource: d.by_source ?? {},
-    };
-  }
-  // Legacy nested format fallback
-  return {
-    recordsIdentified: d.identification?.total_records ?? 0,
-    recordsScreened: d.screening?.records_screened ?? 0,
-    recordsExcluded: d.screening?.records_excluded ?? 0,
-    recordsIncluded: d.included?.total_included ?? 0,
-    exclusionReasons: d.eligibility?.reasons ?? {},
-    bySource: d.identification?.by_source ?? {},
-  };
 }
 
 export async function askAssistant(req: AskRequest): Promise<AskResponse> {
@@ -1756,21 +1657,6 @@ export async function fetchScenarioClustering(
   return response.json();
 }
 
-export async function askScenarioRag(
-  scenarioId: string,
-  question: string,
-  filters?: Record<string, any>
-): Promise<ScenarioRagResponse> {
-  const base = scenarioBase(scenarioId);
-  const response = await fetch(`${base}/${scenarioId}/rag`, {
-    method: 'POST',
-    headers: authHeaders({ "Content-Type": "application/json" }),
-    body: JSON.stringify({ question, filters }),
-  });
-  if (!response.ok) throw new Error(`HTTP ${response.status}`);
-  return response.json();
-}
-
 export async function fetchScenarioPrisma(scenarioId: string): Promise<ScenarioPrisma> {
   const base = scenarioBase(scenarioId);
   const response = await fetch(`${base}/${scenarioId}/prisma`);
@@ -2224,28 +2110,6 @@ export interface UserScenarioCreatePayload {
   pinned?: boolean;
 }
 
-export interface UserScenarioPopulateStatus {
-  scenario_id: string;
-  status: 'not_started' | 'running' | 'done' | 'error' | 'already_running';
-  ingested?: number;
-  total_found?: number;
-  errors?: number;
-  message?: string;
-  error?: string;
-  sources?: {
-    db_cache?: number;
-    pubmed?: number;
-    openalex?: number;
-    crossref?: number;
-    europepmc?: number;
-    medrxiv?: number;
-    biorxiv?: number;
-    prospero?: number;
-    cochrane?: number;
-    [key: string]: number | undefined;
-  };
-}
-
 export interface PipelineStepStatus {
   status: 'pending' | 'running' | 'done' | 'error' | 'skipped';
   ingested?: number;
@@ -2389,18 +2253,6 @@ export async function patchUserScenario(
   return _mapUserScenario(await r.json());
 }
 
-export async function populateUserScenario(
-  scenarioId: string,
-  maxResults = 100000,
-): Promise<{ scenario_id: string; status: string; query: string; message: string }> {
-  const r = await fetch(
-    `${API_BASE_URL}/user-scenarios/${scenarioId}/populate?max_results=${maxResults}`,
-    { method: 'POST', headers: authHeaders() },
-  );
-  if (!r.ok) throw new Error(`HTTP ${r.status}`);
-  return r.json();
-}
-
 export async function startUserScenarioPipeline(
   scenarioId: string,
   maxResults = 100000,
@@ -2421,14 +2273,6 @@ export async function fetchUserScenarioPipelineStatus(
   return r.json();
 }
 
-export async function fetchUserScenarioPopulateStatus(
-  scenarioId: string,
-): Promise<UserScenarioPopulateStatus> {
-  const r = await fetch(`${API_BASE_URL}/user-scenarios/${scenarioId}/populate/status`);
-  if (!r.ok) throw new Error(`HTTP ${r.status}`);
-  return r.json();
-}
-
 // ─── Alertes email ────────────────────────────────────────────────────────────
 
 export async function subscribeAlerts(
@@ -2441,18 +2285,6 @@ export async function subscribeAlerts(
     headers: authHeaders({ "Content-Type": "application/json" }),
     body: JSON.stringify({ email, scenario_id: scenarioId, frequency }),
   });
-  if (!r.ok) throw new Error(`HTTP ${r.status}`);
-  return r.json();
-}
-
-export async function unsubscribeAlerts(
-  email: string,
-  scenarioId: string,
-): Promise<{ status: string }> {
-  const r = await fetch(
-    `${API_BASE_URL}/alerts/unsubscribe?email=${encodeURIComponent(email)}&scenario_id=${encodeURIComponent(scenarioId)}`,
-    { method: 'DELETE', headers: authHeaders() },
-  );
   if (!r.ok) throw new Error(`HTTP ${r.status}`);
   return r.json();
 }

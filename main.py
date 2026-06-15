@@ -258,11 +258,7 @@ class AskIn(BaseModel):
     project_context: str | None = None
     filters: dict[str, Any] | None = None
 
-class ScreeningDecisionIn(BaseModel):
-    document_id: int = Field(..., ge=1)
-    status: str = Field(..., pattern="^(included|excluded|pending)$")
-    reason: str | None = None
-    notes: str | None = None
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Startup
@@ -2046,124 +2042,6 @@ def get_evidence_summary(document_id: int) -> dict[str, Any]:
         },
         "gesica_signals": signals,
         "chunk_count": len(chunks),
-    }
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Phase 4 Endpoints: Screening PRISMA
-# ─────────────────────────────────────────────────────────────────────────────
-
-@app.get("/screening")
-def get_screening_list(project_context: str | None = None) -> list[dict[str, Any]]:
-    """Récupère la liste des documents pour le screening PRISMA."""
-    where_clause = ""
-    params = {}
-    if project_context:
-        where_clause = "WHERE project_context = :project_context"
-        params["project_context"] = project_context
-
-    sql = text(f"""
-        SELECT 
-            id, title, abstract, year, source, project_context,
-            screening_status, screening_reason, screening_notes
-        FROM literature_document
-        {where_clause}
-        ORDER BY id DESC
-    """)
-    with engine.connect() as conn:
-        rows = conn.execute(sql, params).mappings().all()
-    return [dict(r) for r in rows]
-
-@app.post("/screening/decision")
-def submit_screening_decision(
-    payload: ScreeningDecisionIn, _: None = Depends(require_api_key)
-) -> dict[str, Any]:
-    """Soumet une décision de screening (Inclus/Exclu) pour un document."""
-    sql = text("""
-        UPDATE literature_document
-        SET 
-            screening_status = :status,
-            screening_reason = :reason,
-            screening_notes = :notes
-        WHERE id = :document_id
-        RETURNING id
-    """)
-    with engine.begin() as conn:
-        row = conn.execute(sql, payload.model_dump()).first()
-        if not row:
-            raise HTTPException(status_code=404, detail="Document not found")
-    return {"id": row[0], "status": "success"}
-
-@app.get("/screening/prisma")
-def get_prisma_flow(project_context: str | None = None) -> dict[str, Any]:
-    """Calcule les métriques pour le diagramme de flux PRISMA."""
-    where_clause = ""
-    params = {}
-    if project_context:
-        where_clause = "WHERE project_context = :project_context"
-        params["project_context"] = project_context
-
-    # On calcule les différentes étapes du diagramme PRISMA
-    sql_stats = text(f"""
-        SELECT 
-            COUNT(*) as total,
-            SUM(CASE WHEN source = 'pubmed' THEN 1 ELSE 0 END) as pubmed,
-            SUM(CASE WHEN source = 'pmc' THEN 1 ELSE 0 END) as pmc,
-            SUM(CASE WHEN source = 'openalex' THEN 1 ELSE 0 END) as openalex,
-            SUM(CASE WHEN source = 'crossref' THEN 1 ELSE 0 END) as crossref,
-            SUM(CASE WHEN source = 'europepmc' THEN 1 ELSE 0 END) as europepmc,
-            SUM(CASE WHEN screening_status = 'included' THEN 1 ELSE 0 END) as included,
-            SUM(CASE WHEN screening_status = 'excluded' THEN 1 ELSE 0 END) as excluded,
-            SUM(CASE WHEN screening_status = 'pending' OR screening_status IS NULL THEN 1 ELSE 0 END) as pending,
-            SUM(CASE WHEN is_duplicate IS TRUE THEN 1 ELSE 0 END) as duplicates
-        FROM literature_document
-        {where_clause}
-    """)
-    
-    with engine.connect() as conn:
-        stats = conn.execute(sql_stats, params).mappings().first()
-        
-    total = stats["total"] or 0
-    pubmed = stats["pubmed"] or 0
-    pmc = stats["pmc"] or 0
-    openalex = stats["openalex"] or 0
-    crossref = stats["crossref"] or 0
-    europepmc = stats["europepmc"] or 0
-    
-    included = stats["included"] or 0
-    excluded = stats["excluded"] or 0
-    pending = stats["pending"] or 0
-    
-    # Doublons réels détectés (colonne is_duplicate alimentée par deduplicate_corpus.py)
-    duplicates_removed = stats["duplicates"] or 0
-    # Les lignes is_duplicate sont encore présentes dans `total` : on les retire après dédoublonnage
-    records_screened = total - duplicates_removed
-    records_excluded = excluded
-    
-    return {
-        "identification": {
-            "total_records": total,
-            "by_source": {
-                "pubmed": pubmed,
-                "pmc": pmc,
-                "openalex": openalex,
-                "crossref": crossref,
-                "europepmc": europepmc
-            },
-            "duplicates_removed": duplicates_removed
-        },
-        "screening": {
-            "records_screened": records_screened,
-            "records_excluded": records_excluded
-        },
-        "eligibility": {
-            "fulltext_assessed": records_screened - records_excluded,
-            "fulltext_excluded": 0, # Extensible si screening fulltext séparé
-            "reasons": {} # Extensible
-        },
-        "included": {
-            "total_included": included,
-            "pending_assessment": pending
-        }
     }
 
 # ─────────────────────────────────────────────────────────────────────────────
