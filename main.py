@@ -955,13 +955,28 @@ def search(payload: SearchIn) -> dict[str, Any]:
         total_matching_docs = conn.execute(count_sql, count_params).scalar() or 0
         breakdown_rows = conn.execute(breakdown_sql, breakdown_params).mappings().all()
 
+    _SRC_CANONICAL: dict[str, str] = {
+        "pubmed": "PubMed", "medline": "PubMed",
+        "crossref": "Crossref",
+        "openalex": "OpenAlex", "open_alex": "OpenAlex",
+        "europepmc": "EuropePMC", "europe_pmc": "EuropePMC", "europe pmc": "EuropePMC",
+        "prospero": "PROSPERO",
+        "cochrane": "Cochrane",
+        "medrxiv": "medRxiv", "biorxiv": "bioRxiv",
+        "autre": "Autre",
+    }
+
+    def _normalize_src(raw: str) -> str:
+        return _SRC_CANONICAL.get(raw.lower().strip(), raw)
+
     source_counts: dict[str, int] = {}
     fulltext_docs = 0
     abstract_docs = 0
     for br in breakdown_rows:
         dc = int(br["doc_count"] or 0)
         ft = int(br["ft_count"] or 0)
-        source_counts[br["src"]] = dc
+        norm = _normalize_src(br["src"])
+        source_counts[norm] = source_counts.get(norm, 0) + dc
         fulltext_docs += ft
         abstract_docs += (dc - ft)
 
@@ -1000,12 +1015,8 @@ def search(payload: SearchIn) -> dict[str, Any]:
     # Le total de documents uniques = somme du breakdown pertinent (== total_matching_docs)
     total_unique_docs = sum(source_counts.values())
 
-    # Trier le breakdown : Autre en dernier, reste par ordre décroissant
     sorted_breakdown = dict(
-        sorted(
-            source_counts.items(),
-            key=lambda x: (x[0] == "Autre", -x[1])
-        )
+        sorted(source_counts.items(), key=lambda x: (x[0] == "Autre", -x[1]))
     )
 
     # ── Fédération live des 8 sources API (optionnelle) ───────────────────────
@@ -1076,6 +1087,7 @@ def search(payload: SearchIn) -> dict[str, Any]:
     else:
         score_type = "lexical"
         score_label = "Lexical (BM25 simulé : score normalisé entre 0 et 1)"
+    results.sort(key=lambda r: (-float(r.get("score") or 0), -(r.get("year") or 0), str(r.get("document_id") or "")))
     return {
         "results": results,
         "count": len(results),
