@@ -60,3 +60,28 @@ jobs:
               -i ~/.ssh/deploy_key \
               "$DEPLOY_USER@$DEPLOY_HOST" \
               'cd /opt/literev-api && bash deploy.sh'
+
+      - name: Smoke test (health + search)
+        env:
+          SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh -o StrictHostKeyChecking=accept-new \
+              -o ConnectTimeout=15 \
+              -i ~/.ssh/deploy_key \
+              "$DEPLOY_USER@$DEPLOY_HOST" \
+              bash << 'EOF'
+            set -e
+            # Health check
+            curl -fsS http://localhost:8000/health | grep -q '"status":"ok"'
+            # Search smoke test: must return 200 with results key, not 500
+            result=$(curl -fsS -X POST http://localhost:8000/search \
+              -H "Content-Type: application/json" \
+              -d '{"query_text":"test","mode":"hybrid","limit":1}')
+            echo "$result" | grep -q '"results"'
+            echo "Smoke test passed"
+          EOF
