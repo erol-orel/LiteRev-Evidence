@@ -8916,80 +8916,149 @@ def get_user_scenario_pico_stats(scenario_id: str) -> dict[str, Any]:
 
 
 @app.get("/user-scenarios/{scenario_id}/prisma")
-def get_user_scenario_prisma(scenario_id: str) -> dict[str, Any]:
-    """Flow PRISMA pour un scénario utilisateur."""
+def get_user_scenario_prisma(
+    scenario_id: str,
+    threshold: float = Query(None),
+) -> dict[str, Any]:
+    """Flow PRISMA modernisé pour un scénario utilisateur.
+
+    Retourne 4 étapes : identification → pré-screening IA → curation manuelle → synthèse.
+    Le seuil de similarité sémantique sépare sélection automatique et borderline.
+    """
     row = _get_user_scenario_or_404(scenario_id)
+
+    # Effective threshold (param > saved setting > default 0.45)
+    with engine.connect() as conn:
+        ss = conn.execute(text(
+            "SELECT similarity_threshold FROM scenario_settings WHERE scenario_id=:sid"
+        ), {"sid": scenario_id}).first()
+    eff_threshold = threshold if threshold is not None else (
+        float(ss[0]) if ss and ss[0] is not None else 0.45
+    )
+
     with engine.connect() as conn:
         stats = conn.execute(text("""
             SELECT
                 COUNT(*) AS total,
-                SUM(CASE WHEN d.source = 'pubmed' THEN 1 ELSE 0 END) AS pubmed,
-                SUM(CASE WHEN d.source = 'pmc' THEN 1 ELSE 0 END) AS pmc,
-                SUM(CASE WHEN d.source IN ('biorxiv','medrxiv') THEN 1 ELSE 0 END) AS preprints,
+                SUM(CASE WHEN d.source = 'pubmed'   THEN 1 ELSE 0 END) AS pubmed,
+                SUM(CASE WHEN d.source = 'pmc'      THEN 1 ELSE 0 END) AS pmc,
                 SUM(CASE WHEN d.source = 'openalex' THEN 1 ELSE 0 END) AS openalex,
                 SUM(CASE WHEN d.source = 'europepmc' THEN 1 ELSE 0 END) AS europepmc,
                 SUM(CASE WHEN d.source = 'crossref' THEN 1 ELSE 0 END) AS crossref,
-                SUM(CASE WHEN d.source = 'medrxiv' THEN 1 ELSE 0 END) AS medrxiv,
-                SUM(CASE WHEN d.source = 'biorxiv' THEN 1 ELSE 0 END) AS biorxiv,
+                SUM(CASE WHEN d.source = 'medrxiv'  THEN 1 ELSE 0 END) AS medrxiv,
+                SUM(CASE WHEN d.source = 'biorxiv'  THEN 1 ELSE 0 END) AS biorxiv,
                 SUM(CASE WHEN d.source = 'prospero' THEN 1 ELSE 0 END) AS prospero,
                 SUM(CASE WHEN d.source = 'cochrane' THEN 1 ELSE 0 END) AS cochrane,
                 SUM(CASE WHEN d.source = 'db_cache' THEN 1 ELSE 0 END) AS db_cache,
-                SUM(CASE WHEN d.screening_status = 'included' THEN 1 ELSE 0 END) AS included,
-                SUM(CASE WHEN d.screening_status = 'excluded' THEN 1 ELSE 0 END) AS excluded,
-                SUM(CASE WHEN d.screening_status = 'pending' OR d.screening_status IS NULL THEN 1 ELSE 0 END) AS pending,
                 SUM(CASE WHEN d.is_duplicate = TRUE THEN 1 ELSE 0 END) AS duplicates,
+                -- semantic split at effective threshold
+                SUM(CASE WHEN COALESCE(ars.similarity_score, 0) >= :thr THEN 1 ELSE 0 END) AS above_threshold,
+                SUM(CASE WHEN COALESCE(ars.similarity_score, 0) <  :thr THEN 1 ELSE 0 END) AS below_threshold,
+                -- manual curation
+                SUM(CASE WHEN d.screening_status = 'included' THEN 1 ELSE 0 END) AS manually_included,
+                SUM(CASE WHEN d.screening_status = 'excluded' THEN 1 ELSE 0 END) AS manually_excluded,
+                SUM(CASE WHEN d.screening_status IS NULL OR d.screening_status = 'pending'
+                         THEN 1 ELSE 0 END) AS pending,
+                -- manually included but below threshold (override)
+                SUM(CASE WHEN d.screening_status = 'included'
+                           AND COALESCE(ars.similarity_score, 0) < :thr THEN 1 ELSE 0 END) AS manually_rescued,
+                -- manually excluded above threshold (veto)
+                SUM(CASE WHEN d.screening_status = 'excluded'
+                           AND COALESCE(ars.similarity_score, 0) >= :thr THEN 1 ELSE 0 END) AS manually_vetoed,
+                -- full text
                 SUM(CASE WHEN EXISTS (
                     SELECT 1 FROM document_chunk c
                     WHERE c.document_id = d.id AND c.chunk_type = 'fulltext_section'
-                ) THEN 1 ELSE 0 END) AS with_fulltext
+                ) THEN 1 ELSE 0 END) AS with_fulltext,
+                -- embeddings
+                SUM(CASE WHEN EXISTS (
+                    SELECT 1 FROM document_chunk c
+                    WHERE c.document_id = d.id AND c.embedding IS NOT NULL
+                ) THEN 1 ELSE 0 END) AS embedded
             FROM article_scenarios ars
             JOIN literature_document d ON d.id = ars.document_id
             WHERE ars.scenario_id = :sid
-        """), {"sid": scenario_id}).mappings().first()
-    total = int(stats["total"] or 0)
-    duplicates = int(stats["duplicates"] or 0)
-    included = int(stats["included"] or 0)
-    excluded = int(stats["excluded"] or 0)
-    with_fulltext = int(stats["with_fulltext"] or 0)
-    records_after_dedup = total - duplicates
-    screened_manually = included + excluded
-    awaiting_screening = records_after_dedup - screened_manually
-    screening_done = screened_manually > 0
+        """), {"sid": scenario_id, "thr": eff_threshold}).mappings().first()
+
+    total           = int(stats["total"] or 0)
+    duplicates      = int(stats["duplicates"] or 0)
+    above           = int(stats["above_threshold"] or 0)
+    below           = int(stats["below_threshold"] or 0)
+    man_included    = int(stats["manually_included"] or 0)
+    man_excluded    = int(stats["manually_excluded"] or 0)
+    pending         = int(stats["pending"] or 0)
+    man_rescued     = int(stats["manually_rescued"] or 0)   # below threshold but manually included
+    man_vetoed      = int(stats["manually_vetoed"] or 0)    # above threshold but manually excluded
+    with_fulltext   = int(stats["with_fulltext"] or 0)
+    embedded        = int(stats["embedded"] or 0)
+
+    # Evidence = (above threshold NOT vetoed) + manually rescued
+    evidence_total  = (above - man_vetoed) + man_rescued
+    screening_done  = (man_included + man_excluded) > 0
+
     return {
         "scenario_id": scenario_id,
         "scenario_title": row["name"],
         "identification": {
-            "total_records_identified": total,
+            "total_records": total,
             "by_source": {
-                "pubmed": int(stats["pubmed"] or 0),
-                "pmc": int(stats["pmc"] or 0),
-                "preprints": int(stats["preprints"] or 0),
-                "openalex": int(stats["openalex"] or 0),
+                "pubmed":    int(stats["pubmed"] or 0),
+                "pmc":       int(stats["pmc"] or 0),
+                "openalex":  int(stats["openalex"] or 0),
                 "europepmc": int(stats["europepmc"] or 0),
-                "crossref": int(stats.get("crossref") or 0),
-                "medrxiv": int(stats.get("medrxiv") or 0),
-                "biorxiv": int(stats.get("biorxiv") or 0),
-                "prospero": int(stats.get("prospero") or 0),
-                "cochrane": int(stats.get("cochrane") or 0),
-                "db_cache": int(stats.get("db_cache") or 0),
+                "crossref":  int(stats["crossref"] or 0),
+                "medrxiv":   int(stats["medrxiv"] or 0),
+                "biorxiv":   int(stats["biorxiv"] or 0),
+                "prospero":  int(stats["prospero"] or 0),
+                "cochrane":  int(stats["cochrane"] or 0),
+                "db_cache":  int(stats["db_cache"] or 0),
             },
             "duplicates_removed": duplicates,
+            "embedded": embedded,
         },
+        "semantic_screening": {
+            "threshold": eff_threshold,
+            "above_threshold": above,
+            "below_threshold": below,
+            "method": "cosine similarity (text-embedding-3-small)",
+        },
+        "full_text": {
+            "with_fulltext": with_fulltext,
+            "without_fulltext": total - with_fulltext,
+            "pct": round(with_fulltext / total * 100, 1) if total > 0 else 0.0,
+            "note": "Texte intégral via PMC / EuropePMC / Unpaywall / Semantic Scholar",
+        },
+        "manual_curation": {
+            "included": man_included,
+            "excluded": man_excluded,
+            "pending": pending,
+            "screening_complete": screening_done,
+            "manually_rescued": man_rescued,
+            "manually_vetoed": man_vetoed,
+        },
+        "evidence": {
+            "total": evidence_total,
+            "ai_auto_selected": above - man_vetoed,
+            "manually_rescued": man_rescued,
+            "with_fulltext": with_fulltext,
+            "screening_complete": screening_done,
+        },
+        # Keep legacy fields for backward compatibility
         "screening": {
-            "records_screened": records_after_dedup,
-            "records_excluded_title_abstract": excluded,
-            "records_included_screening": included,
-            "records_awaiting_screening": awaiting_screening,
+            "records_screened": total,
+            "records_excluded_title_abstract": man_excluded,
+            "records_included_screening": man_included,
+            "records_awaiting_screening": pending,
         },
         "eligibility": {
-            "fulltext_assessed": records_after_dedup - excluded,
+            "fulltext_assessed": above,
             "fulltext_retrieved": with_fulltext,
-            "fulltext_not_retrieved": max(0, (records_after_dedup - excluded) - with_fulltext),
+            "fulltext_not_retrieved": above - with_fulltext,
             "fulltext_excluded": 0,
         },
         "included": {
-            "total_included": included if screening_done else 0,
-            "awaiting_assessment": awaiting_screening,
+            "total_included": man_included if screening_done else evidence_total,
+            "awaiting_assessment": pending,
             "screening_complete": screening_done,
             "note": "" if screening_done else "Screening manuel non encore effectué.",
         },
