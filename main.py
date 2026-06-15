@@ -10337,24 +10337,37 @@ def get_corpus_stats_by_year_named() -> dict[str, Any]:
             GROUP BY d.year, ars.scenario_id ORDER BY d.year ASC
         """)).mappings().all()
 
-        # Noms des user_scenarios
+        # Noms des user_scenarios (only non-deleted ones)
         user_names = conn.execute(text("""
             SELECT id, name FROM user_scenarios
         """)).mappings().all()
 
     user_name_map = {r["id"]: r["name"] for r in user_names}
+    # Valid GESICA scenarios (not hidden)
+    valid_gesica_ids = {
+        sid for sid, meta in GESICA_SCENARIO_METADATA.items()
+        if not meta.get("hidden", False)
+    }
+    # All valid scenario IDs: existing user scenarios + non-hidden GESICA ones
+    valid_sids = set(user_name_map.keys()) | valid_gesica_ids
 
-    def _resolve_name(sid: str) -> str:
+    def _resolve_name(sid: str) -> str | None:
         if sid in user_name_map:
             return user_name_map[sid]
         meta = GESICA_SCENARIO_METADATA.get(sid, {})
-        return meta.get("title", sid)
+        if meta and not meta.get("hidden", False):
+            return meta.get("title", sid)
+        return None  # deleted or hidden — exclude from heatmap
 
     by_year = {str(r["year"]): r["count"] for r in rows_year}
 
     heatmap: dict[str, dict[str, int]] = {}
     for r in rows_heatmap:
+        if r["scenario_id"] not in valid_sids:
+            continue
         name = _resolve_name(r["scenario_id"])
+        if not name:
+            continue
         src = r["source"] or "Autre"
         if name not in heatmap:
             heatmap[name] = {}
@@ -10362,7 +10375,11 @@ def get_corpus_stats_by_year_named() -> dict[str, Any]:
 
     scenario_year: dict[str, dict[str, int]] = {}
     for r in rows_scenario_year:
+        if r["scenario_id"] not in valid_sids:
+            continue
         name = _resolve_name(r["scenario_id"])
+        if not name:
+            continue
         yr = str(r["year"])
         if name not in scenario_year:
             scenario_year[name] = {}
