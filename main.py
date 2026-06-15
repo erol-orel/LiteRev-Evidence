@@ -7046,6 +7046,7 @@ def _run_user_scenario_populate(
 
     # L'étape DB-cache est déplacée à la fin pour compter d'abord les sources externes, puis dédupliquer !
     db_cached_count = 0
+    ingested = 0
 
     ENTREZ_BASE = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
     EMAIL = os.getenv("PUBMED_EMAIL", "literev@example.com")
@@ -7053,6 +7054,77 @@ def _run_user_scenario_populate(
     HEADERS_LOCAL = {"X-Api-Key": WRITE_KEY}
     API_LOCAL = "http://127.0.0.1:8000"
     BATCH_SIZE = 200  # efetch max par requête
+
+    # ── Étape 0 : Linking sémantique depuis la base locale ───────────────────
+    # Avant toute requête externe, on lie au scénario TOUS les documents déjà
+    # indexés qui correspondent à la requête (même logique que /search).
+    # Pour les modes semantic/hybrid : similarité cosinus > 0.35 via pgvector.
+    # Pour les autres modes : OR des termes significatifs.
+    local_linked = 0
+    try:
+        _openai_key_pop = os.getenv("OPENAI_API_KEY")
+        _scenario_mode = "hybrid"
+        with engine.connect() as _mc:
+            _mr = _mc.execute(text("SELECT mode FROM user_scenarios WHERE id = :sid"),
+                              {"sid": scenario_id}).scalar()
+            if _mr:
+                _scenario_mode = _mr
+
+        _local_where_sql, _local_where_params = _build_where(filters)
+
+        if _scenario_mode in ("semantic", "hybrid") and _openai_key_pop:
+            from openai import OpenAI as _OAI_pop
+            _pop_client = _OAI_pop(api_key=_openai_key_pop)
+            _pop_emb = _pop_client.embeddings.create(
+                input=[query.replace("\n", " ").strip()],
+                model="text-embedding-3-small"
+            ).data[0].embedding
+            _local_params = {**_local_where_params, "q_emb": str(_pop_emb), "limit": max_results}
+            with engine.connect() as _lc:
+                _local_ids = _lc.execute(text(f"""
+                    SELECT DISTINCT d.id
+                    FROM document_chunk c
+                    JOIN literature_document d ON d.id = c.document_id
+                    WHERE c.embedding IS NOT NULL
+                      AND (1 - (c.embedding <=> CAST(:q_emb AS vector))) > 0.35
+                      {_local_where_sql}
+                    LIMIT :limit
+                """), _local_params).scalars().all()
+        else:
+            _stop_pop = {"the","a","an","of","in","on","for","and","or","to","with",
+                         "by","from","using","based","via","support","this","that"}
+            _qt = [t for t in re.split(r"[^a-z0-9]+", query.lower())
+                   if len(t) >= 3 and t not in _stop_pop][:10]
+            if _qt:
+                _lk = []
+                _lp = {**_local_where_params, "limit": max_results}
+                for _li, _lt in enumerate(_qt):
+                    _lk_key = f"lt_{_li}"
+                    _lp[_lk_key] = f"%{_lt}%"
+                    _lk.append(f"(LOWER(COALESCE(d.title,'')) LIKE :{_lk_key}"
+                                f" OR LOWER(COALESCE(d.abstract,'')) LIKE :{_lk_key})")
+                with engine.connect() as _lc:
+                    _local_ids = _lc.execute(text(f"""
+                        SELECT DISTINCT d.id FROM literature_document d
+                        WHERE ({' OR '.join(_lk)}) {_local_where_sql}
+                        LIMIT :limit
+                    """), _lp).scalars().all()
+            else:
+                _local_ids = []
+
+        if _local_ids:
+            with engine.begin() as _lc2:
+                for _lid in _local_ids:
+                    _lc2.execute(text("""
+                        INSERT INTO article_scenarios (document_id, scenario_id, similarity_score)
+                        VALUES (:doc_id, :sid, 0.9)
+                        ON CONFLICT (document_id, scenario_id) DO NOTHING
+                    """), {"doc_id": _lid, "sid": scenario_id})
+                    local_linked += 1
+                    ingested += 1
+            logger.info(f"Populate {scenario_id}: {local_linked} docs liés depuis la base locale")
+    except Exception as _e_local:
+        logger.warning(f"Local DB link failed for {scenario_id}: {_e_local}")
 
     try:
         # 1. Recherche PubMed avec usehistory pour paginer
@@ -7083,12 +7155,15 @@ def _run_user_scenario_populate(
         if total_found == 0:
             if _pipeline_callback is None:
                 _user_scenario_populate_jobs[scenario_id] = {
-                    "status": "done", "ingested": 0, "errors": 0, "total_found": 0,
-                    "message": "Aucun article trouvé sur PubMed pour cette requête."
+                    "status": "done", "ingested": local_linked, "errors": 0, "total_found": local_linked,
+                    "message": f"PubMed: aucun résultat. {local_linked} articles liés depuis la base locale."
                 }
-            return 0
+            if local_linked > 0:
+                # Don't skip remaining sources — fall through to rest of function
+                pass
+            else:
+                return local_linked
 
-        ingested = 0
         errors = 0
         n_batches = math.ceil(effective_max / BATCH_SIZE)
 
