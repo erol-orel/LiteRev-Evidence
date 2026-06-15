@@ -690,12 +690,13 @@ def search(payload: SearchIn) -> dict[str, Any]:
             logger.error(f"Erreur génération embedding pour /search: {e}")
             use_vector = False
 
-    # Préparation des clauses textuelles (BM25 simulé)
+    # Lexical scoring: ts_rank on title+abstract only (uniform across all docs,
+    # no chunk-count bias, length-normalized via PostgreSQL tsvector).
     like_clauses: list[str] = []
-    score_clauses: list[str] = []
     params: dict[str, Any] = {
         "limit": payload.limit,
         "offset": payload.offset,
+        "ts_query_str": payload.query.strip(),
         **where_params,
     }
 
@@ -709,16 +710,18 @@ def search(payload: SearchIn) -> dict[str, Any]:
                 OR LOWER(COALESCE(c.content, '')) LIKE :{key}
             )"""
         )
-        score_clauses.append(
-            f"""(
-                (CASE WHEN LOWER(COALESCE(d.title, ''))    LIKE :{key} THEN 3 ELSE 0 END) +
-                (CASE WHEN LOWER(COALESCE(d.abstract, '')) LIKE :{key} THEN 2 ELSE 0 END) +
-                (CASE WHEN LOWER(COALESCE(c.content, ''))  LIKE :{key} THEN 1 ELSE 0 END)
-            )"""
-        )
 
     any_match_sql = " OR ".join(like_clauses)
-    score_sql = " + ".join(score_clauses)
+
+    # ts_rank on title+abstract: same field for every doc regardless of full-text
+    # presence. plainto_tsquery handles stemming & special chars safely.
+    # * 3.0 maps typical good-match scores (~0.2-0.4) into [0,1] range.
+    lexical_expr = """LEAST(1.0, GREATEST(0.0,
+        ts_rank(
+            to_tsvector('english', COALESCE(d.title, '') || ' ' || COALESCE(d.abstract, '')),
+            plainto_tsquery('english', :ts_query_str)
+        ) * 3.0
+    ))"""
 
     if use_vector and payload.mode == "hybrid":
         # 1. Recherche Hybride : articles avec embedding (score cosinus + textuel)
@@ -746,9 +749,9 @@ def search(payload: SearchIn) -> dict[str, Any]:
                     c.content,
                     d.has_fulltext,
                     (1 - (c.embedding <=> CAST(:query_embedding AS vector))) AS semantic_score,
-                    (CASE WHEN ({any_match_sql}) THEN LEAST(1.0, ({score_sql})::float / 6.0) ELSE 0.0 END) AS lexical_score,
+                    {lexical_expr} AS lexical_score,
                     (0.7 * (1 - (c.embedding <=> CAST(:query_embedding AS vector))) +
-                     0.3 * (CASE WHEN ({any_match_sql}) THEN LEAST(1.0, ({score_sql})::float / 6.0) ELSE 0.0 END)) AS score
+                     0.3 * ({lexical_expr})) AS score
                 FROM document_chunk c
                 JOIN literature_document d ON d.id = c.document_id
                 WHERE c.embedding IS NOT NULL
@@ -774,8 +777,8 @@ def search(payload: SearchIn) -> dict[str, Any]:
                     c.content,
                     d.has_fulltext,
                     0.0 AS semantic_score,
-                    (CASE WHEN ({any_match_sql}) THEN LEAST(1.0, ({score_sql})::float / 6.0) ELSE 0.0 END) AS lexical_score,
-                    (CASE WHEN ({any_match_sql}) THEN LEAST(1.0, ({score_sql})::float / 6.0) ELSE 0.0 END) AS score
+                    {lexical_expr} AS lexical_score,
+                    {lexical_expr} AS score
                 FROM document_chunk c
                 JOIN literature_document d ON d.id = c.document_id
                 WHERE c.embedding IS NULL
@@ -872,9 +875,9 @@ def search(payload: SearchIn) -> dict[str, Any]:
                 c.content,
                 d.has_fulltext,
                 0.0 AS semantic_score,
-                LEAST(1.0, ({score_sql})::float / 6.0) AS lexical_score,
+                {lexical_expr} AS lexical_score,
                 (c.embedding IS NOT NULL) AS is_embedded,
-                LEAST(1.0, ({score_sql})::float / 6.0) AS score
+                {lexical_expr} AS score
             FROM document_chunk c
             JOIN literature_document d ON d.id = c.document_id
             WHERE ({any_match_sql})
