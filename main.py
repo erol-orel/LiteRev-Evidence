@@ -8580,6 +8580,47 @@ def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict
                     """), {"q_vec": _q_vec, "sid": scenario_id})
                 n_reranked = _rr_result.rowcount
                 update_step("rerank", "done", updated=n_reranked)
+
+                # Post-rerank cleanup: remove papers whose confirmed cosine score
+                # is below threshold. Only removes papers that have at least one
+                # embedding (i.e. the rerank step could compute their real score).
+                # Papers without embeddings keep similarity_score=1.0 and are
+                # retained until they are embedded in a future run.
+                _filter_threshold = 0.45
+                try:
+                    with engine.connect() as _tc:
+                        _ts = _tc.execute(text(
+                            "SELECT similarity_threshold FROM scenario_settings WHERE scenario_id = :sid"
+                        ), {"sid": scenario_id}).scalar()
+                        if _ts is not None:
+                            _filter_threshold = float(_ts)
+                except Exception:
+                    pass
+                try:
+                    with engine.begin() as _clean_conn:
+                        _deleted_below = _clean_conn.execute(text("""
+                            DELETE FROM article_scenarios ars
+                            WHERE ars.scenario_id = :sid
+                              AND ars.similarity_score < :thr
+                              AND EXISTS (
+                                  SELECT 1 FROM document_chunk c
+                                  WHERE c.document_id = ars.document_id
+                                    AND c.embedding IS NOT NULL
+                              )
+                        """), {"sid": scenario_id, "thr": _filter_threshold}).rowcount
+                    if _deleted_below:
+                        logger.info(f"Pipeline {scenario_id}: removed {_deleted_below} below-threshold papers after rerank")
+                        with engine.begin() as _ac:
+                            _ac.execute(text("""
+                                UPDATE user_scenarios
+                                SET article_count = (
+                                    SELECT COUNT(DISTINCT document_id)
+                                    FROM article_scenarios WHERE scenario_id = :sid
+                                )
+                                WHERE id = :sid
+                            """), {"sid": scenario_id})
+                except Exception as _ce:
+                    logger.warning(f"Post-rerank cleanup error {scenario_id}: {_ce}")
             else:
                 update_step("rerank", "skipped", reason="Clé OpenAI non configurée")
         except Exception as e:
