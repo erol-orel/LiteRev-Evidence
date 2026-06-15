@@ -3873,8 +3873,8 @@ def get_scenario_corpus(
                 d.study_design, d.sample_size, d.country, d.citation_count,
                 d.open_access, d.pmid, d.publication_type, d.quality_score,
                 d.screening_status, d.reviewer_1_status,
-                COALESCE(ars.similarity_score, 1.0) AS similarity_score,
-                (COALESCE(ars.similarity_score, 1.0) >= :threshold) AS above_threshold,
+                COALESCE(ars.similarity_score, 0.0) AS similarity_score,
+                (COALESCE(ars.similarity_score, 0.0) >= :threshold) AS above_threshold,
                 EXISTS (
                     SELECT 1 FROM document_chunk c
                     WHERE c.document_id = d.id AND c.chunk_type = 'fulltext_section'
@@ -3883,8 +3883,8 @@ def get_scenario_corpus(
             JOIN article_scenarios ars ON ars.document_id = d.id AND ars.scenario_id = :sid
             WHERE {where}
             ORDER BY
-                CASE WHEN COALESCE(ars.similarity_score, 1.0) >= :threshold THEN 0 ELSE 1 END ASC,
-                COALESCE(ars.similarity_score, 1.0) DESC,
+                CASE WHEN COALESCE(ars.similarity_score, 0.0) >= :threshold THEN 0 ELSE 1 END ASC,
+                COALESCE(ars.similarity_score, 0.0) DESC,
                 d.year DESC NULLS LAST,
                 d.citation_count DESC NULLS LAST,
                 d.title ASC
@@ -3895,7 +3895,7 @@ def get_scenario_corpus(
             SELECT COUNT(*) AS cnt
             FROM literature_document d
             JOIN article_scenarios ars ON ars.document_id = d.id AND ars.scenario_id = :sid
-            WHERE {where} AND COALESCE(ars.similarity_score, 1.0) >= :threshold
+            WHERE {where} AND COALESCE(ars.similarity_score, 0.0) >= :threshold
         """), {**{k: v for k, v in params.items() if k not in ('limit', 'offset')}, 'threshold': eff_threshold}).mappings().first()
         above_threshold = int(above_row['cnt'] or 0)
         # Stats par année
@@ -7020,7 +7020,7 @@ def get_user_scenario_corpus(
         counts_row = conn.execute(text(f"""
             SELECT
                 COUNT(*) AS total,
-                COUNT(*) FILTER (WHERE COALESCE(ars.similarity_score, 1.0) >= :threshold) AS above_threshold
+                COUNT(*) FILTER (WHERE COALESCE(ars.similarity_score, 0.0) >= :threshold) AS above_threshold
             FROM literature_document d
             JOIN article_scenarios ars ON ars.document_id = d.id AND ars.scenario_id = :sid
             WHERE {where}
@@ -7034,8 +7034,8 @@ def get_user_scenario_corpus(
                 d.study_design, d.sample_size, d.country, d.citation_count,
                 d.open_access, d.pmid, d.publication_type, d.quality_score,
                 d.screening_status, d.reviewer_1_status,
-                COALESCE(ars.similarity_score, 1.0) AS similarity_score,
-                (COALESCE(ars.similarity_score, 1.0) >= :threshold) AS above_threshold,
+                COALESCE(ars.similarity_score, 0.0) AS similarity_score,
+                (COALESCE(ars.similarity_score, 0.0) >= :threshold) AS above_threshold,
                 EXISTS (
                     SELECT 1 FROM document_chunk c
                     WHERE c.document_id = d.id AND c.chunk_type = 'fulltext_section'
@@ -7044,8 +7044,8 @@ def get_user_scenario_corpus(
             JOIN article_scenarios ars ON ars.document_id = d.id AND ars.scenario_id = :sid
             WHERE {where}
             ORDER BY
-                CASE WHEN COALESCE(ars.similarity_score, 1.0) >= :threshold THEN 0 ELSE 1 END ASC,
-                COALESCE(ars.similarity_score, 1.0) DESC,
+                CASE WHEN COALESCE(ars.similarity_score, 0.0) >= :threshold THEN 0 ELSE 1 END ASC,
+                COALESCE(ars.similarity_score, 0.0) DESC,
                 d.year DESC NULLS LAST,
                 d.citation_count DESC NULLS LAST,
                 d.title ASC
