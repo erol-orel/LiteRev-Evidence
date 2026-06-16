@@ -45,11 +45,7 @@ jobs:
             restart)  echo 'cmd=systemctl restart literev-api && sleep 3 && curl -fsS http://localhost:8000/health' >> "$GITHUB_OUTPUT" ;;
             logs)     echo 'cmd=journalctl -u literev-api --no-pager -n 100' >> "$GITHUB_OUTPUT" ;;
             deploy)   echo 'cmd=cd /opt/literev-api && bash deploy.sh' >> "$GITHUB_OUTPUT" ;;
-            pipeline-status)
-              cat >> "$GITHUB_OUTPUT" << 'PIPELINE_EOF'
-cmd=ps aux | grep -E 'fetch_fulltext|embed_corpus' | grep -v grep; echo '---reprocess log (last 20 lines)---'; tail -20 /tmp/fulltext_reprocess.log 2>/dev/null || echo 'not started'; echo '---new docs log (last 5 lines)---'; tail -5 /tmp/fulltext_new.log 2>/dev/null || echo 'not started'; echo '---embed log (last 5 lines)---'; tail -5 /tmp/embed_after_fulltext.log 2>/dev/null || echo 'not started'
-PIPELINE_EOF
-              ;;
+            pipeline-status) echo "cmd=ps aux | grep -E 'fetch_fulltext|embed_corpus' | grep -v grep; echo '---reprocess log (last 20 lines)---'; tail -20 /tmp/fulltext_reprocess.log 2>/dev/null || echo 'not started'; echo '---new docs log (last 5 lines)---'; tail -5 /tmp/fulltext_new.log 2>/dev/null || echo 'not started'; echo '---embed log (last 5 lines)---'; tail -5 /tmp/embed_after_fulltext.log 2>/dev/null || echo 'not started'" >> "$GITHUB_OUTPUT" ;;
             custom)
               if [ -z "$CUSTOM_CMD" ]; then
                 echo "custom_command est vide" >&2; exit 1
