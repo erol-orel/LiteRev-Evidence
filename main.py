@@ -4509,7 +4509,7 @@ def get_clustering_status(scenario_id: str) -> dict:
 
 
 @app.post("/gesica/scenarios/{scenario_id}/rag")
-def scenario_rag_assistant(scenario_id: str, payload: AskIn) -> dict[str, Any]:
+def scenario_rag_assistant(scenario_id: str, payload: AskIn, _: None = Depends(require_api_key)) -> dict[str, Any]:
     """
     Assistant RAG dédié par scénario.
     Utilise le corpus filtré du scénario + le prompt d'extraction d'évidence spécifique.
@@ -6108,7 +6108,7 @@ def get_knowledge_graph(
 from fastapi.responses import StreamingResponse
 
 @app.post("/ask/stream")
-async def ask_stream(payload: dict[str, Any]) -> StreamingResponse:
+async def ask_stream(payload: dict[str, Any], _: None = Depends(require_api_key)) -> StreamingResponse:
     """
     Version streaming (SSE) de l'endpoint /ask.
     Retourne les tokens au fur et à mesure via Server-Sent Events.
@@ -6512,7 +6512,7 @@ class AlertSubscriptionIn(BaseModel):
 
 
 @app.post("/alerts/subscribe")
-def subscribe_alerts(payload: AlertSubscriptionIn) -> dict[str, Any]:
+def subscribe_alerts(payload: AlertSubscriptionIn, _: None = Depends(require_api_key)) -> dict[str, Any]:
     """
     Enregistre une alerte email pour un scénario.
     L'utilisateur sera notifié quand de nouveaux articles sont ajoutés.
@@ -6548,7 +6548,7 @@ def subscribe_alerts(payload: AlertSubscriptionIn) -> dict[str, Any]:
 
 
 @app.delete("/alerts/unsubscribe")
-def unsubscribe_alerts(email: str, scenario_id: str) -> dict[str, Any]:
+def unsubscribe_alerts(email: str, scenario_id: str, _: None = Depends(require_api_key)) -> dict[str, Any]:
     """Désabonnement des alertes email."""
     with engine.begin() as conn:
         conn.execute(text("""
@@ -9926,7 +9926,7 @@ def get_user_scenario_knowledge_graph(
 
 
 @app.post("/user-scenarios/{scenario_id}/rag")
-def user_scenario_rag_assistant(scenario_id: str, payload: AskIn) -> dict[str, Any]:
+def user_scenario_rag_assistant(scenario_id: str, payload: AskIn, _: None = Depends(require_api_key)) -> dict[str, Any]:
     """Assistant RAG pour un scénario utilisateur (délègue au RAG générique filtré)."""
     row = _get_user_scenario_or_404(scenario_id)
     payload.filters = payload.filters or {}
@@ -11100,7 +11100,7 @@ def get_corpus_stats_by_year_named() -> dict[str, Any]:
 # ─── ASSISTANT IA FILTRÉ PAR SEUIL ───────────────────────────────────────────
 
 @app.post("/ask/stream/filtered")
-async def ask_stream_filtered(payload: dict[str, Any]):
+async def ask_stream_filtered(payload: dict[str, Any], _: None = Depends(require_api_key)):
     """
     Version de /ask/stream qui filtre les chunks par seuil de similarité
     et priorise les articles validés humainement.
