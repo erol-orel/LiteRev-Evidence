@@ -7,11 +7,12 @@ import secrets as _secrets
 from pathlib import Path
 from typing import Any, Optional
 
-# Import des métadonnées enrichies (queries, prompts, variables, seuils)
+# GESICA_ENRICHED et GESICA_SCENARIO_METADATA sont désormais stockés en base de données (user_scenarios is_system=TRUE)
+# Les imports statiques ci-dessous sont conservés pour compatibilité ascendante uniquement
 try:
-    from gesica_scenario_enriched_metadata import GESICA_ENRICHED
+    from gesica_scenario_enriched_metadata import GESICA_ENRICHED as _GESICA_ENRICHED_LEGACY
 except ImportError:
-    GESICA_ENRICHED: dict = {}
+    _GESICA_ENRICHED_LEGACY: dict = {}
 from fastapi import Depends, FastAPI, Header, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -280,10 +281,12 @@ def startup_event() -> None:
                 SELECT id, query, filters
                 FROM user_scenarios
                 WHERE pipeline_status IN ('running', 'starting')
+                  AND COALESCE(is_system, FALSE) = FALSE
             """)).mappings().fetchall()
             _pop_orphans = _startup_conn.execute(text("""
                 SELECT COUNT(*) FROM user_scenarios
                 WHERE populate_status = 'running'
+                  AND COALESCE(is_system, FALSE) = FALSE
             """)).scalar() or 0
 
         # Réinitialiser les populate orphelins à 'error'
@@ -293,6 +296,7 @@ def startup_event() -> None:
                     UPDATE user_scenarios
                     SET populate_status = 'error', updated_at = NOW()
                     WHERE populate_status = 'running'
+                      AND COALESCE(is_system, FALSE) = FALSE
                 """))
             logger.warning(f"Startup: {_pop_orphans} populate(s) orphelin(s) reinitialisé(s) à 'error'.")
 
@@ -2636,24 +2640,73 @@ GESICA_SCENARIO_METADATA: dict[str, dict[str, Any]] = {
 }
 
 
+GESICA_FOLDER_ID = "fld-gesica-main"
+
+
+def _gesica_title(meta: dict[str, Any]) -> str:
+    return str(meta.get("title") or meta.get("name") or meta.get("id") or "Scénario")
+
+
+def _gesica_actions(meta: dict[str, Any]) -> list[str]:
+    actions = meta.get("recommended_actions")
+    if actions is None:
+        actions = meta.get("recommended_action")
+    if isinstance(actions, list):
+        return actions
+    if isinstance(actions, str) and actions.strip():
+        return [actions]
+    return []
+
+
+def _get_db_gesica_scenario_or_404(scenario_id: str, conn=None) -> dict[str, Any]:
+    sql = text("""
+        SELECT *
+        FROM user_scenarios
+        WHERE id = :sid
+          AND is_system = TRUE
+          AND folder_id = :folder_id
+    """)
+    params = {"sid": scenario_id, "folder_id": GESICA_FOLDER_ID}
+    if conn is None:
+        with engine.connect() as _conn:
+            row = _conn.execute(sql, params).mappings().first()
+    else:
+        row = conn.execute(sql, params).mappings().first()
+    if not row:
+        raise HTTPException(status_code=404, detail=f"Scénario '{scenario_id}' non trouvé")
+    return dict(row)
+
+
+def _list_db_gesica_scenarios(conn) -> list[dict[str, Any]]:
+    rows = conn.execute(text("""
+        SELECT *
+        FROM user_scenarios
+        WHERE is_system = TRUE
+          AND folder_id = :folder_id
+          AND id <> 'unassigned'
+          AND COALESCE(hidden, FALSE) = FALSE
+        ORDER BY COALESCE(title, name, id) ASC
+    """), {"folder_id": GESICA_FOLDER_ID}).mappings().all()
+    return [dict(r) for r in rows]
+
+
 @app.get("/gesica/scenarios")
 def get_gesica_scenarios() -> list[dict[str, Any]]:
     """
-    Scénarios GESICA dynamiques : retourne TOUJOURS les 31 scénarios fins depuis GESICA_SCENARIO_METADATA
+    Scénarios GESICA dynamiques : retourne les scénarios système stockés en base,
     enrichis avec les articles scientifiques associés depuis la DB (living evidence review).
     Les scénarios sont triés par nombre d'articles décroissant, puis alphabétiquement.
-    Les scénarios sans articles en DB sont inclus avec article_count=0.
     """
     with engine.connect() as conn:
-        # Récupérer les comptages depuis la DB pour tous les scénarios présents
+        scenario_rows = _list_db_gesica_scenarios(conn)
+
         sql_counts = text("""
             SELECT scenario_id, COUNT(DISTINCT document_id) as article_count
             FROM article_scenarios
             GROUP BY scenario_id;
         """)
         db_counts = {row["scenario_id"]: row["article_count"] for row in conn.execute(sql_counts).mappings().all()}
-        
-        # Récupérer les comptages de screening par scénario
+
         sql_screening = text("""
             SELECT
                 ars.scenario_id,
@@ -2667,32 +2720,26 @@ def get_gesica_scenarios() -> list[dict[str, Any]]:
             row["scenario_id"]: {"included": row["included_count"], "excluded": row["excluded_count"]}
             for row in conn.execute(sql_screening).mappings().all()
         }
-        
-        # Récupérer les scores Kappa par scénario
+
         sql_kappa = text("""
             SELECT scenario_id, kappa_score
             FROM scenario_kappa_cache
-        """) if False else None  # Table optionnelle - fallback si inexistante
-        kappa_scores: dict = {}
+        """) if False else None
+        kappa_scores: dict[str, Any] = {}
         try:
             if sql_kappa is None:
                 raise Exception("skip")
             kappa_scores = {row["scenario_id"]: row["kappa_score"] for row in conn.execute(sql_kappa).mappings().all()}
         except Exception:
             pass
-        
+
         result = []
-        # Itérer sur TOUS les 31 scénarios définis dans les métadonnées statiques
-        for scenario_id, meta in GESICA_SCENARIO_METADATA.items():
-            if scenario_id == "unassigned":
-                continue  # Exclure le scénario "non classé" de l'affichage
-            if meta.get("hidden", False):
-                continue  # Scénario masqué (code conservé, non affiché)
-            
-            article_count = db_counts.get(scenario_id, 0)
+        for meta in scenario_rows:
+            scenario_id = str(meta["id"])
+            title = _gesica_title(meta)
+            article_count = int(db_counts.get(scenario_id, 0) or 0)
             sc = screening_counts.get(scenario_id, {"included": 0, "excluded": 0})
-            
-            # Récupérer les 5 articles les plus récents et pertinents pour ce scénario
+
             articles = []
             if article_count > 0:
                 sql_articles = text("""
@@ -2710,19 +2757,20 @@ def get_gesica_scenarios() -> list[dict[str, Any]]:
                     ORDER BY d.year DESC NULLS LAST, d.title ASC
                 """)
                 articles = [dict(r) for r in conn.execute(sql_articles, {"scenario": scenario_id}).mappings().all()]
-            
+
             result.append({
                 "id": scenario_id,
-                "name": meta["title"],
-                "title": meta["title"],
-                "description": meta["description"],
-                "cluster": meta["cluster"],
+                "name": title,
+                "title": title,
+                "label_short": meta.get("label_short"),
+                "description": meta.get("description") or "",
+                "cluster": meta.get("cluster") or "",
                 "article_count": article_count,
-                "included_count": sc["included"],
-                "excluded_count": sc["excluded"],
+                "included_count": int(sc["included"] or 0),
+                "excluded_count": int(sc["excluded"] or 0),
                 "kappa_score": kappa_scores.get(scenario_id),
-                "hidden": meta.get("hidden", False),
-                "recommended_actions": meta["recommended_actions"],
+                "hidden": bool(meta.get("hidden", False)),
+                "recommended_actions": _gesica_actions(meta),
                 "relevant_articles": articles,
                 "living_evidence_note": (
                     f"Living Evidence Review · {article_count} articles indexés. Mis à jour automatiquement à chaque ingestion."
@@ -2730,10 +2778,8 @@ def get_gesica_scenarios() -> list[dict[str, Any]]:
                     else "Aucun article indexé pour ce scénario. En attente d'ingestion de nouvelles sources."
                 )
             })
-        
-        # Trier : scénarios avec articles en premier (décroissant), puis scénarios vides alphabétiquement
+
         result.sort(key=lambda x: (-x["article_count"], x["title"]))
-            
     return result
 
 
@@ -3430,12 +3476,18 @@ def get_document_scenarios(doc_id: int) -> dict[str, Any]:
             ORDER BY ars.similarity_score DESC NULLS LAST
         """), {"doc_id": doc_id}).mappings().all()
     scenarios = []
+    # Charger les titres GESICA depuis la DB
+    with engine.connect() as _conn:
+        _gesica_rows = _conn.execute(text("""
+            SELECT id, title, name FROM user_scenarios
+            WHERE is_system = TRUE AND folder_id = :fid
+        """), {"fid": GESICA_FOLDER_ID}).mappings().all()
+    _gesica_title_map = {str(r["id"]): (r.get("title") or r.get("name") or str(r["id"])) for r in _gesica_rows}
     for r in rows:
         sid = r["scenario_id"]
-        meta = GESICA_SCENARIO_METADATA.get(sid, {})
         scenarios.append({
             "scenario_id": sid,
-            "title": meta.get("title", sid),
+            "title": _gesica_title_map.get(sid, sid),
             "similarity_score": float(r["similarity_score"]) if r["similarity_score"] else None,
             "assigned_at": r["assigned_at"].isoformat() if r["assigned_at"] else None,
         })
@@ -3854,11 +3906,8 @@ def get_scenario_detail(scenario_id: str) -> dict[str, Any]:
     - Informations sur le modèle IA (algorithme, variables, fréquence de mise à jour)
     - Seuils d'alerte vert/orange/rouge
     """
-    meta = GESICA_SCENARIO_METADATA.get(scenario_id)
-    if not meta:
-        raise HTTPException(status_code=404, detail=f"Scénario '{scenario_id}' non trouvé")
-    enriched = GESICA_ENRICHED.get(scenario_id, {})
     with engine.connect() as conn:
+        meta = _get_db_gesica_scenario_or_404(scenario_id, conn)
         stats = conn.execute(text("""
             SELECT
                 COUNT(*) AS total,
@@ -3877,20 +3926,20 @@ def get_scenario_detail(scenario_id: str) -> dict[str, Any]:
         """), {"sid": scenario_id}).mappings().first()
     return {
         "id": scenario_id,
-        "title": meta["title"],
-        "description": meta["description"],
-        "cluster": meta["cluster"],
-        "recommended_actions": meta.get("recommended_actions", []),
-        "boolean_queries": enriched.get("boolean_queries", []),
-        "nl_queries": enriched.get("nl_queries", []),
-        "evidence_extraction_prompt": enriched.get("evidence_extraction_prompt", ""),
-        "model_info": enriched.get("model_info", {}),
-        "alert_thresholds": enriched.get("alert_thresholds", {}),
-        "databases": enriched.get("databases", []),
-        "outcome_definition": enriched.get("outcome_definition", ""),
-        "variables_detail": enriched.get("variables_detail", {}),
-        "keywords": enriched.get("keywords", []),
-        "clinical_rationale": enriched.get("clinical_rationale", ""),
+        "title": _gesica_title(meta),
+        "description": meta.get("description") or "",
+        "cluster": meta.get("cluster") or "",
+        "recommended_actions": _gesica_actions(meta),
+        "boolean_queries": meta.get("boolean_queries") or [],
+        "nl_queries": meta.get("nl_queries") or [],
+        "evidence_extraction_prompt": meta.get("evidence_extraction_prompt") or "",
+        "model_info": meta.get("model_info") or {},
+        "alert_thresholds": meta.get("alert_thresholds") or {},
+        "databases": meta.get("required_databases") or [],
+        "outcome_definition": meta.get("outcome_definition") or "",
+        "variables_detail": meta.get("variables_detail") or {},
+        "keywords": meta.get("keywords") or [],
+        "clinical_rationale": meta.get("clinical_rationale") or "",
         "corpus_stats": {
             "total": int(stats["total"] or 0),
             "with_fulltext": int(stats["with_fulltext"] or 0),
@@ -3917,9 +3966,7 @@ def get_scenario_corpus(
     Retourne le corpus d'articles pour un scénario avec statistiques.
     Supporte la pagination, le filtrage par année, source et full-text.
     """
-    meta = GESICA_SCENARIO_METADATA.get(scenario_id)
-    if not meta:
-        raise HTTPException(status_code=404, detail=f"Scénario '{scenario_id}' non trouvé")
+    _get_db_gesica_scenario_or_404(scenario_id)
     # Seuil effectif : paramètre > seuil sauvegardé > défaut 0.45.
     eff_threshold = 0.45
     try:
@@ -4032,12 +4079,9 @@ def get_scenario_model_status(scenario_id: str) -> dict[str, Any]:
     Retourne le statut coloré du modèle pour un scénario.
     Exécute le modèle correspondant et évalue le statut vert/orange/rouge.
     """
-    meta = GESICA_SCENARIO_METADATA.get(scenario_id)
-    if not meta:
-        raise HTTPException(status_code=404, detail=f"Scénario '{scenario_id}' non trouvé")
-    enriched = GESICA_ENRICHED.get(scenario_id, {})
-    model_info = enriched.get("model_info", {})
-    thresholds = enriched.get("alert_thresholds", {})
+    meta = _get_db_gesica_scenario_or_404(scenario_id)
+    model_info = meta.get("model_info") or {}
+    thresholds = meta.get("alert_thresholds") or {}
     # Mapping scenario_id -> endpoint de modèle existant
     MODEL_ENDPOINT_MAP = {
         "demand-forecasting": "demand_forecasting_model",
@@ -4176,7 +4220,14 @@ def _run_clustering_background(scenario_id: str, force_refresh: bool = False) ->
         except Exception:
             pass
 
-    meta = GESICA_SCENARIO_METADATA.get(scenario_id, {})
+    try:
+        meta_for_cluster = {}
+        try:
+            meta_for_cluster = _get_db_gesica_scenario_or_404(scenario_id)
+        except Exception:
+            pass  # Scénario utilisateur ou non trouvé — on continue sans métadonnées
+    except Exception:
+        meta_for_cluster = {}
     try:
         import numpy as np
         from sklearn.feature_extraction.text import TfidfVectorizer
@@ -4354,7 +4405,7 @@ def _run_clustering_background(scenario_id: str, force_refresh: bool = False) ->
                     completion = _client.chat.completions.create(
                         model="gpt-4.1-mini",
                         messages=[{"role": "user", "content": (
-                            f"Scénario : {meta.get('title', scenario_id)}.\n"
+                            f"Scénario : {_gesica_title(meta_for_cluster) if meta_for_cluster else scenario_id}.\n"
                             f"Articles représentatifs du cluster :\n{llm_ctx}\n\n"
                             f"Rédigez un résumé concis (3-4 phrases, max 120 mots) en français : "
                             f"thématique commune, évidences clés, valeur opérationnelle pour les urgences préhospitalières."
@@ -4411,9 +4462,7 @@ def get_scenario_clustering(scenario_id: str, force_refresh: bool = False) -> di
     Appeler /clustering/status pour vérifier si le résultat est prêt.
     """
     import threading
-    meta = GESICA_SCENARIO_METADATA.get(scenario_id)
-    if not meta:
-        raise HTTPException(status_code=404, detail=f"Scénario '{scenario_id}' non trouvé")
+    _get_db_gesica_scenario_or_404(scenario_id)
 
     # Si résultat en cache mémoire, retourner immédiatement
     job = _clustering_jobs.get(scenario_id)
@@ -4456,11 +4505,8 @@ def scenario_rag_assistant(scenario_id: str, payload: AskIn) -> dict[str, Any]:
     Assistant RAG dédié par scénario.
     Utilise le corpus filtré du scénario + le prompt d'extraction d'évidence spécifique.
     """
-    meta = GESICA_SCENARIO_METADATA.get(scenario_id)
-    if not meta:
-        raise HTTPException(status_code=404, detail=f"Scénario '{scenario_id}' non trouvé")
-    enriched = GESICA_ENRICHED.get(scenario_id, {})
-    evidence_prompt = enriched.get("evidence_extraction_prompt", "")
+    meta = _get_db_gesica_scenario_or_404(scenario_id)
+    evidence_prompt = meta.get("evidence_extraction_prompt") or ""
     # Forcer le filtre sur le scénario
     payload.filters = payload.filters or {}
     payload.filters["scenario_type"] = scenario_id
@@ -4611,9 +4657,7 @@ def get_scenario_prisma(scenario_id: str) -> dict[str, Any]:
     Flow PRISMA pour un scénario spécifique.
     Calcule les métriques d'identification, screening, éligibilité et inclusion.
     """
-    meta = GESICA_SCENARIO_METADATA.get(scenario_id)
-    if not meta:
-        raise HTTPException(status_code=404, detail=f"Scénario '{scenario_id}' non trouvé")
+    _get_db_gesica_scenario_or_404(scenario_id)
     with engine.connect() as conn:
         stats = conn.execute(text("""
             SELECT
@@ -4762,9 +4806,7 @@ async def upload_scenario_dataset(
     Permet à l'utilisateur d'uploader un jeu de données (CSV ou Excel) pour alimenter
     les variables non branchées d'un scénario spécifique.
     """
-    meta = GESICA_SCENARIO_METADATA.get(scenario_id)
-    if not meta:
-        raise HTTPException(status_code=404, detail=f"Scénario '{scenario_id}' non trouvé")
+    _get_db_gesica_scenario_or_404(scenario_id)
 
     # Valider le format du fichier
     filename = file.filename or ""
@@ -6189,9 +6231,7 @@ def get_evidence_brief_pdf(scenario_id: str):
     from reportlab.lib.enums import TA_CENTER, TA_LEFT
     import io
 
-    meta = GESICA_SCENARIO_METADATA.get(scenario_id)
-    if not meta:
-        raise HTTPException(status_code=404, detail=f"Scénario '{scenario_id}' non trouvé")
+    meta = _get_db_gesica_scenario_or_404(scenario_id)
 
     # Récupérer les données
     with engine.connect() as conn:
@@ -6279,7 +6319,7 @@ def get_evidence_brief_pdf(scenario_id: str):
 
     # En-tête
     story.append(Paragraph("LiteRev : Evidence to Scenario", small_style))
-    story.append(Paragraph(f"Evidence Brief : {meta['title']}", title_style))
+    story.append(Paragraph(f"Evidence Brief : {_gesica_title(meta)}", title_style))
     story.append(Paragraph(
         f"Scénario LiteRev · Généré le {__import__('datetime').datetime.now().strftime('%d/%m/%Y à %H:%M')}",
         small_style
@@ -6388,13 +6428,12 @@ def trigger_living_review(
     import threading
 
     scenarios_to_update = []
-    if scenario_id:
-        meta = GESICA_SCENARIO_METADATA.get(scenario_id)
-        if not meta:
-            raise HTTPException(status_code=404, detail=f"Scénario '{scenario_id}' non trouvé")
-        scenarios_to_update = [(scenario_id, meta)]
-    else:
-        scenarios_to_update = list(GESICA_SCENARIO_METADATA.items())
+    with engine.connect() as conn:
+        if scenario_id:
+            meta = _get_db_gesica_scenario_or_404(scenario_id, conn)
+            scenarios_to_update = [(scenario_id, meta)]
+        else:
+            scenarios_to_update = [(row["id"], row) for row in _list_db_gesica_scenarios(conn)]
 
     report = {
         "dry_run": dry_run,
@@ -6406,8 +6445,8 @@ def trigger_living_review(
     for sid, smeta in scenarios_to_update:
         scenario_report = {
             "scenario_id": sid,
-            "title": smeta.get("title", sid),
-            "query": smeta.get("pubmed_query", smeta.get("boolean_query", "N/A")),
+            "title": _gesica_title(smeta),
+            "query": ((smeta.get("boolean_queries") or ["N/A"])[0] if isinstance(smeta.get("boolean_queries"), list) else (smeta.get("boolean_queries") or smeta.get("query") or "N/A")),
             "action": "would_fetch" if dry_run else "fetching",
         }
         report["scenarios"].append(scenario_report)
@@ -6859,7 +6898,9 @@ def create_user_scenario(payload: UserScenarioIn, _: None = Depends(require_api_
 @app.delete("/user-scenarios/{scenario_id}", status_code=200)
 def delete_user_scenario(scenario_id: str, _: None = Depends(require_api_key)) -> dict[str, Any]:
     """Supprime un scénario utilisateur et ses associations article_scenarios."""
-    _get_user_scenario_or_404(scenario_id)
+    row = _get_user_scenario_or_404(scenario_id)
+    if bool(row.get("is_system")):
+        raise HTTPException(status_code=403, detail="Les scénarios système ne peuvent pas être supprimés via cet endpoint")
     with engine.begin() as conn:
         # Supprimer les associations article_scenarios pour ce scénario utilisateur
         conn.execute(text("""
@@ -9310,7 +9351,7 @@ def get_user_scenario_embedding_status(scenario_id: str) -> dict[str, Any]:
 
 # ── Proxy endpoints : rediriger les appels /gesica/scenarios/{usr-*}/... ──────
 # Les endpoints existants (screening, pico, evidence-brief, clustering, rag, etc.)
-# utilisent GESICA_SCENARIO_METADATA.get(scenario_id) pour valider l'ID.
+# valident maintenant l'ID via la DB (user_scenarios is_system=TRUE).
 # Pour les scénarios utilisateur (usr-*), on intercepte avant ce check.
 
 @app.get("/user-scenarios/{scenario_id}/screening-progress")
@@ -10140,20 +10181,109 @@ def get_user_scenario_article_pico(scenario_id: str, article_id: int) -> dict[st
 def get_user_scenario_evidence_brief_pdf(scenario_id: str):
     """PDF Evidence Brief pour un scénario utilisateur."""
     row = _get_user_scenario_or_404(scenario_id)
-    # Injecter temporairement dans GESICA_SCENARIO_METADATA pour réutiliser la fonction PDF
-    _tmp_meta = {
-        "title": row["name"],
-        "description": f"Scénario utilisateur : {row['query']}",
-        "cluster": "user",
-        "recommended_actions": [],
-    }
-    GESICA_SCENARIO_METADATA[scenario_id] = _tmp_meta
-    try:
-        result = get_evidence_brief_pdf(scenario_id)
-    finally:
-        # Retirer l'entrée temporaire
-        GESICA_SCENARIO_METADATA.pop(scenario_id, None)
-    return result
+    # Injecter le scénario utilisateur dans user_scenarios avec is_system=True temporairement
+    # n'est plus nécessaire : get_evidence_brief_pdf lit maintenant depuis la DB via _get_db_gesica_scenario_or_404
+    # On crée une entrée temporaire dans user_scenarios si nécessaire
+    # Pour les user_scenarios, on appelle directement la logique PDF avec les données du scénario
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.lib.units import cm
+    from reportlab.lib import colors
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, HRFlowable
+    from reportlab.lib.enums import TA_CENTER, TA_LEFT
+    import io as _io
+
+    with engine.connect() as _conn:
+        corpus_stats = _conn.execute(text("""
+            SELECT
+                COUNT(*) AS total,
+                SUM(CASE WHEN is_duplicate IS NOT TRUE THEN 1 ELSE 0 END) AS unique_docs,
+                GREATEST(1900, MIN(year)) AS year_min, MAX(year) AS year_max,
+                SUM(CASE WHEN screening_status = 'included' THEN 1 ELSE 0 END) AS included,
+                SUM(CASE WHEN pico_json IS NOT NULL THEN 1 ELSE 0 END) AS with_pico
+            FROM literature_document
+            WHERE project_context = 'literev' AND scenario_type = :sid
+        """), {"sid": scenario_id}).mappings().first()
+        top_articles = _conn.execute(text("""
+            SELECT title, year, journal, authors,
+                   COALESCE((pico_json->>'study_design'), study_design, 'N/A') AS design
+            FROM literature_document
+            WHERE project_context = 'literev' AND scenario_type = :sid
+              AND is_duplicate IS NOT TRUE AND abstract IS NOT NULL
+            ORDER BY quality_score DESC NULLS LAST, year DESC NULLS LAST
+            LIMIT 100000
+        """), {"sid": scenario_id}).mappings().all()
+        study_designs = _conn.execute(text("""
+            SELECT
+                COALESCE((pico_json->>'study_design'), study_design, 'Non classifié') AS design,
+                COUNT(*) AS n
+            FROM literature_document
+            WHERE project_context = 'literev' AND scenario_type = :sid
+              AND is_duplicate IS NOT TRUE
+            GROUP BY 1 ORDER BY 2 DESC LIMIT 8
+        """), {"sid": scenario_id}).mappings().all()
+
+    _buf = _io.BytesIO()
+    _doc = SimpleDocTemplate(_buf, pagesize=A4, rightMargin=2*cm, leftMargin=2*cm, topMargin=2*cm, bottomMargin=2*cm)
+    _styles = getSampleStyleSheet()
+    _dark_green = colors.HexColor("#1a3a2a")
+    _brand_green = colors.HexColor("#22c55e")
+    _light_text = colors.HexColor("#374151")
+    _title_style = ParagraphStyle("UT", parent=_styles["Title"], fontSize=22, textColor=_dark_green, spaceAfter=6, fontName="Helvetica-Bold")
+    _h2_style = ParagraphStyle("UH2", parent=_styles["Heading2"], fontSize=13, textColor=_dark_green, spaceBefore=14, spaceAfter=4, fontName="Helvetica-Bold")
+    _body_style = ParagraphStyle("UB", parent=_styles["Normal"], fontSize=9, textColor=_light_text, spaceAfter=4, leading=14)
+    _small_style = ParagraphStyle("US", parent=_styles["Normal"], fontSize=7, textColor=colors.HexColor("#6b7280"), spaceAfter=2)
+
+    _story = []
+    _story.append(Paragraph("LiteRev : Evidence to Scenario", _small_style))
+    _story.append(Paragraph(f"Evidence Brief : {row['name']}", _title_style))
+    _story.append(Paragraph(f"Scénario utilisateur · Généré le {__import__('datetime').datetime.now().strftime('%d/%m/%Y à %H:%M')}", _small_style))
+    _story.append(HRFlowable(width="100%", thickness=2, color=_brand_green, spaceAfter=12))
+
+    _total = int(corpus_stats["total"] or 0)
+    _unique = int(corpus_stats["unique_docs"] or 0)
+    _included = int(corpus_stats["included"] or 0)
+    _with_pico = int(corpus_stats["with_pico"] or 0)
+    _year_min = corpus_stats["year_min"] or "N/A"
+    _year_max = corpus_stats["year_max"] or "N/A"
+
+    _story.append(Paragraph("Corpus documentaire", _h2_style))
+    _stats_data = [["Indicateur", "Valeur"], ["Total articles", str(_total)], ["Articles uniques", str(_unique)],
+                   ["Articles inclus", str(_included) if _included > 0 else "En attente"], ["Avec PICO", str(_with_pico)],
+                   ["Période", f"{_year_min} – {_year_max}"]]
+    _st = Table(_stats_data, colWidths=[10*cm, 6*cm])
+    _st.setStyle(TableStyle([("BACKGROUND", (0,0), (-1,0), _dark_green), ("TEXTCOLOR", (0,0), (-1,0), colors.white),
+                              ("FONTNAME", (0,0), (-1,0), "Helvetica-Bold"), ("FONTSIZE", (0,0), (-1,-1), 9),
+                              ("ROWBACKGROUNDS", (0,1), (-1,-1), [colors.HexColor("#f9fafb"), colors.white]),
+                              ("GRID", (0,0), (-1,-1), 0.5, colors.HexColor("#e5e7eb")), ("PADDING", (0,0), (-1,-1), 6)]))
+    _story.append(_st)
+
+    if study_designs:
+        _story.append(Paragraph("Distribution par type d'étude", _h2_style))
+        _dd = [["Type d'étude", "Nombre"]] + [[str(d["design"]), str(d["n"])] for d in study_designs]
+        _dt = Table(_dd, colWidths=[10*cm, 6*cm])
+        _dt.setStyle(TableStyle([("BACKGROUND", (0,0), (-1,0), _dark_green), ("TEXTCOLOR", (0,0), (-1,0), colors.white),
+                                  ("FONTNAME", (0,0), (-1,0), "Helvetica-Bold"), ("FONTSIZE", (0,0), (-1,-1), 9),
+                                  ("ROWBACKGROUNDS", (0,1), (-1,-1), [colors.HexColor("#f9fafb"), colors.white]),
+                                  ("GRID", (0,0), (-1,-1), 0.5, colors.HexColor("#e5e7eb")), ("PADDING", (0,0), (-1,-1), 6)]))
+        _story.append(_dt)
+
+    if top_articles:
+        _story.append(Paragraph("Articles les plus pertinents", _h2_style))
+        for _i, _art in enumerate(top_articles, 1):
+            _story.append(Paragraph(f"<b>{_i}. {(_art['title'] or 'Sans titre')[:120]}</b>",
+                                    ParagraphStyle("at", parent=_body_style, fontSize=9, textColor=_dark_green)))
+            _story.append(Paragraph((_art['authors'] or '')[:80], _small_style))
+            _story.append(Paragraph(f"{_art['year'] or 'N/A'} · {_art['journal'] or 'Journal inconnu'} · {_art['design']}", _small_style))
+            _story.append(Spacer(1, 4))
+
+    _story.append(HRFlowable(width="100%", thickness=1, color=colors.HexColor("#e5e7eb"), spaceBefore=16))
+    _story.append(Paragraph("Ce document a été généré automatiquement par LiteRev.", _small_style))
+    _doc.build(_story)
+    _buf.seek(0)
+    from fastapi.responses import Response as _Resp
+    return _Resp(content=_buf.read(), media_type="application/pdf",
+                 headers={"Content-Disposition": f'attachment; filename="evidence_brief_{scenario_id}.pdf"'})
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -10207,9 +10337,12 @@ def _get_scenario_name(scenario_id: str) -> str:
                 "SELECT name FROM user_scenarios WHERE id = :id"
             ), {"id": scenario_id}).mappings().first()
         return row["name"] if row else scenario_id
-    # GESICA : utiliser les métadonnées
-    meta = GESICA_SCENARIO_METADATA.get(scenario_id, {})
-    return meta.get("title", scenario_id)
+    # GESICA : utiliser la DB
+    try:
+        meta = _get_db_gesica_scenario_or_404(scenario_id)
+        return _gesica_title(meta)
+    except Exception:
+        return scenario_id
 
 
 def _get_above_threshold_articles(scenario_id: str, threshold: float | None = None) -> list[dict]:
@@ -10323,10 +10456,9 @@ def trigger_rerank(scenario_id: str, _: None = Depends(require_api_key)) -> dict
         row = _get_user_scenario_or_404(scenario_id)
         query = row["query"]
     else:
-        meta = GESICA_SCENARIO_METADATA.get(scenario_id)
-        if not meta:
-            raise HTTPException(status_code=404, detail="Scénario non trouvé")
-        query = meta.get("nl_queries", [meta.get("title", scenario_id)])[0] if meta.get("nl_queries") else meta.get("title", scenario_id)
+        meta = _get_db_gesica_scenario_or_404(scenario_id)
+        nl_queries = meta.get("nl_queries") or []
+        query = nl_queries[0] if nl_queries else _gesica_title(meta)
 
     if _RERANK_JOBS.get(scenario_id, {}).get("status") == "running":
         return {"status": "already_running", "scenario_id": scenario_id}
@@ -10887,20 +11019,19 @@ def get_corpus_stats_by_year_named() -> dict[str, Any]:
         """)).mappings().all()
 
     user_name_map = {r["id"]: r["name"] for r in user_names}
-    # Valid GESICA scenarios (not hidden)
-    valid_gesica_ids = {
-        sid for sid, meta in GESICA_SCENARIO_METADATA.items()
-        if not meta.get("hidden", False)
-    }
+    # Valid GESICA scenarios (not hidden) — depuis la DB
+    with engine.connect() as _hm_conn:
+        _gesica_db_rows = _list_db_gesica_scenarios(_hm_conn)
+    _gesica_name_map = {str(r["id"]): _gesica_title(r) for r in _gesica_db_rows}
+    valid_gesica_ids = set(_gesica_name_map.keys())
     # All valid scenario IDs: existing user scenarios + non-hidden GESICA ones
     valid_sids = set(user_name_map.keys()) | valid_gesica_ids
 
     def _resolve_name(sid: str) -> str | None:
         if sid in user_name_map:
             return user_name_map[sid]
-        meta = GESICA_SCENARIO_METADATA.get(sid, {})
-        if meta and not meta.get("hidden", False):
-            return meta.get("title", sid)
+        if sid in _gesica_name_map:
+            return _gesica_name_map[sid]
         return None  # deleted or hidden — exclude from heatmap
 
     by_year = {str(r["year"]): r["count"] for r in rows_year}
@@ -11091,11 +11222,9 @@ def trigger_full_pipeline_with_brief(scenario_id: str, _: None = Depends(require
         row = _get_user_scenario_or_404(scenario_id)
         query = row["query"]
     else:
-        meta = GESICA_SCENARIO_METADATA.get(scenario_id)
-        if not meta:
-            raise HTTPException(status_code=404, detail="Scénario non trouvé")
-        nl = meta.get("nl_queries", [])
-        query = nl[0] if nl else meta.get("title", scenario_id)
+        meta = _get_db_gesica_scenario_or_404(scenario_id)
+        nl = meta.get("nl_queries") or []
+        query = nl[0] if nl else _gesica_title(meta)
 
     def _run():
         logger.info(f"Full pipeline with brief: {scenario_id}")

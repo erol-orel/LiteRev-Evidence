@@ -730,26 +730,13 @@ function StatsView({ corpusStats, gesicaStats, fulltextStats, scenarios, statsBy
               <div className="space-y-1.5">
                 {scenarios && scenarios.length > 0 ? (() => {
                   const maxCount = Math.max(...scenarios.map(s => s.articleCount));
-                  const scenarioLabels: Record<string, string> = {
-                    "hospital-capacity-forecasting": "Capacité hospitalière",
-                    "demand-forecasting": "Prévision de demande",
-                    "cardiac-arrest-prediction": "Arrêt cardiaque",
-                    "ambulance-dispatch-optimization": "Dispatch ambulances",
-                    "triage-support": "Aide au triage",
-                    "dispatch-decision-support": "Décision dispatch",
-                    "response-time-optimization": "Temps de réponse",
-                    "trauma-severity-assessment": "Sévérité trauma",
-                    "stroke-detection": "Détection AVC",
-                    "call-prioritization": "Priorisation appels",
-                    "emergency-call-qualification": "Qualification appels",
-                  };
                   return scenarios
                     .filter(s => s.articleCount > 0)
                     .sort((a, b) => b.articleCount - a.articleCount)
                     .map(s => (
                       <div key={s.id} className="group">
                         <div className="flex items-center justify-between text-xs mb-0.5">
-                          <span className="text-white/70 truncate max-w-[70%]">{scenarioLabels[s.id] ?? s.title}</span>
+                          <span className="text-white/70 truncate max-w-[70%]">{s.labelShort ?? s.title}</span>
                           <span className="font-mono text-brand-300 shrink-0 ml-2">{s.articleCount.toLocaleString()}</span>
                         </div>
                         <div className="h-1.5 w-full rounded-full bg-white/5 overflow-hidden">
@@ -986,29 +973,20 @@ function StatsView({ corpusStats, gesicaStats, fulltextStats, scenarios, statsBy
             Heatmap : scénarios × sources
           </h2>
           {(() => {
-            const scenarioLabels: Record<string, string> = {
-              "hospital-capacity-forecasting": "Capacité hosp.",
-              "demand-forecasting": "Prévision demande",
-              "cardiac-arrest-prediction": "Arrêt cardiaque",
-              "ambulance-dispatch-optimization": "Dispatch amb.",
-              "triage-support": "Triage",
-              "dispatch-decision-support": "Décision dispatch",
-              "response-time-optimization": "Temps réponse",
-              "trauma-severity-assessment": "Trauma",
-              "stroke-detection": "AVC",
-              "call-prioritization": "Priorisation",
-              "emergency-call-qualification": "Qualification",
-            };
+            // Les labels courts viennent de la DB via scenarios (labelShort)
+            const scenarioLabelMap = Object.fromEntries(
+              (scenarios ?? []).map(s => [s.id, s.labelShort ?? s.title])
+            );
             const heatmap = statsByYear.heatmapScenarioSource;
             const allSources = Array.from(
               new Set(Object.values(heatmap).flatMap(s => Object.keys(s)))
             ).sort();
-            const scenarios = Object.entries(heatmap).sort((a, b) => {
+            const heatmapEntries = Object.entries(heatmap).sort((a, b) => {
               const totalA = Object.values(a[1]).reduce((s, v) => s + v, 0);
               const totalB = Object.values(b[1]).reduce((s, v) => s + v, 0);
               return totalB - totalA;
             });
-            const globalMax = Math.max(...scenarios.flatMap(([, srcMap]) => Object.values(srcMap)));
+            const globalMax = Math.max(...heatmapEntries.flatMap(([, srcMap]) => Object.values(srcMap)));
             return (
               <div className="overflow-x-auto">
                 <table className="w-full text-xs">
@@ -1022,11 +1000,11 @@ function StatsView({ corpusStats, gesicaStats, fulltextStats, scenarios, statsBy
                     </tr>
                   </thead>
                   <tbody>
-                    {scenarios.map(([sid, srcMap]) => {
+                    {heatmapEntries.map(([sid, srcMap]) => {
                       const total = Object.values(srcMap).reduce((s, v) => s + v, 0);
                       return (
                         <tr key={sid} className="border-t border-white/5">
-                          <td className="py-1.5 pr-3 text-white/70">{scenarioLabels[sid] ?? sid}</td>
+                          <td className="py-1.5 pr-3 text-white/70">{scenarioLabelMap[sid] ?? sid}</td>
                           {allSources.map(src => {
                             const val = srcMap[src] ?? 0;
                             const intensity = globalMax > 0 ? val / globalMax : 0;

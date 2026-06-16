@@ -354,6 +354,7 @@ export interface GesicaStats {
 export interface GesicaScenario {
   id: string;
   title: string;
+  labelShort?: string | null;
   description: string;
   cluster: string;
   articleCount: number;
@@ -531,6 +532,7 @@ export async function fetchGesicaScenarios(): Promise<GesicaScenario[]> {
   const data: Array<{
     id: string;
     title: string;
+    label_short?: string | null;
     description: string;
     cluster: string;
     article_count: number;
@@ -559,6 +561,7 @@ export async function fetchGesicaScenarios(): Promise<GesicaScenario[]> {
   return data.map((s) => ({
     id: s.id,
     title: s.title,
+    labelShort: s.label_short ?? null,
     description: s.description,
     cluster: s.cluster,
     articleCount: s.article_count,
