@@ -6526,7 +6526,7 @@ class AlertSubscriptionIn(BaseModel):
 
 
 @app.post("/alerts/subscribe")
-def subscribe_alerts(payload: AlertSubscriptionIn) -> dict[str, Any]:
+def subscribe_alerts(payload: AlertSubscriptionIn, _: None = Depends(require_api_key)) -> dict[str, Any]:
     """
     Enregistre une alerte email pour un scénario.
     L'utilisateur sera notifié quand de nouveaux articles sont ajoutés.
@@ -6562,7 +6562,7 @@ def subscribe_alerts(payload: AlertSubscriptionIn) -> dict[str, Any]:
 
 
 @app.delete("/alerts/unsubscribe")
-def unsubscribe_alerts(email: str, scenario_id: str) -> dict[str, Any]:
+def unsubscribe_alerts(email: str, scenario_id: str, _: None = Depends(require_api_key)) -> dict[str, Any]:
     """Désabonnement des alertes email."""
     with engine.begin() as conn:
         conn.execute(text("""
