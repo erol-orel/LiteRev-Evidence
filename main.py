@@ -2710,9 +2710,11 @@ def get_gesica_scenarios() -> list[dict[str, Any]]:
         scenario_rows = _list_db_gesica_scenarios(conn)
 
         sql_counts = text("""
-            SELECT scenario_id, COUNT(DISTINCT document_id) as article_count
-            FROM article_scenarios
-            GROUP BY scenario_id;
+            SELECT ars.scenario_id, COUNT(DISTINCT ars.document_id) as article_count
+            FROM article_scenarios ars
+            JOIN literature_document d ON d.id = ars.document_id
+            WHERE (d.is_duplicate IS NULL OR d.is_duplicate = FALSE)
+            GROUP BY ars.scenario_id;
         """)
         db_counts = {row["scenario_id"]: row["article_count"] for row in conn.execute(sql_counts).mappings().all()}
 
@@ -2723,6 +2725,7 @@ def get_gesica_scenarios() -> list[dict[str, Any]]:
                 COUNT(CASE WHEN d.screening_status = 'excluded' THEN 1 END) as excluded_count
             FROM article_scenarios ars
             JOIN literature_document d ON d.id = ars.document_id
+            WHERE (d.is_duplicate IS NULL OR d.is_duplicate = FALSE)
             GROUP BY ars.scenario_id;
         """)
         screening_counts = {
@@ -2763,6 +2766,7 @@ def get_gesica_scenarios() -> list[dict[str, Any]]:
                     FROM literature_document d
                     JOIN article_scenarios ars ON ars.document_id = d.id
                     WHERE ars.scenario_id = :scenario
+                      AND (d.is_duplicate IS NULL OR d.is_duplicate = FALSE)
                     ORDER BY d.year DESC NULLS LAST, d.title ASC
                 """)
                 articles = [dict(r) for r in conn.execute(sql_articles, {"scenario": scenario_id}).mappings().all()]
@@ -6773,6 +6777,7 @@ def _user_scenario_to_gesica_format(row: dict[str, Any]) -> dict[str, Any]:
             FROM article_scenarios ars
             JOIN literature_document d ON d.id = ars.document_id
             WHERE ars.scenario_id = :sid
+              AND (d.is_duplicate IS NULL OR d.is_duplicate = FALSE)
         """), {"sid": row["id"]}).mappings().first()
 
     article_count = int(counts["article_count"] or 0) if counts else 0
