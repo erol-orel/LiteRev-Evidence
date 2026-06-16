@@ -4167,6 +4167,11 @@ export function ScenarioDetailPage({ scenarioId, onBack }: ScenarioDetailPagePro
   const [error, setError] = useState<string | null>(null);
   const [activeSection, setActiveSection] = useState<SectionKey>("review");
 
+  // Scroll en haut de page à chaque ouverture d'un scénario
+  useEffect(() => {
+    window.scrollTo({ top: 0, behavior: "instant" });
+  }, [scenarioId]);
+
   useEffect(() => {
     setLoading(true);
     setError(null);
