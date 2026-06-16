@@ -8031,7 +8031,9 @@ def _run_user_scenario_populate(
             conn.execute(text("""
                 UPDATE user_scenarios
                 SET article_count = (
-                    SELECT COUNT(DISTINCT document_id) FROM article_scenarios WHERE scenario_id = :sid
+                    SELECT COUNT(DISTINCT ars.document_id) FROM article_scenarios ars
+                    JOIN literature_document d ON d.id = ars.document_id
+                    WHERE ars.scenario_id = :sid AND (d.is_duplicate IS NULL OR d.is_duplicate = FALSE)
                 ),
                 populate_status = 'done',
                 updated_at = NOW()
@@ -8071,7 +8073,7 @@ def _run_user_scenario_populate(
                 with engine.begin() as _ac:
                     _ac.execute(text("""
                         UPDATE user_scenarios
-                        SET article_count = (SELECT COUNT(DISTINCT document_id) FROM article_scenarios WHERE scenario_id = :sid),
+                        SET article_count = (SELECT COUNT(DISTINCT ars.document_id) FROM article_scenarios ars JOIN literature_document d ON d.id = ars.document_id WHERE ars.scenario_id = :sid AND (d.is_duplicate IS NULL OR d.is_duplicate = FALSE)),
                             rerank_removed_count = :removed,
                             rerank_threshold = :thr
                         WHERE id = :sid
@@ -8764,8 +8766,11 @@ def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict
                             _ac.execute(text("""
                                 UPDATE user_scenarios
                                 SET article_count = (
-                                    SELECT COUNT(DISTINCT document_id)
-                                    FROM article_scenarios WHERE scenario_id = :sid
+                                    SELECT COUNT(DISTINCT ars.document_id)
+                                    FROM article_scenarios ars
+                                    JOIN literature_document d ON d.id = ars.document_id
+                                    WHERE ars.scenario_id = :sid
+                                      AND (d.is_duplicate IS NULL OR d.is_duplicate = FALSE)
                                 )
                                 WHERE id = :sid
                             """), {"sid": scenario_id})
@@ -9113,7 +9118,9 @@ def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict
         try:
             with engine.begin() as _conn:
                 _final_count = _conn.execute(text("""
-                    SELECT COUNT(DISTINCT document_id) FROM article_scenarios WHERE scenario_id = :sid
+                    SELECT COUNT(DISTINCT ars.document_id) FROM article_scenarios ars
+                    JOIN literature_document d ON d.id = ars.document_id
+                    WHERE ars.scenario_id = :sid AND (d.is_duplicate IS NULL OR d.is_duplicate = FALSE)
                 """), {"sid": scenario_id}).scalar() or 0
                 # Récupérer les infos de rerank pour le message final
                 _rerank_info = _conn.execute(text("""
