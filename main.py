@@ -622,11 +622,21 @@ def create_document(
             :scenario_type, :geographic_scope, :evidence_category,
             :doi, :pmid, :authors, :journal, :open_access
         )
+        ON CONFLICT (doi) WHERE doi IS NOT NULL DO NOTHING
         RETURNING id
     """)
+    params = doc.model_dump()
     with engine.begin() as conn:
-        new_id = conn.execute(sql, doc.model_dump()).scalar_one()
-    return {"id": new_id}
+        new_id = conn.execute(sql, params).scalar()
+        deduplicated = False
+        if new_id is None:
+            # DOI already present (UNIQUE(doi) partial index) — return the existing row
+            new_id = conn.execute(
+                text("SELECT id FROM literature_document WHERE doi = :doi ORDER BY id LIMIT 1"),
+                {"doi": params.get("doi")},
+            ).scalar()
+            deduplicated = True
+    return {"id": new_id, "deduplicated": deduplicated}
 
 @app.post("/chunks")
 def create_chunk(
@@ -7333,13 +7343,20 @@ def _ingest_doc_direct(
             ) VALUES (
                 :source, :title, :abstract, :year, :url, :external_id,
                 :project_context, :source_type, :doi, :authors, :journal
-            ) RETURNING id
+            )
+            ON CONFLICT (doi) WHERE doi IS NOT NULL DO NOTHING
+            RETURNING id
         """), {
             "source": source, "title": title, "abstract": abstract,
             "year": year, "url": url, "external_id": external_id,
             "project_context": project_context, "source_type": source_type,
             "doi": doi, "authors": authors, "journal": journal,
-        }).scalar_one()
+        }).scalar()
+        if doc_id is None:
+            # DOI already present — reuse the existing canonical row
+            doc_id = _c.execute(text(
+                "SELECT id FROM literature_document WHERE doi = :doi ORDER BY id LIMIT 1"
+            ), {"doi": doi}).scalar()
 
     # INSERT direct du chunk title_abstract
     if len(content_text) >= 30:
