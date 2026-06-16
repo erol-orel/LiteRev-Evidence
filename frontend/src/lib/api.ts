@@ -2094,6 +2094,7 @@ export interface UserScenario extends GesicaScenario {
   mode: string;
   filters: Record<string, any>;
   result_count: number;
+  resultCount: number;           // alias camelCase de result_count
   pinned: boolean;
   created_at: string | null;
   updated_at: string | null;
@@ -2102,6 +2103,8 @@ export interface UserScenario extends GesicaScenario {
   pipeline_status?: string;
   pipeline_step?: string | null;
   pipeline_progress?: number;
+  rerank_removed_count?: number; // articles supprimés après rerank sous seuil
+  rerank_threshold?: number;     // seuil utilisé lors du dernier rerank
 }
 
 export interface UserScenarioCreatePayload {
@@ -2201,9 +2204,15 @@ export interface EmbeddingStatus {
 // ─── CRUD user-scenarios ──────────────────────────────────────────────────────
 
 function _mapUserScenario(u: any): UserScenario {
+  // article_count = articles réellement en DB après ingestion + nettoyage
+  // result_count  = snapshot du nombre de résultats au moment de la recherche
+  // On ne fait PLUS de fallback result_count → articleCount pour éviter
+  // la confusion 129 (recherche) → 75 (corpus réel après rerank)
+  const articleCount = u.article_count ?? u.articleCount ?? 0;
   return {
     ...u,
-    articleCount: u.article_count ?? u.articleCount ?? u.result_count ?? 0,
+    articleCount,
+    resultCount: u.result_count ?? u.resultCount ?? 0,
     livingEvidenceNote: u.living_evidence_note ?? u.livingEvidenceNote ?? '',
     recommendedActions: u.recommended_actions ?? u.recommendedActions ?? [],
     relevantArticles: u.relevant_articles ?? u.relevantArticles ?? [],
@@ -2215,6 +2224,8 @@ function _mapUserScenario(u: any): UserScenario {
     pipeline_status: u.pipeline_status ?? 'idle',
     pipeline_step: u.pipeline_step ?? null,
     pipeline_progress: u.pipeline_progress ?? 0,
+    rerank_removed_count: u.rerank_removed_count ?? 0,
+    rerank_threshold: u.rerank_threshold ?? 0.45,
   };
 }
 

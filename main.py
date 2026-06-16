@@ -6702,6 +6702,8 @@ def _ensure_user_scenarios_table() -> None:
             "ALTER TABLE user_scenarios ADD COLUMN IF NOT EXISTS pipeline_started_at TIMESTAMP",
             "ALTER TABLE user_scenarios ADD COLUMN IF NOT EXISTS article_count INTEGER DEFAULT 0",
             "ALTER TABLE user_scenarios ADD COLUMN IF NOT EXISTS search_strategy JSONB",
+            "ALTER TABLE user_scenarios ADD COLUMN IF NOT EXISTS rerank_removed_count INTEGER DEFAULT 0",
+            "ALTER TABLE user_scenarios ADD COLUMN IF NOT EXISTS rerank_threshold FLOAT DEFAULT 0.45",
             # Clustering persisté en base (sinon perdu au redémarrage du serveur)
             "ALTER TABLE article_scenarios ADD COLUMN IF NOT EXISTS cluster_id INTEGER",
             "ALTER TABLE article_scenarios ADD COLUMN IF NOT EXISTS cluster_label TEXT",
@@ -6746,7 +6748,9 @@ def _get_user_scenario_or_404(scenario_id: str) -> dict[str, Any]:
     with engine.connect() as conn:
         row = conn.execute(text("""
             SELECT id, name, query, mode, filters, result_count, pinned, folder_id, created_at, updated_at,
-                   search_strategy
+                   search_strategy, populate_status, pipeline_status, pipeline_step,
+                   pipeline_progress, pipeline_started_at, article_count, is_system,
+                   rerank_removed_count, rerank_threshold
             FROM user_scenarios WHERE id = :id
         """), {"id": scenario_id}).mappings().first()
     if not row:
@@ -6806,6 +6810,8 @@ def _user_scenario_to_gesica_format(row: dict[str, Any]) -> dict[str, Any]:
         "pipeline_status": row.get("pipeline_status", "idle"),
         "pipeline_step": row.get("pipeline_step"),
         "pipeline_progress": row.get("pipeline_progress", 0),
+        "rerank_removed_count": row.get("rerank_removed_count", 0) or 0,
+        "rerank_threshold": row.get("rerank_threshold", 0.45) or 0.45,
     }
 
 
@@ -6834,7 +6840,11 @@ def list_user_scenarios() -> list[dict[str, Any]]:
                 us.id, us.name, us.query, us.mode, us.filters,
                 us.pinned, us.folder_id, us.created_at, us.updated_at,
                 us.populate_status, us.pipeline_status, us.pipeline_step, us.pipeline_progress,
-                COALESCE(us.result_count, 0) AS result_count
+                COALESCE(us.result_count, 0) AS result_count,
+                COALESCE(us.article_count, 0) AS article_count,
+                COALESCE(us.rerank_removed_count, 0) AS rerank_removed_count,
+                COALESCE(us.rerank_threshold, 0.45) AS rerank_threshold,
+                us.is_system
             FROM user_scenarios us
             ORDER BY us.pinned DESC, us.created_at DESC
         """)).mappings().all()
@@ -8011,7 +8021,7 @@ def _run_user_scenario_populate(
         except Exception as _e_noabs:
             logger.warning(f"Suppression articles sans abstract {scenario_id}: {_e_noabs}")
 
-        # ── Mettre à jour article_count ───────────────────────────────────────
+        # ── Mettre à jour article_count (avant rerank) ──────────────────────
         with engine.begin() as conn:
             conn.execute(text("""
                 UPDATE user_scenarios
@@ -8034,6 +8044,8 @@ def _run_user_scenario_populate(
                     _clean_thr = float(_sts)
         except Exception:
             pass
+        _n_removed = 0
+        _n_null_removed = 0
         try:
             _n_scored = _run_semantic_rerank_inline(scenario_id, query)
             with engine.begin() as _cconn:
@@ -8043,7 +8055,6 @@ def _run_user_scenario_populate(
                       AND similarity_score IS NOT NULL
                       AND similarity_score < :thr
                 """), {"sid": scenario_id, "thr": _clean_thr}).rowcount
-                _n_null_removed = 0
                 if _n_scored > 0:
                     _n_null_removed = _cconn.execute(text("""
                         DELETE FROM article_scenarios
@@ -8055,9 +8066,11 @@ def _run_user_scenario_populate(
                 with engine.begin() as _ac:
                     _ac.execute(text("""
                         UPDATE user_scenarios
-                        SET article_count = (SELECT COUNT(DISTINCT document_id) FROM article_scenarios WHERE scenario_id = :sid)
+                        SET article_count = (SELECT COUNT(DISTINCT document_id) FROM article_scenarios WHERE scenario_id = :sid),
+                            rerank_removed_count = :removed,
+                            rerank_threshold = :thr
                         WHERE id = :sid
-                    """), {"sid": scenario_id})
+                    """), {"sid": scenario_id, "removed": _n_removed + _n_null_removed, "thr": _clean_thr})
         except Exception as _e_rr:
             logger.warning(f"rerank post-populate {scenario_id}: {_e_rr}")
 
@@ -9097,6 +9110,13 @@ def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict
                 _final_count = _conn.execute(text("""
                     SELECT COUNT(DISTINCT document_id) FROM article_scenarios WHERE scenario_id = :sid
                 """), {"sid": scenario_id}).scalar() or 0
+                # Récupérer les infos de rerank pour le message final
+                _rerank_info = _conn.execute(text("""
+                    SELECT rerank_removed_count, rerank_threshold
+                    FROM user_scenarios WHERE id = :sid
+                """), {"sid": scenario_id}).mappings().first()
+                _removed = int(_rerank_info["rerank_removed_count"] or 0) if _rerank_info else 0
+                _thr = float(_rerank_info["rerank_threshold"] or 0.45) if _rerank_info else 0.45
                 _conn.execute(text("""
                     UPDATE user_scenarios
                     SET pipeline_status = 'done',
@@ -9106,8 +9126,9 @@ def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict
                         updated_at = NOW()
                     WHERE id = :sid
                 """), {"sid": scenario_id, "cnt": _final_count})
+            _rerank_note = f" ({_removed} filtrés par rerank sémantique, seuil {_thr})" if _removed > 0 else ""
             _user_scenario_pipeline_jobs[scenario_id]["message"] = (
-                f"Pipeline terminé : {_final_count} articles dans le corpus."
+                f"{_final_count} articles dans le corpus{_rerank_note}."
             )
         except Exception as _e:
             logger.warning(f"Pipeline final DB update failed: {_e}")

@@ -2835,7 +2835,19 @@ function ScenariosView({
                     <div className="flex-1 min-w-0 cursor-pointer" onClick={() => setDetailScenarioId(s.id)}>
                       <p className="text-sm text-white/80 truncate group-hover:text-white transition">{s.title}</p>
                       <p className="text-xs text-white/30 truncate">
-                        {s.articleCount > 0 ? `${s.articleCount} articles` : 'Aucun article'}
+                        {(() => {
+                          const us = s as any;
+                          if (s.articleCount > 0) {
+                            const removed = us.rerank_removed_count ?? 0;
+                            const thr = us.rerank_threshold ?? 0.45;
+                            const removedNote = removed > 0 ? ` (${removed} filtrés, seuil ${thr})` : '';
+                            return `${s.articleCount} articles${removedNote}`;
+                          }
+                          if (!isPipelineDone && !dbPipelineDone && !dbPopulateDone && us.resultCount > 0) {
+                            return `${us.resultCount} résultats · non indexé`;
+                          }
+                          return 'Aucun article indexé';
+                        })()}
                         {(isPipelineDone || dbPipelineDone) && s.articleCount > 0 && <span className="ml-1 text-forest-400">✓ Pipeline terminé</span>}
                         {!isPipelineDone && !dbPipelineDone && dbPopulateDone && s.articleCount > 0 && <span className="ml-1 text-gold-400">✓ Articles ingérés</span>}
                       </p>
@@ -2884,7 +2896,21 @@ function ScenariosView({
                   <div className="flex-1 min-w-0 cursor-pointer" onClick={() => setDetailScenarioId(s.id)}>
                     <p className="text-sm font-semibold text-white truncate group-hover:text-gold-300 transition">{s.title}</p>
                     <p className="text-xs text-white/40 truncate">
-                      {s.articleCount} articles · {new Date(s.created_at ?? '').toLocaleDateString("fr-CH")}
+                      {(() => {
+                        const us = s as any;
+                        const pipelineDone = us.pipeline_status === 'done' || pipelineStatuses[s.id]?.overall_status === 'done';
+                        const populateDone = us.populate_status === 'done';
+                        if (s.articleCount > 0) {
+                          const removed = us.rerank_removed_count ?? 0;
+                          const thr = us.rerank_threshold ?? 0.45;
+                          const removedNote = removed > 0 ? ` (${removed} filtrés, seuil ${thr})` : '';
+                          return `${s.articleCount} articles${removedNote}`;
+                        }
+                        if (!pipelineDone && !populateDone && us.resultCount > 0) {
+                          return `${us.resultCount} résultats · pipeline non lancé`;
+                        }
+                        return 'Aucun article indexé';
+                      })()} · {new Date(s.created_at ?? '').toLocaleDateString("fr-CH")}
                     </p>
                     {s.title !== s.query && <p className="text-xs text-white/25 truncate font-mono">{s.query}</p>}
                     {pipelineStatuses[s.id] && pipelineStatuses[s.id].overall_status !== 'done' && (
@@ -2939,7 +2965,14 @@ function ScenariosView({
                       </div>
                     )}
                     {pipelineStatuses[s.id]?.overall_status === 'done' && (
-                      <p className="text-xs text-forest-400 mt-0.5">✓ Pipeline terminé : {pipelineStatuses[s.id]?.message}</p>
+                      <p className="text-xs text-forest-400 mt-0.5">
+                        ✓ Pipeline terminé : {pipelineStatuses[s.id]?.message}
+                        {((s as any).rerank_removed_count ?? 0) > 0 && (
+                          <span className="text-white/30 ml-1">
+                            ({(s as any).rerank_removed_count} articles filtrés par rerank sémantique, seuil {(s as any).rerank_threshold ?? 0.45})
+                          </span>
+                        )}
+                      </p>
                     )}
                   </div>
                   <button
@@ -2990,7 +3023,21 @@ function ScenariosView({
                   <div className="flex-1 min-w-0 cursor-pointer" onClick={() => setDetailScenarioId(s.id)}>
                     <p className="text-sm text-white/80 truncate group-hover:text-white transition">{s.title}</p>
                     <p className="text-xs text-white/30 truncate">
-                      {s.articleCount} articles · {new Date(s.created_at ?? '').toLocaleDateString("fr-CH")}
+                      {(() => {
+                        const us = s as any;
+                        const pipelineDone = us.pipeline_status === 'done' || pipelineStatuses[s.id]?.overall_status === 'done';
+                        const populateDone = us.populate_status === 'done';
+                        if (s.articleCount > 0) {
+                          const removed = us.rerank_removed_count ?? 0;
+                          const thr = us.rerank_threshold ?? 0.45;
+                          const removedNote = removed > 0 ? ` (${removed} filtrés, seuil ${thr})` : '';
+                          return `${s.articleCount} articles${removedNote}`;
+                        }
+                        if (!pipelineDone && !populateDone && us.resultCount > 0) {
+                          return `${us.resultCount} résultats de recherche · non indexé`;
+                        }
+                        return 'Aucun article indexé';
+                      })()} · {new Date(s.created_at ?? '').toLocaleDateString("fr-CH")}
                     </p>
                     {pipelineStatuses[s.id] && pipelineStatuses[s.id].overall_status !== 'done' && (
                       <div className="mt-1 flex items-center gap-2">
@@ -3023,7 +3070,14 @@ function ScenariosView({
                       </div>
                     )}
                     {pipelineStatuses[s.id]?.overall_status === 'done' && (
-                      <p className="text-xs text-forest-400 mt-0.5">✓ Pipeline terminé</p>
+                      <p className="text-xs text-forest-400 mt-0.5">
+                        ✓ Pipeline terminé : {pipelineStatuses[s.id]?.message ?? `${s.articleCount} articles`}
+                        {((s as any).rerank_removed_count ?? 0) > 0 && (
+                          <span className="text-white/30 ml-1">
+                            ({(s as any).rerank_removed_count} filtrés, seuil {(s as any).rerank_threshold ?? 0.45})
+                          </span>
+                        )}
+                      </p>
                     )}
                   </div>
                   <button
@@ -3327,7 +3381,8 @@ export default function App() {
                     id: u.id, query: u.query, mode: u.mode as SearchMode,
                     projectContext: (u.filters?.projectContext ?? 'literev') as ProjectContext,
                     timestamp: u.created_at ? new Date(u.created_at).getTime() : Date.now(),
-                    resultCount: u.result_count ?? 0,
+                    // Afficher article_count (corpus réel) si disponible, sinon result_count (snapshot recherche)
+                    resultCount: u.articleCount > 0 ? u.articleCount : (u.resultCount ?? u.result_count ?? 0),
                     name: u.title !== u.query ? u.title : undefined,
                     pinned: u.pinned,
                   })));
@@ -3372,6 +3427,7 @@ export default function App() {
           mode: newScenario.mode as SearchMode,
           projectContext: (newScenario.filters?.projectContext ?? projectContext) as ProjectContext,
           timestamp: newScenario.created_at ? new Date(newScenario.created_at).getTime() : Date.now(),
+          // result_count = snapshot de la recherche (sera remplacé par article_count après pipeline)
           resultCount: newScenario.result_count ?? results.length,
           name,
           pinned: true,
