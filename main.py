@@ -1299,10 +1299,15 @@ def search(payload: SearchIn) -> dict[str, Any]:
             JOIN literature_document d ON d.id = c.document_id
             WHERE ({any_match_sql}) {where_sql}
         """)
-        count_params = {
-            **where_params,
-            **{f"term_{i}": f"%{t}%" for i, t in enumerate(query_terms)},
-        }
+        if payload.mode == "boolean":
+            # En mode booléen, les paramètres sont déjà dans `params` sous les clés bool_req_*/bool_opt_*/bool_excl_*
+            _bool_params = {k: v for k, v in params.items() if k.startswith(("bool_req_", "bool_opt_", "bool_excl_"))}
+            count_params = {**where_params, **_bool_params}
+        else:
+            count_params = {
+                **where_params,
+                **{f"term_{i}": f"%{t}%" for i, t in enumerate(query_terms)},
+            }
 
     # Répartition par source + comptage texte-intégral/résumé, calculés sur
     # EXACTEMENT le même ensemble pertinent que total_matching_docs (même seuil
@@ -1333,10 +1338,14 @@ def search(payload: SearchIn) -> dict[str, Any]:
             WHERE ({any_match_sql}) {where_sql}
             GROUP BY 1
         """)
-        breakdown_params = {
-            **where_params,
-            **{f"term_{i}": f"%{t}%" for i, t in enumerate(query_terms)},
-        }
+        if payload.mode == "boolean":
+            _bool_params = {k: v for k, v in params.items() if k.startswith(("bool_req_", "bool_opt_", "bool_excl_"))}
+            breakdown_params = {**where_params, **_bool_params}
+        else:
+            breakdown_params = {
+                **where_params,
+                **{f"term_{i}": f"%{t}%" for i, t in enumerate(query_terms)},
+            }
 
     with engine.connect() as conn:
         rows = conn.execute(sql, params).mappings().all()
