@@ -21,8 +21,12 @@ constraint) and no ANN index on `document_chunk.embedding` (323k×1536, 5 GB).
 | `_phase2_execute.py` | Phase 2 (destructive): backup → repoint links → delete dups → add `UNIQUE(doi)` | deleted 10,758 docs (cascade ~31.7k chunks); `uq_literature_document_doi` created; backups in `_dedup_bak_*` |
 
 ### Follow-ups owed
-- Ingest paths (`POST /documents`, bulk scripts) need `ON CONFLICT (doi) ... DO NOTHING`
-  / IntegrityError handling now that `UNIQUE(doi)` is enforced.
+- ✅ Ingest `ON CONFLICT (doi)` handling — done in PR #30 (`POST /documents` +
+  `_run_user_scenario_populate`). Bulk scripts still rely on their own error handling.
 - `UNIQUE(pmid)` not added — 21 residual PMID groups (differing/null DOI).
-- Drop `_dedup_bak_documents` / `_dedup_bak_chunks` / `_dedup_bak_links` once verified.
-- `VACUUM ANALYZE literature_document, document_chunk` to reclaim space + refresh stats.
+- ✅ Dropped `_dedup_bak_*` backup tables and ran `VACUUM (ANALYZE)` — `_vacuum_dropbak.py`
+  (2026-06-16). Phase 2 delete is now irreversible.
+
+| Script | Purpose | Result |
+|---|---|---|
+| `_vacuum_dropbak.py` | Drop Phase 2 backup tables + `VACUUM (ANALYZE)` the three tables | backups dropped; dead tuples reclaimed to reusable + planner stats refreshed |
