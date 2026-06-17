@@ -4086,34 +4086,30 @@ export function ScenarioDetailPage({ scenarioId, onBack }: ScenarioDetailPagePro
   const [error, setError] = useState<string | null>(null);
   const [activeSection, setActiveSection] = useState<SectionKey>("review");
 
-  // Scroll tout en haut à l'ouverture d'un scénario.
-  // Un simple scrollTo(0,0) ne suffit pas : l'inertie de défilement (momentum
-  // trackpad/molette) reportée depuis la liste ou la recherche continue d'émettre
-  // des évènements de scroll après la bascule de page et refait descendre la
-  // nouvelle page (parfois juste sous l'en-tête). On épingle donc le haut image
-  // par image jusqu'à ce que la position se *stabilise* à 0 (momentum épuisé),
-  // au lieu d'une durée fixe. La boucle s'arrête dès que le haut tient quelques
-  // frames (cas sans inertie → quasi instantané) ou après un plafond de sécurité.
-  // Dépendance `loading` : relance une fois le vrai contenu monté.
+  // Scroll tout en haut à l'ouverture d'un scénario, en garantissant le tout
+  // début (en-tête + logos). Un scrollTo(0,0) seul est repoussé par l'inertie
+  // (momentum) reportée depuis la liste/recherche. On va donc en haut PUIS on
+  // verrouille brièvement le défilement (overflow:hidden) : tant que la page ne
+  // peut pas défiler, l'inertie ne peut pas la faire redescendre. On relâche
+  // après 500 ms (inertie épuisée). Dépendance `loading` : on rejoue le verrou
+  // une fois le vrai contenu monté.
   useLayoutEffect(() => {
-    let raf = 0;
-    let stable = 0;
-    const startedAt = performance.now();
+    const root = document.documentElement;
+    const body = document.body;
+    const prevRoot = root.style.overflow;
+    const prevBody = body.style.overflow;
     window.scrollTo(0, 0);
-    const pinTop = () => {
-      const y = window.scrollY || document.documentElement.scrollTop || 0;
-      if (y === 0) {
-        stable += 1;
-      } else {
-        window.scrollTo(0, 0);
-        stable = 0;
-      }
-      if (stable < 4 && performance.now() - startedAt < 1000) {
-        raf = requestAnimationFrame(pinTop);
-      }
+    root.style.overflow = "hidden";
+    body.style.overflow = "hidden";
+    const release = () => {
+      root.style.overflow = prevRoot;
+      body.style.overflow = prevBody;
     };
-    raf = requestAnimationFrame(pinTop);
-    return () => cancelAnimationFrame(raf);
+    const timer = window.setTimeout(release, 500);
+    return () => {
+      window.clearTimeout(timer);
+      release();
+    };
   }, [scenarioId, loading]);
 
   useEffect(() => {
