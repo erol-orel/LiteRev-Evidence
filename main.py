@@ -2009,17 +2009,14 @@ def search_live(
     )
     new_count = sum(1 for r in all_results if not r["in_local_db"])
 
-    # Background ingest of new papers
+    # Background ingest of new papers — via le lanceur verrouillé pour ne jamais
+    # démarrer un populate concurrent (sinon les nettoyages post-ingestion se
+    # marchent dessus : compteurs corrompus, liens supprimés par l'autre job).
     ingesting_background = False
     if new_count > 0:
         try:
-            import threading as _thr
-            _thr.Thread(
-                target=_run_user_scenario_populate,
-                args=(scenario_id, query, {}, 200),
-                daemon=True,
-            ).start()
-            ingesting_background = True
+            status = _launch_populate_job(scenario_id, query, row.get("filters") or {}, 200)
+            ingesting_background = (status == "started")
         except Exception as _be:
             logger.warning(f"search_live background ingest error: {_be}")
 
@@ -2763,17 +2760,10 @@ def get_gesica_scenarios() -> list[dict[str, Any]]:
             for row in conn.execute(sql_screening).mappings().all()
         }
 
-        sql_kappa = text("""
-            SELECT scenario_id, kappa_score
-            FROM scenario_kappa_cache
-        """) if False else None
+        # Kappa par scénario : il n'existe pas de table `scenario_kappa_cache`
+        # (aucun écrivain). Le kappa live est servi par l'endpoint dédié
+        # /double-blind/kappa ; ici on ne fournit pas de valeur agrégée.
         kappa_scores: dict[str, Any] = {}
-        try:
-            if sql_kappa is None:
-                raise Exception("skip")
-            kappa_scores = {row["scenario_id"]: row["kappa_score"] for row in conn.execute(sql_kappa).mappings().all()}
-        except Exception:
-            pass
 
         result = []
         for meta in scenario_rows:
@@ -4178,13 +4168,22 @@ def get_scenario_model_status(scenario_id: str) -> dict[str, Any]:
                     break
             if singleton and hasattr(singleton, "predict_demo"):
                 model_result = singleton.predict_demo()
+            else:
+                model_error = f"Aucun singleton exécutable dans le module '{model_module}'."
         except Exception as e:
             model_error = str(e)
-    # Déterminer le statut coloré
-    status_color = "green"
-    status_label = thresholds.get("green", {}).get("label", "Normal")
-    if model_result:
-        # Logique de statut basée sur le résultat du modèle
+    else:
+        model_error = "Aucun modèle n'est câblé pour ce scénario."
+
+    # Déterminer le statut coloré. IMPORTANT : un modèle absent ou en échec NE
+    # DOIT PAS s'afficher en vert (« Normal ») — sinon un modèle cassé est
+    # indistinguable d'un modèle sain. On renvoie un statut « indisponible »
+    # explicite.
+    model_available = model_result is not None
+    if not model_available:
+        status_color = "unavailable"
+        status_label = "Modèle indisponible"
+    else:
         result_status = str(model_result.get("status", "")).upper()
         if "RED" in result_status or "ALERT" in result_status or "CRITIQUE" in result_status:
             status_color = "red"
@@ -4209,6 +4208,7 @@ def get_scenario_model_status(scenario_id: str) -> dict[str, Any]:
         "scenario_id": scenario_id,
         "status_color": status_color,
         "status_label": status_label,
+        "model_available": model_available,
         "model_info": model_info,
         "alert_thresholds": thresholds,
         "model_result": model_result,
@@ -7375,6 +7375,31 @@ _user_scenario_populate_jobs: dict[str, dict] = {}
 _user_scenario_pipeline_jobs: dict[str, dict] = {}
 
 
+def _launch_populate_job(scenario_id: str, query: str, filters: dict, max_results: int) -> str:
+    """
+    Démarre un job d'ingestion en arrière-plan pour un scénario, en garantissant
+    qu'un seul job tourne à la fois (verrou partagé). Renvoie l'état : "started"
+    ou "already_running". Utilisé par /populate ET /search/live afin qu'aucun des
+    deux ne lance un populate concurrent sur le même scénario.
+    """
+    import threading
+    with _populate_jobs_lock:
+        job = _user_scenario_populate_jobs.get(scenario_id)
+        if job and job.get("status") == "running":
+            return "already_running"
+        _user_scenario_populate_jobs[scenario_id] = {
+            "status": "running", "ingested": 0, "errors": 0, "total_found": 0,
+            "sources": {"db_cache": 0, "pubmed": 0, "openalex": 0, "crossref": 0,
+                        "europepmc": 0, "medrxiv": 0, "biorxiv": 0, "prospero": 0, "cochrane": 0},
+        }
+    threading.Thread(
+        target=_run_user_scenario_populate,
+        args=(scenario_id, query, filters or {}, max_results, None),
+        daemon=True,
+    ).start()
+    return "started"
+
+
 def _generate_search_strategy(query: str) -> dict:
     """
     Uses GPT-4.1-mini to generate a structured boolean search strategy from a natural language query.
@@ -7443,7 +7468,9 @@ def _ingest_doc_direct(
     if existing:
         return existing
 
-    # INSERT direct du document
+    # INSERT document + chunk dans UNE SEULE transaction : sinon un crash entre
+    # les deux laisse un document sans chunk (jamais indexable/cherchable) — c'est
+    # l'origine des documents orphelins observés en production.
     with engine.begin() as _c:
         doc_id = _c.execute(text("""
             INSERT INTO literature_document (
@@ -7467,16 +7494,19 @@ def _ingest_doc_direct(
                 "SELECT id FROM literature_document WHERE doi = :doi ORDER BY id LIMIT 1"
             ), {"doi": doi}).scalar()
 
-    # INSERT direct du chunk title_abstract
-    if len(content_text) >= 30:
-        with engine.begin() as _c:
+        # INSERT du chunk title_abstract, idempotent : ne crée PAS de second chunk
+        # si le document en a déjà un (cas d'un doc atteint via dédup DOI avec un
+        # external_id différent — l'origine des chunks dupliqués observés).
+        if doc_id is not None and len(content_text) >= 30:
             _c.execute(text("""
                 INSERT INTO document_chunk (
                     document_id, chunk_index, content, chunk_type,
                     token_count, chunk_weight, metadata_json
-                ) VALUES (
-                    :doc_id, 0, :content, 'title_abstract',
-                    :token_count, 1.0, '{}'
+                )
+                SELECT :doc_id, 0, :content, 'title_abstract', :token_count, 1.0, '{}'
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM document_chunk
+                    WHERE document_id = :doc_id AND chunk_type = 'title_abstract'
                 )
             """), {
                 "doc_id": doc_id,
@@ -7536,9 +7566,16 @@ def _run_user_scenario_populate(
             _ingested_total[0] += count
             _errors_total[0] += err
             if _pipeline_callback is None:
-                _user_scenario_populate_jobs[scenario_id]["ingested"] = _ingested_total[0]
-                _user_scenario_populate_jobs[scenario_id]["sources"][source_name] = \
-                    _user_scenario_populate_jobs[scenario_id]["sources"].get(source_name, 0) + count
+                job = _user_scenario_populate_jobs[scenario_id]
+                job["ingested"] = _ingested_total[0]
+                # Remonter les erreurs dans l'état du job : sans cela, errors=0
+                # masquait toute perte de données par source (échec silencieux).
+                job["errors"] = _errors_total[0]
+                job.setdefault("errors_by_source", {})
+                if err:
+                    job["errors_by_source"][source_name] = \
+                        job["errors_by_source"].get(source_name, 0) + err
+                job["sources"][source_name] = job["sources"].get(source_name, 0) + count
 
     # ── Étape 0 : Linking depuis la base locale (séquentiel, rapide) ─────────
     local_linked = 0
@@ -9218,30 +9255,17 @@ def populate_user_scenario(
     Déclenche l'ingéstion multi-sources en arrière-plan pour un scénario utilisateur.
     Sans limite fixe : max_results par défaut à 10000 (1000 par source).
     """
-    import threading
     row = _get_user_scenario_or_404(scenario_id)
     query = row["query"]
 
-    with _populate_jobs_lock:
-        job = _user_scenario_populate_jobs.get(scenario_id)
-        if job and job.get("status") == "running":
-            return {
-                "scenario_id": scenario_id,
-                "status": "already_running",
-                "message": "Une ingestion est déjà en cours pour ce scénario.",
-                "ingested": job.get("ingested", 0),
-            }
-
-        _user_scenario_populate_jobs[scenario_id] = {
-            "status": "running", "ingested": 0, "errors": 0, "total_found": 0,
-            "sources": {"db_cache": 0, "pubmed": 0, "openalex": 0, "crossref": 0, "europepmc": 0, "medrxiv": 0, "biorxiv": 0, "prospero": 0, "cochrane": 0}
+    if _launch_populate_job(scenario_id, query, row.get("filters") or {}, max_results) == "already_running":
+        job = _user_scenario_populate_jobs.get(scenario_id) or {}
+        return {
+            "scenario_id": scenario_id,
+            "status": "already_running",
+            "message": "Une ingestion est déjà en cours pour ce scénario.",
+            "ingested": job.get("ingested", 0),
         }
-    t = threading.Thread(
-        target=_run_user_scenario_populate,
-        args=(scenario_id, query, row.get("filters") or {}, max_results, None),
-        daemon=True,
-    )
-    t.start()
 
     return {
         "scenario_id": scenario_id,
