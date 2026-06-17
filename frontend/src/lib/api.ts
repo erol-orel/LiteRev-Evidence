@@ -1889,6 +1889,8 @@ export interface KGEdge {
 export interface KGCluster {
   id: number;
   size: number;
+  /** Étiquette thématique (mots-clés des titres). */
+  label?: string;
   years: number[];
   designs: string[];
   top_articles: string[];
@@ -1899,6 +1901,8 @@ export interface KnowledgeGraphData {
   n_nodes: number;
   n_edges: number;
   n_clusters: number;
+  /** Nombre total d'articles éligibles (n_nodes peut être un sous-ensemble). */
+  n_total?: number;
   min_similarity: number;
   nodes: KGNode[];
   edges: KGEdge[];
@@ -1907,7 +1911,7 @@ export interface KnowledgeGraphData {
 
 export async function fetchKnowledgeGraph(
   scenarioId: string,
-  maxNodes = 10000,
+  maxNodes = 400,
   minSimilarity = 0.35,
 ): Promise<KnowledgeGraphData> {
   const base = scenarioBase(scenarioId);
