@@ -4404,8 +4404,9 @@ def _run_clustering_background(scenario_id: str, force_refresh: bool = False) ->
                            LIMIT 1
                        ) AS embedding_str
                 FROM literature_document d
-                WHERE d.project_context = 'literev'
-                  AND d.scenario_type = :sid
+                JOIN article_scenarios asn ON asn.document_id = d.id
+                WHERE asn.scenario_id = :sid
+                  AND d.project_context = 'literev'
                   AND (d.is_duplicate IS NULL OR d.is_duplicate = FALSE)
                   AND d.abstract IS NOT NULL
                   AND LENGTH(d.abstract) > 50
