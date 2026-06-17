@@ -4779,6 +4779,7 @@ def scenario_rag_assistant(scenario_id: str, payload: AskIn) -> dict[str, Any]:
                 WHERE c.embedding IS NOT NULL
                   AND EXISTS (SELECT 1 FROM article_scenarios ars WHERE ars.document_id = d.id AND ars.scenario_id = :sid)
                   AND (d.is_duplicate IS NULL OR d.is_duplicate = FALSE)
+                  AND d.screening_status IS DISTINCT FROM 'excluded'  -- porte de screening (C1)
                 ORDER BY c.embedding <=> CAST(:emb AS vector)
                 LIMIT 8
             """), {"emb": str(query_embedding), "sid": scenario_id}).mappings().all()
@@ -4803,6 +4804,7 @@ def scenario_rag_assistant(scenario_id: str, payload: AskIn) -> dict[str, Any]:
                 JOIN literature_document d ON d.id = c.document_id
                 WHERE ({like_clauses})
                   AND EXISTS (SELECT 1 FROM article_scenarios ars WHERE ars.document_id = d.id AND ars.scenario_id = :sid)
+                  AND d.screening_status IS DISTINCT FROM 'excluded'  -- porte de screening (C1)
                 ORDER BY d.year DESC NULLS LAST
                 LIMIT 8
             """), params).mappings().all()
@@ -5231,6 +5233,7 @@ def extract_pico_batch(
                 JOIN article_scenarios asn ON asn.document_id = ld.id AND asn.scenario_id = :sid
                 WHERE ld.project_context = 'literev'
                   AND (ld.pico_json IS NULL OR (ld.pico_json->>'pico_confidence')::float < 0.5)
+                  AND ld.screening_status IS DISTINCT FROM 'excluded'  -- porte de screening (C1)
                 ORDER BY ld.id
                 LIMIT :lim
             """), {"sid": scenario_id, "lim": limit}).mappings().fetchall()
@@ -10164,6 +10167,7 @@ def user_scenario_rag_assistant(scenario_id: str, payload: AskIn) -> dict[str, A
                 WHERE c.embedding IS NOT NULL
                   AND EXISTS (SELECT 1 FROM article_scenarios ars WHERE ars.document_id = d.id AND ars.scenario_id = :sid)
                   AND (d.is_duplicate IS NULL OR d.is_duplicate = FALSE)
+                  AND d.screening_status IS DISTINCT FROM 'excluded'  -- porte de screening (C1)
                 ORDER BY c.embedding <=> CAST(:emb AS vector)
                 LIMIT 8
             """), {"emb": str(query_embedding), "sid": scenario_id}).mappings().all()
@@ -10186,6 +10190,7 @@ def user_scenario_rag_assistant(scenario_id: str, payload: AskIn) -> dict[str, A
                 JOIN literature_document d ON d.id = c.document_id
                 WHERE ({like_clauses})
                   AND EXISTS (SELECT 1 FROM article_scenarios ars WHERE ars.document_id = d.id AND ars.scenario_id = :sid)
+                  AND d.screening_status IS DISTINCT FROM 'excluded'  -- porte de screening (C1)
                 ORDER BY d.year DESC NULLS LAST
                 LIMIT 8
             """), params).mappings().all()
@@ -10597,6 +10602,9 @@ def _get_above_threshold_articles(scenario_id: str, threshold: float | None = No
             JOIN article_scenarios asn ON asn.document_id = ld.id AND asn.scenario_id = :sid
             WHERE ld.project_context = 'literev'
               AND ld.is_duplicate IS NOT TRUE
+              -- Porte de screening (C1) : ne jamais alimenter le modèle avec un
+              -- article explicitement exclu (les autres statuts restent admis).
+              AND ld.screening_status IS DISTINCT FROM 'excluded'
               AND (
                   ld.screening_status = 'included'
                   OR asn.similarity_score >= :threshold
