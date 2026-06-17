@@ -29,6 +29,7 @@ import {
   getVariablesGenerationStatus,
   validateScenarioVariables,
   getModelRun,
+  getModelDataset,
   trainModel,
   generateSyntheticData,
   getModelTrainStatus,
@@ -75,6 +76,7 @@ import {
   type KGNode,
   type KappaStats,
   type ModelRun,
+  type ModelDataset,
   type ModelMonitor,
   type SpecProposal,
   scenarioBase,
@@ -447,7 +449,32 @@ function QueriesSection({ detail, scenarioId }: { detail: ScenarioDetail; scenar
 
 // ─── Section: Variables & Databases (NOUVEAU) ──────────────────────────────────
 
-function VariablesSection({ detail, scenarioId }: { detail: ScenarioDetail; scenarioId: string }) {
+function VariablesSection({ detail, scenarioId, onGoToModel }: { detail: ScenarioDetail; scenarioId: string; onGoToModel?: () => void }) {
+  // État du modèle entraîné + des données branchées, pour relier ce panneau au
+  // "Modèle Prédictif" : on montre par variable si elle est branchée, et quel
+  // algorithme a réellement été entraîné.
+  const [modelRun, setModelRun] = useState<ModelRun | null>(null);
+  const [modelDataset, setModelDataset] = useState<ModelDataset | null>(null);
+  React.useEffect(() => {
+    getModelRun(scenarioId).then(setModelRun).catch(() => setModelRun(null));
+    getModelDataset(scenarioId).then(setModelDataset).catch(() => setModelDataset(null));
+  }, [scenarioId]);
+
+  const trained = modelRun?.status === "ready";
+  const trainedMetricValue = (() => {
+    if (!trained || !modelRun?.metrics || !modelRun.metric) return null;
+    const v = modelRun.metrics[modelRun.metric];
+    return typeof v === "number" ? v : null;
+  })();
+  const val = modelDataset?.validation;
+  const dataStatusFor = (machineName?: string): "plugged" | "missing_user" | "public" | "unknown" => {
+    if (!machineName || !val) return "unknown";
+    if ((val.matched_features ?? []).includes(machineName)) return "plugged";
+    if ((val.missing_public ?? []).includes(machineName)) return "public";
+    if ((val.missing_user ?? []).includes(machineName)) return "missing_user";
+    return "unknown";
+  };
+
   const [file, setFile] = useState<File | null>(null);
   const [uploading, setLoading] = useState(false);
   const [uploadResult, setUploadResult] = useState<any | null>(null);
@@ -652,6 +679,30 @@ function VariablesSection({ detail, scenarioId }: { detail: ScenarioDetail; scen
             </div>
           </div>
 
+          {/* Lien opérationnel avec le Modèle Prédictif */}
+          <div className="rounded-2xl border border-white/10 bg-white/2 px-4 py-2.5 flex flex-wrap items-center gap-x-4 gap-y-1.5 text-[11px]">
+            <span className="flex items-center gap-1.5 text-white/60">
+              <span className={`h-1.5 w-1.5 rounded-full ${llmVars._validated ? 'bg-brand-400' : 'bg-gold-400'}`} />
+              {llmVars._validated ? 'Spec validé' : 'Spec à valider'}
+            </span>
+            <span className="text-white/20">·</span>
+            <span className="flex items-center gap-1.5 text-white/60">
+              <Database size={11} />
+              {modelDataset?.status === 'ready' ? `${modelDataset.n_rows?.toLocaleString() ?? '?'} lignes branchées` : 'Aucune donnée branchée'}
+            </span>
+            <span className="text-white/20">·</span>
+            <span className="flex items-center gap-1.5 text-white/60">
+              <Brain size={11} />
+              {trained ? `Modèle : ${modelRun?.family}${trainedMetricValue != null ? ` · ${modelRun?.metric} ${trainedMetricValue.toFixed(3)}` : ''}` : 'Modèle non entraîné'}
+            </span>
+            {onGoToModel && (
+              <button onClick={onGoToModel}
+                className="ml-auto flex items-center gap-1 rounded-lg border border-brand-500/30 bg-brand-500/10 text-brand-300 px-2.5 py-1 font-semibold hover:bg-brand-500/20 transition">
+                Ouvrir le Modèle prédictif →
+              </button>
+            )}
+          </div>
+
           {/* Outcome principal LLM */}
           {llmVars.primary_outcome && (
             <div className="rounded-2xl border border-gold-500/10 bg-gold-500/5 p-4 space-y-1">
@@ -670,18 +721,31 @@ function VariablesSection({ detail, scenarioId }: { detail: ScenarioDetail; scen
                   <th className="py-2.5 px-3">Type</th>
                   <th className="py-2.5 px-3">Definition</th>
                   <th className="py-2.5 px-3">Source</th>
+                  <th className="py-2.5 px-3 text-center">Données</th>
                   <th className="py-2.5 px-3 text-center">Importance</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-white/5 text-xs">
                 {llmVars.predictor_variables?.map((v, i) => (
                   <tr key={i} className="hover:bg-white/1">
-                    <td className="py-3 px-3 font-mono text-brand-300 font-medium">{v.name}</td>
+                    <td className="py-3 px-3">
+                      <p className="font-mono text-brand-300 font-medium">{v.name}</p>
+                      {v.machine_name && <p className="text-[10px] text-white/35 font-mono mt-0.5">col : {v.machine_name}</p>}
+                    </td>
                     <td className="py-3 px-3">
                       <span className="rounded bg-white/5 border border-white/10 px-1.5 py-0.5 text-[10px] text-white/50">{v.type}</span>
                     </td>
                     <td className="py-3 px-3 text-white/70 leading-5 max-w-[200px]">{v.definition}</td>
                     <td className="py-3 px-3 text-white/50 font-mono text-[11px]">{v.data_source}</td>
+                    <td className="py-3 px-3 text-center">
+                      {(() => {
+                        const st = dataStatusFor(v.machine_name);
+                        if (st === 'plugged') return <span title={v.machine_name} className="rounded-full px-2 py-0.5 text-[10px] font-semibold bg-brand-500/15 text-brand-300">✓ branchée</span>;
+                        if (st === 'public') return <span title={`${v.machine_name} — récupérable automatiquement`} className="rounded-full px-2 py-0.5 text-[10px] font-semibold bg-white/8 text-white/55">☁ publique</span>;
+                        if (st === 'missing_user') return <span title={v.machine_name} className="rounded-full px-2 py-0.5 text-[10px] font-semibold bg-gold-500/15 text-gold-300">⚠ à fournir</span>;
+                        return <span className="text-white/25 text-[10px]">—</span>;
+                      })()}
+                    </td>
                     <td className="py-3 px-3 text-center">
                       <span className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${
                         v.importance === 'high' ? 'bg-brand-500/15 text-brand-300' :
@@ -698,7 +762,14 @@ function VariablesSection({ detail, scenarioId }: { detail: ScenarioDetail; scen
           {/* Algorithme recommande */}
           {llmVars.recommended_algorithm && (
             <div className="rounded-2xl border border-white/8 bg-white/3 p-4 space-y-2">
-              <p className="text-[10px] font-bold uppercase tracking-wider text-white/35">Algorithme recommande</p>
+              <div className="flex items-center justify-between flex-wrap gap-2">
+                <p className="text-[10px] font-bold uppercase tracking-wider text-white/35">Algorithme recommande</p>
+                {trained && (
+                  <span className="rounded-full bg-brand-500/15 text-brand-300 px-2 py-0.5 text-[10px] font-semibold">
+                    Entraîné : {modelRun?.family}{trainedMetricValue != null ? ` · ${modelRun?.metric} ${trainedMetricValue.toFixed(3)}` : ''}
+                  </span>
+                )}
+              </div>
               <p className="text-sm font-semibold text-white">{llmVars.recommended_algorithm.primary}</p>
               <p className="text-xs text-white/55">{llmVars.recommended_algorithm.rationale}</p>
               {llmVars.recommended_algorithm.alternatives?.length > 0 && (
@@ -3748,7 +3819,7 @@ function VariablesModelTab({ scenarioId, detail }: { scenarioId: string; detail:
           </button>
         ))}
       </div>
-      {sub === "variables" && <VariablesSection detail={detail} scenarioId={scenarioId} />}
+      {sub === "variables" && <VariablesSection detail={detail} scenarioId={scenarioId} onGoToModel={() => setSub("monitor")} />}
       {sub === "monitor" && <ModelMonitorSection scenarioId={scenarioId} />}
     </div>
   );
