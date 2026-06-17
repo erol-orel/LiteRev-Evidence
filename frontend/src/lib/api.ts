@@ -2579,6 +2579,7 @@ export interface ScenarioVariables {
     data_source: string;
     importance: 'high' | 'medium' | 'low';
     evidence_level: string;
+    machine_name?: string;
   }>;
   recommended_algorithm?: {
     primary: string;
@@ -2719,6 +2720,28 @@ export async function generateSyntheticData(
   nRows = 400,
 ): Promise<{ status: string; n_rows?: number; n_cols?: number }> {
   const r = await fetch(`${API_BASE_URL}/scenarios/${scenarioId}/model/data/synthetic?n_rows=${nRows}`, { method: 'POST', headers: authHeaders() });
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  return r.json();
+}
+
+export interface ModelDataset {
+  status: string; // ready | empty
+  dataset_id?: number;
+  n_rows?: number;
+  n_cols?: number;
+  validation?: {
+    matched_features?: string[];
+    missing_user?: string[];
+    missing_public?: string[];
+    target_present?: boolean;
+    readiness?: { can_train: boolean; reasons: string[]; auto_fetchable?: string[] };
+  };
+  created_at?: string;
+  message?: string;
+}
+
+export async function getModelDataset(scenarioId: string): Promise<ModelDataset> {
+  const r = await fetch(`${API_BASE_URL}/scenarios/${scenarioId}/model/data`);
   if (!r.ok) throw new Error(`HTTP ${r.status}`);
   return r.json();
 }
