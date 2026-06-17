@@ -11786,6 +11786,253 @@ def get_model_dataset(scenario_id: str) -> dict[str, Any]:
     }
 
 
+# ─── MODEL TRAINING (Phase 3) : sklearn + Optuna sur le dataset branché ───────
+# Entraîne un vrai modèle à partir du model_spec (Phase 1) et du dataset
+# uploadé (Phase 2) : préprocessing, HPO par validation croisée (Optuna),
+# holdout, importances. Le pipeline entraîné est sérialisé (joblib) et sert les
+# prédictions. Remplace les formules mock par un modèle réellement appris.
+
+_MODEL_TRAIN_JOBS: dict[str, dict] = {}
+
+
+def _ensure_model_run_table():
+    with engine.begin() as conn:
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS scenario_model_run (
+                id               BIGSERIAL PRIMARY KEY,
+                scenario_id      VARCHAR(80) NOT NULL,
+                dataset_id       BIGINT,
+                status           VARCHAR(20) DEFAULT 'running',
+                family           TEXT,
+                task_type        TEXT,
+                metric           TEXT,
+                metrics_json     JSONB,
+                best_params_json JSONB,
+                feature_importance_json JSONB,
+                summary_json     JSONB,
+                artifact_path    TEXT,
+                error            TEXT,
+                is_active        BOOLEAN DEFAULT FALSE,
+                created_at       TIMESTAMP DEFAULT NOW()
+            )
+        """))
+        conn.execute(text(
+            "CREATE INDEX IF NOT EXISTS ix_model_run_scenario_active "
+            "ON scenario_model_run (scenario_id, is_active)"
+        ))
+    logger.info("Table scenario_model_run vérifiée/créée.")
+
+
+try:
+    _ensure_model_run_table()
+except Exception as _e:
+    logger.warning(f"_ensure_model_run_table: {_e}")
+
+
+def _run_model_training(scenario_id: str, n_trials: int = 25) -> None:
+    """Job d'entraînement (thread) : charge le dataset actif, entraîne, persiste."""
+    import json as _json
+    import pandas as pd
+    from datetime import datetime, timezone
+    import model_trainer
+
+    try:
+        spec = _get_model_spec(scenario_id)
+        if not spec:
+            raise ValueError("Aucun model_spec (générez/validez les Variables & Modèle).")
+
+        with engine.connect() as conn:
+            ds = conn.execute(text("""
+                SELECT id, stored_path FROM scenario_model_dataset
+                WHERE scenario_id = :sid AND is_active = TRUE
+                ORDER BY created_at DESC LIMIT 1
+            """), {"sid": scenario_id}).mappings().first()
+        if not ds or not ds["stored_path"]:
+            raise ValueError("Aucun dataset branché. Uploadez d'abord un CSV/XLSX.")
+
+        df = pd.read_csv(ds["stored_path"])
+        result = model_trainer.train_model(df, spec, n_trials=n_trials)
+
+        # Sérialiser le pipeline entraîné.
+        pipeline = result.pop("pipeline")
+        artifact_path = None
+        try:
+            import joblib
+            adir = MODEL_DATA_DIR / scenario_id / "model"
+            adir.mkdir(parents=True, exist_ok=True)
+            artifact_path = str(adir / f"artifact_{int(datetime.now(timezone.utc).timestamp())}.joblib")
+            joblib.dump(pipeline, artifact_path)
+        except Exception as e:
+            logger.error(f"Sérialisation artefact {scenario_id}: {e}", exc_info=True)
+            artifact_path = None
+
+        with engine.begin() as conn:
+            conn.execute(text(
+                "UPDATE scenario_model_run SET is_active = FALSE WHERE scenario_id = :sid AND is_active = TRUE"
+            ), {"sid": scenario_id})
+            run_id = conn.execute(text("""
+                INSERT INTO scenario_model_run
+                    (scenario_id, dataset_id, status, family, task_type, metric,
+                     metrics_json, best_params_json, feature_importance_json, summary_json,
+                     artifact_path, is_active)
+                VALUES (:sid, :did, 'done', :fam, :tt, :met,
+                     CAST(:mj AS jsonb), CAST(:bp AS jsonb), CAST(:fi AS jsonb), CAST(:sj AS jsonb),
+                     :ap, TRUE)
+                RETURNING id
+            """), {
+                "sid": scenario_id, "did": ds["id"], "fam": result["family"],
+                "tt": result["task_type"], "met": result["metric"],
+                "mj": _json.dumps(result["metrics"]),
+                "bp": _json.dumps(result["best_params"]),
+                "fi": _json.dumps(result["feature_importances"]),
+                "sj": _json.dumps({k: v for k, v in result.items()
+                                   if k not in ("metrics", "best_params", "feature_importances")}),
+                "ap": artifact_path,
+            }).scalar()
+
+        _MODEL_TRAIN_JOBS[scenario_id] = {
+            "status": "done", "run_id": run_id, "metrics": result["metrics"],
+            "family": result["family"], "task_type": result["task_type"],
+        }
+        logger.info(f"Modèle entraîné {scenario_id}: run {run_id}, {result['metrics']}")
+    except Exception as e:
+        logger.error(f"Entraînement modèle {scenario_id}: {e}", exc_info=True)
+        _MODEL_TRAIN_JOBS[scenario_id] = {"status": "error", "error": str(e)}
+        try:
+            import json as _json2
+            with engine.begin() as conn:
+                conn.execute(text("""
+                    INSERT INTO scenario_model_run (scenario_id, status, error, is_active)
+                    VALUES (:sid, 'error', :err, FALSE)
+                """), {"sid": scenario_id, "err": str(e)[:2000]})
+        except Exception:
+            pass
+
+
+@app.post("/scenarios/{scenario_id}/model/train")
+def train_scenario_model(scenario_id: str, n_trials: int = 25,
+                         _: None = Depends(require_api_key)) -> dict[str, Any]:
+    """Lance l'entraînement réel (async) du modèle sur le dataset branché."""
+    import threading
+
+    if _MODEL_TRAIN_JOBS.get(scenario_id, {}).get("status") == "running":
+        return {"status": "already_running", "scenario_id": scenario_id}
+
+    if not _get_model_spec(scenario_id):
+        raise HTTPException(status_code=400, detail="Aucun model_spec. Générez puis validez les Variables & Modèle.")
+    with engine.connect() as conn:
+        ds = conn.execute(text(
+            "SELECT id FROM scenario_model_dataset WHERE scenario_id = :sid AND is_active = TRUE LIMIT 1"
+        ), {"sid": scenario_id}).first()
+    if not ds:
+        raise HTTPException(status_code=400, detail="Aucun dataset branché. Uploadez un CSV/XLSX d'abord.")
+
+    n_trials = max(5, min(int(n_trials or 25), 100))
+    _MODEL_TRAIN_JOBS[scenario_id] = {"status": "running"}
+    threading.Thread(target=_run_model_training, args=(scenario_id, n_trials), daemon=True).start()
+    return {"status": "started", "scenario_id": scenario_id, "n_trials": n_trials}
+
+
+@app.get("/scenarios/{scenario_id}/model/train/status")
+def get_model_train_status(scenario_id: str) -> dict[str, Any]:
+    """Statut du job d'entraînement."""
+    return _MODEL_TRAIN_JOBS.get(scenario_id, {"status": "idle"})
+
+
+@app.get("/scenarios/{scenario_id}/model/run")
+def get_model_run(scenario_id: str) -> dict[str, Any]:
+    """Dernier modèle entraîné actif : métriques, hyperparamètres, importances."""
+    with engine.connect() as conn:
+        row = conn.execute(text("""
+            SELECT id, dataset_id, status, family, task_type, metric, metrics_json,
+                   best_params_json, feature_importance_json, summary_json, error,
+                   (artifact_path IS NOT NULL) AS has_artifact, created_at
+            FROM scenario_model_run
+            WHERE scenario_id = :sid AND is_active = TRUE
+            ORDER BY created_at DESC LIMIT 1
+        """), {"sid": scenario_id}).mappings().first()
+
+    if not row:
+        return {"status": "empty", "message": "Aucun modèle entraîné. Lancez l'entraînement après avoir branché des données."}
+
+    return {
+        "status": "ready",
+        "run_id": row["id"],
+        "dataset_id": row["dataset_id"],
+        "family": row["family"],
+        "task_type": row["task_type"],
+        "metric": row["metric"],
+        "metrics": row["metrics_json"],
+        "best_params": row["best_params_json"],
+        "feature_importances": row["feature_importance_json"],
+        "summary": row["summary_json"],
+        "has_artifact": row["has_artifact"],
+        "created_at": row["created_at"].isoformat() if row["created_at"] else None,
+    }
+
+
+@app.post("/scenarios/{scenario_id}/model/predict")
+def predict_scenario_model(scenario_id: str, payload: dict[str, Any],
+                           _: None = Depends(require_api_key)) -> dict[str, Any]:
+    """
+    Prédit avec le modèle entraîné actif. Body: {"rows": [{feature: value, ...}, ...]}.
+    Renvoie les prédictions (et probabilités si classification).
+    """
+    import pandas as pd
+
+    rows = payload.get("rows")
+    if not isinstance(rows, list) or not rows:
+        raise HTTPException(status_code=400, detail="Body attendu: {\"rows\": [ {feature: value, ...} ]}")
+
+    with engine.connect() as conn:
+        run = conn.execute(text("""
+            SELECT artifact_path, task_type, summary_json FROM scenario_model_run
+            WHERE scenario_id = :sid AND is_active = TRUE AND artifact_path IS NOT NULL
+            ORDER BY created_at DESC LIMIT 1
+        """), {"sid": scenario_id}).mappings().first()
+    if not run:
+        raise HTTPException(status_code=400, detail="Aucun modèle entraîné disponible. Entraînez d'abord le modèle.")
+
+    try:
+        import joblib
+        pipeline = joblib.load(run["artifact_path"])
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Chargement du modèle impossible : {e}")
+
+    df = pd.DataFrame(rows)
+    classes = (run["summary_json"] or {}).get("classes")
+    try:
+        preds = pipeline.predict(df)
+        # Classification : reconvertir les entiers encodés vers les labels d'origine.
+        if run["task_type"] == "classification" and classes:
+            predictions = [classes[int(p)] if 0 <= int(p) < len(classes) else _jsonable(p) for p in preds]
+        else:
+            predictions = [_jsonable(p) for p in preds]
+        out: dict[str, Any] = {"status": "ok", "predictions": predictions}
+        if run["task_type"] == "classification" and hasattr(pipeline, "predict_proba"):
+            proba = pipeline.predict_proba(df)
+            out["classes"] = classes
+            out["probabilities"] = [[float(x) for x in r] for r in proba]
+        return out
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Prédiction impossible (colonnes manquantes ?) : {e}")
+
+
+def _jsonable(v):
+    """Convertit les scalaires numpy en types Python natifs."""
+    try:
+        import numpy as np
+        if isinstance(v, (np.integer,)):
+            return int(v)
+        if isinstance(v, (np.floating,)):
+            return float(v)
+        if isinstance(v, (np.bool_,)):
+            return bool(v)
+    except Exception:
+        pass
+    return v
+
+
 # ─── HEATMAP AVEC VRAIS NOMS ─────────────────────────────────────────────────
 
 @app.get("/corpus/stats/by-year/named")
