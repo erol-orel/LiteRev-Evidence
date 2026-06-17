@@ -4240,6 +4240,121 @@ class _NumpyEncoder(json.JSONEncoder):
 _clustering_jobs: dict[str, dict] = {}  # scenario_id -> {"status": "running"|"done"|"error", "result": ...}
 
 
+def _cluster_core(
+    docs: list,
+    texts: list[str],
+    *,
+    openai_key: str | None = None,
+    allow_openai_embeddings: bool = False,
+    tfidf_min_df: int = 2,
+) -> dict:
+    """Cœur partagé du clustering (utilisé par l'endpoint à la demande ET le pipeline).
+
+    Chaîne : embeddings (pgvector DB → OpenAI optionnel → repli TF-IDF) → UMAP 2D
+    (thread, timeout 60 s) → HDBSCAN, avec repli K-Means+SVD si UMAP/HDBSCAN échoue.
+    Retourne labels, projection 2D, méthode, et les artefacts TF-IDF nécessaires à la
+    construction des clusters (feature_names, matrice dense).
+    """
+    import numpy as np
+    import threading
+    from sklearn.feature_extraction.text import TfidfVectorizer
+    from sklearn.cluster import KMeans
+    from sklearn.decomposition import TruncatedSVD, PCA
+
+    vectorizer = TfidfVectorizer(max_features=800, stop_words="english",
+                                 min_df=tfidf_min_df, max_df=0.9, ngram_range=(1, 2))
+    X_tfidf = vectorizer.fit_transform(texts)
+    feature_names = vectorizer.get_feature_names_out()
+
+    # 1) Embeddings pgvector stockés en DB (privilégiés)
+    embeddings_matrix = None
+    embedding_source = "tfidf"
+    if any(d.get("embedding_str") for d in docs):
+        try:
+            vecs = []
+            for d in docs:
+                es = d.get("embedding_str")
+                vecs.append([float(x) for x in es.strip("[]").split(",")] if es else None)
+            valid = [v for v in vecs if v is not None]
+            if valid:
+                mean_vec = np.mean(valid, axis=0).tolist()
+                vecs = [v if v is not None else mean_vec for v in vecs]
+                embeddings_matrix = np.array(vecs, dtype=np.float32)
+                embedding_source = "db_pgvector"
+        except Exception as e:
+            logger.warning(f"_cluster_core: embeddings DB inutilisables: {e}")
+
+    # 2) Sinon, génération OpenAI (optionnelle)
+    if embeddings_matrix is None and allow_openai_embeddings and openai_key:
+        try:
+            from openai import OpenAI as _OAI
+            _oai = _OAI(api_key=openai_key)
+            all_vecs: list = []
+            batch_texts = [t[:2000] for t in texts]
+            for i in range(0, len(batch_texts), 100):
+                resp = _oai.embeddings.create(model="text-embedding-3-small",
+                                              input=batch_texts[i:i + 100])
+                all_vecs.extend([e.embedding for e in resp.data])
+            embeddings_matrix = np.array(all_vecs, dtype=np.float32)
+            embedding_source = "openai_api"
+        except Exception as e:
+            logger.warning(f"_cluster_core: embeddings OpenAI échoués: {e}")
+
+    umap_input = embeddings_matrix if embeddings_matrix is not None else X_tfidf.toarray()
+
+    # 3) UMAP 2D dans un thread avec timeout 60 s
+    umap_result: dict = {"embedding": None}
+    def _run_umap():
+        try:
+            import umap as umap_lib
+            reducer = umap_lib.UMAP(
+                n_neighbors=min(10, len(docs) - 1), n_components=2,
+                metric="cosine", random_state=42, low_memory=True, n_epochs=200,
+            )
+            umap_result["embedding"] = reducer.fit_transform(umap_input)
+        except Exception as e:
+            logger.warning(f"_cluster_core UMAP: {e}")
+    _t = threading.Thread(target=_run_umap, daemon=True)
+    _t.start()
+    _t.join(timeout=60)
+
+    embedding_2d = umap_result["embedding"]
+    labels = None
+    method_used = "kmeans_fallback"
+
+    # 4) HDBSCAN sur la projection 2D
+    if embedding_2d is not None:
+        try:
+            import hdbscan as hdbscan_lib
+            clusterer = hdbscan_lib.HDBSCAN(
+                min_cluster_size=max(3, len(docs) // 15), min_samples=2,
+                metric="euclidean", cluster_selection_method="eom",
+            )
+            labels = clusterer.fit_predict(embedding_2d)
+            method_used = "embeddings_umap_hdbscan" if embeddings_matrix is not None else "tfidf_umap_hdbscan"
+        except Exception as e:
+            logger.warning(f"_cluster_core HDBSCAN: {e}")
+
+    # 5) Repli K-Means + SVD (si UMAP a expiré ou HDBSCAN a échoué)
+    if labels is None:
+        n_clusters = max(3, min(8, len(docs) // 15))
+        svd = TruncatedSVD(n_components=min(50, X_tfidf.shape[1] - 1, len(docs) - 1), random_state=42)
+        X_reduced = svd.fit_transform(X_tfidf)
+        labels = KMeans(n_clusters=n_clusters, random_state=42, n_init=5, max_iter=100).fit_predict(X_reduced)
+        if embedding_2d is None:
+            embedding_2d = PCA(n_components=2, random_state=42).fit_transform(X_reduced)
+        method_used = "kmeans_fallback"
+
+    return {
+        "labels": labels,
+        "embedding_2d": embedding_2d,
+        "method": method_used,
+        "feature_names": feature_names,
+        "X_dense": X_tfidf.toarray(),
+        "embedding_source": embedding_source,
+    }
+
+
 def _run_clustering_background(scenario_id: str, force_refresh: bool = False) -> None:
     """Calcule le clustering dans un thread séparé et stocke le résultat en cache."""
     import time as _time
@@ -4309,106 +4424,19 @@ def _run_clustering_background(scenario_id: str, force_refresh: bool = False) ->
 
         texts = [f"{d['title']} {d['abstract'] or ''}" for d in docs]
 
-        # ── Tentative embeddings OpenAI → UMAP → HDBSCAN ────────────────────
-        embedding_2d = None
-        labels = None
-        method_used = "kmeans_fallback"
+        # ── Embeddings → UMAP → HDBSCAN (cœur partagé _cluster_core) ────────
         openai_key = os.getenv("OPENAI_API_KEY")
-
-        # Essayer d'utiliser les embeddings stockés en DB (pgvector)
-        embeddings_matrix = None
-        if any(d.get("embedding_str") for d in docs):
-            try:
-                import ast
-                vecs = []
-                for d in docs:
-                    es = d.get("embedding_str")
-                    if es:
-                        # Format pgvector: [0.1,0.2,...]
-                        vec = [float(x) for x in es.strip("[]").split(",")]
-                        vecs.append(vec)
-                    else:
-                        vecs.append(None)
-                # Remplacer les None par la moyenne
-                valid = [v for v in vecs if v is not None]
-                if valid:
-                    mean_vec = np.mean(valid, axis=0).tolist()
-                    vecs = [v if v is not None else mean_vec for v in vecs]
-                    embeddings_matrix = np.array(vecs, dtype=np.float32)
-                    logger.info(f"Clustering {scenario_id}: {len(docs)} embeddings DB chargés")
-            except Exception as e:
-                logger.warning(f"Clustering {scenario_id}: embeddings DB non utilisables: {e}")
-
-        # Si pas d'embeddings en DB, générer via OpenAI API (batch)
-        if embeddings_matrix is None and openai_key:
-            try:
-                from openai import OpenAI as _OAI
-                _oai = _OAI(api_key=openai_key)
-                batch_texts = [t[:2000] for t in texts]  # tronquer
-                # Batch de 100 max
-                all_vecs = []
-                for i in range(0, len(batch_texts), 100):
-                    resp = _oai.embeddings.create(
-                        model="text-embedding-3-small",
-                        input=batch_texts[i:i+100]
-                    )
-                    all_vecs.extend([e.embedding for e in resp.data])
-                embeddings_matrix = np.array(all_vecs, dtype=np.float32)
-                logger.info(f"Clustering {scenario_id}: {len(docs)} embeddings OpenAI générés")
-            except Exception as e:
-                logger.warning(f"Clustering {scenario_id}: embeddings OpenAI échoués: {e}")
-
-        # ── UMAP sur les embeddings (ou TF-IDF si pas d'embeddings) ─────────
-        vectorizer = TfidfVectorizer(max_features=800, stop_words='english', min_df=2, max_df=0.9, ngram_range=(1, 2))
-        X_tfidf = vectorizer.fit_transform(texts)
-        feature_names = vectorizer.get_feature_names_out()
-
-        umap_input = embeddings_matrix if embeddings_matrix is not None else X_tfidf.toarray()
-        umap_metric = 'cosine'
-
-        umap_result = {"embedding": None, "error": None}
-        def run_umap():
-            try:
-                import umap as umap_lib
-                reducer = umap_lib.UMAP(
-                    n_neighbors=min(10, len(docs) - 1), n_components=2,
-                    metric=umap_metric, random_state=42, low_memory=True, n_epochs=200,
-                )
-                umap_result["embedding"] = reducer.fit_transform(umap_input)
-            except Exception as e:
-                umap_result["error"] = str(e)
-
-        umap_thread = threading.Thread(target=run_umap, daemon=True)
-        umap_thread.start()
-        umap_thread.join(timeout=60)
-
-        if umap_result["embedding"] is not None:
-            embedding_2d = umap_result["embedding"]
-            try:
-                import hdbscan as hdbscan_lib
-                min_cluster_size = max(3, len(docs) // 15)
-                clusterer = hdbscan_lib.HDBSCAN(
-                    min_cluster_size=min_cluster_size, min_samples=2,
-                    metric='euclidean', cluster_selection_method='eom'
-                )
-                labels = clusterer.fit_predict(embedding_2d)
-                method_used = "embeddings_umap_hdbscan" if embeddings_matrix is not None else "tfidf_umap_hdbscan"
-            except Exception as e:
-                logger.warning(f"HDBSCAN failed: {e}")
-
-        # ── Fallback K-Means + SVD ───────────────────────────────────────────
-        if labels is None:
-            n_clusters = max(3, min(8, len(docs) // 15))
-            svd = TruncatedSVD(n_components=min(50, len(docs) - 1), random_state=42)
-            X_reduced = svd.fit_transform(X_tfidf)
-            km = KMeans(n_clusters=n_clusters, random_state=42, n_init=5, max_iter=100)
-            labels = km.fit_predict(X_reduced)
-            pca = PCA(n_components=2, random_state=42)
-            embedding_2d = pca.fit_transform(X_reduced)
-            method_used = "kmeans_fallback"
+        _cc = _cluster_core(docs, texts, openai_key=openai_key,
+                            allow_openai_embeddings=True, tfidf_min_df=2)
+        labels = _cc["labels"]
+        embedding_2d = _cc["embedding_2d"]
+        method_used = _cc["method"]
+        feature_names = _cc["feature_names"]
+        X_dense = _cc["X_dense"]
+        embedding_source = _cc["embedding_source"]
+        logger.info(f"Clustering {scenario_id}: {len(docs)} docs, source={embedding_source}, method={method_used}")
 
         # ── Construction des clusters ────────────────────────────────────────
-        X_dense = X_tfidf.toarray()
         clusters = []
 
         for label in sorted(set(labels)):
@@ -4481,7 +4509,7 @@ def _run_clustering_background(scenario_id: str, force_refresh: bool = False) ->
             "n_docs": len(docs),
             "n_clusters": len([c for c in clusters if not c["is_noise"]]),
             "method": method_used,
-            "embedding_source": "db_pgvector" if embeddings_matrix is not None and any(d.get("embedding_str") for d in docs) else ("openai_api" if embeddings_matrix is not None else "tfidf"),
+            "embedding_source": embedding_source,
             "clusters": sorted(clusters, key=lambda x: (x["is_noise"], -x["n_docs"])),
             "from_cache": False,
         }
@@ -9007,80 +9035,16 @@ def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict
             if len(cl_docs) >= 5:
                 texts = [f"{d['title']} {d['abstract'] or ''}" for d in cl_docs]
 
-                # ── TF-IDF (toujours calculé pour les top_words) ─────────────
-                vectorizer = TfidfVectorizer(max_features=800, stop_words="english", min_df=1, max_df=0.9, ngram_range=(1, 2))
-                X_tfidf = vectorizer.fit_transform(texts)
-                feature_names = vectorizer.get_feature_names_out()
-
-                # ── Charger les embeddings depuis DB ─────────────────────────
-                embeddings_matrix = None
-                if any(d.get("embedding_str") for d in cl_docs):
-                    try:
-                        vecs = []
-                        for d in cl_docs:
-                            es = d.get("embedding_str")
-                            if es:
-                                vec = [float(x) for x in es.strip("[]").split(",")]
-                                vecs.append(vec)
-                            else:
-                                vecs.append(None)
-                        valid = [v for v in vecs if v is not None]
-                        if valid:
-                            mean_vec = np.mean(valid, axis=0).tolist()
-                            vecs = [v if v is not None else mean_vec for v in vecs]
-                            embeddings_matrix = np.array(vecs, dtype=np.float32)
-                            logger.info(f"Pipeline clustering {scenario_id}: {len(cl_docs)} embeddings DB chargés")
-                    except Exception as _emb_err:
-                        logger.warning(f"Pipeline clustering {scenario_id}: embeddings DB inutilisables: {_emb_err}")
-
-                umap_input = embeddings_matrix if embeddings_matrix is not None else X_tfidf.toarray()
-
-                # ── UMAP (60s timeout) ────────────────────────────────────────
-                umap_result: dict = {"embedding": None}
-                def _run_umap_cl():
-                    try:
-                        import umap as umap_lib
-                        reducer = umap_lib.UMAP(
-                            n_neighbors=min(10, len(cl_docs) - 1), n_components=2,
-                            metric="cosine", random_state=42, low_memory=True, n_epochs=200,
-                        )
-                        umap_result["embedding"] = reducer.fit_transform(umap_input)
-                    except Exception as _ue:
-                        logger.warning(f"Pipeline UMAP {scenario_id}: {_ue}")
-
-                _umap_thread = threading.Thread(target=_run_umap_cl, daemon=True)
-                _umap_thread.start()
-                _umap_thread.join(timeout=60)
-
-                embedding_2d = umap_result["embedding"]
-                labels = None
-                method_used = "kmeans_fallback"
-
-                if embedding_2d is not None:
-                    try:
-                        import hdbscan as hdbscan_lib
-                        _min_cs = max(3, len(cl_docs) // 15)
-                        _clusterer = hdbscan_lib.HDBSCAN(
-                            min_cluster_size=_min_cs, min_samples=2,
-                            metric="euclidean", cluster_selection_method="eom"
-                        )
-                        labels = _clusterer.fit_predict(embedding_2d)
-                        method_used = "embeddings_umap_hdbscan" if embeddings_matrix is not None else "tfidf_umap_hdbscan"
-                        logger.info(f"Pipeline clustering {scenario_id}: UMAP+HDBSCAN OK ({len(set(labels))} clusters)")
-                    except Exception as _he:
-                        logger.warning(f"Pipeline HDBSCAN {scenario_id}: {_he}")
-
-                # ── Fallback KMeans ───────────────────────────────────────────
-                if labels is None:
-                    n_clusters_km = max(3, min(8, len(cl_docs) // 15))
-                    _svd = TruncatedSVD(n_components=min(50, X_tfidf.shape[1] - 1), random_state=42)
-                    X_red = _svd.fit_transform(X_tfidf)
-                    _km = KMeans(n_clusters=n_clusters_km, random_state=42, n_init=5, max_iter=100)
-                    labels = _km.fit_predict(X_red)
-                    if embedding_2d is None:
-                        _pca = PCA(n_components=2, random_state=42)
-                        embedding_2d = _pca.fit_transform(X_red)
-                    method_used = "kmeans_fallback"
+                # ── Embeddings → UMAP → HDBSCAN (cœur partagé _cluster_core) ──
+                _cc = _cluster_core(cl_docs, texts, openai_key=None,
+                                    allow_openai_embeddings=False, tfidf_min_df=1)
+                labels = _cc["labels"]
+                embedding_2d = _cc["embedding_2d"]
+                method_used = _cc["method"]
+                feature_names = _cc["feature_names"]
+                X_dense = _cc["X_dense"]
+                logger.info(f"Pipeline clustering {scenario_id}: {len(cl_docs)} docs, "
+                            f"source={_cc['embedding_source']}, method={method_used}")
 
                 n_clusters = len(set(int(l) for l in labels if int(l) != -1))
 
@@ -9103,7 +9067,6 @@ def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict
                 import os as _os
                 cache_dir = "/tmp/literev_clustering_cache"
                 _os.makedirs(cache_dir, exist_ok=True)
-                X_dense = X_tfidf.toarray()
                 clusters_data = []
                 for _cl_label in sorted(set(int(l) for l in labels)):
                     _idxs = [i for i, l in enumerate(labels) if int(l) == _cl_label]
