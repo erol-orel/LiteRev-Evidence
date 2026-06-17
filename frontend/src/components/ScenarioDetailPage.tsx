@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useRef, useMemo } from "react";
+import React, { useState, useEffect, useLayoutEffect, useCallback, useRef, useMemo } from "react";
 import {
   ArrowLeft, Brain,
   ChevronDown, ChevronUp, Database, ExternalLink, FileText,
@@ -4075,10 +4075,13 @@ export function ScenarioDetailPage({ scenarioId, onBack }: ScenarioDetailPagePro
   const [error, setError] = useState<string | null>(null);
   const [activeSection, setActiveSection] = useState<SectionKey>("review");
 
-  // Scroll en haut de page à chaque ouverture d'un scénario
-  useEffect(() => {
-    window.scrollTo({ top: 0, behavior: "instant" });
-  }, [scenarioId]);
+  // Scroll en haut de page à chaque ouverture d'un scénario.
+  // useLayoutEffect + dépendance `loading` : on remet aussi à 0 une fois le
+  // contenu réel monté (le simple reset au montage se fait pendant le spinner,
+  // donc la page longue qui s'affiche ensuite gardait la position de défilement).
+  useLayoutEffect(() => {
+    window.scrollTo(0, 0);
+  }, [scenarioId, loading]);
 
   useEffect(() => {
     setLoading(true);
