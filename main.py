@@ -174,6 +174,26 @@ def require_api_key(x_api_key: str | None = Header(default=None)) -> None:
     if not x_api_key or not _secrets.compare_digest(x_api_key, WRITE_API_KEY):
         raise HTTPException(status_code=401, detail="Invalid API key")
 
+
+# Normalisation des types d'étude : le PICO LLM produit du texte libre (des
+# centaines de variantes uniques). On regroupe en un jeu canonique fixe au moment
+# de l'affichage (les valeurs brutes study_design / pico_json restent intactes).
+# `d` = libellé brut en minuscules (cf. _study_design_distinct_cte). 1er match gagne.
+_STUDY_DESIGN_CASE = """CASE
+        WHEN d = '' THEN 'Non spécifié'
+        WHEN d LIKE '%systematic review%' OR d LIKE '%meta-analysis%' OR d LIKE '%meta analysis%' OR d LIKE '%scoping review%' OR d LIKE '%umbrella review%' THEN 'Revue systématique / Méta-analyse'
+        WHEN d LIKE '%randomi%' OR d LIKE 'rct%' OR d LIKE '%controlled trial%' THEN 'Essai contrôlé randomisé (RCT)'
+        WHEN d LIKE '%case-control%' OR d LIKE '%case control%' THEN 'Cas-témoins'
+        WHEN d LIKE '%cross-sectional%' OR d LIKE '%cross sectional%' THEN 'Transversale'
+        WHEN d LIKE '%case report%' OR d LIKE '%case series%' THEN 'Cas clinique / Série de cas'
+        WHEN d LIKE '%cohort%' OR d LIKE '%longitudinal%' OR d LIKE '%observational%' OR d LIKE '%retrospective%' OR d LIKE '%prospective%' OR d LIKE '%registry%' OR d LIKE '%surveillance%' THEN 'Cohorte / Observationnelle'
+        WHEN d LIKE '%model%' OR d LIKE '%simulation%' OR d LIKE '%forecast%' OR d LIKE '%machine learning%' OR d LIKE '%in silico%' OR d LIKE '%predictive%' THEN 'Modélisation / Simulation'
+        WHEN d LIKE '%qualitative%' OR d LIKE '%interview%' OR d LIKE '%focus group%' THEN 'Qualitative'
+        WHEN d LIKE '%narrative review%' OR d LIKE '%literature review%' OR d LIKE '%guideline%' OR d LIKE '%review%' THEN 'Revue narrative / Recommandation'
+        WHEN d LIKE '%in vitro%' OR d LIKE '%in vivo%' OR d LIKE '%animal%' OR d LIKE '%experimental%' OR d LIKE '%laboratory%' OR d LIKE '%murine%' OR d LIKE '% mice%' THEN 'Expérimentale / Préclinique'
+        ELSE 'Autre'
+      END"""
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Pydantic models
 # ─────────────────────────────────────────────────────────────────────────────
@@ -5542,15 +5562,18 @@ def get_evidence_brief(scenario_id: str) -> dict[str, Any]:
         """), {"sid": scenario_id}).mappings().fetchall()
 
         # Distribution par type d'étude
-        study_designs = conn.execute(text("""
-            SELECT
-                COALESCE(ld.study_design, ld.pico_json->>'study_design', 'Non classifié') AS design,
-                COUNT(*) AS n
-            FROM literature_document ld
-            JOIN article_scenarios asn ON asn.document_id = ld.id AND asn.scenario_id = :sid
-            WHERE ld.project_context = 'literev'
-              AND ld.is_duplicate IS NOT TRUE
-            GROUP BY 1 ORDER BY 2 DESC LIMIT 30
+        study_designs = conn.execute(text(f"""
+            WITH b AS (
+                SELECT lower(coalesce(
+                    nullif(trim(ld.study_design), ''),
+                    nullif(trim(ld.pico_json->>'study_design'), ''), '')) AS d
+                FROM literature_document ld
+                JOIN article_scenarios asn ON asn.document_id = ld.id AND asn.scenario_id = :sid
+                WHERE ld.project_context = 'literev'
+                  AND ld.is_duplicate IS NOT TRUE
+            )
+            SELECT {_STUDY_DESIGN_CASE} AS design, COUNT(*) AS n
+            FROM b GROUP BY 1 ORDER BY 2 DESC
         """), {"sid": scenario_id}).mappings().fetchall()
 
         # Distribution par année (20 dernières années)
@@ -9680,13 +9703,17 @@ def get_user_scenario_evidence_brief(scenario_id: str) -> dict[str, Any]:
             LIMIT 15
         """), {"sid": scenario_id}).mappings().fetchall()
 
-        study_designs = conn.execute(text("""
-            SELECT COALESCE(d.study_design, d.pico_json->>'study_design', 'Non classifié') AS design,
-                   COUNT(*) AS n
-            FROM article_scenarios ars
-            JOIN literature_document d ON d.id = ars.document_id
-            WHERE ars.scenario_id = :sid AND d.is_duplicate IS NOT TRUE
-            GROUP BY 1 ORDER BY 2 DESC LIMIT 30
+        study_designs = conn.execute(text(f"""
+            WITH b AS (
+                SELECT lower(coalesce(
+                    nullif(trim(ld.study_design), ''),
+                    nullif(trim(ld.pico_json->>'study_design'), ''), '')) AS d
+                FROM article_scenarios ars
+                JOIN literature_document ld ON ld.id = ars.document_id
+                WHERE ars.scenario_id = :sid AND ld.is_duplicate IS NOT TRUE
+            )
+            SELECT {_STUDY_DESIGN_CASE} AS design, COUNT(*) AS n
+            FROM b GROUP BY 1 ORDER BY 2 DESC
         """), {"sid": scenario_id}).mappings().fetchall()
 
         year_dist = conn.execute(text("""
