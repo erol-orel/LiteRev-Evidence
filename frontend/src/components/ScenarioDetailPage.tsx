@@ -1514,7 +1514,6 @@ function ClusteringSection({ scenarioId }: { scenarioId: string }) {
     return () => stopPolling();
   }, [load, stopPolling]);
 
-  const [vizTab, setVizTab] = useState<'scatter'|'graph'>('scatter');
   const activeClusterData = data?.clusters.find((c) => c.cluster_id === selectedCluster);
 
   return (
@@ -1557,25 +1556,15 @@ function ClusteringSection({ scenarioId }: { scenarioId: string }) {
               {/* Carte UMAP 2D (SVG) */}
               <div className="lg:col-span-1 space-y-4">
                 <div className="rounded-2xl border border-white/5 bg-white/2 p-4 flex flex-col gap-3">
-                  <div className="flex items-center gap-1">
-                    <button onClick={()=>setVizTab("scatter")} className={`px-3 py-1 rounded-lg text-[10px] font-semibold uppercase tracking-wider transition ${vizTab==="scatter"?"bg-brand-700 text-gold-400":"text-white/60 hover:text-white hover:bg-white/8"}`}>UMAP 2D</button>
-                    <button onClick={()=>setVizTab("graph")} className={`px-3 py-1 rounded-lg text-[10px] font-semibold uppercase tracking-wider transition ${vizTab==="graph"?"bg-brand-700 text-gold-400":"text-white/60 hover:text-white hover:bg-white/8"}`}>Knowledge Graph</button>
+                  <span className="text-[10px] font-semibold uppercase tracking-wider text-gold-400">Projection UMAP 2D</span>
+                  <p className="text-[10px] text-white/40 leading-4">Points = articles. Proximité = similarité. Nuages = groupes thématiques.</p>
+                  <div className="w-full bg-[#0a1410] rounded-xl border border-white/5 overflow-hidden">
+                    <UmapScatterPlot clusters={data.clusters} selectedCluster={selectedCluster} onSelectCluster={setSelectedCluster}/>
                   </div>
-                  {vizTab==="scatter"&&(
-                    <>
-                      <p className="text-[10px] text-white/40 leading-4">Points = articles. Proximité = similarité. Nuages = groupes thématiques.</p>
-                      <div className="w-full bg-[#0a1410] rounded-xl border border-white/5 overflow-hidden">
-                        <UmapScatterPlot clusters={data.clusters} selectedCluster={selectedCluster} onSelectCluster={setSelectedCluster}/>
-                      </div>
-                      <div className="flex items-center justify-between text-[10px] text-white/25 font-mono">
-                        <span>← UMAP dim 1 →</span>
-                        <span>{data.n_docs} articles · {data.n_clusters} clusters</span>
-                      </div>
-                    </>
-                  )}
-                  {vizTab==="graph"&&(
-                    <KnowledgeGraph clusters={data.clusters} selectedCluster={selectedCluster} onSelectCluster={setSelectedCluster}/>
-                  )}
+                  <div className="flex items-center justify-between text-[10px] text-white/25 font-mono">
+                    <span>← UMAP dim 1 →</span>
+                    <span>{data.n_docs} articles · {data.n_clusters} clusters</span>
+                  </div>
                 </div>
 
                 {/* Sélecteur de cluster de gauche */}
@@ -1707,212 +1696,6 @@ function expandHull(hull: Array<{x:number;y:number}>, margin: number): Array<{x:
   const cy=hull.reduce((s,p)=>s+p.y,0)/hull.length;
   return hull.map(p=>{const dx=p.x-cx,dy=p.y-cy,d=Math.sqrt(dx*dx+dy*dy)||1;return{x:p.x+(dx/d)*margin,y:p.y+(dy/d)*margin};});
 }
-// Knowledge Graph : nœuds = clusters, arêtes = mots-clés partagés
-function KnowledgeGraph({clusters,selectedCluster,onSelectCluster}:{clusters:ClusterResult[];selectedCluster:number|null;onSelectCluster:(id:number)=>void}) {
-  const W=560,H=420;
-  const denseC=clusters.filter(c=>!c.is_noise);
-  const [hoveredNode,setHoveredNode]=React.useState<string|null>(null);
-  const [tooltip,setTooltip]=React.useState<{x:number;y:number;text:string}|null>(null);
-  if (!denseC.length) return <span className="text-xs text-white/40">Aucun cluster.</span>;
-
-  // Build keyword nodes + cluster nodes
-  type GNode={id:string;label:string;type:'cluster'|'keyword';cluster_id?:number;count?:number;x:number;y:number;r:number;color:string};
-  type GEdge={from:string;to:string;weight:number};
-
-  // Gather top keywords across all clusters
-  const kwMap=new Map<string,{clusters:number[];count:number}>();
-  denseC.forEach(c=>{
-    (c.top_words||[]).slice(0,8).forEach((w,i)=>{
-      const key=w.toLowerCase();
-      if(!kwMap.has(key)) kwMap.set(key,{clusters:[],count:0});
-      const entry=kwMap.get(key)!;
-      entry.clusters.push(c.cluster_id);
-      entry.count+=8-i; // TF-IDF-like weight: first words have higher weight
-    });
-  });
-
-  // Keep only keywords that appear in ≥1 cluster (all are interesting) but limit to top 20
-  const sortedKw=[...kwMap.entries()]
-    .sort((a,b)=>b[1].count-a[1].count)
-    .slice(0,Math.min(20,kwMap.size));
-
-  // Layout: clusters in outer ring, keywords in inner area
-  const clusterNodes:GNode[]=denseC.map((c,i)=>{
-    const angle=(2*Math.PI*i)/denseC.length-Math.PI/2;
-    const r0=Math.min(W,H)*0.36;
-    return{
-      id:`c_${c.cluster_id}`,
-      label:c.cluster_name,
-      type:'cluster',
-      cluster_id:c.cluster_id,
-      count:c.n_docs,
-      x:W/2+r0*Math.cos(angle),
-      y:H/2+r0*Math.sin(angle),
-      r:Math.max(22,Math.min(42,14+c.n_docs/6)),
-      color:getClusterColor(c.cluster_id,false),
-    };
-  });
-
-  const kwNodes:GNode[]=sortedKw.map(([w,info],i)=>{
-    // Position keywords in a grid-like inner area
-    const cols=Math.ceil(Math.sqrt(sortedKw.length));
-    const row=Math.floor(i/cols);
-    const col=i%cols;
-    const cellW=(W*0.5)/cols;
-    const cellH=(H*0.5)/Math.ceil(sortedKw.length/cols);
-    const jitter=(Math.random()-0.5)*cellW*0.3;
-    return{
-      id:`k_${w}`,
-      label:w,
-      type:'keyword',
-      count:info.count,
-      x:W*0.25+col*cellW+cellW/2+jitter,
-      y:H*0.25+row*cellH+cellH/2,
-      r:Math.max(10,Math.min(20,6+info.count*1.5)),
-      color:'rgba(227,172,59,0.85)',
-    };
-  });
-
-  const allNodes=[...clusterNodes,...kwNodes];
-
-  // Edges: cluster → keyword
-  const edges:GEdge[]=[];
-  sortedKw.forEach(([w,info])=>{
-    info.clusters.forEach(cid=>{
-      edges.push({from:`c_${cid}`,to:`k_${w}`,weight:1});
-    });
-  });
-  // Cross-cluster edges (shared keywords)
-  for(let i=0;i<denseC.length;i++){
-    for(let j=i+1;j<denseC.length;j++){
-      const wA=new Set((denseC[i].top_words||[]).map(w=>w.toLowerCase()));
-      const shared=(denseC[j].top_words||[]).filter(w=>wA.has(w.toLowerCase()));
-      if(shared.length>0){
-        edges.push({from:`c_${denseC[i].cluster_id}`,to:`c_${denseC[j].cluster_id}`,weight:shared.length});
-      }
-    }
-  }
-
-  const nodeMap=new Map(allNodes.map(n=>[n.id,n]));
-
-  const isActive=(id:string)=>{
-    if(!selectedCluster) return true;
-    if(id===`c_${selectedCluster}`) return true;
-    return edges.some(e=>(e.from===id||e.to===id)&&(e.from===`c_${selectedCluster}`||e.to===`c_${selectedCluster}`));
-  };
-
-  return (
-    <div className="w-full">
-      <p className="text-[10px] text-white/35 leading-4 mb-2">
-        <span className="inline-block w-2 h-2 rounded-full bg-brand-400 mr-1 align-middle"/>Clusters (taille = nb articles)
-        <span className="inline-block w-2 h-2 rounded-full bg-gold-400 ml-3 mr-1 align-middle"/>Concepts cliniques clés
-        <span className="ml-3">· Connexions = co-occurrence dans le corpus</span>
-      </p>
-      <svg width="100%" viewBox={`0 0 ${W} ${H}`} className="bg-[#0a1410] rounded-2xl border border-white/5 overflow-visible" style={{maxHeight:420}}>
-        <defs>
-          <filter id="kglow2"><feGaussianBlur stdDeviation="4" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
-          <filter id="kwglow"><feGaussianBlur stdDeviation="2" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
-          {clusterNodes.map(n=>(
-            <radialGradient key={`rg-${n.id}`} id={`rg-${n.id}`} cx="50%" cy="50%" r="50%">
-              <stop offset="0%" stopColor={n.color} stopOpacity="1"/>
-              <stop offset="100%" stopColor={n.color} stopOpacity="0.4"/>
-            </radialGradient>
-          ))}
-        </defs>
-        {/* Grid lines subtle */}
-        {[0.25,0.5,0.75].map(f=>(
-          <React.Fragment key={f}>
-            <line x1={W*f} y1={0} x2={W*f} y2={H} stroke="rgba(255,255,255,0.02)" strokeWidth="1"/>
-            <line x1={0} y1={H*f} x2={W} y2={H*f} stroke="rgba(255,255,255,0.02)" strokeWidth="1"/>
-          </React.Fragment>
-        ))}
-        {/* Edges */}
-        {edges.map((e,i)=>{
-          const na=nodeMap.get(e.from),nb=nodeMap.get(e.to);
-          if(!na||!nb) return null;
-          const bothCluster=na.type==='cluster'&&nb.type==='cluster';
-          const active=isActive(e.from)&&isActive(e.to);
-          const selEdge=selectedCluster&&(e.from===`c_${selectedCluster}`||e.to===`c_${selectedCluster}`);
-          return(
-            <line key={i}
-              x1={na.x} y1={na.y} x2={nb.x} y2={nb.y}
-              stroke={bothCluster?(selEdge?"rgba(255,255,255,0.35)":"rgba(255,255,255,0.08)"):(selEdge?"rgba(227,172,59,0.5)":"rgba(227,172,59,0.12)")}
-              strokeWidth={bothCluster?(selEdge?e.weight*1.5:e.weight*0.6):(selEdge?1.5:0.8)}
-              strokeDasharray={bothCluster?"none":"3,2"}
-              opacity={active?1:0.2}
-            />
-          );
-        })}
-        {/* Keyword nodes */}
-        {kwNodes.map(n=>{
-          const active=isActive(n.id);
-          const hov=hoveredNode===n.id;
-          return(
-            <g key={n.id} className="cursor-pointer"
-              onMouseEnter={()=>{setHoveredNode(n.id);setTooltip({x:n.x,y:n.y-n.r-8,text:n.label});}}
-              onMouseLeave={()=>{setHoveredNode(null);setTooltip(null);}}
-            >
-              <circle cx={n.x} cy={n.y} r={hov?n.r+3:n.r}
-                fill="rgba(227,172,59,0.15)"
-                stroke={hov?"rgba(227,172,59,0.9)":"rgba(227,172,59,0.4)"}
-                strokeWidth={hov?1.5:0.8}
-                opacity={active?1:0.2}
-                filter={hov?"url(#kwglow)":undefined}
-              />
-              {(n.r>12||hov)&&<text x={n.x} y={n.y} textAnchor="middle" dominantBaseline="middle"
-                fontSize={hov?"8":"7"} fill="rgba(227,172,59,0.9)" fontWeight="600"
-                opacity={active?1:0.3}
-                className="pointer-events-none select-none"
-              >{n.label}</text>}
-            </g>
-          );
-        })}
-        {/* Cluster nodes */}
-        {clusterNodes.map(n=>{
-          const sel=selectedCluster===n.cluster_id;
-          const active=isActive(n.id);
-          const hov=hoveredNode===n.id;
-          return(
-            <g key={n.id} className="cursor-pointer"
-              onClick={()=>n.cluster_id!=null&&onSelectCluster(n.cluster_id)}
-              onMouseEnter={()=>{setHoveredNode(n.id);setTooltip({x:n.x,y:n.y-n.r-10,text:`${n.label} · ${n.count} articles`});}}
-              onMouseLeave={()=>{setHoveredNode(null);setTooltip(null);}}
-            >
-              {(sel||hov)&&<circle cx={n.x} cy={n.y} r={n.r+10} fill={n.color} opacity={0.12}/>}
-              {sel&&<circle cx={n.x} cy={n.y} r={n.r+6} fill="none" stroke={n.color} strokeWidth="1.5" strokeDasharray="4,2" opacity={0.6}/>}
-              <circle cx={n.x} cy={n.y} r={n.r}
-                fill={`url(#rg-${n.id})`}
-                stroke={sel?"#fff":n.color}
-                strokeWidth={sel?2:1}
-                strokeOpacity={sel?0.9:0.5}
-                opacity={active?1:0.3}
-                filter={(sel||hov)?"url(#kglow2)":undefined}
-              />
-              <text x={n.x} y={n.y-3} textAnchor="middle" dominantBaseline="middle"
-                fontSize="8" fontWeight="800" fill="#fff" opacity={active?0.95:0.3}
-                className="pointer-events-none select-none"
-              >{n.label.replace("Cluster ","C")}</text>
-              <text x={n.x} y={n.y+8} textAnchor="middle" dominantBaseline="middle"
-                fontSize="7" fill="rgba(255,255,255,0.6)" opacity={active?1:0.3}
-                className="pointer-events-none select-none"
-              >{n.count}</text>
-            </g>
-          );
-        })}
-        {/* Tooltip */}
-        {tooltip&&(
-          <g>
-            <rect x={tooltip.x-tooltip.text.length*2.8} y={tooltip.y-14} width={tooltip.text.length*5.6+8} height={16}
-              rx="4" fill="rgba(10,20,16,0.92)" stroke="rgba(255,255,255,0.12)" strokeWidth="0.8"/>
-            <text x={tooltip.x} y={tooltip.y-5} textAnchor="middle" fontSize="8" fill="rgba(255,255,255,0.9)"
-              className="pointer-events-none select-none">{tooltip.text}</text>
-          </g>
-        )}
-      </svg>
-    </div>
-  );
-}
-
 // Scatter plot UMAP moderne avec nuages pastel
 function UmapScatterPlot({clusters,selectedCluster,onSelectCluster}:{clusters:ClusterResult[];selectedCluster:number|null;onSelectCluster:(id:number)=>void}) {
   const allPoints: Array<ClusterPoint&{cluster_id:number;is_noise:boolean}>=[];
@@ -2551,7 +2334,7 @@ function KnowledgeGraphSection({ scenarioId }: { scenarioId: string }) {
 
   React.useEffect(() => {
     setLoading(true);
-    fetchKnowledgeGraph(scenarioId, 80, minSim)
+    fetchKnowledgeGraph(scenarioId, 400, minSim)
       .then(setData)
       .catch(e => setError(e.message))
       .finally(() => setLoading(false));
@@ -2619,8 +2402,13 @@ function KnowledgeGraphSection({ scenarioId }: { scenarioId: string }) {
     <div className="space-y-4">
       <SectionHeader
         icon={<Network size={14} className="text-brand-400" />}
-        title="Knowledge Graph : Réseau de Co-citations"
-        subtitle={`${data.n_nodes} articles · ${data.n_edges} connexions · ${data.n_clusters} groupes thématiques · similarité cosinus sur embeddings`}
+        title="Knowledge Graph : Réseau de Similarité Sémantique"
+        subtitle={
+          (data.n_total && data.n_total > data.n_nodes
+            ? `${data.n_nodes} articles les plus pertinents sur ${data.n_total} · `
+            : `${data.n_nodes} articles · `) +
+          `${data.n_edges} liens · ${data.n_clusters} communautés thématiques · proximité = similarité cosinus des embeddings`
+        }
       />
 
       {/* Contrôles */}
@@ -2634,15 +2422,18 @@ function KnowledgeGraphSection({ scenarioId }: { scenarioId: string }) {
           <span className="font-mono text-brand-300">{minSim.toFixed(2)}</span>
         </div>
         <div className="flex flex-wrap gap-2">
-          {uniqueClusters.slice(0,5).map((cid, i) => (
-            <button key={cid}
-              onClick={() => setSelectedNode(null)}
-              className="flex items-center gap-1.5 rounded-lg border border-white/10 bg-white/3 px-2 py-1 text-[10px] text-white/50 hover:text-white transition"
-            >
-              <span className="h-2 w-2 rounded-full" style={{background: CLUSTER_COLORS[i % CLUSTER_COLORS.length]}}/>
-              Groupe {cid + 1} ({data.clusters.find(c => c.id === cid)?.size || 0} articles)
-            </button>
-          ))}
+          {[...data.clusters].sort((a,b)=>b.size-a.size).slice(0,5).map((c) => {
+            const i = uniqueClusters.indexOf(c.id);
+            return (
+              <span key={c.id}
+                className="flex items-center gap-1.5 rounded-lg border border-white/10 bg-white/3 px-2 py-1 text-[10px] text-white/50"
+              >
+                <span className="h-2 w-2 rounded-full shrink-0" style={{background: CLUSTER_COLORS[i % CLUSTER_COLORS.length]}}/>
+                <span className="text-white/70">{c.label || `Groupe ${c.id + 1}`}</span>
+                <span className="text-white/30 font-mono">· {c.size}</span>
+              </span>
+            );
+          })}
         </div>
       </div>
 
@@ -2775,18 +2566,39 @@ function KnowledgeGraphSection({ scenarioId }: { scenarioId: string }) {
             </div>
           )}
 
-          {/* Légende clusters */}
-          <div className="rounded-2xl border border-white/5 bg-white/2 p-3 space-y-2">
-            <p className="text-[10px] font-bold uppercase tracking-wider text-white/40">Groupes thématiques</p>
-            {data.clusters.slice(0, 6).map((c, i) => (
-              <div key={c.id} className="flex items-center justify-between text-[10px]">
-                <div className="flex items-center gap-1.5">
-                  <span className="h-2 w-2 rounded-full shrink-0" style={{background: CLUSTER_COLORS[i % CLUSTER_COLORS.length]}}/>
-                  <span className="text-white/60">Groupe {c.id + 1}</span>
-                </div>
-                <span className="text-white/40 font-mono">{c.size} articles</span>
+          {/* Articles pivots (les plus connectés) */}
+          {(() => {
+            const hubs = [...data.nodes].filter(n => n.degree > 0).sort((a,b)=>b.degree-a.degree).slice(0,5);
+            if (!hubs.length) return null;
+            return (
+              <div className="rounded-2xl border border-white/5 bg-white/2 p-3 space-y-2">
+                <p className="text-[10px] font-bold uppercase tracking-wider text-white/40">Articles pivots (les plus connectés)</p>
+                {hubs.map(n => (
+                  <button key={n.id} onClick={() => setSelectedNode(n.id)}
+                    className="w-full text-left flex items-start gap-2 text-[10px] hover:bg-white/3 rounded px-1 py-0.5 transition">
+                    <span className="text-brand-300 font-mono shrink-0 w-5">{n.degree}</span>
+                    <span className="text-white/60 leading-3 line-clamp-2">{n.title}</span>
+                  </button>
+                ))}
               </div>
-            ))}
+            );
+          })()}
+
+          {/* Légende des communautés thématiques */}
+          <div className="rounded-2xl border border-white/5 bg-white/2 p-3 space-y-2">
+            <p className="text-[10px] font-bold uppercase tracking-wider text-white/40">Communautés thématiques</p>
+            {[...data.clusters].filter(c => c.size > 1).sort((a,b)=>b.size-a.size).slice(0, 8).map((c) => {
+              const i = uniqueClusters.indexOf(c.id);
+              return (
+                <div key={c.id} className="flex items-center justify-between gap-2 text-[10px]">
+                  <div className="flex items-center gap-1.5 min-w-0">
+                    <span className="h-2 w-2 rounded-full shrink-0" style={{background: CLUSTER_COLORS[i % CLUSTER_COLORS.length]}}/>
+                    <span className="text-white/60 truncate">{c.label || `Groupe ${c.id + 1}`}</span>
+                  </div>
+                  <span className="text-white/40 font-mono shrink-0">{c.size}</span>
+                </div>
+              );
+            })}
           </div>
 
           {/* Stats */}
