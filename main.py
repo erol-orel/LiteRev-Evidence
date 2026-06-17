@@ -12033,6 +12033,112 @@ def _jsonable(v):
     return v
 
 
+# ─── MODEL MONITORING (Phase 4) : statut live piloté par le modèle entraîné ───
+# Score les données récentes via le modèle réel (Phase 3) et en déduit un niveau
+# d'alerte green/orange/red, avec les libellés des alert_thresholds du spec.
+# Équivalent "user scenario" du /gesica/.../model-status (qui pilote les modules
+# GESICA codés en dur).
+
+_DEFAULT_ALERT_LABELS = {
+    "green": "Normal", "orange": "Vigilance", "red": "Alerte critique",
+}
+
+
+@app.get("/scenarios/{scenario_id}/model/monitor")
+def monitor_scenario_model(scenario_id: str, window: int = 7) -> dict[str, Any]:
+    """
+    Statut live du modèle entraîné : score les `window` dernières lignes du
+    dataset branché et renvoie un niveau d'alerte + la valeur courante.
+    """
+    import pandas as pd
+    import model_trainer
+    from datetime import datetime, timezone
+
+    with engine.connect() as conn:
+        run = conn.execute(text("""
+            SELECT id, family, task_type, metric, metrics_json, summary_json, artifact_path
+            FROM scenario_model_run
+            WHERE scenario_id = :sid AND is_active = TRUE AND artifact_path IS NOT NULL
+            ORDER BY created_at DESC LIMIT 1
+        """), {"sid": scenario_id}).mappings().first()
+    if not run:
+        return {"status": "unavailable", "status_color": "unavailable",
+                "status_label": "Modèle non entraîné",
+                "message": "Entraînez le modèle après avoir branché des données."}
+
+    with engine.connect() as conn:
+        ds = conn.execute(text("""
+            SELECT stored_path FROM scenario_model_dataset
+            WHERE scenario_id = :sid AND is_active = TRUE
+            ORDER BY created_at DESC LIMIT 1
+        """), {"sid": scenario_id}).mappings().first()
+    if not ds or not ds["stored_path"]:
+        return {"status": "unavailable", "status_color": "unavailable",
+                "status_label": "Aucune donnée", "message": "Aucun dataset branché."}
+
+    try:
+        import joblib
+        pipeline = joblib.load(run["artifact_path"])
+        df = pd.read_csv(ds["stored_path"])
+    except Exception as e:
+        logger.error(f"Monitor load {scenario_id}: {e}", exc_info=True)
+        return {"status": "error", "status_color": "unavailable",
+                "status_label": "Erreur de chargement", "message": str(e)}
+
+    summary = run["summary_json"] or {}
+    task_type = run["task_type"]
+    classes = summary.get("classes")
+    target = summary.get("target")
+
+    window = max(1, min(int(window or 7), 200))
+    recent = df.tail(window)
+    target_values = None
+    if task_type in ("regression", "count") and target and target in df.columns:
+        target_values = pd.to_numeric(df[target], errors="coerce").tolist()
+
+    # Récupérer la classe positive + libellés d'alerte depuis le spec.
+    spec = _get_model_spec(scenario_id) or {}
+    positive_class = (spec.get("outcome") or {}).get("positive_class")
+    with engine.connect() as conn:
+        vj = conn.execute(text(
+            "SELECT variables_json FROM scenario_settings WHERE scenario_id = :sid"
+        ), {"sid": scenario_id}).scalar()
+    alert_thresholds = (dict(vj).get("alert_thresholds") if vj else None) or {}
+
+    try:
+        mon = model_trainer.compute_monitoring(
+            pipeline, recent, task_type, classes=classes,
+            positive_class=positive_class, target_values=target_values)
+    except Exception as e:
+        logger.error(f"Monitor score {scenario_id}: {e}", exc_info=True)
+        return {"status": "error", "status_color": "unavailable",
+                "status_label": "Erreur de scoring", "message": str(e)}
+
+    level = mon["level"]
+    label = (alert_thresholds.get(level) or {}).get("label") or _DEFAULT_ALERT_LABELS[level]
+    outcome = (spec.get("outcome") or {})
+
+    return {
+        "status": "ready",
+        "scenario_id": scenario_id,
+        "status_color": level,
+        "status_label": label,
+        "value": _jsonable(mon["value"]),
+        "kind": mon["kind"],
+        "unit": outcome.get("unit"),
+        "outcome": outcome.get("name"),
+        "positive_class": mon.get("positive_class"),
+        "bands": mon["bands"],
+        "n_scored": mon["n_scored"],
+        "window": window,
+        "model": {"run_id": run["id"], "family": run["family"],
+                  "task_type": task_type, "metric": run["metric"],
+                  "metrics": run["metrics_json"]},
+        "alert_thresholds": alert_thresholds,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
 # ─── HEATMAP AVEC VRAIS NOMS ─────────────────────────────────────────────────
 
 @app.get("/corpus/stats/by-year/named")
