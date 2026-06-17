@@ -352,3 +352,61 @@ def train_model(df, spec: dict, n_trials: int = 25, random_state: int = 42, test
         "feature_importances": _feature_importances(final),
         "pipeline": final,
     }
+
+
+# ─── Monitoring (Phase 4) : score les données récentes -> niveau d'alerte ─────
+
+def positive_index(classes: list | None, positive_class: str | None) -> int:
+    """Index de la classe 'événement' (positive). Par défaut la dernière classe."""
+    if classes and positive_class is not None and str(positive_class) in classes:
+        return classes.index(str(positive_class))
+    return (len(classes) - 1) if classes else 1
+
+
+def _level_from_value(v: float, orange: float | None, red: float | None) -> str:
+    """Mappe une valeur croissante (risque) vers green/orange/red."""
+    if orange is None or red is None:
+        return "green"
+    if v >= red:
+        return "red"
+    if v >= orange:
+        return "orange"
+    return "green"
+
+
+def compute_monitoring(pipeline, recent_df, task_type: str, classes: list | None = None,
+                       positive_class: str | None = None, target_values=None) -> dict:
+    """
+    Score les lignes récentes avec le modèle entraîné et en déduit un niveau
+    d'alerte (green/orange/red). Pur/testable.
+
+    - classification : risque = proba moyenne de la classe positive ; bandes
+      fixes 0.33 / 0.66 (la proba est déjà normalisée).
+    - régression : valeur = prédiction moyenne ; bandes = tertiles (p33/p66) de
+      la cible d'entraînement (valeur haute = alerte, convention EMS).
+    """
+    import numpy as np
+
+    n = int(len(recent_df))
+    if task_type in ("regression", "count"):
+        preds = np.asarray(pipeline.predict(recent_df), dtype=float)
+        value = float(np.mean(preds))
+        lo = hi = None
+        if target_values is not None:
+            tv = np.asarray(target_values, dtype=float)
+            tv = tv[~np.isnan(tv)]
+            if len(tv) >= 5:
+                lo, hi = float(np.quantile(tv, 0.33)), float(np.quantile(tv, 0.66))
+        return {"kind": "value", "value": value, "level": _level_from_value(value, lo, hi),
+                "bands": {"orange": lo, "red": hi}, "n_scored": n}
+
+    idx = positive_index(classes, positive_class)
+    if hasattr(pipeline, "predict_proba"):
+        proba = pipeline.predict_proba(recent_df)
+        col = min(idx, proba.shape[1] - 1)
+        risk = float(np.mean(proba[:, col]))
+    else:
+        risk = float(np.mean(np.asarray(pipeline.predict(recent_df)) == idx))
+    return {"kind": "probability", "value": risk, "level": _level_from_value(risk, 0.33, 0.66),
+            "positive_class": (classes[idx] if classes else None),
+            "bands": {"orange": 0.33, "red": 0.66}, "n_scored": n}
