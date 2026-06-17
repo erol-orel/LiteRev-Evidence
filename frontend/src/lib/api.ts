@@ -2714,6 +2714,15 @@ export async function trainModel(scenarioId: string): Promise<{ status: string; 
   return r.json();
 }
 
+export async function generateSyntheticData(
+  scenarioId: string,
+  nRows = 400,
+): Promise<{ status: string; n_rows?: number; n_cols?: number }> {
+  const r = await fetch(`${API_BASE_URL}/scenarios/${scenarioId}/model/data/synthetic?n_rows=${nRows}`, { method: 'POST', headers: authHeaders() });
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  return r.json();
+}
+
 export async function getModelTrainStatus(scenarioId: string): Promise<{ status: string; error?: string; metrics?: Record<string, number> }> {
   const r = await fetch(`${API_BASE_URL}/scenarios/${scenarioId}/model/train/status`);
   if (!r.ok) throw new Error(`HTTP ${r.status}`);
