@@ -3602,11 +3602,11 @@ ${b.corpus_stats.year_min && b.corpus_stats.year_max ? `<p class="meta">Couvertu
 <div class="dist-grid">
   <div class="dist-box">
     <div class="dist-title">Types d'étude</div>
-    ${b.study_design_distribution.slice(0,6).map(d=>`<div class="bar-row"><span class="bar-label">${d.design}</span><div class="bar-track"><div class="bar-fill-green" style="width:${Math.round(d.count/total*100)}%"></div></div><span class="bar-count">${d.count}</span></div>`).join('')}
+    ${(()=>{const top=b.study_design_distribution;const rem=total-top.reduce((s,d)=>s+d.count,0);const rows=rem>0?[...top,{design:'Autres',count:rem}]:top;return rows.map(d=>`<div class="bar-row"><span class="bar-label">${d.design}</span><div class="bar-track"><div class="bar-fill-green" style="width:${Math.round(d.count/total*100)}%"></div></div><span class="bar-count">${d.count}</span></div>`).join('');})()}
   </div>
   <div class="dist-box">
     <div class="dist-title">Sources</div>
-    ${(b.source_distribution??[]).slice(0,6).map(d=>`<div class="bar-row"><span class="bar-label">${d.source}</span><div class="bar-track"><div class="bar-fill-blue" style="width:${Math.round(d.count/total*100)}%"></div></div><span class="bar-count">${d.count}</span></div>`).join('')}
+    ${(()=>{const top=(b.source_distribution??[]);const rem=total-top.reduce((s,d)=>s+d.count,0);const rows=rem>0?[...top,{source:'Autres',count:rem}]:top;return rows.map(d=>`<div class="bar-row"><span class="bar-label">${d.source}</span><div class="bar-track"><div class="bar-fill-blue" style="width:${Math.round(d.count/total*100)}%"></div></div><span class="bar-count">${d.count}</span></div>`).join('');})()}
   </div>
   <div class="dist-box">
     <div class="dist-title">Niveaux de preuve</div>
@@ -3746,7 +3746,12 @@ ${llm.future_research ? `<h3>Directions de recherche futures</h3><p class="llm-t
             <div className="rounded-2xl border border-white/5 bg-white/2 p-4 space-y-2">
               <p className="text-[10px] font-bold uppercase tracking-wider text-white/40">Types d'étude</p>
               <div className="space-y-1.5">
-                {briefData.study_design_distribution.slice(0,6).map(d=>(
+                {(() => {
+                  // Toutes les catégories + « Autres » (reste) pour que la somme corresponde au corpus
+                  const top = briefData.study_design_distribution;
+                  const remainder = total - top.reduce((s,d)=>s+d.count,0);
+                  const rows = remainder > 0 ? [...top, {design:'Autres', count:remainder}] : top;
+                  return rows.map(d=>(
                   <div key={d.design} className="flex items-center gap-2 text-[10px]">
                     <span className="w-28 text-white/60 truncate">{d.design}</span>
                     <div className="flex-1 h-1 bg-white/5 rounded-full overflow-hidden">
@@ -3754,13 +3759,18 @@ ${llm.future_research ? `<h3>Directions de recherche futures</h3><p class="llm-t
                     </div>
                     <span className="w-7 text-right text-white/40 font-mono">{d.count}</span>
                   </div>
-                ))}
+                  ));
+                })()}
               </div>
             </div>
             <div className="rounded-2xl border border-white/5 bg-white/2 p-4 space-y-2">
               <p className="text-[10px] font-bold uppercase tracking-wider text-white/40">Sources</p>
               <div className="space-y-1.5">
-                {(briefData.source_distribution ?? []).slice(0,6).map(d=>(
+                {(() => {
+                  const top = (briefData.source_distribution ?? []);
+                  const remainder = total - top.reduce((s,d)=>s+d.count,0);
+                  const rows = remainder > 0 ? [...top, {source:'Autres', count:remainder}] : top;
+                  return rows.map(d=>(
                   <div key={d.source} className="flex items-center gap-2 text-[10px]">
                     <span className="w-28 text-white/60 truncate capitalize">{d.source}</span>
                     <div className="flex-1 h-1 bg-white/5 rounded-full overflow-hidden">
@@ -3768,7 +3778,8 @@ ${llm.future_research ? `<h3>Directions de recherche futures</h3><p class="llm-t
                     </div>
                     <span className="w-7 text-right text-white/40 font-mono">{d.count}</span>
                   </div>
-                ))}
+                  ));
+                })()}
               </div>
             </div>
             <div className="rounded-2xl border border-white/5 bg-white/2 p-4 space-y-2">

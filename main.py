@@ -5550,7 +5550,7 @@ def get_evidence_brief(scenario_id: str) -> dict[str, Any]:
             JOIN article_scenarios asn ON asn.document_id = ld.id AND asn.scenario_id = :sid
             WHERE ld.project_context = 'literev'
               AND ld.is_duplicate IS NOT TRUE
-            GROUP BY 1 ORDER BY 2 DESC LIMIT 12
+            GROUP BY 1 ORDER BY 2 DESC LIMIT 30
         """), {"sid": scenario_id}).mappings().fetchall()
 
         # Distribution par année (20 dernières années)
@@ -9686,7 +9686,7 @@ def get_user_scenario_evidence_brief(scenario_id: str) -> dict[str, Any]:
             FROM article_scenarios ars
             JOIN literature_document d ON d.id = ars.document_id
             WHERE ars.scenario_id = :sid AND d.is_duplicate IS NOT TRUE
-            GROUP BY 1 ORDER BY 2 DESC LIMIT 12
+            GROUP BY 1 ORDER BY 2 DESC LIMIT 30
         """), {"sid": scenario_id}).mappings().fetchall()
 
         year_dist = conn.execute(text("""
