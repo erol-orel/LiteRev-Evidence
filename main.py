@@ -11518,6 +11518,274 @@ def get_scenario_model_spec(scenario_id: str) -> dict[str, Any]:
     }
 
 
+# ─── MODEL DATA (Phase 2) : upload, validation vs data_template, readiness ────
+# L'utilisateur branche ses données (CSV/XLSX) sur le model_spec. On valide les
+# colonnes contre le data_template, on stocke le dataset, et on évalue si le
+# modèle peut être entraîné. Les colonnes manquantes 'public_api' (ex: météo)
+# sont signalées comme récupérables automatiquement (branchement Open-Meteo : étape suivante).
+
+import os as _os_mod
+
+MODEL_DATA_DIR = Path(_os_mod.environ.get("MODEL_DATA_DIR", "/home/ubuntu/uploads_datasets"))
+
+
+def _ensure_model_dataset_table():
+    """Suivi des datasets uploadés par scénario pour l'entraînement du modèle."""
+    with engine.begin() as conn:
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS scenario_model_dataset (
+                id              BIGSERIAL PRIMARY KEY,
+                scenario_id     VARCHAR(80) NOT NULL,
+                filename        TEXT,
+                stored_path     TEXT,
+                n_rows          INTEGER,
+                n_cols          INTEGER,
+                columns_json    JSONB,
+                validation_json JSONB,
+                is_active       BOOLEAN DEFAULT TRUE,
+                created_at      TIMESTAMP DEFAULT NOW()
+            )
+        """))
+        conn.execute(text(
+            "CREATE INDEX IF NOT EXISTS ix_model_dataset_scenario_active "
+            "ON scenario_model_dataset (scenario_id, is_active)"
+        ))
+    logger.info("Table scenario_model_dataset vérifiée/créée.")
+
+
+try:
+    _ensure_model_dataset_table()
+except Exception as _e:
+    logger.warning(f"_ensure_model_dataset_table: {_e}")
+
+
+def _norm_col(s: Any) -> str:
+    return str(s if s is not None else "").strip().lower()
+
+
+def _get_model_spec(scenario_id: str) -> dict | None:
+    """Retourne le model_spec stocké (ou None) pour un scénario."""
+    with engine.connect() as conn:
+        row = conn.execute(text(
+            "SELECT variables_json FROM scenario_settings WHERE scenario_id = :sid"
+        ), {"sid": scenario_id}).mappings().first()
+    if not (row and row["variables_json"]):
+        return None
+    return dict(row["variables_json"]).get("model_spec")
+
+
+def _validate_dataset_against_template(file_columns: list, data_template: dict,
+                                       file_dtype_kinds: dict | None = None) -> dict:
+    """
+    Compare les colonnes d'un fichier au data_template (pur, testable).
+    Le matching est insensible à la casse/aux espaces ; on signale les colonnes
+    cible/explicatives présentes, manquantes (user vs public_api), en trop, et
+    les incompatibilités de type. Conclut sur la possibilité d'entraîner.
+    """
+    file_dtype_kinds = file_dtype_kinds or {}
+    cols = list(file_columns or [])
+    norm_to_file: dict[str, Any] = {}
+    for c in cols:
+        norm_to_file.setdefault(_norm_col(c), c)
+
+    template_cols = data_template.get("columns") or []
+    target_col = data_template.get("target_column")
+
+    present_required, missing_required, present_optional = [], [], []
+    missing_user, missing_public, matched_features = [], [], []
+    renamed, dtype_warnings = [], []
+    target_present = False
+    n_features = n_features_present = 0
+
+    def file_has(canonical):
+        f = norm_to_file.get(_norm_col(canonical))
+        if f is not None and f != canonical:
+            renamed.append({"expected": canonical, "found": f})
+        return f
+
+    for col in template_cols:
+        name, role = col.get("name"), col.get("role")
+        required, source = col.get("required", False), col.get("source", "user")
+        if role == "feature":
+            n_features += 1
+        found = file_has(name)
+        if found is not None:
+            if role == "outcome":
+                target_present = True
+            else:
+                n_features_present += 1
+                matched_features.append(name)
+            (present_required if required else present_optional).append(name)
+            kind, exp = file_dtype_kinds.get(_norm_col(found)), col.get("dtype")
+            if exp in ("float", "int") and kind == "other":
+                dtype_warnings.append({"column": name, "expected": exp, "found_kind": kind})
+        else:
+            if required:
+                missing_required.append(name)
+            if source == "public_api":
+                missing_public.append(name)
+            elif role != "outcome":
+                missing_user.append(name)
+
+    template_norms = {_norm_col(c.get("name")) for c in template_cols}
+    extra_columns = [c for c in cols if _norm_col(c) not in template_norms]
+
+    reasons = []
+    if not target_present:
+        reasons.append(f"Colonne cible '{target_col}' absente (obligatoire pour entraîner).")
+    if n_features_present == 0:
+        reasons.append("Aucune variable explicative présente dans le fichier.")
+    can_train = target_present and n_features_present >= 1
+
+    return {
+        "target_column": target_col,
+        "target_present": target_present,
+        "n_features_total": n_features,
+        "n_features_present": n_features_present,
+        "matched_features": matched_features,
+        "present_required": present_required,
+        "missing_required": missing_required,
+        "present_optional": present_optional,
+        "missing_user": missing_user,
+        "missing_public": missing_public,
+        "extra_columns": extra_columns,
+        "renamed": renamed,
+        "dtype_warnings": dtype_warnings,
+        "readiness": {
+            "can_train": can_train,
+            "reasons": reasons,
+            "auto_fetchable": missing_public,
+        },
+    }
+
+
+def _dataframe_dtype_kinds(df) -> dict:
+    """{col_normalisé: 'numeric'|'datetime'|'bool'|'other'} depuis un DataFrame pandas."""
+    import pandas as pd
+    kinds = {}
+    for c in df.columns:
+        s = df[c]
+        if pd.api.types.is_bool_dtype(s):
+            k = "bool"
+        elif pd.api.types.is_numeric_dtype(s):
+            k = "numeric"
+        elif pd.api.types.is_datetime64_any_dtype(s):
+            k = "datetime"
+        else:
+            k = "other"
+        kinds[_norm_col(c)] = k
+    return kinds
+
+
+@app.post("/scenarios/{scenario_id}/model/data")
+async def upload_model_dataset(
+    scenario_id: str,
+    file: UploadFile = File(...),
+    _: None = Depends(require_api_key),
+) -> dict[str, Any]:
+    """
+    Branche un jeu de données (CSV/XLSX) sur le model_spec d'un scénario.
+    Valide les en-têtes contre le data_template, stocke le dataset (actif), et
+    renvoie un rapport de validation + l'état de préparation à l'entraînement.
+    """
+    import io
+    import pandas as pd
+    from datetime import datetime, timezone
+
+    spec = _get_model_spec(scenario_id)
+    if not spec:
+        raise HTTPException(status_code=400,
+                            detail="Aucune spécification de modèle. Générez puis validez les Variables & Modèle d'abord.")
+    data_template = spec.get("data_template") or {}
+    if not data_template.get("columns"):
+        raise HTTPException(status_code=400, detail="data_template absent du model_spec. Relancez la génération des variables.")
+
+    filename = file.filename or ""
+    ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+    if ext not in ("csv", "xlsx", "xls"):
+        raise HTTPException(status_code=400, detail="Seuls les fichiers CSV et Excel (.xlsx, .xls) sont acceptés.")
+
+    content = await file.read()
+    try:
+        if ext in ("xlsx", "xls"):
+            df = pd.read_excel(io.BytesIO(content))
+        else:
+            df = pd.read_csv(io.BytesIO(content))
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Lecture du fichier impossible : {e}")
+
+    if len(df) == 0:
+        raise HTTPException(status_code=400, detail="Le fichier ne contient aucune ligne.")
+    if len(df) > 500_000:
+        raise HTTPException(status_code=400, detail="Fichier trop volumineux (> 500 000 lignes).")
+
+    report = _validate_dataset_against_template(list(df.columns), data_template, _dataframe_dtype_kinds(df))
+
+    # Stockage (CSV canonique) + métadonnées ; le précédent dataset devient inactif.
+    safe = Path(filename).name or "dataset.csv"
+    stored_path = None
+    try:
+        ddir = MODEL_DATA_DIR / scenario_id / "model"
+        ddir.mkdir(parents=True, exist_ok=True)
+        stored_path = str(ddir / f"{int(datetime.now(timezone.utc).timestamp())}_{safe}.csv")
+        df.to_csv(stored_path, index=False)
+    except Exception as e:
+        logger.error(f"Stockage dataset {scenario_id}: {e}", exc_info=True)
+
+    with engine.begin() as conn:
+        conn.execute(text(
+            "UPDATE scenario_model_dataset SET is_active = FALSE WHERE scenario_id = :sid AND is_active = TRUE"
+        ), {"sid": scenario_id})
+        new_id = conn.execute(text("""
+            INSERT INTO scenario_model_dataset
+                (scenario_id, filename, stored_path, n_rows, n_cols, columns_json, validation_json, is_active)
+            VALUES (:sid, :fn, :sp, :nr, :nc, CAST(:cj AS jsonb), CAST(:vj AS jsonb), TRUE)
+            RETURNING id
+        """), {
+            "sid": scenario_id, "fn": filename, "sp": stored_path,
+            "nr": int(len(df)), "nc": int(len(df.columns)),
+            "cj": json.dumps([str(c) for c in df.columns]),
+            "vj": json.dumps(report),
+        }).scalar()
+
+    return {
+        "status": "stored",
+        "dataset_id": new_id,
+        "scenario_id": scenario_id,
+        "filename": filename,
+        "n_rows": int(len(df)),
+        "n_cols": int(len(df.columns)),
+        "stored": stored_path is not None,
+        "validation": report,
+    }
+
+
+@app.get("/scenarios/{scenario_id}/model/data")
+def get_model_dataset(scenario_id: str) -> dict[str, Any]:
+    """Résumé du dataset actif d'un scénario + état de préparation à l'entraînement."""
+    with engine.connect() as conn:
+        row = conn.execute(text("""
+            SELECT id, filename, n_rows, n_cols, columns_json, validation_json, created_at
+            FROM scenario_model_dataset
+            WHERE scenario_id = :sid AND is_active = TRUE
+            ORDER BY created_at DESC LIMIT 1
+        """), {"sid": scenario_id}).mappings().first()
+
+    if not row:
+        return {"status": "empty", "message": "Aucun jeu de données branché. Uploadez un CSV/XLSX correspondant au data_template."}
+
+    return {
+        "status": "ready",
+        "dataset_id": row["id"],
+        "filename": row["filename"],
+        "n_rows": row["n_rows"],
+        "n_cols": row["n_cols"],
+        "columns": row["columns_json"],
+        "validation": row["validation_json"],
+        "created_at": row["created_at"].isoformat() if row["created_at"] else None,
+    }
+
+
 # ─── HEATMAP AVEC VRAIS NOMS ─────────────────────────────────────────────────
 
 @app.get("/corpus/stats/by-year/named")
