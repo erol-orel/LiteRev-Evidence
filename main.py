@@ -11230,7 +11230,7 @@ def _attach_model_spec(variables: dict, prov_articles: list[dict]) -> dict:
     return variables
 
 
-def _generate_variables_from_pico(scenario_id: str) -> dict[str, Any]:
+def _generate_variables_from_pico(scenario_id: str, persist: str = "active") -> dict[str, Any]:
     """
     Génère automatiquement les variables du modèle et l'outcome à partir des PICO extraits.
     Sauvegarde dans scenario_settings.variables_json.
@@ -11366,19 +11366,30 @@ Retourne UNIQUEMENT le JSON valide."""
             "validation_status": "pending",
         }
 
-        # Sauvegarder en DB
+        # Sauvegarder en DB. persist="proposal" (Phase 5) écrit dans un slot
+        # de staging sans toucher le spec actif validé.
         with engine.begin() as conn:
-            conn.execute(text("""
-                INSERT INTO scenario_settings (scenario_id, variables_json, variables_validated, variables_generated_at, updated_at)
-                VALUES (:sid, CAST(:vars AS jsonb), FALSE, NOW(), NOW())
-                ON CONFLICT (scenario_id) DO UPDATE
-                SET variables_json = CAST(:vars AS jsonb),
-                    variables_validated = FALSE,
-                    variables_generated_at = NOW(),
-                    updated_at = NOW()
-            """), {"sid": scenario_id, "vars": _json.dumps(variables)})
+            if persist == "proposal":
+                conn.execute(text("""
+                    INSERT INTO scenario_settings (scenario_id, variables_proposal_json, proposal_generated_at, updated_at)
+                    VALUES (:sid, CAST(:vars AS jsonb), NOW(), NOW())
+                    ON CONFLICT (scenario_id) DO UPDATE
+                    SET variables_proposal_json = CAST(:vars AS jsonb),
+                        proposal_generated_at = NOW(),
+                        updated_at = NOW()
+                """), {"sid": scenario_id, "vars": _json.dumps(variables)})
+            else:
+                conn.execute(text("""
+                    INSERT INTO scenario_settings (scenario_id, variables_json, variables_validated, variables_generated_at, updated_at)
+                    VALUES (:sid, CAST(:vars AS jsonb), FALSE, NOW(), NOW())
+                    ON CONFLICT (scenario_id) DO UPDATE
+                    SET variables_json = CAST(:vars AS jsonb),
+                        variables_validated = FALSE,
+                        variables_generated_at = NOW(),
+                        updated_at = NOW()
+                """), {"sid": scenario_id, "vars": _json.dumps(variables)})
 
-        logger.info(f"Variables & Modèle générés pour {scenario_id}: {len(pico_articles)} articles PICO.")
+        logger.info(f"Variables & Modèle générés ({persist}) pour {scenario_id}: {len(pico_articles)} articles PICO.")
         return variables
 
     except Exception as e:
@@ -11515,6 +11526,202 @@ def get_scenario_model_spec(scenario_id: str) -> dict[str, Any]:
         "provenance_index": vj.get("_provenance_index", {}),
         "validated": row["variables_validated"],
         "generated_at": row["variables_generated_at"].isoformat() if row["variables_generated_at"] else None,
+    }
+
+
+# ─── SPEC EVOLUTION (Phase 5) : nouvelle évidence -> proposition -> validation ─
+# Quand de nouveaux articles apportent de l'évidence (nouvel outcome, nouvelle
+# variable, meilleur algorithme), on RÉGÉNÈRE le spec dans un slot de staging,
+# on le DIFFE contre le spec actif validé, l'utilisateur VALIDE, puis le nouveau
+# spec devient actif (version +1) et le modèle est ré-entraîné.
+
+_SPEC_PROPOSAL_JOBS: dict[str, dict] = {}
+
+
+def _ensure_spec_proposal_columns():
+    with engine.begin() as conn:
+        conn.execute(text("ALTER TABLE scenario_settings ADD COLUMN IF NOT EXISTS variables_proposal_json JSONB"))
+        conn.execute(text("ALTER TABLE scenario_settings ADD COLUMN IF NOT EXISTS proposal_generated_at TIMESTAMP"))
+    logger.info("Colonnes de proposition de spec vérifiées/créées.")
+
+
+try:
+    _ensure_spec_proposal_columns()
+except Exception as _e:
+    logger.warning(f"_ensure_spec_proposal_columns: {_e}")
+
+
+def _diff_model_spec(old: dict | None, new: dict | None) -> dict:
+    """Diff structuré entre deux model_spec (pur, testable)."""
+    old, new = old or {}, new or {}
+    o_out, n_out = old.get("outcome") or {}, new.get("outcome") or {}
+    outcome_fields = {}
+    for f in ("name", "machine_name", "task_type", "unit"):
+        if (o_out.get(f) or None) != (n_out.get(f) or None):
+            outcome_fields[f] = {"old": o_out.get(f), "new": n_out.get(f)}
+
+    o_feats = {f.get("machine_name"): f for f in (old.get("features") or [])}
+    n_feats = {f.get("machine_name"): f for f in (new.get("features") or [])}
+    added = [k for k in n_feats if k not in o_feats]
+    removed = [k for k in o_feats if k not in n_feats]
+    changed = []
+    for k in n_feats:
+        if k in o_feats:
+            fc = {}
+            for fld in ("dtype", "source", "importance"):
+                if (o_feats[k].get(fld) or None) != (n_feats[k].get(fld) or None):
+                    fc[fld] = {"old": o_feats[k].get(fld), "new": n_feats[k].get(fld)}
+            if fc:
+                changed.append({"machine_name": k, "fields": fc})
+
+    o_alg, n_alg = old.get("algorithm") or {}, new.get("algorithm") or {}
+    alg_fields = {}
+    for f in ("family", "metric"):
+        if (o_alg.get(f) or None) != (n_alg.get(f) or None):
+            alg_fields[f] = {"old": o_alg.get(f), "new": n_alg.get(f)}
+
+    has_changes = bool(outcome_fields or added or removed or changed or alg_fields)
+    return {
+        "has_changes": has_changes,
+        "outcome_changed": bool(outcome_fields),
+        "outcome_fields": outcome_fields,
+        "features_added": added,
+        "features_removed": removed,
+        "features_changed": changed,
+        "algorithm_changed": bool(alg_fields),
+        "algorithm_fields": alg_fields,
+        "summary": {
+            "added": len(added), "removed": len(removed), "changed": len(changed),
+            "outcome_changed": bool(outcome_fields), "algorithm_changed": bool(alg_fields),
+        },
+    }
+
+
+@app.post("/scenarios/{scenario_id}/model/spec/propose")
+def propose_scenario_spec(scenario_id: str, _: None = Depends(require_api_key)) -> dict[str, Any]:
+    """Régénère le spec depuis l'évidence courante dans un slot de proposition (async)."""
+    import threading
+
+    if _SPEC_PROPOSAL_JOBS.get(scenario_id, {}).get("status") == "running":
+        return {"status": "already_running", "scenario_id": scenario_id}
+
+    _SPEC_PROPOSAL_JOBS[scenario_id] = {"status": "running"}
+
+    def _run():
+        result = _generate_variables_from_pico(scenario_id, persist="proposal")
+        if "error" in result:
+            _SPEC_PROPOSAL_JOBS[scenario_id] = {"status": "error", "error": result["error"]}
+        else:
+            _SPEC_PROPOSAL_JOBS[scenario_id] = {"status": "done"}
+
+    threading.Thread(target=_run, daemon=True).start()
+    return {"status": "started", "scenario_id": scenario_id}
+
+
+@app.get("/scenarios/{scenario_id}/model/spec/proposal")
+def get_scenario_spec_proposal(scenario_id: str) -> dict[str, Any]:
+    """Proposition de spec en attente + diff vs spec actif."""
+    job = _SPEC_PROPOSAL_JOBS.get(scenario_id, {})
+    if job.get("status") == "running":
+        return {"status": "generating", "message": "Régénération en cours, réessayez bientôt."}
+
+    with engine.connect() as conn:
+        row = conn.execute(text("""
+            SELECT variables_json, variables_proposal_json, proposal_generated_at
+            FROM scenario_settings WHERE scenario_id = :sid
+        """), {"sid": scenario_id}).mappings().first()
+
+    if job.get("status") == "error":
+        return {"status": "error", "error": job.get("error")}
+    if not (row and row["variables_proposal_json"]):
+        return {"status": "empty", "message": "Aucune proposition. Lancez /model/spec/propose."}
+
+    proposal = dict(row["variables_proposal_json"])
+    active = dict(row["variables_json"]) if row["variables_json"] else {}
+    diff = _diff_model_spec(active.get("model_spec"), proposal.get("model_spec"))
+
+    return {
+        "status": "ready",
+        "scenario_id": scenario_id,
+        "diff": diff,
+        "proposal_spec": proposal.get("model_spec"),
+        "active_version": (active.get("model_spec") or {}).get("version"),
+        "proposal_provenance": proposal.get("_provenance_index", {}),
+        "generated_at": row["proposal_generated_at"].isoformat() if row["proposal_generated_at"] else None,
+    }
+
+
+@app.post("/scenarios/{scenario_id}/model/spec/proposal/validate")
+def validate_scenario_spec_proposal(scenario_id: str, payload: dict[str, Any],
+                                    _: None = Depends(require_api_key)) -> dict[str, Any]:
+    """
+    Valide ou rejette la proposition. Body: {"action": "accept"|"reject", "retrain": bool}.
+    accept -> la proposition devient le spec actif (version +1), validé, et le
+    modèle est ré-entraîné si un dataset est branché.
+    """
+    import json as _json
+    import threading
+    from datetime import datetime, timezone
+
+    action = (payload.get("action") or "").strip().lower()
+    if action not in ("accept", "reject"):
+        raise HTTPException(status_code=400, detail="action doit être 'accept' ou 'reject'.")
+
+    with engine.connect() as conn:
+        row = conn.execute(text("""
+            SELECT variables_json, variables_proposal_json
+            FROM scenario_settings WHERE scenario_id = :sid
+        """), {"sid": scenario_id}).mappings().first()
+    if not (row and row["variables_proposal_json"]):
+        raise HTTPException(status_code=400, detail="Aucune proposition en attente.")
+
+    if action == "reject":
+        with engine.begin() as conn:
+            conn.execute(text("""
+                UPDATE scenario_settings
+                SET variables_proposal_json = NULL, proposal_generated_at = NULL, updated_at = NOW()
+                WHERE scenario_id = :sid
+            """), {"sid": scenario_id})
+        return {"status": "rejected", "scenario_id": scenario_id}
+
+    # accept : promouvoir la proposition en spec actif, version +1.
+    proposal = dict(row["variables_proposal_json"])
+    active = dict(row["variables_json"]) if row["variables_json"] else {}
+    old_ver = int((active.get("model_spec") or {}).get("version", 0) or 0)
+    if proposal.get("model_spec"):
+        proposal["model_spec"]["version"] = old_ver + 1
+
+    with engine.begin() as conn:
+        conn.execute(text("""
+            UPDATE scenario_settings
+            SET variables_json = CAST(:vars AS jsonb),
+                variables_validated = TRUE,
+                variables_generated_at = NOW(),
+                variables_proposal_json = NULL,
+                proposal_generated_at = NULL,
+                updated_at = NOW()
+            WHERE scenario_id = :sid
+        """), {"sid": scenario_id, "vars": _json.dumps(proposal)})
+
+    # Ré-entraînement automatique si un dataset est branché.
+    retrain = payload.get("retrain", True)
+    retrain_started = False
+    if retrain:
+        with engine.connect() as conn:
+            ds = conn.execute(text(
+                "SELECT id FROM scenario_model_dataset WHERE scenario_id = :sid AND is_active = TRUE LIMIT 1"
+            ), {"sid": scenario_id}).first()
+        if ds and _MODEL_TRAIN_JOBS.get(scenario_id, {}).get("status") != "running":
+            _MODEL_TRAIN_JOBS[scenario_id] = {"status": "running"}
+            threading.Thread(target=_run_model_training, args=(scenario_id, 25), daemon=True).start()
+            retrain_started = True
+
+    return {
+        "status": "accepted",
+        "scenario_id": scenario_id,
+        "new_version": old_ver + 1,
+        "retrain_started": retrain_started,
+        "validated_at": datetime.now(timezone.utc).isoformat(),
     }
 
 
