@@ -4086,23 +4086,33 @@ export function ScenarioDetailPage({ scenarioId, onBack }: ScenarioDetailPagePro
   const [error, setError] = useState<string | null>(null);
   const [activeSection, setActiveSection] = useState<SectionKey>("review");
 
-  // Scroll en haut de page à l'ouverture d'un scénario.
-  // On « épingle » le haut pendant un court instant (~350 ms) via une boucle
-  // requestAnimationFrame : un simple scrollTo(0,0) ne suffit pas car l'inertie
-  // de défilement (momentum trackpad/molette) reportée depuis la liste ou la
-  // recherche continue d'émettre des évènements de scroll après la bascule de
-  // page, ce qui refait défiler la nouvelle page vers le bas. La dépendance
-  // `loading` relance l'épinglage une fois le vrai contenu monté.
+  // Scroll tout en haut à l'ouverture d'un scénario.
+  // Un simple scrollTo(0,0) ne suffit pas : l'inertie de défilement (momentum
+  // trackpad/molette) reportée depuis la liste ou la recherche continue d'émettre
+  // des évènements de scroll après la bascule de page et refait descendre la
+  // nouvelle page (parfois juste sous l'en-tête). On épingle donc le haut image
+  // par image jusqu'à ce que la position se *stabilise* à 0 (momentum épuisé),
+  // au lieu d'une durée fixe. La boucle s'arrête dès que le haut tient quelques
+  // frames (cas sans inertie → quasi instantané) ou après un plafond de sécurité.
+  // Dépendance `loading` : relance une fois le vrai contenu monté.
   useLayoutEffect(() => {
     let raf = 0;
+    let stable = 0;
     const startedAt = performance.now();
+    window.scrollTo(0, 0);
     const pinTop = () => {
-      window.scrollTo(0, 0);
-      if (performance.now() - startedAt < 350) {
+      const y = window.scrollY || document.documentElement.scrollTop || 0;
+      if (y === 0) {
+        stable += 1;
+      } else {
+        window.scrollTo(0, 0);
+        stable = 0;
+      }
+      if (stable < 4 && performance.now() - startedAt < 1000) {
         raf = requestAnimationFrame(pinTop);
       }
     };
-    pinTop();
+    raf = requestAnimationFrame(pinTop);
     return () => cancelAnimationFrame(raf);
   }, [scenarioId, loading]);
 
