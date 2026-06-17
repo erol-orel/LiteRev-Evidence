@@ -96,6 +96,13 @@ const STATUS_COLORS = {
     dot: "bg-rose-400",
     badge: "bg-rose-500/20 text-rose-300 border-rose-500/30",
   },
+  unavailable: {
+    bg: "bg-white/3",
+    border: "border-white/15",
+    text: "text-white/50",
+    dot: "bg-white/40",
+    badge: "bg-white/10 text-white/50 border-white/15",
+  },
 };
 
 function SectionHeader({ icon, title, subtitle }: { icon: React.ReactNode; title: string; subtitle?: string }) {
