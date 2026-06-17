@@ -212,6 +212,107 @@ def _normalize_doi(doi: str | None) -> str | None:
     return doi
 
 
+# Hiérarchie des devis d'étude (evidence pyramid) → score 0–1.
+_STUDY_DESIGN_TIERS = (
+    (("meta-analysis", "méta-analyse", "metaanalysis"), 1.00),
+    (("systematic review", "revue systématique", "systematic"), 0.92),
+    (("randomized", "randomised", "rct", "essai randomisé"), 0.85),
+    (("cohort", "cohorte", "longitudinal"), 0.62),
+    (("case-control", "cas-témoins", "case control"), 0.52),
+    (("cross-sectional", "transversale", "survey", "observational"), 0.42),
+    (("case series", "case report", "cas clinique", "série de cas"), 0.28),
+    (("editorial", "commentary", "opinion", "letter", "éditorial"), 0.18),
+)
+_BIAS_RISK_FACTOR = {"low": 1.0, "faible": 1.0, "moderate": 0.85, "modéré": 0.85,
+                     "unclear": 0.75, "incertain": 0.75, "high": 0.55, "élevé": 0.55}
+
+
+def _coerce_int(value: Any) -> int | None:
+    """Convertit prudemment une valeur (str/float/None) en int positif, sinon None."""
+    if value is None:
+        return None
+    try:
+        n = int(float(str(value).replace(",", "").strip()))
+        return n if n > 0 else None
+    except (ValueError, TypeError):
+        return None
+
+
+def _design_tier_score(study_design: str | None) -> float | None:
+    """Score 0–1 du devis d'étude d'après la pyramide des preuves, ou None si inconnu."""
+    if not study_design:
+        return None
+    s = study_design.strip().lower()
+    for keywords, score in _STUDY_DESIGN_TIERS:
+        if any(k in s for k in keywords):
+            return score
+    return None
+
+
+def _compute_quality_score(
+    study_design: str | None = None,
+    year: int | None = None,
+    sample_size: int | None = None,
+    citation_count: int | None = None,
+    open_access: bool | None = None,
+    bias_risk: str | None = None,
+) -> float | None:
+    """
+    Score de qualité méthodologique déterministe et reproductible, dans [0, 1].
+
+    Combinaison pondérée de signaux objectifs (aucun appel LLM) :
+      - devis d'étude (pyramide des preuves)  — poids 0.50
+      - taille d'échantillon (log)            — poids 0.18
+      - citations (log)                       — poids 0.12
+      - récence                               — poids 0.12
+      - accès ouvert                          — poids 0.08
+    Le score du devis est en outre modulé par le risque de biais s'il est connu.
+
+    Renvoie None si AUCUN signal n'est disponible (on ne fabrique pas une note).
+    Les poids sont renormalisés sur les seuls signaux présents, afin qu'un article
+    bien documenté et un article peu documenté restent comparables.
+    """
+    import math
+    from datetime import datetime, timezone
+
+    components: list[tuple[float, float]] = []  # (sous-score 0–1, poids)
+
+    design = _design_tier_score(study_design)
+    if design is not None:
+        if bias_risk:
+            design *= _BIAS_RISK_FACTOR.get(str(bias_risk).strip().lower(), 1.0)
+        components.append((min(1.0, design), 0.50))
+
+    if sample_size and sample_size > 0:
+        # 10 → 0.25, 1k → ~0.6, 100k → 1.0
+        components.append((min(1.0, math.log10(sample_size) / 5.0), 0.18))
+
+    if citation_count is not None and citation_count >= 0:
+        # 0 → 0, ~30 → 0.5, 1000 → 1.0
+        components.append((min(1.0, math.log10(citation_count + 1) / 3.0), 0.12))
+
+    if year and year > 1950:
+        current = datetime.now(timezone.utc).year
+        age = max(0, current - int(year))
+        # ≤2 ans → 1.0, dégrade linéairement, 0 au-delà de 25 ans
+        components.append((max(0.0, min(1.0, (25 - age) / 23.0)), 0.12))
+
+    if open_access is not None:
+        components.append((1.0 if open_access else 0.0, 0.08))
+
+    if not components:
+        return None
+    total_weight = sum(w for _, w in components)
+    score = sum(sub * w for sub, w in components) / total_weight
+    score = max(0.0, min(1.0, score))
+    # Sans devis d'étude connu, on ne peut pas affirmer une qualité « Forte » :
+    # on plafonne à 0.55 (au mieux « Modérée ») pour qu'un article récent mais
+    # non caractérisé ne soit jamais classé au sommet de la pyramide des preuves.
+    if design is None:
+        score = min(score, 0.55)
+    return round(score, 4)
+
+
 class DocumentIn(BaseModel):
     source: str = Field(..., min_length=1)
     title: str = Field(..., min_length=1)
@@ -4225,6 +4326,68 @@ def run_scenario_model(scenario_id: str, _: None = Depends(require_api_key)) -> 
     Retourne le résultat frais avec statut coloré.
     """
     return get_scenario_model_status(scenario_id)
+
+
+@app.post("/admin/recompute-quality-scores")
+def recompute_quality_scores(
+    limit: int = 5000,
+    only_missing: bool = True,
+    _: None = Depends(require_api_key),
+) -> dict[str, Any]:
+    """
+    (Re)calcule le quality_score déterministe sur le corpus existant à partir des
+    colonnes structurées et de metadata_json (study_type, sample_size, bias_risk).
+    Idempotent. `only_missing=True` ne traite que les documents sans score
+    (quality_score NULL ou 0). À appeler par lots (`limit`) pour le backfill.
+    """
+    where_missing = "AND (quality_score IS NULL OR quality_score = 0)" if only_missing else ""
+    with engine.connect() as conn:
+        rows = conn.execute(text(f"""
+            SELECT id, year, citation_count, open_access, study_design, sample_size,
+                   metadata_json
+            FROM literature_document
+            WHERE project_context = 'literev'
+              {where_missing}
+            ORDER BY id
+            LIMIT :limit
+        """), {"limit": max(1, min(limit, 50000))}).mappings().fetchall()
+
+    updated = 0
+    skipped_no_signal = 0
+    for r in rows:
+        meta = r["metadata_json"] if isinstance(r["metadata_json"], dict) else {}
+        study_design = r["study_design"] or (meta.get("study_type") if meta else None)
+        sample_size = r["sample_size"] or _coerce_int(meta.get("sample_size") if meta else None)
+        score = _compute_quality_score(
+            study_design=study_design,
+            year=r["year"],
+            sample_size=sample_size,
+            citation_count=r["citation_count"],
+            open_access=r["open_access"],
+            bias_risk=(meta.get("bias_risk") if meta else None),
+        )
+        if score is None:
+            skipped_no_signal += 1
+            continue
+        with engine.begin() as conn:
+            conn.execute(text("""
+                UPDATE literature_document
+                SET quality_score = :score,
+                    study_design = COALESCE(:study_design, study_design),
+                    sample_size = COALESCE(:sample_size, sample_size)
+                WHERE id = :id
+            """), {"score": score, "study_design": study_design,
+                   "sample_size": sample_size, "id": r["id"]})
+        updated += 1
+
+    return {
+        "scanned": len(rows),
+        "updated": updated,
+        "skipped_no_signal": skipped_no_signal,
+        "only_missing": only_missing,
+        "limit": limit,
+        "message": "Relancez l'endpoint tant que 'scanned' == 'limit' pour traiter tout le corpus.",
+    }
 
 
 # ── Encoder JSON pour types numpy ────────────────────────────────────────────
@@ -9035,7 +9198,9 @@ def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict
                 )
                 with engine.connect() as conn:
                     meta_rows = conn.execute(text("""
-                        SELECT ld.id, ld.title, ld.abstract, ld.source, ld.year
+                        SELECT ld.id, ld.title, ld.abstract, ld.source, ld.year,
+                               ld.citation_count, ld.open_access,
+                               ld.study_design, ld.sample_size
                         FROM literature_document ld
                         JOIN article_scenarios asn ON asn.document_id = ld.id
                         WHERE asn.scenario_id = :sid
@@ -9060,12 +9225,34 @@ def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict
                         )
                         metadata = json.loads(response.choices[0].message.content)
                         metadata["metadata_confidence"] = float(metadata.get("metadata_confidence", 0.5))
+                        # Renseigner les colonnes structurées depuis le JSON extrait
+                        # (study_design / sample_size), puis calculer un quality_score
+                        # déterministe — sinon l'évaluation GRADE buckette tout en « Faible ».
+                        study_design = metadata.get("study_type") or row.get("study_design")
+                        sample_size = _coerce_int(metadata.get("sample_size")) or row.get("sample_size")
+                        quality_score = _compute_quality_score(
+                            study_design=study_design,
+                            year=row.get("year"),
+                            sample_size=sample_size,
+                            citation_count=row.get("citation_count"),
+                            open_access=row.get("open_access"),
+                            bias_risk=metadata.get("bias_risk"),
+                        )
                         with engine.begin() as conn:
                             conn.execute(text("""
                                 UPDATE literature_document
-                                SET metadata_json = CAST(:meta AS jsonb)
+                                SET metadata_json = CAST(:meta AS jsonb),
+                                    study_design = COALESCE(:study_design, study_design),
+                                    sample_size = COALESCE(:sample_size, sample_size),
+                                    quality_score = COALESCE(:quality_score, quality_score)
                                 WHERE id = :article_id
-                            """), {"meta": json.dumps(metadata), "article_id": row["id"]})
+                            """), {
+                                "meta": json.dumps(metadata),
+                                "study_design": study_design,
+                                "sample_size": sample_size,
+                                "quality_score": quality_score,
+                                "article_id": row["id"],
+                            })
                         meta_extracted += 1
                     except Exception as e:
                         logger.warning(f"Pipeline metadata article {row['id']}: {e}")
