@@ -4075,12 +4075,24 @@ export function ScenarioDetailPage({ scenarioId, onBack }: ScenarioDetailPagePro
   const [error, setError] = useState<string | null>(null);
   const [activeSection, setActiveSection] = useState<SectionKey>("review");
 
-  // Scroll en haut de page à chaque ouverture d'un scénario.
-  // useLayoutEffect + dépendance `loading` : on remet aussi à 0 une fois le
-  // contenu réel monté (le simple reset au montage se fait pendant le spinner,
-  // donc la page longue qui s'affiche ensuite gardait la position de défilement).
+  // Scroll en haut de page à l'ouverture d'un scénario.
+  // On « épingle » le haut pendant un court instant (~350 ms) via une boucle
+  // requestAnimationFrame : un simple scrollTo(0,0) ne suffit pas car l'inertie
+  // de défilement (momentum trackpad/molette) reportée depuis la liste ou la
+  // recherche continue d'émettre des évènements de scroll après la bascule de
+  // page, ce qui refait défiler la nouvelle page vers le bas. La dépendance
+  // `loading` relance l'épinglage une fois le vrai contenu monté.
   useLayoutEffect(() => {
-    window.scrollTo(0, 0);
+    let raf = 0;
+    const startedAt = performance.now();
+    const pinTop = () => {
+      window.scrollTo(0, 0);
+      if (performance.now() - startedAt < 350) {
+        raf = requestAnimationFrame(pinTop);
+      }
+    };
+    pinTop();
+    return () => cancelAnimationFrame(raf);
   }, [scenarioId, loading]);
 
   useEffect(() => {
