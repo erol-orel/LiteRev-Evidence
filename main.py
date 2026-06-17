@@ -11007,6 +11007,229 @@ def get_llm_evidence_brief(scenario_id: str) -> dict[str, Any]:
 _VARIABLES_GENERATION_JOBS: dict[str, dict] = {}
 
 
+# ─── MODEL SPEC (Phase 1) : schéma machine + provenance ──────────────────────
+# La littérature définit la SPÉCIFICATION du modèle (outcome, variables
+# explicatives, algorithme). Les données d'entraînement viendront ensuite de
+# l'utilisateur (CSV/XLSX) et de flux publics. Ces helpers normalisent la sortie
+# LLM en un spec déterministe, exploitable par la machine, et tracé (provenance)
+# vers les articles sources. Tout est ADDITIF : les clés existantes de
+# variables_json restent intactes pour ne pas casser le frontend.
+
+MODEL_SPEC_SCHEMA = "model_spec/1.0"
+
+_TASK_TYPES = {"classification", "regression", "count", "survival"}
+_DTYPES = {"float", "int", "bool", "category", "datetime"}
+_FEATURE_SOURCES = {"user", "public_api"}
+_ALGO_FAMILIES = {
+    "gradient_boosting", "random_forest", "logistic_regression",
+    "linear_regression", "elasticnet", "svm", "mlp", "cox_ph", "knn",
+}
+_METRICS = {"roc_auc", "average_precision", "rmse", "mae", "r2", "c_index"}
+_CV_STRATEGIES = {"stratified_kfold", "kfold", "timeseries"}
+
+
+def _slug_identifier(name: str, used: set[str]) -> str:
+    """snake_case, identifiant valide et unique (pour colonnes CSV/DataFrame)."""
+    import re as _re
+    import unicodedata as _ud
+    # Replier les accents (é -> e) avant de slugifier, sinon ils deviennent des "_".
+    folded = _ud.normalize("NFKD", name or "").encode("ascii", "ignore").decode("ascii")
+    base = _re.sub(r"[^a-z0-9]+", "_", folded.strip().lower()).strip("_")
+    if not base or not _re.match(r"^[a-z_]", base):
+        base = ("var_" + base).strip("_") if base else "var"
+    candidate, i = base, 2
+    while candidate in used:
+        candidate = f"{base}_{i}"
+        i += 1
+    used.add(candidate)
+    return candidate
+
+
+def _coerce_enum(value: Any, allowed: set[str], default: str) -> str:
+    v = str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
+    return v if v in allowed else default
+
+
+def _infer_algo_family(text_blob: str) -> str:
+    t = (text_blob or "").lower()
+    table = [
+        (("xgboost", "lightgbm", "gradient boost", "gradient_boost", "boosting", "gbm"), "gradient_boosting"),
+        (("random forest", "random_forest", "forêt aléatoire", "foret aleatoire"), "random_forest"),
+        (("logistic", "logistique"), "logistic_regression"),
+        (("cox", "proportional hazard", "survie", "survival"), "cox_ph"),
+        (("ridge", "lasso", "elastic"), "elasticnet"),
+        (("linear regression", "régression linéaire", "regression lineaire", "ols", "moindres carrés"), "linear_regression"),
+        (("svm", "support vector"), "svm"),
+        (("neural", "mlp", "deep", "réseau de neur", "reseau de neur"), "mlp"),
+        (("knn", "nearest neighbor", "plus proches voisins"), "knn"),
+    ]
+    for keys, fam in table:
+        if any(k in t for k in keys):
+            return fam
+    return "gradient_boosting"
+
+
+def _dtype_for_var_type(var_type: Any) -> str:
+    return {
+        "continuous": "float", "binary": "bool", "categorical": "category",
+        "time_series": "float", "count": "int", "integer": "int",
+    }.get(str(var_type or "").strip().lower(), "float")
+
+
+def _infer_feature_source(data_source: str, declared: str) -> tuple[str, str | None]:
+    """Retourne (source, public_provider) — déclaré LLM sinon heuristique texte."""
+    declared = (declared or "").strip().lower()
+    if declared in _FEATURE_SOURCES:
+        src = declared
+    else:
+        ds = (data_source or "").lower()
+        public_hint = any(k in ds for k in (
+            "météo", "meteo", "weather", "temperature", "température", "forecast",
+            "prévision", "prevision", "open-meteo", "openmeteo", "insee", "open data",
+            "opendata", "données publiques", "donnees publiques", "santé publique",
+            "sentinel", "réseau sentinelles", "reseau sentinelles", "pollen", "air quality",
+        ))
+        src = "public_api" if public_hint else "user"
+    provider = None
+    if src == "public_api":
+        ds = (data_source or "").lower()
+        if any(k in ds for k in ("météo", "meteo", "weather", "temp", "forecast", "prévision", "prevision", "open-meteo")):
+            provider = "open-meteo"
+    return src, provider
+
+
+def _filter_provenance(raw: Any, valid_ids: set) -> list:
+    """Ne garde que les ids réellement présents dans le contexte fourni au LLM."""
+    out: list = []
+    for x in (raw or []):
+        try:
+            xi = int(x)
+        except (TypeError, ValueError):
+            continue
+        if xi in valid_ids and xi not in out:
+            out.append(xi)
+    return out
+
+
+def _attach_model_spec(variables: dict, prov_articles: list[dict]) -> dict:
+    """
+    Construit un `model_spec` déterministe (outcome, features, algorithme,
+    data_template) + un index de provenance, à partir de la sortie LLM.
+    Robuste : si le LLM omet les champs machine, ils sont reconstruits depuis
+    les champs humains existants. N'altère aucune clé existante (ajoute
+    seulement `machine_name` en cross-link et les blocs `model_spec`/_provenance_index).
+    """
+    valid_ids = {a["id"] for a in prov_articles if a.get("id") is not None}
+    prov_meta = {
+        a["id"]: {"title": (a.get("title") or "")[:160], "year": a.get("year"), "doi": a.get("doi")}
+        for a in prov_articles if a.get("id") is not None
+    }
+    used: set[str] = set()
+    cited: set = set()
+
+    # ── Outcome ──
+    po = variables.get("primary_outcome") or {}
+    outcome_mn = _slug_identifier(po.get("machine_name") or po.get("name") or "outcome", used)
+    task_type = _coerce_enum(po.get("task_type"), _TASK_TYPES, "classification")
+    outcome_prov = _filter_provenance(po.get("provenance"), valid_ids)
+    cited.update(outcome_prov)
+    po["machine_name"] = outcome_mn  # cross-link additif
+    po["task_type"] = task_type
+    outcome = {
+        "name": po.get("name", ""),
+        "machine_name": outcome_mn,
+        "task_type": task_type,
+        "unit": po.get("unit") or po.get("measurement") or "",
+        "positive_class": po.get("positive_class") if task_type == "classification" else None,
+        "provenance": outcome_prov,
+    }
+
+    # ── Features ──
+    features = []
+    has_time_series = False
+    for pv in (variables.get("predictor_variables") or []):
+        mn = _slug_identifier(pv.get("machine_name") or pv.get("name") or "feature", used)
+        dtype = _coerce_enum(pv.get("dtype"), _DTYPES, _dtype_for_var_type(pv.get("type")))
+        source, provider = _infer_feature_source(pv.get("data_source", ""), pv.get("source", ""))
+        prov = _filter_provenance(pv.get("provenance"), valid_ids)
+        cited.update(prov)
+        if str(pv.get("type", "")).strip().lower() == "time_series" or dtype == "datetime":
+            has_time_series = True
+        pv["machine_name"] = mn  # cross-link additif
+        features.append({
+            "name": pv.get("name", ""),
+            "machine_name": mn,
+            "dtype": dtype,
+            "source": source,
+            "public_provider": provider,
+            "importance": _coerce_enum(pv.get("importance"), {"high", "medium", "low"}, "medium"),
+            "provenance": prov,
+        })
+
+    # ── Algorithme ──
+    ra = variables.get("recommended_algorithm") or {}
+    family = _coerce_enum(
+        ra.get("family"), _ALGO_FAMILIES,
+        _infer_algo_family(f"{ra.get('primary', '')} {' '.join(ra.get('alternatives') or [])}"),
+    )
+    metric = _coerce_enum(
+        ra.get("metric"), _METRICS,
+        {"classification": "roc_auc", "regression": "rmse", "count": "rmse", "survival": "c_index"}[task_type],
+    )
+    default_cv = "timeseries" if has_time_series else ("stratified_kfold" if task_type == "classification" else "kfold")
+    cv_strategy = _coerce_enum(ra.get("cv_strategy"), _CV_STRATEGIES, default_cv)
+    try:
+        cv_folds = int(ra.get("cv_folds") or 5)
+    except (TypeError, ValueError):
+        cv_folds = 5
+    cv_folds = min(max(cv_folds, 3), 10)
+    algo_prov = _filter_provenance(ra.get("provenance"), valid_ids)
+    cited.update(algo_prov)
+    candidates = [c for c in (_coerce_enum(x, _ALGO_FAMILIES, "") for x in (ra.get("alternatives") or [])) if c]
+    algorithm = {
+        "family": family,
+        "candidates": candidates,
+        "rationale": ra.get("rationale", ""),
+        "cv": {"strategy": cv_strategy, "folds": cv_folds},
+        "metric": metric,
+        "provenance": algo_prov,
+    }
+
+    # ── Data template (dérivé → garanti cohérent avec les machine_name ci-dessus) ──
+    target_dtype = {"classification": "category", "regression": "float", "count": "int", "survival": "float"}[task_type]
+    columns = [{
+        "name": outcome_mn, "dtype": target_dtype, "role": "outcome",
+        "required": True, "source": "user", "description": outcome["name"],
+    }]
+    for f in features:
+        columns.append({
+            "name": f["machine_name"], "dtype": f["dtype"], "role": "feature",
+            "required": f["importance"] == "high",
+            "source": f["source"], "public_provider": f["public_provider"],
+            "description": f["name"],
+        })
+    data_template = {
+        "target_column": outcome_mn,
+        "columns": columns,
+        "formats": ["csv", "xlsx"],
+        "user_columns": [c["name"] for c in columns if c["source"] == "user"],
+        "public_columns": [c["name"] for c in columns if c["source"] == "public_api"],
+        "notes": ("Les en-têtes du fichier doivent correspondre EXACTEMENT à ces noms. "
+                  "Les colonnes 'public_api' pourront être récupérées automatiquement (Phase 2)."),
+    }
+
+    variables["model_spec"] = {
+        "schema": MODEL_SPEC_SCHEMA,
+        "version": 1,
+        "outcome": outcome,
+        "features": features,
+        "algorithm": algorithm,
+        "data_template": data_template,
+    }
+    variables["_provenance_index"] = {str(i): prov_meta[i] for i in sorted(cited) if i in prov_meta}
+    return variables
+
+
 def _generate_variables_from_pico(scenario_id: str) -> dict[str, Any]:
     """
     Génère automatiquement les variables du modèle et l'outcome à partir des PICO extraits.
@@ -11030,6 +11253,7 @@ def _generate_variables_from_pico(scenario_id: str) -> dict[str, Any]:
     for a in pico_articles[:25]:
         pj = a.get("pico_json") or {}
         pico_context.append({
+            "id": a.get("id"),
             "title": a.get("title", "")[:100],
             "year": a.get("year"),
             "study_design": a.get("study_design") or pj.get("study_design", ""),
@@ -11058,7 +11282,12 @@ Génère un JSON avec EXACTEMENT ces champs :
     "name": "Nom de l'outcome principal",
     "definition": "Définition clinique précise",
     "measurement": "Comment le mesurer",
-    "timeframe": "Horizon temporel"
+    "timeframe": "Horizon temporel",
+    "machine_name": "identifiant_snake_case_court",
+    "task_type": "classification|regression|count|survival",
+    "unit": "Unité de mesure (ex: bool, jours, /100k)",
+    "positive_class": "Classe positive si classification, sinon null",
+    "provenance": [ids d'articles de la liste ci-dessus soutenant cet outcome]
   }},
   "secondary_outcomes": [
     {{"name": "...", "definition": "..."}}
@@ -11070,14 +11299,24 @@ Génère un JSON avec EXACTEMENT ces champs :
       "definition": "Définition clinique",
       "data_source": "Source de données recommandée",
       "importance": "high|medium|low",
-      "evidence_level": "Nombre d'études qui la mentionnent"
+      "evidence_level": "Nombre d'études qui la mentionnent",
+      "machine_name": "identifiant_snake_case_court (ex: temp_max_j1)",
+      "dtype": "float|int|bool|category|datetime",
+      "source": "user (fournie par l'utilisateur) | public_api (récupérable: météo, open data...)",
+      "public_provider": "open-meteo si météo, sinon null",
+      "provenance": [ids d'articles de la liste ci-dessus mentionnant cette variable]
     }}
   ],
   "recommended_algorithm": {{
     "primary": "Algorithme principal recommandé",
     "alternatives": ["Alternative 1", "Alternative 2"],
     "rationale": "Justification basée sur la littérature",
-    "validation_method": "Méthode de validation recommandée"
+    "validation_method": "Méthode de validation recommandée",
+    "family": "gradient_boosting|random_forest|logistic_regression|linear_regression|elasticnet|svm|mlp|cox_ph|knn",
+    "metric": "roc_auc|average_precision|rmse|mae|c_index",
+    "cv_strategy": "stratified_kfold|kfold|timeseries",
+    "cv_folds": 5,
+    "provenance": [ids d'articles de la liste ci-dessus justifiant l'algorithme]
   }},
   "required_databases": ["Base 1", "Base 2"],
   "sample_size_recommendation": "Estimation de la taille d'échantillon nécessaire",
@@ -11090,6 +11329,12 @@ Génère un JSON avec EXACTEMENT ces champs :
   "implementation_notes": "Notes d'implémentation pratiques",
   "validation_status": "pending"
 }}
+
+IMPORTANT pour les champs "provenance" : ce sont des listes d'identifiants (champ "id")
+des articles figurant dans la liste ci-dessus. N'invente AUCUN id : n'utilise que des id
+réellement présents. Les "machine_name" doivent être de courts identifiants snake_case
+(minuscules, chiffres, underscores) utilisables comme noms de colonnes.
+
 Retourne UNIQUEMENT le JSON valide."""
 
     try:
@@ -11101,10 +11346,18 @@ Retourne UNIQUEMENT le JSON valide."""
                 {"role": "user", "content": user_prompt},
             ],
             temperature=0.15,
-            max_tokens=2000,
+            max_tokens=3000,
             response_format={"type": "json_object"},
         )
         variables = _json.loads(response.choices[0].message.content)
+
+        # Phase 1 : normaliser en model_spec déterministe (machine_name, dtype,
+        # algorithme/CV/métrique, data_template) + provenance tracée vers les articles.
+        try:
+            variables = _attach_model_spec(variables, pico_articles[:25])
+        except Exception as spec_err:  # le spec machine ne doit jamais bloquer la génération
+            logger.error(f"model_spec build {scenario_id}: {spec_err}", exc_info=True)
+
         variables["_meta"] = {
             "scenario_id": scenario_id,
             "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -11220,6 +11473,49 @@ def validate_scenario_variables(scenario_id: str, payload: dict[str, Any], _: No
             """), {"sid": scenario_id})
 
     return {"status": "validated", "scenario_id": scenario_id, "validated_at": datetime.now(timezone.utc).isoformat()}
+
+
+@app.get("/scenarios/{scenario_id}/model/spec")
+def get_scenario_model_spec(scenario_id: str) -> dict[str, Any]:
+    """
+    Vue 'machine' du modèle dérivée de variables_json.model_spec : outcome
+    (task_type), features (machine_name/dtype/source), algorithme (famille, CV,
+    métrique) et data_template — les noms de colonnes EXACTS à fournir pour
+    l'upload de données. Chaque élément porte sa provenance (ids d'articles).
+    Socle des phases suivantes (upload de données puis entraînement réel).
+    """
+    with engine.connect() as conn:
+        row = conn.execute(text("""
+            SELECT variables_json, variables_validated, variables_generated_at
+            FROM scenario_settings WHERE scenario_id = :sid
+        """), {"sid": scenario_id}).mappings().first()
+
+    if not (row and row["variables_json"]):
+        return {"status": "empty", "message": "Aucune spécification de modèle. Générez d'abord les Variables & Modèle."}
+
+    vj = dict(row["variables_json"])
+    spec = vj.get("model_spec")
+    if not spec:
+        # Spec générée avant la Phase 1 : pas encore de schéma machine.
+        return {
+            "status": "legacy",
+            "message": "Spécification antérieure au schéma machine. Relancez la génération des Variables & Modèle pour obtenir le data_template.",
+            "validated": row["variables_validated"],
+        }
+
+    return {
+        "status": "ready",
+        "scenario_id": scenario_id,
+        "schema": spec.get("schema"),
+        "version": spec.get("version"),
+        "outcome": spec.get("outcome"),
+        "features": spec.get("features"),
+        "algorithm": spec.get("algorithm"),
+        "data_template": spec.get("data_template"),
+        "provenance_index": vj.get("_provenance_index", {}),
+        "validated": row["variables_validated"],
+        "generated_at": row["variables_generated_at"].isoformat() if row["variables_generated_at"] else None,
+    }
 
 
 # ─── HEATMAP AVEC VRAIS NOMS ─────────────────────────────────────────────────
