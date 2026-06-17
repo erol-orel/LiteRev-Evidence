@@ -3614,33 +3614,6 @@ ${b.corpus_stats.year_min && b.corpus_stats.year_max ? `<p class="meta">Couvertu
   </div>
 </div>
 
-<hr class="section-divider">
-<h2>Articles représentatifs avec extraction PICO</h2>
-${b.top_articles.slice(0,5).map((a,i)=>{
-  const statusCls = a.screening_status==='included'?'badge-status-included':a.screening_status==='excluded'?'badge-status-excluded':'badge-status-pending';
-  const statusLabel = a.screening_status==='included'?'Inclus':a.screening_status==='excluded'?'Exclu':'En attente';
-  const doiUrl = a.doi ? `https://doi.org/${a.doi}` : null;
-  return `<div class="article-card">
-  <div class="article-num">#${i+1}</div>
-  <div class="article-title">${a.title}</div>
-  <div class="article-meta">
-    ${a.year||'N/A'}
-    ${a.journal ? ` · ${a.journal}` : ''}
-    ${a.study_design ? ` · <span class="badge">${a.study_design}</span>` : ''}
-    ${a.similarity_score != null ? ` · <span class="badge badge-sim">sim. ${a.similarity_score.toFixed(2)}</span>` : ''}
-    ${a.screening_status ? ` · <span class="badge ${statusCls}">${statusLabel}</span>` : ''}
-    ${a.citation_count ? ` · ${a.citation_count} citations` : ''}
-    ${doiUrl ? ` · <a href="${doiUrl}" class="doi-link">${doiUrl}</a>` : ''}
-  </div>
-  ${a.pico_summary ? `<div class="pico-grid">
-    <div class="pico-cell"><div class="pico-label">Population</div><div class="pico-val">${a.pico_summary.population||'—'}</div></div>
-    <div class="pico-cell"><div class="pico-label">Intervention</div><div class="pico-val">${a.pico_summary.intervention||'—'}</div></div>
-    <div class="pico-cell"><div class="pico-label">Outcome</div><div class="pico-val">${a.pico_summary.outcome||'—'}</div></div>
-    <div class="pico-cell"><div class="pico-label">Conclusion clé</div><div class="pico-val">${a.pico_summary.key_finding||'—'}</div></div>
-  </div>` : a.abstract_excerpt ? `<p style="font-size:.8em;color:#555;font-style:italic;margin-top:6px">"${a.abstract_excerpt}..."</p>` : ''}
-</div>`;
-}).join('')}
-
 ${llm && (llm.executive_summary || (llm.key_findings?.length ?? 0) > 0) ? `
 <hr class="section-divider">
 <h2>Brief Narratif LLM</h2>
@@ -3814,71 +3787,6 @@ ${llm.future_research ? `<h3>Directions de recherche futures</h3><p class="llm-t
             </div>
           </div>
         </>
-      )}
-
-      {/* ─── ARTICLES REPRÉSENTATIFS ─────────────────────────────────────────── */}
-      {briefData && briefData.top_articles.length > 0 && (
-        <div className="space-y-3">
-          <p className="text-[10px] font-bold uppercase tracking-wider text-white/40">Articles représentatifs avec extraction PICO</p>
-          {briefData.top_articles.slice(0,5).map((a,i)=>(
-            <div key={a.id} className="rounded-2xl border border-white/5 bg-white/2 p-4 space-y-2">
-              <div className="flex items-start gap-2">
-                <span className="text-[10px] font-mono text-brand-300 shrink-0 mt-0.5">#{i+1}</span>
-                <div className="flex-1 min-w-0">
-                  {a.doi ? (
-                    <a href={`https://doi.org/${a.doi}`} target="_blank" rel="noopener noreferrer"
-                      className="text-xs font-semibold text-white/85 leading-4 hover:text-brand-300 transition line-clamp-2">
-                      {a.title}
-                    </a>
-                  ) : (
-                    <p className="text-xs font-semibold text-white/85 leading-4 line-clamp-2">{a.title}</p>
-                  )}
-                  <div className="flex flex-wrap gap-2 mt-1.5 text-[9px] text-white/40 items-center">
-                    <span>{a.year||'N/A'}</span>
-                    {a.journal && <span className="truncate max-w-[160px]">{a.journal}</span>}
-                    {a.study_design && (
-                      <span className="rounded bg-brand-500/10 border border-brand-500/20 px-1.5 py-0.5 text-brand-300">{a.study_design}</span>
-                    )}
-                    {a.similarity_score != null && (
-                      <span className="rounded bg-gold-500/10 border border-gold-500/20 px-1.5 py-0.5 text-gold-400">sim. {a.similarity_score.toFixed(2)}</span>
-                    )}
-                    {a.screening_status && (
-                      <span className={`rounded px-1.5 py-0.5 ${
-                        a.screening_status === 'included' ? 'bg-brand-500/15 text-brand-300' :
-                        a.screening_status === 'excluded' ? 'bg-red-500/15 text-red-400' : 'bg-white/5 text-white/40'
-                      }`}>{a.screening_status === 'included' ? 'Inclus' : a.screening_status === 'excluded' ? 'Exclu' : 'En attente'}</span>
-                    )}
-                    {a.citation_count != null && <span>{a.citation_count} cit.</span>}
-                    {a.doi && (
-                      <a href={`https://doi.org/${a.doi}`} target="_blank" rel="noopener noreferrer"
-                        className="rounded bg-white/5 border border-white/10 px-1.5 py-0.5 text-white/50 hover:text-brand-300 hover:border-brand-500/30 transition flex items-center gap-1">
-                        <ExternalLink size={8} /> DOI
-                      </a>
-                    )}
-                  </div>
-                </div>
-              </div>
-              {a.pico_summary && (
-                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 mt-1">
-                  {[
-                    {label:'Population',     val:a.pico_summary.population},
-                    {label:'Intervention',   val:a.pico_summary.intervention},
-                    {label:'Outcome',        val:a.pico_summary.outcome},
-                    {label:'Conclusion clé', val:a.pico_summary.key_finding},
-                  ].map(p=>(
-                    <div key={p.label} className="rounded-xl border border-white/5 bg-white/2 p-2">
-                      <div className="text-[8px] font-bold uppercase text-white/30 mb-0.5">{p.label}</div>
-                      <div className="text-[9px] text-white/65 leading-3.5 line-clamp-3">{p.val || '—'}</div>
-                    </div>
-                  ))}
-                </div>
-              )}
-              {a.abstract_excerpt && !a.pico_summary && (
-                <p className="text-[9px] text-white/40 italic line-clamp-2">"{a.abstract_excerpt}..."</p>
-              )}
-            </div>
-          ))}
-        </div>
       )}
 
       {/* ─── SÉPARATEUR ─────────────────────────────────────────────────────── */}
