@@ -2645,6 +2645,121 @@ export async function validateScenarioVariables(
   return r.json();
 }
 
+// ─── Modèle entraîné : run, monitoring live, évolution (Phases 3-5) ───────────
+
+export interface ModelRun {
+  status: string; // ready | empty
+  run_id?: number;
+  family?: string;
+  task_type?: string;
+  metric?: string;
+  metrics?: Record<string, number>;
+  best_params?: Record<string, unknown>;
+  feature_importances?: { feature: string; importance: number }[];
+  summary?: Record<string, unknown>;
+  has_artifact?: boolean;
+  created_at?: string;
+  message?: string;
+}
+
+export interface ModelMonitor {
+  status: string; // ready | unavailable | error
+  status_color?: 'green' | 'orange' | 'red' | 'unavailable';
+  status_label?: string;
+  value?: number;
+  kind?: string;
+  unit?: string | null;
+  outcome?: string | null;
+  positive_class?: string | null;
+  bands?: { orange: number | null; red: number | null };
+  n_scored?: number;
+  window?: number;
+  model?: { run_id: number; family: string; task_type: string; metric: string; metrics: Record<string, number> };
+  alert_thresholds?: Record<string, { label?: string; condition?: string }>;
+  generated_at?: string;
+  message?: string;
+}
+
+export interface SpecDiff {
+  has_changes: boolean;
+  outcome_changed: boolean;
+  outcome_fields: Record<string, { old: unknown; new: unknown }>;
+  features_added: string[];
+  features_removed: string[];
+  features_changed: { machine_name: string; fields: Record<string, { old: unknown; new: unknown }> }[];
+  algorithm_changed: boolean;
+  algorithm_fields: Record<string, { old: unknown; new: unknown }>;
+  summary: { added: number; removed: number; changed: number; outcome_changed: boolean; algorithm_changed: boolean };
+}
+
+export interface SpecProposal {
+  status: string; // ready | empty | generating | error
+  diff?: SpecDiff;
+  proposal_spec?: Record<string, unknown>;
+  active_version?: number;
+  generated_at?: string;
+  message?: string;
+  error?: string;
+}
+
+export async function getModelRun(scenarioId: string): Promise<ModelRun> {
+  const r = await fetch(`${API_BASE_URL}/scenarios/${scenarioId}/model/run`);
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  return r.json();
+}
+
+export async function trainModel(scenarioId: string): Promise<{ status: string; scenario_id?: string; n_trials?: number }> {
+  const r = await fetch(`${API_BASE_URL}/scenarios/${scenarioId}/model/train`, { method: 'POST', headers: authHeaders() });
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  return r.json();
+}
+
+export async function generateSyntheticData(
+  scenarioId: string,
+  nRows = 400,
+): Promise<{ status: string; n_rows?: number; n_cols?: number }> {
+  const r = await fetch(`${API_BASE_URL}/scenarios/${scenarioId}/model/data/synthetic?n_rows=${nRows}`, { method: 'POST', headers: authHeaders() });
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  return r.json();
+}
+
+export async function getModelTrainStatus(scenarioId: string): Promise<{ status: string; error?: string; metrics?: Record<string, number> }> {
+  const r = await fetch(`${API_BASE_URL}/scenarios/${scenarioId}/model/train/status`);
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  return r.json();
+}
+
+export async function getModelMonitor(scenarioId: string): Promise<ModelMonitor> {
+  const r = await fetch(`${API_BASE_URL}/scenarios/${scenarioId}/model/monitor`);
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  return r.json();
+}
+
+export async function proposeSpec(scenarioId: string): Promise<{ status: string; scenario_id?: string }> {
+  const r = await fetch(`${API_BASE_URL}/scenarios/${scenarioId}/model/spec/propose`, { method: 'POST', headers: authHeaders() });
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  return r.json();
+}
+
+export async function getSpecProposal(scenarioId: string): Promise<SpecProposal> {
+  const r = await fetch(`${API_BASE_URL}/scenarios/${scenarioId}/model/spec/proposal`);
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  return r.json();
+}
+
+export async function validateSpecProposal(
+  scenarioId: string,
+  action: 'accept' | 'reject',
+): Promise<{ status: string; new_version?: number; retrain_started?: boolean }> {
+  const r = await fetch(`${API_BASE_URL}/scenarios/${scenarioId}/model/spec/proposal/validate`, {
+    method: 'POST',
+    headers: authHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify({ action }),
+  });
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  return r.json();
+}
+
 // ─── Heatmap avec vrais noms ──────────────────────────────────────────────────
 
 export async function fetchCorpusStatsByYearNamed(): Promise<CorpusStatsByYear> {

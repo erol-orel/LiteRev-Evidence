@@ -7,13 +7,12 @@ import {
   Shield, Terminal, Zap, AlertTriangle,
   Globe, Upload, CheckCircle2, AlertCircle, Info,
   Microscope, Loader2, Download, Table2, BookOpen,
-  Network, Bell, Users, Rss, Sparkles, ClipboardList
+  Network, Bell, Users, Rss, Sparkles, ClipboardList,
+  TrendingUp, X
 } from "lucide-react";
 import {
   fetchScenarioDetail,
   fetchScenarioCorpus,
-  fetchScenarioModelStatus,
-  runScenarioModel,
   fetchScenarioClustering,
   askScenarioRagStreamFiltered,
   fetchScenarioPrisma,
@@ -29,6 +28,14 @@ import {
   generateScenarioVariables,
   getVariablesGenerationStatus,
   validateScenarioVariables,
+  getModelRun,
+  trainModel,
+  generateSyntheticData,
+  getModelTrainStatus,
+  getModelMonitor,
+  proposeSpec,
+  getSpecProposal,
+  validateSpecProposal,
   getScenarioSettings,
   patchScenarioSettings,
   triggerRerank,
@@ -53,7 +60,6 @@ import {
   type EmbeddingStatus,
   type ScenarioDetail,
   type ScenarioCorpus,
-  type ModelStatus,
   type ScenarioClustering,
   type ScenarioRagResponse,
   type ScenarioPrisma,
@@ -68,6 +74,9 @@ import {
   type KnowledgeGraphData,
   type KGNode,
   type KappaStats,
+  type ModelRun,
+  type ModelMonitor,
+  type SpecProposal,
   scenarioBase,
   isUserScenario,
 } from "../lib/api";
@@ -860,141 +869,6 @@ function VariablesSection({ detail, scenarioId }: { detail: ScenarioDetail; scen
         </div>
       </div>
     </div>
-    </div>
-  );
-}
-
-// ─── Section: Model ───────────────────────────────────────────────────────────
-
-function ModelSection({ scenarioId }: { scenarioId: string }) {
-  const [data, setData] = useState<ModelStatus | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-  const [recalculating, setRecalculating] = useState(false);
-
-  const load = useCallback(() => {
-    setLoading(true);
-    setError(null);
-    fetchScenarioModelStatus(scenarioId)
-      .then(setData)
-      .catch((e) => setError(e.message))
-      .finally(() => setLoading(false));
-  }, [scenarioId]);
-
-  useEffect(() => {
-    load();
-  }, [load]);
-
-  const runModel = async () => {
-    setRecalculating(true);
-    setError(null);
-    try {
-      const res = await runScenarioModel(scenarioId);
-      setData(res);
-    } catch (e: any) {
-      setError(e.message);
-    } finally {
-      setRecalculating(false);
-    }
-  };
-
-  if (loading) return <LoadingSpinner text="Chargement du statut du modèle..." />;
-  if (error || !data) return <ErrorBox message={error ?? "Erreur statut modèle"} />;
-
-  const colors = STATUS_COLORS[data.status_color] || STATUS_COLORS.green;
-
-  return (
-    <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
-      {/* Statut Live Card */}
-      <div className={`rounded-3xl border ${colors.border} ${colors.bg} p-6 flex flex-col justify-between space-y-6 lg:col-span-1`}>
-        <div>
-          <div className="flex items-center justify-between">
-            <span className="text-[10px] font-bold uppercase tracking-wider text-white/50">Statut Live du Modèle</span>
-            <span className="flex h-2 w-2 rounded-full relative">
-              <span className={`animate-ping absolute inline-flex h-full w-full rounded-full opacity-75 ${colors.dot}`} />
-              <span className={`relative inline-flex rounded-full h-2 w-2 ${colors.dot}`} />
-            </span>
-          </div>
-          <p className="mt-4 text-3xl font-extrabold text-white">{data.status_label}</p>
-          {data.model_result && data.model_result.value !== undefined && (
-            <div className="mt-4 rounded-2xl bg-white/5 p-4 border border-white/5">
-              <p className="text-[10px] text-white/50 uppercase tracking-wider">Dernière valeur live calculée</p>
-              <p className="text-3xl font-black text-brand-300 mt-1 font-mono">
-                {typeof data.model_result.value === "number" ? data.model_result.value.toLocaleString() : data.model_result.value}
-                {data.model_result.unit && <span className="text-sm font-normal ml-1 text-white/50">{data.model_result.unit}</span>}
-              </p>
-              <p className="text-[10px] text-white/35 mt-1.5 font-mono">Calculé le {new Date(data.timestamp).toLocaleString()}</p>
-            </div>
-          )}
-        </div>
-
-        <div className="space-y-3">
-          <div className="flex items-center gap-2 text-xs text-white/50">
-            <RefreshCw size={12} />
-            <span>Mise à jour automatique à chaque nouvelle valeur</span>
-          </div>
-          <button
-            onClick={runModel}
-            disabled={recalculating}
-            className="w-full flex items-center justify-center gap-1.5 rounded-xl bg-white text-forest-950 font-semibold py-2 text-xs hover:bg-forest-200 transition disabled:opacity-50"
-          >
-            <RotateCcw size={12} className={recalculating ? "animate-spin" : ""} />
-            {recalculating ? "Recalcul..." : "Rerun le modèle manuellement"}
-          </button>
-        </div>
-      </div>
-
-      {/* Algorithme & Seuils */}
-      <div className="lg:col-span-2 space-y-6">
-        {/* Info algorithme */}
-        <div className="rounded-3xl border border-white/10 bg-white/3 p-5 space-y-4">
-          <SectionHeader
-            icon={<Brain size={14} className="text-brand-400" />}
-            title="Algorithme & Paramètres"
-            subtitle="Spécifications techniques du modèle prédictif"
-          />
-          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 text-xs">
-            <div className="rounded-xl border border-white/5 bg-white/2 px-3 py-2">
-              <span className="text-white/35">Modèle mathématique</span>
-              <p className="font-semibold text-white mt-1">{data.model_info.algorithm}</p>
-            </div>
-            <div className="rounded-xl border border-white/5 bg-white/2 px-3 py-2">
-              <span className="text-white/35">Fréquence de calcul</span>
-              <p className="font-semibold text-white mt-1">{data.model_info.update_frequency}</p>
-            </div>
-            <div className="rounded-xl border border-white/5 bg-white/2 px-3 py-2 sm:col-span-2">
-              <span className="text-white/35">Indicateur de sortie (Outcome)</span>
-              <p className="font-semibold text-white mt-1">{data.model_info.output}</p>
-            </div>
-          </div>
-        </div>
-
-        {/* Seuils d'alerte */}
-        <div className="rounded-3xl border border-white/10 bg-white/3 p-5 space-y-4">
-          <SectionHeader
-            icon={<Shield size={14} className="text-brand-400" />}
-            title="Seuils d'alerte et de décision"
-            subtitle="Séparations définissant la couleur d'alerte"
-          />
-          <div className="grid grid-cols-1 gap-3 sm:grid-cols-3 text-xs">
-            <div className="rounded-xl border border-brand-500/10 bg-brand-500/5 px-3 py-2.5">
-              <span className="font-semibold text-brand-300">Vert (Situation normale)</span>
-              <p className="text-white/50 mt-1 font-mono">{data.alert_thresholds.green.condition}</p>
-              <p className="text-[10px] text-white/35 mt-1">{data.alert_thresholds.green.label}</p>
-            </div>
-            <div className="rounded-xl border border-gold-500/10 bg-gold-500/5 px-3 py-2.5">
-              <span className="font-semibold text-gold-300">Orange (Vigilance)</span>
-              <p className="text-white/50 mt-1 font-mono">{data.alert_thresholds.orange.condition}</p>
-              <p className="text-[10px] text-white/35 mt-1">{data.alert_thresholds.orange.label}</p>
-            </div>
-            <div className="rounded-xl border border-rose-500/10 bg-rose-500/5 px-3 py-2.5">
-              <span className="font-semibold text-rose-300">Rouge (Alerte critique)</span>
-              <p className="text-white/50 mt-1 font-mono">{data.alert_thresholds.red.condition}</p>
-              <p className="text-[10px] text-white/35 mt-1">{data.alert_thresholds.red.label}</p>
-            </div>
-          </div>
-        </div>
-      </div>
     </div>
   );
 }
@@ -3857,16 +3731,16 @@ function VizTab({ scenarioId }: { scenarioId: string }) {
 
 /** VariablesModelTab : Variables & Données + Modèle prédictif (sous-tabs) */
 function VariablesModelTab({ scenarioId, detail }: { scenarioId: string; detail: ScenarioDetail }) {
-  const [sub, setSub] = React.useState<"variables" | "model">("variables");
+  const [sub, setSub] = React.useState<"variables" | "monitor">("variables");
   const SUB = [
     { key: "variables" as const, label: "Données & Variables", icon: <Database size={12} /> },
-    { key: "model" as const, label: "Modèle Prédictif", icon: <Brain size={12} /> },
+    { key: "monitor" as const, label: "Modèle Prédictif", icon: <Brain size={12} /> },
   ];
   return (
     <div className="space-y-4">
       <div className="flex gap-1.5 border-b border-white/5 pb-3">
         {SUB.map(s => (
-          <button key={s.key} onClick={() => setSub(s.key as "variables" | "model")}
+          <button key={s.key} onClick={() => setSub(s.key)}
             className={`flex items-center gap-1.5 rounded-xl px-3 py-1.5 text-xs font-medium transition ${
               sub === s.key ? "bg-brand-700 text-gold-400 font-semibold" : "text-white/60 hover:text-white hover:bg-white/8"
             }`}>
@@ -3875,7 +3749,229 @@ function VariablesModelTab({ scenarioId, detail }: { scenarioId: string; detail:
         ))}
       </div>
       {sub === "variables" && <VariablesSection detail={detail} scenarioId={scenarioId} />}
-      {sub === "model" && <ModelSection scenarioId={scenarioId} />}
+      {sub === "monitor" && <ModelMonitorSection scenarioId={scenarioId} />}
+    </div>
+  );
+}
+
+// ─── Section: Suivi & Évolution du modèle entraîné (Phases 3-5) ────────────────
+
+function ModelMonitorSection({ scenarioId }: { scenarioId: string }) {
+  const [run, setRun] = useState<ModelRun | null>(null);
+  const [monitor, setMonitor] = useState<ModelMonitor | null>(null);
+  const [proposal, setProposal] = useState<SpecProposal | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [busy, setBusy] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  const load = useCallback(() => {
+    setLoading(true);
+    Promise.all([
+      getModelRun(scenarioId).catch(() => null),
+      getModelMonitor(scenarioId).catch(() => null),
+      getSpecProposal(scenarioId).catch(() => null),
+    ]).then(([r, m, p]) => {
+      setRun(r); setMonitor(m); setProposal(p);
+    }).catch((e) => setError(e.message)).finally(() => setLoading(false));
+  }, [scenarioId]);
+
+  useEffect(() => { load(); }, [load]);
+
+  const poll = (fn: () => Promise<{ status: string }>, done: () => void) => {
+    let tries = 0;
+    const tick = async () => {
+      tries += 1;
+      try {
+        const s = await fn();
+        if (s.status === "running") {
+          if (tries < 40) { setTimeout(tick, 3000); return; }
+        }
+      } catch { /* ignore transient */ }
+      done();
+    };
+    setTimeout(tick, 2000);
+  };
+
+  const doTrain = async () => {
+    setBusy("train"); setError(null);
+    try {
+      await trainModel(scenarioId);
+      poll(() => getModelTrainStatus(scenarioId), () => { setBusy(null); load(); });
+    } catch (e: any) { setError(e.message); setBusy(null); }
+  };
+
+  const doSynthetic = async () => {
+    setBusy("synthetic"); setError(null);
+    try {
+      await generateSyntheticData(scenarioId);
+      await trainModel(scenarioId);
+      poll(() => getModelTrainStatus(scenarioId), () => { setBusy(null); load(); });
+    } catch (e: any) { setError(e.message); setBusy(null); }
+  };
+
+  const doPropose = async () => {
+    setBusy("propose"); setError(null);
+    try {
+      await proposeSpec(scenarioId);
+      poll(async () => { const p = await getSpecProposal(scenarioId); return { status: p.status === "generating" ? "running" : "done" }; },
+        () => { setBusy(null); load(); });
+    } catch (e: any) { setError(e.message); setBusy(null); }
+  };
+
+  const doValidate = async (action: 'accept' | 'reject') => {
+    setBusy(action); setError(null);
+    try {
+      await validateSpecProposal(scenarioId, action);
+      if (action === 'accept') {
+        poll(() => getModelTrainStatus(scenarioId), () => { setBusy(null); load(); });
+      } else { setBusy(null); load(); }
+    } catch (e: any) { setError(e.message); setBusy(null); }
+  };
+
+  if (loading) return <LoadingSpinner text="Chargement du modèle entraîné..." />;
+
+  const mcolors = STATUS_COLORS[monitor?.status_color ?? "unavailable"] || STATUS_COLORS.green;
+  const diff = proposal?.diff;
+
+  return (
+    <div className="space-y-6">
+      {error && <ErrorBox message={error} />}
+
+      <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
+        {/* Statut live piloté par le modèle entraîné */}
+        <div className={`rounded-3xl border ${mcolors.border} ${mcolors.bg} p-6 flex flex-col justify-between space-y-6`}>
+          <div>
+            <div className="flex items-center justify-between">
+              <span className="text-[10px] font-bold uppercase tracking-wider text-white/50">Statut Live (modèle entraîné)</span>
+              <span className="flex h-2 w-2 rounded-full relative">
+                <span className={`animate-ping absolute inline-flex h-full w-full rounded-full opacity-75 ${mcolors.dot}`} />
+                <span className={`relative inline-flex rounded-full h-2 w-2 ${mcolors.dot}`} />
+              </span>
+            </div>
+            {monitor?.status === "ready" ? (
+              <>
+                <p className="mt-4 text-3xl font-extrabold text-white">{monitor.status_label}</p>
+                <div className="mt-4 rounded-2xl bg-white/5 p-4 border border-white/5">
+                  <p className="text-[10px] text-white/50 uppercase tracking-wider">
+                    {monitor.kind === "probability" ? `Risque (${monitor.positive_class ?? "classe positive"})` : "Valeur prédite"}
+                    {monitor.n_scored ? ` — ${monitor.n_scored} pts` : ""}
+                  </p>
+                  <p className="text-3xl font-black text-brand-300 mt-1 font-mono">
+                    {monitor.kind === "probability" && typeof monitor.value === "number"
+                      ? `${(monitor.value * 100).toFixed(0)}%`
+                      : (typeof monitor.value === "number" ? monitor.value.toLocaleString() : monitor.value)}
+                    {monitor.unit && <span className="text-sm font-normal ml-1 text-white/50">{monitor.unit}</span>}
+                  </p>
+                  {monitor.generated_at && (
+                    <p className="text-[10px] text-white/35 mt-1.5 font-mono">Calculé le {new Date(monitor.generated_at).toLocaleString()}</p>
+                  )}
+                </div>
+              </>
+            ) : (
+              <p className="mt-4 text-sm text-white/60">{monitor?.message ?? "Modèle non entraîné ou aucune donnée branchée."}</p>
+            )}
+          </div>
+        </div>
+
+        {/* Modèle entraîné : métriques */}
+        <div className="lg:col-span-2 rounded-3xl border border-white/10 bg-white/3 p-5 space-y-4">
+          <SectionHeader icon={<Brain size={14} className="text-brand-400" />} title="Modèle entraîné"
+            subtitle="Algorithme, métriques et hyperparamètres (scikit-learn + Optuna)" />
+          {run?.status === "ready" ? (
+            <div className="space-y-3">
+              <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 text-xs">
+                <div className="rounded-xl border border-white/5 bg-white/2 px-3 py-2">
+                  <span className="text-white/35">Algorithme</span>
+                  <p className="font-semibold text-white mt-1">{run.family}</p>
+                </div>
+                <div className="rounded-xl border border-white/5 bg-white/2 px-3 py-2">
+                  <span className="text-white/35">Tâche</span>
+                  <p className="font-semibold text-white mt-1">{run.task_type}</p>
+                </div>
+                <div className="rounded-xl border border-white/5 bg-white/2 px-3 py-2">
+                  <span className="text-white/35">Métrique ({run.metric})</span>
+                  <p className="font-semibold text-brand-300 mt-1 font-mono">
+                    {run.metrics && run.metric && typeof run.metrics[run.metric] === "number"
+                      ? run.metrics[run.metric].toFixed(3)
+                      : (run.metrics ? Object.values(run.metrics)[0]?.toFixed?.(3) : "—")}
+                  </p>
+                </div>
+              </div>
+              {run.feature_importances && run.feature_importances.length > 0 && (
+                <div className="rounded-xl border border-white/5 bg-white/2 px-3 py-2.5">
+                  <span className="text-[10px] text-white/35 uppercase tracking-wider flex items-center gap-1"><TrendingUp size={11} /> Variables influentes</span>
+                  <div className="mt-2 space-y-1.5">
+                    {run.feature_importances.slice(0, 5).map((fi) => (
+                      <div key={fi.feature} className="flex items-center gap-2">
+                        <div className="h-1.5 rounded-full bg-brand-500/60" style={{ width: `${Math.max(4, Math.min(100, fi.importance * 100))}%` }} />
+                        <span className="text-[10px] text-white/50 font-mono truncate">{fi.feature}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+          ) : (
+            <p className="text-xs text-white/50">{run?.message ?? "Aucun modèle entraîné."}</p>
+          )}
+          <div className="flex flex-col gap-2 sm:flex-row">
+            <button onClick={doTrain} disabled={busy !== null}
+              className="flex-1 flex items-center justify-center gap-1.5 rounded-xl bg-white text-forest-950 font-semibold py-2 text-xs hover:bg-forest-200 transition disabled:opacity-50">
+              <RotateCcw size={12} className={busy === "train" ? "animate-spin" : ""} />
+              {busy === "train" ? "Entraînement en cours..." : (run?.status === "ready" ? "Ré-entraîner le modèle" : "Entraîner le modèle")}
+            </button>
+            <button onClick={doSynthetic} disabled={busy !== null} title="Génère un jeu de données synthétique cohérent avec le spec puis entraîne — pour une démo sans données réelles"
+              className="flex items-center justify-center gap-1.5 rounded-xl border border-white/15 text-white/70 font-semibold py-2 px-3 text-xs hover:bg-white/5 transition disabled:opacity-50">
+              <Sparkles size={12} className={busy === "synthetic" ? "animate-spin" : ""} />
+              {busy === "synthetic" ? "Démo en cours..." : "Données de démo + entraîner"}
+            </button>
+          </div>
+        </div>
+      </div>
+
+      {/* Évolution pilotée par l'évidence (Phase 5) */}
+      <div className="rounded-3xl border border-white/10 bg-white/3 p-5 space-y-4">
+        <SectionHeader icon={<Sparkles size={14} className="text-gold-400" />} title="Évolution pilotée par l'évidence"
+          subtitle="Régénère le spec depuis l'évidence courante, compare, et validez le changement" />
+        {diff && proposal?.status === "ready" ? (
+          diff.has_changes ? (
+            <div className="space-y-3">
+              <div className="flex flex-wrap gap-2 text-[11px]">
+                {diff.outcome_changed && <span className="rounded-lg bg-gold-500/10 border border-gold-500/30 text-gold-300 px-2 py-1">Outcome modifié</span>}
+                {diff.summary.added > 0 && <span className="rounded-lg bg-brand-500/10 border border-brand-500/30 text-brand-300 px-2 py-1">+{diff.summary.added} variable(s)</span>}
+                {diff.summary.removed > 0 && <span className="rounded-lg bg-rose-500/10 border border-rose-500/30 text-rose-300 px-2 py-1">-{diff.summary.removed} variable(s)</span>}
+                {diff.summary.changed > 0 && <span className="rounded-lg bg-white/5 border border-white/15 text-white/70 px-2 py-1">{diff.summary.changed} modifiée(s)</span>}
+                {diff.algorithm_changed && <span className="rounded-lg bg-gold-500/10 border border-gold-500/30 text-gold-300 px-2 py-1">Algorithme: {String(diff.algorithm_fields.family?.new ?? "")}</span>}
+              </div>
+              {(diff.features_added.length > 0 || diff.features_removed.length > 0) && (
+                <div className="text-[11px] font-mono text-white/50 space-y-0.5">
+                  {diff.features_added.map((f) => <p key={f} className="text-brand-300">+ {f}</p>)}
+                  {diff.features_removed.map((f) => <p key={f} className="text-rose-300">− {f}</p>)}
+                </div>
+              )}
+              <div className="flex gap-2">
+                <button onClick={() => doValidate('accept')} disabled={busy !== null}
+                  className="flex items-center gap-1.5 rounded-xl bg-brand-600 text-white font-semibold py-2 px-4 text-xs hover:bg-brand-500 transition disabled:opacity-50">
+                  <CheckCircle2 size={13} />{busy === "accept" ? "Application..." : "Valider & ré-entraîner"}
+                </button>
+                <button onClick={() => doValidate('reject')} disabled={busy !== null}
+                  className="flex items-center gap-1.5 rounded-xl border border-white/15 text-white/70 font-semibold py-2 px-4 text-xs hover:bg-white/5 transition disabled:opacity-50">
+                  <X size={13} />Rejeter
+                </button>
+              </div>
+            </div>
+          ) : (
+            <p className="text-xs text-brand-300 flex items-center gap-1.5"><CheckCircle2 size={13} /> Le modèle est à jour avec l'évidence actuelle.</p>
+          )
+        ) : (
+          <p className="text-xs text-white/50">Aucune proposition en attente. Vérifiez si de nouvelles évidences modifient le modèle.</p>
+        )}
+        <button onClick={doPropose} disabled={busy !== null}
+          className="flex items-center gap-1.5 rounded-xl border border-gold-500/30 bg-gold-500/10 text-gold-300 font-semibold py-2 px-4 text-xs hover:bg-gold-500/20 transition disabled:opacity-50">
+          <RefreshCw size={12} className={busy === "propose" ? "animate-spin" : ""} />
+          {busy === "propose" ? "Analyse de l'évidence..." : "Vérifier les nouvelles évidences"}
+        </button>
+      </div>
     </div>
   );
 }
