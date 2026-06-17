@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useLayoutEffect, useCallback, useRef, useMemo } from "react";
+import { ErrorBoundary } from "./ErrorBoundary";
 import {
   ArrowLeft, Brain,
   ChevronDown, ChevronUp, Database, ExternalLink, FileText,
@@ -4217,15 +4218,18 @@ export function ScenarioDetailPage({ scenarioId, onBack }: ScenarioDetailPagePro
         ))}
       </div>
 
-      {/* Contenu de la section active */}
-      {activeSection === "review" && <ReviewTab scenarioId={scenarioId} detail={detail} />}
-      {activeSection === "evidence" && <EvidenceTab scenarioId={scenarioId} detail={detail} />}
-      {activeSection === "assistant" && <RagSection scenarioId={scenarioId} detail={detail} />}
-      {activeSection === "viz" && <VizTab scenarioId={scenarioId} />}
-      {activeSection === "variables" && <VariablesModelTab detail={detail} scenarioId={scenarioId} />}
-      {activeSection === "queries" && <QueriesSection detail={detail} scenarioId={scenarioId} />}
-      {activeSection === "enrichment" && <EnrichmentSection scenarioId={scenarioId} />}
-      {activeSection === "alerts" && <AlertsSection scenarioId={scenarioId} />}
+      {/* Contenu de la section active — isolé par une limite d'erreur : un crash
+          de rendu (ex. visualisation clustering) n'emporte plus toute la page. */}
+      <ErrorBoundary resetKey={`${activeSection}:${scenarioId}`} label="cette section">
+        {activeSection === "review" && <ReviewTab scenarioId={scenarioId} detail={detail} />}
+        {activeSection === "evidence" && <EvidenceTab scenarioId={scenarioId} detail={detail} />}
+        {activeSection === "assistant" && <RagSection scenarioId={scenarioId} detail={detail} />}
+        {activeSection === "viz" && <VizTab scenarioId={scenarioId} />}
+        {activeSection === "variables" && <VariablesModelTab detail={detail} scenarioId={scenarioId} />}
+        {activeSection === "queries" && <QueriesSection detail={detail} scenarioId={scenarioId} />}
+        {activeSection === "enrichment" && <EnrichmentSection scenarioId={scenarioId} />}
+        {activeSection === "alerts" && <AlertsSection scenarioId={scenarioId} />}
+      </ErrorBoundary>
     </div>
   );
 }
