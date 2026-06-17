@@ -30,3 +30,19 @@ constraint) and no ANN index on `document_chunk.embedding` (323k×1536, 5 GB).
 | Script | Purpose | Result |
 |---|---|---|
 | `_vacuum_dropbak.py` | Drop Phase 2 backup tables + `VACUUM (ANALYZE)` the three tables | backups dropped; dead tuples reclaimed to reusable + planner stats refreshed |
+
+## PENDING — chunk integrity cleanup (audit A3 + B3)
+
+Context: the pipeline audit (PR #43) found, at the chunk level:
+- **B3** — 116 docs with >1 `title_abstract` chunk (no uniqueness) → double-counted in similarity search.
+- **A3** — 233 chunkless docs (no chunk at all) → invisible to search/RAG.
+
+The forward-looking fixes shipped in PR #44 (atomic ingest) and PR #46/#45; this
+is the one-off cleanup of the *existing* bad rows. Not yet run.
+
+| Script | Purpose |
+|---|---|
+| `_chunk_preflight.py` | Read-only: exact counts (dup-chunk docs, chunkless-with-text, chunkless-empty) + sample empty ids |
+| `_chunk_cleanup.py` | Dry-run by default; `--execute` to apply. (1) backs up + de-dupes `title_abstract` chunks keeping the embedded one; (2) adds partial unique index `uq_document_chunk_title_abstract`; (3) recovers chunkless-with-text docs by inserting a `title_abstract` chunk (worker then embeds); (4) reports truly-empty docs, never deletes them |
+
+Run order: `_chunk_preflight.py` → review → `_chunk_cleanup.py` (dry-run) → `_chunk_cleanup.py --execute`.
