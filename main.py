@@ -11993,6 +11993,73 @@ def get_model_dataset(scenario_id: str) -> dict[str, Any]:
     }
 
 
+@app.post("/scenarios/{scenario_id}/model/data/synthetic")
+def generate_synthetic_model_dataset(scenario_id: str, n_rows: int = 400,
+                                     _: None = Depends(require_api_key)) -> dict[str, Any]:
+    """
+    Génère un dataset SYNTHÉTIQUE cohérent avec le data_template du spec et le
+    branche comme dataset actif. Permet de faire tourner un vrai modèle de
+    démonstration (entraînable immédiatement) sans données réelles — utile pour
+    transformer un scénario en démo « modèle en ligne ». Généralisable à tout scénario.
+    """
+    from datetime import datetime, timezone
+    import model_trainer
+
+    spec = _get_model_spec(scenario_id)
+    if not spec:
+        raise HTTPException(status_code=400,
+                            detail="Aucune spécification de modèle. Générez puis validez les Variables & Modèle d'abord.")
+    if not (spec.get("data_template") or {}).get("columns"):
+        raise HTTPException(status_code=400, detail="data_template absent du model_spec. Relancez la génération des variables.")
+
+    n_rows = max(50, min(int(n_rows or 400), 5000))
+    try:
+        df = model_trainer.generate_synthetic_dataset(spec, n_rows=n_rows)
+    except Exception as e:
+        logger.error(f"Synthetic gen {scenario_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Génération synthétique impossible : {e}")
+
+    report = _validate_dataset_against_template(list(df.columns), spec["data_template"], _dataframe_dtype_kinds(df))
+
+    stored_path = None
+    try:
+        ddir = MODEL_DATA_DIR / scenario_id / "model"
+        ddir.mkdir(parents=True, exist_ok=True)
+        stored_path = str(ddir / f"{int(datetime.now(timezone.utc).timestamp())}_synthetic.csv")
+        df.to_csv(stored_path, index=False)
+    except Exception as e:
+        logger.error(f"Stockage dataset synthétique {scenario_id}: {e}", exc_info=True)
+
+    with engine.begin() as conn:
+        conn.execute(text(
+            "UPDATE scenario_model_dataset SET is_active = FALSE WHERE scenario_id = :sid AND is_active = TRUE"
+        ), {"sid": scenario_id})
+        new_id = conn.execute(text("""
+            INSERT INTO scenario_model_dataset
+                (scenario_id, filename, stored_path, n_rows, n_cols, columns_json, validation_json, is_active)
+            VALUES (:sid, :fn, :sp, :nr, :nc, CAST(:cj AS jsonb), CAST(:vj AS jsonb), TRUE)
+            RETURNING id
+        """), {
+            "sid": scenario_id, "fn": f"synthetic_{n_rows}.csv", "sp": stored_path,
+            "nr": int(len(df)), "nc": int(len(df.columns)),
+            "cj": json.dumps([str(c) for c in df.columns]),
+            "vj": json.dumps(report),
+        }).scalar()
+
+    return {
+        "status": "stored",
+        "synthetic": True,
+        "dataset_id": new_id,
+        "scenario_id": scenario_id,
+        "n_rows": int(len(df)),
+        "n_cols": int(len(df.columns)),
+        "columns": [str(c) for c in df.columns],
+        "stored": stored_path is not None,
+        "validation": report,
+        "note": "Données synthétiques de démonstration — à remplacer par des données réelles pour un usage opérationnel.",
+    }
+
+
 # ─── MODEL TRAINING (Phase 3) : sklearn + Optuna sur le dataset branché ───────
 # Entraîne un vrai modèle à partir du model_spec (Phase 1) et du dataset
 # uploadé (Phase 2) : préprocessing, HPO par validation croisée (Optuna),

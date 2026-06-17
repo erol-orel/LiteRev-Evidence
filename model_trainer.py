@@ -26,6 +26,71 @@ def _norm(s: Any) -> str:
     return str(s if s is not None else "").strip().lower()
 
 
+def generate_synthetic_dataset(spec: dict, n_rows: int = 400, seed: int = 42):
+    """
+    Génère un dataset synthétique cohérent avec le data_template du spec, pour
+    faire tourner un VRAI modèle de démonstration (sans données réelles).
+    La cible dépend des variables (signal réel) afin que les métriques soient
+    significatives. Toutes les colonnes du template (user + public) sont créées
+    pour un dataset auto-suffisant. Pur/testable.
+    """
+    import numpy as np
+    import pandas as pd
+
+    rng = np.random.RandomState(seed)
+    dt = spec.get("data_template") or {}
+    cols = dt.get("columns") or []
+    outcome = spec.get("outcome") or {}
+    task = (outcome.get("task_type") or "classification").strip().lower()
+    target_name = dt.get("target_column") or outcome.get("machine_name") or "target"
+
+    data: dict[str, Any] = {}
+    signal: list = []  # composantes numériques pour construire une cible corrélée
+    for c in cols:
+        if c.get("role") != "feature":
+            continue
+        name, d = c.get("name"), c.get("dtype", "float")
+        if d == "bool":
+            v = rng.binomial(1, 0.4, n_rows)
+            data[name] = v.astype(int); signal.append(v.astype(float))
+        elif d == "int":
+            v = rng.poisson(5, n_rows)
+            data[name] = v; signal.append(v.astype(float))
+        elif d == "category":
+            levels = [f"{(name or 'cat')[:10]}_{k}" for k in range(3)]
+            idx = rng.randint(0, len(levels), n_rows)
+            data[name] = [levels[i] for i in idx]; signal.append(idx.astype(float))
+        elif d == "datetime":
+            base = pd.Timestamp("2024-01-01")
+            data[name] = [(base + pd.Timedelta(days=int(i))).date().isoformat() for i in range(n_rows)]
+        else:  # float
+            v = rng.normal(0.0, 1.0, n_rows)
+            data[name] = v; signal.append(v)
+
+    if signal:
+        M = np.vstack(signal).T
+        w = rng.normal(0.0, 1.0, M.shape[1])
+        lin = (M * w).sum(axis=1)
+        lin = (lin - lin.mean()) / (lin.std() + 1e-9)
+    else:
+        lin = rng.normal(0.0, 1.0, n_rows)
+
+    if task in ("regression", "count"):
+        y = lin * 10.0 + rng.normal(0.0, 2.0, n_rows)
+        if task == "count":
+            y = np.clip(np.round(y - y.min()), 0, None).astype(int)
+        data[target_name] = y
+    else:
+        # Échelle du logit > 1 pour des classes nettement séparables (démo lisible).
+        prob = 1.0 / (1.0 + np.exp(-2.5 * lin))
+        yb = (rng.rand(n_rows) < prob).astype(int)
+        pos = outcome.get("positive_class") or "oui"
+        neg = "non" if str(pos) != "non" else "autre"
+        data[target_name] = [pos if v == 1 else neg for v in yb]
+
+    return pd.DataFrame(data)
+
+
 def _effective_family(family: str, task_type: str) -> str:
     """Ramène la famille demandée vers une famille valide pour la tâche."""
     family = (family or "").strip().lower()
