@@ -1082,9 +1082,19 @@ function CorpusSection({ scenarioId, threshold }: { scenarioId: string; detail: 
                 </span>
               )}
             </div>
-            <div className="flex items-center gap-3 flex-wrap">
+            {/* Réconciliation avec le corpus : documents pas encore découpés */}
+            {typeof embeddingStatus.corpus_total === 'number' && (embeddingStatus.chunkless ?? 0) > 0 && (
+              <p className="text-[10px] text-gold-300">
+                ⚠ {embeddingStatus.chunkless} / {embeddingStatus.corpus_total} document(s) sans chunk (pas encore découpés) — invisibles à la recherche.
+              </p>
+            )}
+            <div className="flex items-center gap-3 flex-wrap" title="Modes de recherche disponibles selon l'état des embeddings. Le lexical marche toujours ; le sémantique et l'hybride nécessitent des embeddings.">
               {Object.entries(embeddingStatus.score_availability).map(([type, available]) => (
-                <span key={type} className={`text-[10px] flex items-center gap-1 ${available ? 'text-forest-400' : 'text-white/25'}`}>
+                <span key={type}
+                  title={type === 'lexical' ? 'Recherche par mots-clés (plein texte). Toujours disponible.' :
+                         type === 'semantic' ? 'Similarité vectorielle (sens). Nécessite des embeddings.' :
+                         'Mélange 70% sémantique + 30% lexical. Nécessite des embeddings.'}
+                  className={`text-[10px] flex items-center gap-1 ${available ? 'text-forest-400' : 'text-white/25'}`}>
                   {available ? '✓' : '✗'} {type === 'lexical' ? 'Lexical' : type === 'semantic' ? 'Sémantique' : 'Hybride'}
                 </span>
               ))}

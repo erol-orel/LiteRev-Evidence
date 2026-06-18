@@ -2205,6 +2205,8 @@ export interface EmbeddingStatus {
   scenario_id: string;
   status: 'none' | 'partial' | 'complete';
   status_label: string;
+  corpus_total?: number;
+  chunkless?: number;
   abstract_only: {
     total_docs: number;
     embedded_docs: number;
