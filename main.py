@@ -9565,6 +9565,19 @@ def get_user_scenario_embedding_status(scenario_id: str) -> dict[str, Any]:
     """
     _get_user_scenario_or_404(scenario_id)
     with engine.connect() as conn:
+        # Univers = corpus du scénario, hors doublons (MÊME filtre que /corpus),
+        # pour réconcilier les compteurs. Inclut les docs SANS chunk (chunkless).
+        corpus = conn.execute(text("""
+            SELECT
+                COUNT(*) AS corpus_total,
+                COUNT(*) FILTER (
+                    WHERE NOT EXISTS (SELECT 1 FROM document_chunk c WHERE c.document_id = ars.document_id)
+                ) AS chunkless
+            FROM article_scenarios ars
+            JOIN literature_document ld ON ld.id = ars.document_id
+            WHERE ars.scenario_id = :sid AND ld.is_duplicate IS NOT TRUE
+        """), {"sid": scenario_id}).mappings().first()
+
         # Title+abstract: one chunk per doc, check if that chunk is embedded
         ta = conn.execute(text("""
             SELECT
@@ -9574,7 +9587,8 @@ def get_user_scenario_embedding_status(scenario_id: str) -> dict[str, Any]:
             FROM article_scenarios ars
             JOIN document_chunk c ON c.document_id = ars.document_id
                 AND c.chunk_type = 'title_abstract'
-            WHERE ars.scenario_id = :sid
+            JOIN literature_document ld ON ld.id = ars.document_id
+            WHERE ars.scenario_id = :sid AND ld.is_duplicate IS NOT TRUE
         """), {"sid": scenario_id}).mappings().first()
 
         # Full-text: multiple chunks per doc
@@ -9591,7 +9605,8 @@ def get_user_scenario_embedding_status(scenario_id: str) -> dict[str, Any]:
                 FROM article_scenarios ars
                 JOIN document_chunk c ON c.document_id = ars.document_id
                     AND c.chunk_type = 'fulltext_section'
-                WHERE ars.scenario_id = :sid
+                JOIN literature_document ld ON ld.id = ars.document_id
+                WHERE ars.scenario_id = :sid AND ld.is_duplicate IS NOT TRUE
             ) d
             JOIN (
                 SELECT
@@ -9609,6 +9624,9 @@ def get_user_scenario_embedding_status(scenario_id: str) -> dict[str, Any]:
     ta_embedded = int(ta["embedded_docs"] or 0)
     ta_pending = int(ta["pending_docs"] or 0)
 
+    corpus_total = int(corpus["corpus_total"] or 0)
+    chunkless = int(corpus["chunkless"] or 0)
+
     ft_total = int(ft["total_ft_docs"] or 0)
     ft_pending_docs = int(ft["ft_docs_pending"] or 0)
     ft_total_chunks = int(ft["total_ft_chunks"] or 0)
@@ -9620,7 +9638,10 @@ def get_user_scenario_embedding_status(scenario_id: str) -> dict[str, Any]:
     # Total pending embedding work
     total_pending_chunks = ta_pending + ft_pending_chunks
 
-    if total_pending_chunks == 0 and ta_total > 0:
+    if chunkless > 0:
+        status = "partial"
+        status_label = f"{chunkless} document(s) pas encore découpé(s) (sans chunk) — invisibles à la recherche"
+    elif total_pending_chunks == 0 and ta_total > 0:
         status = "complete"
         status_label = "All embeddings complete"
     elif ta_embedded == 0 and ft_embedded_chunks == 0:
@@ -9634,6 +9655,8 @@ def get_user_scenario_embedding_status(scenario_id: str) -> dict[str, Any]:
         "scenario_id": scenario_id,
         "status": status,
         "status_label": status_label,
+        "corpus_total": corpus_total,
+        "chunkless": chunkless,
         "abstract_only": {
             "total_docs": abstract_only_total,
             "embedded_docs": max(0, abstract_only_total - ta_pending),
