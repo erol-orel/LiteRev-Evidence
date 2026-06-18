@@ -11924,16 +11924,34 @@ def _dataframe_dtype_kinds(df) -> dict:
     return kinds
 
 
+def _maybe_autotrain(scenario_id: str, report: dict) -> bool:
+    """Démarre l'entraînement si les données branchées suffisent (can_train) et
+    qu'aucun entraînement n'est déjà en cours. Renvoie True si lancé."""
+    import threading
+
+    if not ((report or {}).get("readiness") or {}).get("can_train"):
+        return False
+    if _MODEL_TRAIN_JOBS.get(scenario_id, {}).get("status") == "running":
+        return False
+    _MODEL_TRAIN_JOBS[scenario_id] = {"status": "running"}
+    threading.Thread(target=_run_model_training, args=(scenario_id, 25), daemon=True).start()
+    logger.info(f"Auto-entraînement déclenché pour {scenario_id} (données suffisantes).")
+    return True
+
+
 @app.post("/scenarios/{scenario_id}/model/data")
 async def upload_model_dataset(
     scenario_id: str,
     file: UploadFile = File(...),
+    auto_train: bool = True,
     _: None = Depends(require_api_key),
 ) -> dict[str, Any]:
     """
     Branche un jeu de données (CSV/XLSX) sur le model_spec d'un scénario.
     Valide les en-têtes contre le data_template, stocke le dataset (actif), et
     renvoie un rapport de validation + l'état de préparation à l'entraînement.
+    Si les données suffisent (can_train) et auto_train, l'entraînement démarre
+    automatiquement (upload -> entraînement -> modèle en ligne, sans étape manuelle).
     """
     import io
     import pandas as pd
@@ -12004,6 +12022,7 @@ async def upload_model_dataset(
         "n_cols": int(len(df.columns)),
         "stored": stored_path is not None,
         "validation": report,
+        "training_started": _maybe_autotrain(scenario_id, report) if auto_train else False,
     }
 
 
@@ -12035,6 +12054,7 @@ def get_model_dataset(scenario_id: str) -> dict[str, Any]:
 
 @app.post("/scenarios/{scenario_id}/model/data/synthetic")
 def generate_synthetic_model_dataset(scenario_id: str, n_rows: int = 400,
+                                     auto_train: bool = True,
                                      _: None = Depends(require_api_key)) -> dict[str, Any]:
     """
     Génère un dataset SYNTHÉTIQUE cohérent avec le data_template du spec et le
@@ -12096,6 +12116,7 @@ def generate_synthetic_model_dataset(scenario_id: str, n_rows: int = 400,
         "columns": [str(c) for c in df.columns],
         "stored": stored_path is not None,
         "validation": report,
+        "training_started": _maybe_autotrain(scenario_id, report) if auto_train else False,
         "note": "Données synthétiques de démonstration — à remplacer par des données réelles pour un usage opérationnel.",
     }
 
