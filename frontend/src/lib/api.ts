@@ -1695,7 +1695,33 @@ export async function uploadScenarioDataset(
     const text = await response.text();
     throw new Error(text || `Upload failed with status ${response.status}`);
   }
-  
+
+  return response.json();
+}
+
+export interface ModelDataUploadResponse {
+  status: string;
+  dataset_id?: number;
+  n_rows?: number;
+  n_cols?: number;
+  validation?: ModelDataset['validation'];
+  training_started?: boolean;
+}
+
+// Branche les données sur le pipeline modèle (valide vs data_template, stocke,
+// et déclenche l'entraînement automatiquement si les données suffisent).
+export async function uploadModelData(scenarioId: string, file: File): Promise<ModelDataUploadResponse> {
+  const formData = new FormData();
+  formData.append('file', file);
+  const response = await fetch(`${API_BASE_URL}/scenarios/${scenarioId}/model/data`, {
+    method: 'POST',
+    headers: authHeaders(),
+    body: formData,
+  });
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(text || `Upload failed with status ${response.status}`);
+  }
   return response.json();
 }
 

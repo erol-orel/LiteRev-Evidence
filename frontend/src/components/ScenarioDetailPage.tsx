@@ -16,7 +16,7 @@ import {
   fetchScenarioClustering,
   askScenarioRagStreamFiltered,
   fetchScenarioPrisma,
-  uploadScenarioDataset,
+  uploadModelData,
   screenArticle,
   fetchArticlePico,
   fetchScenarioPicoBulk,
@@ -615,9 +615,20 @@ function VariablesSection({ detail, scenarioId, onGoToModel }: { detail: Scenari
     setUploadError(null);
     setUploadResult(null);
     try {
-      const res = await uploadScenarioDataset(scenarioId, file);
+      // Branche les données sur le pipeline modèle : validation + (si suffisant)
+      // entraînement automatique. Plus besoin de cliquer "Entraîner".
+      const res = await uploadModelData(scenarioId, file);
       setUploadResult(res);
       setFile(null);
+      // Rafraîchit l'état modèle/données ; si l'entraînement a démarré, on le suit.
+      getModelDataset(scenarioId).then(setModelDataset).catch(() => {});
+      if (res.training_started) {
+        const poll = () => getModelTrainStatus(scenarioId).then(s => {
+          if (s.status === 'running') { setTimeout(poll, 3000); }
+          else { getModelRun(scenarioId).then(setModelRun).catch(() => {}); }
+        }).catch(() => {});
+        setTimeout(poll, 2000);
+      }
     } catch (err: any) {
       setUploadError(err.message || "Une erreur est survenue lors de l'upload.");
     } finally {
@@ -951,19 +962,33 @@ function VariablesSection({ detail, scenarioId, onGoToModel }: { detail: Scenari
           {uploadResult && (
             <div className="rounded-2xl border border-brand-500/20 bg-brand-500/5 p-4 space-y-3">
               <div className="flex items-center gap-1.5 text-brand-300 text-xs font-semibold">
-                <CheckCircle2 size={14} /> Importation réussie !
+                <CheckCircle2 size={14} /> Données branchées sur le modèle
               </div>
-              <p className="text-[11px] text-white/70 leading-4">
-                {uploadResult.message}
-              </p>
               <div className="rounded-lg bg-forest-900/50 p-2 text-[10px] font-mono text-white/50 space-y-1">
-                <div>Lignes détectées : <span className="text-brand-300">{uploadResult.detected_rows}</span></div>
-                <div>Colonnes : <span className="text-brand-300">{uploadResult.detected_columns?.slice(0, 5).join(", ")}{uploadResult.detected_columns?.length > 5 ? "..." : ""}</span></div>
+                <div>Lignes : <span className="text-brand-300">{uploadResult.n_rows}</span> · Colonnes : <span className="text-brand-300">{uploadResult.n_cols}</span></div>
+                {uploadResult.validation?.matched_features && (
+                  <div>Variables reconnues : <span className="text-brand-300">{uploadResult.validation.matched_features.length}</span></div>
+                )}
+                {(uploadResult.validation?.missing_user?.length ?? 0) > 0 && (
+                  <div className="text-gold-300">À fournir : {uploadResult.validation!.missing_user!.join(", ")}</div>
+                )}
               </div>
-              <div className="flex items-start gap-1 text-[10px] text-white/35">
-                <Info size={10} className="shrink-0 mt-0.5" />
-                <span>Les variables manquantes du modèle seront automatiquement branchées lors du prochain recalcul.</span>
-              </div>
+              {uploadResult.training_started ? (
+                <div className="flex items-start gap-1.5 text-[11px] text-brand-300">
+                  <Loader2 size={12} className="animate-spin shrink-0 mt-0.5" />
+                  <span>Entraînement lancé automatiquement. Suivez-le dans l'onglet <strong>Modèle Prédictif</strong>.</span>
+                </div>
+              ) : (
+                <div className="flex items-start gap-1 text-[10px] text-white/45">
+                  <Info size={10} className="shrink-0 mt-0.5" />
+                  <span>{uploadResult.validation?.readiness?.reasons?.[0] ?? "Données insuffisantes pour entraîner (cible + au moins une variable requises)."}</span>
+                </div>
+              )}
+              {onGoToModel && (
+                <button onClick={onGoToModel} className="text-[10px] font-semibold text-brand-300 hover:text-brand-200">
+                  Ouvrir le Modèle prédictif →
+                </button>
+              )}
             </div>
           )}
         </div>
@@ -3879,6 +3904,15 @@ function ModelMonitorSection({ scenarioId }: { scenarioId: string }) {
 
   useEffect(() => { load(); }, [load]);
 
+  // Rafraîchissement live : le statut se met à jour seul (sans spinner).
+  useEffect(() => {
+    const id = setInterval(() => {
+      getModelMonitor(scenarioId).then(setMonitor).catch(() => {});
+      getModelRun(scenarioId).then(setRun).catch(() => {});
+    }, 30000);
+    return () => clearInterval(id);
+  }, [scenarioId]);
+
   const poll = (fn: () => Promise<{ status: string }>, done: () => void) => {
     let tries = 0;
     const tick = async () => {
@@ -3905,8 +3939,9 @@ function ModelMonitorSection({ scenarioId }: { scenarioId: string }) {
   const doSynthetic = async () => {
     setBusy("synthetic"); setError(null);
     try {
+      // L'endpoint synthétique déclenche déjà l'entraînement (auto_train) ;
+      // on se contente de suivre le job.
       await generateSyntheticData(scenarioId);
-      await trainModel(scenarioId);
       poll(() => getModelTrainStatus(scenarioId), () => { setBusy(null); load(); });
     } catch (e: any) { setError(e.message); setBusy(null); }
   };
