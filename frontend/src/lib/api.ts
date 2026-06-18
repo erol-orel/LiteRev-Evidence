@@ -2758,6 +2758,31 @@ export async function getModelMonitor(scenarioId: string): Promise<ModelMonitor>
   return r.json();
 }
 
+export interface ProvArticle {
+  id: number;
+  title: string;
+  year?: number | null;
+  doi?: string | null;
+  citation_count?: number | null;
+  url?: string | null;
+}
+
+export interface ModelSpecResponse {
+  status: string; // ready | empty | legacy
+  outcome?: { name?: string; machine_name?: string; task_type?: string; unit?: string; best_article?: ProvArticle | null };
+  features?: Array<{ name?: string; machine_name?: string; dtype?: string; source?: string; importance?: string; best_article?: ProvArticle | null }>;
+  algorithm?: { family?: string; metric?: string; best_article?: ProvArticle | null };
+  provenance_index?: Record<string, ProvArticle>;
+  validated?: boolean;
+  message?: string;
+}
+
+export async function getScenarioModelSpec(scenarioId: string): Promise<ModelSpecResponse> {
+  const r = await fetch(`${API_BASE_URL}/scenarios/${scenarioId}/model/spec`);
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  return r.json();
+}
+
 export async function proposeSpec(scenarioId: string): Promise<{ status: string; scenario_id?: string }> {
   const r = await fetch(`${API_BASE_URL}/scenarios/${scenarioId}/model/spec/propose`, { method: 'POST', headers: authHeaders() });
   if (!r.ok) throw new Error(`HTTP ${r.status}`);

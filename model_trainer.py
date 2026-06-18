@@ -314,6 +314,40 @@ def _feature_importances(pipe, top: int = 20) -> list[dict]:
         return []
 
 
+def _importances_by_variable(pipe, used: list[dict]) -> dict:
+    """
+    Agrège les importances par VARIABLE source (machine_name), en repliant les
+    colonnes transformées (num__x, cat__x_niveau) sur leur variable d'origine.
+    Normalisé (somme = 1). Permet d'afficher les mêmes noms que l'onglet
+    Variables (pas les noms transformés du pipeline).
+    """
+    import numpy as np
+    try:
+        pre, est = pipe.named_steps["pre"], pipe.named_steps["est"]
+        names = list(pre.get_feature_names_out())
+        if hasattr(est, "feature_importances_"):
+            vals = np.asarray(est.feature_importances_, dtype=float)
+        elif hasattr(est, "coef_"):
+            coef = np.asarray(est.coef_, dtype=float)
+            vals = np.abs(coef).mean(axis=0) if coef.ndim > 1 else np.abs(coef)
+        else:
+            return {}
+        # Plus long machine_name d'abord -> évite qu'"age" capte "age_group_*".
+        mnames = sorted([u["machine_name"] for u in used], key=len, reverse=True)
+        agg = {u["machine_name"]: 0.0 for u in used}
+        for n, v in zip(names, vals):
+            base = n.split("__", 1)[1] if "__" in n else n
+            for m in mnames:
+                if base == m or base.startswith(m + "_"):
+                    agg[m] += float(v)
+                    break
+        total = sum(agg.values()) or 1.0
+        return {m: agg[m] / total for m in agg}
+    except Exception as e:
+        logger.warning(f"importances_by_variable indisponible: {e}")
+        return {}
+
+
 def train_model(df, spec: dict, n_trials: int = 25, random_state: int = 42, test_size: float = 0.2) -> dict:
     """
     Entraîne un modèle réel à partir du dataset et du model_spec.
@@ -415,6 +449,7 @@ def train_model(df, spec: dict, n_trials: int = 25, random_state: int = 42, test
         "best_params": best_params,
         "metrics": metrics,
         "feature_importances": _feature_importances(final),
+        "importances_by_variable": _importances_by_variable(final, used),
         "pipeline": final,
     }
 

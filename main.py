@@ -11514,16 +11514,56 @@ def get_scenario_model_spec(scenario_id: str) -> dict[str, Any]:
             "validated": row["variables_validated"],
         }
 
+    # ── Résolution provenance : pour chaque outcome/variable/algorithme, on
+    # remonte l'article SOURCE le plus pertinent (plus récent, puis plus cité). ──
+    prov_ids: set[int] = set()
+    for elem in (spec.get("outcome") or {}, spec.get("algorithm") or {}):
+        prov_ids.update(int(i) for i in (elem.get("provenance") or []) if isinstance(i, (int, float)))
+    for f in (spec.get("features") or []):
+        prov_ids.update(int(i) for i in (f.get("provenance") or []) if isinstance(i, (int, float)))
+
+    resolved: dict[str, Any] = {}
+    if prov_ids:
+        with engine.connect() as conn:
+            arts = conn.execute(text("""
+                SELECT id, title, year, doi, citation_count
+                FROM literature_document WHERE id = ANY(:ids)
+            """), {"ids": list(prov_ids)}).mappings().all()
+        for a in arts:
+            resolved[str(a["id"])] = {
+                "id": a["id"], "title": a["title"], "year": a["year"],
+                "doi": a["doi"], "citation_count": a["citation_count"],
+                "url": (f"https://doi.org/{a['doi']}" if a["doi"] else None),
+            }
+
+    def _best_article(ids):
+        cand = [resolved[str(int(i))] for i in (ids or [])
+                if isinstance(i, (int, float)) and str(int(i)) in resolved]
+        if not cand:
+            return None
+        cand.sort(key=lambda a: ((a["year"] or 0), (a["citation_count"] or 0)), reverse=True)
+        return cand[0]
+
+    outcome = dict(spec.get("outcome") or {})
+    outcome["best_article"] = _best_article(outcome.get("provenance"))
+    algorithm = dict(spec.get("algorithm") or {})
+    algorithm["best_article"] = _best_article(algorithm.get("provenance"))
+    features = []
+    for f in (spec.get("features") or []):
+        f2 = dict(f)
+        f2["best_article"] = _best_article(f.get("provenance"))
+        features.append(f2)
+
     return {
         "status": "ready",
         "scenario_id": scenario_id,
         "schema": spec.get("schema"),
         "version": spec.get("version"),
-        "outcome": spec.get("outcome"),
-        "features": spec.get("features"),
-        "algorithm": spec.get("algorithm"),
+        "outcome": outcome,
+        "features": features,
+        "algorithm": algorithm,
         "data_template": spec.get("data_template"),
-        "provenance_index": vj.get("_provenance_index", {}),
+        "provenance_index": resolved or vj.get("_provenance_index", {}),
         "validated": row["variables_validated"],
         "generated_at": row["variables_generated_at"].isoformat() if row["variables_generated_at"] else None,
     }
