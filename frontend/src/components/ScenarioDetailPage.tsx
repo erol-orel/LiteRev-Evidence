@@ -30,6 +30,7 @@ import {
   validateScenarioVariables,
   getModelRun,
   getModelDataset,
+  getScenarioModelSpec,
   trainModel,
   generateSyntheticData,
   getModelTrainStatus,
@@ -77,6 +78,8 @@ import {
   type KappaStats,
   type ModelRun,
   type ModelDataset,
+  type ModelSpecResponse,
+  type ProvArticle,
   type ModelMonitor,
   type SpecProposal,
   scenarioBase,
@@ -449,16 +452,39 @@ function QueriesSection({ detail, scenarioId }: { detail: ScenarioDetail; scenar
 
 // ─── Section: Variables & Databases (NOUVEAU) ──────────────────────────────────
 
+// Lien vers l'article source (le plus récent / le plus cité) d'un élément du spec.
+function ArticleSourceLink({ a, label = "Source" }: { a?: ProvArticle | null; label?: string }) {
+  if (!a) return null;
+  const text = `${(a.title ?? 'article').slice(0, 70)}${a.year ? ` (${a.year})` : ''}`;
+  const inner = (
+    <span className="inline-flex items-center gap-1 text-[10px] text-brand-300/80 hover:text-brand-300">
+      <FileText size={9} /> {label} : {text}
+      {typeof a.citation_count === 'number' && a.citation_count > 0 && (
+        <span className="text-white/30">· {a.citation_count} cit.</span>
+      )}
+    </span>
+  );
+  return a.url
+    ? <a href={a.url} target="_blank" rel="noreferrer" title={a.title} className="block mt-0.5">{inner}</a>
+    : <span title={a.title} className="block mt-0.5">{inner}</span>;
+}
+
 function VariablesSection({ detail, scenarioId, onGoToModel }: { detail: ScenarioDetail; scenarioId: string; onGoToModel?: () => void }) {
   // État du modèle entraîné + des données branchées, pour relier ce panneau au
   // "Modèle Prédictif" : on montre par variable si elle est branchée, et quel
   // algorithme a réellement été entraîné.
   const [modelRun, setModelRun] = useState<ModelRun | null>(null);
   const [modelDataset, setModelDataset] = useState<ModelDataset | null>(null);
+  const [modelSpec, setModelSpec] = useState<ModelSpecResponse | null>(null);
   React.useEffect(() => {
     getModelRun(scenarioId).then(setModelRun).catch(() => setModelRun(null));
     getModelDataset(scenarioId).then(setModelDataset).catch(() => setModelDataset(null));
+    getScenarioModelSpec(scenarioId).then(setModelSpec).catch(() => setModelSpec(null));
   }, [scenarioId]);
+
+  // machine_name -> article source (le plus récent / cité) pour chaque variable.
+  const sourceByVar: Record<string, ProvArticle | null> = {};
+  (modelSpec?.features ?? []).forEach(f => { if (f.machine_name) sourceByVar[f.machine_name] = f.best_article ?? null; });
 
   const trained = modelRun?.status === "ready";
   const trainedMetricValue = (() => {
@@ -710,6 +736,7 @@ function VariablesSection({ detail, scenarioId, onGoToModel }: { detail: Scenari
               <p className="text-sm font-medium text-gold-200">{llmVars.primary_outcome.name}</p>
               <p className="text-xs text-white/55">{llmVars.primary_outcome.definition}</p>
               <p className="text-[10px] text-white/35">Mesure : {llmVars.primary_outcome.measurement} - Horizon : {llmVars.primary_outcome.timeframe}</p>
+              <ArticleSourceLink a={modelSpec?.outcome?.best_article} />
             </div>
           )}
 
@@ -731,6 +758,7 @@ function VariablesSection({ detail, scenarioId, onGoToModel }: { detail: Scenari
                     <td className="py-3 px-3">
                       <p className="font-mono text-brand-300 font-medium">{v.name}</p>
                       {v.machine_name && <p className="text-[10px] text-white/35 font-mono mt-0.5">col : {v.machine_name}</p>}
+                      {v.machine_name && <ArticleSourceLink a={sourceByVar[v.machine_name]} />}
                     </td>
                     <td className="py-3 px-3">
                       <span className="rounded bg-white/5 border border-white/10 px-1.5 py-0.5 text-[10px] text-white/50">{v.type}</span>
@@ -775,6 +803,7 @@ function VariablesSection({ detail, scenarioId, onGoToModel }: { detail: Scenari
               {llmVars.recommended_algorithm.alternatives?.length > 0 && (
                 <p className="text-[10px] text-white/35">Alternatives : {llmVars.recommended_algorithm.alternatives.join(', ')}</p>
               )}
+              <ArticleSourceLink a={modelSpec?.algorithm?.best_article} />
             </div>
           )}
         </div>
@@ -3831,6 +3860,7 @@ function ModelMonitorSection({ scenarioId }: { scenarioId: string }) {
   const [run, setRun] = useState<ModelRun | null>(null);
   const [monitor, setMonitor] = useState<ModelMonitor | null>(null);
   const [proposal, setProposal] = useState<SpecProposal | null>(null);
+  const [spec, setSpec] = useState<ModelSpecResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -3841,8 +3871,9 @@ function ModelMonitorSection({ scenarioId }: { scenarioId: string }) {
       getModelRun(scenarioId).catch(() => null),
       getModelMonitor(scenarioId).catch(() => null),
       getSpecProposal(scenarioId).catch(() => null),
-    ]).then(([r, m, p]) => {
-      setRun(r); setMonitor(m); setProposal(p);
+      getScenarioModelSpec(scenarioId).catch(() => null),
+    ]).then(([r, m, p, s]) => {
+      setRun(r); setMonitor(m); setProposal(p); setSpec(s);
     }).catch((e) => setError(e.message)).finally(() => setLoading(false));
   }, [scenarioId]);
 
@@ -3903,6 +3934,20 @@ function ModelMonitorSection({ scenarioId }: { scenarioId: string }) {
 
   const mcolors = STATUS_COLORS[monitor?.status_color ?? "unavailable"] || STATUS_COLORS.green;
   const diff = proposal?.diff;
+
+  // Importances par VARIABLE (mêmes noms que l'onglet Variables), repliées et
+  // mappées machine_name -> nom lisible. Fallback: feature_importances nettoyées.
+  const nameByMachine: Record<string, string> = {};
+  (spec?.features ?? []).forEach(f => { if (f.machine_name) nameByMachine[f.machine_name] = f.name || f.machine_name; });
+  const byVar = (run?.summary?.importances_by_variable ?? null) as Record<string, number> | null;
+  const topImportances: { label: string; value: number }[] = byVar && Object.keys(byVar).length > 0
+    ? Object.entries(byVar)
+        .map(([mn, v]) => ({ label: nameByMachine[mn] ?? mn, value: Number(v) }))
+        .sort((a, b) => b.value - a.value).slice(0, 6)
+    : (run?.feature_importances ?? []).slice(0, 6).map(fi => {
+        const base = fi.feature.includes("__") ? fi.feature.split("__").slice(1).join("__") : fi.feature;
+        return { label: nameByMachine[base] ?? base, value: fi.importance };
+      });
 
   return (
     <div className="space-y-6">
@@ -3968,14 +4013,14 @@ function ModelMonitorSection({ scenarioId }: { scenarioId: string }) {
                   </p>
                 </div>
               </div>
-              {run.feature_importances && run.feature_importances.length > 0 && (
+              {topImportances.length > 0 && (
                 <div className="rounded-xl border border-white/5 bg-white/2 px-3 py-2.5">
                   <span className="text-[10px] text-white/35 uppercase tracking-wider flex items-center gap-1"><TrendingUp size={11} /> Variables influentes</span>
                   <div className="mt-2 space-y-1.5">
-                    {run.feature_importances.slice(0, 5).map((fi) => (
-                      <div key={fi.feature} className="flex items-center gap-2">
-                        <div className="h-1.5 rounded-full bg-brand-500/60" style={{ width: `${Math.max(4, Math.min(100, fi.importance * 100))}%` }} />
-                        <span className="text-[10px] text-white/50 font-mono truncate">{fi.feature}</span>
+                    {topImportances.map((fi) => (
+                      <div key={fi.label} className="flex items-center gap-2">
+                        <div className="h-1.5 rounded-full bg-brand-500/60" style={{ width: `${Math.max(4, Math.min(100, fi.value * 100))}%` }} />
+                        <span className="text-[10px] text-white/50 truncate">{fi.label}</span>
                       </div>
                     ))}
                   </div>
