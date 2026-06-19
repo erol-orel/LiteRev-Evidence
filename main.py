@@ -8377,6 +8377,7 @@ def _run_user_scenario_populate(
         # Soft filter : le seuil filtre l'affichage et l'aval, JAMAIS par
         # suppression. Réduire le seuil fait donc réapparaître des articles.
         try:
+            _backfill_title_abstract_chunks(scenario_id)  # docs liés sans chunk résumé
             _n_scored = _run_semantic_rerank_inline(scenario_id, query)
             logger.info(f"Post-populate rerank {scenario_id}: {_n_scored} articles scorés (aucune suppression).")
         except Exception as _e_rr:
@@ -10710,6 +10711,7 @@ def trigger_rerank(scenario_id: str, _: None = Depends(require_api_key)) -> dict
     _RERANK_JOBS[scenario_id] = {"status": "running", "updated": 0}
 
     def _run():
+        _backfill_title_abstract_chunks(scenario_id)  # docs sans chunk résumé -> searchable
         n = _run_semantic_rerank(scenario_id, query)
         _RERANK_JOBS[scenario_id] = {"status": "done", "updated": n}
 
@@ -10723,9 +10725,46 @@ def get_rerank_status(scenario_id: str) -> dict[str, Any]:
     return _RERANK_JOBS.get(scenario_id, {"status": "idle"})
 
 
+def _backfill_title_abstract_chunks(scenario_id: str | None = None) -> int:
+    """
+    Crée un chunk `title_abstract` (embedding NULL) pour les documents qui ont un
+    titre/résumé mais AUCUN chunk title_abstract — typiquement les docs liés depuis
+    la base locale sans création de chunk. Le worker d'enrichissement les embed
+    ensuite : recherche sémantique au niveau résumé + compteurs réconciliés.
+    Idempotent (NOT EXISTS). Si scenario_id est None, traite tout le corpus literev.
+    """
+    scope = "JOIN article_scenarios ars ON ars.document_id = ld.id AND ars.scenario_id = :sid" if scenario_id else ""
+    params = {"sid": scenario_id} if scenario_id else {}
+    try:
+        with engine.begin() as conn:
+            n = conn.execute(text(f"""
+                INSERT INTO document_chunk (document_id, chunk_index, content, chunk_type, created_at)
+                SELECT DISTINCT ld.id,
+                       (SELECT COALESCE(MAX(c2.chunk_index), -1) + 1 FROM document_chunk c2 WHERE c2.document_id = ld.id),
+                       btrim(coalesce(ld.title, '') || E'\\n\\n' || coalesce(ld.abstract, '')),
+                       'title_abstract', now()
+                FROM literature_document ld
+                {scope}
+                WHERE ld.project_context = 'literev'
+                  AND ld.is_duplicate IS NOT TRUE
+                  AND length(btrim(coalesce(ld.title, '') || ' ' || coalesce(ld.abstract, ''))) >= 30
+                  AND NOT EXISTS (
+                      SELECT 1 FROM document_chunk c
+                      WHERE c.document_id = ld.id AND c.chunk_type = 'title_abstract'
+                  )
+            """), params).rowcount
+        if n:
+            logger.info(f"Backfill title_abstract chunks ({scenario_id or 'global'}): {n} créés (embedding par le worker).")
+        return n
+    except Exception as e:
+        logger.warning(f"Backfill title_abstract chunks {scenario_id}: {e}")
+        return 0
+
+
 def _maybe_autorerank(scenario_id: str) -> bool:
     """
-    Lance le scoring sémantique en arrière-plan si jamais effectué (auto-score).
+    Lance le scoring sémantique en arrière-plan si jamais effectué (auto-score),
+    et complète au passage les chunks title_abstract manquants (recherche + compteurs).
     Ne se déclenche qu'une fois par scénario (tant que le process vit) : si le
     job est déjà 'running' ou 'done', on ne relance pas. Renvoie True si lancé.
     """
@@ -10751,6 +10790,7 @@ def _maybe_autorerank(scenario_id: str) -> bool:
 
     def _run():
         try:
+            _backfill_title_abstract_chunks(scenario_id)  # docs sans chunk résumé -> searchable
             n = _run_semantic_rerank(scenario_id, query)
             _RERANK_JOBS[scenario_id] = {"status": "done", "updated": n}
             logger.info(f"Auto-rerank {scenario_id}: {n} articles scorés.")
