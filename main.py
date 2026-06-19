@@ -7064,6 +7064,32 @@ def _user_scenario_to_gesica_format(row: dict[str, Any]) -> dict[str, Any]:
     included = int(counts["included_count"] or 0) if counts else 0
     excluded = int(counts["excluded_count"] or 0) if counts else 0
 
+    # Actions recommandées (cache) + résumé du modèle entraîné, pour la carte
+    # généralisée du tableau de bord (mêmes blocs que les scénarios GESICA).
+    actions: list = []
+    model_summary: dict[str, Any] = {"has_model": False}
+    try:
+        with engine.connect() as _c2:
+            _a = _c2.execute(text(
+                "SELECT recommended_actions_json FROM scenario_settings WHERE scenario_id = :sid"
+            ), {"sid": row["id"]}).scalar()
+            if isinstance(_a, list):
+                actions = _a
+            _m = _c2.execute(text("""
+                SELECT family, metric, metrics_json FROM scenario_model_run
+                WHERE scenario_id = :sid AND is_active = TRUE
+                ORDER BY created_at DESC LIMIT 1
+            """), {"sid": row["id"]}).mappings().first()
+            if _m:
+                mj = _m["metrics_json"] or {}
+                mv = mj.get(_m["metric"]) if _m["metric"] else (list(mj.values())[0] if mj else None)
+                model_summary = {
+                    "has_model": True, "family": _m["family"], "metric": _m["metric"],
+                    "metric_value": (float(mv) if isinstance(mv, (int, float)) else None),
+                }
+    except Exception as _e_card:
+        logger.warning(f"Card extras {row['id']}: {_e_card}")
+
     return {
         "id": row["id"],
         "name": row["name"],
@@ -7075,7 +7101,8 @@ def _user_scenario_to_gesica_format(row: dict[str, Any]) -> dict[str, Any]:
         "excluded_count": excluded,
         "kappa_score": None,
         "hidden": False,
-        "recommended_actions": [],
+        "recommended_actions": actions,
+        "model": model_summary,
         "relevant_articles": [],
         "living_evidence_note": (
             f"Scénario utilisateur · {article_count} articles indexés (7 sources)."
@@ -11661,6 +11688,8 @@ def _ensure_spec_proposal_columns():
     with engine.begin() as conn:
         conn.execute(text("ALTER TABLE scenario_settings ADD COLUMN IF NOT EXISTS variables_proposal_json JSONB"))
         conn.execute(text("ALTER TABLE scenario_settings ADD COLUMN IF NOT EXISTS proposal_generated_at TIMESTAMP"))
+        conn.execute(text("ALTER TABLE scenario_settings ADD COLUMN IF NOT EXISTS recommended_actions_json JSONB"))
+        conn.execute(text("ALTER TABLE scenario_settings ADD COLUMN IF NOT EXISTS actions_generated_at TIMESTAMP"))
     logger.info("Colonnes de proposition de spec vérifiées/créées.")
 
 
@@ -11668,6 +11697,102 @@ try:
     _ensure_spec_proposal_columns()
 except Exception as _e:
     logger.warning(f"_ensure_spec_proposal_columns: {_e}")
+
+
+# ─── ACTIONS RECOMMANDÉES (carte tableau de bord, généralisé aux user scenarios) ─
+_ACTIONS_JOBS: dict[str, dict] = {}
+
+
+def _generate_recommended_actions(scenario_id: str) -> list[str]:
+    """
+    Génère 4-5 actions opérationnelles/cliniques concrètes à partir de l'évidence
+    du scénario (PICO des articles au-dessus du seuil), façon « Actions
+    recommandées » des cartes GESICA. Cache dans scenario_settings.
+    """
+    import json as _json
+    from openai import OpenAI as _OAI
+
+    articles = _get_above_threshold_articles(scenario_id)
+    pico_articles = [a for a in articles if a.get("pico_json")]
+    base = pico_articles or articles
+    if not base:
+        return []
+
+    scenario_name = _get_scenario_name(scenario_id)
+    ctx = []
+    for a in base[:20]:
+        pj = a.get("pico_json") or {}
+        ctx.append({
+            "title": (a.get("title") or "")[:120],
+            "O": pj.get("outcome", pj.get("O", "")),
+            "key_finding": pj.get("key_finding", pj.get("conclusion", "")),
+        })
+
+    system = ("Tu es un expert en aide à la décision en santé/médecine d'urgence. "
+              "À partir d'une revue de littérature, tu proposes des ACTIONS opérationnelles "
+              "concrètes, spécifiques et actionnables (pas de généralités). Pas de tiret em (—).")
+    user = (f"Scénario : \"{scenario_name}\"\n"
+            f"Basé sur {len(base)} articles :\n{_json.dumps(ctx, ensure_ascii=False)[:6000]}\n\n"
+            "Génère un JSON {\"recommended_actions\": [\"action 1\", ...]} avec 4 à 5 actions "
+            "concrètes déduites de l'évidence. Retourne UNIQUEMENT le JSON.")
+    try:
+        client = _OAI()
+        resp = client.chat.completions.create(
+            model="gpt-4.1", temperature=0.2, max_tokens=700,
+            response_format={"type": "json_object"},
+            messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
+        )
+        data = _json.loads(resp.choices[0].message.content)
+        actions = [str(x) for x in (data.get("recommended_actions") or []) if str(x).strip()][:6]
+    except Exception as e:
+        logger.error(f"Génération actions {scenario_id}: {e}", exc_info=True)
+        return []
+
+    with engine.begin() as conn:
+        conn.execute(text("""
+            INSERT INTO scenario_settings (scenario_id, recommended_actions_json, actions_generated_at, updated_at)
+            VALUES (:sid, CAST(:a AS jsonb), NOW(), NOW())
+            ON CONFLICT (scenario_id) DO UPDATE
+            SET recommended_actions_json = CAST(:a AS jsonb), actions_generated_at = NOW(), updated_at = NOW()
+        """), {"sid": scenario_id, "a": _json.dumps(actions)})
+    return actions
+
+
+def _maybe_generate_actions(scenario_id: str) -> bool:
+    """Lance la génération des actions en arrière-plan, une fois par scénario."""
+    import threading
+    if _ACTIONS_JOBS.get(scenario_id, {}).get("status") in ("running", "done"):
+        return False
+    _ACTIONS_JOBS[scenario_id] = {"status": "running"}
+
+    def _run():
+        try:
+            n = _generate_recommended_actions(scenario_id)
+            _ACTIONS_JOBS[scenario_id] = {"status": "done", "count": len(n)}
+        except Exception as e:
+            _ACTIONS_JOBS[scenario_id] = {"status": "error", "error": str(e)}
+            logger.warning(f"Actions job {scenario_id}: {e}")
+
+    threading.Thread(target=_run, daemon=True).start()
+    return True
+
+
+@app.get("/scenarios/{scenario_id}/recommended-actions")
+def get_recommended_actions(scenario_id: str) -> dict[str, Any]:
+    """Actions recommandées (cache) ; génère en arrière-plan au 1er appel si absentes."""
+    with engine.connect() as conn:
+        row = conn.execute(text(
+            "SELECT recommended_actions_json, actions_generated_at FROM scenario_settings WHERE scenario_id = :sid"
+        ), {"sid": scenario_id}).mappings().first()
+    if row and isinstance(row["recommended_actions_json"], list) and row["recommended_actions_json"]:
+        return {"status": "ready", "actions": row["recommended_actions_json"],
+                "generated_at": row["actions_generated_at"].isoformat() if row["actions_generated_at"] else None}
+    started = _maybe_generate_actions(scenario_id)
+    job = _ACTIONS_JOBS.get(scenario_id, {})
+    if job.get("status") == "error":
+        return {"status": "error", "actions": [], "error": job.get("error")}
+    return {"status": "generating" if (started or job.get("status") == "running") else "empty", "actions": []}
+
 
 
 def _diff_model_spec(old: dict | None, new: dict | None) -> dict:
