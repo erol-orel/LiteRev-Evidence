@@ -2216,7 +2216,7 @@ function ScenariosView({
             </div>
             <p className="mt-1 text-sm leading-5 text-forest-400 line-clamp-2">{scenario.description}</p>
           </div>
-          <div className="shrink-0 flex items-center gap-2">
+          <div className="shrink-0 flex items-center gap-1.5">
             <button
               onClick={(e) => { e.stopPropagation(); setDetailScenarioId(scenario.id); }}
               className="rounded-xl border border-brand-500/20 bg-brand-500/10 px-2.5 py-1 text-[10px] text-brand-300 hover:bg-brand-500/20 transition font-medium"
@@ -2224,9 +2224,50 @@ function ScenariosView({
             >
               Page détail
             </button>
+            {isUser && (
+              <>
+                {onPopulateUserScenario && (
+                  <button type="button" onClick={(e) => { e.stopPropagation(); onPopulateUserScenario(scenario.id); }}
+                    disabled={populatingId === scenario.id}
+                    className="rounded-xl border border-forest-500/30 px-2 py-1 text-[10px] text-forest-300 hover:bg-forest-500/10 transition disabled:opacity-50"
+                    title="Ingérer des articles">
+                    {populatingId === scenario.id ? <RotateCcw size={11} className="animate-spin" /> : <Zap size={11} />}
+                  </button>
+                )}
+                {onReplaySearch && (
+                  <button type="button" onClick={(e) => { e.stopPropagation(); const saved = savedSearches.find(ss => ss.id === scenario.id); if (saved) onReplaySearch(saved); }}
+                    className="rounded-xl border border-white/10 px-2 py-1 text-[10px] text-white/40 hover:text-white hover:bg-white/10 transition" title="Relancer la recherche">↻</button>
+                )}
+                {onAssignFolder && (
+                  <button type="button" onClick={(e) => { e.stopPropagation(); setAssigningScenarioId(scenario.id); }}
+                    className="rounded-xl border border-white/10 px-2 py-1 text-[10px] text-white/30 hover:text-white hover:bg-white/10 transition" title="Assigner à un dossier"><FolderOpen size={11} /></button>
+                )}
+                {onTogglePin && (
+                  <button type="button" onClick={(e) => { e.stopPropagation(); onTogglePin(scenario.id); }}
+                    className={`rounded-xl border px-2 py-1 text-[10px] transition ${(scenario as any).pinned ? "border-gold-400/30 text-gold-400 hover:bg-gold-500/10" : "border-white/10 text-white/30 hover:text-gold-300 hover:bg-white/10"}`}
+                    title={(scenario as any).pinned ? "Désépingler" : "Épingler"}>★</button>
+                )}
+                {onDeleteSearch && (
+                  <button type="button" onClick={(e) => { e.stopPropagation(); onDeleteSearch(scenario.id); }}
+                    className="rounded-xl border border-white/10 px-2 py-1 text-[10px] text-white/30 hover:text-red-400 hover:border-red-500/20 transition" title="Supprimer">✕</button>
+                )}
+              </>
+            )}
+            {!isUser && onDeleteSearch && (
+              <button type="button" onClick={(e) => { e.stopPropagation(); onDeleteSearch(scenario.id); }}
+                className="rounded-xl border border-white/10 px-2 py-1 text-[10px] text-white/30 hover:text-red-400 hover:border-red-500/20 transition" title="Supprimer">✕</button>
+            )}
             {isExpanded ? <ChevronUp size={16} className="text-forest-500" /> : <ChevronDown size={16} className="text-forest-500" />}
           </div>
         </div>
+        {isUser && pipelineStatuses[scenario.id] && pipelineStatuses[scenario.id].overall_status !== 'done' && (
+          <div className="mt-2 flex items-center gap-2 pl-12">
+            <RotateCcw size={10} className="text-brand-400 animate-spin shrink-0" />
+            <span className="text-xs text-brand-300">
+              {pipelineStatuses[scenario.id].overall_status === 'error' ? '⚠ Erreur pipeline' : `Pipeline : ${pipelineStatuses[scenario.id].current_step ?? 'en cours'}…`}
+            </span>
+          </div>
+        )}
 
         {isExpanded && (
           <div className="mt-4 space-y-4 border-t border-white/10 pt-4">
@@ -2884,64 +2925,9 @@ function ScenariosView({
                 {folderScenarios.length === 0 && (
                   <p className="text-xs text-white/30 italic">Aucun scénario dans ce dossier</p>
                 )}
-                {folderScenarios.map(s => {
-                  const pStatus = pipelineStatuses[s.id];
-                  const isPipelineRunning = pStatus && pStatus.overall_status !== 'done' && pStatus.overall_status !== 'not_started' && pStatus.overall_status !== 'error';
-                  const isPipelineDone = pStatus?.overall_status === 'done';
-                  const dbPipelineDone = (s as any).pipeline_status === 'done';
-                  const dbPopulateDone = (s as any).populate_status === 'done';
-                  return (
-                  <div key={s.id} className="flex items-center gap-3 rounded-xl border border-white/8 bg-white/3 px-3 py-2 hover:bg-white/8 transition group">
-                    <div className="flex-1 min-w-0 cursor-pointer" onClick={() => setDetailScenarioId(s.id)}>
-                      <p className="text-sm text-white/80 truncate group-hover:text-white transition">{s.title}</p>
-                      <p className="text-xs text-white/30 truncate">
-                        {(() => {
-                          const us = s as any;
-                          if (s.articleCount > 0) {
-                            const removed = us.rerank_removed_count ?? 0;
-                            const thr = us.rerank_threshold ?? 0.45;
-                            const removedNote = removed > 0 ? ` (${removed} filtrés, seuil ${thr})` : '';
-                            return `${s.articleCount} articles${removedNote}`;
-                          }
-                          if (!isPipelineDone && !dbPipelineDone && !dbPopulateDone && us.resultCount > 0) {
-                            return `${us.resultCount} résultats · non indexé`;
-                          }
-                          return 'Aucun article indexé';
-                        })()}
-                        {(isPipelineDone || dbPipelineDone) && s.articleCount > 0 && <span className="ml-1 text-forest-400">✓ Pipeline terminé</span>}
-                        {!isPipelineDone && !dbPipelineDone && dbPopulateDone && s.articleCount > 0 && <span className="ml-1 text-gold-400">✓ Articles ingérés</span>}
-                      </p>
-                      {isPipelineRunning && (
-                        <div className="mt-0.5 flex items-center gap-1.5">
-                          <RotateCcw size={9} className="text-brand-400 animate-spin shrink-0" />
-                          <span className="text-xs text-brand-300">
-                            {pStatus.overall_status === 'error' ? '⚠ Erreur pipeline' :
-                             pStatus.current_step === 'ingest' ? 'Ingéstion multi-sources (8 sources)...' :
-                             pStatus.current_step === 'embed' ? 'Génération embeddings...' :
-                             pStatus.current_step === 'pico' ? 'Extraction PICO...' :
-                             pStatus.current_step === 'metadata' ? 'Métadonnées...' :
-                             pStatus.current_step === 'fulltext' ? 'Récupération full-text...' :
-                             pStatus.current_step === 'clustering' ? 'Clustering...' :
-                             pStatus.current_step === 'rerank' ? 'Rerank sémantique...' : 'Pipeline en cours...'}
-                          </span>
-                        </div>
-                      )}
-                      {!pStatus && !dbPipelineDone && !dbPopulateDone && s.articleCount === 0 && (
-                        <p className="text-xs text-white/20 italic">Pipeline non lancé</p>
-                      )}
-                    </div>
-                    <button type="button" onClick={() => setDetailScenarioId(s.id)} className="shrink-0 rounded-xl bg-white/5 border border-white/10 px-2 py-1 text-xs text-white/50 hover:text-white transition">Ouvrir</button>
-                    {onPopulateUserScenario && s.articleCount === 0 && (
-                      <button type="button" onClick={() => onPopulateUserScenario(s.id)} disabled={populatingId === s.id} className="shrink-0 rounded-xl border border-forest-500/30 px-2 py-1 text-xs text-forest-300 hover:bg-forest-500/10 transition disabled:opacity-50" title="Lancer le pipeline">
-                        {populatingId === s.id ? <RotateCcw size={10} className="animate-spin" /> : <Zap size={10} />}
-                      </button>
-                    )}
-                    {onAssignFolder && <button type="button" onClick={() => setAssigningScenarioId(s.id)} className="shrink-0 rounded-xl border border-white/10 px-2 py-1 text-xs text-white/30 hover:text-white transition" title="Changer de dossier"><FolderOpen size={11} /></button>}
-                    {onTogglePin && <button type="button" onClick={() => onTogglePin(s.id)} className="shrink-0 rounded-xl border border-white/10 px-2 py-1 text-xs text-white/30 hover:text-gold-400 transition" title="Épingler">☆</button>}
-                    {onDeleteSearch && <button type="button" onClick={() => onDeleteSearch(s.id)} className="shrink-0 rounded-xl border border-white/10 px-2 py-1 text-xs text-white/30 hover:text-red-400 transition" title="Supprimer">✕</button>}
-                  </div>
-                  );
-                })}
+                {folderScenarios.map(s => (
+                  <ScenarioCard key={s.id} scenario={s} />
+                ))}
               </div>
             );
           })}
@@ -2951,124 +2937,7 @@ function ScenariosView({
             <div className="space-y-2">
               <h3 className="text-xs font-semibold text-gold-400 uppercase tracking-widest">Épinglés</h3>
               {userScenarios.filter(s => s.pinned && !(s as any).folder_id).map(s => (
-                <div key={s.id} className="flex items-center gap-3 rounded-2xl border border-gold-400/30 bg-gold-500/5 px-4 py-3 hover:bg-gold-500/10 transition group">
-                  <Activity size={14} className="text-gold-400 shrink-0" />
-                  <div className="flex-1 min-w-0 cursor-pointer" onClick={() => setDetailScenarioId(s.id)}>
-                    <p className="text-sm font-semibold text-white truncate group-hover:text-gold-300 transition">{s.title}</p>
-                    <p className="text-xs text-white/40 truncate">
-                      {(() => {
-                        const us = s as any;
-                        const pipelineDone = us.pipeline_status === 'done' || pipelineStatuses[s.id]?.overall_status === 'done';
-                        const populateDone = us.populate_status === 'done';
-                        if (s.articleCount > 0) {
-                          const removed = us.rerank_removed_count ?? 0;
-                          const thr = us.rerank_threshold ?? 0.45;
-                          const removedNote = removed > 0 ? ` (${removed} filtrés, seuil ${thr})` : '';
-                          return `${s.articleCount} articles${removedNote}`;
-                        }
-                        if (!pipelineDone && !populateDone && us.resultCount > 0) {
-                          return `${us.resultCount} résultats · pipeline non lancé`;
-                        }
-                        return 'Aucun article indexé';
-                      })()} · {new Date(s.created_at ?? '').toLocaleDateString("fr-CH")}
-                    </p>
-                    {s.title !== s.query && <p className="text-xs text-white/25 truncate font-mono">{s.query}</p>}
-                    {pipelineStatuses[s.id] && pipelineStatuses[s.id].overall_status !== 'done' && (
-                      <div className="mt-1 flex items-center gap-2">
-                        <RotateCcw size={10} className="text-brand-400 animate-spin shrink-0" />
-                        <span className="text-xs text-brand-300">
-                          {(() => {
-                            const ps = pipelineStatuses[s.id];
-                            if (ps.overall_status === 'error') return '⚠ Erreur pipeline';
-                            const step = ps.current_step;
-                            const st = ps.steps?.[step as keyof typeof ps.steps];
-                            if (step === 'embed') {
-                              const d = st?.docs_done ?? 0; const t = st?.docs_total ?? 0;
-                              return t > 0 ? `Embeddings ${d}/${t} docs...` : 'Génération embeddings...';
-                            }
-                            if (step === 'pico') {
-                              const ext = (st as any)?.extracted_this_run ?? 0;
-                              return ext > 0 ? `PICO ${ext} extraits...` : 'Extraction PICO...';
-                            }
-                            if (step === 'metadata') {
-                              const ext = (st as any)?.extracted_this_run ?? 0;
-                              return ext > 0 ? `Métadonnées ${ext} extraites...` : 'Extraction métadonnées...';
-                            }
-                            if (step === 'ingest') return 'Ingestion multi-sources (8 sources)...';
-                            if (step === 'fulltext') return 'Récupération full-text...';
-                            if (step === 'clustering') return 'Clustering thématique...';
-                            if (step === 'rerank') return 'Rerank sémantique...';
-                            return 'Pipeline en cours...';
-                          })()}
-                        </span>
-                        <span className="text-xs text-white/25">
-                          {(['ingest','fulltext','embed','rerank','pico','metadata','clustering'] as const).map(step => {
-                            const st = pipelineStatuses[s.id]?.steps?.[step]?.status;
-                            const stepSt = pipelineStatuses[s.id]?.steps?.[step];
-                            const dotCls = st === 'done' ? 'bg-forest-400' : st === 'running' ? 'bg-brand-400 animate-pulse' : st === 'error' ? 'bg-red-400' : 'bg-white/20';
-                            const stepLabel: Record<string, string> = {
-                              ingest: 'Ingestion (8 sources)',
-                              embed: 'Embeddings',
-                              pico: 'PICO',
-                              metadata: 'Métadonnées',
-                              fulltext: 'Full-text',
-                              clustering: 'Clustering',
-                              rerank: 'Rerank sémantique',
-                            };
-                            const pctHint = step === 'embed' && stepSt?.pct != null ? ` · ${stepSt.pct}%` : '';
-                            const methodHint = step === 'clustering' && stepSt?.method ? ` · ${stepSt.method}` : '';
-                            const ingestHint = step === 'ingest' && stepSt?.ingested != null
-                              ? ` · ${stepSt.ingested} uniq${stepSt.api_results_raw != null ? ` (${stepSt.api_results_raw} bruts)` : ''}` : '';
-                            return <span key={step} className={`inline-block w-1.5 h-1.5 rounded-full mx-0.5 ${dotCls}`} title={`${stepLabel[step] ?? step}: ${st ?? 'pending'}${ingestHint}${pctHint}${methodHint}`} />;
-                          })}
-                        </span>
-                      </div>
-                    )}
-                    {pipelineStatuses[s.id]?.overall_status === 'done' && (
-                      <p className="text-xs text-forest-400 mt-0.5">
-                        ✓ Pipeline terminé : {pipelineStatuses[s.id]?.message}
-                        {((s as any).rerank_removed_count ?? 0) > 0 && (
-                          <span className="text-white/30 ml-1">
-                            ({(s as any).rerank_removed_count} articles filtrés par rerank sémantique, seuil {(s as any).rerank_threshold ?? 0.45})
-                          </span>
-                        )}
-                      </p>
-                    )}
-                  </div>
-                  <button
-                    type="button"
-                    onClick={() => setDetailScenarioId(s.id)}
-                    className="shrink-0 rounded-xl bg-brand-500/20 border border-brand-500/30 px-3 py-1.5 text-xs text-brand-300 hover:bg-brand-500/30 transition"
-                  >
-                    Ouvrir
-                  </button>
-                  {onPopulateUserScenario && (
-                    <button
-                      type="button"
-                      onClick={() => onPopulateUserScenario(s.id)}
-                      disabled={populatingId === s.id}
-                      className="shrink-0 rounded-xl border border-forest-500/30 px-2 py-1.5 text-xs text-forest-300 hover:bg-forest-500/10 transition disabled:opacity-50"
-                      title="Ingérer des articles PubMed"
-                    >
-                      {populatingId === s.id ? (<RotateCcw size={11} className="animate-spin" />) : (<Zap size={11} />)}
-                    </button>
-                  )}
-                  {onReplaySearch && (
-                    <button type="button" onClick={() => {
-                      const saved = savedSearches.find(ss => ss.id === s.id);
-                      if (saved) onReplaySearch(saved);
-                    }} className="shrink-0 rounded-xl border border-white/10 px-2 py-1.5 text-xs text-white/40 hover:text-white hover:bg-white/10 transition" title="Relancer la recherche">↻</button>
-                  )}
-                  {onAssignFolder && (
-                    <button type="button" onClick={() => setAssigningScenarioId(s.id)} className="shrink-0 rounded-xl border border-white/10 px-2 py-1.5 text-xs text-white/30 hover:text-white hover:bg-white/10 transition" title="Assigner à un dossier"><FolderOpen size={11} /></button>
-                  )}
-                  {onTogglePin && (
-                    <button type="button" onClick={() => onTogglePin(s.id)} className="shrink-0 rounded-xl border border-gold-400/20 px-2 py-1.5 text-xs text-gold-400 hover:bg-gold-500/10 transition" title="Désépingler">★</button>
-                  )}
-                  {onDeleteSearch && (
-                    <button type="button" onClick={() => onDeleteSearch(s.id)} className="shrink-0 rounded-xl border border-white/10 px-2 py-1.5 text-xs text-white/30 hover:text-red-400 hover:border-red-500/20 transition" title="Supprimer">✕</button>
-                  )}
-                </div>
+                <ScenarioCard key={s.id} scenario={s} />
               ))}
             </div>
           )}
@@ -3078,102 +2947,7 @@ function ScenariosView({
             <div className="space-y-2">
               <h3 className="text-xs font-semibold text-white/40 uppercase tracking-widest">Recherches récentes</h3>
               {userScenarios.filter(s => !s.pinned && !(s as any).folder_id).map(s => (
-                <div key={s.id} className="flex items-center gap-3 rounded-2xl border border-white/8 bg-white/3 px-4 py-3 hover:bg-white/8 transition group">
-                  <BookOpen size={14} className="text-white/30 shrink-0" />
-                  <div className="flex-1 min-w-0 cursor-pointer" onClick={() => setDetailScenarioId(s.id)}>
-                    <p className="text-sm text-white/80 truncate group-hover:text-white transition">{s.title}</p>
-                    <p className="text-xs text-white/30 truncate">
-                      {(() => {
-                        const us = s as any;
-                        const pipelineDone = us.pipeline_status === 'done' || pipelineStatuses[s.id]?.overall_status === 'done';
-                        const populateDone = us.populate_status === 'done';
-                        if (s.articleCount > 0) {
-                          const removed = us.rerank_removed_count ?? 0;
-                          const thr = us.rerank_threshold ?? 0.45;
-                          const removedNote = removed > 0 ? ` (${removed} filtrés, seuil ${thr})` : '';
-                          return `${s.articleCount} articles${removedNote}`;
-                        }
-                        if (!pipelineDone && !populateDone && us.resultCount > 0) {
-                          return `${us.resultCount} résultats de recherche · non indexé`;
-                        }
-                        return 'Aucun article indexé';
-                      })()} · {new Date(s.created_at ?? '').toLocaleDateString("fr-CH")}
-                    </p>
-                    {pipelineStatuses[s.id] && pipelineStatuses[s.id].overall_status !== 'done' && (
-                      <div className="mt-1 flex items-center gap-2">
-                        <RotateCcw size={10} className="text-brand-400 animate-spin shrink-0" />
-                        <span className="text-xs text-brand-300">
-                          {(() => {
-                            const ps = pipelineStatuses[s.id];
-                            if (ps.overall_status === 'error') return '⚠ Erreur pipeline';
-                            const step = ps.current_step;
-                            const st = ps.steps?.[step as keyof typeof ps.steps];
-                            if (step === 'embed') {
-                              const d = st?.docs_done ?? 0; const t = st?.docs_total ?? 0;
-                              return t > 0 ? `Embeddings ${d}/${t} docs...` : 'Génération embeddings...';
-                            }
-                            if (step === 'pico') {
-                              const ext = (st as any)?.extracted_this_run ?? 0;
-                              return ext > 0 ? `PICO ${ext} extraits...` : 'Extraction PICO...';
-                            }
-                            if (step === 'metadata') {
-                              const ext = (st as any)?.extracted_this_run ?? 0;
-                              return ext > 0 ? `Métadonnées ${ext} extraites...` : 'Extraction métadonnées...';
-                            }
-                            if (step === 'ingest') return 'Ingestion multi-sources (8 sources)...';
-                            if (step === 'fulltext') return 'Récupération full-text...';
-                            if (step === 'clustering') return 'Clustering thématique...';
-                            if (step === 'rerank') return 'Rerank sémantique...';
-                            return 'Pipeline en cours...';
-                          })()}
-                        </span>
-                      </div>
-                    )}
-                    {pipelineStatuses[s.id]?.overall_status === 'done' && (
-                      <p className="text-xs text-forest-400 mt-0.5">
-                        ✓ Pipeline terminé : {pipelineStatuses[s.id]?.message ?? `${s.articleCount} articles`}
-                        {((s as any).rerank_removed_count ?? 0) > 0 && (
-                          <span className="text-white/30 ml-1">
-                            ({(s as any).rerank_removed_count} filtrés, seuil {(s as any).rerank_threshold ?? 0.45})
-                          </span>
-                        )}
-                      </p>
-                    )}
-                  </div>
-                  <button
-                    type="button"
-                    onClick={() => setDetailScenarioId(s.id)}
-                    className="shrink-0 rounded-xl bg-white/5 border border-white/10 px-3 py-1.5 text-xs text-white/60 hover:text-white hover:bg-white/10 transition"
-                  >
-                    Ouvrir
-                  </button>
-                  {onPopulateUserScenario && (
-                    <button
-                      type="button"
-                      onClick={() => onPopulateUserScenario(s.id)}
-                      disabled={populatingId === s.id}
-                      className="shrink-0 rounded-xl border border-forest-500/30 px-2 py-1.5 text-xs text-forest-300 hover:bg-forest-500/10 transition disabled:opacity-50"
-                      title="Ingérer des articles PubMed"
-                    >
-                      {populatingId === s.id ? (<RotateCcw size={11} className="animate-spin" />) : (<Zap size={11} />)}
-                    </button>
-                  )}
-                  {onReplaySearch && (
-                    <button type="button" onClick={() => {
-                      const saved = savedSearches.find(ss => ss.id === s.id);
-                      if (saved) onReplaySearch(saved);
-                    }} className="shrink-0 rounded-xl border border-white/10 px-2 py-1.5 text-xs text-white/40 hover:text-white hover:bg-white/10 transition" title="Relancer">↻</button>
-                  )}
-                  {onAssignFolder && (
-                    <button type="button" onClick={() => setAssigningScenarioId(s.id)} className="shrink-0 rounded-xl border border-white/10 px-2 py-1.5 text-xs text-white/30 hover:text-white hover:bg-white/10 transition" title="Assigner à un dossier"><FolderOpen size={11} /></button>
-                  )}
-                  {onTogglePin && (
-                    <button type="button" onClick={() => onTogglePin(s.id)} className="shrink-0 rounded-xl border border-white/10 px-2 py-1.5 text-xs text-white/30 hover:text-gold-400 hover:border-gold-400/30 transition" title="Épingler">☆</button>
-                  )}
-                  {onDeleteSearch && (
-                    <button type="button" onClick={() => onDeleteSearch(s.id)} className="shrink-0 rounded-xl border border-white/10 px-2 py-1.5 text-xs text-white/30 hover:text-red-400 hover:border-red-500/20 transition" title="Supprimer">✕</button>
-                  )}
-                </div>
+                <ScenarioCard key={s.id} scenario={s} />
               ))}
             </div>
           )}
