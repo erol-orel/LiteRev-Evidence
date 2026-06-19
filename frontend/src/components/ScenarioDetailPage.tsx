@@ -368,7 +368,7 @@ function QueriesSection({ detail, scenarioId }: { detail: ScenarioDetail; scenar
           {liveData && (
             <div className="space-y-3">
               <div className="flex flex-wrap items-center gap-3 text-xs text-forest-400">
-                <span className="text-white font-semibold">{liveData.total} résultats</span>
+                <span className="text-white font-semibold">{liveData.total} résultats (APIs en direct)</span>
                 <span>·</span>
                 {liveData.new_count > 0 && (
                   <span className="rounded-full border border-amber-500/40 bg-amber-500/10 px-2 py-0.5 text-amber-300">
@@ -378,6 +378,14 @@ function QueriesSection({ detail, scenarioId }: { detail: ScenarioDetail; scenar
                 )}
                 <span>{liveData.sources_queried.join(", ")}</span>
               </div>
+              {typeof liveData.corpus_total === "number" && (
+                <div className="rounded-xl border border-brand-500/20 bg-brand-500/5 px-3 py-2 text-[11px] text-brand-200"
+                     title="Le panneau ci-dessus = résultats des APIs externes (plafonnés). Le corpus du scénario = correspondance locale complète + nouvelles références ingérées. C'est ce corpus qui alimente l'Evidence Brief, l'Assistant et le modèle.">
+                  Corpus du scénario : <span className="font-semibold text-white">{liveData.corpus_total.toLocaleString()}</span> documents
+                  {" · "}<span className="text-brand-300">{(liveData.corpus_above_threshold ?? 0).toLocaleString()} au-dessus du seuil {liveData.threshold ?? 0.45}</span>
+                  {" "}<span className="text-white/40">(les nouvelles références n'ont qu'un score lexical tant qu'elles ne sont pas vectorisées)</span>
+                </div>
+              )}
               <div className="flex flex-wrap items-center gap-1.5 text-[11px]">
                 <span className="text-forest-500">Trier :</span>
                 {([
