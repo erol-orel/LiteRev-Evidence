@@ -31,18 +31,22 @@ constraint) and no ANN index on `document_chunk.embedding` (323k×1536, 5 GB).
 |---|---|---|
 | `_vacuum_dropbak.py` | Drop Phase 2 backup tables + `VACUUM (ANALYZE)` the three tables | backups dropped; dead tuples reclaimed to reusable + planner stats refreshed |
 
-## PENDING — chunk integrity cleanup (audit A3 + B3)
+## 2026-06-19 — chunk integrity cleanup (audit A3 + B3)
 
 Context: the pipeline audit (PR #43) found, at the chunk level:
 - **B3** — 116 docs with >1 `title_abstract` chunk (no uniqueness) → double-counted in similarity search.
 - **A3** — 233 chunkless docs (no chunk at all) → invisible to search/RAG.
 
-The forward-looking fixes shipped in PR #44 (atomic ingest) and PR #46/#45; this
-is the one-off cleanup of the *existing* bad rows. Not yet run.
+The forward-looking fixes shipped in PR #44 (atomic ingest) and PR #45/#46; this
+was the one-off cleanup of the *existing* bad rows. **Run 2026-06-19** (preflight
+in-scope: 74,259 literev non-dup docs).
 
-| Script | Purpose |
-|---|---|
-| `_chunk_preflight.py` | Read-only: exact counts (dup-chunk docs, chunkless-with-text, chunkless-empty) + sample empty ids |
-| `_chunk_cleanup.py` | Dry-run by default; `--execute` to apply. (1) backs up + de-dupes `title_abstract` chunks keeping the embedded one; (2) adds partial unique index `uq_document_chunk_title_abstract`; (3) recovers chunkless-with-text docs by inserting a `title_abstract` chunk (worker then embeds); (4) reports truly-empty docs, never deletes them |
+| Script | Purpose | Result |
+|---|---|---|
+| `_chunk_preflight.py` | Read-only counts | 116 dup-chunk docs (226 extra) ; 233 chunkless, all recoverable ; 0 truly-empty |
+| `_chunk_cleanup.py --execute` | De-dupe + index + recover | 226 dup chunks backed up to `_chunk_dedup_bak_20260619_161845` then deleted (116 docs deduped) ; partial unique index `uq_document_chunk_title_abstract` created ; 233 recovery `title_abstract` chunks inserted (embedding NULL → enrichment worker embeds) ; 0 empty docs |
 
-Run order: `_chunk_preflight.py` → review → `_chunk_cleanup.py` (dry-run) → `_chunk_cleanup.py --execute`.
+### Follow-ups owed
+- Background worker embeds the 233 recovered chunks (NULL embedding) — chunkless count → ~0.
+- Backup table `_chunk_dedup_bak_20260619_161845` kept for rollback; drop + `VACUUM (ANALYZE) document_chunk` once satisfied to make the dedup irreversible and reclaim space.
+
