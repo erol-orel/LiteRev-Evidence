@@ -7467,13 +7467,15 @@ def get_user_scenario_corpus(
         counts_row = conn.execute(text(f"""
             SELECT
                 COUNT(*) AS total,
-                COUNT(*) FILTER (WHERE COALESCE(ars.similarity_score, 0.0) >= :threshold) AS above_threshold
+                COUNT(*) FILTER (WHERE ars.similarity_score >= :threshold) AS above_threshold,
+                COUNT(*) FILTER (WHERE ars.similarity_score IS NULL) AS unscored
             FROM literature_document d
             JOIN article_scenarios ars ON ars.document_id = d.id AND ars.scenario_id = :sid
             WHERE {where}
         """), {**{k: v for k, v in params.items() if k not in ('limit', 'offset')}, 'threshold': eff_threshold}).mappings().first()
         total = int(counts_row["total"] or 0)
         above_threshold = int(counts_row["above_threshold"] or 0)
+        unscored = int(counts_row["unscored"] or 0)
         articles = conn.execute(text(f"""
             SELECT
                 d.id, d.title, d.abstract, d.year, d.source, d.url,
@@ -7514,11 +7516,18 @@ def get_user_scenario_corpus(
             GROUP BY d.source ORDER BY cnt DESC LIMIT 8
         """), {k: v for k, v in params.items() if k not in ('limit', 'offset')}).mappings().all()
 
+    # Auto-score : si des articles ne sont pas encore scorés, on lance le rerank
+    # en arrière-plan (une fois). Le seuil devient alors exploitable.
+    rerank_running = _maybe_autorerank(scenario_id) if unscored > 0 else False
+
     return {
         "scenario_id": scenario_id,
         "scenario_title": row["name"],
         "total": total,
         "above_threshold": above_threshold,
+        "below_threshold": max(0, total - above_threshold - unscored),
+        "unscored": unscored,
+        "rerank_running": rerank_running or (_RERANK_JOBS.get(scenario_id, {}).get("status") == "running"),
         "threshold": eff_threshold,
         "offset": offset,
         "limit": limit,
@@ -8364,44 +8373,12 @@ def _run_user_scenario_populate(
                 WHERE id = :sid
             """), {"sid": scenario_id})
 
-        # ── Scores sémantiques + nettoyage sous le seuil ─────────────────────
-        _clean_thr = 0.45
-        try:
-            with engine.connect() as _stc:
-                _sts = _stc.execute(text(
-                    "SELECT similarity_threshold FROM scenario_settings WHERE scenario_id = :sid"
-                ), {"sid": scenario_id}).scalar()
-                if _sts is not None:
-                    _clean_thr = float(_sts)
-        except Exception:
-            pass
-        _n_removed = 0
-        _n_null_removed = 0
+        # ── Scores sémantiques — SANS suppression (corpus complet conservé) ──
+        # Soft filter : le seuil filtre l'affichage et l'aval, JAMAIS par
+        # suppression. Réduire le seuil fait donc réapparaître des articles.
         try:
             _n_scored = _run_semantic_rerank_inline(scenario_id, query)
-            with engine.begin() as _cconn:
-                _n_removed = _cconn.execute(text("""
-                    DELETE FROM article_scenarios
-                    WHERE scenario_id = :sid
-                      AND similarity_score IS NOT NULL
-                      AND similarity_score < :thr
-                """), {"sid": scenario_id, "thr": _clean_thr}).rowcount
-                if _n_scored > 0:
-                    _n_null_removed = _cconn.execute(text("""
-                        DELETE FROM article_scenarios
-                        WHERE scenario_id = :sid
-                          AND similarity_score IS NULL
-                    """), {"sid": scenario_id}).rowcount
-            if _n_removed or _n_null_removed:
-                logger.info(f"Post-populate cleanup {scenario_id}: {_n_removed} sous seuil + {_n_null_removed} non scorés supprimés")
-                with engine.begin() as _ac:
-                    _ac.execute(text("""
-                        UPDATE user_scenarios
-                        SET article_count = (SELECT COUNT(DISTINCT ars.document_id) FROM article_scenarios ars JOIN literature_document d ON d.id = ars.document_id WHERE ars.scenario_id = :sid AND (d.is_duplicate IS NULL OR d.is_duplicate = FALSE)),
-                            rerank_removed_count = :removed,
-                            rerank_threshold = :thr
-                        WHERE id = :sid
-                    """), {"sid": scenario_id, "removed": _n_removed + _n_null_removed, "thr": _clean_thr})
+            logger.info(f"Post-populate rerank {scenario_id}: {_n_scored} articles scorés (aucune suppression).")
         except Exception as _e_rr:
             logger.warning(f"rerank post-populate {scenario_id}: {_e_rr}")
 
@@ -10744,6 +10721,45 @@ def trigger_rerank(scenario_id: str, _: None = Depends(require_api_key)) -> dict
 def get_rerank_status(scenario_id: str) -> dict[str, Any]:
     """Statut du job de reranking sémantique."""
     return _RERANK_JOBS.get(scenario_id, {"status": "idle"})
+
+
+def _maybe_autorerank(scenario_id: str) -> bool:
+    """
+    Lance le scoring sémantique en arrière-plan si jamais effectué (auto-score).
+    Ne se déclenche qu'une fois par scénario (tant que le process vit) : si le
+    job est déjà 'running' ou 'done', on ne relance pas. Renvoie True si lancé.
+    """
+    import threading
+
+    st = _RERANK_JOBS.get(scenario_id, {}).get("status")
+    if st in ("running", "done"):
+        return False
+    try:
+        if scenario_id.startswith("usr-"):
+            row = _get_user_scenario_or_404(scenario_id)
+            query = row["query"]
+        else:
+            meta = _get_db_gesica_scenario_or_404(scenario_id)
+            nl = meta.get("nl_queries") or []
+            query = nl[0] if nl else _gesica_title(meta)
+    except Exception:
+        return False
+    if not query:
+        return False
+
+    _RERANK_JOBS[scenario_id] = {"status": "running", "updated": 0}
+
+    def _run():
+        try:
+            n = _run_semantic_rerank(scenario_id, query)
+            _RERANK_JOBS[scenario_id] = {"status": "done", "updated": n}
+            logger.info(f"Auto-rerank {scenario_id}: {n} articles scorés.")
+        except Exception as e:
+            logger.warning(f"Auto-rerank {scenario_id}: {e}")
+            _RERANK_JOBS[scenario_id] = {"status": "error", "error": str(e)}
+
+    threading.Thread(target=_run, daemon=True).start()
+    return True
 
 
 @app.get("/scenarios/{scenario_id}/settings")

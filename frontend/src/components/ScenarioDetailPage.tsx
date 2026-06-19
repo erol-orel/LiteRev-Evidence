@@ -1117,13 +1117,22 @@ function CorpusSection({ scenarioId, threshold }: { scenarioId: string; detail: 
             subtitle="Articles sélectionnés automatiquement : en attente de validation humaine (screening)"
           />
           {data.above_threshold !== undefined && (
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-2 flex-wrap">
               <span className="rounded-full bg-brand-500/15 border border-brand-500/30 px-3 py-1 text-[10px] font-semibold text-brand-300">
-                {data.above_threshold} auto-sélectionnés (seuil)
+                {data.above_threshold} au-dessus du seuil
               </span>
-              {data.total > data.above_threshold && (
-                <span className="rounded-full bg-white/5 border border-white/10 px-3 py-1 text-[10px] text-white/40">
-                  {data.total - data.above_threshold} sous le seuil
+              {(() => {
+                const below = data.below_threshold ?? Math.max(0, data.total - data.above_threshold! - (data.unscored ?? 0));
+                return below > 0 ? (
+                  <span className="rounded-full bg-white/5 border border-white/10 px-3 py-1 text-[10px] text-white/40">
+                    {below} sous le seuil (conservés)
+                  </span>
+                ) : null;
+              })()}
+              {(data.unscored ?? 0) > 0 && (
+                <span className="rounded-full bg-gold-500/10 border border-gold-500/30 px-3 py-1 text-[10px] text-gold-300 flex items-center gap-1">
+                  {data.rerank_running && <Loader2 size={9} className="animate-spin" />}
+                  {data.unscored} non scorés{data.rerank_running ? ' · scoring en cours…' : ''}
                 </span>
               )}
             </div>

@@ -1434,6 +1434,10 @@ export interface ScenarioCorpus {
   scenario_id: string;
   total: number;
   above_threshold?: number;
+  below_threshold?: number;
+  unscored?: number;
+  rerank_running?: boolean;
+  threshold?: number;
   offset: number;
   limit: number;
   articles: CorpusArticle[];
