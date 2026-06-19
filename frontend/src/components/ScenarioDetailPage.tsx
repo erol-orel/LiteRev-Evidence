@@ -1066,28 +1066,46 @@ function CorpusSection({ scenarioId, threshold }: { scenarioId: string; detail: 
             }`}>
               Embeddings
             </span>
+            {typeof embeddingStatus.corpus_total === 'number' && (
+              <p className="text-[11px] text-white/70">
+                <span className="text-white font-semibold">{embeddingStatus.corpus_total}</span> documents au total
+              </p>
+            )}
             <div className="flex flex-wrap gap-x-4 gap-y-1 text-[10px]">
-              {/* Abstract-only row */}
-              <span className={embeddingStatus.abstract_only.pending_docs > 0 ? 'text-gold-300' : 'text-forest-400'}>
-                {embeddingStatus.abstract_only.embedded_docs}/{embeddingStatus.abstract_only.total_docs} résumés
-                {embeddingStatus.abstract_only.pending_docs > 0 && ` · ${embeddingStatus.abstract_only.pending_docs} en attente`}
+              {/* Résumés vectorisés (title_abstract) */}
+              <span className={embeddingStatus.title_abstract_chunks.pending_docs > 0 ? 'text-gold-300' : 'text-forest-400'}>
+                {embeddingStatus.title_abstract_chunks.embedded_docs} résumés vectorisés
+                {embeddingStatus.title_abstract_chunks.pending_docs > 0 && ` · ${embeddingStatus.title_abstract_chunks.pending_docs} en cours`}
               </span>
-              {/* Full-text row */}
+              {/* Textes intégraux */}
               {embeddingStatus.fulltext.total_docs > 0 && (
                 <span className={embeddingStatus.fulltext.pending_chunks > 0 ? 'text-gold-300' : 'text-forest-400'}>
                   {embeddingStatus.fulltext.docs_fully_embedded}/{embeddingStatus.fulltext.total_docs} textes intégraux
                   {embeddingStatus.fulltext.pending_chunks > 0 && (
-                    <> · {embeddingStatus.fulltext.docs_pending} articles ({embeddingStatus.fulltext.pending_chunks} chunks) en attente</>
+                    <> · {embeddingStatus.fulltext.pending_chunks} chunks en attente</>
                   )}
                 </span>
               )}
             </div>
-            {/* Réconciliation avec le corpus : documents pas encore découpés */}
-            {typeof embeddingStatus.corpus_total === 'number' && (embeddingStatus.chunkless ?? 0) > 0 && (
-              <p className="text-[10px] text-gold-300">
-                ⚠ {embeddingStatus.chunkless} / {embeddingStatus.corpus_total} document(s) sans chunk (pas encore découpés) — invisibles à la recherche.
-              </p>
-            )}
+            {/* Réconciliation avec le corpus : docs sans chunk résumé (complétion auto) */}
+            {typeof embeddingStatus.corpus_total === 'number' && (() => {
+              const missing = Math.max(0, embeddingStatus.corpus_total - embeddingStatus.title_abstract_chunks.total_docs);
+              if (missing > 0) {
+                return (
+                  <p className="text-[10px] text-gold-300">
+                    ⏳ {missing} / {embeddingStatus.corpus_total} documents en cours de découpage + vectorisation (complétion auto en arrière-plan).
+                  </p>
+                );
+              }
+              if ((embeddingStatus.chunkless ?? 0) > 0) {
+                return (
+                  <p className="text-[10px] text-gold-300">
+                    ⚠ {embeddingStatus.chunkless} document(s) sans contenu exploitable (ni résumé ni texte).
+                  </p>
+                );
+              }
+              return <p className="text-[10px] text-forest-400">✓ Tous les documents sont découpés et vectorisés.</p>;
+            })()}
             <div className="flex items-center gap-3 flex-wrap" title="Modes de recherche disponibles selon l'état des embeddings. Le lexical marche toujours ; le sémantique et l'hybride nécessitent des embeddings.">
               {Object.entries(embeddingStatus.score_availability).map(([type, available]) => (
                 <span key={type}
