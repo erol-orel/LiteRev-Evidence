@@ -92,6 +92,8 @@ import {
   type DisasterRiskResponse,
   type MCIVictimResponse,
   searchDocuments,
+  fetchSearchStrategy,
+  type SearchStrategy,
   fetchUserScenarios,
   createUserScenario,
   deleteUserScenario,
@@ -3002,6 +3004,10 @@ export default function App() {
   const [searchLiveNewCount, setSearchLiveNewCount] = useState<number | null>(null);
   const [searchScoreType, setSearchScoreType] = useState<string | null>(null);
   const [searchScoreLabel, setSearchScoreLabel] = useState<string | null>(null);
+  // Requête booléenne traduite par LLM (mode booléen) : affichée à l'utilisateur
+  // et utilisée comme base du corpus (même requête → compteur == taille du corpus).
+  const [booleanStrategy, setBooleanStrategy] = useState<SearchStrategy | null>(null);
+  const [translatingQuery, setTranslatingQuery] = useState(false);
   const [folders, setFolders] = useState<ScenarioFolder[]>([]);
   const [sortBy, setSortBy] = useState<"score" | "semantic" | "lexical" | "year_desc" | "year_asc" | "fulltext_first">("score");
 
@@ -3140,8 +3146,29 @@ export default function App() {
     setSelectedDocument(null);
     setEvidenceSummary(null);
     try {
+      // Mode booléen : on traduit d'abord la requête en langage naturel en une
+      // requête booléenne (LLM). C'est CETTE requête qui définit le corpus, donc
+      // on la recherche ET on la persiste sur le scénario → le compteur affiché
+      // == la taille du corpus (même requête booléenne des deux côtés).
+      let effectiveQuery = query;
+      let strategy: SearchStrategy | null = null;
+      if (mode === "boolean") {
+        setTranslatingQuery(true);
+        try {
+          strategy = await fetchSearchStrategy(query.trim());
+          setBooleanStrategy(strategy);
+          if (strategy?.general) effectiveQuery = strategy.general;
+        } catch (e) {
+          console.warn("Boolean translation failed, using raw query:", e);
+          setBooleanStrategy(null);
+        } finally {
+          setTranslatingQuery(false);
+        }
+      } else {
+        setBooleanStrategy(null);
+      }
       const data = await searchDocuments({
-        queryText: query,
+        queryText: effectiveQuery,
         mode,
         limit: 10000,
         filters: effectiveFilters,
@@ -3168,6 +3195,7 @@ export default function App() {
         filters: { projectContext },
         result_count: data.totalMatchingDocs ?? data.results.length,
         pinned: false,
+        search_strategy: strategy ?? undefined,
       }).then(newScenario => {
         setUserScenarios(prev => {
           // Dédupliquer par query+mode (garder la plus récente)
@@ -3253,6 +3281,7 @@ export default function App() {
         filters: { projectContext },
         result_count: searchTotalMatching ?? results.length,
         pinned: true,
+        search_strategy: (mode === "boolean" ? booleanStrategy : null) ?? undefined,
       }).then(newScenario => {
         setUserScenarios(prev => [newScenario, ...prev]);
         setSavedSearches(prev => [{
@@ -3630,6 +3659,7 @@ export default function App() {
                               setSearchTotalMatching(null);
                               setSearchFulltextDocs(null);
                               setSearchAbstractDocs(null);
+                              setBooleanStrategy(null);
                               setSelectedResult(null);
                               setSelectedDocument(null);
                             }
@@ -3693,6 +3723,26 @@ export default function App() {
                     <span className="block text-forest-500 mt-0.5">Recherche plus lente, ajoute les articles non encore indexes</span>
                   </span>
                 </label>
+
+                {mode === "boolean" && (translatingQuery || booleanStrategy?.general) && (
+                  <div className="mt-3 rounded-2xl border border-brand-400/20 bg-brand-400/5 p-3">
+                    <div className="flex items-center gap-2 text-[10px] uppercase tracking-wider text-brand-300/80">
+                      <span>Requête booléenne (traduite par IA)</span>
+                      {translatingQuery && <span className="text-white/40 normal-case tracking-normal">· traduction…</span>}
+                    </div>
+                    {booleanStrategy?.general && (
+                      <code className="mt-1.5 block break-words font-mono text-xs text-white/80">
+                        {booleanStrategy.general}
+                      </code>
+                    )}
+                    {booleanStrategy?.explanation && (
+                      <p className="mt-1.5 text-[11px] leading-snug text-forest-400">{booleanStrategy.explanation}</p>
+                    )}
+                    <p className="mt-1.5 text-[10px] leading-snug text-white/30">
+                      C'est cette requête qui définit le corpus du scénario : le nombre de documents ci-dessous == la taille du corpus.
+                    </p>
+                  </div>
+                )}
               </section>
 
               {error && (

@@ -16,7 +16,7 @@ except ImportError:
 from fastapi import Depends, FastAPI, Header, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, field_validator, model_validator
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, text, bindparam
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("literev-api")
@@ -1413,6 +1413,13 @@ def search(payload: SearchIn) -> dict[str, Any]:
     # Comptage réel du nombre de documents distincts correspondant à la requête.
     # En sémantique/hybride : docs avec au moins un chunk dont la similarité cosinus > 0.45.
     # En lexical : docs contenant au moins un terme de la requête.
+    # En BOOLÉEN : on applique EXACTEMENT le même prédicat que _search_local_doc_ids
+    # (le helper qui construit le corpus) — y compris le filtre « résumé présent » —
+    # pour que le compteur de la recherche == la taille du corpus du scénario.
+    _corpus_abs_filter = (
+        " AND d.abstract IS NOT NULL AND length(TRIM(d.abstract)) >= 30"
+        if payload.mode == "boolean" else ""
+    )
     if use_vector and payload.mode in ("hybrid", "semantic"):
         count_sql = text(f"""
             SELECT COUNT(DISTINCT d.id)
@@ -1428,7 +1435,7 @@ def search(payload: SearchIn) -> dict[str, Any]:
             SELECT COUNT(DISTINCT d.id)
             FROM document_chunk c
             JOIN literature_document d ON d.id = c.document_id
-            WHERE ({any_match_sql}) {where_sql}
+            WHERE ({any_match_sql}){_corpus_abs_filter} {where_sql}
         """)
         if payload.mode == "boolean":
             # En mode booléen, les paramètres sont déjà dans `params` sous les clés bool_req_*/bool_opt_*/bool_excl_*
@@ -1466,7 +1473,7 @@ def search(payload: SearchIn) -> dict[str, Any]:
                 COUNT(DISTINCT d.id) FILTER (WHERE d.has_fulltext) AS ft_count
             FROM document_chunk c
             JOIN literature_document d ON d.id = c.document_id
-            WHERE ({any_match_sql}) {where_sql}
+            WHERE ({any_match_sql}){_corpus_abs_filter} {where_sql}
             GROUP BY 1
         """)
         if payload.mode == "boolean":
@@ -7033,6 +7040,10 @@ class UserScenarioIn(BaseModel):
     result_count: int = Field(default=0, ge=0)
     pinned: bool = Field(default=False)
     folder_id: str | None = None
+    # Stratégie booléenne (générée par LLM) déjà calculée côté recherche. Si
+    # fournie, on la persiste telle quelle pour que le corpus utilise EXACTEMENT
+    # la même requête booléenne que celle affichée/comptée à la recherche.
+    search_strategy: dict[str, Any] | None = None
 
 
 class UserScenarioPatch(BaseModel):
@@ -7205,21 +7216,23 @@ def create_user_scenario(payload: UserScenarioIn, _: None = Depends(require_api_
                 conn.execute(text("""
                     UPDATE user_scenarios
                     SET name = :name, filters = CAST(:filters AS jsonb),
-                        result_count = :result_count, created_at = now()
+                        result_count = :result_count, created_at = now(),
+                        search_strategy = COALESCE(CAST(:strategy AS jsonb), search_strategy)
                     WHERE id = :id
                 """), {
                     "id": existing,
                     "name": payload.name,
                     "filters": json.dumps(payload.filters),
                     "result_count": payload.result_count,
+                    "strategy": json.dumps(payload.search_strategy) if payload.search_strategy else None,
                 })
                 row = _get_user_scenario_or_404(existing)
                 return _user_scenario_to_gesica_format(row)
     new_id = "usr-" + str(uuid.uuid4()).replace("-", "")[:12]
     with engine.begin() as conn:
         conn.execute(text("""
-            INSERT INTO user_scenarios (id, name, query, mode, filters, result_count, pinned, folder_id)
-            VALUES (:id, :name, :query, :mode, CAST(:filters AS jsonb), :result_count, :pinned, :folder_id)
+            INSERT INTO user_scenarios (id, name, query, mode, filters, result_count, pinned, folder_id, search_strategy)
+            VALUES (:id, :name, :query, :mode, CAST(:filters AS jsonb), :result_count, :pinned, :folder_id, CAST(:strategy AS jsonb))
         """), {
             "id": new_id,
             "name": payload.name,
@@ -7229,9 +7242,11 @@ def create_user_scenario(payload: UserScenarioIn, _: None = Depends(require_api_
             "result_count": payload.result_count,
             "pinned": payload.pinned,
             "folder_id": payload.folder_id,
+            "strategy": json.dumps(payload.search_strategy) if payload.search_strategy else None,
         })
     # Génération de la stratégie de recherche en arrière-plan : l'appel OpenAI
-    # ne doit JAMAIS bloquer (ni faire échouer) la création du scénario.
+    # ne doit JAMAIS bloquer (ni faire échouer) la création du scénario. On la
+    # saute si le client a déjà fourni la stratégie (recherche booléenne).
     def _bg_strategy(sid: str, q: str) -> None:
         try:
             strategy = _generate_search_strategy(q)
@@ -7241,11 +7256,12 @@ def create_user_scenario(payload: UserScenarioIn, _: None = Depends(require_api_
                 """), {"id": sid, "strategy": json.dumps(strategy)})
         except Exception as _se:
             logger.warning(f"search_strategy generation failed for {sid}: {_se}")
-    try:
-        import threading as _threading
-        _threading.Thread(target=_bg_strategy, args=(new_id, payload.query), daemon=True).start()
-    except Exception as _te:
-        logger.warning(f"could not start strategy thread for {new_id}: {_te}")
+    if not payload.search_strategy:
+        try:
+            import threading as _threading
+            _threading.Thread(target=_bg_strategy, args=(new_id, payload.query), daemon=True).start()
+        except Exception as _te:
+            logger.warning(f"could not start strategy thread for {new_id}: {_te}")
     row = _get_user_scenario_or_404(new_id)
     return _user_scenario_to_gesica_format(row)
 
@@ -7669,6 +7685,21 @@ def _generate_search_strategy(query: str) -> dict:
         return {"general": query, "pubmed": query, "explanation": "", "synonyms": []}
 
 
+class SearchStrategyIn(BaseModel):
+    query: str = Field(..., min_length=1)
+
+
+@app.post("/search-strategy")
+def post_search_strategy(payload: SearchStrategyIn) -> dict[str, Any]:
+    """Traduit une requête en langage naturel en stratégie booléenne (LLM).
+
+    Permet à la recherche d'AFFICHER la requête booléenne et de l'utiliser comme
+    base du corpus : la même stratégie est ensuite persistée sur le scénario, de
+    sorte que le compteur de recherche == la taille du corpus (même requête).
+    """
+    return _generate_search_strategy(payload.query)
+
+
 def _ingest_doc_direct(
     source: str,
     title: str,
@@ -7814,10 +7845,39 @@ def _run_user_scenario_populate(
     # le sous-ensemble pertinent (_get_above_threshold_articles).
     local_linked = 0
     try:
-        _local_ids = _search_local_doc_ids(query, "lexical", filters, limit=100_000)
+        # Le corpus = résultat de la REQUÊTE BOOLÉENNE (générée par LLM). On
+        # récupère search_strategy.general ; à défaut on la génère depuis la requête.
+        _boolean = query
+        try:
+            with engine.connect() as _sc:
+                _strat = _sc.execute(text("SELECT search_strategy FROM user_scenarios WHERE id = :sid"),
+                                     {"sid": scenario_id}).scalar()
+            if isinstance(_strat, dict) and _strat.get("general"):
+                _boolean = _strat["general"]
+            else:
+                _gen = _generate_search_strategy(query)
+                _boolean = _gen.get("general") or query
+                with engine.begin() as _sc2:
+                    _sc2.execute(text("UPDATE user_scenarios SET search_strategy = CAST(:s AS jsonb) WHERE id = :id"),
+                                 {"s": json.dumps(_gen), "id": scenario_id})
+        except Exception as _be:
+            logger.warning(f"Populate {scenario_id} boolean strategy: {_be}")
+        _local_ids = _search_local_doc_ids(_boolean, "boolean", filters, limit=100_000)
 
         if _local_ids:
             with engine.begin() as _lc2:
+                # RESET du corpus à la correspondance booléenne. Sans cela,
+                # l'accumulation ON CONFLICT DO NOTHING ne retire jamais les liens
+                # devenus obsolètes (ex. un ancien match lexical OR-de-tous-les-mots
+                # qui avait gonflé le corpus à des dizaines de milliers d'articles).
+                # Le corpus = EXACTEMENT le résultat de la requête booléenne (base
+                # locale) ∪ les nouvelles références live ajoutées plus bas.
+                _lc2.execute(
+                    text("DELETE FROM article_scenarios WHERE scenario_id = :sid "
+                         "AND document_id NOT IN :ids").bindparams(
+                             bindparam("ids", expanding=True)),
+                    {"sid": scenario_id, "ids": list(_local_ids)},
+                )
                 for _lid in _local_ids:
                     _lc2.execute(text("""
                         INSERT INTO article_scenarios (document_id, scenario_id, similarity_score)
@@ -7826,7 +7886,7 @@ def _run_user_scenario_populate(
                     """), {"doc_id": _lid, "sid": scenario_id})
                     local_linked += 1
             _inc("db_cache", local_linked)
-            logger.info(f"Populate {scenario_id}: {local_linked} docs liés depuis la base locale")
+            logger.info(f"Populate {scenario_id}: corpus booléen = {local_linked} docs (base locale)")
 
         if local_linked > 0:
             with engine.begin() as _uc:

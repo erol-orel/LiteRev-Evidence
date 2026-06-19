@@ -2160,6 +2160,7 @@ export interface UserScenarioCreatePayload {
   filters: Record<string, any>;
   result_count?: number;
   pinned?: boolean;
+  search_strategy?: SearchStrategy | null;
 }
 
 export interface PipelineStepStatus {
@@ -2985,6 +2986,17 @@ export interface SearchStrategy {
   pubmed: string;
   explanation: string;
   synonyms: string[][];
+}
+
+/** Traduit une requête en langage naturel en stratégie booléenne (LLM). */
+export async function fetchSearchStrategy(query: string): Promise<SearchStrategy> {
+  const r = await fetch(`${API_BASE_URL}/search-strategy`, {
+    method: 'POST',
+    headers: authHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify({ query }),
+  });
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  return r.json();
 }
 
 export async function getSearchStrategy(scenarioId: string): Promise<SearchStrategy> {
