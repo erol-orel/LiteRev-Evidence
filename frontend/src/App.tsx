@@ -103,6 +103,7 @@ import {
   updateFolder,
   deleteFolder,
   assignScenarioToFolder,
+  getRecommendedActions,
   type UserScenario,
   type UserScenarioPipelineStatus,
   type ScenarioFolder,
@@ -2159,6 +2160,33 @@ function ScenariosView({
   const ScenarioCard = ({ scenario }: { scenario: GesicaScenario }) => {
     const isExpanded = expandedId === scenario.id;
     const hasArticles = scenario.articleCount > 0;
+    const isUser = (scenario as any).is_user_scenario === true || scenario.cluster === "user";
+
+    // Actions recommandées : pour les scénarios utilisateur, génération paresseuse
+    // (auto, en cache) déclenchée à l'ouverture de la carte.
+    const [fetchedActions, setFetchedActions] = React.useState<string[] | null>(null);
+    const [actionsGenerating, setActionsGenerating] = React.useState(false);
+    React.useEffect(() => {
+      if (!isExpanded || !isUser) return;
+      if (scenario.recommendedActions && scenario.recommendedActions.length > 0) return;
+      if (fetchedActions !== null) return;
+      let cancelled = false;
+      const tick = (tries: number) => {
+        getRecommendedActions(scenario.id).then(r => {
+          if (cancelled) return;
+          if (r.status === "ready") { setFetchedActions(r.actions); setActionsGenerating(false); }
+          else if (r.status === "generating" && tries < 20) { setActionsGenerating(true); setTimeout(() => tick(tries + 1), 4000); }
+          else { setFetchedActions([]); setActionsGenerating(false); }
+        }).catch(() => { if (!cancelled) { setFetchedActions([]); setActionsGenerating(false); } });
+      };
+      tick(0);
+      return () => { cancelled = true; };
+    }, [isExpanded, isUser, scenario.id]);
+
+    const actions = (scenario.recommendedActions && scenario.recommendedActions.length > 0)
+      ? scenario.recommendedActions
+      : (fetchedActions ?? []);
+
     return (
       <div className={`rounded-3xl border p-5 shadow-xl transition ${
         hasArticles ? "border-white/10 bg-white/5" : "border-white/5 bg-white/2 opacity-60"
@@ -2213,17 +2241,49 @@ function ScenariosView({
             </div>
 
             {/* Actions recommandées */}
-            <div>
-              <h4 className="mb-2 text-xs font-semibold uppercase tracking-wider text-forest-400">Actions recommandées</h4>
-              <ul className="space-y-1.5">
-                {scenario.recommendedActions.map((action, i) => (
-                  <li key={i} className="flex items-start gap-2 text-sm text-white/80">
-                    <span className="mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full bg-brand-400" />
-                    {action}
-                  </li>
-                ))}
-              </ul>
-            </div>
+            {(actions.length > 0 || actionsGenerating) && (
+              <div>
+                <h4 className="mb-2 text-xs font-semibold uppercase tracking-wider text-forest-400">Actions recommandées</h4>
+                {actions.length > 0 ? (
+                  <ul className="space-y-1.5">
+                    {actions.map((action, i) => (
+                      <li key={i} className="flex items-start gap-2 text-sm text-white/80">
+                        <span className="mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full bg-brand-400" />
+                        {action}
+                      </li>
+                    ))}
+                  </ul>
+                ) : (
+                  <p className="text-xs text-forest-400 flex items-center gap-1.5">
+                    <RefreshCw size={11} className="animate-spin" /> Génération des actions recommandées depuis l'évidence…
+                  </p>
+                )}
+              </div>
+            )}
+
+            {/* Modèle Prédictif — carte générique (scénarios utilisateur) */}
+            {isUser && (
+              <div className="rounded-2xl border border-brand-500/20 bg-brand-500/5 p-4">
+                <div className="flex items-center justify-between mb-2">
+                  <div className="flex items-center gap-2">
+                    <Activity size={14} className="text-brand-400" />
+                    <span className="text-xs font-semibold text-brand-300 uppercase tracking-wider">Modèle Prédictif</span>
+                  </div>
+                  {scenario.model?.has_model && scenario.model.family && (
+                    <span className="text-[10px] text-brand-400 bg-brand-500/10 border border-brand-500/20 px-2 py-0.5 rounded-full">
+                      {scenario.model.family}{scenario.model.metric && scenario.model.metric_value != null ? ` · ${scenario.model.metric} ${scenario.model.metric_value.toFixed(3)}` : ""}
+                    </span>
+                  )}
+                </div>
+                <button
+                  onClick={(e) => { e.stopPropagation(); setDetailScenarioId(scenario.id); }}
+                  className="w-full flex items-center justify-center gap-1.5 rounded-xl border border-brand-500/30 bg-brand-500/10 text-brand-300 font-semibold py-2 text-xs hover:bg-brand-500/20 transition"
+                >
+                  <Activity size={12} />
+                  {scenario.model?.has_model ? "Prédire / ouvrir le modèle" : "Entraîner & prédire (page détail)"}
+                </button>
+              </div>
+            )}
 
             {/* Bouton Modèle Prédictif pour demand-forecasting */}
             {scenario.id === "demand-forecasting" && (
@@ -2575,8 +2635,8 @@ function ScenariosView({
               </div>
             )}
 
-            {/* Articles associés */}
-            {scenario.relevantArticles.length > 0 && (
+            {/* Liste d'articles retirée de la carte — disponible sur la page détail */}
+            {false && scenario.relevantArticles.length > 0 && (
               <div>
                 <h4 className="mb-2 text-xs font-semibold uppercase tracking-wider text-forest-400">
                   Articles récents ({scenario.articleCount} total, 5 affichés)

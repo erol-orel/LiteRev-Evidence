@@ -360,6 +360,7 @@ export interface GesicaScenario {
   articleCount: number;
   livingEvidenceNote: string;
   recommendedActions: string[];
+  model?: { has_model: boolean; family?: string; metric?: string; metric_value?: number | null };
   hidden?: boolean;
   included_count?: number;
   excluded_count?: number;
@@ -569,6 +570,15 @@ export async function fetchGesicaScenarios(): Promise<GesicaScenario[]> {
     recommendedActions: s.recommended_actions,
     relevantArticles: s.relevant_articles,
   }));
+}
+
+// Actions recommandées (génération LLM paresseuse + cache côté serveur).
+export async function getRecommendedActions(
+  scenarioId: string,
+): Promise<{ status: string; actions: string[]; generated_at?: string }> {
+  const r = await fetch(`${API_BASE_URL}/scenarios/${scenarioId}/recommended-actions`);
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  return r.json();
 }
 
 export async function askAssistant(req: AskRequest): Promise<AskResponse> {
