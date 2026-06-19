@@ -3737,6 +3737,9 @@ export default function App() {
                           );
                         })()}
                       </p>
+                      <p className="text-[10px] text-white/30 leading-snug max-w-2xl">
+                        Recherche live (découverte) : ce nombre varie selon les sources API, le seuil sémantique et la croissance de la base. Le corpus du scénario sauvegardé est figé et c'est lui qui alimente le modèle.
+                      </p>
                       {searchSourceBreakdown && Object.keys(searchSourceBreakdown).length > 0 && (() => {
                         const localEntries = Object.entries(searchSourceBreakdown).filter(([k]) => !k.endsWith(" (live)"));
                         const liveEntries = Object.entries(searchSourceBreakdown).filter(([k]) => k.endsWith(" (live)"));
