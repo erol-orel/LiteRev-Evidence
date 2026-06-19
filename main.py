@@ -7808,16 +7808,13 @@ def _run_user_scenario_populate(
                 job["sources"][source_name] = job["sources"].get(source_name, 0) + count
 
     # ── Étape 0 : Linking depuis la base locale (séquentiel, rapide) ─────────
+    # Le CORPUS est défini par une correspondance LEXICALE (requête booléenne),
+    # indépendante du seuil sémantique : base locale ∪ nouvelles références live.
+    # Le seuil sémantique n'intervient QUE dans la page scénario pour sélectionner
+    # le sous-ensemble pertinent (_get_above_threshold_articles).
     local_linked = 0
     try:
-        _scenario_mode = "hybrid"
-        with engine.connect() as _mc:
-            _mr = _mc.execute(text("SELECT mode FROM user_scenarios WHERE id = :sid"),
-                              {"sid": scenario_id}).scalar()
-            if _mr:
-                _scenario_mode = _mr
-
-        _local_ids = _search_local_doc_ids(query, _scenario_mode, filters, limit=100_000)
+        _local_ids = _search_local_doc_ids(query, "lexical", filters, limit=100_000)
 
         if _local_ids:
             with engine.begin() as _lc2:

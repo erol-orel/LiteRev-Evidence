@@ -2959,8 +2959,8 @@ function ScenariosView({
 export default function App() {
   const [projectContext, setProjectContext] = useState<ProjectContext>("literev");
   const [activeTab, setActiveTab] = useState<AppTab>("search");
-  const [mode, setMode] = useState<SearchMode>("semantic");
-  const [semanticThreshold, setSemanticThreshold] = useState(0.45);
+  const [mode, setMode] = useState<SearchMode>("boolean");
+  const [semanticThreshold] = useState(0.45);
   const [includeLive, setIncludeLive] = useState(false);
   const [query, setQuery] = useState("");
   const [filters, setFilters] = useState<SearchFilters>({
@@ -3654,21 +3654,9 @@ export default function App() {
                   })}
                 </div>
 
-                {(mode === "semantic" || mode === "hybrid") && (
-                  <div className="mb-3 flex items-center gap-3 text-xs text-forest-300">
-                    <span className="whitespace-nowrap">Seuil sémantique</span>
-                    <input
-                      type="range"
-                      min={0.1}
-                      max={0.9}
-                      step={0.05}
-                      value={semanticThreshold}
-                      onChange={(e) => setSemanticThreshold(parseFloat(e.target.value))}
-                      className="flex-1 accent-brand-400"
-                    />
-                    <span className="w-8 text-right font-mono text-brand-300">{semanticThreshold.toFixed(2)}</span>
-                  </div>
-                )}
+                {/* Le seuil sémantique ne s'applique PLUS à la recherche : le corpus
+                    est une correspondance lexicale (base locale + APIs live). Le seuil
+                    ne sert qu'à sélectionner les articles pertinents dans la page scénario. */}
 
                 <div className="flex flex-col gap-3 lg:flex-row">
                   <input
