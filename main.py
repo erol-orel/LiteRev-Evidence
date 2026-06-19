@@ -11693,25 +11693,56 @@ réellement présents. Les "machine_name" doivent être de courts identifiants s
 Retourne UNIQUEMENT le JSON valide."""
 
     try:
-        client = _OAI()
-        response = client.chat.completions.create(
-            model="gpt-4.1",
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
-            temperature=0.15,
-            max_tokens=3000,
-            response_format={"type": "json_object"},
-        )
-        variables = _json.loads(response.choices[0].message.content)
+        # ── Déterminisme du recheck ──────────────────────────────────────────
+        # Empreinte de l'évidence = ensemble des articles (au-dessus du seuil) qui
+        # alimentent le modèle. Si elle est INCHANGÉE depuis le dernier spec validé,
+        # on RÉUTILISE ce spec tel quel : « rechecker » sur la même évidence donne
+        # exactement le même résultat (plus d'appel LLM non déterministe). On ne
+        # régénère via le LLM QUE lorsque l'évidence change réellement.
+        import hashlib as _hashlib
+        _ev_ids = sorted(str(a.get("id")) for a in pico_articles[:25] if a.get("id") is not None)
+        evidence_fingerprint = _hashlib.sha256("|".join(_ev_ids).encode()).hexdigest()[:16]
 
-        # Phase 1 : normaliser en model_spec déterministe (machine_name, dtype,
-        # algorithme/CV/métrique, data_template) + provenance tracée vers les articles.
-        try:
-            variables = _attach_model_spec(variables, pico_articles[:25])
-        except Exception as spec_err:  # le spec machine ne doit jamais bloquer la génération
-            logger.error(f"model_spec build {scenario_id}: {spec_err}", exc_info=True)
+        _reused = None
+        with engine.connect() as _rc:
+            _row = _rc.execute(text(
+                "SELECT variables_json, variables_proposal_json FROM scenario_settings WHERE scenario_id = :sid"
+            ), {"sid": scenario_id}).mappings().first()
+        # On réutilise le spec validé (variables_json) en priorité, sinon la dernière
+        # proposition (variables_proposal_json), si construit sur la MÊME évidence.
+        for _slot in ("variables_json", "variables_proposal_json"):
+            _cand = _row.get(_slot) if _row else None
+            if (isinstance(_cand, dict)
+                    and _cand.get("model_spec")
+                    and _cand.get("_meta", {}).get("evidence_fingerprint") == evidence_fingerprint):
+                _reused = _cand
+                break
+
+        if _reused is not None:
+            variables = dict(_reused)
+            logger.info(f"Variables {scenario_id}: évidence inchangée (fingerprint {evidence_fingerprint}) "
+                        f"→ spec réutilisé (déterministe, sans appel LLM).")
+        else:
+            client = _OAI()
+            response = client.chat.completions.create(
+                model="gpt-4.1",
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                temperature=0,
+                seed=42,
+                max_tokens=3000,
+                response_format={"type": "json_object"},
+            )
+            variables = _json.loads(response.choices[0].message.content)
+
+            # Phase 1 : normaliser en model_spec déterministe (machine_name, dtype,
+            # algorithme/CV/métrique, data_template) + provenance tracée vers les articles.
+            try:
+                variables = _attach_model_spec(variables, pico_articles[:25])
+            except Exception as spec_err:  # le spec machine ne doit jamais bloquer la génération
+                logger.error(f"model_spec build {scenario_id}: {spec_err}", exc_info=True)
 
         variables["_meta"] = {
             "scenario_id": scenario_id,
@@ -11719,6 +11750,8 @@ Retourne UNIQUEMENT le JSON valide."""
             "pico_articles_used": len(pico_articles),
             "auto_generated": True,
             "validation_status": "pending",
+            "evidence_fingerprint": evidence_fingerprint,
+            "reused": _reused is not None,
         }
 
         # Sauvegarder en DB. persist="proposal" (Phase 5) écrit dans un slot

@@ -644,11 +644,6 @@ function VariablesSection({ detail, scenarioId, onGoToModel }: { detail: Scenari
     }
   };
 
-  const variables = detail.variables_detail ? Object.entries(detail.variables_detail) : [];
-  const totalVars = variables.length;
-  const pluggedVars = variables.filter(([, v]) => v.plugged).length;
-  const missingVars = totalVars - pluggedVars;
-
   return (
     <div className="space-y-4">
 
@@ -828,80 +823,10 @@ function VariablesSection({ detail, scenarioId, onGoToModel }: { detail: Scenari
         </div>
       )}
 
-    <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
-      {/* Colonne de gauche: Variables & Outcomes */}
-      <div className="lg:col-span-2 space-y-6">
-        {/* Outcome */}
-        <div className="rounded-3xl border border-white/10 bg-white/3 p-5 space-y-4">
-          <SectionHeader
-            icon={<Zap size={14} className="text-gold-400" />}
-            title="Outcome étudié & surveillé"
-            subtitle="Définition clinique de l'indicateur principal du modèle"
-          />
-          <div className="rounded-2xl border border-gold-500/10 bg-gold-500/5 p-4">
-            <p className="text-sm font-medium text-gold-200 leading-6">
-              {detail.outcome_definition || "Outcome clinique non spécifié."}
-            </p>
-          </div>
-        </div>
-
-        {/* Liste des variables */}
-        <div className="rounded-3xl border border-white/10 bg-white/3 p-5 space-y-4">
-          <div className="flex items-center justify-between flex-wrap gap-2">
-            <SectionHeader
-              icon={<Database size={14} className="text-brand-400" />}
-              title="Variables du modèle"
-              subtitle="Paramètres d'entrée du modèle prédictif"
-            />
-            <div className="flex gap-2">
-              <span className="rounded-full bg-brand-500/10 border border-brand-500/20 px-2.5 py-1 text-[10px] font-semibold text-brand-300">
-                {pluggedVars} branchées
-              </span>
-              {missingVars > 0 && (
-                <span className="rounded-full bg-rose-500/10 border border-rose-500/20 px-2.5 py-1 text-[10px] font-semibold text-rose-300">
-                  {missingVars} manquantes
-                </span>
-              )}
-            </div>
-          </div>
-
-          <div className="overflow-x-auto">
-            <table className="w-full border-collapse text-left">
-              <thead>
-                <tr className="border-b border-white/5 text-[10px] text-white/50 uppercase tracking-wider">
-                  <th className="py-2.5 px-3">Variable</th>
-                  <th className="py-2.5 px-3">Définition clinique / Rôle</th>
-                  <th className="py-2.5 px-3">Source de données</th>
-                  <th className="py-2.5 px-3 text-center">Statut</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-white/5 text-xs">
-                {variables.map(([name, varInfo]) => (
-                  <tr key={name} className="hover:bg-white/1">
-                    <td className="py-3 px-3 font-mono text-brand-300 font-medium">{name}</td>
-                    <td className="py-3 px-3 text-white/70 leading-5">{varInfo.definition}</td>
-                    <td className="py-3 px-3 text-white/50 font-mono text-[11px]">{varInfo.source}</td>
-                    <td className="py-3 px-3 text-center">
-                      {varInfo.plugged ? (
-                        <span className="inline-flex items-center gap-1 rounded-full bg-brand-500/15 border border-brand-500/20 px-2 py-0.5 text-[10px] text-brand-300">
-                          <CheckCircle2 size={10} /> Connecté
-                        </span>
-                      ) : (
-                        <span className="inline-flex items-center gap-1 rounded-full bg-rose-500/15 border border-rose-500/20 px-2 py-0.5 text-[10px] text-rose-300" title="Données réelles manquantes">
-                          <AlertCircle size={10} /> Non connecté
-                        </span>
-                      )}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </div>
-      </div>
-
-      {/* Colonne de droite: Bases de données & Upload */}
-      <div className="space-y-6">
+    {/* L'outcome et les variables (générés par LLM) sont présentés plus haut dans
+        cet onglet ; les anciens encadrés (vides pour les scénarios utilisateur) ont
+        été retirés. Restent les bases de données requises et l'import de données. */}
+    <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
         {/* Bases de données utilisées */}
         <div className="rounded-3xl border border-white/10 bg-white/3 p-5 space-y-4">
           <SectionHeader
@@ -1000,7 +925,6 @@ function VariablesSection({ detail, scenarioId, onGoToModel }: { detail: Scenari
             </div>
           )}
         </div>
-      </div>
     </div>
     </div>
   );
