@@ -7129,9 +7129,9 @@ def _user_scenario_to_gesica_format(row: dict[str, Any]) -> dict[str, Any]:
         "model": model_summary,
         "relevant_articles": [],
         "living_evidence_note": (
-            f"Scénario utilisateur · {article_count} articles indexés (7 sources)."
+            f"Living Evidence Review · {article_count} articles indexés. Mis à jour automatiquement à chaque ingestion."
             if article_count > 0
-            else "Aucun article indexé. Lancez l'ingéstion multi-sources (PubMed, OpenAlex, Crossref, EuropePMC, medRxiv, bioRxiv, PROSPERO)."
+            else "Aucun article indexé. Lancez l'ingestion multi-sources pour construire le corpus."
         ),
         "pinned": bool(row.get("pinned", False)),
         "query": row["query"],
