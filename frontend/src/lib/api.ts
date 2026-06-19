@@ -1446,6 +1446,8 @@ export interface ScenarioCorpus {
   above_threshold?: number;
   below_threshold?: number;
   unscored?: number;
+  from_local?: number | null;
+  newly_fetched?: number | null;
   rerank_running?: boolean;
   threshold?: number;
   offset: number;

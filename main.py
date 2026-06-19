@@ -7489,20 +7489,25 @@ def get_user_scenario_corpus(
             WHERE c.document_id = d.id AND c.chunk_type = 'fulltext_section'
         )""")
     where = " AND ".join(conditions)
+    _screated = row.get("created_at")
     with engine.connect() as conn:
         # Single query for both total and above_threshold to avoid race condition
         counts_row = conn.execute(text(f"""
             SELECT
                 COUNT(*) AS total,
                 COUNT(*) FILTER (WHERE ars.similarity_score >= :threshold) AS above_threshold,
-                COUNT(*) FILTER (WHERE ars.similarity_score IS NULL) AS unscored
+                COUNT(*) FILTER (WHERE ars.similarity_score IS NULL) AS unscored,
+                COUNT(*) FILTER (WHERE :screated IS NOT NULL AND d.created_at >= :screated) AS newly_fetched
             FROM literature_document d
             JOIN article_scenarios ars ON ars.document_id = d.id AND ars.scenario_id = :sid
             WHERE {where}
-        """), {**{k: v for k, v in params.items() if k not in ('limit', 'offset')}, 'threshold': eff_threshold}).mappings().first()
+        """), {**{k: v for k, v in params.items() if k not in ('limit', 'offset')},
+               'threshold': eff_threshold, 'screated': _screated}).mappings().first()
         total = int(counts_row["total"] or 0)
         above_threshold = int(counts_row["above_threshold"] or 0)
         unscored = int(counts_row["unscored"] or 0)
+        newly_fetched = int(counts_row["newly_fetched"] or 0) if _screated else None
+        from_local = (total - newly_fetched) if newly_fetched is not None else None
         articles = conn.execute(text(f"""
             SELECT
                 d.id, d.title, d.abstract, d.year, d.source, d.url,
@@ -7554,6 +7559,8 @@ def get_user_scenario_corpus(
         "above_threshold": above_threshold,
         "below_threshold": max(0, total - above_threshold - unscored),
         "unscored": unscored,
+        "from_local": from_local,
+        "newly_fetched": newly_fetched,
         "rerank_running": rerank_running or (_RERANK_JOBS.get(scenario_id, {}).get("status") == "running"),
         "threshold": eff_threshold,
         "offset": offset,

@@ -1164,6 +1164,12 @@ function CorpusSection({ scenarioId, threshold }: { scenarioId: string; detail: 
             </div>
           )}
         </div>
+        {typeof data.from_local === "number" && (
+          <p className="text-[11px] text-white/40"
+             title="Le corpus combine les correspondances de la base locale partagée (déjà ingérées) et les nouvelles références récupérées en direct. Estimation d'après la date d'entrée des documents en base (≥ création du scénario = récupérés pour ce scénario).">
+            {data.from_local.toLocaleString()} déjà en base locale · {(data.newly_fetched ?? 0).toLocaleString()} récupérés pour ce scénario
+          </p>
+        )}
         <div className="space-y-3">
           {data.articles.length > 0 ? data.articles.map((article) => (
             <ArticleRow
