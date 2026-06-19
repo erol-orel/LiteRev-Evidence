@@ -1174,6 +1174,7 @@ def _search_local_doc_ids(
             WHERE c.embedding IS NOT NULL
               AND (1 - (c.embedding <=> CAST(:q_emb AS vector))) > :threshold
               AND d.abstract IS NOT NULL AND length(TRIM(d.abstract)) >= 30
+              AND (d.is_duplicate IS NULL OR d.is_duplicate = FALSE)
               {where_sql}
             LIMIT :limit
         """)
@@ -1184,12 +1185,45 @@ def _search_local_doc_ids(
             JOIN literature_document d ON d.id = c.document_id
             WHERE ({any_match_sql})
               AND d.abstract IS NOT NULL AND length(TRIM(d.abstract)) >= 30
+              AND (d.is_duplicate IS NULL OR d.is_duplicate = FALSE)
               {where_sql}
             LIMIT :limit
         """)
 
     with engine.connect() as conn:
         return conn.execute(sql, params).scalars().all()
+
+
+# Limite de récupération par source live (PubMed, OpenAlex, …). Appliquée à
+# l'identique à la recherche ET à la construction du corpus.
+LIVE_MAX_PER_SOURCE = 2000
+
+
+def _boolean_corpus_ids(boolean_query: str, filters: dict) -> list:
+    """LA source de vérité de l'appartenance au corpus : les documents de la base
+    locale qui correspondent à la requête booléenne. Recherche et corpus utilisent
+    EXACTEMENT ce helper → le compteur de la recherche == la taille du corpus."""
+    return _search_local_doc_ids(boolean_query, "boolean", filters, limit=500_000)
+
+
+def _set_scenario_corpus(scenario_id: str, ids: list) -> int:
+    """Fixe le corpus d'un scénario à EXACTEMENT `ids` (appartenance booléenne).
+    Supprime les liens qui n'en font plus partie et insère les manquants. Si `ids`
+    est vide on ne touche à rien (évite de vider le corpus sur un échec transitoire)."""
+    if not ids:
+        return 0
+    with engine.begin() as _c:
+        _c.execute(
+            text("DELETE FROM article_scenarios WHERE scenario_id = :sid "
+                 "AND document_id NOT IN :ids").bindparams(bindparam("ids", expanding=True)),
+            {"sid": scenario_id, "ids": list(ids)},
+        )
+        for _did in ids:
+            _c.execute(text("""
+                INSERT INTO article_scenarios (document_id, scenario_id, similarity_score)
+                VALUES (:d, :s, NULL) ON CONFLICT (document_id, scenario_id) DO NOTHING
+            """), {"d": _did, "s": scenario_id})
+    return len(ids)
 
 
 @app.post("/search")
@@ -1421,6 +1455,7 @@ def search(payload: SearchIn) -> dict[str, Any]:
     # pour que le compteur de la recherche == la taille du corpus du scénario.
     _corpus_abs_filter = (
         " AND d.abstract IS NOT NULL AND length(TRIM(d.abstract)) >= 30"
+        " AND (d.is_duplicate IS NULL OR d.is_duplicate = FALSE)"
         if payload.mode == "boolean" else ""
     )
     if use_vector and payload.mode in ("hybrid", "semantic"):
@@ -7640,7 +7675,8 @@ _user_scenario_populate_jobs: dict[str, dict] = {}
 _user_scenario_pipeline_jobs: dict[str, dict] = {}
 
 
-def _launch_populate_job(scenario_id: str, query: str, filters: dict, max_results: int) -> str:
+def _launch_populate_job(scenario_id: str, query: str, filters: dict, max_results: int,
+                         include_live: bool = True) -> str:
     """
     Démarre un job d'ingestion en arrière-plan pour un scénario, en garantissant
     qu'un seul job tourne à la fois (verrou partagé). Renvoie l'état : "started"
@@ -7659,7 +7695,7 @@ def _launch_populate_job(scenario_id: str, query: str, filters: dict, max_result
         }
     threading.Thread(
         target=_run_user_scenario_populate,
-        args=(scenario_id, query, filters or {}, max_results, None),
+        args=(scenario_id, query, filters or {}, max_results, None, include_live),
         daemon=True,
     ).start()
     return "started"
@@ -7807,12 +7843,15 @@ def _run_user_scenario_populate(
     filters: dict,
     max_results: int = 500,
     _pipeline_callback=None,
+    include_live: bool = True,
 ) -> int:
     """
-    Ingère des articles pour un scénario utilisateur en arrière-plan (7 sources).
-    Les 7 sources externes sont interrogées EN PARALLÈLE via ThreadPoolExecutor.
-    Limite : 1 000 articles max par source.
-    Retourne le nombre total d'articles ingérés.
+    Construit le corpus d'un scénario = résultat de la REQUÊTE BOOLÉENNE sur
+    (base locale ∪ articles récupérés en direct). Les sources live ne servent qu'à
+    ENRICHIR la base ; l'appartenance au corpus est ensuite décidée UNIQUEMENT par
+    la correspondance booléenne (_boolean_corpus_ids) — la même que la recherche.
+    Plafond : LIVE_MAX_PER_SOURCE articles par source. include_live=False = base
+    locale seulement. Retourne le nombre total d'articles ingérés.
     """
     import time as _time
     import xml.etree.ElementTree as ET
@@ -7820,6 +7859,9 @@ def _run_user_scenario_populate(
     import math
     import threading
     from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    # Plafond par source identique pour recherche et corpus (déterminisme).
+    max_results = min(max_results, LIVE_MAX_PER_SOURCE)
 
     if _pipeline_callback is None:
         _user_scenario_populate_jobs[scenario_id] = {
@@ -7840,11 +7882,11 @@ def _run_user_scenario_populate(
     _errors_total = [0]
 
     def _link_to_scenario(doc_id):
-        with engine.begin() as _c:
-            _c.execute(text("""
-                INSERT INTO article_scenarios (document_id, scenario_id, similarity_score)
-                VALUES (:doc_id, :sid, NULL) ON CONFLICT (document_id, scenario_id) DO NOTHING
-            """), {"doc_id": doc_id, "sid": scenario_id})
+        # NE LIE PLUS pendant la fédération : ingérer un article live ne l'ajoute
+        # PAS d'office au corpus. L'appartenance est recalculée après ingestion via
+        # la correspondance booléenne (_boolean_corpus_ids) — sinon le corpus
+        # gonflait avec des résultats live ne correspondant pas à la requête.
+        return None
 
     def _inc(source_name, count=1, err=0):
         with _counter_lock:
@@ -8465,20 +8507,36 @@ def _run_user_scenario_populate(
         _fetch_europepmc, _fetch_preprints, _fetch_prospero, _fetch_cochrane,
     ]
     t_start = _time.time()
-    with ThreadPoolExecutor(max_workers=7) as executor:
-        futures = {executor.submit(fn): fn.__name__ for fn in source_funcs}
-        for future in as_completed(futures):
-            try:
-                src_name, src_count = future.result()
-                logger.info(f"Populate {scenario_id} [{src_name}]: {src_count} articles ingérés")
-            except Exception as _fe:
-                logger.warning(f"Populate {scenario_id} source future error: {_fe}")
-    t_elapsed = _time.time() - t_start
-    logger.info(f"Populate {scenario_id}: toutes sources terminées en {t_elapsed:.1f}s")
+    if include_live:
+        with ThreadPoolExecutor(max_workers=7) as executor:
+            futures = {executor.submit(fn): fn.__name__ for fn in source_funcs}
+            for future in as_completed(futures):
+                try:
+                    src_name, src_count = future.result()
+                    logger.info(f"Populate {scenario_id} [{src_name}]: {src_count} articles ingérés")
+                except Exception as _fe:
+                    logger.warning(f"Populate {scenario_id} source future error: {_fe}")
+        t_elapsed = _time.time() - t_start
+        logger.info(f"Populate {scenario_id}: toutes sources terminées en {t_elapsed:.1f}s")
+    else:
+        logger.info(f"Populate {scenario_id}: include_live=False — base locale uniquement")
 
     ingested = _ingested_total[0]
     errors = _errors_total[0]
     total_found = ingested  # Approximation — PubMed callback met à jour séparément
+
+    # ── Corpus = correspondance BOOLÉENNE sur la base enrichie ───────────────
+    # Après ingestion des articles live, on recalcule l'appartenance au corpus via
+    # EXACTEMENT le même helper que la recherche (_boolean_corpus_ids). Le corpus
+    # devient donc strictement « résultat de la requête booléenne sur base locale ∪
+    # live », et sa taille == le compteur de la recherche.
+    try:
+        _final_ids = _boolean_corpus_ids(_boolean, filters)
+        _n_corpus = _set_scenario_corpus(scenario_id, _final_ids)
+        logger.info(f"Populate {scenario_id}: corpus booléen final = {_n_corpus} docs "
+                    f"(base locale ∪ live, requête = {_boolean[:120]})")
+    except Exception as _e_corpus:
+        logger.warning(f"Rebuild corpus booléen {scenario_id}: {_e_corpus}")
 
     try:
         # ── Règle qualité : articles SANS abstract retirés du corpus ─────────
@@ -9634,16 +9692,17 @@ def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict
 def populate_user_scenario(
     scenario_id: str,
     max_results: int = 100000,
+    include_live: bool = True,
     _: None = Depends(require_api_key),
 ) -> dict[str, Any]:
     """
-    Déclenche l'ingéstion multi-sources en arrière-plan pour un scénario utilisateur.
-    Sans limite fixe : max_results par défaut à 10000 (1000 par source).
+    Construit le corpus du scénario = requête booléenne sur (base locale ∪ live).
+    Plafond LIVE_MAX_PER_SOURCE par source. include_live=False : base locale seule.
     """
     row = _get_user_scenario_or_404(scenario_id)
     query = row["query"]
 
-    if _launch_populate_job(scenario_id, query, row.get("filters") or {}, max_results) == "already_running":
+    if _launch_populate_job(scenario_id, query, row.get("filters") or {}, max_results, include_live) == "already_running":
         job = _user_scenario_populate_jobs.get(scenario_id) or {}
         return {
             "scenario_id": scenario_id,
