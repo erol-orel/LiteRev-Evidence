@@ -3748,7 +3748,7 @@ export default function App() {
                     active: doneLocal && !doneLive,
                     hint: doneLocal && !doneLive ? liveSources[searchElapsed % liveSources.length] : undefined,
                   }] : []),
-                  { label: "Agrégation, déduplication & scoring", done: false, active: includeLive ? doneLive : doneLocal },
+                  { label: "Agrégation, déduplication & tri par pertinence", done: false, active: includeLive ? doneLive : doneLocal },
                 ];
                 return (
                   <div className="rounded-3xl border border-brand-400/20 bg-white/5 p-6">
