@@ -16,7 +16,7 @@ except ImportError:
 from fastapi import Depends, FastAPI, Header, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, field_validator, model_validator
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, text, bindparam
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("literev-api")
@@ -1377,7 +1377,10 @@ def search(payload: SearchIn) -> dict[str, Any]:
             LIMIT :limit OFFSET :offset
         """)
     else:
-        # 3. Fallback Lexical Pur (BM25 simulé)
+        # 3. Fallback : booléen (appartenance binaire → tri par récence) ou
+        #    lexical pur (tri par score ts_rank).
+        _order_by = ("d.year DESC NULLS LAST, d.id DESC" if payload.mode == "boolean"
+                     else "score DESC, d.year DESC NULLS LAST, d.id DESC")
         sql = text(f"""
             SELECT
                 d.id            AS document_id,
@@ -1406,13 +1409,20 @@ def search(payload: SearchIn) -> dict[str, Any]:
             JOIN literature_document d ON d.id = c.document_id
             WHERE ({any_match_sql})
             {where_sql}
-            ORDER BY score DESC, d.year DESC NULLS LAST, d.id DESC
+            ORDER BY {_order_by}
             LIMIT :limit OFFSET :offset
         """)
 
     # Comptage réel du nombre de documents distincts correspondant à la requête.
     # En sémantique/hybride : docs avec au moins un chunk dont la similarité cosinus > 0.45.
     # En lexical : docs contenant au moins un terme de la requête.
+    # En BOOLÉEN : on applique EXACTEMENT le même prédicat que _search_local_doc_ids
+    # (le helper qui construit le corpus) — y compris le filtre « résumé présent » —
+    # pour que le compteur de la recherche == la taille du corpus du scénario.
+    _corpus_abs_filter = (
+        " AND d.abstract IS NOT NULL AND length(TRIM(d.abstract)) >= 30"
+        if payload.mode == "boolean" else ""
+    )
     if use_vector and payload.mode in ("hybrid", "semantic"):
         count_sql = text(f"""
             SELECT COUNT(DISTINCT d.id)
@@ -1428,7 +1438,7 @@ def search(payload: SearchIn) -> dict[str, Any]:
             SELECT COUNT(DISTINCT d.id)
             FROM document_chunk c
             JOIN literature_document d ON d.id = c.document_id
-            WHERE ({any_match_sql}) {where_sql}
+            WHERE ({any_match_sql}){_corpus_abs_filter} {where_sql}
         """)
         if payload.mode == "boolean":
             # En mode booléen, les paramètres sont déjà dans `params` sous les clés bool_req_*/bool_opt_*/bool_excl_*
@@ -1466,7 +1476,7 @@ def search(payload: SearchIn) -> dict[str, Any]:
                 COUNT(DISTINCT d.id) FILTER (WHERE d.has_fulltext) AS ft_count
             FROM document_chunk c
             JOIN literature_document d ON d.id = c.document_id
-            WHERE ({any_match_sql}) {where_sql}
+            WHERE ({any_match_sql}){_corpus_abs_filter} {where_sql}
             GROUP BY 1
         """)
         if payload.mode == "boolean":
@@ -1628,10 +1638,20 @@ def search(payload: SearchIn) -> dict[str, Any]:
     elif use_vector and payload.mode == "semantic":
         score_type = "semantic"
         score_label = "Sémantique (similarité cosinus vectorielle)"
+    elif payload.mode == "boolean":
+        # Corpus booléen = appartenance binaire (comme une requête PubMed) : il n'y
+        # a PAS de score de pertinence à ce stade. On trie par récence (convention
+        # de veille bibliographique). La pertinence sémantique intervient ensuite,
+        # sur la page scénario. Évite le faux « score lexical ≈ 1 » trompeur.
+        score_type = "none"
+        score_label = "Tri par récence — le corpus booléen n'a pas de score de pertinence (la pertinence sémantique s'applique sur la page scénario)"
     else:
         score_type = "lexical"
         score_label = "Lexical (BM25 simulé : score normalisé entre 0 et 1)"
-    results.sort(key=lambda r: (-float(r.get("score") or 0), -(r.get("year") or 0), str(r.get("document_id") or "")))
+    if score_type == "none":
+        results.sort(key=lambda r: (-(r.get("year") or 0), str(r.get("document_id") or "")))
+    else:
+        results.sort(key=lambda r: (-float(r.get("score") or 0), -(r.get("year") or 0), str(r.get("document_id") or "")))
     abstract_docs += live_new_count  # live API results are all abstract-only
     return {
         "results": results,
@@ -4176,6 +4196,7 @@ def get_scenario_corpus(
                 d.open_access, d.pmid, d.publication_type, d.quality_score,
                 d.screening_status, d.reviewer_1_status,
                 COALESCE(ars.similarity_score, 0.0) AS similarity_score,
+                ars.rerank_score AS rerank_score,
                 (COALESCE(ars.similarity_score, 0.0) >= :threshold) AS above_threshold,
                 EXISTS (
                     SELECT 1 FROM document_chunk c
@@ -4186,7 +4207,7 @@ def get_scenario_corpus(
             WHERE {where}
             ORDER BY
                 CASE WHEN COALESCE(ars.similarity_score, 0.0) >= :threshold THEN 0 ELSE 1 END ASC,
-                COALESCE(ars.similarity_score, 0.0) DESC,
+                COALESCE(ars.rerank_score, ars.similarity_score, 0.0) DESC,
                 d.year DESC NULLS LAST,
                 d.citation_count DESC NULLS LAST,
                 d.title ASC
@@ -7015,6 +7036,10 @@ def _ensure_user_scenarios_table() -> None:
             # Clustering persisté en base (sinon perdu au redémarrage du serveur)
             "ALTER TABLE article_scenarios ADD COLUMN IF NOT EXISTS cluster_id INTEGER",
             "ALTER TABLE article_scenarios ADD COLUMN IF NOT EXISTS cluster_label TEXT",
+            # Score d'un cross-encoder (rerank Cohere) — précision supérieure au
+            # cosinus pour ORDONNER le sous-ensemble pertinent (sélection = cosinus
+            # >= seuil ; ordre = rerank_score quand présent).
+            "ALTER TABLE article_scenarios ADD COLUMN IF NOT EXISTS rerank_score FLOAT",
         ):
             conn.execute(text(_ddl))
     logger.info("Tables user_scenarios et user_scenario_folders vérifiées/créées.")
@@ -7033,6 +7058,10 @@ class UserScenarioIn(BaseModel):
     result_count: int = Field(default=0, ge=0)
     pinned: bool = Field(default=False)
     folder_id: str | None = None
+    # Stratégie booléenne (générée par LLM) déjà calculée côté recherche. Si
+    # fournie, on la persiste telle quelle pour que le corpus utilise EXACTEMENT
+    # la même requête booléenne que celle affichée/comptée à la recherche.
+    search_strategy: dict[str, Any] | None = None
 
 
 class UserScenarioPatch(BaseModel):
@@ -7205,21 +7234,23 @@ def create_user_scenario(payload: UserScenarioIn, _: None = Depends(require_api_
                 conn.execute(text("""
                     UPDATE user_scenarios
                     SET name = :name, filters = CAST(:filters AS jsonb),
-                        result_count = :result_count, created_at = now()
+                        result_count = :result_count, created_at = now(),
+                        search_strategy = COALESCE(CAST(:strategy AS jsonb), search_strategy)
                     WHERE id = :id
                 """), {
                     "id": existing,
                     "name": payload.name,
                     "filters": json.dumps(payload.filters),
                     "result_count": payload.result_count,
+                    "strategy": json.dumps(payload.search_strategy) if payload.search_strategy else None,
                 })
                 row = _get_user_scenario_or_404(existing)
                 return _user_scenario_to_gesica_format(row)
     new_id = "usr-" + str(uuid.uuid4()).replace("-", "")[:12]
     with engine.begin() as conn:
         conn.execute(text("""
-            INSERT INTO user_scenarios (id, name, query, mode, filters, result_count, pinned, folder_id)
-            VALUES (:id, :name, :query, :mode, CAST(:filters AS jsonb), :result_count, :pinned, :folder_id)
+            INSERT INTO user_scenarios (id, name, query, mode, filters, result_count, pinned, folder_id, search_strategy)
+            VALUES (:id, :name, :query, :mode, CAST(:filters AS jsonb), :result_count, :pinned, :folder_id, CAST(:strategy AS jsonb))
         """), {
             "id": new_id,
             "name": payload.name,
@@ -7229,9 +7260,11 @@ def create_user_scenario(payload: UserScenarioIn, _: None = Depends(require_api_
             "result_count": payload.result_count,
             "pinned": payload.pinned,
             "folder_id": payload.folder_id,
+            "strategy": json.dumps(payload.search_strategy) if payload.search_strategy else None,
         })
     # Génération de la stratégie de recherche en arrière-plan : l'appel OpenAI
-    # ne doit JAMAIS bloquer (ni faire échouer) la création du scénario.
+    # ne doit JAMAIS bloquer (ni faire échouer) la création du scénario. On la
+    # saute si le client a déjà fourni la stratégie (recherche booléenne).
     def _bg_strategy(sid: str, q: str) -> None:
         try:
             strategy = _generate_search_strategy(q)
@@ -7241,11 +7274,12 @@ def create_user_scenario(payload: UserScenarioIn, _: None = Depends(require_api_
                 """), {"id": sid, "strategy": json.dumps(strategy)})
         except Exception as _se:
             logger.warning(f"search_strategy generation failed for {sid}: {_se}")
-    try:
-        import threading as _threading
-        _threading.Thread(target=_bg_strategy, args=(new_id, payload.query), daemon=True).start()
-    except Exception as _te:
-        logger.warning(f"could not start strategy thread for {new_id}: {_te}")
+    if not payload.search_strategy:
+        try:
+            import threading as _threading
+            _threading.Thread(target=_bg_strategy, args=(new_id, payload.query), daemon=True).start()
+        except Exception as _te:
+            logger.warning(f"could not start strategy thread for {new_id}: {_te}")
     row = _get_user_scenario_or_404(new_id)
     return _user_scenario_to_gesica_format(row)
 
@@ -7537,6 +7571,7 @@ def get_user_scenario_corpus(
                 d.open_access, d.pmid, d.publication_type, d.quality_score,
                 d.screening_status, d.reviewer_1_status,
                 COALESCE(ars.similarity_score, 0.0) AS similarity_score,
+                ars.rerank_score AS rerank_score,
                 (COALESCE(ars.similarity_score, 0.0) >= :threshold) AS above_threshold,
                 EXISTS (
                     SELECT 1 FROM document_chunk c
@@ -7547,7 +7582,7 @@ def get_user_scenario_corpus(
             WHERE {where}
             ORDER BY
                 CASE WHEN COALESCE(ars.similarity_score, 0.0) >= :threshold THEN 0 ELSE 1 END ASC,
-                COALESCE(ars.similarity_score, 0.0) DESC,
+                COALESCE(ars.rerank_score, ars.similarity_score, 0.0) DESC,
                 d.year DESC NULLS LAST,
                 d.citation_count DESC NULLS LAST,
                 d.title ASC
@@ -7649,11 +7684,16 @@ def _generate_search_strategy(query: str) -> dict:
             model="gpt-4.1-mini",
             messages=[
                 {"role": "system", "content": (
-                    "You are a systematic review librarian. Given a research query, generate a structured boolean search strategy. "
+                    "You are a systematic review librarian. The user may type EITHER a natural-language "
+                    "description OR an already-formed boolean query. First decide which it is:\n"
+                    "- If it is ALREADY a boolean query (it uses AND/OR/NOT operators or quoted phrases "
+                    "with explicit structure), PRESERVE it as-is in 'general' (only fix obvious syntax), and "
+                    "set 'explanation' to note that the query was already boolean and kept unchanged.\n"
+                    "- Otherwise, TRANSLATE the natural-language query into a boolean query.\n"
                     "Return ONLY valid JSON with these fields:\n"
                     '{"general": "boolean query using AND/OR/NOT and quotes for phrases",\n'
                     '"pubmed": "PubMed-optimized query with MeSH terms [MeSH Terms] and field tags [Title/Abstract]",\n'
-                    '"explanation": "1-2 sentences explaining the term choices and synonyms",\n'
+                    '"explanation": "1-2 sentences explaining the term choices and synonyms (or that the input was already boolean)",\n'
                     '"synonyms": [["term1", "synonym1a", "synonym1b"], ["term2", "synonym2a"]]}\n'
                     "Keep queries practical and not overly long. Use 2-4 concept groups max."
                 )},
@@ -7667,6 +7707,21 @@ def _generate_search_strategy(query: str) -> dict:
     except Exception as _e:
         logger.warning(f"_generate_search_strategy failed: {_e}")
         return {"general": query, "pubmed": query, "explanation": "", "synonyms": []}
+
+
+class SearchStrategyIn(BaseModel):
+    query: str = Field(..., min_length=1)
+
+
+@app.post("/search-strategy")
+def post_search_strategy(payload: SearchStrategyIn) -> dict[str, Any]:
+    """Traduit une requête en langage naturel en stratégie booléenne (LLM).
+
+    Permet à la recherche d'AFFICHER la requête booléenne et de l'utiliser comme
+    base du corpus : la même stratégie est ensuite persistée sur le scénario, de
+    sorte que le compteur de recherche == la taille du corpus (même requête).
+    """
+    return _generate_search_strategy(payload.query)
 
 
 def _ingest_doc_direct(
@@ -7814,10 +7869,39 @@ def _run_user_scenario_populate(
     # le sous-ensemble pertinent (_get_above_threshold_articles).
     local_linked = 0
     try:
-        _local_ids = _search_local_doc_ids(query, "lexical", filters, limit=100_000)
+        # Le corpus = résultat de la REQUÊTE BOOLÉENNE (générée par LLM). On
+        # récupère search_strategy.general ; à défaut on la génère depuis la requête.
+        _boolean = query
+        try:
+            with engine.connect() as _sc:
+                _strat = _sc.execute(text("SELECT search_strategy FROM user_scenarios WHERE id = :sid"),
+                                     {"sid": scenario_id}).scalar()
+            if isinstance(_strat, dict) and _strat.get("general"):
+                _boolean = _strat["general"]
+            else:
+                _gen = _generate_search_strategy(query)
+                _boolean = _gen.get("general") or query
+                with engine.begin() as _sc2:
+                    _sc2.execute(text("UPDATE user_scenarios SET search_strategy = CAST(:s AS jsonb) WHERE id = :id"),
+                                 {"s": json.dumps(_gen), "id": scenario_id})
+        except Exception as _be:
+            logger.warning(f"Populate {scenario_id} boolean strategy: {_be}")
+        _local_ids = _search_local_doc_ids(_boolean, "boolean", filters, limit=100_000)
 
         if _local_ids:
             with engine.begin() as _lc2:
+                # RESET du corpus à la correspondance booléenne. Sans cela,
+                # l'accumulation ON CONFLICT DO NOTHING ne retire jamais les liens
+                # devenus obsolètes (ex. un ancien match lexical OR-de-tous-les-mots
+                # qui avait gonflé le corpus à des dizaines de milliers d'articles).
+                # Le corpus = EXACTEMENT le résultat de la requête booléenne (base
+                # locale) ∪ les nouvelles références live ajoutées plus bas.
+                _lc2.execute(
+                    text("DELETE FROM article_scenarios WHERE scenario_id = :sid "
+                         "AND document_id NOT IN :ids").bindparams(
+                             bindparam("ids", expanding=True)),
+                    {"sid": scenario_id, "ids": list(_local_ids)},
+                )
                 for _lid in _local_ids:
                     _lc2.execute(text("""
                         INSERT INTO article_scenarios (document_id, scenario_id, similarity_score)
@@ -7826,7 +7910,7 @@ def _run_user_scenario_populate(
                     """), {"doc_id": _lid, "sid": scenario_id})
                     local_linked += 1
             _inc("db_cache", local_linked)
-            logger.info(f"Populate {scenario_id}: {local_linked} docs liés depuis la base locale")
+            logger.info(f"Populate {scenario_id}: corpus booléen = {local_linked} docs (base locale)")
 
         if local_linked > 0:
             with engine.begin() as _uc:
@@ -8432,6 +8516,11 @@ def _run_user_scenario_populate(
             _backfill_title_abstract_chunks(scenario_id)  # docs liés sans chunk résumé
             _n_scored = _run_semantic_rerank_inline(scenario_id, query)
             logger.info(f"Post-populate rerank {scenario_id}: {_n_scored} articles scorés (aucune suppression).")
+            # Cross-encoder (Cohere) : réordonne le sous-ensemble pertinent pour
+            # plus de précision. No-op si COHERE_API_KEY absent.
+            _n_ce = _run_cross_encoder_rerank(scenario_id, query)
+            if _n_ce:
+                logger.info(f"Post-populate cross-encoder {scenario_id}: {_n_ce} articles réordonnés.")
         except Exception as _e_rr:
             logger.warning(f"rerank post-populate {scenario_id}: {_e_rr}")
 
@@ -8502,6 +8591,81 @@ def _run_semantic_rerank_inline(scenario_id: str, query: str) -> int:
         return updated
     except Exception as _e:
         logger.error(f"Rerank inline {scenario_id} fatal: {_e}", exc_info=True)
+        return 0
+
+
+def _cohere_rerank(query: str, docs: list[str], model: str = "rerank-v3.5") -> list[float] | None:
+    """Cross-encoder rerank via l'API Cohere. Renvoie un score de pertinence par
+    document (aligné sur `docs`), ou None si pas de clé / échec. Pas de dépendance
+    Python ajoutée : appel REST direct. Activé seulement si COHERE_API_KEY est défini.
+    """
+    key = os.getenv("COHERE_API_KEY")
+    if not key or not docs:
+        return None
+    try:
+        resp = _requests.post(
+            "https://api.cohere.com/v2/rerank",
+            headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+            json={"model": model, "query": query[:4000], "documents": docs, "top_n": len(docs)},
+            timeout=60,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        scores: list[float | None] = [None] * len(docs)
+        for item in data.get("results", []):
+            idx = item.get("index")
+            if idx is not None and 0 <= idx < len(docs):
+                scores[idx] = float(item.get("relevance_score", 0.0))
+        return scores  # type: ignore[return-value]
+    except Exception as _e:
+        logger.warning(f"Cohere rerank failed: {_e}")
+        return None
+
+
+def _run_cross_encoder_rerank(scenario_id: str, query: str, top_k: int = 200) -> int:
+    """Reranke le sous-ensemble PERTINENT (cosinus >= seuil) avec un cross-encoder
+    (Cohere). La SÉLECTION reste pilotée par le cosinus + seuil ; on ne fait
+    qu'AMÉLIORER l'ORDRE des articles pertinents (précision). No-op sans clé Cohere.
+    """
+    if not os.getenv("COHERE_API_KEY"):
+        return 0
+    try:
+        eff_threshold = 0.45
+        with engine.connect() as _tc:
+            _ts = _tc.execute(text(
+                "SELECT similarity_threshold FROM scenario_settings WHERE scenario_id = :sid"
+            ), {"sid": scenario_id}).scalar()
+            if _ts is not None:
+                eff_threshold = float(_ts)
+            rows = _tc.execute(text("""
+                SELECT ld.id, ld.title, ld.abstract
+                FROM literature_document ld
+                JOIN article_scenarios asn ON asn.document_id = ld.id AND asn.scenario_id = :sid
+                WHERE COALESCE(asn.similarity_score, 0.0) >= :thr
+                  AND ld.abstract IS NOT NULL AND length(ld.abstract) > 30
+                ORDER BY asn.similarity_score DESC NULLS LAST
+                LIMIT :k
+            """), {"sid": scenario_id, "thr": eff_threshold, "k": top_k}).mappings().all()
+        if not rows:
+            return 0
+        docs = [f"{r['title']}\n\n{(r['abstract'] or '')[:1500]}" for r in rows]
+        scores = _cohere_rerank(query, docs)
+        if not scores:
+            return 0
+        updated = 0
+        with engine.begin() as _c:
+            for r, s in zip(rows, scores):
+                if s is None:
+                    continue
+                _c.execute(text("""
+                    UPDATE article_scenarios SET rerank_score = :s
+                    WHERE document_id = :doc_id AND scenario_id = :sid
+                """), {"s": s, "doc_id": r["id"], "sid": scenario_id})
+                updated += 1
+        logger.info(f"Cross-encoder rerank {scenario_id}: {updated} articles pertinents réordonnés.")
+        return updated
+    except Exception as _e:
+        logger.warning(f"Cross-encoder rerank {scenario_id} failed: {_e}")
         return 0
 
 
