@@ -91,9 +91,12 @@ import {
   type SituationalAwarenessResponse,
   type DisasterRiskResponse,
   type MCIVictimResponse,
-  searchDocuments,
   fetchSearchStrategy,
   type SearchStrategy,
+  populateUserScenario,
+  fetchUserScenarioPopulateStatus,
+  fetchScenarioCorpus,
+  type CorpusArticle,
   fetchUserScenarios,
   createUserScenario,
   deleteUserScenario,
@@ -2962,7 +2965,6 @@ export default function App() {
   const [projectContext, setProjectContext] = useState<ProjectContext>("literev");
   const [activeTab, setActiveTab] = useState<AppTab>("search");
   const [mode, setMode] = useState<SearchMode>("boolean");
-  const [semanticThreshold] = useState(0.45);
   const [includeLive, setIncludeLive] = useState(false);
   const [query, setQuery] = useState("");
   const [filters, setFilters] = useState<SearchFilters>({
@@ -3083,16 +3085,6 @@ export default function App() {
     }
   }, [activeTab]);
 
-  const effectiveFilters = useMemo<SearchFilters>(
-    () => ({
-      ...filters,
-      projectContext,
-      yearMin: yearRange[0],
-      yearMax: yearRange[1],
-    }),
-    [filters, projectContext, yearRange],
-  );
-
   // Deduplicate to ONE entry per document (keep the highest-scoring chunk per doc).
   // The backend returns one row per chunk; multiple chunks from the same document
   // must not produce multiple paginated entries — that causes the same paper to
@@ -3166,7 +3158,6 @@ export default function App() {
       // requête booléenne (LLM). C'est CETTE requête qui définit le corpus, donc
       // on la recherche ET on la persiste sur le scénario → le compteur affiché
       // == la taille du corpus (même requête booléenne des deux côtés).
-      let effectiveQuery = query;
       let strategy: SearchStrategy | null = null;
       if (mode === "boolean") {
         setSearchPhase('translating');
@@ -3174,7 +3165,6 @@ export default function App() {
         try {
           strategy = await fetchSearchStrategy(query.trim());
           setBooleanStrategy(strategy);
-          if (strategy?.general) effectiveQuery = strategy.general;
         } catch (e) {
           console.warn("Boolean translation failed, using raw query:", e);
           setBooleanStrategy(null);
@@ -3185,55 +3175,78 @@ export default function App() {
         setBooleanStrategy(null);
       }
       setSearchPhase('searching');
-      const data = await searchDocuments({
-        queryText: effectiveQuery,
-        mode,
-        limit: 10000,
-        filters: effectiveFilters,
-        includeLive,
-        similarityThreshold: mode === "semantic" || mode === "hybrid" ? semanticThreshold : undefined,
-      });
-      setResults(data.results);
-      setSearchTotalMatching(data.totalMatchingDocs ?? null);
-      setSearchSourceBreakdown(data.sourceBreakdown ?? null);
-      setSearchFulltextDocs(data.fulltextDocs ?? null);
-      setSearchAbstractDocs(data.abstractDocs ?? null);
-      setSearchLiveNewCount(data.liveNewCount ?? null);
-      setSearchScoreType(data.scoreType ?? null);
-      setSearchScoreLabel(data.scoreLabel ?? null);
-      const first = data.results[0] ?? null;
-      if (first) {
-        await loadDocumentDetail(first);
-      }
-      // Sauvegarder automatiquement dans le backend (user_scenarios)
-      createUserScenario({
+      // ── LA recherche CONSTRUIT le corpus, puis l'affiche ─────────────────────
+      // Le nombre affiché == la taille du corpus du scénario (même opération, même
+      // helper booléen). On crée le scénario, on construit le corpus (requête
+      // booléenne sur base locale ∪ sources live, plafond 2000/source), puis on
+      // lit le corpus et on l'affiche. Plus de "preview" divergente.
+      const newScenario = await createUserScenario({
         name: query.trim(),
         query: query.trim(),
         mode,
         filters: { projectContext },
-        result_count: data.totalMatchingDocs ?? data.results.length,
+        result_count: 0,
         pinned: false,
         search_strategy: strategy ?? undefined,
-      }).then(newScenario => {
-        setUserScenarios(prev => {
-          // Dédupliquer par query+mode (garder la plus récente)
-          const filtered = prev.filter(s => !(s.query === newScenario.query && s.mode === newScenario.mode && !s.pinned));
-          return [newScenario, ...filtered].slice(0, 50);
-        });
-        setSavedSearches(prev => {
-          const filtered = prev.filter(s => !(s.query === query.trim() && s.mode === mode && !s.pinned));
-          return [{
-            id: newScenario.id,
-            query: newScenario.query,
-            mode: newScenario.mode as SearchMode,
-            projectContext: (newScenario.filters?.projectContext ?? projectContext) as ProjectContext,
-            timestamp: newScenario.created_at ? new Date(newScenario.created_at).getTime() : Date.now(),
-            resultCount: newScenario.result_count ?? data.results.length,
-            name: undefined,
-            pinned: false,
-          }, ...filtered].slice(0, 50);
-        });
-      }).catch(err => console.warn('Auto-save user_scenario failed:', err));
+      });
+      const sid = newScenario.id;
+      await populateUserScenario(sid, { includeLive, maxResults: 2000 });
+      // Attendre la fin de la construction du corpus (le panneau de progression
+      // informe l'utilisateur). On sonde l'état jusqu'à done/error.
+      for (let i = 0; i < 120; i++) {
+        await new Promise((r) => setTimeout(r, 5000));
+        try {
+          const st = await fetchUserScenarioPopulateStatus(sid);
+          if (st.status === 'done' || st.status === 'error') break;
+        } catch { /* transient — keep polling */ }
+      }
+      // Lire le corpus construit : c'est CE nombre qui est affiché (== page scénario).
+      const corpus = await fetchScenarioCorpus(sid, { limit: 10000 });
+      const corpusResults: SearchResult[] = (corpus.articles || []).map((a: CorpusArticle) => ({
+        id: `${a.id}-0`,
+        documentId: a.id,
+        chunkIndex: 0,
+        content: a.abstract ?? '',
+        title: a.title,
+        abstract: a.abstract,
+        source: a.source,
+        year: a.year,
+        url: a.url,
+        highlight: (a.abstract ?? '').slice(0, 600),
+        hasFulltext: a.has_fulltext,
+        semanticScore: a.similarity_score ?? null,
+        score: a.similarity_score ?? 0,
+      }));
+      setResults(corpusResults);
+      setSearchTotalMatching(corpus.total);   // == taille du corpus
+      setSearchLiveNewCount(0);               // tout est déjà compté dans le corpus
+      setSearchSourceBreakdown(null);
+      setSearchFulltextDocs(null);
+      setSearchAbstractDocs(null);
+      setSearchScoreType('none');
+      setSearchScoreLabel(null);
+      const first = corpusResults[0] ?? null;
+      if (first) {
+        await loadDocumentDetail(first);
+      }
+      // Mettre à jour les listes locales (scénario désormais construit).
+      setUserScenarios(prev => {
+        const filtered = prev.filter(s => !(s.query === newScenario.query && s.mode === newScenario.mode && !s.pinned));
+        return [{ ...newScenario, result_count: corpus.total, articleCount: corpus.total }, ...filtered].slice(0, 50);
+      });
+      setSavedSearches(prev => {
+        const filtered = prev.filter(s => !(s.query === query.trim() && s.mode === mode && !s.pinned));
+        return [{
+          id: sid,
+          query: newScenario.query,
+          mode: newScenario.mode as SearchMode,
+          projectContext: (newScenario.filters?.projectContext ?? projectContext) as ProjectContext,
+          timestamp: newScenario.created_at ? new Date(newScenario.created_at).getTime() : Date.now(),
+          resultCount: corpus.total,
+          name: undefined,
+          pinned: false,
+        }, ...filtered].slice(0, 50);
+      });
     } catch (err) {
       setError(err instanceof Error ? err.message : "Erreur inconnue");
       setResults([]);

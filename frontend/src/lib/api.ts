@@ -2336,6 +2336,30 @@ export async function fetchUserScenarioPipelineStatus(
   return r.json();
 }
 
+/** Construit le corpus (= requête booléenne sur base locale ∪ live) en arrière-plan. */
+export async function populateUserScenario(
+  scenarioId: string,
+  opts?: { includeLive?: boolean; maxResults?: number },
+): Promise<{ scenario_id: string; status: string; message?: string }> {
+  const params = new URLSearchParams();
+  params.set('max_results', String(opts?.maxResults ?? 2000));
+  params.set('include_live', String(opts?.includeLive ?? true));
+  const r = await fetch(
+    `${API_BASE_URL}/user-scenarios/${scenarioId}/populate?${params}`,
+    { method: 'POST', headers: authHeaders() },
+  );
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  return r.json();
+}
+
+export async function fetchUserScenarioPopulateStatus(
+  scenarioId: string,
+): Promise<{ scenario_id: string; status: string; ingested?: number }> {
+  const r = await fetch(`${API_BASE_URL}/user-scenarios/${scenarioId}/populate/status`);
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  return r.json();
+}
+
 // ─── Alertes email ────────────────────────────────────────────────────────────
 
 export async function subscribeAlerts(
