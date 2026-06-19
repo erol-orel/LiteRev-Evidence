@@ -2961,6 +2961,9 @@ export interface LiveSearchResponse {
   results: LiveSearchResult[];
   total: number;
   new_count: number;
+  corpus_total?: number;
+  corpus_above_threshold?: number;
+  threshold?: number;
   sources_queried: string[];
   ingesting_background: boolean;
 }

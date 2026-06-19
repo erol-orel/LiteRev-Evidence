@@ -2110,6 +2110,27 @@ def search_live(
     )
     new_count = sum(1 for r in all_results if not r["in_local_db"])
 
+    # Compteur RÉEL du corpus du scénario (identique à l'onglet Corpus) pour que
+    # le panneau « recherche en direct » soit cohérent avec le corpus. Le bloc
+    # fédéré ci-dessus n'interroge que les APIs externes (plafonné) ; il ne
+    # reflète PAS la correspondance locale réelle.
+    _thr = _get_scenario_threshold(scenario_id)
+    corpus_total = 0
+    corpus_above = 0
+    try:
+        with engine.connect() as _cc:
+            _cr = _cc.execute(text("""
+                SELECT COUNT(*) AS total,
+                       COUNT(*) FILTER (WHERE ars.similarity_score >= :thr) AS above
+                FROM article_scenarios ars
+                JOIN literature_document d ON d.id = ars.document_id
+                WHERE ars.scenario_id = :sid AND (d.is_duplicate IS NULL OR d.is_duplicate = FALSE)
+            """), {"sid": scenario_id, "thr": _thr}).mappings().first()
+        corpus_total = int(_cr["total"] or 0)
+        corpus_above = int(_cr["above"] or 0)
+    except Exception as _ce:
+        logger.warning(f"search_live corpus count {scenario_id}: {_ce}")
+
     # Background ingest of new papers — via le lanceur verrouillé pour ne jamais
     # démarrer un populate concurrent (sinon les nettoyages post-ingestion se
     # marchent dessus : compteurs corrompus, liens supprimés par l'autre job).
@@ -2125,6 +2146,9 @@ def search_live(
         "results": all_results,
         "total": len(all_results),
         "new_count": new_count,
+        "corpus_total": corpus_total,
+        "corpus_above_threshold": corpus_above,
+        "threshold": _thr,
         "sources_queried": sources_queried,
         "source_raw_counts": raw_counts,
         "ingesting_background": ingesting_background,
@@ -7228,23 +7252,20 @@ def create_user_scenario(payload: UserScenarioIn, _: None = Depends(require_api_
 
 @app.delete("/user-scenarios/{scenario_id}", status_code=200)
 def delete_user_scenario(scenario_id: str, _: None = Depends(require_api_key)) -> dict[str, Any]:
-    """Supprime un scénario utilisateur et ses associations article_scenarios."""
-    row = _get_user_scenario_or_404(scenario_id)
-    if bool(row.get("is_system")):
-        raise HTTPException(status_code=403, detail="Les scénarios système ne peuvent pas être supprimés via cet endpoint")
+    """Supprime un scénario (utilisateur OU GESICA) et ses associations."""
+    _get_user_scenario_or_404(scenario_id)
+    # Les scénarios GESICA (is_system) sont désormais des scénarios ordinaires :
+    # supprimables comme les autres (généralisation). On nettoie aussi les tables
+    # liées (datasets/runs de modèle) pour ne pas laisser d'orphelins.
     with engine.begin() as conn:
-        # Supprimer les associations article_scenarios pour ce scénario utilisateur
-        conn.execute(text("""
-            DELETE FROM article_scenarios WHERE scenario_id = :sid
-        """), {"sid": scenario_id})
-        # Supprimer les paramètres du scénario
-        conn.execute(text("""
-            DELETE FROM scenario_settings WHERE scenario_id = :sid
-        """), {"sid": scenario_id})
-        # Supprimer le scénario lui-même
-        conn.execute(text("""
-            DELETE FROM user_scenarios WHERE id = :id
-        """), {"id": scenario_id})
+        conn.execute(text("DELETE FROM article_scenarios WHERE scenario_id = :sid"), {"sid": scenario_id})
+        conn.execute(text("DELETE FROM scenario_settings WHERE scenario_id = :sid"), {"sid": scenario_id})
+        for _t in ("scenario_model_dataset", "scenario_model_run"):
+            try:
+                conn.execute(text(f"DELETE FROM {_t} WHERE scenario_id = :sid"), {"sid": scenario_id})
+            except Exception:
+                pass
+        conn.execute(text("DELETE FROM user_scenarios WHERE id = :id"), {"id": scenario_id})
     return {"deleted": True, "id": scenario_id}
 
 
