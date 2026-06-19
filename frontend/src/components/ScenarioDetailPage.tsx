@@ -1104,6 +1104,14 @@ function CorpusSection({ scenarioId, threshold }: { scenarioId: string; detail: 
                   </p>
                 );
               }
+              // Tous les documents ont un chunk ; reste éventuellement des embeddings en cours.
+              if ((embeddingStatus.total_pending_chunks ?? 0) > 0) {
+                return (
+                  <p className="text-[10px] text-gold-300">
+                    ✓ Tous les documents sont découpés · {embeddingStatus.total_pending_chunks} embeddings en cours…
+                  </p>
+                );
+              }
               return <p className="text-[10px] text-forest-400">✓ Tous les documents sont découpés et vectorisés.</p>;
             })()}
             <div className="flex items-center gap-3 flex-wrap" title="Modes de recherche disponibles selon l'état des embeddings. Le lexical marche toujours ; le sémantique et l'hybride nécessitent des embeddings.">
