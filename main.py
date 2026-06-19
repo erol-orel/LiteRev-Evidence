@@ -8603,7 +8603,8 @@ def _cohere_rerank(query: str, docs: list[str], model: str = "rerank-v3.5") -> l
     if not key or not docs:
         return None
     try:
-        resp = _requests.post(
+        import requests as _rq
+        resp = _rq.post(
             "https://api.cohere.com/v2/rerank",
             headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
             json={"model": model, "query": query[:4000], "documents": docs, "top_n": len(docs)},
