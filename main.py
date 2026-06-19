@@ -4196,6 +4196,7 @@ def get_scenario_corpus(
                 d.open_access, d.pmid, d.publication_type, d.quality_score,
                 d.screening_status, d.reviewer_1_status,
                 COALESCE(ars.similarity_score, 0.0) AS similarity_score,
+                ars.rerank_score AS rerank_score,
                 (COALESCE(ars.similarity_score, 0.0) >= :threshold) AS above_threshold,
                 EXISTS (
                     SELECT 1 FROM document_chunk c
@@ -4206,7 +4207,7 @@ def get_scenario_corpus(
             WHERE {where}
             ORDER BY
                 CASE WHEN COALESCE(ars.similarity_score, 0.0) >= :threshold THEN 0 ELSE 1 END ASC,
-                COALESCE(ars.similarity_score, 0.0) DESC,
+                COALESCE(ars.rerank_score, ars.similarity_score, 0.0) DESC,
                 d.year DESC NULLS LAST,
                 d.citation_count DESC NULLS LAST,
                 d.title ASC
@@ -7035,6 +7036,10 @@ def _ensure_user_scenarios_table() -> None:
             # Clustering persisté en base (sinon perdu au redémarrage du serveur)
             "ALTER TABLE article_scenarios ADD COLUMN IF NOT EXISTS cluster_id INTEGER",
             "ALTER TABLE article_scenarios ADD COLUMN IF NOT EXISTS cluster_label TEXT",
+            # Score d'un cross-encoder (rerank Cohere) — précision supérieure au
+            # cosinus pour ORDONNER le sous-ensemble pertinent (sélection = cosinus
+            # >= seuil ; ordre = rerank_score quand présent).
+            "ALTER TABLE article_scenarios ADD COLUMN IF NOT EXISTS rerank_score FLOAT",
         ):
             conn.execute(text(_ddl))
     logger.info("Tables user_scenarios et user_scenario_folders vérifiées/créées.")
@@ -7566,6 +7571,7 @@ def get_user_scenario_corpus(
                 d.open_access, d.pmid, d.publication_type, d.quality_score,
                 d.screening_status, d.reviewer_1_status,
                 COALESCE(ars.similarity_score, 0.0) AS similarity_score,
+                ars.rerank_score AS rerank_score,
                 (COALESCE(ars.similarity_score, 0.0) >= :threshold) AS above_threshold,
                 EXISTS (
                     SELECT 1 FROM document_chunk c
@@ -7576,7 +7582,7 @@ def get_user_scenario_corpus(
             WHERE {where}
             ORDER BY
                 CASE WHEN COALESCE(ars.similarity_score, 0.0) >= :threshold THEN 0 ELSE 1 END ASC,
-                COALESCE(ars.similarity_score, 0.0) DESC,
+                COALESCE(ars.rerank_score, ars.similarity_score, 0.0) DESC,
                 d.year DESC NULLS LAST,
                 d.citation_count DESC NULLS LAST,
                 d.title ASC
@@ -8510,6 +8516,11 @@ def _run_user_scenario_populate(
             _backfill_title_abstract_chunks(scenario_id)  # docs liés sans chunk résumé
             _n_scored = _run_semantic_rerank_inline(scenario_id, query)
             logger.info(f"Post-populate rerank {scenario_id}: {_n_scored} articles scorés (aucune suppression).")
+            # Cross-encoder (Cohere) : réordonne le sous-ensemble pertinent pour
+            # plus de précision. No-op si COHERE_API_KEY absent.
+            _n_ce = _run_cross_encoder_rerank(scenario_id, query)
+            if _n_ce:
+                logger.info(f"Post-populate cross-encoder {scenario_id}: {_n_ce} articles réordonnés.")
         except Exception as _e_rr:
             logger.warning(f"rerank post-populate {scenario_id}: {_e_rr}")
 
@@ -8580,6 +8591,81 @@ def _run_semantic_rerank_inline(scenario_id: str, query: str) -> int:
         return updated
     except Exception as _e:
         logger.error(f"Rerank inline {scenario_id} fatal: {_e}", exc_info=True)
+        return 0
+
+
+def _cohere_rerank(query: str, docs: list[str], model: str = "rerank-v3.5") -> list[float] | None:
+    """Cross-encoder rerank via l'API Cohere. Renvoie un score de pertinence par
+    document (aligné sur `docs`), ou None si pas de clé / échec. Pas de dépendance
+    Python ajoutée : appel REST direct. Activé seulement si COHERE_API_KEY est défini.
+    """
+    key = os.getenv("COHERE_API_KEY")
+    if not key or not docs:
+        return None
+    try:
+        resp = _requests.post(
+            "https://api.cohere.com/v2/rerank",
+            headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+            json={"model": model, "query": query[:4000], "documents": docs, "top_n": len(docs)},
+            timeout=60,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        scores: list[float | None] = [None] * len(docs)
+        for item in data.get("results", []):
+            idx = item.get("index")
+            if idx is not None and 0 <= idx < len(docs):
+                scores[idx] = float(item.get("relevance_score", 0.0))
+        return scores  # type: ignore[return-value]
+    except Exception as _e:
+        logger.warning(f"Cohere rerank failed: {_e}")
+        return None
+
+
+def _run_cross_encoder_rerank(scenario_id: str, query: str, top_k: int = 200) -> int:
+    """Reranke le sous-ensemble PERTINENT (cosinus >= seuil) avec un cross-encoder
+    (Cohere). La SÉLECTION reste pilotée par le cosinus + seuil ; on ne fait
+    qu'AMÉLIORER l'ORDRE des articles pertinents (précision). No-op sans clé Cohere.
+    """
+    if not os.getenv("COHERE_API_KEY"):
+        return 0
+    try:
+        eff_threshold = 0.45
+        with engine.connect() as _tc:
+            _ts = _tc.execute(text(
+                "SELECT similarity_threshold FROM scenario_settings WHERE scenario_id = :sid"
+            ), {"sid": scenario_id}).scalar()
+            if _ts is not None:
+                eff_threshold = float(_ts)
+            rows = _tc.execute(text("""
+                SELECT ld.id, ld.title, ld.abstract
+                FROM literature_document ld
+                JOIN article_scenarios asn ON asn.document_id = ld.id AND asn.scenario_id = :sid
+                WHERE COALESCE(asn.similarity_score, 0.0) >= :thr
+                  AND ld.abstract IS NOT NULL AND length(ld.abstract) > 30
+                ORDER BY asn.similarity_score DESC NULLS LAST
+                LIMIT :k
+            """), {"sid": scenario_id, "thr": eff_threshold, "k": top_k}).mappings().all()
+        if not rows:
+            return 0
+        docs = [f"{r['title']}\n\n{(r['abstract'] or '')[:1500]}" for r in rows]
+        scores = _cohere_rerank(query, docs)
+        if not scores:
+            return 0
+        updated = 0
+        with engine.begin() as _c:
+            for r, s in zip(rows, scores):
+                if s is None:
+                    continue
+                _c.execute(text("""
+                    UPDATE article_scenarios SET rerank_score = :s
+                    WHERE document_id = :doc_id AND scenario_id = :sid
+                """), {"s": s, "doc_id": r["id"], "sid": scenario_id})
+                updated += 1
+        logger.info(f"Cross-encoder rerank {scenario_id}: {updated} articles pertinents réordonnés.")
+        return updated
+    except Exception as _e:
+        logger.warning(f"Cross-encoder rerank {scenario_id} failed: {_e}")
         return 0
 
 
