@@ -3013,7 +3013,7 @@ export default function App() {
   const [searchPhase, setSearchPhase] = useState<'idle' | 'translating' | 'searching'>('idle');
   const [searchElapsed, setSearchElapsed] = useState(0);
   const [folders, setFolders] = useState<ScenarioFolder[]>([]);
-  const [sortBy, setSortBy] = useState<"score" | "semantic" | "lexical" | "year_desc" | "year_asc" | "fulltext_first">("score");
+  const [sortBy, setSortBy] = useState<"score" | "semantic" | "lexical" | "year_desc" | "year_asc" | "fulltext_first">("year_desc");
 
 
   useEffect(() => {
@@ -3115,9 +3115,13 @@ export default function App() {
         const af = a.hasFulltext ? 1 : 0;
         const bf = b.hasFulltext ? 1 : 0;
         if (bf !== af) return bf - af;
-        return (b.score ?? 0) - (a.score ?? 0);
+        return (b.year ?? 0) - (a.year ?? 0);
       }
-      return (b.score ?? 0) - (a.score ?? 0);
+      if (sortBy === "score" || sortBy === "semantic" || sortBy === "lexical") {
+        // Plus de score de pertinence au stade recherche (corpus booléen) → récence.
+        return (b.year ?? 0) - (a.year ?? 0);
+      }
+      return (b.year ?? 0) - (a.year ?? 0);
     });
   }, [results, sortBy]);
 
@@ -3809,7 +3813,7 @@ export default function App() {
                         })()}
                       </p>
                       <p className="text-[10px] text-white/30 leading-snug max-w-2xl">
-                        Recherche live (découverte) : ce nombre varie selon les sources API, le seuil sémantique et la croissance de la base. Le corpus du scénario sauvegardé est figé et c'est lui qui alimente le modèle.
+                        Corpus = résultat de la requête booléenne (base locale + sources API en direct). Ce nombre peut varier avec les sources API et la croissance de la base, mais PAS avec le seuil sémantique (qui ne sélectionne les articles pertinents que sur la page scénario). Les résultats sont triés par récence.
                       </p>
                       {searchSourceBreakdown && Object.keys(searchSourceBreakdown).length > 0 && (() => {
                         const localEntries = Object.entries(searchSourceBreakdown).filter(([k]) => !k.endsWith(" (live)"));
@@ -3922,9 +3926,6 @@ export default function App() {
                   <div className="flex flex-wrap items-center gap-2 mb-2 mt-1">
                     <span className="text-xs text-forest-500">Trier :</span>
                     {([
-                      ["score", "Score global"],
-                      ["semantic", "Sémantique"],
-                      ["lexical", "Lexical"],
                       ["year_desc", "Année ↓"],
                       ["year_asc", "Année ↑"],
                       ["fulltext_first", "Full-text d'abord"],
@@ -3979,16 +3980,20 @@ export default function App() {
                           </div>
 
                           <div className="mt-3 flex flex-wrap gap-2 text-xs text-forest-400">
-                            {/* Score chip */}
-                            <span className={`rounded-full px-2 py-1 ${
-                              searchScoreType === 'hybrid' ? 'bg-violet-500/20 text-violet-300' :
-                              searchScoreType === 'semantic' ? 'bg-blue-500/20 text-blue-300' :
-                              'bg-white/5'
-                            }`} title={searchScoreLabel ?? undefined}>
-                              {searchScoreType === 'hybrid' ? '⊕' :
-                               searchScoreType === 'semantic' ? '◎' :
-                               '≡'} {(result.score ?? 0).toFixed(3)}
-                            </span>
+                            {/* Score chip — masqué au stade recherche (corpus booléen =
+                                appartenance binaire, pas de score de pertinence).
+                                La pertinence sémantique apparaît sur la page scénario. */}
+                            {searchScoreType && searchScoreType !== 'none' && (
+                              <span className={`rounded-full px-2 py-1 ${
+                                searchScoreType === 'hybrid' ? 'bg-violet-500/20 text-violet-300' :
+                                searchScoreType === 'semantic' ? 'bg-blue-500/20 text-blue-300' :
+                                'bg-white/5'
+                              }`} title={searchScoreLabel ?? undefined}>
+                                {searchScoreType === 'hybrid' ? '⊕' :
+                                 searchScoreType === 'semantic' ? '◎' :
+                                 '≡'} {(result.score ?? 0).toFixed(3)}
+                              </span>
+                            )}
                             {/* Décomposition (hybride uniquement : sinon redondant avec le score global) */}
                             {searchScoreType === 'hybrid' && result.semanticScore != null && (
                               <span className="rounded-full bg-blue-500/10 px-2 py-1 text-blue-300 border border-blue-500/20" title="Composante sémantique (cosinus)">

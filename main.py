@@ -1377,7 +1377,10 @@ def search(payload: SearchIn) -> dict[str, Any]:
             LIMIT :limit OFFSET :offset
         """)
     else:
-        # 3. Fallback Lexical Pur (BM25 simulé)
+        # 3. Fallback : booléen (appartenance binaire → tri par récence) ou
+        #    lexical pur (tri par score ts_rank).
+        _order_by = ("d.year DESC NULLS LAST, d.id DESC" if payload.mode == "boolean"
+                     else "score DESC, d.year DESC NULLS LAST, d.id DESC")
         sql = text(f"""
             SELECT
                 d.id            AS document_id,
@@ -1406,7 +1409,7 @@ def search(payload: SearchIn) -> dict[str, Any]:
             JOIN literature_document d ON d.id = c.document_id
             WHERE ({any_match_sql})
             {where_sql}
-            ORDER BY score DESC, d.year DESC NULLS LAST, d.id DESC
+            ORDER BY {_order_by}
             LIMIT :limit OFFSET :offset
         """)
 
@@ -1635,10 +1638,20 @@ def search(payload: SearchIn) -> dict[str, Any]:
     elif use_vector and payload.mode == "semantic":
         score_type = "semantic"
         score_label = "Sémantique (similarité cosinus vectorielle)"
+    elif payload.mode == "boolean":
+        # Corpus booléen = appartenance binaire (comme une requête PubMed) : il n'y
+        # a PAS de score de pertinence à ce stade. On trie par récence (convention
+        # de veille bibliographique). La pertinence sémantique intervient ensuite,
+        # sur la page scénario. Évite le faux « score lexical ≈ 1 » trompeur.
+        score_type = "none"
+        score_label = "Tri par récence — le corpus booléen n'a pas de score de pertinence (la pertinence sémantique s'applique sur la page scénario)"
     else:
         score_type = "lexical"
         score_label = "Lexical (BM25 simulé : score normalisé entre 0 et 1)"
-    results.sort(key=lambda r: (-float(r.get("score") or 0), -(r.get("year") or 0), str(r.get("document_id") or "")))
+    if score_type == "none":
+        results.sort(key=lambda r: (-(r.get("year") or 0), str(r.get("document_id") or "")))
+    else:
+        results.sort(key=lambda r: (-float(r.get("score") or 0), -(r.get("year") or 0), str(r.get("document_id") or "")))
     abstract_docs += live_new_count  # live API results are all abstract-only
     return {
         "results": results,
