@@ -3008,6 +3008,10 @@ export default function App() {
   // et utilisée comme base du corpus (même requête → compteur == taille du corpus).
   const [booleanStrategy, setBooleanStrategy] = useState<SearchStrategy | null>(null);
   const [translatingQuery, setTranslatingQuery] = useState(false);
+  // Panneau de progression pendant la recherche (~30 s avec les APIs en direct) :
+  // informe l'utilisateur de l'étape en cours pour qu'il patiente sereinement.
+  const [searchPhase, setSearchPhase] = useState<'idle' | 'translating' | 'searching'>('idle');
+  const [searchElapsed, setSearchElapsed] = useState(0);
   const [folders, setFolders] = useState<ScenarioFolder[]>([]);
   const [sortBy, setSortBy] = useState<"score" | "semantic" | "lexical" | "year_desc" | "year_asc" | "fulltext_first">("score");
 
@@ -3034,6 +3038,14 @@ export default function App() {
     setSelectedDocument(null);
     setEvidenceSummary(null);
   }, [projectContext]);
+
+  // Compteur de secondes écoulées pendant une recherche (panneau de progression).
+  useEffect(() => {
+    if (searchPhase === 'idle') return;
+    setSearchElapsed(0);
+    const t = setInterval(() => setSearchElapsed((s) => s + 1), 1000);
+    return () => clearInterval(t);
+  }, [searchPhase]);
 
   useEffect(() => {
     if (activeTab === "stats") {
@@ -3153,6 +3165,7 @@ export default function App() {
       let effectiveQuery = query;
       let strategy: SearchStrategy | null = null;
       if (mode === "boolean") {
+        setSearchPhase('translating');
         setTranslatingQuery(true);
         try {
           strategy = await fetchSearchStrategy(query.trim());
@@ -3167,6 +3180,7 @@ export default function App() {
       } else {
         setBooleanStrategy(null);
       }
+      setSearchPhase('searching');
       const data = await searchDocuments({
         queryText: effectiveQuery,
         mode,
@@ -3221,6 +3235,7 @@ export default function App() {
       setResults([]);
     } finally {
       setLoading(false);
+      setSearchPhase('idle');
     }
   }
 
@@ -3304,7 +3319,8 @@ export default function App() {
 
   function handleReplaySearch(s: SavedSearch) {
     setQuery(s.query);
-    setMode(s.mode);
+    // Recherche unifiée : toujours en mode booléen (l'IA traduit si besoin).
+    setMode("boolean");
     setProjectContext(s.projectContext);
     setActiveTab("search");
     // Déclencher la recherche après mise à jour du state
@@ -3641,63 +3657,26 @@ export default function App() {
 
             <section className="space-y-6">
               <section className="rounded-3xl border border-white/10 bg-white/5 p-5 shadow-2xl">
-                <div className="mb-4 flex items-center gap-2 rounded-2xl border border-white/10 bg-forest-900/80 p-1 text-sm">
-                  {(["semantic", "boolean"] as SearchMode[]).map((item) => {
-                    const tooltipText = item === "semantic"
-                      ? "Recherche par sens et contexte (vecteurs). Résultats variés, non-déterministes, triés par pertinence sémantique. Idéal pour explorer un sujet large. Qualité élevée, quantité variable."
-                      : "Recherche par mots-clés exacts (AND, OR, NOT). Résultats déterministes et reproductibles. Les mêmes mots donnent toujours les mêmes résultats. Idéal pour des requêtes précises.";
-                    return (
-                      <div key={item} className="relative flex items-center gap-0.5">
-                        <button
-                          type="button"
-                          onClick={() => {
-                            if (item !== mode) {
-                              setMode(item);
-                              setResults([]);
-                              setPage(1);
-                              setSearchSourceBreakdown(null);
-                              setSearchTotalMatching(null);
-                              setSearchFulltextDocs(null);
-                              setSearchAbstractDocs(null);
-                              setBooleanStrategy(null);
-                              setSelectedResult(null);
-                              setSelectedDocument(null);
-                            }
-                          }}
-                          className={`rounded-xl px-4 py-2 capitalize transition font-medium ${
-                            mode === item
-                              ? "bg-brand-700 text-gold-400 font-semibold"
-                              : "text-white/60 hover:text-white hover:bg-white/8"
-                          }`}
-                        >
-                          {item === "semantic" ? "Sémantique" : "Booléen"}
-                        </button>
-                        <div className="group relative">
-                          <span className="cursor-help text-xs text-white/25 hover:text-brand-300 transition px-1">ⓘ</span>
-                          <div className="pointer-events-none absolute bottom-full left-1/2 z-50 mb-2 w-64 -translate-x-1/2 rounded-xl border border-white/10 bg-forest-900 p-3 text-xs text-white/70 opacity-0 shadow-xl transition-opacity group-hover:opacity-100">
-                            <p className="font-semibold text-white mb-1">{item === "semantic" ? "Recherche par Vecteurs" : "Recherche Booléenne"}</p>
-                            {tooltipText}
-                          </div>
-                        </div>
-                      </div>
-                    );
-                  })}
+                {/* Une seule recherche : l'utilisateur saisit librement (langage
+                    naturel OU requête booléenne) ; l'IA détecte le format et, si
+                    besoin, traduit en requête booléenne — c'est elle qui définit le
+                    corpus. Le seuil sémantique n'intervient plus ici (uniquement sur
+                    la page scénario pour sélectionner les articles pertinents). */}
+                <div className="mb-3 flex items-start gap-2 text-xs text-forest-300">
+                  <span className="text-brand-300">✨</span>
+                  <span>
+                    Décrivez votre sujet en langage naturel <span className="text-white/50">(« prévision de la demande d'ambulances »)</span>{" "}
+                    ou saisissez directement une requête booléenne <span className="text-white/50">(« ambulance AND (demand OR forecasting) »)</span>.
+                    L'IA reconnaît le format et traduit si nécessaire.
+                  </span>
                 </div>
-
-                {/* Le seuil sémantique ne s'applique PLUS à la recherche : le corpus
-                    est une correspondance lexicale (base locale + APIs live). Le seuil
-                    ne sert qu'à sélectionner les articles pertinents dans la page scénario. */}
 
                 <div className="flex flex-col gap-3 lg:flex-row">
                   <input
                     value={query}
                     onChange={(e) => setQuery(e.target.value)}
                     onKeyDown={(e) => e.key === "Enter" && handleSearch()}
-                    placeholder={
-                      mode === "semantic"
-                        ? "Ex. ambulance demand forecasting"
-                        : "Ex. ambulance AND forecasting"
-                    }
+                    placeholder="Ex. prévision de la demande d'ambulances  —  ou  —  ambulance AND forecasting"
                     className="min-h-14 flex-1 rounded-2xl border border-white/10 bg-forest-950/80 px-4 text-white outline-none placeholder:text-forest-500 focus:border-brand-400"
                   />
                   <button
@@ -3750,6 +3729,60 @@ export default function App() {
                   {error}
                 </div>
               )}
+
+              {loading && searchPhase !== 'idle' && (() => {
+                // Étapes de la recherche. Sans flux temps réel du backend, on
+                // approxime l'avancement à partir de la phase + du temps écoulé,
+                // afin que l'utilisateur sache ce qui se passe pendant l'attente.
+                const liveSources = ["PubMed", "OpenAlex", "Crossref", "EuropePMC", "medRxiv", "bioRxiv", "PROSPERO", "Cochrane"];
+                const searching = searchPhase === 'searching';
+                const doneTranslate = searching;
+                const doneLocal = searching && searchElapsed >= 3;
+                const doneLive = searching && includeLive && searchElapsed >= 24;
+                const steps: { label: string; done: boolean; active: boolean; hint?: string }[] = [
+                  { label: "Traduction de la requête (IA)", done: doneTranslate, active: !doneTranslate },
+                  { label: "Recherche dans la base locale indexée", done: doneLocal, active: doneTranslate && !doneLocal },
+                  ...(includeLive ? [{
+                    label: "Interrogation des sources API en direct",
+                    done: doneLive,
+                    active: doneLocal && !doneLive,
+                    hint: doneLocal && !doneLive ? liveSources[searchElapsed % liveSources.length] : undefined,
+                  }] : []),
+                  { label: "Agrégation, déduplication & scoring", done: false, active: includeLive ? doneLive : doneLocal },
+                ];
+                return (
+                  <div className="rounded-3xl border border-brand-400/20 bg-white/5 p-6">
+                    <div className="flex items-center justify-between">
+                      <p className="text-sm font-semibold text-white">Recherche en cours…</p>
+                      <span className="font-mono text-xs text-white/40">{searchElapsed}s</span>
+                    </div>
+                    <ul className="mt-4 space-y-2.5">
+                      {steps.map((s, i) => (
+                        <li key={i} className="flex items-center gap-3 text-sm">
+                          <span className="flex h-5 w-5 shrink-0 items-center justify-center">
+                            {s.done ? (
+                              <span className="text-brand-300">✓</span>
+                            ) : s.active ? (
+                              <span className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-brand-300/30 border-t-brand-300" />
+                            ) : (
+                              <span className="h-1.5 w-1.5 rounded-full bg-white/20" />
+                            )}
+                          </span>
+                          <span className={s.done ? "text-white/40 line-through decoration-white/20" : s.active ? "text-white" : "text-white/40"}>
+                            {s.label}
+                            {s.hint && <span className="ml-1.5 text-emerald-300/70">· {s.hint}</span>}
+                          </span>
+                        </li>
+                      ))}
+                    </ul>
+                    {includeLive && (
+                      <p className="mt-4 text-[11px] leading-snug text-white/30">
+                        Les 8 sources en direct sont interrogées en parallèle : comptez 20 à 30 secondes. Les résultats de la base locale sont déjà prêts ; nous attendons les dernières références live avant d'afficher le total.
+                      </p>
+                    )}
+                  </div>
+                );
+              })()}
 
               {!loading && !error && !hasResults && (
                 <div className="rounded-3xl border border-dashed border-white/10 bg-white/5 p-10 text-center text-forest-300">

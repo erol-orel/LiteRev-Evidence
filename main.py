@@ -7665,11 +7665,16 @@ def _generate_search_strategy(query: str) -> dict:
             model="gpt-4.1-mini",
             messages=[
                 {"role": "system", "content": (
-                    "You are a systematic review librarian. Given a research query, generate a structured boolean search strategy. "
+                    "You are a systematic review librarian. The user may type EITHER a natural-language "
+                    "description OR an already-formed boolean query. First decide which it is:\n"
+                    "- If it is ALREADY a boolean query (it uses AND/OR/NOT operators or quoted phrases "
+                    "with explicit structure), PRESERVE it as-is in 'general' (only fix obvious syntax), and "
+                    "set 'explanation' to note that the query was already boolean and kept unchanged.\n"
+                    "- Otherwise, TRANSLATE the natural-language query into a boolean query.\n"
                     "Return ONLY valid JSON with these fields:\n"
                     '{"general": "boolean query using AND/OR/NOT and quotes for phrases",\n'
                     '"pubmed": "PubMed-optimized query with MeSH terms [MeSH Terms] and field tags [Title/Abstract]",\n'
-                    '"explanation": "1-2 sentences explaining the term choices and synonyms",\n'
+                    '"explanation": "1-2 sentences explaining the term choices and synonyms (or that the input was already boolean)",\n'
                     '"synonyms": [["term1", "synonym1a", "synonym1b"], ["term2", "synonym2a"]]}\n'
                     "Keep queries practical and not overly long. Use 2-4 concept groups max."
                 )},
