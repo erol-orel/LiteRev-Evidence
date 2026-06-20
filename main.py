@@ -8598,6 +8598,18 @@ def _run_user_scenario_populate(
         except Exception as _e_rr:
             logger.warning(f"rerank post-populate {scenario_id}: {_e_rr}")
 
+        # Précalcul des visualisations dès que le corpus est construit et scoré, pour
+        # que l'onglet Visualisation soit prêt sans attente (clustering UMAP/HDBSCAN,
+        # mis en cache). Le pipeline complet a sa propre étape clustering ; on ne
+        # déclenche donc ce précalcul que pour le chemin /populate (recherche).
+        if _pipeline_callback is None:
+            try:
+                import threading as _vth
+                _vth.Thread(target=_run_clustering_background, args=(scenario_id, True),
+                            daemon=True).start()
+            except Exception as _e_viz:
+                logger.warning(f"Précalcul visualisation {scenario_id}: {_e_viz}")
+
         if _pipeline_callback is None:
             _sources_final = _user_scenario_populate_jobs.get(scenario_id, {}).get("sources", {})
             _src_parts = [f"{src}: {cnt}" for src, cnt in _sources_final.items() if cnt > 0]

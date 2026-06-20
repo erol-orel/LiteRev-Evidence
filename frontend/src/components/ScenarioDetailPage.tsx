@@ -1658,18 +1658,20 @@ function ClusteringSection({ scenarioId }: { scenarioId: string }) {
                       </div>
                     </div>
 
-                    {/* Article représentatif */}
-                    <div className="space-y-2 border-t border-white/5 pt-4">
-                      <p className="text-[10px] font-bold uppercase tracking-wider text-white/50">Article le plus central / représentatif</p>
-                      <div className="rounded-xl border border-white/5 bg-white/3 p-3">
-                        <div className="flex items-center gap-1.5 text-[10px] text-white/35 font-mono">
-                          <span>ID: #{activeClusterData.representative_doc.id}</span>
-                          {activeClusterData.representative_doc.year && <span>• {activeClusterData.representative_doc.year}</span>}
-                          {activeClusterData.representative_doc.journal && <span>• {activeClusterData.representative_doc.journal}</span>}
+                    {/* Article représentatif (peut être absent pour un petit cluster) */}
+                    {activeClusterData.representative_doc && (
+                      <div className="space-y-2 border-t border-white/5 pt-4">
+                        <p className="text-[10px] font-bold uppercase tracking-wider text-white/50">Article le plus central / représentatif</p>
+                        <div className="rounded-xl border border-white/5 bg-white/3 p-3">
+                          <div className="flex items-center gap-1.5 text-[10px] text-white/35 font-mono">
+                            <span>ID: #{activeClusterData.representative_doc.id}</span>
+                            {activeClusterData.representative_doc.year && <span>• {activeClusterData.representative_doc.year}</span>}
+                            {activeClusterData.representative_doc.journal && <span>• {activeClusterData.representative_doc.journal}</span>}
+                          </div>
+                          <h5 className="text-xs font-semibold text-white mt-1.5 leading-5">{activeClusterData.representative_doc.title}</h5>
                         </div>
-                        <h5 className="text-xs font-semibold text-white mt-1.5 leading-5">{activeClusterData.representative_doc.title}</h5>
                       </div>
-                    </div>
+                    )}
                   </div>
                 )}
               </div>
@@ -4025,7 +4027,6 @@ function ModelMonitorSection({ scenarioId }: { scenarioId: string }) {
                 <div className="mt-4 rounded-2xl bg-white/5 p-4 border border-white/5">
                   <p className="text-[10px] text-white/50 uppercase tracking-wider">
                     {monitor.kind === "probability" ? `Risque (${monitor.positive_class ?? "classe positive"})` : "Valeur prédite"}
-                    {monitor.n_scored ? ` — ${monitor.n_scored} pts` : ""}
                   </p>
                   <p className="text-3xl font-black text-brand-300 mt-1 font-mono">
                     {monitor.kind === "probability" && typeof monitor.value === "number"
@@ -4047,7 +4048,7 @@ function ModelMonitorSection({ scenarioId }: { scenarioId: string }) {
         {/* Modèle entraîné : métriques */}
         <div className="lg:col-span-2 rounded-3xl border border-white/10 bg-white/3 p-5 space-y-4">
           <SectionHeader icon={<Brain size={14} className="text-brand-400" />} title="Modèle entraîné"
-            subtitle="Algorithme, métriques et hyperparamètres (scikit-learn + Optuna)" />
+            subtitle="Algorithme, métriques et hyperparamètres" />
           {run?.status === "ready" ? (
             <div className="space-y-3">
               <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 text-xs">
@@ -4077,6 +4078,18 @@ function ModelMonitorSection({ scenarioId }: { scenarioId: string }) {
                         <div className="h-1.5 rounded-full bg-brand-500/60" style={{ width: `${Math.max(4, Math.min(100, fi.value * 100))}%` }} />
                         <span className="text-[10px] text-white/50 truncate">{fi.label}</span>
                       </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+              {run.best_params && Object.keys(run.best_params).length > 0 && (
+                <div className="rounded-xl border border-white/5 bg-white/2 px-3 py-2.5">
+                  <span className="text-[10px] text-white/35 uppercase tracking-wider">Hyperparamètres (optimisés par validation croisée)</span>
+                  <div className="mt-2 flex flex-wrap gap-1.5">
+                    {Object.entries(run.best_params).map(([k, v]) => (
+                      <span key={k} className="rounded-lg border border-white/10 bg-white/5 px-2 py-0.5 text-[10px] font-mono text-white/70">
+                        {k} = <span className="text-brand-300">{typeof v === 'number' ? (Number.isInteger(v) ? v : (v as number).toFixed(3)) : String(v)}</span>
+                      </span>
                     ))}
                   </div>
                 </div>
