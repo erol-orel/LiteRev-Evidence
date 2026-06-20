@@ -656,7 +656,7 @@ function VariablesSection({ detail, scenarioId, onGoToModel }: { detail: Scenari
               Variables & Modele generes automatiquement - validation requise
             </p>
             <p className="text-[10px] text-gold-200/70 leading-relaxed">
-              {llmVars.predictor_variables?.length ?? 0} variables predictives et le modele recommande ont ete extraits automatiquement depuis les PICO de {llmVars._meta?.pico_articles_used ?? '?'} articles. Verifiez et validez avant utilisation.
+              {llmVars.predictor_variables?.length ?? 0} variables predictives et le modele recommande ont ete derives des {llmVars._meta?.pico_articles_used ?? '?'} articles pertinents avec PICO{llmVars._meta?.relevant_total != null ? ` (sur ${llmVars._meta.relevant_total} pertinents` : ''}{llmVars._meta?.corpus_total != null ? `, ${llmVars._meta.corpus_total} au corpus)` : (llmVars._meta?.relevant_total != null ? ')' : '')}. Verifiez et validez avant utilisation.
             </p>
           </div>
           <button onClick={handleValidateLlm} disabled={llmValidating}
@@ -707,8 +707,8 @@ function VariablesSection({ detail, scenarioId, onGoToModel }: { detail: Scenari
           <div className="flex items-center justify-between flex-wrap gap-2">
             <SectionHeader
               icon={<Brain size={14} className="text-brand-400" />}
-              title="Variables generees par LLM"
-              subtitle={`Extraites depuis les PICO de ${llmVars._meta?.pico_articles_used ?? '?'} articles`}
+              title="Variables du modèle"
+              subtitle={`Outcome, variables et algorithme dérivés de ${llmVars._meta?.pico_articles_used ?? '?'} articles pertinents avec PICO${llmVars._meta?.relevant_total != null ? ` · ${llmVars._meta.relevant_total} pertinents` : ''}${llmVars._meta?.corpus_total != null ? ` sur ${llmVars._meta.corpus_total} au corpus` : ''}`}
             />
             <div className="flex gap-2">
               {llmVars._validated ? (
@@ -762,7 +762,7 @@ function VariablesSection({ detail, scenarioId, onGoToModel }: { detail: Scenari
                   <th className="py-2.5 px-3">Type</th>
                   <th className="py-2.5 px-3">Definition</th>
                   <th className="py-2.5 px-3">Source</th>
-                  <th className="py-2.5 px-3 text-center">Données</th>
+                  <th className="py-2.5 px-3 text-center">Disponibilité</th>
                   <th className="py-2.5 px-3 text-center">Importance</th>
                 </tr>
               </thead>
@@ -781,11 +781,30 @@ function VariablesSection({ detail, scenarioId, onGoToModel }: { detail: Scenari
                     <td className="py-3 px-3 text-white/50 font-mono text-[11px]">{v.data_source}</td>
                     <td className="py-3 px-3 text-center">
                       {(() => {
-                        const st = dataStatusFor(v.machine_name);
-                        if (st === 'plugged') return <span title={v.machine_name} className="rounded-full px-2 py-0.5 text-[10px] font-semibold bg-brand-500/15 text-brand-300">✓ branchée</span>;
-                        if (st === 'public') return <span title={`${v.machine_name} — récupérable automatiquement`} className="rounded-full px-2 py-0.5 text-[10px] font-semibold bg-white/8 text-white/55">☁ publique</span>;
-                        if (st === 'missing_user') return <span title={v.machine_name} className="rounded-full px-2 py-0.5 text-[10px] font-semibold bg-gold-500/15 text-gold-300">⚠ à fournir</span>;
-                        return <span className="text-white/25 text-[10px]">—</span>;
+                        // Statut clair (pastille + libellé + couleur, jamais la couleur
+                        // seule — accessibilité). Sans jeu de données chargé, on déduit
+                        // la disponibilité de la source déclarée de la variable.
+                        let st = dataStatusFor(v.machine_name);
+                        if (st === 'unknown') {
+                          const auto = !!(v as any).public_provider
+                            || (v as any).source === 'public_api'
+                            || /public|api|m[ée]t[ée]o|open[- ]?data|open-?meteo/i.test(v.data_source ?? '');
+                          st = auto ? 'public' : 'missing_user';
+                        }
+                        const cfg = ({
+                          plugged:      { dot: 'bg-emerald-400', cls: 'text-emerald-300', label: 'Branché' },
+                          public:       { dot: 'bg-sky-400',     cls: 'text-sky-300',     label: 'Récupérable (API)' },
+                          missing_user: { dot: 'bg-amber-400',   cls: 'text-amber-300',   label: 'À fournir' },
+                        } as const)[st as 'plugged' | 'public' | 'missing_user'];
+                        const tip = st === 'plugged' ? 'Données réelles connectées au modèle'
+                          : st === 'public' ? 'Récupérée automatiquement via une API publique (aucune action requise)'
+                          : 'À fournir : importez ces données pour entraîner le modèle';
+                        return (
+                          <span title={`${v.machine_name ?? ''} — ${tip}`} className={`inline-flex items-center gap-1.5 text-[10px] font-semibold ${cfg.cls}`}>
+                            <span className={`h-1.5 w-1.5 rounded-full ${cfg.dot}`} />
+                            {cfg.label}
+                          </span>
+                        );
                       })()}
                     </td>
                     <td className="py-3 px-3 text-center">
@@ -827,25 +846,31 @@ function VariablesSection({ detail, scenarioId, onGoToModel }: { detail: Scenari
         cet onglet ; les anciens encadrés (vides pour les scénarios utilisateur) ont
         été retirés. Restent les bases de données requises et l'import de données. */}
     <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
-        {/* Bases de données utilisées */}
+        {/* Sources de données requises par le MODÈLE (et non la source de la
+            littérature). On préfère required_databases du spec généré ; à défaut
+            on liste detail.databases. */}
         <div className="rounded-3xl border border-white/10 bg-white/3 p-5 space-y-4">
           <SectionHeader
             icon={<Globe size={14} className="text-brand-400" />}
-            title="Bases de données requises"
-            subtitle="Flux d'informations à connecter pour ce scénario"
+            title="Sources de données requises"
+            subtitle="Flux à connecter pour alimenter et entraîner le modèle"
           />
-          <div className="space-y-2">
-            {detail.databases && detail.databases.length > 0 ? (
-              detail.databases.map((db, i) => (
-                <div key={i} className="flex items-center gap-2.5 rounded-xl border border-white/5 bg-white/3 px-3 py-2.5 text-xs text-white/70">
-                  <Database size={12} className="text-brand-400 shrink-0" />
-                  <span>{db}</span>
-                </div>
-              ))
+          {(() => {
+            const feeds = ((llmVars as any)?.required_databases as string[] | undefined)
+              ?? detail.databases ?? [];
+            return feeds.length > 0 ? (
+              <div className="space-y-2">
+                {feeds.map((db, i) => (
+                  <div key={i} className="flex items-center gap-2.5 rounded-xl border border-white/5 bg-white/3 px-3 py-2.5 text-xs text-white/70">
+                    <Database size={12} className="text-brand-400 shrink-0" />
+                    <span>{db}</span>
+                  </div>
+                ))}
+              </div>
             ) : (
-              <p className="text-xs text-white/35 italic">Aucune base de données répertoriée.</p>
-            )}
-          </div>
+              <p className="text-xs text-white/35 italic">Les sources seront déduites une fois les variables du modèle générées.</p>
+            );
+          })()}
         </div>
 
         {/* Zone d'upload interactif */}
@@ -3515,29 +3540,36 @@ ${llm.future_research ? `<h3>Directions de recherche futures</h3><p class="llm-t
       {briefError && <ErrorBox message={briefError} />}
       {briefData && (
         <>
-          {/* KPIs */}
-          <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-7 gap-2.5">
-            {(()=>{
-              const dups = briefData.corpus_stats.duplicates ?? 0;
-              const uniqueTotal = briefData.corpus_stats.total - dups;
-              const uTotal = uniqueTotal || 1;
-              return [
-                {label:'Articles total',  value:briefData.corpus_stats.total,                                                                                  color:'text-white',      sub:dups>0?`dont ${dups} doublons`:null},
-                {label:'Uniques',         value:uniqueTotal,                                                                                                    color:'text-white/80',   sub:null},
-                {label:'Inclus',          value:briefData.corpus_stats.included,                                                                               color:'text-brand-300',  sub:`${Math.round(briefData.corpus_stats.included/uTotal*100)}%`},
-                {label:'Exclus',          value:briefData.corpus_stats.excluded,                                                                               color:'text-red-400',    sub:`${Math.round(briefData.corpus_stats.excluded/uTotal*100)}%`},
-                {label:'En attente',      value:briefData.corpus_stats.pending ?? (uniqueTotal - briefData.corpus_stats.included - briefData.corpus_stats.excluded), color:'text-white/50',   sub:null},
-                {label:'PICO extraits',   value:briefData.corpus_stats.with_pico,                                                                               color:'text-gold-400',   sub:`${Math.round(briefData.corpus_stats.pico_coverage_pct ?? briefData.corpus_stats.with_pico/uTotal*100)}%`},
-                {label:'Texte intégral',  value:briefData.corpus_stats.with_fulltext ?? 0,                                                                     color:'text-blue-300',   sub:null},
-              ];
-            })().map(s=>(
-              <div key={s.label} className="rounded-2xl border border-white/5 bg-white/2 p-3 text-center">
-                <div className={`text-xl font-bold ${s.color}`}>{s.value}</div>
-                {s.sub && <div className="text-[9px] text-white/30 font-mono">{s.sub}</div>}
-                <div className="text-[9px] text-white/35 mt-0.5 leading-tight">{s.label}</div>
+          {/* KPIs — l'analyse (Evidence Brief, PICO, modèle) repose sur les
+              articles PERTINENTS (au-dessus du seuil sémantique). On montre le
+              corpus total pour le contexte, puis tout le reste sur les pertinents.
+              Les compteurs de screening (inclus/exclus/en attente) vivent dans
+              l'onglet Revue, pas ici. */}
+          {(()=>{
+            const cs = briefData.corpus_stats;
+            const dups = cs.duplicates ?? 0;
+            const uniqueTotal = cs.total - dups;
+            const relevant = cs.relevant ?? uniqueTotal;
+            const rTotal = relevant || 1;
+            const thr = cs.threshold ?? 0.45;
+            const boxes = [
+              {label:'Articles (corpus)', value:uniqueTotal,                            color:'text-white',       sub:dups>0?`dont ${dups} doublons`:'uniques'},
+              {label:'Pertinents (utilisés)', value:relevant,                           color:'text-brand-300',   sub:`seuil ≥ ${thr} · ${Math.round(relevant/(uniqueTotal||1)*100)}% du corpus`},
+              {label:'PICO extraits',     value:cs.relevant_with_pico ?? cs.with_pico,  color:'text-gold-400',    sub:`${Math.round((cs.relevant_with_pico ?? cs.with_pico)/rTotal*100)}% des pertinents`},
+              {label:'Texte intégral',    value:cs.relevant_with_fulltext ?? cs.with_fulltext ?? 0, color:'text-blue-300', sub:`${Math.round((cs.relevant_with_fulltext ?? cs.with_fulltext ?? 0)/rTotal*100)}% des pertinents`},
+            ];
+            return (
+              <div className="grid grid-cols-2 lg:grid-cols-4 gap-2.5">
+                {boxes.map(s=>(
+                  <div key={s.label} className="rounded-2xl border border-white/5 bg-white/2 p-3 text-center">
+                    <div className={`text-xl font-bold ${s.color}`}>{s.value}</div>
+                    {s.sub && <div className="text-[9px] text-white/30 font-mono">{s.sub}</div>}
+                    <div className="text-[9px] text-white/35 mt-0.5 leading-tight">{s.label}</div>
+                  </div>
+                ))}
               </div>
-            ))}
-          </div>
+            );
+          })()}
 
           {/* Couverture temporelle */}
           {briefData.corpus_stats.year_min && briefData.corpus_stats.year_max && (
