@@ -7587,7 +7587,11 @@ def get_user_scenario_corpus(
                 COUNT(*) AS total,
                 COUNT(*) FILTER (WHERE ars.similarity_score >= :threshold) AS above_threshold,
                 COUNT(*) FILTER (WHERE ars.similarity_score IS NULL) AS unscored,
-                COUNT(*) FILTER (WHERE :screated IS NOT NULL AND d.created_at >= :screated) AS newly_fetched
+                COUNT(*) FILTER (WHERE :screated IS NOT NULL AND d.created_at >= :screated) AS newly_fetched,
+                COUNT(*) FILTER (WHERE EXISTS (
+                    SELECT 1 FROM document_chunk c
+                    WHERE c.document_id = d.id AND c.chunk_type = 'fulltext_section'
+                )) AS with_fulltext
             FROM literature_document d
             JOIN article_scenarios ars ON ars.document_id = d.id AND ars.scenario_id = :sid
             WHERE {where}
@@ -7598,6 +7602,7 @@ def get_user_scenario_corpus(
         unscored = int(counts_row["unscored"] or 0)
         newly_fetched = int(counts_row["newly_fetched"] or 0) if _screated else None
         from_local = (total - newly_fetched) if newly_fetched is not None else None
+        with_fulltext = int(counts_row["with_fulltext"] or 0)
         articles = conn.execute(text(f"""
             SELECT
                 d.id, d.title, d.abstract, d.year, d.source, d.url,
@@ -7631,13 +7636,28 @@ def get_user_scenario_corpus(
               AND d.year >= 2000
             GROUP BY d.year ORDER BY d.year DESC
         """), {k: v for k, v in params.items() if k not in ('limit', 'offset')}).mappings().all()
+        # Répartition par source, en distinguant la base locale (docs déjà en base
+        # avant ce scénario) des références ramenées en direct par les APIs pendant
+        # la construction du corpus (docs créés après la création du scénario).
         source_dist = conn.execute(text(f"""
-            SELECT d.source, COUNT(*) AS cnt
+            SELECT d.source,
+                   COUNT(*) AS cnt,
+                   COUNT(*) FILTER (WHERE :screated IS NULL OR d.created_at < :screated) AS local_cnt,
+                   COUNT(*) FILTER (WHERE :screated IS NOT NULL AND d.created_at >= :screated) AS live_cnt
             FROM literature_document d
             JOIN article_scenarios ars ON ars.document_id = d.id AND ars.scenario_id = :sid
             WHERE {where}
-            GROUP BY d.source ORDER BY cnt DESC LIMIT 8
-        """), {k: v for k, v in params.items() if k not in ('limit', 'offset')}).mappings().all()
+            GROUP BY d.source ORDER BY cnt DESC LIMIT 12
+        """), {**{k: v for k, v in params.items() if k not in ('limit', 'offset')},
+               'screated': _screated}).mappings().all()
+        # Dict {source: n_local, "source (live)": n_live} pour le panneau de recherche.
+        source_breakdown: dict[str, int] = {}
+        for r in source_dist:
+            _src = r["source"] or "Autre"
+            if int(r["local_cnt"] or 0) > 0:
+                source_breakdown[_src] = int(r["local_cnt"])
+            if int(r["live_cnt"] or 0) > 0:
+                source_breakdown[f"{_src} (live)"] = int(r["live_cnt"])
 
     # Auto-score : si des articles ne sont pas encore scorés, on lance le rerank
     # en arrière-plan (une fois). Le seuil devient alors exploitable.
@@ -7652,6 +7672,9 @@ def get_user_scenario_corpus(
         "unscored": unscored,
         "from_local": from_local,
         "newly_fetched": newly_fetched,
+        "docs_with_fulltext": with_fulltext,
+        "docs_abstract_only": max(0, total - with_fulltext),
+        "source_breakdown": source_breakdown,
         "rerank_running": rerank_running or (_RERANK_JOBS.get(scenario_id, {}).get("status") == "running"),
         "threshold": eff_threshold,
         "offset": offset,
@@ -9832,12 +9855,24 @@ def get_user_scenario_embedding_status(scenario_id: str) -> dict[str, Any]:
             WHERE ars.scenario_id = :sid AND ld.is_duplicate IS NOT TRUE
         """), {"sid": scenario_id}).mappings().first()
 
-        # Title+abstract: one chunk per doc, check if that chunk is embedded
+        # Title+abstract: one chunk per doc. Un chunk title_abstract n'est "en
+        # attente" QUE s'il sera réellement embeddé par le worker — qui IGNORE
+        # (a) les chunks trop courts (length <= 20) et (b) le title_abstract d'un
+        # doc qui possède aussi du plein texte (on embed alors le plein texte). Sans
+        # ces deux filtres, le compteur restait bloqué à un petit nombre "en cours".
         ta = conn.execute(text("""
             SELECT
                 COUNT(DISTINCT ars.document_id) AS total_docs,
                 COUNT(DISTINCT CASE WHEN c.embedding IS NOT NULL THEN ars.document_id END) AS embedded_docs,
-                COUNT(DISTINCT CASE WHEN c.embedding IS NULL THEN ars.document_id END) AS pending_docs
+                COUNT(DISTINCT CASE
+                    WHEN c.embedding IS NULL
+                     AND length(c.content) > 20
+                     AND NOT EXISTS (
+                         SELECT 1 FROM document_chunk c2
+                         WHERE c2.document_id = ars.document_id
+                           AND c2.chunk_type = 'fulltext_section'
+                     )
+                    THEN ars.document_id END) AS pending_docs
             FROM article_scenarios ars
             JOIN document_chunk c ON c.document_id = ars.document_id
                 AND c.chunk_type = 'title_abstract'
@@ -9930,10 +9965,15 @@ def get_user_scenario_embedding_status(scenario_id: str) -> dict[str, Any]:
             "pending_chunks": ft_pending_chunks,
         },
         "total_pending_chunks": total_pending_chunks,
+        # Disponibilité réelle de chaque mode de pertinence :
+        # - lexical : toujours prêt (recherche plein texte / tsvector).
+        # - sémantique : prêt dès qu'au moins un chunk est vectorisé.
+        # - cohere : reranker cross-encoder, prêt seulement si COHERE_API_KEY est
+        #   configuré (remplace l'ancien score « hybride » 70/30 qui n'existe plus).
         "score_availability": {
             "lexical": True,
             "semantic": ta_embedded > 0 or ft_embedded_chunks > 0,
-            "hybrid": ta_embedded > 0 or ft_embedded_chunks > 0,
+            "cohere": bool(os.getenv("COHERE_API_KEY")),
         }
     }
 
