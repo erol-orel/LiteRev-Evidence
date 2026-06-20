@@ -4598,6 +4598,128 @@ def _cluster_core(
     }
 
 
+# ── Caches de visualisation persistés en DB (scenario_settings) ───────────────
+# Un SEUL couple load/save par visualisation, partagé par le pipeline, le
+# précalcul et les endpoints — plus de duplication ni de cache /tmp éphémère.
+
+def _save_viz_cache(scenario_id: str, col: str, payload: dict) -> None:
+    """Upsert un JSON de visualisation dans scenario_settings.{col}_json (+ _at)."""
+    _at = "clustering_generated_at" if col == "clustering" else "kg_generated_at"
+    _jc = f"{col}_json" if col == "clustering" else "knowledge_graph_json"
+    try:
+        with engine.begin() as _c:
+            _c.execute(text(f"""
+                INSERT INTO scenario_settings (scenario_id, {_jc}, {_at}, updated_at)
+                VALUES (:sid, CAST(:p AS jsonb), NOW(), NOW())
+                ON CONFLICT (scenario_id) DO UPDATE
+                SET {_jc} = CAST(:p AS jsonb), {_at} = NOW(), updated_at = NOW()
+            """), {"sid": scenario_id, "p": json.dumps(payload, default=str)})
+    except Exception as _e:
+        logger.warning(f"_save_viz_cache {col} {scenario_id}: {_e}")
+
+
+def _load_viz_cache(scenario_id: str, col: str, ttl: int = 86400) -> dict | None:
+    """Lit le JSON de visualisation en cache s'il est frais (< ttl secondes)."""
+    _at = "clustering_generated_at" if col == "clustering" else "kg_generated_at"
+    _jc = f"{col}_json" if col == "clustering" else "knowledge_graph_json"
+    try:
+        with engine.connect() as _c:
+            row = _c.execute(text(
+                f"SELECT {_jc} AS j, {_at} AS at FROM scenario_settings WHERE scenario_id = :sid"
+            ), {"sid": scenario_id}).mappings().first()
+        if row and row["j"]:
+            fresh = True
+            if row["at"]:
+                from datetime import datetime as _dt, timezone as _tz
+                _ts = row["at"]
+                if _ts.tzinfo is None:
+                    _ts = _ts.replace(tzinfo=_tz.utc)
+                fresh = (_dt.now(_tz.utc) - _ts).total_seconds() < ttl
+            if fresh:
+                data = dict(row["j"])
+                data["from_cache"] = True
+                return data
+    except Exception as _e:
+        logger.warning(f"_load_viz_cache {col} {scenario_id}: {_e}")
+    return None
+
+
+def _build_clusters_payload(scenario_id: str, docs: list, cc: dict, *,
+                            with_summaries: bool = False, openai_key: str | None = None,
+                            title: str | None = None) -> dict:
+    """Construit le payload de clustering CANONIQUE (un seul format, partagé par le
+    pipeline ET le calcul en arrière-plan). `with_summaries` active le résumé LLM
+    par cluster. Schéma figé : clusters[].representative_doc + embedding_source."""
+    import numpy as np
+    labels = cc["labels"]; embedding_2d = cc["embedding_2d"]; method_used = cc["method"]
+    feature_names = cc["feature_names"]; X_dense = cc["X_dense"]; embedding_source = cc["embedding_source"]
+    clusters = []
+    for label in sorted(set(labels)):
+        label_int = int(label)
+        idxs = [i for i, l in enumerate(labels) if int(l) == label_int]
+        coords = embedding_2d[idxs]
+        cluster_tfidf = X_dense[idxs].mean(axis=0)
+        top_indices = cluster_tfidf.argsort()[-10:][::-1]
+        top_words = [str(feature_names[i]) for i in top_indices if cluster_tfidf[i] > 0]
+        center = np.mean(coords, axis=0)
+        distances = np.linalg.norm(coords - center, axis=1)
+        rep = docs[idxs[int(np.argmin(distances))]]
+        points = [
+            {"id": int(docs[i]["id"]), "title": str(docs[i]["title"] or ""),
+             "year": int(docs[i]["year"]) if docs[i].get("year") else None,
+             "x": float(embedding_2d[i, 0]), "y": float(embedding_2d[i, 1])}
+            for i in idxs
+        ]
+        resume = "Bruit de fond (articles non regroupés)." if label_int == -1 else ""
+        if with_summaries and label_int != -1 and openai_key:
+            try:
+                from openai import OpenAI as _OAI
+                _client = _OAI(api_key=openai_key)
+                top5 = np.argsort(distances)[:5]
+                llm_ctx = "\n\n".join(
+                    f"Titre: {docs[idxs[int(t)]]['title']}\nRésumé: {(docs[idxs[int(t)]].get('abstract') or '')[:350]}"
+                    for t in top5
+                )
+                completion = _client.chat.completions.create(
+                    model="gpt-4.1-mini",
+                    messages=[{"role": "user", "content": (
+                        f"Scénario : {title or scenario_id}.\n"
+                        f"Articles représentatifs du cluster :\n{llm_ctx}\n\n"
+                        f"Rédigez un résumé concis (3-4 phrases, max 120 mots) en français : "
+                        f"thématique commune, évidences clés, valeur opérationnelle pour les urgences préhospitalières."
+                    )}],
+                    max_tokens=200, temperature=0.3,
+                )
+                resume = completion.choices[0].message.content.strip()
+            except Exception as _e:
+                logger.error(f"Résumé cluster {label_int}: {_e}")
+        clusters.append({
+            "cluster_id": label_int,
+            "cluster_name": f"Cluster {label_int + 1}" if label_int != -1 else "Non-classés",
+            "is_noise": label_int == -1,
+            "n_docs": len(idxs),
+            "center_x": float(center[0]), "center_y": float(center[1]),
+            "top_words": top_words,
+            "summary": resume,
+            "representative_doc": {
+                "id": int(rep["id"]),
+                "title": str(rep["title"] or ""),
+                "year": int(rep["year"]) if rep.get("year") else None,
+                "journal": str(rep.get("journal") or ""),
+            },
+            "points": points,
+        })
+    return {
+        "scenario_id": scenario_id,
+        "n_docs": len(docs),
+        "n_clusters": len([c for c in clusters if not c["is_noise"]]),
+        "method": method_used,
+        "embedding_source": embedding_source,
+        "clusters": sorted(clusters, key=lambda x: (x["is_noise"], -x["n_docs"])),
+        "from_cache": False,
+    }
+
+
 def _run_clustering_background(scenario_id: str, force_refresh: bool = False) -> None:
     """Calcule le clustering dans un thread séparé et stocke le résultat en cache."""
     import time as _time
@@ -4680,84 +4802,14 @@ def _run_clustering_background(scenario_id: str, force_refresh: bool = False) ->
         embedding_source = _cc["embedding_source"]
         logger.info(f"Clustering {scenario_id}: {len(docs)} docs, source={embedding_source}, method={method_used}")
 
-        # ── Construction des clusters ────────────────────────────────────────
-        clusters = []
-
-        for label in sorted(set(labels)):
-            label_int = int(label)
-            cluster_indices = [i for i, l in enumerate(labels) if int(l) == label_int]
-            cluster_docs = [docs[i] for i in cluster_indices]
-            coords = embedding_2d[cluster_indices]
-            mean_x = float(np.mean(coords[:, 0]))
-            mean_y = float(np.mean(coords[:, 1]))
-
-            cluster_tfidf = X_dense[cluster_indices].mean(axis=0)
-            top_indices = cluster_tfidf.argsort()[-10:][::-1]
-            top_words = [str(feature_names[i]) for i in top_indices if cluster_tfidf[i] > 0]
-
-            center = np.mean(coords, axis=0)
-            distances = np.linalg.norm(coords - center, axis=1)
-            central_idx = cluster_indices[int(np.argmin(distances))]
-            representative_doc = docs[central_idx]
-
-            points = [
-                {"id": int(docs[i]["id"]), "title": str(docs[i]["title"] or ""),
-                 "year": int(docs[i]["year"]) if docs[i]["year"] else None,
-                 "x": float(embedding_2d[i, 0]), "y": float(embedding_2d[i, 1])}
-                for i in cluster_indices
-            ]
-
-            resume = "Bruit de fond (articles non regroupés)." if label_int == -1 else "Résumé non disponible."
-            if label_int != -1 and openai_key:
-                try:
-                    from openai import OpenAI as _OAI
-                    _client = _OAI(api_key=openai_key)
-                    top5 = np.argsort(distances)[:5]
-                    llm_ctx = "\n\n".join(
-                        f"Titre: {docs[cluster_indices[int(t)]]['title']}\nRésumé: {(docs[cluster_indices[int(t)]]['abstract'] or '')[:350]}"
-                        for t in top5
-                    )
-                    completion = _client.chat.completions.create(
-                        model="gpt-4.1-mini",
-                        messages=[{"role": "user", "content": (
-                            f"Scénario : {_gesica_title(meta_for_cluster) if meta_for_cluster else scenario_id}.\n"
-                            f"Articles représentatifs du cluster :\n{llm_ctx}\n\n"
-                            f"Rédigez un résumé concis (3-4 phrases, max 120 mots) en français : "
-                            f"thématique commune, évidences clés, valeur opérationnelle pour les urgences préhospitalières."
-                        )}],
-                        max_tokens=200, temperature=0.3
-                    )
-                    resume = completion.choices[0].message.content.strip()
-                except Exception as e:
-                    logger.error(f"Résumé cluster {label_int}: {e}")
-
-            clusters.append({
-                "cluster_id": label_int,
-                "cluster_name": f"Cluster {label_int + 1}" if label_int != -1 else "Non-classés",
-                "is_noise": label_int == -1,
-                "n_docs": len(cluster_docs),
-                "center_x": mean_x, "center_y": mean_y,
-                "top_words": top_words,
-                "summary": resume,
-                "representative_doc": {
-                    "id": int(representative_doc["id"]),
-                    "title": str(representative_doc["title"] or ""),
-                    "year": int(representative_doc["year"]) if representative_doc["year"] else None,
-                    "journal": str(representative_doc["journal"] or ""),
-                },
-                "points": points,
-            })
-
-        result = {
-            "scenario_id": scenario_id,
-            "n_docs": len(docs),
-            "n_clusters": len([c for c in clusters if not c["is_noise"]]),
-            "method": method_used,
-            "embedding_source": embedding_source,
-            "clusters": sorted(clusters, key=lambda x: (x["is_noise"], -x["n_docs"])),
-            "from_cache": False,
-        }
-        # Sauvegarder en cache (encoder numpy)
+        # Construction du payload (helper PARTAGÉ avec le pipeline — plus de copie).
+        result = _build_clusters_payload(
+            scenario_id, docs, _cc, with_summaries=True, openai_key=openai_key,
+            title=(_gesica_title(meta_for_cluster) if meta_for_cluster else None),
+        )
+        # Cache DB (durable) + /tmp (compat) + mémoire.
+        _save_viz_cache(scenario_id, "clustering",
+                        json.loads(json.dumps(result, cls=_NumpyEncoder)))
         try:
             with open(cache_file, "w") as f:
                 json.dump(result, f, cls=_NumpyEncoder)
@@ -4779,6 +4831,11 @@ def get_scenario_clustering(scenario_id: str, force_refresh: bool = False) -> di
     import threading
     _get_db_gesica_scenario_or_404(scenario_id)
 
+    # Cache DB durable d'abord (survit aux redémarrages, contrairement à la mémoire)
+    if not force_refresh:
+        _db = _load_viz_cache(scenario_id, "clustering")
+        if _db:
+            return _db
     # Si résultat en cache mémoire, retourner immédiatement
     job = _clustering_jobs.get(scenario_id)
     if job and job["status"] == "done" and not force_refresh:
@@ -4802,6 +4859,9 @@ def get_clustering_status(scenario_id: str) -> dict:
     """Vérifie si le clustering est terminé et retourne le résultat si disponible."""
     job = _clustering_jobs.get(scenario_id)
     if not job:
+        _db = _load_viz_cache(scenario_id, "clustering")
+        if _db:
+            return _db
         return {"scenario_id": scenario_id, "status": "not_started",
                 "message": "Aucun calcul lancé. Appelez GET /clustering d'abord."}
     if job["status"] == "running":
@@ -6836,11 +6896,6 @@ def trigger_living_review(
                 logger.info(f"Living Review pipeline: {result.stdout[:500]}")
                 if result.returncode != 0:
                     logger.error(f"Living Review error: {result.stderr[:500]}")
-                # Invalider le cache clustering
-                import glob, os
-                for f in glob.glob("/tmp/literev_clustering_cache_*.pkl"):
-                    os.remove(f)
-                    logger.info(f"Cache clustering invalidé: {f}")
             except Exception as e:
                 logger.error(f"Living Review pipeline error: {e}")
 
@@ -8603,10 +8658,18 @@ def _run_user_scenario_populate(
         # mis en cache). Le pipeline complet a sa propre étape clustering ; on ne
         # déclenche donc ce précalcul que pour le chemin /populate (recherche).
         if _pipeline_callback is None:
+            def _precompute_viz(_sid):
+                try:
+                    _run_clustering_background(_sid, True)   # clustering → cache DB
+                except Exception as _e1:
+                    logger.warning(f"Précalcul clustering {_sid}: {_e1}")
+                try:
+                    _precompute_user_kg(_sid)                # knowledge graph → cache DB
+                except Exception as _e2:
+                    logger.warning(f"Précalcul KG {_sid}: {_e2}")
             try:
                 import threading as _vth
-                _vth.Thread(target=_run_clustering_background, args=(scenario_id, True),
-                            daemon=True).start()
+                _vth.Thread(target=_precompute_viz, args=(scenario_id,), daemon=True).start()
             except Exception as _e_viz:
                 logger.warning(f"Précalcul visualisation {scenario_id}: {_e_viz}")
 
@@ -9618,54 +9681,28 @@ def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict
                             "did": _cl_doc["id"],
                         })
 
-                # ── Cache JSON pour l'endpoint de visualisation ───────────────
-                import os as _os
-                cache_dir = "/tmp/literev_clustering_cache"
-                _os.makedirs(cache_dir, exist_ok=True)
-                clusters_data = []
-                for _cl_label in sorted(set(int(l) for l in labels)):
-                    _idxs = [i for i, l in enumerate(labels) if int(l) == _cl_label]
-                    _cl_docs_sub = [cl_docs[i] for i in _idxs]
-                    _coords = embedding_2d[_idxs] if embedding_2d is not None else np.zeros((len(_idxs), 2))
-                    _tfidf_mean = X_dense[_idxs].mean(axis=0)
-                    _top_idx = _tfidf_mean.argsort()[-10:][::-1]
-                    _top_words = [str(feature_names[i]) for i in _top_idx if _tfidf_mean[i] > 0]
-                    _center = np.mean(_coords, axis=0)
-                    _dists = np.linalg.norm(_coords - _center, axis=1)
-                    _rep_idx = _idxs[int(np.argmin(_dists))]
-                    clusters_data.append({
-                        "cluster_id": _cl_label,
-                        "cluster_name": f"Cluster {_cl_label + 1}" if _cl_label != -1 else "Non-classés",
-                        "is_noise": _cl_label == -1,
-                        "n_docs": len(_idxs),
-                        "center_x": float(_center[0]),
-                        "center_y": float(_center[1]),
-                        "top_words": _top_words,
-                        "summary": "",
-                        "representative": {"id": int(cl_docs[_rep_idx]["id"]), "title": str(cl_docs[_rep_idx]["title"] or "")},
-                        "points": [
-                            {"id": int(cl_docs[i]["id"]), "title": str(cl_docs[i]["title"] or ""),
-                             "year": int(cl_docs[i]["year"]) if cl_docs[i]["year"] else None,
-                             "x": float(embedding_2d[i, 0]) if embedding_2d is not None else 0.0,
-                             "y": float(embedding_2d[i, 1]) if embedding_2d is not None else 0.0}
-                            for i in _idxs
-                        ],
-                    })
-                result_cache = {
-                    "scenario_id": scenario_id,
-                    "n_docs": len(cl_docs),
-                    "n_clusters": n_clusters,
-                    "method": method_used,
-                    "clusters": clusters_data,
-                    "from_cache": False,
-                }
-                with open(f"{cache_dir}/{scenario_id}.json", "w") as f:
-                    json.dump(result_cache, f)
+                # Cache de visualisation : MÊME helper que le calcul en arrière-plan
+                # (plus de duplication) → DB durable (+ /tmp pour compat).
+                _cl_payload = _build_clusters_payload(scenario_id, cl_docs, _cc, with_summaries=False)
+                _save_viz_cache(scenario_id, "clustering", _cl_payload)
+                try:
+                    import os as _os
+                    _os.makedirs("/tmp/literev_clustering_cache", exist_ok=True)
+                    with open(f"/tmp/literev_clustering_cache/{scenario_id}.json", "w") as f:
+                        json.dump(_cl_payload, f, default=str)
+                except Exception:
+                    pass
                 update_step("clustering", "done", n_clusters=n_clusters, n_docs=len(cl_docs), method=method_used)
             else:
                 update_step("clustering", "skipped", reason=f"Corpus insuffisant ({len(cl_docs)} articles)")
         except Exception as e:
             update_step("clustering", "error", error=str(e))
+
+        # ── Précalcul du knowledge graph (cache DB) — visualisation prête ──────
+        try:
+            _precompute_user_kg(scenario_id)
+        except Exception as _e_kg:
+            logger.warning(f"Précalcul KG pipeline {scenario_id}: {_e_kg}")
 
         # ── Fin du pipeline ───────────────────────────────────────────────────
         _user_scenario_pipeline_jobs[scenario_id]["overall_status"] = "done"
@@ -10434,13 +10471,9 @@ def get_user_scenario_pico_bulk(scenario_id: str, limit: int = 100000, offset: i
 
 
 @app.get("/user-scenarios/{scenario_id}/knowledge-graph")
-def get_user_scenario_knowledge_graph(
-    scenario_id: str,
-    max_nodes: int = 400,
-    min_similarity: float = 0.35,
-) -> dict[str, Any]:
-    """Graphe de connaissance d'un scénario utilisateur (réseau de similarité sémantique)."""
-    _get_user_scenario_or_404(scenario_id)
+def _compute_user_kg(scenario_id: str, max_nodes: int = 400, min_similarity: float = 0.35) -> dict[str, Any]:
+    """Calcul du knowledge graph d'un scénario utilisateur (un seul endroit, réutilisé
+    par l'endpoint ET le précalcul)."""
     sql = _KG_NODE_SQL.format(
         join=("JOIN article_scenarios ars ON ars.document_id = d.id"
               " JOIN document_chunk c ON c.document_id = d.id"),
@@ -10457,6 +10490,33 @@ def get_user_scenario_knowledge_graph(
                           WHERE c.document_id = d.id AND c.embedding IS NOT NULL)
         """), {"sid": scenario_id}).scalar() or 0
     return _build_knowledge_graph(scenario_id, rows, min_similarity, int(n_total))
+
+
+def _precompute_user_kg(scenario_id: str) -> None:
+    """Précalcule + met en cache (DB) le knowledge graph aux paramètres par défaut."""
+    try:
+        _save_viz_cache(scenario_id, "kg", _compute_user_kg(scenario_id))
+    except Exception as _e:
+        logger.warning(f"Précalcul KG {scenario_id}: {_e}")
+
+
+def get_user_scenario_knowledge_graph(
+    scenario_id: str,
+    max_nodes: int = 400,
+    min_similarity: float = 0.35,
+) -> dict[str, Any]:
+    """Graphe de connaissance d'un scénario utilisateur (réseau de similarité sémantique)."""
+    _get_user_scenario_or_404(scenario_id)
+    # Cache DB durable aux paramètres par défaut (précalculé par le pipeline/populate).
+    _default = (max_nodes == 400 and abs(min_similarity - 0.35) < 1e-6)
+    if _default:
+        _db = _load_viz_cache(scenario_id, "kg")
+        if _db:
+            return _db
+    kg = _compute_user_kg(scenario_id, max_nodes, min_similarity)
+    if _default:
+        _save_viz_cache(scenario_id, "kg", kg)
+    return kg
 
 
 @app.post("/user-scenarios/{scenario_id}/rag")
@@ -10670,6 +10730,10 @@ def get_user_scenario_clustering(scenario_id: str, force_refresh: bool = False) 
     """Clustering pour un scénario utilisateur."""
     import threading
     _get_user_scenario_or_404(scenario_id)
+    if not force_refresh:
+        _db = _load_viz_cache(scenario_id, "clustering")
+        if _db:
+            return _db
     job = _clustering_jobs.get(scenario_id)
     if job and job["status"] == "done" and not force_refresh:
         return job["result"]
@@ -10690,6 +10754,9 @@ def get_user_scenario_clustering_status(scenario_id: str) -> dict:
     _get_user_scenario_or_404(scenario_id)
     job = _clustering_jobs.get(scenario_id)
     if not job:
+        _db = _load_viz_cache(scenario_id, "clustering")
+        if _db:
+            return _db
         return {"scenario_id": scenario_id, "status": "not_started", "message": "Aucun calcul lancé."}
     if job["status"] == "running":
         return {"scenario_id": scenario_id, "status": "running", "message": "Calcul en cours..."}
@@ -12032,6 +12099,11 @@ def _ensure_spec_proposal_columns():
         conn.execute(text("ALTER TABLE scenario_settings ADD COLUMN IF NOT EXISTS proposal_generated_at TIMESTAMP"))
         conn.execute(text("ALTER TABLE scenario_settings ADD COLUMN IF NOT EXISTS recommended_actions_json JSONB"))
         conn.execute(text("ALTER TABLE scenario_settings ADD COLUMN IF NOT EXISTS actions_generated_at TIMESTAMP"))
+        # Caches de visualisation persistés en DB (durables, contrairement à /tmp).
+        conn.execute(text("ALTER TABLE scenario_settings ADD COLUMN IF NOT EXISTS clustering_json JSONB"))
+        conn.execute(text("ALTER TABLE scenario_settings ADD COLUMN IF NOT EXISTS clustering_generated_at TIMESTAMP"))
+        conn.execute(text("ALTER TABLE scenario_settings ADD COLUMN IF NOT EXISTS knowledge_graph_json JSONB"))
+        conn.execute(text("ALTER TABLE scenario_settings ADD COLUMN IF NOT EXISTS kg_generated_at TIMESTAMP"))
     logger.info("Colonnes de proposition de spec vérifiées/créées.")
 
 
