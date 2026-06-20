@@ -8699,45 +8699,75 @@ def _run_user_scenario_populate(
         return 0
 
 def _run_semantic_rerank_inline(scenario_id: str, query: str) -> int:
-    """Calcule le score cosinus entre la requête et chaque abstract, met à jour similarity_score."""
-    import time as _time
+    """Score sémantique (cosinus requête↔article) du corpus, mis dans similarity_score.
+
+    Optimisé : on RÉUTILISE les embeddings pgvector déjà stockés
+    (document_chunk.embedding) et on calcule le cosinus EN BASE en UNE requête
+    (au lieu de ré-embedder chaque résumé via OpenAI + cosinus Python + une
+    transaction par article — ce qui rendait l'étape très lente). On ne ré-embedde
+    via OpenAI QUE les articles fraîchement ingérés dont les chunks ne sont pas
+    encore vectorisés (minorité)."""
     try:
         from openai import OpenAI as _OAI
         _client = _OAI()
-        q_emb_resp = _client.embeddings.create(model="text-embedding-3-small", input=query[:2000])
-        q_emb = q_emb_resp.data[0].embedding
+        q_emb = _client.embeddings.create(model="text-embedding-3-small", input=query[:2000]).data[0].embedding
+        q_str = str(q_emb)
+
+        # 1) Rapide : cosinus pgvector en base pour tous les docs déjà vectorisés.
+        with engine.begin() as _c:
+            n_fast = _c.execute(text("""
+                UPDATE article_scenarios asn
+                SET similarity_score = sub.sim
+                FROM (
+                    SELECT c.document_id,
+                           MAX(1 - (c.embedding <=> CAST(:q AS vector))) AS sim
+                    FROM document_chunk c
+                    JOIN article_scenarios a
+                      ON a.document_id = c.document_id AND a.scenario_id = :sid
+                    WHERE c.embedding IS NOT NULL
+                      AND c.chunk_type IN ('title_abstract', 'fulltext_section')
+                    GROUP BY c.document_id
+                ) sub
+                WHERE asn.scenario_id = :sid AND asn.document_id = sub.document_id
+            """), {"q": q_str, "sid": scenario_id}).rowcount or 0
+
+        # 2) Repli OpenAI UNIQUEMENT pour les articles encore non scorés (chunks pas
+        #    encore vectorisés). Batch d'embeddings + cosinus numpy + une seule
+        #    transaction par lot.
         with engine.connect() as _conn:
             _rows = _conn.execute(text("""
                 SELECT ld.id, ld.title, ld.abstract
                 FROM literature_document ld
                 JOIN article_scenarios asn ON asn.document_id = ld.id AND asn.scenario_id = :sid
-                WHERE ld.project_context = 'literev'
+                WHERE asn.similarity_score IS NULL
                   AND ld.abstract IS NOT NULL AND length(ld.abstract) > 30
-                ORDER BY ld.id
+                ORDER BY ld.id LIMIT 1000
             """), {"sid": scenario_id}).mappings().fetchall()
-        updated = 0
-        for i in range(0, len(_rows), 100):
-            batch = _rows[i:i+100]
-            texts = [f"{r['title']}\n\n{(r['abstract'] or '')[:1500]}" for r in batch]
-            try:
-                emb_resp = _client.embeddings.create(model="text-embedding-3-small", input=texts)
-                for j, emb_data in enumerate(emb_resp.data):
-                    doc_emb = emb_data.embedding
-                    dot = sum(a * b for a, b in zip(q_emb, doc_emb))
-                    norm_q = sum(a * a for a in q_emb) ** 0.5
-                    norm_d = sum(b * b for b in doc_emb) ** 0.5
-                    sim = max(0.0, min(1.0, dot / (norm_q * norm_d) if norm_q and norm_d else 0.0))
+        n_slow = 0
+        if _rows:
+            import numpy as _np
+            _q = _np.asarray(q_emb, dtype=float)
+            _qn = float(_np.linalg.norm(_q)) or 1.0
+            for i in range(0, len(_rows), 100):
+                batch = _rows[i:i+100]
+                texts = [f"{r['title']}\n\n{(r['abstract'] or '')[:1500]}" for r in batch]
+                try:
+                    emb = _client.embeddings.create(model="text-embedding-3-small", input=texts).data
+                    ups = []
+                    for j, e in enumerate(emb):
+                        _d = _np.asarray(e.embedding, dtype=float)
+                        sim = float(_q @ _d) / (_qn * (float(_np.linalg.norm(_d)) or 1.0))
+                        ups.append({"score": max(0.0, min(1.0, sim)), "doc_id": batch[j]["id"], "sid": scenario_id})
                     with engine.begin() as _c:
                         _c.execute(text("""
                             UPDATE article_scenarios SET similarity_score = :score
                             WHERE document_id = :doc_id AND scenario_id = :sid
-                        """), {"score": sim, "doc_id": batch[j]["id"], "sid": scenario_id})
-                    updated += 1
-            except Exception as _e:
-                logger.warning(f"Rerank inline batch {i}: {_e}")
-            _time.sleep(0.2)
-        logger.info(f"Rerank inline {scenario_id}: {updated} articles rerankés.")
-        return updated
+                        """), ups)
+                    n_slow += len(ups)
+                except Exception as _e:
+                    logger.warning(f"Rerank fallback batch {i}: {_e}")
+        logger.info(f"Rerank {scenario_id}: {n_fast} via pgvector + {n_slow} via OpenAI (fallback).")
+        return n_fast + n_slow
     except Exception as _e:
         logger.error(f"Rerank inline {scenario_id} fatal: {_e}", exc_info=True)
         return 0
