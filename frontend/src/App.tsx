@@ -3013,7 +3013,7 @@ export default function App() {
   const [searchPhase, setSearchPhase] = useState<'idle' | 'translating' | 'searching'>('idle');
   const [searchElapsed, setSearchElapsed] = useState(0);
   const [folders, setFolders] = useState<ScenarioFolder[]>([]);
-  const [sortBy, setSortBy] = useState<"score" | "semantic" | "lexical" | "year_desc" | "year_asc" | "fulltext_first">("year_desc");
+  const [sortBy, setSortBy] = useState<"score" | "semantic" | "lexical" | "year_desc" | "year_asc">("year_desc");
 
 
   useEffect(() => {
@@ -3096,12 +3096,6 @@ export default function App() {
       if (sortBy === "lexical") return (b.lexicalScore ?? 0) - (a.lexicalScore ?? 0);
       if (sortBy === "year_desc") return (b.year ?? 0) - (a.year ?? 0);
       if (sortBy === "year_asc") return (a.year ?? 0) - (b.year ?? 0);
-      if (sortBy === "fulltext_first") {
-        const af = a.hasFulltext ? 1 : 0;
-        const bf = b.hasFulltext ? 1 : 0;
-        if (bf !== af) return bf - af;
-        return (b.year ?? 0) - (a.year ?? 0);
-      }
       if (sortBy === "score" || sortBy === "semantic" || sortBy === "lexical") {
         // Plus de score de pertinence au stade recherche (corpus booléen) → récence.
         return (b.year ?? 0) - (a.year ?? 0);
@@ -3913,7 +3907,6 @@ export default function App() {
                     {([
                       ["year_desc", "Année ↓"],
                       ["year_asc", "Année ↑"],
-                      ["fulltext_first", "Full-text d'abord"],
                     ] as [typeof sortBy, string][]).map(([val, label]) => (
                       <button
                         key={val}
@@ -4011,13 +4004,15 @@ export default function App() {
                                 {result.evidenceCategory}
                               </span>
                             )}
-                            {/* Badge couverture textuelle */}
+                            {/* Badge couverture textuelle — basé sur hasFulltext
+                                (présence d'un chunk plein texte), pas sur chunkType
+                                qui n'est pas renseigné pour les résultats du corpus. */}
                             <span className={`rounded-full px-2 py-1 border text-[11px] font-semibold ${
-                              result.chunkType === 'fulltext_section'
+                              result.hasFulltext
                                 ? 'bg-brand-500/10 border-brand-500/20 text-brand-400'
                                 : 'bg-forest-800/50 border-white/5 text-forest-500'
-                            }`} title={result.chunkType === 'fulltext_section' ? 'Texte intégral indexé' : 'Titre + résumé uniquement'}>
-                              {result.chunkType === 'fulltext_section' ? 'Full Text' : 'Abstract'}
+                            }`} title={result.hasFulltext ? 'Texte intégral indexé' : 'Titre + résumé uniquement'}>
+                              {result.hasFulltext ? 'Full Text' : 'Abstract'}
                             </span>
                             {/* Provenance : base locale indexée vs source API en direct */}
                             {result.isLive ? (
