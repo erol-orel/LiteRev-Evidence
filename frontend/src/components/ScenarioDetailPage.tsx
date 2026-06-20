@@ -749,8 +749,40 @@ function VariablesSection({ detail, scenarioId, onGoToModel }: { detail: Scenari
               <p className="text-[10px] font-bold uppercase tracking-wider text-gold-400">Outcome principal</p>
               <p className="text-sm font-medium text-gold-200">{llmVars.primary_outcome.name}</p>
               <p className="text-xs text-white/55">{llmVars.primary_outcome.definition}</p>
-              <p className="text-[10px] text-white/35">Mesure : {llmVars.primary_outcome.measurement} - Horizon : {llmVars.primary_outcome.timeframe}</p>
+              <p className="text-[10px] text-white/35">Mesure : {llmVars.primary_outcome.measurement} - Horizon : {llmVars.primary_outcome.timeframe}{llmVars.primary_outcome.unit ? ` · Unité : ${llmVars.primary_outcome.unit}` : ''}</p>
               <ArticleSourceLink a={modelSpec?.outcome?.best_article} />
+            </div>
+          )}
+
+          {/* Seuils d'interprétation de l'outcome (issus des évidences) */}
+          {llmVars.alert_thresholds && (
+            <div className="rounded-2xl border border-white/10 bg-white/3 p-4 space-y-2.5">
+              <p className="text-[10px] font-bold uppercase tracking-wider text-white/50">
+                Seuils d'interprétation de l'outcome <span className="text-white/30 normal-case font-normal">· fondés sur les évidences</span>
+              </p>
+              {(["green", "orange", "red"] as const).map((lvl) => {
+                const t = llmVars.alert_thresholds?.[lvl];
+                if (!t) return null;
+                const cfg = {
+                  green:  { dot: "bg-emerald-400", cls: "text-emerald-300", def: "Normal" },
+                  orange: { dot: "bg-amber-400",   cls: "text-amber-300",   def: "Tension" },
+                  red:    { dot: "bg-rose-400",     cls: "text-rose-300",    def: "Alerte" },
+                }[lvl];
+                return (
+                  <div key={lvl} className="flex items-start gap-2.5">
+                    <span className={`mt-1 h-2 w-2 shrink-0 rounded-full ${cfg.dot}`} />
+                    <div className="min-w-0">
+                      <p className="text-xs">
+                        <span className={`font-semibold ${cfg.cls}`}>{t.label || cfg.def}</span>
+                        {t.range && <span className="ml-2 font-mono text-white/70">{t.range}</span>}
+                      </p>
+                      {(t.rationale || t.description) && (
+                        <p className="text-[10px] text-white/40 leading-snug">{t.rationale || t.description}</p>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
             </div>
           )}
 

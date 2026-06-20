@@ -2642,6 +2642,7 @@ export interface ScenarioVariables {
     definition: string;
     measurement: string;
     timeframe: string;
+    unit?: string;
   };
   secondary_outcomes?: Array<{ name: string; definition: string }>;
   predictor_variables?: Array<{
@@ -2663,9 +2664,9 @@ export interface ScenarioVariables {
   sample_size_recommendation?: string;
   update_frequency?: string;
   alert_thresholds?: {
-    green: { label: string; description: string };
-    orange: { label: string; description: string };
-    red: { label: string; description: string };
+    green: { label?: string; range?: string; rationale?: string; description?: string; provenance?: number[] };
+    orange: { label?: string; range?: string; rationale?: string; description?: string; provenance?: number[] };
+    red: { label?: string; range?: string; rationale?: string; description?: string; provenance?: number[] };
   };
   implementation_notes?: string;
   validation_status?: string;
