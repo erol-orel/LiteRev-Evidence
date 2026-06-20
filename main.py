@@ -7791,11 +7791,23 @@ def _run_user_scenario_populate(
     if _pipeline_callback is None:
         _user_scenario_populate_jobs[scenario_id] = {
             "status": "running", "ingested": 0, "errors": 0, "total_found": 0,
+            # `phase` reflète l'ÉTAPE RÉELLE du backend (et non un minuteur côté
+            # client) : local → federation → scoring → rerank → done. `rerank_status`
+            # suit le cross-encoder qui tourne en arrière-plan après l'affichage.
+            "phase": "local", "rerank_status": "idle",
             "sources": {
                 "db_cache": 0, "pubmed": 0, "openalex": 0, "crossref": 0,
                 "europepmc": 0, "medrxiv": 0, "biorxiv": 0, "prospero": 0, "cochrane": 0
             }
         }
+
+    def _set_phase(_phase: str, **extra):
+        """Met à jour la phase réelle du job (no-op pour le pipeline complet)."""
+        if _pipeline_callback is None:
+            job = _user_scenario_populate_jobs.get(scenario_id)
+            if job is not None:
+                job["phase"] = _phase
+                job.update(extra)
 
     ENTREZ_BASE = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
     EMAIL = os.getenv("PUBMED_EMAIL", "literev@example.com")
@@ -8434,6 +8446,7 @@ def _run_user_scenario_populate(
     ]
     t_start = _time.time()
     if include_live:
+        _set_phase("federation")
         with ThreadPoolExecutor(max_workers=7) as executor:
             futures = {executor.submit(fn): fn.__name__ for fn in source_funcs}
             for future in as_completed(futures):
@@ -8493,27 +8506,53 @@ def _run_user_scenario_populate(
                 WHERE id = :sid
             """), {"sid": scenario_id})
 
-        # ── Scores sémantiques — SANS suppression (corpus complet conservé) ──
+        # ── Scores sémantiques (cosinus) — SANS suppression ─────────────────
         # Soft filter : le seuil filtre l'affichage et l'aval, JAMAIS par
         # suppression. Réduire le seuil fait donc réapparaître des articles.
+        _set_phase("scoring")
         try:
             _backfill_title_abstract_chunks(scenario_id)  # docs liés sans chunk résumé
             _n_scored = _run_semantic_rerank_inline(scenario_id, query)
-            logger.info(f"Post-populate rerank {scenario_id}: {_n_scored} articles scorés (aucune suppression).")
-            # Cross-encoder (Cohere) : réordonne le sous-ensemble pertinent pour
-            # plus de précision. No-op si COHERE_API_KEY absent.
-            _n_ce = _run_cross_encoder_rerank(scenario_id, query)
-            if _n_ce:
-                logger.info(f"Post-populate cross-encoder {scenario_id}: {_n_ce} articles réordonnés.")
+            logger.info(f"Post-populate scoring {scenario_id}: {_n_scored} articles scorés (cosinus, aucune suppression).")
         except Exception as _e_rr:
-            logger.warning(f"rerank post-populate {scenario_id}: {_e_rr}")
+            logger.warning(f"scoring post-populate {scenario_id}: {_e_rr}")
 
-        # Précalcul des visualisations dès que le corpus est construit et scoré, pour
-        # que l'onglet Visualisation soit prêt sans attente (clustering UMAP/HDBSCAN,
-        # mis en cache). Le pipeline complet a sa propre étape clustering ; on ne
-        # déclenche donc ce précalcul que pour le chemin /populate (recherche).
+        # ── Le corpus est scoré (cosinus) → on le publie MAINTENANT ──────────
+        # Le cross-encoder Cohere (plus lent) et les visualisations tournent
+        # ENSUITE en arrière-plan : l'utilisateur voit les résultats ordonnés par
+        # cosinus immédiatement, puis la liste se réordonne quand le rerank arrive
+        # (rerank_status). Plus d'attente synchrone sur l'API Cohere.
+        _cohere_enabled = bool(os.getenv("COHERE_API_KEY"))
         if _pipeline_callback is None:
-            def _precompute_viz(_sid):
+            _sources_final = _user_scenario_populate_jobs.get(scenario_id, {}).get("sources", {})
+            _src_parts = [f"{src}: {cnt}" for src, cnt in _sources_final.items() if cnt > 0]
+            _src_summary = " | ".join(_src_parts) if _src_parts else "aucune source"
+            _user_scenario_populate_jobs[scenario_id] = {
+                "status": "done",
+                "phase": "done",
+                "rerank_status": "running" if _cohere_enabled else "skipped",
+                "ingested": ingested,
+                "errors": errors,
+                "total_found": total_found,
+                "sources": _sources_final,
+                "message": f"{ingested} articles ingérés depuis 8 sources ({_src_summary}), {errors} erreurs.",
+            }
+
+        # Arrière-plan : cross-encoder (réordonne le sous-ensemble pertinent) puis
+        # clustering UMAP/HDBSCAN + knowledge graph (cache DB). Réservé au chemin
+        # /populate (le pipeline complet a ses propres étapes).
+        if _pipeline_callback is None:
+            def _post_done_bg(_sid, _query):
+                try:
+                    _n_ce = _run_cross_encoder_rerank(_sid, _query)
+                    if _n_ce:
+                        logger.info(f"Post-populate cross-encoder {_sid}: {_n_ce} articles réordonnés.")
+                except Exception as _ece:
+                    logger.warning(f"cross-encoder arrière-plan {_sid}: {_ece}")
+                finally:
+                    _job = _user_scenario_populate_jobs.get(_sid)
+                    if _job is not None:
+                        _job["rerank_status"] = "done"
                 try:
                     _run_clustering_background(_sid, True)   # clustering → cache DB
                 except Exception as _e1:
@@ -8524,22 +8563,10 @@ def _run_user_scenario_populate(
                     logger.warning(f"Précalcul KG {_sid}: {_e2}")
             try:
                 import threading as _vth
-                _vth.Thread(target=_precompute_viz, args=(scenario_id,), daemon=True).start()
+                _vth.Thread(target=_post_done_bg, args=(scenario_id, query), daemon=True).start()
             except Exception as _e_viz:
-                logger.warning(f"Précalcul visualisation {scenario_id}: {_e_viz}")
+                logger.warning(f"Tâches arrière-plan {scenario_id}: {_e_viz}")
 
-        if _pipeline_callback is None:
-            _sources_final = _user_scenario_populate_jobs.get(scenario_id, {}).get("sources", {})
-            _src_parts = [f"{src}: {cnt}" for src, cnt in _sources_final.items() if cnt > 0]
-            _src_summary = " | ".join(_src_parts) if _src_parts else "aucune source"
-            _user_scenario_populate_jobs[scenario_id] = {
-                "status": "done",
-                "ingested": ingested,
-                "errors": errors,
-                "total_found": total_found,
-                "sources": _sources_final,
-                "message": f"{ingested} articles ingérés depuis 8 sources ({_src_summary}), {errors} erreurs.",
-            }
         logger.info(f"Populate user_scenario {scenario_id}: {ingested} articles ingérés (8 sources, parallèle).")
         return ingested
 
