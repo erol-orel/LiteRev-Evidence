@@ -3770,7 +3770,7 @@ export default function App() {
                     </ul>
                     {includeLive && (
                       <p className="mt-4 text-[11px] leading-snug text-white/30">
-                        Les 8 sources en direct sont interrogées en parallèle : comptez 20 à 30 secondes. Les résultats de la base locale sont déjà prêts ; nous attendons les dernières références live avant d'afficher le total.
+                        Les résultats de la base locale sont déjà prêts. Les 8 sources en direct sont interrogées en parallèle.
                       </p>
                     )}
                   </div>
