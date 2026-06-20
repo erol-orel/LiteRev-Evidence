@@ -1080,6 +1080,7 @@ function ScenariosView({
 }) {
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [detailScenarioId, setDetailScenarioId] = useState<string | null>(null);
+  const [detailInitialTab, setDetailInitialTab] = useState<"model" | undefined>(undefined);
   const [showNewFolderDialog, setShowNewFolderDialog] = useState(false);
   const [newFolderName, setNewFolderName] = useState('');
   const [newFolderColor, setNewFolderColor] = useState('#6366f1');
@@ -1090,7 +1091,7 @@ function ScenariosView({
 
   // Page détail d'un scénario (GESICA ou utilisateur)
   if (detailScenarioId) {
-    return <ScenarioDetailPage scenarioId={detailScenarioId} onBack={() => setDetailScenarioId(null)} />;
+    return <ScenarioDetailPage scenarioId={detailScenarioId} initialTab={detailInitialTab} onBack={() => { setDetailScenarioId(null); setDetailInitialTab(undefined); }} />;
   }
 
   if (loading) {
@@ -2223,7 +2224,7 @@ function ScenariosView({
           </div>
           <div className="shrink-0 flex items-center gap-1.5">
             <button
-              onClick={(e) => { e.stopPropagation(); setDetailScenarioId(scenario.id); }}
+              onClick={(e) => { e.stopPropagation(); setDetailInitialTab(undefined); setDetailScenarioId(scenario.id); }}
               className="rounded-xl border border-brand-500/20 bg-brand-500/10 px-2.5 py-1 text-[10px] text-brand-300 hover:bg-brand-500/20 transition font-medium"
               title="Ouvrir la page détail du scénario"
             >
@@ -2312,7 +2313,7 @@ function ScenariosView({
                   )}
                 </div>
                 <button
-                  onClick={(e) => { e.stopPropagation(); setDetailScenarioId(scenario.id); }}
+                  onClick={(e) => { e.stopPropagation(); setDetailInitialTab("model"); setDetailScenarioId(scenario.id); }}
                   className="w-full flex items-center justify-center gap-1.5 rounded-xl border border-brand-500/30 bg-brand-500/10 text-brand-300 font-semibold py-2 text-xs hover:bg-brand-500/20 transition"
                 >
                   <Activity size={12} />
