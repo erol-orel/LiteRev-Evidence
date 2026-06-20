@@ -3877,8 +3877,8 @@ function VizTab({ scenarioId }: { scenarioId: string }) {
 }
 
 /** VariablesModelTab : Variables & Données + Modèle prédictif (sous-tabs) */
-function VariablesModelTab({ scenarioId, detail }: { scenarioId: string; detail: ScenarioDetail }) {
-  const [sub, setSub] = React.useState<"variables" | "monitor">("variables");
+function VariablesModelTab({ scenarioId, detail, initialSub }: { scenarioId: string; detail: ScenarioDetail; initialSub?: "variables" | "monitor" }) {
+  const [sub, setSub] = React.useState<"variables" | "monitor">(initialSub ?? "variables");
   const SUB = [
     { key: "variables" as const, label: "Données & Variables", icon: <Database size={12} /> },
     { key: "monitor" as const, label: "Modèle Prédictif", icon: <Brain size={12} /> },
@@ -4178,13 +4178,15 @@ const SECTIONS: Array<{ key: SectionKey; label: string; icon: React.ReactNode }>
 interface ScenarioDetailPageProps {
   scenarioId: string;
   onBack: () => void;
+  initialTab?: "model";
 }
 
-export function ScenarioDetailPage({ scenarioId, onBack }: ScenarioDetailPageProps) {
+export function ScenarioDetailPage({ scenarioId, onBack, initialTab }: ScenarioDetailPageProps) {
   const [detail, setDetail] = useState<ScenarioDetail | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [activeSection, setActiveSection] = useState<SectionKey>("review");
+  // initialTab="model" ouvre directement l'onglet Variables & Modèle (sous-tab Modèle prédictif).
+  const [activeSection, setActiveSection] = useState<SectionKey>(initialTab === "model" ? "variables" : "review");
 
   // Scroll tout en haut à l'ouverture d'un scénario, en garantissant le tout
   // début (en-tête + logos). Un scrollTo(0,0) seul est repoussé par l'inertie
@@ -4324,7 +4326,7 @@ export function ScenarioDetailPage({ scenarioId, onBack }: ScenarioDetailPagePro
         {activeSection === "evidence" && <EvidenceTab scenarioId={scenarioId} detail={detail} />}
         {activeSection === "assistant" && <RagSection scenarioId={scenarioId} detail={detail} />}
         {activeSection === "viz" && <VizTab scenarioId={scenarioId} />}
-        {activeSection === "variables" && <VariablesModelTab detail={detail} scenarioId={scenarioId} />}
+        {activeSection === "variables" && <VariablesModelTab detail={detail} scenarioId={scenarioId} initialSub={initialTab === "model" ? "monitor" : undefined} />}
         {activeSection === "queries" && <QueriesSection detail={detail} scenarioId={scenarioId} />}
         {activeSection === "enrichment" && <EnrichmentSection scenarioId={scenarioId} />}
         {activeSection === "alerts" && <AlertsSection scenarioId={scenarioId} />}
