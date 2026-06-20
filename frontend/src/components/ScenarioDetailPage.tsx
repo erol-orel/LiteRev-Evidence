@@ -293,7 +293,7 @@ function QueriesSection({ detail, scenarioId }: { detail: ScenarioDetail; scenar
           <div className="flex items-center gap-2 mb-3">
             <Brain size={12} className="text-violet-400" />
             <span className="text-xs font-semibold text-violet-300 uppercase tracking-wider">
-              Stratégie Booléenne IA
+              Stratégie Booléenne
             </span>
             <button
               onClick={loadStrategy}
@@ -389,7 +389,7 @@ function QueriesSection({ detail, scenarioId }: { detail: ScenarioDetail; scenar
               <div className="flex flex-wrap items-center gap-1.5 text-[11px]">
                 <span className="text-forest-500">Trier :</span>
                 {([
-                  ["hybrid", "Score hybride"],
+                  ["hybrid", "Pertinence"],
                   ["semantic", "Sémantique"],
                   ["lexical", "Lexical"],
                   ["year_desc", "Année"],
@@ -416,8 +416,8 @@ function QueriesSection({ detail, scenarioId }: { detail: ScenarioDetail; scenar
                         <p className="text-xs font-medium text-white leading-5 truncate">{r.title || "(Sans titre)"}</p>
                         <div className="flex flex-wrap gap-1.5 mt-1 items-center">
                           {r.hybrid_score != null && (
-                            <span className="text-[10px] rounded-full bg-violet-500/20 px-1.5 py-0.5 text-violet-300" title="Score hybride (0.7·sémantique + 0.3·lexical)">
-                              ⊕ {r.hybrid_score.toFixed(2)}
+                            <span className="text-[10px] rounded-full bg-violet-500/20 px-1.5 py-0.5 text-violet-300" title="Score de pertinence (recherche en direct)">
+                              {r.hybrid_score.toFixed(2)}
                             </span>
                           )}
                           {r.semantic_score != null && (
@@ -2916,7 +2916,7 @@ function AlertsSection({ scenarioId }: { scenarioId: string }) {
           {[
             'Interrogation multi-sources : DB Cache + PubMed + OpenAlex + Crossref + EuropePMC + medRxiv + bioRxiv + PROSPERO + Cochrane',
             'Insertion des nouveaux articles (déduplication automatique)',
-            'Génération des embeddings (text-embedding-3-small) : active les scores sémantiques et hybrides',
+            'Génération des embeddings (text-embedding-3-small) : active la pertinence sémantique',
             'Extraction PICO par LLM (GPT-4.1-mini)',
             'Récupération full-text via Unpaywall',
             'Recalcul du clustering thématique',

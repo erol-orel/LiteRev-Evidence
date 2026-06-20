@@ -8945,20 +8945,51 @@ def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict
                 return None
 
             def _chunk_text_ft(text_str):
+                # Découpage SÉMANTIQUE par phrases : on coupe aux frontières de
+                # phrases (et non au milieu d'un mot/d'une idée), puis on fusionne
+                # en chunks d'environ _CHUNK_SIZE_FT caractères avec un recouvrement
+                # au niveau de la phrase. Plus cohérent que l'ancienne fenêtre brute.
                 text_str = _re.sub(r"\s+", " ", text_str).strip()
                 if not text_str:
                     return []
-                _chunks = []
-                _start = 0
-                while _start < len(text_str):
-                    _end = min(_start + _CHUNK_SIZE_FT, len(text_str))
-                    if _end < len(text_str):
-                        _cut = text_str.rfind(" ", _start, _end)
-                        if _cut > _start:
-                            _end = _cut
-                    _chunks.append(text_str[_start:_end].strip())
-                    _start = _end - _CHUNK_OVERLAP_FT if _end - _CHUNK_OVERLAP_FT > _start else _end
-                return [c for c in _chunks if len(c) > 50]
+                _sentences = _re.split(r"(?<=[.!?])\s+", text_str)
+                _chunks: list[str] = []
+                _cur: list[str] = []
+                _cur_len = 0
+                for _s in _sentences:
+                    if _cur and _cur_len + len(_s) + 1 > _CHUNK_SIZE_FT:
+                        _chunks.append(" ".join(_cur).strip())
+                        _ov: list[str] = []
+                        _olen = 0
+                        for _p in reversed(_cur):
+                            if _olen + len(_p) <= _CHUNK_OVERLAP_FT:
+                                _ov.insert(0, _p)
+                                _olen += len(_p)
+                            else:
+                                break
+                        _cur = _ov
+                        _cur_len = sum(len(_p) + 1 for _p in _cur)
+                    _cur.append(_s)
+                    _cur_len += len(_s) + 1
+                if _cur:
+                    _chunks.append(" ".join(_cur).strip())
+                # Phrase unique trop longue (> 1.5x la cible) : re-découpe en fenêtre mot.
+                _final: list[str] = []
+                _max = int(_CHUNK_SIZE_FT * 1.5)
+                for _c in _chunks:
+                    if len(_c) <= _max:
+                        _final.append(_c)
+                        continue
+                    _st = 0
+                    while _st < len(_c):
+                        _en = min(_st + _CHUNK_SIZE_FT, len(_c))
+                        if _en < len(_c):
+                            _cut = _c.rfind(" ", _st, _en)
+                            if _cut > _st:
+                                _en = _cut
+                        _final.append(_c[_st:_en].strip())
+                        _st = _en
+                return [c for c in _final if len(c) > 50]
 
             def _insert_fulltext_chunks_ft(doc_id, chunks, source_label, emb_client=None):
                 """Insère les chunks fulltext_section et les embedde immédiatement si possible."""
@@ -9317,65 +9348,28 @@ def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict
                 n_reranked = _rr_result.rowcount
                 update_step("rerank", "done", updated=n_reranked)
 
-                # Post-rerank cleanup: remove papers whose confirmed cosine score
-                # is below threshold. Only removes papers that have at least one
-                # embedding (i.e. the rerank step could compute their real score).
-                # Papers without embeddings keep similarity_score=1.0 and are
-                # retained until they are embedded in a future run.
-                _filter_threshold = 0.45
+                # Seuil SÉMANTIQUE = SOFT : on ne supprime JAMAIS d'article du
+                # corpus. Le corpus = résultat INTÉGRAL de la requête booléenne
+                # (base locale ∪ live) ; le seuil ne fait que distinguer, à
+                # l'affichage et en aval (page scénario, modèle), les articles
+                # « au-dessus du seuil » (mis en avant) des « sous le seuil »
+                # (conservés). Voir get_user_scenario_corpus (above/below_threshold).
+                # On recalcule simplement article_count sur le corpus complet.
                 try:
-                    with engine.connect() as _tc:
-                        _ts = _tc.execute(text(
-                            "SELECT similarity_threshold FROM scenario_settings WHERE scenario_id = :sid"
-                        ), {"sid": scenario_id}).scalar()
-                        if _ts is not None:
-                            _filter_threshold = float(_ts)
-                except Exception:
-                    pass
-                try:
-                    with engine.begin() as _clean_conn:
-                        # Supprimer les articles sous le seuil de similarité (ont un embedding)
-                        _deleted_below = _clean_conn.execute(text("""
-                            DELETE FROM article_scenarios ars
-                            WHERE ars.scenario_id = :sid
-                              AND ars.similarity_score < :thr
-                              AND EXISTS (
-                                  SELECT 1 FROM document_chunk c
-                                  WHERE c.document_id = ars.document_id
-                                    AND c.embedding IS NOT NULL
-                              )
-                        """), {"sid": scenario_id, "thr": _filter_threshold}).rowcount
-
-                        # Final cleanup: remove articles still unscored after embed+rerank.
-                        # These are articles with no abstract and no stored embedding — they cannot
-                        # appear in semantic search results, so they must not be in the corpus count.
-                        # IMPORTANT: must be inside the same 'with' block so _clean_conn is still open.
-                        _deleted_null = _clean_conn.execute(text("""
-                            DELETE FROM article_scenarios
-                            WHERE scenario_id = :sid
-                              AND similarity_score IS NULL
-                        """), {"sid": scenario_id}).rowcount
-
-                    if _deleted_below:
-                        logger.info(f"Pipeline {scenario_id}: removed {_deleted_below} below-threshold papers after rerank")
-                    if _deleted_null:
-                        logger.info(f"Pipeline {scenario_id}: removed {_deleted_null} unscored articles (no abstract/embedding)")
-
-                    if _deleted_below or _deleted_null:
-                        with engine.begin() as _ac:
-                            _ac.execute(text("""
-                                UPDATE user_scenarios
-                                SET article_count = (
-                                    SELECT COUNT(DISTINCT ars.document_id)
-                                    FROM article_scenarios ars
-                                    JOIN literature_document d ON d.id = ars.document_id
-                                    WHERE ars.scenario_id = :sid
-                                      AND (d.is_duplicate IS NULL OR d.is_duplicate = FALSE)
-                                )
-                                WHERE id = :sid
-                            """), {"sid": scenario_id})
+                    with engine.begin() as _ac:
+                        _ac.execute(text("""
+                            UPDATE user_scenarios
+                            SET article_count = (
+                                SELECT COUNT(DISTINCT ars.document_id)
+                                FROM article_scenarios ars
+                                JOIN literature_document d ON d.id = ars.document_id
+                                WHERE ars.scenario_id = :sid
+                                  AND (d.is_duplicate IS NULL OR d.is_duplicate = FALSE)
+                            )
+                            WHERE id = :sid
+                        """), {"sid": scenario_id})
                 except Exception as _ce:
-                    logger.warning(f"Post-rerank cleanup error {scenario_id}: {_ce}")
+                    logger.warning(f"Post-rerank article_count update {scenario_id}: {_ce}")
             else:
                 update_step("rerank", "skipped", reason="Clé OpenAI non configurée")
         except Exception as e:
