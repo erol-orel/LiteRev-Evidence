@@ -1843,6 +1843,10 @@ export interface EvidenceBriefData {
     duplicates: number;
     with_pico: number;
     with_fulltext: number;
+    relevant?: number;
+    relevant_with_pico?: number;
+    relevant_with_fulltext?: number;
+    threshold?: number;
     included: number;
     excluded: number;
     pending: number;
@@ -2152,8 +2156,6 @@ export interface UserScenario extends GesicaScenario {
   pipeline_status?: string;
   pipeline_step?: string | null;
   pipeline_progress?: number;
-  rerank_removed_count?: number; // articles supprimés après rerank sous seuil
-  rerank_threshold?: number;     // seuil utilisé lors du dernier rerank
 }
 
 export interface UserScenarioCreatePayload {
@@ -2276,8 +2278,6 @@ function _mapUserScenario(u: any): UserScenario {
     pipeline_status: u.pipeline_status ?? 'idle',
     pipeline_step: u.pipeline_step ?? null,
     pipeline_progress: u.pipeline_progress ?? 0,
-    rerank_removed_count: u.rerank_removed_count ?? 0,
-    rerank_threshold: u.rerank_threshold ?? 0.45,
   };
 }
 
@@ -2673,6 +2673,8 @@ export interface ScenarioVariables {
     scenario_id: string;
     generated_at: string;
     pico_articles_used: number;
+    relevant_total?: number;
+    corpus_total?: number;
     auto_generated: boolean;
     validation_status: string;
   };

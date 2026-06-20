@@ -7066,8 +7066,6 @@ def _ensure_user_scenarios_table() -> None:
             "ALTER TABLE user_scenarios ADD COLUMN IF NOT EXISTS pipeline_started_at TIMESTAMP",
             "ALTER TABLE user_scenarios ADD COLUMN IF NOT EXISTS article_count INTEGER DEFAULT 0",
             "ALTER TABLE user_scenarios ADD COLUMN IF NOT EXISTS search_strategy JSONB",
-            "ALTER TABLE user_scenarios ADD COLUMN IF NOT EXISTS rerank_removed_count INTEGER DEFAULT 0",
-            "ALTER TABLE user_scenarios ADD COLUMN IF NOT EXISTS rerank_threshold FLOAT DEFAULT 0.45",
             # Clustering persisté en base (sinon perdu au redémarrage du serveur)
             "ALTER TABLE article_scenarios ADD COLUMN IF NOT EXISTS cluster_id INTEGER",
             "ALTER TABLE article_scenarios ADD COLUMN IF NOT EXISTS cluster_label TEXT",
@@ -7121,8 +7119,7 @@ def _get_user_scenario_or_404(scenario_id: str) -> dict[str, Any]:
         row = conn.execute(text("""
             SELECT id, name, query, mode, filters, result_count, pinned, folder_id, created_at, updated_at,
                    search_strategy, populate_status, pipeline_status, pipeline_step,
-                   pipeline_progress, pipeline_started_at, article_count, is_system,
-                   rerank_removed_count, rerank_threshold
+                   pipeline_progress, pipeline_started_at, article_count, is_system
             FROM user_scenarios WHERE id = :id
         """), {"id": scenario_id}).mappings().first()
     if not row:
@@ -7210,8 +7207,6 @@ def _user_scenario_to_gesica_format(row: dict[str, Any]) -> dict[str, Any]:
         "pipeline_status": row.get("pipeline_status", "idle"),
         "pipeline_step": row.get("pipeline_step"),
         "pipeline_progress": row.get("pipeline_progress", 0),
-        "rerank_removed_count": row.get("rerank_removed_count", 0) or 0,
-        "rerank_threshold": row.get("rerank_threshold", 0.45) or 0.45,
     }
 
 
@@ -7242,8 +7237,6 @@ def list_user_scenarios() -> list[dict[str, Any]]:
                 us.populate_status, us.pipeline_status, us.pipeline_step, us.pipeline_progress,
                 COALESCE(us.result_count, 0) AS result_count,
                 COALESCE(us.article_count, 0) AS article_count,
-                COALESCE(us.rerank_removed_count, 0) AS rerank_removed_count,
-                COALESCE(us.rerank_threshold, 0.45) AS rerank_threshold,
                 us.is_system
             FROM user_scenarios us
             ORDER BY us.pinned DESC, us.created_at DESC
@@ -9675,13 +9668,6 @@ def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict
                     JOIN literature_document d ON d.id = ars.document_id
                     WHERE ars.scenario_id = :sid AND (d.is_duplicate IS NULL OR d.is_duplicate = FALSE)
                 """), {"sid": scenario_id}).scalar() or 0
-                # Récupérer les infos de rerank pour le message final
-                _rerank_info = _conn.execute(text("""
-                    SELECT rerank_removed_count, rerank_threshold
-                    FROM user_scenarios WHERE id = :sid
-                """), {"sid": scenario_id}).mappings().first()
-                _removed = int(_rerank_info["rerank_removed_count"] or 0) if _rerank_info else 0
-                _thr = float(_rerank_info["rerank_threshold"] or 0.45) if _rerank_info else 0.45
                 _conn.execute(text("""
                     UPDATE user_scenarios
                     SET pipeline_status = 'done',
@@ -9691,9 +9677,8 @@ def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict
                         updated_at = NOW()
                     WHERE id = :sid
                 """), {"sid": scenario_id, "cnt": _final_count})
-            _rerank_note = f" ({_removed} filtrés par rerank sémantique, seuil {_thr})" if _removed > 0 else ""
             _user_scenario_pipeline_jobs[scenario_id]["message"] = (
-                f"{_final_count} articles dans le corpus{_rerank_note}."
+                f"{_final_count} articles dans le corpus."
             )
         except Exception as _e:
             logger.warning(f"Pipeline final DB update failed: {_e}")
@@ -10208,7 +10193,11 @@ def get_user_scenario_prisma(
 def get_user_scenario_evidence_brief(scenario_id: str) -> dict[str, Any]:
     """Evidence Brief pour un scénario utilisateur (même format que GESICA)."""
     row = _get_user_scenario_or_404(scenario_id)
+    eff_thr = _get_scenario_threshold(scenario_id)
     with engine.connect() as conn:
+        # `relevant*` = sous-ensemble PERTINENT (au-dessus du seuil sémantique) sur
+        # lequel l'Evidence Brief / le modèle s'appuient ; `total`/`with_*` couvrent
+        # le corpus complet (pour le contexte).
         corpus_stats = conn.execute(text("""
             SELECT
                 COUNT(*) AS total,
@@ -10221,6 +10210,15 @@ def get_user_scenario_evidence_brief(scenario_id: str) -> dict[str, Any]:
                     SELECT 1 FROM document_chunk c
                     WHERE c.document_id = d.id AND c.chunk_type = 'fulltext_section'
                 )) AS with_fulltext,
+                COUNT(*) FILTER (WHERE d.is_duplicate IS NOT TRUE
+                    AND COALESCE(ars.similarity_score, 0) >= :thr) AS relevant,
+                COUNT(*) FILTER (WHERE d.is_duplicate IS NOT TRUE
+                    AND COALESCE(ars.similarity_score, 0) >= :thr
+                    AND d.pico_json IS NOT NULL) AS relevant_with_pico,
+                COUNT(*) FILTER (WHERE d.is_duplicate IS NOT TRUE
+                    AND COALESCE(ars.similarity_score, 0) >= :thr
+                    AND EXISTS (SELECT 1 FROM document_chunk c
+                        WHERE c.document_id = d.id AND c.chunk_type = 'fulltext_section')) AS relevant_with_fulltext,
                 GREATEST(1900, MIN(d.year)) AS year_min,
                 MAX(d.year) AS year_max,
                 AVG(d.citation_count) FILTER (WHERE d.citation_count IS NOT NULL) AS avg_citations,
@@ -10228,7 +10226,7 @@ def get_user_scenario_evidence_brief(scenario_id: str) -> dict[str, Any]:
             FROM article_scenarios ars
             JOIN literature_document d ON d.id = ars.document_id
             WHERE ars.scenario_id = :sid
-        """), {"sid": scenario_id}).mappings().fetchone()
+        """), {"sid": scenario_id, "thr": eff_thr}).mappings().fetchone()
 
         top_articles = conn.execute(text("""
             SELECT d.id, d.title, d.abstract, d.year, d.journal, d.authors, d.doi,
@@ -10321,6 +10319,10 @@ def get_user_scenario_evidence_brief(scenario_id: str) -> dict[str, Any]:
             "duplicates": int(corpus_stats["duplicates"] or 0),
             "with_pico": int(corpus_stats["with_pico"] or 0),
             "with_fulltext": int(corpus_stats["with_fulltext"] or 0),
+            "relevant": int(corpus_stats["relevant"] or 0),
+            "relevant_with_pico": int(corpus_stats["relevant_with_pico"] or 0),
+            "relevant_with_fulltext": int(corpus_stats["relevant_with_fulltext"] or 0),
+            "threshold": eff_thr,
             "included": int(corpus_stats["included"] or 0),
             "excluded": int(corpus_stats["excluded"] or 0),
             "pending": int(corpus_stats["pending"] or 0),
@@ -11778,10 +11780,22 @@ Retourne UNIQUEMENT le JSON valide."""
             except Exception as spec_err:  # le spec machine ne doit jamais bloquer la génération
                 logger.error(f"model_spec build {scenario_id}: {spec_err}", exc_info=True)
 
+        try:
+            with engine.connect() as _cc:
+                _corpus_total = _cc.execute(text("""
+                    SELECT COUNT(*) FROM article_scenarios ars
+                    JOIN literature_document d ON d.id = ars.document_id
+                    WHERE ars.scenario_id = :sid AND d.is_duplicate IS NOT TRUE
+                """), {"sid": scenario_id}).scalar() or 0
+        except Exception:
+            _corpus_total = len(articles)
         variables["_meta"] = {
             "scenario_id": scenario_id,
             "generated_at": datetime.now(timezone.utc).isoformat(),
-            "pico_articles_used": len(pico_articles),
+            # Outcome/variables/algorithme dérivés du sous-ensemble PERTINENT.
+            "corpus_total": int(_corpus_total),            # corpus complet
+            "relevant_total": len(articles),               # au-dessus du seuil
+            "pico_articles_used": len(pico_articles),      # pertinents AVEC PICO (entrée du modèle)
             "auto_generated": True,
             "validation_status": "pending",
             "evidence_fingerprint": evidence_fingerprint,

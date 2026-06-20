@@ -817,9 +817,9 @@ function StatsView({ corpusStats, gesicaStats, fulltextStats, scenarios, statsBy
             </div>
             <div className="rounded-2xl border border-white/10 bg-forest-900/60 p-4 text-center">
               <p className={`text-2xl font-bold ${fulltextStats.hybrid_search.active ? 'text-brand-300' : 'text-rose-300'}`}>
-                {fulltextStats.hybrid_search.active ? 'HYBRID' : 'LEXICAL'}
+                {fulltextStats.hybrid_search.active ? 'SÉMANTIQUE' : 'LEXICAL'}
               </p>
-              <p className="mt-1 text-xs text-forest-400">Mode recherche</p>
+              <p className="mt-1 text-xs text-forest-400">Recherche disponible</p>
             </div>
           </div>
           {fulltextStats.by_source && fulltextStats.by_source.length > 0 && (
