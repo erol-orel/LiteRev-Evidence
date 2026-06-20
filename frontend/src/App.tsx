@@ -131,6 +131,13 @@ const FILTER_FIELDS: Array<[keyof FilterOptions, string]> = [
 
 const PAGE_SIZE = 20;
 
+// Bornes du filtre Années : du plus ancien article réellement en base (en
+// ignorant les années aberrantes < 1000) jusqu'à l'année courante (aujourd'hui).
+function yearSliderBounds(yearOpts?: Array<{ value: string | number }> | null): { min: number; max: number } {
+  const yrs = (yearOpts ?? []).map(y => Number(y.value)).filter(y => Number.isFinite(y) && y > 1000);
+  return { min: yrs.length ? Math.min(...yrs) : 1990, max: new Date().getFullYear() };
+}
+
 type AppTab = "search" | "scenarios" | "stats" | "terrain";
 
 interface SavedSearch {
@@ -2963,7 +2970,7 @@ export default function App() {
   });
   const [diseaseSearch, setDiseaseSearch] = useState<string>("");
   const [yearRange, setYearRange] = useState<[number, number]>([
-    1900,
+    1990,
     new Date().getFullYear(),
   ]);
   const [results, setResults] = useState<SearchResult[]>([]);
@@ -3013,13 +3020,8 @@ export default function App() {
     getFilterOptions()
       .then((opts) => {
         setFilterOptions(opts);
-        const years =
-          opts.year
-            ?.map((y) => Number(y.value))
-            .filter((y) => Number.isFinite(y) && y > 0) ?? [];
-        if (years.length > 0) {
-          setYearRange([Math.max(1900, Math.min(...years)), Math.max(...years)]);
-        }
+        const b = yearSliderBounds(opts.year);
+        setYearRange([b.min, b.max]);
       })
       .catch((err) => console.error(err));
   }, []);
@@ -3380,13 +3382,8 @@ export default function App() {
     setSelectedResult(null);
     setSelectedDocument(null);
     setEvidenceSummary(null);
-    const years =
-      filterOptions?.year
-        ?.map((y) => Number(y.value))
-        .filter((y) => Number.isFinite(y) && y > 0) ?? [];
-    if (years.length > 0) {
-      setYearRange([Math.max(1900, Math.min(...years)), Math.max(...years)]);
-    }
+    const b = yearSliderBounds(filterOptions?.year);
+    setYearRange([b.min, b.max]);
   }
 
   function handleExport(format: "csv" | "json") {
@@ -3615,12 +3612,7 @@ export default function App() {
                       </span>
                     </span>
                     {(() => {
-                      const minYear = filterOptions?.year?.length
-                        ? Math.max(1900, Math.min(...filterOptions.year.map((y) => Number(y.value))))
-                        : 1900;
-                      const maxYear = filterOptions?.year?.length
-                        ? Math.max(...filterOptions.year.map((y) => Number(y.value)))
-                        : new Date().getFullYear();
+                      const { min: minYear, max: maxYear } = yearSliderBounds(filterOptions?.year);
                       const range = maxYear - minYear || 1;
                       const leftPct = ((yearRange[0] - minYear) / range) * 100;
                       const rightPct = ((yearRange[1] - minYear) / range) * 100;
@@ -3657,8 +3649,8 @@ export default function App() {
                       );
                     })()}
                     <div className="flex justify-between text-[10px] text-white/30 mt-1">
-                      <span>{filterOptions?.year?.length ? Math.max(1900, Math.min(...filterOptions.year.map(y => Number(y.value)))) : 1900}</span>
-                      <span>{filterOptions?.year?.length ? Math.max(...filterOptions.year.map(y => Number(y.value))) : new Date().getFullYear()}</span>
+                      <span>{yearSliderBounds(filterOptions?.year).min}</span>
+                      <span>{yearSliderBounds(filterOptions?.year).max}</span>
                     </div>
                   </div>
                 </div>
