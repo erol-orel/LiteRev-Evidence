@@ -1448,6 +1448,9 @@ export interface ScenarioCorpus {
   unscored?: number;
   from_local?: number | null;
   newly_fetched?: number | null;
+  docs_with_fulltext?: number;
+  docs_abstract_only?: number;
+  source_breakdown?: Record<string, number>;
   rerank_running?: boolean;
   threshold?: number;
   offset: number;
@@ -2246,7 +2249,7 @@ export interface EmbeddingStatus {
   score_availability: {
     lexical: boolean;
     semantic: boolean;
-    hybrid: boolean;
+    cohere: boolean;
   };
 }
 

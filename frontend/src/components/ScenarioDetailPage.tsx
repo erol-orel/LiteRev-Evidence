@@ -1046,16 +1046,21 @@ function CorpusSection({ scenarioId, threshold }: { scenarioId: string; detail: 
               }
               return <p className="text-[10px] text-forest-400">✓ Tous les documents sont découpés et vectorisés.</p>;
             })()}
-            <div className="flex items-center gap-3 flex-wrap" title="Modes de recherche disponibles selon l'état des embeddings. Le lexical marche toujours ; le sémantique et l'hybride nécessitent des embeddings.">
-              {Object.entries(embeddingStatus.score_availability).map(([type, available]) => (
-                <span key={type}
-                  title={type === 'lexical' ? 'Recherche par mots-clés (plein texte). Toujours disponible.' :
-                         type === 'semantic' ? 'Similarité vectorielle (sens). Nécessite des embeddings.' :
-                         'Mélange 70% sémantique + 30% lexical. Nécessite des embeddings.'}
-                  className={`text-[10px] flex items-center gap-1 ${available ? 'text-forest-400' : 'text-white/25'}`}>
-                  {available ? '✓' : '✗'} {type === 'lexical' ? 'Lexical' : type === 'semantic' ? 'Sémantique' : 'Hybride'}
-                </span>
-              ))}
+            <div className="flex items-center gap-3 flex-wrap" title="Modes de pertinence disponibles. Le lexical marche toujours ; le sémantique nécessite des embeddings ; le reranking Cohere nécessite une clé COHERE_API_KEY.">
+              {(['lexical', 'semantic', 'cohere'] as const).map((type) => {
+                const available = embeddingStatus.score_availability[type];
+                const label = type === 'lexical' ? 'Lexical' : type === 'semantic' ? 'Sémantique' : 'Cohere (rerank)';
+                const tip = type === 'lexical' ? 'Recherche par mots-clés (plein texte). Toujours disponible.'
+                  : type === 'semantic' ? 'Similarité vectorielle (sens). Nécessite des embeddings.'
+                  : 'Reranking cross-encoder Cohere du sous-ensemble pertinent. Nécessite COHERE_API_KEY.';
+                return (
+                  <span key={type} title={tip}
+                    className={`text-[10px] flex items-center gap-1 ${available ? 'text-forest-400' : 'text-white/25'}`}>
+                    <span className={`h-1.5 w-1.5 rounded-full ${available ? 'bg-brand-400' : 'bg-white/20'}`} />
+                    {label}
+                  </span>
+                );
+              })}
             </div>
             {embeddingStatus.total_pending_chunks > 0 && (
               <p className="text-[10px] text-white/30">

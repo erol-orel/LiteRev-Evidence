@@ -2276,16 +2276,6 @@ function ScenariosView({
 
         {isExpanded && (
           <div className="mt-4 space-y-4 border-t border-white/10 pt-4">
-            {/* Living Evidence Note */}
-            <div className={`rounded-2xl border px-3 py-2 text-xs ${
-              hasArticles
-                ? "border-brand-500/20 bg-brand-500/5 text-brand-300"
-                : "border-white/5 bg-white/2 text-forest-500"
-            }`}>
-              <RefreshCw size={10} className="inline mr-1" />
-              {scenario.livingEvidenceNote}
-            </div>
-
             {/* Actions recommandées */}
             {(actions.length > 0 || actionsGenerating) && (
               <div>
@@ -3219,10 +3209,12 @@ export default function App() {
       }));
       setResults(corpusResults);
       setSearchTotalMatching(corpus.total);   // == taille du corpus
-      setSearchLiveNewCount(0);               // tout est déjà compté dans le corpus
-      setSearchSourceBreakdown(null);
-      setSearchFulltextDocs(null);
-      setSearchAbstractDocs(null);
+      // Répartition par source (base locale vs API en direct), nouvelles
+      // références live, et texte intégral vs résumé seul — lus depuis le corpus.
+      setSearchSourceBreakdown(corpus.source_breakdown ?? null);
+      setSearchLiveNewCount(corpus.newly_fetched ?? 0);
+      setSearchFulltextDocs(corpus.docs_with_fulltext ?? null);
+      setSearchAbstractDocs(corpus.docs_abstract_only ?? null);
       setSearchScoreType('none');
       setSearchScoreLabel(null);
       const first = corpusResults[0] ?? null;
@@ -3804,9 +3796,8 @@ export default function App() {
                     <div className="space-y-1">
                       <p className="text-sm text-forest-400">
                         {(() => {
-                          const base = searchTotalMatching ?? uniqueDocCount;
-                          const live = searchLiveNewCount ?? 0;
-                          const total = base + live;
+                          // corpus.total inclut déjà les références live : pas d'addition.
+                          const total = searchTotalMatching ?? uniqueDocCount;
                           return (
                             <>
                               <span className="font-semibold text-white">{total.toLocaleString()}</span>{" "}
