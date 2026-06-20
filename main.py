@@ -11792,9 +11792,9 @@ Génère un JSON avec EXACTEMENT ces champs :
   "sample_size_recommendation": "Estimation de la taille d'échantillon nécessaire",
   "update_frequency": "Fréquence de mise à jour recommandée",
   "alert_thresholds": {{
-    "green": {{"label": "Normal", "description": ""}},
-    "orange": {{"label": "Vigilance", "description": ""}},
-    "red": {{"label": "Alerte critique", "description": ""}}
+    "green":  {{"label": "Normal",  "range": "Plage de valeurs de l'OUTCOME considérée normale, NUMÉRIQUE et cohérente avec son unit/task_type (ex: '< 0.10' pour une probabilité, '< 5 /100k' pour un taux, '0-2' pour un compte)", "rationale": "Justification fondée sur les évidences (cite les seuils rapportés dans la littérature si disponibles)", "provenance": [ids d'articles]}},
+    "orange": {{"label": "Tension", "range": "Plage intermédiaire (ex: '0.10-0.30')", "rationale": "...", "provenance": [ids d'articles]}},
+    "red":    {{"label": "Alerte",  "range": "Plage critique (ex: '> 0.30')", "rationale": "...", "provenance": [ids d'articles]}}
   }},
   "implementation_notes": "Notes d'implémentation pratiques",
   "validation_status": "pending"
@@ -11804,6 +11804,13 @@ IMPORTANT pour les champs "provenance" : ce sont des listes d'identifiants (cham
 des articles figurant dans la liste ci-dessus. N'invente AUCUN id : n'utilise que des id
 réellement présents. Les "machine_name" doivent être de courts identifiants snake_case
 (minuscules, chiffres, underscores) utilisables comme noms de colonnes.
+
+IMPORTANT pour "alert_thresholds" : donne des plages de valeurs NUMÉRIQUES concrètes de
+l'OUTCOME (pas des phrases vagues), cohérentes avec son "unit" et son "task_type", et
+fondées sur les seuils rapportés dans les évidences quand ils existent (sinon des seuils
+cliniquement plausibles). Les trois plages doivent être contiguës et couvrir tout le
+domaine. Tu PEUX renommer les catégories si l'outcome s'y prête (ex. pour un compte :
+"Faible"/"Modéré"/"Élevé"), mais garde 3 niveaux du plus sûr au plus critique.
 
 Retourne UNIQUEMENT le JSON valide."""
 
