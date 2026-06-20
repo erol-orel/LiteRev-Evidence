@@ -512,13 +512,32 @@ def startup_event() -> None:
             try:
                 title    = row["title"] or ""
                 abstract = row["abstract"] or ""
+                # Évidence extraite du TEXTE INTÉGRAL si disponible, sinon du résumé.
+                # Les chunks fulltext_section sont concaténés dans l'ordre ; on
+                # marque la source (`pico_source`) pour pouvoir ré-extraire plus
+                # tard les articles dont le PICO venait du résumé seul.
+                body_text   = abstract[:3000]
+                body_label  = "Abstract"
+                pico_source = "abstract"
+                if row.get("has_fulltext"):
+                    with engine.connect() as _ftc:
+                        _ft = _ftc.execute(text("""
+                            SELECT string_agg(content, E'\n\n' ORDER BY chunk_index) AS ft
+                            FROM document_chunk
+                            WHERE document_id = :id AND chunk_type = 'fulltext_section'
+                        """), {"id": row["id"]}).scalar()
+                    if _ft and len(_ft) > len(abstract):
+                        body_text   = _ft[:14000]
+                        body_label  = "Full text"
+                        pico_source = "fulltext"
                 resp = client.chat.completions.create(
                     model="gpt-4.1-mini",
                     messages=[
                         {"role": "system", "content": _system_pico},
-                        {"role": "user",   "content": f"Title: {title}\n\nAbstract: {abstract[:3000]}"},
+                        {"role": "user",   "content": f"Title: {title}\n\n{body_label}: {body_text}"},
                     ],
-                    temperature=0.1,
+                    temperature=0,
+                    seed=42,
                     max_tokens=400,
                     response_format={"type": "json_object"},
                 )
@@ -528,6 +547,7 @@ def startup_event() -> None:
                     return None
                 pico["pico_confidence"] = float(pico.get("pico_confidence", 0.5))
                 pico["pico_notes"]      = pico.get("pico_notes", "")
+                pico["pico_source"]     = pico_source
                 with engine.begin() as _c:
                     _c.execute(text("""
                         UPDATE literature_document
@@ -602,14 +622,24 @@ def startup_event() -> None:
 
                 # ── 2. PICO ───────────────────────────────────────────────────
                 with engine.connect() as _conn:
+                    # On extrait le PICO des articles sans PICO, PUIS on ré-extrait
+                    # ceux dont le PICO venait du résumé alors que le texte intégral
+                    # est désormais disponible (pico_source != 'fulltext'). Les
+                    # articles jamais traités passent en premier.
                     _pico_rows = _conn.execute(text("""
-                        SELECT id, title, abstract
+                        SELECT id, title, abstract, has_fulltext
                         FROM literature_document
                         WHERE project_context = 'literev'
-                          AND pico_json IS NULL
                           AND abstract IS NOT NULL
                           AND LENGTH(abstract) > 50
-                        ORDER BY id
+                          AND (
+                            pico_json IS NULL
+                            OR (
+                                has_fulltext IS TRUE
+                                AND (pico_json->>'pico_source') IS DISTINCT FROM 'fulltext'
+                            )
+                          )
+                        ORDER BY (pico_json IS NULL) DESC, id
                         LIMIT :lim
                     """), {"lim": _PICO_BATCH}).mappings().fetchall()
 
@@ -5270,7 +5300,7 @@ def extract_article_pico(scenario_id: str, article_id: int, _: None = Depends(re
     """Extrait (ou re-extrait) le PICO pour un article via LLM à la demande."""
     with engine.connect() as conn:
         row = conn.execute(text("""
-            SELECT id, title, abstract
+            SELECT id, title, abstract, has_fulltext
             FROM literature_document
             WHERE id = :article_id
               AND project_context = 'literev'
@@ -5297,7 +5327,18 @@ def extract_article_pico(scenario_id: str, article_id: int, _: None = Depends(re
         '"pico_confidence":0.0-1.0,"pico_notes":""}\n'
         "Be concise (max 2 sentences per field). Return ONLY the JSON."
     )
-    user_content = f"Title: {title}\n\nAbstract: {abstract[:3000]}"
+    # Évidence extraite du TEXTE INTÉGRAL si disponible, sinon du résumé.
+    body_text, body_label, pico_source = abstract[:3000], "Abstract", "abstract"
+    if row.get("has_fulltext"):
+        with engine.connect() as _ftc:
+            _ft = _ftc.execute(text("""
+                SELECT string_agg(content, E'\n\n' ORDER BY chunk_index) AS ft
+                FROM document_chunk
+                WHERE document_id = :id AND chunk_type = 'fulltext_section'
+            """), {"id": article_id}).scalar()
+        if _ft and len(_ft) > len(abstract):
+            body_text, body_label, pico_source = _ft[:14000], "Full text", "fulltext"
+    user_content = f"Title: {title}\n\n{body_label}: {body_text}"
 
     try:
         from openai import OpenAI as _OAI
@@ -5309,7 +5350,8 @@ def extract_article_pico(scenario_id: str, article_id: int, _: None = Depends(re
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_content},
             ],
-            temperature=0.1,
+            temperature=0,
+            seed=42,
             max_tokens=400,
             response_format={"type": "json_object"},
         )
@@ -5321,6 +5363,7 @@ def extract_article_pico(scenario_id: str, article_id: int, _: None = Depends(re
 
         pico["pico_confidence"] = float(pico.get("pico_confidence", 0.5))
         pico["pico_notes"] = pico.get("pico_notes", "")
+        pico["pico_source"] = pico_source
 
         with engine.begin() as conn:
             conn.execute(text("""
@@ -10303,10 +10346,17 @@ def get_user_scenario_evidence_brief(scenario_id: str) -> dict[str, Any]:
                     AND COALESCE(ars.similarity_score, 0) >= :thr
                     AND EXISTS (SELECT 1 FROM document_chunk c
                         WHERE c.document_id = d.id AND c.chunk_type = 'fulltext_section')) AS relevant_with_fulltext,
-                GREATEST(1900, MIN(d.year)) AS year_min,
-                MAX(d.year) AS year_max,
-                AVG(d.citation_count) FILTER (WHERE d.citation_count IS NOT NULL) AS avg_citations,
-                MAX(d.citation_count) AS max_citations
+                -- Couverture & citations : calculées sur le SOUS-ENSEMBLE PERTINENT
+                -- (au-dessus du seuil), pas sur le corpus complet.
+                GREATEST(1900, MIN(d.year) FILTER (WHERE d.is_duplicate IS NOT TRUE
+                    AND COALESCE(ars.similarity_score, 0) >= :thr)) AS year_min,
+                MAX(d.year) FILTER (WHERE d.is_duplicate IS NOT TRUE
+                    AND COALESCE(ars.similarity_score, 0) >= :thr) AS year_max,
+                AVG(d.citation_count) FILTER (WHERE d.is_duplicate IS NOT TRUE
+                    AND COALESCE(ars.similarity_score, 0) >= :thr
+                    AND d.citation_count IS NOT NULL) AS avg_citations,
+                MAX(d.citation_count) FILTER (WHERE d.is_duplicate IS NOT TRUE
+                    AND COALESCE(ars.similarity_score, 0) >= :thr) AS max_citations
             FROM article_scenarios ars
             JOIN literature_document d ON d.id = ars.document_id
             WHERE ars.scenario_id = :sid
@@ -10320,12 +10370,17 @@ def get_user_scenario_evidence_brief(scenario_id: str) -> dict[str, Any]:
             JOIN literature_document d ON d.id = ars.document_id
             WHERE ars.scenario_id = :sid
               AND d.is_duplicate IS NOT TRUE AND d.abstract IS NOT NULL
+              AND COALESCE(ars.similarity_score, 0) >= :thr
             ORDER BY
                 CASE WHEN d.screening_status = 'included' THEN 0 ELSE 1 END,
                 d.citation_count DESC NULLS LAST, d.year DESC NULLS LAST
             LIMIT 15
-        """), {"sid": scenario_id}).mappings().fetchall()
+        """), {"sid": scenario_id, "thr": eff_thr}).mappings().fetchall()
 
+        # Toutes les distributions ci-dessous sont calculées sur le SOUS-ENSEMBLE
+        # PERTINENT (au-dessus du seuil sémantique), pas sur le corpus complet :
+        # elles doivent sommer au nombre de « pertinents » affiché (ex. 51), pas
+        # au total du corpus (ex. 100).
         study_designs = conn.execute(text(f"""
             WITH b AS (
                 SELECT lower(coalesce(
@@ -10334,27 +10389,30 @@ def get_user_scenario_evidence_brief(scenario_id: str) -> dict[str, Any]:
                 FROM article_scenarios ars
                 JOIN literature_document ld ON ld.id = ars.document_id
                 WHERE ars.scenario_id = :sid AND ld.is_duplicate IS NOT TRUE
+                  AND COALESCE(ars.similarity_score, 0) >= :thr
             )
             SELECT {_STUDY_DESIGN_CASE} AS design, COUNT(*) AS n
             FROM b GROUP BY 1 ORDER BY 2 DESC
-        """), {"sid": scenario_id}).mappings().fetchall()
+        """), {"sid": scenario_id, "thr": eff_thr}).mappings().fetchall()
 
         year_dist = conn.execute(text("""
             SELECT d.year, COUNT(*) AS n
             FROM article_scenarios ars
             JOIN literature_document d ON d.id = ars.document_id
             WHERE ars.scenario_id = :sid AND d.is_duplicate IS NOT TRUE
+              AND COALESCE(ars.similarity_score, 0) >= :thr
               AND d.year IS NOT NULL AND d.year >= 2000
             GROUP BY d.year ORDER BY d.year ASC
-        """), {"sid": scenario_id}).mappings().fetchall()
+        """), {"sid": scenario_id, "thr": eff_thr}).mappings().fetchall()
 
         source_dist = conn.execute(text("""
             SELECT d.source, COUNT(*) AS n
             FROM article_scenarios ars
             JOIN literature_document d ON d.id = ars.document_id
             WHERE ars.scenario_id = :sid AND d.is_duplicate IS NOT TRUE
+              AND COALESCE(ars.similarity_score, 0) >= :thr
             GROUP BY d.source ORDER BY n DESC LIMIT 8
-        """), {"sid": scenario_id}).mappings().fetchall()
+        """), {"sid": scenario_id, "thr": eff_thr}).mappings().fetchall()
 
         evidence_levels = conn.execute(text("""
             SELECT
@@ -10368,8 +10426,9 @@ def get_user_scenario_evidence_brief(scenario_id: str) -> dict[str, Any]:
             FROM article_scenarios ars
             JOIN literature_document d ON d.id = ars.document_id
             WHERE ars.scenario_id = :sid AND d.is_duplicate IS NOT TRUE
+              AND COALESCE(ars.similarity_score, 0) >= :thr
             GROUP BY 1 ORDER BY 2 DESC
-        """), {"sid": scenario_id}).mappings().fetchall()
+        """), {"sid": scenario_id, "thr": eff_thr}).mappings().fetchall()
 
     pico_table = []
     for r in top_articles:
