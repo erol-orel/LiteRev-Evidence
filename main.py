@@ -11044,75 +11044,6 @@ def _get_above_threshold_articles(scenario_id: str, threshold: float | None = No
     return [dict(r) for r in rows]
 
 
-def _run_semantic_rerank(scenario_id: str, query: str) -> int:
-    """
-    Calcule le score de similarité sémantique entre la requête et chaque abstract,
-    puis met à jour article_scenarios.similarity_score.
-    Retourne le nombre d'articles rerankés.
-    """
-    import time as _time
-    try:
-        from openai import OpenAI as _OAI
-        client = _OAI()
-
-        # Embedding de la requête
-        q_emb_resp = client.embeddings.create(
-            model="text-embedding-3-small",
-            input=query[:2000],
-        )
-        q_emb = q_emb_resp.data[0].embedding
-
-        # Récupérer tous les articles du scénario sans score ou avec score = 1.0 (défaut)
-        with engine.connect() as conn:
-            rows = conn.execute(text("""
-                SELECT ld.id, ld.title, ld.abstract
-                FROM literature_document ld
-                JOIN article_scenarios asn ON asn.document_id = ld.id AND asn.scenario_id = :sid
-                WHERE ld.project_context = 'literev'
-                  AND ld.abstract IS NOT NULL
-                  AND length(ld.abstract) > 30
-                ORDER BY ld.id
-            """), {"sid": scenario_id}).mappings().fetchall()
-
-        updated = 0
-        BATCH = 100  # OpenAI embeddings batch
-
-        for i in range(0, len(rows), BATCH):
-            batch = rows[i:i+BATCH]
-            texts = [f"{r['title']}\n\n{(r['abstract'] or '')[:1500]}" for r in batch]
-            try:
-                emb_resp = client.embeddings.create(
-                    model="text-embedding-3-small",
-                    input=texts,
-                )
-                for j, emb_data in enumerate(emb_resp.data):
-                    doc_emb = emb_data.embedding
-                    # Cosine similarity
-                    dot = sum(a * b for a, b in zip(q_emb, doc_emb))
-                    norm_q = sum(a * a for a in q_emb) ** 0.5
-                    norm_d = sum(b * b for b in doc_emb) ** 0.5
-                    sim = dot / (norm_q * norm_d) if norm_q and norm_d else 0.0
-                    sim = max(0.0, min(1.0, sim))
-
-                    with engine.begin() as conn:
-                        conn.execute(text("""
-                            UPDATE article_scenarios
-                            SET similarity_score = :score
-                            WHERE document_id = :doc_id AND scenario_id = :sid
-                        """), {"score": sim, "doc_id": batch[j]["id"], "sid": scenario_id})
-                    updated += 1
-            except Exception as e:
-                logger.warning(f"Rerank batch {i}: {e}")
-            _time.sleep(0.2)
-
-        logger.info(f"Rerank {scenario_id}: {updated} articles rerankés.")
-        return updated
-
-    except Exception as e:
-        logger.error(f"Rerank {scenario_id} fatal: {e}", exc_info=True)
-        return 0
-
-
 @app.post("/scenarios/{scenario_id}/rerank")
 def trigger_rerank(scenario_id: str, _: None = Depends(require_api_key)) -> dict[str, Any]:
     """
@@ -11137,7 +11068,7 @@ def trigger_rerank(scenario_id: str, _: None = Depends(require_api_key)) -> dict
 
     def _run():
         _backfill_title_abstract_chunks(scenario_id)  # docs sans chunk résumé -> searchable
-        n = _run_semantic_rerank(scenario_id, query)
+        n = _run_semantic_rerank_inline(scenario_id, query)
         _RERANK_JOBS[scenario_id] = {"status": "done", "updated": n}
 
     threading.Thread(target=_run, daemon=True).start()
@@ -11216,7 +11147,7 @@ def _maybe_autorerank(scenario_id: str) -> bool:
     def _run():
         try:
             _backfill_title_abstract_chunks(scenario_id)  # docs sans chunk résumé -> searchable
-            n = _run_semantic_rerank(scenario_id, query)
+            n = _run_semantic_rerank_inline(scenario_id, query)
             _RERANK_JOBS[scenario_id] = {"status": "done", "updated": n}
             logger.info(f"Auto-rerank {scenario_id}: {n} articles scorés.")
         except Exception as e:
@@ -13384,7 +13315,7 @@ def trigger_full_pipeline_with_brief(scenario_id: str, _: None = Depends(require
     def _run():
         logger.info(f"Full pipeline with brief: {scenario_id}")
         # 1. Reranking
-        _run_semantic_rerank(scenario_id, query)
+        _run_semantic_rerank_inline(scenario_id, query)
         # 2. Evidence Brief LLM
         _generate_evidence_brief_llm(scenario_id, force=True)
         # 3. Variables & Modèle
