@@ -3012,6 +3012,10 @@ export default function App() {
   // informe l'utilisateur de l'étape en cours pour qu'il patiente sereinement.
   const [searchPhase, setSearchPhase] = useState<'idle' | 'translating' | 'searching'>('idle');
   const [searchElapsed, setSearchElapsed] = useState(0);
+  // Affichage local-first : les résultats de la base locale apparaissent
+  // immédiatement ; `liveRefreshing` indique que les sources en direct sont
+  // encore interrogées en arrière-plan (la liste se rafraîchit toute seule).
+  const [liveRefreshing, setLiveRefreshing] = useState(false);
   const [folders, setFolders] = useState<ScenarioFolder[]>([]);
   const [sortBy, setSortBy] = useState<"score" | "semantic" | "lexical" | "year_desc" | "year_asc">("year_desc");
 
@@ -3178,46 +3182,72 @@ export default function App() {
       });
       const sid = newScenario.id;
       await populateUserScenario(sid, { includeLive, maxResults: 2000 });
-      // Attendre la fin de la construction du corpus (le panneau de progression
-      // informe l'utilisateur). On sonde l'état jusqu'à done/error.
-      for (let i = 0; i < 120; i++) {
-        await new Promise((r) => setTimeout(r, 5000));
+      // ── AFFICHAGE LOCAL-FIRST ────────────────────────────────────────────────
+      // La base locale est liée au scénario dès le début de la construction ;
+      // les sources en direct (~20-30 s) ne font que s'ajouter ensuite. On lit
+      // donc le corpus à chaque tour de boucle : dès qu'il contient des
+      // documents on les affiche (recherche locale = quasi instantanée), puis on
+      // continue à rafraîchir en arrière-plan jusqu'à la fin de la fédération.
+      let lastTotal = 0;
+      let firstDetailLoaded = false;
+      const renderCorpus = async () => {
+        const corpus = await fetchScenarioCorpus(sid, { limit: 10000 });
+        const corpusResults: SearchResult[] = (corpus.articles || []).map((a: CorpusArticle) => ({
+          id: `${a.id}-0`,
+          documentId: a.id,
+          chunkIndex: 0,
+          content: a.abstract ?? '',
+          title: a.title,
+          abstract: a.abstract,
+          source: a.source,
+          year: a.year,
+          url: a.url,
+          highlight: (a.abstract ?? '').slice(0, 600),
+          hasFulltext: a.has_fulltext,
+          semanticScore: a.similarity_score ?? null,
+          score: a.similarity_score ?? 0,
+        }));
+        setResults(corpusResults);
+        setSearchTotalMatching(corpus.total);   // == taille du corpus
+        // Répartition par source (base locale vs API en direct), nouvelles
+        // références live, et texte intégral vs résumé seul — lus depuis le corpus.
+        setSearchSourceBreakdown(corpus.source_breakdown ?? null);
+        setSearchLiveNewCount(corpus.newly_fetched ?? 0);
+        setSearchFulltextDocs(corpus.docs_with_fulltext ?? null);
+        setSearchAbstractDocs(corpus.docs_abstract_only ?? null);
+        setSearchScoreType('none');
+        setSearchScoreLabel(null);
+        lastTotal = corpus.total;
+        const first = corpusResults[0] ?? null;
+        if (first && !firstDetailLoaded) {
+          firstDetailLoaded = true;
+          loadDocumentDetail(first).catch(() => { /* non bloquant */ });
+        }
+        return corpusResults.length;
+      };
+      // On sonde l'état tout en affichant le corpus en construction.
+      for (let i = 0; i < 240; i++) {
+        let status = 'pending';
         try {
           const st = await fetchUserScenarioPopulateStatus(sid);
-          if (st.status === 'done' || st.status === 'error') break;
+          status = st.status;
         } catch { /* transient — keep polling */ }
+        try {
+          const shown = await renderCorpus();
+          // Dès qu'il y a des documents, on libère l'écran : les résultats
+          // locaux sont visibles et les sources live continuent en fond.
+          if (shown > 0 && loading) {
+            setLoading(false);
+            setLiveRefreshing(includeLive);
+          }
+        } catch { /* transient — keep polling */ }
+        if (status === 'done' || status === 'error') break;
+        await new Promise((r) => setTimeout(r, 2500));
       }
-      // Lire le corpus construit : c'est CE nombre qui est affiché (== page scénario).
-      const corpus = await fetchScenarioCorpus(sid, { limit: 10000 });
-      const corpusResults: SearchResult[] = (corpus.articles || []).map((a: CorpusArticle) => ({
-        id: `${a.id}-0`,
-        documentId: a.id,
-        chunkIndex: 0,
-        content: a.abstract ?? '',
-        title: a.title,
-        abstract: a.abstract,
-        source: a.source,
-        year: a.year,
-        url: a.url,
-        highlight: (a.abstract ?? '').slice(0, 600),
-        hasFulltext: a.has_fulltext,
-        semanticScore: a.similarity_score ?? null,
-        score: a.similarity_score ?? 0,
-      }));
-      setResults(corpusResults);
-      setSearchTotalMatching(corpus.total);   // == taille du corpus
-      // Répartition par source (base locale vs API en direct), nouvelles
-      // références live, et texte intégral vs résumé seul — lus depuis le corpus.
-      setSearchSourceBreakdown(corpus.source_breakdown ?? null);
-      setSearchLiveNewCount(corpus.newly_fetched ?? 0);
-      setSearchFulltextDocs(corpus.docs_with_fulltext ?? null);
-      setSearchAbstractDocs(corpus.docs_abstract_only ?? null);
-      setSearchScoreType('none');
-      setSearchScoreLabel(null);
-      const first = corpusResults[0] ?? null;
-      if (first) {
-        await loadDocumentDetail(first);
-      }
+      // Rafraîchissement final (corpus complet, scores/reranking appliqués).
+      setLiveRefreshing(false);
+      try { await renderCorpus(); } catch { /* déjà affiché */ }
+      const corpus = { total: lastTotal };
       // Mettre à jour les listes locales (scénario désormais construit).
       setUserScenarios(prev => {
         const filtered = prev.filter(s => !(s.query === newScenario.query && s.mode === newScenario.mode && !s.pinned));
@@ -3241,6 +3271,7 @@ export default function App() {
       setResults([]);
     } finally {
       setLoading(false);
+      setLiveRefreshing(false);
       setSearchPhase('idle');
     }
   }
@@ -3794,6 +3825,12 @@ export default function App() {
                           );
                         })()}
                       </p>
+                      {liveRefreshing && (
+                        <p className="flex items-center gap-2 text-xs text-emerald-300/80">
+                          <span className="h-3 w-3 animate-spin rounded-full border-2 border-emerald-300/30 border-t-emerald-300" />
+                          Résultats de la base locale affichés · sources en direct en cours d'ajout…
+                        </p>
+                      )}
                       {searchSourceBreakdown && Object.keys(searchSourceBreakdown).length > 0 && (() => {
                         const localEntries = Object.entries(searchSourceBreakdown).filter(([k]) => !k.endsWith(" (live)"));
                         const liveEntries = Object.entries(searchSourceBreakdown).filter(([k]) => k.endsWith(" (live)"));

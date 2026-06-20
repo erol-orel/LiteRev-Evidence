@@ -7810,7 +7810,8 @@ def _generate_search_strategy(query: str) -> dict:
                 )},
                 {"role": "user", "content": f"Research query: {query}"}
             ],
-            temperature=0.2,
+            temperature=0,
+            seed=42,
             max_tokens=500,
             response_format={"type": "json_object"},
         )
