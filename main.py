@@ -4627,10 +4627,15 @@ def _load_viz_cache(scenario_id: str, col: str, ttl: int = 86400) -> dict | None
             row = _c.execute(text(
                 f"SELECT {_jc} AS j, {_at} AS at FROM scenario_settings WHERE scenario_id = :sid"
             ), {"sid": scenario_id}).mappings().first()
-        if row and row["j"] and row["at"]:
-            from datetime import datetime as _dt, timezone as _tz
-            _age = (_dt.now(_tz.utc) - row["at"].replace(tzinfo=_tz.utc)).total_seconds()
-            if _age < ttl:
+        if row and row["j"]:
+            fresh = True
+            if row["at"]:
+                from datetime import datetime as _dt, timezone as _tz
+                _ts = row["at"]
+                if _ts.tzinfo is None:
+                    _ts = _ts.replace(tzinfo=_tz.utc)
+                fresh = (_dt.now(_tz.utc) - _ts).total_seconds() < ttl
+            if fresh:
                 data = dict(row["j"])
                 data["from_cache"] = True
                 return data
