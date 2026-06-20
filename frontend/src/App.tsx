@@ -3006,8 +3006,8 @@ export default function App() {
   const [searchLiveNewCount, setSearchLiveNewCount] = useState<number | null>(null);
   const [searchScoreType, setSearchScoreType] = useState<string | null>(null);
   const [searchScoreLabel, setSearchScoreLabel] = useState<string | null>(null);
-  // Requête booléenne traduite par LLM (mode booléen) : affichée à l'utilisateur
-  // et utilisée comme base du corpus (même requête → compteur == taille du corpus).
+  // Requête booléenne (mode booléen) : affichée à l'utilisateur et utilisée comme
+  // base du corpus (même requête → compteur == taille du corpus).
   const [booleanStrategy, setBooleanStrategy] = useState<SearchStrategy | null>(null);
   const [translatingQuery, setTranslatingQuery] = useState(false);
   // Panneau de progression pendant la recherche (~30 s avec les APIs en direct) :
@@ -3155,9 +3155,9 @@ export default function App() {
     setEvidenceSummary(null);
     try {
       // Mode booléen : on traduit d'abord la requête en langage naturel en une
-      // requête booléenne (LLM). C'est CETTE requête qui définit le corpus, donc
-      // on la recherche ET on la persiste sur le scénario → le compteur affiché
-      // == la taille du corpus (même requête booléenne des deux côtés).
+      // requête booléenne. C'est CETTE requête qui définit le corpus, donc on la
+      // recherche ET on la persiste sur le scénario → le compteur affiché ==
+      // la taille du corpus (même requête booléenne des deux côtés).
       let strategy: SearchStrategy | null = null;
       if (mode === "boolean") {
         setSearchPhase('translating');
@@ -3336,7 +3336,7 @@ export default function App() {
 
   function handleReplaySearch(s: SavedSearch) {
     setQuery(s.query);
-    // Recherche unifiée : toujours en mode booléen (l'IA traduit si besoin).
+    // Recherche unifiée : toujours en mode booléen (traduction automatique si besoin).
     setMode("boolean");
     setProjectContext(s.projectContext);
     setActiveTab("search");
@@ -3674,17 +3674,14 @@ export default function App() {
 
             <section className="space-y-6">
               <section className="rounded-3xl border border-white/10 bg-white/5 p-5 shadow-2xl">
-                {/* Une seule recherche : l'utilisateur saisit librement (langage
-                    naturel OU requête booléenne) ; l'IA détecte le format et, si
-                    besoin, traduit en requête booléenne — c'est elle qui définit le
+                {/* Une seule recherche : l'utilisateur saisit librement, en langage
+                    naturel ou en requête booléenne. La requête booléenne définit le
                     corpus. Le seuil sémantique n'intervient plus ici (uniquement sur
                     la page scénario pour sélectionner les articles pertinents). */}
                 <div className="mb-3 flex items-start gap-2 text-xs text-forest-300">
-                  <span className="text-brand-300">✨</span>
                   <span>
-                    Décrivez votre sujet en langage naturel <span className="text-white/50">(« prévision de la demande d'ambulances »)</span>{" "}
-                    ou saisissez directement une requête booléenne <span className="text-white/50">(« ambulance AND (demand OR forecasting) »)</span>.
-                    L'IA reconnaît le format et traduit si nécessaire.
+                    Écrivez votre sujet de recherche en langage naturel <span className="text-white/50">(« prévision de la demande d'ambulances »)</span>{" "}
+                    ou en requête booléenne <span className="text-white/50">(« ambulance AND (demand OR forecasting) »)</span>.
                   </span>
                 </div>
 
@@ -3693,7 +3690,7 @@ export default function App() {
                     value={query}
                     onChange={(e) => setQuery(e.target.value)}
                     onKeyDown={(e) => e.key === "Enter" && handleSearch()}
-                    placeholder="Ex. prévision de la demande d'ambulances  —  ou  —  ambulance AND forecasting"
+                    placeholder="Ex. prévision de la demande d'ambulances  ou  ambulance AND forecasting"
                     className="min-h-14 flex-1 rounded-2xl border border-white/10 bg-forest-950/80 px-4 text-white outline-none placeholder:text-forest-500 focus:border-brand-400"
                   />
                   <button
@@ -3722,21 +3719,15 @@ export default function App() {
 
                 {mode === "boolean" && (translatingQuery || booleanStrategy?.general) && (
                   <div className="mt-3 rounded-2xl border border-brand-400/20 bg-brand-400/5 p-3">
-                    <div className="flex items-center gap-2 text-[10px] uppercase tracking-wider text-brand-300/80">
-                      <span>Requête booléenne (traduite par IA)</span>
-                      {translatingQuery && <span className="text-white/40 normal-case tracking-normal">· traduction…</span>}
+                    <div className="flex items-center gap-2 text-xs text-brand-300/80">
+                      <span>Requête booléenne</span>
+                      {translatingQuery && <span className="text-white/40">· traduction…</span>}
                     </div>
                     {booleanStrategy?.general && (
                       <code className="mt-1.5 block break-words font-mono text-xs text-white/80">
                         {booleanStrategy.general}
                       </code>
                     )}
-                    {booleanStrategy?.explanation && (
-                      <p className="mt-1.5 text-[11px] leading-snug text-forest-400">{booleanStrategy.explanation}</p>
-                    )}
-                    <p className="mt-1.5 text-[10px] leading-snug text-white/30">
-                      C'est cette requête qui définit le corpus du scénario : le nombre de documents ci-dessous == la taille du corpus.
-                    </p>
                   </div>
                 )}
               </section>
@@ -3757,7 +3748,7 @@ export default function App() {
                 const doneLocal = searching && searchElapsed >= 3;
                 const doneLive = searching && includeLive && searchElapsed >= 24;
                 const steps: { label: string; done: boolean; active: boolean; hint?: string }[] = [
-                  { label: "Traduction de la requête (IA)", done: doneTranslate, active: !doneTranslate },
+                  { label: "Traduction de la requête", done: doneTranslate, active: !doneTranslate },
                   { label: "Recherche dans la base locale indexée", done: doneLocal, active: doneTranslate && !doneLocal },
                   ...(includeLive ? [{
                     label: "Interrogation des sources API en direct",
@@ -3765,7 +3756,7 @@ export default function App() {
                     active: doneLocal && !doneLive,
                     hint: doneLocal && !doneLive ? liveSources[searchElapsed % liveSources.length] : undefined,
                   }] : []),
-                  { label: "Agrégation, déduplication & tri par pertinence", done: false, active: includeLive ? doneLive : doneLocal },
+                  { label: "Agrégation et déduplication", done: false, active: includeLive ? doneLive : doneLocal },
                 ];
                 return (
                   <div className="rounded-3xl border border-brand-400/20 bg-white/5 p-6">
@@ -3824,9 +3815,6 @@ export default function App() {
                             </>
                           );
                         })()}
-                      </p>
-                      <p className="text-[10px] text-white/30 leading-snug max-w-2xl">
-                        Corpus = résultat de la requête booléenne (base locale + sources API en direct). Ce nombre peut varier avec les sources API et la croissance de la base, mais PAS avec le seuil sémantique (qui ne sélectionne les articles pertinents que sur la page scénario). Les résultats sont triés par récence.
                       </p>
                       {searchSourceBreakdown && Object.keys(searchSourceBreakdown).length > 0 && (() => {
                         const localEntries = Object.entries(searchSourceBreakdown).filter(([k]) => !k.endsWith(" (live)"));
