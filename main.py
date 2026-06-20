@@ -4242,7 +4242,9 @@ def get_scenario_corpus(
             WHERE {where}
             ORDER BY
                 CASE WHEN COALESCE(ars.similarity_score, 0.0) >= :threshold THEN 0 ELSE 1 END ASC,
-                COALESCE(ars.rerank_score, ars.similarity_score, 0.0) DESC,
+                (ars.rerank_score IS NOT NULL) DESC,
+                ars.rerank_score DESC NULLS LAST,
+                ars.similarity_score DESC NULLS LAST,
                 d.year DESC NULLS LAST,
                 d.citation_count DESC NULLS LAST,
                 d.title ASC
@@ -7670,7 +7672,9 @@ def get_user_scenario_corpus(
             WHERE {where}
             ORDER BY
                 CASE WHEN COALESCE(ars.similarity_score, 0.0) >= :threshold THEN 0 ELSE 1 END ASC,
-                COALESCE(ars.rerank_score, ars.similarity_score, 0.0) DESC,
+                (ars.rerank_score IS NOT NULL) DESC,
+                ars.rerank_score DESC NULLS LAST,
+                ars.similarity_score DESC NULLS LAST,
                 d.year DESC NULLS LAST,
                 d.citation_count DESC NULLS LAST,
                 d.title ASC
@@ -8802,7 +8806,7 @@ def _cohere_rerank(query: str, docs: list[str], model: str = "rerank-v3.5") -> l
         return None
 
 
-def _run_cross_encoder_rerank(scenario_id: str, query: str, top_k: int = 200) -> int:
+def _run_cross_encoder_rerank(scenario_id: str, query: str, top_k: int = 1000) -> int:
     """Reranke le sous-ensemble PERTINENT (cosinus >= seuil) avec un cross-encoder
     (Cohere). La SÉLECTION reste pilotée par le cosinus + seuil ; on ne fait
     qu'AMÉLIORER l'ORDRE des articles pertinents (précision). No-op sans clé Cohere.

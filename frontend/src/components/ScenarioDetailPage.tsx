@@ -1314,16 +1314,22 @@ function ArticleRow({
                 Full-text
               </span>
             )}
+            {/* Score de PERTINENCE (Cohere) = celui qui détermine le classement,
+                affiché en premier pour que l'ordre soit lisible. */}
+            {article.rerank_score !== undefined && article.rerank_score !== null && (
+              <span className="rounded-full px-2 py-0.5 text-[9px] font-medium bg-violet-500/15 border border-violet-500/30 text-violet-300"
+                title="Pertinence (reranking Cohere) — c'est ce score qui ordonne les articles">
+                ⊕ {article.rerank_score.toFixed(3)}
+              </span>
+            )}
             {article.similarity_score !== undefined && article.similarity_score !== null && (
               <span className={`rounded-full px-2 py-0.5 text-[9px] font-medium ${
-                article.similarity_score >= 0.9
-                  ? 'bg-white/5 border border-white/10 text-white/30'
-                  : article.similarity_score >= 0.45
+                article.similarity_score >= 0.45
                   ? 'bg-brand-500/15 border border-brand-500/30 text-brand-300'
                   : 'bg-white/5 border border-white/10 text-white/30'
               }`}
-              title={article.similarity_score >= 0.99 ? 'Score lexical (BM25) : embedding non encore disponible' : 'Score sémantique (cosinus)'}>
-                {article.similarity_score >= 0.99 ? '≡' : '◎'} {article.similarity_score.toFixed(3)}
+              title="Similarité sémantique (cosinus)">
+                ◎ {article.similarity_score.toFixed(3)}
               </span>
             )}
             <span className={`rounded-full px-2 py-0.5 text-[9px] font-medium ${statusBadge}`}>

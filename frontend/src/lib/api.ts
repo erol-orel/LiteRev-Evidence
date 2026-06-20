@@ -1433,6 +1433,7 @@ export interface CorpusArticle {
   open_access: boolean | null;
   has_fulltext: boolean;
   similarity_score?: number | null;
+  rerank_score?: number | null;
   screening_status?: string | null;
   reviewer_1_status?: string | null;
   pmid?: string | null;

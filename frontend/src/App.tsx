@@ -4004,13 +4004,15 @@ export default function App() {
                                 {result.evidenceCategory}
                               </span>
                             )}
-                            {/* Badge couverture textuelle */}
+                            {/* Badge couverture textuelle — basé sur hasFulltext
+                                (présence d'un chunk plein texte), pas sur chunkType
+                                qui n'est pas renseigné pour les résultats du corpus. */}
                             <span className={`rounded-full px-2 py-1 border text-[11px] font-semibold ${
-                              result.chunkType === 'fulltext_section'
+                              result.hasFulltext
                                 ? 'bg-brand-500/10 border-brand-500/20 text-brand-400'
                                 : 'bg-forest-800/50 border-white/5 text-forest-500'
-                            }`} title={result.chunkType === 'fulltext_section' ? 'Texte intégral indexé' : 'Titre + résumé uniquement'}>
-                              {result.chunkType === 'fulltext_section' ? 'Full Text' : 'Abstract'}
+                            }`} title={result.hasFulltext ? 'Texte intégral indexé' : 'Titre + résumé uniquement'}>
+                              {result.hasFulltext ? 'Full Text' : 'Abstract'}
                             </span>
                             {/* Provenance : base locale indexée vs source API en direct */}
                             {result.isLive ? (
