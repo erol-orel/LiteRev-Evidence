@@ -512,13 +512,32 @@ def startup_event() -> None:
             try:
                 title    = row["title"] or ""
                 abstract = row["abstract"] or ""
+                # Évidence extraite du TEXTE INTÉGRAL si disponible, sinon du résumé.
+                # Les chunks fulltext_section sont concaténés dans l'ordre ; on
+                # marque la source (`pico_source`) pour pouvoir ré-extraire plus
+                # tard les articles dont le PICO venait du résumé seul.
+                body_text   = abstract[:3000]
+                body_label  = "Abstract"
+                pico_source = "abstract"
+                if row.get("has_fulltext"):
+                    with engine.connect() as _ftc:
+                        _ft = _ftc.execute(text("""
+                            SELECT string_agg(content, E'\n\n' ORDER BY chunk_index) AS ft
+                            FROM document_chunk
+                            WHERE document_id = :id AND chunk_type = 'fulltext_section'
+                        """), {"id": row["id"]}).scalar()
+                    if _ft and len(_ft) > len(abstract):
+                        body_text   = _ft[:14000]
+                        body_label  = "Full text"
+                        pico_source = "fulltext"
                 resp = client.chat.completions.create(
                     model="gpt-4.1-mini",
                     messages=[
                         {"role": "system", "content": _system_pico},
-                        {"role": "user",   "content": f"Title: {title}\n\nAbstract: {abstract[:3000]}"},
+                        {"role": "user",   "content": f"Title: {title}\n\n{body_label}: {body_text}"},
                     ],
-                    temperature=0.1,
+                    temperature=0,
+                    seed=42,
                     max_tokens=400,
                     response_format={"type": "json_object"},
                 )
@@ -528,6 +547,7 @@ def startup_event() -> None:
                     return None
                 pico["pico_confidence"] = float(pico.get("pico_confidence", 0.5))
                 pico["pico_notes"]      = pico.get("pico_notes", "")
+                pico["pico_source"]     = pico_source
                 with engine.begin() as _c:
                     _c.execute(text("""
                         UPDATE literature_document
@@ -602,14 +622,24 @@ def startup_event() -> None:
 
                 # ── 2. PICO ───────────────────────────────────────────────────
                 with engine.connect() as _conn:
+                    # On extrait le PICO des articles sans PICO, PUIS on ré-extrait
+                    # ceux dont le PICO venait du résumé alors que le texte intégral
+                    # est désormais disponible (pico_source != 'fulltext'). Les
+                    # articles jamais traités passent en premier.
                     _pico_rows = _conn.execute(text("""
-                        SELECT id, title, abstract
+                        SELECT id, title, abstract, has_fulltext
                         FROM literature_document
                         WHERE project_context = 'literev'
-                          AND pico_json IS NULL
                           AND abstract IS NOT NULL
                           AND LENGTH(abstract) > 50
-                        ORDER BY id
+                          AND (
+                            pico_json IS NULL
+                            OR (
+                                has_fulltext IS TRUE
+                                AND (pico_json->>'pico_source') IS DISTINCT FROM 'fulltext'
+                            )
+                          )
+                        ORDER BY (pico_json IS NULL) DESC, id
                         LIMIT :lim
                     """), {"lim": _PICO_BATCH}).mappings().fetchall()
 
@@ -1218,11 +1248,13 @@ def _set_scenario_corpus(scenario_id: str, ids: list) -> int:
                  "AND document_id NOT IN :ids").bindparams(bindparam("ids", expanding=True)),
             {"sid": scenario_id, "ids": list(ids)},
         )
-        for _did in ids:
-            _c.execute(text("""
-                INSERT INTO article_scenarios (document_id, scenario_id, similarity_score)
-                VALUES (:d, :s, NULL) ON CONFLICT (document_id, scenario_id) DO NOTHING
-            """), {"d": _did, "s": scenario_id})
+        # Insertion en masse (un seul aller-retour) plutôt qu'une requête par
+        # document : la (ré)construction du corpus local doit être quasi immédiate.
+        _c.execute(text("""
+            INSERT INTO article_scenarios (document_id, scenario_id, similarity_score)
+            SELECT unnest(CAST(:ids AS bigint[])), :s, NULL
+            ON CONFLICT (document_id, scenario_id) DO NOTHING
+        """), {"ids": list(ids), "s": scenario_id})
     return len(ids)
 
 
@@ -5270,7 +5302,7 @@ def extract_article_pico(scenario_id: str, article_id: int, _: None = Depends(re
     """Extrait (ou re-extrait) le PICO pour un article via LLM à la demande."""
     with engine.connect() as conn:
         row = conn.execute(text("""
-            SELECT id, title, abstract
+            SELECT id, title, abstract, has_fulltext
             FROM literature_document
             WHERE id = :article_id
               AND project_context = 'literev'
@@ -5297,7 +5329,18 @@ def extract_article_pico(scenario_id: str, article_id: int, _: None = Depends(re
         '"pico_confidence":0.0-1.0,"pico_notes":""}\n'
         "Be concise (max 2 sentences per field). Return ONLY the JSON."
     )
-    user_content = f"Title: {title}\n\nAbstract: {abstract[:3000]}"
+    # Évidence extraite du TEXTE INTÉGRAL si disponible, sinon du résumé.
+    body_text, body_label, pico_source = abstract[:3000], "Abstract", "abstract"
+    if row.get("has_fulltext"):
+        with engine.connect() as _ftc:
+            _ft = _ftc.execute(text("""
+                SELECT string_agg(content, E'\n\n' ORDER BY chunk_index) AS ft
+                FROM document_chunk
+                WHERE document_id = :id AND chunk_type = 'fulltext_section'
+            """), {"id": article_id}).scalar()
+        if _ft and len(_ft) > len(abstract):
+            body_text, body_label, pico_source = _ft[:14000], "Full text", "fulltext"
+    user_content = f"Title: {title}\n\n{body_label}: {body_text}"
 
     try:
         from openai import OpenAI as _OAI
@@ -5309,7 +5352,8 @@ def extract_article_pico(scenario_id: str, article_id: int, _: None = Depends(re
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_content},
             ],
-            temperature=0.1,
+            temperature=0,
+            seed=42,
             max_tokens=400,
             response_format={"type": "json_object"},
         )
@@ -5321,6 +5365,7 @@ def extract_article_pico(scenario_id: str, article_id: int, _: None = Depends(re
 
         pico["pico_confidence"] = float(pico.get("pico_confidence", 0.5))
         pico["pico_notes"] = pico.get("pico_notes", "")
+        pico["pico_source"] = pico_source
 
         with engine.begin() as conn:
             conn.execute(text("""
@@ -5858,205 +5903,9 @@ def get_scenario_pico_bulk(scenario_id: str, limit: int = 100000, offset: int = 
 # ─── Evidence Brief PDF ───────────────────────────────────────────────────────
 @app.get("/gesica/scenarios/{scenario_id}/evidence-brief")
 def get_evidence_brief(scenario_id: str) -> dict[str, Any]:
-    """Retourne les données structurées enrichies pour l'Evidence Brief (PICO, synthèse, designs, années)."""
-    with engine.connect() as conn:
-        # Stats du corpus
-        corpus_stats = conn.execute(text("""
-            SELECT
-                COUNT(*) AS total,
-                COUNT(*) FILTER (WHERE is_duplicate IS TRUE) AS duplicates,
-                COUNT(*) FILTER (WHERE pico_json IS NOT NULL) AS with_pico,
-                COUNT(*) FILTER (WHERE screening_status = 'included') AS included,
-                COUNT(*) FILTER (WHERE screening_status = 'excluded') AS excluded,
-                COUNT(*) FILTER (WHERE screening_status = 'pending' OR screening_status IS NULL) AS pending,
-                COUNT(*) FILTER (WHERE has_fulltext IS TRUE) AS with_fulltext,
-                GREATEST(1900, MIN(year)) AS year_min,
-                MAX(year) AS year_max,
-                AVG(citation_count) FILTER (WHERE citation_count IS NOT NULL) AS avg_citations,
-                MAX(citation_count) AS max_citations
-            FROM literature_document ld
-            WHERE EXISTS (
-                SELECT 1 FROM article_scenarios asn
-                WHERE asn.document_id = ld.id AND asn.scenario_id = :sid
-            ) AND project_context = 'literev'
-        """), {"sid": scenario_id}).mappings().fetchone()
-
-        # Top articles par citations (inclus en priorité)
-        top_articles = conn.execute(text("""
-            SELECT ld.id, ld.title, ld.abstract, ld.year, ld.journal, ld.authors, ld.doi,
-                   ld.study_design, ld.pico_json, ld.citation_count, ld.screening_status,
-                   ld.quality_score, asn.similarity_score
-            FROM literature_document ld
-            JOIN article_scenarios asn ON asn.document_id = ld.id AND asn.scenario_id = :sid
-            WHERE ld.project_context = 'literev'
-              AND ld.is_duplicate IS NOT TRUE
-              AND ld.abstract IS NOT NULL
-            ORDER BY
-                CASE WHEN ld.screening_status = 'included' THEN 0 ELSE 1 END,
-                ld.citation_count DESC NULLS LAST,
-                ld.year DESC NULLS LAST
-            LIMIT 15
-        """), {"sid": scenario_id}).mappings().fetchall()
-
-        # Distribution par type d'étude
-        study_designs = conn.execute(text(f"""
-            WITH b AS (
-                SELECT lower(coalesce(
-                    nullif(trim(ld.study_design), ''),
-                    nullif(trim(ld.pico_json->>'study_design'), ''), '')) AS d
-                FROM literature_document ld
-                JOIN article_scenarios asn ON asn.document_id = ld.id AND asn.scenario_id = :sid
-                WHERE ld.project_context = 'literev'
-                  AND ld.is_duplicate IS NOT TRUE
-            )
-            SELECT {_STUDY_DESIGN_CASE} AS design, COUNT(*) AS n
-            FROM b GROUP BY 1 ORDER BY 2 DESC
-        """), {"sid": scenario_id}).mappings().fetchall()
-
-        # Distribution par année (20 dernières années)
-        year_dist = conn.execute(text("""
-            SELECT ld.year, COUNT(*) AS n
-            FROM literature_document ld
-            JOIN article_scenarios asn ON asn.document_id = ld.id AND asn.scenario_id = :sid
-            WHERE ld.project_context = 'literev'
-              AND ld.is_duplicate IS NOT TRUE AND ld.year IS NOT NULL
-              AND ld.year >= 2000
-            GROUP BY ld.year ORDER BY ld.year ASC
-        """), {"sid": scenario_id}).mappings().fetchall()
-
-        # Distribution par source
-        source_dist = conn.execute(text("""
-            SELECT ld.source, COUNT(*) AS n
-            FROM literature_document ld
-            JOIN article_scenarios asn ON asn.document_id = ld.id AND asn.scenario_id = :sid
-            WHERE ld.project_context = 'literev'
-              AND ld.is_duplicate IS NOT TRUE
-            GROUP BY ld.source ORDER BY n DESC LIMIT 8
-        """), {"sid": scenario_id}).mappings().fetchall()
-
-        # Stats PICO détaillées (P, I, C, O extraits)
-        pico_articles = conn.execute(text("""
-            SELECT ld.id, ld.title, ld.year, ld.journal, ld.citation_count,
-                   ld.pico_json, ld.study_design, ld.screening_status, asn.similarity_score
-            FROM literature_document ld
-            JOIN article_scenarios asn ON asn.document_id = ld.id AND asn.scenario_id = :sid
-            WHERE ld.project_context = 'literev'
-              AND ld.pico_json IS NOT NULL
-              AND ld.is_duplicate IS NOT TRUE
-            ORDER BY
-                CASE WHEN ld.screening_status = 'included' THEN 0 ELSE 1 END,
-                ld.citation_count DESC NULLS LAST
-            LIMIT 100000
-        """), {"sid": scenario_id}).mappings().fetchall()
-
-        # Distribution des niveaux de preuve
-        evidence_levels = conn.execute(text("""
-            SELECT
-                CASE
-                    WHEN quality_score >= 0.7 THEN 'Forte'
-                    WHEN quality_score >= 0.4 THEN 'Modérée'
-                    WHEN quality_score IS NOT NULL THEN 'Faible'
-                    ELSE 'Non évaluée'
-                END AS level,
-                COUNT(*) AS n
-            FROM literature_document ld
-            JOIN article_scenarios asn ON asn.document_id = ld.id AND asn.scenario_id = :sid
-            WHERE ld.project_context = 'literev'
-              AND ld.is_duplicate IS NOT TRUE
-            GROUP BY 1 ORDER BY 2 DESC
-        """), {"sid": scenario_id}).mappings().fetchall()
-
-        # Double-aveugle stats
-        blind_stats = conn.execute(text("""
-            SELECT
-                COUNT(*) FILTER (WHERE reviewer_1_status IS NOT NULL) AS r1_done,
-                COUNT(*) FILTER (WHERE reviewer_2_status IS NOT NULL) AS r2_done,
-                COUNT(*) FILTER (WHERE reviewer_1_status IS NOT NULL AND reviewer_2_status IS NOT NULL) AS both_done,
-                COUNT(*) FILTER (WHERE kappa_resolved IS TRUE) AS agreements,
-                COUNT(*) FILTER (WHERE kappa_final_status = 'conflict') AS conflicts
-            FROM literature_document ld
-            JOIN article_scenarios asn ON asn.document_id = ld.id AND asn.scenario_id = :sid
-            WHERE ld.project_context = 'literev'
-        """), {"sid": scenario_id}).mappings().fetchone()
-
-    # Construire le tableau comparatif PICO
-    pico_table = []
-    for r in pico_articles:
-        pj = r["pico_json"] or {}
-        pico_table.append({
-            "id": r["id"],
-            "title": (r["title"] or "")[:120],
-            "year": r["year"],
-            "journal": r["journal"],
-            "citation_count": r["citation_count"],
-            "study_design": r["study_design"] or pj.get("study_design", ""),
-            "screening_status": r["screening_status"],
-            "similarity_score": round(float(r["similarity_score"]), 3) if r["similarity_score"] else None,
-            "pico": {
-                "population": pj.get("population", pj.get("P", "")),
-                "intervention": pj.get("intervention", pj.get("I", "")),
-                "comparator": pj.get("comparator", pj.get("C", "")),
-                "outcome": pj.get("outcome", pj.get("O", "")),
-                "study_design": pj.get("study_design", ""),
-                "key_finding": pj.get("key_finding", pj.get("conclusion", "")),
-                "limitations": pj.get("limitations", ""),
-                "evidence_level": pj.get("evidence_level", ""),
-            }
-        })
-
-    return {
-        "scenario_id": scenario_id,
-        "generated_at": __import__('datetime').datetime.now().isoformat(),
-        "corpus_stats": {
-            "total": int(corpus_stats["total"] or 0),
-            "duplicates": int(corpus_stats["duplicates"] or 0),
-            "with_pico": int(corpus_stats["with_pico"] or 0),
-            "with_fulltext": int(corpus_stats["with_fulltext"] or 0),
-            "included": int(corpus_stats["included"] or 0),
-            "excluded": int(corpus_stats["excluded"] or 0),
-            "pending": int(corpus_stats["pending"] or 0),
-            "year_min": corpus_stats["year_min"],
-            "year_max": corpus_stats["year_max"],
-            "avg_citations": round(float(corpus_stats["avg_citations"]), 1) if corpus_stats["avg_citations"] else None,
-            "max_citations": int(corpus_stats["max_citations"]) if corpus_stats["max_citations"] else None,
-            "pico_coverage_pct": round(100 * int(corpus_stats["with_pico"] or 0) / max(int(corpus_stats["total"] or 1), 1), 1),
-        },
-        "double_blind_stats": {
-            "reviewer_1_done": int(blind_stats["r1_done"] or 0),
-            "reviewer_2_done": int(blind_stats["r2_done"] or 0),
-            "both_done": int(blind_stats["both_done"] or 0),
-            "agreements": int(blind_stats["agreements"] or 0),
-            "conflicts": int(blind_stats["conflicts"] or 0),
-        },
-        "top_articles": [
-            {
-                "id": r["id"],
-                "title": r["title"],
-                "year": r["year"],
-                "journal": r["journal"],
-                "authors": r["authors"],
-                "doi": r["doi"],
-                "study_design": r["study_design"] or (r["pico_json"].get("study_design") if r["pico_json"] else None),
-                "citation_count": r["citation_count"],
-                "screening_status": r["screening_status"],
-                "quality_score": round(float(r["quality_score"]), 2) if r["quality_score"] else None,
-                "similarity_score": round(float(r["similarity_score"]), 3) if r["similarity_score"] else None,
-                "abstract_excerpt": (r["abstract"] or "")[:500],
-                "pico_summary": {
-                    "population": r["pico_json"].get("population", r["pico_json"].get("P", "")) if r["pico_json"] else "",
-                    "intervention": r["pico_json"].get("intervention", r["pico_json"].get("I", "")) if r["pico_json"] else "",
-                    "outcome": r["pico_json"].get("outcome", r["pico_json"].get("O", "")) if r["pico_json"] else "",
-                    "key_finding": r["pico_json"].get("key_finding", r["pico_json"].get("conclusion", "")) if r["pico_json"] else "",
-                } if r["pico_json"] else None,
-            }
-            for r in top_articles
-        ],
-        "pico_table": pico_table,
-        "study_design_distribution": [{"design": d["design"], "count": int(d["n"])} for d in study_designs],
-        "year_distribution": [{"year": d["year"], "count": int(d["n"])} for d in year_dist],
-        "source_distribution": [{"source": s["source"], "count": int(s["n"])} for s in source_dist],
-        "evidence_level_distribution": [{"level": e["level"], "count": int(e["n"])} for e in evidence_levels],
-    }
+    """Evidence Brief d'un scénario GESICA (délègue au constructeur générique :
+    un seul helper partagé avec les scénarios utilisateur)."""
+    return _build_evidence_brief(scenario_id)
 
 
 # ─── DOUBLE-AVEUGLE SCREENING + KAPPA DE COHEN ───────────────────────────────
@@ -7810,7 +7659,8 @@ def _generate_search_strategy(query: str) -> dict:
                 )},
                 {"role": "user", "content": f"Research query: {query}"}
             ],
-            temperature=0.2,
+            temperature=0,
+            seed=42,
             max_tokens=500,
             response_format={"type": "json_object"},
         )
@@ -7941,11 +7791,23 @@ def _run_user_scenario_populate(
     if _pipeline_callback is None:
         _user_scenario_populate_jobs[scenario_id] = {
             "status": "running", "ingested": 0, "errors": 0, "total_found": 0,
+            # `phase` reflète l'ÉTAPE RÉELLE du backend (et non un minuteur côté
+            # client) : local → federation → scoring → rerank → done. `rerank_status`
+            # suit le cross-encoder qui tourne en arrière-plan après l'affichage.
+            "phase": "local", "rerank_status": "idle",
             "sources": {
                 "db_cache": 0, "pubmed": 0, "openalex": 0, "crossref": 0,
                 "europepmc": 0, "medrxiv": 0, "biorxiv": 0, "prospero": 0, "cochrane": 0
             }
         }
+
+    def _set_phase(_phase: str, **extra):
+        """Met à jour la phase réelle du job (no-op pour le pipeline complet)."""
+        if _pipeline_callback is None:
+            job = _user_scenario_populate_jobs.get(scenario_id)
+            if job is not None:
+                job["phase"] = _phase
+                job.update(extra)
 
     ENTREZ_BASE = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
     EMAIL = os.getenv("PUBMED_EMAIL", "literev@example.com")
@@ -8019,13 +7881,14 @@ def _run_user_scenario_populate(
                              bindparam("ids", expanding=True)),
                     {"sid": scenario_id, "ids": list(_local_ids)},
                 )
-                for _lid in _local_ids:
-                    _lc2.execute(text("""
-                        INSERT INTO article_scenarios (document_id, scenario_id, similarity_score)
-                        VALUES (:doc_id, :sid, NULL)
-                        ON CONFLICT (document_id, scenario_id) DO NOTHING
-                    """), {"doc_id": _lid, "sid": scenario_id})
-                    local_linked += 1
+                # Insertion en masse (un seul aller-retour) : le corpus local doit
+                # être lié quasi instantanément, sans une requête par document.
+                _lc2.execute(text("""
+                    INSERT INTO article_scenarios (document_id, scenario_id, similarity_score)
+                    SELECT unnest(CAST(:ids AS bigint[])), :sid, NULL
+                    ON CONFLICT (document_id, scenario_id) DO NOTHING
+                """), {"ids": list(_local_ids), "sid": scenario_id})
+                local_linked = len(_local_ids)
             _inc("db_cache", local_linked)
             logger.info(f"Populate {scenario_id}: corpus booléen = {local_linked} docs (base locale)")
 
@@ -8583,6 +8446,7 @@ def _run_user_scenario_populate(
     ]
     t_start = _time.time()
     if include_live:
+        _set_phase("federation")
         with ThreadPoolExecutor(max_workers=7) as executor:
             futures = {executor.submit(fn): fn.__name__ for fn in source_funcs}
             for future in as_completed(futures):
@@ -8642,27 +8506,53 @@ def _run_user_scenario_populate(
                 WHERE id = :sid
             """), {"sid": scenario_id})
 
-        # ── Scores sémantiques — SANS suppression (corpus complet conservé) ──
+        # ── Scores sémantiques (cosinus) — SANS suppression ─────────────────
         # Soft filter : le seuil filtre l'affichage et l'aval, JAMAIS par
         # suppression. Réduire le seuil fait donc réapparaître des articles.
+        _set_phase("scoring")
         try:
             _backfill_title_abstract_chunks(scenario_id)  # docs liés sans chunk résumé
             _n_scored = _run_semantic_rerank_inline(scenario_id, query)
-            logger.info(f"Post-populate rerank {scenario_id}: {_n_scored} articles scorés (aucune suppression).")
-            # Cross-encoder (Cohere) : réordonne le sous-ensemble pertinent pour
-            # plus de précision. No-op si COHERE_API_KEY absent.
-            _n_ce = _run_cross_encoder_rerank(scenario_id, query)
-            if _n_ce:
-                logger.info(f"Post-populate cross-encoder {scenario_id}: {_n_ce} articles réordonnés.")
+            logger.info(f"Post-populate scoring {scenario_id}: {_n_scored} articles scorés (cosinus, aucune suppression).")
         except Exception as _e_rr:
-            logger.warning(f"rerank post-populate {scenario_id}: {_e_rr}")
+            logger.warning(f"scoring post-populate {scenario_id}: {_e_rr}")
 
-        # Précalcul des visualisations dès que le corpus est construit et scoré, pour
-        # que l'onglet Visualisation soit prêt sans attente (clustering UMAP/HDBSCAN,
-        # mis en cache). Le pipeline complet a sa propre étape clustering ; on ne
-        # déclenche donc ce précalcul que pour le chemin /populate (recherche).
+        # ── Le corpus est scoré (cosinus) → on le publie MAINTENANT ──────────
+        # Le cross-encoder Cohere (plus lent) et les visualisations tournent
+        # ENSUITE en arrière-plan : l'utilisateur voit les résultats ordonnés par
+        # cosinus immédiatement, puis la liste se réordonne quand le rerank arrive
+        # (rerank_status). Plus d'attente synchrone sur l'API Cohere.
+        _cohere_enabled = bool(os.getenv("COHERE_API_KEY"))
         if _pipeline_callback is None:
-            def _precompute_viz(_sid):
+            _sources_final = _user_scenario_populate_jobs.get(scenario_id, {}).get("sources", {})
+            _src_parts = [f"{src}: {cnt}" for src, cnt in _sources_final.items() if cnt > 0]
+            _src_summary = " | ".join(_src_parts) if _src_parts else "aucune source"
+            _user_scenario_populate_jobs[scenario_id] = {
+                "status": "done",
+                "phase": "done",
+                "rerank_status": "running" if _cohere_enabled else "skipped",
+                "ingested": ingested,
+                "errors": errors,
+                "total_found": total_found,
+                "sources": _sources_final,
+                "message": f"{ingested} articles ingérés depuis 8 sources ({_src_summary}), {errors} erreurs.",
+            }
+
+        # Arrière-plan : cross-encoder (réordonne le sous-ensemble pertinent) puis
+        # clustering UMAP/HDBSCAN + knowledge graph (cache DB). Réservé au chemin
+        # /populate (le pipeline complet a ses propres étapes).
+        if _pipeline_callback is None:
+            def _post_done_bg(_sid, _query):
+                try:
+                    _n_ce = _run_cross_encoder_rerank(_sid, _query)
+                    if _n_ce:
+                        logger.info(f"Post-populate cross-encoder {_sid}: {_n_ce} articles réordonnés.")
+                except Exception as _ece:
+                    logger.warning(f"cross-encoder arrière-plan {_sid}: {_ece}")
+                finally:
+                    _job = _user_scenario_populate_jobs.get(_sid)
+                    if _job is not None:
+                        _job["rerank_status"] = "done"
                 try:
                     _run_clustering_background(_sid, True)   # clustering → cache DB
                 except Exception as _e1:
@@ -8673,22 +8563,10 @@ def _run_user_scenario_populate(
                     logger.warning(f"Précalcul KG {_sid}: {_e2}")
             try:
                 import threading as _vth
-                _vth.Thread(target=_precompute_viz, args=(scenario_id,), daemon=True).start()
+                _vth.Thread(target=_post_done_bg, args=(scenario_id, query), daemon=True).start()
             except Exception as _e_viz:
-                logger.warning(f"Précalcul visualisation {scenario_id}: {_e_viz}")
+                logger.warning(f"Tâches arrière-plan {scenario_id}: {_e_viz}")
 
-        if _pipeline_callback is None:
-            _sources_final = _user_scenario_populate_jobs.get(scenario_id, {}).get("sources", {})
-            _src_parts = [f"{src}: {cnt}" for src, cnt in _sources_final.items() if cnt > 0]
-            _src_summary = " | ".join(_src_parts) if _src_parts else "aucune source"
-            _user_scenario_populate_jobs[scenario_id] = {
-                "status": "done",
-                "ingested": ingested,
-                "errors": errors,
-                "total_found": total_found,
-                "sources": _sources_final,
-                "message": f"{ingested} articles ingérés depuis 8 sources ({_src_summary}), {errors} erreurs.",
-            }
         logger.info(f"Populate user_scenario {scenario_id}: {ingested} articles ingérés (8 sources, parallèle).")
         return ingested
 
@@ -10274,8 +10152,16 @@ def get_user_scenario_prisma(
 
 @app.get("/user-scenarios/{scenario_id}/evidence-brief")
 def get_user_scenario_evidence_brief(scenario_id: str) -> dict[str, Any]:
-    """Evidence Brief pour un scénario utilisateur (même format que GESICA)."""
-    row = _get_user_scenario_or_404(scenario_id)
+    """Evidence Brief d'un scénario utilisateur (délègue au constructeur générique)."""
+    _get_user_scenario_or_404(scenario_id)
+    return _build_evidence_brief(scenario_id)
+
+
+def _build_evidence_brief(scenario_id: str) -> dict[str, Any]:
+    """Construit l'Evidence Brief d'un scénario, indépendamment de son type (user
+    ou GESICA) : un seul helper générique. Toutes les statistiques (designs,
+    sources, niveaux de preuve, couverture, citations) sont calculées sur le
+    SOUS-ENSEMBLE PERTINENT (au-dessus du seuil sémantique)."""
     eff_thr = _get_scenario_threshold(scenario_id)
     with engine.connect() as conn:
         # `relevant*` = sous-ensemble PERTINENT (au-dessus du seuil sémantique) sur
@@ -10302,10 +10188,17 @@ def get_user_scenario_evidence_brief(scenario_id: str) -> dict[str, Any]:
                     AND COALESCE(ars.similarity_score, 0) >= :thr
                     AND EXISTS (SELECT 1 FROM document_chunk c
                         WHERE c.document_id = d.id AND c.chunk_type = 'fulltext_section')) AS relevant_with_fulltext,
-                GREATEST(1900, MIN(d.year)) AS year_min,
-                MAX(d.year) AS year_max,
-                AVG(d.citation_count) FILTER (WHERE d.citation_count IS NOT NULL) AS avg_citations,
-                MAX(d.citation_count) AS max_citations
+                -- Couverture & citations : calculées sur le SOUS-ENSEMBLE PERTINENT
+                -- (au-dessus du seuil), pas sur le corpus complet.
+                GREATEST(1900, MIN(d.year) FILTER (WHERE d.is_duplicate IS NOT TRUE
+                    AND COALESCE(ars.similarity_score, 0) >= :thr)) AS year_min,
+                MAX(d.year) FILTER (WHERE d.is_duplicate IS NOT TRUE
+                    AND COALESCE(ars.similarity_score, 0) >= :thr) AS year_max,
+                AVG(d.citation_count) FILTER (WHERE d.is_duplicate IS NOT TRUE
+                    AND COALESCE(ars.similarity_score, 0) >= :thr
+                    AND d.citation_count IS NOT NULL) AS avg_citations,
+                MAX(d.citation_count) FILTER (WHERE d.is_duplicate IS NOT TRUE
+                    AND COALESCE(ars.similarity_score, 0) >= :thr) AS max_citations
             FROM article_scenarios ars
             JOIN literature_document d ON d.id = ars.document_id
             WHERE ars.scenario_id = :sid
@@ -10319,12 +10212,17 @@ def get_user_scenario_evidence_brief(scenario_id: str) -> dict[str, Any]:
             JOIN literature_document d ON d.id = ars.document_id
             WHERE ars.scenario_id = :sid
               AND d.is_duplicate IS NOT TRUE AND d.abstract IS NOT NULL
+              AND COALESCE(ars.similarity_score, 0) >= :thr
             ORDER BY
                 CASE WHEN d.screening_status = 'included' THEN 0 ELSE 1 END,
                 d.citation_count DESC NULLS LAST, d.year DESC NULLS LAST
             LIMIT 15
-        """), {"sid": scenario_id}).mappings().fetchall()
+        """), {"sid": scenario_id, "thr": eff_thr}).mappings().fetchall()
 
+        # Toutes les distributions ci-dessous sont calculées sur le SOUS-ENSEMBLE
+        # PERTINENT (au-dessus du seuil sémantique), pas sur le corpus complet :
+        # elles doivent sommer au nombre de « pertinents » affiché (ex. 51), pas
+        # au total du corpus (ex. 100).
         study_designs = conn.execute(text(f"""
             WITH b AS (
                 SELECT lower(coalesce(
@@ -10333,27 +10231,30 @@ def get_user_scenario_evidence_brief(scenario_id: str) -> dict[str, Any]:
                 FROM article_scenarios ars
                 JOIN literature_document ld ON ld.id = ars.document_id
                 WHERE ars.scenario_id = :sid AND ld.is_duplicate IS NOT TRUE
+                  AND COALESCE(ars.similarity_score, 0) >= :thr
             )
             SELECT {_STUDY_DESIGN_CASE} AS design, COUNT(*) AS n
             FROM b GROUP BY 1 ORDER BY 2 DESC
-        """), {"sid": scenario_id}).mappings().fetchall()
+        """), {"sid": scenario_id, "thr": eff_thr}).mappings().fetchall()
 
         year_dist = conn.execute(text("""
             SELECT d.year, COUNT(*) AS n
             FROM article_scenarios ars
             JOIN literature_document d ON d.id = ars.document_id
             WHERE ars.scenario_id = :sid AND d.is_duplicate IS NOT TRUE
+              AND COALESCE(ars.similarity_score, 0) >= :thr
               AND d.year IS NOT NULL AND d.year >= 2000
             GROUP BY d.year ORDER BY d.year ASC
-        """), {"sid": scenario_id}).mappings().fetchall()
+        """), {"sid": scenario_id, "thr": eff_thr}).mappings().fetchall()
 
         source_dist = conn.execute(text("""
             SELECT d.source, COUNT(*) AS n
             FROM article_scenarios ars
             JOIN literature_document d ON d.id = ars.document_id
             WHERE ars.scenario_id = :sid AND d.is_duplicate IS NOT TRUE
+              AND COALESCE(ars.similarity_score, 0) >= :thr
             GROUP BY d.source ORDER BY n DESC LIMIT 8
-        """), {"sid": scenario_id}).mappings().fetchall()
+        """), {"sid": scenario_id, "thr": eff_thr}).mappings().fetchall()
 
         evidence_levels = conn.execute(text("""
             SELECT
@@ -10367,8 +10268,9 @@ def get_user_scenario_evidence_brief(scenario_id: str) -> dict[str, Any]:
             FROM article_scenarios ars
             JOIN literature_document d ON d.id = ars.document_id
             WHERE ars.scenario_id = :sid AND d.is_duplicate IS NOT TRUE
+              AND COALESCE(ars.similarity_score, 0) >= :thr
             GROUP BY 1 ORDER BY 2 DESC
-        """), {"sid": scenario_id}).mappings().fetchall()
+        """), {"sid": scenario_id, "thr": eff_thr}).mappings().fetchall()
 
     pico_table = []
     for r in top_articles:
@@ -11257,7 +11159,9 @@ def _generate_evidence_brief_llm(scenario_id: str, force: bool = False) -> dict[
 
     scenario_name = _get_scenario_name(scenario_id)
 
-    # Préparer le contexte : top 30 articles avec PICO
+    # Préparer le contexte : top 30 articles avec PICO + résumé. Le PICO (extrait
+    # du texte intégral quand disponible) donne la structure ; l'abstract apporte
+    # le récit brut (effets, conclusions) que la compression PICO perd.
     context_articles = []
     for a in articles[:30]:
         pj = a.get("pico_json") or {}
@@ -11273,6 +11177,7 @@ def _generate_evidence_brief_llm(scenario_id: str, force: bool = False) -> dict[
             "C": pj.get("comparator", pj.get("C", "")),
             "O": pj.get("outcome", pj.get("O", "")),
             "key_finding": pj.get("key_finding", pj.get("conclusion", "")),
+            "abstract": (a.get("abstract") or "")[:1500],
         })
 
     context_str = _json.dumps(context_articles, ensure_ascii=False, indent=2)
@@ -11683,7 +11588,9 @@ def _generate_variables_from_pico(scenario_id: str, persist: str = "active") -> 
 
     scenario_name = _get_scenario_name(scenario_id)
 
-    # Construire le contexte PICO
+    # Construire le contexte PICO + résumé. Le PICO (extrait du texte intégral
+    # quand disponible) structure ; l'abstract fournit les prédicteurs, métriques
+    # et résultats bruts utiles au choix des variables, outcomes et algorithme.
     pico_context = []
     for a in pico_articles[:25]:
         pj = a.get("pico_json") or {}
@@ -11697,6 +11604,7 @@ def _generate_variables_from_pico(scenario_id: str, persist: str = "active") -> 
             "C": pj.get("comparator", pj.get("C", "")),
             "O": pj.get("outcome", pj.get("O", "")),
             "key_finding": pj.get("key_finding", pj.get("conclusion", "")),
+            "abstract": (a.get("abstract") or "")[:1200],
         })
 
     context_str = _json.dumps(pico_context, ensure_ascii=False, indent=2)
@@ -11787,8 +11695,14 @@ Retourne UNIQUEMENT le JSON valide."""
         # exactement le même résultat (plus d'appel LLM non déterministe). On ne
         # régénère via le LLM QUE lorsque l'évidence change réellement.
         import hashlib as _hashlib
+        # Le suffixe de version invalide les empreintes des specs générés avec un
+        # contexte plus pauvre (ex. PICO seul, sans abstract) : ils sont régénérés
+        # une fois avec le contexte enrichi, puis réutilisés à évidence constante.
+        _CTX_VERSION = "ctx-v2-abstract"
         _ev_ids = sorted(str(a.get("id")) for a in pico_articles[:25] if a.get("id") is not None)
-        evidence_fingerprint = _hashlib.sha256("|".join(_ev_ids).encode()).hexdigest()[:16]
+        evidence_fingerprint = _hashlib.sha256(
+            (_CTX_VERSION + "|" + "|".join(_ev_ids)).encode()
+        ).hexdigest()[:16]
 
         _reused = None
         with engine.connect() as _rc:

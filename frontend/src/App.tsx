@@ -3012,6 +3012,15 @@ export default function App() {
   // informe l'utilisateur de l'étape en cours pour qu'il patiente sereinement.
   const [searchPhase, setSearchPhase] = useState<'idle' | 'translating' | 'searching'>('idle');
   const [searchElapsed, setSearchElapsed] = useState(0);
+  // Affichage local-first : les résultats de la base locale apparaissent
+  // immédiatement ; `liveRefreshing` indique qu'un travail de fond (sources en
+  // direct OU reranking) se poursuit et que la liste se rafraîchit toute seule.
+  const [liveRefreshing, setLiveRefreshing] = useState(false);
+  const [refreshLabel, setRefreshLabel] = useState<string | null>(null);
+  // Phase RÉELLE du backend (renvoyée par /populate/status), pour piloter le
+  // panneau de progression au lieu d'un minuteur approximatif côté client.
+  const [searchBackendPhase, setSearchBackendPhase] =
+    useState<'local' | 'federation' | 'scoring' | 'done' | null>(null);
   const [folders, setFolders] = useState<ScenarioFolder[]>([]);
   const [sortBy, setSortBy] = useState<"score" | "semantic" | "lexical" | "year_desc" | "year_asc">("year_desc");
 
@@ -3178,46 +3187,109 @@ export default function App() {
       });
       const sid = newScenario.id;
       await populateUserScenario(sid, { includeLive, maxResults: 2000 });
-      // Attendre la fin de la construction du corpus (le panneau de progression
-      // informe l'utilisateur). On sonde l'état jusqu'à done/error.
-      for (let i = 0; i < 120; i++) {
-        await new Promise((r) => setTimeout(r, 5000));
+      // ── AFFICHAGE LOCAL-FIRST ────────────────────────────────────────────────
+      // La base locale est liée au scénario dès le début de la construction ;
+      // les sources en direct (~20-30 s) ne font que s'ajouter ensuite. On lit
+      // donc le corpus à chaque tour de boucle : dès qu'il contient des
+      // documents on les affiche (recherche locale = quasi instantanée), puis on
+      // continue à rafraîchir en arrière-plan jusqu'à la fin de la fédération.
+      let lastTotal = 0;
+      let firstDetailLoaded = false;
+      const renderCorpus = async () => {
+        const corpus = await fetchScenarioCorpus(sid, { limit: 10000 });
+        const corpusResults: SearchResult[] = (corpus.articles || []).map((a: CorpusArticle) => ({
+          id: `${a.id}-0`,
+          documentId: a.id,
+          chunkIndex: 0,
+          content: a.abstract ?? '',
+          title: a.title,
+          abstract: a.abstract,
+          source: a.source,
+          year: a.year,
+          url: a.url,
+          highlight: (a.abstract ?? '').slice(0, 600),
+          hasFulltext: a.has_fulltext,
+          semanticScore: a.similarity_score ?? null,
+          score: a.similarity_score ?? 0,
+        }));
+        setResults(corpusResults);
+        setSearchTotalMatching(corpus.total);   // == taille du corpus
+        // Répartition par source (base locale vs API en direct), nouvelles
+        // références live, et texte intégral vs résumé seul — lus depuis le corpus.
+        setSearchSourceBreakdown(corpus.source_breakdown ?? null);
+        setSearchLiveNewCount(corpus.newly_fetched ?? 0);
+        setSearchFulltextDocs(corpus.docs_with_fulltext ?? null);
+        setSearchAbstractDocs(corpus.docs_abstract_only ?? null);
+        setSearchScoreType('none');
+        setSearchScoreLabel(null);
+        lastTotal = corpus.total;
+        const first = corpusResults[0] ?? null;
+        if (first && !firstDetailLoaded) {
+          firstDetailLoaded = true;
+          loadDocumentDetail(first).catch(() => { /* non bloquant */ });
+        }
+        return corpusResults.length;
+      };
+      // Phase 1 : sonder l'état RÉEL tout en affichant le corpus en construction.
+      // On affiche les documents dès qu'ils sont liés et on suit la phase backend
+      // (local → federation → scoring) pour le panneau de progression.
+      let displayed = false;
+      let reachedDone = false;
+      const phaseLabel: Record<string, string> = {
+        federation: "Sources en direct en cours d'ajout…",
+        scoring: 'Calcul des scores de pertinence…',
+      };
+      for (let i = 0; i < 240; i++) {
+        let status = 'pending';
+        let phase: 'local' | 'federation' | 'scoring' | 'done' | null = null;
         try {
           const st = await fetchUserScenarioPopulateStatus(sid);
-          if (st.status === 'done' || st.status === 'error') break;
+          status = st.status;
+          phase = st.phase ?? null;
         } catch { /* transient — keep polling */ }
+        if (phase) {
+          setSearchBackendPhase(phase);
+          if (displayed && phaseLabel[phase]) setRefreshLabel(phaseLabel[phase]);
+        }
+        try {
+          const shown = await renderCorpus();
+          // Dès qu'il y a des documents, on libère l'écran : les résultats sont
+          // visibles et le travail de fond (live/scoring) continue.
+          if (shown > 0 && !displayed) {
+            displayed = true;
+            setLoading(false);
+            setLiveRefreshing(true);
+            if (phase && phaseLabel[phase]) setRefreshLabel(phaseLabel[phase]);
+          }
+        } catch { /* transient — keep polling */ }
+        if (status === 'done') { reachedDone = true; break; }
+        if (status === 'error') break;
+        await new Promise((r) => setTimeout(r, 2000));
       }
-      // Lire le corpus construit : c'est CE nombre qui est affiché (== page scénario).
-      const corpus = await fetchScenarioCorpus(sid, { limit: 10000 });
-      const corpusResults: SearchResult[] = (corpus.articles || []).map((a: CorpusArticle) => ({
-        id: `${a.id}-0`,
-        documentId: a.id,
-        chunkIndex: 0,
-        content: a.abstract ?? '',
-        title: a.title,
-        abstract: a.abstract,
-        source: a.source,
-        year: a.year,
-        url: a.url,
-        highlight: (a.abstract ?? '').slice(0, 600),
-        hasFulltext: a.has_fulltext,
-        semanticScore: a.similarity_score ?? null,
-        score: a.similarity_score ?? 0,
-      }));
-      setResults(corpusResults);
-      setSearchTotalMatching(corpus.total);   // == taille du corpus
-      // Répartition par source (base locale vs API en direct), nouvelles
-      // références live, et texte intégral vs résumé seul — lus depuis le corpus.
-      setSearchSourceBreakdown(corpus.source_breakdown ?? null);
-      setSearchLiveNewCount(corpus.newly_fetched ?? 0);
-      setSearchFulltextDocs(corpus.docs_with_fulltext ?? null);
-      setSearchAbstractDocs(corpus.docs_abstract_only ?? null);
-      setSearchScoreType('none');
-      setSearchScoreLabel(null);
-      const first = corpusResults[0] ?? null;
-      if (first) {
-        await loadDocumentDetail(first);
+      setSearchBackendPhase('done');
+      // Le corpus est scoré (ordre cosinus) et publié. On l'affiche.
+      try { await renderCorpus(); } catch { /* déjà affiché */ }
+
+      // Phase 2 : le cross-encoder (Cohere) réordonne le sous-ensemble pertinent
+      // EN ARRIÈRE-PLAN. On rafraîchit jusqu'à sa fin pour récupérer le nouvel
+      // ordre — sans bloquer, les résultats étant déjà visibles.
+      if (reachedDone) {
+        setRefreshLabel('Affinage du classement (reranking)…');
+        setLiveRefreshing(true);
+        for (let j = 0; j < 40; j++) {
+          let rerank: string = 'done';
+          try {
+            const st = await fetchUserScenarioPopulateStatus(sid);
+            rerank = st.rerank_status ?? 'done';
+          } catch { rerank = 'done'; }
+          if (rerank !== 'running') break;
+          await new Promise((r) => setTimeout(r, 2000));
+        }
+        try { await renderCorpus(); } catch { /* déjà affiché */ }
       }
+      setLiveRefreshing(false);
+      setRefreshLabel(null);
+      const corpus = { total: lastTotal };
       // Mettre à jour les listes locales (scénario désormais construit).
       setUserScenarios(prev => {
         const filtered = prev.filter(s => !(s.query === newScenario.query && s.mode === newScenario.mode && !s.pinned));
@@ -3241,6 +3313,9 @@ export default function App() {
       setResults([]);
     } finally {
       setLoading(false);
+      setLiveRefreshing(false);
+      setRefreshLabel(null);
+      setSearchBackendPhase(null);
       setSearchPhase('idle');
     }
   }
@@ -3718,24 +3793,23 @@ export default function App() {
               )}
 
               {loading && searchPhase !== 'idle' && (() => {
-                // Étapes de la recherche. Sans flux temps réel du backend, on
-                // approxime l'avancement à partir de la phase + du temps écoulé,
-                // afin que l'utilisateur sache ce qui se passe pendant l'attente.
+                // Étapes de la recherche pilotées par la PHASE RÉELLE du backend
+                // (/populate/status), pas par un minuteur : le libellé affiché
+                // correspond donc à ce que fait réellement le serveur.
                 const liveSources = ["PubMed", "OpenAlex", "Crossref", "EuropePMC", "medRxiv", "bioRxiv", "PROSPERO", "Cochrane"];
-                const searching = searchPhase === 'searching';
-                const doneTranslate = searching;
-                const doneLocal = searching && searchElapsed >= 3;
-                const doneLive = searching && includeLive && searchElapsed >= 24;
+                const translating = searchPhase === 'translating';
+                const rankOf: Record<string, number> = { local: 1, federation: 2, scoring: 3, done: 4 };
+                const rank = searchBackendPhase ? rankOf[searchBackendPhase] : 0;
                 const steps: { label: string; done: boolean; active: boolean; hint?: string }[] = [
-                  { label: "Traduction de la requête", done: doneTranslate, active: !doneTranslate },
-                  { label: "Recherche dans la base locale indexée", done: doneLocal, active: doneTranslate && !doneLocal },
+                  { label: "Traduction de la requête", done: !translating, active: translating },
+                  { label: "Recherche dans la base locale indexée", done: !translating && rank > 1, active: !translating && rank <= 1 },
                   ...(includeLive ? [{
                     label: "Interrogation des sources API en direct",
-                    done: doneLive,
-                    active: doneLocal && !doneLive,
-                    hint: doneLocal && !doneLive ? liveSources[searchElapsed % liveSources.length] : undefined,
+                    done: rank > 2,
+                    active: rank === 2,
+                    hint: rank === 2 ? liveSources[searchElapsed % liveSources.length] : undefined,
                   }] : []),
-                  { label: "Agrégation et déduplication", done: false, active: includeLive ? doneLive : doneLocal },
+                  { label: "Calcul des scores de pertinence", done: rank > 3, active: rank === 3 },
                 ];
                 return (
                   <div className="rounded-3xl border border-brand-400/20 bg-white/5 p-6">
@@ -3794,6 +3868,12 @@ export default function App() {
                           );
                         })()}
                       </p>
+                      {liveRefreshing && (
+                        <p className="flex items-center gap-2 text-xs text-emerald-300/80">
+                          <span className="h-3 w-3 animate-spin rounded-full border-2 border-emerald-300/30 border-t-emerald-300" />
+                          {refreshLabel ?? "Mise à jour des résultats en cours…"}
+                        </p>
+                      )}
                       {searchSourceBreakdown && Object.keys(searchSourceBreakdown).length > 0 && (() => {
                         const localEntries = Object.entries(searchSourceBreakdown).filter(([k]) => !k.endsWith(" (live)"));
                         const liveEntries = Object.entries(searchSourceBreakdown).filter(([k]) => k.endsWith(" (live)"));

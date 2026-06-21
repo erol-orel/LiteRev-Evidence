@@ -2358,7 +2358,16 @@ export async function populateUserScenario(
 
 export async function fetchUserScenarioPopulateStatus(
   scenarioId: string,
-): Promise<{ scenario_id: string; status: string; ingested?: number }> {
+): Promise<{
+  scenario_id: string;
+  status: string;
+  ingested?: number;
+  // Phase RÉELLE du backend (et non un minuteur côté client).
+  phase?: 'local' | 'federation' | 'scoring' | 'done';
+  // Statut du cross-encoder Cohere qui réordonne en arrière-plan après l'affichage.
+  rerank_status?: 'idle' | 'running' | 'done' | 'skipped';
+  sources?: Record<string, number>;
+}> {
   const r = await fetch(`${API_BASE_URL}/user-scenarios/${scenarioId}/populate/status`);
   if (!r.ok) throw new Error(`HTTP ${r.status}`);
   return r.json();
