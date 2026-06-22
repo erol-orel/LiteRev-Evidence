@@ -7331,10 +7331,12 @@ def create_folder(payload: FolderIn, _: None = Depends(require_api_key)) -> dict
         """), {"id": new_id, "name": payload.name, "color": payload.color, "sort_order": payload.sort_order})
     with engine.connect() as conn:
         row = conn.execute(text("SELECT id, name, color, sort_order, created_at FROM user_scenario_folders WHERE id = :id"), {"id": new_id}).mappings().first()
+    # Réponse construite sur les valeurs connues (insérées) : robuste même si le
+    # SELECT de relecture ne retrouve pas la ligne (race / connexion distincte).
     return {
-        "id": row["id"], "name": row["name"], "color": row["color"],
-        "sort_order": row["sort_order"], "scenario_count": 0,
-        "created_at": row["created_at"].isoformat() if row.get("created_at") else None,
+        "id": new_id, "name": payload.name, "color": payload.color,
+        "sort_order": payload.sort_order, "scenario_count": 0,
+        "created_at": row["created_at"].isoformat() if row and row.get("created_at") else None,
     }
 
 
