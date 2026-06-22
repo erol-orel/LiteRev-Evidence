@@ -90,14 +90,37 @@ class InMemoryRateLimiter:
 general_limiter = InMemoryRateLimiter(requests_limit=600, window_seconds=60)
 expensive_limiter = InMemoryRateLimiter(requests_limit=30, window_seconds=60)
 
-# Endpoints coûteux à protéger (RAG, search, génération de briefs)
+# Endpoints coûteux à protéger (RAG, search, génération de briefs).
+# ATTENTION : un segment {param} ne doit matcher QU'UN seul segment de chemin.
+# Sinon `/user-scenarios/{id}/rag` capturerait tout `/user-scenarios/*` (corpus,
+# prisma, clustering, evidence-brief, ...) et tout le détail scénario serait
+# soumis à la limite "coûteuse" (30/min) → faux 429 sur de très nombreuses pages.
 EXPENSIVE_PATHS = {
     "/search",
-    "/ask",  # couvre /ask, /ask/stream, /ask/stream/filtered (préfixe)
+    "/ask",  # couvre /ask, /ask/stream, /ask/stream/filtered (sous-chemins)
     "/user-scenarios/{scenario_id}/rag",
     "/gesica/scenarios/{scenario_id}/rag",
     "/scenarios/{scenario_id}/full-pipeline",
 }
+
+def _compile_expensive_patterns(paths: set[str]) -> list[re.Pattern]:
+    """Compile chaque route coûteuse en regex ancrée.
+
+    - `{param}` → exactement un segment de chemin (``[^/]+``).
+    - Un sous-chemin est autorisé (``/ask`` couvre ``/ask/stream/filtered`` ;
+      ``/user-scenarios/{id}/rag`` couvre un éventuel ``/rag/stream``), mais une
+      route paramétrée ne déborde JAMAIS sur ses routes sœurs (``/prisma`` etc.).
+    """
+    compiled: list[re.Pattern] = []
+    for p in paths:
+        segments = [
+            r"[^/]+" if seg.startswith("{") and seg.endswith("}") else re.escape(seg)
+            for seg in p.split("/")
+        ]
+        compiled.append(re.compile("^" + "/".join(segments) + r"(?:/.*)?$"))
+    return compiled
+
+_EXPENSIVE_PATTERNS = _compile_expensive_patterns(EXPENSIVE_PATHS)
 
 @app.middleware("http")
 async def rate_limit_middleware(request: Request, call_next):
@@ -116,25 +139,23 @@ async def rate_limit_middleware(request: Request, call_next):
     if path == "/health":
         return await call_next(request)
 
-    # Vérifier si le chemin est coûteux.
-    # - Chemins paramétrés ({...}) : match sur le préfixe avant le premier '{'.
-    # - Chemins fixes : match exact OU sous-chemin (ex. /ask couvre /ask/stream/filtered).
-    is_expensive = any(
-        path.startswith(exp_path.split("{")[0]) if "{" in exp_path
-        else (path == exp_path or path.startswith(exp_path + "/"))
-        for exp_path in EXPENSIVE_PATHS
-    )
+    # Vérifier si le chemin est coûteux (match précis par segment, cf.
+    # _compile_expensive_patterns) : seules les routes RAG / full-pipeline /
+    # search / ask sont throttlées agressivement, pas tout /user-scenarios/*.
+    is_expensive = any(rx.match(path) for rx in _EXPENSIVE_PATTERNS)
 
     limiter = expensive_limiter if is_expensive else general_limiter
     if not limiter.is_allowed(client_ip):
         logger.warning(f"Rate limit exceeded for IP: {client_ip} on path: {path}")
         # IMPORTANT : dans un BaseHTTPMiddleware, lever HTTPException ne passe pas
         # par les gestionnaires d'exceptions FastAPI → cela remonte en 500.
-        # On retourne donc directement une réponse 429 propre.
+        # On retourne donc directement une réponse 429 propre, avec Retry-After
+        # pour que clients et proxies temporisent au lieu de marmarteler.
         from starlette.responses import JSONResponse as _JSONResponse
         return _JSONResponse(
             status_code=429,
             content={"detail": "Too many requests. Please try again later."},
+            headers={"Retry-After": str(limiter.window_seconds)},
         )
 
     return await call_next(request)
@@ -5068,7 +5089,7 @@ def get_scenario_prisma(scenario_id: str) -> dict[str, Any]:
     Flow PRISMA pour un scénario spécifique.
     Calcule les métriques d'identification, screening, éligibilité et inclusion.
     """
-    _get_db_gesica_scenario_or_404(scenario_id)
+    meta = _get_db_gesica_scenario_or_404(scenario_id)
     with engine.connect() as conn:
         stats = conn.execute(text("""
             SELECT
@@ -5130,7 +5151,7 @@ def get_scenario_prisma(scenario_id: str) -> dict[str, Any]:
 
     return {
         "scenario_id": scenario_id,
-        "scenario_title": meta["title"],
+        "scenario_title": _gesica_title(meta),
         "identification": {
             "total_records_identified": total_identified,
             "by_source": {
@@ -8814,6 +8835,7 @@ def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict
             import subprocess as _subprocess
             import tempfile as _tempfile
             import xml.etree.ElementTree as _ET_ft
+            import requests as _requests
 
             _NCBI_BASE_FT = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
             _EPMC_BASE_FT = "https://www.ebi.ac.uk/europepmc/webservices/rest"
