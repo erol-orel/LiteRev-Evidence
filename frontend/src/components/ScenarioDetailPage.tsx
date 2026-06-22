@@ -84,6 +84,7 @@ import {
   type SpecProposal,
   scenarioBase,
   isUserScenario,
+  safeFetch,
 } from "../lib/api";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -1544,7 +1545,7 @@ function ClusteringSection({ scenarioId }: { scenarioId: string }) {
         setData(result);
         pollRef.current = setInterval(async () => {
           try {
-            const r = await fetch(`${scenarioBase(scenarioId)}/${scenarioId}/clustering/status`);
+            const r = await safeFetch(`${scenarioBase(scenarioId)}/${scenarioId}/clustering/status`);
             if (!r.ok) return;
             const status = await r.json();
             if (status.status === "done" || (status.clusters && status.clusters.length > 0)) {
