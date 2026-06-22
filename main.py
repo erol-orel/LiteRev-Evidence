@@ -196,6 +196,17 @@ def require_api_key(x_api_key: str | None = Header(default=None)) -> None:
         raise HTTPException(status_code=401, detail="Invalid API key")
 
 
+# Seuil minimal de similarité (cosinus) pour qu'un chunk soit jugé pertinent par
+# le RAG question→passage. Volontairement bas : text-embedding-3-small produit des
+# similarités Q→passage modestes, donc un seuil élevé écarterait de bons
+# appariements. Ce plancher ne sert qu'à filtrer le bruit manifeste. Réglable via
+# la variable d'environnement RAG_MIN_SIMILARITY.
+try:
+    RAG_MIN_SIMILARITY = float(os.getenv("RAG_MIN_SIMILARITY", "0.18"))
+except (TypeError, ValueError):
+    RAG_MIN_SIMILARITY = 0.18
+
+
 # Normalisation des types d'étude : le PICO LLM produit du texte libre (des
 # centaines de variantes uniques). On regroupe en un jeu canonique fixe au moment
 # de l'affichage (les valeurs brutes study_design / pico_json restent intactes).
@@ -980,10 +991,13 @@ def ask_assistant(payload: AskIn) -> dict[str, Any]:
             logger.error(f"Erreur lors de la génération de l'embedding pour /ask: {e}")
             
     if has_vector:
-        # Recherche vectorielle pure pour le RAG
-        params = {"query_embedding": str(query_embedding), "limit": 6, **where_params}
+        # Recherche vectorielle pure pour le RAG. On exclut les doublons et les
+        # articles écartés au screening, et on impose un plancher de similarité
+        # pour ne pas répondre à partir de chunks hors-sujet (corpus mince).
+        params = {"query_embedding": str(query_embedding), "limit": 6,
+                  "max_dist": 1.0 - RAG_MIN_SIMILARITY, **where_params}
         sql = text(f"""
-            SELECT 
+            SELECT
                 d.id AS document_id,
                 d.title,
                 d.year,
@@ -996,6 +1010,9 @@ def ask_assistant(payload: AskIn) -> dict[str, Any]:
             FROM document_chunk c
             JOIN literature_document d ON d.id = c.document_id
             WHERE c.embedding IS NOT NULL
+              AND (d.is_duplicate IS NULL OR d.is_duplicate = FALSE)
+              AND d.screening_status IS DISTINCT FROM 'excluded'
+              AND (c.embedding <=> CAST(:query_embedding AS vector)) <= :max_dist
             {where_sql}
             ORDER BY c.embedding <=> CAST(:query_embedding AS vector)
             LIMIT :limit
@@ -1020,6 +1037,8 @@ def ask_assistant(payload: AskIn) -> dict[str, Any]:
             FROM document_chunk c
             JOIN literature_document d ON d.id = c.document_id
             WHERE ({any_match_sql})
+              AND (d.is_duplicate IS NULL OR d.is_duplicate = FALSE)
+              AND d.screening_status IS DISTINCT FROM 'excluded'
             {where_sql}
             ORDER BY score DESC, d.year DESC NULLS LAST
             LIMIT :limit
@@ -1889,9 +1908,12 @@ def _ncbi_get(url: str, params: dict, timeout: int = 12):
     key = os.getenv("NCBI_API_KEY")
     if key:
         params = {**params, "api_key": key}
+    # Avec une clé API, NCBI autorise 10 req/s (vs 3 sans) : on resserre l'espacement
+    # pour réduire la sérialisation du verrou global sur le trio PubMed/PROSPERO/Cochrane.
+    min_interval = 0.11 if key else _NCBI_MIN_INTERVAL
     for attempt in range(3):
         with _NCBI_LOCK:
-            wait = _NCBI_MIN_INTERVAL - (_time.time() - _NCBI_LAST[0])
+            wait = min_interval - (_time.time() - _NCBI_LAST[0])
             if wait > 0:
                 _time.sleep(wait)
             try:
@@ -2009,7 +2031,7 @@ def _live_fetch_europepmc(query: str, max_results: int) -> list[dict]:
         r = _req.get("https://www.ebi.ac.uk/europepmc/webservices/rest/search", params={
             "query": query, "resultType": "lite", "pageSize": min(max_results, 50),
             "format": "json"
-        }, timeout=10)
+        }, headers={"User-Agent": "LiteRev/1.0 (mailto:api@literev.app)"}, timeout=10)
         for item in r.json().get("resultList", {}).get("result", []):
             results.append({
                 "title": item.get("title", ""),
@@ -2081,11 +2103,16 @@ def _live_fetch_preprint_server(server: str, source_name: str, query: str, max_r
         date_from = date_to - _dt.timedelta(days=180)
         cursor = 0
         scanned = 0
-        max_scan = 300  # plafond pour rester dans le budget temps de la fédération
+        # Plafond resserré : l'API biorxiv ne fait pas de recherche plein-texte, on
+        # filtre côté client par mots-clés → le taux de correspondance est faible et
+        # scanner 300 prépublications (3 pages × 10s) consommait quasi tout le budget
+        # de 30s de la fédération pour ~0 résultat. 120 + timeout court suffit.
+        max_scan = 120  # plafond pour rester dans le budget temps de la fédération
+        _hdrs = {"User-Agent": "LiteRev/1.0 (mailto:api@literev.app)"}
         while scanned < max_scan and len(results) < max_results:
             url = (f"https://api.biorxiv.org/details/{server}/"
                    f"{date_from.isoformat()}/{date_to.isoformat()}/{cursor}/json")
-            r = _req.get(url, timeout=10)
+            r = _req.get(url, timeout=6, headers=_hdrs)
             if not r.ok:
                 break
             payload = r.json()
@@ -2251,19 +2278,36 @@ def _federated_live_search(
     q_emb = None
     res_embs: list[list[float] | None] = [None] * len(deduped_list)
     if openai_key and deduped_list:
+        # Borne anti-latence : le scoring sémantique est sur le chemin de la
+        # requête (l'utilisateur attend la réponse). On ne ré-embedde donc QUE les
+        # N meilleurs résultats par recouvrement lexical (retrieve-then-rerank) ;
+        # au-delà, semantic_score reste 0 (ces résultats sont déjà peu pertinents).
+        # Évite d'embedder ~400 résultats par requête. Timeout court + garde par
+        # lot pour qu'un appel lent/échoué ne fige pas ni n'annule tout le scoring.
+        SEM_SCORE_CAP = 60
+        cand_idx = sorted(
+            range(len(deduped_list)),
+            key=lambda i: _lexical_overlap(
+                q_words,
+                (deduped_list[i].get("title", "") or "") + " " + (deduped_list[i].get("abstract") or "")),
+            reverse=True,
+        )[:SEM_SCORE_CAP]
         try:
             from openai import OpenAI as _OAI
-            _client = _OAI(api_key=openai_key, timeout=20.0)
+            _client = _OAI(api_key=openai_key, timeout=8.0)
             q_emb = _client.embeddings.create(
                 input=[(query or "").replace("\n", " ").strip()],
                 model="text-embedding-3-small",
             ).data[0].embedding
-            texts = [((r.get("title", "") or "") + ". " + (r.get("abstract") or "")).replace("\n", " ").strip()[:2000]
-                     for r in deduped_list]
-            for i in range(0, len(texts), 256):
-                emb_resp = _client.embeddings.create(input=texts[i:i + 256], model="text-embedding-3-small")
-                for j, d in enumerate(emb_resp.data):
-                    res_embs[i + j] = d.embedding
+            texts = [((deduped_list[i].get("title", "") or "") + ". " + (deduped_list[i].get("abstract") or "")).replace("\n", " ").strip()[:2000]
+                     for i in cand_idx]
+            for b in range(0, len(texts), 256):
+                try:
+                    emb_resp = _client.embeddings.create(input=texts[b:b + 256], model="text-embedding-3-small")
+                    for j, d in enumerate(emb_resp.data):
+                        res_embs[cand_idx[b + j]] = d.embedding
+                except Exception as _be:
+                    logger.warning(f"federated scoring batch error: {_be}")
         except Exception as _ee:
             logger.warning(f"federated scoring embed error: {_ee}")
             q_emb = None
@@ -2348,6 +2392,93 @@ def search_live(
         "sources_queried": sources_queried,
         "source_raw_counts": raw_counts,
         "ingesting_background": ingesting_background,
+    }
+
+
+@app.get("/sources/health")
+def sources_health(query: str = "cardiac arrest", timeout: int = 12) -> dict[str, Any]:
+    """Diagnostic des sources externes (live search).
+
+    Interroge en parallèle chaque API amont avec une requête minimale et renvoie,
+    par source, le statut HTTP, la latence (ms), un compteur de résultats et
+    l'erreur éventuelle. Permet de diagnostiquer « sources lentes / ne répondent
+    plus » directement en production (où l'accès réseau sortant diffère du sandbox).
+    Lecture seule, aucune écriture, aucune clé requise.
+    """
+    import concurrent.futures
+    import time as _t
+    from datetime import datetime as _dtm, timezone as _tz
+    import requests as _req
+
+    ua = {"User-Agent": "LiteRev/1.0 (mailto:api@literev.app)"}
+    ncbi_key = os.getenv("NCBI_API_KEY")
+    eutils_params = {"db": "pubmed", "term": query, "retmax": 1, "retmode": "json",
+                     "tool": "literev", "email": "api@literev.app"}
+    if ncbi_key:
+        eutils_params["api_key"] = ncbi_key
+
+    # (nom, url, params, headers, extracteur de compteur depuis le JSON)
+    probes = [
+        ("PubMed (eutils)", "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi",
+         eutils_params, ua,
+         lambda j: len(j.get("esearchresult", {}).get("idlist", []))),
+        ("OpenAlex", "https://api.openalex.org/works",
+         {"search": _plain_keywords(query), "per-page": 1, "select": "id,title"}, ua,
+         lambda j: j.get("meta", {}).get("count")),
+        ("Crossref", "https://api.crossref.org/works",
+         {"query": query, "rows": 1, "select": "DOI,title"}, ua,
+         lambda j: j.get("message", {}).get("total-results")),
+        ("EuropePMC", "https://www.ebi.ac.uk/europepmc/webservices/rest/search",
+         {"query": query, "resultType": "lite", "pageSize": 1, "format": "json"}, ua,
+         lambda j: j.get("hitCount")),
+        ("bioRxiv/medRxiv", "https://api.biorxiv.org/details/biorxiv/2024-01-01/2024-01-07/0/json",
+         None, ua,
+         lambda j: (j.get("messages", [{}])[0] or {}).get("total")),
+    ]
+
+    def _probe(name: str, url: str, params, headers, count_fn) -> dict[str, Any]:
+        t0 = _t.time()
+        try:
+            r = _req.get(url, params=params, headers=headers, timeout=timeout)
+            ms = round((_t.time() - t0) * 1000)
+            count = None
+            if r.status_code == 200:
+                try:
+                    count = count_fn(r.json())
+                except Exception:
+                    count = None
+            return {"source": name, "ok": r.status_code == 200, "http": r.status_code,
+                    "latency_ms": ms, "count": count,
+                    "error": None if r.status_code == 200 else (r.text or "")[:200]}
+        except Exception as e:
+            return {"source": name, "ok": False, "http": None,
+                    "latency_ms": round((_t.time() - t0) * 1000), "count": None,
+                    "error": f"{type(e).__name__}: {e}"[:200]}
+
+    results: list[dict[str, Any]] = []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=len(probes)) as ex:
+        futs = {ex.submit(_probe, *p): p[0] for p in probes}
+        try:
+            for f in concurrent.futures.as_completed(futs, timeout=timeout + 5):
+                results.append(f.result())
+        except concurrent.futures.TimeoutError:
+            done = {r["source"] for r in results}
+            for name in futs.values():
+                if name not in done:
+                    results.append({"source": name, "ok": False, "http": None,
+                                    "latency_ms": None, "count": None,
+                                    "error": "probe timed out"})
+    results.sort(key=lambda r: r["source"])
+    return {
+        "query": query,
+        "checked_at": _dtm.now(_tz.utc).isoformat(),
+        "sources": results,
+        "reachable": sum(1 for r in results if r["ok"]),
+        "total": len(results),
+        "config": {
+            "ncbi_api_key": bool(ncbi_key),
+            "openai_api_key": bool(os.getenv("OPENAI_API_KEY")),
+        },
     }
 
 
@@ -5029,12 +5160,6 @@ def scenario_rag_assistant(scenario_id: str, payload: AskIn) -> dict[str, Any]:
     payload.filters = payload.filters or {}
     payload.filters["scenario_type"] = scenario_id
     payload.filters["project_context"] = "literev"
-    # Construire la question enrichie avec le contexte du scénario
-    enriched_question = payload.question
-    if evidence_prompt:
-        # Injecter le contexte du scénario dans la question
-        enriched_question = f"[Contexte scénario: {meta['title']}]\n{payload.question}"
-    # Appeler l'assistant RAG générique avec le prompt enrichi
     openai_key = os.getenv("OPENAI_API_KEY")
     # Recherche vectorielle filtrée sur le scénario
     query_embedding = None
@@ -6526,7 +6651,9 @@ async def ask_stream(payload: dict[str, Any]) -> StreamingResponse:
     sources = []
     if emb_str:
         where_extra = ""
-        params_extra: dict[str, Any] = {"top_k": top_k, "emb": emb_str}
+        params_extra: dict[str, Any] = {
+            "top_k": top_k, "emb": emb_str, "max_dist": 1.0 - RAG_MIN_SIMILARITY,
+        }
         if project_context:
             where_extra += " AND d.project_context = :project_context"
             params_extra["project_context"] = project_context
@@ -6540,13 +6667,21 @@ async def ask_stream(payload: dict[str, Any]) -> StreamingResponse:
                        1 - (c.embedding <=> CAST(:emb AS vector)) AS similarity
                 FROM document_chunk c
                 JOIN literature_document d ON d.id = c.document_id
-                WHERE c.embedding IS NOT NULL {where_extra}
+                WHERE c.embedding IS NOT NULL
+                  AND (d.is_duplicate IS NULL OR d.is_duplicate = FALSE)
+                  AND d.screening_status IS DISTINCT FROM 'excluded'
+                  AND (c.embedding <=> CAST(:emb AS vector)) <= :max_dist
+                  {where_extra}
                 ORDER BY c.embedding <=> CAST(:emb AS vector)
                 LIMIT :top_k
             """), params_extra).mappings().all()
 
-        for r in rows:
-            context_chunks.append(r["content"])
+        for i, r in enumerate(rows):
+            # Inclure titre + année DANS le contexte : le prompt demande de citer
+            # les articles par leur titre, donc le modèle doit les voir.
+            context_chunks.append(
+                f"[{i + 1}] {r['title'] or 'Sans titre'} ({r['year'] or 'année inconnue'})\n{r['content']}"
+            )
             sources.append({
                 "id": r["doc_id"],
                 "title": r["title"],
@@ -6574,6 +6709,14 @@ Réponds de manière structurée et cite les sources pertinentes du contexte."""
         import json as _json
         sources_event = f"event: sources\ndata: {_json.dumps(sources)}\n\n"
         yield sources_event
+
+        # Pas de contexte récupéré → ne PAS interroger le LLM (réponse non étayée).
+        if not context_chunks:
+            msg = ("Aucun passage pertinent n'a été trouvé dans le corpus pour cette "
+                   "question. Reformulez la question ou élargissez le corpus.")
+            yield f"data: {_json.dumps({'token': msg})}\n\n"
+            yield "event: done\ndata: {}\n\n"
+            return
 
         # Puis streamer la réponse LLM
         try:
@@ -13256,8 +13399,12 @@ async def ask_stream_filtered(payload: dict[str, Any]):
                 LIMIT :top_k
             """), params_extra).mappings().all()
 
-        for r in rows:
-            context_chunks.append(r["content"])
+        for i, r in enumerate(rows):
+            # Inclure titre + année DANS le contexte (le prompt demande de citer
+            # par titre, donc le modèle doit disposer des titres).
+            context_chunks.append(
+                f"[{i + 1}] {r['title'] or 'Sans titre'} ({r['year'] or 'année inconnue'})\n{r['content']}"
+            )
             sources.append({
                 "id": r["doc_id"],
                 "title": r["title"],
@@ -13286,6 +13433,14 @@ Réponds de manière structurée et cite les sources pertinentes du contexte."""
         import json as _json2
         sources_event = f"event: sources\ndata: {_json2.dumps(sources)}\n\n"
         yield sources_event
+
+        # Pas de contexte pertinent → ne pas générer de réponse non étayée.
+        if not context_chunks:
+            msg = ("Aucun passage pertinent (au-dessus du seuil) n'a été trouvé pour "
+                   "cette question dans ce scénario. Reformulez ou abaissez le seuil.")
+            yield f"data: {_json2.dumps({'token': msg})}\n\n"
+            yield "event: done\ndata: {}\n\n"
+            return
 
         try:
             async_client = AsyncOpenAI()
