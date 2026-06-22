@@ -21,6 +21,65 @@ function authHeaders(extra: Record<string, string> = {}): Record<string, string>
   return token ? { "X-API-Key": token, ...extra } : { ...extra };
 }
 
+// ─── Résilience réseau : retries + messages d'erreur lisibles ────────────────
+// Le frontend affiche le message d'erreur tel quel (cf. ErrorBox). Avant, chaque
+// hoquet transitoire (429 sous charge, 502/503 pendant un déploiement) remontait
+// un « HTTP 429 » brut. On (1) réessaie automatiquement les statuts transitoires
+// avec back-off, et (2) traduit les statuts en messages compréhensibles.
+
+const _RETRYABLE_5XX = new Set([502, 503, 504]);
+
+function _isGet(init?: RequestInit): boolean {
+  const m = (init?.method ?? "GET").toUpperCase();
+  return m === "GET" || m === "HEAD";
+}
+
+function _sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function _backoffMs(resp: Response, attempt: number): number {
+  // Respecte Retry-After mais le plafonne : inutile de figer l'UI 60 s — mieux
+  // vaut quelques tentatives courtes puis un message clair.
+  const ra = Number(resp.headers.get("Retry-After"));
+  if (Number.isFinite(ra) && ra > 0) return Math.min(ra * 1000, 4000);
+  return Math.min(500 * 2 ** attempt, 4000) + Math.floor(Math.random() * 250);
+}
+
+/**
+ * fetch() avec retries sur statuts transitoires. Un 429 est toujours réessayé
+ * (la requête a été rejetée AVANT traitement) ; les 502/503/504 ne sont réessayés
+ * que pour les requêtes idempotentes (GET/HEAD) afin de ne pas rejouer un POST.
+ * Les erreurs réseau / abort se propagent à l'identique (pas de changement de
+ * comportement par rapport à fetch()).
+ */
+export async function safeFetch(
+  input: RequestInfo | URL,
+  init?: RequestInit,
+  opts: { retries?: number; retryOn5xx?: boolean } = {},
+): Promise<Response> {
+  const retries = opts.retries ?? 2;
+  const allow5xx = opts.retryOn5xx ?? _isGet(init);
+  for (let attempt = 0; ; attempt++) {
+    const resp = await globalThis.fetch(input, init);
+    const retryable =
+      resp.status === 429 || (allow5xx && _RETRYABLE_5XX.has(resp.status));
+    if (!retryable || attempt >= retries) return resp;
+    await _sleep(_backoffMs(resp, attempt));
+  }
+}
+
+/** Traduit un statut HTTP en message utilisateur (français). */
+export function httpMessage(status: number): string {
+  if (status === 429) return "Trop de requêtes — patientez quelques instants puis réessayez.";
+  if (status === 401 || status === 403) return "Accès non autorisé.";
+  if (status === 404) return "Ressource introuvable.";
+  if (status === 502 || status === 503 || status === 504)
+    return "Service momentanément indisponible — réessayez dans un instant.";
+  if (status >= 500) return "Erreur serveur — réessayez plus tard.";
+  return `Erreur ${status}.`;
+}
+
 export interface FilterOption {
   value: string | number;
   label: string;
@@ -219,7 +278,7 @@ export async function searchDocuments(
     similarity_threshold: payload.similarityThreshold,
   };
 
-  const response = await fetch(`${API_BASE_URL}/search`, {
+  const response = await safeFetch(`${API_BASE_URL}/search`, {
     method: "POST",
     headers: authHeaders({ "Content-Type": "application/json" }),
     body: JSON.stringify(apiPayload),
@@ -246,7 +305,7 @@ export async function searchDocuments(
 }
 
 export async function getFilterOptions(): Promise<FilterOptions> {
-  const response = await fetch(`${API_BASE_URL}/filters-options`);
+  const response = await safeFetch(`${API_BASE_URL}/filters-options`);
 
   if (!response.ok) {
     const text = await response.text();
@@ -262,7 +321,7 @@ export async function getFilterOptions(): Promise<FilterOptions> {
 export async function fetchDocumentDetail(
   documentId: number,
 ): Promise<DocumentDetailResponse> {
-  const response = await fetch(`${API_BASE_URL}/documents/${documentId}`);
+  const response = await safeFetch(`${API_BASE_URL}/documents/${documentId}`);
 
   if (!response.ok) {
     const text = await response.text();
@@ -424,8 +483,8 @@ export interface FulltextStats {
   }>;
 }
 export async function fetchFulltextStats(): Promise<FulltextStats> {
-  const response = await fetch(`${API_BASE_URL}/corpus/fulltext-stats`);
-  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  const response = await safeFetch(`${API_BASE_URL}/corpus/fulltext-stats`);
+  if (!response.ok) throw new Error(httpMessage(response.status));
   return response.json();
 }
 
@@ -451,7 +510,7 @@ export interface AskResponse {
 export async function fetchEvidenceSummary(
   documentId: number,
 ): Promise<EvidenceSummaryResponse> {
-  const response = await fetch(`${API_BASE_URL}/evidence-summary/${documentId}`);
+  const response = await safeFetch(`${API_BASE_URL}/evidence-summary/${documentId}`);
   if (!response.ok) {
     const text = await response.text();
     throw new Error(text || `Evidence summary failed with status ${response.status}`);
@@ -486,7 +545,7 @@ export async function fetchEvidenceSummary(
 }
 
 export async function fetchCorpusStats(): Promise<CorpusStats> {
-  const response = await fetch(`${API_BASE_URL}/corpus/stats`);
+  const response = await safeFetch(`${API_BASE_URL}/corpus/stats`);
   if (!response.ok) throw new Error(`Corpus stats failed with status ${response.status}`);
   const data = await response.json();
   return {
@@ -505,7 +564,7 @@ export interface CorpusStatsByYear {
 }
 
 export async function fetchCorpusStatsByYear(): Promise<CorpusStatsByYear> {
-  const response = await fetch(`${API_BASE_URL}/corpus/stats/by-year`);
+  const response = await safeFetch(`${API_BASE_URL}/corpus/stats/by-year`);
   if (!response.ok) throw new Error(`Corpus stats by-year failed with status ${response.status}`);
   const data = await response.json();
   return {
@@ -516,7 +575,7 @@ export async function fetchCorpusStatsByYear(): Promise<CorpusStatsByYear> {
 }
 
 export async function fetchGesicaStats(): Promise<GesicaStats> {
-  const response = await fetch(`${API_BASE_URL}/gesica/stats`);
+  const response = await safeFetch(`${API_BASE_URL}/gesica/stats`);
   if (!response.ok) throw new Error(`LiteRev stats failed with status ${response.status}`);
   const data = await response.json();
   return {
@@ -528,7 +587,7 @@ export async function fetchGesicaStats(): Promise<GesicaStats> {
 }
 
 export async function fetchGesicaScenarios(): Promise<GesicaScenario[]> {
-  const response = await fetch(`${API_BASE_URL}/gesica/scenarios`);
+  const response = await safeFetch(`${API_BASE_URL}/gesica/scenarios`);
   if (!response.ok) throw new Error(`LiteRev scenarios failed with status ${response.status}`);
   const data: Array<{
     id: string;
@@ -576,13 +635,13 @@ export async function fetchGesicaScenarios(): Promise<GesicaScenario[]> {
 export async function getRecommendedActions(
   scenarioId: string,
 ): Promise<{ status: string; actions: string[]; generated_at?: string }> {
-  const r = await fetch(`${API_BASE_URL}/scenarios/${scenarioId}/recommended-actions`);
-  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  const r = await safeFetch(`${API_BASE_URL}/scenarios/${scenarioId}/recommended-actions`);
+  if (!r.ok) throw new Error(httpMessage(r.status));
   return r.json();
 }
 
 export async function askAssistant(req: AskRequest): Promise<AskResponse> {
-  const response = await fetch(`${API_BASE_URL}/ask`, {
+  const response = await safeFetch(`${API_BASE_URL}/ask`, {
     method: "POST",
     headers: authHeaders({ "Content-Type": "application/json" }),
     body: JSON.stringify({
@@ -676,7 +735,7 @@ export interface TerrainEpidemic {
 // ─── P5 TERRAIN API FUNCTIONS ────────────────────────────────────────────────
 
 export async function fetchTerrainMeteo(lat = 46.2044, lon = 6.1432): Promise<TerrainMeteo> {
-  const response = await fetch(`${API_BASE_URL}/terrain/meteo?lat=${lat}&lon=${lon}`);
+  const response = await safeFetch(`${API_BASE_URL}/terrain/meteo?lat=${lat}&lon=${lon}`);
   if (!response.ok) throw new Error(`Terrain meteo failed with status ${response.status}`);
   return response.json();
 }
@@ -686,13 +745,13 @@ export async function fetchTerrainGeo(
   destLat = 46.1925, destLon = 6.2388
 ): Promise<TerrainGeo> {
   const url = `${API_BASE_URL}/terrain/geo?orig_lat=${origLat}&orig_lon=${origLon}&dest_lat=${destLat}&dest_lon=${destLon}`;
-  const response = await fetch(url);
+  const response = await safeFetch(url);
   if (!response.ok) throw new Error(`Terrain geo failed with status ${response.status}`);
   return response.json();
 }
 
 export async function fetchTerrainEpidemic(region = "transborder"): Promise<TerrainEpidemic> {
-  const response = await fetch(`${API_BASE_URL}/terrain/epidemic?region=${region}`);
+  const response = await safeFetch(`${API_BASE_URL}/terrain/epidemic?region=${region}`);
   if (!response.ok) throw new Error(`Terrain epidemic failed with status ${response.status}`);
   return response.json();
 }
@@ -759,19 +818,19 @@ export interface TerrainInformalSignals {
 // ─── P5 TERRAIN EXTENDED API FUNCTIONS ────────────────────────────────────────
 
 export async function fetchTerrainDemographics(postalCode = "74100"): Promise<TerrainDemographics> {
-  const response = await fetch(`${API_BASE_URL}/terrain/demographics?postal_code=${postalCode}`);
+  const response = await safeFetch(`${API_BASE_URL}/terrain/demographics?postal_code=${postalCode}`);
   if (!response.ok) throw new Error(`Terrain demographics failed with status ${response.status}`);
   return response.json();
 }
 
 export async function fetchTerrainPharmacies(lat = 46.2044, lon = 6.1432): Promise<TerrainPharmacies> {
-  const response = await fetch(`${API_BASE_URL}/terrain/pharmacies?lat=${lat}&lon=${lon}`);
+  const response = await safeFetch(`${API_BASE_URL}/terrain/pharmacies?lat=${lat}&lon=${lon}`);
   if (!response.ok) throw new Error(`Terrain pharmacies failed with status ${response.status}`);
   return response.json();
 }
 
 export async function fetchTerrainInformalSignals(): Promise<TerrainInformalSignals> {
-  const response = await fetch(`${API_BASE_URL}/terrain/informal-signals`);
+  const response = await safeFetch(`${API_BASE_URL}/terrain/informal-signals`);
   if (!response.ok) throw new Error(`Terrain informal signals failed with status ${response.status}`);
   return response.json();
 }
@@ -799,7 +858,7 @@ export interface TerrainClimate {
 }
 
 export async function fetchTerrainClimate(lat = 46.2044, lon = 6.1432): Promise<TerrainClimate> {
-  const response = await fetch(`${API_BASE_URL}/terrain/climate?lat=${lat}&lon=${lon}`);
+  const response = await safeFetch(`${API_BASE_URL}/terrain/climate?lat=${lat}&lon=${lon}`);
   if (!response.ok) throw new Error(`Terrain climate failed with status ${response.status}`);
   return response.json();
 }
@@ -830,8 +889,8 @@ export interface DemandForecastResponse {
 }
 
 export async function fetchDemandForecast(lat = 46.2044, lon = 6.1432, region = "Auvergne-Rhône-Alpes"): Promise<DemandForecastResponse> {
-  const response = await fetch(`${API_BASE_URL}/gesica/model/demand-forecasting?lat=${lat}&lon=${lon}&region=${encodeURIComponent(region)}`);
-  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  const response = await safeFetch(`${API_BASE_URL}/gesica/model/demand-forecasting?lat=${lat}&lon=${lon}&region=${encodeURIComponent(region)}`);
+  if (!response.ok) throw new Error(httpMessage(response.status));
   return response.json();
 }
 
@@ -873,8 +932,8 @@ export interface EpidemicEarlyWarningResponse {
   data_sources: string[];
 }
 export async function fetchEpidemicEarlyWarning(forceRefresh = false): Promise<EpidemicEarlyWarningResponse> {
-  const response = await fetch(`${API_BASE_URL}/gesica/model/epidemic-early-warning?force_refresh=${forceRefresh}`);
-  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  const response = await safeFetch(`${API_BASE_URL}/gesica/model/epidemic-early-warning?force_refresh=${forceRefresh}`);
+  if (!response.ok) throw new Error(httpMessage(response.status));
   return response.json();
 }
 
@@ -923,8 +982,8 @@ export interface ResponseTimeOptimizationResponse {
   data_sources: string[];
 }
 export async function fetchResponseTimeOptimization(forceRefresh = false): Promise<ResponseTimeOptimizationResponse> {
-  const response = await fetch(`${API_BASE_URL}/gesica/model/response-time-optimization?force_refresh=${forceRefresh}`);
-  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  const response = await safeFetch(`${API_BASE_URL}/gesica/model/response-time-optimization?force_refresh=${forceRefresh}`);
+  if (!response.ok) throw new Error(httpMessage(response.status));
   return response.json();
 }
 
@@ -969,8 +1028,8 @@ export interface CardiacArrestPredictionResponse {
   data_sources: string[];
 }
 export async function fetchCardiacArrestPrediction(): Promise<CardiacArrestPredictionResponse> {
-  const response = await fetch(`${API_BASE_URL}/gesica/model/cardiac-arrest-prediction`);
-  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  const response = await safeFetch(`${API_BASE_URL}/gesica/model/cardiac-arrest-prediction`);
+  if (!response.ok) throw new Error(httpMessage(response.status));
   return response.json();
 }
 
@@ -1037,8 +1096,8 @@ export interface HeatwaveEMSImpactResponse {
   data_sources: string[];
 }
 export async function fetchHeatwaveEMSImpact(): Promise<HeatwaveEMSImpactResponse> {
-  const response = await fetch(`${API_BASE_URL}/gesica/model/heatwave-ems-impact`);
-  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  const response = await safeFetch(`${API_BASE_URL}/gesica/model/heatwave-ems-impact`);
+  if (!response.ok) throw new Error(httpMessage(response.status));
   return response.json();
 }
 
@@ -1061,8 +1120,8 @@ export interface StrokeDetectionResponse {
   scientific_references: string[];
 }
 export async function fetchStrokeDetection(): Promise<StrokeDetectionResponse> {
-  const response = await fetch(`${API_BASE_URL}/gesica/model/stroke-detection`);
-  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  const response = await safeFetch(`${API_BASE_URL}/gesica/model/stroke-detection`);
+  if (!response.ok) throw new Error(httpMessage(response.status));
   return response.json();
 }
 
@@ -1081,8 +1140,8 @@ export interface TriageSupportResponse {
   scientific_references: string[];
 }
 export async function fetchTriageSupport(): Promise<TriageSupportResponse> {
-  const response = await fetch(`${API_BASE_URL}/gesica/model/triage-support`);
-  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  const response = await safeFetch(`${API_BASE_URL}/gesica/model/triage-support`);
+  if (!response.ok) throw new Error(httpMessage(response.status));
   return response.json();
 }
 
@@ -1103,8 +1162,8 @@ export interface UndertriageRiskResponse {
   scientific_references: string[];
 }
 export async function fetchUndertriageRisk(): Promise<UndertriageRiskResponse> {
-  const response = await fetch(`${API_BASE_URL}/gesica/model/undertriage-risk`);
-  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  const response = await safeFetch(`${API_BASE_URL}/gesica/model/undertriage-risk`);
+  if (!response.ok) throw new Error(httpMessage(response.status));
   return response.json();
 }
 
@@ -1128,8 +1187,8 @@ export interface TraumaCareResponse {
   scientific_references: string[];
 }
 export async function fetchTraumaCare(): Promise<TraumaCareResponse> {
-  const response = await fetch(`${API_BASE_URL}/gesica/model/trauma-care`);
-  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  const response = await safeFetch(`${API_BASE_URL}/gesica/model/trauma-care`);
+  if (!response.ok) throw new Error(httpMessage(response.status));
   return response.json();
 }
 
@@ -1155,8 +1214,8 @@ export interface MassCasualtyResponse {
   scientific_references: string[];
 }
 export async function fetchMassCasualty(nVictims = 50, eventType = "transport_accident"): Promise<MassCasualtyResponse> {
-  const response = await fetch(`${API_BASE_URL}/gesica/model/mass-casualty?n_victims=${nVictims}&event_type=${eventType}`);
-  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  const response = await safeFetch(`${API_BASE_URL}/gesica/model/mass-casualty?n_victims=${nVictims}&event_type=${eventType}`);
+  if (!response.ok) throw new Error(httpMessage(response.status));
   return response.json();
 }
 
@@ -1170,8 +1229,8 @@ export interface ClinicalDeteriorationResponse {
   recommendations: string[];
 }
 export async function fetchClinicalDeterioration(): Promise<ClinicalDeteriorationResponse> {
-  const response = await fetch(`${API_BASE_URL}/gesica/model/clinical-deterioration-prediction`);
-  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  const response = await safeFetch(`${API_BASE_URL}/gesica/model/clinical-deterioration-prediction`);
+  if (!response.ok) throw new Error(httpMessage(response.status));
   return response.json();
 }
 
@@ -1184,8 +1243,8 @@ export interface CallQualificationResponse {
   resource_summary: Record<string, number>;
 }
 export async function fetchCallQualification(): Promise<CallQualificationResponse> {
-  const response = await fetch(`${API_BASE_URL}/gesica/model/emergency-call-qualification`);
-  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  const response = await safeFetch(`${API_BASE_URL}/gesica/model/emergency-call-qualification`);
+  if (!response.ok) throw new Error(httpMessage(response.status));
   return response.json();
 }
 
@@ -1198,8 +1257,8 @@ export interface DispatchDecisionResponse {
   resource_status: Record<string, { available: number; deployed: number; total: number }>;
 }
 export async function fetchDispatchDecision(): Promise<DispatchDecisionResponse> {
-  const response = await fetch(`${API_BASE_URL}/gesica/model/dispatch-decision-support`);
-  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  const response = await safeFetch(`${API_BASE_URL}/gesica/model/dispatch-decision-support`);
+  if (!response.ok) throw new Error(httpMessage(response.status));
   return response.json();
 }
 
@@ -1210,8 +1269,8 @@ export interface PatientPathwayResponse {
   summary: { total_cases: number; cross_border_cases: number; mean_eta_min: number };
 }
 export async function fetchPatientPathway(): Promise<PatientPathwayResponse> {
-  const response = await fetch(`${API_BASE_URL}/gesica/model/patient-pathway-optimization`);
-  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  const response = await safeFetch(`${API_BASE_URL}/gesica/model/patient-pathway-optimization`);
+  if (!response.ok) throw new Error(httpMessage(response.status));
   return response.json();
 }
 
@@ -1224,8 +1283,8 @@ export interface AmbulanceDispatchResponse {
   total_units_deployed: number;
 }
 export async function fetchAmbulanceDispatch(): Promise<AmbulanceDispatchResponse> {
-  const response = await fetch(`${API_BASE_URL}/gesica/model/ambulance-dispatch-optimization`);
-  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  const response = await safeFetch(`${API_BASE_URL}/gesica/model/ambulance-dispatch-optimization`);
+  if (!response.ok) throw new Error(httpMessage(response.status));
   return response.json();
 }
 
@@ -1238,8 +1297,8 @@ export interface HospitalCapacityResponse {
   max_staffing_deficit: { hour: string; required: number; current: number; deficit: number };
 }
 export async function fetchHospitalCapacity(): Promise<HospitalCapacityResponse> {
-  const response = await fetch(`${API_BASE_URL}/gesica/model/hospital-capacity-forecasting`);
-  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  const response = await safeFetch(`${API_BASE_URL}/gesica/model/hospital-capacity-forecasting`);
+  if (!response.ok) throw new Error(httpMessage(response.status));
   return response.json();
 }
 
@@ -1251,8 +1310,8 @@ export interface SurveillanceResponse {
   active_alerts: Array<{ indicator: string; zscore: number; message: string; severity: string }>;
 }
 export async function fetchSurveillance(): Promise<SurveillanceResponse> {
-  const response = await fetch(`${API_BASE_URL}/gesica/model/surveillance`);
-  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  const response = await safeFetch(`${API_BASE_URL}/gesica/model/surveillance`);
+  if (!response.ok) throw new Error(httpMessage(response.status));
   return response.json();
 }
 
@@ -1264,8 +1323,8 @@ export interface SurgeManagementResponse {
   staffing: { available_crews: number; required_crews: number; additional_needed: number };
 }
 export async function fetchSurgeManagement(): Promise<SurgeManagementResponse> {
-  const response = await fetch(`${API_BASE_URL}/gesica/model/surge-management`);
-  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  const response = await safeFetch(`${API_BASE_URL}/gesica/model/surge-management`);
+  if (!response.ok) throw new Error(httpMessage(response.status));
   return response.json();
 }
 
@@ -1278,8 +1337,8 @@ export interface ResourceAllocationResponse {
   remaining_resources: Record<string, number>;
 }
 export async function fetchResourceAllocation(): Promise<ResourceAllocationResponse> {
-  const response = await fetch(`${API_BASE_URL}/gesica/model/resource-allocation`);
-  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  const response = await safeFetch(`${API_BASE_URL}/gesica/model/resource-allocation`);
+  if (!response.ok) throw new Error(httpMessage(response.status));
   return response.json();
 }
 
@@ -1291,8 +1350,8 @@ export interface EnvironmentalRiskResponse {
   recommendations: string[];
 }
 export async function fetchEnvironmentalRisk(): Promise<EnvironmentalRiskResponse> {
-  const response = await fetch(`${API_BASE_URL}/gesica/model/environmental-risk-forecasting`);
-  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  const response = await safeFetch(`${API_BASE_URL}/gesica/model/environmental-risk-forecasting`);
+  if (!response.ok) throw new Error(httpMessage(response.status));
   return response.json();
 }
 
@@ -1304,8 +1363,8 @@ export interface PandemicPreparednessResponse {
   preparedness_assessment: string; preparedness_color: string;
 }
 export async function fetchPandemicPreparedness(): Promise<PandemicPreparednessResponse> {
-  const response = await fetch(`${API_BASE_URL}/gesica/model/pandemic-preparedness`);
-  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  const response = await safeFetch(`${API_BASE_URL}/gesica/model/pandemic-preparedness`);
+  if (!response.ok) throw new Error(httpMessage(response.status));
   return response.json();
 }
 
@@ -1318,8 +1377,8 @@ export interface CrossBorderResponse {
   agreements: Array<{ id: string; name: string; type: string; active: boolean; legal_basis: string }>;
 }
 export async function fetchCrossBorder(): Promise<CrossBorderResponse> {
-  const response = await fetch(`${API_BASE_URL}/gesica/model/cross-border-coordination`);
-  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  const response = await safeFetch(`${API_BASE_URL}/gesica/model/cross-border-coordination`);
+  if (!response.ok) throw new Error(httpMessage(response.status));
   return response.json();
 }
 
@@ -1330,8 +1389,8 @@ export interface SituationalAwarenessResponse {
   real_time_indicators: { active_incidents: number; available_ems_crews: number; ed_occupancy_pct: number; pending_calls_in_queue: number; cross_border_active: number; weather_risk: string };
 }
 export async function fetchSituationalAwareness(): Promise<SituationalAwarenessResponse> {
-  const response = await fetch(`${API_BASE_URL}/gesica/model/situational-awareness`);
-  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  const response = await safeFetch(`${API_BASE_URL}/gesica/model/situational-awareness`);
+  if (!response.ok) throw new Error(httpMessage(response.status));
   return response.json();
 }
 
@@ -1343,8 +1402,8 @@ export interface DisasterRiskResponse {
   overall_risk_level: string;
 }
 export async function fetchDisasterRisk(): Promise<DisasterRiskResponse> {
-  const response = await fetch(`${API_BASE_URL}/gesica/model/disaster-risk-assessment`);
-  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  const response = await safeFetch(`${API_BASE_URL}/gesica/model/disaster-risk-assessment`);
+  if (!response.ok) throw new Error(httpMessage(response.status));
   return response.json();
 }
 
@@ -1357,8 +1416,8 @@ export interface MCIVictimResponse {
   recommended_resources: { SMUR: number; AMBULANCE: number; MÉDECINS: number };
 }
 export async function fetchMCIVictim(): Promise<MCIVictimResponse> {
-  const response = await fetch(`${API_BASE_URL}/gesica/model/mci-victim-estimation`);
-  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  const response = await safeFetch(`${API_BASE_URL}/gesica/model/mci-victim-estimation`);
+  if (!response.ok) throw new Error(httpMessage(response.status));
   return response.json();
 }
 
@@ -1623,8 +1682,8 @@ export interface PicoData {
 
 export async function fetchScenarioDetail(scenarioId: string): Promise<ScenarioDetail> {
   const base = scenarioBase(scenarioId);
-  const response = await fetch(`${base}/${scenarioId}/detail`);
-  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  const response = await safeFetch(`${base}/${scenarioId}/detail`);
+  if (!response.ok) throw new Error(httpMessage(response.status));
   return response.json();
 }
 
@@ -1650,22 +1709,22 @@ export async function fetchScenarioCorpus(
   if (options?.threshold != null) params.set('threshold', String(options.threshold));
   const base = scenarioBase(scenarioId);
   const url = `${base}/${scenarioId}/corpus?${params}`;
-  const response = await fetch(url);
-  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  const response = await safeFetch(url);
+  if (!response.ok) throw new Error(httpMessage(response.status));
   return response.json();
 }
 
 export async function fetchScenarioModelStatus(scenarioId: string): Promise<ModelStatus> {
   const base = scenarioBase(scenarioId);
-  const response = await fetch(`${base}/${scenarioId}/model-status`);
-  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  const response = await safeFetch(`${base}/${scenarioId}/model-status`);
+  if (!response.ok) throw new Error(httpMessage(response.status));
   return response.json();
 }
 
 export async function runScenarioModel(scenarioId: string): Promise<ModelStatus> {
   const base = scenarioBase(scenarioId);
-  const response = await fetch(`${base}/${scenarioId}/model-run`, { method: 'POST', headers: authHeaders() });
-  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  const response = await safeFetch(`${base}/${scenarioId}/model-run`, { method: 'POST', headers: authHeaders() });
+  if (!response.ok) throw new Error(httpMessage(response.status));
   return response.json();
 }
 
@@ -1675,15 +1734,15 @@ export async function fetchScenarioClustering(
 ): Promise<ScenarioClustering> {
   const params = nClusters ? `?n_clusters=${nClusters}` : '';
   const base = scenarioBase(scenarioId);
-  const response = await fetch(`${base}/${scenarioId}/clustering${params}`);
-  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  const response = await safeFetch(`${base}/${scenarioId}/clustering${params}`);
+  if (!response.ok) throw new Error(httpMessage(response.status));
   return response.json();
 }
 
 export async function fetchScenarioPrisma(scenarioId: string): Promise<ScenarioPrisma> {
   const base = scenarioBase(scenarioId);
-  const response = await fetch(`${base}/${scenarioId}/prisma`);
-  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  const response = await safeFetch(`${base}/${scenarioId}/prisma`);
+  if (!response.ok) throw new Error(httpMessage(response.status));
   return response.json();
 }
 
@@ -1705,7 +1764,7 @@ export async function uploadScenarioDataset(
   formData.append('file', file);
   
   const base = scenarioBase(scenarioId);
-  const response = await fetch(`${base}/${scenarioId}/upload-dataset`, {
+  const response = await safeFetch(`${base}/${scenarioId}/upload-dataset`, {
     method: 'POST',
     headers: authHeaders(),
     body: formData,
@@ -1733,7 +1792,7 @@ export interface ModelDataUploadResponse {
 export async function uploadModelData(scenarioId: string, file: File): Promise<ModelDataUploadResponse> {
   const formData = new FormData();
   formData.append('file', file);
-  const response = await fetch(`${API_BASE_URL}/scenarios/${scenarioId}/model/data`, {
+  const response = await safeFetch(`${API_BASE_URL}/scenarios/${scenarioId}/model/data`, {
     method: 'POST',
     headers: authHeaders(),
     body: formData,
@@ -1756,18 +1815,18 @@ export async function screenArticle(
   if (reason) params.set('reason', reason);
   if (notes) params.set('notes', notes);
   const base = scenarioBase(scenarioId);
-  const response = await fetch(
+  const response = await safeFetch(
     `${base}/${scenarioId}/articles/${articleId}/screen?${params}`,
     { method: 'POST', headers: authHeaders() }
   );
-  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  if (!response.ok) throw new Error(httpMessage(response.status));
   return response.json();
 }
 
 export async function fetchScreeningProgress(scenarioId: string): Promise<ScreeningProgress> {
   const base = scenarioBase(scenarioId);
-  const response = await fetch(`${base}/${scenarioId}/screening-progress`);
-  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  const response = await safeFetch(`${base}/${scenarioId}/screening-progress`);
+  if (!response.ok) throw new Error(httpMessage(response.status));
   return response.json();
 }
 
@@ -1776,10 +1835,10 @@ export async function fetchArticlePico(
   articleId: number
 ): Promise<{ article_id: number; pico: PicoData | null; extracted_at: string | null }> {
   const base = scenarioBase(scenarioId);
-  const response = await fetch(
+  const response = await safeFetch(
     `${base}/${scenarioId}/articles/${articleId}/pico`
   );
-  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  if (!response.ok) throw new Error(httpMessage(response.status));
   return response.json();
 }
 
@@ -1789,8 +1848,8 @@ export async function extractPicoBatch(
 ): Promise<{ extracted: number; skipped: number; errors: number; message: string }> {
   const params = new URLSearchParams({ limit: String(limit) });
   if (scenarioId) params.set('scenario_id', scenarioId);
-  const response = await fetch(`${API_BASE_URL}/pico/extract?${params}`, { method: 'POST', headers: authHeaders() });
-  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  const response = await safeFetch(`${API_BASE_URL}/pico/extract?${params}`, { method: 'POST', headers: authHeaders() });
+  if (!response.ok) throw new Error(httpMessage(response.status));
   return response.json();
 }
 
@@ -1830,8 +1889,8 @@ export async function fetchScenarioPicoBulk(
   offset = 0
 ): Promise<PicoBulkResponse> {
   const base = scenarioBase(scenarioId);
-  const r = await fetch(`${base}/${scenarioId}/pico-bulk?limit=${limit}&offset=${offset}`);
-  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  const r = await safeFetch(`${base}/${scenarioId}/pico-bulk?limit=${limit}&offset=${offset}`);
+  if (!r.ok) throw new Error(httpMessage(r.status));
   return r.json();
 }
 
@@ -1912,8 +1971,8 @@ export interface EvidenceBriefData {
 
 export async function fetchEvidenceBrief(scenarioId: string): Promise<EvidenceBriefData> {
   const base = scenarioBase(scenarioId);
-  const r = await fetch(`${base}/${scenarioId}/evidence-brief`);
-  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  const r = await safeFetch(`${base}/${scenarioId}/evidence-brief`);
+  if (!r.ok) throw new Error(httpMessage(r.status));
   return r.json();
 }
 
@@ -1965,10 +2024,10 @@ export async function fetchKnowledgeGraph(
   minSimilarity = 0.35,
 ): Promise<KnowledgeGraphData> {
   const base = scenarioBase(scenarioId);
-  const r = await fetch(
+  const r = await safeFetch(
     `${base}/${scenarioId}/knowledge-graph?max_nodes=${maxNodes}&min_similarity=${minSimilarity}`,
   );
-  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  if (!r.ok) throw new Error(httpMessage(r.status));
   return r.json();
 }
 
@@ -1991,7 +2050,7 @@ export function askScenarioRagStream(
 
   (async () => {
     try {
-      const resp = await fetch(`${API_BASE_URL}/ask/stream`, {
+      const resp = await safeFetch(`${API_BASE_URL}/ask/stream`, {
         method: "POST",
         headers: authHeaders({ "Content-Type": "application/json" }),
         body: JSON.stringify({
@@ -2003,7 +2062,7 @@ export function askScenarioRagStream(
         signal: controller.signal,
       });
 
-      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      if (!resp.ok) throw new Error(httpMessage(resp.status));
       if (!resp.body) throw new Error("No response body");
 
       const reader = resp.body.getReader();
@@ -2079,7 +2138,7 @@ export async function submitDoubleBlindDecision(
   payload: DoubleBlindDecision,
 ): Promise<{ id: number; agreement: boolean | null; final_status: string | null }> {
   const base = scenarioBase(scenarioId);
-  const r = await fetch(
+  const r = await safeFetch(
     `${base}/${scenarioId}/double-blind/decision`,
     {
       method: "POST",
@@ -2087,16 +2146,16 @@ export async function submitDoubleBlindDecision(
       body: JSON.stringify(payload),
     },
   );
-  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  if (!r.ok) throw new Error(httpMessage(r.status));
   return r.json();
 }
 
 export async function fetchKappaStats(scenarioId: string): Promise<KappaStats> {
   const base = scenarioBase(scenarioId);
-  const r = await fetch(
+  const r = await safeFetch(
     `${base}/${scenarioId}/double-blind/kappa`,
   );
-  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  if (!r.ok) throw new Error(httpMessage(r.status));
   return r.json();
 }
 
@@ -2104,10 +2163,10 @@ export async function fetchDoubleBlindConflicts(
   scenarioId: string,
 ): Promise<any[]> {
   const base = scenarioBase(scenarioId);
-  const r = await fetch(
+  const r = await safeFetch(
     `${base}/${scenarioId}/double-blind/conflicts`,
   );
-  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  if (!r.ok) throw new Error(httpMessage(r.status));
   return r.json();
 }
 
@@ -2283,8 +2342,8 @@ function _mapUserScenario(u: any): UserScenario {
 }
 
 export async function fetchUserScenarios(): Promise<UserScenario[]> {
-  const r = await fetch(`${API_BASE_URL}/user-scenarios`);
-  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  const r = await safeFetch(`${API_BASE_URL}/user-scenarios`);
+  if (!r.ok) throw new Error(httpMessage(r.status));
   const data: any[] = await r.json();
   return data.map(_mapUserScenario);
 }
@@ -2292,18 +2351,18 @@ export async function fetchUserScenarios(): Promise<UserScenario[]> {
 export async function createUserScenario(
   payload: UserScenarioCreatePayload,
 ): Promise<UserScenario> {
-  const r = await fetch(`${API_BASE_URL}/user-scenarios`, {
+  const r = await safeFetch(`${API_BASE_URL}/user-scenarios`, {
     method: 'POST',
     headers: authHeaders({ "Content-Type": "application/json" }),
     body: JSON.stringify(payload),
   });
-  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  if (!r.ok) throw new Error(httpMessage(r.status));
   return _mapUserScenario(await r.json());
 }
 
 export async function deleteUserScenario(scenarioId: string): Promise<{ deleted: boolean; id: string }> {
-  const r = await fetch(`${API_BASE_URL}/user-scenarios/${scenarioId}`, { method: 'DELETE', headers: authHeaders() });
-  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  const r = await safeFetch(`${API_BASE_URL}/user-scenarios/${scenarioId}`, { method: 'DELETE', headers: authHeaders() });
+  if (!r.ok) throw new Error(httpMessage(r.status));
   return r.json();
 }
 
@@ -2311,12 +2370,12 @@ export async function patchUserScenario(
   scenarioId: string,
   patch: { name?: string; pinned?: boolean; mode?: string; filters?: Record<string, any>; folder_id?: string | null },
 ): Promise<UserScenario> {
-  const r = await fetch(`${API_BASE_URL}/user-scenarios/${scenarioId}`, {
+  const r = await safeFetch(`${API_BASE_URL}/user-scenarios/${scenarioId}`, {
     method: 'PATCH',
     headers: authHeaders({ "Content-Type": "application/json" }),
     body: JSON.stringify(patch),
   });
-  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  if (!r.ok) throw new Error(httpMessage(r.status));
   return _mapUserScenario(await r.json());
 }
 
@@ -2324,19 +2383,19 @@ export async function startUserScenarioPipeline(
   scenarioId: string,
   maxResults = 100000,
 ): Promise<{ scenario_id: string; status: string; message: string; steps: string[] }> {
-  const r = await fetch(
+  const r = await safeFetch(
     `${API_BASE_URL}/user-scenarios/${scenarioId}/pipeline?max_results=${maxResults}`,
     { method: 'POST', headers: authHeaders() },
   );
-  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  if (!r.ok) throw new Error(httpMessage(r.status));
   return r.json();
 }
 
 export async function fetchUserScenarioPipelineStatus(
   scenarioId: string,
 ): Promise<UserScenarioPipelineStatus> {
-  const r = await fetch(`${API_BASE_URL}/user-scenarios/${scenarioId}/pipeline/status`);
-  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  const r = await safeFetch(`${API_BASE_URL}/user-scenarios/${scenarioId}/pipeline/status`);
+  if (!r.ok) throw new Error(httpMessage(r.status));
   return r.json();
 }
 
@@ -2348,11 +2407,11 @@ export async function populateUserScenario(
   const params = new URLSearchParams();
   params.set('max_results', String(opts?.maxResults ?? 2000));
   params.set('include_live', String(opts?.includeLive ?? true));
-  const r = await fetch(
+  const r = await safeFetch(
     `${API_BASE_URL}/user-scenarios/${scenarioId}/populate?${params}`,
     { method: 'POST', headers: authHeaders() },
   );
-  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  if (!r.ok) throw new Error(httpMessage(r.status));
   return r.json();
 }
 
@@ -2368,8 +2427,8 @@ export async function fetchUserScenarioPopulateStatus(
   rerank_status?: 'idle' | 'running' | 'done' | 'skipped';
   sources?: Record<string, number>;
 }> {
-  const r = await fetch(`${API_BASE_URL}/user-scenarios/${scenarioId}/populate/status`);
-  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  const r = await safeFetch(`${API_BASE_URL}/user-scenarios/${scenarioId}/populate/status`);
+  if (!r.ok) throw new Error(httpMessage(r.status));
   return r.json();
 }
 
@@ -2380,12 +2439,12 @@ export async function subscribeAlerts(
   scenarioId: string,
   frequency: "daily" | "weekly" | "immediate" = "weekly",
 ): Promise<{ status: string; message: string }> {
-  const r = await fetch(`${API_BASE_URL}/alerts/subscribe`, {
+  const r = await safeFetch(`${API_BASE_URL}/alerts/subscribe`, {
     method: "POST",
     headers: authHeaders({ "Content-Type": "application/json" }),
     body: JSON.stringify({ email, scenario_id: scenarioId, frequency }),
   });
-  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  if (!r.ok) throw new Error(httpMessage(r.status));
   return r.json();
 }
 
@@ -2397,8 +2456,8 @@ export async function triggerLivingReview(
 ): Promise<{ status: string; message: string; scenarios: any[] }> {
   const params = new URLSearchParams({ dry_run: String(dryRun) });
   if (scenarioId) params.set("scenario_id", scenarioId);
-  const r = await fetch(`${API_BASE_URL}/gesica/living-review/trigger?${params}`, { method: 'POST', headers: authHeaders() });
-  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  const r = await safeFetch(`${API_BASE_URL}/gesica/living-review/trigger?${params}`, { method: 'POST', headers: authHeaders() });
+  if (!r.ok) throw new Error(httpMessage(r.status));
   return r.json();
 }
 
@@ -2425,8 +2484,8 @@ export async function extractPicoBatchGlobal(
 ): Promise<EnrichmentBatchResult> {
   const params = new URLSearchParams({ limit: String(limit) });
   if (scenarioId) params.set('scenario_id', scenarioId);
-  const r = await fetch(`${API_BASE_URL}/pico/extract?${params}`, { method: 'POST', headers: authHeaders() });
-  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  const r = await safeFetch(`${API_BASE_URL}/pico/extract?${params}`, { method: 'POST', headers: authHeaders() });
+  if (!r.ok) throw new Error(httpMessage(r.status));
   return r.json();
 }
 
@@ -2436,8 +2495,8 @@ export async function extractMetadataBatch(
 ): Promise<EnrichmentBatchResult> {
   const params = new URLSearchParams({ limit: String(limit) });
   if (scenarioId) params.set('scenario_id', scenarioId);
-  const r = await fetch(`${API_BASE_URL}/metadata/extract?${params}`, { method: 'POST', headers: authHeaders() });
-  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  const r = await safeFetch(`${API_BASE_URL}/metadata/extract?${params}`, { method: 'POST', headers: authHeaders() });
+  if (!r.ok) throw new Error(httpMessage(r.status));
   return r.json();
 }
 
@@ -2447,8 +2506,8 @@ export async function fetchFulltextBatch(
 ): Promise<EnrichmentBatchResult & { fetched: number; not_available: number }> {
   const params = new URLSearchParams({ limit: String(limit) });
   if (scenarioId) params.set('scenario_id', scenarioId);
-  const r = await fetch(`${API_BASE_URL}/fulltext/fetch?${params}`, { method: 'POST', headers: authHeaders() });
-  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  const r = await safeFetch(`${API_BASE_URL}/fulltext/fetch?${params}`, { method: 'POST', headers: authHeaders() });
+  if (!r.ok) throw new Error(httpMessage(r.status));
   return r.json();
 }
 
@@ -2457,8 +2516,8 @@ export async function fetchEnrichmentStatus(
 ): Promise<EnrichmentStatus> {
   const params = new URLSearchParams();
   if (scenarioId) params.set('scenario_id', scenarioId);
-  const r = await fetch(`${API_BASE_URL}/enrichment/status?${params}`);
-  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  const r = await safeFetch(`${API_BASE_URL}/enrichment/status?${params}`);
+  if (!r.ok) throw new Error(httpMessage(r.status));
   return r.json();
 }
 
@@ -2474,8 +2533,8 @@ export interface ScenarioFolder {
 }
 
 export async function fetchFolders(): Promise<ScenarioFolder[]> {
-  const r = await fetch(`${API_BASE_URL}/user-scenario-folders`);
-  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  const r = await safeFetch(`${API_BASE_URL}/user-scenario-folders`);
+  if (!r.ok) throw new Error(httpMessage(r.status));
   return r.json();
 }
 
@@ -2484,12 +2543,12 @@ export async function createFolder(
   color = '#6366f1',
   sort_order = 0,
 ): Promise<ScenarioFolder> {
-  const r = await fetch(`${API_BASE_URL}/user-scenario-folders`, {
+  const r = await safeFetch(`${API_BASE_URL}/user-scenario-folders`, {
     method: 'POST',
     headers: authHeaders({ "Content-Type": "application/json" }),
     body: JSON.stringify({ name, color, sort_order }),
   });
-  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  if (!r.ok) throw new Error(httpMessage(r.status));
   return r.json();
 }
 
@@ -2499,18 +2558,18 @@ export async function updateFolder(
   color: string,
   sort_order: number,
 ): Promise<ScenarioFolder> {
-  const r = await fetch(`${API_BASE_URL}/user-scenario-folders/${folderId}`, {
+  const r = await safeFetch(`${API_BASE_URL}/user-scenario-folders/${folderId}`, {
     method: 'PATCH',
     headers: authHeaders({ "Content-Type": "application/json" }),
     body: JSON.stringify({ name, color, sort_order }),
   });
-  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  if (!r.ok) throw new Error(httpMessage(r.status));
   return r.json();
 }
 
 export async function deleteFolder(folderId: string): Promise<{ deleted: boolean; id: string }> {
-  const r = await fetch(`${API_BASE_URL}/user-scenario-folders/${folderId}`, { method: 'DELETE', headers: authHeaders() });
-  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  const r = await safeFetch(`${API_BASE_URL}/user-scenario-folders/${folderId}`, { method: 'DELETE', headers: authHeaders() });
+  if (!r.ok) throw new Error(httpMessage(r.status));
   return r.json();
 }
 
@@ -2534,8 +2593,8 @@ export interface ScenarioSettings {
 }
 
 export async function getScenarioSettings(scenarioId: string): Promise<ScenarioSettings> {
-  const r = await fetch(`${API_BASE_URL}/scenarios/${scenarioId}/settings`);
-  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  const r = await safeFetch(`${API_BASE_URL}/scenarios/${scenarioId}/settings`);
+  if (!r.ok) throw new Error(httpMessage(r.status));
   return r.json();
 }
 
@@ -2543,20 +2602,20 @@ export async function patchScenarioSettings(
   scenarioId: string,
   payload: Partial<Pick<ScenarioSettings, 'similarity_threshold' | 'variables_json' | 'variables_validated'>>,
 ): Promise<{ status: string; scenario_id: string; updated: string[] }> {
-  const r = await fetch(`${API_BASE_URL}/scenarios/${scenarioId}/settings`, {
+  const r = await safeFetch(`${API_BASE_URL}/scenarios/${scenarioId}/settings`, {
     method: 'PATCH',
     headers: authHeaders({ "Content-Type": "application/json" }),
     body: JSON.stringify(payload),
   });
-  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  if (!r.ok) throw new Error(httpMessage(r.status));
   return r.json();
 }
 
 export async function fetchUserScenarioEmbeddingStatus(
   scenarioId: string,
 ): Promise<EmbeddingStatus> {
-  const r = await fetch(`${API_BASE_URL}/user-scenarios/${scenarioId}/embedding-status`);
-  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  const r = await safeFetch(`${API_BASE_URL}/user-scenarios/${scenarioId}/embedding-status`);
+  if (!r.ok) throw new Error(httpMessage(r.status));
   return r.json();
 }
 
@@ -2565,16 +2624,16 @@ export async function triggerRerank(
   query?: string,
 ): Promise<{ status: string; scenario_id: string; query?: string }> {
   const params = query ? `?query=${encodeURIComponent(query)}` : '';
-  const r = await fetch(`${API_BASE_URL}/scenarios/${scenarioId}/rerank${params}`, { method: 'POST', headers: authHeaders() });
-  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  const r = await safeFetch(`${API_BASE_URL}/scenarios/${scenarioId}/rerank${params}`, { method: 'POST', headers: authHeaders() });
+  if (!r.ok) throw new Error(httpMessage(r.status));
   return r.json();
 }
 
 export async function getRerankStatus(
   scenarioId: string,
 ): Promise<{ status: string; updated?: number; error?: string }> {
-  const r = await fetch(`${API_BASE_URL}/scenarios/${scenarioId}/rerank/status`);
-  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  const r = await safeFetch(`${API_BASE_URL}/scenarios/${scenarioId}/rerank/status`);
+  if (!r.ok) throw new Error(httpMessage(r.status));
   return r.json();
 }
 
@@ -2619,8 +2678,8 @@ export interface LlmEvidenceBrief {
 }
 
 export async function getLlmEvidenceBrief(scenarioId: string): Promise<LlmEvidenceBrief> {
-  const r = await fetch(`${API_BASE_URL}/scenarios/${scenarioId}/evidence-brief/llm`);
-  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  const r = await safeFetch(`${API_BASE_URL}/scenarios/${scenarioId}/evidence-brief/llm`);
+  if (!r.ok) throw new Error(httpMessage(r.status));
   return r.json();
 }
 
@@ -2628,19 +2687,19 @@ export async function generateEvidenceBrief(
   scenarioId: string,
   force = false,
 ): Promise<{ status: string; scenario_id: string }> {
-  const r = await fetch(
+  const r = await safeFetch(
     `${API_BASE_URL}/scenarios/${scenarioId}/evidence-brief/generate?force=${force}`,
     { method: 'POST', headers: authHeaders() },
   );
-  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  if (!r.ok) throw new Error(httpMessage(r.status));
   return r.json();
 }
 
 export async function getBriefGenerationStatus(
   scenarioId: string,
 ): Promise<{ status: string; generated_at?: string; error?: string }> {
-  const r = await fetch(`${API_BASE_URL}/scenarios/${scenarioId}/evidence-brief/generate/status`);
-  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  const r = await safeFetch(`${API_BASE_URL}/scenarios/${scenarioId}/evidence-brief/generate/status`);
+  if (!r.ok) throw new Error(httpMessage(r.status));
   return r.json();
 }
 
@@ -2697,24 +2756,24 @@ export interface ScenarioVariables {
 }
 
 export async function getScenarioVariables(scenarioId: string): Promise<ScenarioVariables> {
-  const r = await fetch(`${API_BASE_URL}/scenarios/${scenarioId}/variables`);
-  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  const r = await safeFetch(`${API_BASE_URL}/scenarios/${scenarioId}/variables`);
+  if (!r.ok) throw new Error(httpMessage(r.status));
   return r.json();
 }
 
 export async function generateScenarioVariables(
   scenarioId: string,
 ): Promise<{ status: string; scenario_id?: string }> {
-  const r = await fetch(`${API_BASE_URL}/scenarios/${scenarioId}/variables/generate`, { method: 'POST', headers: authHeaders() });
-  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  const r = await safeFetch(`${API_BASE_URL}/scenarios/${scenarioId}/variables/generate`, { method: 'POST', headers: authHeaders() });
+  if (!r.ok) throw new Error(httpMessage(r.status));
   return r.json();
 }
 
 export async function getVariablesGenerationStatus(
   scenarioId: string,
 ): Promise<{ status: string; generated_at?: string; variables_count?: number; error?: string }> {
-  const r = await fetch(`${API_BASE_URL}/scenarios/${scenarioId}/variables/generate/status`);
-  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  const r = await safeFetch(`${API_BASE_URL}/scenarios/${scenarioId}/variables/generate/status`);
+  if (!r.ok) throw new Error(httpMessage(r.status));
   return r.json();
 }
 
@@ -2722,12 +2781,12 @@ export async function validateScenarioVariables(
   scenarioId: string,
   payload: { variables_json?: Record<string, unknown> },
 ): Promise<{ status: string; scenario_id: string; validated_at: string }> {
-  const r = await fetch(`${API_BASE_URL}/scenarios/${scenarioId}/variables/validate`, {
+  const r = await safeFetch(`${API_BASE_URL}/scenarios/${scenarioId}/variables/validate`, {
     method: 'POST',
     headers: authHeaders({ "Content-Type": "application/json" }),
     body: JSON.stringify(payload),
   });
-  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  if (!r.ok) throw new Error(httpMessage(r.status));
   return r.json();
 }
 
@@ -2789,14 +2848,14 @@ export interface SpecProposal {
 }
 
 export async function getModelRun(scenarioId: string): Promise<ModelRun> {
-  const r = await fetch(`${API_BASE_URL}/scenarios/${scenarioId}/model/run`);
-  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  const r = await safeFetch(`${API_BASE_URL}/scenarios/${scenarioId}/model/run`);
+  if (!r.ok) throw new Error(httpMessage(r.status));
   return r.json();
 }
 
 export async function trainModel(scenarioId: string): Promise<{ status: string; scenario_id?: string; n_trials?: number }> {
-  const r = await fetch(`${API_BASE_URL}/scenarios/${scenarioId}/model/train`, { method: 'POST', headers: authHeaders() });
-  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  const r = await safeFetch(`${API_BASE_URL}/scenarios/${scenarioId}/model/train`, { method: 'POST', headers: authHeaders() });
+  if (!r.ok) throw new Error(httpMessage(r.status));
   return r.json();
 }
 
@@ -2804,8 +2863,8 @@ export async function generateSyntheticData(
   scenarioId: string,
   nRows = 400,
 ): Promise<{ status: string; n_rows?: number; n_cols?: number }> {
-  const r = await fetch(`${API_BASE_URL}/scenarios/${scenarioId}/model/data/synthetic?n_rows=${nRows}`, { method: 'POST', headers: authHeaders() });
-  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  const r = await safeFetch(`${API_BASE_URL}/scenarios/${scenarioId}/model/data/synthetic?n_rows=${nRows}`, { method: 'POST', headers: authHeaders() });
+  if (!r.ok) throw new Error(httpMessage(r.status));
   return r.json();
 }
 
@@ -2826,20 +2885,20 @@ export interface ModelDataset {
 }
 
 export async function getModelDataset(scenarioId: string): Promise<ModelDataset> {
-  const r = await fetch(`${API_BASE_URL}/scenarios/${scenarioId}/model/data`);
-  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  const r = await safeFetch(`${API_BASE_URL}/scenarios/${scenarioId}/model/data`);
+  if (!r.ok) throw new Error(httpMessage(r.status));
   return r.json();
 }
 
 export async function getModelTrainStatus(scenarioId: string): Promise<{ status: string; error?: string; metrics?: Record<string, number> }> {
-  const r = await fetch(`${API_BASE_URL}/scenarios/${scenarioId}/model/train/status`);
-  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  const r = await safeFetch(`${API_BASE_URL}/scenarios/${scenarioId}/model/train/status`);
+  if (!r.ok) throw new Error(httpMessage(r.status));
   return r.json();
 }
 
 export async function getModelMonitor(scenarioId: string): Promise<ModelMonitor> {
-  const r = await fetch(`${API_BASE_URL}/scenarios/${scenarioId}/model/monitor`);
-  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  const r = await safeFetch(`${API_BASE_URL}/scenarios/${scenarioId}/model/monitor`);
+  if (!r.ok) throw new Error(httpMessage(r.status));
   return r.json();
 }
 
@@ -2863,20 +2922,20 @@ export interface ModelSpecResponse {
 }
 
 export async function getScenarioModelSpec(scenarioId: string): Promise<ModelSpecResponse> {
-  const r = await fetch(`${API_BASE_URL}/scenarios/${scenarioId}/model/spec`);
-  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  const r = await safeFetch(`${API_BASE_URL}/scenarios/${scenarioId}/model/spec`);
+  if (!r.ok) throw new Error(httpMessage(r.status));
   return r.json();
 }
 
 export async function proposeSpec(scenarioId: string): Promise<{ status: string; scenario_id?: string }> {
-  const r = await fetch(`${API_BASE_URL}/scenarios/${scenarioId}/model/spec/propose`, { method: 'POST', headers: authHeaders() });
-  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  const r = await safeFetch(`${API_BASE_URL}/scenarios/${scenarioId}/model/spec/propose`, { method: 'POST', headers: authHeaders() });
+  if (!r.ok) throw new Error(httpMessage(r.status));
   return r.json();
 }
 
 export async function getSpecProposal(scenarioId: string): Promise<SpecProposal> {
-  const r = await fetch(`${API_BASE_URL}/scenarios/${scenarioId}/model/spec/proposal`);
-  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  const r = await safeFetch(`${API_BASE_URL}/scenarios/${scenarioId}/model/spec/proposal`);
+  if (!r.ok) throw new Error(httpMessage(r.status));
   return r.json();
 }
 
@@ -2884,20 +2943,20 @@ export async function validateSpecProposal(
   scenarioId: string,
   action: 'accept' | 'reject',
 ): Promise<{ status: string; new_version?: number; retrain_started?: boolean }> {
-  const r = await fetch(`${API_BASE_URL}/scenarios/${scenarioId}/model/spec/proposal/validate`, {
+  const r = await safeFetch(`${API_BASE_URL}/scenarios/${scenarioId}/model/spec/proposal/validate`, {
     method: 'POST',
     headers: authHeaders({ "Content-Type": "application/json" }),
     body: JSON.stringify({ action }),
   });
-  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  if (!r.ok) throw new Error(httpMessage(r.status));
   return r.json();
 }
 
 // ─── Heatmap avec vrais noms ──────────────────────────────────────────────────
 
 export async function fetchCorpusStatsByYearNamed(): Promise<CorpusStatsByYear> {
-  const r = await fetch(`${API_BASE_URL}/corpus/stats/by-year/named`);
-  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  const r = await safeFetch(`${API_BASE_URL}/corpus/stats/by-year/named`);
+  if (!r.ok) throw new Error(httpMessage(r.status));
   const data = await r.json();
   return {
     byYear: data.by_year,
@@ -2918,7 +2977,7 @@ export function askScenarioRagStreamFiltered(
 
   (async () => {
     try {
-      const resp = await fetch(`${API_BASE_URL}/ask/stream/filtered`, {
+      const resp = await safeFetch(`${API_BASE_URL}/ask/stream/filtered`, {
         method: 'POST',
         headers: authHeaders({ "Content-Type": "application/json" }),
         body: JSON.stringify({
@@ -2930,7 +2989,7 @@ export function askScenarioRagStreamFiltered(
         signal: controller.signal,
       });
 
-      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      if (!resp.ok) throw new Error(httpMessage(resp.status));
       if (!resp.body) throw new Error('No response body');
 
       const reader = resp.body.getReader();
@@ -3013,11 +3072,11 @@ export async function searchLive(
   scenarioId: string,
   maxPerSource = 50,
 ): Promise<LiveSearchResponse> {
-  const r = await fetch(
+  const r = await safeFetch(
     `${API_BASE_URL}/user-scenarios/${scenarioId}/search/live?max_per_source=${maxPerSource}`,
     { method: 'POST', headers: authHeaders() },
   );
-  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  if (!r.ok) throw new Error(httpMessage(r.status));
   return r.json();
 }
 
@@ -3030,20 +3089,20 @@ export interface SearchStrategy {
 
 /** Traduit une requête en langage naturel en stratégie booléenne (LLM). */
 export async function fetchSearchStrategy(query: string): Promise<SearchStrategy> {
-  const r = await fetch(`${API_BASE_URL}/search-strategy`, {
+  const r = await safeFetch(`${API_BASE_URL}/search-strategy`, {
     method: 'POST',
     headers: authHeaders({ "Content-Type": "application/json" }),
     body: JSON.stringify({ query }),
   });
-  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  if (!r.ok) throw new Error(httpMessage(r.status));
   return r.json();
 }
 
 export async function getSearchStrategy(scenarioId: string): Promise<SearchStrategy> {
-  const r = await fetch(
+  const r = await safeFetch(
     `${API_BASE_URL}/user-scenarios/${scenarioId}/search-strategy`,
     { headers: authHeaders() },
   );
-  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  if (!r.ok) throw new Error(httpMessage(r.status));
   return r.json();
 }
