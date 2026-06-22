@@ -498,6 +498,7 @@ def startup_event() -> None:
         _PICO_WORKERS  = 5     # threads parallèles pour extraction PICO
         _CYCLE_SLEEP   = 30    # secondes entre deux cycles
         _PICO_BATCH    = 50    # articles PICO par cycle
+        _ABS_BATCH     = 50    # notices sans résumé traitées par cycle (backfill)
 
         _system_pico = (
             "You are a systematic review expert. "
@@ -564,7 +565,48 @@ def startup_event() -> None:
                 logger.debug(f"BG PICO doc {row['id']}: {_pe}")
                 return None
 
-        logger.info("Background enrichment worker started (embedding + PICO).")
+        def _europepmc_abstracts_by_doi(dois: list[str]) -> dict[str, str]:
+            """Récupère le résumé via EuropePMC pour une liste de DOI (une requête
+            OR groupée). EuropePMC agrège MEDLINE + PMC : meilleure couverture
+            DOI→abstract que Crossref/OpenAlex. Renvoie {doi_minuscule: abstract}."""
+            import requests as _rq
+            out: dict[str, str] = {}
+            _dois = [d for d in dois if d]
+            if not _dois:
+                return out
+            q = " OR ".join(f'DOI:"{d}"' for d in _dois)
+            try:
+                _r = _rq.get(
+                    "https://www.ebi.ac.uk/europepmc/webservices/rest/search",
+                    params={"query": f"({q})", "resultType": "core",
+                            "format": "json", "pageSize": len(_dois)},
+                    timeout=30,
+                )
+                _r.raise_for_status()
+                for _res in ((_r.json().get("resultList") or {}).get("result") or []):
+                    _d = (_res.get("doi") or "").lower().strip()
+                    _ab = _res.get("abstractText")
+                    if _d and _ab:
+                        _ab = re.sub(r"<[^>]+>", " ", _ab)      # retirer le JATS/HTML
+                        _ab = re.sub(r"\s+", " ", _ab).strip()
+                        if len(_ab) >= 30:
+                            out[_d] = _ab
+            except Exception as _ee:
+                logger.debug(f"EuropePMC abstract batch: {_ee}")
+            return out
+
+        # Colonne de suivi : évite de re-tenter indéfiniment les notices dont
+        # EuropePMC n'a pas de résumé (sinon le même lot bloquerait la file).
+        try:
+            with engine.begin() as _cc:
+                _cc.execute(text(
+                    "ALTER TABLE literature_document "
+                    "ADD COLUMN IF NOT EXISTS abstract_backfill_attempted BOOLEAN DEFAULT FALSE"
+                ))
+        except Exception as _ce:
+            logger.warning(f"ensure abstract_backfill_attempted column: {_ce}")
+
+        logger.info("Background enrichment worker started (abstract backfill + embedding + PICO).")
         while True:
             try:
                 openai_key = os.getenv("OPENAI_API_KEY")
@@ -573,6 +615,52 @@ def startup_event() -> None:
                     continue
 
                 _client = _OAI_bg(api_key=openai_key)
+
+                # ── 0. BACKFILL DES RÉSUMÉS (notices sans abstract, via DOI) ──
+                # Beaucoup de notices Crossref/OpenAlex arrivent sans résumé. On
+                # tente de le récupérer via EuropePMC (par DOI) pour les rendre
+                # exploitables (puis embedding + PICO par les étapes suivantes).
+                try:
+                    with engine.connect() as _conn:
+                        _stub_rows = _conn.execute(text("""
+                            SELECT id, doi FROM literature_document
+                            WHERE project_context = 'literev'
+                              AND doi IS NOT NULL
+                              AND (abstract IS NULL OR length(trim(abstract)) < 30)
+                              AND abstract_backfill_attempted IS NOT TRUE
+                            ORDER BY id LIMIT :lim
+                        """), {"lim": _ABS_BATCH}).mappings().fetchall()
+                    if _stub_rows:
+                        _doi_map: dict[str, list[int]] = {}
+                        for _r in _stub_rows:
+                            _doi_map.setdefault((_r["doi"] or "").lower().strip(), []).append(_r["id"])
+                        _dois = [d for d in _doi_map if d]
+                        _found: dict[str, str] = {}
+                        for _k in range(0, len(_dois), 20):       # 20 DOI / requête
+                            _found.update(_europepmc_abstracts_by_doi(_dois[_k:_k + 20]))
+                        _filled = 0
+                        with engine.begin() as _cu:
+                            for _d, _ab in _found.items():
+                                for _docid in _doi_map.get(_d, []):
+                                    _cu.execute(text("""
+                                        UPDATE literature_document SET abstract = :ab
+                                        WHERE id = :id
+                                          AND (abstract IS NULL OR length(trim(abstract)) < 30)
+                                    """), {"ab": _ab, "id": _docid})
+                                    _filled += 1
+                            # Marquer TOUTES les notices tentées (trouvées ou non).
+                            _cu.execute(
+                                text("UPDATE literature_document SET abstract_backfill_attempted = TRUE "
+                                     "WHERE id IN :ids").bindparams(bindparam("ids", expanding=True)),
+                                {"ids": [_r["id"] for _r in _stub_rows]},
+                            )
+                        if _found:
+                            # Créer les chunks title_abstract des docs nouvellement dotés
+                            # d'un résumé (l'embedding ci-dessous les vectorisera).
+                            _backfill_title_abstract_chunks()
+                            logger.info(f"BG abstract backfill: {_filled} résumés récupérés (EuropePMC).")
+                except Exception as _abe:
+                    logger.warning(f"BG abstract backfill error: {_abe}")
 
                 # ── 1. EMBEDDING ──────────────────────────────────────────────
                 # Priorité : fulltext_section d'abord, puis title_abstract
