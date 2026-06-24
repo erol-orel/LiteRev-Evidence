@@ -8129,10 +8129,20 @@ def _run_user_scenario_populate(
     import requests as _requests
     import math
     import threading
-    from concurrent.futures import ThreadPoolExecutor, as_completed
+    # NB : sur Python <3.11, as_completed() lève concurrent.futures.TimeoutError,
+    # qui n'EST PAS le TimeoutError natif. On l'importe explicitement pour pouvoir
+    # l'attraper (cf. bloc fédération plus bas).
+    from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as _FuturesTimeout
 
     # Plafond par source identique pour recherche et corpus (déterminisme).
     max_results = min(max_results, LIVE_MAX_PER_SOURCE)
+
+    # Garde-temps partagé entre les boucles de pagination des sources lentes
+    # (OpenAlex/Crossref/EuropePMC). Quand le budget fédération est dépassé, elles
+    # s'arrêtent d'elles-mêmes au lieu de continuer à paginer jusqu'à 2000 résultats
+    # en arrière-plan (résultats qui seraient de toute façon écartés par le filtre
+    # booléen final). Réglé juste avant le lancement de la fédération.
+    _fed_deadline = [float("inf")]
 
     if _pipeline_callback is None:
         _user_scenario_populate_jobs[scenario_id] = {
@@ -8265,10 +8275,13 @@ def _run_user_scenario_populate(
     def _fetch_pubmed():
         count = 0
         try:
-            r = _requests.get(
+            # Throttle partagé eutils (verrou global + clé API + retry 429) : sinon
+            # PubMed se faisait évincer par PROSPERO/Cochrane (mêmes serveurs eutils,
+            # 3 req/s sans clé) → esearch 429 → total_found=0 → 0 article ingéré.
+            r = _ncbi_get(
                 f"{ENTREZ_BASE}/esearch.fcgi",
-                params={"db": "pubmed", "term": _pubmed_q, "retmax": 0,
-                        "retmode": "json", "usehistory": "y", "email": EMAIL},
+                {"db": "pubmed", "term": _pubmed_q, "retmax": 0,
+                 "retmode": "json", "usehistory": "y", "email": EMAIL},
                 timeout=30,
             )
             r.raise_for_status()
@@ -8286,13 +8299,21 @@ def _run_user_scenario_populate(
                 if retmax_batch <= 0 or retstart >= total_found:
                     break
                 try:
-                    r2 = _requests.post(
-                        f"{ENTREZ_BASE}/efetch.fcgi",
-                        data={"db": "pubmed", "WebEnv": web_env, "query_key": query_key,
-                              "retstart": retstart, "retmax": retmax_batch,
-                              "rettype": "xml", "retmode": "xml", "email": EMAIL},
-                        timeout=90,
-                    )
+                    _ef_data = {"db": "pubmed", "WebEnv": web_env, "query_key": query_key,
+                                "retstart": retstart, "retmax": retmax_batch,
+                                "rettype": "xml", "retmode": "xml", "email": EMAIL}
+                    _ef_key = os.getenv("NCBI_API_KEY")
+                    if _ef_key:
+                        _ef_data["api_key"] = _ef_key
+                    # Espacer le DÉMARRAGE de la requête vis-à-vis des autres appels
+                    # eutils (verrou partagé), sans tenir le verrou pendant le POST
+                    # (lent) afin de ne pas sérialiser PROSPERO/Cochrane.
+                    with _NCBI_LOCK:
+                        _ef_wait = (0.11 if _ef_key else _NCBI_MIN_INTERVAL) - (_time.time() - _NCBI_LAST[0])
+                        if _ef_wait > 0:
+                            _time.sleep(_ef_wait)
+                        _NCBI_LAST[0] = _time.time()
+                    r2 = _requests.post(f"{ENTREZ_BASE}/efetch.fcgi", data=_ef_data, timeout=90)
                     r2.raise_for_status()
                 except Exception as _e_fetch:
                     logger.warning(f"PubMed efetch batch {batch_idx}: {_e_fetch}")
@@ -8354,6 +8375,8 @@ def _run_user_scenario_populate(
             _oa_fetched = 0
             _oa_limit = min(max_results, max_results)
             while _oa_fetched < _oa_limit:
+                if _time.time() >= _fed_deadline[0]:
+                    break  # budget fédération dépassé — on arrête de paginer
                 _oa_batch = min(200, _oa_limit - _oa_fetched)
                 oa_resp = _requests.get(
                     "https://api.openalex.org/works",
@@ -8414,6 +8437,8 @@ def _run_user_scenario_populate(
             _cr_limit = min(max_results, max_results)
             _cr_rows = min(100, _cr_limit)
             while _cr_fetched < _cr_limit:
+                if _time.time() >= _fed_deadline[0]:
+                    break  # budget fédération dépassé — on arrête de paginer
                 cr_resp = _requests.get(
                     "https://api.crossref.org/works",
                     params={"query": _plain_q, "rows": _cr_rows, "offset": _cr_offset,
@@ -8471,6 +8496,8 @@ def _run_user_scenario_populate(
             _ep_limit = min(max_results, max_results)
             _ep_page_size = 200
             while _ep_fetched < _ep_limit:
+                if _time.time() >= _fed_deadline[0]:
+                    break  # budget fédération dépassé — on arrête de paginer
                 ep_resp = _requests.get(
                     "https://www.ebi.ac.uk/europepmc/webservices/rest/search",
                     params={"query": _boolean, "format": "json", "pageSize": _ep_page_size,
@@ -8806,7 +8833,15 @@ def _run_user_scenario_populate(
     t_start = _time.time()
     if include_live:
         _set_phase("federation")
-        with ThreadPoolExecutor(max_workers=7) as executor:
+        # Garde-temps : passé ce délai, les boucles de pagination des sources lentes
+        # s'arrêtent (cf. _fed_deadline) et on poursuit avec le corpus partiel.
+        _fed_deadline[0] = t_start + POPULATE_FEDERATION_BUDGET
+        # IMPORTANT — on N'UTILISE PAS `with ThreadPoolExecutor(...)` : sa sortie
+        # appelle shutdown(wait=True), qui attend TOUTES les sources (jusqu'à ~5 min
+        # quand OpenAlex/Crossref paginent vers 2000), annulant de fait le budget.
+        # On gère l'executor manuellement et on l'arrête SANS attendre.
+        executor = ThreadPoolExecutor(max_workers=7)
+        try:
             futures = {executor.submit(fn): fn.__name__ for fn in source_funcs}
             try:
                 # Budget global : ne pas attendre indéfiniment une source lente.
@@ -8816,13 +8851,24 @@ def _run_user_scenario_populate(
                         logger.info(f"Populate {scenario_id} [{src_name}]: {src_count} articles ingérés")
                     except Exception as _fe:
                         logger.warning(f"Populate {scenario_id} source future error: {_fe}")
-            except TimeoutError:
+            # CRITIQUE — sur Python <3.11, as_completed lève
+            # concurrent.futures.TimeoutError (≠ TimeoutError natif). Sans
+            # _FuturesTimeout dans le except, l'exception remontait, le bloc
+            # plantait, et la reconstruction du corpus + le scoring + le passage à
+            # « done » étaient SAUTÉS → corpus figé sur la base locale, statut
+            # bloqué sur « running », résultats live perdus.
+            except (TimeoutError, _FuturesTimeout):
                 _done = sum(1 for _f in futures if _f.done())
                 logger.warning(
                     f"Populate {scenario_id}: budget fédération {POPULATE_FEDERATION_BUDGET:.0f}s dépassé — "
                     f"{_done}/{len(futures)} sources terminées ; poursuite avec le corpus partiel "
                     f"(les sources lentes continuent en arrière-plan)."
                 )
+        finally:
+            # wait=False : ne PAS bloquer sur les sources lentes. cancel_futures=True
+            # annule celles qui n'ont pas démarré ; celles en cours s'arrêteront au
+            # prochain tour de pagination grâce à _fed_deadline.
+            executor.shutdown(wait=False, cancel_futures=True)
         t_elapsed = _time.time() - t_start
         logger.info(f"Populate {scenario_id}: fédération terminée en {t_elapsed:.1f}s")
     else:
