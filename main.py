@@ -8280,7 +8280,9 @@ def _run_user_scenario_populate(
             # 3 req/s sans clé) → esearch 429 → total_found=0 → 0 article ingéré.
             r = _ncbi_get(
                 f"{ENTREZ_BASE}/esearch.fcgi",
-                {"db": "pubmed", "term": _pubmed_q, "retmax": 0,
+                # sort=pub_date → l'ensemble historique est trié du plus récent au
+                # plus ancien ; efetch récupère donc d'abord les articles récents.
+                {"db": "pubmed", "term": _pubmed_q, "retmax": 0, "sort": "pub_date",
                  "retmode": "json", "usehistory": "y", "email": EMAIL},
                 timeout=30,
             )
@@ -8380,8 +8382,11 @@ def _run_user_scenario_populate(
                 _oa_batch = min(200, _oa_limit - _oa_fetched)
                 oa_resp = _requests.get(
                     "https://api.openalex.org/works",
+                    # sort=publication_date:desc → quand on plafonne à max_results,
+                    # on récupère les articles LES PLUS RÉCENTS d'abord (utile pour
+                    # une revue vivante ; les anciens pertinents sont déjà en base).
                     params={"search": _plain_q, "per_page": _oa_batch, "page": _oa_page,
-                            "mailto": "literev@gesica.ch"},
+                            "sort": "publication_date:desc", "mailto": "literev@gesica.ch"},
                     timeout=20,
                 )
                 oa_resp.raise_for_status()
@@ -8441,6 +8446,11 @@ def _run_user_scenario_populate(
                     break  # budget fédération dépassé — on arrête de paginer
                 cr_resp = _requests.get(
                     "https://api.crossref.org/works",
+                    # NB : PAS de sort=published desc ici (contrairement aux autres
+                    # sources). Les dates Crossref sont peu fiables : un tri par date
+                    # remonte des enregistrements à dates erronées (ex. « 2121 ») en
+                    # tête. On garde donc le tri par pertinence (défaut), qui place les
+                    # articles les plus pertinents — pas les plus faussement récents.
                     params={"query": _plain_q, "rows": _cr_rows, "offset": _cr_offset,
                             "mailto": "literev@gesica.ch"},
                     timeout=20,
@@ -8500,8 +8510,10 @@ def _run_user_scenario_populate(
                     break  # budget fédération dépassé — on arrête de paginer
                 ep_resp = _requests.get(
                     "https://www.ebi.ac.uk/europepmc/webservices/rest/search",
+                    # sort=P_PDATE_D desc → articles les plus récents d'abord (idem OpenAlex).
                     params={"query": _boolean, "format": "json", "pageSize": _ep_page_size,
-                            "resultType": "core", "cursorMark": _ep_cursor_mark},
+                            "resultType": "core", "sort": "P_PDATE_D desc",
+                            "cursorMark": _ep_cursor_mark},
                     timeout=20,
                 )
                 ep_resp.raise_for_status()
