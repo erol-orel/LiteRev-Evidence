@@ -8197,22 +8197,33 @@ def _run_user_scenario_populate(
         # Le corpus = résultat de la REQUÊTE BOOLÉENNE (générée par LLM). On
         # récupère search_strategy.general ; à défaut on la génère depuis la requête.
         _boolean = query
+        _pubmed_q = query
         try:
             with engine.connect() as _sc:
                 _strat = _sc.execute(text("SELECT search_strategy FROM user_scenarios WHERE id = :sid"),
                                      {"sid": scenario_id}).scalar()
             if isinstance(_strat, dict) and not _strategy_is_degraded(_strat, query):
                 _boolean = _strat["general"]
+                _pubmed_q = _strat.get("pubmed") or _strat["general"]
             else:
                 # Absent ou dégradé (cache empoisonné pendant une panne quota) → régénérer.
                 _gen = _generate_search_strategy(query)
                 _boolean = _gen.get("general") or query
+                _pubmed_q = _gen.get("pubmed") or _boolean
                 if not _strategy_is_degraded(_gen, query):
                     with engine.begin() as _sc2:
                         _sc2.execute(text("UPDATE user_scenarios SET search_strategy = CAST(:s AS jsonb) WHERE id = :id"),
                                      {"s": json.dumps(_gen), "id": scenario_id})
         except Exception as _be:
             logger.warning(f"Populate {scenario_id} boolean strategy: {_be}")
+        # Variante par type de source (comme le font déjà les _live_fetch_*) :
+        #  - _pubmed_q : booléen MeSH → sources proxyfiées PubMed (eutils)
+        #  - _boolean  : booléen général → API qui acceptent les opérateurs (EuropePMC)
+        #  - _plain_q  : mots-clés simples (sans opérateurs ni '?') → OpenAlex / Crossref / preprints
+        # CORRECTIF : auparavant TOUTES les sources recevaient la requête BRUTE en
+        # langage naturel (avec le '?'), d'où OpenAlex 400 et booléens Cochrane/
+        # PROSPERO malformés → 0 article récupéré en direct.
+        _plain_q = _plain_keywords(_boolean) or _plain_keywords(query) or query
         _local_ids = _search_local_doc_ids(_boolean, "boolean", filters, limit=100_000)
 
         if _local_ids:
@@ -8256,7 +8267,7 @@ def _run_user_scenario_populate(
         try:
             r = _requests.get(
                 f"{ENTREZ_BASE}/esearch.fcgi",
-                params={"db": "pubmed", "term": query, "retmax": 0,
+                params={"db": "pubmed", "term": _pubmed_q, "retmax": 0,
                         "retmode": "json", "usehistory": "y", "email": EMAIL},
                 timeout=30,
             )
@@ -8346,7 +8357,7 @@ def _run_user_scenario_populate(
                 _oa_batch = min(200, _oa_limit - _oa_fetched)
                 oa_resp = _requests.get(
                     "https://api.openalex.org/works",
-                    params={"search": query, "per_page": _oa_batch, "page": _oa_page,
+                    params={"search": _plain_q, "per_page": _oa_batch, "page": _oa_page,
                             "mailto": "literev@gesica.ch"},
                     timeout=20,
                 )
@@ -8405,7 +8416,7 @@ def _run_user_scenario_populate(
             while _cr_fetched < _cr_limit:
                 cr_resp = _requests.get(
                     "https://api.crossref.org/works",
-                    params={"query": query, "rows": _cr_rows, "offset": _cr_offset,
+                    params={"query": _plain_q, "rows": _cr_rows, "offset": _cr_offset,
                             "mailto": "literev@gesica.ch"},
                     timeout=20,
                 )
@@ -8462,7 +8473,7 @@ def _run_user_scenario_populate(
             while _ep_fetched < _ep_limit:
                 ep_resp = _requests.get(
                     "https://www.ebi.ac.uk/europepmc/webservices/rest/search",
-                    params={"query": query, "format": "json", "pageSize": _ep_page_size,
+                    params={"query": _boolean, "format": "json", "pageSize": _ep_page_size,
                             "resultType": "core", "cursorMark": _ep_cursor_mark},
                     timeout=20,
                 )
@@ -8587,7 +8598,7 @@ def _run_user_scenario_populate(
                         "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi",
                         params={
                             "db": "pubmed",
-                            "term": f'({query}) AND ("systematic review"[Publication Type] OR "meta-analysis"[Publication Type])',
+                            "term": f'({_pubmed_q}) AND ("systematic review"[Publication Type] OR "meta-analysis"[Publication Type])',
                             "retmax": min(max_results, max_results),
                             "retmode": "json",
                             "sort": "relevance",
@@ -8664,7 +8675,7 @@ def _run_user_scenario_populate(
             try:
                 _coch_resp = _requests.get(
                     "https://www.cochranelibrary.com/search",
-                    params={"searchBy": "6", "searchText": query, "selectedType": "review",
+                    params={"searchBy": "6", "searchText": _plain_q, "selectedType": "review",
                             "isWordVariations": "true", "resultPerPage": "20",
                             "searchType": "basic", "orderBy": "relevancy", "displayPerPage": "20"},
                     headers={"Accept": "application/json",
@@ -8693,7 +8704,7 @@ def _run_user_scenario_populate(
 
             if not _cochrane_results:
                 try:
-                    _coch_term = f'("Cochrane Database Syst Rev"[Journal]) AND ({query})'
+                    _coch_term = f'("Cochrane Database Syst Rev"[Journal]) AND ({_pubmed_q})'
                     _coch_esearch = None
                     for _retry_c in range(3):
                         try:
