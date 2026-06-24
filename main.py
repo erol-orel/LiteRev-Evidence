@@ -206,6 +206,62 @@ try:
 except (TypeError, ValueError):
     RAG_MIN_SIMILARITY = 0.18
 
+# Budget temps (s) de la fédération des sources lors du populate. Borne le temps
+# d'attente quand une source est lente/bloquée (PubMed efetch timeout=90, retries
+# Cochrane). Les sources non terminées continuent en arrière-plan ; le corpus est
+# reconstruit avec ce qui est déjà ingéré. Réglable via l'env POPULATE_FEDERATION_BUDGET.
+try:
+    POPULATE_FEDERATION_BUDGET = float(os.getenv("POPULATE_FEDERATION_BUDGET", "55"))
+except (TypeError, ValueError):
+    POPULATE_FEDERATION_BUDGET = 55.0
+
+
+# ─── Disjoncteur OpenAI (quota épuisé) ───────────────────────────────────────
+# Quand le compte OpenAI est à court de quota, l'API renvoie 429
+# `insufficient_quota` sur CHAQUE appel, et le SDK retente 3× (back-off) → les
+# boucles d'arrière-plan (embedding, PICO, rerank) inondent l'API/les logs et
+# ralentissent tout. On détecte l'erreur quota et on met les boucles batch en
+# pause courte au lieu de marteler. (Le vrai correctif reste : recharger le
+# crédit OpenAI ; ceci rend juste la panne propre et non bloquante.)
+_OPENAI_QUOTA_COOLDOWN_UNTIL = [0.0]
+
+
+def _is_openai_quota_error(exc: object) -> bool:
+    s = str(exc).lower()
+    return "insufficient_quota" in s or "exceeded your current quota" in s
+
+
+def _openai_in_cooldown() -> bool:
+    return time.time() < _OPENAI_QUOTA_COOLDOWN_UNTIL[0]
+
+
+def _trip_openai_cooldown(seconds: int = 300) -> None:
+    _OPENAI_QUOTA_COOLDOWN_UNTIL[0] = time.time() + seconds
+    logger.warning(
+        f"OpenAI quota épuisé (insufficient_quota) → pause des appels OpenAI "
+        f"d'arrière-plan pendant {seconds}s. Rechargez le crédit OpenAI."
+    )
+
+
+def _strategy_is_degraded(strategy: object, query: str | None = None) -> bool:
+    """Vrai si une stratégie de recherche est un repli dégradé (échec LLM) :
+    marquée degraded, ou dont la requête booléenne 'general' est vide / identique
+    au texte brut / sans opérateur booléen — donc à régénérer."""
+    if not isinstance(strategy, dict):
+        return True
+    if strategy.get("degraded"):
+        return True
+    general = (strategy.get("general") or "").strip()
+    if not general:
+        return True
+    # Une vraie requête booléenne contient des opérateurs ou des guillemets.
+    has_operators = any(op in general for op in (" AND ", " OR ", " NOT ", '"')) or "[" in general
+    if not has_operators:
+        return True
+    if query is not None and general.strip().lower() == query.strip().lower():
+        return True
+    return False
+
 
 # Normalisation des types d'étude : le PICO LLM produit du texte libre (des
 # centaines de variantes uniques). On regroupe en un jeu canonique fixe au moment
@@ -717,7 +773,7 @@ def startup_event() -> None:
                         LIMIT 500
                     """)).mappings().fetchall()
 
-                if _chunks:
+                if _chunks and not _openai_in_cooldown():
                     _emb_done = 0
                     for _bi in range(0, len(_chunks), _EMBED_BATCH):
                         _batch = _chunks[_bi:_bi + _EMBED_BATCH]
@@ -737,6 +793,11 @@ def startup_event() -> None:
                             _emb_done += len(_batch)
                         except Exception as _ee:
                             logger.warning(f"BG embed batch {_bi}: {_ee}")
+                            # Quota OpenAI épuisé : inutile de tenter les lots suivants
+                            # (ils échoueront tous) → pause et on sort de la boucle.
+                            if _is_openai_quota_error(_ee):
+                                _trip_openai_cooldown()
+                                break
                     if _emb_done:
                         logger.info(f"BG worker: {_emb_done} chunks embedded.")
 
@@ -763,7 +824,7 @@ def startup_event() -> None:
                         LIMIT :lim
                     """), {"lim": _PICO_BATCH}).mappings().fetchall()
 
-                if _pico_rows:
+                if _pico_rows and not _openai_in_cooldown():
                     _pico_done = 0
                     with _TPE(max_workers=_PICO_WORKERS) as _pool:
                         _futs = {_pool.submit(_extract_pico_one, r, _client): r["id"] for r in _pico_rows}
@@ -2516,17 +2577,21 @@ def get_search_strategy(scenario_id: str) -> dict[str, Any]:
     """Returns the stored search_strategy JSON for this scenario.
     If not yet generated, generates it now and stores it."""
     row = _get_user_scenario_or_404(scenario_id)
+    query = row["query"]
     strategy = row.get("search_strategy")
-    if not strategy:
-        query = row["query"]
+    # Régénérer si absent OU si la valeur stockée est un repli dégradé (p. ex.
+    # généré pendant une panne de quota OpenAI → requête brute échoée). On ne
+    # persiste QUE les stratégies valides, pour ne pas figer un cache empoisonné.
+    if _strategy_is_degraded(strategy, query):
         strategy = _generate_search_strategy(query)
-        try:
-            with engine.begin() as conn:
-                conn.execute(text("""
-                    UPDATE user_scenarios SET search_strategy = CAST(:strategy AS jsonb) WHERE id = :id
-                """), {"id": scenario_id, "strategy": json.dumps(strategy)})
-        except Exception as _e:
-            logger.warning(f"get_search_strategy store error: {_e}")
+        if not _strategy_is_degraded(strategy, query):
+            try:
+                with engine.begin() as conn:
+                    conn.execute(text("""
+                        UPDATE user_scenarios SET search_strategy = CAST(:strategy AS jsonb) WHERE id = :id
+                    """), {"id": scenario_id, "strategy": json.dumps(strategy)})
+            except Exception as _e:
+                logger.warning(f"get_search_strategy store error: {_e}")
     return strategy if isinstance(strategy, dict) else {}
 
 
@@ -7483,6 +7548,10 @@ def create_user_scenario(payload: UserScenarioIn, _: None = Depends(require_api_
     def _bg_strategy(sid: str, q: str) -> None:
         try:
             strategy = _generate_search_strategy(q)
+            if _strategy_is_degraded(strategy, q):
+                # Repli dégradé (panne LLM/quota) : ne PAS persister, sera
+                # régénéré à la prochaine lecture une fois le quota rétabli.
+                return
             with engine.begin() as conn2:
                 conn2.execute(text("""
                     UPDATE user_scenarios SET search_strategy = CAST(:strategy AS jsonb) WHERE id = :id
@@ -7795,6 +7864,9 @@ def get_user_scenario_corpus(
                 COALESCE(ars.similarity_score, 0.0) AS similarity_score,
                 ars.rerank_score AS rerank_score,
                 (COALESCE(ars.similarity_score, 0.0) >= :threshold) AS above_threshold,
+                -- is_new : ingéré pendant CE scénario (vs déjà présent en base).
+                -- Donne un sens au badge "Nouveau" vs "Base locale" côté UI.
+                (:screated IS NOT NULL AND d.created_at >= :screated) AS is_new,
                 EXISTS (
                     SELECT 1 FROM document_chunk c
                     WHERE c.document_id = d.id AND c.chunk_type = 'fulltext_section'
@@ -7811,7 +7883,7 @@ def get_user_scenario_corpus(
                 d.citation_count DESC NULLS LAST,
                 d.title ASC
             LIMIT :limit OFFSET :offset
-        """), {**params, 'threshold': eff_threshold}).mappings().all()
+        """), {**params, 'threshold': eff_threshold, 'screated': _screated}).mappings().all()
         year_dist = conn.execute(text(f"""
             SELECT d.year, COUNT(*) AS cnt
             FROM literature_document d
@@ -7919,7 +7991,7 @@ def _generate_search_strategy(query: str) -> dict:
     """
     openai_key = os.getenv("OPENAI_API_KEY")
     if not openai_key:
-        return {"general": query, "pubmed": query, "explanation": "", "synonyms": []}
+        return {"general": query, "pubmed": query, "explanation": "", "synonyms": [], "degraded": True}
     try:
         from openai import OpenAI as _OAI_ss
         _client = _OAI_ss(api_key=openai_key)
@@ -7950,7 +8022,7 @@ def _generate_search_strategy(query: str) -> dict:
         return json.loads(response.choices[0].message.content)
     except Exception as _e:
         logger.warning(f"_generate_search_strategy failed: {_e}")
-        return {"general": query, "pubmed": query, "explanation": "", "synonyms": []}
+        return {"general": query, "pubmed": query, "explanation": "", "synonyms": [], "degraded": True}
 
 
 class SearchStrategyIn(BaseModel):
@@ -8138,14 +8210,16 @@ def _run_user_scenario_populate(
             with engine.connect() as _sc:
                 _strat = _sc.execute(text("SELECT search_strategy FROM user_scenarios WHERE id = :sid"),
                                      {"sid": scenario_id}).scalar()
-            if isinstance(_strat, dict) and _strat.get("general"):
+            if isinstance(_strat, dict) and not _strategy_is_degraded(_strat, query):
                 _boolean = _strat["general"]
             else:
+                # Absent ou dégradé (cache empoisonné pendant une panne quota) → régénérer.
                 _gen = _generate_search_strategy(query)
                 _boolean = _gen.get("general") or query
-                with engine.begin() as _sc2:
-                    _sc2.execute(text("UPDATE user_scenarios SET search_strategy = CAST(:s AS jsonb) WHERE id = :id"),
-                                 {"s": json.dumps(_gen), "id": scenario_id})
+                if not _strategy_is_degraded(_gen, query):
+                    with engine.begin() as _sc2:
+                        _sc2.execute(text("UPDATE user_scenarios SET search_strategy = CAST(:s AS jsonb) WHERE id = :id"),
+                                     {"s": json.dumps(_gen), "id": scenario_id})
         except Exception as _be:
             logger.warning(f"Populate {scenario_id} boolean strategy: {_be}")
         _local_ids = _search_local_doc_ids(_boolean, "boolean", filters, limit=100_000)
@@ -8732,14 +8806,23 @@ def _run_user_scenario_populate(
         _set_phase("federation")
         with ThreadPoolExecutor(max_workers=7) as executor:
             futures = {executor.submit(fn): fn.__name__ for fn in source_funcs}
-            for future in as_completed(futures):
-                try:
-                    src_name, src_count = future.result()
-                    logger.info(f"Populate {scenario_id} [{src_name}]: {src_count} articles ingérés")
-                except Exception as _fe:
-                    logger.warning(f"Populate {scenario_id} source future error: {_fe}")
+            try:
+                # Budget global : ne pas attendre indéfiniment une source lente.
+                for future in as_completed(futures, timeout=POPULATE_FEDERATION_BUDGET):
+                    try:
+                        src_name, src_count = future.result()
+                        logger.info(f"Populate {scenario_id} [{src_name}]: {src_count} articles ingérés")
+                    except Exception as _fe:
+                        logger.warning(f"Populate {scenario_id} source future error: {_fe}")
+            except TimeoutError:
+                _done = sum(1 for _f in futures if _f.done())
+                logger.warning(
+                    f"Populate {scenario_id}: budget fédération {POPULATE_FEDERATION_BUDGET:.0f}s dépassé — "
+                    f"{_done}/{len(futures)} sources terminées ; poursuite avec le corpus partiel "
+                    f"(les sources lentes continuent en arrière-plan)."
+                )
         t_elapsed = _time.time() - t_start
-        logger.info(f"Populate {scenario_id}: toutes sources terminées en {t_elapsed:.1f}s")
+        logger.info(f"Populate {scenario_id}: fédération terminée en {t_elapsed:.1f}s")
     else:
         logger.info(f"Populate {scenario_id}: include_live=False — base locale uniquement")
 
@@ -8909,7 +8992,7 @@ def _run_semantic_rerank_inline(scenario_id: str, query: str) -> int:
                 ORDER BY ld.id LIMIT 1000
             """), {"sid": scenario_id}).mappings().fetchall()
         n_slow = 0
-        if _rows:
+        if _rows and not _openai_in_cooldown():
             import numpy as _np
             _q = _np.asarray(q_emb, dtype=float)
             _qn = float(_np.linalg.norm(_q)) or 1.0
@@ -8931,6 +9014,9 @@ def _run_semantic_rerank_inline(scenario_id: str, query: str) -> int:
                     n_slow += len(ups)
                 except Exception as _e:
                     logger.warning(f"Rerank fallback batch {i}: {_e}")
+                    if _is_openai_quota_error(_e):
+                        _trip_openai_cooldown()
+                        break
         logger.info(f"Rerank {scenario_id}: {n_fast} via pgvector + {n_slow} via OpenAI (fallback).")
         return n_fast + n_slow
     except Exception as _e:

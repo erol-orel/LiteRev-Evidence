@@ -1491,6 +1491,7 @@ export interface CorpusArticle {
   citation_count: number | null;
   open_access: boolean | null;
   has_fulltext: boolean;
+  is_new?: boolean | null;
   similarity_score?: number | null;
   rerank_score?: number | null;
   screening_status?: string | null;
