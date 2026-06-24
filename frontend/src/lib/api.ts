@@ -1,12 +1,4 @@
-import type {
-  SearchRequest,
-  SearchResponse,
-  SearchResult,
-  ApiSearchRequest,
-  ApiSearchResponse,
-  ApiSearchResult,
-  ApiSearchFilters,
-} from "../types/search";
+import type { SearchResult } from "../types/search";
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "/api";
 
@@ -175,50 +167,6 @@ export interface ApiDocumentDetailResponse {
 
 // --- MAPPER FUNCTIONS ---
 
-function mapFiltersToApi(filters?: SearchRequest["filters"]): ApiSearchFilters | undefined {
-  if (!filters) return undefined;
-  return {
-    project_context: filters.projectContext,
-    source_type: filters.sourceType,
-    disease_or_condition: filters.diseaseOrCondition,
-    scenario_type: filters.scenarioType,
-    geographic_scope: filters.geographicScope,
-    evidence_category: filters.evidenceCategory,
-    year_min: filters.yearMin,
-    year_max: filters.yearMax,
-  };
-}
-
-function mapSearchResultFromApi(apiResult: ApiSearchResult): SearchResult {
-  return {
-    id: apiResult.id,
-    documentId: apiResult.document_id,
-    chunkId: apiResult.chunk_id,
-    chunkIndex: apiResult.chunk_index,
-    title: apiResult.title,
-    abstract: apiResult.abstract,
-    content: apiResult.content,
-    highlight: apiResult.highlight,
-    score: apiResult.score,
-    source: apiResult.source,
-    year: apiResult.year,
-    url: apiResult.url,
-    projectContext: apiResult.project_context,
-    sourceType: apiResult.source_type,
-    diseaseOrCondition: apiResult.disease_or_condition,
-    scenarioType: apiResult.scenario_type,
-    geographicScope: apiResult.geographic_scope,
-    evidenceCategory: apiResult.evidence_category,
-    chunkType: apiResult.chunk_type,
-    semanticScore: apiResult.semantic_score ?? null,
-    lexicalScore: apiResult.lexical_score ?? null,
-    hasFulltext: apiResult.has_fulltext ?? null,
-    isEmbedded: apiResult.is_embedded ?? null,
-    isLive: (apiResult as { is_live?: boolean }).is_live ?? false,
-    inLocalDb: (apiResult as { in_local_db?: boolean }).in_local_db ?? null,
-  };
-}
-
 function mapFilterOptionsFromApi(apiOpts: ApiFilterOptions): FilterOptions {
   return {
     source: apiOpts.source,
@@ -265,44 +213,6 @@ function mapDocumentChunkFromApi(apiChunk: ApiDocumentChunk): DocumentChunk {
 }
 
 // --- API FUNCTIONS ---
-
-export async function searchDocuments(
-  payload: SearchRequest,
-): Promise<SearchResponse> {
-  const apiPayload: ApiSearchRequest = {
-    query_text: payload.queryText,
-    mode: payload.mode,
-    limit: payload.limit,
-    filters: mapFiltersToApi(payload.filters),
-    include_live: payload.includeLive ?? false,
-    similarity_threshold: payload.similarityThreshold,
-  };
-
-  const response = await safeFetch(`${API_BASE_URL}/search`, {
-    method: "POST",
-    headers: authHeaders({ "Content-Type": "application/json" }),
-    body: JSON.stringify(apiPayload),
-  });
-
-  if (!response.ok) {
-    const text = await response.text();
-    throw new Error(text || `Search failed with status ${response.status}`);
-  }
-
-  const apiData: ApiSearchResponse = await response.json();
-  return {
-    results: (apiData.results || []).map(mapSearchResultFromApi),
-    totalUniqueDocs: apiData.total_unique_docs,
-    totalMatchingDocs: apiData.total_matching_docs ?? apiData.total,
-    sourceBreakdown: apiData.source_breakdown,
-    fulltextDocs: apiData.fulltext_docs,
-    abstractDocs: apiData.abstract_docs,
-    liveSourcesQueried: apiData.live_sources_queried,
-    liveNewCount: apiData.live_new_count,
-    scoreType: apiData.score_type,
-    scoreLabel: apiData.score_label,
-  };
-}
 
 export async function getFilterOptions(): Promise<FilterOptions> {
   const response = await safeFetch(`${API_BASE_URL}/filters-options`);
@@ -2040,79 +1950,6 @@ export interface RagStreamCallbacks {
   onDone: () => void;
   onError: (err: string) => void;
 }
-
-export function askScenarioRagStream(
-  scenarioId: string,
-  question: string,
-  callbacks: RagStreamCallbacks,
-): () => void {
-  let aborted = false;
-  const controller = new AbortController();
-
-  (async () => {
-    try {
-      const resp = await safeFetch(`${API_BASE_URL}/ask/stream`, {
-        method: "POST",
-        headers: authHeaders({ "Content-Type": "application/json" }),
-        body: JSON.stringify({
-          question,
-          project_context: "literev",
-          scenario_id: scenarioId,
-          top_k: 8,
-        }),
-        signal: controller.signal,
-      });
-
-      if (!resp.ok) throw new Error(httpMessage(resp.status));
-      if (!resp.body) throw new Error("No response body");
-
-      const reader = resp.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = "";
-
-      while (!aborted) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split("\n");
-        buffer = lines.pop() ?? "";
-
-        for (const line of lines) {
-          if (line.startsWith("event: sources")) continue;
-          if (line.startsWith("event: error")) continue;
-          if (line.startsWith("event: done")) {
-            callbacks.onDone();
-            return;
-          }
-          if (line.startsWith("data: ")) {
-            const raw = line.slice(6).trim();
-            if (!raw || raw === "{}") continue;
-            try {
-              const parsed = JSON.parse(raw);
-              if (parsed.token !== undefined) {
-                callbacks.onToken(parsed.token);
-              } else if (Array.isArray(parsed)) {
-                callbacks.onSources(parsed as ScenarioRagSource[]);
-              } else if (parsed.error) {
-                callbacks.onError(parsed.error);
-              }
-            } catch {}
-          }
-        }
-      }
-      callbacks.onDone();
-    } catch (e: any) {
-      if (!aborted) callbacks.onError(e.message ?? "Erreur streaming");
-    }
-  })();
-
-  return () => {
-    aborted = true;
-    controller.abort();
-  };
-}
-
-// ─── Double-aveugle screening + Kappa de Cohen ───────────────────────────────
 
 export interface KappaStats {
   scenario_id: string;
