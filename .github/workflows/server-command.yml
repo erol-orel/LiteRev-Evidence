@@ -62,11 +62,20 @@ jobs:
           DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
           DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
           REMOTE_CMD: ${{ steps.resolve.outputs.cmd }}
+          # Secret OPTIONNEL transmis au shell distant via STDIN — JAMAIS via
+          # REMOTE_CMD (qui apparaît en clair dans les logs Actions publics).
+          # GitHub masque la valeur (***) car c'est un secret. Permet d'écrire la
+          # clé NCBI côté serveur sans jamais l'exposer. Vide si le secret n'existe
+          # pas (alors l'export est omis).
+          NCBI_API_KEY: ${{ secrets.NCBI_API_KEY }}
         run: |
           mkdir -p ~/.ssh
           printf '%s\n' "$SSH_KEY" > ~/.ssh/deploy_key
           chmod 600 ~/.ssh/deploy_key
-          echo "$REMOTE_CMD" | ssh -o StrictHostKeyChecking=accept-new \
+          {
+            if [ -n "${NCBI_API_KEY:-}" ]; then printf 'export NCBI_API_KEY=%q\n' "$NCBI_API_KEY"; fi
+            echo "$REMOTE_CMD"
+          } | ssh -o StrictHostKeyChecking=accept-new \
               -o ConnectTimeout=15 \
               -i ~/.ssh/deploy_key \
               "$DEPLOY_USER@$DEPLOY_HOST" \
