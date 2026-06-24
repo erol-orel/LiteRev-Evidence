@@ -40,6 +40,7 @@ export interface SearchResult {
   hasFulltext?: boolean | null;
   isEmbedded?: boolean | null;
   isLive?: boolean | null;
+  isNew?: boolean | null;
   inLocalDb?: boolean | null;
   [key: string]: unknown;
 }

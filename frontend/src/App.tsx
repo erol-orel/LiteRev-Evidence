@@ -3209,6 +3209,7 @@ export default function App() {
           url: a.url,
           highlight: (a.abstract ?? '').slice(0, 600),
           hasFulltext: a.has_fulltext,
+          isNew: a.is_new ?? false,
           semanticScore: a.similarity_score ?? null,
           score: a.similarity_score ?? 0,
         }));
@@ -4094,15 +4095,20 @@ export default function App() {
                             }`} title={result.hasFulltext ? 'Texte intégral indexé' : 'Titre + résumé uniquement'}>
                               {result.hasFulltext ? 'Full Text' : 'Abstract'}
                             </span>
-                            {/* Provenance : base locale indexée vs source API en direct */}
+                            {/* Provenance : récupéré en direct / nouvel ajout à ce corpus / déjà en base */}
                             {result.isLive ? (
                               <span className="rounded-full px-2 py-1 border text-[11px] bg-amber-500/10 border-amber-500/30 text-amber-300"
                                     title="Recupere en direct via API externe, pas encore indexe dans la base locale">
                                 API live
                               </span>
+                            ) : result.isNew ? (
+                              <span className="rounded-full px-2 py-1 border text-[11px] bg-brand-500/10 border-brand-500/30 text-brand-300"
+                                    title="Récupéré via les sources en direct pendant CETTE recherche (nouvel ajout au corpus)">
+                                Nouveau
+                              </span>
                             ) : (
                               <span className="rounded-full px-2 py-1 border text-[11px] bg-emerald-500/10 border-emerald-500/20 text-emerald-300"
-                                    title="Présent dans la base locale LiteRev">
+                                    title="Déjà présent dans la base locale avant cette recherche">
                                 Base locale
                               </span>
                             )}
