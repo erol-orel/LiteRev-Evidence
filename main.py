@@ -1763,7 +1763,7 @@ def search(payload: SearchIn) -> dict[str, Any]:
     live_new_count = 0
     if payload.include_live:
         try:
-            live_results, live_sources_queried, _live_raw = _federated_live_search(
+            live_results, live_sources_queried, _live_raw, _live_status = _federated_live_search(
                 query, max_per_source=payload.live_max_per_source
             )
             existing_ext_ids = {
@@ -2181,7 +2181,7 @@ def _federated_live_search(
     max_per_source: int = 50,
     pubmed_query: str | None = None,
     general_query: str | None = None,
-) -> tuple[list[dict], list[str], dict[str, int]]:
+) -> tuple[list[dict], list[str], dict[str, int], dict[str, dict]]:
     """Interroge les 8 sources externes en parallèle, déduplique (par DOI puis
     titre normalisé), marque in_local_db, et score chaque résultat
     (sémantique cosinus + lexical + hybride). Réutilisé par /search (fédéré)
@@ -2200,46 +2200,74 @@ def _federated_live_search(
         ("EuropePMC", _live_fetch_europepmc, general_query),
         ("medRxiv", _live_fetch_medrxiv, general_query),
         ("bioRxiv", _live_fetch_biorxiv, general_query),
-        ("PROSPERO", _live_fetch_prospero, general_query),
-        ("Cochrane", _live_fetch_cochrane, general_query),
+        # PROSPERO/Cochrane sont proxyfiés via PubMed → leur passer la requête
+        # MeSH-optimisée (pubmed_query), pas la requête générale en langage naturel
+        # (sinon les filtres booléens composés matchent souvent 0).
+        ("PROSPERO", _live_fetch_prospero, pubmed_query),
+        ("Cochrane", _live_fetch_cochrane, pubmed_query),
     ]
 
+    import time as _t_fed
+    _t0_fed = _t_fed.time()
     all_results: list[dict] = []
     sources_queried: list[str] = []
     raw_counts: dict[str, int] = {name: 0 for name, _, _ in source_fns}
+    # Statut par source pour le diagnostic ("not working / slow") : ok / empty /
+    # error / timeout, + latence. Les sources non complétées dans le délai
+    # restent "timeout" (auparavant silencieusement absentes de la réponse).
+    source_status: dict[str, dict[str, Any]] = {
+        name: {"status": "timeout", "count": 0, "latency_ms": None} for name, _, _ in source_fns
+    }
     with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
         futures = {executor.submit(fn, q, max_per_source): name for name, fn, q in source_fns}
         try:
             for future in concurrent.futures.as_completed(futures, timeout=30):
                 name = futures[future]
                 sources_queried.append(name)
+                _ms = round((_t_fed.time() - _t0_fed) * 1000)
                 try:
                     items = future.result()
                     raw_counts[name] = len(items)
                     all_results.extend(items)
+                    source_status[name] = {
+                        "status": "ok" if items else "empty",
+                        "count": len(items), "latency_ms": _ms,
+                    }
                 except Exception as _fe:
                     logger.warning(f"federated source {name} error: {_fe}")
+                    source_status[name] = {
+                        "status": "error", "count": 0, "latency_ms": _ms,
+                        "error": str(_fe)[:200],
+                    }
         except concurrent.futures.TimeoutError:
             logger.warning("federated search: certaines sources ont dépassé le délai")
 
-    # Marquage in_local_db — literature_document has no doi column; match via
-    # external_id which stores DOIs for OpenAlex/Crossref/EuropePMC, and
-    # pmid:<id> for PubMed. Normalize DOIs to lowercase for comparison.
-    dois = [r["doi"].lower() for r in all_results if r.get("doi")]
-    in_db_dois: set[str] = set()
-    if dois:
+    # Marquage in_local_db — literature_document n'a pas de colonne doi dédiée et
+    # external_id est hétérogène selon la source (DOI brut pour Crossref/EuropePMC,
+    # "pmid:<id>" pour PubMed/PROSPERO/Cochrane, URL pour OpenAlex). On compare donc
+    # l'external_id stocké à la fois aux DOIs ET aux external_id des résultats
+    # (auparavant : DOI seul → PubMed/PROSPERO/Cochrane/OpenAlex jamais reconnus).
+    keys: set[str] = set()
+    for r in all_results:
+        if r.get("doi"):
+            keys.add(r["doi"].lower())
+        if r.get("external_id"):
+            keys.add(str(r["external_id"]).lower())
+    in_db_keys: set[str] = set()
+    if keys:
         try:
             with engine.connect() as conn:
-                # external_id stores raw DOIs (e.g. "10.1234/foo") for most sources
                 rows_db = conn.execute(text(
                     "SELECT LOWER(external_id) FROM literature_document "
-                    "WHERE LOWER(external_id) = ANY(:dois) AND project_context = 'literev'"
-                ), {"dois": dois}).fetchall()
-                in_db_dois = {r[0] for r in rows_db}
+                    "WHERE LOWER(external_id) = ANY(:keys) AND project_context = 'literev'"
+                ), {"keys": list(keys)}).fetchall()
+                in_db_keys = {r[0] for r in rows_db}
         except Exception as _dbe:
             logger.warning(f"federated DB check error: {_dbe}")
     for r in all_results:
-        r["in_local_db"] = bool(r.get("doi") and r["doi"].lower() in in_db_dois)
+        _doi = (r.get("doi") or "").lower()
+        _eid = str(r.get("external_id") or "").lower()
+        r["in_local_db"] = bool((_doi and _doi in in_db_keys) or (_eid and _eid in in_db_keys))
 
     # Déduplication par DOI (sinon titre normalisé), suivi des sources
     import re as _re2
@@ -2329,7 +2357,7 @@ def _federated_live_search(
         r["hybrid_score"] = round(0.7 * sem + 0.3 * lex, 4)
 
     deduped_list.sort(key=lambda r: r.get("hybrid_score", 0.0), reverse=True)
-    return deduped_list, sources_queried, raw_counts
+    return deduped_list, sources_queried, raw_counts, source_status
 
 
 @app.post("/user-scenarios/{scenario_id}/search/live")
@@ -2345,7 +2373,7 @@ def search_live(
     pubmed_query = strategy.get("pubmed", query) if isinstance(strategy, dict) else query
     general_query = strategy.get("general", query) if isinstance(strategy, dict) else query
 
-    all_results, sources_queried, raw_counts = _federated_live_search(
+    all_results, sources_queried, raw_counts, source_status = _federated_live_search(
         query, max_per_source, pubmed_query=pubmed_query, general_query=general_query
     )
     new_count = sum(1 for r in all_results if not r["in_local_db"])
@@ -2391,6 +2419,7 @@ def search_live(
         "threshold": _thr,
         "sources_queried": sources_queried,
         "source_raw_counts": raw_counts,
+        "source_status": source_status,
         "ingesting_background": ingesting_background,
     }
 

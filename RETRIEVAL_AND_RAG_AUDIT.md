@@ -45,13 +45,13 @@ this external path — "smoke test green" said nothing about live sources.
 - **Preprint scan tightened**: `max_scan 300 → 120`, page `timeout 10 s → 6 s`, + a `User-Agent`. Reclaims most of the wasted federation budget.
 - **EuropePMC** now sends a `User-Agent` (was missing → throttling risk).
 - **NCBI spacing** drops to `0.11 s` when `NCBI_API_KEY` is set (10 req/s tier), reducing the lock serialization tax across the PubMed-backed trio.
+- **Per-source status in `/search/live`** — the response now includes `source_status` `{source: {status: ok|empty|error|timeout, count, latency_ms, error?}}`. Sources dropped at the 30 s cap show `timeout` instead of vanishing; errored sources show `error` + reason. (Removes the "is it down or just empty?" ambiguity at the source.)
+- **`in_local_db` matching fixed** — now matches the DB `external_id` against both result DOIs **and** result `external_id`s (`pmid:`/`prospero:`/`cochrane:`/OpenAlex-URL), not bare DOIs only, so new/duplicate accounting (which drives the background-ingest decision) is correct.
+- **PROSPERO/Cochrane** now receive the MeSH-optimized `pubmed_query` (not the natural-language `general_query`), so their compound `[Publication Type]`/`[Journal]` filters actually match. (Bare-query fallback was intentionally *not* added — it would mislabel non-PROSPERO/Cochrane articles under those sources, corrupting provenance.)
 
-### A.4 Recommended next (config / larger, not in this PR)
+### A.4 Recommended next (server config / ops — cannot be done in code)
 1. **Set `NCBI_API_KEY`** on the server (env) — biggest free win for the PubMed trio; the code already uses it and now spaces at 10 req/s.
-2. **Confirm egress + `WRITE_API_KEY`** in prod: hit `/sources/health` (egress) and verify the frontend's stored `X-API-Key` matches the server (401).
-3. **Surface per-source status** in the `/search/live` response (ok/timeout/error) instead of silently dropping — removes the core "is it down or just empty?" ambiguity.
-4. **Fix `in_local_db` matching** (`external_id` is `pmid:`/`prospero:`/`cochrane:`/OpenAlex-URL, not a bare DOI) so new/duplicate accounting is correct.
-5. **PROSPERO/Cochrane**: pass the MeSH `pubmed_query` and fall back to a bare query when the filtered one returns 0.
+2. **Confirm egress + `WRITE_API_KEY`** in prod: hit `/sources/health` (egress) and verify the frontend's stored `X-API-Key` matches the server (the likely 401).
 
 ---
 
