@@ -3869,7 +3869,6 @@ def get_terrain_climate(lat: float = 46.2044, lon: float = 6.1432) -> dict[str, 
     pour les modèles de prévision de demande EMS et surveillance épidémique.
     """
     import os
-    import tempfile
     
     # Configuration des identifiants Copernicus CDS (depuis l'environnement)
     cds_url = os.getenv("CDS_API_URL", "https://cds.climate.copernicus.eu/api")
@@ -5091,7 +5090,6 @@ def _build_clusters_payload(scenario_id: str, docs: list, cc: dict, *,
 def _run_clustering_background(scenario_id: str, force_refresh: bool = False) -> None:
     """Calcule le clustering dans un thread séparé et stocke le résultat en cache."""
     import time as _time
-    import threading
 
     cache_dir = "/tmp/literev_clustering_cache"
     os.makedirs(cache_dir, exist_ok=True)
@@ -5120,10 +5118,6 @@ def _run_clustering_background(scenario_id: str, force_refresh: bool = False) ->
     except Exception:
         meta_for_cluster = {}
     try:
-        import numpy as np
-        from sklearn.feature_extraction.text import TfidfVectorizer
-        from sklearn.cluster import KMeans
-        from sklearn.decomposition import TruncatedSVD, PCA
 
         with engine.connect() as conn:
             docs = list(conn.execute(text("""
@@ -5881,7 +5875,6 @@ def extract_metadata_batch(
 
     try:
         from openai import OpenAI as _OAI
-        from datetime import datetime, timezone
         _client = _OAI(api_key=openai_key)
 
         for row in rows:
@@ -6716,7 +6709,6 @@ async def ask_stream(payload: dict[str, Any]) -> StreamingResponse:
     Version streaming (SSE) de l'endpoint /ask.
     Retourne les tokens au fur et à mesure via Server-Sent Events.
     """
-    import asyncio
     from openai import AsyncOpenAI
 
     question = payload.get("question", "")
@@ -6858,7 +6850,6 @@ def get_evidence_brief_pdf(scenario_id: str):
     from reportlab.lib.units import cm
     from reportlab.lib import colors
     from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, HRFlowable
-    from reportlab.lib.enums import TA_CENTER, TA_LEFT
     import io
 
     meta = _get_db_gesica_scenario_or_404(scenario_id)
@@ -9906,10 +9897,6 @@ def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict
         # ── Étape 7 : Clustering (UMAP+HDBSCAN avec fallback KMeans) ────────────
         update_step("clustering", "running")
         try:
-            import numpy as np
-            from sklearn.feature_extraction.text import TfidfVectorizer
-            from sklearn.cluster import KMeans
-            from sklearn.decomposition import TruncatedSVD, PCA
 
             with engine.connect() as conn:
                 cl_docs = list(conn.execute(text("""
@@ -11129,7 +11116,6 @@ def get_user_scenario_evidence_brief_pdf(scenario_id: str):
     from reportlab.lib.units import cm
     from reportlab.lib import colors
     from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, HRFlowable
-    from reportlab.lib.enums import TA_CENTER, TA_LEFT
     import io as _io
 
     with engine.connect() as _conn:
@@ -13108,7 +13094,6 @@ def _run_model_training(scenario_id: str, n_trials: int = 25) -> None:
         logger.error(f"Entraînement modèle {scenario_id}: {e}", exc_info=True)
         _MODEL_TRAIN_JOBS[scenario_id] = {"status": "error", "error": str(e)}
         try:
-            import json as _json2
             with engine.begin() as conn:
                 conn.execute(text("""
                     INSERT INTO scenario_model_run (scenario_id, status, error, is_active)
@@ -13445,8 +13430,6 @@ async def ask_stream_filtered(payload: dict[str, Any]):
     Version de /ask/stream qui filtre les chunks par seuil de similarité
     et priorise les articles validés humainement.
     """
-    import asyncio
-    import json as _json
     from openai import AsyncOpenAI, OpenAI as SyncOpenAI
 
     question = payload.get("question", "")
