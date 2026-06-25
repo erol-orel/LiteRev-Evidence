@@ -4061,9 +4061,8 @@ export default function App() {
                           </div>
 
                           <div className="mt-3 flex flex-wrap gap-2 text-xs text-forest-400">
-                            {/* Score chip — masqué au stade recherche (corpus booléen =
-                                appartenance binaire, pas de score de pertinence).
-                                La pertinence sémantique apparaît sur la page scénario. */}
+                            {/* Score sémantique (cosinus) — calculé pour TOUS les documents
+                                affichés (la recherche attend la fin du scoring). */}
                             {searchScoreType && searchScoreType !== 'none' && (
                               <span className={`rounded-full px-2 py-1 ${
                                 searchScoreType === 'hybrid' ? 'bg-violet-500/20 text-violet-300' :
@@ -4073,6 +4072,15 @@ export default function App() {
                                 {searchScoreType === 'hybrid' ? '⊕' :
                                  searchScoreType === 'semantic' ? '◎' :
                                  '≡'} {(result.score ?? 0).toFixed(3)}
+                              </span>
+                            )}
+                            {/* Score de reranking (cross-encoder Cohere) quand présent — c'est
+                                LUI qui ordonne le sous-ensemble pertinent en tête de liste
+                                (échelle distincte du cosinus, d'où l'affichage des deux). */}
+                            {result.rerankScore != null && (
+                              <span className="rounded-full bg-violet-500/15 px-2 py-1 text-violet-300 border border-violet-500/25"
+                                title="Reranking Cohere (cross-encoder) — affine l'ordre du sous-ensemble pertinent. Échelle distincte du cosinus.">
+                                ⊕ Rerank {(result.rerankScore).toFixed(2)}
                               </span>
                             )}
                             {/* Décomposition (hybride uniquement : sinon redondant avec le score global) */}
