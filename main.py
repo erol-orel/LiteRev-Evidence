@@ -7624,7 +7624,7 @@ def list_folders() -> list[dict[str, Any]]:
             FROM user_scenario_folders f
             LEFT JOIN user_scenarios s ON s.folder_id = f.id
             GROUP BY f.id, f.name, f.color, f.sort_order, f.created_at
-            ORDER BY f.sort_order ASC, f.created_at ASC
+            ORDER BY f.sort_order ASC, f.created_at DESC
         """)).mappings().all()
     return [
         {
