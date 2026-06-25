@@ -1080,7 +1080,7 @@ function ScenariosView({
   populatingId?: string | null;
   pipelineStatuses?: Record<string, import('./lib/api').UserScenarioPipelineStatus>;
   folders?: ScenarioFolder[];
-  onCreateFolder?: (name: string, color: string) => Promise<void>;
+  onCreateFolder?: (name: string, color: string) => Promise<ScenarioFolder>;
   onDeleteFolder?: (folderId: string) => Promise<void>;
   onRenameFolder?: (folderId: string, name: string, color: string) => Promise<void>;
   onAssignFolder?: (scenarioId: string, folderId: string | null) => Promise<void>;
@@ -1092,6 +1092,7 @@ function ScenariosView({
   const [newFolderName, setNewFolderName] = useState('');
   const [newFolderColor, setNewFolderColor] = useState('#6366f1');
   const [assigningScenarioId, setAssigningScenarioId] = useState<string | null>(null);
+  const [folderError, setFolderError] = useState<string | null>(null);
   const [editingFolderId, setEditingFolderId] = useState<string | null>(null);
   const [editFolderName, setEditFolderName] = useState('');
   const [editFolderColor, setEditFolderColor] = useState('#6366f1');
@@ -2844,21 +2845,27 @@ function ScenariosView({
                   title="Couleur du dossier"
                 />
               </div>
+              {folderError && <p className="text-[11px] text-rose-300">{folderError}</p>}
               <div className="flex gap-2">
                 <button
                   type="button"
                   onClick={async () => {
                     if (!newFolderName.trim() || !onCreateFolder) return;
-                    await onCreateFolder(newFolderName.trim(), newFolderColor);
-                    setNewFolderName('');
-                    setNewFolderColor('#6366f1');
-                    setShowNewFolderDialog(false);
+                    try {
+                      await onCreateFolder(newFolderName.trim(), newFolderColor);
+                      setNewFolderName('');
+                      setNewFolderColor('#6366f1');
+                      setFolderError(null);
+                      setShowNewFolderDialog(false);
+                    } catch (e) {
+                      setFolderError(e instanceof Error ? e.message : 'Échec de la création du dossier');
+                    }
                   }}
                   className="rounded-xl bg-brand-500/20 border border-brand-500/30 px-3 py-1.5 text-xs text-brand-300 hover:bg-brand-500/30 transition"
                 >
                   Créer
                 </button>
-                <button type="button" onClick={() => setShowNewFolderDialog(false)} className="rounded-xl border border-white/10 px-3 py-1.5 text-xs text-white/40 hover:text-white transition">
+                <button type="button" onClick={() => { setShowNewFolderDialog(false); setFolderError(null); }} className="rounded-xl border border-white/10 px-3 py-1.5 text-xs text-white/40 hover:text-white transition">
                   Annuler
                 </button>
               </div>
@@ -2894,8 +2901,38 @@ function ScenariosView({
                     {f.name}
                   </button>
                 ))}
-                <button type="button" onClick={() => setAssigningScenarioId(null)} className="rounded-xl border border-white/10 px-3 py-1.5 text-xs text-white/30 hover:text-white transition">Annuler</button>
+                <button type="button" onClick={() => { setAssigningScenarioId(null); setFolderError(null); }} className="rounded-xl border border-white/10 px-3 py-1.5 text-xs text-white/30 hover:text-white transition">Annuler</button>
               </div>
+              {/* Créer un dossier ET y placer directement ce scénario (il apparaît en haut) */}
+              <div className="flex items-center gap-2 pt-2 border-t border-white/10">
+                <input
+                  type="text"
+                  value={newFolderName}
+                  onChange={e => setNewFolderName(e.target.value)}
+                  placeholder="+ Nouveau dossier…"
+                  className="flex-1 rounded-xl border border-white/10 bg-white/5 px-3 py-1.5 text-xs text-white placeholder-white/30 focus:outline-none focus:border-brand-400"
+                />
+                <button
+                  type="button"
+                  disabled={!newFolderName.trim()}
+                  onClick={async () => {
+                    if (!newFolderName.trim() || !onCreateFolder) return;
+                    try {
+                      const f = await onCreateFolder(newFolderName.trim(), newFolderColor);
+                      if (f && onAssignFolder) await onAssignFolder(assigningScenarioId, f.id);
+                      setNewFolderName('');
+                      setFolderError(null);
+                      setAssigningScenarioId(null);
+                    } catch (e) {
+                      setFolderError(e instanceof Error ? e.message : 'Échec de la création du dossier');
+                    }
+                  }}
+                  className="rounded-xl bg-brand-500/20 border border-brand-500/30 px-3 py-1.5 text-xs text-brand-300 hover:bg-brand-500/30 transition disabled:opacity-40 shrink-0"
+                >
+                  Créer &amp; assigner
+                </button>
+              </div>
+              {folderError && <p className="text-[11px] text-rose-300">{folderError}</p>}
             </div>
           )}
 
@@ -3577,7 +3614,8 @@ export default function App() {
             folders={folders}
             onCreateFolder={async (name: string, color: string) => {
               const f = await createFolder(name, color);
-              setFolders(prev => [...prev, f]);
+              setFolders(prev => [f, ...prev]);   // nouveau dossier EN HAUT, visible immédiatement
+              return f;
             }}
             onDeleteFolder={async (folderId: string) => {
               await deleteFolder(folderId);
@@ -3769,7 +3807,7 @@ export default function App() {
                     className="mt-0.5 h-4 w-4 accent-brand-400 shrink-0"
                   />
                   <span>
-                    <span>Inclure les sources API en direct (PubMed, OpenAlex, Crossref, EuropePMC, medRxiv, bioRxiv, PROSPERO, Cochrane)</span>
+                    <span>Inclure les sources API en direct (PubMed, OpenAlex, Crossref, EuropePMC, medRxiv, bioRxiv, PROSPERO)</span>
                     <span className="block text-forest-500 mt-0.5">Recherche plus lente, ajoute les articles non encore indexes</span>
                   </span>
                 </label>
@@ -3799,7 +3837,7 @@ export default function App() {
                 // Étapes de la recherche pilotées par la PHASE RÉELLE du backend
                 // (/populate/status), pas par un minuteur : le libellé affiché
                 // correspond donc à ce que fait réellement le serveur.
-                const liveSources = ["PubMed", "OpenAlex", "Crossref", "EuropePMC", "medRxiv", "bioRxiv", "PROSPERO", "Cochrane"];
+                const liveSources = ["PubMed", "OpenAlex", "Crossref", "EuropePMC", "medRxiv", "bioRxiv", "PROSPERO"];
                 const translating = searchPhase === 'translating';
                 const rankOf: Record<string, number> = { local: 1, federation: 2, scoring: 3, done: 4 };
                 const rank = searchBackendPhase ? rankOf[searchBackendPhase] : 0;
