@@ -1035,25 +1035,15 @@ function CorpusSection({ scenarioId, threshold }: { scenarioId: string; detail: 
         </div>
       </div>
 
-      {/* Indexation & pertinence — DEUX choses distinctes :
-          (1) Scores de pertinence = le classement affiché (calculé en ligne).
-          (2) Indexation Assistant IA (RAG) = embeddings de chunks en arrière-plan,
-              qui n'affectent PAS le classement. */}
+      {/* Scores de pertinence = le classement AFFICHÉ (calculé en ligne pendant le
+          scoring). L'indexation RAG (Assistant) vit désormais dans l'onglet
+          « Assistant IA », pas ici : elle n'affecte pas ce classement. */}
       {embeddingStatus && (() => {
         const total = embeddingStatus.corpus_total ?? embeddingStatus.ranking?.total ?? 0;
         const scored = embeddingStatus.ranking?.scored ?? 0;
         const semanticReady = embeddingStatus.score_availability.semantic;
         const cohereReady = embeddingStatus.score_availability.cohere;
         const cohereConfigured = embeddingStatus.score_availability.cohere_configured ?? false;
-        const chunkless = embeddingStatus.chunkless ?? 0;
-        const pendingChunks = embeddingStatus.total_pending_chunks ?? 0;
-        // Progrès RAG réconcilié AU NIVEAU DOCUMENT (somme == total, plus de 215≠216) :
-        // un doc est "en cours" s'il a un résumé/plein-texte pas encore vectorisé OU
-        // pas encore découpé (chunkless).
-        const pendingDocs = (embeddingStatus.title_abstract_chunks.pending_docs ?? 0)
-          + (embeddingStatus.fulltext.docs_pending ?? 0) + chunkless;
-        const indexedDocs = Math.max(0, total - pendingDocs);
-        const ragComplete = pendingChunks === 0 && chunkless === 0;
         // Voyant tri-état : vert (prêt) / ambre (en cours) / gris (indisponible).
         type S = 'on' | 'pending' | 'off';
         const dot = (s: S) => s === 'on' ? 'bg-brand-400' : s === 'pending' ? 'bg-gold-400' : 'bg-white/20';
@@ -1061,8 +1051,7 @@ function CorpusSection({ scenarioId, threshold }: { scenarioId: string; detail: 
         const semanticState: S = semanticReady ? 'on' : (scored > 0 ? 'pending' : 'off');
         const cohereState: S = cohereReady ? 'on' : (cohereConfigured ? 'pending' : 'off');
         return (
-          <div className="rounded-2xl border border-white/10 bg-white/3 px-4 py-3 space-y-3">
-            {/* ── 1. Scores de pertinence (classement affiché) ──────────────── */}
+          <div className="rounded-2xl border border-white/10 bg-white/3 px-4 py-3">
             <div className="space-y-1.5">
               <div className="flex items-center gap-2">
                 {semanticReady ? <CheckCircle2 size={14} className="text-forest-400" />
@@ -1087,34 +1076,6 @@ function CorpusSection({ scenarioId, threshold }: { scenarioId: string; detail: 
                   Cohere (rerank){cohereState === 'pending' ? ' (clé OK, en attente)' : cohereState === 'off' ? ' (non configuré)' : ''}
                 </span>
               </div>
-            </div>
-            {/* ── 2. Indexation Assistant IA (RAG) — n'affecte PAS le classement ── */}
-            <div className="space-y-1 border-t border-white/5 pt-2.5">
-              <div className="flex items-center gap-2">
-                {ragComplete ? <CheckCircle2 size={14} className="text-forest-400" />
-                  : <Loader2 size={14} className="text-gold-400 animate-spin" />}
-                <span className={`text-xs font-semibold ${ragComplete ? 'text-forest-300' : 'text-gold-300'}`}>
-                  Indexation Assistant IA (RAG)
-                </span>
-              </div>
-              <p className="text-[11px] text-white/70">
-                <span className="text-white font-semibold">{indexedDocs}</span> / {total} documents indexés
-                {pendingDocs > 0 && ` · ${pendingDocs} en cours`}
-                {embeddingStatus.fulltext.total_docs > 0 && (
-                  <span className="text-white/40"> (dont {embeddingStatus.fulltext.docs_fully_embedded}/{embeddingStatus.fulltext.total_docs} en texte intégral)</span>
-                )}
-              </p>
-              {chunkless > 0 ? (
-                <p className="text-[10px] text-gold-300">
-                  ⚠ {chunkless} document(s) sans contenu exploitable (ni résumé ni texte).
-                </p>
-              ) : pendingChunks > 0 ? (
-                <p className="text-[10px] text-white/30">
-                  {pendingChunks} chunks restants — indexés en arrière-plan pour l'Assistant IA (n'affecte pas le classement).
-                </p>
-              ) : (
-                <p className="text-[10px] text-forest-400">✓ Tous les documents sont indexés pour l'Assistant IA.</p>
-              )}
             </div>
           </div>
         );
@@ -1826,6 +1787,26 @@ function RagSection({ scenarioId, detail }: { scenarioId: string; detail: Scenar
   const cancelRef = useRef<(() => void) | null>(null);
   const answerRef = useRef<HTMLDivElement>(null);
 
+  // Indexation RAG du corpus : combien de documents l'Assistant peut déjà
+  // interroger. Rafraîchi tant que des chunks restent à vectoriser, pour que la
+  // couverture se mette à jour en direct sous les yeux de l'utilisateur.
+  const [embeddingStatus, setEmbeddingStatus] = useState<EmbeddingStatus | null>(null);
+  useEffect(() => {
+    let stopped = false;
+    let timer: ReturnType<typeof setInterval> | null = null;
+    const stop = () => { if (timer) { clearInterval(timer); timer = null; } };
+    const load = () => fetchUserScenarioEmbeddingStatus(scenarioId)
+      .then((s) => {
+        if (stopped) return;
+        setEmbeddingStatus(s);
+        if ((s.total_pending_chunks ?? 0) === 0 && (s.chunkless ?? 0) === 0) stop();
+      })
+      .catch(() => { /* non bloquant */ });
+    load();
+    timer = setInterval(load, 4000);
+    return () => { stopped = true; stop(); };
+  }, [scenarioId]);
+
   const ask = (qText: string) => {
     if (!qText.trim() || streaming) return;
     // Cancel previous
@@ -1870,6 +1851,48 @@ function RagSection({ scenarioId, detail }: { scenarioId: string; detail: Scenar
         title="Assistant Scientifique"
         subtitle="Réponses en temps réel avec streaming · Articles filtrés par seuil de pertinence + articles validés"
       />
+
+      {/* Indexation du corpus pour l'Assistant (RAG) — couverture documentaire.
+          Déplacée ici depuis l'onglet Corpus : c'est la fonctionnalité concernée. */}
+      {embeddingStatus && (() => {
+        const total = embeddingStatus.corpus_total ?? embeddingStatus.ranking?.total ?? 0;
+        const chunkless = embeddingStatus.chunkless ?? 0;
+        const pendingChunks = embeddingStatus.total_pending_chunks ?? 0;
+        // Progrès réconcilié AU NIVEAU DOCUMENT (somme == total).
+        const pendingDocs = (embeddingStatus.title_abstract_chunks.pending_docs ?? 0)
+          + (embeddingStatus.fulltext.docs_pending ?? 0) + chunkless;
+        const indexedDocs = Math.max(0, total - pendingDocs);
+        const complete = pendingChunks === 0 && chunkless === 0;
+        return (
+          <div className={`rounded-2xl border px-4 py-3 flex items-start gap-3 ${complete ? 'border-forest-500/20 bg-forest-500/5' : 'border-gold-500/20 bg-gold-500/5'}`}>
+            <div className="shrink-0 mt-0.5">
+              {complete ? <CheckCircle2 size={14} className="text-forest-400" />
+                : <Loader2 size={14} className="text-gold-400 animate-spin" />}
+            </div>
+            <div className="flex-1 min-w-0 space-y-1">
+              <p className={`text-xs font-semibold ${complete ? 'text-forest-300' : 'text-gold-300'}`}>
+                Indexation du corpus {complete ? '· prête' : '· en cours'}
+              </p>
+              <p className="text-[11px] text-white/70">
+                <span className="text-white font-semibold">{indexedDocs}</span> / {total} documents indexés
+                {pendingDocs > 0 && ` · ${pendingDocs} en cours`}
+                {embeddingStatus.fulltext.total_docs > 0 && (
+                  <span className="text-white/40"> (dont {embeddingStatus.fulltext.docs_fully_embedded}/{embeddingStatus.fulltext.total_docs} en texte intégral)</span>
+                )}
+              </p>
+              {chunkless > 0 ? (
+                <p className="text-[10px] text-gold-300">⚠ {chunkless} document(s) sans contenu exploitable (ni résumé ni texte).</p>
+              ) : complete ? (
+                <p className="text-[10px] text-forest-400">L'Assistant interroge l'ensemble du corpus.</p>
+              ) : (
+                <p className="text-[10px] text-white/40">
+                  L'Assistant répond déjà ; sa couverture s'étend à mesure de l'indexation{pendingChunks > 0 ? ` (${pendingChunks} chunks restants)` : ''}.
+                </p>
+              )}
+            </div>
+          </div>
+        );
+      })()}
 
       {/* Questions suggérées */}
       {suggestedQuestions.length > 0 && !streamedText && !streaming && (
