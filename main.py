@@ -10275,6 +10275,22 @@ def get_user_scenario_embedding_status(scenario_id: str) -> dict[str, Any]:
             ) ft_emb ON ft_emb.document_id = d.document_id
         """), {"sid": scenario_id}).mappings().first()
 
+        # Scores de pertinence (RANKING) — INDÉPENDANT de l'indexation RAG ci-dessus.
+        # Le similarity_score affiché est calculé EN LIGNE pendant la phase "scoring"
+        # (_run_semantic_rerank_inline : réutilise les embeddings stockés, ré-embedde
+        # le reste à la volée), et le rerank Cohere écrit rerank_score sur le
+        # sous-ensemble pertinent. Ce sont CES compteurs qui pilotent les voyants
+        # "Sémantique" / "Cohere" — PAS le worker d'indexation RAG (chunks).
+        ranking = conn.execute(text("""
+            SELECT
+                COUNT(*) AS total,
+                COUNT(*) FILTER (WHERE ars.similarity_score IS NOT NULL) AS scored,
+                COUNT(*) FILTER (WHERE ars.rerank_score IS NOT NULL) AS reranked
+            FROM article_scenarios ars
+            JOIN literature_document ld ON ld.id = ars.document_id
+            WHERE ars.scenario_id = :sid AND ld.is_duplicate IS NOT TRUE
+        """), {"sid": scenario_id}).mappings().first()
+
     ta_total = int(ta["total_docs"] or 0)
     ta_embedded = int(ta["embedded_docs"] or 0)
     ta_pending = int(ta["pending_docs"] or 0)
@@ -10292,6 +10308,19 @@ def get_user_scenario_embedding_status(scenario_id: str) -> dict[str, Any]:
     abstract_only_total = ta_total - ft_total
     # Total pending embedding work
     total_pending_chunks = ta_pending + ft_pending_chunks
+
+    # ── Pertinence (ranking) : honnête, découplé de l'indexation RAG ────────────
+    rank_total = int(ranking["total"] or 0)
+    rank_scored = int(ranking["scored"] or 0)
+    rank_reranked = int(ranking["reranked"] or 0)
+    cohere_configured = bool(os.getenv("COHERE_API_KEY"))
+    # Sémantique : prêt SEULEMENT quand TOUT le corpus est scoré (et non "au moins
+    # un chunk vectorisé"). Tant que des articles restent non scorés, le classement
+    # sémantique est incomplet → voyant non vert.
+    semantic_ready = rank_total > 0 and rank_scored >= rank_total
+    # Cohere : prêt SEULEMENT quand le rerank a RÉELLEMENT tourné (≥ 1 rerank_score),
+    # pas simplement parce qu'une clé existe.
+    cohere_ready = cohere_configured and rank_reranked > 0
 
     if chunkless > 0:
         status = "partial"
@@ -10331,15 +10360,24 @@ def get_user_scenario_embedding_status(scenario_id: str) -> dict[str, Any]:
             "pending_chunks": ft_pending_chunks,
         },
         "total_pending_chunks": total_pending_chunks,
-        # Disponibilité réelle de chaque mode de pertinence :
-        # - lexical : toujours prêt (recherche plein texte / tsvector).
-        # - sémantique : prêt dès qu'au moins un chunk est vectorisé.
-        # - cohere : reranker cross-encoder, prêt seulement si COHERE_API_KEY est
-        #   configuré (remplace l'ancien score « hybride » 70/30 qui n'existe plus).
+        # ── Pertinence (ranking) : compteurs réels du classement affiché ─────────
+        # Découplé de l'indexation RAG : `scored`/`reranked` portent sur les scores
+        # effectivement présents sur article_scenarios (ce que l'utilisateur voit).
+        "ranking": {
+            "total": rank_total,
+            "scored": rank_scored,
+            "reranked": rank_reranked,
+            "complete": semantic_ready,
+        },
+        # Disponibilité RÉELLE de chaque mode de pertinence (plus de voyant "lexical"
+        # toujours vert, qui n'apportait aucune information) :
+        # - sémantique : vert seulement quand TOUT le corpus est scoré.
+        # - cohere     : vert seulement quand le rerank a réellement tourné.
+        # - cohere_configured : distingue "pas de clé" de "clé OK, rerank pas encore".
         "score_availability": {
-            "lexical": True,
-            "semantic": ta_embedded > 0 or ft_embedded_chunks > 0,
-            "cohere": bool(os.getenv("COHERE_API_KEY")),
+            "semantic": semantic_ready,
+            "cohere": cohere_ready,
+            "cohere_configured": cohere_configured,
         }
     }
 

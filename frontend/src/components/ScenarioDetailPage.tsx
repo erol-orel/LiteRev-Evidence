@@ -1035,99 +1035,90 @@ function CorpusSection({ scenarioId, threshold }: { scenarioId: string; detail: 
         </div>
       </div>
 
-      {/* Statut des embeddings */}
-      {embeddingStatus && (
-        <div className={`rounded-2xl border px-4 py-3 flex items-start gap-3 ${
-          embeddingStatus.status === 'complete'
-            ? 'border-forest-500/20 bg-forest-500/5'
-            : embeddingStatus.status === 'partial'
-            ? 'border-gold-500/20 bg-gold-500/5'
-            : 'border-white/10 bg-white/3'
-        }`}>
-          <div className="shrink-0 mt-0.5">
-            {embeddingStatus.status === 'complete' ? <CheckCircle2 size={14} className="text-forest-400" /> :
-             embeddingStatus.status === 'partial' ? <Loader2 size={14} className="text-gold-400 animate-spin" /> :
-             <AlertCircle size={14} className="text-white/30" />}
-          </div>
-          <div className="flex-1 min-w-0 space-y-1.5">
-            <span className={`text-xs font-semibold ${
-              embeddingStatus.status === 'complete' ? 'text-forest-300' :
-              embeddingStatus.status === 'partial' ? 'text-gold-300' : 'text-white/40'
-            }`}>
-              Embeddings
-            </span>
-            {typeof embeddingStatus.corpus_total === 'number' && (
-              <p className="text-[11px] text-white/70">
-                <span className="text-white font-semibold">{embeddingStatus.corpus_total}</span> documents au total
-              </p>
-            )}
-            <div className="flex flex-wrap gap-x-4 gap-y-1 text-[10px]">
-              {/* Résumés vectorisés (title_abstract) */}
-              <span className={embeddingStatus.title_abstract_chunks.pending_docs > 0 ? 'text-gold-300' : 'text-forest-400'}>
-                {embeddingStatus.title_abstract_chunks.embedded_docs} résumés vectorisés
-                {embeddingStatus.title_abstract_chunks.pending_docs > 0 && ` · ${embeddingStatus.title_abstract_chunks.pending_docs} en cours`}
-              </span>
-              {/* Textes intégraux */}
-              {embeddingStatus.fulltext.total_docs > 0 && (
-                <span className={embeddingStatus.fulltext.pending_chunks > 0 ? 'text-gold-300' : 'text-forest-400'}>
-                  {embeddingStatus.fulltext.docs_fully_embedded}/{embeddingStatus.fulltext.total_docs} textes intégraux
-                  {embeddingStatus.fulltext.pending_chunks > 0 && (
-                    <> · {embeddingStatus.fulltext.pending_chunks} chunks en attente</>
-                  )}
+      {/* Indexation & pertinence — DEUX choses distinctes :
+          (1) Scores de pertinence = le classement affiché (calculé en ligne).
+          (2) Indexation Assistant IA (RAG) = embeddings de chunks en arrière-plan,
+              qui n'affectent PAS le classement. */}
+      {embeddingStatus && (() => {
+        const total = embeddingStatus.corpus_total ?? embeddingStatus.ranking?.total ?? 0;
+        const scored = embeddingStatus.ranking?.scored ?? 0;
+        const semanticReady = embeddingStatus.score_availability.semantic;
+        const cohereReady = embeddingStatus.score_availability.cohere;
+        const cohereConfigured = embeddingStatus.score_availability.cohere_configured ?? false;
+        const chunkless = embeddingStatus.chunkless ?? 0;
+        const pendingChunks = embeddingStatus.total_pending_chunks ?? 0;
+        // Progrès RAG réconcilié AU NIVEAU DOCUMENT (somme == total, plus de 215≠216) :
+        // un doc est "en cours" s'il a un résumé/plein-texte pas encore vectorisé OU
+        // pas encore découpé (chunkless).
+        const pendingDocs = (embeddingStatus.title_abstract_chunks.pending_docs ?? 0)
+          + (embeddingStatus.fulltext.docs_pending ?? 0) + chunkless;
+        const indexedDocs = Math.max(0, total - pendingDocs);
+        const ragComplete = pendingChunks === 0 && chunkless === 0;
+        // Voyant tri-état : vert (prêt) / ambre (en cours) / gris (indisponible).
+        type S = 'on' | 'pending' | 'off';
+        const dot = (s: S) => s === 'on' ? 'bg-brand-400' : s === 'pending' ? 'bg-gold-400' : 'bg-white/20';
+        const txt = (s: S) => s === 'on' ? 'text-forest-400' : s === 'pending' ? 'text-gold-300' : 'text-white/25';
+        const semanticState: S = semanticReady ? 'on' : (scored > 0 ? 'pending' : 'off');
+        const cohereState: S = cohereReady ? 'on' : (cohereConfigured ? 'pending' : 'off');
+        return (
+          <div className="rounded-2xl border border-white/10 bg-white/3 px-4 py-3 space-y-3">
+            {/* ── 1. Scores de pertinence (classement affiché) ──────────────── */}
+            <div className="space-y-1.5">
+              <div className="flex items-center gap-2">
+                {semanticReady ? <CheckCircle2 size={14} className="text-forest-400" />
+                  : <Loader2 size={14} className="text-gold-400 animate-spin" />}
+                <span className={`text-xs font-semibold ${semanticReady ? 'text-forest-300' : 'text-gold-300'}`}>
+                  Scores de pertinence
                 </span>
+              </div>
+              <p className="text-[11px] text-white/70">
+                <span className="text-white font-semibold">{scored}</span> / {total} articles scorés
+                {!semanticReady && scored < total && ` · ${total - scored} en cours…`}
+              </p>
+              <div className="flex items-center gap-3 flex-wrap">
+                <span title="Similarité vectorielle (sens). Verte quand TOUT le corpus est scoré."
+                  className={`text-[10px] flex items-center gap-1 ${txt(semanticState)}`}>
+                  <span className={`h-1.5 w-1.5 rounded-full ${dot(semanticState)}`} />
+                  Sémantique{semanticState === 'pending' ? ' (en cours)' : ''}
+                </span>
+                <span title="Reranking cross-encoder Cohere du sous-ensemble pertinent. Vert quand le rerank a réellement tourné."
+                  className={`text-[10px] flex items-center gap-1 ${txt(cohereState)}`}>
+                  <span className={`h-1.5 w-1.5 rounded-full ${dot(cohereState)}`} />
+                  Cohere (rerank){cohereState === 'pending' ? ' (clé OK, en attente)' : cohereState === 'off' ? ' (non configuré)' : ''}
+                </span>
+              </div>
+            </div>
+            {/* ── 2. Indexation Assistant IA (RAG) — n'affecte PAS le classement ── */}
+            <div className="space-y-1 border-t border-white/5 pt-2.5">
+              <div className="flex items-center gap-2">
+                {ragComplete ? <CheckCircle2 size={14} className="text-forest-400" />
+                  : <Loader2 size={14} className="text-gold-400 animate-spin" />}
+                <span className={`text-xs font-semibold ${ragComplete ? 'text-forest-300' : 'text-gold-300'}`}>
+                  Indexation Assistant IA (RAG)
+                </span>
+              </div>
+              <p className="text-[11px] text-white/70">
+                <span className="text-white font-semibold">{indexedDocs}</span> / {total} documents indexés
+                {pendingDocs > 0 && ` · ${pendingDocs} en cours`}
+                {embeddingStatus.fulltext.total_docs > 0 && (
+                  <span className="text-white/40"> (dont {embeddingStatus.fulltext.docs_fully_embedded}/{embeddingStatus.fulltext.total_docs} en texte intégral)</span>
+                )}
+              </p>
+              {chunkless > 0 ? (
+                <p className="text-[10px] text-gold-300">
+                  ⚠ {chunkless} document(s) sans contenu exploitable (ni résumé ni texte).
+                </p>
+              ) : pendingChunks > 0 ? (
+                <p className="text-[10px] text-white/30">
+                  {pendingChunks} chunks restants — indexés en arrière-plan pour l'Assistant IA (n'affecte pas le classement).
+                </p>
+              ) : (
+                <p className="text-[10px] text-forest-400">✓ Tous les documents sont indexés pour l'Assistant IA.</p>
               )}
             </div>
-            {/* Réconciliation avec le corpus : docs sans chunk résumé (complétion auto) */}
-            {typeof embeddingStatus.corpus_total === 'number' && (() => {
-              const missing = Math.max(0, embeddingStatus.corpus_total - embeddingStatus.title_abstract_chunks.total_docs);
-              if (missing > 0) {
-                return (
-                  <p className="text-[10px] text-gold-300">
-                    ⏳ {missing} / {embeddingStatus.corpus_total} documents en cours de découpage + vectorisation (complétion auto en arrière-plan).
-                  </p>
-                );
-              }
-              if ((embeddingStatus.chunkless ?? 0) > 0) {
-                return (
-                  <p className="text-[10px] text-gold-300">
-                    ⚠ {embeddingStatus.chunkless} document(s) sans contenu exploitable (ni résumé ni texte).
-                  </p>
-                );
-              }
-              // Tous les documents ont un chunk ; reste éventuellement des embeddings en cours.
-              if ((embeddingStatus.total_pending_chunks ?? 0) > 0) {
-                return (
-                  <p className="text-[10px] text-gold-300">
-                    ✓ Tous les documents sont découpés · {embeddingStatus.total_pending_chunks} embeddings en cours…
-                  </p>
-                );
-              }
-              return <p className="text-[10px] text-forest-400">✓ Tous les documents sont découpés et vectorisés.</p>;
-            })()}
-            <div className="flex items-center gap-3 flex-wrap" title="Modes de pertinence disponibles. Le lexical marche toujours ; le sémantique nécessite des embeddings ; le reranking Cohere nécessite une clé COHERE_API_KEY.">
-              {(['lexical', 'semantic', 'cohere'] as const).map((type) => {
-                const available = embeddingStatus.score_availability[type];
-                const label = type === 'lexical' ? 'Lexical' : type === 'semantic' ? 'Sémantique' : 'Cohere (rerank)';
-                const tip = type === 'lexical' ? 'Recherche par mots-clés (plein texte). Toujours disponible.'
-                  : type === 'semantic' ? 'Similarité vectorielle (sens). Nécessite des embeddings.'
-                  : 'Reranking cross-encoder Cohere du sous-ensemble pertinent. Nécessite COHERE_API_KEY.';
-                return (
-                  <span key={type} title={tip}
-                    className={`text-[10px] flex items-center gap-1 ${available ? 'text-forest-400' : 'text-white/25'}`}>
-                    <span className={`h-1.5 w-1.5 rounded-full ${available ? 'bg-brand-400' : 'bg-white/20'}`} />
-                    {label}
-                  </span>
-                );
-              })}
-            </div>
-            {embeddingStatus.total_pending_chunks > 0 && (
-              <p className="text-[10px] text-white/30">
-                {embeddingStatus.total_pending_chunks} chunks restants. Le pipeline completera les embeddings manquants.
-              </p>
-            )}
           </div>
-        </div>
-      )}
+        );
+      })()}
     <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
       {/* Liste des articles */}
       <div className="lg:col-span-2 space-y-4">
