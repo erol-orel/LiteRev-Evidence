@@ -2146,10 +2146,17 @@ export interface EmbeddingStatus {
     pending_chunks: number;
   };
   total_pending_chunks: number;
+  // Pertinence (ranking) — scores réellement présents sur le corpus (≠ indexation RAG).
+  ranking?: {
+    total: number;
+    scored: number;
+    reranked: number;
+    complete: boolean;
+  };
   score_availability: {
-    lexical: boolean;
-    semantic: boolean;
-    cohere: boolean;
+    semantic: boolean;            // vert seulement quand TOUT le corpus est scoré
+    cohere: boolean;              // vert seulement quand le rerank a réellement tourné
+    cohere_configured?: boolean;  // clé présente (distingue "pas de clé" de "pas encore")
   };
 }
 

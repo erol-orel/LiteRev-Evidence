@@ -3021,8 +3021,15 @@ export default function App() {
   // panneau de progression au lieu d'un minuteur approximatif côté client.
   const [searchBackendPhase, setSearchBackendPhase] =
     useState<'local' | 'federation' | 'scoring' | 'done' | null>(null);
+  // Compteurs live par source pendant la fédération (depuis /populate/status),
+  // affichés sur la page d'attente, + étape finale "Affinage (rerank)".
+  const [searchSourceProgress, setSearchSourceProgress] = useState<Record<string, number> | null>(null);
+  const [searchFinalizing, setSearchFinalizing] = useState(false);
   const [folders, setFolders] = useState<ScenarioFolder[]>([]);
-  const [sortBy, setSortBy] = useState<"score" | "semantic" | "lexical" | "year_desc" | "year_asc">("year_desc");
+  // Tri par défaut = pertinence (le score est désormais calculé pour TOUS les
+  // documents affichés, la recherche attendant la fin du scoring). "relevance" =
+  // rerank Cohere quand présent, sinon score sémantique (cosinus).
+  const [sortBy, setSortBy] = useState<"relevance" | "semantic" | "lexical" | "year_desc" | "year_asc">("relevance");
 
 
   useEffect(() => {
@@ -3101,15 +3108,17 @@ export default function App() {
     }
     const deduped = Array.from(byDoc.values());
     return deduped.sort((a, b) => {
-      if (sortBy === "semantic") return (b.semanticScore ?? 0) - (a.semanticScore ?? 0);
-      if (sortBy === "lexical") return (b.lexicalScore ?? 0) - (a.lexicalScore ?? 0);
       if (sortBy === "year_desc") return (b.year ?? 0) - (a.year ?? 0);
       if (sortBy === "year_asc") return (a.year ?? 0) - (b.year ?? 0);
-      if (sortBy === "score" || sortBy === "semantic" || sortBy === "lexical") {
-        // Plus de score de pertinence au stade recherche (corpus booléen) → récence.
-        return (b.year ?? 0) - (a.year ?? 0);
-      }
-      return (b.year ?? 0) - (a.year ?? 0);
+      if (sortBy === "semantic") return (b.semanticScore ?? 0) - (a.semanticScore ?? 0);
+      if (sortBy === "lexical") return (b.lexicalScore ?? 0) - (a.lexicalScore ?? 0);
+      // "relevance" (défaut) = MÊME ordre de pertinence que le backend : rerank
+      // Cohere quand présent (sous-ensemble pertinent), sinon cosinus. On TIERE
+      // (rerankés d'abord) pour ne pas mélanger deux échelles de score distinctes.
+      const aHas = a.rerankScore != null, bHas = b.rerankScore != null;
+      if (aHas !== bHas) return aHas ? -1 : 1;
+      if (aHas && bHas && a.rerankScore !== b.rerankScore) return (b.rerankScore as number) - (a.rerankScore as number);
+      return (b.semanticScore ?? 0) - (a.semanticScore ?? 0);
     });
   }, [results, sortBy]);
 
@@ -3187,12 +3196,11 @@ export default function App() {
       });
       const sid = newScenario.id;
       await populateUserScenario(sid, { includeLive, maxResults: 2000 });
-      // ── AFFICHAGE LOCAL-FIRST ────────────────────────────────────────────────
-      // La base locale est liée au scénario dès le début de la construction ;
-      // les sources en direct (~20-30 s) ne font que s'ajouter ensuite. On lit
-      // donc le corpus à chaque tour de boucle : dès qu'il contient des
-      // documents on les affiche (recherche locale = quasi instantanée), puis on
-      // continue à rafraîchir en arrière-plan jusqu'à la fin de la fédération.
+      // ── CONSTRUCTION COMPLÈTE PUIS AFFICHAGE ─────────────────────────────────
+      // On construit tout le corpus (base locale ∪ sources en direct), on le score,
+      // puis on l'affiche EN UNE FOIS. `renderCorpus` lit le corpus FINAL ; il
+      // n'est appelé qu'à la toute fin (plus de lecture à chaque tour de boucle,
+      // plus d'affichage "local-first" qui montrait des compteurs intermédiaires).
       let lastTotal = 0;
       let firstDetailLoaded = false;
       const renderCorpus = async () => {
@@ -3211,6 +3219,7 @@ export default function App() {
           hasFulltext: a.has_fulltext,
           isNew: a.is_new ?? false,
           semanticScore: a.similarity_score ?? null,
+          rerankScore: a.rerank_score ?? null,
           score: a.similarity_score ?? 0,
         }));
         setResults(corpusResults);
@@ -3221,8 +3230,11 @@ export default function App() {
         setSearchLiveNewCount(corpus.newly_fetched ?? 0);
         setSearchFulltextDocs(corpus.docs_with_fulltext ?? null);
         setSearchAbstractDocs(corpus.docs_abstract_only ?? null);
-        setSearchScoreType('none');
-        setSearchScoreLabel(null);
+        // Le score sémantique (cosinus) est calculé pour tous les documents → on
+        // l'affiche. L'ordre "Pertinence" l'affine via le rerank Cohere sur le
+        // sous-ensemble pertinent.
+        setSearchScoreType('semantic');
+        setSearchScoreLabel('Score sémantique (cosinus) · l\'ordre « Pertinence » est affiné par le rerank Cohere sur le sous-ensemble pertinent');
         lastTotal = corpus.total;
         const first = corpusResults[0] ?? null;
         if (first && !firstDetailLoaded) {
@@ -3231,15 +3243,12 @@ export default function App() {
         }
         return corpusResults.length;
       };
-      // Phase 1 : sonder l'état RÉEL tout en affichant le corpus en construction.
-      // On affiche les documents dès qu'ils sont liés et on suit la phase backend
-      // (local → federation → scoring) pour le panneau de progression.
-      let displayed = false;
+      // ── ATTENDRE LA FIN COMPLÈTE AVANT D'AFFICHER ────────────────────────────
+      // Plus d'affichage local-first : on garde la page d'attente informative tant
+      // que la récupération (base locale + sources en direct) ET le scoring ne sont
+      // pas terminés. On sonde la phase RÉELLE du backend (local → federation →
+      // scoring → done) et les compteurs par source, sans rien afficher encore.
       let reachedDone = false;
-      const phaseLabel: Record<string, string> = {
-        federation: "Sources en direct en cours d'ajout…",
-        scoring: 'Calcul des scores de pertinence…',
-      };
       for (let i = 0; i < 240; i++) {
         let status = 'pending';
         let phase: 'local' | 'federation' | 'scoring' | 'done' | null = null;
@@ -3247,36 +3256,20 @@ export default function App() {
           const st = await fetchUserScenarioPopulateStatus(sid);
           status = st.status;
           phase = st.phase ?? null;
+          if (st.sources) setSearchSourceProgress(st.sources);
         } catch { /* transient — keep polling */ }
-        if (phase) {
-          setSearchBackendPhase(phase);
-          if (displayed && phaseLabel[phase]) setRefreshLabel(phaseLabel[phase]);
-        }
-        try {
-          const shown = await renderCorpus();
-          // Dès qu'il y a des documents, on libère l'écran : les résultats sont
-          // visibles et le travail de fond (live/scoring) continue.
-          if (shown > 0 && !displayed) {
-            displayed = true;
-            setLoading(false);
-            setLiveRefreshing(true);
-            if (phase && phaseLabel[phase]) setRefreshLabel(phaseLabel[phase]);
-          }
-        } catch { /* transient — keep polling */ }
+        if (phase) setSearchBackendPhase(phase);
         if (status === 'done') { reachedDone = true; break; }
-        if (status === 'error') break;
+        if (status === 'error') throw new Error("La construction du corpus a échoué.");
         await new Promise((r) => setTimeout(r, 2000));
       }
+      // Récupération + scoring (cosinus) terminés. Le cross-encoder Cohere réordonne
+      // ENSUITE le sous-ensemble pertinent : on l'attend AUSSI pour que l'ordre soit
+      // STABLE au moment de l'affichage (pas de réordonnancement sous les yeux de
+      // l'utilisateur). Sans clé Cohere, l'étape est instantanée.
       setSearchBackendPhase('done');
-      // Le corpus est scoré (ordre cosinus) et publié. On l'affiche.
-      try { await renderCorpus(); } catch { /* déjà affiché */ }
-
-      // Phase 2 : le cross-encoder (Cohere) réordonne le sous-ensemble pertinent
-      // EN ARRIÈRE-PLAN. On rafraîchit jusqu'à sa fin pour récupérer le nouvel
-      // ordre — sans bloquer, les résultats étant déjà visibles.
       if (reachedDone) {
-        setRefreshLabel('Affinage du classement (reranking)…');
-        setLiveRefreshing(true);
+        setSearchFinalizing(true);
         for (let j = 0; j < 40; j++) {
           let rerank: string = 'done';
           try {
@@ -3286,10 +3279,17 @@ export default function App() {
           if (rerank !== 'running') break;
           await new Promise((r) => setTimeout(r, 2000));
         }
-        try { await renderCorpus(); } catch { /* déjà affiché */ }
+        setSearchFinalizing(false);
       }
-      setLiveRefreshing(false);
-      setRefreshLabel(null);
+      // Tout est prêt (corpus final + scores + rerank) → on affiche UNE fois. Le
+      // `loading` repasse à false dans le finally juste après : la page d'attente
+      // disparaît et les résultats finaux (compteur == corpus) apparaissent ensemble.
+      try {
+        await renderCorpus();
+      } catch {
+        await new Promise((r) => setTimeout(r, 1500));
+        await renderCorpus(); // une erreur ici remonte au catch externe (message lisible)
+      }
       const corpus = { total: lastTotal };
       // Mettre à jour les listes locales (scénario désormais construit).
       setUserScenarios(prev => {
@@ -3317,6 +3317,8 @@ export default function App() {
       setLiveRefreshing(false);
       setRefreshLabel(null);
       setSearchBackendPhase(null);
+      setSearchFinalizing(false);
+      setSearchSourceProgress(null);
       setSearchPhase('idle');
     }
   }
@@ -3801,6 +3803,12 @@ export default function App() {
                 const translating = searchPhase === 'translating';
                 const rankOf: Record<string, number> = { local: 1, federation: 2, scoring: 3, done: 4 };
                 const rank = searchBackendPhase ? rankOf[searchBackendPhase] : 0;
+                // Compteurs live par source (depuis /populate/status) pour rendre
+                // l'attente concrète : on voit les références arriver source par source.
+                const srcEntries = Object.entries(searchSourceProgress ?? {})
+                  .filter(([, n]) => (n as number) > 0)
+                  .sort((a, b) => (b[1] as number) - (a[1] as number));
+                const fetchedSoFar = srcEntries.reduce((a, [, n]) => a + (n as number), 0);
                 const steps: { label: string; done: boolean; active: boolean; hint?: string }[] = [
                   { label: "Traduction de la requête", done: !translating, active: translating },
                   { label: "Recherche dans la base locale indexée", done: !translating && rank > 1, active: !translating && rank <= 1 },
@@ -3808,14 +3816,17 @@ export default function App() {
                     label: "Interrogation des sources API en direct",
                     done: rank > 2,
                     active: rank === 2,
-                    hint: rank === 2 ? liveSources[searchElapsed % liveSources.length] : undefined,
+                    hint: rank === 2
+                      ? (fetchedSoFar > 0 ? `${fetchedSoFar} références récupérées` : liveSources[searchElapsed % liveSources.length])
+                      : undefined,
                   }] : []),
-                  { label: "Calcul des scores de pertinence", done: rank > 3, active: rank === 3 },
+                  { label: "Calcul des scores de pertinence", done: rank > 3 && !searchFinalizing, active: rank === 3 },
+                  { label: "Affinage du classement (Cohere)", done: false, active: searchFinalizing },
                 ];
                 return (
                   <div className="rounded-3xl border border-brand-400/20 bg-white/5 p-6">
                     <div className="flex items-center justify-between">
-                      <p className="text-sm font-semibold text-white">Recherche en cours…</p>
+                      <p className="text-sm font-semibold text-white">Construction du corpus en cours…</p>
                       <span className="font-mono text-xs text-white/40">{searchElapsed}s</span>
                     </div>
                     <ul className="mt-4 space-y-2.5">
@@ -3837,11 +3848,21 @@ export default function App() {
                         </li>
                       ))}
                     </ul>
-                    {includeLive && (
-                      <p className="mt-4 text-[11px] leading-snug text-white/30">
-                        Les résultats de la base locale sont déjà prêts. Les 8 sources en direct sont interrogées en parallèle.
-                      </p>
+                    {/* Détail live par source pendant la fédération */}
+                    {includeLive && rank === 2 && srcEntries.length > 0 && (
+                      <div className="mt-3 flex flex-wrap gap-1.5">
+                        {srcEntries.map(([src, n]) => (
+                          <span key={src} className="rounded-lg border border-emerald-500/20 bg-emerald-500/5 px-2 py-0.5 text-[10px] text-emerald-300/80">
+                            {src}: <span className="font-semibold">{n as number}</span>
+                          </span>
+                        ))}
+                      </div>
                     )}
+                    <p className="mt-4 text-[11px] leading-snug text-white/30">
+                      {includeLive
+                        ? "Les résultats s'afficheront une fois la récupération (base locale + 8 sources en direct), le scoring et l'affinage terminés — pour des compteurs et un classement cohérents et stables."
+                        : "Les résultats s'afficheront une fois la récupération et le scoring terminés."}
+                    </p>
                   </div>
                 );
               })()}
@@ -3986,6 +4007,7 @@ export default function App() {
                   <div className="flex flex-wrap items-center gap-2 mb-2 mt-1">
                     <span className="text-xs text-forest-500">Trier :</span>
                     {([
+                      ["relevance", "Pertinence"],
                       ["year_desc", "Année ↓"],
                       ["year_asc", "Année ↑"],
                     ] as [typeof sortBy, string][]).map(([val, label]) => (
@@ -4039,9 +4061,8 @@ export default function App() {
                           </div>
 
                           <div className="mt-3 flex flex-wrap gap-2 text-xs text-forest-400">
-                            {/* Score chip — masqué au stade recherche (corpus booléen =
-                                appartenance binaire, pas de score de pertinence).
-                                La pertinence sémantique apparaît sur la page scénario. */}
+                            {/* Score sémantique (cosinus) — calculé pour TOUS les documents
+                                affichés (la recherche attend la fin du scoring). */}
                             {searchScoreType && searchScoreType !== 'none' && (
                               <span className={`rounded-full px-2 py-1 ${
                                 searchScoreType === 'hybrid' ? 'bg-violet-500/20 text-violet-300' :
@@ -4051,6 +4072,15 @@ export default function App() {
                                 {searchScoreType === 'hybrid' ? '⊕' :
                                  searchScoreType === 'semantic' ? '◎' :
                                  '≡'} {(result.score ?? 0).toFixed(3)}
+                              </span>
+                            )}
+                            {/* Score de reranking (cross-encoder Cohere) quand présent — c'est
+                                LUI qui ordonne le sous-ensemble pertinent en tête de liste
+                                (échelle distincte du cosinus, d'où l'affichage des deux). */}
+                            {result.rerankScore != null && (
+                              <span className="rounded-full bg-violet-500/15 px-2 py-1 text-violet-300 border border-violet-500/25"
+                                title="Reranking Cohere (cross-encoder) — affine l'ordre du sous-ensemble pertinent. Échelle distincte du cosinus.">
+                                ⊕ Rerank {(result.rerankScore).toFixed(2)}
                               </span>
                             )}
                             {/* Décomposition (hybride uniquement : sinon redondant avec le score global) */}
