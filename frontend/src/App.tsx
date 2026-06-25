@@ -3026,7 +3026,10 @@ export default function App() {
   const [searchSourceProgress, setSearchSourceProgress] = useState<Record<string, number> | null>(null);
   const [searchFinalizing, setSearchFinalizing] = useState(false);
   const [folders, setFolders] = useState<ScenarioFolder[]>([]);
-  const [sortBy, setSortBy] = useState<"score" | "semantic" | "lexical" | "year_desc" | "year_asc">("year_desc");
+  // Tri par défaut = pertinence (le score est désormais calculé pour TOUS les
+  // documents affichés, la recherche attendant la fin du scoring). "relevance" =
+  // rerank Cohere quand présent, sinon score sémantique (cosinus).
+  const [sortBy, setSortBy] = useState<"relevance" | "semantic" | "lexical" | "year_desc" | "year_asc">("relevance");
 
 
   useEffect(() => {
@@ -3105,15 +3108,17 @@ export default function App() {
     }
     const deduped = Array.from(byDoc.values());
     return deduped.sort((a, b) => {
-      if (sortBy === "semantic") return (b.semanticScore ?? 0) - (a.semanticScore ?? 0);
-      if (sortBy === "lexical") return (b.lexicalScore ?? 0) - (a.lexicalScore ?? 0);
       if (sortBy === "year_desc") return (b.year ?? 0) - (a.year ?? 0);
       if (sortBy === "year_asc") return (a.year ?? 0) - (b.year ?? 0);
-      if (sortBy === "score" || sortBy === "semantic" || sortBy === "lexical") {
-        // Plus de score de pertinence au stade recherche (corpus booléen) → récence.
-        return (b.year ?? 0) - (a.year ?? 0);
-      }
-      return (b.year ?? 0) - (a.year ?? 0);
+      if (sortBy === "semantic") return (b.semanticScore ?? 0) - (a.semanticScore ?? 0);
+      if (sortBy === "lexical") return (b.lexicalScore ?? 0) - (a.lexicalScore ?? 0);
+      // "relevance" (défaut) = MÊME ordre de pertinence que le backend : rerank
+      // Cohere quand présent (sous-ensemble pertinent), sinon cosinus. On TIERE
+      // (rerankés d'abord) pour ne pas mélanger deux échelles de score distinctes.
+      const aHas = a.rerankScore != null, bHas = b.rerankScore != null;
+      if (aHas !== bHas) return aHas ? -1 : 1;
+      if (aHas && bHas && a.rerankScore !== b.rerankScore) return (b.rerankScore as number) - (a.rerankScore as number);
+      return (b.semanticScore ?? 0) - (a.semanticScore ?? 0);
     });
   }, [results, sortBy]);
 
@@ -3214,6 +3219,7 @@ export default function App() {
           hasFulltext: a.has_fulltext,
           isNew: a.is_new ?? false,
           semanticScore: a.similarity_score ?? null,
+          rerankScore: a.rerank_score ?? null,
           score: a.similarity_score ?? 0,
         }));
         setResults(corpusResults);
@@ -3224,8 +3230,11 @@ export default function App() {
         setSearchLiveNewCount(corpus.newly_fetched ?? 0);
         setSearchFulltextDocs(corpus.docs_with_fulltext ?? null);
         setSearchAbstractDocs(corpus.docs_abstract_only ?? null);
-        setSearchScoreType('none');
-        setSearchScoreLabel(null);
+        // Le score sémantique (cosinus) est calculé pour tous les documents → on
+        // l'affiche. L'ordre "Pertinence" l'affine via le rerank Cohere sur le
+        // sous-ensemble pertinent.
+        setSearchScoreType('semantic');
+        setSearchScoreLabel('Score sémantique (cosinus) · l\'ordre « Pertinence » est affiné par le rerank Cohere sur le sous-ensemble pertinent');
         lastTotal = corpus.total;
         const first = corpusResults[0] ?? null;
         if (first && !firstDetailLoaded) {
@@ -3998,6 +4007,7 @@ export default function App() {
                   <div className="flex flex-wrap items-center gap-2 mb-2 mt-1">
                     <span className="text-xs text-forest-500">Trier :</span>
                     {([
+                      ["relevance", "Pertinence"],
                       ["year_desc", "Année ↓"],
                       ["year_asc", "Année ↑"],
                     ] as [typeof sortBy, string][]).map(([val, label]) => (

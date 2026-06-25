@@ -37,6 +37,7 @@ export interface SearchResult {
   chunkType?: string | null;
   semanticScore?: number | null;
   lexicalScore?: number | null;
+  rerankScore?: number | null;
   hasFulltext?: boolean | null;
   isEmbedded?: boolean | null;
   isLive?: boolean | null;
