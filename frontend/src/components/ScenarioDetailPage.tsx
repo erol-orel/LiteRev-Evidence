@@ -1889,7 +1889,7 @@ function RagSection({ scenarioId, detail }: { scenarioId: string; detail: Scenar
               {chunkless > 0 ? (
                 <p className="text-[10px] text-gold-300">⚠ {chunkless} document(s) sans contenu exploitable (ni résumé ni texte).</p>
               ) : complete ? (
-                <p className="text-[10px] text-forest-400">L'Assistant interroge l'ensemble du corpus.</p>
+                <p className="text-[10px] text-forest-400">L'Assistant interroge uniquement les articles pertinents (≥ seuil de pertinence), pas tout le corpus.</p>
               ) : (
                 <p className="text-[10px] text-white/40">
                   L'Assistant répond déjà ; sa couverture s'étend à mesure de l'indexation{pendingChunks > 0 ? ` (${pendingChunks} chunks restants)` : ''}.
@@ -2219,7 +2219,7 @@ function PrismaSection({ scenarioId }: { scenarioId: string }) {
       {!mc.screening_complete && (
         <div className="rounded-xl border border-amber-500/20 bg-amber-500/5 px-4 py-3 mt-2">
           <p className="text-[10px] text-amber-400">
-            <span className="font-semibold">Manual screening in progress</span> · {mc.pending.toLocaleString()} articles still pending evaluation. Visit the Corpus tab to include or exclude articles.
+            <span className="font-semibold">Manual screening in progress</span> · {mc.pending.toLocaleString()} articles still pending evaluation.
           </p>
         </div>
       )}

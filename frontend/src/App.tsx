@@ -6,7 +6,6 @@ import {
   fetchDocumentDetail,
   fetchEvidenceSummary,
   fetchGesicaScenarios,
-  fetchGesicaStats,
   fetchCorpusStats,
   getFilterOptions,
   getReadableExcerpt,
@@ -37,7 +36,6 @@ import {
   type EvidenceSummaryResponse,
   type FilterOptions,
   type GesicaScenario,
-  type GesicaStats,
 
   type TerrainMeteo,
   type TerrainGeo,
@@ -608,26 +606,6 @@ function EvidenceStrengthBadge({ strength, showTooltip = false }: { strength: "w
   );
 }
 
-function EvidenceLegend() {
-  return (
-    <div className="rounded-2xl border border-white/10 bg-white/5 p-4 text-xs space-y-2">
-      <p className="font-semibold text-white/70 mb-2 flex items-center gap-1"><Zap size={11} className="text-brand-400" /> Niveaux de preuve</p>
-      <div className="flex items-start gap-2">
-        <span className="inline-flex items-center gap-1 rounded-full border border-brand-500/30 bg-brand-500/20 px-2 py-0.5 text-xs font-medium text-brand-300 shrink-0">Forte</span>
-        <span className="text-white/50">Méta-analyse, revue systématique ou ECR de haute qualité (score ≥ 0.7)</span>
-      </div>
-      <div className="flex items-start gap-2">
-        <span className="inline-flex items-center gap-1 rounded-full border border-gold-500/30 bg-gold-500/20 px-2 py-0.5 text-xs font-medium text-gold-300 shrink-0">Modérée</span>
-        <span className="text-white/50">Étude de cohorte, cas-témoins ou ECR de qualité moyenne (score 0.4–0.7)</span>
-      </div>
-      <div className="flex items-start gap-2">
-        <span className="inline-flex items-center gap-1 rounded-full border border-rose-500/30 bg-rose-500/20 px-2 py-0.5 text-xs font-medium text-rose-300 shrink-0">Faible</span>
-        <span className="text-white/50">Étude transversale, série de cas, avis d'expert (score &lt; 0.4)</span>
-      </div>
-    </div>
-  );
-}
-
 function SignalBadge({ label }: { label: string }) {
   return (
     <span className="rounded-full bg-brand-500/10 border border-brand-500/20 px-2 py-0.5 text-xs text-brand-300">
@@ -701,8 +679,8 @@ function GesicaSignalsPanel({ summary }: { summary: EvidenceSummaryResponse }) {
   );
 }
 
-function StatsView({ corpusStats, gesicaStats, fulltextStats, scenarios, statsByYear }: { corpusStats: CorpusStats | null; gesicaStats: GesicaStats | null; fulltextStats: FulltextStats | null; scenarios?: GesicaScenario[]; statsByYear?: CorpusStatsByYear | null }) {
-  if (!corpusStats && !gesicaStats) {
+function StatsView({ corpusStats, fulltextStats, scenarios, statsByYear }: { corpusStats: CorpusStats | null; fulltextStats: FulltextStats | null; scenarios?: GesicaScenario[]; statsByYear?: CorpusStatsByYear | null }) {
+  if (!corpusStats) {
     return <div className="text-sm text-forest-400">Chargement des statistiques...</div>;
   }
 
@@ -724,7 +702,7 @@ function StatsView({ corpusStats, gesicaStats, fulltextStats, scenarios, statsBy
               <p className="mt-1 text-xs text-forest-400">Chunks</p>
             </div>
             <div className="rounded-2xl border border-white/10 bg-forest-900/60 p-4 text-center">
-              <p className="text-2xl font-bold text-brand-300">{scenarios ? scenarios.filter(s => !s.hidden && s.articleCount > 0).length : Object.keys(corpusStats.byProject).length}</p>
+              <p className="text-2xl font-bold text-brand-300">{(scenarios ?? []).filter(s => !s.hidden).length}</p>
               <p className="mt-1 text-xs text-forest-400">Scénarios</p>
             </div>
             <div className="rounded-2xl border border-white/10 bg-forest-900/60 p-4 text-center">
@@ -741,8 +719,9 @@ function StatsView({ corpusStats, gesicaStats, fulltextStats, scenarios, statsBy
                 Par scénario
               </h3>
               <div className="space-y-1.5">
-                {scenarios && scenarios.some(s => !s.hidden && s.articleCount > 0) ? (() => {
-                  const visible = scenarios.filter(s => !s.hidden && s.articleCount > 0);
+                {(() => {
+                  const visible = (scenarios ?? []).filter(s => !s.hidden && s.articleCount > 0);
+                  if (visible.length === 0) return <p className="text-xs text-forest-400">Aucun scénario avec des articles.</p>;
                   const maxCount = Math.max(...visible.map(s => s.articleCount));
                   return visible
                     .sort((a, b) => b.articleCount - a.articleCount)
@@ -760,14 +739,7 @@ function StatsView({ corpusStats, gesicaStats, fulltextStats, scenarios, statsBy
                         </div>
                       </div>
                     ));
-                })() : (
-                  Object.entries(corpusStats.byProject).map(([proj, count]) => (
-                    <div key={proj} className="flex items-center justify-between rounded-xl border border-white/10 bg-forest-900/40 px-3 py-2 text-sm">
-                      <span className="text-white/80 capitalize">{proj}</span>
-                      <span className="font-mono text-brand-300">{(count as number).toLocaleString()}</span>
-                    </div>
-                  ))
-                )}
+                })()}
               </div>
             </div>
             {/* Par source */}
@@ -805,9 +777,9 @@ function StatsView({ corpusStats, gesicaStats, fulltextStats, scenarios, statsBy
         <div className="rounded-3xl border border-white/10 bg-white/5 p-5 shadow-2xl">
           <h2 className="mb-4 flex items-center gap-2 text-lg font-semibold text-white">
             <BookOpen size={18} className="text-brand-400" />
-            Couverture textuelle &amp; Hybrid Search
+            Couverture textuelle
           </h2>
-          <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
+          <div className="grid grid-cols-2 gap-4 sm:grid-cols-3">
             <div className="rounded-2xl border border-white/10 bg-forest-900/60 p-4 text-center">
               <p className="text-2xl font-bold text-brand-300">{fulltextStats.corpus.docs_with_fulltext.toLocaleString()}</p>
               <p className="mt-1 text-xs text-forest-400">Full Text</p>
@@ -822,12 +794,6 @@ function StatsView({ corpusStats, gesicaStats, fulltextStats, scenarios, statsBy
               </p>
               <p className="mt-1 text-xs text-forest-400">Couverture</p>
             </div>
-            <div className="rounded-2xl border border-white/10 bg-forest-900/60 p-4 text-center">
-              <p className={`text-2xl font-bold ${fulltextStats.hybrid_search.active ? 'text-brand-300' : 'text-rose-300'}`}>
-                {fulltextStats.hybrid_search.active ? 'SÉMANTIQUE' : 'LEXICAL'}
-              </p>
-              <p className="mt-1 text-xs text-forest-400">Recherche disponible</p>
-            </div>
           </div>
           {fulltextStats.by_source && fulltextStats.by_source.length > 0 && (
             <div className="mt-4">
@@ -838,51 +804,6 @@ function StatsView({ corpusStats, gesicaStats, fulltextStats, scenarios, statsBy
                     <span className="text-forest-300 capitalize">{s.source}</span>
                     <span className="font-mono text-brand-300">{s.with_fulltext} / {s.total}</span>
                   </div>
-                ))}
-              </div>
-            </div>
-          )}
-        </div>
-      )}
-
-      {gesicaStats && (
-        <div className="rounded-3xl border border-white/10 bg-white/5 p-5 shadow-2xl">
-          <h2 className="mb-4 flex items-center gap-2 text-lg font-semibold text-white">
-            <Activity size={18} className="text-brand-400" />
-            Corpus LiteRev : Niveaux de preuve
-          </h2>
-          <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
-            {Object.entries(gesicaStats.evidenceStrengthDistribution).map(([strength, count]) => {
-              const strengthLabels: Record<string, string> = {
-                strong: "Forte",
-                moderate: "Modérée",
-                weak: "Faible",
-              };
-              const colors: Record<string, string> = {
-                strong: "text-brand-300",
-                moderate: "text-gold-300",
-                weak: "text-rose-300",
-              };
-              return (
-                <div key={strength} className="rounded-2xl border border-white/10 bg-forest-900/60 p-4 text-center">
-                  <p className={`text-2xl font-bold ${colors[strength] ?? "text-white"}`}>{count}</p>
-                  <p className="mt-1 text-xs text-forest-400">Preuve {strengthLabels[strength] ?? strength}</p>
-                </div>
-              );
-            })}
-          </div>
-          <div className="mt-4">
-            <EvidenceLegend />
-          </div>
-
-          {Object.keys(gesicaStats.forecastHorizons).length > 0 && (
-            <div className="mt-4">
-              <h3 className="mb-2 text-sm font-medium text-forest-300">Horizons prévisionnels</h3>
-              <div className="flex flex-wrap gap-2">
-                {Object.entries(gesicaStats.forecastHorizons).slice(0, 10).map(([h, count]) => (
-                  <span key={h} className="rounded-full border border-brand-500/20 bg-brand-500/10 px-3 py-1 text-xs text-brand-300">
-                    {h} <span className="opacity-60">({count})</span>
-                  </span>
                 ))}
               </div>
             </div>
@@ -3002,7 +2923,6 @@ export default function App() {
   const [filterOptions, setFilterOptions] = useState<FilterOptions | null>(null);
   const [page, setPage] = useState(1);
   const [corpusStats, setCorpusStats] = useState<CorpusStats | null>(null);
-  const [gesicaStats, setGesicaStats] = useState<GesicaStats | null>(null);
   const [fulltextStats, setFulltextStats] = useState<FulltextStats | null>(null);
   const [corpusStatsByYear, setCorpusStatsByYear] = useState<CorpusStatsByYear | null>(null);
   const [gesicaScenarios, setGesicaScenarios] = useState<GesicaScenario[]>([]);
@@ -3079,7 +2999,6 @@ export default function App() {
   useEffect(() => {
     if (activeTab === "stats") {
       fetchCorpusStats().then(setCorpusStats).catch(console.error);
-      fetchGesicaStats().then(setGesicaStats).catch(console.error);
       fetchFulltextStats().then(setFulltextStats).catch(console.error);
       fetchCorpusStatsByYearNamed().then(setCorpusStatsByYear).catch(() => fetchCorpusStatsByYear().then(setCorpusStatsByYear).catch(console.error));
     }
@@ -3571,7 +3490,7 @@ export default function App() {
       <main className="mx-auto max-w-[1380px] px-6 py-8">
 
         {activeTab === "stats" && (
-          <StatsView corpusStats={corpusStats} gesicaStats={gesicaStats} fulltextStats={fulltextStats} scenarios={gesicaScenarios} statsByYear={corpusStatsByYear} />
+          <StatsView corpusStats={corpusStats} fulltextStats={fulltextStats} scenarios={[...gesicaScenarios, ...userScenarios]} statsByYear={corpusStatsByYear} />
         )}
 
 
