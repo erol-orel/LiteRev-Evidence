@@ -282,6 +282,29 @@ _STUDY_DESIGN_CASE = """CASE
         ELSE 'Autre'
       END"""
 
+# Niveau de preuve GRADE (strict), déterminé par le DEVIS d'étude — PAS par un
+# score composite (citations/récence/échantillon servent au classement, pas à la
+# certitude). En GRADE :
+#   - essais randomisés + synthèses d'essais  → certitude ÉLEVÉE  (« Forte »)
+#   - essais contrôlés non randomisés / quasi-expérimental / recommandations
+#                                             → certitude MODÉRÉE (« Modérée »)
+#   - TOUTES les études observationnelles (cohortes, cas-témoins, transversales,
+#     séries/rapports de cas, registres, surveillance…) partent en certitude
+#     FAIBLE (« Faible ») ; idem revues narratives / avis d'experts.
+# `d` = libellé brut du devis en minuscules. Le 1er match gagne : on teste
+# « non-randomi… » avant « randomi… » pour ne pas surclasser les essais non
+# randomisés. Devis inconnus / modélisation / qualitatif → « Non évaluée ».
+_GRADE_LEVEL_CASE = """CASE
+        WHEN d = '' THEN 'Non évaluée'
+        WHEN d LIKE '%non-randomi%' OR d LIKE '%non randomi%' OR d LIKE '%quasi-experimental%' OR d LIKE '%quasi experimental%' OR d LIKE '%interrupted time series%' OR d LIKE '%controlled before%' THEN 'Modérée'
+        WHEN d LIKE '%systematic review%' OR d LIKE '%meta-analysis%' OR d LIKE '%meta analysis%' OR d LIKE '%umbrella review%' THEN 'Forte'
+        WHEN d LIKE '%randomi%' OR d LIKE 'rct%' THEN 'Forte'
+        WHEN d LIKE '%controlled trial%' OR d LIKE '%clinical trial%' OR d LIKE '%guideline%' OR d LIKE '%recommendation%' THEN 'Modérée'
+        WHEN d LIKE '%cohort%' OR d LIKE '%longitudinal%' OR d LIKE '%observational%' OR d LIKE '%retrospective%' OR d LIKE '%prospective%' OR d LIKE '%registry%' OR d LIKE '%surveillance%' OR d LIKE '%case-control%' OR d LIKE '%case control%' OR d LIKE '%cross-sectional%' OR d LIKE '%cross sectional%' OR d LIKE '%case report%' OR d LIKE '%case series%' OR d LIKE '%ecological%' OR d LIKE '%survey%' THEN 'Faible'
+        WHEN d LIKE '%narrative%' OR d LIKE '%literature review%' OR d LIKE '%scoping review%' OR d LIKE '%editorial%' OR d LIKE '%commentary%' OR d LIKE '%opinion%' OR d LIKE '%review%' THEN 'Faible'
+        ELSE 'Non évaluée'
+      END"""
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Pydantic models
 # ─────────────────────────────────────────────────────────────────────────────
@@ -10790,20 +10813,22 @@ def _build_evidence_brief(scenario_id: str) -> dict[str, Any]:
             GROUP BY d.source ORDER BY n DESC LIMIT 8
         """), {"sid": scenario_id, "thr": eff_thr}).mappings().fetchall()
 
-        evidence_levels = conn.execute(text("""
-            SELECT
-                CASE
-                    WHEN d.quality_score >= 0.7 THEN 'Forte'
-                    WHEN d.quality_score >= 0.4 THEN 'Modérée'
-                    WHEN d.quality_score IS NOT NULL THEN 'Faible'
-                    ELSE 'Non évaluée'
-                END AS level,
-                COUNT(*) AS n
-            FROM article_scenarios ars
-            JOIN literature_document d ON d.id = ars.document_id
-            WHERE ars.scenario_id = :sid AND d.is_duplicate IS NOT TRUE
-              AND COALESCE(ars.similarity_score, 0) >= :thr
-            GROUP BY 1 ORDER BY 2 DESC
+        # Niveau de preuve = GRADE strict basé sur le DEVIS (cf. _GRADE_LEVEL_CASE),
+        # pas sur le quality_score composite : sinon une cohorte/cas-témoins bien
+        # citée passait « Modérée » voire « Forte », ce qui contredit GRADE (toute
+        # étude observationnelle part en certitude faible).
+        evidence_levels = conn.execute(text(f"""
+            WITH b AS (
+                SELECT lower(coalesce(
+                    nullif(trim(ld.study_design), ''),
+                    nullif(trim(ld.pico_json->>'study_design'), ''), '')) AS d
+                FROM article_scenarios ars
+                JOIN literature_document ld ON ld.id = ars.document_id
+                WHERE ars.scenario_id = :sid AND ld.is_duplicate IS NOT TRUE
+                  AND COALESCE(ars.similarity_score, 0) >= :thr
+            )
+            SELECT {_GRADE_LEVEL_CASE} AS level, COUNT(*) AS n
+            FROM b GROUP BY 1 ORDER BY 2 DESC
         """), {"sid": scenario_id, "thr": eff_thr}).mappings().fetchall()
 
     pico_table = []
@@ -11755,6 +11780,23 @@ def _generate_evidence_brief_llm(scenario_id: str, force: bool = False) -> dict[
 
     top_designs = sorted(study_designs.items(), key=lambda x: -x[1])[:5]
 
+    # Plafond GRADE déterministe d'après les devis présents : on empêche le LLM de
+    # surclasser un corpus observationnel. En GRADE strict, toute étude
+    # observationnelle (cohorte, cas-témoins, transversale, série de cas) démarre
+    # en certitude FAIBLE ; seuls les essais randomisés et leurs synthèses peuvent
+    # soutenir une certitude élevée.
+    _designs_blob = " ".join(study_designs.keys()).lower()
+    if any(k in _designs_blob for k in ("randomi", "rct", "meta-analysis", "méta-analyse",
+                                        "meta analysis", "systematic review", "revue systématique")):
+        _grade_ceiling = ("Forte possible (essais randomisés / synthèses d'essais présents), "
+                          "à pondérer selon la cohérence et le risque de biais")
+    elif any(k in _designs_blob for k in ("controlled trial", "clinical trial", "quasi-exper",
+                                          "quasi exper", "non-randomi", "non randomi")):
+        _grade_ceiling = "Modérée au mieux (essais contrôlés non randomisés / quasi-expérimental)"
+    else:
+        _grade_ceiling = ("Faible (corpus observationnel : GRADE plafonne la certitude à faible, "
+                          "sauf upgrade explicitement justifié)")
+
     system_prompt = """Tu es un expert en médecine d'urgence et en revue systématique de la littérature scientifique.
 Tu génères des Evidence Briefs complets, rigoureux et structurés en français.
 Tu dois produire un JSON structuré avec tous les champs demandés.
@@ -11768,6 +11810,18 @@ Designs d'étude principaux : {', '.join(f'{d} ({n})' for d, n in top_designs)}.
 
 Articles (top 30 par pertinence) :
 {context_str}
+
+RÈGLES GRADE (strict) pour « evidence_level » et « grade_recommendation » :
+- Le niveau de preuve part du DEVIS d'étude. Essais randomisés et méta-analyses/revues
+  systématiques d'essais → certitude potentiellement Forte. TOUTE étude observationnelle
+  (cohorte, cas-témoins, transversale, série/rapport de cas) démarre en certitude FAIBLE.
+  Ne JAMAIS classer des cas-témoins ou des cohortes en preuve « Forte ».
+- « evidence_level » reflète la MEILLEURE preuve du corpus, plafonnée par le devis.
+  Plafond estimé d'après les devis présents : {_grade_ceiling}.
+- « grade_recommendation » suit le niveau de preuve : A uniquement si preuves Fortes et
+  cohérentes (essais/méta-analyses) ; B si preuves modérées ; C si preuves faibles
+  (corpus observationnel) ; D si très faibles / avis d'experts ; GPP pour une bonne
+  pratique sans preuve directe.
 
 Génère un JSON avec EXACTEMENT ces champs :
 {{
