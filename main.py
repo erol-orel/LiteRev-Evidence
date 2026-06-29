@@ -919,7 +919,7 @@ def get_filter_options() -> dict[str, list[dict[str, Any]]]:
 
     with engine.connect() as conn:
         for key, col in fields:
-            extra_where = "AND year >= 1900" if key == "year" else ""
+            extra_where = "AND year >= 1800 AND year <= EXTRACT(YEAR FROM CURRENT_DATE)::int" if key == "year" else ""
             rows = conn.execute(
                 text(f"""
                     SELECT DISTINCT {col} AS value
@@ -2834,11 +2834,12 @@ def get_evidence_summary(document_id: int) -> dict[str, Any]:
 # Regroupement des sources en libellés canoniques pour les tableaux de bord. La
 # colonne `source` accumule des variantes héritées (casse, anciens tags, valeurs
 # vides) qui gonflaient le compteur « Sources » et fragmentaient les barres. On
-# mappe vers les sources fédérées + « Préprints » ; le reste tombe dans « Autre ».
+# mappe les variantes connues vers les sources fédérées + « Préprints » ; toute
+# autre source garde son nom réel (les valeurs vides → « Non précisé »).
 def _canonical_source(s: str | None) -> str:
     t = (s or "").strip().lower()
     if not t:
-        return "Autre"
+        return "Non précisé"
     # Europe PMC en premier : la chaîne 'europepmc' contient 'pmc'.
     if "europepmc" in t or "europe_pmc" in t or "europe pmc" in t or t == "epmc":
         return "Europe PMC"
@@ -2853,7 +2854,9 @@ def _canonical_source(s: str | None) -> str:
         return "Préprints"
     if "semantic" in t or t == "s2":
         return "Semantic Scholar"
-    return "Autre"
+    # Source non fédérée : on garde le nom réel (nettoyé) plutôt que de tout
+    # masquer derrière « Autre » — l'utilisateur veut voir TOUTES les sources.
+    return (s or "").strip()
 
 
 @app.get("/corpus/stats")
@@ -4059,26 +4062,25 @@ def get_response_time_optimization(force_refresh: bool = False):
 @app.get("/corpus/stats/by-year")
 def get_corpus_stats_by_year() -> dict[str, Any]:
     """
-    Distribution des articles par année (1900+), pour le graphique temporel.
+    Distribution des articles par année (1800 → année courante), pour le graphique temporel.
     Retourne aussi la distribution par année ET par scénario pour la heatmap.
     """
     with engine.connect() as conn:
-        # Articles par année (1900+)
+        # Articles par année (1800 → année courante)
         rows_year = conn.execute(text("""
             SELECT year, COUNT(*) as count
             FROM literature_document
-            WHERE year >= 1900 AND year IS NOT NULL
+            WHERE year >= 1800 AND year <= EXTRACT(YEAR FROM CURRENT_DATE)::int
             GROUP BY year
             ORDER BY year ASC
         """)).mappings().all()
 
-        # Articles par année ET par scénario (1900+)
+        # Articles par année ET par scénario (1800 → année courante)
         rows_scenario_year = conn.execute(text("""
             SELECT d.year, ars.scenario_id, COUNT(*) as count
             FROM literature_document d
             JOIN article_scenarios ars ON ars.document_id = d.id
-            WHERE d.year >= 1900
-              AND d.year IS NOT NULL
+            WHERE d.year >= 1800 AND d.year <= EXTRACT(YEAR FROM CURRENT_DATE)::int
             GROUP BY d.year, ars.scenario_id
             ORDER BY d.year ASC
         """)).mappings().all()
@@ -4579,8 +4581,8 @@ def get_scenario_detail(scenario_id: str) -> dict[str, Any]:
                 ) THEN 1 ELSE 0 END) AS with_fulltext,
                 COUNT(DISTINCT d.year) AS years_covered,
                 COUNT(DISTINCT d.journal) AS journals_count,
-                GREATEST(1900, MIN(d.year)) AS year_min,
-                MAX(d.year) AS year_max
+                MIN(d.year) FILTER (WHERE d.year BETWEEN 1800 AND EXTRACT(YEAR FROM CURRENT_DATE)::int) AS year_min,
+                MAX(d.year) FILTER (WHERE d.year BETWEEN 1800 AND EXTRACT(YEAR FROM CURRENT_DATE)::int) AS year_max
             FROM literature_document d
             JOIN article_scenarios ars ON ars.document_id = d.id
             WHERE ars.scenario_id = :sid
@@ -4713,7 +4715,7 @@ def get_scenario_corpus(
             FROM literature_document d
             JOIN article_scenarios ars ON ars.document_id = d.id AND ars.scenario_id = :sid
             WHERE {where}
-              AND d.year >= 1900
+              AND d.year >= 1800 AND d.year <= EXTRACT(YEAR FROM CURRENT_DATE)::int
             GROUP BY d.year
             ORDER BY d.year DESC
         """), {k: v for k, v in params.items() if k not in ('limit', 'offset')}).mappings().all()
@@ -5328,6 +5330,9 @@ def scenario_rag_assistant(scenario_id: str, payload: AskIn) -> dict[str, Any]:
     """
     meta = _get_db_gesica_scenario_or_404(scenario_id)
     evidence_prompt = meta.get("evidence_extraction_prompt") or ""
+    # L'Assistant n'interroge que le SOUS-ENSEMBLE PERTINENT (≥ seuil sémantique
+    # ou inclus manuellement), pas tout le corpus du scénario.
+    eff_thr = _get_scenario_threshold(scenario_id)
     # Forcer le filtre sur le scénario
     payload.filters = payload.filters or {}
     payload.filters["scenario_type"] = scenario_id
@@ -5357,12 +5362,13 @@ def scenario_rag_assistant(scenario_id: str, payload: AskIn) -> dict[str, Any]:
                 FROM document_chunk c
                 JOIN literature_document d ON d.id = c.document_id
                 WHERE c.embedding IS NOT NULL
-                  AND EXISTS (SELECT 1 FROM article_scenarios ars WHERE ars.document_id = d.id AND ars.scenario_id = :sid)
+                  AND EXISTS (SELECT 1 FROM article_scenarios ars WHERE ars.document_id = d.id AND ars.scenario_id = :sid
+                              AND (COALESCE(ars.similarity_score, 0) >= :thr OR d.screening_status = 'included'))
                   AND (d.is_duplicate IS NULL OR d.is_duplicate = FALSE)
                   AND d.screening_status IS DISTINCT FROM 'excluded'  -- porte de screening (C1)
                 ORDER BY c.embedding <=> CAST(:emb AS vector)
                 LIMIT 8
-            """), {"emb": str(query_embedding), "sid": scenario_id}).mappings().all()
+            """), {"emb": str(query_embedding), "sid": scenario_id, "thr": eff_thr}).mappings().all()
         else:
             # Fallback textuel
             terms = [t.strip() for t in re.split(r"\s+", payload.question.lower()) if t.strip()]
@@ -5372,7 +5378,7 @@ def scenario_rag_assistant(scenario_id: str, payload: AskIn) -> dict[str, Any]:
                 f"(LOWER(COALESCE(d.title,'')) LIKE :t{i} OR LOWER(COALESCE(c.content,'')) LIKE :t{i})"
                 for i in range(len(terms))
             )
-            params: dict[str, Any] = {"sid": scenario_id}
+            params: dict[str, Any] = {"sid": scenario_id, "thr": eff_thr}
             for i, t in enumerate(terms):
                 params[f"t{i}"] = f"%{t}%"
             rows = conn.execute(text(f"""
@@ -5383,7 +5389,8 @@ def scenario_rag_assistant(scenario_id: str, payload: AskIn) -> dict[str, Any]:
                 FROM document_chunk c
                 JOIN literature_document d ON d.id = c.document_id
                 WHERE ({like_clauses})
-                  AND EXISTS (SELECT 1 FROM article_scenarios ars WHERE ars.document_id = d.id AND ars.scenario_id = :sid)
+                  AND EXISTS (SELECT 1 FROM article_scenarios ars WHERE ars.document_id = d.id AND ars.scenario_id = :sid
+                              AND (COALESCE(ars.similarity_score, 0) >= :thr OR d.screening_status = 'included'))
                   AND d.screening_status IS DISTINCT FROM 'excluded'  -- porte de screening (C1)
                 ORDER BY d.year DESC NULLS LAST
                 LIMIT 8
@@ -6948,10 +6955,12 @@ def get_evidence_brief_pdf(scenario_id: str):
                 COUNT(*) FILTER (WHERE d.is_duplicate IS NOT TRUE) AS total,
                 COUNT(*) FILTER (WHERE d.is_duplicate IS NOT TRUE
                     AND COALESCE(ars.similarity_score, 0) >= :thr) AS relevant,
-                GREATEST(1900, MIN(d.year) FILTER (WHERE d.is_duplicate IS NOT TRUE
-                    AND COALESCE(ars.similarity_score, 0) >= :thr)) AS year_min,
+                MIN(d.year) FILTER (WHERE d.is_duplicate IS NOT TRUE
+                    AND COALESCE(ars.similarity_score, 0) >= :thr
+                    AND d.year BETWEEN 1800 AND EXTRACT(YEAR FROM CURRENT_DATE)::int) AS year_min,
                 MAX(d.year) FILTER (WHERE d.is_duplicate IS NOT TRUE
-                    AND COALESCE(ars.similarity_score, 0) >= :thr) AS year_max,
+                    AND COALESCE(ars.similarity_score, 0) >= :thr
+                    AND d.year BETWEEN 1800 AND EXTRACT(YEAR FROM CURRENT_DATE)::int) AS year_max,
                 COUNT(*) FILTER (WHERE d.is_duplicate IS NOT TRUE
                     AND COALESCE(ars.similarity_score, 0) >= :thr
                     AND d.screening_status = 'included') AS included,
@@ -7817,8 +7826,8 @@ def get_user_scenario_detail(scenario_id: str) -> dict[str, Any]:
                 ) THEN 1 ELSE 0 END) AS with_fulltext,
                 COUNT(DISTINCT d.year) AS years_covered,
                 COUNT(DISTINCT d.journal) AS journals_count,
-                GREATEST(1900, MIN(d.year)) AS year_min,
-                MAX(d.year) AS year_max
+                MIN(d.year) FILTER (WHERE d.year BETWEEN 1800 AND EXTRACT(YEAR FROM CURRENT_DATE)::int) AS year_min,
+                MAX(d.year) FILTER (WHERE d.year BETWEEN 1800 AND EXTRACT(YEAR FROM CURRENT_DATE)::int) AS year_max
             FROM literature_document d
             JOIN article_scenarios ars ON ars.document_id = d.id
             WHERE ars.scenario_id = :sid
@@ -7980,7 +7989,7 @@ def get_user_scenario_corpus(
             FROM literature_document d
             JOIN article_scenarios ars ON ars.document_id = d.id AND ars.scenario_id = :sid
             WHERE {where}
-              AND d.year >= 1900
+              AND d.year >= 1800 AND d.year <= EXTRACT(YEAR FROM CURRENT_DATE)::int
             GROUP BY d.year ORDER BY d.year DESC
         """), {k: v for k, v in params.items() if k not in ('limit', 'offset')}).mappings().all()
         # Répartition par source, en distinguant la base locale (docs déjà en base
@@ -10781,10 +10790,12 @@ def _build_evidence_brief(scenario_id: str) -> dict[str, Any]:
                         WHERE c.document_id = d.id AND c.chunk_type = 'fulltext_section')) AS relevant_with_fulltext,
                 -- Couverture & citations : calculées sur le SOUS-ENSEMBLE PERTINENT
                 -- (au-dessus du seuil), pas sur le corpus complet.
-                GREATEST(1900, MIN(d.year) FILTER (WHERE d.is_duplicate IS NOT TRUE
-                    AND COALESCE(ars.similarity_score, 0) >= :thr)) AS year_min,
+                MIN(d.year) FILTER (WHERE d.is_duplicate IS NOT TRUE
+                    AND COALESCE(ars.similarity_score, 0) >= :thr
+                    AND d.year BETWEEN 1800 AND EXTRACT(YEAR FROM CURRENT_DATE)::int) AS year_min,
                 MAX(d.year) FILTER (WHERE d.is_duplicate IS NOT TRUE
-                    AND COALESCE(ars.similarity_score, 0) >= :thr) AS year_max,
+                    AND COALESCE(ars.similarity_score, 0) >= :thr
+                    AND d.year BETWEEN 1800 AND EXTRACT(YEAR FROM CURRENT_DATE)::int) AS year_max,
                 AVG(d.citation_count) FILTER (WHERE d.is_duplicate IS NOT TRUE
                     AND COALESCE(ars.similarity_score, 0) >= :thr
                     AND d.citation_count IS NOT NULL) AS avg_citations,
@@ -10834,7 +10845,7 @@ def _build_evidence_brief(scenario_id: str) -> dict[str, Any]:
             JOIN literature_document d ON d.id = ars.document_id
             WHERE ars.scenario_id = :sid AND d.is_duplicate IS NOT TRUE
               AND COALESCE(ars.similarity_score, 0) >= :thr
-              AND d.year IS NOT NULL AND d.year >= 1900
+              AND d.year >= 1800 AND d.year <= EXTRACT(YEAR FROM CURRENT_DATE)::int
             GROUP BY d.year ORDER BY d.year ASC
         """), {"sid": scenario_id, "thr": eff_thr}).mappings().fetchall()
 
@@ -11052,6 +11063,9 @@ def get_user_scenario_knowledge_graph(
 def user_scenario_rag_assistant(scenario_id: str, payload: AskIn) -> dict[str, Any]:
     """Assistant RAG pour un scénario utilisateur (délègue au RAG générique filtré)."""
     row = _get_user_scenario_or_404(scenario_id)
+    # L'Assistant n'interroge que le SOUS-ENSEMBLE PERTINENT (≥ seuil sémantique
+    # ou inclus manuellement), pas tout le corpus du scénario.
+    eff_thr = _get_scenario_threshold(scenario_id)
     payload.filters = payload.filters or {}
     payload.filters["project_context"] = "literev"
 
@@ -11079,12 +11093,13 @@ def user_scenario_rag_assistant(scenario_id: str, payload: AskIn) -> dict[str, A
                 FROM document_chunk c
                 JOIN literature_document d ON d.id = c.document_id
                 WHERE c.embedding IS NOT NULL
-                  AND EXISTS (SELECT 1 FROM article_scenarios ars WHERE ars.document_id = d.id AND ars.scenario_id = :sid)
+                  AND EXISTS (SELECT 1 FROM article_scenarios ars WHERE ars.document_id = d.id AND ars.scenario_id = :sid
+                              AND (COALESCE(ars.similarity_score, 0) >= :thr OR d.screening_status = 'included'))
                   AND (d.is_duplicate IS NULL OR d.is_duplicate = FALSE)
                   AND d.screening_status IS DISTINCT FROM 'excluded'  -- porte de screening (C1)
                 ORDER BY c.embedding <=> CAST(:emb AS vector)
                 LIMIT 8
-            """), {"emb": str(query_embedding), "sid": scenario_id}).mappings().all()
+            """), {"emb": str(query_embedding), "sid": scenario_id, "thr": eff_thr}).mappings().all()
         else:
             terms = [t.strip() for t in re.split(r"\s+", payload.question.lower()) if t.strip()]
             if not terms:
@@ -11093,7 +11108,7 @@ def user_scenario_rag_assistant(scenario_id: str, payload: AskIn) -> dict[str, A
                 f"(LOWER(COALESCE(d.title,'')) LIKE :t{i} OR LOWER(COALESCE(c.content,'')) LIKE :t{i})"
                 for i in range(len(terms))
             )
-            params: dict[str, Any] = {"sid": scenario_id}
+            params: dict[str, Any] = {"sid": scenario_id, "thr": eff_thr}
             for i, t in enumerate(terms):
                 params[f"t{i}"] = f"%{t}%"
             rows = conn.execute(text(f"""
@@ -11103,7 +11118,8 @@ def user_scenario_rag_assistant(scenario_id: str, payload: AskIn) -> dict[str, A
                 FROM document_chunk c
                 JOIN literature_document d ON d.id = c.document_id
                 WHERE ({like_clauses})
-                  AND EXISTS (SELECT 1 FROM article_scenarios ars WHERE ars.document_id = d.id AND ars.scenario_id = :sid)
+                  AND EXISTS (SELECT 1 FROM article_scenarios ars WHERE ars.document_id = d.id AND ars.scenario_id = :sid
+                              AND (COALESCE(ars.similarity_score, 0) >= :thr OR d.screening_status = 'included'))
                   AND d.screening_status IS DISTINCT FROM 'excluded'  -- porte de screening (C1)
                 ORDER BY d.year DESC NULLS LAST
                 LIMIT 8
@@ -11363,10 +11379,12 @@ def get_user_scenario_evidence_brief_pdf(scenario_id: str):
                 COUNT(*) FILTER (WHERE d.is_duplicate IS NOT TRUE) AS total,
                 COUNT(*) FILTER (WHERE d.is_duplicate IS NOT TRUE
                     AND COALESCE(ars.similarity_score, 0) >= :thr) AS relevant,
-                GREATEST(1900, MIN(d.year) FILTER (WHERE d.is_duplicate IS NOT TRUE
-                    AND COALESCE(ars.similarity_score, 0) >= :thr)) AS year_min,
+                MIN(d.year) FILTER (WHERE d.is_duplicate IS NOT TRUE
+                    AND COALESCE(ars.similarity_score, 0) >= :thr
+                    AND d.year BETWEEN 1800 AND EXTRACT(YEAR FROM CURRENT_DATE)::int) AS year_min,
                 MAX(d.year) FILTER (WHERE d.is_duplicate IS NOT TRUE
-                    AND COALESCE(ars.similarity_score, 0) >= :thr) AS year_max,
+                    AND COALESCE(ars.similarity_score, 0) >= :thr
+                    AND d.year BETWEEN 1800 AND EXTRACT(YEAR FROM CURRENT_DATE)::int) AS year_max,
                 COUNT(*) FILTER (WHERE d.is_duplicate IS NOT TRUE
                     AND COALESCE(ars.similarity_score, 0) >= :thr
                     AND d.screening_status = 'included') AS included,
@@ -13670,11 +13688,11 @@ def get_corpus_stats_by_year_named() -> dict[str, Any]:
     (GESICA et user_scenarios) dans la heatmap.
     """
     with engine.connect() as conn:
-        # Articles par année (2000+)
+        # Articles par année (1800 → année courante)
         rows_year = conn.execute(text("""
             SELECT year, COUNT(*) as count
             FROM literature_document
-            WHERE year >= 1900 AND year IS NOT NULL
+            WHERE year >= 1800 AND year <= EXTRACT(YEAR FROM CURRENT_DATE)::int
             GROUP BY year ORDER BY year ASC
         """)).mappings().all()
 
@@ -13692,7 +13710,7 @@ def get_corpus_stats_by_year_named() -> dict[str, Any]:
             SELECT d.year, ars.scenario_id, COUNT(*) as count
             FROM literature_document d
             JOIN article_scenarios ars ON ars.document_id = d.id
-            WHERE d.year >= 1900 AND d.year IS NOT NULL
+            WHERE d.year >= 1800 AND d.year <= EXTRACT(YEAR FROM CURRENT_DATE)::int
             GROUP BY d.year, ars.scenario_id ORDER BY d.year ASC
         """)).mappings().all()
 
