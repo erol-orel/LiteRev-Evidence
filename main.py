@@ -12147,6 +12147,19 @@ def _attach_model_spec(variables: dict, prov_articles: list[dict]) -> dict:
         "provenance": algo_prov,
     }
 
+    # ── Seuils d'alerte (modalités green/orange/red) : on filtre leur provenance
+    # sur le POOL PERTINENT (mêmes valid_ids que le reste du spec) pour garantir
+    # que chaque modalité est bien sourcée par un article réellement retenu, et on
+    # réécrit la provenance nettoyée pour que l'UI puisse lier les articles. ──
+    at = variables.get("alert_thresholds")
+    if isinstance(at, dict):
+        for _lvl in ("green", "orange", "red"):
+            band = at.get(_lvl)
+            if isinstance(band, dict):
+                band_prov = _filter_provenance(band.get("provenance"), valid_ids)
+                band["provenance"] = band_prov
+                cited.update(band_prov)
+
     # ── Data template (dérivé → garanti cohérent avec les machine_name ci-dessus) ──
     target_dtype = {"classification": "category", "regression": "float", "count": "int", "survival": "float"}[task_type]
     columns = [{
@@ -12534,6 +12547,13 @@ def get_scenario_model_spec(scenario_id: str) -> dict[str, Any]:
         prov_ids.update(int(i) for i in (elem.get("provenance") or []) if isinstance(i, (int, float)))
     for f in (spec.get("features") or []):
         prov_ids.update(int(i) for i in (f.get("provenance") or []) if isinstance(i, (int, float)))
+    # Provenance des modalités d'alerte (seuils green/orange/red) : on les résout
+    # aussi pour que chaque modalité affiche l'article source.
+    _at_raw = vj.get("alert_thresholds") if isinstance(vj, dict) else None
+    if isinstance(_at_raw, dict):
+        for _band in _at_raw.values():
+            if isinstance(_band, dict):
+                prov_ids.update(int(i) for i in (_band.get("provenance") or []) if isinstance(i, (int, float)))
 
     resolved: dict[str, Any] = {}
     if prov_ids:
@@ -12567,6 +12587,22 @@ def get_scenario_model_spec(scenario_id: str) -> dict[str, Any]:
         f2["best_article"] = _best_article(f.get("provenance"))
         features.append(f2)
 
+    # Modalités d'alerte enrichies : chaque niveau porte son article source (le
+    # plus pertinent de sa provenance) + la liste résolue, pour lier la littérature.
+    alert_thresholds = {}
+    if isinstance(_at_raw, dict):
+        for _lvl, _band in _at_raw.items():
+            if not isinstance(_band, dict):
+                continue
+            _b2 = dict(_band)
+            _prov = _band.get("provenance") or []
+            _b2["best_article"] = _best_article(_prov)
+            _b2["provenance_articles"] = [
+                resolved[str(int(i))] for i in _prov
+                if isinstance(i, (int, float)) and str(int(i)) in resolved
+            ]
+            alert_thresholds[_lvl] = _b2
+
     return {
         "status": "ready",
         "scenario_id": scenario_id,
@@ -12575,6 +12611,7 @@ def get_scenario_model_spec(scenario_id: str) -> dict[str, Any]:
         "outcome": outcome,
         "features": features,
         "algorithm": algorithm,
+        "alert_thresholds": alert_thresholds,
         "data_template": spec.get("data_template"),
         "provenance_index": resolved or vj.get("_provenance_index", {}),
         "validated": row["variables_validated"],

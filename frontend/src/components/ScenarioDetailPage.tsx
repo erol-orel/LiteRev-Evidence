@@ -769,6 +769,11 @@ function VariablesSection({ detail, scenarioId, onGoToModel }: { detail: Scenari
                   orange: { dot: "bg-amber-400",   cls: "text-amber-300",   def: "Tension" },
                   red:    { dot: "bg-rose-400",     cls: "text-rose-300",    def: "Alerte" },
                 }[lvl];
+                // Articles sources de la modalité (pool pertinent), résolus côté serveur.
+                const band = modelSpec?.alert_thresholds?.[lvl];
+                const srcArts = band?.provenance_articles?.length
+                  ? band.provenance_articles
+                  : (band?.best_article ? [band.best_article] : []);
                 return (
                   <div key={lvl} className="flex items-start gap-2.5">
                     <span className={`mt-1 h-2 w-2 shrink-0 rounded-full ${cfg.dot}`} />
@@ -780,6 +785,7 @@ function VariablesSection({ detail, scenarioId, onGoToModel }: { detail: Scenari
                       {(t.rationale || t.description) && (
                         <p className="text-[10px] text-white/40 leading-snug">{t.rationale || t.description}</p>
                       )}
+                      {srcArts.slice(0, 3).map((a, i) => <ArticleSourceLink key={i} a={a} label="Réf." />)}
                     </div>
                   </div>
                 );
