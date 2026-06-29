@@ -2831,6 +2831,31 @@ def get_evidence_summary(document_id: int) -> dict[str, Any]:
 # Phase 2 Endpoints: Stats and Scenarios
 # ─────────────────────────────────────────────────────────────────────────────
 
+# Regroupement des sources en libellés canoniques pour les tableaux de bord. La
+# colonne `source` accumule des variantes héritées (casse, anciens tags, valeurs
+# vides) qui gonflaient le compteur « Sources » et fragmentaient les barres. On
+# mappe vers les sources fédérées + « Préprints » ; le reste tombe dans « Autre ».
+def _canonical_source(s: str | None) -> str:
+    t = (s or "").strip().lower()
+    if not t:
+        return "Autre"
+    # Europe PMC en premier : la chaîne 'europepmc' contient 'pmc'.
+    if "europepmc" in t or "europe_pmc" in t or "europe pmc" in t or t == "epmc":
+        return "Europe PMC"
+    if any(k in t for k in ("pubmed", "pmc", "medline", "ncbi", "entrez", "pmid")):
+        return "PubMed"
+    if "openalex" in t:
+        return "OpenAlex"
+    if "crossref" in t or "cross_ref" in t or "cross-ref" in t:
+        return "Crossref"
+    if any(k in t for k in ("medrxiv", "biorxiv", "arxiv", "preprint", "ssrn",
+                            "chemrxiv", "research square", "researchsquare", "osf", "psyarxiv")):
+        return "Préprints"
+    if "semantic" in t or t == "s2":
+        return "Semantic Scholar"
+    return "Autre"
+
+
 @app.get("/corpus/stats")
 def get_corpus_stats() -> dict[str, Any]:
     """Vue globale multi-projet du corpus."""
@@ -2859,7 +2884,12 @@ def get_corpus_stats() -> dict[str, Any]:
     """)
     with engine.connect() as conn:
         totals = {r["project"]: r["count"] for r in conn.execute(sql_totals).mappings().all()}
-        sources = {r["source"]: r["count"] for r in conn.execute(sql_sources).mappings().all()}
+        # Agrégation par source CANONIQUE (sinon les variantes héritées comptaient
+        # chacune comme une « source » distincte → compteur et barres faussés).
+        sources: dict[str, int] = {}
+        for r in conn.execute(sql_sources).mappings().all():
+            k = _canonical_source(r["source"])
+            sources[k] = sources.get(k, 0) + int(r["count"] or 0)
         years = {r["year"]: r["count"] for r in conn.execute(sql_years).mappings().all()}
         
         total_docs = conn.execute(text("SELECT COUNT(*) FROM literature_document")).scalar() or 0
@@ -4174,6 +4204,19 @@ def get_fulltext_stats() -> dict[str, Any]:
     openai_key = os.getenv("OPENAI_API_KEY")
     hybrid_active = bool(openai_key) and chunks_with_embedding > 0
 
+    # Couverture full-text agrégée par source CANONIQUE (mêmes regroupements que
+    # le tableau de bord global, sinon variantes héritées dupliquées).
+    _ft_by_source: dict[str, dict] = {}
+    for r in source_coverage:
+        k = _canonical_source(r["source"])
+        agg = _ft_by_source.setdefault(k, {"source": k, "total": 0, "with_fulltext": 0})
+        agg["total"] += int(r["total"] or 0)
+        agg["with_fulltext"] += int(r["with_fulltext"] or 0)
+    ft_by_source = sorted(_ft_by_source.values(), key=lambda a: a["total"], reverse=True)
+    for a in ft_by_source:
+        a["abstract_only"] = a["total"] - a["with_fulltext"]
+        a["fulltext_pct"] = round(a["with_fulltext"] / a["total"] * 100, 1) if a["total"] else 0
+
     return {
         "corpus": {
             "total_documents": total_docs,
@@ -4196,16 +4239,7 @@ def get_fulltext_stats() -> dict[str, Any]:
                 else "Mode lexical uniquement : clé OpenAI absente ou embeddings non générés"
             ),
         },
-        "by_source": [
-            {
-                "source": r["source"],
-                "total": r["total"],
-                "with_fulltext": r["with_fulltext"],
-                "abstract_only": r["total"] - r["with_fulltext"],
-                "fulltext_pct": round(r["with_fulltext"] / r["total"] * 100, 1) if r["total"] else 0,
-            }
-            for r in source_coverage
-        ],
+        "by_source": ft_by_source,
         "sample_fulltext_docs": [
             {
                 "id": r["id"],
