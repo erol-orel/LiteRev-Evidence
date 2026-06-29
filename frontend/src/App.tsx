@@ -2274,6 +2274,44 @@ function ScenariosView({
             {isExpanded ? <ChevronUp size={16} className="text-forest-500" /> : <ChevronDown size={16} className="text-forest-500" />}
           </div>
         </div>
+        {/* Assignation à un dossier — INLINE, directement sous CETTE carte (plus de
+            carte unique en haut de liste qui obligeait à scroller bien au-dessus). */}
+        {assigningScenarioId === scenario.id && (
+          <div className="mt-3 rounded-2xl border border-brand-400/30 bg-brand-500/5 p-3 space-y-2">
+            <h4 className="text-xs font-semibold text-white">Placer dans un dossier</h4>
+            <div className="flex flex-wrap gap-2">
+              <button type="button" onClick={async (e) => { e.stopPropagation(); if (onAssignFolder) await onAssignFolder(scenario.id, null); setAssigningScenarioId(null); }}
+                className="rounded-xl border border-white/10 px-3 py-1.5 text-xs text-white/50 hover:text-white hover:bg-white/10 transition">Sans dossier</button>
+              {folders.map(f => (
+                <button key={f.id} type="button" onClick={async (e) => { e.stopPropagation(); if (onAssignFolder) await onAssignFolder(scenario.id, f.id); setAssigningScenarioId(null); }}
+                  className="rounded-xl border px-3 py-1.5 text-xs hover:opacity-80 transition"
+                  style={{ borderColor: f.color + '60', backgroundColor: f.color + '20', color: f.color }}>{f.name}</button>
+              ))}
+              <button type="button" onClick={(e) => { e.stopPropagation(); setAssigningScenarioId(null); setFolderError(null); }}
+                className="rounded-xl border border-white/10 px-3 py-1.5 text-xs text-white/30 hover:text-white transition">Annuler</button>
+            </div>
+            {/* Créer un dossier ET y placer ce scénario en un clic */}
+            <div className="flex items-center gap-2 pt-2 border-t border-white/10">
+              <input type="text" value={newFolderName} onChange={e => setNewFolderName(e.target.value)} onClick={e => e.stopPropagation()}
+                placeholder="+ Nouveau dossier…"
+                className="flex-1 rounded-xl border border-white/10 bg-white/5 px-3 py-1.5 text-xs text-white placeholder-white/30 focus:outline-none focus:border-brand-400" />
+              <button type="button" disabled={!newFolderName.trim()}
+                onClick={async (e) => {
+                  e.stopPropagation();
+                  if (!newFolderName.trim() || !onCreateFolder) return;
+                  try {
+                    const nf = await onCreateFolder(newFolderName.trim(), newFolderColor);
+                    if (nf && onAssignFolder) await onAssignFolder(scenario.id, nf.id);
+                    setNewFolderName(''); setFolderError(null); setAssigningScenarioId(null);
+                  } catch (err) {
+                    setFolderError(err instanceof Error ? err.message : 'Échec de la création du dossier');
+                  }
+                }}
+                className="rounded-xl bg-brand-500/20 border border-brand-500/30 px-3 py-1.5 text-xs text-brand-300 hover:bg-brand-500/30 transition disabled:opacity-40 shrink-0">Créer &amp; assigner</button>
+            </div>
+            {folderError && <p className="text-[11px] text-rose-300">{folderError}</p>}
+          </div>
+        )}
         {isUser && pipelineStatuses[scenario.id] && pipelineStatuses[scenario.id].overall_status !== 'done' && (
           <div className="mt-2 flex items-center gap-2 pl-12">
             <RotateCcw size={10} className="text-brand-400 animate-spin shrink-0" />
@@ -2869,70 +2907,6 @@ function ScenariosView({
                   Annuler
                 </button>
               </div>
-            </div>
-          )}
-
-          {/* Dialog assignation dossier */}
-          {assigningScenarioId && (
-            <div className="rounded-2xl border border-white/10 bg-white/5 p-4 space-y-2">
-              <h4 className="text-sm font-semibold text-white">Assigner à un dossier</h4>
-              <div className="flex flex-wrap gap-2">
-                <button
-                  type="button"
-                  onClick={async () => {
-                    if (onAssignFolder) await onAssignFolder(assigningScenarioId, null);
-                    setAssigningScenarioId(null);
-                  }}
-                  className="rounded-xl border border-white/10 px-3 py-1.5 text-xs text-white/50 hover:text-white hover:bg-white/10 transition"
-                >
-                  Sans dossier
-                </button>
-                {folders.map(f => (
-                  <button
-                    key={f.id}
-                    type="button"
-                    onClick={async () => {
-                      if (onAssignFolder) await onAssignFolder(assigningScenarioId, f.id);
-                      setAssigningScenarioId(null);
-                    }}
-                    className="rounded-xl border px-3 py-1.5 text-xs hover:opacity-80 transition"
-                    style={{ borderColor: f.color + '60', backgroundColor: f.color + '20', color: f.color }}
-                  >
-                    {f.name}
-                  </button>
-                ))}
-                <button type="button" onClick={() => { setAssigningScenarioId(null); setFolderError(null); }} className="rounded-xl border border-white/10 px-3 py-1.5 text-xs text-white/30 hover:text-white transition">Annuler</button>
-              </div>
-              {/* Créer un dossier ET y placer directement ce scénario (il apparaît en haut) */}
-              <div className="flex items-center gap-2 pt-2 border-t border-white/10">
-                <input
-                  type="text"
-                  value={newFolderName}
-                  onChange={e => setNewFolderName(e.target.value)}
-                  placeholder="+ Nouveau dossier…"
-                  className="flex-1 rounded-xl border border-white/10 bg-white/5 px-3 py-1.5 text-xs text-white placeholder-white/30 focus:outline-none focus:border-brand-400"
-                />
-                <button
-                  type="button"
-                  disabled={!newFolderName.trim()}
-                  onClick={async () => {
-                    if (!newFolderName.trim() || !onCreateFolder) return;
-                    try {
-                      const f = await onCreateFolder(newFolderName.trim(), newFolderColor);
-                      if (f && onAssignFolder) await onAssignFolder(assigningScenarioId, f.id);
-                      setNewFolderName('');
-                      setFolderError(null);
-                      setAssigningScenarioId(null);
-                    } catch (e) {
-                      setFolderError(e instanceof Error ? e.message : 'Échec de la création du dossier');
-                    }
-                  }}
-                  className="rounded-xl bg-brand-500/20 border border-brand-500/30 px-3 py-1.5 text-xs text-brand-300 hover:bg-brand-500/30 transition disabled:opacity-40 shrink-0"
-                >
-                  Créer &amp; assigner
-                </button>
-              </div>
-              {folderError && <p className="text-[11px] text-rose-300">{folderError}</p>}
             </div>
           )}
 
