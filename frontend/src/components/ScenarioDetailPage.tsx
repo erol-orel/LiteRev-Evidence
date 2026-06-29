@@ -1144,7 +1144,7 @@ function CorpusSection({ scenarioId, threshold }: { scenarioId: string; detail: 
             title="Distribution par Année"
           />
           <div className="space-y-2 text-xs">
-            {data.year_distribution.slice(0, 6).map((item) => (
+            {data.year_distribution.map((item) => (
               <div key={item.year} className="flex items-center gap-3">
                 <span className="w-10 text-white/50 font-mono">{item.year}</span>
                 <div className="flex-1 h-2 bg-white/5 rounded-full overflow-hidden">
