@@ -4656,7 +4656,7 @@ def get_scenario_corpus(
             FROM literature_document d
             JOIN article_scenarios ars ON ars.document_id = d.id AND ars.scenario_id = :sid
             WHERE {where}
-              AND d.year >= 2000
+              AND d.year >= 1900
             GROUP BY d.year
             ORDER BY d.year DESC
         """), {k: v for k, v in params.items() if k not in ('limit', 'offset')}).mappings().all()
@@ -7907,7 +7907,7 @@ def get_user_scenario_corpus(
             FROM literature_document d
             JOIN article_scenarios ars ON ars.document_id = d.id AND ars.scenario_id = :sid
             WHERE {where}
-              AND d.year >= 2000
+              AND d.year >= 1900
             GROUP BY d.year ORDER BY d.year DESC
         """), {k: v for k, v in params.items() if k not in ('limit', 'offset')}).mappings().all()
         # Répartition par source, en distinguant la base locale (docs déjà en base
@@ -10564,11 +10564,15 @@ def get_user_scenario_prisma(
                 -- manually excluded above threshold (veto)
                 SUM(CASE WHEN d.screening_status = 'excluded'
                            AND COALESCE(ars.similarity_score, 0) >= :thr THEN 1 ELSE 0 END) AS manually_vetoed,
-                -- full text
+                -- full text — RESTREINT à l'ensemble de preuves (≥ seuil OU inclus
+                -- manuellement, hors exclus), pas au corpus entier : sinon le "X of Y"
+                -- du PRISMA pouvait dépasser Y (le fameux "5 of 4").
                 SUM(CASE WHEN EXISTS (
                     SELECT 1 FROM document_chunk c
                     WHERE c.document_id = d.id AND c.chunk_type = 'fulltext_section'
-                ) THEN 1 ELSE 0 END) AS with_fulltext,
+                ) AND d.screening_status IS DISTINCT FROM 'excluded'
+                  AND (COALESCE(ars.similarity_score, 0) >= :thr OR d.screening_status = 'included')
+                  THEN 1 ELSE 0 END) AS with_fulltext,
                 -- embeddings
                 SUM(CASE WHEN EXISTS (
                     SELECT 1 FROM document_chunk c
@@ -10757,7 +10761,7 @@ def _build_evidence_brief(scenario_id: str) -> dict[str, Any]:
             JOIN literature_document d ON d.id = ars.document_id
             WHERE ars.scenario_id = :sid AND d.is_duplicate IS NOT TRUE
               AND COALESCE(ars.similarity_score, 0) >= :thr
-              AND d.year IS NOT NULL AND d.year >= 2000
+              AND d.year IS NOT NULL AND d.year >= 1900
             GROUP BY d.year ORDER BY d.year ASC
         """), {"sid": scenario_id, "thr": eff_thr}).mappings().fetchall()
 
@@ -11484,6 +11488,14 @@ def trigger_rerank(scenario_id: str, _: None = Depends(require_api_key)) -> dict
     def _run():
         _backfill_title_abstract_chunks(scenario_id)  # docs sans chunk résumé -> searchable
         n = _run_semantic_rerank_inline(scenario_id, query)
+        # Recalcul COMPLET : après le cosinus, relancer AUSSI le cross-encoder Cohere
+        # sur le sous-ensemble pertinent — sinon « Recalculer scores » ne rafraîchissait
+        # que le cosinus et les rerank_score restaient figés/partiels.
+        try:
+            _nce = _run_cross_encoder_rerank(scenario_id, query)
+            logger.info(f"Rerank manuel {scenario_id}: {n} cosinus + {_nce} cross-encoder Cohere.")
+        except Exception as _ece:
+            logger.warning(f"cross-encoder (recalcul manuel) {scenario_id}: {_ece}")
         _RERANK_JOBS[scenario_id] = {"status": "done", "updated": n}
 
     threading.Thread(target=_run, daemon=True).start()
@@ -13503,7 +13515,7 @@ def get_corpus_stats_by_year_named() -> dict[str, Any]:
         rows_year = conn.execute(text("""
             SELECT year, COUNT(*) as count
             FROM literature_document
-            WHERE year >= 2000 AND year IS NOT NULL
+            WHERE year >= 1900 AND year IS NOT NULL
             GROUP BY year ORDER BY year ASC
         """)).mappings().all()
 
@@ -13521,7 +13533,7 @@ def get_corpus_stats_by_year_named() -> dict[str, Any]:
             SELECT d.year, ars.scenario_id, COUNT(*) as count
             FROM literature_document d
             JOIN article_scenarios ars ON ars.document_id = d.id
-            WHERE d.year >= 2000 AND d.year IS NOT NULL
+            WHERE d.year >= 1900 AND d.year IS NOT NULL
             GROUP BY d.year, ars.scenario_id ORDER BY d.year ASC
         """)).mappings().all()
 
