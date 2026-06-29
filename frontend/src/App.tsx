@@ -724,7 +724,7 @@ function StatsView({ corpusStats, gesicaStats, fulltextStats, scenarios, statsBy
               <p className="mt-1 text-xs text-forest-400">Chunks</p>
             </div>
             <div className="rounded-2xl border border-white/10 bg-forest-900/60 p-4 text-center">
-              <p className="text-2xl font-bold text-brand-300">{scenarios ? scenarios.filter(s => s.articleCount > 0).length : Object.keys(corpusStats.byProject).length}</p>
+              <p className="text-2xl font-bold text-brand-300">{scenarios ? scenarios.filter(s => !s.hidden && s.articleCount > 0).length : Object.keys(corpusStats.byProject).length}</p>
               <p className="mt-1 text-xs text-forest-400">Scénarios</p>
             </div>
             <div className="rounded-2xl border border-white/10 bg-forest-900/60 p-4 text-center">
@@ -741,10 +741,10 @@ function StatsView({ corpusStats, gesicaStats, fulltextStats, scenarios, statsBy
                 Par scénario
               </h3>
               <div className="space-y-1.5">
-                {scenarios && scenarios.length > 0 ? (() => {
-                  const maxCount = Math.max(...scenarios.map(s => s.articleCount));
-                  return scenarios
-                    .filter(s => s.articleCount > 0)
+                {scenarios && scenarios.some(s => !s.hidden && s.articleCount > 0) ? (() => {
+                  const visible = scenarios.filter(s => !s.hidden && s.articleCount > 0);
+                  const maxCount = Math.max(...visible.map(s => s.articleCount));
+                  return visible
                     .sort((a, b) => b.articleCount - a.articleCount)
                     .map(s => (
                       <div key={s.id} className="group">
