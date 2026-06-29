@@ -3534,7 +3534,11 @@ ${llm.future_research ? `<h3>Directions de recherche futures</h3><p class="llm-t
     }
   };
 
-  const total = briefData ? (briefData.corpus_stats.total || 1) : 1;
+  // Les distributions (types d'étude / sources / niveaux de preuve) sont calculées
+  // sur le SOUS-ENSEMBLE PERTINENT (≥ seuil), pas le corpus entier : on divise donc
+  // par `relevant`, sinon les % étaient minuscules et le reste « Autres » gonflait
+  // artificiellement (corpus entier − comptes pertinents).
+  const relevant = briefData ? ((briefData.corpus_stats.relevant ?? briefData.corpus_stats.total) || 1) : 1;
   const meta = llmData?._meta;
   const hasLlmContent = !!(llmData?.executive_summary || (llmData?.key_findings?.length ?? 0) > 0);
 
@@ -3644,13 +3648,13 @@ ${llm.future_research ? `<h3>Directions de recherche futures</h3><p class="llm-t
                 {(() => {
                   // Toutes les catégories + « Autres » (reste) pour que la somme corresponde au corpus
                   const top = briefData.study_design_distribution;
-                  const remainder = total - top.reduce((s,d)=>s+d.count,0);
+                  const remainder = relevant - top.reduce((s,d)=>s+d.count,0);
                   const rows = remainder > 0 ? [...top, {design:'Autres', count:remainder}] : top;
                   return rows.map(d=>(
                   <div key={d.design} className="flex items-center gap-2 text-[10px]">
                     <span className="w-28 text-white/60 truncate">{d.design}</span>
                     <div className="flex-1 h-1 bg-white/5 rounded-full overflow-hidden">
-                      <div className="h-full bg-brand-500 rounded-full" style={{width:`${Math.round(d.count/total*100)}%`}}/>
+                      <div className="h-full bg-brand-500 rounded-full" style={{width:`${Math.round(d.count/relevant*100)}%`}}/>
                     </div>
                     <span className="w-7 text-right text-white/40 font-mono">{d.count}</span>
                   </div>
@@ -3663,13 +3667,13 @@ ${llm.future_research ? `<h3>Directions de recherche futures</h3><p class="llm-t
               <div className="space-y-1.5">
                 {(() => {
                   const top = (briefData.source_distribution ?? []);
-                  const remainder = total - top.reduce((s,d)=>s+d.count,0);
+                  const remainder = relevant - top.reduce((s,d)=>s+d.count,0);
                   const rows = remainder > 0 ? [...top, {source:'Autres', count:remainder}] : top;
                   return rows.map(d=>(
                   <div key={d.source} className="flex items-center gap-2 text-[10px]">
                     <span className="w-28 text-white/60 truncate capitalize">{d.source}</span>
                     <div className="flex-1 h-1 bg-white/5 rounded-full overflow-hidden">
-                      <div className="h-full bg-blue-500/60 rounded-full" style={{width:`${Math.round(d.count/total*100)}%`}}/>
+                      <div className="h-full bg-blue-500/60 rounded-full" style={{width:`${Math.round(d.count/relevant*100)}%`}}/>
                     </div>
                     <span className="w-7 text-right text-white/40 font-mono">{d.count}</span>
                   </div>
@@ -3684,7 +3688,7 @@ ${llm.future_research ? `<h3>Directions de recherche futures</h3><p class="llm-t
                   <div key={d.level} className="flex items-center gap-2 text-[10px]">
                     <span className="w-28 text-white/60 truncate capitalize">{d.level}</span>
                     <div className="flex-1 h-1 bg-white/5 rounded-full overflow-hidden">
-                      <div className="h-full bg-gold-400/60 rounded-full" style={{width:`${Math.round(d.count/total*100)}%`}}/>
+                      <div className="h-full bg-gold-400/60 rounded-full" style={{width:`${Math.round(d.count/relevant*100)}%`}}/>
                     </div>
                     <span className="w-7 text-right text-white/40 font-mono">{d.count}</span>
                   </div>
