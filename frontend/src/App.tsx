@@ -1050,6 +1050,52 @@ function StatsView({ corpusStats, gesicaStats, fulltextStats, scenarios, statsBy
   );
 }
 
+// Actions recommandées — composant HOISTÉ (niveau module) : identité stable, pas de
+// remontage à chaque rendu. C'est le seul endroit qui porte des hooks, ce qui permet
+// à renderScenarioCard d'être une simple fonction inline (cf. correctif double-clic).
+function RecommendedActions({ scenario, isUser }: { scenario: GesicaScenario; isUser: boolean }) {
+  const [fetchedActions, setFetchedActions] = React.useState<string[] | null>(null);
+  const [actionsGenerating, setActionsGenerating] = React.useState(false);
+  React.useEffect(() => {
+    if (!isUser) return;
+    if (scenario.recommendedActions && scenario.recommendedActions.length > 0) return;
+    let cancelled = false;
+    const tick = (tries: number) => {
+      getRecommendedActions(scenario.id).then(r => {
+        if (cancelled) return;
+        if (r.status === "ready") { setFetchedActions(r.actions); setActionsGenerating(false); }
+        else if (r.status === "generating" && tries < 20) { setActionsGenerating(true); setTimeout(() => tick(tries + 1), 4000); }
+        else { setFetchedActions([]); setActionsGenerating(false); }
+      }).catch(() => { if (!cancelled) { setFetchedActions([]); setActionsGenerating(false); } });
+    };
+    tick(0);
+    return () => { cancelled = true; };
+  }, [isUser, scenario.id]);
+  const actions = (scenario.recommendedActions && scenario.recommendedActions.length > 0)
+    ? scenario.recommendedActions
+    : (fetchedActions ?? []);
+  if (!(actions.length > 0 || actionsGenerating)) return null;
+  return (
+    <div>
+      <h4 className="mb-2 text-xs font-semibold uppercase tracking-wider text-forest-400">Actions recommandées</h4>
+      {actions.length > 0 ? (
+        <ul className="space-y-1.5">
+          {actions.map((action, i) => (
+            <li key={i} className="flex items-start gap-2 text-sm text-white/80">
+              <span className="mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full bg-brand-400" />
+              {action}
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <p className="text-xs text-forest-400 flex items-center gap-1.5">
+          <RefreshCw size={11} className="animate-spin" /> Génération des actions recommandées depuis l'évidence…
+        </p>
+      )}
+    </div>
+  );
+}
+
 function ScenariosView({
   scenarios,
   loading,
@@ -2171,38 +2217,17 @@ function ScenariosView({
     );
   };
 
-  const ScenarioCard = ({ scenario }: { scenario: GesicaScenario }) => {
+  // Rendue comme FONCTION inline (et non composant imbriqué) : ainsi elle n'est pas
+  // remontée à chaque rendu de ScenariosView — ce remont permanent faisait « perdre »
+  // le 1er clic du bouton dossier (il fallait cliquer deux fois). Les hooks vivent
+  // désormais dans le composant hoisté RecommendedActions.
+  const renderScenarioCard = (scenario: GesicaScenario) => {
     const isExpanded = expandedId === scenario.id;
     const hasArticles = scenario.articleCount > 0;
     const isUser = (scenario as any).is_user_scenario === true || scenario.cluster === "user";
 
-    // Actions recommandées : pour les scénarios utilisateur, génération paresseuse
-    // (auto, en cache) déclenchée à l'ouverture de la carte.
-    const [fetchedActions, setFetchedActions] = React.useState<string[] | null>(null);
-    const [actionsGenerating, setActionsGenerating] = React.useState(false);
-    React.useEffect(() => {
-      if (!isExpanded || !isUser) return;
-      if (scenario.recommendedActions && scenario.recommendedActions.length > 0) return;
-      if (fetchedActions !== null) return;
-      let cancelled = false;
-      const tick = (tries: number) => {
-        getRecommendedActions(scenario.id).then(r => {
-          if (cancelled) return;
-          if (r.status === "ready") { setFetchedActions(r.actions); setActionsGenerating(false); }
-          else if (r.status === "generating" && tries < 20) { setActionsGenerating(true); setTimeout(() => tick(tries + 1), 4000); }
-          else { setFetchedActions([]); setActionsGenerating(false); }
-        }).catch(() => { if (!cancelled) { setFetchedActions([]); setActionsGenerating(false); } });
-      };
-      tick(0);
-      return () => { cancelled = true; };
-    }, [isExpanded, isUser, scenario.id]);
-
-    const actions = (scenario.recommendedActions && scenario.recommendedActions.length > 0)
-      ? scenario.recommendedActions
-      : (fetchedActions ?? []);
-
     return (
-      <div className={`rounded-3xl border p-5 shadow-xl transition ${
+      <div key={scenario.id} className={`rounded-3xl border p-5 shadow-xl transition ${
         hasArticles ? "border-white/10 bg-white/5" : "border-white/5 bg-white/2 opacity-60"
       }`}>
         <div
@@ -2323,26 +2348,8 @@ function ScenariosView({
 
         {isExpanded && (
           <div className="mt-4 space-y-4 border-t border-white/10 pt-4">
-            {/* Actions recommandées */}
-            {(actions.length > 0 || actionsGenerating) && (
-              <div>
-                <h4 className="mb-2 text-xs font-semibold uppercase tracking-wider text-forest-400">Actions recommandées</h4>
-                {actions.length > 0 ? (
-                  <ul className="space-y-1.5">
-                    {actions.map((action, i) => (
-                      <li key={i} className="flex items-start gap-2 text-sm text-white/80">
-                        <span className="mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full bg-brand-400" />
-                        {action}
-                      </li>
-                    ))}
-                  </ul>
-                ) : (
-                  <p className="text-xs text-forest-400 flex items-center gap-1.5">
-                    <RefreshCw size={11} className="animate-spin" /> Génération des actions recommandées depuis l'évidence…
-                  </p>
-                )}
-              </div>
-            )}
+            {/* Actions recommandées (hooks isolés dans le composant hoisté) */}
+            <RecommendedActions scenario={scenario} isUser={isUser} />
 
             {/* Modèle Prédictif — carte générique (scénarios utilisateur) */}
             {isUser && (
@@ -2855,7 +2862,7 @@ function ScenariosView({
                 <RefreshCw size={8} className="inline mr-1" />Living Review
               </span>
             </div>
-            {clusterScenarios.map(s => <ScenarioCard key={s.id} scenario={s} />)}
+            {clusterScenarios.map(s => renderScenarioCard(s))}
           </div>
         );
       })}
@@ -2940,7 +2947,7 @@ function ScenariosView({
                   <p className="text-xs text-white/30 italic">Aucun scénario dans ce dossier</p>
                 )}
                 {folderScenarios.map(s => (
-                  <ScenarioCard key={s.id} scenario={s} />
+                  renderScenarioCard(s)
                 ))}
               </div>
             );
@@ -2951,7 +2958,7 @@ function ScenariosView({
             <div className="space-y-2">
               <h3 className="text-xs font-semibold text-gold-400 uppercase tracking-widest">Épinglés</h3>
               {userScenarios.filter(s => s.pinned && !(s as any).folder_id).map(s => (
-                <ScenarioCard key={s.id} scenario={s} />
+                renderScenarioCard(s)
               ))}
             </div>
           )}
@@ -2961,7 +2968,7 @@ function ScenariosView({
             <div className="space-y-2">
               <h3 className="text-xs font-semibold text-white/40 uppercase tracking-widest">Recherches récentes</h3>
               {userScenarios.filter(s => !s.pinned && !(s as any).folder_id).map(s => (
-                <ScenarioCard key={s.id} scenario={s} />
+                renderScenarioCard(s)
               ))}
             </div>
           )}
