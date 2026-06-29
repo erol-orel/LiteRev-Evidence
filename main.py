@@ -13471,7 +13471,8 @@ def monitor_scenario_model(scenario_id: str, window: int = 7) -> dict[str, Any]:
     try:
         mon = model_trainer.compute_monitoring(
             pipeline, recent, task_type, classes=classes,
-            positive_class=positive_class, target_values=target_values)
+            positive_class=positive_class, target_values=target_values,
+            alert_thresholds=alert_thresholds)
     except Exception as e:
         logger.error(f"Monitor score {scenario_id}: {e}", exc_info=True)
         return {"status": "error", "status_color": "unavailable",
