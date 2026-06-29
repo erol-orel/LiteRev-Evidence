@@ -9252,9 +9252,27 @@ def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict
     try:
         # ── Étape 1 : Ingestion multi-sources ────────────────────────────────────
         update_step("ingest", "running")
-        ingested = _run_user_scenario_populate(
-            scenario_id, query, filters, max_results, _pipeline_callback=ingest_callback
-        )
+        # Si le scénario a DÉJÀ été peuplé (populate terminé — typiquement par la
+        # recherche, ensuite sauvegardée en scénario), on NE RE-FÉDÈRE PAS. Une 2ᵉ
+        # fédération (live, non déterministe) recalculerait le corpus booléen sur une
+        # base entre-temps enrichie par les threads d'arrière-plan de la 1ʳᵉ
+        # fédération → le compteur dérivait (recherche = 7, carte = 8). On réutilise
+        # le corpus existant et on passe directement à l'enrichissement.
+        with engine.connect() as _psc:
+            _ps_row = _psc.execute(text(
+                "SELECT populate_status, "
+                "(SELECT COUNT(DISTINCT document_id) FROM article_scenarios WHERE scenario_id = :sid) AS n "
+                "FROM user_scenarios WHERE id = :sid"
+            ), {"sid": scenario_id}).mappings().first()
+        _corpus_ready = bool(_ps_row and _ps_row.get("populate_status") == "done" and (_ps_row.get("n") or 0) > 0)
+        if _corpus_ready:
+            ingested = int(_ps_row["n"])
+            logger.info(f"Pipeline {scenario_id}: corpus déjà construit ({ingested} docs, populate=done) — "
+                        f"fédération sautée pour éviter la dérive du compteur.")
+        else:
+            ingested = _run_user_scenario_populate(
+                scenario_id, query, filters, max_results, _pipeline_callback=ingest_callback
+            )
         # `ingested` from populate is a raw cumulative counter (includes ON CONFLICT duplicates
         # and DB-cache articles). Get the real unique count from DB as the source of truth.
         with engine.connect() as _ic:
