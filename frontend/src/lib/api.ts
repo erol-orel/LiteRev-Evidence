@@ -2761,6 +2761,14 @@ export interface ModelSpecResponse {
   outcome?: { name?: string; machine_name?: string; task_type?: string; unit?: string; best_article?: ProvArticle | null };
   features?: Array<{ name?: string; machine_name?: string; dtype?: string; source?: string; importance?: string; best_article?: ProvArticle | null }>;
   algorithm?: { family?: string; metric?: string; best_article?: ProvArticle | null };
+  // Modalités d'alerte (seuils green/orange/red) enrichies côté serveur : chaque
+  // niveau porte l'article source le plus pertinent + la liste résolue, pour lier
+  // la modalité aux articles du pool pertinent qui la justifient.
+  alert_thresholds?: Record<string, {
+    label?: string; range?: string; rationale?: string; description?: string;
+    best_article?: ProvArticle | null;
+    provenance_articles?: ProvArticle[];
+  }>;
   provenance_index?: Record<string, ProvArticle>;
   validated?: boolean;
   message?: string;
