@@ -6881,38 +6881,54 @@ def get_evidence_brief_pdf(scenario_id: str):
 
     meta = _get_db_gesica_scenario_or_404(scenario_id)
 
-    # Récupérer les données
+    # Récupérer les données. Comme le panneau Evidences à l'écran, tout porte sur
+    # le SOUS-ENSEMBLE PERTINENT (≥ seuil sémantique, via article_scenarios), pas
+    # le corpus complet : on garde « total corpus » comme contexte seulement.
+    eff_thr = _get_scenario_threshold(scenario_id)
     with engine.connect() as conn:
         corpus_stats = conn.execute(text("""
             SELECT
-                COUNT(*) AS total,
-                SUM(CASE WHEN is_duplicate IS NOT TRUE THEN 1 ELSE 0 END) AS unique_docs,
-                GREATEST(1900, MIN(year)) AS year_min, MAX(year) AS year_max,
-                SUM(CASE WHEN screening_status = 'included' THEN 1 ELSE 0 END) AS included,
-                SUM(CASE WHEN pico_json IS NOT NULL THEN 1 ELSE 0 END) AS with_pico
-            FROM literature_document
-            WHERE project_context = 'literev' AND scenario_type = :sid
-        """), {"sid": scenario_id}).mappings().first()
+                COUNT(*) FILTER (WHERE d.is_duplicate IS NOT TRUE) AS total,
+                COUNT(*) FILTER (WHERE d.is_duplicate IS NOT TRUE
+                    AND COALESCE(ars.similarity_score, 0) >= :thr) AS relevant,
+                GREATEST(1900, MIN(d.year) FILTER (WHERE d.is_duplicate IS NOT TRUE
+                    AND COALESCE(ars.similarity_score, 0) >= :thr)) AS year_min,
+                MAX(d.year) FILTER (WHERE d.is_duplicate IS NOT TRUE
+                    AND COALESCE(ars.similarity_score, 0) >= :thr) AS year_max,
+                COUNT(*) FILTER (WHERE d.is_duplicate IS NOT TRUE
+                    AND COALESCE(ars.similarity_score, 0) >= :thr
+                    AND d.screening_status = 'included') AS included,
+                COUNT(*) FILTER (WHERE d.is_duplicate IS NOT TRUE
+                    AND COALESCE(ars.similarity_score, 0) >= :thr
+                    AND d.pico_json IS NOT NULL) AS with_pico
+            FROM article_scenarios ars
+            JOIN literature_document d ON d.id = ars.document_id
+            WHERE d.project_context = 'literev' AND ars.scenario_id = :sid
+        """), {"sid": scenario_id, "thr": eff_thr}).mappings().first()
 
         top_articles = conn.execute(text("""
-            SELECT title, year, journal, authors,
-                   COALESCE((pico_json->>'study_design'), study_design, 'N/A') AS design
-            FROM literature_document
-            WHERE project_context = 'literev' AND scenario_type = :sid
-              AND is_duplicate IS NOT TRUE AND abstract IS NOT NULL
-            ORDER BY quality_score DESC NULLS LAST, year DESC NULLS LAST
+            SELECT d.title, d.year, d.journal, d.authors,
+                   COALESCE((d.pico_json->>'study_design'), d.study_design, 'N/A') AS design
+            FROM article_scenarios ars
+            JOIN literature_document d ON d.id = ars.document_id
+            WHERE d.project_context = 'literev' AND ars.scenario_id = :sid
+              AND d.is_duplicate IS NOT TRUE AND d.abstract IS NOT NULL
+              AND COALESCE(ars.similarity_score, 0) >= :thr
+            ORDER BY d.quality_score DESC NULLS LAST, d.year DESC NULLS LAST
             LIMIT 100000
-        """), {"sid": scenario_id}).mappings().all()
+        """), {"sid": scenario_id, "thr": eff_thr}).mappings().all()
 
         study_designs = conn.execute(text("""
             SELECT
-                COALESCE((pico_json->>'study_design'), study_design, 'Non classifié') AS design,
+                COALESCE((d.pico_json->>'study_design'), d.study_design, 'Non classifié') AS design,
                 COUNT(*) AS n
-            FROM literature_document
-            WHERE project_context = 'literev' AND scenario_type = :sid
-              AND is_duplicate IS NOT TRUE
+            FROM article_scenarios ars
+            JOIN literature_document d ON d.id = ars.document_id
+            WHERE d.project_context = 'literev' AND ars.scenario_id = :sid
+              AND d.is_duplicate IS NOT TRUE
+              AND COALESCE(ars.similarity_score, 0) >= :thr
             GROUP BY 1 ORDER BY 2 DESC LIMIT 8
-        """), {"sid": scenario_id}).mappings().all()
+        """), {"sid": scenario_id, "thr": eff_thr}).mappings().all()
 
     # Construire le PDF
     buffer = io.BytesIO()
@@ -6976,7 +6992,7 @@ def get_evidence_brief_pdf(scenario_id: str):
 
     # Stats corpus
     total = int(corpus_stats["total"] or 0)
-    unique = int(corpus_stats["unique_docs"] or 0)
+    relevant = int(corpus_stats["relevant"] or 0)
     included = int(corpus_stats["included"] or 0)
     with_pico = int(corpus_stats["with_pico"] or 0)
     year_min = corpus_stats["year_min"] or "N/A"
@@ -6985,11 +7001,11 @@ def get_evidence_brief_pdf(scenario_id: str):
     story.append(Paragraph("Corpus documentaire", h2_style))
     stats_data = [
         ["Indicateur", "Valeur"],
-        ["Total articles identifiés", str(total)],
-        ["Articles uniques (après déduplication)", str(unique)],
+        ["Articles du corpus (uniques)", str(total)],
+        [f"Articles pertinents utilisés (≥ {eff_thr:.2f})", str(relevant)],
         ["Articles inclus (screening)", str(included) if included > 0 else "En attente de screening"],
-        ["Articles avec extraction PICO", str(with_pico)],
-        ["Période couverte", f"{year_min} – {year_max}"],
+        ["Articles pertinents avec PICO", str(with_pico)],
+        ["Période couverte (pertinents)", f"{year_min} – {year_max}"],
     ]
     stats_table = Table(stats_data, colWidths=[10*cm, 6*cm])
     stats_table.setStyle(TableStyle([
@@ -11279,35 +11295,51 @@ def get_user_scenario_evidence_brief_pdf(scenario_id: str):
     from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, HRFlowable
     import io as _io
 
+    # Comme le panneau Evidences à l'écran : tout porte sur le SOUS-ENSEMBLE
+    # PERTINENT (≥ seuil sémantique, via article_scenarios), pas le corpus complet.
+    eff_thr = _get_scenario_threshold(scenario_id)
     with engine.connect() as _conn:
         corpus_stats = _conn.execute(text("""
             SELECT
-                COUNT(*) AS total,
-                SUM(CASE WHEN is_duplicate IS NOT TRUE THEN 1 ELSE 0 END) AS unique_docs,
-                GREATEST(1900, MIN(year)) AS year_min, MAX(year) AS year_max,
-                SUM(CASE WHEN screening_status = 'included' THEN 1 ELSE 0 END) AS included,
-                SUM(CASE WHEN pico_json IS NOT NULL THEN 1 ELSE 0 END) AS with_pico
-            FROM literature_document
-            WHERE project_context = 'literev' AND scenario_type = :sid
-        """), {"sid": scenario_id}).mappings().first()
+                COUNT(*) FILTER (WHERE d.is_duplicate IS NOT TRUE) AS total,
+                COUNT(*) FILTER (WHERE d.is_duplicate IS NOT TRUE
+                    AND COALESCE(ars.similarity_score, 0) >= :thr) AS relevant,
+                GREATEST(1900, MIN(d.year) FILTER (WHERE d.is_duplicate IS NOT TRUE
+                    AND COALESCE(ars.similarity_score, 0) >= :thr)) AS year_min,
+                MAX(d.year) FILTER (WHERE d.is_duplicate IS NOT TRUE
+                    AND COALESCE(ars.similarity_score, 0) >= :thr) AS year_max,
+                COUNT(*) FILTER (WHERE d.is_duplicate IS NOT TRUE
+                    AND COALESCE(ars.similarity_score, 0) >= :thr
+                    AND d.screening_status = 'included') AS included,
+                COUNT(*) FILTER (WHERE d.is_duplicate IS NOT TRUE
+                    AND COALESCE(ars.similarity_score, 0) >= :thr
+                    AND d.pico_json IS NOT NULL) AS with_pico
+            FROM article_scenarios ars
+            JOIN literature_document d ON d.id = ars.document_id
+            WHERE d.project_context = 'literev' AND ars.scenario_id = :sid
+        """), {"sid": scenario_id, "thr": eff_thr}).mappings().first()
         top_articles = _conn.execute(text("""
-            SELECT title, year, journal, authors,
-                   COALESCE((pico_json->>'study_design'), study_design, 'N/A') AS design
-            FROM literature_document
-            WHERE project_context = 'literev' AND scenario_type = :sid
-              AND is_duplicate IS NOT TRUE AND abstract IS NOT NULL
-            ORDER BY quality_score DESC NULLS LAST, year DESC NULLS LAST
+            SELECT d.title, d.year, d.journal, d.authors,
+                   COALESCE((d.pico_json->>'study_design'), d.study_design, 'N/A') AS design
+            FROM article_scenarios ars
+            JOIN literature_document d ON d.id = ars.document_id
+            WHERE d.project_context = 'literev' AND ars.scenario_id = :sid
+              AND d.is_duplicate IS NOT TRUE AND d.abstract IS NOT NULL
+              AND COALESCE(ars.similarity_score, 0) >= :thr
+            ORDER BY d.quality_score DESC NULLS LAST, d.year DESC NULLS LAST
             LIMIT 100000
-        """), {"sid": scenario_id}).mappings().all()
+        """), {"sid": scenario_id, "thr": eff_thr}).mappings().all()
         study_designs = _conn.execute(text("""
             SELECT
-                COALESCE((pico_json->>'study_design'), study_design, 'Non classifié') AS design,
+                COALESCE((d.pico_json->>'study_design'), d.study_design, 'Non classifié') AS design,
                 COUNT(*) AS n
-            FROM literature_document
-            WHERE project_context = 'literev' AND scenario_type = :sid
-              AND is_duplicate IS NOT TRUE
+            FROM article_scenarios ars
+            JOIN literature_document d ON d.id = ars.document_id
+            WHERE d.project_context = 'literev' AND ars.scenario_id = :sid
+              AND d.is_duplicate IS NOT TRUE
+              AND COALESCE(ars.similarity_score, 0) >= :thr
             GROUP BY 1 ORDER BY 2 DESC LIMIT 8
-        """), {"sid": scenario_id}).mappings().all()
+        """), {"sid": scenario_id, "thr": eff_thr}).mappings().all()
 
     _buf = _io.BytesIO()
     _doc = SimpleDocTemplate(_buf, pagesize=A4, rightMargin=2*cm, leftMargin=2*cm, topMargin=2*cm, bottomMargin=2*cm)
@@ -11327,16 +11359,17 @@ def get_user_scenario_evidence_brief_pdf(scenario_id: str):
     _story.append(HRFlowable(width="100%", thickness=2, color=_brand_green, spaceAfter=12))
 
     _total = int(corpus_stats["total"] or 0)
-    _unique = int(corpus_stats["unique_docs"] or 0)
+    _relevant = int(corpus_stats["relevant"] or 0)
     _included = int(corpus_stats["included"] or 0)
     _with_pico = int(corpus_stats["with_pico"] or 0)
     _year_min = corpus_stats["year_min"] or "N/A"
     _year_max = corpus_stats["year_max"] or "N/A"
 
     _story.append(Paragraph("Corpus documentaire", _h2_style))
-    _stats_data = [["Indicateur", "Valeur"], ["Total articles", str(_total)], ["Articles uniques", str(_unique)],
-                   ["Articles inclus", str(_included) if _included > 0 else "En attente"], ["Avec PICO", str(_with_pico)],
-                   ["Période", f"{_year_min} – {_year_max}"]]
+    _stats_data = [["Indicateur", "Valeur"], ["Articles du corpus (uniques)", str(_total)],
+                   [f"Articles pertinents utilisés (≥ {eff_thr:.2f})", str(_relevant)],
+                   ["Articles inclus", str(_included) if _included > 0 else "En attente"], ["Pertinents avec PICO", str(_with_pico)],
+                   ["Période (pertinents)", f"{_year_min} – {_year_max}"]]
     _st = Table(_stats_data, colWidths=[10*cm, 6*cm])
     _st.setStyle(TableStyle([("BACKGROUND", (0,0), (-1,0), _dark_green), ("TEXTCOLOR", (0,0), (-1,0), colors.white),
                               ("FONTNAME", (0,0), (-1,0), "Helvetica-Bold"), ("FONTSIZE", (0,0), (-1,-1), 9),

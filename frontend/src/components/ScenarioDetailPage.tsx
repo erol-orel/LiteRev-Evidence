@@ -3409,7 +3409,14 @@ function EvidencesSection({ scenarioId, detail }: { scenarioId: string; detail: 
       const b = briefData;
       const dups_pdf = b.corpus_stats.duplicates ?? 0;
       const uniqueTotal_pdf = b.corpus_stats.total - dups_pdf;
-      const total = uniqueTotal_pdf || 1;
+      // Le PDF reflète exactement les mêmes chiffres que le panneau Evidences à
+      // l'écran : stats clés ET distributions portent sur le SOUS-ENSEMBLE
+      // PERTINENT (≥ seuil sémantique), pas le corpus complet.
+      const relevant_pdf = b.corpus_stats.relevant ?? uniqueTotal_pdf;
+      const rTotal_pdf = relevant_pdf || 1;
+      const thr_pdf = b.corpus_stats.threshold ?? 0.45;
+      const picoRel_pdf = b.corpus_stats.relevant_with_pico ?? b.corpus_stats.with_pico ?? 0;
+      const ftRel_pdf = b.corpus_stats.relevant_with_fulltext ?? b.corpus_stats.with_fulltext ?? 0;
       const html = `<!DOCTYPE html><html><head><meta charset="utf-8">
 <title>Evidences : ${detail.title}</title>
 <style>
@@ -3418,7 +3425,7 @@ function EvidencesSection({ scenarioId, detail }: { scenarioId: string; detail: 
   h2{color:#0A3621;margin-top:32px;font-size:1.05em;text-transform:uppercase;letter-spacing:.06em;border-bottom:1px solid #d0e8d8;padding-bottom:4px}
   h3{color:#2d7a52;font-size:.95em;margin-top:16px}
   .meta{color:#666;font-size:.82em;margin-bottom:24px}
-  .stat-grid{display:grid;grid-template-columns:repeat(7,1fr);gap:8px;margin:14px 0}
+  .stat-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin:14px 0}
   .stat{background:#f0f7f3;border:1px solid #aed4bc;border-radius:8px;padding:10px;text-align:center}
   .stat-val{font-size:1.6em;font-weight:700;color:#0A3621}
   .stat-sub{font-size:.7em;color:#888;font-family:monospace}
@@ -3477,28 +3484,26 @@ function EvidencesSection({ scenarioId, detail }: { scenarioId: string; detail: 
 
 <h2>Statistiques du Corpus</h2>
 <div class="stat-grid">
-  <div class="stat"><div class="stat-val">${b.corpus_stats.total}</div>${dups_pdf>0?`<div class="stat-sub">${dups_pdf} doublons</div>`:''}<div class="stat-label">Articles total</div></div>
-  <div class="stat"><div class="stat-val">${uniqueTotal_pdf}</div><div class="stat-label">Uniques</div></div>
-  <div class="stat"><div class="stat-val" style="color:#2d7a52">${b.corpus_stats.included}</div><div class="stat-sub">${Math.round(b.corpus_stats.included/total*100)}%</div><div class="stat-label">Inclus</div></div>
-  <div class="stat"><div class="stat-val" style="color:#dc2626">${b.corpus_stats.excluded}</div><div class="stat-sub">${Math.round(b.corpus_stats.excluded/total*100)}%</div><div class="stat-label">Exclus</div></div>
-  <div class="stat"><div class="stat-val" style="color:#888">${b.corpus_stats.pending ?? (uniqueTotal_pdf - b.corpus_stats.included - b.corpus_stats.excluded)}</div><div class="stat-label">En attente</div></div>
-  <div class="stat"><div class="stat-val" style="color:#d97706">${b.corpus_stats.with_pico}</div><div class="stat-sub">${Math.round(b.corpus_stats.pico_coverage_pct ?? b.corpus_stats.with_pico/total*100)}%</div><div class="stat-label">PICO extraits</div></div>
-  <div class="stat"><div class="stat-val" style="color:#3b82f6">${b.corpus_stats.with_fulltext ?? 0}</div><div class="stat-label">Texte intégral</div></div>
+  <div class="stat"><div class="stat-val">${uniqueTotal_pdf}</div><div class="stat-sub">${dups_pdf>0?`dont ${dups_pdf} doublons`:'uniques'}</div><div class="stat-label">Articles (corpus)</div></div>
+  <div class="stat"><div class="stat-val" style="color:#2d7a52">${relevant_pdf}</div><div class="stat-sub">seuil ≥ ${thr_pdf.toFixed(2)} · ${Math.round(relevant_pdf/(uniqueTotal_pdf||1)*100)}% du corpus</div><div class="stat-label">Pertinents (utilisés)</div></div>
+  <div class="stat"><div class="stat-val" style="color:#d97706">${picoRel_pdf}</div><div class="stat-sub">${Math.round(picoRel_pdf/rTotal_pdf*100)}% des pertinents</div><div class="stat-label">PICO extraits</div></div>
+  <div class="stat"><div class="stat-val" style="color:#3b82f6">${ftRel_pdf}</div><div class="stat-sub">${Math.round(ftRel_pdf/rTotal_pdf*100)}% des pertinents</div><div class="stat-label">Texte intégral</div></div>
 </div>
+${(b.corpus_stats.included||b.corpus_stats.excluded||(b.corpus_stats.pending??0)) ? `<p class="meta">Screening (corpus complet) : <strong>${b.corpus_stats.included}</strong> inclus · <strong>${b.corpus_stats.excluded}</strong> exclus · <strong>${b.corpus_stats.pending ?? Math.max(0, uniqueTotal_pdf - b.corpus_stats.included - b.corpus_stats.excluded)}</strong> en attente</p>` : ''}
 ${b.corpus_stats.year_min && b.corpus_stats.year_max ? `<p class="meta">Couverture : <strong>${b.corpus_stats.year_min} – ${b.corpus_stats.year_max}</strong>${b.corpus_stats.avg_citations != null ? ` · Citations moy. : <strong>${b.corpus_stats.avg_citations.toFixed(1)}</strong>` : ''}</p>` : ''}
 
 <div class="dist-grid">
   <div class="dist-box">
     <div class="dist-title">Types d'étude</div>
-    ${(()=>{const top=b.study_design_distribution;const rem=total-top.reduce((s,d)=>s+d.count,0);const rows=rem>0?[...top,{design:'Autres',count:rem}]:top;return rows.map(d=>`<div class="bar-row"><span class="bar-label">${d.design}</span><div class="bar-track"><div class="bar-fill-green" style="width:${Math.round(d.count/total*100)}%"></div></div><span class="bar-count">${d.count}</span></div>`).join('');})()}
+    ${(()=>{const top=b.study_design_distribution;const rem=relevant_pdf-top.reduce((s,d)=>s+d.count,0);const rows=rem>0?[...top,{design:'Autres',count:rem}]:top;return rows.map(d=>`<div class="bar-row"><span class="bar-label">${d.design}</span><div class="bar-track"><div class="bar-fill-green" style="width:${Math.round(d.count/rTotal_pdf*100)}%"></div></div><span class="bar-count">${d.count}</span></div>`).join('');})()}
   </div>
   <div class="dist-box">
     <div class="dist-title">Sources</div>
-    ${(()=>{const top=(b.source_distribution??[]);const rem=total-top.reduce((s,d)=>s+d.count,0);const rows=rem>0?[...top,{source:'Autres',count:rem}]:top;return rows.map(d=>`<div class="bar-row"><span class="bar-label">${d.source}</span><div class="bar-track"><div class="bar-fill-blue" style="width:${Math.round(d.count/total*100)}%"></div></div><span class="bar-count">${d.count}</span></div>`).join('');})()}
+    ${(()=>{const top=(b.source_distribution??[]);const rem=relevant_pdf-top.reduce((s,d)=>s+d.count,0);const rows=rem>0?[...top,{source:'Autres',count:rem}]:top;return rows.map(d=>`<div class="bar-row"><span class="bar-label">${d.source}</span><div class="bar-track"><div class="bar-fill-blue" style="width:${Math.round(d.count/rTotal_pdf*100)}%"></div></div><span class="bar-count">${d.count}</span></div>`).join('');})()}
   </div>
   <div class="dist-box">
     <div class="dist-title">Niveaux de preuve</div>
-    ${(b.evidence_level_distribution??[]).slice(0,6).map(d=>`<div class="bar-row"><span class="bar-label">${d.level}</span><div class="bar-track"><div class="bar-fill-gold" style="width:${Math.round(d.count/total*100)}%"></div></div><span class="bar-count">${d.count}</span></div>`).join('')}
+    ${(b.evidence_level_distribution??[]).slice(0,6).map(d=>`<div class="bar-row"><span class="bar-label">${d.level}</span><div class="bar-track"><div class="bar-fill-gold" style="width:${Math.round(d.count/rTotal_pdf*100)}%"></div></div><span class="bar-count">${d.count}</span></div>`).join('')}
   </div>
 </div>
 
