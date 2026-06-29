@@ -3871,9 +3871,7 @@ export default function App() {
                       </div>
                     )}
                     <p className="mt-4 text-[11px] leading-snug text-white/30">
-                      {includeLive
-                        ? "Les résultats s'afficheront une fois la récupération (base locale + 8 sources en direct), le scoring et l'affinage terminés — pour des compteurs et un classement cohérents et stables."
-                        : "Les résultats s'afficheront une fois la récupération et le scoring terminés."}
+                      Les résultats s'afficheront une fois la récupération et le scoring terminés.
                     </p>
                   </div>
                 );
