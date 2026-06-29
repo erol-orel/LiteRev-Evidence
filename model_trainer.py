@@ -474,8 +474,30 @@ def _level_from_value(v: float, orange: float | None, red: float | None) -> str:
     return "green"
 
 
+def _alert_bounds(alert_thresholds):
+    """(orange_lo, red_lo) déduits des SEUILS LITTÉRAIRES (alert_thresholds) via leurs
+    champs 'range' ('< 5 /100k', '5–10', '> 10 cas pour 100 000', …). Renvoie
+    (None, None) si introuvable. On retire le dénominateur d'unité ('/100k', 'pour
+    100 000') pour ne garder que les bornes numériques."""
+    if not alert_thresholds:
+        return None, None
+    import re as _re
+    def _nums(band):
+        raw = (alert_thresholds.get(band) or {}).get("range") or ""
+        s = str(raw).split("/")[0]
+        s = _re.split(r"(?i)\b(?:pour|per|par)\b", s)[0]
+        return [float(x) for x in _re.findall(r"\d+(?:\.\d+)?", s)]
+    g, o, rd = _nums("green"), _nums("orange"), _nums("red")
+    orange_lo = min(o) if o else (max(g) if g else None)
+    red_lo = max(o) if o else (min(rd) if rd else None)
+    if orange_lo is not None and red_lo is not None and red_lo < orange_lo:
+        orange_lo, red_lo = red_lo, orange_lo
+    return orange_lo, red_lo
+
+
 def compute_monitoring(pipeline, recent_df, task_type: str, classes: list | None = None,
-                       positive_class: str | None = None, target_values=None) -> dict:
+                       positive_class: str | None = None, target_values=None,
+                       alert_thresholds=None) -> dict:
     """
     Score les lignes récentes avec le modèle entraîné et en déduit un niveau
     d'alerte (green/orange/red). Pur/testable.
@@ -491,14 +513,25 @@ def compute_monitoring(pipeline, recent_df, task_type: str, classes: list | None
     if task_type in ("regression", "count"):
         preds = np.asarray(pipeline.predict(recent_df), dtype=float)
         value = float(np.mean(preds))
-        lo = hi = None
-        if target_values is not None:
+        # PRIORITÉ aux seuils LITTÉRAIRES (alert_thresholds). Les tertiles (p33/p66)
+        # des données d'entraînement ne servent QUE de repli : sinon une valeur SOUS
+        # le seuil « Normal » pouvait être classée « Tension » juste parce qu'elle
+        # dépassait le 33ᵉ percentile des données (bug 2.892/100k → « Tension »
+        # alors que Normal = < 5).
+        lo, hi = _alert_bounds(alert_thresholds)
+        bands_source = "literature" if (lo is not None and hi is not None) else None
+        if (lo is None or hi is None) and target_values is not None:
             tv = np.asarray(target_values, dtype=float)
             tv = tv[~np.isnan(tv)]
             if len(tv) >= 5:
-                lo, hi = float(np.quantile(tv, 0.33)), float(np.quantile(tv, 0.66))
+                if lo is None:
+                    lo = float(np.quantile(tv, 0.33))
+                if hi is None:
+                    hi = float(np.quantile(tv, 0.66))
+                bands_source = bands_source or "data_quantiles"
         return {"kind": "value", "value": value, "level": _level_from_value(value, lo, hi),
-                "bands": {"orange": lo, "red": hi}, "n_scored": n}
+                "bands": {"orange": lo, "red": hi}, "n_scored": n,
+                "bands_source": bands_source}
 
     idx = positive_index(classes, positive_class)
     if hasattr(pipeline, "predict_proba"):
