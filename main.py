@@ -1757,6 +1757,7 @@ def search(payload: SearchIn) -> dict[str, Any]:
         "prospero": "PROSPERO",
         "cochrane": "Cochrane",
         "medrxiv": "medRxiv", "biorxiv": "bioRxiv",
+        "preprint": "Preprints", "preprints": "Preprints",
         "autre": "Autre",
     }
 
@@ -2110,6 +2111,35 @@ def _live_fetch_europepmc(query: str, max_results: int) -> list[dict]:
     return results
 
 
+def _live_fetch_preprints(query: str, max_results: int) -> list[dict]:
+    """Préprints (bioRxiv, medRxiv, Research Square, …) via Europe PMC (filtre SRC:PPR).
+    Europe PMC indexe les préprints AVEC recherche plein-texte par mots-clés — au
+    contraire de l'API biorxiv (dates/DOI uniquement) qu'utilisaient les anciens
+    scanners medRxiv/bioRxiv (peu/pas de résultats)."""
+    import requests as _req
+    results = []
+    try:
+        r = _req.get("https://www.ebi.ac.uk/europepmc/webservices/rest/search", params={
+            "query": f"({query}) AND (SRC:PPR)", "resultType": "lite",
+            "pageSize": min(max_results, 50), "format": "json",
+        }, headers={"User-Agent": "LiteRev/1.0 (mailto:api@literev.app)"}, timeout=10)
+        for item in r.json().get("resultList", {}).get("result", []):
+            results.append({
+                "title": item.get("title", ""),
+                "abstract": item.get("abstractText"),
+                "doi": item.get("doi"),
+                "year": int(item["pubYear"]) if item.get("pubYear", "").isdigit() else None,
+                "authors": item.get("authorString", "").split(", ")[:5] if item.get("authorString") else [],
+                "journal": item.get("journalTitle") or "Preprint",
+                "url": f"https://europepmc.org/article/{item.get('source','PPR')}/{item.get('id','')}",
+                "external_id": item.get("id"),
+                "source_name": "Preprints",
+            })
+    except Exception as _e:
+        logger.warning(f"_live_fetch_preprints error: {_e}")
+    return results
+
+
 def _live_fetch_pubmed_term(term: str, source_name: str, id_prefix: str, max_results: int) -> list[dict]:
     """Helper PubMed générique (esearch+esummary) avec un terme/filtre arbitraire.
     Sert de proxy pour les sources sans API libre (PROSPERO, Cochrane)."""
@@ -2259,13 +2289,10 @@ def _federated_live_search(
         ("OpenAlex", _live_fetch_openalex, general_query),
         ("Crossref", _live_fetch_crossref, general_query),
         ("EuropePMC", _live_fetch_europepmc, general_query),
-        ("medRxiv", _live_fetch_medrxiv, general_query),
-        ("bioRxiv", _live_fetch_biorxiv, general_query),
-        # PROSPERO/Cochrane sont proxyfiés via PubMed → leur passer la requête
-        # MeSH-optimisée (pubmed_query), pas la requête générale en langage naturel
-        # (sinon les filtres booléens composés matchent souvent 0).
-        ("PROSPERO", _live_fetch_prospero, pubmed_query),
-        ("Cochrane", _live_fetch_cochrane, pubmed_query),
+        # Préprints (bioRxiv/medRxiv/…) via Europe PMC (SRC:PPR) : recherche par
+        # mots-clés réelle. Remplace les scanners medRxiv/bioRxiv (dates seules) et
+        # les proxys PubMed PROSPERO/Cochrane (trompeurs et redondants avec PubMed).
+        ("Preprints", _live_fetch_preprints, general_query),
     ]
 
     import time as _t_fed
@@ -7624,7 +7651,7 @@ def list_folders() -> list[dict[str, Any]]:
             FROM user_scenario_folders f
             LEFT JOIN user_scenarios s ON s.folder_id = f.id
             GROUP BY f.id, f.name, f.color, f.sort_order, f.created_at
-            ORDER BY f.sort_order ASC, f.created_at ASC
+            ORDER BY f.sort_order ASC, f.created_at DESC
         """)).mappings().all()
     return [
         {
@@ -8566,65 +8593,70 @@ def _run_user_scenario_populate(
         return ("europepmc", count)
 
     def _fetch_preprints():
+        # Préprints (bioRxiv, medRxiv, Research Square, …) via Europe PMC (SRC:PPR) :
+        # recherche par mots-clés RÉELLE. L'API biorxiv ne fait que dates/DOI, d'où
+        # l'ancien scan des 90 derniers jours filtré côté client (~0 résultat).
         count = 0
         try:
-            import datetime as _dt
-            _date_to = _dt.date.today().isoformat()
-            _date_from = (_dt.date.today() - _dt.timedelta(days=90)).isoformat()
-            _query_words = set(query.lower().split())
-            for _server in ["medrxiv", "biorxiv"]:
-                _cursor = 0
-                _fetched = 0
-                while _fetched < min(max_results, max_results):
-                    _url = f"https://api.biorxiv.org/details/{_server}/{_date_from}/{_date_to}/{_cursor}/json"
-                    _r = _requests.get(_url, timeout=30)
-                    if _r.status_code != 200:
-                        break
-                    _data = _r.json()
-                    _collection = _data.get("collection", [])
-                    if not _collection:
-                        break
-                    for _p in _collection:
-                        _title = (_p.get("title") or "").strip()
-                        _abstract = (_p.get("abstract") or "").strip()
-                        _doi = _p.get("doi") or ""
-                        if not _title or not _doi:
-                            continue
-                        _combined = f"{_title} {_abstract}".lower()
-                        _matches = sum(1 for w in _query_words if len(w) > 3 and w in _combined)
-                        if _matches < 2:
-                            continue
-                        _year = None
-                        _date_str = _p.get("date") or ""
-                        if _date_str[:4].isdigit():
-                            _year = int(_date_str[:4])
-                        _content = f"{_title}\n\n{_abstract}".strip()
-                        if len(_content) < 30:
-                            continue
+            _pp_cursor = "*"
+            _pp_fetched = 0
+            _pp_query = f"({_boolean}) AND (SRC:PPR)"
+            while _pp_fetched < max_results:
+                if _time.time() >= _fed_deadline[0]:
+                    break  # budget fédération dépassé
+                _pp_resp = _requests.get(
+                    "https://www.ebi.ac.uk/europepmc/webservices/rest/search",
+                    params={"query": _pp_query, "format": "json", "pageSize": 100,
+                            "resultType": "core", "sort": "P_PDATE_D desc",
+                            "cursorMark": _pp_cursor},
+                    timeout=20,
+                )
+                _pp_resp.raise_for_status()
+                _pp_data = _pp_resp.json()
+                _pp_results = _pp_data.get("resultList", {}).get("result", [])
+                if not _pp_results:
+                    break
+                for res in _pp_results:
+                    doi = _normalize_doi(res.get("doi"))
+                    ext_id = res.get("id") or doi
+                    title = res.get("title") or ""
+                    if not ext_id or not title:
+                        continue
+                    abstract = res.get("abstractText")
+                    if abstract and abstract.startswith("<"):
                         try:
-                            _doc_id = _ingest_doc_direct(
-                                source=_server, title=_title, abstract=_abstract or None,
-                                year=_year, url=f"https://doi.org/{_doi}",
-                                external_id=f"{_server}:{_doi}", doi=_doi,
-                                source_type="preprint",
-                            )
-                            _link_to_scenario(_doc_id)
-                            count += 1
-                            _fetched += 1
-                            _inc(_server)
+                            import xml.etree.ElementTree as _ET3
+                            abstract = "".join(_ET3.fromstring(f"<root>{abstract}</root>").itertext()).strip()
                         except Exception:
-                            _inc(_server, 0, 1)
-                    _msgs = _data.get("messages", [])
-                    _total_srv = 0
-                    for _m in _msgs:
-                        if isinstance(_m, dict) and "total" in _m:
-                            _total_srv = int(_m["total"])
-                    if _fetched >= _total_srv or len(_collection) < 100:
-                        break
-                    _cursor += 100
-                    _time.sleep(0.5)
+                            pass
+                    year = None
+                    yt = res.get("pubYear")
+                    if yt and str(yt).isdigit():
+                        year = int(yt)
+                    url = (f"https://europepmc.org/article/{res.get('source','PPR')}/{res.get('id')}"
+                           if res.get("id") else (f"https://doi.org/{doi}" if doi else None))
+                    content_text = f"{title}\n\n{abstract or ''}".strip()
+                    if len(content_text) < 30:
+                        continue
+                    try:
+                        doc_id = _ingest_doc_direct(
+                            source="preprint", title=title, abstract=abstract or None,
+                            year=year, url=url, external_id=ext_id, doi=doi,
+                            source_type="preprint",
+                        )
+                        _link_to_scenario(doc_id)
+                        count += 1
+                        _inc("preprint")
+                    except Exception:
+                        _inc("preprint", 0, 1)
+                _pp_fetched += len(_pp_results)
+                _pp_next = _pp_data.get("nextCursorMark")
+                if not _pp_next or _pp_next == _pp_cursor or len(_pp_results) < 100:
+                    break
+                _pp_cursor = _pp_next
+                _time.sleep(0.3)
         except Exception as _e:
-            logger.warning(f"medRxiv/bioRxiv populate {scenario_id}: {_e}")
+            logger.warning(f"Préprints (Europe PMC) populate {scenario_id}: {_e}")
         return ("preprints", count)
 
     def _fetch_prospero():
@@ -8840,7 +8872,7 @@ def _run_user_scenario_populate(
     # Lancer toutes les sources en parallèle
     source_funcs = [
         _fetch_pubmed, _fetch_openalex, _fetch_crossref,
-        _fetch_europepmc, _fetch_preprints, _fetch_prospero, _fetch_cochrane,
+        _fetch_europepmc, _fetch_preprints,
     ]
     t_start = _time.time()
     if include_live:
@@ -8961,7 +8993,7 @@ def _run_user_scenario_populate(
                 "errors": errors,
                 "total_found": total_found,
                 "sources": _sources_final,
-                "message": f"{ingested} articles ingérés depuis 8 sources ({_src_summary}), {errors} erreurs.",
+                "message": f"{ingested} articles ingérés depuis 5 sources ({_src_summary}), {errors} erreurs.",
             }
 
         # Arrière-plan : cross-encoder (réordonne le sous-ensemble pertinent) puis

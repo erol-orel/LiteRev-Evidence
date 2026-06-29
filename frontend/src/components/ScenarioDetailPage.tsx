@@ -1031,7 +1031,7 @@ function CorpusSection({ scenarioId, threshold }: { scenarioId: string; detail: 
       <div className="rounded-2xl border border-gold-500/20 bg-gold-500/5 px-4 py-3 flex items-start gap-3">
         <AlertTriangle size={14} className="text-gold-400 shrink-0 mt-0.5" />
         <div className="text-xs text-gold-200/80 leading-relaxed">
-          <strong className="text-gold-300">Sélection automatique</strong> : Ces articles ont été récupérés depuis 8 sources (DB Cache + PubMed, OpenAlex, Crossref, EuropePMC, medRxiv, bioRxiv, PROSPERO, Cochrane) par recherche multi-sources. <strong>Aucun n'a été validé par un relecteur humain.</strong> Pour une revue systématique formelle, un screening humain en double-aveugle est requis (onglet Revue).
+          <strong className="text-gold-300">Sélection automatique</strong> : Ces articles ont été récupérés depuis 6 sources (DB Cache + PubMed, OpenAlex, Crossref, EuropePMC, Preprints) par recherche multi-sources. <strong>Aucun n'a été validé par un relecteur humain.</strong> Pour une revue systématique formelle, un screening humain en double-aveugle est requis (onglet Revue).
         </div>
       </div>
 
@@ -2023,6 +2023,7 @@ const SOURCE_LABELS_MAP: Record<string, string> = {
   prospero: "PROSPERO",
   cochrane: "Cochrane",
   db_cache: "DB Cache",
+  preprint: "Preprints",
   preprints: "Preprints",
 };
 
@@ -2989,12 +2990,12 @@ function AlertsSection({ scenarioId }: { scenarioId: string }) {
           <h4 className="text-sm font-semibold text-white">Pipeline Living Review</h4>
         </div>
         <p className="text-xs text-white/50">
-          Le pipeline Living Review interroge automatiquement 8 sources (DB Cache + PubMed, OpenAlex, Crossref, EuropePMC, medRxiv, bioRxiv, PROSPERO, Cochrane)
+          Le pipeline Living Review interroge automatiquement 6 sources (DB Cache + PubMed, OpenAlex, Crossref, EuropePMC, Preprints)
           avec la requête de ce scénario, insère les nouveaux articles, génère les embeddings et recalcule le clustering.
         </p>
         <div className="rounded-xl border border-white/5 bg-white/2 p-3 space-y-1.5 text-[10px] text-white/40">
           {[
-            'Interrogation multi-sources : DB Cache + PubMed + OpenAlex + Crossref + EuropePMC + medRxiv + bioRxiv + PROSPERO + Cochrane',
+            'Interrogation multi-sources : DB Cache + PubMed + OpenAlex + Crossref + EuropePMC + Preprints',
             'Insertion des nouveaux articles (déduplication automatique)',
             'Génération des embeddings (text-embedding-3-small) : active la pertinence sémantique',
             'Extraction PICO par LLM (GPT-4.1-mini)',
