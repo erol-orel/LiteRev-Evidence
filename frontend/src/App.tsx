@@ -3807,7 +3807,7 @@ export default function App() {
                     className="mt-0.5 h-4 w-4 accent-brand-400 shrink-0"
                   />
                   <span>
-                    <span>Inclure les sources API en direct (PubMed, OpenAlex, Crossref, EuropePMC, medRxiv, bioRxiv, PROSPERO)</span>
+                    <span>Inclure les sources API en direct (PubMed, OpenAlex, Crossref, EuropePMC, Preprints)</span>
                     <span className="block text-forest-500 mt-0.5">Recherche plus lente, ajoute les articles non encore indexes</span>
                   </span>
                 </label>
@@ -3837,7 +3837,7 @@ export default function App() {
                 // Étapes de la recherche pilotées par la PHASE RÉELLE du backend
                 // (/populate/status), pas par un minuteur : le libellé affiché
                 // correspond donc à ce que fait réellement le serveur.
-                const liveSources = ["PubMed", "OpenAlex", "Crossref", "EuropePMC", "medRxiv", "bioRxiv", "PROSPERO"];
+                const liveSources = ["PubMed", "OpenAlex", "Crossref", "EuropePMC", "Preprints"];
                 const translating = searchPhase === 'translating';
                 const rankOf: Record<string, number> = { local: 1, federation: 2, scoring: 3, done: 4 };
                 const rank = searchBackendPhase ? rankOf[searchBackendPhase] : 0;
