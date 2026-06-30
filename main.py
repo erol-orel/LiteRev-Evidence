@@ -6867,7 +6867,7 @@ async def ask_stream(payload: dict[str, Any]) -> StreamingResponse:
 
         with engine.connect() as conn:
             rows = conn.execute(text(f"""
-                SELECT c.content, d.title, d.year, d.doi, d.id AS doc_id,
+                SELECT c.content, d.title, d.year, d.doi, d.authors, d.id AS doc_id,
                        1 - (c.embedding <=> CAST(:emb AS vector)) AS similarity
                 FROM document_chunk c
                 JOIN literature_document d ON d.id = c.document_id
@@ -6886,12 +6886,14 @@ async def ask_stream(payload: dict[str, Any]) -> StreamingResponse:
             context_chunks.append(
                 f"[{i + 1}] {r['title'] or 'Sans titre'} ({r['year'] or 'année inconnue'})\n{r['content']}"
             )
+            # Champs canoniques (document_id/score/authors) attendus par le front.
             sources.append({
-                "id": r["doc_id"],
+                "document_id": r["doc_id"],
                 "title": r["title"],
                 "year": r["year"],
                 "doi": r["doi"],
-                "similarity": round(float(r["similarity"]), 3),
+                "authors": r["authors"],
+                "score": round(float(r["similarity"]), 3),
             })
 
     context_text = "\n\n---\n\n".join(context_chunks[:top_k]) if context_chunks else "Aucun contexte disponible."
@@ -13950,7 +13952,7 @@ async def ask_stream_filtered(payload: dict[str, Any]):
 
         with engine.connect() as conn:
             rows = conn.execute(text(f"""
-                SELECT c.content, d.title, d.year, d.doi, d.id AS doc_id,
+                SELECT c.content, d.title, d.year, d.doi, d.authors, d.id AS doc_id,
                        d.screening_status,
                        1 - (c.embedding <=> CAST(:emb AS vector)) AS similarity
                 FROM document_chunk c
@@ -13968,12 +13970,16 @@ async def ask_stream_filtered(payload: dict[str, Any]):
             context_chunks.append(
                 f"[{i + 1}] {r['title'] or 'Sans titre'} ({r['year'] or 'année inconnue'})\n{r['content']}"
             )
+            # Champs canoniques attendus par le front (ScenarioRagSource) : document_id
+            # + score (et authors). Avant, on envoyait id/similarity et pas d'auteurs,
+            # d'où « Pertinence: NaN% » et « undefined • » dans le panneau Sources.
             sources.append({
-                "id": r["doc_id"],
+                "document_id": r["doc_id"],
                 "title": r["title"],
                 "year": r["year"],
                 "doi": r["doi"],
-                "similarity": round(float(r["similarity"]), 3),
+                "authors": r["authors"],
+                "score": round(float(r["similarity"]), 3),
                 "validated": r["screening_status"] == "included",
             })
 

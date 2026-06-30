@@ -2101,14 +2101,23 @@ function PrismaSection({ scenarioId }: { scenarioId: string }) {
   if (loading) return <LoadingSpinner text="Calcul du flow PRISMA..." />;
   if (error || !data) return <ErrorBox message={error ?? "Erreur PRISMA"} />;
 
-  const { identification: ident, semantic_screening: sem, full_text: ft, manual_curation: mc, evidence: ev } = data;
+  // Garde-fous : selon l'avancement du scénario, l'API peut renvoyer un payload
+  // partiel (section ou champ absent). Le panneau PRISMA ne doit jamais planter
+  // pour autant — on substitue des objets vides / des 0 (PrismaBigNum appelle
+  // value.toLocaleString() sans condition, donc un undefined ferait crasher l'app).
+  const num = (v: unknown): number => (typeof v === "number" && isFinite(v) ? v : 0);
+  const ident = data.identification ?? ({} as ScenarioPrisma["identification"]);
+  const sem = data.semantic_screening ?? ({} as ScenarioPrisma["semantic_screening"]);
+  const ft = data.full_text ?? ({} as ScenarioPrisma["full_text"]);
+  const mc = data.manual_curation ?? ({} as ScenarioPrisma["manual_curation"]);
+  const ev = data.evidence ?? ({} as ScenarioPrisma["evidence"]);
 
-  const activeSources = Object.entries(ident.by_source)
-    .filter(([, v]) => v > 0)
-    .sort(([, a], [, b]) => (b as number) - (a as number));
+  const activeSources = Object.entries(ident.by_source ?? {})
+    .filter(([, v]) => num(v) > 0)
+    .sort(([, a], [, b]) => num(b) - num(a));
 
-  const totalRecords = ident.total_records ?? ident.total_records_identified ?? 0;
-  const evidenceTotal = ev.ai_auto_selected + ev.manually_rescued;
+  const totalRecords = num(ident.total_records ?? ident.total_records_identified);
+  const evidenceTotal = num(ev.ai_auto_selected) + num(ev.manually_rescued);
 
   return (
     <div className="rounded-3xl border border-white/10 bg-white/3 p-5 space-y-4">
@@ -2128,8 +2137,8 @@ function PrismaSection({ scenarioId }: { scenarioId: string }) {
         >
           <PrismaBigNum value={totalRecords} sub={`${activeSources.length} source${activeSources.length !== 1 ? "s" : ""} searched`} />
           <div className="space-y-1">
-            <PrismaRow label="Embedded (searchable)" value={ident.embedded} />
-            <PrismaRow label="Duplicates removed" value={ident.duplicates_removed} />
+            <PrismaRow label="Embedded (searchable)" value={num(ident.embedded)} />
+            <PrismaRow label="Duplicates removed" value={num(ident.duplicates_removed)} />
           </div>
           {activeSources.length > 0 && (
             <div className="flex flex-wrap gap-1.5 pt-1 border-t border-white/5">
@@ -2152,18 +2161,18 @@ function PrismaSection({ scenarioId }: { scenarioId: string }) {
         >
           <div className="grid grid-cols-2 gap-3">
             <div>
-              <PrismaBigNum value={sem.above_threshold} sub="Above threshold → pre-selected" />
+              <PrismaBigNum value={num(sem.above_threshold)} sub="Above threshold → pre-selected" />
             </div>
             <div>
-              <PrismaBigNum value={sem.below_threshold} sub="Below threshold → deprioritised" />
+              <PrismaBigNum value={num(sem.below_threshold)} sub="Below threshold → deprioritised" />
             </div>
           </div>
           <div className="space-y-1">
-            <PrismaRow label="Similarity threshold" value={`≥ ${(sem.threshold * 100).toFixed(0)}%`} />
-            <PrismaRow label="Method" value={sem.method} />
+            <PrismaRow label="Similarity threshold" value={`≥ ${(num(sem.threshold) * 100).toFixed(0)}%`} />
+            <PrismaRow label="Method" value={sem.method ?? "—"} />
             <PrismaRow
               label="Full texts available"
-              value={`${ft.with_fulltext.toLocaleString()} (${ft.pct.toFixed(0)}%)`}
+              value={`${num(ft.with_fulltext).toLocaleString()} (${num(ft.pct).toFixed(0)}%)`}
               accent="text-violet-300"
             />
           </div>
@@ -2180,18 +2189,18 @@ function PrismaSection({ scenarioId }: { scenarioId: string }) {
         >
           <div className="grid grid-cols-3 gap-3">
             <div>
-              <PrismaBigNum value={mc.included} sub="Included" />
+              <PrismaBigNum value={num(mc.included)} sub="Included" />
             </div>
             <div>
-              <PrismaBigNum value={mc.excluded} sub="Excluded" />
+              <PrismaBigNum value={num(mc.excluded)} sub="Excluded" />
             </div>
             <div>
-              <PrismaBigNum value={mc.pending} sub="Pending" />
+              <PrismaBigNum value={num(mc.pending)} sub="Pending" />
             </div>
           </div>
           <div className="space-y-1 border-t border-white/5 pt-2">
-            <PrismaRow label="Rescued (below threshold, manually included)" value={mc.manually_rescued} accent="text-green-400" />
-            <PrismaRow label="Vetoed (above threshold, manually excluded)" value={mc.manually_vetoed} accent="text-red-400" />
+            <PrismaRow label="Rescued (below threshold, manually included)" value={num(mc.manually_rescued)} accent="text-green-400" />
+            <PrismaRow label="Vetoed (above threshold, manually excluded)" value={num(mc.manually_vetoed)} accent="text-red-400" />
             <PrismaRow label="Screening complete" value={mc.screening_complete ? "Yes" : "In progress"} />
           </div>
         </PrismaStageCard>
@@ -2209,9 +2218,9 @@ function PrismaSection({ scenarioId }: { scenarioId: string }) {
             sub={mc.screening_complete ? "Final evidence set" : "Evidence set (screening in progress)"}
           />
           <div className="space-y-1">
-            <PrismaRow label="AI pre-selected (above threshold, not vetoed)" value={ev.ai_auto_selected} />
-            <PrismaRow label="Manually rescued" value={ev.manually_rescued} accent="text-green-400" />
-            <PrismaRow label="With full text" value={`${ev.with_fulltext.toLocaleString()} of ${evidenceTotal.toLocaleString()}`} />
+            <PrismaRow label="AI pre-selected (above threshold, not vetoed)" value={num(ev.ai_auto_selected)} />
+            <PrismaRow label="Manually rescued" value={num(ev.manually_rescued)} accent="text-green-400" />
+            <PrismaRow label="With full text" value={`${num(ev.with_fulltext).toLocaleString()} of ${evidenceTotal.toLocaleString()}`} />
           </div>
         </PrismaStageCard>
       </div>
@@ -2219,7 +2228,7 @@ function PrismaSection({ scenarioId }: { scenarioId: string }) {
       {!mc.screening_complete && (
         <div className="rounded-xl border border-amber-500/20 bg-amber-500/5 px-4 py-3 mt-2">
           <p className="text-[10px] text-amber-400">
-            <span className="font-semibold">Manual screening in progress</span> · {mc.pending.toLocaleString()} articles still pending evaluation.
+            <span className="font-semibold">Manual screening in progress</span> · {num(mc.pending).toLocaleString()} articles still pending evaluation.
           </p>
         </div>
       )}

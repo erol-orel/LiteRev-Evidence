@@ -1023,99 +1023,11 @@ function RecommendedActions({ scenario, isUser }: { scenario: GesicaScenario; is
   );
 }
 
-function ScenariosView({
-  scenarios,
-  loading,
-  error,
-  savedSearches = [],
-  userScenarios = [],
-  onReplaySearch,
-  onDeleteSearch,
-  onTogglePin,
-  onPopulateUserScenario,
-  populatingId,
-  pipelineStatuses = {},
-  folders = [],
-  onCreateFolder,
-  onDeleteFolder,
-  onRenameFolder,
-  onAssignFolder,
-}: {
-  scenarios: GesicaScenario[];
-  loading?: boolean;
-  error?: string | null;
-  savedSearches?: SavedSearch[];
-  userScenarios?: UserScenario[];
-  onReplaySearch?: (s: SavedSearch) => void;
-  onDeleteSearch?: (id: string) => void;
-  onTogglePin?: (id: string) => void;
-  onPopulateUserScenario?: (id: string) => void;
-  populatingId?: string | null;
-  pipelineStatuses?: Record<string, import('./lib/api').UserScenarioPipelineStatus>;
-  folders?: ScenarioFolder[];
-  onCreateFolder?: (name: string, color: string) => Promise<ScenarioFolder>;
-  onDeleteFolder?: (folderId: string) => Promise<void>;
-  onRenameFolder?: (folderId: string, name: string, color: string) => Promise<void>;
-  onAssignFolder?: (scenarioId: string, folderId: string | null) => Promise<void>;
-}) {
-  const [expandedId, setExpandedId] = useState<string | null>(null);
-  const [detailScenarioId, setDetailScenarioId] = useState<string | null>(null);
-  const [detailInitialTab, setDetailInitialTab] = useState<"model" | undefined>(undefined);
-  const [showNewFolderDialog, setShowNewFolderDialog] = useState(false);
-  const [newFolderName, setNewFolderName] = useState('');
-  const [newFolderColor, setNewFolderColor] = useState('#6366f1');
-  const [assigningScenarioId, setAssigningScenarioId] = useState<string | null>(null);
-  const [folderError, setFolderError] = useState<string | null>(null);
-  const [editingFolderId, setEditingFolderId] = useState<string | null>(null);
-  const [editFolderName, setEditFolderName] = useState('');
-  const [editFolderColor, setEditFolderColor] = useState('#6366f1');
-
-  // Page détail d'un scénario (GESICA ou utilisateur)
-  if (detailScenarioId) {
-    return <ScenarioDetailPage scenarioId={detailScenarioId} initialTab={detailInitialTab} onBack={() => { setDetailScenarioId(null); setDetailInitialTab(undefined); }} />;
-  }
-
-  if (loading) {
-    return (
-      <div className="flex items-center justify-center py-16 text-forest-400">
-        <RotateCcw size={18} className="mr-2 animate-spin" />
-        Chargement des scénarios...
-      </div>
-    );
-  }
-
-  if (error) {
-    return (
-      <div className="flex flex-col items-center justify-center py-16 gap-3">
-        <div className="rounded-2xl border border-red-500/30 bg-red-500/10 px-6 py-4 text-red-300 max-w-xl text-center">
-          <p className="font-semibold mb-1">Erreur de chargement des scénarios</p>
-          <p className="text-sm text-red-400 font-mono break-all">{error}</p>
-          <p className="text-xs text-forest-400 mt-2">Vérifiez que le service API est démarré et que <code>/api/gesica/scenarios</code> répond correctement.</p>
-        </div>
-      </div>
-    );
-  }
-
-  if (scenarios.length === 0) {
-    return (
-      <div className="flex items-center justify-center py-16 text-forest-400">
-        <RotateCcw size={18} className="mr-2 animate-spin" />
-        Chargement des scénarios...
-      </div>
-    );
-  }
-
-  // Extraire les clusters uniques
-
-  const clusterColors: Record<string, string> = {
-    "Prévention & Risques": "border-violet-500/30 bg-violet-500/10 text-violet-300",
-    "Opérations EMS": "border-brand-500/30 bg-brand-500/10 text-brand-300",
-    "Triage & Clinique": "border-brand-500/30 bg-brand-500/10 text-brand-300",
-    "Soins Centrés Patient": "border-rose-500/30 bg-rose-500/10 text-rose-300",
-    "Surveillance & Crise": "border-gold-500/30 bg-gold-500/10 text-gold-300",
-    "Systèmes & IA": "border-brand-500/30 bg-brand-500/10 text-brand-300",
-  };
-
+// === Widgets de scénario (démos métier) ====================================
+// Définis au niveau MODULE (pas dans ScenariosView). Imbriqués, ils étaient
+// recréés à chaque rendu de ScenariosView, donc REMONTÉS par React à chaque
+// tick du polling pipeline (5 s) → perte de leur état interne (prévision
+// chargée, saisies en cours…). Au niveau module, leur identité est stable.
   // Widget de prévision de la demande EMS (Scénario 1 : demand-forecasting)
   const DemandForecastWidget = () => {
     const [forecast, setForecast] = useState<DemandForecastResponse | null>(null);
@@ -2144,6 +2056,100 @@ function ScenariosView({
     );
   };
 
+
+function ScenariosView({
+  scenarios,
+  loading,
+  error,
+  savedSearches = [],
+  userScenarios = [],
+  onReplaySearch,
+  onDeleteSearch,
+  onTogglePin,
+  onPopulateUserScenario,
+  populatingId,
+  pipelineStatuses = {},
+  folders = [],
+  onCreateFolder,
+  onDeleteFolder,
+  onRenameFolder,
+  onAssignFolder,
+}: {
+  scenarios: GesicaScenario[];
+  loading?: boolean;
+  error?: string | null;
+  savedSearches?: SavedSearch[];
+  userScenarios?: UserScenario[];
+  onReplaySearch?: (s: SavedSearch) => void;
+  onDeleteSearch?: (id: string) => void;
+  onTogglePin?: (id: string) => void;
+  onPopulateUserScenario?: (id: string) => void;
+  populatingId?: string | null;
+  pipelineStatuses?: Record<string, import('./lib/api').UserScenarioPipelineStatus>;
+  folders?: ScenarioFolder[];
+  onCreateFolder?: (name: string, color: string) => Promise<ScenarioFolder>;
+  onDeleteFolder?: (folderId: string) => Promise<void>;
+  onRenameFolder?: (folderId: string, name: string, color: string) => Promise<void>;
+  onAssignFolder?: (scenarioId: string, folderId: string | null) => Promise<void>;
+}) {
+  const [expandedId, setExpandedId] = useState<string | null>(null);
+  const [detailScenarioId, setDetailScenarioId] = useState<string | null>(null);
+  const [detailInitialTab, setDetailInitialTab] = useState<"model" | undefined>(undefined);
+  const [showNewFolderDialog, setShowNewFolderDialog] = useState(false);
+  const [newFolderName, setNewFolderName] = useState('');
+  const [newFolderColor, setNewFolderColor] = useState('#6366f1');
+  const [assigningScenarioId, setAssigningScenarioId] = useState<string | null>(null);
+  const [folderError, setFolderError] = useState<string | null>(null);
+  const [editingFolderId, setEditingFolderId] = useState<string | null>(null);
+  const [editFolderName, setEditFolderName] = useState('');
+  const [editFolderColor, setEditFolderColor] = useState('#6366f1');
+
+  // Page détail d'un scénario (GESICA ou utilisateur)
+  if (detailScenarioId) {
+    return <ScenarioDetailPage scenarioId={detailScenarioId} initialTab={detailInitialTab} onBack={() => { setDetailScenarioId(null); setDetailInitialTab(undefined); }} />;
+  }
+
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center py-16 text-forest-400">
+        <RotateCcw size={18} className="mr-2 animate-spin" />
+        Chargement des scénarios...
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div className="flex flex-col items-center justify-center py-16 gap-3">
+        <div className="rounded-2xl border border-red-500/30 bg-red-500/10 px-6 py-4 text-red-300 max-w-xl text-center">
+          <p className="font-semibold mb-1">Erreur de chargement des scénarios</p>
+          <p className="text-sm text-red-400 font-mono break-all">{error}</p>
+          <p className="text-xs text-forest-400 mt-2">Vérifiez que le service API est démarré et que <code>/api/gesica/scenarios</code> répond correctement.</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (scenarios.length === 0) {
+    return (
+      <div className="flex items-center justify-center py-16 text-forest-400">
+        <RotateCcw size={18} className="mr-2 animate-spin" />
+        Chargement des scénarios...
+      </div>
+    );
+  }
+
+  // Extraire les clusters uniques
+
+  const clusterColors: Record<string, string> = {
+    "Prévention & Risques": "border-violet-500/30 bg-violet-500/10 text-violet-300",
+    "Opérations EMS": "border-brand-500/30 bg-brand-500/10 text-brand-300",
+    "Triage & Clinique": "border-brand-500/30 bg-brand-500/10 text-brand-300",
+    "Soins Centrés Patient": "border-rose-500/30 bg-rose-500/10 text-rose-300",
+    "Surveillance & Crise": "border-gold-500/30 bg-gold-500/10 text-gold-300",
+    "Systèmes & IA": "border-brand-500/30 bg-brand-500/10 text-brand-300",
+  };
+
   // Rendue comme FONCTION inline (et non composant imbriqué) : ainsi elle n'est pas
   // remontée à chaque rendu de ScenariosView — ce remont permanent faisait « perdre »
   // le 1er clic du bouton dossier (il fallait cliquer deux fois). Les hooks vivent
@@ -3000,6 +3006,17 @@ export default function App() {
         setYearRange([b.min, b.max]);
       })
       .catch((err) => console.error(err));
+  }, []);
+
+  // Nettoyage au démontage : stopper tous les pollings de pipeline encore actifs.
+  // Sans cela, ils continuent d'émettre des requêtes et de tenter des setState sur
+  // un arbre démonté (fuite mémoire + avertissements React). On lit .current dans
+  // le cleanup à dessein, pour stopper les intervalles RÉELLEMENT en cours.
+  useEffect(() => {
+    return () => {
+      Object.values(pipelinePollRef.current).forEach((id) => clearInterval(id));
+      pipelinePollRef.current = {};
+    };
   }, []);
 
   useEffect(() => {
