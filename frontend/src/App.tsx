@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { ScenarioDetailPage } from "./components/ScenarioDetailPage";
+import { useI18n } from "./i18n/LanguageProvider";
 import { Activity, BarChart2, BookOpen, Cloud, Download, ExternalLink, FolderOpen, MapPin, AlertTriangle, Users, Pill, Radio, RefreshCw, RotateCcw, ChevronDown, ChevronUp, Zap, Lock, KeyRound } from "lucide-react";
 
 import {
@@ -1474,6 +1475,7 @@ function ScenariosView({
 
 export default function App() {
   const [projectContext, setProjectContext] = useState<ProjectContext>("literev");
+  const { t, lang, setLang } = useI18n();
   const [activeTab, setActiveTab] = useState<AppTab>("search");
   // Clé d'écriture admin (X-API-Key). Saisie une fois, stockée en localStorage côté
   // navigateur — jamais dans le bundle public (cf. authHeaders dans lib/api).
@@ -2049,10 +2051,10 @@ export default function App() {
   }, [selectedDocument, selectedResult]);
 
   const tabs: Array<{ id: AppTab; label: string; icon: React.ReactNode }> = [
-    { id: "search", label: "Recherche", icon: <BookOpen size={14} /> },
-    { id: "scenarios", label: "Scénarios", icon: <Activity size={14} /> },
-    { id: "terrain", label: "Données Terrain", icon: <Cloud size={14} className="text-brand-400" /> },
-    { id: "stats", label: "Statistiques", icon: <BarChart2 size={14} /> },
+    { id: "search", label: t("nav.search"), icon: <BookOpen size={14} /> },
+    { id: "scenarios", label: t("nav.scenarios"), icon: <Activity size={14} /> },
+    { id: "terrain", label: t("nav.terrain"), icon: <Cloud size={14} className="text-brand-400" /> },
+    { id: "stats", label: t("nav.stats"), icon: <BarChart2 size={14} /> },
   ];
 
   return (
@@ -2068,10 +2070,24 @@ export default function App() {
             </div>
 
             <div className="flex items-center gap-6">
+              <div className="flex items-center gap-1 rounded-xl border border-white/10 bg-white/5 p-0.5 text-xs" title={t("header.languageLabel")}>
+                {(["fr", "en"] as const).map((l) => (
+                  <button
+                    key={l}
+                    type="button"
+                    onClick={() => setLang(l)}
+                    className={`rounded-lg px-2 py-1 font-semibold transition ${
+                      lang === l ? "bg-brand-700 text-gold-400" : "text-white/50 hover:text-white"
+                    }`}
+                  >
+                    {l.toUpperCase()}
+                  </button>
+                ))}
+              </div>
               <button
                 type="button"
                 onClick={handleManageApiKey}
-                title={apiKeySet ? "Clé admin active sur cet appareil — cliquer pour la retirer" : "Définir la clé admin (X-API-Key) pour activer les écritures"}
+                title={apiKeySet ? t("header.adminKeyActiveTooltip") : t("header.adminKeySetTooltip")}
                 className={`flex items-center gap-1.5 rounded-xl border px-3 py-1.5 text-xs font-medium transition ${
                   apiKeySet
                     ? "border-brand-500/40 bg-brand-700/30 text-brand-200 hover:bg-brand-700/50"
@@ -2079,7 +2095,7 @@ export default function App() {
                 }`}
               >
                 {apiKeySet ? <KeyRound size={13} /> : <Lock size={13} />}
-                {apiKeySet ? "Clé admin" : "Lecture seule"}
+                {apiKeySet ? t("header.adminKeyActive") : t("header.readOnly")}
               </button>
               <img src="/logo.jpg" alt="LiteRev arbre" className="h-20 w-20 rounded-2xl object-cover shadow-xl opacity-90" />
             </div>
