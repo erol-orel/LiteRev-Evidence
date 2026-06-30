@@ -89,11 +89,54 @@ Notes:
   for the intended additions.
 - Ship behind the same CI as everything else.
 
+## Preview result (run on production, 40 scenarios)
+
+Way A → Way B totals: A=8,656 → B=12,875 (common 4,652; lost 4,004; gained 8,223).
+Patterns: most GESICA scenarios are clean supersets; some user scenarios balloon
+(e.g. 13→3013); and **15 scenarios are ⚠ VIDÉ** (zero `article_scenarios` rows):
+`stroke-detection`, `triage-support`, and 13 `usr-…` scenarios.
+
+**Decision: pause the migration and RE-SCORE the 15 first** (so pure Way B isn't
+just emptying scenarios that were never scored).
+
+### Why the 15 have no scored membership
+`article_scenarios` membership is built only by the boolean-query corpus assignment
+(`_boolean_corpus_ids` → `_set_scenario_corpus`), which runs inside user `/populate`
+(and, historically, a one-off GESICA backfill). `/scenarios/{id}/rerank` only SCORES
+rows that already exist — it can't repopulate an empty corpus. The 13 user scenarios
+were never populated (or got reset); the 2 GESICA scenarios were missed by the
+historical backfill, and there was **no live endpoint to rebuild a GESICA corpus**.
+
+### Re-score mechanism (added)
+New endpoint **`POST /scenarios/{id}/rebuild-corpus`** (api-key gated): rebuilds
+membership from the scenario's boolean query against the **local DB only (no live
+re-ingestion)**, then runs cosine + cross-encoder scoring. Cost ≈ 1 query embedding
+per scenario. Works for both GESICA and user scenarios (same `user_scenarios` table).
+Progress via `GET /scenarios/{id}/rerank/status`.
+
+Re-score the 15 (run on the server, with the write key):
+```bash
+KEY=$(grep -E '^WRITE_API_KEY=' /etc/literev-api.env | cut -d= -f2- | tr -d '"'"'"')
+for sid in stroke-detection triage-support \
+  usr-3a5a01dc0c44 usr-438ee5ca28fb usr-5600e99627d2 usr-6a64a31b0fbb \
+  usr-7cadc989ea46 usr-868dc56be997 usr-a9498067e6f9 usr-ca0030a574e0 \
+  usr-cb537e36f0be usr-e2bb05832b44 usr-ecf0ee84ef7d usr-ed591d707a04 usr-ee71de7f1523; do
+    echo "== $sid =="
+    curl -fsS -X POST "http://localhost:8000/api/scenarios/$sid/rebuild-corpus" -H "X-API-Key: $KEY"
+    echo
+done
+# wait a few minutes, then re-run the diff tool — the ⚠ VIDÉ list should shrink/clear.
+```
+**Test on ONE scenario first** (e.g. `stroke-detection`), confirm its corpus +
+scores populate (check `…/rerank/status` and the dashboard), then run the rest.
+
 ## Status
 
 - [x] Decision: Way B, gated on before/after.
 - [x] Read-only preview tool (`scripts/migration1_scenario_type_diff.py`).
-- [ ] Run preview against a production copy (needs a snapshot / read-only DSN).
-- [ ] Backfill if ⚠ scenarios appear.
+- [x] Run preview against production → 15 ⚠ VIDÉ scenarios found.
+- [x] Decision: re-score the 15 first; add `rebuild-corpus` endpoint.
+- [ ] Re-score the 15 on the server; re-run the diff; confirm ⚠ cleared.
+- [ ] Re-evaluate Way B deltas (esp. user-scenario ballooning) with the user.
 - [ ] Rewrite the 29 sites + validate on staging.
 - [ ] Then unblock Migration 2 (`screening-status-per-scenario-migration.md`).

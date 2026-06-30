@@ -11853,6 +11853,81 @@ def get_rerank_status(scenario_id: str) -> dict[str, Any]:
     return _RERANK_JOBS.get(scenario_id, {"status": "idle"})
 
 
+@app.post("/scenarios/{scenario_id}/rebuild-corpus")
+def rebuild_corpus(scenario_id: str, _: None = Depends(require_api_key)) -> dict[str, Any]:
+    """Reconstruit l'appartenance au corpus (article_scenarios) d'un scénario à
+    partir de SA requête booléenne sur la base LOCALE (aucune ré-ingestion live),
+    PUIS recalcule les scores (cosinus + cross-encoder).
+
+    Pourquoi : /rerank ne SCORE que les liens article_scenarios EXISTANTS ; il ne
+    peut donc rien faire pour un scénario dont le corpus est vide (jamais peuplé,
+    ou seulement via l'ancien champ scenario_type). C'est le cas des scénarios
+    « ⚠ VIDÉ » repérés par scripts/migration1_scenario_type_diff.py. Cette route
+    reconstruit leur appartenance puis les score.
+
+    Coût OpenAI minime : ~1 embedding de requête par scénario (la sélection des
+    documents se fait en base locale ; pas d'appel aux sources live). GESICA et
+    user_scenarios partagent la table user_scenarios, donc le traitement est
+    identique. Suivi via /scenarios/{id}/rerank/status."""
+    import threading
+    with engine.connect() as _conn:
+        row = _conn.execute(
+            text("SELECT * FROM user_scenarios WHERE id = :id"), {"id": scenario_id}
+        ).mappings().first()
+    if not row:
+        raise HTTPException(status_code=404, detail=f"Scénario '{scenario_id}' non trouvé")
+    row = dict(row)
+
+    # Requête en langage naturel (sert à l'embedding de scoring).
+    _nl = row.get("nl_queries")
+    query = (row.get("query")
+             or (_nl[0] if isinstance(_nl, list) and _nl else None)
+             or row.get("title") or row.get("name") or "")
+    filters = row.get("filters") or {}
+
+    # Requête BOOLÉENNE (définit l'appartenance, sur la base locale). Priorité :
+    # stratégie stockée → boolean_queries (GESICA) → génération depuis la requête.
+    _strat = row.get("search_strategy")
+    _bq = row.get("boolean_queries")
+    if isinstance(_strat, dict) and _strat.get("general"):
+        boolean = _strat["general"]
+    elif isinstance(_bq, list) and _bq:
+        boolean = _bq[0]
+    elif isinstance(_bq, str) and _bq.strip():
+        boolean = _bq
+    elif query:
+        try:
+            boolean = _generate_search_strategy(query).get("general") or query
+        except Exception:
+            boolean = query
+    else:
+        raise HTTPException(status_code=422,
+                            detail="Scénario sans requête exploitable : reconstruction impossible.")
+
+    if _RERANK_JOBS.get(scenario_id, {}).get("status") == "running":
+        return {"status": "already_running", "scenario_id": scenario_id}
+    _RERANK_JOBS[scenario_id] = {"status": "running", "updated": 0}
+
+    def _run():
+        try:
+            ids = _boolean_corpus_ids(boolean, filters)        # base LOCALE uniquement
+            n_corpus = _set_scenario_corpus(scenario_id, ids)  # fixe l'appartenance
+            _backfill_title_abstract_chunks(scenario_id)       # chunks résumé manquants
+            n = _run_semantic_rerank_inline(scenario_id, query or boolean)  # cosinus pgvector
+            try:
+                _run_cross_encoder_rerank(scenario_id, query or boolean)    # Cohere (si clé)
+            except Exception as _ece:
+                logger.warning(f"rebuild-corpus cross-encoder {scenario_id}: {_ece}")
+            _RERANK_JOBS[scenario_id] = {"status": "done", "corpus": n_corpus, "updated": n}
+            logger.info(f"Rebuild corpus {scenario_id}: {n_corpus} liens, {n} scorés.")
+        except Exception as _e:
+            _RERANK_JOBS[scenario_id] = {"status": "error", "error": str(_e)}
+            logger.error(f"Rebuild corpus {scenario_id}: {_e}", exc_info=True)
+
+    threading.Thread(target=_run, daemon=True).start()
+    return {"status": "started", "scenario_id": scenario_id, "boolean": str(boolean)[:200]}
+
+
 def _backfill_title_abstract_chunks(scenario_id: str | None = None) -> int:
     """
     Crée un chunk `title_abstract` (embedding NULL) pour les documents qui ont un
