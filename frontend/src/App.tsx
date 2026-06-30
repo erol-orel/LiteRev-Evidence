@@ -69,12 +69,14 @@ import type {
   SearchResult,
 } from "./types/search";
 
+// The second tuple element is an i18n key resolved via t() at render time
+// (this array lives at module level, where the t() hook is unavailable).
 const FILTER_FIELDS: Array<[keyof FilterOptions, string]> = [
-  ["sourceType", "Type de source"],
-  ["diseaseOrCondition", "Maladie / pathologie"],
-  ["scenarioType", "Type de scénario"],
-  ["geographicScope", "Zone géographique"],
-  ["evidenceCategory", "Catégorie de preuve"],
+  ["sourceType", "search.filterSourceType"],
+  ["diseaseOrCondition", "search.filterDiseaseOrCondition"],
+  ["scenarioType", "search.filterScenarioType"],
+  ["geographicScope", "search.filterGeographicScope"],
+  ["evidenceCategory", "search.filterEvidenceCategory"],
 ];
 
 const PAGE_SIZE = 20;
@@ -125,6 +127,7 @@ function csvEscape(value: unknown): string {
 
 // ─── TerrainView ─────────────────────────────────────────────────────────────
 function TerrainView() {
+  const { t } = useI18n();
   const [meteo, setMeteo] = useState<TerrainMeteo | null>(null);
   const [geo, setGeo] = useState<TerrainGeo | null>(null);
   const [epidemic, setEpidemic] = useState<TerrainEpidemic | null>(null);
@@ -158,7 +161,7 @@ function TerrainView() {
         setClimate(c);
         setLastRefresh(new Date());
       })
-      .catch((err) => setError(err.message || "Erreur de chargement des données terrain."))
+      .catch((err) => setError(err.message || t("terrain.loadError")))
       .finally(() => setLoading(false));
   };
 
@@ -191,7 +194,7 @@ function TerrainView() {
     return (
       <div className="flex items-center justify-center py-16 text-forest-400">
         <RotateCcw size={18} className="mr-2 animate-spin" />
-        Chargement des données terrain en temps réel...
+        {t("terrain.loading")}
       </div>
     );
   }
@@ -210,20 +213,20 @@ function TerrainView() {
         <div className="flex items-center gap-3">
           <Cloud size={20} className="text-brand-400" />
           <div>
-            <h2 className="text-xl font-semibold text-white">Données Terrain : Grand Genève</h2>
+            <h2 className="text-xl font-semibold text-white">{t("terrain.title")}</h2>
             <p className="text-xs text-forest-400 mt-0.5">
-              6 sources publiques actives · Météo, Routage, Épidémie, Démographie, Pharmacies, Signaux informels
+              {t("terrain.subtitle")}
             </p>
           </div>
         </div>
         <div className="flex items-center gap-3">
-          <span className="text-xs text-forest-500">Actualisé {lastRefresh.toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" })}</span>
+          <span className="text-xs text-forest-500">{t("terrain.refreshedAt")} {lastRefresh.toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" })}</span>
           <button
             onClick={loadAll}
             className="flex items-center gap-2 rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-xs text-forest-300 hover:bg-white/10 transition"
           >
             <RefreshCw size={12} />
-            Actualiser
+            {t("common.refresh")}
           </button>
         </div>
       </div>
@@ -231,21 +234,21 @@ function TerrainView() {
       {/* Grille de KPIs sources */}
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-4 lg:grid-cols-7">
         {[
-          { label: "Météo", icon: <Cloud size={14} />, color: "text-brand-400", active: !!meteo },
-          { label: "Routage", icon: <MapPin size={14} />, color: "text-violet-400", active: !!geo },
-          { label: "Épidémie", icon: <Activity size={14} />, color: "text-brand-400", active: !!epidemic },
-          { label: "Démographie", icon: <Users size={14} />, color: "text-gold-400", active: !!demographics },
-          { label: "Pharmacies", icon: <Pill size={14} />, color: "text-rose-400", active: !!pharmacies },
-          { label: "Signaux", icon: <Radio size={14} />, color: "text-brand-400", active: !!informalSignals },
-          { label: "Copernicus", icon: <Zap size={14} />, color: "text-gold-400", active: !!climate },
+          { id: "meteo", label: t("terrain.kpi.meteo"), icon: <Cloud size={14} />, color: "text-brand-400", active: !!meteo },
+          { id: "routing", label: t("terrain.kpi.routing"), icon: <MapPin size={14} />, color: "text-violet-400", active: !!geo },
+          { id: "epidemic", label: t("terrain.kpi.epidemic"), icon: <Activity size={14} />, color: "text-brand-400", active: !!epidemic },
+          { id: "demographics", label: t("terrain.kpi.demographics"), icon: <Users size={14} />, color: "text-gold-400", active: !!demographics },
+          { id: "pharmacies", label: t("terrain.kpi.pharmacies"), icon: <Pill size={14} />, color: "text-rose-400", active: !!pharmacies },
+          { id: "signals", label: t("terrain.kpi.signals"), icon: <Radio size={14} />, color: "text-brand-400", active: !!informalSignals },
+          { id: "copernicus", label: t("terrain.kpi.copernicus"), icon: <Zap size={14} />, color: "text-gold-400", active: !!climate },
         ].map((s) => (
-          <div key={s.label} className={`rounded-2xl border p-3 text-center transition ${
+          <div key={s.id} className={`rounded-2xl border p-3 text-center transition ${
             s.active ? "border-white/10 bg-white/5" : "border-white/5 bg-white/2 opacity-40"
           }`}>
             <div className={`flex justify-center mb-1 ${s.color}`}>{s.icon}</div>
             <p className="text-xs text-forest-300 font-medium">{s.label}</p>
             <p className={`text-[10px] mt-0.5 ${s.active ? "text-brand-400" : "text-forest-500"}`}>
-              {s.active ? "● Actif" : "○ Inactif"}
+              {s.active ? t("terrain.active") : t("terrain.inactive")}
             </p>
           </div>
         ))}
@@ -257,28 +260,28 @@ function TerrainView() {
           <div className="flex items-center justify-between mb-4">
             <h3 className="flex items-center gap-2 text-lg font-semibold text-white">
               <Cloud size={16} className="text-brand-400" />
-              Météo : {meteo.station}
+              {t("terrain.meteo.heading")} {meteo.station}
             </h3>
             <span className={`rounded-full border px-3 py-1 text-xs font-medium ${alertColors[meteo.alert_level] ?? alertColors.none}`}>
-              {meteo.alert_level === "none" ? "Aucune alerte" : meteo.alert_level === "warning" ? "Vigilance" : "Danger"}
+              {meteo.alert_level === "none" ? t("terrain.meteo.alertNone") : meteo.alert_level === "warning" ? t("terrain.meteo.alertWarning") : t("terrain.meteo.alertDanger")}
             </span>
           </div>
           <div className="grid grid-cols-2 gap-3 sm:grid-cols-4 mb-4">
             <div className="rounded-2xl border border-white/10 bg-forest-900/60 p-3 text-center">
               <p className="text-2xl font-bold text-brand-300">{meteo.temperature}°C</p>
-              <p className="mt-1 text-xs text-forest-400">Température</p>
+              <p className="mt-1 text-xs text-forest-400">{t("terrain.meteo.temperature")}</p>
             </div>
             <div className="rounded-2xl border border-white/10 bg-forest-900/60 p-3 text-center">
               <p className="text-2xl font-bold text-brand-300">{meteo.apparent_temperature}°C</p>
-              <p className="mt-1 text-xs text-forest-400">Ressenti</p>
+              <p className="mt-1 text-xs text-forest-400">{t("terrain.meteo.apparent")}</p>
             </div>
             <div className="rounded-2xl border border-white/10 bg-forest-900/60 p-3 text-center">
               <p className="text-2xl font-bold text-brand-300">{meteo.humidity}%</p>
-              <p className="mt-1 text-xs text-forest-400">Humidité</p>
+              <p className="mt-1 text-xs text-forest-400">{t("terrain.meteo.humidity")}</p>
             </div>
             <div className="rounded-2xl border border-white/10 bg-forest-900/60 p-3 text-center">
               <p className="text-2xl font-bold text-brand-300">{meteo.wind_speed} km/h</p>
-              <p className="mt-1 text-xs text-forest-400">Vent</p>
+              <p className="mt-1 text-xs text-forest-400">{t("terrain.meteo.wind")}</p>
             </div>
           </div>
           <div className={`rounded-2xl border p-3 text-sm ${alertColors[meteo.alert_level] ?? alertColors.none}`}>
@@ -294,28 +297,28 @@ function TerrainView() {
         <div className="rounded-3xl border border-white/10 bg-white/5 p-5 shadow-2xl">
           <h3 className="flex items-center gap-2 text-lg font-semibold text-white mb-4">
             <MapPin size={16} className="text-violet-400" />
-            Routage Transfrontalier : {geo.origin.label} → {geo.destination.label}
+            {t("terrain.geo.heading")} {geo.origin.label} → {geo.destination.label}
           </h3>
           <div className="grid grid-cols-2 gap-3 sm:grid-cols-4 mb-4">
             <div className="rounded-2xl border border-white/10 bg-forest-900/60 p-3 text-center">
               <p className="text-2xl font-bold text-violet-300">{geo.distance_km} km</p>
-              <p className="mt-1 text-xs text-forest-400">Distance</p>
+              <p className="mt-1 text-xs text-forest-400">{t("terrain.geo.distance")}</p>
             </div>
             <div className="rounded-2xl border border-white/10 bg-forest-900/60 p-3 text-center">
               <p className="text-2xl font-bold text-violet-300">{geo.base_duration_min} min</p>
-              <p className="mt-1 text-xs text-forest-400">Durée de base</p>
+              <p className="mt-1 text-xs text-forest-400">{t("terrain.geo.baseDuration")}</p>
             </div>
             <div className="rounded-2xl border border-white/10 bg-forest-900/60 p-3 text-center">
               <p className="text-2xl font-bold text-gold-300">{geo.cross_border_delay_min} min</p>
-              <p className="mt-1 text-xs text-forest-400">Délai douane</p>
+              <p className="mt-1 text-xs text-forest-400">{t("terrain.geo.customsDelay")}</p>
             </div>
             <div className="rounded-2xl border border-white/10 bg-forest-900/60 p-3 text-center">
               <p className="text-2xl font-bold text-rose-300">{geo.total_estimated_response_time_min} min</p>
-              <p className="mt-1 text-xs text-forest-400">Temps total estimé</p>
+              <p className="mt-1 text-xs text-forest-400">{t("terrain.geo.totalEstimated")}</p>
             </div>
           </div>
           <div className="rounded-2xl border border-violet-500/30 bg-violet-500/10 p-3 text-sm text-violet-300">
-            <p className="font-medium">Action de coordination</p>
+            <p className="font-medium">{t("terrain.geo.coordinationAction")}</p>
             <p className="mt-1 opacity-80">{geo.coordination_action}</p>
           </div>
           <p className="mt-2 text-xs text-forest-500 italic">{geo.architecture_note}</p>
@@ -328,10 +331,10 @@ function TerrainView() {
           <div className="flex items-center justify-between mb-4">
             <h3 className="flex items-center gap-2 text-lg font-semibold text-white">
               <Activity size={16} className="text-brand-400" />
-              Surveillance Épidémique : {epidemic.region}
+              {t("terrain.epidemic.heading")} {epidemic.region}
             </h3>
             <span className={`text-lg font-bold ${riskColors[epidemic.global_ems_impact_risk] ?? "text-white"}`}>
-              Risque EMS : {epidemic.global_ems_impact_risk.toUpperCase()}
+              {t("terrain.epidemic.emsRisk")} {epidemic.global_ems_impact_risk.toUpperCase()}
             </span>
           </div>
           <div className="space-y-3 mb-4">
@@ -341,7 +344,7 @@ function TerrainView() {
                   <span className="font-medium text-white text-sm">{d.name}</span>
                   <div className="flex items-center gap-2">
                     <span className={`rounded-full border px-2 py-0.5 text-xs ${statusColors[d.status] ?? ""}`}>
-                      {d.status === "under_threshold" ? "Sous le seuil" : d.status === "warning" ? "Vigilance" : "Épidémie"}
+                      {d.status === "under_threshold" ? t("terrain.epidemic.statusUnderThreshold") : d.status === "warning" ? t("terrain.epidemic.statusWarning") : t("terrain.epidemic.statusEpidemic")}
                     </span>
                     <span className={`text-sm font-bold ${
                       d.trend === "increasing" ? "text-rose-300" : d.trend === "decreasing" ? "text-brand-300" : "text-forest-300"
@@ -349,15 +352,15 @@ function TerrainView() {
                   </div>
                 </div>
                 <div className="mt-2 grid grid-cols-3 gap-2 text-xs text-forest-400">
-                  <span>France : <span className="text-white font-medium">{d.incidence_per_100k_france}/100k</span></span>
-                  <span>Suisse : <span className="text-white font-medium">{d.incidence_per_100k_switzerland}/100k</span></span>
-                  <span>Seuil : <span className="text-white font-medium">{d.epidemic_threshold}/100k</span></span>
+                  <span>{t("terrain.epidemic.france")} <span className="text-white font-medium">{d.incidence_per_100k_france}{t("terrain.epidemic.perThreshold")}</span></span>
+                  <span>{t("terrain.epidemic.switzerland")} <span className="text-white font-medium">{d.incidence_per_100k_switzerland}{t("terrain.epidemic.perThreshold")}</span></span>
+                  <span>{t("terrain.epidemic.threshold")} <span className="text-white font-medium">{d.epidemic_threshold}{t("terrain.epidemic.perThreshold")}</span></span>
                 </div>
               </div>
             ))}
           </div>
           <div className="rounded-2xl border border-brand-500/30 bg-brand-500/10 p-3 text-sm text-brand-300">
-            <p className="font-medium">Recommandation opérationnelle</p>
+            <p className="font-medium">{t("terrain.epidemic.recommendation")}</p>
             <p className="mt-1 opacity-80">{epidemic.recommended_action}</p>
           </div>
           <p className="mt-2 text-xs text-forest-500 italic">{epidemic.architecture_note}</p>
@@ -369,24 +372,24 @@ function TerrainView() {
         <div className="rounded-3xl border border-white/10 bg-white/5 p-5 shadow-2xl">
           <h3 className="flex items-center gap-2 text-lg font-semibold text-white mb-4">
             <Users size={16} className="text-gold-400" />
-            Démographie : {demographics.commune} ({demographics.postal_code})
+            {t("terrain.demographics.heading")} {demographics.commune} ({demographics.postal_code})
           </h3>
           <div className="grid grid-cols-2 gap-3 sm:grid-cols-4 mb-4">
             <div className="rounded-2xl border border-white/10 bg-forest-900/60 p-3 text-center">
               <p className="text-2xl font-bold text-gold-300">{demographics.population.toLocaleString("fr-FR")}</p>
-              <p className="mt-1 text-xs text-forest-400">Population</p>
+              <p className="mt-1 text-xs text-forest-400">{t("terrain.demographics.population")}</p>
             </div>
             <div className="rounded-2xl border border-white/10 bg-forest-900/60 p-3 text-center">
               <p className="text-2xl font-bold text-gold-300">{demographics.density_per_km2}</p>
-              <p className="mt-1 text-xs text-forest-400">Hab/km²</p>
+              <p className="mt-1 text-xs text-forest-400">{t("terrain.demographics.density")}</p>
             </div>
             <div className="rounded-2xl border border-white/10 bg-forest-900/60 p-3 text-center">
               <p className="text-2xl font-bold text-gold-300">{demographics.age_over_65_pct}%</p>
-              <p className="mt-1 text-xs text-forest-400">&gt;65 ans</p>
+              <p className="mt-1 text-xs text-forest-400">{t("terrain.demographics.over65")}</p>
             </div>
             <div className="rounded-2xl border border-white/10 bg-forest-900/60 p-3 text-center">
               <p className="text-2xl font-bold text-rose-300">×{demographics.ems_risk_multiplier}</p>
-              <p className="mt-1 text-xs text-forest-400">Multiplicateur risque EMS</p>
+              <p className="mt-1 text-xs text-forest-400">{t("terrain.demographics.emsRiskMultiplier")}</p>
             </div>
           </div>
           <p className="text-xs text-forest-500 italic">{demographics.architecture_note}</p>
@@ -398,11 +401,11 @@ function TerrainView() {
         <div className="rounded-3xl border border-white/10 bg-white/5 p-5 shadow-2xl">
           <h3 className="flex items-center gap-2 text-lg font-semibold text-white mb-4">
             <Pill size={16} className="text-rose-400" />
-            Pharmacies de Garde & Alertes Médicaments
+            {t("terrain.pharmacies.heading")}
           </h3>
           {pharmacies.critical_medication_alerts.length > 0 && (
             <div className="mb-4 space-y-2">
-              <h4 className="text-xs font-semibold uppercase tracking-wider text-forest-400">Alertes médicaments critiques</h4>
+              <h4 className="text-xs font-semibold uppercase tracking-wider text-forest-400">{t("terrain.pharmacies.criticalAlerts")}</h4>
               {pharmacies.critical_medication_alerts.map((alert, i) => (
                 <div key={i} className={`rounded-2xl border p-3 text-sm ${
                   alert.status === "rupture" ? "border-rose-500/30 bg-rose-500/10 text-rose-300" :
@@ -419,7 +422,7 @@ function TerrainView() {
             </div>
           )}
           <div className="space-y-2">
-            <h4 className="text-xs font-semibold uppercase tracking-wider text-forest-400">Pharmacies à proximité ({pharmacies.pharmacies_nearby.length})</h4>
+            <h4 className="text-xs font-semibold uppercase tracking-wider text-forest-400">{t("terrain.pharmacies.nearby")} ({pharmacies.pharmacies_nearby.length})</h4>
             {pharmacies.pharmacies_nearby.map((ph, i) => (
               <div key={i} className="rounded-2xl border border-white/10 bg-forest-900/60 p-3 flex items-center justify-between">
                 <div>
@@ -429,7 +432,7 @@ function TerrainView() {
                 <div className="text-right">
                   <span className={`text-xs font-medium ${
                     ph.is_dispensary ? "text-brand-300" : "text-forest-400"
-                  }`}>{ph.is_dispensary ? "✓ Dispensaire" : "Pharmacie"}</span>
+                  }`}>{ph.is_dispensary ? t("terrain.pharmacies.dispensary") : t("terrain.pharmacies.pharmacy")}</span>
                   <p className="text-xs text-forest-500">{ph.opening_hours}</p>
                 </div>
               </div>
@@ -444,7 +447,7 @@ function TerrainView() {
         <div className="rounded-3xl border border-white/10 bg-white/5 p-5 shadow-2xl">
           <h3 className="flex items-center gap-2 text-lg font-semibold text-white mb-4">
             <Radio size={16} className="text-brand-400" />
-            Signaux Informels : ProMED / GDELT
+            {t("terrain.signals.heading")}
           </h3>
           <div className="space-y-3">
             {informalSignals.active_signals.map((sig) => (
@@ -464,15 +467,15 @@ function TerrainView() {
                       sig.severity === "moderate" ? "border-gold-500/30 bg-gold-500/10 text-gold-300" :
                       "border-brand-500/30 bg-brand-500/10 text-brand-300"
                     }`}>{sig.severity.toUpperCase()}</span>
-                    <span className="text-xs text-forest-500">Fiabilité {Math.round(sig.reliability_score * 100)}%</span>
+                    <span className="text-xs text-forest-500">{t("terrain.signals.reliability")} {Math.round(sig.reliability_score * 100)}%</span>
                   </div>
                 </div>
                 <p className="text-sm text-forest-300 leading-5">{sig.content}</p>
                 {sig.impact_on_ems && (
-                  <p className="mt-2 text-xs text-brand-300 italic">→ Impact SMUR/EMS : {sig.impact_on_ems}</p>
+                  <p className="mt-2 text-xs text-brand-300 italic">{t("terrain.signals.impactEms")} {sig.impact_on_ems}</p>
                 )}
                 {sig.impact_on_hospital && (
-                  <p className="mt-1 text-xs text-violet-300 italic">→ Impact hospitalier : {sig.impact_on_hospital}</p>
+                  <p className="mt-1 text-xs text-violet-300 italic">{t("terrain.signals.impactHospital")} {sig.impact_on_hospital}</p>
                 )}
               </div>
             ))}
@@ -487,12 +490,12 @@ function TerrainView() {
           <div className="flex items-center justify-between mb-4">
             <h3 className="flex items-center gap-2 text-lg font-semibold text-white">
               <Zap size={16} className="text-gold-400" />
-              Copernicus Climate Data Store (CDS) · ERA5
+              {t("terrain.climate.heading")}
             </h3>
             <span className={`rounded-full border px-3 py-1 text-xs font-medium ${
               climate.api_status.includes("verified") ? "border-brand-500/30 bg-brand-500/10 text-brand-300" : "border-gold-500/30 bg-gold-500/10 text-gold-300"
             }`}>
-              {climate.api_status === "connected_verified" ? "API Connectée" : "Mode simulé / Configuré"}
+              {climate.api_status === "connected_verified" ? t("terrain.climate.apiConnected") : t("terrain.climate.apiSimulated")}
             </span>
           </div>
           
@@ -505,28 +508,28 @@ function TerrainView() {
           <div className="grid grid-cols-2 gap-3 sm:grid-cols-4 mb-4">
             <div className="rounded-2xl border border-white/10 bg-forest-900/60 p-3 text-center">
               <p className="text-2xl font-bold text-gold-300">{climate.climatology.historical_mean_temp_may_c}°C</p>
-              <p className="mt-1 text-xs text-forest-400">Moyenne historique (Mai)</p>
+              <p className="mt-1 text-xs text-forest-400">{t("terrain.climate.historicalMeanMay")}</p>
             </div>
             <div className="rounded-2xl border border-white/10 bg-forest-900/60 p-3 text-center">
               <p className="text-2xl font-bold text-gold-300">+{climate.climatology.current_anomaly_c}°C</p>
-              <p className="mt-1 text-xs text-forest-400">Anomalie thermique</p>
+              <p className="mt-1 text-xs text-forest-400">{t("terrain.climate.thermalAnomaly")}</p>
             </div>
             <div className="rounded-2xl border border-white/10 bg-forest-900/60 p-3 text-center">
               <p className="text-2xl font-bold text-gold-300">{climate.climatology.soil_moisture_deficit_percent}%</p>
-              <p className="mt-1 text-xs text-forest-400">Déficit d'humidité des sols</p>
+              <p className="mt-1 text-xs text-forest-400">{t("terrain.climate.soilMoistureDeficit")}</p>
             </div>
             <div className="rounded-2xl border border-white/10 bg-forest-900/60 p-3 text-center">
               <p className="text-2xl font-bold text-rose-300">{climate.climatology.heatwave_hazard_index.toUpperCase()}</p>
-              <p className="mt-1 text-xs text-forest-400">Risque canicule</p>
+              <p className="mt-1 text-xs text-forest-400">{t("terrain.climate.heatwaveRisk")}</p>
             </div>
           </div>
 
           <div className="rounded-2xl border border-white/10 bg-forest-900/60 p-4">
-            <h4 className="text-xs font-semibold uppercase tracking-wider text-forest-400 mb-2">Projections climatiques horizon 2030 (Transfrontalier)</h4>
+            <h4 className="text-xs font-semibold uppercase tracking-wider text-forest-400 mb-2">{t("terrain.climate.projectionsTitle")}</h4>
             <ul className="space-y-1.5 text-xs text-forest-300">
-              <li>• Augmentation des jours de canicule extrême : <span className="text-white font-medium">+{climate.projections_2030.expected_heatwave_days_increase_per_year} jours/an</span></li>
-              <li>• Augmentation des précipitations extrêmes : <span className="text-white font-medium">+{climate.projections_2030.expected_heavy_precipitation_increase_percent}%</span></li>
-              <li>• Facteur de vulnérabilité EMS principal : <span className="text-white font-medium">{climate.projections_2030.ems_vulnerability_factor.replace(/_/g, " ")}</span></li>
+              <li>• {t("terrain.climate.heatwaveDaysIncrease")} <span className="text-white font-medium">+{climate.projections_2030.expected_heatwave_days_increase_per_year} {t("terrain.climate.daysPerYear")}</span></li>
+              <li>• {t("terrain.climate.heavyPrecipitationIncrease")} <span className="text-white font-medium">+{climate.projections_2030.expected_heavy_precipitation_increase_percent}%</span></li>
+              <li>• {t("terrain.climate.emsVulnerabilityFactor")} <span className="text-white font-medium">{climate.projections_2030.ems_vulnerability_factor.replace(/_/g, " ")}</span></li>
             </ul>
           </div>
           
@@ -630,8 +633,9 @@ function GesicaSignalsPanel({ summary }: { summary: EvidenceSummaryResponse }) {
 }
 
 function StatsView({ corpusStats, fulltextStats, scenarios, statsByYear }: { corpusStats: CorpusStats | null; fulltextStats: FulltextStats | null; scenarios?: GesicaScenario[]; statsByYear?: CorpusStatsByYear | null }) {
+  const { t } = useI18n();
   if (!corpusStats) {
-    return <div className="text-sm text-forest-400">Chargement des statistiques...</div>;
+    return <div className="text-sm text-forest-400">{t("stats.loading")}</div>;
   }
 
   return (
@@ -640,37 +644,37 @@ function StatsView({ corpusStats, fulltextStats, scenarios, statsByYear }: { cor
         <div className="rounded-3xl border border-white/10 bg-white/5 p-5 shadow-2xl">
           <h2 className="mb-4 flex items-center gap-2 text-lg font-semibold text-white">
             <BarChart2 size={18} className="text-brand-400" />
-            Corpus
+            {t("stats.corpus")}
           </h2>
           <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
             <div className="rounded-2xl border border-white/10 bg-forest-900/60 p-4 text-center">
               <p className="text-2xl font-bold text-brand-300">{corpusStats.totalDocuments.toLocaleString()}</p>
-              <p className="mt-1 text-xs text-forest-400">Documents</p>
+              <p className="mt-1 text-xs text-forest-400">{t("stats.documents")}</p>
             </div>
             <div className="rounded-2xl border border-white/10 bg-forest-900/60 p-4 text-center">
               <p className="text-2xl font-bold text-brand-300">{corpusStats.totalChunks.toLocaleString()}</p>
               {fulltextStats?.chunks && (
                 <p className="mt-0.5 text-[10px] font-mono text-forest-400">
-                  <span className="text-blue-300">{fulltextStats.chunks.fulltext.toLocaleString()}</span> texte intégral · {fulltextStats.chunks.abstract.toLocaleString()} résumé
+                  <span className="text-blue-300">{fulltextStats.chunks.fulltext.toLocaleString()}</span> {t("stats.fulltextSuffix")} · {fulltextStats.chunks.abstract.toLocaleString()} {t("stats.abstractSuffix")}
                 </p>
               )}
-              <p className="mt-1 text-xs text-forest-400">Chunks</p>
+              <p className="mt-1 text-xs text-forest-400">{t("stats.chunks")}</p>
             </div>
             <div className="rounded-2xl border border-white/10 bg-forest-900/60 p-4 text-center">
               <p className="text-2xl font-bold text-brand-300">{(scenarios ?? []).filter(s => !s.hidden).length}</p>
-              <p className="mt-1 text-xs text-forest-400">Scénarios</p>
+              <p className="mt-1 text-xs text-forest-400">{t("stats.scenarios")}</p>
             </div>
             <div className="rounded-2xl border border-white/10 bg-forest-900/60 p-4 text-center">
               <p className="text-2xl font-bold text-brand-300">{fulltextStats?.by_source?.length ?? Object.keys(corpusStats.bySource).length}</p>
-              <p className="mt-1 text-xs text-forest-400">Sources</p>
+              <p className="mt-1 text-xs text-forest-400">{t("stats.sources")}</p>
             </div>
           </div>
 
           {/* Couverture texte intégral (fusion de l'ancien panneau "Couverture textuelle") */}
           {fulltextStats && (
             <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-forest-400">
-              <span>Texte intégral : <span className="text-blue-300 font-semibold">{fulltextStats.corpus.docs_with_fulltext.toLocaleString()}</span> / {corpusStats.totalDocuments.toLocaleString()} <span className="text-white/40">({fulltextStats.corpus.fulltext_coverage_pct.toFixed(1)}%)</span></span>
-              <span>Résumé seul : <span className="text-white/70 font-semibold">{fulltextStats.corpus.docs_abstract_only.toLocaleString()}</span></span>
+              <span>{t("stats.fulltextLabel")} <span className="text-blue-300 font-semibold">{fulltextStats.corpus.docs_with_fulltext.toLocaleString()}</span> / {corpusStats.totalDocuments.toLocaleString()} <span className="text-white/40">({fulltextStats.corpus.fulltext_coverage_pct.toFixed(1)}%)</span></span>
+              <span>{t("stats.abstractOnlyLabel")} <span className="text-white/70 font-semibold">{fulltextStats.corpus.docs_abstract_only.toLocaleString()}</span></span>
             </div>
           )}
 
@@ -679,16 +683,16 @@ function StatsView({ corpusStats, fulltextStats, scenarios, statsByYear }: { cor
             <div>
               <h3 className="mb-3 text-sm font-medium text-forest-300 flex items-center gap-1.5">
                 <BarChart2 size={13} className="text-brand-400" />
-                Détail des chunks
+                {t("stats.chunkDetail")}
               </h3>
               {fulltextStats?.chunks ? (() => {
                 const ch = fulltextStats.chunks!;
                 const emb = fulltextStats.embeddings;
                 const tot = ch.total || 1;
                 const rows = [
-                  { label: 'Texte intégral', value: ch.fulltext, cls: 'from-blue-500 to-blue-400' },
-                  { label: 'Résumé (titre + abstract)', value: ch.abstract, cls: 'from-gold-500 to-gold-400' },
-                  ...(ch.other > 0 ? [{ label: 'Autres', value: ch.other, cls: 'from-forest-600 to-forest-500' }] : []),
+                  { label: t("stats.chunkFulltext"), value: ch.fulltext, cls: 'from-blue-500 to-blue-400' },
+                  { label: t("stats.chunkAbstract"), value: ch.abstract, cls: 'from-gold-500 to-gold-400' },
+                  ...(ch.other > 0 ? [{ label: t("stats.chunkOther"), value: ch.other, cls: 'from-forest-600 to-forest-500' }] : []),
                 ];
                 return (
                   <div className="space-y-2">
@@ -704,20 +708,20 @@ function StatsView({ corpusStats, fulltextStats, scenarios, statsByYear }: { cor
                       </div>
                     ))}
                     <p className="pt-1.5 mt-1 text-[11px] text-forest-400 border-t border-white/5">
-                      <span className="text-white/70 font-semibold">{ch.total.toLocaleString()}</span> chunks au total
-                      {emb && <> · <span className="text-blue-300">{emb.chunks_with_embedding.toLocaleString()}</span> indexés ({emb.embedding_coverage_pct.toFixed(0)}%)</>}
+                      <span className="text-white/70 font-semibold">{ch.total.toLocaleString()}</span> {t("stats.chunksTotalSuffix")}
+                      {emb && <> · <span className="text-blue-300">{emb.chunks_with_embedding.toLocaleString()}</span> {t("stats.indexedSuffix")} ({emb.embedding_coverage_pct.toFixed(0)}%)</>}
                     </p>
                   </div>
                 );
               })() : (
-                <p className="text-xs text-forest-400">Chargement…</p>
+                <p className="text-xs text-forest-400">{t("common.loadingEllipsis")}</p>
               )}
             </div>
             {/* Par source */}
             <div>
               <h3 className="mb-3 text-sm font-medium text-forest-300 flex items-center gap-1.5">
                 <BookOpen size={13} className="text-brand-400" />
-                Par source
+                {t("stats.bySource")}
               </h3>
               <div className="space-y-1.5">
                 {(() => {
@@ -736,8 +740,8 @@ function StatsView({ corpusStats, fulltextStats, scenarios, statsByYear }: { cor
                         <span className="font-mono"><span className="text-blue-300">{r.ft.toLocaleString()}</span><span className="text-white/30"> / {r.total.toLocaleString()}</span></span>
                       </div>
                       <div className="h-1.5 w-full rounded-full bg-white/5 overflow-hidden flex">
-                        <div className="h-full bg-blue-400 transition-all" style={{ width: `${Math.round((r.ft / maxVal) * 100)}%` }} title="Texte intégral" />
-                        <div className="h-full bg-gradient-to-r from-gold-500 to-gold-400 transition-all" style={{ width: `${Math.round((Math.max(0, r.total - r.ft) / maxVal) * 100)}%` }} title="Résumé seul" />
+                        <div className="h-full bg-blue-400 transition-all" style={{ width: `${Math.round((r.ft / maxVal) * 100)}%` }} title={t("stats.fulltextBarTitle")} />
+                        <div className="h-full bg-gradient-to-r from-gold-500 to-gold-400 transition-all" style={{ width: `${Math.round((Math.max(0, r.total - r.ft) / maxVal) * 100)}%` }} title={t("stats.abstractBarTitle")} />
                       </div>
                     </div>
                   ));
@@ -755,7 +759,7 @@ function StatsView({ corpusStats, fulltextStats, scenarios, statsByYear }: { cor
                   const yrs = Object.keys(statsByYear.byYear).map((y) => parseInt(y)).filter((y) => !isNaN(y));
                   const lo = yrs.length ? Math.min(...yrs) : new Date().getFullYear();
                   const hi = yrs.length ? Math.max(...yrs) : new Date().getFullYear();
-                  return `Évolution temporelle (${lo}–${hi})`;
+                  return `${t("stats.timeEvolution")} (${lo}–${hi})`;
                 })()}
               </h3>
               {(() => {
@@ -780,7 +784,7 @@ function StatsView({ corpusStats, fulltextStats, scenarios, statsByYear }: { cor
                         return (
                           <div
                             key={y}
-                            title={`${y} : ${c.toLocaleString()} article${c > 1 ? 's' : ''}`}
+                            title={`${y} : ${c.toLocaleString()} ${c > 1 ? t("stats.articles") : t("stats.article")}`}
                             className={`flex-1 rounded-t transition-all hover:opacity-80 ${y >= 2020 ? 'bg-gradient-to-t from-brand-600 to-brand-400' : 'bg-forest-500/70'}`}
                             style={{ height: `${c > 0 ? Math.max(2, pct) : 0}%` }}
                           />
@@ -793,7 +797,7 @@ function StatsView({ corpusStats, fulltextStats, scenarios, statsByYear }: { cor
                       <span>{maxY}</span>
                     </div>
                     <p className="mt-2 text-xs text-forest-400 italic">
-                      Pic : <span className="not-italic font-semibold text-brand-300">{peakYear}</span> ({counts[peakYear].toLocaleString()} articles) · 2020+ en évidence.
+                      {t("stats.peak")} <span className="not-italic font-semibold text-brand-300">{peakYear}</span> ({counts[peakYear].toLocaleString()} {t("stats.articles")}) {t("stats.peakSuffix")}
                     </p>
                   </>
                 );
@@ -808,7 +812,7 @@ function StatsView({ corpusStats, fulltextStats, scenarios, statsByYear }: { cor
         <div className="rounded-3xl border border-white/10 bg-white/5 p-5 shadow-2xl">
           <h2 className="mb-4 flex items-center gap-2 text-lg font-semibold text-white">
             <Activity size={18} className="text-brand-400" />
-            Heatmap : scénarios × sources
+            {t("stats.heatmapTitle")}
           </h2>
           {(() => {
             // Nouvelle forme : { scenario_id: { name, sources: { src: {total, fulltext} } } }.
@@ -828,11 +832,11 @@ function StatsView({ corpusStats, fulltextStats, scenarios, statsByYear }: { cor
                 <table className="w-full text-xs">
                   <thead>
                     <tr>
-                      <th className="text-left text-forest-400 font-normal pb-2 pr-3 min-w-[160px]">Scénario ({rows.length})</th>
+                      <th className="text-left text-forest-400 font-normal pb-2 pr-3 min-w-[160px]">{t("stats.heatmapScenario")} ({rows.length})</th>
                       {allSources.map(src => (
                         <th key={src} className="text-center text-forest-400 font-normal pb-2 px-1 capitalize">{src}</th>
                       ))}
-                      <th className="text-right text-forest-400 font-normal pb-2 pl-2">Total</th>
+                      <th className="text-right text-forest-400 font-normal pb-2 pl-2">{t("stats.heatmapTotal")}</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -850,7 +854,7 @@ function StatsView({ corpusStats, fulltextStats, scenarios, statsByYear }: { cor
                               key={src}
                               className="text-center py-1 px-1 font-mono rounded leading-tight align-middle"
                               style={{ backgroundColor: bg, color: val > 0 ? '#d1fae5' : '#374151' }}
-                              title={val > 0 ? `${val} articles · ${ft} en texte intégral` : undefined}
+                              title={val > 0 ? `${val} ${t("stats.heatmapCellTooltip")} ${ft} ${t("stats.heatmapFulltextTooltip")}` : undefined}
                             >
                               {val > 0 ? (
                                 <>
@@ -869,7 +873,7 @@ function StatsView({ corpusStats, fulltextStats, scenarios, statsByYear }: { cor
                     ))}
                   </tbody>
                 </table>
-                <p className="mt-2 text-[10px] text-forest-400 italic">Chaque cellule : nombre d'articles · « ft » = en texte intégral.</p>
+                <p className="mt-2 text-[10px] text-forest-400 italic">{t("stats.heatmapLegend")}</p>
               </div>
             );
           })()}
@@ -881,7 +885,7 @@ function StatsView({ corpusStats, fulltextStats, scenarios, statsByYear }: { cor
         <div className="rounded-3xl border border-white/10 bg-white/5 p-6 shadow-2xl">
           <h3 className="mb-4 text-base font-semibold text-white flex items-center gap-2">
             <Activity size={16} className="text-brand-400" />
-            Progression du Screening par Scénario
+            {t("stats.screeningProgress")}
           </h3>
           <div className="space-y-2">
             {scenarios.filter(s => !s.hidden && s.articleCount > 0).map(s => {
@@ -897,10 +901,10 @@ function StatsView({ corpusStats, fulltextStats, scenarios, statsByYear }: { cor
                   <div className="flex items-center justify-between mb-1.5">
                     <span className="text-xs font-semibold text-white/80 truncate max-w-[220px]">{s.title}</span>
                     <div className="flex items-center gap-3 text-[10px] shrink-0">
-                      <span className="text-brand-300">{included} inclus</span>
-                      <span className="text-red-400">{excluded} exclus</span>
-                      <span className="text-white/35">{pending} en attente</span>
-                      <span className="text-white/50 font-mono">{total} total</span>
+                      <span className="text-brand-300">{included} {t("stats.included")}</span>
+                      <span className="text-red-400">{excluded} {t("stats.excluded")}</span>
+                      <span className="text-white/35">{pending} {t("stats.pending")}</span>
+                      <span className="text-white/50 font-mono">{total} {t("stats.total")}</span>
                     </div>
                   </div>
                   <div className="h-1.5 bg-white/5 rounded-full overflow-hidden flex">
@@ -909,10 +913,10 @@ function StatsView({ corpusStats, fulltextStats, scenarios, statsByYear }: { cor
                     <div className="h-full bg-white/10 transition-all" style={{width:`${pctPending}%`}}/>
                   </div>
                   <div className="flex gap-3 mt-1 text-[9px] text-white/30">
-                    <span className="flex items-center gap-1"><span className="h-1.5 w-1.5 rounded-full bg-brand-500 inline-block"/>Inclus {pctIncluded}%</span>
-                    <span className="flex items-center gap-1"><span className="h-1.5 w-1.5 rounded-full bg-red-500/60 inline-block"/>Exclus {pctExcluded}%</span>
-                    <span className="flex items-center gap-1"><span className="h-1.5 w-1.5 rounded-full bg-white/10 inline-block"/>En attente {pctPending}%</span>
-                    {s.kappa_score != null && <span className="ml-auto text-white/40">Kappa: <span className="font-mono">{s.kappa_score.toFixed(2)}</span></span>}
+                    <span className="flex items-center gap-1"><span className="h-1.5 w-1.5 rounded-full bg-brand-500 inline-block"/>{t("stats.includedPct")} {pctIncluded}%</span>
+                    <span className="flex items-center gap-1"><span className="h-1.5 w-1.5 rounded-full bg-red-500/60 inline-block"/>{t("stats.excludedPct")} {pctExcluded}%</span>
+                    <span className="flex items-center gap-1"><span className="h-1.5 w-1.5 rounded-full bg-white/10 inline-block"/>{t("stats.pendingPct")} {pctPending}%</span>
+                    {s.kappa_score != null && <span className="ml-auto text-white/40">{t("stats.kappa")} <span className="font-mono">{s.kappa_score.toFixed(2)}</span></span>}
                   </div>
                 </div>
               );
@@ -1005,6 +1009,7 @@ function ScenariosView({
   onRenameFolder?: (folderId: string, name: string, color: string) => Promise<void>;
   onAssignFolder?: (scenarioId: string, folderId: string | null) => Promise<void>;
 }) {
+  const { t } = useI18n();
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [detailScenarioId, setDetailScenarioId] = useState<string | null>(null);
   const [detailInitialTab, setDetailInitialTab] = useState<"model" | undefined>(undefined);
@@ -1026,7 +1031,7 @@ function ScenariosView({
     return (
       <div className="flex items-center justify-center py-16 text-forest-400">
         <RotateCcw size={18} className="mr-2 animate-spin" />
-        Chargement des scénarios...
+        {t("scenarios.loading")}
       </div>
     );
   }
@@ -1035,9 +1040,9 @@ function ScenariosView({
     return (
       <div className="flex flex-col items-center justify-center py-16 gap-3">
         <div className="rounded-2xl border border-red-500/30 bg-red-500/10 px-6 py-4 text-red-300 max-w-xl text-center">
-          <p className="font-semibold mb-1">Erreur de chargement des scénarios</p>
+          <p className="font-semibold mb-1">{t("scenarios.loadErrorTitle")}</p>
           <p className="text-sm text-red-400 font-mono break-all">{error}</p>
-          <p className="text-xs text-forest-400 mt-2">Vérifiez que le service API est démarré et que <code>/api/gesica/scenarios</code> répond correctement.</p>
+          <p className="text-xs text-forest-400 mt-2">{t("scenarios.loadErrorHint1")} <code>/api/gesica/scenarios</code> {t("scenarios.loadErrorHint2")}</p>
         </div>
       </div>
     );
@@ -1047,7 +1052,7 @@ function ScenariosView({
     return (
       <div className="flex items-center justify-center py-16 text-forest-400">
         <RotateCcw size={18} className="mr-2 animate-spin" />
-        Chargement des scénarios...
+        {t("scenarios.loading")}
       </div>
     );
   }
@@ -1091,11 +1096,11 @@ function ScenariosView({
               }`}>{scenario.cluster}</span>
               {hasArticles ? (
                 <span className="rounded-full bg-brand-500/10 border border-brand-500/20 px-2 py-0.5 text-xs text-brand-300 font-mono">
-                  {scenario.articleCount} articles
+                  {scenario.articleCount} {t("scenarios.articles")}
                 </span>
               ) : (
                 <span className="rounded-full bg-forest-700/40 border border-white/5 px-2 py-0.5 text-xs text-forest-500">
-                  0 articles
+                  0 {t("scenarios.articles")}
                 </span>
               )}
             </div>
@@ -1105,9 +1110,9 @@ function ScenariosView({
             <button
               onClick={(e) => { e.stopPropagation(); setDetailInitialTab(undefined); setDetailScenarioId(scenario.id); }}
               className="rounded-xl border border-brand-500/20 bg-brand-500/10 px-2.5 py-1 text-[10px] text-brand-300 hover:bg-brand-500/20 transition font-medium"
-              title="Ouvrir la page détail du scénario"
+              title={t("scenarios.detailPageTooltip")}
             >
-              Page détail
+              {t("scenarios.detailPage")}
             </button>
             {isUser && (
               <>
@@ -1115,32 +1120,32 @@ function ScenariosView({
                   <button type="button" onClick={(e) => { e.stopPropagation(); onPopulateUserScenario(scenario.id); }}
                     disabled={populatingId === scenario.id}
                     className="rounded-xl border border-forest-500/30 px-2 py-1 text-[10px] text-forest-300 hover:bg-forest-500/10 transition disabled:opacity-50"
-                    title="Ingérer des articles">
+                    title={t("scenarios.ingestArticlesTooltip")}>
                     {populatingId === scenario.id ? <RotateCcw size={11} className="animate-spin" /> : <Zap size={11} />}
                   </button>
                 )}
                 {onReplaySearch && (
                   <button type="button" onClick={(e) => { e.stopPropagation(); const saved = savedSearches.find(ss => ss.id === scenario.id); if (saved) onReplaySearch(saved); }}
-                    className="rounded-xl border border-white/10 px-2 py-1 text-[10px] text-white/40 hover:text-white hover:bg-white/10 transition" title="Relancer la recherche">↻</button>
+                    className="rounded-xl border border-white/10 px-2 py-1 text-[10px] text-white/40 hover:text-white hover:bg-white/10 transition" title={t("scenarios.replaySearchTooltip")}>↻</button>
                 )}
                 {onAssignFolder && (
                   <button type="button" onClick={(e) => { e.stopPropagation(); setAssigningScenarioId(scenario.id); }}
-                    className="rounded-xl border border-white/10 px-2 py-1 text-[10px] text-white/30 hover:text-white hover:bg-white/10 transition" title="Assigner à un dossier"><FolderOpen size={11} /></button>
+                    className="rounded-xl border border-white/10 px-2 py-1 text-[10px] text-white/30 hover:text-white hover:bg-white/10 transition" title={t("scenarios.assignFolderTooltip")}><FolderOpen size={11} /></button>
                 )}
                 {onTogglePin && (
                   <button type="button" onClick={(e) => { e.stopPropagation(); onTogglePin(scenario.id); }}
                     className={`rounded-xl border px-2 py-1 text-[10px] transition ${(scenario as any).pinned ? "border-gold-400/30 text-gold-400 hover:bg-gold-500/10" : "border-white/10 text-white/30 hover:text-gold-300 hover:bg-white/10"}`}
-                    title={(scenario as any).pinned ? "Désépingler" : "Épingler"}>★</button>
+                    title={(scenario as any).pinned ? t("scenarios.unpinTooltip") : t("scenarios.pinTooltip")}>★</button>
                 )}
                 {onDeleteSearch && (
                   <button type="button" onClick={(e) => { e.stopPropagation(); onDeleteSearch(scenario.id); }}
-                    className="rounded-xl border border-white/10 px-2 py-1 text-[10px] text-white/30 hover:text-red-400 hover:border-red-500/20 transition" title="Supprimer">✕</button>
+                    className="rounded-xl border border-white/10 px-2 py-1 text-[10px] text-white/30 hover:text-red-400 hover:border-red-500/20 transition" title={t("scenarios.deleteTooltip")}>✕</button>
                 )}
               </>
             )}
             {!isUser && onDeleteSearch && (
               <button type="button" onClick={(e) => { e.stopPropagation(); onDeleteSearch(scenario.id); }}
-                className="rounded-xl border border-white/10 px-2 py-1 text-[10px] text-white/30 hover:text-red-400 hover:border-red-500/20 transition" title="Supprimer">✕</button>
+                className="rounded-xl border border-white/10 px-2 py-1 text-[10px] text-white/30 hover:text-red-400 hover:border-red-500/20 transition" title={t("scenarios.deleteTooltip")}>✕</button>
             )}
             {isExpanded ? <ChevronUp size={16} className="text-forest-500" /> : <ChevronDown size={16} className="text-forest-500" />}
           </div>
@@ -1149,22 +1154,22 @@ function ScenariosView({
             carte unique en haut de liste qui obligeait à scroller bien au-dessus). */}
         {assigningScenarioId === scenario.id && (
           <div className="mt-3 rounded-2xl border border-brand-400/30 bg-brand-500/5 p-3 space-y-2">
-            <h4 className="text-xs font-semibold text-white">Placer dans un dossier</h4>
+            <h4 className="text-xs font-semibold text-white">{t("scenarios.placeInFolder")}</h4>
             <div className="flex flex-wrap gap-2">
               <button type="button" onClick={async (e) => { e.stopPropagation(); if (onAssignFolder) await onAssignFolder(scenario.id, null); setAssigningScenarioId(null); }}
-                className="rounded-xl border border-white/10 px-3 py-1.5 text-xs text-white/50 hover:text-white hover:bg-white/10 transition">Sans dossier</button>
+                className="rounded-xl border border-white/10 px-3 py-1.5 text-xs text-white/50 hover:text-white hover:bg-white/10 transition">{t("scenarios.noFolder")}</button>
               {folders.map(f => (
                 <button key={f.id} type="button" onClick={async (e) => { e.stopPropagation(); if (onAssignFolder) await onAssignFolder(scenario.id, f.id); setAssigningScenarioId(null); }}
                   className="rounded-xl border px-3 py-1.5 text-xs hover:opacity-80 transition"
                   style={{ borderColor: f.color + '60', backgroundColor: f.color + '20', color: f.color }}>{f.name}</button>
               ))}
               <button type="button" onClick={(e) => { e.stopPropagation(); setAssigningScenarioId(null); setFolderError(null); }}
-                className="rounded-xl border border-white/10 px-3 py-1.5 text-xs text-white/30 hover:text-white transition">Annuler</button>
+                className="rounded-xl border border-white/10 px-3 py-1.5 text-xs text-white/30 hover:text-white transition">{t("common.cancel")}</button>
             </div>
             {/* Créer un dossier ET y placer ce scénario en un clic */}
             <div className="flex items-center gap-2 pt-2 border-t border-white/10">
               <input type="text" value={newFolderName} onChange={e => setNewFolderName(e.target.value)} onClick={e => e.stopPropagation()}
-                placeholder="+ Nouveau dossier…"
+                placeholder={t("scenarios.newFolderPlaceholder")}
                 className="flex-1 rounded-xl border border-white/10 bg-white/5 px-3 py-1.5 text-xs text-white placeholder-white/30 focus:outline-none focus:border-brand-400" />
               <button type="button" disabled={!newFolderName.trim()}
                 onClick={async (e) => {
@@ -1175,10 +1180,10 @@ function ScenariosView({
                     if (nf && onAssignFolder) await onAssignFolder(scenario.id, nf.id);
                     setNewFolderName(''); setFolderError(null); setAssigningScenarioId(null);
                   } catch (err) {
-                    setFolderError(err instanceof Error ? err.message : 'Échec de la création du dossier');
+                    setFolderError(err instanceof Error ? err.message : t("scenarios.folderCreateError"));
                   }
                 }}
-                className="rounded-xl bg-brand-500/20 border border-brand-500/30 px-3 py-1.5 text-xs text-brand-300 hover:bg-brand-500/30 transition disabled:opacity-40 shrink-0">Créer &amp; assigner</button>
+                className="rounded-xl bg-brand-500/20 border border-brand-500/30 px-3 py-1.5 text-xs text-brand-300 hover:bg-brand-500/30 transition disabled:opacity-40 shrink-0">{t("scenarios.createAndAssign")}</button>
             </div>
             {folderError && <p className="text-[11px] text-rose-300">{folderError}</p>}
           </div>
@@ -1187,7 +1192,7 @@ function ScenariosView({
           <div className="mt-2 flex items-center gap-2 pl-12">
             <RotateCcw size={10} className="text-brand-400 animate-spin shrink-0" />
             <span className="text-xs text-brand-300">
-              {pipelineStatuses[scenario.id].overall_status === 'error' ? '⚠ Erreur pipeline' : `Pipeline : ${pipelineStatuses[scenario.id].current_step ?? 'en cours'}…`}
+              {pipelineStatuses[scenario.id].overall_status === 'error' ? t("scenarios.pipelineError") : `${t("scenarios.pipelinePrefix")} ${pipelineStatuses[scenario.id].current_step ?? t("scenarios.pipelineInProgress")}…`}
             </span>
           </div>
         )}
@@ -1203,7 +1208,7 @@ function ScenariosView({
                 <div className="flex items-center justify-between mb-2">
                   <div className="flex items-center gap-2">
                     <Activity size={14} className="text-brand-400" />
-                    <span className="text-xs font-semibold text-brand-300 uppercase tracking-wider">Modèle Prédictif</span>
+                    <span className="text-xs font-semibold text-brand-300 uppercase tracking-wider">{t("scenarios.predictiveModel")}</span>
                   </div>
                   {scenario.model?.has_model && scenario.model.family && (
                     <span className="text-[10px] text-brand-400 bg-brand-500/10 border border-brand-500/20 px-2 py-0.5 rounded-full">
@@ -1216,7 +1221,7 @@ function ScenariosView({
                   className="w-full flex items-center justify-center gap-1.5 rounded-xl border border-brand-500/30 bg-brand-500/10 text-brand-300 font-semibold py-2 text-xs hover:bg-brand-500/20 transition"
                 >
                   <Activity size={12} />
-                  {scenario.model?.has_model ? "Prédire / ouvrir le modèle" : "Entraîner & prédire (page détail)"}
+                  {scenario.model?.has_model ? t("scenarios.openModel") : t("scenarios.trainAndPredict")}
                 </button>
               </div>
             )}
@@ -1326,9 +1331,9 @@ function ScenariosView({
         <div className="flex items-center gap-3">
           <Activity size={20} className="text-brand-400" />
           <div>
-            <h2 className="text-xl font-semibold text-white">Tous les scénarios</h2>
+            <h2 className="text-xl font-semibold text-white">{t("scenarios.allScenarios")}</h2>
             <p className="text-xs text-forest-400 mt-0.5">
-              {totalScenarios} scénarios · {totalArticles.toLocaleString()} articles
+              {totalScenarios} {t("scenarios.scenariosCount")} · {totalArticles.toLocaleString()} {t("scenarios.articles")}
             </p>
           </div>
         </div>
@@ -1339,7 +1344,7 @@ function ScenariosView({
             className="shrink-0 flex items-center gap-1.5 rounded-xl border border-white/10 bg-white/5 px-3 py-1.5 text-xs text-white/60 hover:text-white hover:bg-white/10 transition"
           >
             <FolderOpen size={13} />
-            Nouveau dossier
+            {t("scenarios.newFolder")}
           </button>
         )}
       </div>
@@ -1355,7 +1360,7 @@ function ScenariosView({
                 {cluster} <span className="text-xs font-normal opacity-60">({clusterScenarios.length})</span>
               </h3>
               <span className="rounded-full border border-brand-500/20 bg-brand-500/10 px-2 py-0.5 text-[10px] text-brand-400 font-medium">
-                <RefreshCw size={8} className="inline mr-1" />Living Review
+                <RefreshCw size={8} className="inline mr-1" />{t("scenarios.livingReview")}
               </span>
             </div>
             {clusterScenarios.map(s => renderScenarioCard(s))}
@@ -1369,13 +1374,13 @@ function ScenariosView({
           {/* Dialog création dossier */}
           {showNewFolderDialog && (
             <div className="rounded-2xl border border-white/10 bg-white/5 p-4 space-y-3">
-              <h4 className="text-sm font-semibold text-white">Nouveau dossier</h4>
+              <h4 className="text-sm font-semibold text-white">{t("scenarios.newFolder")}</h4>
               <div className="flex gap-2">
                 <input
                   type="text"
                   value={newFolderName}
                   onChange={e => setNewFolderName(e.target.value)}
-                  placeholder="Nom du dossier"
+                  placeholder={t("scenarios.newFolderName")}
                   className="flex-1 rounded-xl border border-white/10 bg-white/5 px-3 py-1.5 text-sm text-white placeholder-white/30 focus:outline-none focus:border-brand-400"
                 />
                 <input
@@ -1383,7 +1388,7 @@ function ScenariosView({
                   value={newFolderColor}
                   onChange={e => setNewFolderColor(e.target.value)}
                   className="w-10 h-9 rounded-xl border border-white/10 bg-white/5 cursor-pointer"
-                  title="Couleur du dossier"
+                  title={t("scenarios.folderColorTitle")}
                 />
               </div>
               {folderError && <p className="text-[11px] text-rose-300">{folderError}</p>}
@@ -1399,15 +1404,15 @@ function ScenariosView({
                       setFolderError(null);
                       setShowNewFolderDialog(false);
                     } catch (e) {
-                      setFolderError(e instanceof Error ? e.message : 'Échec de la création du dossier');
+                      setFolderError(e instanceof Error ? e.message : t("scenarios.folderCreateError"));
                     }
                   }}
                   className="rounded-xl bg-brand-500/20 border border-brand-500/30 px-3 py-1.5 text-xs text-brand-300 hover:bg-brand-500/30 transition"
                 >
-                  Créer
+                  {t("common.create")}
                 </button>
                 <button type="button" onClick={() => { setShowNewFolderDialog(false); setFolderError(null); }} className="rounded-xl border border-white/10 px-3 py-1.5 text-xs text-white/40 hover:text-white transition">
-                  Annuler
+                  {t("common.cancel")}
                 </button>
               </div>
             </div>
@@ -1434,13 +1439,13 @@ function ScenariosView({
                   )}
                   {editingFolderId !== folder.id && (
                     <div className="flex gap-1">
-                      <button type="button" onClick={() => { setEditingFolderId(folder.id); setEditFolderName(folder.name); setEditFolderColor(folder.color); }} className="rounded-lg border border-white/10 px-2 py-1 text-xs text-white/30 hover:text-white transition" title="Renommer">✏</button>
-                      <button type="button" onClick={() => onDeleteFolder && onDeleteFolder(folder.id)} className="rounded-lg border border-white/10 px-2 py-1 text-xs text-white/30 hover:text-red-400 transition" title="Supprimer">✕</button>
+                      <button type="button" onClick={() => { setEditingFolderId(folder.id); setEditFolderName(folder.name); setEditFolderColor(folder.color); }} className="rounded-lg border border-white/10 px-2 py-1 text-xs text-white/30 hover:text-white transition" title={t("scenarios.renameTooltip")}>✏</button>
+                      <button type="button" onClick={() => onDeleteFolder && onDeleteFolder(folder.id)} className="rounded-lg border border-white/10 px-2 py-1 text-xs text-white/30 hover:text-red-400 transition" title={t("scenarios.deleteTooltip")}>✕</button>
                     </div>
                   )}
                 </div>
                 {folderScenarios.length === 0 && (
-                  <p className="text-xs text-white/30 italic">Aucun scénario dans ce dossier</p>
+                  <p className="text-xs text-white/30 italic">{t("scenarios.noScenarioInFolder")}</p>
                 )}
                 {folderScenarios.map(s => (
                   renderScenarioCard(s)
@@ -1452,7 +1457,7 @@ function ScenariosView({
           {/* Épinglés (hors dossier) */}
           {userScenarios.filter(s => s.pinned && !(s as any).folder_id).length > 0 && (
             <div className="space-y-2">
-              <h3 className="text-xs font-semibold text-gold-400 uppercase tracking-widest">Épinglés</h3>
+              <h3 className="text-xs font-semibold text-gold-400 uppercase tracking-widest">{t("scenarios.pinned")}</h3>
               {userScenarios.filter(s => s.pinned && !(s as any).folder_id).map(s => (
                 renderScenarioCard(s)
               ))}
@@ -1462,7 +1467,7 @@ function ScenariosView({
           {/* Non épinglés (hors dossier) */}
           {userScenarios.filter(s => !s.pinned && !(s as any).folder_id).length > 0 && (
             <div className="space-y-2">
-              <h3 className="text-xs font-semibold text-white/40 uppercase tracking-widest">Recherches récentes</h3>
+              <h3 className="text-xs font-semibold text-white/40 uppercase tracking-widest">{t("scenarios.recentSearches")}</h3>
               {userScenarios.filter(s => !s.pinned && !(s as any).folder_id).map(s => (
                 renderScenarioCard(s)
               ))}
@@ -2173,15 +2178,15 @@ export default function App() {
             <aside className="xl:sticky xl:top-8 xl:self-start">
               <div className="rounded-3xl border border-white/10 bg-white/5 p-5 shadow-2xl">
                 <div className="flex items-center justify-between">
-                  <h2 className="text-lg font-semibold text-white">Filtres</h2>
+                  <h2 className="text-lg font-semibold text-white">{t("search.filters")}</h2>
                   <button
                     type="button"
                     onClick={handleReset}
-                    title="Réinitialiser les filtres"
+                    title={t("search.resetFiltersTooltip")}
                     className="flex items-center gap-1 rounded-xl border border-white/10 px-2 py-1 text-xs text-forest-400 transition hover:border-white/20 hover:text-white/80"
                   >
                     <RotateCcw size={12} />
-                    Reset
+                    {t("search.reset")}
                   </button>
                 </div>
 
@@ -2195,13 +2200,13 @@ export default function App() {
                     return (
                       <div key={key} className="block">
                         <span className="mb-2 block text-sm font-medium text-white/80">
-                          {label}
+                          {t(label)}
                         </span>
                         {isDiseaseField && (
                           <div className="relative mb-1">
                             <input
                               type="text"
-                              placeholder="Rechercher une maladie..."
+                              placeholder={t("search.searchDiseasePlaceholder")}
                               value={diseaseSearch}
                               onChange={e => setDiseaseSearch(e.target.value)}
                               className="w-full rounded-xl border border-white/10 bg-forest-950/80 px-3 py-2 text-xs text-white placeholder-white/30 focus:border-brand-400 focus:outline-none"
@@ -2237,7 +2242,7 @@ export default function App() {
                           }
                           className="w-full appearance-none rounded-2xl border border-white/10 bg-forest-950/80 px-3 py-3 text-sm text-white focus:border-brand-400 focus:outline-none"
                         >
-                          <option value="">Tous</option>
+                          <option value="">{t("search.all")}</option>
                           {filteredOptions.map((opt) => (
                             <option key={String(opt.value)} value={String(opt.value)}>
                               {opt.label}
@@ -2250,7 +2255,7 @@ export default function App() {
 
                   <div>
                     <span className="mb-2 block text-sm font-medium text-white/80">
-                      Années{" "}
+                      {t("search.years")}{" "}
                       <span className="font-mono text-brand-300 text-xs">
                         {yearRange[0]} - {yearRange[1]}
                       </span>
@@ -2309,8 +2314,8 @@ export default function App() {
                     la page scénario pour sélectionner les articles pertinents). */}
                 <div className="mb-3 flex items-start gap-2 text-xs text-forest-300">
                   <span>
-                    Écrivez votre sujet de recherche en langage naturel <span className="text-white/50">(« prévision de la demande d'ambulances »)</span>{" "}
-                    ou en requête booléenne <span className="text-white/50">(« ambulance AND (demand OR forecasting) »)</span>.
+                    {t("search.explainerPart1")} <span className="text-white/50">{t("search.explainerExample1")}</span>{" "}
+                    {t("search.explainerPart2")} <span className="text-white/50">{t("search.explainerExample2")}</span>.
                   </span>
                 </div>
 
@@ -2319,7 +2324,7 @@ export default function App() {
                     value={query}
                     onChange={(e) => setQuery(e.target.value)}
                     onKeyDown={(e) => e.key === "Enter" && handleSearch()}
-                    placeholder="Ex. prévision de la demande d'ambulances  ou  ambulance AND forecasting"
+                    placeholder={t("search.queryPlaceholder")}
                     className="min-h-14 flex-1 rounded-2xl border border-white/10 bg-forest-950/80 px-4 text-white outline-none placeholder:text-forest-500 focus:border-brand-400"
                   />
                   <button
@@ -2329,7 +2334,7 @@ export default function App() {
                     disabled={loading}
                     className="min-h-14 rounded-2xl bg-brand-400 px-6 font-semibold text-forest-950 transition hover:bg-brand-300 disabled:cursor-not-allowed disabled:opacity-60"
                   >
-                    {loading ? "Recherche..." : "Rechercher"}
+                    {loading ? t("search.searching") : t("search.searchButton")}
                   </button>
                 </div>
 
@@ -2341,16 +2346,16 @@ export default function App() {
                     className="mt-0.5 h-4 w-4 accent-brand-400 shrink-0"
                   />
                   <span>
-                    <span>Inclure les sources API en direct (PubMed, OpenAlex, Crossref, EuropePMC, Preprints)</span>
-                    <span className="block text-forest-500 mt-0.5">Recherche plus lente, ajoute les articles non encore indexes</span>
+                    <span>{t("search.includeLive")}</span>
+                    <span className="block text-forest-500 mt-0.5">{t("search.includeLiveHint")}</span>
                   </span>
                 </label>
 
                 {mode === "boolean" && (translatingQuery || booleanStrategy?.general) && (
                   <div className="mt-3 rounded-2xl border border-brand-400/20 bg-brand-400/5 p-3">
                     <div className="flex items-center gap-2 text-xs text-brand-300/80">
-                      <span>Requête booléenne</span>
-                      {translatingQuery && <span className="text-white/40">· traduction…</span>}
+                      <span>{t("search.booleanQuery")}</span>
+                      {translatingQuery && <span className="text-white/40">{t("search.translating")}</span>}
                     </div>
                     {booleanStrategy?.general && (
                       <code className="mt-1.5 block break-words font-mono text-xs text-white/80">
@@ -2382,23 +2387,23 @@ export default function App() {
                   .sort((a, b) => (b[1] as number) - (a[1] as number));
                 const fetchedSoFar = srcEntries.reduce((a, [, n]) => a + (n as number), 0);
                 const steps: { label: string; done: boolean; active: boolean; hint?: string }[] = [
-                  { label: "Traduction de la requête", done: !translating, active: translating },
-                  { label: "Recherche dans la base locale indexée", done: !translating && rank > 1, active: !translating && rank <= 1 },
+                  { label: t("search.stepTranslate"), done: !translating, active: translating },
+                  { label: t("search.stepLocal"), done: !translating && rank > 1, active: !translating && rank <= 1 },
                   ...(includeLive ? [{
-                    label: "Interrogation des sources API en direct",
+                    label: t("search.stepLive"),
                     done: rank > 2,
                     active: rank === 2,
                     hint: rank === 2
-                      ? (fetchedSoFar > 0 ? `${fetchedSoFar} références récupérées` : liveSources[searchElapsed % liveSources.length])
+                      ? (fetchedSoFar > 0 ? `${fetchedSoFar} ${t("search.referencesFetched")}` : liveSources[searchElapsed % liveSources.length])
                       : undefined,
                   }] : []),
-                  { label: "Calcul des scores de pertinence", done: rank > 3 && !searchFinalizing, active: rank === 3 },
-                  { label: "Affinage du classement (Cohere)", done: false, active: searchFinalizing },
+                  { label: t("search.stepScoring"), done: rank > 3 && !searchFinalizing, active: rank === 3 },
+                  { label: t("search.stepRerank"), done: false, active: searchFinalizing },
                 ];
                 return (
                   <div className="rounded-3xl border border-brand-400/20 bg-white/5 p-6">
                     <div className="flex items-center justify-between">
-                      <p className="text-sm font-semibold text-white">Construction du corpus en cours…</p>
+                      <p className="text-sm font-semibold text-white">{t("search.buildingCorpus")}</p>
                       <span className="font-mono text-xs text-white/40">{searchElapsed}s</span>
                     </div>
                     <ul className="mt-4 space-y-2.5">
@@ -2431,7 +2436,7 @@ export default function App() {
                       </div>
                     )}
                     <p className="mt-4 text-[11px] leading-snug text-white/30">
-                      Les résultats s'afficheront une fois la récupération et le scoring terminés.
+                      {t("search.resultsWillAppear")}
                     </p>
                   </div>
                 );
@@ -2439,7 +2444,7 @@ export default function App() {
 
               {!loading && !error && !hasResults && (
                 <div className="rounded-3xl border border-dashed border-white/10 bg-white/5 p-10 text-center text-forest-300">
-                  Lancez une recherche pour afficher les résultats.
+                  {t("search.launchPrompt")}
                 </div>
               )}
 
@@ -2454,8 +2459,8 @@ export default function App() {
                           return (
                             <>
                               <span className="font-semibold text-white">{total.toLocaleString()}</span>{" "}
-                              document{total > 1 ? "s" : ""} pertinent{total > 1 ? "s" : ""}
-                              {" "}· {totalPages > 1 ? `page ${page}/${totalPages}` : "1 page"}
+                              {total > 1 ? t("search.documents") : t("search.document")} {total > 1 ? t("search.relevantPlural") : t("search.relevant")}
+                              {" "}· {totalPages > 1 ? `${t("search.page")} ${page}/${totalPages}` : t("search.onePage")}
                             </>
                           );
                         })()}
@@ -2463,7 +2468,7 @@ export default function App() {
                       {liveRefreshing && (
                         <p className="flex items-center gap-2 text-xs text-emerald-300/80">
                           <span className="h-3 w-3 animate-spin rounded-full border-2 border-emerald-300/30 border-t-emerald-300" />
-                          {refreshLabel ?? "Mise à jour des résultats en cours…"}
+                          {refreshLabel ?? t("search.refreshingResults")}
                         </p>
                       )}
                       {searchSourceBreakdown && Object.keys(searchSourceBreakdown).length > 0 && (() => {
@@ -2473,7 +2478,7 @@ export default function App() {
                           <>
                             {localEntries.length > 0 && (
                               <div className="flex flex-wrap items-center gap-1.5">
-                                <span className="text-[10px] text-white/25 uppercase tracking-wider">Base locale</span>
+                                <span className="text-[10px] text-white/25 uppercase tracking-wider">{t("search.localBase")}</span>
                                 {localEntries.map(([src, count]) => (
                                   <span key={src} className="rounded-lg border border-white/10 bg-white/5 px-2 py-0.5 text-xs text-white/50">
                                     {src}: <span className="font-semibold text-white/70">{count}</span>
@@ -2483,14 +2488,14 @@ export default function App() {
                             )}
                             {liveEntries.length > 0 && (
                               <div className="flex flex-wrap items-center gap-1.5">
-                                <span className="text-[10px] text-emerald-500/60 uppercase tracking-wider">API en direct</span>
+                                <span className="text-[10px] text-emerald-500/60 uppercase tracking-wider">{t("search.liveApi")}</span>
                                 {liveEntries.map(([src, count]) => (
                                   <span key={src} className="rounded-lg border border-emerald-500/20 bg-emerald-500/5 px-2 py-0.5 text-xs text-emerald-400/70">
                                     {src.replace(" (live)", "")}: <span className="font-semibold text-emerald-300">{count}</span>
                                   </span>
                                 ))}
                                 {searchLiveNewCount != null && searchLiveNewCount > 0 && (
-                                  <span className="text-[10px] text-emerald-500/50">+{searchLiveNewCount} nouvelles références</span>
+                                  <span className="text-[10px] text-emerald-500/50">+{searchLiveNewCount} {t("search.newReferences")}</span>
                                 )}
                               </div>
                             )}
@@ -2499,12 +2504,12 @@ export default function App() {
                       })()}
                       {(searchFulltextDocs != null || searchAbstractDocs != null) && (
                         <div className="flex flex-wrap items-center gap-1.5">
-                          <span className="text-[10px] text-white/25 uppercase tracking-wider">Contenu</span>
+                          <span className="text-[10px] text-white/25 uppercase tracking-wider">{t("search.content")}</span>
                           <span className="rounded-lg border border-brand-500/20 bg-brand-500/10 px-2 py-0.5 text-xs text-brand-300">
-                            Texte integral : <span className="font-semibold">{(searchFulltextDocs ?? 0).toLocaleString()}</span>
+                            {t("search.fulltext")} <span className="font-semibold">{(searchFulltextDocs ?? 0).toLocaleString()}</span>
                           </span>
                           <span className="rounded-lg border border-white/10 bg-white/5 px-2 py-0.5 text-xs text-white/50">
-                            Resume seul : <span className="font-semibold text-white/70">{(searchAbstractDocs ?? 0).toLocaleString()}</span>
+                            {t("search.abstractOnly")} <span className="font-semibold text-white/70">{(searchAbstractDocs ?? 0).toLocaleString()}</span>
                           </span>
                         </div>
                       )}
@@ -2514,10 +2519,10 @@ export default function App() {
                         type="button"
                         onClick={() => setShowSaveDialog(true)}
                         className="flex items-center gap-1.5 rounded-xl border border-gold-400/40 bg-gold-500/10 px-3 py-1.5 text-xs text-gold-300 transition hover:border-gold-400/70 hover:bg-gold-500/20"
-                        title="Sauvegarder cette recherche comme scénario"
+                        title={t("search.saveAsScenarioTooltip")}
                       >
                         <BookOpen size={12} />
-                        Sauvegarder comme scénario
+                        {t("search.saveAsScenario")}
                       </button>
                       <button
                         type="button"
@@ -2542,8 +2547,8 @@ export default function App() {
                   {showSaveDialog && (
                     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
                       <div className="w-full max-w-md rounded-3xl border border-gold-400/30 bg-[#0a1410] p-6 shadow-2xl">
-                        <h3 className="text-lg font-bold text-white mb-1">Sauvegarder comme scénario</h3>
-                        <p className="text-sm text-white/60 mb-4">Donnez un nom à ce scénario pour le retrouver facilement dans l'historique.</p>
+                        <h3 className="text-lg font-bold text-white mb-1">{t("search.saveAsScenario")}</h3>
+                        <p className="text-sm text-white/60 mb-4">{t("search.saveDialogDesc")}</p>
                         <input
                           type="text"
                           value={saveSearchName}
@@ -2559,14 +2564,14 @@ export default function App() {
                             onClick={() => { setShowSaveDialog(false); setSaveSearchName(""); }}
                             className="rounded-xl border border-white/10 px-4 py-2 text-sm text-white/60 hover:text-white transition"
                           >
-                            Annuler
+                            {t("common.cancel")}
                           </button>
                           <button
                             type="button"
                             onClick={handleSaveAsScenario}
                             className="rounded-xl bg-gold-400 px-4 py-2 text-sm font-semibold text-forest-950 hover:bg-gold-300 transition"
                           >
-                            Sauvegarder
+                            {t("search.save")}
                           </button>
                         </div>
                       </div>
@@ -2575,11 +2580,11 @@ export default function App() {
 
                   {/* Sort controls */}
                   <div className="flex flex-wrap items-center gap-2 mb-2 mt-1">
-                    <span className="text-xs text-forest-500">Trier :</span>
+                    <span className="text-xs text-forest-500">{t("search.sortBy")}</span>
                     {([
-                      ["relevance", "Pertinence"],
-                      ["year_desc", "Année ↓"],
-                      ["year_asc", "Année ↑"],
+                      ["relevance", t("search.sortRelevance")],
+                      ["year_desc", t("search.sortYearDesc")],
+                      ["year_asc", t("search.sortYearAsc")],
                     ] as [typeof sortBy, string][]).map(([val, label]) => (
                       <button
                         key={val}
@@ -2624,7 +2629,7 @@ export default function App() {
                                 rel="noopener noreferrer"
                                 className="inline-flex shrink-0 items-center gap-2 rounded-xl border border-white/10 px-3 py-2 text-sm text-white/80 hover:bg-white/10"
                               >
-                                Source
+                                {t("search.source")}
                                 <ExternalLink size={14} />
                               </a>
                             )}
@@ -2649,19 +2654,19 @@ export default function App() {
                                 (échelle distincte du cosinus, d'où l'affichage des deux). */}
                             {result.rerankScore != null && (
                               <span className="rounded-full bg-violet-500/15 px-2 py-1 text-violet-300 border border-violet-500/25"
-                                title="Reranking Cohere (cross-encoder) — affine l'ordre du sous-ensemble pertinent. Échelle distincte du cosinus.">
+                                title={t("search.rerankTooltip")}>
                                 ⊕ Rerank {(result.rerankScore).toFixed(2)}
                               </span>
                             )}
                             {/* Décomposition (hybride uniquement : sinon redondant avec le score global) */}
                             {searchScoreType === 'hybrid' && result.semanticScore != null && (
-                              <span className="rounded-full bg-blue-500/10 px-2 py-1 text-blue-300 border border-blue-500/20" title="Composante sémantique (cosinus)">
-                                Sém. {(result.semanticScore).toFixed(2)}
+                              <span className="rounded-full bg-blue-500/10 px-2 py-1 text-blue-300 border border-blue-500/20" title={t("search.semanticTooltip")}>
+                                {t("search.semanticShort")} {(result.semanticScore).toFixed(2)}
                               </span>
                             )}
                             {searchScoreType === 'hybrid' && result.lexicalScore != null && (
-                              <span className="rounded-full bg-amber-500/10 px-2 py-1 text-amber-300 border border-amber-500/20" title="Composante lexicale (BM25)">
-                                Lex. {(result.lexicalScore).toFixed(2)}
+                              <span className="rounded-full bg-amber-500/10 px-2 py-1 text-amber-300 border border-amber-500/20" title={t("search.lexicalTooltip")}>
+                                {t("search.lexicalShort")} {(result.lexicalScore).toFixed(2)}
                               </span>
                             )}
                             {result.source && (
@@ -2692,24 +2697,24 @@ export default function App() {
                               result.hasFulltext
                                 ? 'bg-brand-500/10 border-brand-500/20 text-brand-400'
                                 : 'bg-forest-800/50 border-white/5 text-forest-500'
-                            }`} title={result.hasFulltext ? 'Texte intégral indexé' : 'Titre + résumé uniquement'}>
-                              {result.hasFulltext ? 'Full Text' : 'Abstract'}
+                            }`} title={result.hasFulltext ? t("search.fulltextIndexed") : t("search.titleAbstractOnly")}>
+                              {result.hasFulltext ? t("search.fullTextBadge") : t("search.abstractBadge")}
                             </span>
                             {/* Provenance : récupéré en direct / nouvel ajout à ce corpus / déjà en base */}
                             {result.isLive ? (
                               <span className="rounded-full px-2 py-1 border text-[11px] bg-amber-500/10 border-amber-500/30 text-amber-300"
-                                    title="Recupere en direct via API externe, pas encore indexe dans la base locale">
-                                API live
+                                    title={t("search.liveApiBadgeTooltip")}>
+                                {t("search.liveApiBadge")}
                               </span>
                             ) : result.isNew ? (
                               <span className="rounded-full px-2 py-1 border text-[11px] bg-brand-500/10 border-brand-500/30 text-brand-300"
-                                    title="Récupéré via les sources en direct pendant CETTE recherche (nouvel ajout au corpus)">
-                                Nouveau
+                                    title={t("search.newBadgeTooltip")}>
+                                {t("search.newBadge")}
                               </span>
                             ) : (
                               <span className="rounded-full px-2 py-1 border text-[11px] bg-emerald-500/10 border-emerald-500/20 text-emerald-300"
-                                    title="Déjà présent dans la base locale avant cette recherche">
-                                Base locale
+                                    title={t("search.localBaseBadgeTooltip")}>
+                                {t("search.localBaseBadge")}
                               </span>
                             )}
                             {/* Statut d'embedding (vectorisation) */}
@@ -2718,8 +2723,8 @@ export default function App() {
                                 result.isEmbedded
                                   ? 'bg-violet-500/10 border-violet-500/20 text-violet-300'
                                   : 'bg-forest-800/50 border-white/5 text-forest-500'
-                              }`} title={result.isEmbedded ? 'Vectorisé (embedding présent → recherche sémantique)' : 'Non vectorisé (lexical uniquement)'}>
-                                {result.isEmbedded ? 'Vectorisé' : 'Non vectorisé'}
+                              }`} title={result.isEmbedded ? t("search.embeddedTooltip") : t("search.notEmbeddedTooltip")}>
+                                {result.isEmbedded ? t("search.embedded") : t("search.notEmbedded")}
                               </span>
                             )}
                           </div>
@@ -2749,7 +2754,7 @@ export default function App() {
                                     }
                                     className={`rounded-full border px-3 py-1 text-xs transition font-medium ${colorCls}`}
                                   >
-                                    {tag === "pertinent" ? "✓ Pertinent" : tag === "non-pertinent" ? "✕ Non-pertinent" : "● Incertain"}
+                                    {tag === "pertinent" ? t("search.relevanceRelevant") : tag === "non-pertinent" ? t("search.relevanceNotRelevant") : t("search.relevanceUncertain")}
                                   </button>
                                 );
                               },
@@ -2766,7 +2771,7 @@ export default function App() {
                             onClick={() => setPage((p) => p - 1)}
                             className="rounded-xl border border-white/10 px-4 py-2 text-sm text-forest-300 transition hover:bg-white/10 disabled:cursor-not-allowed disabled:opacity-30"
                           >
-                            Précédent
+                            {t("search.previous")}
                           </button>
                           <span className="text-sm text-forest-400">
                             {page} / {totalPages}
@@ -2777,7 +2782,7 @@ export default function App() {
                             onClick={() => setPage((p) => p + 1)}
                             className="rounded-xl border border-white/10 px-4 py-2 text-sm text-forest-300 transition hover:bg-white/10 disabled:cursor-not-allowed disabled:opacity-30"
                           >
-                            Suivant
+                            {t("search.next")}
                           </button>
                         </div>
                       )}
@@ -2787,17 +2792,17 @@ export default function App() {
                       <div className="min-h-[220px] rounded-3xl border border-white/10 bg-white/5 p-5 shadow-2xl">
                         {!selectedResult ? (
                           <div className="text-sm leading-6 text-forest-300">
-                            Cliquez sur un résultat pour afficher le détail du document.
+                            {t("search.clickResult")}
                           </div>
                         ) : detailLoading ? (
                           <div className="text-sm leading-6 text-forest-300">
-                            Chargement du document complet...
+                            {t("search.loadingFullDocument")}
                           </div>
                         ) : (
                           <div className="space-y-5 text-sm text-white/80">
                             <div>
                               <p className="text-xs uppercase tracking-[0.2em] text-brand-300">
-                                Détail de l'article sélectionné
+                                {t("search.selectedArticleDetail")}
                               </p>
                               <h2 className="mt-2 text-xl font-semibold text-white">
                                 {detailView?.title}
@@ -2812,21 +2817,21 @@ export default function App() {
                                   rel="noopener noreferrer"
                                   className="inline-flex items-center gap-2 rounded-xl border border-white/10 px-3 py-2 text-sm text-white/80 hover:bg-white/10"
                                 >
-                                  Open source
+                                  {t("search.openSource")}
                                   <ExternalLink size={16} />
                                 </a>
                               </div>
                             )}
 
                             <section>
-                              <h3 className="mb-2 font-medium text-white">Extrait</h3>
+                              <h3 className="mb-2 font-medium text-white">{t("search.excerpt")}</h3>
                               <p className="rounded-2xl border border-white/10 bg-white/5 p-4 leading-6">
                                 {detailView?.excerpt || "—"}
                               </p>
                             </section>
 
                             <section>
-                              <h3 className="mb-2 font-medium text-white">Abstract</h3>
+                              <h3 className="mb-2 font-medium text-white">{t("search.abstract")}</h3>
                               <p className="rounded-2xl border border-white/10 bg-white/5 p-4 leading-6">
                                 {detailView?.abstract || "—"}
                               </p>
@@ -2837,19 +2842,19 @@ export default function App() {
                             )}
 
                             <section>
-                              <h3 className="mb-2 font-medium text-white">Métadonnées</h3>
+                              <h3 className="mb-2 font-medium text-white">{t("search.metadata")}</h3>
                               <dl className="grid grid-cols-1 gap-3 rounded-2xl border border-white/10 bg-white/5 p-4">
-                                <div><dt className="text-forest-400">ID</dt><dd>{detailView?.id ?? "—"}</dd></div>
-                                <div><dt className="text-forest-400">Source</dt><dd>{detailView?.source}</dd></div>
-                                <div><dt className="text-forest-400">Année</dt><dd>{detailView?.year}</dd></div>
-                                <div><dt className="text-forest-400">External ID</dt><dd>{detailView?.externalId}</dd></div>
-                                <div><dt className="text-forest-400">Projet</dt><dd>{detailView?.projectContext}</dd></div>
-                                <div><dt className="text-forest-400">Type</dt><dd>{detailView?.sourceType}</dd></div>
-                                <div><dt className="text-forest-400">Pathologie</dt><dd>{detailView?.disease}</dd></div>
-                                <div><dt className="text-forest-400">Scénario</dt><dd>{detailView?.scenario}</dd></div>
-                                <div><dt className="text-forest-400">Zone</dt><dd>{detailView?.geography}</dd></div>
-                                <div><dt className="text-forest-400">Preuve</dt><dd>{detailView?.evidence}</dd></div>
-                                <div><dt className="text-forest-400">Chunks</dt><dd>{detailView?.chunkCount}</dd></div>
+                                <div><dt className="text-forest-400">{t("search.metaId")}</dt><dd>{detailView?.id ?? "—"}</dd></div>
+                                <div><dt className="text-forest-400">{t("search.metaSource")}</dt><dd>{detailView?.source}</dd></div>
+                                <div><dt className="text-forest-400">{t("search.metaYear")}</dt><dd>{detailView?.year}</dd></div>
+                                <div><dt className="text-forest-400">{t("search.metaExternalId")}</dt><dd>{detailView?.externalId}</dd></div>
+                                <div><dt className="text-forest-400">{t("search.metaProject")}</dt><dd>{detailView?.projectContext}</dd></div>
+                                <div><dt className="text-forest-400">{t("search.metaType")}</dt><dd>{detailView?.sourceType}</dd></div>
+                                <div><dt className="text-forest-400">{t("search.metaDisease")}</dt><dd>{detailView?.disease}</dd></div>
+                                <div><dt className="text-forest-400">{t("search.metaScenario")}</dt><dd>{detailView?.scenario}</dd></div>
+                                <div><dt className="text-forest-400">{t("search.metaGeography")}</dt><dd>{detailView?.geography}</dd></div>
+                                <div><dt className="text-forest-400">{t("search.metaEvidence")}</dt><dd>{detailView?.evidence}</dd></div>
+                                <div><dt className="text-forest-400">{t("search.metaChunks")}</dt><dd>{detailView?.chunkCount}</dd></div>
                               </dl>
                             </section>
                           </div>
