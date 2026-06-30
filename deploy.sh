@@ -75,20 +75,14 @@ echo "[5/7] Build frontend..."
 cd "$FRONTEND_DIR"
 npm ci --silent
 rm -rf "$FRONTEND_DIR/dist"
-# Injection de la clé d'écriture dans le build : authHeaders() côté front lit
-# VITE_API_KEY pour signer les mutations (création/suppression de scénarios,
-# populate, etc.). On la lit depuis l'env du service (source unique de vérité,
-# jamais committée dans le dépôt) afin que les écritures fonctionnent.
-SERVICE_ENV="/etc/literev-api.env"
-if [ -z "${VITE_API_KEY:-}" ] && [ -r "$SERVICE_ENV" ]; then
-  WK=$(grep -E '^WRITE_API_KEY=' "$SERVICE_ENV" | head -1 | cut -d= -f2- | tr -d '"'"'"' \r')
-  if [ -n "$WK" ]; then
-    export VITE_API_KEY="$WK"
-    echo "  VITE_API_KEY injectée depuis $SERVICE_ENV (longueur ${#WK})"
-  else
-    echo "  AVERTISSEMENT : WRITE_API_KEY introuvable dans $SERVICE_ENV — les écritures front échoueront (401)."
-  fi
-fi
+# SÉCURITÉ : on n'injecte PLUS la clé d'écriture dans le build. Vite « inline » les
+# variables VITE_* dans le bundle JS *public* — y placer WRITE_API_KEY exposait le
+# secret à tout visiteur du site. Les mutations sont désormais signées côté navigateur
+# par une clé que l'admin saisit une seule fois dans l'UI (bouton « Clé admin »,
+# stockée en localStorage sur son appareil, jamais embarquée dans le bundle).
+# On neutralise toute VITE_API_KEY résiduelle de l'environnement pour qu'elle ne
+# soit pas embarquée par mégarde.
+unset VITE_API_KEY || true
 npm run build            # set -e fait échouer le deploy si le build casse
 TITLE=$(grep -o '<title>.*</title>' "$FRONTEND_DIR/dist/index.html")
 BUNDLE=$(ls "$FRONTEND_DIR/dist/assets/"*.js | xargs -n1 basename | head -1)

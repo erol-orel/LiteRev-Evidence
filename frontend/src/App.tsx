@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { ScenarioDetailPage } from "./components/ScenarioDetailPage";
-import { Activity, BarChart2, BookOpen, CheckSquare, Cloud, Download, ExternalLink, FolderOpen, MapPin, AlertTriangle, Users, Pill, Radio, RefreshCw, RotateCcw, ChevronDown, ChevronUp, Zap } from "lucide-react";
+import { Activity, BarChart2, BookOpen, CheckSquare, Cloud, Download, ExternalLink, FolderOpen, MapPin, AlertTriangle, Users, Pill, Radio, RefreshCw, RotateCcw, ChevronDown, ChevronUp, Zap, Lock, KeyRound } from "lucide-react";
 
 import {
   fetchDocumentDetail,
@@ -107,6 +107,9 @@ import {
   deleteFolder,
   assignScenarioToFolder,
   getRecommendedActions,
+  hasApiKey,
+  setApiKey,
+  clearApiKey,
   type UserScenario,
   type UserScenarioPipelineStatus,
   type ScenarioFolder,
@@ -2904,6 +2907,22 @@ function ScenariosView({
 export default function App() {
   const [projectContext, setProjectContext] = useState<ProjectContext>("literev");
   const [activeTab, setActiveTab] = useState<AppTab>("search");
+  // Clé d'écriture admin (X-API-Key). Saisie une fois, stockée en localStorage côté
+  // navigateur — jamais dans le bundle public (cf. authHeaders dans lib/api).
+  const [apiKeySet, setApiKeySet] = useState<boolean>(() => hasApiKey());
+  const handleManageApiKey = () => {
+    if (apiKeySet) {
+      if (window.confirm("Retirer la clé admin de cet appareil ? Les écritures seront désactivées (lecture seule).")) {
+        clearApiKey();
+        setApiKeySet(false);
+      }
+      return;
+    }
+    const entered = window.prompt("Clé admin (X-API-Key) — collez votre clé d'écriture. Elle reste sur cet appareil (localStorage).");
+    if (entered === null) return;
+    setApiKey(entered);
+    setApiKeySet(hasApiKey());
+  };
   const [mode, setMode] = useState<SearchMode>("boolean");
   const [includeLive, setIncludeLive] = useState(false);
   const [query, setQuery] = useState("");
@@ -3470,6 +3489,19 @@ export default function App() {
             </div>
 
             <div className="flex items-center gap-6">
+              <button
+                type="button"
+                onClick={handleManageApiKey}
+                title={apiKeySet ? "Clé admin active sur cet appareil — cliquer pour la retirer" : "Définir la clé admin (X-API-Key) pour activer les écritures"}
+                className={`flex items-center gap-1.5 rounded-xl border px-3 py-1.5 text-xs font-medium transition ${
+                  apiKeySet
+                    ? "border-brand-500/40 bg-brand-700/30 text-brand-200 hover:bg-brand-700/50"
+                    : "border-white/10 bg-white/5 text-white/50 hover:text-white hover:bg-white/10"
+                }`}
+              >
+                {apiKeySet ? <KeyRound size={13} /> : <Lock size={13} />}
+                {apiKeySet ? "Clé admin" : "Lecture seule"}
+              </button>
               <img src="/logo.jpg" alt="LiteRev arbre" className="h-20 w-20 rounded-2xl object-cover shadow-xl opacity-90" />
             </div>
           </div>
