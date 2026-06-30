@@ -473,10 +473,16 @@ export async function fetchCorpusStats(): Promise<CorpusStats> {
   };
 }
 
+export interface HeatmapScenarioEntry {
+  name: string;
+  sources: Record<string, { total: number; fulltext: number }>;
+}
+
 export interface CorpusStatsByYear {
   byYear: Record<string, number>;
   scenarioByYear: Record<string, Record<string, number>>;
-  heatmapScenarioSource: Record<string, Record<string, number>>;
+  // Clé = scenario_id ; valeur = nom + par source {total, texte intégral}.
+  heatmapScenarioSource: Record<string, HeatmapScenarioEntry>;
 }
 
 export async function fetchCorpusStatsByYear(): Promise<CorpusStatsByYear> {
