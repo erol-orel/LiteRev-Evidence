@@ -11616,10 +11616,12 @@ def _get_above_threshold_articles(scenario_id: str, threshold: float | None = No
               -- Porte de screening (C1) : ne jamais alimenter le modèle avec un
               -- article explicitement exclu (les autres statuts restent admis).
               AND ld.screening_status IS DISTINCT FROM 'excluded'
+              -- Décision produit : un article NON scoré (similarity_score NULL)
+              -- n'est PAS pertinent — même définition que tous les affichages
+              -- (COALESCE(score,0) >= seuil). On garde le rattrapage 'included'.
               AND (
                   ld.screening_status = 'included'
-                  OR asn.similarity_score >= :threshold
-                  OR asn.similarity_score IS NULL
+                  OR COALESCE(asn.similarity_score, 0) >= :threshold
               )
             ORDER BY
                 CASE WHEN ld.screening_status = 'included' THEN 0 ELSE 1 END,
