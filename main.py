@@ -4107,14 +4107,15 @@ def get_corpus_stats_by_year() -> dict[str, Any]:
             scenario_year[sid] = {}
         scenario_year[sid][yr] = r["count"]
 
-    # Construire la matrice scénario × source
-    heatmap: dict[str, dict[str, int]] = {}
+    # Construire la matrice scénario × source (même forme que l'endpoint /named :
+    # clé = scenario_id, valeur = {name, sources: {src: {total, fulltext}}}).
+    heatmap: dict[str, dict] = {}
     for r in rows_heatmap:
-        sid = r["scenario_id"]
-        src = r["source"]
-        if sid not in heatmap:
-            heatmap[sid] = {}
-        heatmap[sid][src] = r["count"]
+        sid = str(r["scenario_id"])
+        src = _canonical_source(r["source"])
+        entry = heatmap.setdefault(sid, {"name": sid, "sources": {}})
+        cell = entry["sources"].setdefault(src, {"total": 0, "fulltext": 0})
+        cell["total"] += int(r["count"] or 0)
 
     return {
         "by_year": by_year,
@@ -13797,11 +13798,17 @@ def get_corpus_stats_by_year_named() -> dict[str, Any]:
             GROUP BY year ORDER BY year ASC
         """)).mappings().all()
 
-        # Articles par scénario ET par source (heatmap)
+        # Articles par scénario ET par source (heatmap) + nombre en texte intégral.
         rows_heatmap = conn.execute(text("""
-            SELECT ars.scenario_id, d.source, COUNT(*) as count
+            SELECT ars.scenario_id, d.source,
+                   COUNT(*) AS count,
+                   COUNT(*) FILTER (WHERE EXISTS (
+                       SELECT 1 FROM document_chunk c
+                       WHERE c.document_id = d.id AND c.chunk_type = 'fulltext_section'
+                   )) AS fulltext
             FROM literature_document d
             JOIN article_scenarios ars ON ars.document_id = d.id
+            WHERE d.is_duplicate IS NOT TRUE
             GROUP BY ars.scenario_id, d.source
             ORDER BY ars.scenario_id, count DESC
         """)).mappings().all()
@@ -13838,17 +13845,21 @@ def get_corpus_stats_by_year_named() -> dict[str, Any]:
 
     by_year = {str(r["year"]): r["count"] for r in rows_year}
 
-    heatmap: dict[str, dict[str, int]] = {}
+    # Clé = scenario_id (stable, évite la fusion de scénarios homonymes qui
+    # faisait apparaître MOINS de scénarios qu'en réalité). On porte le nom et,
+    # par source CANONIQUE, le total ET le nombre en texte intégral.
+    heatmap: dict[str, dict] = {}
     for r in rows_heatmap:
         if r["scenario_id"] not in valid_sids:
             continue
         name = _resolve_name(r["scenario_id"])
         if not name:
             continue
-        src = r["source"] or "Autre"
-        if name not in heatmap:
-            heatmap[name] = {}
-        heatmap[name][src] = heatmap[name].get(src, 0) + r["count"]
+        src = _canonical_source(r["source"])
+        entry = heatmap.setdefault(str(r["scenario_id"]), {"name": name, "sources": {}})
+        cell = entry["sources"].setdefault(src, {"total": 0, "fulltext": 0})
+        cell["total"] += int(r["count"] or 0)
+        cell["fulltext"] += int(r["fulltext"] or 0)
 
     scenario_year: dict[str, dict[str, int]] = {}
     for r in rows_scenario_year:

@@ -725,35 +725,43 @@ function StatsView({ corpusStats, fulltextStats, scenarios, statsByYear }: { cor
           )}
 
           <div className="mt-4 grid gap-4 sm:grid-cols-2">
-            {/* Par scénario */}
+            {/* Détail des chunks (remplace "Par scénario" — redondant avec la heatmap) */}
             <div>
               <h3 className="mb-3 text-sm font-medium text-forest-300 flex items-center gap-1.5">
-                <Activity size={13} className="text-brand-400" />
-                Par scénario
+                <BarChart2 size={13} className="text-brand-400" />
+                Détail des chunks
               </h3>
-              <div className="space-y-1.5">
-                {(() => {
-                  const visible = (scenarios ?? []).filter(s => !s.hidden && s.articleCount > 0);
-                  if (visible.length === 0) return <p className="text-xs text-forest-400">Aucun scénario avec des articles.</p>;
-                  const maxCount = Math.max(...visible.map(s => s.articleCount));
-                  return visible
-                    .sort((a, b) => b.articleCount - a.articleCount)
-                    .map(s => (
-                      <div key={s.id} className="group">
+              {fulltextStats?.chunks ? (() => {
+                const ch = fulltextStats.chunks!;
+                const emb = fulltextStats.embeddings;
+                const tot = ch.total || 1;
+                const rows = [
+                  { label: 'Texte intégral', value: ch.fulltext, cls: 'from-blue-500 to-blue-400' },
+                  { label: 'Résumé (titre + abstract)', value: ch.abstract, cls: 'from-gold-500 to-gold-400' },
+                  ...(ch.other > 0 ? [{ label: 'Autres', value: ch.other, cls: 'from-forest-600 to-forest-500' }] : []),
+                ];
+                return (
+                  <div className="space-y-2">
+                    {rows.map(r => (
+                      <div key={r.label}>
                         <div className="flex items-center justify-between text-xs mb-0.5">
-                          <span className="text-white/70 truncate max-w-[70%]">{s.labelShort ?? s.title}</span>
-                          <span className="font-mono text-brand-300 shrink-0 ml-2">{s.articleCount.toLocaleString()}</span>
+                          <span className="text-white/70">{r.label}</span>
+                          <span className="font-mono text-white/60">{r.value.toLocaleString()} <span className="text-white/30">({Math.round(r.value / tot * 100)}%)</span></span>
                         </div>
                         <div className="h-1.5 w-full rounded-full bg-white/5 overflow-hidden">
-                          <div
-                            className="h-full rounded-full bg-gradient-to-r from-brand-500 to-brand-400 transition-all"
-                            style={{ width: `${Math.round((s.articleCount / maxCount) * 100)}%` }}
-                          />
+                          <div className={`h-full rounded-full bg-gradient-to-r ${r.cls}`} style={{ width: `${Math.round(r.value / tot * 100)}%` }} />
                         </div>
                       </div>
-                    ));
-                })()}
-              </div>
+                    ))}
+                    <p className="pt-1.5 mt-1 text-[11px] text-forest-400 border-t border-white/5">
+                      <span className="text-white/70 font-semibold">{ch.total.toLocaleString()}</span> chunks au total
+                      {emb && <> · <span className="text-blue-300">{emb.chunks_with_embedding.toLocaleString()}</span> indexés ({emb.embedding_coverage_pct.toFixed(0)}%)</>}
+                    </p>
+                  </div>
+                );
+              })() : (
+                <p className="text-xs text-forest-400">Chargement…</p>
+              )}
             </div>
             {/* Par source */}
             <div>
@@ -787,6 +795,134 @@ function StatsView({ corpusStats, fulltextStats, scenarios, statsByYear }: { cor
               </div>
             </div>
           </div>
+
+          {/* Évolution temporelle — intégrée au bas du panneau Corpus */}
+          {statsByYear && Object.keys(statsByYear.byYear).length > 0 && (
+            <div className="mt-5 border-t border-white/5 pt-4">
+              <h3 className="mb-3 text-sm font-medium text-forest-300 flex items-center gap-1.5">
+                <BarChart2 size={13} className="text-brand-400" />
+                {(() => {
+                  const yrs = Object.keys(statsByYear.byYear).map((y) => parseInt(y)).filter((y) => !isNaN(y));
+                  const lo = yrs.length ? Math.min(...yrs) : new Date().getFullYear();
+                  const hi = yrs.length ? Math.max(...yrs) : new Date().getFullYear();
+                  return `Évolution temporelle (${lo}–${hi})`;
+                })()}
+              </h3>
+              {(() => {
+                const counts: Record<number, number> = {};
+                Object.entries(statsByYear.byYear).forEach(([y, c]) => {
+                  const yr = parseInt(y);
+                  if (!isNaN(yr)) counts[yr] = (counts[yr] ?? 0) + (c as number);
+                });
+                const years = Object.keys(counts).map(Number).sort((a, b) => a - b);
+                if (years.length === 0) return null;
+                const minY = years[0], maxY = years[years.length - 1];
+                const maxVal = Math.max(...Object.values(counts));
+                const peakYear = years.reduce((p, y) => (counts[y] > counts[p] ? y : p), years[0]);
+                const allYears: number[] = [];
+                for (let y = minY; y <= maxY; y++) allYears.push(y);
+                return (
+                  <>
+                    <div className="flex items-end gap-px h-40 w-full">
+                      {allYears.map((y) => {
+                        const c = counts[y] ?? 0;
+                        const pct = maxVal ? (c / maxVal) * 100 : 0;
+                        return (
+                          <div
+                            key={y}
+                            title={`${y} : ${c.toLocaleString()} article${c > 1 ? 's' : ''}`}
+                            className={`flex-1 rounded-t transition-all hover:opacity-80 ${y >= 2020 ? 'bg-gradient-to-t from-brand-600 to-brand-400' : 'bg-forest-500/70'}`}
+                            style={{ height: `${c > 0 ? Math.max(2, pct) : 0}%` }}
+                          />
+                        );
+                      })}
+                    </div>
+                    <div className="mt-1.5 flex justify-between text-[10px] font-mono text-forest-400">
+                      <span>{minY}</span>
+                      <span>{Math.round((minY + maxY) / 2)}</span>
+                      <span>{maxY}</span>
+                    </div>
+                    <p className="mt-2 text-xs text-forest-400 italic">
+                      Pic : <span className="not-italic font-semibold text-brand-300">{peakYear}</span> ({counts[peakYear].toLocaleString()} articles) · 2020+ en évidence.
+                    </p>
+                  </>
+                );
+              })()}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Heatmap scénario × source */}
+      {statsByYear && Object.keys(statsByYear.heatmapScenarioSource).length > 0 && (
+        <div className="rounded-3xl border border-white/10 bg-white/5 p-5 shadow-2xl">
+          <h2 className="mb-4 flex items-center gap-2 text-lg font-semibold text-white">
+            <Activity size={18} className="text-brand-400" />
+            Heatmap : scénarios × sources
+          </h2>
+          {(() => {
+            // Nouvelle forme : { scenario_id: { name, sources: { src: {total, fulltext} } } }.
+            // Clé par id (plus de fusion de scénarios homonymes) + texte intégral par cellule.
+            const entries = Object.entries(statsByYear.heatmapScenarioSource);
+            const allSources = Array.from(
+              new Set(entries.flatMap(([, v]) => Object.keys(v.sources)))
+            ).sort();
+            const rows = entries.map(([sid, v]) => {
+              const total = Object.values(v.sources).reduce((s, c) => s + c.total, 0);
+              const ftTotal = Object.values(v.sources).reduce((s, c) => s + c.fulltext, 0);
+              return { sid, name: v.name, sources: v.sources, total, ftTotal };
+            }).sort((a, b) => b.total - a.total);
+            const globalMax = Math.max(1, ...rows.flatMap(e => Object.values(e.sources).map(c => c.total)));
+            return (
+              <div className="overflow-x-auto">
+                <table className="w-full text-xs">
+                  <thead>
+                    <tr>
+                      <th className="text-left text-forest-400 font-normal pb-2 pr-3 min-w-[160px]">Scénario ({rows.length})</th>
+                      {allSources.map(src => (
+                        <th key={src} className="text-center text-forest-400 font-normal pb-2 px-1 capitalize">{src}</th>
+                      ))}
+                      <th className="text-right text-forest-400 font-normal pb-2 pl-2">Total</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {rows.map(e => (
+                      <tr key={e.sid} className="border-t border-white/5">
+                        <td className="py-1.5 pr-3 text-white/70 truncate max-w-[240px]" title={e.name}>{e.name}</td>
+                        {allSources.map(src => {
+                          const cell = e.sources[src];
+                          const val = cell?.total ?? 0;
+                          const ft = cell?.fulltext ?? 0;
+                          const intensity = globalMax > 0 ? val / globalMax : 0;
+                          const bg = val > 0 ? `rgba(52, 211, 153, ${Math.max(0.08, intensity * 0.85)})` : 'transparent';
+                          return (
+                            <td
+                              key={src}
+                              className="text-center py-1 px-1 font-mono rounded leading-tight align-middle"
+                              style={{ backgroundColor: bg, color: val > 0 ? '#d1fae5' : '#374151' }}
+                              title={val > 0 ? `${val} articles · ${ft} en texte intégral` : undefined}
+                            >
+                              {val > 0 ? (
+                                <>
+                                  <div>{val}</div>
+                                  {ft > 0 && <div className="text-[9px] text-blue-200/90">{ft} ft</div>}
+                                </>
+                              ) : '—'}
+                            </td>
+                          );
+                        })}
+                        <td className="text-right py-1.5 pl-2 font-mono text-brand-300 font-semibold align-middle">
+                          {e.total.toLocaleString()}
+                          {e.ftTotal > 0 && <span className="block text-[9px] font-normal text-blue-200/80">{e.ftTotal} ft</span>}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+                <p className="mt-2 text-[10px] text-forest-400 italic">Chaque cellule : nombre d'articles · « ft » = en texte intégral.</p>
+              </div>
+            );
+          })()}
         </div>
       )}
 
@@ -832,133 +968,6 @@ function StatsView({ corpusStats, fulltextStats, scenarios, statsByYear }: { cor
               );
             })}
           </div>
-        </div>
-      )}
-
-      {/* Graphique évolution temporelle */}
-      {statsByYear && Object.keys(statsByYear.byYear).length > 0 && (
-        <div className="rounded-3xl border border-white/10 bg-white/5 p-5 shadow-2xl">
-          <h2 className="mb-4 flex items-center gap-2 text-lg font-semibold text-white">
-            <BarChart2 size={18} className="text-brand-400" />
-            {(() => {
-              const yrs = Object.keys(statsByYear.byYear).map((y) => parseInt(y)).filter((y) => !isNaN(y));
-              const lo = yrs.length ? Math.min(...yrs) : new Date().getFullYear();
-              const hi = yrs.length ? Math.max(...yrs) : new Date().getFullYear();
-              return `Évolution temporelle du corpus (${lo}–${hi})`;
-            })()}
-          </h2>
-          {(() => {
-            // Compteur par année (toutes les années renvoyées par l'API, y compris
-            // avant 1900). On comble les années manquantes par 0 pour un axe temporel
-            // linéaire, puis on rend un histogramme compact (1 barre / année).
-            const counts: Record<number, number> = {};
-            Object.entries(statsByYear.byYear).forEach(([y, c]) => {
-              const yr = parseInt(y);
-              if (!isNaN(yr)) counts[yr] = (counts[yr] ?? 0) + (c as number);
-            });
-            const years = Object.keys(counts).map(Number).sort((a, b) => a - b);
-            if (years.length === 0) return null;
-            const minY = years[0], maxY = years[years.length - 1];
-            const maxVal = Math.max(...Object.values(counts));
-            const peakYear = years.reduce((p, y) => (counts[y] > counts[p] ? y : p), years[0]);
-            const allYears: number[] = [];
-            for (let y = minY; y <= maxY; y++) allYears.push(y);
-            return (
-              <>
-                <div className="flex items-end gap-px h-44 w-full">
-                  {allYears.map((y) => {
-                    const c = counts[y] ?? 0;
-                    const pct = maxVal ? (c / maxVal) * 100 : 0;
-                    return (
-                      <div
-                        key={y}
-                        title={`${y} : ${c.toLocaleString()} article${c > 1 ? 's' : ''}`}
-                        className={`flex-1 rounded-t transition-all hover:opacity-80 ${y >= 2020 ? 'bg-gradient-to-t from-brand-600 to-brand-400' : 'bg-forest-500/70'}`}
-                        style={{ height: `${c > 0 ? Math.max(2, pct) : 0}%` }}
-                      />
-                    );
-                  })}
-                </div>
-                <div className="mt-1.5 flex justify-between text-[10px] font-mono text-forest-400">
-                  <span>{minY}</span>
-                  <span>{Math.round((minY + maxY) / 2)}</span>
-                  <span>{maxY}</span>
-                </div>
-                <p className="mt-2 text-xs text-forest-400 italic">
-                  Pic : <span className="not-italic font-semibold text-brand-300">{peakYear}</span> ({counts[peakYear].toLocaleString()} articles) · années récentes (2020+) mises en évidence.
-                </p>
-              </>
-            );
-          })()}
-        </div>
-      )}
-
-      {/* Heatmap scénario × source */}
-      {statsByYear && Object.keys(statsByYear.heatmapScenarioSource).length > 0 && (
-        <div className="rounded-3xl border border-white/10 bg-white/5 p-5 shadow-2xl">
-          <h2 className="mb-4 flex items-center gap-2 text-lg font-semibold text-white">
-            <Activity size={18} className="text-brand-400" />
-            Heatmap : scénarios × sources
-          </h2>
-          {(() => {
-            // Les labels courts viennent de la DB via scenarios (labelShort)
-            const scenarioLabelMap = Object.fromEntries(
-              (scenarios ?? []).map(s => [s.id, s.labelShort ?? s.title])
-            );
-            const heatmap = statsByYear.heatmapScenarioSource;
-            const allSources = Array.from(
-              new Set(Object.values(heatmap).flatMap(s => Object.keys(s)))
-            ).sort();
-            const heatmapEntries = Object.entries(heatmap).sort((a, b) => {
-              const totalA = Object.values(a[1]).reduce((s, v) => s + v, 0);
-              const totalB = Object.values(b[1]).reduce((s, v) => s + v, 0);
-              return totalB - totalA;
-            });
-            const globalMax = Math.max(...heatmapEntries.flatMap(([, srcMap]) => Object.values(srcMap)));
-            return (
-              <div className="overflow-x-auto">
-                <table className="w-full text-xs">
-                  <thead>
-                    <tr>
-                      <th className="text-left text-forest-400 font-normal pb-2 pr-3 min-w-[120px]">Scénario</th>
-                      {allSources.map(src => (
-                        <th key={src} className="text-center text-forest-400 font-normal pb-2 px-1 capitalize">{src}</th>
-                      ))}
-                      <th className="text-right text-forest-400 font-normal pb-2 pl-2">Total</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {heatmapEntries.map(([sid, srcMap]) => {
-                      const total = Object.values(srcMap).reduce((s, v) => s + v, 0);
-                      return (
-                        <tr key={sid} className="border-t border-white/5">
-                          <td className="py-1.5 pr-3 text-white/70">{scenarioLabelMap[sid] ?? sid}</td>
-                          {allSources.map(src => {
-                            const val = srcMap[src] ?? 0;
-                            const intensity = globalMax > 0 ? val / globalMax : 0;
-                            const bg = intensity > 0
-                              ? `rgba(52, 211, 153, ${Math.max(0.08, intensity * 0.85)})`
-                              : 'transparent';
-                            return (
-                              <td
-                                key={src}
-                                className="text-center py-1.5 px-1 font-mono rounded"
-                                style={{ backgroundColor: bg, color: val > 0 ? '#d1fae5' : '#374151' }}
-                                title={val > 0 ? `${val} articles` : undefined}
-                              >
-                                {val > 0 ? val : '—'}
-                              </td>
-                            );
-                          })}
-                          <td className="text-right py-1.5 pl-2 font-mono text-brand-300 font-semibold">{total.toLocaleString()}</td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
-              </div>
-            );
-          })()}
         </div>
       )}
     </div>
