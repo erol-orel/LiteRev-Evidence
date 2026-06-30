@@ -670,6 +670,7 @@ def startup_event() -> None:
         _PICO_WORKERS  = 5     # threads parallèles pour extraction PICO
         _CYCLE_SLEEP   = 30    # secondes entre deux cycles
         _PICO_BATCH    = 50    # articles PICO par cycle
+        _PICO_MAX_ATTEMPTS = 3 # essais max par article (borne les échecs déterministes)
         _ABS_BATCH     = 50    # notices sans résumé traitées par cycle (backfill)
 
         _system_pico = (
@@ -703,43 +704,79 @@ def startup_event() -> None:
                         body_text   = _ft[:14000]
                         body_label  = "Full text"
                         pico_source = "fulltext"
-                resp = client.chat.completions.create(
-                    model="gpt-4.1-mini",
-                    messages=[
-                        {"role": "system", "content": _system_pico},
-                        {"role": "user",   "content": f"Title: {title}\n\n{body_label}: {body_text}"},
-                    ],
-                    temperature=0,
-                    seed=42,
-                    max_tokens=400,
-                    response_format={"type": "json_object"},
-                )
-                pico = json.loads(resp.choices[0].message.content)
-                required = {"P", "I", "C", "O", "study_design", "pico_confidence"}
-                if not required.issubset(pico.keys()):
+                # Appel LLM isolé : une erreur d'API (quota/réseau) est TRANSITOIRE
+                # → on ne compte PAS de tentative (le cooldown s'en charge) et on
+                # réessaiera quand l'API sera saine.
+                try:
+                    resp = client.chat.completions.create(
+                        model="gpt-4.1-mini",
+                        messages=[
+                            {"role": "system", "content": _system_pico},
+                            {"role": "user",   "content": f"Title: {title}\n\n{body_label}: {body_text}"},
+                        ],
+                        temperature=0,
+                        seed=42,
+                        max_tokens=800,  # 400 tronquait le JSON des articles verbeux → json invalide
+                        response_format={"type": "json_object"},
+                    )
+                except Exception as _api_e:
+                    if _is_openai_quota_error(_api_e):
+                        _trip_openai_cooldown()
+                    logger.debug(f"BG PICO API doc {row['id']}: {_api_e}")
                     return None
-                pico["pico_confidence"] = float(pico.get("pico_confidence", 0.5))
-                pico["pico_notes"]      = pico.get("pico_notes", "")
-                pico["pico_source"]     = pico_source
+
+                # On a une RÉPONSE → on COMPTE la tentative quoi qu'il arrive. Sinon,
+                # un article dont la sortie LLM est malformée de façon déterministe
+                # (clé manquante / JSON invalide, identique à chaque fois car
+                # temperature=0/seed=42) serait ré-extrait à l'infini. pico_attempts
+                # (plafonné par _PICO_MAX_ATTEMPTS dans le sélecteur) borne ces échecs.
+                _pico = None
+                try:
+                    _pico = json.loads(resp.choices[0].message.content)
+                except Exception:
+                    _pico = None
                 with engine.begin() as _c:
-                    # On marque pico_fulltext_attempted dès qu'un article has_fulltext
-                    # est traité : même si on n'a pas pu utiliser le texte intégral
-                    # (pas de chunk, ou plus court que le résumé), on ne le ré-essaiera
-                    # plus → fin de la boucle de ré-extraction infinie.
+                    if isinstance(_pico, dict):
+                        # TOLÉRANT : on complète les clés manquantes plutôt que de
+                        # rejeter (et ré-essayer en boucle). Une extraction partielle
+                        # à faible confiance vaut mieux qu'un article jamais traité —
+                        # l'aval filtre déjà sur pico_confidence. Seul un JSON INVALIDE
+                        # (rare avec response_format json_object + max_tokens relevé)
+                        # est compté comme échec à borner.
+                        for _k in ("P", "I", "C", "O"):
+                            _pico.setdefault(_k, "")
+                        _pico.setdefault("study_design", "non précisé")
+                        try:
+                            _pico["pico_confidence"] = float(_pico.get("pico_confidence", 0.3))
+                        except (TypeError, ValueError):
+                            _pico["pico_confidence"] = 0.3
+                        _pico["pico_notes"]  = _pico.get("pico_notes", "")
+                        _pico["pico_source"] = pico_source
+                        _c.execute(text("""
+                            UPDATE literature_document
+                            SET pico_json = CAST(:pico AS jsonb),
+                                pico_extracted_at = :ts,
+                                pico_fulltext_attempted = CASE WHEN :hf THEN TRUE
+                                                               ELSE pico_fulltext_attempted END,
+                                pico_attempts = COALESCE(pico_attempts, 0) + 1
+                            WHERE id = :doc_id
+                        """), {
+                            "pico":   json.dumps(_pico),
+                            "ts":     datetime.now(timezone.utc),
+                            "hf":     bool(row.get("has_fulltext")),
+                            "doc_id": row["id"],
+                        })
+                        return row["id"]
+                    # JSON invalide : on compte la tentative (+ fulltext_attempted)
+                    # pour borner les ré-essais → fin de la boucle de tokens.
                     _c.execute(text("""
                         UPDATE literature_document
-                        SET pico_json = CAST(:pico AS jsonb),
-                            pico_extracted_at = :ts,
+                        SET pico_attempts = COALESCE(pico_attempts, 0) + 1,
                             pico_fulltext_attempted = CASE WHEN :hf THEN TRUE
                                                            ELSE pico_fulltext_attempted END
                         WHERE id = :doc_id
-                    """), {
-                        "pico":   json.dumps(pico),
-                        "ts":     datetime.now(timezone.utc),
-                        "hf":     bool(row.get("has_fulltext")),
-                        "doc_id": row["id"],
-                    })
-                return row["id"]
+                    """), {"hf": bool(row.get("has_fulltext")), "doc_id": row["id"]})
+                    return None
             except Exception as _pe:
                 logger.debug(f"BG PICO doc {row['id']}: {_pe}")
                 return None
@@ -790,6 +827,15 @@ def startup_event() -> None:
                 _cc.execute(text(
                     "ALTER TABLE literature_document "
                     "ADD COLUMN IF NOT EXISTS pico_fulltext_attempted BOOLEAN DEFAULT FALSE"
+                ))
+                # Compteur de tentatives PICO. Un article dont l'extraction échoue
+                # de façon DÉTERMINISTE (sortie LLM malformée : clé manquante ou JSON
+                # invalide) revenait dans le sélecteur à CHAQUE cycle et était ré-envoyé
+                # à gpt-4.1-mini indéfiniment (même échec, temperature=0/seed=42) →
+                # 2e fuite de tokens. On borne à _PICO_MAX_ATTEMPTS essais par article.
+                _cc.execute(text(
+                    "ALTER TABLE literature_document "
+                    "ADD COLUMN IF NOT EXISTS pico_attempts INTEGER DEFAULT 0"
                 ))
         except Exception as _ce:
             logger.warning(f"ensure backfill/pico-attempt columns: {_ce}")
@@ -913,6 +959,7 @@ def startup_event() -> None:
                         WHERE project_context = 'literev'
                           AND abstract IS NOT NULL
                           AND LENGTH(abstract) > 50
+                          AND COALESCE(pico_attempts, 0) < :max_attempts  -- borne les échecs déterministes
                           AND (
                             pico_json IS NULL
                             OR (
@@ -923,7 +970,7 @@ def startup_event() -> None:
                           )
                         ORDER BY (pico_json IS NULL) DESC, id
                         LIMIT :lim
-                    """), {"lim": _PICO_BATCH}).mappings().fetchall()
+                    """), {"lim": _PICO_BATCH, "max_attempts": _PICO_MAX_ATTEMPTS}).mappings().fetchall()
 
                 if _pico_rows and not _openai_in_cooldown():
                     _pico_done = 0
