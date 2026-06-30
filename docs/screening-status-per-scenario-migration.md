@@ -1,6 +1,12 @@
 # Migration plan — per-scenario `screening_status`
 
-**Status:** proposal (no code yet — review before implementation)
+**Status:** Phase 1 SHIPPED (alembic `c8d4e2f1a9b3`, 2026-06-30) — additive
+per-scenario screening columns on `article_scenarios` + option-A backfill from
+the global column, validated end-to-end on local PG (upgrade/downgrade/idempotent).
+Zero behaviour change (global column still authoritative). Phases 2–5 (dual-write,
+dual-read across ~118 sites, frontend, cutover) remain. Migration 1's screening
+**write-gate** flip to `article_scenarios` membership (PR #133) is the Phase-2
+prerequisite, now in place.
 **Author:** generated for review
 **Scope:** move PRISMA screening decisions from *global per-document* to *per (scenario, document)*.
 
