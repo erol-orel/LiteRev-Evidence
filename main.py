@@ -9967,11 +9967,11 @@ def user_scenario_rag_assistant(scenario_id: str, payload: AskIn) -> dict[str, A
                        (1 - (c.embedding <=> CAST(:emb AS vector))) AS score
                 FROM document_chunk c
                 JOIN literature_document d ON d.id = c.document_id
+                JOIN article_scenarios ars ON ars.document_id = d.id AND ars.scenario_id = :sid
                 WHERE c.embedding IS NOT NULL
-                  AND EXISTS (SELECT 1 FROM article_scenarios ars WHERE ars.document_id = d.id AND ars.scenario_id = :sid
-                              AND (COALESCE(ars.similarity_score, 0) >= :thr OR d.screening_status = 'included'))
+                  AND (COALESCE(ars.similarity_score, 0) >= :thr OR COALESCE(ars.screening_status, d.screening_status) = 'included')
                   AND (d.is_duplicate IS NULL OR d.is_duplicate = FALSE)
-                  AND d.screening_status IS DISTINCT FROM 'excluded'  -- porte de screening (C1)
+                  AND COALESCE(ars.screening_status, d.screening_status) IS DISTINCT FROM 'excluded'  -- porte de screening (C1, per-scenario)
                 ORDER BY c.embedding <=> CAST(:emb AS vector)
                 LIMIT 8
             """), {"emb": str(query_embedding), "sid": scenario_id, "thr": eff_thr}).mappings().all()
@@ -9992,10 +9992,10 @@ def user_scenario_rag_assistant(scenario_id: str, payload: AskIn) -> dict[str, A
                        c.content, c.metadata_json, 1.0 AS score
                 FROM document_chunk c
                 JOIN literature_document d ON d.id = c.document_id
+                JOIN article_scenarios ars ON ars.document_id = d.id AND ars.scenario_id = :sid
                 WHERE ({like_clauses})
-                  AND EXISTS (SELECT 1 FROM article_scenarios ars WHERE ars.document_id = d.id AND ars.scenario_id = :sid
-                              AND (COALESCE(ars.similarity_score, 0) >= :thr OR d.screening_status = 'included'))
-                  AND d.screening_status IS DISTINCT FROM 'excluded'  -- porte de screening (C1)
+                  AND (COALESCE(ars.similarity_score, 0) >= :thr OR COALESCE(ars.screening_status, d.screening_status) = 'included')
+                  AND COALESCE(ars.screening_status, d.screening_status) IS DISTINCT FROM 'excluded'  -- porte de screening (C1, per-scenario)
                 ORDER BY d.year DESC NULLS LAST
                 LIMIT 8
             """), params).mappings().all()
@@ -12782,6 +12782,12 @@ async def ask_stream_filtered(payload: dict[str, Any]):
     if emb_str:
         # Construire le filtre scénario avec seuil
         where_extra = ""
+        join_extra = ""
+        # Migration 2 (screening par scénario) : quand un scénario est fourni, on
+        # JOINT article_scenarios pour lire le statut PROPRE au scénario via
+        # COALESCE (repli sur la colonne globale tant que la Phase 5 n'a pas
+        # supprimé le fallback). Sans scénario, on reste sur la colonne globale.
+        screen_expr = "d.screening_status"
         params_extra: dict[str, Any] = {"top_k": top_k, "emb": emb_str, "threshold": threshold}
 
         if project_context:
@@ -12789,17 +12795,17 @@ async def ask_stream_filtered(payload: dict[str, Any]):
             params_extra["project_context"] = project_context
 
         if scenario_id:
-            # Filtrer par scénario ET par seuil de similarité (ou validé humainement)
-            where_extra += """
-                AND EXISTS (
-                    SELECT 1 FROM article_scenarios asn
-                    WHERE asn.document_id = d.id
-                      AND asn.scenario_id = :scenario_id
-                      AND (
-                          asn.similarity_score >= :threshold
-                          OR asn.similarity_score IS NULL
-                          OR d.screening_status = 'included'
-                      )
+            # Filtrer par scénario ET par seuil de similarité (ou validé humainement).
+            # JOIN (au lieu d'EXISTS) : (scenario_id, document_id) est unique dans
+            # article_scenarios, donc la cardinalité est préservée et asn devient
+            # lisible dans le SELECT/ORDER pour le screening par scénario.
+            join_extra = " JOIN article_scenarios asn ON asn.document_id = d.id AND asn.scenario_id = :scenario_id "
+            screen_expr = "COALESCE(asn.screening_status, d.screening_status)"
+            where_extra += f"""
+                AND (
+                    asn.similarity_score >= :threshold
+                    OR asn.similarity_score IS NULL
+                    OR {screen_expr} = 'included'
                 )
             """
             params_extra["scenario_id"] = scenario_id
@@ -12807,13 +12813,14 @@ async def ask_stream_filtered(payload: dict[str, Any]):
         with engine.connect() as conn:
             rows = conn.execute(text(f"""
                 SELECT c.content, d.title, d.year, d.doi, d.authors, d.id AS doc_id,
-                       d.screening_status,
+                       {screen_expr} AS screening_status,
                        1 - (c.embedding <=> CAST(:emb AS vector)) AS similarity
                 FROM document_chunk c
                 JOIN literature_document d ON d.id = c.document_id
+                {join_extra}
                 WHERE c.embedding IS NOT NULL {where_extra}
                 ORDER BY
-                    CASE WHEN d.screening_status = 'included' THEN 0 ELSE 1 END,
+                    CASE WHEN {screen_expr} = 'included' THEN 0 ELSE 1 END,
                     c.embedding <=> CAST(:emb AS vector)
                 LIMIT :top_k
             """), params_extra).mappings().all()
