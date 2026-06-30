@@ -162,14 +162,18 @@ GROUP BY ars.scenario_id ORDER BY ars.scenario_id;
 | 4 — frontend | ~1 day |
 | 5 — cutover + drop | ~0.5 day + soak |
 
-## 8. Open product questions (for you)
+## 8. Product decisions (answered)
 
-1. **Backfill semantics:** copy the current global status to *all* of a document's
-   scenario links (recommended — preserves today's behaviour), or reset to `pending`
-   per scenario and re-screen? The former is non-disruptive; the latter discards
-   existing decisions for multi-scenario docs.
-2. **Auto-screening (living review):** when ingestion auto-sets a status, should it
-   apply to the one scenario being ingested, or all scenarios the doc lands in?
-3. Does the **`scenario_type` decision** (held until staging) need to be resolved
-   first? Phase 2's "scope by membership" assumes `article_scenarios` is the source
-   of truth for membership.
+1. **Backfill semantics → option A.** Copy the current global status onto *all* of a
+   document's scenario links. Preserves today's behaviour exactly; nothing is lost;
+   decisions become editable per scenario going forward. (Phase 1 backfill UPDATE
+   already reflects this.)
+2. **Auto-screening (living review) → the one scenario being updated.** An automatic
+   status set during ingestion applies only to the scenario currently being processed,
+   not to every scenario the document belongs to.
+3. **`scenario_type` (Migration 1) is resolved first.** This migration's "scope by
+   membership" depends on `article_scenarios` being the source of truth, which is
+   exactly what Migration 1 establishes. See `scenario-type-migration.md`.
+
+So this migration is **blocked on Migration 1 completing**, and starts at Phase 1
+once a staging snapshot is available.
