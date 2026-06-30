@@ -722,14 +722,21 @@ def startup_event() -> None:
                 pico["pico_notes"]      = pico.get("pico_notes", "")
                 pico["pico_source"]     = pico_source
                 with engine.begin() as _c:
+                    # On marque pico_fulltext_attempted dès qu'un article has_fulltext
+                    # est traité : même si on n'a pas pu utiliser le texte intégral
+                    # (pas de chunk, ou plus court que le résumé), on ne le ré-essaiera
+                    # plus → fin de la boucle de ré-extraction infinie.
                     _c.execute(text("""
                         UPDATE literature_document
                         SET pico_json = CAST(:pico AS jsonb),
-                            pico_extracted_at = :ts
+                            pico_extracted_at = :ts,
+                            pico_fulltext_attempted = CASE WHEN :hf THEN TRUE
+                                                           ELSE pico_fulltext_attempted END
                         WHERE id = :doc_id
                     """), {
                         "pico":   json.dumps(pico),
                         "ts":     datetime.now(timezone.utc),
+                        "hf":     bool(row.get("has_fulltext")),
                         "doc_id": row["id"],
                     })
                 return row["id"]
@@ -775,8 +782,17 @@ def startup_event() -> None:
                     "ALTER TABLE literature_document "
                     "ADD COLUMN IF NOT EXISTS abstract_backfill_attempted BOOLEAN DEFAULT FALSE"
                 ))
+                # Garde-fou anti-boucle : ne ré-extraire le PICO « texte intégral »
+                # qu'UNE SEULE fois par article. Sans cela, tout article avec
+                # has_fulltext=TRUE mais SANS chunk fulltext exploitable garde
+                # pico_source='abstract' et re-matche le sélecteur PICO à CHAQUE
+                # cycle (30 s) → ré-extraction gpt-4.1-mini infinie = fuite de tokens.
+                _cc.execute(text(
+                    "ALTER TABLE literature_document "
+                    "ADD COLUMN IF NOT EXISTS pico_fulltext_attempted BOOLEAN DEFAULT FALSE"
+                ))
         except Exception as _ce:
-            logger.warning(f"ensure abstract_backfill_attempted column: {_ce}")
+            logger.warning(f"ensure backfill/pico-attempt columns: {_ce}")
 
         logger.info("Background enrichment worker started (abstract backfill + embedding + PICO).")
         while True:
@@ -902,6 +918,7 @@ def startup_event() -> None:
                             OR (
                                 has_fulltext IS TRUE
                                 AND (pico_json->>'pico_source') IS DISTINCT FROM 'fulltext'
+                                AND pico_fulltext_attempted IS NOT TRUE  -- une seule tentative
                             )
                           )
                         ORDER BY (pico_json IS NULL) DESC, id
