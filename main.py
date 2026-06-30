@@ -960,6 +960,14 @@ def startup_event() -> None:
                           AND abstract IS NOT NULL
                           AND LENGTH(abstract) > 50
                           AND COALESCE(pico_attempts, 0) < :max_attempts  -- borne les échecs déterministes
+                          -- PICO UNIQUEMENT pour les articles appartenant à un scénario
+                          -- réel (article_scenarios). Le PICO n'est affiché QUE par
+                          -- scénario : extraire les ~milliers de documents orphelins /
+                          -- hors-scénario du corpus était du pur gaspillage de tokens.
+                          AND EXISTS (
+                              SELECT 1 FROM article_scenarios ars
+                              WHERE ars.document_id = literature_document.id
+                          )
                           AND (
                             pico_json IS NULL
                             OR (
@@ -972,7 +980,11 @@ def startup_event() -> None:
                         LIMIT :lim
                     """), {"lim": _PICO_BATCH, "max_attempts": _PICO_MAX_ATTEMPTS}).mappings().fetchall()
 
-                if _pico_rows and not _openai_in_cooldown():
+                # Coupe-circuit : PICO_AUTOEXTRACT_ENABLED=0 dans /etc/literev-api.env
+                # (puis restart) met en pause l'extraction PICO automatique sans
+                # toucher au code — utile pour stopper net la dépense OpenAI.
+                _pico_enabled = os.getenv("PICO_AUTOEXTRACT_ENABLED", "1").strip().lower() not in ("0", "false", "no", "off")
+                if _pico_rows and _pico_enabled and not _openai_in_cooldown():
                     _pico_done = 0
                     with _TPE(max_workers=_PICO_WORKERS) as _pool:
                         _futs = {_pool.submit(_extract_pico_one, r, _client): r["id"] for r in _pico_rows}
