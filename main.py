@@ -786,7 +786,7 @@ def startup_event() -> None:
                     _time.sleep(_CYCLE_SLEEP)
                     continue
 
-                _client = _OAI_bg(api_key=openai_key)
+                _client = _OAI_bg(api_key=openai_key, timeout=90.0)
 
                 # ── 0. BACKFILL DES RÉSUMÉS (notices sans abstract, via DOI) ──
                 # Beaucoup de notices Crossref/OpenAlex arrivent sans résumé. On
@@ -1124,7 +1124,7 @@ def ask_assistant(payload: AskIn) -> dict[str, Any]:
     if openai_key:
         try:
             from openai import OpenAI
-            client = OpenAI(api_key=openai_key)
+            client = OpenAI(api_key=openai_key, timeout=90.0)
             # Générer l'embedding de la question
             response = client.embeddings.create(
                 input=[payload.question.replace("\n", " ").strip()],
@@ -1249,7 +1249,7 @@ def ask_assistant(payload: AskIn) -> dict[str, Any]:
         
     try:
         from openai import OpenAI
-        client = OpenAI(api_key=openai_key)
+        client = OpenAI(api_key=openai_key, timeout=90.0)
         
         system_prompt = (
             "Vous êtes l'assistant scientifique expert de LiteRev-Evidence, spécialisé dans la synthèse d'évidences "
@@ -1439,7 +1439,7 @@ def _search_local_doc_ids(
     if use_vector:
         try:
             from openai import OpenAI
-            client = OpenAI(api_key=openai_key)
+            client = OpenAI(api_key=openai_key, timeout=90.0)
             query_embedding = client.embeddings.create(
                 input=[query.replace("\n", " ").strip()],
                 model="text-embedding-3-small",
@@ -1563,7 +1563,7 @@ def search(payload: SearchIn) -> dict[str, Any]:
     if use_vector:
         try:
             from openai import OpenAI
-            client = OpenAI(api_key=openai_key)
+            client = OpenAI(api_key=openai_key, timeout=90.0)
             response = client.embeddings.create(
                 input=[query.replace("\n", " ").strip()],
                 model="text-embedding-3-small"
@@ -1581,6 +1581,11 @@ def search(payload: SearchIn) -> dict[str, Any]:
         "offset": payload.offset,
         "ts_query_str": query.strip(),
         "sim_threshold": payload.similarity_threshold,
+        # Plafond de candidats ANN (cf. requêtes sémantique/hybride) : on récupère
+        # les N plus proches voisins via l'index HNSW puis on filtre par seuil, au
+        # lieu de scanner TOUS les embeddings. Généreux et indexé sur la profondeur
+        # de pagination pour préserver le rappel après filtres (where_sql).
+        "ann_candidates": min(10000, max(2000, (payload.offset + payload.limit) * 8)),
         **where_params,
     }
 
@@ -1619,8 +1624,8 @@ def search(payload: SearchIn) -> dict[str, Any]:
             SELECT * FROM (
                 SELECT
                     d.id            AS document_id,
-                    c.id            AS chunk_id,
-                    c.chunk_index,
+                    ann.chunk_id,
+                    ann.chunk_index,
                     d.title,
                     d.abstract,
                     d.source,
@@ -1633,17 +1638,26 @@ def search(payload: SearchIn) -> dict[str, Any]:
                     d.scenario_type,
                     d.geographic_scope,
                     d.evidence_category,
-                    c.chunk_type,
-                    c.content,
+                    ann.chunk_type,
+                    ann.content,
                     d.has_fulltext,
-                    (1 - (c.embedding <=> CAST(:query_embedding AS vector))) AS semantic_score,
+                    ann.semantic_score,
                     {lexical_expr} AS lexical_score,
-                    (0.7 * (1 - (c.embedding <=> CAST(:query_embedding AS vector))) +
-                     0.3 * ({lexical_expr})) AS score
-                FROM document_chunk c
-                JOIN literature_document d ON d.id = c.document_id
-                WHERE c.embedding IS NOT NULL
-                  AND (1 - (c.embedding <=> CAST(:query_embedding AS vector))) > :sim_threshold
+                    (0.7 * ann.semantic_score + 0.3 * ({lexical_expr})) AS score
+                FROM (
+                    -- Candidats ANN via l'index HNSW : on récupère les N plus proches
+                    -- voisins (ORDER BY <=> LIMIT) PUIS on filtre par seuil/where_sql,
+                    -- au lieu de scanner et scorer TOUS les embeddings du corpus.
+                    SELECT c.id AS chunk_id, c.document_id, c.chunk_index,
+                           c.chunk_type, c.content,
+                           (1 - (c.embedding <=> CAST(:query_embedding AS vector))) AS semantic_score
+                    FROM document_chunk c
+                    WHERE c.embedding IS NOT NULL
+                    ORDER BY c.embedding <=> CAST(:query_embedding AS vector)
+                    LIMIT :ann_candidates
+                ) ann
+                JOIN literature_document d ON d.id = ann.document_id
+                WHERE ann.semantic_score > :sim_threshold
                 {where_sql}
                 UNION ALL
                 SELECT
@@ -1685,8 +1699,8 @@ def search(payload: SearchIn) -> dict[str, Any]:
             SELECT * FROM (
                 SELECT
                     d.id            AS document_id,
-                    c.id            AS chunk_id,
-                    c.chunk_index,
+                    ann.chunk_id,
+                    ann.chunk_index,
                     d.title,
                     d.abstract,
                     d.source,
@@ -1699,17 +1713,25 @@ def search(payload: SearchIn) -> dict[str, Any]:
                     d.scenario_type,
                     d.geographic_scope,
                     d.evidence_category,
-                    c.chunk_type,
-                    c.content,
+                    ann.chunk_type,
+                    ann.content,
                     d.has_fulltext,
-                    (1 - (c.embedding <=> CAST(:query_embedding AS vector))) AS semantic_score,
+                    ann.semantic_score,
                     0.0 AS lexical_score,
                     TRUE AS is_embedded,
-                    (1 - (c.embedding <=> CAST(:query_embedding AS vector))) AS score
-                FROM document_chunk c
-                JOIN literature_document d ON d.id = c.document_id
-                WHERE c.embedding IS NOT NULL
-                  AND (1 - (c.embedding <=> CAST(:query_embedding AS vector))) > :sim_threshold
+                    ann.semantic_score AS score
+                FROM (
+                    -- Candidats ANN via l'index HNSW (même principe que le mode hybride).
+                    SELECT c.id AS chunk_id, c.document_id, c.chunk_index,
+                           c.chunk_type, c.content,
+                           (1 - (c.embedding <=> CAST(:query_embedding AS vector))) AS semantic_score
+                    FROM document_chunk c
+                    WHERE c.embedding IS NOT NULL
+                    ORDER BY c.embedding <=> CAST(:query_embedding AS vector)
+                    LIMIT :ann_candidates
+                ) ann
+                JOIN literature_document d ON d.id = ann.document_id
+                WHERE ann.semantic_score > :sim_threshold
                 {where_sql}
             ) combined
             ORDER BY score DESC, year DESC NULLS LAST
@@ -5071,7 +5093,7 @@ def _cluster_core(
     if embeddings_matrix is None and allow_openai_embeddings and openai_key:
         try:
             from openai import OpenAI as _OAI
-            _oai = _OAI(api_key=openai_key)
+            _oai = _OAI(api_key=openai_key, timeout=90.0)
             all_vecs: list = []
             batch_texts = [t[:2000] for t in texts]
             for i in range(0, len(batch_texts), 100):
@@ -5214,7 +5236,7 @@ def _build_clusters_payload(scenario_id: str, docs: list, cc: dict, *,
         if with_summaries and label_int != -1 and openai_key:
             try:
                 from openai import OpenAI as _OAI
-                _client = _OAI(api_key=openai_key)
+                _client = _OAI(api_key=openai_key, timeout=90.0)
                 top5 = np.argsort(distances)[:5]
                 llm_ctx = "\n\n".join(
                     f"Titre: {docs[idxs[int(t)]]['title']}\nRésumé: {(docs[idxs[int(t)]].get('abstract') or '')[:350]}"
@@ -5430,7 +5452,7 @@ def scenario_rag_assistant(scenario_id: str, payload: AskIn) -> dict[str, Any]:
     if openai_key:
         try:
             from openai import OpenAI
-            client = OpenAI(api_key=openai_key)
+            client = OpenAI(api_key=openai_key, timeout=90.0)
             response = client.embeddings.create(
                 input=[payload.question.replace("\n", " ").strip()],
                 model="text-embedding-3-small"
@@ -5526,7 +5548,7 @@ def scenario_rag_assistant(scenario_id: str, payload: AskIn) -> dict[str, Any]:
         }
     try:
         from openai import OpenAI
-        client = OpenAI(api_key=openai_key)
+        client = OpenAI(api_key=openai_key, timeout=90.0)
         system_prompt = (
             f"Vous êtes l'assistant scientifique expert de LiteRev-Evidence pour le scénario : "
             f"**{meta['title']}**.\n\n"
@@ -5845,7 +5867,7 @@ def extract_article_pico(scenario_id: str, article_id: int, _: None = Depends(re
     try:
         from openai import OpenAI as _OAI
         from datetime import datetime, timezone
-        _client = _OAI(api_key=openai_key)
+        _client = _OAI(api_key=openai_key, timeout=90.0)
         response = _client.chat.completions.create(
             model="gpt-4.1-mini",
             messages=[
@@ -5951,7 +5973,7 @@ def extract_pico_batch(
     try:
         from openai import OpenAI as _OAI
         from datetime import datetime, timezone
-        _client = _OAI(api_key=openai_key)
+        _client = _OAI(api_key=openai_key, timeout=90.0)
 
         for row in rows:
             article_id = row["id"]
@@ -6053,7 +6075,7 @@ def extract_metadata_batch(
 
     try:
         from openai import OpenAI as _OAI
-        _client = _OAI(api_key=openai_key)
+        _client = _OAI(api_key=openai_key, timeout=90.0)
 
         for row in rows:
             article_id = row["id"]
@@ -6900,7 +6922,7 @@ async def ask_stream(payload: dict[str, Any]) -> StreamingResponse:
     # Récupérer le contexte RAG (chunks pertinents)
     try:
         from openai import OpenAI as SyncOpenAI
-        sync_client = SyncOpenAI()
+        sync_client = SyncOpenAI(timeout=90.0)
         emb_resp = sync_client.embeddings.create(
             model="text-embedding-3-small",
             input=question[:2000],
@@ -6986,7 +7008,7 @@ Réponds de manière structurée et cite les sources pertinentes du contexte."""
 
         # Puis streamer la réponse LLM
         try:
-            async_client = AsyncOpenAI()
+            async_client = AsyncOpenAI(timeout=90.0)
             stream = await async_client.chat.completions.create(
                 model="gpt-4.1-mini",
                 messages=[
@@ -9285,7 +9307,7 @@ def _run_semantic_rerank_inline(scenario_id: str, query: str) -> int:
     encore vectorisés (minorité)."""
     try:
         from openai import OpenAI as _OAI
-        _client = _OAI()
+        _client = _OAI(timeout=90.0)
         q_emb = _client.embeddings.create(model="text-embedding-3-small", input=query[:2000]).data[0].embedding
         q_str = str(q_emb)
 
@@ -10087,7 +10109,7 @@ def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict
             if openai_key:
                 from openai import OpenAI as _OAI
                 from datetime import datetime, timezone
-                _client = _OAI(api_key=openai_key)
+                _client = _OAI(api_key=openai_key, timeout=90.0)
                 system_prompt_pico = (
                     "You are a systematic review expert in emergency medicine. "
                     "Extract PICO elements and return ONLY valid JSON:\n"
@@ -11261,7 +11283,7 @@ def user_scenario_rag_assistant(scenario_id: str, payload: AskIn) -> dict[str, A
     if openai_key:
         try:
             from openai import OpenAI
-            client = OpenAI(api_key=openai_key)
+            client = OpenAI(api_key=openai_key, timeout=90.0)
             response = client.embeddings.create(
                 input=[payload.question.replace("\n", " ").strip()],
                 model="text-embedding-3-small"
@@ -11347,7 +11369,7 @@ def user_scenario_rag_assistant(scenario_id: str, payload: AskIn) -> dict[str, A
 
     try:
         from openai import OpenAI
-        client = OpenAI(api_key=openai_key)
+        client = OpenAI(api_key=openai_key, timeout=90.0)
         system_prompt = (
             f"Vous êtes l'assistant scientifique expert de LiteRev-Evidence pour la recherche : "
             f"**{row['name']}**.\n\n"
@@ -12096,7 +12118,7 @@ Génère un JSON avec EXACTEMENT ces champs :
 Retourne UNIQUEMENT le JSON valide."""
 
     try:
-        client = _OAI()
+        client = _OAI(timeout=90.0)
         response = client.chat.completions.create(
             model="gpt-4.1",
             messages=[
@@ -12597,7 +12619,7 @@ Retourne UNIQUEMENT le JSON valide."""
             logger.info(f"Variables {scenario_id}: évidence inchangée (fingerprint {evidence_fingerprint}) "
                         f"→ spec réutilisé (déterministe, sans appel LLM).")
         else:
-            client = _OAI()
+            client = _OAI(timeout=90.0)
             response = client.chat.completions.create(
                 model="gpt-4.1",
                 messages=[
@@ -12933,7 +12955,7 @@ def _generate_recommended_actions(scenario_id: str) -> list[str]:
             "Génère un JSON {\"recommended_actions\": [\"action 1\", ...]} avec 4 à 5 actions "
             "concrètes déduites de l'évidence. Retourne UNIQUEMENT le JSON.")
     try:
-        client = _OAI()
+        client = _OAI(timeout=90.0)
         resp = client.chat.completions.create(
             model="gpt-4.1", temperature=0.2, max_tokens=700,
             response_format={"type": "json_object"},
@@ -14002,7 +14024,7 @@ async def ask_stream_filtered(payload: dict[str, Any]):
 
     # Embedding de la question
     try:
-        sync_client = SyncOpenAI()
+        sync_client = SyncOpenAI(timeout=90.0)
         emb_resp = sync_client.embeddings.create(
             model="text-embedding-3-small",
             input=question[:2000],
@@ -14103,7 +14125,7 @@ Réponds de manière structurée et cite les sources pertinentes du contexte."""
             return
 
         try:
-            async_client = AsyncOpenAI()
+            async_client = AsyncOpenAI(timeout=90.0)
             stream = await async_client.chat.completions.create(
                 model="gpt-4.1-mini",
                 messages=[
