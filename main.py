@@ -5853,46 +5853,8 @@ def get_enrichment_status(scenario_id: Optional[str] = None):
 
 @app.get("/gesica/scenarios/{scenario_id}/pico-stats")
 def get_scenario_pico_stats(scenario_id: str):
-    """Statistiques PICO pour un scénario."""
-    with engine.connect() as conn:
-        counts = conn.execute(text("""
-            SELECT
-                COUNT(*)                                            AS total,
-                COUNT(*) FILTER (WHERE pico_json IS NOT NULL)       AS with_pico,
-                COUNT(*) FILTER (WHERE pico_json IS NULL)           AS without_pico,
-                ROUND(AVG((pico_json->>'pico_confidence')::float)
-                    FILTER (WHERE pico_json IS NOT NULL)::numeric, 2) AS avg_confidence
-            FROM literature_document d
-            JOIN article_scenarios ars ON ars.document_id = d.id
-            WHERE ars.scenario_id = :scenario_id
-        """), {"scenario_id": scenario_id}).mappings().fetchone()
-
-        designs = conn.execute(text("""
-            SELECT
-                COALESCE(d.pico_json->>'study_design', 'Non extrait') AS design,
-                COUNT(*) AS n
-            FROM literature_document d
-            JOIN article_scenarios ars ON ars.document_id = d.id
-            WHERE ars.scenario_id = :scenario_id
-              AND d.pico_json IS NOT NULL
-            GROUP BY 1
-            ORDER BY 2 DESC
-        """), {"scenario_id": scenario_id}).mappings().fetchall()
-
-    total = counts["total"] if counts else 0
-    with_pico = counts["with_pico"] if counts else 0
-
-    return {
-        "scenario_id": scenario_id,
-        "total": total,
-        "with_pico": with_pico,
-        "without_pico": counts["without_pico"] if counts else 0,
-        "coverage_pct": round((with_pico / total * 100) if total > 0 else 0, 1),
-        "avg_confidence": float(counts["avg_confidence"]) if counts and counts["avg_confidence"] else None,
-        "study_design_distribution": [
-            {"design": d["design"], "count": d["n"]} for d in designs
-        ],
-    }
+    """Statistiques PICO — delegue a l'implementation user-scenario unifiee."""
+    return get_user_scenario_pico_stats(scenario_id)
 
 
 # ─── Screening PRISMA par article dans un scénario ───────────────────────────
@@ -5940,43 +5902,8 @@ def screen_scenario_article(
 
 @app.get("/gesica/scenarios/{scenario_id}/screening-progress")
 def get_scenario_screening_progress(scenario_id: str) -> dict[str, Any]:
-    """Retourne la progression du screening PRISMA pour un scénario."""
-    with engine.connect() as conn:
-        stats = conn.execute(text("""
-            SELECT
-                COUNT(*) AS total,
-                SUM(CASE WHEN is_duplicate = TRUE THEN 1 ELSE 0 END) AS duplicates,
-                SUM(CASE WHEN screening_status = 'included' THEN 1 ELSE 0 END) AS included,
-                SUM(CASE WHEN screening_status = 'excluded' THEN 1 ELSE 0 END) AS excluded,
-                SUM(CASE WHEN screening_status IS NULL OR screening_status = 'pending' THEN 1 ELSE 0 END) AS pending
-            FROM literature_document
-            WHERE project_context = 'literev'
-              AND EXISTS (SELECT 1 FROM article_scenarios ars WHERE ars.document_id = literature_document.id AND ars.scenario_id = :sid)
-        """), {"sid": scenario_id}).mappings().first()
-
-    total = int(stats["total"] or 0)
-    duplicates = int(stats["duplicates"] or 0)
-    unique = total - duplicates
-    included = int(stats["included"] or 0)
-    excluded = int(stats["excluded"] or 0)
-    pending = int(stats["pending"] or 0)
-    screened = included + excluded
-    pct = round(screened / unique * 100, 1) if unique > 0 else 0
-
-    return {
-        "scenario_id": scenario_id,
-        "total_in_db": total,
-        "total": total,
-        "duplicates": duplicates,
-        "unique_articles": unique,
-        "screened": screened,
-        "included": included,
-        "excluded": excluded,
-        "awaiting": unique - screened,
-        "pending": unique - screened,
-        "progress_pct": pct,
-        "screening_complete": pct >= 100,
-    }
+    """Progression du screening PRISMA — delegue a l'implementation user-scenario unifiee."""
+    return get_user_scenario_screening_progress(scenario_id)
 
 # ─── PICO Bulk : tous les articles d'un scénario avec PICO ────────────────────────────────────────────
 @app.get("/gesica/scenarios/{scenario_id}/pico-bulk")
@@ -6178,105 +6105,14 @@ def submit_double_blind_decision(
 
 @app.get("/gesica/scenarios/{scenario_id}/double-blind/kappa")
 def get_kappa_stats(scenario_id: str) -> dict[str, Any]:
-    """
-    Calcule le score Kappa de Cohen inter-évaluateurs pour un scénario.
-    Kappa = (Po - Pe) / (1 - Pe)
-    où Po = accord observé, Pe = accord attendu par hasard.
-    """
-    with engine.connect() as conn:
-        rows = conn.execute(text("""
-            SELECT reviewer_1_status, reviewer_2_status
-            FROM literature_document
-            WHERE project_context = 'literev'
-              AND EXISTS (SELECT 1 FROM article_scenarios ars WHERE ars.document_id = literature_document.id AND ars.scenario_id = :sid)
-              AND reviewer_1_status IS NOT NULL
-              AND reviewer_2_status IS NOT NULL
-        """), {"sid": scenario_id}).mappings().all()
-
-    if not rows:
-        return {
-            "scenario_id": scenario_id,
-            "n_evaluated": 0,
-            "kappa": None,
-            "interpretation": "Aucune évaluation double-aveugle disponible",
-            "agreements": {},
-            "conflicts": 0,
-        }
-
-    n = len(rows)
-    categories = ["included", "excluded", "pending"]
-
-    # Matrice de confusion
-    matrix = {c1: {c2: 0 for c2 in categories} for c1 in categories}
-    for r in rows:
-        r1 = r["reviewer_1_status"] if r["reviewer_1_status"] in categories else "pending"
-        r2 = r["reviewer_2_status"] if r["reviewer_2_status"] in categories else "pending"
-        matrix[r1][r2] += 1
-
-    # Accord observé (Po)
-    po = sum(matrix[c][c] for c in categories) / n
-
-    # Accord attendu par hasard (Pe)
-    pe = 0.0
-    for c in categories:
-        row_sum = sum(matrix[c][c2] for c2 in categories)
-        col_sum = sum(matrix[c1][c] for c1 in categories)
-        pe += (row_sum / n) * (col_sum / n)
-
-    # Kappa
-    kappa = (po - pe) / (1 - pe) if pe < 1.0 else 1.0
-
-    # Interprétation
-    if kappa >= 0.81:
-        interpretation = "Quasi-parfait (≥ 0.81)"
-    elif kappa >= 0.61:
-        interpretation = "Substantiel (0.61–0.80)"
-    elif kappa >= 0.41:
-        interpretation = "Modéré (0.41–0.60)"
-    elif kappa >= 0.21:
-        interpretation = "Faible (0.21–0.40)"
-    else:
-        interpretation = "Médiocre (< 0.21)"
-
-    # Compter les conflits
-    conflicts = sum(
-        matrix[r1][r2]
-        for r1 in categories
-        for r2 in categories
-        if r1 != r2
-    )
-
-    return {
-        "scenario_id": scenario_id,
-        "n_evaluated": n,
-        "kappa": round(kappa, 4),
-        "po_observed": round(po, 4),
-        "pe_expected": round(pe, 4),
-        "interpretation": interpretation,
-        "conflicts": conflicts,
-        "agreements": {c: matrix[c][c] for c in categories},
-        "matrix": matrix,
-    }
+    """Kappa de Cohen — delegue a l'implementation user-scenario unifiee."""
+    return get_user_scenario_kappa(scenario_id)
 
 
 @app.get("/gesica/scenarios/{scenario_id}/double-blind/conflicts")
 def get_conflicts(scenario_id: str) -> list[dict[str, Any]]:
-    """Retourne les articles en conflit entre les deux reviewers."""
-    with engine.connect() as conn:
-        rows = conn.execute(text("""
-            SELECT id, title, abstract, year, journal,
-                   reviewer_1_status, reviewer_1_reason,
-                   reviewer_2_status, reviewer_2_reason,
-                   kappa_final_status
-            FROM literature_document
-            WHERE project_context = 'literev'
-              AND EXISTS (SELECT 1 FROM article_scenarios ars WHERE ars.document_id = literature_document.id AND ars.scenario_id = :sid)
-              AND reviewer_1_status IS NOT NULL
-              AND reviewer_2_status IS NOT NULL
-              AND reviewer_1_status != reviewer_2_status
-            ORDER BY id
-        """), {"sid": scenario_id}).mappings().all()
-    return [dict(r) for r in rows]
+    """Conflits double-aveugle — delegue a l'implementation user-scenario unifiee."""
+    return get_user_scenario_conflicts(scenario_id)
 
 
 @app.post("/gesica/scenarios/{scenario_id}/double-blind/resolve")
