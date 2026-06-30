@@ -9050,6 +9050,9 @@ def _run_user_scenario_populate(
             logger.warning(f"Suppression articles sans abstract {scenario_id}: {_e_noabs}")
 
         # ── Mettre à jour article_count (avant rerank) ──────────────────────
+        # NB : on ne marque PAS encore populate_status='done' ici — le scoring
+        # n'a pas tourné. Le marquer prématurément faisait paraître "prêt" un
+        # scénario dont les similarity_score restaient NULL (compteurs divergents).
         with engine.begin() as conn:
             conn.execute(text("""
                 UPDATE user_scenarios
@@ -9058,7 +9061,6 @@ def _run_user_scenario_populate(
                     JOIN literature_document d ON d.id = ars.document_id
                     WHERE ars.scenario_id = :sid AND (d.is_duplicate IS NULL OR d.is_duplicate = FALSE)
                 ),
-                populate_status = 'done',
                 updated_at = NOW()
                 WHERE id = :sid
             """), {"sid": scenario_id})
@@ -9067,12 +9069,37 @@ def _run_user_scenario_populate(
         # Soft filter : le seuil filtre l'affichage et l'aval, JAMAIS par
         # suppression. Réduire le seuil fait donc réapparaître des articles.
         _set_phase("scoring")
+        _n_scored = 0
+        _scoring_failed = False
         try:
             _backfill_title_abstract_chunks(scenario_id)  # docs liés sans chunk résumé
             _n_scored = _run_semantic_rerank_inline(scenario_id, query)
             logger.info(f"Post-populate scoring {scenario_id}: {_n_scored} articles scorés (cosinus, aucune suppression).")
         except Exception as _e_rr:
+            _scoring_failed = True
             logger.warning(f"scoring post-populate {scenario_id}: {_e_rr}")
+
+        # ── Honnêteté de l'état : 'done' SEULEMENT si le scoring a réellement
+        # produit des scores. _run_semantic_rerank_inline avale ses erreurs et
+        # renvoie 0 (ex. OpenAI indisponible) ; on détecte ce cas et on marque
+        # 'error' plutôt que 'done' pour ne pas afficher un état prêt trompeur.
+        try:
+            with engine.begin() as conn:
+                _scorable = conn.execute(text("""
+                    SELECT COUNT(DISTINCT ars.document_id) FROM article_scenarios ars
+                    JOIN literature_document d ON d.id = ars.document_id
+                    WHERE ars.scenario_id = :sid AND (d.is_duplicate IS NULL OR d.is_duplicate = FALSE)
+                      AND d.abstract IS NOT NULL AND length(TRIM(d.abstract)) >= 30
+                """), {"sid": scenario_id}).scalar() or 0
+                _ok = (not _scoring_failed) and (_n_scored > 0 or _scorable == 0)
+                conn.execute(text("""
+                    UPDATE user_scenarios SET populate_status = :st, updated_at = NOW() WHERE id = :sid
+                """), {"st": "done" if _ok else "error", "sid": scenario_id})
+                if not _ok:
+                    logger.warning(f"Populate {scenario_id}: scoring n'a produit aucun score "
+                                   f"({_scorable} articles scorables) → populate_status='error'.")
+        except Exception as _e_st:
+            logger.warning(f"populate_status update {scenario_id}: {_e_st}")
 
         # ── Le corpus est scoré (cosinus) → on le publie MAINTENANT ──────────
         # Le cross-encoder Cohere (plus lent) et les visualisations tournent
@@ -10224,6 +10251,18 @@ def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict
         logger.error(f"Pipeline user_scenario {scenario_id} fatal: {e}", exc_info=True)
         _user_scenario_pipeline_jobs[scenario_id]["overall_status"] = "error"
         _user_scenario_pipeline_jobs[scenario_id]["error"] = str(e)
+        # Persister l'échec en DB (symétrique du succès) : sinon la carte lit
+        # pipeline_status='running' indéfiniment et le scénario est relancé comme
+        # « orphelin » au redémarrage.
+        try:
+            with engine.begin() as _conn:
+                _conn.execute(text("""
+                    UPDATE user_scenarios
+                    SET pipeline_status = 'failed', updated_at = NOW()
+                    WHERE id = :sid
+                """), {"sid": scenario_id})
+        except Exception as _e2:
+            logger.warning(f"Pipeline failure DB update {scenario_id}: {_e2}")
 
 
 @app.post("/user-scenarios/{scenario_id}/populate")
