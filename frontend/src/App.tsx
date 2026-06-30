@@ -690,7 +690,7 @@ function StatsView({ corpusStats, fulltextStats, scenarios, statsByYear }: { cor
         <div className="rounded-3xl border border-white/10 bg-white/5 p-5 shadow-2xl">
           <h2 className="mb-4 flex items-center gap-2 text-lg font-semibold text-white">
             <BarChart2 size={18} className="text-brand-400" />
-            Corpus global
+            Corpus
           </h2>
           <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
             <div className="rounded-2xl border border-white/10 bg-forest-900/60 p-4 text-center">
@@ -699,6 +699,11 @@ function StatsView({ corpusStats, fulltextStats, scenarios, statsByYear }: { cor
             </div>
             <div className="rounded-2xl border border-white/10 bg-forest-900/60 p-4 text-center">
               <p className="text-2xl font-bold text-brand-300">{corpusStats.totalChunks.toLocaleString()}</p>
+              {fulltextStats?.chunks && (
+                <p className="mt-0.5 text-[10px] font-mono text-forest-400">
+                  <span className="text-blue-300">{fulltextStats.chunks.fulltext.toLocaleString()}</span> texte intégral · {fulltextStats.chunks.abstract.toLocaleString()} résumé
+                </p>
+              )}
               <p className="mt-1 text-xs text-forest-400">Chunks</p>
             </div>
             <div className="rounded-2xl border border-white/10 bg-forest-900/60 p-4 text-center">
@@ -706,10 +711,18 @@ function StatsView({ corpusStats, fulltextStats, scenarios, statsByYear }: { cor
               <p className="mt-1 text-xs text-forest-400">Scénarios</p>
             </div>
             <div className="rounded-2xl border border-white/10 bg-forest-900/60 p-4 text-center">
-              <p className="text-2xl font-bold text-brand-300">{Object.keys(corpusStats.bySource).length}</p>
+              <p className="text-2xl font-bold text-brand-300">{fulltextStats?.by_source?.length ?? Object.keys(corpusStats.bySource).length}</p>
               <p className="mt-1 text-xs text-forest-400">Sources</p>
             </div>
           </div>
+
+          {/* Couverture texte intégral (fusion de l'ancien panneau "Couverture textuelle") */}
+          {fulltextStats && (
+            <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-forest-400">
+              <span>Texte intégral : <span className="text-blue-300 font-semibold">{fulltextStats.corpus.docs_with_fulltext.toLocaleString()}</span> / {corpusStats.totalDocuments.toLocaleString()} <span className="text-white/40">({fulltextStats.corpus.fulltext_coverage_pct.toFixed(1)}%)</span></span>
+              <span>Résumé seul : <span className="text-white/70 font-semibold">{fulltextStats.corpus.docs_abstract_only.toLocaleString()}</span></span>
+            </div>
+          )}
 
           <div className="mt-4 grid gap-4 sm:grid-cols-2">
             {/* Par scénario */}
@@ -750,19 +763,23 @@ function StatsView({ corpusStats, fulltextStats, scenarios, statsByYear }: { cor
               </h3>
               <div className="space-y-1.5">
                 {(() => {
-                  const entries = Object.entries(corpusStats.bySource).sort((a, b) => (b[1] as number) - (a[1] as number));
-                  const maxVal = Math.max(...entries.map(([, v]) => v as number));
-                  return entries.map(([src, count]) => (
-                    <div key={src}>
+                  // Fusion : par source, le texte intégral (bleu) sur le total (or).
+                  // Le compte "texte intégral / total" reprend l'ancien panneau
+                  // « Full Text par source ».
+                  const rows = (fulltextStats?.by_source && fulltextStats.by_source.length > 0)
+                    ? fulltextStats.by_source.map(s => ({ source: s.source, total: s.total, ft: s.with_fulltext }))
+                    : Object.entries(corpusStats.bySource).map(([source, total]) => ({ source, total: total as number, ft: 0 }));
+                  rows.sort((a, b) => b.total - a.total);
+                  const maxVal = Math.max(1, ...rows.map(r => r.total));
+                  return rows.map(r => (
+                    <div key={r.source}>
                       <div className="flex items-center justify-between text-xs mb-0.5">
-                        <span className="text-white/70 capitalize">{src}</span>
-                        <span className="font-mono text-brand-300">{(count as number).toLocaleString()}</span>
+                        <span className="text-white/70 capitalize">{r.source}</span>
+                        <span className="font-mono"><span className="text-blue-300">{r.ft.toLocaleString()}</span><span className="text-white/30"> / {r.total.toLocaleString()}</span></span>
                       </div>
-                      <div className="h-1.5 w-full rounded-full bg-white/5 overflow-hidden">
-                        <div
-                          className="h-full rounded-full bg-gradient-to-r from-gold-500 to-gold-400 transition-all"
-                          style={{ width: `${Math.round(((count as number) / maxVal) * 100)}%` }}
-                        />
+                      <div className="h-1.5 w-full rounded-full bg-white/5 overflow-hidden flex">
+                        <div className="h-full bg-blue-400 transition-all" style={{ width: `${Math.round((r.ft / maxVal) * 100)}%` }} title="Texte intégral" />
+                        <div className="h-full bg-gradient-to-r from-gold-500 to-gold-400 transition-all" style={{ width: `${Math.round((Math.max(0, r.total - r.ft) / maxVal) * 100)}%` }} title="Résumé seul" />
                       </div>
                     </div>
                   ));
@@ -770,44 +787,6 @@ function StatsView({ corpusStats, fulltextStats, scenarios, statsByYear }: { cor
               </div>
             </div>
           </div>
-        </div>
-      )}
-
-      {fulltextStats && (
-        <div className="rounded-3xl border border-white/10 bg-white/5 p-5 shadow-2xl">
-          <h2 className="mb-4 flex items-center gap-2 text-lg font-semibold text-white">
-            <BookOpen size={18} className="text-brand-400" />
-            Couverture textuelle
-          </h2>
-          <div className="grid grid-cols-2 gap-4 sm:grid-cols-3">
-            <div className="rounded-2xl border border-white/10 bg-forest-900/60 p-4 text-center">
-              <p className="text-2xl font-bold text-brand-300">{fulltextStats.corpus.docs_with_fulltext.toLocaleString()}</p>
-              <p className="mt-1 text-xs text-forest-400">Full Text</p>
-            </div>
-            <div className="rounded-2xl border border-white/10 bg-forest-900/60 p-4 text-center">
-              <p className="text-2xl font-bold text-forest-300">{fulltextStats.corpus.docs_abstract_only.toLocaleString()}</p>
-              <p className="mt-1 text-xs text-forest-400">Abstract only</p>
-            </div>
-            <div className="rounded-2xl border border-white/10 bg-forest-900/60 p-4 text-center">
-              <p className={`text-2xl font-bold ${fulltextStats.corpus.fulltext_coverage_pct >= 20 ? 'text-brand-300' : 'text-gold-300'}`}>
-                {fulltextStats.corpus.fulltext_coverage_pct.toFixed(1)}%
-              </p>
-              <p className="mt-1 text-xs text-forest-400">Couverture</p>
-            </div>
-          </div>
-          {fulltextStats.by_source && fulltextStats.by_source.length > 0 && (
-            <div className="mt-4">
-              <h3 className="mb-2 text-sm font-medium text-forest-300">Full Text par source</h3>
-              <div className="space-y-1">
-                {fulltextStats.by_source.slice(0, 8).map((s) => (
-                  <div key={s.source} className="flex items-center justify-between rounded-xl border border-white/10 bg-forest-900/40 px-3 py-1.5 text-xs">
-                    <span className="text-forest-300 capitalize">{s.source}</span>
-                    <span className="font-mono text-brand-300">{s.with_fulltext} / {s.total}</span>
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
         </div>
       )}
 
@@ -3001,6 +2980,10 @@ export default function App() {
       fetchCorpusStats().then(setCorpusStats).catch(console.error);
       fetchFulltextStats().then(setFulltextStats).catch(console.error);
       fetchCorpusStatsByYearNamed().then(setCorpusStatsByYear).catch(() => fetchCorpusStatsByYear().then(setCorpusStatsByYear).catch(console.error));
+      // Scénarios nécessaires au compteur "Scénarios" + "Par scénario" du tableau
+      // de bord (sinon ils ne sont chargés que sur l'onglet Scénarios → 0).
+      fetchGesicaScenarios().then(setGesicaScenarios).catch(console.error);
+      fetchUserScenarios().then(setUserScenarios).catch(console.error);
     }
     if (activeTab === "scenarios") {
       setLoadingScenarios(true);

@@ -363,6 +363,12 @@ export interface FulltextStats {
     docs_abstract_only: number;
     fulltext_coverage_pct: number;
   };
+  chunks?: {
+    total: number;
+    fulltext: number;
+    abstract: number;
+    other: number;
+  };
   embeddings: {
     total_chunks: number;
     chunks_with_embedding: number;
