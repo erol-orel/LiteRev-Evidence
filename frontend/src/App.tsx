@@ -842,39 +842,54 @@ function StatsView({ corpusStats, fulltextStats, scenarios, statsByYear }: { cor
             <BarChart2 size={18} className="text-brand-400" />
             {(() => {
               const yrs = Object.keys(statsByYear.byYear).map((y) => parseInt(y)).filter((y) => !isNaN(y));
-              const lo = yrs.length ? Math.max(1900, Math.min(...yrs)) : 1900;
+              const lo = yrs.length ? Math.min(...yrs) : new Date().getFullYear();
               const hi = yrs.length ? Math.max(...yrs) : new Date().getFullYear();
               return `Évolution temporelle du corpus (${lo}–${hi})`;
             })()}
           </h2>
           {(() => {
-            const entries = Object.entries(statsByYear.byYear)
-              .filter(([y]) => parseInt(y) >= 1900)
-              .sort((a, b) => parseInt(a[0]) - parseInt(b[0]));
-            const maxVal = Math.max(...entries.map(([, v]) => v));
-            const recentThreshold = 2020;
+            // Compteur par année (toutes les années renvoyées par l'API, y compris
+            // avant 1900). On comble les années manquantes par 0 pour un axe temporel
+            // linéaire, puis on rend un histogramme compact (1 barre / année).
+            const counts: Record<number, number> = {};
+            Object.entries(statsByYear.byYear).forEach(([y, c]) => {
+              const yr = parseInt(y);
+              if (!isNaN(yr)) counts[yr] = (counts[yr] ?? 0) + (c as number);
+            });
+            const years = Object.keys(counts).map(Number).sort((a, b) => a - b);
+            if (years.length === 0) return null;
+            const minY = years[0], maxY = years[years.length - 1];
+            const maxVal = Math.max(...Object.values(counts));
+            const peakYear = years.reduce((p, y) => (counts[y] > counts[p] ? y : p), years[0]);
+            const allYears: number[] = [];
+            for (let y = minY; y <= maxY; y++) allYears.push(y);
             return (
-              <div className="space-y-1">
-                {entries.map(([year, count]) => (
-                  <div key={year} className="flex items-center gap-3">
-                    <span className="w-10 shrink-0 text-right text-xs text-forest-400 font-mono">{year}</span>
-                    <div className="flex-1 h-5 bg-white/5 rounded overflow-hidden relative">
+              <>
+                <div className="flex items-end gap-px h-44 w-full">
+                  {allYears.map((y) => {
+                    const c = counts[y] ?? 0;
+                    const pct = maxVal ? (c / maxVal) * 100 : 0;
+                    return (
                       <div
-                        className={`h-full rounded transition-all ${
-                          parseInt(year) >= recentThreshold
-                            ? 'bg-gradient-to-r from-brand-600 to-brand-400'
-                            : 'bg-gradient-to-r from-forest-600 to-forest-500'
-                        }`}
-                        style={{ width: `${Math.round((count / maxVal) * 100)}%` }}
+                        key={y}
+                        title={`${y} : ${c.toLocaleString()} article${c > 1 ? 's' : ''}`}
+                        className={`flex-1 rounded-t transition-all hover:opacity-80 ${y >= 2020 ? 'bg-gradient-to-t from-brand-600 to-brand-400' : 'bg-forest-500/70'}`}
+                        style={{ height: `${c > 0 ? Math.max(2, pct) : 0}%` }}
                       />
-                    </div>
-                    <span className="w-14 shrink-0 text-right text-xs font-mono text-brand-300">{count.toLocaleString()}</span>
-                  </div>
-                ))}
-              </div>
+                    );
+                  })}
+                </div>
+                <div className="mt-1.5 flex justify-between text-[10px] font-mono text-forest-400">
+                  <span>{minY}</span>
+                  <span>{Math.round((minY + maxY) / 2)}</span>
+                  <span>{maxY}</span>
+                </div>
+                <p className="mt-2 text-xs text-forest-400 italic">
+                  Pic : <span className="not-italic font-semibold text-brand-300">{peakYear}</span> ({counts[peakYear].toLocaleString()} articles) · années récentes (2020+) mises en évidence.
+                </p>
+              </>
             );
           })()}
-          <p className="mt-3 text-xs text-forest-400 italic">Les années 2020+ sont mises en évidence (vert vif) · reflètent la croissance de la littérature IA en médecine d’urgence.</p>
         </div>
       )}
 
