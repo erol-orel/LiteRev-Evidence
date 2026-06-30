@@ -270,6 +270,7 @@ def _strategy_is_degraded(strategy: object, query: str | None = None) -> bool:
 _STUDY_DESIGN_CASE = """CASE
         WHEN d = '' THEN 'Non spécifié'
         WHEN d LIKE '%systematic review%' OR d LIKE '%meta-analysis%' OR d LIKE '%meta analysis%' OR d LIKE '%scoping review%' OR d LIKE '%umbrella review%' THEN 'Revue systématique / Méta-analyse'
+        WHEN d LIKE '%non-randomi%' OR d LIKE '%non randomi%' OR d LIKE '%quasi-experimental%' OR d LIKE '%quasi experimental%' OR d LIKE '%interrupted time series%' OR d LIKE '%controlled before%' THEN 'Essai non randomisé / Quasi-expérimental'
         WHEN d LIKE '%randomi%' OR d LIKE 'rct%' OR d LIKE '%controlled trial%' THEN 'Essai contrôlé randomisé (RCT)'
         WHEN d LIKE '%case-control%' OR d LIKE '%case control%' THEN 'Cas-témoins'
         WHEN d LIKE '%cross-sectional%' OR d LIKE '%cross sectional%' THEN 'Transversale'
@@ -327,6 +328,12 @@ def _normalize_doi(doi: str | None) -> str | None:
 _STUDY_DESIGN_TIERS = (
     (("meta-analysis", "méta-analyse", "metaanalysis"), 1.00),
     (("systematic review", "revue systématique", "systematic"), 0.92),
+    # ⚠ « non-randomi… » AVANT « randomi… » : "non-randomized" CONTIENT "randomized",
+    # donc sans ce garde-fou un essai NON randomisé serait surclassé au rang d'ECR.
+    # Quasi-expérimental → certitude intermédiaire, cohérent avec _GRADE_LEVEL_CASE
+    # qui les classe « Modérée » (au-dessus de l'observationnel, sous l'ECR).
+    (("non-randomized", "non-randomised", "non randomi", "quasi-experimental",
+      "quasi experimental", "interrupted time series", "controlled before"), 0.68),
     (("randomized", "randomised", "rct", "essai randomisé"), 0.85),
     (("cohort", "cohorte", "longitudinal"), 0.62),
     (("case-control", "cas-témoins", "case control"), 0.52),

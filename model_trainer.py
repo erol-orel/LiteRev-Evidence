@@ -223,6 +223,13 @@ def estimator_from_params(family: str, task_type: str, params: dict, random_stat
     p = dict(params or {})
     clf = task_type == "classification"
 
+    # Données médicales souvent déséquilibrées (événement rare) : on pondère les
+    # classes par défaut pour les familles qui le supportent (RF, régression
+    # logistique, SVM). GradientBoosting/MLP/KNN n'exposent pas class_weight et
+    # restent inchangés. setdefault → un réglage explicite du spec a la priorité.
+    if clf and family in ("random_forest", "logistic_regression", "svm"):
+        p.setdefault("class_weight", "balanced")
+
     if family == "gradient_boosting":
         return (GradientBoostingClassifier if clf else GradientBoostingRegressor)(random_state=random_state, **p)
     if family == "random_forest":
@@ -401,13 +408,36 @@ def train_model(df, spec: dict, n_trials: int = 25, random_state: int = 42, test
 
     scoring = _scoring(metric, task_type, n_classes=(len(classes) if classes else None))
     is_ts = strategy == "timeseries"
+    cv_strategy_effective = strategy
+
+    # Validation temporelle : TimeSeriesSplit et le train_test_split NON mélangé
+    # supposent des lignes ORDONNÉES dans le temps. Le DataFrame n'est pas trié,
+    # donc sans tri explicite le découpage suivrait l'ordre arbitraire des lignes →
+    # holdout « temporel » dénué de sens. On trie sur la 1re colonne datetime du
+    # spec ; à défaut (aucune colonne temporelle exploitable) on rétrograde vers un
+    # découpage mélangé plutôt que de fabriquer un faux holdout chronologique.
+    if is_ts:
+        time_col = next(
+            (u["machine_name"] for u in used
+             if u.get("dtype") == "datetime" and u["machine_name"] in X.columns),
+            None,
+        )
+        order = pd.to_datetime(X[time_col], errors="coerce") if time_col else None
+        if order is not None and order.notna().any():
+            sorted_idx = order.sort_values(kind="mergesort").index  # tri stable
+            X = X.loc[sorted_idx].reset_index(drop=True)
+            y = y.loc[sorted_idx].reset_index(drop=True)
+        else:
+            is_ts = False
+            cv_strategy_effective = "stratified_kfold" if task_type == "classification" else "kfold"
+
     stratify = y if (task_type == "classification" and not is_ts) else None
     Xtr, Xte, ytr, yte = train_test_split(
         X, y, test_size=test_size, random_state=random_state,
         shuffle=not is_ts, stratify=stratify,
     )
 
-    cv = _make_cv(strategy, folds, task_type, random_state)
+    cv = _make_cv(cv_strategy_effective, folds, task_type, random_state)
     pre = build_preprocessor(used)
 
     def objective(trial):
@@ -438,7 +468,7 @@ def train_model(df, spec: dict, n_trials: int = 25, random_state: int = 42, test
         "family": family,
         "metric": metric,
         "scoring": scoring,
-        "cv_strategy": strategy,
+        "cv_strategy": cv_strategy_effective,
         "cv_folds": folds,
         "n_total": int(len(X)),
         "n_train": int(len(Xtr)),
@@ -456,11 +486,32 @@ def train_model(df, spec: dict, n_trials: int = 25, random_state: int = 42, test
 
 # ─── Monitoring (Phase 4) : score les données récentes -> niveau d'alerte ─────
 
+# Jetons usuels d'« événement » (classe positive) pour les encodages médicaux
+# courants, utilisés quand le spec ne fixe pas explicitement positive_class.
+_POSITIVE_TOKENS = frozenset({
+    "1", "true", "vrai", "oui", "yes", "positive", "positif", "pos",
+    "event", "événement", "evenement", "case", "cas", "death", "décès", "deces",
+    "deceased", "dead", "mort", "mortality", "mortalité", "malade", "disease",
+    "present", "présent", "abnormal", "anormal",
+})
+
+
 def positive_index(classes: list | None, positive_class: str | None) -> int:
-    """Index de la classe 'événement' (positive). Par défaut la dernière classe."""
-    if classes and positive_class is not None and str(positive_class) in classes:
+    """Index de la classe 'événement' (positive).
+
+    Priorité : (1) positive_class explicite du spec ; (2) un libellé reconnu comme
+    événement (oui/yes/1/positif/décès…) ; (3) à défaut seulement, la dernière
+    classe. LabelEncoder trie les classes par ordre alphabétique, donc le repli
+    « dernière classe » est arbitraire (ex. [décès, survie] → 'survie') : on
+    l'évite dès qu'un libellé interprétable est présent."""
+    if not classes:
+        return 1
+    if positive_class is not None and str(positive_class) in classes:
         return classes.index(str(positive_class))
-    return (len(classes) - 1) if classes else 1
+    for i, c in enumerate(classes):
+        if str(c).strip().lower() in _POSITIVE_TOKENS:
+            return i
+    return len(classes) - 1
 
 
 def _level_from_value(v: float, orange: float | None, red: float | None) -> str:
