@@ -1,12 +1,38 @@
 # Migration plan — per-scenario `screening_status`
 
-**Status:** Phase 1 SHIPPED (alembic `c8d4e2f1a9b3`, 2026-06-30) — additive
-per-scenario screening columns on `article_scenarios` + option-A backfill from
-the global column, validated end-to-end on local PG (upgrade/downgrade/idempotent).
-Zero behaviour change (global column still authoritative). Phases 2–5 (dual-write,
-dual-read across ~118 sites, frontend, cutover) remain. Migration 1's screening
-**write-gate** flip to `article_scenarios` membership (PR #133) is the Phase-2
-prerequisite, now in place.
+**Status:** Phases 1–4 SHIPPED (2026-06-30). Only Phase 5 (cutover/drop) remains.
+- **Phase 1** — alembic `c8d4e2f1a9b3`: additive per-scenario screening columns on
+  `article_scenarios` + option-A backfill from the global column, validated end-to-end
+  on local PG (upgrade/downgrade/idempotent). Zero behaviour change.
+- **Phase 2** (PR #142) — dual-write: `_write_ars_screening()` records the decision on
+  the `(scenario_id, document_id)` row in every screening writer (single-reviewer
+  screen, double-blind resolution, conflict resolution), keeping the global column
+  updated too. `scenario_type` write-gate already flipped to `article_scenarios`
+  membership (PR #133).
+- **Phase 3** (PR #143) — dual-read across the 19 `article_scenarios`-joined read
+  sites: every screening read became `COALESCE(ars.screening_status, d.screening_status)`
+  (corpus, corpus stats, PRISMA funnel, evidence brief, pico-bulk, GRADE, above-threshold
+  helper). Parity validated on local PG via the backfill invariant.
+- **Phase 3b** — the scenario RAG paths: `/user-scenarios/{id}/rag`
+  (`user_scenario_rag_assistant`, vector + keyword), its GESICA forwarder
+  `/gesica/scenarios/{id}/rag`, and the path the UI actually calls,
+  `/ask/stream/filtered` (`ask_stream_filtered`). Each `EXISTS (… article_scenarios …)`
+  was restructured to a 1:1 `JOIN article_scenarios` so the per-scenario screening
+  column is readable in SELECT/WHERE/ORDER as `COALESCE(ars.screening_status,
+  d.screening_status)`. Validated on local PG (identical to old when `ars==d`; correctly
+  per-scenario after divergence).
+- **Phase 4** — frontend: satisfied by the backend reads above, **no `.tsx` change
+  needed**. The screening UI sources its list from `fetchScenarioCorpus(scenarioId)`
+  (now per-scenario via COALESCE) and writes through `screenArticle(scenarioId, …)`
+  (Phase-2 per-scenario endpoint). Each `ScenarioDetailPage` fetches its own scenario's
+  corpus, so screening display/state is inherently scoped to the active scenario — there
+  is no document-id-only cache to leak across scenarios. PRISMA/brief/corpus badges are
+  per-scenario via Phase 3.
+
+**Deferred (intentionally global):** `/ask` (`ask_assistant`) takes no `scenario_id` and
+is not called by the UI; `/ask/stream` (`ask_stream`) is scenario-capable but unused by
+the frontend. Both keep the global `d.screening_status` read; if either is wired to a
+per-scenario surface later, apply the same JOIN+COALESCE pattern as `ask_stream_filtered`.
 **Author:** generated for review
 **Scope:** move PRISMA screening decisions from *global per-document* to *per (scenario, document)*.
 
@@ -106,7 +132,7 @@ CREATE INDEX IF NOT EXISTS ix_article_scenarios_scen_screen
   means an "excluded" doc becomes excluded in every scenario it's scored into —
   same as today, just now editable per scenario going forward.
 
-### Phase 2 — Dual-write
+### Phase 2 — Dual-write — ✅ SHIPPED (PR #142)
 - Screening endpoints write the `(scenario_id, document_id)` row in `article_scenarios`
   **and** keep `literature_document.screening_status` updated (so un-migrated readers
   stay correct).
@@ -114,7 +140,7 @@ CREATE INDEX IF NOT EXISTS ix_article_scenarios_scen_screen
   membership instead (the row being screened).
 - Reversible: revert the endpoints; the global column is still authoritative.
 
-### Phase 3 — Dual-read, migrated incrementally
+### Phase 3 — Dual-read, migrated incrementally — ✅ SHIPPED (incl. 3b, RAG paths)
 - Introduce one helper that emits the relevant-subset predicate against
   `COALESCE(ars.screening_status, d.screening_status)` (per-scenario, falling back to
   global for any not-yet-backfilled row).
@@ -123,7 +149,7 @@ CREATE INDEX IF NOT EXISTS ix_article_scenarios_scen_screen
   count-parity script on staging: per-scenario counts must equal today's for scenarios
   where no per-scenario divergence has been introduced yet.
 
-### Phase 4 — Frontend
+### Phase 4 — Frontend — ✅ SHIPPED (satisfied by backend; no `.tsx` change)
 - Screening UI reads/writes per-scenario status; the PRISMA funnel and corpus badges
   reflect the active scenario. `screen()` in `api.ts` already passes `scenario_id`, so
   the change is mostly display + cache-keying by scenario.
