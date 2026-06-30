@@ -96,8 +96,20 @@ Patterns: most GESICA scenarios are clean supersets; some user scenarios balloon
 (e.g. 13→3013); and **15 scenarios are ⚠ VIDÉ** (zero `article_scenarios` rows):
 `stroke-detection`, `triage-support`, and 13 `usr-…` scenarios.
 
-**Decision: pause the migration and RE-SCORE the 15 first** (so pure Way B isn't
-just emptying scenarios that were never scored).
+**Decision (original): pause and RE-SCORE the 15 first** (so pure Way B isn't just
+emptying scenarios that were never scored).
+
+**Decision (updated 2026-06-30): ship the Step 2 backfill instead of gating on a
+manual re-score.** Re-scoring the 15 needs prod/server access + OpenAI cost and left
+the migration stuck. The backfill (alembic `a7c3e1b9d2f4`) creates the missing
+`article_scenarios` rows from `scenario_type` with `similarity_score = NULL`
+("member but unscored"), making Way B membership a superset of Way A so the read
+switch can no longer empty any scenario. NULL-score rows are never counted as
+*relevant* (canonical predicate), so relevance/PRISMA counts don't move; only
+`article_scenarios`-based membership converges (the 15 VIDÉ scenarios stop showing
+empty). Validated end-to-end on local Postgres 16 (upgrade → downgrade → idempotent
+re-upgrade). The `rebuild-corpus` re-score below remains available as an optional
+quality pass to turn NULL-score members into scored ones.
 
 ### Why the 15 have no scored membership
 `article_scenarios` membership is built only by the boolean-query corpus assignment
@@ -143,7 +155,11 @@ done
 - [x] Read-only preview tool (`scripts/migration1_scenario_type_diff.py`).
 - [x] Run preview against production → 15 ⚠ VIDÉ scenarios found.
 - [x] Decision: re-score the 15 first; add `rebuild-corpus` endpoint.
-- [ ] Re-score the 15 on the server; re-run the diff; confirm ⚠ cleared.
-- [ ] Re-evaluate Way B deltas (esp. user-scenario ballooning) with the user.
-- [ ] Rewrite the 29 sites + validate on staging.
+- [x] **Backfill shipped** as alembic `a7c3e1b9d2f4` (supersedes the manual
+      re-score gate); validated on local PG; auto-applies on deploy.
+- [ ] Post-deploy: re-run the diff tool — expect **0 ⚠ VIDÉ** (every
+      `scenario_type` doc now has an `article_scenarios` row); review the
+      remaining Way A→B deltas (the "ballooning") before flipping the reads.
+- [ ] Rewrite the scoping reads (`d.scenario_type = :sid` → `article_scenarios`
+      EXISTS) once the post-backfill deltas are reviewed (data-dependent call).
 - [ ] Then unblock Migration 2 (`screening-status-per-scenario-migration.md`).
