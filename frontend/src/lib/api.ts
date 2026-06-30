@@ -2,14 +2,54 @@ import type { SearchResult } from "../types/search";
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "/api";
 
-// Stratégie de récupération sécurisée (H-3) : sessionStorage -> localStorage -> env Vite.
-// Joint la clé X-API-Key à toutes les requêtes de mutation (endpoints protégés côté serveur).
+// Clé d'écriture (X-API-Key) jointe aux mutations (endpoints protégés côté serveur
+// par require_api_key). Source UNIQUEMENT depuis le stockage navigateur de l'admin :
+// sessionStorage -> localStorage. On NE lit PLUS import.meta.env.VITE_API_KEY : Vite
+// « inline » les variables VITE_* dans le bundle JS *public*, ce qui exposerait le
+// secret à tout visiteur du site. L'admin saisit la clé une seule fois (setApiKey) ;
+// elle reste sur son appareil. Sans clé, l'accès est en lecture seule (mutations 401).
+const API_KEY_STORAGE = "api_key";
+
+export function getApiKey(): string {
+  try {
+    return (
+      sessionStorage.getItem(API_KEY_STORAGE) ||
+      localStorage.getItem(API_KEY_STORAGE) ||
+      ""
+    );
+  } catch {
+    return "";
+  }
+}
+
+export function hasApiKey(): boolean {
+  return getApiKey().length > 0;
+}
+
+export function clearApiKey(): void {
+  try {
+    sessionStorage.removeItem(API_KEY_STORAGE);
+    localStorage.removeItem(API_KEY_STORAGE);
+  } catch {
+    /* stockage indisponible : rien à faire */
+  }
+}
+
+export function setApiKey(key: string, persist = true): void {
+  const trimmed = (key ?? "").trim();
+  if (!trimmed) {
+    clearApiKey();
+    return;
+  }
+  try {
+    (persist ? localStorage : sessionStorage).setItem(API_KEY_STORAGE, trimmed);
+  } catch {
+    /* stockage indisponible (navigation privée) : on ignore silencieusement */
+  }
+}
+
 function authHeaders(extra: Record<string, string> = {}): Record<string, string> {
-  const token =
-    sessionStorage.getItem("api_key") ||
-    localStorage.getItem("api_key") ||
-    (import.meta.env.VITE_API_KEY as string) ||
-    "";
+  const token = getApiKey();
   return token ? { "X-API-Key": token, ...extra } : { ...extra };
 }
 
