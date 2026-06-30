@@ -4182,6 +4182,12 @@ def get_fulltext_stats() -> dict[str, Any]:
             text("SELECT COUNT(*) FROM document_chunk")
         ).scalar() or 0
 
+        # Répartition des chunks par type : 'fulltext_section' (texte intégral)
+        # vs 'title_abstract' (résumé, ~1 par document) vs le reste.
+        chunks_by_type = conn.execute(text(
+            "SELECT chunk_type, COUNT(*) AS n FROM document_chunk GROUP BY chunk_type"
+        )).mappings().all()
+
         source_coverage = conn.execute(text("""
             SELECT
                 d.source,
@@ -4219,12 +4225,23 @@ def get_fulltext_stats() -> dict[str, Any]:
         a["abstract_only"] = a["total"] - a["with_fulltext"]
         a["fulltext_pct"] = round(a["with_fulltext"] / a["total"] * 100, 1) if a["total"] else 0
 
+    _ct = {r["chunk_type"]: int(r["n"]) for r in chunks_by_type}
+    fulltext_chunks = _ct.get("fulltext_section", 0)
+    abstract_chunks = _ct.get("title_abstract", 0)
+    other_chunks = max(0, total_chunks - fulltext_chunks - abstract_chunks)
+
     return {
         "corpus": {
             "total_documents": total_docs,
             "docs_with_fulltext": docs_with_fulltext,
             "docs_abstract_only": total_docs - docs_with_fulltext,
             "fulltext_coverage_pct": round(docs_with_fulltext / total_docs * 100, 1) if total_docs else 0,
+        },
+        "chunks": {
+            "total": total_chunks,
+            "fulltext": fulltext_chunks,
+            "abstract": abstract_chunks,
+            "other": other_chunks,
         },
         "embeddings": {
             "total_chunks": total_chunks,
