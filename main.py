@@ -9197,25 +9197,31 @@ def _run_semantic_rerank_inline(scenario_id: str, query: str) -> int:
                 WHERE asn.scenario_id = :sid AND asn.document_id = sub.document_id
             """), {"q": q_str, "sid": scenario_id}).rowcount or 0
 
-        # 2) Repli OpenAI UNIQUEMENT pour les articles encore non scorés (chunks pas
-        #    encore vectorisés). Batch d'embeddings + cosinus numpy + une seule
-        #    transaction par lot.
-        with engine.connect() as _conn:
-            _rows = _conn.execute(text("""
-                SELECT ld.id, ld.title, ld.abstract
-                FROM literature_document ld
-                JOIN article_scenarios asn ON asn.document_id = ld.id AND asn.scenario_id = :sid
-                WHERE asn.similarity_score IS NULL
-                  AND ld.abstract IS NOT NULL AND length(ld.abstract) > 30
-                ORDER BY ld.id LIMIT 1000
-            """), {"sid": scenario_id}).mappings().fetchall()
+        # 2) Repli OpenAI pour les articles encore non scorés (chunks pas encore
+        #    vectorisés). On boucle par lots de 100 jusqu'à épuisement (PLUS de
+        #    plafond à 1000) pour qu'AUCUN article pertinent ne reste non scoré ;
+        #    chaque lot ré-interroge les NULL restants. Borne de sécurité pour
+        #    éviter une boucle infinie si un lot ne parvenait pas à s'écrire.
         n_slow = 0
-        if _rows and not _openai_in_cooldown():
+        if not _openai_in_cooldown():
             import numpy as _np
             _q = _np.asarray(q_emb, dtype=float)
             _qn = float(_np.linalg.norm(_q)) or 1.0
-            for i in range(0, len(_rows), 100):
-                batch = _rows[i:i+100]
+            _MAX_FALLBACK_BATCHES = 200  # 200 × 100 = 20 000 articles / scénario
+            for _bi in range(_MAX_FALLBACK_BATCHES):
+                if _openai_in_cooldown():
+                    break
+                with engine.connect() as _conn:
+                    batch = _conn.execute(text("""
+                        SELECT ld.id, ld.title, ld.abstract
+                        FROM literature_document ld
+                        JOIN article_scenarios asn ON asn.document_id = ld.id AND asn.scenario_id = :sid
+                        WHERE asn.similarity_score IS NULL
+                          AND ld.abstract IS NOT NULL AND length(ld.abstract) > 30
+                        ORDER BY ld.id LIMIT 100
+                    """), {"sid": scenario_id}).mappings().fetchall()
+                if not batch:
+                    break
                 texts = [f"{r['title']}\n\n{(r['abstract'] or '')[:1500]}" for r in batch]
                 try:
                     emb = _client.embeddings.create(model="text-embedding-3-small", input=texts).data
@@ -9231,10 +9237,13 @@ def _run_semantic_rerank_inline(scenario_id: str, query: str) -> int:
                         """), ups)
                     n_slow += len(ups)
                 except Exception as _e:
-                    logger.warning(f"Rerank fallback batch {i}: {_e}")
+                    logger.warning(f"Rerank fallback batch {_bi}: {_e}")
                     if _is_openai_quota_error(_e):
                         _trip_openai_cooldown()
-                        break
+                    break  # toute erreur : on arrête (évite une boucle infinie)
+            else:
+                logger.warning(f"Rerank {scenario_id}: plafond de repli atteint "
+                               f"({_MAX_FALLBACK_BATCHES * 100} articles) — certains peuvent rester non scorés.")
         logger.info(f"Rerank {scenario_id}: {n_fast} via pgvector + {n_slow} via OpenAI (fallback).")
         return n_fast + n_slow
     except Exception as _e:
