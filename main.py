@@ -5461,36 +5461,8 @@ def screen_scenario_article(
     notes: str | None = None,
     _: None = Depends(require_api_key),
 ):
-    """
-    Décision de screening PRISMA pour un article d'un scénario.
-    status: 'included' | 'excluded' | 'pending'
-    Pas de clé API requise pour permettre le screening depuis l'interface.
-    """
-    if status not in ("included", "excluded", "pending"):
-        raise HTTPException(status_code=422, detail="status doit être 'included', 'excluded' ou 'pending'")
-
-    with engine.begin() as conn:
-        row = conn.execute(text("""
-            UPDATE literature_document
-            SET screening_status = :status,
-                screening_reason = :reason,
-                screening_notes  = :notes
-            WHERE id = :article_id
-              AND project_context = 'literev'
-              AND EXISTS (SELECT 1 FROM article_scenarios ars WHERE ars.document_id = literature_document.id AND ars.scenario_id = :scenario_id)
-            RETURNING id
-        """), {
-            "status": status,
-            "reason": reason,
-            "notes": notes,
-            "article_id": article_id,
-            "scenario_id": scenario_id,
-        }).first()
-
-    if not row:
-        raise HTTPException(status_code=404, detail="Article non trouvé dans ce scénario")
-
-    return {"id": row[0], "status": status, "updated": True}
+    """Delegue a l'implementation user-scenario unifiee (pipeline unique)."""
+    return screen_user_scenario_article(scenario_id, article_id, status, reason, notes)
 
 
 @app.get("/gesica/scenarios/{scenario_id}/screening-progress")
