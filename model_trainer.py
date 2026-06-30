@@ -464,9 +464,16 @@ def positive_index(classes: list | None, positive_class: str | None) -> int:
 
 
 def _level_from_value(v: float, orange: float | None, red: float | None) -> str:
-    """Mappe une valeur croissante (risque) vers green/orange/red."""
+    """Mappe une valeur croissante (risque) vers green/orange/red.
+
+    Renvoie 'unavailable' (JAMAIS 'green' par défaut) si la valeur est NaN/None
+    ou si les bandes sont inconnues : un seuil non interprétable ou une absence de
+    donnée ne doit pas être présenté comme « Normal »."""
+    import math
+    if v is None or (isinstance(v, float) and math.isnan(v)):
+        return "unavailable"
     if orange is None or red is None:
-        return "green"
+        return "unavailable"
     if v >= red:
         return "red"
     if v >= orange:
@@ -510,6 +517,13 @@ def compute_monitoring(pipeline, recent_df, task_type: str, classes: list | None
     import numpy as np
 
     n = int(len(recent_df))
+    if n == 0:
+        # Aucune donnée récente à scorer → état EXPLICITEMENT indisponible, jamais
+        # « green/Normal » : un moniteur vide ne doit pas paraître sain.
+        kind = "value" if task_type in ("regression", "count") else "probability"
+        return {"kind": kind, "value": None, "level": "unavailable",
+                "bands": {"orange": None, "red": None}, "n_scored": 0,
+                "bands_source": None, "positive_class": None}
     if task_type in ("regression", "count"):
         preds = np.asarray(pipeline.predict(recent_df), dtype=float)
         value = float(np.mean(preds))

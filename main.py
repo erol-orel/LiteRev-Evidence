@@ -13597,6 +13597,7 @@ def _jsonable(v):
 
 _DEFAULT_ALERT_LABELS = {
     "green": "Normal", "orange": "Vigilance", "red": "Alerte critique",
+    "unavailable": "Données insuffisantes",
 }
 
 
@@ -13672,7 +13673,12 @@ def monitor_scenario_model(scenario_id: str, window: int = 7) -> dict[str, Any]:
                 "status_label": "Erreur de scoring", "message": str(e)}
 
     level = mon["level"]
-    label = (alert_thresholds.get(level) or {}).get("label") or _DEFAULT_ALERT_LABELS[level]
+    # 'unavailable' (NaN / pas de données / seuils non interprétables) ne doit
+    # jamais réutiliser le libellé « Normal ».
+    label = (
+        _DEFAULT_ALERT_LABELS["unavailable"] if level == "unavailable"
+        else ((alert_thresholds.get(level) or {}).get("label") or _DEFAULT_ALERT_LABELS.get(level, "Indisponible"))
+    )
     outcome = (spec.get("outcome") or {})
 
     return {
