@@ -5413,6 +5413,30 @@ class DoubleBlindDecisionIn(BaseModel):
     reviewer_code: str | None = None  # Code reviewer (ex: R-2847)
 
 
+def _write_ars_screening(
+    conn,
+    scenario_id: str,
+    document_id: int,
+    status: str | None,
+    reason: str | None = None,
+    notes: str | None = None,
+) -> None:
+    """Migration 2 (per-scenario screening) dual-write: record the screening
+    decision on the (scenario_id, document_id) article_scenarios row. Callers
+    also keep the global literature_document.screening_status updated, which
+    remains authoritative until the Phase 5 cutover. No-op for rows that are not
+    members of the scenario (UPDATE matches nothing)."""
+    conn.execute(text("""
+        UPDATE article_scenarios
+        SET screening_status = :status,
+            screening_reason = :reason,
+            screening_notes  = :notes,
+            screened_at      = NOW()
+        WHERE scenario_id = :sid AND document_id = :doc_id
+    """), {"status": status, "reason": reason, "notes": notes,
+           "sid": scenario_id, "doc_id": document_id})
+
+
 @app.post("/gesica/scenarios/{scenario_id}/double-blind/decision")
 def submit_double_blind_decision(
     scenario_id: str,
@@ -5501,6 +5525,9 @@ def submit_double_blind_decision(
                 "screening": final_status if agreement else "pending",
                 "article_id": payload.article_id,
             })
+            # Migration 2 dual-write: per-scenario screening for this scenario
+            _write_ars_screening(conn, scenario_id, payload.article_id,
+                                 final_status if agreement else "pending")
 
     return {
         "id": payload.article_id,
@@ -5554,6 +5581,9 @@ def resolve_conflict(
             "article_id": article_id,
             "scenario_id": scenario_id,
         }).first()
+        if row:
+            # Migration 2 dual-write: per-scenario screening for this scenario
+            _write_ars_screening(conn, scenario_id, article_id, final_status, notes=arbitrator_notes)
     if not row:
         raise HTTPException(status_code=404, detail="Article non trouvé")
     return {"id": row[0], "final_status": final_status, "resolved": True}
@@ -10181,6 +10211,8 @@ def screen_user_scenario_article(
             WHERE id = :article_id AND project_context = 'literev'
             RETURNING id
         """), {"status": status, "reason": reason, "notes": notes, "article_id": article_id}).first()
+        # Migration 2 dual-write: also record the decision on the per-scenario row
+        _write_ars_screening(conn, scenario_id, article_id, status, reason, notes)
     if not row:
         raise HTTPException(status_code=404, detail="Article non trouvé")
     return {"id": row[0], "status": status, "updated": True}
