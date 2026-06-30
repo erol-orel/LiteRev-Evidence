@@ -114,21 +114,28 @@ re-ingestion)**, then runs cosine + cross-encoder scoring. Cost ≈ 1 query embe
 per scenario. Works for both GESICA and user scenarios (same `user_scenarios` table).
 Progress via `GET /scenarios/{id}/rerank/status`.
 
-Re-score the 15 (run on the server, with the write key):
+Re-score the 15 (run on the server, with the write key). NOTE: hitting the backend
+directly on `localhost:8000` uses **no `/api` prefix** (that prefix is added by nginx
+only for the public URL).
 ```bash
-KEY=$(grep -E '^WRITE_API_KEY=' /etc/literev-api.env | cut -d= -f2- | tr -d '"'"'"')
-for sid in stroke-detection triage-support \
+# Clean key extraction (strips surrounding quotes if any):
+KEY=$(grep -E '^WRITE_API_KEY=' /etc/literev-api.env | cut -d= -f2- | tr -d "\"'")
+
+# Test ONE first, then check it reached "done":
+curl -fsS -X POST "http://localhost:8000/scenarios/stroke-detection/rebuild-corpus" -H "X-API-Key: $KEY"; echo
+sleep 60; curl -fsS "http://localhost:8000/scenarios/stroke-detection/rerank/status"; echo
+
+# Then the rest:
+for sid in triage-support \
   usr-3a5a01dc0c44 usr-438ee5ca28fb usr-5600e99627d2 usr-6a64a31b0fbb \
   usr-7cadc989ea46 usr-868dc56be997 usr-a9498067e6f9 usr-ca0030a574e0 \
   usr-cb537e36f0be usr-e2bb05832b44 usr-ecf0ee84ef7d usr-ed591d707a04 usr-ee71de7f1523; do
     echo "== $sid =="
-    curl -fsS -X POST "http://localhost:8000/api/scenarios/$sid/rebuild-corpus" -H "X-API-Key: $KEY"
-    echo
+    curl -fsS -X POST "http://localhost:8000/scenarios/$sid/rebuild-corpus" -H "X-API-Key: $KEY"
+    echo; sleep 2
 done
 # wait a few minutes, then re-run the diff tool — the ⚠ VIDÉ list should shrink/clear.
 ```
-**Test on ONE scenario first** (e.g. `stroke-detection`), confirm its corpus +
-scores populate (check `…/rerank/status` and the dashboard), then run the rest.
 
 ## Status
 
