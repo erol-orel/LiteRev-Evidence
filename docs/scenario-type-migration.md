@@ -157,9 +157,20 @@ done
 - [x] Decision: re-score the 15 first; add `rebuild-corpus` endpoint.
 - [x] **Backfill shipped** as alembic `a7c3e1b9d2f4` (supersedes the manual
       re-score gate); validated on local PG; auto-applies on deploy.
-- [ ] Post-deploy: re-run the diff tool — expect **0 ⚠ VIDÉ** (every
-      `scenario_type` doc now has an `article_scenarios` row); review the
-      remaining Way A→B deltas (the "ballooning") before flipping the reads.
-- [ ] Rewrite the scoping reads (`d.scenario_type = :sid` → `article_scenarios`
-      EXISTS) once the post-backfill deltas are reviewed (data-dependent call).
+- [x] Post-deploy: re-ran the diff on production → **0 ⚠ VIDÉ**, `perdus(A)=0`
+      everywhere (Way B is a strict superset; nothing is lost). Deltas reviewed
+      with the user (the "ballooning" is the intended cross-scored membership;
+      a few user scenarios grow, e.g. `usr-d523cedda9aa` 13→3020).
+- [x] **Rewrote the 11 scoping reads** (`scenario_type = :param` →
+      `article_scenarios` EXISTS): PRISMA stats, screening-progress, pico-bulk,
+      kappa, double-blind conflicts, knowledge-graph, RAG `/ask/stream`, plus the
+      two screening **write** gates (screen + double-blind resolve — also what
+      Migration 2 needs). Validated on local PG (aliased/unaliased SELECT +
+      correlated EXISTS in UPDATE; a `scenario_type`-only doc is correctly NOT
+      scoped in). Since `perdus(A)=0`, the flip is purely additive in prod.
+- [ ] Document INSERT still **writes** `scenario_type` (provenance, intended);
+      the generic `/search` filter mapping (`filters["scenario_type"]`) is left
+      as-is for now (separate mechanism, not a scenario-dashboard read).
+- [ ] Later: `DROP COLUMN scenario_type` once the write + search-filter uses are
+      migrated and a soak period confirms nothing reads it.
 - [ ] Then unblock Migration 2 (`screening-status-per-scenario-migration.md`).

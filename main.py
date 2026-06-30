@@ -5232,7 +5232,7 @@ def get_scenario_prisma(scenario_id: str) -> dict[str, Any]:
                 ) THEN 1 ELSE 0 END) AS with_fulltext
             FROM literature_document d
             WHERE d.project_context = 'literev'
-              AND d.scenario_type = :sid
+              AND EXISTS (SELECT 1 FROM article_scenarios ars WHERE ars.document_id = d.id AND ars.scenario_id = :sid)
         """), {"sid": scenario_id}).mappings().first()
     total = int(stats["total"] or 0)
     duplicates = int(stats["duplicates"] or 0)
@@ -5922,7 +5922,7 @@ def screen_scenario_article(
                 screening_notes  = :notes
             WHERE id = :article_id
               AND project_context = 'literev'
-              AND scenario_type   = :scenario_id
+              AND EXISTS (SELECT 1 FROM article_scenarios ars WHERE ars.document_id = literature_document.id AND ars.scenario_id = :scenario_id)
             RETURNING id
         """), {
             "status": status,
@@ -5951,7 +5951,7 @@ def get_scenario_screening_progress(scenario_id: str) -> dict[str, Any]:
                 SUM(CASE WHEN screening_status IS NULL OR screening_status = 'pending' THEN 1 ELSE 0 END) AS pending
             FROM literature_document
             WHERE project_context = 'literev'
-              AND scenario_type = :sid
+              AND EXISTS (SELECT 1 FROM article_scenarios ars WHERE ars.document_id = literature_document.id AND ars.scenario_id = :sid)
         """), {"sid": scenario_id}).mappings().first()
 
     total = int(stats["total"] or 0)
@@ -5989,7 +5989,7 @@ def get_scenario_pico_bulk(scenario_id: str, limit: int = 100000, offset: int = 
                 study_design, pico_json, pico_extracted_at,
                 screening_status
             FROM literature_document
-            WHERE scenario_type = :scenario_id
+            WHERE EXISTS (SELECT 1 FROM article_scenarios ars WHERE ars.document_id = literature_document.id AND ars.scenario_id = :scenario_id)
               AND project_context = 'literev'
               AND is_duplicate IS NOT TRUE
             ORDER BY
@@ -6002,7 +6002,7 @@ def get_scenario_pico_bulk(scenario_id: str, limit: int = 100000, offset: int = 
             SELECT COUNT(*) AS total,
                    COUNT(*) FILTER (WHERE pico_json IS NOT NULL) AS with_pico
             FROM literature_document
-            WHERE scenario_type = :scenario_id
+            WHERE EXISTS (SELECT 1 FROM article_scenarios ars WHERE ars.document_id = literature_document.id AND ars.scenario_id = :scenario_id)
               AND project_context = 'literev'
               AND is_duplicate IS NOT TRUE
         """), {"scenario_id": scenario_id}).mappings().fetchone()
@@ -6188,7 +6188,7 @@ def get_kappa_stats(scenario_id: str) -> dict[str, Any]:
             SELECT reviewer_1_status, reviewer_2_status
             FROM literature_document
             WHERE project_context = 'literev'
-              AND scenario_type = :sid
+              AND EXISTS (SELECT 1 FROM article_scenarios ars WHERE ars.document_id = literature_document.id AND ars.scenario_id = :sid)
               AND reviewer_1_status IS NOT NULL
               AND reviewer_2_status IS NOT NULL
         """), {"sid": scenario_id}).mappings().all()
@@ -6270,7 +6270,7 @@ def get_conflicts(scenario_id: str) -> list[dict[str, Any]]:
                    kappa_final_status
             FROM literature_document
             WHERE project_context = 'literev'
-              AND scenario_type = :sid
+              AND EXISTS (SELECT 1 FROM article_scenarios ars WHERE ars.document_id = literature_document.id AND ars.scenario_id = :sid)
               AND reviewer_1_status IS NOT NULL
               AND reviewer_2_status IS NOT NULL
               AND reviewer_1_status != reviewer_2_status
@@ -6300,7 +6300,7 @@ def resolve_conflict(
                 screening_notes = :notes
             WHERE id = :article_id
               AND project_context = 'literev'
-              AND scenario_type = :scenario_id
+              AND EXISTS (SELECT 1 FROM article_scenarios ars WHERE ars.document_id = literature_document.id AND ars.scenario_id = :scenario_id)
             RETURNING id
         """), {
             "final": final_status,
@@ -6501,13 +6501,13 @@ def get_knowledge_graph(
     """
     sql = _KG_NODE_SQL.format(
         join="JOIN document_chunk c ON c.document_id = d.id",
-        where="d.project_context = 'literev' AND d.scenario_type = :sid",
+        where="d.project_context = 'literev' AND EXISTS (SELECT 1 FROM article_scenarios ars WHERE ars.document_id = d.id AND ars.scenario_id = :sid)",
     )
     with engine.connect() as conn:
         rows = conn.execute(text(sql), {"sid": scenario_id, "max_nodes": max_nodes}).mappings().all()
         n_total = conn.execute(text("""
             SELECT COUNT(*) FROM literature_document d
-            WHERE d.project_context = 'literev' AND d.scenario_type = :sid
+            WHERE d.project_context = 'literev' AND EXISTS (SELECT 1 FROM article_scenarios ars WHERE ars.document_id = d.id AND ars.scenario_id = :sid)
               AND d.is_duplicate IS NOT TRUE AND d.abstract IS NOT NULL
               AND EXISTS (SELECT 1 FROM document_chunk c
                           WHERE c.document_id = d.id AND c.embedding IS NOT NULL)
@@ -6560,7 +6560,7 @@ async def ask_stream(payload: dict[str, Any]) -> StreamingResponse:
             where_extra += " AND d.project_context = :project_context"
             params_extra["project_context"] = project_context
         if scenario_id:
-            where_extra += " AND d.scenario_type = :scenario_id"
+            where_extra += " AND EXISTS (SELECT 1 FROM article_scenarios ars WHERE ars.document_id = d.id AND ars.scenario_id = :scenario_id)"
             params_extra["scenario_id"] = scenario_id
 
         with engine.connect() as conn:
