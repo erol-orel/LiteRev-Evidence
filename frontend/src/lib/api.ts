@@ -1,4 +1,5 @@
 import type { SearchResult } from "../types/search";
+import { tStandalone } from "../i18n/LanguageProvider";
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "/api";
 
@@ -101,15 +102,15 @@ export async function safeFetch(
   }
 }
 
-/** Traduit un statut HTTP en message utilisateur (français). */
+/** Traduit un statut HTTP en message utilisateur (langue courante). */
 export function httpMessage(status: number): string {
-  if (status === 429) return "Trop de requêtes — patientez quelques instants puis réessayez.";
-  if (status === 401 || status === 403) return "Accès non autorisé.";
-  if (status === 404) return "Ressource introuvable.";
+  if (status === 429) return tStandalone("errors.tooManyRequests");
+  if (status === 401 || status === 403) return tStandalone("errors.unauthorized");
+  if (status === 404) return tStandalone("errors.notFound");
   if (status === 502 || status === 503 || status === 504)
-    return "Service momentanément indisponible — réessayez dans un instant.";
-  if (status >= 500) return "Erreur serveur — réessayez plus tard.";
-  return `Erreur ${status}.`;
+    return tStandalone("errors.serviceUnavailable");
+  if (status >= 500) return tStandalone("errors.serverError");
+  return `${tStandalone("errors.genericPrefix")} ${status}.`;
 }
 
 export interface FilterOption {

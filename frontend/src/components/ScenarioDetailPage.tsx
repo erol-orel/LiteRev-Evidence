@@ -4422,7 +4422,7 @@ export function ScenarioDetailPage({ scenarioId, onBack, initialTab }: ScenarioD
 
       {/* Contenu de la section active — isolé par une limite d'erreur : un crash
           de rendu (ex. visualisation clustering) n'emporte plus toute la page. */}
-      <ErrorBoundary resetKey={`${activeSection}:${scenarioId}`} label={t("scenarioDetail.page.errorBoundaryLabel")}>
+      <ErrorBoundary resetKey={`${activeSection}:${scenarioId}`} label="scenarioDetail.page.errorBoundaryLabel">
         {activeSection === "review" && <ReviewTab scenarioId={scenarioId} detail={detail} />}
         {activeSection === "evidence" && <EvidenceTab scenarioId={scenarioId} detail={detail} />}
         {activeSection === "assistant" && <RagSection scenarioId={scenarioId} detail={detail} />}

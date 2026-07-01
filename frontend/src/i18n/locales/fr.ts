@@ -15,12 +15,50 @@ export const fr = {
     adminKeySetTooltip:
       "Définir la clé admin (X-API-Key) pour activer les écritures",
     languageLabel: "Langue",
+    removeKeyConfirm:
+      "Retirer la clé admin de cet appareil ? Les écritures seront désactivées (lecture seule).",
+    setKeyPrompt:
+      "Clé admin (X-API-Key) — collez votre clé d'écriture. Elle reste sur cet appareil (localStorage).",
   },
   common: {
     refresh: "Actualiser",
     cancel: "Annuler",
     create: "Créer",
     loadingEllipsis: "Chargement…",
+    recommendedActions: "Actions recommandées",
+    unknownError: "Erreur inconnue",
+  },
+  errors: {
+    tooManyRequests: "Trop de requêtes — patientez quelques instants puis réessayez.",
+    unauthorized: "Accès non autorisé.",
+    notFound: "Ressource introuvable.",
+    serviceUnavailable: "Service momentanément indisponible — réessayez dans un instant.",
+    serverError: "Erreur serveur — réessayez plus tard.",
+    genericPrefix: "Erreur",
+  },
+  evidenceStrength: {
+    strong: {
+      label: "Forte",
+      tooltip:
+        "Preuve forte : méta-analyse, revue systématique ou ECR de haute qualité. Score qualité ≥ 0.7.",
+    },
+    moderate: {
+      label: "Modérée",
+      tooltip:
+        "Preuve modérée : étude de cohorte, étude cas-témoins ou ECR de qualité moyenne. Score qualité 0.4–0.7.",
+    },
+    weak: {
+      label: "Faible",
+      tooltip:
+        "Preuve faible : étude transversale, série de cas, rapport d'expert ou qualité insuffisante. Score qualité < 0.4.",
+    },
+  },
+  errorBoundary: {
+    title: "Une erreur est survenue lors de l'affichage",
+    ofSection: "de",
+    unknownError: "Erreur inconnue.",
+    retry: "Réessayer",
+    appLabel: "l'application",
   },
   terrain: {
     loadError: "Erreur de chargement des données terrain.",
@@ -183,6 +221,10 @@ export const fr = {
     recentSearches: "Recherches récentes",
   },
   search: {
+    forecastHorizon: "Horizon prévisionnel :",
+    scenariosDetected: "Scénarios détectés",
+    reportedMetrics: "Métriques rapportées",
+    corpusBuildFailed: "La construction du corpus a échoué.",
     filters: "Filtres",
     resetFiltersTooltip: "Réinitialiser les filtres",
     reset: "Reset",

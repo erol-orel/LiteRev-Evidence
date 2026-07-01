@@ -8,7 +8,7 @@ import './index.css'
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
     <LanguageProvider>
-      <ErrorBoundary label="l'application">
+      <ErrorBoundary label="errorBoundary.appLabel">
         <App />
       </ErrorBoundary>
     </LanguageProvider>
