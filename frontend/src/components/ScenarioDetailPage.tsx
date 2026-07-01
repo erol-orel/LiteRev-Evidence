@@ -569,6 +569,7 @@ function VariablesSection({ detail, scenarioId, onGoToModel }: { detail: Scenari
     setLlmError(null);
     try {
       await generateScenarioVariables(scenarioId);
+      if (llmPollRef.current) clearInterval(llmPollRef.current);   // avoid orphaning the effect's poll
       llmPollRef.current = setInterval(() => {
         getVariablesGenerationStatus(scenarioId).then(s => {
           if (s.status === 'done') {
@@ -3428,6 +3429,7 @@ function EvidencesSection({ scenarioId, detail }: { scenarioId: string; detail: 
     setGenStatus(t("scenarioDetail.evidences.regenLaunched"));
     try {
       await generateEvidenceBrief(scenarioId, true);
+      if (pollRef.current) clearInterval(pollRef.current);   // avoid orphaning the effect's poll
       pollRef.current = setInterval(() => {
         getBriefGenerationStatus(scenarioId).then(s => {
           if (s.status === 'done') {
