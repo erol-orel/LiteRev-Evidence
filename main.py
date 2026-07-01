@@ -4245,6 +4245,12 @@ def get_fulltext_stats() -> dict[str, Any]:
             WHERE chunk_type = 'fulltext_section'
         """)).scalar() or 0
 
+        # Doublons marqués : on expose la taille dé-dupliquée du corpus pour que
+        # les compteurs ne surestiment pas le nombre d'articles réellement uniques.
+        duplicates = conn.execute(text(
+            "SELECT COUNT(*) FROM literature_document WHERE is_duplicate = TRUE"
+        )).scalar() or 0
+
         chunks_with_embedding = conn.execute(text("""
             SELECT COUNT(*) FROM document_chunk WHERE embedding IS NOT NULL
         """)).scalar() or 0
@@ -4307,6 +4313,8 @@ def get_fulltext_stats() -> dict[str, Any]:
             "docs_with_fulltext": docs_with_fulltext,
             "docs_abstract_only": total_docs - docs_with_fulltext,
             "fulltext_coverage_pct": round(docs_with_fulltext / total_docs * 100, 1) if total_docs else 0,
+            "duplicates": duplicates,
+            "unique_documents": max(0, total_docs - duplicates),
         },
         "chunks": {
             "total": total_chunks,
@@ -4317,6 +4325,7 @@ def get_fulltext_stats() -> dict[str, Any]:
         "embeddings": {
             "total_chunks": total_chunks,
             "chunks_with_embedding": chunks_with_embedding,
+            "chunks_pending": max(0, total_chunks - chunks_with_embedding),
             "embedding_coverage_pct": round(chunks_with_embedding / total_chunks * 100, 1) if total_chunks else 0,
         },
         "hybrid_search": {
@@ -10755,6 +10764,17 @@ def update_scenario_settings(scenario_id: str, payload: dict[str, Any], _: None 
 _BRIEF_GENERATION_JOBS: dict[str, dict] = {}
 
 
+def _job_is_active(job: dict | None, stale_after: float = 180.0) -> bool:
+    """True only if a background job is genuinely still running. A "running"
+    entry older than stale_after seconds (a thread killed by a restart or hung
+    on a network call) is treated as STALE, so a crashed/killed job never locks
+    out retries permanently with "already_running"."""
+    import time
+    if not job or job.get("status") != "running":
+        return False
+    return (time.time() - job.get("started_at", 0)) < stale_after
+
+
 def _generate_evidence_brief_llm(scenario_id: str, force: bool = False, lang: str | None = None) -> dict[str, Any]:
     """
     Génère un Evidence Brief narratif complet via LLM à partir des articles
@@ -10944,19 +10964,25 @@ def generate_evidence_brief(scenario_id: str, force: bool = False, lang: str | N
     Déclenche la génération asynchrone de l'Evidence Brief LLM.
     Fonctionne pour GESICA et user_scenarios.
     """
-    import threading
+    import threading, time
 
-    if _BRIEF_GENERATION_JOBS.get(scenario_id, {}).get("status") == "running":
+    if _job_is_active(_BRIEF_GENERATION_JOBS.get(scenario_id)):
         return {"status": "already_running", "scenario_id": scenario_id}
 
-    _BRIEF_GENERATION_JOBS[scenario_id] = {"status": "running"}
+    _BRIEF_GENERATION_JOBS[scenario_id] = {"status": "running", "started_at": time.time()}
 
     def _run():
-        result = _generate_evidence_brief_llm(scenario_id, force=force, lang=lang)
-        if "error" in result:
-            _BRIEF_GENERATION_JOBS[scenario_id] = {"status": "error", "error": result["error"]}
-        else:
-            _BRIEF_GENERATION_JOBS[scenario_id] = {"status": "done", "generated_at": result.get("_meta", {}).get("generated_at")}
+        try:
+            result = _generate_evidence_brief_llm(scenario_id, force=force, lang=lang)
+            if "error" in result:
+                _BRIEF_GENERATION_JOBS[scenario_id] = {"status": "error", "error": result["error"]}
+            else:
+                _BRIEF_GENERATION_JOBS[scenario_id] = {"status": "done", "generated_at": result.get("_meta", {}).get("generated_at")}
+        except Exception as e:
+            # Without this, an exception (or a killed thread) leaves status stuck
+            # at "running" and every retry returns "already_running" forever.
+            logger.error(f"Evidence Brief job {scenario_id}: {e}", exc_info=True)
+            _BRIEF_GENERATION_JOBS[scenario_id] = {"status": "error", "error": str(e)}
 
     threading.Thread(target=_run, daemon=True).start()
     return {"status": "started", "scenario_id": scenario_id}
@@ -11469,23 +11495,27 @@ Retourne UNIQUEMENT le JSON valide."""
 @app.post("/scenarios/{scenario_id}/variables/generate")
 def generate_scenario_variables(scenario_id: str, lang: str | None = Query(None), _: None = Depends(require_api_key)) -> dict[str, Any]:
     """Déclenche la génération asynchrone des Variables & Modèle depuis les PICO."""
-    import threading
+    import threading, time
 
-    if _VARIABLES_GENERATION_JOBS.get(scenario_id, {}).get("status") == "running":
+    if _job_is_active(_VARIABLES_GENERATION_JOBS.get(scenario_id)):
         return {"status": "already_running"}
 
-    _VARIABLES_GENERATION_JOBS[scenario_id] = {"status": "running"}
+    _VARIABLES_GENERATION_JOBS[scenario_id] = {"status": "running", "started_at": time.time()}
 
     def _run():
-        result = _generate_variables_from_pico(scenario_id, lang=lang)
-        if "error" in result:
-            _VARIABLES_GENERATION_JOBS[scenario_id] = {"status": "error", "error": result["error"]}
-        else:
-            _VARIABLES_GENERATION_JOBS[scenario_id] = {
-                "status": "done",
-                "generated_at": result.get("_meta", {}).get("generated_at"),
-                "variables_count": len(result.get("predictor_variables", [])),
-            }
+        try:
+            result = _generate_variables_from_pico(scenario_id, lang=lang)
+            if "error" in result:
+                _VARIABLES_GENERATION_JOBS[scenario_id] = {"status": "error", "error": result["error"]}
+            else:
+                _VARIABLES_GENERATION_JOBS[scenario_id] = {
+                    "status": "done",
+                    "generated_at": result.get("_meta", {}).get("generated_at"),
+                    "variables_count": len(result.get("predictor_variables", [])),
+                }
+        except Exception as e:
+            logger.error(f"Variables job {scenario_id}: {e}", exc_info=True)
+            _VARIABLES_GENERATION_JOBS[scenario_id] = {"status": "error", "error": str(e)}
 
     threading.Thread(target=_run, daemon=True).start()
     return {"status": "started", "scenario_id": scenario_id}

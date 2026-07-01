@@ -85,7 +85,11 @@ rm -rf "$FRONTEND_DIR/dist"
 unset VITE_API_KEY || true
 npm run build            # set -e fait échouer le deploy si le build casse
 TITLE=$(grep -o '<title>.*</title>' "$FRONTEND_DIR/dist/index.html")
-BUNDLE=$(ls "$FRONTEND_DIR/dist/assets/"*.js | xargs -n1 basename | head -1)
+# `| head -1` closes the pipe early; with multiple JS chunks (code-splitting)
+# that sends SIGPIPE to xargs, which under `set -o pipefail` aborted the whole
+# deploy before the restart step. BUNDLE is only for the log line below → make
+# it non-fatal.
+BUNDLE=$(ls "$FRONTEND_DIR/dist/assets/"*.js 2>/dev/null | xargs -n1 basename | head -1 || true)
 echo "  OK — $TITLE | $BUNDLE"
 
 # ── 6. Déploiement atomique vers nginx ────────────────────────
