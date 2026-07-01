@@ -403,6 +403,8 @@ export interface FulltextStats {
     docs_with_fulltext: number;
     docs_abstract_only: number;
     fulltext_coverage_pct: number;
+    duplicates?: number;
+    unique_documents?: number;
   };
   chunks?: {
     total: number;
@@ -413,6 +415,7 @@ export interface FulltextStats {
   embeddings: {
     total_chunks: number;
     chunks_with_embedding: number;
+    chunks_pending?: number;
     embedding_coverage_pct: number;
   };
   hybrid_search: {

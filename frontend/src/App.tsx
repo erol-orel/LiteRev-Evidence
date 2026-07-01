@@ -655,11 +655,6 @@ function StatsView({ corpusStats, fulltextStats, scenarios, statsByYear }: { cor
             </div>
             <div className="rounded-2xl border border-white/10 bg-forest-900/60 p-4 text-center">
               <p className="text-2xl font-bold text-brand-300">{corpusStats.totalChunks.toLocaleString()}</p>
-              {fulltextStats?.chunks && (
-                <p className="mt-0.5 text-[10px] font-mono text-forest-400">
-                  <span className="text-blue-300">{fulltextStats.chunks.fulltext.toLocaleString()}</span> {t("stats.fulltextSuffix")} · {fulltextStats.chunks.abstract.toLocaleString()} {t("stats.abstractSuffix")}
-                </p>
-              )}
               <p className="mt-1 text-xs text-forest-400">{t("stats.chunks")}</p>
             </div>
             <div className="rounded-2xl border border-white/10 bg-forest-900/60 p-4 text-center">
@@ -677,6 +672,9 @@ function StatsView({ corpusStats, fulltextStats, scenarios, statsByYear }: { cor
             <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-forest-400">
               <span>{t("stats.fulltextLabel")} <span className="text-blue-300 font-semibold">{fulltextStats.corpus.docs_with_fulltext.toLocaleString()}</span> / {corpusStats.totalDocuments.toLocaleString()} <span className="text-white/40">({fulltextStats.corpus.fulltext_coverage_pct.toFixed(1)}%)</span></span>
               <span>{t("stats.abstractOnlyLabel")} <span className="text-white/70 font-semibold">{fulltextStats.corpus.docs_abstract_only.toLocaleString()}</span></span>
+              {typeof fulltextStats.corpus.duplicates === "number" && fulltextStats.corpus.duplicates > 0 && (
+                <span>{t("stats.duplicatesLabel")} <span className="text-white/70 font-semibold">{fulltextStats.corpus.duplicates.toLocaleString()}</span></span>
+              )}
             </div>
           )}
 
@@ -711,7 +709,8 @@ function StatsView({ corpusStats, fulltextStats, scenarios, statsByYear }: { cor
                     ))}
                     <p className="pt-1.5 mt-1 text-[11px] text-forest-400 border-t border-white/5">
                       <span className="text-white/70 font-semibold">{ch.total.toLocaleString()}</span> {t("stats.chunksTotalSuffix")}
-                      {emb && <> · <span className="text-blue-300">{emb.chunks_with_embedding.toLocaleString()}</span> {t("stats.indexedSuffix")} ({emb.embedding_coverage_pct.toFixed(0)}%)</>}
+                      {emb && <> · <span className="text-blue-300">{emb.chunks_with_embedding.toLocaleString()}</span> / {ch.total.toLocaleString()} {t("stats.indexedSuffix")} ({(Math.floor(emb.chunks_with_embedding / (ch.total || 1) * 1000) / 10).toFixed(1)}%)</>}
+                      {emb && typeof emb.chunks_pending === "number" && emb.chunks_pending > 0 && <> · <span className="text-gold-300">{emb.chunks_pending.toLocaleString()}</span> {t("stats.pendingEmbedding")}</>}
                     </p>
                   </div>
                 );

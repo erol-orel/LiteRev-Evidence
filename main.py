@@ -4245,6 +4245,12 @@ def get_fulltext_stats() -> dict[str, Any]:
             WHERE chunk_type = 'fulltext_section'
         """)).scalar() or 0
 
+        # Doublons marqués : on expose la taille dé-dupliquée du corpus pour que
+        # les compteurs ne surestiment pas le nombre d'articles réellement uniques.
+        duplicates = conn.execute(text(
+            "SELECT COUNT(*) FROM literature_document WHERE is_duplicate = TRUE"
+        )).scalar() or 0
+
         chunks_with_embedding = conn.execute(text("""
             SELECT COUNT(*) FROM document_chunk WHERE embedding IS NOT NULL
         """)).scalar() or 0
@@ -4307,6 +4313,8 @@ def get_fulltext_stats() -> dict[str, Any]:
             "docs_with_fulltext": docs_with_fulltext,
             "docs_abstract_only": total_docs - docs_with_fulltext,
             "fulltext_coverage_pct": round(docs_with_fulltext / total_docs * 100, 1) if total_docs else 0,
+            "duplicates": duplicates,
+            "unique_documents": max(0, total_docs - duplicates),
         },
         "chunks": {
             "total": total_chunks,
@@ -4317,6 +4325,7 @@ def get_fulltext_stats() -> dict[str, Any]:
         "embeddings": {
             "total_chunks": total_chunks,
             "chunks_with_embedding": chunks_with_embedding,
+            "chunks_pending": max(0, total_chunks - chunks_with_embedding),
             "embedding_coverage_pct": round(chunks_with_embedding / total_chunks * 100, 1) if total_chunks else 0,
         },
         "hybrid_search": {
