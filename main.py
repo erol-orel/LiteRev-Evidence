@@ -1380,7 +1380,20 @@ def _build_where(filters: dict[str, Any] | None) -> tuple[str, dict[str, Any]]:
     for key, column in field_map.items():
         value = filters.get(key)
         if value not in (None, "", []):
-            clauses.append(f"{column} = :{key}")
+            if key == "scenario_type":
+                # Migration 1 (Way B) : filtrer par APPARTENANCE au scénario
+                # (article_scenarios) et non par la colonne d'ingestion
+                # d.scenario_type. Dernier prédicat encore en Way A ; on l'aligne
+                # sur tous les autres compteurs/vues (corpus, stats, PRISMA, RAG…)
+                # déjà basculés, sinon /search montre MOINS d'articles que le
+                # corpus réel du scénario. Sous-requête corrélée sur d.id
+                # (d = literature_document dans tous les appelants de _build_where).
+                clauses.append(
+                    "EXISTS (SELECT 1 FROM article_scenarios ars "
+                    "WHERE ars.document_id = d.id AND ars.scenario_id = :scenario_type)"
+                )
+            else:
+                clauses.append(f"{column} = :{key}")
             params[key] = value
 
     year_min = filters.get("year_min")
