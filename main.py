@@ -356,6 +356,18 @@ def _coerce_int(value: Any) -> int | None:
         return None
 
 
+def _llm_lang_directive(lang: str | None) -> str:
+    """Output-language instruction appended to LLM system prompts.
+    Defaults to French (the app's default) so existing behaviour is unchanged
+    when no language is supplied."""
+    if (lang or "fr").strip().lower().startswith("en"):
+        return ("\n\nRESPOND ENTIRELY IN ENGLISH. Every sentence, heading, bullet, "
+                "and JSON string value you produce must be written in English, even if "
+                "the source articles or the instructions above are in French.")
+    return ("\n\nRéponds intégralement en FRANÇAIS. Toutes les phrases, titres, puces "
+            "et valeurs de chaîne JSON que tu produis doivent être en français.")
+
+
 def _design_tier_score(study_design: str | None) -> float | None:
     """Score 0–1 du devis d'étude d'après la pyramide des preuves, ou None si inconnu."""
     if not study_design:
@@ -497,6 +509,7 @@ class AskIn(BaseModel):
     question: str = Field(..., min_length=3, max_length=2000)  # Limite d'entrée RAG (H-5)
     project_context: str | None = None
     filters: dict[str, Any] | None = None
+    lang: str | None = None
 
 
 
@@ -1324,8 +1337,8 @@ def ask_assistant(payload: AskIn) -> dict[str, Any]:
             "2. Citez toujours vos sources dans le texte en utilisant le format [SOURCE 1], [SOURCE 2] etc. correspondant aux blocs du contexte.\n"
             "3. Mentionnez la force des preuves (forte, modérée, faible) quand elle est pertinente pour appuyer vos conclusions.\n"
             "4. Si le contexte ne contient pas assez d'informations pour répondre, dites-le honnêtement."
-        )
-        
+        ) + _llm_lang_directive(payload.lang)
+
         user_prompt = (
             f"CONTEXTE :\n{context_str}\n\n"
             f"QUESTION : {payload.question}"
@@ -4727,7 +4740,7 @@ def _load_viz_cache(scenario_id: str, col: str, ttl: int = 86400) -> dict | None
 
 def _build_clusters_payload(scenario_id: str, docs: list, cc: dict, *,
                             with_summaries: bool = False, openai_key: str | None = None,
-                            title: str | None = None) -> dict:
+                            title: str | None = None, lang: str | None = None) -> dict:
     """Construit le payload de clustering CANONIQUE (un seul format, partagé par le
     pipeline ET le calcul en arrière-plan). `with_summaries` active le résumé LLM
     par cluster. Schéma figé : clusters[].representative_doc + embedding_source."""
@@ -4756,6 +4769,8 @@ def _build_clusters_payload(scenario_id: str, docs: list, cc: dict, *,
             try:
                 from openai import OpenAI as _OAI
                 _client = _OAI(api_key=openai_key, timeout=90.0)
+                english = (lang or "fr").strip().lower().startswith("en")
+                lang_word = "in English" if english else "en français"
                 top5 = np.argsort(distances)[:5]
                 llm_ctx = "\n\n".join(
                     f"Titre: {docs[idxs[int(t)]]['title']}\nRésumé: {(docs[idxs[int(t)]].get('abstract') or '')[:350]}"
@@ -4766,9 +4781,9 @@ def _build_clusters_payload(scenario_id: str, docs: list, cc: dict, *,
                     messages=[{"role": "user", "content": (
                         f"Scénario : {title or scenario_id}.\n"
                         f"Articles représentatifs du cluster :\n{llm_ctx}\n\n"
-                        f"Rédigez un résumé concis (3-4 phrases, max 120 mots) en français : "
+                        f"Rédigez un résumé concis (3-4 phrases, max 120 mots) {lang_word} : "
                         f"thématique commune, évidences clés, valeur opérationnelle pour les urgences préhospitalières."
-                    )}],
+                    ) + _llm_lang_directive(lang)}],
                     max_tokens=200, temperature=0.3,
                 )
                 resume = completion.choices[0].message.content.strip()
@@ -4801,7 +4816,7 @@ def _build_clusters_payload(scenario_id: str, docs: list, cc: dict, *,
     }
 
 
-def _run_clustering_background(scenario_id: str, force_refresh: bool = False) -> None:
+def _run_clustering_background(scenario_id: str, force_refresh: bool = False, lang: str | None = None) -> None:
     """Calcule le clustering dans un thread séparé et stocke le résultat en cache."""
     import time as _time
 
@@ -4882,6 +4897,7 @@ def _run_clustering_background(scenario_id: str, force_refresh: bool = False) ->
         result = _build_clusters_payload(
             scenario_id, docs, _cc, with_summaries=True, openai_key=openai_key,
             title=(_gesica_title(meta_for_cluster) if meta_for_cluster else None),
+            lang=lang,
         )
         # Cache DB (durable) + /tmp (compat) + mémoire.
         _save_viz_cache(scenario_id, "clustering",
@@ -4899,9 +4915,9 @@ def _run_clustering_background(scenario_id: str, force_refresh: bool = False) ->
 
 
 @app.get("/gesica/scenarios/{scenario_id}/clustering")
-def get_scenario_clustering(scenario_id: str, force_refresh: bool = False) -> dict[str, Any]:
+def get_scenario_clustering(scenario_id: str, force_refresh: bool = False, lang: str | None = Query(None)) -> dict[str, Any]:
     """Delegue a l'implementation user-scenario unifiee (pipeline unique)."""
-    return get_user_scenario_clustering(scenario_id, force_refresh)
+    return get_user_scenario_clustering(scenario_id, force_refresh, lang)
 
 
 @app.get("/gesica/scenarios/{scenario_id}/clustering/status")
@@ -5804,6 +5820,7 @@ async def ask_stream(payload: dict[str, Any]) -> StreamingResponse:
     project_context = payload.get("project_context", "literev")
     scenario_id = payload.get("scenario_id", None)
     top_k = int(payload.get("top_k", 8))
+    lang = payload.get("lang")
 
     if not question:
         raise HTTPException(status_code=422, detail="question est requis")
@@ -5870,9 +5887,9 @@ async def ask_stream(payload: dict[str, Any]) -> StreamingResponse:
     context_text = "\n\n---\n\n".join(context_chunks[:top_k]) if context_chunks else "Aucun contexte disponible."
 
     system_prompt = """Tu es un assistant expert en médecine d'urgence et en revue systématique de la littérature scientifique.
-Tu réponds en français de manière précise, factuelle et synthétique.
+Tu réponds de manière précise, factuelle et synthétique.
 Base-toi exclusivement sur le contexte fourni. Si l'information n'est pas dans le contexte, dis-le clairement.
-Cite les articles pertinents par leur titre quand tu les mentionnes."""
+Cite les articles pertinents par leur titre quand tu les mentionnes.""" + _llm_lang_directive(lang)
 
     user_prompt = f"""Contexte scientifique (extraits d'articles) :
 {context_text}
@@ -10057,7 +10074,7 @@ def user_scenario_rag_assistant(scenario_id: str, payload: AskIn) -> dict[str, A
             "2. Citez vos sources avec [SOURCE 1], [SOURCE 2], etc.\n"
             "3. Mentionnez les niveaux de preuve (RCT, méta-analyse, étude observationnelle).\n"
             "4. Soyez précis et structuré. Si le contexte est insuffisant, dites-le.\n"
-        )
+        ) + _llm_lang_directive(payload.lang)
         response = client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[
@@ -10159,7 +10176,7 @@ def submit_user_scenario_double_blind_decision(
 
 
 @app.get("/user-scenarios/{scenario_id}/clustering")
-def get_user_scenario_clustering(scenario_id: str, force_refresh: bool = False) -> dict[str, Any]:
+def get_user_scenario_clustering(scenario_id: str, force_refresh: bool = False, lang: str | None = Query(None)) -> dict[str, Any]:
     """Clustering pour un scénario utilisateur."""
     import threading
     _get_user_scenario_or_404(scenario_id)
@@ -10172,7 +10189,7 @@ def get_user_scenario_clustering(scenario_id: str, force_refresh: bool = False) 
         return job["result"]
     if not job or job.get("status") not in ("running",) or force_refresh:
         _clustering_jobs[scenario_id] = {"status": "running"}
-        t = threading.Thread(target=_run_clustering_background, args=(scenario_id, force_refresh), daemon=True)
+        t = threading.Thread(target=_run_clustering_background, args=(scenario_id, force_refresh, lang), daemon=True)
         t.start()
     return {
         "scenario_id": scenario_id, "status": "running",
@@ -10738,7 +10755,7 @@ def update_scenario_settings(scenario_id: str, payload: dict[str, Any], _: None 
 _BRIEF_GENERATION_JOBS: dict[str, dict] = {}
 
 
-def _generate_evidence_brief_llm(scenario_id: str, force: bool = False) -> dict[str, Any]:
+def _generate_evidence_brief_llm(scenario_id: str, force: bool = False, lang: str | None = None) -> dict[str, Any]:
     """
     Génère un Evidence Brief narratif complet via LLM à partir des articles
     au-dessus du seuil de similarité (ou validés humainement).
@@ -10824,10 +10841,10 @@ def _generate_evidence_brief_llm(scenario_id: str, force: bool = False) -> dict[
                           "sauf upgrade explicitement justifié)")
 
     system_prompt = """Tu es un expert en médecine d'urgence et en revue systématique de la littérature scientifique.
-Tu génères des Evidence Briefs complets, rigoureux et structurés en français.
+Tu génères des Evidence Briefs complets, rigoureux et structurés.
 Tu dois produire un JSON structuré avec tous les champs demandés.
 Sois précis, factuel, et base-toi exclusivement sur les articles fournis.
-Ne pas utiliser de tiret em (—). Utiliser des tirets simples (-) si nécessaire."""
+Ne pas utiliser de tiret em (—). Utiliser des tirets simples (-) si nécessaire.""" + _llm_lang_directive(lang)
 
     user_prompt = f"""Génère un Evidence Brief complet pour le scénario de recherche : "{scenario_name}"
 
@@ -10922,7 +10939,7 @@ Retourne UNIQUEMENT le JSON valide."""
 
 
 @app.post("/scenarios/{scenario_id}/evidence-brief/generate")
-def generate_evidence_brief(scenario_id: str, force: bool = False, _: None = Depends(require_api_key)) -> dict[str, Any]:
+def generate_evidence_brief(scenario_id: str, force: bool = False, lang: str | None = Query(None), _: None = Depends(require_api_key)) -> dict[str, Any]:
     """
     Déclenche la génération asynchrone de l'Evidence Brief LLM.
     Fonctionne pour GESICA et user_scenarios.
@@ -10935,7 +10952,7 @@ def generate_evidence_brief(scenario_id: str, force: bool = False, _: None = Dep
     _BRIEF_GENERATION_JOBS[scenario_id] = {"status": "running"}
 
     def _run():
-        result = _generate_evidence_brief_llm(scenario_id, force=force)
+        result = _generate_evidence_brief_llm(scenario_id, force=force, lang=lang)
         if "error" in result:
             _BRIEF_GENERATION_JOBS[scenario_id] = {"status": "error", "error": result["error"]}
         else:
@@ -11221,7 +11238,7 @@ def _attach_model_spec(variables: dict, prov_articles: list[dict]) -> dict:
     return variables
 
 
-def _generate_variables_from_pico(scenario_id: str, persist: str = "active") -> dict[str, Any]:
+def _generate_variables_from_pico(scenario_id: str, persist: str = "active", lang: str | None = None) -> dict[str, Any]:
     """
     Génère automatiquement les variables du modèle et l'outcome à partir des PICO extraits.
     Sauvegarde dans scenario_settings.variables_json.
@@ -11263,7 +11280,7 @@ def _generate_variables_from_pico(scenario_id: str, persist: str = "active") -> 
     system_prompt = """Tu es un expert en modélisation prédictive en médecine d'urgence.
 A partir d'une revue systématique de la littérature, tu identifies les variables clés,
 l'outcome principal, et le meilleur algorithme pour un modèle prédictif.
-Tu génères un JSON structuré. Ne pas utiliser de tiret em (—)."""
+Tu génères un JSON structuré. Ne pas utiliser de tiret em (—).""" + _llm_lang_directive(lang)
 
     user_prompt = f"""Scénario : "{scenario_name}"
 Basé sur {len(pico_articles)} articles avec extraction PICO :
@@ -11450,7 +11467,7 @@ Retourne UNIQUEMENT le JSON valide."""
 
 
 @app.post("/scenarios/{scenario_id}/variables/generate")
-def generate_scenario_variables(scenario_id: str, _: None = Depends(require_api_key)) -> dict[str, Any]:
+def generate_scenario_variables(scenario_id: str, lang: str | None = Query(None), _: None = Depends(require_api_key)) -> dict[str, Any]:
     """Déclenche la génération asynchrone des Variables & Modèle depuis les PICO."""
     import threading
 
@@ -11460,7 +11477,7 @@ def generate_scenario_variables(scenario_id: str, _: None = Depends(require_api_
     _VARIABLES_GENERATION_JOBS[scenario_id] = {"status": "running"}
 
     def _run():
-        result = _generate_variables_from_pico(scenario_id)
+        result = _generate_variables_from_pico(scenario_id, lang=lang)
         if "error" in result:
             _VARIABLES_GENERATION_JOBS[scenario_id] = {"status": "error", "error": result["error"]}
         else:
@@ -11678,7 +11695,7 @@ except Exception as _e:
 _ACTIONS_JOBS: dict[str, dict] = {}
 
 
-def _generate_recommended_actions(scenario_id: str) -> list[str]:
+def _generate_recommended_actions(scenario_id: str, lang: str | None = None) -> list[str]:
     """
     Génère 4-5 actions opérationnelles/cliniques concrètes à partir de l'évidence
     du scénario (PICO des articles au-dessus du seuil), façon « Actions
@@ -11705,7 +11722,8 @@ def _generate_recommended_actions(scenario_id: str) -> list[str]:
 
     system = ("Tu es un expert en aide à la décision en santé/médecine d'urgence. "
               "À partir d'une revue de littérature, tu proposes des ACTIONS opérationnelles "
-              "concrètes, spécifiques et actionnables (pas de généralités). Pas de tiret em (—).")
+              "concrètes, spécifiques et actionnables (pas de généralités). Pas de tiret em (—)."
+              ) + _llm_lang_directive(lang)
     user = (f"Scénario : \"{scenario_name}\"\n"
             f"Basé sur {len(base)} articles :\n{_json.dumps(ctx, ensure_ascii=False)[:6000]}\n\n"
             "Génère un JSON {\"recommended_actions\": [\"action 1\", ...]} avec 4 à 5 actions "
@@ -11733,7 +11751,7 @@ def _generate_recommended_actions(scenario_id: str) -> list[str]:
     return actions
 
 
-def _maybe_generate_actions(scenario_id: str) -> bool:
+def _maybe_generate_actions(scenario_id: str, lang: str | None = None) -> bool:
     """Lance la génération des actions en arrière-plan, une fois par scénario."""
     import threading
     if _ACTIONS_JOBS.get(scenario_id, {}).get("status") in ("running", "done"):
@@ -11742,7 +11760,7 @@ def _maybe_generate_actions(scenario_id: str) -> bool:
 
     def _run():
         try:
-            n = _generate_recommended_actions(scenario_id)
+            n = _generate_recommended_actions(scenario_id, lang=lang)
             _ACTIONS_JOBS[scenario_id] = {"status": "done", "count": len(n)}
         except Exception as e:
             _ACTIONS_JOBS[scenario_id] = {"status": "error", "error": str(e)}
@@ -11753,7 +11771,7 @@ def _maybe_generate_actions(scenario_id: str) -> bool:
 
 
 @app.get("/scenarios/{scenario_id}/recommended-actions")
-def get_recommended_actions(scenario_id: str) -> dict[str, Any]:
+def get_recommended_actions(scenario_id: str, lang: str | None = Query(None)) -> dict[str, Any]:
     """Actions recommandées (cache) ; génère en arrière-plan au 1er appel si absentes."""
     with engine.connect() as conn:
         row = conn.execute(text(
@@ -11762,7 +11780,7 @@ def get_recommended_actions(scenario_id: str) -> dict[str, Any]:
     if row and isinstance(row["recommended_actions_json"], list) and row["recommended_actions_json"]:
         return {"status": "ready", "actions": row["recommended_actions_json"],
                 "generated_at": row["actions_generated_at"].isoformat() if row["actions_generated_at"] else None}
-    started = _maybe_generate_actions(scenario_id)
+    started = _maybe_generate_actions(scenario_id, lang=lang)
     job = _ACTIONS_JOBS.get(scenario_id, {})
     if job.get("status") == "error":
         return {"status": "error", "actions": [], "error": job.get("error")}
@@ -11817,7 +11835,7 @@ def _diff_model_spec(old: dict | None, new: dict | None) -> dict:
 
 
 @app.post("/scenarios/{scenario_id}/model/spec/propose")
-def propose_scenario_spec(scenario_id: str, _: None = Depends(require_api_key)) -> dict[str, Any]:
+def propose_scenario_spec(scenario_id: str, lang: str | None = Query(None), _: None = Depends(require_api_key)) -> dict[str, Any]:
     """Régénère le spec depuis l'évidence courante dans un slot de proposition (async)."""
     import threading
 
@@ -11827,7 +11845,7 @@ def propose_scenario_spec(scenario_id: str, _: None = Depends(require_api_key)) 
     _SPEC_PROPOSAL_JOBS[scenario_id] = {"status": "running"}
 
     def _run():
-        result = _generate_variables_from_pico(scenario_id, persist="proposal")
+        result = _generate_variables_from_pico(scenario_id, persist="proposal", lang=lang)
         if "error" in result:
             _SPEC_PROPOSAL_JOBS[scenario_id] = {"status": "error", "error": result["error"]}
         else:
@@ -12770,6 +12788,7 @@ async def ask_stream_filtered(payload: dict[str, Any]):
     scenario_id = payload.get("scenario_id", None)
     top_k = int(payload.get("top_k", 12))
     project_context = payload.get("project_context", "literev")
+    lang = payload.get("lang")
 
     if not question:
         raise HTTPException(status_code=422, detail="question est requis")
@@ -12860,10 +12879,10 @@ async def ask_stream_filtered(payload: dict[str, Any]):
     context_text = "\n\n---\n\n".join(context_chunks[:top_k]) if context_chunks else "Aucun contexte disponible."
 
     system_prompt = """Tu es un assistant expert en médecine d'urgence et en revue systématique de la littérature scientifique.
-Tu réponds en français de manière précise, factuelle et structurée.
+Tu réponds de manière précise, factuelle et structurée.
 Base-toi exclusivement sur le contexte fourni. Si l'information n'est pas dans le contexte, dis-le clairement.
 Cite les articles pertinents par leur titre quand tu les mentionnes.
-Ne pas utiliser de tiret em (—)."""
+Ne pas utiliser de tiret em (—).""" + _llm_lang_directive(lang)
 
     user_prompt = f"""Contexte scientifique (extraits d'articles sélectionnés par pertinence sémantique) :
 {context_text}

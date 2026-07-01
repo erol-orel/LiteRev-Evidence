@@ -13,7 +13,12 @@ export type Lang = "fr" | "en";
 const RESOURCES: Record<Lang, Translations> = { fr, en };
 const STORAGE_KEY = "literev-lang";
 
-function detectInitial(): Lang {
+/**
+ * Single source of truth for the active language, usable OUTSIDE React
+ * (e.g. in lib/api.ts). Reads the persisted choice from localStorage, then
+ * falls back to the browser language, then French.
+ */
+export function currentLang(): Lang {
   try {
     const saved = localStorage.getItem(STORAGE_KEY);
     if (saved === "fr" || saved === "en") return saved;
@@ -22,6 +27,10 @@ function detectInitial(): Lang {
   } catch {
     return "fr";
   }
+}
+
+function detectInitial(): Lang {
+  return currentLang();
 }
 
 // Dotted-path lookup, e.g. lookup(fr, "nav.search").
@@ -83,13 +92,7 @@ export function LanguageProvider({ children }: { children: React.ReactNode }) {
  * falls back to French, then the key itself — mirroring the hook's `t`.
  */
 export function tStandalone(path: string): string {
-  let lang: Lang = "fr";
-  try {
-    const s = localStorage.getItem(STORAGE_KEY);
-    if (s === "fr" || s === "en") lang = s;
-  } catch {
-    /* ignore */
-  }
+  const lang = currentLang();
   const val = lookup(RESOURCES[lang], path) ?? lookup(fr, path);
   return typeof val === "string" ? val : path;
 }
