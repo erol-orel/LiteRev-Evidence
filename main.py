@@ -5852,6 +5852,11 @@ async def ask_stream(payload: dict[str, Any]) -> StreamingResponse:
     sources = []
     if emb_str:
         where_extra = ""
+        join_extra = ""
+        # Migration 2 : quand un scénario est fourni, on JOINT article_scenarios
+        # pour lire le screening PROPRE au scénario (COALESCE), comme
+        # /ask/stream/filtered. Sans scénario, colonne globale.
+        screen_expr = "d.screening_status"
         params_extra: dict[str, Any] = {
             "top_k": top_k, "emb": emb_str, "max_dist": 1.0 - RAG_MIN_SIMILARITY,
         }
@@ -5859,7 +5864,8 @@ async def ask_stream(payload: dict[str, Any]) -> StreamingResponse:
             where_extra += " AND d.project_context = :project_context"
             params_extra["project_context"] = project_context
         if scenario_id:
-            where_extra += " AND EXISTS (SELECT 1 FROM article_scenarios ars WHERE ars.document_id = d.id AND ars.scenario_id = :scenario_id)"
+            join_extra = " JOIN article_scenarios ars ON ars.document_id = d.id AND ars.scenario_id = :scenario_id "
+            screen_expr = "COALESCE(ars.screening_status, d.screening_status)"
             params_extra["scenario_id"] = scenario_id
 
         with engine.connect() as conn:
@@ -5868,9 +5874,10 @@ async def ask_stream(payload: dict[str, Any]) -> StreamingResponse:
                        1 - (c.embedding <=> CAST(:emb AS vector)) AS similarity
                 FROM document_chunk c
                 JOIN literature_document d ON d.id = c.document_id
+                {join_extra}
                 WHERE c.embedding IS NOT NULL
                   AND (d.is_duplicate IS NULL OR d.is_duplicate = FALSE)
-                  AND d.screening_status IS DISTINCT FROM 'excluded'
+                  AND {screen_expr} IS DISTINCT FROM 'excluded'
                   AND (c.embedding <=> CAST(:emb AS vector)) <= :max_dist
                   {where_extra}
                 ORDER BY c.embedding <=> CAST(:emb AS vector)
@@ -10515,23 +10522,30 @@ def trigger_rerank(scenario_id: str, _: None = Depends(require_api_key)) -> dict
         nl_queries = meta.get("nl_queries") or []
         query = nl_queries[0] if nl_queries else _gesica_title(meta)
 
-    if _RERANK_JOBS.get(scenario_id, {}).get("status") == "running":
+    import time
+    if _job_is_active(_RERANK_JOBS.get(scenario_id)):
         return {"status": "already_running", "scenario_id": scenario_id}
 
-    _RERANK_JOBS[scenario_id] = {"status": "running", "updated": 0}
+    _RERANK_JOBS[scenario_id] = {"status": "running", "updated": 0, "started_at": time.time()}
 
     def _run():
-        _backfill_title_abstract_chunks(scenario_id)  # docs sans chunk résumé -> searchable
-        n = _run_semantic_rerank_inline(scenario_id, query)
-        # Recalcul COMPLET : après le cosinus, relancer AUSSI le cross-encoder Cohere
-        # sur le sous-ensemble pertinent — sinon « Recalculer scores » ne rafraîchissait
-        # que le cosinus et les rerank_score restaient figés/partiels.
         try:
-            _nce = _run_cross_encoder_rerank(scenario_id, query)
-            logger.info(f"Rerank manuel {scenario_id}: {n} cosinus + {_nce} cross-encoder Cohere.")
-        except Exception as _ece:
-            logger.warning(f"cross-encoder (recalcul manuel) {scenario_id}: {_ece}")
-        _RERANK_JOBS[scenario_id] = {"status": "done", "updated": n}
+            _backfill_title_abstract_chunks(scenario_id)  # docs sans chunk résumé -> searchable
+            n = _run_semantic_rerank_inline(scenario_id, query)
+            # Recalcul COMPLET : après le cosinus, relancer AUSSI le cross-encoder Cohere
+            # sur le sous-ensemble pertinent — sinon « Recalculer scores » ne rafraîchissait
+            # que le cosinus et les rerank_score restaient figés/partiels.
+            try:
+                _nce = _run_cross_encoder_rerank(scenario_id, query)
+                logger.info(f"Rerank manuel {scenario_id}: {n} cosinus + {_nce} cross-encoder Cohere.")
+            except Exception as _ece:
+                logger.warning(f"cross-encoder (recalcul manuel) {scenario_id}: {_ece}")
+            _RERANK_JOBS[scenario_id] = {"status": "done", "updated": n}
+        except Exception as e:
+            # Sans ce filet, une exception laisse le job en "running" pour toujours
+            # (→ "already_running" + badge "recalcul en cours" figé jusqu'au restart).
+            logger.error(f"Rerank job {scenario_id}: {e}", exc_info=True)
+            _RERANK_JOBS[scenario_id] = {"status": "error", "error": str(e), "updated": 0}
 
     threading.Thread(target=_run, daemon=True).start()
     return {"status": "started", "scenario_id": scenario_id, "query": query}
@@ -11017,6 +11031,14 @@ def get_llm_evidence_brief(scenario_id: str) -> dict[str, Any]:
     articles = _get_above_threshold_articles(scenario_id, threshold)
     if not articles:
         return {"status": "empty", "message": "Aucun article au-dessus du seuil. Ajoutez des articles ou abaissez le seuil de similarité."}
+
+    # Si un job précédent a ÉCHOUÉ, renvoyer l'erreur au lieu de relancer la
+    # génération à chaque appel : sinon un échec persistant (mauvaise sortie LLM,
+    # quota) boucle en regénération à chaque poll côté front. Le bouton
+    # « régénérer » (POST force) reste la voie de reprise explicite.
+    _bj = _BRIEF_GENERATION_JOBS.get(scenario_id, {})
+    if _bj.get("status") == "error":
+        return {"status": "error", "message": _bj.get("error", "Échec de la génération du brief.")}
 
     # Pas de brief en cache : déclencher la génération
     generate_evidence_brief(scenario_id)
@@ -11551,6 +11573,12 @@ def get_scenario_variables(scenario_id: str) -> dict[str, Any]:
     if not articles:
         return {"status": "empty", "message": "Aucun article au-dessus du seuil. Ajoutez des articles ou abaissez le seuil de similarité."}
 
+    # Job en échec : renvoyer l'erreur au lieu de relancer à chaque poll (évite
+    # une boucle de regénération quand la génération échoue de façon persistante).
+    _vj = _VARIABLES_GENERATION_JOBS.get(scenario_id, {})
+    if _vj.get("status") == "error":
+        return {"status": "error", "message": _vj.get("error", "Échec de la génération des variables.")}
+
     # Déclencher la génération
     generate_scenario_variables(scenario_id)
     return {"status": "generating", "message": "Génération en cours, réessayez dans 30 secondes."}
@@ -11867,19 +11895,23 @@ def _diff_model_spec(old: dict | None, new: dict | None) -> dict:
 @app.post("/scenarios/{scenario_id}/model/spec/propose")
 def propose_scenario_spec(scenario_id: str, lang: str | None = Query(None), _: None = Depends(require_api_key)) -> dict[str, Any]:
     """Régénère le spec depuis l'évidence courante dans un slot de proposition (async)."""
-    import threading
+    import threading, time
 
-    if _SPEC_PROPOSAL_JOBS.get(scenario_id, {}).get("status") == "running":
+    if _job_is_active(_SPEC_PROPOSAL_JOBS.get(scenario_id)):
         return {"status": "already_running", "scenario_id": scenario_id}
 
-    _SPEC_PROPOSAL_JOBS[scenario_id] = {"status": "running"}
+    _SPEC_PROPOSAL_JOBS[scenario_id] = {"status": "running", "started_at": time.time()}
 
     def _run():
-        result = _generate_variables_from_pico(scenario_id, persist="proposal", lang=lang)
-        if "error" in result:
-            _SPEC_PROPOSAL_JOBS[scenario_id] = {"status": "error", "error": result["error"]}
-        else:
-            _SPEC_PROPOSAL_JOBS[scenario_id] = {"status": "done"}
+        try:
+            result = _generate_variables_from_pico(scenario_id, persist="proposal", lang=lang)
+            if "error" in result:
+                _SPEC_PROPOSAL_JOBS[scenario_id] = {"status": "error", "error": result["error"]}
+            else:
+                _SPEC_PROPOSAL_JOBS[scenario_id] = {"status": "done"}
+        except Exception as e:
+            logger.error(f"Spec proposal job {scenario_id}: {e}", exc_info=True)
+            _SPEC_PROPOSAL_JOBS[scenario_id] = {"status": "error", "error": str(e)}
 
     threading.Thread(target=_run, daemon=True).start()
     return {"status": "started", "scenario_id": scenario_id}
