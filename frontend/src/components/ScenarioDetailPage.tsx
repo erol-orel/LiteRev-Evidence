@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useLayoutEffect, useCallback, useRef, useMemo } from "react";
 import { ErrorBoundary } from "./ErrorBoundary";
+import { useI18n } from "../i18n/LanguageProvider";
 import {
   ArrowLeft, Brain,
   ChevronDown, ChevronUp, Database, ExternalLink, FileText,
@@ -133,10 +134,11 @@ function SectionHeader({ icon, title, subtitle }: { icon: React.ReactNode; title
 }
 
 function LoadingSpinner({ text }: { text?: string }) {
+  const { t } = useI18n();
   return (
     <div className="flex items-center justify-center py-8 text-white/50 gap-2">
       <RotateCcw size={16} className="animate-spin" />
-      <span className="text-sm">{text ?? "Chargement..."}</span>
+      <span className="text-sm">{text ?? t("scenarioDetail.common.loading")}</span>
     </div>
   );
 }
@@ -153,6 +155,7 @@ function ErrorBox({ message }: { message: string }) {
 // ─── Section: Queries ─────────────────────────────────────────────────────────
 
 function QueriesSection({ detail, scenarioId }: { detail: ScenarioDetail; scenarioId: string }) {
+  const { t } = useI18n();
   const [showPrompt, setShowPrompt] = useState(false);
   const [strategy, setStrategy] = useState<SearchStrategy | null>(null);
   const [strategyLoading, setStrategyLoading] = useState(false);
@@ -198,15 +201,15 @@ function QueriesSection({ detail, scenarioId }: { detail: ScenarioDetail; scenar
     <div className="rounded-3xl border border-white/10 bg-white/3 p-5 space-y-5">
       <SectionHeader
         icon={<Search size={14} className="text-brand-400" />}
-        title="Stratégie de Recherche"
-        subtitle="Requêtes utilisées pour récupérer les articles du corpus"
+        title={t("scenarioDetail.queries.title")}
+        subtitle={t("scenarioDetail.queries.subtitle")}
       />
       {/* Boolean Queries multi-sources */}
       <div>
         <div className="flex items-center gap-2 mb-3">
           <Terminal size={12} className="text-brand-400" />
           <span className="text-xs font-semibold text-brand-300 uppercase tracking-wider">
-            Requêtes Booléennes ({detail.boolean_queries.length})
+            {t("scenarioDetail.queries.booleanQueries")} ({detail.boolean_queries.length})
           </span>
         </div>
         <div className="space-y-2">
@@ -222,7 +225,7 @@ function QueriesSection({ detail, scenarioId }: { detail: ScenarioDetail; scenar
                   target="_blank"
                   rel="noopener noreferrer"
                   className="text-brand-400 hover:text-brand-300 text-[9px] font-mono"
-                  title="Ouvrir dans PubMed"
+                  title={t("scenarioDetail.queries.openInPubmed")}
                 >PubMed</a>
                 <span className="text-white/20">|</span>
                 <a
@@ -230,7 +233,7 @@ function QueriesSection({ detail, scenarioId }: { detail: ScenarioDetail; scenar
                   target="_blank"
                   rel="noopener noreferrer"
                   className="text-brand-400 hover:text-brand-300 text-[9px] font-mono"
-                  title="Ouvrir dans Google Scholar"
+                  title={t("scenarioDetail.queries.openInScholar")}
                 >Scholar</a>
                 <span className="text-white/20">|</span>
                 <a
@@ -238,12 +241,12 @@ function QueriesSection({ detail, scenarioId }: { detail: ScenarioDetail; scenar
                   target="_blank"
                   rel="noopener noreferrer"
                   className="text-brand-400 hover:text-brand-300 text-[9px] font-mono"
-                  title="Ouvrir dans EuropePMC"
+                  title={t("scenarioDetail.queries.openInEuropepmc")}
                 >EuropePMC</a>
               </div>
             </div>
           )) : (
-            <p className="text-xs text-white/35 italic">Aucune requête booléenne définie pour ce scénario.</p>
+            <p className="text-xs text-white/35 italic">{t("scenarioDetail.queries.noBooleanQuery")}</p>
           )}
         </div>
       </div>
@@ -252,7 +255,7 @@ function QueriesSection({ detail, scenarioId }: { detail: ScenarioDetail; scenar
         <div className="flex items-center gap-2 mb-3">
           <MessageSquare size={12} className="text-brand-400" />
           <span className="text-xs font-semibold text-brand-300 uppercase tracking-wider">
-            Requêtes Langage Naturel ({detail.nl_queries.length})
+            {t("scenarioDetail.queries.nlQueries")} ({detail.nl_queries.length})
           </span>
         </div>
         <div className="space-y-2">
@@ -264,7 +267,7 @@ function QueriesSection({ detail, scenarioId }: { detail: ScenarioDetail; scenar
               </div>
             </div>
           )) : (
-            <p className="text-xs text-white/35 italic">Aucune requête NL définie pour ce scénario.</p>
+            <p className="text-xs text-white/35 italic">{t("scenarioDetail.queries.noNlQuery")}</p>
           )}
         </div>
       </div>
@@ -276,7 +279,7 @@ function QueriesSection({ detail, scenarioId }: { detail: ScenarioDetail; scenar
             className="flex items-center gap-2 text-xs font-semibold text-gold-300 uppercase tracking-wider hover:text-gold-200 transition"
           >
             {showPrompt ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
-            {showPrompt ? "Masquer" : "Afficher"} le prompt d'extraction d'évidence
+            {showPrompt ? t("scenarioDetail.queries.hidePrompt") : t("scenarioDetail.queries.showPrompt")} {t("scenarioDetail.queries.extractionPromptSuffix")}
           </button>
           {showPrompt && (
             <div className="mt-3 rounded-xl border border-gold-500/15 bg-gold-500/5 p-4">
@@ -294,43 +297,43 @@ function QueriesSection({ detail, scenarioId }: { detail: ScenarioDetail; scenar
           <div className="flex items-center gap-2 mb-3">
             <Brain size={12} className="text-violet-400" />
             <span className="text-xs font-semibold text-violet-300 uppercase tracking-wider">
-              Stratégie Booléenne
+              {t("scenarioDetail.queries.booleanStrategy")}
             </span>
             <button
               onClick={loadStrategy}
               disabled={strategyLoading}
               className="ml-auto rounded-xl border border-violet-500/30 bg-violet-500/10 px-2.5 py-1 text-[10px] text-violet-300 hover:bg-violet-500/20 transition disabled:opacity-50"
             >
-              {strategyLoading ? <Loader2 size={10} className="animate-spin inline" /> : "Générer / Rafraîchir"}
+              {strategyLoading ? <Loader2 size={10} className="animate-spin inline" /> : t("scenarioDetail.queries.generateRefresh")}
             </button>
           </div>
           {strategyError && <p className="text-xs text-rose-400">{strategyError}</p>}
           {strategy && (
             <div className="space-y-3">
               <div className="rounded-xl border border-violet-500/15 bg-violet-500/5 p-3">
-                <p className="text-[10px] font-semibold text-violet-400 uppercase tracking-wider mb-1">Requête générale</p>
+                <p className="text-[10px] font-semibold text-violet-400 uppercase tracking-wider mb-1">{t("scenarioDetail.queries.generalQuery")}</p>
                 <code className="text-xs text-violet-200 font-mono break-all leading-5">{strategy.general}</code>
               </div>
               <div className="rounded-xl border border-blue-500/15 bg-blue-500/5 p-3">
                 <div className="flex items-center justify-between mb-1">
-                  <p className="text-[10px] font-semibold text-blue-400 uppercase tracking-wider">Requête PubMed (avec MeSH)</p>
+                  <p className="text-[10px] font-semibold text-blue-400 uppercase tracking-wider">{t("scenarioDetail.queries.pubmedQueryMesh")}</p>
                   <a
                     href={`https://pubmed.ncbi.nlm.nih.gov/?term=${encodeURIComponent(strategy.pubmed)}`}
                     target="_blank" rel="noopener noreferrer"
                     className="text-[9px] text-blue-400 hover:text-blue-300"
-                  >Ouvrir dans PubMed →</a>
+                  >{t("scenarioDetail.queries.openInPubmedArrow")}</a>
                 </div>
                 <code className="text-xs text-blue-200 font-mono break-all leading-5">{strategy.pubmed}</code>
               </div>
               {strategy.explanation && (
                 <div className="rounded-xl border border-white/10 bg-white/3 p-3">
-                  <p className="text-[10px] font-semibold text-white/50 uppercase tracking-wider mb-1">Explication</p>
+                  <p className="text-[10px] font-semibold text-white/50 uppercase tracking-wider mb-1">{t("scenarioDetail.queries.explanation")}</p>
                   <p className="text-xs text-white/70 leading-5">{strategy.explanation}</p>
                 </div>
               )}
               {strategy.synonyms && strategy.synonyms.length > 0 && (
                 <div>
-                  <p className="text-[10px] font-semibold text-white/50 uppercase tracking-wider mb-2">Groupes de synonymes</p>
+                  <p className="text-[10px] font-semibold text-white/50 uppercase tracking-wider mb-2">{t("scenarioDetail.queries.synonymGroups")}</p>
                   <div className="flex flex-wrap gap-2">
                     {strategy.synonyms.map((group, i) => (
                       <div key={i} className="rounded-xl border border-white/10 bg-white/3 px-3 py-1.5 flex gap-1.5 flex-wrap">
@@ -355,45 +358,45 @@ function QueriesSection({ detail, scenarioId }: { detail: ScenarioDetail; scenar
           <div className="flex items-center gap-2 mb-3">
             <Globe size={12} className="text-brand-400" />
             <span className="text-xs font-semibold text-brand-300 uppercase tracking-wider">
-              Recherche en direct (8 sources)
+              {t("scenarioDetail.queries.liveSearchTitle")}
             </span>
             <button
               onClick={runLiveSearch}
               disabled={liveLoading}
               className="ml-auto rounded-xl border border-brand-500/30 bg-brand-500/10 px-2.5 py-1 text-[10px] text-brand-300 hover:bg-brand-500/20 transition disabled:opacity-50 flex items-center gap-1"
             >
-              {liveLoading ? <><Loader2 size={10} className="animate-spin" /> Recherche...</> : "Rechercher toutes les sources"}
+              {liveLoading ? <><Loader2 size={10} className="animate-spin" /> {t("scenarioDetail.queries.searching")}</> : t("scenarioDetail.queries.searchAllSources")}
             </button>
           </div>
           {liveError && <p className="text-xs text-rose-400">{liveError}</p>}
           {liveData && (
             <div className="space-y-3">
               <div className="flex flex-wrap items-center gap-3 text-xs text-forest-400">
-                <span className="text-white font-semibold">{liveData.total} résultats (APIs en direct)</span>
+                <span className="text-white font-semibold">{liveData.total} {t("scenarioDetail.queries.liveResultsSuffix")}</span>
                 <span>·</span>
                 {liveData.new_count > 0 && (
                   <span className="rounded-full border border-amber-500/40 bg-amber-500/10 px-2 py-0.5 text-amber-300">
-                    {liveData.new_count} nouveaux non-indexés
-                    {liveData.ingesting_background && " (ingestion en cours...)"}
+                    {liveData.new_count} {t("scenarioDetail.queries.newUnindexed")}
+                    {liveData.ingesting_background && t("scenarioDetail.queries.ingestingInProgress")}
                   </span>
                 )}
                 <span>{liveData.sources_queried.join(", ")}</span>
               </div>
               {typeof liveData.corpus_total === "number" && (
                 <div className="rounded-xl border border-brand-500/20 bg-brand-500/5 px-3 py-2 text-[11px] text-brand-200"
-                     title="Le panneau ci-dessus = résultats des APIs externes (plafonnés). Le corpus du scénario = correspondance locale complète + nouvelles références ingérées. C'est ce corpus qui alimente l'Evidence Brief, l'Assistant et le modèle.">
-                  Corpus du scénario : <span className="font-semibold text-white">{liveData.corpus_total.toLocaleString()}</span> documents
-                  {" · "}<span className="text-brand-300">{(liveData.corpus_above_threshold ?? 0).toLocaleString()} au-dessus du seuil {liveData.threshold ?? 0.45}</span>
-                  {" "}<span className="text-white/40">(les nouvelles références n'ont qu'un score lexical tant qu'elles ne sont pas vectorisées)</span>
+                     title={t("scenarioDetail.queries.corpusTooltip")}>
+                  {t("scenarioDetail.queries.corpusPrefix")} <span className="font-semibold text-white">{liveData.corpus_total.toLocaleString()}</span> {t("scenarioDetail.queries.corpusDocuments")}
+                  {" · "}<span className="text-brand-300">{(liveData.corpus_above_threshold ?? 0).toLocaleString()} {t("scenarioDetail.queries.corpusAboveThresholdPrefix")} {liveData.threshold ?? 0.45}</span>
+                  {" "}<span className="text-white/40">{t("scenarioDetail.queries.corpusLexicalNote")}</span>
                 </div>
               )}
               <div className="flex flex-wrap items-center gap-1.5 text-[11px]">
-                <span className="text-forest-500">Trier :</span>
+                <span className="text-forest-500">{t("scenarioDetail.queries.sortLabel")}</span>
                 {([
-                  ["hybrid", "Pertinence"],
-                  ["semantic", "Sémantique"],
-                  ["lexical", "Lexical"],
-                  ["year_desc", "Année"],
+                  ["hybrid", t("scenarioDetail.queries.sortRelevance")],
+                  ["semantic", t("scenarioDetail.queries.sortSemantic")],
+                  ["lexical", t("scenarioDetail.queries.sortLexical")],
+                  ["year_desc", t("scenarioDetail.queries.sortYear")],
                 ] as [typeof liveSort, string][]).map(([val, label]) => (
                   <button
                     key={val}
@@ -414,21 +417,21 @@ function QueriesSection({ detail, scenarioId }: { detail: ScenarioDetail; scenar
                   <div key={i} className={`rounded-xl border p-3 ${r.in_local_db ? 'border-white/10 bg-white/3' : 'border-amber-500/30 bg-amber-500/5'}`}>
                     <div className="flex items-start justify-between gap-2">
                       <div className="flex-1 min-w-0">
-                        <p className="text-xs font-medium text-white leading-5 truncate">{r.title || "(Sans titre)"}</p>
+                        <p className="text-xs font-medium text-white leading-5 truncate">{r.title || t("scenarioDetail.queries.untitled")}</p>
                         <div className="flex flex-wrap gap-1.5 mt-1 items-center">
                           {r.hybrid_score != null && (
-                            <span className="text-[10px] rounded-full bg-violet-500/20 px-1.5 py-0.5 text-violet-300" title="Score de pertinence (recherche en direct)">
+                            <span className="text-[10px] rounded-full bg-violet-500/20 px-1.5 py-0.5 text-violet-300" title={t("scenarioDetail.queries.relevanceScoreTooltip")}>
                               {r.hybrid_score.toFixed(2)}
                             </span>
                           )}
                           {r.semantic_score != null && (
-                            <span className="text-[10px] rounded-full bg-blue-500/10 px-1.5 py-0.5 text-blue-300 border border-blue-500/20" title="Composante sémantique">
-                              Sém. {r.semantic_score.toFixed(2)}
+                            <span className="text-[10px] rounded-full bg-blue-500/10 px-1.5 py-0.5 text-blue-300 border border-blue-500/20" title={t("scenarioDetail.queries.semanticComponentTooltip")}>
+                              {t("scenarioDetail.queries.semanticShort")} {r.semantic_score.toFixed(2)}
                             </span>
                           )}
                           {r.lexical_score != null && (
-                            <span className="text-[10px] rounded-full bg-amber-500/10 px-1.5 py-0.5 text-amber-300 border border-amber-500/20" title="Composante lexicale">
-                              Lex. {r.lexical_score.toFixed(2)}
+                            <span className="text-[10px] rounded-full bg-amber-500/10 px-1.5 py-0.5 text-amber-300 border border-amber-500/20" title={t("scenarioDetail.queries.lexicalComponentTooltip")}>
+                              {t("scenarioDetail.queries.lexicalShort")} {r.lexical_score.toFixed(2)}
                             </span>
                           )}
                           <span className="text-[10px] text-forest-400">{r.source_name}</span>
@@ -438,8 +441,8 @@ function QueriesSection({ detail, scenarioId }: { detail: ScenarioDetail; scenar
                           {r.year && <span className="text-[10px] text-forest-400">{r.year}</span>}
                           {r.journal && <span className="text-[10px] text-forest-500 truncate max-w-[120px]">{r.journal}</span>}
                           {r.in_local_db
-                            ? <span className="text-[10px] rounded-full border border-emerald-500/40 bg-emerald-500/10 px-1.5 py-0.5 text-emerald-300">Déjà indexé</span>
-                            : <span className="text-[10px] rounded-full border border-amber-500/40 bg-amber-500/10 px-1.5 py-0.5 text-amber-300">Non indexé</span>}
+                            ? <span className="text-[10px] rounded-full border border-emerald-500/40 bg-emerald-500/10 px-1.5 py-0.5 text-emerald-300">{t("scenarioDetail.queries.alreadyIndexed")}</span>
+                            : <span className="text-[10px] rounded-full border border-amber-500/40 bg-amber-500/10 px-1.5 py-0.5 text-amber-300">{t("scenarioDetail.queries.notIndexed")}</span>}
                         </div>
                       </div>
                       {r.url && (
@@ -462,14 +465,16 @@ function QueriesSection({ detail, scenarioId }: { detail: ScenarioDetail; scenar
 // ─── Section: Variables & Databases (NOUVEAU) ──────────────────────────────────
 
 // Lien vers l'article source (le plus récent / le plus cité) d'un élément du spec.
-function ArticleSourceLink({ a, label = "Source" }: { a?: ProvArticle | null; label?: string }) {
+function ArticleSourceLink({ a, label }: { a?: ProvArticle | null; label?: string }) {
+  const { t } = useI18n();
   if (!a) return null;
+  const resolvedLabel = label ?? t("scenarioDetail.common.source");
   const text = `${(a.title ?? 'article').slice(0, 70)}${a.year ? ` (${a.year})` : ''}`;
   const inner = (
     <span className="inline-flex items-center gap-1 text-[10px] text-brand-300/80 hover:text-brand-300">
-      <FileText size={9} /> {label} : {text}
+      <FileText size={9} /> {resolvedLabel} : {text}
       {typeof a.citation_count === 'number' && a.citation_count > 0 && (
-        <span className="text-white/30">· {a.citation_count} cit.</span>
+        <span className="text-white/30">· {a.citation_count} {t("scenarioDetail.articleSourceLink.citations")}</span>
       )}
     </span>
   );
@@ -479,6 +484,7 @@ function ArticleSourceLink({ a, label = "Source" }: { a?: ProvArticle | null; la
 }
 
 function VariablesSection({ detail, scenarioId, onGoToModel }: { detail: ScenarioDetail; scenarioId: string; onGoToModel?: () => void }) {
+  const { t, lang } = useI18n();
   // État du modèle entraîné + des données branchées, pour relier ce panneau au
   // "Modèle Prédictif" : on montre par variable si elle est branchée, et quel
   // algorithme a réellement été entraîné.
@@ -540,7 +546,7 @@ function VariablesSection({ detail, scenarioId, onGoToModel }: { detail: Scenari
   // Polling si generation en cours
   React.useEffect(() => {
     if (!llmVars || llmVars.status !== 'generating') return;
-    setLlmGenStatus('Generation en cours...');
+    setLlmGenStatus(t("scenarioDetail.variables.genInProgress"));
     llmPollRef.current = setInterval(() => {
       getVariablesGenerationStatus(scenarioId).then(s => {
         if (s.status === 'done') {
@@ -550,16 +556,16 @@ function VariablesSection({ detail, scenarioId, onGoToModel }: { detail: Scenari
         } else if (s.status === 'error') {
           if (llmPollRef.current) clearInterval(llmPollRef.current);
           setLlmGenStatus(null);
-          setLlmError(s.error ?? 'Erreur de generation');
+          setLlmError(s.error ?? t("scenarioDetail.variables.genError"));
         }
       });
     }, 5000);
     return () => { if (llmPollRef.current) clearInterval(llmPollRef.current); };
-  }, [llmVars, scenarioId, loadLlmVars]);
+  }, [llmVars, scenarioId, loadLlmVars, t]);
 
   const handleGenerateLlm = async () => {
     setLlmGenerating(true);
-    setLlmGenStatus('Lancement de la generation...');
+    setLlmGenStatus(t("scenarioDetail.variables.genStarting"));
     setLlmError(null);
     try {
       await generateScenarioVariables(scenarioId);
@@ -574,7 +580,7 @@ function VariablesSection({ detail, scenarioId, onGoToModel }: { detail: Scenari
             if (llmPollRef.current) clearInterval(llmPollRef.current);
             setLlmGenStatus(null);
             setLlmGenerating(false);
-            setLlmError(s.error ?? 'Erreur de generation');
+            setLlmError(s.error ?? t("scenarioDetail.variables.genError"));
           }
         });
       }, 5000);
@@ -639,7 +645,7 @@ function VariablesSection({ detail, scenarioId, onGoToModel }: { detail: Scenari
         setTimeout(poll, 2000);
       }
     } catch (err: any) {
-      setUploadError(err.message || "Une erreur est survenue lors de l'upload.");
+      setUploadError(err.message || t("scenarioDetail.variables.uploadError"));
     } finally {
       setLoading(false);
     }
@@ -654,16 +660,16 @@ function VariablesSection({ detail, scenarioId, onGoToModel }: { detail: Scenari
           <Bell size={14} className="text-gold-400 shrink-0 mt-0.5" />
           <div className="flex-1 min-w-0">
             <p className="text-xs font-semibold text-gold-300 mb-1">
-              Variables & Modele generes automatiquement - validation requise
+              {t("scenarioDetail.variables.llmBannerTitle")}
             </p>
             <p className="text-[10px] text-gold-200/70 leading-relaxed">
-              {llmVars.predictor_variables?.length ?? 0} variables predictives et le modele recommande ont ete derives des {llmVars._meta?.pico_articles_used ?? '?'} articles pertinents avec PICO{llmVars._meta?.relevant_total != null ? ` (sur ${llmVars._meta.relevant_total} pertinents` : ''}{llmVars._meta?.corpus_total != null ? `, ${llmVars._meta.corpus_total} au corpus)` : (llmVars._meta?.relevant_total != null ? ')' : '')}. Verifiez et validez avant utilisation.
+              {llmVars.predictor_variables?.length ?? 0} {t("scenarioDetail.variables.llmBannerBodyPart1")} {llmVars._meta?.pico_articles_used ?? '?'} {t("scenarioDetail.variables.llmBannerBodyPart2")}{llmVars._meta?.relevant_total != null ? `${t("scenarioDetail.variables.llmBannerBodyRelevantPrefix")}${llmVars._meta.relevant_total}${t("scenarioDetail.variables.llmBannerBodyRelevantSuffix")}` : ''}{llmVars._meta?.corpus_total != null ? `, ${llmVars._meta.corpus_total}${t("scenarioDetail.variables.llmBannerBodyCorpusSuffix")}` : (llmVars._meta?.relevant_total != null ? ')' : '')}{t("scenarioDetail.variables.llmBannerBodyClose")}
             </p>
           </div>
           <button onClick={handleValidateLlm} disabled={llmValidating}
             className="shrink-0 flex items-center gap-1.5 rounded-xl bg-gold-500/20 hover:bg-gold-500/30 border border-gold-500/30 text-gold-300 font-semibold px-3 py-1.5 text-xs transition disabled:opacity-50">
             {llmValidating ? (<Loader2 size={11} className="animate-spin" />) : (<CheckCircle2 size={11} />)}
-            Valider
+            {t("scenarioDetail.variables.validate")}
           </button>
         </div>
       )}
@@ -673,7 +679,7 @@ function VariablesSection({ detail, scenarioId, onGoToModel }: { detail: Scenari
         <div className="rounded-2xl border border-brand-500/20 bg-brand-500/5 px-4 py-2.5 flex items-center gap-2">
           <CheckCircle2 size={12} className="text-brand-400 shrink-0" />
           <p className="text-[10px] text-brand-300">
-            Variables & Modele valides par un relecteur humain le {llmVars._generated_at ? new Date(llmVars._generated_at).toLocaleDateString('fr-FR') : ''}.
+            {t("scenarioDetail.variables.validatedBannerPrefix")} {llmVars._generated_at ? new Date(llmVars._generated_at).toLocaleDateString(lang === "fr" ? "fr-FR" : "en-US") : ''}.
           </p>
         </div>
       )}
@@ -682,7 +688,7 @@ function VariablesSection({ detail, scenarioId, onGoToModel }: { detail: Scenari
       {llmVars && llmVars.status === 'empty' && (
         <div className="rounded-2xl border border-slate-500/20 bg-slate-500/5 px-4 py-3 flex items-start gap-3">
           <div className="text-xs text-slate-300/80">
-            <strong className="text-slate-200">Aucun article disponible</strong> : {(llmVars as any).message ?? 'Ajoutez des articles ou abaissez le seuil de similarité pour générer les variables.'}
+            <strong className="text-slate-200">{t("scenarioDetail.variables.emptyTitle")}</strong> : {(llmVars as any).message ?? t("scenarioDetail.variables.emptyDefaultMsg")}
           </div>
         </div>
       )}
@@ -692,7 +698,7 @@ function VariablesSection({ detail, scenarioId, onGoToModel }: { detail: Scenari
         <button onClick={handleGenerateLlm} disabled={llmGenerating || llmLoading}
           className="flex items-center gap-1.5 rounded-xl border border-brand-500/30 bg-brand-500/10 hover:bg-brand-500/20 text-brand-300 font-medium px-3 py-1.5 text-xs transition disabled:opacity-50">
           {llmGenerating ? (<Loader2 size={11} className="animate-spin" />) : (<Brain size={11} />)}
-          Generer automatiquement depuis les PICO
+          {t("scenarioDetail.variables.generateFromPico")}
         </button>
         {llmGenStatus && (
           <span className="text-[10px] text-gold-400 flex items-center gap-1">
@@ -708,14 +714,14 @@ function VariablesSection({ detail, scenarioId, onGoToModel }: { detail: Scenari
           <div className="flex items-center justify-between flex-wrap gap-2">
             <SectionHeader
               icon={<Brain size={14} className="text-brand-400" />}
-              title="Variables du modèle"
-              subtitle={`Outcome, variables et algorithme dérivés de ${llmVars._meta?.pico_articles_used ?? '?'} articles pertinents avec PICO${llmVars._meta?.relevant_total != null ? ` · ${llmVars._meta.relevant_total} pertinents` : ''}${llmVars._meta?.corpus_total != null ? ` sur ${llmVars._meta.corpus_total} au corpus` : ''}`}
+              title={t("scenarioDetail.variables.modelVariablesTitle")}
+              subtitle={`${t("scenarioDetail.variables.modelVariablesSubtitlePart1")} ${llmVars._meta?.pico_articles_used ?? '?'} ${t("scenarioDetail.variables.modelVariablesSubtitlePart2")}${llmVars._meta?.relevant_total != null ? ` · ${llmVars._meta.relevant_total}${t("scenarioDetail.variables.modelVariablesSubtitleRelevant")}` : ''}${llmVars._meta?.corpus_total != null ? `${t("scenarioDetail.variables.modelVariablesSubtitleCorpusPrefix")}${llmVars._meta.corpus_total}${t("scenarioDetail.variables.modelVariablesSubtitleCorpusSuffix")}` : ''}`}
             />
             <div className="flex gap-2">
               {llmVars._validated ? (
-                <span className="rounded-full bg-brand-500/10 border border-brand-500/20 px-2.5 py-1 text-[10px] font-semibold text-brand-300">Validees</span>
+                <span className="rounded-full bg-brand-500/10 border border-brand-500/20 px-2.5 py-1 text-[10px] font-semibold text-brand-300">{t("scenarioDetail.variables.validated")}</span>
               ) : (
-                <span className="rounded-full bg-gold-500/10 border border-gold-500/20 px-2.5 py-1 text-[10px] font-semibold text-gold-300">En attente de validation</span>
+                <span className="rounded-full bg-gold-500/10 border border-gold-500/20 px-2.5 py-1 text-[10px] font-semibold text-gold-300">{t("scenarioDetail.variables.pendingValidation")}</span>
               )}
             </div>
           </div>
@@ -724,22 +730,22 @@ function VariablesSection({ detail, scenarioId, onGoToModel }: { detail: Scenari
           <div className="rounded-2xl border border-white/10 bg-white/2 px-4 py-2.5 flex flex-wrap items-center gap-x-4 gap-y-1.5 text-[11px]">
             <span className="flex items-center gap-1.5 text-white/60">
               <span className={`h-1.5 w-1.5 rounded-full ${llmVars._validated ? 'bg-brand-400' : 'bg-gold-400'}`} />
-              {llmVars._validated ? 'Spec validé' : 'Spec à valider'}
+              {llmVars._validated ? t("scenarioDetail.variables.specValidated") : t("scenarioDetail.variables.specToValidate")}
             </span>
             <span className="text-white/20">·</span>
             <span className="flex items-center gap-1.5 text-white/60">
               <Database size={11} />
-              {modelDataset?.status === 'ready' ? `${modelDataset.n_rows?.toLocaleString() ?? '?'} lignes branchées` : 'Aucune donnée branchée'}
+              {modelDataset?.status === 'ready' ? `${modelDataset.n_rows?.toLocaleString() ?? '?'} ${t("scenarioDetail.variables.rowsPlugged")}` : t("scenarioDetail.variables.noDataPlugged")}
             </span>
             <span className="text-white/20">·</span>
             <span className="flex items-center gap-1.5 text-white/60">
               <Brain size={11} />
-              {trained ? `Modèle : ${modelRun?.family}${trainedMetricValue != null ? ` · ${modelRun?.metric} ${trainedMetricValue.toFixed(3)}` : ''}` : 'Modèle non entraîné'}
+              {trained ? `${t("scenarioDetail.variables.modelPrefix")} ${modelRun?.family}${trainedMetricValue != null ? ` · ${modelRun?.metric} ${trainedMetricValue.toFixed(3)}` : ''}` : t("scenarioDetail.variables.modelNotTrained")}
             </span>
             {onGoToModel && (
               <button onClick={onGoToModel}
                 className="ml-auto flex items-center gap-1 rounded-lg border border-brand-500/30 bg-brand-500/10 text-brand-300 px-2.5 py-1 font-semibold hover:bg-brand-500/20 transition">
-                Ouvrir le Modèle prédictif →
+                {t("scenarioDetail.common.openPredictiveModel")}
               </button>
             )}
           </div>
@@ -747,10 +753,10 @@ function VariablesSection({ detail, scenarioId, onGoToModel }: { detail: Scenari
           {/* Outcome principal LLM */}
           {llmVars.primary_outcome && (
             <div className="rounded-2xl border border-gold-500/10 bg-gold-500/5 p-4 space-y-1">
-              <p className="text-[10px] font-bold uppercase tracking-wider text-gold-400">Outcome principal</p>
+              <p className="text-[10px] font-bold uppercase tracking-wider text-gold-400">{t("scenarioDetail.variables.primaryOutcome")}</p>
               <p className="text-sm font-medium text-gold-200">{llmVars.primary_outcome.name}</p>
               <p className="text-xs text-white/55">{llmVars.primary_outcome.definition}</p>
-              <p className="text-[10px] text-white/35">Mesure : {llmVars.primary_outcome.measurement} - Horizon : {llmVars.primary_outcome.timeframe}{llmVars.primary_outcome.unit ? ` · Unité : ${llmVars.primary_outcome.unit}` : ''}</p>
+              <p className="text-[10px] text-white/35">{t("scenarioDetail.variables.measurement")} {llmVars.primary_outcome.measurement} - {t("scenarioDetail.variables.timeframe")} {llmVars.primary_outcome.timeframe}{llmVars.primary_outcome.unit ? ` · ${t("scenarioDetail.variables.unit")} ${llmVars.primary_outcome.unit}` : ''}</p>
               <ArticleSourceLink a={modelSpec?.outcome?.best_article} />
             </div>
           )}
@@ -759,15 +765,15 @@ function VariablesSection({ detail, scenarioId, onGoToModel }: { detail: Scenari
           {llmVars.alert_thresholds && (
             <div className="rounded-2xl border border-white/10 bg-white/3 p-4 space-y-2.5">
               <p className="text-[10px] font-bold uppercase tracking-wider text-white/50">
-                Seuils d'interprétation de l'outcome <span className="text-white/30 normal-case font-normal">· fondés sur les évidences</span>
+                {t("scenarioDetail.variables.outcomeThresholdsTitle")} <span className="text-white/30 normal-case font-normal">{t("scenarioDetail.variables.outcomeThresholdsSubtitle")}</span>
               </p>
               {(["green", "orange", "red"] as const).map((lvl) => {
-                const t = llmVars.alert_thresholds?.[lvl];
-                if (!t) return null;
+                const band0 = llmVars.alert_thresholds?.[lvl];
+                if (!band0) return null;
                 const cfg = {
-                  green:  { dot: "bg-emerald-400", cls: "text-emerald-300", def: "Normal" },
-                  orange: { dot: "bg-amber-400",   cls: "text-amber-300",   def: "Tension" },
-                  red:    { dot: "bg-rose-400",     cls: "text-rose-300",    def: "Alerte" },
+                  green:  { dot: "bg-emerald-400", cls: "text-emerald-300", def: t("scenarioDetail.variables.thresholdNormal") },
+                  orange: { dot: "bg-amber-400",   cls: "text-amber-300",   def: t("scenarioDetail.variables.thresholdTension") },
+                  red:    { dot: "bg-rose-400",     cls: "text-rose-300",    def: t("scenarioDetail.variables.thresholdAlert") },
                 }[lvl];
                 // Articles sources de la modalité (pool pertinent), résolus côté serveur.
                 const band = modelSpec?.alert_thresholds?.[lvl];
@@ -779,13 +785,13 @@ function VariablesSection({ detail, scenarioId, onGoToModel }: { detail: Scenari
                     <span className={`mt-1 h-2 w-2 shrink-0 rounded-full ${cfg.dot}`} />
                     <div className="min-w-0">
                       <p className="text-xs">
-                        <span className={`font-semibold ${cfg.cls}`}>{t.label || cfg.def}</span>
-                        {t.range && <span className="ml-2 font-mono text-white/70">{t.range}</span>}
+                        <span className={`font-semibold ${cfg.cls}`}>{band0.label || cfg.def}</span>
+                        {band0.range && <span className="ml-2 font-mono text-white/70">{band0.range}</span>}
                       </p>
-                      {(t.rationale || t.description) && (
-                        <p className="text-[10px] text-white/40 leading-snug">{t.rationale || t.description}</p>
+                      {(band0.rationale || band0.description) && (
+                        <p className="text-[10px] text-white/40 leading-snug">{band0.rationale || band0.description}</p>
                       )}
-                      {srcArts.slice(0, 3).map((a, i) => <ArticleSourceLink key={i} a={a} label="Réf." />)}
+                      {srcArts.slice(0, 3).map((a, i) => <ArticleSourceLink key={i} a={a} label={t("scenarioDetail.common.ref")} />)}
                     </div>
                   </div>
                 );
@@ -797,12 +803,12 @@ function VariablesSection({ detail, scenarioId, onGoToModel }: { detail: Scenari
             <table className="w-full border-collapse text-left">
               <thead>
                 <tr className="border-b border-white/5 text-[10px] text-white/50 uppercase tracking-wider">
-                  <th className="py-2.5 px-3">Variable</th>
-                  <th className="py-2.5 px-3">Type</th>
-                  <th className="py-2.5 px-3">Definition</th>
-                  <th className="py-2.5 px-3">Source</th>
-                  <th className="py-2.5 px-3 text-center">Disponibilité</th>
-                  <th className="py-2.5 px-3 text-center">Importance</th>
+                  <th className="py-2.5 px-3">{t("scenarioDetail.variables.tableVariable")}</th>
+                  <th className="py-2.5 px-3">{t("scenarioDetail.variables.tableType")}</th>
+                  <th className="py-2.5 px-3">{t("scenarioDetail.variables.tableDefinition")}</th>
+                  <th className="py-2.5 px-3">{t("scenarioDetail.variables.tableSource")}</th>
+                  <th className="py-2.5 px-3 text-center">{t("scenarioDetail.variables.tableAvailability")}</th>
+                  <th className="py-2.5 px-3 text-center">{t("scenarioDetail.variables.tableImportance")}</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-white/5 text-xs">
@@ -810,7 +816,7 @@ function VariablesSection({ detail, scenarioId, onGoToModel }: { detail: Scenari
                   <tr key={i} className="hover:bg-white/1">
                     <td className="py-3 px-3">
                       <p className="font-mono text-brand-300 font-medium">{v.name}</p>
-                      {v.machine_name && <p className="text-[10px] text-white/35 font-mono mt-0.5">col : {v.machine_name}</p>}
+                      {v.machine_name && <p className="text-[10px] text-white/35 font-mono mt-0.5">{t("scenarioDetail.variables.columnPrefix")} {v.machine_name}</p>}
                       {v.machine_name && <ArticleSourceLink a={sourceByVar[v.machine_name]} />}
                     </td>
                     <td className="py-3 px-3">
@@ -831,13 +837,13 @@ function VariablesSection({ detail, scenarioId, onGoToModel }: { detail: Scenari
                           st = auto ? 'public' : 'missing_user';
                         }
                         const cfg = ({
-                          plugged:      { dot: 'bg-emerald-400', cls: 'text-emerald-300', label: 'Branché' },
-                          public:       { dot: 'bg-sky-400',     cls: 'text-sky-300',     label: 'Récupérable (API)' },
-                          missing_user: { dot: 'bg-amber-400',   cls: 'text-amber-300',   label: 'À fournir' },
+                          plugged:      { dot: 'bg-emerald-400', cls: 'text-emerald-300', label: t("scenarioDetail.variables.statusPlugged") },
+                          public:       { dot: 'bg-sky-400',     cls: 'text-sky-300',     label: t("scenarioDetail.variables.statusPublic") },
+                          missing_user: { dot: 'bg-amber-400',   cls: 'text-amber-300',   label: t("scenarioDetail.variables.statusMissingUser") },
                         } as const)[st as 'plugged' | 'public' | 'missing_user'];
-                        const tip = st === 'plugged' ? 'Données réelles connectées au modèle'
-                          : st === 'public' ? 'Récupérée automatiquement via une API publique (aucune action requise)'
-                          : 'À fournir : importez ces données pour entraîner le modèle';
+                        const tip = st === 'plugged' ? t("scenarioDetail.variables.tipPlugged")
+                          : st === 'public' ? t("scenarioDetail.variables.tipPublic")
+                          : t("scenarioDetail.variables.tipMissingUser");
                         return (
                           <span title={`${v.machine_name ?? ''} — ${tip}`} className={`inline-flex items-center gap-1.5 text-[10px] font-semibold ${cfg.cls}`}>
                             <span className={`h-1.5 w-1.5 rounded-full ${cfg.dot}`} />
@@ -863,17 +869,17 @@ function VariablesSection({ detail, scenarioId, onGoToModel }: { detail: Scenari
           {llmVars.recommended_algorithm && (
             <div className="rounded-2xl border border-white/8 bg-white/3 p-4 space-y-2">
               <div className="flex items-center justify-between flex-wrap gap-2">
-                <p className="text-[10px] font-bold uppercase tracking-wider text-white/35">Algorithme recommande</p>
+                <p className="text-[10px] font-bold uppercase tracking-wider text-white/35">{t("scenarioDetail.variables.recommendedAlgorithm")}</p>
                 {trained && (
                   <span className="rounded-full bg-brand-500/15 text-brand-300 px-2 py-0.5 text-[10px] font-semibold">
-                    Entraîné : {modelRun?.family}{trainedMetricValue != null ? ` · ${modelRun?.metric} ${trainedMetricValue.toFixed(3)}` : ''}
+                    {t("scenarioDetail.variables.trainedPrefix")} {modelRun?.family}{trainedMetricValue != null ? ` · ${modelRun?.metric} ${trainedMetricValue.toFixed(3)}` : ''}
                   </span>
                 )}
               </div>
               <p className="text-sm font-semibold text-white">{llmVars.recommended_algorithm.primary}</p>
               <p className="text-xs text-white/55">{llmVars.recommended_algorithm.rationale}</p>
               {llmVars.recommended_algorithm.alternatives?.length > 0 && (
-                <p className="text-[10px] text-white/35">Alternatives : {llmVars.recommended_algorithm.alternatives.join(', ')}</p>
+                <p className="text-[10px] text-white/35">{t("scenarioDetail.variables.alternatives")} {llmVars.recommended_algorithm.alternatives.join(', ')}</p>
               )}
               <ArticleSourceLink a={modelSpec?.algorithm?.best_article} />
             </div>
@@ -891,8 +897,8 @@ function VariablesSection({ detail, scenarioId, onGoToModel }: { detail: Scenari
         <div className="rounded-3xl border border-white/10 bg-white/3 p-5 space-y-4">
           <SectionHeader
             icon={<Globe size={14} className="text-brand-400" />}
-            title="Sources de données requises"
-            subtitle="Flux à connecter pour alimenter et entraîner le modèle"
+            title={t("scenarioDetail.variables.requiredSourcesTitle")}
+            subtitle={t("scenarioDetail.variables.requiredSourcesSubtitle")}
           />
           {(() => {
             const feeds = ((llmVars as any)?.required_databases as string[] | undefined)
@@ -907,7 +913,7 @@ function VariablesSection({ detail, scenarioId, onGoToModel }: { detail: Scenari
                 ))}
               </div>
             ) : (
-              <p className="text-xs text-white/35 italic">Les sources seront déduites une fois les variables du modèle générées.</p>
+              <p className="text-xs text-white/35 italic">{t("scenarioDetail.variables.requiredSourcesEmpty")}</p>
             );
           })()}
         </div>
@@ -916,8 +922,8 @@ function VariablesSection({ detail, scenarioId, onGoToModel }: { detail: Scenari
         <div className="rounded-3xl border border-white/10 bg-white/3 p-5 space-y-4">
           <SectionHeader
             icon={<Upload size={14} className="text-brand-400" />}
-            title="Importer des données réelles"
-            subtitle="Uploadez vos fichiers CSV/Excel pour alimenter les variables manquantes"
+            title={t("scenarioDetail.variables.importTitle")}
+            subtitle={t("scenarioDetail.variables.importSubtitle")}
           />
 
           <div
@@ -934,8 +940,8 @@ function VariablesSection({ detail, scenarioId, onGoToModel }: { detail: Scenari
               className="hidden"
             />
             <Upload size={24} className="text-white/35" />
-            <p className="text-xs text-white/70 font-medium">Glissez-déposez votre fichier ici</p>
-            <p className="text-[10px] text-white/35">Formats acceptés : CSV, Excel (.xlsx, .xls)</p>
+            <p className="text-xs text-white/70 font-medium">{t("scenarioDetail.variables.dropHere")}</p>
+            <p className="text-[10px] text-white/35">{t("scenarioDetail.variables.acceptedFormats")}</p>
             {file && (
               <div className="mt-2 rounded-lg bg-brand-500/10 border border-brand-500/20 px-2.5 py-1 text-[11px] text-brand-300 font-mono">
                 {file.name} ({(file.size / 1024).toFixed(1)} KB)
@@ -950,7 +956,7 @@ function VariablesSection({ detail, scenarioId, onGoToModel }: { detail: Scenari
               className="w-full flex items-center justify-center gap-1.5 rounded-xl bg-brand-500 hover:bg-brand-400 text-forest-950 font-semibold py-2 text-xs transition disabled:opacity-50"
             >
               <RotateCcw size={12} className={uploading ? "animate-spin" : ""} />
-              {uploading ? "Importation..." : "Lancer l'importation"}
+              {uploading ? t("scenarioDetail.variables.importing") : t("scenarioDetail.variables.launchImport")}
             </button>
           )}
 
@@ -959,31 +965,31 @@ function VariablesSection({ detail, scenarioId, onGoToModel }: { detail: Scenari
           {uploadResult && (
             <div className="rounded-2xl border border-brand-500/20 bg-brand-500/5 p-4 space-y-3">
               <div className="flex items-center gap-1.5 text-brand-300 text-xs font-semibold">
-                <CheckCircle2 size={14} /> Données branchées sur le modèle
+                <CheckCircle2 size={14} /> {t("scenarioDetail.variables.dataPlugged")}
               </div>
               <div className="rounded-lg bg-forest-900/50 p-2 text-[10px] font-mono text-white/50 space-y-1">
-                <div>Lignes : <span className="text-brand-300">{uploadResult.n_rows}</span> · Colonnes : <span className="text-brand-300">{uploadResult.n_cols}</span></div>
+                <div>{t("scenarioDetail.variables.rows")} <span className="text-brand-300">{uploadResult.n_rows}</span> · {t("scenarioDetail.variables.columns")} <span className="text-brand-300">{uploadResult.n_cols}</span></div>
                 {uploadResult.validation?.matched_features && (
-                  <div>Variables reconnues : <span className="text-brand-300">{uploadResult.validation.matched_features.length}</span></div>
+                  <div>{t("scenarioDetail.variables.recognizedVariables")} <span className="text-brand-300">{uploadResult.validation.matched_features.length}</span></div>
                 )}
                 {(uploadResult.validation?.missing_user?.length ?? 0) > 0 && (
-                  <div className="text-gold-300">À fournir : {uploadResult.validation!.missing_user!.join(", ")}</div>
+                  <div className="text-gold-300">{t("scenarioDetail.variables.toProvide")} {uploadResult.validation!.missing_user!.join(", ")}</div>
                 )}
               </div>
               {uploadResult.training_started ? (
                 <div className="flex items-start gap-1.5 text-[11px] text-brand-300">
                   <Loader2 size={12} className="animate-spin shrink-0 mt-0.5" />
-                  <span>Entraînement lancé automatiquement. Suivez-le dans l'onglet <strong>Modèle Prédictif</strong>.</span>
+                  <span>{t("scenarioDetail.variables.trainingStartedPrefix")} <strong>{t("scenarioDetail.variables.trainingStartedTab")}</strong>.</span>
                 </div>
               ) : (
                 <div className="flex items-start gap-1 text-[10px] text-white/45">
                   <Info size={10} className="shrink-0 mt-0.5" />
-                  <span>{uploadResult.validation?.readiness?.reasons?.[0] ?? "Données insuffisantes pour entraîner (cible + au moins une variable requises)."}</span>
+                  <span>{uploadResult.validation?.readiness?.reasons?.[0] ?? t("scenarioDetail.variables.insufficientData")}</span>
                 </div>
               )}
               {onGoToModel && (
                 <button onClick={onGoToModel} className="text-[10px] font-semibold text-brand-300 hover:text-brand-200">
-                  Ouvrir le Modèle prédictif →
+                  {t("scenarioDetail.common.openPredictiveModel")}
                 </button>
               )}
             </div>
@@ -997,6 +1003,7 @@ function VariablesSection({ detail, scenarioId, onGoToModel }: { detail: Scenari
 // ─── Section: Corpus ──────────────────────────────────────────────────────────
 
 function CorpusSection({ scenarioId, threshold }: { scenarioId: string; detail: ScenarioDetail; threshold?: number }) {
+  const { t } = useI18n();
   const [data, setData] = useState<ScenarioCorpus | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -1028,8 +1035,8 @@ function CorpusSection({ scenarioId, threshold }: { scenarioId: string; detail: 
       .catch(() => {}); // Silencieux si pas un user-scenario
   }, [scenarioId]);
 
-  if (loading) return <LoadingSpinner text="Chargement du corpus d'articles..." />;
-  if (error || !data) return <ErrorBox message={error ?? "Erreur corpus"} />;
+  if (loading) return <LoadingSpinner text={t("scenarioDetail.corpus.loadingCorpus")} />;
+  if (error || !data) return <ErrorBox message={error ?? t("scenarioDetail.common.errorCorpus")} />;
 
   return (
     <div className="space-y-4">
@@ -1037,7 +1044,7 @@ function CorpusSection({ scenarioId, threshold }: { scenarioId: string; detail: 
       <div className="rounded-2xl border border-gold-500/20 bg-gold-500/5 px-4 py-3 flex items-start gap-3">
         <AlertTriangle size={14} className="text-gold-400 shrink-0 mt-0.5" />
         <div className="text-xs text-gold-200/80 leading-relaxed">
-          <strong className="text-gold-300">Sélection automatique</strong> : Ces articles ont été récupérés depuis 6 sources (DB Cache + PubMed, OpenAlex, Crossref, EuropePMC, Preprints) par recherche multi-sources. <strong>Aucun n'a été validé par un relecteur humain.</strong> Pour une revue systématique formelle, un screening humain en double-aveugle est requis (onglet Revue).
+          <strong className="text-gold-300">{t("scenarioDetail.corpus.autoSelectionTitle")}</strong>{t("scenarioDetail.corpus.autoSelectionBody1")} <strong>{t("scenarioDetail.corpus.autoSelectionBody2")}</strong> {t("scenarioDetail.corpus.autoSelectionBody3")}
         </div>
       </div>
 
@@ -1063,23 +1070,23 @@ function CorpusSection({ scenarioId, threshold }: { scenarioId: string; detail: 
                 {semanticReady ? <CheckCircle2 size={14} className="text-forest-400" />
                   : <Loader2 size={14} className="text-gold-400 animate-spin" />}
                 <span className={`text-xs font-semibold ${semanticReady ? 'text-forest-300' : 'text-gold-300'}`}>
-                  Scores de pertinence
+                  {t("scenarioDetail.corpus.relevanceScores")}
                 </span>
               </div>
               <p className="text-[11px] text-white/70">
-                <span className="text-white font-semibold">{scored}</span> / {total} articles scorés
-                {!semanticReady && scored < total && ` · ${total - scored} en cours…`}
+                <span className="text-white font-semibold">{scored}</span> / {total} {t("scenarioDetail.corpus.articlesScoredSuffix")}
+                {!semanticReady && scored < total && ` · ${total - scored} ${t("scenarioDetail.corpus.inProgressSuffix")}`}
               </p>
               <div className="flex items-center gap-3 flex-wrap">
-                <span title="Similarité vectorielle (sens). Verte quand TOUT le corpus est scoré."
+                <span title={t("scenarioDetail.corpus.semanticTooltip")}
                   className={`text-[10px] flex items-center gap-1 ${txt(semanticState)}`}>
                   <span className={`h-1.5 w-1.5 rounded-full ${dot(semanticState)}`} />
-                  Sémantique{semanticState === 'pending' ? ' (en cours)' : ''}
+                  {t("scenarioDetail.corpus.semantic")}{semanticState === 'pending' ? t("scenarioDetail.corpus.semanticInProgress") : ''}
                 </span>
-                <span title="Reranking cross-encoder Cohere du sous-ensemble pertinent. Vert quand le rerank a réellement tourné."
+                <span title={t("scenarioDetail.corpus.cohereTooltip")}
                   className={`text-[10px] flex items-center gap-1 ${txt(cohereState)}`}>
                   <span className={`h-1.5 w-1.5 rounded-full ${dot(cohereState)}`} />
-                  Cohere (rerank){cohereState === 'pending' ? ' (clé OK, en attente)' : cohereState === 'off' ? ' (non configuré)' : ''}
+                  {t("scenarioDetail.corpus.cohere")}{cohereState === 'pending' ? t("scenarioDetail.corpus.cohereWaiting") : cohereState === 'off' ? t("scenarioDetail.corpus.cohereNotConfigured") : ''}
                 </span>
               </div>
             </div>
@@ -1092,26 +1099,26 @@ function CorpusSection({ scenarioId, threshold }: { scenarioId: string; detail: 
         <div className="flex items-center justify-between flex-wrap gap-2">
           <SectionHeader
             icon={<FileText size={14} className="text-brand-400" />}
-            title={`Corpus d'articles (${data.total} articles)`}
-            subtitle="Articles sélectionnés automatiquement : en attente de validation humaine (screening)"
+            title={`${t("scenarioDetail.corpus.corpusTitlePrefix")} (${data.total} ${t("scenarioDetail.corpus.corpusTitleArticles")})`}
+            subtitle={t("scenarioDetail.corpus.corpusSubtitle")}
           />
           {data.above_threshold !== undefined && (
             <div className="flex items-center gap-2 flex-wrap">
               <span className="rounded-full bg-brand-500/15 border border-brand-500/30 px-3 py-1 text-[10px] font-semibold text-brand-300">
-                {data.above_threshold} au-dessus du seuil
+                {data.above_threshold} {t("scenarioDetail.corpus.aboveThreshold")}
               </span>
               {(() => {
                 const below = data.below_threshold ?? Math.max(0, data.total - data.above_threshold! - (data.unscored ?? 0));
                 return below > 0 ? (
                   <span className="rounded-full bg-white/5 border border-white/10 px-3 py-1 text-[10px] text-white/40">
-                    {below} sous le seuil (conservés)
+                    {below} {t("scenarioDetail.corpus.belowThresholdKept")}
                   </span>
                 ) : null;
               })()}
               {(data.unscored ?? 0) > 0 && (
                 <span className="rounded-full bg-gold-500/10 border border-gold-500/30 px-3 py-1 text-[10px] text-gold-300 flex items-center gap-1">
                   {data.rerank_running && <Loader2 size={9} className="animate-spin" />}
-                  {data.unscored} non scorés{data.rerank_running ? ' · scoring en cours…' : ''}
+                  {data.unscored} {t("scenarioDetail.corpus.unscored")}{data.rerank_running ? t("scenarioDetail.corpus.scoringInProgress") : ''}
                 </span>
               )}
             </div>
@@ -1119,8 +1126,8 @@ function CorpusSection({ scenarioId, threshold }: { scenarioId: string; detail: 
         </div>
         {typeof data.from_local === "number" && (
           <p className="text-[11px] text-white/40"
-             title="Le corpus combine les correspondances de la base locale partagée (déjà ingérées) et les nouvelles références récupérées en direct. Estimation d'après la date d'entrée des documents en base (≥ création du scénario = récupérés pour ce scénario).">
-            {data.from_local.toLocaleString()} déjà en base locale · {(data.newly_fetched ?? 0).toLocaleString()} récupérés pour ce scénario
+             title={t("scenarioDetail.corpus.fromLocalTooltip")}>
+            {data.from_local.toLocaleString()} {t("scenarioDetail.corpus.alreadyInLocal")} · {(data.newly_fetched ?? 0).toLocaleString()} {t("scenarioDetail.corpus.fetchedForScenario")}
           </p>
         )}
         <div className="space-y-3">
@@ -1136,7 +1143,7 @@ function CorpusSection({ scenarioId, threshold }: { scenarioId: string; detail: 
               }}
             />
           )) : (
-            <p className="text-xs text-white/35 italic">Aucun article dans ce corpus.</p>
+            <p className="text-xs text-white/35 italic">{t("scenarioDetail.corpus.noArticles")}</p>
           )}
         </div>
       </div>
@@ -1147,7 +1154,7 @@ function CorpusSection({ scenarioId, threshold }: { scenarioId: string; detail: 
         <div className="rounded-3xl border border-white/10 bg-white/3 p-5 space-y-4">
           <SectionHeader
             icon={<Globe size={14} className="text-brand-400" />}
-            title="Distribution par Année"
+            title={t("scenarioDetail.corpus.distributionByYear")}
           />
           <div className="space-y-2 text-xs">
             {data.year_distribution.map((item) => (
@@ -1169,7 +1176,7 @@ function CorpusSection({ scenarioId, threshold }: { scenarioId: string; detail: 
         <div className="rounded-3xl border border-white/10 bg-white/3 p-5 space-y-4">
           <SectionHeader
             icon={<Database size={14} className="text-brand-400" />}
-            title="Sources Littérature"
+            title={t("scenarioDetail.corpus.literatureSources")}
           />
           <div className="space-y-2 text-xs">
             {data.source_distribution.map((item) => (
@@ -1205,6 +1212,7 @@ function ArticleRow({
   onToggle: () => void;
   onScreeningChange?: (id: number, status: string) => void;
 }) {
+  const { t } = useI18n();
   const [screeningStatus, setScreeningStatus] = React.useState<string>(article.screening_status ?? 'pending');
   const [screeningLoading, setScreeningLoading] = React.useState(false);
   const [exclusionReason, setExclusionReason] = React.useState('');
@@ -1251,7 +1259,7 @@ function ArticleRow({
     pending: 'bg-gold-500/10 text-gold-400 border border-gold-500/20',
   }[screeningStatus] ?? 'bg-white/5 text-white/50 border border-white/10';
 
-  const statusLabel = { included: 'Inclus', excluded: 'Exclu', pending: 'En attente' }[screeningStatus] ?? screeningStatus;
+  const statusLabel = { included: t("scenarioDetail.articleRow.statusIncluded"), excluded: t("scenarioDetail.articleRow.statusExcluded"), pending: t("scenarioDetail.articleRow.statusPending") }[screeningStatus] ?? screeningStatus;
 
   return (
     <div className={`rounded-2xl border transition overflow-hidden ${
@@ -1270,14 +1278,14 @@ function ArticleRow({
             )}
             {article.has_fulltext && (
               <span className="rounded-full bg-brand-500/10 border border-brand-500/20 px-2 py-0.5 text-[9px] text-brand-300 font-medium">
-                Full-text
+                {t("scenarioDetail.articleRow.fulltext")}
               </span>
             )}
             {/* Score de PERTINENCE (Cohere) = celui qui détermine le classement,
                 affiché en premier pour que l'ordre soit lisible. */}
             {article.rerank_score !== undefined && article.rerank_score !== null && (
               <span className="rounded-full px-2 py-0.5 text-[9px] font-medium bg-violet-500/15 border border-violet-500/30 text-violet-300"
-                title="Pertinence (reranking Cohere) — c'est ce score qui ordonne les articles">
+                title={t("scenarioDetail.articleRow.rerankTooltip")}>
                 ⊕ {article.rerank_score.toFixed(3)}
               </span>
             )}
@@ -1287,7 +1295,7 @@ function ArticleRow({
                   ? 'bg-brand-500/15 border border-brand-500/30 text-brand-300'
                   : 'bg-white/5 border border-white/10 text-white/30'
               }`}
-              title="Similarité sémantique (cosinus)">
+              title={t("scenarioDetail.articleRow.similarityTooltip")}>
                 ◎ {article.similarity_score.toFixed(3)}
               </span>
             )}
@@ -1310,40 +1318,40 @@ function ArticleRow({
           {/* Screening PRISMA : Interface avancée */}
           <div className="rounded-xl border border-white/8 bg-white/3 p-3 space-y-3">
             <h5 className="text-[10px] font-semibold text-white/50 uppercase tracking-wider flex items-center gap-1">
-              <CheckCircle2 size={10} />Décision de Screening (Inclusion / Exclusion)
+              <CheckCircle2 size={10} />{t("scenarioDetail.articleRow.screeningDecision")}
             </h5>
             <div className="grid gap-3 sm:grid-cols-2">
               <div>
-                <label className="block text-[10px] text-white/40 mb-1">Raison de l'exclusion (obligatoire si exclu)</label>
+                <label className="block text-[10px] text-white/40 mb-1">{t("scenarioDetail.articleRow.exclusionReasonLabel")}</label>
                 <select
                   value={exclusionReason}
                   onChange={(e) => { e.stopPropagation(); setExclusionReason(e.target.value); }}
                   onClick={(e) => e.stopPropagation()}
                   className="w-full rounded-lg border border-white/10 bg-forest-950/80 px-2.5 py-1.5 text-xs text-white outline-none focus:border-brand-400"
                 >
-                  <option value="">-- Sélectionner une raison --</option>
-                  <option value="wrong-population">Population non cible</option>
-                  <option value="wrong-intervention">Méthode non cible</option>
-                  <option value="wrong-outcome">Pas de métriques d'évaluation</option>
-                  <option value="no-fulltext">Pas de texte intégral disponible</option>
-                  <option value="duplicate">Doublon d'un autre article</option>
-                  <option value="other">Autre (spécifier en notes)</option>
+                  <option value="">{t("scenarioDetail.articleRow.selectReason")}</option>
+                  <option value="wrong-population">{t("scenarioDetail.articleRow.reasonWrongPopulation")}</option>
+                  <option value="wrong-intervention">{t("scenarioDetail.articleRow.reasonWrongIntervention")}</option>
+                  <option value="wrong-outcome">{t("scenarioDetail.articleRow.reasonWrongOutcome")}</option>
+                  <option value="no-fulltext">{t("scenarioDetail.articleRow.reasonNoFulltext")}</option>
+                  <option value="duplicate">{t("scenarioDetail.articleRow.reasonDuplicate")}</option>
+                  <option value="other">{t("scenarioDetail.articleRow.reasonOther")}</option>
                 </select>
               </div>
               <div>
-                <label className="block text-[10px] text-white/40 mb-1">Notes de screening</label>
+                <label className="block text-[10px] text-white/40 mb-1">{t("scenarioDetail.articleRow.screeningNotesLabel")}</label>
                 <input
                   value={screeningNotes}
                   onChange={(e) => { e.stopPropagation(); setScreeningNotes(e.target.value); }}
                   onClick={(e) => e.stopPropagation()}
-                  placeholder="Observations, commentaires..."
+                  placeholder={t("scenarioDetail.articleRow.screeningNotesPlaceholder")}
                   className="w-full rounded-lg border border-white/10 bg-forest-950/80 px-2.5 py-1.5 text-xs text-white outline-none focus:border-brand-400"
                 />
               </div>
             </div>
             {screeningLoading ? (
               <div className="flex items-center gap-2 text-white/40 text-xs">
-                <Loader2 size={12} className="animate-spin" />Enregistrement...
+                <Loader2 size={12} className="animate-spin" />{t("scenarioDetail.articleRow.saving")}
               </div>
             ) : (
               <div className="flex items-center gap-2 flex-wrap">
@@ -1356,7 +1364,7 @@ function ArticleRow({
                       : 'border-rose-500/30 bg-rose-500/10 hover:bg-rose-500/20 text-rose-300 disabled:opacity-40 disabled:cursor-not-allowed'
                   }`}
                 >
-                  <AlertCircle size={11} />Exclure l'article
+                  <AlertCircle size={11} />{t("scenarioDetail.articleRow.excludeArticle")}
                 </button>
                 <button
                   onClick={(e) => { e.stopPropagation(); handleScreen('included'); }}
@@ -1366,7 +1374,7 @@ function ArticleRow({
                       : 'border-brand-500/30 bg-brand-500/10 hover:bg-brand-500/20 text-brand-300'
                   }`}
                 >
-                  <CheckCircle2 size={11} />Inclure dans le corpus final
+                  <CheckCircle2 size={11} />{t("scenarioDetail.articleRow.includeInFinalCorpus")}
                 </button>
                 <button
                   onClick={(e) => { e.stopPropagation(); handleScreen('pending'); }}
@@ -1376,7 +1384,7 @@ function ArticleRow({
                       : 'border-white/10 bg-white/5 hover:bg-white/10 text-white/50'
                   }`}
                 >
-                  En attente
+                  {t("scenarioDetail.articleRow.pending")}
                 </button>
               </div>
             )}
@@ -1386,18 +1394,18 @@ function ArticleRow({
           {picoLoading ? (
             <div className="flex items-center gap-2 text-white/35">
               <Loader2 size={12} className="animate-spin" />
-              <span>Chargement PICO...</span>
+              <span>{t("scenarioDetail.articleRow.loadingPico")}</span>
             </div>
           ) : pico ? (
             <div className="rounded-xl border border-white/5 bg-white/2 p-3 space-y-2">
               <p className="text-[10px] font-semibold text-white/50 uppercase tracking-wider flex items-center gap-1">
                 <Microscope size={10} />PICO
                 {pico.pico_confidence != null && (
-                  <span className="ml-auto font-mono text-white/35">Confiance : {Math.round(pico.pico_confidence * 100)}%</span>
+                  <span className="ml-auto font-mono text-white/35">{t("scenarioDetail.articleRow.confidence")} {Math.round(pico.pico_confidence * 100)}%</span>
                 )}
               </p>
               <div className="grid grid-cols-2 gap-2">
-                {[['P', 'Population', pico.P], ['I', 'Intervention', pico.I], ['C', 'Comparateur', pico.C], ['O', 'Outcome', pico.O]].map(([key, label, val]) => val && (
+                {[['P', t("scenarioDetail.articleRow.populationLabel"), pico.P], ['I', t("scenarioDetail.articleRow.interventionLabel"), pico.I], ['C', t("scenarioDetail.articleRow.comparatorLabel"), pico.C], ['O', t("scenarioDetail.articleRow.outcomeLabel"), pico.O]].map(([key, label, val]) => val && (
                   <div key={key} className="rounded-lg bg-white/3 border border-white/5 p-2">
                     <span className="text-[9px] font-bold text-brand-400 uppercase">{key} : {label}</span>
                     <p className="text-white/70 mt-0.5 leading-4">{val as string}</p>
@@ -1405,21 +1413,21 @@ function ArticleRow({
                 ))}
               </div>
               {pico.study_design && (
-                <p className="text-[10px] text-white/35">Type d'étude : <span className="text-white/70">{pico.study_design}</span></p>
+                <p className="text-[10px] text-white/35">{t("scenarioDetail.articleRow.studyType")} <span className="text-white/70">{pico.study_design}</span></p>
               )}
             </div>
           ) : picoLoaded ? (
-            <p className="text-[10px] text-white/25 italic">PICO non encore extrait pour cet article.</p>
+            <p className="text-[10px] text-white/25 italic">{t("scenarioDetail.articleRow.picoNotExtracted")}</p>
           ) : null}
 
           {article.abstract && (
             <div>
-              <p className="font-semibold text-white/50 mb-1">Abstract</p>
+              <p className="font-semibold text-white/50 mb-1">{t("scenarioDetail.articleRow.abstract")}</p>
               <p className="text-white/70 leading-5">{article.abstract}</p>
             </div>
           )}
           <div className="flex items-center gap-4 flex-wrap text-white/50 font-mono text-[10px] pt-1">
-            {article.journal && <span>Journal: <span className="text-white/70">{article.journal}</span></span>}
+            {article.journal && <span>{t("scenarioDetail.articleRow.journal")} <span className="text-white/70">{article.journal}</span></span>}
             {article.doi && (
               <span>
                 DOI:{" "}
@@ -1440,7 +1448,7 @@ function ArticleRow({
                 rel="noopener noreferrer"
                 className="flex items-center gap-1 text-brand-400 hover:underline"
               >
-                Lien direct <ExternalLink size={10} />
+                {t("scenarioDetail.articleRow.directLink")} <ExternalLink size={10} />
               </a>
             )}
             {article.country && (
@@ -1467,6 +1475,7 @@ function ArticleRow({
 // ─── Section: Clustering UMAP & HDBSCAN (ENRICHI) ──────────────────────────────
 
 function ClusteringSection({ scenarioId }: { scenarioId: string }) {
+  const { t } = useI18n();
   const [data, setData] = useState<ScenarioClustering | null>(null);
   const [loading, setLoading] = useState(false);
   const [polling, setPolling] = useState(false);
@@ -1511,7 +1520,7 @@ function ClusteringSection({ scenarioId }: { scenarioId: string }) {
               handleResult(status);
             } else if (status.status === "error") {
               stopPolling();
-              setError(status.error || "Erreur lors du clustering");
+              setError(status.error || t("scenarioDetail.clustering.errorClustering"));
             }
           } catch (_) {}
         }, 5000);
@@ -1523,7 +1532,7 @@ function ClusteringSection({ scenarioId }: { scenarioId: string }) {
       setError(e.message);
       setLoading(false);
     }
-  }, [scenarioId, stopPolling, handleResult]);
+  }, [scenarioId, stopPolling, handleResult, t]);
 
   useEffect(() => {
     load();
@@ -1537,8 +1546,8 @@ function ClusteringSection({ scenarioId }: { scenarioId: string }) {
       <div className="flex items-center justify-between flex-wrap gap-2">
         <SectionHeader
           icon={<Layers size={14} className="text-brand-400" />}
-          title="Clustering & Topic Modelling Avancé"
-          subtitle="UMAP (Réduction 2D) + HDBSCAN (Clustering à densité) + Synthèses automatiques"
+          title={t("scenarioDetail.clustering.title")}
+          subtitle={t("scenarioDetail.clustering.subtitle")}
         />
         <button
           onClick={load}
@@ -1546,14 +1555,14 @@ function ClusteringSection({ scenarioId }: { scenarioId: string }) {
           className="flex items-center gap-1.5 rounded-xl border border-brand-500/20 bg-brand-500/10 px-3 py-1.5 text-xs text-brand-300 hover:bg-brand-500/20 transition disabled:opacity-50"
         >
           <RotateCcw size={11} className={loading ? "animate-spin" : ""} />
-          {loading ? "Calcul..." : "Recalculer"}
+          {loading ? t("scenarioDetail.clustering.calculating") : t("scenarioDetail.clustering.recalculate")}
         </button>
       </div>
 
       {(loading || polling) && (
         <LoadingSpinner text={polling
-          ? "Calcul en cours en arrière-plan (UMAP + HDBSCAN)... Mise à jour automatique toutes les 5s"
-          : "Lancement de l'analyse (Embeddings → UMAP 2D → HDBSCAN)..."
+          ? t("scenarioDetail.clustering.pollingText")
+          : t("scenarioDetail.clustering.startingText")
         } />
       )}
       {error && <ErrorBox message={error} />}
@@ -1572,20 +1581,20 @@ function ClusteringSection({ scenarioId }: { scenarioId: string }) {
               {/* Carte UMAP 2D (SVG) */}
               <div className="lg:col-span-1 space-y-4">
                 <div className="rounded-2xl border border-white/5 bg-white/2 p-4 flex flex-col gap-3">
-                  <span className="text-[10px] font-semibold uppercase tracking-wider text-gold-400">Projection UMAP 2D</span>
-                  <p className="text-[10px] text-white/40 leading-4">Points = articles. Proximité = similarité. Nuages = groupes thématiques.</p>
+                  <span className="text-[10px] font-semibold uppercase tracking-wider text-gold-400">{t("scenarioDetail.clustering.umapProjection")}</span>
+                  <p className="text-[10px] text-white/40 leading-4">{t("scenarioDetail.clustering.umapCaption")}</p>
                   <div className="w-full bg-[#0a1410] rounded-xl border border-white/5 overflow-hidden">
                     <UmapScatterPlot clusters={data.clusters} selectedCluster={selectedCluster} onSelectCluster={setSelectedCluster}/>
                   </div>
                   <div className="flex items-center justify-between text-[10px] text-white/25 font-mono">
                     <span>← UMAP dim 1 →</span>
-                    <span>{data.n_docs} articles · {data.n_clusters} clusters</span>
+                    <span>{data.n_docs} {t("scenarioDetail.clustering.articles")} · {data.n_clusters} {t("scenarioDetail.clustering.articlesClustersSeparator")}</span>
                   </div>
                 </div>
 
                 {/* Sélecteur de cluster de gauche */}
                 <div className="space-y-2">
-                  <span className="text-[10px] font-bold uppercase tracking-wider text-white/50 block px-1">Sélectionner un groupe</span>
+                  <span className="text-[10px] font-bold uppercase tracking-wider text-white/50 block px-1">{t("scenarioDetail.clustering.selectGroup")}</span>
                   <div className="space-y-1 max-h-64 overflow-y-auto pr-1">
                     {data.clusters.map((c) => (
                       <button
@@ -1604,7 +1613,7 @@ function ClusteringSection({ scenarioId }: { scenarioId: string }) {
                           />
                           <span className="font-medium truncate max-w-[150px]">{c.cluster_name}</span>
                         </div>
-                        <span className="text-[10px] font-mono opacity-70 bg-white/5 rounded px-1.5 py-0.5">{c.n_docs} articles</span>
+                        <span className="text-[10px] font-mono opacity-70 bg-white/5 rounded px-1.5 py-0.5">{c.n_docs} {t("scenarioDetail.clustering.articles")}</span>
                       </button>
                     ))}
                   </div>
@@ -1624,7 +1633,7 @@ function ClusteringSection({ scenarioId }: { scenarioId: string }) {
                         />
                         <div>
                           <h4 className="text-sm font-bold text-white uppercase tracking-wider">{activeClusterData.cluster_name}</h4>
-                          <p className="text-xs text-white/50 mt-0.5">{activeClusterData.n_docs} articles scientifiques denses dans ce groupe</p>
+                          <p className="text-xs text-white/50 mt-0.5">{activeClusterData.n_docs} {t("scenarioDetail.clustering.denseArticlesInGroup")}</p>
                         </div>
                       </div>
                     </div>
@@ -1633,7 +1642,7 @@ function ClusteringSection({ scenarioId }: { scenarioId: string }) {
                     <div className="space-y-2">
                       <div className="flex items-center gap-1.5 text-xs font-semibold text-brand-300 uppercase tracking-wider">
                         <Brain size={13} />
-                        Synthèse du groupe
+                        {t("scenarioDetail.clustering.groupSynthesis")}
                       </div>
                       <div className="rounded-2xl border border-brand-500/15 bg-brand-500/5 p-4 text-xs text-white/80 leading-6 italic">
                         "{activeClusterData.summary}"
@@ -1642,7 +1651,7 @@ function ClusteringSection({ scenarioId }: { scenarioId: string }) {
 
                     {/* Mots-clés TF-IDF */}
                     <div className="space-y-2">
-                      <p className="text-[10px] font-bold uppercase tracking-wider text-white/50">Mots-clés prépondérants</p>
+                      <p className="text-[10px] font-bold uppercase tracking-wider text-white/50">{t("scenarioDetail.clustering.topKeywords")}</p>
                       <div className="flex flex-wrap gap-1.5">
                         {activeClusterData.top_words.map((w, i) => (
                           <span
@@ -1658,7 +1667,7 @@ function ClusteringSection({ scenarioId }: { scenarioId: string }) {
                     {/* Article représentatif (peut être absent pour un petit cluster) */}
                     {activeClusterData.representative_doc && (
                       <div className="space-y-2 border-t border-white/5 pt-4">
-                        <p className="text-[10px] font-bold uppercase tracking-wider text-white/50">Article le plus central / représentatif</p>
+                        <p className="text-[10px] font-bold uppercase tracking-wider text-white/50">{t("scenarioDetail.clustering.representativeArticle")}</p>
                         <div className="rounded-xl border border-white/5 bg-white/3 p-3">
                           <div className="flex items-center gap-1.5 text-[10px] text-white/35 font-mono">
                             <span>ID: #{activeClusterData.representative_doc.id}</span>
@@ -1716,9 +1725,10 @@ function expandHull(hull: Array<{x:number;y:number}>, margin: number): Array<{x:
 }
 // Scatter plot UMAP moderne avec nuages pastel
 function UmapScatterPlot({clusters,selectedCluster,onSelectCluster}:{clusters:ClusterResult[];selectedCluster:number|null;onSelectCluster:(id:number)=>void}) {
+  const { t } = useI18n();
   const allPoints: Array<ClusterPoint&{cluster_id:number;is_noise:boolean}>=[];
   clusters.forEach(c=>{if(c.points) c.points.forEach(p=>allPoints.push({...p,cluster_id:c.cluster_id,is_noise:c.is_noise}));});
-  if(!allPoints.length) return <span className="text-xs text-white/40">Aucun point.</span>;
+  if(!allPoints.length) return <span className="text-xs text-white/40">{t("scenarioDetail.clustering.noPoint")}</span>;
   const xs=allPoints.map(p=>p.x),ys=allPoints.map(p=>p.y);
   const minX=Math.min(...xs),maxX=Math.max(...xs),minY=Math.min(...ys),maxY=Math.max(...ys);
   const rX=maxX-minX||1,rY=maxY-minY||1;
@@ -1784,6 +1794,7 @@ function UmapScatterPlot({clusters,selectedCluster,onSelectCluster}:{clusters:Cl
 // ─── Section: RAG ─────────────────────────────────────────────────────────────
 
 function RagSection({ scenarioId, detail }: { scenarioId: string; detail: ScenarioDetail }) {
+  const { t } = useI18n();
   const [question, setQuestion] = useState("");
   const [streaming, setStreaming] = useState(false);
   const [streamedText, setStreamedText] = useState("");
@@ -1854,8 +1865,8 @@ function RagSection({ scenarioId, detail }: { scenarioId: string; detail: Scenar
     <div className="rounded-3xl border border-white/10 bg-white/3 p-5 space-y-5">
       <SectionHeader
         icon={<MessageSquare size={14} className="text-brand-400" />}
-        title="Assistant Scientifique"
-        subtitle="Réponses en temps réel avec streaming · Articles filtrés par seuil de pertinence + articles validés"
+        title={t("scenarioDetail.rag.title")}
+        subtitle={t("scenarioDetail.rag.subtitle")}
       />
 
       {/* Indexation du corpus pour l'Assistant (RAG) — couverture documentaire.
@@ -1877,22 +1888,22 @@ function RagSection({ scenarioId, detail }: { scenarioId: string; detail: Scenar
             </div>
             <div className="flex-1 min-w-0 space-y-1">
               <p className={`text-xs font-semibold ${complete ? 'text-forest-300' : 'text-gold-300'}`}>
-                Indexation du corpus {complete ? '· prête' : '· en cours'}
+                {complete ? t("scenarioDetail.rag.indexingReady") : t("scenarioDetail.rag.indexingInProgress")}
               </p>
               <p className="text-[11px] text-white/70">
-                <span className="text-white font-semibold">{indexedDocs}</span> / {total} documents indexés
-                {pendingDocs > 0 && ` · ${pendingDocs} en cours`}
+                <span className="text-white font-semibold">{indexedDocs}</span> / {total} {t("scenarioDetail.rag.documentsIndexed")}
+                {pendingDocs > 0 && ` · ${pendingDocs} ${t("scenarioDetail.rag.docsInProgressSuffix")}`}
                 {embeddingStatus.fulltext.total_docs > 0 && (
-                  <span className="text-white/40"> (dont {embeddingStatus.fulltext.docs_fully_embedded}/{embeddingStatus.fulltext.total_docs} en texte intégral)</span>
+                  <span className="text-white/40">{t("scenarioDetail.rag.inFulltextPrefix")}{embeddingStatus.fulltext.docs_fully_embedded}/{embeddingStatus.fulltext.total_docs}{t("scenarioDetail.rag.inFulltextSuffix")}</span>
                 )}
               </p>
               {chunkless > 0 ? (
-                <p className="text-[10px] text-gold-300">⚠ {chunkless} document(s) sans contenu exploitable (ni résumé ni texte).</p>
+                <p className="text-[10px] text-gold-300">{t("scenarioDetail.rag.chunklessWarningPrefix")}{chunkless}{t("scenarioDetail.rag.chunklessWarningSuffix")}</p>
               ) : complete ? (
-                <p className="text-[10px] text-forest-400">L'Assistant interroge uniquement les articles pertinents (≥ seuil de pertinence), pas tout le corpus.</p>
+                <p className="text-[10px] text-forest-400">{t("scenarioDetail.rag.coverageComplete")}</p>
               ) : (
                 <p className="text-[10px] text-white/40">
-                  L'Assistant répond déjà ; sa couverture s'étend à mesure de l'indexation{pendingChunks > 0 ? ` (${pendingChunks} chunks restants)` : ''}.
+                  {t("scenarioDetail.rag.coverageExpandingPrefix")}{pendingChunks > 0 ? `${t("scenarioDetail.rag.chunksRemainingPrefix")}${pendingChunks}${t("scenarioDetail.rag.chunksRemainingSuffix")}` : ''}.
                 </p>
               )}
             </div>
@@ -1903,7 +1914,7 @@ function RagSection({ scenarioId, detail }: { scenarioId: string; detail: Scenar
       {/* Questions suggérées */}
       {suggestedQuestions.length > 0 && !streamedText && !streaming && (
         <div className="space-y-2">
-          <p className="text-[10px] font-bold uppercase tracking-wider text-white/35">Questions cliniques suggérées</p>
+          <p className="text-[10px] font-bold uppercase tracking-wider text-white/35">{t("scenarioDetail.rag.suggestedQuestions")}</p>
           <div className="flex flex-wrap gap-2">
             {suggestedQuestions.map((q, i) => (
               <button
@@ -1926,20 +1937,20 @@ function RagSection({ scenarioId, detail }: { scenarioId: string; detail: Scenar
           value={question}
           onChange={(e) => setQuestion(e.target.value)}
           onKeyDown={(e) => e.key === "Enter" && ask(question)}
-          placeholder="Posez votre question clinique ou opérationnelle..."
+          placeholder={t("scenarioDetail.rag.questionPlaceholder")}
           disabled={streaming}
           className="flex-1 rounded-xl border border-white/10 bg-white/5 px-4 py-2.5 text-xs text-white focus:outline-none focus:border-brand-500/50 transition disabled:opacity-50"
         />
         {streaming ? (
           <button onClick={reset}
             className="rounded-xl bg-rose-500/20 border border-rose-500/30 hover:bg-rose-500/30 text-rose-300 font-semibold px-4 text-xs transition shrink-0"
-          >Arrêter</button>
+          >{t("scenarioDetail.rag.stop")}</button>
         ) : (
           <button
             onClick={() => ask(question)}
             disabled={!question.trim()}
             className="rounded-xl bg-brand-500 hover:bg-brand-400 text-forest-950 font-semibold px-4 text-xs transition disabled:opacity-50 shrink-0"
-          >Poser</button>
+          >{t("scenarioDetail.rag.ask")}</button>
         )}
       </div>
 
@@ -1950,15 +1961,15 @@ function RagSection({ scenarioId, detail }: { scenarioId: string; detail: Scenar
           {/* Réponse streaming */}
           <div className="lg:col-span-2 space-y-3">
             <div className="flex items-center justify-between">
-              <p className="text-[10px] font-bold uppercase tracking-wider text-white/50">Réponse de l'Assistant</p>
+              <p className="text-[10px] font-bold uppercase tracking-wider text-white/50">{t("scenarioDetail.rag.answerTitle")}</p>
               {streaming && (
                 <div className="flex items-center gap-1.5 text-[10px] text-brand-300">
                   <span className="h-1.5 w-1.5 rounded-full bg-brand-400 animate-pulse"/>
-                  Génération en cours...
+                  {t("scenarioDetail.rag.generating")}
                 </div>
               )}
               {done && (
-                <button onClick={reset} className="text-[10px] text-white/30 hover:text-white transition">Nouvelle question</button>
+                <button onClick={reset} className="text-[10px] text-white/30 hover:text-white transition">{t("scenarioDetail.rag.newQuestion")}</button>
               )}
             </div>
             <div
@@ -1973,15 +1984,15 @@ function RagSection({ scenarioId, detail }: { scenarioId: string; detail: Scenar
           {/* Sources citées */}
           {sources.length > 0 && (
             <div className="space-y-3">
-              <p className="text-[10px] font-bold uppercase tracking-wider text-white/50">Sources scientifiques citées</p>
+              <p className="text-[10px] font-bold uppercase tracking-wider text-white/50">{t("scenarioDetail.rag.citedSources")}</p>
               <div className="space-y-2 max-h-[400px] overflow-y-auto pr-1">
                 {sources.map((src, i) => (
                   <div key={i} className="rounded-xl border border-white/5 bg-white/3 p-2.5 text-xs">
                     <div className="flex items-center justify-between gap-2">
                       <span className="rounded bg-brand-500/10 border border-brand-500/20 px-1.5 py-0.5 text-[9px] text-brand-300 font-mono">
-                        SOURCE {i + 1}
+                        {t("scenarioDetail.rag.sourceLabel")} {i + 1}
                       </span>
-                      <span className="text-[10px] text-white/35 font-mono">Pertinence: {(src.score * 100).toFixed(0)}%</span>
+                      <span className="text-[10px] text-white/35 font-mono">{t("scenarioDetail.rag.relevance")} {(src.score * 100).toFixed(0)}%</span>
                     </div>
                     <h5 className="font-semibold text-white mt-1.5 leading-4 line-clamp-2">{src.title}</h5>
                     <p className="text-[10px] text-white/35 mt-1 truncate">
@@ -1994,10 +2005,10 @@ function RagSection({ scenarioId, detail }: { scenarioId: string; detail: Scenar
           )}
           {streaming && sources.length === 0 && (
             <div className="space-y-2">
-              <p className="text-[10px] font-bold uppercase tracking-wider text-white/50">Sources scientifiques citées</p>
+              <p className="text-[10px] font-bold uppercase tracking-wider text-white/50">{t("scenarioDetail.rag.citedSources")}</p>
               <div className="rounded-xl border border-white/5 bg-white/2 p-3 text-center text-[10px] text-white/30">
                 <Loader2 size={12} className="animate-spin mx-auto mb-1"/>
-                Chargement des sources...
+                {t("scenarioDetail.rag.loadingSources")}
               </div>
             </div>
           )}
@@ -2085,6 +2096,7 @@ function PrismaConnector() {
 }
 
 function PrismaSection({ scenarioId }: { scenarioId: string }) {
+  const { t } = useI18n();
   const [data, setData] = useState<ScenarioPrisma | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -2098,8 +2110,8 @@ function PrismaSection({ scenarioId }: { scenarioId: string }) {
       .finally(() => setLoading(false));
   }, [scenarioId]);
 
-  if (loading) return <LoadingSpinner text="Calcul du flow PRISMA..." />;
-  if (error || !data) return <ErrorBox message={error ?? "Erreur PRISMA"} />;
+  if (loading) return <LoadingSpinner text={t("scenarioDetail.prisma.calculatingFlow")} />;
+  if (error || !data) return <ErrorBox message={error ?? t("scenarioDetail.common.errorPrisma")} />;
 
   // Garde-fous : selon l'avancement du scénario, l'API peut renvoyer un payload
   // partiel (section ou champ absent). Le panneau PRISMA ne doit jamais planter
@@ -2123,8 +2135,8 @@ function PrismaSection({ scenarioId }: { scenarioId: string }) {
     <div className="rounded-3xl border border-white/10 bg-white/3 p-5 space-y-4">
       <SectionHeader
         icon={<Shield size={14} className="text-brand-400" />}
-        title="AI-Assisted PRISMA 2020"
-        subtitle="Modern systematic review flow with semantic AI pre-screening and manual curation"
+        title={t("scenarioDetail.prisma.title")}
+        subtitle={t("scenarioDetail.prisma.subtitle")}
       />
 
       <div className="max-w-xl mx-auto space-y-1">
@@ -2132,13 +2144,13 @@ function PrismaSection({ scenarioId }: { scenarioId: string }) {
         {/* ── Stage 1: Identification ── */}
         <PrismaStageCard
           color="border-emerald-800/50 bg-emerald-950/30 text-emerald-200"
-          label="Stage 1: Identification"
+          label={t("scenarioDetail.prisma.stage1")}
           icon={<Database size={13} className="text-emerald-400" />}
         >
-          <PrismaBigNum value={totalRecords} sub={`${activeSources.length} source${activeSources.length !== 1 ? "s" : ""} searched`} />
+          <PrismaBigNum value={totalRecords} sub={`${activeSources.length} ${activeSources.length !== 1 ? t("scenarioDetail.prisma.sourceSearchedPlural") : t("scenarioDetail.prisma.sourceSearchedSingular")}`} />
           <div className="space-y-1">
-            <PrismaRow label="Embedded (searchable)" value={num(ident.embedded)} />
-            <PrismaRow label="Duplicates removed" value={num(ident.duplicates_removed)} />
+            <PrismaRow label={t("scenarioDetail.prisma.embeddedSearchable")} value={num(ident.embedded)} />
+            <PrismaRow label={t("scenarioDetail.prisma.duplicatesRemoved")} value={num(ident.duplicates_removed)} />
           </div>
           {activeSources.length > 0 && (
             <div className="flex flex-wrap gap-1.5 pt-1 border-t border-white/5">
@@ -2156,22 +2168,22 @@ function PrismaSection({ scenarioId }: { scenarioId: string }) {
         {/* ── Stage 2: AI Semantic Pre-screening ── */}
         <PrismaStageCard
           color="border-violet-800/50 bg-violet-950/30 text-violet-200"
-          label="Stage 2: AI Semantic Pre-screening"
+          label={t("scenarioDetail.prisma.stage2")}
           icon={<Sparkles size={13} className="text-violet-400" />}
         >
           <div className="grid grid-cols-2 gap-3">
             <div>
-              <PrismaBigNum value={num(sem.above_threshold)} sub="Above threshold → pre-selected" />
+              <PrismaBigNum value={num(sem.above_threshold)} sub={t("scenarioDetail.prisma.aboveThresholdPreselected")} />
             </div>
             <div>
-              <PrismaBigNum value={num(sem.below_threshold)} sub="Below threshold → deprioritised" />
+              <PrismaBigNum value={num(sem.below_threshold)} sub={t("scenarioDetail.prisma.belowThresholdDeprioritised")} />
             </div>
           </div>
           <div className="space-y-1">
-            <PrismaRow label="Similarity threshold" value={`≥ ${(num(sem.threshold) * 100).toFixed(0)}%`} />
-            <PrismaRow label="Method" value={sem.method ?? "—"} />
+            <PrismaRow label={t("scenarioDetail.prisma.similarityThreshold")} value={`≥ ${(num(sem.threshold) * 100).toFixed(0)}%`} />
+            <PrismaRow label={t("scenarioDetail.prisma.method")} value={sem.method ?? "—"} />
             <PrismaRow
-              label="Full texts available"
+              label={t("scenarioDetail.prisma.fullTextsAvailable")}
               value={`${num(ft.with_fulltext).toLocaleString()} (${num(ft.pct).toFixed(0)}%)`}
               accent="text-violet-300"
             />
@@ -2184,24 +2196,24 @@ function PrismaSection({ scenarioId }: { scenarioId: string }) {
         {/* ── Stage 3: Manual Curation ── */}
         <PrismaStageCard
           color="border-amber-800/50 bg-amber-950/30 text-amber-200"
-          label="Stage 3: Manual Curation"
+          label={t("scenarioDetail.prisma.stage3")}
           icon={<ClipboardList size={13} className="text-amber-400" />}
         >
           <div className="grid grid-cols-3 gap-3">
             <div>
-              <PrismaBigNum value={num(mc.included)} sub="Included" />
+              <PrismaBigNum value={num(mc.included)} sub={t("scenarioDetail.prisma.included")} />
             </div>
             <div>
-              <PrismaBigNum value={num(mc.excluded)} sub="Excluded" />
+              <PrismaBigNum value={num(mc.excluded)} sub={t("scenarioDetail.prisma.excluded")} />
             </div>
             <div>
-              <PrismaBigNum value={num(mc.pending)} sub="Pending" />
+              <PrismaBigNum value={num(mc.pending)} sub={t("scenarioDetail.prisma.pending")} />
             </div>
           </div>
           <div className="space-y-1 border-t border-white/5 pt-2">
-            <PrismaRow label="Rescued (below threshold, manually included)" value={num(mc.manually_rescued)} accent="text-green-400" />
-            <PrismaRow label="Vetoed (above threshold, manually excluded)" value={num(mc.manually_vetoed)} accent="text-red-400" />
-            <PrismaRow label="Screening complete" value={mc.screening_complete ? "Yes" : "In progress"} />
+            <PrismaRow label={t("scenarioDetail.prisma.rescued")} value={num(mc.manually_rescued)} accent="text-green-400" />
+            <PrismaRow label={t("scenarioDetail.prisma.vetoed")} value={num(mc.manually_vetoed)} accent="text-red-400" />
+            <PrismaRow label={t("scenarioDetail.prisma.screeningComplete")} value={mc.screening_complete ? t("scenarioDetail.prisma.yes") : t("scenarioDetail.prisma.inProgress")} />
           </div>
         </PrismaStageCard>
 
@@ -2210,17 +2222,17 @@ function PrismaSection({ scenarioId }: { scenarioId: string }) {
         {/* ── Stage 4: Evidence Synthesis ── */}
         <PrismaStageCard
           color="border-cyan-800/50 bg-cyan-950/30 text-cyan-200"
-          label="Stage 4: Evidence Synthesis"
+          label={t("scenarioDetail.prisma.stage4")}
           icon={<BookOpen size={13} className="text-cyan-400" />}
         >
           <PrismaBigNum
             value={evidenceTotal}
-            sub={mc.screening_complete ? "Final evidence set" : "Evidence set (screening in progress)"}
+            sub={mc.screening_complete ? t("scenarioDetail.prisma.finalEvidenceSet") : t("scenarioDetail.prisma.evidenceSetInProgress")}
           />
           <div className="space-y-1">
-            <PrismaRow label="AI pre-selected (above threshold, not vetoed)" value={num(ev.ai_auto_selected)} />
-            <PrismaRow label="Manually rescued" value={num(ev.manually_rescued)} accent="text-green-400" />
-            <PrismaRow label="With full text" value={`${num(ev.with_fulltext).toLocaleString()} of ${evidenceTotal.toLocaleString()}`} />
+            <PrismaRow label={t("scenarioDetail.prisma.aiPreselected")} value={num(ev.ai_auto_selected)} />
+            <PrismaRow label={t("scenarioDetail.prisma.manuallyRescued")} value={num(ev.manually_rescued)} accent="text-green-400" />
+            <PrismaRow label={t("scenarioDetail.prisma.withFullTextLabel")} value={`${num(ev.with_fulltext).toLocaleString()} ${t("scenarioDetail.prisma.withFullTextOf")} ${evidenceTotal.toLocaleString()}`} />
           </div>
         </PrismaStageCard>
       </div>
@@ -2228,7 +2240,7 @@ function PrismaSection({ scenarioId }: { scenarioId: string }) {
       {!mc.screening_complete && (
         <div className="rounded-xl border border-amber-500/20 bg-amber-500/5 px-4 py-3 mt-2">
           <p className="text-[10px] text-amber-400">
-            <span className="font-semibold">Manual screening in progress</span> · {num(mc.pending).toLocaleString()} articles still pending evaluation.
+            <span className="font-semibold">{t("scenarioDetail.prisma.manualScreeningInProgress")}</span> · {num(mc.pending).toLocaleString()} {t("scenarioDetail.prisma.articlesStillPending")}
           </p>
         </div>
       )}
@@ -2239,6 +2251,7 @@ function PrismaSection({ scenarioId }: { scenarioId: string }) {
 
 // ─── Section: PICO Tableau Comparatif ─────────────────────────────────────────
 function PicoSection({ scenarioId }: { scenarioId: string }) {
+  const { t } = useI18n();
   const [data, setData] = React.useState<PicoBulkResponse | null>(null);
   const [loading, setLoading] = React.useState(true);
   const [error, setError] = React.useState<string | null>(null);
@@ -2256,7 +2269,7 @@ function PicoSection({ scenarioId }: { scenarioId: string }) {
 
   const exportCsv = () => {
     if (!data) return;
-    const headers = ['ID','Titre','Année','Journal','Type étude','Confiance','Population (P)','Intervention (I)','Comparateur (C)','Outcome (O)','Notes'];
+    const headers = ['ID',t("scenarioDetail.pico.csvTitle"),t("scenarioDetail.pico.csvYear"),t("scenarioDetail.pico.csvJournal"),t("scenarioDetail.pico.csvStudyType"),t("scenarioDetail.pico.csvConfidence"),t("scenarioDetail.pico.csvPopulation"),t("scenarioDetail.pico.csvIntervention"),t("scenarioDetail.pico.csvComparator"),t("scenarioDetail.pico.csvOutcome"),t("scenarioDetail.pico.csvNotes")];
     const rows = data.articles.filter(a => a.has_pico).map(a => [
       a.id, `"${(a.title||'').replace(/"/g,'""')}"`, a.year||'',
       `"${(a.journal||'').replace(/"/g,'""')}"`,
@@ -2275,8 +2288,8 @@ function PicoSection({ scenarioId }: { scenarioId: string }) {
     URL.revokeObjectURL(url);
   };
 
-  if (loading) return <LoadingSpinner text="Chargement des données PICO..." />;
-  if (error || !data) return <ErrorBox message={error ?? "Erreur PICO"} />;
+  if (loading) return <LoadingSpinner text={t("scenarioDetail.pico.loadingData")} />;
+  if (error || !data) return <ErrorBox message={error ?? t("scenarioDetail.common.errorPico")} />;
 
   const filtered = data.articles
     .filter(a => filter === 'all' || (filter === 'with_pico' ? a.has_pico : !a.has_pico))
@@ -2293,16 +2306,16 @@ function PicoSection({ scenarioId }: { scenarioId: string }) {
     <div className="space-y-5">
       <SectionHeader
         icon={<Table2 size={14} className="text-brand-400" />}
-        title="Tableau Comparatif PICO"
-        subtitle="Vue synthétique de tous les articles avec extraction PICO structurée"
+        title={t("scenarioDetail.pico.title")}
+        subtitle={t("scenarioDetail.pico.subtitle")}
       />
       {/* Stats bar */}
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
         {[
-          {label:'Total articles',value:data.total,color:'text-white'},
-          {label:'Avec PICO extrait',value:data.with_pico,color:'text-brand-300'},
-          {label:'Couverture PICO',value:coverage+'%',color:coverage>70?'text-brand-300':coverage>40?'text-gold-400':'text-rose-300'},
-          {label:'Sans PICO',value:data.total-data.with_pico,color:'text-white/50'},
+          {label:t("scenarioDetail.pico.statTotalArticles"),value:data.total,color:'text-white'},
+          {label:t("scenarioDetail.pico.statWithPico"),value:data.with_pico,color:'text-brand-300'},
+          {label:t("scenarioDetail.pico.statCoverage"),value:coverage+'%',color:coverage>70?'text-brand-300':coverage>40?'text-gold-400':'text-rose-300'},
+          {label:t("scenarioDetail.pico.statWithoutPico"),value:data.total-data.with_pico,color:'text-white/50'},
         ].map(s=>(
           <div key={s.label} className="rounded-2xl border border-white/5 bg-white/3 p-3 text-center">
             <div className={`text-xl font-bold ${s.color}`}>{s.value}</div>
@@ -2313,7 +2326,7 @@ function PicoSection({ scenarioId }: { scenarioId: string }) {
       {/* Coverage bar */}
       <div className="rounded-xl border border-white/5 bg-white/2 p-3">
         <div className="flex justify-between text-[10px] text-white/40 mb-1.5">
-          <span>Couverture PICO</span><span>{data.with_pico}/{data.total}</span>
+          <span>{t("scenarioDetail.pico.coverageLabel")}</span><span>{data.with_pico}/{data.total}</span>
         </div>
         <div className="h-2 bg-white/5 rounded-full overflow-hidden">
           <div className="h-full bg-brand-500 rounded-full transition-all" style={{width:`${coverage}%`}}/>
@@ -2322,7 +2335,7 @@ function PicoSection({ scenarioId }: { scenarioId: string }) {
       {/* Controls */}
       <div className="flex flex-wrap gap-2 items-center">
         <input
-          type="text" placeholder="Rechercher un article..." value={search}
+          type="text" placeholder={t("scenarioDetail.pico.searchArticlePlaceholder")} value={search}
           onChange={e=>setSearch(e.target.value)}
           className="flex-1 min-w-[200px] rounded-xl border border-white/10 bg-white/5 px-3 py-1.5 text-xs text-white focus:outline-none focus:border-brand-500/50"
         />
@@ -2333,22 +2346,22 @@ function PicoSection({ scenarioId }: { scenarioId: string }) {
                 filter===f?'bg-brand-700 text-gold-400 font-semibold':'text-white/60 hover:text-white hover:bg-white/8'
               }`}
             >
-              {f==='all'?'Tous':f==='with_pico'?'Avec PICO':'Sans PICO'}
+              {f==='all'?t("scenarioDetail.pico.filterAll"):f==='with_pico'?t("scenarioDetail.pico.filterWithPico"):t("scenarioDetail.pico.filterWithoutPico")}
             </button>
           ))}
         </div>
         <select value={sortBy} onChange={e=>setSortBy(e.target.value as any)}
           className="rounded-lg border border-white/10 bg-white/5 px-2 py-1.5 text-[10px] text-white/70 focus:outline-none"
         >
-          <option value="year">Trier par année</option>
-          <option value="confidence">Trier par confiance</option>
-          <option value="design">Trier par type étude</option>
+          <option value="year">{t("scenarioDetail.pico.sortByYear")}</option>
+          <option value="confidence">{t("scenarioDetail.pico.sortByConfidence")}</option>
+          <option value="design">{t("scenarioDetail.pico.sortByDesign")}</option>
         </select>
         {data.with_pico > 0 && (
           <button onClick={exportCsv}
             className="flex items-center gap-1.5 rounded-xl border border-brand-500/30 bg-brand-500/10 px-3 py-1.5 text-[10px] text-brand-300 hover:bg-brand-500/20 transition"
           >
-            <Download size={10}/>Export CSV
+            <Download size={10}/>{t("scenarioDetail.pico.exportCsv")}
           </button>
         )}
       </div>
@@ -2357,7 +2370,7 @@ function PicoSection({ scenarioId }: { scenarioId: string }) {
         <table className="w-full text-[10px] border-collapse">
           <thead>
             <tr className="border-b border-white/5 bg-white/3">
-              {['Titre','Année','Type étude','Confiance','P : Population','I : Intervention','C : Comparateur','O : Outcome'].map(h=>(
+              {[t("scenarioDetail.pico.colTitle"),t("scenarioDetail.pico.colYear"),t("scenarioDetail.pico.colStudyType"),t("scenarioDetail.pico.colConfidence"),t("scenarioDetail.pico.colPopulation"),t("scenarioDetail.pico.colIntervention"),t("scenarioDetail.pico.colComparator"),t("scenarioDetail.pico.colOutcome")].map(h=>(
                 <th key={h} className="text-left px-3 py-2 text-white/40 font-semibold uppercase tracking-wider whitespace-nowrap">{h}</th>
               ))}
             </tr>
@@ -2400,11 +2413,11 @@ function PicoSection({ scenarioId }: { scenarioId: string }) {
         </table>
         {filtered.length > 100 && (
           <div className="text-center py-3 text-[10px] text-white/35">
-            Affichage des 100 premiers résultats sur {filtered.length}. Utilisez la recherche pour filtrer.
+            {t("scenarioDetail.pico.showingFirstPart1")} {filtered.length}. {t("scenarioDetail.pico.showingFirstPart2")}
           </div>
         )}
         {filtered.length === 0 && (
-          <div className="text-center py-8 text-xs text-white/35">Aucun article ne correspond aux filtres.</div>
+          <div className="text-center py-8 text-xs text-white/35">{t("scenarioDetail.pico.noArticleMatch")}</div>
         )}
       </div>
     </div>
@@ -2414,6 +2427,7 @@ function PicoSection({ scenarioId }: { scenarioId: string }) {
 // ─── Section: Knowledge Graph (co-citations) ─────────────────────────────────
 
 function KnowledgeGraphSection({ scenarioId }: { scenarioId: string }) {
+  const { t } = useI18n();
   const [data, setData] = React.useState<KnowledgeGraphData | null>(null);
   const [loading, setLoading] = React.useState(true);
   const [error, setError] = React.useState<string | null>(null);
@@ -2430,9 +2444,9 @@ function KnowledgeGraphSection({ scenarioId }: { scenarioId: string }) {
       .finally(() => setLoading(false));
   }, [scenarioId, minSim]);
 
-  if (loading) return <LoadingSpinner text="Calcul du graphe de connaissances..." />;
-  if (error || !data) return <ErrorBox message={error ?? "Erreur Knowledge Graph"} />;
-  if (!data.nodes.length) return <div className="text-xs text-white/40 p-4">Aucun article avec embeddings disponible.</div>;
+  if (loading) return <LoadingSpinner text={t("scenarioDetail.knowledgeGraph.calculating")} />;
+  if (error || !data) return <ErrorBox message={error ?? t("scenarioDetail.common.errorKnowledgeGraph")} />;
+  if (!data.nodes.length) return <div className="text-xs text-white/40 p-4">{t("scenarioDetail.knowledgeGraph.noArticleEmbeddings")}</div>;
 
   const W = 700, H = 500;
   const CLUSTER_COLORS = [
@@ -2492,19 +2506,19 @@ function KnowledgeGraphSection({ scenarioId }: { scenarioId: string }) {
     <div className="space-y-4">
       <SectionHeader
         icon={<Network size={14} className="text-brand-400" />}
-        title="Knowledge Graph : Réseau de Similarité Sémantique"
+        title={t("scenarioDetail.knowledgeGraph.title")}
         subtitle={
           (data.n_total && data.n_total > data.n_nodes
-            ? `${data.n_nodes} articles les plus pertinents sur ${data.n_total} · `
-            : `${data.n_nodes} articles · `) +
-          `${data.n_edges} liens · ${data.n_clusters} communautés thématiques · proximité = similarité cosinus des embeddings`
+            ? `${data.n_nodes} ${t("scenarioDetail.knowledgeGraph.subtitleMostRelevantPrefix")} ${data.n_total} · `
+            : `${data.n_nodes} ${t("scenarioDetail.knowledgeGraph.subtitleArticles")} · `) +
+          `${data.n_edges} ${t("scenarioDetail.knowledgeGraph.subtitleLinks")} · ${data.n_clusters} ${t("scenarioDetail.knowledgeGraph.subtitleCommunities")} · ${t("scenarioDetail.knowledgeGraph.subtitleProximity")}`
         }
       />
 
       {/* Contrôles */}
       <div className="flex flex-wrap items-center gap-4">
         <div className="flex items-center gap-2 text-xs text-white/50">
-          <span>Seuil similarité :</span>
+          <span>{t("scenarioDetail.knowledgeGraph.similarityThreshold")}</span>
           <input type="range" min={0.2} max={0.7} step={0.05} value={minSim}
             onChange={e => setMinSim(parseFloat(e.target.value))}
             className="w-28 accent-brand-500"
@@ -2519,7 +2533,7 @@ function KnowledgeGraphSection({ scenarioId }: { scenarioId: string }) {
                 className="flex items-center gap-1.5 rounded-lg border border-white/10 bg-white/3 px-2 py-1 text-[10px] text-white/50"
               >
                 <span className="h-2 w-2 rounded-full shrink-0" style={{background: CLUSTER_COLORS[i % CLUSTER_COLORS.length]}}/>
-                <span className="text-white/70">{c.label || `Groupe ${c.id + 1}`}</span>
+                <span className="text-white/70">{c.label || `${t("scenarioDetail.knowledgeGraph.groupFallback")} ${c.id + 1}`}</span>
                 <span className="text-white/30 font-mono">· {c.size}</span>
               </span>
             );
@@ -2615,7 +2629,7 @@ function KnowledgeGraphSection({ scenarioId }: { scenarioId: string }) {
               const x = tooltip.x;
               const y = tooltip.y;
               const title = (n.title || '').slice(0, 50);
-              const meta = `${n.year || 'N/A'} · ${n.design} · ${n.degree} connexions`;
+              const meta = `${n.year || 'N/A'} · ${n.design} · ${n.degree} ${t("scenarioDetail.knowledgeGraph.tooltipConnections")}`;
               const tw = Math.max(title.length, meta.length) * 4.5 + 16;
               const tx = Math.max(tw/2 + 4, Math.min(W - tw/2 - 4, x));
               const ty = y - 30;
@@ -2642,17 +2656,17 @@ function KnowledgeGraphSection({ scenarioId }: { scenarioId: string }) {
                 <button onClick={() => setSelectedNode(null)} className="text-white/30 hover:text-white text-xs shrink-0">✕</button>
               </div>
               <div className="space-y-1.5 text-[10px] text-white/50">
-                <div className="flex justify-between"><span>Année</span><span className="text-white/70">{selectedNodeData.year || 'N/A'}</span></div>
-                <div className="flex justify-between"><span>Journal</span><span className="text-white/70 text-right max-w-[120px] truncate">{selectedNodeData.journal || '—'}</span></div>
-                <div className="flex justify-between"><span>Type étude</span><span className="rounded bg-brand-500/10 border border-brand-500/20 px-1 text-brand-300">{selectedNodeData.design}</span></div>
-                <div className="flex justify-between"><span>Connexions</span><span className="text-brand-300 font-semibold">{selectedNodeData.degree}</span></div>
-                <div className="flex justify-between"><span>Qualité</span><span className="text-gold-400 font-semibold">{selectedNodeData.quality > 0 ? Math.round(selectedNodeData.quality * 100) + '%' : '—'}</span></div>
+                <div className="flex justify-between"><span>{t("scenarioDetail.knowledgeGraph.year")}</span><span className="text-white/70">{selectedNodeData.year || 'N/A'}</span></div>
+                <div className="flex justify-between"><span>{t("scenarioDetail.knowledgeGraph.journal")}</span><span className="text-white/70 text-right max-w-[120px] truncate">{selectedNodeData.journal || '—'}</span></div>
+                <div className="flex justify-between"><span>{t("scenarioDetail.knowledgeGraph.studyType")}</span><span className="rounded bg-brand-500/10 border border-brand-500/20 px-1 text-brand-300">{selectedNodeData.design}</span></div>
+                <div className="flex justify-between"><span>{t("scenarioDetail.knowledgeGraph.connections")}</span><span className="text-brand-300 font-semibold">{selectedNodeData.degree}</span></div>
+                <div className="flex justify-between"><span>{t("scenarioDetail.knowledgeGraph.quality")}</span><span className="text-gold-400 font-semibold">{selectedNodeData.quality > 0 ? Math.round(selectedNodeData.quality * 100) + '%' : '—'}</span></div>
               </div>
             </div>
           ) : (
             <div className="rounded-2xl border border-white/5 bg-white/2 p-4 text-center">
               <Network size={20} className="text-white/20 mx-auto mb-2"/>
-              <p className="text-[10px] text-white/35">Cliquez sur un nœud pour voir les détails de l'article</p>
+              <p className="text-[10px] text-white/35">{t("scenarioDetail.knowledgeGraph.clickNode")}</p>
             </div>
           )}
 
@@ -2662,7 +2676,7 @@ function KnowledgeGraphSection({ scenarioId }: { scenarioId: string }) {
             if (!hubs.length) return null;
             return (
               <div className="rounded-2xl border border-white/5 bg-white/2 p-3 space-y-2">
-                <p className="text-[10px] font-bold uppercase tracking-wider text-white/40">Articles pivots (les plus connectés)</p>
+                <p className="text-[10px] font-bold uppercase tracking-wider text-white/40">{t("scenarioDetail.knowledgeGraph.hubArticles")}</p>
                 {hubs.map(n => (
                   <button key={n.id} onClick={() => setSelectedNode(n.id)}
                     className="w-full text-left flex items-start gap-2 text-[10px] hover:bg-white/3 rounded px-1 py-0.5 transition">
@@ -2676,14 +2690,14 @@ function KnowledgeGraphSection({ scenarioId }: { scenarioId: string }) {
 
           {/* Légende des communautés thématiques */}
           <div className="rounded-2xl border border-white/5 bg-white/2 p-3 space-y-2">
-            <p className="text-[10px] font-bold uppercase tracking-wider text-white/40">Communautés thématiques</p>
+            <p className="text-[10px] font-bold uppercase tracking-wider text-white/40">{t("scenarioDetail.knowledgeGraph.thematicCommunities")}</p>
             {[...data.clusters].filter(c => c.size > 1).sort((a,b)=>b.size-a.size).slice(0, 8).map((c) => {
               const i = uniqueClusters.indexOf(c.id);
               return (
                 <div key={c.id} className="flex items-center justify-between gap-2 text-[10px]">
                   <div className="flex items-center gap-1.5 min-w-0">
                     <span className="h-2 w-2 rounded-full shrink-0" style={{background: CLUSTER_COLORS[i % CLUSTER_COLORS.length]}}/>
-                    <span className="text-white/60 truncate">{c.label || `Groupe ${c.id + 1}`}</span>
+                    <span className="text-white/60 truncate">{c.label || `${t("scenarioDetail.knowledgeGraph.groupFallback")} ${c.id + 1}`}</span>
                   </div>
                   <span className="text-white/40 font-mono shrink-0">{c.size}</span>
                 </div>
@@ -2694,10 +2708,10 @@ function KnowledgeGraphSection({ scenarioId }: { scenarioId: string }) {
           {/* Stats */}
           <div className="grid grid-cols-2 gap-2">
             {[
-              {label: 'Articles', value: data.n_nodes},
-              {label: 'Connexions', value: data.n_edges},
-              {label: 'Groupes', value: data.n_clusters},
-              {label: 'Seuil', value: data.min_similarity.toFixed(2)},
+              {label: t("scenarioDetail.knowledgeGraph.statArticles"), value: data.n_nodes},
+              {label: t("scenarioDetail.knowledgeGraph.statConnections"), value: data.n_edges},
+              {label: t("scenarioDetail.knowledgeGraph.statGroups"), value: data.n_clusters},
+              {label: t("scenarioDetail.knowledgeGraph.statThreshold"), value: data.min_similarity.toFixed(2)},
             ].map(s => (
               <div key={s.label} className="rounded-xl border border-white/5 bg-white/2 p-2 text-center">
                 <div className="text-sm font-bold text-brand-300">{s.value}</div>
@@ -2718,6 +2732,7 @@ const REVIEWER_CODE_KEY = 'literev_reviewer_code';
 const REVIEWER_ROLE_KEY = 'literev_reviewer_role';
 
 function DoubleBlindSection({ scenarioId }: { scenarioId: string }) {
+  const { t } = useI18n();
   const [kappa, setKappa] = React.useState<KappaStats | null>(null);
   const [conflicts, setConflicts] = React.useState<any[]>([]);
   const [loading, setLoading] = React.useState(true);
@@ -2737,7 +2752,7 @@ function DoubleBlindSection({ scenarioId }: { scenarioId: string }) {
   const handleCodeSubmit = () => {
     const code = codeInput.trim().toUpperCase();
     if (!/^R-?\d{4}$/.test(code) && !/^\d{4}$/.test(code)) {
-      setCodeError('Format invalide. Utilisez 4 chiffres (ex: 2847) ou R-2847');
+      setCodeError(t("scenarioDetail.doubleBlind.invalidCodeFormat"));
       return;
     }
     const normalized = code.startsWith('R-') ? code : `R-${code}`;
@@ -2785,7 +2800,7 @@ function DoubleBlindSection({ scenarioId }: { scenarioId: string }) {
   React.useEffect(() => { reload(); }, [reload]);
 
   const decide = async (articleId: number, status: "included"|"excluded") => {
-    if (!reviewerCode) { alert('Veuillez d\'abord saisir votre code reviewer'); return; }
+    if (!reviewerCode) { alert(t("scenarioDetail.doubleBlind.enterCodeFirst")); return; }
     setSubmitting(articleId);
     try {
       await submitDoubleBlindDecision(scenarioId, { article_id: articleId, reviewer, status, reviewer_code: reviewerCode });
@@ -2797,7 +2812,7 @@ function DoubleBlindSection({ scenarioId }: { scenarioId: string }) {
     }
   };
 
-  if (loading) return <LoadingSpinner text="Chargement du screening double-aveugle..." />;
+  if (loading) return <LoadingSpinner text={t("scenarioDetail.doubleBlind.loading")} />;
 
   const kappaColor = !kappa?.kappa ? 'text-white/40'
     : kappa.kappa >= 0.61 ? 'text-brand-300'
@@ -2808,17 +2823,16 @@ function DoubleBlindSection({ scenarioId }: { scenarioId: string }) {
     <div className="space-y-5">
       <SectionHeader
         icon={<Users size={14} className="text-brand-400" />}
-        title="Screening Double-Aveugle"
-        subtitle="Évaluation indépendante par deux reviewers identifiés par code : score Kappa de Cohen"
+        title={t("scenarioDetail.doubleBlind.title")}
+        subtitle={t("scenarioDetail.doubleBlind.subtitle")}
       />
 
       {/* Identification reviewer */}
       {!reviewerCode ? (
         <div className="rounded-2xl border border-white/10 bg-white/3 p-5 space-y-3">
-          <p className="text-xs font-semibold text-white/70">Identification Reviewer</p>
+          <p className="text-xs font-semibold text-white/70">{t("scenarioDetail.doubleBlind.reviewerIdentification")}</p>
           <p className="text-[10px] text-white/40 leading-relaxed">
-            Saisissez votre code reviewer à 4 chiffres pour commencer l'évaluation.
-            Ce code vous identifie de manière unique et détermine si vous êtes Reviewer 1 ou Reviewer 2.
+            {t("scenarioDetail.doubleBlind.reviewerIdentificationHint")}
           </p>
           <div className="flex gap-2">
             <input
@@ -2826,17 +2840,17 @@ function DoubleBlindSection({ scenarioId }: { scenarioId: string }) {
               value={codeInput}
               onChange={e => { setCodeInput(e.target.value); setCodeError(''); }}
               onKeyDown={e => e.key === 'Enter' && handleCodeSubmit()}
-              placeholder="Ex: 2847 ou R-2847"
+              placeholder={t("scenarioDetail.doubleBlind.codePlaceholder")}
               maxLength={7}
               className="flex-1 rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-xs text-white placeholder-white/25 focus:outline-none focus:border-brand-500/50"
             />
             <button onClick={handleCodeSubmit}
               className="rounded-xl bg-brand-500 hover:bg-brand-400 text-white font-semibold px-4 py-2 text-xs transition">
-              Confirmer
+              {t("scenarioDetail.doubleBlind.confirm")}
             </button>
           </div>
           {codeError && <p className="text-[10px] text-red-400">{codeError}</p>}
-          <p className="text-[9px] text-white/25 italic">Votre code est sauvegardé localement dans ce navigateur.</p>
+          <p className="text-[9px] text-white/25 italic">{t("scenarioDetail.doubleBlind.codeSavedLocally")}</p>
         </div>
       ) : (
         <div className="flex items-center justify-between gap-3 rounded-2xl border border-brand-500/20 bg-brand-500/5 px-4 py-3">
@@ -2845,11 +2859,11 @@ function DoubleBlindSection({ scenarioId }: { scenarioId: string }) {
               <span className="text-xs font-bold text-brand-300">R{reviewer}</span>
             </div>
             <div>
-              <p className="text-xs font-semibold text-white/80">Reviewer {reviewer} : <span className="font-mono text-brand-300">{reviewerCode}</span></p>
-              <p className="text-[9px] text-white/35">Identité sauvegardée dans ce navigateur</p>
+              <p className="text-xs font-semibold text-white/80">{t("scenarioDetail.doubleBlind.reviewerPrefix")} {reviewer} : <span className="font-mono text-brand-300">{reviewerCode}</span></p>
+              <p className="text-[9px] text-white/35">{t("scenarioDetail.doubleBlind.identitySaved")}</p>
             </div>
           </div>
-          <button onClick={handleResetCode} className="text-[9px] text-white/25 hover:text-white/50 transition">Changer</button>
+          <button onClick={handleResetCode} className="text-[9px] text-white/25 hover:text-white/50 transition">{t("scenarioDetail.doubleBlind.change")}</button>
         </div>
       )}
 
@@ -2857,10 +2871,10 @@ function DoubleBlindSection({ scenarioId }: { scenarioId: string }) {
       {kappa && (
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
           {[
-            {label: 'Articles évalués', value: kappa.n_evaluated, color: 'text-white'},
-            {label: 'Score Kappa', value: kappa.kappa != null ? kappa.kappa.toFixed(3) : 'N/A', color: kappaColor},
-            {label: 'Accord observé', value: kappa.po_observed != null ? Math.round(kappa.po_observed * 100) + '%' : 'N/A', color: 'text-brand-300'},
-            {label: 'Conflits', value: kappa.conflicts, color: kappa.conflicts > 0 ? 'text-gold-400' : 'text-white/40'},
+            {label: t("scenarioDetail.doubleBlind.statEvaluated"), value: kappa.n_evaluated, color: 'text-white'},
+            {label: t("scenarioDetail.doubleBlind.statKappa"), value: kappa.kappa != null ? kappa.kappa.toFixed(3) : 'N/A', color: kappaColor},
+            {label: t("scenarioDetail.doubleBlind.statAgreement"), value: kappa.po_observed != null ? Math.round(kappa.po_observed * 100) + '%' : 'N/A', color: 'text-brand-300'},
+            {label: t("scenarioDetail.doubleBlind.statConflicts"), value: kappa.conflicts, color: kappa.conflicts > 0 ? 'text-gold-400' : 'text-white/40'},
           ].map(s => (
             <div key={s.label} className="rounded-2xl border border-white/5 bg-white/3 p-3 text-center">
               <div className={`text-xl font-bold ${s.color}`}>{s.value}</div>
@@ -2874,13 +2888,13 @@ function DoubleBlindSection({ scenarioId }: { scenarioId: string }) {
           <div className={`text-sm font-bold ${kappaColor}`}>{kappa.kappa.toFixed(3)}</div>
           <div>
             <div className="text-xs font-semibold text-white/70">{kappa.interpretation}</div>
-            <div className="text-[10px] text-white/35">Accord attendu par hasard : {Math.round((kappa.pe_expected || 0) * 100)}%</div>
+            <div className="text-[10px] text-white/35">{t("scenarioDetail.doubleBlind.expectedByChance")} {Math.round((kappa.pe_expected || 0) * 100)}%</div>
           </div>
         </div>
       )}
       {kappa?.n_evaluated === 0 && (
         <div className="rounded-xl border border-gold-500/20 bg-gold-500/5 p-3 text-xs text-gold-300">
-          Aucune évaluation double-aveugle n'a encore été soumise. Commencez à évaluer les articles dans la section Corpus.
+          {t("scenarioDetail.doubleBlind.noEvaluationYet")}
         </div>
       )}
 
@@ -2888,7 +2902,7 @@ function DoubleBlindSection({ scenarioId }: { scenarioId: string }) {
       {conflicts.length > 0 && (
         <div className="space-y-3">
           <p className="text-[10px] font-bold uppercase tracking-wider text-gold-400">
-            {conflicts.length} conflit(s) à résoudre
+            {conflicts.length} {t("scenarioDetail.doubleBlind.conflictsToResolve")}
           </p>
           <div className="space-y-2 max-h-[400px] overflow-y-auto">
             {conflicts.map(art => (
@@ -2901,10 +2915,10 @@ function DoubleBlindSection({ scenarioId }: { scenarioId: string }) {
                 <div className="flex gap-2">
                   <button onClick={() => decide(art.id, 'included')} disabled={submitting === art.id}
                     className="flex-1 rounded-lg bg-brand-500/20 border border-brand-500/30 text-brand-300 text-[10px] py-1.5 hover:bg-brand-500/30 transition disabled:opacity-50"
-                  >Inclure (arbitrage)</button>
+                  >{t("scenarioDetail.doubleBlind.includeArbitration")}</button>
                   <button onClick={() => decide(art.id, 'excluded')} disabled={submitting === art.id}
                     className="flex-1 rounded-lg bg-rose-500/10 border border-rose-500/20 text-rose-300 text-[10px] py-1.5 hover:bg-rose-500/20 transition disabled:opacity-50"
-                  >Exclure (arbitrage)</button>
+                  >{t("scenarioDetail.doubleBlind.excludeArbitration")}</button>
                 </div>
               </div>
             ))}
@@ -2918,6 +2932,7 @@ function DoubleBlindSection({ scenarioId }: { scenarioId: string }) {
 // ─── Section: Alertes & Living Review ────────────────────────────────────────
 
 function AlertsSection({ scenarioId }: { scenarioId: string }) {
+  const { t } = useI18n();
   const [email, setEmail] = React.useState('');
   const [frequency, setFrequency] = React.useState<'daily'|'weekly'|'immediate'>('weekly');
   const [subscribed, setSubscribed] = React.useState(false);
@@ -2954,27 +2969,27 @@ function AlertsSection({ scenarioId }: { scenarioId: string }) {
     <div className="space-y-6">
       <SectionHeader
         icon={<Bell size={14} className="text-brand-400" />}
-        title="Alertes & Living Review"
-        subtitle="Abonnez-vous aux nouvelles publications et gérez le pipeline de mise à jour automatique"
+        title={t("scenarioDetail.alerts.title")}
+        subtitle={t("scenarioDetail.alerts.subtitle")}
       />
 
       {/* Alertes email */}
       <div className="rounded-3xl border border-white/10 bg-white/3 p-5 space-y-4">
         <div className="flex items-center gap-2">
           <Bell size={13} className="text-gold-400"/>
-          <h4 className="text-sm font-semibold text-white">Alertes email</h4>
+          <h4 className="text-sm font-semibold text-white">{t("scenarioDetail.alerts.emailAlerts")}</h4>
         </div>
-        <p className="text-xs text-white/50">Recevez une notification quand de nouveaux articles sont ajoutés à ce scénario.</p>
+        <p className="text-xs text-white/50">{t("scenarioDetail.alerts.emailAlertsHint")}</p>
         {subscribed ? (
           <div className="rounded-xl border border-brand-500/20 bg-brand-500/5 p-3 flex items-center gap-2 text-xs text-brand-300">
             <CheckCircle2 size={13}/>
-            Abonnement confirmé pour <strong>{email}</strong> · fréquence : {frequency}
+            {t("scenarioDetail.alerts.subscriptionConfirmedPrefix")} <strong>{email}</strong> {t("scenarioDetail.alerts.subscriptionFrequency")} {frequency}
           </div>
         ) : (
           <div className="space-y-3">
             <input
               type="email" value={email} onChange={e => setEmail(e.target.value)}
-              placeholder="votre@email.com"
+              placeholder={t("scenarioDetail.alerts.emailPlaceholder")}
               className="w-full rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-xs text-white focus:outline-none focus:border-brand-500/50"
             />
             <div className="flex gap-2">
@@ -2985,14 +3000,14 @@ function AlertsSection({ scenarioId }: { scenarioId: string }) {
                       ? 'bg-brand-700 text-gold-400 font-semibold'
                       : 'text-white/60 hover:text-white hover:bg-white/8'
                   }`}
-                >{f === 'immediate' ? 'Immédiat' : f === 'daily' ? 'Quotidien' : 'Hebdomadaire'}</button>
+                >{f === 'immediate' ? t("scenarioDetail.alerts.frequencyImmediate") : f === 'daily' ? t("scenarioDetail.alerts.frequencyDaily") : t("scenarioDetail.alerts.frequencyWeekly")}</button>
               ))}
             </div>
             <button onClick={handleSubscribe} disabled={subscribing || !email.trim()}
               className="flex items-center gap-2 rounded-xl bg-brand-500 hover:bg-brand-400 text-white font-semibold px-4 py-2 text-xs transition disabled:opacity-50"
             >
               {subscribing ? <Loader2 size={12} className="animate-spin"/> : <Bell size={12}/>}
-              S'abonner aux alertes
+              {t("scenarioDetail.alerts.subscribeButton")}
             </button>
           </div>
         )}
@@ -3002,21 +3017,20 @@ function AlertsSection({ scenarioId }: { scenarioId: string }) {
       <div className="rounded-3xl border border-white/10 bg-white/3 p-5 space-y-4">
         <div className="flex items-center gap-2">
           <Rss size={13} className="text-brand-400"/>
-          <h4 className="text-sm font-semibold text-white">Pipeline Living Review</h4>
+          <h4 className="text-sm font-semibold text-white">{t("scenarioDetail.alerts.livingReviewPipeline")}</h4>
         </div>
         <p className="text-xs text-white/50">
-          Le pipeline Living Review interroge automatiquement 6 sources (DB Cache + PubMed, OpenAlex, Crossref, EuropePMC, Preprints)
-          avec la requête de ce scénario, insère les nouveaux articles, génère les embeddings et recalcule le clustering.
+          {t("scenarioDetail.alerts.livingReviewDesc")}
         </p>
         <div className="rounded-xl border border-white/5 bg-white/2 p-3 space-y-1.5 text-[10px] text-white/40">
           {[
-            'Interrogation multi-sources : DB Cache + PubMed + OpenAlex + Crossref + EuropePMC + Preprints',
-            'Insertion des nouveaux articles (déduplication automatique)',
-            'Génération des embeddings (text-embedding-3-small) : active la pertinence sémantique',
-            'Extraction PICO par LLM (GPT-4.1-mini)',
-            'Récupération full-text via Unpaywall',
-            'Recalcul du clustering thématique',
-            'Rerank sémantique (scores cosinus mis à jour)',
+            t("scenarioDetail.alerts.stepMultiSource"),
+            t("scenarioDetail.alerts.stepInsert"),
+            t("scenarioDetail.alerts.stepEmbeddings"),
+            t("scenarioDetail.alerts.stepPico"),
+            t("scenarioDetail.alerts.stepFulltext"),
+            t("scenarioDetail.alerts.stepClustering"),
+            t("scenarioDetail.alerts.stepRerank"),
           ].map((step, i) => (
             <div key={i} className="flex items-center gap-2">
               <span className="h-1 w-1 rounded-full bg-brand-400"/>
@@ -3028,7 +3042,7 @@ function AlertsSection({ scenarioId }: { scenarioId: string }) {
           className="flex items-center gap-2 rounded-xl border border-brand-500/30 bg-brand-500/10 hover:bg-brand-500/20 text-brand-300 font-semibold px-4 py-2 text-xs transition disabled:opacity-50"
         >
           {lrLoading ? <Loader2 size={12} className="animate-spin"/> : <RefreshCw size={12}/>}
-          Simuler (dry run)
+          {t("scenarioDetail.alerts.simulateDryRun")}
         </button>
         {lrStatus && (
           <div className="rounded-xl border border-brand-500/20 bg-brand-500/5 p-3 text-xs text-brand-300 space-y-1">
@@ -3046,10 +3060,11 @@ function AlertsSection({ scenarioId }: { scenarioId: string }) {
 // ─── Section: Enrichissement LLM Batch ────────────────────────────────────────
 
 function EnrichmentSection({ scenarioId }: { scenarioId: string }) {
+  const { t } = useI18n();
   const [status, setStatus] = React.useState<EnrichmentStatus | null>(null);
   const [loadingStatus, setLoadingStatus] = React.useState(false);
   const [running, setRunning] = React.useState<string | null>(null);
-  const [lastResult, setLastResult] = React.useState<{ type: string; msg: string } | null>(null);
+  const [lastResult, setLastResult] = React.useState<{ type: string; msg: string; error: boolean } | null>(null);
   const [limit, setLimit] = React.useState(100000);
 
   const loadStatus = React.useCallback(async () => {
@@ -3072,10 +3087,10 @@ function EnrichmentSection({ scenarioId }: { scenarioId: string }) {
       if (type === "pico") res = await extractPicoBatchGlobal(scenarioId, limit);
       else if (type === "metadata") res = await extractMetadataBatch(scenarioId, limit);
       else res = await fetchFulltextBatch(scenarioId, Math.min(limit, 1000));
-      setLastResult({ type, msg: res.message });
+      setLastResult({ type, msg: res.message, error: false });
       await loadStatus();
     } catch (e: any) {
-      setLastResult({ type, msg: `Erreur : ${e.message}` });
+      setLastResult({ type, msg: `${t("scenarioDetail.enrichment.errorPrefix")} ${e.message}`, error: true });
     } finally {
       setRunning(null);
     }
@@ -3084,8 +3099,8 @@ function EnrichmentSection({ scenarioId }: { scenarioId: string }) {
   const JOBS = [
     {
       key: "pico" as const,
-      label: "Extraction PICO",
-      desc: "Extrait Population, Intervention, Comparateur, Outcome via LLM pour chaque article sans PICO.",
+      label: t("scenarioDetail.enrichment.picoLabel"),
+      desc: t("scenarioDetail.enrichment.picoDesc"),
       icon: <Microscope size={15} className="text-brand-400" />,
       stat: status ? `${status.pico.count} / ${status.total} (${status.pico.pct}%)` : "—",
       pct: status ? status.pico.pct : 0,
@@ -3093,8 +3108,8 @@ function EnrichmentSection({ scenarioId }: { scenarioId: string }) {
     },
     {
       key: "metadata" as const,
-      label: "Enrichissement Métadonnées",
-      desc: "Complète le type d'étude, la taille d'échantillon, le pays, le risque de biais via LLM.",
+      label: t("scenarioDetail.enrichment.metadataLabel"),
+      desc: t("scenarioDetail.enrichment.metadataDesc"),
       icon: <Database size={15} className="text-gold-400" />,
       stat: status ? `${status.metadata.count} / ${status.total} (${status.metadata.pct}%)` : "—",
       pct: status ? status.metadata.pct : 0,
@@ -3102,8 +3117,8 @@ function EnrichmentSection({ scenarioId }: { scenarioId: string }) {
     },
     {
       key: "fulltext" as const,
-      label: "Récupération Full-Text",
-      desc: "Recherche le texte intégral en accès libre via Unpaywall (DOI requis).",
+      label: t("scenarioDetail.enrichment.fulltextLabel"),
+      desc: t("scenarioDetail.enrichment.fulltextDesc"),
       icon: <Globe size={15} className="text-forest-300" />,
       stat: status ? `${status.fulltext.count} / ${status.total} (${status.fulltext.pct}%)` : "—",
       pct: status ? status.fulltext.pct : 0,
@@ -3117,22 +3132,22 @@ function EnrichmentSection({ scenarioId }: { scenarioId: string }) {
     <div className="space-y-5">
       <SectionHeader
         icon={<Zap size={16} className="text-gold-400" />}
-        title="Enrichissement LLM"
-        subtitle="Lancez les enrichissements automatiques sur les articles de ce scénario"
+        title={t("scenarioDetail.enrichment.title")}
+        subtitle={t("scenarioDetail.enrichment.subtitle")}
       />
 
       {userScenario && (
         <div className="rounded-2xl border border-brand-500/20 bg-brand-500/5 px-4 py-3 flex items-start gap-3">
           <Info size={14} className="text-brand-400 shrink-0 mt-0.5" />
           <div className="text-xs text-brand-200/80 leading-relaxed">
-            <strong className="text-brand-300">Enrichissement automatique actif</strong> : Le pipeline de votre scénario lance automatiquement l'extraction PICO et l'enrichissement des métadonnées lors de l'ingéstion des articles. Utilisez les boutons ci-dessous uniquement pour compléter les articles qui auraient été manqués ou pour relancer un enrichissement spécifique.
+            <strong className="text-brand-300">{t("scenarioDetail.enrichment.autoEnrichmentTitle")}</strong>{t("scenarioDetail.enrichment.autoEnrichmentBody")}
           </div>
         </div>
       )}
 
       {/* Paramètre lot */}
       <div className="flex items-center gap-3 rounded-2xl border border-white/8 bg-white/3 px-4 py-3">
-        <label className="text-xs text-white/50 shrink-0">Taille du lot :</label>
+        <label className="text-xs text-white/50 shrink-0">{t("scenarioDetail.enrichment.batchSizeLabel")}</label>
         <input
           type="number"
           min={5} max={100000} step={100}
@@ -3140,14 +3155,14 @@ function EnrichmentSection({ scenarioId }: { scenarioId: string }) {
           onChange={e => setLimit(Number(e.target.value))}
           className="w-20 rounded-lg border border-white/10 bg-white/5 px-2 py-1 text-xs text-white text-center focus:outline-none focus:border-brand-500/50"
         />
-        <span className="text-xs text-white/30">articles par exécution</span>
+        <span className="text-xs text-white/30">{t("scenarioDetail.enrichment.articlesPerRun")}</span>
         <button
           onClick={loadStatus}
           disabled={loadingStatus}
           className="ml-auto flex items-center gap-1.5 rounded-xl border border-white/10 px-3 py-1.5 text-xs text-white/50 hover:text-white hover:bg-white/8 transition"
         >
           <RefreshCw size={11} className={loadingStatus ? "animate-spin" : ""} />
-          Actualiser
+          {t("common.refresh")}
         </button>
       </div>
 
@@ -3166,7 +3181,7 @@ function EnrichmentSection({ scenarioId }: { scenarioId: string }) {
             {/* Barre de progression */}
             <div className="space-y-1">
               <div className="flex justify-between text-[10px] text-white/40">
-                <span>Couverture</span>
+                <span>{t("scenarioDetail.enrichment.coverage")}</span>
                 <span>{job.stat}</span>
               </div>
               <div className="h-1.5 rounded-full bg-white/5 overflow-hidden">
@@ -3183,9 +3198,9 @@ function EnrichmentSection({ scenarioId }: { scenarioId: string }) {
               className="w-full flex items-center justify-center gap-2 rounded-xl bg-brand-500/15 border border-brand-500/25 py-2 text-xs font-medium text-brand-300 hover:bg-brand-500/25 transition disabled:opacity-50 disabled:cursor-not-allowed"
             >
               {running === job.key ? (
-                <><Loader2 size={12} className="animate-spin" /> En cours...</>
+                <><Loader2 size={12} className="animate-spin" /> {t("scenarioDetail.enrichment.running")}</>
               ) : (
-                <><Zap size={12} /> Lancer ({limit} articles)</>
+                <><Zap size={12} /> {t("scenarioDetail.enrichment.launchPrefix")}{limit} {t("scenarioDetail.enrichment.launchSuffix")}</>
               )}
             </button>
           </div>
@@ -3195,11 +3210,11 @@ function EnrichmentSection({ scenarioId }: { scenarioId: string }) {
       {/* Résultat dernier job */}
       {lastResult && (
         <div className={`flex items-start gap-2.5 rounded-2xl border px-4 py-3 text-xs ${
-          lastResult.msg.startsWith("Erreur")
+          lastResult.error
             ? "border-red-500/20 bg-red-500/5 text-red-300"
             : "border-brand-500/20 bg-brand-500/5 text-brand-200"
         }`}>
-          {lastResult.msg.startsWith("Erreur") ? <AlertCircle size={13} className="mt-0.5 shrink-0" /> : <CheckCircle2 size={13} className="mt-0.5 shrink-0" />}
+          {lastResult.error ? <AlertCircle size={13} className="mt-0.5 shrink-0" /> : <CheckCircle2 size={13} className="mt-0.5 shrink-0" />}
           <span><strong className="font-semibold capitalize">{lastResult.type}</strong> : {lastResult.msg}</span>
         </div>
       )}
@@ -3213,6 +3228,7 @@ function EnrichmentSection({ scenarioId }: { scenarioId: string }) {
 // ─── Seuil de similarite ajustable ─────────────────────────────────────────
 
 function SeuilSection({ scenarioId, onSaved, onThresholdChange }: { scenarioId: string; onSaved?: () => void; onThresholdChange?: (v: number) => void }) {
+  const { t } = useI18n();
   const [threshold, setThreshold] = React.useState<number>(0.45);
   const [saving, setSaving] = React.useState(false);
   const [saved, setSaved] = React.useState(false);
@@ -3239,23 +3255,23 @@ function SeuilSection({ scenarioId, onSaved, onThresholdChange }: { scenarioId: 
   };
 
   const handleRerank = async () => {
-    setRerankStatus("Lancement du scoring...");
+    setRerankStatus(t("scenarioDetail.seuil.launchScoring"));
     try {
       await triggerRerank(scenarioId);
       pollRef.current = setInterval(() => {
         getRerankStatus(scenarioId).then(s => {
           if (s.status === "done") {
             if (pollRef.current) clearInterval(pollRef.current);
-            setRerankStatus("Scoring termine : " + (s.updated ?? "?") + " articles mis a jour.");
+            setRerankStatus(t("scenarioDetail.seuil.scoringDonePrefix") + (s.updated ?? "?") + t("scenarioDetail.seuil.scoringDoneSuffix"));
             setTimeout(() => setRerankStatus(null), 4000);
           } else if (s.status === "error") {
             if (pollRef.current) clearInterval(pollRef.current);
-            setRerankStatus("Erreur de scoring.");
+            setRerankStatus(t("scenarioDetail.seuil.scoringError"));
           }
         });
       }, 3000);
     } catch (e: any) {
-      setRerankStatus("Erreur : " + e.message);
+      setRerankStatus(t("scenarioDetail.seuil.errorPrefix") + e.message);
     }
   };
 
@@ -3263,7 +3279,7 @@ function SeuilSection({ scenarioId, onSaved, onThresholdChange }: { scenarioId: 
     <div className="rounded-2xl border border-white/8 bg-white/2 px-4 py-3 flex flex-wrap items-center gap-4">
       <div className="flex items-center gap-2 text-xs text-white/60">
         <Zap size={12} className="text-brand-400 shrink-0" />
-        <span className="font-medium text-white/70">Seuil de pertinence semantique :</span>
+        <span className="font-medium text-white/70">{t("scenarioDetail.seuil.thresholdLabel")}</span>
         <input
           type="range" min={0.1} max={0.9} step={0.05}
           value={threshold}
@@ -3276,20 +3292,20 @@ function SeuilSection({ scenarioId, onSaved, onThresholdChange }: { scenarioId: 
         <button onClick={handleSave} disabled={saving}
           className="flex items-center gap-1 rounded-lg bg-brand-500/15 hover:bg-brand-500/25 border border-brand-500/20 text-brand-300 px-2.5 py-1 text-[11px] font-medium transition disabled:opacity-50">
           {saving ? (<Loader2 size={10} className="animate-spin" />) : (<CheckCircle2 size={10} />)}
-          {saved ? "Sauvegarde !" : "Sauvegarder"}
+          {saved ? t("scenarioDetail.seuil.saved") : t("scenarioDetail.seuil.save")}
         </button>
         <button onClick={handleRerank}
           className="flex items-center gap-1 rounded-lg bg-white/5 hover:bg-white/10 border border-white/10 text-white/50 hover:text-white/70 px-2.5 py-1 text-[11px] font-medium transition">
           <RefreshCw size={10} />
-          Recalculer scores
+          {t("scenarioDetail.seuil.recalculateScores")}
         </button>
         {rerankStatus && (
           <span className="text-[10px] text-gold-400">{rerankStatus}</span>
         )}
       </div>
       <p className="text-[10px] text-white/30 w-full">
-        Les articles avec un score de similarité supérieur à ce seuil (ou validés humainement) sont utilisés dans l'Evidence Brief, l'Assistant IA et les Variables.
-        <span className="ml-1 text-white/20">Score ≡ = lexical BM25 (avant embedding) · Score ◎ = semantique cosinus (apres embedding) · "Recalculer scores" lance le rerank semantique.</span>
+        {t("scenarioDetail.seuil.footerMain")}
+        <span className="ml-1 text-white/20">{t("scenarioDetail.seuil.footerLegend")}</span>
       </p>
     </div>
   );
@@ -3297,13 +3313,14 @@ function SeuilSection({ scenarioId, onSaved, onThresholdChange }: { scenarioId: 
 
 /** ReviewTab : Corpus + PRISMA + Double-Aveugle (sous-tabs) */
 function ReviewTab({ scenarioId, detail }: { scenarioId: string; detail: ScenarioDetail }) {
+  const { t } = useI18n();
   const [sub, setSub] = React.useState<"corpus" | "prisma" | "screening">("corpus");
   const [corpusRefreshKey, setCorpusRefreshKey] = React.useState(0);
   const [liveThreshold, setLiveThreshold] = React.useState<number | undefined>(undefined);
   const SUB = [
-    { key: "corpus" as const,    label: "Corpus",         icon: <FileText size={12} /> },
-    { key: "prisma" as const,    label: "PRISMA",         icon: <Shield size={12} /> },
-    { key: "screening" as const, label: "Double-Aveugle", icon: <Users size={12} /> },
+    { key: "corpus" as const,    label: t("scenarioDetail.review.subCorpus"),    icon: <FileText size={12} /> },
+    { key: "prisma" as const,    label: t("scenarioDetail.review.subPrisma"),    icon: <Shield size={12} /> },
+    { key: "screening" as const, label: t("scenarioDetail.review.subScreening"), icon: <Users size={12} /> },
   ];
   return (
     <div className="space-y-4">
@@ -3331,6 +3348,7 @@ function ReviewTab({ scenarioId, detail }: { scenarioId: string; detail: Scenari
 
 /** EvidencesSection : Stats corpus + 5 articles PICO + Brief narratif LLM fusionnés */
 function EvidencesSection({ scenarioId, detail }: { scenarioId: string; detail: ScenarioDetail }) {
+  const { t, lang } = useI18n();
   // ── Evidence Brief data ──────────────────────────────────────────────────────
   const [briefData, setBriefData] = React.useState<EvidenceBriefData | null>(null);
   const [briefLoading, setBriefLoading] = React.useState(true);
@@ -3371,7 +3389,7 @@ function EvidencesSection({ scenarioId, detail }: { scenarioId: string; detail: 
   // Polling si génération LLM en cours
   React.useEffect(() => {
     if (!llmData || llmData.status !== 'generating') return;
-    setGenStatus('Génération en cours...');
+    setGenStatus(t("scenarioDetail.evidences.generatingInProgress"));
     pollRef.current = setInterval(() => {
       getBriefGenerationStatus(scenarioId).then(s => {
         if (s.status === 'done') {
@@ -3381,16 +3399,16 @@ function EvidencesSection({ scenarioId, detail }: { scenarioId: string; detail: 
         } else if (s.status === 'error') {
           if (pollRef.current) clearInterval(pollRef.current);
           setGenStatus(null);
-          setLlmError(s.error ?? 'Erreur de génération');
+          setLlmError(s.error ?? t("scenarioDetail.evidences.genError"));
         }
       });
     }, 5000);
     return () => { if (pollRef.current) clearInterval(pollRef.current); };
-  }, [llmData, scenarioId, loadLlm]);
+  }, [llmData, scenarioId, loadLlm, t]);
 
   const handleRegenerate = async () => {
     setRegenerating(true);
-    setGenStatus('Régénération lancée...');
+    setGenStatus(t("scenarioDetail.evidences.regenLaunched"));
     try {
       await generateEvidenceBrief(scenarioId, true);
       pollRef.current = setInterval(() => {
@@ -3404,7 +3422,7 @@ function EvidencesSection({ scenarioId, detail }: { scenarioId: string; detail: 
             if (pollRef.current) clearInterval(pollRef.current);
             setGenStatus(null);
             setRegenerating(false);
-            setLlmError(s.error ?? 'Erreur de régénération');
+            setLlmError(s.error ?? t("scenarioDetail.evidences.regenError"));
           }
         });
       }, 5000);
@@ -3433,7 +3451,7 @@ function EvidencesSection({ scenarioId, detail }: { scenarioId: string; detail: 
       const picoRel_pdf = b.corpus_stats.relevant_with_pico ?? b.corpus_stats.with_pico ?? 0;
       const ftRel_pdf = b.corpus_stats.relevant_with_fulltext ?? b.corpus_stats.with_fulltext ?? 0;
       const html = `<!DOCTYPE html><html><head><meta charset="utf-8">
-<title>Evidences : ${detail.title}</title>
+<title>${t("scenarioDetail.evidences.pdf.docTitlePrefix")} ${detail.title}</title>
 <style>
   body{font-family:Georgia,serif;max-width:820px;margin:40px auto;color:#1a1a1a;line-height:1.65;font-size:13px}
   h1{color:#0A3621;border-bottom:3px solid #E3AC3B;padding-bottom:8px;font-size:1.6em}
@@ -3490,58 +3508,58 @@ function EvidencesSection({ scenarioId, detail }: { scenarioId: string; detail: 
   .grade-badge{background:#0A3621;color:#E3AC3B;border-radius:6px;padding:3px 10px;font-weight:700;font-size:.85em;display:inline-block;margin-left:6px}
   @media print{.no-print{display:none}}
 </style></head><body>
-<h1>Evidences</h1>
+<h1>${t("scenarioDetail.evidences.pdf.heading")}</h1>
 <div class="meta">
   <strong>${detail.title}</strong> · LiteRev Evidence<br>
-  Généré le ${new Date().toLocaleDateString('fr-FR',{year:'numeric',month:'long',day:'numeric'})}
-  ${llm?._meta ? ` · ${llm._meta.articles_used} articles · seuil ${llm._meta.threshold?.toFixed(2)}` : ''}
+  ${t("scenarioDetail.evidences.pdf.subheadingGeneratedOn")} ${new Date().toLocaleDateString(lang === "fr" ? "fr-FR" : "en-US",{year:'numeric',month:'long',day:'numeric'})}
+  ${llm?._meta ? ` · ${llm._meta.articles_used} ${t("scenarioDetail.evidences.pdf.subheadingArticles")} ${llm._meta.threshold?.toFixed(2)}` : ''}
 </div>
 
-<h2>Statistiques du Corpus</h2>
+<h2>${t("scenarioDetail.evidences.pdf.corpusStats")}</h2>
 <div class="stat-grid">
-  <div class="stat"><div class="stat-val">${uniqueTotal_pdf}</div><div class="stat-sub">${dups_pdf>0?`dont ${dups_pdf} doublons`:'uniques'}</div><div class="stat-label">Articles (corpus)</div></div>
-  <div class="stat"><div class="stat-val" style="color:#2d7a52">${relevant_pdf}</div><div class="stat-sub">seuil ≥ ${thr_pdf.toFixed(2)} · ${Math.round(relevant_pdf/(uniqueTotal_pdf||1)*100)}% du corpus</div><div class="stat-label">Pertinents (utilisés)</div></div>
-  <div class="stat"><div class="stat-val" style="color:#d97706">${picoRel_pdf}</div><div class="stat-sub">${Math.round(picoRel_pdf/rTotal_pdf*100)}% des pertinents</div><div class="stat-label">PICO extraits</div></div>
-  <div class="stat"><div class="stat-val" style="color:#3b82f6">${ftRel_pdf}</div><div class="stat-sub">${Math.round(ftRel_pdf/rTotal_pdf*100)}% des pertinents</div><div class="stat-label">Texte intégral</div></div>
+  <div class="stat"><div class="stat-val">${uniqueTotal_pdf}</div><div class="stat-sub">${dups_pdf>0?`${t("scenarioDetail.evidences.pdf.statDuplicatesPrefix")} ${dups_pdf} ${t("scenarioDetail.evidences.pdf.statDuplicatesSuffix")}`:t("scenarioDetail.evidences.pdf.statUnique")}</div><div class="stat-label">${t("scenarioDetail.evidences.pdf.articlesCorpus")}</div></div>
+  <div class="stat"><div class="stat-val" style="color:#2d7a52">${relevant_pdf}</div><div class="stat-sub">${t("scenarioDetail.evidences.pdf.thresholdPrefix")} ${thr_pdf.toFixed(2)} · ${Math.round(relevant_pdf/(uniqueTotal_pdf||1)*100)}% ${t("scenarioDetail.evidences.pdf.ofCorpus")}</div><div class="stat-label">${t("scenarioDetail.evidences.pdf.relevantUsed")}</div></div>
+  <div class="stat"><div class="stat-val" style="color:#d97706">${picoRel_pdf}</div><div class="stat-sub">${Math.round(picoRel_pdf/rTotal_pdf*100)}% ${t("scenarioDetail.evidences.pdf.ofRelevant")}</div><div class="stat-label">${t("scenarioDetail.evidences.pdf.picoExtracted")}</div></div>
+  <div class="stat"><div class="stat-val" style="color:#3b82f6">${ftRel_pdf}</div><div class="stat-sub">${Math.round(ftRel_pdf/rTotal_pdf*100)}% ${t("scenarioDetail.evidences.pdf.ofRelevant")}</div><div class="stat-label">${t("scenarioDetail.evidences.pdf.fulltext")}</div></div>
 </div>
-${(b.corpus_stats.included||b.corpus_stats.excluded||(b.corpus_stats.pending??0)) ? `<p class="meta">Screening (corpus complet) : <strong>${b.corpus_stats.included}</strong> inclus · <strong>${b.corpus_stats.excluded}</strong> exclus · <strong>${b.corpus_stats.pending ?? Math.max(0, uniqueTotal_pdf - b.corpus_stats.included - b.corpus_stats.excluded)}</strong> en attente</p>` : ''}
-${b.corpus_stats.year_min && b.corpus_stats.year_max ? `<p class="meta">Couverture : <strong>${b.corpus_stats.year_min} – ${b.corpus_stats.year_max}</strong>${b.corpus_stats.avg_citations != null ? ` · Citations moy. : <strong>${b.corpus_stats.avg_citations.toFixed(1)}</strong>` : ''}</p>` : ''}
+${(b.corpus_stats.included||b.corpus_stats.excluded||(b.corpus_stats.pending??0)) ? `<p class="meta">${t("scenarioDetail.evidences.pdf.screeningPrefix")} <strong>${b.corpus_stats.included}</strong> ${t("scenarioDetail.evidences.pdf.screeningIncluded")} · <strong>${b.corpus_stats.excluded}</strong> ${t("scenarioDetail.evidences.pdf.screeningExcluded")} · <strong>${b.corpus_stats.pending ?? Math.max(0, uniqueTotal_pdf - b.corpus_stats.included - b.corpus_stats.excluded)}</strong> ${t("scenarioDetail.evidences.pdf.screeningPending")}</p>` : ''}
+${b.corpus_stats.year_min && b.corpus_stats.year_max ? `<p class="meta">${t("scenarioDetail.evidences.pdf.coveragePrefix")} <strong>${b.corpus_stats.year_min} – ${b.corpus_stats.year_max}</strong>${b.corpus_stats.avg_citations != null ? ` · ${t("scenarioDetail.evidences.pdf.avgCitations")} <strong>${b.corpus_stats.avg_citations.toFixed(1)}</strong>` : ''}</p>` : ''}
 
 <div class="dist-grid">
   <div class="dist-box">
-    <div class="dist-title">Types d'étude</div>
-    ${(()=>{const top=b.study_design_distribution;const rem=relevant_pdf-top.reduce((s,d)=>s+d.count,0);const rows=rem>0?[...top,{design:'Autres',count:rem}]:top;return rows.map(d=>`<div class="bar-row"><span class="bar-label">${d.design}</span><div class="bar-track"><div class="bar-fill-green" style="width:${Math.round(d.count/rTotal_pdf*100)}%"></div></div><span class="bar-count">${d.count}</span></div>`).join('');})()}
+    <div class="dist-title">${t("scenarioDetail.evidences.pdf.studyTypes")}</div>
+    ${(()=>{const top=b.study_design_distribution;const rem=relevant_pdf-top.reduce((s,d)=>s+d.count,0);const rows=rem>0?[...top,{design:t("scenarioDetail.evidences.pdf.other"),count:rem}]:top;return rows.map(d=>`<div class="bar-row"><span class="bar-label">${d.design}</span><div class="bar-track"><div class="bar-fill-green" style="width:${Math.round(d.count/rTotal_pdf*100)}%"></div></div><span class="bar-count">${d.count}</span></div>`).join('');})()}
   </div>
   <div class="dist-box">
-    <div class="dist-title">Sources</div>
-    ${(()=>{const top=(b.source_distribution??[]);const rem=relevant_pdf-top.reduce((s,d)=>s+d.count,0);const rows=rem>0?[...top,{source:'Autres',count:rem}]:top;return rows.map(d=>`<div class="bar-row"><span class="bar-label">${d.source}</span><div class="bar-track"><div class="bar-fill-blue" style="width:${Math.round(d.count/rTotal_pdf*100)}%"></div></div><span class="bar-count">${d.count}</span></div>`).join('');})()}
+    <div class="dist-title">${t("scenarioDetail.evidences.pdf.sources")}</div>
+    ${(()=>{const top=(b.source_distribution??[]);const rem=relevant_pdf-top.reduce((s,d)=>s+d.count,0);const rows=rem>0?[...top,{source:t("scenarioDetail.evidences.pdf.other"),count:rem}]:top;return rows.map(d=>`<div class="bar-row"><span class="bar-label">${d.source}</span><div class="bar-track"><div class="bar-fill-blue" style="width:${Math.round(d.count/rTotal_pdf*100)}%"></div></div><span class="bar-count">${d.count}</span></div>`).join('');})()}
   </div>
   <div class="dist-box">
-    <div class="dist-title">Niveaux de preuve</div>
+    <div class="dist-title">${t("scenarioDetail.evidences.pdf.evidenceLevels")}</div>
     ${(b.evidence_level_distribution??[]).slice(0,6).map(d=>`<div class="bar-row"><span class="bar-label">${d.level}</span><div class="bar-track"><div class="bar-fill-gold" style="width:${Math.round(d.count/rTotal_pdf*100)}%"></div></div><span class="bar-count">${d.count}</span></div>`).join('')}
   </div>
 </div>
 
 ${llm && (llm.executive_summary || (llm.key_findings?.length ?? 0) > 0) ? `
 <hr class="section-divider">
-<h2>Brief Narratif LLM</h2>
-${llm._meta ? `<p class="meta">${llm._meta.articles_used} articles analysés · seuil ${llm._meta.threshold?.toFixed(2)} · ${llm._meta.human_validated} validés humainement · ${llm._meta.year_range}</p>` : ''}
-${(llm.evidence_level||llm.grade_recommendation) ? `<p>${llm.evidence_level?`<span class="level-badge-${llm.evidence_level.toLowerCase().includes('fort')?'forte':llm.evidence_level.toLowerCase().includes('mod')?'mod':'faible'}">Niveau : ${llm.evidence_level}</span>`:''} ${llm.grade_recommendation?`<span class="grade-badge">Grade ${llm.grade_recommendation}</span>`:''}</p>` : ''}
-${llm.executive_summary ? `<div class="llm-box"><div class="llm-label">Résumé exécutif</div><div class="llm-text">${llm.executive_summary}</div></div>` : ''}
-${llm.clinical_context ? `<h3>Contexte clinique</h3><p class="llm-text">${llm.clinical_context}</p>` : ''}
-${(llm.key_findings?.length??0)>0 ? `<h3>Résultats clés</h3><ul class="llm-list">${llm.key_findings!.map(f=>`<li>${f}</li>`).join('')}</ul>` : ''}
-${llm.evidence_synthesis ? `<h3>Synthèse des évidences</h3><p class="llm-text">${llm.evidence_synthesis}</p>` : ''}
-${(llm.population_summary||llm.intervention_summary||llm.outcome_summary) ? `<div class="pico-summary-grid">${llm.population_summary?`<div class="pico-summary-cell"><div class="pico-label">Population</div><div class="llm-text">${llm.population_summary}</div></div>`:''} ${llm.intervention_summary?`<div class="pico-summary-cell"><div class="pico-label">Intervention</div><div class="llm-text">${llm.intervention_summary}</div></div>`:''} ${llm.outcome_summary?`<div class="pico-summary-cell"><div class="pico-label">Outcome</div><div class="llm-text">${llm.outcome_summary}</div></div>`:''}</div>` : ''}
-${(llm.recommended_actions?.length??0)>0 ? `<div class="llm-gold"><div class="llm-gold-label">Actions recommandées</div><ul class="llm-list">${llm.recommended_actions!.map(a=>`<li>${a}</li>`).join('')}</ul></div>` : ''}
-${llm.clinical_implications ? `<h3>Implications cliniques</h3><p class="llm-text">${llm.clinical_implications}</p>` : ''}
-${(llm.implementation_recommendations?.length??0)>0 ? `<h3>Recommandations d'implémentation</h3><ul class="llm-list">${llm.implementation_recommendations!.map(r=>`<li>${r}</li>`).join('')}</ul>` : ''}
-${((llm.limitations?.length??0)>0||(llm.research_gaps?.length??0)>0) ? `<div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:12px">${(llm.limitations?.length??0)>0?`<div><h3>Limites</h3><ul class="llm-list">${llm.limitations!.map(l=>`<li>${l}</li>`).join('')}</ul></div>`:''} ${(llm.research_gaps?.length??0)>0?`<div><h3>Lacunes de recherche</h3><ul class="llm-list">${llm.research_gaps!.map(g=>`<li>${g}</li>`).join('')}</ul></div>`:''}</div>` : ''}
-${llm.future_research ? `<h3>Directions de recherche futures</h3><p class="llm-text">${llm.future_research}</p>` : ''}
+<h2>${t("scenarioDetail.evidences.pdf.narrativeBrief")}</h2>
+${llm._meta ? `<p class="meta">${llm._meta.articles_used} ${t("scenarioDetail.evidences.pdf.articlesAnalyzed")} ${llm._meta.threshold?.toFixed(2)} · ${llm._meta.human_validated} ${t("scenarioDetail.evidences.pdf.humanValidated")} · ${llm._meta.year_range}</p>` : ''}
+${(llm.evidence_level||llm.grade_recommendation) ? `<p>${llm.evidence_level?`<span class="level-badge-${llm.evidence_level.toLowerCase().includes('fort')?'forte':llm.evidence_level.toLowerCase().includes('mod')?'mod':'faible'}">${t("scenarioDetail.evidences.pdf.level")} ${llm.evidence_level}</span>`:''} ${llm.grade_recommendation?`<span class="grade-badge">${t("scenarioDetail.evidences.pdf.grade")} ${llm.grade_recommendation}</span>`:''}</p>` : ''}
+${llm.executive_summary ? `<div class="llm-box"><div class="llm-label">${t("scenarioDetail.evidences.pdf.executiveSummary")}</div><div class="llm-text">${llm.executive_summary}</div></div>` : ''}
+${llm.clinical_context ? `<h3>${t("scenarioDetail.evidences.pdf.clinicalContext")}</h3><p class="llm-text">${llm.clinical_context}</p>` : ''}
+${(llm.key_findings?.length??0)>0 ? `<h3>${t("scenarioDetail.evidences.pdf.keyFindings")}</h3><ul class="llm-list">${llm.key_findings!.map(f=>`<li>${f}</li>`).join('')}</ul>` : ''}
+${llm.evidence_synthesis ? `<h3>${t("scenarioDetail.evidences.pdf.evidenceSynthesis")}</h3><p class="llm-text">${llm.evidence_synthesis}</p>` : ''}
+${(llm.population_summary||llm.intervention_summary||llm.outcome_summary) ? `<div class="pico-summary-grid">${llm.population_summary?`<div class="pico-summary-cell"><div class="pico-label">${t("scenarioDetail.evidences.pdf.population")}</div><div class="llm-text">${llm.population_summary}</div></div>`:''} ${llm.intervention_summary?`<div class="pico-summary-cell"><div class="pico-label">${t("scenarioDetail.evidences.pdf.intervention")}</div><div class="llm-text">${llm.intervention_summary}</div></div>`:''} ${llm.outcome_summary?`<div class="pico-summary-cell"><div class="pico-label">${t("scenarioDetail.evidences.pdf.outcome")}</div><div class="llm-text">${llm.outcome_summary}</div></div>`:''}</div>` : ''}
+${(llm.recommended_actions?.length??0)>0 ? `<div class="llm-gold"><div class="llm-gold-label">${t("scenarioDetail.evidences.pdf.recommendedActions")}</div><ul class="llm-list">${llm.recommended_actions!.map(a=>`<li>${a}</li>`).join('')}</ul></div>` : ''}
+${llm.clinical_implications ? `<h3>${t("scenarioDetail.evidences.pdf.clinicalImplications")}</h3><p class="llm-text">${llm.clinical_implications}</p>` : ''}
+${(llm.implementation_recommendations?.length??0)>0 ? `<h3>${t("scenarioDetail.evidences.pdf.implementationRecommendations")}</h3><ul class="llm-list">${llm.implementation_recommendations!.map(r=>`<li>${r}</li>`).join('')}</ul>` : ''}
+${((llm.limitations?.length??0)>0||(llm.research_gaps?.length??0)>0) ? `<div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:12px">${(llm.limitations?.length??0)>0?`<div><h3>${t("scenarioDetail.evidences.pdf.limitations")}</h3><ul class="llm-list">${llm.limitations!.map(l=>`<li>${l}</li>`).join('')}</ul></div>`:''} ${(llm.research_gaps?.length??0)>0?`<div><h3>${t("scenarioDetail.evidences.pdf.researchGaps")}</h3><ul class="llm-list">${llm.research_gaps!.map(g=>`<li>${g}</li>`).join('')}</ul></div>`:''}</div>` : ''}
+${llm.future_research ? `<h3>${t("scenarioDetail.evidences.pdf.futureResearch")}</h3><p class="llm-text">${llm.future_research}</p>` : ''}
 
 ` : ''}
 
 <footer>
-  LiteRev Evidence · ${new Date().getFullYear()} · Généré automatiquement depuis la base de données de littérature scientifique.
+  LiteRev Evidence · ${new Date().getFullYear()} · ${t("scenarioDetail.evidences.pdf.footer")}
 </footer>
 </body></html>`;
       const blob = new Blob([html], {type:'text/html;charset=utf-8'});
@@ -3569,18 +3587,18 @@ ${llm.future_research ? `<h3>Directions de recherche futures</h3><p class="llm-t
         <div>
           <SectionHeader
             icon={<BookOpen size={14} className="text-brand-400" />}
-            title="Evidences"
-            subtitle="Rapport synthétique complet : corpus, PICO, screening, brief narratif"
+            title={t("scenarioDetail.evidences.title")}
+            subtitle={t("scenarioDetail.evidences.subtitle")}
           />
           {meta && (
             <p className="text-[10px] text-white/35 mt-1">
-              {meta.articles_used} articles analysés · seuil {meta.threshold?.toFixed(2)} · {meta.human_validated} validés humainement
+              {meta.articles_used} {t("scenarioDetail.evidences.metaArticlesAnalyzed")} {meta.threshold?.toFixed(2)} · {meta.human_validated} {t("scenarioDetail.evidences.metaHumanValidated")}
               {meta.year_range ? ` · ${meta.year_range}` : ''}
             </p>
           )}
           {!meta && briefData && (
             <p className="text-[10px] text-white/35 mt-1">
-              Généré le {new Date(briefData.generated_at).toLocaleDateString('fr-FR',{year:'numeric',month:'long',day:'numeric'})}
+              {t("scenarioDetail.evidences.generatedOn")} {new Date(briefData.generated_at).toLocaleDateString(lang === "fr" ? "fr-FR" : "en-US",{year:'numeric',month:'long',day:'numeric'})}
             </p>
           )}
         </div>
@@ -3593,13 +3611,13 @@ ${llm.future_research ? `<h3>Directions de recherche futures</h3><p class="llm-t
           <button onClick={handleRegenerate} disabled={regenerating || llmLoading}
             className="flex items-center gap-1.5 rounded-xl border border-brand-500/30 bg-brand-500/10 hover:bg-brand-500/20 text-brand-300 font-medium px-3 py-1.5 text-xs transition disabled:opacity-50">
             {regenerating ? (<Loader2 size={11} className="animate-spin" />) : (<RefreshCw size={11} />)}
-            Régénérer brief
+            {t("scenarioDetail.evidences.regenerateBrief")}
           </button>
           {briefData && (
             <button onClick={handleExport} disabled={exporting}
               className="flex items-center gap-2 rounded-2xl bg-brand-500 hover:bg-brand-400 text-white font-semibold px-4 py-2 text-xs transition disabled:opacity-50">
               {exporting ? <Loader2 size={12} className="animate-spin"/> : <Download size={12}/>}
-              {exporting ? 'Génération...' : 'Exporter PDF'}
+              {exporting ? t("scenarioDetail.evidences.generating") : t("scenarioDetail.evidences.exportPdf")}
             </button>
           )}
         </div>
@@ -3610,13 +3628,13 @@ ${llm.future_research ? `<h3>Directions de recherche futures</h3><p class="llm-t
         <div className="rounded-2xl border border-gold-500/20 bg-gold-500/5 px-4 py-3 flex items-start gap-3">
           <AlertTriangle size={14} className="text-gold-400 shrink-0 mt-0.5" />
           <div className="text-xs text-gold-200/80 leading-relaxed">
-            <strong className="text-gold-300">Aucun article validé par un relecteur humain</strong> : Les articles présentés ont été sélectionnés automatiquement. Un screening humain en double-aveugle est nécessaire pour une revue systématique formelle.
+            <strong className="text-gold-300">{t("scenarioDetail.evidences.noHumanValidatedTitle")}</strong>{t("scenarioDetail.evidences.noHumanValidatedBody")}
           </div>
         </div>
       )}
 
       {/* ─── STATS CORPUS ────────────────────────────────────────────────────── */}
-      {briefLoading && <LoadingSpinner text="Chargement des statistiques corpus..." />}
+      {briefLoading && <LoadingSpinner text={t("scenarioDetail.evidences.loadingCorpusStats")} />}
       {briefError && <ErrorBox message={briefError} />}
       {briefData && (
         <>
@@ -3633,10 +3651,10 @@ ${llm.future_research ? `<h3>Directions de recherche futures</h3><p class="llm-t
             const rTotal = relevant || 1;
             const thr = cs.threshold ?? 0.45;
             const boxes = [
-              {label:'Articles (corpus)', value:uniqueTotal,                            color:'text-white',       sub:dups>0?`dont ${dups} doublons`:'uniques'},
-              {label:'Pertinents (utilisés)', value:relevant,                           color:'text-brand-300',   sub:`seuil ≥ ${thr} · ${Math.round(relevant/(uniqueTotal||1)*100)}% du corpus`},
-              {label:'PICO extraits',     value:cs.relevant_with_pico ?? cs.with_pico,  color:'text-gold-400',    sub:`${Math.round((cs.relevant_with_pico ?? cs.with_pico)/rTotal*100)}% des pertinents`},
-              {label:'Texte intégral',    value:cs.relevant_with_fulltext ?? cs.with_fulltext ?? 0, color:'text-blue-300', sub:`${Math.round((cs.relevant_with_fulltext ?? cs.with_fulltext ?? 0)/rTotal*100)}% des pertinents`},
+              {label:t("scenarioDetail.evidences.statCorpusArticles"), value:uniqueTotal,                            color:'text-white',       sub:dups>0?`${t("scenarioDetail.evidences.subDuplicatesPrefix")} ${dups} ${t("scenarioDetail.evidences.subDuplicatesSuffix")}`:t("scenarioDetail.evidences.subUnique")},
+              {label:t("scenarioDetail.evidences.statRelevantUsed"), value:relevant,                           color:'text-brand-300',   sub:`${t("scenarioDetail.evidences.subThresholdPrefix")} ${thr} · ${Math.round(relevant/(uniqueTotal||1)*100)}% ${t("scenarioDetail.evidences.subOfCorpus")}`},
+              {label:t("scenarioDetail.evidences.statPicoExtracted"),     value:cs.relevant_with_pico ?? cs.with_pico,  color:'text-gold-400',    sub:`${Math.round((cs.relevant_with_pico ?? cs.with_pico)/rTotal*100)}% ${t("scenarioDetail.evidences.subOfRelevant")}`},
+              {label:t("scenarioDetail.evidences.statFulltext"),    value:cs.relevant_with_fulltext ?? cs.with_fulltext ?? 0, color:'text-blue-300', sub:`${Math.round((cs.relevant_with_fulltext ?? cs.with_fulltext ?? 0)/rTotal*100)}% ${t("scenarioDetail.evidences.subOfRelevant")}`},
             ];
             return (
               <div className="grid grid-cols-2 lg:grid-cols-4 gap-2.5">
@@ -3654,22 +3672,22 @@ ${llm.future_research ? `<h3>Directions de recherche futures</h3><p class="llm-t
           {/* Couverture temporelle */}
           {briefData.corpus_stats.year_min && briefData.corpus_stats.year_max && (
             <div className="flex flex-wrap gap-4 text-xs text-white/50">
-              <span>Couverture : <span className="text-white/70 font-semibold">{briefData.corpus_stats.year_min} – {briefData.corpus_stats.year_max}</span></span>
-              {briefData.corpus_stats.avg_citations != null && <span>Citations moy. : <span className="text-white/70 font-semibold">{briefData.corpus_stats.avg_citations.toFixed(1)}</span></span>}
-              {briefData.corpus_stats.max_citations != null && <span>Max : <span className="text-white/70 font-semibold">{briefData.corpus_stats.max_citations}</span></span>}
+              <span>{t("scenarioDetail.evidences.coverage")} <span className="text-white/70 font-semibold">{briefData.corpus_stats.year_min} – {briefData.corpus_stats.year_max}</span></span>
+              {briefData.corpus_stats.avg_citations != null && <span>{t("scenarioDetail.evidences.avgCitations")} <span className="text-white/70 font-semibold">{briefData.corpus_stats.avg_citations.toFixed(1)}</span></span>}
+              {briefData.corpus_stats.max_citations != null && <span>{t("scenarioDetail.evidences.max")} <span className="text-white/70 font-semibold">{briefData.corpus_stats.max_citations}</span></span>}
             </div>
           )}
 
           {/* Distributions */}
           <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
             <div className="rounded-2xl border border-white/5 bg-white/2 p-4 space-y-2">
-              <p className="text-[10px] font-bold uppercase tracking-wider text-white/40">Types d'étude</p>
+              <p className="text-[10px] font-bold uppercase tracking-wider text-white/40">{t("scenarioDetail.evidences.studyTypes")}</p>
               <div className="space-y-1.5">
                 {(() => {
                   // Toutes les catégories + « Autres » (reste) pour que la somme corresponde au corpus
                   const top = briefData.study_design_distribution;
                   const remainder = relevant - top.reduce((s,d)=>s+d.count,0);
-                  const rows = remainder > 0 ? [...top, {design:'Autres', count:remainder}] : top;
+                  const rows = remainder > 0 ? [...top, {design:t("scenarioDetail.evidences.other"), count:remainder}] : top;
                   return rows.map(d=>(
                   <div key={d.design} className="flex items-center gap-2 text-[10px]">
                     <span className="w-28 text-white/60 truncate">{d.design}</span>
@@ -3683,12 +3701,12 @@ ${llm.future_research ? `<h3>Directions de recherche futures</h3><p class="llm-t
               </div>
             </div>
             <div className="rounded-2xl border border-white/5 bg-white/2 p-4 space-y-2">
-              <p className="text-[10px] font-bold uppercase tracking-wider text-white/40">Sources</p>
+              <p className="text-[10px] font-bold uppercase tracking-wider text-white/40">{t("scenarioDetail.evidences.sources")}</p>
               <div className="space-y-1.5">
                 {(() => {
                   const top = (briefData.source_distribution ?? []);
                   const remainder = relevant - top.reduce((s,d)=>s+d.count,0);
-                  const rows = remainder > 0 ? [...top, {source:'Autres', count:remainder}] : top;
+                  const rows = remainder > 0 ? [...top, {source:t("scenarioDetail.evidences.other"), count:remainder}] : top;
                   return rows.map(d=>(
                   <div key={d.source} className="flex items-center gap-2 text-[10px]">
                     <span className="w-28 text-white/60 truncate capitalize">{d.source}</span>
@@ -3702,7 +3720,7 @@ ${llm.future_research ? `<h3>Directions de recherche futures</h3><p class="llm-t
               </div>
             </div>
             <div className="rounded-2xl border border-white/5 bg-white/2 p-4 space-y-2">
-              <p className="text-[10px] font-bold uppercase tracking-wider text-white/40">Niveaux de preuve</p>
+              <p className="text-[10px] font-bold uppercase tracking-wider text-white/40">{t("scenarioDetail.evidences.evidenceLevels")}</p>
               <div className="space-y-1.5">
                 {(briefData.evidence_level_distribution ?? []).slice(0,6).map(d=>(
                   <div key={d.level} className="flex items-center gap-2 text-[10px]">
@@ -3722,17 +3740,17 @@ ${llm.future_research ? `<h3>Directions de recherche futures</h3><p class="llm-t
       {/* ─── SÉPARATEUR ─────────────────────────────────────────────────────── */}
       {briefData && (hasLlmContent || llmLoading) && (
         <div className="border-t border-gold-500/20 pt-2">
-          <p className="text-[10px] font-bold uppercase tracking-wider text-gold-400/60">Brief narratif LLM</p>
+          <p className="text-[10px] font-bold uppercase tracking-wider text-gold-400/60">{t("scenarioDetail.evidences.narrativeBriefLlm")}</p>
         </div>
       )}
 
       {/* ─── BRIEF LLM ──────────────────────────────────────────────────────── */}
-      {llmLoading && <LoadingSpinner text="Chargement du brief narratif LLM..." />}
+      {llmLoading && <LoadingSpinner text={t("scenarioDetail.evidences.loadingBrief")} />}
       {llmError && <ErrorBox message={llmError} />}
       {llmData && llmData.status === 'empty' && (
         <div className="rounded-2xl border border-slate-500/20 bg-slate-500/5 px-4 py-3">
           <p className="text-xs text-slate-300/80">
-            <strong className="text-slate-200">Aucun article disponible pour le brief LLM</strong> : {llmData.message ?? 'Ajoutez des articles ou abaissez le seuil de similarité.'}
+            <strong className="text-slate-200">{t("scenarioDetail.evidences.noArticleForBriefTitle")}</strong> : {llmData.message ?? t("scenarioDetail.evidences.noArticleForBriefDefault")}
           </p>
         </div>
       )}
@@ -3740,13 +3758,13 @@ ${llm.future_research ? `<h3>Directions de recherche futures</h3><p class="llm-t
         <div className="rounded-2xl border border-gold-500/20 bg-gold-500/5 px-5 py-4 flex items-start gap-3">
           <Loader2 size={14} className="text-gold-400 animate-spin shrink-0 mt-0.5" />
           <div className="text-xs text-gold-200/80">
-            <strong className="text-gold-300">Brief LLM en cours de génération</strong> : {llmData.message ?? 'Réessayez dans 30 secondes.'}
+            <strong className="text-gold-300">{t("scenarioDetail.evidences.briefGeneratingTitle")}</strong> : {llmData.message ?? t("scenarioDetail.evidences.briefGeneratingDefault")}
           </div>
         </div>
       )}
       {llmData && !llmData.status && !hasLlmContent && (
         <div className="rounded-2xl border border-white/10 bg-white/3 px-4 py-6 text-center text-xs text-white/40">
-          Aucun brief LLM disponible. Cliquez sur "Régénérer brief" pour lancer la génération.
+          {t("scenarioDetail.evidences.noBriefAvailable")}
         </div>
       )}
       {llmData && hasLlmContent && (
@@ -3759,11 +3777,11 @@ ${llm.future_research ? `<h3>Directions de recherche futures</h3><p class="llm-t
                   llmData.evidence_level.toLowerCase().includes('fort') ? 'bg-brand-500/15 border-brand-500/30 text-brand-300' :
                   llmData.evidence_level.toLowerCase().includes('mod') ? 'bg-gold-500/15 border-gold-500/30 text-gold-300' :
                   'bg-white/5 border-white/10 text-white/50'
-                }`}>Niveau : {llmData.evidence_level}</span>
+                }`}>{t("scenarioDetail.evidences.levelPrefix")} {llmData.evidence_level}</span>
               )}
               {llmData.grade_recommendation && (
                 <span className="rounded-xl px-3 py-1 text-xs font-semibold border bg-brand-500/10 border-brand-500/20 text-brand-200">
-                  Grade {llmData.grade_recommendation}
+                  {t("scenarioDetail.evidences.gradePrefix")} {llmData.grade_recommendation}
                 </span>
               )}
             </div>
@@ -3771,21 +3789,21 @@ ${llm.future_research ? `<h3>Directions de recherche futures</h3><p class="llm-t
           {/* Résumé exécutif */}
           {llmData.executive_summary && (
             <div className="rounded-2xl border border-brand-500/20 bg-brand-500/5 p-4">
-              <p className="text-[10px] font-bold uppercase tracking-wider text-brand-400 mb-2">Résumé exécutif</p>
+              <p className="text-[10px] font-bold uppercase tracking-wider text-brand-400 mb-2">{t("scenarioDetail.evidences.executiveSummary")}</p>
               <p className="text-sm text-white/80 leading-relaxed">{llmData.executive_summary}</p>
             </div>
           )}
           {/* Contexte clinique */}
           {llmData.clinical_context && (
             <div className="space-y-1">
-              <p className="text-[10px] font-bold uppercase tracking-wider text-white/35">Contexte clinique</p>
+              <p className="text-[10px] font-bold uppercase tracking-wider text-white/35">{t("scenarioDetail.evidences.clinicalContext")}</p>
               <p className="text-xs text-white/65 leading-relaxed">{llmData.clinical_context}</p>
             </div>
           )}
           {/* Résultats clés */}
           {llmData.key_findings && llmData.key_findings.length > 0 && (
             <div className="space-y-2">
-              <p className="text-[10px] font-bold uppercase tracking-wider text-white/35">Résultats clés</p>
+              <p className="text-[10px] font-bold uppercase tracking-wider text-white/35">{t("scenarioDetail.evidences.keyFindings")}</p>
               <ul className="space-y-1.5">
                 {llmData.key_findings.map((f, i) => (
                   <li key={i} className="flex items-start gap-2 text-xs text-white/70">
@@ -3799,7 +3817,7 @@ ${llm.future_research ? `<h3>Directions de recherche futures</h3><p class="llm-t
           {/* Synthèse des évidences */}
           {llmData.evidence_synthesis && (
             <div className="space-y-1">
-              <p className="text-[10px] font-bold uppercase tracking-wider text-white/35">Synthèse des évidences</p>
+              <p className="text-[10px] font-bold uppercase tracking-wider text-white/35">{t("scenarioDetail.evidences.evidenceSynthesis")}</p>
               <p className="text-xs text-white/65 leading-relaxed whitespace-pre-line">{llmData.evidence_synthesis}</p>
             </div>
           )}
@@ -3808,19 +3826,19 @@ ${llm.future_research ? `<h3>Directions de recherche futures</h3><p class="llm-t
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
               {llmData.population_summary && (
                 <div className="rounded-xl border border-white/8 bg-white/3 p-3">
-                  <p className="text-[9px] font-bold uppercase tracking-wider text-white/30 mb-1">Population</p>
+                  <p className="text-[9px] font-bold uppercase tracking-wider text-white/30 mb-1">{t("scenarioDetail.evidences.population")}</p>
                   <p className="text-xs text-white/60 leading-relaxed">{llmData.population_summary}</p>
                 </div>
               )}
               {llmData.intervention_summary && (
                 <div className="rounded-xl border border-white/8 bg-white/3 p-3">
-                  <p className="text-[9px] font-bold uppercase tracking-wider text-white/30 mb-1">Intervention</p>
+                  <p className="text-[9px] font-bold uppercase tracking-wider text-white/30 mb-1">{t("scenarioDetail.evidences.intervention")}</p>
                   <p className="text-xs text-white/60 leading-relaxed">{llmData.intervention_summary}</p>
                 </div>
               )}
               {llmData.outcome_summary && (
                 <div className="rounded-xl border border-white/8 bg-white/3 p-3">
-                  <p className="text-[9px] font-bold uppercase tracking-wider text-white/30 mb-1">Outcome</p>
+                  <p className="text-[9px] font-bold uppercase tracking-wider text-white/30 mb-1">{t("scenarioDetail.evidences.outcome")}</p>
                   <p className="text-xs text-white/60 leading-relaxed">{llmData.outcome_summary}</p>
                 </div>
               )}
@@ -3829,7 +3847,7 @@ ${llm.future_research ? `<h3>Directions de recherche futures</h3><p class="llm-t
           {/* Actions recommandées */}
           {llmData.recommended_actions && llmData.recommended_actions.length > 0 && (
             <div className="rounded-2xl border border-gold-500/20 bg-gold-500/5 p-4 space-y-2">
-              <p className="text-[10px] font-bold uppercase tracking-wider text-gold-400">Actions recommandées</p>
+              <p className="text-[10px] font-bold uppercase tracking-wider text-gold-400">{t("scenarioDetail.evidences.recommendedActions")}</p>
               <ul className="space-y-1.5">
                 {llmData.recommended_actions.map((a, i) => (
                   <li key={i} className="flex items-start gap-2 text-xs text-gold-200/80">
@@ -3843,14 +3861,14 @@ ${llm.future_research ? `<h3>Directions de recherche futures</h3><p class="llm-t
           {/* Implications cliniques */}
           {llmData.clinical_implications && (
             <div className="space-y-1">
-              <p className="text-[10px] font-bold uppercase tracking-wider text-white/35">Implications cliniques</p>
+              <p className="text-[10px] font-bold uppercase tracking-wider text-white/35">{t("scenarioDetail.evidences.clinicalImplications")}</p>
               <p className="text-xs text-white/65 leading-relaxed">{llmData.clinical_implications}</p>
             </div>
           )}
           {/* Recommandations d'implémentation */}
           {llmData.implementation_recommendations && llmData.implementation_recommendations.length > 0 && (
             <div className="space-y-2">
-              <p className="text-[10px] font-bold uppercase tracking-wider text-white/35">Recommandations d'implémentation</p>
+              <p className="text-[10px] font-bold uppercase tracking-wider text-white/35">{t("scenarioDetail.evidences.implementationRecommendations")}</p>
               <ul className="space-y-1">
                 {llmData.implementation_recommendations.map((r, i) => (
                   <li key={i} className="flex items-start gap-2 text-xs text-white/60">
@@ -3865,7 +3883,7 @@ ${llm.future_research ? `<h3>Directions de recherche futures</h3><p class="llm-t
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             {llmData.limitations && llmData.limitations.length > 0 && (
               <div className="space-y-1.5">
-                <p className="text-[10px] font-bold uppercase tracking-wider text-white/35">Limites</p>
+                <p className="text-[10px] font-bold uppercase tracking-wider text-white/35">{t("scenarioDetail.evidences.limitations")}</p>
                 <ul className="space-y-1">
                   {llmData.limitations.map((l, i) => (
                     <li key={i} className="flex items-start gap-1.5 text-xs text-white/50">
@@ -3878,7 +3896,7 @@ ${llm.future_research ? `<h3>Directions de recherche futures</h3><p class="llm-t
             )}
             {llmData.research_gaps && llmData.research_gaps.length > 0 && (
               <div className="space-y-1.5">
-                <p className="text-[10px] font-bold uppercase tracking-wider text-white/35">Lacunes de recherche</p>
+                <p className="text-[10px] font-bold uppercase tracking-wider text-white/35">{t("scenarioDetail.evidences.researchGaps")}</p>
                 <ul className="space-y-1">
                   {llmData.research_gaps.map((g, i) => (
                     <li key={i} className="flex items-start gap-1.5 text-xs text-white/50">
@@ -3893,7 +3911,7 @@ ${llm.future_research ? `<h3>Directions de recherche futures</h3><p class="llm-t
           {/* Recherches futures */}
           {llmData.future_research && (
             <div className="space-y-1">
-              <p className="text-[10px] font-bold uppercase tracking-wider text-white/35">Directions de recherche futures</p>
+              <p className="text-[10px] font-bold uppercase tracking-wider text-white/35">{t("scenarioDetail.evidences.futureResearch")}</p>
               <p className="text-xs text-white/55 leading-relaxed">{llmData.future_research}</p>
             </div>
           )}
@@ -3906,10 +3924,11 @@ ${llm.future_research ? `<h3>Directions de recherche futures</h3><p class="llm-t
 
 /** EvidenceTab : Evidences fusionnées + Tableau PICO (sous-tabs) */
 function EvidenceTab({ scenarioId, detail }: { scenarioId: string; detail: ScenarioDetail }) {
+  const { t } = useI18n();
   const [sub, setSub] = React.useState<"evidences" | "pico">("evidences");
   const SUB = [
-    { key: "evidences" as const, label: "Evidences", icon: <BookOpen size={12} /> },
-    { key: "pico" as const,      label: "Tableau PICO", icon: <Table2 size={12} /> },
+    { key: "evidences" as const, label: t("scenarioDetail.evidenceTab.subEvidences"), icon: <BookOpen size={12} /> },
+    { key: "pico" as const,      label: t("scenarioDetail.evidenceTab.subPicoTable"), icon: <Table2 size={12} /> },
   ];
   return (
     <div className="space-y-4">
@@ -3931,10 +3950,11 @@ function EvidenceTab({ scenarioId, detail }: { scenarioId: string; detail: Scena
 
 /** VizTab : Clustering + Knowledge Graph (sous-tabs) */
 function VizTab({ scenarioId }: { scenarioId: string }) {
+  const { t } = useI18n();
   const [sub, setSub] = React.useState<"clustering" | "kg">("clustering");
   const SUB = [
-    { key: "clustering" as const, label: "Clustering & Topics", icon: <Layers size={12} /> },
-    { key: "kg" as const,         label: "Knowledge Graph",     icon: <Network size={12} /> },
+    { key: "clustering" as const, label: t("scenarioDetail.vizTab.subClustering"), icon: <Layers size={12} /> },
+    { key: "kg" as const,         label: t("scenarioDetail.vizTab.subKnowledgeGraph"),     icon: <Network size={12} /> },
   ];
   return (
     <div className="space-y-4">
@@ -3956,10 +3976,11 @@ function VizTab({ scenarioId }: { scenarioId: string }) {
 
 /** VariablesModelTab : Variables & Données + Modèle prédictif (sous-tabs) */
 function VariablesModelTab({ scenarioId, detail, initialSub }: { scenarioId: string; detail: ScenarioDetail; initialSub?: "variables" | "monitor" }) {
+  const { t } = useI18n();
   const [sub, setSub] = React.useState<"variables" | "monitor">(initialSub ?? "variables");
   const SUB = [
-    { key: "variables" as const, label: "Données & Variables", icon: <Database size={12} /> },
-    { key: "monitor" as const, label: "Modèle Prédictif", icon: <Brain size={12} /> },
+    { key: "variables" as const, label: t("scenarioDetail.variablesModelTab.subData"), icon: <Database size={12} /> },
+    { key: "monitor" as const, label: t("scenarioDetail.variablesModelTab.subModel"), icon: <Brain size={12} /> },
   ];
   return (
     <div className="space-y-4">
@@ -3982,6 +4003,7 @@ function VariablesModelTab({ scenarioId, detail, initialSub }: { scenarioId: str
 // ─── Section: Suivi & Évolution du modèle entraîné (Phases 3-5) ────────────────
 
 function ModelMonitorSection({ scenarioId }: { scenarioId: string }) {
+  const { t, lang } = useI18n();
   const [run, setRun] = useState<ModelRun | null>(null);
   const [monitor, setMonitor] = useState<ModelMonitor | null>(null);
   const [proposal, setProposal] = useState<SpecProposal | null>(null);
@@ -4065,7 +4087,7 @@ function ModelMonitorSection({ scenarioId }: { scenarioId: string }) {
     } catch (e: any) { setError(e.message); setBusy(null); }
   };
 
-  if (loading) return <LoadingSpinner text="Chargement du modèle entraîné..." />;
+  if (loading) return <LoadingSpinner text={t("scenarioDetail.model.loadingTrained")} />;
 
   const mcolors = STATUS_COLORS[monitor?.status_color ?? "unavailable"] || STATUS_COLORS.green;
   const diff = proposal?.diff;
@@ -4093,7 +4115,7 @@ function ModelMonitorSection({ scenarioId }: { scenarioId: string }) {
         <div className={`rounded-3xl border ${mcolors.border} ${mcolors.bg} p-6 flex flex-col justify-between space-y-6`}>
           <div>
             <div className="flex items-center justify-between">
-              <span className="text-[10px] font-bold uppercase tracking-wider text-white/50">Statut Live (modèle entraîné)</span>
+              <span className="text-[10px] font-bold uppercase tracking-wider text-white/50">{t("scenarioDetail.model.liveStatus")}</span>
               <span className="flex h-2 w-2 rounded-full relative">
                 <span className={`animate-ping absolute inline-flex h-full w-full rounded-full opacity-75 ${mcolors.dot}`} />
                 <span className={`relative inline-flex rounded-full h-2 w-2 ${mcolors.dot}`} />
@@ -4104,7 +4126,7 @@ function ModelMonitorSection({ scenarioId }: { scenarioId: string }) {
                 <p className="mt-4 text-3xl font-extrabold text-white">{monitor.status_label}</p>
                 <div className="mt-4 rounded-2xl bg-white/5 p-4 border border-white/5">
                   <p className="text-[10px] text-white/50 uppercase tracking-wider">
-                    {monitor.kind === "probability" ? `Risque (${monitor.positive_class ?? "classe positive"})` : "Valeur prédite"}
+                    {monitor.kind === "probability" ? `${t("scenarioDetail.model.riskPrefix")}${monitor.positive_class ?? t("scenarioDetail.model.riskPositiveClass")})` : t("scenarioDetail.model.predictedValue")}
                   </p>
                   <p className="text-3xl font-black text-brand-300 mt-1 font-mono">
                     {monitor.kind === "probability" && typeof monitor.value === "number"
@@ -4113,33 +4135,33 @@ function ModelMonitorSection({ scenarioId }: { scenarioId: string }) {
                     {monitor.unit && <span className="text-sm font-normal ml-1 text-white/50">{monitor.unit}</span>}
                   </p>
                   {monitor.generated_at && (
-                    <p className="text-[10px] text-white/35 mt-1.5 font-mono">Calculé le {new Date(monitor.generated_at).toLocaleString()}</p>
+                    <p className="text-[10px] text-white/35 mt-1.5 font-mono">{t("scenarioDetail.model.computedOn")} {new Date(monitor.generated_at).toLocaleString(lang === "fr" ? "fr-FR" : "en-US")}</p>
                   )}
                 </div>
               </>
             ) : (
-              <p className="mt-4 text-sm text-white/60">{monitor?.message ?? "Modèle non entraîné ou aucune donnée branchée."}</p>
+              <p className="mt-4 text-sm text-white/60">{monitor?.message ?? t("scenarioDetail.model.modelNotTrainedOrNoData")}</p>
             )}
           </div>
         </div>
 
         {/* Modèle entraîné : métriques */}
         <div className="lg:col-span-2 rounded-3xl border border-white/10 bg-white/3 p-5 space-y-4">
-          <SectionHeader icon={<Brain size={14} className="text-brand-400" />} title="Modèle entraîné"
-            subtitle="Algorithme, métriques et hyperparamètres" />
+          <SectionHeader icon={<Brain size={14} className="text-brand-400" />} title={t("scenarioDetail.model.trainedModel")}
+            subtitle={t("scenarioDetail.model.trainedModelSubtitle")} />
           {run?.status === "ready" ? (
             <div className="space-y-3">
               <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 text-xs">
                 <div className="rounded-xl border border-white/5 bg-white/2 px-3 py-2">
-                  <span className="text-white/35">Algorithme</span>
+                  <span className="text-white/35">{t("scenarioDetail.model.algorithm")}</span>
                   <p className="font-semibold text-white mt-1">{run.family}</p>
                 </div>
                 <div className="rounded-xl border border-white/5 bg-white/2 px-3 py-2">
-                  <span className="text-white/35">Tâche</span>
+                  <span className="text-white/35">{t("scenarioDetail.model.task")}</span>
                   <p className="font-semibold text-white mt-1">{run.task_type}</p>
                 </div>
                 <div className="rounded-xl border border-white/5 bg-white/2 px-3 py-2">
-                  <span className="text-white/35">Métrique ({run.metric})</span>
+                  <span className="text-white/35">{t("scenarioDetail.model.metricPrefix")}{run.metric})</span>
                   <p className="font-semibold text-brand-300 mt-1 font-mono">
                     {run.metrics && run.metric && typeof run.metrics[run.metric] === "number"
                       ? run.metrics[run.metric].toFixed(3)
@@ -4149,7 +4171,7 @@ function ModelMonitorSection({ scenarioId }: { scenarioId: string }) {
               </div>
               {topImportances.length > 0 && (
                 <div className="rounded-xl border border-white/5 bg-white/2 px-3 py-2.5">
-                  <span className="text-[10px] text-white/35 uppercase tracking-wider flex items-center gap-1"><TrendingUp size={11} /> Variables influentes</span>
+                  <span className="text-[10px] text-white/35 uppercase tracking-wider flex items-center gap-1"><TrendingUp size={11} /> {t("scenarioDetail.model.influentialVariables")}</span>
                   <div className="mt-2 space-y-1.5">
                     {topImportances.map((fi) => (
                       <div key={fi.label} className="flex items-center gap-2">
@@ -4162,7 +4184,7 @@ function ModelMonitorSection({ scenarioId }: { scenarioId: string }) {
               )}
               {run.best_params && Object.keys(run.best_params).length > 0 && (
                 <div className="rounded-xl border border-white/5 bg-white/2 px-3 py-2.5">
-                  <span className="text-[10px] text-white/35 uppercase tracking-wider">Hyperparamètres (optimisés par validation croisée)</span>
+                  <span className="text-[10px] text-white/35 uppercase tracking-wider">{t("scenarioDetail.model.hyperparameters")}</span>
                   <div className="mt-2 flex flex-wrap gap-1.5">
                     {Object.entries(run.best_params).map(([k, v]) => (
                       <span key={k} className="rounded-lg border border-white/10 bg-white/5 px-2 py-0.5 text-[10px] font-mono text-white/70">
@@ -4174,18 +4196,18 @@ function ModelMonitorSection({ scenarioId }: { scenarioId: string }) {
               )}
             </div>
           ) : (
-            <p className="text-xs text-white/50">{run?.message ?? "Aucun modèle entraîné."}</p>
+            <p className="text-xs text-white/50">{run?.message ?? t("scenarioDetail.model.noTrainedModel")}</p>
           )}
           <div className="flex flex-col gap-2 sm:flex-row">
             <button onClick={doTrain} disabled={busy !== null}
               className="flex-1 flex items-center justify-center gap-1.5 rounded-xl bg-white text-forest-950 font-semibold py-2 text-xs hover:bg-forest-200 transition disabled:opacity-50">
               <RotateCcw size={12} className={busy === "train" ? "animate-spin" : ""} />
-              {busy === "train" ? "Entraînement en cours..." : (run?.status === "ready" ? "Ré-entraîner le modèle" : "Entraîner le modèle")}
+              {busy === "train" ? t("scenarioDetail.model.trainingInProgress") : (run?.status === "ready" ? t("scenarioDetail.model.retrainModel") : t("scenarioDetail.model.trainModel"))}
             </button>
-            <button onClick={doSynthetic} disabled={busy !== null} title="Génère un jeu de données synthétique cohérent avec le spec puis entraîne — pour une démo sans données réelles"
+            <button onClick={doSynthetic} disabled={busy !== null} title={t("scenarioDetail.model.syntheticTooltip")}
               className="flex items-center justify-center gap-1.5 rounded-xl border border-white/15 text-white/70 font-semibold py-2 px-3 text-xs hover:bg-white/5 transition disabled:opacity-50">
               <Sparkles size={12} className={busy === "synthetic" ? "animate-spin" : ""} />
-              {busy === "synthetic" ? "Démo en cours..." : "Données de démo + entraîner"}
+              {busy === "synthetic" ? t("scenarioDetail.model.demoInProgress") : t("scenarioDetail.model.demoDataTrain")}
             </button>
           </div>
         </div>
@@ -4193,17 +4215,17 @@ function ModelMonitorSection({ scenarioId }: { scenarioId: string }) {
 
       {/* Évolution pilotée par l'évidence (Phase 5) */}
       <div className="rounded-3xl border border-white/10 bg-white/3 p-5 space-y-4">
-        <SectionHeader icon={<Sparkles size={14} className="text-gold-400" />} title="Évolution pilotée par l'évidence"
-          subtitle="Régénère le spec depuis l'évidence courante, compare, et validez le changement" />
+        <SectionHeader icon={<Sparkles size={14} className="text-gold-400" />} title={t("scenarioDetail.model.evidenceEvolution")}
+          subtitle={t("scenarioDetail.model.evidenceEvolutionSubtitle")} />
         {diff && proposal?.status === "ready" ? (
           diff.has_changes ? (
             <div className="space-y-3">
               <div className="flex flex-wrap gap-2 text-[11px]">
-                {diff.outcome_changed && <span className="rounded-lg bg-gold-500/10 border border-gold-500/30 text-gold-300 px-2 py-1">Outcome modifié</span>}
-                {diff.summary.added > 0 && <span className="rounded-lg bg-brand-500/10 border border-brand-500/30 text-brand-300 px-2 py-1">+{diff.summary.added} variable(s)</span>}
-                {diff.summary.removed > 0 && <span className="rounded-lg bg-rose-500/10 border border-rose-500/30 text-rose-300 px-2 py-1">-{diff.summary.removed} variable(s)</span>}
-                {diff.summary.changed > 0 && <span className="rounded-lg bg-white/5 border border-white/15 text-white/70 px-2 py-1">{diff.summary.changed} modifiée(s)</span>}
-                {diff.algorithm_changed && <span className="rounded-lg bg-gold-500/10 border border-gold-500/30 text-gold-300 px-2 py-1">Algorithme: {String(diff.algorithm_fields.family?.new ?? "")}</span>}
+                {diff.outcome_changed && <span className="rounded-lg bg-gold-500/10 border border-gold-500/30 text-gold-300 px-2 py-1">{t("scenarioDetail.model.outcomeChanged")}</span>}
+                {diff.summary.added > 0 && <span className="rounded-lg bg-brand-500/10 border border-brand-500/30 text-brand-300 px-2 py-1">+{diff.summary.added} {t("scenarioDetail.model.variablesSuffix")}</span>}
+                {diff.summary.removed > 0 && <span className="rounded-lg bg-rose-500/10 border border-rose-500/30 text-rose-300 px-2 py-1">-{diff.summary.removed} {t("scenarioDetail.model.variablesSuffix")}</span>}
+                {diff.summary.changed > 0 && <span className="rounded-lg bg-white/5 border border-white/15 text-white/70 px-2 py-1">{diff.summary.changed} {t("scenarioDetail.model.changedSuffix")}</span>}
+                {diff.algorithm_changed && <span className="rounded-lg bg-gold-500/10 border border-gold-500/30 text-gold-300 px-2 py-1">{t("scenarioDetail.model.algorithmChangedPrefix")} {String(diff.algorithm_fields.family?.new ?? "")}</span>}
               </div>
               {(diff.features_added.length > 0 || diff.features_removed.length > 0) && (
                 <div className="text-[11px] font-mono text-white/50 space-y-0.5">
@@ -4214,24 +4236,24 @@ function ModelMonitorSection({ scenarioId }: { scenarioId: string }) {
               <div className="flex gap-2">
                 <button onClick={() => doValidate('accept')} disabled={busy !== null}
                   className="flex items-center gap-1.5 rounded-xl bg-brand-600 text-white font-semibold py-2 px-4 text-xs hover:bg-brand-500 transition disabled:opacity-50">
-                  <CheckCircle2 size={13} />{busy === "accept" ? "Application..." : "Valider & ré-entraîner"}
+                  <CheckCircle2 size={13} />{busy === "accept" ? t("scenarioDetail.model.applying") : t("scenarioDetail.model.validateRetrain")}
                 </button>
                 <button onClick={() => doValidate('reject')} disabled={busy !== null}
                   className="flex items-center gap-1.5 rounded-xl border border-white/15 text-white/70 font-semibold py-2 px-4 text-xs hover:bg-white/5 transition disabled:opacity-50">
-                  <X size={13} />Rejeter
+                  <X size={13} />{t("scenarioDetail.model.reject")}
                 </button>
               </div>
             </div>
           ) : (
-            <p className="text-xs text-brand-300 flex items-center gap-1.5"><CheckCircle2 size={13} /> Le modèle est à jour avec l'évidence actuelle.</p>
+            <p className="text-xs text-brand-300 flex items-center gap-1.5"><CheckCircle2 size={13} /> {t("scenarioDetail.model.upToDate")}</p>
           )
         ) : (
-          <p className="text-xs text-white/50">Aucune proposition en attente. Vérifiez si de nouvelles évidences modifient le modèle.</p>
+          <p className="text-xs text-white/50">{t("scenarioDetail.model.noProposal")}</p>
         )}
         <button onClick={doPropose} disabled={busy !== null}
           className="flex items-center gap-1.5 rounded-xl border border-gold-500/30 bg-gold-500/10 text-gold-300 font-semibold py-2 px-4 text-xs hover:bg-gold-500/20 transition disabled:opacity-50">
           <RefreshCw size={12} className={busy === "propose" ? "animate-spin" : ""} />
-          {busy === "propose" ? "Analyse de l'évidence..." : "Vérifier les nouvelles évidences"}
+          {busy === "propose" ? t("scenarioDetail.model.analyzingEvidence") : t("scenarioDetail.model.checkNewEvidence")}
         </button>
       </div>
     </div>
@@ -4242,15 +4264,15 @@ function ModelMonitorSection({ scenarioId }: { scenarioId: string }) {
 
 type SectionKey = "review" | "evidence" | "assistant" | "viz" | "variables" | "queries" | "alerts" | "enrichment";
 
-const SECTIONS: Array<{ key: SectionKey; label: string; icon: React.ReactNode }> = [
-  { key: "review",      label: "Corpus & Revue",      icon: <FileText size={13} /> },
-  { key: "evidence",    label: "PICO & Evidence",     icon: <BookOpen size={13} /> },
-  { key: "assistant",   label: "Assistant IA",        icon: <MessageSquare size={13} /> },
-  { key: "viz",         label: "Visualisation",       icon: <Layers size={13} /> },
-  { key: "variables",   label: "Variables & Modèle",  icon: <Database size={13} /> },
-  { key: "queries",     label: "Stratégie",          icon: <Search size={13} /> },
-  { key: "enrichment",  label: "Enrichissement LLM", icon: <Zap size={13} className="text-gold-400" /> },
-  { key: "alerts",      label: "Alertes",             icon: <Bell size={13} /> },
+const SECTIONS: Array<{ key: SectionKey; icon: React.ReactNode }> = [
+  { key: "review",      icon: <FileText size={13} /> },
+  { key: "evidence",    icon: <BookOpen size={13} /> },
+  { key: "assistant",   icon: <MessageSquare size={13} /> },
+  { key: "viz",         icon: <Layers size={13} /> },
+  { key: "variables",   icon: <Database size={13} /> },
+  { key: "queries",     icon: <Search size={13} /> },
+  { key: "enrichment",  icon: <Zap size={13} className="text-gold-400" /> },
+  { key: "alerts",      icon: <Bell size={13} /> },
 ];
 
 interface ScenarioDetailPageProps {
@@ -4260,6 +4282,7 @@ interface ScenarioDetailPageProps {
 }
 
 export function ScenarioDetailPage({ scenarioId, onBack, initialTab }: ScenarioDetailPageProps) {
+  const { t } = useI18n();
   const [detail, setDetail] = useState<ScenarioDetail | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -4305,7 +4328,7 @@ export function ScenarioDetailPage({ scenarioId, onBack, initialTab }: ScenarioD
     return (
       <div className="flex items-center justify-center py-24 text-white/50 gap-2">
         <RotateCcw size={18} className="animate-spin" />
-        <span>Chargement du scénario...</span>
+        <span>{t("scenarioDetail.page.loading")}</span>
       </div>
     );
   }
@@ -4314,9 +4337,9 @@ export function ScenarioDetailPage({ scenarioId, onBack, initialTab }: ScenarioD
     return (
       <div className="space-y-4">
         <button onClick={onBack} className="flex items-center gap-2 text-sm text-white/50 hover:text-white transition">
-          <ArrowLeft size={14} /> Retour aux scénarios
+          <ArrowLeft size={14} /> {t("scenarioDetail.page.backToScenarios")}
         </button>
-        <ErrorBox message={error ?? "Scénario introuvable"} />
+        <ErrorBox message={error ?? t("scenarioDetail.page.scenarioNotFound")} />
       </div>
     );
   }
@@ -4329,7 +4352,7 @@ export function ScenarioDetailPage({ scenarioId, onBack, initialTab }: ScenarioD
           onClick={onBack}
           className="mt-1 flex items-center gap-1.5 rounded-xl border border-white/10 bg-white/5 px-3 py-1.5 text-xs text-white/50 hover:text-white hover:bg-white/10 transition shrink-0"
         >
-          <ArrowLeft size={12} /> Retour
+          <ArrowLeft size={12} /> {t("scenarioDetail.page.back")}
         </button>
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2 flex-wrap">
@@ -4338,7 +4361,7 @@ export function ScenarioDetailPage({ scenarioId, onBack, initialTab }: ScenarioD
               {detail.cluster}
             </span>
             <span className="rounded-full border border-white/10 bg-white/5 px-2 py-0.5 text-xs text-white/50 font-mono">
-              {detail.corpus_stats.total} articles
+              {detail.corpus_stats.total} {t("scenarioDetail.page.articles")}
             </span>
           </div>
           <p className="mt-1 text-sm text-white/50 leading-5">{detail.description}</p>
@@ -4359,7 +4382,7 @@ export function ScenarioDetailPage({ scenarioId, onBack, initialTab }: ScenarioD
             <div className="mt-3 rounded-xl border border-brand-500/10 bg-brand-500/3 p-3.5 text-xs text-brand-200/90 leading-relaxed flex gap-2.5 items-start">
               <span className="mt-0.5 flex h-4 w-4 items-center justify-center rounded-full bg-brand-500/10 text-brand-400 shrink-0 text-[10px] font-bold">i</span>
               <div>
-                <strong className="text-brand-300 font-semibold block mb-0.5">Enjeu Clinique & Décisionnel :</strong>
+                <strong className="text-brand-300 font-semibold block mb-0.5">{t("scenarioDetail.page.clinicalStake")}</strong>
                 {detail.clinical_rationale}
               </div>
             </div>
@@ -4392,14 +4415,14 @@ export function ScenarioDetailPage({ scenarioId, onBack, initialTab }: ScenarioD
             }`}
           >
             {section.icon}
-            {section.label}
+            {t(`scenarioDetail.page.sections.${section.key}`)}
           </button>
         ))}
       </div>
 
       {/* Contenu de la section active — isolé par une limite d'erreur : un crash
           de rendu (ex. visualisation clustering) n'emporte plus toute la page. */}
-      <ErrorBoundary resetKey={`${activeSection}:${scenarioId}`} label="cette section">
+      <ErrorBoundary resetKey={`${activeSection}:${scenarioId}`} label={t("scenarioDetail.page.errorBoundaryLabel")}>
         {activeSection === "review" && <ReviewTab scenarioId={scenarioId} detail={detail} />}
         {activeSection === "evidence" && <EvidenceTab scenarioId={scenarioId} detail={detail} />}
         {activeSection === "assistant" && <RagSection scenarioId={scenarioId} detail={detail} />}
