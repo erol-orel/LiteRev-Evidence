@@ -779,9 +779,9 @@ export const fr = {
       save: "Sauvegarder",
       recalculateScores: "Recalculer scores",
       footerMain:
-        "Les articles avec un score de similarité supérieur à ce seuil (ou validés humainement) sont utilisés dans l'Evidence Brief, l'Assistant IA et les Variables.",
+        "Les articles avec un score de similarité supérieur à ce seuil (ou validés humainement) sont utilisés dans les sections PICO & Evidence, Assistant IA et Variables & Modèle.",
       footerLegend:
-        "Score ≡ = lexical BM25 (avant embedding) · Score ◎ = sémantique cosinus (après embedding) · \"Recalculer scores\" lance le rerank sémantique.",
+        "Le bouton recalculer les scores lance le calcul des scores.",
     },
     review: {
       subCorpus: "Corpus",

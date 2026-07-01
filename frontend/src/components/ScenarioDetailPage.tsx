@@ -1035,6 +1035,19 @@ function CorpusSection({ scenarioId, threshold }: { scenarioId: string; detail: 
       .catch(() => {}); // Silencieux si pas un user-scenario
   }, [scenarioId]);
 
+  // Tant qu'un scoring (rerank Cohere) tourne en arrière-plan, on rafraîchit le
+  // corpus toutes les 4 s pour que les badges de pertinence (⊕ Cohere) et le
+  // compteur "auto-sélectionnés" apparaissent en direct, sans refresh manuel.
+  useEffect(() => {
+    if (!data?.rerank_running) return;
+    const id = setTimeout(() => {
+      fetchScenarioCorpus(scenarioId, threshold != null ? { threshold } : undefined)
+        .then(setData)
+        .catch(() => {});
+    }, 4000);
+    return () => clearTimeout(id);
+  }, [data, scenarioId, threshold]);
+
   if (loading) return <LoadingSpinner text={t("scenarioDetail.corpus.loadingCorpus")} />;
   if (error || !data) return <ErrorBox message={error ?? t("scenarioDetail.common.errorCorpus")} />;
 
@@ -3258,12 +3271,16 @@ function SeuilSection({ scenarioId, onSaved, onThresholdChange }: { scenarioId: 
     setRerankStatus(t("scenarioDetail.seuil.launchScoring"));
     try {
       await triggerRerank(scenarioId);
+      // Refresh the corpus so it picks up rerank_running and auto-refreshes the
+      // relevance (Cohere) badges live, instead of only on a manual page reload.
+      onSaved?.();
       pollRef.current = setInterval(() => {
         getRerankStatus(scenarioId).then(s => {
           if (s.status === "done") {
             if (pollRef.current) clearInterval(pollRef.current);
             setRerankStatus(t("scenarioDetail.seuil.scoringDonePrefix") + (s.updated ?? "?") + t("scenarioDetail.seuil.scoringDoneSuffix"));
             setTimeout(() => setRerankStatus(null), 4000);
+            onSaved?.();   // final refresh so the computed scores/badges show
           } else if (s.status === "error") {
             if (pollRef.current) clearInterval(pollRef.current);
             setRerankStatus(t("scenarioDetail.seuil.scoringError"));

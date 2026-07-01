@@ -781,9 +781,9 @@ export const en: Translations = {
       save: "Save",
       recalculateScores: "Recompute scores",
       footerMain:
-        "Articles with a similarity score above this threshold (or human-validated) are used in the Evidence Brief, the AI Assistant and the Variables.",
+        "Articles with a similarity score above this threshold (or human-validated) are used in the PICO & Evidence, AI Assistant and Variables & Model sections.",
       footerLegend:
-        "Score ≡ = lexical BM25 (before embedding) · Score ◎ = semantic cosine (after embedding) · \"Recompute scores\" runs the semantic rerank.",
+        "The recompute-scores button launches the score computation.",
     },
     review: {
       subCorpus: "Corpus",
