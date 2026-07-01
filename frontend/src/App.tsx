@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { ScenarioDetailPage } from "./components/ScenarioDetailPage";
 import { useI18n } from "./i18n/LanguageProvider";
-import { Activity, BarChart2, BookOpen, Cloud, Download, ExternalLink, FolderOpen, MapPin, AlertTriangle, Users, Pill, Radio, RefreshCw, RotateCcw, ChevronDown, ChevronUp, Zap, Lock, KeyRound } from "lucide-react";
+import { Activity, BarChart2, BookOpen, Cloud, Download, ExternalLink, FolderOpen, MapPin, AlertTriangle, Users, Pill, Radio, RefreshCw, RotateCcw, ChevronDown, ChevronUp, Zap, Lock, KeyRound, Wrench, Trash2 } from "lucide-react";
 
 import {
   fetchDocumentDetail,
@@ -19,6 +19,7 @@ import {
   fetchTerrainInformalSignals,
   fetchTerrainClimate,
   fetchFulltextStats,
+  corpusMaintenance,
   fetchCorpusStatsByYear,
   fetchCorpusStatsByYearNamed,
   type CorpusStats,
@@ -36,6 +37,7 @@ import {
   type TerrainInformalSignals,
   type TerrainClimate,
   type FulltextStats,
+  type CorpusMaintenanceReport,
   fetchSearchStrategy,
   type SearchStrategy,
   populateUserScenario,
@@ -634,7 +636,126 @@ function GesicaSignalsPanel({ summary }: { summary: EvidenceSummaryResponse }) {
   );
 }
 
-function StatsView({ corpusStats, fulltextStats, scenarios, statsByYear }: { corpusStats: CorpusStats | null; fulltextStats: FulltextStats | null; scenarios?: GesicaScenario[]; statsByYear?: CorpusStatsByYear | null }) {
+function CorpusMaintenancePanel({ onRefresh }: { onRefresh?: () => void }) {
+  const { t } = useI18n();
+  const [busy, setBusy] = useState<false | "preview" | "apply">(false);
+  const [report, setReport] = useState<CorpusMaintenanceReport | null>(null);
+  const [applied, setApplied] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const keyed = hasApiKey();
+
+  const actionable = (r: CorpusMaintenanceReport) =>
+    r.duplicates.documents + r.legacy_chunks.legacy_full_text_to_retype + r.legacy_chunks.junk_to_delete;
+
+  async function run(dryRun: boolean) {
+    setBusy(dryRun ? "preview" : "apply");
+    setError(null);
+    try {
+      const r = await corpusMaintenance(dryRun);
+      setReport(r);
+      setApplied(!dryRun);
+      if (!dryRun) onRefresh?.();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="mt-5 border-t border-white/5 pt-4">
+      <h3 className="mb-1 text-sm font-medium text-forest-300 flex items-center gap-1.5">
+        <Wrench size={13} className="text-brand-400" />
+        {t("stats.maint.title")}
+      </h3>
+      <p className="mb-3 text-[11px] text-forest-400">{t("stats.maint.subtitle")}</p>
+
+      {!keyed ? (
+        <p className="text-[11px] text-gold-300/80 flex items-center gap-1.5"><Lock size={12} /> {t("stats.maint.needKey")}</p>
+      ) : (
+        <>
+          <div className="flex flex-wrap gap-2">
+            <button
+              onClick={() => run(true)}
+              disabled={busy !== false}
+              className="inline-flex items-center gap-1.5 rounded-lg border border-white/10 bg-white/5 px-3 py-1.5 text-xs text-white/80 hover:bg-white/10 disabled:opacity-50"
+            >
+              <RefreshCw size={12} className={busy === "preview" ? "animate-spin" : ""} />
+              {busy === "preview" ? t("stats.maint.previewing") : t("stats.maint.preview")}
+            </button>
+            {report && !applied && actionable(report) > 0 && (
+              <button
+                onClick={() => { if (window.confirm(t("stats.maint.confirm"))) run(false); }}
+                disabled={busy !== false}
+                className="inline-flex items-center gap-1.5 rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-1.5 text-xs text-red-200 hover:bg-red-500/20 disabled:opacity-50"
+              >
+                <Trash2 size={12} className={busy === "apply" ? "animate-spin" : ""} />
+                {busy === "apply" ? t("stats.maint.applying") : t("stats.maint.apply")}
+              </button>
+            )}
+          </div>
+
+          {error && (
+            <p className="mt-2 text-[11px] text-red-300 flex items-center gap-1.5"><AlertTriangle size={12} /> {t("stats.maint.error")}: {error}</p>
+          )}
+
+          {report && (
+            <div className="mt-3 rounded-xl border border-white/10 bg-forest-900/40 p-3 text-[11px] text-forest-300 space-y-1">
+              {applied ? (
+                <p className="text-brand-300 font-medium">{t("stats.maint.done")}</p>
+              ) : actionable(report) === 0 ? (
+                <p className="text-forest-300">{t("stats.maint.nothingToDo")}</p>
+              ) : null}
+
+              {applied ? (
+                <ul className="space-y-0.5">
+                  {typeof report.duplicates.deleted_documents === "number" && report.duplicates.deleted_documents > 0 && (
+                    <li><span className="font-mono text-white/80">{report.duplicates.deleted_documents}</span> {t("stats.maint.deletedDocs")} · <span className="font-mono text-white/60">{report.duplicates.chunks_cascade}</span> {t("stats.maint.dupChunks")} · <span className="font-mono text-white/60">{report.duplicates.article_scenarios}</span> {t("stats.maint.dupArs")}</li>
+                  )}
+                  {typeof report.legacy_chunks.retyped === "number" && report.legacy_chunks.retyped > 0 && (
+                    <li><span className="font-mono text-white/80">{report.legacy_chunks.retyped}</span> {t("stats.maint.retyped")}</li>
+                  )}
+                  {typeof report.legacy_chunks.deleted_junk === "number" && report.legacy_chunks.deleted_junk > 0 && (
+                    <li><span className="font-mono text-white/80">{report.legacy_chunks.deleted_junk}</span> {t("stats.maint.deletedJunk")}</li>
+                  )}
+                </ul>
+              ) : actionable(report) > 0 ? (
+                <ul className="space-y-0.5">
+                  {report.duplicates.documents > 0 && (
+                    <li><span className="font-mono text-white/80">{report.duplicates.documents}</span> {t("stats.maint.dupDocs")} · <span className="font-mono text-white/60">{report.duplicates.chunks_cascade}</span> {t("stats.maint.dupChunks")} · <span className="font-mono text-white/60">{report.duplicates.article_scenarios}</span> {t("stats.maint.dupArs")}</li>
+                  )}
+                  {report.legacy_chunks.legacy_full_text_to_retype > 0 && (
+                    <li><span className="font-mono text-white/80">{report.legacy_chunks.legacy_full_text_to_retype}</span> {t("stats.maint.retypeLabel")}</li>
+                  )}
+                  {report.legacy_chunks.junk_to_delete > 0 && (
+                    <li><span className="font-mono text-white/80">{report.legacy_chunks.junk_to_delete}</span> {t("stats.maint.junkLabel")}</li>
+                  )}
+                  {report.legacy_chunks.substantive_kept_reported > 0 && (
+                    <li className="text-forest-400"><span className="font-mono">{report.legacy_chunks.substantive_kept_reported}</span> {t("stats.maint.keptLabel")}</li>
+                  )}
+                </ul>
+              ) : null}
+
+              {report.legacy_chunks.breakdown.length > 0 && (
+                <p className="pt-1 mt-1 border-t border-white/5 text-forest-400 break-words">
+                  {t("stats.maint.breakdownTitle")}: {report.legacy_chunks.breakdown.map(b => `${b.chunk_type} (${b.count})`).join(", ")}
+                </p>
+              )}
+
+              {applied && report.backups.length > 0 && (
+                <p className="pt-1 mt-1 border-t border-white/5 text-forest-400 break-words">
+                  {t("stats.maint.backups")}: <span className="font-mono">{report.backups.join(", ")}</span>
+                </p>
+              )}
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+function StatsView({ corpusStats, fulltextStats, scenarios, statsByYear, onRefresh }: { corpusStats: CorpusStats | null; fulltextStats: FulltextStats | null; scenarios?: GesicaScenario[]; statsByYear?: CorpusStatsByYear | null; onRefresh?: () => void }) {
   const { t } = useI18n();
   if (!corpusStats) {
     return <div className="text-sm text-forest-400">{t("stats.loading")}</div>;
@@ -750,6 +871,9 @@ function StatsView({ corpusStats, fulltextStats, scenarios, statsByYear }: { cor
               </div>
             </div>
           </div>
+
+          {/* Maintenance (admin) — purge doublons + normalisation des chunks « Autres » */}
+          <CorpusMaintenancePanel onRefresh={onRefresh} />
 
           {/* Évolution temporelle — intégrée au bas du panneau Corpus */}
           {statsByYear && Object.keys(statsByYear.byYear).length > 0 && (
@@ -2131,7 +2255,7 @@ export default function App() {
       <main className="mx-auto max-w-[1380px] px-6 py-8">
 
         {activeTab === "stats" && (
-          <StatsView corpusStats={corpusStats} fulltextStats={fulltextStats} scenarios={[...gesicaScenarios, ...userScenarios]} statsByYear={corpusStatsByYear} />
+          <StatsView corpusStats={corpusStats} fulltextStats={fulltextStats} scenarios={[...gesicaScenarios, ...userScenarios]} statsByYear={corpusStatsByYear} onRefresh={() => { fetchCorpusStats().then(setCorpusStats).catch(console.error); fetchFulltextStats().then(setFulltextStats).catch(console.error); }} />
         )}
 
 

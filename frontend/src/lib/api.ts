@@ -448,6 +448,35 @@ export async function fetchFulltextStats(): Promise<FulltextStats> {
   return response.json();
 }
 
+// ─── Maintenance corpus (admin) : purge doublons + normalisation chunks ──────
+export interface CorpusMaintenanceReport {
+  dry_run: boolean;
+  duplicates: {
+    documents: number;
+    chunks_cascade: number;
+    article_scenarios: number;
+    deleted_documents?: number;
+  };
+  legacy_chunks: {
+    breakdown: Array<{ chunk_type: string; count: number; embedded: number }>;
+    legacy_full_text_to_retype: number;
+    junk_to_delete: number;
+    substantive_kept_reported: number;
+    retyped?: number;
+    deleted_junk?: number;
+  };
+  backups: string[];
+}
+export async function corpusMaintenance(dryRun: boolean): Promise<CorpusMaintenanceReport> {
+  const response = await safeFetch(`${API_BASE_URL}/admin/corpus-maintenance`, {
+    method: "POST",
+    headers: authHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify({ dry_run: dryRun }),
+  });
+  if (!response.ok) throw new Error(httpMessage(response.status));
+  return response.json();
+}
+
 export interface AskRequest {
   question: string;
   projectContext?: string;

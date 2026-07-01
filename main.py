@@ -4382,6 +4382,147 @@ def get_fulltext_stats() -> dict[str, Any]:
         ],
     }
 
+
+# ─── Endpoint : maintenance du corpus (purge doublons + normalisation chunks) ─
+class CorpusMaintenanceIn(BaseModel):
+    dry_run: bool = True
+
+
+@app.post("/admin/corpus-maintenance")
+def corpus_maintenance(
+    payload: CorpusMaintenanceIn | None = None,
+    _: None = Depends(require_api_key),
+) -> dict[str, Any]:
+    """Maintenance idempotente et RÉVERSIBLE du corpus (protégée par WRITE_API_KEY).
+
+    Deux opérations, appliquées uniquement si dry_run=False :
+
+      1. Doublons : supprime les documents `is_duplicate = TRUE` — déjà exclus de
+         TOUTES les requêtes (recherche, RAG, PICO, stats) — ainsi que leurs lignes
+         `article_scenarios` (cette table n'a pas de FK → suppression explicite,
+         sinon orphelins). Les chunks partent en CASCADE (document_chunk.document_id
+         ON DELETE CASCADE).
+
+      2. Chunks « Autres » (type non standard) : renomme le type hérité
+         `'full_text'` en `'fulltext_section'` (le worker d'enrichissement les
+         embeddera alors normalement) et supprime les chunks non-standard vraiment
+         inexploitables (contenu < 20 caractères → jamais embeddables). Les chunks
+         non-standard SUBSTANTIELS (≥ 20 car.) sont seulement RAPPORTÉS, jamais
+         modifiés — on décide de leur sort après avoir vu l'aperçu.
+
+    Sécurité : tout tourne dans UNE transaction (atomique) ; avant chaque
+    suppression, les lignes concernées sont copiées dans des tables `_maint_bak_*`
+    (restaurables). dry_run=True (défaut) ne fait que COMPTER — aucune écriture.
+    """
+    dry_run = True if payload is None else bool(payload.dry_run)
+    from datetime import datetime, timezone
+    ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+
+    # Prédicat SQL des chunks « non standard » (NULL inclus : `NOT IN` seul rate NULL).
+    NONSTD = "(chunk_type IS NULL OR chunk_type NOT IN ('title_abstract','fulltext_section'))"
+    # Junk = non standard, PAS le legacy 'full_text' (lui est renommé), contenu trop court.
+    JUNK = (f"{NONSTD} AND chunk_type IS DISTINCT FROM 'full_text' "
+            "AND (content IS NULL OR length(btrim(content)) < 20)")
+
+    report: dict[str, Any] = {
+        "dry_run": dry_run,
+        "duplicates": {},
+        "legacy_chunks": {},
+        "backups": [],
+    }
+
+    with engine.begin() as conn:
+        has_ars = bool(conn.execute(
+            text("SELECT to_regclass('public.article_scenarios')")
+        ).scalar())
+
+        # ── 1. DOUBLONS ────────────────────────────────────────────────────
+        dup_docs = conn.execute(text(
+            "SELECT COUNT(*) FROM literature_document WHERE is_duplicate IS TRUE"
+        )).scalar() or 0
+        dup_chunks = conn.execute(text(
+            "SELECT COUNT(*) FROM document_chunk c "
+            "JOIN literature_document d ON d.id = c.document_id "
+            "WHERE d.is_duplicate IS TRUE"
+        )).scalar() or 0
+        dup_ars = 0
+        if has_ars:
+            dup_ars = conn.execute(text(
+                "SELECT COUNT(*) FROM article_scenarios a "
+                "JOIN literature_document d ON d.id = a.document_id "
+                "WHERE d.is_duplicate IS TRUE"
+            )).scalar() or 0
+        report["duplicates"] = {
+            "documents": int(dup_docs),
+            "chunks_cascade": int(dup_chunks),
+            "article_scenarios": int(dup_ars),
+        }
+        if not dry_run and dup_docs:
+            bak_docs, bak_chunks = f"_maint_bak_docs_{ts}", f"_maint_bak_chunks_{ts}"
+            conn.execute(text(
+                f'CREATE TABLE "{bak_docs}" AS '
+                "SELECT * FROM literature_document WHERE is_duplicate IS TRUE"
+            ))
+            conn.execute(text(
+                f'CREATE TABLE "{bak_chunks}" AS SELECT c.* FROM document_chunk c '
+                "JOIN literature_document d ON d.id = c.document_id WHERE d.is_duplicate IS TRUE"
+            ))
+            report["backups"] += [bak_docs, bak_chunks]
+            if has_ars:
+                bak_ars = f"_maint_bak_ars_{ts}"
+                conn.execute(text(
+                    f'CREATE TABLE "{bak_ars}" AS SELECT a.* FROM article_scenarios a '
+                    "JOIN literature_document d ON d.id = a.document_id WHERE d.is_duplicate IS TRUE"
+                ))
+                conn.execute(text(
+                    "DELETE FROM article_scenarios WHERE document_id IN "
+                    "(SELECT id FROM literature_document WHERE is_duplicate IS TRUE)"
+                ))
+                report["backups"].append(bak_ars)
+            deleted = conn.execute(text(
+                "DELETE FROM literature_document WHERE is_duplicate IS TRUE"
+            )).rowcount  # chunks removed via ON DELETE CASCADE
+            report["duplicates"]["deleted_documents"] = int(deleted)
+
+        # ── 2. CHUNKS « AUTRES » (type non standard) ───────────────────────
+        breakdown_rows = conn.execute(text(
+            "SELECT COALESCE(chunk_type,'(null)') AS t, COUNT(*) AS n, "
+            "COUNT(*) FILTER (WHERE embedding IS NOT NULL) AS embedded "
+            f"FROM document_chunk WHERE {NONSTD} GROUP BY chunk_type ORDER BY n DESC"
+        )).mappings().all()
+        legacy_ft = conn.execute(text(
+            "SELECT COUNT(*) FROM document_chunk WHERE chunk_type = 'full_text'"
+        )).scalar() or 0
+        junk = conn.execute(text(f"SELECT COUNT(*) FROM document_chunk WHERE {JUNK}")).scalar() or 0
+        substantive = conn.execute(text(
+            f"SELECT COUNT(*) FROM document_chunk WHERE {NONSTD} "
+            "AND chunk_type IS DISTINCT FROM 'full_text' "
+            "AND content IS NOT NULL AND length(btrim(content)) >= 20"
+        )).scalar() or 0
+        report["legacy_chunks"] = {
+            "breakdown": [
+                {"chunk_type": r["t"], "count": int(r["n"]), "embedded": int(r["embedded"])}
+                for r in breakdown_rows
+            ],
+            "legacy_full_text_to_retype": int(legacy_ft),
+            "junk_to_delete": int(junk),
+            "substantive_kept_reported": int(substantive),
+        }
+        if not dry_run:
+            retyped = conn.execute(text(
+                "UPDATE document_chunk SET chunk_type='fulltext_section' WHERE chunk_type='full_text'"
+            )).rowcount
+            report["legacy_chunks"]["retyped"] = int(retyped)
+            if junk:
+                bak_junk = f"_maint_bak_junkchunks_{ts}"
+                conn.execute(text(f'CREATE TABLE "{bak_junk}" AS SELECT * FROM document_chunk WHERE {JUNK}'))
+                deleted_junk = conn.execute(text(f"DELETE FROM document_chunk WHERE {JUNK}")).rowcount
+                report["legacy_chunks"]["deleted_junk"] = int(deleted_junk)
+                report["backups"].append(bak_junk)
+
+    return report
+
+
 # ─── Living Review Endpoints ──────────────────────────────────────────────────
 
 @app.get("/living-review/status")
