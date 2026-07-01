@@ -11,6 +11,20 @@ jobs:
   ci:
     name: Build & checks
     runs-on: ubuntu-latest
+    services:
+      # Plain Postgres for the integration tests (they use a minimal schema, no
+      # pgvector needed). The suite auto-skips DB tests if this is unreachable.
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     steps:
       - uses: actions/checkout@v4
 
@@ -23,6 +37,18 @@ jobs:
 
       - name: Validate requirements.txt is resolvable
         run: pip install --dry-run -r requirements.txt
+
+      - name: Backend tests (pytest)
+        env:
+          # main.py imports the heavy ML libs lazily, so the tests only need the
+          # import-critical subset (keeps this step fast). Integration tests run
+          # against the Postgres service above; pure-logic tests need no DB.
+          DB_URL: postgresql+psycopg://postgres:postgres@localhost:5432/postgres
+          WRITE_API_KEY: test-write-key
+          OPENAI_API_KEY: ""
+        run: |
+          pip install pytest fastapi pydantic "sqlalchemy>=2.0" python-dotenv python-multipart "psycopg[binary]"
+          pytest -q
 
       - uses: actions/setup-node@v4
         with:
