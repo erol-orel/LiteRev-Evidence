@@ -1,5 +1,5 @@
 import type { SearchResult } from "../types/search";
-import { tStandalone } from "../i18n/LanguageProvider";
+import { currentLang, tStandalone } from "../i18n/LanguageProvider";
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "/api";
 
@@ -598,7 +598,7 @@ export async function fetchGesicaScenarios(): Promise<GesicaScenario[]> {
 export async function getRecommendedActions(
   scenarioId: string,
 ): Promise<{ status: string; actions: string[]; generated_at?: string }> {
-  const r = await safeFetch(`${API_BASE_URL}/scenarios/${scenarioId}/recommended-actions`);
+  const r = await safeFetch(`${API_BASE_URL}/scenarios/${scenarioId}/recommended-actions?lang=${currentLang()}`);
   if (!r.ok) throw new Error(httpMessage(r.status));
   return r.json();
 }
@@ -611,6 +611,7 @@ export async function askAssistant(req: AskRequest): Promise<AskResponse> {
       question: req.question,
       project_context: req.projectContext || null,
       filters: req.filters || null,
+      lang: currentLang(),
     }),
   });
 
@@ -1109,8 +1110,9 @@ export async function fetchScenarioClustering(
   nClusters?: number
 ): Promise<ScenarioClustering> {
   const params = nClusters ? `?n_clusters=${nClusters}` : '';
+  const langParam = `${params ? '&' : '?'}lang=${currentLang()}`;
   const base = scenarioBase(scenarioId);
-  const response = await safeFetch(`${base}/${scenarioId}/clustering${params}`);
+  const response = await safeFetch(`${base}/${scenarioId}/clustering${params}${langParam}`);
   if (!response.ok) throw new Error(httpMessage(response.status));
   return response.json();
 }
@@ -1998,7 +2000,7 @@ export async function generateEvidenceBrief(
   force = false,
 ): Promise<{ status: string; scenario_id: string }> {
   const r = await safeFetch(
-    `${API_BASE_URL}/scenarios/${scenarioId}/evidence-brief/generate?force=${force}`,
+    `${API_BASE_URL}/scenarios/${scenarioId}/evidence-brief/generate?force=${force}&lang=${currentLang()}`,
     { method: 'POST', headers: authHeaders() },
   );
   if (!r.ok) throw new Error(httpMessage(r.status));
@@ -2074,7 +2076,7 @@ export async function getScenarioVariables(scenarioId: string): Promise<Scenario
 export async function generateScenarioVariables(
   scenarioId: string,
 ): Promise<{ status: string; scenario_id?: string }> {
-  const r = await safeFetch(`${API_BASE_URL}/scenarios/${scenarioId}/variables/generate`, { method: 'POST', headers: authHeaders() });
+  const r = await safeFetch(`${API_BASE_URL}/scenarios/${scenarioId}/variables/generate?lang=${currentLang()}`, { method: 'POST', headers: authHeaders() });
   if (!r.ok) throw new Error(httpMessage(r.status));
   return r.json();
 }
@@ -2246,7 +2248,7 @@ export async function getScenarioModelSpec(scenarioId: string): Promise<ModelSpe
 }
 
 export async function proposeSpec(scenarioId: string): Promise<{ status: string; scenario_id?: string }> {
-  const r = await safeFetch(`${API_BASE_URL}/scenarios/${scenarioId}/model/spec/propose`, { method: 'POST', headers: authHeaders() });
+  const r = await safeFetch(`${API_BASE_URL}/scenarios/${scenarioId}/model/spec/propose?lang=${currentLang()}`, { method: 'POST', headers: authHeaders() });
   if (!r.ok) throw new Error(httpMessage(r.status));
   return r.json();
 }
@@ -2303,6 +2305,7 @@ export function askScenarioRagStreamFiltered(
           project_context: 'literev',
           scenario_id: scenarioId,
           top_k: 12,
+          lang: currentLang(),
         }),
         signal: controller.signal,
       });
