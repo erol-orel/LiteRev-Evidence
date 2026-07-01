@@ -60,6 +60,23 @@ engine = create_engine(
     pool_timeout=30,      # Timeout d'attente d'une connexion du pool (M-3)
     pool_recycle=1800,    # Recycle les connexions toutes les 30 minutes pour éviter les coupures (M-3)
 )
+# ── Observabilité optionnelle : Sentry ────────────────────────────────────────
+# Activé UNIQUEMENT si SENTRY_DSN est défini dans l'environnement. Sans DSN c'est
+# un no-op ; si le paquet sentry-sdk n'est pas installé on dégrade proprement
+# (les erreurs restent visibles via le middleware de logs + journalctl).
+_SENTRY_DSN = os.getenv("SENTRY_DSN")
+if _SENTRY_DSN:
+    try:
+        import sentry_sdk
+        sentry_sdk.init(
+            dsn=_SENTRY_DSN,
+            environment=os.getenv("SENTRY_ENVIRONMENT", "production"),
+            traces_sample_rate=float(os.getenv("SENTRY_TRACES_SAMPLE_RATE", "0") or 0),
+        )
+        logger.info("Sentry activé (capture des erreurs backend).")
+    except Exception as _se:
+        logger.warning(f"Sentry non initialisé ({_se}) ; erreurs via journalctl uniquement.")
+
 app = FastAPI(title="LiteRev API", version="0.4.0")
 
 # ─── Middleware de Rate Limiting In-Memory (H-2) ──────────────────────────────────
@@ -158,7 +175,19 @@ async def rate_limit_middleware(request: Request, call_next):
             headers={"Retry-After": str(limiter.window_seconds)},
         )
 
-    return await call_next(request)
+    # Observabilité : loguer toute exception NON gérée avec son contexte
+    # (méthode + chemin + IP) pour qu'elle soit repérable dans journalctl, puis
+    # la relancer telle quelle (Starlette renvoie son 500 habituel — aucun
+    # changement de comportement). Les HTTPException sont déjà converties en
+    # réponses en amont et ne remontent donc pas ici.
+    try:
+        return await call_next(request)
+    except Exception as exc:
+        logger.error(
+            f"Unhandled error on {request.method} {path} from {client_ip}: {exc}",
+            exc_info=True,
+        )
+        raise
 
 # Restreindre les origines CORS à localhost et aux domaines de production
 ALLOWED_ORIGINS = [

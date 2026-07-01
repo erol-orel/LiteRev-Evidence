@@ -131,3 +131,51 @@ curl -fsS -X POST http://localhost:8000/search -H 'Content-Type: application/jso
   -d '{"query_text":"test","mode":"hybrid","limit":1}' | head -c 200; echo
 journalctl -u literev-api -n 50 --no-pager        # recent service logs
 ```
+
+---
+
+## 7. Monitoring & alerting
+
+Motivation: a deploy failed **silently for hours** (the `deploy.sh` SIGPIPE bug)
+before it was noticed. These catch that class of problem early. Nothing here is
+required for the app to run — they're guardrails.
+
+### 7a. Backend error visibility (in code, already shipped)
+- An HTTP middleware logs every **unhandled** exception with `method path from IP`
+  at `ERROR`, so real 500s are greppable:
+  ```bash
+  journalctl -u literev-api --since "-1h" | grep -iE "Unhandled error|Traceback"
+  ```
+- **Optional Sentry** (off by default). To get email/Slack alerts on backend
+  exceptions, install the SDK and set the DSN, then restart:
+  ```bash
+  /opt/literev-api/.venv/bin/pip install sentry-sdk
+  sudo sed -i '/^SENTRY_DSN=/d' /etc/literev-api.env
+  echo 'SENTRY_DSN=https://<your-dsn>@sentry.io/<project>' | sudo tee -a /etc/literev-api.env
+  sudo systemctl restart literev-api
+  ```
+  With no `SENTRY_DSN` (or no `sentry-sdk` installed) it's a no-op — errors still
+  hit journalctl via the middleware above.
+
+### 7b. Uptime check on `/health` (external)
+Point any uptime monitor (UptimeRobot, Better Stack, Hetzner, a cron+curl) at
+**`https://literev-scenario.com/api/health`** (through nginx) — expect HTTP 200
+`{"status":"ok","database":"ok"}`. Alert if non-200 or the body's `database` isn't
+`ok`. A 1–5 min interval is plenty. `/health` is exempt from rate limiting.
+
+### 7c. Deploy-failure alert (GitHub Actions)
+The "Deploy to production" job can fail without anyone noticing. Add a failure
+notification to `.github/workflows/deploy.yml` (a final step with
+`if: failure()`), e.g. a Slack/Discord webhook or an email action:
+```yaml
+      - name: Notify on failure
+        if: failure()
+        run: |
+          curl -fsS -X POST "$DEPLOY_ALERT_WEBHOOK" \
+            -H 'Content-Type: application/json' \
+            -d "{\"text\":\"❌ LiteRev deploy failed on ${{ github.sha }} — ${{ github.event.head_commit.message }}\"}"
+        env:
+          DEPLOY_ALERT_WEBHOOK: ${{ secrets.DEPLOY_ALERT_WEBHOOK }}
+```
+(Add the `DEPLOY_ALERT_WEBHOOK` repo secret first. Tell me the channel and I'll
+wire the exact step.)
