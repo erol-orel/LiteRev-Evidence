@@ -541,11 +541,12 @@ function TerrainView() {
 }
 
 function EvidenceStrengthBadge({ strength, showTooltip = false }: { strength: "weak" | "moderate" | "strong" | null; showTooltip?: boolean }) {
+  const { t } = useI18n();
   if (!strength) return null;
   const config = {
-    strong: { label: "Forte", className: "bg-brand-500/20 text-brand-300 border-brand-500/30", tooltip: "Preuve forte : méta-analyse, revue systématique ou ECR de haute qualité. Score qualité ≥ 0.7." },
-    moderate: { label: "Modérée", className: "bg-gold-500/20 text-gold-300 border-gold-500/30", tooltip: "Preuve modérée : étude de cohorte, étude cas-témoins ou ECR de qualité moyenne. Score qualité 0.4–0.7." },
-    weak: { label: "Faible", className: "bg-rose-500/20 text-rose-300 border-rose-500/30", tooltip: "Preuve faible : étude transversale, série de cas, rapport d'expert ou qualité insuffisante. Score qualité < 0.4." },
+    strong: { label: t("evidenceStrength.strong.label"), className: "bg-brand-500/20 text-brand-300 border-brand-500/30", tooltip: t("evidenceStrength.strong.tooltip") },
+    moderate: { label: t("evidenceStrength.moderate.label"), className: "bg-gold-500/20 text-gold-300 border-gold-500/30", tooltip: t("evidenceStrength.moderate.tooltip") },
+    weak: { label: t("evidenceStrength.weak.label"), className: "bg-rose-500/20 text-rose-300 border-rose-500/30", tooltip: t("evidenceStrength.weak.tooltip") },
   };
   const { label, className, tooltip } = config[strength];
   return (
@@ -568,6 +569,7 @@ function SignalBadge({ label }: { label: string }) {
 }
 
 function GesicaSignalsPanel({ summary }: { summary: EvidenceSummaryResponse }) {
+  const { t } = useI18n();
   const s = summary.gesicaSignals;
   return (
     <section className="space-y-3">
@@ -581,7 +583,7 @@ function GesicaSignalsPanel({ summary }: { summary: EvidenceSummaryResponse }) {
 
       {s.forecastHorizon && (
         <div className="rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-xs text-forest-300">
-          <span className="text-forest-400">Horizon prévisionnel :</span>{" "}
+          <span className="text-forest-400">{t("search.forecastHorizon")}</span>{" "}
           <span className="font-mono text-brand-300">{s.forecastHorizon}</span>
         </div>
       )}
@@ -599,7 +601,7 @@ function GesicaSignalsPanel({ summary }: { summary: EvidenceSummaryResponse }) {
 
       {s.scenarioTags.length > 0 && (
         <div>
-          <p className="mb-1 text-xs text-forest-400">Scénarios détectés</p>
+          <p className="mb-1 text-xs text-forest-400">{t("search.scenariosDetected")}</p>
           <div className="flex flex-wrap gap-1">
             {s.scenarioTags.map((tag) => (
               <span key={tag} className="rounded-full bg-violet-500/10 border border-violet-500/20 px-2 py-0.5 text-xs text-violet-300">
@@ -612,7 +614,7 @@ function GesicaSignalsPanel({ summary }: { summary: EvidenceSummaryResponse }) {
 
       {s.reportedMetrics.length > 0 && (
         <div>
-          <p className="mb-1 text-xs text-forest-400">Métriques rapportées</p>
+          <p className="mb-1 text-xs text-forest-400">{t("search.reportedMetrics")}</p>
           <div className="flex flex-wrap gap-1">
             {s.reportedMetrics.map((m) => (
               <span key={m} className="rounded-full bg-forest-700/60 border border-white/10 px-2 py-0.5 text-xs text-forest-300 font-mono uppercase">
@@ -932,6 +934,7 @@ function StatsView({ corpusStats, fulltextStats, scenarios, statsByYear }: { cor
 // remontage à chaque rendu. C'est le seul endroit qui porte des hooks, ce qui permet
 // à renderScenarioCard d'être une simple fonction inline (cf. correctif double-clic).
 function RecommendedActions({ scenario, isUser }: { scenario: GesicaScenario; isUser: boolean }) {
+  const { t } = useI18n();
   const [fetchedActions, setFetchedActions] = React.useState<string[] | null>(null);
   const [actionsGenerating, setActionsGenerating] = React.useState(false);
   React.useEffect(() => {
@@ -955,7 +958,7 @@ function RecommendedActions({ scenario, isUser }: { scenario: GesicaScenario; is
   if (!(actions.length > 0 || actionsGenerating)) return null;
   return (
     <div>
-      <h4 className="mb-2 text-xs font-semibold uppercase tracking-wider text-forest-400">Actions recommandées</h4>
+      <h4 className="mb-2 text-xs font-semibold uppercase tracking-wider text-forest-400">{t("common.recommendedActions")}</h4>
       {actions.length > 0 ? (
         <ul className="space-y-1.5">
           {actions.map((action, i) => (
@@ -1487,13 +1490,13 @@ export default function App() {
   const [apiKeySet, setApiKeySet] = useState<boolean>(() => hasApiKey());
   const handleManageApiKey = () => {
     if (apiKeySet) {
-      if (window.confirm("Retirer la clé admin de cet appareil ? Les écritures seront désactivées (lecture seule).")) {
+      if (window.confirm(t("header.removeKeyConfirm"))) {
         clearApiKey();
         setApiKeySet(false);
       }
       return;
     }
-    const entered = window.prompt("Clé admin (X-API-Key) — collez votre clé d'écriture. Elle reste sur cet appareil (localStorage).");
+    const entered = window.prompt(t("header.setKeyPrompt"));
     if (entered === null) return;
     setApiKey(entered);
     setApiKeySet(hasApiKey());
@@ -1809,7 +1812,7 @@ export default function App() {
         } catch { /* transient — keep polling */ }
         if (phase) setSearchBackendPhase(phase);
         if (status === 'done') { reachedDone = true; break; }
-        if (status === 'error') throw new Error("La construction du corpus a échoué.");
+        if (status === 'error') throw new Error(t("search.corpusBuildFailed"));
         await new Promise((r) => setTimeout(r, 2000));
       }
       // Récupération + scoring (cosinus) terminés. Le cross-encoder Cohere réordonne
@@ -1859,7 +1862,7 @@ export default function App() {
         }, ...filtered].slice(0, 50);
       });
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Erreur inconnue");
+      setError(err instanceof Error ? err.message : t("common.unknownError"));
       setResults([]);
     } finally {
       setLoading(false);

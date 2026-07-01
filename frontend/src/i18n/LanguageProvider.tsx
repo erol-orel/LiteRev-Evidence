@@ -77,6 +77,23 @@ export function LanguageProvider({ children }: { children: React.ReactNode }) {
   return <I18nContext.Provider value={value}>{children}</I18nContext.Provider>;
 }
 
+/**
+ * Standalone translator usable OUTSIDE React (e.g. in lib/api.ts or class
+ * components). Reads the persisted language directly from localStorage and
+ * falls back to French, then the key itself — mirroring the hook's `t`.
+ */
+export function tStandalone(path: string): string {
+  let lang: Lang = "fr";
+  try {
+    const s = localStorage.getItem(STORAGE_KEY);
+    if (s === "fr" || s === "en") lang = s;
+  } catch {
+    /* ignore */
+  }
+  const val = lookup(RESOURCES[lang], path) ?? lookup(fr, path);
+  return typeof val === "string" ? val : path;
+}
+
 export function useI18n(): I18nContextValue {
   const ctx = useContext(I18nContext);
   if (!ctx) {

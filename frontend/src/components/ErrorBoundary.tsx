@@ -1,4 +1,5 @@
 import React from "react";
+import { tStandalone } from "../i18n/LanguageProvider";
 
 interface Props {
   children: React.ReactNode;
@@ -6,9 +7,9 @@ interface Props {
   resetKey?: unknown;
   /** Optional custom fallback. */
   fallback?: React.ReactNode;
-  /** Called when the user clicks "Réessayer". */
+  /** Called when the user clicks the retry button. */
   onReset?: () => void;
-  /** Short label for the section, shown in the fallback. */
+  /** i18n key for the section label, resolved and shown in the fallback. */
   label?: string;
 }
 
@@ -51,16 +52,16 @@ export class ErrorBoundary extends React.Component<Props, State> {
     return (
       <div className="rounded-2xl border border-red-500/20 bg-red-500/5 px-4 py-4 text-sm">
         <p className="font-semibold text-red-300 mb-1">
-          Une erreur est survenue lors de l'affichage{this.props.label ? ` de « ${this.props.label} »` : ""}.
+          {tStandalone("errorBoundary.title")}{this.props.label ? ` ${tStandalone("errorBoundary.ofSection")} « ${tStandalone(this.props.label)} »` : ""}.
         </p>
         <p className="text-xs text-red-200/70 mb-3 break-words">
-          {this.state.error?.message || "Erreur inconnue."}
+          {this.state.error?.message || tStandalone("errorBoundary.unknownError")}
         </p>
         <button
           onClick={this.reset}
           className="rounded-lg border border-red-400/30 bg-red-500/10 px-3 py-1.5 text-xs text-red-200 hover:bg-red-500/20 transition"
         >
-          Réessayer
+          {tStandalone("errorBoundary.retry")}
         </button>
       </div>
     );

@@ -17,12 +17,50 @@ export const en: Translations = {
     adminKeySetTooltip:
       "Set the admin key (X-API-Key) to enable writes",
     languageLabel: "Language",
+    removeKeyConfirm:
+      "Remove the admin key from this device? Writes will be disabled (read-only).",
+    setKeyPrompt:
+      "Admin key (X-API-Key) — paste your write key. It stays on this device (localStorage).",
   },
   common: {
     refresh: "Refresh",
     cancel: "Cancel",
     create: "Create",
     loadingEllipsis: "Loading…",
+    recommendedActions: "Recommended actions",
+    unknownError: "Unknown error",
+  },
+  errors: {
+    tooManyRequests: "Too many requests — please wait a moment and try again.",
+    unauthorized: "Unauthorized access.",
+    notFound: "Resource not found.",
+    serviceUnavailable: "Service temporarily unavailable — try again in a moment.",
+    serverError: "Server error — try again later.",
+    genericPrefix: "Error",
+  },
+  evidenceStrength: {
+    strong: {
+      label: "Strong",
+      tooltip:
+        "Strong evidence: meta-analysis, systematic review or high-quality RCT. Quality score ≥ 0.7.",
+    },
+    moderate: {
+      label: "Moderate",
+      tooltip:
+        "Moderate evidence: cohort study, case-control study or medium-quality RCT. Quality score 0.4–0.7.",
+    },
+    weak: {
+      label: "Weak",
+      tooltip:
+        "Weak evidence: cross-sectional study, case series, expert report or insufficient quality. Quality score < 0.4.",
+    },
+  },
+  errorBoundary: {
+    title: "An error occurred while rendering",
+    ofSection: "of",
+    unknownError: "Unknown error.",
+    retry: "Retry",
+    appLabel: "the application",
   },
   terrain: {
     loadError: "Failed to load field data.",
@@ -185,6 +223,10 @@ export const en: Translations = {
     recentSearches: "Recent searches",
   },
   search: {
+    forecastHorizon: "Forecast horizon:",
+    scenariosDetected: "Detected scenarios",
+    reportedMetrics: "Reported metrics",
+    corpusBuildFailed: "Corpus build failed.",
     filters: "Filters",
     resetFiltersTooltip: "Reset filters",
     reset: "Reset",
