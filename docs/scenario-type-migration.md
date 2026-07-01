@@ -168,9 +168,20 @@ done
       Migration 2 needs). Validated on local PG (aliased/unaliased SELECT +
       correlated EXISTS in UPDATE; a `scenario_type`-only doc is correctly NOT
       scoped in). Since `perdus(A)=0`, the flip is purely additive in prod.
-- [ ] Document INSERT still **writes** `scenario_type` (provenance, intended);
-      the generic `/search` filter mapping (`filters["scenario_type"]`) is left
-      as-is for now (separate mechanism, not a scenario-dashboard read).
-- [ ] Later: `DROP COLUMN scenario_type` once the write + search-filter uses are
-      migrated and a soak period confirms nothing reads it.
+- [x] **`/search` filter mapping flipped to Way B** (`_build_where`): a
+      `scenario_type` filter now emits `EXISTS (article_scenarios ars WHERE
+      ars.document_id = d.id AND ars.scenario_id = :scenario_type)` instead of
+      `d.scenario_type = :scenario_type`. This was the **last read-path predicate**
+      still on Way A; `/search` (and `/ask`) now match corpus/stats/PRISMA/RAG.
+      Validated on local PG: identical to Way A where `article_scenarios` mirrors
+      `scenario_type` (no cross-scoring), and the correct superset once a document
+      is scored into a scenario it wasn't ingested under. Facet values in
+      `/filters-options` still come from the `scenario_type` column (which equals
+      `article_scenarios.scenario_id` post-backfill), so the dropdown is unchanged.
+      (User-scenario `usr-*` ids remain excluded from the facet — a separate product
+      decision, untouched.)
+- [ ] Document INSERT still **writes** `scenario_type` (provenance, intended) —
+      the only remaining use of the column. No reader depends on it now.
+- [ ] Later: `DROP COLUMN scenario_type` once the provenance write is dropped and a
+      soak period confirms nothing reads it.
 - [ ] Then unblock Migration 2 (`screening-status-per-scenario-migration.md`).
