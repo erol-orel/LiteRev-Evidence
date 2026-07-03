@@ -222,6 +222,7 @@ export const fr = {
     loadErrorHint1: "Vérifiez que le service API est démarré et que",
     loadErrorHint2: "répond correctement.",
     detailPage: "Page détail",
+    savedSearchPrefix: "Recherche sauvegardée : ",
     detailPageTooltip: "Ouvrir la page détail du scénario",
     ingestArticlesTooltip: "Ingérer des articles",
     replaySearchTooltip: "Relancer la recherche",

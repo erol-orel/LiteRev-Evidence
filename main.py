@@ -10386,20 +10386,98 @@ def _get_scenario_name(scenario_id: str) -> str:
         return scenario_id
 
 
+def _embed_query_vector(query: str) -> str | None:
+    """Embedding d'une requête → chaîne vecteur pgvector « [x,y,…] », ou None si
+    indisponible (pas de clé, cooldown quota, ou erreur). Sert à classer les chunks
+    de texte intégral par pertinence à la requête du scénario."""
+    if not query or not query.strip():
+        return None
+    if not os.getenv("OPENAI_API_KEY") or _openai_in_cooldown():
+        return None
+    try:
+        from openai import OpenAI as _OAI2
+        _emb = _OAI2(api_key=os.getenv("OPENAI_API_KEY"), timeout=30.0).embeddings.create(
+            input=[query.replace("\n", " ").strip()[:2000]],
+            model="text-embedding-3-small",
+        ).data[0].embedding
+        return "[" + ",".join(str(x) for x in _emb) + "]"
+    except Exception as _e:
+        if _is_openai_quota_error(_e):
+            _trip_openai_cooldown()
+        logger.warning(f"_embed_query_vector: {_e}")
+        return None
+
+
+def _fetch_fulltext_excerpts(top_ids: list, query_emb: str | None,
+                             char_cap: int, chunks_per_doc: int) -> dict:
+    """Pour chaque doc, concatène ses chunks `fulltext_section` les PLUS PERTINENTS
+    à la requête (cosinus sur l'embedding déjà stocké du chunk), jusqu'à `char_cap`.
+    Dépenser le budget de tokens sur les passages pertinents (méthodes/résultats)
+    plutôt que sur les premiers caractères (souvent l'intro) : meilleure profondeur
+    à coût égal. Repli sur l'ordre du document (par id) pour les docs dont les chunks
+    ne sont pas (encore) embeddés, ou si aucun embedding de requête n'est disponible."""
+    result: dict = {}
+    if not top_ids:
+        return result
+    # 1) Sélection par pertinence (nécessite un embedding de requête + chunks embeddés)
+    if query_emb is not None:
+        try:
+            with engine.connect() as conn:
+                rows = conn.execute(text("""
+                    SELECT document_id, string_agg(content, E'\n\n' ORDER BY rn) AS fulltext
+                    FROM (
+                        SELECT document_id, content,
+                               ROW_NUMBER() OVER (PARTITION BY document_id
+                                   ORDER BY embedding <=> CAST(:qemb AS vector)) AS rn
+                        FROM document_chunk
+                        WHERE document_id = ANY(CAST(:ids AS bigint[]))
+                          AND chunk_type = 'fulltext_section'
+                          AND embedding IS NOT NULL
+                          AND content IS NOT NULL AND length(TRIM(content)) > 0
+                    ) ranked
+                    WHERE rn <= :cpd
+                    GROUP BY document_id
+                """), {"ids": top_ids, "qemb": query_emb, "cpd": chunks_per_doc}).mappings().fetchall()
+            result = {r["document_id"]: (r["fulltext"] or "")[:char_cap] for r in rows}
+        except Exception as _e:
+            logger.warning(f"_fetch_fulltext_excerpts relevance: {_e}")
+    # 2) Repli par ordre de document pour les docs sans résultat pertinent.
+    _missing = [i for i in top_ids if i not in result]
+    if _missing:
+        try:
+            with engine.connect() as conn:
+                rows = conn.execute(text("""
+                    SELECT document_id, string_agg(content, E'\n\n' ORDER BY id) AS fulltext
+                    FROM document_chunk
+                    WHERE document_id = ANY(CAST(:ids AS bigint[]))
+                      AND chunk_type = 'fulltext_section'
+                      AND content IS NOT NULL AND length(TRIM(content)) > 0
+                    GROUP BY document_id
+                """), {"ids": _missing}).mappings().fetchall()
+            for r in rows:
+                result[r["document_id"]] = (r["fulltext"] or "")[:char_cap]
+        except Exception as _e:
+            logger.warning(f"_fetch_fulltext_excerpts fallback: {_e}")
+    return result
+
+
 def _get_above_threshold_articles(scenario_id: str, threshold: float | None = None,
                                   include_fulltext: bool = False,
-                                  fulltext_top_docs: int = 20,
-                                  fulltext_char_cap: int = 1500) -> list[dict]:
+                                  fulltext_query: str | None = None,
+                                  fulltext_top_docs: int = 25,
+                                  fulltext_char_cap: int = 2500,
+                                  fulltext_chunks_per_doc: int = 5) -> list[dict]:
     """
     Retourne les articles au-dessus du seuil de similarité OU validés humainement.
     Priorité : included > similarity_score >= threshold > autres.
 
     include_fulltext=True attache à chaque article un champ `fulltext` : un extrait
-    du TEXTE INTÉGRAL (chunks `fulltext_section`), pour les `fulltext_top_docs` plus
-    pertinents, plafonné à `fulltext_char_cap` caractères. Le plafond est volontaire
-    (borne le coût en tokens) : les features de synthèse voient le texte intégral
-    quand il existe, SANS envoyer l'article entier au LLM. Les documents sans texte
-    intégral gardent `fulltext=""` (title+abstract seuls).
+    du TEXTE INTÉGRAL (chunks `fulltext_section`) pour les `fulltext_top_docs` plus
+    pertinents. Quand `fulltext_query` est fourni, on choisit par doc les
+    `fulltext_chunks_per_doc` chunks les PLUS PERTINENTS à cette requête (et non les
+    premiers), plafonné à `fulltext_char_cap` caractères — le budget de tokens est
+    ainsi dépensé sur les passages utiles. Les documents sans texte intégral gardent
+    `fulltext=""` (title+abstract seuls).
     """
     if threshold is None:
         threshold = _get_scenario_threshold(scenario_id)
@@ -10429,23 +10507,9 @@ def _get_above_threshold_articles(scenario_id: str, threshold: float | None = No
         """), {"sid": scenario_id, "threshold": threshold}).mappings().fetchall()
     articles = [dict(r) for r in rows]
     if include_fulltext and articles:
-        # Un seul aller-retour : extrait de texte intégral pour les N plus pertinents
-        # (déjà ordonnés). string_agg des sections dans l'ordre, tronqué au plafond.
         _top_ids = [a["id"] for a in articles[:fulltext_top_docs]]
-        _ft: dict = {}
-        try:
-            with engine.connect() as conn:
-                _frows = conn.execute(text("""
-                    SELECT document_id, string_agg(content, E'\n\n' ORDER BY id) AS fulltext
-                    FROM document_chunk
-                    WHERE document_id = ANY(CAST(:ids AS bigint[]))
-                      AND chunk_type = 'fulltext_section'
-                      AND content IS NOT NULL AND length(TRIM(content)) > 0
-                    GROUP BY document_id
-                """), {"ids": _top_ids}).mappings().fetchall()
-            _ft = {r["document_id"]: (r["fulltext"] or "")[:fulltext_char_cap] for r in _frows}
-        except Exception as _e_ft:
-            logger.warning(f"_get_above_threshold_articles full-text fetch: {_e_ft}")
+        _qemb = _embed_query_vector(fulltext_query) if fulltext_query else None
+        _ft = _fetch_fulltext_excerpts(_top_ids, _qemb, fulltext_char_cap, fulltext_chunks_per_doc)
         for a in articles:
             a["fulltext"] = _ft.get(a["id"], "")
     return articles
@@ -10758,8 +10822,9 @@ def _generate_evidence_brief_llm(scenario_id: str, force: bool = False, lang: st
     from openai import OpenAI as _OAI
 
     threshold = _get_scenario_threshold(scenario_id)
-    articles = _get_above_threshold_articles(scenario_id, threshold,
-                                             include_fulltext=True, fulltext_top_docs=30)
+    articles = _get_above_threshold_articles(scenario_id, threshold, include_fulltext=True,
+                                             fulltext_query=_get_scenario_name(scenario_id),
+                                             fulltext_top_docs=30, fulltext_char_cap=2800)
 
     if not articles:
         return {"error": "Aucun article au-dessus du seuil pour générer le brief."}
@@ -10768,7 +10833,7 @@ def _generate_evidence_brief_llm(scenario_id: str, force: bool = False, lang: st
     # On ne régénère que si le sous-ensemble pertinent, le seuil ou la langue ont
     # changé — l'ancien cache « 24h » régénérait un corpus inchangé ET servait un
     # brief périmé (mauvaise langue / corpus modifié) tant qu'il avait moins de 24h.
-    _brief_fp = _evidence_fingerprint([a["id"] for a in articles], threshold, lang, "brief-v2-fulltext")
+    _brief_fp = _evidence_fingerprint([a["id"] for a in articles], threshold, lang, "brief-v3-relevant-fulltext")
     if not force:
         with engine.connect() as conn:
             row = conn.execute(text("""
@@ -10992,7 +11057,7 @@ def get_llm_evidence_brief(scenario_id: str, lang: str | None = Query(None)) -> 
     if not articles:
         return {"status": "empty", "message": "Aucun article au-dessus du seuil. Ajoutez des articles ou abaissez le seuil de similarité."}
 
-    _want_fp = _evidence_fingerprint([a["id"] for a in articles], threshold, lang, "brief-v2-fulltext")
+    _want_fp = _evidence_fingerprint([a["id"] for a in articles], threshold, lang, "brief-v3-relevant-fulltext")
 
     with engine.connect() as conn:
         row = conn.execute(text("""
@@ -11275,8 +11340,9 @@ def _generate_variables_from_pico(scenario_id: str, persist: str = "active", lan
     from openai import OpenAI as _OAI
 
     threshold = _get_scenario_threshold(scenario_id)
-    articles = _get_above_threshold_articles(scenario_id, threshold,
-                                             include_fulltext=True, fulltext_top_docs=25)
+    articles = _get_above_threshold_articles(scenario_id, threshold, include_fulltext=True,
+                                             fulltext_query=_get_scenario_name(scenario_id),
+                                             fulltext_top_docs=25, fulltext_char_cap=2200)
 
     # On n'EXIGE plus un PICO extrait : tout article pertinent contribue au choix des
     # variables/outcome/algorithme via son titre+abstract (+texte intégral si dispo).
@@ -11407,7 +11473,7 @@ Retourne UNIQUEMENT le JSON valide."""
         # (PICO seul, ou sans texte intégral) : régénérés puis réutilisés à évidence
         # constante. Seuil et langue inclus : un spec FR au seuil 0.45 ne doit pas être
         # resservi pour une requête EN ni pour un autre seuil.
-        _CTX_VERSION = "ctx-v3-fulltext"
+        _CTX_VERSION = "ctx-v4-relevant-fulltext"
         evidence_fingerprint = _evidence_fingerprint(
             [a.get("id") for a in pico_articles[:25] if a.get("id") is not None],
             threshold, lang, _CTX_VERSION)[:16]
