@@ -1115,7 +1115,7 @@ function StatsView({ corpusStats, fulltextStats, scenarios, statsByYear, onRefre
 // remontage à chaque rendu. C'est le seul endroit qui porte des hooks, ce qui permet
 // à renderScenarioCard d'être une simple fonction inline (cf. correctif double-clic).
 function RecommendedActions({ scenario, isUser }: { scenario: GesicaScenario; isUser: boolean }) {
-  const { t } = useI18n();
+  const { t, lang } = useI18n();
   const [fetchedActions, setFetchedActions] = React.useState<string[] | null>(null);
   const [actionsGenerating, setActionsGenerating] = React.useState(false);
   React.useEffect(() => {
@@ -1130,9 +1130,13 @@ function RecommendedActions({ scenario, isUser }: { scenario: GesicaScenario; is
         else { setFetchedActions([]); setActionsGenerating(false); }
       }).catch(() => { if (!cancelled) { setFetchedActions([]); setActionsGenerating(false); } });
     };
+    // Réinitialiser avant de (re)charger : au changement de langue on ne veut pas
+    // afficher les anciennes actions (autre langue) le temps de la régénération.
+    setFetchedActions(null);
     tick(0);
     return () => { cancelled = true; };
-  }, [isUser, scenario.id]);
+    // `lang` dans les deps : changer la langue de l'UI régénère les actions.
+  }, [isUser, scenario.id, lang]);
   const actions = (scenario.recommendedActions && scenario.recommendedActions.length > 0)
     ? scenario.recommendedActions
     : (fetchedActions ?? []);
@@ -1151,7 +1155,7 @@ function RecommendedActions({ scenario, isUser }: { scenario: GesicaScenario; is
         </ul>
       ) : (
         <p className="text-xs text-forest-400 flex items-center gap-1.5">
-          <RefreshCw size={11} className="animate-spin" /> Génération des actions recommandées depuis l'évidence…
+          <RefreshCw size={11} className="animate-spin" /> {t("common.generatingRecommendedActions")}
         </p>
       )}
     </div>

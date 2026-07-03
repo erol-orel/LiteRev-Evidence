@@ -26,6 +26,7 @@ export const fr = {
     create: "Créer",
     loadingEllipsis: "Chargement…",
     recommendedActions: "Actions recommandées",
+    generatingRecommendedActions: "Génération des actions recommandées depuis l'évidence…",
     unknownError: "Erreur inconnue",
   },
   errors: {

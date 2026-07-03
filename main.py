@@ -12259,6 +12259,8 @@ def _ensure_spec_proposal_columns():
         conn.execute(text("ALTER TABLE scenario_settings ADD COLUMN IF NOT EXISTS proposal_generated_at TIMESTAMP"))
         conn.execute(text("ALTER TABLE scenario_settings ADD COLUMN IF NOT EXISTS recommended_actions_json JSONB"))
         conn.execute(text("ALTER TABLE scenario_settings ADD COLUMN IF NOT EXISTS actions_generated_at TIMESTAMP"))
+        # Langue des actions en cache : on régénère quand l'UI change de langue.
+        conn.execute(text("ALTER TABLE scenario_settings ADD COLUMN IF NOT EXISTS recommended_actions_lang VARCHAR(8)"))
         # Caches de visualisation persistés en DB (durables, contrairement à /tmp).
         conn.execute(text("ALTER TABLE scenario_settings ADD COLUMN IF NOT EXISTS clustering_json JSONB"))
         conn.execute(text("ALTER TABLE scenario_settings ADD COLUMN IF NOT EXISTS clustering_generated_at TIMESTAMP"))
@@ -12323,29 +12325,34 @@ def _generate_recommended_actions(scenario_id: str, lang: str | None = None) -> 
         logger.error(f"Génération actions {scenario_id}: {e}", exc_info=True)
         return []
 
+    _lang_norm = (lang or "fr")[:2].lower()
     with engine.begin() as conn:
         conn.execute(text("""
-            INSERT INTO scenario_settings (scenario_id, recommended_actions_json, actions_generated_at, updated_at)
-            VALUES (:sid, CAST(:a AS jsonb), NOW(), NOW())
+            INSERT INTO scenario_settings (scenario_id, recommended_actions_json, recommended_actions_lang, actions_generated_at, updated_at)
+            VALUES (:sid, CAST(:a AS jsonb), :lng, NOW(), NOW())
             ON CONFLICT (scenario_id) DO UPDATE
-            SET recommended_actions_json = CAST(:a AS jsonb), actions_generated_at = NOW(), updated_at = NOW()
-        """), {"sid": scenario_id, "a": _json.dumps(actions)})
+            SET recommended_actions_json = CAST(:a AS jsonb), recommended_actions_lang = :lng,
+                actions_generated_at = NOW(), updated_at = NOW()
+        """), {"sid": scenario_id, "a": _json.dumps(actions), "lng": _lang_norm})
     return actions
 
 
 def _maybe_generate_actions(scenario_id: str, lang: str | None = None) -> bool:
-    """Lance la génération des actions en arrière-plan, une fois par scénario."""
+    """Lance la génération des actions en arrière-plan, une fois par (scénario, langue).
+    La clé de job inclut la langue : un changement de langue relance la génération
+    (au lieu du garde-fou « une seule fois » qui figeait la 1re langue)."""
     import threading
-    if _ACTIONS_JOBS.get(scenario_id, {}).get("status") in ("running", "done"):
+    _job_key = f"{scenario_id}:{(lang or 'fr')[:2].lower()}"
+    if _ACTIONS_JOBS.get(_job_key, {}).get("status") in ("running", "done"):
         return False
-    _ACTIONS_JOBS[scenario_id] = {"status": "running"}
+    _ACTIONS_JOBS[_job_key] = {"status": "running"}
 
     def _run():
         try:
             n = _generate_recommended_actions(scenario_id, lang=lang)
-            _ACTIONS_JOBS[scenario_id] = {"status": "done", "count": len(n)}
+            _ACTIONS_JOBS[_job_key] = {"status": "done", "count": len(n)}
         except Exception as e:
-            _ACTIONS_JOBS[scenario_id] = {"status": "error", "error": str(e)}
+            _ACTIONS_JOBS[_job_key] = {"status": "error", "error": str(e)}
             logger.warning(f"Actions job {scenario_id}: {e}")
 
     threading.Thread(target=_run, daemon=True).start()
@@ -12355,15 +12362,19 @@ def _maybe_generate_actions(scenario_id: str, lang: str | None = None) -> bool:
 @app.get("/scenarios/{scenario_id}/recommended-actions")
 def get_recommended_actions(scenario_id: str, lang: str | None = Query(None)) -> dict[str, Any]:
     """Actions recommandées (cache) ; génère en arrière-plan au 1er appel si absentes."""
+    _lang_norm = (lang or "fr")[:2].lower()
     with engine.connect() as conn:
         row = conn.execute(text(
-            "SELECT recommended_actions_json, actions_generated_at FROM scenario_settings WHERE scenario_id = :sid"
+            "SELECT recommended_actions_json, recommended_actions_lang, actions_generated_at FROM scenario_settings WHERE scenario_id = :sid"
         ), {"sid": scenario_id}).mappings().first()
-    if row and isinstance(row["recommended_actions_json"], list) and row["recommended_actions_json"]:
+    # Ne servir le cache que s'il est DANS LA LANGUE demandée. Les actions anciennes
+    # sans langue enregistrée (NULL) sont considérées françaises.
+    if (row and isinstance(row["recommended_actions_json"], list) and row["recommended_actions_json"]
+            and (row["recommended_actions_lang"] or "fr") == _lang_norm):
         return {"status": "ready", "actions": row["recommended_actions_json"],
                 "generated_at": row["actions_generated_at"].isoformat() if row["actions_generated_at"] else None}
     started = _maybe_generate_actions(scenario_id, lang=lang)
-    job = _ACTIONS_JOBS.get(scenario_id, {})
+    job = _ACTIONS_JOBS.get(f"{scenario_id}:{_lang_norm}", {})
     if job.get("status") == "error":
         return {"status": "error", "actions": [], "error": job.get("error")}
     return {"status": "generating" if (started or job.get("status") == "running") else "empty", "actions": []}
