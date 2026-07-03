@@ -389,6 +389,12 @@ def _llm_lang_directive(lang: str | None) -> str:
     """Output-language instruction appended to LLM system prompts.
     Defaults to French (the app's default) so existing behaviour is unchanged
     when no language is supplied."""
+    # Defensive: only a real string carries a language. Anything else — None, or a
+    # FastAPI Query/Depends object leaked by an internal *direct* call to an endpoint
+    # whose param defaults to Query(...) — falls back to the French default instead of
+    # crashing on `.strip()` ("'Query' object has no attribute 'strip'").
+    if not isinstance(lang, str):
+        lang = None
     if (lang or "fr").strip().lower().startswith("en"):
         return ("\n\nRESPOND ENTIRELY IN ENGLISH. Every sentence, heading, bullet, "
                 "and JSON string value you produce must be written in English, even if "
@@ -11749,7 +11755,7 @@ def get_variables_generation_status(scenario_id: str) -> dict[str, Any]:
 
 
 @app.get("/scenarios/{scenario_id}/variables")
-def get_scenario_variables(scenario_id: str) -> dict[str, Any]:
+def get_scenario_variables(scenario_id: str, lang: str | None = Query(None)) -> dict[str, Any]:
     """
     Retourne les variables & modèle générés.
     Si absent, déclenche la génération.
@@ -11778,8 +11784,10 @@ def get_scenario_variables(scenario_id: str) -> dict[str, Any]:
     if _vj.get("status") == "error":
         return {"status": "error", "message": _vj.get("error", "Échec de la génération des variables.")}
 
-    # Déclencher la génération
-    generate_scenario_variables(scenario_id)
+    # Déclencher la génération. On passe lang EXPLICITEMENT : appeler l'endpoint
+    # directement sans cet argument passerait l'objet Query(None) par défaut (et non
+    # None) jusqu'à _llm_lang_directive → crash « 'Query' object has no attribute 'strip' ».
+    generate_scenario_variables(scenario_id, lang=lang)
     return {"status": "generating", "message": "Génération en cours, réessayez dans 30 secondes."}
 
 

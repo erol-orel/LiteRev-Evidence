@@ -41,6 +41,15 @@ def test_lang_directive_defaults_to_french():
         assert "français" in main._llm_lang_directive(value).lower()
 
 
+def test_lang_directive_non_string_falls_back_to_french():
+    # Regression for "'Query' object has no attribute 'strip'": a non-string —
+    # e.g. a FastAPI Query object leaked by an internal direct call to an endpoint
+    # whose param defaults to Query(...) — must NOT crash, and falls back to French.
+    from fastapi import Query
+    assert "français" in main._llm_lang_directive(Query(None)).lower()
+    assert "français" in main._llm_lang_directive(object()).lower()
+
+
 # ── _build_where (/search filter) ────────────────────────────────────────────
 def test_build_where_empty():
     assert main._build_where({}) == ("", {})
