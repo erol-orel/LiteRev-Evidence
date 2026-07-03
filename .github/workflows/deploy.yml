@@ -87,7 +87,7 @@ jobs:
               "$DEPLOY_USER@$DEPLOY_HOST" \
               'cd /opt/literev-api && git reset --hard HEAD && bash deploy.sh'
 
-      - name: Smoke test (health + search)
+      - name: Smoke test (health + corpus stats)
         env:
           SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
           DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
@@ -103,9 +103,8 @@ jobs:
               bash << 'EOF'
             set -e
             curl -fsS http://localhost:8000/health | grep -q '"status":"ok"'
-            result=$(curl -fsS -X POST http://localhost:8000/search \
-              -H "Content-Type: application/json" \
-              -d '{"query_text":"test","mode":"hybrid","limit":1}')
-            echo "$result" | grep -q '"results"'
+            # DB + app OK : GET qui interroge la base. Remplace l'ancien POST /search
+            # (endpoint retiré). -f fait échouer le smoke test sur tout statut != 2xx.
+            curl -fsS http://localhost:8000/corpus/fulltext-stats >/dev/null
             echo "Smoke test passed"
           EOF
