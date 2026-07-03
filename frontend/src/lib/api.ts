@@ -2101,7 +2101,7 @@ export interface ScenarioVariables {
 }
 
 export async function getScenarioVariables(scenarioId: string): Promise<ScenarioVariables> {
-  const r = await safeFetch(`${API_BASE_URL}/scenarios/${scenarioId}/variables`);
+  const r = await safeFetch(`${API_BASE_URL}/scenarios/${scenarioId}/variables?lang=${currentLang()}`);
   if (!r.ok) throw new Error(httpMessage(r.status));
   return r.json();
 }
