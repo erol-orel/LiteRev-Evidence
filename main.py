@@ -7034,10 +7034,14 @@ def get_user_scenario_detail(scenario_id: str) -> dict[str, Any]:
               AND (d.is_duplicate IS NULL OR d.is_duplicate = FALSE)
         """), {"sid": scenario_id}).mappings().first()
 
-    # Construire les boolean_queries à partir de la requête sauvegardée
+    # La requête sauvegardée est booléenne OU en langage naturel selon le mode de
+    # recherche réellement utilisé. On ne l'affiche que dans la catégorie employée
+    # pour éviter de montrer la même requête à la fois en booléen ET en naturel.
     query_text = row["query"]
-    boolean_queries = [query_text] if query_text else []
-    nl_queries = [query_text] if query_text else []
+    _mode = (row.get("mode") or "hybrid").lower()
+    _saved = [query_text] if query_text else []
+    boolean_queries = _saved if _mode == "boolean" else []
+    nl_queries = [] if _mode == "boolean" else _saved
 
     return {
         "id": scenario_id,

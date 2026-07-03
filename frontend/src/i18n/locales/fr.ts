@@ -390,7 +390,7 @@ export const fr = {
       openInPubmedArrow: "Ouvrir dans PubMed →",
       explanation: "Explication",
       synonymGroups: "Groupes de synonymes",
-      liveSearchTitle: "Recherche en direct (8 sources)",
+      liveSearchTitle: "Recherche en direct (5 sources)",
       searching: "Recherche...",
       searchAllSources: "Rechercher toutes les sources",
       liveResultsSuffix: "résultats (APIs en direct)",
