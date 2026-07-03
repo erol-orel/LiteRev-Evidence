@@ -4288,6 +4288,21 @@ def get_fulltext_stats() -> dict[str, Any]:
             text("SELECT COUNT(*) FROM document_chunk")
         ).scalar() or 0
 
+        # « En attente d'indexation » HONNÊTE : uniquement les chunks que le worker VA
+        # réellement embedder — mêmes critères que son sélecteur (types standard ; et pour
+        # un doc doté de texte intégral, son title_abstract n'est pas ré-embeddé car couvert
+        # par le fulltext). Exclut donc les types « Autres » (jamais embeddés) et les résumés
+        # rendus redondants par le fulltext, qui gonflaient artificiellement le reliquat.
+        chunks_pending = conn.execute(text("""
+            SELECT COUNT(*) FROM document_chunk c
+            WHERE c.embedding IS NULL
+              AND c.chunk_type IN ('title_abstract', 'fulltext_section')
+              AND (c.chunk_type = 'fulltext_section'
+                   OR NOT EXISTS (SELECT 1 FROM document_chunk c2
+                                  WHERE c2.document_id = c.document_id
+                                    AND c2.chunk_type = 'fulltext_section'))
+        """)).scalar() or 0
+
         # Répartition des chunks par type : 'fulltext_section' (texte intégral)
         # vs 'title_abstract' (résumé, ~1 par document) vs le reste.
         chunks_by_type = conn.execute(text(
@@ -4354,7 +4369,7 @@ def get_fulltext_stats() -> dict[str, Any]:
         "embeddings": {
             "total_chunks": total_chunks,
             "chunks_with_embedding": chunks_with_embedding,
-            "chunks_pending": max(0, total_chunks - chunks_with_embedding),
+            "chunks_pending": int(chunks_pending),
             "embedding_coverage_pct": round(chunks_with_embedding / total_chunks * 100, 1) if total_chunks else 0,
         },
         "hybrid_search": {
@@ -4419,10 +4434,25 @@ def corpus_maintenance(
     ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
 
     # Prédicat SQL des chunks « non standard » (NULL inclus : `NOT IN` seul rate NULL).
+    # Ces chunks « Autres » (types hérités : 'full_text', 'title', 'abstract_section'…,
+    # ou NULL) ne sont JAMAIS embeddés par le worker (qui ne traite que les deux types
+    # standard) → ils restent « en attente » indéfiniment. On les partitionne en trois
+    # ensembles DISJOINTS, tous sûrs (aucune perte de contenu, sauvegardés avant action) :
     NONSTD = "(chunk_type IS NULL OR chunk_type NOT IN ('title_abstract','fulltext_section'))"
-    # Junk = non standard, PAS le legacy 'full_text' (lui est renommé), contenu trop court.
-    JUNK = (f"{NONSTD} AND chunk_type IS DISTINCT FROM 'full_text' "
-            "AND (content IS NULL OR length(btrim(content)) < 20)")
+    # 1) junk : vide / inexploitable (< 20 car., jamais embeddable) → suppression.
+    JUNK = f"{NONSTD} AND (content IS NULL OR length(btrim(content)) < 20)"
+    # 2) redundant : fragment substantiel dont le TEXTE est déjà contenu dans le chunk
+    #    title_abstract du même document (donc déjà indexé et cherchable) → suppression
+    #    SÛRE (le contenu reste dans title_abstract, rien ne quitte l'index).
+    _IN_TA = ("EXISTS (SELECT 1 FROM document_chunk ta "
+              "WHERE ta.document_id = document_chunk.document_id "
+              "AND ta.chunk_type = 'title_abstract' "
+              "AND position(btrim(document_chunk.content) IN ta.content) > 0)")
+    REDUNDANT = f"{NONSTD} AND content IS NOT NULL AND length(btrim(content)) >= 20 AND {_IN_TA}"
+    # 3) unique : fragment substantiel dont le texte n'est PAS dans title_abstract (vrai
+    #    contenu supplémentaire) → reclassé en 'fulltext_section' pour que le worker
+    #    l'indexe (aucune perte). Après application : plus aucun chunk « Autres ».
+    UNIQUE = f"{NONSTD} AND content IS NOT NULL AND length(btrim(content)) >= 20 AND NOT {_IN_TA}"
 
     report: dict[str, Any] = {
         "dry_run": dry_run,
@@ -4490,35 +4520,34 @@ def corpus_maintenance(
             "COUNT(*) FILTER (WHERE embedding IS NOT NULL) AS embedded "
             f"FROM document_chunk WHERE {NONSTD} GROUP BY chunk_type ORDER BY n DESC"
         )).mappings().all()
-        legacy_ft = conn.execute(text(
-            "SELECT COUNT(*) FROM document_chunk WHERE chunk_type = 'full_text'"
-        )).scalar() or 0
         junk = conn.execute(text(f"SELECT COUNT(*) FROM document_chunk WHERE {JUNK}")).scalar() or 0
-        substantive = conn.execute(text(
-            f"SELECT COUNT(*) FROM document_chunk WHERE {NONSTD} "
-            "AND chunk_type IS DISTINCT FROM 'full_text' "
-            "AND content IS NOT NULL AND length(btrim(content)) >= 20"
-        )).scalar() or 0
+        redundant = conn.execute(text(f"SELECT COUNT(*) FROM document_chunk WHERE {REDUNDANT}")).scalar() or 0
+        uniq = conn.execute(text(f"SELECT COUNT(*) FROM document_chunk WHERE {UNIQUE}")).scalar() or 0
         report["legacy_chunks"] = {
             "breakdown": [
                 {"chunk_type": r["t"], "count": int(r["n"]), "embedded": int(r["embedded"])}
                 for r in breakdown_rows
             ],
-            "legacy_full_text_to_retype": int(legacy_ft),
             "junk_to_delete": int(junk),
-            "substantive_kept_reported": int(substantive),
+            "redundant_to_delete": int(redundant),      # already covered by title_abstract
+            "unique_to_reclassify": int(uniq),          # real content → fulltext_section (indexed)
         }
         if not dry_run:
-            retyped = conn.execute(text(
-                "UPDATE document_chunk SET chunk_type='fulltext_section' WHERE chunk_type='full_text'"
+            # Delete junk + redundant (each backed up first); order is irrelevant — the
+            # three sets are disjoint and none touches title_abstract chunks.
+            for label, pred in (("junkchunks", JUNK), ("redundantchunks", REDUNDANT)):
+                n = conn.execute(text(f"SELECT COUNT(*) FROM document_chunk WHERE {pred}")).scalar() or 0
+                if n:
+                    bak = f"_maint_bak_{label}_{ts}"
+                    conn.execute(text(f'CREATE TABLE "{bak}" AS SELECT * FROM document_chunk WHERE {pred}'))
+                    conn.execute(text(f"DELETE FROM document_chunk WHERE {pred}"))
+                    report["backups"].append(bak)
+            report["legacy_chunks"]["deleted_junk"] = int(junk)
+            report["legacy_chunks"]["deleted_redundant"] = int(redundant)
+            reclassified = conn.execute(text(
+                f"UPDATE document_chunk SET chunk_type='fulltext_section' WHERE {UNIQUE}"
             )).rowcount
-            report["legacy_chunks"]["retyped"] = int(retyped)
-            if junk:
-                bak_junk = f"_maint_bak_junkchunks_{ts}"
-                conn.execute(text(f'CREATE TABLE "{bak_junk}" AS SELECT * FROM document_chunk WHERE {JUNK}'))
-                deleted_junk = conn.execute(text(f"DELETE FROM document_chunk WHERE {JUNK}")).rowcount
-                report["legacy_chunks"]["deleted_junk"] = int(deleted_junk)
-                report["backups"].append(bak_junk)
+            report["legacy_chunks"]["reclassified"] = int(reclassified)
 
     return report
 

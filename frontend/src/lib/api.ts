@@ -459,11 +459,12 @@ export interface CorpusMaintenanceReport {
   };
   legacy_chunks: {
     breakdown: Array<{ chunk_type: string; count: number; embedded: number }>;
-    legacy_full_text_to_retype: number;
     junk_to_delete: number;
-    substantive_kept_reported: number;
-    retyped?: number;
+    redundant_to_delete: number;
+    unique_to_reclassify: number;
     deleted_junk?: number;
+    deleted_redundant?: number;
+    reclassified?: number;
   };
   backups: string[];
 }
