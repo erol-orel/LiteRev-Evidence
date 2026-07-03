@@ -4303,6 +4303,7 @@ def get_fulltext_stats() -> dict[str, Any]:
             SELECT COUNT(*) FROM document_chunk c
             WHERE c.embedding IS NULL
               AND c.chunk_type IN ('title_abstract', 'fulltext_section')
+              AND LENGTH(c.content) > 20
               AND (c.chunk_type = 'fulltext_section'
                    OR NOT EXISTS (SELECT 1 FROM document_chunk c2
                                   WHERE c2.document_id = c.document_id
@@ -4556,6 +4557,73 @@ def corpus_maintenance(
             report["legacy_chunks"]["reclassified"] = int(reclassified)
 
     return report
+
+
+@app.post("/admin/embed-pending")
+def embed_pending_chunks(limit: int = 200, _: None = Depends(require_api_key)) -> dict[str, Any]:
+    """Force l'indexation (embedding) des chunks « en attente » — à la demande, avec
+    EXACTEMENT le sélecteur du worker d'arrière-plan. Vide immédiatement le petit
+    reliquat sans attendre le cycle de 30 s. Traite au plus `limit` chunks (synchrone) ;
+    renvoie le nombre embeddé et le reliquat restant."""
+    openai_key = os.getenv("OPENAI_API_KEY")
+    if not openai_key:
+        raise HTTPException(status_code=503, detail="Clé OpenAI non configurée")
+    if _openai_in_cooldown():
+        return {"embedded": 0, "remaining": None, "cooldown": True}
+
+    # Sélecteur IDENTIQUE au worker et au compteur « en attente » : types standard,
+    # contenu embeddable (> 20 car.), et title_abstract non ré-embeddé si le doc a du
+    # texte intégral (couvert par ses sections).
+    ELIGIBLE = (
+        "c.embedding IS NULL "
+        "AND c.chunk_type IN ('title_abstract','fulltext_section') "
+        "AND LENGTH(c.content) > 20 "
+        "AND (c.chunk_type = 'fulltext_section' "
+        "OR NOT EXISTS (SELECT 1 FROM document_chunk c2 "
+        "WHERE c2.document_id = c.document_id AND c2.chunk_type = 'fulltext_section'))"
+    )
+
+    from openai import OpenAI as _OAI
+    client = _OAI(api_key=openai_key, timeout=90.0)
+
+    with engine.connect() as conn:
+        rows = conn.execute(text(
+            f"SELECT c.id, c.content FROM document_chunk c WHERE {ELIGIBLE} "
+            "ORDER BY c.chunk_type DESC, c.id LIMIT :lim"
+        ), {"lim": max(1, min(int(limit), 2000))}).mappings().fetchall()
+
+    embedded = 0
+    error = None
+    for i in range(0, len(rows), 100):
+        batch = rows[i:i + 100]
+        try:
+            resp = client.embeddings.create(
+                model="text-embedding-3-small",
+                input=[r["content"][:8000] for r in batch],
+            )
+            with engine.begin() as cu:
+                for k, ed in enumerate(resp.data):
+                    vec = "[" + ",".join(str(x) for x in ed.embedding) + "]"
+                    cu.execute(text(
+                        "UPDATE document_chunk SET embedding = CAST(:vec AS vector) WHERE id = :cid"
+                    ), {"vec": vec, "cid": batch[k]["id"]})
+            embedded += len(batch)
+        except Exception as e:
+            if _is_openai_quota_error(e):
+                _trip_openai_cooldown()
+            logger.error(f"embed-pending: {e}", exc_info=True)
+            error = str(e)
+            break
+
+    with engine.connect() as conn:
+        remaining = conn.execute(text(
+            f"SELECT COUNT(*) FROM document_chunk c WHERE {ELIGIBLE}"
+        )).scalar() or 0
+
+    out: dict[str, Any] = {"embedded": int(embedded), "remaining": int(remaining)}
+    if error:
+        out["error"] = error
+    return out
 
 
 # ─── Living Review Endpoints ──────────────────────────────────────────────────
