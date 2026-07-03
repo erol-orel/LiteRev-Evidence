@@ -1460,9 +1460,17 @@ export async function fetchKnowledgeGraph(
 
 // ─── Streaming RAG SSE ────────────────────────────────────────────────────────
 
+/** Corpus counts behind an AI answer: relevant papers used + how many have full text. */
+export interface RagMeta {
+  papers_used: number;
+  papers_with_fulltext: number;
+  threshold: number;
+}
+
 export interface RagStreamCallbacks {
   onSources: (sources: ScenarioRagSource[]) => void;
   onToken: (token: string) => void;
+  onMeta?: (meta: RagMeta) => void;
   onDone: () => void;
   onError: (err: string) => void;
 }
@@ -2385,6 +2393,7 @@ export function askScenarioRagStreamFiltered(
 
         for (const line of lines) {
           if (line.startsWith('event: sources')) continue;
+          if (line.startsWith('event: meta')) continue;
           if (line.startsWith('event: error')) continue;
           if (line.startsWith('event: done')) {
             callbacks.onDone();
@@ -2399,6 +2408,8 @@ export function askScenarioRagStreamFiltered(
                 callbacks.onToken(parsed.token);
               } else if (Array.isArray(parsed)) {
                 callbacks.onSources(parsed as ScenarioRagSource[]);
+              } else if (parsed.papers_used !== undefined) {
+                callbacks.onMeta?.(parsed as RagMeta);
               } else if (parsed.error) {
                 callbacks.onError(parsed.error);
               }

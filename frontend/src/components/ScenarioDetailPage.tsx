@@ -16,6 +16,7 @@ import {
   fetchScenarioCorpus,
   fetchScenarioClustering,
   askScenarioRagStreamFiltered,
+  type RagMeta,
   fetchScenarioPrisma,
   uploadModelData,
   screenArticle,
@@ -1813,6 +1814,7 @@ function RagSection({ scenarioId, detail }: { scenarioId: string; detail: Scenar
   const [streaming, setStreaming] = useState(false);
   const [streamedText, setStreamedText] = useState("");
   const [sources, setSources] = useState<ScenarioRagResponse['sources']>([]);
+  const [meta, setMeta] = useState<RagMeta | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [done, setDone] = useState(false);
   const cancelRef = useRef<(() => void) | null>(null);
@@ -1845,11 +1847,13 @@ function RagSection({ scenarioId, detail }: { scenarioId: string; detail: Scenar
     setStreaming(true);
     setStreamedText("");
     setSources([]);
+    setMeta(null);
     setError(null);
     setDone(false);
 
     const cancel = askScenarioRagStreamFiltered(scenarioId, qText, {
       onSources: (s) => setSources(s),
+      onMeta: (m) => setMeta(m),
       onToken: (t) => {
         setStreamedText(prev => prev + t);
         // Auto-scroll
@@ -1867,6 +1871,7 @@ function RagSection({ scenarioId, detail }: { scenarioId: string; detail: Scenar
     if (cancelRef.current) cancelRef.current();
     setStreamedText("");
     setSources([]);
+    setMeta(null);
     setError(null);
     setDone(false);
     setStreaming(false);
@@ -1993,6 +1998,11 @@ function RagSection({ scenarioId, detail }: { scenarioId: string; detail: Scenar
               {streamedText}
               {streaming && <span className="inline-block w-0.5 h-3 bg-brand-400 animate-pulse ml-0.5 align-middle"/>}
             </div>
+            {meta && meta.papers_used > 0 && (
+              <p className="mt-2 text-[10px] text-white/40">
+                {meta.papers_used} {t("scenarioDetail.rag.papersUsedSuffix")} (≥ {meta.threshold}) · {meta.papers_with_fulltext} {t("scenarioDetail.rag.withFulltextSuffix")}
+              </p>
+            )}
           </div>
 
           {/* Sources citées */}
