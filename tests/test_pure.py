@@ -144,3 +144,22 @@ def test_multi_query_unknown_combinator_is_union(monkeypatch):
 def test_multi_query_all_blank_is_empty(monkeypatch):
     _patch_local_ids(monkeypatch, {})
     assert main._multi_query_corpus_ids([{"kind": "boolean", "text": "  "}], "union", {}) == []
+
+
+# ── _evidence_fingerprint (corpus/threshold/lang cache key) ───────────────────
+def test_evidence_fingerprint_is_order_independent():
+    assert main._evidence_fingerprint([3, 1, 2], 0.45, "en", "brief") == \
+           main._evidence_fingerprint([1, 2, 3], 0.45, "en", "brief")
+
+
+def test_evidence_fingerprint_is_sensitive():
+    base = main._evidence_fingerprint([1, 2, 3], 0.45, "en", "brief")
+    assert base != main._evidence_fingerprint([1, 2, 3], 0.45, "fr", "brief")   # lang
+    assert base != main._evidence_fingerprint([1, 2, 3], 0.60, "en", "brief")   # threshold
+    assert base != main._evidence_fingerprint([1, 2], 0.45, "en", "brief")      # id set
+    assert base != main._evidence_fingerprint([1, 2, 3], 0.45, "en", "vars")    # ctx version
+
+
+def test_evidence_fingerprint_none_lang_is_french_bucket():
+    assert main._evidence_fingerprint([1], 0.45, None, "x") == \
+           main._evidence_fingerprint([1], 0.45, "fr", "x")

@@ -10916,10 +10916,20 @@ def _get_scenario_name(scenario_id: str) -> str:
         return scenario_id
 
 
-def _get_above_threshold_articles(scenario_id: str, threshold: float | None = None) -> list[dict]:
+def _get_above_threshold_articles(scenario_id: str, threshold: float | None = None,
+                                  include_fulltext: bool = False,
+                                  fulltext_top_docs: int = 20,
+                                  fulltext_char_cap: int = 1500) -> list[dict]:
     """
     Retourne les articles au-dessus du seuil de similarité OU validés humainement.
     Priorité : included > similarity_score >= threshold > autres.
+
+    include_fulltext=True attache à chaque article un champ `fulltext` : un extrait
+    du TEXTE INTÉGRAL (chunks `fulltext_section`), pour les `fulltext_top_docs` plus
+    pertinents, plafonné à `fulltext_char_cap` caractères. Le plafond est volontaire
+    (borne le coût en tokens) : les features de synthèse voient le texte intégral
+    quand il existe, SANS envoyer l'article entier au LLM. Les documents sans texte
+    intégral gardent `fulltext=""` (title+abstract seuls).
     """
     if threshold is None:
         threshold = _get_scenario_threshold(scenario_id)
@@ -10947,7 +10957,40 @@ def _get_above_threshold_articles(scenario_id: str, threshold: float | None = No
                 asn.similarity_score DESC NULLS LAST,
                 ld.citation_count DESC NULLS LAST
         """), {"sid": scenario_id, "threshold": threshold}).mappings().fetchall()
-    return [dict(r) for r in rows]
+    articles = [dict(r) for r in rows]
+    if include_fulltext and articles:
+        # Un seul aller-retour : extrait de texte intégral pour les N plus pertinents
+        # (déjà ordonnés). string_agg des sections dans l'ordre, tronqué au plafond.
+        _top_ids = [a["id"] for a in articles[:fulltext_top_docs]]
+        _ft: dict = {}
+        try:
+            with engine.connect() as conn:
+                _frows = conn.execute(text("""
+                    SELECT document_id, string_agg(content, E'\n\n' ORDER BY id) AS fulltext
+                    FROM document_chunk
+                    WHERE document_id = ANY(CAST(:ids AS bigint[]))
+                      AND chunk_type = 'fulltext_section'
+                      AND content IS NOT NULL AND length(TRIM(content)) > 0
+                    GROUP BY document_id
+                """), {"ids": _top_ids}).mappings().fetchall()
+            _ft = {r["document_id"]: (r["fulltext"] or "")[:fulltext_char_cap] for r in _frows}
+        except Exception as _e_ft:
+            logger.warning(f"_get_above_threshold_articles full-text fetch: {_e_ft}")
+        for a in articles:
+            a["fulltext"] = _ft.get(a["id"], "")
+    return articles
+
+
+def _evidence_fingerprint(doc_ids: list, threshold: float | None, lang: str | None, ctx: str) -> str:
+    """Empreinte du corpus pertinent d'un scénario : hash de l'ensemble ORDONNÉ des
+    IDs de documents + seuil + langue + version de contexte. Sert de clé de cache
+    « ne pas régénérer si le corpus n'a pas changé » pour l'Evidence Brief et les
+    Variables (seuil et langue inclus : un brief FR ne doit pas être resservi pour
+    une requête EN, ni un corpus au seuil 0.45 pour un seuil 0.60)."""
+    import hashlib
+    _ids = "|".join(str(i) for i in sorted(doc_ids))
+    _key = f"{ctx}|thr={threshold}|lang={(lang or 'fr').lower()[:2]}|{_ids}"
+    return hashlib.sha256(_key.encode("utf-8")).hexdigest()
 
 
 @app.post("/scenarios/{scenario_id}/rerank")
@@ -11245,32 +11288,37 @@ def _generate_evidence_brief_llm(scenario_id: str, force: bool = False, lang: st
     from openai import OpenAI as _OAI
 
     threshold = _get_scenario_threshold(scenario_id)
-    articles = _get_above_threshold_articles(scenario_id, threshold)
+    articles = _get_above_threshold_articles(scenario_id, threshold,
+                                             include_fulltext=True, fulltext_top_docs=30)
 
     if not articles:
         return {"error": "Aucun article au-dessus du seuil pour générer le brief."}
 
-    # Vérifier si un brief récent existe déjà (< 24h) et force=False
+    # Cache par EMPREINTE DU CORPUS (+ seuil + langue), et non plus par âge (< 24h).
+    # On ne régénère que si le sous-ensemble pertinent, le seuil ou la langue ont
+    # changé — l'ancien cache « 24h » régénérait un corpus inchangé ET servait un
+    # brief périmé (mauvaise langue / corpus modifié) tant qu'il avait moins de 24h.
+    _brief_fp = _evidence_fingerprint([a["id"] for a in articles], threshold, lang, "brief-v2-fulltext")
     if not force:
         with engine.connect() as conn:
             row = conn.execute(text("""
-                SELECT evidence_brief_json, brief_generated_at
-                FROM scenario_settings WHERE scenario_id = :sid
+                SELECT evidence_brief_json FROM scenario_settings WHERE scenario_id = :sid
             """), {"sid": scenario_id}).mappings().first()
-        if row and row["evidence_brief_json"] and row["brief_generated_at"]:
-            age = (datetime.now(timezone.utc) - row["brief_generated_at"].replace(tzinfo=timezone.utc)).total_seconds()
-            if age < 86400:  # 24h
-                return dict(row["evidence_brief_json"])
+        if row and row["evidence_brief_json"]:
+            _cached = dict(row["evidence_brief_json"])
+            if _cached.get("_corpus_fingerprint") == _brief_fp:
+                return _cached
 
     scenario_name = _get_scenario_name(scenario_id)
 
-    # Préparer le contexte : top 30 articles avec PICO + résumé. Le PICO (extrait
-    # du texte intégral quand disponible) donne la structure ; l'abstract apporte
-    # le récit brut (effets, conclusions) que la compression PICO perd.
+    # Préparer le contexte : top 30 articles. Trois niveaux de texte, du plus
+    # structuré au plus brut : PICO (structure) + abstract (récit) + extrait du
+    # TEXTE INTÉGRAL quand disponible (méthodes/résultats que l'abstract résume).
+    # Le LLM voit ainsi le texte réel des articles, pas seulement leur PICO.
     context_articles = []
     for a in articles[:30]:
         pj = a.get("pico_json") or {}
-        context_articles.append({
+        _ca = {
             "title": a.get("title", ""),
             "year": a.get("year"),
             "journal": a.get("journal", ""),
@@ -11283,7 +11331,11 @@ def _generate_evidence_brief_llm(scenario_id: str, force: bool = False, lang: st
             "O": pj.get("outcome", pj.get("O", "")),
             "key_finding": pj.get("key_finding", pj.get("conclusion", "")),
             "abstract": (a.get("abstract") or "")[:1500],
-        })
+        }
+        _ft = (a.get("fulltext") or "").strip()
+        if _ft:
+            _ca["fulltext_excerpt"] = _ft
+        context_articles.append(_ca)
 
     context_str = _json.dumps(context_articles, ensure_ascii=False, indent=2)
 
@@ -11398,6 +11450,10 @@ Retourne UNIQUEMENT le JSON valide."""
             "model": "gpt-4.1",
         }
 
+        # Empreinte du corpus : sert de clé de cache « ne pas régénérer si inchangé »
+        # (relue en tête de fonction). Stockée DANS le brief pour éviter une colonne.
+        brief["_corpus_fingerprint"] = _brief_fp
+
         # Sauvegarder en DB
         with engine.begin() as conn:
             conn.execute(text("""
@@ -11454,11 +11510,20 @@ def get_brief_generation_status(scenario_id: str) -> dict[str, Any]:
 
 
 @app.get("/scenarios/{scenario_id}/evidence-brief/llm")
-def get_llm_evidence_brief(scenario_id: str) -> dict[str, Any]:
+def get_llm_evidence_brief(scenario_id: str, lang: str | None = Query(None)) -> dict[str, Any]:
     """
-    Retourne le brief LLM généré (depuis le cache DB).
-    Si absent, déclenche la génération et retourne un statut pending.
+    Retourne le brief LLM généré (depuis le cache DB) DANS LA LANGUE demandée.
+    Le cache n'est servi que si son empreinte (corpus + seuil + langue) correspond ;
+    sinon (corpus modifié OU langue différente) on déclenche une régénération et on
+    retourne un statut pending. Sans `lang`, le brief reste en français (défaut).
     """
+    threshold = _get_scenario_threshold(scenario_id)
+    articles = _get_above_threshold_articles(scenario_id, threshold)
+    if not articles:
+        return {"status": "empty", "message": "Aucun article au-dessus du seuil. Ajoutez des articles ou abaissez le seuil de similarité."}
+
+    _want_fp = _evidence_fingerprint([a["id"] for a in articles], threshold, lang, "brief-v2-fulltext")
+
     with engine.connect() as conn:
         row = conn.execute(text("""
             SELECT evidence_brief_json, brief_generated_at
@@ -11467,15 +11532,12 @@ def get_llm_evidence_brief(scenario_id: str) -> dict[str, Any]:
 
     if row and row["evidence_brief_json"]:
         brief = dict(row["evidence_brief_json"])
-        brief["_cached"] = True
-        brief["_generated_at"] = row["brief_generated_at"].isoformat() if row["brief_generated_at"] else None
-        return brief
-
-    # Vérifier qu'il y a des articles avant de déclencher la génération
-    threshold = _get_scenario_threshold(scenario_id)
-    articles = _get_above_threshold_articles(scenario_id, threshold)
-    if not articles:
-        return {"status": "empty", "message": "Aucun article au-dessus du seuil. Ajoutez des articles ou abaissez le seuil de similarité."}
+        # Ne servir le cache que s'il correspond au corpus ET à la langue demandés.
+        # Un brief français ne doit pas être resservi quand l'UI passe en anglais.
+        if brief.get("_corpus_fingerprint") == _want_fp:
+            brief["_cached"] = True
+            brief["_generated_at"] = row["brief_generated_at"].isoformat() if row["brief_generated_at"] else None
+            return brief
 
     # Si un job précédent a ÉCHOUÉ, renvoyer l'erreur au lieu de relancer la
     # génération à chaque appel : sinon un échec persistant (mauvaise sortie LLM,
@@ -11485,8 +11547,9 @@ def get_llm_evidence_brief(scenario_id: str) -> dict[str, Any]:
     if _bj.get("status") == "error":
         return {"status": "error", "message": _bj.get("error", "Échec de la génération du brief.")}
 
-    # Pas de brief en cache : déclencher la génération
-    generate_evidence_brief(scenario_id)
+    # Pas de brief en cache valide (absent, corpus changé, ou autre langue) :
+    # déclencher la génération DANS LA LANGUE demandée.
+    generate_evidence_brief(scenario_id, lang=lang)
     return {"status": "generating", "message": "Génération en cours, réessayez dans 30 secondes."}
 
 
@@ -11733,29 +11796,38 @@ def _attach_model_spec(variables: dict, prov_articles: list[dict]) -> dict:
 
 def _generate_variables_from_pico(scenario_id: str, persist: str = "active", lang: str | None = None) -> dict[str, Any]:
     """
-    Génère automatiquement les variables du modèle et l'outcome à partir des PICO extraits.
-    Sauvegarde dans scenario_settings.variables_json.
+    Génère automatiquement les variables du modèle et l'outcome à partir des articles
+    pertinents (PICO structuré + titre/résumé + extrait de texte intégral quand
+    disponible), et non des seuls PICO. Sauvegarde dans scenario_settings.variables_json.
     """
     import json as _json
     from datetime import datetime, timezone
     from openai import OpenAI as _OAI
 
     threshold = _get_scenario_threshold(scenario_id)
-    articles = _get_above_threshold_articles(scenario_id, threshold)
+    articles = _get_above_threshold_articles(scenario_id, threshold,
+                                             include_fulltext=True, fulltext_top_docs=25)
 
-    pico_articles = [a for a in articles if a.get("pico_json")]
+    # On n'EXIGE plus un PICO extrait : tout article pertinent contribue au choix des
+    # variables/outcome/algorithme via son titre+abstract (+texte intégral si dispo).
+    # Le PICO, quand présent, ajoute la structure P/I/C/O. Auparavant, un article
+    # pertinent sans PICO était purement ignoré (perte de signal injustifiée).
+    # `pico_articles` = désormais l'ensemble pertinent complet (nom conservé pour le
+    # reste du flux ; le PICO reste optionnel par article).
+    pico_articles = articles
     if not pico_articles:
-        return {"error": "Aucun article avec PICO extrait pour générer les variables."}
+        return {"error": "Aucun article au-dessus du seuil pour générer les variables."}
+    _n_with_pico = sum(1 for a in pico_articles if a.get("pico_json"))
 
     scenario_name = _get_scenario_name(scenario_id)
 
-    # Construire le contexte PICO + résumé. Le PICO (extrait du texte intégral
-    # quand disponible) structure ; l'abstract fournit les prédicteurs, métriques
-    # et résultats bruts utiles au choix des variables, outcomes et algorithme.
+    # Contexte à trois niveaux (PICO structuré → abstract → extrait de TEXTE
+    # INTÉGRAL quand disponible) : le LLM choisit les prédicteurs/métriques sur le
+    # texte réel des articles, pas seulement sur la compression PICO.
     pico_context = []
     for a in pico_articles[:25]:
         pj = a.get("pico_json") or {}
-        pico_context.append({
+        _entry = {
             "id": a.get("id"),
             "title": a.get("title", "")[:100],
             "year": a.get("year"),
@@ -11766,7 +11838,11 @@ def _generate_variables_from_pico(scenario_id: str, persist: str = "active", lan
             "O": pj.get("outcome", pj.get("O", "")),
             "key_finding": pj.get("key_finding", pj.get("conclusion", "")),
             "abstract": (a.get("abstract") or "")[:1200],
-        })
+        }
+        _ft = (a.get("fulltext") or "").strip()
+        if _ft:
+            _entry["fulltext_excerpt"] = _ft
+        pico_context.append(_entry)
 
     context_str = _json.dumps(pico_context, ensure_ascii=False, indent=2)
 
@@ -11776,7 +11852,7 @@ l'outcome principal, et le meilleur algorithme pour un modèle prédictif.
 Tu génères un JSON structuré. Ne pas utiliser de tiret em (—).""" + _llm_lang_directive(lang)
 
     user_prompt = f"""Scénario : "{scenario_name}"
-Basé sur {len(pico_articles)} articles avec extraction PICO :
+Basé sur {len(pico_articles)} articles pertinents ({_n_with_pico} avec PICO extrait ; PICO, abstract et extrait de texte intégral fournis quand disponibles) :
 
 {context_str}
 
@@ -11855,15 +11931,16 @@ Retourne UNIQUEMENT le JSON valide."""
         # on RÉUTILISE ce spec tel quel : « rechecker » sur la même évidence donne
         # exactement le même résultat (plus d'appel LLM non déterministe). On ne
         # régénère via le LLM QUE lorsque l'évidence change réellement.
-        import hashlib as _hashlib
-        # Le suffixe de version invalide les empreintes des specs générés avec un
-        # contexte plus pauvre (ex. PICO seul, sans abstract) : ils sont régénérés
-        # une fois avec le contexte enrichi, puis réutilisés à évidence constante.
-        _CTX_VERSION = "ctx-v2-abstract"
-        _ev_ids = sorted(str(a.get("id")) for a in pico_articles[:25] if a.get("id") is not None)
-        evidence_fingerprint = _hashlib.sha256(
-            (_CTX_VERSION + "|" + "|".join(_ev_ids)).encode()
-        ).hexdigest()[:16]
+        # Empreinte partagée avec l'Evidence Brief (_evidence_fingerprint) : ensemble
+        # ORDONNÉ des IDs pertinents + seuil + langue + version de contexte. Le suffixe
+        # de version invalide UNE FOIS les specs générés avec un contexte plus pauvre
+        # (PICO seul, ou sans texte intégral) : régénérés puis réutilisés à évidence
+        # constante. Seuil et langue inclus : un spec FR au seuil 0.45 ne doit pas être
+        # resservi pour une requête EN ni pour un autre seuil.
+        _CTX_VERSION = "ctx-v3-fulltext"
+        evidence_fingerprint = _evidence_fingerprint(
+            [a.get("id") for a in pico_articles[:25] if a.get("id") is not None],
+            threshold, lang, _CTX_VERSION)[:16]
 
         _reused = None
         with engine.connect() as _rc:
@@ -11921,7 +11998,7 @@ Retourne UNIQUEMENT le JSON valide."""
             # Outcome/variables/algorithme dérivés du sous-ensemble PERTINENT.
             "corpus_total": int(_corpus_total),            # corpus complet
             "relevant_total": len(articles),               # au-dessus du seuil
-            "pico_articles_used": len(pico_articles),      # pertinents AVEC PICO (entrée du modèle)
+            "pico_articles_used": len(pico_articles),      # articles pertinents (entrée du modèle ; PICO optionnel par article)
             "auto_generated": True,
             "validation_status": "pending",
             "evidence_fingerprint": evidence_fingerprint,
@@ -11961,7 +12038,7 @@ Retourne UNIQUEMENT le JSON valide."""
 
 @app.post("/scenarios/{scenario_id}/variables/generate")
 def generate_scenario_variables(scenario_id: str, lang: str | None = Query(None), _: None = Depends(require_api_key)) -> dict[str, Any]:
-    """Déclenche la génération asynchrone des Variables & Modèle depuis les PICO."""
+    """Déclenche la génération asynchrone des Variables & Modèle depuis les articles pertinents."""
     import threading, time
 
     if _job_is_active(_VARIABLES_GENERATION_JOBS.get(scenario_id)):

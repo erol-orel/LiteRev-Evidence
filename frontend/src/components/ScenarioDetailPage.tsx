@@ -3399,7 +3399,9 @@ function EvidencesSection({ scenarioId, detail }: { scenarioId: string; detail: 
     getLlmEvidenceBrief(scenarioId)
       .then(d => { setLlmData(d); setLlmLoading(false); })
       .catch(e => { setLlmError(e.message); setLlmLoading(false); });
-  }, [scenarioId]);
+    // `lang` in deps: switching the UI language re-requests the brief in that
+    // language (the backend regenerates it when the cached language differs).
+  }, [scenarioId, lang]);
 
   React.useEffect(() => {
     loadLlm();
@@ -3565,7 +3567,7 @@ ${llm && (llm.executive_summary || (llm.key_findings?.length ?? 0) > 0) ? `
 <hr class="section-divider">
 <h2>${t("scenarioDetail.evidences.pdf.narrativeBrief")}</h2>
 ${llm._meta ? `<p class="meta">${llm._meta.articles_used} ${t("scenarioDetail.evidences.pdf.articlesAnalyzed")} ${llm._meta.threshold?.toFixed(2)} · ${llm._meta.human_validated} ${t("scenarioDetail.evidences.pdf.humanValidated")} · ${llm._meta.year_range}</p>` : ''}
-${(llm.evidence_level||llm.grade_recommendation) ? `<p>${llm.evidence_level?`<span class="level-badge-${llm.evidence_level.toLowerCase().includes('fort')?'forte':llm.evidence_level.toLowerCase().includes('mod')?'mod':'faible'}">${t("scenarioDetail.evidences.pdf.level")} ${llm.evidence_level}</span>`:''} ${llm.grade_recommendation?`<span class="grade-badge">${t("scenarioDetail.evidences.pdf.grade")} ${llm.grade_recommendation}</span>`:''}</p>` : ''}
+${(llm.evidence_level||llm.grade_recommendation) ? `<p>${llm.evidence_level?`<span class="level-badge-${/fort|strong|élev|elev|high/.test(llm.evidence_level.toLowerCase())?'forte':/mod/.test(llm.evidence_level.toLowerCase())?'mod':'faible'}">${t("scenarioDetail.evidences.pdf.level")} ${llm.evidence_level}</span>`:''} ${llm.grade_recommendation?`<span class="grade-badge">${t("scenarioDetail.evidences.pdf.grade")} ${llm.grade_recommendation}</span>`:''}</p>` : ''}
 ${llm.executive_summary ? `<div class="llm-box"><div class="llm-label">${t("scenarioDetail.evidences.pdf.executiveSummary")}</div><div class="llm-text">${llm.executive_summary}</div></div>` : ''}
 ${llm.clinical_context ? `<h3>${t("scenarioDetail.evidences.pdf.clinicalContext")}</h3><p class="llm-text">${llm.clinical_context}</p>` : ''}
 ${(llm.key_findings?.length??0)>0 ? `<h3>${t("scenarioDetail.evidences.pdf.keyFindings")}</h3><ul class="llm-list">${llm.key_findings!.map(f=>`<li>${f}</li>`).join('')}</ul>` : ''}

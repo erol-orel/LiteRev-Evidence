@@ -2049,7 +2049,7 @@ export interface LlmEvidenceBrief {
 }
 
 export async function getLlmEvidenceBrief(scenarioId: string): Promise<LlmEvidenceBrief> {
-  const r = await safeFetch(`${API_BASE_URL}/scenarios/${scenarioId}/evidence-brief/llm`);
+  const r = await safeFetch(`${API_BASE_URL}/scenarios/${scenarioId}/evidence-brief/llm?lang=${currentLang()}`);
   if (!r.ok) throw new Error(httpMessage(r.status));
   return r.json();
 }
