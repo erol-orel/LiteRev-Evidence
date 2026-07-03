@@ -1,20 +1,27 @@
 """Integration test for the corpus-maintenance admin endpoint.
 
-Seeds duplicates + legacy/junk/substantive chunks + article_scenarios via raw
-psycopg, then drives `main.corpus_maintenance` (which uses `main.engine`) through
-dry-run → apply → idempotent re-run, asserting counts, chunk CASCADE, the
-explicit article_scenarios delete (that table has no FK), the 'full_text' retype,
-junk deletion, and that restore-point backup tables are created.
+Seeds duplicates + legacy chunks (junk / redundant / unique) + article_scenarios
+via raw psycopg, then drives `main.corpus_maintenance` (which uses `main.engine`)
+through dry-run → apply → idempotent re-run, asserting:
+  - duplicate purge (chunk CASCADE + explicit article_scenarios delete, no FK)
+  - junk deletion (nonstandard + < 20 chars)
+  - redundant deletion (fragment text already inside the doc's title_abstract → safe)
+  - reclassification of unique fragments (real content) to 'fulltext_section'
+  - restore-point backup tables are created; re-run is a no-op.
 
 Skips when no Postgres is reachable (see conftest.db_conn) or when this
 SQLAlchemy/psycopg build can't probe the server version — a known sandbox-only
-quirk (`_get_server_version_info` gets bytes); CI and production are unaffected.
+quirk; CI and production run it for real.
 """
 import pytest
 
 import main
 
-LONG = "this is a long substantive chunk body well over twenty characters"
+# title_abstract text for doc 1; the 'title'/'abstract_section' fragments below are
+# literal substrings of it → classified REDUNDANT (already indexed here) → deleted.
+TA1 = "Cancer immunotherapy outcomes in elderly patients with comorbidities and survival"
+TA2 = "A short but sufficiently long abstract about topic X for testing"
+UNIQUE_TXT = "Totally separate content absent from the abstract entirely here"  # not in TA2
 
 
 def _engine_ok() -> bool:
@@ -50,17 +57,20 @@ def _seed(conn):
             "(3,'D3','pubmed','c',true),(4,'D4','pmc','d',true)"
         )
         rows = [
-            (1, "ta1", "title_abstract", "[0.1]"),
-            (1, LONG, "fulltext_section", "[0.1]"),
-            (1, LONG + " 2", "fulltext_section", "[0.1]"),
-            (2, "ta2", "title_abstract", "[0.1]"),
-            (3, "ta3", "title_abstract", "[0.1]"),      # on duplicate -> cascade
-            (3, LONG, "fulltext_section", "[0.1]"),     # on duplicate -> cascade
-            (4, "ta4", "title_abstract", None),         # on duplicate -> cascade
-            (1, LONG, "full_text", "[0.1]"),            # legacy -> retype
-            (2, "x", None, None),                       # junk (null type, short)
-            (1, " ", "weird_type", None),               # junk (short)
-            (2, LONG, "live_api_persisted", None),      # substantive -> kept/reported
+            # doc1 (canonical): title_abstract + 2 fulltext + 2 REDUNDANT legacy fragments
+            (1, TA1, "title_abstract", "[0.1]"),
+            (1, "full body one section here", "fulltext_section", "[0.1]"),
+            (1, "full body two section here", "fulltext_section", "[0.1]"),
+            (1, "Cancer immunotherapy outcomes", "title", None),            # ⊂ TA1 → redundant
+            (1, "elderly patients with comorbidities", "abstract_section", None),  # ⊂ TA1 → redundant
+            # doc2 (canonical): title_abstract + 1 UNIQUE (reclassify) + 1 JUNK (delete)
+            (2, TA2, "title_abstract", "[0.1]"),
+            (2, UNIQUE_TXT, None, None),   # not in TA2, >=20 chars → reclassify to fulltext_section
+            (2, "x", None, None),          # < 20 chars → junk → delete
+            # duplicate docs: chunks cascade-delete with the docs
+            (3, "ta3", "title_abstract", "[0.1]"),
+            (3, "full3", "fulltext_section", "[0.1]"),
+            (4, "ta4", "title_abstract", None),
         ]
         for did, content, ct, emb in rows:
             cur.execute(
@@ -83,35 +93,43 @@ def test_corpus_maintenance_end_to_end(db_conn):
         pytest.skip("main.engine cannot connect here (SQLAlchemy/psycopg version-probe quirk)")
     _seed(db_conn)
 
-    # ── DRY RUN: reports, writes nothing ────────────────────────────────────
+    # ── DRY RUN: reports the three-way partition, writes nothing ─────────────
     r = main.corpus_maintenance(main.CorpusMaintenanceIn(dry_run=True), None)
     assert r["dry_run"] is True
     assert r["duplicates"]["documents"] == 2
     assert r["duplicates"]["chunks_cascade"] == 3
     assert r["duplicates"]["article_scenarios"] == 2
-    assert r["legacy_chunks"]["legacy_full_text_to_retype"] == 1
-    assert r["legacy_chunks"]["junk_to_delete"] == 2
-    assert r["legacy_chunks"]["substantive_kept_reported"] == 1
+    assert r["legacy_chunks"]["junk_to_delete"] == 1
+    assert r["legacy_chunks"]["redundant_to_delete"] == 2
+    assert r["legacy_chunks"]["unique_to_reclassify"] == 1
     assert _count(db_conn, "SELECT count(*) FROM literature_document") == 4  # untouched
     assert r["backups"] == []
 
     # ── APPLY ───────────────────────────────────────────────────────────────
     r2 = main.corpus_maintenance(main.CorpusMaintenanceIn(dry_run=False), None)
     assert r2["duplicates"]["deleted_documents"] == 2
-    assert r2["legacy_chunks"]["retyped"] == 1
-    assert r2["legacy_chunks"]["deleted_junk"] == 2
-    assert len(r2["backups"]) == 4  # docs, chunks, ars, junkchunks
+    assert r2["legacy_chunks"]["deleted_junk"] == 1
+    assert r2["legacy_chunks"]["deleted_redundant"] == 2
+    assert r2["legacy_chunks"]["reclassified"] == 1
+    assert len(r2["backups"]) == 5  # dup: docs+chunks+ars ; legacy: junk+redundant
     assert _count(db_conn, "SELECT count(*) FROM literature_document") == 2
-    # doc1: {title_abstract, 2x fulltext_section, full_text->fulltext_section} = 4
-    # doc2: {title_abstract, live_api_persisted} = 2  (null junk deleted)
-    assert _count(db_conn, "SELECT count(*) FROM document_chunk") == 6
-    assert _count(db_conn, "SELECT count(*) FROM document_chunk WHERE chunk_type='full_text'") == 0
+    # doc1: {title_abstract, 2x fulltext} = 3 (2 redundant fragments deleted)
+    # doc2: {title_abstract, unique->fulltext_section} = 2 (junk deleted)
+    assert _count(db_conn, "SELECT count(*) FROM document_chunk") == 5
+    # no non-standard chunks remain
+    assert _count(
+        db_conn,
+        "SELECT count(*) FROM document_chunk WHERE chunk_type IS NULL "
+        "OR chunk_type NOT IN ('title_abstract','fulltext_section')",
+    ) == 0
     assert _count(db_conn, "SELECT count(*) FROM document_chunk WHERE chunk_type='fulltext_section'") == 3
+    # the unique fragment's content survived (now a fulltext_section)
+    assert _count(db_conn, f"SELECT count(*) FROM document_chunk WHERE content = '{UNIQUE_TXT}'") == 1
     assert _count(db_conn, "SELECT count(*) FROM article_scenarios") == 1  # only sc-a/doc1
 
     # ── IDEMPOTENT re-run ───────────────────────────────────────────────────
     r3 = main.corpus_maintenance(main.CorpusMaintenanceIn(dry_run=False), None)
     assert r3["duplicates"]["documents"] == 0
-    assert r3["legacy_chunks"]["legacy_full_text_to_retype"] == 0
     assert r3["legacy_chunks"]["junk_to_delete"] == 0
-    assert r3["legacy_chunks"]["substantive_kept_reported"] == 1  # still reported, still kept
+    assert r3["legacy_chunks"]["redundant_to_delete"] == 0
+    assert r3["legacy_chunks"]["unique_to_reclassify"] == 0

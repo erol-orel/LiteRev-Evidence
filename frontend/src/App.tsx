@@ -645,7 +645,8 @@ function CorpusMaintenancePanel({ onRefresh }: { onRefresh?: () => void }) {
   const keyed = hasApiKey();
 
   const actionable = (r: CorpusMaintenanceReport) =>
-    r.duplicates.documents + r.legacy_chunks.legacy_full_text_to_retype + r.legacy_chunks.junk_to_delete;
+    r.duplicates.documents + r.legacy_chunks.junk_to_delete +
+    r.legacy_chunks.redundant_to_delete + r.legacy_chunks.unique_to_reclassify;
 
   async function run(dryRun: boolean) {
     setBusy(dryRun ? "preview" : "apply");
@@ -712,8 +713,11 @@ function CorpusMaintenancePanel({ onRefresh }: { onRefresh?: () => void }) {
                   {typeof report.duplicates.deleted_documents === "number" && report.duplicates.deleted_documents > 0 && (
                     <li><span className="font-mono text-white/80">{report.duplicates.deleted_documents}</span> {t("stats.maint.deletedDocs")} · <span className="font-mono text-white/60">{report.duplicates.chunks_cascade}</span> {t("stats.maint.dupChunks")} · <span className="font-mono text-white/60">{report.duplicates.article_scenarios}</span> {t("stats.maint.dupArs")}</li>
                   )}
-                  {typeof report.legacy_chunks.retyped === "number" && report.legacy_chunks.retyped > 0 && (
-                    <li><span className="font-mono text-white/80">{report.legacy_chunks.retyped}</span> {t("stats.maint.retyped")}</li>
+                  {typeof report.legacy_chunks.deleted_redundant === "number" && report.legacy_chunks.deleted_redundant > 0 && (
+                    <li><span className="font-mono text-white/80">{report.legacy_chunks.deleted_redundant}</span> {t("stats.maint.deletedRedundant")}</li>
+                  )}
+                  {typeof report.legacy_chunks.reclassified === "number" && report.legacy_chunks.reclassified > 0 && (
+                    <li><span className="font-mono text-white/80">{report.legacy_chunks.reclassified}</span> {t("stats.maint.reclassified")}</li>
                   )}
                   {typeof report.legacy_chunks.deleted_junk === "number" && report.legacy_chunks.deleted_junk > 0 && (
                     <li><span className="font-mono text-white/80">{report.legacy_chunks.deleted_junk}</span> {t("stats.maint.deletedJunk")}</li>
@@ -724,14 +728,14 @@ function CorpusMaintenancePanel({ onRefresh }: { onRefresh?: () => void }) {
                   {report.duplicates.documents > 0 && (
                     <li><span className="font-mono text-white/80">{report.duplicates.documents}</span> {t("stats.maint.dupDocs")} · <span className="font-mono text-white/60">{report.duplicates.chunks_cascade}</span> {t("stats.maint.dupChunks")} · <span className="font-mono text-white/60">{report.duplicates.article_scenarios}</span> {t("stats.maint.dupArs")}</li>
                   )}
-                  {report.legacy_chunks.legacy_full_text_to_retype > 0 && (
-                    <li><span className="font-mono text-white/80">{report.legacy_chunks.legacy_full_text_to_retype}</span> {t("stats.maint.retypeLabel")}</li>
+                  {report.legacy_chunks.redundant_to_delete > 0 && (
+                    <li><span className="font-mono text-white/80">{report.legacy_chunks.redundant_to_delete}</span> {t("stats.maint.redundantLabel")}</li>
+                  )}
+                  {report.legacy_chunks.unique_to_reclassify > 0 && (
+                    <li><span className="font-mono text-white/80">{report.legacy_chunks.unique_to_reclassify}</span> {t("stats.maint.reclassifyLabel")}</li>
                   )}
                   {report.legacy_chunks.junk_to_delete > 0 && (
                     <li><span className="font-mono text-white/80">{report.legacy_chunks.junk_to_delete}</span> {t("stats.maint.junkLabel")}</li>
-                  )}
-                  {report.legacy_chunks.substantive_kept_reported > 0 && (
-                    <li className="text-forest-400"><span className="font-mono">{report.legacy_chunks.substantive_kept_reported}</span> {t("stats.maint.keptLabel")}</li>
                   )}
                 </ul>
               ) : null}
