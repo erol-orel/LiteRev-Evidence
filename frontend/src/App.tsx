@@ -1688,7 +1688,7 @@ export default function App() {
   // Recherche multi-sous-requêtes (avancé) : requêtes ADDITIONNELLES combinées à
   // la requête principale ci-dessus. Vide = recherche mono-requête classique.
   const [extraQueries, setExtraQueries] = useState<SubQuery[]>([]);
-  const [combinator, setCombinator] = useState<"union" | "intersection">("intersection");
+  const [combinator, setCombinator] = useState<"union" | "intersection">("union");
   const [filters, setFilters] = useState<SearchFilters>({
     projectContext: "literev",
   });
@@ -2581,7 +2581,7 @@ export default function App() {
                       <p className="text-xs text-forest-300">{t("search.combineHint")}</p>
                       <div className="flex items-center gap-1.5 text-[11px]">
                         <span className="text-forest-500">{t("search.combinator")}</span>
-                        {(["intersection", "union"] as const).map((c) => (
+                        {(["union", "intersection"] as const).map((c) => (
                           <button
                             key={c}
                             type="button"

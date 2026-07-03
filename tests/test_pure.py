@@ -134,11 +134,11 @@ def test_multi_query_intersection_disjoint_is_empty(monkeypatch):
     assert main._multi_query_corpus_ids(sub, "intersection", {}) == []
 
 
-def test_multi_query_unknown_combinator_is_intersection(monkeypatch):
-    # Anything that isn't "union" narrows (intersection = the safe default).
+def test_multi_query_unknown_combinator_is_union(monkeypatch):
+    # Anything that isn't "intersection" broadens (union = the default).
     _patch_local_ids(monkeypatch, {"A": [1, 2, 3], "B": [3, 4]})
     sub = [{"kind": "boolean", "text": "A"}, {"kind": "natural", "text": "B"}]
-    assert main._multi_query_corpus_ids(sub, "banana", {}) == [3]
+    assert sorted(main._multi_query_corpus_ids(sub, "banana", {})) == [1, 2, 3, 4]
 
 
 def test_multi_query_all_blank_is_empty(monkeypatch):

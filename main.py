@@ -1735,12 +1735,12 @@ def _multi_query_corpus_ids(sub_queries: list[dict], combinator: str, filters: d
         id_sets.append(set(_search_local_doc_ids(sq["text"], _mode, filters, limit=500_000)))
     if not id_sets:
         return []
-    if combinator == "union":
-        out: set = set().union(*id_sets)
-    else:  # intersection (ET) — défaut
-        out = set(id_sets[0])
+    if combinator == "intersection":
+        out: set = set(id_sets[0])
         for s in id_sets[1:]:
             out &= s
+    else:  # union (OU) — défaut ; l'intersection (ET) est le choix explicite
+        out = set().union(*id_sets)
     return list(out)
 
 
@@ -6673,17 +6673,17 @@ class UserScenarioIn(BaseModel):
     # la même requête booléenne que celle affichée/comptée à la recherche.
     search_strategy: dict[str, Any] | None = None
     # Recherche MULTI-sous-requêtes : liste [{"kind":"boolean"|"natural","text":...}]
-    # combinée par `combinator` ("union"=OU, "intersection"=ET). < 2 entrées valides
-    # → None (on retombe sur la recherche mono-requête classique query/mode).
+    # combinée par `combinator` ("union"=OU par défaut, "intersection"=ET explicite).
+    # < 2 entrées valides → None (on retombe sur la recherche mono-requête query/mode).
     sub_queries: list[dict[str, Any]] | None = None
-    combinator: str = Field(default="intersection")
+    combinator: str = Field(default="union")
 
     @model_validator(mode="after")
     def _clean_sub_queries(self) -> "UserScenarioIn":
         cleaned = _normalize_sub_queries(self.sub_queries)
         self.sub_queries = cleaned if len(cleaned) >= 2 else None
         if self.combinator not in ("union", "intersection"):
-            self.combinator = "intersection"
+            self.combinator = "union"
         return self
 
 
@@ -7607,7 +7607,7 @@ def _run_user_scenario_populate(
         # live reste pilotée par la stratégie booléenne de la requête synthétisée
         # (elle ne fait qu'ENRICHIR la base ; l'appartenance est recalculée après).
         _sub_queries: list[dict] = []
-        _combinator = "intersection"
+        _combinator = "union"
         try:
             with engine.connect() as _sc:
                 _srow = _sc.execute(text(
