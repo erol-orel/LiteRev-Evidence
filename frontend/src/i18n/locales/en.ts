@@ -392,7 +392,7 @@ export const en: Translations = {
       openInPubmedArrow: "Open in PubMed →",
       explanation: "Explanation",
       synonymGroups: "Synonym groups",
-      liveSearchTitle: "Live search (8 sources)",
+      liveSearchTitle: "Live search (5 sources)",
       searching: "Searching...",
       searchAllSources: "Search all sources",
       liveResultsSuffix: "results (live APIs)",
