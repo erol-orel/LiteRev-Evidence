@@ -5,7 +5,7 @@ export const fr = {
     search: "Recherche",
     scenarios: "Scénarios",
     terrain: "Données Terrain",
-    stats: "Statistiques",
+    stats: "Corpus",
   },
   header: {
     adminKeyActive: "Clé admin",
@@ -782,10 +782,10 @@ export const fr = {
       fulltextLabel: "Récupération Full-Text",
       fulltextDesc: "Recherche le texte intégral en accès libre via Unpaywall (DOI requis).",
       title: "Enrichissement LLM",
-      subtitle: "Lancez les enrichissements automatiques sur les articles de ce scénario",
+      subtitle: "Lancez les enrichissements automatiques sur l'ensemble du corpus",
       autoEnrichmentTitle: "Enrichissement automatique actif",
       autoEnrichmentBody:
-        ": Le pipeline de votre scénario lance automatiquement l'extraction PICO et l'enrichissement des métadonnées lors de l'ingestion des articles. Utilisez les boutons ci-dessous uniquement pour compléter les articles qui auraient été manqués ou pour relancer un enrichissement spécifique.",
+        ": Le pipeline lance automatiquement l'extraction PICO et l'enrichissement des métadonnées lors de l'ingestion des articles. Utilisez les boutons ci-dessous uniquement pour compléter les articles qui auraient été manqués ou pour relancer un enrichissement spécifique.",
       batchSizeLabel: "Taille du lot :",
       articlesPerRun: "articles par exécution",
       coverage: "Couverture",

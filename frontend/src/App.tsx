@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import { ScenarioDetailPage } from "./components/ScenarioDetailPage";
+import { ScenarioDetailPage, EnrichmentSection } from "./components/ScenarioDetailPage";
 import { useI18n } from "./i18n/LanguageProvider";
 import { Activity, BarChart2, BookOpen, Cloud, Download, ExternalLink, FolderOpen, MapPin, AlertTriangle, Users, Pill, Radio, RefreshCw, RotateCcw, ChevronDown, ChevronUp, Zap, Lock, KeyRound, Wrench, Trash2 } from "lucide-react";
 
@@ -878,6 +878,12 @@ function StatsView({ corpusStats, fulltextStats, scenarios, statsByYear, onRefre
 
           {/* Maintenance (admin) — purge doublons + normalisation des chunks « Autres » */}
           <CorpusMaintenancePanel onRefresh={onRefresh} />
+
+          {/* Enrichissement LLM — global, corpus-wide (déplacé depuis l'onglet scénario :
+              l'enrichissement est automatique et à l'échelle du corpus, pas par scénario). */}
+          <div className="mt-5 border-t border-white/5 pt-4">
+            <EnrichmentSection />
+          </div>
 
           {/* Évolution temporelle — intégrée au bas du panneau Corpus */}
           {statsByYear && Object.keys(statsByYear.byYear).length > 0 && (

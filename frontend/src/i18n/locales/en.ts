@@ -7,7 +7,7 @@ export const en: Translations = {
     search: "Search",
     scenarios: "Scenarios",
     terrain: "Field Data",
-    stats: "Statistics",
+    stats: "Corpus",
   },
   header: {
     adminKeyActive: "Admin key",
@@ -784,10 +784,10 @@ export const en: Translations = {
       fulltextLabel: "Full-Text Retrieval",
       fulltextDesc: "Searches for open-access full text via Unpaywall (DOI required).",
       title: "LLM Enrichment",
-      subtitle: "Run automatic enrichments on this scenario's articles",
+      subtitle: "Run automatic enrichments across the whole corpus",
       autoEnrichmentTitle: "Automatic enrichment active",
       autoEnrichmentBody:
-        ": Your scenario's pipeline automatically runs PICO extraction and metadata enrichment when articles are ingested. Use the buttons below only to complete articles that may have been missed or to re-run a specific enrichment.",
+        ": The pipeline automatically runs PICO extraction and metadata enrichment when articles are ingested. Use the buttons below only to complete articles that may have been missed or to re-run a specific enrichment.",
       batchSizeLabel: "Batch size:",
       articlesPerRun: "articles per run",
       coverage: "Coverage",
