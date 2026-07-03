@@ -156,7 +156,7 @@ export const en: Translations = {
     abstractOnlyLabel: "Abstract only:",
     duplicatesLabel: "Duplicates:",
     pendingEmbedding: "pending embedding",
-    coveredByFulltext: "covered by full text",
+    coveredByFulltext: "not indexed (skipped)",
     forceIndex: "Force indexing",
     forceIndexing: "Indexing…",
     forceIndexDone: "Indexed",

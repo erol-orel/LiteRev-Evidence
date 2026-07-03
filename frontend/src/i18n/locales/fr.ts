@@ -154,7 +154,7 @@ export const fr = {
     abstractOnlyLabel: "Résumé seul :",
     duplicatesLabel: "Doublons :",
     pendingEmbedding: "en attente d'indexation",
-    coveredByFulltext: "couverts par le texte intégral",
+    coveredByFulltext: "non indexés (ignorés)",
     forceIndex: "Forcer l'indexation",
     forceIndexing: "Indexation…",
     forceIndexDone: "Indexé",

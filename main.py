@@ -1011,9 +1011,12 @@ def startup_event() -> None:
                     logger.warning(f"BG abstract backfill error: {_abe}")
 
                 # ── 1. EMBEDDING ──────────────────────────────────────────────
-                # Priorité : fulltext_section d'abord, puis title_abstract
-                # Si un article a des chunks fulltext, on n'embède PAS son
-                # title_abstract (le fulltext est plus riche).
+                # On embède TOUS les chunks standard sans embedding — y compris le
+                # title_abstract des docs à texte intégral : le résumé sert de vecteur
+                # représentatif CONSTANT au clustering (même base pour chaque document)
+                # pour un coût négligeable. (Avant, on le sautait pour les docs full-text
+                # → incohérence : la plupart embeddés, ~153 non, et clustering par 1re
+                # section au lieu du résumé.)
                 with engine.connect() as _conn:
                     _chunks = _conn.execute(text("""
                         SELECT c.id, c.content
@@ -1022,14 +1025,6 @@ def startup_event() -> None:
                           AND c.chunk_type IN ('title_abstract', 'fulltext_section')
                           AND LENGTH(c.content) > 20
                           AND COALESCE(c.embedding_attempts, 0) < 3
-                          AND (
-                            c.chunk_type = 'fulltext_section'
-                            OR NOT EXISTS (
-                                SELECT 1 FROM document_chunk c2
-                                WHERE c2.document_id = c.document_id
-                                  AND c2.chunk_type = 'fulltext_section'
-                            )
-                          )
                         ORDER BY c.chunk_type DESC, c.id
                         LIMIT 500
                     """)).mappings().fetchall()
@@ -4366,21 +4361,18 @@ def get_fulltext_stats() -> dict[str, Any]:
             text("SELECT COUNT(*) FROM document_chunk")
         ).scalar() or 0
 
-        # « En attente d'indexation » HONNÊTE : uniquement les chunks que le worker VA
-        # réellement embedder — mêmes critères que son sélecteur (types standard ; et pour
-        # un doc doté de texte intégral, son title_abstract n'est pas ré-embeddé car couvert
-        # par le fulltext). Exclut donc les types « Autres » (jamais embeddés) et les résumés
-        # rendus redondants par le fulltext, qui gonflaient artificiellement le reliquat.
+        # « En attente d'indexation » HONNÊTE : exactement les chunks que le worker VA
+        # embedder — types standard, contenu embeddable (> 20 car.), pas encore mis en
+        # quarantaine (< 3 échecs). Exclut les types « Autres » (jamais embeddés) et les
+        # chunks définitivement refusés par l'API, qui gonflaient artificiellement le
+        # reliquat. (On embède désormais le title_abstract de TOUS les docs, full-text
+        # compris — plus de « couverts par le texte intégral ».)
         chunks_pending = conn.execute(text("""
             SELECT COUNT(*) FROM document_chunk c
             WHERE c.embedding IS NULL
               AND c.chunk_type IN ('title_abstract', 'fulltext_section')
               AND LENGTH(c.content) > 20
               AND COALESCE(c.embedding_attempts, 0) < 3
-              AND (c.chunk_type = 'fulltext_section'
-                   OR NOT EXISTS (SELECT 1 FROM document_chunk c2
-                                  WHERE c2.document_id = c.document_id
-                                    AND c2.chunk_type = 'fulltext_section'))
         """)).scalar() or 0
 
         # Répartition des chunks par type : 'fulltext_section' (texte intégral)
@@ -4651,10 +4643,7 @@ def embed_pending_chunks(limit: int = 200, _: None = Depends(require_api_key)) -
         "c.embedding IS NULL "
         "AND c.chunk_type IN ('title_abstract','fulltext_section') "
         "AND LENGTH(c.content) > 20 "
-        "AND COALESCE(c.embedding_attempts, 0) < 3 "
-        "AND (c.chunk_type = 'fulltext_section' "
-        "OR NOT EXISTS (SELECT 1 FROM document_chunk c2 "
-        "WHERE c2.document_id = c.document_id AND c2.chunk_type = 'fulltext_section'))"
+        "AND COALESCE(c.embedding_attempts, 0) < 3"
     )
 
     from openai import OpenAI as _OAI
@@ -5208,7 +5197,9 @@ def _run_clustering_background(scenario_id: str, force_refresh: bool = False, la
                            FROM document_chunk c
                            WHERE c.document_id = d.id
                              AND c.embedding IS NOT NULL
-                           ORDER BY c.id
+                           -- Vecteur représentatif = le résumé (title_abstract) en
+                           -- priorité pour TOUS les docs (cohérent) ; repli 1er chunk.
+                           ORDER BY (c.chunk_type = 'title_abstract') DESC, c.id
                            LIMIT 1
                        ) AS embedding_str
                 FROM literature_document d
@@ -6139,7 +6130,7 @@ _KG_NODE_SQL = """
           AND d.is_duplicate IS NOT TRUE
           AND c.embedding IS NOT NULL
           AND d.abstract IS NOT NULL
-        ORDER BY d.id, c.id
+        ORDER BY d.id, (c.chunk_type = 'title_abstract') DESC, c.id
     ) sub
     ORDER BY quality_score DESC NULLS LAST, year DESC NULLS LAST
     LIMIT :max_nodes
@@ -9352,7 +9343,8 @@ def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict
                                FROM document_chunk c
                                WHERE c.document_id = d.id
                                  AND c.embedding IS NOT NULL
-                               ORDER BY c.id
+                               -- Résumé (title_abstract) en priorité : vecteur cohérent.
+                               ORDER BY (c.chunk_type = 'title_abstract') DESC, c.id
                                LIMIT 1
                            ) AS embedding_str
                     FROM literature_document d
