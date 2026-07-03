@@ -28,6 +28,7 @@ export const en: Translations = {
     create: "Create",
     loadingEllipsis: "Loading…",
     recommendedActions: "Recommended actions",
+    generatingRecommendedActions: "Generating recommended actions from the evidence…",
     unknownError: "Unknown error",
   },
   errors: {
