@@ -3073,7 +3073,7 @@ function AlertsSection({ scenarioId }: { scenarioId: string }) {
 
 // ─── Section: Enrichissement LLM Batch ────────────────────────────────────────
 
-function EnrichmentSection({ scenarioId }: { scenarioId: string }) {
+export function EnrichmentSection({ scenarioId }: { scenarioId?: string }) {
   const { t } = useI18n();
   const [status, setStatus] = React.useState<EnrichmentStatus | null>(null);
   const [loadingStatus, setLoadingStatus] = React.useState(false);
@@ -3140,7 +3140,9 @@ function EnrichmentSection({ scenarioId }: { scenarioId: string }) {
     },
   ];
 
-  const userScenario = isUserScenario(scenarioId);
+  // Global (Corpus) usage passes no scenarioId; the auto-enrichment note applies
+  // corpus-wide, so show it there too (and for user scenarios, as before).
+  const showAutoNote = !scenarioId || isUserScenario(scenarioId);
 
   return (
     <div className="space-y-5">
@@ -3150,7 +3152,7 @@ function EnrichmentSection({ scenarioId }: { scenarioId: string }) {
         subtitle={t("scenarioDetail.enrichment.subtitle")}
       />
 
-      {userScenario && (
+      {showAutoNote && (
         <div className="rounded-2xl border border-brand-500/20 bg-brand-500/5 px-4 py-3 flex items-start gap-3">
           <Info size={14} className="text-brand-400 shrink-0 mt-0.5" />
           <div className="text-xs text-brand-200/80 leading-relaxed">
@@ -4281,7 +4283,7 @@ function ModelMonitorSection({ scenarioId }: { scenarioId: string }) {
 
 // ─── Main Component ───────────────────────────────────────────────────────────
 
-type SectionKey = "review" | "evidence" | "assistant" | "viz" | "variables" | "queries" | "alerts" | "enrichment";
+type SectionKey = "review" | "evidence" | "assistant" | "viz" | "variables" | "queries" | "alerts";
 
 const SECTIONS: Array<{ key: SectionKey; icon: React.ReactNode }> = [
   { key: "review",      icon: <FileText size={13} /> },
@@ -4290,7 +4292,6 @@ const SECTIONS: Array<{ key: SectionKey; icon: React.ReactNode }> = [
   { key: "viz",         icon: <Layers size={13} /> },
   { key: "variables",   icon: <Database size={13} /> },
   { key: "queries",     icon: <Search size={13} /> },
-  { key: "enrichment",  icon: <Zap size={13} className="text-gold-400" /> },
   { key: "alerts",      icon: <Bell size={13} /> },
 ];
 
@@ -4448,7 +4449,6 @@ export function ScenarioDetailPage({ scenarioId, onBack, initialTab }: ScenarioD
         {activeSection === "viz" && <VizTab scenarioId={scenarioId} />}
         {activeSection === "variables" && <VariablesModelTab detail={detail} scenarioId={scenarioId} initialSub={initialTab === "model" ? "monitor" : undefined} />}
         {activeSection === "queries" && <QueriesSection detail={detail} scenarioId={scenarioId} />}
-        {activeSection === "enrichment" && <EnrichmentSection scenarioId={scenarioId} />}
         {activeSection === "alerts" && <AlertsSection scenarioId={scenarioId} />}
       </ErrorBoundary>
     </div>
