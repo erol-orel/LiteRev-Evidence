@@ -630,6 +630,8 @@ export const en: Translations = {
       generating: "Generating...",
       newQuestion: "New question",
       citedSources: "Cited scientific sources",
+      papersUsedSuffix: "papers used",
+      withFulltextSuffix: "with full text",
       sourceLabel: "SOURCE",
       relevance: "Relevance:",
       loadingSources: "Loading sources...",

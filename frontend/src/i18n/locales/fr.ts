@@ -628,6 +628,8 @@ export const fr = {
       generating: "Génération en cours...",
       newQuestion: "Nouvelle question",
       citedSources: "Sources scientifiques citées",
+      papersUsedSuffix: "articles utilisés",
+      withFulltextSuffix: "avec texte intégral",
       sourceLabel: "SOURCE",
       relevance: "Pertinence:",
       loadingSources: "Chargement des sources...",

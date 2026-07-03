@@ -13381,6 +13381,35 @@ async def ask_stream_filtered(payload: dict[str, Any]):
 
     threshold = _get_scenario_threshold(scenario_id) if scenario_id else DEFAULT_SIMILARITY_THRESHOLD
 
+    # Compteurs « articles utilisés / avec texte intégral » à afficher sous la
+    # réponse IA — MÊMES définitions que la vue Preuves (sous-ensemble PERTINENT du
+    # scénario : ≥ seuil OU inclus). Volontairement PAS dérivés de `sources`, qui
+    # sont des chunks plafonnés à top_k et ne refléteraient pas le nb d'articles.
+    papers_used = 0
+    papers_with_fulltext = 0
+    if scenario_id:
+        try:
+            with engine.connect() as _cc:
+                _cnt = _cc.execute(text("""
+                    SELECT
+                        COUNT(*) FILTER (WHERE d.is_duplicate IS NOT TRUE
+                            AND COALESCE(ars.screening_status, d.screening_status) IS DISTINCT FROM 'excluded'
+                            AND (COALESCE(ars.screening_status, d.screening_status) = 'included' OR COALESCE(ars.similarity_score, 0) >= :thr)) AS relevant,
+                        COUNT(*) FILTER (WHERE d.is_duplicate IS NOT TRUE
+                            AND COALESCE(ars.screening_status, d.screening_status) IS DISTINCT FROM 'excluded'
+                            AND (COALESCE(ars.screening_status, d.screening_status) = 'included' OR COALESCE(ars.similarity_score, 0) >= :thr)
+                            AND EXISTS (SELECT 1 FROM document_chunk c
+                                WHERE c.document_id = d.id AND c.chunk_type = 'fulltext_section')) AS relevant_with_fulltext
+                    FROM article_scenarios ars
+                    JOIN literature_document d ON d.id = ars.document_id
+                    WHERE ars.scenario_id = :sid
+                """), {"sid": scenario_id, "thr": threshold}).mappings().fetchone()
+            if _cnt:
+                papers_used = int(_cnt["relevant"] or 0)
+                papers_with_fulltext = int(_cnt["relevant_with_fulltext"] or 0)
+        except Exception as _e_cnt:
+            logger.warning(f"ask_stream_filtered counts {scenario_id}: {_e_cnt}")
+
     # Embedding de la question
     try:
         sync_client = SyncOpenAI(timeout=90.0)
@@ -13479,6 +13508,14 @@ Réponds de manière structurée et cite les sources pertinentes du contexte."""
 
     async def event_generator():
         import json as _json2
+        # Méta d'abord : combien d'articles pertinents alimentent la réponse et
+        # combien ont un texte intégral (affiché sous la réponse, comme la vue Preuves).
+        meta_event = ("event: meta\ndata: "
+                      + _json2.dumps({"papers_used": papers_used,
+                                      "papers_with_fulltext": papers_with_fulltext,
+                                      "threshold": round(float(threshold), 2)})
+                      + "\n\n")
+        yield meta_event
         sources_event = f"event: sources\ndata: {_json2.dumps(sources)}\n\n"
         yield sources_event
 
