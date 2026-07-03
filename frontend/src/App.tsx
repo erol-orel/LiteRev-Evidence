@@ -2379,6 +2379,12 @@ export default function App() {
                     );
                   })}
 
+                  {/* Rendu UNIQUEMENT quand les filtres sont chargés : sinon le
+                      curseur Années affiche brièvement les bornes de repli (1990)
+                      avant de sauter à l'année réelle du corpus (ex. 1845). React 19
+                      regroupe setFilterOptions + setYearRange en un seul rendu, donc
+                      le bloc apparaît directement aux bonnes bornes, sans clignotement. */}
+                  {filterOptions && (
                   <div>
                     <span className="mb-2 block text-sm font-medium text-white/80">
                       {t("search.years")}{" "}
@@ -2428,6 +2434,7 @@ export default function App() {
                       <span>{yearSliderBounds(filterOptions?.year).max}</span>
                     </div>
                   </div>
+                  )}
                 </div>
               </div>
             </aside>
