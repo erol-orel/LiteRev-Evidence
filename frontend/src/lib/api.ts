@@ -1572,6 +1572,12 @@ export interface UserScenario extends GesicaScenario {
   pipeline_progress?: number;
 }
 
+/** One facet of a multi-query search: a boolean or natural-language sub-query. */
+export interface SubQuery {
+  kind: "boolean" | "natural";
+  text: string;
+}
+
 export interface UserScenarioCreatePayload {
   name: string;
   query: string;
@@ -1580,6 +1586,10 @@ export interface UserScenarioCreatePayload {
   result_count?: number;
   pinned?: boolean;
   search_strategy?: SearchStrategy | null;
+  // Multi-sub-query search: ≥2 facets combined by `combinator` (union = OR,
+  // intersection = AND). Omitted for a normal single-query search.
+  sub_queries?: SubQuery[];
+  combinator?: "union" | "intersection";
 }
 
 export interface PipelineStepStatus {
