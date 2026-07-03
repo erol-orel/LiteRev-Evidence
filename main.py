@@ -272,6 +272,85 @@ def _trip_openai_cooldown(seconds: int = 300) -> None:
     )
 
 
+# ── Embedding résilient (anti « lot empoisonné ») ────────────────────────────
+# L'API embeddings rejette TOUT le lot si UN SEUL input est invalide — le plus
+# souvent trop de tokens : l'ancienne garde tronquait à 8000 CARACTÈRES (pas
+# tokens), et du texte dense (CJK, identifiants, références) dépasse la limite de
+# 8191 tokens. Sans isolation ni borne de tentatives, le lot fautif était
+# ré-échoué à chaque cycle → chunks « en attente » bloqués indéfiniment. Ces
+# helpers (1) tronquent par TOKENS, (2) mappent la réponse par index, et (3) si un
+# lot échoue hors quota, ré-essaient chunk par chunk pour n'isoler QUE le fautif.
+# None = pas encore tenté ; False = tiktoken indisponible (repli caractères, ne plus
+# réessayer — sinon un téléchargement BPE qui échoue serait retenté à chaque appel) ;
+# sinon = l'encodeur. Repli SÛR : 6000 caractères restent < 8191 tokens pour du texte
+# réel (tiktoken, quand présent, préserve bien plus de contenu jusqu'à la vraie limite).
+_TIKTOKEN_ENC: list = [None]
+
+
+def _truncate_to_tokens(s: str, max_tokens: int = 8000) -> str:
+    if not s:
+        return s
+    if _TIKTOKEN_ENC[0] is None:
+        try:
+            import tiktoken
+            _TIKTOKEN_ENC[0] = tiktoken.get_encoding("cl100k_base")
+        except Exception:
+            _TIKTOKEN_ENC[0] = False
+    enc = _TIKTOKEN_ENC[0]
+    if not enc:
+        return s[:6000]
+    try:
+        toks = enc.encode(s)
+        return s if len(toks) <= max_tokens else enc.decode(toks[:max_tokens])
+    except Exception:
+        return s[:6000]
+
+
+def _embed_one_call(client, batch: list) -> None:
+    """Embède `batch` (liste de {id, content}) en UN appel et écrit les vecteurs,
+    en mappant chaque vecteur par SON index de réponse (pas positionnel)."""
+    resp = client.embeddings.create(
+        model="text-embedding-3-small",
+        input=[_truncate_to_tokens(r["content"]) for r in batch],
+    )
+    by_index = {d.index: d.embedding for d in resp.data}
+    with engine.begin() as cu:
+        for k, r in enumerate(batch):
+            emb = by_index.get(k)
+            if emb is None:
+                continue
+            vec = "[" + ",".join(str(x) for x in emb) + "]"
+            cu.execute(
+                text("UPDATE document_chunk SET embedding = CAST(:vec AS vector) WHERE id = :cid"),
+                {"vec": vec, "cid": r["id"]},
+            )
+
+
+def _embed_chunks_resilient(client, rows: list, batch_size: int = 100) -> tuple[int, list]:
+    """Embède rows=[{id, content}] par lots ; si un lot échoue HORS quota, ré-essaie
+    chunk par chunk pour ne pas bloquer les chunks sains. Renvoie (nb_embeddés,
+    [ids_en_échec]). Propage l'erreur de quota pour que l'appelant déclenche le cooldown."""
+    embedded, failed = 0, []
+    for i in range(0, len(rows), batch_size):
+        batch = rows[i:i + batch_size]
+        try:
+            _embed_one_call(client, batch)
+            embedded += len(batch)
+        except Exception as e:
+            if _is_openai_quota_error(e):
+                raise
+            for r in batch:  # lot empoisonné → on isole le fautif
+                try:
+                    _embed_one_call(client, [r])
+                    embedded += 1
+                except Exception as e2:
+                    if _is_openai_quota_error(e2):
+                        raise
+                    failed.append(r["id"])
+                    logger.warning(f"embed chunk {r['id']} échec définitif: {e2}")
+    return embedded, failed
+
+
 def _strategy_is_degraded(strategy: object, query: str | None = None) -> bool:
     """Vrai si une stratégie de recherche est un repli dégradé (échec LLM) :
     marquée degraded, ou dont la requête booléenne 'general' est vide / identique
@@ -942,6 +1021,7 @@ def startup_event() -> None:
                         WHERE c.embedding IS NULL
                           AND c.chunk_type IN ('title_abstract', 'fulltext_section')
                           AND LENGTH(c.content) > 20
+                          AND COALESCE(c.embedding_attempts, 0) < 3
                           AND (
                             c.chunk_type = 'fulltext_section'
                             OR NOT EXISTS (
@@ -955,30 +1035,22 @@ def startup_event() -> None:
                     """)).mappings().fetchall()
 
                 if _chunks and not _openai_in_cooldown():
-                    _emb_done = 0
-                    for _bi in range(0, len(_chunks), _EMBED_BATCH):
-                        _batch = _chunks[_bi:_bi + _EMBED_BATCH]
-                        try:
-                            _resp = _client.embeddings.create(
-                                model="text-embedding-3-small",
-                                input=[r["content"][:8000] for r in _batch],
+                    try:
+                        _emb_done, _failed = _embed_chunks_resilient(_client, list(_chunks))
+                    except Exception:               # quota propagé → pause + réessai après cooldown
+                        _trip_openai_cooldown()
+                        _emb_done, _failed = 0, []
+                    if _failed:
+                        # Chunks refusés par l'API (hors quota) : incrémenter le compteur
+                        # pour les sortir de la file après 3 essais (sinon « en attente »
+                        # éternel + lot ré-échoué à chaque cycle).
+                        with engine.begin() as _cu:
+                            _cu.execute(
+                                text("UPDATE document_chunk SET embedding_attempts = "
+                                     "COALESCE(embedding_attempts,0)+1 WHERE id IN :ids")
+                                .bindparams(bindparam("ids", expanding=True)),
+                                {"ids": _failed},
                             )
-                            with engine.begin() as _cu:
-                                for _k, _ed in enumerate(_resp.data):
-                                    _vec = "[" + ",".join(str(x) for x in _ed.embedding) + "]"
-                                    _cu.execute(text("""
-                                        UPDATE document_chunk
-                                        SET embedding = CAST(:vec AS vector)
-                                        WHERE id = :cid
-                                    """), {"vec": _vec, "cid": _batch[_k]["id"]})
-                            _emb_done += len(_batch)
-                        except Exception as _ee:
-                            logger.warning(f"BG embed batch {_bi}: {_ee}")
-                            # Quota OpenAI épuisé : inutile de tenter les lots suivants
-                            # (ils échoueront tous) → pause et on sort de la boucle.
-                            if _is_openai_quota_error(_ee):
-                                _trip_openai_cooldown()
-                                break
                     if _emb_done:
                         logger.info(f"BG worker: {_emb_done} chunks embedded.")
 
@@ -4304,6 +4376,7 @@ def get_fulltext_stats() -> dict[str, Any]:
             WHERE c.embedding IS NULL
               AND c.chunk_type IN ('title_abstract', 'fulltext_section')
               AND LENGTH(c.content) > 20
+              AND COALESCE(c.embedding_attempts, 0) < 3
               AND (c.chunk_type = 'fulltext_section'
                    OR NOT EXISTS (SELECT 1 FROM document_chunk c2
                                   WHERE c2.document_id = c.document_id
@@ -4578,6 +4651,7 @@ def embed_pending_chunks(limit: int = 200, _: None = Depends(require_api_key)) -
         "c.embedding IS NULL "
         "AND c.chunk_type IN ('title_abstract','fulltext_section') "
         "AND LENGTH(c.content) > 20 "
+        "AND COALESCE(c.embedding_attempts, 0) < 3 "
         "AND (c.chunk_type = 'fulltext_section' "
         "OR NOT EXISTS (SELECT 1 FROM document_chunk c2 "
         "WHERE c2.document_id = c.document_id AND c2.chunk_type = 'fulltext_section'))"
@@ -4592,28 +4666,22 @@ def embed_pending_chunks(limit: int = 200, _: None = Depends(require_api_key)) -
             "ORDER BY c.chunk_type DESC, c.id LIMIT :lim"
         ), {"lim": max(1, min(int(limit), 2000))}).mappings().fetchall()
 
-    embedded = 0
-    error = None
-    for i in range(0, len(rows), 100):
-        batch = rows[i:i + 100]
-        try:
-            resp = client.embeddings.create(
-                model="text-embedding-3-small",
-                input=[r["content"][:8000] for r in batch],
+    # Chemin résilient IDENTIQUE au worker : troncature par tokens + repli chunk par
+    # chunk sur un lot empoisonné (ne se bloque plus sur un contenu que l'API refuse).
+    embedded, failed, error = 0, [], None
+    try:
+        embedded, failed = _embed_chunks_resilient(client, list(rows))
+    except Exception as e:                        # quota → cooldown, on ne réessaie pas ici
+        _trip_openai_cooldown()
+        error = str(e)
+    if failed:
+        with engine.begin() as cu:
+            cu.execute(
+                text("UPDATE document_chunk SET embedding_attempts = "
+                     "COALESCE(embedding_attempts,0)+1 WHERE id IN :ids")
+                .bindparams(bindparam("ids", expanding=True)),
+                {"ids": failed},
             )
-            with engine.begin() as cu:
-                for k, ed in enumerate(resp.data):
-                    vec = "[" + ",".join(str(x) for x in ed.embedding) + "]"
-                    cu.execute(text(
-                        "UPDATE document_chunk SET embedding = CAST(:vec AS vector) WHERE id = :cid"
-                    ), {"vec": vec, "cid": batch[k]["id"]})
-            embedded += len(batch)
-        except Exception as e:
-            if _is_openai_quota_error(e):
-                _trip_openai_cooldown()
-            logger.error(f"embed-pending: {e}", exc_info=True)
-            error = str(e)
-            break
 
     with engine.connect() as conn:
         remaining = conn.execute(text(
@@ -4621,6 +4689,8 @@ def embed_pending_chunks(limit: int = 200, _: None = Depends(require_api_key)) -
         )).scalar() or 0
 
     out: dict[str, Any] = {"embedded": int(embedded), "remaining": int(remaining)}
+    if failed:
+        out["quarantined"] = len(failed)
     if error:
         out["error"] = error
     return out
@@ -6528,6 +6598,11 @@ def _ensure_user_scenarios_table() -> None:
             # cosinus pour ORDONNER le sous-ensemble pertinent (sélection = cosinus
             # >= seuil ; ordre = rerank_score quand présent).
             "ALTER TABLE article_scenarios ADD COLUMN IF NOT EXISTS rerank_score FLOAT",
+            # Borne anti « lot empoisonné » : nb d'échecs d'embedding pour un chunk.
+            # Au-delà de 3, il est exclu du worker / du compteur « en attente » / de
+            # /admin/embed-pending — sinon un chunk que l'API refuse (contenu invalide)
+            # resterait « en attente » à l'infini et serait ré-essayé chaque cycle.
+            "ALTER TABLE document_chunk ADD COLUMN IF NOT EXISTS embedding_attempts INTEGER DEFAULT 0",
         ):
             conn.execute(text(_ddl))
     logger.info("Tables user_scenarios et user_scenario_folders vérifiées/créées.")
