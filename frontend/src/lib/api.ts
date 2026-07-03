@@ -478,6 +478,22 @@ export async function corpusMaintenance(dryRun: boolean): Promise<CorpusMaintena
   return response.json();
 }
 
+// Force l'indexation (embedding) des chunks « en attente » à la demande (admin).
+export interface EmbedPendingResult {
+  embedded: number;
+  remaining: number | null;
+  cooldown?: boolean;
+  error?: string;
+}
+export async function embedPending(limit = 200): Promise<EmbedPendingResult> {
+  const r = await safeFetch(`${API_BASE_URL}/admin/embed-pending?limit=${limit}`, {
+    method: "POST",
+    headers: authHeaders(),
+  });
+  if (!r.ok) throw new Error(httpMessage(r.status));
+  return r.json();
+}
+
 export interface AskRequest {
   question: string;
   projectContext?: string;

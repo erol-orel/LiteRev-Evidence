@@ -272,6 +272,85 @@ def _trip_openai_cooldown(seconds: int = 300) -> None:
     )
 
 
+# ── Embedding résilient (anti « lot empoisonné ») ────────────────────────────
+# L'API embeddings rejette TOUT le lot si UN SEUL input est invalide — le plus
+# souvent trop de tokens : l'ancienne garde tronquait à 8000 CARACTÈRES (pas
+# tokens), et du texte dense (CJK, identifiants, références) dépasse la limite de
+# 8191 tokens. Sans isolation ni borne de tentatives, le lot fautif était
+# ré-échoué à chaque cycle → chunks « en attente » bloqués indéfiniment. Ces
+# helpers (1) tronquent par TOKENS, (2) mappent la réponse par index, et (3) si un
+# lot échoue hors quota, ré-essaient chunk par chunk pour n'isoler QUE le fautif.
+# None = pas encore tenté ; False = tiktoken indisponible (repli caractères, ne plus
+# réessayer — sinon un téléchargement BPE qui échoue serait retenté à chaque appel) ;
+# sinon = l'encodeur. Repli SÛR : 6000 caractères restent < 8191 tokens pour du texte
+# réel (tiktoken, quand présent, préserve bien plus de contenu jusqu'à la vraie limite).
+_TIKTOKEN_ENC: list = [None]
+
+
+def _truncate_to_tokens(s: str, max_tokens: int = 8000) -> str:
+    if not s:
+        return s
+    if _TIKTOKEN_ENC[0] is None:
+        try:
+            import tiktoken
+            _TIKTOKEN_ENC[0] = tiktoken.get_encoding("cl100k_base")
+        except Exception:
+            _TIKTOKEN_ENC[0] = False
+    enc = _TIKTOKEN_ENC[0]
+    if not enc:
+        return s[:6000]
+    try:
+        toks = enc.encode(s)
+        return s if len(toks) <= max_tokens else enc.decode(toks[:max_tokens])
+    except Exception:
+        return s[:6000]
+
+
+def _embed_one_call(client, batch: list) -> None:
+    """Embède `batch` (liste de {id, content}) en UN appel et écrit les vecteurs,
+    en mappant chaque vecteur par SON index de réponse (pas positionnel)."""
+    resp = client.embeddings.create(
+        model="text-embedding-3-small",
+        input=[_truncate_to_tokens(r["content"]) for r in batch],
+    )
+    by_index = {d.index: d.embedding for d in resp.data}
+    with engine.begin() as cu:
+        for k, r in enumerate(batch):
+            emb = by_index.get(k)
+            if emb is None:
+                continue
+            vec = "[" + ",".join(str(x) for x in emb) + "]"
+            cu.execute(
+                text("UPDATE document_chunk SET embedding = CAST(:vec AS vector) WHERE id = :cid"),
+                {"vec": vec, "cid": r["id"]},
+            )
+
+
+def _embed_chunks_resilient(client, rows: list, batch_size: int = 100) -> tuple[int, list]:
+    """Embède rows=[{id, content}] par lots ; si un lot échoue HORS quota, ré-essaie
+    chunk par chunk pour ne pas bloquer les chunks sains. Renvoie (nb_embeddés,
+    [ids_en_échec]). Propage l'erreur de quota pour que l'appelant déclenche le cooldown."""
+    embedded, failed = 0, []
+    for i in range(0, len(rows), batch_size):
+        batch = rows[i:i + batch_size]
+        try:
+            _embed_one_call(client, batch)
+            embedded += len(batch)
+        except Exception as e:
+            if _is_openai_quota_error(e):
+                raise
+            for r in batch:  # lot empoisonné → on isole le fautif
+                try:
+                    _embed_one_call(client, [r])
+                    embedded += 1
+                except Exception as e2:
+                    if _is_openai_quota_error(e2):
+                        raise
+                    failed.append(r["id"])
+                    logger.warning(f"embed chunk {r['id']} échec définitif: {e2}")
+    return embedded, failed
+
+
 def _strategy_is_degraded(strategy: object, query: str | None = None) -> bool:
     """Vrai si une stratégie de recherche est un repli dégradé (échec LLM) :
     marquée degraded, ou dont la requête booléenne 'general' est vide / identique
@@ -932,9 +1011,12 @@ def startup_event() -> None:
                     logger.warning(f"BG abstract backfill error: {_abe}")
 
                 # ── 1. EMBEDDING ──────────────────────────────────────────────
-                # Priorité : fulltext_section d'abord, puis title_abstract
-                # Si un article a des chunks fulltext, on n'embède PAS son
-                # title_abstract (le fulltext est plus riche).
+                # On embède TOUS les chunks standard sans embedding — y compris le
+                # title_abstract des docs à texte intégral : le résumé sert de vecteur
+                # représentatif CONSTANT au clustering (même base pour chaque document)
+                # pour un coût négligeable. (Avant, on le sautait pour les docs full-text
+                # → incohérence : la plupart embeddés, ~153 non, et clustering par 1re
+                # section au lieu du résumé.)
                 with engine.connect() as _conn:
                     _chunks = _conn.execute(text("""
                         SELECT c.id, c.content
@@ -942,43 +1024,28 @@ def startup_event() -> None:
                         WHERE c.embedding IS NULL
                           AND c.chunk_type IN ('title_abstract', 'fulltext_section')
                           AND LENGTH(c.content) > 20
-                          AND (
-                            c.chunk_type = 'fulltext_section'
-                            OR NOT EXISTS (
-                                SELECT 1 FROM document_chunk c2
-                                WHERE c2.document_id = c.document_id
-                                  AND c2.chunk_type = 'fulltext_section'
-                            )
-                          )
+                          AND COALESCE(c.embedding_attempts, 0) < 3
                         ORDER BY c.chunk_type DESC, c.id
                         LIMIT 500
                     """)).mappings().fetchall()
 
                 if _chunks and not _openai_in_cooldown():
-                    _emb_done = 0
-                    for _bi in range(0, len(_chunks), _EMBED_BATCH):
-                        _batch = _chunks[_bi:_bi + _EMBED_BATCH]
-                        try:
-                            _resp = _client.embeddings.create(
-                                model="text-embedding-3-small",
-                                input=[r["content"][:8000] for r in _batch],
+                    try:
+                        _emb_done, _failed = _embed_chunks_resilient(_client, list(_chunks))
+                    except Exception:               # quota propagé → pause + réessai après cooldown
+                        _trip_openai_cooldown()
+                        _emb_done, _failed = 0, []
+                    if _failed:
+                        # Chunks refusés par l'API (hors quota) : incrémenter le compteur
+                        # pour les sortir de la file après 3 essais (sinon « en attente »
+                        # éternel + lot ré-échoué à chaque cycle).
+                        with engine.begin() as _cu:
+                            _cu.execute(
+                                text("UPDATE document_chunk SET embedding_attempts = "
+                                     "COALESCE(embedding_attempts,0)+1 WHERE id IN :ids")
+                                .bindparams(bindparam("ids", expanding=True)),
+                                {"ids": _failed},
                             )
-                            with engine.begin() as _cu:
-                                for _k, _ed in enumerate(_resp.data):
-                                    _vec = "[" + ",".join(str(x) for x in _ed.embedding) + "]"
-                                    _cu.execute(text("""
-                                        UPDATE document_chunk
-                                        SET embedding = CAST(:vec AS vector)
-                                        WHERE id = :cid
-                                    """), {"vec": _vec, "cid": _batch[_k]["id"]})
-                            _emb_done += len(_batch)
-                        except Exception as _ee:
-                            logger.warning(f"BG embed batch {_bi}: {_ee}")
-                            # Quota OpenAI épuisé : inutile de tenter les lots suivants
-                            # (ils échoueront tous) → pause et on sort de la boucle.
-                            if _is_openai_quota_error(_ee):
-                                _trip_openai_cooldown()
-                                break
                     if _emb_done:
                         logger.info(f"BG worker: {_emb_done} chunks embedded.")
 
@@ -4294,19 +4361,18 @@ def get_fulltext_stats() -> dict[str, Any]:
             text("SELECT COUNT(*) FROM document_chunk")
         ).scalar() or 0
 
-        # « En attente d'indexation » HONNÊTE : uniquement les chunks que le worker VA
-        # réellement embedder — mêmes critères que son sélecteur (types standard ; et pour
-        # un doc doté de texte intégral, son title_abstract n'est pas ré-embeddé car couvert
-        # par le fulltext). Exclut donc les types « Autres » (jamais embeddés) et les résumés
-        # rendus redondants par le fulltext, qui gonflaient artificiellement le reliquat.
+        # « En attente d'indexation » HONNÊTE : exactement les chunks que le worker VA
+        # embedder — types standard, contenu embeddable (> 20 car.), pas encore mis en
+        # quarantaine (< 3 échecs). Exclut les types « Autres » (jamais embeddés) et les
+        # chunks définitivement refusés par l'API, qui gonflaient artificiellement le
+        # reliquat. (On embède désormais le title_abstract de TOUS les docs, full-text
+        # compris — plus de « couverts par le texte intégral ».)
         chunks_pending = conn.execute(text("""
             SELECT COUNT(*) FROM document_chunk c
             WHERE c.embedding IS NULL
               AND c.chunk_type IN ('title_abstract', 'fulltext_section')
-              AND (c.chunk_type = 'fulltext_section'
-                   OR NOT EXISTS (SELECT 1 FROM document_chunk c2
-                                  WHERE c2.document_id = c.document_id
-                                    AND c2.chunk_type = 'fulltext_section'))
+              AND LENGTH(c.content) > 20
+              AND COALESCE(c.embedding_attempts, 0) < 3
         """)).scalar() or 0
 
         # Répartition des chunks par type : 'fulltext_section' (texte intégral)
@@ -4556,6 +4622,67 @@ def corpus_maintenance(
             report["legacy_chunks"]["reclassified"] = int(reclassified)
 
     return report
+
+
+@app.post("/admin/embed-pending")
+def embed_pending_chunks(limit: int = 200, _: None = Depends(require_api_key)) -> dict[str, Any]:
+    """Force l'indexation (embedding) des chunks « en attente » — à la demande, avec
+    EXACTEMENT le sélecteur du worker d'arrière-plan. Vide immédiatement le petit
+    reliquat sans attendre le cycle de 30 s. Traite au plus `limit` chunks (synchrone) ;
+    renvoie le nombre embeddé et le reliquat restant."""
+    openai_key = os.getenv("OPENAI_API_KEY")
+    if not openai_key:
+        raise HTTPException(status_code=503, detail="Clé OpenAI non configurée")
+    if _openai_in_cooldown():
+        return {"embedded": 0, "remaining": None, "cooldown": True}
+
+    # Sélecteur IDENTIQUE au worker et au compteur « en attente » : types standard,
+    # contenu embeddable (> 20 car.), et title_abstract non ré-embeddé si le doc a du
+    # texte intégral (couvert par ses sections).
+    ELIGIBLE = (
+        "c.embedding IS NULL "
+        "AND c.chunk_type IN ('title_abstract','fulltext_section') "
+        "AND LENGTH(c.content) > 20 "
+        "AND COALESCE(c.embedding_attempts, 0) < 3"
+    )
+
+    from openai import OpenAI as _OAI
+    client = _OAI(api_key=openai_key, timeout=90.0)
+
+    with engine.connect() as conn:
+        rows = conn.execute(text(
+            f"SELECT c.id, c.content FROM document_chunk c WHERE {ELIGIBLE} "
+            "ORDER BY c.chunk_type DESC, c.id LIMIT :lim"
+        ), {"lim": max(1, min(int(limit), 2000))}).mappings().fetchall()
+
+    # Chemin résilient IDENTIQUE au worker : troncature par tokens + repli chunk par
+    # chunk sur un lot empoisonné (ne se bloque plus sur un contenu que l'API refuse).
+    embedded, failed, error = 0, [], None
+    try:
+        embedded, failed = _embed_chunks_resilient(client, list(rows))
+    except Exception as e:                        # quota → cooldown, on ne réessaie pas ici
+        _trip_openai_cooldown()
+        error = str(e)
+    if failed:
+        with engine.begin() as cu:
+            cu.execute(
+                text("UPDATE document_chunk SET embedding_attempts = "
+                     "COALESCE(embedding_attempts,0)+1 WHERE id IN :ids")
+                .bindparams(bindparam("ids", expanding=True)),
+                {"ids": failed},
+            )
+
+    with engine.connect() as conn:
+        remaining = conn.execute(text(
+            f"SELECT COUNT(*) FROM document_chunk c WHERE {ELIGIBLE}"
+        )).scalar() or 0
+
+    out: dict[str, Any] = {"embedded": int(embedded), "remaining": int(remaining)}
+    if failed:
+        out["quarantined"] = len(failed)
+    if error:
+        out["error"] = error
+    return out
 
 
 # ─── Living Review Endpoints ──────────────────────────────────────────────────
@@ -5070,7 +5197,9 @@ def _run_clustering_background(scenario_id: str, force_refresh: bool = False, la
                            FROM document_chunk c
                            WHERE c.document_id = d.id
                              AND c.embedding IS NOT NULL
-                           ORDER BY c.id
+                           -- Vecteur représentatif = le résumé (title_abstract) en
+                           -- priorité pour TOUS les docs (cohérent) ; repli 1er chunk.
+                           ORDER BY (c.chunk_type = 'title_abstract') DESC, c.id
                            LIMIT 1
                        ) AS embedding_str
                 FROM literature_document d
@@ -6001,7 +6130,7 @@ _KG_NODE_SQL = """
           AND d.is_duplicate IS NOT TRUE
           AND c.embedding IS NOT NULL
           AND d.abstract IS NOT NULL
-        ORDER BY d.id, c.id
+        ORDER BY d.id, (c.chunk_type = 'title_abstract') DESC, c.id
     ) sub
     ORDER BY quality_score DESC NULLS LAST, year DESC NULLS LAST
     LIMIT :max_nodes
@@ -6460,6 +6589,11 @@ def _ensure_user_scenarios_table() -> None:
             # cosinus pour ORDONNER le sous-ensemble pertinent (sélection = cosinus
             # >= seuil ; ordre = rerank_score quand présent).
             "ALTER TABLE article_scenarios ADD COLUMN IF NOT EXISTS rerank_score FLOAT",
+            # Borne anti « lot empoisonné » : nb d'échecs d'embedding pour un chunk.
+            # Au-delà de 3, il est exclu du worker / du compteur « en attente » / de
+            # /admin/embed-pending — sinon un chunk que l'API refuse (contenu invalide)
+            # resterait « en attente » à l'infini et serait ré-essayé chaque cycle.
+            "ALTER TABLE document_chunk ADD COLUMN IF NOT EXISTS embedding_attempts INTEGER DEFAULT 0",
         ):
             conn.execute(text(_ddl))
     logger.info("Tables user_scenarios et user_scenario_folders vérifiées/créées.")
@@ -9209,7 +9343,8 @@ def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict
                                FROM document_chunk c
                                WHERE c.document_id = d.id
                                  AND c.embedding IS NOT NULL
-                               ORDER BY c.id
+                               -- Résumé (title_abstract) en priorité : vecteur cohérent.
+                               ORDER BY (c.chunk_type = 'title_abstract') DESC, c.id
                                LIMIT 1
                            ) AS embedding_str
                     FROM literature_document d

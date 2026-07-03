@@ -20,6 +20,7 @@ import {
   fetchTerrainClimate,
   fetchFulltextStats,
   corpusMaintenance,
+  embedPending,
   fetchCorpusStatsByYear,
   fetchCorpusStatsByYearNamed,
   type CorpusStats,
@@ -636,6 +637,43 @@ function GesicaSignalsPanel({ summary }: { summary: EvidenceSummaryResponse }) {
   );
 }
 
+function ForceIndexButton({ onDone }: { onDone?: () => void }) {
+  const { t } = useI18n();
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState<string | null>(null);
+  if (!hasApiKey()) return null;
+  const run = async () => {
+    setBusy(true);
+    setMsg(null);
+    try {
+      const r = await embedPending();
+      setMsg(
+        r.cooldown
+          ? t("stats.forceIndexCooldown")
+          : `${t("stats.forceIndexDone")}: ${r.embedded}${typeof r.remaining === "number" ? ` · ${r.remaining.toLocaleString()} ${t("stats.forceIndexRemaining")}` : ""}`
+      );
+      onDone?.();
+    } catch (e) {
+      setMsg(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <div className="mt-1.5 flex flex-wrap items-center gap-2">
+      <button
+        onClick={run}
+        disabled={busy}
+        className="inline-flex items-center gap-1.5 rounded-lg border border-white/10 bg-white/5 px-2.5 py-1 text-[11px] text-white/70 hover:bg-white/10 disabled:opacity-50"
+      >
+        <RefreshCw size={11} className={busy ? "animate-spin" : ""} />
+        {busy ? t("stats.forceIndexing") : t("stats.forceIndex")}
+      </button>
+      {msg && <span className="text-[11px] text-forest-400">{msg}</span>}
+    </div>
+  );
+}
+
 function CorpusMaintenancePanel({ onRefresh }: { onRefresh?: () => void }) {
   const { t } = useI18n();
   const [busy, setBusy] = useState<false | "preview" | "apply">(false);
@@ -835,8 +873,17 @@ function StatsView({ corpusStats, fulltextStats, scenarios, statsByYear, onRefre
                     <p className="pt-1.5 mt-1 text-[11px] text-forest-400 border-t border-white/5">
                       <span className="text-white/70 font-semibold">{ch.total.toLocaleString()}</span> {t("stats.chunksTotalSuffix")}
                       {emb && <> · <span className="text-blue-300">{emb.chunks_with_embedding.toLocaleString()}</span> / {ch.total.toLocaleString()} {t("stats.indexedSuffix")} ({(Math.floor(emb.chunks_with_embedding / (ch.total || 1) * 1000) / 10).toFixed(1)}%)</>}
+                      {/* Reliquat non embeddé volontairement (résumés de docs à texte intégral,
+                          couverts par leurs sections) — affiché pour que total = indexés + couverts + en attente. */}
+                      {(() => {
+                        const covered = emb ? Math.max(0, ch.total - emb.chunks_with_embedding - (emb.chunks_pending ?? 0)) : 0;
+                        return covered > 0 ? <> · <span className="text-forest-300">{covered.toLocaleString()}</span> {t("stats.coveredByFulltext")}</> : null;
+                      })()}
                       {emb && typeof emb.chunks_pending === "number" && emb.chunks_pending > 0 && <> · <span className="text-gold-300">{emb.chunks_pending.toLocaleString()}</span> {t("stats.pendingEmbedding")}</>}
                     </p>
+                    {emb && typeof emb.chunks_pending === "number" && emb.chunks_pending > 0 && (
+                      <ForceIndexButton onDone={onRefresh} />
+                    )}
                   </div>
                 );
               })() : (
