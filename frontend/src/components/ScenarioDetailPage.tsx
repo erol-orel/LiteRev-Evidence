@@ -4396,7 +4396,9 @@ export function ScenarioDetailPage({ scenarioId, onBack, initialTab }: ScenarioD
               {detail.corpus_stats.total} {t("scenarioDetail.page.articles")}
             </span>
           </div>
-          <p className="mt-1 text-sm text-white/50 leading-5">{detail.description}</p>
+          <p className="mt-1 text-sm text-white/50 leading-5">
+            {isUserScenario(scenarioId) && detail.query ? `${t("scenarios.savedSearchPrefix")}${detail.query}` : detail.description}
+          </p>
           
           {/* Mots-clés */}
           {detail.keywords && detail.keywords.length > 0 && (

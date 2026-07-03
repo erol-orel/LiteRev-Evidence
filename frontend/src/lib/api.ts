@@ -366,6 +366,7 @@ export interface GesicaScenario {
   title: string;
   labelShort?: string | null;
   description: string;
+  query?: string;   // requête d'origine (user scenarios) — pour un libellé localisé
   cluster: string;
   articleCount: number;
   livingEvidenceNote: string;
@@ -903,6 +904,7 @@ export interface ScenarioDetail {
   title: string;
   description: string;
   cluster: string;
+  query?: string;   // requête d'origine (user scenarios) — pour un libellé localisé
   recommended_actions: string[];
   boolean_queries: string[];
   nl_queries: string[];

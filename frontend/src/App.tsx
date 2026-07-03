@@ -1292,7 +1292,9 @@ function ScenariosView({
                 </span>
               )}
             </div>
-            <p className="mt-1 text-sm leading-5 text-forest-400 line-clamp-2">{scenario.description}</p>
+            <p className="mt-1 text-sm leading-5 text-forest-400 line-clamp-2">
+              {isUser && scenario.query ? `${t("scenarios.savedSearchPrefix")}${scenario.query}` : scenario.description}
+            </p>
           </div>
           <div className="shrink-0 flex items-center gap-1.5">
             <button

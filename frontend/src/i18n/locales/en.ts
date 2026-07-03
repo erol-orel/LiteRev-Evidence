@@ -224,6 +224,7 @@ export const en: Translations = {
     loadErrorHint1: "Check that the API service is running and that",
     loadErrorHint2: "responds correctly.",
     detailPage: "Detail page",
+    savedSearchPrefix: "Saved search: ",
     detailPageTooltip: "Open the scenario detail page",
     ingestArticlesTooltip: "Ingest articles",
     replaySearchTooltip: "Re-run the search",
