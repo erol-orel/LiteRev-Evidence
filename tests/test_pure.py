@@ -82,3 +82,65 @@ def test_build_where_ignores_blank_values():
     where_sql, params = main._build_where({"source": "", "disease_or_condition": None})
     assert where_sql == ""
     assert params == {}
+
+
+# ── _normalize_sub_queries (multi-query cleaning) ────────────────────────────
+def test_normalize_sub_queries_filters_and_defaults():
+    raw = [
+        {"kind": "boolean", "text": "  cardiac arrest  "},  # trimmed
+        {"kind": "natural", "text": "bystander CPR"},
+        {"kind": "weird", "text": "x"},                     # unknown kind → natural
+        {"kind": "boolean", "text": "   "},                  # blank text → dropped
+        {"text": "no kind"},                                 # missing kind → natural
+        "not a dict",                                        # ignored
+    ]
+    assert main._normalize_sub_queries(raw) == [
+        {"kind": "boolean", "text": "cardiac arrest"},
+        {"kind": "natural", "text": "bystander CPR"},
+        {"kind": "natural", "text": "x"},
+        {"kind": "natural", "text": "no kind"},
+    ]
+
+
+def test_normalize_sub_queries_non_list():
+    assert main._normalize_sub_queries(None) == []
+    assert main._normalize_sub_queries("cardiac") == []
+    assert main._normalize_sub_queries({}) == []
+
+
+# ── _multi_query_corpus_ids (union / intersection of doc-id sets) ─────────────
+def _patch_local_ids(monkeypatch, mapping):
+    """Stub _search_local_doc_ids so each sub-query text maps to a fixed id set."""
+    def _fake(query, mode, filters, limit=10_000, threshold=0.45):
+        return list(mapping.get(query, []))
+    monkeypatch.setattr(main, "_search_local_doc_ids", _fake)
+
+
+def test_multi_query_union(monkeypatch):
+    _patch_local_ids(monkeypatch, {"A": [1, 2, 3], "B": [3, 4]})
+    sub = [{"kind": "boolean", "text": "A"}, {"kind": "natural", "text": "B"}]
+    assert sorted(main._multi_query_corpus_ids(sub, "union", {})) == [1, 2, 3, 4]
+
+
+def test_multi_query_intersection(monkeypatch):
+    _patch_local_ids(monkeypatch, {"A": [1, 2, 3], "B": [3, 4]})
+    sub = [{"kind": "boolean", "text": "A"}, {"kind": "natural", "text": "B"}]
+    assert main._multi_query_corpus_ids(sub, "intersection", {}) == [3]
+
+
+def test_multi_query_intersection_disjoint_is_empty(monkeypatch):
+    _patch_local_ids(monkeypatch, {"A": [1, 2], "B": [3, 4]})
+    sub = [{"kind": "boolean", "text": "A"}, {"kind": "boolean", "text": "B"}]
+    assert main._multi_query_corpus_ids(sub, "intersection", {}) == []
+
+
+def test_multi_query_unknown_combinator_is_intersection(monkeypatch):
+    # Anything that isn't "union" narrows (intersection = the safe default).
+    _patch_local_ids(monkeypatch, {"A": [1, 2, 3], "B": [3, 4]})
+    sub = [{"kind": "boolean", "text": "A"}, {"kind": "natural", "text": "B"}]
+    assert main._multi_query_corpus_ids(sub, "banana", {}) == [3]
+
+
+def test_multi_query_all_blank_is_empty(monkeypatch):
+    _patch_local_ids(monkeypatch, {})
+    assert main._multi_query_corpus_ids([{"kind": "boolean", "text": "  "}], "union", {}) == []

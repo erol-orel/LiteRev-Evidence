@@ -63,6 +63,7 @@ import {
   type UserScenario,
   type UserScenarioPipelineStatus,
   type ScenarioFolder,
+  type SubQuery,
 } from "./lib/api";
 import type {
   ProjectContext,
@@ -1684,6 +1685,10 @@ export default function App() {
   const [mode, setMode] = useState<SearchMode>("boolean");
   const [includeLive, setIncludeLive] = useState(false);
   const [query, setQuery] = useState("");
+  // Recherche multi-sous-requêtes (avancé) : requêtes ADDITIONNELLES combinées à
+  // la requête principale ci-dessus. Vide = recherche mono-requête classique.
+  const [extraQueries, setExtraQueries] = useState<SubQuery[]>([]);
+  const [combinator, setCombinator] = useState<"union" | "intersection">("intersection");
   const [filters, setFilters] = useState<SearchFilters>({
     projectContext: "literev",
   });
@@ -1882,6 +1887,17 @@ export default function App() {
     }
   }
 
+  // Construit la liste de sous-requêtes effective : la requête principale (langage
+  // naturel) suivie des sous-requêtes additionnelles non vides. Renvoie null s'il
+  // n'y a pas au moins une sous-requête additionnelle → recherche mono-requête.
+  function buildSubQueries(): SubQuery[] | null {
+    const extra = extraQueries
+      .map((q) => ({ kind: q.kind, text: q.text.trim() }))
+      .filter((q) => q.text);
+    if (!extra.length || !query.trim()) return null;
+    return [{ kind: "natural", text: query.trim() }, ...extra];
+  }
+
   async function handleSearch() {
     if (!query.trim()) return;
     setLoading(true);
@@ -1917,6 +1933,7 @@ export default function App() {
       // helper booléen). On crée le scénario, on construit le corpus (requête
       // booléenne sur base locale ∪ sources live, plafond 2000/source), puis on
       // lit le corpus et on l'affiche. Plus de "preview" divergente.
+      const _sub = buildSubQueries();
       const newScenario = await createUserScenario({
         name: query.trim(),
         query: query.trim(),
@@ -1925,6 +1942,7 @@ export default function App() {
         result_count: 0,
         pinned: false,
         search_strategy: strategy ?? undefined,
+        ...(_sub ? { sub_queries: _sub, combinator } : {}),
       });
       const sid = newScenario.id;
       await populateUserScenario(sid, { includeLive, maxResults: 2000 });
@@ -2092,8 +2110,12 @@ export default function App() {
   function handleSaveAsScenario() {
     if (!query.trim()) return;
     const name = saveSearchName.trim() || query.trim();
-    // Chercher si une entrée non-épinglée existe déjà pour cette requête
-    const existing = userScenarios.find(s => s.query === query && s.mode === mode && !s.pinned);
+    const _sub = buildSubQueries();
+    // Chercher si une entrée non-épinglée existe déjà pour cette requête. Les
+    // recherches multi-sous-requêtes créent toujours une entrée neuve (pas de dédup
+    // par query/mode : la même requête principale peut porter des sous-requêtes/un
+    // combinateur différents).
+    const existing = _sub ? undefined : userScenarios.find(s => s.query === query && s.mode === mode && !s.pinned);
     if (existing) {
       // Mettre à jour : renommer + épingler + lancer pipeline
       patchUserScenario(existing.id, { name, pinned: true })
@@ -2113,6 +2135,7 @@ export default function App() {
         result_count: searchTotalMatching ?? results.length,
         pinned: true,
         search_strategy: (mode === "boolean" ? booleanStrategy : null) ?? undefined,
+        ...(_sub ? { sub_queries: _sub, combinator } : {}),
       }).then(newScenario => {
         setUserScenarios(prev => [newScenario, ...prev]);
         setSavedSearches(prev => [{
@@ -2540,6 +2563,99 @@ export default function App() {
                     <span className="block text-forest-500 mt-0.5">{t("search.includeLiveHint")}</span>
                   </span>
                 </label>
+
+                {/* Recherche multi-sous-requêtes (avancé) : combine la requête
+                    principale ci-dessus avec des sous-requêtes additionnelles, par
+                    union (OU) ou intersection (ET). */}
+                <div className="mt-3">
+                  {extraQueries.length === 0 ? (
+                    <button
+                      type="button"
+                      onClick={() => setExtraQueries([{ kind: "natural", text: "" }])}
+                      className="text-xs text-brand-300 hover:text-brand-200 transition"
+                    >
+                      + {t("search.addSubQuery")}
+                    </button>
+                  ) : (
+                    <div className="rounded-2xl border border-white/10 bg-forest-950/40 p-3 space-y-2.5">
+                      <p className="text-xs text-forest-300">{t("search.combineHint")}</p>
+                      <div className="flex items-center gap-1.5 text-[11px]">
+                        <span className="text-forest-500">{t("search.combinator")}</span>
+                        {(["intersection", "union"] as const).map((c) => (
+                          <button
+                            key={c}
+                            type="button"
+                            onClick={() => setCombinator(c)}
+                            className={`rounded-full border px-2 py-0.5 transition ${
+                              combinator === c
+                                ? "border-brand-400/60 bg-brand-500/20 text-brand-300"
+                                : "border-white/10 bg-white/5 text-forest-400 hover:text-white"
+                            }`}
+                          >
+                            {c === "union" ? t("search.combinatorUnion") : t("search.combinatorIntersection")}
+                          </button>
+                        ))}
+                      </div>
+                      {extraQueries.map((sq, i) => (
+                        <div key={i} className="flex items-center gap-2">
+                          <div className="flex shrink-0 overflow-hidden rounded-lg border border-white/10 text-[10px]">
+                            {(["natural", "boolean"] as const).map((k) => (
+                              <button
+                                key={k}
+                                type="button"
+                                onClick={() =>
+                                  setExtraQueries((prev) =>
+                                    prev.map((r, j) => (j === i ? { ...r, kind: k } : r)),
+                                  )
+                                }
+                                className={`px-2 py-1.5 transition ${
+                                  sq.kind === k
+                                    ? "bg-brand-500/20 text-brand-300"
+                                    : "text-forest-400 hover:text-white"
+                                }`}
+                              >
+                                {k === "boolean"
+                                  ? t("search.subQueryKindBoolean")
+                                  : t("search.subQueryKindNatural")}
+                              </button>
+                            ))}
+                          </div>
+                          <input
+                            value={sq.text}
+                            onChange={(e) =>
+                              setExtraQueries((prev) =>
+                                prev.map((r, j) => (j === i ? { ...r, text: e.target.value } : r)),
+                              )
+                            }
+                            onKeyDown={(e) => e.key === "Enter" && handleSearch()}
+                            placeholder={t("search.subQueryPlaceholder")}
+                            className="min-w-0 flex-1 rounded-xl border border-white/10 bg-forest-950/80 px-3 py-2 text-sm text-white outline-none placeholder:text-forest-500 focus:border-brand-400"
+                          />
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setExtraQueries((prev) => prev.filter((_, j) => j !== i))
+                            }
+                            title={t("search.subQueryRemove")}
+                            aria-label={t("search.subQueryRemove")}
+                            className="shrink-0 px-1 text-sm text-forest-500 hover:text-rose-300 transition"
+                          >
+                            ✕
+                          </button>
+                        </div>
+                      ))}
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setExtraQueries((prev) => [...prev, { kind: "natural", text: "" }])
+                        }
+                        className="text-xs text-brand-300 hover:text-brand-200 transition"
+                      >
+                        + {t("search.addSubQuery")}
+                      </button>
+                    </div>
+                  )}
+                </div>
 
                 {mode === "boolean" && (translatingQuery || booleanStrategy?.general) && (
                   <div className="mt-3 rounded-2xl border border-brand-400/20 bg-brand-400/5 p-3">

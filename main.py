@@ -1700,11 +1700,61 @@ def _boolean_corpus_ids(boolean_query: str, filters: dict) -> list:
     return _search_local_doc_ids(boolean_query, "boolean", filters, limit=500_000)
 
 
-def _set_scenario_corpus(scenario_id: str, ids: list) -> int:
+def _normalize_sub_queries(sub_queries: Any) -> list[dict]:
+    """Nettoie une liste de sous-requêtes : ne garde que les entrées {kind,text}
+    valides (texte non vide, kind ∈ {boolean, natural}). Renvoie [] si aucune."""
+    out: list[dict] = []
+    if not isinstance(sub_queries, list):
+        return out
+    for sq in sub_queries:
+        if not isinstance(sq, dict):
+            continue
+        _text = (sq.get("text") or "").strip()
+        if not _text:
+            continue
+        _kind = "boolean" if sq.get("kind") == "boolean" else "natural"
+        out.append({"kind": _kind, "text": _text})
+    return out
+
+
+def _multi_query_corpus_ids(sub_queries: list[dict], combinator: str, filters: dict) -> list:
+    """Appartenance au corpus pour une recherche MULTI-sous-requêtes.
+
+    Chaque sous-requête produit un ENSEMBLE d'IDs de documents de la base locale :
+      - kind="boolean" → correspondance lexicale (opérateurs AND/OR/NOT),
+      - kind="natural" → correspondance sémantique (embedding, cosinus ≥ seuil).
+    Les ensembles sont combinés par UNION (OU) ou INTERSECTION (ET). Le CLASSEMENT
+    reste calculé en aval (cosinus + rerank) : ici on ne décide que l'APPARTENANCE,
+    donc l'appartenance sémantique est définie par un seuil (et non un top-K) pour
+    que l'intersection ne rate pas un document hors de la fenêtre top-K d'une des
+    sous-requêtes."""
+    clean = _normalize_sub_queries(sub_queries)
+    id_sets: list[set] = []
+    for sq in clean:
+        _mode = "boolean" if sq["kind"] == "boolean" else "semantic"
+        id_sets.append(set(_search_local_doc_ids(sq["text"], _mode, filters, limit=500_000)))
+    if not id_sets:
+        return []
+    if combinator == "union":
+        out: set = set().union(*id_sets)
+    else:  # intersection (ET) — défaut
+        out = set(id_sets[0])
+        for s in id_sets[1:]:
+            out &= s
+    return list(out)
+
+
+def _set_scenario_corpus(scenario_id: str, ids: list, allow_empty: bool = False) -> int:
     """Fixe le corpus d'un scénario à EXACTEMENT `ids` (appartenance booléenne).
     Supprime les liens qui n'en font plus partie et insère les manquants. Si `ids`
-    est vide on ne touche à rien (évite de vider le corpus sur un échec transitoire)."""
+    est vide on ne touche à rien (évite de vider le corpus sur un échec transitoire),
+    SAUF si allow_empty=True — cas d'une intersection multi-requêtes légitimement
+    vide (deux facettes sans document commun), où le corpus DOIT être vidé."""
     if not ids:
+        if allow_empty:
+            with engine.begin() as _c:
+                _c.execute(text("DELETE FROM article_scenarios WHERE scenario_id = :sid"),
+                           {"sid": scenario_id})
         return 0
     with engine.begin() as _c:
         _c.execute(
@@ -6594,6 +6644,12 @@ def _ensure_user_scenarios_table() -> None:
             # /admin/embed-pending — sinon un chunk que l'API refuse (contenu invalide)
             # resterait « en attente » à l'infini et serait ré-essayé chaque cycle.
             "ALTER TABLE document_chunk ADD COLUMN IF NOT EXISTS embedding_attempts INTEGER DEFAULT 0",
+            # Recherche multi-sous-requêtes : liste [{"kind":"boolean"|"natural",
+            # "text":...}] + combinateur ("union" = OU, "intersection" = ET) entre
+            # leurs ensembles de résultats. NULL = recherche mono-requête classique
+            # (colonnes query/mode) → comportement inchangé.
+            "ALTER TABLE user_scenarios ADD COLUMN IF NOT EXISTS sub_queries JSONB",
+            "ALTER TABLE user_scenarios ADD COLUMN IF NOT EXISTS combinator VARCHAR(12)",
         ):
             conn.execute(text(_ddl))
     logger.info("Tables user_scenarios et user_scenario_folders vérifiées/créées.")
@@ -6616,6 +6672,19 @@ class UserScenarioIn(BaseModel):
     # fournie, on la persiste telle quelle pour que le corpus utilise EXACTEMENT
     # la même requête booléenne que celle affichée/comptée à la recherche.
     search_strategy: dict[str, Any] | None = None
+    # Recherche MULTI-sous-requêtes : liste [{"kind":"boolean"|"natural","text":...}]
+    # combinée par `combinator` ("union"=OU, "intersection"=ET). < 2 entrées valides
+    # → None (on retombe sur la recherche mono-requête classique query/mode).
+    sub_queries: list[dict[str, Any]] | None = None
+    combinator: str = Field(default="intersection")
+
+    @model_validator(mode="after")
+    def _clean_sub_queries(self) -> "UserScenarioIn":
+        cleaned = _normalize_sub_queries(self.sub_queries)
+        self.sub_queries = cleaned if len(cleaned) >= 2 else None
+        if self.combinator not in ("union", "intersection"):
+            self.combinator = "intersection"
+        return self
 
 
 class UserScenarioPatch(BaseModel):
@@ -6640,7 +6709,8 @@ def _get_user_scenario_or_404(scenario_id: str) -> dict[str, Any]:
         row = conn.execute(text("""
             SELECT id, name, query, mode, filters, result_count, pinned, folder_id, created_at, updated_at,
                    search_strategy, populate_status, pipeline_status, pipeline_step,
-                   pipeline_progress, pipeline_started_at, article_count, is_system
+                   pipeline_progress, pipeline_started_at, article_count, is_system,
+                   sub_queries, combinator
             FROM user_scenarios WHERE id = :id
         """), {"id": scenario_id}).mappings().first()
     if not row:
@@ -6802,8 +6872,11 @@ def create_user_scenario(payload: UserScenarioIn, _: None = Depends(require_api_
     Pour les recherches récentes (non épinglées, sans dossier), upsert par query+mode
     afin d'éviter l'accumulation de doublons lors des relances de recherche."""
     import uuid
-    # For unpinned auto-saved searches: upsert by query+mode to avoid duplicates
-    if not payload.pinned and not payload.folder_id:
+    # For unpinned auto-saved searches: upsert by query+mode to avoid duplicates.
+    # Skip the upsert for multi-sub-query searches: they share the synthesized
+    # display `query` yet are distinct searches, so query+mode dedup would wrongly
+    # merge them — always insert a fresh row instead.
+    if not payload.pinned and not payload.folder_id and not payload.sub_queries:
         with engine.begin() as conn:
             existing = conn.execute(text("""
                 SELECT id FROM user_scenarios
@@ -6829,8 +6902,8 @@ def create_user_scenario(payload: UserScenarioIn, _: None = Depends(require_api_
     new_id = "usr-" + str(uuid.uuid4()).replace("-", "")[:12]
     with engine.begin() as conn:
         conn.execute(text("""
-            INSERT INTO user_scenarios (id, name, query, mode, filters, result_count, pinned, folder_id, search_strategy)
-            VALUES (:id, :name, :query, :mode, CAST(:filters AS jsonb), :result_count, :pinned, :folder_id, CAST(:strategy AS jsonb))
+            INSERT INTO user_scenarios (id, name, query, mode, filters, result_count, pinned, folder_id, search_strategy, sub_queries, combinator)
+            VALUES (:id, :name, :query, :mode, CAST(:filters AS jsonb), :result_count, :pinned, :folder_id, CAST(:strategy AS jsonb), CAST(:sub_queries AS jsonb), :combinator)
         """), {
             "id": new_id,
             "name": payload.name,
@@ -6841,6 +6914,8 @@ def create_user_scenario(payload: UserScenarioIn, _: None = Depends(require_api_
             "pinned": payload.pinned,
             "folder_id": payload.folder_id,
             "strategy": json.dumps(payload.search_strategy) if payload.search_strategy else None,
+            "sub_queries": json.dumps(payload.sub_queries) if payload.sub_queries else None,
+            "combinator": payload.combinator if payload.sub_queries else None,
         })
     # Génération de la stratégie de recherche en arrière-plan : l'appel OpenAI
     # ne doit JAMAIS bloquer (ni faire échouer) la création du scénario. On la
@@ -7034,14 +7109,20 @@ def get_user_scenario_detail(scenario_id: str) -> dict[str, Any]:
               AND (d.is_duplicate IS NULL OR d.is_duplicate = FALSE)
         """), {"sid": scenario_id}).mappings().first()
 
-    # La requête sauvegardée est booléenne OU en langage naturel selon le mode de
-    # recherche réellement utilisé. On ne l'affiche que dans la catégorie employée
-    # pour éviter de montrer la même requête à la fois en booléen ET en naturel.
+    # Recherche multi-sous-requêtes : on renvoie les vraies listes booléennes /
+    # naturelles. Sinon (mono-requête), la requête sauvegardée est booléenne OU en
+    # langage naturel selon le mode réellement utilisé — on ne l'affiche que dans la
+    # catégorie employée (évite de montrer la même requête en booléen ET en naturel).
     query_text = row["query"]
-    _mode = (row.get("mode") or "hybrid").lower()
-    _saved = [query_text] if query_text else []
-    boolean_queries = _saved if _mode == "boolean" else []
-    nl_queries = [] if _mode == "boolean" else _saved
+    _sub = _normalize_sub_queries(row.get("sub_queries"))
+    if _sub:
+        boolean_queries = [s["text"] for s in _sub if s["kind"] == "boolean"]
+        nl_queries = [s["text"] for s in _sub if s["kind"] == "natural"]
+    else:
+        _mode = (row.get("mode") or "hybrid").lower()
+        _saved = [query_text] if query_text else []
+        boolean_queries = _saved if _mode == "boolean" else []
+        nl_queries = [] if _mode == "boolean" else _saved
 
     return {
         "id": scenario_id,
@@ -7521,10 +7602,21 @@ def _run_user_scenario_populate(
         # récupère search_strategy.general ; à défaut on la génère depuis la requête.
         _boolean = query
         _pubmed_q = query
+        # Recherche multi-sous-requêtes : l'appartenance au corpus est l'union /
+        # l'intersection des ensembles locaux de chaque sous-requête. La fédération
+        # live reste pilotée par la stratégie booléenne de la requête synthétisée
+        # (elle ne fait qu'ENRICHIR la base ; l'appartenance est recalculée après).
+        _sub_queries: list[dict] = []
+        _combinator = "intersection"
         try:
             with engine.connect() as _sc:
-                _strat = _sc.execute(text("SELECT search_strategy FROM user_scenarios WHERE id = :sid"),
-                                     {"sid": scenario_id}).scalar()
+                _srow = _sc.execute(text(
+                    "SELECT search_strategy, sub_queries, combinator FROM user_scenarios WHERE id = :sid"),
+                    {"sid": scenario_id}).mappings().first()
+            _strat = _srow["search_strategy"] if _srow else None
+            _sub_queries = _normalize_sub_queries(_srow["sub_queries"]) if _srow else []
+            if _srow and _srow["combinator"] in ("union", "intersection"):
+                _combinator = _srow["combinator"]
             if isinstance(_strat, dict) and not _strategy_is_degraded(_strat, query):
                 _boolean = _strat["general"]
                 _pubmed_q = _strat.get("pubmed") or _strat["general"]
@@ -7547,7 +7639,9 @@ def _run_user_scenario_populate(
         # langage naturel (avec le '?'), d'où OpenAlex 400 et booléens Cochrane/
         # PROSPERO malformés → 0 article récupéré en direct.
         _plain_q = _plain_keywords(_boolean) or _plain_keywords(query) or query
-        _local_ids = _search_local_doc_ids(_boolean, "boolean", filters, limit=100_000)
+        _local_ids = (_multi_query_corpus_ids(_sub_queries, _combinator, filters)
+                      if _sub_queries
+                      else _search_local_doc_ids(_boolean, "boolean", filters, limit=100_000))
 
         if _local_ids:
             with engine.begin() as _lc2:
@@ -8208,18 +8302,25 @@ def _run_user_scenario_populate(
     errors = _errors_total[0]
     total_found = ingested  # Approximation — PubMed callback met à jour séparément
 
-    # ── Corpus = correspondance BOOLÉENNE sur la base enrichie ───────────────
+    # ── Corpus = correspondance BOOLÉENNE (ou multi-sous-requêtes) sur base enrichie ─
     # Après ingestion des articles live, on recalcule l'appartenance au corpus via
-    # EXACTEMENT le même helper que la recherche (_boolean_corpus_ids). Le corpus
-    # devient donc strictement « résultat de la requête booléenne sur base locale ∪
-    # live », et sa taille == le compteur de la recherche.
+    # EXACTEMENT le même helper que la recherche : _boolean_corpus_ids en mono-requête,
+    # _multi_query_corpus_ids (union/intersection) en multi-sous-requêtes. Le corpus
+    # devient donc strictement « résultat de la requête sur base locale ∪ live ».
+    # allow_empty=True en multi : une intersection légitimement vide DOIT vider le corpus.
     try:
-        _final_ids = _boolean_corpus_ids(_boolean, filters)
-        _n_corpus = _set_scenario_corpus(scenario_id, _final_ids)
-        logger.info(f"Populate {scenario_id}: corpus booléen final = {_n_corpus} docs "
-                    f"(base locale ∪ live, requête = {_boolean[:120]})")
+        if _sub_queries:
+            _final_ids = _multi_query_corpus_ids(_sub_queries, _combinator, filters)
+            _n_corpus = _set_scenario_corpus(scenario_id, _final_ids, allow_empty=True)
+            logger.info(f"Populate {scenario_id}: corpus multi-requêtes final = {_n_corpus} docs "
+                        f"({_combinator} de {len(_sub_queries)} sous-requêtes, base locale ∪ live)")
+        else:
+            _final_ids = _boolean_corpus_ids(_boolean, filters)
+            _n_corpus = _set_scenario_corpus(scenario_id, _final_ids)
+            logger.info(f"Populate {scenario_id}: corpus booléen final = {_n_corpus} docs "
+                        f"(base locale ∪ live, requête = {_boolean[:120]})")
     except Exception as _e_corpus:
-        logger.warning(f"Rebuild corpus booléen {scenario_id}: {_e_corpus}")
+        logger.warning(f"Rebuild corpus {scenario_id}: {_e_corpus}")
 
     try:
         # ── Règle qualité : articles SANS abstract retirés du corpus ─────────
