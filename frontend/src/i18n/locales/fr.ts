@@ -1003,6 +1003,11 @@ export const fr = {
       leaderboardHigher: "(plus haut = meilleur)",
       leaderboardActive: "· actif",
       leaderboardUnavailable: "indisponible",
+      forecastTitle: "Prévision",
+      forecastHorizon: "Horizon",
+      forecastObserved: "Observé",
+      forecastHoldout: "Ajustement (holdout)",
+      forecastFuture: "Prévision future",
       evidenceEvolution: "Évolution pilotée par l'évidence",
       evidenceEvolutionSubtitle:
         "Régénère le spec depuis l'évidence courante, compare, et validez le changement",

@@ -26,6 +26,11 @@ REG_FAMILIES = {"gradient_boosting", "lightgbm", "xgboost", "random_forest", "li
 # paquet fait retomber sur "gradient_boosting" (cf. estimator_from_params).
 _BOOSTED_FAMILIES = {"lightgbm", "xgboost"}
 
+# Familles de PRÉVISION de série temporelle : hors du flux tabulaire sklearn
+# (pas de ColumnTransformer→estimateur). train_model les route vers
+# train_timeseries_model. Nécessitent une colonne datetime + une cible numérique.
+_TS_FAMILIES = {"prophet", "sarimax"}
+
 
 def _has_package(name: str) -> bool:
     import importlib.util
@@ -538,6 +543,14 @@ def train_model(df, spec: dict, n_trials: int = 25, random_state: int = 42, test
 
     optuna.logging.set_verbosity(optuna.logging.WARNING)
 
+    # Prévision de série temporelle : hors du flux tabulaire (Prophet/SARIMAX ne
+    # sont pas des estimateurs sklearn). On route AVANT _effective_family (qui
+    # sinon rétrograderait "prophet"/"sarimax" vers gradient_boosting).
+    _raw_family = ((spec.get("algorithm") or {}).get("family") or "").strip().lower()
+    if _raw_family in _TS_FAMILIES:
+        return train_timeseries_model(df, spec, family=_raw_family,
+                                      random_state=random_state, test_size=test_size)
+
     outcome = spec.get("outcome") or {}
     task_type = (outcome.get("task_type") or "classification").strip().lower()
     if task_type == "survival":
@@ -739,6 +752,224 @@ def compare_models(df, spec: dict, families: list[str] | None = None,
         "families_tried": fams,
         "best_family": (best_result["family"] if best_result else None),
         "best": best_result,   # inclut le pipeline entraîné (à sérialiser par l'appelant)
+    }
+
+
+# ─── Prévision de série temporelle (Phase 3b) : Prophet / SARIMAX ─────────────
+
+def _infer_freq(dates) -> str:
+    """Devine la fréquence (alias d'offset pandas) d'une suite de dates triée.
+    Repli sur la médiane des écarts si pandas.infer_freq échoue (dates irrégulières)."""
+    import numpy as np
+    import pandas as pd
+    idx = pd.DatetimeIndex(pd.to_datetime(dates))
+    try:
+        f = pd.infer_freq(idx)
+        if f:
+            return f
+    except Exception:
+        pass
+    if len(idx) < 3:
+        return "D"
+    med = float(np.median(np.diff(idx.view("int64"))))   # ns entre points
+    day = 86_400 * 1e9
+    if med <= 1.5 * 3600e9:
+        return "h"
+    if med <= 1.5 * day:
+        return "D"
+    if med <= 10 * day:
+        return "W"
+    if med <= 45 * day:
+        return "MS"
+    if med <= 100 * day:
+        return "QS"
+    return "YS"
+
+
+def _seasonal_period(freq: str) -> int:
+    """Période saisonnière plausible selon la fréquence (0 = aucune) : horaire→24,
+    journalier→7 (semaine), hebdo→52, mensuel→12, trimestriel→4."""
+    f = (freq or "").upper()
+    if f.startswith("H"):
+        return 24
+    if f.startswith("D"):
+        return 7
+    if f.startswith("W"):
+        return 52
+    if f.startswith("M"):
+        return 12
+    if f.startswith("Q"):
+        return 4
+    return 0
+
+
+def _ts_metrics(actual, predicted) -> dict:
+    """RMSE / MAE / MAPE sur le holdout (ignore les paires non finies)."""
+    import numpy as np
+    a = np.asarray(actual, dtype=float)
+    p = np.asarray(predicted, dtype=float)
+    m = np.isfinite(a) & np.isfinite(p)
+    a, p = a[m], p[m]
+    if a.size == 0:
+        return {"rmse": None, "mae": None, "mape": None}
+    err = a - p
+    nz = np.abs(a) > 1e-9
+    return {
+        "rmse": float(np.sqrt(np.mean(err ** 2))),
+        "mae": float(np.mean(np.abs(err))),
+        "mape": (float(np.mean(np.abs(err[nz] / a[nz])) * 100.0) if nz.any() else None),
+    }
+
+
+def train_timeseries_model(df, spec: dict, family: str = "prophet",
+                           random_state: int = 42, test_size: float = 0.2,
+                           horizon: int | None = None) -> dict:
+    """Prévision de série temporelle univariée (Prophet ou SARIMAX).
+
+    Exige une colonne datetime + une cible numérique. Découpe un holdout TEMPOREL
+    (derniers points), évalue rmse/mae/mape sur ce holdout, puis réajuste sur toute
+    la série pour produire la prévision future (H pas). Renvoie un dict compatible
+    avec la persistance : le forecaster ajusté est sous `pipeline` (sérialisé par
+    l'appelant), le reste alimente le résumé (holdout, forecast, historique)."""
+    import numpy as np
+    import pandas as pd
+
+    outcome = spec.get("outcome") or {}
+    target = outcome.get("machine_name")
+    features = spec.get("features") or []
+
+    norm_map: dict[str, Any] = {}
+    for c in df.columns:
+        norm_map.setdefault(_norm(c), c)
+    tcol = norm_map.get(_norm(target))
+    if tcol is None:
+        raise ValueError(f"Colonne cible '{target}' absente du dataset.")
+
+    # Colonne temporelle : 1re feature datetime du spec présente, sinon 1re colonne
+    # réellement parsable en dates (>80 % de valeurs valides).
+    time_mn = next((f.get("machine_name") for f in features if f.get("dtype") == "datetime"), None)
+    time_col = norm_map.get(_norm(time_mn)) if time_mn else None
+    if time_col is None:
+        for c in df.columns:
+            if c == tcol:
+                continue
+            if pd.to_datetime(df[c], errors="coerce").notna().mean() > 0.8:
+                time_col = c
+                break
+    if time_col is None:
+        raise ValueError("La prévision temporelle exige une colonne de date (aucune trouvée dans le dataset).")
+
+    # Série propre : dates parsées + cible numérique, triée, doublons de date agrégés.
+    s = pd.DataFrame({
+        "ds": pd.to_datetime(df[time_col], errors="coerce"),
+        "y": pd.to_numeric(df[tcol], errors="coerce"),
+    }).dropna().sort_values("ds", kind="mergesort")
+    s = s.groupby("ds", as_index=False)["y"].mean()
+    n = len(s)
+    if n < 16:
+        raise ValueError(f"Série trop courte pour une prévision ({n} points exploitables). Minimum 16.")
+
+    # Holdout temporel : derniers H points (≥2 ; ≤1/3 de la série).
+    H = int(horizon) if horizon else max(3, min(int(round(n * test_size)), 24))
+    H = max(2, min(H, n // 3))
+    train, test = s.iloc[:n - H], s.iloc[n - H:]
+    freq = _infer_freq(s["ds"])
+    fam = (family or "prophet").strip().lower()
+
+    def _iso(dts):
+        return [pd.Timestamp(d).isoformat() for d in dts]
+
+    best_params: dict[str, Any] = {}
+    if fam == "sarimax":
+        import warnings as _w
+        from statsmodels.tsa.statespace.sarimax import SARIMAX
+        # Grille d'ordres ARIMA(p,d,q) × ordre SAISONNIER inféré de la fréquence.
+        # La composante saisonnière (ex. cycle hebdo pour des données journalières)
+        # est ajoutée uniquement si la série a la longueur pour l'estimer.
+        m_season = _seasonal_period(freq)
+        seasonal_orders = [(0, 0, 0, 0)]
+        if m_season >= 2 and len(train) >= 2 * m_season + 8:
+            seasonal_orders.append((1, 0, 1, m_season))
+        candidates = [(o, so) for o in [(1, 1, 1), (2, 1, 1), (1, 1, 0), (0, 1, 1), (1, 0, 0)]
+                      for so in seasonal_orders]
+        best = None
+        for order, sorder in candidates:
+            try:
+                with _w.catch_warnings():
+                    _w.simplefilter("ignore")
+                    res = SARIMAX(train["y"].to_numpy(), order=order, seasonal_order=sorder,
+                                  enforce_stationarity=False, enforce_invertibility=False).fit(disp=False)
+                    pred = np.asarray(res.forecast(steps=H), dtype=float)
+                mets = _ts_metrics(test["y"].to_numpy(), pred)
+                if mets["rmse"] is not None and (best is None or mets["rmse"] < best[1]["rmse"]):
+                    best = ((order, sorder), mets, pred)
+            except Exception as e:
+                logger.warning(f"SARIMAX {order}x{sorder}: {e}")
+        if best is None:
+            raise ValueError("SARIMAX n'a convergé pour aucun ordre candidat.")
+        (order, sorder), holdout_metrics, holdout_pred = best
+        best_params = {"order": list(order), "seasonal_order": list(sorder)}
+        with _w.catch_warnings():
+            _w.simplefilter("ignore")
+            full = SARIMAX(s["y"].to_numpy(), order=order, seasonal_order=sorder,
+                           enforce_stationarity=False, enforce_invertibility=False).fit(disp=False)
+        fc = full.get_forecast(steps=H)
+        fmean = np.asarray(fc.predicted_mean, dtype=float)
+        ci = np.asarray(fc.conf_int(alpha=0.2), dtype=float)   # IC 80 %
+        lower, upper = ci[:, 0], ci[:, 1]
+        future_dates = pd.date_range(start=s["ds"].iloc[-1], periods=H + 1, freq=freq)[1:]
+        fitted_model = full
+    else:  # prophet
+        import logging as _lg
+        from prophet import Prophet
+        _lg.getLogger("prophet").setLevel(_lg.ERROR)
+        _lg.getLogger("cmdstanpy").setLevel(_lg.ERROR)
+        m = Prophet(interval_width=0.8)
+        m.fit(train[["ds", "y"]])
+        holdout_pred = np.asarray(m.predict(pd.DataFrame({"ds": test["ds"]}))["yhat"], dtype=float)
+        holdout_metrics = _ts_metrics(test["y"].to_numpy(), holdout_pred)
+        mf = Prophet(interval_width=0.8)
+        mf.fit(s[["ds", "y"]])
+        fut = mf.predict(mf.make_future_dataframe(periods=H, freq=freq)).tail(H)
+        fmean = np.asarray(fut["yhat"], dtype=float)
+        lower = np.asarray(fut["yhat_lower"], dtype=float)
+        upper = np.asarray(fut["yhat_upper"], dtype=float)
+        future_dates = pd.to_datetime(fut["ds"])
+        best_params = {"seasonality_mode": "additive", "interval_width": 0.8}
+        fitted_model = mf
+
+    tail_ctx = s.tail(min(60, n))
+    return {
+        "family": fam,
+        "task_type": "forecast",
+        "metric": "rmse",
+        "metrics": {k: (round(v, 4) if isinstance(v, float) else v) for k, v in holdout_metrics.items()},
+        "best_params": best_params,
+        "feature_importances": [],
+        "importances_by_variable": {},
+        "n_train": int(len(train)),
+        "n_test": int(len(test)),
+        "n_points": int(n),
+        "target": target,
+        "time_column": time_mn or _norm(time_col),
+        "horizon": int(H),
+        "series_freq": str(freq),
+        "holdout": {
+            "dates": _iso(test["ds"]),
+            "actual": [float(v) for v in test["y"].to_numpy()],
+            "predicted": [float(v) for v in holdout_pred],
+        },
+        "forecast": {
+            "dates": _iso(future_dates),
+            "predicted": [float(v) for v in fmean],
+            "lower": [float(v) for v in lower],
+            "upper": [float(v) for v in upper],
+        },
+        "history_tail": {
+            "dates": _iso(tail_ctx["ds"]),
+            "actual": [float(v) for v in tail_ctx["y"].to_numpy()],
+        },
+        "pipeline": fitted_model,   # forecaster ajusté (sérialisé par l'appelant)
     }
 
 

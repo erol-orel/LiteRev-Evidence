@@ -11109,7 +11109,11 @@ _FEATURE_SOURCES = {"user", "public_api"}
 _ALGO_FAMILIES = {
     "gradient_boosting", "lightgbm", "xgboost", "random_forest", "logistic_regression",
     "linear_regression", "elasticnet", "svm", "mlp", "cox_ph", "knn",
+    "prophet", "sarimax",
 }
+# Familles de PRÉVISION de série temporelle (routées hors du flux tabulaire par
+# model_trainer). Une cible numérique s'impose → task_type ramené à 'regression'.
+_TS_ALGO_FAMILIES = {"prophet", "sarimax"}
 _METRICS = {"roc_auc", "average_precision", "rmse", "mae", "r2", "c_index"}
 _CV_STRATEGIES = {"stratified_kfold", "kfold", "timeseries"}
 
@@ -12282,6 +12286,15 @@ def edit_scenario_model_spec(scenario_id: str, payload: dict[str, Any],
     if not changed:
         return {"status": "unchanged", "scenario_id": scenario_id}
 
+    # ── Cohérence prévision : une famille de série temporelle exige une cible
+    # NUMÉRIQUE. Si l'outcome est en classification, on ramène à 'regression' (cible
+    # float dans le data_template) et on nettoie la classe positive / la métrique. ──
+    if (algorithm.get("family") in _TS_ALGO_FAMILIES) and outcome.get("task_type") == "classification":
+        outcome["task_type"] = "regression"
+        outcome["positive_class"] = None
+        if (algorithm.get("metric") or "") in ("roc_auc", "average_precision"):
+            algorithm["metric"] = "rmse"
+
     # ── Reconstruire le spec + le data_template (jamais désynchronisé des features) ──
     spec["outcome"], spec["algorithm"], spec["features"] = outcome, algorithm, features
     spec["data_template"] = _derive_data_template(outcome, features)
@@ -12970,6 +12983,12 @@ def predict_scenario_model(scenario_id: str, payload: dict[str, Any],
     if not run:
         raise HTTPException(status_code=400, detail="Aucun modèle entraîné disponible. Entraînez d'abord le modèle.")
 
+    # Modèle de prévision : pas de prédiction ligne-à-ligne (la sortie est la
+    # prévision temporelle, disponible dans l'onglet Modèle / le monitoring).
+    if run["task_type"] == "forecast":
+        raise HTTPException(status_code=400,
+                            detail="Modèle de prévision : la prédiction se fait sur l'horizon temporel, pas ligne par ligne. Voir la prévision dans l'onglet Modèle.")
+
     try:
         import joblib
         pipeline = joblib.load(run["artifact_path"])
@@ -13041,6 +13060,45 @@ def monitor_scenario_model(scenario_id: str, window: int = 7) -> dict[str, Any]:
         return {"status": "unavailable", "status_color": "unavailable",
                 "status_label": "Modèle non entraîné",
                 "message": "Entraînez le modèle après avoir branché des données."}
+
+    # ── Modèle de PRÉVISION (Prophet/SARIMAX) : pas de scoring ligne-à-ligne. La
+    # valeur « courante » est le PROCHAIN point prévu, lu dans le résumé. Les bandes
+    # d'alerte numériques (seuils littéraires) s'appliquent si présentes. ──
+    if run["family"] in _TS_ALGO_FAMILIES or run["task_type"] == "forecast":
+        summ = run["summary_json"] or {}
+        fc = summ.get("forecast") or {}
+        preds = fc.get("predicted") or []
+        spec = _get_model_spec(scenario_id) or {}
+        outcome = spec.get("outcome") or {}
+        if not preds:
+            return {"status": "unavailable", "status_color": "unavailable",
+                    "status_label": _DEFAULT_ALERT_LABELS["unavailable"],
+                    "message": "Prévision indisponible ; ré-entraînez le modèle."}
+        next_val = float(preds[0])
+        with engine.connect() as conn:
+            vj = conn.execute(text(
+                "SELECT variables_json FROM scenario_settings WHERE scenario_id = :sid"
+            ), {"sid": scenario_id}).scalar()
+        alert_thresholds = (dict(vj).get("alert_thresholds") if vj else None) or {}
+        orange, red = model_trainer._alert_bounds(alert_thresholds)
+        if orange is not None and red is not None:
+            level = model_trainer._level_from_value(next_val, orange, red)
+            label = (alert_thresholds.get(level) or {}).get("label") or _DEFAULT_ALERT_LABELS.get(level, "—")
+        else:
+            level, label = "green", _DEFAULT_ALERT_LABELS.get("green", "Normal")
+        return {
+            "status": "ready", "scenario_id": scenario_id,
+            "status_color": level, "status_label": label,
+            "value": next_val, "kind": "forecast",
+            "unit": outcome.get("unit"), "outcome": outcome.get("name"),
+            "bands": {"orange": orange, "red": red},
+            "forecast": {"dates": (fc.get("dates") or [])[:12], "predicted": [float(v) for v in preds[:12]]},
+            "horizon": summ.get("horizon"), "n_scored": len(preds),
+            "model": {"run_id": run["id"], "family": run["family"], "task_type": run["task_type"],
+                      "metric": run["metric"], "metrics": run["metrics_json"]},
+            "alert_thresholds": alert_thresholds,
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+        }
 
     with engine.connect() as conn:
         ds = conn.execute(text("""
