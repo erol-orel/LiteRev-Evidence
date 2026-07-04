@@ -13009,6 +13009,21 @@ def predict_scenario_model(scenario_id: str, payload: dict[str, Any],
             proba = pipeline.predict_proba(df)
             out["classes"] = classes
             out["probabilities"] = [[float(x) for x in r] for r in proba]
+        # Explication LOCALE par prédiction (contribution de chaque variable) — sans
+        # dépendance externe, via ablation vers le fond. Plafonnée pour rester rapide.
+        summ = run["summary_json"] or {}
+        background = summ.get("explain_background")
+        if background and len(df) <= 50:
+            import model_trainer as _mt
+            used = [{"machine_name": k} for k in background]
+            explanations = []
+            for i in range(len(df)):
+                try:
+                    explanations.append(_mt.explain_prediction(
+                        pipeline, df.iloc[[i]], used, run["task_type"], background))
+                except Exception:
+                    explanations.append(None)
+            out["explanations"] = explanations
         return out
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Prédiction impossible (colonnes manquantes ?) : {e}")
