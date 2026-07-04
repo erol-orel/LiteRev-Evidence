@@ -976,6 +976,15 @@ export const en: Translations = {
         "Generates a synthetic dataset consistent with the spec then trains — for a demo without real data",
       demoInProgress: "Demo in progress...",
       demoDataTrain: "Demo data + train",
+      compareModels: "Compare models",
+      comparingInProgress: "Comparing...",
+      compareTooltip:
+        "Trains several families (LightGBM, XGBoost, gradient boosting, random forest, linear model) on the same split and keeps the best",
+      leaderboardTitle: "Model leaderboard",
+      leaderboardLower: "(lower = better)",
+      leaderboardHigher: "(higher = better)",
+      leaderboardActive: "· active",
+      leaderboardUnavailable: "unavailable",
       evidenceEvolution: "Evidence-driven evolution",
       evidenceEvolutionSubtitle:
         "Regenerates the spec from current evidence, compares, and lets you validate the change",

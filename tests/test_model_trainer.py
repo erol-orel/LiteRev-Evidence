@@ -172,6 +172,88 @@ def test_reproducible_same_seed():
     assert a["metrics"]["rmse"] == b["metrics"]["rmse"]
 
 
+# ── boosting families + model comparison leaderboard ─────────────────────────
+def test_effective_family_downgrades_absent_boosting_honestly():
+    # lightgbm/xgboost fall back to gradient_boosting ONLY when the package is
+    # absent — and the reported family must reflect the fallback (no mislabel).
+    for fam in ("lightgbm", "xgboost"):
+        eff = mt._effective_family(fam, "regression")
+        if mt._has_package(fam):
+            assert eff == fam
+        else:
+            assert eff == "gradient_boosting"
+
+
+def test_boosting_family_reports_what_it_trained():
+    # Whatever family the package situation yields, train_model must report the
+    # family it ACTUALLY trained (effective), never the requested-but-absent one.
+    res = mt.train_model(_linear_df(), _reg_spec("lightgbm"), n_trials=5)
+    assert res["family"] == mt._effective_family("lightgbm", "regression")
+    assert res["metrics"]["rmse"] > 0
+
+
+def test_leaderboard_families_excludes_absent_packages():
+    fams = mt.leaderboard_families("regression")
+    # Always-present curated families.
+    assert "gradient_boosting" in fams
+    assert "random_forest" in fams
+    assert "linear_regression" in fams
+    # Boosting families appear IFF their package is importable.
+    for fam in ("lightgbm", "xgboost"):
+        assert (fam in fams) == mt._has_package(fam)
+    # Classification swaps the linear base.
+    clf = mt.leaderboard_families("classification")
+    assert "logistic_regression" in clf
+    assert "linear_regression" not in clf
+
+
+def test_compare_models_ranks_and_picks_best():
+    res = mt.compare_models(_linear_df(), _reg_spec(), n_trials=5)
+    assert res["metric"] == "rmse"
+    assert res["lower_is_better"] is True
+    board = res["leaderboard"]
+    scored = [e for e in board if e.get("value") is not None]
+    assert len(scored) >= 2                                    # at least GB/RF/linear
+    # Ranked ascending by RMSE (lower is better), rank field consistent.
+    vals = [e["value"] for e in scored]
+    assert vals == sorted(vals)
+    assert [e["rank"] for e in scored] == list(range(1, len(scored) + 1))
+    # best_family is the rank-1 entry, and `best` carries a usable pipeline.
+    assert res["best_family"] == scored[0]["family"]
+    assert res["best"]["metrics"]["rmse"] == scored[0]["value"]
+    assert res["best"]["pipeline"] is not None
+
+
+def test_compare_models_best_matches_standalone_train():
+    # On a linear DGP the linear model should win (or tie) — and the leaderboard
+    # value for a family must equal what train_model reports for it alone.
+    df = _linear_df()
+    res = mt.compare_models(df, _reg_spec(), n_trials=5)
+    lin = next((e for e in res["leaderboard"] if e["family"] == "linear_regression"), None)
+    assert lin is not None
+    solo = mt.train_model(df, _reg_spec("linear_regression"), n_trials=5)
+    assert abs(lin["value"] - solo["metrics"]["rmse"]) < 1e-9   # same split/seed → identical
+
+
+def test_compare_models_classification_uses_roc_auc():
+    rng = np.random.RandomState(3)
+    n = 300
+    df = pd.DataFrame({"a": rng.normal(0, 1, n), "b": rng.normal(0, 1, n)})
+    df["out"] = ["oui" if v > 0 else "non" for v in (df.a - df.b)]
+    spec = {
+        "outcome": {"task_type": "classification", "machine_name": "out"},
+        "features": [{"machine_name": "a", "dtype": "float"}, {"machine_name": "b", "dtype": "float"}],
+        "algorithm": {"family": "logistic_regression", "metric": "roc_auc",
+                      "cv": {"strategy": "stratified_kfold", "folds": 4}},
+    }
+    res = mt.compare_models(df, spec, n_trials=5)
+    assert res["metric"] == "roc_auc"
+    assert res["lower_is_better"] is False
+    scored = [e for e in res["leaderboard"] if e.get("value") is not None]
+    assert scored and scored[0]["value"] >= scored[-1]["value"]  # sorted desc (higher better)
+    assert res["best"]["metrics"]["roc_auc"] > 0.8
+
+
 # ── upload validator readiness guards (pure function in main) ────────────────
 def test_validator_can_train_guards():
     import main

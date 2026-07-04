@@ -2240,6 +2240,14 @@ export async function trainModel(scenarioId: string): Promise<{ status: string; 
   return r.json();
 }
 
+// Entraîne plusieurs familles (LightGBM/XGBoost/GB/RF/linéaire) et garde la
+// meilleure. Partage le même job + endpoint de statut que trainModel.
+export async function compareModels(scenarioId: string): Promise<{ status: string; scenario_id?: string; n_trials?: number; mode?: string }> {
+  const r = await safeFetch(`${API_BASE_URL}/scenarios/${scenarioId}/model/compare`, { method: 'POST', headers: authHeaders() });
+  if (!r.ok) throw new Error(httpMessage(r.status));
+  return r.json();
+}
+
 export async function generateSyntheticData(
   scenarioId: string,
   nRows = 400,

@@ -12522,8 +12522,10 @@ except Exception as _e:
     logger.warning(f"_ensure_model_run_table: {_e}")
 
 
-def _run_model_training(scenario_id: str, n_trials: int = 25) -> None:
-    """Job d'entraînement (thread) : charge le dataset actif, entraîne, persiste."""
+def _run_model_training(scenario_id: str, n_trials: int = 25, compare: bool = False) -> None:
+    """Job d'entraînement (thread) : charge le dataset actif, entraîne, persiste.
+    compare=True entraîne PLUSIEURS familles (lightgbm/xgboost/GB/RF/linéaire),
+    persiste la MEILLEURE et joint le classement complet au résumé."""
     import json as _json
     import pandas as pd
     from datetime import datetime, timezone
@@ -12544,7 +12546,17 @@ def _run_model_training(scenario_id: str, n_trials: int = 25) -> None:
             raise ValueError("Aucun dataset branché. Uploadez d'abord un CSV/XLSX.")
 
         df = pd.read_csv(ds["stored_path"])
-        result = model_trainer.train_model(df, spec, n_trials=n_trials)
+        if compare:
+            comparison = model_trainer.compare_models(df, spec, n_trials=n_trials)
+            result = comparison.get("best")
+            if not result:
+                raise ValueError("Aucun modèle n'a pu être entraîné lors de la comparaison.")
+            # Classement complet joint au résumé (affiché dans l'onglet Modèle).
+            result["leaderboard"] = comparison["leaderboard"]
+            result["families_compared"] = comparison["families_tried"]
+            result["leaderboard_lower_is_better"] = comparison["lower_is_better"]
+        else:
+            result = model_trainer.train_model(df, spec, n_trials=n_trials)
 
         # Sérialiser le pipeline entraîné.
         pipeline = result.pop("pipeline")
@@ -12623,6 +12635,36 @@ def train_scenario_model(scenario_id: str, n_trials: int = 25,
     _MODEL_TRAIN_JOBS[scenario_id] = {"status": "running"}
     threading.Thread(target=_run_model_training, args=(scenario_id, n_trials), daemon=True).start()
     return {"status": "started", "scenario_id": scenario_id, "n_trials": n_trials}
+
+
+@app.post("/scenarios/{scenario_id}/model/compare")
+def compare_scenario_models(scenario_id: str, n_trials: int = 15,
+                            _: None = Depends(require_api_key)) -> dict[str, Any]:
+    """Entraîne PLUSIEURS familles (lightgbm/xgboost/GB/RF/linéaire) sur le dataset
+    branché, garde la meilleure comme modèle actif et joint le classement complet.
+    Partage le registre de jobs et le endpoint de statut avec /model/train."""
+    import threading
+
+    if _MODEL_TRAIN_JOBS.get(scenario_id, {}).get("status") == "running":
+        return {"status": "already_running", "scenario_id": scenario_id}
+
+    if not _get_model_spec(scenario_id):
+        raise HTTPException(status_code=400, detail="Aucun model_spec. Générez puis validez les Variables & Modèle.")
+    with engine.connect() as conn:
+        ds = conn.execute(text(
+            "SELECT id FROM scenario_model_dataset WHERE scenario_id = :sid AND is_active = TRUE LIMIT 1"
+        ), {"sid": scenario_id}).first()
+    if not ds:
+        raise HTTPException(status_code=400, detail="Aucun dataset branché. Uploadez un CSV/XLSX d'abord.")
+
+    # La comparaison entraîne N familles → on limite le budget d'essais par famille
+    # (défaut 15) pour garder un temps de calcul raisonnable.
+    n_trials = max(5, min(int(n_trials or 15), 50))
+    _MODEL_TRAIN_JOBS[scenario_id] = {"status": "running"}
+    threading.Thread(
+        target=_run_model_training, args=(scenario_id, n_trials), kwargs={"compare": True}, daemon=True
+    ).start()
+    return {"status": "started", "scenario_id": scenario_id, "n_trials": n_trials, "mode": "compare"}
 
 
 @app.get("/scenarios/{scenario_id}/model/train/status")

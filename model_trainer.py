@@ -18,8 +18,18 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-CLF_FAMILIES = {"gradient_boosting", "random_forest", "logistic_regression", "svm", "mlp", "knn"}
-REG_FAMILIES = {"gradient_boosting", "random_forest", "linear_regression", "elasticnet", "svm", "mlp", "knn"}
+CLF_FAMILIES = {"gradient_boosting", "lightgbm", "xgboost", "random_forest", "logistic_regression", "svm", "mlp", "knn"}
+REG_FAMILIES = {"gradient_boosting", "lightgbm", "xgboost", "random_forest", "linear_regression", "elasticnet", "svm", "mlp", "knn"}
+
+# Familles à gradient boosting « fortes » pour données tabulaires (préférées au
+# GB scikit-learn quand le paquet est présent). Import paresseux : l'absence du
+# paquet fait retomber sur "gradient_boosting" (cf. estimator_from_params).
+_BOOSTED_FAMILIES = {"lightgbm", "xgboost"}
+
+
+def _has_package(name: str) -> bool:
+    import importlib.util
+    return importlib.util.find_spec(name) is not None
 
 
 def _norm(s: Any) -> str:
@@ -102,6 +112,10 @@ def generate_synthetic_dataset(spec: dict, n_rows: int = 400, seed: int = 42):
 def _effective_family(family: str, task_type: str) -> str:
     """Ramène la famille demandée vers une famille valide pour la tâche."""
     family = (family or "").strip().lower()
+    # Paquet de boosting absent → repli HONNÊTE sur le GB scikit-learn (sinon le run
+    # rapporterait "lightgbm"/"xgboost" tout en entraînant un GradientBoosting).
+    if family in _BOOSTED_FAMILIES and not _has_package(family):
+        family = "gradient_boosting"
     if task_type in ("regression", "count"):
         if family == "logistic_regression":
             return "linear_regression"
@@ -183,6 +197,14 @@ def suggest_params(trial, family: str) -> dict:
             "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.3, log=True),
             "max_depth": trial.suggest_int("max_depth", 2, 5),
         }
+    if family in ("lightgbm", "xgboost"):
+        return {
+            "n_estimators": trial.suggest_int("n_estimators", 100, 600),
+            "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.3, log=True),
+            "max_depth": trial.suggest_int("max_depth", 2, 8),
+            "subsample": trial.suggest_float("subsample", 0.6, 1.0),
+            "colsample_bytree": trial.suggest_float("colsample_bytree", 0.6, 1.0),
+        }
     if family == "random_forest":
         return {
             "n_estimators": trial.suggest_int("n_estimators", 100, 400),
@@ -238,6 +260,26 @@ def estimator_from_params(family: str, task_type: str, params: dict, random_stat
     if clf and family in ("random_forest", "logistic_regression", "svm"):
         p.setdefault("class_weight", "balanced")
 
+    if family == "lightgbm":
+        try:
+            from lightgbm import LGBMClassifier, LGBMRegressor
+            if clf:
+                p.setdefault("class_weight", "balanced")   # LGBM gère le déséquilibre
+            return (LGBMClassifier if clf else LGBMRegressor)(
+                random_state=random_state, n_jobs=1, verbosity=-1, **p)
+        except Exception as _e:  # paquet absent → repli GB scikit-learn
+            logger.warning(f"lightgbm indisponible ({_e}) → repli gradient_boosting")
+            family = "gradient_boosting"
+            p.pop("colsample_bytree", None)
+    if family == "xgboost":
+        try:
+            from xgboost import XGBClassifier, XGBRegressor
+            return (XGBClassifier if clf else XGBRegressor)(
+                random_state=random_state, n_jobs=1, verbosity=0, **p)
+        except Exception as _e:
+            logger.warning(f"xgboost indisponible ({_e}) → repli gradient_boosting")
+            family = "gradient_boosting"
+            p.pop("colsample_bytree", None)
     if family == "gradient_boosting":
         return (GradientBoostingClassifier if clf else GradientBoostingRegressor)(random_state=random_state, **p)
     if family == "random_forest":
@@ -627,6 +669,77 @@ def train_model(df, spec: dict, n_trials: int = 25, random_state: int = 42, test
         # Diagnostics des hypothèses de régression (Gauss-Markov / OLS) — informatif.
         result["assumptions"] = regression_diagnostics(final, Xtr, ytr, used)
     return result
+
+
+def _lower_is_better(metric: str) -> bool:
+    return (metric or "").lower() in ("rmse", "mae")
+
+
+def leaderboard_families(task_type: str) -> list[str]:
+    """Ensemble CURÉ de familles à comparer (fortes pour données tabulaires + une
+    base linéaire interprétable). Exclut lightgbm/xgboost si le paquet est absent —
+    pas TOUTES les familles, pour garder la comparaison rapide."""
+    tt = (task_type or "classification").strip().lower()
+    lin = "linear_regression" if tt in ("regression", "count") else "logistic_regression"
+    order = ["lightgbm", "xgboost", "gradient_boosting", "random_forest", lin]
+    base = REG_FAMILIES if tt in ("regression", "count") else CLF_FAMILIES
+    return [f for f in order if f in base and (f not in _BOOSTED_FAMILIES or _has_package(f))]
+
+
+def compare_models(df, spec: dict, families: list[str] | None = None,
+                   n_trials: int = 15, random_state: int = 42, test_size: float = 0.2) -> dict:
+    """Entraîne PLUSIEURS familles sur le MÊME découpage (mêmes seeds → comparaison
+    équitable) et les classe par la métrique de holdout. Renvoie un tableau
+    comparatif + la meilleure famille (avec son pipeline entraîné). Pur/testable.
+
+    Chaque entrée du classement : {family, metric, value, metrics, best_params}.
+    Une famille qui échoue (données insuffisantes, paquet absent) apparaît avec
+    `error` et n'est pas classée."""
+    outcome = spec.get("outcome") or {}
+    task_type = (outcome.get("task_type") or "classification").strip().lower()
+    fams = families or leaderboard_families(task_type)
+
+    entries: list[dict] = []
+    best_result = None
+    metric_key = None
+    for fam in fams:
+        _spec = {**spec, "algorithm": {**(spec.get("algorithm") or {}), "family": fam}}
+        try:
+            r = train_model(df, _spec, n_trials=n_trials, random_state=random_state, test_size=test_size)
+        except Exception as e:
+            entries.append({"family": fam, "error": str(e)[:300]})
+            continue
+        metric_key = r["metric"]
+        val = r["metrics"].get(metric_key)
+        entries.append({
+            "family": r["family"], "metric": metric_key, "value": val,
+            "metrics": r["metrics"], "best_params": r["best_params"],
+            "n_train": r["n_train"], "n_test": r["n_test"],
+        })
+        if val is not None:
+            if best_result is None:
+                best_result = r
+            else:
+                bv = best_result["metrics"].get(best_result["metric"])
+                better = (val < bv) if _lower_is_better(metric_key) else (val > bv)
+                if bv is None or better:
+                    best_result = r
+
+    scored = [e for e in entries if e.get("value") is not None]
+    scored.sort(key=lambda e: e["value"], reverse=not _lower_is_better(metric_key or ""))
+    failed = [e for e in entries if e.get("value") is None]
+    for rank, e in enumerate(scored, 1):
+        e["rank"] = rank
+
+    return {
+        "task_type": task_type,
+        "metric": metric_key,
+        "lower_is_better": _lower_is_better(metric_key or ""),
+        "leaderboard": scored + failed,
+        "families_tried": fams,
+        "best_family": (best_result["family"] if best_result else None),
+        "best": best_result,   # inclut le pipeline entraîné (à sérialiser par l'appelant)
+    }
 
 
 # ─── Monitoring (Phase 4) : score les données récentes -> niveau d'alerte ─────

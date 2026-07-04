@@ -34,6 +34,7 @@ import {
   getModelDataset,
   getScenarioModelSpec,
   trainModel,
+  compareModels,
   generateSyntheticData,
   getModelTrainStatus,
   getModelMonitor,
@@ -4091,6 +4092,14 @@ function ModelMonitorSection({ scenarioId }: { scenarioId: string }) {
     } catch (e: any) { setError(e.message); setBusy(null); }
   };
 
+  const doCompare = async () => {
+    setBusy("compare"); setError(null);
+    try {
+      await compareModels(scenarioId);
+      poll(() => getModelTrainStatus(scenarioId), () => { setBusy(null); load(); });
+    } catch (e: any) { setError(e.message); setBusy(null); }
+  };
+
   const doSynthetic = async () => {
     setBusy("synthetic"); setError(null);
     try {
@@ -4254,6 +4263,45 @@ function ModelMonitorSection({ scenarioId }: { scenarioId: string }) {
                   )}
                 </div>
               )}
+              {/* Classement des familles comparées (bouton « Comparer les modèles »).
+                  Le rang 1 = modèle actif retenu. Les familles en échec (paquet absent,
+                  données insuffisantes) sont listées à part avec leur raison. */}
+              {(((run.summary as any)?.leaderboard?.length ?? 0) > 0) && (() => {
+                const board: any[] = (run.summary as any).leaderboard;
+                const scored = board.filter((e) => e.value != null);
+                const failed = board.filter((e) => e.value == null);
+                const lowerBetter = (run.summary as any).leaderboard_lower_is_better === true;
+                return (
+                  <div className="rounded-xl border border-white/5 bg-white/2 px-3 py-2.5">
+                    <span className="text-[10px] text-white/35 uppercase tracking-wider flex items-center gap-1">
+                      <TrendingUp size={11} /> {t("scenarioDetail.model.leaderboardTitle")}
+                      <span className="text-white/25 normal-case tracking-normal">
+                        · {run.metric} {lowerBetter ? t("scenarioDetail.model.leaderboardLower") : t("scenarioDetail.model.leaderboardHigher")}
+                      </span>
+                    </span>
+                    <div className="mt-2 space-y-1">
+                      {scored.map((e) => (
+                        <div key={e.family} className={`flex items-center gap-2 text-[11px] rounded-lg px-2 py-1 ${
+                          e.rank === 1 ? "bg-brand-500/10 border border-brand-500/25" : ""}`}>
+                          <span className="w-4 shrink-0 text-white/35 font-mono">{e.rank}</span>
+                          <span className={`flex-1 truncate ${e.rank === 1 ? "text-brand-200 font-semibold" : "text-white/70"}`}>
+                            {e.family}
+                            {e.rank === 1 && <span className="ml-1.5 text-[9px] text-brand-300/70">{t("scenarioDetail.model.leaderboardActive")}</span>}
+                          </span>
+                          <span className="font-mono text-white/70">{typeof e.value === "number" ? e.value.toFixed(3) : "—"}</span>
+                        </div>
+                      ))}
+                      {failed.map((e) => (
+                        <div key={e.family} className="flex items-center gap-2 text-[11px] px-2 py-1 opacity-40" title={e.error || ""}>
+                          <span className="w-4 shrink-0 text-white/25">·</span>
+                          <span className="flex-1 truncate text-white/50">{e.family}</span>
+                          <span className="text-[9px] text-white/40">{t("scenarioDetail.model.leaderboardUnavailable")}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                );
+              })()}
             </div>
           ) : (
             <p className="text-xs text-white/50">{run?.message ?? t("scenarioDetail.model.noTrainedModel")}</p>
@@ -4263,6 +4311,11 @@ function ModelMonitorSection({ scenarioId }: { scenarioId: string }) {
               className="flex-1 flex items-center justify-center gap-1.5 rounded-xl bg-white text-forest-950 font-semibold py-2 text-xs hover:bg-forest-200 transition disabled:opacity-50">
               <RotateCcw size={12} className={busy === "train" ? "animate-spin" : ""} />
               {busy === "train" ? t("scenarioDetail.model.trainingInProgress") : (run?.status === "ready" ? t("scenarioDetail.model.retrainModel") : t("scenarioDetail.model.trainModel"))}
+            </button>
+            <button onClick={doCompare} disabled={busy !== null} title={t("scenarioDetail.model.compareTooltip")}
+              className="flex items-center justify-center gap-1.5 rounded-xl border border-white/15 text-white/70 font-semibold py-2 px-3 text-xs hover:bg-white/5 transition disabled:opacity-50">
+              <TrendingUp size={12} className={busy === "compare" ? "animate-spin" : ""} />
+              {busy === "compare" ? t("scenarioDetail.model.comparingInProgress") : t("scenarioDetail.model.compareModels")}
             </button>
             <button onClick={doSynthetic} disabled={busy !== null} title={t("scenarioDetail.model.syntheticTooltip")}
               className="flex items-center justify-center gap-1.5 rounded-xl border border-white/15 text-white/70 font-semibold py-2 px-3 text-xs hover:bg-white/5 transition disabled:opacity-50">

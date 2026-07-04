@@ -974,6 +974,15 @@ export const fr = {
         "Génère un jeu de données synthétique cohérent avec le spec puis entraîne — pour une démo sans données réelles",
       demoInProgress: "Démo en cours...",
       demoDataTrain: "Données de démo + entraîner",
+      compareModels: "Comparer les modèles",
+      comparingInProgress: "Comparaison en cours...",
+      compareTooltip:
+        "Entraîne plusieurs familles (LightGBM, XGBoost, gradient boosting, forêt aléatoire, modèle linéaire) sur le même découpage et garde la meilleure",
+      leaderboardTitle: "Classement des modèles",
+      leaderboardLower: "(plus bas = meilleur)",
+      leaderboardHigher: "(plus haut = meilleur)",
+      leaderboardActive: "· actif",
+      leaderboardUnavailable: "indisponible",
       evidenceEvolution: "Évolution pilotée par l'évidence",
       evidenceEvolutionSubtitle:
         "Régénère le spec depuis l'évidence courante, compare, et validez le changement",
