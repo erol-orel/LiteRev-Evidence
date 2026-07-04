@@ -50,7 +50,7 @@ jobs:
           OPENAI_API_KEY: ""
         run: |
           pip install pytest fastapi pydantic "sqlalchemy>=2.0" python-dotenv python-multipart "psycopg[binary]" \
-            numpy pandas scikit-learn scipy optuna joblib
+            numpy pandas scikit-learn scipy optuna joblib lightgbm xgboost
           pytest -q
 
       - uses: actions/setup-node@v4
