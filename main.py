@@ -11107,7 +11107,7 @@ _TASK_TYPES = {"classification", "regression", "count", "survival"}
 _DTYPES = {"float", "int", "bool", "category", "datetime"}
 _FEATURE_SOURCES = {"user", "public_api"}
 _ALGO_FAMILIES = {
-    "gradient_boosting", "random_forest", "logistic_regression",
+    "gradient_boosting", "lightgbm", "xgboost", "random_forest", "logistic_regression",
     "linear_regression", "elasticnet", "svm", "mlp", "cox_ph", "knn",
 }
 _METRICS = {"roc_auc", "average_precision", "rmse", "mae", "r2", "c_index"}
@@ -11195,6 +11195,54 @@ def _filter_provenance(raw: Any, valid_ids: set) -> list:
         if xi in valid_ids and xi not in out:
             out.append(xi)
     return out
+
+
+_TARGET_DTYPE_FOR_TASK = {"classification": "category", "regression": "float", "count": "int", "survival": "float"}
+
+
+def _derive_data_template(outcome: dict, features: list[dict]) -> dict:
+    """Dérive le data_template (noms de colonnes EXACTS attendus à l'upload) depuis
+    l'outcome + les features. Fonction PURE partagée par le générateur de spec et
+    l'éditeur de spec, pour que le template ne DÉRIVE JAMAIS de la liste réelle des
+    variables (sinon la validation d'upload attendrait des colonnes fantômes)."""
+    task_type = (outcome.get("task_type") or "classification").strip().lower()
+    outcome_mn = outcome.get("machine_name") or "outcome"
+    target_dtype = _TARGET_DTYPE_FOR_TASK.get(task_type, "float")
+    columns = [{
+        "name": outcome_mn, "dtype": target_dtype, "role": "outcome",
+        "required": True, "source": "user", "description": outcome.get("name", ""),
+    }]
+    for f in features:
+        columns.append({
+            "name": f["machine_name"], "dtype": f["dtype"], "role": "feature",
+            "required": f.get("importance") == "high",
+            "source": f.get("source", "user"), "public_provider": f.get("public_provider"),
+            "description": f.get("name", ""),
+        })
+    return {
+        "target_column": outcome_mn,
+        "columns": columns,
+        "formats": ["csv", "xlsx"],
+        "user_columns": [c["name"] for c in columns if c["source"] == "user"],
+        "public_columns": [c["name"] for c in columns if c["source"] == "public_api"],
+        "notes": ("Les en-têtes du fichier doivent correspondre EXACTEMENT à ces noms. "
+                  "Les colonnes 'public_api' pourront être récupérées automatiquement (Phase 2)."),
+    }
+
+
+def _coerce_family_for_task(family: Any, task_type: str) -> str:
+    """Ramène une famille d'algorithme choisie vers une famille COMPATIBLE avec la
+    tâche (sans vérifier la présence du paquet — c'est le rôle du trainer). Ex.:
+    logistic_regression sur une régression -> linear_regression, et inversement."""
+    fam = _coerce_enum(family, _ALGO_FAMILIES, "gradient_boosting")
+    tt = (task_type or "classification").strip().lower()
+    if tt in ("regression", "count"):
+        if fam in ("logistic_regression",):
+            return "linear_regression"
+    else:  # classification / survival
+        if fam in ("linear_regression", "elasticnet"):
+            return "logistic_regression"
+    return fam
 
 
 def _attach_model_spec(variables: dict, prov_articles: list[dict]) -> dict:
@@ -11295,27 +11343,7 @@ def _attach_model_spec(variables: dict, prov_articles: list[dict]) -> dict:
                 cited.update(band_prov)
 
     # ── Data template (dérivé → garanti cohérent avec les machine_name ci-dessus) ──
-    target_dtype = {"classification": "category", "regression": "float", "count": "int", "survival": "float"}[task_type]
-    columns = [{
-        "name": outcome_mn, "dtype": target_dtype, "role": "outcome",
-        "required": True, "source": "user", "description": outcome["name"],
-    }]
-    for f in features:
-        columns.append({
-            "name": f["machine_name"], "dtype": f["dtype"], "role": "feature",
-            "required": f["importance"] == "high",
-            "source": f["source"], "public_provider": f["public_provider"],
-            "description": f["name"],
-        })
-    data_template = {
-        "target_column": outcome_mn,
-        "columns": columns,
-        "formats": ["csv", "xlsx"],
-        "user_columns": [c["name"] for c in columns if c["source"] == "user"],
-        "public_columns": [c["name"] for c in columns if c["source"] == "public_api"],
-        "notes": ("Les en-têtes du fichier doivent correspondre EXACTEMENT à ces noms. "
-                  "Les colonnes 'public_api' pourront être récupérées automatiquement (Phase 2)."),
-    }
+    data_template = _derive_data_template(outcome, features)
 
     variables["model_spec"] = {
         "schema": MODEL_SPEC_SCHEMA,
@@ -12092,6 +12120,221 @@ def validate_scenario_spec_proposal(scenario_id: str, payload: dict[str, Any],
         "new_version": old_ver + 1,
         "retrain_started": retrain_started,
         "validated_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+# Messages d'alerte « souple » (task_type ↔ contenu réel de la cible), bilingues.
+_SPEC_WARN = {
+    "target_not_numeric_for_regression": {
+        "fr": "La cible « {t} » n'est pas numérique : une classification conviendrait sans doute mieux qu'une régression.",
+        "en": "Target “{t}” is not numeric: a classification task would likely fit better than regression.",
+    },
+    "target_binary_for_regression": {
+        "fr": "La cible « {t} » ne prend que {n} valeurs distinctes : une classification conviendrait sans doute mieux.",
+        "en": "Target “{t}” has only {n} distinct values: a classification task would likely fit better.",
+    },
+    "target_high_cardinality_for_classification": {
+        "fr": "La cible « {t} » est numérique avec {n} valeurs distinctes : une régression conviendrait sans doute mieux qu'une classification.",
+        "en": "Target “{t}” is numeric with {n} distinct values: a regression task would likely fit better than classification.",
+    },
+}
+
+
+def _task_target_sanity(scenario_id: str, outcome: dict) -> tuple[str, dict] | None:
+    """Contrôle de cohérence (SOUPLE) entre le task_type choisi et le contenu réel
+    de la colonne cible du dataset branché. Best-effort : renvoie None s'il n'y a pas
+    de dataset ou si la lecture échoue. Retour : (code, params) → localisé par l'appelant."""
+    import pandas as pd
+    import pandas.api.types as pdt
+    with engine.connect() as conn:
+        ds = conn.execute(text(
+            "SELECT stored_path FROM scenario_model_dataset WHERE scenario_id = :sid AND is_active = TRUE LIMIT 1"
+        ), {"sid": scenario_id}).mappings().first()
+    if not (ds and ds["stored_path"]):
+        return None
+    tt = (outcome.get("task_type") or "classification").strip().lower()
+    target_norm = _norm_col(outcome.get("machine_name") or "")
+    df = pd.read_csv(ds["stored_path"], nrows=5000)
+    col = next((c for c in df.columns if _norm_col(c) == target_norm), None)
+    if col is None:
+        return None
+    s = df[col].dropna()
+    if s.empty:
+        return None
+    is_num = pdt.is_numeric_dtype(s)
+    nuniq = int(s.nunique())
+    if tt in ("regression", "count"):
+        if not is_num:
+            return ("target_not_numeric_for_regression", {"t": str(col)})
+        if nuniq <= 2:
+            return ("target_binary_for_regression", {"t": str(col), "n": nuniq})
+    elif tt == "classification":
+        if is_num and nuniq > 20:
+            return ("target_high_cardinality_for_classification", {"t": str(col), "n": nuniq})
+    return None
+
+
+@app.post("/scenarios/{scenario_id}/model/spec/edit")
+def edit_scenario_model_spec(scenario_id: str, payload: dict[str, Any],
+                             lang: str | None = Query(None),
+                             _: None = Depends(require_api_key)) -> dict[str, Any]:
+    """
+    Édite DIRECTEMENT le spec actif (sans régénérer depuis l'évidence) : choix de
+    l'algorithme (parmi les candidats de l'évidence ou toute famille valide),
+    task_type / positive_class de l'outcome, ajout/suppression de variables. Le
+    data_template est reconstruit (colonnes attendues à l'upload), la version
+    incrémentée, et le modèle ré-entraîné si demandé et si un dataset est branché.
+
+    Body (tous les champs optionnels) :
+      {"algorithm_family": "lightgbm", "metric": "rmse", "task_type": "regression",
+       "positive_class": "oui", "remove_features": ["mn1"],
+       "add_features": [{"name": "Âge", "dtype": "int", "importance": "medium"}],
+       "retrain": true}
+    """
+    import json as _json
+    import threading
+    from datetime import datetime, timezone
+
+    with engine.connect() as conn:
+        row = conn.execute(text(
+            "SELECT variables_json FROM scenario_settings WHERE scenario_id = :sid"
+        ), {"sid": scenario_id}).mappings().first()
+    if not (row and row["variables_json"]):
+        raise HTTPException(status_code=400, detail="Aucune spécification de modèle à éditer. Générez d'abord les Variables & Modèle.")
+    vj = dict(row["variables_json"])
+    spec = vj.get("model_spec")
+    if not spec:
+        raise HTTPException(status_code=400, detail="Spécification antérieure au schéma machine. Relancez la génération des Variables & Modèle.")
+
+    spec = dict(spec)
+    outcome = dict(spec.get("outcome") or {})
+    algorithm = dict(spec.get("algorithm") or {})
+    features = [dict(f) for f in (spec.get("features") or [])]
+    changed = False
+
+    # ── Outcome : task_type ──
+    if payload.get("task_type"):
+        new_tt = _coerce_enum(payload["task_type"], _TASK_TYPES, outcome.get("task_type") or "classification")
+        if new_tt != (outcome.get("task_type") or ""):
+            outcome["task_type"] = new_tt
+            changed = True
+            # Métrique par défaut si l'actuelle n'a plus de sens pour la nouvelle tâche.
+            _reg_metrics, _clf_metrics = {"rmse", "mae", "r2"}, {"roc_auc", "average_precision"}
+            _default_metric = {"classification": "roc_auc", "regression": "rmse",
+                               "count": "rmse", "survival": "c_index"}[new_tt]
+            cur_metric = (algorithm.get("metric") or "").strip().lower()
+            ok = (cur_metric in _reg_metrics) if new_tt in ("regression", "count") \
+                else (cur_metric in _clf_metrics) if new_tt == "classification" else True
+            if not ok:
+                algorithm["metric"] = _default_metric
+            if new_tt != "classification":
+                outcome["positive_class"] = None
+            algorithm["family"] = _coerce_family_for_task(algorithm.get("family"), new_tt)
+
+    # ── Outcome : positive_class (classification seulement) ──
+    if "positive_class" in payload and outcome.get("task_type") == "classification":
+        pc = payload.get("positive_class")
+        pc = str(pc).strip() if pc not in (None, "") else None
+        if pc != outcome.get("positive_class"):
+            outcome["positive_class"] = pc
+            changed = True
+
+    # ── Algorithme : famille + métrique ──
+    if payload.get("algorithm_family"):
+        fam = _coerce_family_for_task(payload["algorithm_family"], outcome.get("task_type") or "classification")
+        if fam != (algorithm.get("family") or ""):
+            algorithm["family"] = fam
+            changed = True
+    if payload.get("metric"):
+        met = _coerce_enum(payload["metric"], _METRICS, algorithm.get("metric") or "rmse")
+        if met != (algorithm.get("metric") or ""):
+            algorithm["metric"] = met
+            changed = True
+
+    # ── Features : suppression ──
+    remove = {str(m).strip() for m in (payload.get("remove_features") or []) if str(m).strip()}
+    if remove:
+        kept = [f for f in features if f.get("machine_name") not in remove]
+        if len(kept) != len(features):
+            features, changed = kept, True
+
+    # ── Features : ajout (variable manuelle, sans provenance évidence) ──
+    used = {f.get("machine_name") for f in features if f.get("machine_name")}
+    used.add(outcome.get("machine_name"))
+    for add in (payload.get("add_features") or []):
+        if not isinstance(add, dict):
+            continue
+        name = str(add.get("name") or "").strip()
+        if not name:
+            continue
+        mn = _slug_identifier(add.get("machine_name") or name, used)
+        features.append({
+            "name": name, "machine_name": mn,
+            "dtype": _coerce_enum(add.get("dtype"), _DTYPES, "float"),
+            "source": "user", "public_provider": None,
+            "importance": _coerce_enum(add.get("importance"), {"high", "medium", "low"}, "medium"),
+            "provenance": [],
+        })
+        changed = True
+
+    if not features:
+        raise HTTPException(status_code=400, detail="Le modèle doit conserver au moins une variable explicative.")
+    if not changed:
+        return {"status": "unchanged", "scenario_id": scenario_id}
+
+    # ── Reconstruire le spec + le data_template (jamais désynchronisé des features) ──
+    spec["outcome"], spec["algorithm"], spec["features"] = outcome, algorithm, features
+    spec["data_template"] = _derive_data_template(outcome, features)
+    spec["version"] = int(spec.get("version", 1) or 1) + 1
+    vj["model_spec"] = spec
+
+    # ── Contrôle souple task↔cible (vs dataset branché), localisé ──
+    warnings: list[str] = []
+    try:
+        _sanity = _task_target_sanity(scenario_id, outcome)
+        if _sanity:
+            _code, _params = _sanity
+            _lg = "en" if (lang or "fr").strip().lower().startswith("en") else "fr"
+            warnings.append(_SPEC_WARN[_code][_lg].format(**_params))
+    except Exception as _we:
+        logger.warning(f"task_target_sanity {scenario_id}: {_we}")
+
+    with engine.begin() as conn:
+        conn.execute(text("""
+            UPDATE scenario_settings
+            SET variables_json = CAST(:vars AS jsonb),
+                variables_validated = TRUE,
+                variables_generated_at = NOW(),
+                updated_at = NOW()
+            WHERE scenario_id = :sid
+        """), {"sid": scenario_id, "vars": _json.dumps(vj)})
+
+    # ── Ré-entraînement si demandé + dataset branché ──
+    retrain = payload.get("retrain", True)
+    retrain_started = False
+    if retrain:
+        with engine.connect() as conn:
+            ds = conn.execute(text(
+                "SELECT id FROM scenario_model_dataset WHERE scenario_id = :sid AND is_active = TRUE LIMIT 1"
+            ), {"sid": scenario_id}).first()
+        if ds and _MODEL_TRAIN_JOBS.get(scenario_id, {}).get("status") != "running":
+            _MODEL_TRAIN_JOBS[scenario_id] = {"status": "running"}
+            threading.Thread(target=_run_model_training, args=(scenario_id, 25), daemon=True).start()
+            retrain_started = True
+
+    return {
+        "status": "updated",
+        "scenario_id": scenario_id,
+        "new_version": spec["version"],
+        "outcome": {"machine_name": outcome.get("machine_name"), "name": outcome.get("name"),
+                    "task_type": outcome.get("task_type"), "positive_class": outcome.get("positive_class")},
+        "algorithm": {"family": algorithm.get("family"), "metric": algorithm.get("metric")},
+        "features": [{"name": f["name"], "machine_name": f["machine_name"],
+                      "dtype": f["dtype"], "importance": f.get("importance")} for f in features],
+        "data_template": spec["data_template"],
+        "warnings": warnings,
+        "retrain_started": retrain_started,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
     }
 
 

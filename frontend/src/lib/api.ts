@@ -2304,7 +2304,7 @@ export interface ModelSpecResponse {
   status: string; // ready | empty | legacy
   outcome?: { name?: string; machine_name?: string; task_type?: string; unit?: string; best_article?: ProvArticle | null };
   features?: Array<{ name?: string; machine_name?: string; dtype?: string; source?: string; importance?: string; best_article?: ProvArticle | null }>;
-  algorithm?: { family?: string; metric?: string; best_article?: ProvArticle | null };
+  algorithm?: { family?: string; metric?: string; candidates?: string[]; best_article?: ProvArticle | null };
   // Modalités d'alerte (seuils green/orange/red) enrichies côté serveur : chaque
   // niveau porte l'article source le plus pertinent + la liste résolue, pour lier
   // la modalité aux articles du pool pertinent qui la justifient.
@@ -2320,6 +2320,38 @@ export interface ModelSpecResponse {
 
 export async function getScenarioModelSpec(scenarioId: string): Promise<ModelSpecResponse> {
   const r = await safeFetch(`${API_BASE_URL}/scenarios/${scenarioId}/model/spec`);
+  if (!r.ok) throw new Error(httpMessage(r.status));
+  return r.json();
+}
+
+export interface EditSpecPayload {
+  algorithm_family?: string;
+  metric?: string;
+  task_type?: string;
+  positive_class?: string | null;
+  remove_features?: string[];                                  // machine_names to drop
+  add_features?: { name: string; dtype?: string; importance?: string }[];
+  retrain?: boolean;
+}
+
+export interface EditSpecResponse {
+  status: string;                                              // updated | unchanged
+  new_version?: number;
+  outcome?: { machine_name?: string; name?: string; task_type?: string; positive_class?: string | null };
+  algorithm?: { family?: string; metric?: string };
+  features?: { name: string; machine_name: string; dtype: string; importance?: string }[];
+  warnings?: string[];
+  retrain_started?: boolean;
+}
+
+// Édite directement le spec actif (famille, task_type, ajout/suppression de
+// variables) et ré-entraîne si demandé. lang → alertes task↔cible localisées.
+export async function editModelSpec(scenarioId: string, payload: EditSpecPayload): Promise<EditSpecResponse> {
+  const r = await safeFetch(`${API_BASE_URL}/scenarios/${scenarioId}/model/spec/edit?lang=${currentLang()}`, {
+    method: 'POST',
+    headers: authHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify(payload),
+  });
   if (!r.ok) throw new Error(httpMessage(r.status));
   return r.json();
 }
