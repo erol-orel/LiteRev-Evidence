@@ -40,14 +40,17 @@ jobs:
 
       - name: Backend tests (pytest)
         env:
-          # main.py imports the heavy ML libs lazily, so the tests only need the
-          # import-critical subset (keeps this step fast). Integration tests run
-          # against the Postgres service above; pure-logic tests need no DB.
+          # main.py imports the heavy ML libs lazily, so most tests only need the
+          # import-critical subset. We ALSO install the CORE ML wheels (numpy/pandas/
+          # scikit-learn/scipy/optuna/joblib — fast, unlike prophet/umap/cmdstanpy) so
+          # tests/test_model_trainer.py actually runs (real training correctness).
+          # Integration tests use the Postgres service above; pure tests need no DB.
           DB_URL: postgresql+psycopg://postgres:postgres@localhost:5432/postgres
           WRITE_API_KEY: test-write-key
           OPENAI_API_KEY: ""
         run: |
-          pip install pytest fastapi pydantic "sqlalchemy>=2.0" python-dotenv python-multipart "psycopg[binary]"
+          pip install pytest fastapi pydantic "sqlalchemy>=2.0" python-dotenv python-multipart "psycopg[binary]" \
+            numpy pandas scikit-learn scipy optuna joblib
           pytest -q
 
       - uses: actions/setup-node@v4

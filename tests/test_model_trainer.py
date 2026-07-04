@@ -7,9 +7,15 @@ model recovers a known signal, regression assumption diagnostics fire correctly,
 accent/space-insensitive column matching works, and the upload readiness guards
 block un-trainable files instead of returning a false "training started".
 """
+import pytest
+
+# The CI test step installs the core ML wheels; if a run lacks any of them, skip
+# this whole module cleanly rather than erroring at collection time.
+for _mod in ("numpy", "pandas", "sklearn", "scipy", "optuna"):
+    pytest.importorskip(_mod)
+
 import numpy as np
 import pandas as pd
-import pytest
 
 import model_trainer as mt
 
