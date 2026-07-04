@@ -964,6 +964,8 @@ export const fr = {
       metricPrefix: "Métrique (",
       influentialVariables: "Variables influentes",
       hyperparameters: "Hyperparamètres (optimisés par validation croisée)",
+      assumptions: "Hypothèses de régression (Gauss-Markov)",
+      assumptionsTreeNote: "Modèle non linéaire : les hypothèses OLS ne s'appliquent pas au sens strict, les résidus restent indicatifs.",
       noTrainedModel: "Aucun modèle entraîné.",
       trainingInProgress: "Entraînement en cours...",
       retrainModel: "Ré-entraîner le modèle",

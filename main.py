@@ -12137,7 +12137,13 @@ except Exception as _e:
 
 
 def _norm_col(s: Any) -> str:
-    return str(s if s is not None else "").strip().lower()
+    """Normalise un nom de colonne pour l'appariement fichier↔data_template. MÊMES
+    règles que model_trainer._norm (repli NFKD des accents, minuscules, non-alnum →
+    « _ ») pour que la VALIDATION et l'ENTRAÎNEMENT s'accordent : un en-tête réel
+    « Température max (J1) » s'apparie au machine_name « temperature_max_j1 »."""
+    import unicodedata as _ud
+    _s = _ud.normalize("NFKD", str(s if s is not None else "")).encode("ascii", "ignore").decode()
+    return re.sub(r"[^a-z0-9]+", "_", _s.lower()).strip("_")
 
 
 def _get_model_spec(scenario_id: str) -> dict | None:
@@ -12152,7 +12158,8 @@ def _get_model_spec(scenario_id: str) -> dict | None:
 
 
 def _validate_dataset_against_template(file_columns: list, data_template: dict,
-                                       file_dtype_kinds: dict | None = None) -> dict:
+                                       file_dtype_kinds: dict | None = None,
+                                       n_rows: int | None = None) -> dict:
     """
     Compare les colonnes d'un fichier au data_template (pur, testable).
     Le matching est insensible à la casse/aux espaces ; on signale les colonnes
@@ -12212,7 +12219,22 @@ def _validate_dataset_against_template(file_columns: list, data_template: dict,
         reasons.append(f"Colonne cible '{target_col}' absente (obligatoire pour entraîner).")
     if n_features_present == 0:
         reasons.append("Aucune variable explicative présente dans le fichier.")
-    can_train = target_present and n_features_present >= 1
+    # Assez de lignes ? L'entraînement exige un plancher (model_trainer: min 20).
+    # Sans ce contrôle, un fichier de 5 lignes renvoyait « training_started: true »
+    # puis échouait silencieusement en arrière-plan.
+    _MIN_TRAIN_ROWS = 20
+    if n_rows is not None and n_rows < _MIN_TRAIN_ROWS:
+        reasons.append(f"Trop peu de lignes ({n_rows}) : minimum {_MIN_TRAIN_ROWS} pour entraîner.")
+    # Colonnes numériques contenant des valeurs non numériques : bloquant (sinon
+    # l'imputation/mise à l'échelle plante à l'entraînement en arrière-plan).
+    if dtype_warnings:
+        _bad = ", ".join(str(w.get("column")) for w in dtype_warnings)
+        reasons.append(f"Colonne(s) numérique(s) avec des valeurs non numériques : {_bad}. Corrigez ou retirez ces valeurs.")
+    can_train = (
+        target_present and n_features_present >= 1
+        and (n_rows is None or n_rows >= _MIN_TRAIN_ROWS)
+        and not dtype_warnings
+    )
 
     return {
         "target_column": target_col,
@@ -12314,7 +12336,7 @@ async def upload_model_dataset(
     if len(df) > 500_000:
         raise HTTPException(status_code=400, detail="Fichier trop volumineux (> 500 000 lignes).")
 
-    report = _validate_dataset_against_template(list(df.columns), data_template, _dataframe_dtype_kinds(df))
+    report = _validate_dataset_against_template(list(df.columns), data_template, _dataframe_dtype_kinds(df), n_rows=len(df))
 
     # Stockage (CSV canonique) + métadonnées ; le précédent dataset devient inactif.
     safe = Path(filename).name or "dataset.csv"
@@ -12326,6 +12348,12 @@ async def upload_model_dataset(
         df.to_csv(stored_path, index=False)
     except Exception as e:
         logger.error(f"Stockage dataset {scenario_id}: {e}", exc_info=True)
+
+    # Échec de stockage → NE PAS activer un dataset au chemin NULL (il paraîtrait
+    # « prêt » mais tout entraînement/monitoring échouerait faute de fichier).
+    if stored_path is None:
+        raise HTTPException(status_code=500,
+                            detail="Échec du stockage du dataset (espace disque ?). Réessayez.")
 
     with engine.begin() as conn:
         conn.execute(text(

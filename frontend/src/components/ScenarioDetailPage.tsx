@@ -4198,7 +4198,7 @@ function ModelMonitorSection({ scenarioId }: { scenarioId: string }) {
                   <p className="font-semibold text-brand-300 mt-1 font-mono">
                     {run.metrics && run.metric && typeof run.metrics[run.metric] === "number"
                       ? run.metrics[run.metric].toFixed(3)
-                      : (run.metrics ? Object.values(run.metrics)[0]?.toFixed?.(3) : "—")}
+                      : "—"}
                   </p>
                 </div>
               </div>
@@ -4225,6 +4225,33 @@ function ModelMonitorSection({ scenarioId }: { scenarioId: string }) {
                       </span>
                     ))}
                   </div>
+                </div>
+              )}
+              {/* Hypothèses de régression (Gauss-Markov) : multicolinéarité, homoscédasticité,
+                  autocorrélation, normalité des résidus. Uniquement pour les tâches de régression. */}
+              {(((run.summary as any)?.assumptions?.checks?.length ?? 0) > 0) && (
+                <div className="rounded-xl border border-white/5 bg-white/2 px-3 py-2.5">
+                  <span className="text-[10px] text-white/35 uppercase tracking-wider">{t("scenarioDetail.model.assumptions")}</span>
+                  <div className="mt-2 space-y-1.5">
+                    {(run.summary as any).assumptions.checks.map((c: any) => (
+                      <div key={c.key} className="flex items-start gap-2 text-[10px]" title={c.detail || ""}>
+                        <span className={`mt-px shrink-0 rounded px-1 py-0.5 font-semibold ${
+                          c.status === "ok" ? "bg-forest-500/20 text-forest-300"
+                          : c.status === "warn" ? "bg-amber-500/20 text-amber-300"
+                          : "bg-rose-500/20 text-rose-300"}`}>
+                          {c.status === "ok" ? "OK" : c.status === "warn" ? "!" : "×"}
+                        </span>
+                        <span className="text-white/60">
+                          <span className="text-white/80">{c.name}</span>
+                          {typeof c.p_value === "number" && <span className="text-white/40"> · p={c.p_value}</span>}
+                          {typeof c.statistic === "number" && <span className="text-white/40"> · {c.statistic}</span>}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                  {(run.summary as any).assumptions.applies === false && (
+                    <p className="mt-1.5 text-[9px] text-white/30 leading-snug">{t("scenarioDetail.model.assumptionsTreeNote")}</p>
+                  )}
                 </div>
               )}
             </div>
