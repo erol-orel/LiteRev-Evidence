@@ -23,7 +23,15 @@ REG_FAMILIES = {"gradient_boosting", "random_forest", "linear_regression", "elas
 
 
 def _norm(s: Any) -> str:
-    return str(s if s is not None else "").strip().lower()
+    """Normalise un nom de COLONNE pour l'appariement fichier↔spec : repli des accents
+    (NFKD), minuscules, et tout groupe de caractères non alphanumériques → « _ ».
+    Un en-tête réel « Température max (J1) » s'apparie ainsi au machine_name
+    « temperature_max_j1 » (mêmes règles que _slug_identifier à la génération), au
+    lieu de l'ancien strip().lower() qui échouait sur accents/espaces/ponctuation."""
+    import unicodedata as _ud
+    import re as _re
+    s = _ud.normalize("NFKD", str(s if s is not None else "")).encode("ascii", "ignore").decode()
+    return _re.sub(r"[^a-z0-9]+", "_", s.lower()).strip("_")
 
 
 def generate_synthetic_dataset(spec: dict, n_rows: int = 400, seed: int = 42):
@@ -355,6 +363,123 @@ def _importances_by_variable(pipe, used: list[dict]) -> dict:
         return {}
 
 
+def regression_diagnostics(pipe, X, y, used: list[dict]) -> dict:
+    """Diagnostics des hypothèses de la régression (Gauss-Markov / OLS), calculés
+    sur les résidus d'ENTRAÎNEMENT. Purement informatif — n'altère pas le modèle.
+
+      - multicolinéarité   : VIF par variable numérique (>5 attention, >10 forte) ;
+      - homoscédasticité   : test de Breusch-Pagan (p<0.05 = hétéroscédasticité) ;
+      - autocorrélation    : Durbin-Watson (~2 = ok ; <1.5 ou >2.5 = autocorrélation) ;
+      - normalité résidus  : Shapiro-Wilk (n≤5000) sinon Jarque-Bera (p<0.05 = non normal).
+
+    Ces hypothèses concernent l'inférence des modèles LINÉAIRES (OLS). Pour les
+    modèles à arbres/non linéaires elles ne s'appliquent pas au sens strict, mais les
+    résidus restent informatifs — d'où le champ `applies` (True pour linéaire)."""
+    import numpy as np
+    from scipy import stats as _st
+
+    out: dict[str, Any] = {"checks": [], "applies": None}
+    try:
+        pred = np.asarray(pipe.predict(X), dtype=float)
+        yv = np.asarray(y, dtype=float)
+        resid = yv - pred
+        n = int(len(resid))
+        if n < 8 or float(np.sum(resid ** 2)) < 1e-12:
+            return {"checks": [], "applies": None, "note": "résidus insuffisants pour les diagnostics"}
+
+        pre = pipe.named_steps["pre"]
+        est = pipe.named_steps["est"]
+        out["applies"] = est.__class__.__name__ in ("LinearRegression", "ElasticNet")
+        Z = pre.transform(X)
+        try:
+            Z = Z.toarray()
+        except Exception:
+            Z = np.asarray(Z, dtype=float)
+        names = list(pre.get_feature_names_out())
+
+        # 1) Autocorrélation — Durbin-Watson
+        dw = float(np.sum(np.diff(resid) ** 2) / (np.sum(resid ** 2) + 1e-12))
+        out["checks"].append({
+            "key": "autocorrelation", "name": "Autocorrélation (Durbin-Watson)",
+            "statistic": round(dw, 3),
+            "status": "ok" if 1.5 <= dw <= 2.5 else "warn",
+            "detail": "≈2 = pas d'autocorrélation ; <1.5 ou >2.5 = résidus corrélés (souvent série temporelle mal ordonnée).",
+        })
+
+        # 2) Normalité des résidus — Shapiro-Wilk / Jarque-Bera
+        try:
+            if n <= 5000:
+                _stat, p_norm = _st.shapiro(resid)
+                tname = "Shapiro-Wilk"
+            else:
+                _stat, p_norm = _st.jarque_bera(resid)
+                tname = "Jarque-Bera"
+            out["checks"].append({
+                "key": "normality", "name": f"Normalité des résidus ({tname})",
+                "p_value": round(float(p_norm), 4),
+                "status": "ok" if p_norm >= 0.05 else "warn",
+                "detail": "p≥0.05 = résidus compatibles avec une loi normale (hypothèse OLS pour l'inférence).",
+            })
+        except Exception as _e:
+            logger.warning(f"normality diag: {_e}")
+
+        # 3) Homoscédasticité — test de White (LM = n·R² de resid² sur le design
+        #    AUGMENTÉ des carrés des variables numériques). Le carré capte aussi
+        #    l'hétéroscédasticité « en entonnoir » (variance ∝ x²) que le Breusch-Pagan
+        #    strictement linéaire manque.
+        try:
+            e2 = resid ** 2
+            num_cols = [i for i, nm in enumerate(names) if nm.startswith("num__")]
+            aug = [np.ones(n), Z]
+            if num_cols:
+                aug.append(Z[:, num_cols] ** 2)  # carrés des seules numériques (évite le doublon one-hot²=one-hot)
+            Zc = np.column_stack(aug)
+            beta, *_ = np.linalg.lstsq(Zc, e2, rcond=None)
+            fit = Zc @ beta
+            ss_tot = float(np.sum((e2 - e2.mean()) ** 2)) + 1e-12
+            r2_aux = 1.0 - float(np.sum((e2 - fit) ** 2)) / ss_tot
+            lm = n * max(0.0, r2_aux)
+            df_bp = max(1, Zc.shape[1] - 1)
+            p_bp = float(1.0 - _st.chi2.cdf(lm, df_bp))
+            out["checks"].append({
+                "key": "homoscedasticity", "name": "Homoscédasticité (test de White)",
+                "p_value": round(p_bp, 4),
+                "status": "ok" if p_bp >= 0.05 else "warn",
+                "detail": "p≥0.05 = variance des résidus constante ; p<0.05 = hétéroscédasticité.",
+            })
+        except Exception as _e:
+            logger.warning(f"white/bp diag: {_e}")
+
+        # 4) Multicolinéarité — VIF par variable numérique (régression de chaque
+        #    colonne numérique sur les autres). Repli propre si colinéarité parfaite.
+        try:
+            num_idx = [i for i, nm in enumerate(names) if nm.startswith("num__")]
+            if len(num_idx) >= 2:
+                Zn = Z[:, num_idx]
+                vifs = []
+                for j in range(Zn.shape[1]):
+                    other = np.delete(Zn, j, axis=1)
+                    Ao = np.column_stack([np.ones(n), other])
+                    coef, *_ = np.linalg.lstsq(Ao, Zn[:, j], rcond=None)
+                    sst = float(np.sum((Zn[:, j] - Zn[:, j].mean()) ** 2)) + 1e-12
+                    r2j = 1.0 - float(np.sum((Zn[:, j] - Ao @ coef) ** 2)) / sst
+                    vif = 1.0 / max(1e-6, 1.0 - min(r2j, 1 - 1e-6))
+                    vifs.append({"variable": names[num_idx[j]].split("__", 1)[1], "vif": round(float(vif), 2)})
+                max_vif = max(v["vif"] for v in vifs)
+                out["checks"].append({
+                    "key": "multicollinearity", "name": "Multicolinéarité (VIF max)",
+                    "statistic": max_vif, "per_variable": sorted(vifs, key=lambda d: -d["vif"])[:10],
+                    "status": "ok" if max_vif < 5 else ("warn" if max_vif < 10 else "fail"),
+                    "detail": "VIF<5 = ok ; 5–10 = modérée ; >10 = forte colinéarité (coefficients instables).",
+                })
+        except Exception as _e:
+            logger.warning(f"vif diag: {_e}")
+    except Exception as e:
+        logger.warning(f"regression_diagnostics: {e}")
+        return {"checks": [], "applies": None, "error": str(e)}
+    return out
+
+
 def train_model(df, spec: dict, n_trials: int = 25, random_state: int = 42, test_size: float = 0.2) -> dict:
     """
     Entraîne un modèle réel à partir du dataset et du model_spec.
@@ -461,12 +586,28 @@ def train_model(df, spec: dict, n_trials: int = 25, random_state: int = 42, test
     final.fit(Xtr, ytr)
 
     metrics = _evaluate(final, Xte, yte, task_type, classes)
-    metrics[f"cv_{scoring}"] = cv_best
+    # CV best rendu LISIBLE : les scorers sklearn sont "greater is better", donc rmse/mae
+    # sont stockés en NÉGATIF (neg_*). On expose la valeur positive sous cv_<metric>.
+    cv_pretty = -cv_best if scoring.startswith("neg_") else cv_best
+    metrics[f"cv_{scoring.replace('neg_', '').replace('root_mean_squared_error', 'rmse').replace('mean_absolute_error', 'mae')}"] = float(cv_pretty)
 
-    return {
+    # Métrique AUTORITAIRE = celle réellement optimisée (déduite du scorer), et non
+    # la métrique brute du spec (qui pouvait être incohérente avec la tâche, p.ex.
+    # "rmse" sur une classification → carte UI affichant l'accuracy sous le libellé
+    # "rmse"). `display_metric` existe toujours dans `metrics`, donc la carte affiche
+    # la bonne valeur sous le bon nom. On conserve la demande d'origine séparément.
+    _METRIC_FROM_SCORING = {
+        "neg_root_mean_squared_error": "rmse", "neg_mean_absolute_error": "mae", "r2": "r2",
+        "roc_auc": "roc_auc", "roc_auc_ovr": "roc_auc", "average_precision": "average_precision",
+        "accuracy": "accuracy",
+    }
+    display_metric = _METRIC_FROM_SCORING.get(scoring, metric or scoring)
+
+    result = {
         "task_type": task_type,
         "family": family,
-        "metric": metric,
+        "metric": display_metric,
+        "requested_metric": metric,
         "scoring": scoring,
         "cv_strategy": cv_strategy_effective,
         "cv_folds": folds,
@@ -482,6 +623,10 @@ def train_model(df, spec: dict, n_trials: int = 25, random_state: int = 42, test
         "importances_by_variable": _importances_by_variable(final, used),
         "pipeline": final,
     }
+    if task_type in ("regression", "count"):
+        # Diagnostics des hypothèses de régression (Gauss-Markov / OLS) — informatif.
+        result["assumptions"] = regression_diagnostics(final, Xtr, ytr, used)
+    return result
 
 
 # ─── Monitoring (Phase 4) : score les données récentes -> niveau d'alerte ─────

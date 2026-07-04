@@ -966,6 +966,8 @@ export const en: Translations = {
       metricPrefix: "Metric (",
       influentialVariables: "Influential variables",
       hyperparameters: "Hyperparameters (optimized by cross-validation)",
+      assumptions: "Regression assumptions (Gauss-Markov)",
+      assumptionsTreeNote: "Non-linear model: OLS assumptions do not strictly apply; residual diagnostics are indicative only.",
       noTrainedModel: "No trained model.",
       trainingInProgress: "Training in progress...",
       retrainModel: "Retrain the model",
