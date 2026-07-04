@@ -9,7 +9,7 @@ import {
   Globe, Upload, CheckCircle2, AlertCircle, Info,
   Microscope, Loader2, Download, Table2, BookOpen,
   Network, Bell, Users, Rss, Sparkles, ClipboardList,
-  TrendingUp, X
+  TrendingUp, X, Plus, Sliders
 } from "lucide-react";
 import {
   fetchScenarioDetail,
@@ -79,6 +79,8 @@ import {
   type KnowledgeGraphData,
   type KGNode,
   type KappaStats,
+  editModelSpec,
+  type EditSpecPayload,
   type ModelRun,
   type ModelDataset,
   type ModelSpecResponse,
@@ -485,6 +487,151 @@ function ArticleSourceLink({ a, label }: { a?: ProvArticle | null; label?: strin
     : <span title={a.title} className="block mt-0.5">{inner}</span>;
 }
 
+// Familles sélectionnables (alignées sur model_trainer + _ALGO_FAMILIES côté API).
+const ALGO_FAMILY_OPTIONS = [
+  "lightgbm", "xgboost", "gradient_boosting", "random_forest",
+  "logistic_regression", "linear_regression", "elasticnet", "svm", "mlp", "knn",
+];
+const TASK_TYPE_OPTIONS = ["classification", "regression", "count", "survival"];
+const DTYPE_OPTIONS = ["float", "int", "bool", "category", "datetime"];
+
+// Éditeur de spec : ajuster l'algorithme (parmi les candidats suggérés par
+// l'évidence ou toute famille valide), le type de tâche, et ajouter/supprimer des
+// variables — puis ré-entraîner. Le backend reconstruit le data_template et
+// incrémente la version.
+function SpecEditor({ scenarioId, spec, onApplied }: { scenarioId: string; spec: ModelSpecResponse; onApplied: () => void }) {
+  const { t } = useI18n();
+  const curFamily = spec.algorithm?.family ?? "gradient_boosting";
+  const curTask = spec.outcome?.task_type ?? "classification";
+  const [open, setOpen] = useState(false);
+  const [family, setFamily] = useState(curFamily);
+  const [taskType, setTaskType] = useState(curTask);
+  const [removed, setRemoved] = useState<Set<string>>(new Set());
+  const [added, setAdded] = useState<{ name: string; dtype: string; importance: string }[]>([]);
+  const [addName, setAddName] = useState("");
+  const [addDtype, setAddDtype] = useState("float");
+  const [busy, setBusy] = useState(false);
+  const [warnings, setWarnings] = useState<string[]>([]);
+  const [err, setErr] = useState<string | null>(null);
+
+  // Candidats issus de l'évidence en tête de liste, puis les autres familles.
+  const candidates = (spec.algorithm?.candidates ?? []).filter(c => ALGO_FAMILY_OPTIONS.includes(c));
+  const familyOptions = Array.from(new Set([...candidates, ...ALGO_FAMILY_OPTIONS]));
+  const feats = spec.features ?? [];
+  const remainingCount = feats.filter(f => f.machine_name && !removed.has(f.machine_name)).length + added.length;
+  const dirty = family !== curFamily || taskType !== curTask || removed.size > 0 || added.length > 0;
+
+  const toggleRemove = (mn?: string) => {
+    if (!mn) return;
+    setRemoved(prev => { const n = new Set(prev); if (n.has(mn)) n.delete(mn); else n.add(mn); return n; });
+  };
+  const addFeature = () => {
+    const name = addName.trim();
+    if (!name) return;
+    setAdded(prev => [...prev, { name, dtype: addDtype, importance: "medium" }]);
+    setAddName("");
+  };
+
+  const apply = async () => {
+    setBusy(true); setErr(null); setWarnings([]);
+    try {
+      const payload: EditSpecPayload = { retrain: true };
+      if (family !== curFamily) payload.algorithm_family = family;
+      if (taskType !== curTask) payload.task_type = taskType;
+      if (removed.size > 0) payload.remove_features = Array.from(removed);
+      if (added.length > 0) payload.add_features = added;
+      const res = await editModelSpec(scenarioId, payload);
+      setWarnings(res.warnings ?? []);
+      setRemoved(new Set()); setAdded([]);
+      onApplied();
+    } catch (e: any) { setErr(e.message); }
+    finally { setBusy(false); }
+  };
+
+  return (
+    <div className="rounded-2xl border border-white/8 bg-white/3 p-4 space-y-3">
+      <button onClick={() => setOpen(o => !o)} className="w-full flex items-center justify-between">
+        <span className="text-[10px] font-bold uppercase tracking-wider text-white/35 flex items-center gap-1.5">
+          <Sliders size={12} /> {t("scenarioDetail.specEditor.title")}
+        </span>
+        {open ? <ChevronUp size={14} className="text-white/40" /> : <ChevronDown size={14} className="text-white/40" />}
+      </button>
+      {open && (
+        <div className="space-y-3">
+          <p className="text-[11px] text-white/45">{t("scenarioDetail.specEditor.subtitle")}</p>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <label className="block">
+              <span className="text-[10px] text-white/40 uppercase tracking-wider">{t("scenarioDetail.specEditor.algorithm")}</span>
+              <select value={family} onChange={e => setFamily(e.target.value)}
+                className="mt-1 w-full rounded-lg bg-forest-950/60 border border-white/10 px-2 py-1.5 text-xs text-white">
+                {familyOptions.map(f => (
+                  <option key={f} value={f}>{f}{candidates.includes(f) ? ` · ${t("scenarioDetail.specEditor.suggested")}` : ""}</option>
+                ))}
+              </select>
+            </label>
+            <label className="block">
+              <span className="text-[10px] text-white/40 uppercase tracking-wider">{t("scenarioDetail.specEditor.taskType")}</span>
+              <select value={taskType} onChange={e => setTaskType(e.target.value)}
+                className="mt-1 w-full rounded-lg bg-forest-950/60 border border-white/10 px-2 py-1.5 text-xs text-white">
+                {TASK_TYPE_OPTIONS.map(tt => <option key={tt} value={tt}>{t(`scenarioDetail.specEditor.task_${tt}`)}</option>)}
+              </select>
+            </label>
+          </div>
+          <div>
+            <span className="text-[10px] text-white/40 uppercase tracking-wider">{t("scenarioDetail.specEditor.variables")} ({remainingCount})</span>
+            <div className="mt-1.5 space-y-1">
+              {feats.map(f => {
+                const gone = f.machine_name ? removed.has(f.machine_name) : false;
+                return (
+                  <div key={f.machine_name} className={`flex items-center gap-2 text-[11px] rounded-lg px-2 py-1 border ${gone ? "border-rose-500/20 bg-rose-500/5" : "border-white/8 bg-white/2"}`}>
+                    <span className={`flex-1 truncate ${gone ? "line-through text-white/40" : "text-white/70"}`}>{f.name || f.machine_name}</span>
+                    <span className="text-[9px] text-white/30 font-mono">{f.dtype}</span>
+                    <button onClick={() => toggleRemove(f.machine_name)} className="text-white/40 hover:text-rose-300"
+                      title={gone ? t("scenarioDetail.specEditor.restore") : t("scenarioDetail.specEditor.remove")}>
+                      {gone ? <RotateCcw size={12} /> : <X size={12} />}
+                    </button>
+                  </div>
+                );
+              })}
+              {added.map((a, i) => (
+                <div key={`add-${i}`} className="flex items-center gap-2 text-[11px] rounded-lg px-2 py-1 border border-brand-500/25 bg-brand-500/5">
+                  <span className="flex-1 truncate text-brand-200">{a.name}</span>
+                  <span className="text-[9px] text-white/30 font-mono">{a.dtype}</span>
+                  <span className="text-[9px] text-brand-300/60">{t("scenarioDetail.specEditor.new")}</span>
+                  <button onClick={() => setAdded(prev => prev.filter((_, j) => j !== i))} className="text-white/40 hover:text-rose-300"><X size={12} /></button>
+                </div>
+              ))}
+            </div>
+          </div>
+          <div className="flex flex-wrap items-end gap-2">
+            <input value={addName} onChange={e => setAddName(e.target.value)} placeholder={t("scenarioDetail.specEditor.newVarName")}
+              onKeyDown={e => { if (e.key === "Enter") { e.preventDefault(); addFeature(); } }}
+              className="flex-1 min-w-[120px] rounded-lg bg-forest-950/60 border border-white/10 px-2 py-1.5 text-xs text-white" />
+            <select value={addDtype} onChange={e => setAddDtype(e.target.value)}
+              className="rounded-lg bg-forest-950/60 border border-white/10 px-2 py-1.5 text-xs text-white">
+              {DTYPE_OPTIONS.map(d => <option key={d} value={d}>{d}</option>)}
+            </select>
+            <button onClick={addFeature} disabled={!addName.trim()}
+              className="flex items-center gap-1 rounded-lg border border-white/15 text-white/70 px-2.5 py-1.5 text-xs hover:bg-white/5 disabled:opacity-40">
+              <Plus size={12} /> {t("scenarioDetail.specEditor.add")}
+            </button>
+          </div>
+          {warnings.map((w, i) => (
+            <p key={i} className="text-[11px] text-amber-300 flex items-start gap-1.5"><AlertTriangle size={12} className="mt-px shrink-0" />{w}</p>
+          ))}
+          {err && <p className="text-[11px] text-rose-300">{err}</p>}
+          <button onClick={apply} disabled={busy || !dirty || remainingCount === 0}
+            className="w-full flex items-center justify-center gap-1.5 rounded-xl bg-brand-600 text-white font-semibold py-2 text-xs hover:bg-brand-500 transition disabled:opacity-40">
+            <RotateCcw size={12} className={busy ? "animate-spin" : ""} />
+            {busy ? t("scenarioDetail.specEditor.applying") : t("scenarioDetail.specEditor.applyRetrain")}
+          </button>
+          {remainingCount === 0 && <p className="text-[10px] text-rose-300/70 text-center">{t("scenarioDetail.specEditor.needOne")}</p>}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function VariablesSection({ detail, scenarioId, onGoToModel }: { detail: ScenarioDetail; scenarioId: string; onGoToModel?: () => void }) {
   const { t, lang } = useI18n();
   // État du modèle entraîné + des données branchées, pour relier ce panneau au
@@ -493,11 +640,12 @@ function VariablesSection({ detail, scenarioId, onGoToModel }: { detail: Scenari
   const [modelRun, setModelRun] = useState<ModelRun | null>(null);
   const [modelDataset, setModelDataset] = useState<ModelDataset | null>(null);
   const [modelSpec, setModelSpec] = useState<ModelSpecResponse | null>(null);
-  React.useEffect(() => {
+  const reloadModelState = React.useCallback(() => {
     getModelRun(scenarioId).then(setModelRun).catch(() => setModelRun(null));
     getModelDataset(scenarioId).then(setModelDataset).catch(() => setModelDataset(null));
     getScenarioModelSpec(scenarioId).then(setModelSpec).catch(() => setModelSpec(null));
   }, [scenarioId]);
+  React.useEffect(() => { reloadModelState(); }, [reloadModelState]);
 
   // machine_name -> article source (le plus récent / cité) pour chaque variable.
   const sourceByVar: Record<string, ProvArticle | null> = {};
@@ -886,6 +1034,12 @@ function VariablesSection({ detail, scenarioId, onGoToModel }: { detail: Scenari
               )}
               <ArticleSourceLink a={modelSpec?.algorithm?.best_article} />
             </div>
+          )}
+
+          {/* Éditeur de spec : choisir l'algorithme (candidats de l'évidence),
+              le type de tâche, ajouter/supprimer des variables, puis ré-entraîner. */}
+          {modelSpec?.status === "ready" && (
+            <SpecEditor scenarioId={scenarioId} spec={modelSpec} onApplied={reloadModelState} />
           )}
         </div>
       )}
