@@ -1010,6 +1010,8 @@ export const en: Translations = {
       forecastObserved: "Observed",
       forecastHoldout: "Fit (holdout)",
       forecastFuture: "Forward forecast",
+      guardrails: "Guardrails",
+      metricCi: "Confidence interval",
       evidenceEvolution: "Evidence-driven evolution",
       evidenceEvolutionSubtitle:
         "Regenerates the spec from current evidence, compares, and lets you validate the change",

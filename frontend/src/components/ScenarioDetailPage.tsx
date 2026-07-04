@@ -4508,6 +4508,39 @@ function ModelMonitorSection({ scenarioId }: { scenarioId: string }) {
                   )}
                 </div>
               )}
+              {/* Garde-fous : fuite de cible, équilibre des classes, stabilité CV +
+                  intervalle de confiance bootstrap de la métrique. */}
+              {(((run.summary as any)?.guardrails?.checks?.length ?? 0) > 0) && (() => {
+                const gr = (run.summary as any).guardrails;
+                const ci = gr.metric_ci;
+                return (
+                  <div className="rounded-xl border border-white/5 bg-white/2 px-3 py-2.5">
+                    <span className="text-[10px] text-white/35 uppercase tracking-wider flex items-center gap-1"><Shield size={11} /> {t("scenarioDetail.model.guardrails")}</span>
+                    <div className="mt-2 space-y-1.5">
+                      {gr.checks.map((c: any) => (
+                        <div key={c.key} className="flex items-start gap-2 text-[10px]" title={c.detail || ""}>
+                          <span className={`mt-px shrink-0 rounded px-1 py-0.5 font-semibold ${
+                            c.status === "ok" ? "bg-forest-500/20 text-forest-300"
+                            : c.status === "warn" ? "bg-amber-500/20 text-amber-300"
+                            : "bg-rose-500/20 text-rose-300"}`}>
+                            {c.status === "ok" ? "OK" : c.status === "warn" ? "!" : "×"}
+                          </span>
+                          <span className="text-white/60">
+                            <span className="text-white/80">{c.name}</span>
+                            {typeof c.statistic === "number" && <span className="text-white/40"> · {c.statistic}</span>}
+                            {c.detail && <span className="text-white/40"> — {c.detail}</span>}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                    {ci && typeof ci.low === "number" && (
+                      <p className="mt-2 text-[10px] text-white/50">
+                        {t("scenarioDetail.model.metricCi")} ({ci.metric}) : <span className="font-mono text-white/70">[{ci.low.toFixed(3)}, {ci.high.toFixed(3)}]</span> <span className="text-white/30">· 95% · {ci.n_boot} bootstraps</span>
+                      </p>
+                    )}
+                  </div>
+                );
+              })()}
               {/* Classement des familles comparées (bouton « Comparer les modèles »).
                   Le rang 1 = modèle actif retenu. Les familles en échec (paquet absent,
                   données insuffisantes) sont listées à part avec leur raison. */}

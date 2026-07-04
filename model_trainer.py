@@ -527,6 +527,192 @@ def regression_diagnostics(pipe, X, y, used: list[dict]) -> dict:
     return out
 
 
+# ─── Garde-fous & explicabilité (Phase 4b) ───────────────────────────────────
+
+def _bootstrap_metric_ci(pipe, Xte, yte, task_type: str, scoring: str,
+                         classes: list | None, random_state: int = 42, n_boot: int = 300) -> dict | None:
+    """IC 95 % de la métrique de test par bootstrap des LIGNES de test (on
+    rééchantillonne les prédictions déjà calculées → aucun réentraînement). Donne une
+    fourchette d'incertitude honnête sur la métrique phare. None si test trop petit."""
+    import numpy as np
+    from sklearn import metrics as M
+    yv = np.asarray(yte)
+    n = len(yv)
+    if n < 20:
+        return None
+    try:
+        proba = pipe.predict_proba(Xte) if (task_type == "classification" and hasattr(pipe, "predict_proba")) else None
+        preds = pipe.predict(Xte) if task_type == "classification" else np.asarray(pipe.predict(Xte), dtype=float)
+    except Exception:
+        return None
+
+    def _metric(idx):
+        yt = yv[idx]
+        try:
+            if task_type == "classification":
+                if scoring in ("roc_auc", "roc_auc_ovr") and proba is not None:
+                    return (M.roc_auc_score(yt, proba[idx, 1]) if proba.shape[1] == 2
+                            else M.roc_auc_score(yt, proba[idx], multi_class="ovr"))
+                if scoring == "average_precision" and proba is not None and proba.shape[1] == 2:
+                    return M.average_precision_score(yt, proba[idx, 1])
+                return M.accuracy_score(yt, preds[idx])
+            if scoring == "neg_mean_absolute_error":
+                return M.mean_absolute_error(yt, preds[idx])
+            if scoring == "r2":
+                return M.r2_score(yt, preds[idx])
+            return float(np.sqrt(M.mean_squared_error(yt, preds[idx])))
+        except Exception:
+            return None
+
+    rng = np.random.RandomState(random_state)
+    vals = []
+    for _ in range(n_boot):
+        v = _metric(rng.randint(0, n, n))
+        if v is not None and np.isfinite(v):
+            vals.append(float(v))
+    if len(vals) < 30:
+        return None
+    lo, hi = np.percentile(vals, [2.5, 97.5])
+    name = {"neg_root_mean_squared_error": "rmse", "neg_mean_absolute_error": "mae", "r2": "r2",
+            "roc_auc": "roc_auc", "roc_auc_ovr": "roc_auc", "average_precision": "average_precision",
+            "accuracy": "accuracy"}.get(scoring, scoring)
+    return {"metric": name, "low": round(float(lo), 4), "high": round(float(hi), 4), "n_boot": len(vals)}
+
+
+def model_guardrails(pipe, Xtr, ytr, Xte, yte, task_type: str, cv_scores,
+                     scoring: str, classes: list | None = None, random_state: int = 42) -> dict:
+    """Garde-fous POST-entraînement (informatif, n'altère pas le modèle) :
+      - fuite de cible : variable à association quasi parfaite avec la cible ;
+      - déséquilibre de classes (classification) ;
+      - stabilité de la validation croisée (écart-type inter-folds) ;
+      - IC bootstrap de la métrique de test.
+    Chaque contrôle porte un statut ok/warn/fail pour l'affichage (comme les
+    hypothèses de régression)."""
+    import numpy as np
+    import pandas as pd
+    checks = []
+
+    # 1) Fuite de cible : corrélation (régression) ou AUC univarié (classification
+    # binaire) proche de la perfection → la variable « connaît » déjà l'issue.
+    leaks = []
+    try:
+        yv = np.asarray(ytr, dtype=float)
+        for col in Xtr.columns:
+            xs = pd.to_numeric(Xtr[col], errors="coerce")
+            m = xs.notna().values & np.isfinite(yv)
+            if int(m.sum()) < 8 or xs[m].nunique() < 2:
+                continue
+            if task_type == "classification":
+                yb = yv[m]
+                if len(set(yb.tolist())) == 2:
+                    try:
+                        from sklearn.metrics import roc_auc_score
+                        auc = roc_auc_score(yb, xs[m].values)
+                        auc = max(auc, 1.0 - auc)
+                    except Exception:
+                        continue
+                    if auc >= 0.999:
+                        leaks.append({"feature": col, "assoc": round(float(auc), 4), "kind": "auc"})
+            else:
+                r = float(np.corrcoef(xs[m].values, yv[m])[0, 1])
+                if np.isfinite(r) and abs(r) >= 0.999:
+                    leaks.append({"feature": col, "assoc": round(abs(r), 4), "kind": "corr"})
+    except Exception as e:
+        logger.warning(f"guardrails leakage: {e}")
+    checks.append({
+        "key": "leakage", "name": "Fuite de cible",
+        "status": "fail" if leaks else "ok",
+        "detail": (("Association quasi parfaite avec la cible : " + ", ".join(l["feature"] for l in leaks)
+                    + " — probable fuite (la variable encode l'issue). À retirer.") if leaks
+                   else "Aucune variable ne prédit trivialement la cible."),
+        "leaks": leaks,
+    })
+
+    # 2) Déséquilibre de classes (classification).
+    if task_type == "classification" and classes:
+        try:
+            vc = pd.Series(np.asarray(ytr)).value_counts()
+            total = int(vc.sum())
+            dist = {(str(classes[int(i)]) if 0 <= int(i) < len(classes) else str(i)): int(c) for i, c in vc.items()}
+            minfrac = float(vc.min() / total) if total else 0.0
+            checks.append({
+                "key": "class_balance", "name": "Équilibre des classes",
+                "status": "warn" if minfrac < 0.10 else "ok",
+                "statistic": round(minfrac, 3),
+                "detail": (f"Classe minoritaire : {minfrac*100:.1f} %. "
+                           + ("Fort déséquilibre (<10 %) : préférer average_precision / rappel à l'accuracy."
+                              if minfrac < 0.10 else "Distribution acceptable.")),
+                "distribution": dist,
+            })
+        except Exception as e:
+            logger.warning(f"guardrails balance: {e}")
+
+    # 3) Stabilité de la validation croisée (écart-type inter-folds du meilleur modèle).
+    try:
+        cvs = np.abs(np.asarray(list(cv_scores), dtype=float))   # neg_* → positif
+        mean, std = float(np.mean(cvs)), float(np.std(cvs))
+        rel = std / (abs(mean) + 1e-9)
+        checks.append({
+            "key": "cv_stability", "name": "Stabilité (validation croisée)",
+            "status": "warn" if rel > 0.25 else "ok",
+            "statistic": round(rel, 3), "mean": round(mean, 4), "std": round(std, 4),
+            "detail": (f"Écart-type inter-folds {std:.3f} (moyenne {mean:.3f}). "
+                       + ("Variance élevée : résultat sensible au découpage / peu de données."
+                          if rel > 0.25 else "Résultats stables entre folds.")),
+        })
+    except Exception as e:
+        logger.warning(f"guardrails cv: {e}")
+
+    ci = _bootstrap_metric_ci(pipe, Xte, yte, task_type, scoring, classes, random_state)
+    return {"checks": checks, "metric_ci": ci}
+
+
+def explain_background(Xtr, used: list[dict]) -> dict:
+    """Valeurs de « fond » par variable (médiane si numérique, mode sinon), pour
+    l'explication locale par ablation. JSON-sérialisable (persisté dans le résumé)."""
+    import pandas as pd
+    bg = {}
+    for u in used:
+        mn = u["machine_name"]
+        if mn not in Xtr.columns:
+            continue
+        col = Xtr[mn]
+        num = pd.to_numeric(col, errors="coerce")
+        if num.notna().mean() > 0.5:
+            bg[mn] = float(num.median())
+        else:
+            m = col.mode()
+            bg[mn] = (str(m.iloc[0]) if len(m) else None)
+    return bg
+
+
+def explain_prediction(pipe, X_row, used: list[dict], task_type: str, background: dict) -> dict:
+    """Explication LOCALE d'une prédiction, SANS dépendance externe : contribution de
+    chaque variable estimée par ABLATION vers la valeur de fond (on remplace la
+    variable par son fond et on mesure la variation de sortie). Trié par |contribution|."""
+    import numpy as np
+
+    def _out(dfrow):
+        if task_type == "classification" and hasattr(pipe, "predict_proba"):
+            return float(pipe.predict_proba(dfrow)[0, -1])
+        return float(np.asarray(pipe.predict(dfrow), dtype=float)[0])
+
+    base = _out(X_row)
+    contribs = []
+    for u in used:
+        mn = u["machine_name"]
+        if mn not in X_row.columns or mn not in background:
+            continue
+        row2 = X_row.copy()
+        row2[mn] = background.get(mn)
+        try:
+            contribs.append({"feature": mn, "contribution": round(float(base - _out(row2)), 5)})
+        except Exception:
+            continue
+    contribs.sort(key=lambda c: abs(c["contribution"]), reverse=True)
+    return {"base_output": round(base, 5), "contributions": contribs}
+
+
 def train_model(df, spec: dict, n_trials: int = 25, random_state: int = 42, test_size: float = 0.2) -> dict:
     """
     Entraîne un modèle réel à partir du dataset et du model_spec.
@@ -638,6 +824,13 @@ def train_model(df, spec: dict, n_trials: int = 25, random_state: int = 42, test
             Pipeline([("pre", pre), ("est", est0)]), Xtr, ytr, scoring=scoring, cv=cv, n_jobs=1)))
 
     final = Pipeline([("pre", pre), ("est", estimator_from_params(family, task_type, best_params, random_state))])
+    # Scores par fold du MEILLEUR modèle : réutilisés pour la stabilité CV (garde-fous).
+    try:
+        cv_scores_arr = cross_val_score(
+            Pipeline([("pre", pre), ("est", estimator_from_params(family, task_type, best_params, random_state))]),
+            Xtr, ytr, scoring=scoring, cv=cv, n_jobs=1)
+    except Exception:
+        cv_scores_arr = [cv_best]
     final.fit(Xtr, ytr)
 
     metrics = _evaluate(final, Xte, yte, task_type, classes)
@@ -681,6 +874,17 @@ def train_model(df, spec: dict, n_trials: int = 25, random_state: int = 42, test
     if task_type in ("regression", "count"):
         # Diagnostics des hypothèses de régression (Gauss-Markov / OLS) — informatif.
         result["assumptions"] = regression_diagnostics(final, Xtr, ytr, used)
+    # Garde-fous (fuite de cible, déséquilibre, stabilité CV, IC bootstrap) +
+    # fond d'explication locale (pour /model/predict). Informatif, best-effort.
+    try:
+        result["guardrails"] = model_guardrails(final, Xtr, ytr, Xte, yte, task_type,
+                                                cv_scores_arr, scoring, classes, random_state)
+    except Exception as _ge:
+        logger.warning(f"model_guardrails: {_ge}")
+    try:
+        result["explain_background"] = explain_background(Xtr, used)
+    except Exception:
+        pass
     return result
 
 

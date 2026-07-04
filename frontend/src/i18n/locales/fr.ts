@@ -1008,6 +1008,8 @@ export const fr = {
       forecastObserved: "Observé",
       forecastHoldout: "Ajustement (holdout)",
       forecastFuture: "Prévision future",
+      guardrails: "Garde-fous",
+      metricCi: "Intervalle de confiance",
       evidenceEvolution: "Évolution pilotée par l'évidence",
       evidenceEvolutionSubtitle:
         "Régénère le spec depuis l'évidence courante, compare, et validez le changement",
