@@ -488,9 +488,11 @@ function ArticleSourceLink({ a, label }: { a?: ProvArticle | null; label?: strin
 }
 
 // Familles sélectionnables (alignées sur model_trainer + _ALGO_FAMILIES côté API).
+// prophet/sarimax = prévision de série temporelle (nécessite une colonne date).
 const ALGO_FAMILY_OPTIONS = [
   "lightgbm", "xgboost", "gradient_boosting", "random_forest",
   "logistic_regression", "linear_regression", "elasticnet", "svm", "mlp", "knn",
+  "prophet", "sarimax",
 ];
 const TASK_TYPE_OPTIONS = ["classification", "regression", "count", "survival"];
 const DTYPE_OPTIONS = ["float", "int", "bool", "category", "datetime"];
@@ -628,6 +630,94 @@ function SpecEditor({ scenarioId, spec, onApplied }: { scenarioId: string; spec:
           {remainingCount === 0 && <p className="text-[10px] text-rose-300/70 text-center">{t("scenarioDetail.specEditor.needOne")}</p>}
         </div>
       )}
+    </div>
+  );
+}
+
+// Graphe de prévision (SVG autonome) : historique récent + ajustement sur le
+// holdout (réel vs prévu) + prévision future avec intervalle. Rendu quand le
+// modèle actif est un forecaster (task_type === "forecast").
+function ForecastPanel({ run }: { run: ModelRun }) {
+  const { t, lang } = useI18n();
+  const s = (run.summary ?? {}) as any;
+  const hist = s.history_tail ?? { dates: [], actual: [] };
+  const hold = s.holdout ?? { dates: [], actual: [], predicted: [] };
+  const fore = s.forecast ?? { dates: [], predicted: [], lower: [], upper: [] };
+  const actual: number[] = (hist.actual ?? []).map(Number);
+  const holdPred: number[] = (hold.predicted ?? []).map(Number);
+  const foreVals: number[] = (fore.predicted ?? []).map(Number);
+  const lower: number[] = (fore.lower ?? []).map(Number);
+  const upper: number[] = (fore.upper ?? []).map(Number);
+  const Lh = actual.length;
+  const Hh = holdPred.length;      // holdout predicted aligns to the last Hh of history
+  const Hf = foreVals.length;
+  if (Lh < 2 || Hf < 1) return null;
+
+  const totalN = Lh + Hf;
+  const W = 640, H = 200, padL = 8, padR = 8, padT = 10, padB = 22;
+  const allY = [...actual, ...holdPred, ...foreVals, ...lower, ...upper].filter(v => Number.isFinite(v));
+  const yMin = Math.min(...allY), yMax = Math.max(...allY);
+  const yPad = (yMax - yMin) * 0.08 || 1;
+  const y0 = yMin - yPad, y1 = yMax + yPad;
+  const xAt = (i: number) => padL + (i / Math.max(1, totalN - 1)) * (W - padL - padR);
+  const yAt = (v: number) => padT + (1 - (v - y0) / Math.max(1e-9, y1 - y0)) * (H - padT - padB);
+  const line = (vals: number[], startIdx: number) =>
+    vals.map((v, k) => `${k === 0 ? "M" : "L"}${xAt(startIdx + k).toFixed(1)},${yAt(v).toFixed(1)}`).join(" ");
+
+  // CI band polygon over the forecast region (top edge L→R, bottom edge R→L).
+  const bandPts = (upper.length === Hf && lower.length === Hf)
+    ? [
+        ...upper.map((v, k) => `${xAt(Lh + k).toFixed(1)},${yAt(v).toFixed(1)}`),
+        ...Array.from({ length: Hf }, (_unused, k) => {
+          const j = Hf - 1 - k;
+          return `${xAt(Lh + j).toFixed(1)},${yAt(lower[j]).toFixed(1)}`;
+        }),
+      ].join(" ")
+    : "";
+  // Bridge the actual line into the forecast (continuity at the seam).
+  const foreLineStart = Lh - 1 >= 0 ? [actual[Lh - 1], ...foreVals] : foreVals;
+  const foreLineStartIdx = Lh - 1 >= 0 ? Lh - 1 : Lh;
+
+  const fmtDate = (iso?: string) => {
+    if (!iso) return "";
+    const d = new Date(iso);
+    return isNaN(d.getTime()) ? "" : d.toLocaleDateString(lang === "fr" ? "fr-FR" : "en-US", { month: "short", day: "numeric" });
+  };
+  const firstDate = fmtDate(hist.dates?.[0]);
+  const seamDate = fmtDate(hold.dates?.[0] ?? fore.dates?.[0]);
+  const lastDate = fmtDate(fore.dates?.[fore.dates.length - 1]);
+  const mape = run.metrics?.mape;
+
+  return (
+    <div className="rounded-xl border border-white/5 bg-white/2 px-3 py-2.5">
+      <div className="flex items-center justify-between flex-wrap gap-2">
+        <span className="text-[10px] text-white/35 uppercase tracking-wider flex items-center gap-1">
+          <TrendingUp size={11} /> {t("scenarioDetail.model.forecastTitle")}
+        </span>
+        <span className="text-[10px] text-white/40">
+          {t("scenarioDetail.model.forecastHorizon")}: {s.horizon ?? Hf} · {run.metrics?.rmse != null ? `RMSE ${Number(run.metrics.rmse).toFixed(2)}` : ""}
+          {typeof mape === "number" ? ` · MAPE ${mape.toFixed(1)}%` : ""}
+        </span>
+      </div>
+      <svg viewBox={`0 0 ${W} ${H}`} className="mt-2 w-full" style={{ height: "auto" }} preserveAspectRatio="none">
+        {bandPts && <polygon points={bandPts} fill="rgba(56,189,248,0.12)" stroke="none" />}
+        {/* seam between observed and forecast */}
+        <line x1={xAt(Lh - 1)} y1={padT} x2={xAt(Lh - 1)} y2={H - padB} stroke="rgba(255,255,255,0.12)" strokeDasharray="3 3" />
+        {/* actual (observed history incl. holdout) */}
+        <path d={line(actual, 0)} fill="none" stroke="rgba(255,255,255,0.75)" strokeWidth={1.6} />
+        {/* holdout predicted (model fit on held-out window) */}
+        {Hh > 0 && <path d={line(holdPred, Lh - Hh)} fill="none" stroke="#fbbf24" strokeWidth={1.4} strokeDasharray="4 2" />}
+        {/* forward forecast */}
+        <path d={line(foreLineStart, foreLineStartIdx)} fill="none" stroke="#38bdf8" strokeWidth={1.6} strokeDasharray="4 2" />
+      </svg>
+      <div className="flex items-center justify-between text-[9px] text-white/30 font-mono">
+        <span>{firstDate}</span><span>{seamDate}</span><span>{lastDate}</span>
+      </div>
+      <div className="mt-1.5 flex flex-wrap gap-x-3 gap-y-1 text-[9px]">
+        <span className="flex items-center gap-1"><span className="inline-block w-3 h-[2px] bg-white/70" />{t("scenarioDetail.model.forecastObserved")}</span>
+        <span className="flex items-center gap-1"><span className="inline-block w-3 h-[2px]" style={{ background: "#fbbf24" }} />{t("scenarioDetail.model.forecastHoldout")}</span>
+        <span className="flex items-center gap-1"><span className="inline-block w-3 h-[2px]" style={{ background: "#38bdf8" }} />{t("scenarioDetail.model.forecastFuture")}</span>
+      </div>
     </div>
   );
 }
@@ -4365,6 +4455,7 @@ function ModelMonitorSection({ scenarioId }: { scenarioId: string }) {
                   </p>
                 </div>
               </div>
+              {run.task_type === "forecast" && <ForecastPanel run={run} />}
               {topImportances.length > 0 && (
                 <div className="rounded-xl border border-white/5 bg-white/2 px-3 py-2.5">
                   <span className="text-[10px] text-white/35 uppercase tracking-wider flex items-center gap-1"><TrendingUp size={11} /> {t("scenarioDetail.model.influentialVariables")}</span>

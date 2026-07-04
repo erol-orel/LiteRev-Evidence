@@ -1005,6 +1005,11 @@ export const en: Translations = {
       leaderboardHigher: "(higher = better)",
       leaderboardActive: "· active",
       leaderboardUnavailable: "unavailable",
+      forecastTitle: "Forecast",
+      forecastHorizon: "Horizon",
+      forecastObserved: "Observed",
+      forecastHoldout: "Fit (holdout)",
+      forecastFuture: "Forward forecast",
       evidenceEvolution: "Evidence-driven evolution",
       evidenceEvolutionSubtitle:
         "Regenerates the spec from current evidence, compares, and lets you validate the change",
