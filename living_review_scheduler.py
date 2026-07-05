@@ -447,6 +447,59 @@ def run_all_scenarios(conn, dry_run: bool = False, days: int = 30) -> list[dict]
     return results
 
 
+def run_user_scenarios(conn, dry_run: bool = False, days: int = 30, max_results: int = 200) -> list[dict]:
+    """Living review pour les scénarios UTILISATEUR possédés (owner_email renseigné) :
+    exécute leur `query` sur PubMed et ingère les nouveautés (taguées scenario_type=<id>,
+    project_context='user'), de la même façon que les scénarios préréglés.
+
+    NOTE : l'intégration au corpus SÉMANTIQUE (liens article_scenarios + embeddings)
+    est faite par le pipeline de populate, pas ici — ce passage alimente le corpus
+    global + la détection d'alerte par scenario_type. Un re-populate rattache ensuite
+    les nouveautés au corpus sémantique du scénario."""
+    results: list[dict] = []
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT id, name, query FROM user_scenarios "
+                        "WHERE owner_email IS NOT NULL AND query IS NOT NULL AND query <> ''")
+            scenarios = cur.fetchall()
+    except Exception as e:
+        logger.error(f"Chargement des scénarios utilisateur impossible : {e}")
+        return results
+
+    for sid, name, query in scenarios:
+        new_docs, skipped, errors = [], 0, 0
+        try:
+            articles = fetch_pubmed_new(query, days=days, max_results=max_results)
+        except Exception as e:
+            logger.warning(f"[{sid}] fetch PubMed (user) échec : {e}")
+            articles = []
+        for art in articles:
+            art["scenario_type"] = sid
+            art["project_context"] = "user"
+            if not art.get("external_id") or _external_id_exists(conn, art["external_id"], art["source"]):
+                skipped += 1
+                continue
+            if dry_run:
+                new_docs.append(art)
+                continue
+            doc_id = _insert_document(conn, art)
+            if doc_id:
+                _insert_chunk(conn, doc_id, f"{art['title']}\n\n{art['abstract']}", "title_abstract",
+                              {"source": art["source"], "living_review": True, "user_scenario": sid})
+                new_docs.append(art)
+            else:
+                errors += 1
+        results.append({
+            "scenario_id": sid, "label": name or sid, "user_scenario": True,
+            "run_at": datetime.now(timezone.utc).isoformat(),
+            "new_documents": len(new_docs), "skipped_existing": skipped, "errors": errors,
+            "dry_run": dry_run, "new_titles": [d["title"][:80] for d in new_docs[:5]],
+        })
+        logger.info(f"[{sid}] (user) terminé — {len(new_docs)} nouveaux, {skipped} déjà en base, {errors} erreurs")
+        time.sleep(1)
+    return results
+
+
 def save_run_report(results: list[dict], output_dir: str = "/opt/literev-api"):
     """Sauvegarde un rapport JSON de la dernière exécution."""
     report = {
@@ -493,7 +546,9 @@ def main():
     parser.add_argument("--scenario", default=None,
                         help="ID du scénario à traiter (ex: epidemic-early-warning)")
     parser.add_argument("--all-scenarios", action="store_true",
-                        help="Traiter tous les scénarios")
+                        help="Traiter tous les scénarios préréglés")
+    parser.add_argument("--user-scenarios", action="store_true",
+                        help="Traiter aussi (ou uniquement) les scénarios utilisateur possédés (owner_email)")
     parser.add_argument("--days", type=int, default=30,
                         help="Nombre de jours de lookback (défaut: 30)")
     parser.add_argument("--interval-hours", type=int, default=24,
@@ -527,14 +582,19 @@ def main():
             )
             save_run_report([result])
             print(json.dumps(result, ensure_ascii=False, indent=2))
-        elif args.all_scenarios:
-            results = run_all_scenarios(conn, dry_run=args.dry_run, days=args.days)
+        elif args.all_scenarios or args.user_scenarios:
+            results = []
+            if args.all_scenarios:
+                results += run_all_scenarios(conn, dry_run=args.dry_run, days=args.days)
+            if args.user_scenarios:
+                results += run_user_scenarios(conn, dry_run=args.dry_run, days=args.days)
             report = save_run_report(results)
             total = report["total_new_documents"]
             print(f"\n✅ Living review terminée — {total} nouveaux documents")
             for r in results:
                 status = "DRY-RUN" if args.dry_run else "OK"
-                print(f"  [{status}] {r['scenario_id']:35s} +{r['new_documents']} nouveaux, {r['skipped_existing']} existants")
+                tag = "user" if r.get("user_scenario") else "preset"
+                print(f"  [{status}] ({tag}) {r['scenario_id']:35s} +{r['new_documents']} nouveaux, {r['skipped_existing']} existants")
         else:
             parser.print_help()
     finally:
