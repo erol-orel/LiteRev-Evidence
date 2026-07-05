@@ -3205,6 +3205,7 @@ function AlertsSection({ scenarioId }: { scenarioId: string }) {
   const [email, setEmail] = React.useState('');
   const [frequency, setFrequency] = React.useState<'daily'|'weekly'|'immediate'>('weekly');
   const [subscribed, setSubscribed] = React.useState(false);
+  const [ownerCovered, setOwnerCovered] = React.useState(false);
   const [subscribing, setSubscribing] = React.useState(false);
   const [lrStatus, setLrStatus] = React.useState<any>(null);
   const [lrLoading, setLrLoading] = React.useState(false);
@@ -3213,8 +3214,9 @@ function AlertsSection({ scenarioId }: { scenarioId: string }) {
     if (!email.trim()) return;
     setSubscribing(true);
     try {
-      await subscribeAlerts(email, scenarioId, frequency);
+      const res = await subscribeAlerts(email, scenarioId, frequency);
       setSubscribed(true);
+      setOwnerCovered(!!res.owner_set);
     } catch (e: any) {
       alert(e.message);
     } finally {
@@ -3250,9 +3252,17 @@ function AlertsSection({ scenarioId }: { scenarioId: string }) {
         </div>
         <p className="text-xs text-white/50">{t("scenarioDetail.alerts.emailAlertsHint")}</p>
         {subscribed ? (
-          <div className="rounded-xl border border-brand-500/20 bg-brand-500/5 p-3 flex items-center gap-2 text-xs text-brand-300">
-            <CheckCircle2 size={13}/>
-            {t("scenarioDetail.alerts.subscriptionConfirmedPrefix")} <strong>{email}</strong> {t("scenarioDetail.alerts.subscriptionFrequency")} {frequency}
+          <div className="space-y-2">
+            <div className="rounded-xl border border-brand-500/20 bg-brand-500/5 p-3 flex items-center gap-2 text-xs text-brand-300">
+              <CheckCircle2 size={13}/>
+              {t("scenarioDetail.alerts.subscriptionConfirmedPrefix")} <strong>{email}</strong> {t("scenarioDetail.alerts.subscriptionFrequency")} {frequency}
+            </div>
+            {ownerCovered && (
+              <div className="rounded-xl border border-gold-500/20 bg-gold-500/5 p-2.5 flex items-start gap-2 text-[11px] text-gold-300">
+                <Rss size={12} className="mt-0.5 shrink-0"/>
+                {t("scenarioDetail.alerts.ownerCovered")}
+              </div>
+            )}
           </div>
         ) : (
           <div className="space-y-3">

@@ -770,6 +770,7 @@ export const fr = {
       emailAlertsHint:
         "Recevez une notification quand de nouveaux articles sont ajoutés à ce scénario.",
       subscriptionConfirmedPrefix: "Abonnement confirmé pour",
+      ownerCovered: "Ce scénario est désormais suivi par la living review : les nouveaux articles correspondant à votre requête seront ingérés et vous serez notifié.",
       subscriptionFrequency: "· fréquence :",
       emailPlaceholder: "votre@email.com",
       frequencyImmediate: "Immédiat",

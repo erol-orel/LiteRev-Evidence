@@ -5890,6 +5890,38 @@ def trigger_living_review(
 
 # ─── ALERTES EMAIL ────────────────────────────────────────────────────────────
 
+_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+
+def _clean_email(v) -> str | None:
+    """Normalise (trim + minuscules) et valide une adresse email ; None si vide/invalide."""
+    if not isinstance(v, str):
+        return None
+    v = v.strip().lower()
+    return v if (v and _EMAIL_RE.match(v)) else None
+
+
+def _ensure_alert_subscription(conn, email: str, scenario_id: str, frequency: str = "weekly") -> None:
+    """Crée la table si besoin puis (ré)active l'abonnement email↔scénario (idempotent)."""
+    conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS alert_subscriptions (
+            id SERIAL PRIMARY KEY,
+            email VARCHAR(255) NOT NULL,
+            scenario_id VARCHAR(100) NOT NULL,
+            frequency VARCHAR(20) DEFAULT 'weekly',
+            created_at TIMESTAMP DEFAULT NOW(),
+            last_notified_at TIMESTAMP DEFAULT NULL,
+            is_active BOOLEAN DEFAULT TRUE,
+            UNIQUE(email, scenario_id)
+        )
+    """))
+    conn.execute(text("""
+        INSERT INTO alert_subscriptions (email, scenario_id, frequency)
+        VALUES (:email, :scenario_id, :frequency)
+        ON CONFLICT (email, scenario_id) DO UPDATE SET frequency = :frequency, is_active = TRUE
+    """), {"email": email, "scenario_id": scenario_id, "frequency": frequency})
+
+
 class AlertSubscriptionIn(BaseModel):
     email: str = Field(..., max_length=255)
     scenario_id: str = Field(..., min_length=1, max_length=100)
@@ -5917,32 +5949,25 @@ def subscribe_alerts(payload: AlertSubscriptionIn, _: None = Depends(require_api
     Enregistre une alerte email pour un scénario.
     L'utilisateur sera notifié quand de nouveaux articles sont ajoutés.
     """
+    email = _clean_email(payload.email) or payload.email
     with engine.begin() as conn:
-        # Créer la table si elle n'existe pas
-        conn.execute(text("""
-            CREATE TABLE IF NOT EXISTS alert_subscriptions (
-                id SERIAL PRIMARY KEY,
-                email VARCHAR(255) NOT NULL,
-                scenario_id VARCHAR(100) NOT NULL,
-                frequency VARCHAR(20) DEFAULT 'weekly',
-                created_at TIMESTAMP DEFAULT NOW(),
-                last_notified_at TIMESTAMP DEFAULT NULL,
-                is_active BOOLEAN DEFAULT TRUE,
-                UNIQUE(email, scenario_id)
-            )
-        """))
-        conn.execute(text("""
-            INSERT INTO alert_subscriptions (email, scenario_id, frequency)
-            VALUES (:email, :scenario_id, :frequency)
-            ON CONFLICT (email, scenario_id) DO UPDATE
-            SET frequency = :frequency, is_active = TRUE
-        """), payload.model_dump())
+        _ensure_alert_subscription(conn, email, payload.scenario_id, payload.frequency)
+        # S'abonner à SON scénario utilisateur = en devenir propriétaire (si aucun),
+        # pour que la living review le crawle (run_user_scenarios filtre sur owner_email).
+        owner_set = False
+        if payload.scenario_id.startswith("usr-"):
+            res = conn.execute(text(
+                "UPDATE user_scenarios SET owner_email = :e, updated_at = NOW() "
+                "WHERE id = :id AND (owner_email IS NULL OR owner_email = '')"
+            ), {"e": email, "id": payload.scenario_id})
+            owner_set = (res.rowcount or 0) > 0
 
     return {
         "status": "subscribed",
-        "email": payload.email,
+        "email": email,
         "scenario_id": payload.scenario_id,
         "frequency": payload.frequency,
+        "owner_set": owner_set,
         "message": f"Vous recevrez des alertes {payload.frequency} pour le scénario '{payload.scenario_id}'.",
     }
 
@@ -5975,80 +6000,149 @@ def list_subscriptions(email: str) -> list[dict[str, Any]]:
         return []
 
 
-@app.post("/alerts/send-digest")
-def send_alert_digest(
-    scenario_id: str | None = None,
-    dry_run: bool = True,
-    _: None = Depends(require_api_key),
-) -> dict[str, Any]:
-    """
-    Envoie les digests email aux abonnés.
-    En production, utilise SMTP (configurable via env vars SMTP_HOST, SMTP_USER, SMTP_PASS).
-    """
-    smtp_host = os.getenv("SMTP_HOST", "")
-    smtp_user = os.getenv("SMTP_USER", "")
-    smtp_pass = os.getenv("SMTP_PASS", "")
+def _new_articles_for_scenario(conn, scenario_id: str, since, limit: int = 25) -> list[dict]:
+    """Articles du corpus d'un scénario ingérés APRÈS `since`. Couvre les deux modèles
+    d'appartenance : préréglé (literature_document.scenario_type) ET utilisateur
+    (article_scenarios). since=None (1re notification) → les plus récents (bornés)."""
+    rows = conn.execute(text("""
+        SELECT DISTINCT d.id, d.title, d.year, d.doi, d.url, d.created_at
+        FROM literature_document d
+        WHERE (d.scenario_type = :sid
+               OR EXISTS (SELECT 1 FROM article_scenarios a
+                          WHERE a.document_id = d.id AND a.scenario_id = :sid))
+          AND (CAST(:since AS timestamp) IS NULL OR d.created_at > CAST(:since AS timestamp))
+        ORDER BY d.created_at DESC
+        LIMIT :lim
+    """), {"sid": scenario_id, "since": since, "lim": int(limit)}).mappings().all()
+    return [dict(r) for r in rows]
 
-    if not smtp_host:
-        return {
-            "status": "not_configured",
-            "message": "SMTP non configuré. Définissez SMTP_HOST, SMTP_USER, SMTP_PASS dans les variables d'environnement.",
-            "dry_run": dry_run,
-        }
 
+def _digest_is_due(frequency: str | None, last_notified, now) -> bool:
+    """Un abonnement est-il dû ? immediate = toujours ; daily/weekly selon le délai
+    depuis la dernière notification ; jamais notifié = dû."""
+    from datetime import timedelta
+    if last_notified is None:
+        return True
+    if (frequency or "weekly") == "immediate":
+        return True
+    delta = now - last_notified
+    return delta >= (timedelta(days=1) if frequency == "daily" else timedelta(days=7))
+
+
+def _render_alert_digest(scenario_id: str, articles: list[dict], total_new: int,
+                         base_url: str = "https://literev-scenario.com") -> tuple[str, str, str]:
+    """(subject, html, text) d'un digest — liste les VRAIS nouveaux articles. Pur/testable."""
+    import html as _html
+    subj = f"[LiteRev] {total_new} nouvel{'s' if total_new > 1 else ''} article{'s' if total_new > 1 else ''} — {scenario_id}"
+    scen_url = f"{base_url}/#scenario/{scenario_id}"
+
+    def _row(a):
+        title = _html.escape(str(a.get("title") or "Article"))
+        yr = f" ({a['year']})" if a.get("year") else ""
+        href = a.get("url") or (f"https://doi.org/{a['doi']}" if a.get("doi") else scen_url)
+        return f'<li style="margin:4px 0"><a href="{_html.escape(str(href))}" style="color:#16a34a">{title}</a>{yr}</li>'
+
+    shown = articles[:25]
+    more = f'<p style="font-size:12px;color:#6b7280">… et {total_new - len(shown)} de plus.</p>' if total_new > len(shown) else ""
+    html_body = (
+        '<html><body style="font-family:system-ui,Arial,sans-serif;color:#111">'
+        f'<h2 style="color:#14532d">LiteRev — {total_new} nouvel{"s" if total_new > 1 else ""} article{"s" if total_new > 1 else ""}</h2>'
+        f'<p>Scénario <strong>{_html.escape(scenario_id)}</strong> :</p>'
+        f'<ul>{"".join(_row(a) for a in shown)}</ul>{more}'
+        f'<p><a href="{scen_url}" style="color:#16a34a;font-weight:600">Ouvrir le scénario →</a></p>'
+        '<hr><p style="font-size:11px;color:#6b7280">Vous recevez cet email car vous êtes abonné aux alertes LiteRev pour ce scénario.</p>'
+        '</body></html>'
+    )
+    text_body = (f"LiteRev — {total_new} nouvel article(s) pour le scénario {scenario_id}:\n\n"
+                 + "\n".join(f"- {a.get('title', '')}" + (f" ({a['year']})" if a.get("year") else "") for a in shown)
+                 + (f"\n… et {total_new - len(shown)} de plus." if total_new > len(shown) else "")
+                 + f"\n\n{scen_url}\n")
+    return subj, html_body, text_body
+
+
+def _send_email_smtp(host: str, user: str, pw: str, to: str, subject: str, html_body: str, text_body: str) -> None:
+    """Envoi SMTP (SSL 465). Lève en cas d'échec (l'appelant journalise)."""
+    import smtplib
+    from email.mime.text import MIMEText
+    from email.mime.multipart import MIMEMultipart
+    msg = MIMEMultipart("alternative")
+    msg["Subject"], msg["From"], msg["To"] = subject, user, to
+    msg.attach(MIMEText(text_body, "plain"))
+    msg.attach(MIMEText(html_body, "html"))
+    with smtplib.SMTP_SSL(host, 465, timeout=30) as server:
+        server.login(user, pw)
+        server.sendmail(user, to, msg.as_string())
+
+
+def _process_alert_digests(scenario_id: str | None, dry_run: bool, respect_frequency: bool) -> dict[str, Any]:
+    """Cœur commun de l'envoi des digests : pour chaque abonnement actif (et dû si
+    respect_frequency), calcule les NOUVEAUX articles depuis last_notified_at, envoie
+    l'email (sauf dry_run) et met à jour last_notified_at. Ne notifie pas si 0 nouveauté."""
+    from datetime import datetime, timezone
+    smtp_host, smtp_user, smtp_pass = os.getenv("SMTP_HOST", ""), os.getenv("SMTP_USER", ""), os.getenv("SMTP_PASS", "")
+    now = datetime.now(timezone.utc)
     try:
         with engine.connect() as conn:
-            query = """
-                SELECT s.email, s.scenario_id, s.frequency, s.last_notified_at
-                FROM alert_subscriptions s
-                WHERE s.is_active = TRUE
-            """
+            q = "SELECT id, email, scenario_id, frequency, last_notified_at FROM alert_subscriptions WHERE is_active = TRUE"
             params: dict[str, Any] = {}
             if scenario_id:
-                query += " AND s.scenario_id = :scenario_id"
-                params["scenario_id"] = scenario_id
-            rows = conn.execute(text(query), params).mappings().all()
-    except Exception:
-        rows = []
+                q += " AND scenario_id = :sid"
+                params["sid"] = scenario_id
+            subs = [dict(r) for r in conn.execute(text(q), params).mappings().all()]
+    except Exception as e:
+        return {"status": "error", "error": str(e), "processed": 0, "sent": 0}
 
-    sent = 0
-    if not dry_run and rows:
-        import smtplib
-        from email.mime.text import MIMEText
-        from email.mime.multipart import MIMEMultipart
+    results, sent = [], 0
+    for sub in subs:
+        if respect_frequency and not _digest_is_due(sub.get("frequency"), sub.get("last_notified_at"), now):
+            results.append({"email": sub["email"], "scenario_id": sub["scenario_id"], "skipped": "not_due"})
+            continue
+        try:
+            with engine.connect() as conn:
+                arts = _new_articles_for_scenario(conn, sub["scenario_id"], sub.get("last_notified_at"))
+        except Exception as e:
+            logger.warning(f"digest new-articles {sub['scenario_id']}: {e}")
+            arts = []
+        if not arts:
+            results.append({"email": sub["email"], "scenario_id": sub["scenario_id"], "new": 0, "sent": False})
+            continue
+        if dry_run:
+            results.append({"email": sub["email"], "scenario_id": sub["scenario_id"], "new": len(arts), "sent": False, "reason": "dry_run"})
+            continue
+        if not smtp_host:
+            results.append({"email": sub["email"], "scenario_id": sub["scenario_id"], "new": len(arts), "sent": False, "reason": "smtp_not_configured"})
+            continue
+        subj, html_body, text_body = _render_alert_digest(sub["scenario_id"], arts, len(arts))
+        try:
+            _send_email_smtp(smtp_host, smtp_user, smtp_pass, sub["email"], subj, html_body, text_body)
+            with engine.begin() as conn:
+                conn.execute(text("UPDATE alert_subscriptions SET last_notified_at = NOW() WHERE id = :id"), {"id": sub["id"]})
+            sent += 1
+            results.append({"email": sub["email"], "scenario_id": sub["scenario_id"], "new": len(arts), "sent": True})
+        except Exception as e:
+            logger.error(f"digest email {sub['email']}: {e}")
+            results.append({"email": sub["email"], "scenario_id": sub["scenario_id"], "new": len(arts), "sent": False, "reason": f"error: {e}"})
 
-        for sub in rows:
-            try:
-                msg = MIMEMultipart("alternative")
-                msg["Subject"] = f"[LiteRev] Nouveaux articles : Scénario {sub['scenario_id']}"
-                msg["From"] = smtp_user
-                msg["To"] = sub["email"]
+    status = "sent" if (not dry_run and sent) else ("dry_run" if dry_run else ("not_configured" if not smtp_host else "no_new_articles"))
+    return {"status": status, "subscriptions": len(subs), "processed": len(results), "sent": sent, "dry_run": dry_run, "results": results}
 
-                body = f"""
-                <html><body>
-                <h2 style="color:#1a3a2a">LiteRev : Nouveaux articles disponibles</h2>
-                <p>De nouveaux articles ont été ajoutés au scénario <strong>{sub['scenario_id']}</strong>.</p>
-                <p><a href="http://62.238.39.50/#scenario/{sub['scenario_id']}" style="color:#22c55e">
-                Consulter le scénario</a></p>
-                <hr><p style="font-size:11px;color:#6b7280">
-                Pour vous désabonner, visitez les paramètres de LiteRev.</p>
-                </body></html>
-                """
-                msg.attach(MIMEText(body, "html"))
 
-                with smtplib.SMTP_SSL(smtp_host, 465) as server:
-                    server.login(smtp_user, smtp_pass)
-                    server.sendmail(smtp_user, sub["email"], msg.as_string())
-                sent += 1
-            except Exception as e:
-                logger.error(f"Email error for {sub['email']}: {e}")
+@app.post("/alerts/send-digest")
+def send_alert_digest(scenario_id: str | None = None, dry_run: bool = True,
+                      _: None = Depends(require_api_key)) -> dict[str, Any]:
+    """Envoie (ou simule en dry_run) les digests aux abonnés d'un scénario (ou de tous) :
+    liste les VRAIS nouveaux articles depuis la dernière notification et met à jour
+    last_notified_at. Ignore les abonnements sans nouveauté. Ignore la fréquence
+    (envoi forcé) — pour la cadence automatique, voir /alerts/run-digests."""
+    return _process_alert_digests(scenario_id, dry_run=dry_run, respect_frequency=False)
 
-    return {
-        "status": "sent" if not dry_run else "dry_run",
-        "subscriptions_found": len(rows),
-        "emails_sent": sent,
-        "dry_run": dry_run,
-    }
+
+@app.post("/alerts/run-digests")
+def run_due_alert_digests(dry_run: bool = False, _: None = Depends(require_api_key)) -> dict[str, Any]:
+    """Traite tous les abonnements DUS selon leur fréquence (daily/weekly/immediate).
+    Appelable par cron après la living review (ex. `curl -XPOST .../alerts/run-digests`)
+    pour notifier les utilisateurs des nouveaux articles de LEURS scénarios."""
+    return _process_alert_digests(None, dry_run=dry_run, respect_frequency=True)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -6120,6 +6214,9 @@ def _ensure_user_scenarios_table() -> None:
             # (colonnes query/mode) → comportement inchangé.
             "ALTER TABLE user_scenarios ADD COLUMN IF NOT EXISTS sub_queries JSONB",
             "ALTER TABLE user_scenarios ADD COLUMN IF NOT EXISTS combinator VARCHAR(12)",
+            # Propriétaire (email) : living review + alertes email par utilisateur.
+            "ALTER TABLE user_scenarios ADD COLUMN IF NOT EXISTS owner_email VARCHAR(255)",
+            "CREATE INDEX IF NOT EXISTS ix_user_scenarios_owner ON user_scenarios (owner_email)",
         ):
             conn.execute(text(_ddl))
     logger.info("Tables user_scenarios et user_scenario_folders vérifiées/créées.")
@@ -6147,6 +6244,9 @@ class UserScenarioIn(BaseModel):
     # < 2 entrées valides → None (on retombe sur la recherche mono-requête query/mode).
     sub_queries: list[dict[str, Any]] | None = None
     combinator: str = Field(default="union")
+    # Propriétaire (email) : relie le scénario à un utilisateur pour la living review
+    # et les alertes email. Optionnel (les scénarios restent utilisables sans compte).
+    owner_email: str | None = None
 
     @model_validator(mode="after")
     def _clean_sub_queries(self) -> "UserScenarioIn":
@@ -6154,6 +6254,7 @@ class UserScenarioIn(BaseModel):
         self.sub_queries = cleaned if len(cleaned) >= 2 else None
         if self.combinator not in ("union", "intersection"):
             self.combinator = "union"
+        self.owner_email = _clean_email(self.owner_email)
         return self
 
 
@@ -6372,8 +6473,8 @@ def create_user_scenario(payload: UserScenarioIn, _: None = Depends(require_api_
     new_id = "usr-" + str(uuid.uuid4()).replace("-", "")[:12]
     with engine.begin() as conn:
         conn.execute(text("""
-            INSERT INTO user_scenarios (id, name, query, mode, filters, result_count, pinned, folder_id, search_strategy, sub_queries, combinator)
-            VALUES (:id, :name, :query, :mode, CAST(:filters AS jsonb), :result_count, :pinned, :folder_id, CAST(:strategy AS jsonb), CAST(:sub_queries AS jsonb), :combinator)
+            INSERT INTO user_scenarios (id, name, query, mode, filters, result_count, pinned, folder_id, search_strategy, sub_queries, combinator, owner_email)
+            VALUES (:id, :name, :query, :mode, CAST(:filters AS jsonb), :result_count, :pinned, :folder_id, CAST(:strategy AS jsonb), CAST(:sub_queries AS jsonb), :combinator, :owner_email)
         """), {
             "id": new_id,
             "name": payload.name,
@@ -6386,7 +6487,14 @@ def create_user_scenario(payload: UserScenarioIn, _: None = Depends(require_api_
             "strategy": json.dumps(payload.search_strategy) if payload.search_strategy else None,
             "sub_queries": json.dumps(payload.sub_queries) if payload.sub_queries else None,
             "combinator": payload.combinator if payload.sub_queries else None,
+            "owner_email": payload.owner_email,
         })
+        # Propriétaire renseigné → l'abonner aux alertes de SON scénario (living review).
+        if payload.owner_email:
+            try:
+                _ensure_alert_subscription(conn, payload.owner_email, new_id)
+            except Exception as _e:
+                logger.warning(f"auto-subscribe owner {new_id}: {_e}")
     # Génération de la stratégie de recherche en arrière-plan : l'appel OpenAI
     # ne doit JAMAIS bloquer (ni faire échouer) la création du scénario. On la
     # saute si le client a déjà fourni la stratégie (recherche booléenne).
@@ -6411,6 +6519,44 @@ def create_user_scenario(payload: UserScenarioIn, _: None = Depends(require_api_
             logger.warning(f"could not start strategy thread for {new_id}: {_te}")
     row = _get_user_scenario_or_404(new_id)
     return _user_scenario_to_gesica_format(row)
+
+
+class ScenarioOwnerIn(BaseModel):
+    email: str = Field(..., max_length=255)
+    frequency: str = Field(default="weekly")
+
+
+@app.post("/user-scenarios/{scenario_id}/owner")
+def set_user_scenario_owner(scenario_id: str, payload: ScenarioOwnerIn,
+                            _: None = Depends(require_api_key)) -> dict[str, Any]:
+    """Attribue un propriétaire (email) à un scénario existant et l'abonne aux alertes
+    de living review pour ce scénario. Permet à un utilisateur de « couvrir » ses
+    propres scénarios (notification des nouveaux articles à son email)."""
+    email = _clean_email(payload.email)
+    if not email:
+        raise HTTPException(status_code=400, detail="Adresse email invalide.")
+    freq = payload.frequency if payload.frequency in ("daily", "weekly", "immediate") else "weekly"
+    _get_user_scenario_or_404(scenario_id)
+    with engine.begin() as conn:
+        conn.execute(text("UPDATE user_scenarios SET owner_email = :e, updated_at = NOW() WHERE id = :id"),
+                     {"e": email, "id": scenario_id})
+        _ensure_alert_subscription(conn, email, scenario_id, freq)
+    return {"status": "ok", "scenario_id": scenario_id, "owner_email": email, "frequency": freq,
+            "subscribed": True}
+
+
+@app.get("/user-scenarios/by-owner")
+def list_user_scenarios_by_owner(email: str) -> list[dict[str, Any]]:
+    """Liste les scénarios appartenant à un email (pour « mes scénarios »)."""
+    e = _clean_email(email)
+    if not e:
+        return []
+    with engine.connect() as conn:
+        rows = conn.execute(text(
+            "SELECT id, name, query, created_at, article_count FROM user_scenarios "
+            "WHERE owner_email = :e ORDER BY created_at DESC"
+        ), {"e": e}).mappings().all()
+    return [dict(r) for r in rows]
 
 
 @app.delete("/user-scenarios/{scenario_id}", status_code=200)
@@ -11586,15 +11732,19 @@ Retourne UNIQUEMENT le JSON valide."""
                         updated_at = NOW()
                 """), {"sid": scenario_id, "vars": _json.dumps(variables)})
             else:
+                # variables_lang = langue de génération (pour l'affichage localisé) ;
+                # variables_i18n remis à NULL car les traductions en cache sont périmées.
                 conn.execute(text("""
-                    INSERT INTO scenario_settings (scenario_id, variables_json, variables_validated, variables_generated_at, updated_at)
-                    VALUES (:sid, CAST(:vars AS jsonb), FALSE, NOW(), NOW())
+                    INSERT INTO scenario_settings (scenario_id, variables_json, variables_validated, variables_generated_at, variables_lang, variables_i18n, updated_at)
+                    VALUES (:sid, CAST(:vars AS jsonb), FALSE, NOW(), :vlang, NULL, NOW())
                     ON CONFLICT (scenario_id) DO UPDATE
                     SET variables_json = CAST(:vars AS jsonb),
                         variables_validated = FALSE,
                         variables_generated_at = NOW(),
+                        variables_lang = :vlang,
+                        variables_i18n = NULL,
                         updated_at = NOW()
-                """), {"sid": scenario_id, "vars": _json.dumps(variables)})
+                """), {"sid": scenario_id, "vars": _json.dumps(variables), "vlang": (_norm_lang(lang) or "fr")})
 
         logger.info(f"Variables & Modèle générés ({persist}) pour {scenario_id}: {len(pico_articles)} articles PICO.")
         return variables
@@ -11602,6 +11752,177 @@ Retourne UNIQUEMENT le JSON valide."""
     except Exception as e:
         logger.error(f"Variables generation {scenario_id}: {e}", exc_info=True)
         return {"error": str(e)}
+
+
+# ─── Localisation NON DESTRUCTIVE des Variables/Modèle (affichage FR/EN) ──────
+# variables_json est FONCTIONNEL (machine_name, dtype, model_spec, data_template) :
+# on ne le régénère pas au changement de langue. On traduit UNIQUEMENT les champs
+# d'affichage (noms, définitions, libellés, justifications) et on met en cache la
+# variante par langue dans variables_i18n. Les identifiants machine, types,
+# provenances et le model_spec structurel restent intacts.
+
+def _norm_lang(lang) -> str | None:
+    """'en'/'fr' à partir d'une valeur de langue quelconque ; None si non exploitable."""
+    if not isinstance(lang, str) or not lang.strip():
+        return None
+    return "en" if lang.strip().lower().startswith("en") else "fr"
+
+
+def _detect_variables_lang(variables: dict) -> str:
+    """Heuristique FR/EN pour les lignes LEGACY dépourvues de variables_lang."""
+    po = (variables or {}).get("primary_outcome") or {}
+    sample = " ".join(str(po.get(k, "")) for k in ("name", "definition", "measurement")).lower()
+    for pv in (variables.get("predictor_variables") or [])[:3]:
+        sample += " " + str((pv or {}).get("definition", "")).lower()
+    if not sample.strip():
+        return "fr"
+    fr = sum(sample.count(m) for m in (" le ", " la ", " les ", " des ", " une ", " du ", " et ",
+                                       " pour ", " être", " taux ", "é", "è", "à", "ç"))
+    en = sum(sample.count(m) for m in (" the ", " of ", " and ", " for ", " rate ", " number ",
+                                       " is ", " to ", " in ", " with "))
+    return "en" if en > fr else "fr"
+
+
+def _llm_translate_strings(texts: list, target_lang: str) -> list:
+    """Traduit une liste de chaînes vers 'en'/'fr' (ordre + longueur conservés).
+    Renvoie les chaînes d'ORIGINE en cas d'échec — jamais de corruption."""
+    import json as _json
+    from openai import OpenAI as _OAI
+    if not texts:
+        return texts
+    lang_name = "English" if target_lang == "en" else "French"
+    sys = (f"You are a professional medical translator. Translate each string in the input "
+           f"array to {lang_name}. Preserve medical/technical terms, units (e.g. /100k, mg, %), "
+           "acronyms (ARI, RSV, SARIMAX, ED), and all numbers. Do NOT add explanations or notes. "
+           'Return ONLY a JSON object {"items": [...]} whose "items" is a JSON array of the '
+           "translated strings, in the SAME order and with EXACTLY the same length as the input.")
+    usr = _json.dumps({"items": list(texts)}, ensure_ascii=False)
+    try:
+        client = _OAI(timeout=90.0)
+        resp = client.chat.completions.create(
+            model="gpt-4.1",
+            messages=[{"role": "system", "content": sys}, {"role": "user", "content": usr}],
+            temperature=0, seed=42, max_tokens=4000,
+            response_format={"type": "json_object"},
+        )
+        out = _json.loads(resp.choices[0].message.content)
+        items = out.get("items") if isinstance(out, dict) else None
+        if isinstance(items, list) and len(items) == len(texts) and all(isinstance(x, str) for x in items):
+            return items
+        logger.warning(f"translate_strings: shape mismatch ({type(items).__name__}, "
+                       f"{len(items) if isinstance(items, list) else 'n/a'} vs {len(texts)})")
+    except Exception as e:
+        logger.warning(f"translate_strings failed: {e}")
+    return texts
+
+
+def _translate_variables_payload(variables: dict, target_lang: str) -> dict:
+    """Copie TRADUITE de variables_json : seuls les champs d'AFFICHAGE sont traduits
+    (noms, définitions, libellés, justifications, listes de bases/notes). machine_name,
+    dtype, task_type, family, metric, cv, provenance, ranges numériques et structure du
+    model_spec restent identiques. Les noms/justification traduits sont propagés dans le
+    model_spec miroir (lu par /model/spec)."""
+    import copy
+    v = copy.deepcopy(variables or {})
+    texts: list = []
+    setters: list = []
+
+    def _add(container, key):
+        val = container.get(key)
+        if isinstance(val, str) and val.strip():
+            texts.append(val)
+            setters.append((len(texts) - 1, lambda new, c=container, k=key: c.__setitem__(k, new)))
+
+    def _add_list(lst):
+        if isinstance(lst, list):
+            for i, item in enumerate(lst):
+                if isinstance(item, str) and item.strip():
+                    texts.append(item)
+                    setters.append((len(texts) - 1, lambda new, l=lst, idx=i: l.__setitem__(idx, new)))
+
+    po = v.get("primary_outcome") or {}
+    for k in ("name", "definition", "measurement", "timeframe"):
+        _add(po, k)
+    for so in (v.get("secondary_outcomes") or []):
+        if isinstance(so, dict):
+            for k in ("name", "definition"):
+                _add(so, k)
+    for pv in (v.get("predictor_variables") or []):
+        if isinstance(pv, dict):
+            for k in ("name", "definition", "data_source"):
+                _add(pv, k)
+    ra = v.get("recommended_algorithm") or {}
+    for k in ("primary", "rationale", "validation_method"):
+        _add(ra, k)
+    _add_list(ra.get("alternatives"))
+    at = v.get("alert_thresholds") or {}
+    for lvl in ("green", "orange", "red"):
+        band = at.get(lvl)
+        if isinstance(band, dict):
+            for k in ("label", "rationale", "description"):
+                _add(band, k)
+    _add_list(v.get("required_databases"))
+    for k in ("sample_size_recommendation", "update_frequency", "implementation_notes"):
+        _add(v, k)
+
+    if not texts:
+        return v
+    translated = _llm_translate_strings(texts, target_lang)
+    if len(translated) != len(texts):
+        return v   # sécurité : ne jamais corrompre
+    for idx, setter in setters:
+        setter(translated[idx])
+
+    # Propager les noms/justification traduits dans le model_spec miroir.
+    ms = v.get("model_spec")
+    if isinstance(ms, dict):
+        if isinstance(ms.get("outcome"), dict) and po.get("name"):
+            ms["outcome"]["name"] = po["name"]
+        name_by_mn = {pv.get("machine_name"): pv.get("name")
+                      for pv in (v.get("predictor_variables") or []) if isinstance(pv, dict)}
+        for f in (ms.get("features") or []):
+            if isinstance(f, dict) and name_by_mn.get(f.get("machine_name")):
+                f["name"] = name_by_mn[f["machine_name"]]
+        if isinstance(ms.get("algorithm"), dict) and ra.get("rationale"):
+            ms["algorithm"]["rationale"] = ra["rationale"]
+    return v
+
+
+def _get_localized_variables(scenario_id: str, lang, base_variables: dict | None = None,
+                             variables_lang=None, variables_i18n=None) -> dict | None:
+    """variables_json rendu dans la langue demandée (traduction non destructive mise en
+    cache par langue dans variables_i18n). Charge depuis la DB si base_variables absent."""
+    import json as _json
+    req = _norm_lang(lang)
+    if base_variables is None:
+        with engine.connect() as conn:
+            r = conn.execute(text(
+                "SELECT variables_json, variables_lang, variables_i18n "
+                "FROM scenario_settings WHERE scenario_id = :sid"
+            ), {"sid": scenario_id}).mappings().first()
+        if not (r and r["variables_json"]):
+            return None
+        base_variables = dict(r["variables_json"])
+        variables_lang, variables_i18n = r.get("variables_lang"), r.get("variables_i18n")
+    if not req:
+        return base_variables
+    base = _norm_lang(variables_lang) or _detect_variables_lang(base_variables)
+    if req == base:
+        return base_variables
+    cache = variables_i18n if isinstance(variables_i18n, dict) else {}
+    if isinstance(cache.get(req), dict):
+        return cache[req]
+    translated = _translate_variables_payload(base_variables, req)
+    try:  # cache best-effort ; l'affichage ne doit pas échouer si l'écriture échoue
+        with engine.begin() as conn:
+            conn.execute(text(
+                "UPDATE scenario_settings SET variables_i18n = "
+                "jsonb_set(COALESCE(variables_i18n, '{}'::jsonb), :path, CAST(:val AS jsonb), true) "
+                "WHERE scenario_id = :sid"
+            ), {"sid": scenario_id, "path": "{" + req + "}", "val": _json.dumps(translated)})
+    except Exception as e:
+        logger.warning(f"cache variables_i18n {scenario_id}/{req}: {e}")
+    return translated
 
 
 @app.post("/scenarios/{scenario_id}/variables/generate")
@@ -11647,12 +11968,17 @@ def get_scenario_variables(scenario_id: str, lang: str | None = Query(None)) -> 
     """
     with engine.connect() as conn:
         row = conn.execute(text("""
-            SELECT variables_json, variables_validated, variables_generated_at
+            SELECT variables_json, variables_validated, variables_generated_at,
+                   variables_lang, variables_i18n
             FROM scenario_settings WHERE scenario_id = :sid
         """), {"sid": scenario_id}).mappings().first()
 
     if row and row["variables_json"]:
-        result = dict(row["variables_json"])
+        # Affichage localisé (traduction non destructive mise en cache par langue) :
+        # le contenu fonctionnel (machine_name, model_spec) reste celui de variables_json.
+        result = dict(_get_localized_variables(
+            scenario_id, lang, base_variables=dict(row["variables_json"]),
+            variables_lang=row.get("variables_lang"), variables_i18n=row.get("variables_i18n")))
         result["_validated"] = row["variables_validated"]
         result["_generated_at"] = row["variables_generated_at"].isoformat() if row["variables_generated_at"] else None
         return result
@@ -11692,6 +12018,8 @@ def validate_scenario_variables(scenario_id: str, payload: dict[str, Any], _: No
                 UPDATE scenario_settings
                 SET variables_json = CAST(:vars AS jsonb),
                     variables_validated = TRUE,
+                    variables_lang = NULL,
+                    variables_i18n = NULL,
                     updated_at = NOW()
                 WHERE scenario_id = :sid
             """), {"sid": scenario_id, "vars": _json.dumps(variables_json)})
@@ -11706,24 +12034,30 @@ def validate_scenario_variables(scenario_id: str, payload: dict[str, Any], _: No
 
 
 @app.get("/scenarios/{scenario_id}/model/spec")
-def get_scenario_model_spec(scenario_id: str) -> dict[str, Any]:
+def get_scenario_model_spec(scenario_id: str, lang: str | None = Query(None)) -> dict[str, Any]:
     """
     Vue 'machine' du modèle dérivée de variables_json.model_spec : outcome
     (task_type), features (machine_name/dtype/source), algorithme (famille, CV,
     métrique) et data_template — les noms de colonnes EXACTS à fournir pour
     l'upload de données. Chaque élément porte sa provenance (ids d'articles).
-    Socle des phases suivantes (upload de données puis entraînement réel).
+    Les libellés d'affichage (noms, justifications, seuils) suivent la langue de l'UI ;
+    les identifiants machine et le data_template restent invariants.
     """
     with engine.connect() as conn:
         row = conn.execute(text("""
-            SELECT variables_json, variables_validated, variables_generated_at
+            SELECT variables_json, variables_validated, variables_generated_at,
+                   variables_lang, variables_i18n
             FROM scenario_settings WHERE scenario_id = :sid
         """), {"sid": scenario_id}).mappings().first()
 
     if not (row and row["variables_json"]):
         return {"status": "empty", "message": "Aucune spécification de modèle. Générez d'abord les Variables & Modèle."}
 
-    vj = dict(row["variables_json"])
+    # Variables localisées (affichage FR/EN) : le model_spec miroir porte les noms et
+    # la justification traduits, mais les machine_name / data_template sont intacts.
+    vj = dict(_get_localized_variables(
+        scenario_id, lang, base_variables=dict(row["variables_json"]),
+        variables_lang=row.get("variables_lang"), variables_i18n=row.get("variables_i18n")))
     spec = vj.get("model_spec")
     if not spec:
         # Spec générée avant la Phase 1 : pas encore de schéma machine.
@@ -11829,6 +12163,10 @@ def _ensure_spec_proposal_columns():
         conn.execute(text("ALTER TABLE scenario_settings ADD COLUMN IF NOT EXISTS actions_generated_at TIMESTAMP"))
         # Langue des actions en cache : on régénère quand l'UI change de langue.
         conn.execute(text("ALTER TABLE scenario_settings ADD COLUMN IF NOT EXISTS recommended_actions_lang VARCHAR(8)"))
+        # Localisation NON destructive des Variables/Modèle : langue de génération +
+        # cache des traductions d'affichage par langue (le spec fonctionnel est intact).
+        conn.execute(text("ALTER TABLE scenario_settings ADD COLUMN IF NOT EXISTS variables_lang VARCHAR(8)"))
+        conn.execute(text("ALTER TABLE scenario_settings ADD COLUMN IF NOT EXISTS variables_i18n JSONB"))
         # Caches de visualisation persistés en DB (durables, contrairement à /tmp).
         conn.execute(text("ALTER TABLE scenario_settings ADD COLUMN IF NOT EXISTS clustering_json JSONB"))
         conn.execute(text("ALTER TABLE scenario_settings ADD COLUMN IF NOT EXISTS clustering_generated_at TIMESTAMP"))
@@ -12099,6 +12437,8 @@ def validate_scenario_spec_proposal(scenario_id: str, payload: dict[str, Any],
             SET variables_json = CAST(:vars AS jsonb),
                 variables_validated = TRUE,
                 variables_generated_at = NOW(),
+                variables_lang = NULL,
+                variables_i18n = NULL,
                 variables_proposal_json = NULL,
                 proposal_generated_at = NULL,
                 updated_at = NOW()
@@ -12318,6 +12658,8 @@ def edit_scenario_model_spec(scenario_id: str, payload: dict[str, Any],
             SET variables_json = CAST(:vars AS jsonb),
                 variables_validated = TRUE,
                 variables_generated_at = NOW(),
+                variables_lang = NULL,
+                variables_i18n = NULL,
                 updated_at = NOW()
             WHERE scenario_id = :sid
         """), {"sid": scenario_id, "vars": _json.dumps(vj)})
