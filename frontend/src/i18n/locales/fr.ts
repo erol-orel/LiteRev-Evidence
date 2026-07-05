@@ -988,6 +988,7 @@ export const fr = {
       assumptions: "Hypothèses de régression (Gauss-Markov)",
       assumptionsTreeNote: "Modèle non linéaire : les hypothèses OLS ne s'appliquent pas au sens strict, les résidus restent indicatifs.",
       noTrainedModel: "Aucun modèle entraîné.",
+      syntheticBadge: "Modèle de démonstration entraîné sur des données SYNTHÉTIQUES — remplacez-les par des données réelles pour un usage opérationnel.",
       trainingInProgress: "Entraînement en cours...",
       retrainModel: "Ré-entraîner le modèle",
       trainModel: "Entraîner le modèle",

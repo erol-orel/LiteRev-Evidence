@@ -2269,12 +2269,14 @@ export interface ModelDataset {
     target_present?: boolean;
     readiness?: { can_train: boolean; reasons: string[]; auto_fetchable?: string[] };
   };
+  is_synthetic?: boolean;
   created_at?: string;
   message?: string;
 }
 
 export async function getModelDataset(scenarioId: string): Promise<ModelDataset> {
-  const r = await safeFetch(`${API_BASE_URL}/scenarios/${scenarioId}/model/data`);
+  // Authentifié : le schéma des données uploadées n'est pas public.
+  const r = await safeFetch(`${API_BASE_URL}/scenarios/${scenarioId}/model/data`, { headers: authHeaders() });
   if (!r.ok) throw new Error(httpMessage(r.status));
   return r.json();
 }

@@ -990,6 +990,7 @@ export const en: Translations = {
       assumptions: "Regression assumptions (Gauss-Markov)",
       assumptionsTreeNote: "Non-linear model: OLS assumptions do not strictly apply; residual diagnostics are indicative only.",
       noTrainedModel: "No trained model.",
+      syntheticBadge: "Demo model trained on SYNTHETIC data — replace it with real data for operational use.",
       trainingInProgress: "Training in progress...",
       retrainModel: "Retrain the model",
       trainModel: "Train the model",
