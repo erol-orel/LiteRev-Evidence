@@ -5949,32 +5949,25 @@ def subscribe_alerts(payload: AlertSubscriptionIn, _: None = Depends(require_api
     Enregistre une alerte email pour un scénario.
     L'utilisateur sera notifié quand de nouveaux articles sont ajoutés.
     """
+    email = _clean_email(payload.email) or payload.email
     with engine.begin() as conn:
-        # Créer la table si elle n'existe pas
-        conn.execute(text("""
-            CREATE TABLE IF NOT EXISTS alert_subscriptions (
-                id SERIAL PRIMARY KEY,
-                email VARCHAR(255) NOT NULL,
-                scenario_id VARCHAR(100) NOT NULL,
-                frequency VARCHAR(20) DEFAULT 'weekly',
-                created_at TIMESTAMP DEFAULT NOW(),
-                last_notified_at TIMESTAMP DEFAULT NULL,
-                is_active BOOLEAN DEFAULT TRUE,
-                UNIQUE(email, scenario_id)
-            )
-        """))
-        conn.execute(text("""
-            INSERT INTO alert_subscriptions (email, scenario_id, frequency)
-            VALUES (:email, :scenario_id, :frequency)
-            ON CONFLICT (email, scenario_id) DO UPDATE
-            SET frequency = :frequency, is_active = TRUE
-        """), payload.model_dump())
+        _ensure_alert_subscription(conn, email, payload.scenario_id, payload.frequency)
+        # S'abonner à SON scénario utilisateur = en devenir propriétaire (si aucun),
+        # pour que la living review le crawle (run_user_scenarios filtre sur owner_email).
+        owner_set = False
+        if payload.scenario_id.startswith("usr-"):
+            res = conn.execute(text(
+                "UPDATE user_scenarios SET owner_email = :e, updated_at = NOW() "
+                "WHERE id = :id AND (owner_email IS NULL OR owner_email = '')"
+            ), {"e": email, "id": payload.scenario_id})
+            owner_set = (res.rowcount or 0) > 0
 
     return {
         "status": "subscribed",
-        "email": payload.email,
+        "email": email,
         "scenario_id": payload.scenario_id,
         "frequency": payload.frequency,
+        "owner_set": owner_set,
         "message": f"Vous recevrez des alertes {payload.frequency} pour le scénario '{payload.scenario_id}'.",
     }
 

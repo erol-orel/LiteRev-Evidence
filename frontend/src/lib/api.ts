@@ -1819,7 +1819,7 @@ export async function subscribeAlerts(
   email: string,
   scenarioId: string,
   frequency: "daily" | "weekly" | "immediate" = "weekly",
-): Promise<{ status: string; message: string }> {
+): Promise<{ status: string; message: string; owner_set?: boolean }> {
   const r = await safeFetch(`${API_BASE_URL}/alerts/subscribe`, {
     method: "POST",
     headers: authHeaders({ "Content-Type": "application/json" }),

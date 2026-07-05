@@ -772,6 +772,7 @@ export const en: Translations = {
       emailAlertsHint:
         "Get notified when new articles are added to this scenario.",
       subscriptionConfirmedPrefix: "Subscription confirmed for",
+      ownerCovered: "This scenario is now tracked by the living review: new articles matching your query will be ingested and you'll be notified.",
       subscriptionFrequency: "· frequency:",
       emailPlaceholder: "your@email.com",
       frequencyImmediate: "Immediate",
