@@ -1253,8 +1253,8 @@ def compute_monitoring(pipeline, recent_df, task_type: str, classes: list | None
     Score les lignes récentes avec le modèle entraîné et en déduit un niveau
     d'alerte (green/orange/red). Pur/testable.
 
-    - classification : risque = proba moyenne de la classe positive ; bandes
-      fixes 0.33 / 0.66 (la proba est déjà normalisée).
+    - classification : risque = proba moyenne de la classe positive ; bandes issues
+      des seuils LITTÉRAIRES (alert_thresholds, plages de probabilité), repli 0.33/0.66.
     - régression : valeur = prédiction moyenne ; bandes = tertiles (p33/p66) de
       la cible d'entraînement (valeur haute = alerte, convention EMS).
     """
@@ -1298,6 +1298,16 @@ def compute_monitoring(pipeline, recent_df, task_type: str, classes: list | None
         risk = float(np.mean(proba[:, col]))
     else:
         risk = float(np.mean(np.asarray(pipeline.predict(recent_df)) == idx))
-    return {"kind": "probability", "value": risk, "level": _level_from_value(risk, 0.33, 0.66),
+    # PRIORITÉ aux seuils LITTÉRAIRES (alert_thresholds) comme en régression : le LLM
+    # produit des plages de PROBABILITÉ (ex. green '< 0.10', orange '0.10-0.30',
+    # red '> 0.30'). Repli sur les tertiles fixes 0.33/0.66 uniquement à défaut.
+    lo, hi = _alert_bounds(alert_thresholds)
+    if lo is not None and hi is not None and (lo > 1 or hi > 1):
+        lo, hi = lo / 100.0, hi / 100.0     # seuils écrits en % → ramener en [0,1]
+    if lo is not None and hi is not None:
+        bands_source = "literature"
+    else:
+        lo, hi, bands_source = 0.33, 0.66, "default_probability"
+    return {"kind": "probability", "value": risk, "level": _level_from_value(risk, lo, hi),
             "positive_class": (classes[idx] if classes else None),
-            "bands": {"orange": 0.33, "red": 0.66}, "n_scored": n}
+            "bands": {"orange": lo, "red": hi}, "n_scored": n, "bands_source": bands_source}

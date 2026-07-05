@@ -4445,6 +4445,12 @@ function ModelMonitorSection({ scenarioId }: { scenarioId: string }) {
         <div className="lg:col-span-2 rounded-3xl border border-white/10 bg-white/3 p-5 space-y-4">
           <SectionHeader icon={<Brain size={14} className="text-brand-400" />} title={t("scenarioDetail.model.trainedModel")}
             subtitle={t("scenarioDetail.model.trainedModelSubtitle")} />
+          {run?.status === "ready" && (run.summary as any)?.is_synthetic && (
+            <div className="rounded-xl border border-amber-500/25 bg-amber-500/10 px-3 py-2 flex items-start gap-2 text-[11px] text-amber-300">
+              <Sparkles size={12} className="mt-0.5 shrink-0" />
+              {t("scenarioDetail.model.syntheticBadge")}
+            </div>
+          )}
           {run?.status === "ready" ? (
             <div className="space-y-3">
               <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 text-xs">

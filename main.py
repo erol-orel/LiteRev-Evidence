@@ -12725,6 +12725,8 @@ def _ensure_model_dataset_table():
             "CREATE INDEX IF NOT EXISTS ix_model_dataset_scenario_active "
             "ON scenario_model_dataset (scenario_id, is_active)"
         ))
+        # Données SYNTHÉTIQUES de démo (badge « non réel » dans l'UI) vs données réelles.
+        conn.execute(text("ALTER TABLE scenario_model_dataset ADD COLUMN IF NOT EXISTS is_synthetic BOOLEAN DEFAULT FALSE"))
     logger.info("Table scenario_model_dataset vérifiée/créée.")
 
 
@@ -12920,7 +12922,14 @@ async def upload_model_dataset(
     if ext not in ("csv", "xlsx", "xls"):
         raise HTTPException(status_code=400, detail="Seuls les fichiers CSV et Excel (.xlsx, .xls) sont acceptés.")
 
-    content = await file.read()
+    # Plafond d'octets AVANT de tout charger en mémoire : lit au plus MAX+1 octets
+    # (borne la RAM face à un upload démesuré / malveillant). 25 Mo couvrent largement
+    # un CSV/XLSX de 500 000 lignes, qui est de toute façon rejeté plus bas.
+    _MAX_UPLOAD_BYTES = 25 * 1024 * 1024
+    content = await file.read(_MAX_UPLOAD_BYTES + 1)
+    if len(content) > _MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=413,
+                            detail=f"Fichier trop volumineux (> {_MAX_UPLOAD_BYTES // (1024 * 1024)} Mo).")
     try:
         if ext in ("xlsx", "xls"):
             df = pd.read_excel(io.BytesIO(content))
@@ -12959,8 +12968,8 @@ async def upload_model_dataset(
         ), {"sid": scenario_id})
         new_id = conn.execute(text("""
             INSERT INTO scenario_model_dataset
-                (scenario_id, filename, stored_path, n_rows, n_cols, columns_json, validation_json, is_active)
-            VALUES (:sid, :fn, :sp, :nr, :nc, CAST(:cj AS jsonb), CAST(:vj AS jsonb), TRUE)
+                (scenario_id, filename, stored_path, n_rows, n_cols, columns_json, validation_json, is_active, is_synthetic)
+            VALUES (:sid, :fn, :sp, :nr, :nc, CAST(:cj AS jsonb), CAST(:vj AS jsonb), TRUE, FALSE)
             RETURNING id
         """), {
             "sid": scenario_id, "fn": filename, "sp": stored_path,
@@ -12983,11 +12992,13 @@ async def upload_model_dataset(
 
 
 @app.get("/scenarios/{scenario_id}/model/data")
-def get_model_dataset(scenario_id: str) -> dict[str, Any]:
-    """Résumé du dataset actif d'un scénario + état de préparation à l'entraînement."""
+def get_model_dataset(scenario_id: str, _: None = Depends(require_api_key)) -> dict[str, Any]:
+    """Résumé du dataset actif d'un scénario + état de préparation à l'entraînement.
+    Authentifié : le schéma des données uploadées par l'utilisateur ne doit pas être
+    lisible publiquement par simple connaissance de l'ID de scénario."""
     with engine.connect() as conn:
         row = conn.execute(text("""
-            SELECT id, filename, n_rows, n_cols, columns_json, validation_json, created_at
+            SELECT id, filename, n_rows, n_cols, columns_json, validation_json, is_synthetic, created_at
             FROM scenario_model_dataset
             WHERE scenario_id = :sid AND is_active = TRUE
             ORDER BY created_at DESC LIMIT 1
@@ -13004,6 +13015,7 @@ def get_model_dataset(scenario_id: str) -> dict[str, Any]:
         "n_cols": row["n_cols"],
         "columns": row["columns_json"],
         "validation": row["validation_json"],
+        "is_synthetic": bool(row["is_synthetic"]),
         "created_at": row["created_at"].isoformat() if row["created_at"] else None,
     }
 
@@ -13052,8 +13064,8 @@ def generate_synthetic_model_dataset(scenario_id: str, n_rows: int = 400,
         ), {"sid": scenario_id})
         new_id = conn.execute(text("""
             INSERT INTO scenario_model_dataset
-                (scenario_id, filename, stored_path, n_rows, n_cols, columns_json, validation_json, is_active)
-            VALUES (:sid, :fn, :sp, :nr, :nc, CAST(:cj AS jsonb), CAST(:vj AS jsonb), TRUE)
+                (scenario_id, filename, stored_path, n_rows, n_cols, columns_json, validation_json, is_active, is_synthetic)
+            VALUES (:sid, :fn, :sp, :nr, :nc, CAST(:cj AS jsonb), CAST(:vj AS jsonb), TRUE, TRUE)
             RETURNING id
         """), {
             "sid": scenario_id, "fn": f"synthetic_{n_rows}.csv", "sp": stored_path,
@@ -13136,7 +13148,7 @@ def _run_model_training(scenario_id: str, n_trials: int = 25, compare: bool = Fa
 
         with engine.connect() as conn:
             ds = conn.execute(text("""
-                SELECT id, stored_path FROM scenario_model_dataset
+                SELECT id, stored_path, is_synthetic FROM scenario_model_dataset
                 WHERE scenario_id = :sid AND is_active = TRUE
                 ORDER BY created_at DESC LIMIT 1
             """), {"sid": scenario_id}).mappings().first()
@@ -13155,6 +13167,9 @@ def _run_model_training(scenario_id: str, n_trials: int = 25, compare: bool = Fa
             result["leaderboard_lower_is_better"] = comparison["lower_is_better"]
         else:
             result = model_trainer.train_model(df, spec, n_trials=n_trials)
+
+        # Traçabilité : modèle entraîné sur des données SYNTHÉTIQUES (démo) vs réelles.
+        result["is_synthetic"] = bool(ds.get("is_synthetic"))
 
         # Sérialiser le pipeline entraîné.
         pipeline = result.pop("pipeline")
