@@ -2319,7 +2319,7 @@ export interface ModelSpecResponse {
 }
 
 export async function getScenarioModelSpec(scenarioId: string): Promise<ModelSpecResponse> {
-  const r = await safeFetch(`${API_BASE_URL}/scenarios/${scenarioId}/model/spec`);
+  const r = await safeFetch(`${API_BASE_URL}/scenarios/${scenarioId}/model/spec?lang=${currentLang()}`);
   if (!r.ok) throw new Error(httpMessage(r.status));
   return r.json();
 }

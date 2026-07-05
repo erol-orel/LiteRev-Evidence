@@ -11586,15 +11586,19 @@ Retourne UNIQUEMENT le JSON valide."""
                         updated_at = NOW()
                 """), {"sid": scenario_id, "vars": _json.dumps(variables)})
             else:
+                # variables_lang = langue de génération (pour l'affichage localisé) ;
+                # variables_i18n remis à NULL car les traductions en cache sont périmées.
                 conn.execute(text("""
-                    INSERT INTO scenario_settings (scenario_id, variables_json, variables_validated, variables_generated_at, updated_at)
-                    VALUES (:sid, CAST(:vars AS jsonb), FALSE, NOW(), NOW())
+                    INSERT INTO scenario_settings (scenario_id, variables_json, variables_validated, variables_generated_at, variables_lang, variables_i18n, updated_at)
+                    VALUES (:sid, CAST(:vars AS jsonb), FALSE, NOW(), :vlang, NULL, NOW())
                     ON CONFLICT (scenario_id) DO UPDATE
                     SET variables_json = CAST(:vars AS jsonb),
                         variables_validated = FALSE,
                         variables_generated_at = NOW(),
+                        variables_lang = :vlang,
+                        variables_i18n = NULL,
                         updated_at = NOW()
-                """), {"sid": scenario_id, "vars": _json.dumps(variables)})
+                """), {"sid": scenario_id, "vars": _json.dumps(variables), "vlang": (_norm_lang(lang) or "fr")})
 
         logger.info(f"Variables & Modèle générés ({persist}) pour {scenario_id}: {len(pico_articles)} articles PICO.")
         return variables
@@ -11602,6 +11606,177 @@ Retourne UNIQUEMENT le JSON valide."""
     except Exception as e:
         logger.error(f"Variables generation {scenario_id}: {e}", exc_info=True)
         return {"error": str(e)}
+
+
+# ─── Localisation NON DESTRUCTIVE des Variables/Modèle (affichage FR/EN) ──────
+# variables_json est FONCTIONNEL (machine_name, dtype, model_spec, data_template) :
+# on ne le régénère pas au changement de langue. On traduit UNIQUEMENT les champs
+# d'affichage (noms, définitions, libellés, justifications) et on met en cache la
+# variante par langue dans variables_i18n. Les identifiants machine, types,
+# provenances et le model_spec structurel restent intacts.
+
+def _norm_lang(lang) -> str | None:
+    """'en'/'fr' à partir d'une valeur de langue quelconque ; None si non exploitable."""
+    if not isinstance(lang, str) or not lang.strip():
+        return None
+    return "en" if lang.strip().lower().startswith("en") else "fr"
+
+
+def _detect_variables_lang(variables: dict) -> str:
+    """Heuristique FR/EN pour les lignes LEGACY dépourvues de variables_lang."""
+    po = (variables or {}).get("primary_outcome") or {}
+    sample = " ".join(str(po.get(k, "")) for k in ("name", "definition", "measurement")).lower()
+    for pv in (variables.get("predictor_variables") or [])[:3]:
+        sample += " " + str((pv or {}).get("definition", "")).lower()
+    if not sample.strip():
+        return "fr"
+    fr = sum(sample.count(m) for m in (" le ", " la ", " les ", " des ", " une ", " du ", " et ",
+                                       " pour ", " être", " taux ", "é", "è", "à", "ç"))
+    en = sum(sample.count(m) for m in (" the ", " of ", " and ", " for ", " rate ", " number ",
+                                       " is ", " to ", " in ", " with "))
+    return "en" if en > fr else "fr"
+
+
+def _llm_translate_strings(texts: list, target_lang: str) -> list:
+    """Traduit une liste de chaînes vers 'en'/'fr' (ordre + longueur conservés).
+    Renvoie les chaînes d'ORIGINE en cas d'échec — jamais de corruption."""
+    import json as _json
+    from openai import OpenAI as _OAI
+    if not texts:
+        return texts
+    lang_name = "English" if target_lang == "en" else "French"
+    sys = (f"You are a professional medical translator. Translate each string in the input "
+           f"array to {lang_name}. Preserve medical/technical terms, units (e.g. /100k, mg, %), "
+           "acronyms (ARI, RSV, SARIMAX, ED), and all numbers. Do NOT add explanations or notes. "
+           'Return ONLY a JSON object {"items": [...]} whose "items" is a JSON array of the '
+           "translated strings, in the SAME order and with EXACTLY the same length as the input.")
+    usr = _json.dumps({"items": list(texts)}, ensure_ascii=False)
+    try:
+        client = _OAI(timeout=90.0)
+        resp = client.chat.completions.create(
+            model="gpt-4.1",
+            messages=[{"role": "system", "content": sys}, {"role": "user", "content": usr}],
+            temperature=0, seed=42, max_tokens=4000,
+            response_format={"type": "json_object"},
+        )
+        out = _json.loads(resp.choices[0].message.content)
+        items = out.get("items") if isinstance(out, dict) else None
+        if isinstance(items, list) and len(items) == len(texts) and all(isinstance(x, str) for x in items):
+            return items
+        logger.warning(f"translate_strings: shape mismatch ({type(items).__name__}, "
+                       f"{len(items) if isinstance(items, list) else 'n/a'} vs {len(texts)})")
+    except Exception as e:
+        logger.warning(f"translate_strings failed: {e}")
+    return texts
+
+
+def _translate_variables_payload(variables: dict, target_lang: str) -> dict:
+    """Copie TRADUITE de variables_json : seuls les champs d'AFFICHAGE sont traduits
+    (noms, définitions, libellés, justifications, listes de bases/notes). machine_name,
+    dtype, task_type, family, metric, cv, provenance, ranges numériques et structure du
+    model_spec restent identiques. Les noms/justification traduits sont propagés dans le
+    model_spec miroir (lu par /model/spec)."""
+    import copy
+    v = copy.deepcopy(variables or {})
+    texts: list = []
+    setters: list = []
+
+    def _add(container, key):
+        val = container.get(key)
+        if isinstance(val, str) and val.strip():
+            texts.append(val)
+            setters.append((len(texts) - 1, lambda new, c=container, k=key: c.__setitem__(k, new)))
+
+    def _add_list(lst):
+        if isinstance(lst, list):
+            for i, item in enumerate(lst):
+                if isinstance(item, str) and item.strip():
+                    texts.append(item)
+                    setters.append((len(texts) - 1, lambda new, l=lst, idx=i: l.__setitem__(idx, new)))
+
+    po = v.get("primary_outcome") or {}
+    for k in ("name", "definition", "measurement", "timeframe"):
+        _add(po, k)
+    for so in (v.get("secondary_outcomes") or []):
+        if isinstance(so, dict):
+            for k in ("name", "definition"):
+                _add(so, k)
+    for pv in (v.get("predictor_variables") or []):
+        if isinstance(pv, dict):
+            for k in ("name", "definition", "data_source"):
+                _add(pv, k)
+    ra = v.get("recommended_algorithm") or {}
+    for k in ("primary", "rationale", "validation_method"):
+        _add(ra, k)
+    _add_list(ra.get("alternatives"))
+    at = v.get("alert_thresholds") or {}
+    for lvl in ("green", "orange", "red"):
+        band = at.get(lvl)
+        if isinstance(band, dict):
+            for k in ("label", "rationale", "description"):
+                _add(band, k)
+    _add_list(v.get("required_databases"))
+    for k in ("sample_size_recommendation", "update_frequency", "implementation_notes"):
+        _add(v, k)
+
+    if not texts:
+        return v
+    translated = _llm_translate_strings(texts, target_lang)
+    if len(translated) != len(texts):
+        return v   # sécurité : ne jamais corrompre
+    for idx, setter in setters:
+        setter(translated[idx])
+
+    # Propager les noms/justification traduits dans le model_spec miroir.
+    ms = v.get("model_spec")
+    if isinstance(ms, dict):
+        if isinstance(ms.get("outcome"), dict) and po.get("name"):
+            ms["outcome"]["name"] = po["name"]
+        name_by_mn = {pv.get("machine_name"): pv.get("name")
+                      for pv in (v.get("predictor_variables") or []) if isinstance(pv, dict)}
+        for f in (ms.get("features") or []):
+            if isinstance(f, dict) and name_by_mn.get(f.get("machine_name")):
+                f["name"] = name_by_mn[f["machine_name"]]
+        if isinstance(ms.get("algorithm"), dict) and ra.get("rationale"):
+            ms["algorithm"]["rationale"] = ra["rationale"]
+    return v
+
+
+def _get_localized_variables(scenario_id: str, lang, base_variables: dict | None = None,
+                             variables_lang=None, variables_i18n=None) -> dict | None:
+    """variables_json rendu dans la langue demandée (traduction non destructive mise en
+    cache par langue dans variables_i18n). Charge depuis la DB si base_variables absent."""
+    import json as _json
+    req = _norm_lang(lang)
+    if base_variables is None:
+        with engine.connect() as conn:
+            r = conn.execute(text(
+                "SELECT variables_json, variables_lang, variables_i18n "
+                "FROM scenario_settings WHERE scenario_id = :sid"
+            ), {"sid": scenario_id}).mappings().first()
+        if not (r and r["variables_json"]):
+            return None
+        base_variables = dict(r["variables_json"])
+        variables_lang, variables_i18n = r.get("variables_lang"), r.get("variables_i18n")
+    if not req:
+        return base_variables
+    base = _norm_lang(variables_lang) or _detect_variables_lang(base_variables)
+    if req == base:
+        return base_variables
+    cache = variables_i18n if isinstance(variables_i18n, dict) else {}
+    if isinstance(cache.get(req), dict):
+        return cache[req]
+    translated = _translate_variables_payload(base_variables, req)
+    try:  # cache best-effort ; l'affichage ne doit pas échouer si l'écriture échoue
+        with engine.begin() as conn:
+            conn.execute(text(
+                "UPDATE scenario_settings SET variables_i18n = "
+                "jsonb_set(COALESCE(variables_i18n, '{}'::jsonb), :path, CAST(:val AS jsonb), true) "
+                "WHERE scenario_id = :sid"
+            ), {"sid": scenario_id, "path": "{" + req + "}", "val": _json.dumps(translated)})
+    except Exception as e:
+        logger.warning(f"cache variables_i18n {scenario_id}/{req}: {e}")
+    return translated
 
 
 @app.post("/scenarios/{scenario_id}/variables/generate")
@@ -11647,12 +11822,17 @@ def get_scenario_variables(scenario_id: str, lang: str | None = Query(None)) -> 
     """
     with engine.connect() as conn:
         row = conn.execute(text("""
-            SELECT variables_json, variables_validated, variables_generated_at
+            SELECT variables_json, variables_validated, variables_generated_at,
+                   variables_lang, variables_i18n
             FROM scenario_settings WHERE scenario_id = :sid
         """), {"sid": scenario_id}).mappings().first()
 
     if row and row["variables_json"]:
-        result = dict(row["variables_json"])
+        # Affichage localisé (traduction non destructive mise en cache par langue) :
+        # le contenu fonctionnel (machine_name, model_spec) reste celui de variables_json.
+        result = dict(_get_localized_variables(
+            scenario_id, lang, base_variables=dict(row["variables_json"]),
+            variables_lang=row.get("variables_lang"), variables_i18n=row.get("variables_i18n")))
         result["_validated"] = row["variables_validated"]
         result["_generated_at"] = row["variables_generated_at"].isoformat() if row["variables_generated_at"] else None
         return result
@@ -11692,6 +11872,8 @@ def validate_scenario_variables(scenario_id: str, payload: dict[str, Any], _: No
                 UPDATE scenario_settings
                 SET variables_json = CAST(:vars AS jsonb),
                     variables_validated = TRUE,
+                    variables_lang = NULL,
+                    variables_i18n = NULL,
                     updated_at = NOW()
                 WHERE scenario_id = :sid
             """), {"sid": scenario_id, "vars": _json.dumps(variables_json)})
@@ -11706,24 +11888,30 @@ def validate_scenario_variables(scenario_id: str, payload: dict[str, Any], _: No
 
 
 @app.get("/scenarios/{scenario_id}/model/spec")
-def get_scenario_model_spec(scenario_id: str) -> dict[str, Any]:
+def get_scenario_model_spec(scenario_id: str, lang: str | None = Query(None)) -> dict[str, Any]:
     """
     Vue 'machine' du modèle dérivée de variables_json.model_spec : outcome
     (task_type), features (machine_name/dtype/source), algorithme (famille, CV,
     métrique) et data_template — les noms de colonnes EXACTS à fournir pour
     l'upload de données. Chaque élément porte sa provenance (ids d'articles).
-    Socle des phases suivantes (upload de données puis entraînement réel).
+    Les libellés d'affichage (noms, justifications, seuils) suivent la langue de l'UI ;
+    les identifiants machine et le data_template restent invariants.
     """
     with engine.connect() as conn:
         row = conn.execute(text("""
-            SELECT variables_json, variables_validated, variables_generated_at
+            SELECT variables_json, variables_validated, variables_generated_at,
+                   variables_lang, variables_i18n
             FROM scenario_settings WHERE scenario_id = :sid
         """), {"sid": scenario_id}).mappings().first()
 
     if not (row and row["variables_json"]):
         return {"status": "empty", "message": "Aucune spécification de modèle. Générez d'abord les Variables & Modèle."}
 
-    vj = dict(row["variables_json"])
+    # Variables localisées (affichage FR/EN) : le model_spec miroir porte les noms et
+    # la justification traduits, mais les machine_name / data_template sont intacts.
+    vj = dict(_get_localized_variables(
+        scenario_id, lang, base_variables=dict(row["variables_json"]),
+        variables_lang=row.get("variables_lang"), variables_i18n=row.get("variables_i18n")))
     spec = vj.get("model_spec")
     if not spec:
         # Spec générée avant la Phase 1 : pas encore de schéma machine.
@@ -11829,6 +12017,10 @@ def _ensure_spec_proposal_columns():
         conn.execute(text("ALTER TABLE scenario_settings ADD COLUMN IF NOT EXISTS actions_generated_at TIMESTAMP"))
         # Langue des actions en cache : on régénère quand l'UI change de langue.
         conn.execute(text("ALTER TABLE scenario_settings ADD COLUMN IF NOT EXISTS recommended_actions_lang VARCHAR(8)"))
+        # Localisation NON destructive des Variables/Modèle : langue de génération +
+        # cache des traductions d'affichage par langue (le spec fonctionnel est intact).
+        conn.execute(text("ALTER TABLE scenario_settings ADD COLUMN IF NOT EXISTS variables_lang VARCHAR(8)"))
+        conn.execute(text("ALTER TABLE scenario_settings ADD COLUMN IF NOT EXISTS variables_i18n JSONB"))
         # Caches de visualisation persistés en DB (durables, contrairement à /tmp).
         conn.execute(text("ALTER TABLE scenario_settings ADD COLUMN IF NOT EXISTS clustering_json JSONB"))
         conn.execute(text("ALTER TABLE scenario_settings ADD COLUMN IF NOT EXISTS clustering_generated_at TIMESTAMP"))
@@ -12099,6 +12291,8 @@ def validate_scenario_spec_proposal(scenario_id: str, payload: dict[str, Any],
             SET variables_json = CAST(:vars AS jsonb),
                 variables_validated = TRUE,
                 variables_generated_at = NOW(),
+                variables_lang = NULL,
+                variables_i18n = NULL,
                 variables_proposal_json = NULL,
                 proposal_generated_at = NULL,
                 updated_at = NOW()
@@ -12318,6 +12512,8 @@ def edit_scenario_model_spec(scenario_id: str, payload: dict[str, Any],
             SET variables_json = CAST(:vars AS jsonb),
                 variables_validated = TRUE,
                 variables_generated_at = NOW(),
+                variables_lang = NULL,
+                variables_i18n = NULL,
                 updated_at = NOW()
             WHERE scenario_id = :sid
         """), {"sid": scenario_id, "vars": _json.dumps(vj)})
