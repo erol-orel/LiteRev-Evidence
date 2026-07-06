@@ -218,6 +218,7 @@ export const fr = {
   },
   scenarios: {
     loading: "Chargement des scénarios...",
+    empty: "Aucun scénario pour l'instant. Lancez une recherche pour en créer un.",
     loadErrorTitle: "Erreur de chargement des scénarios",
     loadErrorHint1: "Vérifiez que le service API est démarré et que",
     loadErrorHint2: "répond correctement.",

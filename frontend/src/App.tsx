@@ -1245,11 +1245,16 @@ function ScenariosView({
     );
   }
 
-  if (scenarios.length === 0) {
+  // Une liste GESICA vide n'est PAS un chargement (bug : la vue restait bloquée
+  // sur un spinner « Chargement… » dès qu'il n'y avait plus de scénario GESICA,
+  // masquant aussi les scénarios utilisateur). On n'affiche l'état vide QUE si
+  // rien n'existe (ni GESICA, ni scénarios utilisateur, ni recherches) ; sinon on
+  // rend la vue normale, qui inclut la section des scénarios utilisateur.
+  if (scenarios.length === 0 && (userScenarios?.length ?? 0) === 0 && (savedSearches?.length ?? 0) === 0) {
     return (
-      <div className="flex items-center justify-center py-16 text-forest-400">
-        <RotateCcw size={18} className="mr-2 animate-spin" />
-        {t("scenarios.loading")}
+      <div className="flex flex-col items-center justify-center py-16 text-forest-400 gap-3">
+        <FolderOpen size={22} className="opacity-50" />
+        <p className="text-sm">{t("scenarios.empty")}</p>
       </div>
     );
   }
