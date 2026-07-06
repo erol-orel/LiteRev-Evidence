@@ -1201,6 +1201,15 @@ function ScenariosView({
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [detailScenarioId, setDetailScenarioId] = useState<string | null>(null);
   const [detailInitialTab, setDetailInitialTab] = useState<"model" | undefined>(undefined);
+  // Lien profond (email de living review, partage) : ?scenario=<id> ouvre directement
+  // la page du scénario. On nettoie l'URL ensuite pour ne pas la rouvrir au rafraîchissement.
+  useEffect(() => {
+    const sid = new URLSearchParams(window.location.search).get("scenario");
+    if (sid) {
+      setDetailScenarioId(sid);
+      window.history.replaceState({}, "", window.location.pathname);
+    }
+  }, []);
   const [showNewFolderDialog, setShowNewFolderDialog] = useState(false);
   const [newFolderName, setNewFolderName] = useState('');
   const [newFolderColor, setNewFolderColor] = useState('#6366f1');

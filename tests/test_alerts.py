@@ -56,16 +56,27 @@ def _articles(n):
             for i in range(n)]
 
 
-def test_render_digest_lists_real_articles():
-    subj, html, text = main._render_alert_digest("epidemic-early-warning", _articles(3), 3)
-    assert "3" in subj and "epidemic-early-warning" in subj
+def test_render_digest_uses_name_and_deeplink():
+    name = "Prevision des hausses ARI"
+    subj, html, text = main._render_alert_digest(
+        "usr-095d26e192ae", _articles(3), 3, scenario_name=name)
+    # subject + body show the human NAME, not the raw id
+    assert name in subj
+    assert "usr-095d26e192ae" not in subj
+    assert name in html
     for i in range(3):
         assert f"Article {i}" in html
         assert f"Article {i}" in text
-    # DOI link is built when no url is present
+    # DOI link built when no url is present
     assert "doi.org/10.x/0" in html
-    # scenario link present
-    assert "/#scenario/epidemic-early-warning" in html
+    # deep link to the scenario PAGE (?scenario=<id>), not the old /#scenario search route
+    assert "/?scenario=usr-095d26e192ae" in html
+    assert "/#scenario/" not in html
+
+
+def test_render_digest_falls_back_to_id_without_name():
+    subj, _h, _t = main._render_alert_digest("s1", _articles(1), 1)
+    assert "s1" in subj                                  # no name → id is used
 
 
 def test_render_digest_escapes_html():
@@ -82,8 +93,9 @@ def test_render_digest_overflow_note():
     assert "5 de plus" in text
 
 
-def test_render_digest_singular_plural():
+def test_render_digest_singular_plural_french_agreement():
     subj1, _h, _t = main._render_alert_digest("s", _articles(1), 1)
     subj2, _h2, _t2 = main._render_alert_digest("s", _articles(2), 2)
-    assert "1 nouvel article" in subj1
-    assert "2 nouvels articles" in subj2 or "2 nouvel" in subj2   # accept simple pluralization
+    assert "1 nouvel article" in subj1              # singular
+    assert "2 nouveaux articles" in subj2           # correct FR plural (not "nouvels")
+    assert "nouvels" not in subj2
