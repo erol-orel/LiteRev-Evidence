@@ -220,6 +220,7 @@ export const en: Translations = {
   },
   scenarios: {
     loading: "Loading scenarios...",
+    empty: "No scenarios yet. Run a search to create one.",
     loadErrorTitle: "Failed to load scenarios",
     loadErrorHint1: "Check that the API service is running and that",
     loadErrorHint2: "responds correctly.",
