@@ -22,6 +22,17 @@ def test_clean_email():
     assert main._clean_email("a@b.co") == "a@b.co"
 
 
+# ── SMTP port/mode inference (GoDaddy Pro Email 465 SSL vs M365 587 STARTTLS) ─
+def test_smtp_mode_inference():
+    assert main._smtp_mode_for(465, None) == "ssl"
+    assert main._smtp_mode_for(587, None) == "starttls"
+    assert main._smtp_mode_for(25, None) == "starttls"
+    assert main._smtp_mode_for(465, "starttls") == "starttls"   # explicit override wins
+    assert main._smtp_mode_for(587, "ssl") == "ssl"
+    assert main._smtp_mode_for(None, None) == "ssl"             # default when unset
+    assert main._smtp_mode_for("nonsense", None) == "ssl"       # bad port → safe default
+
+
 # ── frequency "is due" ───────────────────────────────────────────────────────
 def test_digest_is_due():
     now = datetime(2026, 7, 5, tzinfo=timezone.utc)

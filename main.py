@@ -6060,8 +6060,25 @@ def _render_alert_digest(scenario_id: str, articles: list[dict], total_new: int,
     return subj, html_body, text_body
 
 
-def _send_email_smtp(host: str, user: str, pw: str, to: str, subject: str, html_body: str, text_body: str) -> None:
-    """Envoi SMTP (SSL 465). Lève en cas d'échec (l'appelant journalise)."""
+def _smtp_mode_for(port, security: str | None) -> str:
+    """Mode de connexion SMTP : 'ssl' | 'starttls' | 'none'. Un SMTP_SECURITY
+    explicite l'emporte ; sinon on l'infère du port (587/25 → STARTTLS, sinon SSL).
+    Couvre GoDaddy Professional Email (smtpout.secureserver.net:465 SSL) ET
+    Microsoft 365 (smtp.office365.com:587 STARTTLS)."""
+    mode = (security or "").strip().lower()
+    if mode in ("ssl", "starttls", "none"):
+        return mode
+    try:
+        p = int(port)
+    except (TypeError, ValueError):
+        p = 465
+    return "starttls" if p in (587, 25) else "ssl"
+
+
+def _send_email_smtp(host: str, user: str, pw: str, to: str, subject: str, html_body: str, text_body: str,
+                     port=None, security: str | None = None) -> None:
+    """Envoi SMTP, port/mode configurables (env SMTP_PORT / SMTP_SECURITY ; défaut
+    465 SSL). Lève en cas d'échec (l'appelant journalise)."""
     import smtplib
     from email.mime.text import MIMEText
     from email.mime.multipart import MIMEMultipart
@@ -6069,9 +6086,22 @@ def _send_email_smtp(host: str, user: str, pw: str, to: str, subject: str, html_
     msg["Subject"], msg["From"], msg["To"] = subject, user, to
     msg.attach(MIMEText(text_body, "plain"))
     msg.attach(MIMEText(html_body, "html"))
-    with smtplib.SMTP_SSL(host, 465, timeout=30) as server:
-        server.login(user, pw)
-        server.sendmail(user, to, msg.as_string())
+    port = int(port or os.getenv("SMTP_PORT") or 465)
+    mode = _smtp_mode_for(port, security if security is not None else os.getenv("SMTP_SECURITY"))
+    if mode == "ssl":
+        with smtplib.SMTP_SSL(host, port, timeout=30) as server:
+            if user:
+                server.login(user, pw)
+            server.sendmail(user, to, msg.as_string())
+    else:
+        with smtplib.SMTP(host, port, timeout=30) as server:
+            server.ehlo()
+            if mode == "starttls":
+                server.starttls()
+                server.ehlo()
+            if user:
+                server.login(user, pw)
+            server.sendmail(user, to, msg.as_string())
 
 
 def _process_alert_digests(scenario_id: str | None, dry_run: bool, respect_frequency: bool) -> dict[str, Any]:
