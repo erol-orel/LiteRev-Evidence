@@ -3315,7 +3315,8 @@ def get_terrain_meteo(lat: float = 46.2044, lon: float = 6.1432) -> dict[str, An
                 impact_ems += " Risque accru de traumatismes par chutes d'objets ou accidents de la voie publique."
 
             return {
-                "source": "MeteoSwiss (via Open-Meteo API)",
+                "source": "Open-Meteo (api.open-meteo.com)",
+                "data_status": "live",
                 "coordinates": {"latitude": lat, "longitude": lon},
                 "station": "Genève / Cointrin (Région Transfrontalière)",
                 "temperature": temp,
@@ -3326,25 +3327,26 @@ def get_terrain_meteo(lat: float = 46.2044, lon: float = 6.1432) -> dict[str, An
                 "alert_level": alert_level,
                 "alert_description": alert_desc,
                 "impact_on_ems": impact_ems,
-                "architecture_note": "Prêt pour branchement direct sur l'API privée MeteoSwiss ou flux interne HUG/CHUV."
+                "architecture_note": "Données météo réelles via Open-Meteo (proxy public, TZ Europe/Zurich). Un branchement sur l'API MeteoSwiss reste possible."
             }
     except Exception as e:
         logger.error(f"Erreur lors de la récupération météo: {e}")
         
-    # Fallback robuste avec données réalistes si l'API externe est indisponible
+    # Fallback : valeurs d'exemple si l'API Open-Meteo est injoignable (clairement signalé)
     return {
-        "source": "MeteoSwiss (Simulation de secours)",
+        "source": "Estimation de secours — API Open-Meteo indisponible",
+        "data_status": "fallback_estimate",
         "coordinates": {"latitude": lat, "longitude": lon},
-        "station": "Genève / Cointrin (Simulation)",
+        "station": "Genève / Cointrin (estimation)",
         "temperature": 28.5,
         "apparent_temperature": 29.8,
         "humidity": 45.0,
         "wind_speed": 12.0,
         "precipitation": 0.0,
         "alert_level": "warning",
-        "alert_description": "Forte chaleur d'été.",
+        "alert_description": "Forte chaleur d'été (valeur d'exemple).",
         "impact_on_ems": "Augmentation modérée des appels d'urgence pour pathologies cardiovasculaires (+5%).",
-        "architecture_note": "Mode dégradé activé. Prêt pour branchement direct sur l'API privée MeteoSwiss."
+        "architecture_note": "Valeurs d'exemple : l'API Open-Meteo n'a pas répondu. Ne pas utiliser pour une décision opérationnelle."
     }
 
 
@@ -3409,6 +3411,27 @@ def get_terrain_geo(
     }
 
 
+def _sentiweb_latest_value(res: Any) -> float | None:
+    """Incidence /100k de la semaine la plus récente d'une réponse Sentiweb. PUR/testable.
+
+    Sentiweb renvoie {"data": [{"week": <yyyyww>, "inc100": <taux/100k>, "inc": <cas>}, …]}.
+    Le bug historique : le code attendait une LISTE racine avec une clé "incidence"
+    (`isinstance(res, list)` + `.get("incidence")`), ce qui ne correspondait jamais →
+    repli silencieux sur une valeur codée en dur. Renvoie None si rien d'exploitable."""
+    rows = res.get("data") if isinstance(res, dict) else (res if isinstance(res, list) else [])
+    rows = [x for x in (rows or []) if isinstance(x, dict) and (x.get("inc100") is not None or x.get("inc") is not None)]
+    if not rows:
+        return None
+    latest = max(rows, key=lambda x: x.get("week", 0))
+    val = latest.get("inc100")
+    if val is None:
+        val = latest.get("inc")
+    try:
+        return float(val) if val is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
 @app.get("/terrain/epidemic")
 def get_terrain_epidemic(region: str = "transborder") -> dict[str, Any]:
     """
@@ -3418,36 +3441,34 @@ def get_terrain_epidemic(region: str = "transborder") -> dict[str, Any]:
     et les flux ouverts de l'OFSP suisse.
     """
     import requests
-    
+
     # Tentative de récupération des données réelles du Réseau Sentinelles (France) via leur API publique / CSV
     # Nous interrogeons les dernières données disponibles pour la grippe (ILI) et la gastro-entérite (diarrhée aiguë)
     france_data = {}
-    try:
-        # API publique du Réseau Sentinelles (Santé Publique France)
-        # On interroge les données de la semaine dernière pour la région Auvergne-Rhône-Alpes (reg=84)
-        url_sentinelles = "https://www.sentiweb.fr/api/v1/indicators?indicator=3&geo=reg&reg=84" # Indicator 3 = Grippe
-        r = requests.get(url_sentinelles, timeout=4)
-        if r.status_code == 200:
-            res = r.json()
-            if res and isinstance(res, list) and len(res) > 0:
-                latest = res[0]
-                france_data["grippe"] = latest.get("incidence", 145.2)
-    except Exception as e:
-        logger.warning(f"Impossible de joindre le Réseau Sentinelles FR: {e}")
-        france_data["grippe"] = 145.2
+
+    def _sentiweb_latest_inc100(indicator: int) -> float | None:
+        """HTTP + parse : incidence/100k de la semaine la plus récente (région Auvergne-Rhône-Alpes)."""
+        url = f"https://www.sentiweb.fr/api/v1/indicators?indicator={indicator}&geo=reg&reg=84"
+        r = requests.get(url, timeout=4)
+        if r.status_code != 200:
+            return None
+        return _sentiweb_latest_value(r.json())
 
     try:
-        # Indicator 4 = Diarrhée aiguë
-        url_gastro = "https://www.sentiweb.fr/api/v1/indicators?indicator=4&geo=reg&reg=84"
-        r = requests.get(url_gastro, timeout=4)
-        if r.status_code == 200:
-            res = r.json()
-            if res and isinstance(res, list) and len(res) > 0:
-                latest = res[0]
-                france_data["gastro"] = latest.get("incidence", 210.0)
+        _g = _sentiweb_latest_inc100(3)          # Indicator 3 = Grippe (ILI)
+        if _g is not None:
+            france_data["grippe"] = _g
+            france_data["grippe_live"] = True
     except Exception as e:
-        logger.warning(f"Impossible de joindre le Réseau Sentinelles FR pour gastro: {e}")
-        france_data["gastro"] = 210.0
+        logger.warning(f"Impossible de joindre le Réseau Sentinelles FR (grippe): {e}")
+
+    try:
+        _d = _sentiweb_latest_inc100(4)          # Indicator 4 = Diarrhée aiguë
+        if _d is not None:
+            france_data["gastro"] = _d
+            france_data["gastro_live"] = True
+    except Exception as e:
+        logger.warning(f"Impossible de joindre le Réseau Sentinelles FR (gastro): {e}")
 
     # Données unifiées combinant sources réelles et flux ouverts structurés
     diseases = [
@@ -3458,8 +3479,11 @@ def get_terrain_epidemic(region: str = "transborder") -> dict[str, Any]:
             "epidemic_threshold": 150.0,
             "status": "warning" if france_data.get("grippe", 145.2) >= 120.0 else "none",
             "trend": "increasing",
-            "last_update": "2026-05-28",
-            "source_details": "Réseau Sentinelles FR (Auvergne-Rhône-Alpes) & Sentinella CH"
+            "data_status": "live_fr" if france_data.get("grippe_live") else "illustrative",
+            "source_details": ("Réseau Sentinelles FR (sentiweb.fr, live)"
+                               if france_data.get("grippe_live") else
+                               "Valeur d'exemple (Sentiweb injoignable)")
+                              + " · incidence CH illustrative (pas de flux OFSP branché)",
         },
         {
             "name": "COVID-19",
@@ -3468,8 +3492,8 @@ def get_terrain_epidemic(region: str = "transborder") -> dict[str, Any]:
             "epidemic_threshold": 100.0,
             "status": "epidemic",
             "trend": "stable",
-            "last_update": "2026-05-28",
-            "source_details": "Santé Publique France & OFSP Suisse (Déclarations obligatoires)"
+            "data_status": "illustrative",
+            "source_details": "Valeurs d'exemple — aucun flux Santé Publique France / OFSP branché en direct",
         },
         {
             "name": "Gastro-entérite / Acute diarrhea",
@@ -3478,8 +3502,11 @@ def get_terrain_epidemic(region: str = "transborder") -> dict[str, Any]:
             "epidemic_threshold": 170.0,
             "status": "epidemic" if france_data.get("gastro", 210.0) >= 170.0 else "warning",
             "trend": "decreasing",
-            "last_update": "2026-05-28",
-            "source_details": "Réseau Sentinelles FR (Auvergne-Rhône-Alpes) & Sentinella CH"
+            "data_status": "live_fr" if france_data.get("gastro_live") else "illustrative",
+            "source_details": ("Réseau Sentinelles FR (sentiweb.fr, live)"
+                               if france_data.get("gastro_live") else
+                               "Valeur d'exemple (Sentiweb injoignable)")
+                              + " · incidence CH illustrative (pas de flux OFSP branché)",
         }
     ]
     
@@ -3495,13 +3522,17 @@ def get_terrain_epidemic(region: str = "transborder") -> dict[str, Any]:
         risk_level = "low"
         recommendation = "Opérations épidémiques normales."
         
+    _any_live = bool(france_data.get("grippe_live") or france_data.get("gastro_live"))
     return {
-        "source": "Réseau Sentinelles (FR) / Sentinella (CH) / ECDC Unified Stream",
+        "source": "Réseau Sentinelles France (sentiweb.fr) — incidences suisses/COVID illustratives",
+        "data_status": "live_partial" if _any_live else "illustrative",
         "region": "Grand Genève (Haute-Savoie, Ain, Canton de Genève, Canton de Vaud)",
         "diseases": diseases,
         "global_ems_impact_risk": risk_level,
         "recommended_action": recommendation,
-        "architecture_note": "Flux préparé pour intégration avec les données réelles des médecins sentinelles et des urgences HUG/CHUV."
+        "architecture_note": ("Grippe/gastro France = données réelles Sentiweb (région Auvergne-Rhône-Alpes, "
+                              "proxy transfrontalier). Les incidences suisses et COVID sont illustratives : "
+                              "brancher le flux OFSP/opendata.swiss (voir connecteurs Phase 2) pour des données CH réelles.")
     }
 
 
@@ -3571,7 +3602,8 @@ def get_terrain_demographics(postal_code: str = "74100") -> dict[str, Any]:
         "age_over_65_pct": data["age_over_65_pct"],
         "ems_risk_multiplier": risk_multiplier,
         "source": data["source"],
-        "architecture_note": "Connecté aux données ouvertes de l'INSEE (France) et de l'OFS (Suisse). Prêt pour normalisation spatiale de la demande EMS."
+        "data_status": "static_reference",
+        "architecture_note": "Valeurs de référence STATIQUES (recensements INSEE 2021 / OFS 2022) — PAS de connexion en direct. Un connecteur OFS PX-Web / INSEE reste à brancher (Phase 2) pour une actualisation automatique."
     }
 
 
@@ -3633,29 +3665,30 @@ def get_terrain_pharmacies(lat: float = 46.2044, lon: float = 6.1432) -> dict[st
             }
         ]
         
-    # Intégration des alertes de rupture de stock ANSM (France) et Swissmedic (Suisse)
+    # Alertes de rupture de stock — EXEMPLES ILLUSTRATIFS (aucun flux ANSM/Swissmedic branché).
     stock_alerts = [
         {
             "medication": "Amoxicilline 500mg/5ml (Suspension pédiatrique)",
             "status": "tension",
             "country_affected": "France & Suisse",
             "recommendation": "Substitution par de l'Azithromycine ou adaptation posologique selon directives HUG/CHUV.",
-            "source": "ANSM / Swissmedic unifié"
+            "source": "Exemple illustratif (non connecté ANSM/Swissmedic)"
         },
         {
             "medication": "Paracétamol 1g (Injectable)",
             "status": "normal",
             "country_affected": "Aucun",
             "recommendation": "Stocks suffisants pour les flottes d'ambulances.",
-            "source": "Swissmedic"
+            "source": "Exemple illustratif (non connecté Swissmedic)"
         }
     ]
     
     return {
-        "source": "OpenStreetMap (Overpass API) & ANSM/Swissmedic",
+        "source": "OpenStreetMap Overpass (pharmacies) — alertes médicaments illustratives",
+        "data_status": "live_partial",
         "pharmacies_nearby": pharmacies,
         "critical_medication_alerts": stock_alerts,
-        "architecture_note": "Connecté en temps réel à OpenStreetMap. Prêt pour intégration avec le fichier national des pharmacies de garde (France) et le portail des stocks de l'OFSP (Suisse)."
+        "architecture_note": "Pharmacies : positions réelles OpenStreetMap (Overpass). Les alertes de rupture sont des EXEMPLES : brancher le fichier des pharmacies de garde (FR) et le portail ruptures Swissmedic/OFSP (CH) pour du réel."
     }
 
 
@@ -3693,9 +3726,10 @@ def get_terrain_informal_signals() -> dict[str, Any]:
     ]
     
     return {
-        "source": "ProMED / GDELT unifié (Simulation structurée)",
+        "source": "Exemples illustratifs — ProMED-mail / GDELT NON connectés",
+        "data_status": "illustrative",
         "active_signals": signals,
-        "architecture_note": "Flux préparé pour ingérer en temps réel les dépêches ProMED-mail via scraping ou flux RSS et les requêtes SQL GDELT API."
+        "architecture_note": "Signaux d'EXEMPLE (aucun flux réel). Prêt à ingérer les dépêches ProMED-mail (RSS) et l'API GDELT — non branché à ce jour."
     }
 
 
@@ -3717,7 +3751,8 @@ def get_terrain_climate(lat: float = 46.2044, lon: float = 6.1432) -> dict[str, 
     # Pour une robustesse maximale, nous fournissons la logique cdsapi ET un fallback d'appel direct REST.
     
     climate_data = {
-        "source": "Copernicus Climate Data Store (CDS) - ERA5 Reanalysis",
+        "source": "Valeurs climatiques ILLUSTRATIVES (Copernicus CDS non téléchargé)",
+        "data_status": "illustrative",
         "region": "Genève - Haute-Savoie (Transfrontalier)",
         "coordinates": {"latitude": lat, "longitude": lon},
         "climatology": {
@@ -3755,8 +3790,9 @@ def get_terrain_climate(lat: float = 46.2044, lon: float = 6.1432) -> dict[str, 
         # Dans le cadre d'une API web synchrone, nous n'exécutons pas la requête lourde de téléchargement NetCDF à chaque appel.
         # Au lieu de cela, nous validons la connexion et retournons l'état du pipeline, ou nous lisons un cache pré-calculé.
         client = cdsapi.Client(url=cds_url, key=cds_key, quiet=True)
-        climate_data["api_status"] = "connected_verified"
-        climate_data["message"] = "Connexion réussie à Copernicus CDS API. Prêt pour l'exécution des requêtes asynchrones ERA5."
+        climate_data["api_status"] = "connection_verified_data_not_fetched"
+        climate_data["message"] = ("Connexion à Copernicus CDS vérifiée, mais AUCUN téléchargement ERA5 n'est effectué "
+                                    "ici (requête asynchrone lourde) : les valeurs climatiques ci-dessus restent illustratives.")
         
     except ImportError:
         # Fallback si cdsapi n'est pas installé

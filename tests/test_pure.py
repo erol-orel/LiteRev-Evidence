@@ -240,3 +240,24 @@ def test_user_scenario_patch_caps_overlong_name():
     assert len(m.name) <= 255
     # None stays None (name is optional on PATCH)
     assert main.UserScenarioPatch().name is None
+
+
+# ── _sentiweb_latest_value (the /terrain/epidemic silent-fallback bug) ────────
+def test_sentiweb_parse_picks_latest_week_inc100():
+    # Real Sentiweb shape: {"data": [{"week", "inc100", "inc"}, …]} — pick max week's inc100.
+    res = {"data": [
+        {"week": 202405, "inc100": 120.0, "inc": 9000},
+        {"week": 202407, "inc100": 155.5, "inc": 12000},   # most recent
+        {"week": 202406, "inc100": 140.0, "inc": 10000},
+    ]}
+    assert main._sentiweb_latest_value(res) == 155.5
+
+
+def test_sentiweb_parse_falls_back_to_inc_then_none():
+    # inc100 missing → use inc; nothing usable / wrong shapes → None (no crash)
+    assert main._sentiweb_latest_value({"data": [{"week": 202401, "inc": 88}]}) == 88.0
+    assert main._sentiweb_latest_value({"data": []}) is None
+    assert main._sentiweb_latest_value([]) is None
+    assert main._sentiweb_latest_value({"nope": 1}) is None
+    # the OLD broken assumption (a root list of dicts) is now handled too
+    assert main._sentiweb_latest_value([{"week": 202410, "inc100": 42.0}]) == 42.0
