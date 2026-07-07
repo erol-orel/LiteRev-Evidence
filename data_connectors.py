@@ -270,12 +270,15 @@ def _parse_generic_csv(csv_text: str) -> list[dict]:
     return out
 
 
-def _fetch_foph_respiratory(params: dict) -> list[dict]:
+def _fetch_foph_ckan_csv(ckan_id: str, env_var: str, params: dict) -> list[dict]:
+    """Résout le 1er CSV d'un dataset opendata.swiss (CKAN, ou l'override <env_var>),
+    le parse génériquement (date/semaine + colonnes numériques) et filtre par dates.
+    Partagé par les connecteurs FOPH (schéma non vérifié en direct → parseur générique)."""
     import os as _os
-    url = params.get("url") or _os.getenv("FOPH_SENTINELLA_CSV_URL")
+    url = params.get("url") or _os.getenv(env_var)
     if not url:
         try:
-            pkg = _http_get_json(_FOPH_CKAN)
+            pkg = _http_get_json(f"https://opendata.swiss/api/3/action/package_show?id={ckan_id}")
             for res in (((pkg or {}).get("result") or {}).get("resources") or []):
                 if str(res.get("format", "")).lower() == "csv" and (res.get("download_url") or res.get("url")):
                     url = res.get("download_url") or res.get("url")
@@ -289,6 +292,15 @@ def _fetch_foph_respiratory(params: dict) -> list[dict]:
     if s or e:
         rows = [r for r in rows if (not s or r["date"] >= str(s)) and (not e or r["date"] <= str(e))]
     return rows
+
+
+def _fetch_foph_respiratory(params: dict) -> list[dict]:
+    return _fetch_foph_ckan_csv("influenza1", "FOPH_SENTINELLA_CSV_URL", params)
+
+
+def _fetch_foph_wastewater(params: dict) -> list[dict]:
+    # Live wastewater feed (influenza + RSV) — complements the frozen EAWAG archive.
+    return _fetch_foph_ckan_csv("abwassermonitoring-influenza-und-rsv", "FOPH_WASTEWATER_CSV_URL", params)
 
 
 _POINT_PARAMS = {
@@ -373,6 +385,20 @@ CONNECTORS: dict[str, Connector] = {
         notes="BETA — CSV schema not verified live: columns are auto-detected. Set "
               "FOPH_SENTINELLA_CSV_URL or let CKAN resolution pick the resource. NATIONAL granularity "
               "(no cantonal split). Supplies the weekly Sentinella ILI/ARI outcome once the schema is confirmed.",
+    ),
+    "foph-wastewater": Connector(
+        id="foph-wastewater",
+        name="FOPH — Wastewater influenza + RSV (live) — BETA",
+        provider="Federal Office of Public Health (opendata.swiss Abwassermonitoring)",
+        license="opendata.swiss terms of use",
+        geo="catchment",
+        commercial_ok=True,
+        variables=[],   # detected at fetch time — schema unverified (see notes)
+        fetch=_fetch_foph_wastewater,
+        params_schema=_CSV_PARAMS,
+        notes="BETA — LIVE influenza/RSV wastewater feed; complements the frozen EAWAG archive. "
+              "CSV schema not verified live: columns auto-detected. Set FOPH_WASTEWATER_CSV_URL "
+              "or let CKAN resolve the 'Abwassermonitoring Influenza und RSV' dataset.",
     ),
 }
 
