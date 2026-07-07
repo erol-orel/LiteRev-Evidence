@@ -32,6 +32,10 @@ import {
   validateScenarioVariables,
   getModelRun,
   getModelDataset,
+  listDataConnectors,
+  autoFetchModelData,
+  type DataConnector,
+  type AutoFetchResponse,
   getScenarioModelSpec,
   trainModel,
   compareModels,
@@ -1165,6 +1169,13 @@ function VariablesSection({ detail, scenarioId, onGoToModel }: { detail: Scenari
           })()}
         </div>
 
+        {/* Auto-remplissage des variables publiques (Phase 2) */}
+        <AutoFetchPanel
+          scenarioId={scenarioId}
+          spec={modelSpec}
+          onFetched={() => { getModelDataset(scenarioId).then(setModelDataset).catch(() => {}); }}
+        />
+
         {/* Zone d'upload interactif */}
         <div className="rounded-3xl border border-white/10 bg-white/3 p-5 space-y-4">
           <SectionHeader
@@ -2297,6 +2308,155 @@ function RagSection({ scenarioId, detail }: { scenarioId: string; detail: Scenar
 //   Phase 4 : Eligibilité (texte intégral)
 //   Phase 5 : Inclus
 // Inspiré du template officiel PRISMA 2020 (Page, McKenzie et al. 2021)
+
+// Heuristic default: map a public variable's machine_name to a likely connector+variable.
+function _guessConnector(mn: string, connectors: DataConnector[]): { id: string; var: string } | null {
+  const n = (mn || "").toLowerCase();
+  const first = (cid: string): { id: string; var: string } | null => {
+    const c = connectors.find(x => x.id === cid);
+    return c && c.variables[0] ? { id: cid, var: c.variables[0].machine_name } : null;
+  };
+  const match = (cid: string): { id: string; var: string } | null => {
+    const c = connectors.find(x => x.id === cid);
+    const v = c?.variables.find(v => {
+      const vn = v.machine_name.toLowerCase();
+      return n.includes(vn.split("_")[0]) || vn.includes(n.split("_")[0]);
+    });
+    return c && v ? { id: cid, var: v.machine_name } : first(cid);
+  };
+  if (/(temp|humid|precip|wind|weather|met[eé]o)/.test(n)) return match("open-meteo-weather");
+  if (/(pm2|pm10|no2|o3|ozone|air|pollut)/.test(n)) return match("open-meteo-air-quality");
+  if (/(wastewater|sewage|load|rsv|flu|influenza|sars|ww)/.test(n)) return match("eawag-wastewater");
+  if (/(ili|ari|sentinella|incidence|consult)/.test(n)) return first("foph-respiratory");
+  return null;
+}
+
+const _REGION_OPTS = ["geneva", "lausanne", "sion", "neuchatel", "fribourg", "jura"];
+
+// Slice 3b — per-variable pickers: for each PUBLIC data-template column, choose a
+// connector + variable, set a shared region/date window + frequency, and fetch the
+// dataset automatically instead of uploading a CSV.
+function AutoFetchPanel({ scenarioId, spec, onFetched }: {
+  scenarioId: string; spec: ModelSpecResponse | null; onFetched: () => void;
+}) {
+  const { t } = useI18n();
+  const [connectors, setConnectors] = useState<DataConnector[]>([]);
+  const [region, setRegion] = useState("geneva");
+  const [startDate, setStartDate] = useState("");
+  const [endDate, setEndDate] = useState("");
+  const [freq, setFreq] = useState("W");
+  const [autoTrain, setAutoTrain] = useState(true);
+  const [sel, setSel] = useState<Record<string, { enabled: boolean; connectorId: string; variable: string }>>({});
+  const [fetching, setFetching] = useState(false);
+  const [result, setResult] = useState<AutoFetchResponse | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+
+  const publicFeatures = (spec?.features ?? []).filter(f => f.source === "public_api" && f.machine_name);
+
+  useEffect(() => { listDataConnectors().then(setConnectors).catch(() => setConnectors([])); }, []);
+  useEffect(() => {
+    if (!publicFeatures.length || !connectors.length) return;
+    setSel(prev => {
+      const next = { ...prev };
+      for (const f of publicFeatures) {
+        const mn = f.machine_name!;
+        if (next[mn]) continue;
+        const g = _guessConnector(mn, connectors);
+        next[mn] = { enabled: !!g, connectorId: g?.id ?? "", variable: g?.var ?? "" };
+      }
+      return next;
+    });
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [connectors.length, publicFeatures.length]);
+
+  if (!publicFeatures.length) return null;   // nothing public → panel hidden entirely
+  const AF = "scenarioDetail.variables.autoFetch";
+  const varsFor = (cid: string) => connectors.find(c => c.id === cid)?.variables ?? [];
+  const setRow = (mn: string, patch: Partial<{ enabled: boolean; connectorId: string; variable: string }>) =>
+    setSel(prev => ({ ...prev, [mn]: { ...prev[mn], ...patch } }));
+
+  const doFetch = async () => {
+    const mappings = publicFeatures
+      .filter(f => { const s = sel[f.machine_name!]; return s?.enabled && s.connectorId && s.variable; })
+      .map(f => ({ template_column: f.machine_name!, connector_id: sel[f.machine_name!].connectorId, connector_variable: sel[f.machine_name!].variable }));
+    if (!mappings.length || !startDate || !endDate) { setErr(t(`${AF}.needSelection`)); return; }
+    setFetching(true); setErr(null); setResult(null);
+    try {
+      const res = await autoFetchModelData(scenarioId, { region, start_date: startDate, end_date: endDate, frequency: freq, mappings, auto_train: autoTrain });
+      setResult(res); onFetched();
+    } catch (e) { setErr(e instanceof Error ? e.message : String(e)); }
+    finally { setFetching(false); }
+  };
+
+  return (
+    <div className="rounded-3xl border border-brand-500/20 bg-brand-500/5 p-5 space-y-4">
+      <SectionHeader icon={<Database size={14} className="text-brand-400" />} title={t(`${AF}.title`)} subtitle={t(`${AF}.subtitle`)} />
+      <div className="grid grid-cols-2 gap-2 text-[11px]">
+        <label className="space-y-1"><span className="text-white/50">{t(`${AF}.region`)}</span>
+          <select value={region} onChange={e => setRegion(e.target.value)} className="w-full rounded-lg bg-forest-900/60 border border-white/10 px-2 py-1.5 text-white/80">
+            {_REGION_OPTS.map(r => <option key={r} value={r}>{r}</option>)}
+          </select>
+        </label>
+        <label className="space-y-1"><span className="text-white/50">{t(`${AF}.frequency`)}</span>
+          <select value={freq} onChange={e => setFreq(e.target.value)} className="w-full rounded-lg bg-forest-900/60 border border-white/10 px-2 py-1.5 text-white/80">
+            <option value="W">{t(`${AF}.freqWeekly`)}</option>
+            <option value="D">{t(`${AF}.freqDaily`)}</option>
+            <option value="MS">{t(`${AF}.freqMonthly`)}</option>
+          </select>
+        </label>
+        <label className="space-y-1"><span className="text-white/50">{t(`${AF}.from`)}</span>
+          <input type="date" value={startDate} onChange={e => setStartDate(e.target.value)} className="w-full rounded-lg bg-forest-900/60 border border-white/10 px-2 py-1.5 text-white/80" />
+        </label>
+        <label className="space-y-1"><span className="text-white/50">{t(`${AF}.to`)}</span>
+          <input type="date" value={endDate} onChange={e => setEndDate(e.target.value)} className="w-full rounded-lg bg-forest-900/60 border border-white/10 px-2 py-1.5 text-white/80" />
+        </label>
+      </div>
+      <div className="space-y-1.5">
+        {publicFeatures.map(f => {
+          const mn = f.machine_name!; const s = sel[mn] ?? { enabled: false, connectorId: "", variable: "" };
+          return (
+            <div key={mn} className="flex items-center gap-2 rounded-xl border border-white/5 bg-white/3 px-2.5 py-2 text-[11px]">
+              <input type="checkbox" checked={s.enabled} onChange={e => setRow(mn, { enabled: e.target.checked })} className="accent-brand-500" />
+              <span className="w-28 shrink-0 truncate text-white/70" title={f.name || mn}>{f.name || mn}</span>
+              <select value={s.connectorId} onChange={e => setRow(mn, { connectorId: e.target.value, variable: varsFor(e.target.value)[0]?.machine_name ?? "" })}
+                className="flex-1 min-w-0 rounded-lg bg-forest-900/60 border border-white/10 px-1.5 py-1 text-white/80">
+                <option value="">{t(`${AF}.pickConnector`)}</option>
+                {connectors.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+              </select>
+              <select value={s.variable} onChange={e => setRow(mn, { variable: e.target.value })} disabled={!s.connectorId}
+                className="flex-1 min-w-0 rounded-lg bg-forest-900/60 border border-white/10 px-1.5 py-1 text-white/80 disabled:opacity-40">
+                <option value="">{t(`${AF}.pickVariable`)}</option>
+                {varsFor(s.connectorId).map(v => <option key={v.machine_name} value={v.machine_name}>{v.label}</option>)}
+              </select>
+            </div>
+          );
+        })}
+      </div>
+      <label className="flex items-center gap-1.5 text-[10px] text-white/50">
+        <input type="checkbox" checked={autoTrain} onChange={e => setAutoTrain(e.target.checked)} className="accent-brand-500" />
+        {t(`${AF}.autoTrain`)}
+      </label>
+      <button onClick={doFetch} disabled={fetching}
+        className="w-full flex items-center justify-center gap-1.5 rounded-xl bg-brand-500 hover:bg-brand-400 text-forest-950 font-semibold py-2 text-xs transition disabled:opacity-50">
+        {fetching ? <Loader2 size={12} className="animate-spin" /> : <Database size={12} />}
+        {fetching ? t(`${AF}.fetching`) : t(`${AF}.fetch`)}
+      </button>
+      {err && <ErrorBox message={err} />}
+      {result && (
+        <div className="rounded-lg bg-forest-900/50 p-2 text-[10px] font-mono text-white/50 space-y-1">
+          <div>{t(`${AF}.rows`)} <span className="text-brand-300">{result.n_rows}</span> · {t(`${AF}.filled`)} <span className="text-brand-300">{(result.filled_columns || []).join(", ") || "—"}</span></div>
+          {(result.still_needed_user_columns?.length ?? 0) > 0 && (
+            <div className="text-gold-300">{t(`${AF}.stillNeeded`)} {result.still_needed_user_columns.join(", ")}</div>
+          )}
+          {Object.keys(result.fetch_errors || {}).length > 0 && (
+            <div className="text-rose-300">{t(`${AF}.errors`)} {Object.entries(result.fetch_errors).map(([k, v]) => `${k}: ${v}`).join(" · ")}</div>
+          )}
+          {result.training_started && <div className="text-brand-300">{t(`${AF}.trainingStarted`)}</div>}
+        </div>
+      )}
+    </div>
+  );
+}
 
 const SOURCE_LABELS_MAP: Record<string, string> = {
   pubmed: "PubMed",

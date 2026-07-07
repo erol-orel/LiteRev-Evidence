@@ -2281,6 +2281,42 @@ export async function getModelDataset(scenarioId: string): Promise<ModelDataset>
   return r.json();
 }
 
+// ── Phase 2: public-data connectors + auto-fetch ────────────────────────────
+export interface ConnectorVariable { machine_name: string; label: string; unit?: string; dtype?: string; }
+export interface DataConnector {
+  id: string; name: string; provider: string; license: string; geo: string;
+  commercial_ok: boolean; variables: ConnectorVariable[];
+  params_schema?: Record<string, string>; notes?: string;
+}
+
+/** List the public-data connectors the app can auto-fetch variables from. */
+export async function listDataConnectors(): Promise<DataConnector[]> {
+  const r = await safeFetch(`${API_BASE_URL}/model/connectors`, { headers: authHeaders() });
+  if (!r.ok) throw new Error(httpMessage(r.status));
+  return (await r.json()).connectors ?? [];
+}
+
+export interface AutoFetchMapping { template_column: string; connector_id: string; connector_variable: string; }
+export interface AutoFetchResponse {
+  status: string; dataset_id?: number; n_rows: number; n_cols: number; frequency: string;
+  filled_columns: string[]; still_needed_user_columns: string[];
+  fetch_errors: Record<string, string>; validation?: ModelDataset["validation"];
+  preview: Array<Record<string, unknown>>; training_started?: boolean;
+}
+
+/** Assemble the model dataset from public connectors instead of a CSV upload. */
+export async function autoFetchModelData(scenarioId: string, payload: {
+  region?: string; lat?: number; lon?: number; start_date: string; end_date: string;
+  frequency?: string; mappings: AutoFetchMapping[]; auto_train?: boolean;
+}): Promise<AutoFetchResponse> {
+  const r = await safeFetch(`${API_BASE_URL}/scenarios/${scenarioId}/model/data/auto-fetch`, {
+    method: 'POST', headers: authHeaders({ 'Content-Type': 'application/json' }),
+    body: JSON.stringify(payload),
+  });
+  if (!r.ok) throw new Error(httpMessage(r.status));
+  return r.json();
+}
+
 export async function getModelTrainStatus(scenarioId: string): Promise<{ status: string; error?: string; metrics?: Record<string, number> }> {
   const r = await safeFetch(`${API_BASE_URL}/scenarios/${scenarioId}/model/train/status`);
   if (!r.ok) throw new Error(httpMessage(r.status));

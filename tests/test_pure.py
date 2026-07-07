@@ -389,3 +389,40 @@ def test_parse_openaire_nested_and_malformed():
     assert main._parse_openaire(p2)[0]["external_id"] == "openaire:oai:zzz"
     for bad in ({}, {"response": None}, {"response": {"results": None}}):
         assert main._parse_openaire(bad) == []
+
+
+# ── Slice 2: _assemble_connector_frames (resample + align + join) ─────────────
+def test_assemble_connector_frames_resamples_aligns_and_joins():
+    import pandas as pd
+    # Daily weather + wastewater sampled on specific dates → resample weekly, align, join.
+    weather = pd.DataFrame({"date": ["2025-01-01", "2025-01-02", "2025-01-08", "2025-01-09"],
+                            "temp_mean": [1.0, 3.0, 5.0, 7.0]})
+    waste = pd.DataFrame({"date": ["2025-01-01", "2025-01-08"], "rsv_load": [100.0, 200.0]})
+    frames = {"open-meteo-weather": weather, "eawag-wastewater": waste}
+    mappings = [
+        {"template_column": "temperature", "connector_id": "open-meteo-weather", "connector_variable": "temp_mean"},
+        {"template_column": "rsv_ww", "connector_id": "eawag-wastewater", "connector_variable": "rsv_load"},
+    ]
+    df, filled = main._assemble_connector_frames(frames, mappings, "W", "week")
+    assert set(filled) == {"temperature", "rsv_ww"}
+    assert "week" in df.columns and {"temperature", "rsv_ww"} <= set(df.columns)
+    assert len(df) == 2                                   # two aligned weekly buckets
+    assert list(df["temperature"]) == [2.0, 6.0]         # weekly means of daily temps
+    assert list(df["rsv_ww"]) == [100.0, 200.0]
+
+
+def test_assemble_keeps_date_when_no_datetime_col():
+    import pandas as pd
+    frames = {"c": pd.DataFrame({"date": ["2025-01-01", "2025-01-08"], "v": [1.0, 2.0]})}
+    df, filled = main._assemble_connector_frames(
+        frames, [{"template_column": "x", "connector_id": "c", "connector_variable": "v"}], "W", None)
+    assert "date" in df.columns and filled == ["x"]
+
+
+def test_assemble_empty_when_nothing_maps():
+    import pandas as pd
+    frames = {"c": pd.DataFrame({"date": ["2025-01-01"], "v": [1.0]})}
+    # mapping points at a variable the frame doesn't have → nothing assembled
+    df, filled = main._assemble_connector_frames(
+        frames, [{"template_column": "x", "connector_id": "c", "connector_variable": "missing"}], "W", None)
+    assert df is None and filled == []

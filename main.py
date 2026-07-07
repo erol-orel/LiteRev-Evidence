@@ -13297,6 +13297,47 @@ def fetch_data_connector(
     }
 
 
+def _assemble_connector_frames(frames: dict, mappings: list[dict], freq: str,
+                               datetime_col: str | None):
+    """PUR : resample chaque série de connecteur à `freq` (moyenne), joint sur la clé
+    'date' et renomme chaque `connector_variable` vers sa `template_column`. Renvoie
+    (DataFrame assemblé | None, colonnes remplies). Aligne les fréquences hétérogènes
+    (météo quotidienne, eaux usées / Sentinella hebdomadaires) sur une grille commune."""
+    import pandas as pd
+    resampled: dict[str, Any] = {}
+    for cid, df in (frames or {}).items():
+        try:
+            if "date" not in getattr(df, "columns", []):
+                continue
+            d = df.copy()
+            d["date"] = pd.to_datetime(d["date"], errors="coerce")
+            d = d.dropna(subset=["date"])
+            if d.empty:
+                continue
+            d = d.set_index("date").resample(freq).mean(numeric_only=True).reset_index()
+            d["date"] = d["date"].dt.strftime("%Y-%m-%d")
+            resampled[cid] = d
+        except Exception:
+            continue
+    assembled = None
+    filled: list[str] = []
+    for m in mappings:
+        d = resampled.get(m["connector_id"])
+        var = m["connector_variable"]
+        if d is None or var not in d.columns:
+            continue
+        part = d[["date", var]].rename(columns={var: m["template_column"]})
+        part = part.dropna(subset=[m["template_column"]]).drop_duplicates(subset=["date"])
+        assembled = part if assembled is None else assembled.merge(part, on="date", how="outer")
+        filled.append(m["template_column"])
+    if assembled is None or assembled.empty:
+        return None, []
+    if datetime_col and datetime_col not in assembled.columns:
+        assembled = assembled.rename(columns={"date": datetime_col})
+    assembled = assembled.sort_values(assembled.columns[0]).reset_index(drop=True)
+    return assembled, filled
+
+
 @app.post("/scenarios/{scenario_id}/model/data")
 async def upload_model_dataset(
     scenario_id: str,
@@ -13394,6 +13435,125 @@ async def upload_model_dataset(
         "stored": stored_path is not None,
         "validation": report,
         "training_started": _maybe_autotrain(scenario_id, report) if auto_train else False,
+    }
+
+
+class AutoFetchMapping(BaseModel):
+    template_column: str            # colonne du data_template à remplir
+    connector_id: str               # ex. open-meteo-weather, eawag-wastewater
+    connector_variable: str         # variable fournie par le connecteur (ex. temp_mean)
+
+
+class AutoFetchIn(BaseModel):
+    region: str | None = None       # alias Romandie OU lat+lon
+    lat: float | None = None
+    lon: float | None = None
+    start_date: str = Field(..., min_length=8)
+    end_date: str = Field(..., min_length=8)
+    frequency: str = Field(default="W")     # W (hebdo, défaut épidémio) | D | MS
+    mappings: list[AutoFetchMapping] = Field(..., min_length=1)
+    auto_train: bool = False
+
+
+@app.post("/scenarios/{scenario_id}/model/data/auto-fetch")
+def auto_fetch_model_dataset(
+    scenario_id: str, payload: AutoFetchIn, _: None = Depends(require_api_key),
+) -> dict[str, Any]:
+    """Phase 2 — assemble le dataset du modèle depuis des connecteurs de données
+    PUBLIQUES au lieu d'un upload. Chaque mapping relie une colonne du data_template
+    à (connecteur, variable) ; on récupère chaque connecteur, on aligne sur une grille
+    de dates commune (frequency) et on joint, on stocke le dataset actif, puis on
+    renvoie la couverture (colonnes remplies vs encore requises) + un aperçu."""
+    import pandas as pd
+    from datetime import datetime, timezone
+    import data_connectors
+
+    spec = _get_model_spec(scenario_id)
+    if not spec:
+        raise HTTPException(status_code=400,
+                            detail="Aucune spécification de modèle. Générez puis validez les Variables & Modèle d'abord.")
+    data_template = spec.get("data_template") or {}
+    if not data_template.get("columns"):
+        raise HTTPException(status_code=400, detail="data_template absent du model_spec. Relancez la génération des variables.")
+
+    base_params = {"start_date": payload.start_date, "end_date": payload.end_date}
+    if payload.region:
+        base_params["region"] = payload.region
+    if payload.lat is not None:
+        base_params["lat"] = payload.lat
+    if payload.lon is not None:
+        base_params["lon"] = payload.lon
+
+    frames: dict[str, Any] = {}
+    fetch_errors: dict[str, str] = {}
+    for cid in {m.connector_id for m in payload.mappings}:
+        if cid not in data_connectors.CONNECTORS:
+            fetch_errors[cid] = "connecteur inconnu"
+            continue
+        try:
+            rows = data_connectors.fetch_series(cid, dict(base_params))
+        except Exception as _e:
+            fetch_errors[cid] = str(_e)
+            continue
+        if not rows:
+            fetch_errors[cid] = "aucune donnée renvoyée pour cette zone/période"
+            continue
+        frames[cid] = pd.DataFrame(rows)
+
+    _dt_col = next((c["name"] for c in data_template.get("columns", []) if c.get("dtype") == "datetime"), None)
+    freq = (payload.frequency or "W").strip() or "W"
+    assembled, filled = _assemble_connector_frames(
+        frames, [m.model_dump() for m in payload.mappings], freq, _dt_col)
+    if assembled is None or assembled.empty:
+        raise HTTPException(status_code=422, detail={
+            "message": "Aucune donnée assemblée depuis les connecteurs (mappings/fenêtre à vérifier).",
+            "fetch_errors": fetch_errors,
+        })
+
+    report = _validate_dataset_against_template(
+        list(assembled.columns), data_template, _dataframe_dtype_kinds(assembled), n_rows=len(assembled))
+
+    stored_path = None
+    try:
+        ddir = MODEL_DATA_DIR / scenario_id / "model"
+        ddir.mkdir(parents=True, exist_ok=True)
+        stored_path = str(ddir / f"{int(datetime.now(timezone.utc).timestamp())}_autofetch.csv")
+        assembled.to_csv(stored_path, index=False)
+    except Exception as _e:
+        logger.error(f"Stockage auto-fetch {scenario_id}: {_e}", exc_info=True)
+    if stored_path is None:
+        raise HTTPException(status_code=500, detail="Échec du stockage du dataset auto-récupéré.")
+
+    with engine.begin() as conn:
+        conn.execute(text(
+            "UPDATE scenario_model_dataset SET is_active = FALSE WHERE scenario_id = :sid AND is_active = TRUE"
+        ), {"sid": scenario_id})
+        new_id = conn.execute(text("""
+            INSERT INTO scenario_model_dataset
+                (scenario_id, filename, stored_path, n_rows, n_cols, columns_json, validation_json, is_active, is_synthetic)
+            VALUES (:sid, :fn, :sp, :nr, :nc, CAST(:cj AS jsonb), CAST(:vj AS jsonb), TRUE, FALSE)
+            RETURNING id
+        """), {
+            "sid": scenario_id, "fn": "auto_fetch.csv", "sp": stored_path,
+            "nr": int(len(assembled)), "nc": int(len(assembled.columns)),
+            "cj": json.dumps([str(c) for c in assembled.columns]),
+            "vj": json.dumps(report),
+        }).scalar()
+
+    return {
+        "status": "stored",
+        "dataset_id": new_id,
+        "scenario_id": scenario_id,
+        "source": "auto_fetch",
+        "frequency": freq,
+        "n_rows": int(len(assembled)),
+        "n_cols": int(len(assembled.columns)),
+        "filled_columns": filled,
+        "still_needed_user_columns": report.get("missing_user", []),
+        "fetch_errors": fetch_errors,
+        "validation": report,
+        "preview": json.loads(assembled.head(8).to_json(orient="records")),
+        "training_started": _maybe_autotrain(scenario_id, report) if payload.auto_train else False,
     }
 
 
