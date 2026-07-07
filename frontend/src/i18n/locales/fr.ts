@@ -66,7 +66,7 @@ export const fr = {
     loading: "Chargement des données terrain en temps réel...",
     title: "Données Terrain : Grand Genève",
     subtitle:
-      "6 sources publiques actives · Météo, Routage, Épidémie, Démographie, Pharmacies, Signaux informels",
+      "Sources terrain · Météo, Routage & Pharmacies (en direct) ; Épidémie (Sentinelles FR), Démographie & Signaux (exemples)",
     refreshedAt: "Actualisé",
     active: "● Actif",
     inactive: "○ Inactif",
@@ -279,7 +279,7 @@ export const fr = {
     searching: "Recherche...",
     searchButton: "Rechercher",
     includeLive:
-      "Inclure les sources API en direct (PubMed, OpenAlex, Crossref, EuropePMC, Preprints)",
+      "Inclure les sources API en direct (PubMed, OpenAlex, Crossref, EuropePMC, Semantic Scholar, DOAJ, ClinicalTrials.gov, CORE, arXiv, OpenAIRE, bioRxiv, medRxiv, préprints Europe PMC)",
     includeLiveHint: "Recherche plus lente, ajoute les articles non encore indexes",
     addSubQuery: "Ajouter une sous-requête",
     combineHint: "La requête principale ci-dessus est combinée avec ces sous-requêtes :",
@@ -402,7 +402,7 @@ export const fr = {
       openInPubmedArrow: "Ouvrir dans PubMed →",
       explanation: "Explication",
       synonymGroups: "Groupes de synonymes",
-      liveSearchTitle: "Recherche en direct (5 sources)",
+      liveSearchTitle: "Recherche en direct",
       searching: "Recherche...",
       searchAllSources: "Rechercher toutes les sources",
       liveResultsSuffix: "résultats (APIs en direct)",
@@ -538,7 +538,7 @@ export const fr = {
       loadingCorpus: "Chargement du corpus d'articles...",
       autoSelectionTitle: "Sélection automatique",
       autoSelectionBody1:
-        ": Ces articles ont été récupérés depuis 6 sources (DB Cache + PubMed, OpenAlex, Crossref, EuropePMC, Preprints) par recherche multi-sources.",
+        ": Ces articles ont été récupérés depuis le cache local et 13 sources API (PubMed, OpenAlex, Crossref, EuropePMC, Semantic Scholar, DOAJ, ClinicalTrials.gov, CORE, arXiv, OpenAIRE, bioRxiv, medRxiv, préprints Europe PMC) par recherche multi-sources.",
       autoSelectionBody2: "Aucun n'a été validé par un relecteur humain.",
       autoSelectionBody3:
         "Pour une revue systématique formelle, un screening humain en double-aveugle est requis (onglet Revue).",
@@ -802,9 +802,9 @@ export const fr = {
       subscribeButton: "S'abonner aux alertes",
       livingReviewPipeline: "Pipeline Living Review",
       livingReviewDesc:
-        "Le pipeline Living Review interroge automatiquement 6 sources (DB Cache + PubMed, OpenAlex, Crossref, EuropePMC, Preprints) avec la requête de ce scénario, insère les nouveaux articles, génère les embeddings et recalcule le clustering.",
+        "Le pipeline Living Review interroge automatiquement le cache local et 13 sources API (PubMed, OpenAlex, Crossref, EuropePMC, Semantic Scholar, DOAJ, ClinicalTrials.gov, CORE, arXiv, OpenAIRE, bioRxiv, medRxiv, préprints Europe PMC) avec la requête de ce scénario, insère les nouveaux articles, génère les embeddings et recalcule le clustering.",
       stepMultiSource:
-        "Interrogation multi-sources : DB Cache + PubMed + OpenAlex + Crossref + EuropePMC + Preprints",
+        "Interrogation multi-sources : cache local + PubMed + OpenAlex + Crossref + EuropePMC + Semantic Scholar + DOAJ + ClinicalTrials.gov + CORE + arXiv + OpenAIRE + bioRxiv + medRxiv + préprints Europe PMC",
       stepInsert: "Insertion des nouveaux articles (déduplication automatique)",
       stepEmbeddings:
         "Génération des embeddings (text-embedding-3-small) : active la pertinence sémantique",

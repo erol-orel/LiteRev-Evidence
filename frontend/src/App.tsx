@@ -2717,7 +2717,8 @@ export default function App() {
                 // Étapes de la recherche pilotées par la PHASE RÉELLE du backend
                 // (/populate/status), pas par un minuteur : le libellé affiché
                 // correspond donc à ce que fait réellement le serveur.
-                const liveSources = ["PubMed", "OpenAlex", "Crossref", "EuropePMC", "Preprints"];
+                const liveSources = ["PubMed", "OpenAlex", "Crossref", "EuropePMC", "Preprints (Europe PMC)",
+                  "Semantic Scholar", "DOAJ", "ClinicalTrials.gov", "CORE", "arXiv", "OpenAIRE", "bioRxiv", "medRxiv"];
                 const translating = searchPhase === 'translating';
                 const rankOf: Record<string, number> = { local: 1, federation: 2, scoring: 3, done: 4 };
                 const rank = searchBackendPhase ? rankOf[searchBackendPhase] : 0;

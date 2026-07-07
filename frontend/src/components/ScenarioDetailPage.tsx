@@ -2473,8 +2473,8 @@ const SOURCE_LABELS_MAP: Record<string, string> = {
   arxiv: "arXiv",
   openaire: "OpenAIRE",
   db_cache: "DB Cache",
-  preprint: "Preprints",
-  preprints: "Preprints",
+  preprint: "Preprints (Europe PMC)",
+  preprints: "Preprints (Europe PMC)",
 };
 
 function PrismaStageCard({

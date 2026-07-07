@@ -7279,13 +7279,13 @@ def _parse_arxiv(xml_text: str) -> list[dict]:
 
 def _parse_biorxiv(payload: dict, terms: list[str], server: str) -> list[dict]:
     """bioRxiv/medRxiv details API collection → docs FILTRÉS par mots-clés.
-    L'API n'offre pas de recherche : le fetcher scanne une fenêtre de dates et le
-    filtrage lexical se fait ici (garde un preprint si ≥ moitié des termes ≥4 car.
-    apparaissent dans titre+résumé). external_id = <server>:<doi>."""
+    L'API n'offre pas de recherche : le fetcher scanne une fenêtre de dates RÉCENTE
+    et le filtrage lexical se fait ici (garde un preprint si ≥ un TIERS des termes
+    ≥4 car. apparaissent dans titre+résumé). external_id = <server>:<doi>."""
     out: list[dict] = []
     coll = payload.get("collection") if isinstance(payload, dict) else None
     kw = [t for t in (terms or []) if len(t) >= 4]
-    need = max(1, (len(kw) + 1) // 2) if kw else 0
+    need = max(1, (len(kw) + 2) // 3) if kw else 0
     for it in (coll or []):
         if not isinstance(it, dict):
             continue
@@ -8171,9 +8171,13 @@ def _run_user_scenario_populate(
         return ("openaire", count)
 
     def _fetch_biorxiv_medrxiv():
-        # L'API bioRxiv/medRxiv n'offre PAS de recherche par mots-clés : on scanne une
-        # fenêtre de dates RÉCENTE (bornée) puis on filtre lexicalement (_parse_biorxiv).
-        # Couverture = préprints récents pertinents, pas tout l'historique (assumé/honnête).
+        # L'API bioRxiv/medRxiv n'offre PAS de recherche par mots-clés. On scanne une
+        # fenêtre RÉCENTE (les ~45 derniers jours) DEPUIS le curseur 0 vers aujourd'hui
+        # — de sorte que la couverture porte réellement sur les préprints récents (le
+        # bug précédent scannait le DÉBUT d'une fenêtre de 18 mois → les plus VIEUX,
+        # jamais pertinents). Puis filtrage lexical (_parse_biorxiv). Chaque serveur
+        # ingère sous sa propre source ("biorxiv" / "medrxiv"), distinctes des
+        # "Preprints" (facette Europe PMC).
         count = 0
         try:
             from datetime import date as _date, timedelta as _td
@@ -8181,12 +8185,12 @@ def _run_user_scenario_populate(
             _terms = [t for t in _terms if len(t) >= 4]
             try:
                 _to = _date.today()
-                _win = f"{(_to - _td(days=540)).isoformat()}/{_to.isoformat()}"
+                _win = f"{(_to - _td(days=45)).isoformat()}/{_to.isoformat()}"
             except Exception:
-                _win = "2024-01-01/2026-12-31"
+                _win = "2026-05-01/2026-12-31"
             for _server in ("biorxiv", "medrxiv"):
                 _cursor, _pages = 0, 0
-                while _pages < 20:          # borne dure du scan (~2000 préprints/serveur)
+                while _pages < 30:          # borne dure ; les ~45 j récents tiennent dedans
                     if _time.time() >= _fed_deadline[0]:
                         break
                     _r = _requests.get(
@@ -8202,7 +8206,7 @@ def _run_user_scenario_populate(
                     _cursor += len(_coll)
                     if _cursor >= _total or len(_coll) < 100:
                         break
-                    _time.sleep(0.5)
+                    _time.sleep(0.4)
         except Exception as _e:
             logger.warning(f"bioRxiv/medRxiv populate {scenario_id}: {_e}")
         return ("biorxiv_medrxiv", count)
