@@ -110,8 +110,15 @@ def test_normalize_sub_queries_non_list():
 
 # ── _multi_query_corpus_ids (union / intersection of doc-id sets) ─────────────
 def _patch_local_ids(monkeypatch, mapping):
-    """Stub _search_local_doc_ids so each sub-query text maps to a fixed id set."""
+    """Stub _search_local_doc_ids so each sub-query text maps to a fixed id set,
+    and stub the NL→boolean translator to identity (a natural facet is translated
+    to boolean before matching — the identity stub keeps the mapping keyed on the
+    raw text AND avoids any network call in the unit test)."""
+    monkeypatch.setattr(main, "_generate_search_strategy",
+                        lambda q: {"general": q, "pubmed": q}, raising=True)
     def _fake(query, mode, filters, limit=10_000, threshold=0.45):
+        # Membership is now ALWAYS lexical/boolean — no facet uses semantic mode.
+        assert mode == "boolean", f"corpus membership must be boolean, got mode={mode!r}"
         return list(mapping.get(query, []))
     monkeypatch.setattr(main, "_search_local_doc_ids", _fake)
 
@@ -144,6 +151,46 @@ def test_multi_query_unknown_combinator_is_union(monkeypatch):
 def test_multi_query_all_blank_is_empty(monkeypatch):
     _patch_local_ids(monkeypatch, {})
     assert main._multi_query_corpus_ids([{"kind": "boolean", "text": "  "}], "union", {}) == []
+
+
+def test_multi_query_natural_facet_is_translated_to_boolean(monkeypatch):
+    # The heart of the fix: a NATURAL sub-query is translated to boolean (via
+    # _generate_search_strategy) and matched LEXICALLY — the semantic threshold
+    # never decides corpus membership. A boolean sub-query is used verbatim.
+    seen_modes: list[str] = []
+
+    def _fake_translate(q):
+        # natural text "flu surges" → an explicit boolean; anything else unchanged
+        return {"general": '("influenza" OR ILI)' if q == "flu surges" else q}
+
+    def _fake_local(query, mode, filters, limit=10_000, threshold=0.45):
+        seen_modes.append(mode)
+        table = {'("influenza" OR ILI)': [1, 2], "cardiac AND arrest": [2, 3]}
+        return list(table.get(query, []))
+
+    monkeypatch.setattr(main, "_generate_search_strategy", _fake_translate, raising=True)
+    monkeypatch.setattr(main, "_search_local_doc_ids", _fake_local, raising=True)
+
+    sub = [{"kind": "natural", "text": "flu surges"},
+           {"kind": "boolean", "text": "cardiac AND arrest"}]
+    # natural facet resolved via its TRANSLATED boolean → {1,2}; boolean facet → {2,3}
+    assert sorted(main._multi_query_corpus_ids(sub, "union", {})) == [1, 2, 3]
+    assert main._multi_query_corpus_ids(sub, "intersection", {}) == [2]
+    # every membership lookup ran in boolean mode — semantic never touches the corpus
+    assert set(seen_modes) == {"boolean"}
+
+
+def test_multi_query_translation_failure_falls_back_to_raw_text(monkeypatch):
+    # If NL→boolean translation raises (or no OpenAI key), the raw text is used as
+    # the boolean — membership still works, just without synonym expansion.
+    def _boom(_q):
+        raise RuntimeError("no openai key")
+    monkeypatch.setattr(main, "_generate_search_strategy", _boom, raising=True)
+    monkeypatch.setattr(main, "_search_local_doc_ids",
+                        lambda query, mode, filters, limit=10_000, threshold=0.45:
+                        [9] if (query == "flu" and mode == "boolean") else [], raising=True)
+    out = main._multi_query_corpus_ids([{"kind": "natural", "text": "flu"}], "union", {})
+    assert out == [9]
 
 
 # ── _evidence_fingerprint (corpus/threshold/lang cache key) ───────────────────
