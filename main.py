@@ -12974,6 +12974,56 @@ def _maybe_autotrain(scenario_id: str, report: dict) -> bool:
     return True
 
 
+# ─── PHASE 2 : Connecteurs de données publiques (auto-remplissage des variables) ─
+# Chaque connecteur récupère une source publique RÉELLE et lisible par machine et
+# renvoie une série temporelle quotidienne « tidy » joignable au dataset du modèle
+# sur la clé date — au lieu d'un upload CSV manuel. Discovery + fetch ici ; le
+# mapping variable→connecteur et l'assemblage du dataset arrivent ensuite.
+class ConnectorFetchIn(BaseModel):
+    region: str | None = None        # alias Romandie (geneva|lausanne|sion|…) ou lat+lon
+    lat: float | None = None
+    lon: float | None = None
+    start_date: str = Field(..., min_length=8)   # YYYY-MM-DD
+    end_date: str = Field(..., min_length=8)
+    limit: int = Field(default=2000, ge=1, le=20000)
+
+
+@app.get("/model/connectors")
+def list_data_connectors(_: None = Depends(require_api_key)) -> dict[str, Any]:
+    """Liste les connecteurs de données publiques disponibles (métadonnées : source,
+    licence, granularité, variables fournies). Sert à mapper les colonnes `public_api`
+    du data_template vers une source récupérable automatiquement."""
+    import data_connectors
+    return {"connectors": data_connectors.list_connectors()}
+
+
+@app.post("/model/connectors/{connector_id}/fetch")
+def fetch_data_connector(
+    connector_id: str, payload: ConnectorFetchIn, _: None = Depends(require_api_key),
+) -> dict[str, Any]:
+    """Récupère la série quotidienne « tidy » d'un connecteur pour une zone + période.
+    Renvoie les lignes (plafonnées à `limit`) + la provenance réelle (source, licence)."""
+    import data_connectors
+    if connector_id not in data_connectors.CONNECTORS:
+        raise HTTPException(status_code=404, detail=f"Connecteur inconnu : {connector_id}")
+    params = payload.model_dump(exclude_none=True)
+    limit = params.pop("limit", 2000)
+    try:
+        rows = data_connectors.fetch_series(connector_id, params)
+    except ValueError as _ve:
+        raise HTTPException(status_code=422, detail=str(_ve))
+    except Exception as _fe:
+        logger.warning(f"Connector {connector_id} fetch failed: {_fe}")
+        raise HTTPException(status_code=502,
+                            detail=f"Échec de récupération depuis la source publique : {_fe}")
+    meta = data_connectors.CONNECTORS[connector_id].metadata()
+    return {
+        "connector_id": connector_id, "provider": meta["provider"], "license": meta["license"],
+        "commercial_ok": meta["commercial_ok"], "variables": meta["variables"],
+        "row_count": len(rows), "rows": rows[:limit],
+    }
+
+
 @app.post("/scenarios/{scenario_id}/model/data")
 async def upload_model_dataset(
     scenario_id: str,
