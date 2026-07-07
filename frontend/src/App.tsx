@@ -129,6 +129,18 @@ function csvEscape(value: unknown): string {
   return JSON.stringify(value ?? "");
 }
 
+// Libellé court et lisible pour un scénario créé depuis une requête. Une requête
+// booléenne (ou multi-sous-requêtes) dépasse souvent la colonne `name` VARCHAR(255) ;
+// le nom n'est qu'un AFFICHAGE — la requête complète reste dans `query`. On tronque
+// sur une frontière de mot quand c'est possible, avec « … ».
+function scenarioDisplayName(q: string, limit = 140): string {
+  const s = (q ?? "").trim();
+  if (s.length <= limit) return s;
+  const cut = s.slice(0, limit);
+  const lastSpace = cut.lastIndexOf(" ");
+  return (lastSpace > limit * 0.6 ? cut.slice(0, lastSpace) : cut).trimEnd() + "…";
+}
+
 // ─── TerrainView ─────────────────────────────────────────────────────────────
 function TerrainView() {
   const { t } = useI18n();
@@ -1915,7 +1927,10 @@ export default function App() {
       .map((q) => ({ kind: q.kind, text: q.text.trim() }))
       .filter((q) => q.text);
     if (!extra.length || !query.trim()) return null;
-    return [{ kind: "natural", text: query.trim() }, ...extra];
+    // La requête principale est un FACETTE à part entière : son type suit le mode
+    // (booléen → correspondance lexicale, sinon → sémantique), comme les sous-requêtes.
+    const mainKind: SubQuery["kind"] = mode === "boolean" ? "boolean" : "natural";
+    return [{ kind: mainKind, text: query.trim() }, ...extra];
   }
 
   async function handleSearch() {
@@ -1955,7 +1970,7 @@ export default function App() {
       // lit le corpus et on l'affiche. Plus de "preview" divergente.
       const _sub = buildSubQueries();
       const newScenario = await createUserScenario({
-        name: query.trim(),
+        name: scenarioDisplayName(query),
         query: query.trim(),
         mode,
         filters: { projectContext },
@@ -2129,7 +2144,7 @@ export default function App() {
 
   function handleSaveAsScenario() {
     if (!query.trim()) return;
-    const name = saveSearchName.trim() || query.trim();
+    const name = saveSearchName.trim() || scenarioDisplayName(query);
     const _sub = buildSubQueries();
     // Chercher si une entrée non-épinglée existe déjà pour cette requête. Les
     // recherches multi-sous-requêtes créent toujours une entrée neuve (pas de dédup
