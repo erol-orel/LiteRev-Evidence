@@ -1694,19 +1694,37 @@ def _normalize_sub_queries(sub_queries: Any) -> list[dict]:
 def _multi_query_corpus_ids(sub_queries: list[dict], combinator: str, filters: dict) -> list:
     """Appartenance au corpus pour une recherche MULTI-sous-requêtes.
 
-    Chaque sous-requête produit un ENSEMBLE d'IDs de documents de la base locale :
-      - kind="boolean" → correspondance lexicale (opérateurs AND/OR/NOT),
-      - kind="natural" → correspondance sémantique (embedding, cosinus ≥ seuil).
-    Les ensembles sont combinés par UNION (OU) ou INTERSECTION (ET). Le CLASSEMENT
-    reste calculé en aval (cosinus + rerank) : ici on ne décide que l'APPARTENANCE,
-    donc l'appartenance sémantique est définie par un seuil (et non un top-K) pour
-    que l'intersection ne rate pas un document hors de la fenêtre top-K d'une des
-    sous-requêtes."""
+    Chaque sous-requête produit un ENSEMBLE d'IDs de documents de la base locale
+    par correspondance LEXICALE (booléenne) — EXACTEMENT comme la recherche
+    mono-requête (_boolean_corpus_ids) et comme le documente l'étape de populate :
+      - kind="boolean" → la requête est utilisée telle quelle (AND/OR/NOT),
+      - kind="natural" → elle est d'abord TRADUITE en booléen (_generate_search_strategy,
+        déterministe : seed=42, avec expansion de synonymes), puis matchée en booléen.
+
+    Le seuil sémantique N'INTERVIENT JAMAIS dans l'appartenance au corpus : il ne
+    sert qu'EN AVAL (page scénario, _get_above_threshold_articles) à sélectionner le
+    sous-ensemble PERTINENT parmi le corpus. Un corpus défini lexicalement reste
+    reproductible et auditable (exigence revue systématique) ; le score sémantique
+    classe/priorise ensuite, sans jamais retirer d'article du corpus.
+
+    Les ensembles sont combinés par UNION (OU) ou INTERSECTION (ET) puis dédupliqués
+    (ce sont des ensembles)."""
     clean = _normalize_sub_queries(sub_queries)
     id_sets: list[set] = []
     for sq in clean:
-        _mode = "boolean" if sq["kind"] == "boolean" else "semantic"
-        id_sets.append(set(_search_local_doc_ids(sq["text"], _mode, filters, limit=500_000)))
+        if sq["kind"] == "boolean":
+            _boolean = sq["text"]
+        else:
+            # Naturel → booléen, comme une requête naturelle mono-requête. Ainsi
+            # l'appartenance reste LEXICALE (pas de seuil sémantique). Repli sur le
+            # texte brut si la traduction échoue / clé OpenAI absente (mode dégradé).
+            try:
+                _gen = _generate_search_strategy(sq["text"])
+                _boolean = (_gen.get("general") or sq["text"]) if isinstance(_gen, dict) else sq["text"]
+            except Exception as _e:
+                logger.warning(f"_multi_query_corpus_ids: traduction naturel→booléen échouée ({_e}) ; repli lexical brut")
+                _boolean = sq["text"]
+        id_sets.append(set(_search_local_doc_ids(_boolean, "boolean", filters, limit=500_000)))
     if not id_sets:
         return []
     if combinator == "intersection":
