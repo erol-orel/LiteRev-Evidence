@@ -29,13 +29,21 @@ from dataclasses import dataclass, field
 from typing import Any, Callable
 
 
-# ── HTTP seam (monkeypatched in tests) ───────────────────────────────────────
+# ── HTTP seams (monkeypatched in tests) ──────────────────────────────────────
 def _http_get_json(url: str, timeout: int = 20) -> dict:
-    """The ONLY network call in this module. Isolated so tests can replace it."""
+    """JSON network call. Isolated so tests can replace it (no network in tests)."""
     import requests
     r = requests.get(url, timeout=timeout)
     r.raise_for_status()
     return r.json()
+
+
+def _http_get_text(url: str, timeout: int = 30) -> str:
+    """Text/CSV network call (bulk CSV connectors). Isolated for tests."""
+    import requests
+    r = requests.get(url, timeout=timeout)
+    r.raise_for_status()
+    return r.text
 
 
 # ── Region resolution ────────────────────────────────────────────────────────
@@ -173,10 +181,127 @@ class Connector:
         }
 
 
+# ── EAWAG wastewater (bulk CSV, Romandie catchments) ─────────────────────────
+_EAWAG_CSV_URL = "https://raw.githubusercontent.com/EawagPHH/RespiratoryVirusesWastewater/main/LatestRESP6Data-filtered.csv"
+_EAWAG_WWTP = {   # Romandie alias → treatment-plant name used in the dataset
+    "geneva": "STEP Aire", "geneve": "STEP Aire", "genève": "STEP Aire",
+    "lausanne": "STEP Vidy", "vaud": "STEP Vidy",
+    "neuchatel": "STEP Neuchatel", "neuchâtel": "STEP Neuchatel", "jura": "STEP Porrentruy",
+}
+_EAWAG_TARGET_COL = {"IAV": "flu_a_load", "IBV": "flu_b_load", "RSV": "rsv_load", "SARS": "sars_cov2_load"}
+
+
+def _parse_eawag_csv(csv_text: str, wwtp: str, targets: list | None = None) -> list[dict]:
+    """EAWAG RespiratoryVirusesWastewater CSV (wwtp,sample_date,Target,Protein,Load)
+    → tidy daily rows for ONE plant, pivoted long→wide by virus Target. PURE/testable."""
+    import csv as _csv
+    import io as _io
+    want = {str(t).upper() for t in (targets or _EAWAG_TARGET_COL)}
+    by_date: dict[str, dict] = {}
+    try:
+        reader = _csv.DictReader(_io.StringIO(csv_text))
+    except Exception:
+        return []
+    for r in reader:
+        if (r.get("wwtp") or "").strip() != wwtp:
+            continue
+        tgt = (r.get("Target") or "").strip().upper()
+        if tgt not in want:
+            continue
+        date = (r.get("sample_date") or "").strip()[:10]
+        raw = r.get("Load")
+        try:
+            load = float(raw) if raw not in (None, "") else None
+        except (TypeError, ValueError):
+            load = None
+        if not date or load is None:
+            continue
+        by_date.setdefault(date, {"date": date})[_EAWAG_TARGET_COL.get(tgt, f"{tgt.lower()}_load")] = load
+    return [by_date[d] for d in sorted(by_date)]
+
+
+def _fetch_eawag(params: dict) -> list[dict]:
+    alias = str(params.get("region", "geneva") or "geneva").strip().lower()
+    wwtp = params.get("wwtp") or _EAWAG_WWTP.get(alias, "STEP Aire")
+    rows = _parse_eawag_csv(_http_get_text(params.get("url") or _EAWAG_CSV_URL),
+                            wwtp, params.get("targets"))
+    s, e = params.get("start_date"), params.get("end_date")
+    if s or e:
+        rows = [r for r in rows if (not s or r["date"] >= str(s)) and (not e or r["date"] <= str(e))]
+    return rows
+
+
+# ── FOPH / BAG respiratory open data (opendata.swiss CSV) — BETA ─────────────
+# Exact resource/columns not reachable to verify from here (egress-blocked during
+# research). Resolves the CSV via CKAN (or FOPH_SENTINELLA_CSV_URL) and parses
+# GENERICALLY (a date/week column + numeric columns). Firm up once a live fetch
+# confirms the schema; the connector still works, just with detected column names.
+_FOPH_CKAN = "https://opendata.swiss/api/3/action/package_show?id=influenza1"
+_GENERIC_DATE_KEYS = {"date", "week", "yearweek", "year_week", "time", "datum", "temporal", "woche"}
+
+
+def _parse_generic_csv(csv_text: str) -> list[dict]:
+    """Best-effort CSV → tidy rows: pick a date/week column, keep numeric columns."""
+    import csv as _csv
+    import io as _io
+    try:
+        rows = list(_csv.DictReader(_io.StringIO(csv_text)))
+    except Exception:
+        return []
+    cols = [c for c in (rows[0].keys() if rows else []) if c]
+    if not cols:
+        return []
+    dcol = next((c for c in cols if c.strip().lower() in _GENERIC_DATE_KEYS), cols[0])
+    out: list[dict] = []
+    for r in rows:
+        d = (r.get(dcol) or "").strip()
+        if not d:
+            continue
+        row = {"date": d}
+        for c, v in r.items():
+            if c == dcol or v in (None, ""):
+                continue
+            try:
+                row[c.strip().lower().replace(" ", "_")] = float(v)
+            except (TypeError, ValueError):
+                pass
+        if len(row) > 1:
+            out.append(row)
+    return out
+
+
+def _fetch_foph_respiratory(params: dict) -> list[dict]:
+    import os as _os
+    url = params.get("url") or _os.getenv("FOPH_SENTINELLA_CSV_URL")
+    if not url:
+        try:
+            pkg = _http_get_json(_FOPH_CKAN)
+            for res in (((pkg or {}).get("result") or {}).get("resources") or []):
+                if str(res.get("format", "")).lower() == "csv" and (res.get("download_url") or res.get("url")):
+                    url = res.get("download_url") or res.get("url")
+                    break
+        except Exception:
+            url = None
+    if not url:
+        return []
+    rows = _parse_generic_csv(_http_get_text(url))
+    s, e = params.get("start_date"), params.get("end_date")
+    if s or e:
+        rows = [r for r in rows if (not s or r["date"] >= str(s)) and (not e or r["date"] <= str(e))]
+    return rows
+
+
 _POINT_PARAMS = {
     "region": "Romandie alias (geneva|lausanne|sion|neuchatel|fribourg|jura) OR pass lat+lon",
     "lat": "latitude (optional, overrides region)", "lon": "longitude (optional)",
     "start_date": "YYYY-MM-DD", "end_date": "YYYY-MM-DD",
+}
+_CSV_PARAMS = {
+    "region": "Romandie alias → WWTP (EAWAG: geneva→STEP Aire, lausanne→STEP Vidy, …)",
+    "wwtp": "explicit treatment-plant name (EAWAG, optional)",
+    "targets": "virus targets IAV|IBV|RSV|SARS (EAWAG, optional)",
+    "url": "override CSV URL (optional)",
+    "start_date": "YYYY-MM-DD (optional filter)", "end_date": "YYYY-MM-DD (optional filter)",
 }
 
 CONNECTORS: dict[str, Connector] = {
@@ -216,6 +341,38 @@ CONNECTORS: dict[str, Connector] = {
         fetch=_fetch_open_meteo_air_quality,
         params_schema=_POINT_PARAMS,
         notes="~11 km CAMS grid, queried by lat/lon. Free tier is non-commercial.",
+    ),
+    "eawag-wastewater": Connector(
+        id="eawag-wastewater",
+        name="EAWAG — Respiratory-virus wastewater (Romandie catchments)",
+        provider="EAWAG / FOPH (national wastewater programme)",
+        license="CC BY 4.0",
+        geo="catchment",
+        commercial_ok=True,
+        variables=[
+            {"machine_name": "flu_a_load", "label": "Influenza A wastewater load", "unit": "gc/day", "dtype": "float"},
+            {"machine_name": "flu_b_load", "label": "Influenza B wastewater load", "unit": "gc/day", "dtype": "float"},
+            {"machine_name": "rsv_load", "label": "RSV wastewater load", "unit": "gc/day", "dtype": "float"},
+            {"machine_name": "sars_cov2_load", "label": "SARS-CoV-2 wastewater load", "unit": "gc/day", "dtype": "float"},
+        ],
+        fetch=_fetch_eawag,
+        params_schema=_CSV_PARAMS,
+        notes="Catchment-level (STEP Aire=Geneva, STEP Vidy=Lausanne, Neuchâtel, Porrentruy). "
+              "ARCHIVE frozen since 2024-03 → historical backfill; use the live FOPH feed for current data.",
+    ),
+    "foph-respiratory": Connector(
+        id="foph-respiratory",
+        name="FOPH — Respiratory-virus surveillance (Sentinella ILI/ARI) — BETA",
+        provider="Federal Office of Public Health (opendata.swiss influenza1)",
+        license="opendata.swiss terms of use",
+        geo="national",
+        commercial_ok=True,
+        variables=[],   # detected at fetch time — schema unverified (see notes)
+        fetch=_fetch_foph_respiratory,
+        params_schema=_CSV_PARAMS,
+        notes="BETA — CSV schema not verified live: columns are auto-detected. Set "
+              "FOPH_SENTINELLA_CSV_URL or let CKAN resolution pick the resource. NATIONAL granularity "
+              "(no cantonal split). Supplies the weekly Sentinella ILI/ARI outcome once the schema is confirmed.",
     ),
 }
 
