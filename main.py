@@ -2088,27 +2088,13 @@ def _live_fetch_biorxiv(query: str, max_results: int) -> list[dict]:
     return _live_fetch_preprint_server("biorxiv", "bioRxiv", query, max_results)
 
 
-def _live_fetch_prospero(query: str, max_results: int) -> list[dict]:
-    # PROSPERO n'a pas d'API publique : proxy via PubMed restreint aux revues
-    # systématiques / méta-analyses (protocoles enregistrés y sont indexés).
-    term = f'({query}) AND ("systematic review"[Publication Type] OR "meta-analysis"[Publication Type])'
-    return _live_fetch_pubmed_term(term, "PROSPERO", "prospero", max_results)
-
-
-def _live_fetch_cochrane(query: str, max_results: int) -> list[dict]:
-    # La Cochrane Library n'expose pas d'API JSON simple : proxy via PubMed
-    # restreint au journal Cochrane Database of Systematic Reviews (CDSR).
-    term = f'("Cochrane Database Syst Rev"[Journal]) AND ({query})'
-    return _live_fetch_pubmed_term(term, "Cochrane", "cochrane", max_results)
-
-
 def _federated_live_search(
     query: str,
     max_per_source: int = 50,
     pubmed_query: str | None = None,
     general_query: str | None = None,
 ) -> tuple[list[dict], list[str], dict[str, int], dict[str, dict]]:
-    """Interroge les 8 sources externes en parallèle, déduplique (par DOI puis
+    """Interroge les sources externes en parallèle, déduplique (par DOI puis
     titre normalisé), marque in_local_db, et score chaque résultat
     (sémantique cosinus + lexical + hybride). Réutilisé par /search (fédéré)
     et par la recherche live des scénarios.
@@ -2289,7 +2275,7 @@ def search_live(
     max_per_source: int = 50,
     _: None = Depends(require_api_key),
 ) -> dict[str, Any]:
-    """Live federated search across all 8 external sources in parallel."""
+    """Live federated search across the external sources in parallel."""
     row = _get_user_scenario_or_404(scenario_id)
     query = row["query"]
     strategy = row.get("search_strategy") or {}
@@ -7090,7 +7076,8 @@ def _launch_populate_job(scenario_id: str, query: str, filters: dict, max_result
         _user_scenario_populate_jobs[scenario_id] = {
             "status": "running", "ingested": 0, "errors": 0, "total_found": 0,
             "sources": {"db_cache": 0, "pubmed": 0, "openalex": 0, "crossref": 0,
-                        "europepmc": 0, "medrxiv": 0, "biorxiv": 0, "prospero": 0, "cochrane": 0},
+                        "europepmc": 0, "preprint": 0, "semantic_scholar": 0, "doaj": 0,
+                        "clinicaltrials": 0, "core": 0},
         }
     threading.Thread(
         target=_run_user_scenario_populate,
@@ -7158,6 +7145,109 @@ def post_search_strategy(payload: SearchStrategyIn) -> dict[str, Any]:
     sorte que le compteur de recherche == la taille du corpus (même requête).
     """
     return _generate_search_strategy(payload.query)
+
+
+# ── Parseurs de sources littéraires (PURS / testables) ───────────────────────
+# Chaque parseur transforme la réponse brute d'une API en une liste de docs
+# {title, abstract, year, url, external_id, doi, source_type}. Le fetcher (closure
+# dans le populate) ne fait que le HTTP + la pagination puis délègue ici — de sorte
+# que la forme de chaque réponse est vérifiée par des tests SANS réseau.
+def _parse_semantic_scholar(payload: dict) -> list[dict]:
+    """Semantic Scholar Graph API /paper/search → docs. external_id = s2:<paperId>."""
+    out: list[dict] = []
+    for it in (payload.get("data") or []) if isinstance(payload, dict) else []:
+        if not isinstance(it, dict):
+            continue
+        title = (it.get("title") or "").strip()
+        pid = it.get("paperId")
+        if not title or not pid:
+            continue
+        ext = it.get("externalIds") or {}
+        doi = ext.get("DOI") or ext.get("doi")
+        year = it.get("year")
+        out.append({
+            "title": title, "abstract": (it.get("abstract") or None),
+            "year": int(year) if isinstance(year, int) else None,
+            "url": it.get("url") or (f"https://doi.org/{doi}" if doi else None),
+            "doi": doi, "external_id": f"s2:{pid}", "source_type": "article",
+        })
+    return out
+
+
+def _parse_doaj(payload: dict) -> list[dict]:
+    """DOAJ /api/search/articles → docs. external_id = doaj:<id>."""
+    out: list[dict] = []
+    for it in (payload.get("results") or []) if isinstance(payload, dict) else []:
+        bj = (it.get("bibjson") or {}) if isinstance(it, dict) else {}
+        title = (bj.get("title") or "").strip()
+        did = it.get("id") if isinstance(it, dict) else None
+        if not title or not did:
+            continue
+        doi = None
+        for ident in (bj.get("identifier") or []):
+            if isinstance(ident, dict) and str(ident.get("type", "")).lower() == "doi":
+                doi = ident.get("id"); break
+        url = None
+        for lk in (bj.get("link") or []):
+            if isinstance(lk, dict) and lk.get("url"):
+                url = lk.get("url"); break
+        try:
+            year = int(bj.get("year")) if bj.get("year") else None
+        except (TypeError, ValueError):
+            year = None
+        out.append({
+            "title": title, "abstract": (bj.get("abstract") or None), "year": year,
+            "url": url or (f"https://doi.org/{doi}" if doi else None), "doi": doi,
+            "external_id": f"doaj:{did}", "source_type": "article",
+        })
+    return out
+
+
+def _parse_clinicaltrials(payload: dict) -> list[dict]:
+    """ClinicalTrials.gov API v2 /studies → docs. external_id = nct:<id>."""
+    out: list[dict] = []
+    for st in (payload.get("studies") or []) if isinstance(payload, dict) else []:
+        ps = (st.get("protocolSection") or {}) if isinstance(st, dict) else {}
+        idm = ps.get("identificationModule") or {}
+        nct = idm.get("nctId")
+        title = (idm.get("briefTitle") or idm.get("officialTitle") or "").strip()
+        if not nct or not title:
+            continue
+        desc = ps.get("descriptionModule") or {}
+        year = None
+        date = ((ps.get("statusModule") or {}).get("startDateStruct") or {}).get("date") or ""
+        if len(date) >= 4 and date[:4].isdigit():
+            year = int(date[:4])
+        out.append({
+            "title": title,
+            "abstract": (desc.get("briefSummary") or desc.get("detailedDescription") or None),
+            "year": year, "url": f"https://clinicaltrials.gov/study/{nct}",
+            "doi": None, "external_id": f"nct:{nct}", "source_type": "clinical_trial",
+        })
+    return out
+
+
+def _parse_core(payload: dict) -> list[dict]:
+    """CORE API v3 /search/works → docs. external_id = core:<id>."""
+    out: list[dict] = []
+    for it in (payload.get("results") or []) if isinstance(payload, dict) else []:
+        if not isinstance(it, dict):
+            continue
+        title = (it.get("title") or "").strip()
+        cid = it.get("id")
+        if not title or cid is None:
+            continue
+        doi = it.get("doi")
+        try:
+            year = int(it.get("yearPublished")) if it.get("yearPublished") else None
+        except (TypeError, ValueError):
+            year = None
+        out.append({
+            "title": title, "abstract": (it.get("abstract") or None), "year": year,
+            "url": it.get("downloadUrl") or (f"https://doi.org/{doi}" if doi else None),
+            "doi": doi, "external_id": f"core:{cid}", "source_type": "article",
+        })
+    return out
 
 
 def _ingest_doc_direct(
@@ -7282,7 +7372,8 @@ def _run_user_scenario_populate(
             "phase": "local", "rerank_status": "idle",
             "sources": {
                 "db_cache": 0, "pubmed": 0, "openalex": 0, "crossref": 0,
-                "europepmc": 0, "medrxiv": 0, "biorxiv": 0, "prospero": 0, "cochrane": 0
+                "europepmc": 0, "preprint": 0, "semantic_scholar": 0, "doaj": 0,
+                "clinicaltrials": 0, "core": 0
             }
         }
 
@@ -7774,220 +7865,154 @@ def _run_user_scenario_populate(
             logger.warning(f"Préprints (Europe PMC) populate {scenario_id}: {_e}")
         return ("preprints", count)
 
-    def _fetch_prospero():
-        count = 0
-        try:
-            _prospero_resp = None
-            for _retry_p in range(3):
-                try:
-                    _prospero_resp = _requests.get(
-                        "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi",
-                        params={
-                            "db": "pubmed",
-                            "term": f'({_pubmed_q}) AND ("systematic review"[Publication Type] OR "meta-analysis"[Publication Type])',
-                            "retmax": min(max_results, max_results),
-                            "retmode": "json",
-                            "sort": "relevance",
-                        },
-                        timeout=30,
-                    )
-                    _prospero_resp.raise_for_status()
-                    break
-                except Exception as _ep:
-                    logger.warning(f"PROSPERO esearch tentative {_retry_p+1}/3: {_ep}")
-                    _time.sleep(3 * (_retry_p + 1))
-            _pmids = (_prospero_resp.json().get("esearchresult", {}).get("idlist", []) if _prospero_resp else [])
-            if _pmids:
-                import xml.etree.ElementTree as _ET3
-                _pmids_to_fetch = _pmids[:min(max_results, max_results)]
-                for _batch_start in range(0, len(_pmids_to_fetch), 200):
-                    _batch_ids = _pmids_to_fetch[_batch_start:_batch_start + 200]
-                    try:
-                        _fetch_resp = _requests.get(
-                            "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi",
-                            params={"db": "pubmed", "id": ",".join(_batch_ids), "retmode": "xml"},
-                            timeout=45,
-                        )
-                        _fetch_resp.raise_for_status()
-                    except Exception as _ep2:
-                        logger.warning(f"PROSPERO efetch batch {_batch_start}: {_ep2}")
-                        _time.sleep(2)
-                        continue
-                    _root = _ET3.fromstring(_fetch_resp.text)
-                    _time.sleep(0.3)
-                    for _art in _root.findall(".//PubmedArticle"):
-                        _pmid_el = _art.find(".//PMID")
-                        _pmid_val = _pmid_el.text if _pmid_el is not None else None
-                        _title_el = _art.find(".//ArticleTitle")
-                        _title_val = "".join(_title_el.itertext()).strip() if _title_el is not None else ""
-                        if not _pmid_val or not _title_val:
-                            continue
-                        _abs_parts = []
-                        for _ab in _art.findall(".//AbstractText"):
-                            _t = "".join(_ab.itertext()).strip()
-                            if _t:
-                                _abs_parts.append(_t)
-                        _abstract_val = " ".join(_abs_parts).strip() or None
-                        _doi_val = None
-                        for _id_el in _art.findall(".//ArticleId"):
-                            if _id_el.get("IdType") == "doi":
-                                _doi_val = _id_el.text
-                                break
-                        _year_el = _art.find(".//PubDate/Year")
-                        _year_val = int(_year_el.text) if _year_el is not None and _year_el.text else None
-                        _content_p = f"{_title_val}\n\n{_abstract_val or ''}".strip()
-                        if len(_content_p) < 30:
-                            continue
-                        try:
-                            _doc_id = _ingest_doc_direct(
-                                source="prospero", title=_title_val, abstract=_abstract_val,
-                                year=_year_val, url=f"https://pubmed.ncbi.nlm.nih.gov/{_pmid_val}/",
-                                external_id=f"prospero:pubmed:{_pmid_val}", doi=_doi_val,
-                                source_type="systematic_review",
-                            )
-                            _link_to_scenario(_doc_id)
-                            count += 1
-                            _inc("prospero")
-                        except Exception:
-                            _inc("prospero", 0, 1)
-        except Exception as _e:
-            logger.warning(f"PROSPERO populate {scenario_id}: {_e}")
-        return ("prospero", count)
-
-    def _fetch_cochrane():
-        count = 0
-        try:
-            _cochrane_results = []
+    def _ingest_parsed(source, docs):
+        """Ingère une liste de docs parsés (helper commun aux nouvelles sources REST).
+        Renvoie le nombre ingéré. Chaque doc : {title, abstract, year, url,
+        external_id, doi, source_type}. Les docs <30 caractères sont ignorés."""
+        c = 0
+        for _d in docs:
+            if len(f"{_d.get('title','')}\n\n{_d.get('abstract') or ''}".strip()) < 30:
+                continue
             try:
-                _coch_resp = _requests.get(
-                    "https://www.cochranelibrary.com/search",
-                    params={"searchBy": "6", "searchText": _plain_q, "selectedType": "review",
-                            "isWordVariations": "true", "resultPerPage": "20",
-                            "searchType": "basic", "orderBy": "relevancy", "displayPerPage": "20"},
-                    headers={"Accept": "application/json",
-                             "User-Agent": "LiteRev-Evidence/1.0 (academic research tool)"},
-                    timeout=15,
+                _doc_id = _ingest_doc_direct(
+                    source=source, title=_d["title"], abstract=_d.get("abstract"),
+                    year=_d.get("year"), url=_d.get("url"), external_id=_d["external_id"],
+                    doi=_d.get("doi"), source_type=_d.get("source_type", "article"),
                 )
-                if _coch_resp.status_code == 200:
-                    _coch_data = _coch_resp.json()
-                    _reviews = _coch_data.get("results", _coch_data.get("items", []))
-                    for _r in _reviews[:min(50, max_results)]:
-                        _title = _r.get("title", "")
-                        if not _title:
-                            continue
-                        _doi = _normalize_doi(_r.get("doi", _r.get("DOI", "")))
-                        _cochrane_results.append({
-                            "title": _title,
-                            "abstract": _r.get("abstract", _r.get("description", "")),
-                            "authors": _r.get("authors", ""),
-                            "doi": _doi,
-                            "url": _r.get("url", f"https://www.cochranelibrary.com/cdsr/doi/{_doi}" if _doi else None),
-                            "year": _r.get("year", _r.get("publishYear")),
-                            "external_id": f"cochrane:{_doi or _title[:50]}",
-                        })
-            except Exception as _e_coch_api:
-                logger.info(f"Cochrane direct API non disponible, fallback PubMed CDSR: {_e_coch_api}")
+                _link_to_scenario(_doc_id)
+                c += 1
+                _inc(source)
+            except Exception:
+                _inc(source, 0, 1)
+        return c
 
-            if not _cochrane_results:
-                try:
-                    _coch_term = f'("Cochrane Database Syst Rev"[Journal]) AND ({_pubmed_q})'
-                    _coch_esearch = None
-                    for _retry_c in range(3):
-                        try:
-                            _coch_esearch = _requests.get(
-                                "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi",
-                                params={"db": "pubmed", "term": _coch_term,
-                                        "retmax": min(50, max_results),
-                                        "retmode": "json", "sort": "relevance"},
-                                timeout=30,
-                            )
-                            _coch_esearch.raise_for_status()
-                            break
-                        except Exception as _ec:
-                            logger.warning(f"Cochrane fallback esearch tentative {_retry_c+1}/3: {_ec}")
-                            _time.sleep(3 * (_retry_c + 1))
-                    _coch_pmids = (_coch_esearch.json().get("esearchresult", {}).get("idlist", []) if _coch_esearch else [])
-                    if _coch_pmids:
-                        _coch_efetch = None
-                        for _retry_cf in range(3):
-                            try:
-                                _coch_efetch = _requests.get(
-                                    "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi",
-                                    params={"db": "pubmed", "id": ",".join(_coch_pmids), "retmode": "xml"},
-                                    timeout=45,
-                                )
-                                _coch_efetch.raise_for_status()
-                                break
-                            except Exception as _ecf:
-                                logger.warning(f"Cochrane fallback efetch tentative {_retry_cf+1}/3: {_ecf}")
-                                _time.sleep(3 * (_retry_cf + 1))
-                        if not _coch_efetch:
-                            raise Exception("Cochrane fallback efetch échoué après 3 tentatives")
-                        _coch_root = ET.fromstring(_coch_efetch.text)
-                        for _art in _coch_root.findall(".//PubmedArticle"):
-                            _pmid_el = _art.find(".//PMID")
-                            _pmid_val = _pmid_el.text if _pmid_el is not None else None
-                            _title_el = _art.find(".//ArticleTitle")
-                            _title_val = "".join(_title_el.itertext()).strip() if _title_el is not None else ""
-                            if not _pmid_val or not _title_val:
-                                continue
-                            _abs_parts = []
-                            for _ab in _art.findall(".//AbstractText"):
-                                _t = "".join(_ab.itertext()).strip()
-                                if _t:
-                                    _abs_parts.append(_t)
-                            _abstract_val = " ".join(_abs_parts).strip() or None
-                            _doi_val = None
-                            for _id_el in _art.findall(".//ArticleId"):
-                                if _id_el.get("IdType") == "doi":
-                                    _doi_val = _id_el.text
-                                    break
-                            _year_el = _art.find(".//PubDate/Year")
-                            _year_val = int(_year_el.text) if _year_el is not None and _year_el.text else None
-                            _authors_list = []
-                            for _author in _art.findall(".//Author"):
-                                _last = _author.findtext("LastName", "")
-                                _fore = _author.findtext("ForeName", "")
-                                if _last:
-                                    _authors_list.append(f"{_last} {_fore}".strip())
-                            _cochrane_results.append({
-                                "title": _title_val,
-                                "abstract": _abstract_val,
-                                "authors": "; ".join(_authors_list[:10]) or None,
-                                "doi": _doi_val,
-                                "url": f"https://pubmed.ncbi.nlm.nih.gov/{_pmid_val}/",
-                                "year": _year_val,
-                                "external_id": f"cochrane:pubmed:{_pmid_val}",
-                            })
-                except Exception as _e_coch_fb:
-                    logger.error(f"Erreur fallback Cochrane PubMed: {_e_coch_fb}")
-
-            for _item in _cochrane_results:
-                _content_c = f"{_item['title']}\n\n{_item['abstract'] or ''}".strip()
-                if len(_content_c) < 30:
+    def _fetch_semantic_scholar():
+        count = 0
+        try:
+            _s2_key = os.getenv("SEMANTIC_SCHOLAR_API_KEY")
+            _hdrs = {"x-api-key": _s2_key} if _s2_key else {}
+            _off, _cap = 0, min(max_results, 1000)   # S2 search : offset+limit <= 1000
+            while _off < _cap:
+                if _time.time() >= _fed_deadline[0]:
+                    break
+                _bulk = min(100, _cap - _off)
+                _r = _requests.get(
+                    "https://api.semanticscholar.org/graph/v1/paper/search",
+                    params={"query": _plain_q, "offset": _off, "limit": _bulk,
+                            "fields": "title,abstract,year,externalIds,url"},
+                    headers=_hdrs, timeout=20,
+                )
+                if _r.status_code == 429:      # rate-limited → petite pause et on retente
+                    _time.sleep(2)
                     continue
-                try:
-                    _doc_id = _ingest_doc_direct(
-                        source="cochrane", title=_item["title"], abstract=_item["abstract"],
-                        year=_item["year"], url=_item["url"], external_id=_item["external_id"],
-                        doi=_item["doi"], authors=_item["authors"],
-                        journal="Cochrane Database of Systematic Reviews",
-                        source_type="systematic_review",
-                    )
-                    _link_to_scenario(_doc_id)
-                    count += 1
-                    _inc("cochrane")
-                except Exception as _e_ins:
-                    _inc("cochrane", 0, 1)
-                    logger.warning(f"Erreur insertion Cochrane article {_item.get('external_id')}: {_e_ins}")
-        except Exception as _e_coch_global:
-            logger.warning(f"Cochrane global populate {scenario_id}: {_e_coch_global}")
-        return ("cochrane", count)
+                _r.raise_for_status()
+                _payload = _r.json()
+                _got = len(_payload.get("data") or [])
+                count += _ingest_parsed("semantic_scholar", _parse_semantic_scholar(_payload))
+                if _got < _bulk:
+                    break
+                _off += _bulk
+                _time.sleep(0.3)
+        except Exception as _e:
+            logger.warning(f"Semantic Scholar populate {scenario_id}: {_e}")
+        return ("semantic_scholar", count)
+
+    def _fetch_doaj():
+        count = 0
+        try:
+            import urllib.parse as _ulib
+            _page, _fetched = 1, 0
+            while _fetched < max_results:
+                if _time.time() >= _fed_deadline[0]:
+                    break
+                _r = _requests.get(
+                    f"https://doaj.org/api/search/articles/{_ulib.quote(_plain_q, safe='')}",
+                    params={"pageSize": 100, "page": _page}, timeout=20,
+                )
+                _r.raise_for_status()
+                _payload = _r.json()
+                _n = len(_payload.get("results") or [])
+                if _n == 0:
+                    break
+                count += _ingest_parsed("doaj", _parse_doaj(_payload))
+                _fetched += _n
+                if _n < 100:
+                    break
+                _page += 1
+                _time.sleep(0.3)
+        except Exception as _e:
+            logger.warning(f"DOAJ populate {scenario_id}: {_e}")
+        return ("doaj", count)
+
+    def _fetch_clinicaltrials():
+        count = 0
+        try:
+            _ct_token, _ct_fetched = None, 0
+            while _ct_fetched < max_results:
+                if _time.time() >= _fed_deadline[0]:
+                    break
+                _params = {"query.term": _plain_q, "pageSize": 100, "format": "json"}
+                if _ct_token:
+                    _params["pageToken"] = _ct_token
+                _r = _requests.get("https://clinicaltrials.gov/api/v2/studies", params=_params, timeout=20)
+                _r.raise_for_status()
+                _payload = _r.json()
+                _n = len(_payload.get("studies") or [])
+                if _n == 0:
+                    break
+                count += _ingest_parsed("clinicaltrials", _parse_clinicaltrials(_payload))
+                _ct_fetched += _n
+                _ct_token = _payload.get("nextPageToken")
+                if not _ct_token:
+                    break
+                _time.sleep(0.3)
+        except Exception as _e:
+            logger.warning(f"ClinicalTrials.gov populate {scenario_id}: {_e}")
+        return ("clinicaltrials", count)
+
+    def _fetch_core():
+        # CORE exige une clé API (gratuite). Sans clé → source ignorée proprement
+        # (comme NCBI_API_KEY : optionnelle, le déploiement reste vert).
+        _core_key = os.getenv("CORE_API_KEY")
+        if not _core_key:
+            logger.info(f"CORE populate {scenario_id}: CORE_API_KEY absent — source ignorée.")
+            return ("core", 0)
+        count = 0
+        try:
+            _core_offset, _core_fetched = 0, 0
+            while _core_fetched < max_results:
+                if _time.time() >= _fed_deadline[0]:
+                    break
+                _bulk = min(100, max_results - _core_fetched)
+                _r = _requests.post(
+                    "https://api.core.ac.uk/v3/search/works",
+                    headers={"Authorization": f"Bearer {_core_key}"},
+                    json={"q": _plain_q, "limit": _bulk, "offset": _core_offset},
+                    timeout=25,
+                )
+                if _r.status_code == 429:
+                    _time.sleep(3)
+                    continue
+                _r.raise_for_status()
+                _payload = _r.json()
+                _n = len(_payload.get("results") or [])
+                if _n == 0:
+                    break
+                count += _ingest_parsed("core", _parse_core(_payload))
+                _core_fetched += _n
+                _core_offset += _bulk
+                if _n < _bulk:
+                    break
+                _time.sleep(0.3)
+        except Exception as _e:
+            logger.warning(f"CORE populate {scenario_id}: {_e}")
+        return ("core", count)
 
     # Lancer toutes les sources en parallèle
     source_funcs = [
         _fetch_pubmed, _fetch_openalex, _fetch_crossref,
         _fetch_europepmc, _fetch_preprints,
+        _fetch_semantic_scholar, _fetch_doaj, _fetch_clinicaltrials, _fetch_core,
     ]
     t_start = _time.time()
     if include_live:
@@ -7999,7 +8024,7 @@ def _run_user_scenario_populate(
         # appelle shutdown(wait=True), qui attend TOUTES les sources (jusqu'à ~5 min
         # quand OpenAlex/Crossref paginent vers 2000), annulant de fait le budget.
         # On gère l'executor manuellement et on l'arrête SANS attendre.
-        executor = ThreadPoolExecutor(max_workers=7)
+        executor = ThreadPoolExecutor(max_workers=9)
         try:
             futures = {executor.submit(fn): fn.__name__ for fn in source_funcs}
             try:
@@ -8354,7 +8379,7 @@ def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict
     """
     Pipeline complet d'enrichissement pour un scénario utilisateur.
     Ordre optimal :
-    1. ingest    – Ingestion multi-sources (PubMed+OpenAlex+Crossref+EuropePMC+medRxiv+bioRxiv+PROSPERO+Cochrane)
+    1. ingest    – Ingestion multi-sources (PubMed+OpenAlex+Crossref+EuropePMC+Preprints+SemanticScholar+DOAJ+ClinicalTrials.gov+CORE)
     2. fulltext  – Récupération full-text (PMC→EuropePMC→Unpaywall) pendant que les IDs sont frais
     3. embed     – Embeddings sur title+abstract+fulltext chunks (contenu enrichi)
     4. rerank    – Score cosinus via pgvector (pas de re-embedding API)
@@ -9327,7 +9352,8 @@ def populate_user_scenario(
         "query": query,
         "max_results": max_results,
         "message": f"Ingération multi-sources lancée en arrière-plan pour '{row['name']}' "
-                   "(DB Cache + PubMed + OpenAlex + Crossref + EuropePMC + medRxiv + bioRxiv + PROSPERO + Cochrane). "
+                   "(DB Cache + PubMed + OpenAlex + Crossref + EuropePMC + Preprints + "
+                   "Semantic Scholar + DOAJ + ClinicalTrials.gov + CORE). "
                    "Utilisez /user-scenarios/{id}/populate/status pour suivre la progression.",
     }
 
@@ -9715,10 +9741,13 @@ def get_user_scenario_prisma(
                 SUM(CASE WHEN d.source = 'openalex' THEN 1 ELSE 0 END) AS openalex,
                 SUM(CASE WHEN d.source = 'europepmc' THEN 1 ELSE 0 END) AS europepmc,
                 SUM(CASE WHEN d.source = 'crossref' THEN 1 ELSE 0 END) AS crossref,
+                SUM(CASE WHEN d.source = 'preprint' THEN 1 ELSE 0 END) AS preprint,
                 SUM(CASE WHEN d.source = 'medrxiv'  THEN 1 ELSE 0 END) AS medrxiv,
                 SUM(CASE WHEN d.source = 'biorxiv'  THEN 1 ELSE 0 END) AS biorxiv,
-                SUM(CASE WHEN d.source = 'prospero' THEN 1 ELSE 0 END) AS prospero,
-                SUM(CASE WHEN d.source = 'cochrane' THEN 1 ELSE 0 END) AS cochrane,
+                SUM(CASE WHEN d.source = 'semantic_scholar' THEN 1 ELSE 0 END) AS semantic_scholar,
+                SUM(CASE WHEN d.source = 'doaj'     THEN 1 ELSE 0 END) AS doaj,
+                SUM(CASE WHEN d.source = 'clinicaltrials' THEN 1 ELSE 0 END) AS clinicaltrials,
+                SUM(CASE WHEN d.source = 'core'     THEN 1 ELSE 0 END) AS core,
                 SUM(CASE WHEN d.source = 'db_cache' THEN 1 ELSE 0 END) AS db_cache,
                 SUM(CASE WHEN d.is_duplicate = TRUE THEN 1 ELSE 0 END) AS duplicates,
                 -- semantic split at effective threshold
@@ -9781,10 +9810,13 @@ def get_user_scenario_prisma(
                 "openalex":  int(stats["openalex"] or 0),
                 "europepmc": int(stats["europepmc"] or 0),
                 "crossref":  int(stats["crossref"] or 0),
+                "preprint":  int(stats["preprint"] or 0),
                 "medrxiv":   int(stats["medrxiv"] or 0),
                 "biorxiv":   int(stats["biorxiv"] or 0),
-                "prospero":  int(stats["prospero"] or 0),
-                "cochrane":  int(stats["cochrane"] or 0),
+                "semantic_scholar": int(stats["semantic_scholar"] or 0),
+                "doaj":      int(stats["doaj"] or 0),
+                "clinicaltrials": int(stats["clinicaltrials"] or 0),
+                "core":      int(stats["core"] or 0),
                 "db_cache":  int(stats["db_cache"] or 0),
             },
             "duplicates_removed": duplicates,

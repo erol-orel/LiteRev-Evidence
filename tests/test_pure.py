@@ -261,3 +261,63 @@ def test_sentiweb_parse_falls_back_to_inc_then_none():
     assert main._sentiweb_latest_value({"nope": 1}) is None
     # the OLD broken assumption (a root list of dicts) is now handled too
     assert main._sentiweb_latest_value([{"week": 202410, "inc100": 42.0}]) == 42.0
+
+
+# ── New corpus-source parsers (PR B1): raw API payload → tidy docs ────────────
+def test_parse_semantic_scholar():
+    payload = {"data": [
+        {"paperId": "abc", "title": "Flu nowcasting", "abstract": "We model ILI.",
+         "year": 2024, "externalIds": {"DOI": "10.1/x"}, "url": "https://s2/abc"},
+        {"paperId": None, "title": "no id"},          # dropped (needs paperId)
+        {"title": "no paper id key"},                   # dropped
+    ]}
+    docs = main._parse_semantic_scholar(payload)
+    assert len(docs) == 1
+    d = docs[0]
+    assert d["external_id"] == "s2:abc" and d["doi"] == "10.1/x" and d["year"] == 2024
+    assert d["title"] == "Flu nowcasting" and d["source_type"] == "article"
+    assert main._parse_semantic_scholar({}) == [] and main._parse_semantic_scholar({"data": None}) == []
+
+
+def test_parse_doaj():
+    payload = {"results": [
+        {"id": "d1", "bibjson": {"title": "OA respiratory study", "abstract": "abs", "year": "2023",
+                                  "identifier": [{"type": "doi", "id": "10.2/y"}],
+                                  "link": [{"url": "https://doaj/d1"}]}},
+        {"bibjson": {"title": "no id"}},                # dropped (needs id)
+    ]}
+    docs = main._parse_doaj(payload)
+    assert len(docs) == 1
+    assert docs[0]["external_id"] == "doaj:d1" and docs[0]["doi"] == "10.2/y"
+    assert docs[0]["year"] == 2023 and docs[0]["url"] == "https://doaj/d1"
+
+
+def test_parse_clinicaltrials():
+    payload = {"studies": [
+        {"protocolSection": {
+            "identificationModule": {"nctId": "NCT01", "briefTitle": "RSV vaccine trial"},
+            "descriptionModule": {"briefSummary": "A trial."},
+            "statusModule": {"startDateStruct": {"date": "2022-05-01"}}}},
+        {"protocolSection": {"identificationModule": {"nctId": None, "briefTitle": "x"}}},  # dropped
+    ]}
+    docs = main._parse_clinicaltrials(payload)
+    assert len(docs) == 1
+    d = docs[0]
+    assert d["external_id"] == "nct:NCT01" and d["year"] == 2022
+    assert d["url"] == "https://clinicaltrials.gov/study/NCT01" and d["source_type"] == "clinical_trial"
+    assert d["doi"] is None
+
+
+def test_parse_core():
+    payload = {"results": [
+        {"id": 555, "title": "CORE OA paper", "abstract": "abs", "yearPublished": 2021,
+         "doi": "10.3/z", "downloadUrl": "https://core/pdf"},
+        {"id": None, "title": "no id"},                 # dropped
+    ]}
+    docs = main._parse_core(payload)
+    assert len(docs) == 1
+    assert docs[0]["external_id"] == "core:555" and docs[0]["doi"] == "10.3/z"
+    assert docs[0]["year"] == 2021 and docs[0]["url"] == "https://core/pdf"
+    # malformed / empty are safe
+    for bad in ({}, {"results": None}, {"results": ["nope"]}):
+        assert main._parse_core(bad) == []
