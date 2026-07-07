@@ -13301,6 +13301,18 @@ def fetch_data_connector(
     }
 
 
+def _agg_for_column(col: str) -> str:
+    """Fonction d'agrégation au ré-échantillonnage, déduite du nom de colonne :
+    précipitations → somme, charge virale (eaux usées) → dernière valeur du bucket,
+    tout le reste (température, humidité, qualité de l'air, incidence) → moyenne."""
+    c = (col or "").lower()
+    if "precip" in c or "rain" in c or "rainfall" in c:
+        return "sum"
+    if "load" in c or "wastewater" in c or c.endswith("_ww") or "viral" in c:
+        return "last"
+    return "mean"
+
+
 def _assemble_connector_frames(frames: dict, mappings: list[dict], freq: str,
                                datetime_col: str | None):
     """PUR : resample chaque série de connecteur à `freq` (moyenne), joint sur la clé
@@ -13318,7 +13330,10 @@ def _assemble_connector_frames(frames: dict, mappings: list[dict], freq: str,
             d = d.dropna(subset=["date"])
             if d.empty:
                 continue
-            d = d.set_index("date").resample(freq).mean(numeric_only=True).reset_index()
+            d = d.set_index("date")
+            for _c in list(d.columns):
+                d[_c] = pd.to_numeric(d[_c], errors="coerce")
+            d = d.resample(freq).agg({_c: _agg_for_column(_c) for _c in d.columns}).reset_index()
             d["date"] = d["date"].dt.strftime("%Y-%m-%d")
             resampled[cid] = d
         except Exception:

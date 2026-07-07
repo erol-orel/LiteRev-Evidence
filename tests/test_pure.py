@@ -426,3 +426,31 @@ def test_assemble_empty_when_nothing_maps():
     df, filled = main._assemble_connector_frames(
         frames, [{"template_column": "x", "connector_id": "c", "connector_variable": "missing"}], "W", None)
     assert df is None and filled == []
+
+
+def test_agg_for_column_inference():
+    assert main._agg_for_column("precip_sum") == "sum"
+    assert main._agg_for_column("rainfall") == "sum"
+    assert main._agg_for_column("rsv_load") == "last"
+    assert main._agg_for_column("wastewater_viral") == "last"
+    assert main._agg_for_column("temp_mean") == "mean"
+    assert main._agg_for_column("relative_humidity_mean") == "mean"
+
+
+def test_assemble_per_variable_aggregation():
+    import pandas as pd
+    # one weekly bucket, 3 daily rows: precip → SUM, wastewater load → LAST, temp → MEAN
+    wx = pd.DataFrame({"date": ["2025-01-01", "2025-01-02", "2025-01-03"],
+                       "temp_mean": [2.0, 4.0, 6.0], "precip_sum": [1.0, 2.0, 3.0]})
+    ww = pd.DataFrame({"date": ["2025-01-01", "2025-01-02", "2025-01-03"], "rsv_load": [10.0, 20.0, 30.0]})
+    frames = {"w": wx, "e": ww}
+    mappings = [
+        {"template_column": "t", "connector_id": "w", "connector_variable": "temp_mean"},
+        {"template_column": "p", "connector_id": "w", "connector_variable": "precip_sum"},
+        {"template_column": "r", "connector_id": "e", "connector_variable": "rsv_load"},
+    ]
+    df, _ = main._assemble_connector_frames(frames, mappings, "W", None)
+    assert len(df) == 1
+    assert df["t"].iloc[0] == 4.0     # mean(2,4,6)
+    assert df["p"].iloc[0] == 6.0     # sum(1,2,3) — not mean
+    assert df["r"].iloc[0] == 30.0    # last(10,20,30) — not mean

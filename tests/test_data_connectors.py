@@ -158,4 +158,12 @@ def test_fetch_foph_respiratory_via_url(monkeypatch):
 
 def test_new_connectors_registered():
     ids = {m["id"] for m in dc.list_connectors()}
-    assert {"eawag-wastewater", "foph-respiratory"} <= ids
+    assert {"eawag-wastewater", "foph-respiratory", "foph-wastewater"} <= ids
+
+
+def test_fetch_foph_wastewater_via_url(monkeypatch):
+    monkeypatch.setattr(dc, "_http_get_text",
+                        lambda url, timeout=30: "week,rsv_load,flu_load\n2025-01-01,5.0,7.0\n2025-01-08,6.0,8.0\n")
+    rows = dc.fetch_series("foph-wastewater", {"url": "https://x/ww.csv"})
+    assert [r["date"] for r in rows] == ["2025-01-01", "2025-01-08"]
+    assert rows[0]["rsv_load"] == 5.0 and rows[0]["flu_load"] == 7.0
