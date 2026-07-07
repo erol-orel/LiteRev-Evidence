@@ -2310,6 +2310,8 @@ const SOURCE_LABELS_MAP: Record<string, string> = {
   doaj: "DOAJ",
   clinicaltrials: "ClinicalTrials.gov",
   core: "CORE",
+  arxiv: "arXiv",
+  openaire: "OpenAIRE",
   db_cache: "DB Cache",
   preprint: "Preprints",
   preprints: "Preprints",

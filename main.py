@@ -7077,7 +7077,8 @@ def _launch_populate_job(scenario_id: str, query: str, filters: dict, max_result
             "status": "running", "ingested": 0, "errors": 0, "total_found": 0,
             "sources": {"db_cache": 0, "pubmed": 0, "openalex": 0, "crossref": 0,
                         "europepmc": 0, "preprint": 0, "semantic_scholar": 0, "doaj": 0,
-                        "clinicaltrials": 0, "core": 0},
+                        "clinicaltrials": 0, "core": 0, "arxiv": 0, "openaire": 0,
+                        "biorxiv": 0, "medrxiv": 0},
         }
     threading.Thread(
         target=_run_user_scenario_populate,
@@ -7250,6 +7251,114 @@ def _parse_core(payload: dict) -> list[dict]:
     return out
 
 
+def _parse_arxiv(xml_text: str) -> list[dict]:
+    """arXiv Atom feed (export.arxiv.org/api/query) → docs. external_id = arxiv:<id>."""
+    import xml.etree.ElementTree as _ET
+    _ns = {"a": "http://www.w3.org/2005/Atom", "arxiv": "http://arxiv.org/schemas/atom"}
+    out: list[dict] = []
+    try:
+        root = _ET.fromstring(xml_text)
+    except Exception:
+        return out
+    for e in root.findall("a:entry", _ns):
+        title = (e.findtext("a:title", default="", namespaces=_ns) or "").strip()
+        aid_url = (e.findtext("a:id", default="", namespaces=_ns) or "").strip()
+        if not title or not aid_url:
+            continue
+        aid = aid_url.rsplit("/abs/", 1)[-1] if "/abs/" in aid_url else aid_url.rsplit("/", 1)[-1]
+        summary = (e.findtext("a:summary", default="", namespaces=_ns) or "").strip() or None
+        published = e.findtext("a:published", default="", namespaces=_ns) or ""
+        year = int(published[:4]) if published[:4].isdigit() else None
+        out.append({
+            "title": " ".join(title.split()), "abstract": summary, "year": year,
+            "url": aid_url, "doi": e.findtext("arxiv:doi", default=None, namespaces=_ns),
+            "external_id": f"arxiv:{aid}", "source_type": "preprint",
+        })
+    return out
+
+
+def _parse_biorxiv(payload: dict, terms: list[str], server: str) -> list[dict]:
+    """bioRxiv/medRxiv details API collection → docs FILTRÉS par mots-clés.
+    L'API n'offre pas de recherche : le fetcher scanne une fenêtre de dates et le
+    filtrage lexical se fait ici (garde un preprint si ≥ moitié des termes ≥4 car.
+    apparaissent dans titre+résumé). external_id = <server>:<doi>."""
+    out: list[dict] = []
+    coll = payload.get("collection") if isinstance(payload, dict) else None
+    kw = [t for t in (terms or []) if len(t) >= 4]
+    need = max(1, (len(kw) + 1) // 2) if kw else 0
+    for it in (coll or []):
+        if not isinstance(it, dict):
+            continue
+        title = (it.get("title") or "").strip()
+        doi = it.get("doi")
+        if not title or not doi:
+            continue
+        abstract = it.get("abstract") or None
+        hay = f"{title} {abstract or ''}".lower()
+        if kw and sum(1 for t in kw if t in hay) < need:
+            continue
+        date = it.get("date") or ""
+        out.append({
+            "title": title, "abstract": abstract,
+            "year": int(date[:4]) if date[:4].isdigit() else None,
+            "url": f"https://doi.org/{doi}", "doi": doi,
+            "external_id": f"{server}:{doi}", "source_type": "preprint",
+        })
+    return out
+
+
+def _openaire_text(v: Any) -> str | None:
+    """Extrait une chaîne d'un champ OpenAIRE (str, dict {"$":…}, ou liste)."""
+    if isinstance(v, str):
+        return v
+    if isinstance(v, dict):
+        return v.get("$")
+    if isinstance(v, list):
+        for x in v:
+            t = _openaire_text(x)
+            if t:
+                return t
+    return None
+
+
+def _parse_openaire(payload: dict) -> list[dict]:
+    """OpenAIRE search/publications (format=json) → docs. BEST-EFFORT : structure
+    profondément imbriquée et variable ($-wrapped, dict-ou-liste). external_id = doi:<…>
+    ou openaire:<objIdentifier>."""
+    out: list[dict] = []
+    results = (((payload or {}).get("response") or {}).get("results") or {}).get("result") if isinstance(payload, dict) else None
+    if isinstance(results, dict):
+        results = [results]
+    for r in (results or []):
+        if not isinstance(r, dict):
+            continue
+        res = ((r.get("metadata") or {}).get("oaf:entity") or {}).get("oaf:result")
+        if not isinstance(res, dict):
+            continue
+        title = _openaire_text(res.get("title"))
+        if not title:
+            continue
+        doi = None
+        pids = res.get("pid")
+        if isinstance(pids, dict):
+            pids = [pids]
+        for p in (pids or []):
+            if isinstance(p, dict) and str(p.get("@classid", "")).lower() == "doi":
+                doi = p.get("$"); break
+        oid = _openaire_text((r.get("header") or {}).get("dri:objIdentifier")) or _openaire_text(res.get("objIdentifier"))
+        eid = (f"doi:{doi}" if doi else (f"openaire:{oid}" if oid else None))
+        if not eid:
+            continue
+        date = _openaire_text(res.get("dateofacceptance")) or ""
+        out.append({
+            "title": " ".join(title.split()), "abstract": _openaire_text(res.get("description")),
+            "year": int(date[:4]) if date[:4].isdigit() else None,
+            "url": (f"https://doi.org/{doi}" if doi else None), "doi": doi,
+            "external_id": eid, "source_type": "article",
+        })
+    return out
+
+
 def _ingest_doc_direct(
     source: str,
     title: str,
@@ -7373,7 +7482,8 @@ def _run_user_scenario_populate(
             "sources": {
                 "db_cache": 0, "pubmed": 0, "openalex": 0, "crossref": 0,
                 "europepmc": 0, "preprint": 0, "semantic_scholar": 0, "doaj": 0,
-                "clinicaltrials": 0, "core": 0
+                "clinicaltrials": 0, "core": 0, "arxiv": 0, "openaire": 0,
+                "biorxiv": 0, "medrxiv": 0
             }
         }
 
@@ -8008,11 +8118,101 @@ def _run_user_scenario_populate(
             logger.warning(f"CORE populate {scenario_id}: {_e}")
         return ("core", count)
 
+    def _fetch_arxiv():
+        count = 0
+        try:
+            _ax_start = 0
+            while _ax_start < max_results:
+                if _time.time() >= _fed_deadline[0]:
+                    break
+                _bulk = min(100, max_results - _ax_start)
+                _r = _requests.get(
+                    "http://export.arxiv.org/api/query",
+                    params={"search_query": f"all:{_plain_q}", "start": _ax_start, "max_results": _bulk},
+                    timeout=25,
+                )
+                _r.raise_for_status()
+                _docs = _parse_arxiv(_r.text)
+                if not _docs:
+                    break
+                count += _ingest_parsed("arxiv", _docs)
+                if len(_docs) < _bulk:
+                    break
+                _ax_start += _bulk
+                _time.sleep(3)      # arXiv demande ≥3 s entre requêtes
+        except Exception as _e:
+            logger.warning(f"arXiv populate {scenario_id}: {_e}")
+        return ("arxiv", count)
+
+    def _fetch_openaire():
+        count = 0
+        try:
+            _oa_page, _oa_fetched = 1, 0
+            while _oa_fetched < max_results:
+                if _time.time() >= _fed_deadline[0]:
+                    break
+                _r = _requests.get(
+                    "https://api.openaire.eu/search/publications",
+                    params={"keywords": _plain_q, "size": 50, "page": _oa_page, "format": "json"},
+                    timeout=25,
+                )
+                _r.raise_for_status()
+                _docs = _parse_openaire(_r.json())
+                if not _docs:
+                    break
+                count += _ingest_parsed("openaire", _docs)
+                _oa_fetched += len(_docs)
+                if len(_docs) < 50:
+                    break
+                _oa_page += 1
+                _time.sleep(0.5)
+        except Exception as _e:
+            logger.warning(f"OpenAIRE populate {scenario_id}: {_e}")
+        return ("openaire", count)
+
+    def _fetch_biorxiv_medrxiv():
+        # L'API bioRxiv/medRxiv n'offre PAS de recherche par mots-clés : on scanne une
+        # fenêtre de dates RÉCENTE (bornée) puis on filtre lexicalement (_parse_biorxiv).
+        # Couverture = préprints récents pertinents, pas tout l'historique (assumé/honnête).
+        count = 0
+        try:
+            from datetime import date as _date, timedelta as _td
+            _terms = [re.sub(r"[^a-z0-9]", "", w) for w in (_plain_q or "").lower().split()]
+            _terms = [t for t in _terms if len(t) >= 4]
+            try:
+                _to = _date.today()
+                _win = f"{(_to - _td(days=540)).isoformat()}/{_to.isoformat()}"
+            except Exception:
+                _win = "2024-01-01/2026-12-31"
+            for _server in ("biorxiv", "medrxiv"):
+                _cursor, _pages = 0, 0
+                while _pages < 20:          # borne dure du scan (~2000 préprints/serveur)
+                    if _time.time() >= _fed_deadline[0]:
+                        break
+                    _r = _requests.get(
+                        f"https://api.biorxiv.org/details/{_server}/{_win}/{_cursor}/json", timeout=20)
+                    _r.raise_for_status()
+                    _payload = _r.json()
+                    _coll = _payload.get("collection") or []
+                    if not _coll:
+                        break
+                    count += _ingest_parsed(_server, _parse_biorxiv(_payload, _terms, _server))
+                    _pages += 1
+                    _total = int((_payload.get("messages") or [{}])[0].get("total", 0) or 0)
+                    _cursor += len(_coll)
+                    if _cursor >= _total or len(_coll) < 100:
+                        break
+                    _time.sleep(0.5)
+        except Exception as _e:
+            logger.warning(f"bioRxiv/medRxiv populate {scenario_id}: {_e}")
+        return ("biorxiv_medrxiv", count)
+
     # Lancer toutes les sources en parallèle
     source_funcs = [
         _fetch_pubmed, _fetch_openalex, _fetch_crossref,
         _fetch_europepmc, _fetch_preprints,
         _fetch_semantic_scholar, _fetch_doaj, _fetch_clinicaltrials, _fetch_core,
+        _fetch_arxiv, _fetch_openaire, _fetch_biorxiv_medrxiv,
     ]
     t_start = _time.time()
     if include_live:
@@ -8024,7 +8224,7 @@ def _run_user_scenario_populate(
         # appelle shutdown(wait=True), qui attend TOUTES les sources (jusqu'à ~5 min
         # quand OpenAlex/Crossref paginent vers 2000), annulant de fait le budget.
         # On gère l'executor manuellement et on l'arrête SANS attendre.
-        executor = ThreadPoolExecutor(max_workers=9)
+        executor = ThreadPoolExecutor(max_workers=12)
         try:
             futures = {executor.submit(fn): fn.__name__ for fn in source_funcs}
             try:
@@ -8379,7 +8579,7 @@ def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict
     """
     Pipeline complet d'enrichissement pour un scénario utilisateur.
     Ordre optimal :
-    1. ingest    – Ingestion multi-sources (PubMed+OpenAlex+Crossref+EuropePMC+Preprints+SemanticScholar+DOAJ+ClinicalTrials.gov+CORE)
+    1. ingest    – Ingestion multi-sources (PubMed+OpenAlex+Crossref+EuropePMC+Preprints+SemanticScholar+DOAJ+ClinicalTrials.gov+CORE+arXiv+OpenAIRE+medRxiv+bioRxiv)
     2. fulltext  – Récupération full-text (PMC→EuropePMC→Unpaywall) pendant que les IDs sont frais
     3. embed     – Embeddings sur title+abstract+fulltext chunks (contenu enrichi)
     4. rerank    – Score cosinus via pgvector (pas de re-embedding API)
@@ -9353,7 +9553,8 @@ def populate_user_scenario(
         "max_results": max_results,
         "message": f"Ingération multi-sources lancée en arrière-plan pour '{row['name']}' "
                    "(DB Cache + PubMed + OpenAlex + Crossref + EuropePMC + Preprints + "
-                   "Semantic Scholar + DOAJ + ClinicalTrials.gov + CORE). "
+                   "Semantic Scholar + DOAJ + ClinicalTrials.gov + CORE + arXiv + OpenAIRE + "
+                   "medRxiv + bioRxiv). "
                    "Utilisez /user-scenarios/{id}/populate/status pour suivre la progression.",
     }
 
@@ -9748,6 +9949,8 @@ def get_user_scenario_prisma(
                 SUM(CASE WHEN d.source = 'doaj'     THEN 1 ELSE 0 END) AS doaj,
                 SUM(CASE WHEN d.source = 'clinicaltrials' THEN 1 ELSE 0 END) AS clinicaltrials,
                 SUM(CASE WHEN d.source = 'core'     THEN 1 ELSE 0 END) AS core,
+                SUM(CASE WHEN d.source = 'arxiv'    THEN 1 ELSE 0 END) AS arxiv,
+                SUM(CASE WHEN d.source = 'openaire' THEN 1 ELSE 0 END) AS openaire,
                 SUM(CASE WHEN d.source = 'db_cache' THEN 1 ELSE 0 END) AS db_cache,
                 SUM(CASE WHEN d.is_duplicate = TRUE THEN 1 ELSE 0 END) AS duplicates,
                 -- semantic split at effective threshold
@@ -9817,6 +10020,8 @@ def get_user_scenario_prisma(
                 "doaj":      int(stats["doaj"] or 0),
                 "clinicaltrials": int(stats["clinicaltrials"] or 0),
                 "core":      int(stats["core"] or 0),
+                "arxiv":     int(stats["arxiv"] or 0),
+                "openaire":  int(stats["openaire"] or 0),
                 "db_cache":  int(stats["db_cache"] or 0),
             },
             "duplicates_removed": duplicates,

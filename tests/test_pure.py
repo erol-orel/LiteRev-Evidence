@@ -321,3 +321,71 @@ def test_parse_core():
     # malformed / empty are safe
     for bad in ({}, {"results": None}, {"results": ["nope"]}):
         assert main._parse_core(bad) == []
+
+
+# ── PR B2 parsers: arXiv (XML), bioRxiv (scan+filter), OpenAIRE (nested) ──────
+def test_parse_arxiv():
+    xml = """<?xml version="1.0" encoding="UTF-8"?>
+    <feed xmlns="http://www.w3.org/2005/Atom" xmlns:arxiv="http://arxiv.org/schemas/atom">
+      <entry>
+        <id>http://arxiv.org/abs/2401.01234v1</id>
+        <title>Deep learning for   ILI nowcasting</title>
+        <summary>We forecast influenza.</summary>
+        <published>2024-01-15T00:00:00Z</published>
+        <arxiv:doi>10.9/arxiv.x</arxiv:doi>
+      </entry>
+      <entry><id></id><title>no id → dropped</title></entry>
+    </feed>"""
+    docs = main._parse_arxiv(xml)
+    assert len(docs) == 1
+    d = docs[0]
+    assert d["external_id"] == "arxiv:2401.01234v1" and d["year"] == 2024
+    assert d["title"] == "Deep learning for ILI nowcasting"        # whitespace collapsed
+    assert d["doi"] == "10.9/arxiv.x" and d["source_type"] == "preprint"
+    assert main._parse_arxiv("not xml at all") == []               # malformed → []
+
+
+def test_parse_biorxiv_filters_by_keywords():
+    payload = {"collection": [
+        {"doi": "10.1101/aaa", "title": "Respiratory virus wastewater",
+         "abstract": "influenza surveillance", "date": "2025-03-01"},
+        {"doi": "10.1101/bbb", "title": "Unrelated", "abstract": "quantum widgets", "date": "2025-02-01"},
+        {"doi": None, "title": "no doi", "abstract": "influenza respiratory wastewater"},
+    ]}
+    terms = ["respiratory", "influenza", "wastewater"]
+    docs = main._parse_biorxiv(payload, terms, "biorxiv")
+    assert len(docs) == 1                                          # only the matching, DOI-bearing one
+    assert docs[0]["external_id"] == "biorxiv:10.1101/aaa" and docs[0]["year"] == 2025
+    # no terms → keep all DOI-bearing entries
+    assert len(main._parse_biorxiv(payload, [], "medrxiv")) == 2
+
+
+def test_openaire_text_helper():
+    assert main._openaire_text("x") == "x"
+    assert main._openaire_text({"$": "y"}) == "y"
+    assert main._openaire_text([{"$": "z"}, {"$": "w"}]) == "z"
+    assert main._openaire_text(None) is None
+
+
+def test_parse_openaire_nested_and_malformed():
+    payload = {"response": {"results": {"result": [
+        {"header": {"dri:objIdentifier": {"$": "oai:xxx"}},
+         "metadata": {"oaf:entity": {"oaf:result": {
+             "title": [{"$": "Respiratory  forecasting"}, {"$": "alt"}],
+             "description": {"$": "abstract text"},
+             "dateofacceptance": {"$": "2023-06-01"},
+             "pid": [{"@classid": "doi", "$": "10.5/oa"}]}}}},
+        {"metadata": {"oaf:entity": {"oaf:result": {"title": None}}}},   # dropped (no title)
+    ]}}}
+    docs = main._parse_openaire(payload)
+    assert len(docs) == 1
+    d = docs[0]
+    assert d["external_id"] == "doi:10.5/oa" and d["doi"] == "10.5/oa"
+    assert d["title"] == "Respiratory forecasting" and d["year"] == 2023
+    # no DOI → falls back to objIdentifier
+    p2 = {"response": {"results": {"result": [
+        {"header": {"dri:objIdentifier": {"$": "oai:zzz"}},
+         "metadata": {"oaf:entity": {"oaf:result": {"title": {"$": "No DOI paper"}}}}}]}}}
+    assert main._parse_openaire(p2)[0]["external_id"] == "openaire:oai:zzz"
+    for bad in ({}, {"response": None}, {"response": {"results": None}}):
+        assert main._parse_openaire(bad) == []
