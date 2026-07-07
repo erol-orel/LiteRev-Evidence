@@ -68,7 +68,7 @@ export const en: Translations = {
     loading: "Loading real-time field data...",
     title: "Field Data: Greater Geneva",
     subtitle:
-      "6 public sources active · Weather, Routing, Epidemic, Demographics, Pharmacies, Informal signals",
+      "Terrain sources · Weather, Routing & Pharmacies (live); Epidemic (Sentinelles FR), Demographics & Signals (examples)",
     refreshedAt: "Updated",
     active: "● Active",
     inactive: "○ Inactive",
@@ -281,7 +281,7 @@ export const en: Translations = {
     searching: "Searching...",
     searchButton: "Search",
     includeLive:
-      "Include live API sources (PubMed, OpenAlex, Crossref, EuropePMC, Preprints)",
+      "Include live API sources (PubMed, OpenAlex, Crossref, EuropePMC, Semantic Scholar, DOAJ, ClinicalTrials.gov, CORE, arXiv, OpenAIRE, bioRxiv, medRxiv, Europe PMC preprints)",
     includeLiveHint: "Slower search, adds articles not yet indexed",
     addSubQuery: "Add a sub-query",
     combineHint: "The main query above is combined with these sub-queries:",
@@ -404,7 +404,7 @@ export const en: Translations = {
       openInPubmedArrow: "Open in PubMed →",
       explanation: "Explanation",
       synonymGroups: "Synonym groups",
-      liveSearchTitle: "Live search (5 sources)",
+      liveSearchTitle: "Live search",
       searching: "Searching...",
       searchAllSources: "Search all sources",
       liveResultsSuffix: "results (live APIs)",
@@ -540,7 +540,7 @@ export const en: Translations = {
       loadingCorpus: "Loading article corpus...",
       autoSelectionTitle: "Automatic selection",
       autoSelectionBody1:
-        ": These articles were retrieved from 6 sources (DB Cache + PubMed, OpenAlex, Crossref, EuropePMC, Preprints) via multi-source search.",
+        ": These articles were retrieved from the local cache and 13 API sources (PubMed, OpenAlex, Crossref, EuropePMC, Semantic Scholar, DOAJ, ClinicalTrials.gov, CORE, arXiv, OpenAIRE, bioRxiv, medRxiv, Europe PMC preprints) via multi-source search.",
       autoSelectionBody2: "None have been validated by a human reviewer.",
       autoSelectionBody3:
         "For a formal systematic review, double-blind human screening is required (Review tab).",
@@ -804,9 +804,9 @@ export const en: Translations = {
       subscribeButton: "Subscribe to alerts",
       livingReviewPipeline: "Living Review Pipeline",
       livingReviewDesc:
-        "The Living Review pipeline automatically queries 6 sources (DB Cache + PubMed, OpenAlex, Crossref, EuropePMC, Preprints) with this scenario's query, inserts new articles, generates embeddings and recomputes clustering.",
+        "The Living Review pipeline automatically queries the local cache and 13 API sources (PubMed, OpenAlex, Crossref, EuropePMC, Semantic Scholar, DOAJ, ClinicalTrials.gov, CORE, arXiv, OpenAIRE, bioRxiv, medRxiv, Europe PMC preprints) with this scenario's query, inserts new articles, generates embeddings and recomputes clustering.",
       stepMultiSource:
-        "Multi-source query: DB Cache + PubMed + OpenAlex + Crossref + EuropePMC + Preprints",
+        "Multi-source query: local cache + PubMed + OpenAlex + Crossref + EuropePMC + Semantic Scholar + DOAJ + ClinicalTrials.gov + CORE + arXiv + OpenAIRE + bioRxiv + medRxiv + Europe PMC preprints",
       stepInsert: "Insertion of new articles (automatic deduplication)",
       stepEmbeddings:
         "Embedding generation (text-embedding-3-small): enables semantic relevance",
