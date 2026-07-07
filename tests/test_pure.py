@@ -163,3 +163,33 @@ def test_evidence_fingerprint_is_sensitive():
 def test_evidence_fingerprint_none_lang_is_french_bucket():
     assert main._evidence_fingerprint([1], 0.45, None, "x") == \
            main._evidence_fingerprint([1], 0.45, "fr", "x")
+
+
+# ── _truncate_display_name + name capping (the 422-on-long-boolean-query bug) ─
+def test_truncate_display_name_short_unchanged():
+    assert main._truncate_display_name("influenza forecast") == "influenza forecast"
+    assert main._truncate_display_name("  spaced  ") == "spaced"        # stripped
+    assert main._truncate_display_name(None) is None                    # non-str passthrough
+
+
+def test_truncate_display_name_long_is_capped_with_ellipsis():
+    long_q = "(influenza OR RSV) AND (surveillance OR nowcasting) " * 20   # >>255 chars
+    out = main._truncate_display_name(long_q)
+    assert len(out) <= 255            # fits VARCHAR(255)
+    assert out.endswith("…")
+
+
+def test_user_scenario_in_caps_overlong_name_instead_of_422():
+    # A long boolean query used as the scenario NAME must NOT raise (was a 422).
+    long_name = "(influenza OR ILI OR ARI OR RSV OR \"SARS-CoV-2\") AND (surveillance OR nowcasting OR forecast) " * 5
+    m = main.UserScenarioIn(name=long_name, query=long_name)
+    assert len(m.name) <= 255         # name truncated to fit the column
+    assert m.query == long_name       # query (TEXT) keeps the full text
+
+
+def test_user_scenario_patch_caps_overlong_name():
+    long_name = "x" * 400
+    m = main.UserScenarioPatch(name=long_name)
+    assert len(m.name) <= 255
+    # None stays None (name is optional on PATCH)
+    assert main.UserScenarioPatch().name is None

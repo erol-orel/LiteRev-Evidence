@@ -6268,6 +6268,20 @@ except Exception as _e:
     logger.warning(f"_ensure_user_scenarios_table: {_e}")
 
 
+def _truncate_display_name(v: Any, limit: int = 255) -> Any:
+    """Tronque un libellé d'affichage à `limit` caractères (colonne VARCHAR(255)).
+
+    `name` est un LIBELLÉ ; la requête complète vit dans `query` (TEXT). Une requête
+    booléenne un peu longue dépasse 255 caractères → sans ce garde-fou, Pydantic
+    renvoie 422 (max_length) ou la colonne VARCHAR(255) déborde (500). On tronque
+    proprement avec « … » pour que la recherche aboutisse quel que soit le client."""
+    if isinstance(v, str):
+        v = v.strip()
+        if len(v) > limit:
+            v = v[: limit - 1].rstrip() + "…"
+    return v
+
+
 class UserScenarioIn(BaseModel):
     name: str = Field(..., min_length=1, max_length=255)
     query: str = Field(..., min_length=1)
@@ -6289,6 +6303,11 @@ class UserScenarioIn(BaseModel):
     # et les alertes email. Optionnel (les scénarios restent utilisables sans compte).
     owner_email: str | None = None
 
+    @field_validator("name", mode="before")
+    @classmethod
+    def _cap_name(cls, v: Any) -> Any:
+        return _truncate_display_name(v)
+
     @model_validator(mode="after")
     def _clean_sub_queries(self) -> "UserScenarioIn":
         cleaned = _normalize_sub_queries(self.sub_queries)
@@ -6305,6 +6324,11 @@ class UserScenarioPatch(BaseModel):
     mode: str | None = None
     filters: dict[str, Any] | None = None
     folder_id: str | None = None  # Assigner à un dossier (None = hors dossier)
+
+    @field_validator("name", mode="before")
+    @classmethod
+    def _cap_name(cls, v: Any) -> Any:
+        return _truncate_display_name(v)
 
 
 class FolderIn(BaseModel):
