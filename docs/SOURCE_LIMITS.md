@@ -84,9 +84,14 @@ the corpus count itself stays pure lexical.
 | 7 | **DOAJ** | 100 | 2000 | full history (OA only) | none | keyword |
 | 8 | **ClinicalTrials.gov** | 100 | 2000 (trials, not papers) | full registry | none | keyword |
 | 9 | **CORE** | 100 | 2000 | full history | **required (`CORE_API_KEY`, free)** | keyword |
-| 10 | **arXiv** | 100 | **~100 (3 s/req vs 55 s budget)** | full history | none | keyword |
+| 10 | **arXiv** | 100 | **~100 (3 s/req vs 180 s budget)** | full history | none | keyword |
 | 11 | **OpenAIRE** | 50 | 2000 | full history | none | keyword |
 | 12 | **bioRxiv + medRxiv** | 100 | **last 45 days only** | **recent window, no keyword search** | none | date-window + local filter |
+
+> Every **`2000`** above is the *default* `LIVE_MAX_PER_SOURCE` — **env-configurable**; raise
+> it (e.g. `100000`) to remove the cap, after which the `POPULATE_FEDERATION_BUDGET` (180 s
+> default) time budget governs. Semantic Scholar's **1000** and bioRxiv's **45-day window**
+> are upstream limits and are *not* configurable.
 
 ---
 
@@ -146,9 +151,9 @@ the corpus count itself stays pure lexical.
 
 ### 10. arXiv — `export.arxiv.org/api/query` (`main.py:8121`)
 - `max_results = 100`/page, `start` pagination, Atom XML.
-- **arXiv requires ≥ 3 s between requests** (`main.py:8142`). Against the 55 s
-  federation budget, that means **usually only the first ~100 results** land before
-  the budget cuts pagination. Keyless.
+- **arXiv requires ≥ 3 s between requests** (`main.py:8142`). Against the 180 s
+  federation budget, that means **usually only the first few hundred results** land
+  before the budget cuts pagination. Keyless.
 - Coverage skew: physics / CS / math / **quantitative biology** preprints.
 
 ### 11. OpenAIRE — `api.openaire.eu/search/publications` (`main.py:8147`)
@@ -192,11 +197,13 @@ These feed the **auto-fetch** panel (predictors for a scenario's model), not the
 
 ## 4. The limitations that actually bite
 
-1. **The 55 s budget, not the 2000 cap, is usually the binding constraint** for slow
-   sources (arXiv especially, sometimes deep Crossref/OpenAlex pages).
-2. **Semantic Scholar tops out at 1000/query** (hard API limit).
+1. **The 180 s budget, not the 2000 cap, is usually the binding constraint** for slow
+   sources (arXiv especially, sometimes deep Crossref/OpenAlex pages). Both are
+   env-configurable (`POPULATE_FEDERATION_BUDGET`, `LIVE_MAX_PER_SOURCE`) — raise them
+   together to fetch deeper; ⚠ multiplies API calls + OpenAI embedding cost per search.
+2. **Semantic Scholar tops out at 1000/query** (hard API limit — not configurable).
 3. **bioRxiv/medRxiv native = recent 45-day window only** (no historical keyword search).
-4. **CORE = 0 without its (free) API key.**
+4. **CORE contributes 0 until `CORE_API_KEY` (free) is set** in the environment.
 5. **No-abstract records are dropped** → Crossref and ClinicalTrials net lower than raw.
 6. **arXiv/DOAJ/ClinicalTrials are domain-skewed** (preprints / OA journals / trials) —
    good for recall breadth, not representative on their own.
