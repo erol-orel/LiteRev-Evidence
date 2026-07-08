@@ -7113,6 +7113,15 @@ def _launch_populate_job(scenario_id: str, query: str, filters: dict, max_result
     return "started"
 
 
+# Cache mémoire des traductions naturel→booléen. La fonction est DÉTERMINISTE
+# (temperature=0, seed=42) → même requête, même stratégie : on évite de rappeler le
+# LLM à chaque frappe débouncée de /search-facets puis à nouveau à la recherche. Seuls
+# les résultats VALIDES sont mis en cache (jamais un repli dégradé → réessai quand la
+# clé/OpenAI redevient disponible). Borné par un flush simple à la capacité.
+_STRATEGY_CACHE: dict[str, dict] = {}
+_STRATEGY_CACHE_MAX = 512
+
+
 def _generate_search_strategy(query: str) -> dict:
     """
     Uses GPT-4.1-mini to generate a structured boolean search strategy from a natural language query.
@@ -7121,7 +7130,12 @@ def _generate_search_strategy(query: str) -> dict:
     - pubmed: PubMed-specific with MeSH tags
     - explanation: brief explanation of term choices
     - synonyms: list of key synonym groups used
+    Résultats déterministes mis en cache mémoire (voir _STRATEGY_CACHE) ; renvoie une COPIE.
     """
+    _cache_key = (query or "").strip()
+    _cached = _STRATEGY_CACHE.get(_cache_key)
+    if _cached is not None:
+        return dict(_cached)
     openai_key = os.getenv("OPENAI_API_KEY")
     if not openai_key:
         return {"general": query, "pubmed": query, "explanation": "", "synonyms": [], "degraded": True}
@@ -7152,7 +7166,12 @@ def _generate_search_strategy(query: str) -> dict:
             max_tokens=500,
             response_format={"type": "json_object"},
         )
-        return json.loads(response.choices[0].message.content)
+        _result = json.loads(response.choices[0].message.content)
+        if isinstance(_result, dict) and not _result.get("degraded"):
+            if len(_STRATEGY_CACHE) >= _STRATEGY_CACHE_MAX:
+                _STRATEGY_CACHE.clear()          # borne simple : flush à la capacité
+            _STRATEGY_CACHE[_cache_key] = dict(_result)
+        return _result
     except Exception as _e:
         logger.warning(f"_generate_search_strategy failed: {_e}")
         return {"general": query, "pubmed": query, "explanation": "", "synonyms": [], "degraded": True}
@@ -7180,7 +7199,7 @@ class FacetPreviewIn(BaseModel):
 
 
 @app.post("/search-facets")
-def post_search_facets(payload: FacetPreviewIn) -> dict[str, Any]:
+def post_search_facets(payload: FacetPreviewIn, _: None = Depends(require_api_key)) -> dict[str, Any]:
     """Prévisualise l'appartenance au corpus AVANT de lancer la recherche.
 
     Pour chaque facette (requête principale + sous-requêtes) : détecte le type

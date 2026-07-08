@@ -2678,7 +2678,9 @@ export default function App() {
                       {extraQueries.map((sq, i) => {
                         const eff = effectiveKind(sq);
                         const isAuto = sq.kind !== "boolean" && sq.kind !== "natural";
-                        const fp = facetPreview?.facets?.[i + 1];   // facette 0 = requête principale
+                        // Apparier par TEXTE, pas par index : les facettes vides sont filtrées
+                        // côté requête, donc extraQueries[i] ≠ facets[i+1] s'il y a un trou.
+                        const fp = facetPreview?.facets?.find((f) => f.text === sq.text.trim());
                         return (
                           <div key={i} className="space-y-1">
                             <div className="flex items-center gap-2">

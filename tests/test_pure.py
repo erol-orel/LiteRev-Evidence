@@ -503,3 +503,15 @@ def test_post_search_facets_counts_union_and_intersection(monkeypatch):
     res_i = main.post_search_facets(main.FacetPreviewIn(
         sub_queries=payload.sub_queries, combinator="intersection"))
     assert res_i["combined"] == 1                        # intersection chosen
+
+
+def test_generate_search_strategy_returns_cached_copy():
+    # A cached (valid) translation is returned WITHOUT touching the LLM/network, and as
+    # a COPY — mutating the caller's dict must not corrupt the cache.
+    main._STRATEGY_CACHE.clear()
+    main._STRATEGY_CACHE["flu forecasting"] = {"general": "CACHED", "degraded": False}
+    res = main._generate_search_strategy("  flu forecasting  ")   # trimmed → same key
+    assert res["general"] == "CACHED"
+    res["general"] = "MUTATED"
+    assert main._STRATEGY_CACHE["flu forecasting"]["general"] == "CACHED"
+    main._STRATEGY_CACHE.clear()
