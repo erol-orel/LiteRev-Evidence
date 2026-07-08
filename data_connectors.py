@@ -231,12 +231,14 @@ def _fetch_eawag(params: dict) -> list[dict]:
     return rows
 
 
-# ── FOPH / BAG respiratory open data (opendata.swiss CSV) — BETA ─────────────
-# Exact resource/columns not reachable to verify from here (egress-blocked during
-# research). Resolves the CSV via CKAN (or FOPH_SENTINELLA_CSV_URL) and parses
-# GENERICALLY (a date/week column + numeric columns). Firm up once a live fetch
-# confirms the schema; the connector still works, just with detected column names.
-_FOPH_CKAN = "https://opendata.swiss/api/3/action/package_show?id=influenza1"
+# ── FOPH wastewater respiratory-virus monitoring (opendata.swiss CSV) ─────────
+# CONFIRMED live via a prod fetch of opendata.swiss package "influenza1": 70k+ rows
+# since 2022 with columns date, value, valuemean7d, conc, flow, pop. This is FOPH
+# WASTEWATER influenza monitoring (normalized viral load) — NOT clinical Sentinella
+# ILI/ARI. The raw feed multiplexes many treatment plants, so rows are aggregated
+# per date into ONE national series (mean load/concentration, summed pop/flow) — a
+# downstream join therefore can never receive duplicate dates. Pass a column filter
+# (e.g. {"geoRegion": "GE"}) to narrow to a single region/plant before aggregation.
 _GENERIC_DATE_KEYS = {"date", "week", "yearweek", "year_week", "time", "datum", "temporal", "woche"}
 
 
@@ -270,15 +272,88 @@ def _parse_generic_csv(csv_text: str) -> list[dict]:
     return out
 
 
-def _fetch_foph_ckan_csv(ckan_id: str, env_var: str, params: dict) -> list[dict]:
-    """Résout le 1er CSV d'un dataset opendata.swiss (CKAN, ou l'override <env_var>),
-    le parse génériquement (date/semaine + colonnes numériques) et filtre par dates.
-    Partagé par les connecteurs FOPH (schéma non vérifié en direct → parseur générique)."""
+_FOPH_WW_CKAN_ID = "influenza1"                 # opendata.swiss package (confirmed live)
+_FOPH_WW_SUM_COLS = {"pop", "flow"}             # extensive quantities → sum across plants
+# every other numeric column (value, valuemean7d, conc, …) is a rate/concentration → mean
+_FOPH_WW_RESERVED = {"url", "start_date", "end_date", "region", "wwtp", "targets", "lat", "lon"}
+
+
+def _agg_foph_by_date(rows: list[dict]) -> list[dict]:
+    """Collapse multiplexed FOPH wastewater rows to ONE row per date (so a downstream
+    join can't duplicate dates): sum for extensive columns (pop, flow), mean for every
+    other signal (value, valuemean7d, conc). PURE/testable."""
+    from collections import defaultdict as _dd
+    bucket: dict[str, dict[str, list]] = _dd(lambda: _dd(list))
+    for r in rows:
+        d = r.get("date")
+        if not d:
+            continue
+        for k, v in r.items():
+            if k != "date" and isinstance(v, (int, float)):
+                bucket[d][k].append(v)
+    out = []
+    for d in sorted(bucket):
+        row: dict = {"date": d}
+        for k, vals in bucket[d].items():
+            if not vals:
+                continue
+            row[k] = round(sum(vals), 4) if k in _FOPH_WW_SUM_COLS else round(sum(vals) / len(vals), 4)
+        out.append(row)
+    return out
+
+
+def _parse_foph_wastewater(csv_text: str, filters: dict | None = None) -> list[dict]:
+    """FOPH opendata.swiss wastewater CSV → tidy daily rows. Applies optional equality
+    `filters` on any raw column (e.g. {"geoRegion": "GE"}), keeps the numeric columns
+    (value, valuemean7d, conc, flow, pop), and aggregates multiplexed plants to one row
+    per date. PURE/testable."""
+    import csv as _csv
+    import io as _io
+    try:
+        raw = list(_csv.DictReader(_io.StringIO(csv_text)))
+    except Exception:
+        return []
+    cols = [c for c in (raw[0].keys() if raw else []) if c]
+    if not cols:
+        return []
+    dcol = next((c for c in cols if (c or "").strip().lower() in _GENERIC_DATE_KEYS), cols[0]).strip().lower()
+    flt = {str(k).strip().lower(): str(v).strip().lower()
+           for k, v in (filters or {}).items() if v not in (None, "")}
+    kept: list[dict] = []
+    for r in raw:
+        norm = {(k or "").strip().lower(): v for k, v in r.items()}
+        if any((norm.get(fk) or "").strip().lower() != fv for fk, fv in flt.items()):
+            continue
+        d = (norm.get(dcol) or "").strip()
+        if not d:
+            continue
+        row: dict = {"date": d[:10] if (len(d) >= 10 and d[4:5] == "-") else d}
+        for k, v in norm.items():
+            if k == dcol or v in (None, ""):
+                continue
+            try:
+                row[k.replace(" ", "_")] = float(v)
+            except (TypeError, ValueError):
+                pass
+        if len(row) > 1:
+            kept.append(row)
+    dates = [r["date"] for r in kept]
+    if len(dates) != len(set(dates)):          # multiplexed across plants → aggregate
+        return _agg_foph_by_date(kept)
+    kept.sort(key=lambda x: x["date"])
+    return kept
+
+
+def _fetch_foph_wastewater(params: dict) -> list[dict]:
+    """Live FOPH influenza-wastewater series (opendata.swiss 'influenza1'). Resolves the
+    CSV via FOPH_WASTEWATER_CSV_URL, an explicit url=, or the CKAN package, filters by
+    any extra column param (e.g. geoRegion=GE) + date window, aggregated per date."""
     import os as _os
-    url = params.get("url") or _os.getenv(env_var)
+    url = params.get("url") or _os.getenv("FOPH_WASTEWATER_CSV_URL")
     if not url:
         try:
-            pkg = _http_get_json(f"https://opendata.swiss/api/3/action/package_show?id={ckan_id}")
+            pkg = _http_get_json(
+                f"https://opendata.swiss/api/3/action/package_show?id={_FOPH_WW_CKAN_ID}")
             for res in (((pkg or {}).get("result") or {}).get("resources") or []):
                 if str(res.get("format", "")).lower() == "csv" and (res.get("download_url") or res.get("url")):
                     url = res.get("download_url") or res.get("url")
@@ -287,20 +362,12 @@ def _fetch_foph_ckan_csv(ckan_id: str, env_var: str, params: dict) -> list[dict]
             url = None
     if not url:
         return []
-    rows = _parse_generic_csv(_http_get_text(url))
+    filters = {k: v for k, v in params.items() if k not in _FOPH_WW_RESERVED}
+    rows = _parse_foph_wastewater(_http_get_text(url), filters)
     s, e = params.get("start_date"), params.get("end_date")
     if s or e:
         rows = [r for r in rows if (not s or r["date"] >= str(s)) and (not e or r["date"] <= str(e))]
     return rows
-
-
-def _fetch_foph_respiratory(params: dict) -> list[dict]:
-    return _fetch_foph_ckan_csv("influenza1", "FOPH_SENTINELLA_CSV_URL", params)
-
-
-def _fetch_foph_wastewater(params: dict) -> list[dict]:
-    # Live wastewater feed (influenza + RSV) — complements the frozen EAWAG archive.
-    return _fetch_foph_ckan_csv("abwassermonitoring-influenza-und-rsv", "FOPH_WASTEWATER_CSV_URL", params)
 
 
 _POINT_PARAMS = {
@@ -313,6 +380,11 @@ _CSV_PARAMS = {
     "wwtp": "explicit treatment-plant name (EAWAG, optional)",
     "targets": "virus targets IAV|IBV|RSV|SARS (EAWAG, optional)",
     "url": "override CSV URL (optional)",
+    "start_date": "YYYY-MM-DD (optional filter)", "end_date": "YYYY-MM-DD (optional filter)",
+}
+_FOPH_PARAMS = {
+    "url": "override CSV URL (optional; else resolved from opendata.swiss 'influenza1' or FOPH_WASTEWATER_CSV_URL)",
+    "<column>=<value>": "optional equality filter on any raw CSV column (e.g. geoRegion=GE) to select one region/plant before per-date aggregation",
     "start_date": "YYYY-MM-DD (optional filter)", "end_date": "YYYY-MM-DD (optional filter)",
 }
 
@@ -372,33 +444,27 @@ CONNECTORS: dict[str, Connector] = {
         notes="Catchment-level (STEP Aire=Geneva, STEP Vidy=Lausanne, Neuchâtel, Porrentruy). "
               "ARCHIVE frozen since 2024-03 → historical backfill; use the live FOPH feed for current data.",
     ),
-    "foph-respiratory": Connector(
-        id="foph-respiratory",
-        name="FOPH — Respiratory-virus surveillance (Sentinella ILI/ARI) — BETA",
-        provider="Federal Office of Public Health (opendata.swiss influenza1)",
+    "foph-wastewater": Connector(
+        id="foph-wastewater",
+        name="FOPH — Influenza wastewater (normalized viral load, live)",
+        provider="Federal Office of Public Health (opendata.swiss 'influenza1')",
         license="opendata.swiss terms of use",
         geo="national",
         commercial_ok=True,
-        variables=[],   # detected at fetch time — schema unverified (see notes)
-        fetch=_fetch_foph_respiratory,
-        params_schema=_CSV_PARAMS,
-        notes="BETA — CSV schema not verified live: columns are auto-detected. Set "
-              "FOPH_SENTINELLA_CSV_URL or let CKAN resolution pick the resource. NATIONAL granularity "
-              "(no cantonal split). Supplies the weekly Sentinella ILI/ARI outcome once the schema is confirmed.",
-    ),
-    "foph-wastewater": Connector(
-        id="foph-wastewater",
-        name="FOPH — Wastewater influenza + RSV (live) — BETA",
-        provider="Federal Office of Public Health (opendata.swiss Abwassermonitoring)",
-        license="opendata.swiss terms of use",
-        geo="catchment",
-        commercial_ok=True,
-        variables=[],   # detected at fetch time — schema unverified (see notes)
+        variables=[
+            {"machine_name": "value", "label": "Influenza viral load (normalized)", "unit": "gc/day/person", "dtype": "float"},
+            {"machine_name": "valuemean7d", "label": "Influenza viral load, 7-day mean", "unit": "gc/day/person", "dtype": "float"},
+            {"machine_name": "conc", "label": "Influenza concentration in wastewater", "unit": "gc/L", "dtype": "float"},
+            {"machine_name": "flow", "label": "Wastewater flow (summed over plants)", "unit": "L/day", "dtype": "float"},
+            {"machine_name": "pop", "label": "Catchment population covered (summed)", "unit": "people", "dtype": "float"},
+        ],
         fetch=_fetch_foph_wastewater,
-        params_schema=_CSV_PARAMS,
-        notes="BETA — LIVE influenza/RSV wastewater feed; complements the frozen EAWAG archive. "
-              "CSV schema not verified live: columns auto-detected. Set FOPH_WASTEWATER_CSV_URL "
-              "or let CKAN resolve the 'Abwassermonitoring Influenza und RSV' dataset.",
+        params_schema=_FOPH_PARAMS,
+        notes="LIVE influenza WASTEWATER monitoring (opendata.swiss 'influenza1'), weekly since 2022 "
+              "(70k+ rows confirmed) — NOT clinical Sentinella ILI/ARI. The raw feed multiplexes "
+              "treatment plants; rows are aggregated per date into a national series (mean load/conc, "
+              "summed pop/flow). Pass a column filter (e.g. geoRegion=GE) to narrow to one region, or "
+              "set FOPH_WASTEWATER_CSV_URL. Clinical ILI/ARI is not yet wired live → manual CSV upload.",
     ),
 }
 

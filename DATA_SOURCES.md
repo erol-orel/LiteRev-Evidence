@@ -3,6 +3,11 @@
 **Date :** 27 mai 2026  
 **Version :** 1.0.0  
 
+> ⚠️ **Document de conception (aspirationnel).** Plusieurs sources listées ci-dessous
+> (SAMU, TECHWAN, HERE Traffic, Météo-France, INSEE…) ne sont **pas** encore câblées.
+> Pour les sources réellement actives en production et leurs **contraintes/limites
+> réelles** (plafonds, fenêtres de dates, clés requises), voir **`docs/SOURCE_LIMITS.md`**.
+
 ---
 
 ## 1. Introduction et Objectif
