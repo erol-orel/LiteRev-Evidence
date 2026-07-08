@@ -578,6 +578,15 @@ def test_boolean_parser_users_three_group_query():
     assert sql.count(" AND ") >= 2                        # three groups AND-ed together
 
 
+def test_boolean_to_arxiv_transforms_terms_and_groups():
+    # each term → all:"phrase", groups + AND/OR preserved (for the arXiv search_query)
+    got = main._boolean_to_arxiv(_ast_of('("public health schools" OR ranking) AND global'))
+    assert got == '((all:"public health schools" OR all:"ranking") AND all:"global")'
+    assert main._boolean_to_arxiv(_ast_of('influenza surveillance')) == '(all:"influenza" AND all:"surveillance")'
+    # NOT → None (arXiv ANDNOT is binary, not unary) so the caller falls back to all:<keywords>
+    assert main._boolean_to_arxiv(_ast_of('cancer NOT benign')) is None
+
+
 def test_boolean_parser_and_or_not_and_fallback():
     assert _ast_of('cancer AND lung') == ("and", [("term", "cancer"), ("term", "lung")])
     assert _ast_of('cancer OR tumour') == ("or", [("term", "cancer"), ("term", "tumour")])

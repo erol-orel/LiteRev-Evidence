@@ -48,15 +48,24 @@ then matched lexically → a **set of document IDs**. `Union (OR)` = ∪ of the 
 The natural query is translated once (LLM, cached) into a boolean; a plain keyword
 string is derived from it. Each source gets the variant it understands:
 
-| Query variant | Sources |
-|---------------|---------|
-| **PubMed boolean** (with `[MeSH]` / `[Title/Abstract]` tags) | PubMed |
-| **General boolean** (`AND`/`OR`/`NOT`, quotes, groups) | Europe PMC, Preprints (EPMC `SRC:PPR`), **local corpus re-match** |
-| **Plain keywords** (operators/tags stripped, ≤ 8 words) | OpenAlex, Crossref, Semantic Scholar, DOAJ, ClinicalTrials.gov, CORE, arXiv, OpenAIRE |
-| **No query** (date-window scan + local term filter) | bioRxiv, medRxiv (native) |
+| Query variant | Sources | Source-union? |
+|---------------|---------|:---:|
+| **PubMed boolean** (`[MeSH]`/`[Title/Abstract]` tags) | PubMed | ✅ |
+| **General boolean** (`AND`/`OR`/`NOT`, quotes, groups) | Europe PMC, Preprints (EPMC `SRC:PPR`) | ✅ |
+| **Portable boolean** (field tags stripped) | OpenAlex, DOAJ, CORE, ClinicalTrials.gov | ✅ |
+| **arXiv boolean** (`all:"…"`, `AND`/`OR`/`ANDNOT`) | arXiv | ✅ |
+| **Plain keywords / relevance** (no boolean upstream) | Crossref; Semantic Scholar¹ | — (local re-filter) |
+| **No query** (date-window scan + local term filter) | bioRxiv, medRxiv (native)² | — |
 
-Only PubMed + Europe PMC apply the *structured* boolean; the keyword APIs get a flattened
-bag of words and rely on their own relevance ranking. That's why per-source counts differ
+¹ Semantic Scholar supports boolean only on its `/paper/search/bulk` endpoint — not yet wired
+(migration pending). OpenAIRE's legacy `search/publications` endpoint was **deprecated 2026-05-31**;
+its fetcher likely returns nothing until migrated to the Graph API.
+² bioRxiv/medRxiv have no keyword API; their preprints are boolean-searched via the Europe PMC facet.
+
+**Source-union** (`main.py:_link_to_scenario(boolean_native=True)`): the ✅ sources applied the *real*
+boolean, so their hits enter the corpus **directly** (not re-filtered locally). Falls back to plain
+keywords + local re-filter if there's no real boolean (degraded/no OpenAI) or the URL would exceed
+OpenAlex's ~4 KB limit. Only the no-abstract rule filters afterward. That's why per-source counts differ
 for the same search.
 
 ### When the scores are computed (never as a separate "search" step)
