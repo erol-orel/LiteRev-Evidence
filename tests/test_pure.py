@@ -515,3 +515,72 @@ def test_generate_search_strategy_returns_cached_copy():
     res["general"] = "MUTATED"
     assert main._STRATEGY_CACHE["flu forecasting"]["general"] == "CACHED"
     main._STRATEGY_CACHE.clear()
+
+
+# ── boolean parser: groups respected + PubMed field tags stripped ─────────────
+def _bool_leaves(ast):
+    if ast is None:
+        return []
+    if ast[0] == "term":
+        return [ast[1]]
+    if ast[0] == "not":
+        return _bool_leaves(ast[1])
+    out = []
+    for ch in ast[1]:
+        out += _bool_leaves(ch)
+    return out
+
+
+def _ast_of(q):
+    return main._parse_boolean_ast(main._tokenize_boolean(q))
+
+
+def test_boolean_parser_respects_parenthesized_groups():
+    # THE regression: (A OR B) AND (C OR D) must be AND of two OR-groups, NOT
+    # "A AND C AND (B OR D)" (the old flat parser's bug that caused 109 → 5).
+    ast = _ast_of('(A OR B) AND (C OR D)')
+    assert ast == ("and", [
+        ("or", [("term", "a"), ("term", "b")]),
+        ("or", [("term", "c"), ("term", "d")]),
+    ])
+
+
+def test_boolean_parser_strips_pubmed_field_tags():
+    ast = _ast_of('ranking[Title/Abstract] OR "ranking system"[Title/Abstract]')
+    leaves = _bool_leaves(ast)
+    assert leaves == ["ranking", "ranking system"]
+    # the tag text must NOT leak in as a phantom required term
+    for junk in ("titleabstract", "title", "abstract", "meshterms", "mesh", "terms"):
+        assert junk not in leaves
+
+
+def test_boolean_parser_users_three_group_query():
+    q = ('("Public Health Schools"[MeSH Terms] OR "public health schools"[Title/Abstract] '
+         'OR "schools of public health"[Title/Abstract] OR "public health education"[Title/Abstract]) '
+         'AND (ranking[Title/Abstract] OR criteria[Title/Abstract] OR "ranking criteria"[Title/Abstract] '
+         'OR "ranking system"[Title/Abstract] OR evaluation[Title/Abstract] OR assessment[Title/Abstract]) '
+         'AND (global[Title/Abstract] OR worldwide[Title/Abstract] OR international[Title/Abstract] '
+         'OR "in the world"[Title/Abstract])')
+    ast = _ast_of(q)
+    assert ast[0] == "and" and len(ast[1]) == 3          # three AND-groups, not flattened
+    assert [g[0] for g in ast[1]] == ["or", "or", "or"]   # each group is an OR of alternatives
+    assert [len(g[1]) for g in ast[1]] == [4, 6, 4]
+    leaves = _bool_leaves(ast)
+    assert "schools of public health" in leaves and "in the world" in leaves and "worldwide" in leaves
+    for junk in ("titleabstract", "meshterms", "mesh", "terms"):
+        assert junk not in leaves
+    # SQL binds real phrases, never the tag text
+    params: dict = {}
+    sql = main._build_boolean_match_sql_from_query(q, params)
+    vals = set(params.values())
+    assert "%ranking%" in vals and "%in the world%" in vals and "%global%" in vals
+    assert not any("titleabstract" in v or "meshterms" in v for v in vals)
+    assert sql.count(" AND ") >= 2                        # three groups AND-ed together
+
+
+def test_boolean_parser_and_or_not_and_fallback():
+    assert _ast_of('cancer AND lung') == ("and", [("term", "cancer"), ("term", "lung")])
+    assert _ast_of('cancer OR tumour') == ("or", [("term", "cancer"), ("term", "tumour")])
+    assert _ast_of('cancer NOT benign') == ("and", [("term", "cancer"), ("not", ("term", "benign"))])
+    assert _ast_of('influenza surveillance') == ("and", [("term", "influenza"), ("term", "surveillance")])
+    assert main._build_boolean_match_sql_from_query("", {}) == "TRUE"   # empty → matches all (filtered elsewhere)

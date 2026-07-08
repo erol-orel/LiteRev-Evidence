@@ -1499,84 +1499,139 @@ def _build_where(filters: dict[str, Any] | None) -> tuple[str, dict[str, Any]]:
 
     return " AND " + " AND ".join(clauses), params
 
-def _parse_boolean_query(query: str) -> tuple[list[str], list[str], list[str]]:
-    """Parse a boolean query into (required, optional, excluded) term lists.
-    Handles quoted phrases, AND/OR/NOT operators.
-    Default between adjacent terms is AND (like PubMed).
-    Returns (required_terms, optional_terms, excluded_terms).
-    """
-    required: list[str] = []
-    optional_terms: list[str] = []
-    excluded: list[str] = []
+def _strip_field_tags(query: str) -> str:
+    """Enlève les tags de champ PubMed ([MeSH Terms], [Title/Abstract], [tiab]…).
+    Ils n'ont pas d'équivalent dans la base locale (on apparie titre+résumé+texte, soit
+    l'équivalent de [Title/Abstract]) et, laissés en place, polluaient le parsing en
+    devenant des termes REQUIS parasites (« titleabstract », « meshterms »)."""
+    return re.sub(r"\[[^\]]*\]", " ", query or "")
 
-    # Tokenize preserving quoted phrases
-    tokens = re.findall(r'"[^"]*"|\S+', query)
-    pending_op = "AND"
-    i = 0
-    while i < len(tokens):
-        tok = tokens[i]
-        upper = tok.upper()
-        if upper == "AND":
-            pending_op = "AND"
-        elif upper == "OR":
-            pending_op = "OR"
-        elif upper in ("NOT", "-"):
-            # next token is excluded
-            if i + 1 < len(tokens):
-                i += 1
-                raw = tokens[i].strip('"')
-                clean = re.sub(r"[^a-zA-Z0-9\-_ ]", "", raw).lower().strip()
-                if clean:
-                    excluded.append(clean)
+
+def _tokenize_boolean(query: str) -> list[tuple[str, str | None]]:
+    """Découpe une requête booléenne (tags de champ retirés) en jetons :
+    ('(' | ')' | 'AND' | 'OR' | 'NOT', None) ou ('TERM', phrase_normalisée)."""
+    toks: list[tuple[str, str | None]] = []
+    for m in re.finditer(r'"[^"]*"|[()]|[^\s()]+', _strip_field_tags(query)):
+        raw = m.group(0)
+        if raw in ("(", ")"):
+            toks.append((raw, None))
+            continue
+        if raw.startswith('"') and raw.endswith('"'):
+            phrase = re.sub(r"[^a-z0-9\-_ ]", "", raw[1:-1].lower()).strip()
+            if phrase:
+                toks.append(("TERM", phrase))
+            continue
+        up = raw.upper()
+        if up in ("AND", "OR", "NOT"):
+            toks.append((up, None))
+        elif raw == "-":
+            toks.append(("NOT", None))
         else:
-            raw = tok.strip('"')
-            clean = re.sub(r"[^a-zA-Z0-9\-_ ]", "", raw).lower().strip()
-            if clean:
-                if pending_op == "OR":
-                    optional_terms.append(clean)
-                else:
-                    required.append(clean)
-            pending_op = "AND"
-        i += 1
-    return required, optional_terms, excluded
+            term = re.sub(r"[^a-z0-9\-_ ]", "", raw.lower()).strip()
+            if term:
+                toks.append(("TERM", term))
+    return toks
 
 
-def _build_boolean_match_sql(required: list[str], optional_terms: list[str],
-                              excluded: list[str], params: dict) -> str:
-    """Build SQL WHERE fragment for boolean mode with AND/OR/NOT logic."""
-    and_clauses: list[str] = []
+def _parse_boolean_ast(tokens: list[tuple[str, str | None]]):
+    """Analyse récursive-descendante → AST qui RESPECTE le groupement :
+    ('and'|'or', [enfants]) | ('not', enfant) | ('term', phrase) | None.
+    Précédence : OR délimite, AND (explicite OU implicite entre atomes adjacents) lie
+    plus fort, NOT préfixe un atome, les parenthèses regroupent. Robuste aux
+    parenthèses déséquilibrées (arrêt propre) — corrige l'ancien parseur plat qui
+    transformait « (A OU B) ET (C OU D) » en « A ET C ET (B OU D) »."""
+    pos = 0
 
-    for i, term in enumerate(required):
-        key = f"bool_req_{i}"
-        params[key] = f"%{term}%"
-        and_clauses.append(
-            f"(LOWER(COALESCE(d.title,'')) LIKE :{key}"
-            f" OR LOWER(COALESCE(d.abstract,'')) LIKE :{key}"
-            f" OR LOWER(COALESCE(c.content,'')) LIKE :{key})"
-        )
+    def peek():
+        return tokens[pos] if pos < len(tokens) else (None, None)
 
-    if optional_terms:
-        or_parts: list[str] = []
-        for i, term in enumerate(optional_terms):
-            key = f"bool_opt_{i}"
-            params[key] = f"%{term}%"
-            or_parts.append(
-                f"(LOWER(COALESCE(d.title,'')) LIKE :{key}"
+    def parse_atom():
+        nonlocal pos
+        t, val = peek()
+        if t == "(":
+            pos += 1
+            node = parse_or()
+            if peek()[0] == ")":
+                pos += 1
+            return node
+        if t == "TERM":
+            pos += 1
+            return ("term", val)
+        # ')' ou opérateur orphelin : on ne consomme pas '(' ni un TERM ici
+        if t == ")":
+            return None
+        pos += 1            # jeton parasite (AND/OR/NOT sans opérande) → ignoré
+        return None
+
+    def parse_not():
+        nonlocal pos
+        if peek()[0] == "NOT":
+            pos += 1
+            child = parse_atom()
+            return ("not", child) if child is not None else None
+        return parse_atom()
+
+    def parse_and():
+        nonlocal pos
+        nodes = [parse_not()]
+        while True:
+            t = peek()[0]
+            if t == "AND":
+                pos += 1
+                nodes.append(parse_not())
+            elif t in ("TERM", "(", "NOT"):      # AND implicite entre atomes adjacents
+                nodes.append(parse_not())
+            else:
+                break
+        nodes = [n for n in nodes if n is not None]
+        if not nodes:
+            return None
+        return nodes[0] if len(nodes) == 1 else ("and", nodes)
+
+    def parse_or():
+        nonlocal pos
+        nodes = [parse_and()]
+        while peek()[0] == "OR":
+            pos += 1
+            nodes.append(parse_and())
+        nodes = [n for n in nodes if n is not None]
+        if not nodes:
+            return None
+        return nodes[0] if len(nodes) == 1 else ("or", nodes)
+
+    return parse_or()
+
+
+def _boolean_ast_to_sql(ast, params: dict, idx: list | None = None) -> str | None:
+    """Compile l'AST booléen en fragment SQL : chaque feuille apparie le titre, le
+    résumé ET le texte du chunk (équivalent [Title/Abstract]) ; AND/OR/NOT préservés."""
+    if idx is None:
+        idx = [0]
+    if ast is None:
+        return None
+    typ = ast[0]
+    if typ == "term":
+        key = f"bq_{idx[0]}"
+        idx[0] += 1
+        params[key] = f"%{ast[1]}%"
+        return (f"(LOWER(COALESCE(d.title,'')) LIKE :{key}"
                 f" OR LOWER(COALESCE(d.abstract,'')) LIKE :{key}"
-                f" OR LOWER(COALESCE(c.content,'')) LIKE :{key})"
-            )
-        and_clauses.append("(" + " OR ".join(or_parts) + ")")
+                f" OR LOWER(COALESCE(c.content,'')) LIKE :{key})")
+    if typ == "not":
+        inner = _boolean_ast_to_sql(ast[1], params, idx)
+        return f"(NOT {inner})" if inner else None
+    if typ in ("and", "or"):
+        parts = [p for p in (_boolean_ast_to_sql(ch, params, idx) for ch in ast[1]) if p]
+        if not parts:
+            return None
+        joiner = " AND " if typ == "and" else " OR "
+        return "(" + joiner.join(parts) + ")"
+    return None
 
-    for i, term in enumerate(excluded):
-        key = f"bool_excl_{i}"
-        params[key] = f"%{term}%"
-        and_clauses.append(
-            f"NOT (LOWER(COALESCE(d.title,'')) LIKE :{key}"
-            f" OR LOWER(COALESCE(d.abstract,'')) LIKE :{key}"
-            f" OR LOWER(COALESCE(c.content,'')) LIKE :{key})"
-        )
 
-    return " AND ".join(and_clauses) if and_clauses else "TRUE"
+def _build_boolean_match_sql_from_query(query: str, params: dict) -> str:
+    """Requête booléenne → fragment SQL de correspondance (groupement RESPECTÉ)."""
+    return _boolean_ast_to_sql(_parse_boolean_ast(_tokenize_boolean(query)), params) or "TRUE"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1616,8 +1671,7 @@ def _search_local_doc_ids(
     params: dict[str, Any] = {**where_params, "limit": limit}
 
     if mode == "boolean":
-        bool_required, bool_optional, bool_excluded = _parse_boolean_query(query)
-        any_match_sql = _build_boolean_match_sql(bool_required, bool_optional, bool_excluded, params)
+        any_match_sql = _build_boolean_match_sql_from_query(query, params)
     else:
         raw_terms = [t.strip() for t in re.split(r"\s+", query.lower()) if t.strip()]
         query_terms = [re.sub(r"[^a-zA-Z0-9\-_]", "", t) for t in raw_terms if re.sub(r"[^a-zA-Z0-9\-_]", "", t)]
