@@ -1649,6 +1649,26 @@ def _build_boolean_match_sql_from_query(query: str, params: dict) -> str:
     return _boolean_ast_to_sql(_parse_boolean_ast(_tokenize_boolean(query)), params) or "TRUE"
 
 
+def _boolean_to_arxiv(ast) -> str | None:
+    """AST booléen → syntaxe de recherche arXiv : chaque terme devient all:"phrase",
+    AND/OR conservés, parenthèses pour le groupement. Renvoie None si l'AST contient un
+    NOT (l'opérateur arXiv ANDNOT est BINAIRE, pas unaire → ambigu) → l'appelant retombe
+    alors sur `all:<mots-clés>`. PUR/testable."""
+    if ast is None:
+        return None
+    typ = ast[0]
+    if typ == "term":
+        return f'all:"{ast[1]}"'
+    if typ == "not":
+        return None
+    if typ in ("and", "or"):
+        parts = [_boolean_to_arxiv(c) for c in ast[1]]
+        if any(p is None for p in parts):
+            return None
+        return "(" + (" AND " if typ == "and" else " OR ").join(parts) + ")"
+    return None
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Search (Hybride & Vectorielle pgvector)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -7799,6 +7819,24 @@ def _run_user_scenario_populate(
         # langage naturel (avec le '?'), d'où OpenAlex 400 et booléens Cochrane/
         # PROSPERO malformés → 0 article récupéré en direct.
         _plain_q = _plain_keywords(_boolean) or _plain_keywords(query) or query
+        # ── Routage BOOLÉEN par source (docs vérifiées 2026) ────────────────────────
+        # Beaucoup d'API acceptent un vrai booléen (AND/OR/NOT + parenthèses + guillemets),
+        # pas seulement PubMed/EuropePMC : OpenAlex, DOAJ, CORE, ClinicalTrials, arXiv. On
+        # leur envoie donc le booléen PORTABLE (tags de champ PubMed retirés) au lieu de
+        # mots-clés aplatis, et on les traite en SOURCE-UNION. Repli mots-clés si pas de vrai
+        # booléen (mode dégradé) ou si l'URL dépasse ~4 Ko (limite OpenAlex).
+        _portable_bool = _strip_field_tags(_boolean).strip()
+        _bool_is_real = bool(_portable_bool) and _looks_boolean(_portable_bool)
+        _send_bool = _bool_is_real and len(_portable_bool) <= 1200
+        _bool_query = _portable_bool if _send_bool else _plain_q          # OpenAlex/DOAJ/CORE/CT
+        _arxiv_q, _arxiv_native = f"all:{_plain_q}", False                # arXiv : syntaxe dédiée
+        if _bool_is_real:
+            try:
+                _ax = _boolean_to_arxiv(_parse_boolean_ast(_tokenize_boolean(_portable_bool)))
+                if _ax and len(_ax) <= 1200:
+                    _arxiv_q, _arxiv_native = _ax, True
+            except Exception:
+                pass
         _local_ids = (_multi_query_corpus_ids(_sub_queries, _combinator, filters)
                       if _sub_queries
                       else _search_local_doc_ids(_boolean, "boolean", filters, limit=100_000))
@@ -7952,7 +7990,7 @@ def _run_user_scenario_populate(
                     # sort=publication_date:desc → quand on plafonne à max_results,
                     # on récupère les articles LES PLUS RÉCENTS d'abord (utile pour
                     # une revue vivante ; les anciens pertinents sont déjà en base).
-                    params={"search": _plain_q, "per_page": _oa_batch, "page": _oa_page,
+                    params={"search": _bool_query, "per_page": _oa_batch, "page": _oa_page,
                             "sort": "publication_date:desc", "mailto": "literev@gesica.ch"},
                     timeout=20,
                 )
@@ -7987,7 +8025,7 @@ def _run_user_scenario_populate(
                             source="openalex", title=title, abstract=abstract or None,
                             year=year, url=url, external_id=ext_id, doi=doi,
                         )
-                        _link_to_scenario(doc_id)
+                        _link_to_scenario(doc_id, boolean_native=_send_bool)   # source-union si booléen
                         count += 1
                         _inc("openalex")
                     except Exception:
@@ -8199,10 +8237,11 @@ def _run_user_scenario_populate(
             logger.warning(f"Préprints (Europe PMC) populate {scenario_id}: {_e}")
         return ("preprints", count)
 
-    def _ingest_parsed(source, docs):
+    def _ingest_parsed(source, docs, boolean_native=False):
         """Ingère une liste de docs parsés (helper commun aux nouvelles sources REST).
         Renvoie le nombre ingéré. Chaque doc : {title, abstract, year, url,
-        external_id, doi, source_type}. Les docs <30 caractères sont ignorés."""
+        external_id, doi, source_type}. Les docs <30 caractères sont ignorés.
+        boolean_native=True : la source a appliqué un VRAI booléen → source-union."""
         c = 0
         for _d in docs:
             if len(f"{_d.get('title','')}\n\n{_d.get('abstract') or ''}".strip()) < 30:
@@ -8213,7 +8252,7 @@ def _run_user_scenario_populate(
                     year=_d.get("year"), url=_d.get("url"), external_id=_d["external_id"],
                     doi=_d.get("doi"), source_type=_d.get("source_type", "article"),
                 )
-                _link_to_scenario(_doc_id)
+                _link_to_scenario(_doc_id, boolean_native=boolean_native)
                 c += 1
                 _inc(source)
             except Exception:
@@ -8260,7 +8299,7 @@ def _run_user_scenario_populate(
                 if _time.time() >= _fed_deadline[0]:
                     break
                 _r = _requests.get(
-                    f"https://doaj.org/api/search/articles/{_ulib.quote(_plain_q, safe='')}",
+                    f"https://doaj.org/api/search/articles/{_ulib.quote(_bool_query, safe='')}",
                     params={"pageSize": 100, "page": _page}, timeout=20,
                 )
                 _r.raise_for_status()
@@ -8268,7 +8307,7 @@ def _run_user_scenario_populate(
                 _n = len(_payload.get("results") or [])
                 if _n == 0:
                     break
-                count += _ingest_parsed("doaj", _parse_doaj(_payload))
+                count += _ingest_parsed("doaj", _parse_doaj(_payload), boolean_native=_send_bool)
                 _fetched += _n
                 if _n < 100:
                     break
@@ -8285,7 +8324,7 @@ def _run_user_scenario_populate(
             while _ct_fetched < max_results:
                 if _time.time() >= _fed_deadline[0]:
                     break
-                _params = {"query.term": _plain_q, "pageSize": 100, "format": "json"}
+                _params = {"query.term": _bool_query, "pageSize": 100, "format": "json"}
                 if _ct_token:
                     _params["pageToken"] = _ct_token
                 _r = _requests.get("https://clinicaltrials.gov/api/v2/studies", params=_params, timeout=20)
@@ -8294,7 +8333,7 @@ def _run_user_scenario_populate(
                 _n = len(_payload.get("studies") or [])
                 if _n == 0:
                     break
-                count += _ingest_parsed("clinicaltrials", _parse_clinicaltrials(_payload))
+                count += _ingest_parsed("clinicaltrials", _parse_clinicaltrials(_payload), boolean_native=_send_bool)
                 _ct_fetched += _n
                 _ct_token = _payload.get("nextPageToken")
                 if not _ct_token:
@@ -8321,7 +8360,7 @@ def _run_user_scenario_populate(
                 _r = _requests.post(
                     "https://api.core.ac.uk/v3/search/works",
                     headers={"Authorization": f"Bearer {_core_key}"},
-                    json={"q": _plain_q, "limit": _bulk, "offset": _core_offset},
+                    json={"q": _bool_query, "limit": _bulk, "offset": _core_offset},
                     timeout=25,
                 )
                 if _r.status_code == 429:
@@ -8332,7 +8371,7 @@ def _run_user_scenario_populate(
                 _n = len(_payload.get("results") or [])
                 if _n == 0:
                     break
-                count += _ingest_parsed("core", _parse_core(_payload))
+                count += _ingest_parsed("core", _parse_core(_payload), boolean_native=_send_bool)
                 _core_fetched += _n
                 _core_offset += _bulk
                 if _n < _bulk:
@@ -8352,14 +8391,14 @@ def _run_user_scenario_populate(
                 _bulk = min(100, max_results - _ax_start)
                 _r = _requests.get(
                     "http://export.arxiv.org/api/query",
-                    params={"search_query": f"all:{_plain_q}", "start": _ax_start, "max_results": _bulk},
+                    params={"search_query": _arxiv_q, "start": _ax_start, "max_results": _bulk},
                     timeout=25,
                 )
                 _r.raise_for_status()
                 _docs = _parse_arxiv(_r.text)
                 if not _docs:
                     break
-                count += _ingest_parsed("arxiv", _docs)
+                count += _ingest_parsed("arxiv", _docs, boolean_native=_arxiv_native)
                 if len(_docs) < _bulk:
                     break
                 _ax_start += _bulk
