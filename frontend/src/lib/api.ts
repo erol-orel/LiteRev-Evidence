@@ -1584,8 +1584,25 @@ export interface UserScenario extends GesicaScenario {
 
 /** One facet of a multi-query search: a boolean or natural-language sub-query. */
 export interface SubQuery {
-  kind: "boolean" | "natural";
+  // "auto" = let the backend detect boolean vs natural from syntax (default);
+  // "boolean"/"natural" = explicit user override.
+  kind: "boolean" | "natural" | "auto";
   text: string;
+}
+
+export interface FacetPreview {
+  kind: "boolean" | "natural";   // resolved kind (auto → detected)
+  text: string;
+  boolean: string;               // the boolean actually matched (natural → translated)
+  count: number;                 // lexical matches in the indexed library
+}
+
+export interface FacetPreviewResponse {
+  facets: FacetPreview[];
+  union: number;
+  intersection: number;
+  combined: number;
+  combinator: "union" | "intersection";
 }
 
 export interface UserScenarioCreatePayload {
@@ -2574,6 +2591,22 @@ export async function getSearchStrategy(scenarioId: string): Promise<SearchStrat
     `${API_BASE_URL}/user-scenarios/${scenarioId}/search-strategy`,
     { headers: authHeaders() },
   );
+  if (!r.ok) throw new Error(httpMessage(r.status));
+  return r.json();
+}
+
+/** Prévisualise (lexical, bibliothèque locale) le compte d'articles par facette et le
+ *  total par union (OU) / intersection (ET) — AVANT de lancer la recherche complète. */
+export async function previewSearchFacets(
+  subQueries: SubQuery[],
+  combinator: "union" | "intersection",
+  filters: Record<string, any> = {},
+): Promise<FacetPreviewResponse> {
+  const r = await safeFetch(`${API_BASE_URL}/search-facets`, {
+    method: 'POST',
+    headers: authHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify({ sub_queries: subQueries, combinator, filters }),
+  });
   if (!r.ok) throw new Error(httpMessage(r.status));
   return r.json();
 }

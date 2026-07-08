@@ -1674,9 +1674,30 @@ def _boolean_corpus_ids(boolean_query: str, filters: dict) -> list:
     return _search_local_doc_ids(boolean_query, "boolean", filters, limit=500_000)
 
 
+def _looks_boolean(text: str) -> bool:
+    """Le texte utilise-t-il une SYNTAXE booléenne (→ utilisé tel quel) plutôt que du
+    langage naturel (→ traduit) ? Signaux : opérateurs AND/OR/NOT en MAJUSCULES, tags
+    de champ ([dp], [tiab], [mesh]…), guillemets doubles appariés, ou parenthèses.
+    Pur/déterministe — le même heuristique est reflété côté client (App.tsx:looksBoolean)."""
+    if not text:
+        return False
+    t = text.strip()
+    if re.search(r"\[(dp|tiab|ti|ab|mesh|majr|au|tw|la|pt)\]", t, re.IGNORECASE):
+        return True
+    if re.search(r"\b(AND|OR|NOT)\b", t):          # opérateurs en MAJUSCULES uniquement
+        return True
+    if t.count('"') >= 2:                           # au moins une phrase entre guillemets
+        return True
+    if "(" in t and ")" in t:                       # expression groupée
+        return True
+    return False
+
+
 def _normalize_sub_queries(sub_queries: Any) -> list[dict]:
-    """Nettoie une liste de sous-requêtes : ne garde que les entrées {kind,text}
-    valides (texte non vide, kind ∈ {boolean, natural}). Renvoie [] si aucune."""
+    """Nettoie une liste de sous-requêtes : ne garde que les entrées {kind,text} au
+    texte non vide. Le `kind` explicite (boolean|natural) est respecté (override
+    utilisateur) ; sinon (auto|absent|invalide) il est DÉTECTÉ par _looks_boolean —
+    l'utilisateur n'a donc plus à taguer chaque sous-requête. Renvoie [] si aucune."""
     out: list[dict] = []
     if not isinstance(sub_queries, list):
         return out
@@ -1686,7 +1707,11 @@ def _normalize_sub_queries(sub_queries: Any) -> list[dict]:
         _text = (sq.get("text") or "").strip()
         if not _text:
             continue
-        _kind = "boolean" if sq.get("kind") == "boolean" else "natural"
+        _raw_kind = sq.get("kind")
+        if _raw_kind in ("boolean", "natural"):
+            _kind = _raw_kind                                      # override explicite
+        else:
+            _kind = "boolean" if _looks_boolean(_text) else "natural"   # auto-détection
         out.append({"kind": _kind, "text": _text})
     return out
 
@@ -7146,6 +7171,53 @@ def post_search_strategy(payload: SearchStrategyIn) -> dict[str, Any]:
     sorte que le compteur de recherche == la taille du corpus (même requête).
     """
     return _generate_search_strategy(payload.query)
+
+
+class FacetPreviewIn(BaseModel):
+    sub_queries: list[dict[str, Any]] | None = None
+    combinator: str = Field(default="union")
+    filters: dict[str, Any] = Field(default_factory=dict)
+
+
+@app.post("/search-facets")
+def post_search_facets(payload: FacetPreviewIn) -> dict[str, Any]:
+    """Prévisualise l'appartenance au corpus AVANT de lancer la recherche.
+
+    Pour chaque facette (requête principale + sous-requêtes) : détecte le type
+    (booléen/naturel), TRADUIT le naturel en booléen (renvoyé pour affichage), puis
+    COMPTE les correspondances LEXICALES dans la bibliothèque locale via EXACTEMENT le
+    helper qui définit le corpus (_search_local_doc_ids en mode booléen). Renvoie le
+    compte par facette + les totaux par UNION (OU) et INTERSECTION (ET).
+
+    Aucun score sémantique/Cohere ici : l'appartenance au corpus est purement lexicale.
+    NB : ces comptes portent sur la BIBLIOTHÈQUE INDEXÉE — la recherche en direct
+    ajoute ensuite des articles des sources externes avant de refixer le corpus."""
+    clean = _normalize_sub_queries(payload.sub_queries)
+    filters = payload.filters if isinstance(payload.filters, dict) else {}
+    facets: list[dict[str, Any]] = []
+    id_sets: list[set] = []
+    for sq in clean:
+        if sq["kind"] == "boolean":
+            boolean = sq["text"]
+        else:
+            try:
+                _gen = _generate_search_strategy(sq["text"])
+                boolean = (_gen.get("general") or sq["text"]) if isinstance(_gen, dict) else sq["text"]
+            except Exception as _e:
+                logger.warning(f"post_search_facets: traduction naturel→booléen échouée ({_e})")
+                boolean = sq["text"]
+        ids = set(_search_local_doc_ids(boolean, "boolean", filters, limit=500_000))
+        id_sets.append(ids)
+        facets.append({"kind": sq["kind"], "text": sq["text"],
+                       "boolean": boolean, "count": len(ids)})
+    if id_sets:
+        union = len(set().union(*id_sets))
+        intersection = len(set.intersection(*id_sets))
+    else:
+        union = intersection = 0
+    combined = intersection if payload.combinator == "intersection" else union
+    return {"facets": facets, "union": union, "intersection": intersection,
+            "combined": combined, "combinator": payload.combinator}
 
 
 # ── Parseurs de sources littéraires (PURS / testables) ───────────────────────
