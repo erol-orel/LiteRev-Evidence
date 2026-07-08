@@ -587,6 +587,34 @@ def test_boolean_to_arxiv_transforms_terms_and_groups():
     assert main._boolean_to_arxiv(_ast_of('cancer NOT benign')) is None
 
 
+def test_boolean_to_s2_bulk_syntax():
+    # space = AND, ` | ` = OR, quotes = phrase, parens = group
+    got = main._boolean_to_s2(_ast_of('("public health schools" OR ranking) AND global'))
+    assert got == '(("public health schools" | ranking) global)'
+    assert main._boolean_to_s2(_ast_of('influenza')) == 'influenza'
+    assert main._boolean_to_s2(_ast_of('cancer NOT benign')) is None   # NOT → fallback to keyword
+
+
+def test_parse_openaire_graph_defensive():
+    payload = {"results": [
+        {"id": "oai:123", "mainTitle": "Global ranking of schools",
+         "descriptions": ["We ranked schools worldwide."],
+         "publicationDate": "2021-05-01",
+         "pids": [{"scheme": "doi", "value": "10.1234/abc"}]},
+        {"id": "oai:456", "mainTitle": "Dict-shaped description",
+         "descriptions": [{"value": "desc as dict"}], "publicationDate": "2019"},
+        {"mainTitle": "no id, skipped"},                      # missing id → dropped
+    ]}
+    docs = main._parse_openaire_graph(payload)
+    assert len(docs) == 2
+    assert docs[0]["title"] == "Global ranking of schools"
+    assert docs[0]["abstract"] == "We ranked schools worldwide."
+    assert docs[0]["year"] == 2021 and docs[0]["doi"] == "10.1234/abc"
+    assert docs[0]["external_id"] == "openaire:oai:123"
+    assert docs[1]["abstract"] == "desc as dict" and docs[1]["year"] == 2019
+    assert main._parse_openaire_graph({}) == []
+
+
 def test_boolean_parser_and_or_not_and_fallback():
     assert _ast_of('cancer AND lung') == ("and", [("term", "cancer"), ("term", "lung")])
     assert _ast_of('cancer OR tumour') == ("or", [("term", "cancer"), ("term", "tumour")])

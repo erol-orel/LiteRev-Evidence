@@ -52,14 +52,15 @@ string is derived from it. Each source gets the variant it understands:
 |---------------|---------|:---:|
 | **PubMed boolean** (`[MeSH]`/`[Title/Abstract]` tags) | PubMed | ✅ |
 | **General boolean** (`AND`/`OR`/`NOT`, quotes, groups) | Europe PMC, Preprints (EPMC `SRC:PPR`) | ✅ |
-| **Portable boolean** (field tags stripped) | OpenAlex, DOAJ, CORE, ClinicalTrials.gov | ✅ |
-| **arXiv boolean** (`all:"…"`, `AND`/`OR`/`ANDNOT`) | arXiv | ✅ |
-| **Plain keywords / relevance** (no boolean upstream) | Crossref; Semantic Scholar¹ | — (local re-filter) |
+| **Portable boolean** (field tags stripped) | OpenAlex, DOAJ, CORE, ClinicalTrials.gov, OpenAIRE (Graph v2) | ✅ |
+| **Dialect boolean** | arXiv (`all:"…"`, `ANDNOT`); Semantic Scholar (`/paper/search/bulk`: space=AND, `\|`=OR) | ✅ |
+| **Plain keywords / relevance** (no boolean upstream) | Crossref¹ | — (local re-filter) |
 | **No query** (date-window scan + local term filter) | bioRxiv, medRxiv (native)² | — |
 
-¹ Semantic Scholar supports boolean only on its `/paper/search/bulk` endpoint — not yet wired
-(migration pending). OpenAIRE's legacy `search/publications` endpoint was **deprecated 2026-05-31**;
-its fetcher likely returns nothing until migrated to the Graph API.
+¹ Crossref is the only literature source with no boolean support (relevance-ranked free text).
+Semantic Scholar now uses its **bulk** endpoint for boolean (falls back to the relevance endpoint if
+the query has a `NOT`). OpenAIRE was **migrated to the Graph API v2** (`/graph/v2/researchProducts`,
+cursor-paged) after its legacy `search/publications` endpoint was retired 2026-05-31.
 ² bioRxiv/medRxiv have no keyword API; their preprints are boolean-searched via the Europe PMC facet.
 
 **Source-union** (`main.py:_link_to_scenario(boolean_native=True)`): the ✅ sources applied the *real*
