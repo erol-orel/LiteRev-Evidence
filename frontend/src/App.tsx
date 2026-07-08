@@ -1739,6 +1739,10 @@ export default function App() {
   const [mode, setMode] = useState<SearchMode>("boolean");
   const [includeLive, setIncludeLive] = useState(false);
   const [query, setQuery] = useState("");
+  // Type de la requête principale : "auto" (détecté) par défaut, comme les sous-requêtes ;
+  // cliquable pour forcer. Remplace l'ancien toggle mode (défaut "boolean") qui traitait
+  // une requête principale naturelle comme un booléen brut.
+  const [mainKindOverride, setMainKindOverride] = useState<SubQuery["kind"]>("auto");
   // Recherche multi-sous-requêtes (avancé) : requêtes ADDITIONNELLES combinées à
   // la requête principale ci-dessus. Vide = recherche mono-requête classique.
   const [extraQueries, setExtraQueries] = useState<SubQuery[]>([]);
@@ -1958,7 +1962,10 @@ export default function App() {
     // Sinon une requête principale en langage naturel était traitée comme un BOOLÉEN
     // BRUT (0 résultat), alors que la même sous-requête, elle, était détectée "natural"
     // puis TRADUITE → même texte, comptes divergents (0 vs 53).
-    const mainKind: SubQuery["kind"] = looksBoolean(query.trim()) ? "boolean" : "natural";
+    const mainKind: SubQuery["kind"] =
+      mainKindOverride === "boolean" || mainKindOverride === "natural"
+        ? mainKindOverride
+        : (looksBoolean(query.trim()) ? "boolean" : "natural");
     return [{ kind: mainKind, text: query.trim() }, ...extra];
   }
 
@@ -2632,6 +2639,33 @@ export default function App() {
                     {loading ? t("search.searching") : t("search.searchButton")}
                   </button>
                 </div>
+
+                {/* Chip type détecté (parité avec les sous-requêtes) : auto → Booléen → Naturel */}
+                {query.trim() && (() => {
+                  const eff = mainKindOverride === "boolean" || mainKindOverride === "natural"
+                    ? mainKindOverride
+                    : (looksBoolean(query.trim()) ? "boolean" : "natural");
+                  const isAuto = mainKindOverride !== "boolean" && mainKindOverride !== "natural";
+                  return (
+                    <div className="mt-2 flex items-center gap-2 text-[11px] text-forest-400">
+                      <span className="opacity-60">{t("search.mainQueryShort")} :</span>
+                      <button
+                        type="button"
+                        onClick={() => setMainKindOverride((k) =>
+                          k === "auto" ? "boolean" : k === "boolean" ? "natural" : "auto")}
+                        title={t("search.subQueryKindHint")}
+                        className={`rounded-lg border px-2 py-1 transition ${
+                          eff === "boolean"
+                            ? "border-brand-400/40 bg-brand-500/15 text-brand-300"
+                            : "border-white/10 bg-white/5 text-forest-300 hover:text-white"
+                        }`}
+                      >
+                        {eff === "boolean" ? t("search.subQueryKindBoolean") : t("search.subQueryKindNatural")}
+                        <span className="ml-1 opacity-50">{isAuto ? t("search.subQueryAuto") : "✎"}</span>
+                      </button>
+                    </div>
+                  );
+                })()}
 
                 <label className="mt-3 flex items-start gap-2 text-xs text-forest-300 cursor-pointer select-none">
                   <input
