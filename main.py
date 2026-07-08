@@ -7718,12 +7718,21 @@ def _run_user_scenario_populate(
     _counter_lock = threading.Lock()
     _ingested_total = [0]
     _errors_total = [0]
+    _bool_native_ids: set = set()   # SOURCE-UNION — voir _link_to_scenario
 
-    def _link_to_scenario(doc_id):
-        # NE LIE PLUS pendant la fédération : ingérer un article live ne l'ajoute
-        # PAS d'office au corpus. L'appartenance est recalculée après ingestion via
-        # la correspondance booléenne (_boolean_corpus_ids) — sinon le corpus
-        # gonflait avec des résultats live ne correspondant pas à la requête.
+    def _link_to_scenario(doc_id, boolean_native=False):
+        # NE LIE PLUS pendant la fédération : ingérer un article live ne l'ajoute PAS
+        # d'office au corpus. L'appartenance est recalculée après ingestion via la
+        # correspondance booléenne — sinon le corpus gonflait avec des résultats live
+        # (mots-clés) ne correspondant pas à la requête.
+        # EXCEPTION — SOURCE-UNION : les sources BOOLÉENNES-NATIVES (PubMed, Europe PMC,
+        # préprints EPMC) ont appliqué la VRAIE requête booléenne (MeSH / texte intégral).
+        # On mémorise leurs docs pour les INCLURE directement dans le corpus, sans les
+        # re-filtrer localement (le re-filtrage titre+résumé perdait leurs correspondances
+        # MeSH sans phrase littérale dans le résumé — d'où « 109 PubMed → 6 »). Les
+        # sources par MOTS-CLÉS, elles, restent re-filtrées (leur tri est lâche).
+        if boolean_native and doc_id is not None:
+            _bool_native_ids.add(doc_id)
         return None
 
     def _inc(source_name, count=1, err=0):
@@ -7918,7 +7927,7 @@ def _run_user_scenario_populate(
                             year=year, url=f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/",
                             external_id=pmid, doi=doi, authors=authors, journal=journal,
                         )
-                        _link_to_scenario(doc_id)
+                        _link_to_scenario(doc_id, boolean_native=True)   # source-union
                         count += 1
                         _inc("pubmed")
                     except Exception as e:
@@ -8108,7 +8117,7 @@ def _run_user_scenario_populate(
                             source="europepmc", title=title, abstract=abstract or None,
                             year=year, url=url, external_id=ext_id, doi=doi,
                         )
-                        _link_to_scenario(doc_id)
+                        _link_to_scenario(doc_id, boolean_native=True)   # source-union
                         count += 1
                         _inc("europepmc")
                     except Exception:
@@ -8175,7 +8184,7 @@ def _run_user_scenario_populate(
                             year=year, url=url, external_id=ext_id, doi=doi,
                             source_type="preprint",
                         )
-                        _link_to_scenario(doc_id)
+                        _link_to_scenario(doc_id, boolean_native=True)   # source-union
                         count += 1
                         _inc("preprint")
                     except Exception:
@@ -8488,16 +8497,28 @@ def _run_user_scenario_populate(
     # devient donc strictement « résultat de la requête sur base locale ∪ live ».
     # allow_empty=True en multi : une intersection légitimement vide DOIT vider le corpus.
     try:
+        # Appartenance = re-match booléen LOCAL (base locale ∪ live) pour les sources par
+        # mots-clés + la base existante…
         if _sub_queries:
             _final_ids = _multi_query_corpus_ids(_sub_queries, _combinator, filters)
-            _n_corpus = _set_scenario_corpus(scenario_id, _final_ids, allow_empty=True)
-            logger.info(f"Populate {scenario_id}: corpus multi-requêtes final = {_n_corpus} docs "
-                        f"({_combinator} de {len(_sub_queries)} sous-requêtes, base locale ∪ live)")
         else:
             _final_ids = _boolean_corpus_ids(_boolean, filters)
-            _n_corpus = _set_scenario_corpus(scenario_id, _final_ids)
-            logger.info(f"Populate {scenario_id}: corpus booléen final = {_n_corpus} docs "
-                        f"(base locale ∪ live, requête = {_boolean[:120]})")
+        # … ∪ SOURCE-UNION : les docs des sources booléennes-natives (PubMed, Europe PMC,
+        # préprints EPMC) qui ont appliqué la VRAIE requête booléenne sont inclus DIRECTEMENT,
+        # sans re-filtrage local (qui supprimait leurs correspondances MeSH/texte-intégral —
+        # « 109 PubMed → 6 »). La règle « pas de résumé → exclu » s'applique quand même après.
+        # …SAUF en INTERSECTION multi-requêtes : le corpus doit matcher TOUTES les facettes,
+        # or un doc booléen-natif ne matche que la requête PRINCIPALE (les fetchers live
+        # interrogent la requête principale) → l'unir casserait l'intersection. On garde
+        # alors le re-match local strict.
+        _union_native = not (_sub_queries and _combinator == "intersection")
+        _n_native = len(_bool_native_ids) if _union_native else 0
+        if _union_native:
+            _final_ids = list(set(_final_ids) | _bool_native_ids)
+        _n_corpus = _set_scenario_corpus(scenario_id, _final_ids, allow_empty=bool(_sub_queries))
+        logger.info(f"Populate {scenario_id}: corpus final = {_n_corpus} docs "
+                    f"(re-match local ∪ {_n_native} docs booléens-natifs PubMed/EPMC/préprints ; "
+                    f"{'multi ' + _combinator if _sub_queries else 'mono'})")
     except Exception as _e_corpus:
         logger.warning(f"Rebuild corpus {scenario_id}: {_e_corpus}")
 
