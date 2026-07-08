@@ -454,3 +454,52 @@ def test_assemble_per_variable_aggregation():
     assert df["t"].iloc[0] == 4.0     # mean(2,4,6)
     assert df["p"].iloc[0] == 6.0     # sum(1,2,3) — not mean
     assert df["r"].iloc[0] == 30.0    # last(10,20,30) — not mean
+
+
+# ── _looks_boolean (auto-detect boolean vs natural, no manual toggle) ─────────
+def test_looks_boolean_detects_operators_and_syntax():
+    assert main._looks_boolean('ambulance AND (demand OR forecasting)') is True
+    assert main._looks_boolean('"influenza-like illness" OR RSV') is True
+    assert main._looks_boolean('influenza AND pneumonia') is True
+    assert main._looks_boolean('cancer NOT lung') is True
+    assert main._looks_boolean('(surveillance)') is True
+    assert main._looks_boolean('grippe 2019:2026[dp]') is True
+
+
+def test_looks_boolean_treats_natural_language_as_natural():
+    assert main._looks_boolean('prévision de la demande d\'ambulances') is False
+    assert main._looks_boolean('early warning of respiratory surges') is False
+    assert main._looks_boolean('which indicators predict flu weeks in advance') is False
+    assert main._looks_boolean('') is False
+    # lowercase 'and'/'or' inside prose is NOT a boolean operator
+    assert main._looks_boolean('forecasting and early detection of surges') is False
+
+
+def test_normalize_sub_queries_auto_detects_when_kind_absent():
+    out = main._normalize_sub_queries([
+        {"text": "ambulance AND demand"},                 # no kind → detected boolean
+        {"kind": "auto", "text": "early warning of flu"},  # auto → detected natural
+        {"kind": "natural", "text": "cancer AND lung"},    # explicit override wins
+    ])
+    assert [o["kind"] for o in out] == ["boolean", "natural", "natural"]
+
+
+# ── /search-facets preview (per-facet lexical counts + union/intersection) ────
+def test_post_search_facets_counts_union_and_intersection(monkeypatch):
+    # deterministic doc-id sets per boolean query; no DB, no LLM
+    corpus = {"A": {1, 2, 3}, "B": {3, 4}}
+    monkeypatch.setattr(main, "_search_local_doc_ids",
+                        lambda q, mode, filters, limit=0: list(corpus.get(q, set())))
+    monkeypatch.setattr(main, "_generate_search_strategy", lambda text: {"general": "B"})
+    payload = main.FacetPreviewIn(
+        sub_queries=[{"kind": "boolean", "text": "A"},
+                     {"kind": "natural", "text": "some prose"}],   # → translated to "B"
+        combinator="union")
+    res = main.post_search_facets(payload)
+    assert [f["count"] for f in res["facets"]] == [3, 2]
+    assert res["facets"][1]["boolean"] == "B"          # translation surfaced
+    assert res["union"] == 4 and res["intersection"] == 1
+    assert res["combined"] == 4                          # union chosen
+    res_i = main.post_search_facets(main.FacetPreviewIn(
+        sub_queries=payload.sub_queries, combinator="intersection"))
+    assert res_i["combined"] == 1                        # intersection chosen

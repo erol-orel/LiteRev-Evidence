@@ -64,6 +64,8 @@ import {
   type UserScenarioPipelineStatus,
   type ScenarioFolder,
   type SubQuery,
+  previewSearchFacets,
+  type FacetPreviewResponse,
 } from "./lib/api";
 import type {
   ProjectContext,
@@ -139,6 +141,26 @@ function scenarioDisplayName(q: string, limit = 140): string {
   const cut = s.slice(0, limit);
   const lastSpace = cut.lastIndexOf(" ");
   return (lastSpace > limit * 0.6 ? cut.slice(0, lastSpace) : cut).trimEnd() + "…";
+}
+
+// Miroir CLIENT de main.py:_looks_boolean — détecte une SYNTAXE booléenne (opérateurs
+// AND/OR/NOT en majuscules, tags [dp]/[tiab]…, guillemets doubles, parenthèses) pour
+// afficher le type détecté sans que l'utilisateur ait à le taguer. Le backend refait
+// la même détection (source de vérité) ; ceci n'est que l'indicateur d'UI.
+function looksBoolean(text: string): boolean {
+  const t = (text ?? "").trim();
+  if (!t) return false;
+  if (/\[(dp|tiab|ti|ab|mesh|majr|au|tw|la|pt)\]/i.test(t)) return true;
+  if (/\b(AND|OR|NOT)\b/.test(t)) return true;
+  if ((t.match(/"/g)?.length ?? 0) >= 2) return true;
+  if (t.includes("(") && t.includes(")")) return true;
+  return false;
+}
+
+// Type EFFECTIF d'une facette : override explicite (boolean|natural) sinon détecté.
+function effectiveKind(sq: SubQuery): "boolean" | "natural" {
+  if (sq.kind === "boolean" || sq.kind === "natural") return sq.kind;
+  return looksBoolean(sq.text) ? "boolean" : "natural";
 }
 
 // ─── TerrainView ─────────────────────────────────────────────────────────────
@@ -1721,6 +1743,10 @@ export default function App() {
   // la requête principale ci-dessus. Vide = recherche mono-requête classique.
   const [extraQueries, setExtraQueries] = useState<SubQuery[]>([]);
   const [combinator, setCombinator] = useState<"union" | "intersection">("union");
+  // Prévisualisation lexicale débouncée : compte d'articles par facette + total
+  // union/intersection, calculé sur la bibliothèque locale AVANT la recherche.
+  const [facetPreview, setFacetPreview] = useState<FacetPreviewResponse | null>(null);
+  const [facetPreviewLoading, setFacetPreviewLoading] = useState(false);
   const [filters, setFilters] = useState<SearchFilters>({
     projectContext: "literev",
   });
@@ -1932,6 +1958,24 @@ export default function App() {
     const mainKind: SubQuery["kind"] = mode === "boolean" ? "boolean" : "natural";
     return [{ kind: mainKind, text: query.trim() }, ...extra];
   }
+
+  // Prévisualisation débouncée : dès qu'il y a des sous-requêtes, on affiche le compte
+  // lexical par facette + le total union/intersection (bibliothèque locale). Purement
+  // lexical (aucun score sémantique/Cohere) — la recherche en direct enrichit ensuite.
+  useEffect(() => {
+    const sub = buildSubQueries();
+    if (!sub) { setFacetPreview(null); setFacetPreviewLoading(false); return; }
+    let cancelled = false;
+    setFacetPreviewLoading(true);
+    const handle = setTimeout(() => {
+      previewSearchFacets(sub, combinator, { projectContext })
+        .then((res) => { if (!cancelled) setFacetPreview(res); })
+        .catch(() => { if (!cancelled) setFacetPreview(null); })
+        .finally(() => { if (!cancelled) setFacetPreviewLoading(false); });
+    }, 700);
+    return () => { cancelled = true; clearTimeout(handle); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [query, extraQueries, combinator, mode, projectContext]);
 
   async function handleSearch() {
     if (!query.trim()) return;
@@ -2606,7 +2650,7 @@ export default function App() {
                   {extraQueries.length === 0 ? (
                     <button
                       type="button"
-                      onClick={() => setExtraQueries([{ kind: "natural", text: "" }])}
+                      onClick={() => setExtraQueries([{ kind: "auto", text: "" }])}
                       className="text-xs text-brand-300 hover:text-brand-200 transition"
                     >
                       + {t("search.addSubQuery")}
@@ -2631,58 +2675,78 @@ export default function App() {
                           </button>
                         ))}
                       </div>
-                      {extraQueries.map((sq, i) => (
-                        <div key={i} className="flex items-center gap-2">
-                          <div className="flex shrink-0 overflow-hidden rounded-lg border border-white/10 text-[10px]">
-                            {(["natural", "boolean"] as const).map((k) => (
+                      {extraQueries.map((sq, i) => {
+                        const eff = effectiveKind(sq);
+                        const isAuto = sq.kind !== "boolean" && sq.kind !== "natural";
+                        const fp = facetPreview?.facets?.[i + 1];   // facette 0 = requête principale
+                        return (
+                          <div key={i} className="space-y-1">
+                            <div className="flex items-center gap-2">
+                              {/* Type détecté automatiquement ; clic = auto → Booléen → Naturel → auto */}
                               <button
-                                key={k}
                                 type="button"
                                 onClick={() =>
                                   setExtraQueries((prev) =>
-                                    prev.map((r, j) => (j === i ? { ...r, kind: k } : r)),
+                                    prev.map((r, j) =>
+                                      j === i
+                                        ? { ...r, kind: r.kind === "auto" ? "boolean" : r.kind === "boolean" ? "natural" : "auto" }
+                                        : r,
+                                    ),
                                   )
                                 }
-                                className={`px-2 py-1.5 transition ${
-                                  sq.kind === k
-                                    ? "bg-brand-500/20 text-brand-300"
-                                    : "text-forest-400 hover:text-white"
+                                title={t("search.subQueryKindHint")}
+                                className={`shrink-0 rounded-lg border px-2 py-1.5 text-[10px] transition ${
+                                  eff === "boolean"
+                                    ? "border-brand-400/40 bg-brand-500/15 text-brand-300"
+                                    : "border-white/10 bg-white/5 text-forest-300 hover:text-white"
                                 }`}
                               >
-                                {k === "boolean"
-                                  ? t("search.subQueryKindBoolean")
-                                  : t("search.subQueryKindNatural")}
+                                {eff === "boolean" ? t("search.subQueryKindBoolean") : t("search.subQueryKindNatural")}
+                                <span className="ml-1 opacity-50">{isAuto ? t("search.subQueryAuto") : "✎"}</span>
                               </button>
-                            ))}
+                              <input
+                                value={sq.text}
+                                onChange={(e) =>
+                                  setExtraQueries((prev) =>
+                                    prev.map((r, j) => (j === i ? { ...r, text: e.target.value } : r)),
+                                  )
+                                }
+                                onKeyDown={(e) => e.key === "Enter" && handleSearch()}
+                                placeholder={t("search.subQueryPlaceholder")}
+                                className="min-w-0 flex-1 rounded-xl border border-white/10 bg-forest-950/80 px-3 py-2 text-sm text-white outline-none placeholder:text-forest-500 focus:border-brand-400"
+                              />
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  setExtraQueries((prev) => prev.filter((_, j) => j !== i))
+                                }
+                                title={t("search.subQueryRemove")}
+                                aria-label={t("search.subQueryRemove")}
+                                className="shrink-0 px-1 text-sm text-forest-500 hover:text-rose-300 transition"
+                              >
+                                ✕
+                              </button>
+                            </div>
+                            {/* Traduction booléenne (si naturel) + compte lexical local */}
+                            {(eff === "natural" && fp?.boolean) || fp ? (
+                              <div className="pl-1 text-[10px] text-forest-400">
+                                {eff === "natural" && fp?.boolean && (
+                                  <span className="break-words">
+                                    <span className="opacity-60">{t("search.translatedTo")} </span>
+                                    <code className="font-mono text-brand-300/80">{fp.boolean}</code>
+                                    {fp ? "  ·  " : ""}
+                                  </span>
+                                )}
+                                {fp && <span className="opacity-70">{fp.count} {t("search.matchesInLibrary")}</span>}
+                              </div>
+                            ) : null}
                           </div>
-                          <input
-                            value={sq.text}
-                            onChange={(e) =>
-                              setExtraQueries((prev) =>
-                                prev.map((r, j) => (j === i ? { ...r, text: e.target.value } : r)),
-                              )
-                            }
-                            onKeyDown={(e) => e.key === "Enter" && handleSearch()}
-                            placeholder={t("search.subQueryPlaceholder")}
-                            className="min-w-0 flex-1 rounded-xl border border-white/10 bg-forest-950/80 px-3 py-2 text-sm text-white outline-none placeholder:text-forest-500 focus:border-brand-400"
-                          />
-                          <button
-                            type="button"
-                            onClick={() =>
-                              setExtraQueries((prev) => prev.filter((_, j) => j !== i))
-                            }
-                            title={t("search.subQueryRemove")}
-                            aria-label={t("search.subQueryRemove")}
-                            className="shrink-0 px-1 text-sm text-forest-500 hover:text-rose-300 transition"
-                          >
-                            ✕
-                          </button>
-                        </div>
-                      ))}
+                        );
+                      })}
                       <button
                         type="button"
                         onClick={() =>
-                          setExtraQueries((prev) => [...prev, { kind: "natural", text: "" }])
+                          setExtraQueries((prev) => [...prev, { kind: "auto", text: "" }])
                         }
                         className="text-xs text-brand-300 hover:text-brand-200 transition"
                       >
@@ -2691,6 +2755,36 @@ export default function App() {
                     </div>
                   )}
                 </div>
+
+                {/* Répartition lexicale : compte par facette + total union/intersection */}
+                {facetPreview && facetPreview.facets.length > 0 && (
+                  <div className="mt-3 rounded-2xl border border-brand-400/20 bg-brand-400/5 p-3 text-xs">
+                    <div className="flex items-center gap-2 text-brand-300/80">
+                      <span>{t("search.facetBreakdown")}</span>
+                      {facetPreviewLoading && <span className="text-white/40">{t("search.translating")}</span>}
+                    </div>
+                    <div className="mt-1.5 space-y-0.5 text-forest-300">
+                      {facetPreview.facets.map((f, idx) => (
+                        <div key={idx} className="flex items-baseline justify-between gap-3">
+                          <span className="min-w-0 truncate">
+                            <span className="opacity-50">{idx === 0 ? t("search.mainQueryShort") : `#${idx}`}</span>{" "}
+                            {f.text}
+                          </span>
+                          <span className="shrink-0 tabular-nums opacity-80">{f.count}</span>
+                        </div>
+                      ))}
+                    </div>
+                    <div className="mt-2 border-t border-white/10 pt-2 text-forest-200">
+                      {combinator === "union" ? t("search.combinatorUnion") : t("search.combinatorIntersection")}:{" "}
+                      <span className="font-semibold text-brand-300">{facetPreview.combined}</span>{" "}
+                      {t("search.matchesInLibrary")}
+                      <span className="ml-1 opacity-50">
+                        ({t("search.unionShort")} {facetPreview.union} · {t("search.interShort")} {facetPreview.intersection})
+                      </span>
+                    </div>
+                    <p className="mt-1 text-[10px] text-forest-500">{t("search.facetLiveNote")}</p>
+                  </div>
+                )}
 
                 {mode === "boolean" && (translatingQuery || booleanStrategy?.general) && (
                   <div className="mt-3 rounded-2xl border border-brand-400/20 bg-brand-400/5 p-3">
