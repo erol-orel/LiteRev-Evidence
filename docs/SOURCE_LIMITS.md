@@ -10,8 +10,11 @@ Line references point at `main.py` / `data_connectors.py` so this stays verifiab
 
 - **12 literature sources are queried in parallel** on every search/populate
   (`ThreadPoolExecutor(max_workers=12)`, `main.py:8215`).
-- **Hard ceiling: `LIVE_MAX_PER_SOURCE = 2000` documents per source per search**
-  (`main.py:1667`, `7466`). This is the *fetch* cap, before boolean filtering.
+- **Fetch ceiling: `LIVE_MAX_PER_SOURCE = 2000` documents per source per search**
+  (default; **env-configurable** — set it to e.g. `100000` to effectively remove the cap,
+  after which the time budget below is the real governor). This is the *fetch* cap, before
+  boolean filtering. ⚠ raising it multiplies API calls (429 risk) and OpenAI embedding cost
+  on every search.
 - **Wall-clock budget: `POPULATE_FEDERATION_BUDGET = 180 s`** (`main.py:242`, default;
   set the env var higher — e.g. `600` — for a more complete corpus). Populate runs in a
   **background thread**, so a larger budget doesn't block the request; it only delays the

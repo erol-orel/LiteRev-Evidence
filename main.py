@@ -1731,9 +1731,15 @@ def _search_local_doc_ids(
         return conn.execute(sql, params).scalars().all()
 
 
-# Limite de récupération par source live (PubMed, OpenAlex, …). Appliquée à
-# l'identique à la recherche ET à la construction du corpus.
-LIVE_MAX_PER_SOURCE = 2000
+# Limite de récupération par source live (PubMed, OpenAlex, …). Appliquée à l'identique
+# à la recherche ET à la construction du corpus. Réglable via l'env LIVE_MAX_PER_SOURCE :
+# la mettre très haut (p. ex. 100000) « retire » le plafond — la vraie borne devient alors
+# le budget temps (POPULATE_FEDERATION_BUDGET). ⚠ multiplier ce plafond multiplie les
+# appels API (risque de 429 PubMed/S2) ET le coût d'embedding OpenAI de CHAQUE recherche.
+try:
+    LIVE_MAX_PER_SOURCE = int(os.getenv("LIVE_MAX_PER_SOURCE", "2000"))
+except (TypeError, ValueError):
+    LIVE_MAX_PER_SOURCE = 2000
 
 
 def _boolean_corpus_ids(boolean_query: str, filters: dict) -> list:
