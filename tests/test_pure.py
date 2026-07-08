@@ -584,3 +584,14 @@ def test_boolean_parser_and_or_not_and_fallback():
     assert _ast_of('cancer NOT benign') == ("and", [("term", "cancer"), ("not", ("term", "benign"))])
     assert _ast_of('influenza surveillance') == ("and", [("term", "influenza"), ("term", "surveillance")])
     assert main._build_boolean_match_sql_from_query("", {}) == "TRUE"   # empty → matches all (filtered elsewhere)
+
+
+# ── _normalize_title (cross-source dedup key: DOI → title) ────────────────────
+def test_normalize_title_canonicalizes_for_dedup():
+    # same paper, different punctuation/case/spacing from two sources → identical key
+    a = main._normalize_title("Global Ranking of Schools of Public Health: A Systematic Review")
+    b = main._normalize_title("  global ranking of schools of public health — a systematic review  ")
+    assert a == b == "global ranking of schools of public health a systematic review"
+    # SQL backfill uses the SAME normalization, so on-ingest and backfilled keys agree
+    assert main._normalize_title("SARS-CoV-2: Omicron (BA.5)") == "sars cov 2 omicron ba 5"
+    assert main._normalize_title(None) == "" and main._normalize_title("!!!") == ""

@@ -17,6 +17,7 @@ ENV/
 .env
 .env.*
 *.env
+!.env.example
 
 # Editors / OS
 .vscode/

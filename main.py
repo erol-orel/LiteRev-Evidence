@@ -235,13 +235,16 @@ except (TypeError, ValueError):
     RAG_MIN_SIMILARITY = 0.18
 
 # Budget temps (s) de la fédération des sources lors du populate. Borne le temps
-# d'attente quand une source est lente/bloquée (PubMed efetch timeout=90, retries
-# Cochrane). Les sources non terminées continuent en arrière-plan ; le corpus est
-# reconstruit avec ce qui est déjà ingéré. Réglable via l'env POPULATE_FEDERATION_BUDGET.
+# d'attente quand une source est lente/bloquée (PubMed efetch timeout=90). Les sources
+# non terminées continuent en arrière-plan ; le corpus est reconstruit avec ce qui est
+# déjà ingéré. Réglable via l'env POPULATE_FEDERATION_BUDGET (mettre p. ex. 600 pour un
+# corpus plus complet). Défaut 180 s : le populate tourne dans un THREAD de fond, donc
+# un budget plus large ne bloque pas la requête — il retarde juste le passage à « done ».
+# On NE le met pas à l'infini : une source réellement bloquée maintiendrait le job en vie.
 try:
-    POPULATE_FEDERATION_BUDGET = float(os.getenv("POPULATE_FEDERATION_BUDGET", "55"))
+    POPULATE_FEDERATION_BUDGET = float(os.getenv("POPULATE_FEDERATION_BUDGET", "180"))
 except (TypeError, ValueError):
-    POPULATE_FEDERATION_BUDGET = 55.0
+    POPULATE_FEDERATION_BUDGET = 180.0
 
 
 # ─── Disjoncteur OpenAI (quota épuisé) ───────────────────────────────────────
@@ -429,6 +432,13 @@ def _normalize_doi(doi: str | None) -> str | None:
         if doi.lower().startswith(prefix):
             return doi[len(prefix):]
     return doi
+
+
+def _normalize_title(title: str | None) -> str:
+    """Forme canonique d'un titre pour la déduplication inter-sources (minuscules,
+    ponctuation → espace, espaces compactés). Le MÊME calcul est reproduit en SQL pour
+    le backfill : btrim(regexp_replace(lower(title), '[^a-z0-9]+', ' ', 'g'))."""
+    return re.sub(r"[^a-z0-9]+", " ", (title or "").lower()).strip()
 
 
 # Hiérarchie des devis d'étude (evidence pyramid) → score 0–1.
@@ -623,6 +633,11 @@ def _ensure_performance_indexes() -> None:
         "CREATE INDEX IF NOT EXISTS ix_litdoc_project_context ON literature_document (project_context)",
         "CREATE INDEX IF NOT EXISTS ix_doc_chunk_document ON document_chunk (document_id)",
         "CREATE INDEX IF NOT EXISTS ix_doc_chunk_type ON document_chunk (chunk_type)",
+        # Dédup par titre : backfill title_norm des lignes existantes (idempotent —
+        # WHERE title_norm IS NULL) puis index. Même normalisation que _normalize_title.
+        "UPDATE literature_document SET title_norm = btrim(regexp_replace(lower(title), '[^a-z0-9]+', ' ', 'g')) "
+        "WHERE title_norm IS NULL AND title IS NOT NULL",
+        "CREATE INDEX IF NOT EXISTS ix_litdoc_title_norm ON literature_document (project_context, title_norm)",
     ]
     for ddl in btree:
         try:
@@ -1716,9 +1731,15 @@ def _search_local_doc_ids(
         return conn.execute(sql, params).scalars().all()
 
 
-# Limite de récupération par source live (PubMed, OpenAlex, …). Appliquée à
-# l'identique à la recherche ET à la construction du corpus.
-LIVE_MAX_PER_SOURCE = 2000
+# Limite de récupération par source live (PubMed, OpenAlex, …). Appliquée à l'identique
+# à la recherche ET à la construction du corpus. Réglable via l'env LIVE_MAX_PER_SOURCE :
+# la mettre très haut (p. ex. 100000) « retire » le plafond — la vraie borne devient alors
+# le budget temps (POPULATE_FEDERATION_BUDGET). ⚠ multiplier ce plafond multiplie les
+# appels API (risque de 429 PubMed/S2) ET le coût d'embedding OpenAI de CHAQUE recherche.
+try:
+    LIVE_MAX_PER_SOURCE = int(os.getenv("LIVE_MAX_PER_SOURCE", "2000"))
+except (TypeError, ValueError):
+    LIVE_MAX_PER_SOURCE = 2000
 
 
 def _boolean_corpus_ids(boolean_query: str, filters: dict) -> list:
@@ -5416,6 +5437,24 @@ except Exception as _e:
     logger.warning(f"_ensure_double_blind_columns: {_e}")
 
 
+def _ensure_dedup_columns():
+    """Colonne title_norm (titre normalisé) pour la déduplication inter-sources par
+    TITRE — en complément du DOI, afin de capter les doublons SANS DOI (préprints,
+    essais) ou dont le DOI diffère d'une source à l'autre. L'ALTER est instantané ; le
+    backfill des lignes existantes + l'index se font en arrière-plan
+    (_ensure_performance_indexes)."""
+    with engine.begin() as conn:
+        conn.execute(text(
+            "ALTER TABLE literature_document ADD COLUMN IF NOT EXISTS title_norm TEXT"))
+    logger.info("Colonne title_norm (déduplication par titre) vérifiée/créée.")
+
+
+try:
+    _ensure_dedup_columns()
+except Exception as _e:
+    logger.warning(f"_ensure_dedup_columns: {_e}")
+
+
 class DoubleBlindDecisionIn(BaseModel):
     article_id: int
     reviewer: int  # 1 ou 2
@@ -7522,6 +7561,7 @@ def _ingest_doc_direct(
     Retourne l'ID du document (existant ou nouvellement créé).
     """
     doi = _normalize_doi(doi)
+    title_norm = _normalize_title(title)
     content_text = f"{title}\n\n{abstract or ''}".strip()
 
     # Vérifier si le document existe déjà
@@ -7532,6 +7572,24 @@ def _ingest_doc_direct(
         """), {"eid": external_id, "ctx": project_context}).scalar()
     if existing:
         return existing
+
+    # Dédup INTER-SOURCES par TITRE normalisé (en plus du DOI, géré par ON CONFLICT plus
+    # bas) : capte les doublons SANS DOI (préprints, essais) ou dont le DOI diffère d'une
+    # source à l'autre. Best-effort : si la colonne title_norm n'existe pas encore
+    # (migration en cours), on retombe silencieusement sur la dédup DOI. Titres courts/
+    # génériques (< 20 car. normalisés, p. ex. « editorial ») ignorés (faux positifs).
+    if title_norm and len(title_norm) >= 20:
+        try:
+            with engine.connect() as _c:
+                _dup = _c.execute(text(
+                    "SELECT id FROM literature_document "
+                    "WHERE project_context = :ctx AND title_norm = :tn "
+                    "ORDER BY id LIMIT 1"
+                ), {"ctx": project_context, "tn": title_norm}).scalar()
+            if _dup:
+                return _dup
+        except Exception:
+            pass   # colonne absente / erreur transitoire → dédup DOI seule
 
     # INSERT document + chunk dans UNE SEULE transaction : sinon un crash entre
     # les deux laisse un document sans chunk (jamais indexable/cherchable) — c'est
@@ -7578,6 +7636,18 @@ def _ingest_doc_direct(
                 "content": content_text,
                 "token_count": len(content_text.split()),
             })
+    # Best-effort : renseigne title_norm pour la dédup future. Transaction SÉPARÉE →
+    # une colonne title_norm manquante (migration non encore passée) n'annule JAMAIS
+    # l'INSERT ci-dessus.
+    if doc_id is not None and title_norm:
+        try:
+            with engine.begin() as _c2:
+                _c2.execute(text(
+                    "UPDATE literature_document SET title_norm = :tn "
+                    "WHERE id = :id AND (title_norm IS NULL OR title_norm = '')"
+                ), {"tn": title_norm, "id": doc_id})
+        except Exception:
+            pass
     return doc_id
 
 
@@ -7648,12 +7718,21 @@ def _run_user_scenario_populate(
     _counter_lock = threading.Lock()
     _ingested_total = [0]
     _errors_total = [0]
+    _bool_native_ids: set = set()   # SOURCE-UNION — voir _link_to_scenario
 
-    def _link_to_scenario(doc_id):
-        # NE LIE PLUS pendant la fédération : ingérer un article live ne l'ajoute
-        # PAS d'office au corpus. L'appartenance est recalculée après ingestion via
-        # la correspondance booléenne (_boolean_corpus_ids) — sinon le corpus
-        # gonflait avec des résultats live ne correspondant pas à la requête.
+    def _link_to_scenario(doc_id, boolean_native=False):
+        # NE LIE PLUS pendant la fédération : ingérer un article live ne l'ajoute PAS
+        # d'office au corpus. L'appartenance est recalculée après ingestion via la
+        # correspondance booléenne — sinon le corpus gonflait avec des résultats live
+        # (mots-clés) ne correspondant pas à la requête.
+        # EXCEPTION — SOURCE-UNION : les sources BOOLÉENNES-NATIVES (PubMed, Europe PMC,
+        # préprints EPMC) ont appliqué la VRAIE requête booléenne (MeSH / texte intégral).
+        # On mémorise leurs docs pour les INCLURE directement dans le corpus, sans les
+        # re-filtrer localement (le re-filtrage titre+résumé perdait leurs correspondances
+        # MeSH sans phrase littérale dans le résumé — d'où « 109 PubMed → 6 »). Les
+        # sources par MOTS-CLÉS, elles, restent re-filtrées (leur tri est lâche).
+        if boolean_native and doc_id is not None:
+            _bool_native_ids.add(doc_id)
         return None
 
     def _inc(source_name, count=1, err=0):
@@ -7848,7 +7927,7 @@ def _run_user_scenario_populate(
                             year=year, url=f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/",
                             external_id=pmid, doi=doi, authors=authors, journal=journal,
                         )
-                        _link_to_scenario(doc_id)
+                        _link_to_scenario(doc_id, boolean_native=True)   # source-union
                         count += 1
                         _inc("pubmed")
                     except Exception as e:
@@ -8038,7 +8117,7 @@ def _run_user_scenario_populate(
                             source="europepmc", title=title, abstract=abstract or None,
                             year=year, url=url, external_id=ext_id, doi=doi,
                         )
-                        _link_to_scenario(doc_id)
+                        _link_to_scenario(doc_id, boolean_native=True)   # source-union
                         count += 1
                         _inc("europepmc")
                     except Exception:
@@ -8105,7 +8184,7 @@ def _run_user_scenario_populate(
                             year=year, url=url, external_id=ext_id, doi=doi,
                             source_type="preprint",
                         )
-                        _link_to_scenario(doc_id)
+                        _link_to_scenario(doc_id, boolean_native=True)   # source-union
                         count += 1
                         _inc("preprint")
                     except Exception:
@@ -8418,16 +8497,28 @@ def _run_user_scenario_populate(
     # devient donc strictement « résultat de la requête sur base locale ∪ live ».
     # allow_empty=True en multi : une intersection légitimement vide DOIT vider le corpus.
     try:
+        # Appartenance = re-match booléen LOCAL (base locale ∪ live) pour les sources par
+        # mots-clés + la base existante…
         if _sub_queries:
             _final_ids = _multi_query_corpus_ids(_sub_queries, _combinator, filters)
-            _n_corpus = _set_scenario_corpus(scenario_id, _final_ids, allow_empty=True)
-            logger.info(f"Populate {scenario_id}: corpus multi-requêtes final = {_n_corpus} docs "
-                        f"({_combinator} de {len(_sub_queries)} sous-requêtes, base locale ∪ live)")
         else:
             _final_ids = _boolean_corpus_ids(_boolean, filters)
-            _n_corpus = _set_scenario_corpus(scenario_id, _final_ids)
-            logger.info(f"Populate {scenario_id}: corpus booléen final = {_n_corpus} docs "
-                        f"(base locale ∪ live, requête = {_boolean[:120]})")
+        # … ∪ SOURCE-UNION : les docs des sources booléennes-natives (PubMed, Europe PMC,
+        # préprints EPMC) qui ont appliqué la VRAIE requête booléenne sont inclus DIRECTEMENT,
+        # sans re-filtrage local (qui supprimait leurs correspondances MeSH/texte-intégral —
+        # « 109 PubMed → 6 »). La règle « pas de résumé → exclu » s'applique quand même après.
+        # …SAUF en INTERSECTION multi-requêtes : le corpus doit matcher TOUTES les facettes,
+        # or un doc booléen-natif ne matche que la requête PRINCIPALE (les fetchers live
+        # interrogent la requête principale) → l'unir casserait l'intersection. On garde
+        # alors le re-match local strict.
+        _union_native = not (_sub_queries and _combinator == "intersection")
+        _n_native = len(_bool_native_ids) if _union_native else 0
+        if _union_native:
+            _final_ids = list(set(_final_ids) | _bool_native_ids)
+        _n_corpus = _set_scenario_corpus(scenario_id, _final_ids, allow_empty=bool(_sub_queries))
+        logger.info(f"Populate {scenario_id}: corpus final = {_n_corpus} docs "
+                    f"(re-match local ∪ {_n_native} docs booléens-natifs PubMed/EPMC/préprints ; "
+                    f"{'multi ' + _combinator if _sub_queries else 'mono'})")
     except Exception as _e_corpus:
         logger.warning(f"Rebuild corpus {scenario_id}: {_e_corpus}")
 

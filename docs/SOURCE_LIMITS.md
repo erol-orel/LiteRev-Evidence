@@ -10,13 +10,18 @@ Line references point at `main.py` / `data_connectors.py` so this stays verifiab
 
 - **12 literature sources are queried in parallel** on every search/populate
   (`ThreadPoolExecutor(max_workers=12)`, `main.py:8215`).
-- **Hard ceiling: `LIVE_MAX_PER_SOURCE = 2000` documents per source per search**
-  (`main.py:1667`, `7466`). This is the *fetch* cap, before boolean filtering.
-- **Wall-clock budget: `POPULATE_FEDERATION_BUDGET = 55 s`** (`main.py:242`,
-  env-overridable). When it expires, slow sources stop paginating mid-stream and
-  the corpus is built from whatever arrived. **Consequence:** a source that
-  paginates slowly (arXiv, sometimes Crossref/OpenAlex at depth) rarely reaches
-  its 2000 cap — it delivers only the first page(s) that fit in 55 s.
+- **Fetch ceiling: `LIVE_MAX_PER_SOURCE = 2000` documents per source per search**
+  (default; **env-configurable** — set it to e.g. `100000` to effectively remove the cap,
+  after which the time budget below is the real governor). This is the *fetch* cap, before
+  boolean filtering. ⚠ raising it multiplies API calls (429 risk) and OpenAI embedding cost
+  on every search.
+- **Wall-clock budget: `POPULATE_FEDERATION_BUDGET = 180 s`** (`main.py:242`, default;
+  set the env var higher — e.g. `600` — for a more complete corpus). Populate runs in a
+  **background thread**, so a larger budget doesn't block the request; it only delays the
+  scenario reaching "done". Not unbounded on purpose: a truly stuck source would otherwise
+  keep the job alive forever. When it expires, slow sources stop paginating mid-stream and
+  the corpus is built from whatever arrived — so a slow source (arXiv, deep Crossref/
+  OpenAlex) may not reach its 2000 cap.
 - **Corpus membership = boolean/lexical only.** After fetching, membership is
   recomputed with the *same* boolean query on `local DB ∪ freshly-ingested`
   (`_boolean_corpus_ids` / `_multi_query_corpus_ids`, `main.py:8276`). The 2000
@@ -26,13 +31,43 @@ Line references point at `main.py` / `data_connectors.py` so this stays verifiab
   at ingest; **any article with no abstract is removed from the corpus** after
   populate (`main.py:8293`). Sources that return abstract-less records (Crossref,
   ClinicalTrials) therefore contribute fewer papers than they return.
-- **Dedup:** by DOI / external-id / normalized title across all sources.
+- **Dedup (on ingest):** ① same `(source, external_id)` → reuse; ② `ON CONFLICT (doi)`
+  → cross-source DOI merge; ③ **normalized-title** match (`title_norm` = lowercased,
+  punctuation-stripped) for records **without** a DOI or with a DOI in only one source.
+  Titles under 20 normalized chars are skipped to avoid merging generic "Editorial"-type
+  titles. (The `is_duplicate` flag was previously never set — title dedup now prevents the
+  duplicates at ingest instead.)
 
 ### Multi-query combination (union / intersection)
 Each facet (main query + each sub-query) is translated to boolean if natural,
 then matched lexically → a **set of document IDs**. `Union (OR)` = ∪ of the sets,
 `Intersection (AND)` = ∩, then dedup (`main.py:1694`). Semantic and Cohere scores
 **never** enter this — they only rank/select the relevant subset later.
+
+### Which query each source receives
+The natural query is translated once (LLM, cached) into a boolean; a plain keyword
+string is derived from it. Each source gets the variant it understands:
+
+| Query variant | Sources |
+|---------------|---------|
+| **PubMed boolean** (with `[MeSH]` / `[Title/Abstract]` tags) | PubMed |
+| **General boolean** (`AND`/`OR`/`NOT`, quotes, groups) | Europe PMC, Preprints (EPMC `SRC:PPR`), **local corpus re-match** |
+| **Plain keywords** (operators/tags stripped, ≤ 8 words) | OpenAlex, Crossref, Semantic Scholar, DOAJ, ClinicalTrials.gov, CORE, arXiv, OpenAIRE |
+| **No query** (date-window scan + local term filter) | bioRxiv, medRxiv (native) |
+
+Only PubMed + Europe PMC apply the *structured* boolean; the keyword APIs get a flattened
+bag of words and rely on their own relevance ranking. That's why per-source counts differ
+for the same search.
+
+### When the scores are computed (never as a separate "search" step)
+- **Corpus membership / count** = the boolean lexical match above. No score involved.
+- **Semantic score** (`similarity_score`, OpenAI cosine) — at **populate = scenario
+  creation** (`_run_semantic_rerank_inline`); a *soft* rank that never removes a paper.
+- **Cohere rerank** (`rerank_score`) — **lazily, on the scenario page** when you open it
+  (`_maybe_autorerank`), feeding the relevance **threshold** that picks the subset.
+
+So pertinence + Cohere run at/after scenario creation and drive only the *relevant subset* —
+the corpus count itself stays pure lexical.
 
 ---
 
@@ -49,9 +84,14 @@ then matched lexically → a **set of document IDs**. `Union (OR)` = ∪ of the 
 | 7 | **DOAJ** | 100 | 2000 | full history (OA only) | none | keyword |
 | 8 | **ClinicalTrials.gov** | 100 | 2000 (trials, not papers) | full registry | none | keyword |
 | 9 | **CORE** | 100 | 2000 | full history | **required (`CORE_API_KEY`, free)** | keyword |
-| 10 | **arXiv** | 100 | **~100 (3 s/req vs 55 s budget)** | full history | none | keyword |
+| 10 | **arXiv** | 100 | **~100 (3 s/req vs 180 s budget)** | full history | none | keyword |
 | 11 | **OpenAIRE** | 50 | 2000 | full history | none | keyword |
 | 12 | **bioRxiv + medRxiv** | 100 | **last 45 days only** | **recent window, no keyword search** | none | date-window + local filter |
+
+> Every **`2000`** above is the *default* `LIVE_MAX_PER_SOURCE` — **env-configurable**; raise
+> it (e.g. `100000`) to remove the cap, after which the `POPULATE_FEDERATION_BUDGET` (180 s
+> default) time budget governs. Semantic Scholar's **1000** and bioRxiv's **45-day window**
+> are upstream limits and are *not* configurable.
 
 ---
 
@@ -111,9 +151,9 @@ then matched lexically → a **set of document IDs**. `Union (OR)` = ∪ of the 
 
 ### 10. arXiv — `export.arxiv.org/api/query` (`main.py:8121`)
 - `max_results = 100`/page, `start` pagination, Atom XML.
-- **arXiv requires ≥ 3 s between requests** (`main.py:8142`). Against the 55 s
-  federation budget, that means **usually only the first ~100 results** land before
-  the budget cuts pagination. Keyless.
+- **arXiv requires ≥ 3 s between requests** (`main.py:8142`). Against the 180 s
+  federation budget, that means **usually only the first few hundred results** land
+  before the budget cuts pagination. Keyless.
 - Coverage skew: physics / CS / math / **quantitative biology** preprints.
 
 ### 11. OpenAIRE — `api.openaire.eu/search/publications` (`main.py:8147`)
@@ -157,11 +197,13 @@ These feed the **auto-fetch** panel (predictors for a scenario's model), not the
 
 ## 4. The limitations that actually bite
 
-1. **The 55 s budget, not the 2000 cap, is usually the binding constraint** for slow
-   sources (arXiv especially, sometimes deep Crossref/OpenAlex pages).
-2. **Semantic Scholar tops out at 1000/query** (hard API limit).
+1. **The 180 s budget, not the 2000 cap, is usually the binding constraint** for slow
+   sources (arXiv especially, sometimes deep Crossref/OpenAlex pages). Both are
+   env-configurable (`POPULATE_FEDERATION_BUDGET`, `LIVE_MAX_PER_SOURCE`) — raise them
+   together to fetch deeper; ⚠ multiplies API calls + OpenAI embedding cost per search.
+2. **Semantic Scholar tops out at 1000/query** (hard API limit — not configurable).
 3. **bioRxiv/medRxiv native = recent 45-day window only** (no historical keyword search).
-4. **CORE = 0 without its (free) API key.**
+4. **CORE contributes 0 until `CORE_API_KEY` (free) is set** in the environment.
 5. **No-abstract records are dropped** → Crossref and ClinicalTrials net lower than raw.
 6. **arXiv/DOAJ/ClinicalTrials are domain-skewed** (preprints / OA journals / trials) —
    good for recall breadth, not representative on their own.
