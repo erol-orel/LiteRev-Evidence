@@ -1953,9 +1953,12 @@ export default function App() {
       .map((q) => ({ kind: q.kind, text: q.text.trim() }))
       .filter((q) => q.text);
     if (!extra.length || !query.trim()) return null;
-    // La requête principale est un FACETTE à part entière : son type suit le mode
-    // (booléen → correspondance lexicale, sinon → sémantique), comme les sous-requêtes.
-    const mainKind: SubQuery["kind"] = mode === "boolean" ? "boolean" : "natural";
+    // La requête principale est une FACETTE à part entière : son type est AUTO-DÉTECTÉ
+    // (comme les sous-requêtes), et NON imposé par le toggle `mode` (défaut "boolean").
+    // Sinon une requête principale en langage naturel était traitée comme un BOOLÉEN
+    // BRUT (0 résultat), alors que la même sous-requête, elle, était détectée "natural"
+    // puis TRADUITE → même texte, comptes divergents (0 vs 53).
+    const mainKind: SubQuery["kind"] = looksBoolean(query.trim()) ? "boolean" : "natural";
     return [{ kind: mainKind, text: query.trim() }, ...extra];
   }
 
