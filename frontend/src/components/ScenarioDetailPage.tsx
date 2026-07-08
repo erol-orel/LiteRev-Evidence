@@ -2326,8 +2326,9 @@ function _guessConnector(mn: string, connectors: DataConnector[]): { id: string;
   };
   if (/(temp|humid|precip|wind|weather|met[eé]o)/.test(n)) return match("open-meteo-weather");
   if (/(pm2|pm10|no2|o3|ozone|air|pollut)/.test(n)) return match("open-meteo-air-quality");
-  if (/(wastewater|sewage|load|rsv|flu|influenza|sars|ww)/.test(n)) return match("eawag-wastewater");
-  if (/(ili|ari|sentinella|incidence|consult)/.test(n)) return first("foph-respiratory");
+  if (/(rsv|sars|sewage)/.test(n)) return match("eawag-wastewater");   // per-virus loads (archive)
+  if (/(wastewater|viral.?load|influenza|flu|ww)/.test(n)) return match("foph-wastewater");  // live influenza WW
+  // clinical ILI/ARI incidence has no live connector → manual CSV upload (no auto-guess)
   return null;
 }
 

@@ -148,22 +148,51 @@ def test_parse_generic_csv_picks_date_and_numeric():
     assert dc._parse_generic_csv("") == []
 
 
-def test_fetch_foph_respiratory_via_url(monkeypatch):
-    monkeypatch.setattr(dc, "_http_get_text",
-                        lambda url, timeout=30: "date,ili\n2025-01-01,42.0\n2025-01-08,55.0\n")
-    rows = dc.fetch_series("foph-respiratory", {"url": "https://x/foph.csv"})
-    assert [r["date"] for r in rows] == ["2025-01-01", "2025-01-08"]
-    assert rows[0]["ili"] == 42.0
-
-
 def test_new_connectors_registered():
     ids = {m["id"] for m in dc.list_connectors()}
-    assert {"eawag-wastewater", "foph-respiratory", "foph-wastewater"} <= ids
+    assert {"eawag-wastewater", "foph-wastewater"} <= ids
+    assert "foph-respiratory" not in ids          # mislabeled clinical placeholder removed
 
 
-def test_fetch_foph_wastewater_via_url(monkeypatch):
+def test_foph_wastewater_declares_confirmed_variables():
+    by_id = {m["id"]: m for m in dc.list_connectors()}
+    vnames = {v["machine_name"] for v in by_id["foph-wastewater"]["variables"]}
+    assert {"value", "valuemean7d", "conc", "flow", "pop"} == vnames   # confirmed live schema
+
+
+def test_fetch_foph_wastewater_single_series_passthrough(monkeypatch):
+    # a single clean series (unique dates) is returned as-is, no aggregation
     monkeypatch.setattr(dc, "_http_get_text",
                         lambda url, timeout=30: "week,rsv_load,flu_load\n2025-01-01,5.0,7.0\n2025-01-08,6.0,8.0\n")
     rows = dc.fetch_series("foph-wastewater", {"url": "https://x/ww.csv"})
     assert [r["date"] for r in rows] == ["2025-01-01", "2025-01-08"]
     assert rows[0]["rsv_load"] == 5.0 and rows[0]["flu_load"] == 7.0
+
+
+# confirmed FOPH schema, multiplexed across two plants/regions on the same date
+_FOPH_WW_CSV = (
+    "geoRegion,date,value,valuemean7d,conc,flow,pop\n"
+    "GE,2025-01-01,10.0,9.0,100.0,1000,100\n"
+    "VD,2025-01-01,20.0,19.0,200.0,3000,300\n"
+    "GE,2025-01-08,12.0,11.0,120.0,1000,100\n"
+)
+
+
+def test_fetch_foph_wastewater_aggregates_multiplexed_plants(monkeypatch):
+    monkeypatch.setattr(dc, "_http_get_text", lambda url, timeout=30: _FOPH_WW_CSV)
+    rows = dc.fetch_series("foph-wastewater", {"url": "https://x/ww.csv"})
+    assert [r["date"] for r in rows] == ["2025-01-01", "2025-01-08"]     # collapsed to one row/date
+    assert rows[0]["value"] == 15.0        # rate → mean of 10 & 20
+    assert rows[0]["pop"] == 400.0         # extensive → sum of 100 & 300
+    assert rows[0]["flow"] == 4000.0       # extensive → sum
+    json.dumps(rows)                        # JSON-safe (goes over the wire)
+
+
+def test_fetch_foph_wastewater_filter_selects_region(monkeypatch):
+    monkeypatch.setattr(dc, "_http_get_text", lambda url, timeout=30: _FOPH_WW_CSV)
+    rows = dc.fetch_series("foph-wastewater", {"url": "https://x/ww.csv", "geoRegion": "GE"})
+    assert [r["date"] for r in rows] == ["2025-01-01", "2025-01-08"]     # GE only → already unique
+    assert rows[0]["value"] == 10.0 and rows[0]["pop"] == 100.0          # not aggregated with VD
+    later = dc.fetch_series("foph-wastewater",
+                            {"url": "https://x/ww.csv", "geoRegion": "GE", "start_date": "2025-01-05"})
+    assert [r["date"] for r in later] == ["2025-01-08"]                  # date window on top of filter
