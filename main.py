@@ -235,13 +235,16 @@ except (TypeError, ValueError):
     RAG_MIN_SIMILARITY = 0.18
 
 # Budget temps (s) de la fédération des sources lors du populate. Borne le temps
-# d'attente quand une source est lente/bloquée (PubMed efetch timeout=90, retries
-# Cochrane). Les sources non terminées continuent en arrière-plan ; le corpus est
-# reconstruit avec ce qui est déjà ingéré. Réglable via l'env POPULATE_FEDERATION_BUDGET.
+# d'attente quand une source est lente/bloquée (PubMed efetch timeout=90). Les sources
+# non terminées continuent en arrière-plan ; le corpus est reconstruit avec ce qui est
+# déjà ingéré. Réglable via l'env POPULATE_FEDERATION_BUDGET (mettre p. ex. 600 pour un
+# corpus plus complet). Défaut 180 s : le populate tourne dans un THREAD de fond, donc
+# un budget plus large ne bloque pas la requête — il retarde juste le passage à « done ».
+# On NE le met pas à l'infini : une source réellement bloquée maintiendrait le job en vie.
 try:
-    POPULATE_FEDERATION_BUDGET = float(os.getenv("POPULATE_FEDERATION_BUDGET", "55"))
+    POPULATE_FEDERATION_BUDGET = float(os.getenv("POPULATE_FEDERATION_BUDGET", "180"))
 except (TypeError, ValueError):
-    POPULATE_FEDERATION_BUDGET = 55.0
+    POPULATE_FEDERATION_BUDGET = 180.0
 
 
 # ─── Disjoncteur OpenAI (quota épuisé) ───────────────────────────────────────
@@ -429,6 +432,13 @@ def _normalize_doi(doi: str | None) -> str | None:
         if doi.lower().startswith(prefix):
             return doi[len(prefix):]
     return doi
+
+
+def _normalize_title(title: str | None) -> str:
+    """Forme canonique d'un titre pour la déduplication inter-sources (minuscules,
+    ponctuation → espace, espaces compactés). Le MÊME calcul est reproduit en SQL pour
+    le backfill : btrim(regexp_replace(lower(title), '[^a-z0-9]+', ' ', 'g'))."""
+    return re.sub(r"[^a-z0-9]+", " ", (title or "").lower()).strip()
 
 
 # Hiérarchie des devis d'étude (evidence pyramid) → score 0–1.
@@ -623,6 +633,11 @@ def _ensure_performance_indexes() -> None:
         "CREATE INDEX IF NOT EXISTS ix_litdoc_project_context ON literature_document (project_context)",
         "CREATE INDEX IF NOT EXISTS ix_doc_chunk_document ON document_chunk (document_id)",
         "CREATE INDEX IF NOT EXISTS ix_doc_chunk_type ON document_chunk (chunk_type)",
+        # Dédup par titre : backfill title_norm des lignes existantes (idempotent —
+        # WHERE title_norm IS NULL) puis index. Même normalisation que _normalize_title.
+        "UPDATE literature_document SET title_norm = btrim(regexp_replace(lower(title), '[^a-z0-9]+', ' ', 'g')) "
+        "WHERE title_norm IS NULL AND title IS NOT NULL",
+        "CREATE INDEX IF NOT EXISTS ix_litdoc_title_norm ON literature_document (project_context, title_norm)",
     ]
     for ddl in btree:
         try:
@@ -5416,6 +5431,24 @@ except Exception as _e:
     logger.warning(f"_ensure_double_blind_columns: {_e}")
 
 
+def _ensure_dedup_columns():
+    """Colonne title_norm (titre normalisé) pour la déduplication inter-sources par
+    TITRE — en complément du DOI, afin de capter les doublons SANS DOI (préprints,
+    essais) ou dont le DOI diffère d'une source à l'autre. L'ALTER est instantané ; le
+    backfill des lignes existantes + l'index se font en arrière-plan
+    (_ensure_performance_indexes)."""
+    with engine.begin() as conn:
+        conn.execute(text(
+            "ALTER TABLE literature_document ADD COLUMN IF NOT EXISTS title_norm TEXT"))
+    logger.info("Colonne title_norm (déduplication par titre) vérifiée/créée.")
+
+
+try:
+    _ensure_dedup_columns()
+except Exception as _e:
+    logger.warning(f"_ensure_dedup_columns: {_e}")
+
+
 class DoubleBlindDecisionIn(BaseModel):
     article_id: int
     reviewer: int  # 1 ou 2
@@ -7522,6 +7555,7 @@ def _ingest_doc_direct(
     Retourne l'ID du document (existant ou nouvellement créé).
     """
     doi = _normalize_doi(doi)
+    title_norm = _normalize_title(title)
     content_text = f"{title}\n\n{abstract or ''}".strip()
 
     # Vérifier si le document existe déjà
@@ -7532,6 +7566,24 @@ def _ingest_doc_direct(
         """), {"eid": external_id, "ctx": project_context}).scalar()
     if existing:
         return existing
+
+    # Dédup INTER-SOURCES par TITRE normalisé (en plus du DOI, géré par ON CONFLICT plus
+    # bas) : capte les doublons SANS DOI (préprints, essais) ou dont le DOI diffère d'une
+    # source à l'autre. Best-effort : si la colonne title_norm n'existe pas encore
+    # (migration en cours), on retombe silencieusement sur la dédup DOI. Titres courts/
+    # génériques (< 20 car. normalisés, p. ex. « editorial ») ignorés (faux positifs).
+    if title_norm and len(title_norm) >= 20:
+        try:
+            with engine.connect() as _c:
+                _dup = _c.execute(text(
+                    "SELECT id FROM literature_document "
+                    "WHERE project_context = :ctx AND title_norm = :tn "
+                    "ORDER BY id LIMIT 1"
+                ), {"ctx": project_context, "tn": title_norm}).scalar()
+            if _dup:
+                return _dup
+        except Exception:
+            pass   # colonne absente / erreur transitoire → dédup DOI seule
 
     # INSERT document + chunk dans UNE SEULE transaction : sinon un crash entre
     # les deux laisse un document sans chunk (jamais indexable/cherchable) — c'est
@@ -7578,6 +7630,18 @@ def _ingest_doc_direct(
                 "content": content_text,
                 "token_count": len(content_text.split()),
             })
+    # Best-effort : renseigne title_norm pour la dédup future. Transaction SÉPARÉE →
+    # une colonne title_norm manquante (migration non encore passée) n'annule JAMAIS
+    # l'INSERT ci-dessus.
+    if doc_id is not None and title_norm:
+        try:
+            with engine.begin() as _c2:
+                _c2.execute(text(
+                    "UPDATE literature_document SET title_norm = :tn "
+                    "WHERE id = :id AND (title_norm IS NULL OR title_norm = '')"
+                ), {"tn": title_norm, "id": doc_id})
+        except Exception:
+            pass
     return doc_id
 
 
