@@ -32,8 +32,8 @@ jobs:
         with:
           python-version: "3.10"
 
-      - name: Python syntax check (backend)
-        run: python -m compileall -q *.py
+      - name: Python syntax check (backend + scripts + tools)
+        run: python -m compileall -q *.py scripts/*.py tools/*.py
 
       - name: Validate requirements.txt is resolvable
         run: pip install --dry-run -r requirements.txt
