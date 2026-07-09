@@ -22,6 +22,30 @@ import requests
 # the app root (parent dir) so the connector/parser checks can `import main`/`data_connectors`.
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+
+# Load the SAME env files the service loads (secrets.env holds the NCBI / Semantic Scholar /
+# CORE keys) so the source checks below see the same keys as the running app. Mirrors
+# main.py's autoloader; never overrides a value already set in the environment. Without this,
+# the checks run key-less → CORE is "skipped" and S2 rate-limits, misreporting the service.
+def _load_env_file(path):
+    try:
+        with open(path) as _f:
+            for _line in _f:
+                _line = _line.strip()
+                if not _line or _line.startswith("#") or "=" not in _line:
+                    continue
+                _k, _, _v = _line.partition("=")
+                _k = _k.strip()
+                if _k and _k not in os.environ:
+                    os.environ[_k] = _v.strip().strip('"').strip("'")
+    except FileNotFoundError:
+        pass
+
+
+for _ep in ["/opt/literev-api/.env", "/etc/literev/env", "/etc/literev-api.env",
+            "/etc/literev/secrets", "/opt/literev-api/secrets.env"]:
+    _load_env_file(_ep)
+
 UA = {"User-Agent": "LiteRev-smoke/1.0 (mailto:literev@gesica.ch)"}
 TIMEOUT = 30
 
@@ -94,13 +118,16 @@ def src_preprints():
 
 
 def src_semantic_scholar():
+    # The app queries the BULK endpoint for boolean (/paper/search/bulk). Probe it the same
+    # way. Bulk treats spaces as AND, so a strict multi-word total can be small — [OK] means
+    # the endpoint is reachable regardless of the count.
     h = {**UA}
     if os.getenv("SEMANTIC_SCHOLAR_API_KEY"):
         h["x-api-key"] = os.getenv("SEMANTIC_SCHOLAR_API_KEY")
-    r = requests.get("https://api.semanticscholar.org/graph/v1/paper/search",
-                     params={"query": PLAIN_Q, "limit": 1, "fields": "title"}, headers=h, timeout=TIMEOUT)
+    r = requests.get("https://api.semanticscholar.org/graph/v1/paper/search/bulk",
+                     params={"query": PLAIN_Q, "fields": "title"}, headers=h, timeout=TIMEOUT)
     j = r.json()
-    line("Semantic Scholar", r.ok, j.get("total"), (j.get("data") or [{}])[0].get("title"))
+    line("Semantic Scholar (bulk)", r.ok, j.get("total"), (j.get("data") or [{}])[0].get("title"))
 
 
 def src_doaj():
@@ -137,10 +164,16 @@ def src_arxiv():
 
 
 def src_openaire():
-    r = requests.get("https://api.openaire.eu/search/publications",
-                     params={"keywords": PLAIN_Q, "size": 1, "format": "json"}, headers=UA, timeout=TIMEOUT)
-    tot = r.json().get("response", {}).get("header", {}).get("total", {}).get("$")
-    line("OpenAIRE", r.ok, tot, None)
+    # Graph API v2 — the legacy /search/publications was RETIRED 2026-05-31; the app moved to
+    # this endpoint. search= takes free text or boolean; total from header.numFound.
+    r = requests.get("https://api.openaire.eu/graph/v2/researchProducts",
+                     params={"search": PLAIN_Q, "pageSize": 5},
+                     headers={"Accept": "application/json", **UA}, timeout=TIMEOUT)
+    j = r.json()
+    results = j.get("results") or []
+    hdr = j.get("header") or {}
+    tot = hdr.get("numFound") or hdr.get("total") or len(results)
+    line("OpenAIRE (Graph v2)", r.ok, tot, (results[0].get("mainTitle") if results else None))
 
 
 def src_biorxiv_medrxiv():
