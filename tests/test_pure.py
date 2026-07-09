@@ -517,6 +517,14 @@ def test_generate_search_strategy_returns_cached_copy():
     main._STRATEGY_CACHE.clear()
 
 
+def test_strategy_key_is_deterministic_and_normalized():
+    # The persistent-cache key must collapse case + whitespace so the SAME natural
+    # question always maps to the SAME stored boolean (fixes "Main 57 vs #1 56").
+    assert main._strategy_key("  Public   Health? ") == "public health?"
+    assert main._strategy_key("Public Health?") == main._strategy_key("public   health?")
+    assert main._strategy_key("") == "" and main._strategy_key(None) == ""
+
+
 # ── boolean parser: groups respected + PubMed field tags stripped ─────────────
 def _bool_leaves(ast):
     if ast is None:
