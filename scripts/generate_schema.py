@@ -15,7 +15,9 @@ DB_URL = os.getenv("DB_URL") or os.getenv("DATABASE_URL")
 if not DB_URL:
     raise RuntimeError("DB_URL (or DATABASE_URL) environment variable is required")
 
-OUTPUT_FILE = os.path.join(os.path.dirname(__file__), "schema.sql")
+# schema.sql is versioned at the REPO ROOT (this script lives in scripts/), so
+# write one directory up from here.
+OUTPUT_FILE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "schema.sql")
 
 
 def main() -> None:

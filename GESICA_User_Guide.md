@@ -325,7 +325,7 @@ Pour remplir la base de données avec les articles scientifiques, récupérer le
 cd /opt/literev-api
 
 # 1. Lancer l'ingestion initiale des articles PubMed/OpenAlex
-python3 ingest_pipeline.py --project gesica
+python3 scripts/ingest_pipeline.py --project gesica
 
 # 2. Récupérer massivement les full-texts (Unpaywall + PMC)
 python3 fetch_fulltext_bulk.py --project gesica --workers 4 --email erol.orel@unige.ch

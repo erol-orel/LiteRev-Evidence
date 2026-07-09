@@ -5007,9 +5007,9 @@ def get_deduplication_status() -> dict[str, Any]:
             int(stats["duplicates"] or 0) / max(int(stats["total"] or 1), 1) * 100, 1
         ),
         "instructions": {
-            "dry_run": "python3 deduplicate_corpus.py --dry-run",
-            "execute": "python3 deduplicate_corpus.py --execute",
-            "execute_delete": "python3 deduplicate_corpus.py --execute --delete",
+            "dry_run": "python3 scripts/deduplicate_corpus.py --dry-run",
+            "execute": "python3 scripts/deduplicate_corpus.py --execute",
+            "execute_delete": "python3 scripts/deduplicate_corpus.py --execute --delete",
         },
     }
 

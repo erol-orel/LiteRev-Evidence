@@ -47,7 +47,7 @@ fi
 
 # ── 2. Vérification syntaxe Python (tous les modules importés) ─
 echo "[2/7] Vérification syntaxe Python..."
-"$VENV_PY" -m compileall -q "$REPO_DIR"/*.py
+"$VENV_PY" -m compileall -q "$REPO_DIR"/*.py "$REPO_DIR"/scripts/*.py "$REPO_DIR"/tools/*.py
 echo "  OK — $(md5sum $REPO_DIR/main.py | cut -d' ' -f1)"
 
 # ── 3. Dépendances backend ────────────────────────────────────
