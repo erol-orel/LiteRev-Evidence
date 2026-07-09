@@ -6458,6 +6458,17 @@ def _ensure_user_scenarios_table() -> None:
             "CREATE INDEX IF NOT EXISTS ix_user_scenarios_owner ON user_scenarios (owner_email)",
         ):
             conn.execute(text(_ddl))
+        # Cache PERSISTANT des stratégies booléennes : même requête (clé normalisée) →
+        # MÊME booléen, de façon déterministe, à travers les requêtes, les redémarrages
+        # et les workers. Élimine la divergence « Main 57 vs sous-requête 56 » (deux
+        # traductions LLM concurrentes de la même phrase). Voir _generate_search_strategy.
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS search_strategy_cache (
+                query_key   TEXT       PRIMARY KEY,
+                strategy    JSONB      NOT NULL,
+                created_at  TIMESTAMP  DEFAULT NOW()
+            )
+        """))
     logger.info("Tables user_scenarios et user_scenario_folders vérifiées/créées.")
 
 try:
@@ -7255,6 +7266,13 @@ _STRATEGY_CACHE: dict[str, dict] = {}
 _STRATEGY_CACHE_MAX = 512
 
 
+def _strategy_key(query: str) -> str:
+    """Clé de cache NORMALISÉE : minuscules + espaces compactés + rognés. La même
+    phrase en langage naturel (à la casse et aux espaces près) mappe donc toujours
+    sur la même stratégie booléenne — condition d'un résultat déterministe."""
+    return re.sub(r"\s+", " ", (query or "").strip().lower())
+
+
 def _generate_search_strategy(query: str) -> dict:
     """
     Uses GPT-4.1-mini to generate a structured boolean search strategy from a natural language query.
@@ -7265,10 +7283,23 @@ def _generate_search_strategy(query: str) -> dict:
     - synonyms: list of key synonym groups used
     Résultats déterministes mis en cache mémoire (voir _STRATEGY_CACHE) ; renvoie une COPIE.
     """
-    _cache_key = (query or "").strip()
+    _cache_key = _strategy_key(query)
     _cached = _STRATEGY_CACHE.get(_cache_key)
     if _cached is not None:
         return dict(_cached)
+    # Cache PERSISTANT (DB) : même clé normalisée → MÊME stratégie à travers les
+    # requêtes, les redémarrages et les workers. C'est ce qui garantit qu'une même
+    # phrase produit toujours le même booléen (fin de « Main 57 vs sous-requête 56 »).
+    try:
+        with engine.connect() as _scc:
+            _srow = _scc.execute(text(
+                "SELECT strategy FROM search_strategy_cache WHERE query_key = :k"),
+                {"k": _cache_key}).mappings().first()
+        if _srow and isinstance(_srow["strategy"], dict):
+            _STRATEGY_CACHE[_cache_key] = dict(_srow["strategy"])
+            return dict(_srow["strategy"])
+    except Exception as _ce:
+        logger.warning(f"_generate_search_strategy DB cache read: {_ce}")
     openai_key = os.getenv("OPENAI_API_KEY")
     if not openai_key:
         return {"general": query, "pubmed": query, "explanation": "", "synonyms": [], "degraded": True}
@@ -7301,6 +7332,22 @@ def _generate_search_strategy(query: str) -> dict:
         )
         _result = json.loads(response.choices[0].message.content)
         if isinstance(_result, dict) and not _result.get("degraded"):
+            # Persiste ; le PREMIER writer gagne (ON CONFLICT DO NOTHING), puis on RELIT
+            # la valeur gagnante → deux traductions LLM concurrentes de la même phrase
+            # convergent vers UNE seule stratégie persistée et déterministe.
+            try:
+                with engine.begin() as _scw:
+                    _scw.execute(text(
+                        "INSERT INTO search_strategy_cache (query_key, strategy) "
+                        "VALUES (:k, CAST(:s AS jsonb)) ON CONFLICT (query_key) DO NOTHING"),
+                        {"k": _cache_key, "s": json.dumps(_result)})
+                    _wrow = _scw.execute(text(
+                        "SELECT strategy FROM search_strategy_cache WHERE query_key = :k"),
+                        {"k": _cache_key}).mappings().first()
+                if _wrow and isinstance(_wrow["strategy"], dict):
+                    _result = _wrow["strategy"]      # la valeur PERSISTÉE fait foi
+            except Exception as _we:
+                logger.warning(f"_generate_search_strategy DB cache write: {_we}")
             if len(_STRATEGY_CACHE) >= _STRATEGY_CACHE_MAX:
                 _STRATEGY_CACHE.clear()          # borne simple : flush à la capacité
             _STRATEGY_CACHE[_cache_key] = dict(_result)
