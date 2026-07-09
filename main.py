@@ -1669,6 +1669,26 @@ def _boolean_to_arxiv(ast) -> str | None:
     return None
 
 
+def _boolean_to_s2(ast) -> str | None:
+    """AST booléen → syntaxe de l'endpoint Semantic Scholar /paper/search/bulk :
+    espace = AND, ` | ` = OR, guillemets = phrase, parenthèses = groupe. Renvoie None si
+    l'AST contient un NOT (le `-` de S2 est un préfixe contextuel, ambigu isolé) → l'appelant
+    retombe sur l'endpoint classique + mots-clés. PUR/testable."""
+    if ast is None:
+        return None
+    typ = ast[0]
+    if typ == "term":
+        return f'"{ast[1]}"' if " " in ast[1] else ast[1]
+    if typ == "not":
+        return None
+    if typ in ("and", "or"):
+        parts = [_boolean_to_s2(c) for c in ast[1]]
+        if any(p is None for p in parts):
+            return None
+        return "(" + (" " if typ == "and" else " | ").join(parts) + ")"
+    return None
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Search (Hybride & Vectorielle pgvector)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -7525,6 +7545,44 @@ def _openaire_text(v: Any) -> str | None:
     return None
 
 
+def _parse_openaire_graph(payload: dict) -> list[dict]:
+    """OpenAIRE Graph API v2 (/graph/v2/researchProducts) → docs. DÉFENSIF : les champs
+    (descriptions, pids, publicationDate) varient en forme. external_id = openaire:<id>.
+    Remplace l'ancien /search/publications (retiré le 2026-05-31)."""
+    out: list[dict] = []
+    results = (payload.get("results") if isinstance(payload, dict) else None) or []
+    for r in results:
+        if not isinstance(r, dict):
+            continue
+        title = (r.get("mainTitle") or _openaire_text(r.get("title")) or "").strip()
+        oid = r.get("id")
+        if not title or not oid:
+            continue
+        _desc = r.get("descriptions") or r.get("description")
+        if isinstance(_desc, list):
+            _desc = " ".join((d.get("value") if isinstance(d, dict) else str(d)) or "" for d in _desc)
+        elif isinstance(_desc, dict):
+            _desc = _desc.get("value")
+        abstract = (_desc or "").strip() or None
+        _pd = str(r.get("publicationDate") or r.get("publiacationYear") or "")
+        year = int(_pd[:4]) if _pd[:4].isdigit() else None
+        doi = None
+        for p in (r.get("pids") or r.get("pid") or []):
+            if isinstance(p, dict):
+                _sch = str(p.get("scheme") or p.get("type") or p.get("@classid") or "").lower()
+                _val = p.get("value") or p.get("id") or p.get("$")
+                if _sch == "doi" and _val:
+                    doi = _val
+                    break
+        doi = _normalize_doi(doi)
+        out.append({
+            "title": title, "abstract": abstract, "year": year,
+            "url": (f"https://doi.org/{doi}" if doi else None),
+            "doi": doi, "external_id": f"openaire:{oid}", "source_type": "article",
+        })
+    return out
+
+
 def _parse_openaire(payload: dict) -> list[dict]:
     """OpenAIRE search/publications (format=json) → docs. BEST-EFFORT : structure
     profondément imbriquée et variable ($-wrapped, dict-ou-liste). external_id = doi:<…>
@@ -8261,31 +8319,63 @@ def _run_user_scenario_populate(
 
     def _fetch_semantic_scholar():
         count = 0
+        _s2_key = os.getenv("SEMANTIC_SCHOLAR_API_KEY")
+        _hdrs = {"x-api-key": _s2_key} if _s2_key else {}
+        _fields = "title,abstract,year,externalIds,url"
+        # Vrai booléen → endpoint BULK (opérateurs AND/OR + jusqu'à 10M via token) +
+        # source-union. Sinon → endpoint classique (relevance, offset≤1000) + mots-clés.
+        _s2_bool = None
+        if _bool_is_real:
+            try:
+                _s2_bool = _boolean_to_s2(_parse_boolean_ast(_tokenize_boolean(_portable_bool)))
+            except Exception:
+                _s2_bool = None
         try:
-            _s2_key = os.getenv("SEMANTIC_SCHOLAR_API_KEY")
-            _hdrs = {"x-api-key": _s2_key} if _s2_key else {}
-            _off, _cap = 0, min(max_results, 1000)   # S2 search : offset+limit <= 1000
-            while _off < _cap:
-                if _time.time() >= _fed_deadline[0]:
-                    break
-                _bulk = min(100, _cap - _off)
-                _r = _requests.get(
-                    "https://api.semanticscholar.org/graph/v1/paper/search",
-                    params={"query": _plain_q, "offset": _off, "limit": _bulk,
-                            "fields": "title,abstract,year,externalIds,url"},
-                    headers=_hdrs, timeout=20,
-                )
-                if _r.status_code == 429:      # rate-limited → petite pause et on retente
-                    _time.sleep(2)
-                    continue
-                _r.raise_for_status()
-                _payload = _r.json()
-                _got = len(_payload.get("data") or [])
-                count += _ingest_parsed("semantic_scholar", _parse_semantic_scholar(_payload))
-                if _got < _bulk:
-                    break
-                _off += _bulk
-                _time.sleep(0.3)
+            if _s2_bool:
+                _tok, _fetched = None, 0
+                while _fetched < max_results:
+                    if _time.time() >= _fed_deadline[0]:
+                        break
+                    _p = {"query": _s2_bool, "fields": _fields}
+                    if _tok:
+                        _p["token"] = _tok
+                    _r = _requests.get("https://api.semanticscholar.org/graph/v1/paper/search/bulk",
+                                       params=_p, headers=_hdrs, timeout=25)
+                    if _r.status_code == 429:
+                        _time.sleep(2)
+                        continue
+                    _r.raise_for_status()
+                    _payload = _r.json()
+                    _n = len(_payload.get("data") or [])
+                    count += _ingest_parsed("semantic_scholar", _parse_semantic_scholar(_payload),
+                                            boolean_native=True)
+                    _fetched += _n
+                    _tok = _payload.get("token")
+                    if not _tok or _n == 0:
+                        break
+                    _time.sleep(0.3)
+            else:
+                _off, _cap = 0, min(max_results, 1000)   # search classique : offset+limit ≤ 1000
+                while _off < _cap:
+                    if _time.time() >= _fed_deadline[0]:
+                        break
+                    _bulk = min(100, _cap - _off)
+                    _r = _requests.get(
+                        "https://api.semanticscholar.org/graph/v1/paper/search",
+                        params={"query": _plain_q, "offset": _off, "limit": _bulk, "fields": _fields},
+                        headers=_hdrs, timeout=20,
+                    )
+                    if _r.status_code == 429:
+                        _time.sleep(2)
+                        continue
+                    _r.raise_for_status()
+                    _payload = _r.json()
+                    _got = len(_payload.get("data") or [])
+                    count += _ingest_parsed("semantic_scholar", _parse_semantic_scholar(_payload))
+                    if _got < _bulk:
+                        break
+                    _off += _bulk
+                    _time.sleep(0.3)
         except Exception as _e:
             logger.warning(f"Semantic Scholar populate {scenario_id}: {_e}")
         return ("semantic_scholar", count)
@@ -8409,28 +8499,33 @@ def _run_user_scenario_populate(
 
     def _fetch_openaire():
         count = 0
+        # Migration vers l'API Graph v2 : l'ancien /search/publications a été RETIRÉ le
+        # 2026-05-31. `search=` accepte AND/OR/NOT + parenthèses + guillemets → source-union
+        # quand on a un vrai booléen (sinon mots-clés). Pagination par CURSEUR.
+        _oa_q = _portable_bool if _bool_is_real else _plain_q
+        _oa_native = bool(_bool_is_real)
         try:
-            _oa_page, _oa_fetched = 1, 0
-            while _oa_fetched < max_results:
+            _cursor, _fetched = "*", 0
+            while _fetched < max_results:
                 if _time.time() >= _fed_deadline[0]:
                     break
                 _r = _requests.get(
-                    "https://api.openaire.eu/search/publications",
-                    params={"keywords": _plain_q, "size": 50, "page": _oa_page, "format": "json"},
-                    timeout=25,
+                    "https://api.openaire.eu/graph/v2/researchProducts",
+                    params={"search": _oa_q, "pageSize": 50, "cursor": _cursor},
+                    headers={"Accept": "application/json"}, timeout=25,
                 )
                 _r.raise_for_status()
-                _docs = _parse_openaire(_r.json())
-                if not _docs:
+                _payload = _r.json()
+                _docs = _parse_openaire_graph(_payload)
+                count += _ingest_parsed("openaire", _docs, boolean_native=_oa_native)
+                _fetched += len(_docs)
+                _next = (_payload.get("header") or {}).get("nextCursor")
+                if not _docs or not _next or _next == _cursor:
                     break
-                count += _ingest_parsed("openaire", _docs)
-                _oa_fetched += len(_docs)
-                if len(_docs) < 50:
-                    break
-                _oa_page += 1
+                _cursor = _next
                 _time.sleep(0.5)
         except Exception as _e:
-            logger.warning(f"OpenAIRE populate {scenario_id}: {_e}")
+            logger.warning(f"OpenAIRE (Graph API v2) populate {scenario_id}: {_e}")
         return ("openaire", count)
 
     def _fetch_biorxiv_medrxiv():
