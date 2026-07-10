@@ -2088,7 +2088,14 @@ export default function App() {
       // pas terminés. On sonde la phase RÉELLE du backend (local → federation →
       // scoring → done) et les compteurs par source, sans rien afficher encore.
       let reachedDone = false;
-      for (let i = 0; i < 240; i++) {
+      let shownResults = false;
+      // Affichage PROGRESSIF : le corpus se remplit EN DIRECT pendant la fédération
+      // (liens incrémentaux des sources booléennes-natives). On montre les résultats dès
+      // qu'ils arrivent et on rafraîchit le compteur, au lieu d'un écran d'attente figé
+      // jusqu'à la fin (~10 min avec CORE/Crossref). Cap relevé (450 × 2 s = 15 min) pour
+      // atteindre le statut 'done' RÉEL et se figer sur le compteur FINAL (fin du « 172
+      // au lieu de 5758 » : on ne rendait qu'une fois, avant la fin de la construction).
+      for (let i = 0; i < 450; i++) {
         let status = 'pending';
         let phase: 'local' | 'federation' | 'scoring' | 'done' | null = null;
         try {
@@ -2098,6 +2105,14 @@ export default function App() {
           if (st.sources) setSearchSourceProgress(st.sources);
         } catch { /* transient — keep polling */ }
         if (phase) setSearchBackendPhase(phase);
+        // Rafraîchir le corpus affiché ~toutes les 8 s ; dès qu'il contient des documents,
+        // on quitte l'écran d'attente et on affiche la liste qui grandit (compteur en direct).
+        if (i > 0 && i % 4 === 0) {
+          try {
+            const n = await renderCorpus();
+            if (n > 0 && !shownResults) { shownResults = true; setLoading(false); setLiveRefreshing(true); }
+          } catch { /* transient — keep polling */ }
+        }
         if (status === 'done') { reachedDone = true; break; }
         if (status === 'error') throw new Error(t("search.corpusBuildFailed"));
         await new Promise((r) => setTimeout(r, 2000));
