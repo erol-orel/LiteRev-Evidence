@@ -7858,6 +7858,19 @@ def _run_user_scenario_populate(
         # sources par MOTS-CLÉS, elles, restent re-filtrées (leur tri est lâche).
         if boolean_native and doc_id is not None:
             _bool_native_ids.add(doc_id)
+            # Lien INCRÉMENTAL : un doc booléen-natif appartient au corpus par source-union
+            # (confirmé tel quel à l'assemblage final). On le lie DÈS l'ingestion pour que
+            # le compteur du corpus grandisse EN DIRECT pendant la recherche (172 → … →
+            # total), au lieu de sauter d'un coup à la fin. Score NULL ici → renseigné au
+            # scoring. best-effort : l'assemblage final refait l'union de toute façon.
+            try:
+                with engine.begin() as _lc:
+                    _lc.execute(text(
+                        "INSERT INTO article_scenarios (document_id, scenario_id, similarity_score) "
+                        "VALUES (:d, :s, NULL) ON CONFLICT (document_id, scenario_id) DO NOTHING"),
+                        {"d": doc_id, "s": scenario_id})
+            except Exception:
+                pass
         return None
 
     def _inc(source_name, count=1, err=0):
@@ -7942,6 +7955,15 @@ def _run_user_scenario_populate(
                     _arxiv_q, _arxiv_native = _ax, True
             except Exception:
                 pass
+        # PubMed RECALL : la requête MeSH générée par le LLM (_pubmed_q) est parfois
+        # BEAUCOUP plus étroite que le booléen général — p. ex. 35 résultats contre 306
+        # pour le même booléen collé sur le site PubMed. On interroge donc PubMed sur
+        # l'UNION « (MeSH) OR (booléen portable) » : on garde les correspondances MeSH
+        # ET les correspondances de phrase (all-fields). Ne peut qu'AJOUTER des résultats.
+        if (_bool_is_real and _portable_bool and _pubmed_q
+                and _portable_bool not in _pubmed_q
+                and len(_pubmed_q) + len(_portable_bool) <= 1900):
+            _pubmed_q = f"({_pubmed_q}) OR ({_portable_bool})"
         _local_ids = (_multi_query_corpus_ids(_sub_queries, _combinator, filters)
                       if _sub_queries
                       else _search_local_doc_ids(_boolean, "boolean", filters, limit=100_000))
