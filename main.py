@@ -8114,11 +8114,11 @@ def _run_user_scenario_populate(
                 _oa_batch = min(200, _oa_limit - _oa_fetched)
                 oa_resp = _requests.get(
                     "https://api.openalex.org/works",
-                    # sort=publication_date:desc → quand on plafonne à max_results,
-                    # on récupère les articles LES PLUS RÉCENTS d'abord (utile pour
-                    # une revue vivante ; les anciens pertinents sont déjà en base).
+                    # sort=relevance_score:desc → quand on plafonne à max_results, on garde
+                    # les 2000 LES PLUS PERTINENTS (BM25 OpenAlex) et non les plus récents.
+                    # OpenAlex ordonne par pertinence par défaut sous `search` ; on l'explicite.
                     params={"search": _bool_query, "per_page": _oa_batch, "page": _oa_page,
-                            "sort": "publication_date:desc", "mailto": "literev@gesica.ch"},
+                            "sort": "relevance_score:desc", "mailto": "literev@gesica.ch"},
                     timeout=20,
                 )
                 oa_resp.raise_for_status()
@@ -8242,9 +8242,10 @@ def _run_user_scenario_populate(
                     break  # budget fédération dépassé — on arrête de paginer
                 ep_resp = _requests.get(
                     "https://www.ebi.ac.uk/europepmc/webservices/rest/search",
-                    # sort=P_PDATE_D desc → articles les plus récents d'abord (idem OpenAlex).
+                    # Pas de tri par date : on laisse le tri par PERTINENCE (défaut Europe PMC)
+                    # → au plafond de 2000, on garde les plus pertinents et non les plus récents.
                     params={"query": _boolean, "format": "json", "pageSize": _ep_page_size,
-                            "resultType": "core", "sort": "P_PDATE_D desc",
+                            "resultType": "core",
                             "cursorMark": _ep_cursor_mark},
                     timeout=20,
                 )
