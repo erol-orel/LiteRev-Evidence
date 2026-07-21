@@ -7689,32 +7689,32 @@ def _ingest_doc_direct(
     title_norm = _normalize_title(title)
     content_text = f"{title}\n\n{abstract or ''}".strip()
 
-    # Vérifier si le document existe déjà
-    with engine.connect() as _c:
-        existing = _c.execute(text("""
-            SELECT id FROM literature_document
-            WHERE external_id = :eid AND project_context = :ctx LIMIT 1
-        """), {"eid": external_id, "ctx": project_context}).scalar()
+    # Dédup en UN SEUL aller-retour (au lieu de deux SELECT séparés) : par external_id,
+    # sinon par DOI, sinon par TITRE normalisé — capte les doublons sans DOI (préprints,
+    # essais) ou dont le DOI diffère selon la source. Titres < 20 car. normalisés ignorés
+    # (faux positifs). Le try/except couvre le cas d'une colonne title_norm absente (migration).
+    _has_tn = bool(title_norm and len(title_norm) >= 20)
+    try:
+        with engine.connect() as _c:
+            existing = _c.execute(text("""
+                SELECT id FROM literature_document
+                WHERE project_context = :ctx AND (
+                    external_id = :eid
+                    OR (:has_tn AND title_norm = :tn)
+                    OR (:has_doi AND doi = :doi))
+                ORDER BY (external_id = :eid) DESC, (:has_doi AND doi = :doi) DESC
+                LIMIT 1
+            """), {"ctx": project_context, "eid": external_id,
+                   "tn": title_norm, "has_tn": _has_tn,
+                   "doi": doi, "has_doi": bool(doi)}).scalar()
+    except Exception:
+        with engine.connect() as _c:   # repli : dédup external_id seul (colonne title_norm absente)
+            existing = _c.execute(text(
+                "SELECT id FROM literature_document "
+                "WHERE external_id = :eid AND project_context = :ctx LIMIT 1"
+            ), {"eid": external_id, "ctx": project_context}).scalar()
     if existing:
-        return existing
-
-    # Dédup INTER-SOURCES par TITRE normalisé (en plus du DOI, géré par ON CONFLICT plus
-    # bas) : capte les doublons SANS DOI (préprints, essais) ou dont le DOI diffère d'une
-    # source à l'autre. Best-effort : si la colonne title_norm n'existe pas encore
-    # (migration en cours), on retombe silencieusement sur la dédup DOI. Titres courts/
-    # génériques (< 20 car. normalisés, p. ex. « editorial ») ignorés (faux positifs).
-    if title_norm and len(title_norm) >= 20:
-        try:
-            with engine.connect() as _c:
-                _dup = _c.execute(text(
-                    "SELECT id FROM literature_document "
-                    "WHERE project_context = :ctx AND title_norm = :tn "
-                    "ORDER BY id LIMIT 1"
-                ), {"ctx": project_context, "tn": title_norm}).scalar()
-            if _dup:
-                return _dup
-        except Exception:
-            pass   # colonne absente / erreur transitoire → dédup DOI seule
+        return existing   # colonne absente / erreur transitoire → dédup DOI seule
 
     # INSERT document + chunk dans UNE SEULE transaction : sinon un crash entre
     # les deux laisse un document sans chunk (jamais indexable/cherchable) — c'est
@@ -7723,10 +7723,10 @@ def _ingest_doc_direct(
         doc_id = _c.execute(text("""
             INSERT INTO literature_document (
                 source, title, abstract, year, url, external_id,
-                project_context, source_type, doi, authors, journal
+                project_context, source_type, doi, authors, journal, title_norm
             ) VALUES (
                 :source, :title, :abstract, :year, :url, :external_id,
-                :project_context, :source_type, :doi, :authors, :journal
+                :project_context, :source_type, :doi, :authors, :journal, :title_norm
             )
             ON CONFLICT (doi) WHERE doi IS NOT NULL DO NOTHING
             RETURNING id
@@ -7735,6 +7735,7 @@ def _ingest_doc_direct(
             "year": year, "url": url, "external_id": external_id,
             "project_context": project_context, "source_type": source_type,
             "doi": doi, "authors": authors, "journal": journal,
+            "title_norm": (title_norm or None),
         }).scalar()
         if doc_id is None:
             # DOI already present — reuse the existing canonical row
@@ -7761,18 +7762,7 @@ def _ingest_doc_direct(
                 "content": content_text,
                 "token_count": len(content_text.split()),
             })
-    # Best-effort : renseigne title_norm pour la dédup future. Transaction SÉPARÉE →
-    # une colonne title_norm manquante (migration non encore passée) n'annule JAMAIS
-    # l'INSERT ci-dessus.
-    if doc_id is not None and title_norm:
-        try:
-            with engine.begin() as _c2:
-                _c2.execute(text(
-                    "UPDATE literature_document SET title_norm = :tn "
-                    "WHERE id = :id AND (title_norm IS NULL OR title_norm = '')"
-                ), {"tn": title_norm, "id": doc_id})
-        except Exception:
-            pass
+    # title_norm est désormais inséré directement (colonne présente) → plus d'UPDATE séparé.
     return doc_id
 
 
