@@ -14,15 +14,27 @@ Below, `$BASE` = the API base and `$KEY` = the admin key.
 ## Authentication
 
 Mutating endpoints require the **`X-API-Key`** header, compared (constant-time) against the
-`WRITE_API_KEY` env var (in `/opt/literev-api/secrets.env`). `GET` stats/status endpoints are open.
+running service's `WRITE_API_KEY`. `GET` stats/status endpoints are open.
+
+Read the key from the **running process** — this is authoritative. systemd may inject
+`WRITE_API_KEY` via a drop-in `Environment=` **or a separate `EnvironmentFile=`** (find it with
+`systemctl show literev-api -p Environment -p EnvironmentFiles`), which can differ from
+`secrets.env`, and `main.py` does not override an env var that is already set. (Reading
+`secrets.env` directly can therefore give a stale key → `Invalid API key`.)
 
 ```bash
 BASE=http://localhost:8000
-KEY=$(grep -E '^WRITE_API_KEY=' /opt/literev-api/secrets.env | cut -d= -f2-)
-auth=(-H "X-API-Key: $KEY")
+PID=$(systemctl show -p MainPID --value literev-api)
+KEY=$(tr '\0' '\n' < /proc/$PID/environ | sed -n 's/^WRITE_API_KEY=//p')
+[ -n "$KEY" ] && echo "key loaded (${#KEY} chars)"   # never echo the value itself into logs
 ```
 
-- `401 Invalid API key` — missing/wrong key. `503 Server not configured…` — `WRITE_API_KEY` unset.
+- `401 Invalid API key` — missing/wrong/stale key. `503 Server not configured…` — `WRITE_API_KEY` unset.
+
+> **Drift check.** If `grep '^WRITE_API_KEY=' /opt/literev-api/secrets.env` differs from the process
+> value above, `secrets.env` is stale. Pick one source of truth — either put the real key in
+> `secrets.env` and remove the systemd `Environment=` line (`systemctl edit literev-api`), or update
+> `secrets.env` to match — then `systemctl restart literev-api`. Rotate the key if it has leaked.
 
 ---
 
