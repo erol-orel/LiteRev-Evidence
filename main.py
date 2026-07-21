@@ -8172,7 +8172,7 @@ def _run_user_scenario_populate(
             _cr_offset = 0
             _cr_fetched = 0
             _cr_limit = min(max_results, max_results)
-            _cr_rows = min(100, _cr_limit)
+            _cr_rows = min(1000, _cr_limit)   # max Crossref : 10× moins d'allers-retours
             while _cr_fetched < _cr_limit:
                 if _time.time() >= _fed_deadline[0]:
                     break  # budget fédération dépassé — on arrête de paginer
@@ -8236,7 +8236,7 @@ def _run_user_scenario_populate(
             _ep_cursor_mark = "*"
             _ep_fetched = 0
             _ep_limit = min(max_results, max_results)
-            _ep_page_size = 200
+            _ep_page_size = 1000   # max Europe PMC : moins d'allers-retours → fédération plus rapide
             while _ep_fetched < _ep_limit:
                 if _time.time() >= _fed_deadline[0]:
                     break  # budget fédération dépassé — on arrête de paginer
