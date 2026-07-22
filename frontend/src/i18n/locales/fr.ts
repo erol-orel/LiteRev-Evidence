@@ -99,7 +99,7 @@ export const fr = {
     },
     epidemic: {
       heading: "Surveillance Épidémique :",
-      emsRisk: "Risque EMS :",
+      emsRisk: "Risque pour les services de santé :",
       statusUnderThreshold: "Sous le seuil",
       statusWarning: "Vigilance",
       statusEpidemic: "Épidémie",
@@ -114,7 +114,7 @@ export const fr = {
       population: "Population",
       density: "Hab/km²",
       over65: ">65 ans",
-      emsRiskMultiplier: "Multiplicateur risque EMS",
+      emsRiskMultiplier: "Multiplicateur de risque pour les services de santé",
     },
     pharmacies: {
       heading: "Pharmacies de Garde & Alertes Médicaments",
@@ -126,7 +126,7 @@ export const fr = {
     signals: {
       heading: "Signaux Informels : ProMED / GDELT",
       reliability: "Fiabilité",
-      impactEms: "→ Impact SMUR/EMS :",
+      impactEms: "→ Impact sanitaire :",
       impactHospital: "→ Impact hospitalier :",
     },
     climate: {
@@ -141,7 +141,7 @@ export const fr = {
       heatwaveDaysIncrease: "Augmentation des jours de canicule extrême :",
       daysPerYear: "jours/an",
       heavyPrecipitationIncrease: "Augmentation des précipitations extrêmes :",
-      emsVulnerabilityFactor: "Facteur de vulnérabilité EMS principal :",
+      emsVulnerabilityFactor: "Facteur de vulnérabilité principal :",
     },
   },
   stats: {

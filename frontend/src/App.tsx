@@ -614,7 +614,7 @@ function GesicaSignalsPanel({ summary }: { summary: EvidenceSummaryResponse }) {
       <div className="flex items-center justify-between">
         <h3 className="font-medium text-white flex items-center gap-2">
           <Zap size={14} className="text-brand-400" />
-          Signaux EMS
+          Signaux santé
         </h3>
         <EvidenceStrengthBadge strength={s.evidenceStrength} showTooltip={true} />
       </div>
