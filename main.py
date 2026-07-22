@@ -1420,7 +1420,7 @@ def ask_assistant(payload: AskIn) -> dict[str, Any]:
         
         system_prompt = (
             "Vous êtes l'assistant scientifique expert de LiteRev-Evidence, spécialisé dans la synthèse d'évidences "
-            "pour la médecine d'urgence suisse (SMUR/EMS Genève et HUG).\n\n"
+            "scientifiques (recherche clinique et santé publique).\n\n"
             "Votre tâche est de répondre à la question de l'utilisateur en vous basant STRICTEMENT sur le contexte fourni. "
             "Ne faites pas d'affirmations qui ne sont pas étayées par les sources fournies.\n\n"
             "Règles de rédaction :\n"
@@ -4823,7 +4823,7 @@ def _build_clusters_payload(scenario_id: str, docs: list, cc: dict, *,
                         f"Scénario : {title or scenario_id}.\n"
                         f"Articles représentatifs du cluster :\n{llm_ctx}\n\n"
                         f"Rédigez un résumé concis (3-4 phrases, max 120 mots) {lang_word} : "
-                        f"thématique commune, évidences clés, valeur opérationnelle pour les urgences préhospitalières."
+                        f"thématique commune, évidences clés, valeur opérationnelle pour la pratique clinique et la santé publique."
                     ) + _llm_lang_directive(lang)}],
                     max_tokens=200, temperature=0.3,
                 )
@@ -5142,7 +5142,7 @@ def extract_pico_batch(
     errors = 0
 
     system_prompt = (
-        "You are a systematic review expert in emergency medicine. "
+        "You are a systematic review expert. "
         "Extract PICO elements and return ONLY valid JSON:\n"
         '{"P":"Population","I":"Intervention","C":"Comparator or Not specified",'
         '"O":"Outcome(s)","study_design":"RCT|Cohort|Systematic review|etc",'
@@ -5954,7 +5954,7 @@ async def ask_stream(payload: dict[str, Any]) -> StreamingResponse:
 
     context_text = "\n\n---\n\n".join(context_chunks[:top_k]) if context_chunks else "Aucun contexte disponible."
 
-    system_prompt = """Tu es un assistant expert en médecine d'urgence et en revue systématique de la littérature scientifique.
+    system_prompt = """Tu es un assistant expert en sciences de la santé et en revue systématique de la littérature scientifique.
 Tu réponds de manière précise, factuelle et synthétique.
 Base-toi exclusivement sur le contexte fourni. Si l'information n'est pas dans le contexte, dis-le clairement.
 Cite les articles pertinents par leur titre quand tu les mentionnes.""" + _llm_lang_directive(lang)
@@ -9661,7 +9661,7 @@ def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict
                 from datetime import datetime, timezone
                 _client = _OAI(api_key=openai_key, timeout=90.0)
                 system_prompt_pico = (
-                    "You are a systematic review expert in emergency medicine. "
+                    "You are a systematic review expert. "
                     "Extract PICO elements and return ONLY valid JSON:\n"
                     '{"P":"Population","I":"Intervention","C":"Comparator or Not specified",'
                     '"O":"Outcome(s)","study_design":"RCT|Cohort|Systematic review|etc",'
@@ -11842,7 +11842,7 @@ def _generate_evidence_brief_llm(scenario_id: str, force: bool = False, lang: st
         _grade_ceiling = ("Faible (corpus observationnel : GRADE plafonne la certitude à faible, "
                           "sauf upgrade explicitement justifié)")
 
-    system_prompt = """Tu es un expert en médecine d'urgence et en revue systématique de la littérature scientifique.
+    system_prompt = """Tu es un expert en sciences de la santé et en revue systématique de la littérature scientifique.
 Tu génères des Evidence Briefs complets, rigoureux et structurés.
 Tu dois produire un JSON structuré avec tous les champs demandés.
 Sois précis, factuel, et base-toi exclusivement sur les articles fournis.
@@ -12350,7 +12350,7 @@ def _generate_variables_from_pico(scenario_id: str, persist: str = "active", lan
 
     context_str = _json.dumps(pico_context, ensure_ascii=False, indent=2)
 
-    system_prompt = """Tu es un expert en modélisation prédictive en médecine d'urgence.
+    system_prompt = """Tu es un expert en modélisation prédictive appliquée à la santé.
 A partir d'une revue systématique de la littérature, tu identifies les variables clés,
 l'outcome principal, et le meilleur algorithme pour un modèle prédictif.
 Tu génères un JSON structuré. Ne pas utiliser de tiret em (—).""" + _llm_lang_directive(lang)
@@ -13000,7 +13000,7 @@ def _generate_recommended_actions(scenario_id: str, lang: str | None = None) -> 
             "key_finding": pj.get("key_finding", pj.get("conclusion", "")),
         })
 
-    system = ("Tu es un expert en aide à la décision en santé/médecine d'urgence. "
+    system = ("Tu es un expert en aide à la décision en santé et en santé publique. "
               "À partir d'une revue de littérature, tu proposes des ACTIONS opérationnelles "
               "concrètes, spécifiques et actionnables (pas de généralités). Pas de tiret em (—)."
               ) + _llm_lang_directive(lang)
@@ -14798,7 +14798,7 @@ async def ask_stream_filtered(payload: dict[str, Any]):
 
     context_text = "\n\n---\n\n".join(context_chunks[:top_k]) if context_chunks else "Aucun contexte disponible."
 
-    system_prompt = """Tu es un assistant expert en médecine d'urgence et en revue systématique de la littérature scientifique.
+    system_prompt = """Tu es un assistant expert en sciences de la santé et en revue systématique de la littérature scientifique.
 Tu réponds de manière précise, factuelle et structurée.
 Base-toi exclusivement sur le contexte fourni. Si l'information n'est pas dans le contexte, dis-le clairement.
 Cite les articles pertinents par leur titre quand tu les mentionnes.

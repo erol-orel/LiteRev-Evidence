@@ -288,7 +288,7 @@ export async function fetchDocumentDetail(
   };
 }
 
-// --- EMS / STATS TYPES ---
+// --- SIGNALS / STATS TYPES ---
 
 export interface GesicaSignals {
   demandSignals: string[];
