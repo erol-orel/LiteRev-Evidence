@@ -385,7 +385,8 @@ _STUDY_DESIGN_CASE = """CASE
         WHEN d = '' THEN 'Non spécifié'
         WHEN d LIKE '%systematic review%' OR d LIKE '%meta-analysis%' OR d LIKE '%meta analysis%' OR d LIKE '%scoping review%' OR d LIKE '%umbrella review%' THEN 'Revue systématique / Méta-analyse'
         WHEN d LIKE '%non-randomi%' OR d LIKE '%non randomi%' OR d LIKE '%quasi-experimental%' OR d LIKE '%quasi experimental%' OR d LIKE '%interrupted time series%' OR d LIKE '%controlled before%' THEN 'Essai non randomisé / Quasi-expérimental'
-        WHEN d LIKE '%randomi%' OR d LIKE 'rct%' OR d LIKE '%controlled trial%' THEN 'Essai contrôlé randomisé (RCT)'
+        WHEN d LIKE '%randomi%' OR d LIKE 'rct%' THEN 'Essai contrôlé randomisé (RCT)'
+        WHEN d LIKE '%controlled trial%' OR d LIKE '%clinical trial%' THEN 'Essai non randomisé / Quasi-expérimental'
         WHEN d LIKE '%case-control%' OR d LIKE '%case control%' THEN 'Cas-témoins'
         WHEN d LIKE '%cross-sectional%' OR d LIKE '%cross sectional%' THEN 'Transversale'
         WHEN d LIKE '%case report%' OR d LIKE '%case series%' THEN 'Cas clinique / Série de cas'
@@ -2854,11 +2855,12 @@ def get_corpus_stats() -> dict[str, Any]:
         GROUP BY source
     """)
     sql_years = text("""
-        SELECT 
+        SELECT
             year,
             COUNT(*) as count
         FROM literature_document
         WHERE year IS NOT NULL
+          AND year BETWEEN 1800 AND EXTRACT(YEAR FROM CURRENT_DATE)::int  -- pas d'années futures/aberrantes
         GROUP BY year
         ORDER BY year DESC
     """)
@@ -2883,40 +2885,81 @@ def get_corpus_stats() -> dict[str, Any]:
         "by_year": years,
     }
 
-@app.get("/gesica/stats")
-def get_gesica_stats() -> dict[str, Any]:
-    """Statistiques globales du corpus LiteRev."""
-    sql_docs = text("""
-        SELECT id, title, abstract
-        FROM literature_document
-        WHERE project_context = 'literev'
-    """)
-    with engine.connect() as conn:
-        docs = conn.execute(sql_docs).mappings().all()
+# Cache du dashboard /gesica/stats. Le calcul balaie TOUT le corpus literev puis
+# applique _extract_gesica_evidence (regex) PAR document — O(N) Python, > 45 s sur
+# un corpus de dizaines de milliers de docs (→ la requête HTTP dépassait le délai).
+# On met en cache avec TTL et on rafraîchit EN ARRIÈRE-PLAN : la requête ne bloque
+# jamais (elle sert le cache, éventuellement périmé, ou une réponse froide légère).
+_GESICA_STATS_CACHE: dict[str, Any] = {"ts": 0.0, "data": None, "computing": False}
+_GESICA_STATS_TTL = 900  # 15 min
 
-    total_gesica = len(docs)
+
+def _compute_gesica_stats() -> dict[str, Any]:
+    """Calcul LOURD des stats globales (balayage complet + regex par document)."""
+    with engine.connect() as conn:
+        docs = conn.execute(text(
+            "SELECT id, title, abstract FROM literature_document WHERE project_context = 'literev'"
+        )).mappings().all()
     horizons_count: dict[str, int] = {}
     uncertainty_count: dict[str, int] = {}
     evidence_strengths = {"weak": 0, "moderate": 0, "strong": 0}
-
     for doc in docs:
         signals = _extract_gesica_evidence(doc["title"], doc["abstract"], [])
-        
         strength = signals["evidence_strength"]
         evidence_strengths[strength] = evidence_strengths.get(strength, 0) + 1
-        
         for m in signals["uncertainty_handling"]:
             uncertainty_count[m] = uncertainty_count.get(m, 0) + 1
-            
         if signals["forecast_horizon"]:
             h = signals["forecast_horizon"]
             horizons_count[h] = horizons_count.get(h, 0) + 1
-
     return {
-        "total_documents": total_gesica,
+        "total_documents": len(docs),
         "evidence_strength_distribution": evidence_strengths,
         "uncertainty_methods": dict(sorted(uncertainty_count.items(), key=lambda x: x[1], reverse=True)),
         "forecast_horizons": dict(sorted(horizons_count.items(), key=lambda x: x[1], reverse=True)),
+    }
+
+
+@app.get("/gesica/stats")
+def get_gesica_stats() -> dict[str, Any]:
+    """Statistiques globales du corpus LiteRev (cache TTL + rafraîchissement de fond)."""
+    import time as _t
+    import threading as _th
+    now = _t.time()
+    cached = _GESICA_STATS_CACHE["data"]
+    if cached is not None and (now - _GESICA_STATS_CACHE["ts"]) < _GESICA_STATS_TTL:
+        return cached
+    # Périmé ou froid → déclenche UN rafraîchissement de fond (pas de calcul concurrent).
+    if not _GESICA_STATS_CACHE["computing"]:
+        _GESICA_STATS_CACHE["computing"] = True
+
+        def _bg():
+            try:
+                r = _compute_gesica_stats()
+                _GESICA_STATS_CACHE["data"] = r
+                _GESICA_STATS_CACHE["ts"] = _t.time()
+            except Exception as _e:
+                logger.warning(f"gesica/stats refresh: {_e}")
+            finally:
+                _GESICA_STATS_CACHE["computing"] = False
+
+        _th.Thread(target=_bg, daemon=True).start()
+    if cached is not None:
+        return cached  # sert le cache périmé pendant le rafraîchissement
+    # Démarrage à froid : réponse légère immédiate (COUNT rapide) ; distributions à venir.
+    try:
+        with engine.connect() as conn:
+            total = conn.execute(text(
+                "SELECT COUNT(*) FROM literature_document WHERE project_context = 'literev'"
+            )).scalar() or 0
+    except Exception:
+        total = 0
+    return {
+        "total_documents": int(total),
+        "evidence_strength_distribution": {"weak": 0, "moderate": 0, "strong": 0},
+        "uncertainty_methods": {},
+        "forecast_horizons": {},
+        "computing": True,
     }
 
 @app.get("/geoai4ei/stats")
@@ -3990,6 +4033,7 @@ def get_corpus_stats_by_year() -> dict[str, Any]:
             FROM literature_document d
             JOIN article_scenarios ars ON ars.document_id = d.id
             WHERE d.year >= 1800 AND d.year <= EXTRACT(YEAR FROM CURRENT_DATE)::int
+              AND (d.is_duplicate IS NULL OR d.is_duplicate = FALSE)
             GROUP BY d.year, ars.scenario_id
             ORDER BY d.year ASC
         """)).mappings().all()
@@ -3999,6 +4043,7 @@ def get_corpus_stats_by_year() -> dict[str, Any]:
             SELECT ars.scenario_id, d.source, COUNT(*) as count
             FROM literature_document d
             JOIN article_scenarios ars ON ars.document_id = d.id
+            WHERE (d.is_duplicate IS NULL OR d.is_duplicate = FALSE)
             GROUP BY ars.scenario_id, d.source
             ORDER BY ars.scenario_id, count DESC
         """)).mappings().all()
@@ -10387,9 +10432,12 @@ def get_user_scenario_screening_progress(scenario_id: str) -> dict[str, Any]:
             SELECT
                 COUNT(*) AS total,
                 SUM(CASE WHEN d.is_duplicate = TRUE THEN 1 ELSE 0 END) AS duplicates,
-                SUM(CASE WHEN COALESCE(ars.screening_status, d.screening_status) = 'included' THEN 1 ELSE 0 END) AS included,
-                SUM(CASE WHEN COALESCE(ars.screening_status, d.screening_status) = 'excluded' THEN 1 ELSE 0 END) AS excluded,
-                SUM(CASE WHEN COALESCE(ars.screening_status, d.screening_status) IS NULL OR COALESCE(ars.screening_status, d.screening_status) = 'pending' THEN 1 ELSE 0 END) AS pending
+                -- included/excluded/pending comptés sur le sous-ensemble NON dupliqué
+                -- (même base que `unique = total - duplicates`), sinon un doublon
+                -- marqué inclus/exclu faisait dépasser 100 % / rendait `pending` négatif.
+                SUM(CASE WHEN (d.is_duplicate IS NULL OR d.is_duplicate = FALSE) AND COALESCE(ars.screening_status, d.screening_status) = 'included' THEN 1 ELSE 0 END) AS included,
+                SUM(CASE WHEN (d.is_duplicate IS NULL OR d.is_duplicate = FALSE) AND COALESCE(ars.screening_status, d.screening_status) = 'excluded' THEN 1 ELSE 0 END) AS excluded,
+                SUM(CASE WHEN (d.is_duplicate IS NULL OR d.is_duplicate = FALSE) AND (COALESCE(ars.screening_status, d.screening_status) IS NULL OR COALESCE(ars.screening_status, d.screening_status) = 'pending') THEN 1 ELSE 0 END) AS pending
             FROM article_scenarios ars
             JOIN literature_document d ON d.id = ars.document_id
             WHERE ars.scenario_id = :sid
@@ -10432,6 +10480,7 @@ def get_user_scenario_pico_stats(scenario_id: str) -> dict[str, Any]:
             FROM article_scenarios ars
             JOIN literature_document d ON d.id = ars.document_id
             WHERE ars.scenario_id = :sid
+              AND (d.is_duplicate IS NULL OR d.is_duplicate = FALSE)
         """), {"sid": scenario_id}).mappings().fetchone()
         designs = conn.execute(text("""
             SELECT
@@ -10440,6 +10489,7 @@ def get_user_scenario_pico_stats(scenario_id: str) -> dict[str, Any]:
             FROM article_scenarios ars
             JOIN literature_document d ON d.id = ars.document_id
             WHERE ars.scenario_id = :sid AND d.pico_json IS NOT NULL
+              AND (d.is_duplicate IS NULL OR d.is_duplicate = FALSE)
             GROUP BY 1 ORDER BY 2 DESC
         """), {"sid": scenario_id}).mappings().fetchall()
     total = counts["total"] if counts else 0
@@ -10496,24 +10546,28 @@ def get_user_scenario_prisma(
                 SUM(CASE WHEN d.source = 'openaire' THEN 1 ELSE 0 END) AS openaire,
                 SUM(CASE WHEN d.source = 'db_cache' THEN 1 ELSE 0 END) AS db_cache,
                 SUM(CASE WHEN d.is_duplicate = TRUE THEN 1 ELSE 0 END) AS duplicates,
+                -- Étapes POST-identification (screening/éligibilité/preuves) comptées
+                -- sur le sous-ensemble NON dupliqué — cohérent avec toutes les autres
+                -- surfaces "pertinentes" (evidence-brief, RAG, cartes). L'identification
+                -- ci-dessus (total/by_source/duplicates) reste sur le corpus ENTIER.
                 -- semantic split at effective threshold
-                SUM(CASE WHEN COALESCE(ars.similarity_score, 0) >= :thr THEN 1 ELSE 0 END) AS above_threshold,
-                SUM(CASE WHEN COALESCE(ars.similarity_score, 0) <  :thr THEN 1 ELSE 0 END) AS below_threshold,
+                SUM(CASE WHEN (d.is_duplicate IS NULL OR d.is_duplicate = FALSE) AND COALESCE(ars.similarity_score, 0) >= :thr THEN 1 ELSE 0 END) AS above_threshold,
+                SUM(CASE WHEN (d.is_duplicate IS NULL OR d.is_duplicate = FALSE) AND COALESCE(ars.similarity_score, 0) <  :thr THEN 1 ELSE 0 END) AS below_threshold,
                 -- manual curation
-                SUM(CASE WHEN COALESCE(ars.screening_status, d.screening_status) = 'included' THEN 1 ELSE 0 END) AS manually_included,
-                SUM(CASE WHEN COALESCE(ars.screening_status, d.screening_status) = 'excluded' THEN 1 ELSE 0 END) AS manually_excluded,
-                SUM(CASE WHEN COALESCE(ars.screening_status, d.screening_status) IS NULL OR COALESCE(ars.screening_status, d.screening_status) = 'pending'
+                SUM(CASE WHEN (d.is_duplicate IS NULL OR d.is_duplicate = FALSE) AND COALESCE(ars.screening_status, d.screening_status) = 'included' THEN 1 ELSE 0 END) AS manually_included,
+                SUM(CASE WHEN (d.is_duplicate IS NULL OR d.is_duplicate = FALSE) AND COALESCE(ars.screening_status, d.screening_status) = 'excluded' THEN 1 ELSE 0 END) AS manually_excluded,
+                SUM(CASE WHEN (d.is_duplicate IS NULL OR d.is_duplicate = FALSE) AND (COALESCE(ars.screening_status, d.screening_status) IS NULL OR COALESCE(ars.screening_status, d.screening_status) = 'pending')
                          THEN 1 ELSE 0 END) AS pending,
                 -- manually included but below threshold (override)
-                SUM(CASE WHEN COALESCE(ars.screening_status, d.screening_status) = 'included'
+                SUM(CASE WHEN (d.is_duplicate IS NULL OR d.is_duplicate = FALSE) AND COALESCE(ars.screening_status, d.screening_status) = 'included'
                            AND COALESCE(ars.similarity_score, 0) < :thr THEN 1 ELSE 0 END) AS manually_rescued,
                 -- manually excluded above threshold (veto)
-                SUM(CASE WHEN COALESCE(ars.screening_status, d.screening_status) = 'excluded'
+                SUM(CASE WHEN (d.is_duplicate IS NULL OR d.is_duplicate = FALSE) AND COALESCE(ars.screening_status, d.screening_status) = 'excluded'
                            AND COALESCE(ars.similarity_score, 0) >= :thr THEN 1 ELSE 0 END) AS manually_vetoed,
                 -- full text — RESTREINT à l'ensemble de preuves (≥ seuil OU inclus
                 -- manuellement, hors exclus), pas au corpus entier : sinon le "X of Y"
                 -- du PRISMA pouvait dépasser Y (le fameux "5 of 4").
-                SUM(CASE WHEN EXISTS (
+                SUM(CASE WHEN (d.is_duplicate IS NULL OR d.is_duplicate = FALSE) AND EXISTS (
                     SELECT 1 FROM document_chunk c
                     WHERE c.document_id = d.id AND c.chunk_type = 'fulltext_section'
                 ) AND COALESCE(ars.screening_status, d.screening_status) IS DISTINCT FROM 'excluded'
@@ -10531,6 +10585,7 @@ def get_user_scenario_prisma(
 
     total           = int(stats["total"] or 0)
     duplicates      = int(stats["duplicates"] or 0)
+    unique          = max(0, total - duplicates)   # après retrait des doublons
     above           = int(stats["above_threshold"] or 0)
     below           = int(stats["below_threshold"] or 0)
     man_included    = int(stats["manually_included"] or 0)
@@ -10577,9 +10632,12 @@ def get_user_scenario_prisma(
             "method": "cosine similarity (text-embedding-3-small)",
         },
         "full_text": {
+            # Numérateur ET dénominateur sur le MÊME ensemble (les preuves) : with_fulltext
+            # est déjà restreint à l'ensemble de preuves, donc le % se rapporte à evidence_total
+            # (auparavant : numérateur sous-ensemble / dénominateur corpus entier → trompeur).
             "with_fulltext": with_fulltext,
-            "without_fulltext": total - with_fulltext,
-            "pct": round(with_fulltext / total * 100, 1) if total > 0 else 0.0,
+            "without_fulltext": max(0, evidence_total - with_fulltext),
+            "pct": round(with_fulltext / evidence_total * 100, 1) if evidence_total > 0 else 0.0,
             "note": "Texte intégral via PMC / EuropePMC / Unpaywall / Semantic Scholar",
         },
         "manual_curation": {
@@ -10599,15 +10657,18 @@ def get_user_scenario_prisma(
         },
         # Keep legacy fields for backward compatibility
         "screening": {
-            "records_screened": total,
+            "records_screened": unique,   # après retrait des doublons (≠ total identifié)
             "records_excluded_title_abstract": man_excluded,
             "records_included_screening": man_included,
             "records_awaiting_screening": pending,
         },
         "eligibility": {
-            "fulltext_assessed": above,
+            # Éligibilité = ensemble de preuves évalué en texte intégral. `above` seul
+            # (≥ seuil) excluait les rescapés manuels sous le seuil et pouvait rendre
+            # `not_retrieved` négatif (with_fulltext > above). On borne sur evidence_total.
+            "fulltext_assessed": evidence_total,
             "fulltext_retrieved": with_fulltext,
-            "fulltext_not_retrieved": above - with_fulltext,
+            "fulltext_not_retrieved": max(0, evidence_total - with_fulltext),
             "fulltext_excluded": 0,
         },
         "included": {
@@ -10638,13 +10699,16 @@ def _build_evidence_brief(scenario_id: str) -> dict[str, Any]:
         # le corpus complet (pour le contexte).
         corpus_stats = conn.execute(text("""
             SELECT
-                COUNT(*) AS total,
+                -- total/with_pico/with_fulltext/included/excluded/pending comptés hors
+                -- doublons (comme la sortie PDF « (uniques) » et la carte scénario) →
+                -- headline cohérent entre le brief à l'écran, le PDF et le tableau de bord.
+                COUNT(*) FILTER (WHERE d.is_duplicate IS NOT TRUE) AS total,
                 COUNT(*) FILTER (WHERE d.is_duplicate IS TRUE) AS duplicates,
-                COUNT(*) FILTER (WHERE d.pico_json IS NOT NULL) AS with_pico,
-                COUNT(*) FILTER (WHERE COALESCE(ars.screening_status, d.screening_status) = 'included') AS included,
-                COUNT(*) FILTER (WHERE COALESCE(ars.screening_status, d.screening_status) = 'excluded') AS excluded,
-                COUNT(*) FILTER (WHERE COALESCE(ars.screening_status, d.screening_status) = 'pending' OR COALESCE(ars.screening_status, d.screening_status) IS NULL) AS pending,
-                COUNT(*) FILTER (WHERE EXISTS (
+                COUNT(*) FILTER (WHERE d.is_duplicate IS NOT TRUE AND d.pico_json IS NOT NULL) AS with_pico,
+                COUNT(*) FILTER (WHERE d.is_duplicate IS NOT TRUE AND COALESCE(ars.screening_status, d.screening_status) = 'included') AS included,
+                COUNT(*) FILTER (WHERE d.is_duplicate IS NOT TRUE AND COALESCE(ars.screening_status, d.screening_status) = 'excluded') AS excluded,
+                COUNT(*) FILTER (WHERE d.is_duplicate IS NOT TRUE AND (COALESCE(ars.screening_status, d.screening_status) = 'pending' OR COALESCE(ars.screening_status, d.screening_status) IS NULL)) AS pending,
+                COUNT(*) FILTER (WHERE d.is_duplicate IS NOT TRUE AND EXISTS (
                     SELECT 1 FROM document_chunk c
                     WHERE c.document_id = d.id AND c.chunk_type = 'fulltext_section'
                 )) AS with_fulltext,
