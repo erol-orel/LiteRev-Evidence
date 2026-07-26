@@ -1633,9 +1633,17 @@ def _boolean_ast_to_sql(ast, params: dict, idx: list | None = None) -> str | Non
         key = f"bq_{idx[0]}"
         idx[0] += 1
         params[key] = f"%{ast[1]}%"
+        # Appartenance PAR DOCUMENT (pas par chunk) : un terme correspond si le
+        # titre, le résumé OU N'IMPORTE QUEL chunk du document le contient (EXISTS
+        # corrélé sur d.id). Indispensable pour NOT : compiler `NOT terme` en
+        # `(NOT (… OR c.content LIKE …))` évalué PAR LIGNE de chunk laissait
+        # entrer un article exclu dès qu'un AUTRE de ses chunks ne contenait pas le
+        # terme (SELECT DISTINCT d.id) — fuite d'articles exclus dans le corpus.
+        # Corrige aussi le AND inter-chunks (deux termes dans deux chunks distincts).
         return (f"(LOWER(COALESCE(d.title,'')) LIKE :{key}"
                 f" OR LOWER(COALESCE(d.abstract,'')) LIKE :{key}"
-                f" OR LOWER(COALESCE(c.content,'')) LIKE :{key})")
+                f" OR EXISTS (SELECT 1 FROM document_chunk c2"
+                f" WHERE c2.document_id = d.id AND LOWER(COALESCE(c2.content,'')) LIKE :{key}))")
     if typ == "not":
         inner = _boolean_ast_to_sql(ast[1], params, idx)
         return f"(NOT {inner})" if inner else None
@@ -1649,8 +1657,13 @@ def _boolean_ast_to_sql(ast, params: dict, idx: list | None = None) -> str | Non
 
 
 def _build_boolean_match_sql_from_query(query: str, params: dict) -> str:
-    """Requête booléenne → fragment SQL de correspondance (groupement RESPECTÉ)."""
-    return _boolean_ast_to_sql(_parse_boolean_ast(_tokenize_boolean(query)), params) or "TRUE"
+    """Requête booléenne → fragment SQL de correspondance (groupement RESPECTÉ).
+
+    Un AST VIDE (requête sans terme : ponctuation seule, opérateurs/tags de champ
+    seuls, ou repli dégradé) renvoie 'FALSE' — AUCUNE correspondance — et NON 'TRUE'.
+    'TRUE' faisait exploser le corpus à la base ENTIÈRE (appartenance = tous les
+    documents) sur une requête accidentellement sans terme."""
+    return _boolean_ast_to_sql(_parse_boolean_ast(_tokenize_boolean(query)), params) or "FALSE"
 
 
 def _boolean_to_arxiv(ast) -> str | None:
@@ -1952,6 +1965,8 @@ def _ncbi_get(url: str, params: dict, timeout: int = 12):
     # Avec une clé API, NCBI autorise 10 req/s (vs 3 sans) : on resserre l'espacement
     # pour réduire la sérialisation du verrou global sur le trio PubMed/PROSPERO/Cochrane.
     min_interval = 0.11 if key else _NCBI_MIN_INTERVAL
+    r = None
+    last_exc: Exception | None = None
     for attempt in range(3):
         with _NCBI_LOCK:
             wait = min_interval - (_time.time() - _NCBI_LAST[0])
@@ -1959,12 +1974,20 @@ def _ncbi_get(url: str, params: dict, timeout: int = 12):
                 _time.sleep(wait)
             try:
                 r = _req.get(url, params=params, timeout=timeout)
+            except Exception as _e:  # timeout / ConnectionError : transitoire → retry (cf. docstring)
+                last_exc = _e
+                r = None
             finally:
                 _NCBI_LAST[0] = _time.time()
+        if r is None:
+            _time.sleep(0.6 * (attempt + 1))
+            continue
         if r.status_code == 429:
             _time.sleep(0.6 * (attempt + 1))
             continue
         return r
+    if r is None:
+        raise last_exc if last_exc else RuntimeError("NCBI request a échoué (3 tentatives)")
     return r
 
 
@@ -2310,11 +2333,21 @@ def _federated_live_search(
     if keys:
         try:
             with engine.connect() as conn:
+                # Compare les clés (DOI + external_id des résultats) à la fois à la
+                # colonne external_id ET à la colonne doi stockées : un article déjà
+                # ingéré depuis PubMed (external_id='pmid:…', doi renseigné) doit être
+                # reconnu par le DOI d'un résultat Crossref/OpenAlex (sinon new_count
+                # surestimé → ré-ingestion redondante).
                 rows_db = conn.execute(text(
-                    "SELECT LOWER(external_id) FROM literature_document "
-                    "WHERE LOWER(external_id) = ANY(:keys) AND project_context = 'literev'"
+                    "SELECT LOWER(external_id), LOWER(doi) FROM literature_document "
+                    "WHERE (LOWER(external_id) = ANY(:keys) OR LOWER(doi) = ANY(:keys)) "
+                    "AND project_context = 'literev'"
                 ), {"keys": list(keys)}).fetchall()
-                in_db_keys = {r[0] for r in rows_db}
+                for _r in rows_db:
+                    if _r[0]:
+                        in_db_keys.add(_r[0])
+                    if _r[1]:
+                        in_db_keys.add(_r[1])
         except Exception as _dbe:
             logger.warning(f"federated DB check error: {_dbe}")
     for r in all_results:
@@ -7655,7 +7688,7 @@ def _parse_openaire_graph(payload: dict) -> list[dict]:
         elif isinstance(_desc, dict):
             _desc = _desc.get("value")
         abstract = (_desc or "").strip() or None
-        _pd = str(r.get("publicationDate") or r.get("publiacationYear") or "")
+        _pd = str(r.get("publicationDate") or r.get("publicationYear") or "")
         year = int(_pd[:4]) if _pd[:4].isdigit() else None
         doi = None
         for p in (r.get("pids") or r.get("pid") or []):
@@ -8062,6 +8095,13 @@ def _run_user_scenario_populate(
             effective_max = min(max_results, total_found)
             n_batches = math.ceil(effective_max / BATCH_SIZE) if effective_max > 0 else 0
             for batch_idx in range(n_batches):
+                # Budget fédération dépassé → on ARRÊTE la pagination PubMed (comme
+                # toutes les autres sources). Sans ce garde, PubMed continuait à
+                # ingérer APRÈS la reconstruction finale du corpus (liens
+                # boolean_native écrits trop tard) → membres non scorés + divergence
+                # de article_count.
+                if _time.time() >= _fed_deadline[0]:
+                    break
                 retstart = batch_idx * BATCH_SIZE
                 retmax_batch = min(BATCH_SIZE, effective_max - retstart)
                 if retmax_batch <= 0 or retstart >= total_found:

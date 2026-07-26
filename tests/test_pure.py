@@ -628,7 +628,17 @@ def test_boolean_parser_and_or_not_and_fallback():
     assert _ast_of('cancer OR tumour') == ("or", [("term", "cancer"), ("term", "tumour")])
     assert _ast_of('cancer NOT benign') == ("and", [("term", "cancer"), ("not", ("term", "benign"))])
     assert _ast_of('influenza surveillance') == ("and", [("term", "influenza"), ("term", "surveillance")])
-    assert main._build_boolean_match_sql_from_query("", {}) == "TRUE"   # empty → matches all (filtered elsewhere)
+    # Empty/term-less boolean → FALSE (matches NOTHING). Previously 'TRUE' (match
+    # all), which was NOT filtered elsewhere for corpus membership and blew the
+    # scenario corpus up to the entire database. See fix in _build_boolean_match_sql_from_query.
+    assert main._build_boolean_match_sql_from_query("", {}) == "FALSE"
+    # Term membership is PER DOCUMENT (correlated EXISTS over chunks), not per
+    # document_chunk row — otherwise `NOT` leaked excluded articles into the corpus
+    # (a doc kept if any OTHER chunk lacked the term). The compiled SQL must use the
+    # EXISTS subquery for the chunk part, and NOT for the exclusion.
+    _not_sql = main._build_boolean_match_sql_from_query("cancer NOT benign", {})
+    assert "EXISTS (SELECT 1 FROM document_chunk c2" in _not_sql
+    assert "(NOT " in _not_sql
 
 
 # ── _normalize_title (cross-source dedup key: DOI → title) ────────────────────
