@@ -368,8 +368,12 @@ def _strategy_is_degraded(strategy: object, query: str | None = None) -> bool:
     has_operators = any(op in general for op in (" AND ", " OR ", " NOT ", '"')) or "[" in general
     if not has_operators:
         return True
-    if query is not None and general.strip().lower() == query.strip().lower():
-        return True
+    # NB : on NE traite PLUS `general == query` comme dégradé. Si on atteint ici,
+    # `general` contient des opérateurs booléens ; un utilisateur qui saisit un
+    # booléen valide que le LLM préserve à l'identique produit légitimement
+    # general == query — le marquer dégradé forçait une régénération inutile et
+    # jetait les champs pubmed/synonyms fournis (une requête NL sans opérateur est
+    # déjà captée par le garde `not has_operators` ci-dessus).
     return False
 
 
@@ -5123,6 +5127,7 @@ def extract_pico_batch(
                 WHERE ld.project_context = 'literev'
                   AND (ld.pico_json IS NULL OR (ld.pico_json->>'pico_confidence')::float < 0.5)
                   AND COALESCE(asn.screening_status, ld.screening_status) IS DISTINCT FROM 'excluded'  -- porte de screening (C1)
+                  AND COALESCE(ld.pico_attempts, 0) < 3  -- borne les échecs déterministes (token-bleed)
                 ORDER BY ld.id
                 LIMIT :lim
             """), {"sid": scenario_id, "lim": limit}).mappings().fetchall()
@@ -5133,6 +5138,7 @@ def extract_pico_batch(
                 WHERE project_context = 'literev'
                   AND (pico_json IS NULL OR (pico_json->>'pico_confidence')::float < 0.5)
                   AND abstract IS NOT NULL AND length(abstract) > 50
+                  AND COALESCE(pico_attempts, 0) < 3  -- borne les échecs déterministes (token-bleed)
                 ORDER BY id
                 LIMIT :lim
             """), {"lim": limit}).mappings().fetchall()
@@ -5162,6 +5168,8 @@ def extract_pico_batch(
             if not abstract or len(abstract) < 50:
                 skipped += 1
                 continue
+            # Appel LLM isolé : une erreur d'API (quota/réseau) est TRANSITOIRE
+            # → on ne compte PAS de tentative (réessai quand l'API est saine).
             try:
                 response = _client.chat.completions.create(
                     model="gpt-4.1-mini",
@@ -5169,21 +5177,35 @@ def extract_pico_batch(
                         {"role": "system", "content": system_prompt},
                         {"role": "user", "content": f"Title: {title}\n\nAbstract: {abstract[:3000]}"},
                     ],
-                    temperature=0.1,
-                    max_tokens=400,
+                    temperature=0,
+                    seed=42,
+                    max_tokens=800,  # 400 tronquait le JSON des articles verbeux → JSON invalide
                     response_format={"type": "json_object"},
                 )
+            except Exception as e:
+                logger.warning(f"PICO batch API error article {article_id}: {e}")
+                errors += 1
+                continue  # transitoire — ne PAS consommer une tentative
+            # On a une RÉPONSE → on COMPTE la tentative quoi qu'il arrive (borne le
+            # token-bleed : une sortie déterministe malformée ne sera pas ré-extraite
+            # à l'infini). Remplissage tolérant des clés plutôt que rejet en boucle.
+            try:
                 pico = json.loads(response.choices[0].message.content)
-                required = {"P", "I", "C", "O", "study_design", "pico_confidence"}
-                if not required.issubset(pico.keys()):
-                    errors += 1
-                    continue
-                pico["pico_confidence"] = float(pico.get("pico_confidence", 0.5))
+                if not isinstance(pico, dict):
+                    raise ValueError("réponse PICO non-dict")
+                for _k in ("P", "I", "C", "O"):
+                    pico.setdefault(_k, "")
+                pico.setdefault("study_design", "non précisé")
+                try:
+                    pico["pico_confidence"] = float(pico.get("pico_confidence", 0.3))
+                except (TypeError, ValueError):
+                    pico["pico_confidence"] = 0.3
                 pico["pico_notes"] = pico.get("pico_notes", "")
                 with engine.begin() as conn:
                     conn.execute(text("""
                         UPDATE literature_document
-                        SET pico_json = CAST(:pico AS jsonb), pico_extracted_at = :ts
+                        SET pico_json = CAST(:pico AS jsonb), pico_extracted_at = :ts,
+                            pico_attempts = COALESCE(pico_attempts, 0) + 1
                         WHERE id = :article_id
                     """), {
                         "pico": json.dumps(pico),
@@ -5192,7 +5214,15 @@ def extract_pico_batch(
                     })
                 extracted += 1
             except Exception as e:
-                logger.warning(f"PICO batch error article {article_id}: {e}")
+                logger.warning(f"PICO batch parse error article {article_id}: {e}")
+                # Réponse reçue mais JSON invalide → COMPTE la tentative (borne le token-bleed).
+                try:
+                    with engine.begin() as conn:
+                        conn.execute(text(
+                            "UPDATE literature_document SET pico_attempts = COALESCE(pico_attempts, 0) + 1 WHERE id = :aid"
+                        ), {"aid": article_id})
+                except Exception:
+                    pass
                 errors += 1
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Erreur LLM batch: {str(e)}")
@@ -5880,7 +5910,13 @@ async def ask_stream(payload: dict[str, Any]) -> StreamingResponse:
     question = payload.get("question", "")
     project_context = payload.get("project_context", "literev")
     scenario_id = payload.get("scenario_id", None)
-    top_k = int(payload.get("top_k", 8))
+    # Public endpoint : borne top_k pour éviter un débordement de contexte (LIMIT
+    # géant → prompt hors-limite) ou un LIMIT négatif (crash Postgres). Plafond
+    # généreux (qualité préservée), plancher à 1.
+    try:
+        top_k = max(1, min(int(payload.get("top_k", 8)), 40))
+    except (TypeError, ValueError):
+        top_k = 8
     lang = payload.get("lang")
 
     if not question:
@@ -5972,6 +6008,14 @@ Réponds de manière structurée et cite les sources pertinentes du contexte."""
         sources_event = f"event: sources\ndata: {_json.dumps(sources)}\n\n"
         yield sources_event
 
+        # Échec d'embedding (panne/quota OpenAI) → NE PAS prétendre que le corpus est
+        # vide (réponse trompeuse). On signale une erreur transitoire honnête.
+        if emb_str is None:
+            err = ("Le service de recherche est momentanément indisponible "
+                   "(erreur d'embedding). Merci de réessayer dans un instant.")
+            yield f"data: {_json.dumps({'token': err})}\n\n"
+            yield "event: error\ndata: {\"error\": \"embedding_unavailable\"}\n\n"
+            return
         # Pas de contexte récupéré → ne PAS interroger le LLM (réponse non étayée).
         if not context_chunks:
             msg = ("Aucun passage pertinent n'a été trouvé dans le corpus pour cette "
@@ -9296,7 +9340,7 @@ def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict
                             """), {"did": doc_id}).mappings().fetchall()
                         for _bi in range(0, len(_new_chunks), 50):
                             _batch = _new_chunks[_bi:_bi+50]
-                            _texts = [r["content"][:8000] for r in _batch]
+                            _texts = [_truncate_to_tokens(r["content"]) for r in _batch]
                             _emb_resp = emb_client.embeddings.create(
                                 model="text-embedding-3-small", input=_texts)
                             for _k, _ed in enumerate(_emb_resp.data):
@@ -9563,7 +9607,7 @@ def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict
                 for _bi in range(0, _emb_total, _emb_batch_size):
                     _batch = _chunks_to_embed[_bi:_bi + _emb_batch_size]
                     try:
-                        _texts = [r["content"][:8000] for r in _batch]
+                        _texts = [_truncate_to_tokens(r["content"]) for r in _batch]
                         _emb_resp = _emb_client.embeddings.create(
                             model="text-embedding-3-small",
                             input=_texts
@@ -9677,6 +9721,7 @@ def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict
                           AND ld.project_context = 'literev'
                           AND (ld.pico_json IS NULL OR (ld.pico_json->>'pico_confidence')::float < 0.5)
                           AND ld.abstract IS NOT NULL AND length(ld.abstract) > 50
+                          AND COALESCE(ld.pico_attempts, 0) < 3  -- borne les échecs déterministes (token-bleed)
                         ORDER BY ld.id
                     """), {"sid": scenario_id}).mappings().fetchall()
 
@@ -9690,23 +9735,47 @@ def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict
                                 {"role": "system", "content": system_prompt_pico},
                                 {"role": "user", "content": f"Title: {row['title']}\n\nAbstract: {(row['abstract'] or '')[:3000]}"},
                             ],
-                            temperature=0.1,
-                            max_tokens=400,
+                            temperature=0,
+                            seed=42,
+                            max_tokens=800,  # 400 tronquait le JSON verbeux → JSON invalide
                             response_format={"type": "json_object"},
                         )
-                        pico = json.loads(response.choices[0].message.content)
-                        required = {"P", "I", "C", "O", "study_design", "pico_confidence"}
-                        if required.issubset(pico.keys()):
-                            pico["pico_confidence"] = float(pico.get("pico_confidence", 0.5))
-                            with engine.begin() as conn:
-                                conn.execute(text("""
-                                    UPDATE literature_document
-                                    SET pico_json = CAST(:pico AS jsonb), pico_extracted_at = :ts
-                                    WHERE id = :article_id
-                                """), {"pico": json.dumps(pico), "ts": datetime.now(timezone.utc), "article_id": row["id"]})
-                            pico_extracted += 1
                     except Exception as e:
-                        logger.warning(f"Pipeline PICO article {row['id']}: {e}")
+                        logger.warning(f"Pipeline PICO API article {row['id']}: {e}")
+                        pico_errors += 1
+                        _time.sleep(0.05)
+                        continue  # transitoire — ne PAS consommer une tentative
+                    # Réponse reçue → COMPTE la tentative (borne le token-bleed) ;
+                    # remplissage tolérant des clés plutôt que rejet en boucle.
+                    try:
+                        pico = json.loads(response.choices[0].message.content)
+                        if not isinstance(pico, dict):
+                            raise ValueError("réponse PICO non-dict")
+                        for _k in ("P", "I", "C", "O"):
+                            pico.setdefault(_k, "")
+                        pico.setdefault("study_design", "non précisé")
+                        try:
+                            pico["pico_confidence"] = float(pico.get("pico_confidence", 0.3))
+                        except (TypeError, ValueError):
+                            pico["pico_confidence"] = 0.3
+                        pico["pico_notes"] = pico.get("pico_notes", "")
+                        with engine.begin() as conn:
+                            conn.execute(text("""
+                                UPDATE literature_document
+                                SET pico_json = CAST(:pico AS jsonb), pico_extracted_at = :ts,
+                                    pico_attempts = COALESCE(pico_attempts, 0) + 1
+                                WHERE id = :article_id
+                            """), {"pico": json.dumps(pico), "ts": datetime.now(timezone.utc), "article_id": row["id"]})
+                        pico_extracted += 1
+                    except Exception as e:
+                        logger.warning(f"Pipeline PICO parse article {row['id']}: {e}")
+                        try:
+                            with engine.begin() as conn:
+                                conn.execute(text(
+                                    "UPDATE literature_document SET pico_attempts = COALESCE(pico_attempts, 0) + 1 WHERE id = :aid"
+                                ), {"aid": row["id"]})
+                        except Exception:
+                            pass
                         pico_errors += 1
                     _time.sleep(0.05)
                 # Total coverage from DB (includes previously extracted articles)
@@ -11117,16 +11186,111 @@ def screen_user_scenario_article(
 
 @app.post("/user-scenarios/{scenario_id}/articles/{article_id}/pico/extract")
 def extract_user_scenario_article_pico(scenario_id: str, article_id: int, _: None = Depends(require_api_key)) -> dict[str, Any]:
-    """Extraction PICO pour un article d'un scénario utilisateur (délègue à l'endpoint GESICA)."""
+    """Extraction PICO à la demande pour UN article d'un scénario utilisateur.
+
+    Implémentation réelle (les endpoints GESICA `.../pico/extract` délèguent ici).
+    Utilise le texte intégral si disponible (meilleure qualité), sinon le résumé ;
+    max_tokens=800 (400 tronquait le JSON verbeux) et remplissage tolérant des clés.
+    """
     _get_user_scenario_or_404(scenario_id)
-    return extract_article_pico(scenario_id, article_id)
+    openai_key = os.getenv("OPENAI_API_KEY")
+    if not openai_key:
+        raise HTTPException(status_code=503, detail="Clé OpenAI non configurée")
+    with engine.connect() as conn:
+        row = conn.execute(text("""
+            SELECT ld.id, ld.title, ld.abstract
+            FROM literature_document ld
+            JOIN article_scenarios asn ON asn.document_id = ld.id AND asn.scenario_id = :sid
+            WHERE ld.id = :aid
+            LIMIT 1
+        """), {"sid": scenario_id, "aid": article_id}).mappings().first()
+    if not row:
+        raise HTTPException(status_code=404, detail="Article non trouvé dans ce scénario")
+    title = row["title"] or ""
+    abstract = row["abstract"] or ""
+    body_text, body_label, pico_source = abstract[:3000], "Abstract", "abstract"
+    with engine.connect() as _ftc:
+        _ft = _ftc.execute(text("""
+            SELECT string_agg(content, chr(10) || chr(10) ORDER BY chunk_index) AS ft
+            FROM document_chunk
+            WHERE document_id = :id AND chunk_type = 'fulltext_section'
+        """), {"id": article_id}).scalar()
+    if _ft and len(_ft) > len(abstract):
+        body_text, body_label, pico_source = _ft[:14000], "Full text", "fulltext"
+    if not body_text or len(body_text.strip()) < 30:
+        raise HTTPException(status_code=422, detail="Article sans texte exploitable pour l'extraction PICO")
+    system_prompt = (
+        "You are a systematic review expert. "
+        "Extract PICO elements and return ONLY valid JSON:\n"
+        '{"P":"Population","I":"Intervention","C":"Comparator or Not specified",'
+        '"O":"Outcome(s)","study_design":"RCT|Cohort|Systematic review|etc",'
+        '"pico_confidence":0.0-1.0,"pico_notes":""}\n'
+        "Be concise (max 2 sentences per field). Return ONLY the JSON."
+    )
+    try:
+        from openai import OpenAI as _OAI
+        from datetime import datetime, timezone
+        _client = _OAI(api_key=openai_key, timeout=90.0)
+        resp = _client.chat.completions.create(
+            model="gpt-4.1-mini",
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": f"Title: {title}\n\n{body_label}: {body_text}"},
+            ],
+            temperature=0,
+            seed=42,
+            max_tokens=800,
+            response_format={"type": "json_object"},
+        )
+        pico = json.loads(resp.choices[0].message.content)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Échec de l'extraction PICO: {str(e)[:200]}")
+    if not isinstance(pico, dict):
+        raise HTTPException(status_code=502, detail="Réponse PICO invalide (JSON attendu)")
+    for _k in ("P", "I", "C", "O"):
+        pico.setdefault(_k, "")
+    pico.setdefault("study_design", "non précisé")
+    try:
+        pico["pico_confidence"] = float(pico.get("pico_confidence", 0.3))
+    except (TypeError, ValueError):
+        pico["pico_confidence"] = 0.3
+    pico["pico_notes"] = pico.get("pico_notes", "")
+    pico["pico_source"] = pico_source
+    with engine.begin() as conn:
+        conn.execute(text("""
+            UPDATE literature_document
+            SET pico_json = CAST(:pico AS jsonb),
+                pico_extracted_at = :ts,
+                pico_attempts = COALESCE(pico_attempts, 0) + 1
+            WHERE id = :aid
+        """), {"pico": json.dumps(pico), "ts": datetime.now(timezone.utc), "aid": article_id})
+    return {"article_id": article_id, "pico": pico, "extracted": True, "pico_source": pico_source}
 
 
 @app.get("/user-scenarios/{scenario_id}/articles/{article_id}/pico")
 def get_user_scenario_article_pico(scenario_id: str, article_id: int) -> dict[str, Any]:
-    """PICO d'un article dans un scénario utilisateur."""
+    """PICO d'un article dans un scénario utilisateur (lecture).
+
+    Implémentation réelle (les endpoints GESICA `.../pico` délèguent ici)."""
     _get_user_scenario_or_404(scenario_id)
-    return get_article_pico(scenario_id, article_id)
+    with engine.connect() as conn:
+        row = conn.execute(text("""
+            SELECT ld.id, ld.title, ld.pico_json, ld.pico_extracted_at
+            FROM literature_document ld
+            JOIN article_scenarios asn ON asn.document_id = ld.id AND asn.scenario_id = :sid
+            WHERE ld.id = :aid
+            LIMIT 1
+        """), {"sid": scenario_id, "aid": article_id}).mappings().first()
+    if not row:
+        raise HTTPException(status_code=404, detail="Article non trouvé dans ce scénario")
+    pico = row["pico_json"] if isinstance(row["pico_json"], dict) else None
+    return {
+        "article_id": article_id,
+        "title": row["title"],
+        "pico": pico,
+        "extracted": pico is not None,
+        "pico_extracted_at": row["pico_extracted_at"].isoformat() if row.get("pico_extracted_at") else None,
+    }
 
 
 @app.get("/user-scenarios/{scenario_id}/evidence-brief/pdf")
@@ -14677,7 +14841,11 @@ async def ask_stream_filtered(payload: dict[str, Any]):
 
     question = payload.get("question", "")
     scenario_id = payload.get("scenario_id", None)
-    top_k = int(payload.get("top_k", 12))
+    # Public endpoint : borne top_k (débordement de contexte / LIMIT négatif). Plafond généreux.
+    try:
+        top_k = max(1, min(int(payload.get("top_k", 12)), 40))
+    except (TypeError, ValueError):
+        top_k = 12
     project_context = payload.get("project_context", "literev")
     lang = payload.get("lang")
 
@@ -14824,6 +14992,14 @@ Réponds de manière structurée et cite les sources pertinentes du contexte."""
         sources_event = f"event: sources\ndata: {_json2.dumps(sources)}\n\n"
         yield sources_event
 
+        # Échec d'embedding (panne/quota OpenAI) → erreur honnête, ne PAS prétendre
+        # que rien n'est pertinent.
+        if emb_str is None:
+            err = ("Le service de recherche est momentanément indisponible "
+                   "(erreur d'embedding). Merci de réessayer dans un instant.")
+            yield f"data: {_json2.dumps({'token': err})}\n\n"
+            yield "event: error\ndata: {\"error\": \"embedding_unavailable\"}\n\n"
+            return
         # Pas de contexte pertinent → ne pas générer de réponse non étayée.
         if not context_chunks:
             msg = ("Aucun passage pertinent (au-dessus du seuil) n'a été trouvé pour "
