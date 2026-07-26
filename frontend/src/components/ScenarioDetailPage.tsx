@@ -791,6 +791,7 @@ function VariablesSection({ detail, scenarioId, onGoToModel }: { detail: Scenari
   React.useEffect(() => {
     if (!llmVars || llmVars.status !== 'generating') return;
     setLlmGenStatus(t("scenarioDetail.variables.genInProgress"));
+    if (llmPollRef.current) clearInterval(llmPollRef.current);   // pas d'orphelin
     llmPollRef.current = setInterval(() => {
       getVariablesGenerationStatus(scenarioId).then(s => {
         if (s.status === 'done') {
@@ -802,6 +803,12 @@ function VariablesSection({ detail, scenarioId, onGoToModel }: { detail: Scenari
           setLlmGenStatus(null);
           setLlmError(s.error ?? t("scenarioDetail.variables.genError"));
         }
+      }).catch(() => {
+        // Erreur transitoire (réseau/500) : SANS ce catch, l'intervalle n'était
+        // jamais nettoyé (rejet non géré) → spinner "génération" bloqué à vie.
+        if (llmPollRef.current) clearInterval(llmPollRef.current);
+        setLlmGenStatus(null);
+        setLlmError(t("scenarioDetail.variables.genError"));
       });
     }, 5000);
     return () => { if (llmPollRef.current) clearInterval(llmPollRef.current); };
@@ -827,6 +834,13 @@ function VariablesSection({ detail, scenarioId, onGoToModel }: { detail: Scenari
             setLlmGenerating(false);
             setLlmError(s.error ?? t("scenarioDetail.variables.genError"));
           }
+        }).catch(() => {
+          // Erreur transitoire : nettoyer l'intervalle + sortir de l'état "génération"
+          // (sinon rejet non géré + spinner bloqué à vie).
+          if (llmPollRef.current) clearInterval(llmPollRef.current);
+          setLlmGenStatus(null);
+          setLlmGenerating(false);
+          setLlmError(t("scenarioDetail.variables.genError"));
         });
       }, 5000);
     } catch (e: any) {
@@ -1271,12 +1285,13 @@ function CorpusSection({ scenarioId, threshold }: { scenarioId: string; detail: 
   // Recharge le corpus quand le seuil (curseur) change, avec un léger debounce.
   useEffect(() => {
     if (threshold == null) return;
-    const t = setTimeout(() => {
+    let cancelled = false;   // évite qu'une réponse lente d'un ancien seuil écrase un seuil plus récent
+    const tid = setTimeout(() => {
       fetchScenarioCorpus(scenarioId, { threshold })
-        .then(setData)
+        .then(d => { if (!cancelled) setData(d); })
         .catch(() => {});
     }, 250);
-    return () => clearTimeout(t);
+    return () => { cancelled = true; clearTimeout(tid); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [threshold]);
 
@@ -2096,6 +2111,11 @@ function RagSection({ scenarioId, detail }: { scenarioId: string; detail: Scenar
     return () => { stopped = true; stop(); };
   }, [scenarioId]);
 
+  // Abandonner un stream RAG en cours au démontage (navigation hors du scénario) :
+  // sinon le reader SSE continue de tourner et appelle setState sur un composant
+  // démonté (fuite de connexion + avertissement React).
+  useEffect(() => () => { cancelRef.current?.(); }, []);
+
   const ask = (qText: string) => {
     if (!qText.trim() || streaming) return;
     // Cancel previous
@@ -2151,8 +2171,8 @@ function RagSection({ scenarioId, detail }: { scenarioId: string; detail: Scenar
         const chunkless = embeddingStatus.chunkless ?? 0;
         const pendingChunks = embeddingStatus.total_pending_chunks ?? 0;
         // Progrès réconcilié AU NIVEAU DOCUMENT (somme == total).
-        const pendingDocs = (embeddingStatus.title_abstract_chunks.pending_docs ?? 0)
-          + (embeddingStatus.fulltext.docs_pending ?? 0) + chunkless;
+        const pendingDocs = (embeddingStatus.title_abstract_chunks?.pending_docs ?? 0)
+          + (embeddingStatus.fulltext?.docs_pending ?? 0) + chunkless;
         const indexedDocs = Math.max(0, total - pendingDocs);
         const complete = pendingChunks === 0 && chunkless === 0;
         return (
@@ -2168,8 +2188,8 @@ function RagSection({ scenarioId, detail }: { scenarioId: string; detail: Scenar
               <p className="text-[11px] text-white/70">
                 <span className="text-white font-semibold">{indexedDocs}</span> / {total} {t("scenarioDetail.rag.documentsIndexed")}
                 {pendingDocs > 0 && ` · ${pendingDocs} ${t("scenarioDetail.rag.docsInProgressSuffix")}`}
-                {embeddingStatus.fulltext.total_docs > 0 && (
-                  <span className="text-white/40">{t("scenarioDetail.rag.inFulltextPrefix")}{embeddingStatus.fulltext.docs_fully_embedded}/{embeddingStatus.fulltext.total_docs}{t("scenarioDetail.rag.inFulltextSuffix")}</span>
+                {(embeddingStatus.fulltext?.total_docs ?? 0) > 0 && (
+                  <span className="text-white/40">{t("scenarioDetail.rag.inFulltextPrefix")}{embeddingStatus.fulltext?.docs_fully_embedded}/{embeddingStatus.fulltext?.total_docs}{t("scenarioDetail.rag.inFulltextSuffix")}</span>
                 )}
               </p>
               {chunkless > 0 ? (
@@ -3707,6 +3727,7 @@ function SeuilSection({ scenarioId, onSaved, onThresholdChange }: { scenarioId: 
       // Refresh the corpus so it picks up rerank_running and auto-refreshes the
       // relevance (Cohere) badges live, instead of only on a manual page reload.
       onSaved?.();
+      if (pollRef.current) clearInterval(pollRef.current);   // pas d'orphelin
       pollRef.current = setInterval(() => {
         getRerankStatus(scenarioId).then(s => {
           if (s.status === "done") {
@@ -3718,6 +3739,10 @@ function SeuilSection({ scenarioId, onSaved, onThresholdChange }: { scenarioId: 
             if (pollRef.current) clearInterval(pollRef.current);
             setRerankStatus(t("scenarioDetail.seuil.scoringError"));
           }
+        }).catch(() => {
+          // Erreur transitoire : nettoyer l'intervalle (sinon poll infini + rejet non géré).
+          if (pollRef.current) clearInterval(pollRef.current);
+          setRerankStatus(t("scenarioDetail.seuil.scoringError"));
         });
       }, 3000);
     } catch (e: any) {
@@ -3842,6 +3867,7 @@ function EvidencesSection({ scenarioId, detail }: { scenarioId: string; detail: 
   React.useEffect(() => {
     if (!llmData || llmData.status !== 'generating') return;
     setGenStatus(t("scenarioDetail.evidences.generatingInProgress"));
+    if (pollRef.current) clearInterval(pollRef.current);   // pas d'orphelin
     pollRef.current = setInterval(() => {
       getBriefGenerationStatus(scenarioId).then(s => {
         if (s.status === 'done') {
@@ -3853,6 +3879,12 @@ function EvidencesSection({ scenarioId, detail }: { scenarioId: string; detail: 
           setGenStatus(null);
           setLlmError(s.error ?? t("scenarioDetail.evidences.genError"));
         }
+      }).catch(() => {
+        // Erreur transitoire : nettoyer l'intervalle + sortir de "génération"
+        // (sinon rejet non géré + spinner bloqué à vie).
+        if (pollRef.current) clearInterval(pollRef.current);
+        setGenStatus(null);
+        setLlmError(t("scenarioDetail.evidences.genError"));
       });
     }, 5000);
     return () => { if (pollRef.current) clearInterval(pollRef.current); };
@@ -3877,6 +3909,11 @@ function EvidencesSection({ scenarioId, detail }: { scenarioId: string; detail: 
             setRegenerating(false);
             setLlmError(s.error ?? t("scenarioDetail.evidences.regenError"));
           }
+        }).catch(() => {
+          if (pollRef.current) clearInterval(pollRef.current);
+          setGenStatus(null);
+          setRegenerating(false);
+          setLlmError(t("scenarioDetail.evidences.regenError"));
         });
       }, 5000);
     } catch (e: any) {

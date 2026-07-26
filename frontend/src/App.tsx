@@ -1156,11 +1156,12 @@ function RecommendedActions({ scenario, isUser }: { scenario: GesicaScenario; is
     if (!isUser) return;
     if (scenario.recommendedActions && scenario.recommendedActions.length > 0) return;
     let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
     const tick = (tries: number) => {
       getRecommendedActions(scenario.id).then(r => {
         if (cancelled) return;
         if (r.status === "ready") { setFetchedActions(r.actions); setActionsGenerating(false); }
-        else if (r.status === "generating" && tries < 20) { setActionsGenerating(true); setTimeout(() => tick(tries + 1), 4000); }
+        else if (r.status === "generating" && tries < 20) { setActionsGenerating(true); timer = setTimeout(() => tick(tries + 1), 4000); }
         else { setFetchedActions([]); setActionsGenerating(false); }
       }).catch(() => { if (!cancelled) { setFetchedActions([]); setActionsGenerating(false); } });
     };
@@ -1168,7 +1169,9 @@ function RecommendedActions({ scenario, isUser }: { scenario: GesicaScenario; is
     // afficher les anciennes actions (autre langue) le temps de la régénération.
     setFetchedActions(null);
     tick(0);
-    return () => { cancelled = true; };
+    // Annuler + purger le timer en attente au démontage / changement de langue,
+    // sinon un tick déjà planifié refait une requête réseau inutile.
+    return () => { cancelled = true; if (timer) clearTimeout(timer); };
     // `lang` dans les deps : changer la langue de l'UI régénère les actions.
   }, [isUser, scenario.id, lang]);
   const actions = (scenario.recommendedActions && scenario.recommendedActions.length > 0)
@@ -1782,6 +1785,11 @@ export default function App() {
   const [populatingId, setPopulatingId] = useState<string | null>(null);
   const [pipelineStatuses, setPipelineStatuses] = useState<Record<string, UserScenarioPipelineStatus>>({});
   const pipelinePollRef = useRef<Record<string, ReturnType<typeof setInterval>>>({});
+  // Jeton de recherche ACTIVE : incrémenté à chaque handleSearch. La boucle de sondage
+  // (jusqu'à 15 min) continuait en arrière-plan après setLoading(false) ; si l'utilisateur
+  // relançait une recherche, l'ancienne boucle écrasait les résultats de la nouvelle.
+  // On compare ce jeton pour abandonner toute écriture d'état d'une recherche périmée.
+  const activeSearchRef = useRef(0);
   const [searchSourceBreakdown, setSearchSourceBreakdown] = useState<Record<string, number> | null>(null);
   const [searchTotalMatching, setSearchTotalMatching] = useState<number | null>(null);
   const [searchFulltextDocs, setSearchFulltextDocs] = useState<number | null>(null);
@@ -1989,6 +1997,7 @@ export default function App() {
 
   async function handleSearch() {
     if (!query.trim()) return;
+    const mySearch = ++activeSearchRef.current;   // supersède toute recherche précédente
     setLoading(true);
     setError(null);
     setPage(1);
@@ -2043,7 +2052,9 @@ export default function App() {
       let lastTotal = 0;
       let firstDetailLoaded = false;
       const renderCorpus = async () => {
+        if (activeSearchRef.current !== mySearch) return 0;   // recherche périmée → ne rien écrire
         const corpus = await fetchScenarioCorpus(sid, { limit: 10000 });
+        if (activeSearchRef.current !== mySearch) return 0;   // supersédée pendant le fetch
         const corpusResults: SearchResult[] = (corpus.articles || []).map((a: CorpusArticle) => ({
           id: `${a.id}-0`,
           documentId: a.id,
@@ -2096,6 +2107,7 @@ export default function App() {
       // atteindre le statut 'done' RÉEL et se figer sur le compteur FINAL (fin du « 172
       // au lieu de 5758 » : on ne rendait qu'une fois, avant la fin de la construction).
       for (let i = 0; i < 450; i++) {
+        if (activeSearchRef.current !== mySearch) return;   // une recherche plus récente a démarré → on abandonne
         let status = 'pending';
         let phase: 'local' | 'federation' | 'scoring' | 'done' | null = null;
         try {
@@ -2121,6 +2133,7 @@ export default function App() {
       // ENSUITE le sous-ensemble pertinent : on l'attend AUSSI pour que l'ordre soit
       // STABLE au moment de l'affichage (pas de réordonnancement sous les yeux de
       // l'utilisateur). Sans clé Cohere, l'étape est instantanée.
+      if (activeSearchRef.current !== mySearch) return;   // supersédée juste avant l'affichage final
       setSearchBackendPhase('done');
       if (reachedDone) {
         setSearchFinalizing(true);
@@ -2164,16 +2177,22 @@ export default function App() {
         }, ...filtered].slice(0, 50);
       });
     } catch (err) {
-      setError(err instanceof Error ? err.message : t("common.unknownError"));
-      setResults([]);
+      if (activeSearchRef.current === mySearch) {
+        setError(err instanceof Error ? err.message : t("common.unknownError"));
+        setResults([]);
+      }
     } finally {
-      setLoading(false);
-      setLiveRefreshing(false);
-      setRefreshLabel(null);
-      setSearchBackendPhase(null);
-      setSearchFinalizing(false);
-      setSearchSourceProgress(null);
-      setSearchPhase('idle');
+      // Ne réinitialiser l'UI QUE si cette recherche est toujours l'active : une
+      // recherche périmée ne doit pas remettre à zéro l'état de la nouvelle.
+      if (activeSearchRef.current === mySearch) {
+        setLoading(false);
+        setLiveRefreshing(false);
+        setRefreshLabel(null);
+        setSearchBackendPhase(null);
+        setSearchFinalizing(false);
+        setSearchSourceProgress(null);
+        setSearchPhase('idle');
+      }
     }
   }
 
@@ -2181,7 +2200,12 @@ export default function App() {
     // Déclencher le pipeline complet dès qu'un scénario est épinglé
     startUserScenarioPipeline(scenarioId, 500)
       .then(() => {
-        // Démarrer le polling de statut
+        // Démarrer le polling de statut. Nettoyer un poll précédent pour ce scénario
+        // AVANT d'en assigner un nouveau, sinon l'ancien setInterval fuit (orphelin)
+        // et double les requêtes/setState.
+        if (pipelinePollRef.current[scenarioId]) {
+          clearInterval(pipelinePollRef.current[scenarioId]);
+        }
         const pollInterval = setInterval(() => {
           fetchUserScenarioPipelineStatus(scenarioId)
             .then(status => {
