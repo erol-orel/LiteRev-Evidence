@@ -5133,10 +5133,18 @@ async def upload_scenario_dataset(
     upload_dir = Path("/home/ubuntu/uploads_datasets") / scenario_id
     upload_dir.mkdir(parents=True, exist_ok=True)
 
+    # Plafond de taille AVANT écriture disque / pandas (cohérent avec /model/data) :
+    # sinon copyfileobj streamait un upload arbitraire sur disque et pd.read_excel
+    # chargeait tout le classeur en RAM → épuisement disque/mémoire depuis une requête.
+    _MAX_UPLOAD_BYTES = 25 * 1024 * 1024
+    content = await file.read(_MAX_UPLOAD_BYTES + 1)
+    if len(content) > _MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=413,
+                            detail=f"Fichier trop volumineux (> {_MAX_UPLOAD_BYTES // (1024 * 1024)} Mo).")
     file_path = upload_dir / safe_filename
     with file_path.open("wb") as buffer:
-        shutil.copyfileobj(file.file, buffer)
-        
+        buffer.write(content)
+
     # Analyser sommairement le fichier pour extraire des métriques (nombre de lignes, colonnes)
     num_rows = 0
     columns = []
@@ -13537,9 +13545,9 @@ def validate_scenario_spec_proposal(scenario_id: str, payload: dict[str, Any],
                 "SELECT id FROM scenario_model_dataset WHERE scenario_id = :sid AND is_active = TRUE LIMIT 1"
             ), {"sid": scenario_id}).first()
         if ds and _MODEL_TRAIN_JOBS.get(scenario_id, {}).get("status") != "running":
-            _MODEL_TRAIN_JOBS[scenario_id] = {"status": "running"}
-            threading.Thread(target=_run_model_training, args=(scenario_id, 25), daemon=True).start()
-            retrain_started = True
+            if _claim_model_train(scenario_id):   # atomique : évite 2 entraînements concurrents
+                threading.Thread(target=_run_model_training, args=(scenario_id, 25), daemon=True).start()
+                retrain_started = True
 
     return {
         "status": "accepted",
@@ -13756,9 +13764,9 @@ def edit_scenario_model_spec(scenario_id: str, payload: dict[str, Any],
                 "SELECT id FROM scenario_model_dataset WHERE scenario_id = :sid AND is_active = TRUE LIMIT 1"
             ), {"sid": scenario_id}).first()
         if ds and _MODEL_TRAIN_JOBS.get(scenario_id, {}).get("status") != "running":
-            _MODEL_TRAIN_JOBS[scenario_id] = {"status": "running"}
-            threading.Thread(target=_run_model_training, args=(scenario_id, 25), daemon=True).start()
-            retrain_started = True
+            if _claim_model_train(scenario_id):   # atomique : évite 2 entraînements concurrents
+                threading.Thread(target=_run_model_training, args=(scenario_id, 25), daemon=True).start()
+                retrain_started = True
 
     return {
         "status": "updated",
@@ -13968,7 +13976,8 @@ def _maybe_autotrain(scenario_id: str, report: dict) -> bool:
         return False
     if _MODEL_TRAIN_JOBS.get(scenario_id, {}).get("status") == "running":
         return False
-    _MODEL_TRAIN_JOBS[scenario_id] = {"status": "running"}
+    if not _claim_model_train(scenario_id):
+        return False   # un entraînement est déjà en cours pour ce scénario (TOCTOU fermé)
     threading.Thread(target=_run_model_training, args=(scenario_id, 25), daemon=True).start()
     logger.info(f"Auto-entraînement déclenché pour {scenario_id} (données suffisantes).")
     return True
@@ -14404,6 +14413,19 @@ def generate_synthetic_model_dataset(scenario_id: str, n_rows: int = 400,
 # prédictions. Remplace les formules mock par un modèle réellement appris.
 
 _MODEL_TRAIN_JOBS: dict[str, dict] = {}
+_model_train_lock = threading.Lock()
+
+
+def _claim_model_train(scenario_id: str) -> bool:
+    """Réserve ATOMIQUEMENT le job d'entraînement d'un scénario. True si réservé (aucun
+    entraînement en cours), False si un est déjà en cours. Ferme le TOCTOU où deux
+    requêtes quasi simultanées lisaient toutes deux "non en cours" et lançaient deux
+    entraînements concurrents (calcul redondant + un artefact écrasait l'autre)."""
+    with _model_train_lock:
+        if _MODEL_TRAIN_JOBS.get(scenario_id, {}).get("status") == "running":
+            return False
+        _MODEL_TRAIN_JOBS[scenario_id] = {"status": "running"}
+        return True
 
 
 def _ensure_model_run_table():
@@ -14553,7 +14575,8 @@ def train_scenario_model(scenario_id: str, n_trials: int = 25,
         raise HTTPException(status_code=400, detail="Aucun dataset branché. Uploadez un CSV/XLSX d'abord.")
 
     n_trials = max(5, min(int(n_trials or 25), 100))
-    _MODEL_TRAIN_JOBS[scenario_id] = {"status": "running"}
+    if not _claim_model_train(scenario_id):
+        return {"status": "already_running", "scenario_id": scenario_id}
     threading.Thread(target=_run_model_training, args=(scenario_id, n_trials), daemon=True).start()
     return {"status": "started", "scenario_id": scenario_id, "n_trials": n_trials}
 
@@ -14581,7 +14604,8 @@ def compare_scenario_models(scenario_id: str, n_trials: int = 15,
     # La comparaison entraîne N familles → on limite le budget d'essais par famille
     # (défaut 15) pour garder un temps de calcul raisonnable.
     n_trials = max(5, min(int(n_trials or 15), 50))
-    _MODEL_TRAIN_JOBS[scenario_id] = {"status": "running"}
+    if not _claim_model_train(scenario_id):
+        return {"status": "already_running", "scenario_id": scenario_id}
     threading.Thread(
         target=_run_model_training, args=(scenario_id, n_trials), kwargs={"compare": True}, daemon=True
     ).start()
@@ -14765,7 +14789,12 @@ def monitor_scenario_model(scenario_id: str, window: int = 7) -> dict[str, Any]:
             level = model_trainer._level_from_value(next_val, orange, red)
             label = (alert_thresholds.get(level) or {}).get("label") or _DEFAULT_ALERT_LABELS.get(level, "—")
         else:
-            level, label = "green", _DEFAULT_ALERT_LABELS.get("green", "Normal")
+            # Sans bornes littérature, NE JAMAIS afficher "green/Normal" par défaut
+            # (règle "jamais vert par défaut", cf. compute_monitoring / _level_from_value
+            # qui renvoient 'unavailable'). Un point de prévision élevé ne doit pas
+            # apparaître "Normal" faute de seuils.
+            level = "unavailable"
+            label = _DEFAULT_ALERT_LABELS.get("unavailable", "Indisponible")
         return {
             "status": "ready", "scenario_id": scenario_id,
             "status_color": level, "status_label": label,

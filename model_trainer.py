@@ -757,12 +757,33 @@ def train_model(df, spec: dict, n_trials: int = 25, random_state: int = 42, test
 
     classes = None
     if task_type == "classification":
-        le = LabelEncoder()
-        y = pd.Series(le.fit_transform(y.astype(str)))
-        classes = [str(c) for c in le.classes_]
+        y_str = y.astype(str)
+        _uniq = sorted(pd.unique(y_str).tolist())
+        _positive = str((outcome.get("positive_class") or "")).strip()
+        # BINAIRE + classe positive spécifiée → encoder la classe POSITIVE en 1 (l'autre
+        # en 0). Sinon LabelEncoder assigne les labels par ordre ALPHABÉTIQUE : la classe
+        # positive pouvait tomber en 0, alors que f1(binary)/average_precision/roc_auc
+        # (pos_label=1 / proba[:,1]) et l'HPO Optuna visent la classe 1 → métriques et
+        # optimisation portaient sur la MAUVAISE classe (ex. rare-event "décès"/"cas").
+        # Aligner l'encodage corrige tout l'aval sans toucher aux scorers.
+        if len(_uniq) == 2 and _positive and _positive in set(y_str.tolist()):
+            _neg = [c for c in _uniq if c != _positive][0]
+            classes = [_neg, _positive]   # index 1 = classe positive
+            y = pd.Series((y_str == _positive).astype(int))
+        else:
+            le = LabelEncoder()
+            y = pd.Series(le.fit_transform(y_str))
+            classes = [str(c) for c in le.classes_]
         if len(classes) < 2:
             raise ValueError("La cible n'a qu'une seule classe : impossible d'entraîner un classifieur.")
         min_class = int(pd.Series(y).value_counts().min())
+        # Une classe à un seul exemple ne peut être ni stratifiée ni validée en CV :
+        # message clair plutôt qu'une erreur sklearn cryptique en aval.
+        if min_class < 2:
+            raise ValueError(
+                "La classe la moins représentée n'a qu'un seul exemple : impossible de "
+                "stratifier/valider. Ajoutez des données ou fusionnez des classes."
+            )
         folds = max(2, min(folds, min_class))
     else:
         y = pd.to_numeric(y, errors="coerce")
@@ -802,6 +823,15 @@ def train_model(df, spec: dict, n_trials: int = 25, random_state: int = 42, test
         X, y, test_size=test_size, random_state=random_state,
         shuffle=not is_ts, stratify=stratify,
     )
+
+    # Garde-fou classes rares : le nombre de folds doit être <= la plus petite classe
+    # DANS LE TRAIN (pas dans y complet) — sinon StratifiedKFold lève "n_splits cannot
+    # be greater than the number of members in each class" et fait échouer le job.
+    if task_type == "classification" and not is_ts:
+        _train_min = int(pd.Series(list(ytr)).value_counts().min())
+        folds = max(2, min(folds, _train_min))
+        if _train_min < 2:
+            cv_strategy_effective = "kfold"   # une classe à 1 exemple dans le train → CV non stratifiée
 
     cv = _make_cv(cv_strategy_effective, folds, task_type, random_state)
     pre = build_preprocessor(used)
@@ -1096,22 +1126,29 @@ def train_timeseries_model(df, spec: dict, family: str = "prophet",
             seasonal_orders.append((1, 0, 1, m_season))
         candidates = [(o, so) for o in [(1, 1, 1), (2, 1, 1), (1, 1, 0), (0, 1, 1), (1, 0, 0)]
                       for so in seasonal_orders]
-        best = None
+        best = None  # (aic, (order, sorder), résultat ajusté sur le TRAIN)
         for order, sorder in candidates:
             try:
                 with _w.catch_warnings():
                     _w.simplefilter("ignore")
                     res = SARIMAX(train["y"].to_numpy(), order=order, seasonal_order=sorder,
                                   enforce_stationarity=False, enforce_invertibility=False).fit(disp=False)
-                    pred = np.asarray(res.forecast(steps=H), dtype=float)
-                mets = _ts_metrics(test["y"].to_numpy(), pred)
-                if mets["rmse"] is not None and (best is None or mets["rmse"] < best[1]["rmse"]):
-                    best = ((order, sorder), mets, pred)
+                _aic = float(getattr(res, "aic", float("nan")))
+                if _aic == _aic and (best is None or _aic < best[0]):   # _aic==_aic écarte NaN
+                    best = (_aic, (order, sorder), res)
             except Exception as e:
                 logger.warning(f"SARIMAX {order}x{sorder}: {e}")
         if best is None:
             raise ValueError("SARIMAX n'a convergé pour aucun ordre candidat.")
-        (order, sorder), holdout_metrics, holdout_pred = best
+        # Ordre choisi par AIC sur le TRAIN (et NON par le plus petit RMSE holdout de la
+        # grille : sélectionner sur les points mêmes qui servent à mesurer l'erreur
+        # produisait un RMSE « test » optimiste — biais de sélection sur le test). Le
+        # RMSE reporté est ensuite calculé UNE fois, pour cet ordre, sur le holdout intact.
+        _aic, (order, sorder), res = best
+        with _w.catch_warnings():
+            _w.simplefilter("ignore")
+            holdout_pred = np.asarray(res.forecast(steps=H), dtype=float)
+        holdout_metrics = _ts_metrics(test["y"].to_numpy(), holdout_pred)
         best_params = {"order": list(order), "seasonal_order": list(sorder)}
         with _w.catch_warnings():
             _w.simplefilter("ignore")
