@@ -91,9 +91,21 @@ class InMemoryRateLimiter:
         self.window_seconds = window_seconds
         # Stocke les timestamps des requêtes pour chaque IP
         self.history: dict[str, list[float]] = defaultdict(list)
+        self._last_sweep = time.time()
 
     def is_allowed(self, ip: str) -> bool:
         now = time.time()
+        # Balayage périodique : purge les IP sans requête récente. Sans cela, la dict
+        # `history` ne perdait JAMAIS ses clés (une IP qui ne revient pas gardait son
+        # entrée vide indéfiniment) → croissance mémoire non bornée avec des IP
+        # distinctes / des X-Forwarded-For tournants.
+        if now - self._last_sweep > self.window_seconds:
+            self._last_sweep = now
+            cutoff = now - self.window_seconds
+            self.history = defaultdict(list, {
+                k: recent for k, v in self.history.items()
+                if (recent := [t for t in v if t > cutoff])
+            })
         # Filtrer les anciens timestamps hors de la fenêtre
         self.history[ip] = [t for t in self.history[ip] if now - t < self.window_seconds]
         if len(self.history[ip]) >= self.requests_limit:
@@ -7225,6 +7237,10 @@ def get_user_scenario_corpus(
     Compatible avec fetchScenarioCorpus (même format de réponse).
     """
     row = _get_user_scenario_or_404(scenario_id)
+    # Endpoint ouvert : borne limit/offset (un ?limit=100000000 matérialiserait toute
+    # la jointure en RAM/JSON). 100000 couvre largement le plus gros corpus.
+    limit = max(1, min(int(limit), 100000))
+    offset = max(0, int(offset))
     # Seuil effectif : paramètre explicite (curseur en direct) > seuil sauvegardé
     # dans scenario_settings > défaut 0.45. (Auparavant codé en dur à 0.45, donc
     # le compteur « auto-sélectionnés » ne suivait jamais le curseur.)
@@ -10937,6 +10953,10 @@ def _build_evidence_brief(scenario_id: str) -> dict[str, Any]:
 def get_user_scenario_pico_bulk(scenario_id: str, limit: int = 100000, offset: int = 0) -> dict[str, Any]:
     """Tous les articles d'un scénario utilisateur avec leur PICO extrait."""
     _get_user_scenario_or_404(scenario_id)
+    # Endpoint ouvert : borne limit/offset pour éviter qu'un ?limit=100000000 matérialise
+    # toute la jointure en RAM/JSON (DoS mémoire). Plafond généreux (le front pagine).
+    limit = max(1, min(int(limit), 5000))
+    offset = max(0, int(offset))
     with engine.connect() as conn:
         rows = conn.execute(text("""
             SELECT d.id, d.title, d.abstract, d.year, d.source, d.authors, d.doi, d.journal,
@@ -14362,7 +14382,9 @@ def generate_synthetic_model_dataset(scenario_id: str, n_rows: int = 400,
         df = model_trainer.generate_synthetic_dataset(spec, n_rows=n_rows)
     except Exception as e:
         logger.error(f"Synthetic gen {scenario_id}: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Génération synthétique impossible : {e}")
+        # Message générique côté client : l'exception (chemins/internes) est journalisée
+        # serveur, pas renvoyée à l'appelant.
+        raise HTTPException(status_code=500, detail="Génération synthétique impossible.")
 
     report = _validate_dataset_against_template(list(df.columns), spec["data_template"], _dataframe_dtype_kinds(df))
 
@@ -14682,7 +14704,8 @@ def predict_scenario_model(scenario_id: str, payload: dict[str, Any],
         import joblib
         pipeline = joblib.load(run["artifact_path"])
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Chargement du modèle impossible : {e}")
+        logger.error(f"Model load failed: {e}", exc_info=True)   # détail journalisé serveur, pas renvoyé
+        raise HTTPException(status_code=500, detail="Chargement du modèle impossible.")
 
     df = pd.DataFrame(rows)
     classes = (run["summary_json"] or {}).get("classes")
