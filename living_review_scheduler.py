@@ -244,7 +244,11 @@ def fetch_pubmed_new(query: str, days: int = 30, max_results: int = 50) -> list[
     base = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
     date_from = (datetime.now() - timedelta(days=days)).strftime("%Y/%m/%d")
     date_to = datetime.now().strftime("%Y/%m/%d")
-    full_query = f"({query}) AND ({date_from}[PDAT]:{date_to}[PDAT])"
+    # [EDAT] = date d'ENTRÉE dans PubMed (indexation), pas [PDAT] (date de publication).
+    # PubMed indexe souvent un article des jours/mois après sa date de publication ;
+    # une fenêtre [PDAT] ratait donc les articles récemment indexés mais publiés il y a
+    # plus de `days`. Dédup par external_id → élargir la fenêtre est sans risque.
+    full_query = f"({query}) AND ({date_from}[EDAT]:{date_to}[EDAT])"
 
     try:
         # esearch
@@ -368,7 +372,12 @@ def run_living_review_for_scenario(
         return {"error": f"Scénario '{scenario_id}' inconnu"}
 
     label = config["label"]
-    logger.info(f"[{scenario_id}] Living review — {label}")
+    # Fenêtre de recherche PROPRE au scénario si déclarée (p. ex. days_lookback=60
+    # pour undertriage-risk / mass-casualty) ; sinon on garde le `days` de l'appelant.
+    # Auparavant ce champ était ignoré → les articles de 31–60 j n'étaient jamais
+    # ingérés pour ces scénarios.
+    days = config.get("days_lookback", days)
+    logger.info(f"[{scenario_id}] Living review — {label} (fenêtre {days} j)")
 
     new_docs = []
     skipped = 0

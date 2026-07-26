@@ -4503,7 +4503,12 @@ def living_review_run(scenario_id: str = "all", days: int = 30, dry_run: bool = 
     if dry_run:
         cmd.append("--dry-run")
     try:
-        proc = _subprocess.Popen(cmd, stdout=_subprocess.PIPE, stderr=_subprocess.PIPE)
+        # stdout/stderr → DEVNULL (PAS de PIPE) : personne ne draine ces tuyaux, donc
+        # dès que le buffer OS (~64 Ko) se remplissait, le scénario enfant se bloquait
+        # sur write() pour toujours (living_review_last_run.json jamais écrit, statut
+        # figé). Le scheduler journalise son résultat dans son propre fichier de statut.
+        proc = _subprocess.Popen(cmd, stdout=_subprocess.DEVNULL, stderr=_subprocess.DEVNULL,
+                                 stdin=_subprocess.DEVNULL, start_new_session=True)
         return {
             "status": "started",
             "pid": proc.pid,
@@ -6188,11 +6193,20 @@ def trigger_living_review(
     if not dry_run:
         def _run_living_review():
             try:
-                import subprocess
+                import subprocess, sys as _sys
+                _script = str(Path(__file__).parent / "living_review_scheduler.py")
+                # Cible le scénario demandé : living_review_scheduler.py accepte
+                # --scenario / --all-scenarios ; ingest_pubmed.py n'accepte que
+                # --project/--query (--all-scenarios y était un flag INVALIDE →
+                # argparse échouait → la « vraie » exécution ne faisait rien).
+                _cmd = [_sys.executable, _script, "--mode", "once"]
+                if scenario_id:
+                    _cmd += ["--scenario", scenario_id]
+                else:
+                    _cmd.append("--all-scenarios")
                 result = subprocess.run(
-                    ["python3", "ingest_pubmed.py", "--all-scenarios"],
-                    capture_output=True, text=True, timeout=600,
-                    cwd="/opt/literev-api"
+                    _cmd, capture_output=True, text=True, timeout=600,
+                    cwd=str(Path(__file__).parent),
                 )
                 logger.info(f"Living Review pipeline: {result.stdout[:500]}")
                 if result.returncode != 0:
@@ -6295,18 +6309,25 @@ def subscribe_alerts(payload: AlertSubscriptionIn, _: None = Depends(require_api
 @app.delete("/alerts/unsubscribe")
 def unsubscribe_alerts(email: str, scenario_id: str, _: None = Depends(require_api_key)) -> dict[str, Any]:
     """Désabonnement des alertes email."""
+    # subscribe stocke l'email NORMALISÉ (_clean_email : trim + minuscule). Comparer
+    # l'email brut échouait silencieusement (0 ligne) tout en renvoyant "unsubscribed"
+    # → l'utilisateur continuait de recevoir les digests.
+    email = _clean_email(email)
     with engine.begin() as conn:
-        conn.execute(text("""
+        res = conn.execute(text("""
             UPDATE alert_subscriptions
             SET is_active = FALSE
             WHERE email = :email AND scenario_id = :scenario_id
         """), {"email": email, "scenario_id": scenario_id})
+        if res.rowcount == 0:
+            raise HTTPException(status_code=404, detail="Abonnement non trouvé")
     return {"status": "unsubscribed", "email": email, "scenario_id": scenario_id}
 
 
 @app.get("/alerts/subscriptions")
 def list_subscriptions(email: str) -> list[dict[str, Any]]:
     """Liste les abonnements actifs pour un email."""
+    email = _clean_email(email)   # même normalisation qu'à l'abonnement (sinon 0 résultat)
     try:
         with engine.connect() as conn:
             rows = conn.execute(text("""
@@ -6435,9 +6456,13 @@ def _process_alert_digests(scenario_id: str | None, dry_run: bool, respect_frequ
     """Cœur commun de l'envoi des digests : pour chaque abonnement actif (et dû si
     respect_frequency), calcule les NOUVEAUX articles depuis last_notified_at, envoie
     l'email (sauf dry_run) et met à jour last_notified_at. Ne notifie pas si 0 nouveauté."""
-    from datetime import datetime, timezone
+    from datetime import datetime
     smtp_host, smtp_user, smtp_pass = os.getenv("SMTP_HOST", ""), os.getenv("SMTP_USER", ""), os.getenv("SMTP_PASS", "")
-    now = datetime.now(timezone.utc)
+    # NAÏF (pas tz-aware) : `last_notified_at` est une colonne TIMESTAMP (sans fuseau)
+    # → SQLAlchemy renvoie un datetime naïf ; soustraire un `now` aware levait
+    # TypeError dans _digest_is_due dès le 2e passage (tous les digests daily/weekly
+    # cessaient d'être envoyés). Cohérent avec les timestamps naïfs de la base.
+    now = datetime.utcnow()
     try:
         with engine.connect() as conn:
             q = "SELECT id, email, scenario_id, frequency, last_notified_at FROM alert_subscriptions WHERE is_active = TRUE"
