@@ -5133,7 +5133,6 @@ def get_deduplication_status() -> dict[str, Any]:
 # Upload de Dataset par Scénario GESICA
 # ─────────────────────────────────────────────────────────────────────────────
 from fastapi import UploadFile, File
-import shutil
 
 @app.post("/gesica/scenarios/{scenario_id}/upload-dataset")
 async def upload_scenario_dataset(
@@ -5141,69 +5140,17 @@ async def upload_scenario_dataset(
     file: UploadFile = File(...),
     _: None = Depends(require_api_key),
 ) -> dict[str, Any]:
-    """
-    Permet à l'utilisateur d'uploader un jeu de données (CSV ou Excel) pour alimenter
-    les variables non branchées d'un scénario spécifique.
-    """
+    """Upload d'un dataset (CSV/XLSX) pour l'entraînement du modèle d'un scénario.
+
+    Délègue au pipeline unifié POST /scenarios/{id}/model/data : valide les en-têtes
+    contre le data_template, stocke le dataset comme ACTIF (celui que lit réellement
+    l'entraînement) et lance l'entraînement si les données suffisent. Corrige l'ancien
+    comportement où le fichier était écrit sur un chemin JAMAIS lu par l'entraînement —
+    « stocké » sans jamais alimenter le modèle, alors que la réponse le sous-entendait.
+    Nécessite un model_spec validé (sinon 400 : définir d'abord les Variables & Modèle)."""
     _get_db_gesica_scenario_or_404(scenario_id)
-
-    # Valider le format du fichier
-    filename = file.filename or ""
-    ext = filename.split(".")[-1].lower() if "." in filename else ""
-    if ext not in ["csv", "xlsx", "xls"]:
-        raise HTTPException(status_code=400, detail="Seuls les fichiers CSV et Excel (.xlsx, .xls) sont autorisés")
-
-    # Neutraliser tout chemin dans le nom de fichier (anti path-traversal)
-    safe_filename = Path(filename).name
-    if not safe_filename or safe_filename in (".", ".."):
-        raise HTTPException(status_code=400, detail="Nom de fichier invalide")
-
-    # Créer le dossier d'uploads s'il n'existe pas
-    upload_dir = Path("/home/ubuntu/uploads_datasets") / scenario_id
-    upload_dir.mkdir(parents=True, exist_ok=True)
-
-    # Plafond de taille AVANT écriture disque / pandas (cohérent avec /model/data) :
-    # sinon copyfileobj streamait un upload arbitraire sur disque et pd.read_excel
-    # chargeait tout le classeur en RAM → épuisement disque/mémoire depuis une requête.
-    _MAX_UPLOAD_BYTES = 25 * 1024 * 1024
-    content = await file.read(_MAX_UPLOAD_BYTES + 1)
-    if len(content) > _MAX_UPLOAD_BYTES:
-        raise HTTPException(status_code=413,
-                            detail=f"Fichier trop volumineux (> {_MAX_UPLOAD_BYTES // (1024 * 1024)} Mo).")
-    file_path = upload_dir / safe_filename
-    with file_path.open("wb") as buffer:
-        buffer.write(content)
-
-    # Analyser sommairement le fichier pour extraire des métriques (nombre de lignes, colonnes)
-    num_rows = 0
-    columns = []
-    try:
-        if ext == "csv":
-            import pandas as pd
-            df = pd.read_csv(file_path, nrows=5)
-            # Compter les lignes totales rapidement
-            num_rows = sum(1 for _ in open(file_path, "r", encoding="utf-8", errors="ignore")) - 1
-            columns = list(df.columns)
-        else:
-            import pandas as pd
-            df = pd.read_excel(file_path)
-            num_rows = len(df)
-            columns = list(df.columns)
-    except Exception as e:
-        logger.error(f"Erreur lors de l'analyse du fichier uploade {filename}: {e}")
-        # On ne bloque pas l'upload si l'analyse échoue
-        columns = ["Inconnu"]
-        num_rows = -1
-
-    return {
-        "message": f"Fichier '{filename}' uploade avec succès pour le scénario '{scenario_id}'",
-        "filename": filename,
-        "size_bytes": file_path.stat().st_size,
-        "detected_rows": num_rows,
-        "detected_columns": columns,
-        "status": "stored_and_analyzed",
-        "instructions": "Le jeu de données a été stocké. Les variables correspondantes du modèle seront automatiquement branchées lors du prochain recalcul."
-    }
+    # auto_train=True : upload → validation → dataset ACTIF → entraînement automatique.
+    return await upload_model_dataset(scenario_id, file, auto_train=True)
 
 
 # ─── PICO Extraction Endpoints ───────────────────────────────────────────────
