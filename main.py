@@ -655,6 +655,23 @@ def _ensure_performance_indexes() -> None:
         "UPDATE literature_document SET title_norm = btrim(regexp_replace(lower(title), '[^a-z0-9]+', ' ', 'g')) "
         "WHERE title_norm IS NULL AND title IS NOT NULL",
         "CREATE INDEX IF NOT EXISTS ix_litdoc_title_norm ON literature_document (project_context, title_norm)",
+        # Index UNIQUES rendant l'INSERT de _ingest_doc_direct atomique (ON CONFLICT
+        # DO NOTHING) — ferment la course entre fetchers parallèles. best-effort : le
+        # try/except par instruction ci-dessous journalise un échec sans rien casser.
+        #  • DOI : présent en prod via un script ad-hoc mais NON versionné (cf.
+        #    PIPELINE_AUDIT A1) — (re)créé ici pour garantir une cible à ON CONFLICT,
+        #    y compris après une reconstruction depuis les seules migrations.
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_literature_document_doi "
+        "ON literature_document (doi) WHERE doi IS NOT NULL",
+        #  • Titre normalisé : même règle de dédup que _ingest_doc_direct (len≥20),
+        #    limitée aux lignes CANONIQUES (is_duplicate NULL/FALSE) — ne rejette pas
+        #    les doublons déjà marqués (en attente de purge). Si des collisions
+        #    canoniques subsistent, la création échoue et est journalisée : la course
+        #    reste alors ouverte jusqu'à ce que la maintenance nettoie les doublons.
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_litdoc_title_norm "
+        "ON literature_document (project_context, title_norm) "
+        "WHERE title_norm IS NOT NULL AND length(title_norm) >= 20 "
+        "AND (is_duplicate IS NULL OR is_duplicate = FALSE)",
     ]
     for ddl in btree:
         try:
@@ -7851,10 +7868,13 @@ def _ingest_doc_direct(
     journal: str | None = None,
     source_type: str = "article",
     project_context: str = "literev",
-) -> int:
+) -> tuple[int | None, bool]:
     """INSERT SQL direct d'un document + chunk title_abstract.
     Évite les appels HTTP à l'API locale (POST /documents + POST /chunks).
-    Retourne l'ID du document (existant ou nouvellement créé).
+    Retourne (id_document, is_new) : is_new=True si la ligne vient d'être INSÉRÉE,
+    False si le document existait déjà (dédup pré-SELECT, ou course entre fetchers
+    parallèles résolue par ON CONFLICT). Le compteur « ingested » ne s'incrémente
+    que sur les vrais INSERT — sinon il surcompte les doublons inter-sources.
     """
     doi = _normalize_doi(doi)
     title_norm = _normalize_title(title)
@@ -7885,12 +7905,17 @@ def _ingest_doc_direct(
                 "WHERE external_id = :eid AND project_context = :ctx LIMIT 1"
             ), {"eid": external_id, "ctx": project_context}).scalar()
     if existing:
-        return existing   # colonne absente / erreur transitoire → dédup DOI seule
+        return (existing, False)   # dédup pré-SELECT (external_id / titre normalisé / DOI)
 
     # INSERT document + chunk dans UNE SEULE transaction : sinon un crash entre
     # les deux laisse un document sans chunk (jamais indexable/cherchable) — c'est
     # l'origine des documents orphelins observés en production.
     with engine.begin() as _c:
+        # ON CONFLICT DO NOTHING SANS cible : capte un conflit sur N'IMPORTE quel
+        # index unique — uq_literature_document_doi (DOI) ET uq_litdoc_title_norm
+        # (titre normalisé, len≥20). Ferme la course entre fetchers parallèles qui,
+        # avant l'index unique sur le titre, pouvaient tous deux passer le pré-SELECT
+        # puis INSÉRER deux lignes pour le même article sans DOI (préprint, essai).
         doc_id = _c.execute(text("""
             INSERT INTO literature_document (
                 source, title, abstract, year, url, external_id,
@@ -7899,7 +7924,7 @@ def _ingest_doc_direct(
                 :source, :title, :abstract, :year, :url, :external_id,
                 :project_context, :source_type, :doi, :authors, :journal, :title_norm
             )
-            ON CONFLICT (doi) WHERE doi IS NOT NULL DO NOTHING
+            ON CONFLICT DO NOTHING
             RETURNING id
         """), {
             "source": source, "title": title, "abstract": abstract,
@@ -7908,11 +7933,22 @@ def _ingest_doc_direct(
             "doi": doi, "authors": authors, "journal": journal,
             "title_norm": (title_norm or None),
         }).scalar()
+        is_new = doc_id is not None
         if doc_id is None:
-            # DOI already present — reuse the existing canonical row
-            doc_id = _c.execute(text(
-                "SELECT id FROM literature_document WHERE doi = :doi ORDER BY id LIMIT 1"
-            ), {"doi": doi}).scalar()
+            # Un INSERT concurrent a gagné la course (conflit DOI ou titre normalisé).
+            # On récupère la ligne canonique via les MÊMES clés que le pré-SELECT, au
+            # lieu de supposer que le conflit portait sur le DOI (qui peut être NULL).
+            doc_id = _c.execute(text("""
+                SELECT id FROM literature_document
+                WHERE project_context = :ctx AND (
+                    external_id = :eid
+                    OR (:has_tn AND title_norm = :tn)
+                    OR (:has_doi AND doi = :doi))
+                ORDER BY (external_id = :eid) DESC, (:has_doi AND doi = :doi) DESC
+                LIMIT 1
+            """), {"ctx": project_context, "eid": external_id,
+                   "tn": title_norm, "has_tn": _has_tn,
+                   "doi": doi, "has_doi": bool(doi)}).scalar()
 
         # INSERT du chunk title_abstract, idempotent : ne crée PAS de second chunk
         # si le document en a déjà un (cas d'un doc atteint via dédup DOI avec un
@@ -7934,7 +7970,7 @@ def _ingest_doc_direct(
                 "token_count": len(content_text.split()),
             })
     # title_norm est désormais inséré directement (colonne présente) → plus d'UPDATE séparé.
-    return doc_id
+    return (doc_id, is_new)
 
 
 def _run_user_scenario_populate(
@@ -8255,14 +8291,15 @@ def _run_user_scenario_populate(
                     if len(content_text) < 30:
                         continue
                     try:
-                        doc_id = _ingest_doc_direct(
+                        doc_id, _new = _ingest_doc_direct(
                             source="pubmed", title=title, abstract=abstract or None,
                             year=year, url=f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/",
                             external_id=pmid, doi=doi, authors=authors, journal=journal,
                         )
                         _link_to_scenario(doc_id, boolean_native=True)   # source-union
-                        count += 1
-                        _inc("pubmed")
+                        if _new:
+                            count += 1
+                            _inc("pubmed")
                     except Exception as e:
                         logger.warning(f"PubMed PMID {pmid}: {e}")
                         _inc("pubmed", 0, 1)
@@ -8316,13 +8353,14 @@ def _run_user_scenario_populate(
                     if len(content_text) < 30:
                         continue
                     try:
-                        doc_id = _ingest_doc_direct(
+                        doc_id, _new = _ingest_doc_direct(
                             source="openalex", title=title, abstract=abstract or None,
                             year=year, url=url, external_id=ext_id, doi=doi,
                         )
                         _link_to_scenario(doc_id, boolean_native=_send_bool)   # source-union si booléen
-                        count += 1
-                        _inc("openalex")
+                        if _new:
+                            count += 1
+                            _inc("openalex")
                     except Exception:
                         _inc("openalex", 0, 1)
                 _oa_fetched += len(_oa_results)
@@ -8380,13 +8418,14 @@ def _run_user_scenario_populate(
                     if len(content_text) < 30:
                         continue
                     try:
-                        doc_id = _ingest_doc_direct(
+                        doc_id, _new = _ingest_doc_direct(
                             source="crossref", title=title, abstract=abstract or None,
                             year=year, url=f"https://doi.org/{doi}", external_id=doi, doi=doi,
                         )
                         _link_to_scenario(doc_id)
-                        count += 1
-                        _inc("crossref")
+                        if _new:
+                            count += 1
+                            _inc("crossref")
                     except Exception:
                         _inc("crossref", 0, 1)
                 _cr_fetched += len(_cr_items)
@@ -8447,13 +8486,14 @@ def _run_user_scenario_populate(
                     if len(content_text) < 30:
                         continue
                     try:
-                        doc_id = _ingest_doc_direct(
+                        doc_id, _new = _ingest_doc_direct(
                             source="europepmc", title=title, abstract=abstract or None,
                             year=year, url=url, external_id=ext_id, doi=doi,
                         )
                         _link_to_scenario(doc_id, boolean_native=True)   # source-union
-                        count += 1
-                        _inc("europepmc")
+                        if _new:
+                            count += 1
+                            _inc("europepmc")
                     except Exception:
                         _inc("europepmc", 0, 1)
                 _ep_fetched += len(_ep_results)
@@ -8513,14 +8553,15 @@ def _run_user_scenario_populate(
                     if len(content_text) < 30:
                         continue
                     try:
-                        doc_id = _ingest_doc_direct(
+                        doc_id, _new = _ingest_doc_direct(
                             source="preprint", title=title, abstract=abstract or None,
                             year=year, url=url, external_id=ext_id, doi=doi,
                             source_type="preprint",
                         )
                         _link_to_scenario(doc_id, boolean_native=True)   # source-union
-                        count += 1
-                        _inc("preprint")
+                        if _new:
+                            count += 1
+                            _inc("preprint")
                     except Exception:
                         _inc("preprint", 0, 1)
                 _pp_fetched += len(_pp_results)
@@ -8543,14 +8584,15 @@ def _run_user_scenario_populate(
             if len(f"{_d.get('title','')}\n\n{_d.get('abstract') or ''}".strip()) < 30:
                 continue
             try:
-                _doc_id = _ingest_doc_direct(
+                _doc_id, _new = _ingest_doc_direct(
                     source=source, title=_d["title"], abstract=_d.get("abstract"),
                     year=_d.get("year"), url=_d.get("url"), external_id=_d["external_id"],
                     doi=_d.get("doi"), source_type=_d.get("source_type", "article"),
                 )
                 _link_to_scenario(_doc_id, boolean_native=boolean_native)
-                c += 1
-                _inc(source)
+                if _new:
+                    c += 1
+                    _inc(source)
             except Exception:
                 _inc(source, 0, 1)
         return c

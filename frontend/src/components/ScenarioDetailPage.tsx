@@ -774,6 +774,10 @@ function VariablesSection({ detail, scenarioId, onGoToModel }: { detail: Scenari
   const [llmValidating, setLlmValidating] = useState(false);
   const [llmError, setLlmError] = useState<string | null>(null);
   const llmPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  // Anti-setState-après-démontage : garde-fou pour le suivi d'entraînement lancé
+  // depuis l'upload (le poll récursif ci-dessous peut survivre au démontage).
+  const mountedRef = useRef(true);
+  const trainPollRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const loadLlmVars = React.useCallback(() => {
     setLlmLoading(true);
@@ -786,6 +790,12 @@ function VariablesSection({ detail, scenarioId, onGoToModel }: { detail: Scenari
     loadLlmVars();
     return () => { if (llmPollRef.current) clearInterval(llmPollRef.current); };
   }, [loadLlmVars]);
+
+  // Démontage : stoppe le suivi d'entraînement et bloque tout setState tardif.
+  React.useEffect(() => () => {
+    mountedRef.current = false;
+    if (trainPollRef.current) clearTimeout(trainPollRef.current);
+  }, []);
 
   // Polling si generation en cours
   React.useEffect(() => {
@@ -898,10 +908,11 @@ function VariablesSection({ detail, scenarioId, onGoToModel }: { detail: Scenari
       getModelDataset(scenarioId).then(setModelDataset).catch(() => {});
       if (res.training_started) {
         const poll = () => getModelTrainStatus(scenarioId).then(s => {
-          if (s.status === 'running') { setTimeout(poll, 3000); }
-          else { getModelRun(scenarioId).then(setModelRun).catch(() => {}); }
+          if (!mountedRef.current) return;   // composant démonté → on arrête
+          if (s.status === 'running') { trainPollRef.current = setTimeout(poll, 3000); }
+          else { getModelRun(scenarioId).then(r => { if (mountedRef.current) setModelRun(r); }).catch(() => {}); }
         }).catch(() => {});
-        setTimeout(poll, 2000);
+        trainPollRef.current = setTimeout(poll, 2000);
       }
     } catch (err: any) {
       setUploadError(err.message || t("scenarioDetail.variables.uploadError"));
@@ -4525,19 +4536,30 @@ function ModelMonitorSection({ scenarioId }: { scenarioId: string }) {
     return () => clearInterval(id);
   }, [scenarioId]);
 
+  // Anti-setState-après-démontage : le poll récursif ci-dessous appelle done()
+  // (→ setBusy/load) et peut survivre au démontage de l'onglet Modèle.
+  const mountedRef = useRef(true);
+  const pollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => () => {
+    mountedRef.current = false;
+    if (pollTimerRef.current) clearTimeout(pollTimerRef.current);
+  }, []);
+
   const poll = (fn: () => Promise<{ status: string }>, done: () => void) => {
     let tries = 0;
     const tick = async () => {
+      if (!mountedRef.current) return;
       tries += 1;
       try {
         const s = await fn();
+        if (!mountedRef.current) return;
         if (s.status === "running") {
-          if (tries < 40) { setTimeout(tick, 3000); return; }
+          if (tries < 40) { pollTimerRef.current = setTimeout(tick, 3000); return; }
         }
       } catch { /* ignore transient */ }
-      done();
+      if (mountedRef.current) done();
     };
-    setTimeout(tick, 2000);
+    pollTimerRef.current = setTimeout(tick, 2000);
   };
 
   const doTrain = async () => {
