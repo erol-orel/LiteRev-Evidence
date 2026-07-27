@@ -5618,7 +5618,21 @@ def _ensure_double_blind_columns():
             ADD COLUMN IF NOT EXISTS kappa_resolved     BOOLEAN     DEFAULT FALSE,
             ADD COLUMN IF NOT EXISTS kappa_final_status VARCHAR(20) DEFAULT NULL
         """))
-    logger.info("Colonnes double-aveugle vérifiées/créées.")
+        # Par SCÉNARIO (article_scenarios) : mêmes colonnes, car un document
+        # appartenant à plusieurs scénarios doit porter une décision double-aveugle
+        # DISTINCTE par scénario (sinon les kappa se contaminent entre scénarios).
+        # Miroir de la migration Alembic e2f6a8b3c5d7 (belt-and-suspenders au boot).
+        if conn.execute(text("SELECT to_regclass('public.article_scenarios')")).scalar():
+            conn.execute(text("""
+                ALTER TABLE article_scenarios
+                ADD COLUMN IF NOT EXISTS reviewer_1_status  VARCHAR(20),
+                ADD COLUMN IF NOT EXISTS reviewer_1_reason  TEXT,
+                ADD COLUMN IF NOT EXISTS reviewer_2_status  VARCHAR(20),
+                ADD COLUMN IF NOT EXISTS reviewer_2_reason  TEXT,
+                ADD COLUMN IF NOT EXISTS kappa_resolved     BOOLEAN DEFAULT FALSE,
+                ADD COLUMN IF NOT EXISTS kappa_final_status VARCHAR(20)
+            """))
+    logger.info("Colonnes double-aveugle (global + par scénario) vérifiées/créées.")
 
 # Appel au démarrage
 try:
@@ -5694,7 +5708,6 @@ def submit_double_blind_decision(
 
     col_status = f"reviewer_{payload.reviewer}_status"
     col_reason = f"reviewer_{payload.reviewer}_reason"
-    col_code = f"reviewer_{payload.reviewer}_code"
 
     with engine.begin() as conn:
         # Vérifier que l'article appartient bien au scénario (via article_scenarios)
@@ -5706,45 +5719,46 @@ def submit_double_blind_decision(
         if not exists:
             raise HTTPException(status_code=404, detail="Article non trouvé dans ce scénario")
         
-        # Mettre à jour le statut reviewer (colonnes sur literature_document)
-        # Ajouter reviewer_N_code si la colonne existe
+        # Décision reviewer PAR SCÉNARIO (article_scenarios) — autoritative pour le
+        # kappa : un document partagé entre scénarios porte des votes distincts. On
+        # RÉCUPÈRE les deux statuts de CE scénario pour décider de la concordance.
+        ars_row = conn.execute(text(f"""
+            UPDATE article_scenarios
+            SET {col_status} = :status,
+                {col_reason} = :reason
+            WHERE scenario_id = :sid AND document_id = :article_id
+            RETURNING reviewer_1_status, reviewer_2_status
+        """), {
+            "status": payload.status,
+            "reason": payload.reason,
+            "sid": scenario_id,
+            "article_id": payload.article_id,
+        }).first()
+        # Dual-write global (literature_document) — hérité, conservé pour le badge
+        # du corpus et d'éventuels lecteurs legacy. best-effort (jamais bloquant).
         try:
-            row = conn.execute(text(f"""
-                UPDATE literature_document
-                SET {col_status} = :status,
-                    {col_reason} = :reason,
-                    {col_code} = :reviewer_code
-                WHERE id = :article_id
-                RETURNING id, reviewer_1_status, reviewer_2_status
-            """), {
-                "status": payload.status,
-                "reason": payload.reason,
-                "reviewer_code": payload.reviewer_code,
-                "article_id": payload.article_id,
-            }).first()
-        except Exception:
-            # Fallback si la colonne reviewer_N_code n'existe pas encore
-            row = conn.execute(text(f"""
+            conn.execute(text(f"""
                 UPDATE literature_document
                 SET {col_status} = :status,
                     {col_reason} = :reason
                 WHERE id = :article_id
-                RETURNING id, reviewer_1_status, reviewer_2_status
             """), {
                 "status": payload.status,
                 "reason": payload.reason,
                 "article_id": payload.article_id,
-            }).first()
+            })
+        except Exception:
+            pass
 
-        if not row:
+        if not ars_row:
             raise HTTPException(status_code=404, detail="Article non trouvé")
 
-        r1 = row["reviewer_1_status"]
-        r2 = row["reviewer_2_status"]
+        r1 = ars_row["reviewer_1_status"]
+        r2 = ars_row["reviewer_2_status"]
         agreement = None
         final_status = None
 
-        # Si les deux ont statué → calculer concordance et résoudre
+        # Si les deux reviewers ont statué DANS CE SCÉNARIO → concordance + résolution
         if r1 and r2:
             agreement = r1 == r2
             if agreement:
@@ -5754,18 +5768,32 @@ def submit_double_blind_decision(
                 final_status = "conflict"
 
             conn.execute(text("""
-                UPDATE literature_document
+                UPDATE article_scenarios
                 SET kappa_resolved = :resolved,
-                    kappa_final_status = :final,
-                    screening_status = :screening
-                WHERE id = :article_id
+                    kappa_final_status = :final
+                WHERE scenario_id = :sid AND document_id = :article_id
             """), {
                 "resolved": agreement,
                 "final": final_status,
-                "screening": final_status if agreement else "pending",
+                "sid": scenario_id,
                 "article_id": payload.article_id,
             })
-            # Migration 2 dual-write: per-scenario screening for this scenario
+            try:
+                conn.execute(text("""
+                    UPDATE literature_document
+                    SET kappa_resolved = :resolved,
+                        kappa_final_status = :final,
+                        screening_status = :screening
+                    WHERE id = :article_id
+                """), {
+                    "resolved": agreement,
+                    "final": final_status,
+                    "screening": final_status if agreement else "pending",
+                    "article_id": payload.article_id,
+                })
+            except Exception:
+                pass
+            # Migration 2 dual-write: per-scenario screening final status
             _write_ars_screening(conn, scenario_id, payload.article_id,
                                  final_status if agreement else "pending")
 
@@ -5805,28 +5833,41 @@ def resolve_conflict(
         raise HTTPException(status_code=422, detail="final_status doit être 'included' ou 'excluded'")
 
     with engine.begin() as conn:
+        # Résolution PAR SCÉNARIO (autoritative) — l'UPDATE scopé sert aussi de
+        # contrôle d'appartenance (RETURNING vide ⇒ l'article n'est pas dans ce
+        # scénario ⇒ 404).
         row = conn.execute(text("""
-            UPDATE literature_document
+            UPDATE article_scenarios
             SET kappa_final_status = :final,
-                kappa_resolved = TRUE,
-                screening_status = :final,
-                screening_notes = :notes
-            WHERE id = :article_id
-              AND project_context = 'literev'
-              AND EXISTS (SELECT 1 FROM article_scenarios ars WHERE ars.document_id = literature_document.id AND ars.scenario_id = :scenario_id)
-            RETURNING id
+                kappa_resolved = TRUE
+            WHERE scenario_id = :scenario_id AND document_id = :article_id
+            RETURNING document_id
         """), {
             "final": final_status,
-            "notes": arbitrator_notes,
-            "article_id": article_id,
             "scenario_id": scenario_id,
+            "article_id": article_id,
         }).first()
-        if row:
-            # Migration 2 dual-write: per-scenario screening for this scenario
-            _write_ars_screening(conn, scenario_id, article_id, final_status, notes=arbitrator_notes)
-    if not row:
-        raise HTTPException(status_code=404, detail="Article non trouvé")
-    return {"id": row[0], "final_status": final_status, "resolved": True}
+        if not row:
+            raise HTTPException(status_code=404, detail="Article non trouvé")
+        # Dual-write global (hérité, best-effort — badge du corpus / lecteurs legacy).
+        try:
+            conn.execute(text("""
+                UPDATE literature_document
+                SET kappa_final_status = :final,
+                    kappa_resolved = TRUE,
+                    screening_status = :final,
+                    screening_notes = :notes
+                WHERE id = :article_id AND project_context = 'literev'
+            """), {
+                "final": final_status,
+                "notes": arbitrator_notes,
+                "article_id": article_id,
+            })
+        except Exception:
+            pass
+        # Migration 2 dual-write: per-scenario screening for this scenario
+        _write_ars_screening(conn, scenario_id, article_id, final_status, notes=arbitrator_notes)
+    return {"id": article_id, "final_status": final_status, "resolved": True}
 
 
 # ─── KNOWLEDGE GRAPH (réseau de similarité sémantique) ───────────────────────
@@ -7323,7 +7364,8 @@ def get_user_scenario_corpus(
                 d.authors, d.doi, d.journal, d.keywords, d.language,
                 d.study_design, d.sample_size, d.country, d.citation_count,
                 d.open_access, d.pmid, d.publication_type, d.quality_score,
-                COALESCE(ars.screening_status, d.screening_status) AS screening_status, d.reviewer_1_status,
+                COALESCE(ars.screening_status, d.screening_status) AS screening_status,
+                COALESCE(ars.reviewer_1_status, d.reviewer_1_status) AS reviewer_1_status,
                 COALESCE(ars.similarity_score, 0.0) AS similarity_score,
                 ars.rerank_score AS rerank_score,
                 (COALESCE(ars.similarity_score, 0.0) >= :threshold) AS above_threshold,
@@ -11234,12 +11276,11 @@ def get_user_scenario_kappa(scenario_id: str) -> dict[str, Any]:
     _get_user_scenario_or_404(scenario_id)
     with engine.connect() as conn:
         rows = conn.execute(text("""
-            SELECT d.reviewer_1_status, d.reviewer_2_status
+            SELECT ars.reviewer_1_status, ars.reviewer_2_status
             FROM article_scenarios ars
-            JOIN literature_document d ON d.id = ars.document_id
             WHERE ars.scenario_id = :sid
-              AND d.reviewer_1_status IS NOT NULL
-              AND d.reviewer_2_status IS NOT NULL
+              AND ars.reviewer_1_status IS NOT NULL
+              AND ars.reviewer_2_status IS NOT NULL
         """), {"sid": scenario_id}).mappings().all()
     if not rows:
         return {
@@ -11278,14 +11319,14 @@ def get_user_scenario_conflicts(scenario_id: str) -> list[dict[str, Any]]:
     with engine.connect() as conn:
         rows = conn.execute(text("""
             SELECT d.id, d.title, d.abstract, d.year, d.journal,
-                   d.reviewer_1_status, d.reviewer_1_reason,
-                   d.reviewer_2_status, d.reviewer_2_reason, d.kappa_final_status
+                   ars.reviewer_1_status, ars.reviewer_1_reason,
+                   ars.reviewer_2_status, ars.reviewer_2_reason, ars.kappa_final_status
             FROM article_scenarios ars
             JOIN literature_document d ON d.id = ars.document_id
             WHERE ars.scenario_id = :sid
-              AND d.reviewer_1_status IS NOT NULL
-              AND d.reviewer_2_status IS NOT NULL
-              AND d.reviewer_1_status != d.reviewer_2_status
+              AND ars.reviewer_1_status IS NOT NULL
+              AND ars.reviewer_2_status IS NOT NULL
+              AND ars.reviewer_1_status != ars.reviewer_2_status
             ORDER BY d.id
         """), {"sid": scenario_id}).mappings().all()
     return [dict(r) for r in rows]
