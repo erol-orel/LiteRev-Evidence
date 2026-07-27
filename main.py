@@ -119,6 +119,16 @@ class InMemoryRateLimiter:
 general_limiter = InMemoryRateLimiter(requests_limit=600, window_seconds=60)
 expensive_limiter = InMemoryRateLimiter(requests_limit=30, window_seconds=60)
 
+# Nb de sauts de proxy DE CONFIANCE devant l'app (défaut 1 = un seul nginx). L'IP
+# client réelle est le N-ième saut en partant de la FIN du X-Forwarded-For ; les
+# entrées avant ce point sont contrôlables par le client (spoofing). Passer à 2 si
+# un CDN/LB s'ajoute devant nginx — sinon on limiterait sur l'IP du CDN (limite
+# globale) ou on ferait confiance à un XFF spoofé. Borné à >= 1 ; parse tolérant.
+try:
+    _TRUSTED_PROXY_HOPS = max(1, int(os.getenv("TRUSTED_PROXY_HOPS", "1")))
+except (TypeError, ValueError):
+    _TRUSTED_PROXY_HOPS = 1
+
 # Endpoints coûteux à protéger (RAG, search, génération de briefs).
 # ATTENTION : un segment {param} ne doit matcher QU'UN seul segment de chemin.
 # Sinon `/user-scenarios/{id}/rag` capturerait tout `/user-scenarios/*` (corpus,
@@ -153,12 +163,18 @@ _EXPENSIVE_PATTERNS = _compile_expensive_patterns(EXPENSIVE_PATHS)
 @app.middleware("http")
 async def rate_limit_middleware(request: Request, call_next):
     # Récupérer l'IP réelle du client (gère le proxy reverse de production)
+    # IP réelle derrière le reverse proxy : on ne fait confiance qu'aux
+    # _TRUSTED_PROXY_HOPS derniers sauts (notre infra) et on prend le client réel
+    # juste avant. Les entrées antérieures du X-Forwarded-For sont spoofables. On
+    # ignore les segments vides et on retombe sur request.client si l'en-tête est
+    # absent ou malformé (évite un bucket de rate-limit partagé sur IP "" ).
     forwarded_for = request.headers.get("X-Forwarded-For")
+    client_ip = ""
     if forwarded_for:
-        # Ne faire confiance qu'au dernier saut (ajouté par notre reverse proxy),
-        # les entrées précédentes sont contrôlables par le client (spoofing).
-        client_ip = forwarded_for.split(",")[-1].strip()
-    else:
+        _parts = [p.strip() for p in forwarded_for.split(",") if p.strip()]
+        if _parts:
+            client_ip = _parts[-_TRUSTED_PROXY_HOPS] if len(_parts) >= _TRUSTED_PROXY_HOPS else _parts[0]
+    if not client_ip:
         client_ip = request.client.host if request.client else "unknown"
 
     path = request.url.path
@@ -7016,8 +7032,14 @@ def set_user_scenario_owner(scenario_id: str, payload: ScenarioOwnerIn,
 
 
 @app.get("/user-scenarios/by-owner")
-def list_user_scenarios_by_owner(email: str) -> list[dict[str, Any]]:
-    """Liste les scénarios appartenant à un email (pour « mes scénarios »)."""
+def list_user_scenarios_by_owner(email: str, _: None = Depends(require_api_key)) -> list[dict[str, Any]]:
+    """Liste les scénarios appartenant à un email (« mes scénarios »).
+
+    Protégé par clé API : à la différence du listing GLOBAL (public, sans email),
+    by-owner permet d'ÉNUMÉRER les scénarios d'un email arbitraire — une surface de
+    vie privée qu'on ne laisse pas ouverte. Aucun impact UI : le front n'appelle pas
+    cet endpoint (les endpoints de qualité de réponse — RAG/recherche — restent, eux,
+    publics)."""
     e = _clean_email(email)
     if not e:
         return []
