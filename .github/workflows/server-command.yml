@@ -29,8 +29,20 @@ jobs:
   run:
     name: Run on production
     runs-on: ubuntu-latest
-    environment: production
+    # Environnement DÉDIÉ aux commandes manuelles, distinct de « production »
+    # (utilisé par le déploiement automatique dans deploy.yml). Ce découplage
+    # permet d'exiger une revue humaine (« required reviewers ») sur cette
+    # surface sensible — la commande libre « custom » exécute du bash arbitraire
+    # sur le serveur — SANS bloquer le déploiement automatique sur push→main.
+    # Pour activer la revue : Settings → Environments → production-admin →
+    # Required reviewers. Tant qu'aucune règle n'est configurée, cet
+    # environnement se comporte comme avant (aucune approbation requise).
+    environment: production-admin
     concurrency:
+      # Groupe partagé avec le déploiement : sérialise les opérations prod pour
+      # qu'une commande manuelle et un déploiement ne s'exécutent jamais en même
+      # temps sur le serveur. (Contrepartie : une approbation laissée en attente
+      # retient le verrou ; approuver ou annuler la run pour libérer le déploiement.)
       group: production-deploy
       cancel-in-progress: false
     steps:
