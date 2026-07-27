@@ -2466,11 +2466,35 @@ def _federated_live_search(
 
     for i, r in enumerate(deduped_list):
         blob = (r.get("title", "") or "") + " " + (r.get("abstract") or "")
-        lex = _lexical_overlap(q_words, blob)
+        r["lexical_score"] = round(_lexical_overlap(q_words, blob), 4)
         sem = max(0.0, _cosine(q_emb, res_embs[i])) if (q_emb and res_embs[i]) else 0.0
         r["semantic_score"] = round(sem, 4)
-        r["lexical_score"] = round(lex, 4)
-        r["hybrid_score"] = round(0.7 * sem + 0.3 * lex, 4)
+
+    # ④ Fusion HYBRIDE par Reciprocal Rank Fusion (RRF) au lieu d'une somme pondérée :
+    # on classe INDÉPENDAMMENT par lexical puis par sémantique et on somme 1/(k+rang).
+    # Sans paramètre à régler, et robuste au fait que seuls les SEM_SCORE_CAP premiers
+    # résultats ont un score sémantique (les autres, sem=0, ne comptent que par le
+    # lexical) — une somme pondérée mélangeait ces échelles hétérogènes. k=60 (usuel).
+    # Un résultat n'obtient de crédit d'un signal que si ce signal est > 0 (sinon tous
+    # les ex-æquo à 0 en bas du classement pollueraient le score).
+    _RRF_K = 60
+    _rrf = [0.0] * len(deduped_list)
+    _order_lex = sorted(range(len(deduped_list)),
+                        key=lambda i: deduped_list[i]["lexical_score"], reverse=True)
+    for _rank, _i in enumerate(_order_lex):
+        if deduped_list[_i]["lexical_score"] > 0:
+            _rrf[_i] += 1.0 / (_RRF_K + _rank + 1)
+    _order_sem = sorted(range(len(deduped_list)),
+                        key=lambda i: deduped_list[i]["semantic_score"], reverse=True)
+    for _rank, _i in enumerate(_order_sem):
+        if deduped_list[_i]["semantic_score"] > 0:
+            _rrf[_i] += 1.0 / (_RRF_K + _rank + 1)
+    # Normalisation en [0,1] pour l'affichage (le front affiche hybrid_score.toFixed(2)
+    # comme badge) : on divise par le meilleur score RRF → 1er résultat ≈ 1.00, l'ORDRE
+    # reste identique au RRF brut.
+    _rrf_max = (max(_rrf) if _rrf else 0.0) or 1.0
+    for _i, r in enumerate(deduped_list):
+        r["hybrid_score"] = round(_rrf[_i] / _rrf_max, 4)
 
     deduped_list.sort(key=lambda r: r.get("hybrid_score", 0.0), reverse=True)
     return deduped_list, sources_queried, raw_counts, source_status
@@ -8030,6 +8054,14 @@ def _run_user_scenario_populate(
     _ingested_total = [0]
     _errors_total = [0]
     _bool_native_ids: set = set()   # SOURCE-UNION — voir _link_to_scenario
+    # ③ Santé de la fédération, pour décider si un corpus PEUT rétrécir / se vider.
+    #  • _source_errors  : nb de sources ayant échoué (except top-level d'un fetcher) ;
+    #  • _fed_incomplete : True si le budget fédération a été dépassé (sources coupées).
+    # Un « zéro » n'est fiable — donc on autorise un corpus vide — que si la fédération
+    # a réussi (aucune source en erreur ET pas de timeout). Sinon on garde l'ancien
+    # corpus, pour ne pas l'effacer sur une panne passagère d'une source.
+    _source_errors = [0]
+    _fed_incomplete = [False]
 
     def _link_to_scenario(doc_id, boolean_native=False):
         # NE LIE PLUS pendant la fédération : ingérer un article live ne l'ajoute PAS
@@ -8294,6 +8326,7 @@ def _run_user_scenario_populate(
                         _inc("pubmed", 0, 1)
         except Exception as _e:
             logger.warning(f"PubMed populate {scenario_id}: {_e}")
+            _source_errors[0] += 1
         return ("pubmed", count)
 
     def _fetch_openalex():
@@ -8359,6 +8392,7 @@ def _run_user_scenario_populate(
                 _time.sleep(0.3)
         except Exception as _e:
             logger.warning(f"OpenAlex populate {scenario_id}: {_e}")
+            _source_errors[0] += 1
         return ("openalex", count)
 
     def _fetch_crossref():
@@ -8424,6 +8458,7 @@ def _run_user_scenario_populate(
                 _time.sleep(0.3)
         except Exception as _e:
             logger.warning(f"Crossref populate {scenario_id}: {_e}")
+            _source_errors[0] += 1
         return ("crossref", count)
 
     def _fetch_europepmc():
@@ -8493,6 +8528,7 @@ def _run_user_scenario_populate(
                 _time.sleep(0.3)
         except Exception as _e:
             logger.warning(f"EuropePMC populate {scenario_id}: {_e}")
+            _source_errors[0] += 1
         return ("europepmc", count)
 
     def _fetch_preprints():
@@ -8561,6 +8597,7 @@ def _run_user_scenario_populate(
                 _time.sleep(0.3)
         except Exception as _e:
             logger.warning(f"Préprints (Europe PMC) populate {scenario_id}: {_e}")
+            _source_errors[0] += 1
         return ("preprints", count)
 
     def _ingest_parsed(source, docs, boolean_native=False):
@@ -8647,6 +8684,7 @@ def _run_user_scenario_populate(
                     _time.sleep(0.3)
         except Exception as _e:
             logger.warning(f"Semantic Scholar populate {scenario_id}: {_e}")
+            _source_errors[0] += 1
         return ("semantic_scholar", count)
 
     def _fetch_doaj():
@@ -8674,6 +8712,7 @@ def _run_user_scenario_populate(
                 _time.sleep(0.3)
         except Exception as _e:
             logger.warning(f"DOAJ populate {scenario_id}: {_e}")
+            _source_errors[0] += 1
         return ("doaj", count)
 
     def _fetch_clinicaltrials():
@@ -8700,6 +8739,7 @@ def _run_user_scenario_populate(
                 _time.sleep(0.3)
         except Exception as _e:
             logger.warning(f"ClinicalTrials.gov populate {scenario_id}: {_e}")
+            _source_errors[0] += 1
         return ("clinicaltrials", count)
 
     def _fetch_core():
@@ -8738,6 +8778,7 @@ def _run_user_scenario_populate(
                 _time.sleep(0.3)
         except Exception as _e:
             logger.warning(f"CORE populate {scenario_id}: {_e}")
+            _source_errors[0] += 1
         return ("core", count)
 
     def _fetch_arxiv():
@@ -8764,6 +8805,7 @@ def _run_user_scenario_populate(
                 _time.sleep(3)      # arXiv demande ≥3 s entre requêtes
         except Exception as _e:
             logger.warning(f"arXiv populate {scenario_id}: {_e}")
+            _source_errors[0] += 1
         return ("arxiv", count)
 
     def _fetch_openaire():
@@ -8795,6 +8837,7 @@ def _run_user_scenario_populate(
                 _time.sleep(0.5)
         except Exception as _e:
             logger.warning(f"OpenAIRE (Graph API v2) populate {scenario_id}: {_e}")
+            _source_errors[0] += 1
         return ("openaire", count)
 
     def _fetch_biorxiv_medrxiv():
@@ -8836,6 +8879,7 @@ def _run_user_scenario_populate(
                     _time.sleep(0.4)
         except Exception as _e:
             logger.warning(f"bioRxiv/medRxiv populate {scenario_id}: {_e}")
+            _source_errors[0] += 1
         return ("biorxiv_medrxiv", count)
 
     # Lancer toutes les sources en parallèle
@@ -8873,6 +8917,7 @@ def _run_user_scenario_populate(
             # « done » étaient SAUTÉS → corpus figé sur la base locale, statut
             # bloqué sur « running », résultats live perdus.
             except (TimeoutError, _FuturesTimeout):
+                _fed_incomplete[0] = True   # fetch partiel → corpus non autorisé à rétrécir
                 _done = sum(1 for _f in futures if _f.done())
                 logger.warning(
                     f"Populate {scenario_id}: budget fédération {POPULATE_FEDERATION_BUDGET:.0f}s dépassé — "
@@ -8918,7 +8963,14 @@ def _run_user_scenario_populate(
         _n_native = len(_bool_native_ids) if _union_native else 0
         if _union_native:
             _final_ids = list(set(_final_ids) | _bool_native_ids)
-        _n_corpus = _set_scenario_corpus(scenario_id, _final_ids, allow_empty=bool(_sub_queries))
+        # ③ Autorise un corpus vide/réduit :
+        #  • multi-requêtes : une intersection légitimement vide DOIT vider (inchangé) ;
+        #  • base locale seule (pas de live) : le match booléen local est déterministe ;
+        #  • mono-requête + live : SEULEMENT si la fédération a réussi (fetch_ok) — sinon
+        #    un « zéro » peut venir d'une panne passagère → on garde l'ancien corpus.
+        _fetch_ok = (not _fed_incomplete[0]) and _source_errors[0] == 0
+        _allow_empty = bool(_sub_queries) or (not include_live) or _fetch_ok
+        _n_corpus = _set_scenario_corpus(scenario_id, _final_ids, allow_empty=_allow_empty)
         logger.info(f"Populate {scenario_id}: corpus final = {_n_corpus} docs "
                     f"(re-match local ∪ {_n_native} docs booléens-natifs PubMed/EPMC/préprints ; "
                     f"{'multi ' + _combinator if _sub_queries else 'mono'})")
