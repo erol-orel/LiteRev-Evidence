@@ -8548,7 +8548,13 @@ def _run_user_scenario_populate(
                         doc_id, _new = _ingest_doc_direct(
                             source="pubmed", title=title, abstract=abstract or None,
                             year=year, url=f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/",
-                            external_id=pmid, doi=doi, authors=authors, journal=journal,
+                            # external_id « pmid:<id> » — MÊME format que la recherche
+                            # live (_live_fetch_pubmed) et que la convention des autres
+                            # sources (« s2: », « nct: », …). Auparavant brut (« <id> »),
+                            # d'où deux lignes pour le même article sans DOI selon le
+                            # chemin d'ingestion : le pré-SELECT par external_id ne les
+                            # rapprochait pas. Uniformisé, le doublon n'est plus créé.
+                            external_id=f"pmid:{pmid}", doi=doi, authors=authors, journal=journal,
                         )
                         _link_to_scenario(doc_id, boolean_native=True)   # source-union
                         if _new:
