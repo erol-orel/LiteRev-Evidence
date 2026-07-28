@@ -2115,6 +2115,15 @@ _DUP_IDS_SQL = f"""
     ) _g WHERE rn > 1
 """
 
+# Doublons « à purger » = détectés par la clé de contenu (_DUP_IDS_SQL) UNION ceux DÉJÀ
+# marqués is_duplicate (script de dédup manuel / historique). On ne remplace donc jamais
+# le contrat existant fondé sur le flag ; on l'ÉLARGIT à la détection par contenu.
+_DUP_ANY_IDS_SQL = f"""
+    SELECT id, project_context FROM literature_document WHERE is_duplicate IS TRUE
+    UNION
+    SELECT id, project_context FROM ({_DUP_IDS_SQL}) _c
+"""
+
 # Marque is_duplicate=TRUE + canonical_id (plus petit id du groupe) sur les doublons réels.
 # Idempotent (garde IS DISTINCT FROM). Utilisé UNIQUEMENT par la maintenance corpus
 # on-demand (jamais en tâche de fond silencieuse) : geste explicite, prévisualisé et
@@ -2133,16 +2142,16 @@ _DUP_FLAG_UPDATE_SQL = f"""
 
 
 def _count_corpus_duplicates(conn, project_context: str | None = None) -> int:
-    """Nombre de documents DOUBLONS (lignes non canoniques) calculé à la lecture, via la
-    MÊME clé d'identité que la dédup. Honnête sans exiger qu'un script ait posé
-    is_duplicate au préalable. `project_context=None` → tous projets confondus."""
+    """Nombre de documents DOUBLONS calculé à la lecture = détectés par la clé de contenu
+    (même identité que la dédup) UNION ceux déjà marqués is_duplicate. Honnête sans exiger
+    qu'un script ait posé le flag. `project_context=None` → tous projets confondus."""
     if project_context:
         return int(conn.execute(
-            text(f"SELECT COUNT(*) FROM ({_DUP_IDS_SQL}) x WHERE x.project_context = :ctx"),
+            text(f"SELECT COUNT(*) FROM ({_DUP_ANY_IDS_SQL}) x WHERE x.project_context = :ctx"),
             {"ctx": project_context},
         ).scalar() or 0)
     return int(conn.execute(
-        text(f"SELECT COUNT(*) FROM ({_DUP_IDS_SQL}) x")
+        text(f"SELECT COUNT(*) FROM ({_DUP_ANY_IDS_SQL}) x")
     ).scalar() or 0)
 
 
@@ -4595,24 +4604,24 @@ def corpus_maintenance(
         ).scalar())
 
         # ── 1. DOUBLONS ────────────────────────────────────────────────────
-        # Doublons RÉELS détectés à la lecture (même clé d'identité que la dédup :
-        # DOI › external_id normalisé › titre long), SANS dépendre du flag is_duplicate
-        # qu'aucun runtime ne pose. L'aperçu (dry_run) COMPTE sans rien écrire ; à
-        # l'application on POSE d'abord is_duplicate sur ces doublons (idempotent), puis
-        # la sauvegarde + purge existantes (WHERE is_duplicate IS TRUE) opèrent — le tout
-        # dans la même transaction atomique.
+        # Doublons = détectés à la lecture par la clé de contenu (DOI › external_id
+        # normalisé › titre long) UNION ceux DÉJÀ marqués is_duplicate (script manuel /
+        # historique) — on élargit le contrat existant, sans le remplacer. L'aperçu
+        # (dry_run) COMPTE sans rien écrire ; à l'application on POSE d'abord is_duplicate
+        # sur les doublons de contenu (idempotent), puis la sauvegarde + purge existantes
+        # (WHERE is_duplicate IS TRUE) opèrent — le tout dans la même transaction atomique.
         dup_docs = conn.execute(text(
-            f"SELECT COUNT(*) FROM ({_DUP_IDS_SQL}) x"
+            f"SELECT COUNT(*) FROM ({_DUP_ANY_IDS_SQL}) x"
         )).scalar() or 0
         dup_chunks = conn.execute(text(
             f"SELECT COUNT(*) FROM document_chunk "
-            f"WHERE document_id IN (SELECT id FROM ({_DUP_IDS_SQL}) x)"
+            f"WHERE document_id IN (SELECT id FROM ({_DUP_ANY_IDS_SQL}) x)"
         )).scalar() or 0
         dup_ars = 0
         if has_ars:
             dup_ars = conn.execute(text(
                 f"SELECT COUNT(*) FROM article_scenarios "
-                f"WHERE document_id IN (SELECT id FROM ({_DUP_IDS_SQL}) x)"
+                f"WHERE document_id IN (SELECT id FROM ({_DUP_ANY_IDS_SQL}) x)"
             )).scalar() or 0
         report["duplicates"] = {
             "documents": int(dup_docs),
