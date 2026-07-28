@@ -2030,6 +2030,64 @@ def _set_scenario_corpus(scenario_id: str, ids: list, allow_empty: bool = False)
     return len(ids)
 
 
+def _dedup_scenario_links(scenario_id: str) -> int:
+    """Supprime les liens `article_scenarios` DOUBLONS d'un scénario : un seul lien
+    par article distinct, pour que le « corpus » affiché soit stable entre écrans et
+    dans le temps.
+
+    Les index uniques GLOBAUX couvrent le DOI et le titre normalisé, mais PAS le
+    PMID : un même article PubMed SANS DOI ingéré via deux chemins (live =
+    external_id « pmid:123 », populate = « 123 ») crée deux lignes qui échappent au
+    pré-SELECT (external_id différent) ET à l'index DOI (NULL). D'où un article
+    compté deux fois, puis un total qui « fond » plus tard quand la maintenance
+    marque enfin `is_duplicate`. On fige le compte MAINTENANT, de façon déterministe
+    et bornée au scénario : pour chaque clé (DOI › external_id normalisé sans préfixe
+    pmid/pmcid › titre normalisé ≥ 20 › id), on ne garde que le lien de plus petit
+    `document_id` (le canonique — MÊME règle que `scripts/_softdedup.py`, donc aucun
+    « glissement » quand la dédup globale tournera : elle marquera exactement les id
+    supérieurs déjà retirés ici). Aucune fusion abusive : seules des clés EXACTES
+    (même DOI, même external_id normalisé, ou même titre long) sont réunies ; un
+    external_id vide retombe sur le titre puis sur l'id (jamais fusionné). Renvoie le
+    nombre de liens supprimés. Tolérant aux pannes (journalise et renvoie 0)."""
+    try:
+        with engine.begin() as _c:
+            n = _c.execute(text("""
+                WITH keyed AS (
+                    SELECT a.document_id,
+                           COALESCE(
+                             NULLIF(lower(btrim(d.doi)), ''),
+                             NULLIF('ext:' || lower(btrim(
+                                 regexp_replace(d.external_id, '^(pmid|pmcid):', '', 'i')
+                             )), 'ext:'),
+                             CASE WHEN d.title_norm IS NOT NULL
+                                   AND length(d.title_norm) >= 20
+                                  THEN 'tn:' || d.title_norm END,
+                             'id:' || a.document_id::text
+                           ) AS k
+                    FROM article_scenarios a
+                    JOIN literature_document d ON d.id = a.document_id
+                    WHERE a.scenario_id = :sid
+                ),
+                ranked AS (
+                    SELECT document_id,
+                           MIN(document_id) OVER (PARTITION BY k) AS keep_id
+                    FROM keyed
+                )
+                DELETE FROM article_scenarios a
+                USING ranked r
+                WHERE a.scenario_id = :sid
+                  AND a.document_id = r.document_id
+                  AND r.document_id <> r.keep_id
+            """), {"sid": scenario_id}).rowcount
+        if n:
+            logger.info(f"Dédup intra-scénario {scenario_id}: {n} lien(s) doublon(s) "
+                        f"supprimé(s) (même DOI/PMID/titre).")
+        return n or 0
+    except Exception as _e:
+        logger.warning(f"Dédup intra-scénario {scenario_id}: {_e}")
+        return 0
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Live federated search
 # ─────────────────────────────────────────────────────────────────────────────
@@ -9167,6 +9225,12 @@ def _run_user_scenario_populate(
         except Exception as _e_noabs:
             logger.warning(f"Suppression articles sans abstract {scenario_id}: {_e_noabs}")
 
+        # ── Dédup INTRA-scénario : un seul lien par article distinct ─────────
+        # APRÈS le retrait des articles sans abstract, pour ne jamais garder par
+        # erreur une copie sans résumé au détriment d'une copie complète du même
+        # article. Fige le compte de façon déterministe (cf. _dedup_scenario_links).
+        _dedup_scenario_links(scenario_id)
+
         # ── Mettre à jour article_count (avant rerank) ──────────────────────
         # NB : on ne marque PAS encore populate_status='done' ici — le scoring
         # n'a pas tourné. Le marquer prématurément faisait paraître "prêt" un
@@ -12170,6 +12234,7 @@ def rebuild_corpus(scenario_id: str, _: None = Depends(require_api_key)) -> dict
         try:
             ids = _boolean_corpus_ids(boolean, filters)        # base LOCALE uniquement
             n_corpus = _set_scenario_corpus(scenario_id, ids)  # fixe l'appartenance
+            n_corpus -= _dedup_scenario_links(scenario_id)     # un seul lien / article distinct
             _backfill_title_abstract_chunks(scenario_id)       # chunks résumé manquants
             n = _run_semantic_rerank_inline(scenario_id, query or boolean)  # cosinus pgvector
             try:

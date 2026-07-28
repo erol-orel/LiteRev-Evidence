@@ -3942,7 +3942,10 @@ function EvidencesSection({ scenarioId, detail }: { scenarioId: string; detail: 
       const llm = llmData;
       const b = briefData;
       const dups_pdf = b.corpus_stats.duplicates ?? 0;
-      const uniqueTotal_pdf = b.corpus_stats.total - dups_pdf;
+      // `total` renvoyé par le backend EXCLUT déjà les doublons (COUNT FILTER
+      // is_duplicate IS NOT TRUE) — on l'affiche tel quel. Soustraire `dups` ici
+      // dédupliquait une SECONDE fois → chiffre plus bas que la carte scénario.
+      const uniqueTotal_pdf = b.corpus_stats.total;
       // Le PDF reflète exactement les mêmes chiffres que le panneau Evidences à
       // l'écran : stats clés ET distributions portent sur le SOUS-ENSEMBLE
       // PERTINENT (≥ seuil sémantique), pas le corpus complet.
@@ -4147,7 +4150,10 @@ ${llm.future_research ? `<h3>${t("scenarioDetail.evidences.pdf.futureResearch")}
           {(()=>{
             const cs = briefData.corpus_stats;
             const dups = cs.duplicates ?? 0;
-            const uniqueTotal = cs.total - dups;
+            // `total` EXCLUT déjà les doublons côté backend (COUNT FILTER
+            // is_duplicate IS NOT TRUE) → même valeur que la carte scénario.
+            // (Soustraire `dups` de nouveau ici = double déduplication.)
+            const uniqueTotal = cs.total;
             const relevant = cs.relevant ?? uniqueTotal;
             const rTotal = relevant || 1;
             const thr = cs.threshold ?? 0.45;
