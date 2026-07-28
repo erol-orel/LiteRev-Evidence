@@ -2089,6 +2089,64 @@ def _dedup_scenario_links(scenario_id: str) -> int:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Déduplication GLOBALE du corpus : comptage « à la lecture » + marquage on-demand
+# ─────────────────────────────────────────────────────────────────────────────
+# MÊME clé d'identité d'article que _dedup_scenario_links (scope scénario), mais en
+# colonnes NUES (sans alias) pour les requêtes globales : DOI › external_id normalisé
+# (préfixe pmid/pmcid retiré, casse ignorée) › titre normalisé ≥ 20 › id. On PARTITIONNE
+# toujours par project_context (un « literev » et un « gesica » de même titre ne sont PAS
+# des doublons — cf. l'index unique partiel uq_litdoc_title_norm sur (project_context,…)).
+_DUP_KEY_SQL = """COALESCE(
+    NULLIF(lower(btrim(doi)), ''),
+    NULLIF('ext:' || lower(btrim(regexp_replace(external_id, '^(pmid|pmcid):', '', 'i'))), 'ext:'),
+    CASE WHEN title_norm IS NOT NULL AND length(title_norm) >= 20 THEN 'tn:' || title_norm END,
+    'id:' || id::text
+)"""
+
+# ids (+ project_context) des lignes NON canoniques = les doublons réels, calculés À LA
+# LECTURE : aucune écriture, aucune dépendance au flag is_duplicate (qu'aucun runtime ne
+# pose). Sert au « badge doublons », au statut dédup et à l'aperçu de maintenance → les
+# compteurs affichés reflètent la réalité même si le script de dédup n'a jamais tourné.
+_DUP_IDS_SQL = f"""
+    SELECT id, project_context FROM (
+        SELECT id, project_context,
+               ROW_NUMBER() OVER (PARTITION BY project_context, {_DUP_KEY_SQL} ORDER BY id) AS rn
+        FROM literature_document
+    ) _g WHERE rn > 1
+"""
+
+# Marque is_duplicate=TRUE + canonical_id (plus petit id du groupe) sur les doublons réels.
+# Idempotent (garde IS DISTINCT FROM). Utilisé UNIQUEMENT par la maintenance corpus
+# on-demand (jamais en tâche de fond silencieuse) : geste explicite, prévisualisé et
+# sauvegardé, donc toute correction de compteur qui en découle est transparente.
+_DUP_FLAG_UPDATE_SQL = f"""
+    WITH ranked AS (
+        SELECT id, MIN(id) OVER (PARTITION BY project_context, {_DUP_KEY_SQL}) AS keep_id
+        FROM literature_document
+    )
+    UPDATE literature_document d
+    SET is_duplicate = TRUE, canonical_id = r.keep_id
+    FROM ranked r
+    WHERE d.id = r.id AND r.id <> r.keep_id
+      AND (d.is_duplicate IS DISTINCT FROM TRUE OR d.canonical_id IS DISTINCT FROM r.keep_id)
+"""
+
+
+def _count_corpus_duplicates(conn, project_context: str | None = None) -> int:
+    """Nombre de documents DOUBLONS (lignes non canoniques) calculé à la lecture, via la
+    MÊME clé d'identité que la dédup. Honnête sans exiger qu'un script ait posé
+    is_duplicate au préalable. `project_context=None` → tous projets confondus."""
+    if project_context:
+        return int(conn.execute(
+            text(f"SELECT COUNT(*) FROM ({_DUP_IDS_SQL}) x WHERE x.project_context = :ctx"),
+            {"ctx": project_context},
+        ).scalar() or 0)
+    return int(conn.execute(
+        text(f"SELECT COUNT(*) FROM ({_DUP_IDS_SQL}) x")
+    ).scalar() or 0)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Live federated search
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -4346,11 +4404,10 @@ def get_fulltext_stats() -> dict[str, Any]:
             WHERE chunk_type = 'fulltext_section'
         """)).scalar() or 0
 
-        # Doublons marqués : on expose la taille dé-dupliquée du corpus pour que
-        # les compteurs ne surestiment pas le nombre d'articles réellement uniques.
-        duplicates = conn.execute(text(
-            "SELECT COUNT(*) FROM literature_document WHERE is_duplicate = TRUE"
-        )).scalar() or 0
+        # Doublons RÉELS calculés à la lecture (même clé d'identité que la dédup) :
+        # le badge reflète la vérité même si aucun script n'a jamais posé is_duplicate.
+        # Tous projets confondus, comme total_docs ci-dessus.
+        duplicates = _count_corpus_duplicates(conn)
 
         chunks_with_embedding = conn.execute(text("""
             SELECT COUNT(*) FROM document_chunk WHERE embedding IS NOT NULL
@@ -4538,20 +4595,24 @@ def corpus_maintenance(
         ).scalar())
 
         # ── 1. DOUBLONS ────────────────────────────────────────────────────
+        # Doublons RÉELS détectés à la lecture (même clé d'identité que la dédup :
+        # DOI › external_id normalisé › titre long), SANS dépendre du flag is_duplicate
+        # qu'aucun runtime ne pose. L'aperçu (dry_run) COMPTE sans rien écrire ; à
+        # l'application on POSE d'abord is_duplicate sur ces doublons (idempotent), puis
+        # la sauvegarde + purge existantes (WHERE is_duplicate IS TRUE) opèrent — le tout
+        # dans la même transaction atomique.
         dup_docs = conn.execute(text(
-            "SELECT COUNT(*) FROM literature_document WHERE is_duplicate IS TRUE"
+            f"SELECT COUNT(*) FROM ({_DUP_IDS_SQL}) x"
         )).scalar() or 0
         dup_chunks = conn.execute(text(
-            "SELECT COUNT(*) FROM document_chunk c "
-            "JOIN literature_document d ON d.id = c.document_id "
-            "WHERE d.is_duplicate IS TRUE"
+            f"SELECT COUNT(*) FROM document_chunk "
+            f"WHERE document_id IN (SELECT id FROM ({_DUP_IDS_SQL}) x)"
         )).scalar() or 0
         dup_ars = 0
         if has_ars:
             dup_ars = conn.execute(text(
-                "SELECT COUNT(*) FROM article_scenarios a "
-                "JOIN literature_document d ON d.id = a.document_id "
-                "WHERE d.is_duplicate IS TRUE"
+                f"SELECT COUNT(*) FROM article_scenarios "
+                f"WHERE document_id IN (SELECT id FROM ({_DUP_IDS_SQL}) x)"
             )).scalar() or 0
         report["duplicates"] = {
             "documents": int(dup_docs),
@@ -4559,6 +4620,9 @@ def corpus_maintenance(
             "article_scenarios": int(dup_ars),
         }
         if not dry_run and dup_docs:
+            # Pose is_duplicate/canonical_id sur les doublons réels (idempotent) AVANT
+            # la sauvegarde/purge, qui restent pilotées par is_duplicate IS TRUE.
+            conn.execute(text(_DUP_FLAG_UPDATE_SQL))
             bak_docs, bak_chunks = f"_maint_bak_docs_{ts}", f"_maint_bak_chunks_{ts}"
             conn.execute(text(
                 f'CREATE TABLE "{bak_docs}" AS '
@@ -5302,22 +5366,23 @@ def get_deduplication_status() -> dict[str, Any]:
         stats = conn.execute(text("""
             SELECT
                 COUNT(*) AS total,
-                SUM(CASE WHEN is_duplicate = TRUE THEN 1 ELSE 0 END) AS duplicates,
-                SUM(CASE WHEN is_duplicate IS NULL OR is_duplicate = FALSE THEN 1 ELSE 0 END) AS canonical,
                 SUM(CASE WHEN title_hash IS NOT NULL THEN 1 ELSE 0 END) AS with_title_hash,
                 SUM(CASE WHEN quality_score > 0 THEN 1 ELSE 0 END) AS with_quality_score
             FROM literature_document
             WHERE project_context = 'literev'
         """)).mappings().first()
+        # Doublons RÉELS à la lecture (même clé que la dédup), pas le flag is_duplicate
+        # qu'aucun runtime ne pose : le statut reflète la réalité en continu.
+        duplicates = _count_corpus_duplicates(conn, "literev")
+    total = int(stats["total"] or 0)
+    canonical = max(0, total - duplicates)
     return {
-        "total_documents": int(stats["total"] or 0),
-        "canonical_documents": int(stats["canonical"] or 0),
-        "duplicate_documents": int(stats["duplicates"] or 0),
+        "total_documents": total,
+        "canonical_documents": canonical,
+        "duplicate_documents": duplicates,
         "with_title_hash": int(stats["with_title_hash"] or 0),
         "with_quality_score": int(stats["with_quality_score"] or 0),
-        "deduplication_rate": round(
-            int(stats["duplicates"] or 0) / max(int(stats["total"] or 1), 1) * 100, 1
-        ),
+        "deduplication_rate": round(duplicates / max(total, 1) * 100, 1),
         "instructions": {
             "dry_run": "python3 scripts/deduplicate_corpus.py --dry-run",
             "execute": "python3 scripts/deduplicate_corpus.py --execute",
@@ -5793,7 +5858,18 @@ def _ensure_dedup_columns():
     with engine.begin() as conn:
         conn.execute(text(
             "ALTER TABLE literature_document ADD COLUMN IF NOT EXISTS title_norm TEXT"))
-    logger.info("Colonne title_norm (déduplication par titre) vérifiée/créée.")
+        # Colonnes de déduplication historiquement posées par des scripts ad-hoc
+        # (scripts/archive/*.sql) — garanties ici pour que TOUTE base (prod comme base
+        # reconstruite/CI) porte : `pmid` (renseignée à l'ingest → dédup PMID), et
+        # `is_duplicate`/`canonical_id` (marquage + statut de dédup, filtrés par ~20
+        # requêtes existantes). ADD COLUMN IF NOT EXISTS : no-op si déjà présentes.
+        conn.execute(text(
+            "ALTER TABLE literature_document ADD COLUMN IF NOT EXISTS pmid TEXT"))
+        conn.execute(text(
+            "ALTER TABLE literature_document ADD COLUMN IF NOT EXISTS is_duplicate BOOLEAN DEFAULT FALSE"))
+        conn.execute(text(
+            "ALTER TABLE literature_document ADD COLUMN IF NOT EXISTS canonical_id BIGINT"))
+    logger.info("Colonnes de déduplication (title_norm, pmid, is_duplicate, canonical_id) vérifiées/créées.")
 
 
 try:
@@ -8124,6 +8200,20 @@ def _ingest_doc_direct(
     title_norm = _normalize_title(title)
     content_text = f"{title}\n\n{abstract or ''}".strip()
 
+    # PMID dérivé de l'external_id (« pmid:123 » — format PubMed unifié, cf.
+    # _live_fetch_pubmed et le populate) ou d'un external_id purement numérique
+    # d'une source PubMed. Renseigne la colonne `pmid` (jusqu'ici NULL par ce
+    # chemin) pour que la dédup PMID (maintenance corpus / _softdedup) opère —
+    # sans dépendre du format d'external_id. Aucune signature d'appelant modifiée.
+    _pmid: str | None = None
+    if external_id:
+        _eid_s = external_id.strip()
+        _mp = re.match(r"^pmid:(\d+)$", _eid_s, re.I)
+        if _mp:
+            _pmid = _mp.group(1)
+        elif source == "pubmed" and _eid_s.isdigit():
+            _pmid = _eid_s
+
     # Dédup en UN SEUL aller-retour (au lieu de deux SELECT séparés) : par external_id,
     # sinon par DOI, sinon par TITRE normalisé — capte les doublons sans DOI (préprints,
     # essais) ou dont le DOI diffère selon la source. Titres < 20 car. normalisés ignorés
@@ -8163,10 +8253,10 @@ def _ingest_doc_direct(
         doc_id = _c.execute(text("""
             INSERT INTO literature_document (
                 source, title, abstract, year, url, external_id,
-                project_context, source_type, doi, authors, journal, title_norm
+                project_context, source_type, doi, authors, journal, title_norm, pmid
             ) VALUES (
                 :source, :title, :abstract, :year, :url, :external_id,
-                :project_context, :source_type, :doi, :authors, :journal, :title_norm
+                :project_context, :source_type, :doi, :authors, :journal, :title_norm, :pmid
             )
             ON CONFLICT DO NOTHING
             RETURNING id
@@ -8175,7 +8265,7 @@ def _ingest_doc_direct(
             "year": year, "url": url, "external_id": external_id,
             "project_context": project_context, "source_type": source_type,
             "doi": doi, "authors": authors, "journal": journal,
-            "title_norm": (title_norm or None),
+            "title_norm": (title_norm or None), "pmid": _pmid,
         }).scalar()
         is_new = doc_id is not None
         if doc_id is None:
