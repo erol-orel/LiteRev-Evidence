@@ -87,18 +87,18 @@ def test_build_where_ignores_blank_values():
 # ── _normalize_sub_queries (multi-query cleaning) ────────────────────────────
 def test_normalize_sub_queries_filters_and_defaults():
     raw = [
-        {"kind": "boolean", "text": "  cardiac arrest  "},  # trimmed
-        {"kind": "natural", "text": "bystander CPR"},
-        {"kind": "weird", "text": "x"},                     # unknown kind → natural
-        {"kind": "boolean", "text": "   "},                  # blank text → dropped
-        {"text": "no kind"},                                 # missing kind → natural
-        "not a dict",                                        # ignored
+        {"kind": "boolean", "text": "  cardiac arrest  "},          # trimmed; no op → None
+        {"kind": "natural", "text": "bystander CPR", "op": "and"},  # valid op preserved
+        {"kind": "weird", "text": "x", "op": "xor"},                # unknown kind → natural; bad op → None
+        {"kind": "boolean", "text": "   "},                          # blank text → dropped
+        {"text": "no kind", "op": "or"},                             # missing kind → natural; op preserved
+        "not a dict",                                                # ignored
     ]
     assert main._normalize_sub_queries(raw) == [
-        {"kind": "boolean", "text": "cardiac arrest"},
-        {"kind": "natural", "text": "bystander CPR"},
-        {"kind": "natural", "text": "x"},
-        {"kind": "natural", "text": "no kind"},
+        {"kind": "boolean", "text": "cardiac arrest", "op": None},
+        {"kind": "natural", "text": "bystander CPR", "op": "and"},
+        {"kind": "natural", "text": "x", "op": None},
+        {"kind": "natural", "text": "no kind", "op": "or"},
     ]
 
 
