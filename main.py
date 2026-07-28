@@ -657,6 +657,10 @@ def _ensure_performance_indexes() -> None:
     (au pire, la requête concernée reste en scan séquentiel, comme aujourd'hui)."""
     # 1) Index B-tree sur les colonnes de filtre / jointure les plus fréquentes.
     btree = [
+        # Extension trigramme : permet aux index GIN gin_trgm_ops (créés plus bas)
+        # d'assister les LIKE '%terme%' du match booléen. Tolérant : si le rôle DB ne
+        # peut pas créer l'extension, les index GIN échouent et on reste en scan.
+        "CREATE EXTENSION IF NOT EXISTS pg_trgm",
         "CREATE INDEX IF NOT EXISTS ix_article_scenarios_scenario ON article_scenarios (scenario_id)",
         "CREATE INDEX IF NOT EXISTS ix_article_scenarios_document ON article_scenarios (document_id)",
         "CREATE INDEX IF NOT EXISTS ix_article_scenarios_scen_sim ON article_scenarios (scenario_id, similarity_score)",
@@ -707,6 +711,29 @@ def _ensure_performance_indexes() -> None:
         logger.info("Index ANN pgvector (HNSW) vérifié/créé.")
     except Exception as e:
         logger.warning(f"Index ANN pgvector indisponible ({e}); recherche vectorielle en scan séquentiel.")
+
+    # 3) Index GIN TRIGRAMME (pg_trgm) sur titre / résumé / contenu : rendent les
+    # `LOWER(COALESCE(x,'')) LIKE '%terme%'` du match booléen index-assistés. Le
+    # wildcard EN TÊTE interdit tout index B-tree → sans ceci, chaque terme scanne
+    # séquentiellement 207k docs (× termes × facettes) — cause des recherches à
+    # plusieurs minutes. CONCURRENTLY + AUTOCOMMIT : build hors transaction, sans
+    # bloquer les écritures ; chaque index isolé/tolérant. L'expression indexée est
+    # IDENTIQUE à celle de la requête (sinon le planificateur n'utilise pas l'index).
+    trgm_ddl = [
+        "CREATE INDEX CONCURRENTLY IF NOT EXISTS ix_litdoc_title_trgm "
+        "ON literature_document USING gin (LOWER(COALESCE(title,'')) gin_trgm_ops)",
+        "CREATE INDEX CONCURRENTLY IF NOT EXISTS ix_litdoc_abstract_trgm "
+        "ON literature_document USING gin (LOWER(COALESCE(abstract,'')) gin_trgm_ops)",
+        "CREATE INDEX CONCURRENTLY IF NOT EXISTS ix_docchunk_content_trgm "
+        "ON document_chunk USING gin (LOWER(COALESCE(content,'')) gin_trgm_ops)",
+    ]
+    for _tddl in trgm_ddl:
+        try:
+            with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
+                conn.execute(text(_tddl))
+            logger.info(f"Index trigramme vérifié/créé : « {_tddl[:55]}… ».")
+        except Exception as e:
+            logger.warning(f"Index trigramme indisponible « {_tddl[:55]}… » ({e}); LIKE en scan séquentiel.")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1818,7 +1845,26 @@ def _search_local_doc_ids(
               {where_sql}
             LIMIT :limit
         """)
+    elif mode == "boolean":
+        # PERF : le match booléen est PAR DOCUMENT — `any_match_sql` n'apparie que
+        # d.title / d.abstract + un EXISTS corrélé sur document_chunk ; il ne référence
+        # PAS le chunk joint `c`. Piloter la requête depuis literature_document (~207k
+        # lignes) au lieu de document_chunk (souvent 1M+ lignes, multipliées par doc
+        # puis dédupliquées par DISTINCT) renvoie EXACTEMENT le même ensemble d'IDs en
+        # balayant 5-10× moins de lignes — cause majeure de la lenteur de la recherche
+        # locale et de la reconstruction du corpus (exécutée une fois PAR sous-requête).
+        sql = text(f"""
+            SELECT d.id
+            FROM literature_document d
+            WHERE ({any_match_sql})
+              AND d.abstract IS NOT NULL AND length(TRIM(d.abstract)) >= 30
+              AND (d.is_duplicate IS NULL OR d.is_duplicate = FALSE)
+              {where_sql}
+            LIMIT :limit
+        """)
     else:
+        # Mode mots-clés : `any_match_sql` référence c.content → la jointure au chunk
+        # est nécessaire (DISTINCT dédoublonne les docs à plusieurs chunks matchés).
         sql = text(f"""
             SELECT DISTINCT d.id
             FROM document_chunk c
