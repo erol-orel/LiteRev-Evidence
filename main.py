@@ -1936,7 +1936,29 @@ def _normalize_sub_queries(sub_queries: Any) -> list[dict]:
             _kind = _raw_kind                                      # override explicite
         else:
             _kind = "boolean" if _looks_boolean(_text) else "natural"   # auto-détection
-        out.append({"kind": _kind, "text": _text})
+        _raw_op = sq.get("op")
+        _op = _raw_op if _raw_op in ("and", "or") else None        # combinateur PAR facette
+        out.append({"kind": _kind, "text": _text, "op": _op})
+    return out
+
+
+def _fold_facet_sets(id_sets: list[set], facets: list[dict], combinator: str) -> set:
+    """Combine les ensembles d'IDs des facettes de GAUCHE À DROITE : la facette 0
+    (requête principale) est la base ; chaque facette suivante est UNIE (op='or') ou
+    INTERSECTÉE (op='and') selon SON propre opérateur. Un op absent retombe sur le
+    `combinator` global ('intersection'→'and', sinon 'or'). Quand tous les opérateurs
+    sont uniformes, le résultat est IDENTIQUE à l'ancien tout-union / tout-intersection
+    (le fold gauche→droite de ∪ ou ∩ = ∪/∩ de tous). Permet « principale OU #1 ET #2 »."""
+    if not id_sets:
+        return set()
+    default_op = "and" if combinator == "intersection" else "or"
+    out = set(id_sets[0])
+    for i in range(1, len(id_sets)):
+        op = (facets[i].get("op") if i < len(facets) else None) or default_op
+        if op == "and":
+            out &= id_sets[i]
+        else:
+            out |= id_sets[i]
     return out
 
 
@@ -1976,13 +1998,8 @@ def _multi_query_corpus_ids(sub_queries: list[dict], combinator: str, filters: d
         id_sets.append(set(_search_local_doc_ids(_boolean, "boolean", filters, limit=500_000)))
     if not id_sets:
         return []
-    if combinator == "intersection":
-        out: set = set(id_sets[0])
-        for s in id_sets[1:]:
-            out &= s
-    else:  # union (OU) — défaut ; l'intersection (ET) est le choix explicite
-        out = set().union(*id_sets)
-    return list(out)
+    # Fold gauche→droite selon l'op PAR facette (défaut = `combinator` global).
+    return list(_fold_facet_sets(id_sets, clean, combinator))
 
 
 def _set_scenario_corpus(scenario_id: str, ids: list, allow_empty: bool = False) -> int:
@@ -7677,13 +7694,15 @@ def post_search_facets(payload: FacetPreviewIn, _: None = Depends(require_api_ke
         ids = set(_search_local_doc_ids(boolean, "boolean", filters, limit=500_000))
         id_sets.append(ids)
         facets.append({"kind": sq["kind"], "text": sq["text"],
-                       "boolean": boolean, "count": len(ids)})
+                       "boolean": boolean, "count": len(ids), "op": sq.get("op")})
     if id_sets:
         union = len(set().union(*id_sets))
         intersection = len(set.intersection(*id_sets))
+        # `combined` reflète le fold gauche→droite avec l'op PAR facette (les totaux
+        # union/intersection restent affichés comme repères).
+        combined = len(_fold_facet_sets(id_sets, clean, payload.combinator))
     else:
-        union = intersection = 0
-    combined = intersection if payload.combinator == "intersection" else union
+        union = intersection = combined = 0
     return {"facets": facets, "union": union, "intersection": intersection,
             "combined": combined, "combinator": payload.combinator}
 

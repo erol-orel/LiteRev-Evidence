@@ -1962,7 +1962,7 @@ export default function App() {
   // n'y a pas au moins une sous-requête additionnelle → recherche mono-requête.
   function buildSubQueries(): SubQuery[] | null {
     const extra = extraQueries
-      .map((q) => ({ kind: q.kind, text: q.text.trim() }))
+      .map((q) => ({ kind: q.kind, text: q.text.trim(), ...(q.op ? { op: q.op } : {}) }))
       .filter((q) => q.text);
     if (!extra.length || !query.trim()) return null;
     // La requête principale est une FACETTE à part entière : son type est AUTO-DÉTECTÉ
@@ -2760,6 +2760,28 @@ export default function App() {
                         return (
                           <div key={i} className="space-y-1">
                             <div className="flex items-center gap-2">
+                              {/* Opérateur de CETTE facette vs le résultat courant (fold gauche→droite) :
+                                  OU (union) / ET (intersection). Défaut = combinateur global ; clic = bascule. */}
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  setExtraQueries((prev) =>
+                                    prev.map((r, j) =>
+                                      j === i
+                                        ? { ...r, op: ((r.op ?? (combinator === "intersection" ? "and" : "or")) === "and" ? "or" : "and") }
+                                        : r,
+                                    ),
+                                  )
+                                }
+                                title={t("search.combinator")}
+                                className={`shrink-0 rounded-lg border px-2 py-1.5 text-[10px] font-semibold uppercase tracking-wide transition ${
+                                  (sq.op ?? (combinator === "intersection" ? "and" : "or")) === "and"
+                                    ? "border-gold-400/40 bg-gold-500/15 text-gold-300"
+                                    : "border-brand-400/40 bg-brand-500/15 text-brand-300"
+                                }`}
+                              >
+                                {(sq.op ?? (combinator === "intersection" ? "and" : "or")) === "and" ? t("search.interShort") : t("search.unionShort")}
+                              </button>
                               {/* Type détecté automatiquement ; clic = auto → Booléen → Naturel → auto */}
                               <button
                                 type="button"
@@ -2843,12 +2865,23 @@ export default function App() {
                     </div>
                     <div className="mt-1.5 space-y-0.5 text-forest-300">
                       {facetPreview.facets.map((f, idx) => (
-                        <div key={idx} className="flex items-baseline justify-between gap-3">
-                          <span className="min-w-0 truncate">
-                            <span className="opacity-50">{idx === 0 ? t("search.mainQueryShort") : `#${idx}`}</span>{" "}
-                            {f.text}
-                          </span>
-                          <span className="shrink-0 tabular-nums opacity-80">{f.count}</span>
+                        <div key={idx} className="space-y-0.5">
+                          <div className="flex items-baseline justify-between gap-3">
+                            <span className="min-w-0 truncate">
+                              <span className="opacity-50">{idx === 0 ? t("search.mainQueryShort") : `#${idx}`}</span>{" "}
+                              {f.text}
+                            </span>
+                            <span className="shrink-0 tabular-nums opacity-80">{f.count}</span>
+                          </div>
+                          {/* Requête booléenne COMPILÉE de la facette (auditable) — affichée
+                              quand elle diffère du texte saisi, c.-à-d. pour une facette
+                              naturelle traduite (une facette booléenne EST déjà son texte). */}
+                          {f.boolean && f.boolean.trim() !== f.text.trim() && (
+                            <div className="break-words pl-3">
+                              <span className="opacity-50">{t("search.translatedTo")} </span>
+                              <code className="font-mono text-brand-300/70">{f.boolean}</code>
+                            </div>
+                          )}
                         </div>
                       ))}
                     </div>
