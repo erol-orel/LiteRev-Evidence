@@ -1588,6 +1588,10 @@ export interface SubQuery {
   // "boolean"/"natural" = explicit user override.
   kind: "boolean" | "natural" | "auto";
   text: string;
+  // Per-facet combine operator vs the running result, folded LEFT-TO-RIGHT:
+  // "or" = union, "and" = intersection. Omitted ⇒ the backend uses the global
+  // `combinator` for this facet. The main query (facet 0) is the base, no op.
+  op?: "and" | "or";
 }
 
 export interface FacetPreview {
@@ -1595,6 +1599,7 @@ export interface FacetPreview {
   text: string;
   boolean: string;               // the boolean actually matched (natural → translated)
   count: number;                 // lexical matches in the indexed library
+  op?: "and" | "or" | null;      // per-facet operator echoed back (null for the main facet / unset)
 }
 
 export interface FacetPreviewResponse {

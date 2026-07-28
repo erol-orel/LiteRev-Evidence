@@ -1962,7 +1962,7 @@ export default function App() {
   // n'y a pas au moins une sous-requête additionnelle → recherche mono-requête.
   function buildSubQueries(): SubQuery[] | null {
     const extra = extraQueries
-      .map((q) => ({ kind: q.kind, text: q.text.trim() }))
+      .map((q) => ({ kind: q.kind, text: q.text.trim(), ...(q.op ? { op: q.op } : {}) }))
       .filter((q) => q.text);
     if (!extra.length || !query.trim()) return null;
     // La requête principale est une FACETTE à part entière : son type est AUTO-DÉTECTÉ
@@ -2760,6 +2760,28 @@ export default function App() {
                         return (
                           <div key={i} className="space-y-1">
                             <div className="flex items-center gap-2">
+                              {/* Opérateur de CETTE facette vs le résultat courant (fold gauche→droite) :
+                                  OU (union) / ET (intersection). Défaut = combinateur global ; clic = bascule. */}
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  setExtraQueries((prev) =>
+                                    prev.map((r, j) =>
+                                      j === i
+                                        ? { ...r, op: ((r.op ?? (combinator === "intersection" ? "and" : "or")) === "and" ? "or" : "and") }
+                                        : r,
+                                    ),
+                                  )
+                                }
+                                title={t("search.combinator")}
+                                className={`shrink-0 rounded-lg border px-2 py-1.5 text-[10px] font-semibold uppercase tracking-wide transition ${
+                                  (sq.op ?? (combinator === "intersection" ? "and" : "or")) === "and"
+                                    ? "border-gold-400/40 bg-gold-500/15 text-gold-300"
+                                    : "border-brand-400/40 bg-brand-500/15 text-brand-300"
+                                }`}
+                              >
+                                {(sq.op ?? (combinator === "intersection" ? "and" : "or")) === "and" ? t("search.interShort") : t("search.unionShort")}
+                              </button>
                               {/* Type détecté automatiquement ; clic = auto → Booléen → Naturel → auto */}
                               <button
                                 type="button"

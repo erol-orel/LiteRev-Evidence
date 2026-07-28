@@ -193,6 +193,26 @@ def test_multi_query_translation_failure_falls_back_to_raw_text(monkeypatch):
     assert out == [9]
 
 
+def test_multi_query_per_facet_op_left_to_right(monkeypatch):
+    # Per-facet operators, folded LEFT-TO-RIGHT: main OR #1 AND #2 → ((M ∪ A) ∩ B).
+    _patch_local_ids(monkeypatch, {"M": [1, 2], "A": [2, 3], "B": [2, 4]})
+    sub = [{"kind": "boolean", "text": "M"},
+           {"kind": "boolean", "text": "A", "op": "or"},
+           {"kind": "boolean", "text": "B", "op": "and"}]
+    # ((M ∪ A) ∩ B) = ({1,2,3} ∩ {2,4}) = {2}  — note it is NOT plain union or intersection
+    assert main._multi_query_corpus_ids(sub, "union", {}) == [2]
+
+
+def test_multi_query_per_facet_op_overrides_global(monkeypatch):
+    # An explicit per-facet op takes precedence over the global combinator, so the
+    # same facets combine differently per the operator carried on each facet.
+    _patch_local_ids(monkeypatch, {"A": [1, 2, 3], "B": [3, 4]})
+    sub = [{"kind": "boolean", "text": "A"}, {"kind": "boolean", "text": "B", "op": "and"}]
+    assert main._multi_query_corpus_ids(sub, "union", {}) == [3]          # A AND B
+    sub_or = [{"kind": "boolean", "text": "A"}, {"kind": "boolean", "text": "B", "op": "or"}]
+    assert sorted(main._multi_query_corpus_ids(sub_or, "intersection", {})) == [1, 2, 3, 4]  # A OR B
+
+
 # ── _evidence_fingerprint (corpus/threshold/lang cache key) ───────────────────
 def test_evidence_fingerprint_is_order_independent():
     assert main._evidence_fingerprint([3, 1, 2], 0.45, "en", "brief") == \
