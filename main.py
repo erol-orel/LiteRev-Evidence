@@ -7019,6 +7019,39 @@ def create_user_scenario(payload: UserScenarioIn, _: None = Depends(require_api_
                 })
                 row = _get_user_scenario_or_404(existing)
                 return _user_scenario_to_gesica_format(row)
+    # « Enregistrer comme scénario » (épinglage) : ne PAS créer un doublon vide qui
+    # relancerait tout le populate (→ un scénario épinglé « 0 article, ingestion… »
+    # EN PLUS de la recherche récente déjà peuplée). On PROMEUT plutôt la recherche
+    # récente correspondante — même identité COMPLÈTE (query+mode+sous-requêtes+
+    # combinateur) — en l'épinglant, ce qui conserve son corpus déjà construit.
+    # Repli sur un INSERT si aucune récente ne correspond (scénario réellement neuf).
+    if payload.pinned and not payload.folder_id:
+        with engine.begin() as conn:
+            existing = conn.execute(text("""
+                SELECT id FROM user_scenarios
+                WHERE query = :query AND mode = :mode AND pinned = false AND folder_id IS NULL
+                  AND sub_queries IS NOT DISTINCT FROM CAST(:sub_queries AS jsonb)
+                  AND COALESCE(combinator, '') = COALESCE(:combinator, '')
+                ORDER BY created_at DESC LIMIT 1
+            """), {"query": payload.query, "mode": payload.mode,
+                   "sub_queries": json.dumps(payload.sub_queries) if payload.sub_queries else None,
+                   "combinator": payload.combinator}).scalar()
+            if existing:
+                conn.execute(text("""
+                    UPDATE user_scenarios
+                    SET pinned = true, name = :name, filters = CAST(:filters AS jsonb),
+                        result_count = :result_count, updated_at = now(),
+                        search_strategy = COALESCE(CAST(:strategy AS jsonb), search_strategy)
+                    WHERE id = :id
+                """), {
+                    "id": existing,
+                    "name": payload.name,
+                    "filters": json.dumps(payload.filters),
+                    "result_count": payload.result_count,
+                    "strategy": json.dumps(payload.search_strategy) if payload.search_strategy else None,
+                })
+                row = _get_user_scenario_or_404(existing)
+                return _user_scenario_to_gesica_format(row)
     new_id = "usr-" + str(uuid.uuid4()).replace("-", "")[:12]
     with engine.begin() as conn:
         conn.execute(text("""
@@ -11182,21 +11215,32 @@ def get_user_scenario_pico_bulk(scenario_id: str, limit: int = 100000, offset: i
 def _compute_user_kg(scenario_id: str, max_nodes: int = 400, min_similarity: float = 0.35) -> dict[str, Any]:
     """Calcul du knowledge graph d'un scénario utilisateur (un seul endroit, réutilisé
     par l'endpoint ET le précalcul)."""
+    # Le clustering porte sur le SOUS-ENSEMBLE PERTINENT (≥ seuil sémantique OU inclus
+    # manuellement ; jamais les exclus), PAS sur tout le corpus — même définition que
+    # corpus_above et l'Assistant RAG. Sinon les communautés étaient diluées par des
+    # centaines d'articles hors-sujet ramenés par la fédération.
+    _thr = _get_scenario_threshold(scenario_id)
+    _relevant = (" AND COALESCE(ars.screening_status, d.screening_status) IS DISTINCT FROM 'excluded'"
+                 " AND (COALESCE(ars.screening_status, d.screening_status) = 'included'"
+                 "      OR COALESCE(ars.similarity_score, 0) >= :thr)")
     sql = _KG_NODE_SQL.format(
         join=("JOIN article_scenarios ars ON ars.document_id = d.id"
               " JOIN document_chunk c ON c.document_id = d.id"),
-        where="ars.scenario_id = :sid",
+        where="ars.scenario_id = :sid" + _relevant,
     )
     with engine.connect() as conn:
-        rows = conn.execute(text(sql), {"sid": scenario_id, "max_nodes": max_nodes}).mappings().all()
+        rows = conn.execute(text(sql), {"sid": scenario_id, "max_nodes": max_nodes, "thr": _thr}).mappings().all()
         n_total = conn.execute(text("""
             SELECT COUNT(*) FROM literature_document d
             JOIN article_scenarios ars ON ars.document_id = d.id
             WHERE ars.scenario_id = :sid
               AND d.is_duplicate IS NOT TRUE AND d.abstract IS NOT NULL
+              AND COALESCE(ars.screening_status, d.screening_status) IS DISTINCT FROM 'excluded'
+              AND (COALESCE(ars.screening_status, d.screening_status) = 'included'
+                   OR COALESCE(ars.similarity_score, 0) >= :thr)
               AND EXISTS (SELECT 1 FROM document_chunk c
                           WHERE c.document_id = d.id AND c.embedding IS NOT NULL)
-        """), {"sid": scenario_id}).scalar() or 0
+        """), {"sid": scenario_id, "thr": _thr}).scalar() or 0
     return _build_knowledge_graph(scenario_id, rows, min_similarity, int(n_total))
 
 
