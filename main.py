@@ -2100,18 +2100,28 @@ def _ncbi_get(url: str, params: dict, timeout: int = 12):
     return r
 
 
-def _live_fetch_pubmed(query: str, max_results: int) -> list[dict]:
-    """Fetch from PubMed eSearch+eSummary, return list of result dicts."""
-    results = []
+def _live_fetch_pubmed(query: str, max_results: int) -> tuple[list[dict], int]:
+    """Fetch from PubMed eSearch+eSummary.
+
+    Renvoie (résultats, hitcount_réel). `hitcount_réel` = esearchresult.count = le
+    NOMBRE VRAI d'enregistrements PubMed correspondant à la requête — le même
+    compteur que sur pubmed.ncbi.nlm.nih.gov — qui peut dépasser de loin les
+    `max_results` réellement rapatriés dans le panneau. Surfacé pour que le badge
+    de source affiche le vrai total trouvé, et non les seules lignes récupérées
+    (cause du « 306 sur PubMed mais 35 ici »)."""
+    results: list[dict] = []
+    total = 0
     try:
         base = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
         r = _ncbi_get(f"{base}/esearch.fcgi", {
             "db": "pubmed", "term": query, "retmax": max_results,
             "retmode": "json", "tool": "literev", "email": "api@literev.app"
         })
-        ids = r.json().get("esearchresult", {}).get("idlist", [])
+        _esr = r.json().get("esearchresult", {})
+        total = int(_esr.get("count", 0) or 0)          # vrai hitcount (comme le site)
+        ids = _esr.get("idlist", [])
         if not ids:
-            return []
+            return [], total
         r2 = _ncbi_get(f"{base}/esummary.fcgi", {
             "db": "pubmed", "id": ",".join(ids), "retmode": "json",
             "tool": "literev", "email": "api@literev.app"
@@ -2132,7 +2142,7 @@ def _live_fetch_pubmed(query: str, max_results: int) -> list[dict]:
             })
     except Exception as _e:
         logger.warning(f"_live_fetch_pubmed error: {_e}")
-    return results
+    return results, total
 
 
 def _live_fetch_openalex(query: str, max_results: int) -> list[dict]:
@@ -2380,9 +2390,18 @@ def _federated_live_search(
     import concurrent.futures
     pubmed_query = pubmed_query or query
     general_query = general_query or query
+    # PubMed RECALL : la requête MeSH générée (pubmed_query) est souvent BEAUCOUP plus
+    # étroite que le booléen portable (general_query) — p.ex. 35 vs 306 pour le même
+    # booléen collé sur le site PubMed. On interroge PubMed avec l'UNION des deux (même
+    # correctif que le populate) pour retrouver le rappel du site. Repli : booléen seul.
+    if (pubmed_query and general_query and pubmed_query != general_query
+            and len(pubmed_query) + len(general_query) <= 1900):
+        _pubmed_q = f"({pubmed_query}) OR ({general_query})"
+    else:
+        _pubmed_q = general_query or pubmed_query
 
     source_fns = [
-        ("PubMed", _live_fetch_pubmed, pubmed_query),
+        ("PubMed", _live_fetch_pubmed, _pubmed_q),
         ("OpenAlex", _live_fetch_openalex, general_query),
         ("Crossref", _live_fetch_crossref, general_query),
         ("EuropePMC", _live_fetch_europepmc, general_query),
@@ -2411,12 +2430,20 @@ def _federated_live_search(
                 sources_queried.append(name)
                 _ms = round((_t_fed.time() - _t0_fed) * 1000)
                 try:
-                    items = future.result()
-                    raw_counts[name] = len(items)
+                    _res = future.result()
+                    # Un fetcher renvoie soit une liste, soit (liste, total_trouvé_réel).
+                    # PubMed fournit son vrai hitcount (esearchresult.count), qui peut
+                    # dépasser les lignes rapatriées → le badge affiche le vrai total.
+                    if isinstance(_res, tuple):
+                        items, _found = _res
+                    else:
+                        items, _found = _res, None
+                    _found = _found if (_found is not None and _found >= len(items)) else len(items)
+                    raw_counts[name] = _found
                     all_results.extend(items)
                     source_status[name] = {
                         "status": "ok" if items else "empty",
-                        "count": len(items), "latency_ms": _ms,
+                        "count": _found, "fetched": len(items), "latency_ms": _ms,
                     }
                 except Exception as _fe:
                     logger.warning(f"federated source {name} error: {_fe}")
@@ -7497,6 +7524,11 @@ def get_user_scenario_corpus(
         # Répartition par source, en distinguant la base locale (docs déjà en base
         # avant ce scénario) des références ramenées en direct par les APIs pendant
         # la construction du corpus (docs créés après la création du scénario).
+        # PAS de LIMIT SQL : un ancien « LIMIT 12 » coupait les sources classées #13+
+        # (arXiv, bioRxiv, medRxiv, OpenAIRE…) → la SOMME des badges était inférieure au
+        # compteur d'en-tête (p.ex. 5758 badges vs 6031 total). On récupère TOUTES les
+        # sources et on regroupe la traîne dans « Autres » ci-dessous, si bien que la
+        # somme des badges = le total du corpus.
         source_dist = conn.execute(text(f"""
             SELECT d.source,
                    COUNT(*) AS cnt,
@@ -7505,17 +7537,30 @@ def get_user_scenario_corpus(
             FROM literature_document d
             JOIN article_scenarios ars ON ars.document_id = d.id AND ars.scenario_id = :sid
             WHERE {where}
-            GROUP BY d.source ORDER BY cnt DESC LIMIT 12
+            GROUP BY d.source ORDER BY cnt DESC
         """), {**{k: v for k, v in params.items() if k not in ('limit', 'offset')},
                'screated': _screated}).mappings().all()
         # Dict {source: n_local, "source (live)": n_live} pour le panneau de recherche.
+        # On détaille les 12 plus grosses sources ; le reste est regroupé dans « Autres »
+        # (local + live) → les badges totalisent EXACTEMENT le compteur du corpus.
         source_breakdown: dict[str, int] = {}
-        for r in source_dist:
+        _TOP_SOURCES = 12
+        _tail_local = _tail_live = 0
+        for _i, r in enumerate(source_dist):
             _src = r["source"] or "Autre"
-            if int(r["local_cnt"] or 0) > 0:
-                source_breakdown[_src] = int(r["local_cnt"])
-            if int(r["live_cnt"] or 0) > 0:
-                source_breakdown[f"{_src} (live)"] = int(r["live_cnt"])
+            _lc, _vc = int(r["local_cnt"] or 0), int(r["live_cnt"] or 0)
+            if _i < _TOP_SOURCES:
+                if _lc > 0:
+                    source_breakdown[_src] = _lc
+                if _vc > 0:
+                    source_breakdown[f"{_src} (live)"] = _vc
+            else:
+                _tail_local += _lc
+                _tail_live += _vc
+        if _tail_local > 0:
+            source_breakdown["Autres"] = _tail_local
+        if _tail_live > 0:
+            source_breakdown["Autres (live)"] = _tail_live
 
     # Auto-score : si des articles ne sont pas encore scorés, on lance le rerank
     # en arrière-plan (une fois). Le seuil devient alors exploitable.
@@ -8348,7 +8393,9 @@ def _run_user_scenario_populate(
     except Exception as _e_local:
         logger.warning(f"Local DB link failed for {scenario_id}: {_e_local}")
 
-    # ── Étape 1 : Interrogation parallèle des 7 sources externes ─────────────
+    # ── Étape 1 : Interrogation parallèle des 13 sources externes ────────────
+    # (13 sources nommées = 12 fetchers ; bioRxiv+medRxiv partagent un fetcher, et
+    #  Europe PMC sert 2 facettes — europepmc + préprints. Cf. source_funcs plus bas.)
 
     def _fetch_pubmed():
         count = 0
@@ -9190,7 +9237,7 @@ def _run_user_scenario_populate(
                 "errors": errors,
                 "total_found": total_found,
                 "sources": _sources_final,
-                "message": f"{ingested} articles ingérés depuis 5 sources ({_src_summary}), {errors} erreurs.",
+                "message": f"{ingested} articles ingérés depuis 13 sources ({_src_summary}), {errors} erreurs.",
             }
 
         # Arrière-plan : cross-encoder (réordonne le sous-ensemble pertinent) puis
@@ -9222,7 +9269,7 @@ def _run_user_scenario_populate(
             except Exception as _e_viz:
                 logger.warning(f"Tâches arrière-plan {scenario_id}: {_e_viz}")
 
-        logger.info(f"Populate user_scenario {scenario_id}: {ingested} articles ingérés (8 sources, parallèle).")
+        logger.info(f"Populate user_scenario {scenario_id}: {ingested} articles ingérés (13 sources, parallèle).")
         return ingested
 
     except Exception as e:
@@ -9489,7 +9536,7 @@ def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict
 
         if _real_ingested == 0:
             _user_scenario_pipeline_jobs[scenario_id]["overall_status"] = "done"
-            _user_scenario_pipeline_jobs[scenario_id]["message"] = "Aucun article trouvé (7 sources interrogées)."
+            _user_scenario_pipeline_jobs[scenario_id]["message"] = "Aucun article trouvé (13 sources interrogées)."
             return
 
         # ── Étape 2 : Full-text multi-sources (avant embedding pour enrichir les chunks) (PMC → EuropePMC → Unpaywall → bioRxiv → Semantic Scholar → OpenAlex) ──
@@ -10480,7 +10527,7 @@ def start_user_scenario_pipeline(
         "query": query,
         "max_results": max_results,
         "message": f"Pipeline complet lancé pour '{row['name']}' "
-                   "(ingest 8 sources → fulltext → embeddings → rerank → PICO → métadonnées → clustering). "
+                   "(ingest 13 sources → fulltext → embeddings → rerank → PICO → métadonnées → clustering). "
                    "Suivez la progression via GET /user-scenarios/{id}/pipeline/status.",
         "steps": ["ingest", "fulltext", "embed", "rerank", "pico", "metadata", "clustering"],
     }
