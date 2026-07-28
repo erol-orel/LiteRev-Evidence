@@ -2843,12 +2843,23 @@ export default function App() {
                     </div>
                     <div className="mt-1.5 space-y-0.5 text-forest-300">
                       {facetPreview.facets.map((f, idx) => (
-                        <div key={idx} className="flex items-baseline justify-between gap-3">
-                          <span className="min-w-0 truncate">
-                            <span className="opacity-50">{idx === 0 ? t("search.mainQueryShort") : `#${idx}`}</span>{" "}
-                            {f.text}
-                          </span>
-                          <span className="shrink-0 tabular-nums opacity-80">{f.count}</span>
+                        <div key={idx} className="space-y-0.5">
+                          <div className="flex items-baseline justify-between gap-3">
+                            <span className="min-w-0 truncate">
+                              <span className="opacity-50">{idx === 0 ? t("search.mainQueryShort") : `#${idx}`}</span>{" "}
+                              {f.text}
+                            </span>
+                            <span className="shrink-0 tabular-nums opacity-80">{f.count}</span>
+                          </div>
+                          {/* Requête booléenne COMPILÉE de la facette (auditable) — affichée
+                              quand elle diffère du texte saisi, c.-à-d. pour une facette
+                              naturelle traduite (une facette booléenne EST déjà son texte). */}
+                          {f.boolean && f.boolean.trim() !== f.text.trim() && (
+                            <div className="break-words pl-3">
+                              <span className="opacity-50">{t("search.translatedTo")} </span>
+                              <code className="font-mono text-brand-300/70">{f.boolean}</code>
+                            </div>
+                          )}
                         </div>
                       ))}
                     </div>
