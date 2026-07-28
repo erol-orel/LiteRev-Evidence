@@ -2613,6 +2613,10 @@ function PrismaSection({ scenarioId }: { scenarioId: string }) {
           icon={<Database size={13} className="text-emerald-400" />}
         >
           <PrismaBigNum value={totalRecords} sub={`${activeSources.length} ${activeSources.length !== 1 ? t("scenarioDetail.prisma.sourceSearchedPlural") : t("scenarioDetail.prisma.sourceSearchedSingular")}`} />
+          {/* « records identified » = étape PRISMA d'identification : compté AVANT
+              déduplication (norme PRISMA 2020), donc légitimement ≥ au corpus dédupliqué
+              affiché ailleurs. La note l'explicite pour éviter la lecture « incohérence ». */}
+          <div className="text-center text-[10px] text-emerald-300/50 -mt-1">{t("scenarioDetail.prisma.recordsIdentifiedNote")}</div>
           <div className="space-y-1">
             <PrismaRow label={t("scenarioDetail.prisma.embeddedSearchable")} value={num(ident.embedded)} />
             <PrismaRow label={t("scenarioDetail.prisma.duplicatesRemoved")} value={num(ident.duplicates_removed)} />

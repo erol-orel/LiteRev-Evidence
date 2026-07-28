@@ -674,6 +674,7 @@ export const fr = {
       subtitle:
         "Modern systematic review flow with semantic AI pre-screening and manual curation",
       stage1: "Stage 1: Identification",
+      recordsIdentifiedNote: "enregistrements identifiés — avant déduplication",
       sourceSearchedSingular: "source searched",
       sourceSearchedPlural: "sources searched",
       embeddedSearchable: "Embedded (searchable)",
