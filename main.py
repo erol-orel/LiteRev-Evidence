@@ -5108,6 +5108,11 @@ def _run_clustering_background(scenario_id: str, force_refresh: bool = False, la
         meta_for_cluster = {}
     try:
 
+        # Clustering sur le SOUS-ENSEMBLE PERTINENT (≥ seuil sémantique OU inclus
+        # manuellement ; jamais les exclus) — comme le knowledge graph et l'Assistant
+        # RAG. Sinon les topics étaient dilués par les centaines d'articles hors-sujet
+        # ramenés par la fédération.
+        _thr = _get_scenario_threshold(scenario_id)
         with engine.connect() as conn:
             docs = list(conn.execute(text("""
                 SELECT d.id, d.title, d.abstract, d.year, d.journal,
@@ -5128,9 +5133,12 @@ def _run_clustering_background(scenario_id: str, force_refresh: bool = False, la
                   AND (d.is_duplicate IS NULL OR d.is_duplicate = FALSE)
                   AND d.abstract IS NOT NULL
                   AND LENGTH(d.abstract) > 50
+                  AND COALESCE(asn.screening_status, d.screening_status) IS DISTINCT FROM 'excluded'
+                  AND (COALESCE(asn.screening_status, d.screening_status) = 'included'
+                       OR COALESCE(asn.similarity_score, 0) >= :thr)
                 ORDER BY d.year DESC NULLS LAST
                 LIMIT 100000
-            """), {"sid": scenario_id}).mappings().all())
+            """), {"sid": scenario_id, "thr": _thr}).mappings().all())
 
         if len(docs) < 5:
             result = {
@@ -10239,7 +10247,10 @@ def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict
         # ── Étape 7 : Clustering (UMAP+HDBSCAN avec fallback KMeans) ────────────
         update_step("clustering", "running")
         try:
-
+            # Clustering du pipeline sur le SOUS-ENSEMBLE PERTINENT (≥ seuil sémantique
+            # OU inclus manuellement ; jamais exclus) — cohérent avec le clustering à la
+            # demande et le knowledge graph.
+            _thr = _get_scenario_threshold(scenario_id)
             with engine.connect() as conn:
                 cl_docs = list(conn.execute(text("""
                     SELECT d.id, d.title, d.abstract, d.year, d.journal,
@@ -10256,11 +10267,15 @@ def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict
                     JOIN article_scenarios asn ON asn.document_id = d.id
                     WHERE asn.scenario_id = :sid
                       AND d.project_context = 'literev'
+                      AND (d.is_duplicate IS NULL OR d.is_duplicate = FALSE)
                       AND d.abstract IS NOT NULL
                       AND LENGTH(d.abstract) > 50
+                      AND COALESCE(asn.screening_status, d.screening_status) IS DISTINCT FROM 'excluded'
+                      AND (COALESCE(asn.screening_status, d.screening_status) = 'included'
+                           OR COALESCE(asn.similarity_score, 0) >= :thr)
                     ORDER BY d.year DESC NULLS LAST
                     LIMIT 100000
-                """), {"sid": scenario_id}).mappings().all())
+                """), {"sid": scenario_id, "thr": _thr}).mappings().all())
 
             if len(cl_docs) >= 5:
                 texts = [f"{d['title']} {d['abstract'] or ''}" for d in cl_docs]
