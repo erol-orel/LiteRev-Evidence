@@ -13121,6 +13121,15 @@ def _attach_model_spec(variables: dict, prov_articles: list[dict]) -> dict:
                 band["provenance"] = band_prov
                 cited.update(band_prov)
 
+    # ── Paramètres épidémiologiques (famille SEIR) ──────────────────────────────
+    # Nettoyés (nombres coercés, provenance filtrée sur le pool pertinent) par le
+    # module PUR seir_model (même logique testée hors-ligne). Bloc VIDE si le scénario
+    # n'est pas une maladie transmissible ou si rien n'est rapporté → le modèle
+    # compartimental (Phase 3) ne s'active tout simplement pas.
+    import seir_model as _seir
+    _epi = _seir.normalize_extracted_parameters(variables.get("epidemic_parameters"), valid_ids)
+    cited.update(_epi["cited"])
+
     # ── Data template (dérivé → garanti cohérent avec les machine_name ci-dessus) ──
     data_template = _derive_data_template(outcome, features)
 
@@ -13131,6 +13140,11 @@ def _attach_model_spec(variables: dict, prov_articles: list[dict]) -> dict:
         "features": features,
         "algorithm": algorithm,
         "data_template": data_template,
+        "epidemic_parameters": {
+            "applicable": _epi["applicable"],
+            "disease": _epi["disease"],
+            "params": _epi["params"],
+        },
     }
     variables["_provenance_index"] = {str(i): prov_meta[i] for i in sorted(cited) if i in prov_meta}
     return variables
@@ -13249,6 +13263,16 @@ Génère un JSON avec EXACTEMENT ces champs :
     "orange": {{"label": "Tension", "range": "Plage intermédiaire (ex: '0.10-0.30')", "rationale": "...", "provenance": [ids d'articles]}},
     "red":    {{"label": "Alerte",  "range": "Plage critique (ex: '> 0.30')", "rationale": "...", "provenance": [ids d'articles]}}
   }},
+  "epidemic_parameters": {{
+    "applicable": true si le scénario porte sur une MALADIE TRANSMISSIBLE (épidémie / infection) modélisable par un compartimental SEIR, false sinon,
+    "population_disease": "maladie / agent pathogène concerné si applicable, sinon null",
+    "r0": {{"value": nombre|null, "ci_low": nombre|null, "ci_high": nombre|null, "unit": "ratio", "n_studies": entier, "provenance": [ids d'articles rapportant cette valeur]}},
+    "infectious_period_days": {{"value": nombre|null, "ci_low": nombre|null, "ci_high": nombre|null, "unit": "days", "n_studies": entier, "provenance": [ids]}},
+    "incubation_period_days": {{"value": nombre|null, "ci_low": nombre|null, "ci_high": nombre|null, "unit": "days", "n_studies": entier, "provenance": [ids]}},
+    "cfr": {{"value": nombre|null, "ci_low": nombre|null, "ci_high": nombre|null, "unit": "proportion", "n_studies": entier, "provenance": [ids]}},
+    "immunity_duration_days": {{"value": nombre|null, "ci_low": nombre|null, "ci_high": nombre|null, "unit": "days", "n_studies": entier, "provenance": [ids]}},
+    "serial_interval_days": {{"value": nombre|null, "ci_low": nombre|null, "ci_high": nombre|null, "unit": "days", "n_studies": entier, "provenance": [ids]}}
+  }},
   "implementation_notes": "Notes d'implémentation pratiques",
   "validation_status": "pending"
 }}
@@ -13265,6 +13289,16 @@ cliniquement plausibles). Les trois plages doivent être contiguës et couvrir t
 domaine. Tu PEUX renommer les catégories si l'outcome s'y prête (ex. pour un compte :
 "Faible"/"Modéré"/"Élevé"), mais garde 3 niveaux du plus sûr au plus critique.
 
+IMPORTANT pour "epidemic_parameters" : ne renseigne ces paramètres qu'à partir de
+valeurs RÉELLEMENT rapportées dans les articles ci-dessus (avec leur provenance) ; mets
+"value": null pour tout paramètre non rapporté — n'invente AUCUN chiffre. Donne une
+estimation centrale + un intervalle (ci_low/ci_high, idéalement l'IC 95 %) reflétant la
+dispersion entre études quand plusieurs la rapportent. Pour agréger, PRIVILÉGIE les
+estimations des synthèses de meilleure qualité (revues systématiques / méta-analyses,
+cf. "study_design") sur les études isolées. "cfr" en PROPORTION (0..1, pas en
+pourcentage). Si le scénario ne porte PAS sur une maladie transmissible, mets
+"applicable": false et tous les "value" à null.
+
 Retourne UNIQUEMENT le JSON valide."""
 
     try:
@@ -13280,7 +13314,7 @@ Retourne UNIQUEMENT le JSON valide."""
         # (PICO seul, ou sans texte intégral) : régénérés puis réutilisés à évidence
         # constante. Seuil et langue inclus : un spec FR au seuil 0.45 ne doit pas être
         # resservi pour une requête EN ni pour un autre seuil.
-        _CTX_VERSION = "ctx-v4-relevant-fulltext"
+        _CTX_VERSION = "ctx-v5-epi-params"
         evidence_fingerprint = _evidence_fingerprint(
             [a.get("id") for a in pico_articles[:25] if a.get("id") is not None],
             threshold, lang, _CTX_VERSION)[:16]
