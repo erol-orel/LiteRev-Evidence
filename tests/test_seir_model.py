@@ -221,3 +221,104 @@ def test_extracted_params_feed_ensemble_end_to_end():
     assert ens["model"] == "SEIRD"                          # incubation + CFR present
     b = ens["summary"]["r0"]
     assert b["lower"] <= b["median"] <= b["upper"]
+
+
+# ── geography → population (Follow-up A) ──────────────────────────────────────
+def test_population_for_geography_exact_and_case_insensitive():
+    assert sm.population_for_geography("France") == 68_000_000
+    assert sm.population_for_geography("  france ") == 68_000_000     # trimmed + lowercased
+    assert sm.population_for_geography("SWITZERLAND") == 8_800_000
+    assert sm.population_for_geography("Suisse") == 8_800_000         # FR alias
+
+
+def test_population_for_geography_segments_first_match_wins():
+    # multi-segment label → first recognised segment (by order) is used
+    assert sm.population_for_geography("Geneva, Switzerland") == 500_000
+    assert sm.population_for_geography("multi-country / France") == 68_000_000
+    assert sm.population_for_geography("Vaud; Valais") == 815_000
+
+
+def test_population_for_geography_no_false_substring():
+    # "us" must NOT match inside "australia"; unknown/empty → None (no guessing)
+    assert sm.population_for_geography("australia") == 26_000_000
+    assert sm.population_for_geography("Neverland") is None
+    assert sm.population_for_geography("") is None
+    assert sm.population_for_geography(None) is None
+
+
+# ── quality-weighted pooling (Follow-up B) ────────────────────────────────────
+def test_pool_weighted_weights_toward_higher_quality():
+    # two studies: a low value at high quality, a high value at low quality → the
+    # pooled mean is pulled toward the high-quality study (below the plain average 2.5).
+    obs = [{"article_id": 1, "value": 2.0}, {"article_id": 2, "value": 3.0}]
+    pooled = sm.pool_weighted(obs, {1: 9.0, 2: 1.0})
+    assert 2.0 < pooled["value"] < 2.5
+    assert pooled["n_studies"] == 2
+    assert sorted(pooled["provenance"]) == [1, 2]
+    assert pooled["ci_low"] is not None and pooled["ci_low"] < pooled["value"] < pooled["ci_high"]
+
+
+def test_pool_weighted_single_and_empty():
+    one = sm.pool_weighted([{"article_id": 5, "value": 1.7}], {5: 4.0})
+    assert one["value"] == 1.7 and one["n_studies"] == 1
+    assert one["ci_low"] is None and one["ci_high"] is None    # single study → no dispersion CI
+    assert sm.pool_weighted([], {}) is None                    # nothing numeric → None
+    assert sm.pool_weighted([{"article_id": 1, "value": "abc"}], {1: 2.0}) is None
+
+
+def test_pool_weighted_defaults_weight_when_quality_missing():
+    # no quality map → equal weights → plain arithmetic mean
+    pooled = sm.pool_weighted([{"article_id": 1, "value": 2.0}, {"article_id": 2, "value": 4.0}])
+    assert abs(pooled["value"] - 3.0) < 1e-9
+
+
+# ── normalize with per-study observations + quality weighting ─────────────────
+def _obs_block():
+    return {
+        "applicable": True,
+        "population_disease": "Measles",
+        "r0": {"value": 12.0, "ci_low": 10.0, "ci_high": 14.0, "unit": "ratio",
+               "n_studies": 1, "provenance": [1],
+               "observations": [{"article_id": 1, "value": 15.0},
+                                {"article_id": 2, "value": 18.0},
+                                {"article_id": 99, "value": 999.0}]},  # 99 not in valid_ids
+    }
+
+
+def test_normalize_pooling_overrides_llm_value_when_two_studies():
+    norm = sm.normalize_extracted_parameters(_obs_block(), valid_ids={1, 2}, quality_by_id={1: 5.0, 2: 5.0})
+    r0 = norm["params"]["r0"]
+    # invalid obs (id 99) filtered; equal weights → mean of 15 and 18 = 16.5, NOT the LLM 12.0
+    assert abs(r0["value"] - 16.5) < 1e-9
+    assert r0["n_studies"] == 2
+    assert sorted(r0["provenance"]) == [1, 2]
+    assert r0["ci_low"] < r0["value"] < r0["ci_high"]
+
+
+def test_normalize_ignores_observations_without_quality_map():
+    # backward-compatible: no quality_by_id → observations ignored, LLM value kept
+    norm = sm.normalize_extracted_parameters(_obs_block(), valid_ids={1, 2})
+    assert norm["params"]["r0"]["value"] == 12.0
+
+
+def test_normalize_single_observation_falls_back_to_llm_value():
+    blk = {
+        "applicable": True,
+        "r0": {"value": 12.0, "provenance": [1],
+               "observations": [{"article_id": 1, "value": 15.0}]},  # only one → no pool override
+    }
+    norm = sm.normalize_extracted_parameters(blk, valid_ids={1}, quality_by_id={1: 5.0})
+    assert norm["params"]["r0"]["value"] == 12.0                # < 2 studies → LLM estimate retained
+
+
+def test_normalize_pooling_works_when_llm_value_absent():
+    # param with ONLY observations (no central "value") still yields a pooled estimate
+    blk = {
+        "applicable": True,
+        "cfr": {"value": None, "unit": "proportion", "provenance": [1, 2],
+                "observations": [{"article_id": 1, "value": 0.02},
+                                 {"article_id": 2, "value": 0.04}]},
+    }
+    norm = sm.normalize_extracted_parameters(blk, valid_ids={1, 2}, quality_by_id={1: 3.0, 2: 3.0})
+    assert "cfr" in norm["params"]
+    assert abs(norm["params"]["cfr"]["value"] - 0.03) < 1e-9

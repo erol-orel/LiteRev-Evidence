@@ -359,13 +359,16 @@ def _clean_provenance(prov, valid_ids: set) -> list[int]:
     return out
 
 
-def normalize_extracted_parameters(raw, valid_ids=None) -> dict:
+def normalize_extracted_parameters(raw, valid_ids=None, quality_by_id=None) -> dict:
     """Nettoie le bloc `epidemic_parameters` d'une extraction LLM en un bloc
     DÉTERMINISTE : nombres coercés, provenance filtrée sur `valid_ids` (le pool
     pertinent — si fourni), et SEULS les paramètres dont la valeur centrale est un
     nombre conservés. Renvoie
     ``{applicable, disease, params:{nom:{value,ci_low,ci_high,unit,n_studies,provenance}}, cited}``.
-    Pur (aucune I/O) : testable sans base ni réseau."""
+    Si `quality_by_id` est fourni ET qu'un paramètre porte des `observations` par étude,
+    l'estimation « narrative » du LLM est REMPLACÉE par un POOL NUMÉRIQUE pondéré par la
+    qualité (cf. pool_weighted) dès qu'au moins deux études pèsent — plus rigoureux et
+    reproductible. Pur (aucune I/O) : testable sans base ni réseau."""
     valid = set(valid_ids) if valid_ids is not None else None
     if not isinstance(raw, dict):
         return {"applicable": False, "disease": None, "params": {}, "cited": []}
@@ -375,23 +378,46 @@ def normalize_extracted_parameters(raw, valid_ids=None) -> dict:
         blk = raw.get(name)
         if not isinstance(blk, dict):
             continue
-        val = _num_or_none(blk.get("value"))
-        if val is None:
-            continue
+        val = _num_or_none(blk.get("value"))         # estimation LLM (peut être None)
         lo = _num_or_none(blk.get("ci_low"))
         hi = _num_or_none(blk.get("ci_high"))
         if lo is not None and hi is not None and lo > hi:
             lo, hi = None, None  # IC incohérent → ignoré (pas de fausse incertitude)
-        if name == "cfr":
-            val = min(max(val, 0.0), 1.0)  # létalité = proportion 0..1
         prov = _clean_provenance(blk.get("provenance"), valid) if valid is not None else []
-        for i in prov:
-            if i not in cited:
-                cited.append(i)
         try:
             n_studies = int(blk.get("n_studies"))
         except (TypeError, ValueError):
             n_studies = 0
+
+        # Pooling NUMÉRIQUE pondéré par la qualité (prioritaire sur l'estimation LLM)
+        # dès qu'au moins deux études réelles fournissent une observation.
+        if quality_by_id is not None and isinstance(blk.get("observations"), list):
+            _obs = []
+            for o in blk["observations"]:
+                if not isinstance(o, dict):
+                    continue
+                try:
+                    _aid = int(o.get("article_id"))
+                except (TypeError, ValueError):
+                    continue
+                if valid is None or _aid in valid:
+                    _obs.append(o)
+            pooled = pool_weighted(_obs, quality_by_id)
+            if pooled and pooled["n_studies"] >= 2:
+                val, lo, hi = pooled["value"], pooled["ci_low"], pooled["ci_high"]
+                if pooled["provenance"]:
+                    prov = pooled["provenance"]
+                n_studies = max(n_studies, pooled["n_studies"])
+
+        if val is None:
+            continue  # ni valeur LLM ni pool numérique → paramètre ignoré
+        if name == "cfr":
+            val = min(max(val, 0.0), 1.0)  # létalité = proportion 0..1
+            lo = min(max(lo, 0.0), 1.0) if lo is not None else None
+            hi = min(max(hi, 0.0), 1.0) if hi is not None else None
+        for i in prov:
+            if i not in cited:
+                cited.append(i)
         params[name] = {
             "value": val, "ci_low": lo, "ci_high": hi,
             "unit": str(blk.get("unit") or "")[:32],
@@ -423,3 +449,101 @@ def params_to_distributions(params) -> dict:
         else:
             out[name] = val
     return out
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Contexte : population par géographie + pooling numérique pondéré par la qualité
+# ─────────────────────────────────────────────────────────────────────────────
+# Estimations de population (ordre de grandeur, ~2024) par intitulé géographique
+# libre, pour dériver un DÉFAUT de projection du scénario au lieu d'un 1e6 fixe. Les
+# alias Romandie/Léman restent cohérents avec data_connectors._REGION_COORDS.
+_GEO_POPULATION: dict[str, float] = {
+    "world": 8_000_000_000, "global": 8_000_000_000, "worldwide": 8_000_000_000, "monde": 8_000_000_000,
+    "europe": 745_000_000, "european union": 449_000_000, "eu": 449_000_000, "ue": 449_000_000,
+    "africa": 1_400_000_000, "afrique": 1_400_000_000, "asia": 4_700_000_000, "asie": 4_700_000_000,
+    "north america": 600_000_000, "south america": 435_000_000, "latin america": 660_000_000,
+    "oceania": 45_000_000, "middle east": 380_000_000,
+    "france": 68_000_000, "switzerland": 8_800_000, "suisse": 8_800_000,
+    "united states": 335_000_000, "united states of america": 335_000_000, "usa": 335_000_000, "u.s.": 335_000_000,
+    "united kingdom": 67_000_000, "uk": 67_000_000, "england": 56_000_000, "royaume-uni": 67_000_000,
+    "germany": 84_000_000, "allemagne": 84_000_000, "italy": 59_000_000, "italie": 59_000_000,
+    "spain": 48_000_000, "espagne": 48_000_000, "canada": 40_000_000, "china": 1_410_000_000, "chine": 1_410_000_000,
+    "india": 1_430_000_000, "inde": 1_430_000_000, "brazil": 215_000_000, "brésil": 215_000_000,
+    "japan": 124_000_000, "japon": 124_000_000, "australia": 26_000_000, "australie": 26_000_000,
+    "netherlands": 17_700_000, "pays-bas": 17_700_000, "belgium": 11_700_000, "belgique": 11_700_000,
+    "sweden": 10_500_000, "norway": 5_500_000, "denmark": 5_900_000, "austria": 9_100_000, "autriche": 9_100_000,
+    "portugal": 10_300_000, "greece": 10_400_000, "poland": 37_700_000, "ireland": 5_100_000, "irlande": 5_100_000,
+    "geneva": 500_000, "geneve": 500_000, "genève": 500_000, "grand geneve": 1_050_000, "grand genève": 1_050_000,
+    "vaud": 815_000, "lausanne": 815_000, "valais": 350_000, "sion": 350_000,
+    "neuchatel": 175_000, "neuchâtel": 175_000, "fribourg": 325_000, "jura": 73_000, "romandie": 2_000_000,
+}
+
+
+def population_for_geography(geo_label) -> float | None:
+    """Estimation de population pour un intitulé géographique libre (pays/région/monde),
+    ou None si inconnu. Insensible à la casse ; teste le libellé ENTIER puis chaque
+    segment séparé par virgule/slash/point-virgule (ex. « France, Europe » → France).
+    PAS de sous-chaîne (éviter « us » ⊂ « australia »). PUR."""
+    if not geo_label:
+        return None
+    raw = str(geo_label).strip().lower()
+    if not raw:
+        return None
+    segs = [raw]
+    for sep in (",", "/", ";", "|"):
+        raw = raw.replace(sep, ",")
+    segs += [s.strip() for s in raw.split(",")]
+    for c in segs:
+        if c and c in _GEO_POPULATION:
+            return float(_GEO_POPULATION[c])
+    return None
+
+
+def pool_weighted(observations, quality_by_id=None) -> dict | None:
+    """Agrège des observations PAR ÉTUDE ``{"article_id", "value"}`` en une estimation
+    PONDÉRÉE PAR LA QUALITÉ : moyenne pondérée + IC 95 % ≈ moyenne ± 1.96·écart-type
+    pondéré (dispersion inter-études). Poids = ``quality_by_id[article_id]`` (> 0),
+    défaut 1.0 si absent/nul. Renvoie ``{value, ci_low, ci_high, n_studies, provenance}``
+    ou None si aucune observation numérique valide. PUR (aucune I/O)."""
+    pts: list[tuple[float, float, int | None]] = []
+    for o in observations or []:
+        if not isinstance(o, dict):
+            continue
+        v = _num_or_none(o.get("value"))
+        if v is None:
+            continue
+        try:
+            aid: int | None = int(o.get("article_id"))
+        except (TypeError, ValueError):
+            aid = None
+        w = 1.0
+        if aid is not None and quality_by_id:
+            try:
+                qf = float(quality_by_id.get(aid))
+                if qf > 0:
+                    w = qf
+            except (TypeError, ValueError):
+                pass
+        pts.append((v, w, aid))
+    if not pts:
+        return None
+    sw = sum(w for _v, w, _a in pts)
+    if sw <= 0:
+        return None
+    mean = sum(v * w for v, w, _a in pts) / sw
+    if len(pts) >= 2:
+        var = sum(w * (v - mean) ** 2 for v, w, _a in pts) / sw
+        sd = math.sqrt(max(var, 0.0))
+    else:
+        sd = 0.0
+    prov: list[int] = []
+    for _v, _w, a in pts:
+        if a is not None and a not in prov:
+            prov.append(a)
+    return {
+        "value": mean,
+        "ci_low": (mean - _Z * sd) if sd > 0 else None,
+        "ci_high": (mean + _Z * sd) if sd > 0 else None,
+        "n_studies": len(pts),
+        "provenance": prov,
+    }

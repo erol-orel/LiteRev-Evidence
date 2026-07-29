@@ -1078,7 +1078,8 @@ export const fr = {
       attackRate: "Taux d'attaque",
       deaths: "Décès totaux",
       studies: "études",
-      note: "Modèle compartimental auto-sélectionné et paramétré par le corpus de ce scénario ; la bande grisée représente l'incertitude sur les paramètres extraits.",
+      population: "Population",
+      note: "Modèle compartimental auto-sélectionné et paramétré par le corpus de ce scénario ; la bande grisée représente l'incertitude sur les paramètres extraits. Population exposée dérivée de la portée géographique du corpus.",
     },
     page: {
       sections: {
