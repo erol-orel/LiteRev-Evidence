@@ -1068,6 +1068,20 @@ export const en: Translations = {
       analyzingEvidence: "Analyzing evidence...",
       checkNewEvidence: "Check for new evidence",
     },
+    seir: {
+      title: "SEIR epidemic projection",
+      draws: "draws",
+      seriesIncidence: "Incidence",
+      seriesPrevalence: "Prevalence",
+      seriesCumulative: "Cumulative",
+      seriesDeaths: "Deaths",
+      r0: "R₀",
+      peakDay: "Peak day",
+      attackRate: "Attack rate",
+      deaths: "Total deaths",
+      studies: "studies",
+      note: "Compartmental model auto-selected and parameterized from this scenario's corpus; the shaded band is the uncertainty across the extracted parameters.",
+    },
     page: {
       sections: {
         review: "Corpus & Review",

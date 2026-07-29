@@ -1066,6 +1066,20 @@ export const fr = {
       analyzingEvidence: "Analyse de l'évidence...",
       checkNewEvidence: "Vérifier les nouvelles évidences",
     },
+    seir: {
+      title: "Projection épidémique SEIR",
+      draws: "tirages",
+      seriesIncidence: "Incidence",
+      seriesPrevalence: "Prévalence",
+      seriesCumulative: "Cumul",
+      seriesDeaths: "Décès",
+      r0: "R₀",
+      peakDay: "Jour du pic",
+      attackRate: "Taux d'attaque",
+      deaths: "Décès totaux",
+      studies: "études",
+      note: "Modèle compartimental auto-sélectionné et paramétré par le corpus de ce scénario ; la bande grisée représente l'incertitude sur les paramètres extraits.",
+    },
     page: {
       sections: {
         review: "Corpus & Revue",
