@@ -134,6 +134,11 @@ type DetailView = {
   country: string;
 };
 
+// Panneau « Signaux santé » (GESICA) désactivé : orienté réponse d'urgence / EMS,
+// hors cadre santé publique de la page recherche. Typé `boolean` (et non le littéral
+// `false`) pour que le `&&` garde bien le narrowing non-null de `evidenceSummary`.
+const SHOW_GESICA_SIGNALS: boolean = false;
+
 function csvEscape(value: unknown): string {
   return JSON.stringify(value ?? "");
 }
@@ -3403,7 +3408,7 @@ export default function App() {
                                 prévision, scénarios détectés, transfrontalier FR-CH) — hors du
                                 cadre santé publique de cette page. Masqué comme les autres blocs
                                 désactivés du fichier ; la mécanique reste pour un usage futur. */}
-                            {false && evidenceSummary && (
+                            {SHOW_GESICA_SIGNALS && evidenceSummary && (
                               <GesicaSignalsPanel summary={evidenceSummary} />
                             )}
 
