@@ -2370,6 +2370,58 @@ export async function getModelMonitor(scenarioId: string): Promise<ModelMonitor>
   return r.json();
 }
 
+// ── SEIR projection (literature-parameterized compartmental model) ──────────
+export interface SeirBand { median: number[]; lower: number[]; upper: number[]; }
+export interface SeirSummaryBand { median: number; lower: number; upper: number; }
+export interface SeirParamValue {
+  value: number;
+  ci_low: number | null;
+  ci_high: number | null;
+  unit?: string;
+  n_studies?: number;
+  provenance?: number[];
+}
+export interface SeirProjection {
+  applicable: boolean;
+  scenario_id: string;
+  reason?: string;
+  model?: string;
+  disease?: string | null;
+  n_samples?: number;
+  population?: number;
+  dates?: (string | number)[];
+  series?: {
+    incidence: SeirBand;
+    prevalence: SeirBand;
+    cumulative: SeirBand;
+    deaths: SeirBand;
+    r_eff: SeirBand;
+  };
+  summary?: {
+    model: string;
+    r0: SeirSummaryBand;
+    peak_incidence: SeirSummaryBand;
+    peak_incidence_day: SeirSummaryBand;
+    peak_prevalence: SeirSummaryBand;
+    peak_prevalence_day: SeirSummaryBand;
+    attack_rate: SeirSummaryBand;
+    total_deaths: SeirSummaryBand;
+  };
+  parameters?: Record<string, SeirParamValue>;
+}
+
+export async function fetchSeirProjection(
+  scenarioId: string,
+  params: { days?: number; start_date?: string; population?: number; initial_infected?: number; n_samples?: number } = {},
+): Promise<SeirProjection> {
+  const q = new URLSearchParams();
+  Object.entries(params).forEach(([k, v]) => { if (v != null) q.set(k, String(v)); });
+  const qs = q.toString();
+  const r = await safeFetch(`${API_BASE_URL}/scenarios/${scenarioId}/seir/projection${qs ? `?${qs}` : ""}`);
+  if (!r.ok) throw new Error(httpMessage(r.status));
+  return r.json();
+}
+
 export interface ProvArticle {
   id: number;
   title: string;

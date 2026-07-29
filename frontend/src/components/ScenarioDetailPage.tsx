@@ -42,6 +42,9 @@ import {
   generateSyntheticData,
   getModelTrainStatus,
   getModelMonitor,
+  fetchSeirProjection,
+  type SeirProjection,
+  type SeirSummaryBand,
   proposeSpec,
   getSpecProposal,
   validateSpecProposal,
@@ -722,6 +725,131 @@ function ForecastPanel({ run }: { run: ModelRun }) {
         <span className="flex items-center gap-1"><span className="inline-block w-3 h-[2px]" style={{ background: "#fbbf24" }} />{t("scenarioDetail.model.forecastHoldout")}</span>
         <span className="flex items-center gap-1"><span className="inline-block w-3 h-[2px]" style={{ background: "#38bdf8" }} />{t("scenarioDetail.model.forecastFuture")}</span>
       </div>
+    </div>
+  );
+}
+
+// ── SEIR projection (modèle compartimental paramétré par la littérature) ─────
+const _SEIR_SERIES = ["incidence", "prevalence", "cumulative", "deaths"] as const;
+type SeirSeriesKey = typeof _SEIR_SERIES[number];
+const _SEIR_COLOR: Record<SeirSeriesKey, string> = {
+  incidence: "#38bdf8", prevalence: "#a78bfa", cumulative: "#34d399", deaths: "#f87171",
+};
+const _SEIR_PARAM_LABEL: Record<string, string> = {
+  r0: "R₀", beta: "β", infectious_period_days: "Infectious (d)", incubation_period_days: "Incubation (d)",
+  cfr: "CFR", immunity_duration_days: "Immunity (d)", serial_interval_days: "Serial (d)",
+};
+
+function SeirProjectionPanel({ scenarioId }: { scenarioId: string }) {
+  const { t, lang } = useI18n();
+  const [proj, setProj] = useState<SeirProjection | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [series, setSeries] = useState<SeirSeriesKey>("incidence");
+
+  useEffect(() => {
+    let alive = true;
+    setLoading(true);
+    fetchSeirProjection(scenarioId)
+      .then(p => { if (alive) setProj(p); })
+      .catch(() => { if (alive) setProj(null); })
+      .finally(() => { if (alive) setLoading(false); });
+    return () => { alive = false; };
+  }, [scenarioId]);
+
+  // Silencieux tant que non applicable : scénario non épidémique, ou aucun paramètre
+  // épidémiologique extrait de la littérature.
+  if (loading || !proj || !proj.applicable || !proj.series || !proj.summary) return null;
+
+  const band = proj.series[series];
+  const median = (band.median ?? []).map(Number);
+  const lower = (band.lower ?? []).map(Number);
+  const upper = (band.upper ?? []).map(Number);
+  const N = median.length;
+  if (N < 2) return null;
+
+  const W = 640, H = 200, padL = 8, padR = 8, padT = 10, padB = 22;
+  const allY = [...median, ...lower, ...upper].filter(v => Number.isFinite(v));
+  const yMin = Math.min(...allY), yMax = Math.max(...allY);
+  const yPad = (yMax - yMin) * 0.08 || 1;
+  const y0 = yMin - yPad, y1 = yMax + yPad;
+  const xAt = (i: number) => padL + (i / Math.max(1, N - 1)) * (W - padL - padR);
+  const yAt = (v: number) => padT + (1 - (v - y0) / Math.max(1e-9, y1 - y0)) * (H - padT - padB);
+  const linePath = (vals: number[]) => vals.map((v, k) => `${k === 0 ? "M" : "L"}${xAt(k).toFixed(1)},${yAt(v).toFixed(1)}`).join(" ");
+  // CI band polygon (upper L→R, lower R→L).
+  const bandPts = (upper.length === N && lower.length === N)
+    ? [
+        ...upper.map((v, k) => `${xAt(k).toFixed(1)},${yAt(v).toFixed(1)}`),
+        ...Array.from({ length: N }, (_u, k) => { const j = N - 1 - k; return `${xAt(j).toFixed(1)},${yAt(lower[j]).toFixed(1)}`; }),
+      ].join(" ")
+    : "";
+  const color = _SEIR_COLOR[series];
+
+  const dates = proj.dates ?? [];
+  const fmtDate = (d: string | number | undefined) => {
+    if (d == null) return "";
+    if (typeof d === "number") return `J+${d}`;
+    const dt = new Date(d);
+    return isNaN(dt.getTime()) ? String(d) : dt.toLocaleDateString(lang === "fr" ? "fr-FR" : "en-US", { month: "short", day: "numeric" });
+  };
+  const sm = proj.summary;
+  const fmtBand = (x: SeirSummaryBand) => `${x.median} [${x.lower}–${x.upper}]`;
+  const seriesLabel: Record<SeirSeriesKey, string> = {
+    incidence: t("scenarioDetail.seir.seriesIncidence"),
+    prevalence: t("scenarioDetail.seir.seriesPrevalence"),
+    cumulative: t("scenarioDetail.seir.seriesCumulative"),
+    deaths: t("scenarioDetail.seir.seriesDeaths"),
+  };
+
+  return (
+    <div className="rounded-2xl border border-white/5 bg-white/2 p-3">
+      <div className="flex items-center justify-between flex-wrap gap-2">
+        <span className="text-[10px] text-white/35 uppercase tracking-wider flex items-center gap-1">
+          <TrendingUp size={11} /> {t("scenarioDetail.seir.title")}
+        </span>
+        <span className="text-[10px] text-white/40 font-mono">
+          {proj.model}{proj.disease ? ` · ${proj.disease}` : ""} · {proj.n_samples} {t("scenarioDetail.seir.draws")}
+        </span>
+      </div>
+
+      <div className="mt-2 flex flex-wrap gap-1.5">
+        {_SEIR_SERIES.map(k => (
+          <button key={k} type="button" onClick={() => setSeries(k)}
+            className={`rounded-full px-2 py-0.5 text-[10px] border transition ${series === k ? "border-white/30 bg-white/10 text-white" : "border-white/10 text-white/50 hover:bg-white/5"}`}>
+            {seriesLabel[k]}
+          </button>
+        ))}
+      </div>
+
+      <svg viewBox={`0 0 ${W} ${H}`} className="mt-2 w-full" style={{ height: "auto" }} preserveAspectRatio="none">
+        {bandPts && <polygon points={bandPts} fill={`${color}22`} stroke="none" />}
+        <path d={linePath(median)} fill="none" stroke={color} strokeWidth={1.6} />
+      </svg>
+      <div className="flex items-center justify-between text-[9px] text-white/30 font-mono">
+        <span>{fmtDate(dates[0])}</span>
+        <span>{fmtDate(dates[Math.floor(dates.length / 2)])}</span>
+        <span>{fmtDate(dates[dates.length - 1])}</span>
+      </div>
+
+      <div className="mt-2 grid grid-cols-2 sm:grid-cols-4 gap-2 text-[10px]">
+        <div><div className="text-white/40">{t("scenarioDetail.seir.r0")}</div><div className="font-mono text-white/80">{fmtBand(sm.r0)}</div></div>
+        <div><div className="text-white/40">{t("scenarioDetail.seir.peakDay")}</div><div className="font-mono text-white/80">{fmtBand(sm.peak_prevalence_day)}</div></div>
+        <div><div className="text-white/40">{t("scenarioDetail.seir.attackRate")}</div><div className="font-mono text-white/80">{(sm.attack_rate.median * 100).toFixed(1)}%</div></div>
+        <div><div className="text-white/40">{t("scenarioDetail.seir.deaths")}</div><div className="font-mono text-white/80">{fmtBand(sm.total_deaths)}</div></div>
+      </div>
+
+      {proj.parameters && Object.keys(proj.parameters).length > 0 && (
+        <div className="mt-2 border-t border-white/5 pt-1.5 flex flex-wrap gap-x-3 gap-y-1 text-[9px] text-white/40">
+          {Object.entries(proj.parameters).map(([k, v]) => (
+            <span key={k} className="font-mono">
+              {(_SEIR_PARAM_LABEL[k] ?? k)}={v.value}
+              {v.ci_low != null && v.ci_high != null ? ` [${v.ci_low}–${v.ci_high}]` : ""}
+              {v.provenance && v.provenance.length ? ` · ${v.provenance.length} ${t("scenarioDetail.seir.studies")}` : ""}
+            </span>
+          ))}
+        </div>
+      )}
+
+      <p className="mt-1.5 text-[9px] text-white/25 leading-tight">{t("scenarioDetail.seir.note")}</p>
     </div>
   );
 }
@@ -4706,6 +4834,9 @@ function ModelMonitorSection({ scenarioId }: { scenarioId: string }) {
                 </div>
               </div>
               {run.task_type === "forecast" && <ForecastPanel run={run} />}
+              {/* Projection épidémiologique SEIR paramétrée par la littérature (silencieuse
+                  hors scénario transmissible) — à côté de la prévision statistique. */}
+              <SeirProjectionPanel scenarioId={scenarioId} />
               {topImportances.length > 0 && (
                 <div className="rounded-xl border border-white/5 bg-white/2 px-3 py-2.5">
                   <span className="text-[10px] text-white/35 uppercase tracking-wider flex items-center gap-1"><TrendingUp size={11} /> {t("scenarioDetail.model.influentialVariables")}</span>
