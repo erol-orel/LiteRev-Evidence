@@ -320,3 +320,106 @@ def simulate_ensemble(
         "total_deaths": _sum_band("total_deaths"),
     }
     return out
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Paramètres extraits de la littérature → entrées du modèle
+# ─────────────────────────────────────────────────────────────────────────────
+# Paramètres épidémiologiques qu'on tente d'extraire du corpus (via LLM, cf. main).
+# `serial_interval_days` sert au recoupement de R0 et à l'affichage ; il n'est PAS
+# consommé par simulate_ensemble (clé inconnue de _PARAM_FIELDS → simplement ignorée).
+_EXTRACTED_FIELDS = (
+    "r0", "infectious_period_days", "incubation_period_days",
+    "cfr", "immunity_duration_days", "serial_interval_days",
+)
+
+
+def _num_or_none(v):
+    """float fini, ou None (couvre None, '', texte, NaN/inf)."""
+    try:
+        if v is None or v == "":
+            return None
+        f = float(v)
+        return f if math.isfinite(f) else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _clean_provenance(prov, valid_ids: set) -> list[int]:
+    """Ne garde que des ids d'articles RÉELS (présents dans `valid_ids`), dédupliqués,
+    dans l'ordre. Coerce en int ; ignore ce qui n'est pas un id valide."""
+    out: list[int] = []
+    for i in prov or []:
+        try:
+            iv = int(i)
+        except (TypeError, ValueError):
+            continue
+        if iv in valid_ids and iv not in out:
+            out.append(iv)
+    return out
+
+
+def normalize_extracted_parameters(raw, valid_ids=None) -> dict:
+    """Nettoie le bloc `epidemic_parameters` d'une extraction LLM en un bloc
+    DÉTERMINISTE : nombres coercés, provenance filtrée sur `valid_ids` (le pool
+    pertinent — si fourni), et SEULS les paramètres dont la valeur centrale est un
+    nombre conservés. Renvoie
+    ``{applicable, disease, params:{nom:{value,ci_low,ci_high,unit,n_studies,provenance}}, cited}``.
+    Pur (aucune I/O) : testable sans base ni réseau."""
+    valid = set(valid_ids) if valid_ids is not None else None
+    if not isinstance(raw, dict):
+        return {"applicable": False, "disease": None, "params": {}, "cited": []}
+    params: dict = {}
+    cited: list[int] = []
+    for name in _EXTRACTED_FIELDS:
+        blk = raw.get(name)
+        if not isinstance(blk, dict):
+            continue
+        val = _num_or_none(blk.get("value"))
+        if val is None:
+            continue
+        lo = _num_or_none(blk.get("ci_low"))
+        hi = _num_or_none(blk.get("ci_high"))
+        if lo is not None and hi is not None and lo > hi:
+            lo, hi = None, None  # IC incohérent → ignoré (pas de fausse incertitude)
+        if name == "cfr":
+            val = min(max(val, 0.0), 1.0)  # létalité = proportion 0..1
+        prov = _clean_provenance(blk.get("provenance"), valid) if valid is not None else []
+        for i in prov:
+            if i not in cited:
+                cited.append(i)
+        try:
+            n_studies = int(blk.get("n_studies"))
+        except (TypeError, ValueError):
+            n_studies = 0
+        params[name] = {
+            "value": val, "ci_low": lo, "ci_high": hi,
+            "unit": str(blk.get("unit") or "")[:32],
+            "n_studies": max(n_studies, len(prov)),
+            "provenance": prov,
+        }
+    applicable = bool(raw.get("applicable")) and bool(params)
+    disease = None
+    if raw.get("population_disease"):
+        disease = (str(raw.get("population_disease")).strip()[:120]) or None
+    return {"applicable": applicable, "disease": disease, "params": params, "cited": cited}
+
+
+def params_to_distributions(params) -> dict:
+    """Bloc `params` (cf. `normalize_extracted_parameters`) → dict d'entrée pour
+    `simulate_ensemble` : `ParamDist(moyenne, IC)` quand un IC est disponible, sinon la
+    valeur seule. Pur ; les paramètres non consommés par le modèle sont inoffensifs."""
+    out: dict = {}
+    for name, blk in (params or {}).items():
+        if not isinstance(blk, dict):
+            continue
+        val = _num_or_none(blk.get("value"))
+        if val is None:
+            continue
+        lo = _num_or_none(blk.get("ci_low"))
+        hi = _num_or_none(blk.get("ci_high"))
+        if lo is not None and hi is not None and hi > lo:
+            out[name] = ParamDist(mean=val, ci_low=lo, ci_high=hi)
+        else:
+            out[name] = val
+    return out

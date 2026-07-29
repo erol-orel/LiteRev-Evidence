@@ -158,3 +158,66 @@ def test_param_dist_sd_from_ci():
     d = sm.ParamDist(2.5, 2.0, 3.0)
     assert abs(d.sd() - (3.0 - 2.0) / (2 * 1.959963984540054)) < 1e-9
     assert sm.ParamDist(2.5).sd() == 0.0  # no CI → fixed
+
+
+# ── literature-extracted parameters → model inputs ───────────────────────────
+def _raw_block():
+    return {
+        "applicable": True,
+        "population_disease": "Influenza A (H3N2)",
+        "r0": {"value": "1.3", "ci_low": 1.1, "ci_high": 1.6, "unit": "ratio",
+               "n_studies": 4, "provenance": [11, 22, 999, "33"]},
+        "infectious_period_days": {"value": 4, "provenance": [11]},
+        "incubation_period_days": {"value": 2, "ci_low": 3, "ci_high": 1, "provenance": [22]},
+        "cfr": {"value": 1.4, "unit": "proportion", "provenance": [11]},
+        "immunity_duration_days": {"value": None},
+        "serial_interval_days": {"value": 3.0, "ci_low": 2.5, "ci_high": 3.6, "provenance": [22]},
+    }
+
+
+def test_normalize_coercion_and_provenance_filter():
+    norm = sm.normalize_extracted_parameters(_raw_block(), valid_ids={11, 22, 33})
+    assert norm["applicable"] is True
+    assert norm["disease"] == "Influenza A (H3N2)"
+    # invalid id 999 dropped, string "33" coerced to 33
+    assert norm["params"]["r0"]["provenance"] == [11, 22, 33]
+    assert norm["params"]["r0"]["value"] == 1.3
+    assert norm["cited"] == [11, 22, 33]
+
+
+def test_normalize_drops_nulls_clamps_cfr_and_bad_ci():
+    norm = sm.normalize_extracted_parameters(_raw_block(), valid_ids={11, 22, 33})
+    p = norm["params"]
+    assert "immunity_duration_days" not in p                 # value null → dropped entirely
+    assert p["cfr"]["value"] == 1.0                          # proportion clamped to [0,1]
+    # incoherent CI (low 3 > high 1) → CI discarded, value kept as a point estimate
+    assert "incubation_period_days" in p
+    assert p["incubation_period_days"]["ci_low"] is None and p["incubation_period_days"]["ci_high"] is None
+
+
+def test_normalize_not_applicable_or_empty():
+    # explicit not-applicable → applicable False even if numbers present
+    off = sm.normalize_extracted_parameters({"applicable": False, "r0": {"value": 2.0}}, valid_ids=set())
+    assert off["applicable"] is False and "r0" in off["params"]
+    # non-dict / missing → empty, safe
+    assert sm.normalize_extracted_parameters(None)["params"] == {}
+    assert sm.normalize_extracted_parameters("nope")["applicable"] is False
+
+
+def test_params_to_distributions_types():
+    norm = sm.normalize_extracted_parameters(_raw_block(), valid_ids={11, 22, 33})
+    dists = sm.params_to_distributions(norm["params"])
+    assert isinstance(dists["r0"], sm.ParamDist)             # has CI → distribution
+    assert dists["r0"].ci_low == 1.1 and dists["r0"].ci_high == 1.6
+    assert dists["infectious_period_days"] == 4.0            # no CI → fixed float
+    assert dists["incubation_period_days"] == 2.0           # CI discarded → fixed float
+
+
+def test_extracted_params_feed_ensemble_end_to_end():
+    norm = sm.normalize_extracted_parameters(_raw_block(), valid_ids={11, 22, 33})
+    dists = sm.params_to_distributions(norm["params"])
+    dists.update({"population": 1_000_000, "initial_infected": 50})
+    ens = sm.simulate_ensemble(dists, days=180, n_samples=40, seed=3)
+    assert ens["model"] == "SEIRD"                          # incubation + CFR present
+    b = ens["summary"]["r0"]
+    assert b["lower"] <= b["median"] <= b["upper"]
