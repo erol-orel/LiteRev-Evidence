@@ -178,6 +178,13 @@ export interface DocumentDetail {
   scenarioType?: string | null;
   geographicScope?: string | null;
   evidenceCategory?: string | null;
+  // Métadonnées « santé publique » + types normalisés (vocabulaire contrôlé côté backend).
+  authors?: string | null;
+  journal?: string | null;
+  doi?: string | null;
+  country?: string | null;
+  studyDesign?: string | null;   // devis normalisé (_STUDY_DESIGN_CASE)
+  articleType?: string | null;   // type d'article normalisé (_PUB_TYPE_CASE)
 }
 
 export interface ApiDocumentDetail {
@@ -194,6 +201,12 @@ export interface ApiDocumentDetail {
   scenario_type?: string | null;
   geographic_scope?: string | null;
   evidence_category?: string | null;
+  authors?: string | null;
+  journal?: string | null;
+  doi?: string | null;
+  country?: string | null;
+  study_design?: string | null;
+  article_type?: string | null;
 }
 
 export interface DocumentDetailResponse {
@@ -235,6 +248,12 @@ function mapDocumentDetailFromApi(apiDoc: ApiDocumentDetail): DocumentDetail {
     scenarioType: apiDoc.scenario_type,
     geographicScope: apiDoc.geographic_scope,
     evidenceCategory: apiDoc.evidence_category,
+    authors: apiDoc.authors,
+    journal: apiDoc.journal,
+    doi: apiDoc.doi,
+    country: apiDoc.country,
+    studyDesign: apiDoc.study_design,
+    articleType: apiDoc.article_type,
   };
 }
 

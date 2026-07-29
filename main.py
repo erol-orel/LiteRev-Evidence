@@ -449,6 +449,32 @@ _GRADE_LEVEL_CASE = """CASE
         ELSE 'Non évaluée'
       END"""
 
+# Type d'article normalisé → UN vocabulaire contrôlé aligné sur ce que PubMed / Crossref /
+# OpenAlex expriment (liste fusionnée validée). Le champ « Type » brut (source_type) est
+# quasi toujours « article » (chaque fetcher jette le type natif de l'API) et study_design
+# est du texte libre : ce CASE ramène les deux à une valeur unique et stable. `p` = signal
+# brut en minuscules = COALESCE(publication_type, study_design, source_type). Le 1er match
+# gagne, du plus spécifique au plus générique (non-randomisé avant randomisé, revue
+# systématique avant revue simple, rapport de cas avant cohorte).
+_PUB_TYPE_CASE = """CASE
+        WHEN p = '' THEN 'Journal article'
+        WHEN p LIKE '%systematic review%' OR p LIKE '%meta-analysis%' OR p LIKE '%meta analysis%' OR p LIKE '%umbrella review%' THEN 'Systematic review / Meta-analysis'
+        WHEN p LIKE '%practice guideline%' OR p LIKE '%guideline%' OR p LIKE '%recommendation%' OR p LIKE '%consensus statement%' THEN 'Practice guideline'
+        WHEN p LIKE '%non-random%' OR p LIKE '%non random%' OR p LIKE '%quasi-experimental%' OR p LIKE '%quasi experimental%' THEN 'Clinical trial (other)'
+        WHEN p LIKE '%randomized controlled trial%' OR p LIKE '%randomised controlled trial%' OR p LIKE '%randomi%' OR p LIKE 'rct%' THEN 'Randomized controlled trial'
+        WHEN p LIKE '%clinical trial%' OR p LIKE '%controlled trial%' OR p LIKE '%clinical_trial%' THEN 'Clinical trial (other)'
+        WHEN p LIKE '%case report%' OR p LIKE '%case series%' OR p LIKE '%case-report%' THEN 'Case report / series'
+        WHEN p LIKE '%cohort%' OR p LIKE '%case-control%' OR p LIKE '%case control%' OR p LIKE '%cross-sectional%' OR p LIKE '%cross sectional%' OR p LIKE '%observational%' OR p LIKE '%longitudinal%' OR p LIKE '%retrospective%' OR p LIKE '%prospective%' OR p LIKE '%registry%' OR p LIKE '%surveillance%' OR p LIKE '%ecological%' THEN 'Observational study'
+        WHEN p LIKE '%editorial%' OR p LIKE '%letter%' OR p LIKE '%comment%' OR p LIKE '%opinion%' OR p LIKE '%correspondence%' THEN 'Editorial / Letter'
+        WHEN p LIKE '%preprint%' OR p LIKE '%posted-content%' OR p LIKE '%posted content%' THEN 'Preprint'
+        WHEN p LIKE '%conference%' OR p LIKE '%proceedings%' THEN 'Conference paper'
+        WHEN p LIKE '%book%' OR p LIKE '%chapter%' OR p LIKE '%monograph%' OR p LIKE '%reference-entry%' THEN 'Book / Chapter'
+        WHEN p LIKE '%dataset%' OR p LIKE '%data paper%' OR p LIKE '%data-set%' THEN 'Dataset / Other'
+        WHEN p LIKE '%scoping review%' OR p LIKE '%narrative review%' OR p LIKE '%literature review%' OR p LIKE '%review%' THEN 'Review (narrative / scoping)'
+        WHEN p LIKE '%journal%' OR p LIKE '%article%' THEN 'Journal article'
+        ELSE 'Journal article'
+      END"""
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Pydantic models
 # ─────────────────────────────────────────────────────────────────────────────
@@ -2912,14 +2938,33 @@ def get_search_strategy(scenario_id: str) -> dict[str, Any]:
 # ─────────────────────────────────────────────────────────────────────────────
 @app.get("/documents/{document_id}")
 def get_document_detail(document_id: int) -> dict[str, Any]:
-    sql_doc = text("""
-        SELECT
-            id, source, title, abstract, year, url, external_id,
-            project_context, source_type, disease_or_condition,
-            scenario_type, geographic_scope, evidence_category
-        FROM literature_document
-        WHERE id = :document_id
-        LIMIT 1
+    # Détail enrichi ET recentré « santé publique » : on ajoute les champs
+    # bibliographiques utiles (auteurs / revue / DOI / pays) et on NORMALISE les deux
+    # axes de type à un vocabulaire contrôlé — `study_design` via _STUDY_DESIGN_CASE,
+    # `article_type` via _PUB_TYPE_CASE — au lieu du texte libre. `d`/`p` = signaux
+    # bruts en minuscules attendus par ces CASE. (source_type/scenario_type restent
+    # disponibles mais le front ne montre plus le scénario ni les ids internes.)
+    sql_doc = text(f"""
+        WITH _doc AS (
+            SELECT ld.id, ld.source, ld.title, ld.abstract, ld.year, ld.url, ld.external_id,
+                   ld.project_context, ld.source_type, ld.disease_or_condition,
+                   ld.scenario_type, ld.geographic_scope, ld.evidence_category,
+                   ld.authors, ld.journal, ld.doi, ld.country,
+                   lower(coalesce(nullif(trim(ld.study_design), ''), '')) AS d,
+                   lower(coalesce(nullif(trim(ld.publication_type), ''),
+                                  nullif(trim(ld.study_design), ''),
+                                  ld.source_type, '')) AS p
+            FROM literature_document ld
+            WHERE ld.id = :document_id
+            LIMIT 1
+        )
+        SELECT id, source, title, abstract, year, url, external_id,
+               project_context, source_type, disease_or_condition,
+               scenario_type, geographic_scope, evidence_category,
+               authors, journal, doi, country,
+               ({_STUDY_DESIGN_CASE}) AS study_design,
+               ({_PUB_TYPE_CASE}) AS article_type
+        FROM _doc
     """)
     sql_chunks = text("""
         SELECT
@@ -5885,6 +5930,34 @@ try:
     _ensure_dedup_columns()
 except Exception as _e:
     logger.warning(f"_ensure_dedup_columns: {_e}")
+
+
+def _ensure_bibliographic_columns():
+    """Colonnes bibliographiques / d'affichage historiquement posées par un script ad-hoc
+    (scripts/archive/migrate_add_bibliographic_columns.sql) — donc ABSENTES d'une base
+    reconstruite depuis schema.sql seul (CI incluse). On les garantit ici pour que le
+    détail document enrichi (auteurs / revue / DOI / pays / devis / type d'article) ET les
+    requêtes corpus existantes qui les lisent fonctionnent partout. ADD COLUMN IF NOT
+    EXISTS : no-op si déjà présentes."""
+    stmts = [
+        "ALTER TABLE literature_document ADD COLUMN IF NOT EXISTS authors TEXT",
+        "ALTER TABLE literature_document ADD COLUMN IF NOT EXISTS journal TEXT",
+        "ALTER TABLE literature_document ADD COLUMN IF NOT EXISTS doi TEXT",
+        "ALTER TABLE literature_document ADD COLUMN IF NOT EXISTS country TEXT",
+        "ALTER TABLE literature_document ADD COLUMN IF NOT EXISTS study_design TEXT",
+        "ALTER TABLE literature_document ADD COLUMN IF NOT EXISTS publication_type TEXT",
+    ]
+    with engine.begin() as conn:
+        for _s in stmts:
+            conn.execute(text(_s))
+    logger.info("Colonnes bibliographiques (authors, journal, doi, country, study_design, "
+                "publication_type) vérifiées/créées.")
+
+
+try:
+    _ensure_bibliographic_columns()
+except Exception as _e:
+    logger.warning(f"_ensure_bibliographic_columns: {_e}")
 
 
 class DoubleBlindDecisionIn(BaseModel):

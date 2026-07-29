@@ -125,7 +125,19 @@ type DetailView = {
   geography: string;
   evidence: string;
   chunkCount: number;
+  // Métadonnées « santé publique » + types normalisés (backend, vocabulaire contrôlé).
+  articleType: string;
+  studyDesign: string;
+  authors: string;
+  journal: string;
+  doi: string;
+  country: string;
 };
+
+// Panneau « Signaux santé » (GESICA) désactivé : orienté réponse d'urgence / EMS,
+// hors cadre santé publique de la page recherche. Typé `boolean` (et non le littéral
+// `false`) pour que le `&&` garde bien le narrowing non-null de `evidenceSummary`.
+const SHOW_GESICA_SIGNALS: boolean = false;
 
 function csvEscape(value: unknown): string {
   return JSON.stringify(value ?? "");
@@ -2386,6 +2398,13 @@ export default function App() {
       geography: doc?.geographicScope ?? selectedResult.geographicScope ?? "—",
       evidence: doc?.evidenceCategory ?? selectedResult.evidenceCategory ?? "—",
       chunkCount: selectedDocument?.chunks?.length ?? 0,
+      // types normalisés + biblio (renvoyés par /documents/{id}, sinon « — »)
+      articleType: doc?.articleType ?? doc?.sourceType ?? "—",
+      studyDesign: doc?.studyDesign ?? "—",
+      authors: doc?.authors ?? "—",
+      journal: doc?.journal ?? "—",
+      doi: doc?.doi ?? "—",
+      country: doc?.country ?? "—",
     };
   }, [selectedDocument, selectedResult]);
 
@@ -3384,24 +3403,34 @@ export default function App() {
                               </p>
                             </section>
 
-                            {evidenceSummary && (
+                            {/* Panneau « Signaux santé » (GESICA) retiré de la vue article :
+                                orienté réponse d'urgence / EMS (signaux de demande, horizon de
+                                prévision, scénarios détectés, transfrontalier FR-CH) — hors du
+                                cadre santé publique de cette page. Masqué comme les autres blocs
+                                désactivés du fichier ; la mécanique reste pour un usage futur. */}
+                            {SHOW_GESICA_SIGNALS && evidenceSummary && (
                               <GesicaSignalsPanel summary={evidenceSummary} />
                             )}
 
                             <section>
                               <h3 className="mb-2 font-medium text-white">{t("search.metadata")}</h3>
                               <dl className="grid grid-cols-1 gap-3 rounded-2xl border border-white/10 bg-white/5 p-4">
-                                <div><dt className="text-forest-400">{t("search.metaId")}</dt><dd>{detailView?.id ?? "—"}</dd></div>
-                                <div><dt className="text-forest-400">{t("search.metaSource")}</dt><dd>{detailView?.source}</dd></div>
-                                <div><dt className="text-forest-400">{t("search.metaYear")}</dt><dd>{detailView?.year}</dd></div>
-                                <div><dt className="text-forest-400">{t("search.metaExternalId")}</dt><dd>{detailView?.externalId}</dd></div>
-                                <div><dt className="text-forest-400">{t("search.metaProject")}</dt><dd>{detailView?.projectContext}</dd></div>
-                                <div><dt className="text-forest-400">{t("search.metaType")}</dt><dd>{detailView?.sourceType}</dd></div>
+                                {/* Recentré « santé publique » : type d'article + devis
+                                    normalisés, condition, zone/pays, niveau de preuve, puis
+                                    bibliographie (auteurs, revue, année, source, DOI). Retirés :
+                                    ids internes (ID, external id, projet, chunks) et le champ
+                                    Scénario (orienté urgence/EMS). */}
+                                <div><dt className="text-forest-400">{t("search.metaType")}</dt><dd>{detailView?.articleType}</dd></div>
+                                <div><dt className="text-forest-400">{t("search.metaStudyDesign")}</dt><dd>{detailView?.studyDesign}</dd></div>
                                 <div><dt className="text-forest-400">{t("search.metaDisease")}</dt><dd>{detailView?.disease}</dd></div>
-                                <div><dt className="text-forest-400">{t("search.metaScenario")}</dt><dd>{detailView?.scenario}</dd></div>
                                 <div><dt className="text-forest-400">{t("search.metaGeography")}</dt><dd>{detailView?.geography}</dd></div>
+                                <div><dt className="text-forest-400">{t("search.metaCountry")}</dt><dd>{detailView?.country}</dd></div>
                                 <div><dt className="text-forest-400">{t("search.metaEvidence")}</dt><dd>{detailView?.evidence}</dd></div>
-                                <div><dt className="text-forest-400">{t("search.metaChunks")}</dt><dd>{detailView?.chunkCount}</dd></div>
+                                <div><dt className="text-forest-400">{t("search.metaAuthors")}</dt><dd>{detailView?.authors}</dd></div>
+                                <div><dt className="text-forest-400">{t("search.metaJournal")}</dt><dd>{detailView?.journal}</dd></div>
+                                <div><dt className="text-forest-400">{t("search.metaYear")}</dt><dd>{detailView?.year}</dd></div>
+                                <div><dt className="text-forest-400">{t("search.metaSource")}</dt><dd>{detailView?.source}</dd></div>
+                                <div><dt className="text-forest-400">{t("search.metaDoi")}</dt><dd>{detailView?.doi && detailView.doi !== "—" ? <a href={`https://doi.org/${detailView.doi}`} target="_blank" rel="noopener noreferrer" className="text-brand-300 hover:underline">{detailView.doi}</a> : "—"}</dd></div>
                               </dl>
                             </section>
                           </div>
