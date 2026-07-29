@@ -944,6 +944,8 @@ function VariablesSection({ detail, scenarioId, onGoToModel }: { detail: Scenari
           if (llmPollRef.current) clearInterval(llmPollRef.current);
           setLlmGenStatus(null);
           loadLlmVars();
+          reloadModelState();   // le model_spec devient "ready" à la fin de la génération
+                                // → rafraîchir pour afficher « Ajuster le modèle » sans reload
         } else if (s.status === 'error') {
           if (llmPollRef.current) clearInterval(llmPollRef.current);
           setLlmGenStatus(null);
@@ -958,7 +960,7 @@ function VariablesSection({ detail, scenarioId, onGoToModel }: { detail: Scenari
       });
     }, 5000);
     return () => { if (llmPollRef.current) clearInterval(llmPollRef.current); };
-  }, [llmVars, scenarioId, loadLlmVars, t]);
+  }, [llmVars, scenarioId, loadLlmVars, reloadModelState, t]);
 
   const handleGenerateLlm = async () => {
     setLlmGenerating(true);
@@ -974,6 +976,7 @@ function VariablesSection({ detail, scenarioId, onGoToModel }: { detail: Scenari
             setLlmGenStatus(null);
             setLlmGenerating(false);
             loadLlmVars();
+            reloadModelState();   // idem : rendre « Ajuster le modèle » visible immédiatement
           } else if (s.status === 'error') {
             if (llmPollRef.current) clearInterval(llmPollRef.current);
             setLlmGenStatus(null);
@@ -1001,6 +1004,7 @@ function VariablesSection({ detail, scenarioId, onGoToModel }: { detail: Scenari
     try {
       await validateScenarioVariables(scenarioId, {});
       loadLlmVars();
+      reloadModelState();   // garder le spec (et « Ajuster le modèle ») synchrone après validation
     } catch (e: any) {
       setLlmError(e.message);
     } finally {
