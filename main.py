@@ -14813,8 +14813,15 @@ def auto_fetch_model_dataset(
         if cid not in data_connectors.CONNECTORS:
             fetch_errors[cid] = "connecteur inconnu"
             continue
+        _cparams = dict(base_params)
+        if cid == data_connectors.SEIR_CONNECTOR_ID:
+            # Le connecteur SEIR n'est PAS géographique : on lui injecte les paramètres
+            # épidémiologiques EXTRAITS du corpus (bloc model_spec) du scénario courant,
+            # afin que la série d'incidence/prévalence qui alimente le modèle soit
+            # paramétrée par la littérature de CE scénario.
+            _cparams["epidemic_parameters"] = spec.get("epidemic_parameters") or {}
         try:
-            rows = data_connectors.fetch_series(cid, dict(base_params))
+            rows = data_connectors.fetch_series(cid, _cparams)
         except Exception as _e:
             fetch_errors[cid] = str(_e)
             continue
@@ -14877,6 +14884,70 @@ def auto_fetch_model_dataset(
         "validation": report,
         "preview": json.loads(assembled.head(8).to_json(orient="records")),
         "training_started": _maybe_autotrain(scenario_id, report) if payload.auto_train else False,
+    }
+
+
+@app.get("/scenarios/{scenario_id}/seir/projection")
+def get_seir_projection(
+    scenario_id: str,
+    days: int = 365,
+    start_date: str | None = None,
+    population: float = 1_000_000.0,
+    initial_infected: float = 10.0,
+    n_samples: int = 300,
+) -> dict[str, Any]:
+    """Projection compartimentale (famille SEIR) d'un scénario, paramétrée par les
+    paramètres épidémiologiques EXTRAITS du corpus (model_spec.epidemic_parameters,
+    Phase 2). Renvoie les séries incidence / prévalence / cumul / décès / R_eff AVEC
+    bandes d'incertitude (IC de l'ensemble) + un résumé (modèle auto-sélectionné, R0,
+    pic, taux d'attaque) et les paramètres source (avec provenance) pour l'affichage et
+    la traçabilité. `applicable=false` si le scénario n'est pas une maladie
+    transmissible ou si rien n'a été extrait. Lecture seule, déterministe (seed fixe)."""
+    import seir_model
+    from datetime import date, timedelta
+    spec = _get_model_spec(scenario_id) or {}
+    epi = spec.get("epidemic_parameters") or {}
+    dists = seir_model.params_to_distributions((epi.get("params") or {}))
+    if not dists:
+        return {
+            "applicable": False,
+            "scenario_id": scenario_id,
+            "reason": "Aucun paramètre épidémiologique extrait de la littérature "
+                      "(scénario non transmissible, ou paramètres non rapportés).",
+        }
+    try:
+        dists["population"] = float(population or 1_000_000)
+    except (TypeError, ValueError):
+        dists["population"] = 1_000_000.0
+    try:
+        dists["initial_infected"] = float(initial_infected or 10)
+    except (TypeError, ValueError):
+        dists["initial_infected"] = 10.0
+    days = max(1, min(int(days or 365), 3650))
+    n_samples = max(1, min(int(n_samples or 300), 1000))
+    ens = seir_model.simulate_ensemble(dists, days=days, n_samples=n_samples)
+
+    d0 = None
+    if start_date:
+        try:
+            _y, _m, _d = (int(x) for x in str(start_date)[:10].split("-"))
+            d0 = date(_y, _m, _d)
+        except Exception:
+            d0 = None
+    dates = [((d0 + timedelta(days=int(_day))).isoformat() if d0 else int(_day))
+             for _day in ens["days"]]
+
+    return {
+        "applicable": True,
+        "scenario_id": scenario_id,
+        "model": ens["model"],
+        "disease": epi.get("disease"),
+        "n_samples": ens["n_samples"],
+        "population": dists["population"],
+        "dates": dates,
+        "series": {k: ens[k] for k in ("incidence", "prevalence", "cumulative", "deaths", "r_eff")},
+        "summary": ens["summary"],
+        "parameters": epi.get("params"),  # avec provenance → traçabilité UI
     }
 
 
