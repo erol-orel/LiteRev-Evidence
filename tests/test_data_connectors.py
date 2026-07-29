@@ -196,3 +196,44 @@ def test_fetch_foph_wastewater_filter_selects_region(monkeypatch):
     later = dc.fetch_series("foph-wastewater",
                             {"url": "https://x/ww.csv", "geoRegion": "GE", "start_date": "2025-01-05"})
     assert [r["date"] for r in later] == ["2025-01-08"]                  # date window on top of filter
+
+
+# ── SEIR projection connector (no network — integrates the model locally) ─────
+_SEIR_EPI = {
+    "applicable": True, "disease": "Influenza",
+    "params": {
+        "r0": {"value": 1.5, "ci_low": 1.3, "ci_high": 1.8},
+        "infectious_period_days": {"value": 6},
+        "incubation_period_days": {"value": 3},
+        "cfr": {"value": 0.02},
+    },
+}
+
+
+def test_seir_connector_projects_from_extracted_params():
+    rows = dc.fetch_series("seir-projection", {
+        "epidemic_parameters": _SEIR_EPI, "population": 500_000, "initial_infected": 10,
+        "start_date": "2026-01-01", "end_date": "2026-12-31", "n_samples": 40})
+    assert len(rows) == 365                                   # 2026-01-01 .. 2026-12-31 → 365 daily points
+    assert set(rows[0]) == {"date", "seir_incidence", "seir_prevalence", "seir_cumulative", "seir_deaths"}
+    assert rows[0]["date"] == "2026-01-01"
+    cum = [r["seir_cumulative"] for r in rows]
+    assert cum == sorted(cum)                                 # cumulative infections monotone up
+    assert max(r["seir_incidence"] for r in rows) > rows[0]["seir_incidence"]  # epidemic takes off
+    assert rows[-1]["seir_deaths"] > 0                        # CFR known → SEIRD → deaths accrue
+    json.dumps(rows)                                          # JSON-safe (goes into the dataset)
+
+
+def test_seir_connector_empty_when_not_applicable():
+    assert dc.fetch_series("seir-projection", {"epidemic_parameters": {"applicable": False, "params": {}}}) == []
+    assert dc.fetch_series("seir-projection", {}) == []       # nothing extracted → no projection
+
+
+def test_seir_connector_registered_and_metadata_json_safe():
+    assert "seir-projection" in dc.CONNECTORS
+    md = dc.CONNECTORS["seir-projection"].metadata()
+    assert "fetch" not in md                                  # callable excluded from JSON metadata
+    assert [v["machine_name"] for v in md["variables"]] == [
+        "seir_incidence", "seir_prevalence", "seir_cumulative", "seir_deaths"]
+    assert any(c["id"] == "seir-projection" for c in dc.list_connectors())
+    json.dumps(md)

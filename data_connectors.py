@@ -469,6 +469,116 @@ CONNECTORS: dict[str, Connector] = {
 }
 
 
+# ── SEIR projection (modèle compartimental paramétré par la littérature) ─────
+# PAS une source réseau : la « fetch » intègre localement le modèle SEIR-family
+# (seir_model) à partir des paramètres épidémiologiques EXTRAITS du corpus, transmis
+# dans params["epidemic_parameters"] (= bloc model_spec.epidemic_parameters). Renvoie
+# la trajectoire MÉDIANE en lignes journalières, prête à rejoindre le dataset du
+# scénario comme n'importe quel connecteur. Les bandes d'incertitude (IC) sont
+# exposées séparément par l'endpoint de projection (une colonne de dataset = une série).
+SEIR_CONNECTOR_ID = "seir-projection"
+_SEIR_VARS = [
+    {"machine_name": "seir_incidence",  "label": "Incidence modélisée (nouvelles infections/j)", "unit": "cas/jour", "dtype": "float"},
+    {"machine_name": "seir_prevalence", "label": "Prévalence modélisée (infectieux)",             "unit": "cas",      "dtype": "float"},
+    {"machine_name": "seir_cumulative", "label": "Infections cumulées",                           "unit": "cas",      "dtype": "float"},
+    {"machine_name": "seir_deaths",     "label": "Décès cumulés (si létalité connue)",            "unit": "décès",    "dtype": "float"},
+]
+
+
+def _seir_days_from_params(params: dict, default: int = 365) -> int:
+    """Horizon (jours) : fenêtre start_date→end_date si fournie, sinon `days`, sinon défaut.
+    Borné à [1, 3650] pour rester raisonnable."""
+    start, end = params.get("start_date"), params.get("end_date")
+    if start and end:
+        from datetime import date
+        try:
+            y1, m1, d1 = (int(x) for x in str(start)[:10].split("-"))
+            y2, m2, d2 = (int(x) for x in str(end)[:10].split("-"))
+            n = (date(y2, m2, d2) - date(y1, m1, d1)).days
+            if n > 0:
+                return min(n, 3650)
+        except Exception:
+            pass
+    try:
+        return max(1, min(int(params.get("days") or default), 3650))
+    except (TypeError, ValueError):
+        return default
+
+
+def _fetch_seir_projection(params: dict) -> list[dict]:
+    """Trajectoire MÉDIANE du modèle SEIR-family, en lignes journalières tidy. Aucun
+    appel réseau : intégration locale. `params["epidemic_parameters"]` = bloc
+    model_spec.epidemic_parameters (issu du corpus) ; `population` / `initial_infected`
+    en contexte (défauts 1e6 / 10) ; horizon via start/end ou `days`. Liste vide si
+    aucun paramètre exploitable (scénario non épidémique)."""
+    import seir_model
+    from datetime import date, timedelta
+    epi = params.get("epidemic_parameters") or {}
+    dists = seir_model.params_to_distributions((epi.get("params") or {}))
+    if not dists:
+        return []  # rien d'extrait / scénario non transmissible → pas de projection
+    try:
+        dists["population"] = float(params.get("population") or 1_000_000)
+    except (TypeError, ValueError):
+        dists["population"] = 1_000_000.0
+    try:
+        dists["initial_infected"] = float(params.get("initial_infected") or 10)
+    except (TypeError, ValueError):
+        dists["initial_infected"] = 10.0
+    days = _seir_days_from_params(params)
+    try:
+        n_samples = max(1, min(int(params.get("n_samples") or 200), 1000))
+    except (TypeError, ValueError):
+        n_samples = 200
+    ens = seir_model.simulate_ensemble(dists, days=days, n_samples=n_samples)
+
+    d0 = None
+    start = str(params.get("start_date") or "")[:10]
+    try:
+        y, m, d = (int(x) for x in start.split("-"))
+        d0 = date(y, m, d)
+    except Exception:
+        d0 = None
+
+    inc, prev = ens["incidence"]["median"], ens["prevalence"]["median"]
+    cum, dth = ens["cumulative"]["median"], ens["deaths"]["median"]
+    rows: list[dict] = []
+    for i, day in enumerate(ens["days"]):
+        dt = (d0 + timedelta(days=int(day))).isoformat() if d0 else str(day)
+        rows.append({
+            "date": dt,
+            "seir_incidence": round(inc[i], 3),
+            "seir_prevalence": round(prev[i], 3),
+            "seir_cumulative": round(cum[i], 3),
+            "seir_deaths": round(dth[i], 3),
+        })
+    return rows
+
+
+CONNECTORS[SEIR_CONNECTOR_ID] = Connector(
+    id=SEIR_CONNECTOR_ID,
+    name="Projection SEIR (paramétrée par la littérature)",
+    provider="LiteRev — modèle compartimental",
+    license="interne (modèle) ; paramètres tracés vers les articles source",
+    geo="model",
+    commercial_ok=True,
+    variables=_SEIR_VARS,
+    fetch=_fetch_seir_projection,
+    params_schema={
+        "epidemic_parameters": "bloc model_spec.epidemic_parameters (injecté par le scénario)",
+        "population": "entier (défaut 1 000 000)",
+        "initial_infected": "entier (défaut 10)",
+        "start_date": "YYYY-MM-DD (origine des dates)",
+        "end_date": "YYYY-MM-DD (ou 'days')",
+        "n_samples": "taille de l'ensemble (défaut 200)",
+    },
+    notes="Intègre localement un modèle SEIR/SEIRD/SEIRS (auto-sélectionné selon les "
+          "paramètres disponibles) paramétré par R0/période infectieuse/incubation/CFR/"
+          "immunité extraits du corpus. Colonne dataset = trajectoire médiane ; les "
+          "bandes d'incertitude sont fournies par l'endpoint de projection.",
+)
+
+
 def list_connectors() -> list[dict]:
     """JSON-safe metadata for every registered connector."""
     return [c.metadata() for c in CONNECTORS.values()]
