@@ -4846,9 +4846,6 @@ function ModelMonitorSection({ scenarioId }: { scenarioId: string }) {
                 </div>
               </div>
               {run.task_type === "forecast" && <ForecastPanel run={run} />}
-              {/* Projection épidémiologique SEIR paramétrée par la littérature (silencieuse
-                  hors scénario transmissible) — à côté de la prévision statistique. */}
-              <SeirProjectionPanel scenarioId={scenarioId} />
               {topImportances.length > 0 && (
                 <div className="rounded-xl border border-white/5 bg-white/2 px-3 py-2.5">
                   <span className="text-[10px] text-white/35 uppercase tracking-wider flex items-center gap-1"><TrendingUp size={11} /> {t("scenarioDetail.model.influentialVariables")}</span>
@@ -4996,6 +4993,12 @@ function ModelMonitorSection({ scenarioId }: { scenarioId: string }) {
           </div>
         </div>
       </div>
+
+      {/* Projection épidémiologique SEIR paramétrée par la LITTÉRATURE — indépendante du
+          modèle prédictif entraîné (elle ne consomme pas le ML). Rendue ici pour être
+          visible même sans entraînement ; silencieuse hors scénario transmissible ou si
+          aucun paramètre épidémiologique n'a été extrait du corpus. */}
+      <SeirProjectionPanel scenarioId={scenarioId} />
 
       {/* Évolution pilotée par l'évidence (Phase 5) */}
       <div className="rounded-3xl border border-white/10 bg-white/3 p-5 space-y-4">
