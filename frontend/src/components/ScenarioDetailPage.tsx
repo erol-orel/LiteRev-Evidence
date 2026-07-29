@@ -944,6 +944,8 @@ function VariablesSection({ detail, scenarioId, onGoToModel }: { detail: Scenari
           if (llmPollRef.current) clearInterval(llmPollRef.current);
           setLlmGenStatus(null);
           loadLlmVars();
+          reloadModelState();   // le model_spec devient "ready" à la fin de la génération
+                                // → rafraîchir pour afficher « Ajuster le modèle » sans reload
         } else if (s.status === 'error') {
           if (llmPollRef.current) clearInterval(llmPollRef.current);
           setLlmGenStatus(null);
@@ -958,7 +960,7 @@ function VariablesSection({ detail, scenarioId, onGoToModel }: { detail: Scenari
       });
     }, 5000);
     return () => { if (llmPollRef.current) clearInterval(llmPollRef.current); };
-  }, [llmVars, scenarioId, loadLlmVars, t]);
+  }, [llmVars, scenarioId, loadLlmVars, reloadModelState, t]);
 
   const handleGenerateLlm = async () => {
     setLlmGenerating(true);
@@ -974,6 +976,7 @@ function VariablesSection({ detail, scenarioId, onGoToModel }: { detail: Scenari
             setLlmGenStatus(null);
             setLlmGenerating(false);
             loadLlmVars();
+            reloadModelState();   // idem : rendre « Ajuster le modèle » visible immédiatement
           } else if (s.status === 'error') {
             if (llmPollRef.current) clearInterval(llmPollRef.current);
             setLlmGenStatus(null);
@@ -1001,6 +1004,7 @@ function VariablesSection({ detail, scenarioId, onGoToModel }: { detail: Scenari
     try {
       await validateScenarioVariables(scenarioId, {});
       loadLlmVars();
+      reloadModelState();   // garder le spec (et « Ajuster le modèle ») synchrone après validation
     } catch (e: any) {
       setLlmError(e.message);
     } finally {
@@ -4842,9 +4846,6 @@ function ModelMonitorSection({ scenarioId }: { scenarioId: string }) {
                 </div>
               </div>
               {run.task_type === "forecast" && <ForecastPanel run={run} />}
-              {/* Projection épidémiologique SEIR paramétrée par la littérature (silencieuse
-                  hors scénario transmissible) — à côté de la prévision statistique. */}
-              <SeirProjectionPanel scenarioId={scenarioId} />
               {topImportances.length > 0 && (
                 <div className="rounded-xl border border-white/5 bg-white/2 px-3 py-2.5">
                   <span className="text-[10px] text-white/35 uppercase tracking-wider flex items-center gap-1"><TrendingUp size={11} /> {t("scenarioDetail.model.influentialVariables")}</span>
@@ -4992,6 +4993,12 @@ function ModelMonitorSection({ scenarioId }: { scenarioId: string }) {
           </div>
         </div>
       </div>
+
+      {/* Projection épidémiologique SEIR paramétrée par la LITTÉRATURE — indépendante du
+          modèle prédictif entraîné (elle ne consomme pas le ML). Rendue ici pour être
+          visible même sans entraînement ; silencieuse hors scénario transmissible ou si
+          aucun paramètre épidémiologique n'a été extrait du corpus. */}
+      <SeirProjectionPanel scenarioId={scenarioId} />
 
       {/* Évolution pilotée par l'évidence (Phase 5) */}
       <div className="rounded-3xl border border-white/10 bg-white/3 p-5 space-y-4">
