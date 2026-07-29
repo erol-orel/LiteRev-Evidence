@@ -2389,6 +2389,8 @@ export interface SeirProjection {
   disease?: string | null;
   n_samples?: number;
   population?: number;
+  initial_infected?: number;
+  geography?: string | null;
   dates?: (string | number)[];
   series?: {
     incidence: SeirBand;

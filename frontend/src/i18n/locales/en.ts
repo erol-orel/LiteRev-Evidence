@@ -1080,7 +1080,8 @@ export const en: Translations = {
       attackRate: "Attack rate",
       deaths: "Total deaths",
       studies: "studies",
-      note: "Compartmental model auto-selected and parameterized from this scenario's corpus; the shaded band is the uncertainty across the extracted parameters.",
+      population: "Population",
+      note: "Compartmental model auto-selected and parameterized from this scenario's corpus; the shaded band is the uncertainty across the extracted parameters. Exposed population derived from the corpus's geographic scope.",
     },
     page: {
       sections: {

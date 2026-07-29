@@ -13037,6 +13037,12 @@ def _attach_model_spec(variables: dict, prov_articles: list[dict]) -> dict:
         a["id"]: {"title": (a.get("title") or "")[:160], "year": a.get("year"), "doi": a.get("doi")}
         for a in prov_articles if a.get("id") is not None
     }
+    # Poids qualité par article (quality_score déterministe du corpus) → regroupement
+    # pondéré des paramètres épidémiologiques par étude (seir_model.pool_weighted).
+    quality_by_id = {
+        a["id"]: a.get("quality_score")
+        for a in prov_articles if a.get("id") is not None
+    }
     used: set[str] = set()
     cited: set = set()
 
@@ -13127,7 +13133,9 @@ def _attach_model_spec(variables: dict, prov_articles: list[dict]) -> dict:
     # n'est pas une maladie transmissible ou si rien n'est rapporté → le modèle
     # compartimental (Phase 3) ne s'active tout simplement pas.
     import seir_model as _seir
-    _epi = _seir.normalize_extracted_parameters(variables.get("epidemic_parameters"), valid_ids)
+    _epi = _seir.normalize_extracted_parameters(
+        variables.get("epidemic_parameters"), valid_ids, quality_by_id
+    )
     cited.update(_epi["cited"])
 
     # ── Data template (dérivé → garanti cohérent avec les machine_name ci-dessus) ──
@@ -13266,12 +13274,12 @@ Génère un JSON avec EXACTEMENT ces champs :
   "epidemic_parameters": {{
     "applicable": true si le scénario porte sur une MALADIE TRANSMISSIBLE (épidémie / infection) modélisable par un compartimental SEIR, false sinon,
     "population_disease": "maladie / agent pathogène concerné si applicable, sinon null",
-    "r0": {{"value": nombre|null, "ci_low": nombre|null, "ci_high": nombre|null, "unit": "ratio", "n_studies": entier, "provenance": [ids d'articles rapportant cette valeur]}},
-    "infectious_period_days": {{"value": nombre|null, "ci_low": nombre|null, "ci_high": nombre|null, "unit": "days", "n_studies": entier, "provenance": [ids]}},
-    "incubation_period_days": {{"value": nombre|null, "ci_low": nombre|null, "ci_high": nombre|null, "unit": "days", "n_studies": entier, "provenance": [ids]}},
-    "cfr": {{"value": nombre|null, "ci_low": nombre|null, "ci_high": nombre|null, "unit": "proportion", "n_studies": entier, "provenance": [ids]}},
-    "immunity_duration_days": {{"value": nombre|null, "ci_low": nombre|null, "ci_high": nombre|null, "unit": "days", "n_studies": entier, "provenance": [ids]}},
-    "serial_interval_days": {{"value": nombre|null, "ci_low": nombre|null, "ci_high": nombre|null, "unit": "days", "n_studies": entier, "provenance": [ids]}}
+    "r0": {{"value": nombre|null, "ci_low": nombre|null, "ci_high": nombre|null, "unit": "ratio", "n_studies": entier, "provenance": [ids d'articles rapportant cette valeur], "observations": [{{"article_id": id, "value": nombre}}]}},
+    "infectious_period_days": {{"value": nombre|null, "ci_low": nombre|null, "ci_high": nombre|null, "unit": "days", "n_studies": entier, "provenance": [ids], "observations": [{{"article_id": id, "value": nombre}}]}},
+    "incubation_period_days": {{"value": nombre|null, "ci_low": nombre|null, "ci_high": nombre|null, "unit": "days", "n_studies": entier, "provenance": [ids], "observations": [{{"article_id": id, "value": nombre}}]}},
+    "cfr": {{"value": nombre|null, "ci_low": nombre|null, "ci_high": nombre|null, "unit": "proportion", "n_studies": entier, "provenance": [ids], "observations": [{{"article_id": id, "value": nombre}}]}},
+    "immunity_duration_days": {{"value": nombre|null, "ci_low": nombre|null, "ci_high": nombre|null, "unit": "days", "n_studies": entier, "provenance": [ids], "observations": [{{"article_id": id, "value": nombre}}]}},
+    "serial_interval_days": {{"value": nombre|null, "ci_low": nombre|null, "ci_high": nombre|null, "unit": "days", "n_studies": entier, "provenance": [ids], "observations": [{{"article_id": id, "value": nombre}}]}}
   }},
   "implementation_notes": "Notes d'implémentation pratiques",
   "validation_status": "pending"
@@ -13296,8 +13304,12 @@ estimation centrale + un intervalle (ci_low/ci_high, idéalement l'IC 95 %) refl
 dispersion entre études quand plusieurs la rapportent. Pour agréger, PRIVILÉGIE les
 estimations des synthèses de meilleure qualité (revues systématiques / méta-analyses,
 cf. "study_design") sur les études isolées. "cfr" en PROPORTION (0..1, pas en
-pourcentage). Si le scénario ne porte PAS sur une maladie transmissible, mets
-"applicable": false et tous les "value" à null.
+pourcentage). Pour CHAQUE paramètre, renseigne aussi "observations" : la liste des
+valeurs par étude RÉELLEMENT rapportées ({{"article_id": id, "value": nombre}}), une
+entrée par article rapportant ce paramètre (mets [] si aucune). Ces observations
+individuelles servent à un regroupement pondéré par la qualité côté serveur. Si le
+scénario ne porte PAS sur une maladie transmissible, mets "applicable": false et tous
+les "value" à null.
 
 Retourne UNIQUEMENT le JSON valide."""
 
@@ -14818,8 +14830,12 @@ def auto_fetch_model_dataset(
             # Le connecteur SEIR n'est PAS géographique : on lui injecte les paramètres
             # épidémiologiques EXTRAITS du corpus (bloc model_spec) du scénario courant,
             # afin que la série d'incidence/prévalence qui alimente le modèle soit
-            # paramétrée par la littérature de CE scénario.
+            # paramétrée par la littérature de CE scénario. Population d'exposition + cas
+            # initiaux DÉRIVÉS de la géographie du corpus (au lieu d'un 1e6 fixe).
             _cparams["epidemic_parameters"] = spec.get("epidemic_parameters") or {}
+            _seir_pop, _seir_i0, _ = _scenario_seed(scenario_id)
+            _cparams["population"] = _seir_pop
+            _cparams["initial_infected"] = _seir_i0
         try:
             rows = data_connectors.fetch_series(cid, _cparams)
         except Exception as _e:
@@ -14887,13 +14903,54 @@ def auto_fetch_model_dataset(
     }
 
 
+def _scenario_seed(scenario_id: str) -> tuple[float, float, str | None]:
+    """Dérive le contexte de projection d'un scénario — (population d'exposition, cas
+    initiaux, libellé géographique) — à partir de la géographie MODALE de son corpus
+    PERTINENT (champ `geographic_scope` des documents rattachés, filtrés par la même
+    porte de screening/seuil que le modèle), au lieu d'un 1e6 fixe. On prend la première
+    géographie (par fréquence décroissante) reconnue par `population_for_geography` ; les
+    intitulés non mappables (« multi-country »…) sont ignorés. Cas initiaux ≈ 1 pour
+    100 000 (min 1) — un simple amorçage, la dynamique SEIR y est peu sensible. Défaut
+    (1e6, 10, None) si aucune géographie connue. Lecture seule ; robuste aux erreurs."""
+    import seir_model
+    pop: float = 1_000_000.0
+    geo: str | None = None
+    try:
+        threshold = _get_scenario_threshold(scenario_id)
+        with engine.connect() as conn:
+            rows = conn.execute(text("""
+                SELECT ld.geographic_scope AS geo, COUNT(*) AS n
+                FROM literature_document ld
+                JOIN article_scenarios asn ON asn.document_id = ld.id AND asn.scenario_id = :sid
+                WHERE ld.project_context = 'literev'
+                  AND ld.is_duplicate IS NOT TRUE
+                  AND ld.geographic_scope IS NOT NULL
+                  AND COALESCE(asn.screening_status, ld.screening_status) IS DISTINCT FROM 'excluded'
+                  AND (
+                      COALESCE(asn.screening_status, ld.screening_status) = 'included'
+                      OR COALESCE(asn.similarity_score, 0) >= :threshold
+                  )
+                GROUP BY ld.geographic_scope
+                ORDER BY n DESC, ld.geographic_scope ASC
+            """), {"sid": scenario_id, "threshold": threshold}).mappings().all()
+        for r in rows:
+            _p = seir_model.population_for_geography(r["geo"])
+            if _p:
+                pop, geo = _p, str(r["geo"])
+                break
+    except Exception as _e:
+        logger.warning(f"_scenario_seed({scenario_id}): {_e}")
+    i0 = max(1.0, pop * 1e-5)
+    return pop, i0, geo
+
+
 @app.get("/scenarios/{scenario_id}/seir/projection")
 def get_seir_projection(
     scenario_id: str,
     days: int = 365,
     start_date: str | None = None,
-    population: float = 1_000_000.0,
-    initial_infected: float = 10.0,
+    population: float | None = None,
+    initial_infected: float | None = None,
     n_samples: int = 300,
 ) -> dict[str, Any]:
     """Projection compartimentale (famille SEIR) d'un scénario, paramétrée par les
@@ -14901,8 +14958,10 @@ def get_seir_projection(
     Phase 2). Renvoie les séries incidence / prévalence / cumul / décès / R_eff AVEC
     bandes d'incertitude (IC de l'ensemble) + un résumé (modèle auto-sélectionné, R0,
     pic, taux d'attaque) et les paramètres source (avec provenance) pour l'affichage et
-    la traçabilité. `applicable=false` si le scénario n'est pas une maladie
-    transmissible ou si rien n'a été extrait. Lecture seule, déterministe (seed fixe)."""
+    la traçabilité. La population d'exposition + les cas initiaux sont DÉRIVÉS de la
+    géographie du corpus (cf. `_scenario_seed`) sauf override explicite en query.
+    `applicable=false` si le scénario n'est pas une maladie transmissible ou si rien n'a
+    été extrait. Lecture seule, déterministe (seed fixe)."""
     import seir_model
     from datetime import date, timedelta
     spec = _get_model_spec(scenario_id) or {}
@@ -14915,14 +14974,17 @@ def get_seir_projection(
             "reason": "Aucun paramètre épidémiologique extrait de la littérature "
                       "(scénario non transmissible, ou paramètres non rapportés).",
         }
+    # Défauts DÉRIVÉS de la géographie du corpus (population d'exposition + cas initiaux)
+    # au lieu d'un 1e6 fixe ; toute valeur explicite passée en query l'emporte.
+    _pop_default, _i0_default, _geo_label = _scenario_seed(scenario_id)
     try:
-        dists["population"] = float(population or 1_000_000)
+        dists["population"] = float(population) if population is not None else _pop_default
     except (TypeError, ValueError):
-        dists["population"] = 1_000_000.0
+        dists["population"] = _pop_default
     try:
-        dists["initial_infected"] = float(initial_infected or 10)
+        dists["initial_infected"] = float(initial_infected) if initial_infected is not None else _i0_default
     except (TypeError, ValueError):
-        dists["initial_infected"] = 10.0
+        dists["initial_infected"] = _i0_default
     days = max(1, min(int(days or 365), 3650))
     n_samples = max(1, min(int(n_samples or 300), 1000))
     ens = seir_model.simulate_ensemble(dists, days=days, n_samples=n_samples)
@@ -14944,6 +15006,8 @@ def get_seir_projection(
         "disease": epi.get("disease"),
         "n_samples": ens["n_samples"],
         "population": dists["population"],
+        "initial_infected": dists["initial_infected"],
+        "geography": _geo_label,
         "dates": dates,
         "series": {k: ens[k] for k in ("incidence", "prevalence", "cumulative", "deaths", "r_eff")},
         "summary": ens["summary"],

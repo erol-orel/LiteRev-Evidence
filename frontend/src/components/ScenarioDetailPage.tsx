@@ -793,6 +793,14 @@ function SeirProjectionPanel({ scenarioId }: { scenarioId: string }) {
   };
   const sm = proj.summary;
   const fmtBand = (x: SeirSummaryBand) => `${x.median} [${x.lower}–${x.upper}]`;
+  const fmtPop = (n: number) =>
+    n >= 1e9 ? `${(n / 1e9).toFixed(n >= 1e10 ? 0 : 1)}B`
+    : n >= 1e6 ? `${(n / 1e6).toFixed(n >= 1e7 ? 0 : 1)}M`
+    : n >= 1e3 ? `${(n / 1e3).toFixed(0)}k`
+    : `${Math.round(n)}`;
+  const popLabel = typeof proj.population === "number"
+    ? `${t("scenarioDetail.seir.population")} ${fmtPop(proj.population)}${proj.geography ? ` · ${proj.geography}` : ""}`
+    : null;
   const seriesLabel: Record<SeirSeriesKey, string> = {
     incidence: t("scenarioDetail.seir.seriesIncidence"),
     prevalence: t("scenarioDetail.seir.seriesPrevalence"),
@@ -807,7 +815,7 @@ function SeirProjectionPanel({ scenarioId }: { scenarioId: string }) {
           <TrendingUp size={11} /> {t("scenarioDetail.seir.title")}
         </span>
         <span className="text-[10px] text-white/40 font-mono">
-          {proj.model}{proj.disease ? ` · ${proj.disease}` : ""} · {proj.n_samples} {t("scenarioDetail.seir.draws")}
+          {proj.model}{proj.disease ? ` · ${proj.disease}` : ""}{popLabel ? ` · ${popLabel}` : ""} · {proj.n_samples} {t("scenarioDetail.seir.draws")}
         </span>
       </div>
 
