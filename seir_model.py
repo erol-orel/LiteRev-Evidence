@@ -139,6 +139,9 @@ def simulate(p: SeirParams, days: int = 365, dt: float = 0.25) -> dict:
     cumulative: list[float] = []
     deaths: list[float] = []
     r_eff: list[float] = []
+    susceptible: list[float] = []
+    exposed: list[float] = []
+    recovered: list[float] = []
 
     def _record(t: int, yv: list[float]) -> None:
         s, _e, i, _rec, d, c = yv
@@ -148,6 +151,9 @@ def simulate(p: SeirParams, days: int = 365, dt: float = 0.25) -> dict:
         cumulative.append(c * n)
         deaths.append(d * n)
         r_eff.append(r0v * s)
+        susceptible.append(s * n)   # compartiments S / E / R exposés aussi (effectifs)
+        exposed.append(_e * n)
+        recovered.append(_rec * n)
 
     _record(0, y)
     for day in range(1, int(days) + 1):
@@ -178,6 +184,9 @@ def simulate(p: SeirParams, days: int = 365, dt: float = 0.25) -> dict:
         "cumulative": cumulative,
         "deaths": deaths,
         "r_eff": r_eff,
+        "susceptible": susceptible,
+        "exposed": exposed,
+        "recovered": recovered,
         "summary": summary,
     }
 
@@ -298,7 +307,8 @@ def simulate_ensemble(
         "n_samples": len(runs),
         "days": runs[0]["days"],
     }
-    for key in ("incidence", "prevalence", "cumulative", "deaths", "r_eff"):
+    for key in ("incidence", "prevalence", "cumulative", "deaths", "r_eff",
+                "susceptible", "exposed", "recovered"):
         out[key] = _band([r[key] for r in runs], lo_q, hi_q)
 
     def _sum_band(field: str) -> dict:
@@ -553,14 +563,21 @@ def pool_weighted(observations, quality_by_id=None) -> dict | None:
 # Le SEIR comme SOUS-MODÈLE : quelles variables prédictives il DÉRIVE
 # ─────────────────────────────────────────────────────────────────────────────
 # Deux classifications PURES d'une variable (par son nom / machine_name) :
-#   • `seir_feature_column` : la variable est une SORTIE du sous-modèle (incidence,
-#     prévalence, cumul, décès) → renvoie la colonne du connecteur SEIR qui la remplit
-#     automatiquement. La variable RESTE une feature, mais sa valeur vient du modèle.
-#   • `is_seir_parameter` : la variable est un PARAMÈTRE du sous-modèle (R0, CFR,
-#     incubation…) → c'est un input de simulation, PAS une feature du prédicteur.
-# On ne teste que NOM + machine_name (courts, contrôlés), jamais la définition libre,
-# pour éviter les faux positifs (« lits durant les pics d'incidence »…).
-SEIR_OUTPUT_COLUMNS = ("seir_incidence", "seir_prevalence", "seir_cumulative", "seir_deaths")
+#   • `seir_feature_column` : la variable est une SORTIE du sous-modèle (compartiments
+#     S/E/I/R/D et flux : incidence, prévalence, cumul, décès, susceptibles, exposés,
+#     rétablis) → renvoie la colonne du connecteur SEIR qui la remplit automatiquement.
+#     La variable RESTE une feature, mais sa valeur vient du modèle.
+#   • `is_seir_parameter` : la variable est un PARAMÈTRE du sous-modèle (R0/Rt, CFR/IFR,
+#     incubation, période infectieuse, intervalle sériel, durée d'immunité, taux de
+#     transmission/contact/guérison…) → un input de simulation, PAS une feature.
+# Vocabulaire EN+FR couvrant la famille SEIR+. On ne teste que NOM + machine_name (courts,
+# contrôlés), jamais la définition libre, pour éviter les faux positifs. La reclassification
+# n'a lieu QUE sur un scénario épidémique (SEIR applicable), ce qui borne fortement le
+# risque de capturer une covariable externe légitime.
+SEIR_OUTPUT_COLUMNS = (
+    "seir_incidence", "seir_prevalence", "seir_cumulative", "seir_deaths",
+    "seir_susceptible", "seir_exposed", "seir_recovered",
+)
 
 
 def _norm_ascii(text) -> str:
@@ -572,17 +589,35 @@ def _norm_ascii(text) -> str:
     return _re.sub(r"[^a-z0-9]+", " ", s).strip()
 
 
-# Ordre = priorité : décès et cumul AVANT incidence/prévalence (« décès cumulés » vise
-# seir_deaths ; « incidence cumulée » vise seir_cumulative). ASCII, forme espacée.
+# Ordre = PRIORITÉ (première correspondance gagne) : décès → rétablis → exposés → cumul →
+# incidence → prévalence. Ainsi « décès cumulés » vise seir_deaths, « incidence cumulée »
+# et « infectés au total » visent seir_cumulative, « cas actifs » vise seir_prevalence.
+# Vocabulaire EN+FR, forme ASCII espacée.
 _SEIR_OUTPUT_KEYWORDS: tuple[tuple[str, tuple[str, ...]], ...] = (
-    ("seir_deaths",     ("death", "deaths", "deces", "mortalit", "fatalit", "fatal", "letal")),
-    ("seir_cumulative", ("cumulative", "cumul", "cumule", "attack rate", "taux d attaque",
-                         "total infection", "total infections", "infections totales")),
-    ("seir_incidence",  ("incidence", "incident", "new case", "new cases", "new infection",
-                         "nouveaux cas", "nouvelles infections", "daily case", "daily cases",
-                         "cas quotidien", "cas journalier")),
-    ("seir_prevalence", ("prevalence", "prevalent", "active case", "active cases", "cas actif",
-                         "cas actifs", "infectious", "infectieux", "currently infected")),
+    ("seir_deaths",      ("death", "deaths", "deces", "mortalit", "fatalit", "fatal",
+                          "cumulative death", "number of deaths")),
+    ("seir_recovered",   ("recovered", "recovery", "removed", "immune", "immunis", "immunity",
+                          "immunite", "gueri", "retabli", "convalescent", "seroconvert")),
+    ("seir_exposed",     ("exposed", "expose", "latent", "latently", "incubating",
+                          "presymptomatic", "presymptomatique", "pre symptomatic")),
+    ("seir_susceptible", ("susceptible", "susceptibles", "at risk population", "population a risque",
+                          "non immun", "non immunise")),
+    ("seir_cumulative",  ("cumulative", "cumul", "cumule", "attack rate", "taux d attaque",
+                          "total case", "total cases", "total infection", "total infections",
+                          "cas totaux", "infections totales", "final size", "taille finale",
+                          "ever infected", "deja infecte")),
+    ("seir_incidence",   ("incidence", "incident", "new case", "new cases", "new infection",
+                          "new infections", "nouveaux cas", "nouvelle infection",
+                          "nouvelles infections", "daily case", "daily cases", "daily infection",
+                          "cas quotidien", "cas journalier", "reported case", "confirmed case",
+                          "notified case", "cas confirme", "cas notifie", "cas declare",
+                          "cas rapporte", "infection rate", "taux d infection",
+                          "taux d incidence", "notification rate")),
+    ("seir_prevalence",  ("prevalence", "prevalent", "active case", "active cases", "cas actif",
+                          "infectious", "infectieux", "currently infected", "actuellement infecte",
+                          "infected individual", "infected population", "personnes infectees",
+                          "nombre d infecte", "symptomatic case", "cas symptomatique",
+                          "active infection", "en cours d infection")),
 )
 
 
@@ -598,14 +633,24 @@ def seir_feature_column(text) -> str | None:
     return None
 
 
-# Paramètres du sous-modèle. Tokens COURTS/ambigus testés en mot entier (r0, cfr, reff) ;
-# expressions distinctives testées en sous-chaîne. Pas de « rt » nu (trop de collisions).
-_SEIR_PARAM_WORDS: frozenset[str] = frozenset({"r0", "cfr", "reff", "ifr"})
+# Paramètres du sous-modèle SEIR+. Tokens COURTS non ambigus en MOT ENTIER (r0, rt, reff,
+# cfr, ifr) ; expressions distinctives en sous-chaîne (EN+FR). On NE capture PAS les taux
+# gérés HORS du modèle (vaccination, quarantaine, mobilité…) : ce sont des covariables
+# externes légitimes, pas des paramètres consommés par la simulation.
+_SEIR_PARAM_WORDS: frozenset[str] = frozenset({"r0", "rt", "reff", "cfr", "ifr"})
 _SEIR_PARAM_SUBSTR: tuple[str, ...] = (
-    "reproduction", "reproductif", "reproductive", "case fatality", "fatality rate",
-    "letalite", "incubation", "infectious period", "periode infectieuse",
-    "serial interval", "intervalle seriel", "generation time", "temps de generation",
-    "immunity duration", "duree d immunite", "waning", "latent period", "periode de latence",
+    "reproduction", "reproductif", "reproductive",
+    "transmission rate", "transmission coefficient", "taux de transmission",
+    "contact rate", "taux de contact",
+    "case fatality", "infection fatality", "fatality rate", "letalite",
+    "recovery rate", "taux de guerison", "removal rate",
+    "incubation",
+    "latent period", "periode de latence",
+    "infectious period", "periode infectieuse", "periode de contagiosite", "duree de contagiosite",
+    "serial interval", "intervalle seriel",
+    "generation time", "generation interval", "temps de generation", "intervalle de generation",
+    "immunity duration", "duree d immunite", "duree de l immunite",
+    "waning", "immunite decroissante",
 )
 
 

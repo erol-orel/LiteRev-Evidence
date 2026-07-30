@@ -215,7 +215,8 @@ def test_seir_connector_projects_from_extracted_params():
         "epidemic_parameters": _SEIR_EPI, "population": 500_000, "initial_infected": 10,
         "start_date": "2026-01-01", "end_date": "2026-12-31", "n_samples": 40})
     assert len(rows) == 365                                   # 2026-01-01 .. 2026-12-31 → 365 daily points
-    assert set(rows[0]) == {"date", "seir_incidence", "seir_prevalence", "seir_cumulative", "seir_deaths"}
+    assert set(rows[0]) == {"date", "seir_incidence", "seir_prevalence", "seir_cumulative",
+                            "seir_deaths", "seir_susceptible", "seir_exposed", "seir_recovered"}
     assert rows[0]["date"] == "2026-01-01"
     cum = [r["seir_cumulative"] for r in rows]
     assert cum == sorted(cum)                                 # cumulative infections monotone up
@@ -234,6 +235,7 @@ def test_seir_connector_registered_and_metadata_json_safe():
     md = dc.CONNECTORS["seir-projection"].metadata()
     assert "fetch" not in md                                  # callable excluded from JSON metadata
     assert [v["machine_name"] for v in md["variables"]] == [
-        "seir_incidence", "seir_prevalence", "seir_cumulative", "seir_deaths"]
+        "seir_incidence", "seir_prevalence", "seir_cumulative", "seir_deaths",
+        "seir_susceptible", "seir_exposed", "seir_recovered"]
     assert any(c["id"] == "seir-projection" for c in dc.list_connectors())
     json.dumps(md)
