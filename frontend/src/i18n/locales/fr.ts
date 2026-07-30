@@ -225,7 +225,7 @@ export const fr = {
     detailPage: "Page détail",
     savedSearchPrefix: "Recherche sauvegardée : ",
     detailPageTooltip: "Ouvrir la page détail du scénario",
-    ingestArticlesTooltip: "Ingérer des articles",
+    ingestArticlesTooltip: "Tout recalculer (ingestion + PICO, clustering, graphe de connaissances, évidence, variables & SEIR)",
     replaySearchTooltip: "Relancer la recherche",
     assignFolderTooltip: "Assigner à un dossier",
     unpinTooltip: "Désépingler",
