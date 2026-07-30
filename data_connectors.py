@@ -388,6 +388,152 @@ _FOPH_PARAMS = {
     "start_date": "YYYY-MM-DD (optional filter)", "end_date": "YYYY-MM-DD (optional filter)",
 }
 
+
+# ── FOPH Sentinella — clinical influenza-like illness (ILI), opendata.swiss ────
+# The CLINICAL ILI signal (Sentinella sentinel-GP network) — the influenza-ILI
+# OUTCOME, distinct from the wastewater viral-load connector above. FOPH publishes
+# weekly ILI consultation incidence; the exact opendata.swiss resource id shifts
+# each season, so resolution order is: explicit url= → FOPH_SENTINELLA_CSV_URL env
+# → CKAN package_search. ISO-week rows are converted to a real date (Monday of the
+# ISO week) so this weekly series resamples/join-aligns exactly like the daily
+# weather/air-quality connectors. This is the live ILI outcome that was previously
+# "not yet wired → manual upload", enabling a weather → influenza-ILI model.
+_SENTINELLA_CKAN_QUERY = "sentinella grippe ILI"
+_SENTINELLA_VALUE_HINTS = ("inzidenz", "incidence", "inz", "rate", "ili", "ari",
+                           "grippe", "influenza", "faelle", "cases", "consult", "value", "wert")
+_SENTINELLA_WEEK_KEYS = {"iso_week", "isoweek", "week_iso", "yearweek", "year_week",
+                         "week", "woche", "sos_woche", "semaine"}
+_SENTINELLA_RESERVED = {"url", "start_date", "end_date", "region", "value_col",
+                        "age_group", "lat", "lon"}
+
+
+def _isoweek_to_date(token) -> str | None:
+    """'2023-W05' / '2023W05' / '202305' / '2023-05' (ISO year-week) → 'YYYY-MM-DD'
+    (Monday of that ISO week). A plain 'YYYY-MM-DD' passes through unchanged. None if
+    unparseable. PURE — lets a weekly ILI series align onto the daily connectors' grid."""
+    import re as _re
+    from datetime import date as _date
+    s = str(token or "").strip()
+    if not s:
+        return None
+    if _re.fullmatch(r"\d{4}-\d{2}-\d{2}", s):              # already an ISO date
+        return s
+    m = _re.fullmatch(r"(\d{4})[-_ ]?[wW]?(\d{1,2})", s)    # ISO year + week
+    if not m:
+        return None
+    y, w = int(m.group(1)), int(m.group(2))
+    if not (1 <= w <= 53):
+        return None
+    try:
+        return _date.fromisocalendar(y, w, 1).isoformat()  # Monday of the ISO week
+    except ValueError:
+        return None
+
+
+def _guess_ili_value_column(rows: list[dict]) -> str | None:
+    """Pick the ILI incidence column among a tidy row's numeric keys: prefer a name
+    matching the ILI hints, else the first numeric column. PURE."""
+    if not rows:
+        return None
+    keys = [k for k in rows[0].keys() if k != "date"]
+    for k in keys:
+        if any(h in k for h in _SENTINELLA_VALUE_HINTS):
+            return k
+    return keys[0] if keys else None
+
+
+def _parse_sentinella_ili(csv_text: str, value_col: str | None = None,
+                          filters: dict | None = None) -> list[dict]:
+    """FOPH Sentinella CSV → tidy weekly rows {date, ili_incidence}. Detects a
+    week/date column, converts ISO-week to the week's Monday date, applies optional
+    equality `filters` on any raw column (e.g. {"age_group": "all"}), maps the chosen
+    incidence column (auto-detected when value_col is None) to `ili_incidence`, and
+    averages any duplicate weeks. PURE/testable."""
+    import csv as _csv
+    import io as _io
+    try:
+        raw = list(_csv.DictReader(_io.StringIO(csv_text)))
+    except Exception:
+        return []
+    if not raw:
+        return []
+    cols = [c for c in raw[0].keys() if c]
+    if not cols:
+        return []
+
+    def _n(c):
+        return (c or "").strip().lower().replace(" ", "_")
+    dcol = next((c for c in cols if _n(c) in _SENTINELLA_WEEK_KEYS or _n(c) in _GENERIC_DATE_KEYS), cols[0])
+    dcol_n = _n(dcol)
+    flt = {_n(k): str(v).strip().lower() for k, v in (filters or {}).items() if v not in (None, "")}
+    tidy: list[dict] = []
+    for r in raw:
+        norm = {_n(k): v for k, v in r.items()}
+        if any((norm.get(fk) or "").strip().lower() != fv for fk, fv in flt.items()):
+            continue
+        d = _isoweek_to_date(r.get(dcol))
+        if not d:
+            continue
+        row = {"date": d}
+        for k, v in norm.items():
+            if k == dcol_n or v in (None, ""):
+                continue
+            try:
+                row[k] = float(v)
+            except (TypeError, ValueError):
+                pass
+        if len(row) > 1:
+            tidy.append(row)
+    val = _n(value_col) if value_col else _guess_ili_value_column(tidy)
+    if not val:
+        return []
+    by_date: dict[str, list[float]] = {}
+    for r in tidy:
+        if val in r:
+            by_date.setdefault(r["date"], []).append(r[val])
+    merged = [{"date": d, "ili_incidence": round(sum(v) / len(v), 4)} for d, v in by_date.items()]
+    merged.sort(key=lambda x: x["date"])
+    return merged
+
+
+def _fetch_sentinella_ili(params: dict) -> list[dict]:
+    """Live FOPH Sentinella clinical-ILI series. Resolves the CSV via url=, the
+    FOPH_SENTINELLA_CSV_URL env var, or an opendata.swiss CKAN search; parses to
+    weekly {date, ili_incidence}; applies extra column filters + a date window."""
+    import os as _os
+    url = params.get("url") or _os.getenv("FOPH_SENTINELLA_CSV_URL")
+    if not url:
+        try:
+            res = _http_get_json(
+                "https://opendata.swiss/api/3/action/package_search?rows=5&q="
+                + _SENTINELLA_CKAN_QUERY.replace(" ", "%20"))
+            for pkg in (((res or {}).get("result") or {}).get("results") or []):
+                for r in (pkg.get("resources") or []):
+                    if str(r.get("format", "")).lower() == "csv" and (r.get("download_url") or r.get("url")):
+                        url = r.get("download_url") or r.get("url")
+                        break
+                if url:
+                    break
+        except Exception:
+            url = None
+    if not url:
+        return []
+    filters = {k: v for k, v in params.items() if k not in _SENTINELLA_RESERVED}
+    rows = _parse_sentinella_ili(_http_get_text(url), params.get("value_col"), filters)
+    s, e = params.get("start_date"), params.get("end_date")
+    if s or e:
+        rows = [r for r in rows if (not s or r["date"] >= str(s)) and (not e or r["date"] <= str(e))]
+    return rows
+
+
+_SENTINELLA_PARAMS = {
+    "url": "override CSV URL (optional; else FOPH_SENTINELLA_CSV_URL env, or opendata.swiss search)",
+    "value_col": "name of the ILI incidence column to use (optional; auto-detected)",
+    "<column>=<value>": "optional equality filter on any raw column (e.g. age_group=all, region=CH)",
+    "start_date": "YYYY-MM-DD (optional filter)", "end_date": "YYYY-MM-DD (optional filter)",
+}
+
+
 CONNECTORS: dict[str, Connector] = {
     "open-meteo-weather": Connector(
         id="open-meteo-weather",
@@ -464,7 +610,27 @@ CONNECTORS: dict[str, Connector] = {
               "(70k+ rows confirmed) — NOT clinical Sentinella ILI/ARI. The raw feed multiplexes "
               "treatment plants; rows are aggregated per date into a national series (mean load/conc, "
               "summed pop/flow). Pass a column filter (e.g. geoRegion=GE) to narrow to one region, or "
-              "set FOPH_WASTEWATER_CSV_URL. Clinical ILI/ARI is not yet wired live → manual CSV upload.",
+              "set FOPH_WASTEWATER_CSV_URL. Clinical ILI/ARI is served by 'foph-sentinella-ili'.",
+    ),
+    "foph-sentinella-ili": Connector(
+        id="foph-sentinella-ili",
+        name="FOPH Sentinella — Influenza-like illness (clinical ILI, weekly)",
+        provider="Federal Office of Public Health — Sentinella sentinel-GP network (opendata.swiss)",
+        license="opendata.swiss terms of use",
+        geo="national",
+        commercial_ok=True,
+        variables=[
+            {"machine_name": "ili_incidence", "label": "Influenza-like illness consultation incidence",
+             "unit": "per 100k / per 1000 consultations", "dtype": "float"},
+        ],
+        fetch=_fetch_sentinella_ili,
+        params_schema=_SENTINELLA_PARAMS,
+        notes="CLINICAL influenza-like-illness OUTCOME (Sentinella sentinel-GP network), "
+              "complementary to the wastewater viral-load signal. Weekly ISO-week series "
+              "converted to the week's Monday date so it join-aligns with the daily weather / "
+              "air-quality connectors after weekly resampling. The opendata.swiss resource id "
+              "shifts by season → set FOPH_SENTINELLA_CSV_URL or pass url=/value_col= to pin the "
+              "source. This is the live ILI target for a weather → influenza-ILI predictive model.",
     ),
 }
 

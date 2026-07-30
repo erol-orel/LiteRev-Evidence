@@ -150,7 +150,7 @@ def test_parse_generic_csv_picks_date_and_numeric():
 
 def test_new_connectors_registered():
     ids = {m["id"] for m in dc.list_connectors()}
-    assert {"eawag-wastewater", "foph-wastewater"} <= ids
+    assert {"eawag-wastewater", "foph-wastewater", "foph-sentinella-ili"} <= ids
     assert "foph-respiratory" not in ids          # mislabeled clinical placeholder removed
 
 
@@ -196,6 +196,48 @@ def test_fetch_foph_wastewater_filter_selects_region(monkeypatch):
     later = dc.fetch_series("foph-wastewater",
                             {"url": "https://x/ww.csv", "geoRegion": "GE", "start_date": "2025-01-05"})
     assert [r["date"] for r in later] == ["2025-01-08"]                  # date window on top of filter
+
+
+# ── FOPH Sentinella clinical-ILI connector (the influenza-ILI outcome) ────────
+def test_isoweek_to_date_forms():
+    for tok in ("2023-W05", "2023W05", "202305", "2023-05"):
+        assert dc._isoweek_to_date(tok) == "2023-01-30"     # Monday of ISO week 5, 2023
+    assert dc._isoweek_to_date("2024-02-27") == "2024-02-27"   # plain date passes through
+    assert dc._isoweek_to_date("2023-99") is None              # week out of range
+    assert dc._isoweek_to_date("nope") is None and dc._isoweek_to_date("") is None
+
+
+def test_parse_sentinella_ili_isoweek_filter_and_autodetect():
+    csv = ("week,region,inzidenz\n"
+           "2023-W05,CH,12.4\n2023-W06,CH,15.1\n2023-W05,GE,9.0\n2023-W07,CH,18.2\n")
+    rows = dc._parse_sentinella_ili(csv, filters={"region": "CH"})   # value col auto-detected
+    assert rows == [{"date": "2023-01-30", "ili_incidence": 12.4},
+                    {"date": "2023-02-06", "ili_incidence": 15.1},
+                    {"date": "2023-02-13", "ili_incidence": 18.2}]
+
+
+def test_parse_sentinella_ili_value_col_and_dedup():
+    # explicit column choice + duplicate weeks averaged
+    csv = ("date,ili_per_100k,ari_per_100k\n2023-01-30,100,200\n2023-01-30,120,220\n2023-02-06,110,210\n")
+    rows = dc._parse_sentinella_ili(csv, value_col="ili_per_100k")
+    assert rows == [{"date": "2023-01-30", "ili_incidence": 110.0},   # (100+120)/2
+                    {"date": "2023-02-06", "ili_incidence": 110.0}]
+
+
+def test_fetch_sentinella_ili_window_and_json_safe(monkeypatch):
+    csv = "week,inzidenz\n2023-W05,12.4\n2023-W06,15.1\n2023-W07,18.2\n"
+    monkeypatch.setattr(dc, "_http_get_text", lambda url, timeout=30: csv)
+    rows = dc.fetch_series("foph-sentinella-ili", {"url": "https://x/ili.csv", "start_date": "2023-02-01"})
+    assert [r["date"] for r in rows] == ["2023-02-06", "2023-02-13"]   # ISO weeks → Monday dates, windowed
+    json.dumps(rows)                                                    # goes over the wire
+
+
+def test_sentinella_connector_registered_and_metadata():
+    by_id = {m["id"]: m for m in dc.list_connectors()}
+    md = by_id["foph-sentinella-ili"]
+    assert [v["machine_name"] for v in md["variables"]] == ["ili_incidence"]
+    assert md["geo"] == "national"
+    json.dumps(md)                                                     # metadata JSON-safe, hides callable
 
 
 # ── SEIR projection connector (no network — integrates the model locally) ─────

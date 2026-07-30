@@ -2668,8 +2668,9 @@ function _guessConnector(mn: string, connectors: DataConnector[]): { id: string;
   if (/(temp|humid|precip|wind|weather|met[eé]o)/.test(n)) return match("open-meteo-weather");
   if (/(pm2|pm10|no2|o3|ozone|air|pollut)/.test(n)) return match("open-meteo-air-quality");
   if (/(rsv|sars|sewage)/.test(n)) return match("eawag-wastewater");   // per-virus loads (archive)
+  // clinical influenza-like-illness / ARI consultation incidence → FOPH Sentinella (live)
+  if (/(ili|ari|grippal|grippe|influenza.?like|consultation|sentinella|incidence)/.test(n)) return match("foph-sentinella-ili");
   if (/(wastewater|viral.?load|influenza|flu|ww)/.test(n)) return match("foph-wastewater");  // live influenza WW
-  // clinical ILI/ARI incidence has no live connector → manual CSV upload (no auto-guess)
   return null;
 }
 
