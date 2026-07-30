@@ -1051,6 +1051,8 @@ export const fr = {
         trainedOn: "Entraîné",
         computedOn: "Calculé",
         keyDrivers: "Facteurs clés",
+        export: "Exporter",
+        exportTip: "Télécharger le bundle de reproductibilité complet : spec du modèle, chaque run avec ses hyperparamètres/métriques, le jeu de données et la prédiction (JSON)",
       },
       riskPrefix: "Risque (",
       riskPositiveClass: "classe positive",

@@ -42,6 +42,7 @@ import {
   generateSyntheticData,
   getModelTrainStatus,
   getModelMonitor,
+  exportModelBundle,
   fetchSeirProjection,
   postSeirProjection,
   type SeirProjection,
@@ -4792,10 +4793,23 @@ const _DASH_STATUS = {
 } as const;
 type DashStatus = keyof typeof _DASH_STATUS;
 
-function ModelDashboard({ run, monitor, spec }: { run: ModelRun; monitor: ModelMonitor | null; spec: ModelSpecResponse | null }) {
+function ModelDashboard({ scenarioId, run, monitor, spec }: { scenarioId: string; run: ModelRun; monitor: ModelMonitor | null; spec: ModelSpecResponse | null }) {
   const { t, lang } = useI18n();
   const locale = lang === "fr" ? "fr-FR" : "en-US";
   const fmtDate = (d?: string | null) => (d ? new Date(d).toLocaleString(locale, { dateStyle: "medium", timeStyle: "short" }) : "—");
+  const [exporting, setExporting] = useState(false);
+  const doExport = async () => {
+    setExporting(true);
+    try {
+      const bundle = await exportModelBundle(scenarioId);
+      const blob = new Blob([JSON.stringify(bundle, null, 2)], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url; a.download = `model_${scenarioId}.json`; a.click();
+      URL.revokeObjectURL(url);
+    } catch { /* silencieux : l'export ne doit jamais casser la page */ }
+    finally { setExporting(false); }
+  };
 
   const sc: DashStatus = (monitor?.status_color as DashStatus) in _DASH_STATUS ? (monitor!.status_color as DashStatus) : "unavailable";
   const cfg = _DASH_STATUS[sc];
@@ -4830,10 +4844,17 @@ function ModelDashboard({ run, monitor, spec }: { run: ModelRun; monitor: ModelM
       <div className="flex items-start justify-between gap-3 flex-wrap">
         <SectionHeader icon={<Activity size={14} className="text-brand-400" />}
           title={t("scenarioDetail.model.dashboard.title")} subtitle={outcomeName} />
-        <span className={`shrink-0 rounded-full px-3 py-1 text-xs font-bold border ${cfg.bg} ${cfg.text} ${cfg.border} flex items-center gap-1.5`}>
-          <span className={`h-2 w-2 rounded-full ${cfg.dot}`} />
-          {monitor?.status_label ?? t("scenarioDetail.model.dashboard.noSignal")}
-        </span>
+        <div className="flex items-center gap-2 shrink-0">
+          <button type="button" onClick={doExport} disabled={exporting}
+            title={t("scenarioDetail.model.dashboard.exportTip")}
+            className="flex items-center gap-1.5 rounded-full border border-white/15 text-white/60 px-2.5 py-1 text-[10px] font-semibold hover:bg-white/5 hover:text-white transition disabled:opacity-50">
+            {exporting ? <Loader2 size={11} className="animate-spin" /> : <Download size={11} />}{t("scenarioDetail.model.dashboard.export")}
+          </button>
+          <span className={`rounded-full px-3 py-1 text-xs font-bold border ${cfg.bg} ${cfg.text} ${cfg.border} flex items-center gap-1.5`}>
+            <span className={`h-2 w-2 rounded-full ${cfg.dot}`} />
+            {monitor?.status_label ?? t("scenarioDetail.model.dashboard.noSignal")}
+          </span>
+        </div>
       </div>
 
       {/* Prédiction actuelle (héros) */}
@@ -5053,7 +5074,7 @@ function ModelMonitorSection({ scenarioId }: { scenarioId: string }) {
 
       {/* Tableau de bord clinicien — dès qu'un modèle est entraîné : prédiction + bande
           d'alerte (couleur), performance, dates d'entraînement/calcul, facteurs clés. */}
-      {run?.status === "ready" && <ModelDashboard run={run} monitor={monitor} spec={spec} />}
+      {run?.status === "ready" && <ModelDashboard scenarioId={scenarioId} run={run} monitor={monitor} spec={spec} />}
 
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
         {/* Statut live piloté par le modèle entraîné */}

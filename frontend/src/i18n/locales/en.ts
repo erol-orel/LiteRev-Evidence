@@ -1053,6 +1053,8 @@ export const en: Translations = {
         trainedOn: "Trained",
         computedOn: "Computed",
         keyDrivers: "Key drivers",
+        export: "Export",
+        exportTip: "Download the full reproducibility bundle: model spec, every run with its hyperparameters/metrics, the dataset, and the prediction (JSON)",
       },
       riskPrefix: "Risk (",
       riskPositiveClass: "positive class",

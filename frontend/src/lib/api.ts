@@ -2435,6 +2435,16 @@ export async function fetchSeirProjection(
   return r.json();
 }
 
+// Bundle de reproductibilité d'un modèle (spec + runs + hyperparamètres + dataset +
+// prédiction) — authentifié (expose le schéma/les données du scénario).
+export async function exportModelBundle(scenarioId: string, includeData = true): Promise<Record<string, unknown>> {
+  const r = await safeFetch(
+    `${API_BASE_URL}/scenarios/${scenarioId}/model/export?include_data=${includeData}`,
+    { headers: authHeaders() });
+  if (!r.ok) throw new Error(httpMessage(r.status));
+  return r.json();
+}
+
 // Projection AVEC paramètres modifiés par l'utilisateur (onglet SEIR) — explore des
 // variantes sans altérer les paramètres source extraits de la littérature.
 export async function postSeirProjection(
