@@ -15072,31 +15072,50 @@ def _scenario_seed(scenario_id: str) -> tuple[float, float, str | None]:
     import seir_model
     pop: float = 1_000_000.0
     geo: str | None = None
+
+    # 1) Géographie INTENTIONNELLE du scénario = sa requête / son titre. Prioritaire : le
+    #    corpus d'un sujet épidémique est INTERNATIONAL (géographie modale ≈ « world »),
+    #    mais l'utilisateur cible une zone précise (« … en suisse romande »). On prend la
+    #    zone la plus LOCALE citée dans la requête.
     try:
-        threshold = _get_scenario_threshold(scenario_id)
         with engine.connect() as conn:
-            rows = conn.execute(text("""
-                SELECT ld.geographic_scope AS geo, COUNT(*) AS n
-                FROM literature_document ld
-                JOIN article_scenarios asn ON asn.document_id = ld.id AND asn.scenario_id = :sid
-                WHERE ld.project_context = 'literev'
-                  AND ld.is_duplicate IS NOT TRUE
-                  AND ld.geographic_scope IS NOT NULL
-                  AND COALESCE(asn.screening_status, ld.screening_status) IS DISTINCT FROM 'excluded'
-                  AND (
-                      COALESCE(asn.screening_status, ld.screening_status) = 'included'
-                      OR COALESCE(asn.similarity_score, 0) >= :threshold
-                  )
-                GROUP BY ld.geographic_scope
-                ORDER BY n DESC, ld.geographic_scope ASC
-            """), {"sid": scenario_id, "threshold": threshold}).mappings().all()
-        for r in rows:
-            _p = seir_model.population_for_geography(r["geo"])
-            if _p:
-                pop, geo = _p, str(r["geo"])
-                break
+            _q = conn.execute(text(
+                "SELECT COALESCE(NULLIF(query, ''), name, '') FROM user_scenarios WHERE id = :sid"
+            ), {"sid": scenario_id}).scalar()
+        _hit = seir_model.population_for_geography_in_text(_q or "")
+        if _hit:
+            pop, geo = _hit[0], _hit[1]
     except Exception as _e:
-        logger.warning(f"_scenario_seed({scenario_id}): {_e}")
+        logger.warning(f"_scenario_seed geo-from-query {scenario_id}: {_e}")
+
+    # 2) Repli : géographie MODALE du corpus pertinent (si la requête ne cite aucune zone).
+    if geo is None:
+        try:
+            threshold = _get_scenario_threshold(scenario_id)
+            with engine.connect() as conn:
+                rows = conn.execute(text("""
+                    SELECT ld.geographic_scope AS geo, COUNT(*) AS n
+                    FROM literature_document ld
+                    JOIN article_scenarios asn ON asn.document_id = ld.id AND asn.scenario_id = :sid
+                    WHERE ld.project_context = 'literev'
+                      AND ld.is_duplicate IS NOT TRUE
+                      AND ld.geographic_scope IS NOT NULL
+                      AND COALESCE(asn.screening_status, ld.screening_status) IS DISTINCT FROM 'excluded'
+                      AND (
+                          COALESCE(asn.screening_status, ld.screening_status) = 'included'
+                          OR COALESCE(asn.similarity_score, 0) >= :threshold
+                      )
+                    GROUP BY ld.geographic_scope
+                    ORDER BY n DESC, ld.geographic_scope ASC
+                """), {"sid": scenario_id, "threshold": threshold}).mappings().all()
+            for r in rows:
+                _p = seir_model.population_for_geography(r["geo"])
+                if _p:
+                    pop, geo = _p, str(r["geo"])
+                    break
+        except Exception as _e:
+            logger.warning(f"_scenario_seed({scenario_id}): {_e}")
+
     i0 = max(1.0, pop * 1e-5)
     return pop, i0, geo
 
