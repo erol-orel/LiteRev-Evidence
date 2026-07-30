@@ -65,3 +65,15 @@ python scripts/trial_weather_influenza_ili.py --mode weather-ili  # needs produc
 In the app itself, the same path is reachable without code: create an influenza scenario,
 let it derive weather predictors + an ILI outcome, and the connector picker now auto-binds
 weather → `open-meteo-weather` and ILI → `foph-sentinella-ili`, fetches, and trains.
+
+## Built-in demo scenario
+
+So the trial is visible in the product (not just a script), a **pinned demo scenario**
+"Influenza & environment — Switzerland (demo)" is seeded on startup
+(`main._seed_demo_scenarios` + `demo_seed.py`). On boot it idempotently (stable id
+`usr-deadbeef0001`) trains the model on the committed real dataset and writes the four rows
+the dashboard/monitor need — `user_scenarios`, `scenario_settings.variables_json.model_spec`,
+an active `scenario_model_dataset` (the real CSV), and an active `scenario_model_run` (the
+joblib artifact). It appears in the scenario list with the model dashboard populated:
+predicted value, alert colour, metrics, hyperparameters and feature importances. The seed is
+best-effort (never blocks or breaks startup) and runs once; delete the scenario to drop it.
