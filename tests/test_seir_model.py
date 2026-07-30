@@ -322,3 +322,118 @@ def test_normalize_pooling_works_when_llm_value_absent():
     norm = sm.normalize_extracted_parameters(blk, valid_ids={1, 2}, quality_by_id={1: 3.0, 2: 3.0})
     assert "cfr" in norm["params"]
     assert abs(norm["params"]["cfr"]["value"] - 0.03) < 1e-9
+
+
+# ── SEIR as a submodel: which predictor variables it derives ─────────────────
+def test_seir_feature_column_maps_outputs():
+    assert sm.seir_feature_column("Incidence hebdomadaire COVID-19") == "seir_incidence"
+    assert sm.seir_feature_column("nouvelles infections / jour") == "seir_incidence"
+    assert sm.seir_feature_column("Prévalence des cas infectieux") == "seir_prevalence"
+    assert sm.seir_feature_column("Nombre de cas actifs") == "seir_prevalence"
+    assert sm.seir_feature_column("seir_deaths") == "seir_deaths"
+    assert sm.seir_feature_column("Décès cumulés dus au COVID") == "seir_deaths"
+
+
+def test_seir_feature_column_priority_and_none():
+    # "cumulative incidence" must resolve to cumulative (checked before incidence)
+    assert sm.seir_feature_column("Incidence cumulée") == "seir_cumulative"
+    assert sm.seir_feature_column("Taux d'attaque") == "seir_cumulative"
+    # non-epidemic / unrelated variables → not SEIR-derivable
+    assert sm.seir_feature_column("Température maximale") is None
+    assert sm.seir_feature_column("Taux de vaccination") is None
+    assert sm.seir_feature_column("Occupation des lits hospitaliers") is None
+    assert sm.seir_feature_column("") is None
+
+
+def test_is_seir_parameter_detects_params():
+    assert sm.is_seir_parameter("R0 de base")
+    assert sm.is_seir_parameter("Taux de reproduction effectif")
+    assert sm.is_seir_parameter("CFR (létalité)")
+    assert sm.is_seir_parameter("Période d'incubation (jours)")
+    assert sm.is_seir_parameter("Infectious period")
+    assert sm.is_seir_parameter("Intervalle sériel")
+
+
+def test_is_seir_parameter_no_false_positives():
+    # short ambiguous tokens are whole-word only — "r0"/"cfr" must not match inside words
+    assert not sm.is_seir_parameter("start_date")       # contains "rt"? no bare "rt" keyword anyway
+    assert not sm.is_seir_parameter("comfort_index")    # "rt"/"r0" not present as words
+    assert not sm.is_seir_parameter("Nombre d'hospitalisations")
+    assert not sm.is_seir_parameter("Incidence hebdomadaire")   # an output, not a parameter
+    assert not sm.is_seir_parameter("Température")
+    assert not sm.is_seir_parameter("")
+
+
+def test_seir_param_and_output_are_disjoint_for_typical_vars():
+    # a case-fatality variable is a PARAMETER, not a "deaths" output (param check wins upstream)
+    assert sm.is_seir_parameter("Case fatality rate")
+    # bare "décès" is an output, not a parameter
+    assert not sm.is_seir_parameter("Décès quotidiens")
+    assert sm.seir_feature_column("Décès quotidiens") == "seir_deaths"
+
+
+# ── expanded SEIR+ vocabulary (compartments, flows, parameters) ──────────────
+def test_seir_feature_column_compartments():
+    assert sm.seir_feature_column("Population susceptible") == "seir_susceptible"
+    assert sm.seir_feature_column("Nombre de personnes exposées") == "seir_exposed"
+    assert sm.seir_feature_column("Latently infected individuals") == "seir_exposed"
+    assert sm.seir_feature_column("Personnes rétablies") == "seir_recovered"
+    assert sm.seir_feature_column("Recovered / immune population") == "seir_recovered"
+    assert sm.seir_feature_column("Immunité de la population") == "seir_recovered"
+
+
+def test_seir_feature_column_expanded_flow_vocab():
+    assert sm.seir_feature_column("Cas confirmés quotidiens") == "seir_incidence"
+    assert sm.seir_feature_column("Reported cases") == "seir_incidence"
+    assert sm.seir_feature_column("Taux d'incidence") == "seir_incidence"
+    assert sm.seir_feature_column("Total infections to date") == "seir_cumulative"
+    assert sm.seir_feature_column("Final size of the epidemic") == "seir_cumulative"
+    assert sm.seir_feature_column("Cas symptomatiques") == "seir_prevalence"
+    assert sm.seir_feature_column("Number of infectious individuals") == "seir_prevalence"
+
+
+def test_is_seir_parameter_expanded():
+    for v in ("Rt effectif", "Effective reproduction number", "Basic reproduction number R0",
+              "Taux de transmission", "Transmission coefficient", "Contact rate",
+              "Recovery rate", "Taux de guérison", "Generation time", "Generation interval",
+              "Temps de génération", "Waning immunity", "Immunité décroissante",
+              "Infection fatality ratio (IFR)"):
+        assert sm.is_seir_parameter(v), v
+
+
+def test_is_seir_parameter_keeps_external_covariates():
+    # covariates the engine does NOT model must stay real features (not dropped as params)
+    for v in ("Taux de vaccination", "Vaccination coverage", "Couverture vaccinale",
+              "Mobilité de la population", "Occupation des lits", "Température moyenne",
+              "Densité de population", "Proportion de tests positifs"):
+        assert not sm.is_seir_parameter(v), v
+        assert sm.seir_feature_column(v) is None, v
+
+
+def test_param_precedence_for_immunity_duration():
+    # "durée d'immunité" is a PARAMETER; the caller (_attach_model_spec) checks
+    # is_seir_parameter BEFORE seir_feature_column, so it is excluded, not routed to R.
+    assert sm.is_seir_parameter("Durée d'immunité (jours)")
+
+
+def test_simulate_exposes_compartments():
+    res = sm.simulate(
+        sm.SeirParams(r0=2.5, infectious_period_days=6, incubation_period_days=4,
+                      cfr=0.02, population=1_000_000, initial_infected=10),
+        days=120,
+    )
+    n = 1_000_000
+    for key in ("susceptible", "exposed", "recovered"):
+        assert key in res and len(res[key]) == len(res["days"])
+        assert all(0.0 - 1e-6 <= v <= n + 1.0 for v in res[key])
+    # S starts near the whole population and decreases; R starts at 0 and grows
+    assert res["susceptible"][0] > 0.9 * n
+    assert res["susceptible"][-1] < res["susceptible"][0]
+    assert res["recovered"][0] < 1.0 and res["recovered"][-1] > res["recovered"][0]
+
+
+def test_ensemble_aggregates_compartments():
+    ens = sm.simulate_ensemble(_ens_params(), days=120, n_samples=40, seed=5)
+    for key in ("susceptible", "exposed", "recovered"):
+        b = ens[key]
+        assert all(b["lower"][t] <= b["median"][t] <= b["upper"][t] for t in range(len(b["median"])))

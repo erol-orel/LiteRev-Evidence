@@ -7202,6 +7202,17 @@ def list_user_scenarios() -> list[dict[str, Any]]:
                 ORDER BY query, mode, created_at DESC
               )
         """))
+        # Un scénario SAUVEGARDÉ (épinglé) est unique : purge toute recherche récente
+        # (non épinglée) qui DOUBLONNE un scénario épinglé de même query+mode. Sans ça,
+        # relancer une recherche déjà sauvegardée laissait une 2e carte identique.
+        conn.execute(text("""
+            DELETE FROM user_scenarios u
+            WHERE u.pinned = false AND u.folder_id IS NULL
+              AND EXISTS (
+                SELECT 1 FROM user_scenarios p
+                WHERE p.pinned = true AND p.query = u.query AND p.mode = u.mode
+              )
+        """))
         rows = conn.execute(text("""
             SELECT
                 us.id, us.name, us.query, us.mode, us.filters,
@@ -7249,6 +7260,17 @@ def create_user_scenario(payload: UserScenarioIn, _: None = Depends(require_api_
     # merge them — always insert a fresh row instead.
     if not payload.pinned and not payload.folder_id and not payload.sub_queries:
         with engine.begin() as conn:
+            # Un scénario SAUVEGARDÉ (épinglé) est UNIQUE : si CE query l'est déjà, une
+            # relance de recherche ne doit PAS créer un doublon « récent ». On renvoie le
+            # scénario épinglé existant tel quel (corpus + Variables/Modèle préservés) —
+            # la recherche reste visible dans la vue de résultats, sans seconde carte.
+            pinned_existing = conn.execute(text("""
+                SELECT id FROM user_scenarios
+                WHERE query = :query AND mode = :mode AND pinned = true AND folder_id IS NULL
+                ORDER BY created_at DESC LIMIT 1
+            """), {"query": payload.query, "mode": payload.mode}).scalar()
+            if pinned_existing:
+                return _user_scenario_to_gesica_format(_get_user_scenario_or_404(pinned_existing))
             existing = conn.execute(text("""
                 SELECT id FROM user_scenarios
                 WHERE query = :query AND mode = :mode AND pinned = false AND folder_id IS NULL
@@ -12880,7 +12902,7 @@ MODEL_SPEC_SCHEMA = "model_spec/1.0"
 
 _TASK_TYPES = {"classification", "regression", "count", "survival"}
 _DTYPES = {"float", "int", "bool", "category", "datetime"}
-_FEATURE_SOURCES = {"user", "public_api"}
+_FEATURE_SOURCES = {"user", "public_api", "seir"}
 _ALGO_FAMILIES = {
     "gradient_boosting", "lightgbm", "xgboost", "random_forest", "logistic_regression",
     "linear_regression", "elasticnet", "svm", "mlp", "cox_ph", "knn",
@@ -12992,20 +13014,26 @@ def _derive_data_template(outcome: dict, features: list[dict]) -> dict:
         "required": True, "source": "user", "description": outcome.get("name", ""),
     }]
     for f in features:
-        columns.append({
+        col = {
             "name": f["machine_name"], "dtype": f["dtype"], "role": "feature",
             "required": f.get("importance") == "high",
             "source": f.get("source", "user"), "public_provider": f.get("public_provider"),
             "description": f.get("name", ""),
-        })
+        }
+        if f.get("seir_column"):
+            col["seir_column"] = f["seir_column"]  # dérivée du sous-modèle SEIR
+        columns.append(col)
     return {
         "target_column": outcome_mn,
         "columns": columns,
         "formats": ["csv", "xlsx"],
         "user_columns": [c["name"] for c in columns if c["source"] == "user"],
         "public_columns": [c["name"] for c in columns if c["source"] == "public_api"],
+        # Colonnes dérivées du sous-modèle SEIR (remplies automatiquement, pas d'upload).
+        "seir_columns": [c["name"] for c in columns if c["source"] == "seir"],
         "notes": ("Les en-têtes du fichier doivent correspondre EXACTEMENT à ces noms. "
-                  "Les colonnes 'public_api' pourront être récupérées automatiquement (Phase 2)."),
+                  "Les colonnes 'public_api' pourront être récupérées automatiquement (Phase 2). "
+                  "Les colonnes 'seir' sont DÉRIVÉES du sous-modèle épidémique (aucun upload)."),
     }
 
 
@@ -13138,6 +13166,31 @@ def _attach_model_spec(variables: dict, prov_articles: list[dict]) -> dict:
     )
     cited.update(_epi["cited"])
 
+    # ── Le SEIR comme SOUS-MODÈLE : reclasser les variables qu'il DÉRIVE ─────────
+    # Scénario épidémique (paramètres SEIR extraits) → une variable qui EST un paramètre
+    # du modèle (R0, CFR, incubation…) n'est PAS une feature du prédicteur : on la retire
+    # (elle vit dans epidemic_parameters). Une variable qui est une SORTIE du modèle
+    # (incidence, prévalence, cumul, décès) RESTE une feature mais sa source devient
+    # "seir" : remplie automatiquement par le connecteur SEIR (aucun upload / API externe).
+    if _epi.get("applicable"):
+        _pv_by_mn = {pv.get("machine_name"): pv
+                     for pv in (variables.get("predictor_variables") or []) if isinstance(pv, dict)}
+        _kept = []
+        for f in features:
+            _txt = f"{f.get('name', '')} {f.get('machine_name', '')}"
+            _pv = _pv_by_mn.get(f["machine_name"])
+            if _seir.is_seir_parameter(_txt):
+                if _pv is not None:
+                    _pv["_seir_role"] = "parameter"  # cross-link additif pour l'UI
+                continue  # input de simulation → jamais une feature
+            _col = _seir.seir_feature_column(_txt)
+            if _col:
+                f["source"], f["public_provider"], f["seir_column"] = "seir", None, _col
+                if _pv is not None:
+                    _pv["source"], _pv["_seir_role"], _pv["_seir_column"] = "seir", "derived", _col
+            _kept.append(f)
+        features = _kept
+
     # ── Data template (dérivé → garanti cohérent avec les machine_name ci-dessus) ──
     data_template = _derive_data_template(outcome, features)
 
@@ -13247,7 +13300,7 @@ Génère un JSON avec EXACTEMENT ces champs :
       "evidence_level": "Nombre d'études qui la mentionnent",
       "machine_name": "identifiant_snake_case_court (ex: temp_max_j1)",
       "dtype": "float|int|bool|category|datetime",
-      "source": "user (fournie par l'utilisateur) | public_api (récupérable: météo, open data...)",
+      "source": "user (fournie par l'utilisateur) | public_api (récupérable: météo, open data...) | seir (DÉRIVÉE du sous-modèle épidémique: incidence/prévalence/cumul/décès)",
       "public_provider": "open-meteo si météo, sinon null",
       "provenance": [ids d'articles de la liste ci-dessus mentionnant cette variable]
     }}
@@ -13296,6 +13349,16 @@ fondées sur les seuils rapportés dans les évidences quand ils existent (sinon
 cliniquement plausibles). Les trois plages doivent être contiguës et couvrir tout le
 domaine. Tu PEUX renommer les catégories si l'outcome s'y prête (ex. pour un compte :
 "Faible"/"Modéré"/"Élevé"), mais garde 3 niveaux du plus sûr au plus critique.
+
+IMPORTANT — le SEIR est un SOUS-MODÈLE, pas des features (scénarios de maladie
+transmissible) : ne mets JAMAIS un PARAMÈTRE du modèle compartimental (R0, Rt, létalité/
+CFR, période d'incubation, période infectieuse, durée d'immunité, intervalle sériel) dans
+"predictor_variables" — ces valeurs vont dans "epidemic_parameters", pas dans les features.
+En revanche, une SORTIE du sous-modèle (incidence, prévalence, cas actifs, infections
+cumulées, décès) PEUT être une variable prédictive utile : liste-la normalement mais mets
+son "source": "seir" — le serveur la remplira automatiquement depuis le sous-modèle
+(aucune donnée externe requise). Les autres variables (météo, vaccination, mobilité, lits…)
+gardent "source": "user" ou "public_api".
 
 IMPORTANT pour "epidemic_parameters" : ne renseigne ces paramètres qu'à partir de
 valeurs RÉELLEMENT rapportées dans les articles ci-dessus (avec leur provenance) ; mets
@@ -14451,7 +14514,7 @@ def _validate_dataset_against_template(file_columns: list, data_template: dict,
     target_col = data_template.get("target_column")
 
     present_required, missing_required, present_optional = [], [], []
-    missing_user, missing_public, matched_features = [], [], []
+    missing_user, missing_public, missing_seir, matched_features = [], [], [], []
     renamed, dtype_warnings = [], []
     target_present = False
     n_features = n_features_present = 0
@@ -14483,6 +14546,8 @@ def _validate_dataset_against_template(file_columns: list, data_template: dict,
                 missing_required.append(name)
             if source == "public_api":
                 missing_public.append(name)
+            elif source == "seir":
+                missing_seir.append(name)  # dérivée du sous-modèle SEIR → auto-remplie
             elif role != "outcome":
                 missing_user.append(name)
 
@@ -14522,13 +14587,14 @@ def _validate_dataset_against_template(file_columns: list, data_template: dict,
         "present_optional": present_optional,
         "missing_user": missing_user,
         "missing_public": missing_public,
+        "missing_seir": missing_seir,
         "extra_columns": extra_columns,
         "renamed": renamed,
         "dtype_warnings": dtype_warnings,
         "readiness": {
             "can_train": can_train,
             "reasons": reasons,
-            "auto_fetchable": missing_public,
+            "auto_fetchable": missing_public + missing_seir,
         },
     }
 
@@ -14819,9 +14885,22 @@ def auto_fetch_model_dataset(
     if payload.lon is not None:
         base_params["lon"] = payload.lon
 
+    # Mappings = ceux fournis par l'utilisateur + AUTO pour les colonnes dérivées du
+    # sous-modèle SEIR (source="seir") : ces features sont remplies par le connecteur
+    # SEIR sans que l'utilisateur ait à les mapper à la main.
+    mapping_dicts = [m.model_dump() for m in payload.mappings]
+    _mapped_cols = {m["template_column"] for m in mapping_dicts}
+    for _c in (data_template.get("columns") or []):
+        if _c.get("source") == "seir" and _c.get("seir_column") and _c["name"] not in _mapped_cols:
+            mapping_dicts.append({
+                "template_column": _c["name"],
+                "connector_id": data_connectors.SEIR_CONNECTOR_ID,
+                "connector_variable": _c["seir_column"],
+            })
+
     frames: dict[str, Any] = {}
     fetch_errors: dict[str, str] = {}
-    for cid in {m.connector_id for m in payload.mappings}:
+    for cid in {m["connector_id"] for m in mapping_dicts}:
         if cid not in data_connectors.CONNECTORS:
             fetch_errors[cid] = "connecteur inconnu"
             continue
@@ -14849,7 +14928,7 @@ def auto_fetch_model_dataset(
     _dt_col = next((c["name"] for c in data_template.get("columns", []) if c.get("dtype") == "datetime"), None)
     freq = (payload.frequency or "W").strip() or "W"
     assembled, filled = _assemble_connector_frames(
-        frames, [m.model_dump() for m in payload.mappings], freq, _dt_col)
+        frames, mapping_dicts, freq, _dt_col)
     if assembled is None or assembled.empty:
         raise HTTPException(status_code=422, detail={
             "message": "Aucune donnée assemblée depuis les connecteurs (mappings/fenêtre à vérifier).",

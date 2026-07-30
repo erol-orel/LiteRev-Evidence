@@ -1577,6 +1577,15 @@ function ScenariosView({
     + userScenarios.reduce((a, s) => a + (s.articleCount ?? 0), 0);
   const totalScenarios = scenarios.length + userScenarios.length;
 
+  // Un scénario SAUVEGARDÉ (épinglé) est UNIQUE : on masque toute recherche récente
+  // (non épinglée) qui doublonne un scénario épinglé de même query (+ mode) — la 2e carte
+  // identique disparaît immédiatement, sans attendre la purge backend à la prochaine liste.
+  const _scenKey = (s: UserScenario) => `${(s as any).query ?? ''} ${(s as any).mode ?? ''}`;
+  const _pinnedKeys = new Set(userScenarios.filter(s => s.pinned).map(_scenKey));
+  const recentScenarios = userScenarios.filter(
+    s => !s.pinned && !(s as any).folder_id && !_pinnedKeys.has(_scenKey(s)),
+  );
+
   return (
     <div className="space-y-6">
       {/* En-tête unifié */}
@@ -1717,11 +1726,12 @@ function ScenariosView({
             </div>
           )}
 
-          {/* Non épinglés (hors dossier) */}
-          {userScenarios.filter(s => !s.pinned && !(s as any).folder_id).length > 0 && (
+          {/* Recherches récentes (non épinglées, hors dossier) — historique de recherche,
+              dédupliqué des scénarios sauvegardés (cf. recentScenarios). */}
+          {recentScenarios.length > 0 && (
             <div className="space-y-2">
               <h3 className="text-xs font-semibold text-white/40 uppercase tracking-widest">{t("scenarios.recentSearches")}</h3>
-              {userScenarios.filter(s => !s.pinned && !(s as any).folder_id).map(s => (
+              {recentScenarios.map(s => (
                 renderScenarioCard(s)
               ))}
             </div>

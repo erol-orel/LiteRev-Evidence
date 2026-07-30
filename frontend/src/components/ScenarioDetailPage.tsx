@@ -1233,9 +1233,32 @@ function VariablesSection({ detail, scenarioId, onGoToModel }: { detail: Scenari
                       <span className="rounded bg-white/5 border border-white/10 px-1.5 py-0.5 text-[10px] text-white/50">{v.type}</span>
                     </td>
                     <td className="py-3 px-3 text-white/70 leading-5 max-w-[200px]">{v.definition}</td>
-                    <td className="py-3 px-3 text-white/50 font-mono text-[11px]">{v.data_source}</td>
+                    <td className="py-3 px-3 text-white/50 font-mono text-[11px]">
+                      {(v.source === 'seir' || v._seir_role === 'derived')
+                        ? t("scenarioDetail.variables.seirSourceLabel")
+                        : v._seir_role === 'parameter'
+                        ? t("scenarioDetail.variables.seirParamSourceLabel")
+                        : v.data_source}
+                    </td>
                     <td className="py-3 px-3 text-center">
                       {(() => {
+                        // Le sous-modèle SEIR prend le pas : une variable DÉRIVÉE est
+                        // remplie automatiquement ; un PARAMÈTRE (R0/CFR…) n'est pas une
+                        // feature du prédicteur (il alimente le SEIR).
+                        if (v._seir_role === 'parameter') {
+                          return (
+                            <span title={t("scenarioDetail.variables.tipSeirParam")} className="inline-flex items-center gap-1.5 text-[10px] font-semibold text-white/40">
+                              <span className="h-1.5 w-1.5 rounded-full bg-white/30" />{t("scenarioDetail.variables.statusSeirParam")}
+                            </span>
+                          );
+                        }
+                        if (v._seir_role === 'derived' || v.source === 'seir') {
+                          return (
+                            <span title={t("scenarioDetail.variables.tipSeirDerived")} className="inline-flex items-center gap-1.5 text-[10px] font-semibold text-violet-300">
+                              <span className="h-1.5 w-1.5 rounded-full bg-violet-400" />{t("scenarioDetail.variables.statusSeirDerived")}
+                            </span>
+                          );
+                        }
                         // Statut clair (pastille + libellé + couleur, jamais la couleur
                         // seule — accessibilité). Sans jeu de données chargé, on déduit
                         // la disponibilité de la source déclarée de la variable.

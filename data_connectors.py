@@ -478,10 +478,13 @@ CONNECTORS: dict[str, Connector] = {
 # exposées séparément par l'endpoint de projection (une colonne de dataset = une série).
 SEIR_CONNECTOR_ID = "seir-projection"
 _SEIR_VARS = [
-    {"machine_name": "seir_incidence",  "label": "Incidence modélisée (nouvelles infections/j)", "unit": "cas/jour", "dtype": "float"},
-    {"machine_name": "seir_prevalence", "label": "Prévalence modélisée (infectieux)",             "unit": "cas",      "dtype": "float"},
-    {"machine_name": "seir_cumulative", "label": "Infections cumulées",                           "unit": "cas",      "dtype": "float"},
-    {"machine_name": "seir_deaths",     "label": "Décès cumulés (si létalité connue)",            "unit": "décès",    "dtype": "float"},
+    {"machine_name": "seir_incidence",   "label": "Incidence modélisée (nouvelles infections/j)", "unit": "cas/jour", "dtype": "float"},
+    {"machine_name": "seir_prevalence",  "label": "Prévalence modélisée (infectieux)",             "unit": "cas",      "dtype": "float"},
+    {"machine_name": "seir_cumulative",  "label": "Infections cumulées",                           "unit": "cas",      "dtype": "float"},
+    {"machine_name": "seir_deaths",      "label": "Décès cumulés (si létalité connue)",            "unit": "décès",    "dtype": "float"},
+    {"machine_name": "seir_susceptible", "label": "Susceptibles (compartiment S)",                 "unit": "personnes", "dtype": "float"},
+    {"machine_name": "seir_exposed",     "label": "Exposés / latents (compartiment E)",            "unit": "personnes", "dtype": "float"},
+    {"machine_name": "seir_recovered",   "label": "Rétablis / immuns (compartiment R)",            "unit": "personnes", "dtype": "float"},
 ]
 
 
@@ -542,6 +545,7 @@ def _fetch_seir_projection(params: dict) -> list[dict]:
 
     inc, prev = ens["incidence"]["median"], ens["prevalence"]["median"]
     cum, dth = ens["cumulative"]["median"], ens["deaths"]["median"]
+    sus, exp, rec = ens["susceptible"]["median"], ens["exposed"]["median"], ens["recovered"]["median"]
     rows: list[dict] = []
     for i, day in enumerate(ens["days"]):
         dt = (d0 + timedelta(days=int(day))).isoformat() if d0 else str(day)
@@ -551,6 +555,9 @@ def _fetch_seir_projection(params: dict) -> list[dict]:
             "seir_prevalence": round(prev[i], 3),
             "seir_cumulative": round(cum[i], 3),
             "seir_deaths": round(dth[i], 3),
+            "seir_susceptible": round(sus[i], 3),
+            "seir_exposed": round(exp[i], 3),
+            "seir_recovered": round(rec[i], 3),
         })
     return rows
 
