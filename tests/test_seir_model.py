@@ -322,3 +322,51 @@ def test_normalize_pooling_works_when_llm_value_absent():
     norm = sm.normalize_extracted_parameters(blk, valid_ids={1, 2}, quality_by_id={1: 3.0, 2: 3.0})
     assert "cfr" in norm["params"]
     assert abs(norm["params"]["cfr"]["value"] - 0.03) < 1e-9
+
+
+# ── SEIR as a submodel: which predictor variables it derives ─────────────────
+def test_seir_feature_column_maps_outputs():
+    assert sm.seir_feature_column("Incidence hebdomadaire COVID-19") == "seir_incidence"
+    assert sm.seir_feature_column("nouvelles infections / jour") == "seir_incidence"
+    assert sm.seir_feature_column("Prévalence des cas infectieux") == "seir_prevalence"
+    assert sm.seir_feature_column("Nombre de cas actifs") == "seir_prevalence"
+    assert sm.seir_feature_column("seir_deaths") == "seir_deaths"
+    assert sm.seir_feature_column("Décès cumulés dus au COVID") == "seir_deaths"
+
+
+def test_seir_feature_column_priority_and_none():
+    # "cumulative incidence" must resolve to cumulative (checked before incidence)
+    assert sm.seir_feature_column("Incidence cumulée") == "seir_cumulative"
+    assert sm.seir_feature_column("Taux d'attaque") == "seir_cumulative"
+    # non-epidemic / unrelated variables → not SEIR-derivable
+    assert sm.seir_feature_column("Température maximale") is None
+    assert sm.seir_feature_column("Taux de vaccination") is None
+    assert sm.seir_feature_column("Occupation des lits hospitaliers") is None
+    assert sm.seir_feature_column("") is None
+
+
+def test_is_seir_parameter_detects_params():
+    assert sm.is_seir_parameter("R0 de base")
+    assert sm.is_seir_parameter("Taux de reproduction effectif")
+    assert sm.is_seir_parameter("CFR (létalité)")
+    assert sm.is_seir_parameter("Période d'incubation (jours)")
+    assert sm.is_seir_parameter("Infectious period")
+    assert sm.is_seir_parameter("Intervalle sériel")
+
+
+def test_is_seir_parameter_no_false_positives():
+    # short ambiguous tokens are whole-word only — "r0"/"cfr" must not match inside words
+    assert not sm.is_seir_parameter("start_date")       # contains "rt"? no bare "rt" keyword anyway
+    assert not sm.is_seir_parameter("comfort_index")    # "rt"/"r0" not present as words
+    assert not sm.is_seir_parameter("Nombre d'hospitalisations")
+    assert not sm.is_seir_parameter("Incidence hebdomadaire")   # an output, not a parameter
+    assert not sm.is_seir_parameter("Température")
+    assert not sm.is_seir_parameter("")
+
+
+def test_seir_param_and_output_are_disjoint_for_typical_vars():
+    # a case-fatality variable is a PARAMETER, not a "deaths" output (param check wins upstream)
+    assert sm.is_seir_parameter("Case fatality rate")
+    # bare "décès" is an output, not a parameter
+    assert not sm.is_seir_parameter("Décès quotidiens")
+    assert sm.seir_feature_column("Décès quotidiens") == "seir_deaths"

@@ -500,6 +500,12 @@ export const en: Translations = {
       tipPublic:
         "Retrieved automatically via a public API (no action required)",
       tipMissingUser: "To provide: import this data to train the model",
+      statusSeirDerived: "Derived (SEIR)",
+      tipSeirDerived: "Computed automatically by the SEIR submodel from the literature — no upload needed",
+      statusSeirParam: "SEIR parameter",
+      tipSeirParam: "Feeds the SEIR submodel (R₀, CFR, incubation…) — not a predictor feature",
+      seirSourceLabel: "SEIR submodel",
+      seirParamSourceLabel: "SEIR parameter",
       recommendedAlgorithm: "Recommended algorithm",
       trainedPrefix: "Trained:",
       alternatives: "Alternatives:",

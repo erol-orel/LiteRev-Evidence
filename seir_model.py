@@ -547,3 +547,74 @@ def pool_weighted(observations, quality_by_id=None) -> dict | None:
         "n_studies": len(pts),
         "provenance": prov,
     }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Le SEIR comme SOUS-MODÈLE : quelles variables prédictives il DÉRIVE
+# ─────────────────────────────────────────────────────────────────────────────
+# Deux classifications PURES d'une variable (par son nom / machine_name) :
+#   • `seir_feature_column` : la variable est une SORTIE du sous-modèle (incidence,
+#     prévalence, cumul, décès) → renvoie la colonne du connecteur SEIR qui la remplit
+#     automatiquement. La variable RESTE une feature, mais sa valeur vient du modèle.
+#   • `is_seir_parameter` : la variable est un PARAMÈTRE du sous-modèle (R0, CFR,
+#     incubation…) → c'est un input de simulation, PAS une feature du prédicteur.
+# On ne teste que NOM + machine_name (courts, contrôlés), jamais la définition libre,
+# pour éviter les faux positifs (« lits durant les pics d'incidence »…).
+SEIR_OUTPUT_COLUMNS = ("seir_incidence", "seir_prevalence", "seir_cumulative", "seir_deaths")
+
+
+def _norm_ascii(text) -> str:
+    """Minuscule, sans accents, séparateurs → espaces (snake_case et texte libre
+    convergent). Pur."""
+    import re as _re
+    import unicodedata as _ud
+    s = _ud.normalize("NFKD", str(text or "")).encode("ascii", "ignore").decode("ascii").lower()
+    return _re.sub(r"[^a-z0-9]+", " ", s).strip()
+
+
+# Ordre = priorité : décès et cumul AVANT incidence/prévalence (« décès cumulés » vise
+# seir_deaths ; « incidence cumulée » vise seir_cumulative). ASCII, forme espacée.
+_SEIR_OUTPUT_KEYWORDS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("seir_deaths",     ("death", "deaths", "deces", "mortalit", "fatalit", "fatal", "letal")),
+    ("seir_cumulative", ("cumulative", "cumul", "cumule", "attack rate", "taux d attaque",
+                         "total infection", "total infections", "infections totales")),
+    ("seir_incidence",  ("incidence", "incident", "new case", "new cases", "new infection",
+                         "nouveaux cas", "nouvelles infections", "daily case", "daily cases",
+                         "cas quotidien", "cas journalier")),
+    ("seir_prevalence", ("prevalence", "prevalent", "active case", "active cases", "cas actif",
+                         "cas actifs", "infectious", "infectieux", "currently infected")),
+)
+
+
+def seir_feature_column(text) -> str | None:
+    """Colonne de sortie du sous-modèle SEIR qu'une variable prédictive DÉSIGNE
+    (incidence/prévalence/cumul/décès), ou None si aucune. PUR."""
+    t = _norm_ascii(text)
+    if not t:
+        return None
+    for col, keys in _SEIR_OUTPUT_KEYWORDS:
+        if any(k in t for k in keys):
+            return col
+    return None
+
+
+# Paramètres du sous-modèle. Tokens COURTS/ambigus testés en mot entier (r0, cfr, reff) ;
+# expressions distinctives testées en sous-chaîne. Pas de « rt » nu (trop de collisions).
+_SEIR_PARAM_WORDS: frozenset[str] = frozenset({"r0", "cfr", "reff", "ifr"})
+_SEIR_PARAM_SUBSTR: tuple[str, ...] = (
+    "reproduction", "reproductif", "reproductive", "case fatality", "fatality rate",
+    "letalite", "incubation", "infectious period", "periode infectieuse",
+    "serial interval", "intervalle seriel", "generation time", "temps de generation",
+    "immunity duration", "duree d immunite", "waning", "latent period", "periode de latence",
+)
+
+
+def is_seir_parameter(text) -> bool:
+    """True si la variable est un PARAMÈTRE du sous-modèle SEIR (R0/CFR/incubation/
+    intervalle sériel…) — un input de simulation, jamais une feature du prédicteur. PUR."""
+    t = _norm_ascii(text)
+    if not t:
+        return False
+    if set(t.split()) & _SEIR_PARAM_WORDS:
+        return True
+    return any(k in t for k in _SEIR_PARAM_SUBSTR)

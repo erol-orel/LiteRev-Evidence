@@ -498,6 +498,12 @@ export const fr = {
       tipPublic:
         "Récupérée automatiquement via une API publique (aucune action requise)",
       tipMissingUser: "À fournir : importez ces données pour entraîner le modèle",
+      statusSeirDerived: "Dérivé (SEIR)",
+      tipSeirDerived: "Calculé automatiquement par le sous-modèle SEIR à partir de la littérature — aucun upload",
+      statusSeirParam: "Paramètre SEIR",
+      tipSeirParam: "Alimente le sous-modèle SEIR (R₀, CFR, incubation…) — pas une variable du prédicteur",
+      seirSourceLabel: "Sous-modèle SEIR",
+      seirParamSourceLabel: "Paramètre SEIR",
       recommendedAlgorithm: "Algorithme recommandé",
       trainedPrefix: "Entraîné :",
       alternatives: "Alternatives :",

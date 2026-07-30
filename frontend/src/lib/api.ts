@@ -2144,6 +2144,12 @@ export interface ScenarioVariables {
     importance: 'high' | 'medium' | 'low';
     evidence_level: string;
     machine_name?: string;
+    source?: 'user' | 'public_api' | 'seir';
+    // Rôle vis-à-vis du sous-modèle SEIR (annoté côté serveur, scénarios épidémiques) :
+    // 'derived' = sortie du modèle remplie automatiquement ; 'parameter' = input de
+    // simulation (R0/CFR…), pas une feature du prédicteur.
+    _seir_role?: 'derived' | 'parameter';
+    _seir_column?: string;
   }>;
   recommended_algorithm?: {
     primary: string;
@@ -2307,6 +2313,7 @@ export interface ModelDataset {
     matched_features?: string[];
     missing_user?: string[];
     missing_public?: string[];
+    missing_seir?: string[];
     target_present?: boolean;
     readiness?: { can_train: boolean; reasons: string[]; auto_fetchable?: string[] };
   };
