@@ -849,6 +849,9 @@ def startup_event() -> None:
                             "pico":       {"status": "pending"},
                             "metadata":   {"status": "pending"},
                             "clustering": {"status": "pending"},
+                            "knowledge_graph": {"status": "pending"},
+                            "evidence":   {"status": "pending"},
+                            "variables":  {"status": "pending"},
                         },
                     }
                 _t = _startup_threading.Thread(
@@ -9723,7 +9726,8 @@ def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict
     """
     import time as _time
 
-    STEP_ORDER = ["ingest", "fulltext", "embed", "rerank", "pico", "metadata", "clustering"]
+    STEP_ORDER = ["ingest", "fulltext", "embed", "rerank", "pico", "metadata",
+                  "clustering", "knowledge_graph", "evidence", "variables"]
 
     def update_step(step: str, status: str, **kwargs):
         job = _user_scenario_pipeline_jobs.get(scenario_id, {})
@@ -9763,6 +9767,9 @@ def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict
             "pico": {"status": "pending"},
             "metadata": {"status": "pending"},
             "clustering": {"status": "pending"},
+            "knowledge_graph": {"status": "pending"},
+            "evidence": {"status": "pending"},
+            "variables": {"status": "pending"},
         },
     }
 
@@ -10636,11 +10643,33 @@ def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict
         except Exception as e:
             update_step("clustering", "error", error=str(e))
 
-        # ── Précalcul du knowledge graph (cache DB) — visualisation prête ──────
+        # ── Knowledge graph (cache DB) — visualisation prête ──────────────────
         try:
+            update_step("knowledge_graph", "running")
             _precompute_user_kg(scenario_id)
+            update_step("knowledge_graph", "done")
         except Exception as _e_kg:
             logger.warning(f"Précalcul KG pipeline {scenario_id}: {_e_kg}")
+            update_step("knowledge_graph", "error", error=str(_e_kg))
+
+        # ── Evidence Brief (narratif LLM, mis en cache) — prêt sans clic ───────
+        try:
+            update_step("evidence", "running")
+            _generate_evidence_brief_llm(scenario_id)
+            update_step("evidence", "done")
+        except Exception as _e_ev:
+            logger.warning(f"Evidence brief pipeline {scenario_id}: {_e_ev}")
+            update_step("evidence", "error", error=str(_e_ev))
+
+        # ── Variables & Modèle (spec déterministe : outcome, features, algorithme,
+        # data_template, paramètres SEIR) — le scénario est « modèle-prêt » d'emblée.
+        try:
+            update_step("variables", "running")
+            _generate_variables_from_pico(scenario_id)
+            update_step("variables", "done")
+        except Exception as _e_var:
+            logger.warning(f"Génération variables pipeline {scenario_id}: {_e_var}")
+            update_step("variables", "error", error=str(_e_var))
 
         # ── Fin du pipeline ───────────────────────────────────────────────────
         _user_scenario_pipeline_jobs[scenario_id]["overall_status"] = "done"
@@ -10775,6 +10804,9 @@ def start_user_scenario_pipeline(
                 "pico": {"status": "pending"},
                 "metadata": {"status": "pending"},
                 "clustering": {"status": "pending"},
+                "knowledge_graph": {"status": "pending"},
+                "evidence": {"status": "pending"},
+                "variables": {"status": "pending"},
             },
         }
 
@@ -10791,9 +10823,11 @@ def start_user_scenario_pipeline(
         "query": query,
         "max_results": max_results,
         "message": f"Pipeline complet lancé pour '{row['name']}' "
-                   "(ingest 13 sources → fulltext → embeddings → rerank → PICO → métadonnées → clustering). "
+                   "(ingest 13 sources → fulltext → embeddings → rerank → PICO → métadonnées → "
+                   "clustering → knowledge graph → evidence brief → variables & modèle). "
                    "Suivez la progression via GET /user-scenarios/{id}/pipeline/status.",
-        "steps": ["ingest", "fulltext", "embed", "rerank", "pico", "metadata", "clustering"],
+        "steps": ["ingest", "fulltext", "embed", "rerank", "pico", "metadata",
+                  "clustering", "knowledge_graph", "evidence", "variables"],
     }
 
 
@@ -13211,6 +13245,46 @@ def _attach_model_spec(variables: dict, prov_articles: list[dict]) -> dict:
     return variables
 
 
+def _loads_lenient(raw: str) -> dict:
+    """`json.loads` TOLÉRANT aux sorties LLM tronquées (max_tokens atteint) : retire un
+    éventuel fence ```json, puis, si le JSON est incomplet, ferme les chaînes / tableaux /
+    objets restés ouverts en rognant la fin jusqu'à obtenir un objet valide. Best-effort :
+    renvoie le meilleur dict récupérable (au pire {}) — les champs manquants sont
+    reconstruits en aval (_attach_model_spec dérive les champs machine des champs humains).
+    Évite qu'une réponse coupée d'un caractère fasse échouer TOUTE la génération."""
+    import json as _j
+    s = (raw or "").strip()
+    if s.startswith("```"):                                   # fence markdown éventuel
+        s = s.strip("`")
+        s = s[4:] if s[:4].lower() == "json" else s
+        s = s.strip()
+    try:
+        return _j.loads(s)
+    except Exception:
+        pass
+    # Réparation : on tente de fermer les structures ouvertes à des points de coupe
+    # proches de la fin (là où la troncature s'est produite). On borne les essais.
+    cut_points = [i for i, ch in enumerate(s) if ch in ',}]"']
+    for cut in reversed(cut_points[-3000:]):
+        frag = s[:cut + 1].rstrip().rstrip(",")
+        if frag.count('"') % 2 == 1:                          # chaîne ouverte → la fermer
+            frag = frag[:-1] if frag.endswith('"') else frag + '"'
+        opens = frag.count("{") - frag.count("}")
+        obrk = frag.count("[") - frag.count("]")
+        if opens < 0 or obrk < 0:
+            continue
+        cand = frag + ("]" * obrk) + ("}" * opens)
+        try:
+            out = _j.loads(cand)
+            if isinstance(out, dict) and out:
+                logger.warning("Variables/JSON LLM tronqué → réparé (best-effort, %d/%d caractères).",
+                               cut + 1, len(s))
+                return out
+        except Exception:
+            continue
+    return {}
+
+
 def _generate_variables_from_pico(scenario_id: str, persist: str = "active", lang: str | None = None) -> dict[str, Any]:
     """
     Génère automatiquement les variables du modèle et l'outcome à partir des articles
@@ -13423,10 +13497,14 @@ Retourne UNIQUEMENT le JSON valide."""
                 ],
                 temperature=0,
                 seed=42,
-                max_tokens=3000,
+                max_tokens=8000,  # 3000 tronquait le spec (observations par étude + SEIR) → JSON invalide
                 response_format={"type": "json_object"},
             )
-            variables = _json.loads(response.choices[0].message.content)
+            # Parse TOLÉRANT : une réponse coupée (rare à 8000 tokens) est réparée au lieu
+            # de faire échouer toute la génération avec « Expecting ',' delimiter … ».
+            variables = _loads_lenient(response.choices[0].message.content)
+            if not variables:
+                raise ValueError("Réponse LLM (variables) vide ou illisible même après réparation.")
 
             # Phase 1 : normaliser en model_spec déterministe (machine_name, dtype,
             # algorithme/CV/métrique, data_template) + provenance tracée vers les articles.
