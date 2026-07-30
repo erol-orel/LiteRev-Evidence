@@ -782,6 +782,17 @@ def startup_event() -> None:
     except Exception as _e:
         logger.warning(f"spawn _ensure_performance_indexes: {_e}")
 
+    # Scénario de démonstration intégré (dataset RÉEL grippe + modèle entraîné) : rend
+    # l'essai « données réelles » visible dans la liste. Idempotent (id stable) et
+    # best-effort — en arrière-plan pour ne jamais retarder/casser le démarrage.
+    try:
+        import threading as _seed_threading
+        _seed_threading.Thread(
+            target=_seed_demo_scenarios, daemon=True, name="seed-demo"
+        ).start()
+    except Exception as _e:
+        logger.warning(f"spawn _seed_demo_scenarios: {_e}")
+
     # Pipelines orphelins : tout pipeline marqué 'running' ou 'starting' au
     # démarrage du serveur est forcément mort (le thread a été tué lors du
     # redémarrage précédent).
@@ -15424,6 +15435,108 @@ try:
     _ensure_model_run_table()
 except Exception as _e:
     logger.warning(f"_ensure_model_run_table: {_e}")
+
+
+def _seed_demo_scenarios() -> None:
+    """Seed a built-in, model-ready DEMO scenario — a real influenza dataset + a
+    freshly trained model — so the real-dataset trial is visible in the scenario
+    list instead of living only as a script + committed files. Idempotent (guarded
+    by a stable id) and strictly best-effort: any failure is logged and swallowed,
+    the server boots regardless. Runs in a startup daemon thread.
+
+    The four rows the dashboard/monitor need (user_scenarios + scenario_settings
+    with a model_spec + an active dataset CSV + an active run with a joblib artifact)
+    are written to mirror the app's own upload/train inserts. The scenario is pinned
+    (so the recent-search dedup never purges it) and left non-system."""
+    import os
+    import joblib
+    from datetime import datetime, timezone
+    try:
+        import demo_seed
+    except Exception as _e:
+        logger.warning(f"seed demo: import demo_seed failed: {_e}")
+        return
+    sid = demo_seed.DEMO_SCENARIO_ID
+    try:
+        with engine.connect() as conn:
+            if conn.execute(text("SELECT 1 FROM user_scenarios WHERE id = :id"), {"id": sid}).first():
+                return  # already seeded → idempotent no-op
+        repo_root = os.path.dirname(os.path.abspath(__file__))
+        if not os.path.exists(demo_seed.dataset_path(repo_root)):
+            logger.warning(f"seed demo: dataset missing at {demo_seed.dataset_path(repo_root)}")
+            return
+        # Train the real model FIRST (fresh, sklearn-version-matched); abort before any
+        # DB write if it fails, so we never leave a modelless demo card.
+        df, spec, result = demo_seed.train_demo(repo_root, n_trials=20)
+        pipeline = result.pop("pipeline", None)
+        if pipeline is None:
+            logger.warning("seed demo: training produced no pipeline")
+            return
+        # Persist the dataset CSV + joblib artifact under MODEL_DATA_DIR (as upload/train do).
+        ddir = MODEL_DATA_DIR / sid / "model"
+        ddir.mkdir(parents=True, exist_ok=True)
+        ts = int(datetime.now(timezone.utc).timestamp())
+        stored_path = str(ddir / f"{ts}_influenza_ch.csv")
+        df.to_csv(stored_path, index=False)
+        artifact_path = str(ddir / f"artifact_{ts}.joblib")
+        joblib.dump(pipeline, artifact_path)
+        try:
+            report = _validate_dataset_against_template(
+                list(df.columns), spec["data_template"], _dataframe_dtype_kinds(df))
+        except Exception:
+            report = {"ok": True, "note": "demo seed"}
+        summary = {k: v for k, v in result.items()
+                   if k not in ("metrics", "best_params", "feature_importances")}
+        with engine.begin() as conn:
+            if conn.execute(text("SELECT 1 FROM user_scenarios WHERE id = :id"), {"id": sid}).first():
+                return  # race: seeded by another worker between the checks
+            conn.execute(text("""
+                INSERT INTO user_scenarios
+                    (id, name, query, mode, filters, result_count, pinned,
+                     pipeline_status, pipeline_step, pipeline_progress)
+                VALUES (:id, :name, :query, 'hybrid', CAST('{}' AS jsonb), 0, TRUE,
+                     'done', 'done', 100)
+                ON CONFLICT (id) DO NOTHING
+            """), {"id": sid, "name": demo_seed.DEMO_SCENARIO_NAME, "query": demo_seed.DEMO_SCENARIO_QUERY})
+            conn.execute(text("""
+                INSERT INTO scenario_settings (scenario_id, variables_json, variables_validated, updated_at)
+                VALUES (:sid, CAST(:vj AS jsonb), TRUE, NOW())
+                ON CONFLICT (scenario_id) DO UPDATE
+                    SET variables_json = CAST(:vj AS jsonb), variables_validated = TRUE, updated_at = NOW()
+            """), {"sid": sid, "vj": json.dumps(demo_seed.demo_variables_json())})
+            conn.execute(text(
+                "UPDATE scenario_model_dataset SET is_active = FALSE WHERE scenario_id = :sid AND is_active = TRUE"
+            ), {"sid": sid})
+            did = conn.execute(text("""
+                INSERT INTO scenario_model_dataset
+                    (scenario_id, filename, stored_path, n_rows, n_cols, columns_json, validation_json, is_active, is_synthetic)
+                VALUES (:sid, :fn, :sp, :nr, :nc, CAST(:cj AS jsonb), CAST(:vj AS jsonb), TRUE, FALSE)
+                RETURNING id
+            """), {"sid": sid, "fn": "influenza_ch_weekly.csv", "sp": stored_path,
+                   "nr": int(len(df)), "nc": int(len(df.columns)),
+                   "cj": json.dumps([str(c) for c in df.columns]),
+                   "vj": json.dumps(report, default=str)}).scalar()
+            conn.execute(text(
+                "UPDATE scenario_model_run SET is_active = FALSE WHERE scenario_id = :sid AND is_active = TRUE"
+            ), {"sid": sid})
+            conn.execute(text("""
+                INSERT INTO scenario_model_run
+                    (scenario_id, dataset_id, status, family, task_type, metric,
+                     metrics_json, best_params_json, feature_importance_json, summary_json,
+                     artifact_path, is_active)
+                VALUES (:sid, :did, 'ready', :fam, :tt, :met,
+                     CAST(:mj AS jsonb), CAST(:bp AS jsonb), CAST(:fi AS jsonb), CAST(:sj AS jsonb),
+                     :ap, TRUE)
+            """), {"sid": sid, "did": did, "fam": result.get("family"), "tt": result.get("task_type"),
+                   "met": result.get("metric"),
+                   "mj": json.dumps(result.get("metrics", {}), default=str),
+                   "bp": json.dumps(result.get("best_params", {}), default=str),
+                   "fi": json.dumps(result.get("feature_importances", []), default=str),
+                   "sj": json.dumps(summary, default=str), "ap": artifact_path})
+        logger.info(f"seed demo scenario {sid} created (family={result.get('family')}, "
+                    f"R2={(result.get('metrics') or {}).get('r2')})")
+    except Exception as _e:
+        logger.warning(f"seed demo scenario skipped: {_e}")
 
 
 def _run_model_training(scenario_id: str, n_trials: int = 25, compare: bool = False) -> None:
