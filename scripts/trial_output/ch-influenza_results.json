@@ -1,0 +1,183 @@
+{
+  "task_type": "regression",
+  "family": "random_forest",
+  "metric": "r2",
+  "requested_metric": "r2",
+  "scoring": "r2",
+  "cv_strategy": "kfold",
+  "cv_folds": 5,
+  "n_total": 67,
+  "n_train": 53,
+  "n_test": 14,
+  "features_used": [
+    "flu_b_load",
+    "rsv_load",
+    "sars_cov2_load",
+    "season_sin",
+    "season_cos"
+  ],
+  "target": "flu_a_load",
+  "classes": null,
+  "best_params": {
+    "n_estimators": 387,
+    "max_depth": 13,
+    "min_samples_split": 10
+  },
+  "metrics": {
+    "rmse": 8288530.598885539,
+    "mae": 5138958.080481263,
+    "r2": 0.5092456251456714,
+    "cv_r2": -1.1500135660007575
+  },
+  "feature_importances": [
+    {
+      "feature": "num__season_cos",
+      "importance": 0.8801221980555081
+    },
+    {
+      "feature": "num__flu_b_load",
+      "importance": 0.060608610992733965
+    },
+    {
+      "feature": "num__sars_cov2_load",
+      "importance": 0.02338894578266641
+    },
+    {
+      "feature": "num__season_sin",
+      "importance": 0.01871471391332288
+    },
+    {
+      "feature": "num__rsv_load",
+      "importance": 0.0171655312557688
+    }
+  ],
+  "importances_by_variable": {
+    "flu_b_load": 0.06060861099273395,
+    "rsv_load": 0.017165531255768796,
+    "sars_cov2_load": 0.023388945782666405,
+    "season_sin": 0.018714713913322877,
+    "season_cos": 0.8801221980555078
+  },
+  "assumptions": {
+    "checks": [
+      {
+        "key": "autocorrelation",
+        "name": "Autocorr\u00e9lation (Durbin-Watson)",
+        "statistic": 1.763,
+        "status": "ok",
+        "detail": "\u22482 = pas d'autocorr\u00e9lation ; <1.5 ou >2.5 = r\u00e9sidus corr\u00e9l\u00e9s (souvent s\u00e9rie temporelle mal ordonn\u00e9e)."
+      },
+      {
+        "key": "normality",
+        "name": "Normalit\u00e9 des r\u00e9sidus (Shapiro-Wilk)",
+        "p_value": 0.0,
+        "status": "warn",
+        "detail": "p\u22650.05 = r\u00e9sidus compatibles avec une loi normale (hypoth\u00e8se OLS pour l'inf\u00e9rence)."
+      },
+      {
+        "key": "homoscedasticity",
+        "name": "Homosc\u00e9dasticit\u00e9 (test de White)",
+        "p_value": 0.0162,
+        "status": "warn",
+        "detail": "p\u22650.05 = variance des r\u00e9sidus constante ; p<0.05 = h\u00e9t\u00e9rosc\u00e9dasticit\u00e9."
+      },
+      {
+        "key": "multicollinearity",
+        "name": "Multicolin\u00e9arit\u00e9 (VIF max)",
+        "statistic": 2.8,
+        "per_variable": [
+          {
+            "variable": "rsv_load",
+            "vif": 2.8
+          },
+          {
+            "variable": "sars_cov2_load",
+            "vif": 2.31
+          },
+          {
+            "variable": "season_cos",
+            "vif": 2.02
+          },
+          {
+            "variable": "flu_b_load",
+            "vif": 1.47
+          },
+          {
+            "variable": "season_sin",
+            "vif": 1.34
+          }
+        ],
+        "status": "ok",
+        "detail": "VIF<5 = ok ; 5\u201310 = mod\u00e9r\u00e9e ; >10 = forte colin\u00e9arit\u00e9 (coefficients instables)."
+      }
+    ],
+    "applies": false
+  },
+  "guardrails": {
+    "checks": [
+      {
+        "key": "leakage",
+        "name": "Fuite de cible",
+        "status": "ok",
+        "detail": "Aucune variable ne pr\u00e9dit trivialement la cible.",
+        "leaks": []
+      },
+      {
+        "key": "cv_stability",
+        "name": "Stabilit\u00e9 (validation crois\u00e9e)",
+        "status": "warn",
+        "statistic": 1.651,
+        "mean": 1.5904,
+        "std": 2.6254,
+        "detail": "\u00c9cart-type inter-folds 2.625 (moyenne 1.590). Variance \u00e9lev\u00e9e : r\u00e9sultat sensible au d\u00e9coupage / peu de donn\u00e9es."
+      }
+    ],
+    "metric_ci": null
+  },
+  "explain_background": {
+    "flu_b_load": 1309397.5652297942,
+    "rsv_load": 958187.053164341,
+    "sars_cov2_load": 89426025.0021884,
+    "season_sin": -0.021672763616436087,
+    "season_cos": 0.44877925312851974
+  },
+  "provenance": {
+    "topic": "Swiss influenza activity (wastewater surveillance)",
+    "outcome": "influenza-A wastewater load (a validated ILI-activity signal)",
+    "outcome_source": "EAWAG RespiratoryVirusesWastewater \u2014 plant STEP Aire",
+    "outcome_url": "https://raw.githubusercontent.com/EawagPHH/RespiratoryVirusesWastewater/main/LatestRESP6Data-filtered.csv",
+    "note": "Random k-fold CV is unreliable on a 67-week seasonal series (a fold can hold out an entire influenza season); the held-out test R\u00b2 is the honest generalisation estimate. The explicit weather \u2192 clinical-ILI variant runs in --mode weather-ili (open-meteo + FOPH Sentinella, production egress)."
+  },
+  "spec": {
+    "outcome": {
+      "machine_name": "flu_a_load",
+      "task_type": "regression",
+      "unit": "gc/day"
+    },
+    "features": [
+      {
+        "machine_name": "flu_b_load"
+      },
+      {
+        "machine_name": "rsv_load"
+      },
+      {
+        "machine_name": "sars_cov2_load"
+      },
+      {
+        "machine_name": "season_sin"
+      },
+      {
+        "machine_name": "season_cos"
+      }
+    ],
+    "algorithm": {
+      "family": "random_forest",
+      "metric": "r2",
+      "cv": {
+        "strategy": "kfold",
+        "folds": 5
+      }
+    }
+  }
+}
