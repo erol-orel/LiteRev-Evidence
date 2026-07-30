@@ -15707,6 +15707,86 @@ _DEFAULT_ALERT_LABELS = {
 }
 
 
+@app.get("/scenarios/{scenario_id}/model/export")
+def export_model_bundle(scenario_id: str, include_data: bool = True,
+                        _: None = Depends(require_api_key)) -> dict[str, Any]:
+    """Bundle de REPRODUCTIBILITÉ d'un modèle (« pas une boîte noire ») : le model_spec
+    (cible, variables, algorithme, data_template, provenance vers les articles), TOUS les
+    runs entraînés avec leurs HYPERPARAMÈTRES / métriques / importances, le JEU DE DONNÉES
+    (schéma + lignes) et la PRÉDICTION courante. Tout ce qu'il faut pour ré-entraîner et
+    reproduire la prédiction. Authentifié (expose le schéma/les données du scénario)."""
+    from datetime import datetime, timezone
+    with engine.connect() as conn:
+        srow = conn.execute(text(
+            "SELECT name, query, mode FROM user_scenarios WHERE id = :sid"
+        ), {"sid": scenario_id}).mappings().first()
+        runs = conn.execute(text("""
+            SELECT id, dataset_id, family, task_type, metric, metrics_json,
+                   best_params_json, feature_importance_json, summary_json, is_active, created_at
+            FROM scenario_model_run
+            WHERE scenario_id = :sid AND status = 'ready'
+            ORDER BY created_at DESC
+        """), {"sid": scenario_id}).mappings().all()
+        ds = conn.execute(text("""
+            SELECT id, filename, stored_path, n_rows, n_cols, columns_json, validation_json,
+                   is_synthetic, created_at
+            FROM scenario_model_dataset WHERE scenario_id = :sid AND is_active = TRUE
+            ORDER BY created_at DESC LIMIT 1
+        """), {"sid": scenario_id}).mappings().first()
+
+    runs_out = [{
+        "run_id": r["id"], "dataset_id": r["dataset_id"], "family": r["family"],
+        "task_type": r["task_type"], "metric": r["metric"], "metrics": r["metrics_json"],
+        "hyperparameters": r["best_params_json"], "feature_importances": r["feature_importance_json"],
+        "summary": r["summary_json"], "is_active": bool(r["is_active"]),
+        "trained_at": r["created_at"].isoformat() if r["created_at"] else None,
+    } for r in runs]
+
+    dataset_out = None
+    if ds:
+        dataset_out = {
+            "dataset_id": ds["id"], "filename": ds["filename"], "n_rows": ds["n_rows"],
+            "n_cols": ds["n_cols"], "columns": ds["columns_json"], "validation": ds["validation_json"],
+            "is_synthetic": bool(ds["is_synthetic"]),
+            "created_at": ds["created_at"].isoformat() if ds["created_at"] else None,
+        }
+        if include_data and ds["stored_path"]:
+            try:
+                import pandas as pd
+                _df = pd.read_csv(ds["stored_path"])
+                dataset_out["rows"] = json.loads(_df.to_json(orient="records"))
+            except Exception as _e:
+                dataset_out["rows_error"] = str(_e)
+
+    prediction = None
+    try:
+        prediction = monitor_scenario_model(scenario_id)
+    except Exception as _e:
+        prediction = {"status": "error", "error": str(_e)}
+
+    return {
+        "schema": "literev_model_export/1",
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "scenario": {
+            "id": scenario_id,
+            "name": srow["name"] if srow else None,
+            "query": srow["query"] if srow else None,
+            "mode": srow["mode"] if srow else None,
+        },
+        "model_spec": _get_model_spec(scenario_id) or {},
+        "runs": runs_out,
+        "active_run_id": next((r["run_id"] for r in runs_out if r["is_active"]), None),
+        "dataset": dataset_out,
+        "prediction": prediction,
+        "reproducibility_note": (
+            "Chaque run inclut sa famille d'algorithme, ses hyperparamètres (hyperparameters), "
+            "ses métriques et ses importances. Le model_spec (cible, variables, provenance vers "
+            "les articles) + le jeu de données (schéma + lignes) permettent de ré-entraîner le "
+            "modèle et de reproduire la prédiction — rien n'est une boîte noire."
+        ),
+    }
+
+
 @app.get("/scenarios/{scenario_id}/model/monitor")
 def monitor_scenario_model(scenario_id: str, window: int = 7) -> dict[str, Any]:
     """
