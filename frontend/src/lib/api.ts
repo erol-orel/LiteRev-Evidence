@@ -2407,6 +2407,8 @@ export interface SeirProjection {
     cumulative: SeirBand;
     deaths: SeirBand;
     r_eff: SeirBand;
+    vaccinated?: SeirBand;     // présent si le modèle a une vaccination (V)
+    quarantined?: SeirBand;    // présent si le modèle a une quarantaine (Q)
   };
   summary?: {
     model: string;
@@ -2417,6 +2419,8 @@ export interface SeirProjection {
     peak_prevalence_day: SeirSummaryBand;
     attack_rate: SeirSummaryBand;
     total_deaths: SeirSummaryBand;
+    total_vaccinated?: SeirSummaryBand;
+    peak_quarantine?: SeirSummaryBand;
   };
   parameters?: Record<string, SeirParamValue>;
   effective_parameters?: Record<string, SeirParamValue>;
