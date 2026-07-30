@@ -7202,6 +7202,17 @@ def list_user_scenarios() -> list[dict[str, Any]]:
                 ORDER BY query, mode, created_at DESC
               )
         """))
+        # Un scénario SAUVEGARDÉ (épinglé) est unique : purge toute recherche récente
+        # (non épinglée) qui DOUBLONNE un scénario épinglé de même query+mode. Sans ça,
+        # relancer une recherche déjà sauvegardée laissait une 2e carte identique.
+        conn.execute(text("""
+            DELETE FROM user_scenarios u
+            WHERE u.pinned = false AND u.folder_id IS NULL
+              AND EXISTS (
+                SELECT 1 FROM user_scenarios p
+                WHERE p.pinned = true AND p.query = u.query AND p.mode = u.mode
+              )
+        """))
         rows = conn.execute(text("""
             SELECT
                 us.id, us.name, us.query, us.mode, us.filters,
@@ -7249,6 +7260,17 @@ def create_user_scenario(payload: UserScenarioIn, _: None = Depends(require_api_
     # merge them — always insert a fresh row instead.
     if not payload.pinned and not payload.folder_id and not payload.sub_queries:
         with engine.begin() as conn:
+            # Un scénario SAUVEGARDÉ (épinglé) est UNIQUE : si CE query l'est déjà, une
+            # relance de recherche ne doit PAS créer un doublon « récent ». On renvoie le
+            # scénario épinglé existant tel quel (corpus + Variables/Modèle préservés) —
+            # la recherche reste visible dans la vue de résultats, sans seconde carte.
+            pinned_existing = conn.execute(text("""
+                SELECT id FROM user_scenarios
+                WHERE query = :query AND mode = :mode AND pinned = true AND folder_id IS NULL
+                ORDER BY created_at DESC LIMIT 1
+            """), {"query": payload.query, "mode": payload.mode}).scalar()
+            if pinned_existing:
+                return _user_scenario_to_gesica_format(_get_user_scenario_or_404(pinned_existing))
             existing = conn.execute(text("""
                 SELECT id FROM user_scenarios
                 WHERE query = :query AND mode = :mode AND pinned = false AND folder_id IS NULL
