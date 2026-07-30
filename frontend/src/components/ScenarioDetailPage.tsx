@@ -9,7 +9,7 @@ import {
   Globe, Upload, CheckCircle2, AlertCircle, Info,
   Microscope, Loader2, Download, Table2, BookOpen,
   Network, Bell, Users, Rss, Sparkles, ClipboardList,
-  TrendingUp, X, Plus, Sliders
+  TrendingUp, X, Plus, Sliders, Activity
 } from "lucide-react";
 import {
   fetchScenarioDetail,
@@ -4674,6 +4674,146 @@ function VariablesModelTab({ scenarioId, detail, initialSub }: { scenarioId: str
   );
 }
 
+// ─── Tableau de bord du modèle (vue clinicien) ────────────────────────────────
+// Statut clair (pastille + libellé + couleur — jamais la couleur seule, accessibilité).
+const _DASH_STATUS = {
+  green:  { dot: "bg-emerald-400", text: "text-emerald-300", bg: "bg-emerald-500/10", border: "border-emerald-500/30", ring: "ring-emerald-400/40" },
+  orange: { dot: "bg-amber-400",   text: "text-amber-300",   bg: "bg-amber-500/10",   border: "border-amber-500/30",   ring: "ring-amber-400/40" },
+  red:    { dot: "bg-rose-400",    text: "text-rose-300",     bg: "bg-rose-500/10",    border: "border-rose-500/30",    ring: "ring-rose-400/40" },
+  unavailable: { dot: "bg-white/30", text: "text-white/60", bg: "bg-white/5", border: "border-white/10", ring: "ring-white/20" },
+} as const;
+type DashStatus = keyof typeof _DASH_STATUS;
+
+function ModelDashboard({ run, monitor, spec }: { run: ModelRun; monitor: ModelMonitor | null; spec: ModelSpecResponse | null }) {
+  const { t, lang } = useI18n();
+  const locale = lang === "fr" ? "fr-FR" : "en-US";
+  const fmtDate = (d?: string | null) => (d ? new Date(d).toLocaleString(locale, { dateStyle: "medium", timeStyle: "short" }) : "—");
+
+  const sc: DashStatus = (monitor?.status_color as DashStatus) in _DASH_STATUS ? (monitor!.status_color as DashStatus) : "unavailable";
+  const cfg = _DASH_STATUS[sc];
+  const outcomeName = spec?.outcome?.name || monitor?.outcome || t("scenarioDetail.model.dashboard.outcome");
+  const unit = monitor?.unit || spec?.outcome?.unit || "";
+  const hasPrediction = monitor?.status === "ready" && typeof monitor?.value === "number";
+  const valueLabel = hasPrediction
+    ? (monitor!.kind === "probability" ? `${(monitor!.value! * 100).toFixed(0)}%` : monitor!.value!.toLocaleString(locale))
+    : "—";
+  const metricKey = run.metric ?? monitor?.model?.metric;
+  const metricVal = (metricKey && run.metrics && typeof run.metrics[metricKey] === "number") ? run.metrics[metricKey] : null;
+
+  // Facteurs clés (importances par VARIABLE, noms lisibles) — repli sur les brutes.
+  const nameByMachine: Record<string, string> = {};
+  (spec?.features ?? []).forEach(f => { if (f.machine_name) nameByMachine[f.machine_name] = f.name || f.machine_name; });
+  const byVar = (run.summary?.importances_by_variable ?? null) as Record<string, number> | null;
+  const drivers = (byVar && Object.keys(byVar).length > 0
+    ? Object.entries(byVar).map(([mn, v]) => ({ label: nameByMachine[mn] ?? mn, value: Number(v) }))
+    : (run.feature_importances ?? []).map(fi => {
+        const base = fi.feature.includes("__") ? fi.feature.split("__").slice(1).join("__") : fi.feature;
+        return { label: nameByMachine[base] ?? base, value: fi.importance };
+      })
+  ).sort((a, b) => b.value - a.value).slice(0, 5);
+  const maxDriver = drivers.length ? Math.max(...drivers.map(d => Math.abs(d.value))) || 1 : 1;
+
+  const bands = (["green", "orange", "red"] as const)
+    .map(lvl => ({ lvl, ...(spec?.alert_thresholds?.[lvl] ?? {}) }))
+    .filter(b => b.range || b.label);
+
+  return (
+    <div className={`rounded-3xl border ${cfg.border} ${cfg.bg} p-5 space-y-4`}>
+      <div className="flex items-start justify-between gap-3 flex-wrap">
+        <SectionHeader icon={<Activity size={14} className="text-brand-400" />}
+          title={t("scenarioDetail.model.dashboard.title")} subtitle={outcomeName} />
+        <span className={`shrink-0 rounded-full px-3 py-1 text-xs font-bold border ${cfg.bg} ${cfg.text} ${cfg.border} flex items-center gap-1.5`}>
+          <span className={`h-2 w-2 rounded-full ${cfg.dot}`} />
+          {monitor?.status_label ?? t("scenarioDetail.model.dashboard.noSignal")}
+        </span>
+      </div>
+
+      {/* Prédiction actuelle (héros) */}
+      <div className="rounded-2xl border border-white/5 bg-white/2 px-4 py-3">
+        <p className="text-[10px] uppercase tracking-wider text-white/40">
+          {monitor?.kind === "probability"
+            ? `${t("scenarioDetail.model.dashboard.currentRisk")}${monitor?.positive_class ? ` (${monitor.positive_class})` : ""}`
+            : t("scenarioDetail.model.dashboard.currentPrediction")}
+        </p>
+        <div className="flex items-baseline gap-2 mt-1">
+          <span className={`text-5xl font-black font-mono ${cfg.text}`}>{valueLabel}</span>
+          {hasPrediction && unit && <span className="text-sm font-normal text-white/50">{unit}</span>}
+        </div>
+        {!hasPrediction && (
+          <p className="text-[11px] text-white/45 mt-1.5">{t("scenarioDetail.model.dashboard.awaitingData")}</p>
+        )}
+        {typeof monitor?.n_scored === "number" && monitor.n_scored > 0 && (
+          <p className="text-[10px] text-white/35 mt-1 font-mono">
+            {monitor.n_scored.toLocaleString(locale)} {t("scenarioDetail.model.dashboard.scored")}
+            {typeof monitor.window === "number" ? ` · ${t("scenarioDetail.model.dashboard.window")} ${monitor.window}` : ""}
+          </p>
+        )}
+      </div>
+
+      {/* Bandes d'alerte (Normal / Tension / Alerte) — la bande courante est mise en avant */}
+      {bands.length > 0 && (
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+          {bands.map(b => {
+            const bc = _DASH_STATUS[b.lvl];
+            const active = b.lvl === sc && hasPrediction;
+            return (
+              <div key={b.lvl} title={b.rationale || undefined}
+                className={`rounded-xl border ${bc.border} ${bc.bg} px-3 py-2 ${active ? `ring-2 ${bc.ring}` : ""}`}>
+                <div className={`flex items-center gap-1.5 text-[11px] font-semibold ${bc.text}`}>
+                  <span className={`h-1.5 w-1.5 rounded-full ${bc.dot}`} />{b.label || b.lvl}
+                  {active && <span className="ml-auto text-[9px] uppercase tracking-wide">{t("scenarioDetail.model.dashboard.here")}</span>}
+                </div>
+                {b.range && <p className="text-[11px] text-white/55 font-mono mt-0.5">{b.range}</p>}
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {/* Méta : algorithme · métrique · dernier entraînement · dernier calcul */}
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-[11px]">
+        <div className="rounded-xl border border-white/5 bg-white/2 px-3 py-2">
+          <div className="text-white/40">{t("scenarioDetail.model.algorithm")}</div>
+          <div className="font-semibold text-white mt-0.5 font-mono truncate">{run.family ?? "—"}</div>
+        </div>
+        <div className="rounded-xl border border-white/5 bg-white/2 px-3 py-2">
+          <div className="text-white/40 uppercase">{metricKey ?? t("scenarioDetail.model.dashboard.metric")}</div>
+          <div className="font-semibold text-brand-300 mt-0.5 font-mono">{metricVal != null ? metricVal.toFixed(3) : "—"}</div>
+        </div>
+        <div className="rounded-xl border border-white/5 bg-white/2 px-3 py-2">
+          <div className="text-white/40">{t("scenarioDetail.model.dashboard.trainedOn")}</div>
+          <div className="font-medium text-white/80 mt-0.5">{fmtDate(run.created_at)}</div>
+        </div>
+        <div className="rounded-xl border border-white/5 bg-white/2 px-3 py-2">
+          <div className="text-white/40">{t("scenarioDetail.model.dashboard.computedOn")}</div>
+          <div className="font-medium text-white/80 mt-0.5">{fmtDate(monitor?.generated_at)}</div>
+        </div>
+      </div>
+
+      {/* Facteurs clés (importances) */}
+      {drivers.length > 0 && (
+        <div className="rounded-2xl border border-white/5 bg-white/2 px-4 py-3">
+          <p className="text-[10px] uppercase tracking-wider text-white/40 flex items-center gap-1 mb-2">
+            <TrendingUp size={11} /> {t("scenarioDetail.model.dashboard.keyDrivers")}
+          </p>
+          <div className="space-y-1.5">
+            {drivers.map((d, i) => (
+              <div key={i} className="flex items-center gap-2 text-[11px]">
+                <span className="w-40 truncate text-white/70" title={d.label}>{d.label}</span>
+                <span className="flex-1 h-1.5 rounded-full bg-white/5 overflow-hidden">
+                  <span className="block h-full rounded-full bg-brand-400/70" style={{ width: `${Math.max(4, (Math.abs(d.value) / maxDriver) * 100)}%` }} />
+                </span>
+                <span className="w-12 text-right font-mono text-white/45">{d.value.toFixed(3)}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+
 // ─── Section: Suivi & Évolution du modèle entraîné (Phases 3-5) ────────────────
 
 function ModelMonitorSection({ scenarioId }: { scenarioId: string }) {
@@ -4802,6 +4942,10 @@ function ModelMonitorSection({ scenarioId }: { scenarioId: string }) {
   return (
     <div className="space-y-6">
       {error && <ErrorBox message={error} />}
+
+      {/* Tableau de bord clinicien — dès qu'un modèle est entraîné : prédiction + bande
+          d'alerte (couleur), performance, dates d'entraînement/calcul, facteurs clés. */}
+      {run?.status === "ready" && <ModelDashboard run={run} monitor={monitor} spec={spec} />}
 
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
         {/* Statut live piloté par le modèle entraîné */}
