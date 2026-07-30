@@ -735,32 +735,45 @@ function ForecastPanel({ run }: { run: ModelRun }) {
 
 // ── SEIR projection (modèle compartimental paramétré par la littérature) ─────
 const _SEIR_SERIES = ["incidence", "prevalence", "cumulative", "deaths"] as const;
-type SeirSeriesKey = typeof _SEIR_SERIES[number];
+// Séries optionnelles n'apparaissant que si le modèle a le compartiment (V / Q).
+const _SEIR_SERIES_OPT = ["vaccinated", "quarantined"] as const;
+type SeirSeriesKey = typeof _SEIR_SERIES[number] | typeof _SEIR_SERIES_OPT[number];
 const _SEIR_COLOR: Record<SeirSeriesKey, string> = {
   incidence: "#38bdf8", prevalence: "#a78bfa", cumulative: "#34d399", deaths: "#f87171",
+  vaccinated: "#2dd4bf", quarantined: "#fbbf24",
 };
 const _SEIR_PARAM_LABEL: Record<string, string> = {
   r0: "R₀", beta: "β", infectious_period_days: "Infectious (d)", incubation_period_days: "Incubation (d)",
   cfr: "CFR", immunity_duration_days: "Immunity (d)", serial_interval_days: "Serial (d)",
+  vaccination_rate: "Vaccination rate", vaccine_efficacy: "Vaccine efficacy", quarantine_rate: "Quarantine rate",
 };
 
 // ─── Onglet SEIR : modèle · formule · paramètres éditables (liés aux articles) ─
 const _SEIR_PARAM_ORDER = ["r0", "incubation_period_days", "infectious_period_days", "cfr", "immunity_duration_days", "serial_interval_days"];
+// Paramètres d'INTERVENTION (politique, pas extraits de la littérature) : affichés dans
+// leur propre bloc « avancé » pour activer les compartiments V (vaccination) / Q (quarantaine).
+const _SEIR_INTERVENTION_KEYS = ["vaccination_rate", "vaccine_efficacy", "quarantine_rate"];
 const _SEIR_SYMBOL: Record<string, string> = {
   r0: "R₀ = β/γ", incubation_period_days: "σ = 1/incub.", infectious_period_days: "γ = 1/infect.",
   cfr: "f (CFR)", immunity_duration_days: "ω = 1/immun.", serial_interval_days: "—",
+  vaccination_rate: "ν (/day)", vaccine_efficacy: "ε (0–1)", quarantine_rate: "κ (/day)",
 };
 // Équations du membre de droite selon les compartiments actifs du modèle sélectionné.
 function _seirEquations(model: string): { compartments: string; eqs: string[] } {
+  const hasV = model.includes("V");   // vaccination : S→V
   const hasE = model.includes("E");
+  const hasQ = model.includes("Q");   // quarantaine/isolement : I→Q (Q ne transmet plus)
   const hasD = model.includes("D");
   const waning = model.endsWith("S");   // R→S (immunité décroissante) : SEIRS / SEIRDS / SIRS
-  const compartments = ["S", hasE ? "E" : "", "I", "R", hasD ? "D" : ""].filter(Boolean).join(" · ");
-  const eqs: string[] = [`dS/dt = −β·S·I/N${waning ? " + ω·R" : ""}`];
-  if (hasE) { eqs.push("dE/dt = β·S·I/N − σ·E", "dI/dt = σ·E − γ·I"); }
-  else { eqs.push("dI/dt = β·S·I/N − γ·I"); }
-  eqs.push(`dR/dt = γ·${hasD ? "(1−f)·" : ""}I${waning ? " − ω·R" : ""}`);
-  if (hasD) eqs.push("dD/dt = γ·f·I");
+  const compartments = ["S", hasV ? "V" : "", hasE ? "E" : "", "I", hasQ ? "Q" : "", "R", hasD ? "D" : ""].filter(Boolean).join(" · ");
+  const inflow = hasQ ? "(I+Q)" : "I";  // le flux sortant infectieux (I et Q) alimente R/D
+  const eqs: string[] = [`dS/dt = −β·S·I/N${hasV ? " − ν·S" : ""}${waning ? " + ω·R" : ""}`];
+  if (hasV) eqs.push("dV/dt = ν·S");
+  if (hasE) { eqs.push("dE/dt = β·S·I/N − σ·E", `dI/dt = σ·E − γ·I${hasQ ? " − κ·I" : ""}`); }
+  else { eqs.push(`dI/dt = β·S·I/N − γ·I${hasQ ? " − κ·I" : ""}`); }
+  if (hasQ) eqs.push("dQ/dt = κ·I − γ·Q");
+  eqs.push(`dR/dt = γ·${hasD ? "(1−f)·" : ""}${inflow}${waning ? " − ω·R" : ""}`);
+  if (hasD) eqs.push(`dD/dt = γ·f·${inflow}`);
   return { compartments, eqs };
 }
 
@@ -853,12 +866,17 @@ function SeirModelView({ scenarioId }: { scenarioId: string }) {
   };
 
   const sm = proj.summary;
-  const band = proj.series?.[series];
   const seriesLabel: Record<SeirSeriesKey, string> = {
     incidence: t("scenarioDetail.seir.seriesIncidence"), prevalence: t("scenarioDetail.seir.seriesPrevalence"),
     cumulative: t("scenarioDetail.seir.seriesCumulative"), deaths: t("scenarioDetail.seir.seriesDeaths"),
+    vaccinated: t("scenarioDetail.seir.seriesVaccinated"), quarantined: t("scenarioDetail.seir.seriesQuarantined"),
   };
-  const orderedKeys = [..._SEIR_PARAM_ORDER.filter(k => k in params), ...Object.keys(params).filter(k => !_SEIR_PARAM_ORDER.includes(k))];
+  // Séries de base + celles des compartiments V/Q seulement si le modèle les possède.
+  const availableSeries: SeirSeriesKey[] = [..._SEIR_SERIES, ..._SEIR_SERIES_OPT.filter(k => proj.series?.[k])];
+  const activeSeries: SeirSeriesKey = availableSeries.includes(series) ? series : "incidence";
+  const band = proj.series?.[activeSeries];
+  const orderedKeys = [..._SEIR_PARAM_ORDER.filter(k => k in params),
+    ...Object.keys(params).filter(k => !_SEIR_PARAM_ORDER.includes(k) && !_SEIR_INTERVENTION_KEYS.includes(k))];
 
   return (
     <div className="space-y-4">
@@ -884,23 +902,28 @@ function SeirModelView({ scenarioId }: { scenarioId: string }) {
         <p className="text-[10px] text-white/35 mt-2 leading-relaxed">
           β = {t("scenarioDetail.seirTab.beta")}, σ = 1/{t("scenarioDetail.seirTab.incubation")}, γ = 1/{t("scenarioDetail.seirTab.infectious")}
           {model.includes("D") ? `, f = ${t("scenarioDetail.seirTab.cfr")}` : ""}{model.endsWith("S") ? `, ω = 1/${t("scenarioDetail.seirTab.immunity")}` : ""}
+          {model.includes("V") ? `, ν = ${t("scenarioDetail.seirTab.vaccination")}` : ""}{model.includes("Q") ? `, κ = ${t("scenarioDetail.seirTab.quarantine")}` : ""}
         </p>
       </div>
 
       <div className="rounded-2xl border border-white/5 bg-white/2 p-3">
         <div className="flex flex-wrap gap-1.5">
-          {_SEIR_SERIES.map(k => (
+          {availableSeries.map(k => (
             <button key={k} type="button" onClick={() => setSeries(k)}
-              className={`rounded-full px-2 py-0.5 text-[10px] border transition ${series === k ? "border-white/30 bg-white/10 text-white" : "border-white/10 text-white/50 hover:bg-white/5"}`}>{seriesLabel[k]}</button>
+              className={`rounded-full px-2 py-0.5 text-[10px] border transition ${activeSeries === k ? "border-white/30 bg-white/10 text-white" : "border-white/10 text-white/50 hover:bg-white/5"}`}>{seriesLabel[k]}</button>
           ))}
         </div>
-        {band && <SeirBandChart band={band} dates={proj.dates ?? []} color={_SEIR_COLOR[series]} lang={lang} />}
+        {band && <SeirBandChart band={band} dates={proj.dates ?? []} color={_SEIR_COLOR[activeSeries]} lang={lang} />}
         {sm && (
           <div className="mt-2 grid grid-cols-2 sm:grid-cols-4 gap-2 text-[10px]">
             <div><div className="text-white/40">{t("scenarioDetail.seir.r0")}</div><div className="font-mono text-white/80">{sm.r0.median} [{sm.r0.lower}–{sm.r0.upper}]</div></div>
             <div><div className="text-white/40">{t("scenarioDetail.seir.peakDay")}</div><div className="font-mono text-white/80">{sm.peak_prevalence_day.median}</div></div>
             <div><div className="text-white/40">{t("scenarioDetail.seir.attackRate")}</div><div className="font-mono text-white/80">{(sm.attack_rate.median * 100).toFixed(1)}%</div></div>
             <div><div className="text-white/40">{t("scenarioDetail.seir.deaths")}</div><div className="font-mono text-white/80">{sm.total_deaths.median}</div></div>
+            {sm.total_vaccinated && sm.total_vaccinated.median > 0 && (
+              <div><div className="text-white/40">{t("scenarioDetail.seir.totalVaccinated")}</div><div className="font-mono text-teal-300">{fmtPop(sm.total_vaccinated.median)}</div></div>)}
+            {sm.peak_quarantine && sm.peak_quarantine.median > 0 && (
+              <div><div className="text-white/40">{t("scenarioDetail.seir.peakQuarantine")}</div><div className="font-mono text-amber-300">{fmtPop(sm.peak_quarantine.median)}</div></div>)}
           </div>
         )}
       </div>
@@ -945,6 +968,31 @@ function SeirModelView({ scenarioId }: { scenarioId: string }) {
             <input type="number" step="any" value={i0Edit} placeholder={String(Math.round(proj.initial_infected ?? 0))}
               onChange={e => setI0Edit(e.target.value)} className="w-full rounded-lg border border-white/10 bg-white/5 px-2 py-1 text-white/90 font-mono outline-none focus:border-brand-400/50" /></label>
         </div>
+
+        {/* Paramètres d'intervention (avancés) : activent les compartiments V / Q d'un modèle plus riche */}
+        <div className="rounded-xl border border-dashed border-white/12 bg-white/2 p-3 space-y-2">
+          <div className="flex items-center gap-1.5">
+            <Sliders size={12} className="text-teal-300/80" />
+            <p className="text-[10px] uppercase tracking-wider text-white/45">{t("scenarioDetail.seirTab.interventions")}</p>
+          </div>
+          <p className="text-[9px] text-white/30 leading-relaxed">{t("scenarioDetail.seirTab.interventionsHint")}</p>
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 text-[11px]">
+            {_SEIR_INTERVENTION_KEYS.map(k => {
+              const cur = params[k] as SeirParamValue | undefined;
+              return (
+                <label key={k} className="space-y-1 block">
+                  <span className="text-white/55">{_SEIR_PARAM_LABEL[k]} <span className="text-white/30 font-mono">{_SEIR_SYMBOL[k]}</span></span>
+                  <input type="number" step="any" min="0" value={edits[k] ?? ""}
+                    placeholder={cur ? String(cur.value) : (k === "vaccine_efficacy" ? "1.0" : "0")}
+                    onChange={e => setEdits(prev => ({ ...prev, [k]: e.target.value }))}
+                    className="w-full rounded-lg border border-white/10 bg-white/5 px-2 py-1 text-white/90 font-mono outline-none focus:border-teal-400/50" />
+                  {cur?.overridden && <span className="text-[8px] text-teal-300">{t("scenarioDetail.seirTab.active")}</span>}
+                </label>
+              );
+            })}
+          </div>
+        </div>
+
         <div className="flex items-center gap-2 flex-wrap">
           <button type="button" onClick={recompute} disabled={busy || !hasEdits}
             className="flex items-center gap-1.5 rounded-xl bg-brand-600 text-white font-semibold py-1.5 px-4 text-xs hover:bg-brand-500 transition disabled:opacity-50">

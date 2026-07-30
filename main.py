@@ -15223,7 +15223,8 @@ def _seir_projection_payload(
         "initial_infected": dists["initial_infected"],
         "geography": _geo_label,
         "dates": dates,
-        "series": {k: ens[k] for k in ("incidence", "prevalence", "cumulative", "deaths", "r_eff")},
+        "series": {k: ens[k] for k in ("incidence", "prevalence", "cumulative", "deaths", "r_eff",
+                                        "vaccinated", "quarantined") if k in ens},
         "summary": ens["summary"],
         "parameters": src_params,             # littérature (avec provenance) → traçabilité
         "effective_parameters": eff_params,   # réellement simulés (source ⊕ overrides)

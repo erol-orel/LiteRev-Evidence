@@ -114,6 +114,89 @@ def test_seird_deaths_track_cfr():
     assert res["deaths"][0] <= res["deaths"][-1]  # monotone non-decreasing
 
 
+# ── vaccination (V) & quarantine (Q) compartments ────────────────────────────
+def _seir_base(**kw):
+    return sm.simulate(sm.SeirParams(r0=2.5, infectious_period_days=6, incubation_period_days=3,
+                                     population=1e6, initial_infected=10, **kw), days=250)
+
+
+def test_vq_off_reproduces_base_model_exactly():
+    # The V/Q extension must be a no-op when both are absent (or zero): identical name,
+    # identical attack rate — this is what preserves the final-size guarantees above.
+    base = _seir_base()
+    none_off = _seir_base(vaccination_rate=None, quarantine_rate=None)
+    zero_off = _seir_base(vaccination_rate=0.0, vaccine_efficacy=0.9, quarantine_rate=0.0)
+    for other in (none_off, zero_off):
+        assert other["model"] == base["model"] == "SEIR"
+        assert abs(other["summary"]["attack_rate"] - base["summary"]["attack_rate"]) < 1e-12
+    assert base["summary"]["total_vaccinated"] == 0.0
+    assert base["summary"]["peak_quarantine"] == 0.0
+
+
+def test_model_naming_with_v_and_q():
+    cases = [
+        (dict(r0=2, incubation_period_days=3, vaccination_rate=0.01), "SVEIR"),
+        (dict(r0=2, vaccination_rate=0.01), "SVIR"),
+        (dict(r0=2, incubation_period_days=3, quarantine_rate=0.1), "SEIQR"),
+        (dict(r0=2, quarantine_rate=0.1), "SIQR"),
+        (dict(r0=2, incubation_period_days=3, vaccination_rate=0.01, quarantine_rate=0.1), "SVEIQR"),
+        (dict(r0=2, incubation_period_days=3, vaccination_rate=0.01, quarantine_rate=0.1,
+              cfr=0.02, immunity_duration_days=180), "SVEIQRDS"),
+    ]
+    for kw, expected in cases:
+        res = sm.simulate(sm.SeirParams(population=1e6, initial_infected=10, **kw), days=40)
+        assert res["model"] == expected, f"{kw} → {res['model']} (expected {expected})"
+
+
+def test_vaccination_reduces_attack_rate():
+    base = _seir_base()
+    vac = _seir_base(vaccination_rate=0.01, vaccine_efficacy=0.9)
+    assert vac["model"] == "SVEIR"
+    assert vac["summary"]["attack_rate"] < base["summary"]["attack_rate"]
+    assert vac["summary"]["total_vaccinated"] > 0.0
+    # higher efficacy → stronger protection (nu = rate · efficacy) → lower attack rate
+    low_eff = _seir_base(vaccination_rate=0.01, vaccine_efficacy=0.3)
+    assert vac["summary"]["attack_rate"] < low_eff["summary"]["attack_rate"]
+
+
+def test_quarantine_reduces_peak_prevalence():
+    base = _seir_base()
+    # mild isolation: epidemic still occurs but with a lower, later peak
+    qua = _seir_base(quarantine_rate=0.05)
+    assert qua["model"] == "SEIQR"
+    assert qua["summary"]["peak_quarantine"] > 0.0
+    assert qua["summary"]["peak_prevalence"] < base["summary"]["peak_prevalence"]
+    assert qua["summary"]["attack_rate"] < base["summary"]["attack_rate"]
+    # strong isolation drives R_eff below 1 → outbreak fails to take off
+    strong = _seir_base(quarantine_rate=0.5)
+    assert strong["summary"]["attack_rate"] < 0.02
+
+
+def test_vq_population_conservation():
+    # S+E+I+R+D+V+Q must equal N at every recorded step (C is a separate accumulator).
+    n = 1e6
+    res = sm.simulate(sm.SeirParams(r0=3.0, infectious_period_days=5, incubation_period_days=2,
+                                    cfr=0.02, vaccination_rate=0.008, vaccine_efficacy=0.8,
+                                    quarantine_rate=0.15, population=n, initial_infected=50), days=300)
+    for t in range(len(res["days"])):
+        total = (res["susceptible"][t] + res["exposed"][t] + res["prevalence"][t]
+                 + res["recovered"][t] + res["deaths"][t]
+                 + res["vaccinated"][t] + res["quarantined"][t])
+        assert abs(total - n) < 1.0, f"day {res['days'][t]}: {total} != {n}"
+
+
+def test_ensemble_reports_vq_bands():
+    ens = sm.simulate_ensemble(
+        {"r0": sm.ParamDist(2.4, 2.0, 3.0), "infectious_period_days": 6, "incubation_period_days": 3,
+         "vaccination_rate": 0.01, "vaccine_efficacy": 0.85, "population": 1e6, "initial_infected": 10},
+        days=150, n_samples=40, seed=7)
+    assert ens["model"] == "SVEIR"
+    for key in ("vaccinated", "quarantined"):
+        b = ens[key]
+        assert all(b["lower"][t] <= b["median"][t] <= b["upper"][t] for t in range(len(b["median"])))
+    assert ens["summary"]["total_vaccinated"]["median"] > 0.0
+
+
 # ── uncertainty ensemble ─────────────────────────────────────────────────────
 def _ens_params():
     return {

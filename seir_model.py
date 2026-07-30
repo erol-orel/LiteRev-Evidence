@@ -32,9 +32,11 @@ import math
 import random
 from dataclasses import dataclass
 
-# 6 compartiments d'état intégrés : S, E, I, R, D, C (C = infections cumulées,
-# accumulateur monotone distinct — pas soumis à la conservation S+E+I+R+D = N).
-_N_STATE = 6
+# 8 compartiments d'état intégrés : S, E, I, R, D, C, V, Q (C = infections cumulées,
+# accumulateur monotone distinct — hors conservation S+E+I+R+D+V+Q = N). V (vaccinés) et
+# Q (isolés/quarantaine) sont DÉSACTIVÉS (restent 0) sans leur paramètre → modèles de base
+# strictement inchangés (S+E+I+R+D = N, cf. relation de taille finale).
+_N_STATE = 8
 _Z = 1.959963984540054  # quantile normal à 97.5 % (demi-largeur d'un IC 95 %)
 
 
@@ -47,6 +49,9 @@ class SeirParams:
     incubation_period_days: float | None = None   # → sigma ; présent ⇒ compartiment E (SEIR)
     cfr: float = 0.0                              # létalité 0..1 ; > 0 ⇒ compartiment D
     immunity_duration_days: float | None = None   # → omega ; présent ⇒ R→S (immunité décroissante)
+    vaccination_rate: float | None = None         # → nu (fraction de S vaccinée /j) ; présent ⇒ V
+    vaccine_efficacy: float = 1.0                 # ε (0..1) : fraction protégée par la vaccination
+    quarantine_rate: float | None = None          # → kappa (fraction de I isolée /j) ; présent ⇒ Q
     population: float = 1_000_000.0
     initial_infected: float = 10.0
     initial_exposed: float = 0.0
@@ -66,44 +71,71 @@ def _rates(p: SeirParams) -> dict:
     has_waning = bool(p.immunity_duration_days and p.immunity_duration_days > 0)
     omega = 1.0 / p.immunity_duration_days if has_waning else 0.0
     cfr = min(max(p.cfr or 0.0, 0.0), 1.0)
+    eff = min(max(p.vaccine_efficacy if p.vaccine_efficacy is not None else 1.0, 0.0), 1.0)
+    nu = (p.vaccination_rate * eff) if (p.vaccination_rate and p.vaccination_rate > 0) else 0.0
+    kappa = p.quarantine_rate if (p.quarantine_rate and p.quarantine_rate > 0) else 0.0
     return {
         "beta": beta, "gamma": gamma, "sigma": sigma, "omega": omega, "cfr": cfr,
+        "nu": nu, "kappa": kappa,
         "has_e": has_e, "has_death": cfr > 0.0, "has_waning": has_waning,
+        "has_v": nu > 0.0, "has_q": kappa > 0.0,
         "r0": beta / gamma if gamma > 0 else float("nan"),
     }
 
 
 def model_name(rates: dict) -> str:
-    """Libellé du modèle effectivement simulé, d'après les indicateurs actifs."""
-    base = "SEIR" if rates["has_e"] else "SIR"
-    suffix = ("D" if rates["has_death"] else "") + ("S" if rates["has_waning"] else "")
-    return base + suffix
+    """Libellé du modèle effectivement simulé, assemblé compartiment par compartiment.
+
+    Ordre canonique S [V] [E] I [Q] R [D] [S]. Rétro-compatible : sans vaccination ni
+    quarantaine on retrouve exactement SIR/SEIR/SEIRD/SEIRS/SIRD… ; avec elles on obtient
+    p. ex. SVEIR (vaccination) ou SEIQR (quarantaine)."""
+    name = "S"
+    if rates.get("has_v"):
+        name += "V"
+    if rates["has_e"]:
+        name += "E"
+    name += "I"
+    if rates.get("has_q"):
+        name += "Q"
+    name += "R"
+    if rates["has_death"]:
+        name += "D"
+    if rates["has_waning"]:
+        name += "S"
+    return name
 
 
 def _deriv(y: list[float], r: dict) -> tuple[float, ...]:
-    """Membre de droite généralisé (en fractions ; N = 1). Ordre : S, E, I, R, D, C.
+    """Membre de droite généralisé (en fractions ; N = 1). Ordre : S, E, I, R, D, C, V, Q.
 
-    Conservation : dS+dE+dI+dR+dD = 0 (C est un accumulateur à part). Le flux de
-    sortie de I (=gamma·I) se répartit CFR→décès, (1−CFR)→guérison ; sans période
-    d'incubation, les nouvelles infections vont directement de S à I (pas de E)."""
-    s, e, i, rec, _d, _c = y
+    Conservation : dS+dE+dI+dR+dD+dV+dQ = 0 (C est un accumulateur à part). Le flux de
+    sortie infectieux (gamma·(I+Q)) se répartit CFR→décès, (1−CFR)→guérison ; sans période
+    d'incubation, les nouvelles infections vont directement de S à I (pas de E). nu vaccine
+    S→V (protection définitive dans ce modèle simple) ; kappa isole I→Q (Q reste infectieux
+    au plan clinique mais ne transmet plus). Avec nu=kappa=0, se réduit exactement au SEIR."""
+    s, e, i, rec, _d, _c, v, q = y
     inf = r["beta"] * s * i          # force d'infection · S = nouvelles infections/j
     waning = r["omega"] * rec        # R → S (0 sans immunité décroissante)
-    exit_i = r["gamma"] * i          # sortie totale de I
-    to_death = r["cfr"] * exit_i
-    to_recov = exit_i - to_death
+    vacc = r["nu"] * s               # S → V (0 sans vaccination)
+    to_quar = r["kappa"] * i         # I → Q (0 sans quarantaine)
+    exit_i = r["gamma"] * i          # sortie « naturelle » de I (guérison/décès)
+    exit_q = r["gamma"] * q          # sortie de Q (même période infectieuse)
+    to_death = r["cfr"] * (exit_i + exit_q)
+    to_recov = (exit_i + exit_q) - to_death
     if r["has_e"]:
-        ds = -inf + waning
+        ds = -inf - vacc + waning
         de = inf - r["sigma"] * e
-        di = r["sigma"] * e - exit_i
+        di = r["sigma"] * e - exit_i - to_quar
     else:
-        ds = -inf + waning
+        ds = -inf - vacc + waning
         de = 0.0
-        di = inf - exit_i
+        di = inf - exit_i - to_quar
     drec = to_recov - waning
     dd = to_death
     dc = inf
-    return (ds, de, di, drec, dd, dc)
+    dv = vacc
+    dq = to_quar - exit_q
+    return (ds, de, di, drec, dd, dc, dv, dq)
 
 
 def _rk4_step(y: list[float], r: dict, dt: float) -> list[float]:
@@ -127,7 +159,8 @@ def simulate(p: SeirParams, days: int = 365, dt: float = 0.25) -> dict:
     i0 = min(max(float(p.initial_infected or 0.0), 0.0) / n, 1.0)
     e0 = min(max(float(p.initial_exposed or 0.0), 0.0) / n, 1.0 - i0)
     s0 = max(1.0 - i0 - e0, 0.0)
-    y = [s0, e0, i0, 0.0, 0.0, i0 + e0]  # C initial = déjà infectés (E+I)
+    # État : S, E, I, R, D, C, V, Q. C initial = déjà infectés (E+I) ; V/Q partent de 0.
+    y = [s0, e0, i0, 0.0, 0.0, i0 + e0, 0.0, 0.0]
 
     steps_per_day = max(int(round(1.0 / max(dt, 1e-6))), 1)
     step = 1.0 / steps_per_day
@@ -142,25 +175,29 @@ def simulate(p: SeirParams, days: int = 365, dt: float = 0.25) -> dict:
     susceptible: list[float] = []
     exposed: list[float] = []
     recovered: list[float] = []
+    vaccinated: list[float] = []
+    quarantined: list[float] = []
 
     def _record(t: int, yv: list[float]) -> None:
-        s, _e, i, _rec, d, c = yv
+        s, _e, i, _rec, d, c, v, q = yv
         days_out.append(t)
         incidence.append(r["beta"] * s * i * n)  # nouvelles infections/j (effectifs)
         prevalence.append(i * n)
         cumulative.append(c * n)
         deaths.append(d * n)
         r_eff.append(r0v * s)
-        susceptible.append(s * n)   # compartiments S / E / R exposés aussi (effectifs)
+        susceptible.append(s * n)   # compartiments S / E / R / V / Q exposés aussi (effectifs)
         exposed.append(_e * n)
         recovered.append(_rec * n)
+        vaccinated.append(v * n)
+        quarantined.append(q * n)
 
     _record(0, y)
     for day in range(1, int(days) + 1):
         for _ in range(steps_per_day):
             y = _rk4_step(y, r, step)
-            # borne les micro-négatifs dus à l'arithmétique flottante
-            if y[0] < 0 or y[1] < 0 or y[2] < 0 or y[3] < 0 or y[4] < 0 or y[5] < 0:
+            # borne les micro-négatifs dus à l'arithmétique flottante (tous compartiments)
+            if any(v < 0.0 for v in y):
                 y = [v if v > 0.0 else 0.0 for v in y]
         _record(day, y)
 
@@ -175,6 +212,8 @@ def simulate(p: SeirParams, days: int = 365, dt: float = 0.25) -> dict:
         "peak_prevalence_day": days_out[peak_prev_i],
         "attack_rate": round(min(cumulative[-1] / n, 1.0), 4),
         "total_deaths": round(deaths[-1], 2),
+        "total_vaccinated": round(vaccinated[-1], 2),      # 0 sans vaccination
+        "peak_quarantine": round(max(quarantined), 2),     # 0 sans quarantaine
     }
     return {
         "model": summary["model"],
@@ -187,6 +226,8 @@ def simulate(p: SeirParams, days: int = 365, dt: float = 0.25) -> dict:
         "susceptible": susceptible,
         "exposed": exposed,
         "recovered": recovered,
+        "vaccinated": vaccinated,
+        "quarantined": quarantined,
         "summary": summary,
     }
 
@@ -221,11 +262,12 @@ class ParamDist:
 # Paramètres dont la PRÉSENCE change la structure du modèle (E / D / R→S). Ils
 # fixent la structure pour tout l'ensemble ; seules les VALEURS varient d'un tirage
 # à l'autre (on ne veut pas que le modèle « clignote » entre tirages).
-_STRUCTURAL = ("incubation_period_days", "cfr", "immunity_duration_days")
+_STRUCTURAL = ("incubation_period_days", "cfr", "immunity_duration_days",
+               "vaccination_rate", "quarantine_rate")
 _PARAM_FIELDS = (
     "r0", "beta", "infectious_period_days", "incubation_period_days",
     "cfr", "immunity_duration_days", "population", "initial_infected",
-    "initial_exposed",
+    "initial_exposed", "vaccination_rate", "vaccine_efficacy", "quarantine_rate",
 )
 
 
@@ -308,7 +350,7 @@ def simulate_ensemble(
         "days": runs[0]["days"],
     }
     for key in ("incidence", "prevalence", "cumulative", "deaths", "r_eff",
-                "susceptible", "exposed", "recovered"):
+                "susceptible", "exposed", "recovered", "vaccinated", "quarantined"):
         out[key] = _band([r[key] for r in runs], lo_q, hi_q)
 
     def _sum_band(field: str) -> dict:
@@ -328,6 +370,8 @@ def simulate_ensemble(
         "peak_prevalence_day": _sum_band("peak_prevalence_day"),
         "attack_rate": _sum_band("attack_rate"),
         "total_deaths": _sum_band("total_deaths"),
+        "total_vaccinated": _sum_band("total_vaccinated"),
+        "peak_quarantine": _sum_band("peak_quarantine"),
     }
     return out
 
