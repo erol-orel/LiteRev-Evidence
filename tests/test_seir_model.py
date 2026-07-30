@@ -246,6 +246,25 @@ def test_population_for_geography_no_false_substring():
     assert sm.population_for_geography(None) is None
 
 
+def test_population_in_text_prefers_most_local():
+    # a COVID-Suisse-Romande query resolves to Romandie (2M), not Switzerland (8.8M) or world
+    hit = sm.population_for_geography_in_text(
+        "prediction du nombre de personnes hospitalisées par le COVID-19 en suisse romande")
+    assert hit is not None and hit[0] == 2_000_000
+    hit2 = sm.population_for_geography_in_text("COVID-19 hospitalizations in Switzerland")
+    assert hit2 is not None and hit2[0] == 8_800_000
+    # most local wins when several are named
+    hit3 = sm.population_for_geography_in_text("ICU beds in Geneva, Switzerland")
+    assert hit3 is not None and hit3[0] == 500_000
+
+
+def test_population_in_text_none_and_word_boundary():
+    assert sm.population_for_geography_in_text("machine learning for sepsis") is None
+    assert sm.population_for_geography_in_text("") is None
+    assert sm.population_for_geography_in_text("hospitalisations quotidiennes") is None  # no geo word
+    assert sm.population_for_geography_in_text("a cohort in the USA")[0] == 335_000_000
+
+
 # ── quality-weighted pooling (Follow-up B) ────────────────────────────────────
 def test_pool_weighted_weights_toward_higher_quality():
     # two studies: a low value at high quality, a high value at low quality → the

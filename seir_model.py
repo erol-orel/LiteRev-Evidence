@@ -485,7 +485,10 @@ _GEO_POPULATION: dict[str, float] = {
     "portugal": 10_300_000, "greece": 10_400_000, "poland": 37_700_000, "ireland": 5_100_000, "irlande": 5_100_000,
     "geneva": 500_000, "geneve": 500_000, "genève": 500_000, "grand geneve": 1_050_000, "grand genève": 1_050_000,
     "vaud": 815_000, "lausanne": 815_000, "valais": 350_000, "sion": 350_000,
-    "neuchatel": 175_000, "neuchâtel": 175_000, "fribourg": 325_000, "jura": 73_000, "romandie": 2_000_000,
+    "neuchatel": 175_000, "neuchâtel": 175_000, "fribourg": 325_000, "jura": 73_000,
+    "romandie": 2_000_000, "suisse romande": 2_000_000, "swiss romande": 2_000_000,
+    "french-speaking switzerland": 2_000_000, "lake geneva region": 1_100_000,
+    "leman": 1_100_000, "léman": 1_100_000,
 }
 
 
@@ -507,6 +510,27 @@ def population_for_geography(geo_label) -> float | None:
         if c and c in _GEO_POPULATION:
             return float(_GEO_POPULATION[c])
     return None
+
+
+def population_for_geography_in_text(text) -> tuple[float, str] | None:
+    """Cherche DANS un texte libre (titre / requête d'un scénario) le meilleur intitulé
+    géographique connu et renvoie (population, libellé), ou None. On préfère la zone la
+    plus LOCALE citée (plus petite population) : « … en suisse romande » → Romandie (2M)
+    plutôt que « suisse » (8.8M) ou « monde ». Correspondance par MOTS (frontières de
+    mots après normalisation accents/séparateurs → espaces) pour éviter les collisions
+    de sous-chaîne. PUR — sert à ancrer la projection SEIR sur la géographie du scénario,
+    car le corpus d'un sujet épidémique est international (géographie modale ≈ « world »)."""
+    t = _norm_ascii(text)
+    if not t:
+        return None
+    padded = f" {t} "
+    best: tuple[float, str] | None = None
+    for label, pop in _GEO_POPULATION.items():
+        lab = _norm_ascii(label)
+        if lab and f" {lab} " in padded:
+            if best is None or pop < best[0]:
+                best = (float(pop), label)
+    return best
 
 
 def pool_weighted(observations, quality_by_id=None) -> dict | None:
