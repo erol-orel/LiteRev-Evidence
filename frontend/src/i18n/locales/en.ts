@@ -227,7 +227,7 @@ export const en: Translations = {
     detailPage: "Detail page",
     savedSearchPrefix: "Saved search: ",
     detailPageTooltip: "Open the scenario detail page",
-    ingestArticlesTooltip: "Ingest articles",
+    ingestArticlesTooltip: "Rebuild everything (ingest + PICO, clustering, knowledge graph, evidence, variables & SEIR)",
     replaySearchTooltip: "Re-run the search",
     assignFolderTooltip: "Assign to a folder",
     unpinTooltip: "Unpin",

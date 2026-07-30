@@ -7327,6 +7327,13 @@ def create_user_scenario(payload: UserScenarioIn, _: None = Depends(require_api_
                     "strategy": json.dumps(payload.search_strategy) if payload.search_strategy else None,
                 })
                 row = _get_user_scenario_or_404(existing)
+                # Scénario SAUVEGARDÉ (épinglé) → tout se calcule côté serveur : on
+                # déclenche le pipeline COMPLET d'enrichissement (best-effort, dédupliqué
+                # par le verrou). Le front peut aussi l'appeler — le garde empêche le double.
+                try:
+                    _launch_full_pipeline(existing)
+                except Exception as _e:
+                    logger.warning(f"auto full-pipeline on pin {existing}: {_e}")
                 return _user_scenario_to_gesica_format(row)
     new_id = "usr-" + str(uuid.uuid4()).replace("-", "")[:12]
     with engine.begin() as conn:
@@ -7375,6 +7382,12 @@ def create_user_scenario(payload: UserScenarioIn, _: None = Depends(require_api_
             _threading.Thread(target=_bg_strategy, args=(new_id, payload.query), daemon=True).start()
         except Exception as _te:
             logger.warning(f"could not start strategy thread for {new_id}: {_te}")
+    # Nouveau scénario SAUVEGARDÉ (épinglé) → enrichissement complet côté serveur.
+    if payload.pinned:
+        try:
+            _launch_full_pipeline(new_id)
+        except Exception as _e:
+            logger.warning(f"auto full-pipeline on new pin {new_id}: {_e}")
     row = _get_user_scenario_or_404(new_id)
     return _user_scenario_to_gesica_format(row)
 
@@ -7472,6 +7485,12 @@ def patch_user_scenario(scenario_id: str, payload: UserScenarioPatch, _: None = 
         conn.execute(text(f"""
             UPDATE user_scenarios SET {', '.join(updates)} WHERE id = :id
         """), params)
+    # Épinglage via PATCH → scénario SAUVEGARDÉ : enrichissement complet côté serveur.
+    if payload.pinned is True:
+        try:
+            _launch_full_pipeline(scenario_id)
+        except Exception as _e:
+            logger.warning(f"auto full-pipeline on patch-pin {scenario_id}: {_e}")
     row = _get_user_scenario_or_404(scenario_id)
     return _user_scenario_to_gesica_format(row)
 
@@ -10768,6 +10787,39 @@ def get_user_scenario_populate_status(scenario_id: str) -> dict[str, Any]:
     return {"scenario_id": scenario_id, **job}
 
 
+def _launch_full_pipeline(scenario_id: str, max_results: int = 500) -> str:
+    """Démarre le pipeline COMPLET d'enrichissement en arrière-plan (un seul à la fois
+    par scénario). Renvoie 'started' | 'already_running' | 'no_query'. Partagé par
+    l'endpoint POST /pipeline, l'auto-déclenchement à l'ÉPINGLAGE (« scénario sauvegardé
+    → tout est calculé côté serveur ») et le bouton « tout recalculer ». Robuste : ne
+    lève jamais (usage best-effort depuis les handlers de sauvegarde)."""
+    import threading
+    try:
+        row = _get_user_scenario_or_404(scenario_id)
+    except Exception:
+        return "no_query"
+    query = row.get("query")
+    if not query:
+        return "no_query"
+    with _pipeline_jobs_lock:
+        job = _user_scenario_pipeline_jobs.get(scenario_id)
+        if job and job.get("overall_status") in ("running", "starting"):
+            return "already_running"
+        _user_scenario_pipeline_jobs[scenario_id] = {
+            "overall_status": "starting",
+            "current_step": "ingest",
+            "steps": {k: {"status": "pending"} for k in (
+                "ingest", "fulltext", "embed", "rerank", "pico", "metadata",
+                "clustering", "knowledge_graph", "evidence", "variables")},
+        }
+    threading.Thread(
+        target=_run_user_scenario_full_pipeline,
+        args=(scenario_id, query, row.get("filters") or {}, max_results),
+        daemon=True,
+    ).start()
+    return "started"
+
+
 @app.post("/user-scenarios/{scenario_id}/pipeline")
 def start_user_scenario_pipeline(
     scenario_id: str,
@@ -10776,51 +10828,25 @@ def start_user_scenario_pipeline(
 ) -> dict[str, Any]:
     """
     Déclenche le pipeline complet d'enrichissement en arrière-plan :
-    PubMed → PICO → Métadonnées → Full-text → Clustering.
-    Idéalement appelé dès qu'une recherche est validée en scénario épinglé.
+    ingest → fulltext → embed → rerank → PICO → métadonnées → clustering →
+    knowledge graph → evidence brief → variables & modèle.
+    Appelé dès qu'une recherche est sauvegardée en scénario, et par « tout recalculer ».
     """
-    import threading
     row = _get_user_scenario_or_404(scenario_id)
-    query = row["query"]
-
-    with _pipeline_jobs_lock:
-        job = _user_scenario_pipeline_jobs.get(scenario_id)
-        if job and job.get("overall_status") == "running":
-            return {
-                "scenario_id": scenario_id,
-                "status": "already_running",
-                "message": "Un pipeline est déjà en cours pour ce scénario.",
-                "current_step": job.get("current_step"),
-            }
-
-        _user_scenario_pipeline_jobs[scenario_id] = {
-            "overall_status": "starting",
-            "current_step": "ingest",
-            "steps": {
-                "ingest": {"status": "pending"},
-                "fulltext": {"status": "pending"},
-                "embed": {"status": "pending"},
-                "rerank": {"status": "pending"},
-                "pico": {"status": "pending"},
-                "metadata": {"status": "pending"},
-                "clustering": {"status": "pending"},
-                "knowledge_graph": {"status": "pending"},
-                "evidence": {"status": "pending"},
-                "variables": {"status": "pending"},
-            },
+    status = _launch_full_pipeline(scenario_id, max_results)
+    if status == "already_running":
+        job = _user_scenario_pipeline_jobs.get(scenario_id) or {}
+        return {
+            "scenario_id": scenario_id,
+            "status": "already_running",
+            "message": "Un pipeline est déjà en cours pour ce scénario.",
+            "current_step": job.get("current_step"),
         }
-
-    t = threading.Thread(
-        target=_run_user_scenario_full_pipeline,
-        args=(scenario_id, query, row.get("filters") or {}, max_results),
-        daemon=True,
-    )
-    t.start()
 
     return {
         "scenario_id": scenario_id,
         "status": "started",
-        "query": query,
+        "query": row["query"],
         "max_results": max_results,
         "message": f"Pipeline complet lancé pour '{row['name']}' "
                    "(ingest 13 sources → fulltext → embeddings → rerank → PICO → métadonnées → "
