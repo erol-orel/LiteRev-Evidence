@@ -43,8 +43,11 @@ import {
   getModelTrainStatus,
   getModelMonitor,
   fetchSeirProjection,
+  postSeirProjection,
   type SeirProjection,
-  type SeirSummaryBand,
+  type SeirBand,
+  type SeirParamValue,
+  type SeirOverride,
   proposeSpec,
   getSpecProposal,
   validateSpecProposal,
@@ -740,124 +743,219 @@ const _SEIR_PARAM_LABEL: Record<string, string> = {
   cfr: "CFR", immunity_duration_days: "Immunity (d)", serial_interval_days: "Serial (d)",
 };
 
-function SeirProjectionPanel({ scenarioId }: { scenarioId: string }) {
-  const { t, lang } = useI18n();
-  const [proj, setProj] = useState<SeirProjection | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [series, setSeries] = useState<SeirSeriesKey>("incidence");
+// ─── Onglet SEIR : modèle · formule · paramètres éditables (liés aux articles) ─
+const _SEIR_PARAM_ORDER = ["r0", "incubation_period_days", "infectious_period_days", "cfr", "immunity_duration_days", "serial_interval_days"];
+const _SEIR_SYMBOL: Record<string, string> = {
+  r0: "R₀ = β/γ", incubation_period_days: "σ = 1/incub.", infectious_period_days: "γ = 1/infect.",
+  cfr: "f (CFR)", immunity_duration_days: "ω = 1/immun.", serial_interval_days: "—",
+};
+// Équations du membre de droite selon les compartiments actifs du modèle sélectionné.
+function _seirEquations(model: string): { compartments: string; eqs: string[] } {
+  const hasE = model.includes("E");
+  const hasD = model.includes("D");
+  const waning = model.endsWith("S");   // R→S (immunité décroissante) : SEIRS / SEIRDS / SIRS
+  const compartments = ["S", hasE ? "E" : "", "I", "R", hasD ? "D" : ""].filter(Boolean).join(" · ");
+  const eqs: string[] = [`dS/dt = −β·S·I/N${waning ? " + ω·R" : ""}`];
+  if (hasE) { eqs.push("dE/dt = β·S·I/N − σ·E", "dI/dt = σ·E − γ·I"); }
+  else { eqs.push("dI/dt = β·S·I/N − γ·I"); }
+  eqs.push(`dR/dt = γ·${hasD ? "(1−f)·" : ""}I${waning ? " − ω·R" : ""}`);
+  if (hasD) eqs.push("dD/dt = γ·f·I");
+  return { compartments, eqs };
+}
 
-  useEffect(() => {
-    let alive = true;
-    setLoading(true);
-    fetchSeirProjection(scenarioId)
-      .then(p => { if (alive) setProj(p); })
-      .catch(() => { if (alive) setProj(null); })
-      .finally(() => { if (alive) setLoading(false); });
-    return () => { alive = false; };
-  }, [scenarioId]);
-
-  // Silencieux tant que non applicable : scénario non épidémique, ou aucun paramètre
-  // épidémiologique extrait de la littérature.
-  if (loading || !proj || !proj.applicable || !proj.series || !proj.summary) return null;
-
-  const band = proj.series[series];
-  const median = (band.median ?? []).map(Number);
-  const lower = (band.lower ?? []).map(Number);
-  const upper = (band.upper ?? []).map(Number);
+function SeirBandChart({ band, dates, color, lang }: { band: SeirBand; dates: (string | number)[]; color: string; lang: string }) {
+  const median = (band?.median ?? []).map(Number);
+  const lower = (band?.lower ?? []).map(Number);
+  const upper = (band?.upper ?? []).map(Number);
   const N = median.length;
   if (N < 2) return null;
-
   const W = 640, H = 200, padL = 8, padR = 8, padT = 10, padB = 22;
   const allY = [...median, ...lower, ...upper].filter(v => Number.isFinite(v));
   const yMin = Math.min(...allY), yMax = Math.max(...allY);
-  const yPad = (yMax - yMin) * 0.08 || 1;
-  const y0 = yMin - yPad, y1 = yMax + yPad;
+  const yPad = (yMax - yMin) * 0.08 || 1; const y0 = yMin - yPad, y1 = yMax + yPad;
   const xAt = (i: number) => padL + (i / Math.max(1, N - 1)) * (W - padL - padR);
   const yAt = (v: number) => padT + (1 - (v - y0) / Math.max(1e-9, y1 - y0)) * (H - padT - padB);
   const linePath = (vals: number[]) => vals.map((v, k) => `${k === 0 ? "M" : "L"}${xAt(k).toFixed(1)},${yAt(v).toFixed(1)}`).join(" ");
-  // CI band polygon (upper L→R, lower R→L).
   const bandPts = (upper.length === N && lower.length === N)
-    ? [
-        ...upper.map((v, k) => `${xAt(k).toFixed(1)},${yAt(v).toFixed(1)}`),
-        ...Array.from({ length: N }, (_u, k) => { const j = N - 1 - k; return `${xAt(j).toFixed(1)},${yAt(lower[j]).toFixed(1)}`; }),
-      ].join(" ")
+    ? [...upper.map((v, k) => `${xAt(k).toFixed(1)},${yAt(v).toFixed(1)}`),
+       ...Array.from({ length: N }, (_u, k) => { const j = N - 1 - k; return `${xAt(j).toFixed(1)},${yAt(lower[j]).toFixed(1)}`; })].join(" ")
     : "";
-  const color = _SEIR_COLOR[series];
-
-  const dates = proj.dates ?? [];
   const fmtDate = (d: string | number | undefined) => {
     if (d == null) return "";
     if (typeof d === "number") return `J+${d}`;
-    const dt = new Date(d);
-    return isNaN(dt.getTime()) ? String(d) : dt.toLocaleDateString(lang === "fr" ? "fr-FR" : "en-US", { month: "short", day: "numeric" });
+    const dt = new Date(d); return isNaN(dt.getTime()) ? String(d) : dt.toLocaleDateString(lang === "fr" ? "fr-FR" : "en-US", { month: "short", day: "numeric" });
   };
-  const sm = proj.summary;
-  const fmtBand = (x: SeirSummaryBand) => `${x.median} [${x.lower}–${x.upper}]`;
-  const fmtPop = (n: number) =>
-    n >= 1e9 ? `${(n / 1e9).toFixed(n >= 1e10 ? 0 : 1)}B`
-    : n >= 1e6 ? `${(n / 1e6).toFixed(n >= 1e7 ? 0 : 1)}M`
-    : n >= 1e3 ? `${(n / 1e3).toFixed(0)}k`
-    : `${Math.round(n)}`;
-  const popLabel = typeof proj.population === "number"
-    ? `${t("scenarioDetail.seir.population")} ${fmtPop(proj.population)}${proj.geography ? ` · ${proj.geography}` : ""}`
-    : null;
-  const seriesLabel: Record<SeirSeriesKey, string> = {
-    incidence: t("scenarioDetail.seir.seriesIncidence"),
-    prevalence: t("scenarioDetail.seir.seriesPrevalence"),
-    cumulative: t("scenarioDetail.seir.seriesCumulative"),
-    deaths: t("scenarioDetail.seir.seriesDeaths"),
-  };
-
   return (
-    <div className="rounded-2xl border border-white/5 bg-white/2 p-3">
-      <div className="flex items-center justify-between flex-wrap gap-2">
-        <span className="text-[10px] text-white/35 uppercase tracking-wider flex items-center gap-1">
-          <TrendingUp size={11} /> {t("scenarioDetail.seir.title")}
-        </span>
-        <span className="text-[10px] text-white/40 font-mono">
-          {proj.model}{proj.disease ? ` · ${proj.disease}` : ""}{popLabel ? ` · ${popLabel}` : ""} · {proj.n_samples} {t("scenarioDetail.seir.draws")}
-        </span>
-      </div>
-
-      <div className="mt-2 flex flex-wrap gap-1.5">
-        {_SEIR_SERIES.map(k => (
-          <button key={k} type="button" onClick={() => setSeries(k)}
-            className={`rounded-full px-2 py-0.5 text-[10px] border transition ${series === k ? "border-white/30 bg-white/10 text-white" : "border-white/10 text-white/50 hover:bg-white/5"}`}>
-            {seriesLabel[k]}
-          </button>
-        ))}
-      </div>
-
+    <>
       <svg viewBox={`0 0 ${W} ${H}`} className="mt-2 w-full" style={{ height: "auto" }} preserveAspectRatio="none">
         {bandPts && <polygon points={bandPts} fill={`${color}22`} stroke="none" />}
         <path d={linePath(median)} fill="none" stroke={color} strokeWidth={1.6} />
       </svg>
       <div className="flex items-center justify-between text-[9px] text-white/30 font-mono">
-        <span>{fmtDate(dates[0])}</span>
-        <span>{fmtDate(dates[Math.floor(dates.length / 2)])}</span>
-        <span>{fmtDate(dates[dates.length - 1])}</span>
+        <span>{fmtDate(dates[0])}</span><span>{fmtDate(dates[Math.floor(dates.length / 2)])}</span><span>{fmtDate(dates[dates.length - 1])}</span>
+      </div>
+    </>
+  );
+}
+
+function SeirModelView({ scenarioId }: { scenarioId: string }) {
+  const { t, lang } = useI18n();
+  const [proj, setProj] = useState<SeirProjection | null>(null);
+  const [provIndex, setProvIndex] = useState<Record<string, ProvArticle>>({});
+  const [loading, setLoading] = useState(true);
+  const [busy, setBusy] = useState(false);
+  const [series, setSeries] = useState<SeirSeriesKey>("incidence");
+  const [edits, setEdits] = useState<Record<string, string>>({});
+  const [popEdit, setPopEdit] = useState("");
+  const [i0Edit, setI0Edit] = useState("");
+
+  useEffect(() => {
+    let alive = true;
+    setLoading(true);
+    Promise.all([
+      fetchSeirProjection(scenarioId).catch(() => null),
+      getScenarioModelSpec(scenarioId).catch(() => null),
+    ]).then(([p, s]) => {
+      if (!alive) return;
+      setProj(p);
+      setProvIndex((s?.provenance_index as Record<string, ProvArticle>) ?? {});
+    }).finally(() => { if (alive) setLoading(false); });
+    return () => { alive = false; };
+  }, [scenarioId]);
+
+  if (loading && !proj) return <LoadingSpinner text={t("scenarioDetail.seirTab.loading")} />;
+  if (!proj || !proj.applicable) {
+    return <div className="rounded-2xl border border-white/8 bg-white/2 px-4 py-6 text-center text-sm text-white/50">
+      {proj?.reason ?? t("scenarioDetail.seirTab.notApplicable")}</div>;
+  }
+
+  const model = proj.model ?? "SEIR";
+  const { compartments, eqs } = _seirEquations(model);
+  const params = proj.effective_parameters ?? proj.parameters ?? {};
+  const fmtPop = (n?: number) => (typeof n === "number"
+    ? (n >= 1e9 ? `${(n / 1e9).toFixed(1)}B` : n >= 1e6 ? `${(n / 1e6).toFixed(n >= 1e7 ? 0 : 1)}M` : n >= 1e3 ? `${(n / 1e3).toFixed(0)}k` : `${Math.round(n)}`) : "—");
+  const hasEdits = Object.values(edits).some(v => v.trim() !== "") || popEdit.trim() !== "" || i0Edit.trim() !== "";
+  const hasOverrides = !!proj.overrides_applied && Object.keys(proj.overrides_applied).length > 0;
+
+  const recompute = () => {
+    const overrides: Record<string, SeirOverride> = {};
+    Object.entries(edits).forEach(([k, v]) => { const n = parseFloat(v); if (v.trim() !== "" && isFinite(n)) overrides[k] = { value: n }; });
+    const body: { overrides: Record<string, SeirOverride>; population?: number; initial_infected?: number } = { overrides };
+    const pop = parseFloat(popEdit); if (popEdit.trim() !== "" && isFinite(pop)) body.population = pop;
+    const i0 = parseFloat(i0Edit); if (i0Edit.trim() !== "" && isFinite(i0)) body.initial_infected = i0;
+    setBusy(true);
+    postSeirProjection(scenarioId, body).then(p => { if (p?.applicable) setProj(p); }).finally(() => setBusy(false));
+  };
+  const reset = () => {
+    setEdits({}); setPopEdit(""); setI0Edit(""); setBusy(true);
+    fetchSeirProjection(scenarioId).then(p => setProj(p)).finally(() => setBusy(false));
+  };
+
+  const sm = proj.summary;
+  const band = proj.series?.[series];
+  const seriesLabel: Record<SeirSeriesKey, string> = {
+    incidence: t("scenarioDetail.seir.seriesIncidence"), prevalence: t("scenarioDetail.seir.seriesPrevalence"),
+    cumulative: t("scenarioDetail.seir.seriesCumulative"), deaths: t("scenarioDetail.seir.seriesDeaths"),
+  };
+  const orderedKeys = [..._SEIR_PARAM_ORDER.filter(k => k in params), ...Object.keys(params).filter(k => !_SEIR_PARAM_ORDER.includes(k))];
+
+  return (
+    <div className="space-y-4">
+      <div className="rounded-2xl border border-white/8 bg-white/3 p-4 flex flex-wrap items-center justify-between gap-2">
+        <div>
+          <div className="flex items-center gap-2">
+            <span className="rounded-lg bg-brand-500/15 border border-brand-500/30 text-brand-300 px-2.5 py-1 text-sm font-bold font-mono">{model}</span>
+            {proj.disease && <span className="text-sm text-white/70">{proj.disease}</span>}
+          </div>
+          <p className="text-[11px] text-white/40 mt-1">{t("scenarioDetail.seirTab.compartments")}: <span className="font-mono text-white/60">{compartments}</span></p>
+        </div>
+        <div className="text-right text-[11px] text-white/50">
+          <p>{t("scenarioDetail.seir.population")}: <span className="font-mono text-white/80">{fmtPop(proj.population)}</span>{proj.geography ? ` · ${proj.geography}` : ""}</p>
+          <p className="text-white/35">{proj.n_samples} {t("scenarioDetail.seir.draws")}</p>
+        </div>
       </div>
 
-      <div className="mt-2 grid grid-cols-2 sm:grid-cols-4 gap-2 text-[10px]">
-        <div><div className="text-white/40">{t("scenarioDetail.seir.r0")}</div><div className="font-mono text-white/80">{fmtBand(sm.r0)}</div></div>
-        <div><div className="text-white/40">{t("scenarioDetail.seir.peakDay")}</div><div className="font-mono text-white/80">{fmtBand(sm.peak_prevalence_day)}</div></div>
-        <div><div className="text-white/40">{t("scenarioDetail.seir.attackRate")}</div><div className="font-mono text-white/80">{(sm.attack_rate.median * 100).toFixed(1)}%</div></div>
-        <div><div className="text-white/40">{t("scenarioDetail.seir.deaths")}</div><div className="font-mono text-white/80">{fmtBand(sm.total_deaths)}</div></div>
+      <div className="rounded-2xl border border-white/8 bg-white/2 p-4">
+        <p className="text-[10px] uppercase tracking-wider text-white/40 mb-2">{t("scenarioDetail.seirTab.equations")}</p>
+        <div className="font-mono text-[13px] text-white/80 space-y-1 overflow-x-auto">
+          {eqs.map((e, i) => <div key={i}>{e}</div>)}
+        </div>
+        <p className="text-[10px] text-white/35 mt-2 leading-relaxed">
+          β = {t("scenarioDetail.seirTab.beta")}, σ = 1/{t("scenarioDetail.seirTab.incubation")}, γ = 1/{t("scenarioDetail.seirTab.infectious")}
+          {model.includes("D") ? `, f = ${t("scenarioDetail.seirTab.cfr")}` : ""}{model.endsWith("S") ? `, ω = 1/${t("scenarioDetail.seirTab.immunity")}` : ""}
+        </p>
       </div>
 
-      {proj.parameters && Object.keys(proj.parameters).length > 0 && (
-        <div className="mt-2 border-t border-white/5 pt-1.5 flex flex-wrap gap-x-3 gap-y-1 text-[9px] text-white/40">
-          {Object.entries(proj.parameters).map(([k, v]) => (
-            <span key={k} className="font-mono">
-              {(_SEIR_PARAM_LABEL[k] ?? k)}={v.value}
-              {v.ci_low != null && v.ci_high != null ? ` [${v.ci_low}–${v.ci_high}]` : ""}
-              {v.provenance && v.provenance.length ? ` · ${v.provenance.length} ${t("scenarioDetail.seir.studies")}` : ""}
-            </span>
+      <div className="rounded-2xl border border-white/5 bg-white/2 p-3">
+        <div className="flex flex-wrap gap-1.5">
+          {_SEIR_SERIES.map(k => (
+            <button key={k} type="button" onClick={() => setSeries(k)}
+              className={`rounded-full px-2 py-0.5 text-[10px] border transition ${series === k ? "border-white/30 bg-white/10 text-white" : "border-white/10 text-white/50 hover:bg-white/5"}`}>{seriesLabel[k]}</button>
           ))}
         </div>
-      )}
+        {band && <SeirBandChart band={band} dates={proj.dates ?? []} color={_SEIR_COLOR[series]} lang={lang} />}
+        {sm && (
+          <div className="mt-2 grid grid-cols-2 sm:grid-cols-4 gap-2 text-[10px]">
+            <div><div className="text-white/40">{t("scenarioDetail.seir.r0")}</div><div className="font-mono text-white/80">{sm.r0.median} [{sm.r0.lower}–{sm.r0.upper}]</div></div>
+            <div><div className="text-white/40">{t("scenarioDetail.seir.peakDay")}</div><div className="font-mono text-white/80">{sm.peak_prevalence_day.median}</div></div>
+            <div><div className="text-white/40">{t("scenarioDetail.seir.attackRate")}</div><div className="font-mono text-white/80">{(sm.attack_rate.median * 100).toFixed(1)}%</div></div>
+            <div><div className="text-white/40">{t("scenarioDetail.seir.deaths")}</div><div className="font-mono text-white/80">{sm.total_deaths.median}</div></div>
+          </div>
+        )}
+      </div>
 
-      <p className="mt-1.5 text-[9px] text-white/25 leading-tight">{t("scenarioDetail.seir.note")}</p>
+      <div className="rounded-2xl border border-white/8 bg-white/2 p-4 space-y-3">
+        <div className="flex items-center justify-between">
+          <p className="text-[10px] uppercase tracking-wider text-white/40">{t("scenarioDetail.seirTab.parameters")}</p>
+          <p className="text-[9px] text-white/30">{t("scenarioDetail.seirTab.editHint")}</p>
+        </div>
+        <div className="space-y-2">
+          {orderedKeys.map(k => {
+            const p = params[k] as SeirParamValue;
+            const arts = (p.provenance ?? []).map(id => provIndex[String(id)]).filter(Boolean) as ProvArticle[];
+            return (
+              <div key={k} className="grid grid-cols-12 items-center gap-2 text-[11px] border-b border-white/5 pb-2">
+                <div className="col-span-4 sm:col-span-3">
+                  <div className="text-white/80 font-medium">{_SEIR_PARAM_LABEL[k] ?? k}</div>
+                  <div className="text-[9px] text-white/35 font-mono">{_SEIR_SYMBOL[k] ?? ""}</div>
+                </div>
+                <div className="col-span-4 sm:col-span-3">
+                  <input type="number" step="any" value={edits[k] ?? ""} placeholder={String(p.value)}
+                    onChange={e => setEdits(prev => ({ ...prev, [k]: e.target.value }))}
+                    className="w-full rounded-lg border border-white/10 bg-white/5 px-2 py-1 text-white/90 font-mono focus:border-brand-400/50 outline-none" />
+                  {p.overridden && <span className="text-[8px] text-gold-300">{t("scenarioDetail.seirTab.overridden")}</span>}
+                </div>
+                <div className="col-span-4 sm:col-span-3 font-mono text-white/45">
+                  {p.ci_low != null && p.ci_high != null ? `[${p.ci_low}–${p.ci_high}]` : (p.n_studies ? `${p.n_studies} ${t("scenarioDetail.seir.studies")}` : "—")}
+                  {p.unit ? ` ${p.unit}` : ""}
+                </div>
+                <div className="hidden sm:flex col-span-3 flex-wrap gap-1 justify-end">
+                  {arts.slice(0, 3).map((a, i) => <ArticleSourceLink key={i} a={a} label={t("scenarioDetail.common.ref")} />)}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+        <div className="grid grid-cols-2 gap-2 text-[11px]">
+          <label className="space-y-1 block"><span className="text-white/40">{t("scenarioDetail.seir.population")}</span>
+            <input type="number" step="any" value={popEdit} placeholder={String(Math.round(proj.population ?? 0))}
+              onChange={e => setPopEdit(e.target.value)} className="w-full rounded-lg border border-white/10 bg-white/5 px-2 py-1 text-white/90 font-mono outline-none focus:border-brand-400/50" /></label>
+          <label className="space-y-1 block"><span className="text-white/40">{t("scenarioDetail.seirTab.initialInfected")}</span>
+            <input type="number" step="any" value={i0Edit} placeholder={String(Math.round(proj.initial_infected ?? 0))}
+              onChange={e => setI0Edit(e.target.value)} className="w-full rounded-lg border border-white/10 bg-white/5 px-2 py-1 text-white/90 font-mono outline-none focus:border-brand-400/50" /></label>
+        </div>
+        <div className="flex items-center gap-2 flex-wrap">
+          <button type="button" onClick={recompute} disabled={busy || !hasEdits}
+            className="flex items-center gap-1.5 rounded-xl bg-brand-600 text-white font-semibold py-1.5 px-4 text-xs hover:bg-brand-500 transition disabled:opacity-50">
+            {busy ? <Loader2 size={12} className="animate-spin" /> : <RefreshCw size={12} />}{t("scenarioDetail.seirTab.recompute")}</button>
+          {(hasEdits || hasOverrides) && (
+            <button type="button" onClick={reset} disabled={busy}
+              className="rounded-xl border border-white/15 text-white/60 py-1.5 px-3 text-xs hover:bg-white/5 transition disabled:opacity-50">{t("scenarioDetail.seirTab.reset")}</button>
+          )}
+          {hasOverrides && <span className="text-[10px] text-gold-300">{t("scenarioDetail.seirTab.usingOverrides")}</span>}
+        </div>
+      </div>
+      <p className="text-[9px] text-white/25 leading-tight">{t("scenarioDetail.seirTab.note")}</p>
     </div>
   );
 }
@@ -4651,10 +4749,19 @@ function VizTab({ scenarioId }: { scenarioId: string }) {
 /** VariablesModelTab : Variables & Données + Modèle prédictif (sous-tabs) */
 function VariablesModelTab({ scenarioId, detail, initialSub }: { scenarioId: string; detail: ScenarioDetail; initialSub?: "variables" | "monitor" }) {
   const { t } = useI18n();
-  const [sub, setSub] = React.useState<"variables" | "monitor">(initialSub ?? "variables");
+  const [sub, setSub] = React.useState<"variables" | "monitor" | "seir">(initialSub ?? "variables");
+  // Onglet SEIR affiché UNIQUEMENT quand la projection est applicable (maladie
+  // transmissible + paramètres extraits) — sondage léger de l'endpoint.
+  const [seirApplicable, setSeirApplicable] = React.useState(false);
+  React.useEffect(() => {
+    let alive = true;
+    fetchSeirProjection(scenarioId).then(p => { if (alive) setSeirApplicable(!!p?.applicable); }).catch(() => {});
+    return () => { alive = false; };
+  }, [scenarioId]);
   const SUB = [
     { key: "variables" as const, label: t("scenarioDetail.variablesModelTab.subData"), icon: <Database size={12} /> },
     { key: "monitor" as const, label: t("scenarioDetail.variablesModelTab.subModel"), icon: <Brain size={12} /> },
+    ...(seirApplicable ? [{ key: "seir" as const, label: t("scenarioDetail.variablesModelTab.subSeir"), icon: <TrendingUp size={12} /> }] : []),
   ];
   return (
     <div className="space-y-4">
@@ -4670,6 +4777,7 @@ function VariablesModelTab({ scenarioId, detail, initialSub }: { scenarioId: str
       </div>
       {sub === "variables" && <VariablesSection detail={detail} scenarioId={scenarioId} onGoToModel={() => setSub("monitor")} />}
       {sub === "monitor" && <ModelMonitorSection scenarioId={scenarioId} />}
+      {sub === "seir" && <SeirModelView scenarioId={scenarioId} />}
     </div>
   );
 }
@@ -5161,11 +5269,8 @@ function ModelMonitorSection({ scenarioId }: { scenarioId: string }) {
         </div>
       </div>
 
-      {/* Projection épidémiologique SEIR paramétrée par la LITTÉRATURE — indépendante du
-          modèle prédictif entraîné (elle ne consomme pas le ML). Rendue ici pour être
-          visible même sans entraînement ; silencieuse hors scénario transmissible ou si
-          aucun paramètre épidémiologique n'a été extrait du corpus. */}
-      <SeirProjectionPanel scenarioId={scenarioId} />
+      {/* La projection SEIR a désormais son propre onglet « SEIR » (modèle, formule,
+          paramètres éditables liés aux articles) — plus de doublon ici. */}
 
       {/* Évolution pilotée par l'évidence (Phase 5) */}
       <div className="rounded-3xl border border-white/10 bg-white/3 p-5 space-y-4">

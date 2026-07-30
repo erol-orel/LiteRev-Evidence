@@ -2387,7 +2387,9 @@ export interface SeirParamValue {
   unit?: string;
   n_studies?: number;
   provenance?: number[];
+  overridden?: boolean;
 }
+export interface SeirOverride { value: number; ci_low?: number | null; ci_high?: number | null; }
 export interface SeirProjection {
   applicable: boolean;
   scenario_id: string;
@@ -2417,6 +2419,8 @@ export interface SeirProjection {
     total_deaths: SeirSummaryBand;
   };
   parameters?: Record<string, SeirParamValue>;
+  effective_parameters?: Record<string, SeirParamValue>;
+  overrides_applied?: Record<string, number>;
 }
 
 export async function fetchSeirProjection(
@@ -2427,6 +2431,24 @@ export async function fetchSeirProjection(
   Object.entries(params).forEach(([k, v]) => { if (v != null) q.set(k, String(v)); });
   const qs = q.toString();
   const r = await safeFetch(`${API_BASE_URL}/scenarios/${scenarioId}/seir/projection${qs ? `?${qs}` : ""}`);
+  if (!r.ok) throw new Error(httpMessage(r.status));
+  return r.json();
+}
+
+// Projection AVEC paramètres modifiés par l'utilisateur (onglet SEIR) — explore des
+// variantes sans altérer les paramètres source extraits de la littérature.
+export async function postSeirProjection(
+  scenarioId: string,
+  body: {
+    days?: number; start_date?: string; population?: number; initial_infected?: number;
+    n_samples?: number; overrides?: Record<string, SeirOverride>;
+  } = {},
+): Promise<SeirProjection> {
+  const r = await safeFetch(`${API_BASE_URL}/scenarios/${scenarioId}/seir/projection`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
   if (!r.ok) throw new Error(httpMessage(r.status));
   return r.json();
 }

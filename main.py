@@ -15146,29 +15146,43 @@ def _scenario_seed(scenario_id: str) -> tuple[float, float, str | None]:
     return pop, i0, geo
 
 
-@app.get("/scenarios/{scenario_id}/seir/projection")
-def get_seir_projection(
-    scenario_id: str,
-    days: int = 365,
-    start_date: str | None = None,
-    population: float | None = None,
-    initial_infected: float | None = None,
-    n_samples: int = 300,
+def _seir_projection_payload(
+    scenario_id: str, days: int = 365, start_date: str | None = None,
+    population: float | None = None, initial_infected: float | None = None,
+    n_samples: int = 300, overrides: dict | None = None,
 ) -> dict[str, Any]:
-    """Projection compartimentale (famille SEIR) d'un scénario, paramétrée par les
-    paramètres épidémiologiques EXTRAITS du corpus (model_spec.epidemic_parameters,
-    Phase 2). Renvoie les séries incidence / prévalence / cumul / décès / R_eff AVEC
-    bandes d'incertitude (IC de l'ensemble) + un résumé (modèle auto-sélectionné, R0,
-    pic, taux d'attaque) et les paramètres source (avec provenance) pour l'affichage et
-    la traçabilité. La population d'exposition + les cas initiaux sont DÉRIVÉS de la
-    géographie du corpus (cf. `_scenario_seed`) sauf override explicite en query.
-    `applicable=false` si le scénario n'est pas une maladie transmissible ou si rien n'a
-    été extrait. Lecture seule, déterministe (seed fixe)."""
+    """Cœur PARTAGÉ de la projection SEIR (GET par défaut + POST avec overrides). Les
+    `overrides` = {nom_param: {value, ci_low?, ci_high?}} remplacent/ajoutent la valeur
+    (± IC) d'un paramètre saisie par l'utilisateur — pour explorer des variantes du
+    modèle. Les paramètres SOURCE (littérature, avec provenance) restent renvoyés à part
+    (`parameters`) ; les paramètres EFFECTIVEMENT simulés (source ⊕ overrides) le sont
+    aussi (`effective_parameters`). Déterministe (seed fixe)."""
     import seir_model
     from datetime import date, timedelta
     spec = _get_model_spec(scenario_id) or {}
     epi = spec.get("epidemic_parameters") or {}
-    dists = seir_model.params_to_distributions((epi.get("params") or {}))
+    src_params = dict(epi.get("params") or {})
+
+    # Overrides utilisateur : coercés numériquement, marqués `overridden` pour l'UI.
+    eff_params = {k: dict(v) for k, v in src_params.items() if isinstance(v, dict)}
+    applied: dict[str, float] = {}
+    for name, ov in (overrides or {}).items():
+        if not isinstance(ov, dict):
+            continue
+        v = seir_model._num_or_none(ov.get("value"))
+        if v is None:
+            continue
+        blk = dict(eff_params.get(name) or {})
+        blk["value"] = v
+        blk["ci_low"] = seir_model._num_or_none(ov.get("ci_low"))
+        blk["ci_high"] = seir_model._num_or_none(ov.get("ci_high"))
+        blk["overridden"] = True
+        blk.setdefault("unit", (src_params.get(name) or {}).get("unit", ""))
+        blk.setdefault("provenance", [])
+        eff_params[name] = blk
+        applied[name] = v
+
+    dists = seir_model.params_to_distributions(eff_params)
     if not dists:
         return {
             "applicable": False,
@@ -15176,8 +15190,6 @@ def get_seir_projection(
             "reason": "Aucun paramètre épidémiologique extrait de la littérature "
                       "(scénario non transmissible, ou paramètres non rapportés).",
         }
-    # Défauts DÉRIVÉS de la géographie du corpus (population d'exposition + cas initiaux)
-    # au lieu d'un 1e6 fixe ; toute valeur explicite passée en query l'emporte.
     _pop_default, _i0_default, _geo_label = _scenario_seed(scenario_id)
     try:
         dists["population"] = float(population) if population is not None else _pop_default
@@ -15213,8 +15225,48 @@ def get_seir_projection(
         "dates": dates,
         "series": {k: ens[k] for k in ("incidence", "prevalence", "cumulative", "deaths", "r_eff")},
         "summary": ens["summary"],
-        "parameters": epi.get("params"),  # avec provenance → traçabilité UI
+        "parameters": src_params,             # littérature (avec provenance) → traçabilité
+        "effective_parameters": eff_params,   # réellement simulés (source ⊕ overrides)
+        "overrides_applied": applied,
     }
+
+
+@app.get("/scenarios/{scenario_id}/seir/projection")
+def get_seir_projection(
+    scenario_id: str,
+    days: int = 365,
+    start_date: str | None = None,
+    population: float | None = None,
+    initial_infected: float | None = None,
+    n_samples: int = 300,
+) -> dict[str, Any]:
+    """Projection compartimentale (famille SEIR) d'un scénario, paramétrée par la
+    littérature EXTRAITE (model_spec.epidemic_parameters). Séries incidence / prévalence
+    / cumul / décès / R_eff AVEC bandes d'incertitude + résumé + paramètres source (avec
+    provenance). Population + cas initiaux DÉRIVÉS de la géographie du scénario sauf
+    override en query. `applicable=false` si non transmissible. Lecture seule."""
+    return _seir_projection_payload(scenario_id, days, start_date, population,
+                                    initial_infected, n_samples, overrides=None)
+
+
+class SeirProjectionIn(BaseModel):
+    days: int = 365
+    start_date: str | None = None
+    population: float | None = None
+    initial_infected: float | None = None
+    n_samples: int = 300
+    # {nom_param: {value, ci_low?, ci_high?}} — valeurs modifiées/ajoutées par l'utilisateur.
+    overrides: dict[str, dict] | None = None
+
+
+@app.post("/scenarios/{scenario_id}/seir/projection")
+def post_seir_projection(scenario_id: str, payload: SeirProjectionIn) -> dict[str, Any]:
+    """Même projection, mais AVEC des paramètres modifiés par l'utilisateur (onglet SEIR) :
+    `overrides` remplace/ajoute value (± IC) par paramètre pour explorer des variantes du
+    modèle, sans altérer les paramètres source extraits de la littérature."""
+    return _seir_projection_payload(
+        scenario_id, payload.days, payload.start_date, payload.population,
+        payload.initial_infected, payload.n_samples, overrides=payload.overrides)
 
 
 @app.get("/scenarios/{scenario_id}/model/data")
