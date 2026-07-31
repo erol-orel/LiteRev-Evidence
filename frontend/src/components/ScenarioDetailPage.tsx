@@ -43,6 +43,7 @@ import {
   getModelTrainStatus,
   getModelMonitor,
   exportModelBundle,
+  exportModelXlsx,
   fetchSeirProjection,
   postSeirProjection,
   postSeirObserved,
@@ -902,8 +903,14 @@ function SeirModelView({ scenarioId }: { scenarioId: string }) {
 
   if (loading && !proj) return <LoadingSpinner text={t("scenarioDetail.seirTab.loading")} />;
   if (!proj || !proj.applicable) {
-    return <div className="rounded-2xl border border-white/8 bg-white/2 px-4 py-6 text-center text-sm text-white/50">
-      {proj?.reason ?? t("scenarioDetail.seirTab.notApplicable")}</div>;
+    return (
+      <div className="rounded-2xl border border-white/8 bg-white/2 px-5 py-10 text-center space-y-2">
+        <TrendingUp size={22} className="mx-auto text-white/25" />
+        <p className="text-sm font-medium text-white/70">{t("scenarioDetail.seirTab.notApplicableTitle")}</p>
+        <p className="text-[12px] text-white/45 max-w-md mx-auto leading-relaxed">
+          {proj?.reason ?? t("scenarioDetail.seirTab.notApplicable")}</p>
+      </div>
+    );
   }
 
   const model = proj.model ?? "SEIR";
@@ -5005,19 +5012,14 @@ function VizTab({ scenarioId }: { scenarioId: string }) {
 /** VariablesModelTab : Variables & Données + Modèle prédictif (sous-tabs) */
 function VariablesModelTab({ scenarioId, detail, initialSub }: { scenarioId: string; detail: ScenarioDetail; initialSub?: "variables" | "monitor" }) {
   const { t } = useI18n();
-  const [sub, setSub] = React.useState<"variables" | "monitor" | "seir">(initialSub ?? "variables");
-  // Onglet SEIR affiché UNIQUEMENT quand la projection est applicable (maladie
-  // transmissible + paramètres extraits) — sondage léger de l'endpoint.
-  const [seirApplicable, setSeirApplicable] = React.useState(false);
-  React.useEffect(() => {
-    let alive = true;
-    fetchSeirProjection(scenarioId).then(p => { if (alive) setSeirApplicable(!!p?.applicable); }).catch(() => {});
-    return () => { alive = false; };
-  }, [scenarioId]);
+  const [sub, setSub] = React.useState<"variables" | "monitor" | "seir">(initialSub ?? "seir");
+  // Onglet SEIR TOUJOURS affiché et en PREMIER. Quand la projection n'est pas applicable
+  // (maladie non transmissible / aucune variable dérivable par SEIR), SeirModelView
+  // l'énonce clairement plutôt que de masquer l'onglet.
   const SUB = [
+    { key: "seir" as const, label: t("scenarioDetail.variablesModelTab.subSeir"), icon: <TrendingUp size={12} /> },
     { key: "variables" as const, label: t("scenarioDetail.variablesModelTab.subData"), icon: <Database size={12} /> },
     { key: "monitor" as const, label: t("scenarioDetail.variablesModelTab.subModel"), icon: <Brain size={12} /> },
-    ...(seirApplicable ? [{ key: "seir" as const, label: t("scenarioDetail.variablesModelTab.subSeir"), icon: <TrendingUp size={12} /> }] : []),
   ];
   return (
     <div className="space-y-4">
@@ -5053,17 +5055,27 @@ function ModelDashboard({ scenarioId, run, monitor, spec }: { scenarioId: string
   const locale = lang === "fr" ? "fr-FR" : "en-US";
   const fmtDate = (d?: string | null) => (d ? new Date(d).toLocaleString(locale, { dateStyle: "medium", timeStyle: "short" }) : "—");
   const [exporting, setExporting] = useState(false);
+  const [exportingXlsx, setExportingXlsx] = useState(false);
+  const _download = (blob: Blob, name: string) => {
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url; a.download = name; a.click();
+    URL.revokeObjectURL(url);
+  };
   const doExport = async () => {
     setExporting(true);
     try {
       const bundle = await exportModelBundle(scenarioId);
-      const blob = new Blob([JSON.stringify(bundle, null, 2)], { type: "application/json" });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url; a.download = `model_${scenarioId}.json`; a.click();
-      URL.revokeObjectURL(url);
+      _download(new Blob([JSON.stringify(bundle, null, 2)], { type: "application/json" }), `model_${scenarioId}.json`);
     } catch { /* silencieux : l'export ne doit jamais casser la page */ }
     finally { setExporting(false); }
+  };
+  const doExportXlsx = async () => {
+    setExportingXlsx(true);
+    try {
+      _download(await exportModelXlsx(scenarioId), `model_${scenarioId}.xlsx`);
+    } catch { /* silencieux */ }
+    finally { setExportingXlsx(false); }
   };
 
   const sc: DashStatus = (monitor?.status_color as DashStatus) in _DASH_STATUS ? (monitor!.status_color as DashStatus) : "unavailable";
@@ -5100,6 +5112,11 @@ function ModelDashboard({ scenarioId, run, monitor, spec }: { scenarioId: string
         <SectionHeader icon={<Activity size={14} className="text-brand-400" />}
           title={t("scenarioDetail.model.dashboard.title")} subtitle={outcomeName} />
         <div className="flex items-center gap-2 shrink-0">
+          <button type="button" onClick={doExportXlsx} disabled={exportingXlsx}
+            title={t("scenarioDetail.model.dashboard.exportExcelTip")}
+            className="flex items-center gap-1.5 rounded-full border border-emerald-500/25 text-emerald-300/80 px-2.5 py-1 text-[10px] font-semibold hover:bg-emerald-500/10 hover:text-emerald-200 transition disabled:opacity-50">
+            {exportingXlsx ? <Loader2 size={11} className="animate-spin" /> : <Table2 size={11} />}{t("scenarioDetail.model.dashboard.exportExcel")}
+          </button>
           <button type="button" onClick={doExport} disabled={exporting}
             title={t("scenarioDetail.model.dashboard.exportTip")}
             className="flex items-center gap-1.5 rounded-full border border-white/15 text-white/60 px-2.5 py-1 text-[10px] font-semibold hover:bg-white/5 hover:text-white transition disabled:opacity-50">

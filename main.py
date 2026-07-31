@@ -16051,6 +16051,28 @@ def export_model_bundle(scenario_id: str, include_data: bool = True,
     }
 
 
+@app.get("/scenarios/{scenario_id}/model/export.xlsx")
+def export_model_xlsx(scenario_id: str, _: None = Depends(require_api_key)):
+    """Même contenu que /model/export, mais en CLASSEUR EXCEL (.xlsx) : une feuille
+    Variables (cible + chaque variable, avec provenance), une feuille Dataset (toutes
+    les VALEURS des variables + l'issue, une ligne par observation) et une feuille
+    Model runs (métriques + hyperparamètres). Bouton « Excel » du tableau de bord.
+    Authentifié (expose le schéma/les données du scénario)."""
+    from fastapi.responses import StreamingResponse
+    import io
+    import model_export
+    bundle = export_model_bundle(scenario_id, include_data=True, _=None)
+    try:
+        data = model_export.build_model_xlsx(bundle)
+    except ModuleNotFoundError:
+        raise HTTPException(status_code=501, detail="Export Excel indisponible (openpyxl absent).")
+    return StreamingResponse(
+        io.BytesIO(data),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="model_{scenario_id}.xlsx"'},
+    )
+
+
 @app.get("/scenarios/{scenario_id}/model/monitor")
 def monitor_scenario_model(scenario_id: str, window: int = 7) -> dict[str, Any]:
     """
