@@ -14025,6 +14025,8 @@ def _ensure_spec_proposal_columns():
         conn.execute(text("ALTER TABLE scenario_settings ADD COLUMN IF NOT EXISTS clustering_generated_at TIMESTAMP"))
         conn.execute(text("ALTER TABLE scenario_settings ADD COLUMN IF NOT EXISTS knowledge_graph_json JSONB"))
         conn.execute(text("ALTER TABLE scenario_settings ADD COLUMN IF NOT EXISTS kg_generated_at TIMESTAMP"))
+        # Série OBSERVÉE (réelle) attachée au modèle SEIR pour superposition + calibration.
+        conn.execute(text("ALTER TABLE scenario_settings ADD COLUMN IF NOT EXISTS seir_observed_json JSONB"))
     logger.info("Colonnes de proposition de spec vérifiées/créées.")
 
 
@@ -15157,6 +15159,52 @@ def _scenario_seed(scenario_id: str) -> tuple[float, float, str | None]:
     return pop, i0, geo
 
 
+def _get_seir_observed(scenario_id: str) -> dict | None:
+    """Série observée (réelle) attachée au SEIR d'un scénario, ou None."""
+    with engine.connect() as conn:
+        row = conn.execute(text(
+            "SELECT seir_observed_json FROM scenario_settings WHERE scenario_id = :sid"
+        ), {"sid": scenario_id}).mappings().first()
+    if row and row["seir_observed_json"]:
+        return dict(row["seir_observed_json"])
+    return None
+
+
+def _store_seir_observed(scenario_id: str, obj: dict | None) -> None:
+    """Écrit (ou efface si obj=None) la série observée attachée au SEIR du scénario."""
+    with engine.begin() as conn:
+        conn.execute(text("""
+            INSERT INTO scenario_settings (scenario_id, seir_observed_json, updated_at)
+            VALUES (:sid, CAST(:obj AS jsonb), NOW())
+            ON CONFLICT (scenario_id) DO UPDATE
+                SET seir_observed_json = CAST(:obj AS jsonb), updated_at = NOW()
+        """), {"sid": scenario_id, "obj": json.dumps(obj) if obj is not None else None})
+
+
+def _seir_observed_overlay(scenario_id: str, eff_params: dict, pop: float, i0: float,
+                           days: int) -> dict | None:
+    """Prépare la superposition de la série observée sur la projection courante :
+    ré-exprimée en UNITÉS MODÈLE (échelle par moindres carrés) + R² d'ajustement au
+    modèle courant. Best-effort → None si rien d'attaché ou en cas d'erreur."""
+    import seir_model
+    obs = _get_seir_observed(scenario_id)
+    if not obs or not obs.get("points"):
+        return None
+    base = {k: seir_model._num_or_none(v.get("value"))
+            for k, v in (eff_params or {}).items() if isinstance(v, dict)}
+    base = {k: val for k, val in base.items() if val is not None}
+    base["population"], base["initial_infected"] = pop, i0
+    al = seir_model.align_observed(obs["points"])
+    col = obs.get("column") or "incidence"
+    sc = seir_model.scale_observed_to_model(al["points"], base, col, days=days)
+    return {
+        "column": col, "label": obs.get("label"), "source": obs.get("source"),
+        "n": al["n"], "start_date": al["start_date"],
+        "scale": sc.get("scale"), "fit_r2": sc.get("r2"), "shift_days": sc.get("shift_days"),
+        "points": sc.get("points", []),      # [{day, value}] en unités modèle, au jour aligné
+    }
+
+
 def _seir_projection_payload(
     scenario_id: str, days: int = 365, start_date: str | None = None,
     population: float | None = None, initial_infected: float | None = None,
@@ -15224,6 +15272,12 @@ def _seir_projection_payload(
     dates = [((d0 + timedelta(days=int(_day))).isoformat() if d0 else int(_day))
              for _day in ens["days"]]
 
+    try:
+        observed = _seir_observed_overlay(scenario_id, eff_params, dists["population"],
+                                          dists["initial_infected"], days)
+    except Exception:
+        observed = None
+
     return {
         "applicable": True,
         "scenario_id": scenario_id,
@@ -15240,6 +15294,7 @@ def _seir_projection_payload(
         "parameters": src_params,             # littérature (avec provenance) → traçabilité
         "effective_parameters": eff_params,   # réellement simulés (source ⊕ overrides)
         "overrides_applied": applied,
+        "observed": observed,                 # série réelle superposée (ou None)
     }
 
 
@@ -15279,6 +15334,101 @@ def post_seir_projection(scenario_id: str, payload: SeirProjectionIn) -> dict[st
     return _seir_projection_payload(
         scenario_id, payload.days, payload.start_date, payload.population,
         payload.initial_infected, payload.n_samples, overrides=payload.overrides)
+
+
+class SeirObservedIn(BaseModel):
+    points: list[dict] | None = None          # [{date|day, value}] (upload direct)
+    connector_id: str | None = None           # ou tirage d'un connecteur (ex. foph-sentinella-ili)
+    connector_variable: str | None = None
+    region: str | None = None
+    start_date: str | None = None
+    end_date: str | None = None
+    column: str = "incidence"                 # série modèle à comparer (incidence/prevalence/…)
+    label: str | None = None
+
+
+@app.post("/scenarios/{scenario_id}/seir/observed")
+def post_seir_observed(scenario_id: str, payload: SeirObservedIn) -> dict[str, Any]:
+    """Attache une série OBSERVÉE (réelle) au SEIR — upload de points {date|jour, valeur}
+    OU tirage d'un connecteur — pour la superposer au graphe et calibrer le modèle dessus.
+    Stockée par scénario (scenario_settings.seir_observed_json). Au moins 3 points."""
+    import seir_model, data_connectors
+    pts: list[dict] = []
+    source, label = "upload", payload.label
+    if payload.connector_id and payload.connector_variable:
+        prm = {k: v for k, v in {"region": payload.region, "start_date": payload.start_date,
+                                 "end_date": payload.end_date}.items() if v is not None}
+        try:
+            rows = data_connectors.fetch_series(payload.connector_id, prm)
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"connecteur: {e}")
+        for r in rows:
+            v = seir_model._num_or_none(r.get(payload.connector_variable))
+            if v is not None and r.get("date"):
+                pts.append({"date": r["date"], "value": v})
+        source = payload.connector_id
+        label = label or f"{payload.connector_id}:{payload.connector_variable}"
+    else:
+        for p in (payload.points or []):
+            if not isinstance(p, dict):
+                continue
+            v = seir_model._num_or_none(p.get("value"))
+            d = p.get("date", p.get("day"))
+            if v is not None and d is not None:
+                pts.append({"date": d, "value": v})
+    if len(pts) < 3:
+        raise HTTPException(status_code=400,
+                            detail="Au moins 3 points observés (date/jour + valeur) sont requis.")
+    col = payload.column if payload.column in ("incidence", "prevalence", "cumulative", "deaths") else "incidence"
+    _store_seir_observed(scenario_id, {"points": pts, "column": col, "label": label, "source": source})
+    al = seir_model.align_observed(pts)
+    return {"ok": True, "n": len(pts), "column": col, "source": source,
+            "label": label, "start_date": al["start_date"]}
+
+
+@app.delete("/scenarios/{scenario_id}/seir/observed")
+def delete_seir_observed(scenario_id: str) -> dict[str, Any]:
+    """Détache la série observée du SEIR du scénario."""
+    _store_seir_observed(scenario_id, None)
+    return {"ok": True}
+
+
+class SeirCalibrateIn(BaseModel):
+    column: str | None = None
+    overrides: dict[str, dict] | None = None   # mêmes overrides que la projection (facultatif)
+    days: int = 365
+
+
+@app.post("/scenarios/{scenario_id}/seir/calibrate")
+def post_seir_calibrate(scenario_id: str, payload: SeirCalibrateIn) -> dict[str, Any]:
+    """Calibre R0 (+ un facteur d'échelle d'amplitude) du SEIR sur la série observée
+    attachée, par moindres carrés. Renvoie le R0 AJUSTÉ vs le R0 LITTÉRATURE + R²/RMSE.
+    N'altère PAS le spec : l'UI applique le R0 ajusté comme override si l'utilisateur le
+    souhaite (traçabilité littérature ↔ ajusté préservée)."""
+    import seir_model
+    obs = _get_seir_observed(scenario_id)
+    if not obs or not obs.get("points"):
+        raise HTTPException(status_code=400, detail="Aucune série observée attachée à ce scénario.")
+    spec = _get_model_spec(scenario_id) or {}
+    epi = spec.get("epidemic_parameters") or {}
+    eff = {k: dict(v) for k, v in (epi.get("params") or {}).items() if isinstance(v, dict)}
+    for name, ov in (payload.overrides or {}).items():
+        if isinstance(ov, dict):
+            v = seir_model._num_or_none(ov.get("value"))
+            if v is not None:
+                eff.setdefault(name, {})["value"] = v
+    base = {k: seir_model._num_or_none(v.get("value")) for k, v in eff.items() if isinstance(v, dict)}
+    base = {k: val for k, val in base.items() if val is not None}
+    pop, i0, _ = _scenario_seed(scenario_id)
+    base.setdefault("population", pop)
+    base.setdefault("initial_infected", i0)
+    col = payload.column or obs.get("column") or "incidence"
+    al = seir_model.align_observed(obs["points"])
+    fit = seir_model.calibrate_to_observed(al["points"], base, column=col, days=payload.days)
+    if not fit.get("ok"):
+        raise HTTPException(status_code=400, detail=fit.get("reason", "calibration impossible"))
+    fit["literature_r0"] = base.get("r0")
+    return fit
 
 
 @app.get("/scenarios/{scenario_id}/model/data")

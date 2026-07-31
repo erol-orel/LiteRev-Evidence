@@ -539,3 +539,46 @@ def test_ensemble_aggregates_compartments():
     for key in ("susceptible", "exposed", "recovered"):
         b = ens[key]
         assert all(b["lower"][t] <= b["median"][t] <= b["upper"][t] for t in range(len(b["median"])))
+
+
+# ── calibration to an observed series + overlay scaling ──────────────────────
+def _synthetic_observed(r0, col, scale, days_range):
+    truth = sm.simulate(sm.SeirParams(r0=r0, infectious_period_days=6, incubation_period_days=3,
+                                      population=1_000_000, initial_infected=20), days=200)
+    return [(d, truth[col][d] * scale) for d in days_range], truth
+
+
+def test_calibrate_recovers_r0_despite_unit_scale():
+    obs, _ = _synthetic_observed(2.7, "incidence", 0.0003, range(12, 130, 5))
+    base = {"infectious_period_days": 6, "incubation_period_days": 3,
+            "population": 1_000_000, "initial_infected": 20}
+    fit = sm.calibrate_to_observed(obs, base, column="incidence", days=200)
+    assert fit["ok"] and abs(fit["fitted_r0"] - 2.7) < 0.15
+    assert fit["r2"] > 0.98
+    assert abs(fit["scale"] - 0.0003) / 0.0003 < 0.1     # amplitude scale recovered
+
+
+def test_calibrate_needs_enough_points():
+    r = sm.calibrate_to_observed([(1, 2.0), (2, 3.0)], {"population": 1e6})
+    assert r["ok"] is False and r["n_points"] == 2
+
+
+def test_align_observed_dates_to_day_offsets():
+    a = sm.align_observed([{"date": "2023-02-01", "value": 3},
+                           {"date": "2023-01-25", "value": 1},
+                           {"date": "2023-02-08", "value": 9}])
+    assert a["start_date"] == "2023-01-25"
+    assert a["points"] == [(0.0, 1.0), (7.0, 3.0), (14.0, 9.0)]
+    # numeric days pass through, junk dropped
+    b = sm.align_observed([{"day": 2, "value": 5}, {"day": 0, "value": 1}, {"date": "x", "value": 9}])
+    assert b["points"] == [(0.0, 1.0), (2.0, 5.0)]
+
+
+def test_scale_observed_into_model_units():
+    obs, truth = _synthetic_observed(2.5, "incidence", 0.002, range(20, 120, 7))
+    base = {"r0": 2.5, "infectious_period_days": 6, "incubation_period_days": 3,
+            "population": 1_000_000, "initial_infected": 20}
+    s = sm.scale_observed_to_model(obs, base, "incidence", days=180)
+    assert abs(s["scale"] - 0.002) / 0.002 < 0.05 and s["r2"] > 0.99
+    d0 = int(s["points"][0]["day"])
+    assert abs(s["points"][0]["value"] - truth["incidence"][d0]) / truth["incidence"][d0] < 0.05
