@@ -1124,6 +1124,7 @@ export const fr = {
       seriesVaccinated: "Vaccinés",
       seriesQuarantined: "Isolés",
       r0: "R₀",
+      peakPrevalence: "Pic d'infectieux",
       peakDay: "Jour du pic",
       attackRate: "Taux d'attaque",
       deaths: "Décès totaux",

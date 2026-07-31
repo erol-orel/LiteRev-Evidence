@@ -1126,6 +1126,7 @@ export const en: Translations = {
       seriesVaccinated: "Vaccinated",
       seriesQuarantined: "Isolated",
       r0: "R₀",
+      peakPrevalence: "Peak infectious",
       peakDay: "Peak day",
       attackRate: "Attack rate",
       deaths: "Total deaths",

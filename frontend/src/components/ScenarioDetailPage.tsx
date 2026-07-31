@@ -777,16 +777,30 @@ function _seirEquations(model: string): { compartments: string; eqs: string[] } 
   return { compartments, eqs };
 }
 
-function SeirBandChart({ band, dates, color, lang }: { band: SeirBand; dates: (string | number)[]; color: string; lang: string }) {
+// Format a magnitude compactly for a chart axis (1.2M, 340k, 4.5, 0).
+function _fmtCompact(v: number): string {
+  const a = Math.abs(v);
+  if (a >= 1e9) return `${(v / 1e9).toFixed(a >= 1e10 ? 0 : 1)}B`;
+  if (a >= 1e6) return `${(v / 1e6).toFixed(a >= 1e7 ? 0 : 1)}M`;
+  if (a >= 1e3) return `${(v / 1e3).toFixed(a >= 1e4 ? 0 : 1)}k`;
+  if (a >= 10) return v.toFixed(0);
+  if (a >= 1) return v.toFixed(1);
+  return v === 0 ? "0" : v.toFixed(2);
+}
+
+function SeirBandChart({ band, dates, color, lang, yUnit }: {
+  band: SeirBand; dates: (string | number)[]; color: string; lang: string; yUnit?: string;
+}) {
   const median = (band?.median ?? []).map(Number);
   const lower = (band?.lower ?? []).map(Number);
   const upper = (band?.upper ?? []).map(Number);
   const N = median.length;
   if (N < 2) return null;
-  const W = 640, H = 200, padL = 8, padR = 8, padT = 10, padB = 22;
+  const W = 680, H = 240, padL = 50, padR = 14, padT = 14, padB = 30;
   const allY = [...median, ...lower, ...upper].filter(v => Number.isFinite(v));
-  const yMin = Math.min(...allY), yMax = Math.max(...allY);
-  const yPad = (yMax - yMin) * 0.08 || 1; const y0 = yMin - yPad, y1 = yMax + yPad;
+  const dataMax = Math.max(...allY), dataMin = Math.min(...allY);
+  const y0 = Math.min(0, dataMin);                                     // baseline at 0 (épidémio)
+  const y1 = dataMax > y0 ? dataMax + (dataMax - y0) * 0.08 : y0 + 1;
   const xAt = (i: number) => padL + (i / Math.max(1, N - 1)) * (W - padL - padR);
   const yAt = (v: number) => padT + (1 - (v - y0) / Math.max(1e-9, y1 - y0)) * (H - padT - padB);
   const linePath = (vals: number[]) => vals.map((v, k) => `${k === 0 ? "M" : "L"}${xAt(k).toFixed(1)},${yAt(v).toFixed(1)}`).join(" ");
@@ -794,21 +808,46 @@ function SeirBandChart({ band, dates, color, lang }: { band: SeirBand; dates: (s
     ? [...upper.map((v, k) => `${xAt(k).toFixed(1)},${yAt(v).toFixed(1)}`),
        ...Array.from({ length: N }, (_u, k) => { const j = N - 1 - k; return `${xAt(j).toFixed(1)},${yAt(lower[j]).toFixed(1)}`; })].join(" ")
     : "";
-  const fmtDate = (d: string | number | undefined) => {
+  const fmtX = (d: string | number | undefined) => {
     if (d == null) return "";
-    if (typeof d === "number") return `J+${d}`;
+    if (typeof d === "number") return `${lang === "fr" ? "J" : "D"}${d}`;   // jour/day depuis le début
     const dt = new Date(d); return isNaN(dt.getTime()) ? String(d) : dt.toLocaleDateString(lang === "fr" ? "fr-FR" : "en-US", { month: "short", day: "numeric" });
   };
+  const yTicks = [0, 0.25, 0.5, 0.75, 1].map(f => y0 + f * (y1 - y0));
+  const nX = Math.min(6, N);
+  const xTicks = Array.from({ length: nX }, (_v, i) => Math.round((i * (N - 1)) / (nX - 1)));
+  const peakI = median.reduce((bi, v, i) => (v > median[bi] ? i : bi), 0);   // pic de la médiane
+  const xAxisLabel = typeof dates[0] === "number"
+    ? (lang === "fr" ? "Jours depuis le début" : "Days from start")
+    : (lang === "fr" ? "Date" : "Date");
   return (
-    <>
-      <svg viewBox={`0 0 ${W} ${H}`} className="mt-2 w-full" style={{ height: "auto" }} preserveAspectRatio="none">
-        {bandPts && <polygon points={bandPts} fill={`${color}22`} stroke="none" />}
-        <path d={linePath(median)} fill="none" stroke={color} strokeWidth={1.6} />
-      </svg>
-      <div className="flex items-center justify-between text-[9px] text-white/30 font-mono">
-        <span>{fmtDate(dates[0])}</span><span>{fmtDate(dates[Math.floor(dates.length / 2)])}</span><span>{fmtDate(dates[dates.length - 1])}</span>
-      </div>
-    </>
+    <svg viewBox={`0 0 ${W} ${H}`} className="mt-2 w-full text-white/70" style={{ height: "auto" }} role="img" aria-label="SEIR projection">
+      {/* y gridlines + value labels */}
+      {yTicks.map((v, i) => (
+        <g key={`y${i}`}>
+          <line x1={padL} x2={W - padR} y1={yAt(v)} y2={yAt(v)} stroke="currentColor" strokeOpacity={0.1} strokeWidth={0.5} />
+          <text x={padL - 6} y={yAt(v) + 3} textAnchor="end" fontSize={9} fill="currentColor" fillOpacity={0.6} fontFamily="monospace">{_fmtCompact(v)}</text>
+        </g>
+      ))}
+      {yUnit && <text x={12} y={padT + (H - padT - padB) / 2} textAnchor="middle" fontSize={8.5} fill="currentColor" fillOpacity={0.45}
+        transform={`rotate(-90 12 ${padT + (H - padT - padB) / 2})`}>{yUnit}</text>}
+      {/* x axis line + ticks + labels */}
+      <line x1={padL} x2={W - padR} y1={H - padB} y2={H - padB} stroke="currentColor" strokeOpacity={0.3} strokeWidth={0.6} />
+      {xTicks.map((i, k) => (
+        <g key={`x${k}`}>
+          <line x1={xAt(i)} x2={xAt(i)} y1={H - padB} y2={H - padB + 4} stroke="currentColor" strokeOpacity={0.4} strokeWidth={0.6} />
+          <text x={xAt(i)} y={H - padB + 16} textAnchor="middle" fontSize={9} fill="currentColor" fillOpacity={0.65} fontFamily="monospace">{fmtX(dates[i])}</text>
+        </g>
+      ))}
+      <text x={padL + (W - padL - padR) / 2} y={H - 2} textAnchor="middle" fontSize={8.5} fill="currentColor" fillOpacity={0.4}>{xAxisLabel}</text>
+      {/* uncertainty band + median line */}
+      {bandPts && <polygon points={bandPts} fill={color} fillOpacity={0.16} stroke="none" />}
+      <path d={linePath(median)} fill="none" stroke={color} strokeWidth={1.8} />
+      {/* peak marker (median), labelled with its day/date */}
+      <circle cx={xAt(peakI)} cy={yAt(median[peakI])} r={2.6} fill={color} />
+      <text x={Math.min(Math.max(xAt(peakI), padL + 16), W - padR - 16)} y={yAt(median[peakI]) - 6}
+        textAnchor="middle" fontSize={8.5} fill={color} fontFamily="monospace">{fmtX(dates[peakI])}</text>
+    </svg>
   );
 }
 
@@ -871,6 +910,12 @@ function SeirModelView({ scenarioId }: { scenarioId: string }) {
     cumulative: t("scenarioDetail.seir.seriesCumulative"), deaths: t("scenarioDetail.seir.seriesDeaths"),
     vaccinated: t("scenarioDetail.seir.seriesVaccinated"), quarantined: t("scenarioDetail.seir.seriesQuarantined"),
   };
+  const perDay = lang === "fr" ? "personnes/j" : "people/day";
+  const people = lang === "fr" ? "personnes" : "people";
+  const seriesUnit: Record<SeirSeriesKey, string> = {
+    incidence: perDay, prevalence: people, cumulative: people, deaths: people,
+    vaccinated: people, quarantined: people,
+  };
   // Séries de base + celles des compartiments V/Q seulement si le modèle les possède.
   const availableSeries: SeirSeriesKey[] = [..._SEIR_SERIES, ..._SEIR_SERIES_OPT.filter(k => proj.series?.[k])];
   const activeSeries: SeirSeriesKey = availableSeries.includes(series) ? series : "incidence";
@@ -913,11 +958,11 @@ function SeirModelView({ scenarioId }: { scenarioId: string }) {
               className={`rounded-full px-2 py-0.5 text-[10px] border transition ${activeSeries === k ? "border-white/30 bg-white/10 text-white" : "border-white/10 text-white/50 hover:bg-white/5"}`}>{seriesLabel[k]}</button>
           ))}
         </div>
-        {band && <SeirBandChart band={band} dates={proj.dates ?? []} color={_SEIR_COLOR[activeSeries]} lang={lang} />}
+        {band && <SeirBandChart band={band} dates={proj.dates ?? []} color={_SEIR_COLOR[activeSeries]} lang={lang} yUnit={seriesUnit[activeSeries]} />}
         {sm && (
           <div className="mt-2 grid grid-cols-2 sm:grid-cols-4 gap-2 text-[10px]">
-            <div><div className="text-white/40">{t("scenarioDetail.seir.r0")}</div><div className="font-mono text-white/80">{sm.r0.median} [{sm.r0.lower}–{sm.r0.upper}]</div></div>
-            <div><div className="text-white/40">{t("scenarioDetail.seir.peakDay")}</div><div className="font-mono text-white/80">{sm.peak_prevalence_day.median}</div></div>
+            <div><div className="text-white/40">{t("scenarioDetail.seir.peakPrevalence")}</div><div className="font-mono text-white/80">{fmtPop(sm.peak_prevalence.median)}</div></div>
+            <div><div className="text-white/40">{t("scenarioDetail.seir.peakDay")}</div><div className="font-mono text-white/80">{lang === "fr" ? "J" : "D"}{sm.peak_prevalence_day.median}</div></div>
             <div><div className="text-white/40">{t("scenarioDetail.seir.attackRate")}</div><div className="font-mono text-white/80">{(sm.attack_rate.median * 100).toFixed(1)}%</div></div>
             <div><div className="text-white/40">{t("scenarioDetail.seir.deaths")}</div><div className="font-mono text-white/80">{sm.total_deaths.median}</div></div>
             {sm.total_vaccinated && sm.total_vaccinated.median > 0 && (
