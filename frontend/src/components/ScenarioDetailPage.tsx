@@ -9,7 +9,7 @@ import {
   Globe, Upload, CheckCircle2, AlertCircle, Info,
   Microscope, Loader2, Download, Table2, BookOpen,
   Network, Bell, Users, Rss, Sparkles, ClipboardList,
-  TrendingUp, X, Plus, Sliders, Activity
+  TrendingUp, X, Plus, Sliders, Activity, Target
 } from "lucide-react";
 import {
   fetchScenarioDetail,
@@ -45,10 +45,14 @@ import {
   exportModelBundle,
   fetchSeirProjection,
   postSeirProjection,
+  postSeirObserved,
+  deleteSeirObserved,
+  calibrateSeir,
   type SeirProjection,
   type SeirBand,
   type SeirParamValue,
   type SeirOverride,
+  type SeirCalibration,
   proposeSpec,
   getSpecProposal,
   validateSpecProposal,
@@ -777,16 +781,32 @@ function _seirEquations(model: string): { compartments: string; eqs: string[] } 
   return { compartments, eqs };
 }
 
-function SeirBandChart({ band, dates, color, lang }: { band: SeirBand; dates: (string | number)[]; color: string; lang: string }) {
+// Format a magnitude compactly for a chart axis (1.2M, 340k, 4.5, 0).
+function _fmtCompact(v: number): string {
+  const a = Math.abs(v);
+  if (a >= 1e9) return `${(v / 1e9).toFixed(a >= 1e10 ? 0 : 1)}B`;
+  if (a >= 1e6) return `${(v / 1e6).toFixed(a >= 1e7 ? 0 : 1)}M`;
+  if (a >= 1e3) return `${(v / 1e3).toFixed(a >= 1e4 ? 0 : 1)}k`;
+  if (a >= 10) return v.toFixed(0);
+  if (a >= 1) return v.toFixed(1);
+  return v === 0 ? "0" : v.toFixed(2);
+}
+
+function SeirBandChart({ band, dates, color, lang, yUnit, observed, observedColor }: {
+  band: SeirBand; dates: (string | number)[]; color: string; lang: string; yUnit?: string;
+  observed?: { day: number; value: number }[]; observedColor?: string;
+}) {
   const median = (band?.median ?? []).map(Number);
   const lower = (band?.lower ?? []).map(Number);
   const upper = (band?.upper ?? []).map(Number);
   const N = median.length;
   if (N < 2) return null;
-  const W = 640, H = 200, padL = 8, padR = 8, padT = 10, padB = 22;
-  const allY = [...median, ...lower, ...upper].filter(v => Number.isFinite(v));
-  const yMin = Math.min(...allY), yMax = Math.max(...allY);
-  const yPad = (yMax - yMin) * 0.08 || 1; const y0 = yMin - yPad, y1 = yMax + yPad;
+  const W = 680, H = 240, padL = 50, padR = 14, padT = 14, padB = 30;
+  const obs = (observed ?? []).filter(p => Number.isFinite(p.value) && p.day >= 0 && p.day <= N - 1);
+  const allY = [...median, ...lower, ...upper, ...obs.map(p => p.value)].filter(v => Number.isFinite(v));
+  const dataMax = Math.max(...allY), dataMin = Math.min(...allY);
+  const y0 = Math.min(0, dataMin);                                     // baseline at 0 (épidémio)
+  const y1 = dataMax > y0 ? dataMax + (dataMax - y0) * 0.08 : y0 + 1;
   const xAt = (i: number) => padL + (i / Math.max(1, N - 1)) * (W - padL - padR);
   const yAt = (v: number) => padT + (1 - (v - y0) / Math.max(1e-9, y1 - y0)) * (H - padT - padB);
   const linePath = (vals: number[]) => vals.map((v, k) => `${k === 0 ? "M" : "L"}${xAt(k).toFixed(1)},${yAt(v).toFixed(1)}`).join(" ");
@@ -794,21 +814,52 @@ function SeirBandChart({ band, dates, color, lang }: { band: SeirBand; dates: (s
     ? [...upper.map((v, k) => `${xAt(k).toFixed(1)},${yAt(v).toFixed(1)}`),
        ...Array.from({ length: N }, (_u, k) => { const j = N - 1 - k; return `${xAt(j).toFixed(1)},${yAt(lower[j]).toFixed(1)}`; })].join(" ")
     : "";
-  const fmtDate = (d: string | number | undefined) => {
+  const fmtX = (d: string | number | undefined) => {
     if (d == null) return "";
-    if (typeof d === "number") return `J+${d}`;
+    if (typeof d === "number") return `${lang === "fr" ? "J" : "D"}${d}`;   // jour/day depuis le début
     const dt = new Date(d); return isNaN(dt.getTime()) ? String(d) : dt.toLocaleDateString(lang === "fr" ? "fr-FR" : "en-US", { month: "short", day: "numeric" });
   };
+  const yTicks = [0, 0.25, 0.5, 0.75, 1].map(f => y0 + f * (y1 - y0));
+  const nX = Math.min(6, N);
+  const xTicks = Array.from({ length: nX }, (_v, i) => Math.round((i * (N - 1)) / (nX - 1)));
+  const peakI = median.reduce((bi, v, i) => (v > median[bi] ? i : bi), 0);   // pic de la médiane
+  const xAxisLabel = typeof dates[0] === "number"
+    ? (lang === "fr" ? "Jours depuis le début" : "Days from start")
+    : (lang === "fr" ? "Date" : "Date");
   return (
-    <>
-      <svg viewBox={`0 0 ${W} ${H}`} className="mt-2 w-full" style={{ height: "auto" }} preserveAspectRatio="none">
-        {bandPts && <polygon points={bandPts} fill={`${color}22`} stroke="none" />}
-        <path d={linePath(median)} fill="none" stroke={color} strokeWidth={1.6} />
-      </svg>
-      <div className="flex items-center justify-between text-[9px] text-white/30 font-mono">
-        <span>{fmtDate(dates[0])}</span><span>{fmtDate(dates[Math.floor(dates.length / 2)])}</span><span>{fmtDate(dates[dates.length - 1])}</span>
-      </div>
-    </>
+    <svg viewBox={`0 0 ${W} ${H}`} className="mt-2 w-full text-white/70" style={{ height: "auto" }} role="img" aria-label="SEIR projection">
+      {/* y gridlines + value labels */}
+      {yTicks.map((v, i) => (
+        <g key={`y${i}`}>
+          <line x1={padL} x2={W - padR} y1={yAt(v)} y2={yAt(v)} stroke="currentColor" strokeOpacity={0.1} strokeWidth={0.5} />
+          <text x={padL - 6} y={yAt(v) + 3} textAnchor="end" fontSize={9} fill="currentColor" fillOpacity={0.6} fontFamily="monospace">{_fmtCompact(v)}</text>
+        </g>
+      ))}
+      {yUnit && <text x={12} y={padT + (H - padT - padB) / 2} textAnchor="middle" fontSize={8.5} fill="currentColor" fillOpacity={0.45}
+        transform={`rotate(-90 12 ${padT + (H - padT - padB) / 2})`}>{yUnit}</text>}
+      {/* x axis line + ticks + labels */}
+      <line x1={padL} x2={W - padR} y1={H - padB} y2={H - padB} stroke="currentColor" strokeOpacity={0.3} strokeWidth={0.6} />
+      {xTicks.map((i, k) => (
+        <g key={`x${k}`}>
+          <line x1={xAt(i)} x2={xAt(i)} y1={H - padB} y2={H - padB + 4} stroke="currentColor" strokeOpacity={0.4} strokeWidth={0.6} />
+          <text x={xAt(i)} y={H - padB + 16} textAnchor="middle" fontSize={9} fill="currentColor" fillOpacity={0.65} fontFamily="monospace">{fmtX(dates[i])}</text>
+        </g>
+      ))}
+      <text x={padL + (W - padL - padR) / 2} y={H - 2} textAnchor="middle" fontSize={8.5} fill="currentColor" fillOpacity={0.4}>{xAxisLabel}</text>
+      {/* uncertainty band + median line */}
+      {bandPts && <polygon points={bandPts} fill={color} fillOpacity={0.16} stroke="none" />}
+      <path d={linePath(median)} fill="none" stroke={color} strokeWidth={1.8} />
+      {/* observed data overlay (real series, re-expressed in model units at the aligned day) */}
+      {obs.map((p, k) => (
+        <circle key={`obs${k}`} cx={xAt(p.day)} cy={yAt(p.value)} r={2.3}
+          fill={observedColor ?? "#f472b6"} fillOpacity={0.92} stroke="currentColor"
+          strokeWidth={0.3} strokeOpacity={0.25} />
+      ))}
+      {/* peak marker (median), labelled with its day/date */}
+      <circle cx={xAt(peakI)} cy={yAt(median[peakI])} r={2.6} fill={color} />
+      <text x={Math.min(Math.max(xAt(peakI), padL + 16), W - padR - 16)} y={yAt(median[peakI]) - 6}
+        textAnchor="middle" fontSize={8.5} fill={color} fontFamily="monospace">{fmtX(dates[peakI])}</text>
+    </svg>
   );
 }
 
@@ -822,6 +873,16 @@ function SeirModelView({ scenarioId }: { scenarioId: string }) {
   const [edits, setEdits] = useState<Record<string, string>>({});
   const [popEdit, setPopEdit] = useState("");
   const [i0Edit, setI0Edit] = useState("");
+  // Série observée (réelle) : upload/connecteur → superposition + calibration.
+  const [connectors, setConnectors] = useState<DataConnector[]>([]);
+  const [obsText, setObsText] = useState("");
+  const [obsConnector, setObsConnector] = useState("");
+  const [obsVariable, setObsVariable] = useState("");
+  const [obsRegion, setObsRegion] = useState("");
+  const [obsColumn, setObsColumn] = useState<SeirSeriesKey>("incidence");
+  const [obsBusy, setObsBusy] = useState(false);
+  const [obsError, setObsError] = useState("");
+  const [calib, setCalib] = useState<SeirCalibration | null>(null);
 
   useEffect(() => {
     let alive = true;
@@ -836,6 +897,8 @@ function SeirModelView({ scenarioId }: { scenarioId: string }) {
     }).finally(() => { if (alive) setLoading(false); });
     return () => { alive = false; };
   }, [scenarioId]);
+
+  useEffect(() => { listDataConnectors().then(setConnectors).catch(() => setConnectors([])); }, []);
 
   if (loading && !proj) return <LoadingSpinner text={t("scenarioDetail.seirTab.loading")} />;
   if (!proj || !proj.applicable) {
@@ -865,11 +928,70 @@ function SeirModelView({ scenarioId }: { scenarioId: string }) {
     fetchSeirProjection(scenarioId).then(p => setProj(p)).finally(() => setBusy(false));
   };
 
+  // ── Série observée (réelle) : upload/connecteur → superposition + calibration ──
+  const parseObsText = (txt: string): { date?: string; day?: number; value: number }[] => {
+    const pts: { date?: string; day?: number; value: number }[] = [];
+    txt.split(/\r?\n/).forEach(line => {
+      const cells = line.split(/[,;\t]/).map(s => s.trim());
+      if (cells.length < 2) return;
+      const v = parseFloat(cells[1]); if (!isFinite(v)) return;
+      if (/^\d{4}-\d{2}-\d{2}$/.test(cells[0])) pts.push({ date: cells[0], value: v });
+      else { const d = parseFloat(cells[0]); if (isFinite(d)) pts.push({ day: d, value: v }); }
+    });
+    return pts;
+  };
+  const refetchProj = () => fetchSeirProjection(scenarioId).then(p => { if (p?.applicable) setProj(p); });
+  const attachObserved = () => {
+    setObsBusy(true); setObsError("");
+    const body: Parameters<typeof postSeirObserved>[1] = { column: obsColumn };
+    if (obsConnector && obsVariable) {
+      body.connector_id = obsConnector; body.connector_variable = obsVariable;
+      if (obsRegion.trim()) body.region = obsRegion.trim();
+    } else {
+      body.points = parseObsText(obsText);
+    }
+    postSeirObserved(scenarioId, body)
+      .then(refetchProj)
+      .then(() => { setObsText(""); setCalib(null); })
+      .catch(e => setObsError(String(e?.message ?? e)))
+      .finally(() => setObsBusy(false));
+  };
+  const clearObserved = () => {
+    setObsBusy(true); setObsError("");
+    deleteSeirObserved(scenarioId).then(refetchProj).then(() => setCalib(null))
+      .catch(e => setObsError(String(e?.message ?? e))).finally(() => setObsBusy(false));
+  };
+  const runCalibrate = () => {
+    setObsBusy(true); setObsError("");
+    const overrides: Record<string, SeirOverride> = {};
+    Object.entries(edits).forEach(([k, v]) => { const n = parseFloat(v); if (v.trim() !== "" && isFinite(n)) overrides[k] = { value: n }; });
+    calibrateSeir(scenarioId, { column: proj.observed?.column, overrides })
+      .then(setCalib).catch(e => setObsError(String(e?.message ?? e))).finally(() => setObsBusy(false));
+  };
+  const applyFitted = () => {
+    if (calib?.fitted_r0 == null) return;
+    const next = { ...edits, r0: String(calib.fitted_r0) };
+    setEdits(next);
+    const overrides: Record<string, SeirOverride> = {};
+    Object.entries(next).forEach(([k, v]) => { const n = parseFloat(v); if (v.trim() !== "" && isFinite(n)) overrides[k] = { value: n }; });
+    const body: { overrides: Record<string, SeirOverride>; population?: number; initial_infected?: number } = { overrides };
+    const pop = parseFloat(popEdit); if (popEdit.trim() !== "" && isFinite(pop)) body.population = pop;
+    const i0 = parseFloat(i0Edit); if (i0Edit.trim() !== "" && isFinite(i0)) body.initial_infected = i0;
+    setBusy(true);
+    postSeirProjection(scenarioId, body).then(p => { if (p?.applicable) setProj(p); }).finally(() => setBusy(false));
+  };
+
   const sm = proj.summary;
   const seriesLabel: Record<SeirSeriesKey, string> = {
     incidence: t("scenarioDetail.seir.seriesIncidence"), prevalence: t("scenarioDetail.seir.seriesPrevalence"),
     cumulative: t("scenarioDetail.seir.seriesCumulative"), deaths: t("scenarioDetail.seir.seriesDeaths"),
     vaccinated: t("scenarioDetail.seir.seriesVaccinated"), quarantined: t("scenarioDetail.seir.seriesQuarantined"),
+  };
+  const perDay = lang === "fr" ? "personnes/j" : "people/day";
+  const people = lang === "fr" ? "personnes" : "people";
+  const seriesUnit: Record<SeirSeriesKey, string> = {
+    incidence: perDay, prevalence: people, cumulative: people, deaths: people,
+    vaccinated: people, quarantined: people,
   };
   // Séries de base + celles des compartiments V/Q seulement si le modèle les possède.
   const availableSeries: SeirSeriesKey[] = [..._SEIR_SERIES, ..._SEIR_SERIES_OPT.filter(k => proj.series?.[k])];
@@ -913,11 +1035,19 @@ function SeirModelView({ scenarioId }: { scenarioId: string }) {
               className={`rounded-full px-2 py-0.5 text-[10px] border transition ${activeSeries === k ? "border-white/30 bg-white/10 text-white" : "border-white/10 text-white/50 hover:bg-white/5"}`}>{seriesLabel[k]}</button>
           ))}
         </div>
-        {band && <SeirBandChart band={band} dates={proj.dates ?? []} color={_SEIR_COLOR[activeSeries]} lang={lang} />}
+        {band && <SeirBandChart band={band} dates={proj.dates ?? []} color={_SEIR_COLOR[activeSeries]} lang={lang} yUnit={seriesUnit[activeSeries]}
+          observed={proj.observed && proj.observed.column === activeSeries ? proj.observed.points : undefined} observedColor="#f472b6" />}
+        {proj.observed && (
+          <p className="text-[9px] text-white/35 mt-1">
+            <span className="inline-block w-2 h-2 rounded-full bg-pink-400 mr-1 align-middle" />
+            {t("scenarioDetail.seirTab.observedLegend")}{proj.observed.column !== activeSeries ? ` (${seriesLabel[proj.observed.column as SeirSeriesKey] ?? proj.observed.column})` : ""}
+            {proj.observed.fit_r2 != null ? ` · R²=${proj.observed.fit_r2}` : ""}
+          </p>
+        )}
         {sm && (
           <div className="mt-2 grid grid-cols-2 sm:grid-cols-4 gap-2 text-[10px]">
-            <div><div className="text-white/40">{t("scenarioDetail.seir.r0")}</div><div className="font-mono text-white/80">{sm.r0.median} [{sm.r0.lower}–{sm.r0.upper}]</div></div>
-            <div><div className="text-white/40">{t("scenarioDetail.seir.peakDay")}</div><div className="font-mono text-white/80">{sm.peak_prevalence_day.median}</div></div>
+            <div><div className="text-white/40">{t("scenarioDetail.seir.peakPrevalence")}</div><div className="font-mono text-white/80">{fmtPop(sm.peak_prevalence.median)}</div></div>
+            <div><div className="text-white/40">{t("scenarioDetail.seir.peakDay")}</div><div className="font-mono text-white/80">{lang === "fr" ? "J" : "D"}{sm.peak_prevalence_day.median}</div></div>
             <div><div className="text-white/40">{t("scenarioDetail.seir.attackRate")}</div><div className="font-mono text-white/80">{(sm.attack_rate.median * 100).toFixed(1)}%</div></div>
             <div><div className="text-white/40">{t("scenarioDetail.seir.deaths")}</div><div className="font-mono text-white/80">{sm.total_deaths.median}</div></div>
             {sm.total_vaccinated && sm.total_vaccinated.median > 0 && (
@@ -1004,6 +1134,82 @@ function SeirModelView({ scenarioId }: { scenarioId: string }) {
           {hasOverrides && <span className="text-[10px] text-gold-300">{t("scenarioDetail.seirTab.usingOverrides")}</span>}
         </div>
       </div>
+
+      {/* Données observées (réelles) : superposition sur le graphe + calibration du modèle */}
+      <div className="rounded-2xl border border-white/8 bg-white/2 p-4 space-y-3">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-1.5">
+            <Target size={12} className="text-pink-300/80" />
+            <p className="text-[10px] uppercase tracking-wider text-white/45">{t("scenarioDetail.seirTab.observed")}</p>
+          </div>
+          {proj.observed && <span className="text-[9px] text-white/40">{proj.observed.n} {t("scenarioDetail.seirTab.obsPoints")}</span>}
+        </div>
+
+        {proj.observed ? (
+          <div className="space-y-3">
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-[10px]">
+              <div className="truncate"><div className="text-white/40">{t("scenarioDetail.seirTab.obsSource")}</div><div className="font-mono text-white/80 truncate" title={proj.observed.label ?? ""}>{proj.observed.label ?? proj.observed.source ?? "—"}</div></div>
+              <div><div className="text-white/40">{t("scenarioDetail.seirTab.obsSeries")}</div><div className="font-mono text-white/80">{seriesLabel[proj.observed.column as SeirSeriesKey] ?? proj.observed.column}</div></div>
+              <div><div className="text-white/40">{t("scenarioDetail.seirTab.obsFit")}</div><div className="font-mono text-white/80">{proj.observed.fit_r2 != null ? `R²=${proj.observed.fit_r2}` : "—"}</div></div>
+              <div><div className="text-white/40">{t("scenarioDetail.seirTab.obsShift")}</div><div className="font-mono text-white/80">{proj.observed.shift_days != null ? `${proj.observed.shift_days} ${lang === "fr" ? "j" : "d"}` : "—"}</div></div>
+            </div>
+            <div className="flex items-center gap-2 flex-wrap">
+              <button type="button" onClick={runCalibrate} disabled={obsBusy}
+                className="flex items-center gap-1.5 rounded-xl bg-teal-600 text-white font-semibold py-1.5 px-4 text-xs hover:bg-teal-500 transition disabled:opacity-50">
+                {obsBusy ? <Loader2 size={12} className="animate-spin" /> : <Target size={12} />}{t("scenarioDetail.seirTab.calibrate")}</button>
+              <button type="button" onClick={clearObserved} disabled={obsBusy}
+                className="rounded-xl border border-white/15 text-white/60 py-1.5 px-3 text-xs hover:bg-white/5 transition disabled:opacity-50">{t("scenarioDetail.seirTab.obsClear")}</button>
+            </div>
+            {calib?.ok && (
+              <div className="rounded-xl border border-teal-500/20 bg-teal-500/5 p-3 text-[11px] space-y-2">
+                <div className="flex flex-wrap gap-x-4 gap-y-1">
+                  <span className="text-white/60">{t("scenarioDetail.seirTab.fittedR0")}: <span className="font-mono text-teal-300 font-semibold">{calib.fitted_r0}</span></span>
+                  {calib.literature_r0 != null && <span className="text-white/60">{t("scenarioDetail.seirTab.literatureR0")}: <span className="font-mono text-white/80">{calib.literature_r0}</span></span>}
+                  <span className="text-white/60">R²: <span className="font-mono text-white/80">{calib.r2}</span></span>
+                  {calib.shift_days != null && <span className="text-white/60">{t("scenarioDetail.seirTab.obsShift")}: <span className="font-mono text-white/80">{calib.shift_days} {lang === "fr" ? "j" : "d"}</span></span>}
+                </div>
+                <button type="button" onClick={applyFitted} disabled={busy}
+                  className="rounded-lg bg-teal-600/80 text-white py-1 px-3 text-[11px] hover:bg-teal-500 transition disabled:opacity-50">{t("scenarioDetail.seirTab.applyFitted")}</button>
+              </div>
+            )}
+          </div>
+        ) : (
+          <div className="space-y-2">
+            <p className="text-[9px] text-white/30 leading-relaxed">{t("scenarioDetail.seirTab.observedHint")}</p>
+            <div className="grid grid-cols-1 sm:grid-cols-4 gap-2 text-[11px]">
+              <select value={obsConnector} onChange={e => { setObsConnector(e.target.value); setObsVariable(""); }}
+                className="rounded-lg border border-white/10 bg-white/5 px-2 py-1 text-white/90 outline-none focus:border-teal-400/50">
+                <option value="" className="bg-slate-800">{t("scenarioDetail.seirTab.obsUpload")}</option>
+                {connectors.map(c => <option key={c.id} value={c.id} className="bg-slate-800">{c.name}</option>)}
+              </select>
+              {obsConnector && (
+                <select value={obsVariable} onChange={e => setObsVariable(e.target.value)}
+                  className="rounded-lg border border-white/10 bg-white/5 px-2 py-1 text-white/90 outline-none focus:border-teal-400/50">
+                  <option value="" className="bg-slate-800">{t("scenarioDetail.seirTab.obsVariable")}</option>
+                  {(connectors.find(c => c.id === obsConnector)?.variables ?? []).map(v => <option key={v.machine_name} value={v.machine_name} className="bg-slate-800">{v.label}</option>)}
+                </select>
+              )}
+              {obsConnector && <input value={obsRegion} onChange={e => setObsRegion(e.target.value)} placeholder={t("scenarioDetail.seirTab.obsRegion")}
+                className="rounded-lg border border-white/10 bg-white/5 px-2 py-1 text-white/90 outline-none focus:border-teal-400/50" />}
+              <select value={obsColumn} onChange={e => setObsColumn(e.target.value as SeirSeriesKey)}
+                className="rounded-lg border border-white/10 bg-white/5 px-2 py-1 text-white/90 outline-none focus:border-teal-400/50">
+                {(["incidence", "prevalence", "cumulative", "deaths"] as SeirSeriesKey[]).map(k => <option key={k} value={k} className="bg-slate-800">{seriesLabel[k]}</option>)}
+              </select>
+            </div>
+            {!obsConnector && (
+              <textarea value={obsText} onChange={e => setObsText(e.target.value)} rows={3}
+                placeholder={"2023-01-08, 12.4\n2023-01-15, 15.1\n2023-01-22, 18.2"}
+                className="w-full rounded-lg border border-white/10 bg-white/5 px-2 py-1 text-white/90 font-mono text-[11px] outline-none focus:border-teal-400/50" />
+            )}
+            <button type="button" onClick={attachObserved}
+              disabled={obsBusy || (obsConnector ? !obsVariable : parseObsText(obsText).length < 3)}
+              className="flex items-center gap-1.5 rounded-xl bg-teal-600 text-white font-semibold py-1.5 px-4 text-xs hover:bg-teal-500 transition disabled:opacity-50">
+              {obsBusy ? <Loader2 size={12} className="animate-spin" /> : <Upload size={12} />}{t("scenarioDetail.seirTab.obsAttach")}</button>
+          </div>
+        )}
+        {obsError && <p className="text-[10px] text-rose-300">{obsError}</p>}
+      </div>
+
       <p className="text-[9px] text-white/25 leading-tight">{t("scenarioDetail.seirTab.note")}</p>
     </div>
   );

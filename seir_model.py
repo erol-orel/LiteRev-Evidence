@@ -377,6 +377,217 @@ def simulate_ensemble(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Calibration : ajuste R0 (+ un facteur d'échelle) sur une série OBSERVÉE
+# ─────────────────────────────────────────────────────────────────────────────
+_SEIRPARAMS_FIELDS = frozenset((
+    "r0", "beta", "infectious_period_days", "incubation_period_days", "cfr",
+    "immunity_duration_days", "vaccination_rate", "vaccine_efficacy",
+    "quarantine_rate", "population", "initial_infected", "initial_exposed",
+))
+
+
+def _interp_at(axis: list[int], series: list[float], x: float) -> float:
+    """Interpolation linéaire de `series` (indexée par `axis` croissant) au point x."""
+    if not axis:
+        return 0.0
+    if x <= axis[0]:
+        return float(series[0])
+    if x >= axis[-1]:
+        return float(series[-1])
+    lo, hi = 0, len(axis) - 1
+    while hi - lo > 1:
+        mid = (lo + hi) // 2
+        if axis[mid] <= x:
+            lo = mid
+        else:
+            hi = mid
+    x0, x1 = axis[lo], axis[hi]
+    if x1 == x0:
+        return float(series[lo])
+    f = (x - x0) / (x1 - x0)
+    return float(series[lo]) * (1.0 - f) + float(series[hi]) * f
+
+
+def _fit_shift_scale(axis, series, xs, ys, max_shift: float, steps: int = 60):
+    """Meilleur décalage temporel τ ≥ 0 (le modèle a démarré τ jours AVANT la 1re
+    observation) alignant model[x+τ] sur l'observé, avec l'échelle d'amplitude k
+    optimale (moindres carrés) pour chaque τ. Renvoie (τ, k, sse). Une série observée
+    réelle est une FENÊTRE d'une épidémie en cours : sans ce décalage, la forme ne
+    s'aligne pas sur la courbe du modèle (qui part de t=0)."""
+    def _at(tau):
+        m = [_interp_at(axis, series, x + tau) for x in xs]
+        denom = sum(v * v for v in m)
+        k = (sum(mi * yi for mi, yi in zip(m, ys)) / denom) if denom > 1e-12 else 0.0
+        if k < 0:
+            k = 0.0
+        return k, sum((k * mi - yi) ** 2 for mi, yi in zip(m, ys))
+    max_shift = max(0.0, float(max_shift))
+    step = (max_shift / steps) if max_shift > 0 else 1.0
+    best, tau = None, 0.0
+    while tau <= max_shift + 1e-9:
+        k, sse = _at(tau)
+        if best is None or sse < best[2]:
+            best = (tau, k, sse)
+        tau += step
+    if max_shift > 0:                                # raffinement local
+        s = step
+        for _ in range(20):
+            improved = False
+            for tau in (best[0] - s, best[0] + s):
+                if 0.0 <= tau <= max_shift:
+                    k, sse = _at(tau)
+                    if sse < best[2]:
+                        best, improved = (tau, k, sse), True
+            if not improved:
+                s *= 0.5
+    return best
+
+
+def calibrate_to_observed(observed, base_params: dict, column: str = "incidence",
+                          days: int | None = None, r0_bounds: tuple = (0.4, 8.0),
+                          grid: int = 48) -> dict:
+    """Ajuste R0 à une série OBSERVÉE par moindres carrés. L'écart d'UNITÉ entre le
+    modèle (effectifs) et l'observé (cas, %, /100k…) est absorbé par un facteur
+    d'échelle multiplicatif k, optimal analytiquement pour chaque R0 (moindres carrés
+    linéaires) — on ajuste ainsi la FORME/TIMING via R0 et l'AMPLITUDE via k.
+
+    `observed` = liste de (jour_offset, valeur) ; `base_params` = valeurs (moyennes)
+    des autres paramètres (période infectieuse, incubation, cfr, population…) ;
+    `column` ∈ {incidence, prevalence, cumulative, deaths}. Renvoie `{ok, fitted_r0,
+    scale, rmse, r2, n_points, column, horizon_days}`. PUR : n'appelle que `simulate`
+    (pas de dépendance scientifique), donc testable sans réseau ni base."""
+    pts = []
+    for d, v in (observed or []):
+        try:
+            dd, vv = float(d), float(v)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(dd) and math.isfinite(vv) and dd >= 0:
+            pts.append((dd, vv))
+    if len(pts) < 3:
+        return {"ok": False, "reason": "au moins 3 points observés requis", "n_points": len(pts)}
+    if column not in ("incidence", "prevalence", "cumulative", "deaths"):
+        column = "incidence"
+    xs = [d for d, _ in pts]
+    ys = [v for _, v in pts]
+    horizon = max(2, min(int(days or (max(xs) + 1)), 3650))
+    ymean = sum(ys) / len(ys)
+    sst = sum((y - ymean) ** 2 for y in ys) or 1e-9
+    base = {k: v for k, v in (base_params or {}).items() if k in _SEIRPARAMS_FIELDS}
+
+    max_shift = max(0.0, horizon - max(xs) - 1)
+
+    def _sse(r0: float):
+        p = dict(base)
+        p["r0"] = r0
+        p.pop("beta", None)                      # laisser R0 piloter beta
+        try:
+            res = simulate(SeirParams(**p), days=horizon)
+        except Exception:
+            return (float("inf"), 0.0, 0.0)
+        tau, k, sse = _fit_shift_scale(res["days"], res[column], xs, ys, max_shift)
+        return (sse, k, tau)
+
+    lo, hi = r0_bounds
+    best = None
+    for j in range(grid + 1):                    # balayage grossier sur R0
+        r0 = lo + (hi - lo) * j / grid
+        sse, k, tau = _sse(r0)
+        if best is None or sse < best[0]:
+            best = (sse, r0, k, tau)
+    step = (hi - lo) / grid                       # raffinement local (descente 1D)
+    for _ in range(24):
+        improved = False
+        for r0 in (best[1] - step, best[1] + step):
+            if lo <= r0 <= hi:
+                sse, k, tau = _sse(r0)
+                if sse < best[0]:
+                    best, improved = (sse, r0, k, tau), True
+        if not improved:
+            step *= 0.5
+    sse, r0, k, tau = best
+    return {
+        "ok": True, "fitted_r0": round(r0, 4), "scale": k, "shift_days": round(tau, 1),
+        "rmse": (sse / len(ys)) ** 0.5, "r2": round(1.0 - sse / sst, 4),
+        "n_points": len(ys), "column": column, "horizon_days": horizon,
+    }
+
+
+def align_observed(points) -> dict:
+    """Normalise une série observée hétérogène `[{date|day, value}]` en offsets JOUR
+    alignés sur l'axe du modèle. Les dates ISO deviennent des offsets depuis la PLUS
+    ANCIENNE (jour 0) ; les jours numériques sont gardés tels quels. Renvoie
+    `{points:[(day:float, value:float)], start_date:str|None, n:int}` trié par jour.
+    PUR — ancre le t=0 du modèle sur la première observation."""
+    import re as _re
+    from datetime import date as _date
+    parsed = []
+    for p in (points or []):
+        if isinstance(p, dict):
+            raw = p.get("date", p.get("day"))
+            val = p.get("value")
+        else:
+            raw = p[0] if p else None
+            val = p[1] if p and len(p) > 1 else None
+        fv = _num_or_none(val)
+        if fv is None:
+            continue
+        s = str(raw).strip()
+        if _re.fullmatch(r"\d{4}-\d{2}-\d{2}", s):
+            try:
+                _y, _m, _d = (int(x) for x in s.split("-"))
+                parsed.append((_date(_y, _m, _d), None, fv))
+            except ValueError:
+                continue
+        else:
+            dn = _num_or_none(raw)
+            if dn is not None:
+                parsed.append((None, float(dn), fv))
+    if not parsed:
+        return {"points": [], "start_date": None, "n": 0}
+    iso_dates = [d for d, _, _ in parsed if d is not None]
+    start = min(iso_dates) if iso_dates else None
+    out = []
+    for d_iso, d_num, fv in parsed:
+        if d_iso is not None and start is not None:
+            out.append((float((d_iso - start).days), fv))
+        elif d_num is not None:
+            out.append((float(d_num), fv))
+    out.sort(key=lambda t: t[0])
+    return {"points": out, "start_date": start.isoformat() if start else None, "n": len(out)}
+
+
+def scale_observed_to_model(observed, base_params: dict, column: str = "incidence",
+                            days: int | None = None) -> dict:
+    """Échelle d'amplitude (moindres carrés) mappant le modèle COURANT (params fixes)
+    sur la série observée, + le R² obtenu. Renvoie `{scale, r2, points:[{day, value}]}`
+    où `value = observé/scale` ré-exprime l'observé en UNITÉS MODÈLE, prêt à superposer
+    à la courbe. PUR. `scale=None` si non calculable (garde l'observé brut)."""
+    valid = column if column in ("incidence", "prevalence", "cumulative", "deaths") else "incidence"
+    pts = [(float(d), float(v)) for d, v in (observed or []) if _num_or_none(v) is not None]
+    if not pts:
+        return {"scale": None, "r2": None, "points": []}
+    xs = [d for d, _ in pts]
+    ys = [v for _, v in pts]
+    horizon = max(2, min(int(days or (max(xs) + 1)), 3650))
+    base = {k: v for k, v in (base_params or {}).items() if k in _SEIRPARAMS_FIELDS}
+    raw_pts = [{"day": d, "value": v} for d, v in pts]
+    try:
+        res = simulate(SeirParams(**base), days=horizon)
+    except Exception:
+        return {"scale": None, "r2": None, "shift_days": 0.0, "points": raw_pts}
+    max_shift = max(0.0, horizon - max(xs) - 1)
+    tau, k, sse = _fit_shift_scale(res["days"], res[valid], xs, ys, max_shift)
+    if k <= 0:
+        return {"scale": None, "r2": None, "shift_days": 0.0, "points": raw_pts}
+    ymean = sum(ys) / len(ys)
+    sst = sum((y - ymean) ** 2 for y in ys) or 1e-9
+    # points placés au JOUR MODÈLE aligné (x + τ), valeur ré-exprimée en unités modèle
+    return {"scale": k, "r2": round(1.0 - sse / sst, 4), "shift_days": round(tau, 1),
+            "points": [{"day": d + tau, "value": v / k} for d, v in pts]}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Paramètres extraits de la littérature → entrées du modèle
 # ─────────────────────────────────────────────────────────────────────────────
 # Paramètres épidémiologiques qu'on tente d'extraire du corpus (via LLM, cf. main).

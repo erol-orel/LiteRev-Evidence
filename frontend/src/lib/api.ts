@@ -2425,6 +2425,20 @@ export interface SeirProjection {
   parameters?: Record<string, SeirParamValue>;
   effective_parameters?: Record<string, SeirParamValue>;
   overrides_applied?: Record<string, number>;
+  observed?: SeirObserved | null;        // série réelle superposée (si attachée)
+}
+
+export interface SeirObservedPoint { day: number; value: number; }
+export interface SeirObserved {
+  column: string; label?: string | null; source?: string | null; n: number;
+  start_date?: string | null; scale?: number | null; fit_r2?: number | null;
+  shift_days?: number | null;
+  points: SeirObservedPoint[];           // en unités MODÈLE, au jour aligné
+}
+export interface SeirCalibration {
+  ok: boolean; fitted_r0?: number; scale?: number; shift_days?: number;
+  rmse?: number; r2?: number; n_points?: number; column?: string;
+  horizon_days?: number; literature_r0?: number | null; detail?: string;
 }
 
 export async function fetchSeirProjection(
@@ -2462,6 +2476,42 @@ export async function postSeirProjection(
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
+  });
+  if (!r.ok) throw new Error(httpMessage(r.status));
+  return r.json();
+}
+
+// Attache une série OBSERVÉE (réelle) au SEIR : upload de points {date|day, value}
+// OU tirage d'un connecteur (foph-sentinella-ili, foph-wastewater…). Superposée au
+// graphe + base de la calibration. Au moins 3 points.
+export async function postSeirObserved(
+  scenarioId: string,
+  body: {
+    points?: { date?: string | number; day?: number; value: number }[];
+    connector_id?: string; connector_variable?: string; region?: string;
+    start_date?: string; end_date?: string; column?: string; label?: string;
+  },
+): Promise<{ ok: boolean; n: number; column: string; source: string; label?: string; start_date?: string | null }> {
+  const r = await safeFetch(`${API_BASE_URL}/scenarios/${scenarioId}/seir/observed`, {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+  });
+  if (!r.ok) throw new Error(httpMessage(r.status));
+  return r.json();
+}
+
+export async function deleteSeirObserved(scenarioId: string): Promise<{ ok: boolean }> {
+  const r = await safeFetch(`${API_BASE_URL}/scenarios/${scenarioId}/seir/observed`, { method: "DELETE" });
+  if (!r.ok) throw new Error(httpMessage(r.status));
+  return r.json();
+}
+
+// Calibre R0 (+ échelle + décalage temporel) du SEIR sur la série observée attachée.
+export async function calibrateSeir(
+  scenarioId: string,
+  body: { column?: string; overrides?: Record<string, SeirOverride>; days?: number } = {},
+): Promise<SeirCalibration> {
+  const r = await safeFetch(`${API_BASE_URL}/scenarios/${scenarioId}/seir/calibrate`, {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
   });
   if (!r.ok) throw new Error(httpMessage(r.status));
   return r.json();
