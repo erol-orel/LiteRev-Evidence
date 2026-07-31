@@ -2463,6 +2463,16 @@ export async function exportModelBundle(scenarioId: string, includeData = true):
   return r.json();
 }
 
+// Même export, en classeur Excel (.xlsx) : feuilles Variables / Dataset (valeurs +
+// issue) / Model runs. Renvoie le binaire à télécharger.
+export async function exportModelXlsx(scenarioId: string): Promise<Blob> {
+  const r = await safeFetch(
+    `${API_BASE_URL}/scenarios/${scenarioId}/model/export.xlsx`,
+    { headers: authHeaders() });
+  if (!r.ok) throw new Error(httpMessage(r.status));
+  return r.blob();
+}
+
 // Projection AVEC paramètres modifiés par l'utilisateur (onglet SEIR) — explore des
 // variantes sans altérer les paramètres source extraits de la littérature.
 export async function postSeirProjection(
