@@ -19,7 +19,7 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 CLF_FAMILIES = {"gradient_boosting", "lightgbm", "xgboost", "random_forest", "logistic_regression", "svm", "mlp", "knn"}
-REG_FAMILIES = {"gradient_boosting", "lightgbm", "xgboost", "random_forest", "linear_regression", "elasticnet", "svm", "mlp", "knn"}
+REG_FAMILIES = {"gradient_boosting", "lightgbm", "xgboost", "random_forest", "linear_regression", "elasticnet", "svm", "mlp", "knn", "extremal_rf"}
 
 # Familles à gradient boosting « fortes » pour données tabulaires (préférées au
 # GB scikit-learn quand le paquet est présent). Import paresseux : l'absence du
@@ -35,6 +35,97 @@ _TS_FAMILIES = {"prophet", "sarimax"}
 def _has_package(name: str) -> bool:
     import importlib.util
     return importlib.util.find_spec(name) is not None
+
+
+def _weighted_quantile(values, weights, q: float) -> float:
+    """Empirical q-quantile of `values` weighted by `weights` (weights need not sum to 1).
+    Interpolated on the weighted CDF. Pure numpy."""
+    import numpy as np
+    v = np.asarray(values, dtype=float)
+    w = np.asarray(weights, dtype=float)
+    m = w > 0
+    if not m.any():
+        return float(np.nan)
+    v, w = v[m], w[m]
+    order = np.argsort(v, kind="mergesort")
+    v, w = v[order], w[order]
+    cdf = np.cumsum(w) - 0.5 * w
+    cdf /= w.sum()
+    return float(np.interp(q, cdf, v))
+
+
+try:  # real sklearn bases when available (gives __sklearn_tags__, get_params, clone…)
+    from sklearn.base import BaseEstimator as _BaseEstimator, RegressorMixin as _RegressorMixin
+except Exception:  # sklearn absent → dummy bases so `import model_trainer` still works
+    class _BaseEstimator:  # type: ignore
+        pass
+
+    class _RegressorMixin:  # type: ignore
+        pass
+
+
+class QuantileRandomForestRegressor(_RegressorMixin, _BaseEstimator):
+    """Extremal / Quantile Regression Forest (Meinshausen 2006) — a random forest that
+    predicts a conditional QUANTILE (default the 90th percentile) instead of the mean:
+    the plausible SURGE, not the average. It fits a standard RandomForestRegressor,
+    remembers each tree's training-sample leaf assignments, and at predict time returns
+    the leaf-weighted empirical quantile of the training targets. Scored with pinball
+    loss. sklearn-compatible (get_params/set_params via the __init__ signature) so it
+    drops into the Pipeline/CV/joblib machinery unchanged.
+
+    This is the practical core of "extremal random forest" for demand/overload nowcasting;
+    a Pareto-tail extrapolation beyond the observed range could be layered on later."""
+
+    def __init__(self, quantile: float = 0.9, n_estimators: int = 200, max_depth=None,
+                 min_samples_leaf: int = 5, min_samples_split: int = 2,
+                 random_state: int = 42, n_jobs: int = 1):
+        self.quantile = quantile
+        self.n_estimators = n_estimators
+        self.max_depth = max_depth
+        self.min_samples_leaf = min_samples_leaf
+        self.min_samples_split = min_samples_split
+        self.random_state = random_state
+        self.n_jobs = n_jobs
+
+    def fit(self, X, y):
+        import numpy as np
+        from sklearn.ensemble import RandomForestRegressor
+        X = np.asarray(X, dtype=float)
+        y = np.asarray(y, dtype=float).ravel()
+        self.rf_ = RandomForestRegressor(
+            n_estimators=self.n_estimators, max_depth=self.max_depth,
+            min_samples_leaf=self.min_samples_leaf, min_samples_split=self.min_samples_split,
+            random_state=self.random_state, n_jobs=self.n_jobs)
+        self.rf_.fit(X, y)
+        self.y_train_ = y
+        self.train_leaves_ = self.rf_.apply(X)            # (n_train, n_trees)
+        return self
+
+    def predict(self, X):
+        import numpy as np
+        X = np.asarray(X, dtype=float)
+        test_leaves = self.rf_.apply(X)                    # (n_test, n_trees)
+        n_trees = self.train_leaves_.shape[1]
+        # Per tree, map leaf id → boolean membership of training rows (built once).
+        tree_leaf_members = []
+        for t in range(n_trees):
+            col = self.train_leaves_[:, t]
+            members: dict = {}
+            for leaf in np.unique(col):
+                members[leaf] = (col == leaf)
+            tree_leaf_members.append(members)
+        out = np.empty(X.shape[0], dtype=float)
+        for r in range(X.shape[0]):
+            w = np.zeros(self.y_train_.shape[0], dtype=float)
+            for t in range(n_trees):
+                same = tree_leaf_members[t].get(test_leaves[r, t])
+                if same is None:
+                    continue
+                c = same.sum()
+                if c:
+                    w[same] += 1.0 / c
+            out[r] = _weighted_quantile(self.y_train_, w, self.quantile)
+        return out
 
 
 def _norm(s: Any) -> str:
@@ -128,6 +219,8 @@ def _effective_family(family: str, task_type: str) -> str:
     # classification
     if family in ("linear_regression", "elasticnet"):
         return "logistic_regression"
+    if family == "extremal_rf":            # quantile forest is regression-only
+        return "random_forest"
     return family if family in CLF_FAMILIES else "gradient_boosting"
 
 
@@ -216,6 +309,15 @@ def suggest_params(trial, family: str) -> dict:
             "max_depth": trial.suggest_int("max_depth", 3, 20),
             "min_samples_split": trial.suggest_int("min_samples_split", 2, 10),
         }
+    if family == "extremal_rf":
+        # Quantile forest: modest tree count (leaf-quantile predict is O(n_test·n_trees·n_train)),
+        # larger leaves so each carries enough samples to estimate a tail quantile. The target
+        # quantile itself is NOT tuned — it's the user's choice (algorithm.quantile).
+        return {
+            "n_estimators": trial.suggest_int("n_estimators", 100, 300),
+            "max_depth": trial.suggest_int("max_depth", 3, 16),
+            "min_samples_leaf": trial.suggest_int("min_samples_leaf", 5, 30),
+        }
     if family == "logistic_regression":
         return {"C": trial.suggest_float("C", 1e-3, 1e2, log=True)}
     if family == "elasticnet":
@@ -289,6 +391,11 @@ def estimator_from_params(family: str, task_type: str, params: dict, random_stat
         return (GradientBoostingClassifier if clf else GradientBoostingRegressor)(random_state=random_state, **p)
     if family == "random_forest":
         return (RandomForestClassifier if clf else RandomForestRegressor)(random_state=random_state, n_jobs=1, **p)
+    if family == "extremal_rf":
+        # Quantile regression forest (regression/count only; classification is remapped
+        # to random_forest upstream by _effective_family). quantile comes from the spec.
+        q = float(p.pop("quantile", 0.9))
+        return QuantileRandomForestRegressor(quantile=q, random_state=random_state, n_jobs=1, **p)
     if family == "logistic_regression":
         return LogisticRegression(max_iter=1000, **p)
     if family == "linear_regression":
@@ -748,6 +855,13 @@ def train_model(df, spec: dict, n_trials: int = 25, random_state: int = 42, test
     cv_conf = algo.get("cv") or {}
     strategy = cv_conf.get("strategy", "kfold")
     folds = int(cv_conf.get("folds", 5) or 5)
+    # Extremal RF predicts a chosen quantile (the "surge"). Read it from the spec
+    # (clamped to a sensible tail range); it's injected into the estimator, not tuned.
+    is_extremal = family == "extremal_rf"
+    quantile = min(max(float(algo.get("quantile") or 0.9), 0.5), 0.99) if is_extremal else None
+
+    def _with_q(p: dict) -> dict:
+        return {**p, "quantile": quantile} if is_extremal else p
 
     X, y, used, target = resolve_columns(df, spec)
 
@@ -794,6 +908,13 @@ def train_model(df, spec: dict, n_trials: int = 25, random_state: int = 42, test
         raise ValueError(f"Pas assez de lignes exploitables ({len(X)}). Minimum 20.")
 
     scoring = _scoring(metric, task_type, n_classes=(len(classes) if classes else None))
+    scoring_label = scoring if isinstance(scoring, str) else "score"
+    if is_extremal:
+        # Optimise the QUANTILE directly (pinball loss), not the mean — otherwise CV would
+        # push the forest back toward the average and defeat the surge target.
+        from sklearn.metrics import make_scorer, mean_pinball_loss
+        scoring = make_scorer(mean_pinball_loss, alpha=quantile, greater_is_better=False)
+        scoring_label = "neg_pinball"
     is_ts = strategy == "timeseries"
     cv_strategy_effective = strategy
 
@@ -837,7 +958,7 @@ def train_model(df, spec: dict, n_trials: int = 25, random_state: int = 42, test
     pre = build_preprocessor(used)
 
     def objective(trial):
-        est = estimator_from_params(family, task_type, suggest_params(trial, family), random_state)
+        est = estimator_from_params(family, task_type, _with_q(suggest_params(trial, family)), random_state)
         pipe = Pipeline([("pre", pre), ("est", est)])
         scores = cross_val_score(pipe, Xtr, ytr, scoring=scoring, cv=cv, n_jobs=1, error_score="raise")
         return float(np.mean(scores))
@@ -849,25 +970,35 @@ def train_model(df, spec: dict, n_trials: int = 25, random_state: int = 42, test
         study.optimize(objective, n_trials=n_trials, show_progress_bar=False)
         best_params, cv_best = dict(study.best_params), float(study.best_value)
     else:
-        est0 = estimator_from_params(family, task_type, {}, random_state)
+        est0 = estimator_from_params(family, task_type, _with_q({}), random_state)
         cv_best = float(np.mean(cross_val_score(
             Pipeline([("pre", pre), ("est", est0)]), Xtr, ytr, scoring=scoring, cv=cv, n_jobs=1)))
 
-    final = Pipeline([("pre", pre), ("est", estimator_from_params(family, task_type, best_params, random_state))])
+    final = Pipeline([("pre", pre), ("est", estimator_from_params(family, task_type, _with_q(best_params), random_state))])
     # Scores par fold du MEILLEUR modèle : réutilisés pour la stabilité CV (garde-fous).
     try:
         cv_scores_arr = cross_val_score(
-            Pipeline([("pre", pre), ("est", estimator_from_params(family, task_type, best_params, random_state))]),
+            Pipeline([("pre", pre), ("est", estimator_from_params(family, task_type, _with_q(best_params), random_state))]),
             Xtr, ytr, scoring=scoring, cv=cv, n_jobs=1)
     except Exception:
         cv_scores_arr = [cv_best]
     final.fit(Xtr, ytr)
 
     metrics = _evaluate(final, Xte, yte, task_type, classes)
+    if is_extremal:
+        # Quantile-appropriate holdout metrics: pinball loss at the target quantile + the
+        # empirical coverage (share of actuals ≤ prediction — should sit near `quantile`).
+        # rmse/r2 (vs the MEAN) are left in but are expected to look off for a tail forecast.
+        from sklearn.metrics import mean_pinball_loss
+        _preds = final.predict(Xte)
+        _yte = np.asarray(yte, dtype=float)
+        metrics["pinball"] = float(mean_pinball_loss(_yte, _preds, alpha=quantile))
+        metrics["coverage"] = float((_yte <= _preds).mean())
+        metrics["target_quantile"] = float(quantile)
     # CV best rendu LISIBLE : les scorers sklearn sont "greater is better", donc rmse/mae
     # sont stockés en NÉGATIF (neg_*). On expose la valeur positive sous cv_<metric>.
-    cv_pretty = -cv_best if scoring.startswith("neg_") else cv_best
-    metrics[f"cv_{scoring.replace('neg_', '').replace('root_mean_squared_error', 'rmse').replace('mean_absolute_error', 'mae')}"] = float(cv_pretty)
+    cv_pretty = -cv_best if scoring_label.startswith("neg_") else cv_best
+    metrics[f"cv_{scoring_label.replace('neg_', '').replace('root_mean_squared_error', 'rmse').replace('mean_absolute_error', 'mae')}"] = float(cv_pretty)
 
     # Métrique AUTORITAIRE = celle réellement optimisée (déduite du scorer), et non
     # la métrique brute du spec (qui pouvait être incohérente avec la tâche, p.ex.
@@ -877,9 +1008,9 @@ def train_model(df, spec: dict, n_trials: int = 25, random_state: int = 42, test
     _METRIC_FROM_SCORING = {
         "neg_root_mean_squared_error": "rmse", "neg_mean_absolute_error": "mae", "r2": "r2",
         "roc_auc": "roc_auc", "roc_auc_ovr": "roc_auc", "average_precision": "average_precision",
-        "accuracy": "accuracy",
+        "accuracy": "accuracy", "neg_pinball": "pinball",
     }
-    display_metric = _METRIC_FROM_SCORING.get(scoring, metric or scoring)
+    display_metric = _METRIC_FROM_SCORING.get(scoring_label, metric or scoring_label)
 
     result = {
         "task_type": task_type,

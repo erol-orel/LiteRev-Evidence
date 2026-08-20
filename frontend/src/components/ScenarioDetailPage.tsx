@@ -506,7 +506,7 @@ function ArticleSourceLink({ a, label }: { a?: ProvArticle | null; label?: strin
 // Familles sélectionnables (alignées sur model_trainer + _ALGO_FAMILIES côté API).
 // prophet/sarimax = prévision de série temporelle (nécessite une colonne date).
 const ALGO_FAMILY_OPTIONS = [
-  "lightgbm", "xgboost", "gradient_boosting", "random_forest",
+  "lightgbm", "xgboost", "gradient_boosting", "random_forest", "extremal_rf",
   "logistic_regression", "linear_regression", "elasticnet", "svm", "mlp", "knn",
   "prophet", "sarimax",
 ];
