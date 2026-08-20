@@ -12977,7 +12977,7 @@ _FEATURE_SOURCES = {"user", "public_api", "seir"}
 _ALGO_FAMILIES = {
     "gradient_boosting", "lightgbm", "xgboost", "random_forest", "logistic_regression",
     "linear_regression", "elasticnet", "svm", "mlp", "cox_ph", "knn",
-    "prophet", "sarimax",
+    "prophet", "sarimax", "extremal_rf",
 }
 # Familles de PRÉVISION de série temporelle (routées hors du flux tabulaire par
 # model_trainer). Une cible numérique s'impose → task_type ramené à 'regression'.
@@ -13011,6 +13011,7 @@ def _coerce_enum(value: Any, allowed: set[str], default: str) -> str:
 def _infer_algo_family(text_blob: str) -> str:
     t = (text_blob or "").lower()
     table = [
+        (("extremal", "quantile forest", "quantile regression forest", "forêt quantile", "foret quantile", "surge", "extreme quantile"), "extremal_rf"),
         (("xgboost", "lightgbm", "gradient boost", "gradient_boost", "boosting", "gbm"), "gradient_boosting"),
         (("random forest", "random_forest", "forêt aléatoire", "foret aleatoire"), "random_forest"),
         (("logistic", "logistique"), "logistic_regression"),
