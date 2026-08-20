@@ -14374,6 +14374,80 @@ def _task_target_sanity(scenario_id: str, outcome: dict) -> tuple[str, dict] | N
     return None
 
 
+@app.get("/model/outcome-templates")
+def list_outcome_templates() -> dict[str, Any]:
+    """Catalogue des OUTCOMES prêts à l'emploi (GESICA) : surcharge des urgences, taux
+    d'occupation des lits, volume d'appels, pic d'appels (forêt extrémale). Le frontend
+    en applique un pour définir proprement la cible, puis on téléverse l'extract hospitalier."""
+    import outcome_templates
+    return {"templates": outcome_templates.as_list()}
+
+
+@app.post("/scenarios/{scenario_id}/model/outcome-template")
+def apply_outcome_template(scenario_id: str, payload: dict[str, Any],
+                           _: None = Depends(require_api_key)) -> dict[str, Any]:
+    """Applique un OUTCOME prédéfini au model_spec du scénario : remplace la cible
+    (nom/machine_name/task_type/unité/classe positive), pose l'algorithme recommandé
+    (dont extremal_rf pour un pic), fusionne les variables suggérées (source=user, sans
+    écraser les existantes) et les seuils d'alerte, reconstruit le data_template (les
+    colonnes EXACTES à téléverser) et incrémente la version. Body : {"template_id": "..."}."""
+    import json as _json
+    import outcome_templates
+    from datetime import datetime, timezone
+    tpl = outcome_templates.get(payload.get("template_id"))
+    if not tpl:
+        raise HTTPException(status_code=404, detail="Modèle d'outcome inconnu.")
+
+    with engine.connect() as conn:
+        row = conn.execute(text(
+            "SELECT variables_json FROM scenario_settings WHERE scenario_id = :sid"
+        ), {"sid": scenario_id}).mappings().first()
+    vj = dict(row["variables_json"]) if (row and row["variables_json"]) else {}
+    spec = dict(vj.get("model_spec") or {})
+
+    outcome = {
+        "name": tpl["outcome"]["name"], "machine_name": tpl["outcome"]["machine_name"],
+        "task_type": tpl["outcome"]["task_type"], "unit": tpl["outcome"].get("unit", ""),
+        "positive_class": (tpl["outcome"].get("positive_class")
+                           if tpl["outcome"]["task_type"] == "classification" else None),
+        "description": tpl.get("description", ""), "source": "user", "provenance": [],
+    }
+    # Merge suggested features onto any existing ones (never overwrite; drop a feature that
+    # collides with the new target machine_name so a column can't be both feature and outcome).
+    features = [dict(f) for f in (spec.get("features") or [])
+                if f.get("machine_name") != outcome["machine_name"]]
+    seen = {f.get("machine_name") for f in features}
+    for tf in tpl["features"]:
+        mn = tf["machine_name"]
+        if mn in seen or mn == outcome["machine_name"]:
+            continue
+        features.append({"name": tf["name"], "machine_name": mn, "dtype": tf.get("dtype", "float"),
+                         "source": "user", "public_provider": None, "importance": "medium",
+                         "provenance": []})
+        seen.add(mn)
+
+    algorithm = dict(tpl["algorithm"])
+    spec.setdefault("schema", MODEL_SPEC_SCHEMA)
+    spec["outcome"], spec["algorithm"], spec["features"] = outcome, algorithm, features
+    spec["data_template"] = _derive_data_template(outcome, features)
+    spec["version"] = int(spec.get("version", 0) or 0) + 1
+    spec.setdefault("epidemic_parameters", {"applicable": False, "disease": None, "params": {}})
+    vj["model_spec"] = spec
+    if tpl.get("alert_thresholds"):
+        vj["alert_thresholds"] = tpl["alert_thresholds"]
+    vj["outcome_template_id"] = tpl["id"]
+
+    with engine.begin() as conn:
+        conn.execute(text("""
+            INSERT INTO scenario_settings (scenario_id, variables_json, variables_validated, variables_generated_at, updated_at)
+            VALUES (:sid, CAST(:vj AS jsonb), TRUE, NOW(), NOW())
+            ON CONFLICT (scenario_id) DO UPDATE
+                SET variables_json = CAST(:vj AS jsonb), variables_validated = TRUE, updated_at = NOW()
+        """), {"sid": scenario_id, "vj": _json.dumps(vj)})
+    return {"status": "applied", "scenario_id": scenario_id, "template_id": tpl["id"],
+            "model_spec": spec}
+
+
 @app.post("/scenarios/{scenario_id}/model/spec/edit")
 def edit_scenario_model_spec(scenario_id: str, payload: dict[str, Any],
                              lang: str | None = Query(None),

@@ -2592,6 +2592,28 @@ export async function editModelSpec(scenarioId: string, payload: EditSpecPayload
   return r.json();
 }
 
+// Outcomes prêts à l'emploi (GESICA) : surcharge urgences, occupation lits, appels, pic d'appels.
+export interface OutcomeTemplate {
+  id: string; name: string; description: string;
+  outcome: { name: string; machine_name: string; task_type: string; unit?: string; positive_class?: string | null };
+  algorithm: { family: string; metric?: string; quantile?: number };
+  features: { name: string; machine_name: string; dtype: string }[];
+}
+export async function listOutcomeTemplates(): Promise<OutcomeTemplate[]> {
+  const r = await safeFetch(`${API_BASE_URL}/model/outcome-templates`);
+  if (!r.ok) throw new Error(httpMessage(r.status));
+  return (await r.json()).templates ?? [];
+}
+export async function applyOutcomeTemplate(scenarioId: string, templateId: string): Promise<{ status: string; model_spec?: unknown }> {
+  const r = await safeFetch(`${API_BASE_URL}/scenarios/${scenarioId}/model/outcome-template`, {
+    method: 'POST',
+    headers: authHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify({ template_id: templateId }),
+  });
+  if (!r.ok) throw new Error(httpMessage(r.status));
+  return r.json();
+}
+
 export async function proposeSpec(scenarioId: string): Promise<{ status: string; scenario_id?: string }> {
   const r = await safeFetch(`${API_BASE_URL}/scenarios/${scenarioId}/model/spec/propose?lang=${currentLang()}`, { method: 'POST', headers: authHeaders() });
   if (!r.ok) throw new Error(httpMessage(r.status));

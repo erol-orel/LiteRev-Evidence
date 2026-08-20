@@ -1037,6 +1037,12 @@ export const fr = {
       applyFitted: "Appliquer le R₀ ajusté",
       note: "Les paramètres sont regroupés depuis le corpus (valeur + IC 95 %, liés aux articles source). La modification exécute le même modèle compartimental avec vos valeurs — sans changer les évidences extraites.",
     },
+    outcomeTemplates: {
+      title: "Modèles d'outcome (GESICA)",
+      hint: "Appliquer une cible bien définie et prête à l'emploi — puis brancher un extract hospitalier (colonnes listées sous Données) et entraîner.",
+      apply: "Appliquer",
+      applied: "Appliqué",
+    },
     specEditor: {
       title: "Ajuster le modèle",
       subtitle: "Changez l'algorithme, le type de tâche, ou ajoutez/supprimez des variables, puis ré-entraînez. Le gabarit de données attendu est mis à jour automatiquement.",

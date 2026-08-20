@@ -44,6 +44,9 @@ import {
   getModelMonitor,
   exportModelBundle,
   exportModelXlsx,
+  listOutcomeTemplates,
+  applyOutcomeTemplate,
+  type OutcomeTemplate,
   fetchSeirProjection,
   postSeirProjection,
   postSeirObserved,
@@ -1222,6 +1225,49 @@ function SeirModelView({ scenarioId }: { scenarioId: string }) {
   );
 }
 
+// Outcomes GESICA prêts à l'emploi : appliquer une cible bien définie (surcharge urgences,
+// occupation lits, volume/pic d'appels) en un clic, puis téléverser l'extract hospitalier.
+function OutcomeTemplatePicker({ scenarioId, onApplied }: { scenarioId: string; onApplied: () => void }) {
+  const { t } = useI18n();
+  const [templates, setTemplates] = useState<OutcomeTemplate[]>([]);
+  const [applying, setApplying] = useState<string | null>(null);
+  const [applied, setApplied] = useState<string | null>(null);
+  useEffect(() => { listOutcomeTemplates().then(setTemplates).catch(() => setTemplates([])); }, []);
+  if (templates.length === 0) return null;
+  const apply = (id: string) => {
+    setApplying(id);
+    applyOutcomeTemplate(scenarioId, id).then(() => { setApplied(id); onApplied(); }).catch(() => {}).finally(() => setApplying(null));
+  };
+  return (
+    <div className="rounded-2xl border border-white/8 bg-white/2 p-4 space-y-2">
+      <div className="flex items-center gap-1.5">
+        <ClipboardList size={13} className="text-brand-400" />
+        <span className="text-[11px] font-semibold text-white/75 uppercase tracking-wider">{t("scenarioDetail.outcomeTemplates.title")}</span>
+      </div>
+      <p className="text-[10px] text-white/40 leading-snug">{t("scenarioDetail.outcomeTemplates.hint")}</p>
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 pt-1">
+        {templates.map(tpl => (
+          <div key={tpl.id} className="rounded-xl border border-white/8 bg-white/3 p-3 space-y-1.5">
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-[11px] font-semibold text-white/85">{tpl.name}</span>
+              <span className="rounded bg-brand-500/15 text-brand-300 px-1.5 py-0.5 text-[8px] font-mono uppercase">{tpl.outcome.task_type}</span>
+            </div>
+            <p className="text-[10px] text-white/45 leading-snug">{tpl.description}</p>
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-[8px] font-mono text-white/30 truncate">{tpl.algorithm.family}{tpl.algorithm.quantile ? ` · q${tpl.algorithm.quantile}` : ""}</span>
+              <button type="button" onClick={() => apply(tpl.id)} disabled={applying !== null}
+                className="flex items-center gap-1 shrink-0 rounded-lg bg-brand-600 text-white font-semibold px-2.5 py-1 text-[10px] hover:bg-brand-500 transition disabled:opacity-50">
+                {applying === tpl.id ? <Loader2 size={10} className="animate-spin" /> : <Plus size={10} />}
+                {applied === tpl.id ? t("scenarioDetail.outcomeTemplates.applied") : t("scenarioDetail.outcomeTemplates.apply")}
+              </button>
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function VariablesSection({ detail, scenarioId, onGoToModel }: { detail: ScenarioDetail; scenarioId: string; onGoToModel?: () => void }) {
   const { t, lang } = useI18n();
   // État du modèle entraîné + des données branchées, pour relier ce panneau au
@@ -1677,6 +1723,9 @@ function VariablesSection({ detail, scenarioId, onGoToModel }: { detail: Scenari
               <ArticleSourceLink a={modelSpec?.algorithm?.best_article} />
             </div>
           )}
+
+          {/* Outcomes GESICA prêts à l'emploi (surcharge urgences, appels, occupation lits…) */}
+          <OutcomeTemplatePicker scenarioId={scenarioId} onApplied={reloadModelState} />
 
           {/* Éditeur de spec : choisir l'algorithme (candidats de l'évidence),
               le type de tâche, ajouter/supprimer des variables, puis ré-entraîner. */}
