@@ -774,6 +774,80 @@ def model_guardrails(pipe, Xtr, ytr, Xte, yte, task_type: str, cv_scores,
     return {"checks": checks, "metric_ci": ci}
 
 
+def _psi(expected, actual, bins: int = 10):
+    """Population Stability Index between two numeric samples, binned on the EXPECTED
+    (reference) quantiles. Conventional reading: <0.1 negligible, 0.1–0.25 moderate,
+    ≥0.25 significant shift. None if a sample is too small / degenerate. Pure numpy."""
+    import numpy as np
+    e = np.asarray(expected, dtype=float); e = e[np.isfinite(e)]
+    a = np.asarray(actual, dtype=float); a = a[np.isfinite(a)]
+    if len(e) < 10 or len(a) < 10:
+        return None
+    edges = np.unique(np.quantile(e, np.linspace(0.0, 1.0, bins + 1)))
+    if len(edges) < 3:            # near-constant feature → no meaningful bins
+        return None
+    edges[0], edges[-1] = -np.inf, np.inf
+    e_pct = np.histogram(e, bins=edges)[0] / len(e)
+    a_pct = np.histogram(a, bins=edges)[0] / len(a)
+    eps = 1e-4
+    e_pct = np.clip(e_pct, eps, None); a_pct = np.clip(a_pct, eps, None)
+    return float(np.sum((a_pct - e_pct) * np.log(a_pct / e_pct)))
+
+
+def distribution_shift(X, used: list[dict]) -> dict:
+    """Distributional-shift guardrail (the "distributional shift : problème" from the
+    GESICA notes): for each numeric feature, PSI between the EARLY and LATE half of the
+    time-ordered data. A model fit on the past can generalise poorly to a shifted present
+    (call volumes, demand). Ordered by the spec's datetime feature when present, else by
+    row order (uploads are typically chronological). Informative — never alters the model."""
+    import numpy as np
+    import pandas as pd
+    check = {"key": "distribution_shift", "name": "Dérive distributionnelle (temporelle)",
+             "status": "ok", "features": []}
+    n = len(X)
+    if n < 40:
+        check["detail"] = "Trop peu de lignes pour évaluer une dérive temporelle (min. 40)."
+        return check
+    time_col = next((u["machine_name"] for u in used
+                     if u.get("dtype") == "datetime" and u["machine_name"] in X.columns), None)
+    if time_col:
+        order = pd.to_datetime(X[time_col], errors="coerce")
+        idx = order.sort_values(kind="mergesort").index if order.notna().any() else X.index
+    else:
+        idx = X.index
+    Xo = X.loc[idx]
+    half = n // 2
+    early, late = Xo.iloc[:half], Xo.iloc[half:]
+    numeric = [u["machine_name"] for u in used
+               if u.get("dtype") in ("float", "int") and u["machine_name"] in X.columns
+               and u["machine_name"] != time_col]
+    flagged = []
+    for col in numeric:
+        psi = _psi(pd.to_numeric(early[col], errors="coerce").values,
+                   pd.to_numeric(late[col], errors="coerce").values)
+        if psi is None:
+            continue
+        check["features"].append({"feature": col, "psi": round(psi, 3)})
+        if psi >= 0.25:
+            flagged.append((col, psi))
+    check["features"].sort(key=lambda f: -f["psi"])
+    check["statistic"] = max((f["psi"] for f in check["features"]), default=0.0)
+    check["ordered_by"] = time_col or "row_order"
+    if any(p >= 0.5 for _c, p in flagged):
+        check["status"] = "fail"
+    elif flagged:
+        check["status"] = "warn"
+    if flagged:
+        names = ", ".join(f"{c} (PSI {p:.2f})" for c, p in sorted(flagged, key=lambda x: -x[1])[:4])
+        check["detail"] = (
+            f"Distribution décalée entre la 1re et la 2de moitié de la période : {names}. "
+            "Le modèle entraîné sur le passé peut mal se généraliser au présent — "
+            "envisager un ré-entraînement régulier / une fenêtre glissante.")
+    else:
+        check["detail"] = "Distributions stables dans le temps (PSI < 0.25 pour toutes les variables)."
+    return check
+
+
 def explain_background(Xtr, used: list[dict]) -> dict:
     """Valeurs de « fond » par variable (médiane si numérique, mode sinon), pour
     l'explication locale par ablation. JSON-sérialisable (persisté dans le résumé)."""
@@ -1042,6 +1116,12 @@ def train_model(df, spec: dict, n_trials: int = 25, random_state: int = 42, test
                                                 cv_scores_arr, scoring, classes, random_state)
     except Exception as _ge:
         logger.warning(f"model_guardrails: {_ge}")
+    try:
+        _ds = distribution_shift(X, used)   # temporal drift over the full ordered dataset
+        result.setdefault("guardrails", {"checks": [], "metric_ci": None})
+        result["guardrails"].setdefault("checks", []).append(_ds)
+    except Exception as _de:
+        logger.warning(f"distribution_shift: {_de}")
     try:
         result["explain_background"] = explain_background(Xtr, used)
     except Exception:
