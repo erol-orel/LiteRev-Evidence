@@ -1039,6 +1039,12 @@ export const en: Translations = {
       applyFitted: "Apply fitted R₀",
       note: "Parameters are pooled from the corpus (value + 95% CI, linked to the source articles). Editing runs the same compartmental model with your values — it does not change the extracted evidence.",
     },
+    outcomeTemplates: {
+      title: "Outcome templates (GESICA)",
+      hint: "Apply a ready-made, well-defined target — then plug in a hospital extract (columns listed under Data) and train.",
+      apply: "Apply",
+      applied: "Applied",
+    },
     specEditor: {
       title: "Adjust the model",
       subtitle: "Change the algorithm, the task type, or add/remove variables, then retrain. The expected data template updates automatically.",
