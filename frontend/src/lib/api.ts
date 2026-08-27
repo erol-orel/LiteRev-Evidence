@@ -2512,14 +2512,16 @@ export async function postSeirObserved(
   },
 ): Promise<{ ok: boolean; n: number; column: string; source: string; label?: string; start_date?: string | null }> {
   const r = await safeFetch(`${API_BASE_URL}/scenarios/${scenarioId}/seir/observed`, {
-    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+    method: "POST", headers: authHeaders({ "Content-Type": "application/json" }), body: JSON.stringify(body),
   });
   if (!r.ok) throw new Error(httpMessage(r.status));
   return r.json();
 }
 
 export async function deleteSeirObserved(scenarioId: string): Promise<{ ok: boolean }> {
-  const r = await safeFetch(`${API_BASE_URL}/scenarios/${scenarioId}/seir/observed`, { method: "DELETE" });
+  const r = await safeFetch(`${API_BASE_URL}/scenarios/${scenarioId}/seir/observed`, {
+    method: "DELETE", headers: authHeaders(),
+  });
   if (!r.ok) throw new Error(httpMessage(r.status));
   return r.json();
 }
@@ -2530,7 +2532,7 @@ export async function calibrateSeir(
   body: { column?: string; overrides?: Record<string, SeirOverride>; days?: number } = {},
 ): Promise<SeirCalibration> {
   const r = await safeFetch(`${API_BASE_URL}/scenarios/${scenarioId}/seir/calibrate`, {
-    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+    method: "POST", headers: authHeaders({ "Content-Type": "application/json" }), body: JSON.stringify(body),
   });
   if (!r.ok) throw new Error(httpMessage(r.status));
   return r.json();
