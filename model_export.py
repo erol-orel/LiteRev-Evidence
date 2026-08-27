@@ -91,8 +91,36 @@ def build_model_xlsx(bundle: dict) -> bytes:
             _cell(r.get("metrics")), _cell(r.get("hyperparameters")), _cell(r.get("trained_at")),
         ])
 
+    # ── Sheet 4: SEIR parameters ──────────────────────────────────────────────
+    # The epidemiological block is the one part of the model the export used to drop
+    # entirely: R0, CFR, incubation and their provenance never reached the workbook, so
+    # an exported "model" silently omitted the parameters driving the projection.
+    epi = spec.get("epidemic_parameters") or {}
+    ws4 = wb.create_sheet("SEIR parameters")
+    ws4.append(["parameter", "value", "ci_low", "ci_high", "unit", "n_studies",
+                "provenance_article_ids", "overridden"])
+    for c in ws4[1]:
+        c.font = bold
+    epi_params = epi.get("params") if isinstance(epi.get("params"), dict) else {}
+    if epi.get("applicable") and epi_params:
+        for name, blk in epi_params.items():
+            blk = blk if isinstance(blk, dict) else {}
+            ws4.append([
+                _cell(name), _cell(blk.get("value")), _cell(blk.get("ci_low")),
+                _cell(blk.get("ci_high")), _cell(blk.get("unit")),
+                _cell(blk.get("n_studies")), _prov(blk),
+                "yes" if blk.get("overridden") else "",
+            ])
+        ws4.append([])
+        ws4.append(["disease", _cell(epi.get("disease"))])
+        if epi.get("note"):
+            ws4.append(["note", _cell(epi.get("note"))])
+    else:
+        ws4.append(["(no SEIR model for this scenario — not a transmissible-disease "
+                    "scenario, or no epidemic parameters extracted)"])
+
     # Reasonable column widths for readability.
-    for sheet in (ws, ws2, ws3):
+    for sheet in (ws, ws2, ws3, ws4):
         for col in sheet.columns:
             width = max((len(str(c.value)) for c in col if c.value is not None), default=10)
             sheet.column_dimensions[col[0].column_letter].width = min(max(width + 2, 10), 48)

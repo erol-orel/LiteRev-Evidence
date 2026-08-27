@@ -2396,7 +2396,16 @@ export interface SeirProjection {
   reason?: string;
   model?: string;
   disease?: string | null;
+  /** true = projection obtenue via des paramètres SAISIS, pas extraits de la littérature. */
+  forced?: boolean;
+  /** Provenance du R₀ effectivement simulé — l'UI ne doit pas présenter "assumed"/"user" comme sourcé. */
+  r0_source?: "literature" | "user" | "assumed";
+  /** Paramètres extraits mais inexploitables (le backend nomme ce qui manque). */
+  missing?: string[];
+  available_parameters?: string[];
   n_samples?: number;
+  /** Tirages écartés de l'ensemble (divergence numérique) — diagnostic d'un IC d'entrée trop large. */
+  n_dropped?: number;
   population?: number;
   initial_infected?: number;
   geography?: string | null;

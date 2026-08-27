@@ -15317,12 +15317,41 @@ def _seir_projection_payload(
         applied[name] = v
 
     dists = seir_model.params_to_distributions(eff_params)
+    # ── Trois portes AVANT de simuler ────────────────────────────────────────────
+    # Un override explicite de l'utilisateur vaut décision consciente : il ouvre les
+    # portes 1 et 2 (exploration « et si ? »), et la réponse est marquée `forced`.
+    forced = bool(applied)
     if not dists:
         return {
             "applicable": False,
             "scenario_id": scenario_id,
             "reason": "Aucun paramètre épidémiologique extrait de la littérature "
                       "(scénario non transmissible, ou paramètres non rapportés).",
+        }
+    # Porte 1 — le LLM a EXPLICITEMENT jugé le scénario non transmissible. Sans ce
+    # test, un seul paramètre numérique rescapé (une létalité, p. ex.) suffisait à
+    # servir une courbe épidémique complète pour un scénario d'oncologie.
+    if not epi.get("applicable") and not forced:
+        return {
+            "applicable": False,
+            "scenario_id": scenario_id,
+            "reason": "Scénario marqué NON transmissible à l'extraction : pas de "
+                      "modèle compartimental applicable.",
+        }
+    # Porte 2 — un paramètre extrait ne suffit pas, il faut un paramètre qui PILOTE
+    # la dynamique. Sans r0 ni beta, `_rates` retombait sur un R0 = 2.5 codé en dur et
+    # l'UI présentait la courbe qui en découle comme « issue de la littérature ».
+    if not ({"r0", "beta"} & set(dists)) and not forced:
+        _have = ", ".join(sorted(dists)) or "aucun"
+        return {
+            "applicable": False,
+            "scenario_id": scenario_id,
+            "reason": ("Paramètre de transmission manquant : ni R₀ ni β n'a été extrait "
+                       f"(disponibles : {_have}). Une projection reposerait sur une "
+                       "valeur par défaut, pas sur la littérature — saisissez R₀ "
+                       "manuellement pour explorer un scénario."),
+            "missing": ["r0"],
+            "available_parameters": sorted(dists),
         }
     _pop_default, _i0_default, _geo_label = _scenario_seed(scenario_id)
     try:
@@ -15358,7 +15387,15 @@ def _seir_projection_payload(
         "scenario_id": scenario_id,
         "model": ens["model"],
         "disease": epi.get("disease"),
+        # `forced` : projection obtenue grâce à des paramètres SAISIS, pas extraits —
+        # l'UI doit le dire plutôt que de laisser croire à un résultat sourcé.
+        "forced": forced,
+        # "literature" (extrait) | "user" (saisi dans l'UI) | "assumed" (repli du moteur).
+        # Un R0 tapé à la main ne doit pas être annoncé comme sourcé.
+        "r0_source": ("user" if ({"r0", "beta"} & set(applied))
+                      else ens["summary"].get("r0_source", "literature")),
         "n_samples": ens["n_samples"],
+        "n_dropped": ens.get("n_dropped", 0),
         "population": dists["population"],
         "initial_infected": dists["initial_infected"],
         "geography": _geo_label,
@@ -15423,7 +15460,8 @@ class SeirObservedIn(BaseModel):
 
 
 @app.post("/scenarios/{scenario_id}/seir/observed")
-def post_seir_observed(scenario_id: str, payload: SeirObservedIn) -> dict[str, Any]:
+def post_seir_observed(scenario_id: str, payload: SeirObservedIn,
+                       _: None = Depends(require_api_key)) -> dict[str, Any]:
     """Attache une série OBSERVÉE (réelle) au SEIR — upload de points {date|jour, valeur}
     OU tirage d'un connecteur — pour la superposer au graphe et calibrer le modèle dessus.
     Stockée par scénario (scenario_settings.seir_observed_json). Au moins 3 points."""
@@ -15462,7 +15500,8 @@ def post_seir_observed(scenario_id: str, payload: SeirObservedIn) -> dict[str, A
 
 
 @app.delete("/scenarios/{scenario_id}/seir/observed")
-def delete_seir_observed(scenario_id: str) -> dict[str, Any]:
+def delete_seir_observed(scenario_id: str,
+                         _: None = Depends(require_api_key)) -> dict[str, Any]:
     """Détache la série observée du SEIR du scénario."""
     _store_seir_observed(scenario_id, None)
     return {"ok": True}
@@ -15475,7 +15514,8 @@ class SeirCalibrateIn(BaseModel):
 
 
 @app.post("/scenarios/{scenario_id}/seir/calibrate")
-def post_seir_calibrate(scenario_id: str, payload: SeirCalibrateIn) -> dict[str, Any]:
+def post_seir_calibrate(scenario_id: str, payload: SeirCalibrateIn,
+                        _: None = Depends(require_api_key)) -> dict[str, Any]:
     """Calibre R0 (+ un facteur d'échelle d'amplitude) du SEIR sur la série observée
     attachée, par moindres carrés. Renvoie le R0 AJUSTÉ vs le R0 LITTÉRATURE + R²/RMSE.
     N'altère PAS le spec : l'UI applique le R0 ajusté comme override si l'utilisateur le

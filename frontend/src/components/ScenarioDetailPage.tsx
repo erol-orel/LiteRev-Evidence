@@ -761,6 +761,13 @@ const _SEIR_PARAM_ORDER = ["r0", "incubation_period_days", "infectious_period_da
 // Paramètres d'INTERVENTION (politique, pas extraits de la littérature) : affichés dans
 // leur propre bloc « avancé » pour activer les compartiments V (vaccination) / Q (quarantaine).
 const _SEIR_INTERVENTION_KEYS = ["vaccination_rate", "vaccine_efficacy", "quarantine_rate"];
+// Paramètres proposés à la SAISIE quand le corpus n'en a fourni aucun. R₀ est requis :
+// sans lui, le moteur retomberait sur une valeur par défaut et la courbe n'apprendrait
+// rien à personne. Les placeholders donnent un ordre de grandeur, pas une valeur imposée.
+const _SEIR_MANUAL_KEYS = ["r0", "incubation_period_days", "infectious_period_days", "cfr"];
+const _SEIR_MANUAL_PLACEHOLDER: Record<string, string> = {
+  r0: "e.g. 1.3", incubation_period_days: "e.g. 2", infectious_period_days: "e.g. 5", cfr: "e.g. 0.01",
+};
 const _SEIR_SYMBOL: Record<string, string> = {
   r0: "R₀ = β/γ", incubation_period_days: "σ = 1/incub.", infectious_period_days: "γ = 1/infect.",
   cfr: "f (CFR)", immunity_duration_days: "ω = 1/immun.", serial_interval_days: "—",
@@ -888,11 +895,21 @@ function SeirModelView({ scenarioId }: { scenarioId: string }) {
   const [obsError, setObsError] = useState("");
   const [calib, setCalib] = useState<SeirCalibration | null>(null);
 
+  // Une requête EN ÉCHEC ne doit pas se déguiser en « pas de modèle SEIR » : l'erreur
+  // est conservée à part, sinon un 500 ou une coupure réseau est indiscernable d'un
+  // scénario légitimement non transmissible et l'utilisateur cesse de chercher.
+  const [loadError, setLoadError] = useState("");
+  const [reloadKey, setReloadKey] = useState(0);
+
   useEffect(() => {
     let alive = true;
     setLoading(true);
+    setLoadError("");
     Promise.all([
-      fetchSeirProjection(scenarioId).catch(() => null),
+      fetchSeirProjection(scenarioId).catch((e: unknown) => {
+        if (alive) setLoadError(e instanceof Error ? e.message : String(e));
+        return null;
+      }),
       getScenarioModelSpec(scenarioId).catch(() => null),
     ]).then(([p, s]) => {
       if (!alive) return;
@@ -900,18 +917,86 @@ function SeirModelView({ scenarioId }: { scenarioId: string }) {
       setProvIndex((s?.provenance_index as Record<string, ProvArticle>) ?? {});
     }).finally(() => { if (alive) setLoading(false); });
     return () => { alive = false; };
-  }, [scenarioId]);
+  }, [scenarioId, reloadKey]);
 
   useEffect(() => { listDataConnectors().then(setConnectors).catch(() => setConnectors([])); }, []);
 
+  // Relance une projection avec les paramètres SAISIS. Défini AVANT le retour anticipé
+  // ci-dessous pour que l'écran « pas applicable » puisse s'en servir : le backend accepte
+  // parfaitement des overrides sur un scénario sans paramètres extraits, mais l'UI qui les
+  // envoie n'était rendue qu'APRÈS une projection déjà applicable — impasse.
+  const runWithOverrides = (onDone?: (ok: boolean) => void) => {
+    const overrides: Record<string, SeirOverride> = {};
+    Object.entries(edits).forEach(([k, v]) => {
+      const n = parseFloat(v);
+      if (v.trim() !== "" && isFinite(n)) overrides[k] = { value: n };
+    });
+    const body: { overrides: Record<string, SeirOverride>; population?: number; initial_infected?: number } = { overrides };
+    const pop = parseFloat(popEdit); if (popEdit.trim() !== "" && isFinite(pop)) body.population = pop;
+    const i0 = parseFloat(i0Edit); if (i0Edit.trim() !== "" && isFinite(i0)) body.initial_infected = i0;
+    setBusy(true);
+    setLoadError("");
+    postSeirProjection(scenarioId, body)
+      .then(p => { if (p?.applicable) { setProj(p); onDone?.(true); } else { setLoadError(p?.reason ?? ""); onDone?.(false); } })
+      .catch((e: unknown) => { setLoadError(e instanceof Error ? e.message : String(e)); onDone?.(false); })
+      .finally(() => setBusy(false));
+  };
+
   if (loading && !proj) return <LoadingSpinner text={t("scenarioDetail.seirTab.loading")} />;
   if (!proj || !proj.applicable) {
+    const failed = !!loadError && !proj;
     return (
-      <div className="rounded-2xl border border-white/8 bg-white/2 px-5 py-10 text-center space-y-2">
-        <TrendingUp size={22} className="mx-auto text-white/25" />
-        <p className="text-sm font-medium text-white/70">{t("scenarioDetail.seirTab.notApplicableTitle")}</p>
-        <p className="text-[12px] text-white/45 max-w-md mx-auto leading-relaxed">
-          {proj?.reason ?? t("scenarioDetail.seirTab.notApplicable")}</p>
+      <div className="space-y-3">
+        <div className="rounded-2xl border border-white/8 bg-white/2 px-5 py-8 text-center space-y-2">
+          {failed
+            ? <AlertTriangle size={22} className="mx-auto text-rose-300/70" />
+            : <TrendingUp size={22} className="mx-auto text-white/25" />}
+          <p className="text-sm font-medium text-white/70">
+            {failed ? t("scenarioDetail.seirTab.loadFailed") : t("scenarioDetail.seirTab.notApplicableTitle")}</p>
+          <p className="text-[12px] text-white/45 max-w-md mx-auto leading-relaxed">
+            {failed ? loadError : (proj?.reason ?? t("scenarioDetail.seirTab.notApplicable"))}</p>
+          {failed && (
+            <button onClick={() => setReloadKey(k => k + 1)}
+              className="mt-1 rounded-lg border border-white/15 bg-white/5 px-3 py-1.5 text-[11px] text-white/80 hover:bg-white/10">
+              {t("scenarioDetail.seirTab.retry")}
+            </button>
+          )}
+        </div>
+
+        {/* Saisie manuelle : disponible même sans paramètres extraits. */}
+        {!failed && (
+          <div className="rounded-2xl border border-white/8 bg-white/2 p-4 space-y-3">
+            <div>
+              <p className="text-[10px] uppercase tracking-wider text-white/40">{t("scenarioDetail.seirTab.manualTitle")}</p>
+              <p className="text-[11px] text-white/45 leading-relaxed mt-1">{t("scenarioDetail.seirTab.manualHint")}</p>
+            </div>
+            <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 text-[11px]">
+              {_SEIR_MANUAL_KEYS.map(k => (
+                <label key={k} className="space-y-1 block">
+                  <span className="text-white/45">{_SEIR_PARAM_LABEL[k] ?? k}</span>
+                  <input type="number" step="any" value={edits[k] ?? ""}
+                    placeholder={_SEIR_MANUAL_PLACEHOLDER[k] ?? ""}
+                    onChange={e => setEdits(prev => ({ ...prev, [k]: e.target.value }))}
+                    className="w-full rounded-lg border border-white/10 bg-white/5 px-2 py-1 text-white/90 font-mono outline-none focus:border-brand-400/50" />
+                </label>
+              ))}
+              <label className="space-y-1 block"><span className="text-white/45">{t("scenarioDetail.seir.population")}</span>
+                <input type="number" step="any" value={popEdit} onChange={e => setPopEdit(e.target.value)}
+                  className="w-full rounded-lg border border-white/10 bg-white/5 px-2 py-1 text-white/90 font-mono outline-none focus:border-brand-400/50" /></label>
+              <label className="space-y-1 block"><span className="text-white/45">{t("scenarioDetail.seirTab.initialInfected")}</span>
+                <input type="number" step="any" value={i0Edit} onChange={e => setI0Edit(e.target.value)}
+                  className="w-full rounded-lg border border-white/10 bg-white/5 px-2 py-1 text-white/90 font-mono outline-none focus:border-brand-400/50" /></label>
+            </div>
+            {loadError && <p className="text-[11px] text-rose-300/80">{loadError}</p>}
+            <div className="flex items-center gap-2">
+              <button onClick={() => runWithOverrides()} disabled={busy || !(edits.r0 ?? "").trim()}
+                className="rounded-lg border border-brand-400/30 bg-brand-400/10 px-3 py-1.5 text-[11px] text-brand-100 disabled:opacity-40 hover:bg-brand-400/20">
+                {busy ? t("scenarioDetail.seirTab.recomputing") : t("scenarioDetail.seirTab.runManual")}
+              </button>
+              <span className="text-[10px] text-white/30">{t("scenarioDetail.seirTab.manualRequired")}</span>
+            </div>
+          </div>
+        )}
       </div>
     );
   }
@@ -924,15 +1009,7 @@ function SeirModelView({ scenarioId }: { scenarioId: string }) {
   const hasEdits = Object.values(edits).some(v => v.trim() !== "") || popEdit.trim() !== "" || i0Edit.trim() !== "";
   const hasOverrides = !!proj.overrides_applied && Object.keys(proj.overrides_applied).length > 0;
 
-  const recompute = () => {
-    const overrides: Record<string, SeirOverride> = {};
-    Object.entries(edits).forEach(([k, v]) => { const n = parseFloat(v); if (v.trim() !== "" && isFinite(n)) overrides[k] = { value: n }; });
-    const body: { overrides: Record<string, SeirOverride>; population?: number; initial_infected?: number } = { overrides };
-    const pop = parseFloat(popEdit); if (popEdit.trim() !== "" && isFinite(pop)) body.population = pop;
-    const i0 = parseFloat(i0Edit); if (i0Edit.trim() !== "" && isFinite(i0)) body.initial_infected = i0;
-    setBusy(true);
-    postSeirProjection(scenarioId, body).then(p => { if (p?.applicable) setProj(p); }).finally(() => setBusy(false));
-  };
+  const recompute = () => runWithOverrides();
   const reset = () => {
     setEdits({}); setPopEdit(""); setI0Edit(""); setBusy(true);
     fetchSeirProjection(scenarioId).then(p => setProj(p)).finally(() => setBusy(false));
@@ -1010,8 +1087,23 @@ function SeirModelView({ scenarioId }: { scenarioId: string }) {
   const orderedKeys = [..._SEIR_PARAM_ORDER.filter(k => k in params),
     ...Object.keys(params).filter(k => !_SEIR_PARAM_ORDER.includes(k) && !_SEIR_INTERVENTION_KEYS.includes(k))];
 
+  // Une projection dont le R₀ est SAISI ou SUPPOSÉ doit le dire : sans cette mention,
+  // l'UI promet « paramétré par la littérature extraite » au-dessus d'un chiffre inventé.
+  const r0Source = proj.r0_source ?? "literature";
+  const notSourced = r0Source !== "literature" || proj.forced === true;
+
   return (
     <div className="space-y-4">
+      {notSourced && (
+        <div className="rounded-xl border border-gold-400/25 bg-gold-400/5 px-3 py-2 flex items-start gap-2">
+          <AlertTriangle size={13} className="mt-0.5 shrink-0 text-gold-300" />
+          <p className="text-[11px] text-gold-100/80 leading-relaxed">
+            {r0Source === "assumed"
+              ? t("scenarioDetail.seirTab.r0Assumed")
+              : t("scenarioDetail.seirTab.r0UserSupplied")}
+          </p>
+        </div>
+      )}
       <div className="rounded-2xl border border-white/8 bg-white/3 p-4 flex flex-wrap items-center justify-between gap-2">
         <div>
           <div className="flex items-center gap-2">
@@ -5105,25 +5197,38 @@ function ModelDashboard({ scenarioId, run, monitor, spec }: { scenarioId: string
   const fmtDate = (d?: string | null) => (d ? new Date(d).toLocaleString(locale, { dateStyle: "medium", timeStyle: "short" }) : "—");
   const [exporting, setExporting] = useState(false);
   const [exportingXlsx, setExportingXlsx] = useState(false);
+  // Un export qui échoue doit le DIRE. Le catch vide avalait un message déjà traduit
+  // (401 « accès non autorisé » quand la clé API n'est pas mémorisée, 501 si openpyxl
+  // manque côté serveur…) : l'utilisateur cliquait, rien ne se passait, rien ne
+  // l'expliquait. L'export ne doit pas casser la page — mais il doit se plaindre.
+  const [exportError, setExportError] = useState("");
   const _download = (blob: Blob, name: string) => {
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
-    a.href = url; a.download = name; a.click();
-    URL.revokeObjectURL(url);
+    a.href = url; a.download = name;
+    // L'ancre doit être DANS le document et l'URL révoquée au tick suivant, sinon
+    // certains navigateurs annulent le téléchargement avant de l'avoir démarré.
+    a.style.display = "none";
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(() => { document.body.removeChild(a); URL.revokeObjectURL(url); }, 0);
   };
+  const _exportErr = (e: unknown) => setExportError(e instanceof Error ? e.message : String(e));
   const doExport = async () => {
     setExporting(true);
+    setExportError("");
     try {
       const bundle = await exportModelBundle(scenarioId);
       _download(new Blob([JSON.stringify(bundle, null, 2)], { type: "application/json" }), `model_${scenarioId}.json`);
-    } catch { /* silencieux : l'export ne doit jamais casser la page */ }
+    } catch (e) { _exportErr(e); }
     finally { setExporting(false); }
   };
   const doExportXlsx = async () => {
     setExportingXlsx(true);
+    setExportError("");
     try {
       _download(await exportModelXlsx(scenarioId), `model_${scenarioId}.xlsx`);
-    } catch { /* silencieux */ }
+    } catch (e) { _exportErr(e); }
     finally { setExportingXlsx(false); }
   };
 
@@ -5177,6 +5282,14 @@ function ModelDashboard({ scenarioId, run, monitor, spec }: { scenarioId: string
           </span>
         </div>
       </div>
+      {exportError && (
+        <div className="flex items-start gap-2 rounded-xl border border-rose-400/25 bg-rose-400/5 px-3 py-2">
+          <AlertTriangle size={13} className="mt-0.5 shrink-0 text-rose-300" />
+          <p className="text-[11px] text-rose-100/85 leading-relaxed">
+            {t("scenarioDetail.model.dashboard.exportFailed")} {exportError}
+          </p>
+        </div>
+      )}
 
       {/* Prédiction actuelle (héros) */}
       <div className="rounded-2xl border border-white/5 bg-white/2 px-4 py-3">
