@@ -39,6 +39,27 @@ from dataclasses import dataclass
 _N_STATE = 8
 _Z = 1.959963984540054  # quantile normal à 97.5 % (demi-largeur d'un IC 95 %)
 
+# Plancher PHYSIQUE d'une durée épidémiologique (6 h). Une « période » tirée sous ce
+# seuil ne décrit plus une maladie : gamma = 1/période explose et la trajectoire part
+# à l'infini. À ne PAS confondre avec un plancher de POSITIVITÉ (~1e-9), qui convient
+# à un taux mais transforme une durée en maladie impossible (cf. ParamDist.sample).
+_MIN_PERIOD_DAYS = 0.25
+# Champs exprimés en JOURS (durées) : plancher = _MIN_PERIOD_DAYS.
+_PERIOD_FIELDS = frozenset((
+    "infectious_period_days", "incubation_period_days", "immunity_duration_days",
+))
+# Champs exprimés en PROPORTION 0..1 : bornés des deux côtés à l'échantillonnage.
+_FRACTION_FIELDS = frozenset(("cfr", "vaccine_efficacy"))
+
+# ── Littérature grise (rapports de situation) vs littérature revue par les pairs ──
+# `quality_by_id` sert DIRECTEMENT de poids dans pool_weighted : un rapport de situation
+# y pesait 0.55 contre 0.774 pour un essai randomisé (rapport 1.4), et dépassait même un
+# case report revu par les pairs (0.386). Un seul chiffre de communiqué déplaçait alors un
+# R0 poolé de 2.09 à 3.04. Ces deux constantes bornent le problème ; cf.
+# normalize_extracted_parameters.
+GREY_WEIGHT_CAP = 0.10      # poids maximal d'une observation grise dans le pool
+MIN_PEER_STUDIES = 2        # observations revues par les pairs requises avant tout pooling gris
+
 
 @dataclass
 class SeirParams:
@@ -58,14 +79,30 @@ class SeirParams:
 
 
 def _rates(p: SeirParams) -> dict:
-    """Convertit des paramètres « lisibles » (périodes, R0, CFR) en taux d'ODE + indicateurs."""
-    gamma = 1.0 / max(p.infectious_period_days or 0.0, 1e-6)
+    """Convertit des paramètres « lisibles » (périodes, R0, CFR) en taux d'ODE + indicateurs.
+
+    Lève ValueError si la période infectieuse n'est pas physiquement plausible : une
+    durée nulle/négative donnait gamma = 1e6/j, soit une « maladie » qui infecte puis
+    guérit en une fraction de seconde — et la trajectoire absurde qui va avec. Mieux
+    vaut échouer franchement (simulate_ensemble écarte le tirage) que rendre un chiffre
+    faux avec assurance."""
+    per = p.infectious_period_days
+    if per is None or not math.isfinite(float(per)) or float(per) < _MIN_PERIOD_DAYS:
+        raise ValueError(
+            f"SEIR: période infectieuse implausible ({per!r} j ; minimum "
+            f"{_MIN_PERIOD_DAYS} j). Paramètre manquant ou dans la mauvaise unité ?")
+    gamma = 1.0 / float(per)
+    # `r0_source` distingue une valeur ISSUE DE LA LITTÉRATURE d'un repli codé en dur.
+    # Sans lui, l'UI présentait un R0 = 2.5 inventé comme s'il était sourcé (avec un IC
+    # de largeur nulle, ce qui se lit comme une certitude).
+    r0_source = "literature"
     if p.beta is not None and p.beta > 0:
         beta = p.beta
     elif p.r0 is not None and p.r0 > 0:
         beta = p.r0 * gamma
     else:
         beta = 2.5 * gamma  # repli prudent (R0 = 2.5) si ni beta ni r0 fournis
+        r0_source = "assumed"
     has_e = bool(p.incubation_period_days and p.incubation_period_days > 0)
     sigma = 1.0 / p.incubation_period_days if has_e else 0.0
     has_waning = bool(p.immunity_duration_days and p.immunity_duration_days > 0)
@@ -74,12 +111,19 @@ def _rates(p: SeirParams) -> dict:
     eff = min(max(p.vaccine_efficacy if p.vaccine_efficacy is not None else 1.0, 0.0), 1.0)
     nu = (p.vaccination_rate * eff) if (p.vaccination_rate and p.vaccination_rate > 0) else 0.0
     kappa = p.quarantine_rate if (p.quarantine_rate and p.quarantine_rate > 0) else 0.0
+    # R0 = reproduction de BASE (sans intervention) = beta/gamma. Rc = reproduction
+    # CONTRÔLÉE : l'isolement retire les infectieux au taux kappa, donc la durée
+    # infectieuse effective tombe à 1/(gamma+kappa). Sans quarantaine, Rc == R0.
+    # C'est Rc — pas R0 — qui doit piloter r_eff, sinon on affiche « R > 1 » sur une
+    # épidémie que le modèle lui-même montre en train de s'éteindre.
     return {
         "beta": beta, "gamma": gamma, "sigma": sigma, "omega": omega, "cfr": cfr,
         "nu": nu, "kappa": kappa,
         "has_e": has_e, "has_death": cfr > 0.0, "has_waning": has_waning,
         "has_v": nu > 0.0, "has_q": kappa > 0.0,
         "r0": beta / gamma if gamma > 0 else float("nan"),
+        "rc": beta / (gamma + kappa) if (gamma + kappa) > 0 else float("nan"),
+        "r0_source": r0_source,
     }
 
 
@@ -165,6 +209,7 @@ def simulate(p: SeirParams, days: int = 365, dt: float = 0.25) -> dict:
     steps_per_day = max(int(round(1.0 / max(dt, 1e-6))), 1)
     step = 1.0 / steps_per_day
     r0v = r["r0"]
+    rcv = r["rc"]   # reproduction contrôlée (== r0 sans quarantaine) → pilote r_eff
 
     days_out: list[int] = []
     incidence: list[float] = []
@@ -185,7 +230,7 @@ def simulate(p: SeirParams, days: int = 365, dt: float = 0.25) -> dict:
         prevalence.append(i * n)
         cumulative.append(c * n)
         deaths.append(d * n)
-        r_eff.append(r0v * s)
+        r_eff.append(rcv * s)
         susceptible.append(s * n)   # compartiments S / E / R / V / Q exposés aussi (effectifs)
         exposed.append(_e * n)
         recovered.append(_rec * n)
@@ -196,6 +241,13 @@ def simulate(p: SeirParams, days: int = 365, dt: float = 0.25) -> dict:
     for day in range(1, int(days) + 1):
         for _ in range(steps_per_day):
             y = _rk4_step(y, r, step)
+            # Divergence numérique : NaN/inf. Le bornage ci-dessous ne peut PAS l'attraper
+            # (`nan < 0.0` vaut False), donc sans ce test le NaN se propageait jusqu'au
+            # résumé — attack_rate = nan, peak_prevalence = inf — sans la moindre erreur.
+            if not all(math.isfinite(v) for v in y):
+                raise ValueError(
+                    f"SEIR: l'intégration a divergé au jour {day} "
+                    f"(beta·dt trop grand ? paramètres hors domaine ?)")
             # borne les micro-négatifs dus à l'arithmétique flottante (tous compartiments)
             if any(v < 0.0 for v in y):
                 y = [v if v > 0.0 else 0.0 for v in y]
@@ -206,6 +258,8 @@ def simulate(p: SeirParams, days: int = 365, dt: float = 0.25) -> dict:
     summary = {
         "model": model_name(r),
         "r0": round(r0v, 3),
+        "r_control": round(rcv, 3),      # == r0 sans quarantaine
+        "r0_source": r["r0_source"],     # "literature" | "assumed" (repli codé en dur)
         "peak_incidence": round(incidence[peak_inc_i], 2),
         "peak_incidence_day": days_out[peak_inc_i],
         "peak_prevalence": round(prevalence[peak_prev_i], 2),
@@ -239,12 +293,22 @@ def simulate(p: SeirParams, days: int = 365, dt: float = 0.25) -> dict:
 class ParamDist:
     """Distribution d'un paramètre : moyenne + IC 95 % (facultatif) issus du corpus.
 
-    Échantillonnée comme une normale tronquée aux valeurs positives. Sans IC (ou IC
-    dégénéré), la valeur est fixe (== moyenne) — l'incertitude ne vient alors que des
-    autres paramètres."""
+    Échantillonnée comme une normale tronquée au domaine PHYSIQUE du paramètre. Sans IC
+    (ou IC dégénéré), la valeur est fixe (== moyenne) — l'incertitude ne vient alors que
+    des autres paramètres.
+
+    `kind` porte l'UNITÉ, et donc le domaine valide :
+      • "rate"     (défaut) : > 0, plancher de positivité ;
+      • "period"   : une durée en JOURS, plancher `_MIN_PERIOD_DAYS` ;
+      • "fraction" : une proportion, bornée à [0, 1].
+    Sans cette distinction, un plancher de 1e-9 — correct pour un taux — s'appliquait à
+    une durée et fabriquait, dans ~2 % des tirages de CHAQUE ensemble, une maladie dont
+    la période infectieuse valait un milliardième de jour. Ces trajectoires absurdes
+    (pics à 10⁷–10¹¹ cas/j) remontaient telles quelles dans l'IC publié."""
     mean: float
     ci_low: float | None = None
     ci_high: float | None = None
+    kind: str = "rate"
 
     def sd(self) -> float:
         if (self.ci_low is not None and self.ci_high is not None
@@ -252,11 +316,27 @@ class ParamDist:
             return (self.ci_high - self.ci_low) / (2.0 * _Z)
         return 0.0
 
+    def bounds(self) -> tuple[float, float]:
+        """Domaine physique (min, max) du paramètre, selon son unité."""
+        if self.kind == "period":
+            return (_MIN_PERIOD_DAYS, float("inf"))
+        if self.kind == "fraction":
+            return (0.0, 1.0)
+        return (1e-9, float("inf"))
+
     def sample(self, rng: random.Random) -> float:
         sd = self.sd()
+        lo, hi = self.bounds()
         if sd <= 0.0:
-            return float(self.mean)
-        return max(rng.gauss(self.mean, sd), 1e-9)  # garde le paramètre positif
+            return min(max(float(self.mean), lo), hi)
+        # Normale TRONQUÉE par rejet : on retire tant que le tirage sort du domaine,
+        # plutôt que de l'écraser sur la borne (ce qui empilait des valeurs impossibles
+        # exactement AU plancher et biaisait la queue basse de l'IC).
+        for _ in range(64):
+            v = rng.gauss(self.mean, sd)
+            if lo <= v <= hi:
+                return v
+        return min(max(float(self.mean), lo), hi)  # IC pathologique → repli sur la moyenne
 
 
 # Paramètres dont la PRÉSENCE change la structure du modèle (E / D / R→S). Ils
@@ -271,12 +351,27 @@ _PARAM_FIELDS = (
 )
 
 
-def _as_dist(v) -> ParamDist | None:
+def _kind_for(field: str) -> str:
+    """Unité d'un champ de `_PARAM_FIELDS` → domaine d'échantillonnage (cf. ParamDist)."""
+    if field in _PERIOD_FIELDS:
+        return "period"
+    if field in _FRACTION_FIELDS:
+        return "fraction"
+    return "rate"
+
+
+def _as_dist(v, field: str | None = None) -> ParamDist | None:
+    """Coerce en ParamDist en RENSEIGNANT l'unité déduite du nom du champ, faute de quoi
+    une durée serait échantillonnée avec le plancher d'un taux (cf. ParamDist)."""
     if v is None:
         return None
+    kind = _kind_for(field) if field else "rate"
     if isinstance(v, ParamDist):
+        # Une distribution construite sans `kind` explicite hérite de celui du champ.
+        if field and v.kind == "rate" and kind != "rate":
+            return ParamDist(v.mean, v.ci_low, v.ci_high, kind)
         return v
-    return ParamDist(mean=float(v))
+    return ParamDist(mean=float(v), kind=kind)
 
 
 def _percentile(sorted_vals: list[float], q: float) -> float:
@@ -295,17 +390,31 @@ def _percentile(sorted_vals: list[float], q: float) -> float:
 
 
 def _band(series_per_sample: list[list[float]], lo_q: float, hi_q: float) -> dict:
-    """Agrège N trajectoires (une liste par tirage) en médiane + IC par pas de temps."""
+    """Agrège N trajectoires (une liste par tirage) en médiane + IC par pas de temps.
+
+    Les valeurs non finies sont ÉCARTÉES avant le tri : `sorted()` sur une colonne
+    contenant NaN ne lève rien et rend une liste NON triée, ce qui cassait silencieusement
+    la garantie q05 ≤ q50 ≤ q95 (bande « basse » tracée au-dessus de la médiane)."""
     if not series_per_sample:
         return {"median": [], "lower": [], "upper": []}
     horizon = len(series_per_sample[0])
     median, lower, upper = [], [], []
     for t in range(horizon):
-        col = sorted(s[t] for s in series_per_sample)
+        col = sorted(v for v in (s[t] for s in series_per_sample) if math.isfinite(v))
         median.append(_percentile(col, 50.0))
         lower.append(_percentile(col, lo_q))
         upper.append(_percentile(col, hi_q))
     return {"median": median, "lower": lower, "upper": upper}
+
+
+def _run_is_finite(res: dict) -> bool:
+    """Un tirage est retenu seulement si TOUTES ses séries et son résumé sont finis."""
+    for key in ("incidence", "prevalence", "cumulative", "deaths", "r_eff",
+                "susceptible", "exposed", "recovered", "vaccinated", "quarantined"):
+        if any(not math.isfinite(v) for v in res.get(key, ())):
+            return False
+    return all(math.isfinite(v) for v in res["summary"].values()
+               if isinstance(v, (int, float)) and not isinstance(v, bool))
 
 
 def simulate_ensemble(
@@ -324,11 +433,12 @@ def simulate_ensemble(
     plus `days`, `model`, `n_samples` et un `summary` agrégé (pics, taux d'attaque, R0
     en médiane [IC]). Déterministe pour un `seed` donné."""
     rng = random.Random(seed)
-    dists = {k: _as_dist(params.get(k)) for k in _PARAM_FIELDS}
+    dists = {k: _as_dist(params.get(k), k) for k in _PARAM_FIELDS}
     n_samples = max(int(n_samples), 1)
     lo_q, hi_q = ci
 
     runs: list[dict] = []
+    dropped = 0
     for _ in range(n_samples):
         kwargs = {}
         for k in _PARAM_FIELDS:
@@ -337,9 +447,17 @@ def simulate_ensemble(
                 continue  # laisse le défaut du dataclass (et, pour les structurels, désactive)
             kwargs[k] = d.sample(rng)
         try:
-            runs.append(simulate(SeirParams(**kwargs), days=days))
+            res = simulate(SeirParams(**kwargs), days=days)
         except Exception:
+            dropped += 1
             continue  # un tirage numériquement pathologique ne casse pas l'ensemble
+        # Un tirage divergent doit être écarté de TOUTES les séries et du résumé, pas
+        # neutralisé série par série : sinon les bandes reposent sur des sous-ensembles
+        # de tirages différents et cessent d'être cohérentes entre elles.
+        if not _run_is_finite(res):
+            dropped += 1
+            continue
+        runs.append(res)
 
     if not runs:
         raise ValueError("SEIR ensemble: aucune trajectoire valide (paramètres invalides ?)")
@@ -347,6 +465,7 @@ def simulate_ensemble(
     out: dict = {
         "model": runs[0]["model"],
         "n_samples": len(runs),
+        "n_dropped": dropped,   # tirages écartés : diagnostic d'un IC d'entrée trop large
         "days": runs[0]["days"],
     }
     for key in ("incidence", "prevalence", "cumulative", "deaths", "r_eff",
@@ -363,7 +482,11 @@ def simulate_ensemble(
 
     out["summary"] = {
         "model": runs[0]["model"],
+        # La structure du modèle est fixée pour tout l'ensemble : la provenance du R0
+        # (littérature vs repli codé en dur) l'est donc aussi.
+        "r0_source": runs[0]["summary"]["r0_source"],
         "r0": _sum_band("r0"),
+        "r_control": _sum_band("r_control"),
         "peak_incidence": _sum_band("peak_incidence"),
         "peak_incidence_day": _sum_band("peak_incidence_day"),
         "peak_prevalence": _sum_band("peak_prevalence"),
@@ -610,6 +733,16 @@ def _num_or_none(v):
         return None
 
 
+_PERCENT_UNITS = frozenset(("%", "percent", "percentage", "pourcent", "pourcentage",
+                            "per cent", "pct", "%%"))
+
+
+def _is_percent_unit(unit) -> bool:
+    """Vrai si l'unité déclarée dit « pour-cent » (et non « proportion » / vide)."""
+    u = str(unit or "").strip().lower()
+    return u in _PERCENT_UNITS
+
+
 def _clean_provenance(prov, valid_ids: set) -> list[int]:
     """Ne garde que des ids d'articles RÉELS (présents dans `valid_ids`), dédupliqués,
     dans l'ordre. Coerce en int ; ignore ce qui n'est pas un id valide."""
@@ -624,21 +757,45 @@ def _clean_provenance(prov, valid_ids: set) -> list[int]:
     return out
 
 
-def normalize_extracted_parameters(raw, valid_ids=None, quality_by_id=None) -> dict:
+def normalize_extracted_parameters(raw, valid_ids=None, quality_by_id=None,
+                                   grey_ids=None, grey_weight_cap=GREY_WEIGHT_CAP,
+                                   min_peer_studies=MIN_PEER_STUDIES) -> dict:
     """Nettoie le bloc `epidemic_parameters` d'une extraction LLM en un bloc
     DÉTERMINISTE : nombres coercés, provenance filtrée sur `valid_ids` (le pool
     pertinent — si fourni), et SEULS les paramètres dont la valeur centrale est un
     nombre conservés. Renvoie
-    ``{applicable, disease, params:{nom:{value,ci_low,ci_high,unit,n_studies,provenance}}, cited}``.
+    ``{applicable, disease, params:{nom:{value,ci_low,ci_high,unit,n_studies,provenance}},
+    params_context, cited}``.
     Si `quality_by_id` est fourni ET qu'un paramètre porte des `observations` par étude,
     l'estimation « narrative » du LLM est REMPLACÉE par un POOL NUMÉRIQUE pondéré par la
     qualité (cf. pool_weighted) dès qu'au moins deux études pèsent — plus rigoureux et
-    reproductible. Pur (aucune I/O) : testable sans base ni réseau."""
+    reproductible. Pur (aucune I/O) : testable sans base ni réseau.
+
+    `grey_ids` — les observations issues de LITTÉRATURE GRISE (rapports de situation
+    ReliefWeb, communiqués). Elles sont soumises à deux règles, car `quality_by_id` EST
+    le poids de pooling et un rapport de situation y valait 0.55 contre 0.774 pour un
+    essai randomisé — un rapport dépassait même un case report revu par les pairs (0.386) :
+
+      1. la littérature grise ne peut jamais ÉTABLIR un paramètre. Sous
+         `min_peer_studies` observations revues par les pairs, les observations grises
+         sont retirées du pool et renvoyées à part dans `params_context` (« rapporté sur
+         le terrain, non poolé ») — jamais transmises à `params_to_distributions` ;
+      2. quand des données revues par les pairs existent, la grise entre avec un poids
+         plafonné à `grey_weight_cap` (0.10), soit ≥ 6× plus léger qu'un article médiocre.
+         Elle peut nuancer ; elle ne peut pas piloter.
+
+    Mesuré : deux articles à R0 = 2.0 et 2.2 plus un rapport annonçant 6.0 faisaient
+    passer le R0 poolé de 2.09 à 3.04 (+46 %) avec une borne basse d'IC à −0.25. Avec le
+    plafond : 2.31. Les valeurs par défaut reproduisent EXACTEMENT le comportement
+    antérieur quand `grey_ids` est vide."""
     valid = set(valid_ids) if valid_ids is not None else None
-    if not isinstance(raw, dict):
-        return {"applicable": False, "disease": None, "params": {}, "cited": []}
+    grey = {int(g) for g in (grey_ids or []) if _num_or_none(g) is not None}
     params: dict = {}
+    params_context: dict = {}
     cited: list[int] = []
+    if not isinstance(raw, dict):
+        return {"applicable": False, "disease": None, "params": {},
+                "params_context": {}, "cited": []}
     for name in _EXTRACTED_FIELDS:
         blk = raw.get(name)
         if not isinstance(blk, dict):
@@ -657,7 +814,7 @@ def normalize_extracted_parameters(raw, valid_ids=None, quality_by_id=None) -> d
         # Pooling NUMÉRIQUE pondéré par la qualité (prioritaire sur l'estimation LLM)
         # dès qu'au moins deux études réelles fournissent une observation.
         if quality_by_id is not None and isinstance(blk.get("observations"), list):
-            _obs = []
+            _obs, _grey_obs = [], []
             for o in blk["observations"]:
                 if not isinstance(o, dict):
                     continue
@@ -665,18 +822,51 @@ def normalize_extracted_parameters(raw, valid_ids=None, quality_by_id=None) -> d
                     _aid = int(o.get("article_id"))
                 except (TypeError, ValueError):
                     continue
-                if valid is None or _aid in valid:
-                    _obs.append(o)
-            pooled = pool_weighted(_obs, quality_by_id)
+                if valid is not None and _aid not in valid:
+                    continue
+                (_grey_obs if _aid in grey else _obs).append(o)
+            # Règle 1 : sans socle revu par les pairs, la grise ne poole pas du tout.
+            _weights = dict(quality_by_id)
+            if _grey_obs:
+                if len(_obs) >= max(1, int(min_peer_studies)):
+                    # Règle 2 : elle entre, mais avec un poids plafonné.
+                    for _o in _grey_obs:
+                        _gid = int(_o["article_id"])
+                        _weights[_gid] = min(float(_weights.get(_gid) or grey_weight_cap),
+                                             float(grey_weight_cap))
+                    _obs = _obs + _grey_obs
+                else:
+                    _ctx = pool_weighted(_grey_obs, quality_by_id)
+                    if _ctx:
+                        params_context[name] = {
+                            "value": _ctx["value"], "ci_low": _ctx["ci_low"],
+                            "ci_high": _ctx["ci_high"], "n_reports": _ctx["n_studies"],
+                            "provenance": _ctx["provenance"], "grey": True,
+                            "reason": "field-reported; not pooled (no peer-reviewed basis)",
+                        }
+            # `_weights` reste LOCAL au paramètre : plafonner globalement ferait fuiter
+            # le plafond d'un paramètre sur les suivants.
+            pooled = pool_weighted(_obs, _weights)
             if pooled and pooled["n_studies"] >= 2:
                 val, lo, hi = pooled["value"], pooled["ci_low"], pooled["ci_high"]
+                # L'IC du pool est moyenne ± 1.96·écart-type : sur une dispersion
+                # inter-études large il descend sous zéro, ce qui n'a de sens pour
+                # AUCUNE de ces grandeurs (R0, durées, létalité sont ≥ 0).
+                if lo is not None and lo < 0.0:
+                    lo = 0.0
                 if pooled["provenance"]:
                     prov = pooled["provenance"]
                 n_studies = max(n_studies, pooled["n_studies"])
 
         if val is None:
             continue  # ni valeur LLM ni pool numérique → paramètre ignoré
+        unit = str(blk.get("unit") or "")[:32]
         if name == "cfr":
+            # Le champ `unit` était stocké mais jamais lu : une létalité extraite en
+            # POUR-CENT (« 40 » pour 40 %) était écrasée à 1.0, c.-à-d. 100 % de décès.
+            # On convertit quand l'unité le dit, avant de borner.
+            if _is_percent_unit(unit):
+                val, lo, hi = (v / 100.0 if v is not None else None for v in (val, lo, hi))
             val = min(max(val, 0.0), 1.0)  # létalité = proportion 0..1
             lo = min(max(lo, 0.0), 1.0) if lo is not None else None
             hi = min(max(hi, 0.0), 1.0) if hi is not None else None
@@ -685,7 +875,7 @@ def normalize_extracted_parameters(raw, valid_ids=None, quality_by_id=None) -> d
                 cited.append(i)
         params[name] = {
             "value": val, "ci_low": lo, "ci_high": hi,
-            "unit": str(blk.get("unit") or "")[:32],
+            "unit": unit,
             "n_studies": max(n_studies, len(prov)),
             "provenance": prov,
         }
@@ -693,7 +883,10 @@ def normalize_extracted_parameters(raw, valid_ids=None, quality_by_id=None) -> d
     disease = None
     if raw.get("population_disease"):
         disease = (str(raw.get("population_disease")).strip()[:120]) or None
-    return {"applicable": applicable, "disease": disease, "params": params, "cited": cited}
+    # `params_context` n'est JAMAIS passé à params_to_distributions : c'est du contexte
+    # de terrain à afficher, pas une entrée de simulation.
+    return {"applicable": applicable, "disease": disease, "params": params,
+            "params_context": params_context, "cited": cited}
 
 
 def params_to_distributions(params) -> dict:
@@ -724,7 +917,11 @@ def params_to_distributions(params) -> dict:
 # alias Romandie/Léman restent cohérents avec data_connectors._REGION_COORDS.
 _GEO_POPULATION: dict[str, float] = {
     "world": 8_000_000_000, "global": 8_000_000_000, "worldwide": 8_000_000_000, "monde": 8_000_000_000,
-    "europe": 745_000_000, "european union": 449_000_000, "eu": 449_000_000, "ue": 449_000_000,
+    # NB: pas de clé « eu » — c'est le participe passé du verbe avoir, qui apparaît
+    # dans n'importe quel titre français (« ont eu ») et ancrait la projection sur
+    # 449 millions d'habitants. Les formes non ambiguës suffisent.
+    "europe": 745_000_000, "european union": 449_000_000, "union européenne": 449_000_000,
+    "ue": 449_000_000,
     "africa": 1_400_000_000, "afrique": 1_400_000_000, "asia": 4_700_000_000, "asie": 4_700_000_000,
     "north america": 600_000_000, "south america": 435_000_000, "latin america": 660_000_000,
     "oceania": 45_000_000, "middle east": 380_000_000,

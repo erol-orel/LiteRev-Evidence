@@ -582,3 +582,189 @@ def test_scale_observed_into_model_units():
     assert abs(s["scale"] - 0.002) / 0.002 < 0.05 and s["r2"] > 0.99
     d0 = int(s["points"][0]["day"])
     assert abs(s["points"][0]["value"] - truth["incidence"][d0]) / truth["incidence"][d0] < 0.05
+
+
+# ── truthfulness of the uncertainty band & of what the UI is told ─────────────
+# These lock in the fixes for defects found by auditing the ensemble: a rate-shaped
+# positivity floor applied to a parameter measured in DAYS used to inject impossible
+# diseases into ~2 % of EVERY ensemble, and NaN then silently defeated `sorted()`.
+
+def test_period_draws_never_fall_below_the_physical_floor():
+    import random
+    d = sm.ParamDist(6.0, 1.0, 11.0, kind="period")   # a wide but ordinary literature CI
+    rng = random.Random(1)
+    draws = [d.sample(rng) for _ in range(20_000)]
+    assert min(draws) >= sm._MIN_PERIOD_DAYS
+    # a fraction stays inside [0,1]; a rate stays strictly positive
+    frac = sm.ParamDist(0.6, 0.2, 0.95, kind="fraction")
+    fd = [frac.sample(rng) for _ in range(2_000)]
+    assert 0.0 <= min(fd) and max(fd) <= 1.0
+    assert min(sm.ParamDist(2.0, 1.4, 2.8, kind="rate").sample(rng) for _ in range(2_000)) > 0.0
+
+
+def test_field_name_infers_the_sampling_unit():
+    # a bare float or a kind-less ParamDist must inherit the unit implied by the field
+    assert sm._as_dist(6.0, "infectious_period_days").kind == "period"
+    assert sm._as_dist(sm.ParamDist(6.0, 1.0, 11.0), "incubation_period_days").kind == "period"
+    assert sm._as_dist(0.3, "cfr").kind == "fraction"
+    assert sm._as_dist(2.0, "r0").kind == "rate"
+
+
+def test_ensemble_band_stays_ordered_and_inside_the_population():
+    """The exact case that used to corrupt the published band across many seeds."""
+    params = {"r0": sm.ParamDist(2.0, 1.4, 2.8),
+              "infectious_period_days": sm.ParamDist(6.0, 1.0, 11.0),
+              "incubation_period_days": sm.ParamDist(5.0, 3.0, 7.0),
+              "cfr": 0.02, "population": 1e6, "initial_infected": 10.0}
+    for seed in (7, 18, 42, 12345):
+        ens = sm.simulate_ensemble(params, days=180, n_samples=200, seed=seed)
+        for key in ("incidence", "prevalence", "cumulative", "deaths", "r_eff"):
+            b = ens[key]
+            for t in range(len(b["median"])):
+                assert math.isfinite(b["lower"][t]) and math.isfinite(b["upper"][t])
+                assert b["lower"][t] <= b["median"][t] <= b["upper"][t] + 1e-9
+        # a daily incidence band above the whole population is physically impossible
+        assert ens["summary"]["peak_incidence"]["upper"] <= 1e6
+
+
+def test_band_drops_non_finite_instead_of_mis_sorting():
+    nan = float("nan")
+    band = sm._band([[1.0, nan], [2.0, 2.0], [3.0, 1.0]], 2.5, 97.5)
+    assert band["lower"][0] <= band["median"][0] <= band["upper"][0]
+    assert all(math.isfinite(v) for v in band["lower"] + band["median"] + band["upper"])
+
+
+def test_diverged_run_raises_instead_of_returning_nan():
+    # NaN cannot be caught by the negativity clamp (`nan < 0` is False), so simulate()
+    # must detect it explicitly rather than hand back a NaN summary.
+    for bad in (0.0, None, -3.0, 1e-9):
+        try:
+            sm.simulate(sm.SeirParams(r0=2.0, infectious_period_days=bad), days=10)
+            raise AssertionError(f"implausible infectious period {bad!r} was accepted")
+        except ValueError:
+            pass
+
+
+def test_fallback_r0_is_labelled_assumed_not_literature():
+    assumed = sm.simulate(sm.SeirParams(infectious_period_days=7), days=60)["summary"]
+    sourced = sm.simulate(sm.SeirParams(r0=1.4, infectious_period_days=7), days=60)["summary"]
+    assert assumed["r0"] == 2.5 and assumed["r0_source"] == "assumed"
+    assert sourced["r0_source"] == "literature"
+    ens = sm.simulate_ensemble({"infectious_period_days": 7.0}, days=60, n_samples=5)
+    assert ens["summary"]["r0_source"] == "assumed"
+
+
+def test_r_eff_accounts_for_quarantine():
+    """R must not read above 1 on an outbreak the model itself shows dying out."""
+    kw = dict(r0=2.0, infectious_period_days=6, incubation_period_days=9, cfr=0.6,
+              population=1e6, initial_infected=10)
+    free = sm.simulate(sm.SeirParams(**kw), days=365)
+    quar = sm.simulate(sm.SeirParams(quarantine_rate=0.2, **kw), days=365)
+    assert free["summary"]["r_control"] == free["summary"]["r0"]      # no control → Rc = R0
+    assert quar["summary"]["r0"] == 2.0                               # basic R0 unchanged
+    assert quar["summary"]["r_control"] < 1.0                         # control brings it under 1
+    assert quar["r_eff"][0] < 1.0
+    assert quar["summary"]["attack_rate"] < 0.01                      # and it does die out
+
+
+def test_cfr_given_in_percent_is_converted_not_clamped_to_total_lethality():
+    def cfr_of(value, unit):
+        n = sm.normalize_extracted_parameters(
+            {"applicable": True, "cfr": {"value": value, "unit": unit, "provenance": [1]}},
+            valid_ids={1})
+        return n["params"]["cfr"]["value"]
+    assert cfr_of(40.0, "%") == 0.4
+    assert cfr_of(40.0, "percent") == 0.4
+    assert cfr_of(0.4, "") == 0.4              # already a proportion, untouched
+    assert cfr_of(1.4, "proportion") == 1.0    # out-of-range proportion still clamped
+
+
+def test_pooled_ci_never_goes_negative():
+    obs = [{"article_id": 1, "value": 1.2}, {"article_id": 2, "value": 4.8}]
+    norm = sm.normalize_extracted_parameters(
+        {"applicable": True, "r0": {"observations": obs}},
+        valid_ids={1, 2}, quality_by_id={1: 0.8, 2: 0.8})
+    assert norm["params"]["r0"]["ci_low"] >= 0.0
+
+
+def test_common_french_word_eu_is_not_the_european_union():
+    assert sm.population_for_geography_in_text("les patients ont eu une fievre") is None
+    hit = sm.population_for_geography_in_text("incidence in the european union")
+    assert hit is not None and hit[0] == 449_000_000
+
+
+# ── grey literature must never steer a pooled parameter ──────────────────────
+# `quality_by_id` IS the pooling weight, and a ReliefWeb situation report scored 0.55
+# against 0.774 for a strong RCT — and OUTRANKED a peer-reviewed case report at 0.386.
+# Measured before the gate: two papers at R0 2.0/2.2 plus one situation report claiming
+# 6.0 moved the pooled R0 from 2.09 to 3.04 (+46%) with a lower CI bound of -0.25.
+
+def _r0_block(observations):
+    return {"applicable": True, "r0": {"observations": observations}}
+
+
+_PAPERS = [{"article_id": 1, "value": 2.0}, {"article_id": 2, "value": 2.2}]
+_SITREP = {"article_id": 99, "value": 6.0}
+_QUALITY = {1: 0.70, 2: 0.75, 99: 0.55}
+
+
+def test_grey_observation_cannot_steer_a_pool_that_has_peer_reviewed_evidence():
+    ungated = sm.normalize_extracted_parameters(
+        _r0_block(_PAPERS + [_SITREP]), valid_ids={1, 2, 99}, quality_by_id=_QUALITY)
+    gated = sm.normalize_extracted_parameters(
+        _r0_block(_PAPERS + [_SITREP]), valid_ids={1, 2, 99}, quality_by_id=_QUALITY,
+        grey_ids={99})
+    papers_only = sm.normalize_extracted_parameters(
+        _r0_block(_PAPERS), valid_ids={1, 2}, quality_by_id=_QUALITY)
+
+    # the defect, still reproducible when the grey id is not declared
+    assert ungated["params"]["r0"]["value"] > 3.0
+    # capped: the sitrep nudges, it does not steer
+    assert gated["params"]["r0"]["value"] < 2.4
+    assert abs(gated["params"]["r0"]["value"] - papers_only["params"]["r0"]["value"]) < 0.3
+    # it is still counted as evidence seen, and its CI stays physical
+    assert gated["params"]["r0"]["n_studies"] == 3
+    assert gated["params"]["r0"]["ci_low"] >= 0.0
+
+
+def test_grey_observation_alone_cannot_establish_a_parameter():
+    """With no peer-reviewed basis, a field report is context — never a model input."""
+    out = sm.normalize_extracted_parameters(
+        _r0_block([_SITREP]), valid_ids={99}, quality_by_id=_QUALITY, grey_ids={99})
+    assert "r0" not in out["params"]                       # not simulated
+    ctx = out["params_context"]["r0"]
+    assert ctx["grey"] is True and ctx["value"] == 6.0 and ctx["n_reports"] == 1
+    assert "not pooled" in ctx["reason"]
+    # and it can never reach the simulator
+    assert sm.params_to_distributions(out["params"]) == {}
+
+
+def test_one_peer_reviewed_study_is_not_enough_to_admit_grey():
+    out = sm.normalize_extracted_parameters(
+        _r0_block([_PAPERS[0], _SITREP]), valid_ids={1, 99},
+        quality_by_id=_QUALITY, grey_ids={99})
+    assert "r0" in out["params_context"]                   # below min_peer_studies=2
+    assert out["params"].get("r0", {}).get("value") != 6.0
+
+
+def test_the_gate_defaults_to_the_previous_behaviour():
+    """No grey_ids declared => byte-for-byte the old result, so nothing regresses."""
+    before = sm.normalize_extracted_parameters(
+        _r0_block(_PAPERS + [_SITREP]), valid_ids={1, 2, 99}, quality_by_id=_QUALITY)
+    assert before["params_context"] == {}
+    assert before["params"]["r0"]["n_studies"] == 3
+
+
+def test_grey_cap_does_not_leak_between_parameters():
+    raw = {"applicable": True,
+           "r0": {"observations": _PAPERS + [_SITREP]},
+           "cfr": {"observations": [{"article_id": 1, "value": 0.02},
+                                    {"article_id": 2, "value": 0.03}]}}
+    out = sm.normalize_extracted_parameters(raw, valid_ids={1, 2, 99},
+                                            quality_by_id=_QUALITY, grey_ids={99})
+    # cfr has no grey observation, so its weights must be the untouched originals
+    solo = sm.normalize_extracted_parameters(
+        {"applicable": True, "cfr": {"observations": [{"article_id": 1, "value": 0.02},
+                                                      {"article_id": 2, "value": 0.03}]}},
+        valid_ids={1, 2}, quality_by_id=_QUALITY)
+    assert out["params"]["cfr"]["value"] == solo["params"]["cfr"]["value"]

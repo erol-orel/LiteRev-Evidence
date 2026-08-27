@@ -40,9 +40,9 @@ def _bundle():
     }
 
 
-def test_xlsx_has_three_sheets_with_values_and_outcome():
+def test_xlsx_has_all_sheets_with_values_and_outcome():
     wb = load_workbook(io.BytesIO(model_export.build_model_xlsx(_bundle())))
-    assert wb.sheetnames == ["Variables", "Dataset", "Model runs"]
+    assert wb.sheetnames == ["Variables", "Dataset", "Model runs", "SEIR parameters"]
 
     variables = wb["Variables"]
     assert [c.value for c in variables[1]][:3] == ["role", "name", "machine_name"]
@@ -62,5 +62,30 @@ def test_xlsx_has_three_sheets_with_values_and_outcome():
 
 def test_xlsx_handles_empty_bundle_without_crashing():
     wb = load_workbook(io.BytesIO(model_export.build_model_xlsx({})))
-    assert wb.sheetnames == ["Variables", "Dataset", "Model runs"]
+    assert wb.sheetnames == ["Variables", "Dataset", "Model runs", "SEIR parameters"]
     assert wb["Dataset"].cell(row=1, column=1).value.startswith("(no dataset")
+
+
+def test_xlsx_includes_the_seir_block_with_provenance():
+    """The epidemiological parameters used to be dropped from the export entirely."""
+    b = _bundle()
+    b["model_spec"]["epidemic_parameters"] = {
+        "applicable": True, "disease": "Influenza (seasonal)",
+        "params": {
+            "r0": {"value": 1.3, "ci_low": 1.2, "ci_high": 1.4, "unit": "",
+                   "n_studies": 4, "provenance": [11, 22]},
+            "cfr": {"value": 0.001, "unit": "proportion", "n_studies": 2,
+                    "provenance": [33], "overridden": True},
+        },
+    }
+    ws = load_workbook(io.BytesIO(model_export.build_model_xlsx(b)))["SEIR parameters"]
+    rows = {r[0].value: r for r in ws.iter_rows(min_row=2) if r[0].value}
+    assert [c.value for c in ws[1]][:4] == ["parameter", "value", "ci_low", "ci_high"]
+    assert rows["r0"][1].value == 1.3 and rows["r0"][6].value == "11, 22"
+    assert rows["cfr"][7].value == "yes"          # user override is flagged
+    assert rows["disease"][1].value == "Influenza (seasonal)"
+
+
+def test_xlsx_seir_sheet_says_so_when_there_is_no_seir_model():
+    ws = load_workbook(io.BytesIO(model_export.build_model_xlsx(_bundle())))["SEIR parameters"]
+    assert "no SEIR model" in str(ws.cell(row=2, column=1).value)
