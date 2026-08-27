@@ -5,7 +5,7 @@ import {
   ArrowLeft, Brain,
   ChevronDown, ChevronUp, Database, ExternalLink, FileText,
   Layers, MessageSquare, RefreshCw, RotateCcw, Search,
-  Shield, Terminal, Zap, AlertTriangle,
+  Shield, Terminal, Zap, AlertTriangle, Radio,
   Globe, Upload, CheckCircle2, AlertCircle, Info,
   Microscope, Loader2, Download, Table2, BookOpen,
   Network, Bell, Users, Rss, Sparkles, ClipboardList,
@@ -109,6 +109,11 @@ import {
   scenarioBase,
   isUserScenario,
   safeFetch,
+  fetchSituationReports,
+  fetchReliefWebStatus,
+  type SituationReport,
+  type SituationReportsPage,
+  type ReliefWebStatus,
 } from "../lib/api";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -5776,11 +5781,127 @@ function ModelMonitorSection({ scenarioId }: { scenarioId: string }) {
 
 // ─── Main Component ───────────────────────────────────────────────────────────
 
-type SectionKey = "review" | "evidence" | "assistant" | "viz" | "variables" | "queries" | "alerts";
+// ── Rapports de situation (ReliefWeb) — flux SÉPARÉ, littérature GRISE ───────
+// Ce que ReliefWeb apporte et que la littérature ne peut pas : la VITESSE (un bulletin
+// OMS paraît en jours, l'article correspondant en 6 à 24 mois) et le TERRAIN (ouvertures
+// de centres de traitement, doses de vaccin, logistique) — que nulle revue ne publie.
+// Ce qu'il n'apporte pas : la relecture par les pairs. L'UI le dit, en toutes lettres.
+function SituationReportsSection({ scenarioId }: { scenarioId: string }) {
+  const { t } = useI18n();
+  const [page, setPage] = useState<SituationReportsPage | null>(null);
+  const [status, setStatus] = useState<ReliefWebStatus | null>(null);
+  const [q, setQ] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [err, setErr] = useState("");
+
+  const load = React.useCallback((search: string) => {
+    setLoading(true);
+    setErr("");
+    Promise.all([
+      fetchSituationReports({ scenarioId, q: search || undefined, limit: 50 }),
+      fetchReliefWebStatus().catch(() => null),
+    ]).then(([p, s]) => { setPage(p); setStatus(s); })
+      .catch((e: unknown) => setErr(e instanceof Error ? e.message : String(e)))
+      .finally(() => setLoading(false));
+  }, [scenarioId]);
+
+  useEffect(() => { load(""); }, [load]);
+
+  const reports = page?.reports ?? [];
+  return (
+    <div className="space-y-3">
+      <SectionHeader icon={<Radio size={14} className="text-amber-400" />}
+        title={t("scenarioDetail.reports.title")} subtitle={t("scenarioDetail.reports.subtitle")} />
+
+      {/* Avertissement PERMANENT : ces sources ne sont pas revues par les pairs. */}
+      <div className="flex items-start gap-2 rounded-xl border border-amber-400/25 bg-amber-400/5 px-3 py-2">
+        <AlertTriangle size={13} className="mt-0.5 shrink-0 text-amber-300" />
+        <p className="text-[11px] text-amber-100/80 leading-relaxed">{t("scenarioDetail.reports.greyWarning")}</p>
+      </div>
+
+      {status && !status.configured && (
+        <div className="rounded-xl border border-white/10 bg-white/3 px-3 py-2">
+          <p className="text-[11px] text-white/55 leading-relaxed">{t("scenarioDetail.reports.notConfigured")}</p>
+        </div>
+      )}
+
+      <div className="flex flex-wrap items-center gap-2">
+        <input value={q} onChange={e => setQ(e.target.value)}
+          onKeyDown={e => { if (e.key === "Enter") load(q); }}
+          placeholder={t("scenarioDetail.reports.searchPlaceholder")}
+          className="flex-1 min-w-[180px] rounded-lg border border-white/10 bg-white/5 px-3 py-1.5 text-[12px] text-white/90 outline-none focus:border-brand-400/50" />
+        <button onClick={() => load(q)} disabled={loading}
+          className="rounded-lg border border-white/15 bg-white/5 px-3 py-1.5 text-[11px] text-white/80 hover:bg-white/10 disabled:opacity-40">
+          {t("scenarioDetail.reports.search")}
+        </button>
+        {status?.configured && (
+          <span className="text-[10px] text-white/35 font-mono">
+            {status.calls_remaining_today}/{status.quota_calls_per_day} {t("scenarioDetail.reports.quotaLeft")}
+          </span>
+        )}
+      </div>
+
+      {err && (
+        <div className="flex items-start gap-2 rounded-xl border border-rose-400/25 bg-rose-400/5 px-3 py-2">
+          <AlertTriangle size={13} className="mt-0.5 shrink-0 text-rose-300" />
+          <p className="text-[11px] text-rose-100/85">{err}</p>
+        </div>
+      )}
+
+      {loading && !page && <LoadingSpinner text={t("scenarioDetail.reports.loading")} />}
+
+      {!loading && reports.length === 0 && !err && (
+        <div className="rounded-2xl border border-white/8 bg-white/2 px-5 py-10 text-center space-y-2">
+          <Radio size={22} className="mx-auto text-white/25" />
+          <p className="text-sm font-medium text-white/70">{t("scenarioDetail.reports.emptyTitle")}</p>
+          <p className="text-[12px] text-white/45 max-w-md mx-auto leading-relaxed">{t("scenarioDetail.reports.empty")}</p>
+        </div>
+      )}
+
+      {reports.length > 0 && (
+        <>
+          <p className="text-[10px] uppercase tracking-wider text-white/35">
+            {page?.total} {t("scenarioDetail.reports.count")}
+          </p>
+          <div className="space-y-2">
+            {reports.map((r: SituationReport) => (
+              <article key={r.id} className="rounded-xl border border-white/8 bg-white/2 p-3 space-y-1.5">
+                <div className="flex items-start justify-between gap-2">
+                  <a href={r.url ?? "#"} target="_blank" rel="noopener noreferrer"
+                    className="text-[13px] font-medium text-white/85 hover:text-brand-300 leading-snug">
+                    {r.title}
+                  </a>
+                  {/* La crédibilité est affichée, pas cachée : elle plafonne à 0.45. */}
+                  <span className="shrink-0 rounded-full border border-amber-400/25 bg-amber-400/5 px-2 py-0.5 text-[9px] font-mono text-amber-200/80">
+                    {r.credibility.toFixed(2)}
+                  </span>
+                </div>
+                <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[10px] text-white/40">
+                  {r.published_at && <span className="font-mono">{r.published_at.slice(0, 10)}</span>}
+                  {r.sources.length > 0 && <span>· {r.sources.slice(0, 2).join(", ")}</span>}
+                  {r.format && <span>· {r.format}</span>}
+                  {r.primary_country && <span>· {r.primary_country}</span>}
+                  {r.glide && <span className="font-mono text-white/30">· {r.glide}</span>}
+                </div>
+                {r.excerpt && <p className="text-[11px] text-white/50 leading-relaxed line-clamp-2">{r.excerpt}</p>}
+              </article>
+            ))}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+type SectionKey = "review" | "evidence" | "reports" | "assistant" | "viz" | "variables" | "queries" | "alerts";
 
 const SECTIONS: Array<{ key: SectionKey; icon: React.ReactNode }> = [
   { key: "review",      icon: <FileText size={13} /> },
   { key: "evidence",    icon: <BookOpen size={13} /> },
+  // Flux SÉPARÉ (littérature grise) : placé APRÈS les preuves scientifiques, jamais
+  // fondu dedans — le corpus revu par les pairs et les rapports de terrain ne se
+  // lisent pas de la même façon et ne doivent pas se compter ensemble.
+  { key: "reports",     icon: <Radio size={13} /> },
   { key: "assistant",   icon: <MessageSquare size={13} /> },
   { key: "viz",         icon: <Layers size={13} /> },
   { key: "variables",   icon: <Database size={13} /> },
@@ -5940,6 +6061,7 @@ export function ScenarioDetailPage({ scenarioId, onBack, initialTab }: ScenarioD
       <ErrorBoundary resetKey={`${activeSection}:${scenarioId}`} label="scenarioDetail.page.errorBoundaryLabel">
         {activeSection === "review" && <ReviewTab scenarioId={scenarioId} detail={detail} />}
         {activeSection === "evidence" && <EvidenceTab scenarioId={scenarioId} detail={detail} />}
+        {activeSection === "reports" && <SituationReportsSection scenarioId={scenarioId} />}
         {activeSection === "assistant" && <RagSection scenarioId={scenarioId} detail={detail} />}
         {activeSection === "viz" && <VizTab scenarioId={scenarioId} />}
         {activeSection === "variables" && <VariablesModelTab detail={detail} scenarioId={scenarioId} initialSub={initialTab === "model" ? "monitor" : undefined} />}

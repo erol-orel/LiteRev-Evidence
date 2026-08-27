@@ -2822,3 +2822,78 @@ export async function previewSearchFacets(
   if (!r.ok) throw new Error(httpMessage(r.status));
   return r.json();
 }
+
+// ── ReliefWeb : rapports de situation (flux SÉPARÉ du corpus scientifique) ────
+// Littérature GRISE : jamais mélangée à literature_document, jamais comptée dans
+// PRISMA, et plafonnée en crédibilité pour ne pas peser comme une étude publiée.
+export interface SituationReport {
+  id: number;
+  rw_id: string;
+  title: string;
+  url: string | null;
+  published_at: string | null;
+  sources: string[];
+  format: string | null;
+  primary_country: string | null;
+  primary_iso3: string | null;
+  glide: string | null;
+  disaster_types: string[];
+  themes: string[];
+  language: string | null;
+  /** 0..1, plafonnée à 0.45 — très en dessous de toute étude revue par les pairs. */
+  credibility: number;
+  excerpt: string;
+}
+
+export interface SituationReportsPage {
+  total: number;
+  limit: number;
+  offset: number;
+  reports: SituationReport[];
+  grey_literature: boolean;
+  max_credibility: number;
+}
+
+export interface ReliefWebStatus {
+  configured: boolean;
+  base_url?: string;
+  quota_calls_per_day?: number;
+  calls_used_today?: number;
+  calls_remaining_today?: number;
+  reports?: number;
+  countries?: number;
+  newest_published_at?: string | null;
+  error?: string;
+}
+
+export async function fetchSituationReports(
+  options?: { scenarioId?: string; iso3?: string; glide?: string; q?: string; limit?: number; offset?: number },
+): Promise<SituationReportsPage> {
+  const params = new URLSearchParams();
+  if (options?.scenarioId) params.set("scenario_id", options.scenarioId);
+  if (options?.iso3) params.set("iso3", options.iso3);
+  if (options?.glide) params.set("glide", options.glide);
+  if (options?.q) params.set("q", options.q);
+  if (options?.limit) params.set("limit", String(options.limit));
+  if (options?.offset) params.set("offset", String(options.offset));
+  const r = await safeFetch(`${API_BASE_URL}/reliefweb/reports?${params}`);
+  if (!r.ok) throw new Error(httpMessage(r.status));
+  return r.json();
+}
+
+export async function fetchReliefWebStatus(): Promise<ReliefWebStatus> {
+  const r = await safeFetch(`${API_BASE_URL}/reliefweb/status`);
+  if (!r.ok) throw new Error(httpMessage(r.status));
+  return r.json();
+}
+
+export async function ingestSituationReports(
+  body: { scenario_id?: string; pathogens?: string[]; countries?: string[]; date_from?: string; limit?: number; max_calls?: number },
+): Promise<Record<string, unknown>> {
+  const r = await safeFetch(`${API_BASE_URL}/reliefweb/ingest`, {
+    method: "POST", headers: { "Content-Type": "application/json", ...authHeaders() },
+    body: JSON.stringify(body),
+  });
+  if (!r.ok) throw new Error(httpMessage(r.status));
+  return r.json();
+}

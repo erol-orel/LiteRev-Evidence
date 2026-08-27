@@ -997,6 +997,19 @@ export const en: Translations = {
       subModel: "Predictive Model",
       subSeir: "SEIR",
     },
+    reports: {
+      title: "Situation reports",
+      subtitle: "Humanitarian field reporting — ReliefWeb",
+      greyWarning: "Grey literature. These are field and situation reports, not peer-reviewed studies: no methods section, numbers revised without a changelog, and 'suspected' often mixed with 'confirmed'. They are here for timeliness and operational context — a WHO bulletin lands in days, the paper takes months. They are kept apart from your scientific corpus and are capped well below any published study when weighting model parameters.",
+      notConfigured: "ReliefWeb ingestion is not configured. Since 1 November 2025 the API requires a pre-approved appname — request one, then set RELIEFWEB_APPNAME on the server. Reports already ingested are still listed below.",
+      searchPlaceholder: "Search titles and text…",
+      search: "Search",
+      quotaLeft: "calls left today",
+      loading: "Loading situation reports…",
+      emptyTitle: "No situation reports yet",
+      empty: "Nothing has been ingested for this scenario. Once ReliefWeb is configured, reports matching the scenario's pathogens and countries appear here — separately from the scientific corpus.",
+      count: "reports",
+    },
     seirTab: {
       loadFailed: "Could not load the SEIR model",
       retry: "Retry",
@@ -1174,6 +1187,7 @@ export const en: Translations = {
     },
     page: {
       sections: {
+        reports: "Situation reports",
         review: "Corpus & Review",
         evidence: "PICO & Evidence",
         assistant: "AI Assistant",

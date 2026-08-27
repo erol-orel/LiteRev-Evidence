@@ -51,6 +51,15 @@ _PERIOD_FIELDS = frozenset((
 # Champs exprimés en PROPORTION 0..1 : bornés des deux côtés à l'échantillonnage.
 _FRACTION_FIELDS = frozenset(("cfr", "vaccine_efficacy"))
 
+# ── Littérature grise (rapports de situation) vs littérature revue par les pairs ──
+# `quality_by_id` sert DIRECTEMENT de poids dans pool_weighted : un rapport de situation
+# y pesait 0.55 contre 0.774 pour un essai randomisé (rapport 1.4), et dépassait même un
+# case report revu par les pairs (0.386). Un seul chiffre de communiqué déplaçait alors un
+# R0 poolé de 2.09 à 3.04. Ces deux constantes bornent le problème ; cf.
+# normalize_extracted_parameters.
+GREY_WEIGHT_CAP = 0.10      # poids maximal d'une observation grise dans le pool
+MIN_PEER_STUDIES = 2        # observations revues par les pairs requises avant tout pooling gris
+
 
 @dataclass
 class SeirParams:
@@ -748,21 +757,45 @@ def _clean_provenance(prov, valid_ids: set) -> list[int]:
     return out
 
 
-def normalize_extracted_parameters(raw, valid_ids=None, quality_by_id=None) -> dict:
+def normalize_extracted_parameters(raw, valid_ids=None, quality_by_id=None,
+                                   grey_ids=None, grey_weight_cap=GREY_WEIGHT_CAP,
+                                   min_peer_studies=MIN_PEER_STUDIES) -> dict:
     """Nettoie le bloc `epidemic_parameters` d'une extraction LLM en un bloc
     DÉTERMINISTE : nombres coercés, provenance filtrée sur `valid_ids` (le pool
     pertinent — si fourni), et SEULS les paramètres dont la valeur centrale est un
     nombre conservés. Renvoie
-    ``{applicable, disease, params:{nom:{value,ci_low,ci_high,unit,n_studies,provenance}}, cited}``.
+    ``{applicable, disease, params:{nom:{value,ci_low,ci_high,unit,n_studies,provenance}},
+    params_context, cited}``.
     Si `quality_by_id` est fourni ET qu'un paramètre porte des `observations` par étude,
     l'estimation « narrative » du LLM est REMPLACÉE par un POOL NUMÉRIQUE pondéré par la
     qualité (cf. pool_weighted) dès qu'au moins deux études pèsent — plus rigoureux et
-    reproductible. Pur (aucune I/O) : testable sans base ni réseau."""
+    reproductible. Pur (aucune I/O) : testable sans base ni réseau.
+
+    `grey_ids` — les observations issues de LITTÉRATURE GRISE (rapports de situation
+    ReliefWeb, communiqués). Elles sont soumises à deux règles, car `quality_by_id` EST
+    le poids de pooling et un rapport de situation y valait 0.55 contre 0.774 pour un
+    essai randomisé — un rapport dépassait même un case report revu par les pairs (0.386) :
+
+      1. la littérature grise ne peut jamais ÉTABLIR un paramètre. Sous
+         `min_peer_studies` observations revues par les pairs, les observations grises
+         sont retirées du pool et renvoyées à part dans `params_context` (« rapporté sur
+         le terrain, non poolé ») — jamais transmises à `params_to_distributions` ;
+      2. quand des données revues par les pairs existent, la grise entre avec un poids
+         plafonné à `grey_weight_cap` (0.10), soit ≥ 6× plus léger qu'un article médiocre.
+         Elle peut nuancer ; elle ne peut pas piloter.
+
+    Mesuré : deux articles à R0 = 2.0 et 2.2 plus un rapport annonçant 6.0 faisaient
+    passer le R0 poolé de 2.09 à 3.04 (+46 %) avec une borne basse d'IC à −0.25. Avec le
+    plafond : 2.31. Les valeurs par défaut reproduisent EXACTEMENT le comportement
+    antérieur quand `grey_ids` est vide."""
     valid = set(valid_ids) if valid_ids is not None else None
-    if not isinstance(raw, dict):
-        return {"applicable": False, "disease": None, "params": {}, "cited": []}
+    grey = {int(g) for g in (grey_ids or []) if _num_or_none(g) is not None}
     params: dict = {}
+    params_context: dict = {}
     cited: list[int] = []
+    if not isinstance(raw, dict):
+        return {"applicable": False, "disease": None, "params": {},
+                "params_context": {}, "cited": []}
     for name in _EXTRACTED_FIELDS:
         blk = raw.get(name)
         if not isinstance(blk, dict):
@@ -781,7 +814,7 @@ def normalize_extracted_parameters(raw, valid_ids=None, quality_by_id=None) -> d
         # Pooling NUMÉRIQUE pondéré par la qualité (prioritaire sur l'estimation LLM)
         # dès qu'au moins deux études réelles fournissent une observation.
         if quality_by_id is not None and isinstance(blk.get("observations"), list):
-            _obs = []
+            _obs, _grey_obs = [], []
             for o in blk["observations"]:
                 if not isinstance(o, dict):
                     continue
@@ -789,9 +822,31 @@ def normalize_extracted_parameters(raw, valid_ids=None, quality_by_id=None) -> d
                     _aid = int(o.get("article_id"))
                 except (TypeError, ValueError):
                     continue
-                if valid is None or _aid in valid:
-                    _obs.append(o)
-            pooled = pool_weighted(_obs, quality_by_id)
+                if valid is not None and _aid not in valid:
+                    continue
+                (_grey_obs if _aid in grey else _obs).append(o)
+            # Règle 1 : sans socle revu par les pairs, la grise ne poole pas du tout.
+            _weights = dict(quality_by_id)
+            if _grey_obs:
+                if len(_obs) >= max(1, int(min_peer_studies)):
+                    # Règle 2 : elle entre, mais avec un poids plafonné.
+                    for _o in _grey_obs:
+                        _gid = int(_o["article_id"])
+                        _weights[_gid] = min(float(_weights.get(_gid) or grey_weight_cap),
+                                             float(grey_weight_cap))
+                    _obs = _obs + _grey_obs
+                else:
+                    _ctx = pool_weighted(_grey_obs, quality_by_id)
+                    if _ctx:
+                        params_context[name] = {
+                            "value": _ctx["value"], "ci_low": _ctx["ci_low"],
+                            "ci_high": _ctx["ci_high"], "n_reports": _ctx["n_studies"],
+                            "provenance": _ctx["provenance"], "grey": True,
+                            "reason": "field-reported; not pooled (no peer-reviewed basis)",
+                        }
+            # `_weights` reste LOCAL au paramètre : plafonner globalement ferait fuiter
+            # le plafond d'un paramètre sur les suivants.
+            pooled = pool_weighted(_obs, _weights)
             if pooled and pooled["n_studies"] >= 2:
                 val, lo, hi = pooled["value"], pooled["ci_low"], pooled["ci_high"]
                 # L'IC du pool est moyenne ± 1.96·écart-type : sur une dispersion
@@ -828,7 +883,10 @@ def normalize_extracted_parameters(raw, valid_ids=None, quality_by_id=None) -> d
     disease = None
     if raw.get("population_disease"):
         disease = (str(raw.get("population_disease")).strip()[:120]) or None
-    return {"applicable": applicable, "disease": disease, "params": params, "cited": cited}
+    # `params_context` n'est JAMAIS passé à params_to_distributions : c'est du contexte
+    # de terrain à afficher, pas une entrée de simulation.
+    return {"applicable": applicable, "disease": disease, "params": params,
+            "params_context": params_context, "cited": cited}
 
 
 def params_to_distributions(params) -> dict:

@@ -691,3 +691,80 @@ def test_common_french_word_eu_is_not_the_european_union():
     assert sm.population_for_geography_in_text("les patients ont eu une fievre") is None
     hit = sm.population_for_geography_in_text("incidence in the european union")
     assert hit is not None and hit[0] == 449_000_000
+
+
+# ── grey literature must never steer a pooled parameter ──────────────────────
+# `quality_by_id` IS the pooling weight, and a ReliefWeb situation report scored 0.55
+# against 0.774 for a strong RCT — and OUTRANKED a peer-reviewed case report at 0.386.
+# Measured before the gate: two papers at R0 2.0/2.2 plus one situation report claiming
+# 6.0 moved the pooled R0 from 2.09 to 3.04 (+46%) with a lower CI bound of -0.25.
+
+def _r0_block(observations):
+    return {"applicable": True, "r0": {"observations": observations}}
+
+
+_PAPERS = [{"article_id": 1, "value": 2.0}, {"article_id": 2, "value": 2.2}]
+_SITREP = {"article_id": 99, "value": 6.0}
+_QUALITY = {1: 0.70, 2: 0.75, 99: 0.55}
+
+
+def test_grey_observation_cannot_steer_a_pool_that_has_peer_reviewed_evidence():
+    ungated = sm.normalize_extracted_parameters(
+        _r0_block(_PAPERS + [_SITREP]), valid_ids={1, 2, 99}, quality_by_id=_QUALITY)
+    gated = sm.normalize_extracted_parameters(
+        _r0_block(_PAPERS + [_SITREP]), valid_ids={1, 2, 99}, quality_by_id=_QUALITY,
+        grey_ids={99})
+    papers_only = sm.normalize_extracted_parameters(
+        _r0_block(_PAPERS), valid_ids={1, 2}, quality_by_id=_QUALITY)
+
+    # the defect, still reproducible when the grey id is not declared
+    assert ungated["params"]["r0"]["value"] > 3.0
+    # capped: the sitrep nudges, it does not steer
+    assert gated["params"]["r0"]["value"] < 2.4
+    assert abs(gated["params"]["r0"]["value"] - papers_only["params"]["r0"]["value"]) < 0.3
+    # it is still counted as evidence seen, and its CI stays physical
+    assert gated["params"]["r0"]["n_studies"] == 3
+    assert gated["params"]["r0"]["ci_low"] >= 0.0
+
+
+def test_grey_observation_alone_cannot_establish_a_parameter():
+    """With no peer-reviewed basis, a field report is context — never a model input."""
+    out = sm.normalize_extracted_parameters(
+        _r0_block([_SITREP]), valid_ids={99}, quality_by_id=_QUALITY, grey_ids={99})
+    assert "r0" not in out["params"]                       # not simulated
+    ctx = out["params_context"]["r0"]
+    assert ctx["grey"] is True and ctx["value"] == 6.0 and ctx["n_reports"] == 1
+    assert "not pooled" in ctx["reason"]
+    # and it can never reach the simulator
+    assert sm.params_to_distributions(out["params"]) == {}
+
+
+def test_one_peer_reviewed_study_is_not_enough_to_admit_grey():
+    out = sm.normalize_extracted_parameters(
+        _r0_block([_PAPERS[0], _SITREP]), valid_ids={1, 99},
+        quality_by_id=_QUALITY, grey_ids={99})
+    assert "r0" in out["params_context"]                   # below min_peer_studies=2
+    assert out["params"].get("r0", {}).get("value") != 6.0
+
+
+def test_the_gate_defaults_to_the_previous_behaviour():
+    """No grey_ids declared => byte-for-byte the old result, so nothing regresses."""
+    before = sm.normalize_extracted_parameters(
+        _r0_block(_PAPERS + [_SITREP]), valid_ids={1, 2, 99}, quality_by_id=_QUALITY)
+    assert before["params_context"] == {}
+    assert before["params"]["r0"]["n_studies"] == 3
+
+
+def test_grey_cap_does_not_leak_between_parameters():
+    raw = {"applicable": True,
+           "r0": {"observations": _PAPERS + [_SITREP]},
+           "cfr": {"observations": [{"article_id": 1, "value": 0.02},
+                                    {"article_id": 2, "value": 0.03}]}}
+    out = sm.normalize_extracted_parameters(raw, valid_ids={1, 2, 99},
+                                            quality_by_id=_QUALITY, grey_ids={99})
+    # cfr has no grey observation, so its weights must be the untouched originals
+    solo = sm.normalize_extracted_parameters(
+        {"applicable": True, "cfr": {"observations": [{"article_id": 1, "value": 0.02},
+                                                      {"article_id": 2, "value": 0.03}]}},
+        valid_ids={1, 2}, quality_by_id=_QUALITY)
+    assert out["params"]["cfr"]["value"] == solo["params"]["cfr"]["value"]

@@ -995,6 +995,19 @@ export const fr = {
       subModel: "Modèle Prédictif",
       subSeir: "SEIR",
     },
+    reports: {
+      title: "Rapports de situation",
+      subtitle: "Rapports humanitaires de terrain — ReliefWeb",
+      greyWarning: "Littérature grise. Ce sont des rapports de terrain, pas des études revues par les pairs : aucune section méthodes, des chiffres révisés sans historique, et des cas « suspects » souvent mêlés aux « confirmés ». Ils sont là pour la rapidité et le contexte opérationnel — un bulletin OMS paraît en quelques jours, l'article en plusieurs mois. Ils restent séparés du corpus scientifique et pèsent très en dessous de toute étude publiée dans les paramètres du modèle.",
+      notConfigured: "L'ingestion ReliefWeb n'est pas configurée. Depuis le 1er novembre 2025 l'API exige un appname pré-approuvé — demandez-le, puis renseignez RELIEFWEB_APPNAME côté serveur. Les rapports déjà ingérés restent listés ci-dessous.",
+      searchPlaceholder: "Rechercher dans les titres et le texte…",
+      search: "Rechercher",
+      quotaLeft: "appels restants aujourd'hui",
+      loading: "Chargement des rapports de situation…",
+      emptyTitle: "Aucun rapport de situation",
+      empty: "Rien n'a encore été ingéré pour ce scénario. Une fois ReliefWeb configuré, les rapports correspondant aux pathogènes et aux pays du scénario apparaissent ici — séparément du corpus scientifique.",
+      count: "rapports",
+    },
     seirTab: {
       loadFailed: "Impossible de charger le modèle SEIR",
       retry: "Réessayer",
@@ -1172,6 +1185,7 @@ export const fr = {
     },
     page: {
       sections: {
+        reports: "Rapports de situation",
         review: "Corpus & Revue",
         evidence: "PICO & Evidence",
         assistant: "Assistant IA",
