@@ -1172,6 +1172,7 @@ export const en: Translations = {
       seriesPrevalence: "Prevalence",
       seriesCumulative: "Cumulative",
       seriesDeaths: "Deaths",
+      seriesReff: "Effective R",
       seriesVaccinated: "Vaccinated",
       seriesQuarantined: "Isolated",
       r0: "R₀",

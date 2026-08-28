@@ -747,13 +747,16 @@ function ForecastPanel({ run }: { run: ModelRun }) {
 }
 
 // ── SEIR projection (modèle compartimental paramétré par la littérature) ─────
-const _SEIR_SERIES = ["incidence", "prevalence", "cumulative", "deaths"] as const;
+// `r_eff` est renvoyé par le backend et typé depuis toujours, mais ne figurait dans
+// aucune liste sélectionnable : la série la plus parlante (R passant sous 1) était
+// transportée puis jetée. C'est un RATIO, pas un effectif — d'où son unité propre.
+const _SEIR_SERIES = ["incidence", "prevalence", "cumulative", "deaths", "r_eff"] as const;
 // Séries optionnelles n'apparaissant que si le modèle a le compartiment (V / Q).
 const _SEIR_SERIES_OPT = ["vaccinated", "quarantined"] as const;
 type SeirSeriesKey = typeof _SEIR_SERIES[number] | typeof _SEIR_SERIES_OPT[number];
 const _SEIR_COLOR: Record<SeirSeriesKey, string> = {
   incidence: "#38bdf8", prevalence: "#a78bfa", cumulative: "#34d399", deaths: "#f87171",
-  vaccinated: "#2dd4bf", quarantined: "#fbbf24",
+  vaccinated: "#2dd4bf", quarantined: "#fbbf24", r_eff: "#f0abfc",
 };
 const _SEIR_PARAM_LABEL: Record<string, string> = {
   r0: "R₀", beta: "β", infectious_period_days: "Infectious (d)", incubation_period_days: "Incubation (d)",
@@ -769,6 +772,11 @@ const _SEIR_INTERVENTION_KEYS = ["vaccination_rate", "vaccine_efficacy", "quaran
 // Paramètres proposés à la SAISIE quand le corpus n'en a fourni aucun. R₀ est requis :
 // sans lui, le moteur retomberait sur une valeur par défaut et la courbe n'apprendrait
 // rien à personne. Les placeholders donnent un ordre de grandeur, pas une valeur imposée.
+// Médiane d'une bande de résumé SEIR, ou null si la bande manque / n'est pas un nombre.
+// Sans cette garde, un `summary` partiel emportait tout l'onglet dans l'ErrorBoundary.
+function _med(band?: { median?: number } | null): number | null {
+  return typeof band?.median === "number" && Number.isFinite(band.median) ? band.median : null;
+}
 const _SEIR_MANUAL_KEYS = ["r0", "incubation_period_days", "infectious_period_days", "cfr"];
 const _SEIR_MANUAL_PLACEHOLDER: Record<string, string> = {
   r0: "e.g. 1.3", incubation_period_days: "e.g. 2", infectious_period_days: "e.g. 5", cfr: "e.g. 0.01",
@@ -939,6 +947,24 @@ function SeirModelView({ scenarioId }: { scenarioId: string }) {
   // scénario légitimement non transmissible et l'utilisateur cesse de chercher.
   const [loadError, setLoadError] = useState("");
   const [reloadKey, setReloadKey] = useState(0);
+  const [exportingSeir, setExportingSeir] = useState(false);
+  const doExportSeirXlsx = async () => {
+    setExportingSeir(true);
+    setLoadError("");
+    try {
+      const blob = await exportModelXlsx(scenarioId);
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url; a.download = `model_${scenarioId}.xlsx`; a.style.display = "none";
+      document.body.appendChild(a);
+      a.click();
+      setTimeout(() => { document.body.removeChild(a); URL.revokeObjectURL(url); }, 0);
+    } catch (e) {
+      setLoadError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setExportingSeir(false);
+    }
+  };
 
   useEffect(() => {
     let alive = true;
@@ -1050,8 +1076,11 @@ function SeirModelView({ scenarioId }: { scenarioId: string }) {
 
   const recompute = () => runWithOverrides();
   const reset = () => {
-    setEdits({}); setPopEdit(""); setI0Edit(""); setBusy(true);
-    fetchSeirProjection(scenarioId).then(p => setProj(p)).finally(() => setBusy(false));
+    setEdits({}); setPopEdit(""); setI0Edit(""); setBusy(true); setLoadError("");
+    fetchSeirProjection(scenarioId)
+      .then(p => setProj(p))
+      .catch((e: unknown) => setLoadError(e instanceof Error ? e.message : String(e)))
+      .finally(() => setBusy(false));
   };
 
   // ── Série observée (réelle) : upload/connecteur → superposition + calibration ──
@@ -1104,7 +1133,11 @@ function SeirModelView({ scenarioId }: { scenarioId: string }) {
     const pop = parseFloat(popEdit); if (popEdit.trim() !== "" && isFinite(pop)) body.population = pop;
     const i0 = parseFloat(i0Edit); if (i0Edit.trim() !== "" && isFinite(i0)) body.initial_infected = i0;
     setBusy(true);
-    postSeirProjection(scenarioId, body).then(p => { if (p?.applicable) setProj(p); }).finally(() => setBusy(false));
+    setLoadError("");
+    postSeirProjection(scenarioId, body)
+      .then(p => { if (p?.applicable) setProj(p); else setLoadError(p?.reason ?? ""); })
+      .catch((e: unknown) => setLoadError(e instanceof Error ? e.message : String(e)))
+      .finally(() => setBusy(false));
   };
 
   const sm = proj.summary;
@@ -1112,12 +1145,14 @@ function SeirModelView({ scenarioId }: { scenarioId: string }) {
     incidence: t("scenarioDetail.seir.seriesIncidence"), prevalence: t("scenarioDetail.seir.seriesPrevalence"),
     cumulative: t("scenarioDetail.seir.seriesCumulative"), deaths: t("scenarioDetail.seir.seriesDeaths"),
     vaccinated: t("scenarioDetail.seir.seriesVaccinated"), quarantined: t("scenarioDetail.seir.seriesQuarantined"),
+    r_eff: t("scenarioDetail.seir.seriesReff"),
   };
   const perDay = lang === "fr" ? "personnes/j" : "people/day";
   const people = lang === "fr" ? "personnes" : "people";
   const seriesUnit: Record<SeirSeriesKey, string> = {
     incidence: perDay, prevalence: people, cumulative: people, deaths: people,
     vaccinated: people, quarantined: people,
+    r_eff: lang === "fr" ? "R (sans unité)" : "R (dimensionless)",
   };
   // Séries de base + celles des compartiments V/Q seulement si le modèle les possède.
   // Le backend renvoie TOUJOURS les séries vaccinated/quarantined ; les proposer sur un
@@ -1161,6 +1196,14 @@ function SeirModelView({ scenarioId }: { scenarioId: string }) {
           <p className="text-[11px] text-white/40 mt-1">{t("scenarioDetail.seirTab.compartments")}: <span className="font-mono text-white/60">{compartments}</span></p>
         </div>
         <div className="text-right text-[11px] text-white/50">
+          {/* L'export Excel — qui contient désormais la feuille « SEIR parameters » —
+              n'était atteignable que depuis le tableau de bord du modèle, c'est-à-dire
+              pas depuis l'écran où l'on regarde le SEIR. */}
+          <button type="button" onClick={doExportSeirXlsx} disabled={exportingSeir}
+            className="mb-1 inline-flex items-center gap-1.5 rounded-full border border-emerald-500/25 text-emerald-300/80 px-2.5 py-1 text-[10px] font-semibold hover:bg-emerald-500/10 hover:text-emerald-200 transition disabled:opacity-50">
+            {exportingSeir ? <Loader2 size={11} className="animate-spin" /> : <Table2 size={11} />}
+            {t("scenarioDetail.model.dashboard.exportExcel")}
+          </button>
           <p>{t("scenarioDetail.seir.population")}: <span className="font-mono text-white/80">{fmtPop(proj.population)}</span>{proj.geography ? ` · ${proj.geography}` : ""}</p>
           <p className="text-white/35">{proj.n_samples} {t("scenarioDetail.seir.draws")}</p>
         </div>
@@ -1196,14 +1239,19 @@ function SeirModelView({ scenarioId }: { scenarioId: string }) {
         )}
         {sm && (
           <div className="mt-2 grid grid-cols-2 sm:grid-cols-4 gap-2 text-[10px]">
-            <div><div className="text-white/40">{t("scenarioDetail.seir.peakPrevalence")}</div><div className="font-mono text-white/80">{fmtPop(sm.peak_prevalence.median)}</div></div>
-            <div><div className="text-white/40">{t("scenarioDetail.seir.peakDay")}</div><div className="font-mono text-white/80">{lang === "fr" ? "J" : "D"}{sm.peak_prevalence_day.median}</div></div>
-            <div><div className="text-white/40">{t("scenarioDetail.seir.attackRate")}</div><div className="font-mono text-white/80">{(sm.attack_rate.median * 100).toFixed(1)}%</div></div>
-            <div><div className="text-white/40">{t("scenarioDetail.seir.deaths")}</div><div className="font-mono text-white/80">{sm.total_deaths.median}</div></div>
-            {sm.total_vaccinated && sm.total_vaccinated.median > 0 && (
-              <div><div className="text-white/40">{t("scenarioDetail.seir.totalVaccinated")}</div><div className="font-mono text-teal-300">{fmtPop(sm.total_vaccinated.median)}</div></div>)}
-            {sm.peak_quarantine && sm.peak_quarantine.median > 0 && (
-              <div><div className="text-white/40">{t("scenarioDetail.seir.peakQuarantine")}</div><div className="font-mono text-amber-300">{fmtPop(sm.peak_quarantine.median)}</div></div>)}
+            {/* Chaque bande est optional-chaînée : ces quatre-là étaient lues sans
+                garde alors que les deux suivantes en avaient une. Un résumé partiel
+                (payload plus ancien, champ retiré côté serveur) faisait donc tomber
+                TOUT l'onglet SEIR dans l'ErrorBoundary — un panneau d'erreur à la
+                place du modèle, pour une statistique manquante. On affiche « — ». */}
+            <div><div className="text-white/40">{t("scenarioDetail.seir.peakPrevalence")}</div><div className="font-mono text-white/80">{_med(sm.peak_prevalence) != null ? fmtPop(_med(sm.peak_prevalence)!) : "—"}</div></div>
+            <div><div className="text-white/40">{t("scenarioDetail.seir.peakDay")}</div><div className="font-mono text-white/80">{_med(sm.peak_prevalence_day) != null ? `${lang === "fr" ? "J" : "D"}${_med(sm.peak_prevalence_day)}` : "—"}</div></div>
+            <div><div className="text-white/40">{t("scenarioDetail.seir.attackRate")}</div><div className="font-mono text-white/80">{_med(sm.attack_rate) != null ? `${(_med(sm.attack_rate)! * 100).toFixed(1)}%` : "—"}</div></div>
+            <div><div className="text-white/40">{t("scenarioDetail.seir.deaths")}</div><div className="font-mono text-white/80">{_med(sm.total_deaths) ?? "—"}</div></div>
+            {(_med(sm.total_vaccinated) ?? 0) > 0 && (
+              <div><div className="text-white/40">{t("scenarioDetail.seir.totalVaccinated")}</div><div className="font-mono text-teal-300">{fmtPop(_med(sm.total_vaccinated)!)}</div></div>)}
+            {(_med(sm.peak_quarantine) ?? 0) > 0 && (
+              <div><div className="text-white/40">{t("scenarioDetail.seir.peakQuarantine")}</div><div className="font-mono text-amber-300">{fmtPop(_med(sm.peak_quarantine)!)}</div></div>)}
           </div>
         )}
       </div>
@@ -1283,6 +1331,15 @@ function SeirModelView({ scenarioId }: { scenarioId: string }) {
           )}
           {hasOverrides && <span className="text-[10px] text-gold-300">{t("scenarioDetail.seirTab.usingOverrides")}</span>}
         </div>
+        {/* Recompute / Reset / Apply-fitted échouaient en silence : rien dans cette
+            branche n'affichait l'erreur, de sorte qu'un bouton pouvait ne rien faire
+            sans un mot d'explication. */}
+        {loadError && (
+          <div className="flex items-start gap-2 rounded-xl border border-rose-400/25 bg-rose-400/5 px-3 py-2">
+            <AlertTriangle size={13} className="mt-0.5 shrink-0 text-rose-300" />
+            <p className="text-[11px] text-rose-100/85 leading-relaxed">{loadError}</p>
+          </div>
+        )}
       </div>
 
       {/* Données observées (réelles) : superposition sur le graphe + calibration du modèle */}
@@ -1330,7 +1387,14 @@ function SeirModelView({ scenarioId }: { scenarioId: string }) {
               <select value={obsConnector} onChange={e => { setObsConnector(e.target.value); setObsVariable(""); }}
                 className="rounded-lg border border-white/10 bg-white/5 px-2 py-1 text-white/90 outline-none focus:border-teal-400/50">
                 <option value="" className="bg-slate-800">{t("scenarioDetail.seirTab.obsUpload")}</option>
-                {connectors.map(c => <option key={c.id} value={c.id} className="bg-slate-800">{c.name}</option>)}
+                {/* Le connecteur SEIR est exclu ICI (et seulement ici) : la série
+                    « observée » sert à VALIDER le modèle SEIR, donc lui donner la
+                    sortie du SEIR lui-même serait circulaire — et la requête échoue
+                    de toute façon en 400, le connecteur ayant besoin de paramètres
+                    épidémiologiques que cet endpoint ne lui transmet pas. Il reste
+                    proposé dans le mapping d'auto-récupération, où il est légitime. */}
+                {connectors.filter(c => c.id !== "seir-projection")
+                  .map(c => <option key={c.id} value={c.id} className="bg-slate-800">{c.name}</option>)}
               </select>
               {obsConnector && (
                 <select value={obsVariable} onChange={e => setObsVariable(e.target.value)}
