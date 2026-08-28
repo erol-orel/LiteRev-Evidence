@@ -15152,7 +15152,11 @@ class AutoFetchIn(BaseModel):
     start_date: str = Field(..., min_length=8)
     end_date: str = Field(..., min_length=8)
     frequency: str = Field(default="W")     # W (hebdo, défaut épidémio) | D | MS
-    mappings: list[AutoFetchMapping] = Field(..., min_length=1)
+    # Pas de min_length : un scénario dont TOUTES les colonnes dérivent du sous-modèle
+    # SEIR (source="seir") n'a aucun mapping à fournir — le code ci-dessous les ajoute
+    # automatiquement. Exiger au moins un mapping rejetait à la porte le cas que la
+    # fonction est précisément écrite pour traiter.
+    mappings: list[AutoFetchMapping] = Field(default_factory=list)
     auto_train: bool = False
 
 
@@ -15197,6 +15201,10 @@ def auto_fetch_model_dataset(
                 "connector_id": data_connectors.SEIR_CONNECTOR_ID,
                 "connector_variable": _c["seir_column"],
             })
+    if not mapping_dicts:
+        raise HTTPException(status_code=422, detail=(
+            "Rien à récupérer : aucun mapping fourni et aucune colonne dérivée du "
+            "sous-modèle SEIR dans le data_template."))
 
     frames: dict[str, Any] = {}
     fetch_errors: dict[str, str] = {}
@@ -15234,6 +15242,44 @@ def auto_fetch_model_dataset(
             "message": "Aucune donnée assemblée depuis les connecteurs (mappings/fenêtre à vérifier).",
             "fetch_errors": fetch_errors,
         })
+
+    # ── FUSION avec le dataset actif, au lieu de le REMPLACER ────────────────────
+    # Un connecteur ne peut PAS fournir la variable à prédire : elle vient des données
+    # propres de l'utilisateur (passages aux urgences, appels…). Or l'auto-récupération
+    # désactivait le dataset uploadé et activait celui, purement covariables, qu'elle
+    # venait d'assembler : le scénario perdait sa colonne d'outcome, et le rapport de
+    # validation — calculé sur les seules colonnes assemblées — annonçait pourtant
+    # `still_needed_user_columns: []`, c'est-à-dire « rien ne manque ». Silencieux et faux.
+    # On fusionne donc sur la colonne de dates ; les colonnes effectivement récupérées
+    # écrasent leurs homonymes (l'utilisateur vient de les demander), toutes les autres
+    # colonnes du dataset précédent sont CONSERVÉES.
+    merged_from, preserved_cols = None, []
+    if _dt_col and _dt_col in assembled.columns:
+        try:
+            with engine.begin() as _c:
+                _prev = _c.execute(text(
+                    "SELECT id, stored_path FROM scenario_model_dataset "
+                    "WHERE scenario_id = :sid AND is_active = TRUE LIMIT 1"),
+                    {"sid": scenario_id}).mappings().first()
+            if _prev and _prev["stored_path"] and os.path.exists(_prev["stored_path"]):
+                _pdf = pd.read_csv(_prev["stored_path"])
+                if _dt_col in _pdf.columns and not _pdf.empty:
+                    _keep = [c for c in _pdf.columns
+                             if c == _dt_col or c not in assembled.columns]
+                    if len(_keep) > 1:            # au moins une colonne à préserver
+                        _pdf = _pdf[_keep].copy()
+                        # Clés de jointure comparables des deux côtés (dates ISO).
+                        _pdf[_dt_col] = pd.to_datetime(_pdf[_dt_col], errors="coerce")
+                        _adf = assembled.copy()
+                        _adf[_dt_col] = pd.to_datetime(_adf[_dt_col], errors="coerce")
+                        _pdf = _pdf.dropna(subset=[_dt_col])
+                        _merged = _adf.merge(_pdf, on=_dt_col, how="outer").sort_values(_dt_col)
+                        _merged[_dt_col] = _merged[_dt_col].dt.strftime("%Y-%m-%d")
+                        assembled = _merged.reset_index(drop=True)
+                        merged_from = int(_prev["id"])
+                        preserved_cols = [c for c in _keep if c != _dt_col]
+        except Exception as _e:                   # la fusion ne doit jamais casser le fetch
+            logger.warning(f"auto-fetch {scenario_id}: fusion avec le dataset actif ignorée: {_e}")
 
     report = _validate_dataset_against_template(
         list(assembled.columns), data_template, _dataframe_dtype_kinds(assembled), n_rows=len(assembled))
@@ -15274,6 +15320,10 @@ def auto_fetch_model_dataset(
         "n_rows": int(len(assembled)),
         "n_cols": int(len(assembled.columns)),
         "filled_columns": filled,
+        # Traçabilité de la fusion : quel dataset a été repris et quelles colonnes
+        # (dont l'outcome de l'utilisateur) ont été conservées.
+        "merged_from_dataset_id": merged_from,
+        "preserved_columns": preserved_cols,
         "still_needed_user_columns": report.get("missing_user", []),
         "fetch_errors": fetch_errors,
         "validation": report,
