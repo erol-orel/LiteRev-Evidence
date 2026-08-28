@@ -185,7 +185,10 @@ print("RESULT " + json.dumps(out))
     env = {**os.environ,
            "REPO_ROOT": root,
            "PATHS": __import__("json").dumps(REQUIRED_OK),
-           "DB_URL": str(fresh_db),
+           # render_as_string(hide_password=False): str(URL) masks the password as
+           # "***", so the subprocess would authenticate with a literal "***". Invisible
+           # on a trust-auth local cluster, fatal on CI's password-authenticated one.
+           "DB_URL": fresh_db.render_as_string(hide_password=False),
            "WRITE_API_KEY": "test-write-key",
            "ADMIN_API_KEY": "test-admin-key",
            "OPENAI_API_KEY": ""}
@@ -226,7 +229,8 @@ with main.engine.begin() as c:
         "AND tablename LIKE 'ddl_probe%'")))
 print("RESULT " + json.dumps({"failed": len(failed), "tables": tables}))
 """
-    env = {**os.environ, "REPO_ROOT": root, "DB_URL": str(fresh_db),
+    env = {**os.environ, "REPO_ROOT": root,
+           "DB_URL": fresh_db.render_as_string(hide_password=False),
            "WRITE_API_KEY": "k", "ADMIN_API_KEY": "k", "OPENAI_API_KEY": ""}
     proc = subprocess.run([os.sys.executable, "-c", script], env=env,
                           capture_output=True, text=True, timeout=300)

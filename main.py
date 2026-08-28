@@ -6011,6 +6011,10 @@ def _ensure_bibliographic_columns():
         "ALTER TABLE literature_document ADD COLUMN IF NOT EXISTS language TEXT",
         "ALTER TABLE literature_document ADD COLUMN IF NOT EXISTS sample_size INTEGER",
         "ALTER TABLE literature_document ADD COLUMN IF NOT EXISTS open_access BOOLEAN",
+        # Lues par de vraies requêtes SQL (SELECT id, title, abstract, has_fulltext… ;
+        # UPDATE … SET pico_extracted_at = :ts) et créées nulle part non plus.
+        "ALTER TABLE literature_document ADD COLUMN IF NOT EXISTS has_fulltext BOOLEAN DEFAULT FALSE",
+        "ALTER TABLE literature_document ADD COLUMN IF NOT EXISTS pico_extracted_at TIMESTAMP",
     ]
     # Une instruction par transaction : une seule qui échoue ne doit pas faire annuler
     # les précédentes (cf. _exec_ddl_isolated).
