@@ -825,17 +825,45 @@ function SeirBandChart({ band, dates, color, lang, yUnit, observed, observedColo
   const y1 = dataMax > y0 ? dataMax + (dataMax - y0) * 0.08 : y0 + 1;
   const xAt = (i: number) => padL + (i / Math.max(1, N - 1)) * (W - padL - padR);
   const yAt = (v: number) => padT + (1 - (v - y0) / Math.max(1e-9, y1 - y0)) * (H - padT - padB);
-  const linePath = (vals: number[]) => vals.map((v, k) => `${k === 0 ? "M" : "L"}${xAt(k).toFixed(1)},${yAt(v).toFixed(1)}`).join(" ");
-  const bandPts = (upper.length === N && lower.length === N)
-    ? [...upper.map((v, k) => `${xAt(k).toFixed(1)},${yAt(v).toFixed(1)}`),
-       ...Array.from({ length: N }, (_u, k) => { const j = N - 1 - k; return `${xAt(j).toFixed(1)},${yAt(lower[j]).toFixed(1)}`; })].join(" ")
+  // Les points NON FINIS sont sautés et coupent le tracé, au lieu d'être écrits tels
+  // quels : une seule coordonnée "NaN" dans l'attribut `d` invalide TOUT le chemin, et
+  // la courbe disparaît sans un mot.
+  const linePath = (vals: number[]) => {
+    let out = "", pen = false;
+    vals.forEach((v, k) => {
+      if (!Number.isFinite(v)) { pen = false; return; }
+      out += `${pen ? "L" : "M"}${xAt(k).toFixed(1)},${yAt(v).toFixed(1)} `;
+      pen = true;
+    });
+    return out.trim();
+  };
+  // Une bande dont les bornes n'ont pas la même longueur était SUPPRIMÉE en entier. On
+  // trace la partie commune : une bande un peu plus courte reste bien plus informative
+  // qu'une bande absente et inexpliquée.
+  const bandN = Math.min(upper.length, lower.length, N);
+  const bandPts = bandN > 1
+    ? [...Array.from({ length: bandN }, (_u, k) => k)
+         .filter(k => Number.isFinite(upper[k]) && Number.isFinite(lower[k]))
+         .map(k => `${xAt(k).toFixed(1)},${yAt(upper[k]).toFixed(1)}`),
+       ...Array.from({ length: bandN }, (_u, k) => bandN - 1 - k)
+         .filter(j => Number.isFinite(upper[j]) && Number.isFinite(lower[j]))
+         .map(j => `${xAt(j).toFixed(1)},${yAt(lower[j]).toFixed(1)}`)].join(" ")
     : "";
   const fmtX = (d: string | number | undefined) => {
     if (d == null) return "";
     if (typeof d === "number") return `${lang === "fr" ? "J" : "D"}${d}`;   // jour/day depuis le début
     const dt = new Date(d); return isNaN(dt.getTime()) ? String(d) : dt.toLocaleDateString(lang === "fr" ? "fr-FR" : "en-US", { month: "short", day: "numeric" });
   };
-  const yTicks = [0, 0.25, 0.5, 0.75, 1].map(f => y0 + f * (y1 - y0));
+  // Une série entièrement plate (souvent nulle : compartiment inactif) donnait des
+  // graduations « 0.25 personne ». Sur une plage inférieure à quelques unités on
+  // n'affiche que des entiers, et sans variation du tout on se limite à 0.
+  const flat = !(dataMax > dataMin);
+  const yTicks = flat
+    ? [y0]
+    : ((y1 - y0) < 4
+        ? Array.from({ length: Math.max(2, Math.ceil(y1 - y0) + 1) }, (_v, i) => Math.round(y0) + i)
+             .filter(v => v <= y1)
+        : [0, 0.25, 0.5, 0.75, 1].map(f => y0 + f * (y1 - y0)));
   const nX = Math.min(6, N);
   const xTicks = Array.from({ length: nX }, (_v, i) => Math.round((i * (N - 1)) / (nX - 1)));
   const peakI = median.reduce((bi, v, i) => (v > median[bi] ? i : bi), 0);   // pic de la médiane
@@ -872,9 +900,15 @@ function SeirBandChart({ band, dates, color, lang, yUnit, observed, observedColo
           strokeWidth={0.3} strokeOpacity={0.25} />
       ))}
       {/* peak marker (median), labelled with its day/date */}
-      <circle cx={xAt(peakI)} cy={yAt(median[peakI])} r={2.6} fill={color} />
-      <text x={Math.min(Math.max(xAt(peakI), padL + 16), W - padR - 16)} y={yAt(median[peakI]) - 6}
-        textAnchor="middle" fontSize={8.5} fill={color} fontFamily="monospace">{fmtX(dates[peakI])}</text>
+      {/* Pas de marqueur de « pic » sur une courbe plate : il désignerait le jour 0 au
+          hasard et laisserait croire à un événement là où il ne se passe rien. */}
+      {!flat && Number.isFinite(median[peakI]) && (
+        <>
+          <circle cx={xAt(peakI)} cy={yAt(median[peakI])} r={2.6} fill={color} />
+          <text x={Math.min(Math.max(xAt(peakI), padL + 16), W - padR - 16)} y={yAt(median[peakI]) - 6}
+            textAnchor="middle" fontSize={8.5} fill={color} fontFamily="monospace">{fmtX(dates[peakI])}</text>
+        </>
+      )}
     </svg>
   );
 }
@@ -1086,7 +1120,16 @@ function SeirModelView({ scenarioId }: { scenarioId: string }) {
     vaccinated: people, quarantined: people,
   };
   // Séries de base + celles des compartiments V/Q seulement si le modèle les possède.
-  const availableSeries: SeirSeriesKey[] = [..._SEIR_SERIES, ..._SEIR_SERIES_OPT.filter(k => proj.series?.[k])];
+  // Le backend renvoie TOUJOURS les séries vaccinated/quarantined ; les proposer sur un
+  // modèle qui n'a ni compartiment V ni compartiment Q offrait un onglet traçant une
+  // ligne plate à zéro. On les conditionne au nom du modèle (S[V][E]I[Q]R[D][S] : les
+  // lettres V et Q y sont non ambiguës).
+  const _modelName = proj.model ?? "";
+  const _hasCompartment: Record<string, boolean> = {
+    vaccinated: _modelName.includes("V"), quarantined: _modelName.includes("Q"),
+  };
+  const availableSeries: SeirSeriesKey[] = [..._SEIR_SERIES,
+    ..._SEIR_SERIES_OPT.filter(k => proj.series?.[k] && (_hasCompartment[k] ?? true))];
   const activeSeries: SeirSeriesKey = availableSeries.includes(series) ? series : "incidence";
   const band = proj.series?.[activeSeries];
   const orderedKeys = [..._SEIR_PARAM_ORDER.filter(k => k in params),

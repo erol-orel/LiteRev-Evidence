@@ -768,3 +768,66 @@ def test_grey_cap_does_not_leak_between_parameters():
                                                       {"article_id": 2, "value": 0.03}]}},
         valid_ids={1, 2}, quality_by_id=_QUALITY)
     assert out["params"]["cfr"]["value"] == solo["params"]["cfr"]["value"]
+
+
+# ── one article is one study, whatever it says twice ─────────────────────────
+def test_pool_weighted_counts_articles_not_observations():
+    """A paper repeating its number must not out-vote a paper that states it once."""
+    obs = [{"article_id": 1, "value": 2.0}, {"article_id": 1, "value": 2.0},
+           {"article_id": 1, "value": 2.0}, {"article_id": 2, "value": 6.0}]
+    p = sm.pool_weighted(obs, {1: 0.5, 2: 0.5})
+    assert p["n_studies"] == 2                    # two articles, not four observations
+    assert abs(p["value"] - 4.0) < 1e-9           # the honest two-study mean
+
+
+def test_pool_weighted_averages_within_an_article():
+    """Several genuine observations from one paper average into a single study."""
+    p = sm.pool_weighted([{"article_id": 1, "value": 1.0}, {"article_id": 1, "value": 3.0},
+                          {"article_id": 2, "value": 6.0}], {1: 1.0, 2: 1.0})
+    assert p["n_studies"] == 2
+    assert abs(p["value"] - 4.0) < 1e-9           # (mean(1,3)=2 and 6) → 4
+
+
+def test_pool_weighted_keeps_unattributed_observations_distinct():
+    """With no article_id there is nothing to group on; each observation stands alone."""
+    assert sm.pool_weighted([{"value": 1.0}, {"value": 3.0}])["n_studies"] == 2
+
+
+def test_provenance_survives_when_no_valid_id_pool_is_supplied():
+    """Reporting "n studies" with no clickable source is worse than reporting neither."""
+    raw = {"applicable": True, "r0": {"value": 2.0, "provenance": [11, 22], "n_studies": 2}}
+    kept = sm.normalize_extracted_parameters(raw)["params"]["r0"]
+    assert kept["provenance"] == [11, 22] and kept["n_studies"] == 2
+    # a pool, when supplied, still filters
+    filtered = sm.normalize_extracted_parameters(
+        {"applicable": True, "r0": {"value": 2.0, "provenance": [11, 99]}},
+        valid_ids={11})["params"]["r0"]
+    assert filtered["provenance"] == [11]
+
+
+def test_an_invalid_r0_is_rejected_not_quietly_replaced():
+    """A MISSING r0 may fall back; a NEGATIVE one is bad data and must not be smoothed over."""
+    for bad in (-1.0, 0.0):
+        try:
+            sm.simulate(sm.SeirParams(r0=bad, infectious_period_days=5), days=10)
+            raise AssertionError(f"r0={bad} was accepted")
+        except ValueError:
+            pass
+    try:
+        sm.simulate(sm.SeirParams(beta=-0.3, infectious_period_days=5), days=10)
+        raise AssertionError("beta=-0.3 was accepted")
+    except ValueError:
+        pass
+    # the legitimate missing-value fallback is untouched, and still labelled
+    s = sm.simulate(sm.SeirParams(infectious_period_days=5), days=10)["summary"]
+    assert s["r0"] == 2.5 and s["r0_source"] == "assumed"
+
+
+def test_calibration_rejects_a_degenerate_observed_series():
+    """An all-zero series carries no signal; it must not read as a perfect fit."""
+    base = {"r0": 2.0, "infectious_period_days": 5,
+            "population": 1e6, "initial_infected": 10}
+    out = sm.calibrate_to_observed([{"day": d, "value": 0.0} for d in range(0, 120, 7)],
+                                   base, "incidence", days=180)
+    assert out.get("ok") is False
+    assert out.get("r2") in (None, 0.0)

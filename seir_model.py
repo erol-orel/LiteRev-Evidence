@@ -95,6 +95,14 @@ def _rates(p: SeirParams) -> dict:
     # `r0_source` distingue une valeur ISSUE DE LA LITTÉRATURE d'un repli codé en dur.
     # Sans lui, l'UI présentait un R0 = 2.5 inventé comme s'il était sourcé (avec un IC
     # de largeur nulle, ce qui se lit comme une certitude).
+    # Un R0/beta ABSENT est une donnée manquante : le repli prudent se justifie (et
+    # s'annonce). Un R0/beta NÉGATIF OU NUL est une donnée FAUSSE : le remplacer
+    # discrètement par 2.5 reviendrait à récompenser une extraction erronée par une
+    # courbe épidémique d'allure crédible. On refuse.
+    for _n, _v in (("r0", p.r0), ("beta", p.beta)):
+        if _v is not None and float(_v) <= 0.0:
+            raise ValueError(
+                f"SEIR: {_n} = {_v!r} est invalide (doit être > 0). Paramètre mal extrait ?")
     r0_source = "literature"
     if p.beta is not None and p.beta > 0:
         beta = p.beta
@@ -743,6 +751,19 @@ def _is_percent_unit(unit) -> bool:
     return u in _PERCENT_UNITS
 
 
+def _coerce_ids(prov) -> list[int]:
+    """Ids d'articles coercés en int et dédupliqués, dans l'ordre — sans filtrage."""
+    out: list[int] = []
+    for i in prov or []:
+        try:
+            iv = int(i)
+        except (TypeError, ValueError):
+            continue
+        if iv not in out:
+            out.append(iv)
+    return out
+
+
 def _clean_provenance(prov, valid_ids: set) -> list[int]:
     """Ne garde que des ids d'articles RÉELS (présents dans `valid_ids`), dédupliqués,
     dans l'ordre. Coerce en int ; ignore ce qui n'est pas un id valide."""
@@ -805,7 +826,12 @@ def normalize_extracted_parameters(raw, valid_ids=None, quality_by_id=None,
         hi = _num_or_none(blk.get("ci_high"))
         if lo is not None and hi is not None and lo > hi:
             lo, hi = None, None  # IC incohérent → ignoré (pas de fausse incertitude)
-        prov = _clean_provenance(blk.get("provenance"), valid) if valid is not None else []
+        # Sans `valid_ids`, on ne peut pas FILTRER la provenance — mais la jeter revenait
+        # à annoncer « n études » sans le moindre article cliquable en face. On la garde
+        # telle quelle (dédupliquée, coercée en int) ; le filtrage n'a lieu que si un pool
+        # de référence est fourni.
+        prov = (_clean_provenance(blk.get("provenance"), valid) if valid is not None
+                else _coerce_ids(blk.get("provenance")))
         try:
             n_studies = int(blk.get("n_studies"))
         except (TypeError, ValueError):
@@ -1013,6 +1039,29 @@ def pool_weighted(observations, quality_by_id=None) -> dict | None:
         pts.append((v, w, aid))
     if not pts:
         return None
+    # Une ÉTUDE = un article, pas une observation. Un même article peut fournir plusieurs
+    # observations d'un paramètre (plusieurs sous-populations, plusieurs vagues, ou tout
+    # simplement la même valeur répétée par l'extraction) : les compter séparément
+    # pondérait cet article à proportion de sa bavardise et gonflait `n_studies`.
+    # Mesuré : 3 observations à 2.0 issues du MÊME article + 1 observation à 6.0 d'un
+    # autre donnaient 3.00 sur « 4 études » là où les deux études valent 4.00.
+    # On agrège donc d'abord PAR article (moyenne des observations, poids inchangé),
+    # puis on pool entre articles. Les observations sans article_id restent distinctes :
+    # rien ne permet de les rattacher les unes aux autres.
+    _by_article: dict[int, list[float]] = {}
+    _order: list[int] = []
+    _weight: dict[int, float] = {}
+    _anon: list[tuple[float, float, None]] = []
+    for _v, _w, _a in pts:
+        if _a is None:
+            _anon.append((_v, _w, None))
+            continue
+        if _a not in _by_article:
+            _by_article[_a] = []
+            _order.append(_a)
+            _weight[_a] = _w
+        _by_article[_a].append(_v)
+    pts = [(sum(_by_article[a]) / len(_by_article[a]), _weight[a], a) for a in _order] + _anon
     sw = sum(w for _v, w, _a in pts)
     if sw <= 0:
         return None

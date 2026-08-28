@@ -49,7 +49,15 @@ jobs:
           WRITE_API_KEY: test-write-key
           OPENAI_API_KEY: ""
         run: |
+          # httpx : requis par starlette.testclient (fastapi.testclient.TestClient).
+          #   Sans lui, TOUT test passant par TestClient échoue au setup avec
+          #   « requires the httpx2 package » — invisible en local, où httpx est souvent
+          #   déjà installé.
+          # openpyxl : dépendance d'exécution (requirements.txt) de l'export Excel. Sans
+          #   elle, tests/test_model_export.py se SAUTE entièrement via importorskip et
+          #   la CI passait au vert sans jamais exécuter le code d'export.
           pip install pytest fastapi pydantic "sqlalchemy>=2.0" python-dotenv python-multipart "psycopg[binary]" \
+            httpx openpyxl \
             numpy pandas scikit-learn scipy optuna joblib lightgbm xgboost statsmodels
           pytest -q
 
