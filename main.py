@@ -677,6 +677,20 @@ class AskIn(BaseModel):
 # ─────────────────────────────────────────────────────────────────────────────
 # Index de performance
 # ─────────────────────────────────────────────────────────────────────────────
+# Instructions de DDL de démarrage qui ont ÉCHOUÉ, accumulées au fil des _ensure_*.
+# Le DDL de démarrage échoue OUVERT par conception (un serveur qui refuse de démarrer
+# est pire) — mais jusqu'ici la seule trace était une ligne de log, et /health
+# continuait d'annoncer « ok » sur une base incomplète. Cette liste rend l'état
+# dégradé LISIBLE (cf. /health).
+_SCHEMA_DDL_FAILURES: list[str] = []
+
+# Tables sans lesquelles l'application ne peut pas servir ses écrans principaux.
+_REQUIRED_TABLES = (
+    "literature_document", "document_chunk", "article_scenarios",
+    "user_scenarios", "user_scenario_folders", "scenario_settings",
+)
+
+
 def _exec_ddl_isolated(statements, label: str) -> list[str]:
     """Exécute des instructions DDL CHACUNE DANS SA PROPRE TRANSACTION.
 
@@ -694,9 +708,10 @@ def _exec_ddl_isolated(statements, label: str) -> list[str]:
             with engine.begin() as _c:
                 _c.execute(text(_sql))
         except Exception as _e:                     # noqa: BLE001 - best-effort par design
-            failed.append(_sql.strip().split("\n")[0][:120])
-            logger.warning(f"{label}: DDL ignorée ({_e.__class__.__name__}): "
-                           f"{_sql.strip().split(chr(10))[0][:120]}")
+            _first = _sql.strip().split("\n")[0][:120]
+            failed.append(_first)
+            _SCHEMA_DDL_FAILURES.append(f"{label}: {_first}")
+            logger.warning(f"{label}: DDL ignorée ({_e.__class__.__name__}): {_first}")
     return failed
 
 
@@ -1242,9 +1257,48 @@ def startup_event() -> None:
 # ─────────────────────────────────────────────────────────────────────────────
 @app.get("/health")
 def health() -> dict[str, Any]:
+    """Santé du service — connexion À LA BASE *et* intégrité du schéma.
+
+    `SELECT 1` seul mentait : sur une base incomplète, /health répondait « ok » pendant
+    que /user-scenarios, /gesica/scenarios et /corpus/fulltext-stats renvoyaient 500 (le
+    DDL de démarrage échoue ouvert par conception). On expose donc aussi l'état du
+    schéma : `schema.ok` à false nomme les tables manquantes et le nombre d'instructions
+    DDL écartées au démarrage.
+
+    Le statut HTTP reste 200 même en mode dégradé : le smoke test de déploiement
+    l'interroge, et faire échouer le déploiement sur une dégradation préexistante
+    aggraverait la panne au lieu de la révéler. C'est `schema.ok` qu'il faut alerter."""
     with engine.connect() as conn:
         conn.execute(text("SELECT 1"))
-    return {"status": "ok", "database": "ok"}
+        missing: list[str] = []
+        try:
+            present = {r[0] for r in conn.execute(text(
+                "SELECT tablename FROM pg_tables WHERE schemaname = 'public'"))}
+            missing = sorted(t for t in _REQUIRED_TABLES if t not in present)
+        except Exception as _e:                      # ne jamais faire tomber /health
+            logger.warning(f"health: contrôle du schéma indisponible: {_e}")
+    schema_ok = not missing and not _SCHEMA_DDL_FAILURES
+    out: dict[str, Any] = {
+        "status": "ok", "database": "ok",
+        "schema": {
+            "ok": schema_ok,
+            "missing_tables": missing,
+            "ddl_failures": len(_SCHEMA_DDL_FAILURES),
+        },
+    }
+    if not schema_ok:
+        # Visible dans la réponse, pas seulement dans les logs du serveur.
+        out["schema"]["details"] = _SCHEMA_DDL_FAILURES[:10]
+        # NB : `status` reste volontairement "ok". Le smoke test de déploiement filtre
+        # sur '"status":"ok"' ; le basculer ici ferait échouer tout déploiement futur
+        # sur une dégradation PRÉEXISTANTE en production, que rien ne permet d'inspecter
+        # d'ici. Le signal à surveiller est `schema.ok` : une fois la production
+        # confirmée saine, il suffit d'ajouter au smoke test
+        #   curl -fsS localhost:8000/health | grep -q '"ok":true'
+        # pour rendre la dégradation bloquante.
+        logger.warning(f"/health: schéma DÉGRADÉ — tables manquantes={missing}, "
+                       f"DDL écartées={len(_SCHEMA_DDL_FAILURES)}")
+    return out
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Filter options
@@ -14838,7 +14892,14 @@ def _validate_dataset_against_template(file_columns: list, data_template: dict,
         if found is not None:
             if role == "outcome":
                 target_present = True
-            else:
+            elif role == "feature":
+                # UNIQUEMENT les vraies variables explicatives. En comptant ici toute
+                # colonne non-outcome, la colonne de DATES était comptée comme une
+                # variable explicative : n_features_present dépassait n_features_total
+                # (ratio impossible affiché à l'utilisateur) et, plus grave, un fichier
+                # ne contenant QUE la date et la cible — zéro variable explicative —
+                # satisfaisait `n_features_present >= 1` et se voyait déclarer
+                # « prêt à entraîner ».
                 n_features_present += 1
                 matched_features.append(name)
             (present_required if required else present_optional).append(name)
@@ -15247,6 +15308,21 @@ def auto_fetch_model_dataset(
             "fetch_errors": fetch_errors,
         })
 
+    # Colonnes DEMANDÉES mais absentes du résultat. `_assemble_connector_frames` saute
+    # silencieusement un mapping dont la variable manque, si bien que la réponse
+    # annonçait « stored » sans dire qu'une colonne — typiquement la colonne dérivée du
+    # SEIR — n'avait pas été remplie ; le rapport de validation la rangeait alors dans
+    # `missing_seir`, dont le sens est « sera auto-remplie », c'est-à-dire l'inverse de
+    # ce qui venait de se produire. On nomme ici ce qui a été écarté ET pourquoi.
+    _filled = set(filled)
+    dropped_columns = [
+        {"template_column": m["template_column"], "connector_id": m["connector_id"],
+         "connector_variable": m["connector_variable"],
+         "reason": fetch_errors.get(m["connector_id"])
+                   or "variable absente des données renvoyées par le connecteur"}
+        for m in mapping_dicts if m["template_column"] not in _filled
+    ]
+
     # ── FUSION avec le dataset actif, au lieu de le REMPLACER ────────────────────
     # Un connecteur ne peut PAS fournir la variable à prédire : elle vient des données
     # propres de l'utilisateur (passages aux urgences, appels…). Or l'auto-récupération
@@ -15328,6 +15404,8 @@ def auto_fetch_model_dataset(
         # (dont l'outcome de l'utilisateur) ont été conservées.
         "merged_from_dataset_id": merged_from,
         "preserved_columns": preserved_cols,
+        # Colonnes demandées et NON remplies, avec la cause réelle (cf. plus haut).
+        "dropped_columns": dropped_columns,
         "still_needed_user_columns": report.get("missing_user", []),
         "fetch_errors": fetch_errors,
         "validation": report,

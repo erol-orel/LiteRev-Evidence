@@ -670,3 +670,58 @@ def test_normalize_title_canonicalizes_for_dedup():
     # SQL backfill uses the SAME normalization, so on-ingest and backfilled keys agree
     assert main._normalize_title("SARS-CoV-2: Omicron (BA.5)") == "sars cov 2 omicron ba 5"
     assert main._normalize_title(None) == "" and main._normalize_title("!!!") == ""
+
+
+# ── dataset validation: the date column is not an explanatory variable ────────
+def _tpl_with_feature():
+    return {"target_column": "ed_visits", "datetime_column": "date", "columns": [
+        {"name": "date", "role": "datetime", "dtype": "datetime", "required": True, "source": "user"},
+        {"name": "ed_visits", "role": "outcome", "dtype": "float", "required": True, "source": "user"},
+        {"name": "temp_mean", "role": "feature", "dtype": "float", "required": True, "source": "public_api"},
+    ]}
+
+
+def test_validation_counts_only_real_features():
+    """n_features_present counted EVERY non-outcome column, including the datetime one,
+    so the report showed present > total — an impossible ratio."""
+    r = main._validate_dataset_against_template(
+        ["date", "ed_visits", "temp_mean"], _tpl_with_feature(), {}, n_rows=50)
+    assert r["n_features_total"] == 1
+    assert r["n_features_present"] == 1
+    assert r["n_features_present"] <= r["n_features_total"]
+    assert r["matched_features"] == ["temp_mean"]      # not ["date", "temp_mean"]
+
+
+def test_a_dataset_with_no_explanatory_variable_cannot_train():
+    """The real damage: can_train requires n_features_present >= 1, so a file holding
+    only a date and the outcome — zero predictors — was declared ready to train."""
+    r = main._validate_dataset_against_template(
+        ["date", "ed_visits"], _tpl_with_feature(), {}, n_rows=50)
+    assert r["n_features_present"] == 0
+    assert r["readiness"]["can_train"] is False
+    assert any("explicative" in reason for reason in r["readiness"]["reasons"])
+
+
+def test_health_exposes_a_degraded_schema():
+    """`SELECT 1` alone reported "ok" on a database where core endpoints returned 500."""
+    from fastapi.testclient import TestClient
+    saved = list(main._SCHEMA_DDL_FAILURES)
+    try:
+        main._SCHEMA_DDL_FAILURES.clear()
+        cl = TestClient(main.app)
+        body = cl.get("/health").json()
+        if body.get("database") != "ok":
+            import pytest
+            pytest.skip("no reachable database")
+        assert body["schema"]["ok"] is True
+
+        main._SCHEMA_DDL_FAILURES.append("_ensure_x: ALTER TABLE nope ADD COLUMN y int")
+        degraded = cl.get("/health").json()
+        assert degraded["schema"]["ok"] is False
+        assert degraded["schema"]["ddl_failures"] == 1
+        assert degraded["schema"]["details"]
+        # status stays "ok" on purpose: the deploy smoke test greps for it, and flipping
+        # it would fail every future deploy on a pre-existing degradation.
+        assert degraded["status"] == "ok"
+    finally:
+        main._SCHEMA_DDL_FAILURES[:] = saved

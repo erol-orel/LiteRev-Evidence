@@ -1170,6 +1170,7 @@ export const fr = {
       seriesPrevalence: "Prévalence",
       seriesCumulative: "Cumul",
       seriesDeaths: "Décès",
+      seriesReff: "R effectif",
       seriesVaccinated: "Vaccinés",
       seriesQuarantined: "Isolés",
       r0: "R₀",
