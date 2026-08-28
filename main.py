@@ -677,6 +677,29 @@ class AskIn(BaseModel):
 # ─────────────────────────────────────────────────────────────────────────────
 # Index de performance
 # ─────────────────────────────────────────────────────────────────────────────
+def _exec_ddl_isolated(statements, label: str) -> list[str]:
+    """Exécute des instructions DDL CHACUNE DANS SA PROPRE TRANSACTION.
+
+    Pourquoi : Postgres avorte la transaction ENTIÈRE à la première erreur. Regroupées
+    dans un seul `with engine.begin()`, une instruction qui échoue (p. ex. un ALTER sur
+    une table absente) annulait les CREATE TABLE réussis qui la précédaient dans le même
+    bloc — la base ressortait SANS les tables que la fonction venait de créer, et le seul
+    indice était un avertissement dans les logs. C'est exactement ce qui rendait toute
+    base NEUVE inutilisable (voir tests/test_fresh_db_bootstrap.py).
+
+    Renvoie la liste des instructions ayant échoué (vide = tout est passé)."""
+    failed: list[str] = []
+    for _sql in statements:
+        try:
+            with engine.begin() as _c:
+                _c.execute(text(_sql))
+        except Exception as _e:                     # noqa: BLE001 - best-effort par design
+            failed.append(_sql.strip().split("\n")[0][:120])
+            logger.warning(f"{label}: DDL ignorée ({_e.__class__.__name__}): "
+                           f"{_sql.strip().split(chr(10))[0][:120]}")
+    return failed
+
+
 def _ensure_performance_indexes() -> None:
     """Crée les index manquants sur les colonnes chaudes + un index ANN pgvector.
 
@@ -5971,12 +5994,28 @@ def _ensure_bibliographic_columns():
         "ALTER TABLE literature_document ADD COLUMN IF NOT EXISTS country TEXT",
         "ALTER TABLE literature_document ADD COLUMN IF NOT EXISTS study_design TEXT",
         "ALTER TABLE literature_document ADD COLUMN IF NOT EXISTS publication_type TEXT",
+        # ── Colonnes de screening / qualité / enrichissement ────────────────────
+        # Même situation que ci-dessus : lues massivement par le code (screening_status
+        # ≈95 références, pico_json ≈24) mais absentes de schema.sql, donc introuvables
+        # sur toute base neuve. `screening_reason`/`notes` sont, elles, lues par la
+        # migration c8d4e2f1a9b3 qui recopie le verdict global vers article_scenarios.
+        "ALTER TABLE literature_document ADD COLUMN IF NOT EXISTS screening_status TEXT",
+        "ALTER TABLE literature_document ADD COLUMN IF NOT EXISTS screening_reason TEXT",
+        "ALTER TABLE literature_document ADD COLUMN IF NOT EXISTS screening_notes TEXT",
+        "ALTER TABLE literature_document ADD COLUMN IF NOT EXISTS screened_at TIMESTAMP",
+        "ALTER TABLE literature_document ADD COLUMN IF NOT EXISTS pico_json JSONB",
+        "ALTER TABLE literature_document ADD COLUMN IF NOT EXISTS metadata_json JSONB",
+        "ALTER TABLE literature_document ADD COLUMN IF NOT EXISTS citation_count INTEGER",
+        "ALTER TABLE literature_document ADD COLUMN IF NOT EXISTS quality_score DOUBLE PRECISION",
+        "ALTER TABLE literature_document ADD COLUMN IF NOT EXISTS keywords TEXT",
+        "ALTER TABLE literature_document ADD COLUMN IF NOT EXISTS language TEXT",
+        "ALTER TABLE literature_document ADD COLUMN IF NOT EXISTS sample_size INTEGER",
+        "ALTER TABLE literature_document ADD COLUMN IF NOT EXISTS open_access BOOLEAN",
     ]
-    with engine.begin() as conn:
-        for _s in stmts:
-            conn.execute(text(_s))
-    logger.info("Colonnes bibliographiques (authors, journal, doi, country, study_design, "
-                "publication_type) vérifiées/créées.")
+    # Une instruction par transaction : une seule qui échoue ne doit pas faire annuler
+    # les précédentes (cf. _exec_ddl_isolated).
+    _exec_ddl_isolated(stmts, "_ensure_bibliographic_columns")
+    logger.info("Colonnes bibliographiques, de screening et de qualité vérifiées/créées.")
 
 
 try:
@@ -6944,8 +6983,51 @@ def run_due_alert_digests(dry_run: bool = False, _: None = Depends(require_api_k
 #   - un ID de la forme "usr-<uuid4_court>"
 # ─────────────────────────────────────────────────────────────────────────────
 
+# Schéma de `article_scenarios` — le lien N-N document ↔ scénario.
+#
+# Cette table est interrogée PARTOUT dans main.py (≈100 références) mais AUCUN fichier du
+# dépôt ne la créait : ni schema.sql, ni les migrations Alembic (qui se contentent de lui
+# AJOUTER des colonnes et se sautent elles-mêmes si la table est absente), ni le DDL de
+# démarrage (qui l'ALTER directement). Elle n'existait qu'en production, posée
+# historiquement par un script ad hoc. Conséquence : sur une base neuve, l'ALTER échouait
+# et faisait annuler la création de `user_scenarios` (cf. _exec_ddl_isolated).
+#
+# Les colonnes sont reconstruites à partir de l'usage RÉEL :
+#   • scenario_id / document_id / similarity_score : clé et score de rattachement
+#     (confirmés par les deux fixtures de tests d'intégration, qui déclarent explicitement
+#     refléter la production, et par les INSERT/UPDATE de main.py) ;
+#   • cluster_id / cluster_label / rerank_score : ajoutées par le DDL de démarrage ;
+#   • screening_* : migration c8d4e2f1a9b3 ; reviewer_*/kappa_* : migration e2f6a8b3c5d7.
+# Les types reprennent ceux de ces migrations, à l'identique.
+_ARTICLE_SCENARIOS_DDL = """
+    CREATE TABLE IF NOT EXISTS article_scenarios (
+        scenario_id        TEXT   NOT NULL,
+        document_id        BIGINT NOT NULL,
+        similarity_score   DOUBLE PRECISION,
+        rerank_score       FLOAT,
+        cluster_id         INTEGER,
+        cluster_label      TEXT,
+        screening_status   TEXT,
+        screening_reason   TEXT,
+        screening_notes    TEXT,
+        screened_at        TIMESTAMP,
+        reviewer_1_status  VARCHAR(20),
+        reviewer_1_reason  TEXT,
+        reviewer_2_status  VARCHAR(20),
+        reviewer_2_reason  TEXT,
+        kappa_resolved     BOOLEAN DEFAULT FALSE,
+        kappa_final_status VARCHAR(20),
+        assigned_at        TIMESTAMP,
+        PRIMARY KEY (scenario_id, document_id)
+    )
+"""
+
+
 def _ensure_user_scenarios_table() -> None:
     """Crée la table user_scenarios et user_scenario_folders si elles n'existent pas."""
+    # `article_scenarios` d'ABORD, et hors du bloc transactionnel ci-dessous : les ALTER
+    # plus bas la visent, et sur une base neuve son absence annulait tout le reste.
+    _exec_ddl_isolated([_ARTICLE_SCENARIOS_DDL], "_ensure_user_scenarios_table")
     with engine.begin() as conn:
         # Table des dossiers
         conn.execute(text("""
@@ -6977,8 +7059,10 @@ def _ensure_user_scenarios_table() -> None:
             ALTER TABLE user_scenarios ADD COLUMN IF NOT EXISTS folder_id VARCHAR(40)
             REFERENCES user_scenario_folders(id) ON DELETE SET NULL
         """))
-        # Colonnes du pipeline d'ingestion/populate (sur tables préexistantes)
-        for _ddl in (
+        # Colonnes du pipeline d'ingestion/populate (sur tables préexistantes).
+        # NB : exécutées hors de cette transaction, une par une (cf. _exec_ddl_isolated),
+        # pour qu'un ALTER en échec n'annule pas les CREATE TABLE ci-dessus.
+        _pipeline_ddl = (
             "ALTER TABLE user_scenarios ADD COLUMN IF NOT EXISTS populate_status VARCHAR(20)",
             "ALTER TABLE user_scenarios ADD COLUMN IF NOT EXISTS pipeline_status VARCHAR(20)",
             "ALTER TABLE user_scenarios ADD COLUMN IF NOT EXISTS pipeline_step VARCHAR(80)",
@@ -7007,8 +7091,15 @@ def _ensure_user_scenarios_table() -> None:
             # Propriétaire (email) : living review + alertes email par utilisateur.
             "ALTER TABLE user_scenarios ADD COLUMN IF NOT EXISTS owner_email VARCHAR(255)",
             "CREATE INDEX IF NOT EXISTS ix_user_scenarios_owner ON user_scenarios (owner_email)",
-        ):
-            conn.execute(text(_ddl))
+            # Scénarios GESICA : _list_db_gesica_scenarios (main.py:3720-3727) filtre sur
+            # is_system / hidden et trie sur title, SANS qualificatif de table. Ces
+            # colonnes n'étaient créées nulle part : sur une base neuve
+            # GET /gesica/scenarios renvoyait 500 et l'interface affichait
+            # « Failed to load scenarios ».
+            "ALTER TABLE user_scenarios ADD COLUMN IF NOT EXISTS is_system BOOLEAN DEFAULT FALSE",
+            "ALTER TABLE user_scenarios ADD COLUMN IF NOT EXISTS hidden BOOLEAN DEFAULT FALSE",
+            "ALTER TABLE user_scenarios ADD COLUMN IF NOT EXISTS title TEXT",
+        )
         # Cache PERSISTANT des stratégies booléennes : même requête (clé normalisée) →
         # MÊME booléen, de façon déterministe, à travers les requêtes, les redémarrages
         # et les workers. Élimine la divergence « Main 57 vs sous-requête 56 » (deux
@@ -7020,6 +7111,12 @@ def _ensure_user_scenarios_table() -> None:
                 created_at  TIMESTAMP  DEFAULT NOW()
             )
         """))
+    # Les ALTER/INDEX en dernier, isolés : ils portent sur des tables qui peuvent ne pas
+    # exister encore sur une base neuve, et leur échec ne doit rien annuler.
+    _failed = _exec_ddl_isolated(_pipeline_ddl, "_ensure_user_scenarios_table")
+    if _failed:
+        logger.warning(f"_ensure_user_scenarios_table: {len(_failed)} DDL ignorée(s) — "
+                       f"la base est peut-être incomplète : {_failed[:3]}")
     logger.info("Tables user_scenarios et user_scenario_folders vérifiées/créées.")
 
 try:

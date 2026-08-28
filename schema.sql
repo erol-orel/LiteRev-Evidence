@@ -118,3 +118,47 @@ DROP TRIGGER IF EXISTS trg_document_chunk_search_vector ON document_chunk;
 CREATE TRIGGER trg_document_chunk_search_vector
     BEFORE INSERT OR UPDATE ON document_chunk
     FOR EACH ROW EXECUTE FUNCTION document_chunk_search_vector_update();
+
+-- ──────────────────────────────────────────────────────────
+-- Table: article_scenarios  (lien N-N document ↔ scénario)
+-- ──────────────────────────────────────────────────────────
+-- Cette table était ABSENTE de ce fichier alors que main.py l'interroge partout
+-- (≈100 références). Elle n'existait qu'en production, posée historiquement par un
+-- script ad hoc : les migrations Alembic se contentent de lui AJOUTER des colonnes et
+-- se sautent elles-mêmes quand elle manque, et le DDL de démarrage l'ALTER directement.
+-- Sur une base neuve, cet ALTER échouait et faisait ANNULER (rollback transactionnel)
+-- la création de user_scenarios faite juste avant dans le même bloc — d'où une base
+-- inutilisable où /health répondait pourtant 200.
+-- Garde-fou : tests/test_fresh_db_bootstrap.py.
+CREATE TABLE IF NOT EXISTS article_scenarios (
+    scenario_id        TEXT   NOT NULL,
+    document_id        BIGINT NOT NULL,
+    similarity_score   DOUBLE PRECISION,
+    rerank_score       FLOAT,                  -- rerank cross-encoder (ordre d'affichage)
+    cluster_id         INTEGER,
+    cluster_label      TEXT,
+    -- Screening par scénario (migration c8d4e2f1a9b3)
+    screening_status   TEXT,
+    screening_reason   TEXT,
+    screening_notes    TEXT,
+    screened_at        TIMESTAMP,
+    -- Double lecture aveugle par scénario (migration e2f6a8b3c5d7)
+    reviewer_1_status  VARCHAR(20),
+    reviewer_1_reason  TEXT,
+    reviewer_2_status  VARCHAR(20),
+    reviewer_2_reason  TEXT,
+    kappa_resolved     BOOLEAN DEFAULT FALSE,
+    kappa_final_status VARCHAR(20),
+    assigned_at        TIMESTAMP,
+    CONSTRAINT article_scenarios_pkey PRIMARY KEY (scenario_id, document_id)
+);
+
+-- Pas de clé étrangère vers literature_document : la production n'en a pas (les
+-- fixtures d'intégration le notent explicitement), et en ajouter une ici ferait
+-- diverger une base neuve de la base existante.
+CREATE INDEX IF NOT EXISTS ix_article_scenarios_document
+    ON article_scenarios (document_id);
+CREATE INDEX IF NOT EXISTS ix_article_scenarios_scen_screen
+    ON article_scenarios (scenario_id, screening_status);
+CREATE INDEX IF NOT EXISTS ix_article_scenarios_scen_kappa
+    ON article_scenarios (scenario_id, kappa_final_status);
