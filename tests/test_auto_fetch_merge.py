@@ -43,11 +43,17 @@ def _spec():
 
 
 @pytest.fixture()
-def client_and_scenario():
+def client_and_scenario(tmp_path, monkeypatch):
     """A TestClient plus a scenario whose model_spec is persisted, or skip."""
     import main
     from sqlalchemy import text
     from fastapi.testclient import TestClient
+
+    # Datasets are written under MODEL_DATA_DIR, which defaults to /home/ubuntu/... —
+    # a path that does not exist on a CI runner and that the runner user cannot create.
+    # Point it at the test's own temp directory so this exercises the code, not the
+    # filesystem layout of one particular machine.
+    monkeypatch.setattr(main, "MODEL_DATA_DIR", tmp_path / "uploads")
 
     sid = f"usr-{uuid.uuid4().hex[:12]}"
     try:

@@ -105,12 +105,49 @@ def _apply_schema(url):
             sql = sql.replace("vector(1536)", "text")
         sql = "\n".join(l for l in sql.splitlines()
                         if "CREATE EXTENSION" not in l.upper() or "vector" not in l)
-        for stmt in [s.strip() for s in sql.split(";") if s.strip()]:
+        for stmt in _split_statements(sql):
             try:
                 c.execute(sa.text(stmt))
             except Exception:
                 pass          # schema.sql is partly historical; the boot DDL completes it
     eng.dispose()
+
+
+def _split_statements(sql: str) -> list:
+    """Split on semicolons that are NOT inside a dollar-quoted body.
+
+    schema.sql defines a PL/pgSQL trigger function whose body contains semicolons between
+    `$$ ... $$`; a naive split on ";" would shred it into invalid fragments and quietly
+    skip the function, so the test would be exercising a schema subtly unlike the one a
+    real deployment gets.
+    """
+    out, buf, tag, i = [], [], None, 0
+    while i < len(sql):
+        if tag is None and sql[i] == "$":
+            end = sql.find("$", i + 1)
+            candidate = sql[i:end + 1] if end != -1 else None
+            if candidate and (candidate[1:-1] == "" or candidate[1:-1].isidentifier()):
+                tag = candidate
+                buf.append(candidate)
+                i = end + 1
+                continue
+        elif tag is not None and sql.startswith(tag, i):
+            buf.append(tag)
+            i += len(tag)
+            tag = None
+            continue
+        if tag is None and sql[i] == ";":
+            stmt = "".join(buf).strip()
+            if stmt:
+                out.append(stmt)
+            buf = []
+        else:
+            buf.append(sql[i])
+        i += 1
+    tail = "".join(buf).strip()
+    if tail:
+        out.append(tail)
+    return out
 
 
 def test_fresh_database_serves_every_required_endpoint(fresh_db):
