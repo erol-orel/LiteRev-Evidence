@@ -704,14 +704,19 @@ def test_a_dataset_with_no_explanatory_variable_cannot_train():
 
 def test_health_exposes_a_degraded_schema():
     """`SELECT 1` alone reported "ok" on a database where core endpoints returned 500."""
+    import pytest
     from fastapi.testclient import TestClient
     saved = list(main._SCHEMA_DDL_FAILURES)
     try:
         main._SCHEMA_DDL_FAILURES.clear()
         cl = TestClient(main.app)
-        body = cl.get("/health").json()
+        # /health opens a connection, so with no database it RAISES rather than
+        # returning a body — this file also runs in the conftest's no-database mode.
+        try:
+            body = cl.get("/health").json()
+        except Exception:
+            pytest.skip("no reachable database")
         if body.get("database") != "ok":
-            import pytest
             pytest.skip("no reachable database")
         assert body["schema"]["ok"] is True
 
