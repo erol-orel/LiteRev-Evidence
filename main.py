@@ -18,6 +18,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, field_validator, model_validator
 from sqlalchemy import create_engine, text, bindparam
 
+# Comptabilité des tokens + coupe-circuit OpenAI. Importé ici (et non dans les fonctions)
+# parce que TOUS les `from llm_usage import MeteredOpenAI` en dépendent : un import
+# manquant ne doit pas se découvrir au premier appel LLM, en production.
+import llm_usage as _llm_usage
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("literev-api")
 
@@ -715,6 +720,22 @@ def _exec_ddl_isolated(statements, label: str) -> list[str]:
     return failed
 
 
+def _ensure_llm_usage_table() -> None:
+    """Table de COMPTABILITÉ des appels OpenAI (cf. llm_usage.py).
+
+    Créée AVANT le worker d'arrière-plan (lancé à l'import, plus bas) : sans elle, les
+    premiers cycles d'embedding/PICO dépenseraient sans laisser de trace. `configure()`
+    donne au module l'engine ; sans cet appel il n'enregistre rien (et ne casse rien)."""
+    _llm_usage.configure(engine)
+    _exec_ddl_isolated(_llm_usage.DDL, "_ensure_llm_usage_table")
+
+
+try:
+    _ensure_llm_usage_table()
+except Exception as _e:                               # jamais bloquant : c'est de la mesure
+    logger.warning(f"_ensure_llm_usage_table: {_e}")
+
+
 def _ensure_performance_indexes() -> None:
     """Crée les index manquants sur les colonnes chaudes + un index ANN pgvector.
 
@@ -924,7 +945,7 @@ def startup_event() -> None:
     #   2. Extrait le PICO pour tous les articles avec abstract mais sans pico_json
     def _background_enrichment_worker():
         import time as _time
-        from openai import OpenAI as _OAI_bg
+        from llm_usage import MeteredOpenAI as _OAI_bg
         from concurrent.futures import ThreadPoolExecutor as _TPE
         from datetime import datetime, timezone
 
@@ -1300,6 +1321,22 @@ def health() -> dict[str, Any]:
                        f"DDL écartées={len(_SCHEMA_DDL_FAILURES)}")
     return out
 
+
+@app.get("/llm-usage")
+def get_llm_usage(hours: int = Query(24, ge=1, le=24 * 90),
+                  _: None = Depends(require_api_key)) -> dict[str, Any]:
+    """Consommation OpenAI par usage et par modèle sur les `hours` dernières heures.
+
+    LA question à laquelle l'application ne savait pas répondre : QUI dépense. Chaque
+    ligne est un couple (fonction appelante:surface, modèle) — p. ex.
+    `_background_enrichment_worker:chat` pour l'extraction PICO automatique, la plus
+    grosse dépense potentielle (50 articles toutes les 30 s). Trié par tokens
+    décroissants : la première ligne est celle à regarder.
+
+    Protégé par la clé d'écriture : c'est de la donnée d'exploitation, pas du contenu."""
+    return _llm_usage.summary(hours=hours)
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Filter options
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1488,7 +1525,7 @@ def ask_assistant(payload: AskIn) -> dict[str, Any]:
     
     if openai_key:
         try:
-            from openai import OpenAI
+            from llm_usage import MeteredOpenAI as OpenAI
             client = OpenAI(api_key=openai_key, timeout=90.0)
             # Générer l'embedding de la question
             response = client.embeddings.create(
@@ -1613,7 +1650,7 @@ def ask_assistant(payload: AskIn) -> dict[str, Any]:
         }
         
     try:
-        from openai import OpenAI
+        from llm_usage import MeteredOpenAI as OpenAI
         client = OpenAI(api_key=openai_key, timeout=90.0)
         
         system_prompt = (
@@ -1924,7 +1961,7 @@ def _search_local_doc_ids(
     query_embedding = None
     if use_vector:
         try:
-            from openai import OpenAI
+            from llm_usage import MeteredOpenAI as OpenAI
             client = OpenAI(api_key=openai_key, timeout=90.0)
             query_embedding = client.embeddings.create(
                 input=[query.replace("\n", " ").strip()],
@@ -2789,7 +2826,7 @@ def _federated_live_search(
             reverse=True,
         )[:SEM_SCORE_CAP]
         try:
-            from openai import OpenAI as _OAI
+            from llm_usage import MeteredOpenAI as _OAI
             _client = _OAI(api_key=openai_key, timeout=8.0)
             q_emb = _client.embeddings.create(
                 input=[(query or "").replace("\n", " ").strip()],
@@ -4865,7 +4902,7 @@ def embed_pending_chunks(limit: int = 200, _: None = Depends(require_api_key)) -
         "AND COALESCE(c.embedding_attempts, 0) < 3"
     )
 
-    from openai import OpenAI as _OAI
+    from llm_usage import MeteredOpenAI as _OAI
     client = _OAI(api_key=openai_key, timeout=90.0)
 
     with engine.connect() as conn:
@@ -5189,7 +5226,7 @@ def _cluster_core(
     # 2) Sinon, génération OpenAI (optionnelle)
     if embeddings_matrix is None and allow_openai_embeddings and openai_key:
         try:
-            from openai import OpenAI as _OAI
+            from llm_usage import MeteredOpenAI as _OAI
             _oai = _OAI(api_key=openai_key, timeout=90.0)
             all_vecs: list = []
             batch_texts = [t[:2000] for t in texts]
@@ -5332,7 +5369,7 @@ def _build_clusters_payload(scenario_id: str, docs: list, cc: dict, *,
         resume = "Bruit de fond (articles non regroupés)." if label_int == -1 else ""
         if with_summaries and label_int != -1 and openai_key:
             try:
-                from openai import OpenAI as _OAI
+                from llm_usage import MeteredOpenAI as _OAI
                 _client = _OAI(api_key=openai_key, timeout=90.0)
                 english = (lang or "fr").strip().lower().startswith("en")
                 lang_word = "in English" if english else "en français"
@@ -5641,7 +5678,7 @@ def extract_pico_batch(
     )
 
     try:
-        from openai import OpenAI as _OAI
+        from llm_usage import MeteredOpenAI as _OAI
         from datetime import datetime, timezone
         _client = _OAI(api_key=openai_key, timeout=90.0)
 
@@ -5768,7 +5805,7 @@ def extract_metadata_batch(
     )
 
     try:
-        from openai import OpenAI as _OAI
+        from llm_usage import MeteredOpenAI as _OAI
         _client = _OAI(api_key=openai_key, timeout=90.0)
 
         for row in rows:
@@ -6489,7 +6526,7 @@ async def ask_stream(payload: dict[str, Any]) -> StreamingResponse:
     Version streaming (SSE) de l'endpoint /ask.
     Retourne les tokens au fur et à mesure via Server-Sent Events.
     """
-    from openai import AsyncOpenAI
+    from llm_usage import MeteredAsyncOpenAI as AsyncOpenAI
 
     question = payload.get("question", "")
     project_context = payload.get("project_context", "literev")
@@ -6508,7 +6545,7 @@ async def ask_stream(payload: dict[str, Any]) -> StreamingResponse:
 
     # Récupérer le contexte RAG (chunks pertinents)
     try:
-        from openai import OpenAI as SyncOpenAI
+        from llm_usage import MeteredOpenAI as SyncOpenAI
         sync_client = SyncOpenAI(timeout=90.0)
         emb_resp = sync_client.embeddings.create(
             model="text-embedding-3-small",
@@ -8113,7 +8150,7 @@ def _generate_search_strategy(query: str) -> dict:
     if not openai_key:
         return {"general": query, "pubmed": query, "explanation": "", "synonyms": [], "degraded": True}
     try:
-        from openai import OpenAI as _OAI_ss
+        from llm_usage import MeteredOpenAI as _OAI_ss
         _client = _OAI_ss(api_key=openai_key)
         response = _client.chat.completions.create(
             model="gpt-4.1-mini",
@@ -9755,7 +9792,7 @@ def _run_semantic_rerank_inline(scenario_id: str, query: str) -> int:
     via OpenAI QUE les articles fraîchement ingérés dont les chunks ne sont pas
     encore vectorisés (minorité)."""
     try:
-        from openai import OpenAI as _OAI
+        from llm_usage import MeteredOpenAI as _OAI
         _client = _OAI(timeout=90.0)
         q_emb = _client.embeddings.create(model="text-embedding-3-small", input=query[:2000]).data[0].embedding
         q_str = str(q_emb)
@@ -10232,7 +10269,7 @@ def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict
             # Initialiser le client OpenAI pour l'embedding des chunks fulltext
             _ft_emb_client = None
             try:
-                from openai import OpenAI as _OAI_ft
+                from llm_usage import MeteredOpenAI as _OAI_ft
                 _ft_emb_client = _OAI_ft(api_key=os.getenv("OPENAI_API_KEY"))
             except Exception:
                 pass
@@ -10444,7 +10481,7 @@ def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict
         try:
             openai_key = os.getenv("OPENAI_API_KEY")
             if openai_key:
-                from openai import OpenAI as _OAI_emb
+                from llm_usage import MeteredOpenAI as _OAI_emb
                 _emb_client = _OAI_emb(api_key=openai_key)
                 with engine.connect() as _conn_emb:
                     _chunks_to_embed = _conn_emb.execute(text("""
@@ -10503,7 +10540,7 @@ def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict
         try:
             openai_key = os.getenv("OPENAI_API_KEY")
             if openai_key:
-                from openai import OpenAI as _OAI_rr
+                from llm_usage import MeteredOpenAI as _OAI_rr
                 _rr_client = _OAI_rr(api_key=openai_key)
                 _rr_resp = _rr_client.embeddings.create(
                     model="text-embedding-3-small", input=query[:2000])
@@ -10560,7 +10597,7 @@ def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict
         try:
             openai_key = os.getenv("OPENAI_API_KEY")
             if openai_key:
-                from openai import OpenAI as _OAI
+                from llm_usage import MeteredOpenAI as _OAI
                 from datetime import datetime, timezone
                 _client = _OAI(api_key=openai_key, timeout=90.0)
                 system_prompt_pico = (
@@ -10663,7 +10700,7 @@ def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict
         try:
             openai_key = os.getenv("OPENAI_API_KEY")
             if openai_key:
-                from openai import OpenAI as _OAI2
+                from llm_usage import MeteredOpenAI as _OAI2
                 from datetime import datetime, timezone
                 _client2 = _OAI2(api_key=openai_key)
                 system_prompt_meta = (
@@ -11848,7 +11885,7 @@ def user_scenario_rag_assistant(scenario_id: str, payload: AskIn) -> dict[str, A
     query_embedding = None
     if openai_key:
         try:
-            from openai import OpenAI
+            from llm_usage import MeteredOpenAI as OpenAI
             client = OpenAI(api_key=openai_key, timeout=90.0)
             response = client.embeddings.create(
                 input=[payload.question.replace("\n", " ").strip()],
@@ -11934,7 +11971,7 @@ def user_scenario_rag_assistant(scenario_id: str, payload: AskIn) -> dict[str, A
         }
 
     try:
-        from openai import OpenAI
+        from llm_usage import MeteredOpenAI as OpenAI
         client = OpenAI(api_key=openai_key, timeout=90.0)
         system_prompt = (
             f"Vous êtes l'assistant scientifique expert de LiteRev-Evidence pour la recherche : "
@@ -12161,7 +12198,7 @@ def extract_user_scenario_article_pico(scenario_id: str, article_id: int, _: Non
         "Be concise (max 2 sentences per field). Return ONLY the JSON."
     )
     try:
-        from openai import OpenAI as _OAI
+        from llm_usage import MeteredOpenAI as _OAI
         from datetime import datetime, timezone
         _client = _OAI(api_key=openai_key, timeout=90.0)
         resp = _client.chat.completions.create(
@@ -12428,7 +12465,7 @@ def _embed_query_vector(query: str) -> str | None:
     if not os.getenv("OPENAI_API_KEY") or _openai_in_cooldown():
         return None
     try:
-        from openai import OpenAI as _OAI2
+        from llm_usage import MeteredOpenAI as _OAI2
         _emb = _OAI2(api_key=os.getenv("OPENAI_API_KEY"), timeout=30.0).embeddings.create(
             input=[query.replace("\n", " ").strip()[:2000]],
             model="text-embedding-3-small",
@@ -12853,7 +12890,7 @@ def _generate_evidence_brief_llm(scenario_id: str, force: bool = False, lang: st
     """
     import json as _json
     from datetime import datetime, timezone
-    from openai import OpenAI as _OAI
+    from llm_usage import MeteredOpenAI as _OAI
 
     threshold = _get_scenario_threshold(scenario_id)
     articles = _get_above_threshold_articles(scenario_id, threshold, include_fulltext=True,
@@ -13497,7 +13534,7 @@ def _generate_variables_from_pico(scenario_id: str, persist: str = "active", lan
     """
     import json as _json
     from datetime import datetime, timezone
-    from openai import OpenAI as _OAI
+    from llm_usage import MeteredOpenAI as _OAI
 
     threshold = _get_scenario_threshold(scenario_id)
     articles = _get_above_threshold_articles(scenario_id, threshold, include_fulltext=True,
@@ -13807,7 +13844,7 @@ def _llm_translate_strings(texts: list, target_lang: str) -> list:
     """Traduit une liste de chaînes vers 'en'/'fr' (ordre + longueur conservés).
     Renvoie les chaînes d'ORIGINE en cas d'échec — jamais de corruption."""
     import json as _json
-    from openai import OpenAI as _OAI
+    from llm_usage import MeteredOpenAI as _OAI
     if not texts:
         return texts
     lang_name = "English" if target_lang == "en" else "French"
@@ -14214,7 +14251,7 @@ def _generate_recommended_actions(scenario_id: str, lang: str | None = None) -> 
     recommandées » des cartes GESICA. Cache dans scenario_settings.
     """
     import json as _json
-    from openai import OpenAI as _OAI
+    from llm_usage import MeteredOpenAI as _OAI
 
     articles = _get_above_threshold_articles(scenario_id)
     pico_articles = [a for a in articles if a.get("pico_json")]
@@ -16970,7 +17007,7 @@ async def ask_stream_filtered(payload: dict[str, Any]):
     Version de /ask/stream qui filtre les chunks par seuil de similarité
     et priorise les articles validés humainement.
     """
-    from openai import AsyncOpenAI, OpenAI as SyncOpenAI
+    from llm_usage import MeteredAsyncOpenAI as AsyncOpenAI, MeteredOpenAI as SyncOpenAI
 
     question = payload.get("question", "")
     scenario_id = payload.get("scenario_id", None)

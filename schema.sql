@@ -162,3 +162,22 @@ CREATE INDEX IF NOT EXISTS ix_article_scenarios_scen_screen
     ON article_scenarios (scenario_id, screening_status);
 CREATE INDEX IF NOT EXISTS ix_article_scenarios_scen_kappa
     ON article_scenarios (scenario_id, kappa_final_status);
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- Comptabilité des appels OpenAI (migration a7c2e9b5d413 ; cf. llm_usage.py)
+-- L'application appelait l'API depuis une trentaine d'endroits sans jamais lire
+-- `response.usage` : la seule trace d'une dépense était la facture. Une ligne par
+-- appel, étiquetée de la fonction appelante, rend la question « qui dépense »
+-- répondable en une requête (/llm-usage).
+-- ─────────────────────────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS llm_usage (
+    id                BIGSERIAL PRIMARY KEY,
+    ts                TIMESTAMPTZ NOT NULL DEFAULT now(),
+    purpose           TEXT        NOT NULL,
+    model             TEXT        NOT NULL,
+    prompt_tokens     INTEGER     NOT NULL DEFAULT 0,
+    completion_tokens INTEGER     NOT NULL DEFAULT 0,
+    total_tokens      INTEGER     NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_llm_usage_ts ON llm_usage (ts DESC);
+CREATE INDEX IF NOT EXISTS idx_llm_usage_purpose_ts ON llm_usage (purpose, ts DESC);
