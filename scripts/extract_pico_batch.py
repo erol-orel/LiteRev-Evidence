@@ -48,6 +48,9 @@ DB_URL = os.environ.get("DATABASE_URL") or os.environ.get("DB_URL")
 if not DB_URL:
     raise RuntimeError("DATABASE_URL (or DB_URL) environment variable is required")
 engine = create_engine(DB_URL, pool_pre_ping=True)
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # racine du dépôt
+import llm_usage as _llm_usage
+_llm_usage.configure(engine)              # comptabilise les appels de ce script
 
 # ── OpenAI ────────────────────────────────────────────────────────────────────
 # Charger la clé depuis les fichiers d'environnement si non définie dans le shell
@@ -76,7 +79,7 @@ if not os.environ.get("OPENAI_API_KEY"):
                 log.debug(f"Impossible de lire {env_file}: {_e}")
 
 try:
-    from openai import OpenAI
+    from llm_usage import MeteredOpenAI as OpenAI
     _api_key = os.environ.get("OPENAI_API_KEY")
     if not _api_key:
         raise RuntimeError(
@@ -86,7 +89,7 @@ try:
             "  2. OPENAI_API_KEY=sk-... python3 extract_pico_batch.py\n"
             "  3. Ajouter OPENAI_API_KEY=sk-... dans /opt/literev-api/.env"
         )
-    client = OpenAI(api_key=_api_key)
+    client = OpenAI(api_key=_api_key, purpose="extract_pico_batch")
     OPENAI_AVAILABLE = True
 except ImportError:
     OPENAI_AVAILABLE = False

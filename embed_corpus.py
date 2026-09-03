@@ -91,13 +91,17 @@ def main():
         return
 
     try:
-        from openai import OpenAI
-        client = OpenAI(api_key=OPENAI_API_KEY)
+        # Via llm_usage : ce script embède le corpus entier, donc il DÉPENSE. Le laisser
+        # hors comptabilité rendrait la table trompeuse (« le worker est tout le coût »).
+        from llm_usage import MeteredOpenAI as OpenAI
+        client = OpenAI(api_key=OPENAI_API_KEY, purpose="embed_corpus")
     except ImportError:
         logger.error("Le package 'openai' est requis. Installez-le avec pip.")
         return
 
     engine = create_engine(DB_URL, pool_pre_ping=True)
+    import llm_usage as _llm_usage
+    _llm_usage.configure(engine)          # sinon les appels ci-dessous ne sont pas comptés
 
     # 1. Récupérer les chunks sans embedding
     sql_fetch = text("""

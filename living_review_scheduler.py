@@ -55,6 +55,19 @@ DB_URL = os.environ.get("DATABASE_URL") or os.environ.get("DB_URL")
 if not DB_URL:
     raise RuntimeError("DATABASE_URL (or DB_URL) environment variable is required")
 
+# Plafond d'articles rapportés PAR REQUÊTE PubMed. Les scénarios préréglés demandaient
+# 1000 — 20x le défaut de fetch_pubmed_new et 5x ce que demandent les scénarios
+# utilisateur — soit, avec 10 scénarios x 3 requêtes, jusqu'à 30 000 documents par cycle
+# quotidien. Chaque document nouveau devient un chunk à VECTORISER par le worker
+# d'arrière-plan de main.py (dont la file d'embedding n'est pas filtrée par projet,
+# à dessein : la recherche sémantique et l'assistant balaient tout le corpus). Le
+# volume ingéré ici est donc un multiplicateur direct de la dépense OpenAI.
+# Réglable sans redéploiement via LIVING_REVIEW_MAX_RESULTS.
+try:
+    MAX_RESULTS_PER_QUERY = max(1, int(os.environ.get("LIVING_REVIEW_MAX_RESULTS", "200")))
+except (TypeError, ValueError):
+    MAX_RESULTS_PER_QUERY = 200
+
 # ─── Queries PubMed par scénario ──────────────────────────────────────────────
 
 SCENARIO_QUERIES: dict[str, dict] = {
@@ -385,7 +398,7 @@ def run_living_review_for_scenario(
 
     # PubMed
     for query in config.get("pubmed_queries", []):
-        articles = fetch_pubmed_new(query, days=days, max_results=1000)
+        articles = fetch_pubmed_new(query, days=days, max_results=MAX_RESULTS_PER_QUERY)
         for art in articles:
             art["scenario_type"] = scenario_id
             art["project_context"] = "gesica"
@@ -456,7 +469,8 @@ def run_all_scenarios(conn, dry_run: bool = False, days: int = 30) -> list[dict]
     return results
 
 
-def run_user_scenarios(conn, dry_run: bool = False, days: int = 30, max_results: int = 200) -> list[dict]:
+def run_user_scenarios(conn, dry_run: bool = False, days: int = 30,
+                       max_results: int = MAX_RESULTS_PER_QUERY) -> list[dict]:
     """Living review pour les scénarios UTILISATEUR possédés (owner_email renseigné) :
     exécute leur `query` sur PubMed et ingère les nouveautés (taguées scenario_type=<id>,
     project_context='user'), de la même façon que les scénarios préréglés.

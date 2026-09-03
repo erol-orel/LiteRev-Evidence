@@ -42,6 +42,12 @@ REQUIRED_TABLES = {
     "user_scenarios", "user_scenario_folders", "scenario_settings",
 }
 
+# Tables the app serves fine WITHOUT, but whose absence costs something that is hard to
+# notice. llm_usage is the token accounting: if its boot DDL silently fails, every OpenAI
+# call still works and simply goes unrecorded — the app looks healthy while the one thing
+# that can attribute a bill produces an empty table.
+EXPECTED_TABLES = {"llm_usage"}
+
 
 def _admin_url():
     """A libpq URL for creating/dropping throwaway databases, or None to skip."""
@@ -198,8 +204,15 @@ print("RESULT " + json.dumps(out))
     assert line, f"app failed to boot on a fresh database:\nSTDOUT{proc.stdout[-2000:]}\nSTDERR{proc.stderr[-3000:]}"
     got = __import__("json").loads(line[len("RESULT "):])
 
-    missing = REQUIRED_TABLES - set(got.pop("_tables"))
+    tables = set(got.pop("_tables"))
+    missing = REQUIRED_TABLES - tables
     assert not missing, f"a fresh database is missing required tables: {sorted(missing)}"
+
+    unrecorded = EXPECTED_TABLES - tables
+    assert not unrecorded, (
+        f"a fresh database is missing {sorted(unrecorded)}. The app will run and spend "
+        "against the OpenAI API exactly as before, recording nothing — which is the state "
+        "this table was added to end.")
 
     bad = {p: c for p, c in got.items() if c != 200}
     assert not bad, (
