@@ -1310,13 +1310,15 @@ def health() -> dict[str, Any]:
     if not schema_ok:
         # Visible dans la réponse, pas seulement dans les logs du serveur.
         out["schema"]["details"] = _SCHEMA_DDL_FAILURES[:10]
-        # NB : `status` reste volontairement "ok". Le smoke test de déploiement filtre
-        # sur '"status":"ok"' ; le basculer ici ferait échouer tout déploiement futur
-        # sur une dégradation PRÉEXISTANTE en production, que rien ne permet d'inspecter
-        # d'ici. Le signal à surveiller est `schema.ok` : une fois la production
-        # confirmée saine, il suffit d'ajouter au smoke test
-        #   curl -fsS localhost:8000/health | grep -q '"ok":true'
-        # pour rendre la dégradation bloquante.
+        # NB : `status` reste volontairement "ok" même ici. Ce n'est plus un aveu
+        # d'impuissance : `schema.ok` EST désormais bloquant au déploiement (cf.
+        # scripts/check_health.py, appelé par le smoke test de deploy.yml, activé après
+        # confirmation que la production était saine — 39759fe : ok=true, 0 table
+        # manquante, 0 DDL écartée).
+        # La séparation est délibérée : `status` répond « le service tourne », et doit
+        # rester vrai pour que le déploiement PORTANT LE CORRECTIF puisse aboutir ;
+        # `schema.ok` répond « la base est complète », et c'est lui qui échoue le
+        # déploiement. Les inverser rendrait une dégradation irréparable par déploiement.
         logger.warning(f"/health: schéma DÉGRADÉ — tables manquantes={missing}, "
                        f"DDL écartées={len(_SCHEMA_DDL_FAILURES)}")
     return out
