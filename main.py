@@ -345,6 +345,35 @@ def _truncate_to_tokens(s: str, max_tokens: int = 8000) -> str:
         return s[:6000]
 
 
+#: Caractères de contrôle C0 hors tabulation/saut de ligne/retour chariot. NUL (0x00)
+#: est le seul que PostgreSQL REFUSE dans un champ `text` (« PostgreSQL text fields
+#: cannot contain NUL (0x00) bytes ») ; les autres sont acceptés mais n'ont aucun sens
+#: dans du texte extrait — ils viennent d'un PDF mal formé ou d'un décodage raté, et
+#: polluent aussi bien les prompts LLM que l'affichage.
+_CONTROL_CHARS_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+
+
+def sanitize_db_text(s):
+    """Retire les caractères de contrôle qui rendent un texte INSTOCKABLE en base.
+
+    Bug corrigé : `pdftotext` renvoie parfois des octets NUL sur un PDF mal formé.
+    L'INSERT du chunk lève alors psycopg.DataError, et comme
+    `_insert_fulltext_chunks_ft` fait DELETE puis INSERT dans UNE transaction, tout
+    est annulé : l'article n'obtient JAMAIS son texte intégral, avec pour seule trace
+    un WARNING. Observé 3 fois en 45 min en production.
+
+    Le nettoyage se fait ICI, à l'entrée, et pas à l'INSERT : un NUL casse aussi le
+    découpage, le prompt PICO et l'appel d'embedding en aval.
+
+    ATTENTION : `re.sub(r"\\s+", " ", …)`, appliqué juste avant dans les extracteurs,
+    ne protège de RIEN — en Python `\\s` ne couvre pas `\\x00`. Vérifié.
+
+    Pur : renvoie `s` inchangé si ce n'est pas une chaîne (None, bytes…)."""
+    if not isinstance(s, str) or not s:
+        return s
+    return _CONTROL_CHARS_RE.sub("", s)
+
+
 def _embed_one_call(client, batch: list) -> None:
     """Embède `batch` (liste de {id, content}) en UN appel et écrit les vecteurs,
     en mappant chaque vecteur par SON index de réponse (pas positionnel)."""
@@ -8538,6 +8567,15 @@ def _ingest_doc_direct(
     parallèles résolue par ON CONFLICT). Le compteur « ingested » ne s'incrémente
     que sur les vrais INSERT — sinon il surcompte les doublons inter-sources.
     """
+    # Même classe de bug que le texte intégral, sur le chemin d'ingestion PRINCIPAL :
+    # une API JSON peut renvoyer la séquence d'échappement u+0000, que json.loads décode
+    # en NUL RÉEL. L'INSERT échoue alors et le document est perdu pour cette recherche.
+    # On nettoie à l'entrée, avant `title_norm` (la dédup doit voir le titre déjà
+    # normalisé) et avant la construction du chunk title_abstract.
+    title = sanitize_db_text(title)
+    abstract = sanitize_db_text(abstract)
+    authors = sanitize_db_text(authors)
+    journal = sanitize_db_text(journal)
     doi = _normalize_doi(doi)
     title_norm = _normalize_title(title)
     content_text = f"{title}\n\n{abstract or ''}".strip()
@@ -10109,7 +10147,7 @@ def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict
                     _ct = _r.headers.get("content-type", "")
                     if "pdf" not in _ct.lower() and not pdf_url.lower().endswith(".pdf"):
                         _txt = _re.sub(r"<[^>]+>", " ", _r.text)
-                        _txt = _re.sub(r"\s+", " ", _txt).strip()
+                        _txt = sanitize_db_text(_re.sub(r"\s+", " ", _txt)).strip()
                         return _txt if len(_txt) > 500 else None
                     with _tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as _f:
                         for _chunk in _r.iter_content(chunk_size=8192):
@@ -10119,7 +10157,9 @@ def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict
                                            capture_output=True, text=True, timeout=30)
                     os.unlink(_tmp)
                     if _res.returncode == 0 and _res.stdout.strip():
-                        _txt = _re.sub(r"\s+", " ", _res.stdout).strip()
+                        # pdftotext émet des NUL sur certains PDF mal formés ; sans ce
+                        # nettoyage l'INSERT du chunk échoue et l'article perd son texte.
+                        _txt = sanitize_db_text(_re.sub(r"\s+", " ", _res.stdout)).strip()
                         return _txt if len(_txt) > 500 else None
                 except Exception:
                     pass
@@ -10223,7 +10263,12 @@ def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict
                             INSERT INTO document_chunk
                                 (document_id, content, chunk_index, chunk_type, chunk_weight, metadata_json)
                             VALUES (:did, :content, :idx, 'fulltext_section', 1.0, CAST(:meta AS jsonb))
-                        """), {"did": doc_id, "content": _chunk_text, "idx": _i, "meta": _meta})
+                        # Filet de sécurité au POINT D'ÉCRITURE : l'extracteur nettoie
+                        # déjà, mais cette fonction est appelée avec du texte d'autres
+                        # provenances (PMC, EuropePMC…) et un seul NUL fait échouer toute
+                        # la transaction — DELETE compris, donc zéro chunk conservé.
+                        """), {"did": doc_id, "content": sanitize_db_text(_chunk_text),
+                               "idx": _i, "meta": _meta})
                     _c.execute(text(
                         "UPDATE literature_document SET has_fulltext = true, open_access = true WHERE id = :did"
                     ), {"did": doc_id})
