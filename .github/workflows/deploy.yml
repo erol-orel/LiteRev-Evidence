@@ -92,8 +92,20 @@ jobs:
           mkdir -p ~/.ssh
           printf '%s\n' "$SSH_KEY" > ~/.ssh/deploy_key
           chmod 600 ~/.ssh/deploy_key
+          # ServerAliveInterval : deploy.sh construit le frontend SUR LE SERVEUR (npm ci +
+          # tsc + vite), soit plusieurs minutes SANS UNE SEULE LIGNE de sortie. Sans
+          # sonde applicative, un équipement intermédiaire (NAT/pare-feu) coupe la
+          # connexion inactive et ssh meurt sur « client_loop: send disconnect: Broken
+          # pipe » (code 255) — constaté sur le déploiement de bfaf4fc, tué à 4 min 50 en
+          # plein [5/7] Build frontend. Le déploiement s'arrête alors AVANT la bascule du
+          # frontend et AVANT le redémarrage de l'API : rien de cassé, mais rien de
+          # déployé non plus, et l'échec ressemble à une erreur de build.
+          # 30 s x 20 = 10 min de silence tolérées, en gardant le lien actif.
+          # ConnectTimeout ne couvre QUE l'établissement de la connexion, pas sa durée.
           ssh -o StrictHostKeyChecking=accept-new \
               -o ConnectTimeout=15 \
+              -o ServerAliveInterval=30 \
+              -o ServerAliveCountMax=20 \
               -i ~/.ssh/deploy_key \
               "$DEPLOY_USER@$DEPLOY_HOST" \
               'cd /opt/literev-api && git reset --hard HEAD && bash deploy.sh'
@@ -107,8 +119,12 @@ jobs:
           mkdir -p ~/.ssh
           printf '%s\n' "$SSH_KEY" > ~/.ssh/deploy_key
           chmod 600 ~/.ssh/deploy_key
+          # Mêmes sondes que l'étape de déploiement : ce smoke test est court, mais il
+          # suit un redémarrage d'API et ne doit pas échouer sur un lien coupé.
           ssh -o StrictHostKeyChecking=accept-new \
               -o ConnectTimeout=15 \
+              -o ServerAliveInterval=30 \
+              -o ServerAliveCountMax=20 \
               -i ~/.ssh/deploy_key \
               "$DEPLOY_USER@$DEPLOY_HOST" \
               bash << 'EOF'
