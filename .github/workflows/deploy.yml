@@ -113,7 +113,18 @@ jobs:
               "$DEPLOY_USER@$DEPLOY_HOST" \
               bash << 'EOF'
             set -e
-            curl -fsS http://localhost:8000/health | grep -q '"status":"ok"'
+            # Réponse affichée EN ENTIER dans le log : un échec ici doit être
+            # diagnosticable sans rouvrir une session SSH.
+            curl -fsS http://localhost:8000/health -o /tmp/literev_health.json
+            cat /tmp/literev_health.json; echo
+            # Vérifie status + database + schema.ok. `schema.ok` est BLOQUANT depuis que
+            # la production a été confirmée saine (39759fe). Il attrape ce que
+            # `grep '"status":"ok"'` ne voyait pas : le DDL de démarrage échoue OUVERT,
+            # donc une base à laquelle il manque une table répond « ok » pendant que
+            # /corpus/fulltext-stats — la ligne suivante — renvoie 500.
+            # La logique vit dans le dépôt (et est testée) plutôt qu'ici : cf.
+            # scripts/check_health.py et tests/test_check_health.py.
+            python3 /opt/literev-api/scripts/check_health.py /tmp/literev_health.json
             # DB + app OK : GET qui interroge la base. Remplace l'ancien POST /search
             # (endpoint retiré). -f fait échouer le smoke test sur tout statut != 2xx.
             curl -fsS http://localhost:8000/corpus/fulltext-stats >/dev/null
