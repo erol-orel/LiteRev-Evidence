@@ -69,6 +69,14 @@ def _reexec_in_venv_if_needed() -> None:
 
 _reexec_in_venv_if_needed()
 
+# Line-buffered: each query takes minutes, and block buffering would hold every line
+# until the end. Silence over a long SSH session is also what gets the connection
+# dropped ("client_loop: send disconnect: Broken pipe"), losing the whole run.
+try:
+    sys.stdout.reconfigure(line_buffering=True)
+except Exception:                                     # pragma: no cover - old runtimes
+    pass
+
 #: Same text-search configuration in the indexes and in the queries. If these ever
 #: diverge the planner silently stops using the index — the exact trap the trigram
 #: indexes already hit with a missing COALESCE.
@@ -224,6 +232,7 @@ def _titles(eng, ids, n=6):
 
 def compare(eng, main, query, samples):
     print(f"\n{'=' * 78}\nQUERY  {query[:120]}")
+    print("  scanning… (minutes per query without --build)")
     try:
         new, t_new = _new_ids(eng, main, query)
     except UnsupportedQuery as e:
