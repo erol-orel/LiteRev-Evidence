@@ -43,7 +43,31 @@ import os
 import sys
 import time
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+_REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, _REPO)
+
+
+def _reexec_in_venv_if_needed() -> None:
+    """Re-run under the application's virtualenv when launched with a bare python3.
+
+    `deploy.sh` installs every dependency into /opt/literev-api/.venv, so the obvious
+    `python3 scripts/compare_fts.py` dies on `ModuleNotFoundError: fastapi` before doing
+    anything. Re-exec instead of lecturing: the command a person naturally types should
+    work.
+    """
+    try:
+        import fastapi  # noqa: F401
+        return
+    except ModuleNotFoundError:
+        pass
+    venv_py = os.path.join(_REPO, ".venv", "bin", "python3")
+    if os.path.exists(venv_py) and os.path.realpath(venv_py) != os.path.realpath(sys.executable):
+        os.execv(venv_py, [venv_py] + sys.argv)          # replaces this process
+    sys.exit(f"This script needs the application's dependencies. Run it with the venv:\n"
+             f"  {os.path.join(_REPO, '.venv/bin/python3')} {' '.join(sys.argv)}")
+
+
+_reexec_in_venv_if_needed()
 
 #: Same text-search configuration in the indexes and in the queries. If these ever
 #: diverge the planner silently stops using the index — the exact trap the trigram
