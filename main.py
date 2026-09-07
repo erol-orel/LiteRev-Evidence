@@ -1883,6 +1883,40 @@ def _parse_boolean_ast(tokens: list[tuple[str, str | None]]):
     return parse_or()
 
 
+# ── Ce qui a DÉJÀ été essayé pour accélérer ce chemin (ne pas refaire) ───────────
+# EXPLAIN ANALYZE en production (346 152 documents, 1 245 182 chunks, 1 terme, LIMIT 1000) :
+#
+#   Seq Scan on literature_document d                        8 496 ms
+#     Filter: (title LIKE … OR abstract LIKE … OR (hashed SubPlan 2))
+#     SubPlan 2
+#       Bitmap Heap Scan on document_chunk                   4 934 ms   ← 50 % de faux
+#         Rows Removed by Index Recheck: 8105                             positifs relus
+#         Bitmap Index Scan on ix_docchunk_content_trgm         74 ms   ← l'index MARCHE
+#
+# Les trois index GIN trigrammes existent et sont VALIDES. La lecture tentante est :
+# « l'EXISTS dans le OU empêche le BitmapOr, donc les index sur title/abstract ne
+# servent jamais ; compilons l'AST en UNION/INTERSECT/EXCEPT sur document_id ».
+#
+# Cela a été implémenté et MESURÉ (même résultats, à l'ensemble d'id près) :
+#
+#   corpus              filtre de ligne (actuel)      ensembliste
+#    20 000 docs                  556 ms                 1 876 ms
+#    50 000 docs                  657 ms                 5 036 ms
+#   120 000 docs                1 010 ms                11 865 ms
+#
+# La version ensembliste est 3 à 12× PLUS LENTE, et l'écart CROÎT avec le corpus. Neuf
+# termes donnent 27 sous-requêtes ; les termes fréquents (incidence, prevalence,
+# forecasting…) renvoient chacun des dizaines de milliers d'id, et les UNION/INTERSECT
+# successifs sur ces ensembles coûtent bien plus qu'un seul balayage séquentiel qui
+# court-circuite dès le premier prédicat vrai.
+#
+# Surtout : le coût dominant (4,9 s des 8,5 s) est la RELECTURE de tas du bitmap — les
+# trigrammes rendent 16 338 chunks candidats dont la moitié sont de faux positifs, et
+# vérifier un LIKE oblige à relire le texte complet. TOUTE approche fondée sur LIKE paie
+# ce prix, y compris la version ensembliste. Le seul vrai levier serait la recherche
+# plein texte (tsvector + GIN) : pas de relecture, index bien plus petit — mais la
+# sémantique d'appariement change (racinisation, frontières de mots, plus de
+# sous-chaînes), donc c'est une décision produit, pas une optimisation transparente.
 def _boolean_ast_to_sql(ast, params: dict, idx: list | None = None) -> str | None:
     """Compile l'AST booléen en fragment SQL : chaque feuille apparie le titre, le
     résumé ET le texte du chunk (équivalent [Title/Abstract]) ; AND/OR/NOT préservés."""
