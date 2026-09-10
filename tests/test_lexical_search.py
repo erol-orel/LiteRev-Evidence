@@ -121,7 +121,8 @@ def _engine_ok() -> bool:
 
 
 def _reset_state():
-    lex._STATE.update(ready=False, missing=None, stale=None, checked_at=None, last_error=None)
+    lex._STATE.update(ready=False, missing=None, stale=None, checked_at=None,
+                      missing_checked_at=None, last_error=None)
 
 
 @pytest.fixture()

@@ -309,7 +309,8 @@ _STATE: dict[str, Any] = {
     "ready": False,          # every document has a row → the FTS path answers in full
     "missing": None,         # documents without a row (backfill remaining)
     "stale": None,           # rows whose chunks changed since the vector was computed
-    "checked_at": None,      # epoch seconds of the last check
+    "checked_at": None,      # epoch seconds of the last check of any kind
+    "missing_checked_at": None,   # epoch seconds of the last missing-count (the anti-join)
     "last_error": None,
 }
 
@@ -339,15 +340,24 @@ def state() -> dict[str, Any]:
     return out
 
 
-def _check_state(conn) -> None:
+def _check_state(conn, count_missing: bool = True) -> None:
+    """Re-measure. The stale count is an index-only glance; the missing count is an
+    anti-join over every document (≈ a few hundred ms on the production corpus), so
+    callers in steady state ask for it only every few minutes."""
     from sqlalchemy import text
-    row = conn.execute(text("""
-        SELECT (SELECT count(*) FROM literature_document d
-                 WHERE NOT EXISTS (SELECT 1 FROM document_search s WHERE s.document_id = d.id)) AS missing,
-               (SELECT count(*) FROM document_search WHERE stale) AS stale
-    """)).mappings().first()
-    _STATE.update(missing=int(row["missing"]), stale=int(row["stale"]),
-                  ready=int(row["missing"]) == 0, checked_at=time.time(), last_error=None)
+    now = time.time()
+    if count_missing:
+        row = conn.execute(text("""
+            SELECT (SELECT count(*) FROM literature_document d
+                     WHERE NOT EXISTS (SELECT 1 FROM document_search s WHERE s.document_id = d.id)) AS missing,
+                   (SELECT count(*) FROM document_search WHERE stale) AS stale
+        """)).mappings().first()
+        _STATE.update(missing=int(row["missing"]), stale=int(row["stale"]),
+                      ready=int(row["missing"]) == 0, checked_at=now, missing_checked_at=now,
+                      last_error=None)
+    else:
+        stale = conn.execute(text("SELECT count(*) FROM document_search WHERE stale")).scalar()
+        _STATE.update(stale=int(stale or 0), checked_at=now, last_error=None)
 
 
 def is_ready(refresh: bool = True) -> bool:
@@ -359,16 +369,17 @@ def is_ready(refresh: bool = True) -> bool:
     """
     if _engine is None:
         return False
-    checked = _STATE["checked_at"]
+    checked = _STATE["missing_checked_at"]
     if refresh and (checked is None or time.time() - checked > _READY_TTL):
         with _lock:
-            checked = _STATE["checked_at"]
+            checked = _STATE["missing_checked_at"]
             if checked is None or time.time() - checked > _READY_TTL:
                 try:
                     with _engine.connect() as c:
-                        _check_state(c)
+                        _check_state(c, count_missing=True)
                 except Exception as e:                     # noqa: BLE001 - never raise from a search
-                    _STATE.update(ready=False, checked_at=time.time(), last_error=str(e)[:200])
+                    _STATE.update(ready=False, checked_at=time.time(),
+                                  missing_checked_at=time.time(), last_error=str(e)[:200])
     return bool(_STATE["ready"])
 
 
@@ -434,7 +445,8 @@ def refresh_once(batch: int = 400, max_batches: int = 5, check_missing: bool = T
     if _engine is None:
         raise RuntimeError("lexical_search.configure(engine) has not been called")
     done = {"backfilled": 0, "refreshed": 0}
-    if check_missing or _STATE["missing"] is None or (_STATE["missing"] or 0) > 0:
+    backfill = check_missing or _STATE["missing"] is None or (_STATE["missing"] or 0) > 0
+    if backfill:
         for _ in range(max_batches):
             with _engine.begin() as c:
                 n = c.execute(text(_BACKFILL_SQL), {"n": batch}).rowcount or 0
@@ -449,7 +461,7 @@ def refresh_once(batch: int = 400, max_batches: int = 5, check_missing: bool = T
         if n < batch:
             break
     with _engine.connect() as c:
-        _check_state(c)
+        _check_state(c, count_missing=backfill)
     done.update(_STATE)
     return done
 
@@ -460,8 +472,8 @@ def worker_loop(idle_sleep: float = 30.0, busy_sleep: float = 1.0, missing_every
     was_ready = False
     while True:
         try:
-            due = (not _STATE["ready"]) or _STATE["checked_at"] is None \
-                or time.time() - _STATE["checked_at"] > missing_every
+            last = _STATE["missing_checked_at"]
+            due = (not _STATE["ready"]) or last is None or time.time() - last > missing_every
             r = refresh_once(check_missing=due)
             busy = bool(r["backfilled"] or r["refreshed"])
             if busy:
