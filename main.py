@@ -22,6 +22,7 @@ from sqlalchemy import create_engine, text, bindparam
 # parce que TOUS les `from llm_usage import MeteredOpenAI` en dépendent : un import
 # manquant ne doit pas se découvrir au premier appel LLM, en production.
 import llm_usage as _llm_usage
+import lexical_search as _lex
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("literev-api")
@@ -725,7 +726,7 @@ _REQUIRED_TABLES = (
 )
 
 
-def _exec_ddl_isolated(statements, label: str) -> list[str]:
+def _exec_ddl_isolated(statements, label: str, record: bool = True) -> list[str]:
     """Exécute des instructions DDL CHACUNE DANS SA PROPRE TRANSACTION.
 
     Pourquoi : Postgres avorte la transaction ENTIÈRE à la première erreur. Regroupées
@@ -735,7 +736,12 @@ def _exec_ddl_isolated(statements, label: str) -> list[str]:
     indice était un avertissement dans les logs. C'est exactement ce qui rendait toute
     base NEUVE inutilisable (voir tests/test_fresh_db_bootstrap.py).
 
-    Renvoie la liste des instructions ayant échoué (vide = tout est passé)."""
+    Renvoie la liste des instructions ayant échoué (vide = tout est passé).
+
+    `record=False` : l'échec est journalisé et renvoyé, mais PAS inscrit dans
+    _SCHEMA_DDL_FAILURES — donc sans effet sur `schema.ok`, qui est BLOQUANT au
+    déploiement (scripts/check_health.py). À réserver aux objets dont l'absence
+    dégrade (recherche plus lente) sans rien casser."""
     failed: list[str] = []
     for _sql in statements:
         try:
@@ -744,7 +750,8 @@ def _exec_ddl_isolated(statements, label: str) -> list[str]:
         except Exception as _e:                     # noqa: BLE001 - best-effort par design
             _first = _sql.strip().split("\n")[0][:120]
             failed.append(_first)
-            _SCHEMA_DDL_FAILURES.append(f"{label}: {_first}")
+            if record:
+                _SCHEMA_DDL_FAILURES.append(f"{label}: {_first}")
             logger.warning(f"{label}: DDL ignorée ({_e.__class__.__name__}): {_first}")
     return failed
 
@@ -763,6 +770,25 @@ try:
     _ensure_llm_usage_table()
 except Exception as _e:                               # jamais bloquant : c'est de la mesure
     logger.warning(f"_ensure_llm_usage_table: {_e}")
+
+
+def _ensure_document_search() -> None:
+    """Table `document_search` + fonction + triggers de la recherche PLEIN TEXTE
+    (cf. lexical_search.py) : un tsvector par document, tenu à jour par triggers, qui
+    remplace les LIKE '%terme%' du match booléen (55 à 240 s par requête en prod).
+
+    `record=False` : si ces objets ne peuvent pas être créés (droits sur les tables,
+    par ex.), la recherche booléenne reste sur le chemin LIKE — plus lente, pas
+    cassée. Ce n'est donc pas une dégradation du schéma au sens de `schema.ok`
+    (bloquant au déploiement) ; l'état est exposé dans /health → lexical_search."""
+    _lex.configure(engine)
+    _lex.DDL_FAILURES[:] = _exec_ddl_isolated(_lex.DDL, "_ensure_document_search", record=False)
+
+
+try:
+    _ensure_document_search()
+except Exception as _e:
+    logger.warning(f"_ensure_document_search: {_e}")
 
 
 def _ensure_performance_indexes() -> None:
@@ -873,6 +899,14 @@ def startup_event() -> None:
         ).start()
     except Exception as _e:
         logger.warning(f"spawn _ensure_performance_indexes: {_e}")
+
+    # Recherche plein texte : remplissage initial puis rafraîchissement de
+    # document_search en arrière-plan (cf. lexical_search.py). Tant que le remplissage
+    # n'est pas COMPLET, la recherche booléenne reste sur le chemin LIKE.
+    try:
+        _lex.start_worker()
+    except Exception as _e:
+        logger.warning(f"spawn document_search worker: {_e}")
 
     # Scénario de démonstration intégré (dataset RÉEL grippe + modèle entraîné) : rend
     # l'essai « données réelles » visible dans la liste. Idempotent (id stable) et
@@ -1336,6 +1370,12 @@ def health() -> dict[str, Any]:
             "ddl_failures": len(_SCHEMA_DDL_FAILURES),
         },
     }
+    # Moteur de la recherche booléenne (plein texte une fois document_search
+    # rempli, LIKE avant / en repli) : informatif, jamais bloquant.
+    try:
+        out["lexical_search"] = _lex.state()
+    except Exception as _e:                          # noqa: BLE001
+        out["lexical_search"] = {"error": str(_e)[:200]}
     if not schema_ok:
         # Visible dans la réponse, pas seulement dans les logs du serveur.
         out["schema"]["details"] = _SCHEMA_DDL_FAILURES[:10]
@@ -1788,6 +1828,25 @@ def _strip_field_tags(query: str) -> str:
     return re.sub(r"\[[^\]]*\]", " ", query or "")
 
 
+# Conservés dans un terme : lettres (accentuées comprises — « cathéter » doit rester
+# « cathéter », pas « cathter »), chiffres, '_', '-', espaces et '*'. Le reste est du
+# bruit de ponctuation.
+_TERM_JUNK_RE = re.compile(r"[^\w\-* ]")
+
+
+def _clean_boolean_term(raw: str) -> str:
+    """Normalise un terme ou une phrase : minuscules, ponctuation retirée.
+
+    Une '*' FINALE est la troncature PubMed (forecast* = forecast, forecasting,
+    forecasts…) : elle est GARDÉE en fin de terme, et chaque compilateur en fait ce
+    qu'il sait faire (préfixe en plein texte, sous-chaîne en LIKE, retirée pour arXiv
+    et S2). Toute autre '*' est du bruit."""
+    t = _TERM_JUNK_RE.sub("", raw.lower())
+    trunc = t.rstrip().endswith("*")
+    t = t.replace("*", "").strip()
+    return f"{t}*" if (t and trunc) else t
+
+
 def _tokenize_boolean(query: str) -> list[tuple[str, str | None]]:
     """Découpe une requête booléenne (tags de champ retirés) en jetons :
     ('(' | ')' | 'AND' | 'OR' | 'NOT', None) ou ('TERM', phrase_normalisée)."""
@@ -1798,7 +1857,7 @@ def _tokenize_boolean(query: str) -> list[tuple[str, str | None]]:
             toks.append((raw, None))
             continue
         if raw.startswith('"') and raw.endswith('"'):
-            phrase = re.sub(r"[^a-z0-9\-_ ]", "", raw[1:-1].lower()).strip()
+            phrase = _clean_boolean_term(raw[1:-1])
             if phrase:
                 toks.append(("TERM", phrase))
             continue
@@ -1808,7 +1867,7 @@ def _tokenize_boolean(query: str) -> list[tuple[str, str | None]]:
         elif raw == "-":
             toks.append(("NOT", None))
         else:
-            term = re.sub(r"[^a-z0-9\-_ ]", "", raw.lower()).strip()
+            term = _clean_boolean_term(raw)
             if term:
                 toks.append(("TERM", term))
     return toks
@@ -1928,7 +1987,7 @@ def _boolean_ast_to_sql(ast, params: dict, idx: list | None = None) -> str | Non
     if typ == "term":
         key = f"bq_{idx[0]}"
         idx[0] += 1
-        params[key] = f"%{ast[1]}%"
+        params[key] = f"%{ast[1].rstrip('*')}%"       # troncature : déjà une sous-chaîne
         # Appartenance PAR DOCUMENT (pas par chunk) : un terme correspond si le
         # titre, le résumé OU N'IMPORTE QUEL chunk du document le contient (EXISTS
         # corrélé sur d.id). Indispensable pour NOT : compiler `NOT terme` en
@@ -1971,7 +2030,7 @@ def _boolean_to_arxiv(ast) -> str | None:
         return None
     typ = ast[0]
     if typ == "term":
-        return f'all:"{ast[1]}"'
+        return f'all:"{ast[1].rstrip("*")}"'
     if typ == "not":
         return None
     if typ in ("and", "or"):
@@ -1991,7 +2050,8 @@ def _boolean_to_s2(ast) -> str | None:
         return None
     typ = ast[0]
     if typ == "term":
-        return f'"{ast[1]}"' if " " in ast[1] else ast[1]
+        _t = ast[1].rstrip("*")
+        return f'"{_t}"' if " " in _t else _t
     if typ == "not":
         return None
     if typ in ("and", "or"):
@@ -2038,8 +2098,18 @@ def _search_local_doc_ids(
 
     params: dict[str, Any] = {**where_params, "limit": limit}
 
+    _fts = False
+    _ast = None
     if mode == "boolean":
-        any_match_sql = _build_boolean_match_sql_from_query(query, params)
+        _ast = _parse_boolean_ast(_tokenize_boolean(query))
+        _fts = _lex.use_fts()
+        if _fts:
+            # Plein texte : UN tsquery pour toute l'expression, évalué dans l'index GIN
+            # de document_search — sémantique PAR DOCUMENT, comme le chemin LIKE
+            # (cf. lexical_search.py). Un AST vide → FALSE : aucune correspondance.
+            any_match_sql = _lex.match_sql(_ast, params) or "FALSE"
+        else:
+            any_match_sql = _boolean_ast_to_sql(_ast, params) or "FALSE"
     else:
         raw_terms = [t.strip() for t in re.split(r"\s+", query.lower()) if t.strip()]
         query_terms = [re.sub(r"[^a-zA-Z0-9\-_]", "", t) for t in raw_terms if re.sub(r"[^a-zA-Z0-9\-_]", "", t)]
@@ -2068,7 +2138,25 @@ def _search_local_doc_ids(
               {where_sql}
             LIMIT :limit
         """)
+    elif mode == "boolean" and _fts:
+        # Plein texte : un seul balayage d'index GIN sur document_search, puis jointure
+        # par clé primaire pour les filtres (résumé ≥ 30 caractères, doublons, facettes).
+        # Mêmes filtres externes que le chemin LIKE ci-dessous → même définition du
+        # corpus, seule la correspondance des termes change (cf. lexical_search.py).
+        sql = text(f"""
+            SELECT d.id
+            FROM document_search s
+            JOIN literature_document d ON d.id = s.document_id
+            WHERE ({any_match_sql})
+              AND d.abstract IS NOT NULL AND length(TRIM(d.abstract)) >= 30
+              AND (d.is_duplicate IS NULL OR d.is_duplicate = FALSE)
+              {where_sql}
+            LIMIT :limit
+        """)
     elif mode == "boolean":
+        # Chemin LIKE/trigramme : REPLI tant que document_search n'est pas rempli
+        # (ou LEXICAL_SEARCH_ENGINE=like). Lent — 55 à 240 s par requête sur le corpus
+        # de production — mais correct.
         # PERF : le match booléen est PAR DOCUMENT — `any_match_sql` n'apparie que
         # d.title / d.abstract + un EXISTS corrélé sur document_chunk ; il ne référence
         # PAS le chunk joint `c`. Piloter la requête depuis literature_document (~207k
@@ -2099,8 +2187,21 @@ def _search_local_doc_ids(
             LIMIT :limit
         """)
 
+    import time as _time_ls
+    _t0 = _time_ls.perf_counter()
     with engine.connect() as conn:
-        return conn.execute(sql, params).scalars().all()
+        ids = conn.execute(sql, params).scalars().all()
+    if mode == "boolean":
+        # Une ligne par recherche, avec le moteur utilisé : c'est ce que l'on cherche
+        # dans le journal quand « la recherche locale est lente ».
+        logger.info(f"lexical search [{'fts' if _fts else 'like'}] {len(ids)} docs in "
+                    f"{(_time_ls.perf_counter() - _t0) * 1000:.0f} ms — {query[:100]!r}")
+        if _fts:
+            _ignored = _lex.stopword_terms(_lex.ast_terms(_ast))
+            if _ignored:
+                logger.warning(f"lexical search: terms made only of stop words were "
+                               f"ignored by PostgreSQL: {_ignored} — {query[:100]!r}")
+    return ids
 
 
 # Limite de récupération par source live (PubMed, OpenAlex, …). Appliquée à l'identique
@@ -3917,15 +4018,21 @@ def get_gesica_scenarios() -> list[dict[str, Any]]:
     """
     with engine.connect() as conn:
         scenario_rows = _list_db_gesica_scenarios(conn)
+        # Compteurs limités AUX scénarios listés : article_scenarios contient aussi les
+        # liens de tous les scénarios utilisateur (des centaines de milliers de lignes
+        # quand une recherche a « matché » large), qui n'ont rien à faire ici.
+        sys_ids = [str(m["id"]) for m in scenario_rows]
 
         sql_counts = text("""
             SELECT ars.scenario_id, COUNT(DISTINCT ars.document_id) as article_count
             FROM article_scenarios ars
             JOIN literature_document d ON d.id = ars.document_id
-            WHERE (d.is_duplicate IS NULL OR d.is_duplicate = FALSE)
+            WHERE ars.scenario_id = ANY(CAST(:ids AS text[]))
+              AND (d.is_duplicate IS NULL OR d.is_duplicate = FALSE)
             GROUP BY ars.scenario_id;
         """)
-        db_counts = {row["scenario_id"]: row["article_count"] for row in conn.execute(sql_counts).mappings().all()}
+        db_counts = {row["scenario_id"]: row["article_count"]
+                     for row in conn.execute(sql_counts, {"ids": sys_ids}).mappings().all()}
 
         sql_screening = text("""
             SELECT
@@ -3934,12 +4041,13 @@ def get_gesica_scenarios() -> list[dict[str, Any]]:
                 COUNT(CASE WHEN COALESCE(ars.screening_status, d.screening_status) = 'excluded' THEN 1 END) as excluded_count
             FROM article_scenarios ars
             JOIN literature_document d ON d.id = ars.document_id
-            WHERE (d.is_duplicate IS NULL OR d.is_duplicate = FALSE)
+            WHERE ars.scenario_id = ANY(CAST(:ids AS text[]))
+              AND (d.is_duplicate IS NULL OR d.is_duplicate = FALSE)
             GROUP BY ars.scenario_id;
         """)
         screening_counts = {
             row["scenario_id"]: {"included": row["included_count"], "excluded": row["excluded_count"]}
-            for row in conn.execute(sql_screening).mappings().all()
+            for row in conn.execute(sql_screening, {"ids": sys_ids}).mappings().all()
         }
 
         # Kappa par scénario : il n'existe pas de table `scenario_kappa_cache`
@@ -3947,29 +4055,15 @@ def get_gesica_scenarios() -> list[dict[str, Any]]:
         # /double-blind/kappa ; ici on ne fournit pas de valeur agrégée.
         kappa_scores: dict[str, Any] = {}
 
-        # Articles de TOUS les scénarios en UNE requête (au lieu d'une par scénario
-        # — N+1). On groupe ensuite par scénario en Python. L'ordre intra-scénario
-        # (année desc, titre asc) est préservé par le ORDER BY.
-        sql_all_articles = text("""
-            SELECT ars.scenario_id, d.id, d.title, d.abstract, d.year, d.source, d.url,
-                   d.authors, d.doi, d.journal, d.keywords, d.language, d.study_design,
-                   d.sample_size, d.country, d.citation_count, d.open_access,
-                   EXISTS (
-                       SELECT 1 FROM document_chunk c
-                       WHERE c.document_id = d.id
-                         AND c.chunk_type = 'fulltext_section'
-                   ) AS has_fulltext
-            FROM literature_document d
-            JOIN article_scenarios ars ON ars.document_id = d.id
-            WHERE (d.is_duplicate IS NULL OR d.is_duplicate = FALSE)
-            ORDER BY ars.scenario_id, d.year DESC NULLS LAST, d.title ASC
-        """)
-        articles_by_scenario: dict[str, list[dict[str, Any]]] = {}
-        for r in conn.execute(sql_all_articles).mappings().all():
-            rec = dict(r)
-            sid = str(rec.pop("scenario_id"))
-            articles_by_scenario.setdefault(sid, []).append(rec)
-
+        # `relevant_articles` est VIDE, à dessein. Cette liste chargeait autrefois TOUS
+        # les articles de TOUS les scénarios (y compris les scénarios utilisateur, non
+        # listés ici) avec leur résumé, en UNE requête : un seul scénario dont la
+        # recherche lexicale avait apparié 238 000 documents suffisait à faire dépasser
+        # la minute — et la mémoire — à cette route, que l'interface appelle au
+        # chargement de CHAQUE page. Réponse observée en production : 502 sur
+        # /api/gesica/scenarios, « Failed to load scenarios ». Le front n'affiche
+        # d'ailleurs pas cette liste (App.tsx : `false && scenario.relevantArticles…`) ;
+        # les articles d'un scénario se lisent, paginés, sur /gesica/scenarios/{id}/corpus.
         result = []
         for meta in scenario_rows:
             scenario_id = str(meta["id"])
@@ -3977,7 +4071,7 @@ def get_gesica_scenarios() -> list[dict[str, Any]]:
             article_count = int(db_counts.get(scenario_id, 0) or 0)
             sc = screening_counts.get(scenario_id, {"included": 0, "excluded": 0})
 
-            articles = articles_by_scenario.get(scenario_id, [])
+            articles: list[dict[str, Any]] = []
 
             result.append({
                 "id": scenario_id,

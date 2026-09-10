@@ -35,6 +35,13 @@ Usage
   python3 scripts/compare_fts.py --drop
 
 Reads DB_URL the same way main.py does.
+
+Outcome (production, 2026-09-10, five saved queries): 480 825 → 46 019 papers (−90 %,
+almost all `%ai%`/`%ml%` substring false positives), median 136 526 ms → 156 ms. The
+application now searches through `document_search` (see lexical_search.py) — one
+tsvector per DOCUMENT, so `A AND B` still holds across chunks — rather than the two
+per-row expression indexes this script builds. Those indexes serve this comparison
+only: run `--drop` once the switch is confirmed to reclaim their space.
 """
 from __future__ import annotations
 
@@ -43,7 +50,39 @@ import os
 import sys
 import time
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+_REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, _REPO)
+
+
+def _reexec_in_venv_if_needed() -> None:
+    """Re-run under the application's virtualenv when launched with a bare python3.
+
+    `deploy.sh` installs every dependency into /opt/literev-api/.venv, so the obvious
+    `python3 scripts/compare_fts.py` dies on `ModuleNotFoundError: fastapi` before doing
+    anything. Re-exec instead of lecturing: the command a person naturally types should
+    work.
+    """
+    try:
+        import fastapi  # noqa: F401
+        return
+    except ModuleNotFoundError:
+        pass
+    venv_py = os.path.join(_REPO, ".venv", "bin", "python3")
+    if os.path.exists(venv_py) and os.path.realpath(venv_py) != os.path.realpath(sys.executable):
+        os.execv(venv_py, [venv_py] + sys.argv)          # replaces this process
+    sys.exit(f"This script needs the application's dependencies. Run it with the venv:\n"
+             f"  {os.path.join(_REPO, '.venv/bin/python3')} {' '.join(sys.argv)}")
+
+
+_reexec_in_venv_if_needed()
+
+# Line-buffered: each query takes minutes, and block buffering would hold every line
+# until the end. Silence over a long SSH session is also what gets the connection
+# dropped ("client_loop: send disconnect: Broken pipe"), losing the whole run.
+try:
+    sys.stdout.reconfigure(line_buffering=True)
+except Exception:                                     # pragma: no cover - old runtimes
+    pass
 
 #: Same text-search configuration in the indexes and in the queries. If these ever
 #: diverge the planner silently stops using the index — the exact trap the trigram
@@ -200,6 +239,7 @@ def _titles(eng, ids, n=6):
 
 def compare(eng, main, query, samples):
     print(f"\n{'=' * 78}\nQUERY  {query[:120]}")
+    print("  scanning… (minutes per query without --build)")
     try:
         new, t_new = _new_ids(eng, main, query)
     except UnsupportedQuery as e:

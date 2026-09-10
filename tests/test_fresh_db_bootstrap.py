@@ -45,8 +45,10 @@ REQUIRED_TABLES = {
 # Tables the app serves fine WITHOUT, but whose absence costs something that is hard to
 # notice. llm_usage is the token accounting: if its boot DDL silently fails, every OpenAI
 # call still works and simply goes unrecorded — the app looks healthy while the one thing
-# that can attribute a bill produces an empty table.
-EXPECTED_TABLES = {"llm_usage"}
+# that can attribute a bill produces an empty table. document_search is the full-text
+# table: without it every boolean search silently takes the LIKE path (minutes per
+# query on the production corpus) and /health merely reports engine="like".
+EXPECTED_TABLES = {"llm_usage", "document_search"}
 
 
 def _admin_url():
@@ -154,6 +156,25 @@ def _split_statements(sql: str) -> list:
     if tail:
         out.append(tail)
     return out
+
+
+def test_every_schema_statement_starts_with_sql():
+    """A semicolon inside a `--` comment splits the statement that follows it: the
+    fragment begins with the tail of the comment, fails to parse, and `_apply_schema`
+    swallows the error — so schema.sql silently stops creating that object and only
+    the app's boot DDL papers over it. That is exactly what happened to `llm_usage`
+    (comment "migration a7c2e9b5d413 ; cf. llm_usage.py") and would have happened to
+    `document_search`. Pure: no database needed."""
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    sql = open(os.path.join(root, "schema.sql"), encoding="utf-8").read()
+    keywords = {"CREATE", "ALTER", "DO", "DROP", "INSERT", "UPDATE", "DELETE",
+                "COMMENT", "SET", "SELECT", "GRANT", "BEGIN", "END"}
+    odd = []
+    for stmt in _split_statements(sql):
+        body = "\n".join(l for l in stmt.splitlines() if not l.strip().startswith("--")).strip()
+        if body and body.split()[0].upper() not in keywords:
+            odd.append(body[:80].replace("\n", " "))
+    assert not odd, f"statements that do not start with SQL (a ';' inside a comment?): {odd}"
 
 
 def test_fresh_database_serves_every_required_endpoint(fresh_db):
