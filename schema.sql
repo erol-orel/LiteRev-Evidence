@@ -164,7 +164,7 @@ CREATE INDEX IF NOT EXISTS ix_article_scenarios_scen_kappa
     ON article_scenarios (scenario_id, kappa_final_status);
 
 -- ─────────────────────────────────────────────────────────────────────────────
--- Comptabilité des appels OpenAI (migration a7c2e9b5d413 ; cf. llm_usage.py)
+-- Comptabilité des appels OpenAI (migration a7c2e9b5d413 — cf. llm_usage.py)
 -- L'application appelait l'API depuis une trentaine d'endroits sans jamais lire
 -- `response.usage` : la seule trace d'une dépense était la facture. Une ligne par
 -- appel, étiquetée de la fonction appelante, rend la question « qui dépense »
@@ -183,13 +183,15 @@ CREATE INDEX IF NOT EXISTS idx_llm_usage_ts ON llm_usage (ts DESC);
 CREATE INDEX IF NOT EXISTS idx_llm_usage_purpose_ts ON llm_usage (purpose, ts DESC);
 
 -- ─────────────────────────────────────────────────────────────────────────────
--- Recherche plein texte (migration b8d3f0a6c1e7 ; cf. lexical_search.py — source de
+-- Recherche plein texte (migration b8d3f0a6c1e7 — cf. lexical_search.py, source de
 -- vérité de ce DDL, appliqué aussi au démarrage de l'application)
 -- Un tsvector par document (titre + résumé + chunks de texte intégral), indexé GIN :
 -- la requête booléenne ENTIÈRE devient un seul tsquery évalué dans l'index, avec une
 -- sémantique PAR DOCUMENT. Remplace les LIKE '%terme%' (55 à 240 s par requête sur le
--- corpus de production). Tenu à jour par triggers ; le worker de l'application remplit
+-- corpus de production). Tenu à jour par triggers. Le worker de l'application remplit
 -- les documents existants et recalcule les lignes marquées `stale`.
+-- NB : pas de point-virgule dans ces commentaires — tests/test_fresh_db_bootstrap.py
+-- découpe ce fichier sur les points-virgules hors corps $$…$$, commentaires compris.
 -- ─────────────────────────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS document_search (
     document_id BIGINT PRIMARY KEY

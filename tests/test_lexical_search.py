@@ -144,9 +144,12 @@ def corpus(db_conn, monkeypatch):
             "chunk_index int NOT NULL DEFAULT 0, content text NOT NULL, chunk_type text)")
         cur.execute("CREATE TABLE article_scenarios (scenario_id text, document_id bigint, "
                     "similarity_score double precision, PRIMARY KEY (scenario_id, document_id))")
-    lex.configure(main.engine)
-    failed = main._exec_ddl_isolated(lex.DDL, "test", record=False)
-    assert failed == [], failed
+    # The real boot function, on tables that exist this time. On CI the session's
+    # import of main ran it against an EMPTY database (no literature_document yet, so
+    # the table, its indexes and the triggers failed and were recorded); this rerun
+    # must both create the objects and clear that record, exactly as a boot would.
+    main._ensure_document_search()
+    assert lex.DDL_FAILURES == [], lex.DDL_FAILURES
     _reset_state()
     monkeypatch.setenv("LEXICAL_SEARCH_ENGINE", "auto")
     with db_conn.cursor() as cur:
