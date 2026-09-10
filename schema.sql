@@ -181,3 +181,121 @@ CREATE TABLE IF NOT EXISTS llm_usage (
 );
 CREATE INDEX IF NOT EXISTS idx_llm_usage_ts ON llm_usage (ts DESC);
 CREATE INDEX IF NOT EXISTS idx_llm_usage_purpose_ts ON llm_usage (purpose, ts DESC);
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- Recherche plein texte (migration b8d3f0a6c1e7 ; cf. lexical_search.py — source de
+-- vérité de ce DDL, appliqué aussi au démarrage de l'application)
+-- Un tsvector par document (titre + résumé + chunks de texte intégral), indexé GIN :
+-- la requête booléenne ENTIÈRE devient un seul tsquery évalué dans l'index, avec une
+-- sémantique PAR DOCUMENT. Remplace les LIKE '%terme%' (55 à 240 s par requête sur le
+-- corpus de production). Tenu à jour par triggers ; le worker de l'application remplit
+-- les documents existants et recalcule les lignes marquées `stale`.
+-- ─────────────────────────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS document_search (
+    document_id BIGINT PRIMARY KEY
+                REFERENCES literature_document (id) ON DELETE CASCADE,
+    tsv         TSVECTOR,
+    stale       BOOLEAN NOT NULL DEFAULT TRUE,
+    updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS ix_document_search_tsv ON document_search USING gin (tsv);
+CREATE INDEX IF NOT EXISTS ix_document_search_stale ON document_search (document_id) WHERE stale;
+
+CREATE OR REPLACE FUNCTION literev_document_tsv(p_id BIGINT) RETURNS TSVECTOR
+LANGUAGE plpgsql VOLATILE AS $$
+DECLARE
+    v_head TSVECTOR;
+    v_body TSVECTOR;
+BEGIN
+    SELECT to_tsvector('english', coalesce(title, '') || ' ' || coalesce(abstract, ''))
+      INTO v_head
+      FROM literature_document
+     WHERE id = p_id;
+    IF v_head IS NULL THEN
+        RETURN NULL;
+    END IF;
+    BEGIN
+        SELECT to_tsvector('english', string_agg(content, ' ' ORDER BY chunk_index, id))
+          INTO v_body
+          FROM document_chunk
+         WHERE document_id = p_id
+           AND chunk_type IS DISTINCT FROM 'title_abstract';
+    EXCEPTION WHEN program_limit_exceeded THEN
+        v_body := NULL;
+    END;
+    RETURN v_head || coalesce(v_body, ''::tsvector);
+END
+$$;
+
+CREATE OR REPLACE FUNCTION literev_document_search_doc_trg() RETURNS TRIGGER
+LANGUAGE plpgsql AS $$
+BEGIN
+    INSERT INTO document_search (document_id, tsv, stale, updated_at)
+    VALUES (NEW.id, literev_document_tsv(NEW.id), FALSE, now())
+    ON CONFLICT (document_id) DO UPDATE
+        SET tsv = EXCLUDED.tsv, stale = FALSE, updated_at = now();
+    RETURN NULL;
+END
+$$;
+
+CREATE OR REPLACE FUNCTION literev_document_search_chunk_trg() RETURNS TRIGGER
+LANGUAGE plpgsql AS $$
+DECLARE
+    v_doc  BIGINT;
+    v_type TEXT;
+BEGIN
+    IF TG_OP = 'DELETE' THEN
+        v_doc := OLD.document_id; v_type := OLD.chunk_type;
+    ELSE
+        v_doc := NEW.document_id; v_type := NEW.chunk_type;
+    END IF;
+    IF v_type IS DISTINCT FROM 'title_abstract' THEN
+        IF TG_OP = 'DELETE' THEN
+            UPDATE document_search SET stale = TRUE WHERE document_id = v_doc;
+        ELSE
+            INSERT INTO document_search (document_id, tsv, stale)
+            SELECT v_doc, NULL, TRUE
+             WHERE EXISTS (SELECT 1 FROM literature_document WHERE id = v_doc)
+            ON CONFLICT (document_id) DO UPDATE SET stale = TRUE;
+        END IF;
+    END IF;
+    RETURN NULL;
+END
+$$;
+
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid
+                   WHERE t.tgname = 'trg_document_search_doc_ins' AND c.relname = 'literature_document') THEN
+        CREATE TRIGGER trg_document_search_doc_ins
+            AFTER INSERT ON literature_document
+            FOR EACH ROW EXECUTE PROCEDURE literev_document_search_doc_trg();
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid
+                   WHERE t.tgname = 'trg_document_search_doc_upd' AND c.relname = 'literature_document') THEN
+        CREATE TRIGGER trg_document_search_doc_upd
+            AFTER UPDATE OF title, abstract ON literature_document
+            FOR EACH ROW
+            WHEN (OLD.title IS DISTINCT FROM NEW.title OR OLD.abstract IS DISTINCT FROM NEW.abstract)
+            EXECUTE PROCEDURE literev_document_search_doc_trg();
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid
+                   WHERE t.tgname = 'trg_document_search_chunk_ins' AND c.relname = 'document_chunk') THEN
+        CREATE TRIGGER trg_document_search_chunk_ins
+            AFTER INSERT ON document_chunk
+            FOR EACH ROW EXECUTE PROCEDURE literev_document_search_chunk_trg();
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid
+                   WHERE t.tgname = 'trg_document_search_chunk_del' AND c.relname = 'document_chunk') THEN
+        CREATE TRIGGER trg_document_search_chunk_del
+            AFTER DELETE ON document_chunk
+            FOR EACH ROW EXECUTE PROCEDURE literev_document_search_chunk_trg();
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid
+                   WHERE t.tgname = 'trg_document_search_chunk_upd' AND c.relname = 'document_chunk') THEN
+        CREATE TRIGGER trg_document_search_chunk_upd
+            AFTER UPDATE OF content ON document_chunk
+            FOR EACH ROW EXECUTE PROCEDURE literev_document_search_chunk_trg();
+    END IF;
+END
+$$;

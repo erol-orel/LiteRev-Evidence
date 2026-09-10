@@ -67,6 +67,10 @@ graph TD
   `localhost:8000`.
 - **PostgreSQL + pgvector** — the single source of truth (papers, chunks,
   embeddings, scenarios, screening, settings). Lives on a *separate* host.
+  Lexical corpus membership (which papers a boolean query matches) runs on
+  PostgreSQL full-text search: one tsvector per document in `document_search`,
+  kept current by triggers and a background worker (`lexical_search.py`);
+  `/health → lexical_search` says which engine a search uses right now.
 - **OpenAI** — embeddings (`text-embedding-3-small`) and chat (`gpt-4.1` /
   `gpt-4.1-mini` / `gpt-4o-mini`).
 - **Cohere** — reranking (`rerank-v3.5`), optional (no-op without the key).

@@ -35,6 +35,13 @@ Usage
   python3 scripts/compare_fts.py --drop
 
 Reads DB_URL the same way main.py does.
+
+Outcome (production, 2026-09-10, five saved queries): 480 825 → 46 019 papers (−90 %,
+almost all `%ai%`/`%ml%` substring false positives), median 136 526 ms → 156 ms. The
+application now searches through `document_search` (see lexical_search.py) — one
+tsvector per DOCUMENT, so `A AND B` still holds across chunks — rather than the two
+per-row expression indexes this script builds. Those indexes serve this comparison
+only: run `--drop` once the switch is confirmed to reclaim their space.
 """
 from __future__ import annotations
 
