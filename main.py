@@ -3917,15 +3917,21 @@ def get_gesica_scenarios() -> list[dict[str, Any]]:
     """
     with engine.connect() as conn:
         scenario_rows = _list_db_gesica_scenarios(conn)
+        # Compteurs limités AUX scénarios listés : article_scenarios contient aussi les
+        # liens de tous les scénarios utilisateur (des centaines de milliers de lignes
+        # quand une recherche a « matché » large), qui n'ont rien à faire ici.
+        sys_ids = [str(m["id"]) for m in scenario_rows]
 
         sql_counts = text("""
             SELECT ars.scenario_id, COUNT(DISTINCT ars.document_id) as article_count
             FROM article_scenarios ars
             JOIN literature_document d ON d.id = ars.document_id
-            WHERE (d.is_duplicate IS NULL OR d.is_duplicate = FALSE)
+            WHERE ars.scenario_id = ANY(CAST(:ids AS text[]))
+              AND (d.is_duplicate IS NULL OR d.is_duplicate = FALSE)
             GROUP BY ars.scenario_id;
         """)
-        db_counts = {row["scenario_id"]: row["article_count"] for row in conn.execute(sql_counts).mappings().all()}
+        db_counts = {row["scenario_id"]: row["article_count"]
+                     for row in conn.execute(sql_counts, {"ids": sys_ids}).mappings().all()}
 
         sql_screening = text("""
             SELECT
@@ -3934,12 +3940,13 @@ def get_gesica_scenarios() -> list[dict[str, Any]]:
                 COUNT(CASE WHEN COALESCE(ars.screening_status, d.screening_status) = 'excluded' THEN 1 END) as excluded_count
             FROM article_scenarios ars
             JOIN literature_document d ON d.id = ars.document_id
-            WHERE (d.is_duplicate IS NULL OR d.is_duplicate = FALSE)
+            WHERE ars.scenario_id = ANY(CAST(:ids AS text[]))
+              AND (d.is_duplicate IS NULL OR d.is_duplicate = FALSE)
             GROUP BY ars.scenario_id;
         """)
         screening_counts = {
             row["scenario_id"]: {"included": row["included_count"], "excluded": row["excluded_count"]}
-            for row in conn.execute(sql_screening).mappings().all()
+            for row in conn.execute(sql_screening, {"ids": sys_ids}).mappings().all()
         }
 
         # Kappa par scénario : il n'existe pas de table `scenario_kappa_cache`
@@ -3947,29 +3954,15 @@ def get_gesica_scenarios() -> list[dict[str, Any]]:
         # /double-blind/kappa ; ici on ne fournit pas de valeur agrégée.
         kappa_scores: dict[str, Any] = {}
 
-        # Articles de TOUS les scénarios en UNE requête (au lieu d'une par scénario
-        # — N+1). On groupe ensuite par scénario en Python. L'ordre intra-scénario
-        # (année desc, titre asc) est préservé par le ORDER BY.
-        sql_all_articles = text("""
-            SELECT ars.scenario_id, d.id, d.title, d.abstract, d.year, d.source, d.url,
-                   d.authors, d.doi, d.journal, d.keywords, d.language, d.study_design,
-                   d.sample_size, d.country, d.citation_count, d.open_access,
-                   EXISTS (
-                       SELECT 1 FROM document_chunk c
-                       WHERE c.document_id = d.id
-                         AND c.chunk_type = 'fulltext_section'
-                   ) AS has_fulltext
-            FROM literature_document d
-            JOIN article_scenarios ars ON ars.document_id = d.id
-            WHERE (d.is_duplicate IS NULL OR d.is_duplicate = FALSE)
-            ORDER BY ars.scenario_id, d.year DESC NULLS LAST, d.title ASC
-        """)
-        articles_by_scenario: dict[str, list[dict[str, Any]]] = {}
-        for r in conn.execute(sql_all_articles).mappings().all():
-            rec = dict(r)
-            sid = str(rec.pop("scenario_id"))
-            articles_by_scenario.setdefault(sid, []).append(rec)
-
+        # `relevant_articles` est VIDE, à dessein. Cette liste chargeait autrefois TOUS
+        # les articles de TOUS les scénarios (y compris les scénarios utilisateur, non
+        # listés ici) avec leur résumé, en UNE requête : un seul scénario dont la
+        # recherche lexicale avait apparié 238 000 documents suffisait à faire dépasser
+        # la minute — et la mémoire — à cette route, que l'interface appelle au
+        # chargement de CHAQUE page. Réponse observée en production : 502 sur
+        # /api/gesica/scenarios, « Failed to load scenarios ». Le front n'affiche
+        # d'ailleurs pas cette liste (App.tsx : `false && scenario.relevantArticles…`) ;
+        # les articles d'un scénario se lisent, paginés, sur /gesica/scenarios/{id}/corpus.
         result = []
         for meta in scenario_rows:
             scenario_id = str(meta["id"])
@@ -3977,7 +3970,7 @@ def get_gesica_scenarios() -> list[dict[str, Any]]:
             article_count = int(db_counts.get(scenario_id, 0) or 0)
             sc = screening_counts.get(scenario_id, {"included": 0, "excluded": 0})
 
-            articles = articles_by_scenario.get(scenario_id, [])
+            articles: list[dict[str, Any]] = []
 
             result.append({
                 "id": scenario_id,
