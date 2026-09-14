@@ -1,5 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { ScenarioDetailPage, EnrichmentSection } from "./components/ScenarioDetailPage";
+import { fetchActivity } from "./lib/api";
+import type { ActivityItem } from "./lib/api";
 import { useI18n } from "./i18n/LanguageProvider";
 import { Activity, BarChart2, BookOpen, Cloud, Download, ExternalLink, FolderOpen, MapPin, AlertTriangle, Users, Pill, Radio, RefreshCw, RotateCcw, ChevronDown, ChevronUp, Zap, Lock, KeyRound, Wrench, Trash2 } from "lucide-react";
 
@@ -1223,6 +1225,8 @@ function ScenariosView({
   onPopulateUserScenario,
   populatingId,
   pipelineStatuses = {},
+  openScenarioId = null,
+  onOpenedScenario,
   folders = [],
   onCreateFolder,
   onDeleteFolder,
@@ -1240,6 +1244,9 @@ function ScenariosView({
   onPopulateUserScenario?: (id: string) => void;
   populatingId?: string | null;
   pipelineStatuses?: Record<string, import('./lib/api').UserScenarioPipelineStatus>;
+  /** Demande d'ouverture d'une page scénario venue de l'indicateur global de l'en-tête. */
+  openScenarioId?: string | null;
+  onOpenedScenario?: () => void;
   folders?: ScenarioFolder[];
   onCreateFolder?: (name: string, color: string) => Promise<ScenarioFolder>;
   onDeleteFolder?: (folderId: string) => Promise<void>;
@@ -1259,6 +1266,15 @@ function ScenariosView({
       window.history.replaceState({}, "", window.location.pathname);
     }
   }, []);
+  // Demande d'ouverture venue de l'indicateur global (« Ouvrir le scénario »).
+  useEffect(() => {
+    if (openScenarioId) {
+      setDetailInitialTab(undefined);
+      setDetailScenarioId(openScenarioId);
+      onOpenedScenario?.();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [openScenarioId]);
   const [showNewFolderDialog, setShowNewFolderDialog] = useState(false);
   const [newFolderName, setNewFolderName] = useState('');
   const [newFolderColor, setNewFolderColor] = useState('#6366f1');
@@ -1452,6 +1468,17 @@ function ScenariosView({
               // pendant la recherche : le dire, plutôt que laisser lire un total.
               <span className="text-[11px] text-white/40">· {t("scenarios.pipelineCountsProvisional")}</span>
             )}
+          </div>
+        )}
+
+        {/* Recherche en cours (populate lancé depuis la page Recherche, pas un pipeline) :
+            l'état est persisté par le serveur, la carte le montre même après un
+            changement de page ou un rechargement. */}
+        {isUser && !pipelineStatuses[scenario.id] && (scenario as any).populate_status === 'running' && (
+          <div className="mt-2 flex items-center gap-2 pl-12">
+            <RotateCcw size={10} className="text-brand-400 animate-spin shrink-0" />
+            <span className="text-xs text-brand-300">{t("scenarios.searchRunning")}</span>
+            <span className="text-[11px] text-white/40">· {t("scenarios.pipelineCountsProvisional")}</span>
           </div>
         )}
 
@@ -1812,6 +1839,58 @@ export default function App() {
   const [populatingId, setPopulatingId] = useState<string | null>(null);
   const [pipelineStatuses, setPipelineStatuses] = useState<Record<string, UserScenarioPipelineStatus>>({});
   const pipelinePollRef = useRef<Record<string, ReturnType<typeof setInterval>>>({});
+
+  // ── Activité globale : recherches / pipelines en cours, visibles sur TOUTES les pages ──
+  // Une recherche continue côté serveur quand on change d'onglet ; sans cet indicateur
+  // elle « disparaissait », et, non épinglée, on ne savait plus où la retrouver. Le
+  // serveur (/activity) liste ce qui tourne ; on le sonde toutes les 5 s tant qu'il y a
+  // de l'activité, toutes les 30 s sinon, et immédiatement quand une recherche démarre
+  // ici (currentSearchSid). Quand un élément disparaît de la liste, il vient de se
+  // terminer : on le signale avec son compte final et on recharge la liste.
+  const [activity, setActivity] = useState<ActivityItem[]>([]);
+  const [finishedActivity, setFinishedActivity] = useState<ActivityItem[]>([]);
+  const [currentSearchSid, setCurrentSearchSid] = useState<string | null>(null);
+  const [requestedScenarioId, setRequestedScenarioId] = useState<string | null>(null);
+  const activityRef = useRef<ActivityItem[]>([]);
+  useEffect(() => {
+    let alive = true;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const tick = () => {
+      fetchActivity()
+        .then((a) => {
+          if (!alive) return;
+          const now = a.running ?? [];
+          const nowIds = new Set(now.map((x) => x.scenario_id));
+          const ended = activityRef.current.filter((x) => !nowIds.has(x.scenario_id));
+          if (ended.length > 0) {
+            fetchUserScenarios()
+              .then((data) => {
+                if (!alive) return;
+                setUserScenarios(data);
+                const counts = new Map(data.map((u) => [u.id, u.articleCount]));
+                setFinishedActivity((prev) => [
+                  ...ended.map((e) => ({ ...e, article_count: counts.get(e.scenario_id) ?? e.article_count })),
+                  ...prev.filter((p) => !ended.some((e) => e.scenario_id === p.scenario_id)),
+                ].slice(0, 5));
+              })
+              .catch(() => { if (alive) setFinishedActivity((prev) => [...ended, ...prev].slice(0, 5)); });
+          }
+          activityRef.current = now;
+          setActivity(now);
+          timer = setTimeout(tick, now.length > 0 ? 5000 : 30000);
+        })
+        .catch(() => { if (alive) timer = setTimeout(tick, 30000); });
+    };
+    tick();
+    return () => { alive = false; if (timer) clearTimeout(timer); };
+  }, [currentSearchSid]);
+  const openActivity = (a: ActivityItem) => {
+    // La recherche lancée depuis cette session a ses résultats sur l'onglet Recherche ;
+    // toute autre activité s'ouvre sur la page de son scénario (bannière de progression).
+    if (a.scenario_id === currentSearchSid) { setActiveTab("search"); return; }
+    setRequestedScenarioId(a.scenario_id);
+    setActiveTab("scenarios");
+  };
   // Jeton de recherche ACTIVE : incrémenté à chaque handleSearch. La boucle de sondage
   // (jusqu'à 15 min) continuait en arrière-plan après setLoading(false) ; si l'utilisateur
   // relançait une recherche, l'ancienne boucle écrasait les résultats de la nouvelle.
@@ -2076,6 +2155,7 @@ export default function App() {
         ...(_sub ? { sub_queries: _sub, combinator } : {}),
       });
       const sid = newScenario.id;
+      setCurrentSearchSid(sid);   // → indicateur global (« Voir les résultats » revient ici)
       await populateUserScenario(sid, { includeLive, maxResults: 2000 });
       // ── CONSTRUCTION COMPLÈTE PUIS AFFICHAGE ─────────────────────────────────
       // On construit tout le corpus (base locale ∪ sources en direct), on le score,
@@ -2488,6 +2568,35 @@ export default function App() {
             </div>
           </div>
 
+          {/* Indicateur global : ce qui tourne, et ce qui vient de finir, sur toutes les pages */}
+          {(activity.length > 0 || finishedActivity.length > 0) && (
+            <div className="mt-4 space-y-1.5">
+              {activity.map((a) => (
+                <div key={a.scenario_id} className="flex flex-wrap items-center gap-2 rounded-xl border border-amber-500/20 bg-amber-500/5 px-3 py-2 text-xs text-amber-100/90">
+                  <RotateCcw size={12} className="animate-spin text-amber-300 shrink-0" />
+                  <span className="font-medium">{a.kind === "pipeline" ? t("activity.pipelineRunning") : t("activity.searchRunning")}</span>
+                  <span className="truncate max-w-[28rem] text-white/80">«{a.query}»</span>
+                  {a.step && <span className="text-white/45">· {t("activity.step")} {a.step}</span>}
+                  <span className="text-white/45">· {t("activity.provisional")}</span>
+                  <button type="button" onClick={() => openActivity(a)} className="ml-auto rounded-lg border border-white/15 bg-white/5 px-2.5 py-1 text-[11px] text-white/80 hover:bg-white/10">
+                    {a.scenario_id === currentSearchSid ? t("activity.viewResults") : t("activity.openScenario")}
+                  </button>
+                </div>
+              ))}
+              {finishedActivity.map((a) => (
+                <div key={`done-${a.scenario_id}`} className="flex flex-wrap items-center gap-2 rounded-xl border border-emerald-500/20 bg-emerald-500/5 px-3 py-2 text-xs text-emerald-100/90">
+                  <span className="font-medium">{t("activity.finished")}</span>
+                  <span className="truncate max-w-[28rem] text-white/80">«{a.query}»</span>
+                  <span className="text-white/60">· {a.article_count.toLocaleString()} {t("activity.articles")}</span>
+                  <button type="button" onClick={() => openActivity(a)} className="ml-auto rounded-lg border border-white/15 bg-white/5 px-2.5 py-1 text-[11px] text-white/80 hover:bg-white/10">
+                    {a.scenario_id === currentSearchSid ? t("activity.viewResults") : t("activity.openScenario")}
+                  </button>
+                  <button type="button" onClick={() => setFinishedActivity((prev) => prev.filter((x) => x.scenario_id !== a.scenario_id))} className="text-white/40 hover:text-white/80" aria-label="close">×</button>
+                </div>
+              ))}
+            </div>
+          )}
+
           <div className="mt-6 flex gap-1 rounded-2xl border border-white/10 bg-forest-900/60 p-1 w-fit">
             {tabs.map((tab) => (
               <button
@@ -2532,6 +2641,8 @@ export default function App() {
             onPopulateUserScenario={handlePopulateUserScenario}
             populatingId={populatingId}
             pipelineStatuses={pipelineStatuses}
+            openScenarioId={requestedScenarioId}
+            onOpenedScenario={() => setRequestedScenarioId(null)}
             folders={folders}
             onCreateFolder={async (name: string, color: string) => {
               const f = await createFolder(name, color);

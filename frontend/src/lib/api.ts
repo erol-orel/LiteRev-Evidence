@@ -1867,6 +1867,24 @@ export async function fetchScenarioCounts(scenarioId: string): Promise<ScenarioC
   return r.json();
 }
 
+/** Recherche ou pipeline en cours, tous scénarios confondus (indicateur global de
+ *  l'en-tête) : une recherche continue côté serveur quand on change de page. */
+export interface ActivityItem {
+  scenario_id: string;
+  name: string;
+  query: string;
+  pinned: boolean;
+  kind: "search" | "pipeline";
+  step?: string | null;
+  article_count: number;
+}
+
+export async function fetchActivity(): Promise<{ running: ActivityItem[]; count: number; checked_at: string }> {
+  const r = await safeFetch(`${API_BASE_URL}/activity`);
+  if (!r.ok) throw new Error(httpMessage(r.status));
+  return r.json();
+}
+
 /** Construit le corpus (= requête booléenne sur base locale ∪ live) en arrière-plan. */
 export async function populateUserScenario(
   scenarioId: string,
