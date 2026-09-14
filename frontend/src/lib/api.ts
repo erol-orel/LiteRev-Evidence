@@ -1838,6 +1838,35 @@ export async function fetchUserScenarioPipelineStatus(
   return r.json();
 }
 
+/** Les nombres d'articles affichés pour un scénario (liste, en-tête, PRISMA, étape
+ *  sémantique) comparés entre eux, et si un pipeline/populate tourne encore. */
+export interface ScenarioCounts {
+  scenario_id: string;
+  in_progress: boolean;
+  pipeline_status?: string | null;
+  populate_status?: string | null;
+  current_step?: string | null;
+  threshold: number;
+  /** Copie stockée, lue par la liste des scénarios (mise à jour par étapes pendant une recherche). */
+  article_count: number;
+  /** Référence : liens en base hors doublons (onglet Corpus). */
+  corpus_links: number;
+  /** « Passés au screening » du PRISMA, figé à la fin de la dernière recherche ; null avant. */
+  prisma_screened: number | null;
+  above_threshold: number;
+  below_threshold: number;
+  embedded: number;
+  consistent: boolean;
+  mismatches: Array<{ field: string; value: number; expected: number }>;
+  checked_at: string;
+}
+
+export async function fetchScenarioCounts(scenarioId: string): Promise<ScenarioCounts> {
+  const r = await safeFetch(`${API_BASE_URL}/user-scenarios/${scenarioId}/counts`);
+  if (!r.ok) throw new Error(httpMessage(r.status));
+  return r.json();
+}
+
 /** Construit le corpus (= requête booléenne sur base locale ∪ live) en arrière-plan. */
 export async function populateUserScenario(
   scenarioId: string,

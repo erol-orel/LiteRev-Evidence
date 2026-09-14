@@ -1447,6 +1447,11 @@ function ScenariosView({
             <span className="text-xs text-brand-300">
               {pipelineStatuses[scenario.id].overall_status === 'error' ? t("scenarios.pipelineError") : `${t("scenarios.pipelinePrefix")} ${pipelineStatuses[scenario.id].current_step ?? t("scenarios.pipelineInProgress")}…`}
             </span>
+            {pipelineStatuses[scenario.id].overall_status !== 'error' && (
+              // Le nombre d'articles de la carte est une copie mise à jour par étapes
+              // pendant la recherche : le dire, plutôt que laisser lire un total.
+              <span className="text-[11px] text-white/40">· {t("scenarios.pipelineCountsProvisional")}</span>
+            )}
           </div>
         )}
 
@@ -1906,6 +1911,12 @@ export default function App() {
           setGesicaScenarios(gesica);
           setUserScenarios(user);
           setFolders(foldersData);
+          // Pipelines déjà en cours (lancés avant un rechargement de page, ou depuis
+          // l'API) : suivre leur avancement pour que la carte le dise, et rafraîchir
+          // la liste à la fin — sinon article_count restait à sa valeur provisoire.
+          user
+            .filter(u => u.pipeline_status === 'running' || u.pipeline_status === 'starting')
+            .forEach(u => { if (!pipelinePollRef.current[u.id]) _pollPipelineStatus(u.id); });
           // Synchroniser savedSearches avec les user_scenarios backend
           setSavedSearches(user.map(u => ({
             id: u.id,
@@ -2218,42 +2229,47 @@ export default function App() {
     }
   }
 
+  function _pollPipelineStatus(scenarioId: string) {
+    // Polling de statut d'un pipeline en cours. Nettoyer un poll précédent pour ce
+    // scénario AVANT d'en assigner un nouveau, sinon l'ancien setInterval fuit
+    // (orphelin) et double les requêtes/setState. Partagé entre le lancement depuis
+    // cette session et les pipelines déjà en cours au chargement de la liste (sinon,
+    // après un rechargement de page, la carte affichait un article_count provisoire
+    // sans dire qu'un pipeline tournait).
+    if (pipelinePollRef.current[scenarioId]) {
+      clearInterval(pipelinePollRef.current[scenarioId]);
+    }
+    const pollInterval = setInterval(() => {
+      fetchUserScenarioPipelineStatus(scenarioId)
+        .then(status => {
+          setPipelineStatuses(prev => ({ ...prev, [scenarioId]: status }));
+          if (status.overall_status === 'done' || status.overall_status === 'error' || status.overall_status === 'not_started') {
+            clearInterval(pollInterval);
+            delete pipelinePollRef.current[scenarioId];
+            // Rafraîchir la liste des scénarios pour mettre à jour article_count
+            fetchUserScenarios().then(data => {
+              setUserScenarios(data);
+              setSavedSearches(data.map(u => ({
+                id: u.id, query: u.query, mode: u.mode as SearchMode,
+                projectContext: (u.filters?.projectContext ?? 'literev') as ProjectContext,
+                timestamp: u.created_at ? new Date(u.created_at).getTime() : Date.now(),
+                // Afficher article_count (corpus réel) si disponible, sinon result_count (snapshot recherche)
+                resultCount: u.articleCount > 0 ? u.articleCount : (u.resultCount ?? u.result_count ?? 0),
+                name: u.title !== u.query ? u.title : undefined,
+                pinned: u.pinned,
+              })));
+            }).catch(console.warn);
+          }
+        })
+        .catch(console.warn);
+    }, 5000);
+    pipelinePollRef.current[scenarioId] = pollInterval;
+  }
+
   function _launchPipelineForScenario(scenarioId: string) {
     // Déclencher le pipeline complet dès qu'un scénario est épinglé
     startUserScenarioPipeline(scenarioId, 500)
-      .then(() => {
-        // Démarrer le polling de statut. Nettoyer un poll précédent pour ce scénario
-        // AVANT d'en assigner un nouveau, sinon l'ancien setInterval fuit (orphelin)
-        // et double les requêtes/setState.
-        if (pipelinePollRef.current[scenarioId]) {
-          clearInterval(pipelinePollRef.current[scenarioId]);
-        }
-        const pollInterval = setInterval(() => {
-          fetchUserScenarioPipelineStatus(scenarioId)
-            .then(status => {
-              setPipelineStatuses(prev => ({ ...prev, [scenarioId]: status }));
-              if (status.overall_status === 'done' || status.overall_status === 'error') {
-                clearInterval(pollInterval);
-                delete pipelinePollRef.current[scenarioId];
-                // Rafraîchir la liste des scénarios pour mettre à jour article_count
-                fetchUserScenarios().then(data => {
-                  setUserScenarios(data);
-                  setSavedSearches(data.map(u => ({
-                    id: u.id, query: u.query, mode: u.mode as SearchMode,
-                    projectContext: (u.filters?.projectContext ?? 'literev') as ProjectContext,
-                    timestamp: u.created_at ? new Date(u.created_at).getTime() : Date.now(),
-                    // Afficher article_count (corpus réel) si disponible, sinon result_count (snapshot recherche)
-                    resultCount: u.articleCount > 0 ? u.articleCount : (u.resultCount ?? u.result_count ?? 0),
-                    name: u.title !== u.query ? u.title : undefined,
-                    pinned: u.pinned,
-                  })));
-                }).catch(console.warn);
-              }
-            })
-            .catch(console.warn);
-        }, 5000);
-        pipelinePollRef.current[scenarioId] = pollInterval;
-      })
+      .then(() => _pollPipelineStatus(scenarioId))
       .catch(err => console.warn('Pipeline launch failed:', err));
   }
 
