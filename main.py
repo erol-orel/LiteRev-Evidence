@@ -2415,7 +2415,9 @@ def _dedup_scenario_links(scenario_id: str) -> int:
 def _prisma_identification_figures(records_by_source: dict, unique_records: int,
                                    duplicate_rows_removed: int, corpus_total: int,
                                    method: str = "populate",
-                                   federation_incomplete: bool = False) -> dict[str, Any]:
+                                   federation_incomplete: bool = False,
+                                   removed_no_abstract: int = 0,
+                                   removed_not_matching: int = 0) -> dict[str, Any]:
     """Chiffres PRISMA 2020 de l'étape « identification », calculés à partir de ce qu'une
     recherche a RÉELLEMENT ramené — et non du corpus déjà dédupliqué.
 
@@ -2443,6 +2445,15 @@ def _prisma_identification_figures(records_by_source: dict, unique_records: int,
     duplicates = min(identified, across + rows)
     unique_after = identified - duplicates
     corpus = max(0, int(corpus_total or 0))
+    # Retraits AVANT screening, ventilés : sans résumé (règle qualité), hors requête
+    # (enregistrement d'une source par mots-clés qui ne correspond pas au booléen en
+    # local), et le reste (résiduel — p. ex. un document marqué doublon global). Les
+    # deux premiers sont bornés à ce qui reste à expliquer, dans cet ordre, pour que
+    # identifiés − doublons − retraits = passés au screening tienne toujours.
+    to_explain = max(0, unique_after - corpus)
+    no_abstract = min(to_explain, max(0, int(removed_no_abstract or 0)))
+    not_matching = min(to_explain - no_abstract, max(0, int(removed_not_matching or 0)))
+    other = to_explain - no_abstract - not_matching
     return {
         "method": method,
         "computed_at": _dt.now(_tz.utc).isoformat(),
@@ -2453,7 +2464,10 @@ def _prisma_identification_figures(records_by_source: dict, unique_records: int,
         "duplicate_rows_in_database": rows,
         "duplicates_removed": duplicates,
         "unique_records": unique_after,
-        "removed_other_reasons": max(0, unique_after - corpus),
+        "removed_no_abstract": no_abstract,
+        "removed_not_matching": not_matching,
+        "removed_other_reasons": other,
+        "removed_before_screening": to_explain,
         "records_screened": corpus,
     }
 
@@ -9951,6 +9965,8 @@ def _run_user_scenario_populate(
         # doublons (recoupements + lignes fusionnées), retirés pour d'autres raisons.
         # Stockés sur le scénario : le PRISMA les lit au lieu de compter un flag
         # `is_duplicate` que rien ne pose (→ « doublons retirés : 0 » à vie).
+        _pi_corpus_total: int | None = None
+        _pi_figures: dict | None = None
         try:
             with engine.connect() as _pc:
                 _corpus_now = _pc.execute(text("""
@@ -9960,11 +9976,41 @@ def _run_user_scenario_populate(
                 """), {"sid": scenario_id}).scalar() or 0
             with _counter_lock:
                 _recs_snapshot = dict(_ident_records)
-                _uniq_snapshot = len(_ident_docs)
+                _ids_snapshot = list(_ident_docs)
+            # Ventilation des documents identifiés mais ABSENTS du corpus : sans résumé
+            # (règle qualité, appliquée avant la dédup — donc les lignes fusionnées par
+            # la dédup ont toutes un résumé et sont à soustraire de l'autre poche), ou
+            # avec résumé mais non liés (source par mots-clés hors requête booléenne).
+            _no_abs, _not_linked = 0, 0
+            if _ids_snapshot:
+                with engine.connect() as _bc:
+                    _br = _bc.execute(text("""
+                        SELECT COUNT(*) FILTER (WHERE d.abstract IS NULL OR length(TRIM(d.abstract)) < 30) AS no_abstract,
+                               COUNT(*) FILTER (WHERE NOT (d.abstract IS NULL OR length(TRIM(d.abstract)) < 30)
+                                                  AND NOT EXISTS (SELECT 1 FROM article_scenarios a
+                                                                   WHERE a.scenario_id = :sid AND a.document_id = d.id)) AS not_linked
+                        FROM literature_document d
+                        WHERE d.id = ANY(CAST(:ids AS bigint[]))
+                    """), {"sid": scenario_id, "ids": _ids_snapshot}).mappings().first()
+                _no_abs = int(_br["no_abstract"] or 0)
+                _not_linked = int(_br["not_linked"] or 0)
             _figures = _prisma_identification_figures(
-                _recs_snapshot, _uniq_snapshot, _n_dup_rows or 0, int(_corpus_now),
-                method="populate", federation_incomplete=bool(_fed_incomplete[0]))
+                _recs_snapshot, len(_ids_snapshot), _n_dup_rows or 0, int(_corpus_now),
+                method="populate", federation_incomplete=bool(_fed_incomplete[0]),
+                removed_no_abstract=_no_abs,
+                removed_not_matching=max(0, _not_linked - int(_n_dup_rows or 0)))
             _store_prisma_identification(scenario_id, _figures)
+            # Le même total pour tout le monde : le statut du job expose le corpus
+            # RETENU (= article_count = « passés au screening » du PRISMA), et non le
+            # seul compteur d'ingestion (local + nouveaux documents), qui n'est pas un
+            # total de corpus et se lisait comme tel. Repris dans l'état final ci-dessous.
+            _pi_corpus_total = int(_corpus_now)
+            _pi_figures = _figures
+            if _pipeline_callback is None:
+                _job_now = _user_scenario_populate_jobs.get(scenario_id)
+                if _job_now is not None:
+                    _job_now["corpus_total"] = _pi_corpus_total
+                    _job_now["prisma_identification"] = _pi_figures
             logger.info(f"Populate {scenario_id}: PRISMA identification = "
                         f"{_figures['records_identified']} enregistrements, "
                         f"{_figures['duplicates_removed']} doublons, "
@@ -10025,6 +10071,10 @@ def _run_user_scenario_populate(
                 "phase": "done",
                 "rerank_status": "running" if _cohere_enabled else "skipped",
                 "ingested": ingested,
+                # `ingested` = base locale + NOUVEAUX documents : un compteur de travail,
+                # pas un total de corpus. Le corpus retenu est `corpus_total`.
+                "corpus_total": _pi_corpus_total,
+                "prisma_identification": _pi_figures,
                 "errors": errors,
                 "total_found": total_found,
                 "sources": _sources_final,
@@ -11766,7 +11816,10 @@ def get_user_scenario_prisma(
             "duplicate_records_across_sources": int(_figures.get("duplicate_records_across_sources") or 0),
             "duplicate_rows_in_database": int(_figures.get("duplicate_rows_in_database") or 0),
             "unique_records": int(_figures.get("unique_records") or 0),
+            "removed_no_abstract": int(_figures.get("removed_no_abstract") or 0),
+            "removed_not_matching": int(_figures.get("removed_not_matching") or 0),
             "removed_other_reasons": int(_figures.get("removed_other_reasons") or 0),
+            "removed_before_screening": int(_figures.get("removed_before_screening") or 0),
             "records_screened": total,
             "embedded": embedded,
             "figures_from": "search_run",
@@ -11795,7 +11848,10 @@ def get_user_scenario_prisma(
             },
             "duplicates_removed": duplicates,
             "unique_records": unique,
+            "removed_no_abstract": 0,
+            "removed_not_matching": 0,
             "removed_other_reasons": 0,
+            "removed_before_screening": 0,
             "records_screened": unique,
             "embedded": embedded,
             "figures_from": "corpus",

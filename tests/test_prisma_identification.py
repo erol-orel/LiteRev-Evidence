@@ -41,28 +41,54 @@ def test_the_production_shape():
     f = main._prisma_identification_figures(
         {"db_cache": 557, "openalex": 1673, "europepmc": 907, "pubmed": 89},
         unique_records=2766, duplicate_rows_removed=3, corpus_total=2740,
-        method="populate", federation_incomplete=True)
+        method="populate", federation_incomplete=True,
+        removed_no_abstract=15, removed_not_matching=8)
     assert f["records_identified"] == 3226
     assert f["duplicate_records_across_sources"] == 460      # 3226 records → 2766 documents
     assert f["duplicate_rows_in_database"] == 3
     assert f["duplicates_removed"] == 463
     assert f["unique_records"] == 2763
-    assert f["removed_other_reasons"] == 23                  # 2763 unique, 2740 screened
+    assert f["removed_before_screening"] == 23               # 2763 unique, 2740 screened…
+    assert f["removed_no_abstract"] == 15                    # …of which: no abstract,
+    assert f["removed_not_matching"] == 8                    # keyword-source records off-query,
+    assert f["removed_other_reasons"] == 0                   # and nothing left unexplained
     assert f["records_screened"] == 2740
     assert f["method"] == "populate" and f["federation_incomplete"] is True
     assert f["computed_at"].endswith("+00:00")
-    # PRISMA arithmetic holds: identified − duplicates − other = screened
-    assert (f["records_identified"] - f["duplicates_removed"]
-            - f["removed_other_reasons"]) == f["records_screened"]
+    # PRISMA arithmetic holds: identified − duplicates − removals = screened
+    assert (f["records_identified"] - f["duplicates_removed"] - f["removed_no_abstract"]
+            - f["removed_not_matching"] - f["removed_other_reasons"]) == f["records_screened"]
+
+
+def test_the_september_14_run():
+    """The run that prompted the breakdown: 38 458 records, 4 086 duplicates, 34 372
+    unique, 3 861 removed, 30 511 screened — the person reading it wanted to know how
+    many of the 3 861 were the no-abstract rule."""
+    f = main._prisma_identification_figures(
+        {"db_cache": 18367, "openalex": 9000, "europepmc": 7000, "pubmed": 4091},
+        unique_records=34372, duplicate_rows_removed=0, corpus_total=30511,
+        removed_no_abstract=1266, removed_not_matching=2595)
+    assert f["records_identified"] == 38458
+    assert f["duplicates_removed"] == 4086
+    assert f["unique_records"] == 34372
+    assert f["removed_before_screening"] == 3861
+    assert (f["removed_no_abstract"], f["removed_not_matching"], f["removed_other_reasons"]) == (1266, 2595, 0)
+    assert f["records_screened"] == 30511
 
 
 def test_inconsistent_inputs_never_go_negative_or_drop_zero_sources():
     f = main._prisma_identification_figures(
         {"db_cache": 5, "core": 0, "arxiv": None}, unique_records=9,
-        duplicate_rows_removed=20, corpus_total=50)
+        duplicate_rows_removed=20, corpus_total=50, removed_no_abstract=99, removed_not_matching=99)
     assert f["records_by_source"] == {"db_cache": 5}          # empty sources are not "searched"
     assert f["duplicates_removed"] == 5                       # never more than identified
-    assert f["unique_records"] == 0 and f["removed_other_reasons"] == 0
+    assert f["unique_records"] == 0 and f["removed_before_screening"] == 0
+    assert f["removed_no_abstract"] == 0 and f["removed_not_matching"] == 0   # bounded by what is left to explain
+    # buckets that overshoot are clipped in order, and the residual absorbs the rest
+    g = main._prisma_identification_figures({"db_cache": 10}, 10, 0, 4, removed_no_abstract=4, removed_not_matching=4)
+    assert (g["removed_no_abstract"], g["removed_not_matching"], g["removed_other_reasons"]) == (4, 2, 0)
+    h = main._prisma_identification_figures({"db_cache": 10}, 10, 0, 4)
+    assert (h["removed_no_abstract"], h["removed_not_matching"], h["removed_other_reasons"]) == (0, 0, 6)
     empty = main._prisma_identification_figures({}, 0, 0, 0)
     assert empty["records_identified"] == 0 and empty["duplicates_removed"] == 0
 
@@ -144,13 +170,17 @@ def test_stored_figures_survive_a_round_trip(seeded):
 
 def test_the_endpoint_reports_the_search_run(seeded):
     main._store_prisma_identification(SID_RUN, main._prisma_identification_figures(
-        {"db_cache": 557, "openalex": 1673, "europepmc": 907, "pubmed": 89}, 2766, 3, 2740))
+        {"db_cache": 557, "openalex": 1673, "europepmc": 907, "pubmed": 89}, 2766, 3, 2740,
+        removed_no_abstract=15, removed_not_matching=8))
     ident = _prisma(SID_RUN)
     assert ident["figures_from"] == "search_run"
     assert ident["total_records"] == 3226                    # what the sources returned
     assert ident["duplicates_removed"] == 463
     assert ident["unique_records"] == 2763
-    assert ident["removed_other_reasons"] == 23
+    assert ident["removed_before_screening"] == 23
+    assert ident["removed_no_abstract"] == 15
+    assert ident["removed_not_matching"] == 8
+    assert ident["removed_other_reasons"] == 0
     assert ident["by_source"] == {"db_cache": 557, "openalex": 1673, "europepmc": 907, "pubmed": 89}
     assert ident["records_screened"] == 2                    # the corpus as it stands NOW
     assert ident["computed_at"]
