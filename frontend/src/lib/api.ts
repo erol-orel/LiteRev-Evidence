@@ -2405,7 +2405,10 @@ export interface SeirOverride { value: number; ci_low?: number | null; ci_high?:
 export interface SeirProjection {
   applicable: boolean;
   scenario_id: string;
+  /** Texte français du backend (API / logs). L'UI affiche la traduction de `reason_code`. */
   reason?: string;
+  /** Porte fermée, identifiant stable : traduit dans la langue choisie (seirReasonText). */
+  reason_code?: "no_parameters" | "not_transmissible" | "no_transmission_parameter" | string;
   model?: string;
   disease?: string | null;
   /** true = projection obtenue via des paramètres SAISIS, pas extraits de la littérature. */

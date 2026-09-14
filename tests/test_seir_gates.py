@@ -39,7 +39,23 @@ def test_non_transmissible_scenario_is_refused_even_with_a_stray_parameter():
         mp.undo()
     assert out["applicable"] is False
     assert "NON transmissible" in out["reason"]
+    assert out["reason_code"] == "not_transmissible"   # what the UI translates
     assert "summary" not in out          # no curve, no attack rate, nothing to misread
+
+
+# ── gate 0: nothing extracted at all ─────────────────────────────────────────
+def test_no_extracted_parameter_at_all_is_refused_with_a_stable_code():
+    """The interface shows the refusal in the user's language, so each gate carries a
+    stable code next to the French text meant for the API and the logs."""
+    import pytest
+    mp = pytest.MonkeyPatch()
+    try:
+        out = _payload(mp, _spec(True, {}, "grippe"))
+    finally:
+        mp.undo()
+    assert out["applicable"] is False
+    assert out["reason_code"] == "no_parameters"
+    assert out["reason"]
 
 
 # ── gate 2: a parameter that does not drive the dynamics is not enough ───────
@@ -51,6 +67,7 @@ def test_missing_r0_and_beta_is_refused_instead_of_falling_back_to_2_5():
     finally:
         mp.undo()
     assert out["applicable"] is False
+    assert out["reason_code"] == "no_transmission_parameter"
     assert out["missing"] == ["r0"]
     assert out["available_parameters"] == ["cfr"]
     assert "2.5" not in str(out)         # the fabricated value never reaches the client

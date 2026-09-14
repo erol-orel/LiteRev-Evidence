@@ -15931,10 +15931,13 @@ def _seir_projection_payload(
     # Un override explicite de l'utilisateur vaut décision consciente : il ouvre les
     # portes 1 et 2 (exploration « et si ? »), et la réponse est marquée `forced`.
     forced = bool(applied)
+    # `reason_code` : identifiant STABLE de la porte fermée, que l'interface traduit
+    # dans la langue choisie (le texte `reason` reste en français pour l'API / les logs).
     if not dists:
         return {
             "applicable": False,
             "scenario_id": scenario_id,
+            "reason_code": "no_parameters",
             "reason": "Aucun paramètre épidémiologique extrait de la littérature "
                       "(scénario non transmissible, ou paramètres non rapportés).",
         }
@@ -15945,6 +15948,7 @@ def _seir_projection_payload(
         return {
             "applicable": False,
             "scenario_id": scenario_id,
+            "reason_code": "not_transmissible",
             "reason": "Scénario marqué NON transmissible à l'extraction : pas de "
                       "modèle compartimental applicable.",
         }
@@ -15956,6 +15960,7 @@ def _seir_projection_payload(
         return {
             "applicable": False,
             "scenario_id": scenario_id,
+            "reason_code": "no_transmission_parameter",
             "reason": ("Paramètre de transmission manquant : ni R₀ ni β n'a été extrait "
                        f"(disponibles : {_have}). Une projection reposerait sur une "
                        "valeur par défaut, pas sur la littérature — saisissez R₀ "

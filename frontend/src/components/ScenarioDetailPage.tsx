@@ -1002,7 +1002,7 @@ function SeirModelView({ scenarioId }: { scenarioId: string }) {
     setBusy(true);
     setLoadError("");
     postSeirProjection(scenarioId, body)
-      .then(p => { if (p?.applicable) { setProj(p); onDone?.(true); } else { setLoadError(p?.reason ?? ""); onDone?.(false); } })
+      .then(p => { if (p?.applicable) { setProj(p); onDone?.(true); } else { setLoadError(seirReasonText(p, t)); onDone?.(false); } })
       .catch((e: unknown) => { setLoadError(e instanceof Error ? e.message : String(e)); onDone?.(false); })
       .finally(() => setBusy(false));
   };
@@ -1019,7 +1019,7 @@ function SeirModelView({ scenarioId }: { scenarioId: string }) {
           <p className="text-sm font-medium text-white/70">
             {failed ? t("scenarioDetail.seirTab.loadFailed") : t("scenarioDetail.seirTab.notApplicableTitle")}</p>
           <p className="text-[12px] text-white/45 max-w-md mx-auto leading-relaxed">
-            {failed ? loadError : (proj?.reason ?? t("scenarioDetail.seirTab.notApplicable"))}</p>
+            {failed ? loadError : seirReasonText(proj, t)}</p>
           {failed && (
             <button onClick={() => setReloadKey(k => k + 1)}
               className="mt-1 rounded-lg border border-white/15 bg-white/5 px-3 py-1.5 text-[11px] text-white/80 hover:bg-white/10">
@@ -1135,7 +1135,7 @@ function SeirModelView({ scenarioId }: { scenarioId: string }) {
     setBusy(true);
     setLoadError("");
     postSeirProjection(scenarioId, body)
-      .then(p => { if (p?.applicable) setProj(p); else setLoadError(p?.reason ?? ""); })
+      .then(p => { if (p?.applicable) setProj(p); else setLoadError(seirReasonText(p, t)); })
       .catch((e: unknown) => setLoadError(e instanceof Error ? e.message : String(e)))
       .finally(() => setBusy(false));
   };
@@ -3267,6 +3267,28 @@ function AutoFetchPanel({ scenarioId, spec, onFetched }: {
   );
 }
 
+/** Porte SEIR fermée → phrase dans la langue choisie. Le backend renvoie un `reason_code`
+ *  stable (et un texte français pour l'API / les logs) ; sans code connu, on montre ce
+ *  texte plutôt que rien. */
+export function seirReasonText(
+  p: { reason?: string; reason_code?: string; available_parameters?: string[] } | null | undefined,
+  t: (path: string) => string,
+): string {
+  switch (p?.reason_code) {
+    case "no_parameters":
+      return t("scenarioDetail.seirTab.reasonNoParameters");
+    case "not_transmissible":
+      return t("scenarioDetail.seirTab.reasonNotTransmissible");
+    case "no_transmission_parameter": {
+      const available = (p?.available_parameters ?? []).join(", ");
+      return t("scenarioDetail.seirTab.reasonNoTransmissionParameter")
+        .replace("{available}", available || t("scenarioDetail.seirTab.reasonNoneAvailable"));
+    }
+    default:
+      return p?.reason ?? t("scenarioDetail.seirTab.notApplicable");
+  }
+}
+
 const SOURCE_LABELS_MAP: Record<string, string> = {
   pubmed: "PubMed",
   pmc: "PMC",
@@ -3447,7 +3469,9 @@ function PrismaSection({ scenarioId }: { scenarioId: string }) {
               accent="text-violet-300"
             />
           </div>
-          <p className="text-[9px] opacity-40 italic">{ft.note}</p>
+          {/* Note traduite côté client : `ft.note` du backend est en français quelle
+              que soit la langue choisie. */}
+          <p className="text-[9px] opacity-40 italic">{t("scenarioDetail.prisma.fullTextNote")}</p>
         </PrismaStageCard>
 
         <PrismaConnector />
