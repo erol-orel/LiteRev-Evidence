@@ -3281,7 +3281,7 @@ const SOURCE_LABELS_MAP: Record<string, string> = {
   core: "CORE",
   arxiv: "arXiv",
   openaire: "OpenAIRE",
-  db_cache: "DB Cache",
+  db_cache: "Local database",
   preprint: "Preprints (Europe PMC)",
   preprints: "Preprints (Europe PMC)",
 };
@@ -3393,10 +3393,23 @@ function PrismaSection({ scenarioId }: { scenarioId: string }) {
           {/* « records identified » = étape PRISMA d'identification : compté AVANT
               déduplication (norme PRISMA 2020), donc légitimement ≥ au corpus dédupliqué
               affiché ailleurs. La note l'explicite pour éviter la lecture « incohérence ». */}
-          <div className="text-center text-[10px] text-emerald-300/50 -mt-1">{t("scenarioDetail.prisma.recordsIdentifiedNote")}</div>
+          {/* figures_from="corpus" : scénario antérieur à la comptabilité par source — les
+              nombres viennent du corpus DÉJÀ dédupliqué, donc « doublons : 0 » par
+              construction. Le dire, plutôt que d'afficher un « avant déduplication » faux. */}
+          <div className="text-center text-[10px] text-emerald-300/50 -mt-1">
+            {ident.figures_from === "corpus"
+              ? t("scenarioDetail.prisma.recordsIdentifiedNoteCorpus")
+              : t("scenarioDetail.prisma.recordsIdentifiedNote")}
+          </div>
           <div className="space-y-1">
-            <PrismaRow label={t("scenarioDetail.prisma.embeddedSearchable")} value={num(ident.embedded)} />
             <PrismaRow label={t("scenarioDetail.prisma.duplicatesRemoved")} value={num(ident.duplicates_removed)} />
+            {ident.unique_records != null && (
+              <PrismaRow label={t("scenarioDetail.prisma.uniqueRecords")} value={num(ident.unique_records)} />
+            )}
+            {ident.figures_from === "search_run" && (
+              <PrismaRow label={t("scenarioDetail.prisma.removedOtherReasons")} value={num(ident.removed_other_reasons)} />
+            )}
+            <PrismaRow label={t("scenarioDetail.prisma.embeddedSearchable")} value={num(ident.embedded)} />
           </div>
           {activeSources.length > 0 && (
             <div className="flex flex-wrap gap-1.5 pt-1 border-t border-white/5">

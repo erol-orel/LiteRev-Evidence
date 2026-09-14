@@ -1067,6 +1067,18 @@ export interface ScenarioPrisma {
     by_source: Record<string, number>;
     duplicates_removed: number;
     embedded: number;
+    // Chiffres de la RECHERCHE (populate/rebuild) quand ils existent : enregistrements
+    // ramenés par source (recoupements compris), doublons, uniques, retirés pour
+    // d'autres raisons. figures_from="corpus" = scénario antérieur à cette
+    // comptabilité : les nombres viennent du corpus déjà dédupliqué.
+    unique_records?: number;
+    removed_other_reasons?: number;
+    records_screened?: number;
+    duplicate_records_across_sources?: number;
+    duplicate_rows_in_database?: number;
+    figures_from?: "search_run" | "corpus";
+    computed_at?: string | null;
+    federation_incomplete?: boolean;
     // legacy
     total_records_identified?: number;
   };
