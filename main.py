@@ -8346,6 +8346,16 @@ def _launch_populate_job(scenario_id: str, query: str, filters: dict, max_result
                         "clinicaltrials": 0, "core": 0, "arxiv": 0, "openaire": 0,
                         "biorxiv": 0, "medrxiv": 0},
         }
+    # Persister l'état « en cours » : la liste des scénarios et l'indicateur global
+    # (/activity) le lisent en base — une recherche lancée puis quittée (autre page,
+    # rechargement) reste ainsi visible et retrouvable. Remis à done/error à la fin
+    # du run ; les orphelins d'un redémarrage sont passés à 'error' au démarrage.
+    try:
+        with engine.begin() as _c:
+            _c.execute(text("UPDATE user_scenarios SET populate_status = 'running', updated_at = NOW() "
+                            "WHERE id = :sid"), {"sid": scenario_id})
+    except Exception as _e:                              # noqa: BLE001 - jamais bloquant
+        logger.warning(f"populate_status=running {scenario_id}: {_e}")
     threading.Thread(
         target=_run_user_scenario_populate,
         args=(scenario_id, query, filters or {}, max_results, None, include_live),
@@ -11538,6 +11548,44 @@ def get_user_scenario_counts(scenario_id: str) -> dict[str, Any]:
     Sert la bannière de la page scénario : « pipeline en cours, compteurs provisoires »
     puis « terminé, N articles partout » — ou la liste des écarts."""
     return _scenario_counts(scenario_id)
+
+
+@app.get("/activity")
+def get_activity() -> dict[str, Any]:
+    """Recherches et pipelines EN COURS, tous scénarios utilisateur confondus — pour
+    l'indicateur global de l'interface, visible sur toutes les pages.
+
+    Une recherche continue côté serveur quand on change de page ; sans indicateur elle
+    « disparaissait » et, non épinglée, on ne savait plus où la retrouver. Source de
+    vérité : les statuts persistés (populate_status 'running' posé au lancement,
+    pipeline_status 'running'/'starting'), qui survivent au rechargement de la page ;
+    l'état en mémoire des jobs n'apporte que l'étape courante. Les statuts orphelins
+    d'un redémarrage de l'API sont remis à 'error' au démarrage (cf. startup_event)."""
+    from datetime import datetime as _dt, timezone as _tz
+    with engine.connect() as conn:
+        rows = conn.execute(text("""
+            SELECT id, name, query, pinned, populate_status, pipeline_status, pipeline_step,
+                   COALESCE(article_count, 0) AS article_count
+            FROM user_scenarios
+            WHERE pipeline_status IN ('running', 'starting') OR populate_status = 'running'
+            ORDER BY updated_at DESC
+            LIMIT 30
+        """)).mappings().all()
+    items: list[dict[str, Any]] = []
+    for r in rows:
+        pipeline_running = r["pipeline_status"] in ("running", "starting")
+        job = (_user_scenario_pipeline_jobs.get(r["id"]) if pipeline_running
+               else _user_scenario_populate_jobs.get(r["id"])) or {}
+        items.append({
+            "scenario_id": r["id"],
+            "name": r["name"],
+            "query": r["query"],
+            "pinned": bool(r["pinned"]),
+            "kind": "pipeline" if pipeline_running else "search",
+            "step": (job.get("current_step") or r["pipeline_step"]) if pipeline_running else job.get("phase"),
+            "article_count": int(r["article_count"] or 0),
+        })
+    return {"running": items, "count": len(items), "checked_at": _dt.now(_tz.utc).isoformat()}
 
 
 @app.get("/user-scenarios/{scenario_id}/embedding-status")
