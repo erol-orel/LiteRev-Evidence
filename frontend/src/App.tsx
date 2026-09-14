@@ -640,7 +640,7 @@ function GesicaSignalsPanel({ summary }: { summary: EvidenceSummaryResponse }) {
 
       {s.demandSignals.length > 0 && (
         <div>
-          <p className="mb-1 text-xs text-forest-400">Signaux de demande</p>
+          <p className="mb-1 text-xs text-forest-400">{t("search.demandSignals")}</p>
           <div className="flex flex-wrap gap-1">
             {s.demandSignals.slice(0, 8).map((sig) => (
               <SignalBadge key={sig} label={sig} />
