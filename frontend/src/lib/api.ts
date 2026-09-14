@@ -1072,7 +1072,12 @@ export interface ScenarioPrisma {
     // d'autres raisons. figures_from="corpus" = scénario antérieur à cette
     // comptabilité : les nombres viennent du corpus déjà dédupliqué.
     unique_records?: number;
+    // Retraits avant screening, ventilés : sans résumé (règle qualité), hors requête
+    // (source par mots-clés ne correspondant pas au booléen en local), résiduel.
+    removed_no_abstract?: number;
+    removed_not_matching?: number;
     removed_other_reasons?: number;
+    removed_before_screening?: number;
     records_screened?: number;
     duplicate_records_across_sources?: number;
     duplicate_rows_in_database?: number;

@@ -3429,7 +3429,14 @@ function PrismaSection({ scenarioId }: { scenarioId: string }) {
               <PrismaRow label={t("scenarioDetail.prisma.uniqueRecords")} value={num(ident.unique_records)} />
             )}
             {ident.figures_from === "search_run" && (
-              <PrismaRow label={t("scenarioDetail.prisma.removedOtherReasons")} value={num(ident.removed_other_reasons)} />
+              <>
+                <PrismaRow label={t("scenarioDetail.prisma.removedNoAbstract")} value={num(ident.removed_no_abstract)} />
+                <PrismaRow label={t("scenarioDetail.prisma.removedNotMatching")} value={num(ident.removed_not_matching)} />
+                {num(ident.removed_other_reasons) > 0 && (
+                  <PrismaRow label={t("scenarioDetail.prisma.removedOtherReasons")} value={num(ident.removed_other_reasons)} />
+                )}
+                <PrismaRow label={t("scenarioDetail.prisma.recordsScreened")} value={num(ident.records_screened)} accent="text-emerald-300" />
+              </>
             )}
             <PrismaRow label={t("scenarioDetail.prisma.embeddedSearchable")} value={num(ident.embedded)} />
           </div>
