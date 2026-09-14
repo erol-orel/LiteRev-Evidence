@@ -11283,6 +11283,20 @@ def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict
             )
         except Exception as _e:
             logger.warning(f"Pipeline final DB update failed: {_e}")
+        # ── Vérification finale : liste = en-tête = PRISMA = étape sémantique ──
+        # Pendant le pipeline ces lectures divergent (copie stockée, chiffres figés à
+        # la recherche, base en direct) ; à la fin elles doivent coïncider. Exposé dans
+        # le statut du pipeline (bannière de la page) et journalisé.
+        try:
+            _cc = _scenario_counts(scenario_id)
+            _user_scenario_pipeline_jobs[scenario_id]["counts"] = _cc
+            if _cc["consistent"]:
+                logger.info(f"Pipeline complet {scenario_id}: compteurs cohérents — "
+                            f"{_cc['corpus_links']} articles (liste, en-tête, PRISMA, étape 2).")
+            else:
+                logger.warning(f"Pipeline complet {scenario_id}: compteurs INCOHÉRENTS — {_cc['mismatches']}")
+        except Exception as _e_cc:
+            logger.warning(f"Pipeline {scenario_id}: vérification des compteurs impossible: {_e_cc}")
         logger.info(f"Pipeline complet {scenario_id}: terminé.")
 
     except Exception as e:
@@ -11436,6 +11450,89 @@ def get_user_scenario_pipeline_status(scenario_id: str) -> dict[str, Any]:
             "steps": {},
         }
     return {"scenario_id": scenario_id, **job}
+
+
+def _counts_consistency(counts: dict) -> tuple[bool, list[dict]]:
+    """Compare entre eux les nombres d'articles que l'interface affiche pour UN scénario.
+
+    Référence = `corpus_links`, les liens en base hors doublons (ce que l'onglet Corpus
+    liste). La liste des scénarios affiche `article_count`, une COPIE stockée, mise à jour
+    par étapes pendant une recherche (d'abord les correspondances locales, puis le corpus
+    nettoyé) ; le PRISMA affiche `records_screened`, figé à la fin de la dernière
+    recherche ; l'étape 2 compte au-dessus/en dessous du seuil en direct. Le temps d'un
+    pipeline, ces trois lectures divergent légitimement ; à la fin, elles doivent
+    coïncider — et c'est ce que vérifie cette fonction (pure, testée hors base)."""
+    ref = int(counts.get("corpus_links") or 0)
+    mismatches: list[dict] = []
+    ac = counts.get("article_count")
+    if ac is not None and int(ac) != ref:
+        mismatches.append({"field": "article_count", "value": int(ac), "expected": ref})
+    ps = counts.get("prisma_screened")
+    if ps is not None and int(ps) != ref:
+        mismatches.append({"field": "prisma_screened", "value": int(ps), "expected": ref})
+    ab, be = counts.get("above_threshold"), counts.get("below_threshold")
+    if ab is not None and be is not None and int(ab) + int(be) != ref:
+        mismatches.append({"field": "above_plus_below", "value": int(ab) + int(be), "expected": ref})
+    return (not mismatches), mismatches
+
+
+def _scenario_counts(scenario_id: str, row: dict | None = None) -> dict[str, Any]:
+    """Tous les compteurs d'un scénario utilisateur en une lecture, avec le verdict de
+    _counts_consistency et l'état d'avancement (pipeline ou populate en cours)."""
+    from datetime import datetime as _dt, timezone as _tz
+    row = row or _get_user_scenario_or_404(scenario_id)
+    thr = _get_scenario_threshold(scenario_id)
+    with engine.connect() as conn:
+        r = conn.execute(text("""
+            SELECT COUNT(DISTINCT ars.document_id) AS corpus_links,
+                   COUNT(DISTINCT ars.document_id) FILTER (WHERE COALESCE(ars.similarity_score, 0) >= :thr) AS above,
+                   COUNT(DISTINCT ars.document_id) FILTER (WHERE COALESCE(ars.similarity_score, 0) < :thr) AS below,
+                   COUNT(DISTINCT ars.document_id) FILTER (WHERE EXISTS (
+                       SELECT 1 FROM document_chunk c
+                       WHERE c.document_id = ars.document_id AND c.embedding IS NOT NULL)) AS embedded
+            FROM article_scenarios ars
+            JOIN literature_document d ON d.id = ars.document_id
+            WHERE ars.scenario_id = :sid AND (d.is_duplicate IS NULL OR d.is_duplicate = FALSE)
+        """), {"sid": scenario_id, "thr": thr}).mappings().first()
+    figures = _load_prisma_identification(scenario_id)
+    job = _user_scenario_pipeline_jobs.get(scenario_id) or {}
+    pjob = _user_scenario_populate_jobs.get(scenario_id) or {}
+    in_progress = (
+        row.get("pipeline_status") in ("running", "starting")
+        or row.get("populate_status") == "running"
+        or job.get("overall_status") in ("running", "starting")
+        or pjob.get("status") in ("running", "starting")
+    )
+    counts = {
+        "article_count": int(row.get("article_count") or 0),
+        "corpus_links": int(r["corpus_links"] or 0),
+        "prisma_screened": (int(figures.get("records_screened") or 0) if figures else None),
+        "above_threshold": int(r["above"] or 0),
+        "below_threshold": int(r["below"] or 0),
+        "embedded": int(r["embedded"] or 0),
+    }
+    ok, mismatches = _counts_consistency(counts)
+    return {
+        "scenario_id": scenario_id,
+        "in_progress": bool(in_progress),
+        "pipeline_status": row.get("pipeline_status"),
+        "populate_status": row.get("populate_status"),
+        "current_step": job.get("current_step") or row.get("pipeline_step"),
+        "threshold": thr,
+        **counts,
+        "consistent": ok,
+        "mismatches": mismatches,
+        "checked_at": _dt.now(_tz.utc).isoformat(),
+    }
+
+
+@app.get("/user-scenarios/{scenario_id}/counts")
+def get_user_scenario_counts(scenario_id: str) -> dict[str, Any]:
+    """Les nombres d'articles que l'interface affiche pour ce scénario (liste, en-tête,
+    PRISMA, étape sémantique), comparés entre eux, et si un pipeline tourne encore.
+    Sert la bannière de la page scénario : « pipeline en cours, compteurs provisoires »
+    puis « terminé, N articles partout » — ou la liste des écarts."""
+    return _scenario_counts(scenario_id)
 
 
 @app.get("/user-scenarios/{scenario_id}/embedding-status")

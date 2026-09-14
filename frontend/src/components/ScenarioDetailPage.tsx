@@ -18,6 +18,7 @@ import {
   askScenarioRagStreamFiltered,
   type RagMeta,
   fetchScenarioPrisma,
+  fetchScenarioCounts,
   uploadModelData,
   screenArticle,
   fetchArticlePico,
@@ -6074,6 +6075,47 @@ export function ScenarioDetailPage({ scenarioId, onBack, initialTab }: ScenarioD
   // initialTab="model" ouvre directement l'onglet Variables & Modèle (sous-tab Modèle prédictif).
   const [activeSection, setActiveSection] = useState<SectionKey>(initialTab === "model" ? "variables" : "review");
 
+  // Compteurs et pipeline. Tant qu'un pipeline ou un populate tourne, les nombres
+  // d'articles peuvent différer d'un panneau à l'autre : la liste lit une copie stockée
+  // (mise à jour par étapes), le PRISMA les chiffres figés à la fin de la recherche,
+  // l'étape sémantique la base en direct. On le dit pendant, on recharge tout à la fin,
+  // et on affiche le verdict du serveur (tout concorde, ou la liste des écarts).
+  type Counts = Awaited<ReturnType<typeof fetchScenarioCounts>>;
+  const [counts, setCounts] = useState<Counts | null>(null);
+  const [justFinished, setJustFinished] = useState(false);
+  const [refreshKey, setRefreshKey] = useState(0);
+  useEffect(() => {
+    if (!isUserScenario(scenarioId)) return;
+    let alive = true;
+    let sawRunning = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const tick = () => {
+      fetchScenarioCounts(scenarioId)
+        .then((c) => {
+          if (!alive) return;
+          setCounts(c);
+          if (c.in_progress) {
+            sawRunning = true;
+            timer = setTimeout(tick, 5000);
+          } else if (sawRunning) {
+            sawRunning = false;
+            setJustFinished(true);
+            fetchScenarioDetail(scenarioId).then((d) => { if (alive) setDetail(d); }).catch(() => {});
+            setRefreshKey((k) => k + 1);
+          }
+        })
+        .catch(() => { if (alive) timer = setTimeout(tick, 15000); });
+    };
+    setJustFinished(false);
+    tick();
+    return () => { alive = false; if (timer) clearTimeout(timer); };
+  }, [scenarioId]);
+  const countFieldLabel = (field: string) =>
+    field === "article_count" ? t("scenarioDetail.page.countsFieldList")
+      : field === "prisma_screened" ? t("scenarioDetail.page.countsFieldPrisma")
+      : field === "above_plus_below" ? t("scenarioDetail.page.countsFieldSemantic")
+      : field;
+
   // Scroll tout en haut à l'ouverture d'un scénario, en garantissant le tout
   // début (en-tête + logos). Un scrollTo(0,0) seul est repoussé par l'inertie
   // (momentum) reportée depuis la liste/recherche. On va donc en haut PUIS on
@@ -6189,6 +6231,40 @@ export function ScenarioDetailPage({ scenarioId, onBack, initialTab }: ScenarioD
         </div>
       </div>
 
+      {/* Pipeline en cours / terminé : compteurs provisoires, puis vérifiés */}
+      {counts?.in_progress && (
+        <div className="flex items-start gap-2.5 rounded-xl border border-amber-500/20 bg-amber-500/5 px-4 py-3 text-xs text-amber-200/90">
+          <RotateCcw size={13} className="mt-0.5 shrink-0 animate-spin text-amber-300" />
+          <span>{t("scenarioDetail.page.pipelineRunning").replace("{step}", counts.current_step ?? "…")}</span>
+        </div>
+      )}
+      {counts && !counts.in_progress && !counts.consistent && (
+        <div className="rounded-xl border border-rose-500/20 bg-rose-500/5 px-4 py-3 text-xs text-rose-200/90 space-y-1.5">
+          <div className="flex items-center justify-between gap-3">
+            <span className="font-medium">{t("scenarioDetail.page.countsMismatch")}</span>
+            <button
+              onClick={() => { setRefreshKey((k) => k + 1); fetchScenarioCounts(scenarioId).then(setCounts).catch(() => {}); fetchScenarioDetail(scenarioId).then(setDetail).catch(() => {}); }}
+              className="rounded-lg border border-white/15 bg-white/5 px-2.5 py-1 text-[11px] text-white/80 hover:bg-white/10"
+            >
+              {t("scenarioDetail.page.countsRefresh")}
+            </button>
+          </div>
+          <ul className="space-y-0.5 font-mono text-[11px]">
+            {counts.mismatches.map((m) => (
+              <li key={m.field}>
+                {countFieldLabel(m.field)}: {m.value.toLocaleString()} · {t("scenarioDetail.page.countsExpected")} {m.expected.toLocaleString()}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+      {counts && !counts.in_progress && counts.consistent && justFinished && (
+        <div className="flex items-center justify-between gap-3 rounded-xl border border-emerald-500/20 bg-emerald-500/5 px-4 py-3 text-xs text-emerald-200/90">
+          <span>{t("scenarioDetail.page.pipelineDoneConsistent").replace("{n}", counts.corpus_links.toLocaleString())}</span>
+          <button onClick={() => setJustFinished(false)} className="text-white/40 hover:text-white/80" aria-label="close">×</button>
+        </div>
+      )}
+
       {/* Navigation par onglets */}
       <div className="flex flex-wrap gap-1.5 border-b border-white/5 pb-4">
         {SECTIONS.map((section) => (
@@ -6209,7 +6285,11 @@ export function ScenarioDetailPage({ scenarioId, onBack, initialTab }: ScenarioD
 
       {/* Contenu de la section active — isolé par une limite d'erreur : un crash
           de rendu (ex. visualisation clustering) n'emporte plus toute la page. */}
-      <ErrorBoundary resetKey={`${activeSection}:${scenarioId}`} label="scenarioDetail.page.errorBoundaryLabel">
+      <ErrorBoundary resetKey={`${activeSection}:${scenarioId}:${refreshKey}`} label="scenarioDetail.page.errorBoundaryLabel">
+        {/* `key` : à la fin d'un pipeline, on REMONTE la section active pour qu'elle
+            recharge ses données (corpus, PRISMA, étape sémantique…) — sinon elle
+            garderait les nombres provisoires lus pendant le pipeline. */}
+        <div key={`section-${refreshKey}`} className="contents">
         {activeSection === "review" && <ReviewTab scenarioId={scenarioId} detail={detail} />}
         {activeSection === "evidence" && <EvidenceTab scenarioId={scenarioId} detail={detail} />}
         {activeSection === "reports" && <SituationReportsSection scenarioId={scenarioId} />}
@@ -6218,6 +6298,7 @@ export function ScenarioDetailPage({ scenarioId, onBack, initialTab }: ScenarioD
         {activeSection === "variables" && <VariablesModelTab detail={detail} scenarioId={scenarioId} initialSub={initialTab === "model" ? "monitor" : undefined} />}
         {activeSection === "queries" && <QueriesSection detail={detail} scenarioId={scenarioId} />}
         {activeSection === "alerts" && <AlertsSection scenarioId={scenarioId} />}
+        </div>
       </ErrorBoundary>
     </div>
   );
