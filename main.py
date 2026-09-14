@@ -2412,6 +2412,81 @@ def _dedup_scenario_links(scenario_id: str) -> int:
         return 0
 
 
+def _prisma_identification_figures(records_by_source: dict, unique_records: int,
+                                   duplicate_rows_removed: int, corpus_total: int,
+                                   method: str = "populate",
+                                   federation_incomplete: bool = False) -> dict[str, Any]:
+    """Chiffres PRISMA 2020 de l'étape « identification », calculés à partir de ce qu'une
+    recherche a RÉELLEMENT ramené — et non du corpus déjà dédupliqué.
+
+    Pourquoi : le PRISMA affichait « doublons retirés : 0 » par construction. La
+    déduplication a lieu à l'ingestion (index uniques DOI / titre normalisé : un article
+    renvoyé par OpenAlex ET PubMed devient UNE ligne, la seconde arrivée est absorbée
+    sans trace) puis au liage (_dedup_scenario_links, dont le compte n'était que
+    journalisé). Le flag `is_duplicate` que comptait le PRISMA n'est posé par aucun
+    runtime. Ici, on compte à la source, une fois par source qui a renvoyé l'article.
+
+    records_by_source      : enregistrements ramenés PAR SOURCE (« db_cache » = base locale)
+    unique_records         : documents distincts derrière ces enregistrements
+    duplicate_rows_removed : liens retirés par _dedup_scenario_links (même DOI/PMID/titre
+                             sous deux lignes distinctes de la base)
+    corpus_total           : liens restants après nettoyage (sans résumé, doublons)
+
+    PRISMA 2020 : identifiés → doublons retirés → (retirés pour d'autres raisons) →
+    passés au screening. « Autres raisons » ici : pas de résumé, ou enregistrement d'une
+    source par mots-clés qui ne correspond pas à la requête booléenne en local."""
+    from datetime import datetime as _dt, timezone as _tz
+    records = {str(k): int(v) for k, v in (records_by_source or {}).items() if int(v or 0) > 0}
+    identified = sum(records.values())
+    across = max(0, identified - max(0, int(unique_records or 0)))
+    rows = max(0, int(duplicate_rows_removed or 0))
+    duplicates = min(identified, across + rows)
+    unique_after = identified - duplicates
+    corpus = max(0, int(corpus_total or 0))
+    return {
+        "method": method,
+        "computed_at": _dt.now(_tz.utc).isoformat(),
+        "federation_incomplete": bool(federation_incomplete),
+        "records_by_source": records,
+        "records_identified": identified,
+        "duplicate_records_across_sources": across,
+        "duplicate_rows_in_database": rows,
+        "duplicates_removed": duplicates,
+        "unique_records": unique_after,
+        "removed_other_reasons": max(0, unique_after - corpus),
+        "records_screened": corpus,
+    }
+
+
+def _store_prisma_identification(scenario_id: str, figures: dict) -> None:
+    """Persiste les chiffres (colonne JSONB user_scenarios.prisma_identification).
+    best-effort : une colonne absente ou une panne ne doit jamais faire échouer un
+    populate — le PRISMA retombe alors sur le calcul historique (cf. get_user_scenario_prisma)."""
+    try:
+        with engine.begin() as _c:
+            _c.execute(text("UPDATE user_scenarios SET prisma_identification = CAST(:f AS jsonb) "
+                            "WHERE id = :sid"), {"f": json.dumps(figures), "sid": scenario_id})
+    except Exception as _e:                              # noqa: BLE001
+        logger.warning(f"prisma_identification {scenario_id}: {_e}")
+
+
+def _load_prisma_identification(scenario_id: str) -> dict | None:
+    """Chiffres stockés par le dernier populate / rebuild, ou None (scénario antérieur à
+    cette comptabilité, ou colonne absente)."""
+    try:
+        with engine.connect() as _c:
+            _raw = _c.execute(text("SELECT prisma_identification FROM user_scenarios WHERE id = :sid"),
+                              {"sid": scenario_id}).scalar()
+    except Exception:                                    # noqa: BLE001 - colonne absente
+        return None
+    if isinstance(_raw, str):
+        try:
+            _raw = json.loads(_raw)
+        except Exception:                                # noqa: BLE001
+            return None
+    return _raw if isinstance(_raw, dict) and _raw.get("records_by_source") is not None else None
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Déduplication GLOBALE du corpus : comptage « à la lecture » + marquage on-demand
 # ─────────────────────────────────────────────────────────────────────────────
@@ -7324,6 +7399,9 @@ def _ensure_user_scenarios_table() -> None:
             "ALTER TABLE user_scenarios ADD COLUMN IF NOT EXISTS pipeline_started_at TIMESTAMP",
             "ALTER TABLE user_scenarios ADD COLUMN IF NOT EXISTS article_count INTEGER DEFAULT 0",
             "ALTER TABLE user_scenarios ADD COLUMN IF NOT EXISTS search_strategy JSONB",
+            # Chiffres PRISMA « identification » du dernier populate / rebuild (enregistrements
+            # par source, doublons, uniques) — cf. _prisma_identification_figures.
+            "ALTER TABLE user_scenarios ADD COLUMN IF NOT EXISTS prisma_identification JSONB",
             # Clustering persisté en base (sinon perdu au redémarrage du serveur)
             "ALTER TABLE article_scenarios ADD COLUMN IF NOT EXISTS cluster_id INTEGER",
             "ALTER TABLE article_scenarios ADD COLUMN IF NOT EXISTS cluster_label TEXT",
@@ -8883,6 +8961,12 @@ def _run_user_scenario_populate(
     _ingested_total = [0]
     _errors_total = [0]
     _bool_native_ids: set = set()   # SOURCE-UNION — voir _link_to_scenario
+    # Comptabilité PRISMA « identification » : enregistrements ramenés PAR SOURCE (un
+    # article renvoyé par trois sources = trois enregistrements) et documents DISTINCTS
+    # derrière eux. Leur différence est le nombre de doublons — que la dédup à
+    # l'ingestion (index uniques) absorbait jusqu'ici sans laisser de trace.
+    _ident_records: dict[str, int] = {}
+    _ident_docs: set = set()
     # ③ Santé de la fédération, pour décider si un corpus PEUT rétrécir / se vider.
     #  • _source_errors  : nb de sources ayant échoué (except top-level d'un fetcher) ;
     #  • _fed_incomplete : True si le budget fédération a été dépassé (sources coupées).
@@ -8892,7 +8976,14 @@ def _run_user_scenario_populate(
     _source_errors = [0]
     _fed_incomplete = [False]
 
-    def _link_to_scenario(doc_id, boolean_native=False):
+    def _link_to_scenario(doc_id, boolean_native=False, source=None):
+        # Comptabilité PRISMA : un enregistrement par source qui a renvoyé l'article,
+        # que la ligne soit nouvelle ou déjà connue — c'est justement le recoupement
+        # entre sources (et avec la base locale) qui fait le doublon.
+        if doc_id is not None and source:
+            with _counter_lock:
+                _ident_records[source] = _ident_records.get(source, 0) + 1
+                _ident_docs.add(doc_id)
         # NE LIE PLUS pendant la fédération : ingérer un article live ne l'ajoute PAS
         # d'office au corpus. L'appartenance est recalculée après ingestion via la
         # correspondance booléenne — sinon le corpus gonflait avec des résultats live
@@ -9038,6 +9129,10 @@ def _run_user_scenario_populate(
                 """), {"ids": list(_local_ids), "sid": scenario_id})
                 local_linked = len(_local_ids)
             _inc("db_cache", local_linked)
+            # La base locale est une source interrogée comme les autres : ses
+            # correspondances sont des enregistrements identifiés (PRISMA).
+            _ident_records["db_cache"] = local_linked
+            _ident_docs.update(_local_ids)
             logger.info(f"Populate {scenario_id}: corpus booléen = {local_linked} docs (base locale)")
 
         if local_linked > 0:
@@ -9154,7 +9249,7 @@ def _run_user_scenario_populate(
                             # rapprochait pas. Uniformisé, le doublon n'est plus créé.
                             external_id=f"pmid:{pmid}", doi=doi, authors=authors, journal=journal,
                         )
-                        _link_to_scenario(doc_id, boolean_native=True)   # source-union
+                        _link_to_scenario(doc_id, boolean_native=True, source="pubmed")   # source-union
                         if _new:
                             count += 1
                             _inc("pubmed")
@@ -9216,7 +9311,7 @@ def _run_user_scenario_populate(
                             source="openalex", title=title, abstract=abstract or None,
                             year=year, url=url, external_id=ext_id, doi=doi,
                         )
-                        _link_to_scenario(doc_id, boolean_native=_send_bool)   # source-union si booléen
+                        _link_to_scenario(doc_id, boolean_native=_send_bool, source="openalex")   # source-union si booléen
                         if _new:
                             count += 1
                             _inc("openalex")
@@ -9282,7 +9377,7 @@ def _run_user_scenario_populate(
                             source="crossref", title=title, abstract=abstract or None,
                             year=year, url=f"https://doi.org/{doi}", external_id=doi, doi=doi,
                         )
-                        _link_to_scenario(doc_id)
+                        _link_to_scenario(doc_id, source="crossref")
                         if _new:
                             count += 1
                             _inc("crossref")
@@ -9351,7 +9446,7 @@ def _run_user_scenario_populate(
                             source="europepmc", title=title, abstract=abstract or None,
                             year=year, url=url, external_id=ext_id, doi=doi,
                         )
-                        _link_to_scenario(doc_id, boolean_native=True)   # source-union
+                        _link_to_scenario(doc_id, boolean_native=True, source="europepmc")   # source-union
                         if _new:
                             count += 1
                             _inc("europepmc")
@@ -9420,7 +9515,7 @@ def _run_user_scenario_populate(
                             year=year, url=url, external_id=ext_id, doi=doi,
                             source_type="preprint",
                         )
-                        _link_to_scenario(doc_id, boolean_native=True)   # source-union
+                        _link_to_scenario(doc_id, boolean_native=True, source="preprint")   # source-union
                         if _new:
                             count += 1
                             _inc("preprint")
@@ -9452,7 +9547,7 @@ def _run_user_scenario_populate(
                     year=_d.get("year"), url=_d.get("url"), external_id=_d["external_id"],
                     doi=_d.get("doi"), source_type=_d.get("source_type", "article"),
                 )
-                _link_to_scenario(_doc_id, boolean_native=boolean_native)
+                _link_to_scenario(_doc_id, boolean_native=boolean_native, source=source)
                 if _new:
                     c += 1
                     _inc(source)
@@ -9833,7 +9928,7 @@ def _run_user_scenario_populate(
         # APRÈS le retrait des articles sans abstract, pour ne jamais garder par
         # erreur une copie sans résumé au détriment d'une copie complète du même
         # article. Fige le compte de façon déterministe (cf. _dedup_scenario_links).
-        _dedup_scenario_links(scenario_id)
+        _n_dup_rows = _dedup_scenario_links(scenario_id)
 
         # ── Mettre à jour article_count (avant rerank) ──────────────────────
         # NB : on ne marque PAS encore populate_status='done' ici — le scoring
@@ -9850,6 +9945,34 @@ def _run_user_scenario_populate(
                 updated_at = NOW()
                 WHERE id = :sid
             """), {"sid": scenario_id})
+
+        # ── Chiffres PRISMA « identification » de CETTE recherche ────────────
+        # Enregistrements par source (base locale comprise), documents distincts,
+        # doublons (recoupements + lignes fusionnées), retirés pour d'autres raisons.
+        # Stockés sur le scénario : le PRISMA les lit au lieu de compter un flag
+        # `is_duplicate` que rien ne pose (→ « doublons retirés : 0 » à vie).
+        try:
+            with engine.connect() as _pc:
+                _corpus_now = _pc.execute(text("""
+                    SELECT COUNT(DISTINCT ars.document_id) FROM article_scenarios ars
+                    JOIN literature_document d ON d.id = ars.document_id
+                    WHERE ars.scenario_id = :sid AND (d.is_duplicate IS NULL OR d.is_duplicate = FALSE)
+                """), {"sid": scenario_id}).scalar() or 0
+            with _counter_lock:
+                _recs_snapshot = dict(_ident_records)
+                _uniq_snapshot = len(_ident_docs)
+            _figures = _prisma_identification_figures(
+                _recs_snapshot, _uniq_snapshot, _n_dup_rows or 0, int(_corpus_now),
+                method="populate", federation_incomplete=bool(_fed_incomplete[0]))
+            _store_prisma_identification(scenario_id, _figures)
+            logger.info(f"Populate {scenario_id}: PRISMA identification = "
+                        f"{_figures['records_identified']} enregistrements, "
+                        f"{_figures['duplicates_removed']} doublons, "
+                        f"{_figures['unique_records']} uniques, "
+                        f"{_figures['removed_other_reasons']} retirés (autres raisons), "
+                        f"{_figures['records_screened']} au screening.")
+        except Exception as _e_pi:
+            logger.warning(f"Populate {scenario_id}: chiffres PRISMA non stockés: {_e_pi}")
 
         # ── Scores sémantiques (cosinus) — SANS suppression ─────────────────
         # Soft filter : le seuil filtre l'affichage et l'aval, JAMAIS par
@@ -11627,10 +11750,31 @@ def get_user_scenario_prisma(
     evidence_total  = (above - man_vetoed) + man_rescued
     screening_done  = (man_included + man_excluded) > 0
 
-    return {
-        "scenario_id": scenario_id,
-        "scenario_title": row["name"],
-        "identification": {
+    # ── Identification : chiffres de la RECHERCHE quand ils existent ─────────
+    # Un populate/rebuild récent a stocké ce que chaque source a ramené, les doublons
+    # (recoupements entre sources + lignes fusionnées) et les retraits pour d'autres
+    # raisons (cf. _prisma_identification_figures). Sans eux (scénario antérieur), on
+    # retombe sur le corpus, qui est DÉJÀ dédupliqué : ses « doublons » sont le flag
+    # is_duplicate, posé par aucun runtime — d'où l'ancien « 0 » permanent, signalé
+    # ici par figures_from="corpus" pour que l'interface le dise.
+    _figures = _load_prisma_identification(scenario_id)
+    if _figures:
+        _identification = {
+            "total_records": int(_figures.get("records_identified") or 0),
+            "by_source": {str(k): int(v or 0) for k, v in (_figures.get("records_by_source") or {}).items()},
+            "duplicates_removed": int(_figures.get("duplicates_removed") or 0),
+            "duplicate_records_across_sources": int(_figures.get("duplicate_records_across_sources") or 0),
+            "duplicate_rows_in_database": int(_figures.get("duplicate_rows_in_database") or 0),
+            "unique_records": int(_figures.get("unique_records") or 0),
+            "removed_other_reasons": int(_figures.get("removed_other_reasons") or 0),
+            "records_screened": total,
+            "embedded": embedded,
+            "figures_from": "search_run",
+            "computed_at": _figures.get("computed_at"),
+            "federation_incomplete": bool(_figures.get("federation_incomplete")),
+        }
+    else:
+        _identification = {
             "total_records": total,
             "by_source": {
                 "pubmed":    int(stats["pubmed"] or 0),
@@ -11650,8 +11794,17 @@ def get_user_scenario_prisma(
                 "db_cache":  int(stats["db_cache"] or 0),
             },
             "duplicates_removed": duplicates,
+            "unique_records": unique,
+            "removed_other_reasons": 0,
+            "records_screened": unique,
             "embedded": embedded,
-        },
+            "figures_from": "corpus",
+        }
+
+    return {
+        "scenario_id": scenario_id,
+        "scenario_title": row["name"],
+        "identification": _identification,
         "semantic_screening": {
             "threshold": eff_threshold,
             "above_threshold": above,
@@ -12883,7 +13036,12 @@ def rebuild_corpus(scenario_id: str, _: None = Depends(require_api_key)) -> dict
         try:
             ids = _boolean_corpus_ids(boolean, filters)        # base LOCALE uniquement
             n_corpus = _set_scenario_corpus(scenario_id, ids)  # fixe l'appartenance
-            n_corpus -= _dedup_scenario_links(scenario_id)     # un seul lien / article distinct
+            _n_dup_rows = _dedup_scenario_links(scenario_id)   # un seul lien / article distinct
+            n_corpus -= _n_dup_rows
+            # PRISMA : une reconstruction n'interroge que la base locale → une seule
+            # source ; les seuls doublons sont les lignes fusionnées par la dédup.
+            _store_prisma_identification(scenario_id, _prisma_identification_figures(
+                {"db_cache": len(ids)}, len(set(ids)), _n_dup_rows, max(0, n_corpus), method="rebuild"))
             _backfill_title_abstract_chunks(scenario_id)       # chunks résumé manquants
             n = _run_semantic_rerank_inline(scenario_id, query or boolean)  # cosinus pgvector
             try:
