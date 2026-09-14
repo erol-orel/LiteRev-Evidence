@@ -2267,8 +2267,11 @@ export default function App() {
   }
 
   function _launchPipelineForScenario(scenarioId: string) {
-    // Déclencher le pipeline complet dès qu'un scénario est épinglé
-    startUserScenarioPipeline(scenarioId, 500)
+    // Déclencher le pipeline complet dès qu'un scénario est épinglé. Pas de plafond
+    // explicite : le serveur applique LIVE_MAX_PER_SOURCE (2000 par défaut), le MÊME
+    // que le populate lancé depuis l'API — 500 ici donnait un corpus différent pour
+    // la même requête selon le point d'entrée.
+    startUserScenarioPipeline(scenarioId)
       .then(() => _pollPipelineStatus(scenarioId))
       .catch(err => console.warn('Pipeline launch failed:', err));
   }
