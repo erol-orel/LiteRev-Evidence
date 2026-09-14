@@ -10290,7 +10290,12 @@ def _run_cross_encoder_rerank(scenario_id: str, query: str, top_k: int = 1000) -
         return 0
 
 
-def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict, max_results: int = 500) -> None:
+def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict,
+                                     max_results: int = LIVE_MAX_PER_SOURCE) -> None:
+    # max_results : MÊME plafond par source que le populate appelé par l'API
+    # (LIVE_MAX_PER_SOURCE, 2000 par défaut). Il valait 500 ici, d'où deux corpus
+    # différents pour la même requête selon qu'elle partait de l'interface ou de l'API
+    # (25 140 contre 30 511 documents sur « (AI OR ML OR DL) AND infection »).
     """
     Pipeline complet d'enrichissement pour un scénario utilisateur.
     Ordre optimal :
@@ -11367,7 +11372,7 @@ def get_user_scenario_populate_status(scenario_id: str) -> dict[str, Any]:
     return {"scenario_id": scenario_id, **job}
 
 
-def _launch_full_pipeline(scenario_id: str, max_results: int = 500) -> str:
+def _launch_full_pipeline(scenario_id: str, max_results: int = LIVE_MAX_PER_SOURCE) -> str:
     """Démarre le pipeline COMPLET d'enrichissement en arrière-plan (un seul à la fois
     par scénario). Renvoie 'started' | 'already_running' | 'no_query'. Partagé par
     l'endpoint POST /pipeline, l'auto-déclenchement à l'ÉPINGLAGE (« scénario sauvegardé
@@ -11403,7 +11408,7 @@ def _launch_full_pipeline(scenario_id: str, max_results: int = 500) -> str:
 @app.post("/user-scenarios/{scenario_id}/pipeline")
 def start_user_scenario_pipeline(
     scenario_id: str,
-    max_results: int = 500,
+    max_results: int = LIVE_MAX_PER_SOURCE,
     _: None = Depends(require_api_key),
 ) -> dict[str, Any]:
     """
