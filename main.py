@@ -9917,7 +9917,11 @@ def _run_user_scenario_populate(
         _fetch_ok = (not _fed_incomplete[0]) and _source_errors[0] == 0
         _allow_empty = bool(_sub_queries) or (not include_live) or _fetch_ok
         _n_corpus = _set_scenario_corpus(scenario_id, _final_ids, allow_empty=_allow_empty)
-        logger.info(f"Populate {scenario_id}: corpus final = {_n_corpus} docs "
+        # « assemblé, AVANT nettoyage » : les liens vers les documents sans résumé et
+        # les lignes doublons sont retirés juste après — le corpus retenu (article_count,
+        # « passés au screening » du PRISMA) est journalisé plus bas avec les chiffres
+        # PRISMA. Étiqueté « final » auparavant, ce nombre était lu comme le corpus.
+        logger.info(f"Populate {scenario_id}: corpus assemblé (avant nettoyage) = {_n_corpus} docs "
                     f"(re-match local ∪ {_n_native} docs booléens-natifs PubMed/EPMC/préprints ; "
                     f"{'multi ' + _combinator if _sub_queries else 'mono'})")
     except Exception as _e_corpus:
