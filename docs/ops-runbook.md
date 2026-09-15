@@ -183,6 +183,16 @@ required for the app to run — they're guardrails.
   counts, the LLM generators — with OpenAI and Cohere stubbed and random
   embeddings seeded; it is what showed clustering all 25,000 articles peaking at
   3 GB of RAM, hence `CLUSTER_MAX_DOCS`.
+- `scripts/audit_scenario.py` cross-checks every number the interface shows for
+  one scenario (card count, header total, PRISMA arithmetic and screened count,
+  embedding status, clustering sizes and language, threshold, cached artefacts)
+  and prints OK / WARN / FAIL per check. Read-only, GET endpoints only:
+  ```bash
+  cd /opt/literev-api && .venv/bin/python3 scripts/audit_scenario.py \
+      --base http://127.0.0.1:8000 --scenario usr-xxxxxxxxxxxx --lang en
+  ```
+  While a search or pipeline is running for that scenario, disagreements are
+  reported as WARN (expected) rather than FAIL; rerun when it ends.
 
 ### 7b. Uptime check on `/health` (external)
 Point any uptime monitor (UptimeRobot, Better Stack, Hetzner, a cron+curl) at
