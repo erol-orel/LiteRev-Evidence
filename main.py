@@ -2266,6 +2266,43 @@ def _normalize_sub_queries(sub_queries: Any) -> list[dict]:
     return out
 
 
+def _facet_ops(facets: list[dict], combinator: str) -> list[str]:
+    """Opérateur EFFECTIF de chaque facette à partir de la 2e ('and'|'or') : l'op porté
+    par la facette, sinon le `combinator` global ('intersection'→'and', sinon 'or').
+    Une seule source de vérité pour le fold, la règle d'union des sources natives,
+    et l'expression affichée."""
+    default_op = "and" if combinator == "intersection" else "or"
+    out: list[str] = []
+    for f in facets[1:]:
+        op = f.get("op") if isinstance(f, dict) else None
+        out.append(op if op in ("and", "or") else default_op)
+    return out
+
+
+def _facets_intersect(facets: list[dict], combinator: str) -> bool:
+    """True dès qu'UNE facette est INTERSECTÉE (ET) avec le résultat courant. Dans ce
+    cas un document qui ne correspond qu'à la requête principale n'appartient PAS
+    forcément au corpus — les enregistrements booléens-natifs des sources live (qui
+    n'ont vu que la requête principale) ne doivent donc pas être unis d'office."""
+    return "and" in _facet_ops(facets, combinator)
+
+
+def _combined_query_text(query: str | None, sub_queries: Any, combinator: str | None) -> str:
+    """Expression lisible de la recherche COMPLÈTE : requête principale + sous-requêtes
+    avec leurs opérateurs, parenthésée selon le fold gauche→droite réellement appliqué
+    (« (A) AND (B) », « ((A) OR (B)) AND (C) »). Mono-requête → la requête telle quelle.
+    C'est ce texte qui doit apparaître partout où la recherche est montrée (nom par
+    défaut, carte, en-tête, onglet Stratégie) — la colonne `query` ne porte que la
+    facette principale, d'où un « ET » invisible auparavant."""
+    clean = _normalize_sub_queries(sub_queries)
+    if len(clean) < 2:
+        return (query or "").strip()
+    expr = clean[0]["text"]
+    for facet, op in zip(clean[1:], _facet_ops(clean, combinator or "union")):
+        expr = f"({expr}) {op.upper()} ({facet['text']})"
+    return expr
+
+
 def _fold_facet_sets(id_sets: list[set], facets: list[dict], combinator: str) -> set:
     """Combine les ensembles d'IDs des facettes de GAUCHE À DROITE : la facette 0
     (requête principale) est la base ; chaque facette suivante est UNIE (op='or') ou
@@ -5588,15 +5625,194 @@ def _load_viz_cache(scenario_id: str, col: str, ttl: int = 86400) -> dict | None
     return None
 
 
+_CLUSTER_NOISE_TEXT = {
+    "fr": ("Non-classés", "Bruit de fond (articles non regroupés)."),
+    "en": ("Unclassified", "Background noise (articles not grouped)."),
+}
+_CLUSTER_MESSAGES = {
+    "insufficient_corpus": {
+        "fr": "Corpus insuffisant pour le clustering (minimum 5 articles avec abstract requis)",
+        "en": "Not enough articles for clustering (at least 5 articles with an abstract are required)",
+    },
+    "running": {
+        "fr": "Calcul en cours. Revenez dans 30-60s.",
+        "en": "Computing. Check back in 30-60 s.",
+    },
+}
+
+
+def _cluster_summary_llm(client, title: str | None, docs: list, lang: str | None) -> str:
+    """Résumé LLM d'UN cluster à partir de ses articles représentatifs (titre+résumé),
+    dans la langue demandée. Partagé par le clustering complet et la (re)génération
+    des résumés seuls quand la langue du cache ne correspond pas à celle demandée."""
+    english = _norm_lang(lang) == "en"
+    lang_word = "in English" if english else "en français"
+    llm_ctx = "\n\n".join(
+        f"Titre: {d.get('title') or ''}\nRésumé: {(d.get('abstract') or '')[:350]}"
+        for d in docs
+    )
+    completion = client.chat.completions.create(
+        model="gpt-4.1-mini",
+        messages=[{"role": "user", "content": (
+            f"Scénario : {title or 'scénario'}.\n"
+            f"Articles représentatifs du cluster :\n{llm_ctx}\n\n"
+            f"Rédigez un résumé concis (3-4 phrases, max 120 mots) {lang_word} : "
+            f"thématique commune, évidences clés, valeur opérationnelle pour la pratique clinique et la santé publique."
+        ) + _llm_lang_directive(lang)}],
+        max_tokens=200, temperature=0.3,
+    )
+    return (completion.choices[0].message.content or "").strip()
+
+
+def _clusters_have_lang(payload: dict | None, lang: str) -> bool:
+    """True si CHAQUE cluster dense du payload porte un résumé dans `lang`
+    (clusters[].summaries[lang]). Un cache d'avant le suivi de la langue (résumé
+    unique `summary`, langue inconnue) ou un cache de pipeline (sans résumés) → False :
+    les résumés sont alors (re)générés dans la langue demandée, sans re-clusteriser."""
+    if not isinstance(payload, dict):
+        return False
+    dense = [c for c in (payload.get("clusters") or []) if isinstance(c, dict) and not c.get("is_noise")]
+    return all(lang in (c.get("summaries") or {}) for c in dense)
+
+
+def _localize_clusters_payload(payload: dict, lang: str | None) -> dict:
+    """Vue du payload de clustering dans la langue demandée : `summary` de chaque
+    cluster = son résumé dans cette langue (repli : le résumé existant), libellés du
+    cluster « bruit » et message localisés. Ne modifie pas l'objet en cache."""
+    want = _norm_lang(lang) or "fr"
+    noise_name, noise_summary = _CLUSTER_NOISE_TEXT[want]
+    out = dict(payload)
+    clusters = []
+    for c in out.get("clusters") or []:
+        if not isinstance(c, dict):
+            continue
+        cc = dict(c)
+        if cc.get("is_noise"):
+            cc["cluster_name"] = noise_name
+            cc["summary"] = noise_summary
+        else:
+            summaries = cc.get("summaries") or {}
+            if want in summaries:
+                cc["summary"] = summaries[want]
+        clusters.append(cc)
+    out["clusters"] = clusters
+    code = out.get("message_code")
+    if code in _CLUSTER_MESSAGES:
+        out["message"] = _CLUSTER_MESSAGES[code][want]
+    out["lang"] = want
+    return out
+
+
+def _clustering_running_payload(scenario_id: str, lang: str | None) -> dict:
+    want = _norm_lang(lang) or "fr"
+    return {"scenario_id": scenario_id, "status": "running", "message_code": "running",
+            "message": _CLUSTER_MESSAGES["running"][want], "clusters": [], "lang": want}
+
+
+def _summarize_clusters_in_lang(scenario_id: str, payload: dict, lang: str) -> dict:
+    """(Re)génère les RÉSUMÉS des clusters dans `lang` SANS recalculer le clustering
+    (embeddings/UMAP/HDBSCAN conservés) : les 5 articles les plus proches du centre de
+    chaque cluster sont relus en base et résumés par le LLM. Renvoie une COPIE du
+    payload avec clusters[].summaries[lang] (+ `summary` dans cette langue)."""
+    from concurrent.futures import ThreadPoolExecutor as _TPE
+    want = _norm_lang(lang) or "fr"
+    out = json.loads(json.dumps(payload, cls=_NumpyEncoder, default=str))
+    dense = [c for c in (out.get("clusters") or []) if isinstance(c, dict) and not c.get("is_noise")]
+    picks: dict[int, list[int]] = {}
+    need: set[int] = set()
+    for c in dense:
+        cx, cy = float(c.get("center_x") or 0.0), float(c.get("center_y") or 0.0)
+        pts = [p for p in (c.get("points") or []) if isinstance(p, dict) and p.get("id") is not None]
+        pts.sort(key=lambda p: (float(p.get("x") or 0.0) - cx) ** 2 + (float(p.get("y") or 0.0) - cy) ** 2)
+        ids = [int(p["id"]) for p in pts[:5]]
+        rep_id = (c.get("representative_doc") or {}).get("id")
+        if not ids and rep_id is not None:
+            ids = [int(rep_id)]
+        picks[int(c["cluster_id"])] = ids
+        need.update(ids)
+    rows: dict[int, dict] = {}
+    if need:
+        with engine.connect() as conn:
+            for r in conn.execute(text(
+                "SELECT id, title, abstract FROM literature_document WHERE id = ANY(CAST(:ids AS bigint[]))"
+            ), {"ids": sorted(need)}).mappings():
+                rows[int(r["id"])] = dict(r)
+    try:
+        title = _get_scenario_name(scenario_id)
+    except Exception:
+        title = scenario_id
+    openai_key = os.getenv("OPENAI_API_KEY")
+    client = None
+    if openai_key:
+        from llm_usage import MeteredOpenAI as _OAI
+        client = _OAI(api_key=openai_key, timeout=90.0)
+
+    def _one(c: dict) -> str:
+        docs = [rows[i] for i in picks.get(int(c["cluster_id"]), []) if i in rows]
+        if client is None or not docs:
+            return ""
+        try:
+            return _cluster_summary_llm(client, title, docs, want)
+        except Exception as _e:
+            logger.error(f"Résumé cluster {c.get('cluster_id')} ({want}) {scenario_id}: {_e}")
+            return ""
+
+    if dense:
+        with _TPE(max_workers=4) as ex:
+            texts = list(ex.map(_one, dense))
+    else:
+        texts = []
+    for c, s in zip(dense, texts):
+        summaries = dict(c.get("summaries") or {})
+        summaries[want] = s
+        c["summaries"] = summaries
+        c["summary"] = s
+    out["lang"] = want
+    out["from_cache"] = False
+    return out
+
+
+def _persist_clustering_result(scenario_id: str, result: dict) -> None:
+    """Cache DB (durable) + /tmp (compat) d'un payload de clustering."""
+    _save_viz_cache(scenario_id, "clustering", json.loads(json.dumps(result, cls=_NumpyEncoder, default=str)))
+    try:
+        cache_dir = "/tmp/literev_clustering_cache"
+        os.makedirs(cache_dir, exist_ok=True)
+        with open(os.path.join(cache_dir, f"{scenario_id}.json"), "w") as f:
+            json.dump(result, f, cls=_NumpyEncoder, default=str)
+    except Exception:
+        pass
+
+
+def _relocalize_clustering_background(scenario_id: str, payload: dict, lang: str) -> None:
+    """Thread : résumés des clusters dans la langue demandée (structure conservée),
+    puis mise en cache — la page interroge /clustering/status jusqu'à « done »."""
+    try:
+        result = _summarize_clusters_in_lang(scenario_id, payload, lang)
+        _persist_clustering_result(scenario_id, result)
+        _clustering_jobs[scenario_id] = {"status": "done", "result": result}
+    except Exception as e:
+        logger.error(f"Clustering {scenario_id} résumés {lang}: {e}", exc_info=True)
+        _clustering_jobs[scenario_id] = {"status": "error", "error": str(e)}
+
+
 def _build_clusters_payload(scenario_id: str, docs: list, cc: dict, *,
                             with_summaries: bool = False, openai_key: str | None = None,
                             title: str | None = None, lang: str | None = None) -> dict:
     """Construit le payload de clustering CANONIQUE (un seul format, partagé par le
     pipeline ET le calcul en arrière-plan). `with_summaries` active le résumé LLM
-    par cluster. Schéma figé : clusters[].representative_doc + embedding_source."""
+    par cluster, rangé par LANGUE dans clusters[].summaries (`summary` = celui de la
+    langue demandée) pour que le cache serve chaque langue sans mélange.
+    Schéma figé : clusters[].representative_doc + embedding_source."""
     import numpy as np
     labels = cc["labels"]; embedding_2d = cc["embedding_2d"]; method_used = cc["method"]
     feature_names = cc["feature_names"]; X_dense = cc["X_dense"]; embedding_source = cc["embedding_source"]
+    want = _norm_lang(lang) or "fr"
+    noise_name, noise_summary = _CLUSTER_NOISE_TEXT[want]
+    _client = None
+    if with_summaries and openai_key:
+        from llm_usage import MeteredOpenAI as _OAI
+        _client = _OAI(api_key=openai_key, timeout=90.0)
     clusters = []
     for label in sorted(set(labels)):
         label_int = int(label)
@@ -5614,39 +5830,25 @@ def _build_clusters_payload(scenario_id: str, docs: list, cc: dict, *,
              "x": float(embedding_2d[i, 0]), "y": float(embedding_2d[i, 1])}
             for i in idxs
         ]
-        resume = "Bruit de fond (articles non regroupés)." if label_int == -1 else ""
-        if with_summaries and label_int != -1 and openai_key:
+        resume = noise_summary if label_int == -1 else ""
+        summaries: dict[str, str] = {}
+        if _client is not None and label_int != -1:
             try:
-                from llm_usage import MeteredOpenAI as _OAI
-                _client = _OAI(api_key=openai_key, timeout=90.0)
-                english = (lang or "fr").strip().lower().startswith("en")
-                lang_word = "in English" if english else "en français"
                 top5 = np.argsort(distances)[:5]
-                llm_ctx = "\n\n".join(
-                    f"Titre: {docs[idxs[int(t)]]['title']}\nRésumé: {(docs[idxs[int(t)]].get('abstract') or '')[:350]}"
-                    for t in top5
-                )
-                completion = _client.chat.completions.create(
-                    model="gpt-4.1-mini",
-                    messages=[{"role": "user", "content": (
-                        f"Scénario : {title or scenario_id}.\n"
-                        f"Articles représentatifs du cluster :\n{llm_ctx}\n\n"
-                        f"Rédigez un résumé concis (3-4 phrases, max 120 mots) {lang_word} : "
-                        f"thématique commune, évidences clés, valeur opérationnelle pour la pratique clinique et la santé publique."
-                    ) + _llm_lang_directive(lang)}],
-                    max_tokens=200, temperature=0.3,
-                )
-                resume = completion.choices[0].message.content.strip()
+                resume = _cluster_summary_llm(
+                    _client, title or scenario_id, [docs[idxs[int(t)]] for t in top5], want)
             except Exception as _e:
                 logger.error(f"Résumé cluster {label_int}: {_e}")
+            summaries[want] = resume
         clusters.append({
             "cluster_id": label_int,
-            "cluster_name": f"Cluster {label_int + 1}" if label_int != -1 else "Non-classés",
+            "cluster_name": f"Cluster {label_int + 1}" if label_int != -1 else noise_name,
             "is_noise": label_int == -1,
             "n_docs": len(idxs),
             "center_x": float(center[0]), "center_y": float(center[1]),
             "top_words": top_words,
             "summary": resume,
+            "summaries": summaries,
             "representative_doc": {
                 "id": int(rep["id"]),
                 "title": str(rep["title"] or ""),
@@ -5662,6 +5864,7 @@ def _build_clusters_payload(scenario_id: str, docs: list, cc: dict, *,
         "method": method_used,
         "embedding_source": embedding_source,
         "clusters": sorted(clusters, key=lambda x: (x["is_noise"], -x["n_docs"])),
+        "lang": want if with_summaries else None,
         "from_cache": False,
     }
 
@@ -5674,16 +5877,23 @@ def _run_clustering_background(scenario_id: str, force_refresh: bool = False, la
     os.makedirs(cache_dir, exist_ok=True)
     cache_file = os.path.join(cache_dir, f"{scenario_id}.json")
     TTL = 86400
+    want = _norm_lang(lang) or "fr"
 
-    # Vérifier le cache d'abord
+    # Vérifier le cache d'abord — dans la LANGUE demandée : un cache frais dont les
+    # résumés sont dans l'autre langue (ou sans résumés) garde sa structure, seuls les
+    # résumés sont régénérés. Avant, le cache était servi tel quel → résumés en
+    # français sous le toggle anglais.
     if not force_refresh and os.path.exists(cache_file):
         try:
             mtime = os.path.getmtime(cache_file)
             if _time.time() - mtime < TTL:
                 with open(cache_file, "r") as f:
                     cached = json.load(f)
-                cached["from_cache"] = True
-                _clustering_jobs[scenario_id] = {"status": "done", "result": cached}
+                if _clusters_have_lang(cached, want) or not cached.get("clusters") or not os.getenv("OPENAI_API_KEY"):
+                    cached["from_cache"] = True
+                    _clustering_jobs[scenario_id] = {"status": "done", "result": cached}
+                else:
+                    _relocalize_clustering_background(scenario_id, cached, want)
                 return
         except Exception:
             pass
@@ -5733,8 +5943,9 @@ def _run_clustering_background(scenario_id: str, force_refresh: bool = False, la
         if len(docs) < 5:
             result = {
                 "scenario_id": scenario_id, "n_docs": len(docs),
-                "message": "Corpus insuffisant pour le clustering (minimum 5 articles avec abstract requis)",
-                "clusters": [], "from_cache": False,
+                "message_code": "insufficient_corpus",
+                "message": _CLUSTER_MESSAGES["insufficient_corpus"][want],
+                "clusters": [], "from_cache": False, "lang": want,
             }
             _clustering_jobs[scenario_id] = {"status": "done", "result": result}
             return
@@ -5757,16 +5968,10 @@ def _run_clustering_background(scenario_id: str, force_refresh: bool = False, la
         result = _build_clusters_payload(
             scenario_id, docs, _cc, with_summaries=True, openai_key=openai_key,
             title=(_gesica_title(meta_for_cluster) if meta_for_cluster else None),
-            lang=lang,
+            lang=want,
         )
         # Cache DB (durable) + /tmp (compat) + mémoire.
-        _save_viz_cache(scenario_id, "clustering",
-                        json.loads(json.dumps(result, cls=_NumpyEncoder)))
-        try:
-            with open(cache_file, "w") as f:
-                json.dump(result, f, cls=_NumpyEncoder)
-        except Exception:
-            pass
+        _persist_clustering_result(scenario_id, result)
         _clustering_jobs[scenario_id] = {"status": "done", "result": result}
 
     except Exception as e:
@@ -5781,9 +5986,9 @@ def get_scenario_clustering(scenario_id: str, force_refresh: bool = False, lang:
 
 
 @app.get("/gesica/scenarios/{scenario_id}/clustering/status")
-def get_clustering_status(scenario_id: str) -> dict:
+def get_clustering_status(scenario_id: str, lang: str | None = Query(None)) -> dict:
     """Delegue a l'implementation user-scenario unifiee (pipeline unique)."""
-    return get_user_scenario_clustering_status(scenario_id)
+    return get_user_scenario_clustering_status(scenario_id, lang)
 
 
 @app.post("/gesica/scenarios/{scenario_id}/rag")
@@ -7615,11 +7820,16 @@ def _user_scenario_to_gesica_format(
     except Exception as _e_card:
         logger.warning(f"Card extras {row['id']}: {_e_card}")
 
+    # Recherche multi-facettes : l'expression COMPLÈTE (« (A) AND (B) ») est ce que
+    # la carte et l'indicateur d'activité doivent montrer ; `query` reste la facette
+    # principale (identité du scénario, stratégie booléenne live).
+    _sub_clean = _normalize_sub_queries(row.get("sub_queries"))
+    _combined = _combined_query_text(row["query"], _sub_clean, row.get("combinator"))
     return {
         "id": row["id"],
         "name": row["name"],
         "title": row["name"],
-        "description": f"Recherche sauvegardée : {row['query']}",
+        "description": f"Recherche sauvegardée : {_combined}",
         "cluster": "user",
         "article_count": article_count,
         "included_count": included,
@@ -7636,6 +7846,9 @@ def _user_scenario_to_gesica_format(
         ),
         "pinned": bool(row.get("pinned", False)),
         "query": row["query"],
+        "combined_query": _combined,
+        "sub_queries": _sub_clean if len(_sub_clean) >= 2 else None,
+        "combinator": (row.get("combinator") if len(_sub_clean) >= 2 else None),
         "mode": row["mode"],
         "filters": row.get("filters") or {},
         "result_count": row.get("result_count", 0),
@@ -7660,14 +7873,17 @@ def list_user_scenarios() -> list[dict[str, Any]]:
     with engine.begin() as conn:
         # Delete stale duplicates: for unpinned/unfoldered scenarios keep only
         # the most recent row per (query, mode) pair.
+        # Identité COMPLÈTE d'une recherche = query + mode + sous-requêtes + combinateur :
+        # « A » et « (A) AND (B) » partagent la même `query` (facette principale) mais
+        # sont deux recherches distinctes — l'une ne doit pas purger l'autre.
         conn.execute(text("""
             DELETE FROM user_scenarios
             WHERE pinned = false AND folder_id IS NULL
               AND id NOT IN (
-                SELECT DISTINCT ON (query, mode) id
+                SELECT DISTINCT ON (query, mode, sub_queries, combinator) id
                 FROM user_scenarios
                 WHERE pinned = false AND folder_id IS NULL
-                ORDER BY query, mode, created_at DESC
+                ORDER BY query, mode, sub_queries, combinator, created_at DESC
               )
         """))
         # Un scénario SAUVEGARDÉ (épinglé) est unique : purge toute recherche récente
@@ -7679,6 +7895,8 @@ def list_user_scenarios() -> list[dict[str, Any]]:
               AND EXISTS (
                 SELECT 1 FROM user_scenarios p
                 WHERE p.pinned = true AND p.query = u.query AND p.mode = u.mode
+                  AND p.sub_queries IS NOT DISTINCT FROM u.sub_queries
+                  AND COALESCE(p.combinator, '') = COALESCE(u.combinator, '')
               )
         """))
         rows = conn.execute(text("""
@@ -7688,7 +7906,7 @@ def list_user_scenarios() -> list[dict[str, Any]]:
                 us.populate_status, us.pipeline_status, us.pipeline_step, us.pipeline_progress,
                 COALESCE(us.result_count, 0) AS result_count,
                 COALESCE(us.article_count, 0) AS article_count,
-                us.is_system
+                us.is_system, us.sub_queries, us.combinator
             FROM user_scenarios us
             ORDER BY us.pinned DESC, us.created_at DESC
         """)).mappings().all()
@@ -8079,20 +8297,29 @@ def get_user_scenario_detail(scenario_id: str) -> dict[str, Any]:
     # catégorie employée (évite de montrer la même requête en booléen ET en naturel).
     query_text = row["query"]
     _sub = _normalize_sub_queries(row.get("sub_queries"))
+    _combinator = row.get("combinator") if row.get("combinator") in ("union", "intersection") else "union"
+    _combined = _combined_query_text(query_text, _sub, _combinator)
     if _sub:
         boolean_queries = [s["text"] for s in _sub if s["kind"] == "boolean"]
         nl_queries = [s["text"] for s in _sub if s["kind"] == "natural"]
+        # Facettes DANS L'ORDRE avec l'opérateur effectif de chacune (None pour la
+        # principale) : les listes booléen/naturel ci-dessus perdent l'ordre et les
+        # opérateurs — c'est ce qui faisait « disparaître » le ET entre deux requêtes.
+        _ops = _facet_ops(_sub, _combinator)
+        facets = [{"kind": s["kind"], "text": s["text"],
+                   "op": (None if i == 0 else _ops[i - 1])} for i, s in enumerate(_sub)]
     else:
         _mode = (row.get("mode") or "hybrid").lower()
         _saved = [query_text] if query_text else []
         boolean_queries = _saved if _mode == "boolean" else []
         nl_queries = [] if _mode == "boolean" else _saved
+        facets = []
 
     return {
         "id": scenario_id,
         "name": row["name"],
         "title": row["name"],
-        "description": f"Scénario utilisateur basé sur la recherche : {query_text}",
+        "description": f"Scénario utilisateur basé sur la recherche : {_combined}",
         "cluster": "user",
         "recommended_actions": [],
         "boolean_queries": boolean_queries,
@@ -8119,6 +8346,9 @@ def get_user_scenario_detail(scenario_id: str) -> dict[str, Any]:
         },
         "is_user_scenario": True,
         "query": query_text,
+        "combined_query": _combined,
+        "facets": facets,
+        "combinator": _combinator if _sub else None,
         "mode": row["mode"],
         "filters": row.get("filters") or {},
         "pinned": bool(row.get("pinned", False)),
@@ -9914,8 +10144,11 @@ def _run_user_scenario_populate(
         # …SAUF en INTERSECTION multi-requêtes : le corpus doit matcher TOUTES les facettes,
         # or un doc booléen-natif ne matche que la requête PRINCIPALE (les fetchers live
         # interrogent la requête principale) → l'unir casserait l'intersection. On garde
-        # alors le re-match local strict.
-        _union_native = not (_sub_queries and _combinator == "intersection")
+        # alors le re-match local strict. L'intersection peut venir du combinateur
+        # GLOBAL ou d'un « ET » posé sur UNE facette (bouton par sous-requête) : ne
+        # tester que le combinateur global laissait passer ces docs et le « ET » entre
+        # deux requêtes booléennes n'était pas appliqué au corpus.
+        _union_native = not (_sub_queries and _facets_intersect(_sub_queries, _combinator))
         _n_native = len(_bool_native_ids) if _union_native else 0
         if _union_native:
             _final_ids = list(set(_final_ids) | _bool_native_ids)
@@ -9933,7 +10166,7 @@ def _run_user_scenario_populate(
         # PRISMA. Étiqueté « final » auparavant, ce nombre était lu comme le corpus.
         logger.info(f"Populate {scenario_id}: corpus assemblé (avant nettoyage) = {_n_corpus} docs "
                     f"(re-match local ∪ {_n_native} docs booléens-natifs PubMed/EPMC/préprints ; "
-                    f"{'multi ' + _combinator if _sub_queries else 'mono'})")
+                    f"{'multi ' + '/'.join(_facet_ops(_sub_queries, _combinator)) if _sub_queries else 'mono'})")
     except Exception as _e_corpus:
         logger.warning(f"Rebuild corpus {scenario_id}: {_e_corpus}")
 
@@ -11227,16 +11460,10 @@ def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict
                         })
 
                 # Cache de visualisation : MÊME helper que le calcul en arrière-plan
-                # (plus de duplication) → DB durable (+ /tmp pour compat).
+                # (plus de duplication) → DB durable (+ /tmp pour compat). Sans résumés :
+                # ils sont générés à la première ouverture, dans la langue de l'interface.
                 _cl_payload = _build_clusters_payload(scenario_id, cl_docs, _cc, with_summaries=False)
-                _save_viz_cache(scenario_id, "clustering", _cl_payload)
-                try:
-                    import os as _os
-                    _os.makedirs("/tmp/literev_clustering_cache", exist_ok=True)
-                    with open(f"/tmp/literev_clustering_cache/{scenario_id}.json", "w") as f:
-                        json.dump(_cl_payload, f, default=str)
-                except Exception:
-                    pass
+                _persist_clustering_result(scenario_id, _cl_payload)
                 update_step("clustering", "done", n_clusters=n_clusters, n_docs=len(cl_docs), method=method_used)
             else:
                 update_step("clustering", "skipped", reason=f"Corpus insuffisant ({len(cl_docs)} articles)")
@@ -11565,7 +11792,7 @@ def get_activity() -> dict[str, Any]:
     with engine.connect() as conn:
         rows = conn.execute(text("""
             SELECT id, name, query, pinned, populate_status, pipeline_status, pipeline_step,
-                   COALESCE(article_count, 0) AS article_count
+                   COALESCE(article_count, 0) AS article_count, sub_queries, combinator
             FROM user_scenarios
             WHERE pipeline_status IN ('running', 'starting') OR populate_status = 'running'
             ORDER BY updated_at DESC
@@ -11579,7 +11806,8 @@ def get_activity() -> dict[str, Any]:
         items.append({
             "scenario_id": r["id"],
             "name": r["name"],
-            "query": r["query"],
+            # Affichage : l'expression complète « (A) AND (B) » d'une recherche multi-facettes.
+            "query": _combined_query_text(r["query"], r["sub_queries"], r["combinator"]),
             "pinned": bool(r["pinned"]),
             "kind": "pipeline" if pipeline_running else "search",
             "step": (job.get("current_step") or r["pipeline_step"]) if pipeline_running else job.get("phase"),
@@ -12621,42 +12849,58 @@ def submit_user_scenario_double_blind_decision(
 
 @app.get("/user-scenarios/{scenario_id}/clustering")
 def get_user_scenario_clustering(scenario_id: str, force_refresh: bool = False, lang: str | None = Query(None)) -> dict[str, Any]:
-    """Clustering pour un scénario utilisateur."""
+    """Clustering pour un scénario utilisateur, dans la langue demandée (`lang`).
+
+    Le cache (DB, puis job en mémoire) n'est servi tel quel que s'il porte les résumés
+    dans CETTE langue. Sinon la structure (embeddings/UMAP/HDBSCAN) est conservée et
+    seuls les résumés sont régénérés en arrière-plan → réponse « running », la page
+    interroge /clustering/status. Auparavant le cache était renvoyé quelle que soit la
+    langue : résumés en français sous le toggle anglais."""
     import threading
     _get_user_scenario_or_404(scenario_id)
+    want = _norm_lang(lang) or "fr"
     if not force_refresh:
-        _db = _load_viz_cache(scenario_id, "clustering")
-        if _db:
-            return _db
+        cached = _load_viz_cache(scenario_id, "clustering")
+        if not cached:
+            job = _clustering_jobs.get(scenario_id)
+            if job and job.get("status") == "done" and isinstance(job.get("result"), dict):
+                cached = job["result"]
+        if cached:
+            if (_clusters_have_lang(cached, want) or not cached.get("clusters")
+                    or not os.getenv("OPENAI_API_KEY")):
+                return _localize_clusters_payload(cached, want)
+            job = _clustering_jobs.get(scenario_id)
+            if not job or job.get("status") != "running":
+                _clustering_jobs[scenario_id] = {"status": "running"}
+                threading.Thread(target=_relocalize_clustering_background,
+                                 args=(scenario_id, cached, want), daemon=True).start()
+            return _clustering_running_payload(scenario_id, want)
     job = _clustering_jobs.get(scenario_id)
-    if job and job["status"] == "done" and not force_refresh:
-        return job["result"]
     if not job or job.get("status") not in ("running",) or force_refresh:
         _clustering_jobs[scenario_id] = {"status": "running"}
-        t = threading.Thread(target=_run_clustering_background, args=(scenario_id, force_refresh, lang), daemon=True)
+        t = threading.Thread(target=_run_clustering_background, args=(scenario_id, force_refresh, want), daemon=True)
         t.start()
-    return {
-        "scenario_id": scenario_id, "status": "running",
-        "message": "Calcul en cours. Revenez dans 30-60s.",
-        "clusters": [],
-    }
+    return _clustering_running_payload(scenario_id, want)
 
 
 @app.get("/user-scenarios/{scenario_id}/clustering/status")
-def get_user_scenario_clustering_status(scenario_id: str) -> dict:
-    """Statut du clustering pour un scénario utilisateur."""
+def get_user_scenario_clustering_status(scenario_id: str, lang: str | None = Query(None)) -> dict:
+    """Statut du clustering pour un scénario utilisateur (résultat dans la langue demandée)."""
     _get_user_scenario_or_404(scenario_id)
+    want = _norm_lang(lang) or "fr"
     job = _clustering_jobs.get(scenario_id)
     if not job:
         _db = _load_viz_cache(scenario_id, "clustering")
         if _db:
-            return _db
-        return {"scenario_id": scenario_id, "status": "not_started", "message": "Aucun calcul lancé."}
+            return _localize_clusters_payload(_db, want)
+        return {"scenario_id": scenario_id, "status": "not_started",
+                "message": "Aucun calcul lancé." if want == "fr" else "No computation started."}
     if job["status"] == "running":
-        return {"scenario_id": scenario_id, "status": "running", "message": "Calcul en cours..."}
+        return {"scenario_id": scenario_id, "status": "running",
+                "message": _CLUSTER_MESSAGES["running"][want]}
     if job["status"] == "error":
         return {"scenario_id": scenario_id, "status": "error", "error": job.get("error", "Erreur inconnue")}
-    return job["result"]
+    return _localize_clusters_payload(job["result"], want)
 
 
 @app.post("/user-scenarios/{scenario_id}/articles/{article_id}/screen")

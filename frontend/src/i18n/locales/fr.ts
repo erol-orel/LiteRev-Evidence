@@ -419,6 +419,13 @@ export const fr = {
       noBooleanQuery: "Aucune requête booléenne définie pour ce scénario.",
       nlQueries: "Requêtes Langage Naturel",
       noNlQuery: "Aucune requête NL définie pour ce scénario.",
+      combinedTitle: "Recherche combinée",
+      combinedHint:
+        "Le corpus est le résultat des facettes combinées de gauche à droite avec ces opérateurs (ET = intersection, OU = union).",
+      facetMain: "Requête principale",
+      facetBoolean: "Booléen",
+      facetNatural: "Langage naturel",
+      combinedExpression: "Expression complète",
       hidePrompt: "Masquer",
       showPrompt: "Afficher",
       extractionPromptSuffix: "le prompt d'extraction d'évidence",

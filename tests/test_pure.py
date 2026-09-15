@@ -203,6 +203,33 @@ def test_multi_query_per_facet_op_left_to_right(monkeypatch):
     assert main._multi_query_corpus_ids(sub, "union", {}) == [2]
 
 
+def test_combined_query_text_shows_the_operators():
+    # The saved `query` is only the main facet; the displayed expression must carry
+    # the AND/OR actually applied (per-facet op, else the global combinator), with
+    # the left-to-right fold made explicit by parentheses.
+    sub = [{"kind": "boolean", "text": "A AND B"}, {"kind": "boolean", "text": "C OR D", "op": "and"}]
+    assert main._combined_query_text("A AND B", sub, "union") == "(A AND B) AND (C OR D)"
+    sub_g = [{"kind": "boolean", "text": "A"}, {"kind": "natural", "text": "flu surges"}]
+    assert main._combined_query_text("A", sub_g, "intersection") == "(A) AND (flu surges)"
+    assert main._combined_query_text("A", sub_g, "union") == "(A) OR (flu surges)"
+    three = [{"text": "A"}, {"text": "B", "op": "or"}, {"text": "C", "op": "and"}]
+    assert main._combined_query_text("A", three, "union") == "((A) OR (B)) AND (C)"
+    # single query (or no usable sub-queries) → the query itself
+    assert main._combined_query_text("  A AND B ", None, "union") == "A AND B"
+    assert main._combined_query_text("A", [{"text": "A"}], "intersection") == "A"
+
+
+def test_facets_intersect_honours_the_per_facet_and():
+    # Used to decide whether boolean-native live records (which only saw the MAIN
+    # query) may be unioned into the corpus: never when any facet is intersected.
+    base = [{"text": "A"}, {"text": "B"}]
+    assert main._facets_intersect(base, "union") is False
+    assert main._facets_intersect(base, "intersection") is True
+    assert main._facets_intersect([{"text": "A"}, {"text": "B", "op": "and"}], "union") is True
+    assert main._facets_intersect([{"text": "A"}, {"text": "B", "op": "or"}], "intersection") is False
+    assert main._facet_ops([{"text": "A"}, {"text": "B", "op": "and"}, {"text": "C"}], "union") == ["and", "or"]
+
+
 def test_multi_query_per_facet_op_overrides_global(monkeypatch):
     # An explicit per-facet op takes precedence over the global combinator, so the
     # same facets combine differently per the operator carried on each facet.

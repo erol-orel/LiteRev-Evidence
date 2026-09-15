@@ -164,6 +164,10 @@ erDiagram
 - **`scenario_settings`** — per-scenario config and cached artifacts: the
   `similarity_threshold` (default **0.45**) and cached JSON for the evidence
   brief, variables, clustering, knowledge graph, and recommended actions.
+  LLM text is cached **per language**: the evidence brief and variables key
+  their cache on the requested `lang`, and the clustering payload stores each
+  cluster's summary under `clusters[].summaries[lang]` — a request in the other
+  language keeps the UMAP/HDBSCAN structure and regenerates only the summaries.
 
 > **Schema note (real, worth knowing):** the DDL is split across `schema.sql`
 > (only `literature_document`, `document_chunk`, `alembic_version`), the

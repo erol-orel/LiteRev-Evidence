@@ -421,6 +421,13 @@ export const en: Translations = {
       noBooleanQuery: "No Boolean query defined for this scenario.",
       nlQueries: "Natural Language Queries",
       noNlQuery: "No NL query defined for this scenario.",
+      combinedTitle: "Combined search",
+      combinedHint:
+        "The corpus is the result of the facets combined left to right with these operators (AND = intersection, OR = union).",
+      facetMain: "Main query",
+      facetBoolean: "Boolean",
+      facetNatural: "Natural language",
+      combinedExpression: "Full expression",
       hidePrompt: "Hide",
       showPrompt: "Show",
       extractionPromptSuffix: "the evidence extraction prompt",
