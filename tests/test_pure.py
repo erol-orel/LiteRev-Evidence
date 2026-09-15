@@ -8,6 +8,7 @@ These cover the exact helpers behind recent production bugs:
 import time
 
 import main
+from conftest import patch_app  # noqa: E402
 
 
 # ── _job_is_active (stale-job guard) ─────────────────────────────────────────
@@ -114,13 +115,13 @@ def _patch_local_ids(monkeypatch, mapping):
     and stub the NL→boolean translator to identity (a natural facet is translated
     to boolean before matching — the identity stub keeps the mapping keyed on the
     raw text AND avoids any network call in the unit test)."""
-    monkeypatch.setattr(main, "_generate_search_strategy",
-                        lambda q: {"general": q, "pubmed": q}, raising=True)
+    patch_app(monkeypatch, "_generate_search_strategy",
+                        lambda q: {"general": q, "pubmed": q})
     def _fake(query, mode, filters, limit=10_000, threshold=0.45):
         # Membership is now ALWAYS lexical/boolean — no facet uses semantic mode.
         assert mode == "boolean", f"corpus membership must be boolean, got mode={mode!r}"
         return list(mapping.get(query, []))
-    monkeypatch.setattr(main, "_search_local_doc_ids", _fake)
+    patch_app(monkeypatch, "_search_local_doc_ids", _fake)
 
 
 def test_multi_query_union(monkeypatch):
@@ -168,8 +169,8 @@ def test_multi_query_natural_facet_is_translated_to_boolean(monkeypatch):
         table = {'("influenza" OR ILI)': [1, 2], "cardiac AND arrest": [2, 3]}
         return list(table.get(query, []))
 
-    monkeypatch.setattr(main, "_generate_search_strategy", _fake_translate, raising=True)
-    monkeypatch.setattr(main, "_search_local_doc_ids", _fake_local, raising=True)
+    patch_app(monkeypatch, "_generate_search_strategy", _fake_translate)
+    patch_app(monkeypatch, "_search_local_doc_ids", _fake_local)
 
     sub = [{"kind": "natural", "text": "flu surges"},
            {"kind": "boolean", "text": "cardiac AND arrest"}]
@@ -185,10 +186,10 @@ def test_multi_query_translation_failure_falls_back_to_raw_text(monkeypatch):
     # the boolean — membership still works, just without synonym expansion.
     def _boom(_q):
         raise RuntimeError("no openai key")
-    monkeypatch.setattr(main, "_generate_search_strategy", _boom, raising=True)
-    monkeypatch.setattr(main, "_search_local_doc_ids",
+    patch_app(monkeypatch, "_generate_search_strategy", _boom)
+    patch_app(monkeypatch, "_search_local_doc_ids",
                         lambda query, mode, filters, limit=10_000, threshold=0.45:
-                        [9] if (query == "flu" and mode == "boolean") else [], raising=True)
+                        [9] if (query == "flu" and mode == "boolean") else [])
     out = main._multi_query_corpus_ids([{"kind": "natural", "text": "flu"}], "union", {})
     assert out == [9]
 
@@ -570,9 +571,9 @@ def test_normalize_sub_queries_auto_detects_when_kind_absent():
 def test_post_search_facets_counts_union_and_intersection(monkeypatch):
     # deterministic doc-id sets per boolean query; no DB, no LLM
     corpus = {"A": {1, 2, 3}, "B": {3, 4}}
-    monkeypatch.setattr(main, "_search_local_doc_ids",
+    patch_app(monkeypatch, "_search_local_doc_ids",
                         lambda q, mode, filters, limit=0: list(corpus.get(q, set())))
-    monkeypatch.setattr(main, "_generate_search_strategy", lambda text: {"general": "B"})
+    patch_app(monkeypatch, "_generate_search_strategy", lambda text: {"general": "B"})
     payload = main.FacetPreviewIn(
         sub_queries=[{"kind": "boolean", "text": "A"},
                      {"kind": "natural", "text": "some prose"}],   # → translated to "B"

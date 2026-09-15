@@ -9,6 +9,7 @@ pytest.importorskip("fastapi")
 pytest.importorskip("httpx")
 
 import main  # noqa: E402
+from conftest import patch_app  # noqa: E402
 
 
 def _engine_ok() -> bool:
@@ -49,7 +50,7 @@ def test_slow_requests_are_logged_with_route_and_duration(monkeypatch, caplog):
         pytest.skip("main.engine cannot reach the database")
     from fastapi.testclient import TestClient
     client = TestClient(main.app)
-    monkeypatch.setattr(main, "_SLOW_REQUEST_MS", 0)          # everything is "slow"
+    patch_app(monkeypatch, "_SLOW_REQUEST_MS", 0)          # everything is "slow"
     with caplog.at_level(logging.WARNING, logger="literev-api"):
         r = client.get("/activity")
     assert r.status_code == 200
@@ -58,7 +59,7 @@ def test_slow_requests_are_logged_with_route_and_duration(monkeypatch, caplog):
     assert "GET /activity" in slow[0] and " ms status=200 bytes=" in slow[0]
     # Fast requests stay quiet at the default threshold.
     caplog.clear()
-    monkeypatch.setattr(main, "_SLOW_REQUEST_MS", 60_000)
+    patch_app(monkeypatch, "_SLOW_REQUEST_MS", 60_000)
     with caplog.at_level(logging.WARNING, logger="literev-api"):
         client.get("/activity")
     assert not [m for m in caplog.messages if m.startswith("slow request:")]

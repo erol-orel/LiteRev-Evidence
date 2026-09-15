@@ -42,13 +42,13 @@ emergency-medical-services use case) rides on the exact same engine — its
 ## 2. High-level architecture
 
 Four layers: the **browser** (React SPA), **nginx** (TLS + reverse proxy that adds
-the public `/api` prefix), the **FastAPI** backend (one big `main.py` on uvicorn),
+the public `/api` prefix), the **FastAPI** backend (the `api` package behind `main.py`, on uvicorn),
 and the **data + external services** it depends on.
 
 ```mermaid
 graph TD
     U[Browser: React SPA] -->|HTTPS, calls /api/*| N[nginx: TLS + reverse proxy]
-    N -->|strips /api, proxies to localhost:8000| A[FastAPI app - main.py on uvicorn]
+    N -->|strips /api, proxies to localhost:8000| A[FastAPI app - api package, main:app on uvicorn]
     A -->|SQL + vector search| DB[(PostgreSQL 15 + pgvector)]
     A -->|embeddings + chat| OAI[OpenAI API]
     A -->|rerank| CO[Cohere API]
@@ -62,8 +62,8 @@ graph TD
   frontend, and reverse-proxies `/api/*` to the backend, removing the `/api`
   prefix. (So `localhost:8000` has **no** `/api` — that prefix is nginx-only.
   This matters when you `curl` the backend directly on the server.)
-- **FastAPI (`main.py`)** — the entire backend: ~13k lines, ~126 routes, no ORM,
-  no task queue. Runs under uvicorn as the `literev-api` systemd service on
+- **FastAPI (`api/` package, `main.py` entry point)** — the entire backend: ~18k
+  lines in 30 domain modules (§5), 155 routes, no ORM, no task queue. Runs under uvicorn as the `literev-api` systemd service on
   `localhost:8000`.
 - **PostgreSQL + pgvector** — the single source of truth (papers, chunks,
   embeddings, scenarios, screening, settings). Lives on a *separate* host.
@@ -177,7 +177,7 @@ erDiagram
 
 > **Schema note (real, worth knowing):** the DDL is split across `schema.sql`
 > (only `literature_document`, `document_chunk`, `alembic_version`), the
-> `_ensure_*()` boot functions in `main.py` (which create `user_scenarios`,
+> `_ensure_*()` boot functions in the `api` modules (which create `user_scenarios`,
 > `user_scenario_folders`, `scenario_settings` and add columns), and Alembic. The
 > **`article_scenarios` table has no `CREATE TABLE` anywhere in the repo** — it
 > was hand-applied on the production DB and is only ever `ALTER`ed/queried in code
@@ -283,12 +283,59 @@ sequenceDiagram
 
 ---
 
-## 5. Backend map (`main.py`)
+## 5. Backend map (the `api` package)
 
-One file, no ORM (SQLAlchemy Core with `text()` and `with engine.connect()`
-inline), no Celery. The engine is a pooled `create_engine(DB_URL, pool_size=10,
-max_overflow=20, pool_pre_ping=True, ...)`. Think of the routes as functional
-modules:
+No ORM (SQLAlchemy Core with `text()` and `with engine.connect()` inline), no
+Celery. The engine is a pooled `create_engine(DB_URL, pool_size=10,
+max_overflow=20, pool_pre_ping=True, ...)`. The code lives in the `api` package,
+one module per domain; `main.py` at the root is only the entry point
+(`uvicorn main:app`) and composition root: it imports the modules in the order
+`api.MODULES` lists them and re-exports every name, so `import main` keeps working
+for the scripts, tools and tests.
+
+| Module | What it holds |
+|---|---|
+| `core` | env loading, `DB_URL`/`engine`, the FastAPI `app`, rate limiting and CORS middleware, `require_api_key`, OpenAI quota cooldown, `_msg`/`_norm_lang`, `_job_is_active` |
+| `documents` | `DocumentIn`/`ChunkIn`, resilient embeddings, `sanitize_db_text`, quality score, document detail and evidence summary, quality recompute |
+| `scenario_store` | `_get_user_scenario_or_404`, `_get_scenario_threshold` (the lookups every domain needs) |
+| `schema_boot` | the `_ensure_*` DDL helpers and `startup_event` |
+| `system` | `/health`, `/llm-usage`, `/filters-options` |
+| `search` | Boolean parsing and SQL, lexical matching, multi-facet corpus membership, PRISMA identification figures, duplicate SQL, search strategy and facet preview |
+| `sources` | live fetchers and parsers of the literature sources, federated search, `_ingest_doc_direct`, `/sources/health` |
+| `corpus` | corpus and full-text statistics, maintenance, embed-pending, deduplication status |
+| `enrichment` | batch PICO / metadata / full-text enrichment and its status |
+| `gesica` | catalogue metadata, stats, listing, detail and corpus of built-in scenarios, `_get_scenario_name` |
+| `terrain` | `/terrain/*` field data |
+| `living_review` | living review status, run and trigger |
+| `clustering` | clustering jobs, UMAP/HDBSCAN core, visualisation cache, per-language summaries, endpoints |
+| `knowledge_graph` | graph construction and endpoints |
+| `double_blind` | double-blind decisions, conflicts, Cohen's kappa |
+| `alerts` | alert subscriptions, digests, SMTP |
+| `scenarios` | `user_scenarios` DDL, CRUD, folders, detail, corpus endpoint, populate/pipeline launchers and job dicts, counts, activity, embedding status, model status |
+| `pipeline` | `_run_user_scenario_populate`, `_run_user_scenario_full_pipeline`, the full-pipeline endpoint |
+| `relevance` | semantic scoring, Cohere cross-encoder rerank, `scenario_settings`, `_get_above_threshold_articles`, rerank and settings endpoints, corpus rebuild, chunk backfill |
+| `review` | screening progress, PRISMA flow, PICO stats / bulk / per article, per-article screening |
+| `evidence` | evidence brief (structured, LLM, PDF) |
+| `assistant` | `/ask`, `/ask/stream`, `/ask/stream/filtered`, scenario RAG |
+| `variables` | model-spec schema, variables generated from PICO, localisation, variables endpoints |
+| `model_spec` | spec proposals, validation, outcome templates, edits |
+| `actions` | recommended actions |
+| `model_data` | dataset table, validation against the template, public data connectors, upload, auto-fetch, synthetic data |
+| `seir` | SEIR projection, observed data, calibration |
+| `situation_reports` | ReliefWeb tables, budget, ingestion and listing |
+| `model_training` | training jobs, demo seed, training, comparison, run, prediction, export, monitoring |
+| `gesica_routes` | the `/gesica/*` forwarders and the URL aliases |
+
+Two rules keep the package cycle-free: a module only imports **from the modules
+before it** at module level, and a reference to a later module is a lazy
+`from .later import name` at the top of the function that needs it (13 functions;
+the comment says which). The startup DDL of each module runs when it is imported,
+so the order of `api.MODULES` is also the DDL order, unchanged from the single
+file. Tests patch a helper with `patch_app(monkeypatch, name, value)`
+(tests/conftest.py), which sets it on every module that binds the name — patching
+`main.X` alone no longer reaches the callers.
+
+Think of the routes as functional modules:
 
 ```mermaid
 graph LR
@@ -321,7 +368,7 @@ graph LR
     GES[/gesica/* forwarders/] -.delegates to.-> S2 & R2 & V1 & A1
 ```
 
-**Startup (`@app.on_event("startup")`, line 562).** Runs `SELECT 1`, then in a
+**Startup (`api.schema_boot.startup_event`).** Runs `SELECT 1`, then in a
 background thread builds performance indexes — including the pgvector **HNSW**
 approximate-nearest-neighbor index on `document_chunk.embedding` (so semantic
 search stays fast). It also **recovers orphaned jobs**: any scenario left
@@ -352,23 +399,23 @@ crashed thread must not leave a job stuck at `running` forever). A matching
 on restart — which is exactly why startup re-launches orphans.
 
 **Key cross-cutting helpers:**
-- **`_build_where(filters)`** (1372) — turns a filters dict into a parameterized
+- **`_build_where(filters)`** (`api.search`) — turns a filters dict into a parameterized
   SQL `WHERE` fragment for `literature_document`. Normalizes legacy
   `project_context` values to `literev`, and (post-migration) rewrites a
   `scenario_type` filter into an `EXISTS (… article_scenarios …)` membership check
   instead of a plain column match. Shared by `/search` and `/ask`.
-- **`_get_above_threshold_articles(scenario_id, threshold)`** (10467) — the
+- **`_get_above_threshold_articles(scenario_id, threshold)`** (`api.relevance`) — the
   canonical "relevant subset" query. Joins `article_scenarios`, drops excluded
   papers, and keeps rows that are `included` **or** whose
   `COALESCE(similarity_score, 0) >= threshold`. Feeds the briefs and the model.
-- **`_llm_lang_directive(lang)`** (359) — appends "respond entirely in
+- **`_llm_lang_directive(lang)`** (`api.documents`) — appends "respond entirely in
   FR/EN" to LLM prompts. **French is the default.**
 - **Per-scenario screening via COALESCE** — reads everywhere use
   `COALESCE(ars.screening_status, d.screening_status)`: the per-scenario value
   wins, falling back to the global column when NULL. Writes go through
   `_write_ars_screening()` (dual-write to both, transitional). This is the read
   side of Migration 2 (§8).
-- **`require_api_key`** (192) — the write-auth dependency. Reads the `X-API-Key`
+- **`require_api_key`** (`api.core`) — the write-auth dependency. Reads the `X-API-Key`
   header, constant-time-compares it to `WRITE_API_KEY`, and is attached to every
   mutating endpoint via `Depends(...)`. Reads are open; writes require the key.
 

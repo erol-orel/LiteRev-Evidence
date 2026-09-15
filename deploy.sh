@@ -6,7 +6,7 @@
 #   Source git  : /opt/literev-api/
 #   Build       : /opt/literev-api/frontend/  (npm run build)
 #   Servi nginx : /var/www/literev-frontend/  (seul chemin public)
-#   API         : localhost:8000 (uvicorn /opt/literev-api/main.py)
+#   API         : localhost:8000 (uvicorn main:app — code in /opt/literev-api/api/)
 #
 # Garanties :
 #   - un build frontend qui échoue ABORTE le déploiement (le site live reste intact)
@@ -48,7 +48,7 @@ fi
 # ── 2. Vérification syntaxe Python (tous les modules importés) ─
 echo "[2/7] Vérification syntaxe Python..."
 "$VENV_PY" -m compileall -q "$REPO_DIR"/*.py "$REPO_DIR"/scripts/*.py "$REPO_DIR"/tools/*.py
-echo "  OK — $(md5sum $REPO_DIR/main.py | cut -d' ' -f1)"
+echo "  OK — $(cat $REPO_DIR/main.py $REPO_DIR/api/*.py | md5sum | cut -d' ' -f1)"
 
 # ── 3. Dépendances backend ────────────────────────────────────
 echo "[3/7] Installation dépendances backend..."
@@ -57,7 +57,7 @@ echo "  OK"
 
 # ── 4. Migrations base de données ─────────────────────────────
 # Non bloquant : le schéma est aussi garanti au démarrage par les fonctions
-# _ensure_*() de main.py. Un échec alembic est journalisé mais n'interrompt
+# _ensure_*() des modules api/. Un échec alembic est journalisé mais n'interrompt
 # pas le déploiement (l'app applique ses DDL idempotentes au boot).
 echo "[4/7] Migrations alembic (non bloquant)..."
 if [ -f "$REPO_DIR/alembic.ini" ]; then

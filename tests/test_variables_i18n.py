@@ -12,6 +12,7 @@ import pytest
 pytest.importorskip("pandas")   # main is import-only; keep parity with other suites
 
 import main
+from conftest import patch_app  # noqa: E402
 
 
 def _sample_variables():
@@ -62,7 +63,7 @@ def fake_translate(monkeypatch):
     # Deterministic stand-in for the LLM: prefix each string, preserving order/length.
     def _fake(texts, target_lang):
         return [f"[{target_lang}] {t}" for t in texts]
-    monkeypatch.setattr(main, "_llm_translate_strings", _fake)
+    patch_app(monkeypatch, "_llm_translate_strings", _fake)
 
 
 def test_translation_translates_display_and_preserves_functional(fake_translate):
@@ -114,7 +115,7 @@ def test_positional_integrity_no_crosswiring(fake_translate):
 
 def test_translator_length_mismatch_is_safe(monkeypatch):
     # If the LLM returns the wrong number of items, we must NOT corrupt — return original.
-    monkeypatch.setattr(main, "_llm_translate_strings", lambda texts, lang: ["oops"])
+    patch_app(monkeypatch, "_llm_translate_strings", lambda texts, lang: ["oops"])
     src = _sample_variables()
     out = main._translate_variables_payload(src, "fr")
     assert out["primary_outcome"]["name"] == "ARI surge incidence"   # unchanged
