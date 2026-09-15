@@ -219,6 +219,41 @@ def test_combined_query_text_shows_the_operators():
     assert main._combined_query_text("A", [{"text": "A"}], "intersection") == "A"
 
 
+def test_or_facets_widen_the_live_federation_queries():
+    # A united (OR) facet is added to the boolean and PubMed queries sent to the live
+    # sources; an intersected (AND) facet is not (its hits are a subset of the main
+    # query's, re-matched locally). Natural facets are translated first.
+    sub = [{"kind": "boolean", "text": "influenza AND wastewater"},
+           {"kind": "boolean", "text": "RSV AND sewage", "op": "or"},
+           {"kind": "boolean", "text": "Switzerland", "op": "and"},
+           {"kind": "natural", "text": "measles outbreaks", "op": "or"}]
+    translate = lambda q: {"general": '("measles" OR rubeola) AND outbreak', "pubmed": "measles[MeSH] AND outbreak"}
+    b, p, n = main._widen_boolean_for_or_facets("influenza AND wastewater", "influenza[MeSH] AND wastewater",
+                                                sub, "union", translate=translate)
+    assert n == 2
+    assert b == '((influenza AND wastewater) OR (RSV AND sewage)) OR (("measles" OR rubeola) AND outbreak)'
+    assert p == "((influenza[MeSH] AND wastewater) OR (RSV AND sewage)) OR (measles[MeSH] AND outbreak)"
+    assert "Switzerland" not in b                                     # AND facet stays local
+    # a facet already contained in the main boolean is not repeated
+    assert main._widen_boolean_for_or_facets("A OR B", "A OR B", [{"text": "A OR B"}, {"text": "B", "op": "or"}], "union")[2] == 0
+    # single query / no OR facet → unchanged
+    assert main._widen_boolean_for_or_facets("A", "A", None, "union") == ("A", "A", 0)
+    assert main._widen_boolean_for_or_facets("A", "A", [{"text": "A"}, {"text": "B"}], "intersection") == ("A", "A", 0)
+
+
+def test_or_facets_are_skipped_when_the_query_would_exceed_the_url_budget():
+    long_facet = "x" * 1300
+    b, p, n = main._widen_boolean_for_or_facets("A", "A", [{"text": "A"}, {"kind": "boolean", "text": long_facet, "op": "or"}],
+                                                "union")
+    assert (b, p, n) == ("A", "A", 0)
+    # translation failure → raw text is used, never an exception
+    def _boom(q):
+        raise RuntimeError("no LLM")
+    b, p, n = main._widen_boolean_for_or_facets("A", "A", [{"text": "A"}, {"kind": "natural", "text": "flu surges", "op": "or"}],
+                                                "union", translate=_boom)
+    assert n == 1 and b == "(A) OR (flu surges)"
+
+
 def test_facets_intersect_honours_the_per_facet_and():
     # Used to decide whether boolean-native live records (which only saw the MAIN
     # query) may be unioned into the corpus: never when any facet is intersected.

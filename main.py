@@ -2347,6 +2347,48 @@ def _combined_query_text(query: str | None, sub_queries: Any, combinator: str | 
     return expr
 
 
+def _widen_boolean_for_or_facets(boolean: str, pubmed_q: str, sub_queries: Any, combinator: str | None,
+                                 translate=None, max_len: int = 1200, max_pubmed_len: int = 1900) -> tuple[str, str, int]:
+    """Élargit les requêtes envoyées aux sources LIVE aux facettes UNIES (OU) d'une
+    recherche multi-facettes : « (booléen principal) OR (booléen de la facette) ».
+
+    La fédération n'interrogeait que la requête PRINCIPALE : une facette « OU » ne
+    trouvait que ce que la base locale contenait déjà — des articles qui ne
+    correspondent qu'à elle n'étaient jamais ramenés de PubMed/Europe PMC/OpenAlex.
+    Les facettes intersectées (ET) n'ont pas besoin d'être fédérées : leurs résultats
+    sont un sous-ensemble de ceux de la requête principale, re-matché localement.
+    Une facette naturelle est traduite via `translate` (par défaut
+    _generate_search_strategy) ; sans traduction utilisable, son texte est utilisé
+    tel quel. Les longueurs sont bornées (limites d'URL des API) : au-delà, on garde la
+    requête principale seule. Renvoie (booléen, requête PubMed, nb de facettes ajoutées)."""
+    clean = _normalize_sub_queries(sub_queries)
+    if len(clean) < 2:
+        return boolean, pubmed_q, 0
+    translate = translate or _generate_search_strategy
+    added = 0
+    for facet, op in zip(clean[1:], _facet_ops(clean, combinator or "union")):
+        if op != "or":
+            continue
+        fb, fp = facet["text"], None
+        if facet["kind"] != "boolean":
+            try:
+                gen = translate(facet["text"])
+                if isinstance(gen, dict) and gen.get("general") and not _strategy_is_degraded(gen, facet["text"]):
+                    fb, fp = gen["general"], gen.get("pubmed")
+            except Exception as _e:                      # noqa: BLE001 — repli texte brut
+                logger.warning(f"facette OU « {facet['text'][:60]} » : traduction échouée ({_e}) ; texte brut")
+        portable = _strip_field_tags(fb).strip() or fb
+        if portable in boolean:
+            continue
+        new_bool = f"({boolean}) OR ({portable})"
+        new_pub = f"({pubmed_q}) OR ({fp or portable})" if pubmed_q else (fp or portable)
+        if len(new_bool) > max_len or len(new_pub) > max_pubmed_len:
+            logger.warning(f"facette OU « {facet['text'][:60]} » ignorée pour la fédération live : requête trop longue")
+            continue
+        boolean, pubmed_q, added = new_bool, new_pub, added + 1
+    return boolean, pubmed_q, added
+
+
 def _fold_facet_sets(id_sets: list[set], facets: list[dict], combinator: str) -> set:
     """Combine les ensembles d'IDs des facettes de GAUCHE À DROITE : la facette 0
     (requête principale) est la base ; chaque facette suivante est UNIE (op='or') ou
@@ -9435,6 +9477,16 @@ def _run_user_scenario_populate(
                                      {"s": json.dumps(_gen), "id": scenario_id})
         except Exception as _be:
             logger.warning(f"Populate {scenario_id} boolean strategy: {_be}")
+        # Facettes UNIES (OU) d'une recherche multi-facettes : fédérées AUSSI, en
+        # élargissant les requêtes live (« principal OR facette »). Les facettes ET
+        # restent re-matchées localement (sous-ensemble du principal).
+        if _sub_queries:
+            try:
+                _boolean, _pubmed_q, _n_or = _widen_boolean_for_or_facets(_boolean, _pubmed_q, _sub_queries, _combinator)
+                if _n_or:
+                    logger.info(f"Populate {scenario_id}: fédération élargie à {_n_or} facette(s) OU — {_boolean[:160]!r}")
+            except Exception as _we:                      # noqa: BLE001
+                logger.warning(f"Populate {scenario_id} facettes OU: {_we}")
         # Variante par type de source (comme le font déjà les _live_fetch_*) :
         #  - _pubmed_q : booléen MeSH → sources proxyfiées PubMed (eutils)
         #  - _boolean  : booléen général → API qui acceptent les opérateurs (EuropePMC)
