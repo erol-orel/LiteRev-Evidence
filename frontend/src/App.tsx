@@ -2040,7 +2040,8 @@ export default function App() {
         })
         .catch((err) => { setScenariosError(String(err)); setLoadingScenarios(false); });
     }
-  }, [activeTab]);
+    // `lang` : le catalogue intégré est rendu par le serveur dans la langue de l'interface.
+  }, [activeTab, lang]);
 
   // Deduplicate to ONE entry per document (keep the highest-scoring chunk per doc).
   // The backend returns one row per chunk; multiple chunks from the same document

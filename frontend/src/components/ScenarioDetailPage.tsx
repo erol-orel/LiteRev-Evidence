@@ -5655,7 +5655,7 @@ function ModelMonitorSection({ scenarioId }: { scenarioId: string }) {
     ]).then(([r, m, p, s]) => {
       setRun(r); setMonitor(m); setProposal(p); setSpec(s);
     }).catch((e) => setError(e.message)).finally(() => setLoading(false));
-  }, [scenarioId]);
+  }, [scenarioId, lang]);   // les libellés du moniteur sont rendus dans la langue de l'interface
 
   useEffect(() => { load(); }, [load]);
 
@@ -6167,7 +6167,7 @@ interface ScenarioDetailPageProps {
 }
 
 export function ScenarioDetailPage({ scenarioId, onBack, initialTab }: ScenarioDetailPageProps) {
-  const { t } = useI18n();
+  const { t, lang } = useI18n();
   const [detail, setDetail] = useState<ScenarioDetail | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -6248,7 +6248,9 @@ export function ScenarioDetailPage({ scenarioId, onBack, initialTab }: ScenarioD
       .then(setDetail)
       .catch((e) => setError(e.message))
       .finally(() => setLoading(false));
-  }, [scenarioId]);
+    // `lang` : le catalogue intégré (titre, description, actions) et les libellés par
+    // défaut sont rendus par le serveur dans la langue de l'interface.
+  }, [scenarioId, lang]);
 
   if (loading) {
     return (

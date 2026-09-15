@@ -23,6 +23,13 @@ from sqlalchemy import create_engine, text, bindparam
 # manquant ne doit pas se découvrir au premier appel LLM, en production.
 import llm_usage as _llm_usage
 import lexical_search as _lex
+from gesica_i18n import localize_gesica as _localize_gesica
+
+
+def _msg(lang, fr: str, en: str) -> str:
+    """Texte utilisateur dans la langue demandée (français par défaut) : pour les
+    messages d'état renvoyés par l'API et affichés tels quels par l'interface."""
+    return en if (isinstance(lang, str) and lang.strip().lower().startswith("en")) else fr
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("literev-api")
@@ -4222,11 +4229,12 @@ def _list_db_gesica_scenarios(conn) -> list[dict[str, Any]]:
 
 
 @app.get("/gesica/scenarios")
-def get_gesica_scenarios() -> list[dict[str, Any]]:
+def get_gesica_scenarios(lang: str | None = Query(None)) -> list[dict[str, Any]]:
     """
     Scénarios GESICA dynamiques : retourne les scénarios système stockés en base,
     enrichis avec les articles scientifiques associés depuis la DB (living evidence review).
     Les scénarios sont triés par nombre d'articles décroissant, puis alphabétiquement.
+    `lang=en` rend le catalogue (titre, description, actions) en anglais.
     """
     with engine.connect() as conn:
         scenario_rows = _list_db_gesica_scenarios(conn)
@@ -4278,6 +4286,7 @@ def get_gesica_scenarios() -> list[dict[str, Any]]:
         # les articles d'un scénario se lisent, paginés, sur /gesica/scenarios/{id}/corpus.
         result = []
         for meta in scenario_rows:
+            meta = _localize_gesica(meta, lang)
             scenario_id = str(meta["id"])
             title = _gesica_title(meta)
             article_count = int(db_counts.get(scenario_id, 0) or 0)
@@ -4300,9 +4309,13 @@ def get_gesica_scenarios() -> list[dict[str, Any]]:
                 "recommended_actions": _gesica_actions(meta),
                 "relevant_articles": articles,
                 "living_evidence_note": (
-                    f"Living Evidence Review · {article_count} articles indexés. Mis à jour automatiquement à chaque ingestion."
+                    _msg(lang,
+                         f"Living Evidence Review · {article_count} articles indexés. Mis à jour automatiquement à chaque ingestion.",
+                         f"Living Evidence Review · {article_count} articles indexed. Updated automatically with every ingestion.")
                     if article_count > 0
-                    else "Aucun article indexé pour ce scénario. En attente d'ingestion de nouvelles sources."
+                    else _msg(lang,
+                              "Aucun article indexé pour ce scénario. En attente d'ingestion de nouvelles sources.",
+                              "No article indexed for this scenario yet. Waiting for new sources to be ingested.")
                 )
             })
 
@@ -5315,7 +5328,7 @@ def embed_pending_chunks(limit: int = 200, _: None = Depends(require_api_key)) -
 # ─── Living Review Endpoints ──────────────────────────────────────────────────
 
 @app.get("/living-review/status")
-def living_review_status():
+def living_review_status(lang: str | None = Query(None)):
     """Retourne le statut de la dernière exécution de la living review."""
     import json as _json
     report_path = Path("/opt/literev-api/living_review_last_run.json")
@@ -5328,7 +5341,7 @@ def living_review_status():
             pass
     return {
         "status": "no_run_yet",
-        "message": "Aucune living review n'a encore été exécutée.",
+        "message": _msg(lang, "Aucune living review n'a encore été exécutée.", "No living review has run yet."),
         "command": "python3 living_review_scheduler.py --all-scenarios",
         "scenarios_available": list(SCENARIO_LIVING_REVIEW_IDS),
     }
@@ -5360,7 +5373,8 @@ def living_review_run(scenario_id: str = "all", days: int = 30, dry_run: bool = 
             "scenario": scenario_id,
             "days": days,
             "dry_run": dry_run,
-            "message": f"Living review lancée. Consultez /living-review/status pour le résultat.",
+            "message": _msg(lang, "Living review lancée. Consultez /living-review/status pour le résultat.",
+                            "Living review started. See /living-review/status for the result."),
         }
     except Exception as e:
         return {"status": "error", "error": str(e)}
@@ -5406,7 +5420,7 @@ SCENARIO_LIVING_REVIEW_IDS = [
 # ─────────────────────────────────────────────────────────────────────────────
 
 @app.get("/gesica/scenarios/{scenario_id}/detail")
-def get_scenario_detail(scenario_id: str) -> dict[str, Any]:
+def get_scenario_detail(scenario_id: str, lang: str | None = Query(None)) -> dict[str, Any]:
     """
     Retourne toutes les informations enrichies d'un scénario :
     - Métadonnées de base (titre, description, cluster, actions recommandées)
@@ -5414,9 +5428,10 @@ def get_scenario_detail(scenario_id: str) -> dict[str, Any]:
     - Prompt d'extraction d'évidence spécifique au scénario
     - Informations sur le modèle IA (algorithme, variables, fréquence de mise à jour)
     - Seuils d'alerte vert/orange/rouge
+    `lang=en` rend le titre, la description et les actions du catalogue en anglais.
     """
     with engine.connect() as conn:
-        meta = _get_db_gesica_scenario_or_404(scenario_id, conn)
+        meta = _localize_gesica(_get_db_gesica_scenario_or_404(scenario_id, conn), lang)
         stats = conn.execute(text("""
             SELECT
                 COUNT(*) AS total,
@@ -7292,6 +7307,7 @@ def get_evidence_brief_pdf(scenario_id: str):
 def trigger_living_review(
     scenario_id: str | None = None,
     dry_run: bool = True,
+    lang: str | None = Query(None),
     _: None = Depends(require_api_key),
 ) -> dict[str, Any]:
     """
@@ -8414,7 +8430,7 @@ def delete_folder(folder_id: str, _: None = Depends(require_api_key)) -> dict[st
 # ── Detail (compatible ScenarioDetail frontend) ───────────────────────────────
 
 @app.get("/user-scenarios/{scenario_id}/detail")
-def get_user_scenario_detail(scenario_id: str) -> dict[str, Any]:
+def get_user_scenario_detail(scenario_id: str, lang: str | None = Query(None)) -> dict[str, Any]:
     """
     Retourne les informations enrichies d'un scénario utilisateur au format ScenarioDetail.
     Compatible avec ScenarioDetailPage (boolean_queries, nl_queries, corpus_stats, etc.)
@@ -8466,7 +8482,8 @@ def get_user_scenario_detail(scenario_id: str) -> dict[str, Any]:
         "id": scenario_id,
         "name": row["name"],
         "title": row["name"],
-        "description": f"Scénario utilisateur basé sur la recherche : {_combined}",
+        "description": _msg(lang, f"Scénario utilisateur basé sur la recherche : {_combined}",
+                            f"User scenario built from the search: {_combined}"),
         "cluster": "user",
         "recommended_actions": [],
         "boolean_queries": boolean_queries,
@@ -8474,9 +8491,9 @@ def get_user_scenario_detail(scenario_id: str) -> dict[str, Any]:
         "evidence_extraction_prompt": "",
         "model_info": {},
         "alert_thresholds": {
-            "green": {"label": "Normal", "threshold": 0},
-            "orange": {"label": "Vigilance", "threshold": 50},
-            "red": {"label": "Alerte", "threshold": 80},
+            "green": {"label": _msg(lang, "Normal", "Normal"), "threshold": 0},
+            "orange": {"label": _msg(lang, "Vigilance", "Watch"), "threshold": 50},
+            "red": {"label": _msg(lang, "Alerte", "Alert"), "threshold": 80},
         },
         "databases": ["PubMed"],
         "outcome_definition": "",
@@ -13862,7 +13879,8 @@ def _generate_evidence_brief_llm(scenario_id: str, force: bool = False, lang: st
                                              full_rows=30)
 
     if not articles:
-        return {"error": "Aucun article au-dessus du seuil pour générer le brief."}
+        return {"error": _msg(lang, "Aucun article au-dessus du seuil pour générer le brief.",
+                              "No article above the threshold to generate the brief.")}
 
     # Cache par EMPREINTE DU CORPUS (+ seuil + langue), et non plus par âge (< 24h).
     # On ne régénère que si le sous-ensemble pertinent, le seuil ou la langue ont
@@ -14091,7 +14109,9 @@ def get_llm_evidence_brief(scenario_id: str, lang: str | None = Query(None)) -> 
     threshold = _get_scenario_threshold(scenario_id)
     articles = _get_above_threshold_articles(scenario_id, threshold, full_rows=0)   # ids/statuts seulement
     if not articles:
-        return {"status": "empty", "message": "Aucun article au-dessus du seuil. Ajoutez des articles ou abaissez le seuil de similarité."}
+        return {"status": "empty", "message": _msg(lang,
+                "Aucun article au-dessus du seuil. Ajoutez des articles ou abaissez le seuil de similarité.",
+                "No article above the threshold. Add articles or lower the similarity threshold.")}
 
     _want_fp = _evidence_fingerprint([a["id"] for a in articles], threshold, lang, "brief-v3-relevant-fulltext")
 
@@ -14121,7 +14141,8 @@ def get_llm_evidence_brief(scenario_id: str, lang: str | None = Query(None)) -> 
     # Pas de brief en cache valide (absent, corpus changé, ou autre langue) :
     # déclencher la génération DANS LA LANGUE demandée.
     generate_evidence_brief(scenario_id, lang=lang)
-    return {"status": "generating", "message": "Génération en cours, réessayez dans 30 secondes."}
+    return {"status": "generating", "message": _msg(lang, "Génération en cours, réessayez dans 30 secondes.",
+                                                    "Generating, try again in 30 seconds.")}
 
 
 # ─── VARIABLES & MODÈLE AUTO-REMPLI DEPUIS PICO ──────────────────────────────
@@ -14516,7 +14537,8 @@ def _generate_variables_from_pico(scenario_id: str, persist: str = "active", lan
     # reste du flux ; le PICO reste optionnel par article).
     pico_articles = articles
     if not pico_articles:
-        return {"error": "Aucun article au-dessus du seuil pour générer les variables."}
+        return {"error": _msg(lang, "Aucun article au-dessus du seuil pour générer les variables.",
+                              "No article above the threshold to generate the variables.")}
     _n_with_pico = sum(1 for a in pico_articles if a.get("has_pico") or a.get("pico_json"))
 
     scenario_name = _get_scenario_name(scenario_id)
@@ -15011,7 +15033,9 @@ def get_scenario_variables(scenario_id: str, lang: str | None = Query(None)) -> 
     threshold = _get_scenario_threshold(scenario_id)
     articles = _get_above_threshold_articles(scenario_id, threshold, full_rows=0)   # existence seulement
     if not articles:
-        return {"status": "empty", "message": "Aucun article au-dessus du seuil. Ajoutez des articles ou abaissez le seuil de similarité."}
+        return {"status": "empty", "message": _msg(lang,
+                "Aucun article au-dessus du seuil. Ajoutez des articles ou abaissez le seuil de similarité.",
+                "No article above the threshold. Add articles or lower the similarity threshold.")}
 
     # Job en échec : renvoyer l'erreur au lieu de relancer à chaque poll (évite
     # une boucle de regénération quand la génération échoue de façon persistante).
@@ -15023,7 +15047,8 @@ def get_scenario_variables(scenario_id: str, lang: str | None = Query(None)) -> 
     # directement sans cet argument passerait l'objet Query(None) par défaut (et non
     # None) jusqu'à _llm_lang_directive → crash « 'Query' object has no attribute 'strip' ».
     generate_scenario_variables(scenario_id, lang=lang)
-    return {"status": "generating", "message": "Génération en cours, réessayez dans 30 secondes."}
+    return {"status": "generating", "message": _msg(lang, "Génération en cours, réessayez dans 30 secondes.",
+                                                    "Generating, try again in 30 seconds.")}
 
 
 @app.post("/scenarios/{scenario_id}/variables/validate")
@@ -17624,6 +17649,15 @@ _DEFAULT_ALERT_LABELS = {
     "green": "Normal", "orange": "Vigilance", "red": "Alerte critique",
     "unavailable": "Données insuffisantes",
 }
+_DEFAULT_ALERT_LABELS_EN = {
+    "green": "Normal", "orange": "Watch", "red": "Critical alert",
+    "unavailable": "Insufficient data",
+}
+
+
+def _alert_labels(lang) -> dict[str, str]:
+    """Libellés par défaut des niveaux d'alerte du moniteur, dans la langue demandée."""
+    return _DEFAULT_ALERT_LABELS_EN if _msg(lang, "fr", "en") == "en" else _DEFAULT_ALERT_LABELS
 
 
 @app.get("/scenarios/{scenario_id}/model/export")
@@ -17729,7 +17763,7 @@ def export_model_xlsx(scenario_id: str, _: None = Depends(require_api_key)):
 
 
 @app.get("/scenarios/{scenario_id}/model/monitor")
-def monitor_scenario_model(scenario_id: str, window: int = 7) -> dict[str, Any]:
+def monitor_scenario_model(scenario_id: str, window: int = 7, lang: str | None = Query(None)) -> dict[str, Any]:
     """
     Statut live du modèle entraîné : score les `window` dernières lignes du
     dataset branché et renvoie un niveau d'alerte + la valeur courante.
@@ -17745,8 +17779,9 @@ def monitor_scenario_model(scenario_id: str, window: int = 7) -> dict[str, Any]:
         """), {"sid": scenario_id}).mappings().first()
     if not run:
         return {"status": "unavailable", "status_color": "unavailable",
-                "status_label": "Modèle non entraîné",
-                "message": "Entraînez le modèle après avoir branché des données."}
+                "status_label": _msg(lang, "Modèle non entraîné", "Model not trained"),
+                "message": _msg(lang, "Entraînez le modèle après avoir branché des données.",
+                                "Train the model once data is connected.")}
     # Imports lourds (pandas + pile d'entraînement, ~160 Mo de RSS au premier appel)
     # APRÈS le test « pas de modèle » : la page d'un scénario sans modèle les payait
     # à chaque ouverture de l'onglet Variables & Modèle.
@@ -17764,8 +17799,9 @@ def monitor_scenario_model(scenario_id: str, window: int = 7) -> dict[str, Any]:
         outcome = spec.get("outcome") or {}
         if not preds:
             return {"status": "unavailable", "status_color": "unavailable",
-                    "status_label": _DEFAULT_ALERT_LABELS["unavailable"],
-                    "message": "Prévision indisponible ; ré-entraînez le modèle."}
+                    "status_label": _alert_labels(lang)["unavailable"],
+                    "message": _msg(lang, "Prévision indisponible ; ré-entraînez le modèle.",
+                                    "Forecast unavailable; retrain the model.")}
         next_val = float(preds[0])
         with engine.connect() as conn:
             vj = conn.execute(text(
@@ -17775,7 +17811,7 @@ def monitor_scenario_model(scenario_id: str, window: int = 7) -> dict[str, Any]:
         orange, red = model_trainer._alert_bounds(alert_thresholds)
         if orange is not None and red is not None:
             level = model_trainer._level_from_value(next_val, orange, red)
-            label = (alert_thresholds.get(level) or {}).get("label") or _DEFAULT_ALERT_LABELS.get(level, "—")
+            label = (alert_thresholds.get(level) or {}).get("label") or _alert_labels(lang).get(level, "—")
         else:
             # Sans bornes littérature, NE JAMAIS afficher "green/Normal" par défaut
             # (règle "jamais vert par défaut", cf. compute_monitoring / _level_from_value
@@ -17805,7 +17841,8 @@ def monitor_scenario_model(scenario_id: str, window: int = 7) -> dict[str, Any]:
         """), {"sid": scenario_id}).mappings().first()
     if not ds or not ds["stored_path"]:
         return {"status": "unavailable", "status_color": "unavailable",
-                "status_label": "Aucune donnée", "message": "Aucun dataset branché."}
+                "status_label": _msg(lang, "Aucune donnée", "No data"),
+                "message": _msg(lang, "Aucun dataset branché.", "No dataset connected.")}
 
     try:
         import joblib
@@ -17814,7 +17851,7 @@ def monitor_scenario_model(scenario_id: str, window: int = 7) -> dict[str, Any]:
     except Exception as e:
         logger.error(f"Monitor load {scenario_id}: {e}", exc_info=True)
         return {"status": "error", "status_color": "unavailable",
-                "status_label": "Erreur de chargement", "message": str(e)}
+                "status_label": _msg(lang, "Erreur de chargement", "Loading error"), "message": str(e)}
 
     summary = run["summary_json"] or {}
     task_type = run["task_type"]
@@ -17844,14 +17881,15 @@ def monitor_scenario_model(scenario_id: str, window: int = 7) -> dict[str, Any]:
     except Exception as e:
         logger.error(f"Monitor score {scenario_id}: {e}", exc_info=True)
         return {"status": "error", "status_color": "unavailable",
-                "status_label": "Erreur de scoring", "message": str(e)}
+                "status_label": _msg(lang, "Erreur de scoring", "Scoring error"), "message": str(e)}
 
     level = mon["level"]
     # 'unavailable' (NaN / pas de données / seuils non interprétables) ne doit
     # jamais réutiliser le libellé « Normal ».
     label = (
-        _DEFAULT_ALERT_LABELS["unavailable"] if level == "unavailable"
-        else ((alert_thresholds.get(level) or {}).get("label") or _DEFAULT_ALERT_LABELS.get(level, "Indisponible"))
+        _alert_labels(lang)["unavailable"] if level == "unavailable"
+        else ((alert_thresholds.get(level) or {}).get("label")
+              or _alert_labels(lang).get(level, _msg(lang, "Indisponible", "Unavailable")))
     )
     outcome = (spec.get("outcome") or {})
 
@@ -18221,7 +18259,7 @@ def trigger_full_pipeline_with_brief(scenario_id: str, _: None = Depends(require
 
 # ─── Endpoint model-status pour user_scenarios ───────────────────────────────
 @app.get("/user-scenarios/{scenario_id}/model-status")
-def get_user_scenario_model_status(scenario_id: str) -> dict[str, Any]:
+def get_user_scenario_model_status(scenario_id: str, lang: str | None = Query(None)) -> dict[str, Any]:
     """
     Statut du modèle pour un scénario utilisateur.
     Retourne un statut neutre (pas de modèle prédictif pour les scénarios utilisateurs).
@@ -18240,7 +18278,7 @@ def get_user_scenario_model_status(scenario_id: str) -> dict[str, Any]:
     return {
         "scenario_id": scenario_id,
         "status_color": "blue",
-        "status_label": "Scénario personnalisé",
+        "status_label": _msg(lang, "Scénario personnalisé", "Custom scenario"),
         "model_info": {
             "name": "N/A",
             "description": "Les scénarios personnalisés ne disposent pas d'un modèle prédictif intégré. Utilisez l'onglet Variables & Données pour configurer votre propre modèle.",
