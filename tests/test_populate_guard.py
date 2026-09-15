@@ -11,6 +11,7 @@ best-effort and logged when the database is unreachable).
 import time
 
 import main
+from conftest import patch_app  # noqa: E402
 
 
 def test_launch_populate_job_marks_a_crash_as_error(monkeypatch):
@@ -19,7 +20,7 @@ def test_launch_populate_job_marks_a_crash_as_error(monkeypatch):
     def _boom(*_a, **_k):
         raise ModuleNotFoundError("No module named 'requests'")
 
-    monkeypatch.setattr(main, "_run_user_scenario_populate", _boom)
+    patch_app(monkeypatch, "_run_user_scenario_populate", _boom)
     main._user_scenario_populate_jobs.pop(sid, None)
 
     assert main._launch_populate_job(sid, "influenza AND surveillance", {}, 50, include_live=False) == "started"

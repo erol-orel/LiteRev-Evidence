@@ -77,3 +77,26 @@ def ensure_document_columns(cur) -> bool:
     for col, typ in (("rerank_score", "FLOAT"), ("screening_status", "TEXT"), ("reviewer_1_status", "VARCHAR(20)")):
         cur.execute(f"ALTER TABLE article_scenarios ADD COLUMN IF NOT EXISTS {col} {typ}")
     return created_chunk_table
+
+
+def patch_app(monkeypatch, name: str, value) -> None:
+    """Patch `name` on `main` and on every module of the `api` package that carries it.
+
+    The API used to be one module, where patching `main.X` reached every caller. The
+    domain modules each bind the names they import (`from .search import X`), so a
+    test has to patch the binding the code under test actually reads; patching every
+    module that has the name restores the old single-namespace behaviour (the lazy
+    imports inside functions read the defining module at call time, so they follow)."""
+    import importlib
+
+    import api
+    import main
+
+    targets = [main] + [importlib.import_module(f"api.{m}") for m in api.MODULES]
+    found = False
+    for mod in targets:
+        if hasattr(mod, name):
+            monkeypatch.setattr(mod, name, value)
+            found = True
+    if not found:
+        raise AttributeError(f"{name} is not defined in the API")

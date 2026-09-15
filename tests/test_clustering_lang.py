@@ -11,6 +11,7 @@ import pytest
 pytest.importorskip("fastapi")
 
 import main  # noqa: E402
+from conftest import patch_app  # noqa: E402
 
 SID = "usr-lang-cluster-test"
 
@@ -94,7 +95,7 @@ def test_localize_falls_back_to_existing_summary_and_localizes_messages():
 # ── endpoint: cache in the other language → summaries-only background job ─────
 @pytest.fixture()
 def no_db(monkeypatch):
-    monkeypatch.setattr(main, "_get_user_scenario_or_404", lambda sid: {"id": sid})
+    patch_app(monkeypatch, "_get_user_scenario_or_404", lambda sid: {"id": sid})
     monkeypatch.setenv("OPENAI_API_KEY", "test-key")
     main._clustering_jobs.pop(SID, None)
     yield
@@ -112,7 +113,7 @@ class _FakeThread:
 
 
 def test_cached_summaries_in_requested_language_are_served_directly(no_db, monkeypatch):
-    monkeypatch.setattr(main, "_load_viz_cache", lambda sid, col, ttl=86400: _payload("fr"))
+    patch_app(monkeypatch, "_load_viz_cache", lambda sid, col, ttl=86400: _payload("fr"))
     res = main.get_user_scenario_clustering(SID, False, "fr")
     assert res.get("status") != "running"
     assert res["lang"] == "fr" and res["clusters"][0]["summary"] == "Résumé en français."
@@ -122,7 +123,7 @@ def test_cached_summaries_in_other_language_trigger_relocalization(no_db, monkey
     import threading
     _FakeThread.started.clear()
     monkeypatch.setattr(threading, "Thread", _FakeThread)
-    monkeypatch.setattr(main, "_load_viz_cache", lambda sid, col, ttl=86400: _payload("fr"))
+    patch_app(monkeypatch, "_load_viz_cache", lambda sid, col, ttl=86400: _payload("fr"))
     res = main.get_user_scenario_clustering(SID, False, "en")
     assert res["status"] == "running" and res["lang"] == "en"
     assert len(_FakeThread.started) == 1
@@ -137,7 +138,7 @@ def test_cached_summaries_in_other_language_trigger_relocalization(no_db, monkey
 
 def test_without_openai_key_the_cache_is_served_as_is(no_db, monkeypatch):
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
-    monkeypatch.setattr(main, "_load_viz_cache", lambda sid, col, ttl=86400: _payload("fr"))
+    patch_app(monkeypatch, "_load_viz_cache", lambda sid, col, ttl=86400: _payload("fr"))
     res = main.get_user_scenario_clustering(SID, False, "en")
     assert res.get("status") != "running"
     assert res["clusters"][1]["cluster_name"] == "Unclassified"    # labels still localized
@@ -172,7 +173,7 @@ def test_summarize_in_lang_keeps_structure_and_stores_per_language(no_db, monkey
             return _R()
 
     monkeypatch.setattr(main.engine, "connect", lambda: _Conn())
-    monkeypatch.setattr(main, "_get_scenario_name", lambda sid: "Flu scenario")
+    patch_app(monkeypatch, "_get_scenario_name", lambda sid: "Flu scenario")
 
     class _OAI:
         def __init__(self, **kw):
@@ -184,7 +185,7 @@ def test_summarize_in_lang_keeps_structure_and_stores_per_language(no_db, monkey
     def _fake_summary(client, title, docs, lang):
         calls.append((title, [d["id"] for d in docs], lang))
         return "Summary in English."
-    monkeypatch.setattr(main, "_cluster_summary_llm", _fake_summary)
+    patch_app(monkeypatch, "_cluster_summary_llm", _fake_summary)
 
     out = main._summarize_clusters_in_lang(SID, _payload("fr"), "en")
     assert calls == [("Flu scenario", [1, 2], "en")]           # nearest-to-centre docs, target lang

@@ -10,6 +10,7 @@ Pure: `_get_model_spec` is monkeypatched, so no database is needed (the geograph
 and the observed-series overlay both fail closed onto defaults when the DB is unreachable).
 """
 import main
+from conftest import patch_app  # noqa: E402
 
 
 def _param(value, lo=None, hi=None, unit="", provenance=(1, 2)):
@@ -23,7 +24,7 @@ def _spec(applicable, params, disease="X"):
 
 
 def _payload(monkeypatch, spec, **kw):
-    monkeypatch.setattr(main, "_get_model_spec", lambda _sid: spec)
+    patch_app(monkeypatch, "_get_model_spec", lambda _sid: spec)
     kw.setdefault("days", 120)
     kw.setdefault("n_samples", 40)
     return main._seir_projection_payload("usr-test00000001", **kw)

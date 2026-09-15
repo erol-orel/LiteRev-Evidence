@@ -266,7 +266,8 @@ def run_compute(app_main, sid: str, query: str = "influenza surveillance", slow_
     llm_usage.MeteredOpenAI = _FakeOpenAI                       # every `from llm_usage import MeteredOpenAI`
     os.environ["OPENAI_API_KEY"] = os.environ.get("OPENAI_API_KEY") or "sk-bench"
     os.environ["COHERE_API_KEY"] = os.environ.get("COHERE_API_KEY") or "bench"
-    app_main._cohere_rerank = lambda q, docs, model="rerank-v3.5": [random.random() for _ in docs]
+    from api import relevance as _relevance                      # the rerank reads its own module
+    _relevance._cohere_rerank = lambda q, docs, model="rerank-v3.5": [random.random() for _ in docs]
 
     def _hwm_mb() -> float:
         try:
