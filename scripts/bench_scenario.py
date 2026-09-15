@@ -79,7 +79,7 @@ def _rss_mb() -> float:
     return 0.0
 
 
-def seed(engine, n: int, sid: str) -> None:
+def seed(engine, n: int, sid: str, name: str | None = None) -> None:
     """Create a synthetic scenario of `n` articles with abstracts, one title_abstract
     chunk each (no embedding), scored links and a fake clustering cache."""
     from sqlalchemy import text
@@ -92,7 +92,7 @@ def seed(engine, n: int, sid: str) -> None:
             INSERT INTO user_scenarios (id, name, query, mode, filters, pinned, article_count,
                                         populate_status, pipeline_status, result_count)
             VALUES (:sid, :name, :q, 'boolean', '{}', TRUE, :n, 'done', 'done', :n)
-        """), {"sid": sid, "name": f"Benchmark {n} articles", "q": "influenza AND surveillance", "n": n})
+        """), {"sid": sid, "name": name or f"Benchmark {n} articles", "q": "influenza AND surveillance", "n": n})
     ids: list[int] = []
     batch = 2000
     # Optional columns differ between a production database and a test database
@@ -147,7 +147,8 @@ def seed(engine, n: int, sid: str) -> None:
         clusters.append({
             "cluster_id": k, "cluster_name": f"Cluster {k + 1}", "is_noise": False, "n_docs": len(chunk),
             "center_x": float(k), "center_y": float(k % 3), "top_words": WORDS[:10],
-            "summary": "Résumé synthétique.", "summaries": {"fr": "Résumé synthétique."},
+            "summary": "Résumé synthétique.",
+            "summaries": {"fr": "Résumé synthétique.", "en": "Synthetic summary."},
             "representative_doc": {"id": chunk[0] if chunk else 0, "title": "t", "year": 2020, "journal": "j"},
             "points": [{"id": d, "title": f"Benchmark article {j}", "year": 2010,
                         "x": float(k) + rnd.random(), "y": float(k % 3) + rnd.random()}

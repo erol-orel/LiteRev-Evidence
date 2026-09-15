@@ -56,8 +56,10 @@ jobs:
           # openpyxl : dépendance d'exécution (requirements.txt) de l'export Excel. Sans
           #   elle, tests/test_model_export.py se SAUTE entièrement via importorskip et
           #   la CI passait au vert sans jamais exécuter le code d'export.
+          # uvicorn + requests : servent l'API au smoke test navigateur (scripts/smoke_e2e.py)
+          #   plus bas — la construction d'un corpus importe requests même sans source en direct.
           pip install pytest fastapi pydantic "sqlalchemy>=2.0" python-dotenv python-multipart "psycopg[binary]" \
-            httpx openpyxl \
+            httpx openpyxl uvicorn requests \
             numpy pandas scikit-learn scipy optuna joblib lightgbm xgboost statsmodels
           pytest -q
 
@@ -72,6 +74,41 @@ jobs:
         run: |
           npm ci
           npm run build
+
+      - name: Frontend unit tests (vitest)
+        working-directory: frontend
+        run: npm test
+
+      # Smoke test navigateur (Playwright) : l'interface construite ci-dessus, servie par
+      # `vite preview`, contre l'API démarrée sur une base jetable du service Postgres,
+      # avec un scénario synthétique (scripts/smoke_e2e.py). Sans clé OpenAI ni source
+      # en direct : déterministe. Le navigateur est mis en cache entre les exécutions.
+      - name: Cache the Playwright browser
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('frontend/package-lock.json') }}
+
+      - name: Install the Playwright browser
+        working-directory: frontend
+        run: npx playwright install --with-deps chromium
+
+      - name: Browser smoke test (Playwright)
+        env:
+          DB_URL: postgresql+psycopg://postgres:postgres@localhost:5432/postgres
+          CI: "true"
+        run: python scripts/smoke_e2e.py --no-build
+
+      - name: Upload the Playwright report
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: |
+            frontend/playwright-report
+            frontend/test-results
+            frontend/e2e-api.log
+          if-no-files-found: ignore
 
   deploy:
     name: Deploy to production

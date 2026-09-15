@@ -8759,11 +8759,29 @@ def _launch_populate_job(scenario_id: str, query: str, filters: dict, max_result
                             "WHERE id = :sid"), {"sid": scenario_id})
     except Exception as _e:                              # noqa: BLE001 - jamais bloquant
         logger.warning(f"populate_status=running {scenario_id}: {_e}")
-    threading.Thread(
-        target=_run_user_scenario_populate,
-        args=(scenario_id, query, filters or {}, max_results, None, include_live),
-        daemon=True,
-    ).start()
+    def _guarded() -> None:
+        # The job's own error handling starts inside the function; anything raised
+        # before it (a missing dependency at its imports, say) killed the thread and
+        # left the job "running" forever, with the search page polling it. Seen by
+        # the browser smoke test on an API without `requests`.
+        try:
+            _run_user_scenario_populate(scenario_id, query, filters or {}, max_results, None, include_live)
+        except BaseException as _e:                          # noqa: BLE001
+            logger.error(f"Populate {scenario_id} crashed before its own error handling: {_e}", exc_info=True)
+            _job = _user_scenario_populate_jobs.get(scenario_id)
+            if _job is None or _job.get("status") == "running":
+                _user_scenario_populate_jobs[scenario_id] = {
+                    "status": "error", "error": f"{type(_e).__name__}: {_e}",
+                    "ingested": (_job or {}).get("ingested", 0),
+                }
+            try:
+                with engine.begin() as _c:
+                    _c.execute(text("UPDATE user_scenarios SET populate_status = 'error', updated_at = NOW() "
+                                    "WHERE id = :sid"), {"sid": scenario_id})
+            except Exception as _e2:                          # noqa: BLE001 - jamais bloquant
+                logger.warning(f"populate_status=error {scenario_id}: {_e2}")
+
+    threading.Thread(target=_guarded, daemon=True).start()
     return "started"
 
 

@@ -216,3 +216,35 @@ notification to `.github/workflows/deploy.yml` (a final step with
 ```
 (Add the `DEPLOY_ALERT_WEBHOOK` repo secret first. Tell me the channel and I'll
 wire the exact step.)
+
+## 8. Tests (backend, frontend, browser)
+
+Three layers, all run by CI on every pull request (`.github/workflows/deploy.yml`,
+job "Build & checks") before anything reaches production:
+
+| Layer | Command | What it covers |
+|---|---|---|
+| Backend | `pytest -q` (repo root) | pure logic + integration tests on the Postgres named by `DB_URL` (skipped without one) |
+| Frontend unit | `npm test` (in `frontend/`) | vitest + Testing Library: search-text helpers, API client (retries, URLs, admin key, error messages), locale files (same keys and placeholders in French and English), language provider, error boundary |
+| Browser smoke | `python3 scripts/smoke_e2e.py` (repo root) | Playwright drives the **built** interface against a **real API on a throwaway database**: scenario list and language toggle, scenario page (header, corpus, PRISMA, clustering), a two-facet local search that creates a scenario named with its AND |
+
+### Running the browser smoke test locally
+```bash
+pip install uvicorn                                   # once, in the API virtualenv
+cd frontend && npm ci && npx playwright install --with-deps chromium && cd ..
+DB_URL=postgresql+psycopg://postgres:postgres@127.0.0.1:5432/postgres \
+    python3 scripts/smoke_e2e.py                      # builds the frontend, ~2 min
+python3 scripts/smoke_e2e.py --no-build -- --headed -g "two-facet"   # one test, visible browser
+```
+`DB_URL` can name any database of the server: the script creates
+`literev_smoke_<random>` next to it, applies `schema.sql`, boots the API on port 8765
+(its startup DDL completes the schema), seeds a 40-article scenario with the seeder
+of `scripts/bench_scenario.py`, serves `frontend/dist` with `vite preview` (port 4173,
+`/api` proxied to the API) and drops the database at the end (`--keep-db` keeps it).
+No OpenAI or Cohere key is passed, so the run is deterministic and offline. On
+failure the API log is in `frontend/e2e-api.log`, Playwright's trace and screenshot
+in `frontend/test-results/` (CI uploads both as the `playwright-report` artifact).
+
+**Never point it at production**: it creates and drops databases on the server it
+is given.
+
