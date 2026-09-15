@@ -5539,15 +5539,17 @@ def _cluster_core(
     embedding_source = "tfidf"
     if any(d.get("embedding_str") for d in docs):
         try:
+            # Parsing numpy en float32 (4 octets/valeur) : la liste de floats Python
+            # (~24 octets/valeur, 1536 par doc) pesait ~900 Mo pour 25 000 docs.
             vecs = []
             for d in docs:
                 es = d.get("embedding_str")
-                vecs.append([float(x) for x in es.strip("[]").split(",")] if es else None)
-            valid = [v for v in vecs if v is not None]
+                vecs.append(np.fromstring(es.strip("[]"), sep=",", dtype=np.float32) if es else None)
+            valid = [v for v in vecs if v is not None and v.size]
             if valid:
-                mean_vec = np.mean(valid, axis=0).tolist()
-                vecs = [v if v is not None else mean_vec for v in vecs]
-                embeddings_matrix = np.array(vecs, dtype=np.float32)
+                mean_vec = np.mean(np.stack(valid), axis=0)
+                vecs = [v if (v is not None and v.size == mean_vec.size) else mean_vec for v in vecs]
+                embeddings_matrix = np.stack(vecs).astype(np.float32, copy=False)
                 embedding_source = "db_pgvector"
         except Exception as e:
             logger.warning(f"_cluster_core: embeddings DB inutilisables: {e}")
@@ -5618,9 +5620,60 @@ def _cluster_core(
         "embedding_2d": embedding_2d,
         "method": method_used,
         "feature_names": feature_names,
-        "X_dense": X_tfidf.toarray(),
+        # Matrice TF-IDF gardée CREUSE (la version dense pesait 160 Mo pour
+        # 25 000 docs × 800 termes) ; les moyennes par cluster se font dessus.
+        "X_dense": X_tfidf,
         "embedding_source": embedding_source,
     }
+
+
+CLUSTER_MAX_DOCS = max(200, int(os.getenv("CLUSTER_MAX_DOCS", "3000")))
+
+
+def _clustering_docs(scenario_id: str, threshold: float, cap: int | None = None) -> tuple[list, int]:
+    """Documents à clusteriser pour un scénario : le sous-ensemble PERTINENT (≥ seuil
+    sémantique OU inclus manuellement ; jamais les exclus), plafonné aux `cap` plus
+    pertinents (inclus d'abord, puis score décroissant), avec le vecteur du résumé.
+    Renvoie (docs, nombre total de documents éligibles).
+
+    Sans plafond, 25 000 documents = 25 000 embeddings à parser puis UMAP sur une
+    matrice 25 000 × 1536 : 88 s et un pic de 3 Go de RAM — de quoi faire tuer le
+    processus API sur le serveur. Les clusters sont visuellement identiques sur les
+    3 000 articles les plus pertinents."""
+    cap = CLUSTER_MAX_DOCS if cap is None else max(5, int(cap))
+    _relevant = """
+        FROM literature_document d
+        JOIN article_scenarios asn ON asn.document_id = d.id
+        WHERE asn.scenario_id = :sid
+          AND d.project_context = 'literev'
+          AND (d.is_duplicate IS NULL OR d.is_duplicate = FALSE)
+          AND d.abstract IS NOT NULL
+          AND LENGTH(d.abstract) > 50
+          AND COALESCE(asn.screening_status, d.screening_status) IS DISTINCT FROM 'excluded'
+          AND (COALESCE(asn.screening_status, d.screening_status) = 'included'
+               OR COALESCE(asn.similarity_score, 0) >= :thr)
+    """
+    with engine.connect() as conn:
+        n_total = int(conn.execute(text(f"SELECT COUNT(*) {_relevant}"),
+                                   {"sid": scenario_id, "thr": threshold}).scalar() or 0)
+        docs = list(conn.execute(text(f"""
+            SELECT d.id, d.title, d.abstract, d.year, d.journal,
+                   (
+                       SELECT c.embedding::text
+                       FROM document_chunk c
+                       WHERE c.document_id = d.id
+                         AND c.embedding IS NOT NULL
+                       -- Vecteur représentatif = le résumé (title_abstract) en
+                       -- priorité pour TOUS les docs (cohérent) ; repli 1er chunk.
+                       ORDER BY (c.chunk_type = 'title_abstract') DESC, c.id
+                       LIMIT 1
+                   ) AS embedding_str
+            {_relevant}
+            ORDER BY (COALESCE(asn.screening_status, d.screening_status) = 'included') DESC,
+                     asn.similarity_score DESC NULLS LAST, d.year DESC NULLS LAST, d.id
+            LIMIT :cap
+        """), {"sid": scenario_id, "thr": threshold, "cap": cap}).mappings().all())
+    return docs, n_total
 
 
 # ── Caches de visualisation persistés en DB (scenario_settings) ───────────────
@@ -5871,7 +5924,8 @@ def _relocalize_clustering_background(scenario_id: str, payload: dict, lang: str
 
 def _build_clusters_payload(scenario_id: str, docs: list, cc: dict, *,
                             with_summaries: bool = False, openai_key: str | None = None,
-                            title: str | None = None, lang: str | None = None) -> dict:
+                            title: str | None = None, lang: str | None = None,
+                            n_docs_total: int | None = None) -> dict:
     """Construit le payload de clustering CANONIQUE (un seul format, partagé par le
     pipeline ET le calcul en arrière-plan). `with_summaries` active le résumé LLM
     par cluster, rangé par LANGUE dans clusters[].summaries (`summary` = celui de la
@@ -5891,7 +5945,7 @@ def _build_clusters_payload(scenario_id: str, docs: list, cc: dict, *,
         label_int = int(label)
         idxs = [i for i, l in enumerate(labels) if int(l) == label_int]
         coords = embedding_2d[idxs]
-        cluster_tfidf = X_dense[idxs].mean(axis=0)
+        cluster_tfidf = np.asarray(X_dense[idxs].mean(axis=0)).ravel()   # dense ou creuse
         top_indices = cluster_tfidf.argsort()[-10:][::-1]
         top_words = [str(feature_names[i]) for i in top_indices if cluster_tfidf[i] > 0]
         center = np.mean(coords, axis=0)
@@ -5933,6 +5987,9 @@ def _build_clusters_payload(scenario_id: str, docs: list, cc: dict, *,
     return {
         "scenario_id": scenario_id,
         "n_docs": len(docs),
+        # Documents éligibles au total ; > n_docs quand le clustering a été plafonné
+        # aux CLUSTER_MAX_DOCS plus pertinents (l'interface l'indique).
+        "n_docs_total": int(n_docs_total) if n_docs_total is not None else len(docs),
         "n_clusters": len([c for c in clusters if not c["is_noise"]]),
         "method": method_used,
         "embedding_source": embedding_source,
@@ -5986,32 +6043,7 @@ def _run_clustering_background(scenario_id: str, force_refresh: bool = False, la
         # RAG. Sinon les topics étaient dilués par les centaines d'articles hors-sujet
         # ramenés par la fédération.
         _thr = _get_scenario_threshold(scenario_id)
-        with engine.connect() as conn:
-            docs = list(conn.execute(text("""
-                SELECT d.id, d.title, d.abstract, d.year, d.journal,
-                       (
-                           SELECT c.embedding::text
-                           FROM document_chunk c
-                           WHERE c.document_id = d.id
-                             AND c.embedding IS NOT NULL
-                           -- Vecteur représentatif = le résumé (title_abstract) en
-                           -- priorité pour TOUS les docs (cohérent) ; repli 1er chunk.
-                           ORDER BY (c.chunk_type = 'title_abstract') DESC, c.id
-                           LIMIT 1
-                       ) AS embedding_str
-                FROM literature_document d
-                JOIN article_scenarios asn ON asn.document_id = d.id
-                WHERE asn.scenario_id = :sid
-                  AND d.project_context = 'literev'
-                  AND (d.is_duplicate IS NULL OR d.is_duplicate = FALSE)
-                  AND d.abstract IS NOT NULL
-                  AND LENGTH(d.abstract) > 50
-                  AND COALESCE(asn.screening_status, d.screening_status) IS DISTINCT FROM 'excluded'
-                  AND (COALESCE(asn.screening_status, d.screening_status) = 'included'
-                       OR COALESCE(asn.similarity_score, 0) >= :thr)
-                ORDER BY d.year DESC NULLS LAST
-                LIMIT 100000
-            """), {"sid": scenario_id, "thr": _thr}).mappings().all())
+        docs, _n_total = _clustering_docs(scenario_id, _thr)
 
         if len(docs) < 5:
             result = {
@@ -6041,7 +6073,7 @@ def _run_clustering_background(scenario_id: str, force_refresh: bool = False, la
         result = _build_clusters_payload(
             scenario_id, docs, _cc, with_summaries=True, openai_key=openai_key,
             title=(_gesica_title(meta_for_cluster) if meta_for_cluster else None),
-            lang=want,
+            lang=want, n_docs_total=_n_total,
         )
         # Cache DB (durable) + /tmp (compat) + mémoire.
         _persist_clustering_result(scenario_id, result)
@@ -11484,31 +11516,7 @@ def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict
             # OU inclus manuellement ; jamais exclus) — cohérent avec le clustering à la
             # demande et le knowledge graph.
             _thr = _get_scenario_threshold(scenario_id)
-            with engine.connect() as conn:
-                cl_docs = list(conn.execute(text("""
-                    SELECT d.id, d.title, d.abstract, d.year, d.journal,
-                           (
-                               SELECT c.embedding::text
-                               FROM document_chunk c
-                               WHERE c.document_id = d.id
-                                 AND c.embedding IS NOT NULL
-                               -- Résumé (title_abstract) en priorité : vecteur cohérent.
-                               ORDER BY (c.chunk_type = 'title_abstract') DESC, c.id
-                               LIMIT 1
-                           ) AS embedding_str
-                    FROM literature_document d
-                    JOIN article_scenarios asn ON asn.document_id = d.id
-                    WHERE asn.scenario_id = :sid
-                      AND d.project_context = 'literev'
-                      AND (d.is_duplicate IS NULL OR d.is_duplicate = FALSE)
-                      AND d.abstract IS NOT NULL
-                      AND LENGTH(d.abstract) > 50
-                      AND COALESCE(asn.screening_status, d.screening_status) IS DISTINCT FROM 'excluded'
-                      AND (COALESCE(asn.screening_status, d.screening_status) = 'included'
-                           OR COALESCE(asn.similarity_score, 0) >= :thr)
-                    ORDER BY d.year DESC NULLS LAST
-                    LIMIT 100000
-                """), {"sid": scenario_id, "thr": _thr}).mappings().all())
+            cl_docs, _cl_total = _clustering_docs(scenario_id, _thr)   # plafonné (CLUSTER_MAX_DOCS)
 
             if len(cl_docs) >= 5:
                 texts = [f"{d['title']} {d['abstract'] or ''}" for d in cl_docs]
@@ -11544,9 +11552,11 @@ def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict
                 # Cache de visualisation : MÊME helper que le calcul en arrière-plan
                 # (plus de duplication) → DB durable (+ /tmp pour compat). Sans résumés :
                 # ils sont générés à la première ouverture, dans la langue de l'interface.
-                _cl_payload = _build_clusters_payload(scenario_id, cl_docs, _cc, with_summaries=False)
+                _cl_payload = _build_clusters_payload(scenario_id, cl_docs, _cc, with_summaries=False,
+                                                      n_docs_total=_cl_total)
                 _persist_clustering_result(scenario_id, _cl_payload)
-                update_step("clustering", "done", n_clusters=n_clusters, n_docs=len(cl_docs), method=method_used)
+                update_step("clustering", "done", n_clusters=n_clusters, n_docs=len(cl_docs),
+                            n_docs_total=_cl_total, method=method_used)
             else:
                 update_step("clustering", "skipped", reason=f"Corpus insuffisant ({len(cl_docs)} articles)")
         except Exception as e:
@@ -13400,7 +13410,9 @@ def _get_above_threshold_articles(scenario_id: str, threshold: float | None = No
                                   fulltext_query: str | None = None,
                                   fulltext_top_docs: int = 25,
                                   fulltext_char_cap: int = 2500,
-                                  fulltext_chunks_per_doc: int = 5) -> list[dict]:
+                                  fulltext_chunks_per_doc: int = 5,
+                                  full_rows: int | None = None,
+                                  require_pico: bool = False) -> list[dict]:
     """
     Retourne les articles au-dessus du seuil de similarité OU validés humainement.
     Priorité : included > similarity_score >= threshold > autres.
@@ -13412,33 +13424,51 @@ def _get_above_threshold_articles(scenario_id: str, threshold: float | None = No
     premiers), plafonné à `fulltext_char_cap` caractères — le budget de tokens est
     ainsi dépensé sur les passages utiles. Les documents sans texte intégral gardent
     `fulltext=""` (title+abstract seuls).
+
+    `full_rows=N` : TOUS les articles pertinents sont renvoyés (ids, année, statut,
+    devis, `has_pico`… — de quoi compter et prendre l'empreinte du corpus) mais seuls
+    les N premiers portent `abstract` et `pico_json`. Les générateurs LLM n'utilisent
+    que 20 à 30 articles : charger 25 000 résumés + PICO (120 Mo) pour en lire 30 était
+    inutile, et ces générateurs tournent en parallèle. `require_pico=True` restreint
+    aux articles disposant d'un PICO extrait.
     """
     if threshold is None:
         threshold = _get_scenario_threshold(scenario_id)
+    _fr = -1 if full_rows is None else max(0, int(full_rows))
     with engine.connect() as conn:
-        rows = conn.execute(text("""
-            SELECT ld.id, ld.title, ld.abstract, ld.year, ld.journal, ld.authors, ld.doi,
-                   ld.study_design, ld.pico_json, ld.citation_count, COALESCE(asn.screening_status, ld.screening_status) AS screening_status,
-                   ld.quality_score, asn.similarity_score
-            FROM literature_document ld
-            JOIN article_scenarios asn ON asn.document_id = ld.id AND asn.scenario_id = :sid
-            WHERE ld.project_context = 'literev'
-              AND ld.is_duplicate IS NOT TRUE
-              -- Porte de screening (C1) : ne jamais alimenter le modèle avec un
-              -- article explicitement exclu (les autres statuts restent admis).
-              AND COALESCE(asn.screening_status, ld.screening_status) IS DISTINCT FROM 'excluded'
-              -- Décision produit : un article NON scoré (similarity_score NULL)
-              -- n'est PAS pertinent — même définition que tous les affichages
-              -- (COALESCE(score,0) >= seuil). On garde le rattrapage 'included'.
-              AND (
-                  COALESCE(asn.screening_status, ld.screening_status) = 'included'
-                  OR COALESCE(asn.similarity_score, 0) >= :threshold
-              )
-            ORDER BY
-                CASE WHEN COALESCE(asn.screening_status, ld.screening_status) = 'included' THEN 0 ELSE 1 END,
-                asn.similarity_score DESC NULLS LAST,
-                ld.citation_count DESC NULLS LAST
-        """), {"sid": scenario_id, "threshold": threshold}).mappings().fetchall()
+        rows = conn.execute(text(f"""
+            SELECT id, title, year, journal, authors, doi, study_design, citation_count,
+                   screening_status, quality_score, similarity_score, has_pico,
+                   CASE WHEN :fr < 0 OR rn <= :fr THEN abstract END AS abstract,
+                   CASE WHEN :fr < 0 OR rn <= :fr THEN pico_json END AS pico_json
+            FROM (
+                SELECT ld.id, ld.title, ld.abstract, ld.year, ld.journal, ld.authors, ld.doi,
+                       ld.study_design, ld.pico_json, ld.citation_count,
+                       COALESCE(asn.screening_status, ld.screening_status) AS screening_status,
+                       ld.quality_score, asn.similarity_score,
+                       (ld.pico_json IS NOT NULL) AS has_pico,
+                       ROW_NUMBER() OVER (ORDER BY
+                           CASE WHEN COALESCE(asn.screening_status, ld.screening_status) = 'included' THEN 0 ELSE 1 END,
+                           asn.similarity_score DESC NULLS LAST,
+                           ld.citation_count DESC NULLS LAST, ld.id) AS rn
+                FROM literature_document ld
+                JOIN article_scenarios asn ON asn.document_id = ld.id AND asn.scenario_id = :sid
+                WHERE ld.project_context = 'literev'
+                  AND ld.is_duplicate IS NOT TRUE
+                  -- Porte de screening (C1) : ne jamais alimenter le modèle avec un
+                  -- article explicitement exclu (les autres statuts restent admis).
+                  AND COALESCE(asn.screening_status, ld.screening_status) IS DISTINCT FROM 'excluded'
+                  -- Décision produit : un article NON scoré (similarity_score NULL)
+                  -- n'est PAS pertinent — même définition que tous les affichages
+                  -- (COALESCE(score,0) >= seuil). On garde le rattrapage 'included'.
+                  AND (
+                      COALESCE(asn.screening_status, ld.screening_status) = 'included'
+                      OR COALESCE(asn.similarity_score, 0) >= :threshold
+                  )
+                  {"AND ld.pico_json IS NOT NULL" if require_pico else ""}
+            ) ranked
+            ORDER BY rn
+        """), {"sid": scenario_id, "threshold": threshold, "fr": _fr}).mappings().fetchall()
     articles = [dict(r) for r in rows]
     if include_fulltext and articles:
         _top_ids = [a["id"] for a in articles[:fulltext_top_docs]]
@@ -13772,9 +13802,12 @@ def _generate_evidence_brief_llm(scenario_id: str, force: bool = False, lang: st
     from llm_usage import MeteredOpenAI as _OAI
 
     threshold = _get_scenario_threshold(scenario_id)
+    # Résumés/PICO/texte intégral pour les 30 articles du contexte seulement ; les
+    # autres lignes (légères) servent aux statistiques et à l'empreinte du corpus.
     articles = _get_above_threshold_articles(scenario_id, threshold, include_fulltext=True,
                                              fulltext_query=_get_scenario_name(scenario_id),
-                                             fulltext_top_docs=30, fulltext_char_cap=2800)
+                                             fulltext_top_docs=30, fulltext_char_cap=2800,
+                                             full_rows=30)
 
     if not articles:
         return {"error": "Aucun article au-dessus du seuil pour générer le brief."}
@@ -13824,10 +13857,11 @@ def _generate_evidence_brief_llm(scenario_id: str, force: bool = False, lang: st
 
     context_str = _json.dumps(context_articles, ensure_ascii=False, indent=2)
 
-    # Stats corpus
+    # Stats corpus (sur TOUS les articles pertinents : `has_pico` est renseigné pour
+    # chaque ligne, `pico_json` seulement pour les 30 du contexte).
     total = len(articles)
     included = sum(1 for a in articles if a.get("screening_status") == "included")
-    with_pico = sum(1 for a in articles if a.get("pico_json"))
+    with_pico = sum(1 for a in articles if a.get("has_pico") or a.get("pico_json"))
     years = [a["year"] for a in articles if a.get("year")]
     year_range = f"{min(years)}-{max(years)}" if years else "N/A"
 
@@ -14003,7 +14037,7 @@ def get_llm_evidence_brief(scenario_id: str, lang: str | None = Query(None)) -> 
     retourne un statut pending. Sans `lang`, le brief reste en français (défaut).
     """
     threshold = _get_scenario_threshold(scenario_id)
-    articles = _get_above_threshold_articles(scenario_id, threshold)
+    articles = _get_above_threshold_articles(scenario_id, threshold, full_rows=0)   # ids/statuts seulement
     if not articles:
         return {"status": "empty", "message": "Aucun article au-dessus du seuil. Ajoutez des articles ou abaissez le seuil de similarité."}
 
@@ -14416,9 +14450,11 @@ def _generate_variables_from_pico(scenario_id: str, persist: str = "active", lan
     from llm_usage import MeteredOpenAI as _OAI
 
     threshold = _get_scenario_threshold(scenario_id)
+    # Résumés/PICO/texte intégral pour les 25 articles du contexte seulement.
     articles = _get_above_threshold_articles(scenario_id, threshold, include_fulltext=True,
                                              fulltext_query=_get_scenario_name(scenario_id),
-                                             fulltext_top_docs=25, fulltext_char_cap=2200)
+                                             fulltext_top_docs=25, fulltext_char_cap=2200,
+                                             full_rows=25)
 
     # On n'EXIGE plus un PICO extrait : tout article pertinent contribue au choix des
     # variables/outcome/algorithme via son titre+abstract (+texte intégral si dispo).
@@ -14429,7 +14465,7 @@ def _generate_variables_from_pico(scenario_id: str, persist: str = "active", lan
     pico_articles = articles
     if not pico_articles:
         return {"error": "Aucun article au-dessus du seuil pour générer les variables."}
-    _n_with_pico = sum(1 for a in pico_articles if a.get("pico_json"))
+    _n_with_pico = sum(1 for a in pico_articles if a.get("has_pico") or a.get("pico_json"))
 
     scenario_name = _get_scenario_name(scenario_id)
 
@@ -14921,7 +14957,7 @@ def get_scenario_variables(scenario_id: str, lang: str | None = Query(None)) -> 
 
     # Vérifier qu'il y a des articles avant de déclencher la génération
     threshold = _get_scenario_threshold(scenario_id)
-    articles = _get_above_threshold_articles(scenario_id, threshold)
+    articles = _get_above_threshold_articles(scenario_id, threshold, full_rows=0)   # existence seulement
     if not articles:
         return {"status": "empty", "message": "Aucun article au-dessus du seuil. Ajoutez des articles ou abaissez le seuil de similarité."}
 
@@ -15132,9 +15168,10 @@ def _generate_recommended_actions(scenario_id: str, lang: str | None = None) -> 
     import json as _json
     from llm_usage import MeteredOpenAI as _OAI
 
-    articles = _get_above_threshold_articles(scenario_id)
-    pico_articles = [a for a in articles if a.get("pico_json")]
-    base = pico_articles or articles
+    # Articles AVEC PICO d'abord (contexte pour 20 d'entre eux), sinon tous les
+    # pertinents ; seuls les 20 premiers portent leur résumé/PICO.
+    pico_articles = _get_above_threshold_articles(scenario_id, full_rows=20, require_pico=True)
+    base = pico_articles or _get_above_threshold_articles(scenario_id, full_rows=20)
     if not base:
         return []
 

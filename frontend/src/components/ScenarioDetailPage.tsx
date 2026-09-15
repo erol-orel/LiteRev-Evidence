@@ -2751,6 +2751,11 @@ function ClusteringSection({ scenarioId }: { scenarioId: string }) {
                     <span>← UMAP dim 1 →</span>
                     <span>
                       {data.n_docs} {t("scenarioDetail.clustering.articles")} · {data.n_clusters} {t("scenarioDetail.clustering.articlesClustersSeparator")}
+                      {data.n_docs_total != null && data.n_docs_total > data.n_docs && (
+                        <> · {t("scenarioDetail.clustering.docsCapped")
+                          .replace("{n}", data.n_docs.toLocaleString())
+                          .replace("{total}", data.n_docs_total.toLocaleString())}</>
+                      )}
                       {data.points_total != null && data.points_shown != null && data.points_shown < data.points_total && (
                         <> · {t("scenarioDetail.clustering.pointsSampled")
                           .replace("{shown}", data.points_shown.toLocaleString())

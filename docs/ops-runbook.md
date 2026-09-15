@@ -178,7 +178,11 @@ required for the app to run — they're guardrails.
   anything slower than 2 s or larger than 2 MB. Locally, `--seed 25000` builds a
   synthetic 25,000-article scenario first (that run found the 27 MB search-page
   corpus fetch, the 2.5 MB settings call and the 2.5 MB clustering payload fixed
-  in September 2026).
+  in September 2026). `--compute` (local only) also times the computations —
+  scoring, cross-encoder, brief context, clustering, knowledge graph, PRISMA,
+  counts, the LLM generators — with OpenAI and Cohere stubbed and random
+  embeddings seeded; it is what showed clustering all 25,000 articles peaking at
+  3 GB of RAM, hence `CLUSTER_MAX_DOCS`.
 
 ### 7b. Uptime check on `/health` (external)
 Point any uptime monitor (UptimeRobot, Better Stack, Hetzner, a cron+curl) at

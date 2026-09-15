@@ -1050,6 +1050,9 @@ export interface ClusterResult {
 export interface ScenarioClustering {
   scenario_id: string;
   n_docs: number;
+  // Eligible documents; > n_docs when the clustering was capped to the most
+  // relevant CLUSTER_MAX_DOCS articles (the caption says so).
+  n_docs_total?: number;
   n_clusters?: number;
   clusters: ClusterResult[];
   topics: ClusterTopic[];

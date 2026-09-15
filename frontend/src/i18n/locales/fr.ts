@@ -663,6 +663,7 @@ export const fr = {
         "Points = articles. Proximité = similarité. Nuages = groupes thématiques.",
       articlesClustersSeparator: "clusters",
       pointsSampled: "{shown} points affichés sur {total}",
+      docsCapped: "calculé sur les {n} articles les plus pertinents sur {total}",
       articles: "articles",
       selectGroup: "Sélectionner un groupe",
       denseArticlesInGroup: "articles scientifiques denses dans ce groupe",

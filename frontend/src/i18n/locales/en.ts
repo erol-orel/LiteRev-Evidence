@@ -665,6 +665,7 @@ export const en: Translations = {
         "Points = articles. Proximity = similarity. Clouds = thematic groups.",
       articlesClustersSeparator: "clusters",
       pointsSampled: "{shown} of {total} points shown",
+      docsCapped: "computed on the {n} most relevant of {total} articles",
       articles: "articles",
       selectGroup: "Select a group",
       denseArticlesInGroup: "dense scientific articles in this group",

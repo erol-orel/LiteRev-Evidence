@@ -293,9 +293,13 @@ def run_compute(app_main, sid: str, query: str = "influenza surveillance", slow_
         return f"status={job.get('status')} n_docs={res.get('n_docs')} method={res.get('method')} clusters={res.get('n_clusters')}"
 
     def _brief_context():
+        # Same call as the evidence brief: every relevant row (light), abstract/PICO
+        # and full-text excerpts for the 30 used in the prompt.
         arts = app_main._get_above_threshold_articles(sid, include_fulltext=True, fulltext_query=query,
-                                                      fulltext_top_docs=30, fulltext_char_cap=2800)
-        return f"{len(arts)} articles fetched (30 used)"
+                                                      fulltext_top_docs=30, fulltext_char_cap=2800,
+                                                      full_rows=30)
+        heavy = sum(1 for a in arts if a.get("abstract"))
+        return f"{len(arts)} relevant rows, {heavy} with abstract/PICO"
 
     steps = [
         ("backfill title_abstract chunks", lambda: f"{app_main._backfill_title_abstract_chunks(sid)} created"),
