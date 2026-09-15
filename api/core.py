@@ -120,8 +120,22 @@ class InMemoryRateLimiter:
 # Le frontend est volubile (tableau de bord = nombreux appels, recherche = gros
 # payloads) : limites généreuses pour éviter les faux positifs, plus strictes
 # sur les endpoints coûteux (RAG, recherche, génération de briefs).
-general_limiter = InMemoryRateLimiter(requests_limit=600, window_seconds=60)
-expensive_limiter = InMemoryRateLimiter(requests_limit=30, window_seconds=60)
+def _env_int(name: str, default: int, minimum: int = 0) -> int:
+    """Integer setting read from the environment; the default when unset or invalid."""
+    try:
+        return max(minimum, int(os.getenv(name, str(default))))
+    except (TypeError, ValueError):
+        return default
+
+
+# Per-IP limits, requests per minute. Overridable for an event where a whole room
+# shares one public IP (a presentation, a workshop): RATE_LIMIT_GENERAL_PER_MIN and
+# RATE_LIMIT_EXPENSIVE_PER_MIN in the API environment, then restart the service.
+# /health reports the values in force.
+RATE_LIMIT_GENERAL_PER_MIN = _env_int("RATE_LIMIT_GENERAL_PER_MIN", 600, minimum=1)
+RATE_LIMIT_EXPENSIVE_PER_MIN = _env_int("RATE_LIMIT_EXPENSIVE_PER_MIN", 30, minimum=1)
+general_limiter = InMemoryRateLimiter(requests_limit=RATE_LIMIT_GENERAL_PER_MIN, window_seconds=60)
+expensive_limiter = InMemoryRateLimiter(requests_limit=RATE_LIMIT_EXPENSIVE_PER_MIN, window_seconds=60)
 _PROCESS_STARTED_AT = _time_mod.time()
 try:
     _SLOW_REQUEST_MS = max(0, int(os.getenv("SLOW_REQUEST_MS", "2000")))

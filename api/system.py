@@ -13,7 +13,15 @@ from sqlalchemy import text
 import lexical_search as _lex
 import llm_usage as _llm_usage
 
-from .core import _process_stats, app, engine, logger, require_api_key
+from .core import (
+    RATE_LIMIT_EXPENSIVE_PER_MIN,
+    RATE_LIMIT_GENERAL_PER_MIN,
+    _process_stats,
+    app,
+    engine,
+    logger,
+    require_api_key,
+)
 from .schema_boot import _REQUIRED_TABLES, _SCHEMA_DDL_FAILURES
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -59,6 +67,9 @@ def health() -> dict[str, Any]:
     # Mémoire / threads / uptime / pool DB du processus : un redémarrage récent
     # (uptime court) ou une mémoire proche de la limite se lisent ici.
     out["process"] = _process_stats()
+    # Per-IP limits in force (RATE_LIMIT_*_PER_MIN): what a room sharing one IP gets.
+    out["rate_limit"] = {"general_per_min": RATE_LIMIT_GENERAL_PER_MIN,
+                         "expensive_per_min": RATE_LIMIT_EXPENSIVE_PER_MIN}
     if not schema_ok:
         # Visible dans la réponse, pas seulement dans les logs du serveur.
         out["schema"]["details"] = _SCHEMA_DDL_FAILURES[:10]
