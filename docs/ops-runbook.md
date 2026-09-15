@@ -224,7 +224,7 @@ job "Build & checks") before anything reaches production:
 
 | Layer | Command | What it covers |
 |---|---|---|
-| Backend | `pytest -q` (repo root) | pure logic + integration tests on the Postgres named by `DB_URL` (skipped without one) |
+| Backend | `pytest -q` (repo root) | pure logic + integration tests on the Postgres named by `DB_URL` (skipped without one). **The integration tests truncate and rewrite the tables of that database: point `DB_URL` at a scratch database, never at production or at a database whose data you want to keep** |
 | Frontend unit | `npm test` (in `frontend/`) | vitest + Testing Library: search-text helpers, API client (retries, URLs, admin key, error messages), locale files (same keys and placeholders in French and English), language provider, error boundary |
 | Browser smoke | `python3 scripts/smoke_e2e.py` (repo root) | Playwright drives the **built** interface against a **real API on a throwaway database**: scenario list and language toggle, scenario page (header, corpus, PRISMA, clustering), a two-facet local search that creates a scenario named with its AND |
 
@@ -247,4 +247,37 @@ in `frontend/test-results/` (CI uploads both as the `playwright-report` artifact
 
 **Never point it at production**: it creates and drops databases on the server it
 is given.
+
+## 9. Before a demo or a presentation
+
+The day before, and again an hour before, run the preflight against production (from
+the server, or from a laptop with `--base https://literev-scenario.com/api`) on the
+scenarios you will show, in the language you will use:
+```bash
+WRITE_API_KEY=… python3 scripts/preflight_demo.py --scenario usr-aaa --scenario usr-bbb --lang en
+```
+One line per check, `OK` / `WARN` / `FAIL`, exit code 1 on a FAIL:
+- health: database, schema, full-text engine, memory and uptime, rate limits;
+- OpenAI: one cheap real call (a search-strategy translation) proves the key works and
+  has quota — without it the briefs, variables and actions do not generate;
+- per scenario: the header numbers agree (the audit script runs inside), and every
+  artefact a tab shows — clustering, knowledge graph, evidence brief, LLM brief,
+  variables, recommended actions, model spec — is cached in the requested language.
+  With the write key the missing ones are generated now and awaited (`--wait`,
+  default 300 s); without it they are reported so you can open the tab once. Every
+  read endpoint is timed (above `--slow-ms`, default 2000, is a WARN).
+
+Then:
+- **deploy freeze**: every merge to `main` restarts the API and cuts any search or
+  pipeline in flight, so nothing merges from the morning of the session until it ends;
+- **warm the clustering** once after any restart (its first computation compiles
+  UMAP, about 30 s) — the preflight warns when the API restarted recently;
+- **prefer pre-built scenarios** in the session; a live search can take up to the
+  federation budget (3 min) when a source is slow — keep a pre-built one as fallback;
+- **a room sharing one public IP** (audience on the venue Wi-Fi) hits the per-IP
+  limits: raise `RATE_LIMIT_GENERAL_PER_MIN` (600) and `RATE_LIMIT_EXPENSIVE_PER_MIN`
+  (30: `/ask*`, scenario RAG, full pipeline) in `/etc/literev-api.env` for the day and
+  restart the service; `/health` shows the values in force;
+- hard-reload the browser once before presenting when a deploy happened since the
+  last visit, and record a short screen capture of the flows as a network fallback.
 
