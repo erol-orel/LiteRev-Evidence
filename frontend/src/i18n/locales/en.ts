@@ -609,6 +609,8 @@ export const en: Translations = {
       alreadyInLocal: "already in local database",
       fetchedForScenario: "fetched for this scenario",
       noArticles: "No article in this corpus.",
+      showing: "{shown} of {total} articles shown",
+      loadMore: "Load {n} more",
       distributionByYear: "Distribution by Year",
       literatureSources: "Literature Sources",
     },
