@@ -2194,7 +2194,9 @@ export default function App() {
       let firstDetailLoaded = false;
       const renderCorpus = async () => {
         if (activeSearchRef.current !== mySearch) return 0;   // recherche périmée → ne rien écrire
-        const corpus = await fetchScenarioCorpus(sid, { limit: 10000 });
+        // Résumés tronqués à 600 caractères : la liste n'affiche qu'un extrait (600) et
+        // le panneau de détail relit le résumé complet via /documents/{id}.
+        const corpus = await fetchScenarioCorpus(sid, { limit: 10000, abstractChars: 600 });
         if (activeSearchRef.current !== mySearch) return 0;   // supersédée pendant le fetch
         const corpusResults: SearchResult[] = (corpus.articles || []).map((a: CorpusArticle) => ({
           id: `${a.id}-0`,

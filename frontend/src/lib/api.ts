@@ -1037,6 +1037,7 @@ export interface ClusterResult {
   summary: string;
   // LLM summaries per language ("fr"/"en"); `summary` is the one for the requested lang.
   summaries?: Record<string, string>;
+  points_total?: number;   // all points of the cluster (points[] may be a sample)
   representative_doc: {
     id: number;
     title: string;
@@ -1057,6 +1058,10 @@ export interface ScenarioClustering {
   status?: "running" | "done" | "error" | "not_started" | string;
   lang?: string;          // language of the served summaries
   from_cache?: boolean;
+  // UMAP points are capped per response (sampled evenly per cluster); the cache
+  // keeps them all. points_shown < points_total ⇒ the plot is a sample.
+  points_total?: number;
+  points_shown?: number;
 }
 
 export interface ScenarioRagResponse {
@@ -1194,6 +1199,7 @@ export async function fetchScenarioCorpus(
     fulltextOnly?: boolean;
     source?: string;
     threshold?: number;
+    abstractChars?: number;   // truncate abstracts server-side (excerpt-only views)
   }
 ): Promise<ScenarioCorpus> {
   const params = new URLSearchParams();
@@ -1204,6 +1210,9 @@ export async function fetchScenarioCorpus(
   if (options?.fulltextOnly) params.set('fulltext_only', 'true');
   if (options?.source) params.set('source', options.source);
   if (options?.threshold != null) params.set('threshold', String(options.threshold));
+  // Truncate abstracts server-side when only an excerpt is displayed (search results
+  // page): 10,000 full abstracts weighed tens of MB for a 600-character snippet.
+  if (options?.abstractChars != null) params.set('abstract_chars', String(options.abstractChars));
   const base = scenarioBase(scenarioId);
   const url = `${base}/${scenarioId}/corpus?${params}`;
   const response = await safeFetch(url);
@@ -2103,11 +2112,12 @@ export async function assignScenarioToFolder(
 export interface ScenarioSettings {
   scenario_id: string;
   similarity_threshold: number;
-  evidence_brief_json: Record<string, unknown> | null;
   brief_generated_at: string | null;
-  variables_json: Record<string, unknown> | null;
   variables_validated: boolean;
   variables_generated_at: string | null;
+  // Presence of the cached artifacts (the artifacts themselves come from their own
+  // endpoints; the settings call no longer ships the clustering/graph/brief blobs).
+  cached?: Record<string, boolean>;
 }
 
 export async function getScenarioSettings(scenarioId: string): Promise<ScenarioSettings> {
@@ -2118,7 +2128,7 @@ export async function getScenarioSettings(scenarioId: string): Promise<ScenarioS
 
 export async function patchScenarioSettings(
   scenarioId: string,
-  payload: Partial<Pick<ScenarioSettings, 'similarity_threshold' | 'variables_json' | 'variables_validated'>>,
+  payload: { similarity_threshold?: number; variables_json?: Record<string, unknown> | null; variables_validated?: boolean },
 ): Promise<{ status: string; scenario_id: string; updated: string[] }> {
   const r = await safeFetch(`${API_BASE_URL}/scenarios/${scenarioId}/settings`, {
     method: 'PATCH',

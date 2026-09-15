@@ -661,6 +661,7 @@ export const fr = {
       umapCaption:
         "Points = articles. Proximité = similarité. Nuages = groupes thématiques.",
       articlesClustersSeparator: "clusters",
+      pointsSampled: "{shown} points affichés sur {total}",
       articles: "articles",
       selectGroup: "Sélectionner un groupe",
       denseArticlesInGroup: "articles scientifiques denses dans ce groupe",

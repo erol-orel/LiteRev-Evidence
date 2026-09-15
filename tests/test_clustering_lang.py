@@ -60,6 +60,28 @@ def test_localize_picks_the_requested_language_and_translates_noise_labels():
     assert p["clusters"][1]["cluster_name"] == "Non-classés"
 
 
+def test_localize_caps_the_points_evenly_and_reports_totals():
+    # 25,000 points were 2.5 MB of JSON and 25,000 SVG circles; the served view is a
+    # deterministic, evenly spaced sample with the true totals alongside.
+    p = _payload("fr", with_noise=False)
+    big = [{"id": i, "title": "t", "year": 2020, "x": float(i), "y": 0.0} for i in range(1000)]
+    small = [{"id": 5000 + i, "title": "u", "year": 2020, "x": 0.0, "y": float(i)} for i in range(10)]
+    p["clusters"][0]["points"] = big
+    p["clusters"].append({**p["clusters"][0], "cluster_id": 1, "points": small, "summaries": {"fr": "s"}})
+    out = main._localize_clusters_payload(p, "fr", max_points=100)
+    assert out["points_total"] == 1010 and out["points_shown"] <= 110
+    c0, c1 = out["clusters"]
+    assert c0["points_total"] == 1000 and 90 <= len(c0["points"]) <= 100
+    assert c1["points_total"] == 10 and len(c1["points"]) == 10           # small clusters keep ≥ 5
+    xs = [pt["x"] for pt in c0["points"]]
+    assert xs == sorted(xs) and xs[0] == 0.0 and xs[-1] >= 900.0            # spread over the whole cloud
+    assert main._localize_clusters_payload(p, "fr", max_points=100) == out  # deterministic
+    # under the cap: everything is served, totals still reported
+    full = main._localize_clusters_payload(p, "fr", max_points=5000)
+    assert full["points_shown"] == full["points_total"] == 1010
+    assert len(p["clusters"][0]["points"]) == 1000                          # cache untouched
+
+
 def test_localize_falls_back_to_existing_summary_and_localizes_messages():
     legacy = _payload(None)                       # pre-language cache: single `summary`
     out = main._localize_clusters_payload(legacy, "en")
