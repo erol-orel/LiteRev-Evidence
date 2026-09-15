@@ -17,6 +17,7 @@ The test builds a database the way a new deployment does (schema.sql, then the a
 startup DDL) and asserts the endpoints actually answer. It skips cleanly when no Postgres
 is reachable, so CI without a database service still passes the pure tests.
 """
+import importlib.util
 import os
 import subprocess
 import uuid
@@ -93,69 +94,16 @@ def fresh_db():
             pass
 
 
-def _apply_schema(url):
-    """Apply schema.sql the way a new deployment would.
-
-    pgvector may be absent in CI, and schema.sql declares `vector(1536)`; the app's own
-    SEIR/corpus paths never touch embeddings, so the column type is rewritten to text
-    when the extension cannot be created. That mirrors what a deploy without pgvector
-    gets, which is the case under test.
-    """
-    import sqlalchemy as sa
-
-    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    sql = open(os.path.join(root, "schema.sql"), encoding="utf-8").read()
-    eng = sa.create_engine(url, isolation_level="AUTOCOMMIT")
-    with eng.connect() as c:
-        try:
-            c.execute(sa.text("CREATE EXTENSION IF NOT EXISTS vector"))
-        except Exception:
-            sql = sql.replace("vector(1536)", "text")
-        sql = "\n".join(l for l in sql.splitlines()
-                        if "CREATE EXTENSION" not in l.upper() or "vector" not in l)
-        for stmt in _split_statements(sql):
-            try:
-                c.execute(sa.text(stmt))
-            except Exception:
-                pass          # schema.sql is partly historical; the boot DDL completes it
-    eng.dispose()
-
-
-def _split_statements(sql: str) -> list:
-    """Split on semicolons that are NOT inside a dollar-quoted body.
-
-    schema.sql defines a PL/pgSQL trigger function whose body contains semicolons between
-    `$$ ... $$`; a naive split on ";" would shred it into invalid fragments and quietly
-    skip the function, so the test would be exercising a schema subtly unlike the one a
-    real deployment gets.
-    """
-    out, buf, tag, i = [], [], None, 0
-    while i < len(sql):
-        if tag is None and sql[i] == "$":
-            end = sql.find("$", i + 1)
-            candidate = sql[i:end + 1] if end != -1 else None
-            if candidate and (candidate[1:-1] == "" or candidate[1:-1].isidentifier()):
-                tag = candidate
-                buf.append(candidate)
-                i = end + 1
-                continue
-        elif tag is not None and sql.startswith(tag, i):
-            buf.append(tag)
-            i += len(tag)
-            tag = None
-            continue
-        if tag is None and sql[i] == ";":
-            stmt = "".join(buf).strip()
-            if stmt:
-                out.append(stmt)
-            buf = []
-        else:
-            buf.append(sql[i])
-        i += 1
-    tail = "".join(buf).strip()
-    if tail:
-        out.append(tail)
-    return out
+# The bootstrap helpers are shared with the browser smoke test runner
+# (scripts/smoke_e2e.py builds its throwaway database the same way), so they live in
+# scripts/db_bootstrap.py; scripts/ is not a package, hence the explicit load.
+_BOOTSTRAP_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                               "scripts", "db_bootstrap.py")
+_spec = importlib.util.spec_from_file_location("db_bootstrap", _BOOTSTRAP_PATH)
+_db_bootstrap = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(_db_bootstrap)
+_apply_schema = _db_bootstrap.apply_schema
+_split_statements = _db_bootstrap.split_statements
 
 
 def test_every_schema_statement_starts_with_sql():

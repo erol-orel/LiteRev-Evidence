@@ -435,6 +435,21 @@ graph TD
 
 ---
 
+### 6a. Frontend tests
+- **Unit (vitest + Testing Library, jsdom)** — `npm test` in `frontend/`; files sit
+  next to the code (`src/**/*.test.ts(x)`, setup in `src/test/setup.ts`). They cover
+  the pure search helpers (`src/lib/searchText.ts`: combined query text, facet kind
+  detection, display names), the API client (`safeFetch` retries, URL building, admin
+  key header, status → message), the locale files (identical keys and `{placeholders}`
+  in French and English), the language provider and the error boundary.
+- **Browser smoke (Playwright)** — `frontend/e2e/smoke.spec.ts`, configuration in
+  `frontend/playwright.config.ts` (serves `dist/` with `vite preview`, `/api` proxied
+  to the API). It is run by `scripts/smoke_e2e.py`, which boots the real API on a
+  throwaway database with one seeded scenario: scenario list + language toggle,
+  scenario page (header, corpus, PRISMA, clustering), and a two-facet search on the
+  local corpus whose saved scenario carries the AND. CI runs both on every pull
+  request; see `docs/ops-runbook.md` §8.
+
 ## 7. Deploy & ops
 
 **Pipeline (GitHub Actions → SSH → `deploy.sh`).** `.github/workflows/deploy.yml`:
