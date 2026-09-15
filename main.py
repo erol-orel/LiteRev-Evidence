@@ -129,6 +129,39 @@ class InMemoryRateLimiter:
 general_limiter = InMemoryRateLimiter(requests_limit=600, window_seconds=60)
 expensive_limiter = InMemoryRateLimiter(requests_limit=30, window_seconds=60)
 
+# Observabilité : toute requête plus longue que SLOW_REQUEST_MS est journalisée
+# (méthode, chemin, durée, statut, taille). Un « Failed to fetch » côté navigateur
+# n'était diagnosticable qu'en devinant ; le journal dit désormais quelle route
+# traîne et combien elle renvoie. /health expose aussi la mémoire du processus.
+import time as _time_mod
+_PROCESS_STARTED_AT = _time_mod.time()
+try:
+    _SLOW_REQUEST_MS = max(0, int(os.getenv("SLOW_REQUEST_MS", "2000")))
+except ValueError:
+    _SLOW_REQUEST_MS = 2000
+
+
+def _process_stats() -> dict[str, Any]:
+    """Mémoire résidente (courante et pic), threads, uptime et état du pool DB du
+    processus API — lisible dans /health sans accès au serveur."""
+    out: dict[str, Any] = {"uptime_s": int(_time_mod.time() - _PROCESS_STARTED_AT)}
+    try:
+        with open("/proc/self/status") as _f:
+            for _line in _f:
+                if _line.startswith("VmRSS:"):
+                    out["rss_mb"] = round(int(_line.split()[1]) / 1024.0, 1)
+                elif _line.startswith("VmHWM:"):
+                    out["rss_peak_mb"] = round(int(_line.split()[1]) / 1024.0, 1)
+                elif _line.startswith("Threads:"):
+                    out["threads"] = int(_line.split()[1])
+    except Exception:                                  # noqa: BLE001 — non Linux
+        pass
+    try:
+        out["db_pool"] = engine.pool.status()
+    except Exception:                                  # noqa: BLE001
+        pass
+    return out
+
 # Nb de sauts de proxy DE CONFIANCE devant l'app (défaut 1 = un seul nginx). L'IP
 # client réelle est le N-ième saut en partant de la FIN du X-Forwarded-For ; les
 # entrées avant ce point sont contrôlables par le client (spoofing). Passer à 2 si
@@ -217,14 +250,22 @@ async def rate_limit_middleware(request: Request, call_next):
     # la relancer telle quelle (Starlette renvoie son 500 habituel — aucun
     # changement de comportement). Les HTTPException sont déjà converties en
     # réponses en amont et ne remontent donc pas ici.
+    _t0 = _time_mod.perf_counter()
     try:
-        return await call_next(request)
+        response = await call_next(request)
     except Exception as exc:
         logger.error(
             f"Unhandled error on {request.method} {path} from {client_ip}: {exc}",
             exc_info=True,
         )
         raise
+    _ms = (_time_mod.perf_counter() - _t0) * 1000.0
+    if _ms >= _SLOW_REQUEST_MS:
+        logger.warning(
+            f"slow request: {request.method} {path} {int(_ms)} ms status={response.status_code} "
+            f"bytes={response.headers.get('content-length', '?')} ip={client_ip}"
+        )
+    return response
 
 # Restreindre les origines CORS à localhost et aux domaines de production
 ALLOWED_ORIGINS = [
@@ -1376,6 +1417,9 @@ def health() -> dict[str, Any]:
         out["lexical_search"] = _lex.state()
     except Exception as _e:                          # noqa: BLE001
         out["lexical_search"] = {"error": str(_e)[:200]}
+    # Mémoire / threads / uptime / pool DB du processus : un redémarrage récent
+    # (uptime court) ou une mémoire proche de la limite se lisent ici.
+    out["process"] = _process_stats()
     if not schema_ok:
         # Visible dans la réponse, pas seulement dans les logs du serveur.
         out["schema"]["details"] = _SCHEMA_DDL_FAILURES[:10]
@@ -5675,14 +5719,36 @@ def _clusters_have_lang(payload: dict | None, lang: str) -> bool:
     return all(lang in (c.get("summaries") or {}) for c in dense)
 
 
-def _localize_clusters_payload(payload: dict, lang: str | None) -> dict:
+CLUSTER_MAX_POINTS = max(500, int(os.getenv("CLUSTER_MAX_POINTS", "4000")))
+
+
+def _sample_points(points: list, keep: int) -> list:
+    """Sous-échantillon DÉTERMINISTE de `keep` points, à pas régulier (les points sont
+    dans l'ordre du corpus, donc l'échantillon couvre tout le nuage)."""
+    n = len(points)
+    if keep >= n or keep <= 0:
+        return list(points)
+    step = n / float(keep)
+    return [points[int(i * step)] for i in range(keep)]
+
+
+def _localize_clusters_payload(payload: dict, lang: str | None, max_points: int | None = None) -> dict:
     """Vue du payload de clustering dans la langue demandée : `summary` de chaque
     cluster = son résumé dans cette langue (repli : le résumé existant), libellés du
-    cluster « bruit » et message localisés. Ne modifie pas l'objet en cache."""
+    cluster « bruit » et message localisés. Ne modifie pas l'objet en cache.
+
+    Les points de la projection UMAP sont plafonnés à `max_points` au total (répartis
+    au prorata des clusters, ≥ 5 par cluster) : 25 000 points = 2,5 Mo de JSON et
+    25 000 cercles SVG dans le navigateur, pour un nuage visuellement identique à
+    4 000 points. Le cache garde tous les points (`points_total` par cluster)."""
     want = _norm_lang(lang) or "fr"
     noise_name, noise_summary = _CLUSTER_NOISE_TEXT[want]
+    cap = CLUSTER_MAX_POINTS if max_points is None else max(0, int(max_points))
     out = dict(payload)
     clusters = []
+    total_points = sum(len(c.get("points") or []) for c in (out.get("clusters") or []) if isinstance(c, dict))
+    ratio = (cap / float(total_points)) if (cap and total_points > cap) else 1.0
+    shown = 0
     for c in out.get("clusters") or []:
         if not isinstance(c, dict):
             continue
@@ -5694,8 +5760,15 @@ def _localize_clusters_payload(payload: dict, lang: str | None) -> dict:
             summaries = cc.get("summaries") or {}
             if want in summaries:
                 cc["summary"] = summaries[want]
+        pts = cc.get("points") or []
+        cc["points_total"] = len(pts)
+        if ratio < 1.0 and len(pts) > 50:            # small clusters are served whole
+            cc["points"] = _sample_points(pts, max(50, int(len(pts) * ratio)))
+        shown += len(cc.get("points") or [])
         clusters.append(cc)
     out["clusters"] = clusters
+    out["points_total"] = total_points
+    out["points_shown"] = shown
     code = out.get("message_code")
     if code in _CLUSTER_MESSAGES:
         out["message"] = _CLUSTER_MESSAGES[code][want]
@@ -8368,16 +8441,23 @@ def get_user_scenario_corpus(
     fulltext_only: bool = False,
     source: str | None = None,
     threshold: float | None = None,
+    abstract_chars: int | None = Query(None, ge=0, le=20000),
 ) -> dict[str, Any]:
     """
     Retourne le corpus d'articles pour un scénario utilisateur.
     Compatible avec fetchScenarioCorpus (même format de réponse).
+
+    `abstract_chars` tronque le résumé de chaque article à N caractères : la page de
+    résultats de recherche n'affiche qu'un extrait (600 caractères) et lit le résumé
+    complet via /documents/{id} au clic — envoyer 10 000 résumés entiers pesait des
+    dizaines de Mo pour rien. Sans le paramètre, le résumé complet est renvoyé.
     """
     row = _get_user_scenario_or_404(scenario_id)
     # Endpoint ouvert : borne limit/offset (un ?limit=100000000 matérialiserait toute
     # la jointure en RAM/JSON). 100000 couvre largement le plus gros corpus.
     limit = max(1, min(int(limit), 100000))
     offset = max(0, int(offset))
+    _abstract_sql = "d.abstract" if abstract_chars is None else "LEFT(d.abstract, :abstract_chars)"
     # Seuil effectif : paramètre explicite (curseur en direct) > seuil sauvegardé
     # dans scenario_settings > défaut 0.45. (Auparavant codé en dur à 0.45, donc
     # le compteur « auto-sélectionnés » ne suivait jamais le curseur.)
@@ -8439,7 +8519,7 @@ def get_user_scenario_corpus(
         with_fulltext = int(counts_row["with_fulltext"] or 0)
         articles = conn.execute(text(f"""
             SELECT
-                d.id, d.title, d.abstract, d.year, d.source, d.url,
+                d.id, d.title, {_abstract_sql} AS abstract, d.year, d.source, d.url,
                 d.authors, d.doi, d.journal, d.keywords, d.language,
                 d.study_design, d.sample_size, d.country, d.citation_count,
                 d.open_access, d.pmid, d.publication_type, d.quality_score,
@@ -8467,7 +8547,8 @@ def get_user_scenario_corpus(
                 d.citation_count DESC NULLS LAST,
                 d.title ASC
             LIMIT :limit OFFSET :offset
-        """), {**params, 'threshold': eff_threshold, 'screated': _screated}).mappings().all()
+        """), {**params, 'threshold': eff_threshold, 'screated': _screated,
+               **({'abstract_chars': int(abstract_chars)} if abstract_chars is not None else {})}).mappings().all()
         year_dist = conn.execute(text(f"""
             SELECT d.year, COUNT(*) AS cnt
             FROM literature_document d
@@ -8537,6 +8618,7 @@ def get_user_scenario_corpus(
         "threshold": eff_threshold,
         "offset": offset,
         "limit": limit,
+        "abstract_truncated": abstract_chars is not None,
         "articles": [dict(a) for a in articles],
         "year_distribution": [{"year": r["year"], "count": int(r["cnt"])} for r in year_dist],
         "source_distribution": [{"source": r["source"], "count": int(r["cnt"])} for r in source_dist],
@@ -13589,9 +13671,18 @@ def _maybe_autorerank(scenario_id: str) -> bool:
     return True
 
 
+_SETTINGS_BLOB_COLUMNS = ("evidence_brief_json", "variables_json", "clustering_json",
+                          "knowledge_graph_json", "recommended_actions_json")
+
+
 @app.get("/scenarios/{scenario_id}/settings")
 def get_scenario_settings(scenario_id: str) -> dict[str, Any]:
-    """Retourne les paramètres du scénario (seuil, état du brief LLM, variables)."""
+    """Retourne les paramètres du scénario (seuil, dates de génération, variables validées).
+
+    Les artefacts JSON en cache (brief, variables, clustering, graphe, actions) ne sont
+    PAS renvoyés : chacun a son endpoint. Avec `SELECT *`, la page scénario téléchargeait
+    à chaque ouverture, pour lire un seul seuil, le clustering complet et le graphe de
+    connaissances (2,5 Mo pour 25 000 articles). Seule leur présence est indiquée."""
     with engine.connect() as conn:
         row = conn.execute(text("""
             SELECT * FROM scenario_settings WHERE scenario_id = :sid
@@ -13600,13 +13691,14 @@ def get_scenario_settings(scenario_id: str) -> dict[str, Any]:
         return {
             "scenario_id": scenario_id,
             "similarity_threshold": DEFAULT_SIMILARITY_THRESHOLD,
-            "evidence_brief_json": None,
             "brief_generated_at": None,
-            "variables_json": None,
             "variables_validated": False,
             "variables_generated_at": None,
+            "cached": {c[:-5]: False for c in _SETTINGS_BLOB_COLUMNS},
         }
-    return dict(row)
+    out = {k: v for k, v in dict(row).items() if k not in _SETTINGS_BLOB_COLUMNS}
+    out["cached"] = {c[:-5]: bool(row.get(c)) for c in _SETTINGS_BLOB_COLUMNS if c in row}
+    return out
 
 
 @app.patch("/scenarios/{scenario_id}/settings")
@@ -17553,8 +17645,6 @@ def monitor_scenario_model(scenario_id: str, window: int = 7) -> dict[str, Any]:
     Statut live du modèle entraîné : score les `window` dernières lignes du
     dataset branché et renvoie un niveau d'alerte + la valeur courante.
     """
-    import pandas as pd
-    import model_trainer
     from datetime import datetime, timezone
 
     with engine.connect() as conn:
@@ -17568,6 +17658,11 @@ def monitor_scenario_model(scenario_id: str, window: int = 7) -> dict[str, Any]:
         return {"status": "unavailable", "status_color": "unavailable",
                 "status_label": "Modèle non entraîné",
                 "message": "Entraînez le modèle après avoir branché des données."}
+    # Imports lourds (pandas + pile d'entraînement, ~160 Mo de RSS au premier appel)
+    # APRÈS le test « pas de modèle » : la page d'un scénario sans modèle les payait
+    # à chaque ouverture de l'onglet Variables & Modèle.
+    import pandas as pd
+    import model_trainer
 
     # ── Modèle de PRÉVISION (Prophet/SARIMAX) : pas de scoring ligne-à-ligne. La
     # valeur « courante » est le PROCHAIN point prévu, lu dans le résumé. Les bandes

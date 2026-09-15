@@ -2749,7 +2749,14 @@ function ClusteringSection({ scenarioId }: { scenarioId: string }) {
                   </div>
                   <div className="flex items-center justify-between text-[10px] text-white/25 font-mono">
                     <span>← UMAP dim 1 →</span>
-                    <span>{data.n_docs} {t("scenarioDetail.clustering.articles")} · {data.n_clusters} {t("scenarioDetail.clustering.articlesClustersSeparator")}</span>
+                    <span>
+                      {data.n_docs} {t("scenarioDetail.clustering.articles")} · {data.n_clusters} {t("scenarioDetail.clustering.articlesClustersSeparator")}
+                      {data.points_total != null && data.points_shown != null && data.points_shown < data.points_total && (
+                        <> · {t("scenarioDetail.clustering.pointsSampled")
+                          .replace("{shown}", data.points_shown.toLocaleString())
+                          .replace("{total}", data.points_total.toLocaleString())}</>
+                      )}
+                    </span>
                   </div>
                 </div>
 

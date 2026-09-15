@@ -157,6 +157,29 @@ required for the app to run — they're guardrails.
   With no `SENTRY_DSN` (or no `sentry-sdk` installed) it's a no-op — errors still
   hit journalctl via the middleware above.
 
+### 7a′. Slow requests and process memory (in code, already shipped)
+- Every request slower than `SLOW_REQUEST_MS` (default 2000) is logged at
+  `WARNING` with its route, duration, status and size — the first thing to read
+  when the interface shows "Failed to fetch" or a tab spins:
+  ```bash
+  journalctl -u literev-api --since "-1h" | grep "slow request"
+  ```
+- `/health` carries a `process` block: `rss_mb`, `rss_peak_mb`, `threads`,
+  `uptime_s` and the DB pool line. A short `uptime_s` right after a "Failed to
+  fetch" means the API restarted (deploy or crash); a `rss_peak_mb` close to the
+  machine's RAM means the process is being killed for memory.
+- `scripts/bench_scenario.py` times every read endpoint of the scenario page for
+  one scenario. On the server, read-only, against the running API:
+  ```bash
+  cd /opt/literev-api && .venv/bin/python3 scripts/bench_scenario.py \
+      --base http://127.0.0.1:8000 --scenario usr-xxxxxxxxxxxx --read-only
+  ```
+  It prints one line per endpoint (ms, KB, status), sorted by time, and flags
+  anything slower than 2 s or larger than 2 MB. Locally, `--seed 25000` builds a
+  synthetic 25,000-article scenario first (that run found the 27 MB search-page
+  corpus fetch, the 2.5 MB settings call and the 2.5 MB clustering payload fixed
+  in September 2026).
+
 ### 7b. Uptime check on `/health` (external)
 Point any uptime monitor (UptimeRobot, Better Stack, Hetzner, a cron+curl) at
 **`https://literev-scenario.com/api/health`** (through nginx) — expect HTTP 200

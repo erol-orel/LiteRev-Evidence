@@ -663,6 +663,7 @@ export const en: Translations = {
       umapCaption:
         "Points = articles. Proximity = similarity. Clouds = thematic groups.",
       articlesClustersSeparator: "clusters",
+      pointsSampled: "{shown} of {total} points shown",
       articles: "articles",
       selectGroup: "Select a group",
       denseArticlesInGroup: "dense scientific articles in this group",
