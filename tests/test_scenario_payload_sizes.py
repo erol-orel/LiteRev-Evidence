@@ -36,9 +36,28 @@ def seeded(db_conn):
             cur.execute("SELECT to_regclass(%s) IS NULL", (tbl,))
             if cur.fetchone()[0] and ensure:
                 ensure()
-        # Columns the corpus endpoint reads but a suite-bootstrapped database lacks.
-        cur.execute("ALTER TABLE literature_document ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT now()")
-        cur.execute("ALTER TABLE literature_document ADD COLUMN IF NOT EXISTS url TEXT")
+        # Columns the corpus endpoint reads but a suite-bootstrapped database lacks
+        # (CI has no pgvector, so schema.sql is not applied there and the documents
+        # table comes from a minimal fixture): the boot DDL that production relies on,
+        # plus the schema.sql base columns.
+        cur.execute("SELECT to_regclass('document_chunk') IS NULL")
+        created_chunk_table = cur.fetchone()[0]
+        if created_chunk_table:                       # dropped again at teardown
+            cur.execute("""
+                CREATE TABLE document_chunk (
+                    id BIGSERIAL PRIMARY KEY, document_id BIGINT NOT NULL,
+                    chunk_index INTEGER NOT NULL DEFAULT 0, content TEXT NOT NULL DEFAULT '',
+                    chunk_type TEXT, created_at TIMESTAMP DEFAULT now())""")
+        for ensure_name in ("_ensure_bibliographic_columns", "_ensure_double_blind_columns", "_ensure_dedup_columns"):
+            ensure = getattr(main, ensure_name, None)
+            if ensure:
+                ensure()
+        for col, typ in (("created_at", "TIMESTAMP DEFAULT now()"), ("url", "TEXT"), ("pmid", "TEXT"),
+                         ("year", "INTEGER"), ("source", "TEXT"), ("keywords", "TEXT"), ("language", "TEXT"),
+                         ("open_access", "BOOLEAN"), ("sample_size", "INTEGER")):
+            cur.execute(f"ALTER TABLE literature_document ADD COLUMN IF NOT EXISTS {col} {typ}")
+        for col, typ in (("rerank_score", "FLOAT"), ("screening_status", "TEXT"), ("reviewer_1_status", "VARCHAR(20)")):
+            cur.execute(f"ALTER TABLE article_scenarios ADD COLUMN IF NOT EXISTS {col} {typ}")
         cur.execute("DELETE FROM article_scenarios WHERE scenario_id = %s", (SID,))
         cur.execute("DELETE FROM scenario_settings WHERE scenario_id = %s", (SID,))
         cur.execute("DELETE FROM user_scenarios WHERE id = %s", (SID,))
@@ -61,6 +80,8 @@ def seeded(db_conn):
         cur.execute("DELETE FROM scenario_settings WHERE scenario_id = %s", (SID,))
         cur.execute("DELETE FROM user_scenarios WHERE id = %s", (SID,))
         cur.execute("DELETE FROM literature_document WHERE id IN (9101, 9102)")
+        if created_chunk_table:
+            cur.execute("DROP TABLE document_chunk")
 
 
 def test_settings_do_not_ship_the_cached_artifacts(seeded):
