@@ -15,6 +15,7 @@ import {
   fetchScenarioDetail,
   fetchScenarioCorpus,
   fetchScenarioClustering,
+  fetchScenarioClusteringStatus,
   askScenarioRagStreamFiltered,
   type RagMeta,
   fetchScenarioPrisma,
@@ -107,9 +108,7 @@ import {
   type ProvArticle,
   type ModelMonitor,
   type SpecProposal,
-  scenarioBase,
   isUserScenario,
-  safeFetch,
   fetchSituationReports,
   fetchReliefWebStatus,
   type SituationReport,
@@ -233,6 +232,50 @@ function QueriesSection({ detail, scenarioId }: { detail: ScenarioDetail; scenar
         title={t("scenarioDetail.queries.title")}
         subtitle={t("scenarioDetail.queries.subtitle")}
       />
+      {/* Recherche multi-facettes : les facettes DANS L'ORDRE avec l'opérateur
+          réellement appliqué à chacune, puis l'expression complète. Les listes
+          booléen/naturel ci-dessous perdent l'ordre et les opérateurs — le ET entre
+          deux requêtes booléennes n'apparaissait donc nulle part. */}
+      {detail.facets && detail.facets.length >= 2 && (
+        <div className="rounded-2xl border border-gold-500/20 bg-gold-500/5 p-3 space-y-2">
+          <div className="flex items-center gap-2">
+            <Layers size={12} className="text-gold-400" />
+            <span className="text-xs font-semibold text-gold-300 uppercase tracking-wider">
+              {t("scenarioDetail.queries.combinedTitle")} ({detail.facets.length})
+            </span>
+          </div>
+          <p className="text-[11px] text-white/45 leading-4">{t("scenarioDetail.queries.combinedHint")}</p>
+          <div className="space-y-1.5">
+            {detail.facets.map((f, i) => (
+              <div key={i} className="flex items-start gap-2">
+                <span
+                  className={`shrink-0 mt-0.5 rounded-md border px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide ${
+                    i === 0
+                      ? "border-white/10 bg-white/5 text-white/50"
+                      : f.op === "and"
+                        ? "border-gold-400/40 bg-gold-500/15 text-gold-300"
+                        : "border-brand-400/40 bg-brand-500/15 text-brand-300"
+                  }`}
+                >
+                  {i === 0
+                    ? t("scenarioDetail.queries.facetMain")
+                    : f.op === "and" ? t("search.interShort") : t("search.unionShort")}
+                </span>
+                <code className="text-xs text-brand-200 font-mono break-all leading-5">{f.text}</code>
+                <span className="shrink-0 mt-0.5 text-[10px] text-white/35">
+                  {f.kind === "boolean" ? t("scenarioDetail.queries.facetBoolean") : t("scenarioDetail.queries.facetNatural")}
+                </span>
+              </div>
+            ))}
+          </div>
+          {detail.combined_query && (
+            <div className="border-t border-white/10 pt-2">
+              <span className="text-[10px] uppercase tracking-wider text-white/40">{t("scenarioDetail.queries.combinedExpression")}</span>
+              <code className="mt-1 block break-words font-mono text-xs text-gold-200">{detail.combined_query}</code>
+            </div>
+          )}
+        </div>
+      )}
       {/* Boolean Queries multi-sources */}
       <div>
         <div className="flex items-center gap-2 mb-3">
@@ -2549,7 +2592,9 @@ function ArticleRow({
 // ─── Section: Clustering UMAP & HDBSCAN (ENRICHI) ──────────────────────────────
 
 function ClusteringSection({ scenarioId }: { scenarioId: string }) {
-  const { t } = useI18n();
+  // `lang` est une dépendance du chargement : les résumés de clusters sont servis dans
+  // la langue demandée (régénérés côté serveur si le cache est dans l'autre langue).
+  const { t, lang } = useI18n();
   const [data, setData] = useState<ScenarioClustering | null>(null);
   const [loading, setLoading] = useState(false);
   const [polling, setPolling] = useState(false);
@@ -2586,9 +2631,7 @@ function ClusteringSection({ scenarioId }: { scenarioId: string }) {
         setData(result);
         pollRef.current = setInterval(async () => {
           try {
-            const r = await safeFetch(`${scenarioBase(scenarioId)}/${scenarioId}/clustering/status`);
-            if (!r.ok) return;
-            const status = await r.json();
+            const status = await fetchScenarioClusteringStatus(scenarioId);
             if (status.status === "done" || (status.clusters && status.clusters.length > 0)) {
               stopPolling();
               handleResult(status);
@@ -2606,7 +2649,7 @@ function ClusteringSection({ scenarioId }: { scenarioId: string }) {
       setError(e.message);
       setLoading(false);
     }
-  }, [scenarioId, stopPolling, handleResult, t]);
+  }, [scenarioId, lang, stopPolling, handleResult, t]);
 
   useEffect(() => {
     load();
@@ -6192,7 +6235,9 @@ export function ScenarioDetailPage({ scenarioId, onBack, initialTab }: ScenarioD
             </span>
           </div>
           <p className="mt-1 text-sm text-white/50 leading-5">
-            {isUserScenario(scenarioId) && detail.query ? `${t("scenarios.savedSearchPrefix")}${detail.query}` : detail.description}
+            {isUserScenario(scenarioId) && detail.query
+              ? `${t("scenarios.savedSearchPrefix")}${detail.combined_query || detail.query}`
+              : detail.description}
           </p>
           
           {/* Mots-clés */}

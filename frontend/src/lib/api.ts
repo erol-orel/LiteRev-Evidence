@@ -924,6 +924,12 @@ export interface ScenarioDetail {
   description: string;
   cluster: string;
   query?: string;   // requête d'origine (user scenarios) — pour un libellé localisé
+  // Multi-facet search (user scenarios): the WHOLE expression "(A) AND (B)" and the
+  // ordered facets with the operator actually applied to each one (none on the main
+  // query). `query` alone is only the main facet, which hid the AND/OR.
+  combined_query?: string;
+  facets?: ScenarioFacet[];
+  combinator?: "union" | "intersection" | null;
   recommended_actions: string[];
   boolean_queries: string[];
   nl_queries: string[];
@@ -1013,6 +1019,13 @@ export interface ClusterPoint {
   y: number;
 }
 
+/** One facet of a saved multi-query search as returned by the detail endpoint. */
+export interface ScenarioFacet {
+  kind: "boolean" | "natural";
+  text: string;
+  op: "and" | "or" | null;   // operator applied vs the running result; null on the main facet
+}
+
 export interface ClusterResult {
   cluster_id: number;
   cluster_name: string;
@@ -1022,6 +1035,8 @@ export interface ClusterResult {
   center_y: number;
   top_words: string[];
   summary: string;
+  // LLM summaries per language ("fr"/"en"); `summary` is the one for the requested lang.
+  summaries?: Record<string, string>;
   representative_doc: {
     id: number;
     title: string;
@@ -1038,6 +1053,10 @@ export interface ScenarioClustering {
   clusters: ClusterResult[];
   topics: ClusterTopic[];
   message?: string;
+  message_code?: string;
+  status?: "running" | "done" | "error" | "not_started" | string;
+  lang?: string;          // language of the served summaries
+  from_cache?: boolean;
 }
 
 export interface ScenarioRagResponse {
@@ -1200,6 +1219,14 @@ export async function fetchScenarioClustering(
   const langParam = `${params ? '&' : '?'}lang=${currentLang()}`;
   const base = scenarioBase(scenarioId);
   const response = await safeFetch(`${base}/${scenarioId}/clustering${params}${langParam}`);
+  if (!response.ok) throw new Error(httpMessage(response.status));
+  return response.json();
+}
+
+/** Poll a background clustering job; the result comes back in the current UI language. */
+export async function fetchScenarioClusteringStatus(scenarioId: string): Promise<ScenarioClustering & { error?: string }> {
+  const base = scenarioBase(scenarioId);
+  const response = await safeFetch(`${base}/${scenarioId}/clustering/status?lang=${currentLang()}`);
   if (!response.ok) throw new Error(httpMessage(response.status));
   return response.json();
 }
@@ -1604,6 +1631,11 @@ export function scenarioBase(scenarioId: string): string {
 
 export interface UserScenario extends GesicaScenario {
   query: string;
+  // Multi-facet search: full expression "(A) AND (B)" for display, plus the saved
+  // facets/combinator so a replay can restore them. Absent on single-query searches.
+  combined_query?: string;
+  sub_queries?: SubQuery[] | null;
+  combinator?: "union" | "intersection" | null;
   mode: string;
   filters: Record<string, any>;
   result_count: number;

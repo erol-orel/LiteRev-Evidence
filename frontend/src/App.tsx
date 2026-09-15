@@ -107,6 +107,10 @@ interface SavedSearch {
   resultCount: number;
   name?: string;
   pinned?: boolean;
+  // Multi-facet search: saved facets + combinator, restored on replay (the AND/OR
+  // between the facets is part of the search — replaying only `query` lost it).
+  subQueries?: SubQuery[] | null;
+  combinator?: "union" | "intersection" | null;
 }
 
 // localStorage supprimé : les recherches sauvegardées sont désormais persistées en backend (table user_scenarios)
@@ -155,6 +159,22 @@ function scenarioDisplayName(q: string, limit = 140): string {
   const cut = s.slice(0, limit);
   const lastSpace = cut.lastIndexOf(" ");
   return (lastSpace > limit * 0.6 ? cut.slice(0, lastSpace) : cut).trimEnd() + "…";
+}
+
+// Miroir CLIENT de main.py:_combined_query_text — expression COMPLÈTE d'une recherche
+// multi-facettes, parenthésée selon le fold gauche→droite réellement appliqué :
+// « (A) AND (B) », « ((A) OR (B)) AND (C) ». Sert de nom par défaut au scénario :
+// avant, seul le texte de la requête principale était utilisé et le ET/OU entre
+// les facettes n'apparaissait nulle part.
+function combinedQueryText(sub: SubQuery[], combinator: "union" | "intersection"): string {
+  const facets = sub.map((q) => ({ ...q, text: q.text.trim() })).filter((q) => q.text);
+  if (facets.length < 2) return facets[0]?.text ?? "";
+  const defaultOp = combinator === "intersection" ? "and" : "or";
+  let expr = facets[0].text;
+  for (const f of facets.slice(1)) {
+    expr = `(${expr}) ${(f.op ?? defaultOp).toUpperCase()} (${f.text})`;
+  }
+  return expr;
 }
 
 // Miroir CLIENT de main.py:_looks_boolean — détecte une SYNTAXE booléenne (opérateurs
@@ -1372,7 +1392,9 @@ function ScenariosView({
               )}
             </div>
             <p className="mt-1 text-sm leading-5 text-forest-400 line-clamp-2">
-              {isUser && scenario.query ? `${t("scenarios.savedSearchPrefix")}${scenario.query}` : scenario.description}
+              {isUser && scenario.query
+                ? `${t("scenarios.savedSearchPrefix")}${(scenario as UserScenario).combined_query || scenario.query}`
+                : scenario.description}
             </p>
           </div>
           <div className="shrink-0 flex items-center gap-1.5">
@@ -1612,7 +1634,9 @@ function ScenariosView({
   // Un scénario SAUVEGARDÉ (épinglé) est UNIQUE : on masque toute recherche récente
   // (non épinglée) qui doublonne un scénario épinglé de même query (+ mode) — la 2e carte
   // identique disparaît immédiatement, sans attendre la purge backend à la prochaine liste.
-  const _scenKey = (s: UserScenario) => `${(s as any).query ?? ''} ${(s as any).mode ?? ''}`;
+  // Clé = expression COMPLÈTE (« (A) AND (B) ») + mode : « A » et « (A) AND (B) »
+  // partagent la même `query` (facette principale) mais sont deux recherches.
+  const _scenKey = (s: UserScenario) => `${s.combined_query ?? s.query ?? ''}\u0000${(s as any).mode ?? ''}`;
   const _pinnedKeys = new Set(userScenarios.filter(s => s.pinned).map(_scenKey));
   const recentScenarios = userScenarios.filter(
     s => !s.pinned && !(s as any).folder_id && !_pinnedKeys.has(_scenKey(s)),
@@ -2006,6 +2030,8 @@ export default function App() {
             resultCount: u.result_count ?? 0,
             name: u.title !== u.query ? u.title : undefined,
             pinned: u.pinned,
+            subQueries: u.sub_queries ?? null,
+            combinator: u.combinator ?? null,
           })));
           setLoadingScenarios(false);
         })
@@ -2145,7 +2171,9 @@ export default function App() {
       // lit le corpus et on l'affiche. Plus de "preview" divergente.
       const _sub = buildSubQueries();
       const newScenario = await createUserScenario({
-        name: scenarioDisplayName(query),
+        // Nom par défaut = l'expression COMPLÈTE (facettes + ET/OU), pas seulement
+        // la requête principale.
+        name: scenarioDisplayName(_sub ? combinedQueryText(_sub, combinator) : query),
         query: query.trim(),
         mode,
         filters: { projectContext },
@@ -2272,12 +2300,17 @@ export default function App() {
       }
       const corpus = { total: lastTotal };
       // Mettre à jour les listes locales (scénario désormais construit).
+      // Identité d'une recherche = expression COMPLÈTE (facettes + ET/OU) + mode :
+      // « A » et « (A) AND (B) » ne se remplacent pas l'une l'autre dans la liste.
+      const _newKey = newScenario.combined_query ?? newScenario.query;
       setUserScenarios(prev => {
-        const filtered = prev.filter(s => !(s.query === newScenario.query && s.mode === newScenario.mode && !s.pinned));
+        const filtered = prev.filter(s => !((s.combined_query ?? s.query) === _newKey && s.mode === newScenario.mode && !s.pinned));
         return [{ ...newScenario, result_count: corpus.total, articleCount: corpus.total }, ...filtered].slice(0, 50);
       });
       setSavedSearches(prev => {
-        const filtered = prev.filter(s => !(s.query === query.trim() && s.mode === mode && !s.pinned));
+        const filtered = prev.filter(s => !(
+          (s.subQueries && s.subQueries.length >= 2 ? combinedQueryText(s.subQueries, s.combinator ?? "union") : s.query) === _newKey
+          && s.mode === mode && !s.pinned));
         return [{
           id: sid,
           query: newScenario.query,
@@ -2287,6 +2320,8 @@ export default function App() {
           resultCount: corpus.total,
           name: undefined,
           pinned: false,
+          subQueries: newScenario.sub_queries ?? null,
+          combinator: newScenario.combinator ?? null,
         }, ...filtered].slice(0, 50);
       });
     } catch (err) {
@@ -2337,6 +2372,8 @@ export default function App() {
                 resultCount: u.articleCount > 0 ? u.articleCount : (u.resultCount ?? u.result_count ?? 0),
                 name: u.title !== u.query ? u.title : undefined,
                 pinned: u.pinned,
+                subQueries: u.sub_queries ?? null,
+                combinator: u.combinator ?? null,
               })));
             }).catch(console.warn);
           }
@@ -2358,8 +2395,9 @@ export default function App() {
 
   function handleSaveAsScenario() {
     if (!query.trim()) return;
-    const name = saveSearchName.trim() || scenarioDisplayName(query);
     const _sub = buildSubQueries();
+    // Nom par défaut = l'expression complète « (A) AND (B) » d'une recherche multi-facettes.
+    const name = saveSearchName.trim() || scenarioDisplayName(_sub ? combinedQueryText(_sub, combinator) : query);
     // Chercher si une entrée non-épinglée existe déjà pour cette requête. Les
     // recherches multi-sous-requêtes créent toujours une entrée neuve (pas de dédup
     // par query/mode : la même requête principale peut porter des sous-requêtes/un
@@ -2397,6 +2435,8 @@ export default function App() {
           resultCount: newScenario.result_count ?? results.length,
           name,
           pinned: true,
+          subQueries: newScenario.sub_queries ?? null,
+          combinator: newScenario.combinator ?? null,
         }, ...prev]);
         _launchPipelineForScenario(newScenario.id);
       }).catch(err => console.warn('Create user_scenario failed:', err));
@@ -2406,7 +2446,15 @@ export default function App() {
   }
 
   function handleReplaySearch(s: SavedSearch) {
-    setQuery(s.query);
+    // Recherche multi-facettes : restaurer TOUTES les facettes avec leurs opérateurs
+    // (le ET/OU fait partie de la recherche) — pas seulement la requête principale.
+    const sub = s.subQueries && s.subQueries.length >= 2 ? s.subQueries : null;
+    setQuery(sub ? sub[0].text : s.query);
+    setMainKindOverride(sub ? sub[0].kind : "auto");
+    setExtraQueries(sub
+      ? sub.slice(1).map((q) => ({ kind: q.kind, text: q.text, ...(q.op ? { op: q.op } : {}) }))
+      : []);
+    setCombinator(sub ? (s.combinator ?? "union") : "union");
     // Recherche unifiée : toujours en mode booléen (traduction automatique si besoin).
     setMode("boolean");
     setProjectContext(s.projectContext);
