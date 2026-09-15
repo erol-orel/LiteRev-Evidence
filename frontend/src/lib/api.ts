@@ -619,7 +619,8 @@ export async function fetchGesicaStats(): Promise<GesicaStats> {
 }
 
 export async function fetchGesicaScenarios(): Promise<GesicaScenario[]> {
-  const response = await safeFetch(`${API_BASE_URL}/gesica/scenarios`);
+  // The built-in catalogue is stored in French; the server renders it in the UI language.
+  const response = await safeFetch(`${API_BASE_URL}/gesica/scenarios?lang=${currentLang()}`);
   if (!response.ok) throw new Error(`LiteRev scenarios failed with status ${response.status}`);
   const data: Array<{
     id: string;
@@ -1187,7 +1188,7 @@ export interface PicoData {
 
 export async function fetchScenarioDetail(scenarioId: string): Promise<ScenarioDetail> {
   const base = scenarioBase(scenarioId);
-  const response = await safeFetch(`${base}/${scenarioId}/detail`);
+  const response = await safeFetch(`${base}/${scenarioId}/detail?lang=${currentLang()}`);
   if (!response.ok) throw new Error(httpMessage(response.status));
   return response.json();
 }
@@ -1984,7 +1985,7 @@ export async function triggerLivingReview(
   scenarioId?: string,
   dryRun = true,
 ): Promise<{ status: string; message: string; scenarios: any[] }> {
-  const params = new URLSearchParams({ dry_run: String(dryRun) });
+  const params = new URLSearchParams({ dry_run: String(dryRun), lang: currentLang() });
   if (scenarioId) params.set("scenario_id", scenarioId);
   const r = await safeFetch(`${API_BASE_URL}/gesica/living-review/trigger?${params}`, { method: 'POST', headers: authHeaders() });
   if (!r.ok) throw new Error(httpMessage(r.status));
@@ -2481,7 +2482,7 @@ export async function getModelTrainStatus(scenarioId: string): Promise<{ status:
 }
 
 export async function getModelMonitor(scenarioId: string): Promise<ModelMonitor> {
-  const r = await safeFetch(`${API_BASE_URL}/scenarios/${scenarioId}/model/monitor`);
+  const r = await safeFetch(`${API_BASE_URL}/scenarios/${scenarioId}/model/monitor?lang=${currentLang()}`);
   if (!r.ok) throw new Error(httpMessage(r.status));
   return r.json();
 }

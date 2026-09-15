@@ -168,6 +168,12 @@ erDiagram
   their cache on the requested `lang`, and the clustering payload stores each
   cluster's summary under `clusters[].summaries[lang]` — a request in the other
   language keeps the UMAP/HDBSCAN structure and regenerates only the summaries.
+  The built-in (GESICA) catalogue is stored in French; `gesica_i18n.py` carries
+  its English titles, descriptions and recommended actions, applied by the list
+  and detail endpoints when `lang=en`. Status labels and messages that the
+  interface shows raw (model monitor, generators, living review) follow `lang`
+  too. PICO fields are extracted once per article in the article's language and
+  are not translated per toggle.
 
 > **Schema note (real, worth knowing):** the DDL is split across `schema.sql`
 > (only `literature_document`, `document_chunk`, `alembic_version`), the
