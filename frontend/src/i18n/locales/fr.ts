@@ -607,6 +607,8 @@ export const fr = {
       alreadyInLocal: "déjà en base locale",
       fetchedForScenario: "récupérés pour ce scénario",
       noArticles: "Aucun article dans ce corpus.",
+      showing: "{shown} articles affichés sur {total}",
+      loadMore: "Charger {n} de plus",
       distributionByYear: "Distribution par Année",
       literatureSources: "Sources Littérature",
     },

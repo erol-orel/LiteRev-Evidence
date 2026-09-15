@@ -2105,20 +2105,29 @@ function VariablesSection({ detail, scenarioId, onGoToModel }: { detail: Scenari
 
 // ─── Section: Corpus ──────────────────────────────────────────────────────────
 
+// Taille de page de la liste d'articles. Le corpus d'un scénario peut dépasser
+// 25 000 articles (avec résumés) : tout charger en UNE requête pesait des dizaines
+// de Mo, prenait des secondes côté serveur et se soldait par « Failed to fetch »
+// dès que la connexion était coupée (redémarrage de l'API pendant un déploiement,
+// délai dépassé). Les compteurs et distributions restent calculés sur le corpus
+// ENTIER par le serveur ; seule la liste est paginée (« Charger plus »).
+const CORPUS_PAGE_SIZE = 200;
+
 function CorpusSection({ scenarioId, threshold }: { scenarioId: string; detail: ScenarioDetail; threshold?: number }) {
   const { t } = useI18n();
   const [data, setData] = useState<ScenarioCorpus | null>(null);
   const [loading, setLoading] = useState(true);
+  const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [expandedId, setExpandedId] = useState<number | null>(null);
   const [embeddingStatus, setEmbeddingStatus] = useState<EmbeddingStatus | null>(null);
 
-  // Recharge le corpus quand le seuil (curseur) change, avec un léger debounce.
+  // Recharge la PREMIÈRE page quand le seuil (curseur) change, avec un léger debounce.
   useEffect(() => {
     if (threshold == null) return;
     let cancelled = false;   // évite qu'une réponse lente d'un ancien seuil écrase un seuil plus récent
     const tid = setTimeout(() => {
-      fetchScenarioCorpus(scenarioId, { threshold })
+      fetchScenarioCorpus(scenarioId, { threshold, limit: CORPUS_PAGE_SIZE })
         .then(d => { if (!cancelled) setData(d); })
         .catch(() => {});
     }, 250);
@@ -2129,7 +2138,7 @@ function CorpusSection({ scenarioId, threshold }: { scenarioId: string; detail: 
   useEffect(() => {
     setLoading(true);
     setError(null);
-    fetchScenarioCorpus(scenarioId)
+    fetchScenarioCorpus(scenarioId, { limit: CORPUS_PAGE_SIZE })
       .then(setData)
       .catch((e) => setError(e.message))
       .finally(() => setLoading(false));
@@ -2142,18 +2151,33 @@ function CorpusSection({ scenarioId, threshold }: { scenarioId: string; detail: 
   // Tant qu'un scoring (rerank Cohere) tourne en arrière-plan, on rafraîchit le
   // corpus toutes les 4 s pour que les badges de pertinence (⊕ Cohere) et le
   // compteur "auto-sélectionnés" apparaissent en direct, sans refresh manuel.
+  // On recharge exactement les pages déjà affichées (même longueur de liste).
   useEffect(() => {
     if (!data?.rerank_running) return;
+    const shown = Math.max(CORPUS_PAGE_SIZE, data.articles.length);
     const id = setTimeout(() => {
-      fetchScenarioCorpus(scenarioId, threshold != null ? { threshold } : undefined)
+      fetchScenarioCorpus(scenarioId, { limit: shown, ...(threshold != null ? { threshold } : {}) })
         .then(setData)
         .catch(() => {});
     }, 4000);
     return () => clearTimeout(id);
   }, [data, scenarioId, threshold]);
 
+  const loadMore = () => {
+    if (!data || loadingMore) return;
+    setLoadingMore(true);
+    fetchScenarioCorpus(scenarioId, {
+      limit: CORPUS_PAGE_SIZE, offset: data.articles.length,
+      ...(threshold != null ? { threshold } : {}),
+    })
+      .then((next) => setData((prev) => (prev ? { ...next, articles: [...prev.articles, ...next.articles] } : next)))
+      .catch((e) => setError(e.message))
+      .finally(() => setLoadingMore(false));
+  };
+
   if (loading) return <LoadingSpinner text={t("scenarioDetail.corpus.loadingCorpus")} />;
   if (error || !data) return <ErrorBox message={error ?? t("scenarioDetail.common.errorCorpus")} />;
+  const hasMore = data.articles.length < data.total;
 
   return (
     <div className="space-y-4">
@@ -2261,6 +2285,26 @@ function CorpusSection({ scenarioId, threshold }: { scenarioId: string; detail: 
             />
           )) : (
             <p className="text-xs text-white/35 italic">{t("scenarioDetail.corpus.noArticles")}</p>
+          )}
+          {data.articles.length > 0 && (
+            <div className="flex items-center justify-between gap-3 pt-1 text-[11px] text-white/40">
+              <span>
+                {t("scenarioDetail.corpus.showing")
+                  .replace("{shown}", data.articles.length.toLocaleString())
+                  .replace("{total}", data.total.toLocaleString())}
+              </span>
+              {hasMore && (
+                <button
+                  type="button"
+                  onClick={loadMore}
+                  disabled={loadingMore}
+                  className="flex items-center gap-1.5 rounded-xl border border-brand-500/20 bg-brand-500/10 px-3 py-1.5 text-xs text-brand-300 hover:bg-brand-500/20 transition disabled:opacity-50"
+                >
+                  {loadingMore ? <Loader2 size={11} className="animate-spin" /> : <ChevronDown size={11} />}
+                  {t("scenarioDetail.corpus.loadMore").replace("{n}", String(Math.min(CORPUS_PAGE_SIZE, data.total - data.articles.length)))}
+                </button>
+              )}
+            </div>
           )}
         </div>
       </div>
