@@ -330,6 +330,7 @@ export const fr = {
     relevantPlural: "pertinents",
     page: "page",
     onePage: "1 page",
+    topShown: "les {n} plus pertinents affichés — le corpus complet est dans le scénario",
     refreshingResults: "Mise à jour des résultats en cours…",
     localBase: "Base locale",
     liveApi: "API en direct",

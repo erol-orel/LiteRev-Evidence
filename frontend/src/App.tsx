@@ -88,6 +88,9 @@ const FILTER_FIELDS: Array<[keyof FilterOptions, string]> = [
 ];
 
 const PAGE_SIZE = 20;
+// Nombre d'articles téléchargés pour la page de résultats : les plus pertinents du
+// corpus (ordre serveur). Le corpus complet reste consultable dans le scénario.
+const SEARCH_TOP_N = 200;
 
 // Bornes du filtre Années : du plus ancien article réellement en base (en
 // ignorant les années aberrantes < 1000) jusqu'à l'année courante (aujourd'hui).
@@ -2194,9 +2197,12 @@ export default function App() {
       let firstDetailLoaded = false;
       const renderCorpus = async () => {
         if (activeSearchRef.current !== mySearch) return 0;   // recherche périmée → ne rien écrire
-        // Résumés tronqués à 600 caractères : la liste n'affiche qu'un extrait (600) et
-        // le panneau de détail relit le résumé complet via /documents/{id}.
-        const corpus = await fetchScenarioCorpus(sid, { limit: 10000, abstractChars: 600 });
+        // Seuls les SEARCH_TOP_N articles les plus pertinents sont téléchargés (le
+        // serveur trie par pertinence : seuil, rerank, cosinus) ; le compteur affiché
+        // reste la taille TOTALE du corpus (corpus.total). Résumés tronqués à 600
+        // caractères : la liste n'affiche qu'un extrait et le panneau de détail relit
+        // le résumé complet via /documents/{id}. Avant : 10 000 articles entiers (27 Mo).
+        const corpus = await fetchScenarioCorpus(sid, { limit: SEARCH_TOP_N, abstractChars: 600 });
         if (activeSearchRef.current !== mySearch) return 0;   // supersédée pendant le fetch
         const corpusResults: SearchResult[] = (corpus.articles || []).map((a: CorpusArticle) => ({
           id: `${a.id}-0`,
@@ -3217,6 +3223,9 @@ export default function App() {
                               <span className="font-semibold text-white">{total.toLocaleString()}</span>{" "}
                               {total > 1 ? t("search.documents") : t("search.document")} {total > 1 ? t("search.relevantPlural") : t("search.relevant")}
                               {" "}· {totalPages > 1 ? `${t("search.page")} ${page}/${totalPages}` : t("search.onePage")}
+                              {total > dedupedResults.length && (
+                                <span className="text-forest-500"> · {t("search.topShown").replace("{n}", dedupedResults.length.toLocaleString())}</span>
+                              )}
                             </>
                           );
                         })()}

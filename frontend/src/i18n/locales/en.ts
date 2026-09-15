@@ -332,6 +332,7 @@ export const en: Translations = {
     relevantPlural: "relevant",
     page: "page",
     onePage: "1 page",
+    topShown: "top {n} shown — the full corpus is in the scenario",
     refreshingResults: "Updating results…",
     localBase: "Local database",
     liveApi: "Live API",
