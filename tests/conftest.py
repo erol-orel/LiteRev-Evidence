@@ -45,3 +45,35 @@ def db_conn():
     conn.autocommit = True
     yield conn
     conn.close()
+
+
+def ensure_document_columns(cur) -> bool:
+    """Give a suite-bootstrapped database the document/link columns production has.
+
+    On CI pgvector is unavailable, so schema.sql is not applied and the documents
+    table only carries the base columns; the boot DDL that adds the bibliographic,
+    screening and dedup columns ran before the table existed. Endpoints that read
+    those columns (corpus, relevant articles…) need them. Returns True when a minimal
+    `document_chunk` table had to be created (the caller drops it at teardown)."""
+    import main
+
+    cur.execute("SELECT to_regclass('document_chunk') IS NULL")
+    created_chunk_table = bool(cur.fetchone()[0])
+    if created_chunk_table:
+        cur.execute("""
+            CREATE TABLE document_chunk (
+                id BIGSERIAL PRIMARY KEY, document_id BIGINT NOT NULL,
+                chunk_index INTEGER NOT NULL DEFAULT 0, content TEXT NOT NULL DEFAULT '',
+                chunk_type TEXT, created_at TIMESTAMP DEFAULT now())""")
+    for ensure_name in ("_ensure_bibliographic_columns", "_ensure_double_blind_columns", "_ensure_dedup_columns"):
+        ensure = getattr(main, ensure_name, None)
+        if ensure:
+            ensure()
+    for col, typ in (("created_at", "TIMESTAMP DEFAULT now()"), ("url", "TEXT"), ("pmid", "TEXT"),
+                     ("year", "INTEGER"), ("source", "TEXT"), ("keywords", "TEXT"), ("language", "TEXT"),
+                     ("open_access", "BOOLEAN"), ("sample_size", "INTEGER"), ("pico_json", "JSONB"),
+                     ("project_context", "VARCHAR(32) DEFAULT 'literev'")):
+        cur.execute(f"ALTER TABLE literature_document ADD COLUMN IF NOT EXISTS {col} {typ}")
+    for col, typ in (("rerank_score", "FLOAT"), ("screening_status", "TEXT"), ("reviewer_1_status", "VARCHAR(20)")):
+        cur.execute(f"ALTER TABLE article_scenarios ADD COLUMN IF NOT EXISTS {col} {typ}")
+    return created_chunk_table

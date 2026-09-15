@@ -212,6 +212,132 @@ def run(get, sid: str, read_only: bool, slow_ms: int, big_kb: int, in_process: b
     return 1 if flagged else 0
 
 
+class _FakeOpenAI:
+    """Stand-in for llm_usage.MeteredOpenAI: random 1536-d embeddings and a canned
+    chat answer, no network. Lets the computations be timed without a key; the LLM
+    latency itself is not part of what is measured."""
+
+    def __init__(self, *args, **kwargs):
+        self._rnd = random.Random(7)
+        self.embeddings = self
+        self.chat = self
+        self.completions = self
+
+    def create(self, **kw):
+        import types
+        if "input" in kw:                                   # embeddings.create
+            inputs = kw["input"] if isinstance(kw["input"], list) else [kw["input"]]
+            data = [types.SimpleNamespace(embedding=[self._rnd.random() for _ in range(1536)]) for _ in inputs]
+            return types.SimpleNamespace(data=data, usage=None)
+        msg = types.SimpleNamespace(content="Résumé synthétique (bench).")
+        return types.SimpleNamespace(choices=[types.SimpleNamespace(message=msg)], usage=None)
+
+
+def seed_embeddings(engine, sid: str) -> int:
+    """Random pgvector embeddings on the scenario's chunks (needs the pgvector column);
+    returns the number of chunks embedded, 0 when the column is absent."""
+    from sqlalchemy import text
+    with engine.connect() as c:
+        has_col = c.execute(text(
+            "SELECT 1 FROM information_schema.columns WHERE table_name = 'document_chunk' AND column_name = 'embedding'"
+        )).scalar()
+    if not has_col:
+        return 0
+    n = 0
+    with engine.begin() as c:
+        n = c.execute(text("""
+            UPDATE document_chunk ch SET embedding = (
+                SELECT ('[' || string_agg(random()::text, ',') || ']')::vector
+                FROM generate_series(1, 1536 + 0 * ch.id)
+            )
+            WHERE ch.embedding IS NULL
+              AND ch.document_id IN (SELECT document_id FROM article_scenarios WHERE scenario_id = :sid)
+        """), {"sid": sid}).rowcount or 0
+    return n
+
+
+def run_compute(app_main, sid: str, query: str = "influenza surveillance", slow_ms: int = 60000) -> int:
+    """Time the server-side COMPUTATIONS behind the scenario page (scoring,
+    cross-encoder, brief context, clustering, knowledge graph, PRISMA, counts,
+    LLM-backed generators) in-process, with OpenAI and Cohere stubbed."""
+    import llm_usage
+    from sqlalchemy import text
+    llm_usage.MeteredOpenAI = _FakeOpenAI                       # every `from llm_usage import MeteredOpenAI`
+    os.environ["OPENAI_API_KEY"] = os.environ.get("OPENAI_API_KEY") or "sk-bench"
+    os.environ["COHERE_API_KEY"] = os.environ.get("COHERE_API_KEY") or "bench"
+    app_main._cohere_rerank = lambda q, docs, model="rerank-v3.5": [random.random() for _ in docs]
+
+    def _hwm_mb() -> float:
+        try:
+            with open("/proc/self/status") as f:
+                for line in f:
+                    if line.startswith("VmHWM:"):
+                        return int(line.split()[1]) / 1024.0
+        except Exception:
+            pass
+        return 0.0
+
+    print(f"\nSeeding embeddings for {sid}…", file=sys.stderr)
+    t0 = time.perf_counter()
+    n_emb = seed_embeddings(app_main.engine, sid)
+    print(f"  {n_emb} chunks embedded in {time.perf_counter() - t0:.1f} s", file=sys.stderr)
+    with app_main.engine.begin() as c:                          # make the scoring do real work
+        c.execute(text("UPDATE article_scenarios SET similarity_score = NULL, rerank_score = NULL WHERE scenario_id = :sid"),
+                  {"sid": sid})
+
+    def _clustering():
+        app_main._clustering_jobs.pop(sid, None)
+        app_main._run_clustering_background(sid, True, "fr")
+        job = app_main._clustering_jobs.get(sid) or {}
+        res = job.get("result") or {}
+        return f"status={job.get('status')} n_docs={res.get('n_docs')} method={res.get('method')} clusters={res.get('n_clusters')}"
+
+    def _brief_context():
+        # Same call as the evidence brief: every relevant row (light), abstract/PICO
+        # and full-text excerpts for the 30 used in the prompt.
+        arts = app_main._get_above_threshold_articles(sid, include_fulltext=True, fulltext_query=query,
+                                                      fulltext_top_docs=30, fulltext_char_cap=2800,
+                                                      full_rows=30)
+        heavy = sum(1 for a in arts if a.get("abstract"))
+        return f"{len(arts)} relevant rows, {heavy} with abstract/PICO"
+
+    steps = [
+        ("backfill title_abstract chunks", lambda: f"{app_main._backfill_title_abstract_chunks(sid)} created"),
+        ("semantic scoring (pgvector cosine)", lambda: f"{app_main._run_semantic_rerank_inline(sid, query)} scored"),
+        ("cross-encoder rerank (Cohere stubbed)", lambda: f"{app_main._run_cross_encoder_rerank(sid, query)} reranked"),
+        ("relevant articles + full-text excerpts", _brief_context),
+        ("evidence brief (LLM stubbed)", lambda: str(app_main._generate_evidence_brief_llm(sid, force=True, lang="fr"))[:60]),
+        ("clustering UMAP+HDBSCAN (summaries stubbed)", _clustering),
+        ("knowledge graph (400 nodes)", lambda: f"{len(app_main._compute_user_kg(sid).get('nodes', []))} nodes"),
+        ("prisma", lambda: f"screened={app_main.get_user_scenario_prisma(sid, None).get('records_screened')}"),
+        ("counts consistency", lambda: f"consistent={app_main._scenario_counts(sid).get('consistent')}"),
+        ("recommended actions (LLM stubbed)", lambda: str(app_main._generate_recommended_actions(sid, lang='fr'))[:60]),
+        ("variables from PICO (LLM stubbed)", lambda: str(app_main._generate_variables_from_pico(sid, lang='fr'))[:60]),
+    ]
+    rows = []
+    for label, fn in steps:
+        rss0, hwm0 = _rss_mb(), _hwm_mb()
+        t0 = time.perf_counter()
+        try:
+            note = fn()
+            err = ""
+        except Exception as e:                                  # noqa: BLE001
+            note, err = "", f"{type(e).__name__}: {str(e)[:70]}"
+        ms = (time.perf_counter() - t0) * 1000.0
+        rows.append((ms, _rss_mb() - rss0, _hwm_mb() - hwm0, label, note, err))
+    print(f"\n{'ms':>8} {'ΔRSS MB':>8} {'ΔPeak MB':>9}  computation")
+    flagged = 0
+    for ms, drss, dpeak, label, note, err in sorted(rows, key=lambda r: -r[0]):
+        flag = " SLOW" if ms > slow_ms else ""
+        if err:
+            flag += " ERROR"
+        if flag:
+            flagged += 1
+        print(f"{ms:8.0f} {drss:8.1f} {dpeak:9.1f}  {label:44s} {note or err}{flag}")
+    print(f"\n{len(rows)} computations, {flagged} flagged (slow > {slow_ms} ms or error).")
+    return 1 if flagged else 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--base", help="API base URL (HTTP mode); omit for in-process mode")
@@ -219,6 +345,9 @@ def main() -> int:
     ap.add_argument("--seed", type=int, default=0, help="in-process mode: seed a synthetic corpus of N articles")
     ap.add_argument("--cleanup", action="store_true", help="in-process mode: delete the synthetic corpus at the end")
     ap.add_argument("--read-only", action="store_true", help="skip endpoints that may start background work")
+    ap.add_argument("--compute", action="store_true",
+                    help="in-process mode: also time the computations (scoring, clustering, graph, brief…) "
+                         "with OpenAI/Cohere stubbed; seeds random embeddings on the scenario's chunks")
     ap.add_argument("--slow-ms", type=int, default=2000)
     ap.add_argument("--big-kb", type=int, default=2000)
     args = ap.parse_args()
@@ -255,7 +384,10 @@ def main() -> int:
         return r.status_code, len(r.content)
 
     try:
-        return run(get, sid, args.read_only, args.slow_ms, args.big_kb, in_process=True)
+        rc = run(get, sid, args.read_only, args.slow_ms, args.big_kb, in_process=True)
+        if args.compute:
+            rc = max(rc, run_compute(app_main, sid))
+        return rc
     finally:
         if args.cleanup and args.seed:
             cleanup(app_main.engine, sid)
