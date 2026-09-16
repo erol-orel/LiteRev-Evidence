@@ -13,7 +13,7 @@ from fastapi import UploadFile, File
 from .core import app, require_api_key
 from .gesica import _get_db_gesica_scenario_or_404, get_scenario_detail
 from .clustering import get_user_scenario_clustering, get_user_scenario_clustering_status
-from .knowledge_graph import _compute_user_kg
+from .knowledge_graph import _compute_user_kg, get_user_scenario_concept_graph_payload
 from .double_blind import get_user_scenario_conflicts, get_user_scenario_kappa
 from .review import (
     extract_user_scenario_article_pico,
@@ -143,6 +143,12 @@ def get_knowledge_graph(
 ) -> dict[str, Any]:
     """Delegue a l'implementation user-scenario unifiee (pipeline unique)."""
     return _compute_user_kg(scenario_id, max_nodes, min_similarity)
+
+
+@app.get("/gesica/scenarios/{scenario_id}/concept-graph")
+def get_concept_graph(scenario_id: str, refresh: bool = False) -> dict[str, Any]:
+    """Carte des concepts — delegue a l'implementation user-scenario unifiee."""
+    return get_user_scenario_concept_graph_payload(scenario_id, refresh)
 
 
 # ─── PDF EVIDENCE BRIEF CÔTÉ SERVEUR ─────────────────────────────────────────

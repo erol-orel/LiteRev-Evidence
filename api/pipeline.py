@@ -68,6 +68,13 @@ from .clustering import (
     _run_clustering_background,
 )
 from .knowledge_graph import _precompute_user_kg
+
+
+def _auto_pipeline_after_search() -> bool:
+    """Le pipeline complet d'enrichissement enchaîne-t-il automatiquement après une
+    recherche (corpus construit ET scoré) ? Oui par défaut ; AUTO_PIPELINE_AFTER_SEARCH=0
+    pour s'en tenir à la recherche (les onglets calculent alors à l'ouverture)."""
+    return os.getenv("AUTO_PIPELINE_AFTER_SEARCH", "1").strip().lower() not in ("0", "false", "no", "off")
 from .scenarios import _scenario_counts, _user_scenario_pipeline_jobs, _user_scenario_populate_jobs
 
 def _run_user_scenario_populate(
@@ -1228,6 +1235,7 @@ def _run_user_scenario_populate(
         _set_phase("scoring")
         _n_scored = 0
         _scoring_failed = False
+        _auto_ok = [False]           # corpus scoré → le pipeline complet peut enchaîner
         try:
             _backfill_title_abstract_chunks(scenario_id)  # docs liés sans chunk résumé
             _n_scored = _run_semantic_rerank_inline(scenario_id, query)
@@ -1249,6 +1257,7 @@ def _run_user_scenario_populate(
                       AND d.abstract IS NOT NULL AND length(TRIM(d.abstract)) >= 30
                 """), {"sid": scenario_id}).scalar() or 0
                 _ok = (not _scoring_failed) and (_n_scored > 0 or _scorable == 0)
+                _auto_ok[0] = bool(_ok)
                 conn.execute(text("""
                     UPDATE user_scenarios SET populate_status = :st, updated_at = NOW() WHERE id = :sid
                 """), {"st": "done" if _ok else "error", "sid": scenario_id})
@@ -1308,6 +1317,17 @@ def _run_user_scenario_populate(
                     _precompute_user_kg(_sid)                # knowledge graph → cache DB
                 except Exception as _e2:
                     logger.warning(f"Précalcul KG {_sid}: {_e2}")
+                # Enrichissement COMPLET automatique (embeddings, PICO, métadonnées, résumés,
+                # brief, variables et modèle, actions, carte des concepts) dès que le corpus
+                # est construit et scoré : un scénario est prêt sans qu'on ait à l'épingler.
+                # AUTO_PIPELINE_AFTER_SEARCH=0 pour s'en tenir à la recherche seule.
+                if _auto_ok[0] and _auto_pipeline_after_search():
+                    try:
+                        from .scenarios import _launch_full_pipeline
+                        _st = _launch_full_pipeline(_sid, lang=lang)
+                        logger.info(f"Auto full-pipeline après recherche {_sid}: {_st}")
+                    except Exception as _e3:
+                        logger.warning(f"Auto full-pipeline {_sid}: {_e3}")
             try:
                 import threading as _vth
                 _vth.Thread(target=_post_done_bg, args=(scenario_id, query), daemon=True).start()
@@ -1350,7 +1370,7 @@ def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict
     import time as _time
 
     STEP_ORDER = ["ingest", "fulltext", "embed", "rerank", "pico", "metadata",
-                  "clustering", "knowledge_graph", "evidence", "variables"]
+                  "clustering", "knowledge_graph", "evidence", "variables", "actions"]
 
     def update_step(step: str, status: str, **kwargs):
         job = _user_scenario_pipeline_jobs.get(scenario_id, {})
@@ -1382,18 +1402,8 @@ def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict
     _user_scenario_pipeline_jobs[scenario_id] = {
         "overall_status": "running",
         "current_step": "ingest",
-        "steps": {
-            "ingest": {"status": "pending"},
-            "fulltext": {"status": "pending"},
-            "embed": {"status": "pending"},
-            "rerank": {"status": "pending"},
-            "pico": {"status": "pending"},
-            "metadata": {"status": "pending"},
-            "clustering": {"status": "pending"},
-            "knowledge_graph": {"status": "pending"},
-            "evidence": {"status": "pending"},
-            "variables": {"status": "pending"},
-        },
+        "lang": lang or "fr",
+        "steps": {k: {"status": "pending"} for k in STEP_ORDER},
     }
 
     try:
@@ -2252,7 +2262,12 @@ def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict
         try:
             update_step("knowledge_graph", "running")
             _precompute_user_kg(scenario_id)
-            update_step("knowledge_graph", "done")
+            # Carte des concepts : annotation LLM (une fois par article) des articles
+            # pertinents sans concepts, puis cache — l'onglet n'a rien à calculer.
+            from .knowledge_graph import _precompute_concept_graph  # lazy: keeps the import list short
+            _cg = _precompute_concept_graph(scenario_id, extract=True) or {}
+            update_step("knowledge_graph", "done", concepts_articles=_cg.get("n_with_concepts"),
+                        concept_nodes=len(_cg.get("nodes") or []))
         except Exception as _e_kg:
             logger.warning(f"Précalcul KG pipeline {scenario_id}: {_e_kg}")
             update_step("knowledge_graph", "error", error=str(_e_kg))
@@ -2271,6 +2286,13 @@ def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict
         try:
             update_step("variables", "running")
             _generate_variables_from_pico(scenario_id, lang=lang or "fr")
+            # Projection SEIR par défaut (365 j, 300 tirages) calculée et mise en cache ICI :
+            # l'onglet Modèle l'affiche sans simuler sous les yeux de l'utilisateur.
+            try:
+                from .seir import _precompute_seir_projection  # lazy: seir is loaded after this module
+                _precompute_seir_projection(scenario_id)
+            except Exception as _e_seir:
+                logger.warning(f"Précalcul SEIR {scenario_id}: {_e_seir}")
             update_step("variables", "done")
         except Exception as _e_var:
             logger.warning(f"Génération variables pipeline {scenario_id}: {_e_var}")

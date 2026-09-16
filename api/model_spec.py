@@ -165,6 +165,12 @@ def _ensure_spec_proposal_columns():
         conn.execute(text("ALTER TABLE scenario_settings ADD COLUMN IF NOT EXISTS clustering_generated_at TIMESTAMP"))
         conn.execute(text("ALTER TABLE scenario_settings ADD COLUMN IF NOT EXISTS knowledge_graph_json JSONB"))
         conn.execute(text("ALTER TABLE scenario_settings ADD COLUMN IF NOT EXISTS kg_generated_at TIMESTAMP"))
+        # Carte des concepts (knowledge_graph.py) et projection SEIR par défaut (seir.py) :
+        # calculées par le pipeline, servies telles quelles à l'ouverture de l'onglet.
+        conn.execute(text("ALTER TABLE scenario_settings ADD COLUMN IF NOT EXISTS concept_graph_json JSONB"))
+        conn.execute(text("ALTER TABLE scenario_settings ADD COLUMN IF NOT EXISTS concept_graph_generated_at TIMESTAMP"))
+        conn.execute(text("ALTER TABLE scenario_settings ADD COLUMN IF NOT EXISTS seir_projection_json JSONB"))
+        conn.execute(text("ALTER TABLE scenario_settings ADD COLUMN IF NOT EXISTS seir_projection_generated_at TIMESTAMP"))
         # Série OBSERVÉE (réelle) attachée au modèle SEIR pour superposition + calibration.
         conn.execute(text("ALTER TABLE scenario_settings ADD COLUMN IF NOT EXISTS seir_observed_json JSONB"))
     logger.info("Colonnes de proposition de spec vérifiées/créées.")

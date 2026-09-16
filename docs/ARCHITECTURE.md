@@ -177,6 +177,26 @@ erDiagram
   knowledge-graph caches are rebuilt at each corpus build and otherwise kept for
   30 days (`VIZ_CACHE_TTL_S`), not 24 h: an expiry only re-ran a 40 s computation
   in front of the user the day after the build.
+- **Nothing waits for a click.** A search whose corpus is built and scored
+  launches the full pipeline by itself (`AUTO_PIPELINE_AFTER_SEARCH`, on by
+  default), so an unpinned scenario is enriched like a pinned one. The pipeline
+  also caches the default SEIR projection (`seir_projection_json`, stale as soon
+  as the variables are regenerated) and the concept map (`concept_graph_json`).
+  At startup the API compiles the UMAP/HDBSCAN kernels in the background
+  (`WARM_ON_STARTUP`), relaunches the searches and pipelines a restart
+  interrupted, in the language they were started in (`pipeline_lang`,
+  `RESUME_ON_STARTUP`), instead of marking them failed.
+- **Concept map** (`knowledge_graph.py`): each relevant article gets typed
+  concepts — pathogen, vector, host, population, exposure, intervention, outcome,
+  method, place — normalised once by the LLM from its PICO (English and French
+  labels, `literature_document.concepts_json`), plus the structured fields
+  (country ISO2, study design, setting, keywords). Nodes are concepts sized by
+  article count, links are co-occurrences in the same article; the payload also
+  carries the most documented chains (subject › exposure › outcome), the evidence
+  gaps (frequent pairs never studied together) and the concepts of the corpus's
+  latest year. Served from cache; when articles still lack concepts the endpoint
+  answers at once from the structured fields and normalises the rest in the
+  background (`enriching`), the interface re-reading until it is done.
   The built-in (GESICA) catalogue is stored in French; `gesica_i18n.py` carries
   its English titles, descriptions and recommended actions, applied by the list
   and detail endpoints when `lang=en`. Status labels and messages that the
@@ -317,7 +337,7 @@ for the scripts, tools and tests.
 | `terrain` | `/terrain/*` field data |
 | `living_review` | living review status, run and trigger |
 | `clustering` | clustering jobs, UMAP/HDBSCAN core, visualisation cache, per-language summaries, endpoints |
-| `knowledge_graph` | graph construction and endpoints |
+| `knowledge_graph` | the article similarity network, and the **concept map**: typed concepts per article (`concepts_json`, normalised once by the LLM in both languages), co-occurrence links, chains, evidence gaps, `/concept-graph` |
 | `double_blind` | double-blind decisions, conflicts, Cohen's kappa |
 | `alerts` | alert subscriptions, digests, SMTP |
 | `scenarios` | `user_scenarios` DDL, CRUD, folders, detail, corpus endpoint, populate/pipeline launchers and job dicts, counts, activity, embedding status, model status |

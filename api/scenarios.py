@@ -122,6 +122,9 @@ def _ensure_user_scenarios_table() -> None:
             "ALTER TABLE user_scenarios ADD COLUMN IF NOT EXISTS pipeline_step VARCHAR(80)",
             "ALTER TABLE user_scenarios ADD COLUMN IF NOT EXISTS pipeline_progress INTEGER DEFAULT 0",
             "ALTER TABLE user_scenarios ADD COLUMN IF NOT EXISTS pipeline_started_at TIMESTAMP",
+            # Langue de l'interface qui a lancé le dernier populate/pipeline : un job
+            # interrompu par un redémarrage est relancé dans la même langue.
+            "ALTER TABLE user_scenarios ADD COLUMN IF NOT EXISTS pipeline_lang VARCHAR(8)",
             "ALTER TABLE user_scenarios ADD COLUMN IF NOT EXISTS article_count INTEGER DEFAULT 0",
             "ALTER TABLE user_scenarios ADD COLUMN IF NOT EXISTS search_strategy JSONB",
             # Chiffres PRISMA « identification » du dernier populate / rebuild (enregistrements
@@ -1080,8 +1083,9 @@ def _launch_populate_job(scenario_id: str, query: str, filters: dict, max_result
     # du run ; les orphelins d'un redémarrage sont passés à 'error' au démarrage.
     try:
         with engine.begin() as _c:
-            _c.execute(text("UPDATE user_scenarios SET populate_status = 'running', updated_at = NOW() "
-                            "WHERE id = :sid"), {"sid": scenario_id})
+            _c.execute(text("UPDATE user_scenarios SET populate_status = 'running', pipeline_lang = :lang, "
+                            "updated_at = NOW() WHERE id = :sid"),
+                       {"sid": scenario_id, "lang": _norm_lang(lang) or "fr"})
     except Exception as _e:                              # noqa: BLE001 - jamais bloquant
         logger.warning(f"populate_status=running {scenario_id}: {_e}")
     def _guarded() -> None:
@@ -1199,6 +1203,15 @@ def _launch_full_pipeline(scenario_id: str, max_results: int = LIVE_MAX_PER_SOUR
                 "clustering", "knowledge_graph", "evidence", "variables", "actions")},
             "lang": _norm_lang(lang) or "fr",
         }
+    # Persister l'état « démarre » et la langue : un redémarrage du serveur relance le
+    # pipeline interrompu dans la même langue (schema_boot.startup_event).
+    try:
+        with engine.begin() as _c:
+            _c.execute(text("UPDATE user_scenarios SET pipeline_status = 'starting', pipeline_lang = :lang, "
+                            "updated_at = NOW() WHERE id = :sid"),
+                       {"sid": scenario_id, "lang": _norm_lang(lang) or "fr"})
+    except Exception as _e:                              # noqa: BLE001 - jamais bloquant
+        logger.warning(f"pipeline_status=starting {scenario_id}: {_e}")
     threading.Thread(
         target=_run_user_scenario_full_pipeline,
         args=(scenario_id, query, row.get("filters") or {}, max_results, _norm_lang(lang) or "fr"),

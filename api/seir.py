@@ -257,6 +257,75 @@ def _seir_projection_payload(
     }
 
 
+# ── Cache de la projection PAR DÉFAUT (365 j, 300 tirages, géographie du scénario) ──
+# La projection est une simulation numérique (pas de LLM) mais ses 300 tirages prenaient
+# quelques secondes à chaque ouverture de l'onglet Modèle. Le pipeline la calcule après
+# les variables et la range dans scenario_settings ; l'onglet la lit telle quelle. Elle
+# est périmée dès que le spec (variables_json) est plus récent qu'elle. La série observée
+# (`observed`) n'est pas mise en cache : elle est relue à chaque fois (un jeu de données
+# peut avoir été attaché entre-temps).
+
+def _json_default(o):
+    return o.item() if hasattr(o, "item") else str(o)
+
+
+def _seir_cache_read(scenario_id: str) -> dict | None:
+    with engine.connect() as conn:
+        row = conn.execute(text(
+            "SELECT seir_projection_json AS j, seir_projection_generated_at AS at, "
+            "variables_generated_at AS vat FROM scenario_settings WHERE scenario_id = :sid"
+        ), {"sid": scenario_id}).mappings().first()
+    if not row or not row["j"]:
+        return None
+    if row["vat"] is not None and row["at"] is not None and row["at"] < row["vat"]:
+        return None                                  # spec régénéré depuis : à recalculer
+    return dict(row["j"])
+
+
+def _seir_cache_write(scenario_id: str, payload: dict) -> None:
+    try:
+        with engine.begin() as conn:
+            conn.execute(text("""
+                INSERT INTO scenario_settings (scenario_id, seir_projection_json, seir_projection_generated_at, updated_at)
+                VALUES (:sid, CAST(:p AS jsonb), NOW(), NOW())
+                ON CONFLICT (scenario_id) DO UPDATE
+                SET seir_projection_json = CAST(:p AS jsonb), seir_projection_generated_at = NOW(), updated_at = NOW()
+            """), {"sid": scenario_id, "p": json.dumps(payload, default=_json_default)})
+    except Exception as _e:
+        logger.warning(f"seir cache write {scenario_id}: {_e}")
+
+
+def _default_seir_projection(scenario_id: str, refresh: bool = False) -> dict[str, Any]:
+    """Projection par défaut servie depuis le cache quand il est à jour, sinon calculée et
+    mise en cache. `from_cache` dit d'où elle vient."""
+    if not refresh:
+        try:
+            cached = _seir_cache_read(scenario_id)
+        except Exception as _e:
+            logger.warning(f"seir cache read {scenario_id}: {_e}")
+            cached = None
+        if cached is not None:
+            cached["from_cache"] = True
+            if cached.get("applicable"):
+                try:
+                    cached["observed"] = _seir_observed_overlay(
+                        scenario_id, cached.get("effective_parameters") or {},
+                        float(cached.get("population") or 1e6), float(cached.get("initial_infected") or 10), 365)
+                except Exception:
+                    cached["observed"] = None
+            return cached
+    payload = _seir_projection_payload(scenario_id, 365, None, None, None, 300, overrides=None)
+    _seir_cache_write(scenario_id, {k: v for k, v in payload.items() if k != "observed"})
+    payload["from_cache"] = False
+    return payload
+
+
+def _precompute_seir_projection(scenario_id: str) -> dict[str, Any]:
+    """Appelé par le pipeline après la génération des variables : (re)calcule et range la
+    projection par défaut."""
+    return _default_seir_projection(scenario_id, refresh=True)
+
+
 @app.get("/scenarios/{scenario_id}/seir/projection")
 def get_seir_projection(
     scenario_id: str,
@@ -265,12 +334,18 @@ def get_seir_projection(
     population: float | None = None,
     initial_infected: float | None = None,
     n_samples: int = 300,
+    refresh: bool = False,
 ) -> dict[str, Any]:
     """Projection compartimentale (famille SEIR) d'un scénario, paramétrée par la
     littérature EXTRAITE (model_spec.epidemic_parameters). Séries incidence / prévalence
     / cumul / décès / R_eff AVEC bandes d'incertitude + résumé + paramètres source (avec
     provenance). Population + cas initiaux DÉRIVÉS de la géographie du scénario sauf
-    override en query. `applicable=false` si non transmissible. Lecture seule."""
+    override en query. `applicable=false` si non transmissible. Lecture seule.
+    Aux paramètres par défaut, la projection vient du cache rempli par le pipeline
+    (`from_cache`) ; `refresh=true` force le recalcul."""
+    if (days == 365 and start_date is None and population is None
+            and initial_infected is None and n_samples == 300):
+        return _default_seir_projection(scenario_id, refresh=refresh)
     return _seir_projection_payload(scenario_id, days, start_date, population,
                                     initial_infected, n_samples, overrides=None)
 

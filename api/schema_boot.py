@@ -191,6 +191,35 @@ def _ensure_performance_indexes() -> None:
 # ─────────────────────────────────────────────────────────────────────────────
 # Startup
 # ─────────────────────────────────────────────────────────────────────────────
+def _warm_clustering_kernels() -> None:
+    """Compile les noyaux numba d'UMAP et d'HDBSCAN sur un jeu minuscule, une fois par
+    processus. Sans cela, la PREMIÈRE visualisation après un redémarrage payait ≈ 30 s de
+    compilation sous les yeux de l'utilisateur (et le préchauffage figurait au runbook
+    comme geste manuel). Best-effort : n'échoue jamais, ne bloque pas le démarrage."""
+    import time as _t
+    t0 = _t.time()
+    try:
+        import numpy as _np
+        X = _np.random.RandomState(0).rand(60, 16).astype("float32")
+        try:
+            import umap as _umap
+            _umap.UMAP(n_neighbors=8, n_components=2, min_dist=0.1, random_state=42).fit_transform(X)
+        except Exception as _e:                              # noqa: BLE001
+            logger.info(f"warm-up UMAP: {_e}")
+        try:
+            import hdbscan as _hdb
+            _hdb.HDBSCAN(min_cluster_size=5).fit(X)
+        except Exception as _e:                              # noqa: BLE001
+            logger.info(f"warm-up HDBSCAN: {_e}")
+        logger.info(f"Warm-up clustering kernels: {_t.time() - t0:.1f} s")
+    except Exception as _e:                                  # noqa: BLE001
+        logger.warning(f"warm-up: {_e}")
+
+
+def _startup_flag(name: str, default: str = "1") -> bool:
+    return os.getenv(name, default).strip().lower() not in ("0", "false", "no", "off")
+
+
 @app.on_event("startup")
 def startup_event() -> None:
     from .scenarios import _pipeline_jobs_lock, _user_scenario_pipeline_jobs  # lazy: scenarios is loaded after this module
@@ -211,6 +240,16 @@ def startup_event() -> None:
         ).start()
     except Exception as _e:
         logger.warning(f"spawn _ensure_performance_indexes: {_e}")
+
+    # Préchauffage des noyaux UMAP/HDBSCAN (≈ 30 s de compilation numba, en arrière-plan),
+    # pour que la première visualisation après ce redémarrage ne les paie pas.
+    # WARM_ON_STARTUP=0 pour désactiver (tests, CI).
+    if _startup_flag("WARM_ON_STARTUP"):
+        try:
+            import threading as _warm_threading
+            _warm_threading.Thread(target=_warm_clustering_kernels, daemon=True, name="warm-umap").start()
+        except Exception as _e:
+            logger.warning(f"spawn warm-up: {_e}")
 
     # Recherche plein texte : remplissage initial puis rafraîchissement de
     # document_search en arrière-plan (cf. lexical_search.py). Tant que le remplissage
@@ -239,29 +278,48 @@ def startup_event() -> None:
     try:
         with engine.connect() as _startup_conn:
             _orphan_rows = _startup_conn.execute(text("""
-                SELECT id, query, filters
+                SELECT id, query, filters, pipeline_lang
                 FROM user_scenarios
                 WHERE pipeline_status IN ('running', 'starting')
                   AND COALESCE(is_system, FALSE) = FALSE
             """)).mappings().fetchall()
-            _pop_orphans = _startup_conn.execute(text("""
-                SELECT COUNT(*) FROM user_scenarios
+            _pop_orphan_rows = _startup_conn.execute(text("""
+                SELECT id, query, filters, pipeline_lang FROM user_scenarios
                 WHERE populate_status = 'running'
                   AND COALESCE(is_system, FALSE) = FALSE
-            """)).scalar() or 0
+            """)).mappings().fetchall()
 
-        # Réinitialiser les populate orphelins à 'error'
-        if _pop_orphans:
-            with engine.begin() as _c:
-                _c.execute(text("""
-                    UPDATE user_scenarios
-                    SET populate_status = 'error', updated_at = NOW()
-                    WHERE populate_status = 'running'
-                      AND COALESCE(is_system, FALSE) = FALSE
-                """))
-            logger.warning(f"Startup: {_pop_orphans} populate(s) orphelin(s) reinitialisé(s) à 'error'.")
+        # Recherches orphelines (populate 'running' au moment du redémarrage) : RELANCÉES,
+        # même requête et même langue, plutôt que passées à 'error' — la page de recherche
+        # qui les attendait retrouve un job en cours, et le pipeline complet enchaîne
+        # ensuite comme après toute recherche. RESUME_ON_STARTUP=0 : marquées 'error'.
+        _relaunched_pop: set[str] = set()
+        if _pop_orphan_rows:
+            if _startup_flag("RESUME_ON_STARTUP"):
+                from .scenarios import LIVE_MAX_PER_SOURCE, _launch_populate_job  # lazy: scenarios is loaded after this module
+                for _po in _pop_orphan_rows:
+                    if not _po.get("query"):
+                        continue
+                    try:
+                        _launch_populate_job(_po["id"], _po["query"], _po.get("filters") or {},
+                                             LIVE_MAX_PER_SOURCE, True, _po.get("pipeline_lang"))
+                        _relaunched_pop.add(_po["id"])
+                        logger.warning(f"Startup: recherche {_po['id']} interrompue par le redémarrage → relancée.")
+                    except Exception as _e_po:
+                        logger.warning(f"Startup: relance populate {_po['id']}: {_e_po}")
+            else:
+                with engine.begin() as _c:
+                    _c.execute(text("""
+                        UPDATE user_scenarios
+                        SET populate_status = 'error', updated_at = NOW()
+                        WHERE populate_status = 'running'
+                          AND COALESCE(is_system, FALSE) = FALSE
+                    """))
+                logger.warning(f"Startup: {len(_pop_orphan_rows)} populate(s) orphelin(s) reinitialisé(s) à 'error'.")
 
-        # Relancer automatiquement les pipelines interrompus
+        # Relancer automatiquement les pipelines interrompus (sauf ceux dont la recherche
+        # vient d'être relancée : le pipeline enchaînera à la fin de celle-ci).
+        _orphan_rows = [r for r in _orphan_rows if r["id"] not in _relaunched_pop]
         if _orphan_rows:
             import threading as _startup_threading
             logger.warning(
@@ -285,27 +343,21 @@ def startup_event() -> None:
                     logger.warning(f"Startup: pipeline {_oid} sans requête → marqué 'failed'.")
                     continue
                 # Initialiser le job en mémoire
+                _olang = (_orphan.get("pipeline_lang") or "fr").lower()
                 with _pipeline_jobs_lock:
                     _user_scenario_pipeline_jobs[_oid] = {
                         "overall_status": "starting",
                         "current_step": "ingest",
                         "auto_restarted": True,
-                        "steps": {
-                            "ingest":     {"status": "pending"},
-                            "fulltext":   {"status": "pending"},
-                            "embed":      {"status": "pending"},
-                            "rerank":     {"status": "pending"},
-                            "pico":       {"status": "pending"},
-                            "metadata":   {"status": "pending"},
-                            "clustering": {"status": "pending"},
-                            "knowledge_graph": {"status": "pending"},
-                            "evidence":   {"status": "pending"},
-                            "variables":  {"status": "pending"},
-                        },
+                        "lang": _olang,
+                        "steps": {k: {"status": "pending"} for k in (
+                            "ingest", "fulltext", "embed", "rerank", "pico", "metadata",
+                            "clustering", "knowledge_graph", "evidence", "variables", "actions")},
                     }
                 _t = _startup_threading.Thread(
                     target=_run_user_scenario_full_pipeline,
                     args=(_oid, _oquery, _ofilters),
+                    kwargs={"lang": _olang},              # même langue qu'avant l'interruption
                     daemon=True,
                 )
                 _t.start()
@@ -740,6 +792,8 @@ def _ensure_bibliographic_columns():
         "ALTER TABLE literature_document ADD COLUMN IF NOT EXISTS screened_at TIMESTAMP",
         "ALTER TABLE literature_document ADD COLUMN IF NOT EXISTS pico_json JSONB",
         "ALTER TABLE literature_document ADD COLUMN IF NOT EXISTS metadata_json JSONB",
+        # Concepts typés normalisés par le LLM (carte des concepts) — une fois par article.
+        "ALTER TABLE literature_document ADD COLUMN IF NOT EXISTS concepts_json JSONB",
         "ALTER TABLE literature_document ADD COLUMN IF NOT EXISTS citation_count INTEGER",
         "ALTER TABLE literature_document ADD COLUMN IF NOT EXISTS quality_score DOUBLE PRECISION",
         "ALTER TABLE literature_document ADD COLUMN IF NOT EXISTS keywords TEXT",

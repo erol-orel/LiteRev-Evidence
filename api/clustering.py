@@ -202,10 +202,16 @@ def _clustering_docs(scenario_id: str, threshold: float, cap: int | None = None)
 # Un SEUL couple load/save par visualisation, partagé par le pipeline, le
 # précalcul et les endpoints — plus de duplication ni de cache /tmp éphémère.
 
+_VIZ_COLS = {
+    "clustering": ("clustering_json", "clustering_generated_at"),
+    "kg": ("knowledge_graph_json", "kg_generated_at"),
+    "concepts": ("concept_graph_json", "concept_graph_generated_at"),
+}
+
+
 def _save_viz_cache(scenario_id: str, col: str, payload: dict) -> None:
-    """Upsert un JSON de visualisation dans scenario_settings.{col}_json (+ _at)."""
-    _at = "clustering_generated_at" if col == "clustering" else "kg_generated_at"
-    _jc = f"{col}_json" if col == "clustering" else "knowledge_graph_json"
+    """Upsert un JSON de visualisation dans scenario_settings (colonnes de _VIZ_COLS)."""
+    _jc, _at = _VIZ_COLS[col]
     try:
         with engine.begin() as _c:
             _c.execute(text(f"""
@@ -227,8 +233,7 @@ VIZ_CACHE_TTL_S = 30 * 86400
 
 def _load_viz_cache(scenario_id: str, col: str, ttl: int = VIZ_CACHE_TTL_S) -> dict | None:
     """Lit le JSON de visualisation en cache s'il est frais (< ttl secondes)."""
-    _at = "clustering_generated_at" if col == "clustering" else "kg_generated_at"
-    _jc = f"{col}_json" if col == "clustering" else "knowledge_graph_json"
+    _jc, _at = _VIZ_COLS[col]
     try:
         with engine.connect() as _c:
             row = _c.execute(text(

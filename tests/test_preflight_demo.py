@@ -43,6 +43,9 @@ class FakeApi:
             return 200, {"status": "running"}
         if "/knowledge-graph" in path:
             return 200, {"nodes": [1, 2, 3], "edges": [1]}
+        if "/concept-graph" in path:
+            return 200, {"kind": "concepts", "nodes": [1, 2], "edges": [1], "source": "llm",
+                         "enriching": False, "n_missing_concepts": 0}
         if path.endswith("/evidence-brief"):
             return 200, {"corpus_stats": {"total": 40}}
         if "/evidence-brief/llm" in path:
