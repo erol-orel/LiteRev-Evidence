@@ -138,6 +138,28 @@ def test_search_is_not_on_the_expensive_rate_limit():
         assert not any(rx.match(sibling) for rx in _EXPENSIVE_PATTERNS), sibling
 
 
+# ── Moving the threshold invalidates everything computed from the old corpus ─
+def test_moving_the_threshold_drops_every_artefact_computed_from_the_old_corpus():
+    """Each cached artefact is a function of the relevant subset, so changing the
+    threshold must drop it. The three visualisations were nulled and the brief and the
+    variables self-invalidate (their fingerprint carries the threshold), but the
+    recommended actions were keyed only by (scenario, language): moving the slider from
+    0.45 to 0.60 went on serving, indefinitely, actions drawn from the previous corpus
+    while the tab presented them as the current one's."""
+    import inspect
+
+    from api import relevance
+
+    src = inspect.getsource(relevance.update_scenario_settings)
+    invalidated = src.split('if "similarity_threshold" in updates:', 1)[1]
+    invalidated = invalidated.split('if "variables_json" in updates:', 1)[0]
+    for column in ("clustering_json", "knowledge_graph_json", "concept_graph_json",
+                   "recommended_actions_json"):
+        assert f"{column} = NULL" in invalidated, f"{column} survives a threshold change"
+    # The language marker goes too, or a stale cache is served as if it were fresh.
+    assert "recommended_actions_lang = NULL" in invalidated
+
+
 # ── data_connectors: the module docstring lists the connectors that exist ────
 def test_connector_docstring_lists_every_registered_connector():
     """The docstring said "two connectors shipped here" long after six were registered,
