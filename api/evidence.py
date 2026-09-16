@@ -290,7 +290,11 @@ def get_user_scenario_evidence_brief_pdf(scenario_id: str):
               AND d.is_duplicate IS NOT TRUE AND d.abstract IS NOT NULL
               AND COALESCE(ars.screening_status, d.screening_status) IS DISTINCT FROM 'excluded'
               AND (COALESCE(ars.screening_status, d.screening_status) = 'included' OR COALESCE(ars.similarity_score, 0) >= :thr)
-            ORDER BY d.quality_score DESC NULLS LAST, d.year DESC NULLS LAST
+            -- « Articles les plus pertinents » dans le PDF : trier par qualité donnait une
+            -- liste qui n'est pas celle du tri par pertinence de l'application.
+            ORDER BY (COALESCE(ars.screening_status, d.screening_status) = 'included') DESC,
+                     COALESCE(ars.rerank_score, ars.similarity_score, 0) DESC NULLS LAST,
+                     d.quality_score DESC NULLS LAST, d.year DESC NULLS LAST
             LIMIT 100000
         """), {"sid": scenario_id, "thr": eff_thr}).mappings().all()
         study_designs = _conn.execute(text("""
@@ -374,6 +378,13 @@ def get_user_scenario_evidence_brief_pdf(scenario_id: str):
 
 _BRIEF_GENERATION_JOBS: dict[str, dict] = {}
 
+# Version du CONTEXTE du brief, partagée par l'écrivain et le lecteur du cache. Une SEULE
+# constante, parce que les deux ont divergé une fois (« v4 » écrit, « v3 » cherché) :
+# l'empreinte ne correspondait plus jamais, /evidence-brief/llm répondait « génération en
+# cours » indéfiniment, relançait un thread à chaque sondage, et le PDF sortait sans sa
+# partie narrative. Changer cette valeur invalide UNE fois les briefs existants.
+BRIEF_CONTEXT_VERSION = "brief-v4-full-corpus-digest"
+
 
 def _generate_evidence_brief_llm(scenario_id: str, force: bool = False, lang: str | None = None) -> dict[str, Any]:
     """
@@ -403,7 +414,7 @@ def _generate_evidence_brief_llm(scenario_id: str, force: bool = False, lang: st
     # brief périmé (mauvaise langue / corpus modifié) tant qu'il avait moins de 24h.
     # v4 : le prompt porte désormais le digest du corpus COMPLET (et plus seulement les
     # 30 articles reproduits). Le suffixe invalide une fois les briefs écrits sans lui.
-    _brief_fp = _evidence_fingerprint([a["id"] for a in articles], threshold, lang, "brief-v4-full-corpus-digest")
+    _brief_fp = _evidence_fingerprint([a["id"] for a in articles], threshold, lang, BRIEF_CONTEXT_VERSION)
     if not force:
         with engine.connect() as conn:
             row = conn.execute(text("""
@@ -641,7 +652,7 @@ def get_llm_evidence_brief(scenario_id: str, lang: str | None = Query(None)) -> 
                 "Aucun article au-dessus du seuil. Ajoutez des articles ou abaissez le seuil de similarité.",
                 "No article above the threshold. Add articles or lower the similarity threshold.")}
 
-    _want_fp = _evidence_fingerprint([a["id"] for a in articles], threshold, lang, "brief-v3-relevant-fulltext")
+    _want_fp = _evidence_fingerprint([a["id"] for a in articles], threshold, lang, BRIEF_CONTEXT_VERSION)
 
     with engine.connect() as conn:
         row = conn.execute(text("""

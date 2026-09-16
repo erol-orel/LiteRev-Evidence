@@ -10,7 +10,7 @@ import re
 import threading as _threading_ncbi
 from typing import Any
 
-from fastapi import Depends
+from fastapi import Depends, Query
 from sqlalchemy import text
 
 from .core import RELIEFWEB_APPNAME, app, engine, logger, require_api_key
@@ -569,9 +569,15 @@ def _federated_live_search(
 def search_live(
     scenario_id: str,
     max_per_source: int = 50,
+    lang: str | None = Query(None),
     _: None = Depends(require_api_key),
 ) -> dict[str, Any]:
-    """Live federated search across the external sources in parallel."""
+    """Live federated search across the external sources in parallel.
+
+    `lang` : langue de l'interface qui lance la recherche. Cinquième point d'entrée qui
+    construit un corpus, il l'ignorait : la suite (résumés de clusters, brief, variables,
+    actions) était donc écrite en français quel que soit le toggle, et un redémarrage
+    reprenait le scénario en français puisque `pipeline_lang` avait été fixé à 'fr'."""
     from .scenarios import _launch_populate_job  # lazy: scenarios is loaded after this module
     row = _get_user_scenario_or_404(scenario_id)
     query = row["query"]
@@ -613,7 +619,7 @@ def search_live(
     ingesting_background = False
     if new_count > 0:
         try:
-            status = _launch_populate_job(scenario_id, query, row.get("filters") or {}, 200)
+            status = _launch_populate_job(scenario_id, query, row.get("filters") or {}, 200, lang=lang)
             ingesting_background = (status == "started")
         except Exception as _be:
             logger.warning(f"search_live background ingest error: {_be}")
@@ -636,10 +642,16 @@ def search_live(
 def sources_health(query: str = "cardiac arrest", timeout: int = 12) -> dict[str, Any]:
     """Diagnostic des sources externes (live search).
 
-    Interroge en parallèle chaque API amont avec une requête minimale et renvoie,
-    par source, le statut HTTP, la latence (ms), un compteur de résultats et
-    l'erreur éventuelle. Permet de diagnostiquer « sources lentes / ne répondent
-    plus » directement en production (où l'accès réseau sortant diffère du sandbox).
+    Interroge en parallèle les SIX sources sondées (PubMed, OpenAlex, Crossref,
+    Europe PMC, bioRxiv/medRxiv, ReliefWeb) avec une requête minimale et renvoie, par
+    source, le statut HTTP, la latence (ms), un compteur de résultats et l'erreur
+    éventuelle. Permet de diagnostiquer « sources lentes / ne répondent plus »
+    directement en production (où l'accès réseau sortant diffère du sandbox).
+
+    ATTENTION : les autres fetchers de la fédération (Semantic Scholar, DOAJ,
+    ClinicalTrials.gov, CORE, arXiv, OpenAIRE) ne sont PAS sondés. « 6 joignables sur 6 »
+    ne signifie donc pas que toute la fédération est saine ; la réponse porte
+    `probed` et `not_probed` pour que ce soit explicite.
     Lecture seule, aucune écriture, aucune clé requise.
     """
     import concurrent.futures
@@ -713,12 +725,22 @@ def sources_health(query: str = "cardiac arrest", timeout: int = 12) -> dict[str
                                     "latency_ms": None, "count": None,
                                     "error": "probe timed out"})
     results.sort(key=lambda r: r["source"])
+    # Les fetchers de la fédération que ce diagnostic NE sonde PAS. Les nommer dans la
+    # réponse évite de lire « 6 joignables sur 6 » comme « toute la fédération est saine ».
+    not_probed = ["Semantic Scholar", "DOAJ", "ClinicalTrials.gov", "CORE", "arXiv",
+                  "OpenAIRE"]
     return {
         "query": query,
         "checked_at": _dtm.now(_tz.utc).isoformat(),
         "sources": results,
         "reachable": sum(1 for r in results if r["ok"]),
         "total": len(results),
+        "probed": [r["source"] for r in results],
+        "not_probed": not_probed,
+        "coverage_note": (
+            f"{len(results)} sources sondées sur {len(results) + len(not_probed)} "
+            f"fetchers ; les autres ne sont pas testées par cet endpoint."
+        ),
         "config": {
             "ncbi_api_key": bool(ncbi_key),
             "openai_api_key": bool(os.getenv("OPENAI_API_KEY")),

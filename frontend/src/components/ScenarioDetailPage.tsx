@@ -23,7 +23,7 @@ import {
   uploadModelData,
   screenArticle,
   fetchArticlePico,
-  fetchScenarioPicoBulk,
+  fetchAllScenarioPico,
   fetchEvidenceBrief,
   getLlmEvidenceBrief,
   generateEvidenceBrief,
@@ -125,6 +125,12 @@ import {
 } from "../lib/api";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
+
+/** Seuil de similarité par défaut, MIROIR de `DEFAULT_SIMILARITY_THRESHOLD` dans
+ *  api/scenario_store.py. Repli uniquement : dès que le scénario a répondu, c'est SON
+ *  seuil qui compte. À éparpiller la valeur en littéraux, un scénario passé à 0.60
+ *  affichait encore ses articles comme « pertinents » à partir de 0.45. */
+const DEFAULT_SIMILARITY_THRESHOLD = 0.45;
 
 const STATUS_COLORS = {
   green: {
@@ -466,7 +472,7 @@ function QueriesSection({ detail, scenarioId }: { detail: ScenarioDetail; scenar
                 <div className="rounded-xl border border-brand-500/20 bg-brand-500/5 px-3 py-2 text-[11px] text-brand-200"
                      title={t("scenarioDetail.queries.corpusTooltip")}>
                   {t("scenarioDetail.queries.corpusPrefix")} <span className="font-semibold text-white">{liveData.corpus_total.toLocaleString()}</span> {t("scenarioDetail.queries.corpusDocuments")}
-                  {" · "}<span className="text-brand-300">{(liveData.corpus_above_threshold ?? 0).toLocaleString()} {t("scenarioDetail.queries.corpusAboveThresholdPrefix")} {liveData.threshold ?? 0.45}</span>
+                  {" · "}<span className="text-brand-300">{(liveData.corpus_above_threshold ?? 0).toLocaleString()} {t("scenarioDetail.queries.corpusAboveThresholdPrefix")} {liveData.threshold ?? DEFAULT_SIMILARITY_THRESHOLD}</span>
                   {" "}<span className="text-white/40">{t("scenarioDetail.queries.corpusLexicalNote")}</span>
                 </div>
               )}
@@ -2122,14 +2128,16 @@ function VariablesSection({ detail, scenarioId, onGoToModel }: { detail: Scenari
 const CORPUS_PAGE_SIZE = 200;
 
 /** "Export…" select: the relevant articles as csv, xlsx, ris, bibtex, json or md. */
-function RelevantExportMenu({ scenarioId }: { scenarioId: string }) {
+function RelevantExportMenu({ scenarioId, threshold }: { scenarioId: string; threshold?: number }) {
   const { t } = useI18n();
   const [busy, setBusy] = useState(false);
   const [failed, setFailed] = useState(false);
   const run = async (format: RelevantExportFormat) => {
     setBusy(true); setFailed(false);
     try {
-      const { blob, filename } = await exportRelevantArticles(scenarioId, format);
+      // Le seuil EN COURS (curseur), pas celui enregistré : sinon le fichier décrivait un
+      // autre corpus que le compteur affiché juste à côté.
+      const { blob, filename } = await exportRelevantArticles(scenarioId, format, { threshold });
       downloadBlob(blob, filename);
     } catch {
       setFailed(true);
@@ -2281,35 +2289,40 @@ function CorpusSection({ scenarioId, threshold }: { scenarioId: string; detail: 
           <SectionHeader
             icon={<FileText size={14} className="text-brand-400" />}
             title={`${t("scenarioDetail.corpus.corpusTitlePrefix")} (${data.total} ${t("scenarioDetail.corpus.corpusTitleArticles")})`}
-            subtitle={t("scenarioDetail.corpus.corpusSubtitle")}
+            // « Aucun validé par un relecteur » était affiché sans condition, y compris
+            // sur un corpus dont des articles portent un badge « inclus » juste dessous.
+            subtitle={data.articles.some(a => a.screening_status === "included" || a.screening_status === "excluded")
+              ? t("scenarioDetail.corpus.corpusSubtitle")
+              : t("scenarioDetail.corpus.corpusSubtitleNoneValidated")}
           />
-          {data.above_threshold !== undefined && (
-            <div className="flex items-center gap-2 flex-wrap">
+          {/* Un seul bloc de badges. Les deux derniers vivaient dans une branche
+              `above_threshold === undefined` que le serveur ne produit jamais (il renvoie
+              toujours un entier) : l'avertissement « N non scorés, scoring en cours »
+              était donc inatteignable, et le seuil paraissait définitif pendant que le
+              scoring tournait encore. */}
+          <div className="flex items-center gap-2 flex-wrap">
+            {data.above_threshold !== undefined && (
               <span className="rounded-full bg-brand-500/15 border border-brand-500/30 px-3 py-1 text-[10px] font-semibold text-brand-300">
                 {data.above_threshold} {t("scenarioDetail.corpus.aboveThreshold")}
               </span>
-              <RelevantExportMenu scenarioId={scenarioId} />
-            </div>
-          )}
-          {data.above_threshold === undefined && (
-            <div className="flex items-center gap-2 flex-wrap">
-              <RelevantExportMenu scenarioId={scenarioId} />
-              {(() => {
-                const below = data.below_threshold ?? Math.max(0, data.total - data.above_threshold! - (data.unscored ?? 0));
-                return below > 0 ? (
-                  <span className="rounded-full bg-white/5 border border-white/10 px-3 py-1 text-[10px] text-white/40">
-                    {below} {t("scenarioDetail.corpus.belowThresholdKept")}
-                  </span>
-                ) : null;
-              })()}
-              {(data.unscored ?? 0) > 0 && (
-                <span className="rounded-full bg-gold-500/10 border border-gold-500/30 px-3 py-1 text-[10px] text-gold-300 flex items-center gap-1">
-                  {data.rerank_running && <Loader2 size={9} className="animate-spin" />}
-                  {data.unscored} {t("scenarioDetail.corpus.unscored")}{data.rerank_running ? t("scenarioDetail.corpus.scoringInProgress") : ''}
+            )}
+            {(() => {
+              const below = data.below_threshold
+                ?? Math.max(0, data.total - (data.above_threshold ?? 0) - (data.unscored ?? 0));
+              return below > 0 ? (
+                <span className="rounded-full bg-white/5 border border-white/10 px-3 py-1 text-[10px] text-white/40">
+                  {below} {t("scenarioDetail.corpus.belowThresholdKept")}
                 </span>
-              )}
-            </div>
-          )}
+              ) : null;
+            })()}
+            {(data.unscored ?? 0) > 0 && (
+              <span className="rounded-full bg-gold-500/10 border border-gold-500/30 px-3 py-1 text-[10px] text-gold-300 flex items-center gap-1">
+                {data.rerank_running && <Loader2 size={9} className="animate-spin" />}
+                {data.unscored} {t("scenarioDetail.corpus.unscored")}{data.rerank_running ? t("scenarioDetail.corpus.scoringInProgress") : ''}
+              </span>
+            )}
+            <RelevantExportMenu scenarioId={scenarioId} threshold={threshold} />
+          </div>
         </div>
         {typeof data.from_local === "number" && (
           <p className="text-[11px] text-white/40"
@@ -2323,6 +2336,7 @@ function CorpusSection({ scenarioId, threshold }: { scenarioId: string; detail: 
               key={article.id}
               article={article}
               scenarioId={scenarioId}
+              threshold={data.threshold ?? threshold ?? DEFAULT_SIMILARITY_THRESHOLD}
               isExpanded={expandedId === article.id}
               onToggle={() => setExpandedId(expandedId === article.id ? null : article.id)}
               onScreeningChange={(_id, _status) => {
@@ -2409,12 +2423,17 @@ function CorpusSection({ scenarioId, threshold }: { scenarioId: string; detail: 
 function ArticleRow({
   article,
   scenarioId,
+  threshold,
   isExpanded,
   onToggle,
   onScreeningChange,
 }: {
   article: CorpusArticle;
   scenarioId: string;
+  /** Seuil RÉEL du scénario : le badge de similarité s'allume au-dessus de CE seuil,
+      pas d'une constante. Avec un seuil déplacé à 0.60, un article à 0.50 était mis en
+      avant alors que le corpus pertinent l'exclut. */
+  threshold: number;
   isExpanded: boolean;
   onToggle: () => void;
   onScreeningChange?: (id: number, status: string) => void;
@@ -2498,7 +2517,7 @@ function ArticleRow({
             )}
             {article.similarity_score !== undefined && article.similarity_score !== null && (
               <span className={`rounded-full px-2 py-0.5 text-[9px] font-medium ${
-                article.similarity_score >= 0.45
+                article.similarity_score >= threshold
                   ? 'bg-brand-500/15 border border-brand-500/30 text-brand-300'
                   : 'bg-white/5 border border-white/10 text-white/30'
               }`}
@@ -3706,7 +3725,9 @@ function PicoSection({ scenarioId }: { scenarioId: string }) {
 
   React.useEffect(() => {
     setLoading(true);
-    fetchScenarioPicoBulk(scenarioId, 200, 0)
+    // Le corpus ENTIER, page par page : l'onglet annonce « tous les articles » et
+    // l'export CSV n'écrit que ce qui est chargé ; il n'en chargeait que 200.
+    fetchAllScenarioPico(scenarioId)
       .then(setData)
       .catch(e => setError(e.message))
       .finally(() => setLoading(false));
@@ -3933,6 +3954,46 @@ function ConceptMapView({ scenarioId }: { scenarioId: string }) {
   const [hovered, setHovered] = React.useState<number | null>(null);
   const [latestOnly, setLatestOnly] = React.useState(false);
   const [showAll, setShowAll] = React.useState(false);
+  // Choix de l'utilisateur sur CE qui entre dans le graphe : catégories masquées,
+  // concepts retirés un par un, et nombre minimal d'articles derrière un concept.
+  // Conservé par scénario (localStorage) : un graphe composé pour une présentation
+  // survit au rechargement de la page.
+  const filterKey = `literev-kg-filter-${scenarioId}`;
+  const [hiddenTypes, setHiddenTypes] = React.useState<Set<ConceptType>>(new Set());
+  const [hiddenNodes, setHiddenNodes] = React.useState<Set<number>>(new Set());
+  const [minArticles, setMinArticles] = React.useState(1);
+  const [filtersReady, setFiltersReady] = React.useState(false);
+
+  React.useEffect(() => {
+    setFiltersReady(false);
+    try {
+      const raw = localStorage.getItem(filterKey);
+      const saved = raw ? JSON.parse(raw) : null;
+      setHiddenTypes(new Set<ConceptType>(saved?.hiddenTypes ?? []));
+      setHiddenNodes(new Set<number>(saved?.hiddenNodes ?? []));
+      setMinArticles(Number(saved?.minArticles) > 0 ? Number(saved.minArticles) : 1);
+    } catch {
+      setHiddenTypes(new Set()); setHiddenNodes(new Set()); setMinArticles(1);
+    }
+    setFiltersReady(true);
+  }, [filterKey]);
+
+  React.useEffect(() => {
+    if (!filtersReady) return;                       // ne pas écraser avant d'avoir lu
+    try {
+      localStorage.setItem(filterKey, JSON.stringify({
+        hiddenTypes: [...hiddenTypes], hiddenNodes: [...hiddenNodes], minArticles,
+      }));
+    } catch { /* navigation privée : le filtre reste simplement en mémoire */ }
+  }, [filterKey, filtersReady, hiddenTypes, hiddenNodes, minArticles]);
+
+  const toggleType = (ty: ConceptType) => setHiddenTypes(prev => {
+    const next = new Set(prev);
+    if (next.has(ty)) next.delete(ty); else next.add(ty);
+    return next;
+  });
+  const hideNode = (id: number) => setHiddenNodes(prev => new Set(prev).add(id));
+  const resetFilters = () => { setHiddenTypes(new Set()); setHiddenNodes(new Set()); setMinArticles(1); };
 
   React.useEffect(() => {
     let cancelled = false;
@@ -3966,11 +4027,18 @@ function ConceptMapView({ scenarioId }: { scenarioId: string }) {
   }
 
   // ── Layered layout: one column per type, nodes stacked by article count ─────
-  const types = CONCEPT_TYPE_ORDER.filter(ty => data.nodes.some(n => n.type === ty));
+  // Le graphe ne montre que ce que l'utilisateur a retenu : catégories cochées,
+  // concepts non retirés, au moins `minArticles` articles derrière chacun.
+  const presentTypes = CONCEPT_TYPE_ORDER.filter(ty => data.nodes.some(n => n.type === ty));
+  const keep = (n: ConceptNode) => !hiddenNodes.has(n.id) && n.count >= minArticles;
+  const types = presentTypes.filter(ty => !hiddenTypes.has(ty) && data.nodes.some(n => n.type === ty && keep(n)));
+  const countInType = (ty: ConceptType) => data.nodes.filter(n => n.type === ty && keep(n)).length;
   const byType: Partial<Record<ConceptType, ConceptNode[]>> = {};
   for (const ty of types) {
-    byType[ty] = data.nodes.filter(n => n.type === ty).sort((a, b) => b.count - a.count).slice(0, 14);
+    byType[ty] = data.nodes.filter(n => n.type === ty && keep(n))
+      .sort((a, b) => b.count - a.count).slice(0, 14);
   }
+  const filtersActive = hiddenTypes.size > 0 || hiddenNodes.size > 0 || minArticles > 1;
   const shown = new Set<number>();
   for (const ty of types) for (const n of byType[ty] ?? []) shown.add(n.id);
   const maxCount = Math.max(1, ...data.nodes.map(n => n.count));
@@ -4008,9 +4076,13 @@ function ConceptMapView({ scenarioId }: { scenarioId: string }) {
         .filter(x => !latestOnly || (data.latest_year !== null && x.a.y === data.latest_year))
     : [];
   const links = [...edges].sort((a, b) => b.weight - a.weight).slice(0, 10);
+  // Le sous-titre compte ce qui est AFFICHÉ : annoncer le total du payload pendant
+  // qu'une partie est masquée serait exactement le genre d'écart qu'on corrige ailleurs.
   const subtitle = t("scenarioDetail.knowledgeGraph.conceptSubtitle")
-    .replace("{n}", String(data.nodes.length)).replace("{e}", String(data.edges.length))
-    .replace("{a}", String(data.n_articles));
+    .replace("{n}", String(shown.size)).replace("{e}", String(edges.length))
+    .replace("{a}", String(data.n_articles))
+    + (filtersActive ? ` · ${t("scenarioDetail.knowledgeGraph.filtered")
+        .replace("{total}", String(data.nodes.length))}` : "");
   const nameOf = (id: number) => { const n = nodeById.get(id); return n ? label(n) : "?"; };
   const Badge = ({ ty }: { ty: ConceptType }) => (
     <span className="rounded px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wider"
@@ -4043,15 +4115,54 @@ function ConceptMapView({ scenarioId }: { scenarioId: string }) {
             {t("scenarioDetail.knowledgeGraph.highlightYear").replace("{year}", String(data.latest_year))}
           </button>
         )}
+        {/* Catégories : cliquer en retire une du graphe, recliquer la remet. */}
         <div className="flex flex-wrap gap-2">
-          {types.map(ty => (
-            <span key={ty} className="flex items-center gap-1.5 text-[10px] text-white/50">
-              <span className="h-2 w-2 rounded-full" style={{ background: CONCEPT_TYPE_COLORS[ty] }} />
-              {typeName(ty)} <span className="font-mono text-white/30">{(byType[ty] ?? []).length}</span>
-            </span>
-          ))}
+          {presentTypes.map(ty => {
+            const off = hiddenTypes.has(ty);
+            return (
+              <button key={ty} type="button" onClick={() => toggleType(ty)}
+                title={t(off ? "scenarioDetail.knowledgeGraph.includeType" : "scenarioDetail.knowledgeGraph.excludeType")
+                  .replace("{type}", typeName(ty))}
+                className={`flex items-center gap-1.5 rounded-lg border px-2 py-1 text-[10px] transition ${off
+                  ? "border-white/5 bg-transparent text-white/25 line-through"
+                  : "border-white/10 bg-white/5 text-white/70 hover:border-white/25"}`}>
+                <span className="h-2 w-2 rounded-full shrink-0"
+                  style={{ background: off ? "transparent" : CONCEPT_TYPE_COLORS[ty],
+                           border: off ? `1px solid ${CONCEPT_TYPE_COLORS[ty]}66` : undefined }} />
+                {typeName(ty)} <span className="font-mono text-white/30">{countInType(ty)}</span>
+              </button>
+            );
+          })}
         </div>
       </div>
+
+      {/* Seuil d'inclusion et remise à zéro de la composition. */}
+      <div className="flex flex-wrap items-center gap-4">
+        <label className="flex items-center gap-2 text-[11px] text-white/50">
+          <span>{t("scenarioDetail.knowledgeGraph.minArticles")}</span>
+          <input type="range" min={1} max={Math.max(2, Math.min(20, maxCount))} step={1} value={minArticles}
+            onChange={e => setMinArticles(parseInt(e.target.value, 10))}
+            className="w-28 accent-brand-500" />
+          <span className="font-mono text-brand-300">{minArticles}</span>
+        </label>
+        {hiddenNodes.size > 0 && (
+          <span className="text-[11px] text-white/40">
+            {t("scenarioDetail.knowledgeGraph.removedConcepts").replace("{n}", String(hiddenNodes.size))}
+          </span>
+        )}
+        {filtersActive && (
+          <button type="button" onClick={resetFilters}
+            className="rounded-lg border border-white/10 bg-white/5 px-2.5 py-1 text-[11px] text-white/60 hover:text-white">
+            {t("scenarioDetail.knowledgeGraph.resetFilters")}
+          </button>
+        )}
+      </div>
+
+      {types.length === 0 && (
+        <p className="rounded-xl border border-white/10 bg-white/3 px-3 py-2 text-xs text-white/50">
+          {t("scenarioDetail.knowledgeGraph.everythingFiltered")}
+        </p>
+      )}
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
         <div className="lg:col-span-2 overflow-x-auto">
@@ -4120,7 +4231,14 @@ function ConceptMapView({ scenarioId }: { scenarioId: string }) {
                     )}
                   </p>
                 </div>
-                <button type="button" onClick={() => setSelected(null)} className="text-white/30 hover:text-white text-xs shrink-0">✕</button>
+                <div className="flex items-center gap-2 shrink-0">
+                  <button type="button" onClick={() => { hideNode(sel.id); setSelected(null); }}
+                    title={t("scenarioDetail.knowledgeGraph.removeConcept")}
+                    className="rounded border border-white/10 px-1.5 py-0.5 text-[9px] text-white/40 hover:border-rose-400/40 hover:text-rose-300">
+                    {t("scenarioDetail.knowledgeGraph.removeConcept")}
+                  </button>
+                  <button type="button" onClick={() => setSelected(null)} className="text-white/30 hover:text-white text-xs">✕</button>
+                </div>
               </div>
               {neighbours.length > 0 && (
                 <div className="space-y-1">
@@ -4153,6 +4271,16 @@ function ConceptMapView({ scenarioId }: { scenarioId: string }) {
                   <button type="button" onClick={() => setShowAll(true)} className="text-[10px] text-brand-300 hover:underline">
                     {t("scenarioDetail.knowledgeGraph.showAll")} ({selArticles.length})
                   </button>
+                )}
+                {/* La charge utile ne transporte qu'un échantillon des articles d'un
+                    concept très fréquent. Le dire ICI : l'entête annonce le total (1 200)
+                    et « Tout afficher » en listait 40 sans que rien n'explique l'écart. */}
+                {(sel.articles_listed ?? sel.articles.length) < sel.count && (
+                  <p className="text-[9px] text-white/35 leading-3">
+                    {t("scenarioDetail.knowledgeGraph.articlesTruncated")
+                      .replace("{listed}", String(sel.articles_listed ?? sel.articles.length))
+                      .replace("{total}", String(sel.count))}
+                  </p>
                 )}
               </div>
             </div>
@@ -5018,7 +5146,7 @@ export function EnrichmentSection({ scenarioId }: { scenarioId?: string }) {
 
 function SeuilSection({ scenarioId, onSaved, onThresholdChange }: { scenarioId: string; onSaved?: () => void; onThresholdChange?: (v: number) => void }) {
   const { t } = useI18n();
-  const [threshold, setThreshold] = React.useState<number>(0.45);
+  const [threshold, setThreshold] = React.useState<number>(DEFAULT_SIMILARITY_THRESHOLD);
   const [saving, setSaving] = React.useState(false);
   const [saved, setSaved] = React.useState(false);
   const [rerankStatus, setRerankStatus] = React.useState<string | null>(null);
@@ -5026,7 +5154,7 @@ function SeuilSection({ scenarioId, onSaved, onThresholdChange }: { scenarioId: 
 
   React.useEffect(() => {
     getScenarioSettings(scenarioId)
-      .then(s => setThreshold(s.similarity_threshold ?? 0.45))
+      .then(s => setThreshold(s.similarity_threshold ?? DEFAULT_SIMILARITY_THRESHOLD))
       .catch(() => {});
     return () => { if (pollRef.current) clearInterval(pollRef.current); };
   }, [scenarioId]);
@@ -5263,7 +5391,7 @@ function EvidencesSection({ scenarioId, detail }: { scenarioId: string; detail: 
       // PERTINENT (≥ seuil sémantique), pas le corpus complet.
       const relevant_pdf = b.corpus_stats.relevant ?? uniqueTotal_pdf;
       const rTotal_pdf = relevant_pdf || 1;
-      const thr_pdf = b.corpus_stats.threshold ?? 0.45;
+      const thr_pdf = b.corpus_stats.threshold ?? DEFAULT_SIMILARITY_THRESHOLD;
       const picoRel_pdf = b.corpus_stats.relevant_with_pico ?? b.corpus_stats.with_pico ?? 0;
       const ftRel_pdf = b.corpus_stats.relevant_with_fulltext ?? b.corpus_stats.with_fulltext ?? 0;
       const html = `<!DOCTYPE html><html><head><meta charset="utf-8">
@@ -5468,7 +5596,7 @@ ${llm.future_research ? `<h3>${t("scenarioDetail.evidences.pdf.futureResearch")}
             const uniqueTotal = cs.total;
             const relevant = cs.relevant ?? uniqueTotal;
             const rTotal = relevant || 1;
-            const thr = cs.threshold ?? 0.45;
+            const thr = cs.threshold ?? DEFAULT_SIMILARITY_THRESHOLD;
             const boxes = [
               {label:t("scenarioDetail.evidences.statCorpusArticles"), value:uniqueTotal,                            color:'text-white',       sub:dups>0?`${t("scenarioDetail.evidences.subDuplicatesPrefix")} ${dups} ${t("scenarioDetail.evidences.subDuplicatesSuffix")}`:t("scenarioDetail.evidences.subUnique")},
               {label:t("scenarioDetail.evidences.statRelevantUsed"), value:relevant,                           color:'text-brand-300',   sub:`${t("scenarioDetail.evidences.subThresholdPrefix")} ${thr} · ${Math.round(relevant/(uniqueTotal||1)*100)}% ${t("scenarioDetail.evidences.subOfCorpus")}`},

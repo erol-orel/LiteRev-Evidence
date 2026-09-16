@@ -44,8 +44,22 @@ def _load_env_file(path: str) -> None:
         if key and key not in os.environ:
             os.environ[key] = value
 
-# Charger aussi le fichier secrets hors-repo (jamais commité)
-for _ep in ["/etc/literev/secrets", "/opt/literev-api/secrets.env"]:
+# Fichiers d'environnement chargés, DANS CET ORDRE : la première valeur trouvée gagne et
+# rien n'écrase une variable déjà présente dans l'environnement du processus (systemd).
+#
+# Les trois premiers (configuration non secrète) ne l'étaient PAS : seuls les deux
+# fichiers de secrets étaient lus, alors que .env.example dit depuis toujours de mettre la
+# configuration dans ./.env ou /opt/literev-api/.env. Résultat : un opérateur qui plafonne
+# la dépense OpenAI ou le volume de fetch dans le fichier que la documentation lui indique
+# n'avait aucun effet, et aucune erreur. La liste ci-dessous est celle de .env.example.
+ENV_FILES = [
+    ".env",
+    "/opt/literev-api/.env",
+    "/etc/literev/env",
+    "/etc/literev/secrets",
+    "/opt/literev-api/secrets.env",
+]
+for _ep in ENV_FILES:
     _load_env_file(_ep)
 
 DB_URL = os.getenv("DB_URL")
@@ -174,7 +188,9 @@ try:
 except (TypeError, ValueError):
     _TRUSTED_PROXY_HOPS = 1
 
-# Endpoints coûteux à protéger (RAG, search, génération de briefs).
+# Endpoints coûteux à protéger : RAG (`/ask*` et les deux `/rag`) et le lancement du
+# pipeline complet. `/search` N'EST PAS dans cette liste : il reste sur la limite
+# générale, parce que la page de recherche en émet plusieurs par frappe.
 # ATTENTION : un segment {param} ne doit matcher QU'UN seul segment de chemin.
 # Sinon `/user-scenarios/{id}/rag` capturerait tout `/user-scenarios/*` (corpus,
 # prisma, clustering, evidence-brief, ...) et tout le détail scénario serait

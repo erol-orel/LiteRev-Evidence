@@ -203,7 +203,12 @@ def _warm_clustering_kernels() -> None:
         X = _np.random.RandomState(0).rand(60, 16).astype("float32")
         try:
             import umap as _umap
-            _umap.UMAP(n_neighbors=8, n_components=2, min_dist=0.1, random_state=42).fit_transform(X)
+            # MÊME configuration que le clustering réel (_cluster_core) : métrique cosinus,
+            # low_memory, n_epochs. Préchauffer la métrique euclidienne par défaut
+            # compilait un noyau que l'application n'utilise jamais, et la première
+            # visualisation payait quand même la compilation.
+            _umap.UMAP(n_neighbors=8, n_components=2, metric="cosine", random_state=42,
+                       low_memory=True, n_epochs=200).fit_transform(X)
         except Exception as _e:                              # noqa: BLE001
             logger.info(f"warm-up UMAP: {_e}")
         try:
@@ -455,7 +460,7 @@ def startup_event() -> None:
                         # est compté comme échec à borner.
                         for _k in ("P", "I", "C", "O"):
                             _pico.setdefault(_k, "")
-                        _pico.setdefault("study_design", "non précisé")
+                        _pico.setdefault("study_design", "not specified")   # identifiant stable (cf. api/pipeline.py)
                         try:
                             _pico["pico_confidence"] = float(_pico.get("pico_confidence", 0.3))
                         except (TypeError, ValueError):

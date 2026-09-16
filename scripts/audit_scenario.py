@@ -2,13 +2,19 @@
 """Cross-check every number the interface shows for ONE scenario, across endpoints
 and caches, and say which ones disagree.
 
-Read-only: only GET endpoints are called (nothing is generated or recomputed).
+Only GET endpoints are called; nothing is written. ONE CAVEAT: GET /clustering computes
+the projection in the background when the requested language is not in cache, so on a
+scenario that has never been clustered in that language the audit does start one job.
+Pass --no-clustering to skip that check and leave the scenario strictly untouched.
 
   # against the running API on the server:
   python3 scripts/audit_scenario.py --base http://127.0.0.1:8000 --scenario usr-xxxx [--lang en]
 
   # in-process against the local database (DB_URL set):
   python3 scripts/audit_scenario.py --scenario usr-xxxx
+
+  # never trigger anything, even a clustering job:
+  python3 scripts/audit_scenario.py --scenario usr-xxxx --no-clustering
 
 Checks (FAIL = numbers that must agree once no pipeline is running; WARN = worth a
 look; INFO = state):
@@ -21,6 +27,7 @@ look; INFO = state):
   - /embedding-status  corpus_total = corpus links; scored ≤ total
   - /clustering        cache: cluster sizes sum to n_docs; n_docs ≤ n_docs_total ≤
                        corpus links; served language; summaries present
+                       (skipped by --no-clustering, see the caveat above)
   - /settings          threshold in range; which artefacts are cached
   - /evidence-brief    cached brief present and its language marker
   - /activity          whether this scenario is still running (then mismatches are
@@ -38,8 +45,9 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 class Audit:
-    def __init__(self, get, sid: str, lang: str):
+    def __init__(self, get, sid: str, lang: str, with_clustering: bool = True):
         self.get, self.sid, self.lang = get, sid, lang
+        self.with_clustering = with_clustering
         self.rows: list[tuple[str, str, str]] = []      # (level, check, detail)
         self.running = False
 
@@ -128,8 +136,13 @@ class Audit:
                 self.add("OK" if scored <= rtotal else "FAIL", "scoring progress",
                          f"scored={scored}/{rtotal} semantic_ready={(emb.get('score_availability') or {}).get('semantic')}")
 
-        cl = self.fetch(f"/user-scenarios/{sid}/clustering?lang={self.lang}") or {}
-        if cl.get("status") == "running":
+        # GET /clustering starts a background job when the language is not cached, so
+        # --no-clustering skips it entirely rather than merely ignoring its answer.
+        cl = {} if not self.with_clustering else (
+            self.fetch(f"/user-scenarios/{sid}/clustering?lang={self.lang}") or {})
+        if not self.with_clustering:
+            self.add("INFO", "clustering", "skipped (--no-clustering)")
+        elif cl.get("status") == "running":
             self.add("INFO", "clustering", "not cached in this language (a background job was just started)")
         elif cl.get("clusters"):
             n = cl.get("n_docs"); nt = cl.get("n_docs_total", n)
@@ -192,6 +205,9 @@ def main() -> int:
     ap.add_argument("--scenario", required=True, help="user scenario id (usr-…)")
     ap.add_argument("--base", help="API base URL; omit for in-process mode against DB_URL")
     ap.add_argument("--lang", default="fr", choices=["fr", "en"], help="language to audit the caches in")
+    ap.add_argument("--no-clustering", action="store_true",
+                    help="skip the clustering check, whose GET would start a background "
+                         "job when that language is not cached")
     args = ap.parse_args()
 
     if args.base:
@@ -215,7 +231,7 @@ def main() -> int:
             r = client.get(path)
             return r.status_code, (r.json() if r.headers.get("content-type", "").startswith("application/json") else None)
 
-    return Audit(get, args.scenario, args.lang).run()
+    return Audit(get, args.scenario, args.lang, with_clustering=not args.no_clustering).run()
 
 
 if __name__ == "__main__":

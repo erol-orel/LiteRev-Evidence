@@ -132,17 +132,26 @@ def corpus_digest(scenario_id: str, threshold: float | None = None) -> dict[str,
                 if len(lst) < _TOP_CONCEPTS_PER_TYPE:
                     lst.append({"label": c["label"], "n": c["n"]})
             out["concepts"] = by_type
+        out["complete"] = True                               # calculé sur TOUT le corpus pertinent
     except Exception as e:                                   # noqa: BLE001 - jamais bloquant
+        # `complete` était posé HORS du try : une agrégation en échec renvoyait
+        # {"n_articles": 0, "complete": True}, les générateurs retombaient en silence sur
+        # leurs 20 à 30 articles reproduits, et la note de couverture annonçait « la
+        # TOTALITE des 0 articles ». Le seul mode de panne qui viole la règle de la maison
+        # se déclarait conforme.
         logger.warning(f"corpus_digest {scenario_id}: {e}")
         out.setdefault("n_articles", 0)
-    out["complete"] = True                                   # calculé sur TOUT le corpus pertinent
+        out["complete"] = False
+        out["error"] = str(e)[:300]
     return out
 
 
 def digest_to_prompt(digest: dict, max_chars: int = 2600) -> str:
     """Le digest en un bloc de texte compact pour un prompt. Dit d'emblée sur combien
     d'articles il porte, pour que le modèle ne parle jamais au nom d'un échantillon."""
-    if not digest or not digest.get("n_articles"):
+    # Un digest incomplet ne doit RIEN affirmer : mieux vaut un bloc vide (le générateur
+    # reprend alors son repli explicite) qu'un total faux présenté comme exhaustif.
+    if not digest or not digest.get("n_articles") or not digest.get("complete"):
         return ""
     d = digest
     lines = [f"CORPUS COMPLET: {d['n_articles']} articles pertinents "
@@ -169,8 +178,21 @@ def digest_to_prompt(digest: dict, max_chars: int = 2600) -> str:
 
 
 def digest_coverage_note(digest: dict, n_verbatim: int) -> str:
-    """La phrase que chaque prompt porte : le digest couvre tout, le verbatim illustre."""
-    n = (digest or {}).get("n_articles") or 0
+    """La phrase que chaque prompt porte : le digest couvre tout, le verbatim illustre.
+
+    Si le digest est INCOMPLET, la phrase s'inverse au lieu de disparaître. Elle
+    affirmait « la TOTALITE des 0 articles » au-dessus d'un bloc de chiffres que
+    `digest_to_prompt` venait justement de supprimer : le modèle lisait une garantie
+    d'exhaustivité portant sur rien, alors qu'il n'avait sous les yeux que les articles
+    reproduits, c'est-à-dire l'échantillon que la règle de la maison interdit. Dans ce
+    cas il faut le lui DIRE, et lui interdire de généraliser, plutôt que se taire."""
+    if not digest or not digest.get("complete") or not digest.get("n_articles"):
+        return (f"ATTENTION : l'agregation du corpus complet a echoue. Tu ne disposes que "
+                f"des {n_verbatim} articles reproduits ci-dessous. N'enonce AUCUN total, "
+                f"AUCUNE proportion et AUCUNE tendance d'ensemble : limite-toi a ce que "
+                f"ces {n_verbatim} articles etablissent, et dis explicitement que la vue "
+                f"d'ensemble du corpus n'etait pas disponible.")
+    n = digest.get("n_articles") or 0
     return (f"Les chiffres ci-dessus portent sur la TOTALITE des {n} articles pertinents. "
             f"Les {n_verbatim} articles reproduits ensuite en sont les mieux etablis "
             f"(qualite, citations) et servent a citer et a illustrer: tes conclusions "

@@ -228,7 +228,7 @@ def _save_viz_cache(scenario_id: str, col: str, payload: dict) -> None:
 # reconstruction du corpus (recherche, pipeline), c'est cela qui le tient à jour ; une
 # expiration courte ne faisait que relancer un calcul de 40 s (clustering) ou de
 # plusieurs secondes (graphe) sous les yeux de l'utilisateur le lendemain de la construction.
-VIZ_CACHE_TTL_S = 30 * 86400
+VIZ_CACHE_TTL_S = int(os.getenv("VIZ_CACHE_TTL_S", str(30 * 86400)) or 30 * 86400)
 
 
 def _load_viz_cache(scenario_id: str, col: str, ttl: int = VIZ_CACHE_TTL_S) -> dict | None:

@@ -21,7 +21,12 @@ from .core import (
     logger,
     require_api_key,
 )
-from .scenario_store import DEFAULT_SIMILARITY_THRESHOLD, _get_scenario_threshold, _get_user_scenario_or_404
+from .scenario_store import (
+    CORPUS_DERIVED_CACHE_RESET,
+    DEFAULT_SIMILARITY_THRESHOLD,
+    _get_scenario_threshold,
+    _get_user_scenario_or_404,
+)
 from .search import (
     _boolean_corpus_ids,
     _dedup_scenario_links,
@@ -652,6 +657,31 @@ def update_scenario_settings(scenario_id: str, payload: dict[str, Any], _: None 
                 UPDATE scenario_settings SET {key} = :val, updated_at = NOW()
                 WHERE scenario_id = :sid
             """), {"val": val, "sid": scenario_id})
+
+        # Les artefacts mis en cache sont des FONCTIONS du seuil (clustering, graphe de
+        # similarité, carte des concepts) ou du spec (projection SEIR par défaut). Ils
+        # n'étaient invalidés par rien : déplacer le curseur de pertinence laissait servir,
+        # jusqu'à 30 jours, des visualisations calculées sur un sous-ensemble qui n'existe
+        # plus, et une édition du spec laissait une projection issue des anciens paramètres.
+        if "similarity_threshold" in updates:
+            # Les actions recommandées étaient les seules oubliées : elles sont générées
+            # sur les articles pertinents ET sur le digest du corpus, mais leur cache
+            # n'est indexé que par (scénario, langue). Déplacer le seuil de 0.45 à 0.60
+            # continuait donc de servir, indéfiniment, des actions tirées du corpus
+            # PRÉCÉDENT, présentées comme celles du corpus actuel. La liste est partagée
+            # avec la living review (CORPUS_DERIVED_CACHE_RESET) pour qu'un artefact
+            # ajouté demain ne soit pas oublié d'un côté.
+            conn.execute(text(f"""
+                UPDATE scenario_settings SET {CORPUS_DERIVED_CACHE_RESET}
+                WHERE scenario_id = :sid
+            """), {"sid": scenario_id})
+        if "variables_json" in updates:
+            conn.execute(text("""
+                UPDATE scenario_settings
+                SET seir_projection_json = NULL, seir_projection_generated_at = NULL,
+                    variables_i18n = NULL
+                WHERE scenario_id = :sid
+            """), {"sid": scenario_id})
 
     # Retourner l'objet settings complet mis à jour
     with engine.connect() as conn:

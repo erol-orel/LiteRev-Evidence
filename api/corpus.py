@@ -318,18 +318,28 @@ def corpus_maintenance(
 
     Deux opérations, appliquées uniquement si dry_run=False :
 
-      1. Doublons : supprime les documents `is_duplicate = TRUE` - déjà exclus de
-         TOUTES les requêtes (recherche, RAG, PICO, stats) - ainsi que leurs lignes
-         `article_scenarios` (cette table n'a pas de FK → suppression explicite,
-         sinon orphelins). Les chunks partent en CASCADE (document_chunk.document_id
-         ON DELETE CASCADE).
+      1. Doublons : l'ensemble traité est l'UNION des documents déjà marqués
+         `is_duplicate = TRUE` et de ceux que la clé de contenu (DOI › external_id
+         normalisé › titre long) désigne comme doublons. Les seconds ne sont PAS
+         encore marqués, donc ils comptent aujourd'hui dans les statistiques et les
+         listes : les marquer puis les supprimer FERA BAISSER les compteurs affichés
+         (c'est le but ; le dry_run donne le nombre exact avant d'agir). Les lignes
+         `article_scenarios` correspondantes sont supprimées explicitement (cette
+         table n'a pas de FK, sinon orphelins) ; les chunks partent en CASCADE
+         (document_chunk.document_id ON DELETE CASCADE).
 
-      2. Chunks « Autres » (type non standard) : renomme le type hérité
-         `'full_text'` en `'fulltext_section'` (le worker d'enrichissement les
-         embeddera alors normalement) et supprime les chunks non-standard vraiment
-         inexploitables (contenu < 20 caractères → jamais embeddables). Les chunks
-         non-standard SUBSTANTIELS (≥ 20 car.) sont seulement RAPPORTÉS, jamais
-         modifiés - on décide de leur sort après avoir vu l'aperçu.
+      2. Chunks « Autres » (type non standard, types hérités ou NULL, jamais embeddés
+         par le worker). Ils sont partitionnés en trois ensembles disjoints et les
+         TROIS sont traités, aucun n'est laissé tel quel :
+           - junk (< 20 car., jamais embeddable) → SUPPRIMÉ ;
+           - redundant (≥ 20 car. mais texte déjà contenu dans le chunk
+             `title_abstract` du même document) → SUPPRIMÉ, sans perte : le texte
+             reste indexé via `title_abstract` ;
+           - unique (≥ 20 car., contenu réellement supplémentaire) → RECLASSÉ en
+             `'fulltext_section'` pour que le worker l'indexe.
+         Après application il ne reste donc plus aucun chunk « Autres ». Le dry_run
+         donne les trois compteurs séparément (`junk_to_delete`,
+         `redundant_to_delete`, `unique_to_reclassify`) avant toute écriture.
 
     Sécurité : tout tourne dans UNE transaction (atomique) ; avant chaque
     suppression, les lignes concernées sont copiées dans des tables `_maint_bak_*`
@@ -477,9 +487,10 @@ def embed_pending_chunks(limit: int = 200, _: None = Depends(require_api_key)) -
     if _openai_in_cooldown():
         return {"embedded": 0, "remaining": None, "cooldown": True}
 
-    # Sélecteur IDENTIQUE au worker et au compteur « en attente » : types standard,
-    # contenu embeddable (> 20 car.), et title_abstract non ré-embeddé si le doc a du
-    # texte intégral (couvert par ses sections).
+    # Sélecteur IDENTIQUE au worker (schema_boot) et au compteur « en attente » :
+    # types standard, contenu embeddable (> 20 car.), quarantaine après 3 échecs.
+    # Le title_abstract est embeddé pour TOUS les documents, texte intégral compris
+    # (l'ancienne exception « couvert par ses sections » a été retirée).
     ELIGIBLE = (
         "c.embedding IS NULL "
         "AND c.chunk_type IN ('title_abstract','fulltext_section') "

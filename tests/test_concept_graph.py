@@ -123,3 +123,37 @@ def test_the_auto_pipeline_flag_defaults_on_and_reads_the_environment(monkeypatc
     assert main._auto_pipeline_after_search() is True
     monkeypatch.setenv("AUTO_PIPELINE_AFTER_SEARCH", "0")
     assert main._auto_pipeline_after_search() is False
+
+
+def test_a_node_and_an_edge_say_how_many_articles_they_actually_carry():
+    """`count` and `weight` are the real totals, but the payload only carries the first
+    40 articles of a node and the first 20 of a link. The panel announced 1200 in the
+    header and then listed 40 with nothing explaining the gap, so both now report
+    `articles_listed` and the interface says when it is below the total."""
+    chik = _c("pathogen", "chikungunya virus")
+    aedes = _c("vector", "Aedes albopictus")
+    # 45 articles citing both: above ARTICLES_PER_NODE (40) and ARTICLES_PER_EDGE (20).
+    rows = [_row(i, 2024, [chik, aedes]) for i in range(1, 46)]
+    g = main._build_concept_graph(rows, n_total=45)
+
+    node = next(n for n in g["nodes"] if n["label"]["en"] == "chikungunya virus")
+    assert node["count"] == 45                       # the truth about the corpus
+    assert node["articles_listed"] == main.ARTICLES_PER_NODE == 40
+    assert len(node["articles"]) == node["articles_listed"]
+
+    edge = g["edges"][0]
+    assert edge["weight"] == 45
+    assert edge["articles_listed"] == main.ARTICLES_PER_EDGE == 20
+    assert len(edge["articles"]) == edge["articles_listed"]
+
+
+def test_a_small_concept_lists_every_one_of_its_articles():
+    """The truncation notice must not appear when nothing is truncated."""
+    chik = _c("pathogen", "chikungunya virus")
+    aedes = _c("vector", "Aedes albopictus")
+    rows = [_row(i, 2024, [chik, aedes]) for i in range(1, 4)]
+    g = main._build_concept_graph(rows, n_total=3)
+
+    node = next(n for n in g["nodes"] if n["label"]["en"] == "chikungunya virus")
+    assert node["count"] == node["articles_listed"] == 3
+    assert g["edges"][0]["weight"] == g["edges"][0]["articles_listed"] == 3

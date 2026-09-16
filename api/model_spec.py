@@ -483,7 +483,15 @@ def apply_outcome_template(scenario_id: str, payload: dict[str, Any],
             INSERT INTO scenario_settings (scenario_id, variables_json, variables_validated, variables_generated_at, updated_at)
             VALUES (:sid, CAST(:vj AS jsonb), TRUE, NOW(), NOW())
             ON CONFLICT (scenario_id) DO UPDATE
-                SET variables_json = CAST(:vj AS jsonb), variables_validated = TRUE, updated_at = NOW()
+                SET variables_json = CAST(:vj AS jsonb), variables_validated = TRUE,
+                    -- Le spec change ici aussi : sans ces trois remises à zéro, la ligne
+                    -- existante gardait son `variables_generated_at`, donc la projection
+                    -- SEIR en cache n'était jamais jugée périmée, et les traductions
+                    -- d'affichage restaient celles de l'ancien spec.
+                    variables_generated_at = NOW(),
+                    variables_i18n = NULL,
+                    seir_projection_json = NULL, seir_projection_generated_at = NULL,
+                    updated_at = NOW()
         """), {"sid": scenario_id, "vj": _json.dumps(vj)})
     return {"status": "applied", "scenario_id": scenario_id, "template_id": tpl["id"],
             "model_spec": spec}

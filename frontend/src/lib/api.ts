@@ -1389,7 +1389,30 @@ export interface PicoBulkResponse {
   with_pico: number;
   offset: number;
   limit: number;
+  /** Rows in this page, and whether more remain (the endpoint pages, it never truncates silently). */
+  returned?: number;
+  truncated?: boolean;
+  next_offset?: number | null;
+  page_max?: number;
   articles: PicoBulkArticle[];
+}
+
+/** Every article of the scenario with its PICO, by following the pages to the end.
+ *  The PICO tab claims to show "all articles": it must therefore hold all of them. */
+export async function fetchAllScenarioPico(
+  scenarioId: string,
+  maxPages = 40,
+): Promise<PicoBulkResponse> {
+  const first = await fetchScenarioPicoBulk(scenarioId, 5000, 0);
+  const all = [...first.articles];
+  let next = first.truncated ? first.next_offset ?? null : null;
+  for (let page = 1; next !== null && page < maxPages; page++) {
+    const chunk = await fetchScenarioPicoBulk(scenarioId, 5000, next);
+    all.push(...chunk.articles);
+    next = chunk.truncated ? chunk.next_offset ?? null : null;
+  }
+  return { ...first, articles: all, returned: all.length, offset: 0,
+           truncated: next !== null, next_offset: next };
 }
 
 export async function fetchScenarioPicoBulk(
@@ -1543,6 +1566,9 @@ export interface ConceptNode {
   new_count: number;
   /** Up to 40 article ids, most relevant first (keys of `articles`). */
   articles: number[];
+  /** How many `articles` the payload actually carries. Below `count` on a frequent
+   *  concept: the panel says so rather than showing 40 under a header announcing 1200. */
+  articles_listed?: number;
 }
 
 export interface ConceptEdge {
@@ -1550,7 +1576,9 @@ export interface ConceptEdge {
   target: number;
   /** Number of articles citing both concepts. */
   weight: number;
+  /** Up to 20 of them; `articles_listed` says how many the payload carries. */
   articles: number[];
+  articles_listed?: number;
 }
 
 export interface ConceptArticle {
@@ -2018,12 +2046,17 @@ export async function fetchUserScenarioPopulateStatus(
   scenarioId: string,
 ): Promise<{
   scenario_id: string;
+  /** 'not_started' | 'running' | 'done' | 'unranked' | 'error'. `unranked` = the corpus
+   *  IS built but the semantic scoring produced no score: the articles are real and
+   *  readable, their ORDER and the similarity threshold are not. Not an error. */
   status: string;
   ingested?: number;
   // Phase RÉELLE du backend (et non un minuteur côté client).
   phase?: 'local' | 'federation' | 'scoring' | 'done';
   // Statut du cross-encoder Cohere qui réordonne en arrière-plan après l'affichage.
   rerank_status?: 'idle' | 'running' | 'done' | 'skipped';
+  /** Present only when `status === 'unranked'`: why no score was produced. */
+  scoring?: { ok: boolean; reason_code: string; reason: string };
   sources?: Record<string, number>;
   /** Sources replayed from the cache of the last identical search (no network call). */
   cached_sources?: string[];
@@ -2663,10 +2696,12 @@ export type RelevantExportFormat = typeof RELEVANT_EXPORT_FORMATS[number];
 export async function exportRelevantArticles(
   scenarioId: string,
   format: RelevantExportFormat,
-  opts: { includeAbstract?: boolean } = {},
+  opts: { includeAbstract?: boolean; threshold?: number } = {},
 ): Promise<{ blob: Blob; filename: string }> {
   const params = new URLSearchParams({ format });
   if (opts.includeAbstract === false) params.set("include_abstract", "false");
+  // The threshold currently shown, so the file matches the count next to the button.
+  if (typeof opts.threshold === "number") params.set("threshold", String(opts.threshold));
   const r = await safeFetch(`${scenarioBase(scenarioId)}/${scenarioId}/relevant/export?${params}`);
   if (!r.ok) throw new Error(httpMessage(r.status));
   const disposition = r.headers.get("Content-Disposition") ?? "";
@@ -2989,7 +3024,9 @@ export async function searchLive(
   maxPerSource = 50,
 ): Promise<LiveSearchResponse> {
   const r = await safeFetch(
-    `${API_BASE_URL}/user-scenarios/${scenarioId}/search/live?max_per_source=${maxPerSource}`,
+    // `lang`: this starts a corpus build and the pipeline that follows it, so it carries
+    // the interface language like the other four entry points.
+    `${API_BASE_URL}/user-scenarios/${scenarioId}/search/live?max_per_source=${maxPerSource}&lang=${currentLang()}`,
     { method: 'POST', headers: authHeaders() },
   );
   if (!r.ok) throw new Error(httpMessage(r.status));

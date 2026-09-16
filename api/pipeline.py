@@ -10,10 +10,10 @@ import os
 import re
 from typing import Any
 
-from fastapi import Depends
+from fastapi import Depends, Query
 from sqlalchemy import text, bindparam
 
-from .core import POPULATE_FEDERATION_BUDGET, app, engine, logger, require_api_key
+from .core import POPULATE_FEDERATION_BUDGET, _norm_lang, app, engine, logger, require_api_key
 from .documents import (
     _coerce_int,
     _compute_quality_score,
@@ -549,7 +549,13 @@ def _run_user_scenario_populate(
                     r2 = _requests.post(f"{ENTREZ_BASE}/efetch.fcgi", data=_ef_data, timeout=90)
                     r2.raise_for_status()
                 except Exception as _e_fetch:
+                    # Un lot perdu = jusqu'à BATCH_SIZE notices absentes du corpus et des
+                    # chiffres PRISMA. On continue (corpus partiel plutôt que rien) mais on
+                    # MARQUE la source en erreur : sans cela, le fetcher passait pour
+                    # complet et sa liste amputée était mémorisée dans le cache des
+                    # sources, donc rejouée telle quelle pendant douze heures.
                     logger.warning(f"PubMed efetch batch {batch_idx}: {_e_fetch}")
+                    _mark_source_error()
                     _time.sleep(1)
                     continue
                 root = ET.fromstring(r2.content)
@@ -1171,6 +1177,10 @@ def _run_user_scenario_populate(
     ]
     t_start = _time.time()
     _completed_ok: set[str] = set()
+    # Fetchers qui ont RÉPONDU pendant ce run (cache rejoué inclus) : la couverture
+    # annoncée à l'utilisateur en fin de recherche doit être celle-là, pas un « 13 »
+    # constant. Une source coupée par le budget n'y figure pas.
+    _queried: set[str] = set()
     _qhash = _source_query_hash(query, filters, max_results)
     if include_live:
         _set_phase("federation")
@@ -1189,6 +1199,7 @@ def _run_user_scenario_populate(
                     _job = _user_scenario_populate_jobs.get(scenario_id)
                     if _job is not None:
                         _job.setdefault("cached_sources", []).append(_fname.replace("_fetch_", ""))
+            _queried.add(_fname)                     # servie, sans appel réseau
             logger.info(f"Populate {scenario_id} [{_fname}]: {len(_entry['links'])} liens rejoués depuis le "
                         f"cache des sources ({_entry['age_s'] / 60:.0f} min)")
         _to_run = [fn for fn in source_funcs if fn.__name__ not in _cached]
@@ -1205,6 +1216,7 @@ def _run_user_scenario_populate(
                     _fname = futures[future]
                     try:
                         src_name, src_count = future.result()
+                        _queried.add(_fname)          # a réellement répondu dans le budget
                         logger.info(f"Populate {scenario_id} [{src_name}]: {src_count} articles ingérés")
                         # Pagination allée au bout AVANT le budget et sans erreur : la
                         # réponse de ce fetcher peut être rejouée à la prochaine relance.
@@ -1407,10 +1419,19 @@ def _run_user_scenario_populate(
             _scoring_failed = True
             logger.warning(f"scoring post-populate {scenario_id}: {_e_rr}")
 
-        # ── Honnêteté de l'état : 'done' SEULEMENT si le scoring a réellement
-        # produit des scores. _run_semantic_rerank_inline avale ses erreurs et
-        # renvoie 0 (ex. OpenAI indisponible) ; on détecte ce cas et on marque
-        # 'error' plutôt que 'done' pour ne pas afficher un état prêt trompeur.
+        # ── Honnêteté de l'état : trois issues DISTINCTES, pas deux ──────────
+        # `_run_semantic_rerank_inline` avale ses erreurs et renvoie 0 (OpenAI
+        # indisponible, quota épuisé). Deux états ne suffisaient pas à le dire :
+        #   - 'done'     : corpus construit ET scoré, tout est utilisable ;
+        #   - 'unranked' : corpus construit, AUCUN score produit. Les articles sont
+        #                  là et se lisent, mais l'ordre et le seuil ne veulent rien
+        #                  dire tant qu'ils ne sont pas calculés ;
+        #   - 'error'    : la construction du corpus elle-même a échoué (posé
+        #                  ailleurs : lancement, redémarrage).
+        # Le marquer 'error' jetait un corpus parfaitement lisible : sur une panne
+        # OpenAI, l'utilisateur voyait « la construction du corpus a échoué » alors
+        # que ses articles étaient en base. 'done' mentait dans l'autre sens.
+        _scoring_state = "ok"
         try:
             with engine.begin() as conn:
                 _scorable = conn.execute(text("""
@@ -1421,12 +1442,14 @@ def _run_user_scenario_populate(
                 """), {"sid": scenario_id}).scalar() or 0
                 _ok = (not _scoring_failed) and (_n_scored > 0 or _scorable == 0)
                 _auto_ok[0] = bool(_ok)
+                _scoring_state = "ok" if _ok else "unranked"
                 conn.execute(text("""
                     UPDATE user_scenarios SET populate_status = :st, updated_at = NOW() WHERE id = :sid
-                """), {"st": "done" if _ok else "error", "sid": scenario_id})
+                """), {"st": "done" if _ok else "unranked", "sid": scenario_id})
                 if not _ok:
                     logger.warning(f"Populate {scenario_id}: scoring n'a produit aucun score "
-                                   f"({_scorable} articles scorables) → populate_status='error'.")
+                                   f"({_scorable} articles scorables) → populate_status='unranked' "
+                                   f"(corpus construit, non classé).")
         except Exception as _e_st:
             logger.warning(f"populate_status update {scenario_id}: {_e_st}")
 
@@ -1441,8 +1464,25 @@ def _run_user_scenario_populate(
             _src_parts = [f"{src}: {cnt}" for src, cnt in _sources_final.items() if cnt > 0]
             _src_summary = " | ".join(_src_parts) if _src_parts else "aucune source"
             _user_scenario_populate_jobs[scenario_id] = {
-                "status": "done",
+                # Le statut SERVI à l'interface dit la même chose que celui écrit en base.
+                # Il laissait « done » quand le scoring n'avait produit aucun score : la
+                # page affichait une recherche terminée dont tous les scores sont NULL
+                # (classement et seuil sans signification), sans un mot nulle part.
+                "status": "done" if _auto_ok[0] else "unranked",
                 "phase": "done",
+                **({} if _auto_ok[0] else {
+                    # PAS une erreur de recherche : le corpus est construit et lisible,
+                    # c'est son CLASSEMENT qui manque. L'interface l'affiche donc avec un
+                    # avertissement, au lieu de jeter des articles qui sont bien là.
+                    "scoring": {
+                        "ok": False,
+                        "reason_code": "no_scores",
+                        "reason": "Le scoring sémantique n'a produit aucun score : corpus "
+                                  "construit mais non classé (clé OpenAI indisponible ?). "
+                                  "L'ordre des articles et le seuil de similarité ne "
+                                  "s'appliquent pas tant qu'il n'a pas tourné.",
+                    },
+                }),
                 # Sources rejouées depuis le cache : l'état final remplace le dict du job,
                 # la liste serait perdue et la page de résultats ne pourrait plus dire
                 # pourquoi la recherche a pris trois secondes au lieu de trois minutes.
@@ -1456,7 +1496,19 @@ def _run_user_scenario_populate(
                 "errors": errors,
                 "total_found": total_found,
                 "sources": _sources_final,
-                "message": f"{ingested} articles ingérés depuis 13 sources ({_src_summary}), {errors} erreurs.",
+                # Ce message est la ligne qu'un relecteur citerait pour justifier la
+                # couverture de la recherche : il dit ce qui a RÉELLEMENT été interrogé,
+                # pas « 13 sources » en toutes circonstances (base locale seule, budget
+                # de fédération épuisé, sources rejouées depuis le cache).
+                "message": (
+                    f"{ingested} articles ingérés, {errors} erreurs. "
+                    + ("Base locale uniquement (sources externes non interrogées)."
+                       if not include_live else
+                       f"Sources interrogées : {len(_queried)}/{len(source_funcs)} "
+                       f"({_src_summary})"
+                       + (f" ; {len(_cached)} rejouée(s) depuis le cache de la recherche identique."
+                          if _cached else "."))
+                ),
             }
 
         # Arrière-plan : cross-encoder (réordonne le sous-ensemble pertinent) puis
@@ -2174,6 +2226,11 @@ def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict
                 from llm_usage import MeteredOpenAI as _OAI
                 from datetime import datetime, timezone
                 _client = _OAI(api_key=openai_key, timeout=90.0)
+                # Le PICO est AFFICHÉ tel quel (onglet PICO, export CSV) : sa PROSE suit
+                # donc la langue de l'interface, comme le reste du pipeline. `study_design`
+                # reste en anglais : c'est un identifiant que le code regroupe et normalise
+                # (digest, carte des concepts), et le traduire scinderait « cohort » et
+                # « cohorte » en deux catégories pour le même devis.
                 system_prompt_pico = (
                     "You are a systematic review expert. "
                     "Extract PICO elements and return ONLY valid JSON:\n"
@@ -2181,6 +2238,9 @@ def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict
                     '"O":"Outcome(s)","study_design":"RCT|Cohort|Systematic review|etc",'
                     '"pico_confidence":0.0-1.0,"pico_notes":""}\n'
                     "Be concise (max 2 sentences per field). Return ONLY the JSON."
+                    + _llm_lang_directive(lang)
+                    + " Exception: keep \"study_design\" in English, from the list above, "
+                      "as a stable identifier."
                 )
                 with engine.connect() as conn:
                     pico_rows = conn.execute(text("""
@@ -2223,7 +2283,7 @@ def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict
                             raise ValueError("réponse PICO non-dict")
                         for _k in ("P", "I", "C", "O"):
                             pico.setdefault(_k, "")
-                        pico.setdefault("study_design", "non précisé")
+                        pico.setdefault("study_design", "not specified")   # identifiant stable, jamais affiché brut sans traduction
                         try:
                             pico["pico_confidence"] = float(pico.get("pico_confidence", 0.3))
                         except (TypeError, ValueError):
@@ -2277,13 +2337,20 @@ def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict
                 from llm_usage import MeteredOpenAI as _OAI2
                 from datetime import datetime, timezone
                 _client2 = _OAI2(api_key=openai_key)
+                # Seul `primary_outcome` est de la prose affichée : il suit la langue de
+                # l'interface. Tous les autres champs sont des VALEURS D'ÉNUMÉRATION que le
+                # code compare et regroupe (study_type → study_design, setting, funding,
+                # bias_risk, country en ISO2) : elles restent en anglais.
                 system_prompt_meta = (
                     "You are a biomedical librarian. Extract metadata from this article and return ONLY valid JSON:\n"
                     '{"study_type":"RCT|Cohort|Case-control|Cross-sectional|Systematic review|Meta-analysis|Case report|Editorial|Other",'
                     '"sample_size":null,"country":"ISO2 or null","setting":"hospital|prehospital|community|other|null",'
                     '"primary_outcome":"brief description or null","funding":"public|industry|mixed|not reported",'
                     '"bias_risk":"low|moderate|high|unclear","metadata_confidence":0.0-1.0}\n'
-                    "Return ONLY the JSON."
+                    "Return ONLY the JSON. Every field except \"primary_outcome\" is an "
+                    "identifier: keep it in English, exactly from the lists above."
+                    + _llm_lang_directive(lang)
+                    + " That language applies to \"primary_outcome\" only."
                 )
                 with engine.connect() as conn:
                     meta_rows = conn.execute(text("""
@@ -2540,13 +2607,18 @@ def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict
 # ─── PIPELINE COMPLET AVEC BRIEF LLM ─────────────────────────────────────────
 
 @app.post("/scenarios/{scenario_id}/full-pipeline")
-def trigger_full_pipeline_with_brief(scenario_id: str, _: None = Depends(require_api_key)) -> dict[str, Any]:
+def trigger_full_pipeline_with_brief(scenario_id: str, lang: str | None = Query(None),
+                                     _: None = Depends(require_api_key)) -> dict[str, Any]:
     """
     Déclenche le pipeline complet incluant :
     1. Reranking sémantique
     2. Génération Evidence Brief LLM
     3. Génération Variables & Modèle
     Fonctionne pour GESICA et user_scenarios.
+
+    `lang` : langue de production, comme tous les autres déclencheurs. Sans elle, cet
+    endpoint régénérait en français (et, comme il force la régénération du brief,
+    REMPLAÇAIT un brief anglais existant par sa version française).
     """
     from .relevance import _run_semantic_rerank_inline  # lazy: relevance is loaded after this module
     from .evidence import _generate_evidence_brief_llm  # lazy: evidence is loaded after this module
@@ -2561,14 +2633,16 @@ def trigger_full_pipeline_with_brief(scenario_id: str, _: None = Depends(require
         nl = meta.get("nl_queries") or []
         query = nl[0] if nl else _gesica_title(meta)
 
+    _lang = _norm_lang(lang) or "fr"
+
     def _run():
-        logger.info(f"Full pipeline with brief: {scenario_id}")
+        logger.info(f"Full pipeline with brief: {scenario_id} (lang={_lang})")
         # 1. Reranking
         _run_semantic_rerank_inline(scenario_id, query)
         # 2. Evidence Brief LLM
-        _generate_evidence_brief_llm(scenario_id, force=True)
+        _generate_evidence_brief_llm(scenario_id, force=True, lang=_lang)
         # 3. Variables & Modèle
-        _generate_variables_from_pico(scenario_id)
+        _generate_variables_from_pico(scenario_id, lang=_lang)
         logger.info(f"Full pipeline with brief done: {scenario_id}")
 
     threading.Thread(target=_run, daemon=True).start()

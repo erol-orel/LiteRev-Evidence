@@ -1176,23 +1176,30 @@ def get_variables_generation_status(scenario_id: str) -> dict[str, Any]:
 
 
 @app.get("/scenarios/{scenario_id}/epidemic-parameters/candidates")
-def get_epidemic_parameter_candidates(scenario_id: str, limit: int = 40) -> dict[str, Any]:
+def get_epidemic_parameter_candidates(scenario_id: str, limit: int = 0) -> dict[str, Any]:
     """Les articles du corpus pertinent qui RAPPORTENT un paramètre épidémiologique, avec
     le ou les paramètres que chacun mesure. Lecture seule, sans LLM : dit ce que la
-    littérature du scénario contient avant toute extraction."""
-    arts = _parameter_candidate_articles(scenario_id, None, max(1, min(int(limit), 200)))
+    littérature du scénario contient avant toute extraction.
+
+    `n_candidates` compte TOUT le corpus, comme le fait l'extraction : cet endroit
+    répondait « 40 » pour n'importe quel corpus au-delà de 40, donc un chiffre différent
+    de celui annoncé par l'extraction pour le même scénario. `limit > 0` ne tronque que la
+    LISTE renvoyée (`articles`), jamais les compteurs."""
+    arts = _parameter_candidate_articles(scenario_id, None, 0)      # jamais d'échantillon
     by_param: dict[str, int] = {}
     for a in arts:
         for p in a["params_mentioned"]:
             by_param[p] = by_param.get(p, 0) + 1
+    _shown = arts if int(limit or 0) <= 0 else arts[:int(limit)]
     return {
         "scenario_id": scenario_id,
-        "n_candidates": len(arts),
-        "by_parameter": by_param,
+        "n_candidates": len(arts),                 # tout le corpus
+        "by_parameter": by_param,                  # compté sur tout le corpus
+        "articles_listed": len(_shown),
         "articles": [{"id": a["id"], "title": (a.get("title") or "")[:200], "year": a.get("year"),
                       "doi": a.get("doi"), "study_design": a.get("study_design"),
                       "quality_score": a.get("quality_score"),
-                      "parameters": a["params_mentioned"]} for a in arts],
+                      "parameters": a["params_mentioned"]} for a in _shown],
     }
 
 
@@ -1318,12 +1325,18 @@ def validate_scenario_variables(scenario_id: str, payload: dict[str, Any], _: No
     variables_json = payload.get("variables_json")
     with engine.begin() as conn:
         if variables_json:
+            # La projection SEIR en cache est calculée à partir de ce spec : un spec
+            # remplacé par l'utilisateur la rend caduque. Sans cette invalidation, l'onglet
+            # Modèle resservait, en la marquant « from_cache », une courbe issue des
+            # paramètres que l'utilisateur venait justement de corriger.
             conn.execute(text("""
                 UPDATE scenario_settings
                 SET variables_json = CAST(:vars AS jsonb),
                     variables_validated = TRUE,
                     variables_lang = NULL,
                     variables_i18n = NULL,
+                    seir_projection_json = NULL,
+                    seir_projection_generated_at = NULL,
                     updated_at = NOW()
                 WHERE scenario_id = :sid
             """), {"sid": scenario_id, "vars": _json.dumps(variables_json)})

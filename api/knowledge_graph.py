@@ -64,7 +64,11 @@ def _build_knowledge_graph(
     `n_total` = nombre total d'articles éligibles (pour signaler un éventuel sous-ensemble).
     """
     if not rows:
-        return {"nodes": [], "edges": [], "clusters": [], "n_total": n_total}
+        # Même forme que la charge utile pleine : l'interface et les scripts lisent
+        # n_nodes/n_edges/n_clusters sans avoir à traiter un cas particulier.
+        return {"scenario_id": scenario_id, "n_nodes": 0, "n_edges": 0, "n_clusters": 0,
+                "n_total": n_total, "min_similarity": min_similarity,
+                "nodes": [], "edges": [], "clusters": []}
 
     import numpy as np
 
@@ -87,7 +91,9 @@ def _build_knowledge_graph(
             continue
 
     if not nodes_data:
-        return {"nodes": [], "edges": [], "clusters": [], "n_total": n_total}
+        return {"scenario_id": scenario_id, "n_nodes": 0, "n_edges": 0, "n_clusters": 0,
+                "n_total": n_total, "min_similarity": min_similarity,
+                "nodes": [], "edges": [], "clusters": []}
 
     embeddings = np.array([n["emb"] for n in nodes_data])
     norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
@@ -173,12 +179,17 @@ def _build_knowledge_graph(
     }
 
 
-# SQL partagé : sélectionne un embedding par article, priorise les meilleurs articles
+# SQL partagé : un embedding par article, les plus PERTINENTS d'abord. Le tri se faisait
+# sur quality_score : les 400 nœuds dessinés n'étaient donc pas les 400 que l'utilisateur
+# obtient en triant son corpus par pertinence, alors que le sous-titre annonce « les N
+# articles les plus pertinents ». Inclus d'abord, puis rerank, puis score sémantique.
 _KG_NODE_SQL = """
     SELECT * FROM (
         SELECT DISTINCT ON (d.id)
             d.id, d.title, d.year, d.journal, d.study_design, d.quality_score,
             c.embedding::text AS emb_str,
+            (COALESCE(ars.screening_status, d.screening_status) = 'included') AS is_included,
+            COALESCE(ars.rerank_score, ars.similarity_score, 0) AS relevance,
             COALESCE((d.pico_json->>'study_design'), d.study_design, 'unknown') AS design
         FROM literature_document d
         {join}
@@ -188,7 +199,8 @@ _KG_NODE_SQL = """
           AND d.abstract IS NOT NULL
         ORDER BY d.id, (c.chunk_type = 'title_abstract') DESC, c.id
     ) sub
-    ORDER BY quality_score DESC NULLS LAST, year DESC NULLS LAST
+    ORDER BY is_included DESC, relevance DESC NULLS LAST,
+             quality_score DESC NULLS LAST, year DESC NULLS LAST
     LIMIT :max_nodes
 """
 
@@ -276,6 +288,11 @@ CONCEPT_TYPES = ("pathogen", "vector", "host", "population", "exposure", "interv
 _LLM_CONCEPT_TYPES = ("pathogen", "vector", "host", "population", "exposure", "intervention",
                       "outcome", "method", "place")
 CONCEPTS_VERSION = 1
+# Articles transportés par nœud et par arête. Ce n'est PAS un plafond d'extraction (le
+# `count` d'un nœud porte sur tout le corpus) mais la taille de la charge utile envoyée au
+# navigateur ; l'interface dit combien elle en liste sur combien.
+ARTICLES_PER_NODE = 40
+ARTICLES_PER_EDGE = 20
 # Plafond d'articles normalisés par le LLM en une passe (15 par appel → ≈ 100 appels).
 # Aucun plafond par défaut : les concepts sont normalisés pour TOUS les articles
 # pertinents, une seule fois par article (cache `concepts_json`), donc le coût est ponctuel
@@ -524,13 +541,22 @@ def _build_concept_graph(rows: list[dict], *, max_nodes: int = 60, min_edge: int
         arts = node_articles.get(i, [])
         nodes.append({
             "id": i, "type": k[0], "label": labels.get(k, {"en": k[1], "fr": k[1]}),
-            "count": len(arts), "new_count": int(node_new.get(i, 0)), "articles": arts[:40],
+            "count": len(arts), "new_count": int(node_new.get(i, 0)),
+            "articles": arts[:ARTICLES_PER_NODE],
+            # Combien la charge utile en transporte réellement : « Tout afficher » sur un
+            # concept annoncé à 1 200 articles en listait 40 sans le dire.
+            "articles_listed": min(len(arts), ARTICLES_PER_NODE),
         })
     edges = []
     for (i, j), w in edge_w.most_common():
         if w < min_edge:
             break
-        edges.append({"source": i, "target": j, "weight": int(w), "articles": edge_articles[(i, j)][:20]})
+        # Même honnêteté que sur les noeuds : `weight` est le nombre RÉEL de
+        # co-occurrences, `articles` n'en transporte qu'une partie sur un lien fréquent.
+        _ea = edge_articles[(i, j)]
+        edges.append({"source": i, "target": j, "weight": int(w),
+                      "articles": _ea[:ARTICLES_PER_EDGE],
+                      "articles_listed": min(len(_ea), ARTICLES_PER_EDGE)})
         if len(edges) >= 200:
             break
 

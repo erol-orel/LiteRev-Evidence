@@ -9,8 +9,10 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import Depends, Query
+from sqlalchemy import text
 
 from .core import _msg, app, engine, logger, require_api_key
+from .scenario_store import CORPUS_DERIVED_CACHE_RESET
 from .gesica import (
     SCENARIO_LIVING_REVIEW_IDS,
     _gesica_title,
@@ -41,11 +43,23 @@ def living_review_status(lang: str | None = Query(None)):
 
 
 @app.post("/living-review/run")
-def living_review_run(scenario_id: str = "all", days: int = 30, dry_run: bool = False, _: None = Depends(require_api_key)):
-    """Lance la living review pour un scénario ou tous les scénarios (processus async)."""
+def living_review_run(scenario_id: str = "all", days: int = 30, dry_run: bool = False,
+                      lang: str | None = Query(None), _: None = Depends(require_api_key)):
+    """Lance la living review pour un scénario ou tous les scénarios (processus async).
+
+    Deux défauts corrigés ici : le script était cherché dans `api/` (il est à la racine
+    du dépôt, ce module ayant été extrait de main.py), donc l'enfant mourait aussitôt sur
+    « can't open file » ; et `lang` n'était pas un paramètre, donc la construction de la
+    réponse levait un NameError avalé par le `except` : l'endpoint renvoyait toujours
+    `error`, jamais `started`, et rien n'était jamais récupéré."""
     import subprocess as _subprocess
     import sys as _sys
-    script = str(Path(__file__).parent / "living_review_scheduler.py")
+    script = str(Path(__file__).resolve().parent.parent / "living_review_scheduler.py")
+    if not Path(script).exists():
+        return {"status": "error",
+                "error": f"Scheduler introuvable : {script}",
+                "message": _msg(lang, "Le script de living review est introuvable sur le serveur.",
+                                "The living review script is missing on the server.")}
     cmd = [_sys.executable, script, "--mode", "once", "--days", str(days)]
     if scenario_id == "all":
         cmd.append("--all-scenarios")
@@ -85,9 +99,11 @@ def trigger_living_review(
     """
     Déclenche le pipeline Living Review :
     1. Interroge PubMed avec la requête booléenne du scénario
-    2. Insère les nouveaux articles
-    3. Génère les embeddings
-    4. Invalide le cache clustering
+    2. Insère les nouveaux articles et leurs chunks
+    3. Invalide les caches de visualisation des scénarios rafraîchis (clustering, graphe
+       de similarité, carte des concepts) : le corpus a changé, ils sont périmés
+    Les EMBEDDINGS ne sont pas produits ici : le worker d'arrière-plan les calcule ensuite
+    (cf. schema_boot), la docstring annonçait à tort une étape synchrone.
     Retourne un rapport de ce qui a été fait (ou ce qui serait fait en dry_run).
     """
     import threading
@@ -117,10 +133,14 @@ def trigger_living_review(
         report["scenarios"].append(scenario_report)
 
     if not dry_run:
+        _sids = [sid for sid, _ in scenarios_to_update]
+
         def _run_living_review():
             try:
                 import subprocess, sys as _sys
-                _script = str(Path(__file__).parent / "living_review_scheduler.py")
+                # Racine du dépôt, pas api/ : ce module a été extrait de main.py et le
+                # chemin l'a suivi, si bien que l'enfant mourait sur « can't open file ».
+                _script = str(Path(__file__).resolve().parent.parent / "living_review_scheduler.py")
                 # Cible le scénario demandé : living_review_scheduler.py accepte
                 # --scenario / --all-scenarios ; ingest_pubmed.py n'accepte que
                 # --project/--query (--all-scenarios y était un flag INVALIDE →
@@ -132,11 +152,27 @@ def trigger_living_review(
                     _cmd.append("--all-scenarios")
                 result = subprocess.run(
                     _cmd, capture_output=True, text=True, timeout=600,
-                    cwd=str(Path(__file__).parent),
+                    cwd=str(Path(__file__).resolve().parent.parent),
                 )
                 logger.info(f"Living Review pipeline: {result.stdout[:500]}")
                 if result.returncode != 0:
                     logger.error(f"Living Review error: {result.stderr[:500]}")
+                elif _sids:
+                    # Le corpus a gagné des articles : tout ce qui en est calculé ne le
+                    # décrit plus. L'étape 4 annoncée par la docstring n'existait nulle
+                    # part dans le scheduler ; elle est faite ici, où l'on sait quels
+                    # scénarios ont été rafraîchis. La liste est celle du changement de
+                    # seuil (CORPUS_DERIVED_CACHE_RESET) : les deux se sont déjà désaccordées
+                    # une fois, sur les actions recommandées.
+                    try:
+                        with engine.begin() as _c:
+                            _c.execute(text(f"""
+                                UPDATE scenario_settings SET {CORPUS_DERIVED_CACHE_RESET}
+                                WHERE scenario_id = ANY(:sids)
+                            """), {"sids": _sids})
+                        logger.info(f"Living Review: caches dérivés du corpus invalidés pour {_sids}")
+                    except Exception as _ce:
+                        logger.warning(f"Living Review cache invalidation: {_ce}")
             except Exception as e:
                 logger.error(f"Living Review pipeline error: {e}")
 

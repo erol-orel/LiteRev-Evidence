@@ -17,6 +17,10 @@ from .scenario_store import _get_user_scenario_or_404
 from .search import _load_prisma_identification, _reconcile_prisma_identification
 from .double_blind import _write_ars_screening
 
+# Taille maximale d'UNE page de /pico-bulk (borne mémoire, pas une troncature cachée :
+# la réponse porte `total`, `returned`, `truncated` et `next_offset`).
+PICO_BULK_MAX_PAGE = int(os.getenv("PICO_BULK_MAX_PAGE", "5000") or 5000)
+
 # ── Proxy endpoints : rediriger les appels /gesica/scenarios/{usr-*}/... ──────
 # Les endpoints existants (screening, pico, evidence-brief, clustering, rag, etc.)
 # valident maintenant l'ID via la DB (user_scenarios is_system=TRUE).
@@ -172,8 +176,11 @@ def get_user_scenario_prisma(
                 ) AND COALESCE(ars.screening_status, d.screening_status) IS DISTINCT FROM 'excluded'
                   AND (COALESCE(ars.similarity_score, 0) >= :thr OR COALESCE(ars.screening_status, d.screening_status) = 'included')
                   THEN 1 ELSE 0 END) AS with_fulltext,
-                -- embeddings
-                SUM(CASE WHEN EXISTS (
+                -- embeddings : MÊME sous-ensemble non dupliqué que les étapes
+                -- post-identification ci-dessus. Sans le filtre, la carte PRISMA pouvait
+                -- annoncer plus d'articles « embeddés (recherchables) » que d'articles
+                -- passés au screening, et contredire /counts sur la même quantité.
+                SUM(CASE WHEN (d.is_duplicate IS NULL OR d.is_duplicate = FALSE) AND EXISTS (
                     SELECT 1 FROM document_chunk c
                     WHERE c.document_id = d.id AND c.embedding IS NOT NULL
                 ) THEN 1 ELSE 0 END) AS embedded
@@ -331,11 +338,16 @@ def get_user_scenario_prisma(
 
 @app.get("/user-scenarios/{scenario_id}/pico-bulk")
 def get_user_scenario_pico_bulk(scenario_id: str, limit: int = 100000, offset: int = 0) -> dict[str, Any]:
-    """Tous les articles d'un scénario utilisateur avec leur PICO extrait."""
+    """Articles d'un scénario utilisateur avec leur PICO extrait, PAGINÉS.
+
+    Une page vaut au plus `PICO_BULK_MAX_PAGE` articles (borne mémoire : un
+    ?limit=100000000 matérialiserait toute la jointure en RAM/JSON). La réponse dit
+    combien d'articles existent (`total`), combien sont renvoyés et s'il en reste
+    (`truncated`, `next_offset`) : elle annonçait « tous les articles » en n'en servant
+    que les 5 000 premiers, sans autre signal que le `limit` renvoyé."""
     _get_user_scenario_or_404(scenario_id)
-    # Endpoint ouvert : borne limit/offset pour éviter qu'un ?limit=100000000 matérialise
-    # toute la jointure en RAM/JSON (DoS mémoire). Plafond généreux (le front pagine).
-    limit = max(1, min(int(limit), 5000))
+    _requested = max(1, int(limit))
+    limit = min(_requested, PICO_BULK_MAX_PAGE)
     offset = max(0, int(offset))
     with engine.connect() as conn:
         rows = conn.execute(text("""
@@ -378,12 +390,20 @@ def get_user_scenario_pico_bulk(scenario_id: str, limit: int = 100000, offset: i
             "pico_extracted_at": r["pico_extracted_at"].isoformat() if r["pico_extracted_at"] else None,
             "screening_status": r["screening_status"],
         })
+    _total = int(total_row["total"]) if total_row else 0
+    _returned = len(articles)
     return {
         "scenario_id": scenario_id,
-        "total": int(total_row["total"]) if total_row else 0,
+        "total": _total,
         "with_pico": int(total_row["with_pico"]) if total_row else 0,
         "offset": offset,
         "limit": limit,
+        "returned": _returned,
+        # Le client sait s'il tient tout le corpus ou une page : sans cela, un export
+        # PICO de plus de PICO_BULK_MAX_PAGE articles se lisait comme complet.
+        "truncated": offset + _returned < _total,
+        "next_offset": (offset + _returned) if offset + _returned < _total else None,
+        "page_max": PICO_BULK_MAX_PAGE,
         "articles": articles,
     }
 
@@ -416,9 +436,13 @@ def screen_user_scenario_article(
         """), {"status": status, "reason": reason, "notes": notes, "article_id": article_id}).first()
         # Migration 2 dual-write: also record the decision on the per-scenario row
         _write_ars_screening(conn, scenario_id, article_id, status, reason, notes)
-    if not row:
-        raise HTTPException(status_code=404, detail="Article non trouvé")
-    return {"id": row[0], "status": status, "updated": True}
+    # L'UPDATE ci-dessus ne touche que les lignes `project_context = 'literev'` ; la
+    # décision qui COMPTE est celle écrite sur article_scenarios (toutes les lectures
+    # font COALESCE(ars.screening_status, d.screening_status)), et elle est déjà
+    # committée ici. Répondre 404 « Article non trouvé » disait au relecteur que son
+    # screening avait échoué alors qu'il était enregistré et appliqué.
+    return {"id": article_id, "status": status, "updated": True,
+            "document_row_updated": bool(row)}
 
 
 @app.post("/user-scenarios/{scenario_id}/articles/{article_id}/pico/extract")

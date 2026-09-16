@@ -38,3 +38,23 @@ def _get_scenario_threshold(scenario_id: str) -> float:
             SELECT similarity_threshold FROM scenario_settings WHERE scenario_id = :sid
         """), {"sid": scenario_id}).mappings().first()
     return float(row["similarity_threshold"]) if row and row["similarity_threshold"] is not None else DEFAULT_SIMILARITY_THRESHOLD
+
+
+# ── Invalidation des artefacts calculés sur le corpus pertinent ───────────────
+# Clustering, réseau de similarité, carte des concepts et actions recommandées sont
+# tous des FONCTIONS du sous-ensemble pertinent : ils périment dès que ce sous-ensemble
+# bouge, c'est-à-dire quand le seuil change ou quand le corpus gagne des articles. Le
+# brief et les variables, eux, s'invalident seuls (leur empreinte porte le seuil ET les
+# identifiants des articles).
+#
+# UNE seule liste, parce que deux requêtes à tenir en phase ont déjà divergé : le seuil
+# et la living review nettoyaient les trois visualisations mais oubliaient les actions
+# recommandées, qui restaient servies indéfiniment alors qu'elles décrivaient le corpus
+# précédent.
+CORPUS_DERIVED_CACHE_RESET = """
+    clustering_json = NULL, clustering_generated_at = NULL,
+    knowledge_graph_json = NULL, kg_generated_at = NULL,
+    concept_graph_json = NULL, concept_graph_generated_at = NULL,
+    recommended_actions_json = NULL, recommended_actions_lang = NULL,
+    actions_generated_at = NULL
+"""

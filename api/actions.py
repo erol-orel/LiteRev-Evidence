@@ -58,7 +58,10 @@ def _generate_recommended_actions(scenario_id: str, lang: str | None = None) -> 
               "concrètes, spécifiques et actionnables (pas de généralités). Pas de tiret cadratin (em dash)."
               ) + _llm_lang_directive(lang)
     user = (f"Scénario : \"{scenario_name}\"\n\n"
-            + (f"{_digest_block}\n\n{_coverage}\n\n" if _digest_block else f"Basé sur {_n_total} articles.\n\n")
+            # `_coverage` est porté DANS LES DEUX CAS : complet il garantit l'exhaustivité,
+            # incomplet il interdit de généraliser au-delà des articles reproduits.
+            + (f"{_digest_block}\n\n{_coverage}\n\n" if _digest_block
+               else f"Basé sur {_n_total} articles.\n\n{_coverage}\n\n")
             + f"Articles reproduits ({len(ctx)} les mieux établis) :\n"
             + f"{_json.dumps(ctx, ensure_ascii=False)[:6000]}\n\n"
             "Génère un JSON {\"recommended_actions\": [\"action 1\", ...]} avec 4 à 5 actions "
