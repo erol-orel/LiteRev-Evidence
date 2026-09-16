@@ -1,4 +1,4 @@
-"""Built-in demo scenario — a real influenza dataset + a trained model.
+"""Built-in demo scenario - a real influenza dataset + a trained model.
 
 Makes the real-dataset trial (`scripts/trial_weather_influenza_ili.py`) visible IN
 the app as a proper, openable scenario, instead of only a script + committed files.
@@ -18,10 +18,10 @@ import os
 
 # Stable id → the startup seed is idempotent (matches the app's usr-<12 hex> format).
 DEMO_SCENARIO_ID = "usr-deadbeef0001"
-DEMO_SCENARIO_NAME = "Influenza & environment — Switzerland (demo)"
+DEMO_SCENARIO_NAME = "Influenza & environment - Switzerland (demo)"
 DEMO_SCENARIO_QUERY = (
     "Influenza-like illness and its environmental / co-circulating drivers in "
-    "Switzerland — trained on real EAWAG wastewater surveillance"
+    "Switzerland - trained on real EAWAG wastewater surveillance"
 )
 _DATASET_REL = os.path.join("scripts", "trial_output", "ch-influenza_dataset.csv")
 
@@ -51,13 +51,13 @@ _ALGORITHM = {"family": "random_forest", "metric": "r2",
               "cv": {"strategy": "kfold", "folds": 5}}
 
 # Paramètres épidémiologiques de la grippe SAISONNIÈRE, aux ordres de grandeur publiés
-# et admis. Le bloc était auparavant `applicable: False` avec `params: {}` — de sorte que
+# et admis. Le bloc était auparavant `applicable: False` avec `params: {}` - de sorte que
 # le SEIR de l'UNIQUE scénario livré (et qui porte sur la grippe) affichait « aucun modèle
 # SEIR », c'est-à-dire exactement l'inverse de la démonstration voulue.
 #
 # HONNÊTETÉ : `provenance: []` et `n_studies: 0` sont VOLONTAIRES. Ces valeurs ne sont pas
 # extraites du corpus de ce scénario (il n'y en a pas) : ce sont des valeurs de
-# démonstration. On ne fabrique pas d'ids d'articles pour faire croire à une traçabilité —
+# démonstration. On ne fabrique pas d'ids d'articles pour faire croire à une traçabilité -
 # c'est précisément le travers que le reste de ce correctif supprime. `is_demo` le dit à
 # l'UI, qui peut étiqueter la projection comme démonstrative.
 def _demo_epidemic_parameters() -> dict:

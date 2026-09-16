@@ -1,5 +1,5 @@
 """Everything the pipeline caches is produced in the language of the interface that
-started it — the pin, the "rebuild everything" button, the search.
+started it - the pin, the "rebuild everything" button, the search.
 
 Seen on September 16: a scenario pinned under the English toggle, "Pipeline finished",
 and yet the Variables & Model, Visualization and knowledge-graph tabs computed at their

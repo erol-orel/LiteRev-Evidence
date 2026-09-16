@@ -24,11 +24,11 @@ Three controls, all off by default so that installing this changes no behaviour:
 
 A refusal raises `LLMCallBlocked`. Call sites already wrap their LLM calls in
 `try/except Exception`, so a blocked call degrades to "this feature is unavailable"
-rather than a 500 — the same shape as an API outage, which is what a spend freeze is.
+rather than a 500 - the same shape as an API outage, which is what a spend freeze is.
 
 NOT metered: the two streaming chat calls (`stream=True`). The API only reports usage
 for a stream when asked via `stream_options`, which appends a final chunk with empty
-`choices` — enough to break a consumer that assumes every chunk has one. Adding that
+`choices` - enough to break a consumer that assumes every chunk has one. Adding that
 needs a test against the live API, which is exactly what this environment cannot do.
 They are counted as calls with zero tokens, so they show up in the table as a known
 blind spot rather than silently missing. The master switch and budget DO apply to them.
@@ -68,7 +68,7 @@ DDL = (
 
 
 class LLMCallBlocked(RuntimeError):
-    """An OpenAI call was refused locally — by the master switch or the daily budget."""
+    """An OpenAI call was refused locally - by the master switch or the daily budget."""
 
 
 # ── configuration ────────────────────────────────────────────────────────────
@@ -101,7 +101,7 @@ def _usage_fields(usage) -> tuple[int, int, int]:
     """(prompt, completion, total) from a response's `usage`, whatever shape it has.
 
     Embedding responses carry no `completion_tokens`; a streamed response may carry no
-    usage at all. Missing means zero, never an exception — accounting must not be able
+    usage at all. Missing means zero, never an exception - accounting must not be able
     to break the call it is accounting for.
     """
     def _int(v):
@@ -191,7 +191,7 @@ def check_allowed(purpose: str = "") -> None:
 # ── the metered client ───────────────────────────────────────────────────────
 
 def _caller_name(depth: int = 2) -> str:
-    """Name of the function that asked for a client — used as the usage `purpose`."""
+    """Name of the function that asked for a client - used as the usage `purpose`."""
     try:
         import inspect
         f = inspect.currentframe()
@@ -225,7 +225,7 @@ def instrument(client, purpose: str):
         try:
             target = client.chat.completions if attr == "chat" else client.embeddings
             target.create = _wrap(target.create, purpose, kind)
-        except Exception as e:                       # SDK shape changed — never fatal
+        except Exception as e:                       # SDK shape changed - never fatal
             logger.warning(f"llm_usage could not instrument {attr}: {e}")
     return client
 

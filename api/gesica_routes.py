@@ -62,7 +62,7 @@ async def upload_scenario_dataset(
     Délègue au pipeline unifié POST /scenarios/{id}/model/data : valide les en-têtes
     contre le data_template, stocke le dataset comme ACTIF (celui que lit réellement
     l'entraînement) et lance l'entraînement si les données suffisent. Corrige l'ancien
-    comportement où le fichier était écrit sur un chemin JAMAIS lu par l'entraînement —
+    comportement où le fichier était écrit sur un chemin JAMAIS lu par l'entraînement -
     « stocké » sans jamais alimenter le modèle, alors que la réponse le sous-entendait.
     Nécessite un model_spec validé (sinon 400 : définir d'abord les Variables & Modèle)."""
     _get_db_gesica_scenario_or_404(scenario_id)
@@ -86,7 +86,7 @@ def extract_article_pico(scenario_id: str, article_id: int, _: None = Depends(re
 
 @app.get("/gesica/scenarios/{scenario_id}/pico-stats")
 def get_scenario_pico_stats(scenario_id: str):
-    """Statistiques PICO — delegue a l'implementation user-scenario unifiee."""
+    """Statistiques PICO - delegue a l'implementation user-scenario unifiee."""
     return get_user_scenario_pico_stats(scenario_id)
 
 
@@ -107,7 +107,7 @@ def screen_scenario_article(
 
 @app.get("/gesica/scenarios/{scenario_id}/screening-progress")
 def get_scenario_screening_progress(scenario_id: str) -> dict[str, Any]:
-    """Progression du screening PRISMA — delegue a l'implementation user-scenario unifiee."""
+    """Progression du screening PRISMA - delegue a l'implementation user-scenario unifiee."""
     return get_user_scenario_screening_progress(scenario_id)
 
 # ─── PICO Bulk : tous les articles d'un scénario avec PICO ────────────────────────────────────────────
@@ -125,13 +125,13 @@ def get_evidence_brief(scenario_id: str) -> dict[str, Any]:
 
 @app.get("/gesica/scenarios/{scenario_id}/double-blind/kappa")
 def get_kappa_stats(scenario_id: str) -> dict[str, Any]:
-    """Kappa de Cohen — delegue a l'implementation user-scenario unifiee."""
+    """Kappa de Cohen - delegue a l'implementation user-scenario unifiee."""
     return get_user_scenario_kappa(scenario_id)
 
 
 @app.get("/gesica/scenarios/{scenario_id}/double-blind/conflicts")
 def get_conflicts(scenario_id: str) -> list[dict[str, Any]]:
-    """Conflits double-aveugle — delegue a l'implementation user-scenario unifiee."""
+    """Conflits double-aveugle - delegue a l'implementation user-scenario unifiee."""
     return get_user_scenario_conflicts(scenario_id)
 
 
@@ -147,7 +147,7 @@ def get_knowledge_graph(
 
 @app.get("/gesica/scenarios/{scenario_id}/concept-graph")
 def get_concept_graph(scenario_id: str, refresh: bool = False) -> dict[str, Any]:
-    """Carte des concepts — delegue a l'implementation user-scenario unifiee."""
+    """Carte des concepts - delegue a l'implementation user-scenario unifiee."""
     return get_user_scenario_concept_graph_payload(scenario_id, refresh)
 
 

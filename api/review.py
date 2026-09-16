@@ -146,7 +146,7 @@ def get_user_scenario_prisma(
                 SUM(CASE WHEN d.source = 'db_cache' THEN 1 ELSE 0 END) AS db_cache,
                 SUM(CASE WHEN d.is_duplicate = TRUE THEN 1 ELSE 0 END) AS duplicates,
                 -- Étapes POST-identification (screening/éligibilité/preuves) comptées
-                -- sur le sous-ensemble NON dupliqué — cohérent avec toutes les autres
+                -- sur le sous-ensemble NON dupliqué - cohérent avec toutes les autres
                 -- surfaces "pertinentes" (evidence-brief, RAG, cartes). L'identification
                 -- ci-dessus (total/by_source/duplicates) reste sur le corpus ENTIER.
                 -- semantic split at effective threshold
@@ -163,7 +163,7 @@ def get_user_scenario_prisma(
                 -- manually excluded above threshold (veto)
                 SUM(CASE WHEN (d.is_duplicate IS NULL OR d.is_duplicate = FALSE) AND COALESCE(ars.screening_status, d.screening_status) = 'excluded'
                            AND COALESCE(ars.similarity_score, 0) >= :thr THEN 1 ELSE 0 END) AS manually_vetoed,
-                -- full text — RESTREINT à l'ensemble de preuves (≥ seuil OU inclus
+                -- full text - RESTREINT à l'ensemble de preuves (≥ seuil OU inclus
                 -- manuellement, hors exclus), pas au corpus entier : sinon le "X of Y"
                 -- du PRISMA pouvait dépasser Y (le fameux "5 of 4").
                 SUM(CASE WHEN (d.is_duplicate IS NULL OR d.is_duplicate = FALSE) AND EXISTS (
@@ -204,9 +204,9 @@ def get_user_scenario_prisma(
     # (recoupements entre sources + lignes fusionnées) et les retraits pour d'autres
     # raisons (cf. _prisma_identification_figures). Sans eux (scénario antérieur), on
     # retombe sur le corpus, qui est DÉJÀ dédupliqué : ses « doublons » sont le flag
-    # is_duplicate, posé par aucun runtime — d'où l'ancien « 0 » permanent, signalé
+    # is_duplicate, posé par aucun runtime - d'où l'ancien « 0 » permanent, signalé
     # ici par figures_from="corpus" pour que l'interface le dise.
-    # « Passés au screening » = le corpus tel qu'il est MAINTENANT, hors doublons — la
+    # « Passés au screening » = le corpus tel qu'il est MAINTENANT, hors doublons - la
     # même référence que /counts et l'onglet Corpus. Les chiffres de la recherche sont
     # RÉCONCILIÉS avec lui (_reconcile_prisma_identification) : ce qui a été ajouté ou
     # retiré depuis la recherche apparaît sur sa propre ligne, et l'arithmétique

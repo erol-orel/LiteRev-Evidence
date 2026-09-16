@@ -47,7 +47,7 @@ def _generate_recommended_actions(scenario_id: str, lang: str | None = None) -> 
 
     system = ("Tu es un expert en aide à la décision en santé et en santé publique. "
               "À partir d'une revue de littérature, tu proposes des ACTIONS opérationnelles "
-              "concrètes, spécifiques et actionnables (pas de généralités). Pas de tiret em (—)."
+              "concrètes, spécifiques et actionnables (pas de généralités). Pas de tiret cadratin (em dash)."
               ) + _llm_lang_directive(lang)
     user = (f"Scénario : \"{scenario_name}\"\n"
             f"Basé sur {len(base)} articles :\n{_json.dumps(ctx, ensure_ascii=False)[:6000]}\n\n"

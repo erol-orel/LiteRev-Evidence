@@ -1,4 +1,4 @@
-"""The influenza anchors, exercised end to end — no database, no network, no API key.
+"""The influenza anchors, exercised end to end - no database, no network, no API key.
 
 `epidemic_parameters` is produced by an LLM call that no test can make, and every SEIR
 curve in the app is drawn from it. These tests cover the half that IS reachable: given an
@@ -40,7 +40,7 @@ def test_every_anchor_band_contains_its_own_reference_value():
         assert a.holds(a.typical), f"{name}: typical {a.typical} outside [{a.low}, {a.high}]"
         for factor, label in a.confusions:
             assert not a.holds(a.typical * factor), (
-                f"{name}: the {label} check is useless — a correct value times {factor} "
+                f"{name}: the {label} check is useless - a correct value times {factor} "
                 "still lands inside the band, so the confusion is undetectable")
 
 
@@ -94,7 +94,7 @@ def test_deaths_track_the_extracted_case_fatality_ratio():
     assert math.isclose(ratio, cfr, rel_tol=0.01), (ratio, cfr)
 
     # Same extraction, CFR read as a percentage: ~100x the deaths, on a curve that looks
-    # every bit as plausible. Nothing in the engine can tell these two apart — only the
+    # every bit as plausible. Nothing in the engine can tell these two apart - only the
     # anchor can, which is why it exists.
     hundred_fold = _simulate(params, cfr=cfr * 100.0)
     assert hundred_fold["deaths"][-1] > 50 * res["deaths"][-1]
@@ -114,7 +114,7 @@ def test_the_uncertainty_ensemble_stays_finite_on_real_intervals():
 def test_the_serial_interval_is_extracted_but_never_simulated():
     """It is normalised and displayed, yet absent from _PARAM_FIELDS.
 
-    Pinned so nobody reads it off the SEIR tab believing it shaped the curve — and so that
+    Pinned so nobody reads it off the SEIR tab believing it shaped the curve - and so that
     wiring it in later has to be a deliberate change to this test.
     """
     for name in anchors.NOT_SIMULATED:
@@ -225,6 +225,6 @@ def test_the_checker_says_what_it_cannot_check_on_a_normalised_block():
 
 
 def test_provenance_is_only_judged_when_the_corpus_is_known():
-    """Without corpus_ids a fabricated id is invisible here — as it is to the code."""
+    """Without corpus_ids a fabricated id is invisible here - as it is to the code."""
     bad = _mutate("r0", provenance=[101, 999])
     assert not any("999" in c for c in check_extraction(bad))

@@ -1,4 +1,4 @@
-# Migration 1 — `scenario_type` → `article_scenarios` (Way B)
+# Migration 1 - `scenario_type` → `article_scenarios` (Way B)
 
 **Decision:** the ~29 endpoints that scope by `d.scenario_type = :sid` ("ingestion
 membership") will switch to **scored membership via `article_scenarios`** ("Way B"),
@@ -7,9 +7,9 @@ membership") will switch to **scored membership via `article_scenarios`** ("Way 
 ## Why (plain terms)
 
 A document can belong to several scenarios. Two membership notions exist:
-- **Way A — ingestion:** `literature_document.scenario_type`, stamped once when the
+- **Way A - ingestion:** `literature_document.scenario_type`, stamped once when the
   paper was fetched. Single-valued, never updated.
-- **Way B — scored:** `article_scenarios (scenario_id, document_id, similarity_score)`,
+- **Way B - scored:** `article_scenarios (scenario_id, document_id, similarity_score)`,
   the relevance-scoring result. Many-to-many; this is what the dashboard already uses.
 
 `d.scenario_type = :sid` and an `article_scenarios` join return different document
@@ -17,7 +17,7 @@ sets, so switching the 29 sites changes what each scenario shows. We want Way B
 ("every relevant paper, even if found via another scenario"), but we verify the
 impact on real data before flipping anything.
 
-## Step 1 — Before/after preview (do this first, zero risk)
+## Step 1 - Before/after preview (do this first, zero risk)
 
 `scripts/migration1_scenario_type_diff.py` is **read-only** (SELECT only). It prints,
 per scenario:
@@ -46,7 +46,7 @@ fixture with a deliberately divergent scenario.)
 **Review the output together** before any code lands. If the deltas look right and no
 scenario is unexpectedly emptied, proceed.
 
-## Step 2 — Backfill (only if the preview flags ⚠ VIDÉ scenarios)
+## Step 2 - Backfill (only if the preview flags ⚠ VIDÉ scenarios)
 
 For any scenario that exists via `scenario_type` but has no `article_scenarios` rows,
 create the missing links so Way B doesn't lose those documents:
@@ -60,11 +60,11 @@ WHERE d.scenario_type IS NOT NULL
       WHERE ars.scenario_id = d.scenario_type AND ars.document_id = d.id
   );
 ```
-`similarity_score = NULL` means "member but unscored" — already treated as *not above
+`similarity_score = NULL` means "member but unscored" - already treated as *not above
 threshold* by the canonical predicate (see #115), so this changes membership without
 inflating "relevant" counts. Run on staging, re-run the preview, confirm no ⚠ remain.
 
-## Step 3 — Rewrite the 29 sites
+## Step 3 - Rewrite the 29 sites
 
 Replace the scoping predicate everywhere it appears:
 ```sql
@@ -77,12 +77,12 @@ WHERE EXISTS (SELECT 1 FROM article_scenarios ars
 Notes:
 - The `ix_article_scenarios_document` / `ix_article_scenarios_scenario` indexes
   (shipped in #122) make the EXISTS cheap.
-- Some sites also write `scenario_type` (document insert) — keep writing it for now
+- Some sites also write `scenario_type` (document insert) - keep writing it for now
   (harmless, and useful as a provenance field) but stop *reading* it for scoping.
 - The screening endpoints' `AND scenario_type = :sid` gate becomes the membership
   EXISTS too (this is also what Migration 2 needs).
 
-## Step 4 — Validate & ship
+## Step 4 - Validate & ship
 
 - On staging: re-run the preview (expect A==B per scenario after backfill) and a
   corpus-count parity check; confirm dashboards/search/PRISMA are unchanged except
@@ -115,7 +115,7 @@ quality pass to turn NULL-score members into scored ones.
 `article_scenarios` membership is built only by the boolean-query corpus assignment
 (`_boolean_corpus_ids` → `_set_scenario_corpus`), which runs inside user `/populate`
 (and, historically, a one-off GESICA backfill). `/scenarios/{id}/rerank` only SCORES
-rows that already exist — it can't repopulate an empty corpus. The 13 user scenarios
+rows that already exist - it can't repopulate an empty corpus. The 13 user scenarios
 were never populated (or got reset); the 2 GESICA scenarios were missed by the
 historical backfill, and there was **no live endpoint to rebuild a GESICA corpus**.
 
@@ -146,7 +146,7 @@ for sid in triage-support \
     curl -fsS -X POST "http://localhost:8000/scenarios/$sid/rebuild-corpus" -H "X-API-Key: $KEY"
     echo; sleep 2
 done
-# wait a few minutes, then re-run the diff tool — the ⚠ VIDÉ list should shrink/clear.
+# wait a few minutes, then re-run the diff tool - the ⚠ VIDÉ list should shrink/clear.
 ```
 
 ## Status
@@ -164,7 +164,7 @@ done
 - [x] **Rewrote the 11 scoping reads** (`scenario_type = :param` →
       `article_scenarios` EXISTS): PRISMA stats, screening-progress, pico-bulk,
       kappa, double-blind conflicts, knowledge-graph, RAG `/ask/stream`, plus the
-      two screening **write** gates (screen + double-blind resolve — also what
+      two screening **write** gates (screen + double-blind resolve - also what
       Migration 2 needs). Validated on local PG (aliased/unaliased SELECT +
       correlated EXISTS in UPDATE; a `scenario_type`-only doc is correctly NOT
       scoped in). Since `perdus(A)=0`, the flip is purely additive in prod.
@@ -178,9 +178,9 @@ done
       is scored into a scenario it wasn't ingested under. Facet values in
       `/filters-options` still come from the `scenario_type` column (which equals
       `article_scenarios.scenario_id` post-backfill), so the dropdown is unchanged.
-      (User-scenario `usr-*` ids remain excluded from the facet — a separate product
+      (User-scenario `usr-*` ids remain excluded from the facet - a separate product
       decision, untouched.)
-- [ ] Document INSERT still **writes** `scenario_type` (provenance, intended) —
+- [ ] Document INSERT still **writes** `scenario_type` (provenance, intended) -
       the only remaining use of the column. No reader depends on it now.
 - [ ] Later: `DROP COLUMN scenario_type` once the provenance write is dropped and a
       soak period confirms nothing reads it.

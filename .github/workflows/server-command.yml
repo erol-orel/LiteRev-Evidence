@@ -32,8 +32,8 @@ jobs:
     # Environnement DÉDIÉ aux commandes manuelles, distinct de « production »
     # (utilisé par le déploiement automatique dans deploy.yml). Ce découplage
     # permet d'exiger une revue humaine (« required reviewers ») sur cette
-    # surface sensible — la commande libre « custom » exécute du bash arbitraire
-    # sur le serveur — SANS bloquer le déploiement automatique sur push→main.
+    # surface sensible - la commande libre « custom » exécute du bash arbitraire
+    # sur le serveur - SANS bloquer le déploiement automatique sur push→main.
     # Pour activer la revue : Settings → Environments → production-admin →
     # Required reviewers. Tant qu'aucune règle n'est configurée, cet
     # environnement se comporte comme avant (aucune approbation requise).
@@ -74,7 +74,7 @@ jobs:
           DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
           DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
           REMOTE_CMD: ${{ steps.resolve.outputs.cmd }}
-          # Secret OPTIONNEL transmis au shell distant via STDIN — JAMAIS via
+          # Secret OPTIONNEL transmis au shell distant via STDIN - JAMAIS via
           # REMOTE_CMD (qui apparaît en clair dans les logs Actions publics).
           # GitHub masque la valeur (***) car c'est un secret. Permet d'écrire la
           # clé NCBI côté serveur sans jamais l'exposer. Vide si le secret n'existe

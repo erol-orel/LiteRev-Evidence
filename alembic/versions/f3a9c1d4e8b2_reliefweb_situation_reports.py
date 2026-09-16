@@ -1,10 +1,10 @@
-"""ReliefWeb situation reports — a SEPARATE evidence stream
+"""ReliefWeb situation reports - a SEPARATE evidence stream
 
 Deliberately NOT stored in `literature_document`. Four blockers, each verified against a
 real database rather than assumed:
 
 1. `uq_litdoc_title_norm` is UNIQUE (project_context, title_norm) WHERE length >= 20, and
-   ReliefWeb's normal pattern is a RECURRING title — "Ukraine: Humanitarian Impact
+   ReliefWeb's normal pattern is a RECURRING title - "Ukraine: Humanitarian Impact
    Situation Report No. 12" normalises to 49 characters. Inserting the next issue raises
    UniqueViolation. Changing project_context does not help: the index covers it.
 2. `_ingest_doc_direct` drops the second report before the index even fires (its
@@ -12,7 +12,7 @@ real database rather than assumed:
    indistinguishable from a legitimate cross-source duplicate and invisible in the logs.
 3. There is no project isolation on corpus membership: `_build_where({})` returns
    ('', {}), so any row in literature_document is reachable from an ordinary paper
-   scenario on a lexical match — exactly the contamination this feature must avoid.
+   scenario on a lexical match - exactly the contamination this feature must avoid.
 4. `year` is an INTEGER. ReliefWeb publishes daily; a whole outbreak collapses into one
    bucket, breaking the year filters, the corpus year histogram and the recency term of
    the quality score.

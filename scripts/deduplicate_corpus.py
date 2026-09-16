@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-deduplicate_corpus.py — Déduplication intelligente du corpus GESICA
+deduplicate_corpus.py - Déduplication intelligente du corpus GESICA
 
 Stratégie de déduplication (par ordre de priorité) :
   1. DOI exact (normalisé en minuscules, sans espaces)

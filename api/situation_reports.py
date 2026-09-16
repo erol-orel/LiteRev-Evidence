@@ -15,11 +15,11 @@ from sqlalchemy import text
 from .core import RELIEFWEB_APPNAME, app, engine, logger, require_api_key
 
 # ═════════════════════════════════════════════════════════════════════════════
-# ReliefWeb — rapports de situation humanitaires, EN PARALLÈLE des articles
+# ReliefWeb - rapports de situation humanitaires, EN PARALLÈLE des articles
 # ═════════════════════════════════════════════════════════════════════════════
 # Flux SÉPARÉ, volontairement : table `situation_report` distincte, ingestion distincte,
 # budget d'appels distinct. Ni la fédération 12 sources (_run_user_scenario_populate), ni
-# PRISMA, ni /corpus/stats ne sont touchés — ce que ReliefWeb apporte (la vitesse, le
+# PRISMA, ni /corpus/stats ne sont touchés - ce que ReliefWeb apporte (la vitesse, le
 # terrain) ne doit pas se mélanger à un corpus revu par les pairs, ni en gonfler les
 # compteurs. Voir reliefweb_source.py pour le pourquoi détaillé.
 def _ensure_reliefweb_tables():
@@ -176,7 +176,7 @@ def reliefweb_ingest(payload: ReliefWebIngestIn,
     Respecte le quota documenté (1000 appels/jour) en le comptant localement, déduplique
     AVANT insertion (4 000+ sources couvrent le même événement, et le même document existe
     en EN/FR/ES/AR sous des ids distincts), et signale explicitement une couverture
-    partielle (`truncated`) — un balayage écourté par le quota ne doit jamais se lire
+    partielle (`truncated`) - un balayage écourté par le quota ne doit jamais se lire
     comme exhaustif."""
     import reliefweb_source
     if not RELIEFWEB_APPNAME:
@@ -225,7 +225,7 @@ def reliefweb_ingest(payload: ReliefWebIngestIn,
 def reliefweb_reports(scenario_id: str | None = None, iso3: str | None = None,
                       glide: str | None = None, q: str | None = None,
                       limit: int = 50, offset: int = 0) -> dict[str, Any]:
-    """Liste les rapports de situation ingérés (flux séparé — n'interroge JAMAIS
+    """Liste les rapports de situation ingérés (flux séparé - n'interroge JAMAIS
     literature_document). Lecture seule, sans appel réseau."""
     import reliefweb_source
     limit = max(1, min(int(limit or 50), 200))

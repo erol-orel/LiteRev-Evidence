@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-fetch_fulltext_bulk.py — Récupération massive de full-texts pour LiteRev-Evidence
+fetch_fulltext_bulk.py - Récupération massive de full-texts pour LiteRev-Evidence
 ==================================================================================
 Stratégie multi-sources par ordre de priorité :
-  1. PubMed Central (NCBI E-utilities) — via PMCID ou résolution PMID→PMCID
-  2. Europe PMC REST API             — fallback PMC + articles non-NCBI
-  3. Unpaywall API                   — DOI → PDF open-access (email requis)
-  4. bioRxiv / medRxiv               — preprints (DOI 10.1101/...)
-  5. Semantic Scholar Open Access    — fallback PDF open-access
-  6. OpenAlex                        — open_access.oa_url si disponible
+  1. PubMed Central (NCBI E-utilities) - via PMCID ou résolution PMID→PMCID
+  2. Europe PMC REST API - fallback PMC + articles non-NCBI
+  3. Unpaywall API - DOI → PDF open-access (email requis)
+  4. bioRxiv / medRxiv - preprints (DOI 10.1101/...)
+  5. Semantic Scholar Open Access - fallback PDF open-access
+  6. OpenAlex - open_access.oa_url si disponible
 
 Pour chaque document sans full-text :
   - Résout l'identifiant (external_id, doi, pmid, openalex_id)
@@ -102,7 +102,7 @@ def _get(url: str, params: dict = None, timeout: int = 20, headers: dict = None)
             r = requests.get(url, params=params, timeout=timeout, headers=headers or {})
             if r.status_code == 429:
                 wait = int(r.headers.get("Retry-After", 10))
-                logger.warning(f"Rate limit — attente {wait}s")
+                logger.warning(f"Rate limit - attente {wait}s")
                 time.sleep(wait)
                 continue
             return r
@@ -435,7 +435,7 @@ def _extract_pdf_text(pdf_url: str) -> Optional[str]:
             return None
         content_type = r.headers.get("content-type", "")
         if "pdf" not in content_type.lower() and not pdf_url.lower().endswith(".pdf"):
-            # Peut être du HTML — essayer d'extraire le texte directement
+            # Peut être du HTML - essayer d'extraire le texte directement
             text = r.text
             text = re.sub(r"<[^>]+>", " ", text)
             text = re.sub(r"\s+", " ", text).strip()
@@ -657,7 +657,7 @@ def process_document(row: dict, args: argparse.Namespace, engine) -> dict:
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Récupération massive de full-texts — LiteRev-Evidence"
+        description="Récupération massive de full-texts - LiteRev-Evidence"
     )
     parser.add_argument("--dry-run", action="store_true",
                         help="Simulation : ne rien écrire en base")
@@ -684,7 +684,7 @@ def main():
 
     if not UNPAYWALL_EMAIL:
         logger.warning(
-            "UNPAYWALL_EMAIL non défini — source Unpaywall désactivée. "
+            "UNPAYWALL_EMAIL non défini - source Unpaywall désactivée. "
             "Ajoutez --email votre@email.com ou UNPAYWALL_EMAIL=... dans secrets.env"
         )
 
@@ -728,7 +728,7 @@ def main():
     total = len(docs)
     logger.info(f"{'[DRY-RUN] ' if args.dry_run else ''}Documents à traiter : {total}")
     if total == 0:
-        logger.info("Aucun document à traiter — tous ont déjà un full-text.")
+        logger.info("Aucun document à traiter - tous ont déjà un full-text.")
         return
 
     # ── Traitement parallèle ──
@@ -756,16 +756,16 @@ def main():
 
             if status == "ok":
                 logger.info(
-                    f"[{done}/{total}] ✅ doc {res['doc_id']} — {res['chunks']} chunks "
-                    f"({res['source_used']}) — {res['title']}"
+                    f"[{done}/{total}] ✅ doc {res['doc_id']} - {res['chunks']} chunks "
+                    f"({res['source_used']}) - {res['title']}"
                 )
             elif done % 50 == 0 or status == "error":
-                logger.info(f"[{done}/{total}] {status.upper()} doc {res['doc_id']} — {res['title']}")
+                logger.info(f"[{done}/{total}] {status.upper()} doc {res['doc_id']} - {res['title']}")
 
     # ── Rapport final ──
     logger.info("")
     logger.info("=" * 60)
-    logger.info(f"{'[DRY-RUN] ' if args.dry_run else ''}RAPPORT FINAL — {total} documents traités")
+    logger.info(f"{'[DRY-RUN] ' if args.dry_run else ''}RAPPORT FINAL - {total} documents traités")
     logger.info(f"  ✅ Full-text récupéré : {stats.get('ok', 0)}")
     logger.info(f"  ❌ Non trouvé        : {stats.get('not_found', 0)}")
     logger.info(f"  ⚠️  Contenu vide      : {stats.get('empty', 0)}")

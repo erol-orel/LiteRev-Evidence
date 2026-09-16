@@ -4,12 +4,12 @@ WHY
 ---
 Corpus membership is lexical: a document belongs to a scenario when its title, abstract
 or full text matches the boolean query (main._boolean_corpus_ids). Until this module,
-every term compiled to three `LIKE '%term%'` predicates — title, abstract, an EXISTS over
-the document's chunks — assisted by trigram indexes. Measured on the production corpus
+every term compiled to three `LIKE '%term%'` predicates - title, abstract, an EXISTS over
+the document's chunks - assisted by trigram indexes. Measured on the production corpus
 (346 152 documents, 1 245 182 chunks) that took 55 to 240 SECONDS per query: the
 trigram index yields candidates, and verifying a LIKE means re-reading every candidate
 row's text (see the note above main._boolean_ast_to_sql). Substrings matched too:
-`%ai%` inside "chain", `%ml%` inside "html" — which is how one scenario's corpus
+`%ai%` inside "chain", `%ml%` inside "html" - which is how one scenario's corpus
 reached 238 438 documents.
 
 WHAT
@@ -17,14 +17,14 @@ WHAT
 One tsvector per document, materialised in `document_search` (title + abstract +
 full-text chunks, `english` configuration, positions kept so phrases work), indexed
 with GIN. The WHOLE boolean expression compiles to ONE tsquery evaluated inside the
-index — AND, OR, NOT, quoted phrases and `prefix*` alike — with PER-DOCUMENT
+index - AND, OR, NOT, quoted phrases and `prefix*` alike - with PER-DOCUMENT
 semantics: `A AND B` holds when A and B occur anywhere in the same document, in two
 different chunks included, exactly what the LIKE path defined. On the same corpus the
 saved queries answer in milliseconds instead of minutes (scripts/compare_fts.py).
 
 What changes for the person searching: stemming (forecast = forecasting = forecasts),
 no more substrings (`ai` no longer matches "chain"), stop words ignored ("the", "it",
-"of" — PostgreSQL drops them from the query, and `stopword_terms` lets the caller say
+"of" - PostgreSQL drops them from the query, and `stopword_terms` lets the caller say
 so), `word*` is a real prefix, accents are kept.
 
 HOW IT STAYS CURRENT
@@ -36,7 +36,7 @@ The chunk side only marks, because chunk writers insert one row per statement an
 recomputing a 30-chunk document 30 times would be quadratic. A background worker
 (started from main.startup_event) backfills documents that have no row yet and
 recomputes stale rows. Until the backfill is complete the search falls back to the
-LIKE path — correct, merely slow — so a deploy never answers with a partial corpus.
+LIKE path - correct, merely slow - so a deploy never answers with a partial corpus.
 
 Limits, accepted on purpose: a tsvector holds at most 1 MB and positions up to
 16 383; a full text beyond that keeps its title+abstract vector (phrase queries stop
@@ -66,7 +66,7 @@ _HEAD_ONLY_CHUNK_TYPE = "title_abstract"
 # Each statement runs in its own transaction (main._exec_ddl_isolated) and is idempotent:
 # IF NOT EXISTS / OR REPLACE / "create the trigger only if absent". Triggers are created
 # through DO blocks because `CREATE OR REPLACE TRIGGER` needs PostgreSQL 14 and the
-# logic lives in the functions anyway — replacing a function updates every trigger.
+# logic lives in the functions anyway - replacing a function updates every trigger.
 DDL: tuple[str, ...] = (
     """
     CREATE TABLE IF NOT EXISTS document_search (
@@ -233,17 +233,17 @@ def ast_to_tsquery_sql(ast, params: dict, idx: list | None = None) -> str | None
     """Compile main._parse_boolean_ast output into a SQL expression yielding ONE tsquery.
 
     Leaves bind their term (never interpolated) and become:
-      word / "a phrase"   phraseto_tsquery — same stemming as the stored vectors, stop
+      word / "a phrase"   phraseto_tsquery - same stemming as the stored vectors, stop
                           words dropped, a hyphenated word ("sars-cov-2") becoming the
                           same phrase of parts that to_tsvector produced when indexing;
-      word*               to_tsquery(quote_literal(word) || ':*') — a prefix match, the
+      word*               to_tsquery(quote_literal(word) || ':*') - a prefix match, the
                           PubMed truncation the tokenizer preserves.
     AND / OR / NOT become the tsquery operators && / || / !!, parenthesised, so the
     whole boolean is one index condition regardless of term count.
 
     A leaf whose term is only stop words compiles to an EMPTY tsquery, which PostgreSQL
     ignores inside && / || (a NOTICE, not an error) and which matches nothing on its
-    own — see `stopword_terms`. Returns None for an empty AST: the caller treats that as
+    own - see `stopword_terms`. Returns None for an empty AST: the caller treats that as
     "matches nothing", never as "matches everything".
     """
     if idx is None:
@@ -326,7 +326,7 @@ def configure(engine) -> None:
 
 def engine_choice() -> str:
     """LEXICAL_SEARCH_ENGINE: auto (default: full text once backfilled, LIKE before),
-    like (force the previous path — the rollback switch), fts (force full text)."""
+    like (force the previous path - the rollback switch), fts (force full text)."""
     v = (os.getenv("LEXICAL_SEARCH_ENGINE") or "auto").strip().lower()
     return v if v in ("auto", "like", "fts") else "auto"
 
@@ -363,8 +363,8 @@ def _check_state(conn, count_missing: bool = True) -> None:
 def is_ready(refresh: bool = True) -> bool:
     """True when every document has a row, i.e. the FTS path answers the whole corpus.
 
-    Cheap after the worker's first pass (a cached flag). Before it — a search in the
-    first seconds after boot, or a process without the worker — runs the check itself,
+    Cheap after the worker's first pass (a cached flag). Before it - a search in the
+    first seconds after boot, or a process without the worker - runs the check itself,
     once per `_READY_TTL`. Any failure means "not ready": the LIKE path is the safe side.
     """
     if _engine is None:
@@ -397,7 +397,7 @@ def stopword_terms(terms: list[str]) -> list[str]:
 
     Inside AND/OR an empty tsquery is dropped, so `IT AND infection` means `infection`;
     alone it matches nothing. Best-effort (an error yields []): this is for the log
-    line and the person reading it, never for the result. Prefix terms are excluded —
+    line and the person reading it, never for the result. Prefix terms are excluded -
     `to_tsquery` keeps them.
     """
     plain = [t.replace("*", "") for t in terms if not t.endswith("*")]
@@ -428,7 +428,7 @@ _BACKFILL_SQL = """
 
 # FOR UPDATE SKIP LOCKED: two workers (or a worker and a chunk writer holding the row)
 # never wait on each other. A mark set while this runs waits for our commit, then
-# lands, and the next pass recomputes — nothing is lost.
+# lands, and the next pass recomputes - nothing is lost.
 _REFRESH_SQL = """
     UPDATE document_search s
        SET tsv = literev_document_tsv(s.document_id), stale = FALSE, updated_at = now()
@@ -480,7 +480,7 @@ def worker_loop(idle_sleep: float = 30.0, busy_sleep: float = 1.0, missing_every
                 logger.info(f"document_search: +{r['backfilled']} backfilled, "
                             f"{r['refreshed']} refreshed, {r['missing']} missing, {r['stale']} stale")
             if r["ready"] and not was_ready:
-                logger.info("document_search: complete — boolean search now uses full text.")
+                logger.info("document_search: complete - boolean search now uses full text.")
             was_ready = bool(r["ready"])
         except Exception as e:                             # noqa: BLE001 - keep the loop alive
             _STATE.update(last_error=str(e)[:200], ready=False, checked_at=time.time())

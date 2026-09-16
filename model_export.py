@@ -8,7 +8,7 @@ lazily so importing this module never fails when the optional dependency is abse
 Sheets:
   - Variables : every model variable (the outcome + each feature) with its role, name,
     machine name, dtype/task, unit, source and provenance article ids.
-  - Dataset   : the actual data — one column per variable + the outcome, one row per
+  - Dataset   : the actual data - one column per variable + the outcome, one row per
     observation (the values used to train / score the model).
   - Model runs: every trained run with its metrics and hyperparameters.
 """
@@ -116,7 +116,7 @@ def build_model_xlsx(bundle: dict) -> bytes:
         if epi.get("note"):
             ws4.append(["note", _cell(epi.get("note"))])
     else:
-        ws4.append(["(no SEIR model for this scenario — not a transmissible-disease "
+        ws4.append(["(no SEIR model for this scenario - not a transmissible-disease "
                     "scenario, or no epidemic parameters extracted)"])
 
     # Reasonable column widths for readability.

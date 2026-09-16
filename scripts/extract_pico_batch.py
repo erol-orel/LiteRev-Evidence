@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-extract_pico_batch.py — Extraction PICO en batch pour le corpus GESICA
+extract_pico_batch.py - Extraction PICO en batch pour le corpus GESICA
 ======================================================================
 Utilise gpt-4.1-mini (via l'API OpenAI configurée dans l'environnement)
 pour extraire les éléments PICO de chaque article à partir du titre + abstract.
@@ -93,7 +93,7 @@ try:
     OPENAI_AVAILABLE = True
 except ImportError:
     OPENAI_AVAILABLE = False
-    log.warning("openai non installé — pip3 install openai")
+    log.warning("openai non installé - pip3 install openai")
 except RuntimeError as e:
     log.error(str(e))
     sys.exit(1)
@@ -209,7 +209,7 @@ def run_extraction(dry_run: bool, limit: Optional[int], scenario: Optional[str],
         return
     
     if not OPENAI_AVAILABLE:
-        log.error("openai non disponible — installez-le avec : pip3 install openai")
+        log.error("openai non disponible - installez-le avec : pip3 install openai")
         sys.exit(1)
     
     # Extraction en batch avec rate limiting

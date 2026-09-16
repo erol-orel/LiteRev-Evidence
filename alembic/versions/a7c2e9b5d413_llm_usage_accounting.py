@@ -3,12 +3,12 @@
 The application called the OpenAI API from about thirty places and recorded nothing: no
 call site read `response.usage`, so the only evidence that something was spending was the
 invoice. Two token leaks had already been found and fixed by reading code, because there
-was no other way to find them — see the comments around the PICO worker in main.py.
+was no other way to find them - see the comments around the PICO worker in main.py.
 
 One row per call, tagged with the calling function, makes "which loop is spending" a
 one-query question (`GET /llm-usage`). The rows the answer usually turns on:
 
-  _background_enrichment_worker:chat        automatic PICO extraction — 50 articles every
+  _background_enrichment_worker:chat        automatic PICO extraction - 50 articles every
                                             30 s, gpt-4.1-mini over up to 14 000 chars of
                                             full text. The largest potential consumer.
   _background_enrichment_worker:embeddings  500 chunks every 30 s. Cheap per unit; the

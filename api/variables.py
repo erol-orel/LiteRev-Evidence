@@ -97,7 +97,7 @@ def _dtype_for_var_type(var_type: Any) -> str:
 
 
 def _infer_feature_source(data_source: str, declared: str) -> tuple[str, str | None]:
-    """Retourne (source, public_provider) — déclaré LLM sinon heuristique texte."""
+    """Retourne (source, public_provider) - déclaré LLM sinon heuristique texte."""
     declared = (declared or "").strip().lower()
     if declared in _FEATURE_SOURCES:
         src = declared
@@ -172,7 +172,7 @@ def _derive_data_template(outcome: dict, features: list[dict]) -> dict:
 
 def _coerce_family_for_task(family: Any, task_type: str) -> str:
     """Ramène une famille d'algorithme choisie vers une famille COMPATIBLE avec la
-    tâche (sans vérifier la présence du paquet — c'est le rôle du trainer). Ex.:
+    tâche (sans vérifier la présence du paquet - c'est le rôle du trainer). Ex.:
     logistic_regression sur une régression -> linear_regression, et inversement."""
     fam = _coerce_enum(family, _ALGO_FAMILIES, "gradient_boosting")
     tt = (task_type or "classification").strip().lower()
@@ -348,7 +348,7 @@ def _loads_lenient(raw: str) -> dict:
     """`json.loads` TOLÉRANT aux sorties LLM tronquées (max_tokens atteint) : retire un
     éventuel fence ```json, puis, si le JSON est incomplet, ferme les chaînes / tableaux /
     objets restés ouverts en rognant la fin jusqu'à obtenir un objet valide. Best-effort :
-    renvoie le meilleur dict récupérable (au pire {}) — les champs manquants sont
+    renvoie le meilleur dict récupérable (au pire {}) - les champs manquants sont
     reconstruits en aval (_attach_model_spec dérive les champs machine des champs humains).
     Évite qu'une réponse coupée d'un caractère fasse échouer TOUTE la génération."""
     import json as _j
@@ -443,7 +443,7 @@ def _generate_variables_from_pico(scenario_id: str, persist: str = "active", lan
     system_prompt = """Tu es un expert en modélisation prédictive appliquée à la santé.
 A partir d'une revue systématique de la littérature, tu identifies les variables clés,
 l'outcome principal, et le meilleur algorithme pour un modèle prédictif.
-Tu génères un JSON structuré. Ne pas utiliser de tiret em (—).""" + _llm_lang_directive(lang)
+Tu génères un JSON structuré. Ne pas utiliser de tiret cadratin (em dash).""" + _llm_lang_directive(lang)
 
     user_prompt = f"""Scénario : "{scenario_name}"
 Basé sur {len(pico_articles)} articles pertinents ({_n_with_pico} avec PICO extrait ; PICO, abstract et extrait de texte intégral fournis quand disponibles) :
@@ -526,19 +526,19 @@ cliniquement plausibles). Les trois plages doivent être contiguës et couvrir t
 domaine. Tu PEUX renommer les catégories si l'outcome s'y prête (ex. pour un compte :
 "Faible"/"Modéré"/"Élevé"), mais garde 3 niveaux du plus sûr au plus critique.
 
-IMPORTANT — le SEIR est un SOUS-MODÈLE, pas des features (scénarios de maladie
+IMPORTANT - le SEIR est un SOUS-MODÈLE, pas des features (scénarios de maladie
 transmissible) : ne mets JAMAIS un PARAMÈTRE du modèle compartimental (R0, Rt, létalité/
 CFR, période d'incubation, période infectieuse, durée d'immunité, intervalle sériel) dans
-"predictor_variables" — ces valeurs vont dans "epidemic_parameters", pas dans les features.
+"predictor_variables" - ces valeurs vont dans "epidemic_parameters", pas dans les features.
 En revanche, une SORTIE du sous-modèle (incidence, prévalence, cas actifs, infections
 cumulées, décès) PEUT être une variable prédictive utile : liste-la normalement mais mets
-son "source": "seir" — le serveur la remplira automatiquement depuis le sous-modèle
+son "source": "seir" - le serveur la remplira automatiquement depuis le sous-modèle
 (aucune donnée externe requise). Les autres variables (météo, vaccination, mobilité, lits…)
 gardent "source": "user" ou "public_api".
 
 IMPORTANT pour "epidemic_parameters" : ne renseigne ces paramètres qu'à partir de
 valeurs RÉELLEMENT rapportées dans les articles ci-dessus (avec leur provenance) ; mets
-"value": null pour tout paramètre non rapporté — n'invente AUCUN chiffre. Donne une
+"value": null pour tout paramètre non rapporté - n'invente AUCUN chiffre. Donne une
 estimation centrale + un intervalle (ci_low/ci_high, idéalement l'IC 95 %) reflétant la
 dispersion entre études quand plusieurs la rapportent. Pour agréger, PRIVILÉGIE les
 estimations des synthèses de meilleure qualité (revues systématiques / méta-analyses,
@@ -689,7 +689,7 @@ def _detect_variables_lang(variables: dict) -> str:
 
 def _llm_translate_strings(texts: list, target_lang: str) -> list:
     """Traduit une liste de chaînes vers 'en'/'fr' (ordre + longueur conservés).
-    Renvoie les chaînes d'ORIGINE en cas d'échec — jamais de corruption."""
+    Renvoie les chaînes d'ORIGINE en cas d'échec - jamais de corruption."""
     import json as _json
     from llm_usage import MeteredOpenAI as _OAI
     if not texts:

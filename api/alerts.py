@@ -167,7 +167,7 @@ def _digest_is_due(frequency: str | None, last_notified, now) -> bool:
 def _render_alert_digest(scenario_id: str, articles: list[dict], total_new: int,
                          base_url: str = "https://literev-scenario.com",
                          scenario_name: str | None = None) -> tuple[str, str, str]:
-    """(subject, html, text) d'un digest — liste les VRAIS nouveaux articles. Pur/testable.
+    """(subject, html, text) d'un digest - liste les VRAIS nouveaux articles. Pur/testable.
     Utilise le NOM lisible du scénario (pas l'ID) et un lien PROFOND vers sa page
     (?scenario=<id>, ouvert directement par le front)."""
     import html as _html
@@ -175,7 +175,7 @@ def _render_alert_digest(scenario_id: str, articles: list[dict], total_new: int,
     label = (scenario_name or scenario_id).strip() or scenario_id
     # Accord FR : 1 → « nouvel article » ; ≥2 → « nouveaux articles ».
     noun = "nouvel article" if total_new == 1 else "nouveaux articles"
-    subj = f"[LiteRev] {total_new} {noun} — {label}"
+    subj = f"[LiteRev] {total_new} {noun} - {label}"
     scen_url = f"{base_url}/?scenario={_q(scenario_id, safe='')}"
 
     def _row(a):
@@ -188,14 +188,14 @@ def _render_alert_digest(scenario_id: str, articles: list[dict], total_new: int,
     more = f'<p style="font-size:12px;color:#6b7280">… et {total_new - len(shown)} de plus.</p>' if total_new > len(shown) else ""
     html_body = (
         '<html><body style="font-family:system-ui,Arial,sans-serif;color:#111">'
-        f'<h2 style="color:#14532d">LiteRev — {total_new} {noun}</h2>'
+        f'<h2 style="color:#14532d">LiteRev - {total_new} {noun}</h2>'
         f'<p>Scénario <strong>{_html.escape(label)}</strong> :</p>'
         f'<ul>{"".join(_row(a) for a in shown)}</ul>{more}'
         f'<p><a href="{_html.escape(scen_url)}" style="color:#16a34a;font-weight:600">Ouvrir le scénario →</a></p>'
         '<hr><p style="font-size:11px;color:#6b7280">Vous recevez cet email car vous êtes abonné aux alertes LiteRev pour ce scénario.</p>'
         '</body></html>'
     )
-    text_body = (f"LiteRev — {total_new} {noun} pour le scénario « {label} » :\n\n"
+    text_body = (f"LiteRev - {total_new} {noun} pour le scénario « {label} » :\n\n"
                  + "\n".join(f"- {a.get('title', '')}" + (f" ({a['year']})" if a.get("year") else "") for a in shown)
                  + (f"\n… et {total_new - len(shown)} de plus." if total_new > len(shown) else "")
                  + f"\n\n{scen_url}\n")
@@ -313,7 +313,7 @@ def send_alert_digest(scenario_id: str | None = None, dry_run: bool = True,
     """Envoie (ou simule en dry_run) les digests aux abonnés d'un scénario (ou de tous) :
     liste les VRAIS nouveaux articles depuis la dernière notification et met à jour
     last_notified_at. Ignore les abonnements sans nouveauté. Ignore la fréquence
-    (envoi forcé) — pour la cadence automatique, voir /alerts/run-digests."""
+    (envoi forcé) - pour la cadence automatique, voir /alerts/run-digests."""
     return _process_alert_digests(scenario_id, dry_run=dry_run, respect_frequency=False)
 
 

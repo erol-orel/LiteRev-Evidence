@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-migration1_scenario_type_diff.py — APERÇU LECTURE SEULE (aucune écriture).
+migration1_scenario_type_diff.py - APERÇU LECTURE SEULE (aucune écriture).
 
 Migration 1 (scenario_type → article_scenarios, « Way B ») : avant de réécrire les
 ~29 endpoints qui scopent par `d.scenario_type = :sid` (appartenance « ingestion »),

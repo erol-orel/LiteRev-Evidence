@@ -114,7 +114,7 @@ def test_positional_integrity_no_crosswiring(fake_translate):
 
 
 def test_translator_length_mismatch_is_safe(monkeypatch):
-    # If the LLM returns the wrong number of items, we must NOT corrupt — return original.
+    # If the LLM returns the wrong number of items, we must NOT corrupt - return original.
     patch_app(monkeypatch, "_llm_translate_strings", lambda texts, lang: ["oops"])
     src = _sample_variables()
     out = main._translate_variables_payload(src, "fr")

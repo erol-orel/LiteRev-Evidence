@@ -1,4 +1,4 @@
-"""Pure tests for reliefweb_source.py — no network, no database, stdlib only.
+"""Pure tests for reliefweb_source.py - no network, no database, stdlib only.
 
 The HTTP seams are monkeypatched with a recorded-shape fixture. This matters more than
 usual here: the live API was unreachable from the build environment (the egress proxy
@@ -46,7 +46,7 @@ def _payload(items, total=None):
 def test_reports_query_is_json_safe_and_always_sorted():
     q = rw.build_reports_query(countries=["COD"], date_from="2026-01-01", limit=250)
     json.dumps(q)                                  # goes out as a POST body
-    # Unsorted pagination silently skips and repeats records — the docs warn about it.
+    # Unsorted pagination silently skips and repeats records - the docs warn about it.
     assert q["sort"] == ["date.created:desc"]
     assert q["limit"] == 250 and q["offset"] == 0
     assert "title" in q["fields"]["include"] and "date.original" in q["fields"]["include"]
@@ -64,7 +64,7 @@ def test_reports_query_combines_the_editorial_tag_with_a_keyword_sweep():
 
 
 def test_reports_query_never_emits_a_value_less_filter():
-    """A filter with a field but NO value tests EXISTENCE, not equality — it would
+    """A filter with a field but NO value tests EXISTENCE, not equality - it would
     silently match every record that merely has the field."""
     q = rw.build_reports_query(countries=None, languages=None, pathogens=["ebola"])
     def walk(node):
@@ -96,7 +96,7 @@ def test_country_and_date_and_changed_filters():
 
 
 def test_disasters_query_needs_the_analysis_preset_for_archived_events():
-    """Archived epidemics are excluded by default — a historical backfill misses them."""
+    """Archived epidemics are excluded by default - a historical backfill misses them."""
     live = rw.build_disasters_query()
     arch = rw.build_disasters_query(include_archived=True)
     assert "preset" not in live

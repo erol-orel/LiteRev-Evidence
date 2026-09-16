@@ -136,10 +136,10 @@ Le schéma de base de données PostgreSQL de LiteRev-Evidence est étendu pour a
 
 ## 8. Références
 
-[^1]: *Designing a LiteRev-based project that aligns Horizon GeoAI4EI, GESICA, and EVA objectives (1).md* — Alignement stratégique, double graphe de connaissances, tâches WP3.
-[^2]: *EVA Application (LiteRev-1.pdf)* — Spécifications de la plateforme de revue systématique.
-[^3]: *INFRASTRUCTURE.md* — Configuration des serveurs de production LiteRev-Evidence.
-[^4]: *Artificial Intelligence in Emergency Medical Services for Health Emergencies and Disasters: A Systematic Review (Kokou Laris Edjinedja et al., 2026)* — Justification scientifique des variables météo, épidémiques, de triage et de ressources.
-[^5]: *A.9 Annexe Business-case GESICA* — Objectifs d'optimisation, données d'urgence et partenaires (HUG, CHUV, TECHWAN).
-[^6]: *FCS Application Form GESICA (Ref: 20510)* — Cadre d'interopérabilité avec la suite SAGA et les services de secours transfrontaliers.
-[^7]: *Audit technique LiteRev-Evidence (mai 2026)* — Schéma de base de données actuel et structure de l'API FastAPI.
+[^1]: *Designing a LiteRev-based project that aligns Horizon GeoAI4EI, GESICA, and EVA objectives (1).md* - Alignement stratégique, double graphe de connaissances, tâches WP3.
+[^2]: *EVA Application (LiteRev-1.pdf)* - Spécifications de la plateforme de revue systématique.
+[^3]: *INFRASTRUCTURE.md* - Configuration des serveurs de production LiteRev-Evidence.
+[^4]: *Artificial Intelligence in Emergency Medical Services for Health Emergencies and Disasters: A Systematic Review (Kokou Laris Edjinedja et al., 2026)* - Justification scientifique des variables météo, épidémiques, de triage et de ressources.
+[^5]: *A.9 Annexe Business-case GESICA* - Objectifs d'optimisation, données d'urgence et partenaires (HUG, CHUV, TECHWAN).
+[^6]: *FCS Application Form GESICA (Ref: 20510)* - Cadre d'interopérabilité avec la suite SAGA et les services de secours transfrontaliers.
+[^7]: *Audit technique LiteRev-Evidence (mai 2026)* - Schéma de base de données actuel et structure de l'API FastAPI.

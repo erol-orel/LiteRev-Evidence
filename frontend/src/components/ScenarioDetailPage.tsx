@@ -68,6 +68,10 @@ import {
   getRerankStatus,
   fetchKnowledgeGraph,
   fetchConceptGraph,
+  exportRelevantArticles,
+  downloadBlob,
+  RELEVANT_EXPORT_FORMATS,
+  type RelevantExportFormat,
   type ConceptGraphData,
   type ConceptNode,
   type ConceptType,
@@ -238,7 +242,7 @@ function QueriesSection({ detail, scenarioId }: { detail: ScenarioDetail; scenar
       />
       {/* Recherche multi-facettes : les facettes DANS L'ORDRE avec l'opérateur
           réellement appliqué à chacune, puis l'expression complète. Les listes
-          booléen/naturel ci-dessous perdent l'ordre et les opérateurs — le ET entre
+          booléen/naturel ci-dessous perdent l'ordre et les opérateurs - le ET entre
           deux requêtes booléennes n'apparaissait donc nulle part. */}
       {detail.facets && detail.facets.length >= 2 && (
         <div className="rounded-2xl border border-gold-500/20 bg-gold-500/5 p-3 space-y-2">
@@ -571,7 +575,7 @@ const DTYPE_OPTIONS = ["float", "int", "bool", "category", "datetime"];
 
 // Éditeur de spec : ajuster l'algorithme (parmi les candidats suggérés par
 // l'évidence ou toute famille valide), le type de tâche, et ajouter/supprimer des
-// variables — puis ré-entraîner. Le backend reconstruit le data_template et
+// variables - puis ré-entraîner. Le backend reconstruit le data_template et
 // incrémente la version.
 function SpecEditor({ scenarioId, spec, onApplied }: { scenarioId: string; spec: ModelSpecResponse; onApplied: () => void }) {
   const { t } = useI18n();
@@ -797,7 +801,7 @@ function ForecastPanel({ run }: { run: ModelRun }) {
 // ── SEIR projection (modèle compartimental paramétré par la littérature) ─────
 // `r_eff` est renvoyé par le backend et typé depuis toujours, mais ne figurait dans
 // aucune liste sélectionnable : la série la plus parlante (R passant sous 1) était
-// transportée puis jetée. C'est un RATIO, pas un effectif — d'où son unité propre.
+// transportée puis jetée. C'est un RATIO, pas un effectif - d'où son unité propre.
 const _SEIR_SERIES = ["incidence", "prevalence", "cumulative", "deaths", "r_eff"] as const;
 // Séries optionnelles n'apparaissant que si le modèle a le compartiment (V / Q).
 const _SEIR_SERIES_OPT = ["vaccinated", "quarantined"] as const;
@@ -831,7 +835,7 @@ const _SEIR_MANUAL_PLACEHOLDER: Record<string, string> = {
 };
 const _SEIR_SYMBOL: Record<string, string> = {
   r0: "R₀ = β/γ", incubation_period_days: "σ = 1/incub.", infectious_period_days: "γ = 1/infect.",
-  cfr: "f (CFR)", immunity_duration_days: "ω = 1/immun.", serial_interval_days: "—",
+  cfr: "f (CFR)", immunity_duration_days: "ω = 1/immun.", serial_interval_days: "-",
   vaccination_rate: "ν (/day)", vaccine_efficacy: "ε (0–1)", quarantine_rate: "κ (/day)",
 };
 // Équations du membre de droite selon les compartiments actifs du modèle sélectionné.
@@ -1037,7 +1041,7 @@ function SeirModelView({ scenarioId }: { scenarioId: string }) {
   // Relance une projection avec les paramètres SAISIS. Défini AVANT le retour anticipé
   // ci-dessous pour que l'écran « pas applicable » puisse s'en servir : le backend accepte
   // parfaitement des overrides sur un scénario sans paramètres extraits, mais l'UI qui les
-  // envoie n'était rendue qu'APRÈS une projection déjà applicable — impasse.
+  // envoie n'était rendue qu'APRÈS une projection déjà applicable - impasse.
   const runWithOverrides = (onDone?: (ok: boolean) => void) => {
     const overrides: Record<string, SeirOverride> = {};
     Object.entries(edits).forEach(([k, v]) => {
@@ -1118,7 +1122,7 @@ function SeirModelView({ scenarioId }: { scenarioId: string }) {
   const { compartments, eqs } = _seirEquations(model);
   const params = proj.effective_parameters ?? proj.parameters ?? {};
   const fmtPop = (n?: number) => (typeof n === "number"
-    ? (n >= 1e9 ? `${(n / 1e9).toFixed(1)}B` : n >= 1e6 ? `${(n / 1e6).toFixed(n >= 1e7 ? 0 : 1)}M` : n >= 1e3 ? `${(n / 1e3).toFixed(0)}k` : `${Math.round(n)}`) : "—");
+    ? (n >= 1e9 ? `${(n / 1e9).toFixed(1)}B` : n >= 1e6 ? `${(n / 1e6).toFixed(n >= 1e7 ? 0 : 1)}M` : n >= 1e3 ? `${(n / 1e3).toFixed(0)}k` : `${Math.round(n)}`) : "-");
   const hasEdits = Object.values(edits).some(v => v.trim() !== "") || popEdit.trim() !== "" || i0Edit.trim() !== "";
   const hasOverrides = !!proj.overrides_applied && Object.keys(proj.overrides_applied).length > 0;
 
@@ -1244,7 +1248,7 @@ function SeirModelView({ scenarioId }: { scenarioId: string }) {
           <p className="text-[11px] text-white/40 mt-1">{t("scenarioDetail.seirTab.compartments")}: <span className="font-mono text-white/60">{compartments}</span></p>
         </div>
         <div className="text-right text-[11px] text-white/50">
-          {/* L'export Excel — qui contient désormais la feuille « SEIR parameters » —
+          {/* L'export Excel - qui contient désormais la feuille « SEIR parameters » -
               n'était atteignable que depuis le tableau de bord du modèle, c'est-à-dire
               pas depuis l'écran où l'on regarde le SEIR. */}
           <button type="button" onClick={doExportSeirXlsx} disabled={exportingSeir}
@@ -1290,12 +1294,12 @@ function SeirModelView({ scenarioId }: { scenarioId: string }) {
             {/* Chaque bande est optional-chaînée : ces quatre-là étaient lues sans
                 garde alors que les deux suivantes en avaient une. Un résumé partiel
                 (payload plus ancien, champ retiré côté serveur) faisait donc tomber
-                TOUT l'onglet SEIR dans l'ErrorBoundary — un panneau d'erreur à la
-                place du modèle, pour une statistique manquante. On affiche « — ». */}
-            <div><div className="text-white/40">{t("scenarioDetail.seir.peakPrevalence")}</div><div className="font-mono text-white/80">{_med(sm.peak_prevalence) != null ? fmtPop(_med(sm.peak_prevalence)!) : "—"}</div></div>
-            <div><div className="text-white/40">{t("scenarioDetail.seir.peakDay")}</div><div className="font-mono text-white/80">{_med(sm.peak_prevalence_day) != null ? `${lang === "fr" ? "J" : "D"}${_med(sm.peak_prevalence_day)}` : "—"}</div></div>
-            <div><div className="text-white/40">{t("scenarioDetail.seir.attackRate")}</div><div className="font-mono text-white/80">{_med(sm.attack_rate) != null ? `${(_med(sm.attack_rate)! * 100).toFixed(1)}%` : "—"}</div></div>
-            <div><div className="text-white/40">{t("scenarioDetail.seir.deaths")}</div><div className="font-mono text-white/80">{_med(sm.total_deaths) ?? "—"}</div></div>
+                TOUT l'onglet SEIR dans l'ErrorBoundary - un panneau d'erreur à la
+                place du modèle, pour une statistique manquante. On affiche « - ». */}
+            <div><div className="text-white/40">{t("scenarioDetail.seir.peakPrevalence")}</div><div className="font-mono text-white/80">{_med(sm.peak_prevalence) != null ? fmtPop(_med(sm.peak_prevalence)!) : "-"}</div></div>
+            <div><div className="text-white/40">{t("scenarioDetail.seir.peakDay")}</div><div className="font-mono text-white/80">{_med(sm.peak_prevalence_day) != null ? `${lang === "fr" ? "J" : "D"}${_med(sm.peak_prevalence_day)}` : "-"}</div></div>
+            <div><div className="text-white/40">{t("scenarioDetail.seir.attackRate")}</div><div className="font-mono text-white/80">{_med(sm.attack_rate) != null ? `${(_med(sm.attack_rate)! * 100).toFixed(1)}%` : "-"}</div></div>
+            <div><div className="text-white/40">{t("scenarioDetail.seir.deaths")}</div><div className="font-mono text-white/80">{_med(sm.total_deaths) ?? "-"}</div></div>
             {(_med(sm.total_vaccinated) ?? 0) > 0 && (
               <div><div className="text-white/40">{t("scenarioDetail.seir.totalVaccinated")}</div><div className="font-mono text-teal-300">{fmtPop(_med(sm.total_vaccinated)!)}</div></div>)}
             {(_med(sm.peak_quarantine) ?? 0) > 0 && (
@@ -1326,7 +1330,7 @@ function SeirModelView({ scenarioId }: { scenarioId: string }) {
                   {p.overridden && <span className="text-[8px] text-gold-300">{t("scenarioDetail.seirTab.overridden")}</span>}
                 </div>
                 <div className="col-span-4 sm:col-span-3 font-mono text-white/45">
-                  {p.ci_low != null && p.ci_high != null ? `[${p.ci_low}–${p.ci_high}]` : (p.n_studies ? `${p.n_studies} ${t("scenarioDetail.seir.studies")}` : "—")}
+                  {p.ci_low != null && p.ci_high != null ? `[${p.ci_low}–${p.ci_high}]` : (p.n_studies ? `${p.n_studies} ${t("scenarioDetail.seir.studies")}` : "-")}
                   {p.unit ? ` ${p.unit}` : ""}
                 </div>
                 <div className="hidden sm:flex col-span-3 flex-wrap gap-1 justify-end">
@@ -1403,10 +1407,10 @@ function SeirModelView({ scenarioId }: { scenarioId: string }) {
         {proj.observed ? (
           <div className="space-y-3">
             <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-[10px]">
-              <div className="truncate"><div className="text-white/40">{t("scenarioDetail.seirTab.obsSource")}</div><div className="font-mono text-white/80 truncate" title={proj.observed.label ?? ""}>{proj.observed.label ?? proj.observed.source ?? "—"}</div></div>
+              <div className="truncate"><div className="text-white/40">{t("scenarioDetail.seirTab.obsSource")}</div><div className="font-mono text-white/80 truncate" title={proj.observed.label ?? ""}>{proj.observed.label ?? proj.observed.source ?? "-"}</div></div>
               <div><div className="text-white/40">{t("scenarioDetail.seirTab.obsSeries")}</div><div className="font-mono text-white/80">{seriesLabel[proj.observed.column as SeirSeriesKey] ?? proj.observed.column}</div></div>
-              <div><div className="text-white/40">{t("scenarioDetail.seirTab.obsFit")}</div><div className="font-mono text-white/80">{proj.observed.fit_r2 != null ? `R²=${proj.observed.fit_r2}` : "—"}</div></div>
-              <div><div className="text-white/40">{t("scenarioDetail.seirTab.obsShift")}</div><div className="font-mono text-white/80">{proj.observed.shift_days != null ? `${proj.observed.shift_days} ${lang === "fr" ? "j" : "d"}` : "—"}</div></div>
+              <div><div className="text-white/40">{t("scenarioDetail.seirTab.obsFit")}</div><div className="font-mono text-white/80">{proj.observed.fit_r2 != null ? `R²=${proj.observed.fit_r2}` : "-"}</div></div>
+              <div><div className="text-white/40">{t("scenarioDetail.seirTab.obsShift")}</div><div className="font-mono text-white/80">{proj.observed.shift_days != null ? `${proj.observed.shift_days} ${lang === "fr" ? "j" : "d"}` : "-"}</div></div>
             </div>
             <div className="flex items-center gap-2 flex-wrap">
               <button type="button" onClick={runCalibrate} disabled={obsBusy}
@@ -1437,7 +1441,7 @@ function SeirModelView({ scenarioId }: { scenarioId: string }) {
                 <option value="" className="bg-slate-800">{t("scenarioDetail.seirTab.obsUpload")}</option>
                 {/* Le connecteur SEIR est exclu ICI (et seulement ici) : la série
                     « observée » sert à VALIDER le modèle SEIR, donc lui donner la
-                    sortie du SEIR lui-même serait circulaire — et la requête échoue
+                    sortie du SEIR lui-même serait circulaire - et la requête échoue
                     de toute façon en 400, le connecteur ayant besoin de paramètres
                     épidémiologiques que cet endpoint ne lui transmet pas. Il reste
                     proposé dans le mapping d'auto-récupération, où il est légitime. */}
@@ -1918,7 +1922,7 @@ function VariablesSection({ detail, scenarioId, onGoToModel }: { detail: Scenari
                           );
                         }
                         // Statut clair (pastille + libellé + couleur, jamais la couleur
-                        // seule — accessibilité). Sans jeu de données chargé, on déduit
+                        // seule - accessibilité). Sans jeu de données chargé, on déduit
                         // la disponibilité de la source déclarée de la variable.
                         let st = dataStatusFor(v.machine_name);
                         if (st === 'unknown') {
@@ -1936,7 +1940,7 @@ function VariablesSection({ detail, scenarioId, onGoToModel }: { detail: Scenari
                           : st === 'public' ? t("scenarioDetail.variables.tipPublic")
                           : t("scenarioDetail.variables.tipMissingUser");
                         return (
-                          <span title={`${v.machine_name ?? ''} — ${tip}`} className={`inline-flex items-center gap-1.5 text-[10px] font-semibold ${cfg.cls}`}>
+                          <span title={`${v.machine_name ?? ''} - ${tip}`} className={`inline-flex items-center gap-1.5 text-[10px] font-semibold ${cfg.cls}`}>
                             <span className={`h-1.5 w-1.5 rounded-full ${cfg.dot}`} />
                             {cfg.label}
                           </span>
@@ -2117,6 +2121,38 @@ function VariablesSection({ detail, scenarioId, onGoToModel }: { detail: Scenari
 // ENTIER par le serveur ; seule la liste est paginée (« Charger plus »).
 const CORPUS_PAGE_SIZE = 200;
 
+/** "Export…" select: the relevant articles as csv, xlsx, ris, bibtex, json or md. */
+function RelevantExportMenu({ scenarioId }: { scenarioId: string }) {
+  const { t } = useI18n();
+  const [busy, setBusy] = useState(false);
+  const [failed, setFailed] = useState(false);
+  const run = async (format: RelevantExportFormat) => {
+    setBusy(true); setFailed(false);
+    try {
+      const { blob, filename } = await exportRelevantArticles(scenarioId, format);
+      downloadBlob(blob, filename);
+    } catch {
+      setFailed(true);
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <span className="flex items-center gap-1.5" title={t("scenarioDetail.corpus.exportRelevant")}>
+      {busy ? <Loader2 size={11} className="animate-spin text-brand-300" /> : <Download size={11} className="text-brand-300" />}
+      <select value="" disabled={busy} aria-label={t("scenarioDetail.corpus.exportRelevant")}
+        onChange={e => { const f = e.target.value as RelevantExportFormat; if (f) void run(f); }}
+        className="rounded-lg border border-brand-500/30 bg-brand-500/10 px-2 py-1 text-[10px] text-brand-300 focus:outline-none">
+        <option value="">{busy ? t("scenarioDetail.corpus.exporting") : t("scenarioDetail.corpus.exportPlaceholder")}</option>
+        {RELEVANT_EXPORT_FORMATS.map(f => (
+          <option key={f} value={f}>{t(`scenarioDetail.corpus.exportFormats.${f}`)}</option>
+        ))}
+      </select>
+      {failed && <span className="text-[10px] text-rose-300">{t("scenarioDetail.corpus.exportFailed")}</span>}
+    </span>
+  );
+}
+
 function CorpusSection({ scenarioId, threshold }: { scenarioId: string; detail: ScenarioDetail; threshold?: number }) {
   const { t } = useI18n();
   const [data, setData] = useState<ScenarioCorpus | null>(null);
@@ -2252,6 +2288,12 @@ function CorpusSection({ scenarioId, threshold }: { scenarioId: string; detail: 
               <span className="rounded-full bg-brand-500/15 border border-brand-500/30 px-3 py-1 text-[10px] font-semibold text-brand-300">
                 {data.above_threshold} {t("scenarioDetail.corpus.aboveThreshold")}
               </span>
+              <RelevantExportMenu scenarioId={scenarioId} />
+            </div>
+          )}
+          {data.above_threshold === undefined && (
+            <div className="flex items-center gap-2 flex-wrap">
+              <RelevantExportMenu scenarioId={scenarioId} />
               {(() => {
                 const below = data.below_threshold ?? Math.max(0, data.total - data.above_threshold! - (data.unscored ?? 0));
                 return below > 0 ? (
@@ -3055,7 +3097,7 @@ function RagSection({ scenarioId, detail }: { scenarioId: string; detail: Scenar
         subtitle={t("scenarioDetail.rag.subtitle")}
       />
 
-      {/* Indexation du corpus pour l'Assistant (RAG) — couverture documentaire.
+      {/* Indexation du corpus pour l'Assistant (RAG) - couverture documentaire.
           Déplacée ici depuis l'onglet Corpus : c'est la fonctionnalité concernée. */}
       {embeddingStatus && (() => {
         const total = embeddingStatus.corpus_total ?? embeddingStatus.ranking?.total ?? 0;
@@ -3246,7 +3288,7 @@ function _guessConnector(mn: string, connectors: DataConnector[]): { id: string;
 
 const _REGION_OPTS = ["geneva", "lausanne", "sion", "neuchatel", "fribourg", "jura"];
 
-// Slice 3b — per-variable pickers: for each PUBLIC data-template column, choose a
+// Slice 3b - per-variable pickers: for each PUBLIC data-template column, choose a
 // connector + variable, set a shared region/date window + frequency, and fetch the
 // dataset automatically instead of uploading a CSV.
 function AutoFetchPanel({ scenarioId, spec, onFetched }: {
@@ -3357,7 +3399,7 @@ function AutoFetchPanel({ scenarioId, spec, onFetched }: {
       {err && <ErrorBox message={err} />}
       {result && (
         <div className="rounded-lg bg-forest-900/50 p-2 text-[10px] font-mono text-white/50 space-y-1">
-          <div>{t(`${AF}.rows`)} <span className="text-brand-300">{result.n_rows}</span> · {t(`${AF}.filled`)} <span className="text-brand-300">{(result.filled_columns || []).join(", ") || "—"}</span></div>
+          <div>{t(`${AF}.rows`)} <span className="text-brand-300">{result.n_rows}</span> · {t(`${AF}.filled`)} <span className="text-brand-300">{(result.filled_columns || []).join(", ") || "-"}</span></div>
           {(result.still_needed_user_columns?.length ?? 0) > 0 && (
             <div className="text-gold-300">{t(`${AF}.stillNeeded`)} {result.still_needed_user_columns.join(", ")}</div>
           )}
@@ -3483,7 +3525,7 @@ function PrismaSection({ scenarioId }: { scenarioId: string }) {
 
   // Garde-fous : selon l'avancement du scénario, l'API peut renvoyer un payload
   // partiel (section ou champ absent). Le panneau PRISMA ne doit jamais planter
-  // pour autant — on substitue des objets vides / des 0 (PrismaBigNum appelle
+  // pour autant - on substitue des objets vides / des 0 (PrismaBigNum appelle
   // value.toLocaleString() sans condition, donc un undefined ferait crasher l'app).
   const num = (v: unknown): number => (typeof v === "number" && isFinite(v) ? v : 0);
   const ident = data.identification ?? ({} as ScenarioPrisma["identification"]);
@@ -3519,7 +3561,7 @@ function PrismaSection({ scenarioId }: { scenarioId: string }) {
           {/* « records identified » = étape PRISMA d'identification : compté AVANT
               déduplication (norme PRISMA 2020), donc légitimement ≥ au corpus dédupliqué
               affiché ailleurs. La note l'explicite pour éviter la lecture « incohérence ». */}
-          {/* figures_from="corpus" : scénario antérieur à la comptabilité par source — les
+          {/* figures_from="corpus" : scénario antérieur à la comptabilité par source - les
               nombres viennent du corpus DÉJÀ dédupliqué, donc « doublons : 0 » par
               construction. Le dire, plutôt que d'afficher un « avant déduplication » faux. */}
           <div className="text-center text-[10px] text-emerald-300/50 -mt-1">
@@ -3582,7 +3624,7 @@ function PrismaSection({ scenarioId }: { scenarioId: string }) {
           </div>
           <div className="space-y-1">
             <PrismaRow label={t("scenarioDetail.prisma.similarityThreshold")} value={`≥ ${(num(sem.threshold) * 100).toFixed(0)}%`} />
-            <PrismaRow label={t("scenarioDetail.prisma.method")} value={sem.method ?? "—"} />
+            <PrismaRow label={t("scenarioDetail.prisma.method")} value={sem.method ?? "-"} />
             <PrismaRow
               label={t("scenarioDetail.prisma.fullTextsAvailable")}
               value={`${num(ft.with_fulltext).toLocaleString()} (${num(ft.pct).toFixed(0)}%)`}
@@ -3790,11 +3832,11 @@ function PicoSection({ scenarioId }: { scenarioId: string }) {
                     <span className="text-white/70 leading-4 line-clamp-2">{a.title}</span>
                   </div>
                 </td>
-                <td className="px-3 py-2 text-white/50 font-mono whitespace-nowrap">{a.year||'—'}</td>
+                <td className="px-3 py-2 text-white/50 font-mono whitespace-nowrap">{a.year||'-'}</td>
                 <td className="px-3 py-2 whitespace-nowrap">
                   {a.study_design
                     ? <span className="rounded-md bg-brand-500/10 border border-brand-500/20 px-1.5 py-0.5 text-brand-300">{a.study_design}</span>
-                    : <span className="text-white/25">—</span>
+                    : <span className="text-white/25"> - </span>
                   }
                 </td>
                 <td className="px-3 py-2 whitespace-nowrap">
@@ -3802,12 +3844,12 @@ function PicoSection({ scenarioId }: { scenarioId: string }) {
                     ? <span className={`font-mono font-semibold ${a.pico_confidence>0.7?'text-brand-300':a.pico_confidence>0.4?'text-gold-400':'text-rose-300'}`}>
                         {Math.round(a.pico_confidence*100)}%
                       </span>
-                    : <span className="text-white/25">—</span>
+                    : <span className="text-white/25"> - </span>
                   }
                 </td>
                 {(['P','I','C','O'] as const).map(key=>(
                   <td key={key} className="px-3 py-2 max-w-[160px]">
-                    <span className="text-white/60 leading-4 line-clamp-3">{(a as any)[key]||<span className="text-white/20">—</span>}</span>
+                    <span className="text-white/60 leading-4 line-clamp-3">{(a as any)[key]||<span className="text-white/20"> - </span>}</span>
                   </td>
                 ))}
               </tr>
@@ -4032,7 +4074,7 @@ function ConceptMapView({ scenarioId }: { scenarioId: string }) {
                   stroke={hot ? "#fff" : "#9be7c4"} strokeWidth={0.6 + 3 * (e.weight / maxW)}
                   strokeOpacity={focus === null ? base : hot ? 0.85 : 0.04} className="cursor-pointer"
                   onClick={() => setSelected(e.source)}>
-                  <title>{`${nameOf(e.source)} — ${nameOf(e.target)} · ${e.weight}`}</title>
+                  <title>{`${nameOf(e.source)} - ${nameOf(e.target)} · ${e.weight}`}</title>
                 </path>
               );
             })}
@@ -4101,7 +4143,7 @@ function ConceptMapView({ scenarioId }: { scenarioId: string }) {
                   const href = a.doi ? `https://doi.org/${a.doi}` : a.pmid ? `https://pubmed.ncbi.nlm.nih.gov/${a.pmid}/` : null;
                   return (
                     <div key={id} className="flex items-start gap-1.5 text-[10px]">
-                      <span className="font-mono text-white/30 shrink-0 w-8">{a.y ?? "—"}</span>
+                      <span className="font-mono text-white/30 shrink-0 w-8">{a.y ?? "-"}</span>
                       <span className="text-white/65 leading-3 line-clamp-2 flex-1">{a.t}</span>
                       {href && <a href={href} target="_blank" rel="noreferrer" className="text-brand-300 shrink-0"><ExternalLink size={10} /></a>}
                     </div>
@@ -4127,7 +4169,7 @@ function ConceptMapView({ scenarioId }: { scenarioId: string }) {
               {links.map((e, i) => (
                 <button key={i} type="button" onClick={() => setSelected(e.source)}
                   className="flex w-full items-center justify-between gap-2 rounded px-1 py-0.5 text-left text-[10px] hover:bg-white/3">
-                  <span className="truncate text-white/65">{nameOf(e.source)} <span className="text-white/30">—</span> {nameOf(e.target)}</span>
+                  <span className="truncate text-white/65">{nameOf(e.source)} <span className="text-white/30"> - </span> {nameOf(e.target)}</span>
                   <span className="font-mono text-brand-300 shrink-0">{e.weight}</span>
                 </button>
               ))}
@@ -4392,10 +4434,10 @@ function ArticleSimilarityGraph({ scenarioId }: { scenarioId: string }) {
               </div>
               <div className="space-y-1.5 text-[10px] text-white/50">
                 <div className="flex justify-between"><span>{t("scenarioDetail.knowledgeGraph.year")}</span><span className="text-white/70">{selectedNodeData.year || 'N/A'}</span></div>
-                <div className="flex justify-between"><span>{t("scenarioDetail.knowledgeGraph.journal")}</span><span className="text-white/70 text-right max-w-[120px] truncate">{selectedNodeData.journal || '—'}</span></div>
+                <div className="flex justify-between"><span>{t("scenarioDetail.knowledgeGraph.journal")}</span><span className="text-white/70 text-right max-w-[120px] truncate">{selectedNodeData.journal || '-'}</span></div>
                 <div className="flex justify-between"><span>{t("scenarioDetail.knowledgeGraph.studyType")}</span><span className="rounded bg-brand-500/10 border border-brand-500/20 px-1 text-brand-300">{selectedNodeData.design}</span></div>
                 <div className="flex justify-between"><span>{t("scenarioDetail.knowledgeGraph.connections")}</span><span className="text-brand-300 font-semibold">{selectedNodeData.degree}</span></div>
-                <div className="flex justify-between"><span>{t("scenarioDetail.knowledgeGraph.quality")}</span><span className="text-gold-400 font-semibold">{selectedNodeData.quality > 0 ? Math.round(selectedNodeData.quality * 100) + '%' : '—'}</span></div>
+                <div className="flex justify-between"><span>{t("scenarioDetail.knowledgeGraph.quality")}</span><span className="text-gold-400 font-semibold">{selectedNodeData.quality > 0 ? Math.round(selectedNodeData.quality * 100) + '%' : '-'}</span></div>
               </div>
             </div>
           ) : (
@@ -4847,7 +4889,7 @@ export function EnrichmentSection({ scenarioId }: { scenarioId?: string }) {
       label: t("scenarioDetail.enrichment.picoLabel"),
       desc: t("scenarioDetail.enrichment.picoDesc"),
       icon: <Microscope size={15} className="text-brand-400" />,
-      stat: status ? `${status.pico.count} / ${status.total} (${status.pico.pct}%)` : "—",
+      stat: status ? `${status.pico.count} / ${status.total} (${status.pico.pct}%)` : "-",
       pct: status ? status.pico.pct : 0,
       color: "bg-brand-500",
     },
@@ -4856,7 +4898,7 @@ export function EnrichmentSection({ scenarioId }: { scenarioId?: string }) {
       label: t("scenarioDetail.enrichment.metadataLabel"),
       desc: t("scenarioDetail.enrichment.metadataDesc"),
       icon: <Database size={15} className="text-gold-400" />,
-      stat: status ? `${status.metadata.count} / ${status.total} (${status.metadata.pct}%)` : "—",
+      stat: status ? `${status.metadata.count} / ${status.total} (${status.metadata.pct}%)` : "-",
       pct: status ? status.metadata.pct : 0,
       color: "bg-gold-500",
     },
@@ -4865,7 +4907,7 @@ export function EnrichmentSection({ scenarioId }: { scenarioId?: string }) {
       label: t("scenarioDetail.enrichment.fulltextLabel"),
       desc: t("scenarioDetail.enrichment.fulltextDesc"),
       icon: <Globe size={15} className="text-forest-300" />,
-      stat: status ? `${status.fulltext.count} / ${status.total} (${status.fulltext.pct}%)` : "—",
+      stat: status ? `${status.fulltext.count} / ${status.total} (${status.fulltext.pct}%)` : "-",
       pct: status ? status.fulltext.pct : 0,
       color: "bg-forest-400",
     },
@@ -5213,7 +5255,7 @@ function EvidencesSection({ scenarioId, detail }: { scenarioId: string; detail: 
       const b = briefData;
       const dups_pdf = b.corpus_stats.duplicates ?? 0;
       // `total` renvoyé par le backend EXCLUT déjà les doublons (COUNT FILTER
-      // is_duplicate IS NOT TRUE) — on l'affiche tel quel. Soustraire `dups` ici
+      // is_duplicate IS NOT TRUE) - on l'affiche tel quel. Soustraire `dups` ici
       // dédupliquait une SECONDE fois → chiffre plus bas que la carte scénario.
       const uniqueTotal_pdf = b.corpus_stats.total;
       // Le PDF reflète exactement les mêmes chiffres que le panneau Evidences à
@@ -5412,7 +5454,7 @@ ${llm.future_research ? `<h3>${t("scenarioDetail.evidences.pdf.futureResearch")}
       {briefError && <ErrorBox message={briefError} />}
       {briefData && (
         <>
-          {/* KPIs — l'analyse (Evidence Brief, PICO, modèle) repose sur les
+          {/* KPIs - l'analyse (Evidence Brief, PICO, modèle) repose sur les
               articles PERTINENTS (au-dessus du seuil sémantique). On montre le
               corpus total pour le contexte, puis tout le reste sur les pertinents.
               Les compteurs de screening (inclus/exclus/en attente) vivent dans
@@ -5783,7 +5825,7 @@ function VariablesModelTab({ scenarioId, detail, initialSub }: { scenarioId: str
 }
 
 // ─── Tableau de bord du modèle (vue clinicien) ────────────────────────────────
-// Statut clair (pastille + libellé + couleur — jamais la couleur seule, accessibilité).
+// Statut clair (pastille + libellé + couleur - jamais la couleur seule, accessibilité).
 const _DASH_STATUS = {
   green:  { dot: "bg-emerald-400", text: "text-emerald-300", bg: "bg-emerald-500/10", border: "border-emerald-500/30", ring: "ring-emerald-400/40" },
   orange: { dot: "bg-amber-400",   text: "text-amber-300",   bg: "bg-amber-500/10",   border: "border-amber-500/30",   ring: "ring-amber-400/40" },
@@ -5795,13 +5837,13 @@ type DashStatus = keyof typeof _DASH_STATUS;
 function ModelDashboard({ scenarioId, run, monitor, spec }: { scenarioId: string; run: ModelRun; monitor: ModelMonitor | null; spec: ModelSpecResponse | null }) {
   const { t, lang } = useI18n();
   const locale = lang === "fr" ? "fr-FR" : "en-US";
-  const fmtDate = (d?: string | null) => (d ? new Date(d).toLocaleString(locale, { dateStyle: "medium", timeStyle: "short" }) : "—");
+  const fmtDate = (d?: string | null) => (d ? new Date(d).toLocaleString(locale, { dateStyle: "medium", timeStyle: "short" }) : "-");
   const [exporting, setExporting] = useState(false);
   const [exportingXlsx, setExportingXlsx] = useState(false);
   // Un export qui échoue doit le DIRE. Le catch vide avalait un message déjà traduit
   // (401 « accès non autorisé » quand la clé API n'est pas mémorisée, 501 si openpyxl
   // manque côté serveur…) : l'utilisateur cliquait, rien ne se passait, rien ne
-  // l'expliquait. L'export ne doit pas casser la page — mais il doit se plaindre.
+  // l'expliquait. L'export ne doit pas casser la page - mais il doit se plaindre.
   const [exportError, setExportError] = useState("");
   const _download = (blob: Blob, name: string) => {
     const url = URL.createObjectURL(blob);
@@ -5840,11 +5882,11 @@ function ModelDashboard({ scenarioId, run, monitor, spec }: { scenarioId: string
   const hasPrediction = monitor?.status === "ready" && typeof monitor?.value === "number";
   const valueLabel = hasPrediction
     ? (monitor!.kind === "probability" ? `${(monitor!.value! * 100).toFixed(0)}%` : monitor!.value!.toLocaleString(locale))
-    : "—";
+    : "-";
   const metricKey = run.metric ?? monitor?.model?.metric;
   const metricVal = (metricKey && run.metrics && typeof run.metrics[metricKey] === "number") ? run.metrics[metricKey] : null;
 
-  // Facteurs clés (importances par VARIABLE, noms lisibles) — repli sur les brutes.
+  // Facteurs clés (importances par VARIABLE, noms lisibles) - repli sur les brutes.
   const nameByMachine: Record<string, string> = {};
   (spec?.features ?? []).forEach(f => { if (f.machine_name) nameByMachine[f.machine_name] = f.name || f.machine_name; });
   const byVar = (run.summary?.importances_by_variable ?? null) as Record<string, number> | null;
@@ -5914,7 +5956,7 @@ function ModelDashboard({ scenarioId, run, monitor, spec }: { scenarioId: string
         )}
       </div>
 
-      {/* Bandes d'alerte (Normal / Tension / Alerte) — la bande courante est mise en avant */}
+      {/* Bandes d'alerte (Normal / Tension / Alerte) - la bande courante est mise en avant */}
       {bands.length > 0 && (
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
           {bands.map(b => {
@@ -5938,11 +5980,11 @@ function ModelDashboard({ scenarioId, run, monitor, spec }: { scenarioId: string
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-[11px]">
         <div className="rounded-xl border border-white/5 bg-white/2 px-3 py-2">
           <div className="text-white/40">{t("scenarioDetail.model.algorithm")}</div>
-          <div className="font-semibold text-white mt-0.5 font-mono truncate">{run.family ?? "—"}</div>
+          <div className="font-semibold text-white mt-0.5 font-mono truncate">{run.family ?? "-"}</div>
         </div>
         <div className="rounded-xl border border-white/5 bg-white/2 px-3 py-2">
           <div className="text-white/40 uppercase">{metricKey ?? t("scenarioDetail.model.dashboard.metric")}</div>
-          <div className="font-semibold text-brand-300 mt-0.5 font-mono">{metricVal != null ? metricVal.toFixed(3) : "—"}</div>
+          <div className="font-semibold text-brand-300 mt-0.5 font-mono">{metricVal != null ? metricVal.toFixed(3) : "-"}</div>
         </div>
         <div className="rounded-xl border border-white/5 bg-white/2 px-3 py-2">
           <div className="text-white/40">{t("scenarioDetail.model.dashboard.trainedOn")}</div>
@@ -6107,7 +6149,7 @@ function ModelMonitorSection({ scenarioId }: { scenarioId: string }) {
     <div className="space-y-6">
       {error && <ErrorBox message={error} />}
 
-      {/* Tableau de bord clinicien — dès qu'un modèle est entraîné : prédiction + bande
+      {/* Tableau de bord clinicien - dès qu'un modèle est entraîné : prédiction + bande
           d'alerte (couleur), performance, dates d'entraînement/calcul, facteurs clés. */}
       {run?.status === "ready" && <ModelDashboard scenarioId={scenarioId} run={run} monitor={monitor} spec={spec} />}
 
@@ -6172,7 +6214,7 @@ function ModelMonitorSection({ scenarioId }: { scenarioId: string }) {
                   <p className="font-semibold text-brand-300 mt-1 font-mono">
                     {run.metrics && run.metric && typeof run.metrics[run.metric] === "number"
                       ? run.metrics[run.metric].toFixed(3)
-                      : "—"}
+                      : "-"}
                   </p>
                 </div>
               </div>
@@ -6249,7 +6291,7 @@ function ModelMonitorSection({ scenarioId }: { scenarioId: string }) {
                           <span className="text-white/60">
                             <span className="text-white/80">{c.name}</span>
                             {typeof c.statistic === "number" && <span className="text-white/40"> · {c.statistic}</span>}
-                            {c.detail && <span className="text-white/40"> — {c.detail}</span>}
+                            {c.detail && <span className="text-white/40"> - {c.detail}</span>}
                           </span>
                         </div>
                       ))}
@@ -6287,7 +6329,7 @@ function ModelMonitorSection({ scenarioId }: { scenarioId: string }) {
                             {e.family}
                             {e.rank === 1 && <span className="ml-1.5 text-[9px] text-brand-300/70">{t("scenarioDetail.model.leaderboardActive")}</span>}
                           </span>
-                          <span className="font-mono text-white/70">{typeof e.value === "number" ? e.value.toFixed(3) : "—"}</span>
+                          <span className="font-mono text-white/70">{typeof e.value === "number" ? e.value.toFixed(3) : "-"}</span>
                         </div>
                       ))}
                       {failed.map((e) => (
@@ -6326,7 +6368,7 @@ function ModelMonitorSection({ scenarioId }: { scenarioId: string }) {
       </div>
 
       {/* La projection SEIR a désormais son propre onglet « SEIR » (modèle, formule,
-          paramètres éditables liés aux articles) — plus de doublon ici. */}
+          paramètres éditables liés aux articles) - plus de doublon ici. */}
 
       {/* Évolution pilotée par l'évidence (Phase 5) */}
       <div className="rounded-3xl border border-white/10 bg-white/3 p-5 space-y-4">
@@ -6377,10 +6419,10 @@ function ModelMonitorSection({ scenarioId }: { scenarioId: string }) {
 
 // ─── Main Component ───────────────────────────────────────────────────────────
 
-// ── Rapports de situation (ReliefWeb) — flux SÉPARÉ, littérature GRISE ───────
+// ── Rapports de situation (ReliefWeb) - flux SÉPARÉ, littérature GRISE ───────
 // Ce que ReliefWeb apporte et que la littérature ne peut pas : la VITESSE (un bulletin
 // OMS paraît en jours, l'article correspondant en 6 à 24 mois) et le TERRAIN (ouvertures
-// de centres de traitement, doses de vaccin, logistique) — que nulle revue ne publie.
+// de centres de traitement, doses de vaccin, logistique) - que nulle revue ne publie.
 // Ce qu'il n'apporte pas : la relecture par les pairs. L'UI le dit, en toutes lettres.
 function SituationReportsSection({ scenarioId }: { scenarioId: string }) {
   const { t } = useI18n();
@@ -6495,7 +6537,7 @@ const SECTIONS: Array<{ key: SectionKey; icon: React.ReactNode }> = [
   { key: "review",      icon: <FileText size={13} /> },
   { key: "evidence",    icon: <BookOpen size={13} /> },
   // Flux SÉPARÉ (littérature grise) : placé APRÈS les preuves scientifiques, jamais
-  // fondu dedans — le corpus revu par les pairs et les rapports de terrain ne se
+  // fondu dedans - le corpus revu par les pairs et les rapports de terrain ne se
   // lisent pas de la même façon et ne doivent pas se compter ensemble.
   { key: "reports",     icon: <Radio size={13} /> },
   { key: "assistant",   icon: <MessageSquare size={13} /> },
@@ -6731,11 +6773,11 @@ export function ScenarioDetailPage({ scenarioId, onBack, initialTab }: ScenarioD
         ))}
       </div>
 
-      {/* Contenu de la section active — isolé par une limite d'erreur : un crash
+      {/* Contenu de la section active - isolé par une limite d'erreur : un crash
           de rendu (ex. visualisation clustering) n'emporte plus toute la page. */}
       <ErrorBoundary resetKey={`${activeSection}:${scenarioId}:${refreshKey}`} label="scenarioDetail.page.errorBoundaryLabel">
         {/* `key` : à la fin d'un pipeline, on REMONTE la section active pour qu'elle
-            recharge ses données (corpus, PRISMA, étape sémantique…) — sinon elle
+            recharge ses données (corpus, PRISMA, étape sémantique…) - sinon elle
             garderait les nombres provisoires lus pendant le pipeline. */}
         <div key={`section-${refreshKey}`} className="contents">
         {activeSection === "review" && <ReviewTab scenarioId={scenarioId} detail={detail} />}

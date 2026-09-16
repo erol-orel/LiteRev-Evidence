@@ -1,4 +1,4 @@
-"""Pure-logic tests for seir_model.py — no database, no network, stdlib only.
+"""Pure-logic tests for seir_model.py - no database, no network, stdlib only.
 
 The strongest correctness check is the SIR **final-size relation**: for a closed
 epidemic the attack rate z satisfies z = 1 - exp(-R0 * z). We also cover model
@@ -122,7 +122,7 @@ def _seir_base(**kw):
 
 def test_vq_off_reproduces_base_model_exactly():
     # The V/Q extension must be a no-op when both are absent (or zero): identical name,
-    # identical attack rate — this is what preserves the final-size guarantees above.
+    # identical attack rate - this is what preserves the final-size guarantees above.
     base = _seir_base()
     none_off = _seir_base(vaccination_rate=None, quarantine_rate=None)
     zero_off = _seir_base(vaccination_rate=0.0, vaccine_efficacy=0.9, quarantine_rate=0.0)
@@ -231,7 +231,7 @@ def test_ensemble_fixed_params_collapse_to_point_estimate():
     ens = sm.simulate_ensemble(params, days=150, n_samples=25, seed=1)
     det = sm.simulate(sm.SeirParams(r0=2.5, infectious_period_days=6, population=1e6, initial_infected=10), days=150)
     lo, up = ens["incidence"]["lower"], ens["incidence"]["upper"]
-    # zero-width band (identical draws) — up to percentile-interpolation float rounding
+    # zero-width band (identical draws) - up to percentile-interpolation float rounding
     assert all(abs(up[t] - lo[t]) < 1e-6 for t in range(len(lo)))
     for t in range(len(det["incidence"])):
         assert abs(ens["incidence"]["median"][t] - det["incidence"][t]) < 1e-6
@@ -457,7 +457,7 @@ def test_is_seir_parameter_detects_params():
 
 
 def test_is_seir_parameter_no_false_positives():
-    # short ambiguous tokens are whole-word only — "r0"/"cfr" must not match inside words
+    # short ambiguous tokens are whole-word only - "r0"/"cfr" must not match inside words
     assert not sm.is_seir_parameter("start_date")       # contains "rt"? no bare "rt" keyword anyway
     assert not sm.is_seir_parameter("comfort_index")    # "rt"/"r0" not present as words
     assert not sm.is_seir_parameter("Nombre d'hospitalisations")
@@ -695,7 +695,7 @@ def test_common_french_word_eu_is_not_the_european_union():
 
 # ── grey literature must never steer a pooled parameter ──────────────────────
 # `quality_by_id` IS the pooling weight, and a ReliefWeb situation report scored 0.55
-# against 0.774 for a strong RCT — and OUTRANKED a peer-reviewed case report at 0.386.
+# against 0.774 for a strong RCT - and OUTRANKED a peer-reviewed case report at 0.386.
 # Measured before the gate: two papers at R0 2.0/2.2 plus one situation report claiming
 # 6.0 moved the pooled R0 from 2.09 to 3.04 (+46%) with a lower CI bound of -0.25.
 
@@ -728,7 +728,7 @@ def test_grey_observation_cannot_steer_a_pool_that_has_peer_reviewed_evidence():
 
 
 def test_grey_observation_alone_cannot_establish_a_parameter():
-    """With no peer-reviewed basis, a field report is context — never a model input."""
+    """With no peer-reviewed basis, a field report is context - never a model input."""
     out = sm.normalize_extracted_parameters(
         _r0_block([_SITREP]), valid_ids={99}, quality_by_id=_QUALITY, grey_ids={99})
     assert "r0" not in out["params"]                       # not simulated

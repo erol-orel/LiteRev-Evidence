@@ -12,7 +12,7 @@ class reaches the main ingestion path too, because a JSON API may return "\\u000
 which `json.loads` decodes into a real NUL.
 
 The trap these tests exist to pin: the extractors run `re.sub(r"\\s+", " ", ...)` right
-before returning, which looks like it would clean this up and does not — Python's `\\s`
+before returning, which looks like it would clean this up and does not - Python's `\\s`
 does not match `\\x00`.
 """
 import pytest
@@ -36,13 +36,13 @@ def test_whitespace_normalisation_alone_would_not_have_caught_it():
     """Pins WHY the bug survived: `\\s` does not cover NUL. If this ever fails, the
     sanitiser has become redundant and can go."""
     import re
-    assert NUL in re.sub(r"\s+", " ", f"a{NUL}b"), "re.\\s now matches NUL — revisit"
+    assert NUL in re.sub(r"\s+", " ", f"a{NUL}b"), "re.\\s now matches NUL - revisit"
     assert NUL not in main.sanitize_db_text(f"a{NUL}b")
 
 
 def test_real_text_is_left_alone():
     """Accents, punctuation, newlines and tabs are legitimate and must survive."""
-    for text in ("Étude prospective sur la grippe A (H1N1) — 2009",
+    for text in ("Étude prospective sur la grippe A (H1N1) - 2009",
                  "line one\nline two\tcolumn",
                  "R₀ = 1.28 (IQR 1.19–1.37)",
                  "emoji ok 🦠", ""):

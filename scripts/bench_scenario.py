@@ -9,7 +9,7 @@ Two modes:
   DB_URL=postgresql+psycopg://... python3 scripts/bench_scenario.py --seed 25000
 
   # 2) Over HTTP against a running API (e.g. production on the server), on an
-  #    EXISTING scenario — nothing is written, only GET endpoints are called:
+  #    EXISTING scenario - nothing is written, only GET endpoints are called:
   python3 scripts/bench_scenario.py --base http://127.0.0.1:8000 --scenario usr-xxxx
 
 Endpoints flagged with "*" may start background work on a cold cache (automatic

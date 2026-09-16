@@ -63,8 +63,8 @@ def _live_fetch_pubmed(query: str, max_results: int) -> tuple[list[dict], int]:
     """Fetch from PubMed eSearch+eSummary.
 
     Renvoie (résultats, hitcount_réel). `hitcount_réel` = esearchresult.count = le
-    NOMBRE VRAI d'enregistrements PubMed correspondant à la requête — le même
-    compteur que sur pubmed.ncbi.nlm.nih.gov — qui peut dépasser de loin les
+    NOMBRE VRAI d'enregistrements PubMed correspondant à la requête - le même
+    compteur que sur pubmed.ncbi.nlm.nih.gov - qui peut dépasser de loin les
     `max_results` réellement rapatriés dans le panneau. Surfacé pour que le badge
     de source affiche le vrai total trouvé, et non les seules lignes récupérées
     (cause du « 306 sur PubMed mais 35 ici »)."""
@@ -167,7 +167,7 @@ def _live_fetch_europepmc(query: str, max_results: int) -> list[dict]:
     import requests as _req
     results = []
     try:
-        # NB : ne PAS passer sort=RELEVANCE — c'est une valeur invalide pour
+        # NB : ne PAS passer sort=RELEVANCE - c'est une valeur invalide pour
         # EuropePMC qui renvoie alors une liste vide. Sans 'sort', l'API trie
         # par pertinence par défaut.
         r = _req.get("https://www.ebi.ac.uk/europepmc/webservices/rest/search", params={
@@ -193,7 +193,7 @@ def _live_fetch_europepmc(query: str, max_results: int) -> list[dict]:
 
 def _live_fetch_preprints(query: str, max_results: int) -> list[dict]:
     """Préprints (bioRxiv, medRxiv, Research Square, …) via Europe PMC (filtre SRC:PPR).
-    Europe PMC indexe les préprints AVEC recherche plein-texte par mots-clés — au
+    Europe PMC indexe les préprints AVEC recherche plein-texte par mots-clés - au
     contraire de l'API biorxiv (dates/DOI uniquement) qu'utilisaient les anciens
     scanners medRxiv/bioRxiv (peu/pas de résultats)."""
     import requests as _req
@@ -265,7 +265,7 @@ def _live_fetch_preprint_server(server: str, source_name: str, query: str, max_r
     try:
         # Mots-clés significatifs (booléen nettoyé). Les 2 premiers sont les
         # termes "primaires" (concept central) : on EXIGE qu'au moins un soit
-        # présent, plus un nombre minimal de correspondances totales — sinon le
+        # présent, plus un nombre minimal de correspondances totales - sinon le
         # filtre laisse passer n'importe quel preprint contenant 2 mots courants.
         words = _plain_keywords(query, max_words=12).split()
         primary = words[:2]
@@ -350,7 +350,7 @@ def _federated_live_search(
     pubmed_query = pubmed_query or query
     general_query = general_query or query
     # PubMed RECALL : la requête MeSH générée (pubmed_query) est souvent BEAUCOUP plus
-    # étroite que le booléen portable (general_query) — p.ex. 35 vs 306 pour le même
+    # étroite que le booléen portable (general_query) - p.ex. 35 vs 306 pour le même
     # booléen collé sur le site PubMed. On interroge PubMed avec l'UNION des deux (même
     # correctif que le populate) pour retrouver le rappel du site. Repli : booléen seul.
     if (pubmed_query and general_query and pubmed_query != general_query
@@ -413,7 +413,7 @@ def _federated_live_search(
         except concurrent.futures.TimeoutError:
             logger.warning("federated search: certaines sources ont dépassé le délai")
 
-    # Marquage in_local_db — literature_document n'a pas de colonne doi dédiée et
+    # Marquage in_local_db - literature_document n'a pas de colonne doi dédiée et
     # external_id est hétérogène selon la source (DOI brut pour Crossref/EuropePMC,
     # "pmid:<id>" pour PubMed/PROSPERO/Cochrane, URL pour OpenAlex). On compare donc
     # l'external_id stocké à la fois aux DOIs ET aux external_id des résultats
@@ -539,7 +539,7 @@ def _federated_live_search(
     # on classe INDÉPENDAMMENT par lexical puis par sémantique et on somme 1/(k+rang).
     # Sans paramètre à régler, et robuste au fait que seuls les SEM_SCORE_CAP premiers
     # résultats ont un score sémantique (les autres, sem=0, ne comptent que par le
-    # lexical) — une somme pondérée mélangeait ces échelles hétérogènes. k=60 (usuel).
+    # lexical) - une somme pondérée mélangeait ces échelles hétérogènes. k=60 (usuel).
     # Un résultat n'obtient de crédit d'un signal que si ce signal est > 0 (sinon tous
     # les ex-æquo à 0 en bas du classement pollueraient le score).
     _RRF_K = 60
@@ -607,7 +607,7 @@ def search_live(
     except Exception as _ce:
         logger.warning(f"search_live corpus count {scenario_id}: {_ce}")
 
-    # Background ingest of new papers — via le lanceur verrouillé pour ne jamais
+    # Background ingest of new papers - via le lanceur verrouillé pour ne jamais
     # démarrer un populate concurrent (sinon les nettoyages post-ingestion se
     # marchent dessus : compteurs corrompus, liens supprimés par l'autre job).
     ingesting_background = False
@@ -729,7 +729,7 @@ def sources_health(query: str = "cardiac arrest", timeout: int = 12) -> dict[str
 # ── Parseurs de sources littéraires (PURS / testables) ───────────────────────
 # Chaque parseur transforme la réponse brute d'une API en une liste de docs
 # {title, abstract, year, url, external_id, doi, source_type}. Le fetcher (closure
-# dans le populate) ne fait que le HTTP + la pagination puis délègue ici — de sorte
+# dans le populate) ne fait que le HTTP + la pagination puis délègue ici - de sorte
 # que la forme de chaque réponse est vérifiée par des tests SANS réseau.
 def _parse_semantic_scholar(payload: dict) -> list[dict]:
     """Semantic Scholar Graph API /paper/search → docs. external_id = s2:<paperId>."""
@@ -993,7 +993,7 @@ def _ingest_doc_direct(
     Retourne (id_document, is_new) : is_new=True si la ligne vient d'être INSÉRÉE,
     False si le document existait déjà (dédup pré-SELECT, ou course entre fetchers
     parallèles résolue par ON CONFLICT). Le compteur « ingested » ne s'incrémente
-    que sur les vrais INSERT — sinon il surcompte les doublons inter-sources.
+    que sur les vrais INSERT - sinon il surcompte les doublons inter-sources.
     """
     # Même classe de bug que le texte intégral, sur le chemin d'ingestion PRINCIPAL :
     # une API JSON peut renvoyer la séquence d'échappement u+0000, que json.loads décode
@@ -1008,10 +1008,10 @@ def _ingest_doc_direct(
     title_norm = _normalize_title(title)
     content_text = f"{title}\n\n{abstract or ''}".strip()
 
-    # PMID dérivé de l'external_id (« pmid:123 » — format PubMed unifié, cf.
+    # PMID dérivé de l'external_id (« pmid:123 » - format PubMed unifié, cf.
     # _live_fetch_pubmed et le populate) ou d'un external_id purement numérique
     # d'une source PubMed. Renseigne la colonne `pmid` (jusqu'ici NULL par ce
-    # chemin) pour que la dédup PMID (maintenance corpus / _softdedup) opère —
+    # chemin) pour que la dédup PMID (maintenance corpus / _softdedup) opère -
     # sans dépendre du format d'external_id. Aucune signature d'appelant modifiée.
     _pmid: str | None = None
     if external_id:
@@ -1023,7 +1023,7 @@ def _ingest_doc_direct(
             _pmid = _eid_s
 
     # Dédup en UN SEUL aller-retour (au lieu de deux SELECT séparés) : par external_id,
-    # sinon par DOI, sinon par TITRE normalisé — capte les doublons sans DOI (préprints,
+    # sinon par DOI, sinon par TITRE normalisé - capte les doublons sans DOI (préprints,
     # essais) ou dont le DOI diffère selon la source. Titres < 20 car. normalisés ignorés
     # (faux positifs). Le try/except couvre le cas d'une colonne title_norm absente (migration).
     _has_tn = bool(title_norm and len(title_norm) >= 20)
@@ -1050,11 +1050,11 @@ def _ingest_doc_direct(
         return (existing, False)   # dédup pré-SELECT (external_id / titre normalisé / DOI)
 
     # INSERT document + chunk dans UNE SEULE transaction : sinon un crash entre
-    # les deux laisse un document sans chunk (jamais indexable/cherchable) — c'est
+    # les deux laisse un document sans chunk (jamais indexable/cherchable) - c'est
     # l'origine des documents orphelins observés en production.
     with engine.begin() as _c:
         # ON CONFLICT DO NOTHING SANS cible : capte un conflit sur N'IMPORTE quel
-        # index unique — uq_literature_document_doi (DOI) ET uq_litdoc_title_norm
+        # index unique - uq_literature_document_doi (DOI) ET uq_litdoc_title_norm
         # (titre normalisé, len≥20). Ferme la course entre fetchers parallèles qui,
         # avant l'index unique sur le titre, pouvaient tous deux passer le pré-SELECT
         # puis INSÉRER deux lignes pour le même article sans DOI (préprint, essai).
@@ -1094,7 +1094,7 @@ def _ingest_doc_direct(
 
         # INSERT du chunk title_abstract, idempotent : ne crée PAS de second chunk
         # si le document en a déjà un (cas d'un doc atteint via dédup DOI avec un
-        # external_id différent — l'origine des chunks dupliqués observés).
+        # external_id différent - l'origine des chunks dupliqués observés).
         if doc_id is not None and len(content_text) >= 30:
             _c.execute(text("""
                 INSERT INTO document_chunk (

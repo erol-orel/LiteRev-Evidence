@@ -29,7 +29,7 @@ from .schema_boot import _REQUIRED_TABLES, _SCHEMA_DDL_FAILURES
 # ─────────────────────────────────────────────────────────────────────────────
 @app.get("/health")
 def health() -> dict[str, Any]:
-    """Santé du service — connexion À LA BASE *et* intégrité du schéma.
+    """Santé du service - connexion À LA BASE *et* intégrité du schéma.
 
     `SELECT 1` seul mentait : sur une base incomplète, /health répondait « ok » pendant
     que /user-scenarios, /gesica/scenarios et /corpus/fulltext-stats renvoyaient 500 (le
@@ -76,13 +76,13 @@ def health() -> dict[str, Any]:
         # NB : `status` reste volontairement "ok" même ici. Ce n'est plus un aveu
         # d'impuissance : `schema.ok` EST désormais bloquant au déploiement (cf.
         # scripts/check_health.py, appelé par le smoke test de deploy.yml, activé après
-        # confirmation que la production était saine — 39759fe : ok=true, 0 table
+        # confirmation que la production était saine - 39759fe : ok=true, 0 table
         # manquante, 0 DDL écartée).
         # La séparation est délibérée : `status` répond « le service tourne », et doit
         # rester vrai pour que le déploiement PORTANT LE CORRECTIF puisse aboutir ;
         # `schema.ok` répond « la base est complète », et c'est lui qui échoue le
         # déploiement. Les inverser rendrait une dégradation irréparable par déploiement.
-        logger.warning(f"/health: schéma DÉGRADÉ — tables manquantes={missing}, "
+        logger.warning(f"/health: schéma DÉGRADÉ - tables manquantes={missing}, "
                        f"DDL écartées={len(_SCHEMA_DDL_FAILURES)}")
     return out
 
@@ -93,7 +93,7 @@ def get_llm_usage(hours: int = Query(24, ge=1, le=24 * 90),
     """Consommation OpenAI par usage et par modèle sur les `hours` dernières heures.
 
     LA question à laquelle l'application ne savait pas répondre : QUI dépense. Chaque
-    ligne est un couple (fonction appelante:surface, modèle) — p. ex.
+    ligne est un couple (fonction appelante:surface, modèle) - p. ex.
     `_background_enrichment_worker:chat` pour l'extraction PICO automatique, la plus
     grosse dépense potentielle (50 articles toutes les 30 s). Trié par tokens
     décroissants : la première ligne est celle à regarder.

@@ -1,6 +1,6 @@
 """Chunk-integrity cleanup (audit A3 + B3). Guarded, idempotent.
 
-Dry-run by default — pass `--execute` to apply. Destructive deletes are backed
+Dry-run by default - pass `--execute` to apply. Destructive deletes are backed
 up to an in-DB table first (same convention as `_phase2_execute.py`).
 
 Actions when `--execute`:
@@ -8,7 +8,7 @@ Actions when `--execute`:
      that already has an embedding, else lowest id), back up + delete the rest.
   2. Add partial unique index `uq_document_chunk_title_abstract`
      (document_id WHERE chunk_type='title_abstract') so the bug can't recur at
-     the DB level — complements the app-level fix in PR #44.
+     the DB level - complements the app-level fix in PR #44.
   3. [A3a] Recover chunkless docs that have text: insert a `title_abstract`
      chunk (content = title + abstract, embedding left NULL). The enrichment
      worker then embeds it (main.py: "embède les chunks title_abstract sans
@@ -101,7 +101,7 @@ with eng.begin() as c:
         """)).rowcount
         print(f"      inserted {inserted} recovery chunks (embedding NULL -> worker embeds)")
 
-    # ── 4. A3b : empties — report only ──────────────────────────────────────
+    # ── 4. A3b : empties - report only ──────────────────────────────────────
     empty = scalar(c, f"""
         SELECT count(*) FROM literature_document ld
         WHERE {SCOPE}
@@ -121,4 +121,4 @@ if EXECUTE:
 else:
     print("[B3] (dry-run) would ensure partial unique index uq_document_chunk_title_abstract")
 
-print("== DONE ==" + ("" if EXECUTE else "  (dry-run — no writes)"))
+print("== DONE ==" + ("" if EXECUTE else "  (dry-run - no writes)"))

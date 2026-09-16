@@ -1,11 +1,11 @@
 """Every article count the interface shows for a scenario must agree once a pipeline ends.
 
 Observed on 14 Sep: the scenario card said 22,707 articles, the scenario header 25,140,
-the PRISMA box 25,140 — while the full pipeline was still running. Not a bug in any one
+the PRISMA box 25,140 - while the full pipeline was still running. Not a bug in any one
 number: the card reads a stored copy updated in stages during a search (local matches
 first, cleaned corpus later), PRISMA reads figures frozen at the end of the search, the
 semantic stage reads the database live. The fix is to say so while a pipeline runs, to
-refresh everything at the end, and to CHECK that the numbers agree — which is what
+refresh everything at the end, and to CHECK that the numbers agree - which is what
 `_counts_consistency` / `_scenario_counts` / GET /user-scenarios/{id}/counts do.
 """
 import pytest

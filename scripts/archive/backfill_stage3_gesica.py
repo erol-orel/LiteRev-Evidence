@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Stage 3 backfill: GESICA-specific scenario_type and geographic_scope enrichment.
-Version 2.1 — 31 scénarios couvrant les 4 clusters de la revue systématique.
+Version 2.1 - 31 scénarios couvrant les 4 clusters de la revue systématique.
 Opère uniquement sur literature_document (les chunks héritent via document_id).
 """
 from __future__ import annotations

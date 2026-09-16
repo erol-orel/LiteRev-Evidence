@@ -2,14 +2,14 @@
 """Compare the CURRENT lexical matching against PostgreSQL full-text search.
 
 Answers the question that decides whether to switch: for your real queries on your real
-corpus, does full-text search return MORE papers or FEWER — and *which* ones?
+corpus, does full-text search return MORE papers or FEWER - and *which* ones?
 
 Guessing is worthless here, because the change moves recall in both directions at once:
 
   gained   stemming unifies word forms: "forecasting" starts matching "forecast",
            "forecasts", "forecasted"; "incidence" matches "incidences".
   lost     substrings stop matching: today `LIKE '%incidence%'` matches "coincidence"
-           and `LIKE '%mpox%'` matches inside any longer word. Those disappear — mostly
+           and `LIKE '%mpox%'` matches inside any longer word. Those disappear - mostly
            a precision win, but it IS a recall change and you should see the sample.
   lost     a quoted phrase becomes a phrase query (`case <-> count`) rather than a
            substring, which is stricter about what sits between the words.
@@ -20,7 +20,7 @@ READ-ONLY by default: it computes `to_tsvector` on the fly and creates nothing. 
 slow (a sequential scan per query, minutes on a large corpus) but it cannot alter your
 database. `--build` additionally creates two GIN expression indexes so the same
 comparison also produces meaningful TIMINGS; `--drop` removes them again. Neither
-changes a single row of data — they are indexes on expressions, not schema changes.
+changes a single row of data - they are indexes on expressions, not schema changes.
 
 Usage
 -----
@@ -38,8 +38,8 @@ Reads DB_URL the same way main.py does.
 
 Outcome (production, 2026-09-10, five saved queries): 480 825 → 46 019 papers (−90 %,
 almost all `%ai%`/`%ml%` substring false positives), median 136 526 ms → 156 ms. The
-application now searches through `document_search` (see lexical_search.py) — one
-tsvector per DOCUMENT, so `A AND B` still holds across chunks — rather than the two
+application now searches through `document_search` (see lexical_search.py) - one
+tsvector per DOCUMENT, so `A AND B` still holds across chunks - rather than the two
 per-row expression indexes this script builds. Those indexes serve this comparison
 only: run `--drop` once the switch is confirmed to reclaim their space.
 """
@@ -85,13 +85,13 @@ except Exception:                                     # pragma: no cover - old r
     pass
 
 #: Same text-search configuration in the indexes and in the queries. If these ever
-#: diverge the planner silently stops using the index — the exact trap the trigram
+#: diverge the planner silently stops using the index - the exact trap the trigram
 #: indexes already hit with a missing COALESCE.
 TS_CONFIG = "english"
 
 #: Indexed expressions, built through these two helpers so the DDL and every query are
 #: generated from ONE definition. A table alias does not affect how PostgreSQL matches an
-#: expression index, but a changed COALESCE or config would — and it would fail silently,
+#: expression index, but a changed COALESCE or config would - and it would fail silently,
 #: exactly as it already can with the trigram indexes.
 def doc_tsv(alias: str = "") -> str:
     p = f"{alias}." if alias else ""
@@ -128,7 +128,7 @@ def ast_to_tsquery_sql(ast, params: dict, idx: list | None = None) -> str:
     Each leaf becomes `phraseto_tsquery(...)`, which handles a single word and a quoted
     phrase alike, applies the same stemming as the indexed `to_tsvector`, and drops
     stop words. AND/OR become the `&&` / `||` tsquery operators, so the WHOLE boolean
-    expression collapses into ONE index condition regardless of term count — that is
+    expression collapses into ONE index condition regardless of term count - that is
     the entire performance argument for this change.
 
     Raises `UnsupportedQuery` on a NOT: negation cannot live inside the tsquery without
@@ -243,7 +243,7 @@ def compare(eng, main, query, samples):
     try:
         new, t_new = _new_ids(eng, main, query)
     except UnsupportedQuery as e:
-        print(f"  SKIPPED — {e}")
+        print(f"  SKIPPED - {e}")
         return None
     old, t_old = _old_ids(eng, main, query)
 
@@ -288,7 +288,7 @@ def main_cli() -> int:
         return 0
 
     if args.build:
-        print("Creating GIN expression indexes (CONCURRENTLY — writes are not blocked).")
+        print("Creating GIN expression indexes (CONCURRENTLY - writes are not blocked).")
         print("This adds indexes only; no column, no row is modified. Minutes on a large "
               "corpus. Remove them again with --drop.\n")
         for ddl in BUILD_DDL:

@@ -75,6 +75,89 @@ def _auto_pipeline_after_search() -> bool:
     recherche (corpus construit ET scoré) ? Oui par défaut ; AUTO_PIPELINE_AFTER_SEARCH=0
     pour s'en tenir à la recherche (les onglets calculent alors à l'ouverture)."""
     return os.getenv("AUTO_PIPELINE_AFTER_SEARCH", "1").strip().lower() not in ("0", "false", "no", "off")
+
+
+# ── Cache des réponses des sources (par fetcher et par requête) ──────────────────
+# Une recherche relancée quelques heures après la première redemandait à chaque source
+# tout son résultat, jusqu'au plafond par source, pour ne rien insérer (les documents
+# étaient déjà en base) : trois minutes de fédération pour rien. On mémorise, par fetcher
+# et par requête (requête, filtres, plafond), les documents qu'il a renvoyés quand sa
+# pagination est allée au bout sans erreur. Une relance dans le délai SOURCE_CACHE_TTL_S
+# rejoue ces liens (mêmes compteurs PRISMA, même source-union) sans appel réseau ; les
+# fetchers coupés par le budget ou en erreur ne sont pas mémorisés. force_live=True sur
+# /populate ignore le cache.
+SOURCE_CACHE_TTL_S = int(os.getenv("SOURCE_CACHE_TTL_S", str(12 * 3600)) or 0)
+
+
+def _ensure_source_query_cache() -> None:
+    try:
+        with engine.begin() as _c:
+            _c.execute(text("""
+                CREATE TABLE IF NOT EXISTS source_query_cache (
+                    fetcher     VARCHAR(40) NOT NULL,
+                    query_hash  VARCHAR(40) NOT NULL,
+                    query       TEXT,
+                    links       JSONB NOT NULL,
+                    n_records   INTEGER NOT NULL DEFAULT 0,
+                    fetched_at  TIMESTAMP NOT NULL DEFAULT NOW(),
+                    PRIMARY KEY (fetcher, query_hash)
+                )
+            """))
+    except Exception as _e:                                  # noqa: BLE001 - never blocks boot
+        logger.warning(f"_ensure_source_query_cache: {_e}")
+
+
+try:
+    _ensure_source_query_cache()
+except Exception as _e:                                      # noqa: BLE001
+    logger.warning(f"_ensure_source_query_cache: {_e}")
+
+
+def _source_query_hash(query: str, filters: dict | None, max_results: int) -> str:
+    """Clé de cache : même requête, mêmes filtres, même plafond par source."""
+    import hashlib
+    payload = json.dumps({"q": (query or "").strip(), "f": filters or {}, "m": int(max_results)},
+                         sort_keys=True, ensure_ascii=False, default=str)
+    return hashlib.sha1(payload.encode("utf-8")).hexdigest()[:40]
+
+
+def _load_source_cache(query_hash: str, ttl_s: int | None = None) -> dict[str, dict]:
+    """{fetcher: {links: [[doc_id, source, boolean_native], ...], n_records, age_s}} pour les
+    entrées plus fraîches que le TTL. Vide (jamais d'erreur) si la table manque."""
+    ttl = SOURCE_CACHE_TTL_S if ttl_s is None else ttl_s
+    if ttl <= 0:
+        return {}
+    out: dict[str, dict] = {}
+    try:
+        with engine.connect() as _c:
+            rows = _c.execute(text(
+                "SELECT fetcher, links, n_records, EXTRACT(EPOCH FROM (NOW() - fetched_at)) AS age_s "
+                "FROM source_query_cache WHERE query_hash = :h"
+            ), {"h": query_hash}).mappings().all()
+        for r in rows:
+            age = float(r["age_s"] or 0)
+            if age > ttl:
+                continue
+            links = r["links"] if isinstance(r["links"], list) else json.loads(r["links"] or "[]")
+            out[r["fetcher"]] = {"links": [tuple(x) for x in links if isinstance(x, list) and len(x) == 3],
+                                 "n_records": int(r["n_records"] or 0), "age_s": age}
+    except Exception as _e:                                  # noqa: BLE001
+        logger.warning(f"_load_source_cache: {_e}")
+    return out
+
+
+def _save_source_cache(fetcher: str, query_hash: str, query: str, links: list) -> None:
+    try:
+        with engine.begin() as _c:
+            _c.execute(text("""
+                INSERT INTO source_query_cache (fetcher, query_hash, query, links, n_records, fetched_at)
+                VALUES (:f, :h, :q, CAST(:l AS jsonb), :n, NOW())
+                ON CONFLICT (fetcher, query_hash) DO UPDATE
+                SET links = CAST(:l AS jsonb), n_records = :n, query = :q, fetched_at = NOW()
+            """), {"f": fetcher, "h": query_hash, "q": (query or "")[:4000],
+                   "l": json.dumps([list(x) for x in links]), "n": len(links)})
+    except Exception as _e:                                  # noqa: BLE001
+        logger.warning(f"_save_source_cache {fetcher}: {_e}")
 from .scenarios import _scenario_counts, _user_scenario_pipeline_jobs, _user_scenario_populate_jobs
 
 def _run_user_scenario_populate(
@@ -85,12 +168,13 @@ def _run_user_scenario_populate(
     _pipeline_callback=None,
     include_live: bool = True,
     lang: str | None = None,
+    force_live: bool = False,
 ) -> int:
     """
     Construit le corpus d'un scénario = résultat de la REQUÊTE BOOLÉENNE sur
     (base locale ∪ articles récupérés en direct). Les sources live ne servent qu'à
     ENRICHIR la base ; l'appartenance au corpus est ensuite décidée UNIQUEMENT par
-    la correspondance booléenne (_boolean_corpus_ids) — la même que la recherche.
+    la correspondance booléenne (_boolean_corpus_ids) - la même que la recherche.
     Plafond : LIVE_MAX_PER_SOURCE articles par source. include_live=False = base
     locale seulement. Retourne le nombre total d'articles ingérés.
     """
@@ -146,17 +230,17 @@ def _run_user_scenario_populate(
     _counter_lock = threading.Lock()
     _ingested_total = [0]
     _errors_total = [0]
-    _bool_native_ids: set = set()   # SOURCE-UNION — voir _link_to_scenario
+    _bool_native_ids: set = set()   # SOURCE-UNION - voir _link_to_scenario
     # Comptabilité PRISMA « identification » : enregistrements ramenés PAR SOURCE (un
     # article renvoyé par trois sources = trois enregistrements) et documents DISTINCTS
-    # derrière eux. Leur différence est le nombre de doublons — que la dédup à
+    # derrière eux. Leur différence est le nombre de doublons - que la dédup à
     # l'ingestion (index uniques) absorbait jusqu'ici sans laisser de trace.
     _ident_records: dict[str, int] = {}
     _ident_docs: set = set()
     # ③ Santé de la fédération, pour décider si un corpus PEUT rétrécir / se vider.
     #  • _source_errors  : nb de sources ayant échoué (except top-level d'un fetcher) ;
     #  • _fed_incomplete : True si le budget fédération a été dépassé (sources coupées).
-    # Un « zéro » n'est fiable — donc on autorise un corpus vide — que si la fédération
+    # Un « zéro » n'est fiable - donc on autorise un corpus vide - que si la fédération
     # a réussi (aucune source en erreur ET pas de timeout). Sinon on garde l'ancien
     # corpus, pour ne pas l'effacer sur une panne passagère d'une source.
     _source_errors = [0]
@@ -171,6 +255,26 @@ def _run_user_scenario_populate(
     # aucun lien ne peut se glisser entre le gel et l'assemblage.
     _corpus_lock = threading.Lock()
     _corpus_frozen = [False]
+    # Cache des sources : chaque fetcher tourne dans son thread ; on retient, par fetcher,
+    # les liens qu'il produit (document, source, booléen-natif) pour les rejouer à la
+    # prochaine relance de la même requête, et les fetchers tombés en erreur.
+    _tls = threading.local()
+    _run_links: dict[str, list] = {}
+    _fetcher_errors: set[str] = set()
+
+    def _mark_source_error():
+        _source_errors[0] += 1
+        _f = getattr(_tls, "fetcher", None)
+        if _f:
+            with _counter_lock:
+                _fetcher_errors.add(_f)
+
+    def _run_fetcher(fn):
+        _tls.fetcher = fn.__name__
+        try:
+            return fn()
+        finally:
+            _tls.fetcher = None
 
     def _link_to_scenario(doc_id, boolean_native=False, source=None):
         with _corpus_lock:
@@ -180,21 +284,24 @@ def _run_user_scenario_populate(
 
     def _link_to_scenario_unlocked(doc_id, boolean_native=False, source=None):
         # Comptabilité PRISMA : un enregistrement par source qui a renvoyé l'article,
-        # que la ligne soit nouvelle ou déjà connue — c'est justement le recoupement
+        # que la ligne soit nouvelle ou déjà connue : c'est justement le recoupement
         # entre sources (et avec la base locale) qui fait le doublon.
         if doc_id is not None and source:
             with _counter_lock:
                 _ident_records[source] = _ident_records.get(source, 0) + 1
                 _ident_docs.add(doc_id)
+                _f = getattr(_tls, "fetcher", None)
+                if _f:
+                    _run_links.setdefault(_f, []).append((int(doc_id), source, bool(boolean_native)))
         # NE LIE PLUS pendant la fédération : ingérer un article live ne l'ajoute PAS
         # d'office au corpus. L'appartenance est recalculée après ingestion via la
-        # correspondance booléenne — sinon le corpus gonflait avec des résultats live
+        # correspondance booléenne - sinon le corpus gonflait avec des résultats live
         # (mots-clés) ne correspondant pas à la requête.
-        # EXCEPTION — SOURCE-UNION : les sources BOOLÉENNES-NATIVES (PubMed, Europe PMC,
+        # EXCEPTION - SOURCE-UNION : les sources BOOLÉENNES-NATIVES (PubMed, Europe PMC,
         # préprints EPMC) ont appliqué la VRAIE requête booléenne (MeSH / texte intégral).
         # On mémorise leurs docs pour les INCLURE directement dans le corpus, sans les
         # re-filtrer localement (le re-filtrage titre+résumé perdait leurs correspondances
-        # MeSH sans phrase littérale dans le résumé — d'où « 109 PubMed → 6 »). Les
+        # MeSH sans phrase littérale dans le résumé - d'où « 109 PubMed → 6 »). Les
         # sources par MOTS-CLÉS, elles, restent re-filtrées (leur tri est lâche).
         if boolean_native and doc_id is not None:
             _bool_native_ids.add(doc_id)
@@ -276,7 +383,7 @@ def _run_user_scenario_populate(
             try:
                 _boolean, _pubmed_q, _n_or = _widen_boolean_for_or_facets(_boolean, _pubmed_q, _sub_queries, _combinator)
                 if _n_or:
-                    logger.info(f"Populate {scenario_id}: fédération élargie à {_n_or} facette(s) OU — {_boolean[:160]!r}")
+                    logger.info(f"Populate {scenario_id}: fédération élargie à {_n_or} facette(s) OU - {_boolean[:160]!r}")
             except Exception as _we:                      # noqa: BLE001
                 logger.warning(f"Populate {scenario_id} facettes OU: {_we}")
         # Variante par type de source (comme le font déjà les _live_fetch_*) :
@@ -306,7 +413,7 @@ def _run_user_scenario_populate(
             except Exception:
                 pass
         # PubMed RECALL : la requête MeSH générée par le LLM (_pubmed_q) est parfois
-        # BEAUCOUP plus étroite que le booléen général — p. ex. 35 résultats contre 306
+        # BEAUCOUP plus étroite que le booléen général - p. ex. 35 résultats contre 306
         # pour le même booléen collé sur le site PubMed. On interroge donc PubMed sur
         # l'UNION « (MeSH) OR (booléen portable) » : on garde les correspondances MeSH
         # ET les correspondances de phrase (all-fields). Ne peut qu'AJOUTER des résultats.
@@ -358,7 +465,7 @@ def _run_user_scenario_populate(
 
     # ── Étape 1 : Interrogation parallèle des 13 sources externes ────────────
     # (13 sources nommées = 12 fetchers ; bioRxiv+medRxiv partagent un fetcher, et
-    #  Europe PMC sert 2 facettes — europepmc + préprints. Cf. source_funcs plus bas.)
+    #  Europe PMC sert 2 facettes - europepmc + préprints. Cf. source_funcs plus bas.)
 
     def _fetch_pubmed():
         count = 0
@@ -366,23 +473,54 @@ def _run_user_scenario_populate(
             # Throttle partagé eutils (verrou global + clé API + retry 429) : sinon
             # PubMed se faisait évincer par PROSPERO/Cochrane (mêmes serveurs eutils,
             # 3 req/s sans clé) → esearch 429 → total_found=0 → 0 article ingéré.
+            # Identifiants D'ABORD : esearch renvoie la liste des PMID (du plus récent au
+            # plus ancien, jusqu'au plafond par source). Les PMID déjà en base sont liés
+            # sans rien télécharger ; seuls les inconnus passent par efetch. Avant, chaque
+            # relance retéléchargeait les notices complètes de tout le résultat pour
+            # n'insérer aucune ligne (ON CONFLICT) : la quasi-totalité du trafic PubMed.
             r = _ncbi_get(
                 f"{ENTREZ_BASE}/esearch.fcgi",
-                # sort=pub_date → l'ensemble historique est trié du plus récent au
-                # plus ancien ; efetch récupère donc d'abord les articles récents.
-                {"db": "pubmed", "term": _pubmed_q, "retmax": 0, "sort": "pub_date",
-                 "retmode": "json", "usehistory": "y", "email": EMAIL},
+                {"db": "pubmed", "term": _pubmed_q, "retmax": max(0, min(int(max_results), 10000)),
+                 "sort": "pub_date", "retmode": "json", "email": EMAIL},
                 timeout=30,
             )
             r.raise_for_status()
             search_result = r.json()["esearchresult"]
             total_found = int(search_result.get("count", 0))
-            web_env = search_result.get("webenv", "")
-            query_key = search_result.get("querykey", "1")
             if _pipeline_callback:
                 _pipeline_callback("pubmed_found", total_found)
-            effective_max = min(max_results, total_found)
-            n_batches = math.ceil(effective_max / BATCH_SIZE) if effective_max > 0 else 0
+            _pmids = [str(p).strip() for p in (search_result.get("idlist") or []) if str(p).strip()]
+            _pmids = _pmids[:max(0, int(max_results))]
+            _pmid_set = set(_pmids)
+            _known: dict[str, int] = {}
+            for _ki in range(0, len(_pmids), 1000):
+                _chunk = _pmids[_ki:_ki + 1000]
+                try:
+                    with engine.connect() as _kc:
+                        _krows = _kc.execute(text(
+                            "SELECT id, pmid::text AS pmid, external_id FROM literature_document "
+                            "WHERE pmid::text = ANY(:p) OR external_id = ANY(:e)"
+                        ), {"p": _chunk, "e": [f"pmid:{p}" for p in _chunk]}).mappings().all()
+                except Exception:                            # base sans colonne external_id
+                    with engine.connect() as _kc:
+                        _krows = _kc.execute(text(
+                            "SELECT id, pmid::text AS pmid, NULL AS external_id FROM literature_document "
+                            "WHERE pmid::text = ANY(:p)"
+                        ), {"p": _chunk}).mappings().all()
+                for _kr in _krows:
+                    _pm = str(_kr["pmid"] or "").strip()
+                    if not _pm and _kr["external_id"]:
+                        _pm = str(_kr["external_id"]).strip()[5:]
+                    if _pm in _pmid_set:
+                        _known.setdefault(_pm, int(_kr["id"]))
+            for _pm in _pmids:
+                _did = _known.get(_pm)
+                if _did is not None:
+                    _link_to_scenario(_did, boolean_native=True, source="pubmed")   # déjà en base
+            _unknown = [p for p in _pmids if p not in _known]
+            logger.info(f"PubMed populate {scenario_id}: {total_found} résultats, {len(_pmids)} PMID retenus, "
+                        f"{len(_known)} déjà en base, {len(_unknown)} à télécharger")
+            n_batches = math.ceil(len(_unknown) / BATCH_SIZE) if _unknown else 0
             for batch_idx in range(n_batches):
                 # Budget fédération dépassé → on ARRÊTE la pagination PubMed (comme
                 # toutes les autres sources). Sans ce garde, PubMed continuait à
@@ -391,13 +529,11 @@ def _run_user_scenario_populate(
                 # de article_count.
                 if _time.time() >= _fed_deadline[0]:
                     break
-                retstart = batch_idx * BATCH_SIZE
-                retmax_batch = min(BATCH_SIZE, effective_max - retstart)
-                if retmax_batch <= 0 or retstart >= total_found:
+                _batch_ids = _unknown[batch_idx * BATCH_SIZE:(batch_idx + 1) * BATCH_SIZE]
+                if not _batch_ids:
                     break
                 try:
-                    _ef_data = {"db": "pubmed", "WebEnv": web_env, "query_key": query_key,
-                                "retstart": retstart, "retmax": retmax_batch,
+                    _ef_data = {"db": "pubmed", "id": ",".join(_batch_ids),
                                 "rettype": "xml", "retmode": "xml", "email": EMAIL}
                     _ef_key = os.getenv("NCBI_API_KEY")
                     if _ef_key:
@@ -453,7 +589,7 @@ def _run_user_scenario_populate(
                         doc_id, _new = _ingest_doc_direct(
                             source="pubmed", title=title, abstract=abstract or None,
                             year=year, url=f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/",
-                            # external_id « pmid:<id> » — MÊME format que la recherche
+                            # external_id « pmid:<id> » - MÊME format que la recherche
                             # live (_live_fetch_pubmed) et que la convention des autres
                             # sources (« s2: », « nct: », …). Auparavant brut (« <id> »),
                             # d'où deux lignes pour le même article sans DOI selon le
@@ -470,7 +606,7 @@ def _run_user_scenario_populate(
                         _inc("pubmed", 0, 1)
         except Exception as _e:
             logger.warning(f"PubMed populate {scenario_id}: {_e}")
-            _source_errors[0] += 1
+            _mark_source_error()
         return ("pubmed", count)
 
     def _fetch_openalex():
@@ -481,7 +617,7 @@ def _run_user_scenario_populate(
             _oa_limit = min(max_results, max_results)
             while _oa_fetched < _oa_limit:
                 if _time.time() >= _fed_deadline[0]:
-                    break  # budget fédération dépassé — on arrête de paginer
+                    break  # budget fédération dépassé - on arrête de paginer
                 _oa_batch = min(200, _oa_limit - _oa_fetched)
                 oa_resp = _requests.get(
                     "https://api.openalex.org/works",
@@ -536,7 +672,7 @@ def _run_user_scenario_populate(
                 _time.sleep(0.3)
         except Exception as _e:
             logger.warning(f"OpenAlex populate {scenario_id}: {_e}")
-            _source_errors[0] += 1
+            _mark_source_error()
         return ("openalex", count)
 
     def _fetch_crossref():
@@ -548,14 +684,14 @@ def _run_user_scenario_populate(
             _cr_rows = min(1000, _cr_limit)   # max Crossref : 10× moins d'allers-retours
             while _cr_fetched < _cr_limit:
                 if _time.time() >= _fed_deadline[0]:
-                    break  # budget fédération dépassé — on arrête de paginer
+                    break  # budget fédération dépassé - on arrête de paginer
                 cr_resp = _requests.get(
                     "https://api.crossref.org/works",
                     # NB : PAS de sort=published desc ici (contrairement aux autres
                     # sources). Les dates Crossref sont peu fiables : un tri par date
                     # remonte des enregistrements à dates erronées (ex. « 2121 ») en
                     # tête. On garde donc le tri par pertinence (défaut), qui place les
-                    # articles les plus pertinents — pas les plus faussement récents.
+                    # articles les plus pertinents - pas les plus faussement récents.
                     params={"query": _plain_q, "rows": _cr_rows, "offset": _cr_offset,
                             "mailto": "literev@gesica.ch"},
                     timeout=20,
@@ -602,7 +738,7 @@ def _run_user_scenario_populate(
                 _time.sleep(0.3)
         except Exception as _e:
             logger.warning(f"Crossref populate {scenario_id}: {_e}")
-            _source_errors[0] += 1
+            _mark_source_error()
         return ("crossref", count)
 
     def _fetch_europepmc():
@@ -614,7 +750,7 @@ def _run_user_scenario_populate(
             _ep_page_size = 1000   # max Europe PMC : moins d'allers-retours → fédération plus rapide
             while _ep_fetched < _ep_limit:
                 if _time.time() >= _fed_deadline[0]:
-                    break  # budget fédération dépassé — on arrête de paginer
+                    break  # budget fédération dépassé - on arrête de paginer
                 ep_resp = _requests.get(
                     "https://www.ebi.ac.uk/europepmc/webservices/rest/search",
                     # Pas de tri par date : on laisse le tri par PERTINENCE (défaut Europe PMC)
@@ -672,7 +808,7 @@ def _run_user_scenario_populate(
                 _time.sleep(0.3)
         except Exception as _e:
             logger.warning(f"EuropePMC populate {scenario_id}: {_e}")
-            _source_errors[0] += 1
+            _mark_source_error()
         return ("europepmc", count)
 
     def _fetch_preprints():
@@ -741,7 +877,7 @@ def _run_user_scenario_populate(
                 _time.sleep(0.3)
         except Exception as _e:
             logger.warning(f"Préprints (Europe PMC) populate {scenario_id}: {_e}")
-            _source_errors[0] += 1
+            _mark_source_error()
         return ("preprints", count)
 
     def _ingest_parsed(source, docs, boolean_native=False):
@@ -828,7 +964,7 @@ def _run_user_scenario_populate(
                     _time.sleep(0.3)
         except Exception as _e:
             logger.warning(f"Semantic Scholar populate {scenario_id}: {_e}")
-            _source_errors[0] += 1
+            _mark_source_error()
         return ("semantic_scholar", count)
 
     def _fetch_doaj():
@@ -856,7 +992,7 @@ def _run_user_scenario_populate(
                 _time.sleep(0.3)
         except Exception as _e:
             logger.warning(f"DOAJ populate {scenario_id}: {_e}")
-            _source_errors[0] += 1
+            _mark_source_error()
         return ("doaj", count)
 
     def _fetch_clinicaltrials():
@@ -883,7 +1019,7 @@ def _run_user_scenario_populate(
                 _time.sleep(0.3)
         except Exception as _e:
             logger.warning(f"ClinicalTrials.gov populate {scenario_id}: {_e}")
-            _source_errors[0] += 1
+            _mark_source_error()
         return ("clinicaltrials", count)
 
     def _fetch_core():
@@ -891,7 +1027,7 @@ def _run_user_scenario_populate(
         # (comme NCBI_API_KEY : optionnelle, le déploiement reste vert).
         _core_key = os.getenv("CORE_API_KEY")
         if not _core_key:
-            logger.info(f"CORE populate {scenario_id}: CORE_API_KEY absent — source ignorée.")
+            logger.info(f"CORE populate {scenario_id}: CORE_API_KEY absent - source ignorée.")
             return ("core", 0)
         count = 0
         try:
@@ -922,7 +1058,7 @@ def _run_user_scenario_populate(
                 _time.sleep(0.3)
         except Exception as _e:
             logger.warning(f"CORE populate {scenario_id}: {_e}")
-            _source_errors[0] += 1
+            _mark_source_error()
         return ("core", count)
 
     def _fetch_arxiv():
@@ -949,7 +1085,7 @@ def _run_user_scenario_populate(
                 _time.sleep(3)      # arXiv demande ≥3 s entre requêtes
         except Exception as _e:
             logger.warning(f"arXiv populate {scenario_id}: {_e}")
-            _source_errors[0] += 1
+            _mark_source_error()
         return ("arxiv", count)
 
     def _fetch_openaire():
@@ -981,13 +1117,13 @@ def _run_user_scenario_populate(
                 _time.sleep(0.5)
         except Exception as _e:
             logger.warning(f"OpenAIRE (Graph API v2) populate {scenario_id}: {_e}")
-            _source_errors[0] += 1
+            _mark_source_error()
         return ("openaire", count)
 
     def _fetch_biorxiv_medrxiv():
         # L'API bioRxiv/medRxiv n'offre PAS de recherche par mots-clés. On scanne une
         # fenêtre RÉCENTE (les ~45 derniers jours) DEPUIS le curseur 0 vers aujourd'hui
-        # — de sorte que la couverture porte réellement sur les préprints récents (le
+        # - de sorte que la couverture porte réellement sur les préprints récents (le
         # bug précédent scannait le DÉBUT d'une fenêtre de 18 mois → les plus VIEUX,
         # jamais pertinents). Puis filtrage lexical (_parse_biorxiv). Chaque serveur
         # ingère sous sa propre source ("biorxiv" / "medrxiv"), distinctes des
@@ -1023,7 +1159,7 @@ def _run_user_scenario_populate(
                     _time.sleep(0.4)
         except Exception as _e:
             logger.warning(f"bioRxiv/medRxiv populate {scenario_id}: {_e}")
-            _source_errors[0] += 1
+            _mark_source_error()
         return ("biorxiv_medrxiv", count)
 
     # Lancer toutes les sources en parallèle
@@ -1034,27 +1170,49 @@ def _run_user_scenario_populate(
         _fetch_arxiv, _fetch_openaire, _fetch_biorxiv_medrxiv,
     ]
     t_start = _time.time()
+    _completed_ok: set[str] = set()
+    _qhash = _source_query_hash(query, filters, max_results)
     if include_live:
         _set_phase("federation")
         # Garde-temps : passé ce délai, les boucles de pagination des sources lentes
         # s'arrêtent (cf. _fed_deadline) et on poursuit avec le corpus partiel.
         _fed_deadline[0] = t_start + POPULATE_FEDERATION_BUDGET
-        # IMPORTANT — on N'UTILISE PAS `with ThreadPoolExecutor(...)` : sa sortie
+        # Cache des sources : les fetchers dont la réponse à CETTE requête est encore
+        # fraîche (SOURCE_CACHE_TTL_S) sont rejoués depuis la base, sans appel réseau,
+        # avec les mêmes compteurs ; les autres partent normalement.
+        _cached = {} if force_live else _load_source_cache(_qhash)
+        for _fname, _entry in _cached.items():
+            for _cd, _cs, _cn in _entry["links"]:
+                _link_to_scenario(_cd, boolean_native=_cn, source=_cs)
+            if _pipeline_callback is None:
+                with _counter_lock:
+                    _job = _user_scenario_populate_jobs.get(scenario_id)
+                    if _job is not None:
+                        _job.setdefault("cached_sources", []).append(_fname.replace("_fetch_", ""))
+            logger.info(f"Populate {scenario_id} [{_fname}]: {len(_entry['links'])} liens rejoués depuis le "
+                        f"cache des sources ({_entry['age_s'] / 60:.0f} min)")
+        _to_run = [fn for fn in source_funcs if fn.__name__ not in _cached]
+        # IMPORTANT : on N'UTILISE PAS `with ThreadPoolExecutor(...)` : sa sortie
         # appelle shutdown(wait=True), qui attend TOUTES les sources (jusqu'à ~5 min
         # quand OpenAlex/Crossref paginent vers 2000), annulant de fait le budget.
         # On gère l'executor manuellement et on l'arrête SANS attendre.
         executor = ThreadPoolExecutor(max_workers=12)
         try:
-            futures = {executor.submit(fn): fn.__name__ for fn in source_funcs}
+            futures = {executor.submit(_run_fetcher, fn): fn.__name__ for fn in _to_run}
             try:
                 # Budget global : ne pas attendre indéfiniment une source lente.
                 for future in as_completed(futures, timeout=POPULATE_FEDERATION_BUDGET):
+                    _fname = futures[future]
                     try:
                         src_name, src_count = future.result()
                         logger.info(f"Populate {scenario_id} [{src_name}]: {src_count} articles ingérés")
+                        # Pagination allée au bout AVANT le budget et sans erreur : la
+                        # réponse de ce fetcher peut être rejouée à la prochaine relance.
+                        if _time.time() < _fed_deadline[0] and _fname not in _fetcher_errors:
+                            _completed_ok.add(_fname)
                     except Exception as _fe:
                         logger.warning(f"Populate {scenario_id} source future error: {_fe}")
-            # CRITIQUE — sur Python <3.11, as_completed lève
+            # CRITIQUE - sur Python <3.11, as_completed lève
             # concurrent.futures.TimeoutError (≠ TimeoutError natif). Sans
             # _FuturesTimeout dans le except, l'exception remontait, le bloc
             # plantait, et la reconstruction du corpus + le scoring + le passage à
@@ -1064,7 +1222,7 @@ def _run_user_scenario_populate(
                 _fed_incomplete[0] = True   # fetch partiel → corpus non autorisé à rétrécir
                 _done = sum(1 for _f in futures if _f.done())
                 logger.warning(
-                    f"Populate {scenario_id}: budget fédération {POPULATE_FEDERATION_BUDGET:.0f}s dépassé — "
+                    f"Populate {scenario_id}: budget fédération {POPULATE_FEDERATION_BUDGET:.0f}s dépassé - "
                     f"{_done}/{len(futures)} sources terminées ; poursuite avec le corpus partiel "
                     f"(les sources lentes continuent en arrière-plan)."
                 )
@@ -1073,14 +1231,19 @@ def _run_user_scenario_populate(
             # annule celles qui n'ont pas démarré ; celles en cours s'arrêteront au
             # prochain tour de pagination grâce à _fed_deadline.
             executor.shutdown(wait=False, cancel_futures=True)
+        for _fname in _completed_ok:
+            with _counter_lock:
+                _links_now = list(_run_links.get(_fname, []))
+            _save_source_cache(_fname, _qhash, query, _links_now)
         t_elapsed = _time.time() - t_start
-        logger.info(f"Populate {scenario_id}: fédération terminée en {t_elapsed:.1f}s")
+        logger.info(f"Populate {scenario_id}: fédération terminée en {t_elapsed:.1f}s "
+                    f"({len(_cached)} fetcher(s) depuis le cache, {len(_completed_ok)} mémorisé(s))")
     else:
-        logger.info(f"Populate {scenario_id}: include_live=False — base locale uniquement")
+        logger.info(f"Populate {scenario_id}: include_live=False - base locale uniquement")
 
     ingested = _ingested_total[0]
     errors = _errors_total[0]
-    total_found = ingested  # Approximation — PubMed callback met à jour séparément
+    total_found = ingested  # Approximation - PubMed callback met à jour séparément
 
     # ── Corpus = correspondance BOOLÉENNE (ou multi-sous-requêtes) sur base enrichie ─
     # Après ingestion des articles live, on recalcule l'appartenance au corpus via
@@ -1101,7 +1264,7 @@ def _run_user_scenario_populate(
             _final_ids = _boolean_corpus_ids(_boolean, filters)
         # … ∪ SOURCE-UNION : les docs des sources booléennes-natives (PubMed, Europe PMC,
         # préprints EPMC) qui ont appliqué la VRAIE requête booléenne sont inclus DIRECTEMENT,
-        # sans re-filtrage local (qui supprimait leurs correspondances MeSH/texte-intégral —
+        # sans re-filtrage local (qui supprimait leurs correspondances MeSH/texte-intégral -
         # « 109 PubMed → 6 »). La règle « pas de résumé → exclu » s'applique quand même après.
         # …SAUF en INTERSECTION multi-requêtes : le corpus doit matcher TOUTES les facettes,
         # or un doc booléen-natif ne matche que la requête PRINCIPALE (les fetchers live
@@ -1117,13 +1280,13 @@ def _run_user_scenario_populate(
         # ③ Autorise un corpus vide/réduit :
         #  • multi-requêtes : une intersection légitimement vide DOIT vider (inchangé) ;
         #  • base locale seule (pas de live) : le match booléen local est déterministe ;
-        #  • mono-requête + live : SEULEMENT si la fédération a réussi (fetch_ok) — sinon
+        #  • mono-requête + live : SEULEMENT si la fédération a réussi (fetch_ok) - sinon
         #    un « zéro » peut venir d'une panne passagère → on garde l'ancien corpus.
         _fetch_ok = (not _fed_incomplete[0]) and _source_errors[0] == 0
         _allow_empty = bool(_sub_queries) or (not include_live) or _fetch_ok
         _n_corpus = _set_scenario_corpus(scenario_id, _final_ids, allow_empty=_allow_empty)
         # « assemblé, AVANT nettoyage » : les liens vers les documents sans résumé et
-        # les lignes doublons sont retirés juste après — le corpus retenu (article_count,
+        # les lignes doublons sont retirés juste après - le corpus retenu (article_count,
         # « passés au screening » du PRISMA) est journalisé plus bas avec les chiffres
         # PRISMA. Étiqueté « final » auparavant, ce nombre était lu comme le corpus.
         logger.info(f"Populate {scenario_id}: corpus assemblé (avant nettoyage) = {_n_corpus} docs "
@@ -1154,7 +1317,7 @@ def _run_user_scenario_populate(
         _n_dup_rows = _dedup_scenario_links(scenario_id)
 
         # ── Mettre à jour article_count (avant rerank) ──────────────────────
-        # NB : on ne marque PAS encore populate_status='done' ici — le scoring
+        # NB : on ne marque PAS encore populate_status='done' ici - le scoring
         # n'a pas tourné. Le marquer prématurément faisait paraître "prêt" un
         # scénario dont les similarity_score restaient NULL (compteurs divergents).
         with engine.begin() as conn:
@@ -1187,7 +1350,7 @@ def _run_user_scenario_populate(
                 _recs_snapshot = dict(_ident_records)
                 _ids_snapshot = list(_ident_docs)
             # Ventilation des documents identifiés mais ABSENTS du corpus : sans résumé
-            # (règle qualité, appliquée avant la dédup — donc les lignes fusionnées par
+            # (règle qualité, appliquée avant la dédup - donc les lignes fusionnées par
             # la dédup ont toutes un résumé et sont à soustraire de l'autre poche), ou
             # avec résumé mais non liés (source par mots-clés hors requête booléenne).
             _no_abs, _not_linked = 0, 0
@@ -1229,7 +1392,7 @@ def _run_user_scenario_populate(
         except Exception as _e_pi:
             logger.warning(f"Populate {scenario_id}: chiffres PRISMA non stockés: {_e_pi}")
 
-        # ── Scores sémantiques (cosinus) — SANS suppression ─────────────────
+        # ── Scores sémantiques (cosinus) - SANS suppression ─────────────────
         # Soft filter : le seuil filtre l'affichage et l'aval, JAMAIS par
         # suppression. Réduire le seuil fait donc réapparaître des articles.
         _set_phase("scoring")
@@ -1409,7 +1572,7 @@ def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict
     try:
         # ── Étape 1 : Ingestion multi-sources ────────────────────────────────────
         update_step("ingest", "running")
-        # Si le scénario a DÉJÀ été peuplé (populate terminé — typiquement par la
+        # Si le scénario a DÉJÀ été peuplé (populate terminé - typiquement par la
         # recherche, ensuite sauvegardée en scénario), on NE RE-FÉDÈRE PAS. Une 2ᵉ
         # fédération (live, non déterministe) recalculerait le corpus booléen sur une
         # base entre-temps enrichie par les threads d'arrière-plan de la 1ʳᵉ
@@ -1424,7 +1587,7 @@ def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict
         _corpus_ready = bool(_ps_row and _ps_row.get("populate_status") == "done" and (_ps_row.get("n") or 0) > 0)
         if _corpus_ready:
             ingested = int(_ps_row["n"])
-            logger.info(f"Pipeline {scenario_id}: corpus déjà construit ({ingested} docs, populate=done) — "
+            logger.info(f"Pipeline {scenario_id}: corpus déjà construit ({ingested} docs, populate=done) - "
                         f"fédération sautée pour éviter la dérive du compteur.")
         else:
             ingested = _run_user_scenario_populate(
@@ -1626,7 +1789,7 @@ def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict
                         # Filet de sécurité au POINT D'ÉCRITURE : l'extracteur nettoie
                         # déjà, mais cette fonction est appelée avec du texte d'autres
                         # provenances (PMC, EuropePMC…) et un seul NUL fait échouer toute
-                        # la transaction — DELETE compris, donc zéro chunk conservé.
+                        # la transaction - DELETE compris, donc zéro chunk conservé.
                         """), {"did": doc_id, "content": sanitize_db_text(_chunk_text),
                                "idx": _i, "meta": _meta})
                     _c.execute(text(
@@ -1883,7 +2046,7 @@ def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict
         except Exception as e:
             update_step("fulltext", "error", error=str(e))
 
-        # ── Étape 3 : Embeddings (title_abstract + fulltext_section — contenu enrichi) ────────
+        # ── Étape 3 : Embeddings (title_abstract + fulltext_section - contenu enrichi) ────────
         update_step("embed", "running")
         try:
             openai_key = os.getenv("OPENAI_API_KEY")
@@ -2047,7 +2210,7 @@ def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict
                         logger.warning(f"Pipeline PICO API article {row['id']}: {e}")
                         pico_errors += 1
                         _time.sleep(0.05)
-                        continue  # transitoire — ne PAS consommer une tentative
+                        continue  # transitoire - ne PAS consommer une tentative
                     # Réponse reçue → COMPTE la tentative (borne le token-bleed) ;
                     # remplissage tolérant des clés plutôt que rejet en boucle.
                     try:
@@ -2149,7 +2312,7 @@ def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict
                         metadata["metadata_confidence"] = float(metadata.get("metadata_confidence", 0.5))
                         # Renseigner les colonnes structurées depuis le JSON extrait
                         # (study_design / sample_size), puis calculer un quality_score
-                        # déterministe — sinon l'évaluation GRADE buckette tout en « Faible ».
+                        # déterministe - sinon l'évaluation GRADE buckette tout en « Faible ».
                         study_design = metadata.get("study_type") or row.get("study_design")
                         sample_size = _coerce_int(metadata.get("sample_size")) or row.get("sample_size")
                         quality_score = _compute_quality_score(
@@ -2206,7 +2369,7 @@ def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict
         update_step("clustering", "running")
         try:
             # Clustering du pipeline sur le SOUS-ENSEMBLE PERTINENT (≥ seuil sémantique
-            # OU inclus manuellement ; jamais exclus) — cohérent avec le clustering à la
+            # OU inclus manuellement ; jamais exclus) - cohérent avec le clustering à la
             # demande et le knowledge graph.
             _thr = _get_scenario_threshold(scenario_id)
             cl_docs, _cl_total = _clustering_docs(scenario_id, _thr)   # plafonné (CLUSTER_MAX_DOCS)
@@ -2246,7 +2409,7 @@ def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict
                 # (plus de duplication) → DB durable (+ /tmp pour compat). AVEC les résumés,
                 # dans la langue de l'interface qui a lancé le pipeline : la première
                 # ouverture de l'onglet ne doit rien attendre (avant : « sans résumés, générés
-                # à la première ouverture » — soit 12 appels LLM sous les yeux de l'utilisateur).
+                # à la première ouverture » - soit 12 appels LLM sous les yeux de l'utilisateur).
                 _cl_payload = _build_clusters_payload(scenario_id, cl_docs, _cc, with_summaries=True,
                                                       openai_key=os.getenv("OPENAI_API_KEY"),
                                                       lang=lang or "fr", n_docs_total=_cl_total)
@@ -2258,12 +2421,12 @@ def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict
         except Exception as e:
             update_step("clustering", "error", error=str(e))
 
-        # ── Knowledge graph (cache DB) — visualisation prête ──────────────────
+        # ── Knowledge graph (cache DB) - visualisation prête ──────────────────
         try:
             update_step("knowledge_graph", "running")
             _precompute_user_kg(scenario_id)
             # Carte des concepts : annotation LLM (une fois par article) des articles
-            # pertinents sans concepts, puis cache — l'onglet n'a rien à calculer.
+            # pertinents sans concepts, puis cache - l'onglet n'a rien à calculer.
             from .knowledge_graph import _precompute_concept_graph  # lazy: keeps the import list short
             _cg = _precompute_concept_graph(scenario_id, extract=True) or {}
             update_step("knowledge_graph", "done", concepts_articles=_cg.get("n_with_concepts"),
@@ -2272,7 +2435,7 @@ def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict
             logger.warning(f"Précalcul KG pipeline {scenario_id}: {_e_kg}")
             update_step("knowledge_graph", "error", error=str(_e_kg))
 
-        # ── Evidence Brief (narratif LLM, mis en cache) — prêt sans clic ───────
+        # ── Evidence Brief (narratif LLM, mis en cache) - prêt sans clic ───────
         try:
             update_step("evidence", "running")
             _generate_evidence_brief_llm(scenario_id, lang=lang or "fr")
@@ -2282,7 +2445,7 @@ def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict
             update_step("evidence", "error", error=str(_e_ev))
 
         # ── Variables & Modèle (spec déterministe : outcome, features, algorithme,
-        # data_template, paramètres SEIR) — le scénario est « modèle-prêt » d'emblée.
+        # data_template, paramètres SEIR) - le scénario est « modèle-prêt » d'emblée.
         try:
             update_step("variables", "running")
             _generate_variables_from_pico(scenario_id, lang=lang or "fr")
@@ -2299,7 +2462,7 @@ def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict
             update_step("variables", "error", error=str(_e_var))
 
         # ── Actions recommandées (carte du tableau de bord) : générées ICI, dans la
-        # langue de l'interface — elles l'étaient à la première ouverture de la carte.
+        # langue de l'interface - elles l'étaient à la première ouverture de la carte.
         try:
             update_step("actions", "running")
             from .actions import _generate_recommended_actions  # lazy: actions is loaded after this module
@@ -2344,10 +2507,10 @@ def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict
             _cc = _scenario_counts(scenario_id)
             _user_scenario_pipeline_jobs[scenario_id]["counts"] = _cc
             if _cc["consistent"]:
-                logger.info(f"Pipeline complet {scenario_id}: compteurs cohérents — "
+                logger.info(f"Pipeline complet {scenario_id}: compteurs cohérents - "
                             f"{_cc['corpus_links']} articles (liste, en-tête, PRISMA, étape 2).")
             else:
-                logger.warning(f"Pipeline complet {scenario_id}: compteurs INCOHÉRENTS — {_cc['mismatches']}")
+                logger.warning(f"Pipeline complet {scenario_id}: compteurs INCOHÉRENTS - {_cc['mismatches']}")
         except Exception as _e_cc:
             logger.warning(f"Pipeline {scenario_id}: vérification des compteurs impossible: {_e_cc}")
         logger.info(f"Pipeline complet {scenario_id}: terminé.")

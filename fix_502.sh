@@ -1,13 +1,13 @@
 #!/bin/bash
 # ═══════════════════════════════════════════════════════════════════════
-# Script de correction 502 — LiteRev API
+# Script de correction 502 - LiteRev API
 # Exécuter sur app-01 avec : sudo bash fix_502.sh
 # ═══════════════════════════════════════════════════════════════════════
 VENV="/opt/literev-api/.venv"
 API_DIR="/opt/literev-api"
 
 echo "═══════════════════════════════════════════════════════"
-echo "  CORRECTION 502 — LiteRev API"
+echo "  CORRECTION 502 - LiteRev API"
 echo "═══════════════════════════════════════════════════════"
 
 echo ""
@@ -15,7 +15,7 @@ echo "1. Vérification de psycopg (v3) dans le .venv :"
 if "$VENV/bin/python3" -c "import psycopg; print('  ✓ psycopg v3 OK')" 2>/dev/null; then
     echo "  → psycopg v3 présent"
 else
-    echo "  ✗ psycopg v3 manquant — installation..."
+    echo "  ✗ psycopg v3 manquant - installation..."
     "$VENV/bin/pip" install "psycopg[binary]" "psycopg[pool]" 2>&1 | tail -5
     echo "  ✓ psycopg v3 installé"
 fi

@@ -78,8 +78,8 @@ except Exception as _e:
 
 
 def _seed_demo_scenarios() -> None:
-    """Seed a built-in, model-ready DEMO scenario — a real influenza dataset + a
-    freshly trained model — so the real-dataset trial is visible in the scenario
+    """Seed a built-in, model-ready DEMO scenario - a real influenza dataset + a
+    freshly trained model - so the real-dataset trial is visible in the scenario
     list instead of living only as a script + committed files. Idempotent (guarded
     by a stable id) and strictly best-effort: any failure is logged and swallowed,
     the server boots regardless. Runs in a startup daemon thread.
@@ -416,7 +416,7 @@ def predict_scenario_model(scenario_id: str, payload: dict[str, Any],
             proba = pipeline.predict_proba(df)
             out["classes"] = classes
             out["probabilities"] = [[float(x) for x in r] for r in proba]
-        # Explication LOCALE par prédiction (contribution de chaque variable) — sans
+        # Explication LOCALE par prédiction (contribution de chaque variable) - sans
         # dépendance externe, via ablation vers le fond. Plafonnée pour rester rapide.
         summ = run["summary_json"] or {}
         background = summ.get("explain_background")
@@ -545,7 +545,7 @@ def export_model_bundle(scenario_id: str, include_data: bool = True,
             "Chaque run inclut sa famille d'algorithme, ses hyperparamètres (hyperparameters), "
             "ses métriques et ses importances. Le model_spec (cible, variables, provenance vers "
             "les articles) + le jeu de données (schéma + lignes) permettent de ré-entraîner le "
-            "modèle et de reproduire la prédiction — rien n'est une boîte noire."
+            "modèle et de reproduire la prédiction - rien n'est une boîte noire."
         ),
     }
 
@@ -621,7 +621,7 @@ def monitor_scenario_model(scenario_id: str, window: int = 7, lang: str | None =
         orange, red = model_trainer._alert_bounds(alert_thresholds)
         if orange is not None and red is not None:
             level = model_trainer._level_from_value(next_val, orange, red)
-            label = (alert_thresholds.get(level) or {}).get("label") or _alert_labels(lang).get(level, "—")
+            label = (alert_thresholds.get(level) or {}).get("label") or _alert_labels(lang).get(level, "-")
         else:
             # Sans bornes littérature, NE JAMAIS afficher "green/Normal" par défaut
             # (règle "jamais vert par défaut", cf. compute_monitoring / _level_from_value

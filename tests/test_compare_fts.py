@@ -2,7 +2,7 @@
 
 This script exists to answer "does full-text search return more papers or fewer" on real
 data. That answer is only worth having if the tsquery it builds actually means the same
-thing as the boolean the user typed — so these tests check the compilation, and where a
+thing as the boolean the user typed - so these tests check the compilation, and where a
 database is available, that PostgreSQL agrees with the intended semantics.
 """
 import os
@@ -45,7 +45,7 @@ def test_terms_are_bound_never_interpolated():
 
 def test_negation_is_refused_inside_the_tsquery():
     """`!!term` at document level would accept a document whose title lacks the term
-    while one of its chunks contains it — the per-document semantics the current
+    while one of its chunks contains it - the per-document semantics the current
     compiler is careful about. The caller must subtract sets instead."""
     with pytest.raises(cf.UnsupportedQuery):
         cf.ast_to_tsquery_sql(_ast("mpox NOT benign"), {})
@@ -55,7 +55,7 @@ def test_negation_becomes_a_set_subtraction():
     params: dict = {}
     sql = cf.fts_doc_ids_sql(_ast("mpox NOT benign"), params)
     assert " EXCEPT " in sql
-    # Two TERMS — one positive, one negated. Each appears four times in the text because
+    # Two TERMS - one positive, one negated. Each appears four times in the text because
     # every branch embeds its tsquery once for the documents arm and once for the chunks
     # arm of the UNION; the parameter count is what says how many terms there really are.
     assert len(params) == 2, params
@@ -75,7 +75,7 @@ def test_both_branches_are_searched_so_membership_stays_per_document():
 
 
 def test_query_expressions_match_the_indexed_expressions():
-    """An alias is fine; a changed COALESCE or config is not — the planner would stop
+    """An alias is fine; a changed COALESCE or config is not - the planner would stop
     using the index with no error, which is how the trigram indexes can silently fail."""
     assert cf.doc_tsv() in cf.BUILD_DDL[0]
     assert cf.chunk_tsv() in cf.BUILD_DDL[1]
@@ -120,7 +120,7 @@ def test_stemming_is_what_gains_papers(pg):
 
 
 def test_substring_false_positives_disappear(pg):
-    """The predicted loss — and it is a precision WIN. Today
+    """The predicted loss - and it is a precision WIN. Today
     `LIKE '%incidence%'` matches 'coincidence'; full text does not."""
     assert "incidence" in "coincidence"                    # the current behaviour
     assert not _matches(pg, "A remarkable coincidence occurred", "incidence")

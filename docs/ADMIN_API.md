@@ -1,13 +1,13 @@
-# LiteRev — Admin / Operations API
+# LiteRev - Admin / Operations API
 
 Operational reference for driving LiteRev directly (build corpora, run maintenance,
-enrichment, scoring, digests). Frontend-only read endpoints are omitted — see the route
+enrichment, scoring, digests). Frontend-only read endpoints are omitted - see the route
 table in `main.py` for the full 136-route surface.
 
 ## Base URL
 
 - **On the server:** `http://localhost:8000`
-- **Public:** behind nginx on `literev-app-01` (`62.238.39.50`) — use your API host.
+- **Public:** behind nginx on `literev-app-01` (`62.238.39.50`) - use your API host.
 
 Below, `$BASE` = the API base and `$KEY` = the admin key.
 
@@ -16,7 +16,7 @@ Below, `$BASE` = the API base and `$KEY` = the admin key.
 Mutating endpoints require the **`X-API-Key`** header, compared (constant-time) against the
 running service's `WRITE_API_KEY`. `GET` stats/status endpoints are open.
 
-Read the key from the **running process** — this is authoritative. systemd may inject
+Read the key from the **running process** - this is authoritative. systemd may inject
 `WRITE_API_KEY` via a drop-in `Environment=` **or a separate `EnvironmentFile=`** (find it with
 `systemctl show literev-api -p Environment -p EnvironmentFiles`), which can differ from
 `secrets.env`, and `main.py` does not override an env var that is already set. (Reading
@@ -29,12 +29,12 @@ KEY=$(tr '\0' '\n' < /proc/$PID/environ | sed -n 's/^WRITE_API_KEY=//p')
 [ -n "$KEY" ] && echo "key loaded (${#KEY} chars)"   # never echo the value itself into logs
 ```
 
-- `401 Invalid API key` — missing/wrong/stale key. `503 Server not configured…` — `WRITE_API_KEY` unset.
+- `401 Invalid API key` - missing/wrong/stale key. `503 Server not configured…` - `WRITE_API_KEY` unset.
 
 > **Drift check.** If `grep '^WRITE_API_KEY=' /opt/literev-api/secrets.env` differs from the process
-> value above, `secrets.env` is stale. Pick one source of truth — either put the real key in
+> value above, `secrets.env` is stale. Pick one source of truth - either put the real key in
 > `secrets.env` and remove the systemd `Environment=` line (`systemctl edit literev-api`), or update
-> `secrets.env` to match — then `systemctl restart literev-api`. Rotate the key if it has leaked.
+> `secrets.env` to match - then `systemctl restart literev-api`. Rotate the key if it has leaked.
 
 ---
 
@@ -43,7 +43,7 @@ KEY=$(tr '\0' '\n' < /proc/$PID/environ | sed -n 's/^WRITE_API_KEY=//p')
 | Method | Path | Auth | Purpose |
 |--------|------|------|---------|
 | GET | `/health` | open | liveness (`{"status":"ok"}`) |
-| GET | `/sources/health?query=cardiac%20arrest&timeout=12` | open | per-source live probe (status, latency, count) — diagnose slow/broken sources |
+| GET | `/sources/health?query=cardiac%20arrest&timeout=12` | open | per-source live probe (status, latency, count) - diagnose slow/broken sources |
 | GET | `/corpus/stats` | open | global corpus counts |
 | GET | `/corpus/fulltext-stats` | open | full-text vs abstract-only breakdown |
 | GET | `/enrichment/status` | open | PICO / metadata / full-text backfill progress |
@@ -63,9 +63,9 @@ budget. This is the full federation (12 fetchers / 13 sources).
 | Method | Path | Auth | Key params |
 |--------|------|------|-----------|
 | POST | `/user-scenarios/{id}/populate` | ✅ | `max_results` (default 100000 → clamped to `LIVE_MAX_PER_SOURCE`), `include_live` (default true) |
-| GET | `/user-scenarios/{id}/populate/status` | open | `{status, phase, ingested, sources, rerank_status}` — poll until `status=done` |
+| GET | `/user-scenarios/{id}/populate/status` | open | `{status, phase, ingested, sources, rerank_status}` - poll until `status=done` |
 | POST | `/scenarios/{id}/rebuild-corpus` | ✅ | re-run boolean membership on the existing library (no live fetch) |
-| POST | `/user-scenarios/{id}/pipeline` | ✅ | `max_results` (default 500) — full pipeline (populate → fulltext → embed) |
+| POST | `/user-scenarios/{id}/pipeline` | ✅ | `max_results` (default 500) - full pipeline (populate → fulltext → embed) |
 | GET | `/user-scenarios/{id}/pipeline/status` | open | pipeline phase/progress |
 
 ```bash
@@ -144,11 +144,11 @@ curl -s "${auth[@]}" -X POST "$BASE/fulltext/fetch?scenario_id=usr-XXXX&limit=10
 
 | Var | Default | Effect |
 |-----|---------|--------|
-| `WRITE_API_KEY` | — | admin key (required) |
+| `WRITE_API_KEY` | - | admin key (required) |
 | `LIVE_MAX_PER_SOURCE` | 2000 | max docs fetched **per source** during populate |
 | `POPULATE_FEDERATION_BUDGET` | 180 | seconds the live federation runs before slow sources are cut off |
-| `NCBI_API_KEY` / `SEMANTIC_SCHOLAR_API_KEY` / `CORE_API_KEY` | — | raise per-source rate limits / enable CORE |
-| `OPENAI_API_KEY` | — | embeddings + LLM extraction |
+| `NCBI_API_KEY` / `SEMANTIC_SCHOLAR_API_KEY` / `CORE_API_KEY` | - | raise per-source rate limits / enable CORE |
+| `OPENAI_API_KEY` | - | embeddings + LLM extraction |
 | `RAG_MIN_SIMILARITY` | 0.18 | RAG passage-match floor |
 
 > The **Server command (manual)** GitHub Action (`Actions → Server command`) runs `diagnose`,

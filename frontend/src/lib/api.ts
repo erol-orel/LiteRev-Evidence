@@ -72,7 +72,7 @@ function _sleep(ms: number): Promise<void> {
 }
 
 function _backoffMs(resp: Response, attempt: number): number {
-  // Respecte Retry-After mais le plafonne : inutile de figer l'UI 60 s — mieux
+  // Respecte Retry-After mais le plafonne : inutile de figer l'UI 60 s - mieux
   // vaut quelques tentatives courtes puis un message clair.
   const ra = Number(resp.headers.get("Retry-After"));
   if (Number.isFinite(ra) && ra > 0) return Math.min(ra * 1000, 4000);
@@ -385,7 +385,7 @@ export interface GesicaScenario {
   title: string;
   labelShort?: string | null;
   description: string;
-  query?: string;   // requête d'origine (user scenarios) — pour un libellé localisé
+  query?: string;   // requête d'origine (user scenarios) - pour un libellé localisé
   cluster: string;
   articleCount: number;
   livingEvidenceNote: string;
@@ -924,7 +924,7 @@ export interface ScenarioDetail {
   title: string;
   description: string;
   cluster: string;
-  query?: string;   // requête d'origine (user scenarios) — pour un libellé localisé
+  query?: string;   // requête d'origine (user scenarios) - pour un libellé localisé
   // Multi-facet search (user scenarios): the WHOLE expression "(A) AND (B)" and the
   // ordered facets with the operator actually applied to each one (none on the main
   // query). `query` alone is only the main facet, which hid the AND/OR.
@@ -1850,7 +1850,7 @@ export interface EmbeddingStatus {
     pending_chunks: number;
   };
   total_pending_chunks: number;
-  // Pertinence (ranking) — scores réellement présents sur le corpus (≠ indexation RAG).
+  // Pertinence (ranking) - scores réellement présents sur le corpus (≠ indexation RAG).
   ranking?: {
     total: number;
     scored: number;
@@ -2579,13 +2579,13 @@ export interface SeirProjection {
   disease?: string | null;
   /** true = projection obtenue via des paramètres SAISIS, pas extraits de la littérature. */
   forced?: boolean;
-  /** Provenance du R₀ effectivement simulé — l'UI ne doit pas présenter "assumed"/"user" comme sourcé. */
+  /** Provenance du R₀ effectivement simulé - l'UI ne doit pas présenter "assumed"/"user" comme sourcé. */
   r0_source?: "literature" | "user" | "assumed";
   /** Paramètres extraits mais inexploitables (le backend nomme ce qui manque). */
   missing?: string[];
   available_parameters?: string[];
   n_samples?: number;
-  /** Tirages écartés de l'ensemble (divergence numérique) — diagnostic d'un IC d'entrée trop large. */
+  /** Tirages écartés de l'ensemble (divergence numérique) - diagnostic d'un IC d'entrée trop large. */
   n_dropped?: number;
   population?: number;
   initial_infected?: number;
@@ -2644,13 +2644,44 @@ export async function fetchSeirProjection(
 }
 
 // Bundle de reproductibilité d'un modèle (spec + runs + hyperparamètres + dataset +
-// prédiction) — authentifié (expose le schéma/les données du scénario).
+// prédiction) - authentifié (expose le schéma/les données du scénario).
 export async function exportModelBundle(scenarioId: string, includeData = true): Promise<Record<string, unknown>> {
   const r = await safeFetch(
     `${API_BASE_URL}/scenarios/${scenarioId}/model/export?include_data=${includeData}`,
     { headers: authHeaders() });
   if (!r.ok) throw new Error(httpMessage(r.status));
   return r.json();
+}
+
+// ─── Relevant articles export (csv, xlsx, ris, bibtex, json, md) ─────────────
+export const RELEVANT_EXPORT_FORMATS = ["csv", "xlsx", "ris", "bibtex", "json", "md"] as const;
+export type RelevantExportFormat = typeof RELEVANT_EXPORT_FORMATS[number];
+
+/** The relevant articles of a scenario as a file; the filename comes from the API. */
+export async function exportRelevantArticles(
+  scenarioId: string,
+  format: RelevantExportFormat,
+  opts: { includeAbstract?: boolean } = {},
+): Promise<{ blob: Blob; filename: string }> {
+  const params = new URLSearchParams({ format });
+  if (opts.includeAbstract === false) params.set("include_abstract", "false");
+  const r = await safeFetch(`${scenarioBase(scenarioId)}/${scenarioId}/relevant/export?${params}`);
+  if (!r.ok) throw new Error(httpMessage(r.status));
+  const disposition = r.headers.get("Content-Disposition") ?? "";
+  const m = /filename="?([^";]+)"?/.exec(disposition);
+  return { blob: await r.blob(), filename: m?.[1] ?? `relevant-articles.${format === "bibtex" ? "bib" : format}` };
+}
+
+/** Hand a blob to the browser as a download. */
+export function downloadBlob(blob: Blob, filename: string): void {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
 // Même export, en classeur Excel (.xlsx) : feuilles Variables / Dataset (valeurs +
@@ -2663,7 +2694,7 @@ export async function exportModelXlsx(scenarioId: string): Promise<Blob> {
   return r.blob();
 }
 
-// Projection AVEC paramètres modifiés par l'utilisateur (onglet SEIR) — explore des
+// Projection AVEC paramètres modifiés par l'utilisateur (onglet SEIR) - explore des
 // variantes sans altérer les paramètres source extraits de la littérature.
 export async function postSeirProjection(
   scenarioId: string,
@@ -2991,7 +3022,7 @@ export async function getSearchStrategy(scenarioId: string): Promise<SearchStrat
 }
 
 /** Prévisualise (lexical, bibliothèque locale) le compte d'articles par facette et le
- *  total par union (OU) / intersection (ET) — AVANT de lancer la recherche complète. */
+ *  total par union (OU) / intersection (ET) - AVANT de lancer la recherche complète. */
 export async function previewSearchFacets(
   subQueries: SubQuery[],
   combinator: "union" | "intersection",
@@ -3023,7 +3054,7 @@ export interface SituationReport {
   disaster_types: string[];
   themes: string[];
   language: string | null;
-  /** 0..1, plafonnée à 0.45 — très en dessous de toute étude revue par les pairs. */
+  /** 0..1, plafonnée à 0.45 - très en dessous de toute étude revue par les pairs. */
   credibility: number;
   excerpt: string;
 }

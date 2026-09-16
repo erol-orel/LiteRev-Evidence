@@ -198,7 +198,7 @@ def _compute_user_kg(scenario_id: str, max_nodes: int = 400, min_similarity: flo
     """Calcul du knowledge graph d'un scénario utilisateur (un seul endroit, réutilisé
     par l'endpoint ET le précalcul)."""
     # Le clustering porte sur le SOUS-ENSEMBLE PERTINENT (≥ seuil sémantique OU inclus
-    # manuellement ; jamais les exclus), PAS sur tout le corpus — même définition que
+    # manuellement ; jamais les exclus), PAS sur tout le corpus - même définition que
     # corpus_above et l'Assistant RAG. Sinon les communautés étaient diluées par des
     # centaines d'articles hors-sujet ramenés par la fédération.
     _thr = _get_scenario_threshold(scenario_id)
@@ -385,7 +385,7 @@ def _article_concepts(row: dict) -> list[tuple[str, str, dict]]:
                 continue
             add(t, c.get("en"), c.get("fr"))
 
-    # Champs structurés : lieu (ISO2), devis, cadre — indépendants du LLM.
+    # Champs structurés : lieu (ISO2), devis, cadre - indépendants du LLM.
     mj = row.get("metadata_json")
     if isinstance(mj, str):
         try:
@@ -535,7 +535,7 @@ def _build_concept_graph(rows: list[dict], *, max_nodes: int = 60, min_edge: int
                if c >= (1 if small else 2)]
 
     # Lacunes : sujets × issues et expositions/interventions × issues les plus documentés,
-    # sans aucun article commun — classées par « attente » (produit des tailles).
+    # sans aucun article commun - classées par « attente » (produit des tailles).
     by_type: dict[str, list[dict]] = defaultdict(list)
     for n in nodes:
         by_type[n["type"]].append(n)
@@ -683,7 +683,7 @@ def _llm_concepts_for_batch(client, batch: list[dict]) -> dict[int, list[dict]]:
 
 def _extract_concepts_for_scenario(scenario_id: str, max_articles: int | None = None) -> int:
     """Normalise par le LLM les concepts des articles pertinents qui n'en ont pas encore
-    (`concepts_json`), une fois pour toutes — les autres scénarios les réutilisent.
+    (`concepts_json`), une fois pour toutes - les autres scénarios les réutilisent.
     Renvoie le nombre d'articles annotés. Sans clé OpenAI : 0, sans erreur."""
     if not os.getenv("OPENAI_API_KEY"):
         return 0

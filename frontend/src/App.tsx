@@ -112,7 +112,7 @@ interface SavedSearch {
   name?: string;
   pinned?: boolean;
   // Multi-facet search: saved facets + combinator, restored on replay (the AND/OR
-  // between the facets is part of the search — replaying only `query` lost it).
+  // between the facets is part of the search - replaying only `query` lost it).
   subQueries?: SubQuery[] | null;
   combinator?: "union" | "intersection" | null;
 }
@@ -863,7 +863,7 @@ function StatsView({ corpusStats, fulltextStats, scenarios, statsByYear, onRefre
           )}
 
           <div className="mt-4 grid gap-4 sm:grid-cols-2">
-            {/* Détail des chunks (remplace "Par scénario" — redondant avec la heatmap) */}
+            {/* Détail des chunks (remplace "Par scénario" - redondant avec la heatmap) */}
             <div>
               <h3 className="mb-3 text-sm font-medium text-forest-300 flex items-center gap-1.5">
                 <BarChart2 size={13} className="text-brand-400" />
@@ -895,7 +895,7 @@ function StatsView({ corpusStats, fulltextStats, scenarios, statsByYear, onRefre
                       <span className="text-white/70 font-semibold">{ch.total.toLocaleString()}</span> {t("stats.chunksTotalSuffix")}
                       {emb && <> · <span className="text-blue-300">{emb.chunks_with_embedding.toLocaleString()}</span> / {ch.total.toLocaleString()} {t("stats.indexedSuffix")} ({(Math.floor(emb.chunks_with_embedding / (ch.total || 1) * 1000) / 10).toFixed(1)}%)</>}
                       {/* Reliquat non embeddé volontairement (résumés de docs à texte intégral,
-                          couverts par leurs sections) — affiché pour que total = indexés + couverts + en attente. */}
+                          couverts par leurs sections) - affiché pour que total = indexés + couverts + en attente. */}
                       {(() => {
                         const covered = emb ? Math.max(0, ch.total - emb.chunks_with_embedding - (emb.chunks_pending ?? 0)) : 0;
                         return covered > 0 ? <> · <span className="text-forest-300">{covered.toLocaleString()}</span> {t("stats.coveredByFulltext")}</> : null;
@@ -944,16 +944,16 @@ function StatsView({ corpusStats, fulltextStats, scenarios, statsByYear, onRefre
             </div>
           </div>
 
-          {/* Maintenance (admin) — purge doublons + normalisation des chunks « Autres » */}
+          {/* Maintenance (admin) - purge doublons + normalisation des chunks « Autres » */}
           <CorpusMaintenancePanel onRefresh={onRefresh} />
 
-          {/* Enrichissement LLM — global, corpus-wide (déplacé depuis l'onglet scénario :
+          {/* Enrichissement LLM - global, corpus-wide (déplacé depuis l'onglet scénario :
               l'enrichissement est automatique et à l'échelle du corpus, pas par scénario). */}
           <div className="mt-5 border-t border-white/5 pt-4">
             <EnrichmentSection />
           </div>
 
-          {/* Évolution temporelle — intégrée au bas du panneau Corpus */}
+          {/* Évolution temporelle - intégrée au bas du panneau Corpus */}
           {statsByYear && Object.keys(statsByYear.byYear).length > 0 && (
             <div className="mt-5 border-t border-white/5 pt-4">
               <h3 className="mb-3 text-sm font-medium text-forest-300 flex items-center gap-1.5">
@@ -1064,7 +1064,7 @@ function StatsView({ corpusStats, fulltextStats, scenarios, statsByYear, onRefre
                                   <div>{val}</div>
                                   {ft > 0 && <div className="text-[9px] text-blue-200/90">{ft} ft</div>}
                                 </>
-                              ) : '—'}
+                              ) : '-'}
                             </td>
                           );
                         })}
@@ -1131,7 +1131,7 @@ function StatsView({ corpusStats, fulltextStats, scenarios, statsByYear, onRefre
   );
 }
 
-// Actions recommandées — composant HOISTÉ (niveau module) : identité stable, pas de
+// Actions recommandées - composant HOISTÉ (niveau module) : identité stable, pas de
 // remontage à chaque rendu. C'est le seul endroit qui porte des hooks, ce qui permet
 // à renderScenarioCard d'être une simple fonction inline (cf. correctif double-clic).
 function RecommendedActions({ scenario, isUser }: { scenario: GesicaScenario; isUser: boolean }) {
@@ -1308,7 +1308,7 @@ function ScenariosView({
   };
 
   // Rendue comme FONCTION inline (et non composant imbriqué) : ainsi elle n'est pas
-  // remontée à chaque rendu de ScenariosView — ce remont permanent faisait « perdre »
+  // remontée à chaque rendu de ScenariosView - ce remont permanent faisait « perdre »
   // le 1er clic du bouton dossier (il fallait cliquer deux fois). Les hooks vivent
   // désormais dans le composant hoisté RecommendedActions.
   const renderScenarioCard = (scenario: GesicaScenario) => {
@@ -1393,7 +1393,7 @@ function ScenariosView({
             {isExpanded ? <ChevronUp size={16} className="text-forest-500" /> : <ChevronDown size={16} className="text-forest-500" />}
           </div>
         </div>
-        {/* Assignation à un dossier — INLINE, directement sous CETTE carte (plus de
+        {/* Assignation à un dossier - INLINE, directement sous CETTE carte (plus de
             carte unique en haut de liste qui obligeait à scroller bien au-dessus). */}
         {assigningScenarioId === scenario.id && (
           <div className="mt-3 rounded-2xl border border-brand-400/30 bg-brand-500/5 p-3 space-y-2">
@@ -1461,7 +1461,7 @@ function ScenariosView({
             {/* Actions recommandées (hooks isolés dans le composant hoisté) */}
             <RecommendedActions scenario={scenario} isUser={isUser} />
 
-            {/* Modèle Prédictif — carte générique (scénarios utilisateur) */}
+            {/* Modèle Prédictif - carte générique (scénarios utilisateur) */}
             {isUser && (
               <div className="rounded-2xl border border-brand-500/20 bg-brand-500/5 p-4">
                 <div className="flex items-center justify-between mb-2">
@@ -1485,7 +1485,7 @@ function ScenariosView({
               </div>
             )}
 
-            {/* Liste d'articles retirée de la carte — disponible sur la page détail */}
+            {/* Liste d'articles retirée de la carte - disponible sur la page détail */}
             {false && scenario.relevantArticles.length > 0 && (
               <div>
                 <h4 className="mb-2 text-xs font-semibold uppercase tracking-wider text-forest-400">
@@ -1584,7 +1584,7 @@ function ScenariosView({
   const totalScenarios = scenarios.length + userScenarios.length;
 
   // Un scénario SAUVEGARDÉ (épinglé) est UNIQUE : on masque toute recherche récente
-  // (non épinglée) qui doublonne un scénario épinglé de même query (+ mode) — la 2e carte
+  // (non épinglée) qui doublonne un scénario épinglé de même query (+ mode) - la 2e carte
   // identique disparaît immédiatement, sans attendre la purge backend à la prochaine liste.
   // Clé = expression COMPLÈTE (« (A) AND (B) ») + mode : « A » et « (A) AND (B) »
   // partagent la même `query` (facette principale) mais sont deux recherches.
@@ -1734,7 +1734,7 @@ function ScenariosView({
             </div>
           )}
 
-          {/* Recherches récentes (non épinglées, hors dossier) — historique de recherche,
+          {/* Recherches récentes (non épinglées, hors dossier) - historique de recherche,
               dédupliqué des scénarios sauvegardés (cf. recentScenarios). */}
           {recentScenarios.length > 0 && (
             <div className="space-y-2">
@@ -1754,7 +1754,7 @@ export default function App() {
   const { t, lang, setLang } = useI18n();
   const [activeTab, setActiveTab] = useState<AppTab>("search");
   // Clé d'écriture admin (X-API-Key). Saisie une fois, stockée en localStorage côté
-  // navigateur — jamais dans le bundle public (cf. authHeaders dans lib/api).
+  // navigateur - jamais dans le bundle public (cf. authHeaders dans lib/api).
   const [apiKeySet, setApiKeySet] = useState<boolean>(() => hasApiKey());
   const handleManageApiKey = () => {
     if (apiKeySet) {
@@ -1968,7 +1968,7 @@ export default function App() {
           setFolders(foldersData);
           // Pipelines déjà en cours (lancés avant un rechargement de page, ou depuis
           // l'API) : suivre leur avancement pour que la carte le dise, et rafraîchir
-          // la liste à la fin — sinon article_count restait à sa valeur provisoire.
+          // la liste à la fin - sinon article_count restait à sa valeur provisoire.
           user
             .filter(u => u.pipeline_status === 'running' || u.pipeline_status === 'starting')
             .forEach(u => { if (!pipelinePollRef.current[u.id]) _pollPipelineStatus(u.id); });
@@ -1994,7 +1994,7 @@ export default function App() {
 
   // Deduplicate to ONE entry per document (keep the highest-scoring chunk per doc).
   // The backend returns one row per chunk; multiple chunks from the same document
-  // must not produce multiple paginated entries — that causes the same paper to
+  // must not produce multiple paginated entries - that causes the same paper to
   // appear on multiple pages and makes the page count meaningless.
   const dedupedResults = useMemo(() => {
     const byDoc = new Map<number, SearchResult>();
@@ -2070,7 +2070,7 @@ export default function App() {
 
   // Prévisualisation débouncée : dès qu'il y a des sous-requêtes, on affiche le compte
   // lexical par facette + le total union/intersection (bibliothèque locale). Purement
-  // lexical (aucun score sémantique/Cohere) — la recherche en direct enrichit ensuite.
+  // lexical (aucun score sémantique/Cohere) - la recherche en direct enrichit ensuite.
   useEffect(() => {
     const sub = buildSubQueries();
     if (!sub) { setFacetPreview(null); setFacetPreviewLoading(false); return; }
@@ -2174,7 +2174,7 @@ export default function App() {
         setResults(corpusResults);
         setSearchTotalMatching(corpus.total);   // == taille du corpus
         // Répartition par source (base locale vs API en direct), nouvelles
-        // références live, et texte intégral vs résumé seul — lus depuis le corpus.
+        // références live, et texte intégral vs résumé seul - lus depuis le corpus.
         setSearchSourceBreakdown(corpus.source_breakdown ?? null);
         setSearchLiveNewCount(corpus.newly_fetched ?? 0);
         setSearchFulltextDocs(corpus.docs_with_fulltext ?? null);
@@ -2214,7 +2214,7 @@ export default function App() {
           status = st.status;
           phase = st.phase ?? null;
           if (st.sources) setSearchSourceProgress(st.sources);
-        } catch { /* transient — keep polling */ }
+        } catch { /* transient - keep polling */ }
         if (phase) setSearchBackendPhase(phase);
         // Rafraîchir le corpus affiché ~toutes les 8 s ; dès qu'il contient des documents,
         // on quitte l'écran d'attente et on affiche la liste qui grandit (compteur en direct).
@@ -2222,7 +2222,7 @@ export default function App() {
           try {
             const n = await renderCorpus();
             if (n > 0 && !shownResults) { shownResults = true; setLoading(false); setLiveRefreshing(true); }
-          } catch { /* transient — keep polling */ }
+          } catch { /* transient - keep polling */ }
         }
         if (status === 'done') { reachedDone = true; break; }
         if (status === 'error') throw new Error(t("search.corpusBuildFailed"));
@@ -2344,7 +2344,7 @@ export default function App() {
   function _launchPipelineForScenario(scenarioId: string) {
     // Déclencher le pipeline complet dès qu'un scénario est épinglé. Pas de plafond
     // explicite : le serveur applique LIVE_MAX_PER_SOURCE (2000 par défaut), le MÊME
-    // que le populate lancé depuis l'API — 500 ici donnait un corpus différent pour
+    // que le populate lancé depuis l'API - 500 ici donnait un corpus différent pour
     // la même requête selon le point d'entrée.
     startUserScenarioPipeline(scenarioId)
       .then(() => _pollPipelineStatus(scenarioId))
@@ -2405,7 +2405,7 @@ export default function App() {
 
   function handleReplaySearch(s: SavedSearch) {
     // Recherche multi-facettes : restaurer TOUTES les facettes avec leurs opérateurs
-    // (le ET/OU fait partie de la recherche) — pas seulement la requête principale.
+    // (le ET/OU fait partie de la recherche) - pas seulement la requête principale.
     const sub = s.subQueries && s.subQueries.length >= 2 ? s.subQueries : null;
     setQuery(sub ? sub[0].text : s.query);
     setMainKindOverride(sub ? sub[0].kind : "auto");
@@ -2502,24 +2502,24 @@ export default function App() {
       title: doc?.title ?? selectedResult.title ?? "Sans titre",
       abstract: doc?.abstract ?? "",
       excerpt,
-      source: doc?.source ?? selectedResult.source ?? "—",
-      year: doc?.year?.toString() ?? selectedResult.year?.toString() ?? "—",
+      source: doc?.source ?? selectedResult.source ?? "-",
+      year: doc?.year?.toString() ?? selectedResult.year?.toString() ?? "-",
       url: doc?.url ?? selectedResult.url ?? "",
-      externalId: doc?.externalId ?? "—",
-      projectContext: doc?.projectContext ?? selectedResult.projectContext ?? "—",
-      sourceType: doc?.sourceType ?? selectedResult.sourceType ?? "—",
-      disease: doc?.diseaseOrCondition ?? selectedResult.diseaseOrCondition ?? "—",
-      scenario: doc?.scenarioType ?? selectedResult.scenarioType ?? "—",
-      geography: doc?.geographicScope ?? selectedResult.geographicScope ?? "—",
-      evidence: doc?.evidenceCategory ?? selectedResult.evidenceCategory ?? "—",
+      externalId: doc?.externalId ?? "-",
+      projectContext: doc?.projectContext ?? selectedResult.projectContext ?? "-",
+      sourceType: doc?.sourceType ?? selectedResult.sourceType ?? "-",
+      disease: doc?.diseaseOrCondition ?? selectedResult.diseaseOrCondition ?? "-",
+      scenario: doc?.scenarioType ?? selectedResult.scenarioType ?? "-",
+      geography: doc?.geographicScope ?? selectedResult.geographicScope ?? "-",
+      evidence: doc?.evidenceCategory ?? selectedResult.evidenceCategory ?? "-",
       chunkCount: selectedDocument?.chunks?.length ?? 0,
-      // types normalisés + biblio (renvoyés par /documents/{id}, sinon « — »)
-      articleType: doc?.articleType ?? doc?.sourceType ?? "—",
-      studyDesign: doc?.studyDesign ?? "—",
-      authors: doc?.authors ?? "—",
-      journal: doc?.journal ?? "—",
-      doi: doc?.doi ?? "—",
-      country: doc?.country ?? "—",
+      // types normalisés + biblio (renvoyés par /documents/{id}, sinon « - »)
+      articleType: doc?.articleType ?? doc?.sourceType ?? "-",
+      studyDesign: doc?.studyDesign ?? "-",
+      authors: doc?.authors ?? "-",
+      journal: doc?.journal ?? "-",
+      doi: doc?.doi ?? "-",
+      country: doc?.country ?? "-",
     };
   }, [selectedDocument, selectedResult]);
 
@@ -3038,7 +3038,7 @@ export default function App() {
                             </span>
                             <span className="shrink-0 tabular-nums opacity-80">{f.count}</span>
                           </div>
-                          {/* Requête booléenne COMPILÉE de la facette (auditable) — affichée
+                          {/* Requête booléenne COMPILÉE de la facette (auditable) - affichée
                               quand elle diffère du texte saisi, c.-à-d. pour une facette
                               naturelle traduite (une facette booléenne EST déjà son texte). */}
                           {f.boolean && f.boolean.trim() !== f.text.trim() && (
@@ -3351,7 +3351,7 @@ export default function App() {
                           </div>
 
                           <div className="mt-3 flex flex-wrap gap-2 text-xs text-forest-400">
-                            {/* Score sémantique (cosinus) — calculé pour TOUS les documents
+                            {/* Score sémantique (cosinus) - calculé pour TOUS les documents
                                 affichés (la recherche attend la fin du scoring). */}
                             {searchScoreType && searchScoreType !== 'none' && (
                               <span className={`rounded-full px-2 py-1 ${
@@ -3364,7 +3364,7 @@ export default function App() {
                                  '≡'} {(result.score ?? 0).toFixed(3)}
                               </span>
                             )}
-                            {/* Score de reranking (cross-encoder Cohere) quand présent — c'est
+                            {/* Score de reranking (cross-encoder Cohere) quand présent - c'est
                                 LUI qui ordonne le sous-ensemble pertinent en tête de liste
                                 (échelle distincte du cosinus, d'où l'affichage des deux). */}
                             {result.rerankScore != null && (
@@ -3405,7 +3405,7 @@ export default function App() {
                                 {result.evidenceCategory}
                               </span>
                             )}
-                            {/* Badge couverture textuelle — basé sur hasFulltext
+                            {/* Badge couverture textuelle - basé sur hasFulltext
                                 (présence d'un chunk plein texte), pas sur chunkType
                                 qui n'est pas renseigné pour les résultats du corpus. */}
                             <span className={`rounded-full px-2 py-1 border text-[11px] font-semibold ${
@@ -3541,20 +3541,20 @@ export default function App() {
                             <section>
                               <h3 className="mb-2 font-medium text-white">{t("search.excerpt")}</h3>
                               <p className="rounded-2xl border border-white/10 bg-white/5 p-4 leading-6">
-                                {detailView?.excerpt || "—"}
+                                {detailView?.excerpt || "-"}
                               </p>
                             </section>
 
                             <section>
                               <h3 className="mb-2 font-medium text-white">{t("search.abstract")}</h3>
                               <p className="rounded-2xl border border-white/10 bg-white/5 p-4 leading-6">
-                                {detailView?.abstract || "—"}
+                                {detailView?.abstract || "-"}
                               </p>
                             </section>
 
                             {/* Panneau « Signaux santé » (GESICA) retiré de la vue article :
                                 orienté réponse d'urgence / EMS (signaux de demande, horizon de
-                                prévision, scénarios détectés, transfrontalier FR-CH) — hors du
+                                prévision, scénarios détectés, transfrontalier FR-CH) - hors du
                                 cadre santé publique de cette page. Masqué comme les autres blocs
                                 désactivés du fichier ; la mécanique reste pour un usage futur. */}
                             {SHOW_GESICA_SIGNALS && evidenceSummary && (
@@ -3579,7 +3579,7 @@ export default function App() {
                                 <div><dt className="text-forest-400">{t("search.metaJournal")}</dt><dd>{detailView?.journal}</dd></div>
                                 <div><dt className="text-forest-400">{t("search.metaYear")}</dt><dd>{detailView?.year}</dd></div>
                                 <div><dt className="text-forest-400">{t("search.metaSource")}</dt><dd>{detailView?.source}</dd></div>
-                                <div><dt className="text-forest-400">{t("search.metaDoi")}</dt><dd>{detailView?.doi && detailView.doi !== "—" ? <a href={`https://doi.org/${detailView.doi}`} target="_blank" rel="noopener noreferrer" className="text-brand-300 hover:underline">{detailView.doi}</a> : "—"}</dd></div>
+                                <div><dt className="text-forest-400">{t("search.metaDoi")}</dt><dd>{detailView?.doi && detailView.doi !== "-" ? <a href={`https://doi.org/${detailView.doi}`} target="_blank" rel="noopener noreferrer" className="text-brand-300 hover:underline">{detailView.doi}</a> : "-"}</dd></div>
                               </dl>
                             </section>
                           </div>

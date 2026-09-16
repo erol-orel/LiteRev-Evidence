@@ -44,7 +44,7 @@ def _canonical_source(s: str | None) -> str:
     if "semantic" in t or t == "s2":
         return "Semantic Scholar"
     # Source non fédérée : on garde le nom réel (nettoyé) plutôt que de tout
-    # masquer derrière « Autre » — l'utilisateur veut voir TOUTES les sources.
+    # masquer derrière « Autre » - l'utilisateur veut voir TOUTES les sources.
     return (s or "").strip()
 
 
@@ -196,11 +196,11 @@ def get_fulltext_stats() -> dict[str, Any]:
         ).scalar() or 0
 
         # « En attente d'indexation » HONNÊTE : exactement les chunks que le worker VA
-        # embedder — types standard, contenu embeddable (> 20 car.), pas encore mis en
+        # embedder - types standard, contenu embeddable (> 20 car.), pas encore mis en
         # quarantaine (< 3 échecs). Exclut les types « Autres » (jamais embeddés) et les
         # chunks définitivement refusés par l'API, qui gonflaient artificiellement le
         # reliquat. (On embède désormais le title_abstract de TOUS les docs, full-text
-        # compris — plus de « couverts par le texte intégral ».)
+        # compris - plus de « couverts par le texte intégral ».)
         chunks_pending = conn.execute(text("""
             SELECT COUNT(*) FROM document_chunk c
             WHERE c.embedding IS NULL
@@ -318,8 +318,8 @@ def corpus_maintenance(
 
     Deux opérations, appliquées uniquement si dry_run=False :
 
-      1. Doublons : supprime les documents `is_duplicate = TRUE` — déjà exclus de
-         TOUTES les requêtes (recherche, RAG, PICO, stats) — ainsi que leurs lignes
+      1. Doublons : supprime les documents `is_duplicate = TRUE` - déjà exclus de
+         TOUTES les requêtes (recherche, RAG, PICO, stats) - ainsi que leurs lignes
          `article_scenarios` (cette table n'a pas de FK → suppression explicite,
          sinon orphelins). Les chunks partent en CASCADE (document_chunk.document_id
          ON DELETE CASCADE).
@@ -329,11 +329,11 @@ def corpus_maintenance(
          embeddera alors normalement) et supprime les chunks non-standard vraiment
          inexploitables (contenu < 20 caractères → jamais embeddables). Les chunks
          non-standard SUBSTANTIELS (≥ 20 car.) sont seulement RAPPORTÉS, jamais
-         modifiés — on décide de leur sort après avoir vu l'aperçu.
+         modifiés - on décide de leur sort après avoir vu l'aperçu.
 
     Sécurité : tout tourne dans UNE transaction (atomique) ; avant chaque
     suppression, les lignes concernées sont copiées dans des tables `_maint_bak_*`
-    (restaurables). dry_run=True (défaut) ne fait que COMPTER — aucune écriture.
+    (restaurables). dry_run=True (défaut) ne fait que COMPTER - aucune écriture.
     """
     dry_run = True if payload is None else bool(payload.dry_run)
     from datetime import datetime, timezone
@@ -375,10 +375,10 @@ def corpus_maintenance(
         # ── 1. DOUBLONS ────────────────────────────────────────────────────
         # Doublons = détectés à la lecture par la clé de contenu (DOI › external_id
         # normalisé › titre long) UNION ceux DÉJÀ marqués is_duplicate (script manuel /
-        # historique) — on élargit le contrat existant, sans le remplacer. L'aperçu
+        # historique) - on élargit le contrat existant, sans le remplacer. L'aperçu
         # (dry_run) COMPTE sans rien écrire ; à l'application on POSE d'abord is_duplicate
         # sur les doublons de contenu (idempotent), puis la sauvegarde + purge existantes
-        # (WHERE is_duplicate IS TRUE) opèrent — le tout dans la même transaction atomique.
+        # (WHERE is_duplicate IS TRUE) opèrent - le tout dans la même transaction atomique.
         dup_docs = conn.execute(text(
             f"SELECT COUNT(*) FROM ({_DUP_ANY_IDS_SQL}) x"
         )).scalar() or 0
@@ -446,7 +446,7 @@ def corpus_maintenance(
             "unique_to_reclassify": int(uniq),          # real content → fulltext_section (indexed)
         }
         if not dry_run:
-            # Delete junk + redundant (each backed up first); order is irrelevant — the
+            # Delete junk + redundant (each backed up first); order is irrelevant - the
             # three sets are disjoint and none touches title_abstract chunks.
             for label, pred in (("junkchunks", JUNK), ("redundantchunks", REDUNDANT)):
                 n = conn.execute(text(f"SELECT COUNT(*) FROM document_chunk WHERE {pred}")).scalar() or 0
@@ -467,7 +467,7 @@ def corpus_maintenance(
 
 @app.post("/admin/embed-pending")
 def embed_pending_chunks(limit: int = 200, _: None = Depends(require_api_key)) -> dict[str, Any]:
-    """Force l'indexation (embedding) des chunks « en attente » — à la demande, avec
+    """Force l'indexation (embedding) des chunks « en attente » - à la demande, avec
     EXACTEMENT le sélecteur du worker d'arrière-plan. Vide immédiatement le petit
     reliquat sans attendre le cycle de 30 s. Traite au plus `limit` chunks (synchrone) ;
     renvoie le nombre embeddé et le reliquat restant."""

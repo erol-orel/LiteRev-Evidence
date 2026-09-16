@@ -145,7 +145,7 @@ except ValueError:
 
 def _process_stats() -> dict[str, Any]:
     """Mémoire résidente (courante et pic), threads, uptime et état du pool DB du
-    processus API — lisible dans /health sans accès au serveur."""
+    processus API - lisible dans /health sans accès au serveur."""
     out: dict[str, Any] = {"uptime_s": int(_time_mod.time() - _PROCESS_STARTED_AT)}
     try:
         with open("/proc/self/status") as _f:
@@ -156,7 +156,7 @@ def _process_stats() -> dict[str, Any]:
                     out["rss_peak_mb"] = round(int(_line.split()[1]) / 1024.0, 1)
                 elif _line.startswith("Threads:"):
                     out["threads"] = int(_line.split()[1])
-    except Exception:                                  # noqa: BLE001 — non Linux
+    except Exception:                                  # noqa: BLE001 - non Linux
         pass
     try:
         out["db_pool"] = engine.pool.status()
@@ -167,7 +167,7 @@ def _process_stats() -> dict[str, Any]:
 # Nb de sauts de proxy DE CONFIANCE devant l'app (défaut 1 = un seul nginx). L'IP
 # client réelle est le N-ième saut en partant de la FIN du X-Forwarded-For ; les
 # entrées avant ce point sont contrôlables par le client (spoofing). Passer à 2 si
-# un CDN/LB s'ajoute devant nginx — sinon on limiterait sur l'IP du CDN (limite
+# un CDN/LB s'ajoute devant nginx - sinon on limiterait sur l'IP du CDN (limite
 # globale) ou on ferait confiance à un XFF spoofé. Borné à >= 1 ; parse tolérant.
 try:
     _TRUSTED_PROXY_HOPS = max(1, int(os.getenv("TRUSTED_PROXY_HOPS", "1")))
@@ -249,7 +249,7 @@ async def rate_limit_middleware(request: Request, call_next):
 
     # Observabilité : loguer toute exception NON gérée avec son contexte
     # (méthode + chemin + IP) pour qu'elle soit repérable dans journalctl, puis
-    # la relancer telle quelle (Starlette renvoie son 500 habituel — aucun
+    # la relancer telle quelle (Starlette renvoie son 500 habituel - aucun
     # changement de comportement). Les HTTPException sont déjà converties en
     # réponses en amont et ne remontent donc pas ici.
     _t0 = _time_mod.perf_counter()
@@ -320,7 +320,7 @@ except (TypeError, ValueError):
 # non terminées continuent en arrière-plan ; le corpus est reconstruit avec ce qui est
 # déjà ingéré. Réglable via l'env POPULATE_FEDERATION_BUDGET (mettre p. ex. 600 pour un
 # corpus plus complet). Défaut 180 s : le populate tourne dans un THREAD de fond, donc
-# un budget plus large ne bloque pas la requête — il retarde juste le passage à « done ».
+# un budget plus large ne bloque pas la requête - il retarde juste le passage à « done ».
 # On NE le met pas à l'infini : une source réellement bloquée maintiendrait le job en vie.
 try:
     POPULATE_FEDERATION_BUDGET = float(os.getenv("POPULATE_FEDERATION_BUDGET", "180"))

@@ -545,7 +545,7 @@ async def ask_stream_filtered(payload: dict[str, Any]):
     threshold = _get_scenario_threshold(scenario_id) if scenario_id else DEFAULT_SIMILARITY_THRESHOLD
 
     # Compteurs « articles utilisés / avec texte intégral » à afficher sous la
-    # réponse IA — MÊMES définitions que la vue Preuves (sous-ensemble PERTINENT du
+    # réponse IA - MÊMES définitions que la vue Preuves (sous-ensemble PERTINENT du
     # scénario : ≥ seuil OU inclus). Volontairement PAS dérivés de `sources`, qui
     # sont des chunks plafonnés à top_k et ne refléteraient pas le nb d'articles.
     papers_used = 0
@@ -660,7 +660,7 @@ async def ask_stream_filtered(payload: dict[str, Any]):
 Tu réponds de manière précise, factuelle et structurée.
 Base-toi exclusivement sur le contexte fourni. Si l'information n'est pas dans le contexte, dis-le clairement.
 Cite les articles pertinents par leur titre quand tu les mentionnes.
-Ne pas utiliser de tiret em (—).""" + _llm_lang_directive(lang)
+Ne pas utiliser de tiret cadratin (em dash).""" + _llm_lang_directive(lang)
 
     user_prompt = f"""Contexte scientifique (extraits d'articles sélectionnés par pertinence sémantique) :
 {context_text}

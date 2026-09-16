@@ -17,13 +17,13 @@ from .scenario_store import _get_scenario_threshold
 from .model_data import _get_model_spec
 
 def _scenario_seed(scenario_id: str) -> tuple[float, float, str | None]:
-    """Dérive le contexte de projection d'un scénario — (population d'exposition, cas
-    initiaux, libellé géographique) — à partir de la géographie MODALE de son corpus
+    """Dérive le contexte de projection d'un scénario - (population d'exposition, cas
+    initiaux, libellé géographique) - à partir de la géographie MODALE de son corpus
     PERTINENT (champ `geographic_scope` des documents rattachés, filtrés par la même
     porte de screening/seuil que le modèle), au lieu d'un 1e6 fixe. On prend la première
     géographie (par fréquence décroissante) reconnue par `population_for_geography` ; les
     intitulés non mappables (« multi-country »…) sont ignorés. Cas initiaux ≈ 1 pour
-    100 000 (min 1) — un simple amorçage, la dynamique SEIR y est peu sensible. Défaut
+    100 000 (min 1) - un simple amorçage, la dynamique SEIR y est peu sensible. Défaut
     (1e6, 10, None) si aucune géographie connue. Lecture seule ; robuste aux erreurs."""
     import seir_model
     pop: float = 1_000_000.0
@@ -129,7 +129,7 @@ def _seir_projection_payload(
 ) -> dict[str, Any]:
     """Cœur PARTAGÉ de la projection SEIR (GET par défaut + POST avec overrides). Les
     `overrides` = {nom_param: {value, ci_low?, ci_high?}} remplacent/ajoutent la valeur
-    (± IC) d'un paramètre saisie par l'utilisateur — pour explorer des variantes du
+    (± IC) d'un paramètre saisie par l'utilisateur - pour explorer des variantes du
     modèle. Les paramètres SOURCE (littérature, avec provenance) restent renvoyés à part
     (`parameters`) ; les paramètres EFFECTIVEMENT simulés (source ⊕ overrides) le sont
     aussi (`effective_parameters`). Déterministe (seed fixe)."""
@@ -173,7 +173,7 @@ def _seir_projection_payload(
             "reason": "Aucun paramètre épidémiologique extrait de la littérature "
                       "(scénario non transmissible, ou paramètres non rapportés).",
         }
-    # Porte 1 — le LLM a EXPLICITEMENT jugé le scénario non transmissible. Sans ce
+    # Porte 1 - le LLM a EXPLICITEMENT jugé le scénario non transmissible. Sans ce
     # test, un seul paramètre numérique rescapé (une létalité, p. ex.) suffisait à
     # servir une courbe épidémique complète pour un scénario d'oncologie.
     if not epi.get("applicable") and not forced:
@@ -184,7 +184,7 @@ def _seir_projection_payload(
             "reason": "Scénario marqué NON transmissible à l'extraction : pas de "
                       "modèle compartimental applicable.",
         }
-    # Porte 2 — un paramètre extrait ne suffit pas, il faut un paramètre qui PILOTE
+    # Porte 2 - un paramètre extrait ne suffit pas, il faut un paramètre qui PILOTE
     # la dynamique. Sans r0 ni beta, `_rates` retombait sur un R0 = 2.5 codé en dur et
     # l'UI présentait la courbe qui en découle comme « issue de la littérature ».
     if not ({"r0", "beta"} & set(dists)) and not forced:
@@ -195,7 +195,7 @@ def _seir_projection_payload(
             "reason_code": "no_transmission_parameter",
             "reason": ("Paramètre de transmission manquant : ni R₀ ni β n'a été extrait "
                        f"(disponibles : {_have}). Une projection reposerait sur une "
-                       "valeur par défaut, pas sur la littérature — saisissez R₀ "
+                       "valeur par défaut, pas sur la littérature - saisissez R₀ "
                        "manuellement pour explorer un scénario."),
             "missing": ["r0"],
             "available_parameters": sorted(dists),
@@ -234,7 +234,7 @@ def _seir_projection_payload(
         "scenario_id": scenario_id,
         "model": ens["model"],
         "disease": epi.get("disease"),
-        # `forced` : projection obtenue grâce à des paramètres SAISIS, pas extraits —
+        # `forced` : projection obtenue grâce à des paramètres SAISIS, pas extraits -
         # l'UI doit le dire plutôt que de laisser croire à un résultat sourcé.
         "forced": forced,
         # "literature" (extrait) | "user" (saisi dans l'UI) | "assumed" (repli du moteur).
@@ -356,7 +356,7 @@ class SeirProjectionIn(BaseModel):
     population: float | None = None
     initial_infected: float | None = None
     n_samples: int = 300
-    # {nom_param: {value, ci_low?, ci_high?}} — valeurs modifiées/ajoutées par l'utilisateur.
+    # {nom_param: {value, ci_low?, ci_high?}} - valeurs modifiées/ajoutées par l'utilisateur.
     overrides: dict[str, dict] | None = None
 
 
@@ -384,8 +384,8 @@ class SeirObservedIn(BaseModel):
 @app.post("/scenarios/{scenario_id}/seir/observed")
 def post_seir_observed(scenario_id: str, payload: SeirObservedIn,
                        _: None = Depends(require_api_key)) -> dict[str, Any]:
-    """Attache une série OBSERVÉE (réelle) au SEIR — upload de points {date|jour, valeur}
-    OU tirage d'un connecteur — pour la superposer au graphe et calibrer le modèle dessus.
+    """Attache une série OBSERVÉE (réelle) au SEIR - upload de points {date|jour, valeur}
+    OU tirage d'un connecteur - pour la superposer au graphe et calibrer le modèle dessus.
     Stockée par scénario (scenario_settings.seir_observed_json). Au moins 3 points."""
     import seir_model, data_connectors
     pts: list[dict] = []

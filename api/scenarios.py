@@ -37,7 +37,7 @@ from .alerts import _clean_email, _ensure_alert_subscription
 #   - un ID de la forme "usr-<uuid4_court>"
 # ─────────────────────────────────────────────────────────────────────────────
 
-# Schéma de `article_scenarios` — le lien N-N document ↔ scénario.
+# Schéma de `article_scenarios` - le lien N-N document ↔ scénario.
 #
 # Cette table est interrogée PARTOUT dans main.py (≈100 références) mais AUCUN fichier du
 # dépôt ne la créait : ni schema.sql, ni les migrations Alembic (qui se contentent de lui
@@ -128,18 +128,18 @@ def _ensure_user_scenarios_table() -> None:
             "ALTER TABLE user_scenarios ADD COLUMN IF NOT EXISTS article_count INTEGER DEFAULT 0",
             "ALTER TABLE user_scenarios ADD COLUMN IF NOT EXISTS search_strategy JSONB",
             # Chiffres PRISMA « identification » du dernier populate / rebuild (enregistrements
-            # par source, doublons, uniques) — cf. _prisma_identification_figures.
+            # par source, doublons, uniques) - cf. _prisma_identification_figures.
             "ALTER TABLE user_scenarios ADD COLUMN IF NOT EXISTS prisma_identification JSONB",
             # Clustering persisté en base (sinon perdu au redémarrage du serveur)
             "ALTER TABLE article_scenarios ADD COLUMN IF NOT EXISTS cluster_id INTEGER",
             "ALTER TABLE article_scenarios ADD COLUMN IF NOT EXISTS cluster_label TEXT",
-            # Score d'un cross-encoder (rerank Cohere) — précision supérieure au
+            # Score d'un cross-encoder (rerank Cohere) - précision supérieure au
             # cosinus pour ORDONNER le sous-ensemble pertinent (sélection = cosinus
             # >= seuil ; ordre = rerank_score quand présent).
             "ALTER TABLE article_scenarios ADD COLUMN IF NOT EXISTS rerank_score FLOAT",
             # Borne anti « lot empoisonné » : nb d'échecs d'embedding pour un chunk.
             # Au-delà de 3, il est exclu du worker / du compteur « en attente » / de
-            # /admin/embed-pending — sinon un chunk que l'API refuse (contenu invalide)
+            # /admin/embed-pending - sinon un chunk que l'API refuse (contenu invalide)
             # resterait « en attente » à l'infini et serait ré-essayé chaque cycle.
             "ALTER TABLE document_chunk ADD COLUMN IF NOT EXISTS embedding_attempts INTEGER DEFAULT 0",
             # Recherche multi-sous-requêtes : liste [{"kind":"boolean"|"natural",
@@ -175,7 +175,7 @@ def _ensure_user_scenarios_table() -> None:
     # exister encore sur une base neuve, et leur échec ne doit rien annuler.
     _failed = _exec_ddl_isolated(_pipeline_ddl, "_ensure_user_scenarios_table")
     if _failed:
-        logger.warning(f"_ensure_user_scenarios_table: {len(_failed)} DDL ignorée(s) — "
+        logger.warning(f"_ensure_user_scenarios_table: {len(_failed)} DDL ignorée(s) - "
                        f"la base est peut-être incomplète : {_failed[:3]}")
     logger.info("Tables user_scenarios et user_scenario_folders vérifiées/créées.")
 
@@ -367,7 +367,7 @@ def list_user_scenarios() -> list[dict[str, Any]]:
         # the most recent row per (query, mode) pair.
         # Identité COMPLÈTE d'une recherche = query + mode + sous-requêtes + combinateur :
         # « A » et « (A) AND (B) » partagent la même `query` (facette principale) mais
-        # sont deux recherches distinctes — l'une ne doit pas purger l'autre.
+        # sont deux recherches distinctes - l'une ne doit pas purger l'autre.
         conn.execute(text("""
             DELETE FROM user_scenarios
             WHERE pinned = false AND folder_id IS NULL
@@ -436,12 +436,12 @@ def create_user_scenario(payload: UserScenarioIn, lang: str | None = Query(None)
     # For unpinned auto-saved searches: upsert by query+mode to avoid duplicates.
     # Skip the upsert for multi-sub-query searches: they share the synthesized
     # display `query` yet are distinct searches, so query+mode dedup would wrongly
-    # merge them — always insert a fresh row instead.
+    # merge them - always insert a fresh row instead.
     if not payload.pinned and not payload.folder_id and not payload.sub_queries:
         with engine.begin() as conn:
             # Un scénario SAUVEGARDÉ (épinglé) est UNIQUE : si CE query l'est déjà, une
             # relance de recherche ne doit PAS créer un doublon « récent ». On renvoie le
-            # scénario épinglé existant tel quel (corpus + Variables/Modèle préservés) —
+            # scénario épinglé existant tel quel (corpus + Variables/Modèle préservés) -
             # la recherche reste visible dans la vue de résultats, sans seconde carte.
             pinned_existing = conn.execute(text("""
                 SELECT id FROM user_scenarios
@@ -474,8 +474,8 @@ def create_user_scenario(payload: UserScenarioIn, lang: str | None = Query(None)
     # « Enregistrer comme scénario » (épinglage) : ne PAS créer un doublon vide qui
     # relancerait tout le populate (→ un scénario épinglé « 0 article, ingestion… »
     # EN PLUS de la recherche récente déjà peuplée). On PROMEUT plutôt la recherche
-    # récente correspondante — même identité COMPLÈTE (query+mode+sous-requêtes+
-    # combinateur) — en l'épinglant, ce qui conserve son corpus déjà construit.
+    # récente correspondante - même identité COMPLÈTE (query+mode+sous-requêtes+
+    # combinateur) - en l'épinglant, ce qui conserve son corpus déjà construit.
     # Repli sur un INSERT si aucune récente ne correspond (scénario réellement neuf).
     if payload.pinned and not payload.folder_id:
         with engine.begin() as conn:
@@ -505,7 +505,7 @@ def create_user_scenario(payload: UserScenarioIn, lang: str | None = Query(None)
                 row = _get_user_scenario_or_404(existing)
                 # Scénario SAUVEGARDÉ (épinglé) → tout se calcule côté serveur : on
                 # déclenche le pipeline COMPLET d'enrichissement (best-effort, dédupliqué
-                # par le verrou). Le front peut aussi l'appeler — le garde empêche le double.
+                # par le verrou). Le front peut aussi l'appeler - le garde empêche le double.
                 try:
                     _launch_full_pipeline(existing, lang=lang)
                 except Exception as _e:
@@ -597,9 +597,9 @@ def list_user_scenarios_by_owner(email: str, _: None = Depends(require_api_key))
     """Liste les scénarios appartenant à un email (« mes scénarios »).
 
     Protégé par clé API : à la différence du listing GLOBAL (public, sans email),
-    by-owner permet d'ÉNUMÉRER les scénarios d'un email arbitraire — une surface de
+    by-owner permet d'ÉNUMÉRER les scénarios d'un email arbitraire - une surface de
     vie privée qu'on ne laisse pas ouverte. Aucun impact UI : le front n'appelle pas
-    cet endpoint (les endpoints de qualité de réponse — RAG/recherche — restent, eux,
+    cet endpoint (les endpoints de qualité de réponse - RAG/recherche - restent, eux,
     publics)."""
     e = _clean_email(email)
     if not e:
@@ -787,7 +787,7 @@ def get_user_scenario_detail(scenario_id: str, lang: str | None = Query(None)) -
 
     # Recherche multi-sous-requêtes : on renvoie les vraies listes booléennes /
     # naturelles. Sinon (mono-requête), la requête sauvegardée est booléenne OU en
-    # langage naturel selon le mode réellement utilisé — on ne l'affiche que dans la
+    # langage naturel selon le mode réellement utilisé - on ne l'affiche que dans la
     # catégorie employée (évite de montrer la même requête en booléen ET en naturel).
     query_text = row["query"]
     _sub = _normalize_sub_queries(row.get("sub_queries"))
@@ -798,7 +798,7 @@ def get_user_scenario_detail(scenario_id: str, lang: str | None = Query(None)) -
         nl_queries = [s["text"] for s in _sub if s["kind"] == "natural"]
         # Facettes DANS L'ORDRE avec l'opérateur effectif de chacune (None pour la
         # principale) : les listes booléen/naturel ci-dessus perdent l'ordre et les
-        # opérateurs — c'est ce qui faisait « disparaître » le ET entre deux requêtes.
+        # opérateurs - c'est ce qui faisait « disparaître » le ET entre deux requêtes.
         _ops = _facet_ops(_sub, _combinator)
         facets = [{"kind": s["kind"], "text": s["text"],
                    "op": (None if i == 0 else _ops[i - 1])} for i, s in enumerate(_sub)]
@@ -871,7 +871,7 @@ def get_user_scenario_corpus(
 
     `abstract_chars` tronque le résumé de chaque article à N caractères : la page de
     résultats de recherche n'affiche qu'un extrait (600 caractères) et lit le résumé
-    complet via /documents/{id} au clic — envoyer 10 000 résumés entiers pesait des
+    complet via /documents/{id} au clic - envoyer 10 000 résumés entiers pesait des
     dizaines de Mo pour rien. Sans le paramètre, le résumé complet est renvoyé.
     """
     from .relevance import _RERANK_JOBS, _maybe_autorerank  # lazy: relevance is loaded after this module
@@ -1057,7 +1057,8 @@ _user_scenario_pipeline_jobs: dict[str, dict] = {}
 
 
 def _launch_populate_job(scenario_id: str, query: str, filters: dict, max_results: int,
-                         include_live: bool = True, lang: str | None = None) -> str:
+                         include_live: bool = True, lang: str | None = None,
+                         force_live: bool = False) -> str:
     """
     Démarre un job d'ingestion en arrière-plan pour un scénario, en garantissant
     qu'un seul job tourne à la fois (verrou partagé). Renvoie l'état : "started"
@@ -1078,7 +1079,7 @@ def _launch_populate_job(scenario_id: str, query: str, filters: dict, max_result
                         "biorxiv": 0, "medrxiv": 0},
         }
     # Persister l'état « en cours » : la liste des scénarios et l'indicateur global
-    # (/activity) le lisent en base — une recherche lancée puis quittée (autre page,
+    # (/activity) le lisent en base - une recherche lancée puis quittée (autre page,
     # rechargement) reste ainsi visible et retrouvable. Remis à done/error à la fin
     # du run ; les orphelins d'un redémarrage sont passés à 'error' au démarrage.
     try:
@@ -1095,7 +1096,7 @@ def _launch_populate_job(scenario_id: str, query: str, filters: dict, max_result
         # the browser smoke test on an API without `requests`.
         try:
             _run_user_scenario_populate(scenario_id, query, filters or {}, max_results, None, include_live,
-                                        _norm_lang(lang) or "fr")
+                                        _norm_lang(lang) or "fr", force_live=force_live)
         except BaseException as _e:                          # noqa: BLE001
             logger.error(f"Populate {scenario_id} crashed before its own error handling: {_e}", exc_info=True)
             _job = _user_scenario_populate_jobs.get(scenario_id)
@@ -1121,19 +1122,21 @@ def populate_user_scenario(
     max_results: int = 100000,
     include_live: bool = True,
     lang: str | None = Query(None),
+    force_live: bool = False,
     _: None = Depends(require_api_key),
 ) -> dict[str, Any]:
     """
     Construit le corpus du scénario = requête booléenne sur (base locale ∪ live).
     Plafond LIVE_MAX_PER_SOURCE par source. include_live=False : base locale seule.
+    force_live=True : ignorer le cache des réponses des sources (SOURCE_CACHE_TTL_S).
     """
     row = _get_user_scenario_or_404(scenario_id)
     query = row["query"]
 
-    # `lang` : la langue de l'interface qui lance la recherche — les résumés de clusters
+    # `lang` : la langue de l'interface qui lance la recherche : les résumés de clusters
     # précalculés à la fin le sont dans cette langue (plus de première ouverture qui attend).
     if _launch_populate_job(scenario_id, query, row.get("filters") or {}, max_results, include_live,
-                            _norm_lang(lang)) == "already_running":
+                            _norm_lang(lang), force_live=force_live) == "already_running":
         job = _user_scenario_populate_jobs.get(scenario_id) or {}
         return {
             "scenario_id": scenario_id,
@@ -1178,8 +1181,8 @@ def _launch_full_pipeline(scenario_id: str, max_results: int = LIVE_MAX_PER_SOUR
     lève jamais (usage best-effort depuis les handlers de sauvegarde).
 
     `lang` : la langue de l'interface qui déclenche le pipeline. TOUT ce que le pipeline
-    produit et met en cache — résumés de clusters, brief, variables et spécification du
-    modèle, actions recommandées — l'est dans cette langue, pour qu'aucun onglet n'ait
+    produit et met en cache - résumés de clusters, brief, variables et spécification du
+    modèle, actions recommandées - l'est dans cette langue, pour qu'aucun onglet n'ait
     à générer quoi que ce soit à sa première ouverture. Avant : tout en français, puis
     régénéré ou traduit à l'ouverture sous le toggle anglais."""
     from .pipeline import _run_user_scenario_full_pipeline  # lazy: pipeline is loaded after this module
@@ -1282,7 +1285,7 @@ def _counts_consistency(counts: dict) -> tuple[bool, list[dict]]:
     nettoyé) ; le PRISMA affiche `records_screened`, figé à la fin de la dernière
     recherche ; l'étape 2 compte au-dessus/en dessous du seuil en direct. Le temps d'un
     pipeline, ces trois lectures divergent légitimement ; à la fin, elles doivent
-    coïncider — et c'est ce que vérifie cette fonction (pure, testée hors base)."""
+    coïncider - et c'est ce que vérifie cette fonction (pure, testée hors base)."""
     ref = int(counts.get("corpus_links") or 0)
     mismatches: list[dict] = []
     ac = counts.get("article_count")
@@ -1360,13 +1363,13 @@ def get_user_scenario_counts(scenario_id: str) -> dict[str, Any]:
     """Les nombres d'articles que l'interface affiche pour ce scénario (liste, en-tête,
     PRISMA, étape sémantique), comparés entre eux, et si un pipeline tourne encore.
     Sert la bannière de la page scénario : « pipeline en cours, compteurs provisoires »
-    puis « terminé, N articles partout » — ou la liste des écarts."""
+    puis « terminé, N articles partout » - ou la liste des écarts."""
     return _scenario_counts(scenario_id)
 
 
 @app.get("/activity")
 def get_activity() -> dict[str, Any]:
-    """Recherches et pipelines EN COURS, tous scénarios utilisateur confondus — pour
+    """Recherches et pipelines EN COURS, tous scénarios utilisateur confondus - pour
     l'indicateur global de l'interface, visible sur toutes les pages.
 
     Une recherche continue côté serveur quand on change de page ; sans indicateur elle
@@ -1427,7 +1430,7 @@ def get_user_scenario_embedding_status(scenario_id: str) -> dict[str, Any]:
         """), {"sid": scenario_id}).mappings().first()
 
         # Title+abstract: one chunk per doc. Un chunk title_abstract n'est "en
-        # attente" QUE s'il sera réellement embeddé par le worker — qui IGNORE
+        # attente" QUE s'il sera réellement embeddé par le worker - qui IGNORE
         # (a) les chunks trop courts (length <= 20) et (b) le title_abstract d'un
         # doc qui possède aussi du plein texte (on embed alors le plein texte). Sans
         # ces deux filtres, le compteur restait bloqué à un petit nombre "en cours".
@@ -1480,12 +1483,12 @@ def get_user_scenario_embedding_status(scenario_id: str) -> dict[str, Any]:
             ) ft_emb ON ft_emb.document_id = d.document_id
         """), {"sid": scenario_id}).mappings().first()
 
-        # Scores de pertinence (RANKING) — INDÉPENDANT de l'indexation RAG ci-dessus.
+        # Scores de pertinence (RANKING) - INDÉPENDANT de l'indexation RAG ci-dessus.
         # Le similarity_score affiché est calculé EN LIGNE pendant la phase "scoring"
         # (_run_semantic_rerank_inline : réutilise les embeddings stockés, ré-embedde
         # le reste à la volée), et le rerank Cohere écrit rerank_score sur le
         # sous-ensemble pertinent. Ce sont CES compteurs qui pilotent les voyants
-        # "Sémantique" / "Cohere" — PAS le worker d'indexation RAG (chunks).
+        # "Sémantique" / "Cohere" - PAS le worker d'indexation RAG (chunks).
         ranking = conn.execute(text("""
             SELECT
                 COUNT(*) AS total,
@@ -1529,13 +1532,13 @@ def get_user_scenario_embedding_status(scenario_id: str) -> dict[str, Any]:
 
     if chunkless > 0:
         status = "partial"
-        status_label = f"{chunkless} document(s) pas encore découpé(s) (sans chunk) — invisibles à la recherche"
+        status_label = f"{chunkless} document(s) pas encore découpé(s) (sans chunk) - invisibles à la recherche"
     elif total_pending_chunks == 0 and ta_total > 0:
         status = "complete"
         status_label = "All embeddings complete"
     elif ta_embedded == 0 and ft_embedded_chunks == 0:
         status = "none"
-        status_label = "No embeddings yet — only lexical search available"
+        status_label = "No embeddings yet - only lexical search available"
     else:
         status = "partial"
         status_label = f"{ta_pending} abstract-only docs + {ft_pending_chunks} fulltext chunks still to embed"

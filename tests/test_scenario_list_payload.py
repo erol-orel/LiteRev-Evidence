@@ -2,7 +2,7 @@
 
 Production, 2026-09-10: nginx answered 502 on /api/gesica/scenarios ("Failed to load
 scenarios") and, when it did answer, the list took minutes. The route loaded EVERY
-article of EVERY scenario — user scenarios included, which it does not even list — with
+article of EVERY scenario - user scenarios included, which it does not even list - with
 their abstracts, in ONE query, then serialised all of it. A single user scenario whose
 lexical search had matched 238 000 documents was enough. The frontend never displays
 that list (App.tsx: `false && scenario.relevantArticles…`); a scenario's articles are
@@ -81,7 +81,7 @@ def seeded(db_conn):
             "(3, 'Sys doc dup', 'pubmed', 'abstract dup', 2022, true, NULL)")
         cur.execute("INSERT INTO article_scenarios (scenario_id, document_id) VALUES "
                     "(%s, 1), (%s, 2), (%s, 3)", (SYS_ID, SYS_ID, SYS_ID))
-        # user scenario: many articles with long abstracts — the payload that used to leak
+        # user scenario: many articles with long abstracts - the payload that used to leak
         cur.executemany(
             "INSERT INTO literature_document (id, title, source, abstract, year) VALUES (%s, %s, 'pubmed', %s, 2020)",
             [(100 + i, f"User doc {i}", MARKER * 10) for i in range(USER_DOCS)])

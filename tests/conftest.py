@@ -1,7 +1,7 @@
 """Shared pytest setup for the LiteRev backend tests.
 
 `main.py` reads DB_URL and WRITE_API_KEY at import time (and raises if missing),
-but `create_engine(DB_URL)` is lazy — so importing `main` needs the env vars set
+but `create_engine(DB_URL)` is lazy - so importing `main` needs the env vars set
 but NOT a reachable database (its startup DDL is wrapped in try/except). Pure
 tests therefore run with a dummy DB_URL; integration tests use the `db_conn`
 fixture (a raw psycopg connection), which skips cleanly when no Postgres is

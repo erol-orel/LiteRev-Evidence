@@ -1,12 +1,12 @@
 #!/bin/bash
 # =============================================================
-# deploy.sh — LiteRev Evidence to Scenario
+# deploy.sh - LiteRev Evidence to Scenario
 #
 # CHEMIN UNIQUE :
 #   Source git  : /opt/literev-api/
 #   Build       : /opt/literev-api/frontend/  (npm run build)
 #   Servi nginx : /var/www/literev-frontend/  (seul chemin public)
-#   API         : localhost:8000 (uvicorn main:app — code in /opt/literev-api/api/)
+#   API         : localhost:8000 (uvicorn main:app - code in /opt/literev-api/api/)
 #
 # Garanties :
 #   - un build frontend qui échoue ABORTE le déploiement (le site live reste intact)
@@ -28,7 +28,7 @@ VENV_PIP="$REPO_DIR/.venv/bin/pip"
 
 echo ""
 echo "========================================"
-echo "  LiteRev Deploy — $(date '+%Y-%m-%d %H:%M:%S')"
+echo "  LiteRev Deploy - $(date '+%Y-%m-%d %H:%M:%S')"
 echo "========================================"
 
 # ── 1. Git pull ───────────────────────────────────────────────
@@ -37,7 +37,7 @@ cd "$REPO_DIR"
 git reset --hard HEAD          # discard any server-side manual edits
 git clean -fd                  # remove untracked files
 git pull origin main
-echo "  OK — $(git log --oneline -1)"
+echo "  OK - $(git log --oneline -1)"
 
 # Re-exec pour utiliser le deploy.sh fraichement tiré
 if [ -z "${DEPLOY_REEXEC:-}" ]; then
@@ -48,7 +48,7 @@ fi
 # ── 2. Vérification syntaxe Python (tous les modules importés) ─
 echo "[2/7] Vérification syntaxe Python..."
 "$VENV_PY" -m compileall -q "$REPO_DIR"/*.py "$REPO_DIR"/scripts/*.py "$REPO_DIR"/tools/*.py
-echo "  OK — $(cat $REPO_DIR/main.py $REPO_DIR/api/*.py | md5sum | cut -d' ' -f1)"
+echo "  OK - $(cat $REPO_DIR/main.py $REPO_DIR/api/*.py | md5sum | cut -d' ' -f1)"
 
 # ── 3. Dépendances backend ────────────────────────────────────
 echo "[3/7] Installation dépendances backend..."
@@ -64,7 +64,7 @@ if [ -f "$REPO_DIR/alembic.ini" ]; then
   if ( cd "$REPO_DIR" && "$VENV_PY" -m alembic upgrade head ); then
     echo "  OK"
   else
-    echo "  AVERTISSEMENT : alembic upgrade a échoué — on continue (DDL au boot)."
+    echo "  AVERTISSEMENT : alembic upgrade a échoué - on continue (DDL au boot)."
   fi
 else
   echo "  (pas d'alembic.ini, étape ignorée)"
@@ -76,7 +76,7 @@ cd "$FRONTEND_DIR"
 npm ci --silent
 rm -rf "$FRONTEND_DIR/dist"
 # SÉCURITÉ : on n'injecte PLUS la clé d'écriture dans le build. Vite « inline » les
-# variables VITE_* dans le bundle JS *public* — y placer WRITE_API_KEY exposait le
+# variables VITE_* dans le bundle JS *public* - y placer WRITE_API_KEY exposait le
 # secret à tout visiteur du site. Les mutations sont désormais signées côté navigateur
 # par une clé que l'admin saisit une seule fois dans l'UI (bouton « Clé admin »,
 # stockée en localStorage sur son appareil, jamais embarquée dans le bundle).
@@ -90,7 +90,7 @@ TITLE=$(grep -o '<title>.*</title>' "$FRONTEND_DIR/dist/index.html")
 # deploy before the restart step. BUNDLE is only for the log line below → make
 # it non-fatal.
 BUNDLE=$(ls "$FRONTEND_DIR/dist/assets/"*.js 2>/dev/null | xargs -n1 basename | head -1 || true)
-echo "  OK — $TITLE | $BUNDLE"
+echo "  OK - $TITLE | $BUNDLE"
 
 # ── 6. Déploiement atomique vers nginx ────────────────────────
 echo "[6/7] Bascule atomique vers $NGINX_ROOT..."
@@ -103,7 +103,7 @@ cp -r "$FRONTEND_DIR/dist/"* "$STAGING/"
 rm -rf "$PREVIOUS"
 [ -d "$NGINX_ROOT" ] && mv "$NGINX_ROOT" "$PREVIOUS"
 mv "$STAGING" "$NGINX_ROOT"
-echo "  OK — $(grep -o '<title>.*</title>' $NGINX_ROOT/index.html)"
+echo "  OK - $(grep -o '<title>.*</title>' $NGINX_ROOT/index.html)"
 echo "  Rollback dispo : $PREVIOUS"
 
 # ── 7. Redémarrage API + health check bloquant ────────────────
@@ -116,7 +116,7 @@ for i in 1 2 3 4 5 6; do
   [ -n "$HEALTH" ] && break
 done
 if [ -z "$HEALTH" ]; then
-  echo "  ÉCHEC — /health ne répond pas. Rollback du frontend..."
+  echo "  ÉCHEC - /health ne répond pas. Rollback du frontend..."
   if [ -d "$PREVIOUS" ]; then
     rm -rf "$NGINX_ROOT"
     mv "$PREVIOUS" "$NGINX_ROOT"
@@ -130,7 +130,7 @@ echo "  Health  : $HEALTH"
 
 echo ""
 echo "========================================"
-echo "  DEPLOY OK — $(date '+%Y-%m-%d %H:%M:%S')"
+echo "  DEPLOY OK - $(date '+%Y-%m-%d %H:%M:%S')"
 echo "  Commit : $(git -C $REPO_DIR log --oneline -1)"
 echo "========================================"
 echo ""

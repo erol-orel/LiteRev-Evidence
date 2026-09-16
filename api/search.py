@@ -85,7 +85,7 @@ def _strip_field_tags(query: str) -> str:
     return re.sub(r"\[[^\]]*\]", " ", query or "")
 
 
-# Conservés dans un terme : lettres (accentuées comprises — « cathéter » doit rester
+# Conservés dans un terme : lettres (accentuées comprises - « cathéter » doit rester
 # « cathéter », pas « cathter »), chiffres, '_', '-', espaces et '*'. Le reste est du
 # bruit de ponctuation.
 _TERM_JUNK_RE = re.compile(r"[^\w\-* ]")
@@ -135,7 +135,7 @@ def _parse_boolean_ast(tokens: list[tuple[str, str | None]]):
     ('and'|'or', [enfants]) | ('not', enfant) | ('term', phrase) | None.
     Précédence : OR délimite, AND (explicite OU implicite entre atomes adjacents) lie
     plus fort, NOT préfixe un atome, les parenthèses regroupent. Robuste aux
-    parenthèses déséquilibrées (arrêt propre) — corrige l'ancien parseur plat qui
+    parenthèses déséquilibrées (arrêt propre) - corrige l'ancien parseur plat qui
     transformait « (A OU B) ET (C OU D) » en « A ET C ET (B OU D) »."""
     pos = 0
 
@@ -226,11 +226,11 @@ def _parse_boolean_ast(tokens: list[tuple[str, str | None]]):
 # successifs sur ces ensembles coûtent bien plus qu'un seul balayage séquentiel qui
 # court-circuite dès le premier prédicat vrai.
 #
-# Surtout : le coût dominant (4,9 s des 8,5 s) est la RELECTURE de tas du bitmap — les
+# Surtout : le coût dominant (4,9 s des 8,5 s) est la RELECTURE de tas du bitmap - les
 # trigrammes rendent 16 338 chunks candidats dont la moitié sont de faux positifs, et
 # vérifier un LIKE oblige à relire le texte complet. TOUTE approche fondée sur LIKE paie
 # ce prix, y compris la version ensembliste. Le seul vrai levier serait la recherche
-# plein texte (tsvector + GIN) : pas de relecture, index bien plus petit — mais la
+# plein texte (tsvector + GIN) : pas de relecture, index bien plus petit - mais la
 # sémantique d'appariement change (racinisation, frontières de mots, plus de
 # sous-chaînes), donc c'est une décision produit, pas une optimisation transparente.
 def _boolean_ast_to_sql(ast, params: dict, idx: list | None = None) -> str | None:
@@ -250,7 +250,7 @@ def _boolean_ast_to_sql(ast, params: dict, idx: list | None = None) -> str | Non
         # corrélé sur d.id). Indispensable pour NOT : compiler `NOT terme` en
         # `(NOT (… OR c.content LIKE …))` évalué PAR LIGNE de chunk laissait
         # entrer un article exclu dès qu'un AUTRE de ses chunks ne contenait pas le
-        # terme (SELECT DISTINCT d.id) — fuite d'articles exclus dans le corpus.
+        # terme (SELECT DISTINCT d.id) - fuite d'articles exclus dans le corpus.
         # Corrige aussi le AND inter-chunks (deux termes dans deux chunks distincts).
         return (f"(LOWER(COALESCE(d.title,'')) LIKE :{key}"
                 f" OR LOWER(COALESCE(d.abstract,'')) LIKE :{key}"
@@ -272,7 +272,7 @@ def _build_boolean_match_sql_from_query(query: str, params: dict) -> str:
     """Requête booléenne → fragment SQL de correspondance (groupement RESPECTÉ).
 
     Un AST VIDE (requête sans terme : ponctuation seule, opérateurs/tags de champ
-    seuls, ou repli dégradé) renvoie 'FALSE' — AUCUNE correspondance — et NON 'TRUE'.
+    seuls, ou repli dégradé) renvoie 'FALSE' - AUCUNE correspondance - et NON 'TRUE'.
     'TRUE' faisait exploser le corpus à la base ENTIÈRE (appartenance = tous les
     documents) sur une requête accidentellement sans terme."""
     return _boolean_ast_to_sql(_parse_boolean_ast(_tokenize_boolean(query)), params) or "FALSE"
@@ -362,7 +362,7 @@ def _search_local_doc_ids(
         _fts = _lex.use_fts()
         if _fts:
             # Plein texte : UN tsquery pour toute l'expression, évalué dans l'index GIN
-            # de document_search — sémantique PAR DOCUMENT, comme le chemin LIKE
+            # de document_search - sémantique PAR DOCUMENT, comme le chemin LIKE
             # (cf. lexical_search.py). Un AST vide → FALSE : aucune correspondance.
             any_match_sql = _lex.match_sql(_ast, params) or "FALSE"
         else:
@@ -412,14 +412,14 @@ def _search_local_doc_ids(
         """)
     elif mode == "boolean":
         # Chemin LIKE/trigramme : REPLI tant que document_search n'est pas rempli
-        # (ou LEXICAL_SEARCH_ENGINE=like). Lent — 55 à 240 s par requête sur le corpus
-        # de production — mais correct.
-        # PERF : le match booléen est PAR DOCUMENT — `any_match_sql` n'apparie que
+        # (ou LEXICAL_SEARCH_ENGINE=like). Lent - 55 à 240 s par requête sur le corpus
+        # de production - mais correct.
+        # PERF : le match booléen est PAR DOCUMENT - `any_match_sql` n'apparie que
         # d.title / d.abstract + un EXISTS corrélé sur document_chunk ; il ne référence
         # PAS le chunk joint `c`. Piloter la requête depuis literature_document (~207k
         # lignes) au lieu de document_chunk (souvent 1M+ lignes, multipliées par doc
         # puis dédupliquées par DISTINCT) renvoie EXACTEMENT le même ensemble d'IDs en
-        # balayant 5-10× moins de lignes — cause majeure de la lenteur de la recherche
+        # balayant 5-10× moins de lignes - cause majeure de la lenteur de la recherche
         # locale et de la reconstruction du corpus (exécutée une fois PAR sous-requête).
         sql = text(f"""
             SELECT d.id
@@ -452,18 +452,18 @@ def _search_local_doc_ids(
         # Une ligne par recherche, avec le moteur utilisé : c'est ce que l'on cherche
         # dans le journal quand « la recherche locale est lente ».
         logger.info(f"lexical search [{'fts' if _fts else 'like'}] {len(ids)} docs in "
-                    f"{(_time_ls.perf_counter() - _t0) * 1000:.0f} ms — {query[:100]!r}")
+                    f"{(_time_ls.perf_counter() - _t0) * 1000:.0f} ms - {query[:100]!r}")
         if _fts:
             _ignored = _lex.stopword_terms(_lex.ast_terms(_ast))
             if _ignored:
                 logger.warning(f"lexical search: terms made only of stop words were "
-                               f"ignored by PostgreSQL: {_ignored} — {query[:100]!r}")
+                               f"ignored by PostgreSQL: {_ignored} - {query[:100]!r}")
     return ids
 
 
 # Limite de récupération par source live (PubMed, OpenAlex, …). Appliquée à l'identique
 # à la recherche ET à la construction du corpus. Réglable via l'env LIVE_MAX_PER_SOURCE :
-# la mettre très haut (p. ex. 100000) « retire » le plafond — la vraie borne devient alors
+# la mettre très haut (p. ex. 100000) « retire » le plafond - la vraie borne devient alors
 # le budget temps (POPULATE_FEDERATION_BUDGET). ⚠ multiplier ce plafond multiplie les
 # appels API (risque de 429 PubMed/S2) ET le coût d'embedding OpenAI de CHAQUE recherche.
 try:
@@ -483,7 +483,7 @@ def _looks_boolean(text: str) -> bool:
     """Le texte utilise-t-il une SYNTAXE booléenne (→ utilisé tel quel) plutôt que du
     langage naturel (→ traduit) ? Signaux : opérateurs AND/OR/NOT en MAJUSCULES, tags
     de champ ([dp], [tiab], [mesh]…), guillemets doubles appariés, ou parenthèses.
-    Pur/déterministe — le même heuristique est reflété côté client (App.tsx:looksBoolean)."""
+    Pur/déterministe - le même heuristique est reflété côté client (App.tsx:looksBoolean)."""
     if not text:
         return False
     t = text.strip()
@@ -501,7 +501,7 @@ def _looks_boolean(text: str) -> bool:
 def _normalize_sub_queries(sub_queries: Any) -> list[dict]:
     """Nettoie une liste de sous-requêtes : ne garde que les entrées {kind,text} au
     texte non vide. Le `kind` explicite (boolean|natural) est respecté (override
-    utilisateur) ; sinon (auto|absent|invalide) il est DÉTECTÉ par _looks_boolean —
+    utilisateur) ; sinon (auto|absent|invalide) il est DÉTECTÉ par _looks_boolean -
     l'utilisateur n'a donc plus à taguer chaque sous-requête. Renvoie [] si aucune."""
     out: list[dict] = []
     if not isinstance(sub_queries, list):
@@ -539,7 +539,7 @@ def _facet_ops(facets: list[dict], combinator: str) -> list[str]:
 def _facets_intersect(facets: list[dict], combinator: str) -> bool:
     """True dès qu'UNE facette est INTERSECTÉE (ET) avec le résultat courant. Dans ce
     cas un document qui ne correspond qu'à la requête principale n'appartient PAS
-    forcément au corpus — les enregistrements booléens-natifs des sources live (qui
+    forcément au corpus - les enregistrements booléens-natifs des sources live (qui
     n'ont vu que la requête principale) ne doivent donc pas être unis d'office."""
     return "and" in _facet_ops(facets, combinator)
 
@@ -549,7 +549,7 @@ def _combined_query_text(query: str | None, sub_queries: Any, combinator: str | 
     avec leurs opérateurs, parenthésée selon le fold gauche→droite réellement appliqué
     (« (A) AND (B) », « ((A) OR (B)) AND (C) »). Mono-requête → la requête telle quelle.
     C'est ce texte qui doit apparaître partout où la recherche est montrée (nom par
-    défaut, carte, en-tête, onglet Stratégie) — la colonne `query` ne porte que la
+    défaut, carte, en-tête, onglet Stratégie) - la colonne `query` ne porte que la
     facette principale, d'où un « ET » invisible auparavant."""
     clean = _normalize_sub_queries(sub_queries)
     if len(clean) < 2:
@@ -566,7 +566,7 @@ def _widen_boolean_for_or_facets(boolean: str, pubmed_q: str, sub_queries: Any, 
     recherche multi-facettes : « (booléen principal) OR (booléen de la facette) ».
 
     La fédération n'interrogeait que la requête PRINCIPALE : une facette « OU » ne
-    trouvait que ce que la base locale contenait déjà — des articles qui ne
+    trouvait que ce que la base locale contenait déjà - des articles qui ne
     correspondent qu'à elle n'étaient jamais ramenés de PubMed/Europe PMC/OpenAlex.
     Les facettes intersectées (ET) n'ont pas besoin d'être fédérées : leurs résultats
     sont un sous-ensemble de ceux de la requête principale, re-matché localement.
@@ -588,7 +588,7 @@ def _widen_boolean_for_or_facets(boolean: str, pubmed_q: str, sub_queries: Any, 
                 gen = translate(facet["text"])
                 if isinstance(gen, dict) and gen.get("general") and not _strategy_is_degraded(gen, facet["text"]):
                     fb, fp = gen["general"], gen.get("pubmed")
-            except Exception as _e:                      # noqa: BLE001 — repli texte brut
+            except Exception as _e:                      # noqa: BLE001 - repli texte brut
                 logger.warning(f"facette OU « {facet['text'][:60]} » : traduction échouée ({_e}) ; texte brut")
         portable = _strip_field_tags(fb).strip() or fb
         if portable in boolean:
@@ -626,7 +626,7 @@ def _multi_query_corpus_ids(sub_queries: list[dict], combinator: str, filters: d
     """Appartenance au corpus pour une recherche MULTI-sous-requêtes.
 
     Chaque sous-requête produit un ENSEMBLE d'IDs de documents de la base locale
-    par correspondance LEXICALE (booléenne) — EXACTEMENT comme la recherche
+    par correspondance LEXICALE (booléenne) - EXACTEMENT comme la recherche
     mono-requête (_boolean_corpus_ids) et comme le documente l'étape de populate :
       - kind="boolean" → la requête est utilisée telle quelle (AND/OR/NOT),
       - kind="natural" → elle est d'abord TRADUITE en booléen (_generate_search_strategy,
@@ -666,7 +666,7 @@ def _set_scenario_corpus(scenario_id: str, ids: list, allow_empty: bool = False)
     """Fixe le corpus d'un scénario à EXACTEMENT `ids` (appartenance booléenne).
     Supprime les liens qui n'en font plus partie et insère les manquants. Si `ids`
     est vide on ne touche à rien (évite de vider le corpus sur un échec transitoire),
-    SAUF si allow_empty=True — cas d'une intersection multi-requêtes légitimement
+    SAUF si allow_empty=True - cas d'une intersection multi-requêtes légitimement
     vide (deux facettes sans document commun), où le corpus DOIT être vidé."""
     if not ids:
         if allow_empty:
@@ -703,7 +703,7 @@ def _dedup_scenario_links(scenario_id: str) -> int:
     marque enfin `is_duplicate`. On fige le compte MAINTENANT, de façon déterministe
     et bornée au scénario : pour chaque clé (DOI › external_id normalisé sans préfixe
     pmid/pmcid › titre normalisé ≥ 20 › id), on ne garde que le lien de plus petit
-    `document_id` (le canonique — MÊME règle que `scripts/_softdedup.py`, donc aucun
+    `document_id` (le canonique - MÊME règle que `scripts/_softdedup.py`, donc aucun
     « glissement » quand la dédup globale tournera : elle marquera exactement les id
     supérieurs déjà retirés ici). Aucune fusion abusive : seules des clés EXACTES
     (même DOI, même external_id normalisé, ou même titre long) sont réunies ; un
@@ -755,7 +755,7 @@ def _prisma_identification_figures(records_by_source: dict, unique_records: int,
                                    removed_no_abstract: int = 0,
                                    removed_not_matching: int = 0) -> dict[str, Any]:
     """Chiffres PRISMA 2020 de l'étape « identification », calculés à partir de ce qu'une
-    recherche a RÉELLEMENT ramené — et non du corpus déjà dédupliqué.
+    recherche a RÉELLEMENT ramené - et non du corpus déjà dédupliqué.
 
     Pourquoi : le PRISMA affichait « doublons retirés : 0 » par construction. La
     déduplication a lieu à l'ingestion (index uniques DOI / titre normalisé : un article
@@ -783,7 +783,7 @@ def _prisma_identification_figures(records_by_source: dict, unique_records: int,
     corpus = max(0, int(corpus_total or 0))
     # Retraits AVANT screening, ventilés : sans résumé (règle qualité), hors requête
     # (enregistrement d'une source par mots-clés qui ne correspond pas au booléen en
-    # local), et le reste (résiduel — p. ex. un document marqué doublon global). Les
+    # local), et le reste (résiduel - p. ex. un document marqué doublon global). Les
     # deux premiers sont bornés à ce qui reste à expliquer, dans cet ordre, pour que
     # identifiés − doublons − retraits = passés au screening tienne toujours.
     to_explain = max(0, unique_after - corpus)
@@ -812,15 +812,15 @@ def _reconcile_prisma_identification(figures: dict, corpus_now: int) -> dict[str
     """The identification figures of the last search, brought to the corpus AS IT STANDS.
 
     The figures are computed when a search closes. The corpus can change afterwards: a
-    rebuild from the local database, duplicates marked later by the maintenance and —
-    before the corpus was frozen at assembly — pages of a slow source arriving after
+    rebuild from the local database, duplicates marked later by the maintenance and -
+    before the corpus was frozen at assembly - pages of a slow source arriving after
     the accounting. The panel used to show the live corpus as "records screened" next
     to duplicates and removals computed for another total, so identified − duplicates
     − removals no longer equalled screened (3,623 − 731 − 401 ≠ 3,602). The difference
     is now a line of its own, in the direction it happened:
 
-      added_after_search   — documents in the corpus that this search did not count
-      removed_after_search — documents the search screened that have left the corpus
+      added_after_search - documents in the corpus that this search did not count
+      removed_after_search - documents the search screened that have left the corpus
 
     and identified − duplicates − removals + added − removed_after = screened holds
     for every scenario, whatever happened since the search. The per-source counts and
@@ -853,7 +853,7 @@ def _reconcile_prisma_identification(figures: dict, corpus_now: int) -> dict[str
 def _store_prisma_identification(scenario_id: str, figures: dict) -> None:
     """Persiste les chiffres (colonne JSONB user_scenarios.prisma_identification).
     best-effort : une colonne absente ou une panne ne doit jamais faire échouer un
-    populate — le PRISMA retombe alors sur le calcul historique (cf. get_user_scenario_prisma)."""
+    populate - le PRISMA retombe alors sur le calcul historique (cf. get_user_scenario_prisma)."""
     try:
         with engine.begin() as _c:
             _c.execute(text("UPDATE user_scenarios SET prisma_identification = CAST(:f AS jsonb) "
@@ -886,7 +886,7 @@ def _load_prisma_identification(scenario_id: str) -> dict | None:
 # colonnes NUES (sans alias) pour les requêtes globales : DOI › external_id normalisé
 # (préfixe pmid/pmcid retiré, casse ignorée) › titre normalisé ≥ 20 › id. On PARTITIONNE
 # toujours par project_context (un « literev » et un « gesica » de même titre ne sont PAS
-# des doublons — cf. l'index unique partiel uq_litdoc_title_norm sur (project_context,…)).
+# des doublons - cf. l'index unique partiel uq_litdoc_title_norm sur (project_context,…)).
 _DUP_KEY_SQL = """COALESCE(
     NULLIF(lower(btrim(doi)), ''),
     NULLIF('ext:' || lower(btrim(regexp_replace(external_id, '^(pmid|pmcid):', '', 'i'))), 'ext:'),
@@ -1005,7 +1005,7 @@ _STRATEGY_CACHE_MAX = 512
 def _strategy_key(query: str) -> str:
     """Clé de cache NORMALISÉE : minuscules + espaces compactés + rognés. La même
     phrase en langage naturel (à la casse et aux espaces près) mappe donc toujours
-    sur la même stratégie booléenne — condition d'un résultat déterministe."""
+    sur la même stratégie booléenne - condition d'un résultat déterministe."""
     return re.sub(r"\s+", " ", (query or "").strip().lower())
 
 
@@ -1125,7 +1125,7 @@ def post_search_facets(payload: FacetPreviewIn, _: None = Depends(require_api_ke
     compte par facette + les totaux par UNION (OU) et INTERSECTION (ET).
 
     Aucun score sémantique/Cohere ici : l'appartenance au corpus est purement lexicale.
-    NB : ces comptes portent sur la BIBLIOTHÈQUE INDEXÉE — la recherche en direct
+    NB : ces comptes portent sur la BIBLIOTHÈQUE INDEXÉE - la recherche en direct
     ajoute ensuite des articles des sources externes avant de refixer le corpus."""
     clean = _normalize_sub_queries(payload.sub_queries)
     filters = payload.filters if isinstance(payload.filters, dict) else {}

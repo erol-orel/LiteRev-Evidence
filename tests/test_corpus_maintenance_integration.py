@@ -10,7 +10,7 @@ through dry-run → apply → idempotent re-run, asserting:
   - restore-point backup tables are created; re-run is a no-op.
 
 Skips when no Postgres is reachable (see conftest.db_conn) or when this
-SQLAlchemy/psycopg build can't probe the server version — a known sandbox-only
+SQLAlchemy/psycopg build can't probe the server version - a known sandbox-only
 quirk; CI and production run it for real.
 """
 import pytest
@@ -39,7 +39,7 @@ def _seed(conn):
             "CREATE TABLE literature_document ("
             "id bigint PRIMARY KEY, title text NOT NULL, source text NOT NULL, abstract text,"
             # colonnes de dédup utilisées par la détection de doublons de la maintenance
-            # (clé de contenu) — mêmes qu'en production ; NULL pour ces lignes-ci.
+            # (clé de contenu) - mêmes qu'en production ; NULL pour ces lignes-ci.
             "doi text, external_id text, title_norm text, pmid text, canonical_id bigint,"
             "is_duplicate boolean DEFAULT false, project_context text DEFAULT 'literev')"
         )
@@ -179,7 +179,7 @@ def test_corpus_maintenance_detects_content_duplicates(db_conn):
             "(12,'Unrelated paper B','pubmed','pmid:99',false)"
         )
 
-    # DRY RUN : 1 doublon détecté (id=11, non canonique — garde le plus petit id=10).
+    # DRY RUN : 1 doublon détecté (id=11, non canonique - garde le plus petit id=10).
     r = main.corpus_maintenance(main.CorpusMaintenanceIn(dry_run=True), None)
     assert r["duplicates"]["documents"] == 1
     assert _count(db_conn, "SELECT count(*) FROM literature_document") == 3  # rien supprimé

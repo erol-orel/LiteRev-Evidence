@@ -61,7 +61,7 @@ class Audit:
         self.running = bool(running)
         if running:
             a = running[0]
-            self.add("INFO", "activity", f"{a.get('kind')} running, step={a.get('step')} — count mismatches are expected until it ends")
+            self.add("INFO", "activity", f"{a.get('kind')} running, step={a.get('step')} - count mismatches are expected until it ends")
         else:
             self.add("INFO", "activity", "no search or pipeline running for this scenario")
 
@@ -183,7 +183,7 @@ class Audit:
             fails += level == "FAIL"
             print(f"{level:5s} {check:{width}s} {detail}")
         verdict = "ALL NUMBERS AGREE" if not fails else f"{fails} CHECK(S) FAIL"
-        print(f"\n{verdict} — scenario {self.sid}" + (" (still running: recheck when it ends)" if self.running else ""))
+        print(f"\n{verdict} - scenario {self.sid}" + (" (still running: recheck when it ends)" if self.running else ""))
         return 1 if fails else 0
 
 

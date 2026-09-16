@@ -1,28 +1,28 @@
 #!/usr/bin/env python3
 """End-to-end real-dataset trial: environment → influenza, on the app's OWN stack.
 
-This exercises the full predictive path the product ships — the real data
+This exercises the full predictive path the product ships - the real data
 connectors (`data_connectors.fetch_series`) feed the real trainer
-(`model_trainer.train_model`) — on a REAL public dataset, and prints the trained
+(`model_trainer.train_model`) - on a REAL public dataset, and prints the trained
 model's honest metrics, hyperparameters and feature importances. It is the
 answer to "let's try a real dataset on a specific topic" for the influenza theme.
 
 Two modes (same assemble→train code path):
 
-  weather-ili   (the headline topic — needs open-meteo + FOPH Sentinella egress,
+  weather-ili   (the headline topic - needs open-meteo + FOPH Sentinella egress,
                 i.e. production)
         features : open-meteo-weather  (temperature, humidity, …)  [daily → weekly]
         outcome  : foph-sentinella-ili (clinical ILI consultation incidence) [weekly]
 
-  ch-influenza  (default — reproducible anywhere with GitHub access; used for the
+  ch-influenza  (default - reproducible anywhere with GitHub access; used for the
                 committed proof because open-meteo / opendata.swiss are egress-blocked
                 outside production)
         source   : EAWAG respiratory-virus wastewater (real Swiss surveillance,
                    raw.githubusercontent.com) for one treatment plant
         outcome  : influenza-A wastewater load (a validated influenza-activity signal)
         features : co-circulating RSV + influenza-B + SARS-CoV-2 loads and the
-                   seasonal (climatic) cycle — the annual temperature/humidity swing
-                   that drives influenza — encoded as sin/cos harmonics of the ISO week
+                   seasonal (climatic) cycle - the annual temperature/humidity swing
+                   that drives influenza - encoded as sin/cos harmonics of the ISO week
 
 Weekly alignment mirrors the app's `_assemble_connector_frames` (main.py): each tidy
 daily/weekly series is resampled to weekly buckets (sum for precipitation, last for
@@ -58,7 +58,7 @@ def _agg_for_column(col: str) -> str:
 
 
 def _weekly_join(series: list[tuple[list[dict], list[str]]], datetime_col: str = "date"):
-    """Resample each tidy series to weekly buckets and outer-join on the week key —
+    """Resample each tidy series to weekly buckets and outer-join on the week key -
     the same two-stage assembly the app performs in `_assemble_connector_frames`."""
     import pandas as pd
     assembled = None
@@ -82,7 +82,7 @@ def _weekly_join(series: list[tuple[list[dict], list[str]]], datetime_col: str =
 
 
 def _add_seasonal_harmonics(df, datetime_col="date"):
-    """Encode the annual (climatic) cycle as sin/cos of the ISO week — a weather-cycle
+    """Encode the annual (climatic) cycle as sin/cos of the ISO week - a weather-cycle
     proxy that captures influenza's strong seasonality without an external feed."""
     import pandas as pd
     wk = pd.to_datetime(df[datetime_col]).dt.isocalendar().week.astype(float)
@@ -113,7 +113,7 @@ def build_ch_influenza(args):
     provenance = {
         "topic": "Swiss influenza activity (wastewater surveillance)",
         "outcome": "influenza-A wastewater load (a validated ILI-activity signal)",
-        "outcome_source": f"EAWAG RespiratoryVirusesWastewater — plant {args.plant or 'STEP Aire (Geneva)'}",
+        "outcome_source": f"EAWAG RespiratoryVirusesWastewater - plant {args.plant or 'STEP Aire (Geneva)'}",
         "outcome_url": dc._EAWAG_CSV_URL,
         "note": "Random k-fold CV is unreliable on a 67-week seasonal series (a fold can "
                 "hold out an entire influenza season); the held-out test R² is the honest "
@@ -135,7 +135,7 @@ def build_weather_ili(args):
     if not weather or not ili:
         raise SystemExit(
             "Live sources unreachable (weather rows=%d, ili rows=%d). This mode needs "
-            "open-meteo + FOPH Sentinella egress — run it in production, or set "
+            "open-meteo + FOPH Sentinella egress - run it in production, or set "
             "FOPH_SENTINELLA_CSV_URL." % (len(weather), len(ili)))
     df = _weekly_join([
         (weather, ["temp_mean", "temp_min", "temp_max", "relative_humidity_mean", "precip_sum", "wind_max"]),

@@ -1,6 +1,6 @@
-# Search page + pipeline — audit findings & fixes
+# Search page + pipeline - audit findings & fixes
 
-Date: 2026-06-24. Context: after the OpenAI quota outage, three symptoms were reported —
+Date: 2026-06-24. Context: after the OpenAI quota outage, three symptoms were reported -
 boolean-query translation echoing the raw text, the live search "taking ages" (~77s),
 and every result card showing "Base locale" despite "+N nouvelles références".
 
@@ -9,18 +9,18 @@ and every result card showing "Base locale" despite "+N nouvelles références".
 **The search page does NOT use `POST /search` / `_federated_live_search`.** Its flow is:
 `POST /search-strategy` → `createUserScenario` → `POST /user-scenarios/{id}/populate` →
 poll `GET /user-scenarios/{id}/corpus`. So `_federated_live_search` (and the perf work in
-PR #91 that targeted it) is on a **parallel path the page doesn't exercise** — which is why
+PR #91 that targeted it) is on a **parallel path the page doesn't exercise** - which is why
 the earlier optimizations didn't change what the user saw. The real path is
 `_run_user_scenario_populate` + `get_user_scenario_corpus`.
 
-All three symptoms were verified (via `git`) to **predate** PRs #88/#90/#91 — not regressions
+All three symptoms were verified (via `git`) to **predate** PRs #88/#90/#91 - not regressions
 introduced by those changes. But the fixes now target the **correct** paths.
 
-## Issue 1 — Boolean query echoes the raw text
+## Issue 1 - Boolean query echoes the raw text
 
 Root cause: `_generate_search_strategy` (`main.py`) translates NL→boolean via GPT-4.1-mini, and
 on **any** OpenAI error (incl. `429 insufficient_quota`) its `except` returns
-`{"general": query, ...}` — the raw text. Worse, that degraded result was **cached** in
+`{"general": query, ...}` - the raw text. Worse, that degraded result was **cached** in
 `user_scenarios.search_strategy` and never refreshed (no error sentinel), so a scenario created
 during the outage stays poisoned even after quota returns.
 
@@ -30,7 +30,7 @@ Fix:
 - The three caching callers (`get_search_strategy`, `create_user_scenario._bg_strategy`, the populate
   path) now **regenerate** a degraded/poisoned strategy and **never persist** a degraded one.
 
-## Issue 2 — Live search ~77s, "stuck on bioRxiv"
+## Issue 2 - Live search ~77s, "stuck on bioRxiv"
 
 Root cause: the populate federation (`_run_user_scenario_populate`) waited on
 `as_completed(futures)` with **no timeout**, so the slowest of 7 sources (PubMed efetch
@@ -44,7 +44,7 @@ Fix:
   slow sources keep ingesting in the background.
 - Quota cooldown (Issue 4) removes the outage-time retry-storm in the inline rerank/embed.
 
-## Issue 3 — "+N nouvelles références" but every card says "Base locale"
+## Issue 3 - "+N nouvelles références" but every card says "Base locale"
 
 Root cause: `renderCorpus` built each card **without** setting any provenance flag, so the badge's
 `result.isLive` was always falsy → **always "Base locale"**. Meanwhile "+N nouvelles références"
@@ -59,7 +59,7 @@ Fix:
   (fetched during this search) / **Base locale** (pre-existing). So a "+N nouvelles références"
   paper now correctly shows **Nouveau**.
 
-## Issue 4 — OpenAI quota flood mitigation (the actual outage cause)
+## Issue 4 - OpenAI quota flood mitigation (the actual outage cause)
 
 The account hit `429 insufficient_quota`; every chat/embedding call failed and the SDK retried
 3×, and the background worker ground through every batch → a sustained flood (1656 429s / 3000 log
@@ -73,6 +73,6 @@ cron line (was running twice concurrently).
 
 ## Recommended (not in this PR)
 - Lower the page's `maxResults: 2000` / `LIVE_MAX_PER_SOURCE` if faster-but-smaller corpora are OK.
-- Set `NCBI_API_KEY` (10 req/s vs 3) — already used by the code.
+- Set `NCBI_API_KEY` (10 req/s vs 3) - already used by the code.
 - Long term: converge the page onto a single federation path so `/search` and `/populate` share
   timeouts, provenance, and instrumentation.

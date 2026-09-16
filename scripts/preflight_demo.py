@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Preflight for a demo: is the API ready to present, right now?
 
-Runs against a live API — on the server (default --base http://127.0.0.1:8000) or from
-a laptop (--base https://literev-scenario.com/api) — and prints one line per check,
+Runs against a live API - on the server (default --base http://127.0.0.1:8000) or from
+a laptop (--base https://literev-scenario.com/api) - and prints one line per check,
 OK / WARN / FAIL:
 
   health         database, schema, full-text engine, memory, uptime, rate limits
@@ -10,9 +10,9 @@ OK / WARN / FAIL:
                  has quota; without it the briefs, variables and actions do not generate
   Cohere         configured or not (the rerank is optional)
   per scenario   the numbers the page shows agree (scripts/audit_scenario.py); every
-                 artefact a tab shows is cached and served in the requested language —
+                 artefact a tab shows is cached and served in the requested language -
                  clustering, knowledge graph, evidence brief, LLM brief, variables,
-                 recommended actions, model spec — the missing ones are generated when
+                 recommended actions, model spec - the missing ones are generated when
                  an API key is given (WRITE_API_KEY or --api-key) and awaited (--wait);
                  and the time of every read endpoint (above --slow-ms is a WARN)
 
@@ -101,19 +101,19 @@ class Preflight:
         lex = body.get("lexical_search") or {}
         engine = lex.get("engine") or lex.get("mode") or "?"
         self.add("OK" if engine == "fts" else "WARN", "health: full-text engine",
-                 f"{engine}" + ("" if engine == "fts" else " — boolean searches take the slow LIKE path"))
+                 f"{engine}" + ("" if engine == "fts" else " - boolean searches take the slow LIKE path"))
         proc = body.get("process") or {}
         rss, peak, up = proc.get("rss_mb"), proc.get("rss_peak_mb"), proc.get("uptime_s")
         if rss is not None:
             hours = (up or 0) / 3600.0
             level = "WARN" if (rss or 0) > 2000 else "OK"
             self.add(level, "health: process", f"rss {rss:.0f} MB (peak {peak:.0f} MB), {proc.get('threads')} threads, up {hours:.1f} h"
-                     + (" — a restart before the session would free memory" if level == "WARN" else ""))
+                     + (" - a restart before the session would free memory" if level == "WARN" else ""))
             if hours < 0.5:
                 self.add("WARN", "health: uptime", "the API restarted less than 30 minutes ago: open one clustering tab to warm UMAP")
         rl = body.get("rate_limit")
         if rl:
-            self.add("OK", "health: rate limits", f"{rl.get('general_per_min')}/min general, {rl.get('expensive_per_min')}/min on search, ask and pipeline — per IP")
+            self.add("OK", "health: rate limits", f"{rl.get('general_per_min')}/min general, {rl.get('expensive_per_min')}/min on search, ask and pipeline - per IP")
 
     def check_openai(self) -> None:
         query = f"ambulance demand forecasting preflight {int(time.time())}"
@@ -135,7 +135,7 @@ class Preflight:
             top = (body.get("by_purpose") or [{}])[0]
             who = f", biggest: {top.get('purpose') or top.get('usage') or top.get('caller') or '?'} ({top.get('total_tokens', 0)} tokens)" if top else ""
             self.add("OK", "OpenAI usage (24 h)",
-                     f"{body.get('total_calls', 0)} calls, {body.get('total_tokens', 0)} tokens{who} — check the budget cap (runbook §4)")
+                     f"{body.get('total_calls', 0)} calls, {body.get('total_tokens', 0)} tokens{who} - check the budget cap (runbook §4)")
 
     # ── per scenario ─────────────────────────────────────────────────────────
     def check_scenario(self, sid: str) -> None:
@@ -147,6 +147,22 @@ class Preflight:
             return
         counts = self.read(f"{sid}: counts", f"/user-scenarios/{sid}/counts",
                            lambda b: "consistent" if b.get("consistent") else ("still running" if b.get("in_progress") else f"DISAGREE {b.get('mismatches') or b.get('details') or ''}"))
+        # A search or a pipeline still running: wait for it (within the wait budget) rather
+        # than checking, and generating, on a moving corpus.
+        if counts and counts.get("in_progress") and self.wait_s > 0:
+            deadline = time.monotonic() + self.wait_s
+            polls = 0
+            while time.monotonic() < deadline and polls < 400:
+                self.sleep(10)
+                polls += 1
+                status, body = self.get(f"/user-scenarios/{sid}/counts")
+                if status == 200 and isinstance(body, dict) and not body.get("in_progress"):
+                    counts = body
+                    break
+            if counts.get("in_progress"):
+                self.add("WARN", f"{sid}: running job", f"still running after {self.wait_s} s: the checks below see a moving corpus")
+            else:
+                self.add("OK", f"{sid}: running job", f"waited for the search/pipeline to finish ({polls * 10} s)")
         if counts and not counts.get("consistent"):
             self.add("WARN" if counts.get("in_progress") else "FAIL", f"{sid}: counts", "the header, the list and the PRISMA disagree")
         if self.audit:
@@ -237,7 +253,7 @@ class Preflight:
         fails = sum(1 for lvl, _, _ in self.rows if lvl == "FAIL")
         warns = sum(1 for lvl, _, _ in self.rows if lvl == "WARN")
         print(f"\n{len(self.rows)} checks: {fails} FAIL, {warns} WARN")
-        print("READY TO PRESENT" if not fails else "NOT READY — fix the FAIL lines")
+        print("READY TO PRESENT" if not fails else "NOT READY - fix the FAIL lines")
         return 1 if fails else 0
 
     def run(self) -> int:
@@ -285,7 +301,7 @@ def main() -> int:
                 return e.code, json.loads(raw)
             except ValueError:
                 return e.code, raw
-        except Exception as e:                                # noqa: BLE001 — network
+        except Exception as e:                                # noqa: BLE001 - network
             return 0, str(e)
 
     def get(path):

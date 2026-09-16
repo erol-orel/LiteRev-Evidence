@@ -1,4 +1,4 @@
-# LiteRev-Evidence — Production-Grade Audit
+# LiteRev-Evidence - Production-Grade Audit
 
 Date: 2026-06-16 · Auditor: automated deep audit (repo + live server + live DB)
 Commit audited: `745be1a` (server == origin/main, clean) · DB: PostgreSQL 14.23, pgvector 0.8.2
@@ -18,18 +18,18 @@ The engineering of the request/SQL layer is, in isolation, fairly solid.
 However the audit found **five Critical issues**, several of which are live in production
 right now (not just latent):
 
-1. **Secret exposure** — the OpenAI API key is stored in **plaintext** in the systemd
+1. **Secret exposure** - the OpenAI API key is stored in **plaintext** in the systemd
    override and was printed into a **public** GitHub Actions log during this audit
    (log since deleted). The key must be rotated.
 2. **No ANN/vector index** on `document_chunk.embedding` (323,868 rows × 1536-dim, **5 GB**
-   table). Every semantic/hybrid search is a full sequential scan — the dominant latency
+   table). Every semantic/hybrid search is a full sequential scan - the dominant latency
    risk and it worsens linearly with corpus growth.
 3. **Large-scale data duplication**: **8,957** duplicate-DOI groups, **1,033** duplicate-URL,
    **696** duplicate-`external_id`, **647** duplicate-PMID in `literature_document` (81,209
    rows). There is **no unique constraint** on any natural key, the dedup job is largely
    inert (`canonical_id` is 99.6% NULL), and scenario article counts do **not** filter
    duplicates → inflated counts.
-4. **No TLS** — nginx listens on `:80` only. The `WRITE_API_KEY` travels as a cleartext
+4. **No TLS** - nginx listens on `:80` only. The `WRITE_API_KEY` travels as a cleartext
    `X-API-Key` header; all traffic is interceptable.
 5. **The schema lives only in the live DB.** Alembic has a single **no-op** revision;
    every real object (`article_scenarios`, `screening_status`, all bibliographic/PICO/dedup
@@ -43,7 +43,7 @@ exposure is **disaster recovery / environment reproducibility**, not a current o
 distinction only emerged by querying production.
 
 A second nuance: many concurrency findings are **mitigated today by a single uvicorn worker**
-(confirmed: one process, no `--workers`). They are latent — but nothing *enforces* the single
+(confirmed: one process, no `--workers`). They are latent - but nothing *enforces* the single
 worker, and one cross-process race (the **duplicated midnight cron line**) is live regardless.
 
 ---
@@ -52,7 +52,7 @@ worker, and one cross-process race (the **duplicated midnight cron line**) is li
 
 ```
         Browser (React 19 SPA, state-nav, no router)
-              │  HTTPS? NO — plain HTTP :80
+              │  HTTPS? NO - plain HTTP :80
               ▼
         nginx (literev-app-01:80)
           ├─ /            → static /var/www/literev-frontend (SPA)
@@ -81,7 +81,7 @@ worker, and one cross-process race (the **duplicated midnight cron line**) is li
 ```
 
 Pipeline order (orchestrator, correct): `ingest → fulltext → embed → rerank → pico → metadata → clustering`.
-Cron path runs only `scheduler + embed_corpus` — **fulltext and PICO are never run by cron**;
+Cron path runs only `scheduler + embed_corpus` - **fulltext and PICO are never run by cron**;
 they rely on the in-process BG worker.
 
 ---
@@ -92,7 +92,7 @@ Legend for each: **What / Why / Evidence / Location / Fix / Verify.**
 
 ### CRITICAL
 
-**C1 — OpenAI API key in plaintext + leaked to public CI log**
+**C1 - OpenAI API key in plaintext + leaked to public CI log**
 - What: `/etc/systemd/system/literev-api.service.d/override.conf` sets
   `Environment="OPENAI_API_KEY=sk-proj-…"` in clear; the key is also in
   `/opt/literev-api/secrets.env`. During this audit a `systemctl cat` printed it into a
@@ -105,7 +105,7 @@ Legend for each: **What / Why / Evidence / Location / Fix / Verify.**
   exposed run log.)
 - Verify: new key works via `/health`-adjacent embed call; `grep -r OPENAI override.conf` empty.
 
-**C2 — No vector ANN index on `document_chunk.embedding`**
+**C2 - No vector ANN index on `document_chunk.embedding`**
 - What: 323,868 rows, 1536-dim, 5,088 MB; the only indexes are btree/gin (search_vector,
   metadata_json, chunk_type, chunk_weight). No ivfflat/hnsw (it's commented out in `schema.sql:98-99`).
 - Why: Every `ORDER BY embedding <=> :q` (12+ sites: `main.py:730,4556,6160,9940`, threshold
@@ -116,8 +116,8 @@ Legend for each: **What / Why / Evidence / Location / Fix / Verify.**
   (pgvector 0.8.2 supports HNSW; `vector_cosine_ops` matches `<=>`). Then `ANALYZE`.
 - Verify: `EXPLAIN (ANALYZE) SELECT … ORDER BY embedding <=> :q LIMIT 10;` shows Index Scan, not Seq Scan.
 
-**C3 — Large-scale duplicate documents; no DB-level dedup anchor**
-- What: dup groups — `doi=8957`, `url=1033`, `external_id=696`, `pmid=647`. No UNIQUE on any
+**C3 - Large-scale duplicate documents; no DB-level dedup anchor**
+- What: dup groups - `doi=8957`, `url=1033`, `external_id=696`, `pmid=647`. No UNIQUE on any
   natural key. Dedup is app-only and inert: `canonical_id` 99.6% NULL.
 - Why: `/documents` (`main.py:613`) inserts with no `ON CONFLICT`/pre-check; ingest dedup is a
   fuzzy `/search` that **fails open** (returns False on error → re-insert,
@@ -130,7 +130,7 @@ Legend for each: **What / Why / Evidence / Location / Fix / Verify.**
   **fail-closed**; add `AND NOT d.is_duplicate` to count/article queries.
 - Verify: the dup-group SQL returns 0 after cleanup; re-POST a doc twice → row count unchanged.
 
-**C4 — No TLS (plain HTTP)**
+**C4 - No TLS (plain HTTP)**
 - What: nginx `server { listen 80; … }` only; no 443/cert/redirect.
 - Why: `WRITE_API_KEY` is sent as an `X-API-Key` header in cleartext; all
   request/response data interceptable on the wire.
@@ -139,7 +139,7 @@ Legend for each: **What / Why / Evidence / Location / Fix / Verify.**
 - Fix: add TLS (Let's Encrypt/Caddy), 80→443 redirect, HSTS.
 - Verify: `curl -I http://host` 301→https; `https://host/health` 200 with valid cert.
 
-**C5 — Schema exists only in the live DB; Alembic is a no-op (DR/reproducibility)**
+**C5 - Schema exists only in the live DB; Alembic is a no-op (DR/reproducibility)**
 - What: single revision `eb6b9e396ffc` has `upgrade()/downgrade()` = `pass`; `alembic_version`
   is stamped to it. Every real object was hand-applied via `_ensure_*()` boot DDL +
   `scripts/archive/*.sql` run by hand.
@@ -155,7 +155,7 @@ Legend for each: **What / Why / Evidence / Location / Fix / Verify.**
 
 ### HIGH
 
-**H1 — Unauthenticated mutating endpoints (IDOR + cost-DoS)**
+**H1 - Unauthenticated mutating endpoints (IDOR + cost-DoS)**
 - `/alerts/subscribe` (POST, `main.py:6514`) and `/alerts/unsubscribe` (DELETE, `:6550`) have
   no `require_api_key`; unsubscribe deletes by attacker-supplied `email`+`scenario_id` → **IDOR**.
 - `/ask/stream` (`:6110`), `/ask/stream/filtered` (`:11081`), `/gesica/scenarios/{id}/rag`
@@ -164,7 +164,7 @@ Legend for each: **What / Why / Evidence / Location / Fix / Verify.**
 - Fix: add `Depends(require_api_key)` to `/alerts/*`; scope unsubscribe to caller; gate RAG/stream
   behind auth or a read-key. Verify: anonymous DELETE → 401; unsubscribe can't touch others' rows.
 
-**H2 — Frontend has no way to provide the API key → all write features 401 in prod**
+**H2 - Frontend has no way to provide the API key → all write features 401 in prod**
 - `authHeaders()` reads `sessionStorage/localStorage["api_key"]` but **nothing writes them**
   (no settings UI/prompt); `VITE_API_KEY` unset in prod. So create/delete/screen/rerank/
   pipeline/brief/alerts all send no key → 401. `App.tsx:3276` even auto-creates a scenario on
@@ -174,7 +174,7 @@ Legend for each: **What / Why / Evidence / Location / Fix / Verify.**
   stop the per-search auto-save or make it explicit/idempotent.
 - Verify: with no key, a create action surfaces an auth error (not silent); with key, it persists.
 
-**H3 — Cross-process pipeline races → duplicate paid OpenAI work & rows**
+**H3 - Cross-process pipeline races → duplicate paid OpenAI work & rows**
 - The crontab has **two identical** `0 0 * * *` lines running `scheduler … && embed_corpus`
   → two concurrent midnight runs. The in-process BG worker also embeds/PICOs the same
   `embedding IS NULL` rows with **no lock** (`main.py:441-457,484-493`) concurrently with
@@ -187,7 +187,7 @@ Legend for each: **What / Why / Evidence / Location / Fix / Verify.**
   (`UPDATE … WHERE pipeline_status<>'running' RETURNING id`).
 - Verify: two concurrent embed loops on a fixture → OpenAI calls == #chunks, not 2×.
 
-**H4 — No OpenAI retry/backoff; transient failures silently drop work and advance the pipeline**
+**H4 - No OpenAI retry/backoff; transient failures silently drop work and advance the pipeline**
 - Every embed/PICO call is a single attempt (`embed_corpus.py:74`, `main.py:464,8639,8372`,
   `extract_pico_batch.py:131`). On 429/timeout the batch is dropped (`main.py:8654`
   `_emb_errors += len(_batch)`), then the pipeline **proceeds to rerank/pico on partially
@@ -195,7 +195,7 @@ Legend for each: **What / Why / Evidence / Location / Fix / Verify.**
 - Fix: wrap calls in exponential backoff honoring `Retry-After`; don't advance a step while
   `errors > threshold`. Verify: inject a 429 → batch retried, step not marked done.
 
-**H5 — Pervasive silent failure (swallowed excepts + HTTP 200 on error)**
+**H5 - Pervasive silent failure (swallowed excepts + HTTP 200 on error)**
 - 13+ `except Exception: pass` (`main.py:2742,3988,4458,7146,8035,8285,8312,8406…`), several
   wrapping DB writes/cleanup before `populate_status='done'` is committed (`main.py:8021`).
   Many endpoints return `{"status":"error"}`/`{"error":…}` with **200** (`main.py:3772,10574,
@@ -203,15 +203,15 @@ Legend for each: **What / Why / Evidence / Location / Fix / Verify.**
 - Why: failures invisible; 5xx monitoring blind; dedup checks that fail-open cause C3.
 - Fix: `logger.exception` in handlers; raise `HTTPException` with real status codes; fail-closed on dedup.
 
-**H6 — Deploy: failed migration is non-fatal; no backend rollback**
-- `alembic upgrade head || (warn; continue)` (`deploy.sh:62-68`) — a failed migration doesn't
+**H6 - Deploy: failed migration is non-fatal; no backend rollback**
+- `alembic upgrade head || (warn; continue)` (`deploy.sh:62-68`) - a failed migration doesn't
   abort. On health-check failure the script restores **only the frontend** from `.prev`
   (`deploy.sh:120-129`); the new (possibly broken) backend code stays → 502 (the very thing
   `fix_502.sh`/`diagnose_502.sh` firefight).
 - Fix: capture `PREV_COMMIT` pre-pull; on health failure `git reset --hard $PREV_COMMIT && restart`;
   make migration failure fatal once Alembic is real (C5).
 
-**H7 — Single-worker constraint is required but unenforced**
+**H7 - Single-worker constraint is required but unenforced**
 - The app starts in-process daemon threads + holds in-memory rate-limit/job state
   (`main.py:90-91,510,4485,7245`). It works **only** because the unit runs one uvicorn worker
   (confirmed). Adding `--workers N` would N× the rate limit, run N enrichment/training threads,
@@ -221,57 +221,57 @@ Legend for each: **What / Why / Evidence / Location / Fix / Verify.**
 
 ### MEDIUM
 
-- **M1 — N+1 + unbounded fetch on `GET /gesica/scenarios`** (`main.py:2746-2768`): one full
+- **M1 - N+1 + unbounded fetch on `GET /gesica/scenarios`** (`main.py:2746-2768`): one full
   per-scenario article query (no LIMIT, abstracts included) for ~27 scenarios per page load.
   Fix: counts-only list; lazy/paginated detail.
-- **M2 — `article_count` cache incoherent**: written non-atomically across separate txns
-  (`main.py:7434` interim wrong value, `8015`, `8058`) and two endpoints disagree —
+- **M2 - `article_count` cache incoherent**: written non-atomically across separate txns
+  (`main.py:7434` interim wrong value, `8015`, `8058`) and two endpoints disagree -
   `/gesica/scenarios` computes live, `/user-scenarios` reads the stored column
   (`main.py:6774`). Fix: always derive live, or maintain via trigger on `article_scenarios`.
-- **M3 — Clustering/kappa caches never invalidated on corpus change** (`main.py:4214-4227`,
+- **M3 - Clustering/kappa caches never invalidated on corpus change** (`main.py:4214-4227`,
   `/tmp/literev_clustering_cache`); `force_refresh` is the only buster. `scenario_kappa_cache`
   is dead (`if False`, `main.py:2733`).
-- **M4 — Mixed `timestamp` vs `timestamptz`**: newer tables (`literature_document`,
+- **M4 - Mixed `timestamp` vs `timestamptz`**: newer tables (`literature_document`,
   `document_chunk`, `article_scenarios`) use `timestamptz`; `user_scenarios`,
   `scenario_settings`, `user_scenario_folders`, `alert_subscriptions` use naive `timestamp`.
   Off-by-tz risk for the scheduler/alerts. Fix: standardize on `timestamptz`.
-- **M5 — Env/secret path fragmentation**: systemd `EnvironmentFile=/etc/literev-api.env`,
+- **M5 - Env/secret path fragmentation**: systemd `EnvironmentFile=/etc/literev-api.env`,
   but `secrets.env` lives at `/opt/literev-api/secrets.env` (loaded separately by `main.py`);
   `OPENAI_API_KEY` is duplicated in override.conf **and** secrets.env; `deploy.sh:82` reads
   `WRITE_API_KEY` from `/etc/literev-api.env` for `VITE_API_KEY` injection. Drift here silently
   yields write-401s. Fix: one canonical env file across unit/main.py/alembic/deploy.
-- **M6 — Raw `dict` bodies bypass Pydantic / unchecked casts**: `ask_stream(payload: dict)`
+- **M6 - Raw `dict` bodies bypass Pydantic / unchecked casts**: `ask_stream(payload: dict)`
   (`main.py:6111`), settings/variables endpoints; `int(payload.get("top_k"))` (`:6122`) → 500
   on bad input (no exception handler). Fix: Pydantic models with bounds.
-- **M7 — State-mutating work on a GET + check-then-set race**: `GET /gesica/scenarios/{id}/clustering`
+- **M7 - State-mutating work on a GET + check-then-set race**: `GET /gesica/scenarios/{id}/clustering`
   (`main.py:4467`) spawns a DB-mutating thread and writes `_clustering_jobs` unlocked; two GETs
   start two threads. Fix: POST + reuse `_pipeline_jobs_lock` pattern.
-- **M8 — CI has weak gates**: `deploy.yml` runs only `compileall` + `pip --dry-run` + `npm build`
+- **M8 - CI has weak gates**: `deploy.yml` runs only `compileall` + `pip --dry-run` + `npm build`
   (tsc). No pytest (none exist), no `npm run lint` (script exists, never called), no alembic
   check. Deploy runs on **every** push to main; the only gate is the `production` environment's
   (unverified) reviewers. Fix: add lint + tests + migration check; require reviewers/tags.
-- **M9 — Frontend hardening**: TS not `strict` (`tsconfig.app.json`), heavy `any`;
+- **M9 - Frontend hardening**: TS not `strict` (`tsconfig.app.json`), heavy `any`;
   bleeding-edge/likely-invalid dep pins (`react@^19.2.6`, `vite@^8`, `typescript@~6.0`,
   `eslint@^10`) risk non-reproducible builds; PDF export revokes the blob URL before the
   deferred `print()` (`ScenarioDetailPage.tsx:3667-3670`) → blank tab; no URL router
   (back/refresh/deep-link broken). Fixes per item.
-- **M10 — Unrestricted root SSH + arbitrary `custom` command channel**: the single
+- **M10 - Unrestricted root SSH + arbitrary `custom` command channel**: the single
   `DEPLOY_SSH_KEY` is unrestricted root (`INFRASTRUCTURE.md:27,37`) and `server-command.yml`
   exposes a `custom` arbitrary-bash-as-root path. Audit-logged but not prevented. Fix:
   non-root deploy user, forced-command whitelist, drop `custom`, rotate key, `from=` allowlist.
 
 ### LOW
 
-- **L1 — Dead code/features (confirmed by data):** double-blind/screening columns are ~100%
+- **L1 - Dead code/features (confirmed by data):** double-blind/screening columns are ~100%
   NULL (`reviewer_1/2_status`, `screening_reason/notes`, `kappa_final_status`,
   `structured_abstract`, `study_design`, `sample_size`) → those features are effectively
   unused; `scenario_kappa_cache` dead (`if False`); `getEvidenceBriefPdfUrl` exported-unused;
   several backend endpoints unreferenced by the frontend. Decide: implement or remove.
-- **L2 — `document_chunk` metadata-scoring columns mostly empty**: `char_start/char_end/
+- **L2 - `document_chunk` metadata-scoring columns mostly empty**: `char_start/char_end/
   section_label` 100% NULL, `token_count` 75% NULL → the chunk-scoring feature is unpopulated.
-- **L3 — `generate_schema.py:99` emits invalid `ALTER TABLE … ADD CONSTRAINT IF NOT EXISTS`**
+- **L3 - `generate_schema.py:99` emits invalid `ALTER TABLE … ADD CONSTRAINT IF NOT EXISTS`**
   (Postgres rejects `IF NOT EXISTS` on ADD CONSTRAINT) → regenerated schema won't replay.
-- **L4 — Bad defaults / docs:** `quality_score DEFAULT 0.0` (NULL would distinguish "unscored");
+- **L4 - Bad defaults / docs:** `quality_score DEFAULT 0.0` (NULL would distinguish "unscored");
   `INFRASTRUCTURE.md` claims PostgreSQL 15 but it's **14.23**; `updated_at` columns have
   `DEFAULT now()` but no auto-update trigger; README is the default Vite template.
 
@@ -285,12 +285,12 @@ Live DB: PostgreSQL **14.23**, pgvector **0.8.2**. 8 tables, all with PKs.
 |---|---|---|---|
 | document_chunk | 323,868 | 5,088 MB | embedding vector(1536) 99.99% populated; **no ANN index** (C2); good FTS gin + btree |
 | literature_document | 81,209 | 215 MB | **heavy duplication** (C3); ~40 cols, many ~100% NULL (L1) |
-| article_scenarios | 25,301 | 59 MB | PK+UNIQUE(document_id,scenario_id)+FK+2 indexes — **healthy** (exists despite not being in repo) |
-| scenario_settings | 10 | — | naive timestamps (M4) |
-| user_scenarios | 38 | — | naive timestamps; pipeline_* cols |
-| alert_subscriptions | 5 | — | UNIQUE(email,scenario_id) ✓ |
-| user_scenario_folders | 7 | — | — |
-| alembic_version | 1 | — | stamped `eb6b9e396ffc` (no-op) (C5) |
+| article_scenarios | 25,301 | 59 MB | PK+UNIQUE(document_id,scenario_id)+FK+2 indexes - **healthy** (exists despite not being in repo) |
+| scenario_settings | 10 | - | naive timestamps (M4) |
+| user_scenarios | 38 | - | naive timestamps; pipeline_* cols |
+| alert_subscriptions | 5 | - | UNIQUE(email,scenario_id) ✓ |
+| user_scenario_folders | 7 | - | - |
+| alembic_version | 1 | - | stamped `eb6b9e396ffc` (no-op) (C5) |
 
 - **Constraints/keys present & correct:** all FKs (`article_scenarios.document_id`,
   `document_chunk.document_id`, `literature_document.canonical_id` self-FK,
@@ -315,10 +315,10 @@ and `GROUP BY … HAVING count(*)>1` duplicate detection. (See `scripts/_audit_d
 - **Order:** orchestrator order is correct (fulltext→embed→…); standalone scripts have no
   enforced order; PICO never re-runs after fulltext arrives (quality capped at abstract).
 - **Idempotency:** `/documents` and chunk inserts non-idempotent (no `ON CONFLICT`); fulltext
-  insert is idempotent (delete-then-insert) — good; `article_scenarios` link uses `ON CONFLICT`.
+  insert is idempotent (delete-then-insert) - good; `article_scenarios` link uses `ON CONFLICT`.
 - **Single-instance:** scheduler has no lockfile/timer guard (H3/H7).
-- **Deploy:** good — `set -euo pipefail`, atomic frontend swap + `.prev` rollback, blocking
-  DB-touching `/health` gate, real post-deploy smoke test, serial `concurrency` group. Bad —
+- **Deploy:** good - `set -euo pipefail`, atomic frontend swap + `.prev` rollback, blocking
+  DB-touching `/health` gate, real post-deploy smoke test, serial `concurrency` group. Bad -
   non-fatal migration, frontend-only rollback (H6), half-deploy window (frontend swapped before
   backend validated).
 - **CI:** no tests/lint/migration check; deploy on every push (M8).
@@ -351,11 +351,11 @@ and `GROUP BY … HAVING count(*)>1` duplicate detection. (See `scripts/_audit_d
 
 **Now / today (containment & safety):**
 1. **Rotate the OpenAI API key** (C1); remove the `Environment=` literal from override.conf.
-2. **Add TLS + HTTP→HTTPS redirect** (C4) — `WRITE_API_KEY` is currently on the wire in clear.
-3. **Add auth to `/alerts/*` and gate `/ask/stream*` + `/*/rag`** (H1) — IDOR + billable DoS.
+2. **Add TLS + HTTP→HTTPS redirect** (C4) - `WRITE_API_KEY` is currently on the wire in clear.
+3. **Add auth to `/alerts/*` and gate `/ask/stream*` + `/*/rag`** (H1) - IDOR + billable DoS.
 
 **This week (correctness & cost):**
-4. **Create the HNSW vector index** (C2) — biggest single perf win; build `CONCURRENTLY`.
+4. **Create the HNSW vector index** (C2) - biggest single perf win; build `CONCURRENTLY`.
 5. **De-duplicate `literature_document` + add UNIQUE(doi)/UNIQUE(pmid) partial indexes; make
    `/documents` `ON CONFLICT`; dedup checks fail-closed; filter `is_duplicate` in counts** (C3, H5).
 6. **Remove the duplicate cron line; add work-claiming locks (`FOR UPDATE SKIP LOCKED`) and a
@@ -379,6 +379,6 @@ and `GROUP BY … HAVING count(*)>1` duplicate detection. (See `scripts/_audit_d
 ### Test-coverage note
 There is **zero** automated test coverage today (no pytest, no frontend test runner). Per the
 request to cover every confirmed bug: each fix above has a concrete verification listed, but
-they should be encoded as regression tests once a `tests/` harness + CI job exist (step 10) —
+they should be encoded as regression tests once a `tests/` harness + CI job exist (step 10) -
 starting with auth (`require_api_key`, `/alerts/*`), dedup idempotency (`/documents` double-POST),
 count coherence, and the vector-index EXPLAIN check.

@@ -1,4 +1,4 @@
-# Operations Runbook — LiteRev-Evidence
+# Operations Runbook - LiteRev-Evidence
 
 Steps that run on the **server** (`literev-app-01`) or in external **dashboards**,
 which the agent can't execute remotely. Run as root/sudo on the server unless noted.
@@ -18,7 +18,7 @@ Conventions:
   ```bash
   dig +short literev-scenario.com        # must return the server IP
   ```
-  (Let's Encrypt will NOT issue a cert for a bare IP — the domain must resolve first.)
+  (Let's Encrypt will NOT issue a cert for a bare IP - the domain must resolve first.)
 - Ports **80 and 443** open in the firewall / cloud security group.
 - nginx is the front proxy (it already terminates the public site and proxies `/api`).
 
@@ -90,7 +90,7 @@ In platform.openai.com:
 
 ---
 
-## 5. Fake / empty scenario records — list them (read-only) before any deletion
+## 5. Fake / empty scenario records - list them (read-only) before any deletion
 
 Deleting records is destructive, so first produce the list and review it together. This query
 only SELECTs. It flags scenarios with **no** scored members AND **no** ingestion docs:
@@ -138,7 +138,7 @@ journalctl -u literev-api -n 50 --no-pager        # recent service logs
 
 Motivation: a deploy failed **silently for hours** (the `deploy.sh` SIGPIPE bug)
 before it was noticed. These catch that class of problem early. Nothing here is
-required for the app to run — they're guardrails.
+required for the app to run - they're guardrails.
 
 ### 7a. Backend error visibility (in code, already shipped)
 - An HTTP middleware logs every **unhandled** exception with `method path from IP`
@@ -154,12 +154,12 @@ required for the app to run — they're guardrails.
   echo 'SENTRY_DSN=https://<your-dsn>@sentry.io/<project>' | sudo tee -a /etc/literev-api.env
   sudo systemctl restart literev-api
   ```
-  With no `SENTRY_DSN` (or no `sentry-sdk` installed) it's a no-op — errors still
+  With no `SENTRY_DSN` (or no `sentry-sdk` installed) it's a no-op - errors still
   hit journalctl via the middleware above.
 
 ### 7a′. Slow requests and process memory (in code, already shipped)
 - Every request slower than `SLOW_REQUEST_MS` (default 2000) is logged at
-  `WARNING` with its route, duration, status and size — the first thing to read
+  `WARNING` with its route, duration, status and size - the first thing to read
   when the interface shows "Failed to fetch" or a tab spins:
   ```bash
   journalctl -u literev-api --since "-1h" | grep "slow request"
@@ -178,9 +178,9 @@ required for the app to run — they're guardrails.
   anything slower than 2 s or larger than 2 MB. Locally, `--seed 25000` builds a
   synthetic 25,000-article scenario first (that run found the 27 MB search-page
   corpus fetch, the 2.5 MB settings call and the 2.5 MB clustering payload fixed
-  in September 2026). `--compute` (local only) also times the computations —
+  in September 2026). `--compute` (local only) also times the computations -
   scoring, cross-encoder, brief context, clustering, knowledge graph, PRISMA,
-  counts, the LLM generators — with OpenAI and Cohere stubbed and random
+  counts, the LLM generators - with OpenAI and Cohere stubbed and random
   embeddings seeded; it is what showed clustering all 25,000 articles peaking at
   3 GB of RAM, hence `CLUSTER_MAX_DOCS`.
 - `scripts/audit_scenario.py` cross-checks every number the interface shows for
@@ -196,7 +196,7 @@ required for the app to run — they're guardrails.
 
 ### 7b. Uptime check on `/health` (external)
 Point any uptime monitor (UptimeRobot, Better Stack, Hetzner, a cron+curl) at
-**`https://literev-scenario.com/api/health`** (through nginx) — expect HTTP 200
+**`https://literev-scenario.com/api/health`** (through nginx) - expect HTTP 200
 `{"status":"ok","database":"ok"}`. Alert if non-200 or the body's `database` isn't
 `ok`. A 1–5 min interval is plenty. `/health` is exempt from rate limiting.
 
@@ -210,7 +210,7 @@ notification to `.github/workflows/deploy.yml` (a final step with
         run: |
           curl -fsS -X POST "$DEPLOY_ALERT_WEBHOOK" \
             -H 'Content-Type: application/json' \
-            -d "{\"text\":\"❌ LiteRev deploy failed on ${{ github.sha }} — ${{ github.event.head_commit.message }}\"}"
+            -d "{\"text\":\"❌ LiteRev deploy failed on ${{ github.sha }} - ${{ github.event.head_commit.message }}\"}"
         env:
           DEPLOY_ALERT_WEBHOOK: ${{ secrets.DEPLOY_ALERT_WEBHOOK }}
 ```
@@ -259,10 +259,10 @@ WRITE_API_KEY=… python3 scripts/preflight_demo.py --scenario usr-aaa --scenari
 One line per check, `OK` / `WARN` / `FAIL`, exit code 1 on a FAIL:
 - health: database, schema, full-text engine, memory and uptime, rate limits;
 - OpenAI: one cheap real call (a search-strategy translation) proves the key works and
-  has quota — without it the briefs, variables and actions do not generate;
+  has quota - without it the briefs, variables and actions do not generate;
 - per scenario: the header numbers agree (the audit script runs inside), and every
-  artefact a tab shows — clustering, knowledge graph, evidence brief, LLM brief,
-  variables, recommended actions, model spec — is cached in the requested language.
+  artefact a tab shows - clustering, knowledge graph, evidence brief, LLM brief,
+  variables, recommended actions, model spec - is cached in the requested language.
   With the write key the missing ones are generated now and awaited (`--wait`,
   default 300 s); without it they are reported so you can open the tab once. Every
   read endpoint is timed (above `--slow-ms`, default 2000, is a WARN).
@@ -282,7 +282,10 @@ Then:
   corpus is scored (`AUTO_PIPELINE_AFTER_SEARCH=1`); set it to 0 for a day of many
   throw-away searches if the OpenAI bill matters more than ready tabs;
 - **prefer pre-built scenarios** in the session; a live search can take up to the
-  federation budget (3 min) when a source is slow — keep a pre-built one as fallback;
+  federation budget (3 min) when a source is slow - keep a pre-built one as fallback;
+  a search already run in the last 12 hours replays the sources' answers from the
+  cache (`SOURCE_CACHE_TTL_S`) and finishes in seconds; `force_live=true` on
+  `/populate` asks the sources again;
 - **a room sharing one public IP** (audience on the venue Wi-Fi) hits the per-IP
   limits: raise `RATE_LIMIT_GENERAL_PER_MIN` (600) and `RATE_LIMIT_EXPENSIVE_PER_MIN`
   (30: `/ask*`, scenario RAG, full pipeline) in `/etc/literev-api.env` for the day and

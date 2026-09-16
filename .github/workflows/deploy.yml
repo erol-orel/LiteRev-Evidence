@@ -42,7 +42,7 @@ jobs:
         env:
           # main.py imports the heavy ML libs lazily, so most tests only need the
           # import-critical subset. We ALSO install the CORE ML wheels (numpy/pandas/
-          # scikit-learn/scipy/optuna/joblib — fast, unlike prophet/umap/cmdstanpy) so
+          # scikit-learn/scipy/optuna/joblib - fast, unlike prophet/umap/cmdstanpy) so
           # tests/test_model_trainer.py actually runs (real training correctness).
           # Integration tests use the Postgres service above; pure tests need no DB.
           DB_URL: postgresql+psycopg://postgres:postgres@localhost:5432/postgres
@@ -51,13 +51,13 @@ jobs:
         run: |
           # httpx : requis par starlette.testclient (fastapi.testclient.TestClient).
           #   Sans lui, TOUT test passant par TestClient échoue au setup avec
-          #   « requires the httpx2 package » — invisible en local, où httpx est souvent
+          #   « requires the httpx2 package » - invisible en local, où httpx est souvent
           #   déjà installé.
           # openpyxl : dépendance d'exécution (requirements.txt) de l'export Excel. Sans
           #   elle, tests/test_model_export.py se SAUTE entièrement via importorskip et
           #   la CI passait au vert sans jamais exécuter le code d'export.
           # uvicorn + requests : servent l'API au smoke test navigateur (scripts/smoke_e2e.py)
-          #   plus bas — la construction d'un corpus importe requests même sans source en direct.
+          #   plus bas - la construction d'un corpus importe requests même sans source en direct.
           pip install pytest fastapi pydantic "sqlalchemy>=2.0" python-dotenv python-multipart "psycopg[binary]" \
             httpx openpyxl uvicorn requests \
             numpy pandas scikit-learn scipy optuna joblib lightgbm xgboost statsmodels
@@ -133,7 +133,7 @@ jobs:
           # tsc + vite), soit plusieurs minutes SANS UNE SEULE LIGNE de sortie. Sans
           # sonde applicative, un équipement intermédiaire (NAT/pare-feu) coupe la
           # connexion inactive et ssh meurt sur « client_loop: send disconnect: Broken
-          # pipe » (code 255) — constaté sur le déploiement de bfaf4fc, tué à 4 min 50 en
+          # pipe » (code 255) - constaté sur le déploiement de bfaf4fc, tué à 4 min 50 en
           # plein [5/7] Build frontend. Le déploiement s'arrête alors AVANT la bascule du
           # frontend et AVANT le redémarrage de l'API : rien de cassé, mais rien de
           # déployé non plus, et l'échec ressemble à une erreur de build.
@@ -174,7 +174,7 @@ jobs:
             # la production a été confirmée saine (39759fe). Il attrape ce que
             # `grep '"status":"ok"'` ne voyait pas : le DDL de démarrage échoue OUVERT,
             # donc une base à laquelle il manque une table répond « ok » pendant que
-            # /corpus/fulltext-stats — la ligne suivante — renvoie 500.
+            # /corpus/fulltext-stats - la ligne suivante - renvoie 500.
             # La logique vit dans le dépôt (et est testée) plutôt qu'ici : cf.
             # scripts/check_health.py et tests/test_check_health.py.
             python3 /opt/literev-api/scripts/check_health.py /tmp/literev_health.json

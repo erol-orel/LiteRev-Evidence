@@ -74,7 +74,7 @@ def submit_double_blind_decision(
         if not exists:
             raise HTTPException(status_code=404, detail="Article non trouvé dans ce scénario")
         
-        # Décision reviewer PAR SCÉNARIO (article_scenarios) — autoritative pour le
+        # Décision reviewer PAR SCÉNARIO (article_scenarios) - autoritative pour le
         # kappa : un document partagé entre scénarios porte des votes distincts. On
         # RÉCUPÈRE les deux statuts de CE scénario pour décider de la concordance.
         ars_row = conn.execute(text(f"""
@@ -89,7 +89,7 @@ def submit_double_blind_decision(
             "sid": scenario_id,
             "article_id": payload.article_id,
         }).first()
-        # Dual-write global (literature_document) — hérité, conservé pour le badge
+        # Dual-write global (literature_document) - hérité, conservé pour le badge
         # du corpus et d'éventuels lecteurs legacy. best-effort (jamais bloquant).
         try:
             conn.execute(text(f"""
@@ -176,7 +176,7 @@ def resolve_conflict(
         raise HTTPException(status_code=422, detail="final_status doit être 'included' ou 'excluded'")
 
     with engine.begin() as conn:
-        # Résolution PAR SCÉNARIO (autoritative) — l'UPDATE scopé sert aussi de
+        # Résolution PAR SCÉNARIO (autoritative) - l'UPDATE scopé sert aussi de
         # contrôle d'appartenance (RETURNING vide ⇒ l'article n'est pas dans ce
         # scénario ⇒ 404).
         row = conn.execute(text("""
@@ -192,7 +192,7 @@ def resolve_conflict(
         }).first()
         if not row:
             raise HTTPException(status_code=404, detail="Article non trouvé")
-        # Dual-write global (hérité, best-effort — badge du corpus / lecteurs legacy).
+        # Dual-write global (hérité, best-effort - badge du corpus / lecteurs legacy).
         try:
             conn.execute(text("""
                 UPDATE literature_document
