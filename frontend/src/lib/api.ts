@@ -1105,6 +1105,10 @@ export interface ScenarioPrisma {
     removed_no_abstract?: number;
     removed_not_matching?: number;
     removed_other_reasons?: number;
+    // Corpus changes since the search that produced the figures (their own lines in the panel).
+    added_after_search?: number;
+    removed_after_search?: number;
+    records_screened_at_search?: number;
     removed_before_screening?: number;
     records_screened?: number;
     duplicate_records_across_sources?: number;

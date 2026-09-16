@@ -153,8 +153,24 @@ def _run_user_scenario_populate(
     # corpus, pour ne pas l'effacer sur une panne passagère d'une source.
     _source_errors = [0]
     _fed_incomplete = [False]
+    # GEL du corpus : dès que l'assemblage final commence, un enregistrement qui arrive
+    # encore d'une source lente (pages au-delà du budget fédération, l'executor n'attend
+    # pas) est ingéré dans la base mais n'est NI compté NI lié à CETTE recherche. Avant,
+    # les pages tardives des sources booléennes-natives continuaient d'insérer des liens
+    # après le nettoyage du corpus et le calcul des chiffres PRISMA : 3 602 articles au
+    # corpus pour 2 491 « passés au screening », des documents tardifs exempts de la
+    # règle « sans résumé » et de la dédup. Le verrou couvre le test ET l'insertion :
+    # aucun lien ne peut se glisser entre le gel et l'assemblage.
+    _corpus_lock = threading.Lock()
+    _corpus_frozen = [False]
 
     def _link_to_scenario(doc_id, boolean_native=False, source=None):
+        with _corpus_lock:
+            if _corpus_frozen[0]:
+                return None            # arrivé après l'assemblage : pas dans cette recherche
+            return _link_to_scenario_unlocked(doc_id, boolean_native, source)
+
+    def _link_to_scenario_unlocked(doc_id, boolean_native=False, source=None):
         # Comptabilité PRISMA : un enregistrement par source qui a renvoyé l'article,
         # que la ligne soit nouvelle ou déjà connue — c'est justement le recoupement
         # entre sources (et avec la base locale) qui fait le doublon.
@@ -1065,6 +1081,10 @@ def _run_user_scenario_populate(
     # devient donc strictement « résultat de la requête sur base locale ∪ live ».
     # allow_empty=True en multi : une intersection légitimement vide DOIT vider le corpus.
     try:
+        # Gel : à partir d'ici, ce qui arrive encore des sources ne fait plus partie de
+        # cette recherche (cf. _corpus_frozen). Le corpus et ses chiffres sont figés ensemble.
+        with _corpus_lock:
+            _corpus_frozen[0] = True
         # Appartenance = re-match booléen LOCAL (base locale ∪ live) pour les sources par
         # mots-clés + la base existante…
         if _sub_queries:

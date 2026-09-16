@@ -1295,10 +1295,18 @@ def _scenario_counts(scenario_id: str, row: dict | None = None) -> dict[str, Any
         or job.get("overall_status") in ("running", "starting")
         or pjob.get("status") in ("running", "starting")
     )
+    _corpus_links = int(r["corpus_links"] or 0)
+    _screened_at_search = (int(figures.get("records_screened") or 0) if figures else None)
     counts = {
         "article_count": int(row.get("article_count") or 0),
-        "corpus_links": int(r["corpus_links"] or 0),
-        "prisma_screened": (int(figures.get("records_screened") or 0) if figures else None),
+        "corpus_links": _corpus_links,
+        # Le PRISMA réconcilie les chiffres de la recherche avec le corpus tel qu'il est
+        # (ajouts/retraits depuis la recherche sur leurs propres lignes) : son « passés au
+        # screening » EST le corpus. Le chiffre brut de la recherche et l'écart restent
+        # exposés pour l'audit et les journaux.
+        "prisma_screened": (_corpus_links if figures else None),
+        "prisma_screened_at_search": _screened_at_search,
+        "prisma_drift": ((_corpus_links - _screened_at_search) if figures else None),
         "above_threshold": int(r["above"] or 0),
         "below_threshold": int(r["below"] or 0),
         "embedded": int(r["embedded"] or 0),

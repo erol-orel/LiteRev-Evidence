@@ -808,6 +808,48 @@ def _prisma_identification_figures(records_by_source: dict, unique_records: int,
     }
 
 
+def _reconcile_prisma_identification(figures: dict, corpus_now: int) -> dict[str, Any]:
+    """The identification figures of the last search, brought to the corpus AS IT STANDS.
+
+    The figures are computed when a search closes. The corpus can change afterwards: a
+    rebuild from the local database, duplicates marked later by the maintenance and —
+    before the corpus was frozen at assembly — pages of a slow source arriving after
+    the accounting. The panel used to show the live corpus as "records screened" next
+    to duplicates and removals computed for another total, so identified − duplicates
+    − removals no longer equalled screened (3,623 − 731 − 401 ≠ 3,602). The difference
+    is now a line of its own, in the direction it happened:
+
+      added_after_search   — documents in the corpus that this search did not count
+      removed_after_search — documents the search screened that have left the corpus
+
+    and identified − duplicates − removals + added − removed_after = screened holds
+    for every scenario, whatever happened since the search. The per-source counts and
+    the search-time figures are kept as they were (they describe the search)."""
+    identified = int(figures.get("records_identified") or 0)
+    duplicates = int(figures.get("duplicates_removed") or 0)
+    unique = int(figures.get("unique_records") or 0)
+    no_abstract = int(figures.get("removed_no_abstract") or 0)
+    not_matching = int(figures.get("removed_not_matching") or 0)
+    other = int(figures.get("removed_other_reasons") or 0)
+    screened_then = max(0, int(figures.get("records_screened") or 0))
+    corpus_now = max(0, int(corpus_now or 0))
+    out = dict(figures)
+    out.update({
+        "records_identified": identified,
+        "duplicates_removed": duplicates,
+        "unique_records": unique,
+        "removed_no_abstract": no_abstract,
+        "removed_not_matching": not_matching,
+        "removed_other_reasons": other,
+        "removed_before_screening": no_abstract + not_matching + other,
+        "records_screened_at_search": screened_then,
+        "added_after_search": max(0, corpus_now - screened_then),
+        "removed_after_search": max(0, screened_then - corpus_now),
+        "records_screened": corpus_now,
+    })
+    return out
+
+
 def _store_prisma_identification(scenario_id: str, figures: dict) -> None:
     """Persiste les chiffres (colonne JSONB user_scenarios.prisma_identification).
     best-effort : une colonne absente ou une panne ne doit jamais faire échouer un
