@@ -168,6 +168,15 @@ erDiagram
   their cache on the requested `lang`, and the clustering payload stores each
   cluster's summary under `clusters[].summaries[lang]` — a request in the other
   language keeps the UMAP/HDBSCAN structure and regenerates only the summaries.
+  The **language of the interface that starts the work is forwarded** (`?lang=`)
+  by the search (`/populate`), the pin (`PATCH pinned`, `POST /user-scenarios`)
+  and the rebuild (`POST /pipeline`) to the launchers and down to every pipeline
+  step: cluster summaries, evidence brief, variables and model specification,
+  recommended actions (a pipeline step of its own) are all produced in that
+  language, so no tab generates anything at its first opening. The clustering and
+  knowledge-graph caches are rebuilt at each corpus build and otherwise kept for
+  30 days (`VIZ_CACHE_TTL_S`), not 24 h: an expiry only re-ran a 40 s computation
+  in front of the user the day after the build.
   The built-in (GESICA) catalogue is stored in French; `gesica_i18n.py` carries
   its English titles, descriptions and recommended actions, applied by the list
   and detail endpoints when `lang=en`. Status labels and messages that the

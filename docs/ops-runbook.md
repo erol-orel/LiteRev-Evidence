@@ -270,6 +270,11 @@ One line per check, `OK` / `WARN` / `FAIL`, exit code 1 on a FAIL:
 Then:
 - **deploy freeze**: every merge to `main` restarts the API and cuts any search or
   pipeline in flight, so nothing merges from the morning of the session until it ends;
+- **build in the language you will present in**: everything the search, the pin and
+  the rebuild cache (cluster summaries, brief, variables and model, actions) is produced
+  in the language of the toggle at that moment; a tab opened under the other toggle
+  regenerates its text on the spot (LLM, 10-40 s). Switch the toggle first, then run the
+  searches or the preflight with `--lang`;
 - **warm the clustering** once after any restart (its first computation compiles
   UMAP, about 30 s) — the preflight warns when the API restarted recently;
 - **prefer pre-built scenarios** in the session; a live search can take up to the
