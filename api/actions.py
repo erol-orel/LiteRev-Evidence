@@ -45,14 +45,24 @@ def _generate_recommended_actions(scenario_id: str, lang: str | None = None) -> 
             "key_finding": pj.get("key_finding", pj.get("conclusion", "")),
         })
 
+    # Les actions engagent le corpus ENTIER, pas les 20 articles reproduits : le digest
+    # (agrégats sur TOUS les articles pertinents) précède, le verbatim illustre.
+    from .digest import corpus_digest, digest_coverage_note, digest_to_prompt
+    _digest = corpus_digest(scenario_id)
+    _digest_block = digest_to_prompt(_digest, max_chars=1800)
+    _coverage = digest_coverage_note(_digest, len(ctx))
+    _n_total = _digest.get("n_articles") or len(base)
+
     system = ("Tu es un expert en aide à la décision en santé et en santé publique. "
               "À partir d'une revue de littérature, tu proposes des ACTIONS opérationnelles "
               "concrètes, spécifiques et actionnables (pas de généralités). Pas de tiret cadratin (em dash)."
               ) + _llm_lang_directive(lang)
-    user = (f"Scénario : \"{scenario_name}\"\n"
-            f"Basé sur {len(base)} articles :\n{_json.dumps(ctx, ensure_ascii=False)[:6000]}\n\n"
+    user = (f"Scénario : \"{scenario_name}\"\n\n"
+            + (f"{_digest_block}\n\n{_coverage}\n\n" if _digest_block else f"Basé sur {_n_total} articles.\n\n")
+            + f"Articles reproduits ({len(ctx)} les mieux établis) :\n"
+            + f"{_json.dumps(ctx, ensure_ascii=False)[:6000]}\n\n"
             "Génère un JSON {\"recommended_actions\": [\"action 1\", ...]} avec 4 à 5 actions "
-            "concrètes déduites de l'évidence. Retourne UNIQUEMENT le JSON.")
+            "concrètes déduites de l'évidence du corpus complet. Retourne UNIQUEMENT le JSON.")
     try:
         client = _OAI(timeout=90.0)
         resp = client.chat.completions.create(
