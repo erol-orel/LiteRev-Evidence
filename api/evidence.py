@@ -401,7 +401,9 @@ def _generate_evidence_brief_llm(scenario_id: str, force: bool = False, lang: st
     # On ne régénère que si le sous-ensemble pertinent, le seuil ou la langue ont
     # changé - l'ancien cache « 24h » régénérait un corpus inchangé ET servait un
     # brief périmé (mauvaise langue / corpus modifié) tant qu'il avait moins de 24h.
-    _brief_fp = _evidence_fingerprint([a["id"] for a in articles], threshold, lang, "brief-v3-relevant-fulltext")
+    # v4 : le prompt porte désormais le digest du corpus COMPLET (et plus seulement les
+    # 30 articles reproduits). Le suffixe invalide une fois les briefs écrits sans lui.
+    _brief_fp = _evidence_fingerprint([a["id"] for a in articles], threshold, lang, "brief-v4-full-corpus-digest")
     if not force:
         with engine.connect() as conn:
             row = conn.execute(text("""
@@ -441,6 +443,15 @@ def _generate_evidence_brief_llm(scenario_id: str, force: bool = False, lang: st
         context_articles.append(_ca)
 
     context_str = _json.dumps(context_articles, ensure_ascii=False, indent=2)
+
+    # Le brief parle au nom du corpus ENTIER : le digest (agrégats calculés sur TOUS les
+    # articles pertinents, sans échantillonnage) précède les articles reproduits, qui ne
+    # sont là que pour citer. Avant, le modèle lisait 30 articles sur 2 732 et annonçait
+    # pourtant le total : les distributions décrites étaient celles de son échantillon.
+    from .digest import corpus_digest, digest_coverage_note, digest_to_prompt
+    _digest = corpus_digest(scenario_id, threshold)
+    _digest_block = digest_to_prompt(_digest)
+    _coverage = digest_coverage_note(_digest, len(context_articles))
 
     # Stats corpus (sur TOUS les articles pertinents : `has_pico` est renseigné pour
     # chaque ligne, `pico_json` seulement pour les 30 du contexte).
@@ -483,10 +494,12 @@ Ne pas utiliser de tiret cadratin (em dash). Utiliser des tirets simples (-) si 
 
     user_prompt = f"""Génère un Evidence Brief complet pour le scénario de recherche : "{scenario_name}"
 
-Corpus : {total} articles ({year_range}), {with_pico} avec PICO extrait, {included} validés humainement.
+{_digest_block or f"Corpus : {total} articles ({year_range}), {with_pico} avec PICO extrait, {included} validés humainement."}
 Designs d'étude principaux : {', '.join(f'{d} ({n})' for d, n in top_designs)}.
 
-Articles (top 30 par pertinence) :
+{_coverage}
+
+Articles reproduits ({len(context_articles)} les mieux établis, pour citer et illustrer) :
 {context_str}
 
 RÈGLES GRADE (strict) pour « evidence_level » et « grade_recommendation » :

@@ -193,6 +193,19 @@ erDiagram
   (`WARM_ON_STARTUP`), relaunches the searches and pipelines a restart
   interrupted, in the language they were started in (`pipeline_lang`,
   `RESUME_ON_STARTUP`), instead of marking them failed.
+- **Every extraction reads all the relevant articles.** Above the threshold or included
+  by a reviewer, never the excluded, never a sample. Since a corpus of thousands of
+  abstracts does not fit in one prompt, the rule is kept by map then reduce: the
+  per-article facts are extracted once and cached on the row (`pico_json`,
+  `concepts_json`), and `digest.py` aggregates them over the ENTIRE relevant subset in
+  SQL, with no LLM. Each generator writes over that digest (volumetry, coverage, years,
+  designs, countries, journals, typed concepts) and reproduces only its best few articles,
+  for quotation, under an explicit instruction that its conclusions must hold for the
+  whole corpus. Before this, the brief spoke for 30 articles out of 2,732 while announcing
+  the full count. The article caps now default to zero, meaning no limit; a positive
+  `EPI_PARAM_MAX_ARTICLES`, `CONCEPT_MAX_ARTICLES` or `CONCEPT_GRAPH_MAX_ARTICLES` is a
+  budget fallback. Clustering and the similarity graph keep their caps: they are
+  projections bounded by memory, not extractions, and the interface says so.
 - **Epidemiological parameters are searched for, not hoped for.** The model spec is
   built from the 25 most relevant articles, which on a corpus of thousands almost
   never report an R0 or an incubation period: the SEIR tab announced "no parameter

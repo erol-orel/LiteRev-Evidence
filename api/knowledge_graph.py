@@ -277,7 +277,10 @@ _LLM_CONCEPT_TYPES = ("pathogen", "vector", "host", "population", "exposure", "i
                       "outcome", "method", "place")
 CONCEPTS_VERSION = 1
 # Plafond d'articles normalisés par le LLM en une passe (15 par appel → ≈ 100 appels).
-CONCEPT_MAX_ARTICLES = int(os.getenv("CONCEPT_MAX_ARTICLES", "1500") or 1500)
+# Aucun plafond par défaut : les concepts sont normalisés pour TOUS les articles
+# pertinents, une seule fois par article (cache `concepts_json`), donc le coût est ponctuel
+# et incrémental. CONCEPT_MAX_ARTICLES > 0 en pose un pour une passe (secours budgétaire).
+CONCEPT_MAX_ARTICLES = int(os.getenv("CONCEPT_MAX_ARTICLES", "0") or 0)
 _CONCEPT_BATCH = 15
 _CONCEPT_WORKERS = 6
 
@@ -598,15 +601,18 @@ _CONCEPT_ROWS_SQL = """
              ars.similarity_score DESC NULLS LAST, d.year DESC NULLS LAST, d.id
     LIMIT :cap
 """
-CONCEPT_GRAPH_MAX_ARTICLES = 3000
+# Aucun plafond par défaut : la carte compte les concepts de TOUS les articles pertinents
+# (lecture de colonnes déjà extraites, sans LLM). > 0 pose un plafond d'exploitation.
+CONCEPT_GRAPH_MAX_ARTICLES = int(os.getenv("CONCEPT_GRAPH_MAX_ARTICLES", "0") or 0)
 
 
 def _concept_rows(scenario_id: str) -> tuple[list[dict], int]:
     thr = _get_scenario_threshold(scenario_id)
+    _cap = CONCEPT_GRAPH_MAX_ARTICLES if CONCEPT_GRAPH_MAX_ARTICLES > 0 else None
     with engine.connect() as conn:
         rows = [dict(r) for r in conn.execute(text(_CONCEPT_ROWS_SQL),
                                               {"sid": scenario_id, "thr": thr,
-                                               "cap": CONCEPT_GRAPH_MAX_ARTICLES}).mappings().all()]
+                                               "cap": _cap}).mappings().all()]
         n_total = conn.execute(text(
             "SELECT COUNT(*) FROM literature_document d JOIN article_scenarios ars ON ars.document_id = d.id "
             "WHERE ars.scenario_id = :sid AND d.is_duplicate IS NOT TRUE AND d.abstract IS NOT NULL "
@@ -692,7 +698,9 @@ def _extract_concepts_for_scenario(scenario_id: str, max_articles: int | None = 
     rows, _ = _concept_rows(scenario_id)
     todo = [r for r in rows if not r.get("concepts_json")
             and (isinstance(r.get("pico_json"), dict) or (r.get("abstract") and len(r["abstract"]) > 80))]
-    todo = todo[:(max_articles or CONCEPT_MAX_ARTICLES)]
+    _cap = int(max_articles or CONCEPT_MAX_ARTICLES or 0)
+    if _cap > 0:
+        todo = todo[:_cap]
     if not todo:
         return 0
     client = _OAI(timeout=120.0)

@@ -62,7 +62,10 @@ _PARAM_TOKENS: dict[str, tuple[str, ...]] = {
 # suffit à démontrer que le scénario est transmissible (cf. _merge_epidemic_observations).
 _TRANSMISSION_PARAMS = ("r0", "serial_interval_days", "incubation_period_days")
 
-EPI_PARAM_MAX_ARTICLES = _env_int("EPI_PARAM_MAX_ARTICLES", 40, 1)   # articles envoyés au LLM
+# Aucun plafond par défaut : l'extraction lit TOUS les articles pertinents qui mesurent
+# un paramètre, jamais un échantillon. EPI_PARAM_MAX_ARTICLES > 0 en pose un (secours
+# d'exploitation si le budget LLM doit être tenu un jour donné).
+EPI_PARAM_MAX_ARTICLES = _env_int("EPI_PARAM_MAX_ARTICLES", 0, 0)
 _EPI_PARAM_BATCH = 10
 _EPI_PARAM_WORKERS = 4
 
@@ -93,10 +96,11 @@ def params_mentioned(text: str) -> list[str]:
 
 
 def _parameter_candidate_articles(scenario_id: str, threshold: float | None = None,
-                                  limit: int = EPI_PARAM_MAX_ARTICLES) -> list[dict]:
-    """Articles du sous-ensemble PERTINENT qui rapportent un paramètre (terme de mesure
-    dans le titre ou le résumé), les meilleurs d'abord : synthèses en tête, puis qualité,
-    citations et année. Même porte de screening que partout ailleurs."""
+                                  limit: int = 0) -> list[dict]:
+    """TOUS les articles du sous-ensemble PERTINENT qui rapportent un paramètre (terme de
+    mesure dans le titre ou le résumé), les meilleurs d'abord : synthèses en tête, puis
+    qualité, citations et année. Même porte de screening que partout ailleurs.
+    `limit <= 0` : aucun plafond (le cas par défaut)."""
     if threshold is None:
         threshold = _get_scenario_threshold(scenario_id)
     sql = text("""
@@ -120,10 +124,12 @@ def _parameter_candidate_articles(scenario_id: str, threshold: float | None = No
           d.id
         LIMIT :cap
     """)
+    # NULL en LIMIT = pas de limite en SQL : le défaut lit tout le corpus pertinent.
+    _cap = int(limit) if int(limit or 0) > 0 else None
     with engine.connect() as conn:
         rows = [dict(r) for r in conn.execute(
             sql, {"sid": scenario_id, "thr": threshold, "rx": _param_regex(boundary=r"\y"),
-                  "cap": max(1, int(limit))}).mappings().all()]
+                  "cap": _cap}).mappings().all()]
     for r in rows:
         r["params_mentioned"] = params_mentioned(f"{r.get('title') or ''} {r.get('abstract') or ''}")
     return [r for r in rows if r["params_mentioned"]]
@@ -179,9 +185,10 @@ def _epi_extract_batch(client, batch: list[dict], disease_hint: str | None) -> l
 
 def extract_epidemic_observations(scenario_id: str, disease_hint: str | None = None,
                                   threshold: float | None = None,
-                                  max_articles: int = EPI_PARAM_MAX_ARTICLES) -> dict[str, Any]:
+                                  max_articles: int = 0) -> dict[str, Any]:
     """Cherche dans TOUT le corpus pertinent les articles qui rapportent un paramètre
-    épidémiologique et en extrait une observation par étude.
+    épidémiologique et en extrait une observation par étude. Aucun échantillonnage :
+    `max_articles <= 0` (le défaut) lit tous les articles qui en mesurent un.
 
     Renvoie ``{params: {nom: {observations: [{article_id, value, ci_low, ci_high}]}},
     disease, n_candidates, n_articles_used, n_with_values}``. Sans clé OpenAI :
@@ -189,7 +196,7 @@ def extract_epidemic_observations(scenario_id: str, disease_hint: str | None = N
     import os as _os
     from concurrent.futures import ThreadPoolExecutor
 
-    candidates = _parameter_candidate_articles(scenario_id, threshold, max_articles)
+    candidates = _parameter_candidate_articles(scenario_id, threshold, max_articles or 0)
     # `articles` : de quoi TRACER la provenance. Ces articles sont hors des 25 plus
     # pertinents qui servent au reste du spec ; sans eux dans le pool de provenance,
     # _attach_model_spec filtrerait justement les observations qu'on vient de mesurer.
@@ -701,13 +708,26 @@ def _generate_variables_from_pico(scenario_id: str, persist: str = "active", lan
 
     context_str = _json.dumps(pico_context, ensure_ascii=False, indent=2)
 
+    # Le spec engage le corpus ENTIER : le digest (agrégats sur TOUS les articles
+    # pertinents, sans échantillonnage) précède les 25 articles reproduits, qui servent
+    # à choisir des variables concrètes et à citer.
+    from .digest import corpus_digest, digest_coverage_note, digest_to_prompt
+    _digest = corpus_digest(scenario_id, threshold)
+    _digest_block = digest_to_prompt(_digest)
+    _coverage = digest_coverage_note(_digest, len(pico_context))
+
     system_prompt = """Tu es un expert en modélisation prédictive appliquée à la santé.
 A partir d'une revue systématique de la littérature, tu identifies les variables clés,
 l'outcome principal, et le meilleur algorithme pour un modèle prédictif.
 Tu génères un JSON structuré. Ne pas utiliser de tiret cadratin (em dash).""" + _llm_lang_directive(lang)
 
     user_prompt = f"""Scénario : "{scenario_name}"
-Basé sur {len(pico_articles)} articles pertinents ({_n_with_pico} avec PICO extrait ; PICO, abstract et extrait de texte intégral fournis quand disponibles) :
+
+{_digest_block or f"Basé sur {len(pico_articles)} articles pertinents ({_n_with_pico} avec PICO extrait)."}
+
+{_coverage}
+
+Articles reproduits ({len(pico_context)} les mieux établis ; PICO, abstract et extrait de texte intégral quand disponibles) :
 
 {context_str}
 
@@ -829,7 +849,7 @@ Retourne UNIQUEMENT le JSON valide."""
         # v6 : les paramètres épidémiologiques viennent désormais d'une extraction CIBLÉE
         # sur les articles qui les mesurent, pas des seuls 25 plus pertinents. Le suffixe
         # invalide UNE FOIS les specs construits sans elle.
-        _CTX_VERSION = "ctx-v6-epi-targeted"
+        _CTX_VERSION = "ctx-v7-full-corpus-digest"
         evidence_fingerprint = _evidence_fingerprint(
             [a.get("id") for a in pico_articles[:25] if a.get("id") is not None],
             threshold, lang, _CTX_VERSION)[:16]
@@ -1177,7 +1197,7 @@ def get_epidemic_parameter_candidates(scenario_id: str, limit: int = 40) -> dict
 
 
 @app.post("/scenarios/{scenario_id}/epidemic-parameters/extract")
-def extract_scenario_epidemic_parameters(scenario_id: str, max_articles: int = EPI_PARAM_MAX_ARTICLES,
+def extract_scenario_epidemic_parameters(scenario_id: str, max_articles: int = 0,
                                          _: None = Depends(require_api_key)) -> dict[str, Any]:
     """Relance la seule extraction CIBLÉE des paramètres épidémiologiques et la fusionne
     dans le spec déjà stocké (le reste du spec est inchangé et n'est PAS régénéré).

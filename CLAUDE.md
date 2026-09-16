@@ -10,6 +10,31 @@ text must keep asking the model not to use it.
 
 `tests/test_no_em_dashes.py` scans every tracked text file and fails CI on the first one.
 
+## Every extraction reads all the relevant papers
+
+Any information or evidence extraction (brief, recommended actions, variables and model
+spec, epidemiological parameters, concepts, any future one) draws on **all** the relevant
+articles of the scenario: those above the similarity threshold, plus those a reviewer
+included by hand, and never the excluded. Never a sample, never a top 20, 25, 30 or 40.
+
+A corpus of several thousand abstracts does not fit in one prompt, so the rule is kept by
+map then reduce, and any new extraction must follow the same shape:
+
+- **map**: extract the per-article facts once and cache them on the article row
+  (`pico_json`, `concepts_json`), so the cost is one-time and incremental;
+- **reduce**: `api/digest.py` aggregates those facts over the entire relevant subset in
+  SQL, with no LLM and no sampling. The generator writes over that digest and reproduces
+  only a handful of articles, for quotation, with an explicit instruction that its
+  conclusions must hold for the whole corpus.
+
+Article caps default to zero, meaning no limit. A positive `EPI_PARAM_MAX_ARTICLES`,
+`CONCEPT_MAX_ARTICLES` or `CONCEPT_GRAPH_MAX_ARTICLES` is an operational fallback for a
+day when the LLM budget must be held, not a normal setting. The clustering and the
+similarity graph keep their caps: they are projections bounded by memory, not extractions,
+and the interface says how many articles they draw.
+
+`tests/test_full_corpus_digest.py` pins both halves.
+
 ## Working conventions
 
 - Backend: the `api/` package, one module per domain; `main.py` is the entry point and
