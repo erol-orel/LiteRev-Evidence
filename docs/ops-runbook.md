@@ -241,16 +241,35 @@ server, or a subscriber never receives an email:
    and sends nothing.
 2. **A cron or systemd timer** calling the digest runner, which respects each
    subscription's frequency (daily / weekly / immediate) and only writes
-   `last_notified_at` for the ones it actually sent:
+   `last_notified_at` for the ones it actually sent.
+
+The runner needs `WRITE_API_KEY`, so it goes through a wrapper that sources the env
+file. Do NOT put the key in the crontab: `/etc/cron.d/*` is world-readable, and a
+`$VARIABLE` there is not expanded from the service environment anyway (cron gives the
+job an almost empty environment, so the header would go out empty and every run would
+get a 401). A crontab line also cannot be split with a backslash: one job, one line.
+
 ```bash
-# /etc/cron.d/literev-alerts - every day at 07:10, after the living review
-10 7 * * * root curl -fsS -XPOST -H "X-API-Key: $WRITE_API_KEY" \
-  http://127.0.0.1:8000/alerts/run-digests?dry_run=false >> /var/log/literev-alerts.log 2>&1
+sudo tee /usr/local/bin/literev-alerts >/dev/null <<'SH'
+#!/bin/bash
+set -euo pipefail
+set -a; . /etc/literev-api.env; set +a
+curl -fsS -X POST -H "X-API-Key: ${WRITE_API_KEY}" \
+  "http://127.0.0.1:8000/alerts/run-digests?dry_run=false"
+SH
+sudo chmod 700 /usr/local/bin/literev-alerts          # the key is read from root-only env
+
+# every day at 07:10, after the living review. One line, no continuation.
+printf '%s\n' '10 7 * * * root /usr/local/bin/literev-alerts >> /var/log/literev-alerts.log 2>&1' \
+  | sudo tee /etc/cron.d/literev-alerts >/dev/null
+sudo chmod 644 /etc/cron.d/literev-alerts             # cron ignores group/other-writable files
 ```
-Check it first with `dry_run=true`: the response lists every subscription, how
-many new articles it would carry, and why any is skipped (`not_due`,
-`smtp_not_configured`). `POST /alerts/subscribe` returns a `delivery` block saying
-which of the two prerequisites is in place.
+
+Check it first with `dry_run=true` (run the wrapper's curl by hand with that flag): the
+response lists every subscription, how many new articles it would carry, and why any is
+skipped (`not_due`, `smtp_not_configured`). Nothing is sent and `last_notified_at` is not
+touched on a dry run. `POST /alerts/subscribe` returns a `delivery` block saying which of
+the two prerequisites is in place.
 
 ## 8. Tests (backend, frontend, browser)
 
