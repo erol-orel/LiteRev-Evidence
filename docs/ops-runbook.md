@@ -197,8 +197,20 @@ required for the app to run - they're guardrails.
 ### 7b. Uptime check on `/health` (external)
 Point any uptime monitor (UptimeRobot, Better Stack, Hetzner, a cron+curl) at
 **`https://literev-scenario.com/api/health`** (through nginx) - expect HTTP 200
-`{"status":"ok","database":"ok"}`. Alert if non-200 or the body's `database` isn't
-`ok`. A 1–5 min interval is plenty. `/health` is exempt from rate limiting.
+with `schema.ok` true. Alert on non-200 **and on `"ok": false` inside `schema`**.
+
+Alerting on `status` or `database` alone is not enough, and this is deliberate:
+both stay `"ok"` on a degraded schema, so that the deploy carrying the fix can
+still pass its own smoke test. The field that says "the database is complete" is
+`schema.ok`, and it names the missing tables and the count of DDL statements
+dropped at startup. A keyword monitor can watch for the string `"ok": false`, or
+use a cron+curl:
+```bash
+curl -fsS https://literev-scenario.com/api/health \
+  | python3 -c 'import json,sys; d=json.load(sys.stdin)["schema"]; sys.exit(0 if d["ok"] else 1)' \
+  || echo "LiteRev: schema DEGRADED"
+```
+A 1-5 min interval is plenty. `/health` is exempt from rate limiting.
 
 ### 7c. Deploy-failure alert (GitHub Actions)
 The "Deploy to production" job can fail without anyone noticing. Add a failure
@@ -216,6 +228,29 @@ notification to `.github/workflows/deploy.yml` (a final step with
 ```
 (Add the `DEPLOY_ALERT_WEBHOOK` repo secret first. Tell me the channel and I'll
 wire the exact step.)
+
+### 7d. Email alerts to users: NOT scheduled by the API
+`POST /alerts/subscribe` stores a subscription; it sends nothing and schedules
+nothing. **The API has no internal scheduler.** Two things must be set up on the
+server, or a subscriber never receives an email:
+
+1. **SMTP** in the API environment: `SMTP_HOST`, `SMTP_USER`, `SMTP_PASS`, and
+   optionally `SMTP_PORT` (465 implicit TLS, 587 STARTTLS, 25 plain) and
+   `SMTP_SECURITY` (`ssl` / `starttls` / `none`, otherwise inferred from the port).
+   Without `SMTP_HOST` the digest run reports `smtp_not_configured` per subscriber
+   and sends nothing.
+2. **A cron or systemd timer** calling the digest runner, which respects each
+   subscription's frequency (daily / weekly / immediate) and only writes
+   `last_notified_at` for the ones it actually sent:
+```bash
+# /etc/cron.d/literev-alerts - every day at 07:10, after the living review
+10 7 * * * root curl -fsS -XPOST -H "X-API-Key: $WRITE_API_KEY" \
+  http://127.0.0.1:8000/alerts/run-digests?dry_run=false >> /var/log/literev-alerts.log 2>&1
+```
+Check it first with `dry_run=true`: the response lists every subscription, how
+many new articles it would carry, and why any is skipped (`not_due`,
+`smtp_not_configured`). `POST /alerts/subscribe` returns a `delivery` block saying
+which of the two prerequisites is in place.
 
 ## 8. Tests (backend, frontend, browser)
 
@@ -270,11 +305,18 @@ One line per check, `OK` / `WARN` / `FAIL`, exit code 1 on a FAIL:
 Then:
 - **deploy freeze**: every merge to `main` restarts the API and cuts any search or
   pipeline in flight, so nothing merges from the morning of the session until it ends;
-- **the SEIR tab needs measured parameters**: it only projects when the corpus reports a
-  transmission parameter. `GET /scenarios/{id}/epidemic-parameters/candidates` says what
-  the corpus holds (no LLM, instant); `POST /scenarios/{id}/epidemic-parameters/extract`
-  re-runs the extraction alone on a scenario whose spec predates it. A scenario with no
-  such article is not a bug, and the tab now says so with the counts;
+- **the SEIR tab needs measured parameters**: by default it only projects when the corpus
+  reports a transmission parameter (R₀ or β). Three gates close it: no parameter at all
+  (`no_parameters`), a scenario the extraction marked non-transmissible
+  (`not_transmissible`), and parameters extracted but none that drives the dynamics
+  (`no_transmission_parameter`). **An explicit user override reopens gates 1 and 2**:
+  `POST /scenarios/{id}/seir-projection` with `overrides` simulates anyway and marks the
+  answer `forced: true`, with `r0_source: "user"`. That is a deliberate "what if", not a
+  literature result, and it must not be presented as one. `GET
+  /scenarios/{id}/epidemic-parameters/candidates` says what the corpus holds (no LLM,
+  instant); `POST /scenarios/{id}/epidemic-parameters/extract` re-runs the extraction
+  alone on a scenario whose spec predates it. A scenario with no such article is not a
+  bug, and the tab says so with the counts;
 - **build in the language you will present in**: everything the search, the pin and
   the rebuild cache (cluster summaries, brief, variables and model, actions) is produced
   in the language of the toggle at that moment; a tab opened under the other toggle

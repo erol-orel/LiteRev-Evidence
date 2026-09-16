@@ -19,7 +19,10 @@ from sqlalchemy import text
 from .core import app, engine, logger, require_api_key
 from .variables import _norm_col
 
-MODEL_DATA_DIR = Path(_os_mod.environ.get("MODEL_DATA_DIR", "/home/ubuntu/uploads_datasets"))
+# Défaut SOUS la racine de déploiement, comme annoncé par .env.example : le défaut réel
+# était /home/ubuntu/uploads_datasets, donc hors du répertoire qu'un opérateur
+# sauvegarde ou nettoie, et sans rapport avec la documentation.
+MODEL_DATA_DIR = Path(_os_mod.environ.get("MODEL_DATA_DIR", "/opt/literev-api/uploads_datasets"))
 
 
 def _ensure_model_dataset_table():

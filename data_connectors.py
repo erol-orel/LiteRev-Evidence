@@ -15,12 +15,20 @@ Design goals (mirrors model_trainer.py):
   - Registry: `CONNECTORS[id] -> Connector`. The app maps a scenario's public
     columns to a connector + params, fetches, and assembles the dataset.
 
-Connectors shipped here (verified pluggable, 2026-07):
+Connectors shipped here (`CONNECTORS` holds all six):
   - open-meteo-weather      → historical daily temperature/precip/wind/humidity
   - open-meteo-air-quality  → daily PM2.5 / PM10 / NO2 / O3 (Copernicus CAMS)
+  - eawag-wastewater        → daily SARS-CoV-2 / IAV / IBV / RSV wastewater load
+  - foph-wastewater         → OFSP wastewater monitoring, daily viral load
+  - foph-sentinella-ili     → OFSP Sentinella, weekly ILI consultations (forward-filled)
+  - seir-projection         → the scenario's own SEIR run, registered at import time by
+                              `CONNECTORS[SEIR_CONNECTOR_ID] = …` further down this file.
+                              Unlike the five above it calls no external API: it reads the
+                              scenario's calibrated parameters and returns the projected
+                              curve, so a model can be trained against it.
 
-Both are point sources (query by lat/lon → any Romandie city). The FOPH respiratory
-open-data + EAWAG wastewater connectors are the next additions (CSV sources).
+The two Open-Meteo connectors are point sources (query by lat/lon → any Romandie city);
+the three Swiss public-health connectors are national/station series (CSV sources).
 """
 from __future__ import annotations
 
@@ -678,14 +686,26 @@ def _fetch_seir_projection(params: dict) -> list[dict]:
     """Trajectoire MÉDIANE du modèle SEIR-family, en lignes journalières tidy. Aucun
     appel réseau : intégration locale. `params["epidemic_parameters"]` = bloc
     model_spec.epidemic_parameters (issu du corpus) ; `population` / `initial_infected`
-    en contexte (défauts 1e6 / 10) ; horizon via start/end ou `days`. Liste vide si
-    aucun paramètre exploitable (scénario non épidémique)."""
+    en contexte (défauts 1e6 / 10) ; horizon via start/end ou `days`.
+
+    MÊMES PORTES que l'endpoint de projection (api/seir.py) : liste vide si aucun
+    paramètre n'est extrait, si le scénario est marqué NON transmissible, ou s'il manque
+    le paramètre qui PILOTE la dynamique (R0 ou beta). Sans cette dernière porte,
+    seir_model._rates retombait sur un R0 = 2.5 codé en dur : un corpus n'ayant livré
+    qu'une létalité produisait une série d'incidence complète, présentée comme
+    « paramétrée par la littérature » et versée telle quelle dans le jeu
+    d'entraînement du modèle prédictif (auto-fetch des colonnes `source: "seir"`)."""
     import seir_model
     from datetime import date, timedelta
     epi = params.get("epidemic_parameters") or {}
     dists = seir_model.params_to_distributions((epi.get("params") or {}))
     if not dists:
         return []  # rien d'extrait / scénario non transmissible → pas de projection
+    if not epi.get("applicable"):
+        return []  # jugé NON transmissible à l'extraction : aucun compartimental
+    if not ({"r0", "beta"} & set(dists)):
+        # Ni R0 ni beta : toute courbe reposerait sur la valeur de repli du moteur.
+        return []
     try:
         dists["population"] = float(params.get("population") or 1_000_000)
     except (TypeError, ValueError):

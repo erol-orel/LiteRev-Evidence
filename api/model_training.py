@@ -101,7 +101,11 @@ def _seed_demo_scenarios() -> None:
         with engine.connect() as conn:
             if conn.execute(text("SELECT 1 FROM user_scenarios WHERE id = :id"), {"id": sid}).first():
                 return  # already seeded → idempotent no-op
-        repo_root = os.path.dirname(os.path.abspath(__file__))
+        # Racine du DÉPÔT : ce module a été extrait de main.py, et le chemin est resté
+        # relatif à api/. demo_seed cherchait scripts/trial_output/ sous api/, qui n'a pas
+        # de sous-dossier scripts : le scénario de démonstration ne pouvait jamais être
+        # semé, et c'est aussi lui qui produisait les seuls runs 'ready'.
+        repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         if not os.path.exists(demo_seed.dataset_path(repo_root)):
             logger.warning(f"seed demo: dataset missing at {demo_seed.dataset_path(repo_root)}")
             return
@@ -352,7 +356,14 @@ def get_model_run(scenario_id: str) -> dict[str, Any]:
         return {"status": "empty", "message": "Aucun modèle entraîné. Lancez l'entraînement après avoir branché des données."}
 
     return {
-        "status": "ready",
+        # « ready » était renvoyé en dur, y compris pour un run dont la sérialisation du
+        # modèle avait échoué (artifact_path NULL) : l'onglet Modèle annonçait un modèle
+        # prêt pendant que la prédiction répondait 400 et le monitoring « unavailable ».
+        "status": "ready" if row["has_artifact"] else "no_artifact",
+        "usable": bool(row["has_artifact"]),
+        "message": (None if row["has_artifact"] else
+                    "Entraînement terminé mais le modèle n'a pas pu être enregistré : "
+                    "prédiction et monitoring indisponibles. Relancez l'entraînement."),
         "run_id": row["id"],
         "dataset_id": row["dataset_id"],
         "family": row["family"],
@@ -487,7 +498,11 @@ def export_model_bundle(scenario_id: str, include_data: bool = True,
             SELECT id, dataset_id, family, task_type, metric, metrics_json,
                    best_params_json, feature_importance_json, summary_json, is_active, created_at
             FROM scenario_model_run
-            WHERE scenario_id = :sid AND status = 'ready'
+            -- 'done' est le statut qu'écrit l'entraînement réel ; 'ready' n'était produit
+            -- que par le seeder de démonstration. Le bundle de reproductibilité filtrait
+            -- sur 'ready' et ressortait donc TOUJOURS vide : aucun run, aucun
+            -- hyperparamètre, aucune métrique, pour un modèle affiché comme entraîné.
+            WHERE scenario_id = :sid AND status IN ('done', 'ready')
             ORDER BY created_at DESC
         """), {"sid": scenario_id}).mappings().all()
         ds = conn.execute(text("""

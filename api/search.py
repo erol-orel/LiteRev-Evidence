@@ -1067,7 +1067,13 @@ def _generate_search_strategy(query: str) -> dict:
             response_format={"type": "json_object"},
         )
         _result = json.loads(response.choices[0].message.content)
-        if isinstance(_result, dict) and not _result.get("degraded"):
+        # Validité au sens du RESTE du code (_strategy_is_degraded : `general` vide, ou
+        # sans opérateur booléen), pas seulement l'absence du drapeau `degraded`. Une
+        # traduction qui « réussit » en renvoyant une requête inexploitable était sinon
+        # épinglée à vie dans le cache persistant (ON CONFLICT DO NOTHING, jamais
+        # réécrit), et le réessai promis « quand OpenAI redevient disponible » n'avait
+        # jamais lieu pour cette requête.
+        if isinstance(_result, dict) and not _result.get("degraded") and not _strategy_is_degraded(_result):
             # Persiste ; le PREMIER writer gagne (ON CONFLICT DO NOTHING), puis on RELIT
             # la valeur gagnante → deux traductions LLM concurrentes de la même phrase
             # convergent vers UNE seule stratégie persistée et déterministe.

@@ -273,6 +273,7 @@ export const en: Translations = {
     scenariosDetected: "Detected scenarios",
     reportedMetrics: "Reported metrics",
     corpusBuildFailed: "Corpus build failed.",
+    corpusUnranked: "Corpus built, but not ranked: the semantic scoring produced no score (OpenAI key unavailable?). The articles below are the ones your query matched, in no particular order of relevance, and the similarity threshold does not apply to them. Rerun the search once scoring is available.",
     filters: "Filters",
     resetFiltersTooltip: "Reset filters",
     reset: "Reset",
@@ -600,8 +601,9 @@ export const en: Translations = {
       cohereNotConfigured: " (not configured)",
       corpusTitlePrefix: "Article corpus",
       corpusTitleArticles: "articles",
-      corpusSubtitle:
-        "Automatically selected articles: pending human validation (screening)",
+      corpusSubtitle: "Automatically selected articles; screening decisions are shown per article",
+      corpusSubtitleNoneValidated:
+        "Automatically selected articles: none validated by a human reviewer yet (screening)",
       exportRelevant: "Export the relevant articles",
       exportPlaceholder: "Export…",
       exporting: "Exporting…",

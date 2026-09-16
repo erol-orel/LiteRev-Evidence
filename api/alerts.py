@@ -73,9 +73,14 @@ class AlertSubscriptionIn(BaseModel):
 
 @app.post("/alerts/subscribe")
 def subscribe_alerts(payload: AlertSubscriptionIn, _: None = Depends(require_api_key)) -> dict[str, Any]:
-    """
-    Enregistre une alerte email pour un scénario.
-    L'utilisateur sera notifié quand de nouveaux articles sont ajoutés.
+    """Enregistre une alerte email pour un scénario.
+
+    ATTENTION, ce que cet endpoint fait vraiment : il ENREGISTRE l'abonnement, il
+    n'envoie rien et ne programme rien. L'envoi est fait par `/alerts/run-digests`,
+    qu'il faut appeler depuis un cron (ou un timer systemd) : l'API n'a pas de
+    planificateur interne. Sans cron, ou sans `SMTP_HOST`, l'abonnement est bien
+    stocké mais aucun email ne partira jamais. La réponse porte donc `delivery`, qui
+    dit lequel des deux prérequis manque, plutôt que de promettre un envoi.
     """
     email = _clean_email(payload.email) or payload.email
     with engine.begin() as conn:
@@ -90,13 +95,28 @@ def subscribe_alerts(payload: AlertSubscriptionIn, _: None = Depends(require_api
             ), {"e": email, "id": payload.scenario_id})
             owner_set = (res.rowcount or 0) > 0
 
+    smtp_ok = bool(os.getenv("SMTP_HOST", ""))
     return {
         "status": "subscribed",
         "email": email,
         "scenario_id": payload.scenario_id,
         "frequency": payload.frequency,
         "owner_set": owner_set,
-        "message": f"Vous recevrez des alertes {payload.frequency} pour le scénario '{payload.scenario_id}'.",
+        # État RÉEL de la distribution, pas une promesse : l'abonnement est stocké dans
+        # tous les cas, mais l'email ne part que si SMTP est configuré ET si
+        # /alerts/run-digests est appelé par un cron (l'API ne planifie rien).
+        "delivery": {
+            "smtp_configured": smtp_ok,
+            "requires_scheduled_runner": True,
+            "runner_endpoint": "POST /alerts/run-digests",
+        },
+        "message": (
+            f"Abonnement {payload.frequency} enregistré pour le scénario "
+            f"'{payload.scenario_id}'. L'envoi dépend de l'appel périodique de "
+            f"/alerts/run-digests"
+            + ("" if smtp_ok else " et de la configuration de SMTP_HOST, absente ici")
+            + "."
+        ),
     }
 
 

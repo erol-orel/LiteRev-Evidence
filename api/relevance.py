@@ -653,6 +653,27 @@ def update_scenario_settings(scenario_id: str, payload: dict[str, Any], _: None 
                 WHERE scenario_id = :sid
             """), {"val": val, "sid": scenario_id})
 
+        # Les artefacts mis en cache sont des FONCTIONS du seuil (clustering, graphe de
+        # similarité, carte des concepts) ou du spec (projection SEIR par défaut). Ils
+        # n'étaient invalidés par rien : déplacer le curseur de pertinence laissait servir,
+        # jusqu'à 30 jours, des visualisations calculées sur un sous-ensemble qui n'existe
+        # plus, et une édition du spec laissait une projection issue des anciens paramètres.
+        if "similarity_threshold" in updates:
+            conn.execute(text("""
+                UPDATE scenario_settings
+                SET clustering_json = NULL, clustering_generated_at = NULL,
+                    knowledge_graph_json = NULL, kg_generated_at = NULL,
+                    concept_graph_json = NULL, concept_graph_generated_at = NULL
+                WHERE scenario_id = :sid
+            """), {"sid": scenario_id})
+        if "variables_json" in updates:
+            conn.execute(text("""
+                UPDATE scenario_settings
+                SET seir_projection_json = NULL, seir_projection_generated_at = NULL,
+                    variables_i18n = NULL
+                WHERE scenario_id = :sid
+            """), {"sid": scenario_id})
+
     # Retourner l'objet settings complet mis à jour
     with engine.connect() as conn:
         updated_row = conn.execute(text("""

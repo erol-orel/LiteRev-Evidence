@@ -1902,6 +1902,12 @@ export default function App() {
   // Sources rejouées depuis le cache de la dernière recherche identique : explique
   // pourquoi une relance prend quelques secondes au lieu de la fédération complète.
   const [searchCachedSources, setSearchCachedSources] = useState<string[] | null>(null);
+  // Corpus construit mais NON CLASSÉ (le scoring sémantique n'a produit aucun score,
+  // clé OpenAI indisponible p. ex.). Ce n'est pas un échec de la recherche : les
+  // articles sont là et s'affichent, mais leur ORDRE et le seuil de similarité ne
+  // veulent rien dire, et l'interface doit le dire au lieu de les présenter comme
+  // classés par pertinence.
+  const [searchUnranked, setSearchUnranked] = useState<string | null>(null);
   const [searchFinalizing, setSearchFinalizing] = useState(false);
   const [folders, setFolders] = useState<ScenarioFolder[]>([]);
   // Tri par défaut = pertinence (le score est désormais calculé pour TOUS les
@@ -2094,6 +2100,7 @@ export default function App() {
     const mySearch = ++activeSearchRef.current;   // supersède toute recherche précédente
     setLoading(true);
     setError(null);
+    setSearchUnranked(null);      // l'avertissement décrit le corpus précédent
     setPage(1);
     setSelectedResult(null);
     setSelectedDocument(null);
@@ -2229,6 +2236,10 @@ export default function App() {
           } catch { /* transient - keep polling */ }
         }
         if (status === 'done') { reachedDone = true; break; }
+        // Corpus construit mais non classé : on SORT de la boucle comme pour 'done'
+        // et on affiche les articles, avec l'avertissement. Les jeter derrière un
+        // message d'échec serait faux : ils sont en base et lisibles.
+        if (status === 'unranked') { reachedDone = true; setSearchUnranked(t("search.corpusUnranked")); break; }
         if (status === 'error') throw new Error(t("search.corpusBuildFailed"));
         await new Promise((r) => setTimeout(r, 2000));
       }
@@ -2303,6 +2314,9 @@ export default function App() {
         setSearchSourceProgress(null);
         setSearchCachedSources(null);
         setSearchPhase('idle');
+        // `searchUnranked` N'EST PAS remis à zéro ici : il décrit le corpus AFFICHÉ,
+        // qui reste à l'écran après la fin de la recherche. Il est effacé au lancement
+        // de la suivante.
       }
     }
   }
@@ -3196,6 +3210,14 @@ export default function App() {
                         <p className="flex items-center gap-2 text-xs text-emerald-300/80">
                           <span className="h-3 w-3 animate-spin rounded-full border-2 border-emerald-300/30 border-t-emerald-300" />
                           {refreshLabel ?? t("search.refreshingResults")}
+                        </p>
+                      )}
+                      {/* Corpus construit mais NON classé : dire que l'ordre affiché n'est
+                          pas un ordre de pertinence vaut mieux que le laisser croire. */}
+                      {searchUnranked && (
+                        <p className="flex items-start gap-2 rounded-lg border border-gold-500/30 bg-gold-500/10 px-3 py-2 text-xs text-gold-200">
+                          <AlertTriangle size={13} className="mt-0.5 shrink-0" />
+                          <span>{searchUnranked}</span>
                         </p>
                       )}
                       {searchSourceBreakdown && Object.keys(searchSourceBreakdown).length > 0 && (() => {

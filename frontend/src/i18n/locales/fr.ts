@@ -271,6 +271,7 @@ export const fr = {
     scenariosDetected: "Scénarios détectés",
     reportedMetrics: "Métriques rapportées",
     corpusBuildFailed: "La construction du corpus a échoué.",
+    corpusUnranked: "Corpus construit, mais non classé : le scoring sémantique n'a produit aucun score (clé OpenAI indisponible ?). Les articles ci-dessous sont bien ceux que votre requête sélectionne, mais dans aucun ordre de pertinence, et le seuil de similarité ne s'applique pas. Relancez la recherche quand le scoring sera disponible.",
     filters: "Filtres",
     resetFiltersTooltip: "Réinitialiser les filtres",
     reset: "Réinitialiser",
@@ -606,8 +607,9 @@ export const fr = {
         csv: "CSV (tableur)", xlsx: "Excel (.xlsx)", ris: "RIS (Zotero, EndNote, Mendeley)",
         bibtex: "BibTeX", json: "JSON", md: "Markdown",
       },
-      corpusSubtitle:
-        "Articles sélectionnés automatiquement : en attente de validation humaine (screening)",
+      corpusSubtitle: "Articles sélectionnés automatiquement ; la décision de screening est indiquée par article",
+      corpusSubtitleNoneValidated:
+        "Articles sélectionnés automatiquement : aucun validé par un relecteur humain (screening)",
       aboveThreshold: "au-dessus du seuil",
       belowThresholdKept: "sous le seuil (conservés)",
       unscored: "non scorés",

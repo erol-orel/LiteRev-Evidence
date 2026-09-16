@@ -62,8 +62,8 @@ graph TD
   frontend, and reverse-proxies `/api/*` to the backend, removing the `/api`
   prefix. (So `localhost:8000` has **no** `/api` - that prefix is nginx-only.
   This matters when you `curl` the backend directly on the server.)
-- **FastAPI (`api/` package, `main.py` entry point)** - the entire backend: ~18k
-  lines in 30 domain modules (§5), 155 routes, no ORM, no task queue. Runs under uvicorn as the `literev-api` systemd service on
+- **FastAPI (`api/` package, `main.py` entry point)** - the entire backend: ~21k
+  lines in 32 domain modules (§5), 157 routes, no ORM, no task queue. Runs under uvicorn as the `literev-api` systemd service on
   `localhost:8000`.
 - **PostgreSQL + pgvector** - the single source of truth (papers, chunks,
   embeddings, scenarios, screening, settings). Lives on a *separate* host.
@@ -382,7 +382,7 @@ for the scripts, tools and tests.
 | `review` | screening progress, PRISMA flow, PICO stats / bulk / per article, per-article screening |
 | `evidence` | evidence brief (structured, LLM, PDF) |
 | `assistant` | `/ask`, `/ask/stream`, `/ask/stream/filtered`, scenario RAG |
-| `variables` | model-spec schema, variables generated from PICO, localisation, variables endpoints |
+| `digest` | `corpus_digest`: the whole-corpus aggregation in SQL (no LLM, no sampling) that every generator writes over, plus `digest_to_prompt` and `digest_coverage_note` |
 | `model_spec` | spec proposals, validation, outcome templates, edits |
 | `actions` | recommended actions |
 | `model_data` | dataset table, validation against the template, public data connectors, upload, auto-fetch, synthetic data |
@@ -485,7 +485,9 @@ on restart - which is exactly why startup re-launches orphans.
   mutating endpoint via `Depends(...)`. Reads are open; writes require the key.
 
 **Other cross-cutting facts:** in-memory per-IP **rate limiting** (600/min
-general, 30/min on expensive paths like `/search`, `/ask*`, RAG, full-pipeline);
+general; 30/min only on the four expensive paths in `EXPENSIVE_PATHS`: `/ask*`,
+the two `/rag`, and `/full-pipeline`. `/search` is deliberately NOT one of them,
+since the search page fires several per keystroke);
 Pydantic models are used sparingly (~10: `SearchIn`, `AskIn`, `DocumentIn`,
 `UserScenarioIn`, …) since most endpoints take path/query params.
 
