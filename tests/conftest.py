@@ -13,6 +13,10 @@ import os
 os.environ.setdefault("WRITE_API_KEY", "test-write-key")
 os.environ.setdefault("DB_URL", "postgresql+psycopg://u:p@127.0.0.1:1/nodb")  # unreachable dummy
 os.environ.setdefault("OPENAI_API_KEY", "")
+# No background side effects in the tests: no UMAP warm-up at startup, no automatic
+# full pipeline after a corpus build (the tests stub or drive the workers themselves).
+os.environ.setdefault("WARM_ON_STARTUP", "0")
+os.environ.setdefault("AUTO_PIPELINE_AFTER_SEARCH", "0")
 
 import pytest
 
@@ -72,6 +76,8 @@ def ensure_document_columns(cur) -> bool:
     for col, typ in (("created_at", "TIMESTAMP DEFAULT now()"), ("url", "TEXT"), ("pmid", "TEXT"),
                      ("year", "INTEGER"), ("source", "TEXT"), ("keywords", "TEXT"), ("language", "TEXT"),
                      ("open_access", "BOOLEAN"), ("sample_size", "INTEGER"), ("pico_json", "JSONB"),
+                     ("metadata_json", "JSONB"), ("concepts_json", "JSONB"), ("country", "TEXT"),
+                     ("study_design", "TEXT"), ("quality_score", "FLOAT"),
                      ("project_context", "VARCHAR(32) DEFAULT 'literev'")):
         cur.execute(f"ALTER TABLE literature_document ADD COLUMN IF NOT EXISTS {col} {typ}")
     for col, typ in (("rerank_score", "FLOAT"), ("screening_status", "TEXT"), ("reviewer_1_status", "VARCHAR(20)")):

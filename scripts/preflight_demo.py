@@ -170,6 +170,12 @@ class Preflight:
                 self.add(level, f"{sid}: clustering", f"{n} clusters on {body.get('n_docs')} docs, cached={bool(body.get('from_cache'))}, lang={served}" + ("" if level == "OK" else f" (asked {lang})"))
         self.read(f"{sid}: knowledge graph", f"/user-scenarios/{sid}/knowledge-graph",
                   lambda b: f"{len(b.get('nodes') or [])} nodes, {len(b.get('edges') or b.get('links') or [])} edges")
+        cg = self.read(f"{sid}: concept map", f"/user-scenarios/{sid}/concept-graph",
+                       lambda b: f"{len(b.get('nodes') or [])} concepts, {len(b.get('edges') or [])} links, "
+                                 f"source={b.get('source')}, enriching={bool(b.get('enriching'))}")
+        if isinstance(cg, dict) and (cg.get("enriching") or (cg.get("n_missing_concepts") or 0) > 0):
+            self.add("WARN", f"{sid}: concept map", f"{cg.get('n_missing_concepts')} articles still without LLM concepts"
+                     + (" (normalising now)" if cg.get("enriching") else " (no OpenAI key on the API?)"))
         self.read(f"{sid}: evidence brief", f"/user-scenarios/{sid}/evidence-brief",
                   lambda b: f"{(b.get('corpus_stats') or {}).get('total', '?')} articles in the brief")
         self.artifact(sid, "LLM brief", f"/scenarios/{sid}/evidence-brief/llm?lang={lang}",

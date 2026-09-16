@@ -67,6 +67,10 @@ import {
   triggerRerank,
   getRerankStatus,
   fetchKnowledgeGraph,
+  fetchConceptGraph,
+  type ConceptGraphData,
+  type ConceptNode,
+  type ConceptType,
   fetchKappaStats,
   fetchDoubleBlindConflicts,
   submitDoubleBlindDecision,
@@ -3825,7 +3829,339 @@ function PicoSection({ scenarioId }: { scenarioId: string }) {
 
 // ─── Section: Knowledge Graph (co-citations) ─────────────────────────────────
 
+// ─── Knowledge graph: concept map (default) and article similarity network ────
+//
+// The concept map relates what the articles are ABOUT: typed concepts (pathogen, vector,
+// host, population, exposure, intervention, outcome, method, place, design, setting,
+// topic), one column per type, node size = number of articles citing the concept, link =
+// cited by the same articles. Every node and link opens its articles. The similarity
+// network (articles as nodes, cosine similarity as links) is kept as the second mode.
+
+const CONCEPT_TYPE_ORDER: ConceptType[] = [
+  "pathogen", "vector", "host", "population", "exposure", "intervention",
+  "outcome", "method", "place", "setting", "design", "topic",
+];
+const CONCEPT_TYPE_COLORS: Record<ConceptType, string> = {
+  pathogen: "#f472b6", vector: "#fb923c", host: "#fbbf24", population: "#34d399",
+  exposure: "#a78bfa", intervention: "#60a5fa", outcome: "#22c55e", method: "#e879f9",
+  place: "#38bdf8", setting: "#c084fc", design: "#94a3b8", topic: "#4ade80",
+};
+
+/** Label of a concept in the interface language; a place is an ISO2 code localised by the browser. */
+function conceptLabel(n: ConceptNode, lang: string): string {
+  if (n.type === "place") {
+    try {
+      const name = new Intl.DisplayNames([lang], { type: "region" }).of(n.label.en);
+      if (name) return name;
+    } catch { /* unknown code: keep it */ }
+    return n.label.en;
+  }
+  const l = lang === "fr" ? n.label.fr : n.label.en;
+  return l || n.label.en || n.label.fr;
+}
+
 function KnowledgeGraphSection({ scenarioId }: { scenarioId: string }) {
+  const { t } = useI18n();
+  const [mode, setMode] = React.useState<"concepts" | "articles">("concepts");
+  return (
+    <div className="space-y-4">
+      <div className="flex flex-wrap gap-2">
+        {(["concepts", "articles"] as const).map(m => (
+          <button key={m} type="button" onClick={() => setMode(m)}
+            className={`rounded-lg border px-3 py-1.5 text-xs transition ${mode === m
+              ? "border-brand-500/40 bg-brand-500/15 text-brand-200"
+              : "border-white/10 bg-white/3 text-white/50 hover:text-white/80"}`}>
+            {t(m === "concepts" ? "scenarioDetail.knowledgeGraph.modeConcepts" : "scenarioDetail.knowledgeGraph.modeArticles")}
+          </button>
+        ))}
+      </div>
+      {mode === "concepts"
+        ? <ConceptMapView scenarioId={scenarioId} />
+        : <ArticleSimilarityGraph scenarioId={scenarioId} />}
+    </div>
+  );
+}
+
+function ConceptMapView({ scenarioId }: { scenarioId: string }) {
+  const { t, lang } = useI18n();
+  const [data, setData] = React.useState<ConceptGraphData | null>(null);
+  const [loading, setLoading] = React.useState(true);
+  const [error, setError] = React.useState<string | null>(null);
+  const [selected, setSelected] = React.useState<number | null>(null);
+  const [hovered, setHovered] = React.useState<number | null>(null);
+  const [latestOnly, setLatestOnly] = React.useState(false);
+  const [showAll, setShowAll] = React.useState(false);
+
+  React.useEffect(() => {
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    let polls = 0;
+    const load = () => {
+      fetchConceptGraph(scenarioId)
+        .then(d => {
+          if (cancelled) return;
+          setData(d);
+          setLoading(false);
+          // The API normalises the missing concepts in the background: re-read until done.
+          if (d.enriching && polls < 40) { polls += 1; timer = setTimeout(load, 6000); }
+        })
+        .catch((e: Error) => { if (!cancelled) { setError(e.message); setLoading(false); } });
+    };
+    setLoading(true); setError(null); setSelected(null); setShowAll(false);
+    load();
+    return () => { cancelled = true; if (timer) clearTimeout(timer); };
+  }, [scenarioId]);
+
+  if (loading && !data) return <LoadingSpinner text={t("scenarioDetail.knowledgeGraph.calculating")} />;
+  if (error || !data) return <ErrorBox message={error ?? t("scenarioDetail.common.errorKnowledgeGraph")} />;
+  if (!data.nodes.length) {
+    return (
+      <div className="space-y-2 p-4 text-xs text-white/40">
+        <p>{t("scenarioDetail.knowledgeGraph.noConcepts")}</p>
+        {data.enriching && <p className="flex items-center gap-2 text-brand-300"><Loader2 size={12} className="animate-spin" />{t("scenarioDetail.knowledgeGraph.enriching")}</p>}
+      </div>
+    );
+  }
+
+  // ── Layered layout: one column per type, nodes stacked by article count ─────
+  const types = CONCEPT_TYPE_ORDER.filter(ty => data.nodes.some(n => n.type === ty));
+  const byType: Partial<Record<ConceptType, ConceptNode[]>> = {};
+  for (const ty of types) {
+    byType[ty] = data.nodes.filter(n => n.type === ty).sort((a, b) => b.count - a.count).slice(0, 14);
+  }
+  const shown = new Set<number>();
+  for (const ty of types) for (const n of byType[ty] ?? []) shown.add(n.id);
+  const maxCount = Math.max(1, ...data.nodes.map(n => n.count));
+  const radius = (n: ConceptNode) => 4 + 12 * Math.sqrt(n.count / maxCount);
+  const W = 980;
+  const rows = Math.max(1, ...types.map(ty => (byType[ty] ?? []).length));
+  const H = Math.max(420, 70 + rows * 30);
+  const colW = W / Math.max(1, types.length);
+  const pos: Record<number, { x: number; y: number }> = {};
+  types.forEach((ty, ci) => {
+    const list = byType[ty] ?? [];
+    const x = colW * ci + colW / 2;
+    const step = Math.min(30, (H - 70) / Math.max(1, list.length));
+    const total = step * (list.length - 1);
+    list.forEach((n, ri) => { pos[n.id] = { x, y: 40 + (H - 40) / 2 - total / 2 + ri * step }; });
+  });
+  const nodeById = new Map(data.nodes.map(n => [n.id, n]));
+  const edges = data.edges.filter(e => shown.has(e.source) && shown.has(e.target));
+  const maxW = Math.max(1, ...edges.map(e => e.weight));
+  const focus = selected ?? hovered;
+  const incident = (id: number) => focus !== null && edges.some(e =>
+    (e.source === focus && e.target === id) || (e.target === focus && e.source === id));
+  const dimmed = (id: number) => focus !== null && id !== focus && !incident(id);
+  const label = (n: ConceptNode) => conceptLabel(n, lang);
+  const typeName = (ty: string) => t(`scenarioDetail.knowledgeGraph.conceptTypes.${ty}`);
+  const sel = selected !== null ? (nodeById.get(selected) ?? null) : null;
+  const neighbours = sel
+    ? edges.filter(e => e.source === sel.id || e.target === sel.id)
+        .map(e => ({ n: nodeById.get(e.source === sel.id ? e.target : e.source), w: e.weight }))
+        .filter((x): x is { n: ConceptNode; w: number } => !!x.n)
+        .sort((a, b) => b.w - a.w)
+    : [];
+  const selArticles = sel
+    ? sel.articles.map(id => ({ id, a: data.articles[String(id)] })).filter(x => x.a)
+        .filter(x => !latestOnly || (data.latest_year !== null && x.a.y === data.latest_year))
+    : [];
+  const links = [...edges].sort((a, b) => b.weight - a.weight).slice(0, 10);
+  const subtitle = t("scenarioDetail.knowledgeGraph.conceptSubtitle")
+    .replace("{n}", String(data.nodes.length)).replace("{e}", String(data.edges.length))
+    .replace("{a}", String(data.n_articles));
+  const nameOf = (id: number) => { const n = nodeById.get(id); return n ? label(n) : "?"; };
+  const Badge = ({ ty }: { ty: ConceptType }) => (
+    <span className="rounded px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wider"
+      style={{ background: `${CONCEPT_TYPE_COLORS[ty]}22`, color: CONCEPT_TYPE_COLORS[ty] }}>
+      {typeName(ty)}
+    </span>
+  );
+
+  return (
+    <div className="space-y-4">
+      <SectionHeader icon={<Network size={14} className="text-brand-400" />}
+        title={t("scenarioDetail.knowledgeGraph.conceptTitle")} subtitle={subtitle} />
+
+      {data.enriching && (
+        <div className="flex items-center gap-2 rounded-xl border border-brand-500/20 bg-brand-500/5 px-3 py-2 text-xs text-brand-200">
+          <Loader2 size={12} className="animate-spin shrink-0" />{t("scenarioDetail.knowledgeGraph.enriching")}
+        </div>
+      )}
+      {!data.enriching && data.source === "structured" && (
+        <div className="rounded-xl border border-white/10 bg-white/3 px-3 py-2 text-xs text-white/50">
+          {t("scenarioDetail.knowledgeGraph.structuredOnly")}
+        </div>
+      )}
+
+      <div className="flex flex-wrap items-center gap-3">
+        {data.latest_year !== null && (
+          <button type="button" onClick={() => setLatestOnly(v => !v)}
+            className={`rounded-lg border px-2.5 py-1 text-[11px] transition ${latestOnly
+              ? "border-amber-400/40 bg-amber-400/15 text-amber-200" : "border-white/10 bg-white/3 text-white/50 hover:text-white/80"}`}>
+            {t("scenarioDetail.knowledgeGraph.highlightYear").replace("{year}", String(data.latest_year))}
+          </button>
+        )}
+        <div className="flex flex-wrap gap-2">
+          {types.map(ty => (
+            <span key={ty} className="flex items-center gap-1.5 text-[10px] text-white/50">
+              <span className="h-2 w-2 rounded-full" style={{ background: CONCEPT_TYPE_COLORS[ty] }} />
+              {typeName(ty)} <span className="font-mono text-white/30">{(byType[ty] ?? []).length}</span>
+            </span>
+          ))}
+        </div>
+      </div>
+
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+        <div className="lg:col-span-2 overflow-x-auto">
+          <svg width="100%" viewBox={`0 0 ${W} ${H}`} className="bg-[#070f0a] rounded-2xl border border-white/5" style={{ minWidth: 640 }}>
+            {types.map((ty, ci) => (
+              <g key={ty}>
+                <circle cx={colW * ci + 14} cy={18} r={3} fill={CONCEPT_TYPE_COLORS[ty]} />
+                <text x={colW * ci + 22} y={21} fontSize="9.5" fontWeight="700" fill="rgba(255,255,255,0.55)"
+                  className="uppercase select-none" style={{ letterSpacing: 0.8 }}>{typeName(ty)}</text>
+              </g>
+            ))}
+            {edges.map((e, i) => {
+              const a = pos[e.source], b = pos[e.target];
+              if (!a || !b) return null;
+              const mx = (a.x + b.x) / 2;
+              const hot = focus !== null && (e.source === focus || e.target === focus);
+              const base = 0.10 + 0.30 * (e.weight / maxW);
+              return (
+                <path key={i} d={`M ${a.x} ${a.y} C ${mx} ${a.y}, ${mx} ${b.y}, ${b.x} ${b.y}`} fill="none"
+                  stroke={hot ? "#fff" : "#9be7c4"} strokeWidth={0.6 + 3 * (e.weight / maxW)}
+                  strokeOpacity={focus === null ? base : hot ? 0.85 : 0.04} className="cursor-pointer"
+                  onClick={() => setSelected(e.source)}>
+                  <title>{`${nameOf(e.source)} — ${nameOf(e.target)} · ${e.weight}`}</title>
+                </path>
+              );
+            })}
+            {types.map((ty, ci) => (byType[ty] ?? []).map(n => {
+              const p = pos[n.id];
+              if (!p) return null;
+              const r = radius(n);
+              const color = CONCEPT_TYPE_COLORS[n.type];
+              const isSel = selected === n.id;
+              const faded = dimmed(n.id) || (latestOnly && n.new_count === 0);
+              const rightSide = ci < types.length - 1;
+              const txt = label(n);
+              return (
+                <g key={n.id} className="cursor-pointer" opacity={faded ? 0.18 : 1}
+                  onClick={() => setSelected(isSel ? null : n.id)}
+                  onMouseEnter={() => setHovered(n.id)} onMouseLeave={() => setHovered(null)}>
+                  <title>{`${txt} · ${n.count}`}</title>
+                  {isSel && <circle cx={p.x} cy={p.y} r={r + 5} fill="none" stroke="#fff" strokeWidth="1.2" strokeDasharray="3,2" opacity={0.8} />}
+                  {latestOnly && n.new_count > 0 && <circle cx={p.x} cy={p.y} r={r + 3} fill="none" stroke="#fbbf24" strokeWidth="1.5" />}
+                  <circle cx={p.x} cy={p.y} r={r} fill={color} fillOpacity={0.85} stroke={isSel ? "#fff" : color} strokeWidth={isSel ? 1.5 : 0.6} />
+                  <text x={rightSide ? p.x + r + 4 : p.x - r - 4} y={p.y + 3} fontSize="9" fill="rgba(255,255,255,0.85)"
+                    textAnchor={rightSide ? "start" : "end"} className="select-none">
+                    {txt.length > 26 ? `${txt.slice(0, 25)}…` : txt}
+                    <tspan fill="rgba(255,255,255,0.35)" fontSize="7.5"> {n.count}</tspan>
+                  </text>
+                </g>
+              );
+            }))}
+          </svg>
+        </div>
+
+        <div className="space-y-3">
+          {sel ? (
+            <div className="rounded-2xl border border-white/10 bg-white/3 p-4 space-y-3">
+              <div className="flex items-start justify-between gap-2">
+                <div className="space-y-1 min-w-0">
+                  <Badge ty={sel.type} />
+                  <p className="text-sm font-bold text-white leading-5 break-words">{label(sel)}</p>
+                  <p className="text-[10px] text-white/50">
+                    {sel.count} {t("scenarioDetail.knowledgeGraph.subtitleArticles")}
+                    {data.latest_year !== null && sel.new_count > 0 && (
+                      <span className="text-amber-300"> · {sel.new_count} {t("scenarioDetail.knowledgeGraph.newIn").replace("{year}", String(data.latest_year))}</span>
+                    )}
+                  </p>
+                </div>
+                <button type="button" onClick={() => setSelected(null)} className="text-white/30 hover:text-white text-xs shrink-0">✕</button>
+              </div>
+              {neighbours.length > 0 && (
+                <div className="space-y-1">
+                  <p className="text-[10px] font-bold uppercase tracking-wider text-white/40">{t("scenarioDetail.knowledgeGraph.connectedConcepts")}</p>
+                  {neighbours.slice(0, 8).map(({ n, w }) => (
+                    <button key={n.id} type="button" onClick={() => setSelected(n.id)}
+                      className="flex w-full items-center justify-between gap-2 rounded px-1 py-0.5 text-left text-[10px] hover:bg-white/3">
+                      <span className="flex items-center gap-1.5 min-w-0">
+                        <span className="h-1.5 w-1.5 rounded-full shrink-0" style={{ background: CONCEPT_TYPE_COLORS[n.type] }} />
+                        <span className="truncate text-white/70">{label(n)}</span>
+                      </span>
+                      <span className="font-mono text-brand-300 shrink-0">{w}</span>
+                    </button>
+                  ))}
+                </div>
+              )}
+              <div className="space-y-1">
+                <p className="text-[10px] font-bold uppercase tracking-wider text-white/40">{t("scenarioDetail.knowledgeGraph.articlesOf")}</p>
+                {(showAll ? selArticles : selArticles.slice(0, 8)).map(({ id, a }) => {
+                  const href = a.doi ? `https://doi.org/${a.doi}` : a.pmid ? `https://pubmed.ncbi.nlm.nih.gov/${a.pmid}/` : null;
+                  return (
+                    <div key={id} className="flex items-start gap-1.5 text-[10px]">
+                      <span className="font-mono text-white/30 shrink-0 w-8">{a.y ?? "—"}</span>
+                      <span className="text-white/65 leading-3 line-clamp-2 flex-1">{a.t}</span>
+                      {href && <a href={href} target="_blank" rel="noreferrer" className="text-brand-300 shrink-0"><ExternalLink size={10} /></a>}
+                    </div>
+                  );
+                })}
+                {!showAll && selArticles.length > 8 && (
+                  <button type="button" onClick={() => setShowAll(true)} className="text-[10px] text-brand-300 hover:underline">
+                    {t("scenarioDetail.knowledgeGraph.showAll")} ({selArticles.length})
+                  </button>
+                )}
+              </div>
+            </div>
+          ) : (
+            <div className="rounded-2xl border border-white/5 bg-white/2 p-4 text-center">
+              <Network size={20} className="text-white/20 mx-auto mb-2" />
+              <p className="text-[10px] text-white/35">{t("scenarioDetail.knowledgeGraph.clickConcept")}</p>
+            </div>
+          )}
+
+          {links.length > 0 && (
+            <div className="rounded-2xl border border-white/5 bg-white/2 p-3 space-y-1.5">
+              <p className="text-[10px] font-bold uppercase tracking-wider text-white/40">{t("scenarioDetail.knowledgeGraph.strongestLinks")}</p>
+              {links.map((e, i) => (
+                <button key={i} type="button" onClick={() => setSelected(e.source)}
+                  className="flex w-full items-center justify-between gap-2 rounded px-1 py-0.5 text-left text-[10px] hover:bg-white/3">
+                  <span className="truncate text-white/65">{nameOf(e.source)} <span className="text-white/30">—</span> {nameOf(e.target)}</span>
+                  <span className="font-mono text-brand-300 shrink-0">{e.weight}</span>
+                </button>
+              ))}
+            </div>
+          )}
+
+          {data.triples.length > 0 && (
+            <div className="rounded-2xl border border-white/5 bg-white/2 p-3 space-y-1.5">
+              <p className="text-[10px] font-bold uppercase tracking-wider text-white/40">{t("scenarioDetail.knowledgeGraph.documentedChains")}</p>
+              {data.triples.map((tr, i) => (
+                <div key={i} className="flex items-center justify-between gap-2 text-[10px]">
+                  <span className="truncate text-white/65">{tr.nodes.map(nameOf).join(" › ")}</span>
+                  <span className="font-mono text-brand-300 shrink-0">{tr.count}</span>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {data.gaps.length > 0 && (
+            <div className="rounded-2xl border border-amber-400/15 bg-amber-400/5 p-3 space-y-1.5">
+              <p className="text-[10px] font-bold uppercase tracking-wider text-amber-200/70">{t("scenarioDetail.knowledgeGraph.evidenceGaps")}</p>
+              <p className="text-[9px] text-white/35">{t("scenarioDetail.knowledgeGraph.gapsHint")}</p>
+              {data.gaps.map((g, i) => (
+                <div key={i} className="text-[10px] text-white/65 truncate">{nameOf(g.nodes[0])} <span className="text-amber-300/70">×</span> {nameOf(g.nodes[1])}</div>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ArticleSimilarityGraph({ scenarioId }: { scenarioId: string }) {
   const { t } = useI18n();
   const [data, setData] = React.useState<KnowledgeGraphData | null>(null);
   const [loading, setLoading] = React.useState(true);

@@ -1527,6 +1527,67 @@ export interface KnowledgeGraphData {
   clusters: KGCluster[];
 }
 
+// ─── Concept map (typed concepts, co-occurrence links, articles behind each) ──
+
+export type ConceptType =
+  | "pathogen" | "vector" | "host" | "population" | "exposure" | "intervention"
+  | "outcome" | "method" | "place" | "design" | "setting" | "topic";
+
+export interface ConceptNode {
+  id: number;
+  type: ConceptType;
+  /** Canonical labels in both interface languages; a place carries its ISO2 code. */
+  label: { en: string; fr: string };
+  /** Articles citing the concept (all of them), and those of the corpus's latest year. */
+  count: number;
+  new_count: number;
+  /** Up to 40 article ids, most relevant first (keys of `articles`). */
+  articles: number[];
+}
+
+export interface ConceptEdge {
+  source: number;
+  target: number;
+  /** Number of articles citing both concepts. */
+  weight: number;
+  articles: number[];
+}
+
+export interface ConceptArticle {
+  t: string;
+  y: number | null;
+  q: number;
+  doi: string | null;
+  pmid: string | null;
+}
+
+export interface ConceptGraphData {
+  kind: "concepts";
+  version: number;
+  scenario_id: string;
+  n_articles: number;
+  n_total: number;
+  n_with_concepts: number;
+  n_missing_concepts: number;
+  source: "llm" | "structured";
+  /** True while the API normalises the missing concepts with the LLM; re-fetch later. */
+  enriching?: boolean;
+  latest_year: number | null;
+  types: { type: ConceptType; count: number }[];
+  nodes: ConceptNode[];
+  edges: ConceptEdge[];
+  triples: { nodes: number[]; count: number }[];
+  gaps: { nodes: number[]; expected: number }[];
+  articles: Record<string, ConceptArticle>;
+}
+
+export async function fetchConceptGraph(scenarioId: string, refresh = false): Promise<ConceptGraphData> {
+  const base = scenarioBase(scenarioId);
+  const r = await safeFetch(`${base}/${scenarioId}/concept-graph${refresh ? "?refresh=true" : ""}`);
+  if (!r.ok) throw new Error(httpMessage(r.status));
+  return r.json();
+}
+
 export async function fetchKnowledgeGraph(
   scenarioId: string,
   maxNodes = 400,

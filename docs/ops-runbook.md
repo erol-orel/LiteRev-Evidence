@@ -275,8 +275,12 @@ Then:
   in the language of the toggle at that moment; a tab opened under the other toggle
   regenerates its text on the spot (LLM, 10-40 s). Switch the toggle first, then run the
   searches or the preflight with `--lang`;
-- **warm the clustering** once after any restart (its first computation compiles
-  UMAP, about 30 s) — the preflight warns when the API restarted recently;
+- **after a restart** the API compiles the UMAP/HDBSCAN kernels by itself in the
+  background (about 30 s, `WARM_ON_STARTUP=1`) and relaunches the searches and
+  pipelines the restart interrupted (`RESUME_ON_STARTUP=1`); the preflight still
+  warns when the API restarted recently. Every search runs the full pipeline once its
+  corpus is scored (`AUTO_PIPELINE_AFTER_SEARCH=1`); set it to 0 for a day of many
+  throw-away searches if the OpenAI bill matters more than ready tabs;
 - **prefer pre-built scenarios** in the session; a live search can take up to the
   federation budget (3 min) when a source is slow — keep a pre-built one as fallback;
 - **a room sharing one public IP** (audience on the venue Wi-Fi) hits the per-IP

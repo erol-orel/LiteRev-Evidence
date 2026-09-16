@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   clearApiKey,
+  fetchConceptGraph,
   fetchGesicaScenarios,
   fetchScenarioCorpus,
   fetchScenarioDetail,
@@ -134,6 +135,14 @@ describe("scenario endpoints", () => {
     await fetchScenarioCorpus("usr-abc", { limit: 200, abstractChars: 600, threshold: 0.42, fulltextOnly: true });
     expect(fetchMock.mock.calls[0][0])
       .toBe("/api/user-scenarios/usr-abc/corpus?limit=200&fulltext_only=true&threshold=0.42&abstract_chars=600");
+  });
+
+  it("reads the concept map from the scenario's own base path", async () => {
+    const fetchMock = stubFetch(reply(200, { kind: "concepts", nodes: [] }), reply(200, { kind: "concepts", nodes: [] }));
+    await fetchConceptGraph("usr-abc");
+    await fetchConceptGraph("influenza-surveillance", true);
+    expect(fetchMock.mock.calls[0][0]).toBe("/api/user-scenarios/usr-abc/concept-graph");
+    expect(fetchMock.mock.calls[1][0]).toBe("/api/gesica/scenarios/influenza-surveillance/concept-graph?refresh=true");
   });
 
   it("routes built-in and user scenarios to their own base path, with the language", async () => {

@@ -122,6 +122,9 @@ def main() -> int:
 
         env = {**os.environ, "DB_URL": smoke_url_str, "WRITE_API_KEY": args.api_key,
                "ADMIN_API_KEY": args.api_key, "OPENAI_API_KEY": "", "COHERE_API_KEY": "",
+               # Deterministic: no UMAP warm-up thread, no automatic full pipeline after the
+               # test's search (it would re-federate live sources behind the assertions).
+               "WARM_ON_STARTUP": "0", "AUTO_PIPELINE_AFTER_SEARCH": "0",
                "PYTHONUNBUFFERED": "1"}
         api_log = open(API_LOG, "w", encoding="utf-8")
         api = subprocess.Popen([sys.executable, "-m", "uvicorn", "main:app", "--host", "127.0.0.1",

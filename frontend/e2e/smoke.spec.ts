@@ -78,6 +78,16 @@ test("opens the scenario page: header, corpus, PRISMA flow and clustering", asyn
   await page.getByRole("button", { name: en.scenarioDetail.page.sections.viz, exact: true }).click();
   await expect(page.getByText("Cluster 1", { exact: true }).first()).toBeVisible();
   await expect(page.getByText("Synthetic summary.").first()).toBeVisible();
+
+  // Knowledge graph: the concept map is the default mode and answers without an LLM
+  // (structured fields only, or an explicit empty state), the similarity network stays.
+  await page.getByRole("button", { name: en.scenarioDetail.vizTab.subKnowledgeGraph, exact: true }).click();
+  await expect(page.getByRole("button", { name: en.scenarioDetail.knowledgeGraph.modeConcepts, exact: true })).toBeVisible();
+  await expect(page.getByText(en.scenarioDetail.knowledgeGraph.conceptTitle)
+    .or(page.getByText(en.scenarioDetail.knowledgeGraph.noConcepts)).first()).toBeVisible({ timeout: 15_000 });
+  await page.getByRole("button", { name: en.scenarioDetail.knowledgeGraph.modeArticles, exact: true }).click();
+  await expect(page.getByText(en.scenarioDetail.knowledgeGraph.title)
+    .or(page.getByText(en.scenarioDetail.knowledgeGraph.noArticleEmbeddings)).first()).toBeVisible({ timeout: 15_000 });
   check();
 });
 
