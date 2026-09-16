@@ -68,6 +68,10 @@ import {
   getRerankStatus,
   fetchKnowledgeGraph,
   fetchConceptGraph,
+  exportRelevantArticles,
+  downloadBlob,
+  RELEVANT_EXPORT_FORMATS,
+  type RelevantExportFormat,
   type ConceptGraphData,
   type ConceptNode,
   type ConceptType,
@@ -2117,6 +2121,38 @@ function VariablesSection({ detail, scenarioId, onGoToModel }: { detail: Scenari
 // ENTIER par le serveur ; seule la liste est paginée (« Charger plus »).
 const CORPUS_PAGE_SIZE = 200;
 
+/** "Export…" select: the relevant articles as csv, xlsx, ris, bibtex, json or md. */
+function RelevantExportMenu({ scenarioId }: { scenarioId: string }) {
+  const { t } = useI18n();
+  const [busy, setBusy] = useState(false);
+  const [failed, setFailed] = useState(false);
+  const run = async (format: RelevantExportFormat) => {
+    setBusy(true); setFailed(false);
+    try {
+      const { blob, filename } = await exportRelevantArticles(scenarioId, format);
+      downloadBlob(blob, filename);
+    } catch {
+      setFailed(true);
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <span className="flex items-center gap-1.5" title={t("scenarioDetail.corpus.exportRelevant")}>
+      {busy ? <Loader2 size={11} className="animate-spin text-brand-300" /> : <Download size={11} className="text-brand-300" />}
+      <select value="" disabled={busy} aria-label={t("scenarioDetail.corpus.exportRelevant")}
+        onChange={e => { const f = e.target.value as RelevantExportFormat; if (f) void run(f); }}
+        className="rounded-lg border border-brand-500/30 bg-brand-500/10 px-2 py-1 text-[10px] text-brand-300 focus:outline-none">
+        <option value="">{busy ? t("scenarioDetail.corpus.exporting") : t("scenarioDetail.corpus.exportPlaceholder")}</option>
+        {RELEVANT_EXPORT_FORMATS.map(f => (
+          <option key={f} value={f}>{t(`scenarioDetail.corpus.exportFormats.${f}`)}</option>
+        ))}
+      </select>
+      {failed && <span className="text-[10px] text-rose-300">{t("scenarioDetail.corpus.exportFailed")}</span>}
+    </span>
+  );
+}
+
 function CorpusSection({ scenarioId, threshold }: { scenarioId: string; detail: ScenarioDetail; threshold?: number }) {
   const { t } = useI18n();
   const [data, setData] = useState<ScenarioCorpus | null>(null);
@@ -2252,6 +2288,12 @@ function CorpusSection({ scenarioId, threshold }: { scenarioId: string; detail: 
               <span className="rounded-full bg-brand-500/15 border border-brand-500/30 px-3 py-1 text-[10px] font-semibold text-brand-300">
                 {data.above_threshold} {t("scenarioDetail.corpus.aboveThreshold")}
               </span>
+              <RelevantExportMenu scenarioId={scenarioId} />
+            </div>
+          )}
+          {data.above_threshold === undefined && (
+            <div className="flex items-center gap-2 flex-wrap">
+              <RelevantExportMenu scenarioId={scenarioId} />
               {(() => {
                 const below = data.below_threshold ?? Math.max(0, data.total - data.above_threshold! - (data.unscored ?? 0));
                 return below > 0 ? (

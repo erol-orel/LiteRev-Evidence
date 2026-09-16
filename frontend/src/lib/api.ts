@@ -2653,6 +2653,37 @@ export async function exportModelBundle(scenarioId: string, includeData = true):
   return r.json();
 }
 
+// ─── Relevant articles export (csv, xlsx, ris, bibtex, json, md) ─────────────
+export const RELEVANT_EXPORT_FORMATS = ["csv", "xlsx", "ris", "bibtex", "json", "md"] as const;
+export type RelevantExportFormat = typeof RELEVANT_EXPORT_FORMATS[number];
+
+/** The relevant articles of a scenario as a file; the filename comes from the API. */
+export async function exportRelevantArticles(
+  scenarioId: string,
+  format: RelevantExportFormat,
+  opts: { includeAbstract?: boolean } = {},
+): Promise<{ blob: Blob; filename: string }> {
+  const params = new URLSearchParams({ format });
+  if (opts.includeAbstract === false) params.set("include_abstract", "false");
+  const r = await safeFetch(`${scenarioBase(scenarioId)}/${scenarioId}/relevant/export?${params}`);
+  if (!r.ok) throw new Error(httpMessage(r.status));
+  const disposition = r.headers.get("Content-Disposition") ?? "";
+  const m = /filename="?([^";]+)"?/.exec(disposition);
+  return { blob: await r.blob(), filename: m?.[1] ?? `relevant-articles.${format === "bibtex" ? "bib" : format}` };
+}
+
+/** Hand a blob to the browser as a download. */
+export function downloadBlob(blob: Blob, filename: string): void {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
 // Même export, en classeur Excel (.xlsx) : feuilles Variables / Dataset (valeurs +
 // issue) / Model runs. Renvoie le binaire à télécharger.
 export async function exportModelXlsx(scenarioId: string): Promise<Blob> {

@@ -597,6 +597,14 @@ export const fr = {
       cohereNotConfigured: " (non configuré)",
       corpusTitlePrefix: "Corpus d'articles",
       corpusTitleArticles: "articles",
+      exportRelevant: "Exporter les articles pertinents",
+      exportPlaceholder: "Exporter…",
+      exporting: "Export en cours…",
+      exportFailed: "L'export a échoué",
+      exportFormats: {
+        csv: "CSV (tableur)", xlsx: "Excel (.xlsx)", ris: "RIS (Zotero, EndNote, Mendeley)",
+        bibtex: "BibTeX", json: "JSON", md: "Markdown",
+      },
       corpusSubtitle:
         "Articles sélectionnés automatiquement : en attente de validation humaine (screening)",
       aboveThreshold: "au-dessus du seuil",

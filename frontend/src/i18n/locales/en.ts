@@ -601,6 +601,14 @@ export const en: Translations = {
       corpusTitleArticles: "articles",
       corpusSubtitle:
         "Automatically selected articles: pending human validation (screening)",
+      exportRelevant: "Export the relevant articles",
+      exportPlaceholder: "Export…",
+      exporting: "Exporting…",
+      exportFailed: "The export failed",
+      exportFormats: {
+        csv: "CSV (spreadsheet)", xlsx: "Excel (.xlsx)", ris: "RIS (Zotero, EndNote, Mendeley)",
+        bibtex: "BibTeX", json: "JSON", md: "Markdown",
+      },
       aboveThreshold: "above the threshold",
       belowThresholdKept: "below the threshold (kept)",
       unscored: "unscored",

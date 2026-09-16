@@ -350,6 +350,7 @@ for the scripts, tools and tests.
 | `scenarios` | `user_scenarios` DDL, CRUD, folders, detail, corpus endpoint, populate/pipeline launchers and job dicts, counts, activity, embedding status, model status |
 | `pipeline` | `_run_user_scenario_populate`, `_run_user_scenario_full_pipeline`, the full-pipeline endpoint |
 | `relevance` | semantic scoring, Cohere cross-encoder rerank, `scenario_settings`, `_get_above_threshold_articles`, rerank and settings endpoints, corpus rebuild, chunk backfill |
+| `exports` | the relevant articles of a scenario as a file: csv, xlsx, ris, bibtex, json, md (`/relevant/export`, pure formatters) |
 | `review` | screening progress, PRISMA flow, PICO stats / bulk / per article, per-article screening |
 | `evidence` | evidence brief (structured, LLM, PDF) |
 | `assistant` | `/ask`, `/ask/stream`, `/ask/stream/filtered`, scenario RAG |

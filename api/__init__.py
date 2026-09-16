@@ -23,6 +23,7 @@ MODULES = (
     "scenarios",
     "pipeline",
     "relevance",
+    "exports",
     "review",
     "evidence",
     "assistant",

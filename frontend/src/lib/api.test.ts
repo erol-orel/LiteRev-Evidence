@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   clearApiKey,
+  exportRelevantArticles,
   fetchConceptGraph,
   fetchGesicaScenarios,
   fetchScenarioCorpus,
@@ -135,6 +136,16 @@ describe("scenario endpoints", () => {
     await fetchScenarioCorpus("usr-abc", { limit: 200, abstractChars: 600, threshold: 0.42, fulltextOnly: true });
     expect(fetchMock.mock.calls[0][0])
       .toBe("/api/user-scenarios/usr-abc/corpus?limit=200&fulltext_only=true&threshold=0.42&abstract_chars=600");
+  });
+
+  it("exports the relevant articles as a named file", async () => {
+    const body = { ok: true, status: 200, headers: { get: (n: string) => n === "Content-Disposition" ? 'attachment; filename="chik_relevant-articles_12.ris"' : null },
+      blob: async () => new Blob(["TY  - JOUR"]), json: async () => ({}), text: async () => "" } as unknown as Response;
+    const fetchMock = stubFetch(body);
+    const out = await exportRelevantArticles("usr-abc", "ris");
+    expect(fetchMock.mock.calls[0][0]).toBe("/api/user-scenarios/usr-abc/relevant/export?format=ris");
+    expect(out.filename).toBe("chik_relevant-articles_12.ris");
+    expect(await out.blob.text()).toBe("TY  - JOUR");
   });
 
   it("reads the concept map from the scenario's own base path", async () => {
