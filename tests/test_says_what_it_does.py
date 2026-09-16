@@ -65,6 +65,22 @@ def test_an_incomplete_digest_asserts_nothing_in_a_prompt():
     assert "12" in digest_to_prompt(good)
 
 
+def test_the_coverage_sentence_inverts_instead_of_claiming_a_false_total():
+    """The block of figures disappears on a failed digest, but the sentence under it went
+    on saying "the figures above cover the TOTALITY of 0 relevant articles". The model
+    then read a guarantee of exhaustiveness covering nothing, while holding only the
+    reproduced articles: precisely the sample the house rule forbids. On a failure the
+    sentence now forbids generalising instead of falling silent."""
+    from api.digest import digest_coverage_note
+
+    broken = digest_coverage_note({"n_articles": 0, "complete": False}, 30)
+    assert "TOTALITE" not in broken
+    assert "30" in broken and "AUCUN total" in broken
+
+    good = digest_coverage_note({"n_articles": 1200, "complete": True}, 30)
+    assert "TOTALITE des 1200" in good
+
+
 # ── /sources/health: six probes are not the whole federation ─────────────────
 def test_sources_health_names_what_it_does_not_probe():
     """The endpoint probes six fetchers out of twelve, so "6 reachable out of 6" must not

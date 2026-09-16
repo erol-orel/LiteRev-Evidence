@@ -178,8 +178,21 @@ def digest_to_prompt(digest: dict, max_chars: int = 2600) -> str:
 
 
 def digest_coverage_note(digest: dict, n_verbatim: int) -> str:
-    """La phrase que chaque prompt porte : le digest couvre tout, le verbatim illustre."""
-    n = (digest or {}).get("n_articles") or 0
+    """La phrase que chaque prompt porte : le digest couvre tout, le verbatim illustre.
+
+    Si le digest est INCOMPLET, la phrase s'inverse au lieu de disparaître. Elle
+    affirmait « la TOTALITE des 0 articles » au-dessus d'un bloc de chiffres que
+    `digest_to_prompt` venait justement de supprimer : le modèle lisait une garantie
+    d'exhaustivité portant sur rien, alors qu'il n'avait sous les yeux que les articles
+    reproduits, c'est-à-dire l'échantillon que la règle de la maison interdit. Dans ce
+    cas il faut le lui DIRE, et lui interdire de généraliser, plutôt que se taire."""
+    if not digest or not digest.get("complete") or not digest.get("n_articles"):
+        return (f"ATTENTION : l'agregation du corpus complet a echoue. Tu ne disposes que "
+                f"des {n_verbatim} articles reproduits ci-dessous. N'enonce AUCUN total, "
+                f"AUCUNE proportion et AUCUNE tendance d'ensemble : limite-toi a ce que "
+                f"ces {n_verbatim} articles etablissent, et dis explicitement que la vue "
+                f"d'ensemble du corpus n'etait pas disponible.")
+    n = digest.get("n_articles") or 0
     return (f"Les chiffres ci-dessus portent sur la TOTALITE des {n} articles pertinents. "
             f"Les {n_verbatim} articles reproduits ensuite en sont les mieux etablis "
             f"(qualite, citations) et servent a citer et a illustrer: tes conclusions "
