@@ -218,7 +218,14 @@ def _save_viz_cache(scenario_id: str, col: str, payload: dict) -> None:
         logger.warning(f"_save_viz_cache {col} {scenario_id}: {_e}")
 
 
-def _load_viz_cache(scenario_id: str, col: str, ttl: int = 86400) -> dict | None:
+# Durée de vie du cache de visualisation en base. Le cache est REFAIT à chaque
+# reconstruction du corpus (recherche, pipeline), c'est cela qui le tient à jour ; une
+# expiration courte ne faisait que relancer un calcul de 40 s (clustering) ou de
+# plusieurs secondes (graphe) sous les yeux de l'utilisateur le lendemain de la construction.
+VIZ_CACHE_TTL_S = 30 * 86400
+
+
+def _load_viz_cache(scenario_id: str, col: str, ttl: int = VIZ_CACHE_TTL_S) -> dict | None:
     """Lit le JSON de visualisation en cache s'il est frais (< ttl secondes)."""
     _at = "clustering_generated_at" if col == "clustering" else "kg_generated_at"
     _jc = f"{col}_json" if col == "clustering" else "knowledge_graph_json"

@@ -14,7 +14,7 @@ from sqlalchemy import text
 
 from .core import app, engine, require_api_key
 from .scenario_store import _get_user_scenario_or_404
-from .search import _load_prisma_identification
+from .search import _load_prisma_identification, _reconcile_prisma_identification
 from .double_blind import _write_ars_screening
 
 # ── Proxy endpoints : rediriger les appels /gesica/scenarios/{usr-*}/... ──────
@@ -206,20 +206,31 @@ def get_user_scenario_prisma(
     # retombe sur le corpus, qui est DÉJÀ dédupliqué : ses « doublons » sont le flag
     # is_duplicate, posé par aucun runtime — d'où l'ancien « 0 » permanent, signalé
     # ici par figures_from="corpus" pour que l'interface le dise.
+    # « Passés au screening » = le corpus tel qu'il est MAINTENANT, hors doublons — la
+    # même référence que /counts et l'onglet Corpus. Les chiffres de la recherche sont
+    # RÉCONCILIÉS avec lui (_reconcile_prisma_identification) : ce qui a été ajouté ou
+    # retiré depuis la recherche apparaît sur sa propre ligne, et l'arithmétique
+    # identifiés − doublons − retraits (+ ajoutés − retirés depuis) = screening tient
+    # toujours. Avant : `total` (liens, doublons compris) affiché à côté de retraits
+    # calculés pour un autre corpus → 3 623 − 731 − 401 ≠ 3 602.
     _figures = _load_prisma_identification(scenario_id)
     if _figures:
+        _rec = _reconcile_prisma_identification(_figures, unique)
         _identification = {
-            "total_records": int(_figures.get("records_identified") or 0),
+            "total_records": int(_rec.get("records_identified") or 0),
             "by_source": {str(k): int(v or 0) for k, v in (_figures.get("records_by_source") or {}).items()},
-            "duplicates_removed": int(_figures.get("duplicates_removed") or 0),
+            "duplicates_removed": int(_rec.get("duplicates_removed") or 0),
             "duplicate_records_across_sources": int(_figures.get("duplicate_records_across_sources") or 0),
             "duplicate_rows_in_database": int(_figures.get("duplicate_rows_in_database") or 0),
-            "unique_records": int(_figures.get("unique_records") or 0),
-            "removed_no_abstract": int(_figures.get("removed_no_abstract") or 0),
-            "removed_not_matching": int(_figures.get("removed_not_matching") or 0),
-            "removed_other_reasons": int(_figures.get("removed_other_reasons") or 0),
-            "removed_before_screening": int(_figures.get("removed_before_screening") or 0),
-            "records_screened": total,
+            "unique_records": int(_rec.get("unique_records") or 0),
+            "removed_no_abstract": int(_rec.get("removed_no_abstract") or 0),
+            "removed_not_matching": int(_rec.get("removed_not_matching") or 0),
+            "removed_other_reasons": int(_rec.get("removed_other_reasons") or 0),
+            "removed_before_screening": int(_rec.get("removed_before_screening") or 0),
+            "added_after_search": int(_rec.get("added_after_search") or 0),
+            "removed_after_search": int(_rec.get("removed_after_search") or 0),
+            "records_screened_at_search": int(_rec.get("records_screened_at_search") or 0),
+            "records_screened": unique,
             "embedded": embedded,
             "figures_from": "search_run",
             "computed_at": _figures.get("computed_at"),
@@ -251,6 +262,9 @@ def get_user_scenario_prisma(
             "removed_not_matching": 0,
             "removed_other_reasons": 0,
             "removed_before_screening": 0,
+            "added_after_search": 0,
+            "removed_after_search": 0,
+            "records_screened_at_search": unique,
             "records_screened": unique,
             "embedded": embedded,
             "figures_from": "corpus",

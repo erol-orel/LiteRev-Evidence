@@ -14,7 +14,7 @@ from fastapi import Depends, HTTPException, Query
 from pydantic import BaseModel, Field, field_validator, model_validator
 from sqlalchemy import text
 
-from .core import _msg, app, engine, logger, require_api_key
+from .core import _msg, _norm_lang, app, engine, logger, require_api_key
 from .documents import _strategy_is_degraded
 from .scenario_store import _get_scenario_threshold, _get_user_scenario_or_404
 from .schema_boot import _exec_ddl_isolated
@@ -424,7 +424,8 @@ def list_user_scenarios() -> list[dict[str, Any]]:
 
 
 @app.post("/user-scenarios", status_code=201)
-def create_user_scenario(payload: UserScenarioIn, _: None = Depends(require_api_key)) -> dict[str, Any]:
+def create_user_scenario(payload: UserScenarioIn, lang: str | None = Query(None),
+                         _: None = Depends(require_api_key)) -> dict[str, Any]:
     """Crée ou met à jour un scénario utilisateur depuis une recherche sauvegardée.
     Pour les recherches récentes (non épinglées, sans dossier), upsert par query+mode
     afin d'éviter l'accumulation de doublons lors des relances de recherche."""
@@ -503,7 +504,7 @@ def create_user_scenario(payload: UserScenarioIn, _: None = Depends(require_api_
                 # déclenche le pipeline COMPLET d'enrichissement (best-effort, dédupliqué
                 # par le verrou). Le front peut aussi l'appeler — le garde empêche le double.
                 try:
-                    _launch_full_pipeline(existing)
+                    _launch_full_pipeline(existing, lang=lang)
                 except Exception as _e:
                     logger.warning(f"auto full-pipeline on pin {existing}: {_e}")
                 return _user_scenario_to_gesica_format(row)
@@ -557,7 +558,7 @@ def create_user_scenario(payload: UserScenarioIn, _: None = Depends(require_api_
     # Nouveau scénario SAUVEGARDÉ (épinglé) → enrichissement complet côté serveur.
     if payload.pinned:
         try:
-            _launch_full_pipeline(new_id)
+            _launch_full_pipeline(new_id, lang=lang)
         except Exception as _e:
             logger.warning(f"auto full-pipeline on new pin {new_id}: {_e}")
     row = _get_user_scenario_or_404(new_id)
@@ -628,7 +629,8 @@ def delete_user_scenario(scenario_id: str, _: None = Depends(require_api_key)) -
 
 
 @app.patch("/user-scenarios/{scenario_id}")
-def patch_user_scenario(scenario_id: str, payload: UserScenarioPatch, _: None = Depends(require_api_key)) -> dict[str, Any]:
+def patch_user_scenario(scenario_id: str, payload: UserScenarioPatch, lang: str | None = Query(None),
+                        _: None = Depends(require_api_key)) -> dict[str, Any]:
     """Met à jour le nom, le pin, le mode ou les filtres d'un scénario utilisateur."""
     _get_user_scenario_or_404(scenario_id)
     updates = []
@@ -660,7 +662,7 @@ def patch_user_scenario(scenario_id: str, payload: UserScenarioPatch, _: None = 
     # Épinglage via PATCH → scénario SAUVEGARDÉ : enrichissement complet côté serveur.
     if payload.pinned is True:
         try:
-            _launch_full_pipeline(scenario_id)
+            _launch_full_pipeline(scenario_id, lang=lang)
         except Exception as _e:
             logger.warning(f"auto full-pipeline on patch-pin {scenario_id}: {_e}")
     row = _get_user_scenario_or_404(scenario_id)
@@ -1052,7 +1054,7 @@ _user_scenario_pipeline_jobs: dict[str, dict] = {}
 
 
 def _launch_populate_job(scenario_id: str, query: str, filters: dict, max_results: int,
-                         include_live: bool = True) -> str:
+                         include_live: bool = True, lang: str | None = None) -> str:
     """
     Démarre un job d'ingestion en arrière-plan pour un scénario, en garantissant
     qu'un seul job tourne à la fois (verrou partagé). Renvoie l'état : "started"
@@ -1088,7 +1090,8 @@ def _launch_populate_job(scenario_id: str, query: str, filters: dict, max_result
         # left the job "running" forever, with the search page polling it. Seen by
         # the browser smoke test on an API without `requests`.
         try:
-            _run_user_scenario_populate(scenario_id, query, filters or {}, max_results, None, include_live)
+            _run_user_scenario_populate(scenario_id, query, filters or {}, max_results, None, include_live,
+                                        _norm_lang(lang) or "fr")
         except BaseException as _e:                          # noqa: BLE001
             logger.error(f"Populate {scenario_id} crashed before its own error handling: {_e}", exc_info=True)
             _job = _user_scenario_populate_jobs.get(scenario_id)
@@ -1113,6 +1116,7 @@ def populate_user_scenario(
     scenario_id: str,
     max_results: int = 100000,
     include_live: bool = True,
+    lang: str | None = Query(None),
     _: None = Depends(require_api_key),
 ) -> dict[str, Any]:
     """
@@ -1122,7 +1126,10 @@ def populate_user_scenario(
     row = _get_user_scenario_or_404(scenario_id)
     query = row["query"]
 
-    if _launch_populate_job(scenario_id, query, row.get("filters") or {}, max_results, include_live) == "already_running":
+    # `lang` : la langue de l'interface qui lance la recherche — les résumés de clusters
+    # précalculés à la fin le sont dans cette langue (plus de première ouverture qui attend).
+    if _launch_populate_job(scenario_id, query, row.get("filters") or {}, max_results, include_live,
+                            _norm_lang(lang)) == "already_running":
         job = _user_scenario_populate_jobs.get(scenario_id) or {}
         return {
             "scenario_id": scenario_id,
@@ -1158,12 +1165,19 @@ def get_user_scenario_populate_status(scenario_id: str) -> dict[str, Any]:
     return {"scenario_id": scenario_id, **job}
 
 
-def _launch_full_pipeline(scenario_id: str, max_results: int = LIVE_MAX_PER_SOURCE) -> str:
+def _launch_full_pipeline(scenario_id: str, max_results: int = LIVE_MAX_PER_SOURCE,
+                          lang: str | None = None) -> str:
     """Démarre le pipeline COMPLET d'enrichissement en arrière-plan (un seul à la fois
     par scénario). Renvoie 'started' | 'already_running' | 'no_query'. Partagé par
     l'endpoint POST /pipeline, l'auto-déclenchement à l'ÉPINGLAGE (« scénario sauvegardé
     → tout est calculé côté serveur ») et le bouton « tout recalculer ». Robuste : ne
-    lève jamais (usage best-effort depuis les handlers de sauvegarde)."""
+    lève jamais (usage best-effort depuis les handlers de sauvegarde).
+
+    `lang` : la langue de l'interface qui déclenche le pipeline. TOUT ce que le pipeline
+    produit et met en cache — résumés de clusters, brief, variables et spécification du
+    modèle, actions recommandées — l'est dans cette langue, pour qu'aucun onglet n'ait
+    à générer quoi que ce soit à sa première ouverture. Avant : tout en français, puis
+    régénéré ou traduit à l'ouverture sous le toggle anglais."""
     from .pipeline import _run_user_scenario_full_pipeline  # lazy: pipeline is loaded after this module
     import threading
     try:
@@ -1182,11 +1196,12 @@ def _launch_full_pipeline(scenario_id: str, max_results: int = LIVE_MAX_PER_SOUR
             "current_step": "ingest",
             "steps": {k: {"status": "pending"} for k in (
                 "ingest", "fulltext", "embed", "rerank", "pico", "metadata",
-                "clustering", "knowledge_graph", "evidence", "variables")},
+                "clustering", "knowledge_graph", "evidence", "variables", "actions")},
+            "lang": _norm_lang(lang) or "fr",
         }
     threading.Thread(
         target=_run_user_scenario_full_pipeline,
-        args=(scenario_id, query, row.get("filters") or {}, max_results),
+        args=(scenario_id, query, row.get("filters") or {}, max_results, _norm_lang(lang) or "fr"),
         daemon=True,
     ).start()
     return "started"
@@ -1196,6 +1211,7 @@ def _launch_full_pipeline(scenario_id: str, max_results: int = LIVE_MAX_PER_SOUR
 def start_user_scenario_pipeline(
     scenario_id: str,
     max_results: int = LIVE_MAX_PER_SOURCE,
+    lang: str | None = Query(None),
     _: None = Depends(require_api_key),
 ) -> dict[str, Any]:
     """
@@ -1205,7 +1221,7 @@ def start_user_scenario_pipeline(
     Appelé dès qu'une recherche est sauvegardée en scénario, et par « tout recalculer ».
     """
     row = _get_user_scenario_or_404(scenario_id)
-    status = _launch_full_pipeline(scenario_id, max_results)
+    status = _launch_full_pipeline(scenario_id, max_results, lang)
     if status == "already_running":
         job = _user_scenario_pipeline_jobs.get(scenario_id) or {}
         return {
@@ -1295,10 +1311,18 @@ def _scenario_counts(scenario_id: str, row: dict | None = None) -> dict[str, Any
         or job.get("overall_status") in ("running", "starting")
         or pjob.get("status") in ("running", "starting")
     )
+    _corpus_links = int(r["corpus_links"] or 0)
+    _screened_at_search = (int(figures.get("records_screened") or 0) if figures else None)
     counts = {
         "article_count": int(row.get("article_count") or 0),
-        "corpus_links": int(r["corpus_links"] or 0),
-        "prisma_screened": (int(figures.get("records_screened") or 0) if figures else None),
+        "corpus_links": _corpus_links,
+        # Le PRISMA réconcilie les chiffres de la recherche avec le corpus tel qu'il est
+        # (ajouts/retraits depuis la recherche sur leurs propres lignes) : son « passés au
+        # screening » EST le corpus. Le chiffre brut de la recherche et l'écart restent
+        # exposés pour l'audit et les journaux.
+        "prisma_screened": (_corpus_links if figures else None),
+        "prisma_screened_at_search": _screened_at_search,
+        "prisma_drift": ((_corpus_links - _screened_at_search) if figures else None),
         "above_threshold": int(r["above"] or 0),
         "below_threshold": int(r["below"] or 0),
         "embedded": int(r["embedded"] or 0),

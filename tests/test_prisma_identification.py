@@ -76,6 +76,34 @@ def test_the_september_14_run():
     assert f["records_screened"] == 30511
 
 
+def test_reconciliation_keeps_the_figures_when_the_corpus_did_not_move():
+    f = main._prisma_identification_figures({"db_cache": 1509, "pubmed": 265, "openalex": 224}, 1700, 0, 1400,
+                                            removed_no_abstract=200, removed_not_matching=100)
+    r = main._reconcile_prisma_identification(f, 1400)
+    assert r["records_screened"] == 1400 and r["records_screened_at_search"] == 1400
+    assert r["added_after_search"] == 0 and r["removed_after_search"] == 0
+    assert r["records_identified"] == 1998 and r["unique_records"] == 1700
+    assert r["records_by_source"] == f["records_by_source"]
+
+
+def test_reconciliation_shows_the_chikungunya_drift_on_its_own_line():
+    """3,623 identified, 731 duplicates, 351 + 50 removed, 2,491 screened at the search;
+    3,602 in the corpus afterwards. The panel used to print 3,602 as "screened" under
+    figures that add up to 2,491."""
+    f = {"records_identified": 3623, "duplicates_removed": 731, "unique_records": 2892,
+         "removed_no_abstract": 351, "removed_not_matching": 50, "removed_other_reasons": 0,
+         "removed_before_screening": 401, "records_screened": 2491, "records_by_source": {"db_cache": 1509}}
+    r = main._reconcile_prisma_identification(f, 3602)
+    assert r["added_after_search"] == 1111 and r["removed_after_search"] == 0
+    assert r["records_screened"] == 3602 and r["records_screened_at_search"] == 2491
+    assert (r["records_identified"] - r["duplicates_removed"] - r["removed_before_screening"]
+            + r["added_after_search"] - r["removed_after_search"]) == 3602
+    shrunk = main._reconcile_prisma_identification(f, 2400)
+    assert shrunk["removed_after_search"] == 91 and shrunk["added_after_search"] == 0
+    assert (shrunk["records_identified"] - shrunk["duplicates_removed"] - shrunk["removed_before_screening"]
+            - shrunk["removed_after_search"]) == 2400
+
+
 def test_inconsistent_inputs_never_go_negative_or_drop_zero_sources():
     f = main._prisma_identification_figures(
         {"db_cache": 5, "core": 0, "arxiv": None}, unique_records=9,
@@ -182,8 +210,29 @@ def test_the_endpoint_reports_the_search_run(seeded):
     assert ident["removed_not_matching"] == 8
     assert ident["removed_other_reasons"] == 0
     assert ident["by_source"] == {"db_cache": 557, "openalex": 1673, "europepmc": 907, "pubmed": 89}
-    assert ident["records_screened"] == 2                    # the corpus as it stands NOW
+    # The corpus as it stands NOW is 2 documents; the search had screened 2,740. The
+    # difference is a line of its own and the arithmetic holds on what is displayed.
+    assert ident["records_screened"] == 2
+    assert ident["records_screened_at_search"] == 2740
+    assert ident["removed_after_search"] == 2738 and ident["added_after_search"] == 0
+    assert (ident["total_records"] - ident["duplicates_removed"] - ident["removed_before_screening"]
+            + ident["added_after_search"] - ident["removed_after_search"]) == ident["records_screened"]
     assert ident["computed_at"]
+
+
+def test_documents_added_after_the_search_are_shown_not_hidden(seeded):
+    """The September 16 panel: figures computed for a corpus of 2,491, a corpus of 3,602
+    afterwards (late pages of slow sources kept linking). The extra documents get their
+    own line; "records screened" is the corpus; the arithmetic closes."""
+    main._store_prisma_identification(SID_RUN, main._prisma_identification_figures(
+        {"db_cache": 1, "openalex": 1}, 1, 0, 1))           # the search screened ONE document
+    ident = _prisma(SID_RUN)                                  # the corpus holds TWO now
+    assert ident["records_screened"] == 2
+    assert ident["records_screened_at_search"] == 1
+    assert ident["added_after_search"] == 1 and ident["removed_after_search"] == 0
+    assert ident["total_records"] == 2 and ident["duplicates_removed"] == 1 and ident["unique_records"] == 1
+    assert (ident["total_records"] - ident["duplicates_removed"] - ident["removed_before_screening"]
+            + ident["added_after_search"] - ident["removed_after_search"]) == 2
 
 
 def test_without_figures_the_endpoint_falls_back_and_says_so(seeded):

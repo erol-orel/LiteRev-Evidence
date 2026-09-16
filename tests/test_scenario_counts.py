@@ -132,6 +132,18 @@ def test_the_endpoint_names_a_stale_stored_count(seeded):
     assert c["mismatches"] == [{"field": "article_count", "value": 2, "expected": 3}]
 
 
+def test_a_stale_search_figure_is_reported_as_drift_not_as_a_mismatch(seeded):
+    """The PRISMA panel reconciles the search-time figures with the corpus (the difference
+    is shown on its own line), so the banner no longer calls a stale figure a
+    disagreement; the raw figure and the drift stay exposed for the audit."""
+    main._store_prisma_identification(SID, main._prisma_identification_figures({"db_cache": 1}, 1, 0, 1))
+    c = _counts(SID)
+    assert c["corpus_links"] == 3
+    assert c["prisma_screened"] == 3                      # what the panel shows: the corpus
+    assert c["prisma_screened_at_search"] == 1 and c["prisma_drift"] == 2
+    assert c["consistent"] is True and c["mismatches"] == []
+
+
 def test_a_running_pipeline_is_reported_as_in_progress(seeded):
     with seeded.cursor() as cur:
         cur.execute("UPDATE user_scenarios SET pipeline_status = 'running', pipeline_step = 'fulltext' WHERE id = %s", (SID,))

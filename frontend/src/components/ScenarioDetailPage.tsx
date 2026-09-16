@@ -3535,6 +3535,15 @@ function PrismaSection({ scenarioId }: { scenarioId: string }) {
                 {num(ident.removed_other_reasons) > 0 && (
                   <PrismaRow label={t("scenarioDetail.prisma.removedOtherReasons")} value={num(ident.removed_other_reasons)} />
                 )}
+                {/* Le corpus a changé depuis la recherche (reconstruction, pages tardives d'une
+                    source, doublons marqués ensuite) : l'écart a sa ligne, dans son sens, pour
+                    que identifiés − doublons − retraits (± depuis) = passés au screening. */}
+                {num(ident.added_after_search) > 0 && (
+                  <PrismaRow label={t("scenarioDetail.prisma.addedAfterSearch")} value={`+${num(ident.added_after_search).toLocaleString()}`} accent="text-amber-300" />
+                )}
+                {num(ident.removed_after_search) > 0 && (
+                  <PrismaRow label={t("scenarioDetail.prisma.removedAfterSearch")} value={`−${num(ident.removed_after_search).toLocaleString()}`} accent="text-amber-300" />
+                )}
                 <PrismaRow label={t("scenarioDetail.prisma.recordsScreened")} value={num(ident.records_screened)} accent="text-emerald-300" />
               </>
             )}

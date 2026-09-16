@@ -77,6 +77,7 @@ def _run_user_scenario_populate(
     max_results: int = 500,
     _pipeline_callback=None,
     include_live: bool = True,
+    lang: str | None = None,
 ) -> int:
     """
     Construit le corpus d'un scénario = résultat de la REQUÊTE BOOLÉENNE sur
@@ -153,8 +154,24 @@ def _run_user_scenario_populate(
     # corpus, pour ne pas l'effacer sur une panne passagère d'une source.
     _source_errors = [0]
     _fed_incomplete = [False]
+    # GEL du corpus : dès que l'assemblage final commence, un enregistrement qui arrive
+    # encore d'une source lente (pages au-delà du budget fédération, l'executor n'attend
+    # pas) est ingéré dans la base mais n'est NI compté NI lié à CETTE recherche. Avant,
+    # les pages tardives des sources booléennes-natives continuaient d'insérer des liens
+    # après le nettoyage du corpus et le calcul des chiffres PRISMA : 3 602 articles au
+    # corpus pour 2 491 « passés au screening », des documents tardifs exempts de la
+    # règle « sans résumé » et de la dédup. Le verrou couvre le test ET l'insertion :
+    # aucun lien ne peut se glisser entre le gel et l'assemblage.
+    _corpus_lock = threading.Lock()
+    _corpus_frozen = [False]
 
     def _link_to_scenario(doc_id, boolean_native=False, source=None):
+        with _corpus_lock:
+            if _corpus_frozen[0]:
+                return None            # arrivé après l'assemblage : pas dans cette recherche
+            return _link_to_scenario_unlocked(doc_id, boolean_native, source)
+
+    def _link_to_scenario_unlocked(doc_id, boolean_native=False, source=None):
         # Comptabilité PRISMA : un enregistrement par source qui a renvoyé l'article,
         # que la ligne soit nouvelle ou déjà connue — c'est justement le recoupement
         # entre sources (et avec la base locale) qui fait le doublon.
@@ -1065,6 +1082,10 @@ def _run_user_scenario_populate(
     # devient donc strictement « résultat de la requête sur base locale ∪ live ».
     # allow_empty=True en multi : une intersection légitimement vide DOIT vider le corpus.
     try:
+        # Gel : à partir d'ici, ce qui arrive encore des sources ne fait plus partie de
+        # cette recherche (cf. _corpus_frozen). Le corpus et ses chiffres sont figés ensemble.
+        with _corpus_lock:
+            _corpus_frozen[0] = True
         # Appartenance = re-match booléen LOCAL (base locale ∪ live) pour les sources par
         # mots-clés + la base existante…
         if _sub_queries:
@@ -1278,7 +1299,9 @@ def _run_user_scenario_populate(
                     if _job is not None:
                         _job["rerank_status"] = "done"
                 try:
-                    _run_clustering_background(_sid, True)   # clustering → cache DB
+                    # clustering → cache DB, résumés dans la langue de l'interface qui a
+                    # lancé la recherche (sinon la première ouverture attendait le LLM)
+                    _run_clustering_background(_sid, True, lang)
                 except Exception as _e1:
                     logger.warning(f"Précalcul clustering {_sid}: {_e1}")
                 try:
@@ -1306,7 +1329,7 @@ def _run_user_scenario_populate(
 
 
 def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict,
-                                     max_results: int = LIVE_MAX_PER_SOURCE) -> None:
+                                     max_results: int = LIVE_MAX_PER_SOURCE, lang: str | None = None) -> None:
     # max_results : MÊME plafond par source que le populate appelé par l'API
     # (LIVE_MAX_PER_SOURCE, 2000 par défaut). Il valait 500 ici, d'où deux corpus
     # différents pour la même requête selon qu'elle partait de l'interface ou de l'API
@@ -2210,10 +2233,13 @@ def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict
                         })
 
                 # Cache de visualisation : MÊME helper que le calcul en arrière-plan
-                # (plus de duplication) → DB durable (+ /tmp pour compat). Sans résumés :
-                # ils sont générés à la première ouverture, dans la langue de l'interface.
-                _cl_payload = _build_clusters_payload(scenario_id, cl_docs, _cc, with_summaries=False,
-                                                      n_docs_total=_cl_total)
+                # (plus de duplication) → DB durable (+ /tmp pour compat). AVEC les résumés,
+                # dans la langue de l'interface qui a lancé le pipeline : la première
+                # ouverture de l'onglet ne doit rien attendre (avant : « sans résumés, générés
+                # à la première ouverture » — soit 12 appels LLM sous les yeux de l'utilisateur).
+                _cl_payload = _build_clusters_payload(scenario_id, cl_docs, _cc, with_summaries=True,
+                                                      openai_key=os.getenv("OPENAI_API_KEY"),
+                                                      lang=lang or "fr", n_docs_total=_cl_total)
                 _persist_clustering_result(scenario_id, _cl_payload)
                 update_step("clustering", "done", n_clusters=n_clusters, n_docs=len(cl_docs),
                             n_docs_total=_cl_total, method=method_used)
@@ -2234,7 +2260,7 @@ def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict
         # ── Evidence Brief (narratif LLM, mis en cache) — prêt sans clic ───────
         try:
             update_step("evidence", "running")
-            _generate_evidence_brief_llm(scenario_id)
+            _generate_evidence_brief_llm(scenario_id, lang=lang or "fr")
             update_step("evidence", "done")
         except Exception as _e_ev:
             logger.warning(f"Evidence brief pipeline {scenario_id}: {_e_ev}")
@@ -2244,11 +2270,22 @@ def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict
         # data_template, paramètres SEIR) — le scénario est « modèle-prêt » d'emblée.
         try:
             update_step("variables", "running")
-            _generate_variables_from_pico(scenario_id)
+            _generate_variables_from_pico(scenario_id, lang=lang or "fr")
             update_step("variables", "done")
         except Exception as _e_var:
             logger.warning(f"Génération variables pipeline {scenario_id}: {_e_var}")
             update_step("variables", "error", error=str(_e_var))
+
+        # ── Actions recommandées (carte du tableau de bord) : générées ICI, dans la
+        # langue de l'interface — elles l'étaient à la première ouverture de la carte.
+        try:
+            update_step("actions", "running")
+            from .actions import _generate_recommended_actions  # lazy: actions is loaded after this module
+            _generate_recommended_actions(scenario_id, lang=lang or "fr")
+            update_step("actions", "done")
+        except Exception as _e_act:
+            logger.warning(f"Actions recommandées pipeline {scenario_id}: {_e_act}")
+            update_step("actions", "error", error=str(_e_act))
 
         # ── Fin du pipeline ───────────────────────────────────────────────────
         _user_scenario_pipeline_jobs[scenario_id]["overall_status"] = "done"

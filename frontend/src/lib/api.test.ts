@@ -8,8 +8,11 @@ import {
   hasApiKey,
   httpMessage,
   patchScenarioSettings,
+  patchUserScenario,
+  populateUserScenario,
   safeFetch,
   setApiKey,
+  startUserScenarioPipeline,
 } from "./api";
 import { en } from "../i18n/locales/en";
 
@@ -107,6 +110,21 @@ describe("API key storage", () => {
     expect(getApiKey()).toBe("");
     setApiKey("   ");                                              // blank = remove
     expect(hasApiKey()).toBe(false);
+  });
+});
+
+describe("calls that start server-side work carry the interface language", () => {
+  it("passes lang when pinning, starting the pipeline and building the corpus", async () => {
+    localStorage.setItem("literev-lang", "en");
+    setApiKey("secret");
+    const fetchMock = stubFetch(reply(200, {}), reply(200, {}), reply(200, {}));
+    await patchUserScenario("usr-abc", { pinned: true });
+    await startUserScenarioPipeline("usr-abc", 500);
+    await populateUserScenario("usr-abc", { includeLive: true, maxResults: 2000 });
+    const urls = fetchMock.mock.calls.map((c) => String(c[0]));
+    expect(urls[0]).toBe("/api/user-scenarios/usr-abc?lang=en");
+    expect(urls[1]).toBe("/api/user-scenarios/usr-abc/pipeline?max_results=500&lang=en");
+    expect(urls[2]).toBe("/api/user-scenarios/usr-abc/populate?max_results=2000&include_live=true&lang=en");
   });
 });
 

@@ -103,11 +103,17 @@ class Audit:
             dups, unique = ident.get("duplicates_removed"), ident.get("unique_records")
             buckets = [ident.get(k) or 0 for k in ("removed_no_abstract", "removed_not_matching", "removed_other_reasons")]
             screened = ident.get("records_screened")
+            added, gone = int(ident.get("added_after_search") or 0), int(ident.get("removed_after_search") or 0)
             arith_ok = (identified is not None and dups is not None and unique is not None
-                        and identified - dups == unique and unique - sum(buckets) == screened)
+                        and identified - dups == unique and unique - sum(buckets) + added - gone == screened)
             self.add("OK" if arith_ok else "FAIL", "prisma arithmetic",
-                     f"identified={identified} − duplicates={dups} = unique={unique}; unique − removed{buckets} = screened={screened} "
-                     f"(figures_from={ident.get('figures_from')}, federation_incomplete={ident.get('federation_incomplete')})")
+                     f"identified={identified} − duplicates={dups} = unique={unique}; unique − removed{buckets}"
+                     + (f" + added_after={added}" if added else "") + (f" − removed_after={gone}" if gone else "")
+                     + f" = screened={screened} (figures_from={ident.get('figures_from')}, federation_incomplete={ident.get('federation_incomplete')})")
+            if added or gone:
+                self.add("INFO", "prisma drift since the search",
+                         f"the corpus changed after the search that produced the figures: +{added} / −{gone} documents "
+                         f"(a rebuild, later pages of a source, duplicates marked since); re-run the search for one consistent run")
             self.add(self._cmp(screened, ref), "prisma screened = corpus", f"records_screened={screened} vs corpus_links={ref}")
         else:
             self.add("WARN", "prisma", "no identification figures (scenario older than the PRISMA accounting, or never searched)")

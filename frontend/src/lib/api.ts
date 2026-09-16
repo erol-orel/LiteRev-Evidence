@@ -1105,6 +1105,10 @@ export interface ScenarioPrisma {
     removed_no_abstract?: number;
     removed_not_matching?: number;
     removed_other_reasons?: number;
+    // Corpus changes since the search that produced the figures (their own lines in the panel).
+    added_after_search?: number;
+    removed_after_search?: number;
+    records_screened_at_search?: number;
     removed_before_screening?: number;
     records_screened?: number;
     duplicate_records_across_sources?: number;
@@ -1835,7 +1839,7 @@ export async function fetchUserScenarios(): Promise<UserScenario[]> {
 export async function createUserScenario(
   payload: UserScenarioCreatePayload,
 ): Promise<UserScenario> {
-  const r = await safeFetch(`${API_BASE_URL}/user-scenarios`, {
+  const r = await safeFetch(`${API_BASE_URL}/user-scenarios?lang=${currentLang()}`, {
     method: 'POST',
     headers: authHeaders({ "Content-Type": "application/json" }),
     body: JSON.stringify(payload),
@@ -1854,7 +1858,9 @@ export async function patchUserScenario(
   scenarioId: string,
   patch: { name?: string; pinned?: boolean; mode?: string; filters?: Record<string, any>; folder_id?: string | null },
 ): Promise<UserScenario> {
-  const r = await safeFetch(`${API_BASE_URL}/user-scenarios/${scenarioId}`, {
+  // `lang`: pinning starts the full pipeline; everything it caches is produced in the
+  // interface language, so no tab has to generate at its first opening.
+  const r = await safeFetch(`${API_BASE_URL}/user-scenarios/${scenarioId}?lang=${currentLang()}`, {
     method: 'PATCH',
     headers: authHeaders({ "Content-Type": "application/json" }),
     body: JSON.stringify(patch),
@@ -1868,7 +1874,7 @@ export async function startUserScenarioPipeline(
   maxResults = 100000,
 ): Promise<{ scenario_id: string; status: string; message: string; steps: string[] }> {
   const r = await safeFetch(
-    `${API_BASE_URL}/user-scenarios/${scenarioId}/pipeline?max_results=${maxResults}`,
+    `${API_BASE_URL}/user-scenarios/${scenarioId}/pipeline?max_results=${maxResults}&lang=${currentLang()}`,
     { method: 'POST', headers: authHeaders() },
   );
   if (!r.ok) throw new Error(httpMessage(r.status));
@@ -1938,6 +1944,7 @@ export async function populateUserScenario(
   const params = new URLSearchParams();
   params.set('max_results', String(opts?.maxResults ?? 2000));
   params.set('include_live', String(opts?.includeLive ?? true));
+  params.set('lang', currentLang());          // cluster summaries precomputed in this language
   const r = await safeFetch(
     `${API_BASE_URL}/user-scenarios/${scenarioId}/populate?${params}`,
     { method: 'POST', headers: authHeaders() },
