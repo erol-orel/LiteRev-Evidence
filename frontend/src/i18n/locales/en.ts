@@ -829,6 +829,7 @@ export const en: Translations = {
       articlesOf: "Articles",
       newIn: "new in {year}",
       showAll: "Show all",
+      articlesTruncated: "Showing {listed} of the {total} articles of this concept: the map carries the most relevant ones. Use the corpus tab or the export for the full list.",
       clickConcept: "Click a concept to see its links and articles",
       conceptTypes: {
         pathogen: "Pathogen", vector: "Vector", host: "Host", population: "Population",

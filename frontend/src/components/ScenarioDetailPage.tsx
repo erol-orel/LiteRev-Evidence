@@ -4272,6 +4272,16 @@ function ConceptMapView({ scenarioId }: { scenarioId: string }) {
                     {t("scenarioDetail.knowledgeGraph.showAll")} ({selArticles.length})
                   </button>
                 )}
+                {/* La charge utile ne transporte qu'un échantillon des articles d'un
+                    concept très fréquent. Le dire ICI : l'entête annonce le total (1 200)
+                    et « Tout afficher » en listait 40 sans que rien n'explique l'écart. */}
+                {(sel.articles_listed ?? sel.articles.length) < sel.count && (
+                  <p className="text-[9px] text-white/35 leading-3">
+                    {t("scenarioDetail.knowledgeGraph.articlesTruncated")
+                      .replace("{listed}", String(sel.articles_listed ?? sel.articles.length))
+                      .replace("{total}", String(sel.count))}
+                  </p>
+                )}
               </div>
             </div>
           ) : (

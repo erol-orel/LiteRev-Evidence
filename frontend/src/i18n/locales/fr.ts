@@ -827,6 +827,7 @@ export const fr = {
       articlesOf: "Articles",
       newIn: "nouveaux en {year}",
       showAll: "Tout afficher",
+      articlesTruncated: "{listed} des {total} articles de ce concept sont listés : la carte transporte les plus pertinents. Utilisez l'onglet corpus ou l'export pour la liste complète.",
       clickConcept: "Cliquez un concept pour voir ses liens et ses articles",
       conceptTypes: {
         pathogen: "Pathogène", vector: "Vecteur", host: "Hôte", population: "Population",

@@ -1566,6 +1566,9 @@ export interface ConceptNode {
   new_count: number;
   /** Up to 40 article ids, most relevant first (keys of `articles`). */
   articles: number[];
+  /** How many `articles` the payload actually carries. Below `count` on a frequent
+   *  concept: the panel says so rather than showing 40 under a header announcing 1200. */
+  articles_listed?: number;
 }
 
 export interface ConceptEdge {
@@ -1573,7 +1576,9 @@ export interface ConceptEdge {
   target: number;
   /** Number of articles citing both concepts. */
   weight: number;
+  /** Up to 20 of them; `articles_listed` says how many the payload carries. */
   articles: number[];
+  articles_listed?: number;
 }
 
 export interface ConceptArticle {

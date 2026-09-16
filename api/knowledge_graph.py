@@ -551,8 +551,12 @@ def _build_concept_graph(rows: list[dict], *, max_nodes: int = 60, min_edge: int
     for (i, j), w in edge_w.most_common():
         if w < min_edge:
             break
+        # Même honnêteté que sur les noeuds : `weight` est le nombre RÉEL de
+        # co-occurrences, `articles` n'en transporte qu'une partie sur un lien fréquent.
+        _ea = edge_articles[(i, j)]
         edges.append({"source": i, "target": j, "weight": int(w),
-                      "articles": edge_articles[(i, j)][:ARTICLES_PER_EDGE]})
+                      "articles": _ea[:ARTICLES_PER_EDGE],
+                      "articles_listed": min(len(_ea), ARTICLES_PER_EDGE)})
         if len(edges) >= 200:
             break
 
