@@ -6,14 +6,14 @@
 
 Unlike smoke_test_sources_full.py (which sends bare keywords just to check REACHABILITY),
 this sends the SAME boolean to every source using the EXACT per-source translation the app
-uses in populate — main._strip_field_tags / _boolean_to_arxiv / _boolean_to_s2 / the portable
-boolean — and prints each source's own total for that query. That is the apples-to-apples
+uses in populate - main._strip_field_tags / _boolean_to_arxiv / _boolean_to_s2 / the portable
+boolean - and prints each source's own total for that query. That is the apples-to-apples
 view: the corpus is the SOURCE-UNION of these boolean hits (minus records with no abstract).
 
-Only Crossref (relevance-only upstream) and bioRxiv/medRxiv (no keyword API — date-window scan)
+Only Crossref (relevance-only upstream) and bioRxiv/medRxiv (no keyword API - date-window scan)
 can't take the boolean; every other source does. Pass a natural-language query and it is first
 translated via the app's LLM strategy (needs OPENAI_API_KEY); pass a boolean and it's used as-is
-(no LLM call). Uses the app venv — it imports `main`. No DB writes.
+(no LLM call). Uses the app venv - it imports `main`. No DB writes.
 """
 import logging
 import os
@@ -47,7 +47,7 @@ for _ep in ["/opt/literev-api/.env", "/etc/literev/env", "/etc/literev-api.env",
     _load_env_file(_ep)
 
 logging.disable(logging.INFO)   # hush main.py's import-time DDL "vérifiées/créées" chatter
-import main  # noqa: E402  — reuse the app's OWN translators so we send what the app sends
+import main  # noqa: E402 - reuse the app's OWN translators so we send what the app sends
 
 UA = {"User-Agent": "LiteRev-boolcount/1.0 (mailto:literev@gesica.ch)"}
 TIMEOUT = 30
@@ -184,7 +184,7 @@ def c_openaire():
 
 
 def c_crossref():
-    # Crossref has NO boolean — relevance-only. Shown for contrast; app sends plain keywords.
+    # Crossref has NO boolean - relevance-only. Shown for contrast; app sends plain keywords.
     n = requests.get("https://api.crossref.org/works",
                      params={"query": _plain_q, "rows": 0, "mailto": "literev@gesica.ch"},
                      headers=UA, timeout=TIMEOUT).json().get("message", {}).get("total-results")
@@ -216,5 +216,5 @@ if __name__ == "__main__":
     print("READ: 'portable-bool' = the SAME boolean (PubMed field-tags stripped) sent verbatim.")
     print("PubMed gets the MeSH-tagged dialect; arXiv/S2 get their own syntax; EPMC gets the general")
     print("boolean; only Crossref (relevance-only) gets plain keywords. The corpus is the UNION of")
-    print("these boolean hits — so it should be close to the SUM of the boolean-capable rows, not the")
+    print("these boolean hits - so it should be close to the SUM of the boolean-capable rows, not the")
     print("tiny local re-match that produced '11 at the end' before the fix.")

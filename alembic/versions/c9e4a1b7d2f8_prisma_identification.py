@@ -10,7 +10,7 @@ trace) and at linking (_dedup_scenario_links, whose count was only logged).
 each source returned (the local database included), the distinct documents behind those
 records, the duplicates (overlaps between sources plus rows merged by the link dedup),
 the records removed for other reasons (no abstract, no local match to the boolean) and
-the records that reached screening — see main._prisma_identification_figures. The
+the records that reached screening - see main._prisma_identification_figures. The
 PRISMA endpoint reads it when present and falls back to the corpus otherwise, saying so.
 
 Revision ID: c9e4a1b7d2f8

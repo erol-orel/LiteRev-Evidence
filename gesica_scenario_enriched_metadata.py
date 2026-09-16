@@ -15,7 +15,7 @@ Métadonnées enrichies pour les 28 scénarios GESICA :
 GESICA_ENRICHED: dict = {
 
     # ──────────────────────────────────────────────────────────────────────────
-    # Cluster 1 — Patient-centered prehospital critical care
+    # Cluster 1 - Patient-centered prehospital critical care
     # ──────────────────────────────────────────────────────────────────────────
 
     "cardiac-arrest-prediction": {
@@ -45,8 +45,8 @@ GESICA_ENRICHED: dict = {
         },
         "alert_thresholds": {
             "green": {"label": "Risque normal", "condition": "score < 0.3"},
-            "orange": {"label": "Risque modéré — vigilance", "condition": "0.3 ≤ score < 0.6"},
-            "red": {"label": "Risque élevé — alerte", "condition": "score ≥ 0.6"},
+            "orange": {"label": "Risque modéré - vigilance", "condition": "0.3 ≤ score < 0.6"},
+            "red": {"label": "Risque élevé - alerte", "condition": "score ≥ 0.6"},
         },
         "databases": [
             "Registre National des Arrêts Cardiaques (ex: RéAC en France, registre cantonal à Genève)",
@@ -118,8 +118,8 @@ GESICA_ENRICHED: dict = {
         },
         "alert_thresholds": {
             "green": {"label": "Suspicion faible", "condition": "score < 0.4"},
-            "orange": {"label": "Suspicion modérée — activer protocole AVC", "condition": "0.4 ≤ score < 0.7"},
-            "red": {"label": "Suspicion forte — pré-alerte UNV immédiate", "condition": "score ≥ 0.7"},
+            "orange": {"label": "Suspicion modérée - activer protocole AVC", "condition": "0.4 ≤ score < 0.7"},
+            "red": {"label": "Suspicion forte - pré-alerte UNV immédiate", "condition": "score ≥ 0.7"},
         },
         "databases": [
             "Dossier Patient Informatisé (DPI) des urgences (HUG/CHUV)",
@@ -191,8 +191,8 @@ GESICA_ENRICHED: dict = {
         },
         "alert_thresholds": {
             "green": {"label": "Traumatisme mineur", "condition": "TRISS_survival ≥ 0.90"},
-            "orange": {"label": "Traumatisme modéré — surveillance étroite", "condition": "0.75 ≤ TRISS_survival < 0.90"},
-            "red": {"label": "Traumatisme grave — transfert Trauma Center Niveau 1", "condition": "TRISS_survival < 0.75"},
+            "orange": {"label": "Traumatisme modéré - surveillance étroite", "condition": "0.75 ≤ TRISS_survival < 0.90"},
+            "red": {"label": "Traumatisme grave - transfert Trauma Center Niveau 1", "condition": "TRISS_survival < 0.75"},
         },
         "databases": [
             "Registre National des Traumatismes Graves (ex: Traumabase)",
@@ -264,8 +264,8 @@ GESICA_ENRICHED: dict = {
         },
         "alert_thresholds": {
             "green": {"label": "Patient stable", "condition": "NEWS2 < 5"},
-            "orange": {"label": "Risque modéré — surveillance continue", "condition": "5 ≤ NEWS2 < 7"},
-            "red": {"label": "Risque critique — alerte réanimation", "condition": "NEWS2 ≥ 7"},
+            "orange": {"label": "Risque modéré - surveillance continue", "condition": "5 ≤ NEWS2 < 7"},
+            "red": {"label": "Risque critique - alerte réanimation", "condition": "NEWS2 ≥ 7"},
         },
         "databases": [
             "Données de monitorage continu préhospitalier (télémétrie Lifepak/Corpuls)",
@@ -333,8 +333,8 @@ GESICA_ENRICHED: dict = {
         },
         "alert_thresholds": {
             "green": {"label": "Filière optimale disponible", "condition": "saturation_hopital_cible < 0.8"},
-            "orange": {"label": "Filière engorgée — réorientation recommandée", "condition": "0.8 ≤ saturation_hopital_cible < 0.95"},
-            "red": {"label": "Filière saturée — réorientation obligatoire", "condition": "saturation_hopital_cible ≥ 0.95"},
+            "orange": {"label": "Filière engorgée - réorientation recommandée", "condition": "0.8 ≤ saturation_hopital_cible < 0.95"},
+            "red": {"label": "Filière saturée - réorientation obligatoire", "condition": "saturation_hopital_cible ≥ 0.95"},
         },
         "databases": [
             "Système de suivi de l'occupation des lits hospitaliers (HUG/CHUV)",
@@ -397,8 +397,8 @@ GESICA_ENRICHED: dict = {
         },
         "alert_thresholds": {
             "green": {"label": "Incident gérable (Moyen local)", "condition": "nb_victimes_estime < 10"},
-            "orange": {"label": "Incident majeur — déclenchement Plan Blanc/NOVI", "condition": "10 ≤ nb_victimes_estime < 50"},
-            "red": {"label": "Catastrophe majeure — renforts nationaux/transfrontaliers", "condition": "nb_victimes_estime ≥ 50"},
+            "orange": {"label": "Incident majeur - déclenchement Plan Blanc/NOVI", "condition": "10 ≤ nb_victimes_estime < 50"},
+            "red": {"label": "Catastrophe majeure - renforts nationaux/transfrontaliers", "condition": "nb_victimes_estime ≥ 50"},
         },
         "databases": [
             "Données de géolocalisation et densité de population horaire (LandScan / données mobiles)",
@@ -461,8 +461,8 @@ GESICA_ENRICHED: dict = {
         },
         "alert_thresholds": {
             "green": {"label": "Risque environnemental faible", "condition": "aqi < 50"},
-            "orange": {"label": "Risque modéré — hausse des appels respiratoires (+15%)", "condition": "50 ≤ aqi < 100"},
-            "red": {"label": "Risque élevé — pic d'appels cardiorespiratoires (+30%)", "condition": "aqi ≥ 100"},
+            "orange": {"label": "Risque modéré - hausse des appels respiratoires (+15%)", "condition": "50 ≤ aqi < 100"},
+            "red": {"label": "Risque élevé - pic d'appels cardiorespiratoires (+30%)", "condition": "aqi ≥ 100"},
         },
         "databases": [
             "Réseau de surveillance de la qualité de l'air (ex: Air Genève, ATMO Auvergne-Rhône-Alpes)",
@@ -530,8 +530,8 @@ GESICA_ENRICHED: dict = {
         },
         "alert_thresholds": {
             "green": {"label": "Accessibilité normale", "condition": "routes_bloquees == 0"},
-            "orange": {"label": "Accessibilité dégradée — allongement délais (+5-15 min)", "condition": "1 ≤ routes_bloquees < 5"},
-            "red": {"label": "Secteurs isolés — intervention hélicoptère requise", "condition": "routes_bloquees ≥ 5"},
+            "orange": {"label": "Accessibilité dégradée - allongement délais (+5-15 min)", "condition": "1 ≤ routes_bloquees < 5"},
+            "red": {"label": "Secteurs isolés - intervention hélicoptère requise", "condition": "routes_bloquees ≥ 5"},
         },
         "databases": [
             "Système d'Information Géographique (SIG) cantonal (SITG Genève)",
@@ -594,8 +594,8 @@ GESICA_ENRICHED: dict = {
         },
         "alert_thresholds": {
             "green": {"label": "Impact climatique soutenable", "condition": "hausse_appels_estimee < 5%"},
-            "orange": {"label": "Impact modéré — besoin d'adaptation des effectifs (+10%)", "condition": "5% ≤ hausse_appels_estimee < 15%"},
-            "red": {"label": "Impact critique — saturation prévisible sans restructuration majeure", "condition": "hausse_appels_estimee ≥ 15%"},
+            "orange": {"label": "Impact modéré - besoin d'adaptation des effectifs (+10%)", "condition": "5% ≤ hausse_appels_estimee < 15%"},
+            "red": {"label": "Impact critique - saturation prévisible sans restructuration majeure", "condition": "hausse_appels_estimee ≥ 15%"},
         },
         "databases": [
             "Scénarios climatiques nationaux CH2018 (Suisse) / Météo-France Drias",
@@ -653,8 +653,8 @@ GESICA_ENRICHED: dict = {
         },
         "alert_thresholds": {
             "green": {"label": "Pas d'impact thermique", "condition": "temperature_max_24h < 30°C"},
-            "orange": {"label": "Vigilance Canicule — hausse des appels (+20%)", "condition": "30°C ≤ temperature_max_24h < 34°C"},
-            "red": {"label": "Alerte Canicule Extrême — hausse critique (+40% appels)", "condition": "temperature_max_24h ≥ 34°C"},
+            "orange": {"label": "Vigilance Canicule - hausse des appels (+20%)", "condition": "30°C ≤ temperature_max_24h < 34°C"},
+            "red": {"label": "Alerte Canicule Extrême - hausse critique (+40% appels)", "condition": "temperature_max_24h ≥ 34°C"},
         },
         "databases": [
             "Données météo quotidiennes (MétéoSuisse / Météo-France)",
@@ -722,8 +722,8 @@ GESICA_ENRICHED: dict = {
         },
         "alert_thresholds": {
             "green": {"label": "Qualification normale", "condition": "confidence_score ≥ 0.80"},
-            "orange": {"label": "Incertitude — poser questions complémentaires", "condition": "0.50 ≤ confidence_score < 0.80"},
-            "red": {"label": "Divergence forte — régulation manuelle prioritaire", "condition": "confidence_score < 0.50"},
+            "orange": {"label": "Incertitude - poser questions complémentaires", "condition": "0.50 ≤ confidence_score < 0.80"},
+            "red": {"label": "Divergence forte - régulation manuelle prioritaire", "condition": "confidence_score < 0.50"},
         },
         "databases": [
             "Enregistrements audio anonymisés de la centrale d'appels 144/15",
@@ -790,8 +790,8 @@ GESICA_ENRICHED: dict = {
         },
         "alert_thresholds": {
             "green": {"label": "Priorité adéquate", "condition": "risque_sous_triage < 5%"},
-            "orange": {"label": "Risque de sous-triage modéré — réévaluation par médecin régulateur", "condition": "5% ≤ risque_sous_triage < 15%"},
-            "red": {"label": "Risque de sous-triage élevé — envoi immédiat ambulance P1", "condition": "risque_sous_triage ≥ 15%"},
+            "orange": {"label": "Risque de sous-triage modéré - réévaluation par médecin régulateur", "condition": "5% ≤ risque_sous_triage < 15%"},
+            "red": {"label": "Risque de sous-triage élevé - envoi immédiat ambulance P1", "condition": "risque_sous_triage ≥ 15%"},
         },
         "databases": [
             "Base de données des fiches de régulation SAGA (144)",
@@ -858,8 +858,8 @@ GESICA_ENRICHED: dict = {
         },
         "alert_thresholds": {
             "green": {"label": "Blessé léger (Vert)", "condition": "priorite_triage == 'Vert'"},
-            "orange": {"label": "Urgence (Jaune) — évacuation secondaire", "condition": "priorite_triage == 'Jaune'"},
-            "red": {"label": "Extrême Urgence (Rouge) — évacuation prioritaire", "condition": "priorite_triage == 'Rouge'"},
+            "orange": {"label": "Urgence (Jaune) - évacuation secondaire", "condition": "priorite_triage == 'Jaune'"},
+            "red": {"label": "Extrême Urgence (Rouge) - évacuation prioritaire", "condition": "priorite_triage == 'Rouge'"},
         },
         "databases": [
             "Système de gestion numérique des victimes de catastrophe (ex: IVENA / SanQA)",
@@ -922,8 +922,8 @@ GESICA_ENRICHED: dict = {
         },
         "alert_thresholds": {
             "green": {"label": "Taux de sous-triage conforme", "condition": "taux_sous_triage < 5%"},
-            "orange": {"label": "Alerte sous-triage modéré — besoin de révision des protocoles", "condition": "5% ≤ taux_sous_triage < 10%"},
-            "red": {"label": "Alerte sous-triage critique — audit immédiat requis", "condition": "taux_sous_triage ≥ 10%"},
+            "orange": {"label": "Alerte sous-triage modéré - besoin de révision des protocoles", "condition": "5% ≤ taux_sous_triage < 10%"},
+            "red": {"label": "Alerte sous-triage critique - audit immédiat requis", "condition": "taux_sous_triage ≥ 10%"},
         },
         "databases": [
             "Base croisée SAGA (Régulation) et DPI des urgences hospitalières (HUG/CHUV)",
@@ -991,8 +991,8 @@ GESICA_ENRICHED: dict = {
         },
         "alert_thresholds": {
             "green": {"label": "Tri assisté fiable", "condition": "discrepance_tri_expert < 10%"},
-            "orange": {"label": "Incohérence mineure — réévaluation recommandée", "condition": "10% ≤ discrepance_tri_expert < 20%"},
-            "red": {"label": "Incohérence majeure — validation obligatoire par médecin", "condition": "discrepance_tri_expert ≥ 20%"},
+            "orange": {"label": "Incohérence mineure - réévaluation recommandée", "condition": "10% ≤ discrepance_tri_expert < 20%"},
+            "red": {"label": "Incohérence majeure - validation obligatoire par médecin", "condition": "discrepance_tri_expert ≥ 20%"},
         },
         "databases": [
             "Base de données de l'Échelle Suisse du Tri (EST)",
@@ -1064,8 +1064,8 @@ GESICA_ENRICHED: dict = {
         },
         "alert_thresholds": {
             "green": {"label": "Ressource optimale disponible", "condition": "temps_arrivee_smur_estime < 15 min"},
-            "orange": {"label": "SMUR local indisponible — envoi SMUR secondaire", "condition": "15 min ≤ temps_arrivee_smur_estime < 25 min"},
-            "red": {"label": "Pas de SMUR disponible à moins de 25 min — envoi hélicoptère / ambulance seule", "condition": "temps_arrivee_smur_estime ≥ 25 min"},
+            "orange": {"label": "SMUR local indisponible - envoi SMUR secondaire", "condition": "15 min ≤ temps_arrivee_smur_estime < 25 min"},
+            "red": {"label": "Pas de SMUR disponible à moins de 25 min - envoi hélicoptère / ambulance seule", "condition": "temps_arrivee_smur_estime ≥ 25 min"},
         },
         "databases": [
             "Système de répartition assistée par ordinateur (Techwan / TechCAD)",
@@ -1133,7 +1133,7 @@ GESICA_ENRICHED: dict = {
         "alert_thresholds": {
             "green": {"label": "Temps de réponse optimal", "condition": "temps_reponse_estime < 8 min"},
             "orange": {"label": "Temps de réponse limite (congestion)", "condition": "8 min ≤ temps_reponse_estime < 15 min"},
-            "red": {"label": "Temps de réponse critique — risque de perte de chance", "condition": "temps_reponse_estime ≥ 15 min"},
+            "red": {"label": "Temps de réponse critique - risque de perte de chance", "condition": "temps_reponse_estime ≥ 15 min"},
         },
         "databases": [
             "Système d'Information Géographique routier (SITG / TomTom API)",
@@ -1200,8 +1200,8 @@ GESICA_ENRICHED: dict = {
         },
         "alert_thresholds": {
             "green": {"label": "Couverture optimale du territoire", "condition": "couverture_population_10min ≥ 95%"},
-            "orange": {"label": "Couverture dégradée — relocalisation requise", "condition": "85% ≤ couverture_population_10min < 95%"},
-            "red": {"label": "Couverture critique — risque majeur de retard de secours", "condition": "couverture_population_10min < 85%"},
+            "orange": {"label": "Couverture dégradée - relocalisation requise", "condition": "85% ≤ couverture_population_10min < 95%"},
+            "red": {"label": "Couverture critique - risque majeur de retard de secours", "condition": "couverture_population_10min < 85%"},
         },
         "databases": [
             "Système de suivi d'activité TechCAD",
@@ -1263,8 +1263,8 @@ GESICA_ENRICHED: dict = {
         },
         "alert_thresholds": {
             "green": {"label": "Effectifs suffisants", "condition": "adequation_effectif ≥ 1.0"},
-            "orange": {"label": "Sous-effectif modéré — risque de dépassement des délais", "condition": "0.85 ≤ adequation_effectif < 1.0"},
-            "red": {"label": "Sous-effectif critique — rappel de personnel d'urgence requis", "condition": "adequation_effectif < 0.85"},
+            "orange": {"label": "Sous-effectif modéré - risque de dépassement des délais", "condition": "0.85 ≤ adequation_effectif < 1.0"},
+            "red": {"label": "Sous-effectif critique - rappel de personnel d'urgence requis", "condition": "adequation_effectif < 0.85"},
         },
         "databases": [
             "Logiciel de gestion des ressources humaines et des plannings (ex: Polypoint)",
@@ -1327,8 +1327,8 @@ GESICA_ENRICHED: dict = {
         },
         "alert_thresholds": {
             "green": {"label": "Urgences fluides", "condition": "nedocs < 100"},
-            "orange": {"label": "Urgences surchargées — activer mesures de fluidification", "condition": "100 ≤ nedocs < 140"},
-            "red": {"label": "Urgences saturées — déclenchement Plan Blanc interne / déviation ambulances", "condition": "nedocs ≥ 140"},
+            "orange": {"label": "Urgences surchargées - activer mesures de fluidification", "condition": "100 ≤ nedocs < 140"},
+            "red": {"label": "Urgences saturées - déclenchement Plan Blanc interne / déviation ambulances", "condition": "nedocs ≥ 140"},
         },
         "databases": [
             "Dossier Patient Informatisé des Urgences (HUG/CHUV)",
@@ -1395,8 +1395,8 @@ GESICA_ENRICHED: dict = {
         },
         "alert_thresholds": {
             "green": {"label": "Demande normale attendue", "condition": "erreur_prevision < 10%"},
-            "orange": {"label": "Hausse significative de la demande (+15%) — adapter effectifs", "condition": "10% ≤ erreur_prevision < 20%"},
-            "red": {"label": "Surcharge critique attendue (+30% appels) — plan de crise", "condition": "erreur_prevision ≥ 20%"},
+            "orange": {"label": "Hausse significative de la demande (+15%) - adapter effectifs", "condition": "10% ≤ erreur_prevision < 20%"},
+            "red": {"label": "Surcharge critique attendue (+30% appels) - plan de crise", "condition": "erreur_prevision ≥ 20%"},
         },
         "databases": [
             "Historique de régulation SAGA (144/15)",
@@ -1468,8 +1468,8 @@ GESICA_ENRICHED: dict = {
         },
         "alert_thresholds": {
             "green": {"label": "Ressources allouées optimales", "condition": "adequation_ressources_demande ≥ 0.95"},
-            "orange": {"label": "Inadéquation offre-demande locale — ajustement mineur requis", "condition": "0.80 ≤ adequation_ressources_demande < 0.95"},
-            "red": {"label": "Inadéquation majeure — rupture de couverture prévisible", "condition": "adequation_ressources_demande < 0.80"},
+            "orange": {"label": "Inadéquation offre-demande locale - ajustement mineur requis", "condition": "0.80 ≤ adequation_ressources_demande < 0.95"},
+            "red": {"label": "Inadéquation majeure - rupture de couverture prévisible", "condition": "adequation_ressources_demande < 0.80"},
         },
         "databases": [
             "Base de données d'activité TechCAD",
@@ -1532,8 +1532,8 @@ GESICA_ENRICHED: dict = {
         },
         "alert_thresholds": {
             "green": {"label": "Activité épidémique normale (Bruit de fond)", "condition": "cusum_score < 2.0"},
-            "orange": {"label": "Alerte épidémique modérée — hausse anormale des appels", "condition": "2.0 ≤ cusum_score < 4.0"},
-            "red": {"label": "Seuil épidémique franchi — début de vague épidémique", "condition": "cusum_score ≥ 4.0"},
+            "orange": {"label": "Alerte épidémique modérée - hausse anormale des appels", "condition": "2.0 ≤ cusum_score < 4.0"},
+            "red": {"label": "Seuil épidémique franchi - début de vague épidémique", "condition": "cusum_score ≥ 4.0"},
         },
         "databases": [
             "Base de données de régulation SAGA (motifs cliniques d'appels)",
@@ -1596,8 +1596,8 @@ GESICA_ENRICHED: dict = {
         },
         "alert_thresholds": {
             "green": {"label": "Situation sanitaire stable", "condition": "score_anomalie < 0.50"},
-            "orange": {"label": "Hausse inhabituelle d'activité — investigation requise", "condition": "0.50 ≤ score_anomalie < 0.80"},
-            "red": {"label": "Anomalie sanitaire majeure détectée — alerte santé publique", "condition": "score_anomalie ≥ 0.80"},
+            "orange": {"label": "Hausse inhabituelle d'activité - investigation requise", "condition": "0.50 ≤ score_anomalie < 0.80"},
+            "red": {"label": "Anomalie sanitaire majeure détectée - alerte santé publique", "condition": "score_anomalie ≥ 0.80"},
         },
         "databases": [
             "Base de données de régulation SAGA (144/15)",
@@ -1660,8 +1660,8 @@ GESICA_ENRICHED: dict = {
         },
         "alert_thresholds": {
             "green": {"label": "Capacité d'afflux normale", "condition": "temps_avant_saturation > 12h"},
-            "orange": {"label": "Saturation à court terme (<6h) — pré-alerte plan blanc", "condition": "2h ≤ temps_avant_saturation < 6h"},
-            "red": {"label": "Saturation imminente (<2h) — déclenchement plan blanc immédiat", "condition": "temps_avant_saturation < 2h"},
+            "orange": {"label": "Saturation à court terme (<6h) - pré-alerte plan blanc", "condition": "2h ≤ temps_avant_saturation < 6h"},
+            "red": {"label": "Saturation imminente (<2h) - déclenchement plan blanc immédiat", "condition": "temps_avant_saturation < 2h"},
         },
         "databases": [
             "Système d'information hospitalier HUG (flux de patients)",
@@ -1724,8 +1724,8 @@ GESICA_ENRICHED: dict = {
         },
         "alert_thresholds": {
             "green": {"label": "Stocks et effectifs sécurisés", "condition": "autonomie_stocks_jours ≥ 30"},
-            "orange": {"label": "Tension sur les stocks — réapprovisionnement d'urgence", "condition": "10 ≤ autonomie_stocks_jours < 30"},
-            "red": {"label": "Rupture de stock imminente — rationnement et réutilisation", "condition": "autonomie_stocks_jours < 10"},
+            "orange": {"label": "Tension sur les stocks - réapprovisionnement d'urgence", "condition": "10 ≤ autonomie_stocks_jours < 30"},
+            "red": {"label": "Rupture de stock imminente - rationnement et réutilisation", "condition": "autonomie_stocks_jours < 10"},
         },
         "databases": [
             "Inventaire logistique centralisé de la pharmacie hospitalière (HUG)",
@@ -1788,8 +1788,8 @@ GESICA_ENRICHED: dict = {
         },
         "alert_thresholds": {
             "green": {"label": "Coordination normale", "condition": "protocoles_actifs == True"},
-            "orange": {"label": "Coordination dégradée — contact direct", "condition": "delai_coordination > 5 min"},
-            "red": {"label": "Rupture coordination — escalade hiérarchique", "condition": "protocoles_inactifs == True"},
+            "orange": {"label": "Coordination dégradée - contact direct", "condition": "delai_coordination > 5 min"},
+            "red": {"label": "Rupture coordination - escalade hiérarchique", "condition": "protocoles_inactifs == True"},
         },
         "databases": [
             "Système de répartition TechCAD transfrontalier",
@@ -1852,8 +1852,8 @@ GESICA_ENRICHED: dict = {
         },
         "alert_thresholds": {
             "green": {"label": "Situation normale", "condition": "nb_alertes_actives == 0"},
-            "orange": {"label": "Alertes en cours — surveillance renforcée", "condition": "1 ≤ nb_alertes_actives < 3"},
-            "red": {"label": "Situation critique — cellule de crise", "condition": "nb_alertes_actives ≥ 3"},
+            "orange": {"label": "Alertes en cours - surveillance renforcée", "condition": "1 ≤ nb_alertes_actives < 3"},
+            "red": {"label": "Situation critique - cellule de crise", "condition": "nb_alertes_actives ≥ 3"},
         },
         "databases": [
             "Système d'Information Géographique SITG (Genève)",

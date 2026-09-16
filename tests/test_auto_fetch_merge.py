@@ -1,11 +1,11 @@
 """Auto-fetch must ADD public covariates to the user's data, not replace it.
 
 Regression guard for a silent data-loss bug: a connector can never supply the variable
-being predicted — that comes from the user's own data (ED visits, incoming calls). But
+being predicted - that comes from the user's own data (ED visits, incoming calls). But
 auto-fetch deactivated the uploaded dataset and activated the covariates-only frame it
 had just assembled, so the scenario lost its outcome column. Worse, the validation report
 was computed on the assembled columns alone, so the response said
-`still_needed_user_columns: []` — "nothing is missing" — while the required outcome was
+`still_needed_user_columns: []` - "nothing is missing" - while the required outcome was
 gone. Silent, and wrong in the direction that hides itself.
 
 Needs Postgres; skips cleanly without it.
@@ -50,7 +50,7 @@ def client_and_scenario(tmp_path, monkeypatch):
     from sqlalchemy import text
     from fastapi.testclient import TestClient
 
-    # Datasets are written under MODEL_DATA_DIR, which defaults to /home/ubuntu/... —
+    # Datasets are written under MODEL_DATA_DIR, which defaults to /home/ubuntu/... -
     # a path that does not exist on a CI runner and that the runner user cannot create.
     # Point it at the test's own temp directory so this exercises the code, not the
     # filesystem layout of one particular machine.
@@ -94,7 +94,7 @@ def test_auto_fetch_preserves_the_users_uploaded_outcome(client_and_scenario, mo
     cl, sid, main = client_and_scenario
     key = {"x-api-key": os.getenv("WRITE_API_KEY", "test-write-key")}
 
-    # The user uploads their own outcome — no connector can produce this column.
+    # The user uploads their own outcome - no connector can produce this column.
     csv = "date,ed_visits\n" + "\n".join(f"2024-01-{d:02d},{100 + d}" for d in range(1, 29))
     up = cl.post(f"/scenarios/{sid}/model/data", headers=key,
                  files={"file": ("mine.csv", csv, "text/csv")})

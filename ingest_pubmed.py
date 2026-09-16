@@ -202,7 +202,7 @@ def run_project(project: str, queries: list[str]) -> int:
 
         time.sleep(0.35)
 
-    print(f"\n✅ Ingestion terminée — {total_new} nouveaux articles")
+    print(f"\n✅ Ingestion terminée - {total_new} nouveaux articles")
     return total_new
 
 def main() -> int:

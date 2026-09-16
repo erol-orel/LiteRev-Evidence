@@ -2,7 +2,7 @@
 stay "running" forever.
 
 `_run_user_scenario_populate` reports its failures itself, but only once inside its
-body: an exception raised earlier (its imports, for one — the browser smoke test hit
+body: an exception raised earlier (its imports, for one - the browser smoke test hit
 `ModuleNotFoundError: requests` on a bare API) killed the thread, and the in-memory
 job kept saying "running" while the search page polled it without end. The launcher
 now wraps the thread target. Pure: no database needed (the status update is

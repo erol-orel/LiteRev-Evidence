@@ -1,4 +1,4 @@
-"""Phase 3 — entraînement réel du modèle (scikit-learn + Optuna).
+"""Phase 3 - entraînement réel du modèle (scikit-learn + Optuna).
 
 La littérature fournit le `model_spec` (outcome, variables explicatives,
 algorithme) ; les données d'entraînement viennent de l'utilisateur (+ flux
@@ -65,7 +65,7 @@ except Exception:  # sklearn absent → dummy bases so `import model_trainer` st
 
 
 class QuantileRandomForestRegressor(_RegressorMixin, _BaseEstimator):
-    """Extremal / Quantile Regression Forest (Meinshausen 2006) — a random forest that
+    """Extremal / Quantile Regression Forest (Meinshausen 2006) - a random forest that
     predicts a conditional QUANTILE (default the 90th percentile) instead of the mean:
     the plausible SURGE, not the average. It fits a standard RandomForestRegressor,
     remembers each tree's training-sample leaf assignments, and at predict time returns
@@ -312,7 +312,7 @@ def suggest_params(trial, family: str) -> dict:
     if family == "extremal_rf":
         # Quantile forest: modest tree count (leaf-quantile predict is O(n_test·n_trees·n_train)),
         # larger leaves so each carries enough samples to estimate a tail quantile. The target
-        # quantile itself is NOT tuned — it's the user's choice (algorithm.quantile).
+        # quantile itself is NOT tuned - it's the user's choice (algorithm.quantile).
         return {
             "n_estimators": trial.suggest_int("n_estimators", 100, 300),
             "max_depth": trial.suggest_int("max_depth", 3, 16),
@@ -519,7 +519,7 @@ def _importances_by_variable(pipe, used: list[dict]) -> dict:
 
 def regression_diagnostics(pipe, X, y, used: list[dict]) -> dict:
     """Diagnostics des hypothèses de la régression (Gauss-Markov / OLS), calculés
-    sur les résidus d'ENTRAÎNEMENT. Purement informatif — n'altère pas le modèle.
+    sur les résidus d'ENTRAÎNEMENT. Purement informatif - n'altère pas le modèle.
 
       - multicolinéarité   : VIF par variable numérique (>5 attention, >10 forte) ;
       - homoscédasticité   : test de Breusch-Pagan (p<0.05 = hétéroscédasticité) ;
@@ -528,7 +528,7 @@ def regression_diagnostics(pipe, X, y, used: list[dict]) -> dict:
 
     Ces hypothèses concernent l'inférence des modèles LINÉAIRES (OLS). Pour les
     modèles à arbres/non linéaires elles ne s'appliquent pas au sens strict, mais les
-    résidus restent informatifs — d'où le champ `applies` (True pour linéaire)."""
+    résidus restent informatifs - d'où le champ `applies` (True pour linéaire)."""
     import numpy as np
     from scipy import stats as _st
 
@@ -551,7 +551,7 @@ def regression_diagnostics(pipe, X, y, used: list[dict]) -> dict:
             Z = np.asarray(Z, dtype=float)
         names = list(pre.get_feature_names_out())
 
-        # 1) Autocorrélation — Durbin-Watson
+        # 1) Autocorrélation - Durbin-Watson
         dw = float(np.sum(np.diff(resid) ** 2) / (np.sum(resid ** 2) + 1e-12))
         out["checks"].append({
             "key": "autocorrelation", "name": "Autocorrélation (Durbin-Watson)",
@@ -560,7 +560,7 @@ def regression_diagnostics(pipe, X, y, used: list[dict]) -> dict:
             "detail": "≈2 = pas d'autocorrélation ; <1.5 ou >2.5 = résidus corrélés (souvent série temporelle mal ordonnée).",
         })
 
-        # 2) Normalité des résidus — Shapiro-Wilk / Jarque-Bera
+        # 2) Normalité des résidus - Shapiro-Wilk / Jarque-Bera
         try:
             if n <= 5000:
                 _stat, p_norm = _st.shapiro(resid)
@@ -577,7 +577,7 @@ def regression_diagnostics(pipe, X, y, used: list[dict]) -> dict:
         except Exception as _e:
             logger.warning(f"normality diag: {_e}")
 
-        # 3) Homoscédasticité — test de White (LM = n·R² de resid² sur le design
+        # 3) Homoscédasticité - test de White (LM = n·R² de resid² sur le design
         #    AUGMENTÉ des carrés des variables numériques). Le carré capte aussi
         #    l'hétéroscédasticité « en entonnoir » (variance ∝ x²) que le Breusch-Pagan
         #    strictement linéaire manque.
@@ -604,7 +604,7 @@ def regression_diagnostics(pipe, X, y, used: list[dict]) -> dict:
         except Exception as _e:
             logger.warning(f"white/bp diag: {_e}")
 
-        # 4) Multicolinéarité — VIF par variable numérique (régression de chaque
+        # 4) Multicolinéarité - VIF par variable numérique (régression de chaque
         #    colonne numérique sur les autres). Repli propre si colinéarité parfaite.
         try:
             num_idx = [i for i, nm in enumerate(names) if nm.startswith("num__")]
@@ -730,7 +730,7 @@ def model_guardrails(pipe, Xtr, ytr, Xte, yte, task_type: str, cv_scores,
         "key": "leakage", "name": "Fuite de cible",
         "status": "fail" if leaks else "ok",
         "detail": (("Association quasi parfaite avec la cible : " + ", ".join(l["feature"] for l in leaks)
-                    + " — probable fuite (la variable encode l'issue). À retirer.") if leaks
+                    + " - probable fuite (la variable encode l'issue). À retirer.") if leaks
                    else "Aucune variable ne prédit trivialement la cible."),
         "leaks": leaks,
     })
@@ -799,7 +799,7 @@ def distribution_shift(X, used: list[dict]) -> dict:
     GESICA notes): for each numeric feature, PSI between the EARLY and LATE half of the
     time-ordered data. A model fit on the past can generalise poorly to a shifted present
     (call volumes, demand). Ordered by the spec's datetime feature when present, else by
-    row order (uploads are typically chronological). Informative — never alters the model."""
+    row order (uploads are typically chronological). Informative - never alters the model."""
     import numpy as np
     import pandas as pd
     check = {"key": "distribution_shift", "name": "Dérive distributionnelle (temporelle)",
@@ -841,7 +841,7 @@ def distribution_shift(X, used: list[dict]) -> dict:
         names = ", ".join(f"{c} (PSI {p:.2f})" for c, p in sorted(flagged, key=lambda x: -x[1])[:4])
         check["detail"] = (
             f"Distribution décalée entre la 1re et la 2de moitié de la période : {names}. "
-            "Le modèle entraîné sur le passé peut mal se généraliser au présent — "
+            "Le modèle entraîné sur le passé peut mal se généraliser au présent - "
             "envisager un ré-entraînement régulier / une fenêtre glissante.")
     else:
         check["detail"] = "Distributions stables dans le temps (PSI < 0.25 pour toutes les variables)."
@@ -984,7 +984,7 @@ def train_model(df, spec: dict, n_trials: int = 25, random_state: int = 42, test
     scoring = _scoring(metric, task_type, n_classes=(len(classes) if classes else None))
     scoring_label = scoring if isinstance(scoring, str) else "score"
     if is_extremal:
-        # Optimise the QUANTILE directly (pinball loss), not the mean — otherwise CV would
+        # Optimise the QUANTILE directly (pinball loss), not the mean - otherwise CV would
         # push the forest back toward the average and defeat the surge target.
         from sklearn.metrics import make_scorer, mean_pinball_loss
         scoring = make_scorer(mean_pinball_loss, alpha=quantile, greater_is_better=False)
@@ -1020,7 +1020,7 @@ def train_model(df, spec: dict, n_trials: int = 25, random_state: int = 42, test
     )
 
     # Garde-fou classes rares : le nombre de folds doit être <= la plus petite classe
-    # DANS LE TRAIN (pas dans y complet) — sinon StratifiedKFold lève "n_splits cannot
+    # DANS LE TRAIN (pas dans y complet) - sinon StratifiedKFold lève "n_splits cannot
     # be greater than the number of members in each class" et fait échouer le job.
     if task_type == "classification" and not is_ts:
         _train_min = int(pd.Series(list(ytr)).value_counts().min())
@@ -1061,7 +1061,7 @@ def train_model(df, spec: dict, n_trials: int = 25, random_state: int = 42, test
     metrics = _evaluate(final, Xte, yte, task_type, classes)
     if is_extremal:
         # Quantile-appropriate holdout metrics: pinball loss at the target quantile + the
-        # empirical coverage (share of actuals ≤ prediction — should sit near `quantile`).
+        # empirical coverage (share of actuals ≤ prediction - should sit near `quantile`).
         # rmse/r2 (vs the MEAN) are left in but are expected to look off for a tail forecast.
         from sklearn.metrics import mean_pinball_loss
         _preds = final.predict(Xte)
@@ -1107,7 +1107,7 @@ def train_model(df, spec: dict, n_trials: int = 25, random_state: int = 42, test
         "pipeline": final,
     }
     if task_type in ("regression", "count"):
-        # Diagnostics des hypothèses de régression (Gauss-Markov / OLS) — informatif.
+        # Diagnostics des hypothèses de régression (Gauss-Markov / OLS) - informatif.
         result["assumptions"] = regression_diagnostics(final, Xtr, ytr, used)
     # Garde-fous (fuite de cible, déséquilibre, stabilité CV, IC bootstrap) +
     # fond d'explication locale (pour /model/predict). Informatif, best-effort.
@@ -1135,7 +1135,7 @@ def _lower_is_better(metric: str) -> bool:
 
 def leaderboard_families(task_type: str) -> list[str]:
     """Ensemble CURÉ de familles à comparer (fortes pour données tabulaires + une
-    base linéaire interprétable). Exclut lightgbm/xgboost si le paquet est absent —
+    base linéaire interprétable). Exclut lightgbm/xgboost si le paquet est absent -
     pas TOUTES les familles, pour garder la comparaison rapide."""
     tt = (task_type or "classification").strip().lower()
     lin = "linear_regression" if tt in ("regression", "count") else "logistic_regression"
@@ -1353,7 +1353,7 @@ def train_timeseries_model(df, spec: dict, family: str = "prophet",
             raise ValueError("SARIMAX n'a convergé pour aucun ordre candidat.")
         # Ordre choisi par AIC sur le TRAIN (et NON par le plus petit RMSE holdout de la
         # grille : sélectionner sur les points mêmes qui servent à mesurer l'erreur
-        # produisait un RMSE « test » optimiste — biais de sélection sur le test). Le
+        # produisait un RMSE « test » optimiste - biais de sélection sur le test). Le
         # RMSE reporté est ensuite calculé UNE fois, pour cet ordre, sur le holdout intact.
         _aic, (order, sorder), res = best
         with _w.catch_warnings():

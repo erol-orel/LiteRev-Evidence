@@ -98,7 +98,7 @@ def extract_pico_batch(
             except Exception as e:
                 logger.warning(f"PICO batch API error article {article_id}: {e}")
                 errors += 1
-                continue  # transitoire — ne PAS consommer une tentative
+                continue  # transitoire - ne PAS consommer une tentative
             # On a une RÉPONSE → on COMPTE la tentative quoi qu'il arrive (borne le
             # token-bleed : une sortie déterministe malformée ne sera pas ré-extraite
             # à l'infini). Remplissage tolérant des clés plutôt que rejet en boucle.

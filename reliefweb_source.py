@@ -20,7 +20,7 @@ A title, a body, an organisation or a country cannot survive that pipe, and thir
 in one week cannot coexist in it. ReliefWeb yields DOCUMENTS, so it is modelled as one.
 
 PURE except for two named HTTP seams (`_http_post_json`, `_http_get_json`), which the
-tests monkeypatch — everything here is exercised offline.
+tests monkeypatch - everything here is exercised offline.
 
 API notes, from the official documentation (apidoc.reliefweb.int):
   - Base URL is **https://api.reliefweb.int/v2/**. V1 is decommissioned.
@@ -29,7 +29,7 @@ API notes, from the official documentation (apidoc.reliefweb.int):
   - Quotas, quoted in full: "The maximum number of entries returned per call is 1000. The
     maximum number of calls allowed per day is 1000." There is no documented per-second
     limit, no reset time and no rate-limit header, so callers must count their own calls
-    (`QUOTA_CALLS_PER_DAY`) and cache — see `main._rw_budget_remaining`.
+    (`QUOTA_CALLS_PER_DAY`) and cache - see `main._rw_budget_remaining`.
 """
 from __future__ import annotations
 
@@ -44,7 +44,7 @@ BASE_URL = "https://api.reliefweb.int/v2"
 DEFAULT_APPNAME = "literev-evidence"
 
 # Documented quotas (apidoc.reliefweb.int/#quotas). 1000 calls/day is the binding
-# constraint: never build a per-user live query on top of it — ingest and cache.
+# constraint: never build a per-user live query on top of it - ingest and cache.
 QUOTA_CALLS_PER_DAY = 1000
 MAX_LIMIT_PER_CALL = 1000
 
@@ -64,7 +64,7 @@ PATHOGEN_TERMS = (
 
 # ── source credibility ───────────────────────────────────────────────────────
 # `quality_score` on literature_document IS the SEIR pooling weight, and a situation
-# report scored a flat 0.55 there — ABOVE a peer-reviewed case report at 0.386. One
+# report scored a flat 0.55 there - ABOVE a peer-reviewed case report at 0.386. One
 # press-release "R0 ~ 6" moved a pooled R0 from 2.09 to 3.04 and pushed the lower CI
 # below zero. These values are deliberately far below any peer-reviewed study: they rank
 # reports against EACH OTHER (a WHO bulletin above an unattributed news item) without
@@ -116,7 +116,7 @@ _DATE_TAIL = re.compile(
 
 def strip_markdown(text) -> str:
     """ReliefWeb `body` is Markdown (`body-html` is the HTML twin). Flatten it to plain
-    text for indexing/summarising — do NOT run an HTML sanitiser over it. PURE."""
+    text for indexing/summarising - do NOT run an HTML sanitiser over it. PURE."""
     s = str(text or "")
     s = _MD_LINK.sub(r"\1", s)          # [label](url) → label
     s = _HTML_TAG.sub(" ", s)           # stray inline HTML happens in practice
@@ -147,7 +147,8 @@ def series_key(title, source_names=None) -> str:
     primary source. PURE."""
     base = str(title or "")
     for _ in range(3):                            # "... No. 12 (5 March 2026)"
-        new = _DATE_TAIL.sub("", _SERIAL_TAIL.sub("", base)).strip(" -–—:|")
+        # Dashes stripped by their code points: external titles do carry en and em dashes.
+        new = _DATE_TAIL.sub("", _SERIAL_TAIL.sub("", base)).strip(" -" + chr(0x2013) + chr(0x2014) + ":|")
         if new == base:
             break
         base = new
@@ -157,7 +158,7 @@ def series_key(title, source_names=None) -> str:
 
 # ── query building ───────────────────────────────────────────────────────────
 def _cond(field_name: str, value=None, negate: bool = False) -> dict:
-    """One filter condition. NOTE: omitting `value` tests FIELD EXISTENCE, not equality —
+    """One filter condition. NOTE: omitting `value` tests FIELD EXISTENCE, not equality -
     an easy silent bug when a caller passes None, so we never emit a value-less filter
     unless asked explicitly."""
     c: dict[str, Any] = {"field": field_name}
@@ -185,7 +186,7 @@ def build_reports_query(
     Combines the editorial tag (`disaster_type = Epidemic`) OR a pathogen free-text sweep,
     because the tag lags the outbreak. Always emits an explicit `sort`: the docs warn that
     "if there is no sort specified, results may not be consistent", and paginating an
-    unsorted result set silently skips and repeats records. PURE — no network."""
+    unsorted result set silently skips and repeats records. PURE - no network."""
     limit = max(0, min(int(limit), MAX_LIMIT_PER_CALL))
     conditions: list[dict] = []
 
@@ -238,7 +239,7 @@ def build_reports_query(
 
 def build_disasters_query(*, status: tuple | list = ("current", "alert"),
                           limit: int = 200, include_archived: bool = False) -> dict:
-    """POST body for /v2/disasters — the epidemic EVENT spine (GLIDE ids).
+    """POST body for /v2/disasters - the epidemic EVENT spine (GLIDE ids).
 
     Archived events are excluded by the default presets, so a historical backfill needs
     `include_archived` (the docs' `preset=analysis` behaviour). PURE."""
@@ -286,7 +287,7 @@ class Report:
     title: str
     body: str
     url: str
-    published_at: str | None          # date.original — the SOURCE's date, not our ingest
+    published_at: str | None          # date.original - the SOURCE's date, not our ingest
     created_at: str | None
     changed_at: str | None
     sources: list[str] = field(default_factory=list)
@@ -439,7 +440,7 @@ def _http_get_json(url: str, timeout: int = 30) -> dict:
 
 def endpoint(kind: str, appname: str | None = None) -> str:
     """Full URL for a collection. `appname` is MANDATORY and, since 1 Nov 2025,
-    pre-approval-gated — an ad-hoc string is likely to be rejected."""
+    pre-approval-gated - an ad-hoc string is likely to be rejected."""
     return f"{BASE_URL}/{kind}?appname={appname or DEFAULT_APPNAME}"
 
 
@@ -471,7 +472,7 @@ def fetch_disasters(query: dict, appname: str | None = None) -> list[dict]:
 
 def plan_pagination(total: int, limit: int, budget_calls: int) -> list[int]:
     """Offsets needed to walk `total` records at `limit` per call, truncated to the call
-    budget. Returns the offsets ACTUALLY affordable — the caller must report the shortfall
+    budget. Returns the offsets ACTUALLY affordable - the caller must report the shortfall
     rather than presenting a partial sweep as complete. PURE."""
     limit = max(1, min(int(limit), MAX_LIMIT_PER_CALL))
     pages = max(0, math.ceil(max(0, int(total)) / limit))

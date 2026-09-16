@@ -1,4 +1,4 @@
-# Guide de l'Utilisateur — Module Prédictif & Décisionnel GESICA (v8.0)
+# Guide de l'Utilisateur - Module Prédictif & Décisionnel GESICA (v8.0)
 
 Ce guide décrit le fonctionnement, la base scientifique, les données requises et l'interprétation des **11 scénarios prédictifs et décisionnels** intégrés dans la plateforme **LiteRev-Evidence** pour le projet **GESICA**.
 
@@ -174,7 +174,7 @@ Optimiser l'orientation préhospitalière des patients suspects d'Accident Vascu
 ### Interprétation du Widget
 - **Probabilité d'Occlusion (LVO)** : Pourcentage de risque de gros vaisseau occlus.
 - **Calculateur de Délais** : Comparaison du temps total estimé pour l'option A (Hôpital local + transfert) vs option B (Direct Stroke Center).
-- **Orientation Recommandée** : Décision claire affichée à l'écran (ex : "Éviter l'Hôpital de Thonon, transfert direct HUG recommandé — gain estimé : 42 minutes").
+- **Orientation Recommandée** : Décision claire affichée à l'écran (ex : "Éviter l'Hôpital de Thonon, transfert direct HUG recommandé - gain estimé : 42 minutes").
 
 ---
 

@@ -109,7 +109,7 @@ def _validate_dataset_against_template(file_columns: list, data_template: dict,
                 # colonne non-outcome, la colonne de DATES était comptée comme une
                 # variable explicative : n_features_present dépassait n_features_total
                 # (ratio impossible affiché à l'utilisateur) et, plus grave, un fichier
-                # ne contenant QUE la date et la cible — zéro variable explicative —
+                # ne contenant QUE la date et la cible - zéro variable explicative -
                 # satisfaisait `n_features_present >= 1` et se voyait déclarer
                 # « prêt à entraîner ».
                 n_features_present += 1
@@ -214,7 +214,7 @@ def _maybe_autotrain(scenario_id: str, report: dict) -> bool:
 # ─── PHASE 2 : Connecteurs de données publiques (auto-remplissage des variables) ─
 # Chaque connecteur récupère une source publique RÉELLE et lisible par machine et
 # renvoie une série temporelle quotidienne « tidy » joignable au dataset du modèle
-# sur la clé date — au lieu d'un upload CSV manuel. Discovery + fetch ici ; le
+# sur la clé date - au lieu d'un upload CSV manuel. Discovery + fetch ici ; le
 # mapping variable→connecteur et l'assemblage du dataset arrivent ensuite.
 class ConnectorFetchIn(BaseModel):
     region: str | None = None        # alias Romandie (geneva|lausanne|sion|…) ou lat+lon
@@ -431,7 +431,7 @@ class AutoFetchIn(BaseModel):
     end_date: str = Field(..., min_length=8)
     frequency: str = Field(default="W")     # W (hebdo, défaut épidémio) | D | MS
     # Pas de min_length : un scénario dont TOUTES les colonnes dérivent du sous-modèle
-    # SEIR (source="seir") n'a aucun mapping à fournir — le code ci-dessous les ajoute
+    # SEIR (source="seir") n'a aucun mapping à fournir - le code ci-dessous les ajoute
     # automatiquement. Exiger au moins un mapping rejetait à la porte le cas que la
     # fonction est précisément écrite pour traiter.
     mappings: list[AutoFetchMapping] = Field(default_factory=list)
@@ -442,7 +442,7 @@ class AutoFetchIn(BaseModel):
 def auto_fetch_model_dataset(
     scenario_id: str, payload: AutoFetchIn, _: None = Depends(require_api_key),
 ) -> dict[str, Any]:
-    """Phase 2 — assemble le dataset du modèle depuis des connecteurs de données
+    """Phase 2 - assemble le dataset du modèle depuis des connecteurs de données
     PUBLIQUES au lieu d'un upload. Chaque mapping relie une colonne du data_template
     à (connecteur, variable) ; on récupère chaque connecteur, on aligne sur une grille
     de dates commune (frequency) et on joint, on stocke le dataset actif, puis on
@@ -524,8 +524,8 @@ def auto_fetch_model_dataset(
 
     # Colonnes DEMANDÉES mais absentes du résultat. `_assemble_connector_frames` saute
     # silencieusement un mapping dont la variable manque, si bien que la réponse
-    # annonçait « stored » sans dire qu'une colonne — typiquement la colonne dérivée du
-    # SEIR — n'avait pas été remplie ; le rapport de validation la rangeait alors dans
+    # annonçait « stored » sans dire qu'une colonne - typiquement la colonne dérivée du
+    # SEIR - n'avait pas été remplie ; le rapport de validation la rangeait alors dans
     # `missing_seir`, dont le sens est « sera auto-remplie », c'est-à-dire l'inverse de
     # ce qui venait de se produire. On nomme ici ce qui a été écarté ET pourquoi.
     _filled = set(filled)
@@ -542,7 +542,7 @@ def auto_fetch_model_dataset(
     # propres de l'utilisateur (passages aux urgences, appels…). Or l'auto-récupération
     # désactivait le dataset uploadé et activait celui, purement covariables, qu'elle
     # venait d'assembler : le scénario perdait sa colonne d'outcome, et le rapport de
-    # validation — calculé sur les seules colonnes assemblées — annonçait pourtant
+    # validation - calculé sur les seules colonnes assemblées - annonçait pourtant
     # `still_needed_user_columns: []`, c'est-à-dire « rien ne manque ». Silencieux et faux.
     # On fusionne donc sur la colonne de dates ; les colonnes effectivement récupérées
     # écrasent leurs homonymes (l'utilisateur vient de les demander), toutes les autres
@@ -664,7 +664,7 @@ def generate_synthetic_model_dataset(scenario_id: str, n_rows: int = 400,
     """
     Génère un dataset SYNTHÉTIQUE cohérent avec le data_template du spec et le
     branche comme dataset actif. Permet de faire tourner un vrai modèle de
-    démonstration (entraînable immédiatement) sans données réelles — utile pour
+    démonstration (entraînable immédiatement) sans données réelles - utile pour
     transformer un scénario en démo « modèle en ligne ». Généralisable à tout scénario.
     """
     from datetime import datetime, timezone
@@ -724,5 +724,5 @@ def generate_synthetic_model_dataset(scenario_id: str, n_rows: int = 400,
         "stored": stored_path is not None,
         "validation": report,
         "training_started": _maybe_autotrain(scenario_id, report) if auto_train else False,
-        "note": "Données synthétiques de démonstration — à remplacer par des données réelles pour un usage opérationnel.",
+        "note": "Données synthétiques de démonstration - à remplacer par des données réelles pour un usage opérationnel.",
     }

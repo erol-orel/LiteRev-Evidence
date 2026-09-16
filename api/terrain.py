@@ -78,7 +78,7 @@ def get_terrain_meteo(lat: float = 46.2044, lon: float = 6.1432) -> dict[str, An
         
     # Fallback : valeurs d'exemple si l'API Open-Meteo est injoignable (clairement signalé)
     return {
-        "source": "Estimation de secours — API Open-Meteo indisponible",
+        "source": "Estimation de secours - API Open-Meteo indisponible",
         "data_status": "fallback_estimate",
         "coordinates": {"latitude": lat, "longitude": lon},
         "station": "Genève / Cointrin (estimation)",
@@ -237,7 +237,7 @@ def get_terrain_epidemic(region: str = "transborder") -> dict[str, Any]:
             "status": "epidemic",
             "trend": "stable",
             "data_status": "illustrative",
-            "source_details": "Valeurs d'exemple — aucun flux Santé Publique France / OFSP branché en direct",
+            "source_details": "Valeurs d'exemple - aucun flux Santé Publique France / OFSP branché en direct",
         },
         {
             "name": "Gastro-entérite / Acute diarrhea",
@@ -268,7 +268,7 @@ def get_terrain_epidemic(region: str = "transborder") -> dict[str, Any]:
         
     _any_live = bool(france_data.get("grippe_live") or france_data.get("gastro_live"))
     return {
-        "source": "Réseau Sentinelles France (sentiweb.fr) — incidences suisses/COVID illustratives",
+        "source": "Réseau Sentinelles France (sentiweb.fr) - incidences suisses/COVID illustratives",
         "data_status": "live_partial" if _any_live else "illustrative",
         "region": "Grand Genève (Haute-Savoie, Ain, Canton de Genève, Canton de Vaud)",
         "diseases": diseases,
@@ -347,7 +347,7 @@ def get_terrain_demographics(postal_code: str = "74100") -> dict[str, Any]:
         "ems_risk_multiplier": risk_multiplier,
         "source": data["source"],
         "data_status": "static_reference",
-        "architecture_note": "Valeurs de référence STATIQUES (recensements INSEE 2021 / OFS 2022) — PAS de connexion en direct. Un connecteur OFS PX-Web / INSEE reste à brancher (Phase 2) pour une actualisation automatique."
+        "architecture_note": "Valeurs de référence STATIQUES (recensements INSEE 2021 / OFS 2022) - PAS de connexion en direct. Un connecteur OFS PX-Web / INSEE reste à brancher (Phase 2) pour une actualisation automatique."
     }
 
 
@@ -409,7 +409,7 @@ def get_terrain_pharmacies(lat: float = 46.2044, lon: float = 6.1432) -> dict[st
             }
         ]
         
-    # Alertes de rupture de stock — EXEMPLES ILLUSTRATIFS (aucun flux ANSM/Swissmedic branché).
+    # Alertes de rupture de stock - EXEMPLES ILLUSTRATIFS (aucun flux ANSM/Swissmedic branché).
     stock_alerts = [
         {
             "medication": "Amoxicilline 500mg/5ml (Suspension pédiatrique)",
@@ -428,7 +428,7 @@ def get_terrain_pharmacies(lat: float = 46.2044, lon: float = 6.1432) -> dict[st
     ]
     
     return {
-        "source": "OpenStreetMap Overpass (pharmacies) — alertes médicaments illustratives",
+        "source": "OpenStreetMap Overpass (pharmacies) - alertes médicaments illustratives",
         "data_status": "live_partial",
         "pharmacies_nearby": pharmacies,
         "critical_medication_alerts": stock_alerts,
@@ -470,10 +470,10 @@ def get_terrain_informal_signals() -> dict[str, Any]:
     ]
     
     return {
-        "source": "Exemples illustratifs — ProMED-mail / GDELT NON connectés",
+        "source": "Exemples illustratifs - ProMED-mail / GDELT NON connectés",
         "data_status": "illustrative",
         "active_signals": signals,
-        "architecture_note": "Signaux d'EXEMPLE (aucun flux réel). Prêt à ingérer les dépêches ProMED-mail (RSS) et l'API GDELT — non branché à ce jour."
+        "architecture_note": "Signaux d'EXEMPLE (aucun flux réel). Prêt à ingérer les dépêches ProMED-mail (RSS) et l'API GDELT - non branché à ce jour."
     }
 
 

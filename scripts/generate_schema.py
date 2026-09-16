@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-generate_schema.py — Extrait le schéma SQL complet depuis la base PostgreSQL
+generate_schema.py - Extrait le schéma SQL complet depuis la base PostgreSQL
 et le sauvegarde dans schema.sql pour versionnement dans GitHub.
 
 Usage:
@@ -26,7 +26,7 @@ def main() -> None:
 
     lines: list[str] = [
         "-- ============================================================",
-        "-- LiteRev-Evidence — Schéma PostgreSQL",
+        "-- LiteRev-Evidence - Schéma PostgreSQL",
         "-- Généré automatiquement par generate_schema.py",
         "-- ============================================================",
         "",

@@ -3,7 +3,7 @@
 Reports, without changing anything:
   - B3: documents with >1 `title_abstract` chunk (duplicate chunks);
   - A3a: chunkless documents that DO have title/abstract text (recoverable);
-  - A3b: chunkless documents with NO usable text (truly empty — decision needed).
+  - A3b: chunkless documents with NO usable text (truly empty - decision needed).
 
 Reads DB_URL / DATABASE_URL from the environment. Run via the audited
 server-command workflow, same as the other scripts in this folder.

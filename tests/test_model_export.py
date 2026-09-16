@@ -1,4 +1,4 @@
-"""Tests for model_export.build_model_xlsx — the Excel export of a model bundle.
+"""Tests for model_export.build_model_xlsx - the Excel export of a model bundle.
 
 Skips cleanly where openpyxl isn't installed (it is a runtime dep in requirements.txt).
 """

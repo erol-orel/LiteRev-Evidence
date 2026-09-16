@@ -48,7 +48,7 @@ try:
     _USE_TIKTOKEN = True
 except ImportError:
     _USE_TIKTOKEN = False
-    logger.warning("tiktoken non disponible — troncature par caractères (moins précise)")
+    logger.warning("tiktoken non disponible - troncature par caractères (moins précise)")
 
 
 def truncate_text(text_to_embed: str) -> str:
@@ -135,7 +135,7 @@ def main():
         batch = chunks[i : i + batch_size]
         logger.info(
             f"Lot {i // batch_size + 1}/{(len(chunks) + batch_size - 1) // batch_size}"
-            f" — chunks {i}–{i + len(batch) - 1}"
+            f" - chunks {i}–{i + len(batch) - 1}"
         )
 
         updates = []
@@ -157,7 +157,7 @@ def main():
             logger.info(f"  → {len(updates)} embeddings sauvegardés.")
 
     logger.info(
-        f"Terminé — {total_ok} embeddings générés, {total_err} erreurs."
+        f"Terminé - {total_ok} embeddings générés, {total_err} erreurs."
     )
 
 

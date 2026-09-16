@@ -89,7 +89,7 @@ export function LanguageProvider({ children }: { children: React.ReactNode }) {
 /**
  * Standalone translator usable OUTSIDE React (e.g. in lib/api.ts or class
  * components). Reads the persisted language directly from localStorage and
- * falls back to French, then the key itself — mirroring the hook's `t`.
+ * falls back to French, then the key itself - mirroring the hook's `t`.
  */
 export function tStandalone(path: string): string {
   const lang = currentLang();

@@ -22,7 +22,7 @@ from .documents import _embed_chunks_resilient
 # ─────────────────────────────────────────────────────────────────────────────
 # Instructions de DDL de démarrage qui ont ÉCHOUÉ, accumulées au fil des _ensure_*.
 # Le DDL de démarrage échoue OUVERT par conception (un serveur qui refuse de démarrer
-# est pire) — mais jusqu'ici la seule trace était une ligne de log, et /health
+# est pire) - mais jusqu'ici la seule trace était une ligne de log, et /health
 # continuait d'annoncer « ok » sur une base incomplète. Cette liste rend l'état
 # dégradé LISIBLE (cf. /health).
 _SCHEMA_DDL_FAILURES: list[str] = []
@@ -40,14 +40,14 @@ def _exec_ddl_isolated(statements, label: str, record: bool = True) -> list[str]
     Pourquoi : Postgres avorte la transaction ENTIÈRE à la première erreur. Regroupées
     dans un seul `with engine.begin()`, une instruction qui échoue (p. ex. un ALTER sur
     une table absente) annulait les CREATE TABLE réussis qui la précédaient dans le même
-    bloc — la base ressortait SANS les tables que la fonction venait de créer, et le seul
+    bloc - la base ressortait SANS les tables que la fonction venait de créer, et le seul
     indice était un avertissement dans les logs. C'est exactement ce qui rendait toute
     base NEUVE inutilisable (voir tests/test_fresh_db_bootstrap.py).
 
     Renvoie la liste des instructions ayant échoué (vide = tout est passé).
 
     `record=False` : l'échec est journalisé et renvoyé, mais PAS inscrit dans
-    _SCHEMA_DDL_FAILURES — donc sans effet sur `schema.ok`, qui est BLOQUANT au
+    _SCHEMA_DDL_FAILURES - donc sans effet sur `schema.ok`, qui est BLOQUANT au
     déploiement (scripts/check_health.py). À réserver aux objets dont l'absence
     dégrade (recherche plus lente) sans rien casser."""
     failed: list[str] = []
@@ -86,7 +86,7 @@ def _ensure_document_search() -> None:
     remplace les LIKE '%terme%' du match booléen (55 à 240 s par requête en prod).
 
     `record=False` : si ces objets ne peuvent pas être créés (droits sur les tables,
-    par ex.), la recherche booléenne reste sur le chemin LIKE — plus lente, pas
+    par ex.), la recherche booléenne reste sur le chemin LIKE - plus lente, pas
     cassée. Ce n'est donc pas une dégradation du schéma au sens de `schema.ok`
     (bloquant au déploiement) ; l'état est exposé dans /health → lexical_search."""
     _lex.configure(engine)
@@ -122,21 +122,21 @@ def _ensure_performance_indexes() -> None:
         "CREATE INDEX IF NOT EXISTS ix_litdoc_project_context ON literature_document (project_context)",
         "CREATE INDEX IF NOT EXISTS ix_doc_chunk_document ON document_chunk (document_id)",
         "CREATE INDEX IF NOT EXISTS ix_doc_chunk_type ON document_chunk (chunk_type)",
-        # Dédup par titre : backfill title_norm des lignes existantes (idempotent —
+        # Dédup par titre : backfill title_norm des lignes existantes (idempotent -
         # WHERE title_norm IS NULL) puis index. Même normalisation que _normalize_title.
         "UPDATE literature_document SET title_norm = btrim(regexp_replace(lower(title), '[^a-z0-9]+', ' ', 'g')) "
         "WHERE title_norm IS NULL AND title IS NOT NULL",
         "CREATE INDEX IF NOT EXISTS ix_litdoc_title_norm ON literature_document (project_context, title_norm)",
         # Index UNIQUES rendant l'INSERT de _ingest_doc_direct atomique (ON CONFLICT
-        # DO NOTHING) — ferment la course entre fetchers parallèles. best-effort : le
+        # DO NOTHING) - ferment la course entre fetchers parallèles. best-effort : le
         # try/except par instruction ci-dessous journalise un échec sans rien casser.
         #  • DOI : présent en prod via un script ad-hoc mais NON versionné (cf.
-        #    PIPELINE_AUDIT A1) — (re)créé ici pour garantir une cible à ON CONFLICT,
+        #    PIPELINE_AUDIT A1) - (re)créé ici pour garantir une cible à ON CONFLICT,
         #    y compris après une reconstruction depuis les seules migrations.
         "CREATE UNIQUE INDEX IF NOT EXISTS uq_literature_document_doi "
         "ON literature_document (doi) WHERE doi IS NOT NULL",
         #  • Titre normalisé : même règle de dédup que _ingest_doc_direct (len≥20),
-        #    limitée aux lignes CANONIQUES (is_duplicate NULL/FALSE) — ne rejette pas
+        #    limitée aux lignes CANONIQUES (is_duplicate NULL/FALSE) - ne rejette pas
         #    les doublons déjà marqués (en attente de purge). Si des collisions
         #    canoniques subsistent, la création échoue et est journalisée : la course
         #    reste alors ouverte jusqu'à ce que la maintenance nettoie les doublons.
@@ -167,7 +167,7 @@ def _ensure_performance_indexes() -> None:
     # 3) Index GIN TRIGRAMME (pg_trgm) sur titre / résumé / contenu : rendent les
     # `LOWER(COALESCE(x,'')) LIKE '%terme%'` du match booléen index-assistés. Le
     # wildcard EN TÊTE interdit tout index B-tree → sans ceci, chaque terme scanne
-    # séquentiellement 207k docs (× termes × facettes) — cause des recherches à
+    # séquentiellement 207k docs (× termes × facettes) - cause des recherches à
     # plusieurs minutes. CONCURRENTLY + AUTOCOMMIT : build hors transaction, sans
     # bloquer les écritures ; chaque index isolé/tolérant. L'expression indexée est
     # IDENTIQUE à celle de la requête (sinon le planificateur n'utilise pas l'index).
@@ -261,7 +261,7 @@ def startup_event() -> None:
 
     # Scénario de démonstration intégré (dataset RÉEL grippe + modèle entraîné) : rend
     # l'essai « données réelles » visible dans la liste. Idempotent (id stable) et
-    # best-effort — en arrière-plan pour ne jamais retarder/casser le démarrage.
+    # best-effort - en arrière-plan pour ne jamais retarder/casser le démarrage.
     try:
         import threading as _seed_threading
         _seed_threading.Thread(
@@ -290,7 +290,7 @@ def startup_event() -> None:
             """)).mappings().fetchall()
 
         # Recherches orphelines (populate 'running' au moment du redémarrage) : RELANCÉES,
-        # même requête et même langue, plutôt que passées à 'error' — la page de recherche
+        # même requête et même langue, plutôt que passées à 'error' - la page de recherche
         # qui les attendait retrouve un job en cours, et le pipeline complet enchaîne
         # ensuite comme après toute recherche. RESUME_ON_STARTUP=0 : marquées 'error'.
         _relaunched_pop: set[str] = set()
@@ -323,7 +323,7 @@ def startup_event() -> None:
         if _orphan_rows:
             import threading as _startup_threading
             logger.warning(
-                f"Startup: {len(_orphan_rows)} pipeline(s) interrompu(s) détecté(s) — "
+                f"Startup: {len(_orphan_rows)} pipeline(s) interrompu(s) détecté(s) - "
                 f"relance automatique en arrière-plan."
             )
             for _orphan in _orphan_rows:
@@ -449,7 +449,7 @@ def startup_event() -> None:
                     if isinstance(_pico, dict):
                         # TOLÉRANT : on complète les clés manquantes plutôt que de
                         # rejeter (et ré-essayer en boucle). Une extraction partielle
-                        # à faible confiance vaut mieux qu'un article jamais traité —
+                        # à faible confiance vaut mieux qu'un article jamais traité -
                         # l'aval filtre déjà sur pico_confidence. Seul un JSON INVALIDE
                         # (rare avec response_format json_object + max_tokens relevé)
                         # est compté comme échec à borner.
@@ -607,7 +607,7 @@ def startup_event() -> None:
                     logger.warning(f"BG abstract backfill error: {_abe}")
 
                 # ── 1. EMBEDDING ──────────────────────────────────────────────
-                # On embède TOUS les chunks standard sans embedding — y compris le
+                # On embède TOUS les chunks standard sans embedding - y compris le
                 # title_abstract des docs à texte intégral : le résumé sert de vecteur
                 # représentatif CONSTANT au clustering (même base pour chaque document)
                 # pour un coût négligeable. (Avant, on le sautait pour les docs full-text
@@ -680,7 +680,7 @@ def startup_event() -> None:
 
                 # Coupe-circuit : PICO_AUTOEXTRACT_ENABLED=0 dans /etc/literev-api.env
                 # (puis restart) met en pause l'extraction PICO automatique sans
-                # toucher au code — utile pour stopper net la dépense OpenAI.
+                # toucher au code - utile pour stopper net la dépense OpenAI.
                 _pico_enabled = os.getenv("PICO_AUTOEXTRACT_ENABLED", "1").strip().lower() not in ("0", "false", "no", "off")
                 if _pico_rows and _pico_enabled and not _openai_in_cooldown():
                     _pico_done = 0
@@ -740,7 +740,7 @@ except Exception as _e:
 
 def _ensure_dedup_columns():
     """Colonne title_norm (titre normalisé) pour la déduplication inter-sources par
-    TITRE — en complément du DOI, afin de capter les doublons SANS DOI (préprints,
+    TITRE - en complément du DOI, afin de capter les doublons SANS DOI (préprints,
     essais) ou dont le DOI diffère d'une source à l'autre. L'ALTER est instantané ; le
     backfill des lignes existantes + l'index se font en arrière-plan
     (_ensure_performance_indexes)."""
@@ -748,7 +748,7 @@ def _ensure_dedup_columns():
         conn.execute(text(
             "ALTER TABLE literature_document ADD COLUMN IF NOT EXISTS title_norm TEXT"))
         # Colonnes de déduplication historiquement posées par des scripts ad-hoc
-        # (scripts/archive/*.sql) — garanties ici pour que TOUTE base (prod comme base
+        # (scripts/archive/*.sql) - garanties ici pour que TOUTE base (prod comme base
         # reconstruite/CI) porte : `pmid` (renseignée à l'ingest → dédup PMID), et
         # `is_duplicate`/`canonical_id` (marquage + statut de dédup, filtrés par ~20
         # requêtes existantes). ADD COLUMN IF NOT EXISTS : no-op si déjà présentes.
@@ -769,7 +769,7 @@ except Exception as _e:
 
 def _ensure_bibliographic_columns():
     """Colonnes bibliographiques / d'affichage historiquement posées par un script ad-hoc
-    (scripts/archive/migrate_add_bibliographic_columns.sql) — donc ABSENTES d'une base
+    (scripts/archive/migrate_add_bibliographic_columns.sql) - donc ABSENTES d'une base
     reconstruite depuis schema.sql seul (CI incluse). On les garantit ici pour que le
     détail document enrichi (auteurs / revue / DOI / pays / devis / type d'article) ET les
     requêtes corpus existantes qui les lisent fonctionnent partout. ADD COLUMN IF NOT
@@ -792,7 +792,7 @@ def _ensure_bibliographic_columns():
         "ALTER TABLE literature_document ADD COLUMN IF NOT EXISTS screened_at TIMESTAMP",
         "ALTER TABLE literature_document ADD COLUMN IF NOT EXISTS pico_json JSONB",
         "ALTER TABLE literature_document ADD COLUMN IF NOT EXISTS metadata_json JSONB",
-        # Concepts typés normalisés par le LLM (carte des concepts) — une fois par article.
+        # Concepts typés normalisés par le LLM (carte des concepts) - une fois par article.
         "ALTER TABLE literature_document ADD COLUMN IF NOT EXISTS concepts_json JSONB",
         "ALTER TABLE literature_document ADD COLUMN IF NOT EXISTS citation_count INTEGER",
         "ALTER TABLE literature_document ADD COLUMN IF NOT EXISTS quality_score DOUBLE PRECISION",

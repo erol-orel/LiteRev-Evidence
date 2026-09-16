@@ -1,4 +1,4 @@
-"""Tests for the GESICA outcome-template catalogue (pure — no DB/FastAPI)."""
+"""Tests for the GESICA outcome-template catalogue (pure - no DB/FastAPI)."""
 import json
 
 import outcome_templates as ot

@@ -1,6 +1,6 @@
-# GESICA — Base Scientifique Complète par Scénario
+# GESICA - Base Scientifique Complète par Scénario
 
-**Version :** 1.0 — 31 mai 2026  
+**Version :** 1.0 - 31 mai 2026
 **Auteur :** LiteRev-Evidence (génération automatique)  
 **Objectif :** Pour chaque scénario GESICA, définir les queries d'exhaustivité, les données disponibles, les algorithmes optimaux, les outcomes clés et la feuille de route d'implémentation.
 
@@ -23,7 +23,7 @@
 
 ---
 
-## Scénario 1 — Epidemic Early Warning (Alerte Précoce Épidémique)
+## Scénario 1 - Epidemic Early Warning (Alerte Précoce Épidémique)
 
 ### Contexte clinique
 
@@ -66,7 +66,7 @@ AND ("2018"[pdat]:"2026"[pdat])
 | **Google Trends** | Tendances de recherche "grippe", "fièvre" | Quotidien | pytrends (Python) |
 | **Copernicus ERA5** | Température, humidité relative, vent | Horaire (réanalyse) | CDS API (gratuit) |
 
-### Algorithmes — État de l'art 2024–2026
+### Algorithmes - État de l'art 2024–2026
 
 | Algorithme | Performance | Horizon | Avantages | Limites |
 |---|---|---|---|---|
@@ -108,7 +108,7 @@ AND ("2018"[pdat]:"2026"[pdat])
 
 ---
 
-## Scénario 2 — Cardiac Arrest Prediction (OHCA)
+## Scénario 2 - Cardiac Arrest Prediction (OHCA)
 
 ### Contexte clinique
 
@@ -144,7 +144,7 @@ AND ("2015"[pdat]:"2026"[pdat])
 | **Google Maps / OSRM** | Temps de trajet EMS | Temps réel | API gratuite |
 | **Données HUG/CHUV** | OHCA Genève (accès à négocier) | Quotidien | Convention de recherche |
 
-### Algorithmes — État de l'art
+### Algorithmes - État de l'art
 
 | Algorithme | AUC / Performance | Horizon | Référence |
 |---|---|---|---|
@@ -174,7 +174,7 @@ AND ("2015"[pdat]:"2026"[pdat])
 
 ---
 
-## Scénario 3 — Demand Forecasting EMS
+## Scénario 3 - Demand Forecasting EMS
 
 ### Contexte clinique
 
@@ -221,7 +221,7 @@ AND ("weather"[tiab] OR "season"[tiab] OR "influenza"[tiab] OR "holiday"[tiab])
 
 ---
 
-## Scénario 4 — Heatwave EMS Impact
+## Scénario 4 - Heatwave EMS Impact
 
 ### Contexte clinique
 
@@ -270,7 +270,7 @@ AND ("health"[tiab] OR "mortality"[tiab] OR "morbidity"[tiab] OR "emergency"[tia
 
 ---
 
-## Scénario 5 — Response Time Optimization
+## Scénario 5 - Response Time Optimization
 
 ### Contexte clinique
 
@@ -305,7 +305,7 @@ AND ("2015"[pdat]:"2026"[pdat])
 
 ---
 
-## Scénario 6 — Triage Support (Support au Tri Clinique)
+## Scénario 6 - Triage Support (Support au Tri Clinique)
 
 ### Contexte clinique
 
@@ -340,7 +340,7 @@ AND ("2018"[pdat]:"2026"[pdat])
 
 ---
 
-## Scénario 7 — Mass Casualty Triage
+## Scénario 7 - Mass Casualty Triage
 
 ### Contexte clinique
 
@@ -365,7 +365,7 @@ AND ("2015"[pdat]:"2026"[pdat])
 
 ---
 
-## Scénario 8 — Surge Management
+## Scénario 8 - Surge Management
 
 ### Contexte clinique
 
@@ -390,7 +390,7 @@ AND ("2018"[pdat]:"2026"[pdat])
 
 ---
 
-## Scénario 9 — Pandemic Preparedness
+## Scénario 9 - Pandemic Preparedness
 
 ### Contexte clinique
 
@@ -415,7 +415,7 @@ AND ("2020"[pdat]:"2026"[pdat])
 
 ---
 
-## Scénario 10 — Cross-border Coordination
+## Scénario 10 - Cross-border Coordination
 
 ### Contexte clinique
 
@@ -442,7 +442,7 @@ AND ("Switzerland"[tiab] OR "France"[tiab] OR "border"[tiab])
 
 ---
 
-## Synthèse — Plan d'implémentation par priorité
+## Synthèse - Plan d'implémentation par priorité
 
 | Priorité | Scénario | Données requises | Algorithme | Statut |
 |---|---|---|---|---|

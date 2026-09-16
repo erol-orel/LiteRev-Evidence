@@ -31,7 +31,7 @@ def get_scenario_model_spec(scenario_id: str, lang: str | None = Query(None)) ->
     """
     Vue 'machine' du modèle dérivée de variables_json.model_spec : outcome
     (task_type), features (machine_name/dtype/source), algorithme (famille, CV,
-    métrique) et data_template — les noms de colonnes EXACTS à fournir pour
+    métrique) et data_template - les noms de colonnes EXACTS à fournir pour
     l'upload de données. Chaque élément porte sa provenance (ids d'articles).
     Les libellés d'affichage (noms, justifications, seuils) suivent la langue de l'UI ;
     les identifiants machine et le data_template restent invariants.

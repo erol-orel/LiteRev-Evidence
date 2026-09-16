@@ -1,15 +1,15 @@
-"""A brand-new database must yield a WORKING app — not just a booting one.
+"""A brand-new database must yield a WORKING app - not just a booting one.
 
 This is the regression guard for a failure that reached production unnoticed: on a
 genuinely fresh database, `_ensure_user_scenarios_table` ran every statement inside ONE
 transaction, and its `ALTER TABLE article_scenarios ...` raised because NO file in the
-repository ever created `article_scenarios` (not schema.sql, not the Alembic migrations —
-which only ADD columns and skip themselves when the table is missing — and not the boot
+repository ever created `article_scenarios` (not schema.sql, not the Alembic migrations -
+which only ADD columns and skip themselves when the table is missing - and not the boot
 DDL, which altered it directly). Postgres then aborted the whole transaction and rolled
 back the `user_scenarios` tables created moments earlier in the same block.
 
 The result was an app that answered `/health` with 200 while `/user-scenarios`,
-`/gesica/scenarios` and `/corpus/fulltext-stats` all returned 500 — and the last of those
+`/gesica/scenarios` and `/corpus/fulltext-stats` all returned 500 - and the last of those
 is the endpoint the production deploy smoke-tests, so a deploy onto a fresh database would
 have failed its own smoke test while `/health` looked fine.
 
@@ -45,7 +45,7 @@ REQUIRED_TABLES = {
 
 # Tables the app serves fine WITHOUT, but whose absence costs something that is hard to
 # notice. llm_usage is the token accounting: if its boot DDL silently fails, every OpenAI
-# call still works and simply goes unrecorded — the app looks healthy while the one thing
+# call still works and simply goes unrecorded - the app looks healthy while the one thing
 # that can attribute a bill produces an empty table. document_search is the full-text
 # table: without it every boolean search silently takes the LIKE path (minutes per
 # query on the production corpus) and /health merely reports engine="like".
@@ -72,7 +72,7 @@ def fresh_db():
 
     u = _admin_url()
     if u is None:
-        pytest.skip("DB_URL not set — fresh-database bootstrap test needs Postgres")
+        pytest.skip("DB_URL not set - fresh-database bootstrap test needs Postgres")
     name = f"freshboot_{uuid.uuid4().hex[:10]}"
     admin = u.set(database="postgres")
     try:
@@ -109,7 +109,7 @@ _split_statements = _db_bootstrap.split_statements
 def test_every_schema_statement_starts_with_sql():
     """A semicolon inside a `--` comment splits the statement that follows it: the
     fragment begins with the tail of the comment, fails to parse, and `_apply_schema`
-    swallows the error — so schema.sql silently stops creating that object and only
+    swallows the error - so schema.sql silently stops creating that object and only
     the app's boot DDL papers over it. That is exactly what happened to `llm_usage`
     (comment "migration a7c2e9b5d413 ; cf. llm_usage.py") and would have happened to
     `document_search`. Pure: no database needed."""
@@ -134,7 +134,7 @@ def test_fresh_database_serves_every_required_endpoint(fresh_db):
 
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     # main.py runs its startup DDL at IMPORT time, so it must be imported in a
-    # subprocess bound to the fresh database — importing it here would bind to the
+    # subprocess bound to the fresh database - importing it here would bind to the
     # session's own DB_URL and prove nothing.
     script = r"""
 import json, os, sys
@@ -180,13 +180,13 @@ print("RESULT " + json.dumps(out))
     unrecorded = EXPECTED_TABLES - tables
     assert not unrecorded, (
         f"a fresh database is missing {sorted(unrecorded)}. The app will run and spend "
-        "against the OpenAI API exactly as before, recording nothing — which is the state "
+        "against the OpenAI API exactly as before, recording nothing - which is the state "
         "this table was added to end.")
 
     bad = {p: c for p, c in got.items() if c != 200}
     assert not bad, (
         f"a fresh database does not serve these endpoints: {bad}. "
-        "This is the failure mode where /health returns 200 while the app is unusable — "
+        "This is the failure mode where /health returns 200 while the app is unusable - "
         "and /corpus/fulltext-stats is what the production deploy smoke-tests.")
 
 

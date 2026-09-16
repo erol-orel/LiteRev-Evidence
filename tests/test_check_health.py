@@ -1,4 +1,4 @@
-"""The deploy smoke test's health assertion — the check that has to FAIL correctly.
+"""The deploy smoke test's health assertion - the check that has to FAIL correctly.
 
 A smoke test that cannot fail is decoration. The property worth proving is not that a
 healthy response passes; it is that each broken one is REJECTED, and rejected with a

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-living_review_scheduler.py — Scheduler de Living Review automatique par scénario GESICA
+living_review_scheduler.py - Scheduler de Living Review automatique par scénario GESICA
 
 Fonctionnement :
   - Tourne en boucle (daemon) ou en mode one-shot
@@ -56,8 +56,8 @@ if not DB_URL:
     raise RuntimeError("DATABASE_URL (or DB_URL) environment variable is required")
 
 # Plafond d'articles rapportés PAR REQUÊTE PubMed. Les scénarios préréglés demandaient
-# 1000 — 20x le défaut de fetch_pubmed_new et 5x ce que demandent les scénarios
-# utilisateur — soit, avec 10 scénarios x 3 requêtes, jusqu'à 30 000 documents par cycle
+# 1000 - 20x le défaut de fetch_pubmed_new et 5x ce que demandent les scénarios
+# utilisateur - soit, avec 10 scénarios x 3 requêtes, jusqu'à 30 000 documents par cycle
 # quotidien. Chaque document nouveau devient un chunk à VECTORISER par le worker
 # d'arrière-plan de main.py (dont la file d'embedding n'est pas filtrée par projet,
 # à dessein : la recherche sémantique et l'assistant balaient tout le corpus). Le
@@ -390,7 +390,7 @@ def run_living_review_for_scenario(
     # Auparavant ce champ était ignoré → les articles de 31–60 j n'étaient jamais
     # ingérés pour ces scénarios.
     days = config.get("days_lookback", days)
-    logger.info(f"[{scenario_id}] Living review — {label} (fenêtre {days} j)")
+    logger.info(f"[{scenario_id}] Living review - {label} (fenêtre {days} j)")
 
     new_docs = []
     skipped = 0
@@ -454,7 +454,7 @@ def run_living_review_for_scenario(
         "new_titles": [d["title"][:80] for d in new_docs[:5]],
     }
     logger.info(
-        f"[{scenario_id}] Terminé — {len(new_docs)} nouveaux, {skipped} déjà en base, {errors} erreurs"
+        f"[{scenario_id}] Terminé - {len(new_docs)} nouveaux, {skipped} déjà en base, {errors} erreurs"
     )
     return result
 
@@ -476,7 +476,7 @@ def run_user_scenarios(conn, dry_run: bool = False, days: int = 30,
     project_context='user'), de la même façon que les scénarios préréglés.
 
     NOTE : l'intégration au corpus SÉMANTIQUE (liens article_scenarios + embeddings)
-    est faite par le pipeline de populate, pas ici — ce passage alimente le corpus
+    est faite par le pipeline de populate, pas ici - ce passage alimente le corpus
     global + la détection d'alerte par scenario_type. Un re-populate rattache ensuite
     les nouveautés au corpus sémantique du scénario."""
     results: list[dict] = []
@@ -518,7 +518,7 @@ def run_user_scenarios(conn, dry_run: bool = False, days: int = 30,
             "new_documents": len(new_docs), "skipped_existing": skipped, "errors": errors,
             "dry_run": dry_run, "new_titles": [d["title"][:80] for d in new_docs[:5]],
         })
-        logger.info(f"[{sid}] (user) terminé — {len(new_docs)} nouveaux, {skipped} déjà en base, {errors} erreurs")
+        logger.info(f"[{sid}] (user) terminé - {len(new_docs)} nouveaux, {skipped} déjà en base, {errors} erreurs")
         time.sleep(1)
     return results
 
@@ -543,7 +543,7 @@ def save_run_report(results: list[dict], output_dir: str = "/opt/literev-api"):
 
 def run_daemon(interval_hours: int = 24, days: int = 7):
     """Tourne en boucle, exécute la living review toutes les N heures."""
-    logger.info(f"Démarrage du daemon living review — intervalle {interval_hours}h")
+    logger.info(f"Démarrage du daemon living review - intervalle {interval_hours}h")
     while True:
         conn = _get_db_conn()
         if conn:
@@ -551,7 +551,7 @@ def run_daemon(interval_hours: int = 24, days: int = 7):
                 results = run_all_scenarios(conn, days=days)
                 report = save_run_report(results)
                 total = report["total_new_documents"]
-                logger.info(f"Cycle terminé — {total} nouveaux documents au total")
+                logger.info(f"Cycle terminé - {total} nouveaux documents au total")
             finally:
                 conn.close()
         else:
@@ -585,7 +585,7 @@ def main():
     if args.list_scenarios:
         print("\nScénarios disponibles :")
         for sid, cfg in SCENARIO_QUERIES.items():
-            print(f"  {sid:35s} — {cfg['label']}")
+            print(f"  {sid:35s} - {cfg['label']}")
         return
 
     if args.mode == "daemon":
@@ -613,7 +613,7 @@ def main():
                 results += run_user_scenarios(conn, dry_run=args.dry_run, days=args.days)
             report = save_run_report(results)
             total = report["total_new_documents"]
-            print(f"\n✅ Living review terminée — {total} nouveaux documents")
+            print(f"\n✅ Living review terminée - {total} nouveaux documents")
             for r in results:
                 status = "DRY-RUN" if args.dry_run else "OK"
                 tag = "user" if r.get("user_scenario") else "preset"

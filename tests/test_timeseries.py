@@ -1,6 +1,6 @@
 """Correctness tests for the time-series forecasting path (model_trainer).
 
-Prophet/SARIMAX are NOT sklearn estimators — train_model routes families
+Prophet/SARIMAX are NOT sklearn estimators - train_model routes families
 `prophet`/`sarimax` to train_timeseries_model, which holds out the last H points,
 scores rmse/mae/mape on that holdout, then refits on the full series to forecast
 forward. These lock in: the reported holdout RMSE matches an INDEPENDENT
@@ -91,7 +91,7 @@ def test_sarimax_window_and_forecast_shapes():
 
 def test_sarimax_seasonal_term_selected_and_beats_amplitude():
     # On a strongly weekly-seasonal series the grid must pick a seasonal order and
-    # drive RMSE below the seasonal amplitude (5) — i.e. it actually models the cycle.
+    # drive RMSE below the seasonal amplitude (5) - i.e. it actually models the cycle.
     res = mt.train_model(_seasonal_df(sigma=1.0), _spec("sarimax"))
     assert res["best_params"]["seasonal_order"][3] == 7      # weekly period captured
     assert res["metrics"]["rmse"] < 3.0

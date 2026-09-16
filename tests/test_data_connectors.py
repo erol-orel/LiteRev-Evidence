@@ -1,4 +1,4 @@
-"""Pure-logic tests for data_connectors.py — no network.
+"""Pure-logic tests for data_connectors.py - no network.
 
 The only side effect in the module is `_http_get_json`; every test monkeypatches it
 with a canned Open-Meteo response and asserts the tidy-row assembly + aggregation.
@@ -240,7 +240,7 @@ def test_sentinella_connector_registered_and_metadata():
     json.dumps(md)                                                     # metadata JSON-safe, hides callable
 
 
-# ── SEIR projection connector (no network — integrates the model locally) ─────
+# ── SEIR projection connector (no network - integrates the model locally) ─────
 _SEIR_EPI = {
     "applicable": True, "disease": "Influenza",
     "params": {

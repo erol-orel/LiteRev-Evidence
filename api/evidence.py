@@ -399,7 +399,7 @@ def _generate_evidence_brief_llm(scenario_id: str, force: bool = False, lang: st
 
     # Cache par EMPREINTE DU CORPUS (+ seuil + langue), et non plus par âge (< 24h).
     # On ne régénère que si le sous-ensemble pertinent, le seuil ou la langue ont
-    # changé — l'ancien cache « 24h » régénérait un corpus inchangé ET servait un
+    # changé - l'ancien cache « 24h » régénérait un corpus inchangé ET servait un
     # brief périmé (mauvaise langue / corpus modifié) tant qu'il avait moins de 24h.
     _brief_fp = _evidence_fingerprint([a["id"] for a in articles], threshold, lang, "brief-v3-relevant-fulltext")
     if not force:
@@ -479,7 +479,7 @@ def _generate_evidence_brief_llm(scenario_id: str, force: bool = False, lang: st
 Tu génères des Evidence Briefs complets, rigoureux et structurés.
 Tu dois produire un JSON structuré avec tous les champs demandés.
 Sois précis, factuel, et base-toi exclusivement sur les articles fournis.
-Ne pas utiliser de tiret em (—). Utiliser des tirets simples (-) si nécessaire.""" + _llm_lang_directive(lang)
+Ne pas utiliser de tiret cadratin (em dash). Utiliser des tirets simples (-) si nécessaire.""" + _llm_lang_directive(lang)
 
     user_prompt = f"""Génère un Evidence Brief complet pour le scénario de recherche : "{scenario_name}"
 

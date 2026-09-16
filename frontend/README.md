@@ -23,7 +23,7 @@ browser's storage.
 ```bash
 npm test             # unit tests (vitest + Testing Library, jsdom): src/**/*.test.ts(x)
 npm run test:watch
-npm run e2e          # browser smoke test (Playwright) — needs a running API and a
+npm run e2e          # browser smoke test (Playwright) - needs a running API and a
                      # seeded scenario: use `python3 scripts/smoke_e2e.py` from the
                      # repository root, which sets everything up (see docs/ops-runbook.md §8)
 ```
@@ -34,8 +34,8 @@ Playwright by hand.
 
 ## Layout
 
-- `src/App.tsx` — shell, navigation, search page, scenario list
-- `src/components/ScenarioDetailPage.tsx` — the scenario page and its sections
-- `src/lib/api.ts` — typed API client (retries, error messages, admin key)
-- `src/lib/searchText.ts` — pure search helpers (combined query text, facet kinds)
-- `src/i18n/` — language provider and the French/English locale files
+- `src/App.tsx` - shell, navigation, search page, scenario list
+- `src/components/ScenarioDetailPage.tsx` - the scenario page and its sections
+- `src/lib/api.ts` - typed API client (retries, error messages, admin key)
+- `src/lib/searchText.ts` - pure search helpers (combined query text, facet kinds)
+- `src/i18n/` - language provider and the French/English locale files

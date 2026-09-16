@@ -1,25 +1,25 @@
-# LiteRev-Evidence — Architecture
+# LiteRev-Evidence - Architecture
 
 A step-by-step, plain-language tour of the whole system: what it does, how the
 pieces fit together, how data flows, and how it ships. Written for the project
-owner. Diagrams are [Mermaid](https://mermaid.js.org/) — GitHub and most editors
+owner. Diagrams are [Mermaid](https://mermaid.js.org/) - GitHub and most editors
 render them inline.
 
 > **Jargon, up front (each is re-explained in context):**
-> - **Embedding** — a list of 1536 numbers that captures the *meaning* of a piece
+> - **Embedding** - a list of 1536 numbers that captures the *meaning* of a piece
 >   of text, so two texts about the same thing land near each other.
-> - **Chunk** — a document split into searchable pieces (here: its
+> - **Chunk** - a document split into searchable pieces (here: its
 >   title+abstract, plus each full-text section).
-> - **pgvector** — a Postgres extension that stores embeddings and finds the
+> - **pgvector** - a Postgres extension that stores embeddings and finds the
 >   nearest ones fast.
-> - **RAG** (Retrieval-Augmented Generation) — answer a question by first
+> - **RAG** (Retrieval-Augmented Generation) - answer a question by first
 >   *retrieving* the most relevant chunks, then asking an LLM to answer *using
 >   only those chunks*.
-> - **Rerank** — a second, more precise model that re-orders an already-shortlisted
+> - **Rerank** - a second, more precise model that re-orders an already-shortlisted
 >   set of results (here: Cohere).
-> - **PRISMA** — the standard reporting flow for a systematic literature review
+> - **PRISMA** - the standard reporting flow for a systematic literature review
 >   (how many papers were found → screened → included).
-> - **PICO** — a way to summarize a clinical study: Population, Intervention,
+> - **PICO** - a way to summarize a clinical study: Population, Intervention,
 >   Comparison, Outcome.
 
 ---
@@ -34,7 +34,7 @@ run a full systematic-review workflow on top of that corpus: screen papers in/ou
 (PRISMA), extract PICO summaries, ask an AI assistant grounded in the corpus
 (RAG), generate an evidence brief, cluster the literature, build a knowledge
 graph, and even derive candidate variables for a predictive model. GESICA (an
-emergency-medical-services use case) rides on the exact same engine — its
+emergency-medical-services use case) rides on the exact same engine - its
 `/gesica/*` endpoints just forward to the generic scenario code.
 
 ---
@@ -56,26 +56,26 @@ graph TD
     A -->|live context| TER[Terrain feeds: Open-Meteo, geo, epidemic, ...]
 ```
 
-- **Browser** — a single-page React app (Vite build) served as static files. It
+- **Browser** - a single-page React app (Vite build) served as static files. It
   talks only to `/api` (relative), so it works on any host/TLS setup.
-- **nginx** — terminates HTTPS for `literev-scenario.com`, serves the static
+- **nginx** - terminates HTTPS for `literev-scenario.com`, serves the static
   frontend, and reverse-proxies `/api/*` to the backend, removing the `/api`
-  prefix. (So `localhost:8000` has **no** `/api` — that prefix is nginx-only.
+  prefix. (So `localhost:8000` has **no** `/api` - that prefix is nginx-only.
   This matters when you `curl` the backend directly on the server.)
-- **FastAPI (`api/` package, `main.py` entry point)** — the entire backend: ~18k
+- **FastAPI (`api/` package, `main.py` entry point)** - the entire backend: ~18k
   lines in 30 domain modules (§5), 155 routes, no ORM, no task queue. Runs under uvicorn as the `literev-api` systemd service on
   `localhost:8000`.
-- **PostgreSQL + pgvector** — the single source of truth (papers, chunks,
+- **PostgreSQL + pgvector** - the single source of truth (papers, chunks,
   embeddings, scenarios, screening, settings). Lives on a *separate* host.
   Lexical corpus membership (which papers a boolean query matches) runs on
   PostgreSQL full-text search: one tsvector per document in `document_search`,
   kept current by triggers and a background worker (`lexical_search.py`);
   `/health → lexical_search` says which engine a search uses right now.
-- **OpenAI** — embeddings (`text-embedding-3-small`) and chat (`gpt-4.1` /
+- **OpenAI** - embeddings (`text-embedding-3-small`) and chat (`gpt-4.1` /
   `gpt-4.1-mini` / `gpt-4o-mini`).
-- **Cohere** — reranking (`rerank-v3.5`), optional (no-op without the key).
-- **Literature sources** — public APIs queried live when building a corpus.
-- **Terrain feeds** — live situational data (weather, geo, epidemic signals…)
+- **Cohere** - reranking (`rerank-v3.5`), optional (no-op without the key).
+- **Literature sources** - public APIs queried live when building a corpus.
+- **Terrain feeds** - live situational data (weather, geo, epidemic signals…)
   for the "Terrain" dashboard.
 
 ---
@@ -136,18 +136,18 @@ erDiagram
     }
 ```
 
-- **`literature_document`** — one row per paper (title, abstract, year, source,
+- **`literature_document`** - one row per paper (title, abstract, year, source,
   DOI, quality score, dedup fields). `scenario_type` is a *legacy* single-scenario
   tag stamped at ingestion (see §8). `screening_status` here is the *global*
   include/exclude decision, currently being migrated to per-scenario.
-- **`document_chunk`** — the searchable pieces of each paper. **Chunk model:**
+- **`document_chunk`** - the searchable pieces of each paper. **Chunk model:**
   exactly **one `title_abstract` chunk per document** (chunk_index 0, inserted
   idempotently) plus **N `fulltext_section` chunks** (one per section, re-created
   on each full-text fetch). Each chunk carries an `embedding` (`vector(1536)`, the
-  pgvector column — 1536 is the dimension of OpenAI's `text-embedding-3-small`)
+  pgvector column - 1536 is the dimension of OpenAI's `text-embedding-3-small`)
   and a `search_vector` (Postgres full-text index, auto-maintained by a trigger).
   This dual storage is what powers **hybrid search** (keyword + semantic).
-- **`article_scenarios`** — the heart of the model: the **many-to-many** join that
+- **`article_scenarios`** - the heart of the model: the **many-to-many** join that
   says "this document belongs to this scenario, with this relevance score." One
   document can be scored into many scenarios. Composite primary key
   `(document_id, scenario_id)`. It carries the *scored membership*
@@ -155,18 +155,18 @@ erDiagram
   (`screening_status`/`reason`/`notes`/`screened_at`), and clustering
   (`cluster_id`, `cluster_label`). The link to `user_scenarios` is by convention
   (`scenario_id = user_scenarios.id`), not a hard DB foreign key.
-- **`user_scenarios`** — one row per scenario: its `query`, search `mode`,
+- **`user_scenarios`** - one row per scenario: its `query`, search `mode`,
   `filters` (JSONB), and pipeline bookkeeping (`populate_status`,
   `pipeline_status`, `article_count`…). GESICA's built-in scenarios live here too
   (`is_system = TRUE`), which is why the GESICA and user paths can share one
   implementation.
-- **`user_scenario_folders`** — optional folders to group scenarios (1:N).
-- **`scenario_settings`** — per-scenario config and cached artifacts: the
+- **`user_scenario_folders`** - optional folders to group scenarios (1:N).
+- **`scenario_settings`** - per-scenario config and cached artifacts: the
   `similarity_threshold` (default **0.45**) and cached JSON for the evidence
   brief, variables, clustering, knowledge graph, and recommended actions.
   LLM text is cached **per language**: the evidence brief and variables key
   their cache on the requested `lang`, and the clustering payload stores each
-  cluster's summary under `clusters[].summaries[lang]` — a request in the other
+  cluster's summary under `clusters[].summaries[lang]` - a request in the other
   language keeps the UMAP/HDBSCAN structure and regenerates only the summaries.
   The **language of the interface that starts the work is forwarded** (`?lang=`)
   by the search (`/populate`), the pin (`PATCH pinned`, `POST /user-scenarios`)
@@ -177,6 +177,13 @@ erDiagram
   knowledge-graph caches are rebuilt at each corpus build and otherwise kept for
   30 days (`VIZ_CACHE_TTL_S`), not 24 h: an expiry only re-ran a 40 s computation
   in front of the user the day after the build.
+- **A re-run does not ask the sources again.** Each fetcher's answer to a query
+  (the documents it linked, with their source and Boolean-native flag) is kept in
+  `source_query_cache` when its paging went to the end without error, keyed by
+  query, filters and cap, for `SOURCE_CACHE_TTL_S` (12 h by default). A re-run
+  within that time replays the links with the same PRISMA counters and no network
+  call; `force_live=true` on `/populate` bypasses it. PubMed also asks for the
+  identifier list first and downloads only the records not yet in the database.
 - **Nothing waits for a click.** A search whose corpus is built and scored
   launches the full pipeline by itself (`AUTO_PIPELINE_AFTER_SEARCH`, on by
   default), so an unpinned scenario is enriched like a pinned one. The pipeline
@@ -187,8 +194,8 @@ erDiagram
   interrupted, in the language they were started in (`pipeline_lang`,
   `RESUME_ON_STARTUP`), instead of marking them failed.
 - **Concept map** (`knowledge_graph.py`): each relevant article gets typed
-  concepts — pathogen, vector, host, population, exposure, intervention, outcome,
-  method, place — normalised once by the LLM from its PICO (English and French
+  concepts - pathogen, vector, host, population, exposure, intervention, outcome,
+  method, place - normalised once by the LLM from its PICO (English and French
   labels, `literature_document.concepts_json`), plus the structured fields
   (country ISO2, study design, setting, keywords). Nodes are concepts sized by
   article count, links are co-occurrences in the same article; the payload also
@@ -208,7 +215,7 @@ erDiagram
 > (only `literature_document`, `document_chunk`, `alembic_version`), the
 > `_ensure_*()` boot functions in the `api` modules (which create `user_scenarios`,
 > `user_scenario_folders`, `scenario_settings` and add columns), and Alembic. The
-> **`article_scenarios` table has no `CREATE TABLE` anywhere in the repo** — it
+> **`article_scenarios` table has no `CREATE TABLE` anywhere in the repo** - it
 > was hand-applied on the production DB and is only ever `ALTER`ed/queried in code
 > (documented in `AUDIT_REPORT.md`). So a fresh DB built purely from the repo
 > would be missing it. Treat the *live* DB as the source of truth.
@@ -223,9 +230,9 @@ Three concrete journeys.
 
 Counter-intuitively, the "Search" tab does **not** call a one-shot `/search`
 endpoint. In the UI, running a search **creates a scenario and populates its
-corpus** — so every search becomes a reusable, screenable corpus. (The raw
-`POST /search` endpoint still exists — hybrid keyword+vector over the whole
-corpus — and is used internally / by the deploy smoke test.)
+corpus** - so every search becomes a reusable, screenable corpus. (The raw
+`POST /search` endpoint still exists - hybrid keyword+vector over the whole
+corpus - and is used internally / by the deploy smoke test.)
 
 ```mermaid
 sequenceDiagram
@@ -361,7 +368,7 @@ before it** at module level, and a reference to a later module is a lazy
 the comment says which). The startup DDL of each module runs when it is imported,
 so the order of `api.MODULES` is also the DDL order, unchanged from the single
 file. Tests patch a helper with `patch_app(monkeypatch, name, value)`
-(tests/conftest.py), which sets it on every module that binds the name — patching
+(tests/conftest.py), which sets it on every module that binds the name - patching
 `main.X` alone no longer reaches the callers.
 
 Think of the routes as functional modules:
@@ -398,7 +405,7 @@ graph LR
 ```
 
 **Startup (`api.schema_boot.startup_event`).** Runs `SELECT 1`, then in a
-background thread builds performance indexes — including the pgvector **HNSW**
+background thread builds performance indexes - including the pgvector **HNSW**
 approximate-nearest-neighbor index on `document_chunk.embedding` (so semantic
 search stays fast). It also **recovers orphaned jobs**: any scenario left
 `running`/`starting` from a previous process (threads die on restart) is reset or
@@ -412,8 +419,8 @@ delegator: e.g. `POST /gesica/.../rag` is literally
 `return user_scenario_rag_assistant(...)`, and `/gesica/.../prisma` →
 `get_user_scenario_prisma(...)`. GESICA scenarios are just `user_scenarios` rows
 with `is_system = TRUE`, so there is **one** pipeline behind both URL families.
-(A few `/gesica/*` routes with genuinely GESICA-specific logic — dedup status,
-dataset upload — are not forwarders.)
+(A few `/gesica/*` routes with genuinely GESICA-specific logic - dedup status,
+dataset upload - are not forwarders.)
 
 **The background-job pattern.** Expensive work runs in daemon threads tracked by
 in-memory dicts keyed by `scenario_id`: `_RERANK_JOBS`, `_BRIEF_GENERATION_JOBS`,
@@ -422,29 +429,29 @@ in-memory dicts keyed by `scenario_id`: `_RERANK_JOBS`, `_BRIEF_GENERATION_JOBS`
 checks for an active job (returns `already_running` if so), sets
 `JOBS[id] = {status: "running"}`, spawns `threading.Thread(target=_run,
 daemon=True)`, and returns `{status: "started"}`. `_run` overwrites the entry with
-`{status: "done"}` or `{status: "error"}` (the `try/except` is essential — a
+`{status: "done"}` or `{status: "error"}` (the `try/except` is essential - a
 crashed thread must not leave a job stuck at `running` forever). A matching
 `GET .../status` just returns the dict. Because state is in memory, jobs are lost
-on restart — which is exactly why startup re-launches orphans.
+on restart - which is exactly why startup re-launches orphans.
 
 **Key cross-cutting helpers:**
-- **`_build_where(filters)`** (`api.search`) — turns a filters dict into a parameterized
+- **`_build_where(filters)`** (`api.search`) - turns a filters dict into a parameterized
   SQL `WHERE` fragment for `literature_document`. Normalizes legacy
   `project_context` values to `literev`, and (post-migration) rewrites a
   `scenario_type` filter into an `EXISTS (… article_scenarios …)` membership check
   instead of a plain column match. Shared by `/search` and `/ask`.
-- **`_get_above_threshold_articles(scenario_id, threshold)`** (`api.relevance`) — the
+- **`_get_above_threshold_articles(scenario_id, threshold)`** (`api.relevance`) - the
   canonical "relevant subset" query. Joins `article_scenarios`, drops excluded
   papers, and keeps rows that are `included` **or** whose
   `COALESCE(similarity_score, 0) >= threshold`. Feeds the briefs and the model.
-- **`_llm_lang_directive(lang)`** (`api.documents`) — appends "respond entirely in
+- **`_llm_lang_directive(lang)`** (`api.documents`) - appends "respond entirely in
   FR/EN" to LLM prompts. **French is the default.**
-- **Per-scenario screening via COALESCE** — reads everywhere use
+- **Per-scenario screening via COALESCE** - reads everywhere use
   `COALESCE(ars.screening_status, d.screening_status)`: the per-scenario value
   wins, falling back to the global column when NULL. Writes go through
   `_write_ars_screening()` (dual-write to both, transitional). This is the read
   side of Migration 2 (§8).
-- **`require_api_key`** (`api.core`) — the write-auth dependency. Reads the `X-API-Key`
+- **`require_api_key`** (`api.core`) - the write-auth dependency. Reads the `X-API-Key`
   header, constant-time-compares it to `WRITE_API_KEY`, and is attached to every
   mutating endpoint via `Depends(...)`. Reads are open; writes require the key.
 
@@ -482,7 +489,7 @@ graph TD
 
 - **Shell (`App.tsx`).** Holds the four main views via a plain
   `activeTab` state (`"search" | "scenarios" | "stats" | "terrain"`) and a
-  header tab bar — no URL routing. The **"Clé admin"** button in the header
+  header tab bar - no URL routing. The **"Clé admin"** button in the header
   captures the write key with a `prompt()` and stores it in
   local/sessionStorage (never in the bundle); without it the UI is read-only.
 - **`ScenarioDetailPage.tsx`.** The scenario workspace: eight sections
@@ -492,7 +499,7 @@ graph TD
   sections have nested sub-tabs (e.g. review → corpus / PRISMA / screening;
   evidence → brief / PICO table; viz → clustering / knowledge graph).
 - **API layer (`lib/api.ts`).** One typed module wrapping `fetch`. Base URL is
-  `import.meta.env.VITE_API_BASE_URL ?? "/api"` — **relative `/api`** by default,
+  `import.meta.env.VITE_API_BASE_URL ?? "/api"` - **relative `/api`** by default,
   so it just works behind nginx. A `safeFetch` wrapper retries transient errors
   (429/502/503/504). The write key is attached as the **`X-API-Key`** header via
   `authHeaders()`. A `scenarioBase(id)` helper routes to `/user-scenarios` for
@@ -505,20 +512,20 @@ graph TD
   FR/EN are nested dictionary objects; `t("nav.search")` does a dotted-path lookup
   and falls back to French. A standalone **`currentLang()`** (reads
   `localStorage["literev-lang"]`, then browser language, then `fr`) is importable
-  outside React — `lib/api.ts` uses it to thread the language into every call
+  outside React - `lib/api.ts` uses it to thread the language into every call
   (`?lang=` on GETs, `lang:` in POST bodies), so the backend's LLM answers come
   back in the user's language. **Default language: French.**
 
 ---
 
 ### 6a. Frontend tests
-- **Unit (vitest + Testing Library, jsdom)** — `npm test` in `frontend/`; files sit
+- **Unit (vitest + Testing Library, jsdom)** - `npm test` in `frontend/`; files sit
   next to the code (`src/**/*.test.ts(x)`, setup in `src/test/setup.ts`). They cover
   the pure search helpers (`src/lib/searchText.ts`: combined query text, facet kind
   detection, display names), the API client (`safeFetch` retries, URL building, admin
   key header, status → message), the locale files (identical keys and `{placeholders}`
   in French and English), the language provider and the error boundary.
-- **Browser smoke (Playwright)** — `frontend/e2e/smoke.spec.ts`, configuration in
+- **Browser smoke (Playwright)** - `frontend/e2e/smoke.spec.ts`, configuration in
   `frontend/playwright.config.ts` (serves `dist/` with `vite preview`, `/api` proxied
   to the API). It is run by `scripts/smoke_e2e.py`, which boots the real API on a
   throwaway database with one seeded scenario: scenario list + language toggle,
@@ -559,7 +566,7 @@ non-zero exit. Alembic is best-effort (the `_ensure_*()` boot DDL guarantees the
 schema even if a migration is skipped). The build deliberately does **not** inject
 any API key into the bundle.
 
-**Infrastructure — two Hetzner hosts on a private network:**
+**Infrastructure - two Hetzner hosts on a private network:**
 
 | Host | Role |
 |------|------|
@@ -569,15 +576,15 @@ any API key into the bundle.
 The app reaches the DB over the **private** network (`10.10.1.10:5432`); the DB is
 not on the public internet. Repo source lives at `/opt/literev-api`.
 
-- **TLS / nginx** — nginx terminates HTTPS for `literev-scenario.com` (certbot
+- **TLS / nginx** - nginx terminates HTTPS for `literev-scenario.com` (certbot
   auto-renew), serves the static frontend, and reverse-proxies `/api/*` to
   `localhost:8000` (stripping the prefix). The nginx site config lives on the
   server, not in the repo.
-- **Env file `/etc/literev-api.env`** — holds `DB_URL`, `OPENAI_API_KEY`,
+- **Env file `/etc/literev-api.env`** - holds `DB_URL`, `OPENAI_API_KEY`,
   `WRITE_API_KEY` (and optional `COHERE_API_KEY`, `CDS_API_KEY`). Loaded by the
   systemd unit; always `cp` a backup before editing, then
   `systemctl restart literev-api`.
-- **Ops runbook** — server-side procedures (issue/renew TLS, rotate
+- **Ops runbook** - server-side procedures (issue/renew TLS, rotate
   `WRITE_API_KEY` and the OpenAI key, cap the OpenAI budget, list empty scenarios,
   verify a deploy) live in **`docs/ops-runbook.md`**. Infra/CI details are in
   `INFRASTRUCTURE.md`.
@@ -591,19 +598,19 @@ Two related migrations are moving membership and screening from *per-document* t
 intentionally deferred until a soak period confirms nothing else reads the old
 columns.
 
-- **Migration 1 — `scenario_type` → `article_scenarios` membership.** Historically
+- **Migration 1 - `scenario_type` → `article_scenarios` membership.** Historically
   a document's scenario was a single value, `literature_document.scenario_type`
   ("Way A", ingestion membership). It's being replaced by the scored many-to-many
   `article_scenarios` ("Way B"), so a paper can belong to every scenario it's
   relevant to. A backfill (Alembic `a7c3e1b9d2f4`) inserted the missing
   `article_scenarios` rows from `scenario_type` (with `similarity_score = NULL`,
-  which never counts as "relevant"), making Way B a strict superset — verified in
+  which never counts as "relevant"), making Way B a strict superset - verified in
   production (0 emptied scenarios). All read paths and `/search`'s filter mapping
   now use `article_scenarios`. **Still pending:** document inserts still *write*
   `scenario_type` as provenance, and `DROP COLUMN scenario_type` awaits a soak.
   Details: `docs/scenario-type-migration.md`.
 
-- **Migration 2 — per-scenario `screening_status`.** A screening decision used to
+- **Migration 2 - per-scenario `screening_status`.** A screening decision used to
   be a single global value on `literature_document`, so excluding a paper in
   scenario A excluded it everywhere. New columns on `article_scenarios`
   (`screening_status`/`reason`/`notes`/`screened_at`, Alembic `c8d4e2f1a9b3`) hold

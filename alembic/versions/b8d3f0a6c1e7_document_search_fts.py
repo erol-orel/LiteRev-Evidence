@@ -1,6 +1,6 @@
 """Full-text search table for lexical corpus membership
 
-Corpus membership — which documents a scenario's boolean query matches — compiled each
+Corpus membership - which documents a scenario's boolean query matches - compiled each
 term to `LIKE '%term%'` on title, abstract and every chunk, trigram-assisted. On the
 production corpus (346 152 documents, 1 245 182 chunks) one query took 55 to 240 s, and
 substrings matched (`%ai%` inside "chain"), which is how one corpus reached 238 438

@@ -4,7 +4,7 @@
 
 | Nom | IP publique | IP privée | Rôle |
 |-----|-------------|-----------|------|
-| literev-app-01 | 62.238.39.50 | — | API FastAPI + Frontend Nginx |
+| literev-app-01 | 62.238.39.50 | - | API FastAPI + Frontend Nginx |
 | literev-db-01 | 62.238.34.180 | 10.10.1.10 | PostgreSQL + pgvector |
 
 ## Connexion DB
@@ -15,12 +15,12 @@ PGPASSWORD='...' psql -h 10.10.1.10 -U literev -d literev
 
 ## Déploiement
 
-### Automatique (CI/CD — GitHub Actions)
+### Automatique (CI/CD - GitHub Actions)
 
 Deux workflows GitHub Actions :
 
-1. **`deploy.yml`** — sur chaque PR : CI (syntaxe Python `compileall` + résolution `requirements.txt` + build frontend `npm ci && npm run build`). Sur chaque push/merge sur `main` : déploiement SSH (exécute `deploy.sh` : git pull, deps, migrations, build, bascule nginx atomique, restart + health check bloquant).
-2. **`server-command.yml`** — déclenchement manuel (onglet *Actions* → *Server command (manual)* → *Run workflow*) pour lancer une commande ponctuelle et journalisée sur le serveur : `diagnose`, `migrate`, `restart`, `logs`, `deploy`, ou une commande libre (`custom`).
+1. **`deploy.yml`** - sur chaque PR : CI (syntaxe Python `compileall` + résolution `requirements.txt` + build frontend `npm ci && npm run build`). Sur chaque push/merge sur `main` : déploiement SSH (exécute `deploy.sh` : git pull, deps, migrations, build, bascule nginx atomique, restart + health check bloquant).
+2. **`server-command.yml`** - déclenchement manuel (onglet *Actions* → *Server command (manual)* → *Run workflow*) pour lancer une commande ponctuelle et journalisée sur le serveur : `diagnose`, `migrate`, `restart`, `logs`, `deploy`, ou une commande libre (`custom`).
 
 #### Configuration initiale (une seule fois)
 
@@ -81,16 +81,16 @@ chemin d'un fichier `.py` dans le dépôt = son chemin sur le serveur.
 | **racine** (`/opt/literev-api/*.py`) | Modules applicatifs **importés par `main.py`** (`main.py`, `data_connectors.py`, `model_trainer.py`, `gesica_scenario_enriched_metadata.py`) **+** scripts câblés au runtime/cron | Ne PAS déplacer : cela casserait un `import`, un `subprocess`, ou une tâche cron. |
 | `scripts/` | Outils **manuels / hors-ligne** : ingestion en masse, backfills, maintenance, génération de schéma. Lancés à la main (`python3 scripts/<x>.py …`). | Aucun import applicatif, aucun cron ne les vise. |
 | `scripts/archive/` | Backfills historiques (one-shot déjà exécutés). | Conservés pour référence, non maintenus. |
-| `tools/` | Scripts de **diagnostic / vérification** des sources (voir en-têtes). Lancés sous le venv : `.venv/bin/python tools/<x>.py`. | — |
-| `tests/` | Suite `pytest` (72 tests purs + intégration Postgres). | — |
-| `alembic/` | Migrations de schéma. | — |
+| `tools/` | Scripts de **diagnostic / vérification** des sources (voir en-têtes). Lancés sous le venv : `.venv/bin/python tools/<x>.py`. | - |
+| `tests/` | Suite `pytest` (72 tests purs + intégration Postgres). | - |
+| `alembic/` | Migrations de schéma. | - |
 
 ### Pourquoi certains scripts restent à la racine (câblage serveur)
 
 Déplacer ces fichiers casserait une invocation *invisible depuis le code applicatif* :
 
-- **`living_review_scheduler.py`** — (1) lancé par `main.py` via `Path(__file__).parent / "living_review_scheduler.py"` (doit être voisin de `main.py`) ; (2) tâche **cron** quotidienne (`crontab -e`, voir GESICA_User_Guide).
-- **`embed_corpus.py`** — tâche **cron** quotidienne (`… && python3 embed_corpus.py --project gesica`).
-- **`ingest_pubmed.py`** — appelé en `subprocess` par `main.py` (endpoint Living Review) et par `scripts/ingest_gesica.py`.
+- **`living_review_scheduler.py`** - (1) lancé par `main.py` via `Path(__file__).parent / "living_review_scheduler.py"` (doit être voisin de `main.py`) ; (2) tâche **cron** quotidienne (`crontab -e`, voir GESICA_User_Guide).
+- **`embed_corpus.py`** - tâche **cron** quotidienne (`… && python3 embed_corpus.py --project gesica`).
+- **`ingest_pubmed.py`** - appelé en `subprocess` par `main.py` (endpoint Living Review) et par `scripts/ingest_gesica.py`.
 
 > Pour déplacer l'un d'eux plus tard : mettre à jour **en même temps** le `crontab` du serveur et/ou le chemin dans `main.py`, sinon la fonction concernée échoue silencieusement.

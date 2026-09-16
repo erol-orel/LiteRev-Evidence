@@ -1,5 +1,5 @@
 """Integration test: `_build_where`'s scenario filter, executed against a real
-Postgres, returns Migration-1 "Way B" (article_scenarios membership) — including
+Postgres, returns Migration-1 "Way B" (article_scenarios membership) - including
 documents cross-scored into a scenario they were not ingested under.
 
 Skips automatically when no Postgres is reachable (see conftest.db_conn), so CI

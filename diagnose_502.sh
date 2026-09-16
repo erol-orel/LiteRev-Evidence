@@ -1,13 +1,13 @@
 #!/bin/bash
 # ═══════════════════════════════════════════════════════════════════════
-# Script de diagnostic 502 — LiteRev API
+# Script de diagnostic 502 - LiteRev API
 # Exécuter sur app-01 (62.238.39.50) avec : sudo bash diagnose_502.sh
 # ═══════════════════════════════════════════════════════════════════════
 # Pas de `set -e` : un diagnostic doit continuer même quand une commande
-# échoue (c'est précisément le cas qu'on diagnostique — API down, port
+# échoue (c'est précisément le cas qu'on diagnostique - API down, port
 # fermé, grep sans correspondance qui renvoie un code non nul).
 echo "═══════════════════════════════════════════════════════"
-echo "  DIAGNOSTIC 502 — LiteRev API"
+echo "  DIAGNOSTIC 502 - LiteRev API"
 echo "═══════════════════════════════════════════════════════"
 
 echo ""
@@ -20,11 +20,11 @@ journalctl -u literev-api --no-pager -n 50 2>&1
 
 echo ""
 echo "3. Processus Python actifs :"
-ps aux | grep -E "python|uvicorn|gunicorn" | grep -v grep || echo "  (aucun processus python/uvicorn/gunicorn — l'API est probablement arrêtée)"
+ps aux | grep -E "python|uvicorn|gunicorn" | grep -v grep || echo "  (aucun processus python/uvicorn/gunicorn - l'API est probablement arrêtée)"
 
 echo ""
 echo "4. Ports en écoute :"
-ss -tlnp | grep -E "8000|8001|8080|8765|5000" || echo "  (aucun port applicatif en écoute — l'API n'écoute pas)"
+ss -tlnp | grep -E "8000|8001|8080|8765|5000" || echo "  (aucun port applicatif en écoute - l'API n'écoute pas)"
 
 echo ""
 echo "5. Version du code sur le serveur :"
@@ -44,8 +44,8 @@ python3 -c "import fastapi; print('  ✓ fastapi OK')" 2>&1
 python3 -c "import sqlalchemy; print('  ✓ sqlalchemy OK')" 2>&1
 python3 -c "import openai; print('  ✓ openai OK')" 2>&1
 python3 -c "import sklearn; print('  ✓ sklearn OK')" 2>&1
-python3 -c "import umap; print('  ✓ umap-learn OK')" 2>&1 || echo "  ✗ umap-learn manquant — installer avec: pip3 install umap-learn"
-python3 -c "import hdbscan; print('  ✓ hdbscan OK')" 2>&1 || echo "  ✗ hdbscan manquant — installer avec: pip3 install hdbscan"
+python3 -c "import umap; print('  ✓ umap-learn OK')" 2>&1 || echo "  ✗ umap-learn manquant - installer avec: pip3 install umap-learn"
+python3 -c "import hdbscan; print('  ✓ hdbscan OK')" 2>&1 || echo "  ✗ hdbscan manquant - installer avec: pip3 install hdbscan"
 
 echo ""
 echo "9. Connexion à la base de données :"
@@ -59,7 +59,7 @@ try:
     engine = create_engine(db_url)
     with engine.connect() as conn:
         result = conn.execute(text('SELECT COUNT(*) FROM literature_document'))
-        print(f'  ✓ DB OK — {result.scalar()} documents')
+        print(f'  ✓ DB OK - {result.scalar()} documents')
 except Exception as e:
     print(f'  ✗ ERREUR DB : {e}')
 " 2>&1

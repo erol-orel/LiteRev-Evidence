@@ -1,4 +1,4 @@
-"""Published influenza parameter values — the yardstick for judging a real LLM extraction.
+"""Published influenza parameter values - the yardstick for judging a real LLM extraction.
 
 Nothing downstream of the LLM has ever been checked against reality. `epidemic_parameters`
 comes out of a generation step no test can run (it needs an API key), and every SEIR curve
@@ -6,8 +6,8 @@ the app draws rests on it. This module pins what the literature actually says, s
 extraction can be JUDGED rather than trusted.
 
 The bands are deliberately WIDE. Their job is to catch the errors that make a projection
-meaningless — a case fatality ratio given in percent (100x out), a period given in hours,
-a hallucinated magnitude, a provenance id naming no article in the corpus — not to referee
+meaningless - a case fatality ratio given in percent (100x out), a period given in hours,
+a hallucinated magnitude, a provenance id naming no article in the corpus - not to referee
 between studies. A value inside a band is plausible, not verified; a value outside one is
 very probably wrong.
 
@@ -44,7 +44,7 @@ To judge a REAL extraction, from the repository root:
 Note WHICH block to hand it. `variables['epidemic_parameters']` is the raw model output and
 still carries `observations`, so every check applies. `variables['model_spec']
 ['epidemic_parameters']` has already been through `normalize_extracted_parameters`, which
-consumes the observations into a pooled estimate — the checker detects that shape and says
+consumes the observations into a pooled estimate - the checker detects that shape and says
 which checks it could not run.
 """
 from __future__ import annotations
@@ -118,7 +118,7 @@ ANCHORS: dict[str, Anchor] = {
     ),
 }
 
-#: R0 or beta is the ONLY parameter without which a projection cannot be served —
+#: R0 or beta is the ONLY parameter without which a projection cannot be served -
 #: `_seir_projection_payload` gate 2 (main.py) refuses rather than fall back to 2.5.
 REQUIRED_FOR_PROJECTION = "r0"
 
@@ -137,10 +137,10 @@ CORPUS_IDS = frozenset({101, 102, 103, 104, 105, 106})
 #: near the top of the evidence pyramid, a single-season cohort mid-table, a small outbreak
 #: investigation low. These ARE the pooling weights (`seir_model.pool_weighted`).
 QUALITY_BY_ID = {
-    101: 0.88,   # Biggerstaff 2014 — systematic review, heavily cited
-    102: 0.86,   # Lessler 2009     — systematic review
-    103: 0.84,   # Vink 2014        — systematic review
-    104: 0.80,   # Carrat 2008      — review of volunteer challenge studies
+    101: 0.88,   # Biggerstaff 2014 - systematic review, heavily cited
+    102: 0.86,   # Lessler 2009 - systematic review
+    103: 0.84,   # Vink 2014 - systematic review
+    104: 0.80,   # Carrat 2008 - review of volunteer challenge studies
     105: 0.55,   # single-season household cohort
     106: 0.42,   # small outbreak investigation
 }
@@ -148,7 +148,7 @@ QUALITY_BY_ID = {
 #: What a faithful extraction of that corpus looks like: per-study `observations` (which is
 #: what `pool_weighted` re-pools by quality), real provenance ids, CFR as a proportion.
 #: `immunity_duration_days` deliberately carries ONE observation, so it exercises the other
-#: path — under two studies the pool is refused and the model's own estimate is kept.
+#: path - under two studies the pool is refused and the model's own estimate is kept.
 INFLUENZA_EXTRACTION: dict = {
     "applicable": True,
     "population_disease": "Influenza (seasonal and pandemic)",
@@ -197,7 +197,7 @@ INFLUENZA_EXTRACTION: dict = {
 # ── the checker ──────────────────────────────────────────────────────────────
 
 def _num(v):
-    """float fini, ou None — même tolérance que `seir_model._num_or_none`."""
+    """float fini, ou None - même tolérance que `seir_model._num_or_none`."""
     try:
         if v is None or v == "":
             return None
@@ -211,20 +211,20 @@ def _diagnose(anchor: Anchor, value: float) -> str:
     """Name the likely unit confusion behind an out-of-band value, when one fits."""
     for factor, label in anchor.confusions:
         if anchor.low <= value * factor <= anchor.high:
-            return f" — looks like {label}"
+            return f" - looks like {label}"
     return ""
 
 
 def check_extraction(epi, corpus_ids=None) -> list[str]:
     """Judge an `epidemic_parameters` block against the anchors. Returns complaints.
 
-    An empty list means "nothing implausible found" — which is not the same as correct.
+    An empty list means "nothing implausible found" - which is not the same as correct.
     Accepts either shape: the RAW model output (flat, with `observations`) or the block
     already through `normalize_extracted_parameters` (`{applicable, disease, params}`).
     On the normalised shape the observation-level checks cannot run, and the return value
     says so rather than passing silently.
 
-    `corpus_ids` — the article ids actually in the scenario's corpus. Provenance is only
+    `corpus_ids` - the article ids actually in the scenario's corpus. Provenance is only
     checked for fabrication when this is supplied; without it a made-up id is invisible
     here, exactly as it is to `_clean_provenance`, which drops it without complaint.
     """
@@ -235,13 +235,13 @@ def check_extraction(epi, corpus_ids=None) -> list[str]:
     normalised = isinstance(epi.get("params"), dict)
     blocks = epi["params"] if normalised else epi
     if normalised:
-        out.append("NOTE: normalised block — per-study `observations` were already pooled "
+        out.append("NOTE: normalised block - per-study `observations` were already pooled "
                    "away, so they cannot be checked here. Re-run on "
                    "variables['epidemic_parameters'] for the full check.")
 
     if not epi.get("applicable"):
         out.append("applicable is false: influenza IS transmissible, so either the model "
-                   "misjudged the scenario or no parameter survived normalisation — "
+                   "misjudged the scenario or no parameter survived normalisation - "
                    "either way the SEIR tab is gated off (main.py gate 1)")
 
     ids = set(corpus_ids) if corpus_ids is not None else None
@@ -250,7 +250,7 @@ def check_extraction(epi, corpus_ids=None) -> list[str]:
         blk = blocks.get(name)
         if not isinstance(blk, dict):
             if name == REQUIRED_FOR_PROJECTION:
-                out.append(f"{name}: absent — without it no projection is served at all "
+                out.append(f"{name}: absent - without it no projection is served at all "
                            "(gate 2 refuses rather than assume 2.5)")
             else:
                 out.append(f"{name}: absent (acceptable if no article reports it)")
@@ -259,12 +259,12 @@ def check_extraction(epi, corpus_ids=None) -> list[str]:
         value = _num(blk.get("value"))
         if value is None:
             out.append(f"{name}: value is null or not a number "
-                       f"({blk.get('value')!r}) — correct if unreported, since the prompt "
+                       f"({blk.get('value')!r}) - correct if unreported, since the prompt "
                        "asks for null over invention")
             continue
 
         # A CFR whose unit SAYS percent is converted by `normalize_extracted_parameters`,
-        # so judge the converted value — otherwise a correct extraction reads as out of
+        # so judge the converted value - otherwise a correct extraction reads as out of
         # band. The dangerous case is the opposite: percent MAGNITUDE, proportion LABEL.
         unit = str(blk.get("unit") or "")
         declared_percent = name == "cfr" and sm._is_percent_unit(unit)
@@ -273,7 +273,7 @@ def check_extraction(epi, corpus_ids=None) -> list[str]:
                 and anchor.low <= value / 100.0 <= anchor.high):
             out.append(f"cfr = {value} declared as {unit!r}: this is a PERCENTAGE wearing "
                        "the label of a proportion. `_is_percent_unit` reads the unit, not "
-                       "the magnitude, so nothing converts it — deaths come out 100x high")
+                       "the magnitude, so nothing converts it - deaths come out 100x high")
         elif not anchor.holds(banded):
             out.append(f"{name} = {value} is outside the plausible band "
                        f"[{anchor.low}, {anchor.high}] {anchor.unit}"
@@ -282,7 +282,7 @@ def check_extraction(epi, corpus_ids=None) -> list[str]:
         lo, hi = _num(blk.get("ci_low")), _num(blk.get("ci_high"))
         if lo is not None and hi is not None:
             if lo > hi:
-                out.append(f"{name}: ci_low {lo} > ci_high {hi} — normalisation drops both "
+                out.append(f"{name}: ci_low {lo} > ci_high {hi} - normalisation drops both "
                            "rather than invent an interval, so the parameter loses its "
                            "uncertainty band silently")
             elif not (lo <= value <= hi):
@@ -290,7 +290,7 @@ def check_extraction(epi, corpus_ids=None) -> list[str]:
 
         prov = blk.get("provenance")
         if not isinstance(prov, list) or not prov:
-            out.append(f"{name}: no provenance — the value is unattributable, and the UI "
+            out.append(f"{name}: no provenance - the value is unattributable, and the UI "
                        "will show a study count with nothing to click")
         elif ids is not None:
             bogus = [p for p in prov if _num(p) is None or int(_num(p)) not in ids]
@@ -302,7 +302,7 @@ def check_extraction(epi, corpus_ids=None) -> list[str]:
         if not normalised:
             obs = blk.get("observations")
             if not isinstance(obs, list) or not obs:
-                out.append(f"{name}: `observations` is empty — quality-weighted pooling has "
+                out.append(f"{name}: `observations` is empty - quality-weighted pooling has "
                            "nothing to re-pool, so the model's own averaging is what you get")
             else:
                 for o in obs:

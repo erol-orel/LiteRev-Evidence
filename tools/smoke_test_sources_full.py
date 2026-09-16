@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Live-verify every LiteRev data source + connector — RUN ON PROD (has egress).
+"""Live-verify every LiteRev data source + connector - RUN ON PROD (has egress).
 
     cd /opt/literev-api && .venv/bin/python tools/smoke_test_sources_full.py
 
-(Use the app venv — the connector + parser checks import `main`/`data_connectors`.)
+(Use the app venv - the connector + parser checks import `main`/`data_connectors`.)
 
 For each of the 13 literature sources it makes a real API call and prints: reachable?,
 the source's own TOTAL count for the query, and a sample title. Then it exercises every
@@ -119,7 +119,7 @@ def src_preprints():
 
 def src_semantic_scholar():
     # The app queries the BULK endpoint for boolean (/paper/search/bulk). Probe it the same
-    # way. Bulk treats spaces as AND, so a strict multi-word total can be small — [OK] means
+    # way. Bulk treats spaces as AND, so a strict multi-word total can be small - [OK] means
     # the endpoint is reachable regardless of the count.
     h = {**UA}
     if os.getenv("SEMANTIC_SCHOLAR_API_KEY"):
@@ -164,7 +164,7 @@ def src_arxiv():
 
 
 def src_openaire():
-    # Graph API v2 — the legacy /search/publications was RETIRED 2026-05-31; the app moved to
+    # Graph API v2 - the legacy /search/publications was RETIRED 2026-05-31; the app moved to
     # this endpoint. search= takes free text or boolean; total from header.numFound.
     r = requests.get("https://api.openaire.eu/graph/v2/researchProducts",
                      params={"search": PLAIN_Q, "pageSize": 5},
@@ -182,7 +182,7 @@ def src_biorxiv_medrxiv():
     for server in ("biorxiv", "medrxiv"):
         r = requests.get(f"https://api.biorxiv.org/details/{server}/{win}/0/json", headers=UA, timeout=TIMEOUT)
         n = int((r.json().get("messages") or [{}])[0].get("total", 0) or 0)
-        line(f"{server} (45d window)", r.ok, n, "no keyword search — window scan + local filter")
+        line(f"{server} (45d window)", r.ok, n, "no keyword search - window scan + local filter")
 
 
 # ── data connectors ───────────────────────────────────────────────────────────
@@ -210,9 +210,9 @@ def connectors():
             print(f"  [FAIL] {cid:24s} {type(e).__name__}: {str(e)[:80]}")
 
 
-# ── boolean parser (the 109→5 fix) — no network/DB ────────────────────────────
+# ── boolean parser (the 109→5 fix) - no network/DB ────────────────────────────
 def parser_demo():
-    print("\nBoolean parser on YOUR PubMed query (the fix — no DB needed):")
+    print("\nBoolean parser on YOUR PubMed query (the fix - no DB needed):")
     try:
         import main
         ast = main._parse_boolean_ast(main._tokenize_boolean(PUBMED_Q))

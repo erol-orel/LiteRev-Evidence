@@ -4,7 +4,7 @@ export default {
   theme: {
     extend: {
       colors: {
-        // ── Palette LiteRev — couleurs exactes du logo ───────────────
+        // ── Palette LiteRev - couleurs exactes du logo ───────────────
         // Vert foncé (tronc + livre) : #0A3621
         // Or/Ambre  (feuillage)      : #E3AC3B
         // ─────────────────────────────────────────────────────────────

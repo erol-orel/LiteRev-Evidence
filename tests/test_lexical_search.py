@@ -1,4 +1,4 @@
-"""Full-text corpus membership (lexical_search.py) — the compiler, the triggers, the
+"""Full-text corpus membership (lexical_search.py) - the compiler, the triggers, the
 backfill, and the semantics a searcher will notice.
 
 Production numbers that motivate this: the LIKE path took 55 to 240 s per boolean
@@ -38,7 +38,7 @@ def test_the_whole_boolean_is_one_tsquery_with_bound_terms():
 
 def test_not_compiles_to_the_tsquery_negation():
     """Per-document semantics make `!!` exact here: one vector per document, so
-    `mpox & !benign` means "mpox somewhere, benign nowhere" — the same rule the LIKE
+    `mpox & !benign` means "mpox somewhere, benign nowhere" - the same rule the LIKE
     path enforced with a correlated NOT EXISTS."""
     sql = lex.ast_to_tsquery_sql(_ast("mpox NOT benign"), {})
     assert "(!! phraseto_tsquery" in sql and " && " in sql
@@ -229,7 +229,7 @@ def test_backfill_fills_missing_rows_and_readiness_follows(corpus):
 
 def test_until_the_backfill_is_complete_the_search_falls_back_to_like(corpus):
     """The deploy-time guarantee: never a partial corpus. `ai` inside "chain" and
-    "daily" is the LIKE fingerprint — full text cannot match it."""
+    "daily" is the LIKE fingerprint - full text cannot match it."""
     with corpus.cursor() as cur:
         cur.execute("DELETE FROM document_search WHERE document_id = 5")
     _reset_state()

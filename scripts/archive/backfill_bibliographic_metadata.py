@@ -400,7 +400,7 @@ def main():
             source = (doc["source"] or "").lower()
             url = doc["url"] or ""
             
-            log.info(f"[{i+1}/{len(docs)}] Doc {doc_id} — source={source}, external_id={external_id[:30]}")
+            log.info(f"[{i+1}/{len(docs)}] Doc {doc_id} - source={source}, external_id={external_id[:30]}")
             
             metadata_parts = []
             
@@ -478,7 +478,7 @@ def main():
             # Commit toutes les 50 lignes
             if (i + 1) % 50 == 0:
                 conn.commit()
-                log.info(f"  Progression : {i+1}/{len(docs)} — mis à jour={updated}, ignorés={skipped}, erreurs={errors}")
+                log.info(f"  Progression : {i+1}/{len(docs)} - mis à jour={updated}, ignorés={skipped}, erreurs={errors}")
         
         conn.commit()
     

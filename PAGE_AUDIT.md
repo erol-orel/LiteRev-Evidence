@@ -1,9 +1,9 @@
-# Page-by-Page Error Audit — LiteRev-Evidence
+# Page-by-Page Error Audit - LiteRev-Evidence
 
 Date: 2026-06-22 · Branch: `claude/inspiring-gates-0u6dce` · PR #88
 
-Trigger: runtime errors reported across many pages — **HTTP 429** on the
-EVIDENCES tab and **HTTP 500** on the PRISMA tab (screenshots) — with the note
+Trigger: runtime errors reported across many pages - **HTTP 429** on the
+EVIDENCES tab and **HTTP 500** on the PRISMA tab (screenshots) - with the note
 "errors on many pages, full audit of every page".
 
 Method: static analysis of the backend (`main.py`, ~13.3k lines, ~150 endpoints)
@@ -22,10 +22,10 @@ response**. Fix the backend → the boxes disappear.
 
 | # | Symptom (UI) | Endpoint | Root cause | Fix |
 |---|---|---|---|---|
-| 1 | **HTTP 500** on PRISMA (every system scenario) | `GET /gesica/scenarios/{id}/prisma` | Handler used `meta["title"]` but never assigned `meta` — it discarded the result of `_get_db_gesica_scenario_or_404(...)`. Unbound name → `NameError` → 500 on every call. | Capture the row: `meta = _get_db_gesica_scenario_or_404(scenario_id)`; use null-safe `_gesica_title(meta)`. |
-| 2 | **HTTP 429** on EVIDENCES and most scenario tabs | rate-limit middleware | The "expensive endpoint" matcher keyed on the path prefix *before* the first `{`. So `/user-scenarios/{id}/rag` matched **all** of `/user-scenarios/*`, `/gesica/scenarios/*`, and `/scenarios/*` — the entire scenario detail page (corpus, prisma, evidence-brief, clustering, model, variables…) was throttled at **30 req/min** instead of 600. One page load + 5 s polling exhausts it → spurious 429s app-wide. | Precise per-segment regex matching (`{param}` → exactly one path segment). Only `rag` / `full-pipeline` / `search` / `ask` stay on the 30/min bucket. Added `Retry-After` header. Unit-tested. |
-| 3 | Silent — full text never retrieved (no error shown) | user-scenario pipeline (full-text step) | `_requests` used but never imported; every fetch raised `NameError`, swallowed by a broad `except` → full text silently never fetched, degrading evidence quality. | Added `import requests as _requests`. |
-| 4 | Latent (theoretical) — 500 on folder create | `POST /user-scenario-folders` | Re-read `row` after INSERT (separate connection) was dereferenced with no `if row:` guard. Would only fire on a race/external delete, but the whole response block was exposed. | Build the response from the known inserted values; guard `created_at` with `row and …`. |
+| 1 | **HTTP 500** on PRISMA (every system scenario) | `GET /gesica/scenarios/{id}/prisma` | Handler used `meta["title"]` but never assigned `meta` - it discarded the result of `_get_db_gesica_scenario_or_404(...)`. Unbound name → `NameError` → 500 on every call. | Capture the row: `meta = _get_db_gesica_scenario_or_404(scenario_id)`; use null-safe `_gesica_title(meta)`. |
+| 2 | **HTTP 429** on EVIDENCES and most scenario tabs | rate-limit middleware | The "expensive endpoint" matcher keyed on the path prefix *before* the first `{`. So `/user-scenarios/{id}/rag` matched **all** of `/user-scenarios/*`, `/gesica/scenarios/*`, and `/scenarios/*` - the entire scenario detail page (corpus, prisma, evidence-brief, clustering, model, variables…) was throttled at **30 req/min** instead of 600. One page load + 5 s polling exhausts it → spurious 429s app-wide. | Precise per-segment regex matching (`{param}` → exactly one path segment). Only `rag` / `full-pipeline` / `search` / `ask` stay on the 30/min bucket. Added `Retry-After` header. Unit-tested. |
+| 3 | Silent - full text never retrieved (no error shown) | user-scenario pipeline (full-text step) | `_requests` used but never imported; every fetch raised `NameError`, swallowed by a broad `except` → full text silently never fetched, degrading evidence quality. | Added `import requests as _requests`. |
+| 4 | Latent (theoretical) - 500 on folder create | `POST /user-scenario-folders` | Re-read `row` after INSERT (separate connection) was dereferenced with no `if row:` guard. Would only fire on a race/external delete, but the whole response block was exposed. | Build the response from the known inserted values; guard `created_at` with `row and …`. |
 
 All verified: `python -m py_compile main.py` ✓ · `ruff --select F821,F811` clean ✓ ·
 rate-limiter matcher unit-tested across the full path matrix ✓ · CI run #226 green ✓.
@@ -52,7 +52,7 @@ Legend: ✅ no code-level error found · 🔧 fixed in this PR · ⚠️ pre-exi
 | **Statistiques** | `GET /corpus/stats`, `/corpus/fulltext-stats`, `/corpus/stats/by-year[/named]`, `/gesica/stats`, `/gesica/scenarios` | ✅ |
 | **Terrain** | `GET /terrain/{meteo,geo,epidemic,demographics,pharmacies,informal-signals,climate}` | ✅ (errors already soft-handled with a friendly message) |
 
-### Scenario detail (`ScenarioDetailPage.tsx`) — 8 sections
+### Scenario detail (`ScenarioDetailPage.tsx`) - 8 sections
 
 | Section → sub-tab | Key endpoints | Status |
 |---|---|---|
@@ -74,7 +74,7 @@ Legend: ✅ no code-level error found · 🔧 fixed in this PR · ⚠️ pre-exi
 
 ---
 
-## 3. Backend 500-risk sweep — result
+## 3. Backend 500-risk sweep - result
 
 A seven-pattern sweep (ZeroDivisionError, None-indexing of DB rows, `json.loads`
 on None, `int/float/strftime` on None, `KeyError`, unbound locals) over every
@@ -85,7 +85,7 @@ fixes above. The codebase is unusually defensive:
 - Every `int(col)`/`float(col)` on a DB value is wrapped (`or 0`, `or 0.0`, `if col else …`).
 - Ungrouped SQL aggregates (`COUNT/SUM/MIN/MAX … WHERE …` with no `GROUP BY`)
   always return exactly one row, so `.mappings().first()` is never `None` there
-  even for an empty scenario — invalidating the "empty corpus → None row → crash" theory.
+  even for an empty scenario - invalidating the "empty corpus → None row → crash" theory.
 - By-id lookups are guarded by `if not row:` / `_get_*_or_404()`.
 - JSONB columns are auto-parsed by the driver (used as dicts; no `loads`-on-dict bug).
 
@@ -113,7 +113,7 @@ fixes above. The codebase is unusually defensive:
 
 3. **If 500s persist in production after this PR**, the remaining likely causes
    are *outside* application logic: a DB schema/migration drift (a column the SQL
-   selects that's missing in the deployed DB — consistent with the existing
+   selects that's missing in the deployed DB - consistent with the existing
    `AUDIT_REPORT.md` finding that the schema lives only in the live DB), an
    external-call failure (OpenAI/HTTP) on generate paths, or auth. These need a
    live log line (the exact 500 traceback) to pin down.

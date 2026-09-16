@@ -24,7 +24,7 @@ except ImportError:
     _GESICA_ENRICHED_LEGACY: dict = {}
 
 # Cache du dashboard /gesica/stats. Le calcul balaie TOUT le corpus literev puis
-# applique _extract_gesica_evidence (regex) PAR document — O(N) Python, > 45 s sur
+# applique _extract_gesica_evidence (regex) PAR document - O(N) Python, > 45 s sur
 # un corpus de dizaines de milliers de docs (→ la requête HTTP dépassait le délai).
 # On met en cache avec TTL et on rafraîchit EN ARRIÈRE-PLAN : la requête ne bloque
 # jamais (elle sert le cache, éventuellement périmé, ou une réponse froide légère).
@@ -564,7 +564,7 @@ def get_gesica_scenarios(lang: str | None = Query(None)) -> list[dict[str, Any]]
         # les articles de TOUS les scénarios (y compris les scénarios utilisateur, non
         # listés ici) avec leur résumé, en UNE requête : un seul scénario dont la
         # recherche lexicale avait apparié 238 000 documents suffisait à faire dépasser
-        # la minute — et la mémoire — à cette route, que l'interface appelle au
+        # la minute - et la mémoire - à cette route, que l'interface appelle au
         # chargement de CHAQUE page. Réponse observée en production : 502 sur
         # /api/gesica/scenarios, « Failed to load scenarios ». Le front n'affiche
         # d'ailleurs pas cette liste (App.tsx : `false && scenario.relevantArticles…`) ;
@@ -815,7 +815,7 @@ def get_corpus_stats_by_year_named() -> dict[str, Any]:
         """)).mappings().all()
 
     user_name_map = {r["id"]: r["name"] for r in user_names}
-    # Valid GESICA scenarios (not hidden) — depuis la DB
+    # Valid GESICA scenarios (not hidden) - depuis la DB
     with engine.connect() as _hm_conn:
         _gesica_db_rows = _list_db_gesica_scenarios(_hm_conn)
     _gesica_name_map = {str(r["id"]): _gesica_title(r) for r in _gesica_db_rows}
@@ -828,7 +828,7 @@ def get_corpus_stats_by_year_named() -> dict[str, Any]:
             return user_name_map[sid]
         if sid in _gesica_name_map:
             return _gesica_name_map[sid]
-        return None  # deleted or hidden — exclude from heatmap
+        return None  # deleted or hidden - exclude from heatmap
 
     by_year = {str(r["year"]): r["count"] for r in rows_year}
 

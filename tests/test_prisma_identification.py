@@ -1,6 +1,6 @@
 """PRISMA "identification" must count what the search RETURNED, not the de-duplicated corpus.
 
-Production, every scenario: "records identified — before de-duplication: 2,766",
+Production, every scenario: "records identified - before de-duplication: 2,766",
 "duplicates removed: 0". The box counted corpus documents flagged `is_duplicate`, a flag
 no runtime sets. The real de-duplication happens at ingestion (a paper returned by
 OpenAlex and PubMed becomes one row; the second arrival is absorbed without a trace)
@@ -62,7 +62,7 @@ def test_the_production_shape():
 
 def test_the_september_14_run():
     """The run that prompted the breakdown: 38 458 records, 4 086 duplicates, 34 372
-    unique, 3 861 removed, 30 511 screened — the person reading it wanted to know how
+    unique, 3 861 removed, 30 511 screened - the person reading it wanted to know how
     many of the 3 861 were the no-abstract rule."""
     f = main._prisma_identification_figures(
         {"db_cache": 18367, "openalex": 9000, "europepmc": 7000, "pubmed": 4091},

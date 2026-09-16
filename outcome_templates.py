@@ -3,7 +3,7 @@
 The notes emphasise "bien définir les outcomes": these are ready-made, well-specified
 outcomes (emergency-department overload, incoming-call volume, call surge, bed occupancy)
 that a user can apply to a scenario's model in one click, then upload a matching hospital
-extract and train — instead of hand-defining the target each time. Pure/importable
+extract and train - instead of hand-defining the target each time. Pure/importable
 (no DB, no FastAPI); `main` builds the data_template + persists.
 
 Each template carries:
@@ -68,7 +68,7 @@ TEMPLATES: list[dict[str, Any]] = [
     {
         "id": "call_surge",
         "name": "Pic d'appels (surcharge de la centrale)",
-        "description": "Anticiper les PICS d'appels (quantile haut), pas la moyenne — via la forêt extrémale (extremal_rf).",
+        "description": "Anticiper les PICS d'appels (quantile haut), pas la moyenne - via la forêt extrémale (extremal_rf).",
         "outcome": {"name": "Pic d'appels", "machine_name": "incoming_calls",
                     "task_type": "regression", "unit": "appels/jour", "positive_class": None},
         "algorithm": {"family": "extremal_rf", "metric": "pinball", "quantile": 0.9},

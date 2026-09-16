@@ -15,7 +15,7 @@ export function csvEscape(value: unknown): string {
 
 // Libellé court et lisible pour un scénario créé depuis une requête. Une requête
 // booléenne (ou multi-sous-requêtes) dépasse souvent la colonne `name` VARCHAR(255) ;
-// le nom n'est qu'un AFFICHAGE — la requête complète reste dans `query`. On tronque
+// le nom n'est qu'un AFFICHAGE - la requête complète reste dans `query`. On tronque
 // sur une frontière de mot quand c'est possible, avec « … ».
 export function scenarioDisplayName(q: string, limit = 140): string {
   const s = (q ?? "").trim();
@@ -25,7 +25,7 @@ export function scenarioDisplayName(q: string, limit = 140): string {
   return (lastSpace > limit * 0.6 ? cut.slice(0, lastSpace) : cut).trimEnd() + "…";
 }
 
-// Miroir CLIENT de main.py:_combined_query_text — expression COMPLÈTE d'une recherche
+// Miroir CLIENT de main.py:_combined_query_text - expression COMPLÈTE d'une recherche
 // multi-facettes, parenthésée selon le fold gauche→droite réellement appliqué :
 // « (A) AND (B) », « ((A) OR (B)) AND (C) ». Sert de nom par défaut au scénario :
 // avant, seul le texte de la requête principale était utilisé et le ET/OU entre
@@ -41,7 +41,7 @@ export function combinedQueryText(sub: SubQuery[], combinator: "union" | "inters
   return expr;
 }
 
-// Miroir CLIENT de main.py:_looks_boolean — détecte une SYNTAXE booléenne (opérateurs
+// Miroir CLIENT de main.py:_looks_boolean - détecte une SYNTAXE booléenne (opérateurs
 // AND/OR/NOT en majuscules, tags [dp]/[tiab]…, guillemets doubles, parenthèses) pour
 // afficher le type détecté sans que l'utilisateur ait à le taguer. Le backend refait
 // la même détection (source de vérité) ; ceci n'est que l'indicateur d'UI.

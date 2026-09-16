@@ -1,4 +1,4 @@
-"""scripts/preflight_demo.py — the demo readiness report, on canned API answers.
+"""scripts/preflight_demo.py - the demo readiness report, on canned API answers.
 
 Pure: `get`/`post` are fakes, `sleep` is a no-op, the audit is skipped."""
 import importlib.util

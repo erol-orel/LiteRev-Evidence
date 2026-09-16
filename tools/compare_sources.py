@@ -3,13 +3,13 @@
 
     cd /opt/literev-api && .venv/bin/python tools/compare_sources.py
 
-(Use the app venv — this imports `main`, so it needs the service's dependencies.)
+(Use the app venv - this imports `main`, so it needs the service's dependencies.)
 
 For a natural query it translates exactly like the app (main._generate_search_strategy),
 then per source fetches a sample and applies the SAME local boolean match that defines
 corpus membership (substring match of the general boolean against title+abstract). The
 gap between "direct total" and "passes local boolean" is why the corpus is far smaller
-than the raw source totals — and it's biggest for PubMed (MeSH matches with no literal
+than the raw source totals - and it's biggest for PubMed (MeSH matches with no literal
 phrase in the abstract). No DB writes.
 """
 import os
@@ -40,7 +40,7 @@ _AST = main._parse_boolean_ast(main._tokenize_boolean(GENERAL))
 
 def local_pass(title, abstract):
     """Replicates _search_local_doc_ids boolean mode: substring match of the general
-    boolean against lowercased title+abstract — the exact corpus-membership test."""
+    boolean against lowercased title+abstract - the exact corpus-membership test."""
     blob = f"{title or ''} {abstract or ''}".lower()
 
     def m(a):
@@ -137,8 +137,8 @@ def s_semantic_scholar():
 
 def s_biorxiv_medrxiv():
     # bioRxiv + medRxiv are STILL live (native, source="biorxiv"/"medrxiv"), separate from
-    # the Europe PMC "preprint" facet. They have NO keyword search — the API only serves a
-    # date window — so "total" here is ALL preprints in the last 45 days, not query hits;
+    # the Europe PMC "preprint" facet. They have NO keyword search - the API only serves a
+    # date window - so "total" here is ALL preprints in the last 45 days, not query hits;
     # the fetcher keeps those matching >= 1/3 of the terms, then the corpus re-match applies.
     from datetime import date, timedelta
     to = date.today()
@@ -164,7 +164,7 @@ SOURCES = [
 
 if __name__ == "__main__":
     print("=" * 92)
-    print("DIRECT vs LiteRev corpus filter — per source")
+    print("DIRECT vs LiteRev corpus filter - per source")
     print(f"NL query : {NL_QUERY}")
     print(f"general  : {GENERAL[:110]}")
     print(f"plain    : {PLAIN}")
@@ -175,7 +175,7 @@ if __name__ == "__main__":
         try:
             total, docs = fn()
             passed = sum(1 for t, a in docs if local_pass(t, a))
-            rate = f"{100*passed/len(docs):.0f}%" if docs else "—"
+            rate = f"{100*passed/len(docs):.0f}%" if docs else "-"
             print(f"{name:18} {qkind:16} {total:>8} {len(docs):>8} {passed:>16} {rate:>7}")
         except Exception as e:
             print(f"{name:18} {qkind:16} {'FAIL':>8}  {type(e).__name__}: {str(e)[:40]}")
@@ -186,5 +186,5 @@ if __name__ == "__main__":
     print("phrase in the abstract.")
     print("AFTER the source-union fix: PubMed / Europe PMC / EPMC-preprints bypass that re-match")
     print("(their whole 'direct' set enters the corpus, minus no-abstract records); the KEYWORD")
-    print("APIs (OpenAlex/Crossref/S2/…) still keep only 'pass local-bool' — their plain-query")
+    print("APIs (OpenAlex/Crossref/S2/…) still keep only 'pass local-bool' - their plain-query")
     print("results are a loose ranking that the boolean SHOULD filter.")

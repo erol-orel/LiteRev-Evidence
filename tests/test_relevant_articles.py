@@ -1,6 +1,6 @@
 """The relevant-articles fetch behind the LLM generators (brief, variables, actions)
-returned every relevant article with its abstract and PICO — 25,000 rows and 120 MB
-for a large scenario — while each generator reads 20 to 30 of them. `full_rows=N`
+returned every relevant article with its abstract and PICO - 25,000 rows and 120 MB
+for a large scenario - while each generator reads 20 to 30 of them. `full_rows=N`
 keeps every row (ids, statuses, `has_pico`: enough for counts and the corpus
 fingerprint) but ships abstract/PICO for the top N only; `require_pico` restricts to
 articles with an extracted PICO."""

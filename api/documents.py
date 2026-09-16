@@ -16,7 +16,7 @@ from sqlalchemy import text
 from .core import _is_openai_quota_error, app, engine, logger, require_api_key
 
 # ── Embedding résilient (anti « lot empoisonné ») ────────────────────────────
-# L'API embeddings rejette TOUT le lot si UN SEUL input est invalide — le plus
+# L'API embeddings rejette TOUT le lot si UN SEUL input est invalide - le plus
 # souvent trop de tokens : l'ancienne garde tronquait à 8000 CARACTÈRES (pas
 # tokens), et du texte dense (CJK, identifiants, références) dépasse la limite de
 # 8191 tokens. Sans isolation ni borne de tentatives, le lot fautif était
@@ -24,7 +24,7 @@ from .core import _is_openai_quota_error, app, engine, logger, require_api_key
 # helpers (1) tronquent par TOKENS, (2) mappent la réponse par index, et (3) si un
 # lot échoue hors quota, ré-essaient chunk par chunk pour n'isoler QUE le fautif.
 # None = pas encore tenté ; False = tiktoken indisponible (repli caractères, ne plus
-# réessayer — sinon un téléchargement BPE qui échoue serait retenté à chaque appel) ;
+# réessayer - sinon un téléchargement BPE qui échoue serait retenté à chaque appel) ;
 # sinon = l'encodeur. Repli SÛR : 6000 caractères restent < 8191 tokens pour du texte
 # réel (tiktoken, quand présent, préserve bien plus de contenu jusqu'à la vraie limite).
 _TIKTOKEN_ENC: list = [None]
@@ -52,7 +52,7 @@ def _truncate_to_tokens(s: str, max_tokens: int = 8000) -> str:
 #: Caractères de contrôle C0 hors tabulation/saut de ligne/retour chariot. NUL (0x00)
 #: est le seul que PostgreSQL REFUSE dans un champ `text` (« PostgreSQL text fields
 #: cannot contain NUL (0x00) bytes ») ; les autres sont acceptés mais n'ont aucun sens
-#: dans du texte extrait — ils viennent d'un PDF mal formé ou d'un décodage raté, et
+#: dans du texte extrait - ils viennent d'un PDF mal formé ou d'un décodage raté, et
 #: polluent aussi bien les prompts LLM que l'affichage.
 _CONTROL_CHARS_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 
@@ -70,7 +70,7 @@ def sanitize_db_text(s):
     découpage, le prompt PICO et l'appel d'embedding en aval.
 
     ATTENTION : `re.sub(r"\\s+", " ", …)`, appliqué juste avant dans les extracteurs,
-    ne protège de RIEN — en Python `\\s` ne couvre pas `\\x00`. Vérifié.
+    ne protège de RIEN - en Python `\\s` ne couvre pas `\\x00`. Vérifié.
 
     Pur : renvoie `s` inchangé si ce n'est pas une chaîne (None, bytes…)."""
     if not isinstance(s, str) or not s:
@@ -126,7 +126,7 @@ def _embed_chunks_resilient(client, rows: list, batch_size: int = 100) -> tuple[
 def _strategy_is_degraded(strategy: object, query: str | None = None) -> bool:
     """Vrai si une stratégie de recherche est un repli dégradé (échec LLM) :
     marquée degraded, ou dont la requête booléenne 'general' est vide / identique
-    au texte brut / sans opérateur booléen — donc à régénérer."""
+    au texte brut / sans opérateur booléen - donc à régénérer."""
     if not isinstance(strategy, dict):
         return True
     if strategy.get("degraded"):
@@ -141,7 +141,7 @@ def _strategy_is_degraded(strategy: object, query: str | None = None) -> bool:
     # NB : on NE traite PLUS `general == query` comme dégradé. Si on atteint ici,
     # `general` contient des opérateurs booléens ; un utilisateur qui saisit un
     # booléen valide que le LLM préserve à l'identique produit légitimement
-    # general == query — le marquer dégradé forçait une régénération inutile et
+    # general == query - le marquer dégradé forçait une régénération inutile et
     # jetait les champs pubmed/synonyms fournis (une requête NL sans opérateur est
     # déjà captée par le garde `not has_operators` ci-dessus).
     return False
@@ -168,7 +168,7 @@ _STUDY_DESIGN_CASE = """CASE
         ELSE 'Autre'
       END"""
 
-# Niveau de preuve GRADE (strict), déterminé par le DEVIS d'étude — PAS par un
+# Niveau de preuve GRADE (strict), déterminé par le DEVIS d'étude - PAS par un
 # score composite (citations/récence/échantillon servent au classement, pas à la
 # certitude). En GRADE :
 #   - essais randomisés + synthèses d'essais  → certitude ÉLEVÉE  (« Forte »)
@@ -278,9 +278,9 @@ def _llm_lang_directive(lang: str | None) -> str:
     """Output-language instruction appended to LLM system prompts.
     Defaults to French (the app's default) so existing behaviour is unchanged
     when no language is supplied."""
-    # Defensive: only a real string carries a language. Anything else — None, or a
+    # Defensive: only a real string carries a language. Anything else - None, or a
     # FastAPI Query/Depends object leaked by an internal *direct* call to an endpoint
-    # whose param defaults to Query(...) — falls back to the French default instead of
+    # whose param defaults to Query(...) - falls back to the French default instead of
     # crashing on `.strip()` ("'Query' object has no attribute 'strip'").
     if not isinstance(lang, str):
         lang = None
@@ -315,11 +315,11 @@ def _compute_quality_score(
     Score de qualité méthodologique déterministe et reproductible, dans [0, 1].
 
     Combinaison pondérée de signaux objectifs (aucun appel LLM) :
-      - devis d'étude (pyramide des preuves)  — poids 0.50
-      - taille d'échantillon (log)            — poids 0.18
-      - citations (log)                       — poids 0.12
-      - récence                               — poids 0.12
-      - accès ouvert                          — poids 0.08
+      - devis d'étude (pyramide des preuves) - poids 0.50
+      - taille d'échantillon (log) - poids 0.18
+      - citations (log) - poids 0.12
+      - récence - poids 0.12
+      - accès ouvert - poids 0.08
     Le score du devis est en outre modulé par le risque de biais s'il est connu.
 
     Renvoie None si AUCUN signal n'est disponible (on ne fabrique pas une note).
@@ -432,7 +432,7 @@ def create_document(
         new_id = conn.execute(sql, params).scalar()
         deduplicated = False
         if new_id is None:
-            # DOI already present (UNIQUE(doi) partial index) — return the existing row
+            # DOI already present (UNIQUE(doi) partial index) - return the existing row
             new_id = conn.execute(
                 text("SELECT id FROM literature_document WHERE doi = :doi ORDER BY id LIMIT 1"),
                 {"doi": params.get("doi")},
@@ -477,8 +477,8 @@ def create_chunk(
 def get_document_detail(document_id: int) -> dict[str, Any]:
     # Détail enrichi ET recentré « santé publique » : on ajoute les champs
     # bibliographiques utiles (auteurs / revue / DOI / pays) et on NORMALISE les deux
-    # axes de type à un vocabulaire contrôlé — `study_design` via _STUDY_DESIGN_CASE,
-    # `article_type` via _PUB_TYPE_CASE — au lieu du texte libre. `d`/`p` = signaux
+    # axes de type à un vocabulaire contrôlé - `study_design` via _STUDY_DESIGN_CASE,
+    # `article_type` via _PUB_TYPE_CASE - au lieu du texte libre. `d`/`p` = signaux
     # bruts en minuscules attendus par ces CASE. (source_type/scenario_type restent
     # disponibles mais le front ne montre plus le scénario ni les ids internes.)
     sql_doc = text(f"""

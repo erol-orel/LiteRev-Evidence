@@ -4,7 +4,7 @@
 Run by the deploy smoke test (.github/workflows/deploy.yml) against the freshly restarted
 API. It exists as a file rather than a shell one-liner for two reasons: the check is real
 logic and deserves tests (tests/test_check_health.py), and embedding it in the workflow
-meant a python heredoc inside a bash heredoc inside a YAML block scalar — three levels of
+meant a python heredoc inside a bash heredoc inside a YAML block scalar - three levels of
 indentation, any of which a later edit could silently break.
 
 What it adds over the `grep '"status":"ok"'` it replaced
@@ -12,12 +12,12 @@ What it adds over the `grep '"status":"ok"'` it replaced
 The startup DDL fails OPEN by design: a server that refuses to boot is worse than a
 degraded one. The cost is that a database missing a table answered /health with
 `status: ok` while /user-scenarios, /gesica/scenarios and /corpus/fulltext-stats all
-returned 500. That is not hypothetical — it is the fresh-database bug fixed in e060f3a,
+returned 500. That is not hypothetical - it is the fresh-database bug fixed in e060f3a,
 and the last of those endpoints is what this very smoke test calls next.
 
 `status` deliberately stays "ok" in that state so that a pre-existing degradation cannot
 fail every deployment (including the one carrying the fix). `schema.ok` is the field that
-tells the truth, and this script is what makes it BLOCKING — enabled once production was
+tells the truth, and this script is what makes it BLOCKING - enabled once production was
 confirmed clean (deploy 39759fe: ok=true, no missing tables, no dropped DDL).
 
 Parsed as JSON rather than grepped: `grep '"ok":true'` would match any future boolean
@@ -52,7 +52,7 @@ def problems(health) -> list[str]:
     if not isinstance(schema, dict):
         # An older build predating the schema block would otherwise pass silently, and
         # the deploy would go green having checked nothing it was added to check.
-        out.append("no `schema` block in /health — is the deployed build older than the "
+        out.append("no `schema` block in /health - is the deployed build older than the "
                    "schema integrity check?")
     elif schema.get("ok") is not True:
         missing = schema.get("missing_tables") or []
@@ -73,12 +73,12 @@ def main(argv: list[str]) -> int:
         raw = sys.stdin.read() if argv[1] == "-" else open(argv[1], encoding="utf-8").read()
         health = json.loads(raw)
     except Exception as e:
-        print(f"SMOKE TEST FAILED — could not read /health: {e}", file=sys.stderr)
+        print(f"SMOKE TEST FAILED - could not read /health: {e}", file=sys.stderr)
         return 1
 
     found = problems(health)
     if found:
-        print("SMOKE TEST FAILED — " + "; ".join(found), file=sys.stderr)
+        print("SMOKE TEST FAILED - " + "; ".join(found), file=sys.stderr)
         return 1
     print("health OK (status, database, schema all clean)")
     return 0

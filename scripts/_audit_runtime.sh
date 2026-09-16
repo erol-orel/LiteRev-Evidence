@@ -1,5 +1,5 @@
 set +e
-# NOTE: never `systemctl cat` this unit — its drop-in override.conf stores secrets in
+# NOTE: never `systemctl cat` this unit - its drop-in override.conf stores secrets in
 # Environment=. Use `systemctl show` and select only non-secret properties, and redact
 # any Environment= values defensively.
 echo "== UNIT STATE (no secrets) =="

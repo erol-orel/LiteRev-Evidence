@@ -1,9 +1,9 @@
-"""Pure-logic unit tests — no database or network required.
+"""Pure-logic unit tests - no database or network required.
 
 These cover the exact helpers behind recent production bugs:
-- `_job_is_active`  — the stale-job guard that stops "already_running" lock-outs.
-- `_llm_lang_directive` — FR/EN LLM output-language switch.
-- `_build_where` — the /search filter, incl. the Migration-1 Way-B scoping.
+- `_job_is_active` - the stale-job guard that stops "already_running" lock-outs.
+- `_llm_lang_directive` - FR/EN LLM output-language switch.
+- `_build_where` - the /search filter, incl. the Migration-1 Way-B scoping.
 """
 import time
 
@@ -43,9 +43,9 @@ def test_lang_directive_defaults_to_french():
 
 
 def test_lang_directive_non_string_falls_back_to_french():
-    # Regression for "'Query' object has no attribute 'strip'": a non-string —
+    # Regression for "'Query' object has no attribute 'strip'": a non-string -
     # e.g. a FastAPI Query object leaked by an internal direct call to an endpoint
-    # whose param defaults to Query(...) — must NOT crash, and falls back to French.
+    # whose param defaults to Query(...) - must NOT crash, and falls back to French.
     from fastapi import Query
     assert "français" in main._llm_lang_directive(Query(None)).lower()
     assert "français" in main._llm_lang_directive(object()).lower()
@@ -113,12 +113,12 @@ def test_normalize_sub_queries_non_list():
 def _patch_local_ids(monkeypatch, mapping):
     """Stub _search_local_doc_ids so each sub-query text maps to a fixed id set,
     and stub the NL→boolean translator to identity (a natural facet is translated
-    to boolean before matching — the identity stub keeps the mapping keyed on the
+    to boolean before matching - the identity stub keeps the mapping keyed on the
     raw text AND avoids any network call in the unit test)."""
     patch_app(monkeypatch, "_generate_search_strategy",
                         lambda q: {"general": q, "pubmed": q})
     def _fake(query, mode, filters, limit=10_000, threshold=0.45):
-        # Membership is now ALWAYS lexical/boolean — no facet uses semantic mode.
+        # Membership is now ALWAYS lexical/boolean - no facet uses semantic mode.
         assert mode == "boolean", f"corpus membership must be boolean, got mode={mode!r}"
         return list(mapping.get(query, []))
     patch_app(monkeypatch, "_search_local_doc_ids", _fake)
@@ -156,7 +156,7 @@ def test_multi_query_all_blank_is_empty(monkeypatch):
 
 def test_multi_query_natural_facet_is_translated_to_boolean(monkeypatch):
     # The heart of the fix: a NATURAL sub-query is translated to boolean (via
-    # _generate_search_strategy) and matched LEXICALLY — the semantic threshold
+    # _generate_search_strategy) and matched LEXICALLY - the semantic threshold
     # never decides corpus membership. A boolean sub-query is used verbatim.
     seen_modes: list[str] = []
 
@@ -177,13 +177,13 @@ def test_multi_query_natural_facet_is_translated_to_boolean(monkeypatch):
     # natural facet resolved via its TRANSLATED boolean → {1,2}; boolean facet → {2,3}
     assert sorted(main._multi_query_corpus_ids(sub, "union", {})) == [1, 2, 3]
     assert main._multi_query_corpus_ids(sub, "intersection", {}) == [2]
-    # every membership lookup ran in boolean mode — semantic never touches the corpus
+    # every membership lookup ran in boolean mode - semantic never touches the corpus
     assert set(seen_modes) == {"boolean"}
 
 
 def test_multi_query_translation_failure_falls_back_to_raw_text(monkeypatch):
     # If NL→boolean translation raises (or no OpenAI key), the raw text is used as
-    # the boolean — membership still works, just without synonym expansion.
+    # the boolean - membership still works, just without synonym expansion.
     def _boom(_q):
         raise RuntimeError("no openai key")
     patch_app(monkeypatch, "_generate_search_strategy", _boom)
@@ -200,7 +200,7 @@ def test_multi_query_per_facet_op_left_to_right(monkeypatch):
     sub = [{"kind": "boolean", "text": "M"},
            {"kind": "boolean", "text": "A", "op": "or"},
            {"kind": "boolean", "text": "B", "op": "and"}]
-    # ((M ∪ A) ∩ B) = ({1,2,3} ∩ {2,4}) = {2}  — note it is NOT plain union or intersection
+    # ((M ∪ A) ∩ B) = ({1,2,3} ∩ {2,4}) = {2} - note it is NOT plain union or intersection
     assert main._multi_query_corpus_ids(sub, "union", {}) == [2]
 
 
@@ -327,7 +327,7 @@ def test_user_scenario_patch_caps_overlong_name():
 
 # ── _sentiweb_latest_value (the /terrain/epidemic silent-fallback bug) ────────
 def test_sentiweb_parse_picks_latest_week_inc100():
-    # Real Sentiweb shape: {"data": [{"week", "inc100", "inc"}, …]} — pick max week's inc100.
+    # Real Sentiweb shape: {"data": [{"week", "inc100", "inc"}, …]} - pick max week's inc100.
     res = {"data": [
         {"week": 202405, "inc100": 120.0, "inc": 9000},
         {"week": 202407, "inc100": 155.5, "inc": 12000},   # most recent
@@ -535,8 +535,8 @@ def test_assemble_per_variable_aggregation():
     df, _ = main._assemble_connector_frames(frames, mappings, "W", None)
     assert len(df) == 1
     assert df["t"].iloc[0] == 4.0     # mean(2,4,6)
-    assert df["p"].iloc[0] == 6.0     # sum(1,2,3) — not mean
-    assert df["r"].iloc[0] == 30.0    # last(10,20,30) — not mean
+    assert df["p"].iloc[0] == 6.0     # sum(1,2,3) - not mean
+    assert df["r"].iloc[0] == 30.0    # last(10,20,30) - not mean
 
 
 # ── _looks_boolean (auto-detect boolean vs natural, no manual toggle) ─────────
@@ -590,7 +590,7 @@ def test_post_search_facets_counts_union_and_intersection(monkeypatch):
 
 def test_generate_search_strategy_returns_cached_copy():
     # A cached (valid) translation is returned WITHOUT touching the LLM/network, and as
-    # a COPY — mutating the caller's dict must not corrupt the cache.
+    # a COPY - mutating the caller's dict must not corrupt the cache.
     main._STRATEGY_CACHE.clear()
     main._STRATEGY_CACHE["flu forecasting"] = {"general": "CACHED", "degraded": False}
     res = main._generate_search_strategy("  flu forecasting  ")   # trimmed → same key
@@ -716,7 +716,7 @@ def test_boolean_parser_and_or_not_and_fallback():
     # scenario corpus up to the entire database. See fix in _build_boolean_match_sql_from_query.
     assert main._build_boolean_match_sql_from_query("", {}) == "FALSE"
     # Term membership is PER DOCUMENT (correlated EXISTS over chunks), not per
-    # document_chunk row — otherwise `NOT` leaked excluded articles into the corpus
+    # document_chunk row - otherwise `NOT` leaked excluded articles into the corpus
     # (a doc kept if any OTHER chunk lacked the term). The compiled SQL must use the
     # EXISTS subquery for the chunk part, and NOT for the exclusion.
     _not_sql = main._build_boolean_match_sql_from_query("cancer NOT benign", {})
@@ -728,7 +728,7 @@ def test_boolean_parser_and_or_not_and_fallback():
 def test_normalize_title_canonicalizes_for_dedup():
     # same paper, different punctuation/case/spacing from two sources → identical key
     a = main._normalize_title("Global Ranking of Schools of Public Health: A Systematic Review")
-    b = main._normalize_title("  global ranking of schools of public health — a systematic review  ")
+    b = main._normalize_title("  global ranking of schools of public health - a systematic review  ")
     assert a == b == "global ranking of schools of public health a systematic review"
     # SQL backfill uses the SAME normalization, so on-ingest and backfilled keys agree
     assert main._normalize_title("SARS-CoV-2: Omicron (BA.5)") == "sars cov 2 omicron ba 5"
@@ -746,7 +746,7 @@ def _tpl_with_feature():
 
 def test_validation_counts_only_real_features():
     """n_features_present counted EVERY non-outcome column, including the datetime one,
-    so the report showed present > total — an impossible ratio."""
+    so the report showed present > total - an impossible ratio."""
     r = main._validate_dataset_against_template(
         ["date", "ed_visits", "temp_mean"], _tpl_with_feature(), {}, n_rows=50)
     assert r["n_features_total"] == 1
@@ -757,7 +757,7 @@ def test_validation_counts_only_real_features():
 
 def test_a_dataset_with_no_explanatory_variable_cannot_train():
     """The real damage: can_train requires n_features_present >= 1, so a file holding
-    only a date and the outcome — zero predictors — was declared ready to train."""
+    only a date and the outcome - zero predictors - was declared ready to train."""
     r = main._validate_dataset_against_template(
         ["date", "ed_visits"], _tpl_with_feature(), {}, n_rows=50)
     assert r["n_features_present"] == 0
@@ -774,7 +774,7 @@ def test_health_exposes_a_degraded_schema():
         main._SCHEMA_DDL_FAILURES.clear()
         cl = TestClient(main.app)
         # /health opens a connection, so with no database it RAISES rather than
-        # returning a body — this file also runs in the conftest's no-database mode.
+        # returning a body - this file also runs in the conftest's no-database mode.
         try:
             body = cl.get("/health").json()
         except Exception:

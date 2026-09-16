@@ -1,5 +1,5 @@
 """Correctness tests for the Model tab's real training (model_trainer.py) and the
-upload validator guards. No DB or network — model_trainer is a pure DataFrame→dict
+upload validator guards. No DB or network - model_trainer is a pure DataFrame→dict
 module; the validator is a pure function (main is import-only, env set by conftest).
 
 These lock in the audit: reported metrics match an INDEPENDENT recomputation, the
@@ -175,7 +175,7 @@ def test_reproducible_same_seed():
 # ── boosting families + model comparison leaderboard ─────────────────────────
 def test_effective_family_downgrades_absent_boosting_honestly():
     # lightgbm/xgboost fall back to gradient_boosting ONLY when the package is
-    # absent — and the reported family must reflect the fallback (no mislabel).
+    # absent - and the reported family must reflect the fallback (no mislabel).
     for fam in ("lightgbm", "xgboost"):
         eff = mt._effective_family(fam, "regression")
         if mt._has_package(fam):
@@ -225,7 +225,7 @@ def test_compare_models_ranks_and_picks_best():
 
 
 def test_compare_models_best_matches_standalone_train():
-    # On a linear DGP the linear model should win (or tie) — and the leaderboard
+    # On a linear DGP the linear model should win (or tie) - and the leaderboard
     # value for a family must equal what train_model reports for it alone.
     df = _linear_df()
     res = mt.compare_models(df, _reg_spec(), n_trials=5)

@@ -159,7 +159,7 @@ def _clustering_docs(scenario_id: str, threshold: float, cap: int | None = None)
     Renvoie (docs, nombre total de documents éligibles).
 
     Sans plafond, 25 000 documents = 25 000 embeddings à parser puis UMAP sur une
-    matrice 25 000 × 1536 : 88 s et un pic de 3 Go de RAM — de quoi faire tuer le
+    matrice 25 000 × 1536 : 88 s et un pic de 3 Go de RAM - de quoi faire tuer le
     processus API sur le serveur. Les clusters sont visuellement identiques sur les
     3 000 articles les plus pertinents."""
     cap = CLUSTER_MAX_DOCS if cap is None else max(5, int(cap))
@@ -200,7 +200,7 @@ def _clustering_docs(scenario_id: str, threshold: float, cap: int | None = None)
 
 # ── Caches de visualisation persistés en DB (scenario_settings) ───────────────
 # Un SEUL couple load/save par visualisation, partagé par le pipeline, le
-# précalcul et les endpoints — plus de duplication ni de cache /tmp éphémère.
+# précalcul et les endpoints - plus de duplication ni de cache /tmp éphémère.
 
 _VIZ_COLS = {
     "clustering": ("clustering_json", "clustering_generated_at"),
@@ -446,7 +446,7 @@ def _persist_clustering_result(scenario_id: str, result: dict) -> None:
 
 def _relocalize_clustering_background(scenario_id: str, payload: dict, lang: str) -> None:
     """Thread : résumés des clusters dans la langue demandée (structure conservée),
-    puis mise en cache — la page interroge /clustering/status jusqu'à « done »."""
+    puis mise en cache - la page interroge /clustering/status jusqu'à « done »."""
     try:
         result = _summarize_clusters_in_lang(scenario_id, payload, lang)
         _persist_clustering_result(scenario_id, result)
@@ -543,7 +543,7 @@ def _run_clustering_background(scenario_id: str, force_refresh: bool = False, la
     TTL = 86400
     want = _norm_lang(lang) or "fr"
 
-    # Vérifier le cache d'abord — dans la LANGUE demandée : un cache frais dont les
+    # Vérifier le cache d'abord - dans la LANGUE demandée : un cache frais dont les
     # résumés sont dans l'autre langue (ou sans résumés) garde sa structure, seuls les
     # résumés sont régénérés. Avant, le cache était servi tel quel → résumés en
     # français sous le toggle anglais.
@@ -567,13 +567,13 @@ def _run_clustering_background(scenario_id: str, force_refresh: bool = False, la
         try:
             meta_for_cluster = _get_db_gesica_scenario_or_404(scenario_id)
         except Exception:
-            pass  # Scénario utilisateur ou non trouvé — on continue sans métadonnées
+            pass  # Scénario utilisateur ou non trouvé - on continue sans métadonnées
     except Exception:
         meta_for_cluster = {}
     try:
 
         # Clustering sur le SOUS-ENSEMBLE PERTINENT (≥ seuil sémantique OU inclus
-        # manuellement ; jamais les exclus) — comme le knowledge graph et l'Assistant
+        # manuellement ; jamais les exclus) - comme le knowledge graph et l'Assistant
         # RAG. Sinon les topics étaient dilués par les centaines d'articles hors-sujet
         # ramenés par la fédération.
         _thr = _get_scenario_threshold(scenario_id)
@@ -603,7 +603,7 @@ def _run_clustering_background(scenario_id: str, force_refresh: bool = False, la
         embedding_source = _cc["embedding_source"]
         logger.info(f"Clustering {scenario_id}: {len(docs)} docs, source={embedding_source}, method={method_used}")
 
-        # Construction du payload (helper PARTAGÉ avec le pipeline — plus de copie).
+        # Construction du payload (helper PARTAGÉ avec le pipeline - plus de copie).
         result = _build_clusters_payload(
             scenario_id, docs, _cc, with_summaries=True, openai_key=openai_key,
             title=(_gesica_title(meta_for_cluster) if meta_for_cluster else None),

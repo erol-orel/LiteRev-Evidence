@@ -1,4 +1,4 @@
-# Real-dataset trial — environment → influenza
+# Real-dataset trial - environment → influenza
 
 This documents the first end-to-end training run on a **real public dataset**, on the
 influenza theme, using the product's own stack: the real data connectors
@@ -9,7 +9,7 @@ Runner: [`scripts/trial_weather_influenza_ili.py`](../scripts/trial_weather_infl
 
 Influenza has strong, well-characterised environmental drivers (cold, dry air) and rich
 open surveillance data, so the extracted predictor variables (temperature, humidity) and
-the outcome (influenza-like illness) both have real, machine-readable datasets — exactly
+the outcome (influenza-like illness) both have real, machine-readable datasets - exactly
 the criterion for a first real trial.
 
 The predictor connector already shipped (`open-meteo-weather`, live in production). The
@@ -18,14 +18,14 @@ missing piece was the **clinical ILI outcome**: this trial adds the
 influenza-like-illness consultation incidence, opendata.swiss), which the app previously
 flagged as *"not yet wired → manual upload"*. Weekly ISO-week rows are converted to the
 week's Monday date so the series join-aligns with the daily weather connector after weekly
-resampling — the same assembly the app performs in `_assemble_connector_frames`.
+resampling - the same assembly the app performs in `_assemble_connector_frames`.
 
 ## Two modes (identical assemble → train code path)
 
 | mode | features | outcome | egress |
 |------|----------|---------|--------|
-| `weather-ili` | `open-meteo-weather` (temperature, humidity, precip, wind) | `foph-sentinella-ili` (clinical ILI incidence) | open-meteo + opendata.swiss — **production** |
-| `ch-influenza` *(default)* | co-circulating RSV / influenza-B / SARS-CoV-2 loads + seasonal (climatic) harmonics | influenza-A wastewater load (a validated influenza-activity signal) | GitHub only — **reproducible anywhere** |
+| `weather-ili` | `open-meteo-weather` (temperature, humidity, precip, wind) | `foph-sentinella-ili` (clinical ILI incidence) | open-meteo + opendata.swiss - **production** |
+| `ch-influenza` *(default)* | co-circulating RSV / influenza-B / SARS-CoV-2 loads + seasonal (climatic) harmonics | influenza-A wastewater load (a validated influenza-activity signal) | GitHub only - **reproducible anywhere** |
 
 `weather-ili` is the headline topic but needs egress that only production has
 (open-meteo and opendata.swiss are blocked from CI/sandboxes). The default `ch-influenza`
@@ -48,9 +48,9 @@ feature importance (by variable)
 ```
 
 The trained model attributes influenza-A activity primarily to the **seasonal cycle**,
-with a secondary **co-circulation** signal from influenza-B — epidemiologically sensible,
+with a secondary **co-circulation** signal from influenza-B - epidemiologically sensible,
 learned end-to-end from real surveillance data. (Random k-fold CV is unreliable on a
-67-week seasonal series — a fold can hold out an entire season — so the held-out test R²
+67-week seasonal series - a fold can hold out an entire season - so the held-out test R²
 is the honest generalisation estimate.) The full dataset and results are committed under
 [`scripts/trial_output/`](../scripts/trial_output/) for reproducibility.
 
@@ -69,10 +69,10 @@ weather → `open-meteo-weather` and ILI → `foph-sentinella-ili`, fetches, and
 ## Built-in demo scenario
 
 So the trial is visible in the product (not just a script), a **pinned demo scenario**
-"Influenza & environment — Switzerland (demo)" is seeded on startup
+"Influenza & environment - Switzerland (demo)" is seeded on startup
 (`main._seed_demo_scenarios` + `demo_seed.py`). On boot it idempotently (stable id
 `usr-deadbeef0001`) trains the model on the committed real dataset and writes the four rows
-the dashboard/monitor need — `user_scenarios`, `scenario_settings.variables_json.model_spec`,
+the dashboard/monitor need - `user_scenarios`, `scenario_settings.variables_json.model_spec`,
 an active `scenario_model_dataset` (the real CSV), and an active `scenario_model_run` (the
 joblib artifact). It appears in the scenario list with the model dashboard populated:
 predicted value, alert colour, metrics, hyperparameters and feature importances. The seed is

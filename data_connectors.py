@@ -1,8 +1,8 @@
-"""data_connectors.py — Phase-2 public-data connectors.
+"""data_connectors.py - Phase-2 public-data connectors.
 
 Each connector fetches a REAL, machine-readable public data source and returns a
-TIDY daily time series — a list of {"date": "YYYY-MM-DD", <machine_name>: value, …}
-rows — that can be joined into a scenario's modeling dataset on the date key,
+TIDY daily time series - a list of {"date": "YYYY-MM-DD", <machine_name>: value, …}
+rows - that can be joined into a scenario's modeling dataset on the date key,
 instead of asking the user to upload a CSV.
 
 Design goals (mirrors model_trainer.py):
@@ -234,9 +234,9 @@ def _fetch_eawag(params: dict) -> list[dict]:
 # ── FOPH wastewater respiratory-virus monitoring (opendata.swiss CSV) ─────────
 # CONFIRMED live via a prod fetch of opendata.swiss package "influenza1": 70k+ rows
 # since 2022 with columns date, value, valuemean7d, conc, flow, pop. This is FOPH
-# WASTEWATER influenza monitoring (normalized viral load) — NOT clinical Sentinella
+# WASTEWATER influenza monitoring (normalized viral load) - NOT clinical Sentinella
 # ILI/ARI. The raw feed multiplexes many treatment plants, so rows are aggregated
-# per date into ONE national series (mean load/concentration, summed pop/flow) — a
+# per date into ONE national series (mean load/concentration, summed pop/flow) - a
 # downstream join therefore can never receive duplicate dates. Pass a column filter
 # (e.g. {"geoRegion": "GE"}) to narrow to a single region/plant before aggregation.
 _GENERIC_DATE_KEYS = {"date", "week", "yearweek", "year_week", "time", "datum", "temporal", "woche"}
@@ -389,8 +389,8 @@ _FOPH_PARAMS = {
 }
 
 
-# ── FOPH Sentinella — clinical influenza-like illness (ILI), opendata.swiss ────
-# The CLINICAL ILI signal (Sentinella sentinel-GP network) — the influenza-ILI
+# ── FOPH Sentinella - clinical influenza-like illness (ILI), opendata.swiss ────
+# The CLINICAL ILI signal (Sentinella sentinel-GP network) - the influenza-ILI
 # OUTCOME, distinct from the wastewater viral-load connector above. FOPH publishes
 # weekly ILI consultation incidence; the exact opendata.swiss resource id shifts
 # each season, so resolution order is: explicit url= → FOPH_SENTINELLA_CSV_URL env
@@ -410,7 +410,7 @@ _SENTINELLA_RESERVED = {"url", "start_date", "end_date", "region", "value_col",
 def _isoweek_to_date(token) -> str | None:
     """'2023-W05' / '2023W05' / '202305' / '2023-05' (ISO year-week) → 'YYYY-MM-DD'
     (Monday of that ISO week). A plain 'YYYY-MM-DD' passes through unchanged. None if
-    unparseable. PURE — lets a weekly ILI series align onto the daily connectors' grid."""
+    unparseable. PURE - lets a weekly ILI series align onto the daily connectors' grid."""
     import re as _re
     from datetime import date as _date
     s = str(token or "").strip()
@@ -537,9 +537,9 @@ _SENTINELLA_PARAMS = {
 CONNECTORS: dict[str, Connector] = {
     "open-meteo-weather": Connector(
         id="open-meteo-weather",
-        name="Open-Meteo — Weather (historical daily)",
+        name="Open-Meteo - Weather (historical daily)",
         provider="Open-Meteo (ERA5 / Copernicus)",
-        license="CC BY 4.0 — free tier NON-commercial",
+        license="CC BY 4.0 - free tier NON-commercial",
         geo="point",
         commercial_ok=False,
         variables=[
@@ -553,13 +553,13 @@ CONNECTORS: dict[str, Connector] = {
         fetch=_fetch_open_meteo_weather,
         params_schema=_POINT_PARAMS,
         notes="Already used live by /terrain/meteo. Point source: any Romandie coords. "
-              "Free tier is non-commercial — a production deployment needs a paid/self-hosted plan.",
+              "Free tier is non-commercial - a production deployment needs a paid/self-hosted plan.",
     ),
     "open-meteo-air-quality": Connector(
         id="open-meteo-air-quality",
-        name="Open-Meteo — Air Quality (Copernicus CAMS)",
+        name="Open-Meteo - Air Quality (Copernicus CAMS)",
         provider="Open-Meteo (Copernicus CAMS)",
-        license="CC BY 4.0 — free tier NON-commercial",
+        license="CC BY 4.0 - free tier NON-commercial",
         geo="point",
         commercial_ok=False,
         variables=[
@@ -574,7 +574,7 @@ CONNECTORS: dict[str, Connector] = {
     ),
     "eawag-wastewater": Connector(
         id="eawag-wastewater",
-        name="EAWAG — Respiratory-virus wastewater (Romandie catchments)",
+        name="EAWAG - Respiratory-virus wastewater (Romandie catchments)",
         provider="EAWAG / FOPH (national wastewater programme)",
         license="CC BY 4.0",
         geo="catchment",
@@ -592,7 +592,7 @@ CONNECTORS: dict[str, Connector] = {
     ),
     "foph-wastewater": Connector(
         id="foph-wastewater",
-        name="FOPH — Influenza wastewater (normalized viral load, live)",
+        name="FOPH - Influenza wastewater (normalized viral load, live)",
         provider="Federal Office of Public Health (opendata.swiss 'influenza1')",
         license="opendata.swiss terms of use",
         geo="national",
@@ -607,15 +607,15 @@ CONNECTORS: dict[str, Connector] = {
         fetch=_fetch_foph_wastewater,
         params_schema=_FOPH_PARAMS,
         notes="LIVE influenza WASTEWATER monitoring (opendata.swiss 'influenza1'), weekly since 2022 "
-              "(70k+ rows confirmed) — NOT clinical Sentinella ILI/ARI. The raw feed multiplexes "
+              "(70k+ rows confirmed) - NOT clinical Sentinella ILI/ARI. The raw feed multiplexes "
               "treatment plants; rows are aggregated per date into a national series (mean load/conc, "
               "summed pop/flow). Pass a column filter (e.g. geoRegion=GE) to narrow to one region, or "
               "set FOPH_WASTEWATER_CSV_URL. Clinical ILI/ARI is served by 'foph-sentinella-ili'.",
     ),
     "foph-sentinella-ili": Connector(
         id="foph-sentinella-ili",
-        name="FOPH Sentinella — Influenza-like illness (clinical ILI, weekly)",
-        provider="Federal Office of Public Health — Sentinella sentinel-GP network (opendata.swiss)",
+        name="FOPH Sentinella - Influenza-like illness (clinical ILI, weekly)",
+        provider="Federal Office of Public Health - Sentinella sentinel-GP network (opendata.swiss)",
         license="opendata.swiss terms of use",
         geo="national",
         commercial_ok=True,
@@ -731,7 +731,7 @@ def _fetch_seir_projection(params: dict) -> list[dict]:
 CONNECTORS[SEIR_CONNECTOR_ID] = Connector(
     id=SEIR_CONNECTOR_ID,
     name="Projection SEIR (paramétrée par la littérature)",
-    provider="LiteRev — modèle compartimental",
+    provider="LiteRev - modèle compartimental",
     license="interne (modèle) ; paramètres tracés vers les articles source",
     geo="model",
     commercial_ok=True,

@@ -1,4 +1,4 @@
-"""Token accounting, the master switch and the daily budget — no API key, no network.
+"""Token accounting, the master switch and the daily budget - no API key, no network.
 
 The accounting exists because the app spent money invisibly. So the properties that matter
 are not "it records the happy path" but: it never breaks the call it measures, it cannot be
@@ -6,7 +6,7 @@ fooled by a response shape it did not expect, and a switch that is supposed to s
 actually stops it BEFORE the request goes out.
 
 `llm_usage` deliberately imports `openai` only inside the two factory functions, so this
-whole file runs on a machine that has never installed the SDK — which is what CI is.
+whole file runs on a machine that has never installed the SDK - which is what CI is.
 """
 import sys
 import types
@@ -129,7 +129,7 @@ def test_the_master_switch_blocks_before_the_request_is_made(monkeypatch):
     cl = _client(lambda **kw: calls.append(kw) or _Resp(_Usage(1, 1)), None)
     with pytest.raises(llm_usage.LLMCallBlocked):
         cl.chat.completions.create(model="m")
-    assert calls == [], "a disabled call must not reach the API — that is the whole point"
+    assert calls == [], "a disabled call must not reach the API - that is the whole point"
 
 
 @pytest.mark.parametrize("value", ["0", "false", "no", "off", "OFF"])
@@ -221,7 +221,7 @@ def test_the_real_sdk_can_actually_be_instrumented(monkeypatch):
     """`instrument` assigns over `create` on a live client. If the SDK ever makes those
     resources immutable (slots, a frozen model), metering would silently stop and the
     only symptom would be an empty table next to a real invoice. Skipped where the SDK
-    is not installed — CI does not install it — so it guards the machines that matter.
+    is not installed - CI does not install it - so it guards the machines that matter.
     """
     openai = pytest.importorskip("openai")
     monkeypatch.setenv("OPENAI_ENABLED", "0")

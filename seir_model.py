@@ -1,12 +1,12 @@
 """Modèles compartimentaux de la famille SEIR, paramétrés par la littérature.
 
-Fonctions PURES — pas de base de données, pas de réseau, **bibliothèque standard
+Fonctions PURES - pas de base de données, pas de réseau, **bibliothèque standard
 seulement** (`math`, `random`). Les numériques sont donc testables en CI sans
 scipy/numpy. Intégrateur RK4 déterministe + un ensemble de propagation
 d'incertitude qui échantillonne les distributions de paramètres issues des articles.
 
 Sélection AUTOMATIQUE du modèle : la structure la plus riche que les paramètres
-disponibles permettent — un seul membre de droite généralisé couvre toutes les
+disponibles permettent - un seul membre de droite généralisé couvre toutes les
 combinaisons (SIR, SEIR, SEIRD, SEIRS, SEIRDS…) :
 
   * compartiment latent E  ⇐ une période d'incubation est connue   → SEIR sinon SIR
@@ -33,7 +33,7 @@ import random
 from dataclasses import dataclass
 
 # 8 compartiments d'état intégrés : S, E, I, R, D, C, V, Q (C = infections cumulées,
-# accumulateur monotone distinct — hors conservation S+E+I+R+D+V+Q = N). V (vaccinés) et
+# accumulateur monotone distinct - hors conservation S+E+I+R+D+V+Q = N). V (vaccinés) et
 # Q (isolés/quarantaine) sont DÉSACTIVÉS (restent 0) sans leur paramètre → modèles de base
 # strictement inchangés (S+E+I+R+D = N, cf. relation de taille finale).
 _N_STATE = 8
@@ -83,7 +83,7 @@ def _rates(p: SeirParams) -> dict:
 
     Lève ValueError si la période infectieuse n'est pas physiquement plausible : une
     durée nulle/négative donnait gamma = 1e6/j, soit une « maladie » qui infecte puis
-    guérit en une fraction de seconde — et la trajectoire absurde qui va avec. Mieux
+    guérit en une fraction de seconde - et la trajectoire absurde qui va avec. Mieux
     vaut échouer franchement (simulate_ensemble écarte le tirage) que rendre un chiffre
     faux avec assurance."""
     per = p.infectious_period_days
@@ -122,7 +122,7 @@ def _rates(p: SeirParams) -> dict:
     # R0 = reproduction de BASE (sans intervention) = beta/gamma. Rc = reproduction
     # CONTRÔLÉE : l'isolement retire les infectieux au taux kappa, donc la durée
     # infectieuse effective tombe à 1/(gamma+kappa). Sans quarantaine, Rc == R0.
-    # C'est Rc — pas R0 — qui doit piloter r_eff, sinon on affiche « R > 1 » sur une
+    # C'est Rc - pas R0 - qui doit piloter r_eff, sinon on affiche « R > 1 » sur une
     # épidémie que le modèle lui-même montre en train de s'éteindre.
     return {
         "beta": beta, "gamma": gamma, "sigma": sigma, "omega": omega, "cfr": cfr,
@@ -251,7 +251,7 @@ def simulate(p: SeirParams, days: int = 365, dt: float = 0.25) -> dict:
             y = _rk4_step(y, r, step)
             # Divergence numérique : NaN/inf. Le bornage ci-dessous ne peut PAS l'attraper
             # (`nan < 0.0` vaut False), donc sans ce test le NaN se propageait jusqu'au
-            # résumé — attack_rate = nan, peak_prevalence = inf — sans la moindre erreur.
+            # résumé - attack_rate = nan, peak_prevalence = inf - sans la moindre erreur.
             if not all(math.isfinite(v) for v in y):
                 raise ValueError(
                     f"SEIR: l'intégration a divergé au jour {day} "
@@ -302,14 +302,14 @@ class ParamDist:
     """Distribution d'un paramètre : moyenne + IC 95 % (facultatif) issus du corpus.
 
     Échantillonnée comme une normale tronquée au domaine PHYSIQUE du paramètre. Sans IC
-    (ou IC dégénéré), la valeur est fixe (== moyenne) — l'incertitude ne vient alors que
+    (ou IC dégénéré), la valeur est fixe (== moyenne) - l'incertitude ne vient alors que
     des autres paramètres.
 
     `kind` porte l'UNITÉ, et donc le domaine valide :
       • "rate"     (défaut) : > 0, plancher de positivité ;
       • "period"   : une durée en JOURS, plancher `_MIN_PERIOD_DAYS` ;
       • "fraction" : une proportion, bornée à [0, 1].
-    Sans cette distinction, un plancher de 1e-9 — correct pour un taux — s'appliquait à
+    Sans cette distinction, un plancher de 1e-9 - correct pour un taux - s'appliquait à
     une durée et fabriquait, dans ~2 % des tirages de CHAQUE ensemble, une maladie dont
     la période infectieuse valait un milliardième de jour. Ces trajectoires absurdes
     (pics à 10⁷–10¹¹ cas/j) remontaient telles quelles dans l'IC publié."""
@@ -580,7 +580,7 @@ def calibrate_to_observed(observed, base_params: dict, column: str = "incidence"
     """Ajuste R0 à une série OBSERVÉE par moindres carrés. L'écart d'UNITÉ entre le
     modèle (effectifs) et l'observé (cas, %, /100k…) est absorbé par un facteur
     d'échelle multiplicatif k, optimal analytiquement pour chaque R0 (moindres carrés
-    linéaires) — on ajuste ainsi la FORME/TIMING via R0 et l'AMPLITUDE via k.
+    linéaires) - on ajuste ainsi la FORME/TIMING via R0 et l'AMPLITUDE via k.
 
     `observed` = liste de (jour_offset, valeur) ; `base_params` = valeurs (moyennes)
     des autres paramètres (période infectieuse, incubation, cfr, population…) ;
@@ -649,7 +649,7 @@ def align_observed(points) -> dict:
     alignés sur l'axe du modèle. Les dates ISO deviennent des offsets depuis la PLUS
     ANCIENNE (jour 0) ; les jours numériques sont gardés tels quels. Renvoie
     `{points:[(day:float, value:float)], start_date:str|None, n:int}` trié par jour.
-    PUR — ancre le t=0 du modèle sur la première observation."""
+    PUR - ancre le t=0 du modèle sur la première observation."""
     import re as _re
     from datetime import date as _date
     parsed = []
@@ -752,7 +752,7 @@ def _is_percent_unit(unit) -> bool:
 
 
 def _coerce_ids(prov) -> list[int]:
-    """Ids d'articles coercés en int et dédupliqués, dans l'ordre — sans filtrage."""
+    """Ids d'articles coercés en int et dédupliqués, dans l'ordre - sans filtrage."""
     out: list[int] = []
     for i in prov or []:
         try:
@@ -783,24 +783,24 @@ def normalize_extracted_parameters(raw, valid_ids=None, quality_by_id=None,
                                    min_peer_studies=MIN_PEER_STUDIES) -> dict:
     """Nettoie le bloc `epidemic_parameters` d'une extraction LLM en un bloc
     DÉTERMINISTE : nombres coercés, provenance filtrée sur `valid_ids` (le pool
-    pertinent — si fourni), et SEULS les paramètres dont la valeur centrale est un
+    pertinent - si fourni), et SEULS les paramètres dont la valeur centrale est un
     nombre conservés. Renvoie
     ``{applicable, disease, params:{nom:{value,ci_low,ci_high,unit,n_studies,provenance}},
     params_context, cited}``.
     Si `quality_by_id` est fourni ET qu'un paramètre porte des `observations` par étude,
     l'estimation « narrative » du LLM est REMPLACÉE par un POOL NUMÉRIQUE pondéré par la
-    qualité (cf. pool_weighted) dès qu'au moins deux études pèsent — plus rigoureux et
+    qualité (cf. pool_weighted) dès qu'au moins deux études pèsent - plus rigoureux et
     reproductible. Pur (aucune I/O) : testable sans base ni réseau.
 
-    `grey_ids` — les observations issues de LITTÉRATURE GRISE (rapports de situation
+    `grey_ids` - les observations issues de LITTÉRATURE GRISE (rapports de situation
     ReliefWeb, communiqués). Elles sont soumises à deux règles, car `quality_by_id` EST
     le poids de pooling et un rapport de situation y valait 0.55 contre 0.774 pour un
-    essai randomisé — un rapport dépassait même un case report revu par les pairs (0.386) :
+    essai randomisé - un rapport dépassait même un case report revu par les pairs (0.386) :
 
       1. la littérature grise ne peut jamais ÉTABLIR un paramètre. Sous
          `min_peer_studies` observations revues par les pairs, les observations grises
          sont retirées du pool et renvoyées à part dans `params_context` (« rapporté sur
-         le terrain, non poolé ») — jamais transmises à `params_to_distributions` ;
+         le terrain, non poolé ») - jamais transmises à `params_to_distributions` ;
       2. quand des données revues par les pairs existent, la grise entre avec un poids
          plafonné à `grey_weight_cap` (0.10), soit ≥ 6× plus léger qu'un article médiocre.
          Elle peut nuancer ; elle ne peut pas piloter.
@@ -826,7 +826,7 @@ def normalize_extracted_parameters(raw, valid_ids=None, quality_by_id=None,
         hi = _num_or_none(blk.get("ci_high"))
         if lo is not None and hi is not None and lo > hi:
             lo, hi = None, None  # IC incohérent → ignoré (pas de fausse incertitude)
-        # Sans `valid_ids`, on ne peut pas FILTRER la provenance — mais la jeter revenait
+        # Sans `valid_ids`, on ne peut pas FILTRER la provenance - mais la jeter revenait
         # à annoncer « n études » sans le moindre article cliquable en face. On la garde
         # telle quelle (dédupliquée, coercée en int) ; le filtrage n'a lieu que si un pool
         # de référence est fourni.
@@ -943,7 +943,7 @@ def params_to_distributions(params) -> dict:
 # alias Romandie/Léman restent cohérents avec data_connectors._REGION_COORDS.
 _GEO_POPULATION: dict[str, float] = {
     "world": 8_000_000_000, "global": 8_000_000_000, "worldwide": 8_000_000_000, "monde": 8_000_000_000,
-    # NB: pas de clé « eu » — c'est le participe passé du verbe avoir, qui apparaît
+    # NB: pas de clé « eu » - c'est le participe passé du verbe avoir, qui apparaît
     # dans n'importe quel titre français (« ont eu ») et ancrait la projection sur
     # 449 millions d'habitants. Les formes non ambiguës suffisent.
     "europe": 745_000_000, "european union": 449_000_000, "union européenne": 449_000_000,
@@ -996,7 +996,7 @@ def population_for_geography_in_text(text) -> tuple[float, str] | None:
     plus LOCALE citée (plus petite population) : « … en suisse romande » → Romandie (2M)
     plutôt que « suisse » (8.8M) ou « monde ». Correspondance par MOTS (frontières de
     mots après normalisation accents/séparateurs → espaces) pour éviter les collisions
-    de sous-chaîne. PUR — sert à ancrer la projection SEIR sur la géographie du scénario,
+    de sous-chaîne. PUR - sert à ancrer la projection SEIR sur la géographie du scénario,
     car le corpus d'un sujet épidémique est international (géographie modale ≈ « world »)."""
     t = _norm_ascii(text)
     if not t:
@@ -1181,7 +1181,7 @@ _SEIR_PARAM_SUBSTR: tuple[str, ...] = (
 
 def is_seir_parameter(text) -> bool:
     """True si la variable est un PARAMÈTRE du sous-modèle SEIR (R0/CFR/incubation/
-    intervalle sériel…) — un input de simulation, jamais une feature du prédicteur. PUR."""
+    intervalle sériel…) - un input de simulation, jamais une feature du prédicteur. PUR."""
     t = _norm_ascii(text)
     if not t:
         return False

@@ -2,7 +2,7 @@
 
 These lock in an audit finding: `epidemic_parameters.applicable` was never checked, so a
 scenario the extraction had explicitly flagged as NON-transmissible still rendered a full
-compartmental projection as soon as one stray numeric parameter survived normalisation —
+compartmental projection as soon as one stray numeric parameter survived normalisation -
 a clinician would see an epidemic curve for an oncology scenario. A second gate stops the
 engine's hard-coded R0 = 2.5 fallback from being presented as literature-derived.
 

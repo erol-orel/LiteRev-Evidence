@@ -38,7 +38,7 @@ def _run_semantic_rerank_inline(scenario_id: str, query: str) -> int:
     Optimisé : on RÉUTILISE les embeddings pgvector déjà stockés
     (document_chunk.embedding) et on calcule le cosinus EN BASE en UNE requête
     (au lieu de ré-embedder chaque résumé via OpenAI + cosinus Python + une
-    transaction par article — ce qui rendait l'étape très lente). On ne ré-embedde
+    transaction par article - ce qui rendait l'étape très lente). On ne ré-embedde
     via OpenAI QUE les articles fraîchement ingérés dont les chunks ne sont pas
     encore vectorisés (minorité)."""
     try:
@@ -111,7 +111,7 @@ def _run_semantic_rerank_inline(scenario_id: str, query: str) -> int:
                     break  # toute erreur : on arrête (évite une boucle infinie)
             else:
                 logger.warning(f"Rerank {scenario_id}: plafond de repli atteint "
-                               f"({_MAX_FALLBACK_BATCHES * 100} articles) — certains peuvent rester non scorés.")
+                               f"({_MAX_FALLBACK_BATCHES * 100} articles) - certains peuvent rester non scorés.")
         logger.info(f"Rerank {scenario_id}: {n_fast} via pgvector + {n_slow} via OpenAI (fallback).")
         return n_fast + n_slow
     except Exception as _e:
@@ -318,12 +318,12 @@ def _get_above_threshold_articles(scenario_id: str, threshold: float | None = No
     du TEXTE INTÉGRAL (chunks `fulltext_section`) pour les `fulltext_top_docs` plus
     pertinents. Quand `fulltext_query` est fourni, on choisit par doc les
     `fulltext_chunks_per_doc` chunks les PLUS PERTINENTS à cette requête (et non les
-    premiers), plafonné à `fulltext_char_cap` caractères — le budget de tokens est
+    premiers), plafonné à `fulltext_char_cap` caractères - le budget de tokens est
     ainsi dépensé sur les passages utiles. Les documents sans texte intégral gardent
     `fulltext=""` (title+abstract seuls).
 
     `full_rows=N` : TOUS les articles pertinents sont renvoyés (ids, année, statut,
-    devis, `has_pico`… — de quoi compter et prendre l'empreinte du corpus) mais seuls
+    devis, `has_pico`… - de quoi compter et prendre l'empreinte du corpus) mais seuls
     les N premiers portent `abstract` et `pico_json`. Les générateurs LLM n'utilisent
     que 20 à 30 articles : charger 25 000 résumés + PICO (120 Mo) pour en lire 30 était
     inutile, et ces générateurs tournent en parallèle. `require_pico=True` restreint
@@ -356,7 +356,7 @@ def _get_above_threshold_articles(scenario_id: str, threshold: float | None = No
                   -- article explicitement exclu (les autres statuts restent admis).
                   AND COALESCE(asn.screening_status, ld.screening_status) IS DISTINCT FROM 'excluded'
                   -- Décision produit : un article NON scoré (similarity_score NULL)
-                  -- n'est PAS pertinent — même définition que tous les affichages
+                  -- n'est PAS pertinent - même définition que tous les affichages
                   -- (COALESCE(score,0) >= seuil). On garde le rattrapage 'included'.
                   AND (
                       COALESCE(asn.screening_status, ld.screening_status) = 'included'
@@ -416,7 +416,7 @@ def trigger_rerank(scenario_id: str, _: None = Depends(require_api_key)) -> dict
             _backfill_title_abstract_chunks(scenario_id)  # docs sans chunk résumé -> searchable
             n = _run_semantic_rerank_inline(scenario_id, query)
             # Recalcul COMPLET : après le cosinus, relancer AUSSI le cross-encoder Cohere
-            # sur le sous-ensemble pertinent — sinon « Recalculer scores » ne rafraîchissait
+            # sur le sous-ensemble pertinent - sinon « Recalculer scores » ne rafraîchissait
             # que le cosinus et les rerank_score restaient figés/partiels.
             try:
                 _nce = _run_cross_encoder_rerank(scenario_id, query)
@@ -524,7 +524,7 @@ def rebuild_corpus(scenario_id: str, _: None = Depends(require_api_key)) -> dict
 def _backfill_title_abstract_chunks(scenario_id: str | None = None) -> int:
     """
     Crée un chunk `title_abstract` (embedding NULL) pour les documents qui ont un
-    titre/résumé mais AUCUN chunk title_abstract — typiquement les docs liés depuis
+    titre/résumé mais AUCUN chunk title_abstract - typiquement les docs liés depuis
     la base locale sans création de chunk. Le worker d'enrichissement les embed
     ensuite : recherche sémantique au niveau résumé + compteurs réconciliés.
     Idempotent (NOT EXISTS). Si scenario_id est None, traite tout le corpus literev.

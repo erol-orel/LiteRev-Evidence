@@ -20,7 +20,7 @@ with e.begin() as c:
     n_del = c.execute(text("SELECT count(*) FROM _del")).scalar()
     print("del set:", n_del)
 
-    # 1. Backups (restorable safety net) — persistent tables
+    # 1. Backups (restorable safety net) - persistent tables
     for bak, src, col in [
         ("_dedup_bak_documents", "literature_document", "id"),
         ("_dedup_bak_chunks", "document_chunk", "document_id"),

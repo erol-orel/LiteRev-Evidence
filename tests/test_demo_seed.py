@@ -1,4 +1,4 @@
-"""Pure-logic tests for demo_seed.py — no DB, no pandas/sklearn (those are imported
+"""Pure-logic tests for demo_seed.py - no DB, no pandas/sklearn (those are imported
 lazily inside train_demo, so importing the module and building the spec is stdlib-only).
 
 The end-to-end DB seeding (main._seed_demo_scenarios) is verified separately against a
