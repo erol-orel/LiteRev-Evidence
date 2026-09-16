@@ -12,6 +12,7 @@ from fastapi import Depends, Query
 from sqlalchemy import text
 
 from .core import _msg, app, engine, logger, require_api_key
+from .scenario_store import CORPUS_DERIVED_CACHE_RESET
 from .gesica import (
     SCENARIO_LIVING_REVIEW_IDS,
     _gesica_title,
@@ -157,20 +158,19 @@ def trigger_living_review(
                 if result.returncode != 0:
                     logger.error(f"Living Review error: {result.stderr[:500]}")
                 elif _sids:
-                    # Le corpus a gagné des articles : les visualisations en cache ne le
-                    # décrivent plus. L'étape 4 annoncée par la docstring n'existait nulle
+                    # Le corpus a gagné des articles : tout ce qui en est calculé ne le
+                    # décrit plus. L'étape 4 annoncée par la docstring n'existait nulle
                     # part dans le scheduler ; elle est faite ici, où l'on sait quels
-                    # scénarios ont été rafraîchis.
+                    # scénarios ont été rafraîchis. La liste est celle du changement de
+                    # seuil (CORPUS_DERIVED_CACHE_RESET) : les deux se sont déjà désaccordées
+                    # une fois, sur les actions recommandées.
                     try:
                         with engine.begin() as _c:
-                            _c.execute(text("""
-                                UPDATE scenario_settings
-                                SET clustering_json = NULL, clustering_generated_at = NULL,
-                                    knowledge_graph_json = NULL, kg_generated_at = NULL,
-                                    concept_graph_json = NULL, concept_graph_generated_at = NULL
+                            _c.execute(text(f"""
+                                UPDATE scenario_settings SET {CORPUS_DERIVED_CACHE_RESET}
                                 WHERE scenario_id = ANY(:sids)
                             """), {"sids": _sids})
-                        logger.info(f"Living Review: caches de visualisation invalidés pour {_sids}")
+                        logger.info(f"Living Review: caches dérivés du corpus invalidés pour {_sids}")
                     except Exception as _ce:
                         logger.warning(f"Living Review cache invalidation: {_ce}")
             except Exception as e:

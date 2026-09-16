@@ -150,14 +150,22 @@ def test_moving_the_threshold_drops_every_artefact_computed_from_the_old_corpus(
 
     from api import relevance
 
-    src = inspect.getsource(relevance.update_scenario_settings)
-    invalidated = src.split('if "similarity_threshold" in updates:', 1)[1]
-    invalidated = invalidated.split('if "variables_json" in updates:', 1)[0]
+    from api.scenario_store import CORPUS_DERIVED_CACHE_RESET
+
     for column in ("clustering_json", "knowledge_graph_json", "concept_graph_json",
                    "recommended_actions_json"):
-        assert f"{column} = NULL" in invalidated, f"{column} survives a threshold change"
+        assert f"{column} = NULL" in CORPUS_DERIVED_CACHE_RESET, f"{column} is not reset"
     # The language marker goes too, or a stale cache is served as if it were fresh.
-    assert "recommended_actions_lang = NULL" in invalidated
+    assert "recommended_actions_lang = NULL" in CORPUS_DERIVED_CACHE_RESET
+
+    # Both places that invalidate must use that ONE list, not their own copy: the two
+    # SQL statements had already drifted apart over the recommended actions.
+    threshold_path = inspect.getsource(relevance.update_scenario_settings)
+    assert "CORPUS_DERIVED_CACHE_RESET" in threshold_path
+
+    from api import living_review
+
+    assert "CORPUS_DERIVED_CACHE_RESET" in inspect.getsource(living_review.trigger_living_review)
 
 
 # ── data_connectors: the module docstring lists the connectors that exist ────
