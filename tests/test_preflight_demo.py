@@ -122,6 +122,21 @@ def test_a_generation_that_never_finishes_is_a_warning_and_a_failure_is_a_fail()
     assert levels["usr-demo: LLM brief"] == "FAIL" and rc == 1
 
 
+def test_a_scenario_without_epidemic_parameters_reports_what_the_corpus_holds():
+    class NoSeir(FakeApi):
+        def get(self, path):
+            if "/seir/projection" in path:
+                return 200, {"applicable": False, "reason_code": "no_parameters",
+                             "articles_reporting_parameters": 37, "articles_with_values": 0}
+            return super().get(path)
+
+    rc, levels, pf = _run(NoSeir(), api_key="k")
+    detail = next(d for _l, c, d in pf.rows if c == "usr-demo: SEIR")
+    assert "not applicable (no_parameters)" in detail
+    assert "0 value(s) from 37 article(s) reporting one" in detail
+    assert rc == 0 and levels["usr-demo: SEIR"] == "OK"      # a fact about the corpus, not a failure
+
+
 def test_slow_endpoints_and_a_recent_restart_are_warnings(monkeypatch):
     health = _healthy()
     health["process"]["uptime_s"] = 60

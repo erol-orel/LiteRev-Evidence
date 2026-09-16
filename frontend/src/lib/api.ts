@@ -2025,6 +2025,8 @@ export async function fetchUserScenarioPopulateStatus(
   // Statut du cross-encoder Cohere qui réordonne en arrière-plan après l'affichage.
   rerank_status?: 'idle' | 'running' | 'done' | 'skipped';
   sources?: Record<string, number>;
+  /** Sources replayed from the cache of the last identical search (no network call). */
+  cached_sources?: string[];
 }> {
   const r = await safeFetch(`${API_BASE_URL}/user-scenarios/${scenarioId}/populate/status`);
   if (!r.ok) throw new Error(httpMessage(r.status));

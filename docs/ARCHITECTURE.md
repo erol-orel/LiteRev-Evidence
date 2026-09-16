@@ -193,6 +193,20 @@ erDiagram
   (`WARM_ON_STARTUP`), relaunches the searches and pipelines a restart
   interrupted, in the language they were started in (`pipeline_lang`,
   `RESUME_ON_STARTUP`), instead of marking them failed.
+- **Epidemiological parameters are searched for, not hoped for.** The model spec is
+  built from the 25 most relevant articles, which on a corpus of thousands almost
+  never report an R0 or an incubation period: the SEIR tab announced "no parameter
+  extracted from the literature" for a chikungunya corpus of 2,732 articles. The
+  corpus is now scanned for the articles that **measure** a parameter (measurement
+  terms in the title or abstract, English and French, word-bounded so `Macro0` is not
+  an R0), best evidence first, and only those go to the LLM, one observation per
+  study. The observations join the quality-weighted pool (`seir_model.pool_weighted`),
+  so the value served to the model is a mean of real studies, each one clickable. A
+  measured transmission parameter also settles `applicable`, whatever the first pass
+  answered. `/scenarios/{id}/epidemic-parameters/candidates` lists what the corpus
+  holds without calling any LLM; `POST …/extract` re-runs the extraction alone and
+  merges it into the stored spec. When nothing is found, the SEIR answer says how many
+  articles mention a parameter and how many gave a value, instead of looking broken.
 - **Concept map** (`knowledge_graph.py`): each relevant article gets typed
   concepts - pathogen, vector, host, population, exposure, intervention, outcome,
   method, place - normalised once by the LLM from its PICO (English and French
@@ -351,6 +365,7 @@ for the scripts, tools and tests.
 | `pipeline` | `_run_user_scenario_populate`, `_run_user_scenario_full_pipeline`, the full-pipeline endpoint |
 | `relevance` | semantic scoring, Cohere cross-encoder rerank, `scenario_settings`, `_get_above_threshold_articles`, rerank and settings endpoints, corpus rebuild, chunk backfill |
 | `exports` | the relevant articles of a scenario as a file: csv, xlsx, ris, bibtex, json, md (`/relevant/export`, pure formatters) |
+| `variables` | variables and model spec from the evidence, per-language localisation, and the **targeted extraction of the epidemiological parameters** (`params_mentioned`, `_parameter_candidate_articles`, `extract_epidemic_observations`, `merge_epidemic_observations`, `/epidemic-parameters/{candidates,extract}`) |
 | `review` | screening progress, PRISMA flow, PICO stats / bulk / per article, per-article screening |
 | `evidence` | evidence brief (structured, LLM, PDF) |
 | `assistant` | `/ask`, `/ask/stream`, `/ask/stream/filtered`, scenario RAG |

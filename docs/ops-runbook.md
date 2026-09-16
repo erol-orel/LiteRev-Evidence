@@ -270,6 +270,11 @@ One line per check, `OK` / `WARN` / `FAIL`, exit code 1 on a FAIL:
 Then:
 - **deploy freeze**: every merge to `main` restarts the API and cuts any search or
   pipeline in flight, so nothing merges from the morning of the session until it ends;
+- **the SEIR tab needs measured parameters**: it only projects when the corpus reports a
+  transmission parameter. `GET /scenarios/{id}/epidemic-parameters/candidates` says what
+  the corpus holds (no LLM, instant); `POST /scenarios/{id}/epidemic-parameters/extract`
+  re-runs the extraction alone on a scenario whose spec predates it. A scenario with no
+  such article is not a bug, and the tab now says so with the counts;
 - **build in the language you will present in**: everything the search, the pin and
   the rebuild cache (cluster summaries, brief, variables and model, actions) is produced
   in the language of the toggle at that moment; a tab opened under the other toggle

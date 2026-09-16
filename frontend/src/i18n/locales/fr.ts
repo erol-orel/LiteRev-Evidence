@@ -320,6 +320,7 @@ export const fr = {
     stepScoring: "Calcul des scores de pertinence",
     stepRerank: "Affinage du classement (Cohere)",
     referencesFetched: "références récupérées",
+    sourcesFromCache: "{n} source(s) rejouée(s) depuis la dernière recherche identique, sans les réinterroger",
     buildingCorpus: "Construction du corpus en cours…",
     resultsWillAppear:
       "Les résultats s'afficheront une fois la récupération et le scoring terminés.",

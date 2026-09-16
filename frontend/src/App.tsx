@@ -1899,6 +1899,9 @@ export default function App() {
   // Compteurs live par source pendant la fédération (depuis /populate/status),
   // affichés sur la page d'attente, + étape finale "Affinage (rerank)".
   const [searchSourceProgress, setSearchSourceProgress] = useState<Record<string, number> | null>(null);
+  // Sources rejouées depuis le cache de la dernière recherche identique : explique
+  // pourquoi une relance prend quelques secondes au lieu de la fédération complète.
+  const [searchCachedSources, setSearchCachedSources] = useState<string[] | null>(null);
   const [searchFinalizing, setSearchFinalizing] = useState(false);
   const [folders, setFolders] = useState<ScenarioFolder[]>([]);
   // Tri par défaut = pertinence (le score est désormais calculé pour TOUS les
@@ -2214,6 +2217,7 @@ export default function App() {
           status = st.status;
           phase = st.phase ?? null;
           if (st.sources) setSearchSourceProgress(st.sources);
+          if (st.cached_sources?.length) setSearchCachedSources(st.cached_sources);
         } catch { /* transient - keep polling */ }
         if (phase) setSearchBackendPhase(phase);
         // Rafraîchir le corpus affiché ~toutes les 8 s ; dès qu'il contient des documents,
@@ -2297,6 +2301,7 @@ export default function App() {
         setSearchBackendPhase(null);
         setSearchFinalizing(false);
         setSearchSourceProgress(null);
+        setSearchCachedSources(null);
         setSearchPhase('idle');
       }
     }
@@ -3137,6 +3142,13 @@ export default function App() {
                         </li>
                       ))}
                     </ul>
+                    {/* Sources rejouées depuis le cache : dit pourquoi c'est rapide. */}
+                    {includeLive && (searchCachedSources?.length ?? 0) > 0 && (
+                      <p className="mt-3 text-[11px] text-brand-300/80">
+                        {t("search.sourcesFromCache").replace("{n}", String(searchCachedSources!.length))}
+                        <span className="text-white/35"> · {searchCachedSources!.join(", ")}</span>
+                      </p>
+                    )}
                     {/* Détail live par source pendant la fédération */}
                     {includeLive && rank === 2 && srcEntries.length > 0 && (
                       <div className="mt-3 flex flex-wrap gap-1.5">

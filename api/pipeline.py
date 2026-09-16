@@ -1443,6 +1443,10 @@ def _run_user_scenario_populate(
             _user_scenario_populate_jobs[scenario_id] = {
                 "status": "done",
                 "phase": "done",
+                # Sources rejouées depuis le cache : l'état final remplace le dict du job,
+                # la liste serait perdue et la page de résultats ne pourrait plus dire
+                # pourquoi la recherche a pris trois secondes au lieu de trois minutes.
+                "cached_sources": sorted(_cached) if include_live else [],
                 "rerank_status": "running" if _cohere_enabled else "skipped",
                 "ingested": ingested,
                 # `ingested` = base locale + NOUVEAUX documents : un compteur de travail,
