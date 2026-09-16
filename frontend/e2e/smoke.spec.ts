@@ -85,6 +85,17 @@ test("opens the scenario page: header, corpus, PRISMA flow and clustering", asyn
   await expect(page.getByRole("button", { name: en.scenarioDetail.knowledgeGraph.modeConcepts, exact: true })).toBeVisible();
   await expect(page.getByText(en.scenarioDetail.knowledgeGraph.conceptTitle)
     .or(page.getByText(en.scenarioDetail.knowledgeGraph.noConcepts)).first()).toBeVisible({ timeout: 15_000 });
+  // The concept map is composed by the user: removing a category takes it out of the
+  // graph and the subtitle says the map is filtered; reset brings it back.
+  const kg = en.scenarioDetail.knowledgeGraph;
+  const chip = page.getByRole("button", { name: new RegExp(`^${kg.conceptTypes.topic}`) });
+  if (await chip.count()) {
+    await chip.first().click();
+    await expect(page.getByText(new RegExp(kg.filtered.replace("{total}", "\\d+")))).toBeVisible();
+    await page.getByRole("button", { name: kg.resetFilters }).click();
+    await expect(page.getByText(new RegExp(kg.filtered.replace("{total}", "\\d+")))).toHaveCount(0);
+  }
+
   await page.getByRole("button", { name: en.scenarioDetail.knowledgeGraph.modeArticles, exact: true }).click();
   await expect(page.getByText(en.scenarioDetail.knowledgeGraph.title)
     .or(page.getByText(en.scenarioDetail.knowledgeGraph.noArticleEmbeddings)).first()).toBeVisible({ timeout: 15_000 });
