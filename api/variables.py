@@ -11,7 +11,7 @@ from typing import Any
 from fastapi import Depends, Query
 from sqlalchemy import text
 
-from .core import _job_is_active, _msg, _norm_lang, app, engine, logger, require_api_key
+from .core import _env_int, _job_is_active, _msg, _norm_lang, app, engine, logger, require_api_key
 from .documents import _llm_lang_directive
 from .scenario_store import _get_scenario_threshold
 from .gesica import _get_scenario_name
@@ -20,6 +20,267 @@ from .relevance import _evidence_fingerprint, _get_above_threshold_articles
 # ─── VARIABLES & MODÈLE AUTO-REMPLI DEPUIS PICO ──────────────────────────────
 
 _VARIABLES_GENERATION_JOBS: dict[str, dict] = {}
+
+
+# ─── EXTRACTION CIBLÉE DES PARAMÈTRES ÉPIDÉMIOLOGIQUES (famille SEIR) ─────────
+#
+# Le spec est généré à partir des 25 articles LES PLUS PERTINENTS du corpus. Sur un
+# corpus de plusieurs milliers d'articles, ceux qui RAPPORTENT un R0 ou une période
+# d'incubation n'y figurent quasiment jamais : le bloc epidemic_parameters ressortait
+# vide et l'onglet Modèle annonçait « aucun paramètre extrait de la littérature » pour
+# un corpus chikungunya de 2 732 articles, où ces valeurs sont pourtant publiées.
+#
+# On CHERCHE donc, dans tout le sous-ensemble pertinent, les articles qui MESURENT un
+# paramètre (termes de mesure dans le titre ou le résumé), et on n'extrait que sur
+# ceux-là, une observation par étude. Le regroupement pondéré par la qualité
+# (seir_model.pool_weighted, déjà en place) fait le reste : la valeur servie au modèle
+# reste une moyenne d'études réelles, chacune cliquable.
+
+# Termes de MESURE par paramètre (EN + FR). Une même source pour le pré-filtre SQL et
+# le filtre Python : pas de divergence possible entre les deux.
+_PARAM_PHRASES: dict[str, tuple[str, ...]] = {
+    "r0": ("basic reproduction number", "reproduction number", "reproductive number",
+           "reproduction ratio", "nombre de reproduction", "taux de reproduction"),
+    "serial_interval_days": ("serial interval", "generation interval", "generation time",
+                             "intervalle sériel", "intervalle de génération"),
+    "incubation_period_days": ("incubation period", "période d'incubation", "periode d'incubation",
+                               "latent period", "période de latence"),
+    "infectious_period_days": ("infectious period", "infectiousness duration", "duration of infectiousness",
+                               "shedding duration", "duration of viremia", "période infectieuse",
+                               "durée d'infectiosité"),
+    "cfr": ("case fatality", "case-fatality", "fatality rate", "fatality ratio",
+            "létalité", "letalite", "taux de décès", "death rate among cases"),
+    "immunity_duration_days": ("duration of immunity", "immunity duration", "waning immunity",
+                               "duration of protection", "durée de l'immunité", "durée de protection",
+                               "seroprotection duration"),
+}
+# Sigles courts : exigent des frontières de mot, sinon « R0 » matche « macro0 ».
+_PARAM_TOKENS: dict[str, tuple[str, ...]] = {
+    "r0": ("R0", "R-0", "R_0", "Rzero"),
+}
+# Paramètres qui PILOTENT la dynamique : un seul d'entre eux, mesuré dans le corpus,
+# suffit à démontrer que le scénario est transmissible (cf. _merge_epidemic_observations).
+_TRANSMISSION_PARAMS = ("r0", "serial_interval_days", "incubation_period_days")
+
+EPI_PARAM_MAX_ARTICLES = _env_int("EPI_PARAM_MAX_ARTICLES", 40, 1)   # articles envoyés au LLM
+_EPI_PARAM_BATCH = 10
+_EPI_PARAM_WORKERS = 4
+
+
+def _param_regex(params=None, boundary: str = r"\b") -> str:
+    """Alternation regex des termes de mesure (paramètres demandés, ou tous). `boundary`
+    vaut r'\\b' pour Python et r'\\y' pour Postgres. Pur."""
+    names = tuple(params or _PARAM_PHRASES)
+    parts: list[str] = []
+    for name in names:
+        parts.extend(re.escape(p) for p in _PARAM_PHRASES.get(name, ()))
+        parts.extend(f"{boundary}{re.escape(t)}{boundary}" for t in _PARAM_TOKENS.get(name, ()))
+    return "|".join(parts)
+
+
+_PARAM_SCAN_RE = re.compile(_param_regex(), re.IGNORECASE)
+
+
+def params_mentioned(text: str) -> list[str]:
+    """Paramètres épidémiologiques dont un terme de MESURE apparaît dans ce texte
+    (titre + résumé), dans l'ordre de _PARAM_PHRASES. Pur, testé hors ligne."""
+    t = text or ""
+    found = []
+    for name in _PARAM_PHRASES:
+        if re.search(_param_regex([name]), t, re.IGNORECASE):
+            found.append(name)
+    return found
+
+
+def _parameter_candidate_articles(scenario_id: str, threshold: float | None = None,
+                                  limit: int = EPI_PARAM_MAX_ARTICLES) -> list[dict]:
+    """Articles du sous-ensemble PERTINENT qui rapportent un paramètre (terme de mesure
+    dans le titre ou le résumé), les meilleurs d'abord : synthèses en tête, puis qualité,
+    citations et année. Même porte de screening que partout ailleurs."""
+    if threshold is None:
+        threshold = _get_scenario_threshold(scenario_id)
+    sql = text("""
+        SELECT d.id, d.title, d.abstract, d.year, d.doi, d.study_design,
+               d.quality_score, d.citation_count, d.source,
+               COALESCE(ars.similarity_score, 0) AS similarity
+        FROM literature_document d
+        JOIN article_scenarios ars ON ars.document_id = d.id
+        WHERE ars.scenario_id = :sid
+          AND d.is_duplicate IS NOT TRUE
+          AND d.abstract IS NOT NULL
+          AND COALESCE(ars.screening_status, d.screening_status) IS DISTINCT FROM 'excluded'
+          AND (COALESCE(ars.screening_status, d.screening_status) = 'included'
+               OR COALESCE(ars.similarity_score, 0) >= :thr)
+          AND (d.title || ' ' || d.abstract) ~* :rx
+        ORDER BY
+          CASE WHEN COALESCE(d.study_design, '') ~* 'systematic|meta-analy|méta-analy' THEN 0 ELSE 1 END,
+          d.quality_score DESC NULLS LAST,
+          d.citation_count DESC NULLS LAST,
+          d.year DESC NULLS LAST,
+          d.id
+        LIMIT :cap
+    """)
+    with engine.connect() as conn:
+        rows = [dict(r) for r in conn.execute(
+            sql, {"sid": scenario_id, "thr": threshold, "rx": _param_regex(boundary=r"\y"),
+                  "cap": max(1, int(limit))}).mappings().all()]
+    for r in rows:
+        r["params_mentioned"] = params_mentioned(f"{r.get('title') or ''} {r.get('abstract') or ''}")
+    return [r for r in rows if r["params_mentioned"]]
+
+
+_EPI_EXTRACT_SYSTEM = (
+    "You extract epidemiological parameters from study abstracts, for a compartmental "
+    "(SEIR family) model. Report ONLY values the abstract states for the disease under "
+    "study: never infer, never carry a value over from another disease, never invent. "
+    "Normalise units: r0 is a ratio; serial_interval_days, incubation_period_days, "
+    "infectious_period_days and immunity_duration_days are in DAYS; cfr is a PROPORTION "
+    "between 0 and 1 (a case fatality of 1.5 percent is 0.015). When a study gives a "
+    "range or an interval, put its central value in value and the bounds in ci_low and "
+    "ci_high. Return ONLY JSON: {\"articles\": [{\"id\": <id>, \"disease\": <name or null>, "
+    "\"parameters\": [{\"name\": <one of r0, serial_interval_days, incubation_period_days, "
+    "infectious_period_days, cfr, immunity_duration_days>, \"value\": <number>, "
+    "\"ci_low\": <number or null>, \"ci_high\": <number or null>}]}]}. An article that "
+    "reports no usable value gets an empty parameters list."
+)
+
+
+def _epi_llm_client():
+    """Client LLM de l'extraction (une seule couture, que les tests remplacent)."""
+    from llm_usage import MeteredOpenAI as _OAI
+    return _OAI(timeout=120.0)
+
+
+def _epi_extract_batch(client, batch: list[dict], disease_hint: str | None) -> list[dict]:
+    """Un appel LLM pour un lot d'articles. Renvoie [{id, disease, parameters:[...]}].
+    Robuste : un lot perdu renvoie []."""
+    import json as _json
+    items = [{
+        "id": int(a["id"]),
+        "title": (a.get("title") or "")[:300],
+        "abstract": (a.get("abstract") or "")[:2000],
+        "looks_like": a.get("params_mentioned") or [],
+    } for a in batch]
+    payload = {"disease_of_interest": disease_hint or None, "articles": items}
+    try:
+        resp = client.chat.completions.create(
+            model="gpt-4.1-mini",
+            messages=[{"role": "system", "content": _EPI_EXTRACT_SYSTEM},
+                      {"role": "user", "content": _json.dumps(payload, ensure_ascii=False)}],
+            temperature=0, seed=42, max_tokens=3000,
+            response_format={"type": "json_object"},
+        )
+        data = _json.loads(resp.choices[0].message.content)
+    except Exception as e:                                   # noqa: BLE001
+        logger.warning(f"epidemic parameter extraction batch: {e}")
+        return []
+    return [a for a in (data.get("articles") or []) if isinstance(a, dict)] if isinstance(data, dict) else []
+
+
+def extract_epidemic_observations(scenario_id: str, disease_hint: str | None = None,
+                                  threshold: float | None = None,
+                                  max_articles: int = EPI_PARAM_MAX_ARTICLES) -> dict[str, Any]:
+    """Cherche dans TOUT le corpus pertinent les articles qui rapportent un paramètre
+    épidémiologique et en extrait une observation par étude.
+
+    Renvoie ``{params: {nom: {observations: [{article_id, value, ci_low, ci_high}]}},
+    disease, n_candidates, n_articles_used, n_with_values}``. Sans clé OpenAI :
+    les candidats sont comptés, aucune observation n'est produite."""
+    import os as _os
+    from concurrent.futures import ThreadPoolExecutor
+
+    candidates = _parameter_candidate_articles(scenario_id, threshold, max_articles)
+    # `articles` : de quoi TRACER la provenance. Ces articles sont hors des 25 plus
+    # pertinents qui servent au reste du spec ; sans eux dans le pool de provenance,
+    # _attach_model_spec filtrerait justement les observations qu'on vient de mesurer.
+    out: dict[str, Any] = {
+        "params": {}, "disease": None, "n_candidates": len(candidates),
+        "n_articles_used": 0, "n_with_values": 0,
+        "articles": [{"id": a["id"], "title": a.get("title"), "year": a.get("year"),
+                      "doi": a.get("doi"), "quality_score": a.get("quality_score"),
+                      "study_design": a.get("study_design"), "source": a.get("source"),
+                      "params_mentioned": a.get("params_mentioned")} for a in candidates],
+    }
+    if not candidates or not _os.getenv("OPENAI_API_KEY"):
+        return out
+    try:
+        client = _epi_llm_client()
+    except Exception as _e:                                  # noqa: BLE001 - SDK absent ou clé illisible
+        logger.warning(f"Extraction des paramètres {scenario_id}: client LLM indisponible ({_e})")
+        return out                                           # les candidats restent comptés
+    batches = [candidates[i:i + _EPI_PARAM_BATCH] for i in range(0, len(candidates), _EPI_PARAM_BATCH)]
+    valid_ids = {int(a["id"]) for a in candidates}
+    diseases: dict[str, int] = {}
+    with ThreadPoolExecutor(max_workers=_EPI_PARAM_WORKERS) as ex:
+        results = list(ex.map(lambda b: _epi_extract_batch(client, b, disease_hint), batches))
+    import seir_model as _seir
+    for res in results:
+        for art in res:
+            try:
+                aid = int(art.get("id"))
+            except (TypeError, ValueError):
+                continue
+            if aid not in valid_ids:
+                continue                                     # id inventé : ignoré
+            got = False
+            for p in (art.get("parameters") or []):
+                if not isinstance(p, dict):
+                    continue
+                name = str(p.get("name") or "").strip()
+                val = _seir._num_or_none(p.get("value"))
+                if name not in _PARAM_PHRASES or val is None:
+                    continue
+                obs = {"article_id": aid, "value": val}
+                lo, hi = _seir._num_or_none(p.get("ci_low")), _seir._num_or_none(p.get("ci_high"))
+                if lo is not None and hi is not None and lo < hi:
+                    obs["ci_low"], obs["ci_high"] = lo, hi
+                out["params"].setdefault(name, {"observations": []})["observations"].append(obs)
+                got = True
+            if got:
+                out["n_with_values"] += 1
+                _d = str(art.get("disease") or "").strip()
+                if _d:
+                    diseases[_d] = diseases.get(_d, 0) + 1
+    out["n_articles_used"] = len(candidates)
+    if diseases:
+        out["disease"] = max(diseases.items(), key=lambda kv: kv[1])[0]
+    logger.info(f"Paramètres épidémiologiques {scenario_id}: {len(candidates)} articles candidats, "
+                f"{out['n_with_values']} avec une valeur, paramètres={sorted(out['params'])}")
+    return out
+
+
+def merge_epidemic_observations(block, targeted) -> dict:
+    """Fusionne les observations CIBLÉES dans le bloc `epidemic_parameters` du LLM
+    narratif (PUR, testé hors ligne).
+
+    Les observations ciblées viennent d'articles qui MESURENT le paramètre : elles
+    s'ajoutent à celles du bloc narratif, dédupliquées par (paramètre, article). Un
+    paramètre absent du bloc narratif est créé. `applicable` passe à true lorsqu'un
+    paramètre de TRANSMISSION est mesuré par au moins un article : le corpus le
+    démontre, quoi qu'ait répondu le premier appel sur ses 25 articles."""
+    merged = dict(block) if isinstance(block, dict) else {}
+    tparams = (targeted or {}).get("params") or {}
+    for name, blk in tparams.items():
+        cur = dict(merged.get(name)) if isinstance(merged.get(name), dict) else {}
+        obs = [o for o in (cur.get("observations") or []) if isinstance(o, dict)]
+        seen = {(o.get("article_id"), o.get("value")) for o in obs}
+        for o in blk.get("observations") or []:
+            if (o.get("article_id"), o.get("value")) not in seen:
+                obs.append(o)
+                seen.add((o.get("article_id"), o.get("value")))
+        cur["observations"] = obs
+        # Provenance = les articles réellement mesurés (l'UI les rend cliquables).
+        prov = list(dict.fromkeys([o["article_id"] for o in obs if o.get("article_id") is not None]))
+        if prov:
+            cur["provenance"] = prov
+            cur["n_studies"] = len(prov)
+        cur.setdefault("unit", "ratio" if name == "r0" else ("proportion" if name == "cfr" else "days"))
+        merged[name] = cur
+    if any(tparams.get(p, {}).get("observations") for p in _TRANSMISSION_PARAMS):
+        merged["applicable"] = True
+    if (targeted or {}).get("disease") and not merged.get("population_disease"):
+        merged["population_disease"] = targeted["disease"]
+    return merged
 
 
 # ─── MODEL SPEC (Phase 1) : schéma machine + provenance ──────────────────────
@@ -565,7 +826,10 @@ Retourne UNIQUEMENT le JSON valide."""
         # (PICO seul, ou sans texte intégral) : régénérés puis réutilisés à évidence
         # constante. Seuil et langue inclus : un spec FR au seuil 0.45 ne doit pas être
         # resservi pour une requête EN ni pour un autre seuil.
-        _CTX_VERSION = "ctx-v5-epi-params"
+        # v6 : les paramètres épidémiologiques viennent désormais d'une extraction CIBLÉE
+        # sur les articles qui les mesurent, pas des seuls 25 plus pertinents. Le suffixe
+        # invalide UNE FOIS les specs construits sans elle.
+        _CTX_VERSION = "ctx-v6-epi-targeted"
         evidence_fingerprint = _evidence_fingerprint(
             [a.get("id") for a in pico_articles[:25] if a.get("id") is not None],
             threshold, lang, _CTX_VERSION)[:16]
@@ -608,10 +872,31 @@ Retourne UNIQUEMENT le JSON valide."""
             if not variables:
                 raise ValueError("Réponse LLM (variables) vide ou illisible même après réparation.")
 
+            # Paramètres épidémiologiques : extraction CIBLÉE sur les articles du corpus
+            # qui les MESURENT (les 25 plus pertinents n'en rapportent presque jamais).
+            # Sans candidat, aucun appel LLM : un scénario non transmissible ne coûte rien.
+            _epi_targeted: dict[str, Any] = {}
+            try:
+                _epi_targeted = extract_epidemic_observations(
+                    scenario_id, disease_hint=scenario_name, threshold=threshold)
+                if _epi_targeted.get("params"):
+                    variables["epidemic_parameters"] = merge_epidemic_observations(
+                        variables.get("epidemic_parameters"), _epi_targeted)
+            except Exception as _epi_err:                    # jamais bloquant
+                logger.warning(f"Extraction ciblée des paramètres {scenario_id}: {_epi_err}")
+
             # Phase 1 : normaliser en model_spec déterministe (machine_name, dtype,
             # algorithme/CV/métrique, data_template) + provenance tracée vers les articles.
+            # Pool de provenance = les 25 articles du contexte UNION les articles qui ont
+            # fourni une mesure (sinon leur provenance serait filtrée et le pooling vide).
+            _prov_pool = list(pico_articles[:25])
+            _prov_seen = {a.get("id") for a in _prov_pool}
+            for _a in (_epi_targeted.get("articles") or []):
+                if _a.get("id") not in _prov_seen:
+                    _prov_pool.append(_a)
+                    _prov_seen.add(_a.get("id"))
             try:
-                variables = _attach_model_spec(variables, pico_articles[:25])
+                variables = _attach_model_spec(variables, _prov_pool)
             except Exception as spec_err:  # le spec machine ne doit jamais bloquer la génération
                 logger.error(f"model_spec build {scenario_id}: {spec_err}", exc_info=True)
 
@@ -636,6 +921,12 @@ Retourne UNIQUEMENT le JSON valide."""
             "evidence_fingerprint": evidence_fingerprint,
             "reused": _reused is not None,
         }
+        if _reused is None:
+            # Combien d'articles du corpus MESURENT un paramètre, et combien en ont donné
+            # une valeur : l'onglet Modèle peut dire « 0 sur 2 732 » au lieu de « aucun
+            # paramètre extrait », qui laissait croire à une panne.
+            variables["_meta"]["epidemic_parameter_candidates"] = int(_epi_targeted.get("n_candidates", 0))
+            variables["_meta"]["epidemic_parameter_articles_with_values"] = int(_epi_targeted.get("n_with_values", 0))
 
         # Sauvegarder en DB. persist="proposal" (Phase 5) écrit dans un slot
         # de staging sans toucher le spec actif validé.
@@ -862,6 +1153,92 @@ def generate_scenario_variables(scenario_id: str, lang: str | None = Query(None)
 def get_variables_generation_status(scenario_id: str) -> dict[str, Any]:
     """Statut du job de génération des variables."""
     return _VARIABLES_GENERATION_JOBS.get(scenario_id, {"status": "idle"})
+
+
+@app.get("/scenarios/{scenario_id}/epidemic-parameters/candidates")
+def get_epidemic_parameter_candidates(scenario_id: str, limit: int = 40) -> dict[str, Any]:
+    """Les articles du corpus pertinent qui RAPPORTENT un paramètre épidémiologique, avec
+    le ou les paramètres que chacun mesure. Lecture seule, sans LLM : dit ce que la
+    littérature du scénario contient avant toute extraction."""
+    arts = _parameter_candidate_articles(scenario_id, None, max(1, min(int(limit), 200)))
+    by_param: dict[str, int] = {}
+    for a in arts:
+        for p in a["params_mentioned"]:
+            by_param[p] = by_param.get(p, 0) + 1
+    return {
+        "scenario_id": scenario_id,
+        "n_candidates": len(arts),
+        "by_parameter": by_param,
+        "articles": [{"id": a["id"], "title": (a.get("title") or "")[:200], "year": a.get("year"),
+                      "doi": a.get("doi"), "study_design": a.get("study_design"),
+                      "quality_score": a.get("quality_score"),
+                      "parameters": a["params_mentioned"]} for a in arts],
+    }
+
+
+@app.post("/scenarios/{scenario_id}/epidemic-parameters/extract")
+def extract_scenario_epidemic_parameters(scenario_id: str, max_articles: int = EPI_PARAM_MAX_ARTICLES,
+                                         _: None = Depends(require_api_key)) -> dict[str, Any]:
+    """Relance la seule extraction CIBLÉE des paramètres épidémiologiques et la fusionne
+    dans le spec déjà stocké (le reste du spec est inchangé et n'est PAS régénéré).
+
+    Utile quand le corpus a grandi, ou pour un scénario dont le spec a été construit
+    avant cette extraction. Le pooling pondéré par la qualité est refait ensuite."""
+    import json as _json
+
+    with engine.connect() as conn:
+        row = conn.execute(text(
+            "SELECT variables_json FROM scenario_settings WHERE scenario_id = :sid"
+        ), {"sid": scenario_id}).mappings().first()
+    if not (row and row["variables_json"]):
+        return {"status": "empty", "message": "Aucun spec stocké : générez d'abord les Variables & Modèle."}
+
+    variables = dict(row["variables_json"])
+    name = _get_scenario_name(scenario_id)
+    targeted = extract_epidemic_observations(scenario_id, disease_hint=name, max_articles=max_articles)
+    if not targeted.get("params"):
+        return {"status": "no_parameters", "scenario_id": scenario_id,
+                "n_candidates": targeted.get("n_candidates", 0),
+                "message": ("Aucune valeur exploitable dans les articles qui mentionnent un paramètre."
+                            if targeted.get("n_candidates")
+                            else "Aucun article du corpus ne rapporte de paramètre épidémiologique.")}
+
+    variables["epidemic_parameters"] = merge_epidemic_observations(
+        variables.get("epidemic_parameters"), targeted)
+    # Pool de provenance : les articles du contexte UNION ceux qui ont fourni une mesure.
+    thr = _get_scenario_threshold(scenario_id)
+    pool = _get_above_threshold_articles(scenario_id, thr, full_rows=25)[:25]
+    seen = {a.get("id") for a in pool}
+    for a in (targeted.get("articles") or []):
+        if a.get("id") not in seen:
+            pool.append(a)
+            seen.add(a.get("id"))
+    variables = _attach_model_spec(variables, pool)
+    meta = dict(variables.get("_meta") or {})
+    meta["epidemic_parameter_candidates"] = int(targeted.get("n_candidates", 0))
+    meta["epidemic_parameter_articles_with_values"] = int(targeted.get("n_with_values", 0))
+    variables["_meta"] = meta
+
+    with engine.begin() as conn:
+        conn.execute(text("""
+            UPDATE scenario_settings
+            SET variables_json = CAST(:v AS jsonb), variables_i18n = NULL,
+                seir_projection_json = NULL, seir_projection_generated_at = NULL, updated_at = NOW()
+            WHERE scenario_id = :sid
+        """), {"v": _json.dumps(variables, default=str), "sid": scenario_id})
+
+    _epi = (variables.get("model_spec") or {}).get("epidemic_parameters") or {}
+    return {
+        "status": "ok",
+        "scenario_id": scenario_id,
+        "n_candidates": targeted.get("n_candidates", 0),
+        "n_articles_with_values": targeted.get("n_with_values", 0),
+        "disease": _epi.get("disease") or targeted.get("disease"),
+        "applicable": bool(_epi.get("applicable")),
+        "parameters": {k: {"value": v.get("value"), "ci_low": v.get("ci_low"), "ci_high": v.get("ci_high"),
+                           "n_studies": v.get("n_studies"), "unit": v.get("unit")}
+                       for k, v in (_epi.get("params") or {}).items()},
+    }
 
 
 @app.get("/scenarios/{scenario_id}/variables")

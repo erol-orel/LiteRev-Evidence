@@ -159,6 +159,21 @@ def _seir_projection_payload(
         applied[name] = v
 
     dists = seir_model.params_to_distributions(eff_params)
+
+    def _scan_counts() -> dict[str, int]:
+        """Ce que la recherche de paramètres a trouvé dans le corpus (stocké par la
+        génération). « Aucun paramètre extrait » laissait croire à une panne ; dire
+        « 0 valeur sur 37 articles qui en parlent » est une information."""
+        try:
+            with engine.connect() as _c:
+                _r = _c.execute(text(
+                    "SELECT variables_json FROM scenario_settings WHERE scenario_id = :sid"
+                ), {"sid": scenario_id}).mappings().first()
+            _m = (dict(_r["variables_json"]).get("_meta") or {}) if _r and _r["variables_json"] else {}
+            return {"articles_reporting_parameters": int(_m.get("epidemic_parameter_candidates") or 0),
+                    "articles_with_values": int(_m.get("epidemic_parameter_articles_with_values") or 0)}
+        except Exception:                                    # noqa: BLE001 - jamais bloquant
+            return {"articles_reporting_parameters": 0, "articles_with_values": 0}
     # ── Trois portes AVANT de simuler ────────────────────────────────────────────
     # Un override explicite de l'utilisateur vaut décision consciente : il ouvre les
     # portes 1 et 2 (exploration « et si ? »), et la réponse est marquée `forced`.
@@ -166,12 +181,16 @@ def _seir_projection_payload(
     # `reason_code` : identifiant STABLE de la porte fermée, que l'interface traduit
     # dans la langue choisie (le texte `reason` reste en français pour l'API / les logs).
     if not dists:
+        _sc = _scan_counts()
         return {
             "applicable": False,
             "scenario_id": scenario_id,
             "reason_code": "no_parameters",
-            "reason": "Aucun paramètre épidémiologique extrait de la littérature "
-                      "(scénario non transmissible, ou paramètres non rapportés).",
+            "reason": ("Aucun paramètre épidémiologique extrait de la littérature "
+                       "(scénario non transmissible, ou paramètres non rapportés). "
+                       f"{_sc['articles_reporting_parameters']} article(s) du corpus mentionnent "
+                       f"un paramètre, {_sc['articles_with_values']} en donnent une valeur."),
+            **_sc,
         }
     # Porte 1 - le LLM a EXPLICITEMENT jugé le scénario non transmissible. Sans ce
     # test, un seul paramètre numérique rescapé (une létalité, p. ex.) suffisait à
@@ -199,6 +218,7 @@ def _seir_projection_payload(
                        "manuellement pour explorer un scénario."),
             "missing": ["r0"],
             "available_parameters": sorted(dists),
+            **_scan_counts(),
         }
     _pop_default, _i0_default, _geo_label = _scenario_seed(scenario_id)
     try:

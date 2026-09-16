@@ -322,6 +322,7 @@ export const en: Translations = {
     stepScoring: "Computing relevance scores",
     stepRerank: "Refining the ranking (Cohere)",
     referencesFetched: "references fetched",
+    sourcesFromCache: "{n} source(s) replayed from the last identical search, without asking them again",
     buildingCorpus: "Building the corpus…",
     resultsWillAppear:
       "Results will appear once retrieval and scoring are complete.",

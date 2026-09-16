@@ -110,7 +110,10 @@ class Preflight:
             self.add(level, "health: process", f"rss {rss:.0f} MB (peak {peak:.0f} MB), {proc.get('threads')} threads, up {hours:.1f} h"
                      + (" - a restart before the session would free memory" if level == "WARN" else ""))
             if hours < 0.5:
-                self.add("WARN", "health: uptime", "the API restarted less than 30 minutes ago: open one clustering tab to warm UMAP")
+                self.add("WARN", "health: uptime",
+                         "the API restarted less than 30 minutes ago: the UMAP warm-up and the relaunch of "
+                         "the interrupted searches run in the background, so check the scenario lines below "
+                         "rather than assuming the caches are ready")
         rl = body.get("rate_limit")
         if rl:
             self.add("OK", "health: rate limits", f"{rl.get('general_per_min')}/min general, {rl.get('expensive_per_min')}/min on search, ask and pipeline - per IP")
@@ -216,8 +219,16 @@ class Preflight:
         self.read(f"{sid}: screening", f"/user-scenarios/{sid}/screening-progress")
         self.read(f"{sid}: model monitor", f"/scenarios/{sid}/model/monitor?lang={lang}",
                   lambda b: f"status={b.get('status', '?')}")
-        self.read(f"{sid}: SEIR", f"/scenarios/{sid}/seir/projection",
-                  lambda b: "applicable" if b.get("applicable", b.get("ok", True)) else f"not applicable ({b.get('reason_code') or b.get('reason')})")
+        # SEIR: when it does not apply, say what the corpus holds. "No parameter extracted"
+        # alone reads like a failure; "0 values out of 37 articles that mention one" does not.
+        def _seir_detail(b):
+            if b.get("applicable", b.get("ok", True)):
+                return "applicable" + (", from cache" if b.get("from_cache") else "")
+            scanned = b.get("articles_reporting_parameters")
+            extra = (f", {b.get('articles_with_values', 0)} value(s) from {scanned} article(s) reporting one"
+                     if scanned is not None else "")
+            return f"not applicable ({b.get('reason_code') or b.get('reason')}){extra}"
+        self.read(f"{sid}: SEIR", f"/scenarios/{sid}/seir/projection", _seir_detail)
 
     def artifact(self, sid: str, name: str, get_path: str, generate_path: str | None,
                  ready=lambda b: b.get("status") not in ("empty", "generating", "error", "running")) -> None:
