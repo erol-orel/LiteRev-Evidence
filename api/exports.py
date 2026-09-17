@@ -247,27 +247,92 @@ def _slug(s: str) -> str:
     return s[:60] or "scenario"
 
 
-def relevant_articles_export(scenario_id: str, fmt: str, threshold: float | None,
-                             include_abstract: bool) -> Response:
+def _normalize_format(fmt: str) -> str:
+    """Le format demandé, ou 400. `bib` est un alias courant de `bibtex`."""
     fmt = (fmt or "csv").lower()
     if fmt == "bib":
         fmt = "bibtex"
     if fmt not in EXPORT_FORMATS:
-        raise HTTPException(status_code=400, detail=f"format must be one of {', '.join(EXPORT_FORMATS)}")
+        raise HTTPException(status_code=400,
+                            detail=f"format must be one of {', '.join(EXPORT_FORMATS)}")
+    return fmt
+
+
+# Colonnes lues pour un export par identifiants. Mêmes noms que
+# `_get_above_threshold_articles`, pour que `export_rows` ne voie aucune différence
+# entre un sous-ensemble et le corpus pertinent.
+_BY_IDS_SQL = """
+    SELECT d.id, d.title, d.year, d.journal, d.authors, d.doi, d.study_design,
+           d.citation_count, d.quality_score, d.abstract, d.pico_json,
+           COALESCE(ars.screening_status, d.screening_status) AS screening_status,
+           ars.similarity_score
+    FROM literature_document d
+    JOIN article_scenarios ars ON ars.document_id = d.id AND ars.scenario_id = :sid
+    WHERE d.id = ANY(:ids) AND d.is_duplicate IS NOT TRUE
+    ORDER BY (COALESCE(ars.screening_status, d.screening_status) = 'included') DESC,
+             COALESCE(ars.rerank_score, ars.similarity_score, 0) DESC NULLS LAST,
+             d.citation_count DESC NULLS LAST, d.id
+"""
+
+
+def articles_by_ids(scenario_id: str, ids: list[int]) -> list[dict]:
+    """Les articles de CE scénario parmi `ids`, dans l'ordre de pertinence de l'app.
+
+    Bornée au scénario par le JOIN : un identifiant qui ne lui appartient pas est
+    simplement absent du résultat, jamais exporté. C'est ce qui permet d'ouvrir un
+    export générique par identifiants sans en faire une fuite du corpus entier."""
+    ids = [int(i) for i in ids if str(i).strip()]
+    if not ids:
+        return []
+    with engine.connect() as conn:
+        rows = conn.execute(text(_BY_IDS_SQL), {"sid": scenario_id, "ids": ids}).mappings().all()
+    return [dict(r) for r in rows]
+
+
+def articles_export_response(scenario_id: str, fmt: str, articles: list[dict],
+                             include_abstract: bool, *, subset: str, subset_label: str,
+                             coverage: str = "", extra_meta: dict | None = None) -> Response:
+    """Rend N'IMPORTE QUEL sous-ensemble d'articles dans les six formats.
+
+    Les formateurs étaient déjà purs ; seule la SÉLECTION des lignes était câblée sur le
+    corpus pertinent. Ce noyau la prend en paramètre, de sorte qu'un cluster, un concept,
+    une réponse du RAG ou une sélection à la main produisent exactement le même fichier,
+    avec les mêmes colonnes.
+
+    `coverage` : ce que le sous-ensemble couvre ET ce qu'il ne couvre pas (un cluster est
+    tiré d'une projection plafonnée, pas du corpus entier). Il part dans les métadonnées
+    du fichier, pas seulement dans l'interface : un export qui circule seul doit porter
+    ses propres limites."""
+    fmt = _normalize_format(fmt)
     row = _get_user_scenario_or_404(scenario_id)
-    articles = _get_above_threshold_articles(scenario_id, threshold=threshold)
     extra = _export_extra_fields([a["id"] for a in articles])
     for a in articles:
         a.update({k: v for k, v in (extra.get(int(a["id"])) or {}).items() if k != "id"})
     rows = export_rows(articles, include_abstract=include_abstract)
     title = str(row.get("name") or scenario_id)
     meta = {"scenario_id": scenario_id, "scenario": title, "query": row.get("query"),
-            "n_articles": len(rows), "format": fmt}
-    body = render_export(fmt, rows, title, meta)
-    filename = f"{_slug(title)}_relevant-articles_{len(rows)}.{_EXTENSIONS[fmt]}"
+            "n_articles": len(rows), "format": fmt,
+            "subset": subset, "subset_label": subset_label}
+    if coverage:
+        meta["coverage"] = coverage
+    meta.update(extra_meta or {})
+    doc_title = title if subset == "relevant" else f"{title} - {subset_label}"
+    body = render_export(fmt, rows, doc_title, meta)
+    filename = f"{_slug(title)}_{_slug(subset_label)}_{len(rows)}.{_EXTENSIONS[fmt]}"
     return Response(content=body, media_type=_CONTENT_TYPES[fmt],
                     headers={"Content-Disposition": f'attachment; filename="{filename}"',
-                             "X-Article-Count": str(len(rows))})
+                             "X-Article-Count": str(len(rows)),
+                             "X-Export-Subset": subset})
+
+
+def relevant_articles_export(scenario_id: str, fmt: str, threshold: float | None,
+                             include_abstract: bool) -> Response:
+    articles = _get_above_threshold_articles(scenario_id, threshold=threshold)
+    return articles_export_response(
+        scenario_id, fmt, articles, include_abstract,
+        subset="relevant", subset_label="relevant-articles",
+        coverage=("Tous les articles pertinents du scénario : au-dessus du seuil de "
+                  "similarité ou inclus par un relecteur, jamais les exclus."))
 
 
 @app.get("/user-scenarios/{scenario_id}/relevant/export")
@@ -291,3 +356,183 @@ def export_gesica_scenario_relevant(
 ) -> Response:
     """Same export for the built-in scenarios."""
     return relevant_articles_export(scenario_id, format, threshold, include_abstract)
+
+
+# ─── Exports de SOUS-ENSEMBLES du corpus ─────────────────────────────────────
+# Partout où l'application découpe le corpus (clusters, carte des concepts, réponse du
+# RAG, sélection à la main), on doit pouvoir sortir la liste des articles correspondante,
+# dans les mêmes six formats et avec les mêmes colonnes que l'export des pertinents. Les
+# formateurs ne changent pas : seule la sélection des lignes diffère.
+
+@app.get("/user-scenarios/{scenario_id}/clusters/{cluster_id}/export")
+def export_scenario_cluster(
+    scenario_id: str,
+    cluster_id: int,
+    format: str = Query("csv"),
+    lang: str | None = Query(None),
+    include_abstract: bool = True,
+) -> Response:
+    """Les articles d'UN cluster, dans le format demandé.
+
+    Le cache de clustering conserve TOUS les points avec leur identifiant de document
+    (seule la charge utile servie est sous-échantillonnée pour l'affichage), donc
+    l'export d'un cluster est complet POUR CE CLUSTER.
+
+    En revanche le clustering lui-même ne porte que sur les `CLUSTER_MAX_DOCS` articles
+    les plus pertinents : c'est une projection bornée par la mémoire, pas une extraction.
+    Le fichier le dit dans ses métadonnées, pour qu'un export qui circule seul ne se lise
+    pas comme « tous les articles de ce thème »."""
+    from .clustering import CLUSTER_MAX_DOCS, _load_viz_cache
+
+    _get_user_scenario_or_404(scenario_id)
+    cache = _load_viz_cache(scenario_id, "clustering_json")
+    if not cache or not cache.get("clusters"):
+        raise HTTPException(status_code=404,
+                            detail="Aucun clustering en cache pour ce scénario : ouvrez "
+                                   "l'onglet Clusters pour le calculer, puis réessayez.")
+    match = next((c for c in cache["clusters"]
+                  if isinstance(c, dict) and int(c.get("cluster_id", -99)) == int(cluster_id)), None)
+    if match is None:
+        _known = sorted(int(c.get("cluster_id")) for c in cache["clusters"]
+                        if isinstance(c, dict) and c.get("cluster_id") is not None)
+        raise HTTPException(status_code=404,
+                            detail=f"Cluster {cluster_id} inconnu (disponibles : {_known}).")
+    ids = [int(p["id"]) for p in (match.get("points") or [])
+           if isinstance(p, dict) and p.get("id") is not None]
+    articles = articles_by_ids(scenario_id, ids)
+    _name = str(match.get("cluster_name") or f"cluster-{cluster_id}")
+    _n_clustered = int(cache.get("n_docs") or 0)
+    _n_eligible = int(cache.get("n_docs_total") or _n_clustered)
+    coverage = (
+        f"Articles du cluster « {_name} » ({len(articles)}). Le clustering porte sur "
+        f"{_n_clustered} articles sur {_n_eligible} éligibles : c'est une projection "
+        f"plafonnée à CLUSTER_MAX_DOCS={CLUSTER_MAX_DOCS} (les plus pertinents), pas le "
+        f"corpus entier. Pour la liste complète des articles pertinents, utilisez "
+        f"l'export du corpus."
+    )
+    return articles_export_response(
+        scenario_id, format, articles, include_abstract,
+        subset="cluster", subset_label=_slug(_name) or f"cluster-{cluster_id}",
+        coverage=coverage,
+        extra_meta={"cluster_id": int(cluster_id), "cluster_name": _name,
+                    "clustering_lang": cache.get("lang") or lang,
+                    "n_docs_clustered": _n_clustered, "n_docs_eligible": _n_eligible,
+                    "top_words": match.get("top_words") or [],
+                    "cluster_summary": match.get("summary") or ""})
+
+
+@app.get("/user-scenarios/{scenario_id}/concepts/export")
+def export_scenario_concept_subset(
+    scenario_id: str,
+    concepts: str = Query(..., description="type:label, séparés par « | ». Ex: pathogen:dengue virus|vector:Aedes albopictus"),
+    mode: str = Query("any", pattern="^(any|all)$"),
+    format: str = Query("csv"),
+    include_abstract: bool = True,
+) -> Response:
+    """Les articles derrière un concept, ou derrière une SÉLECTION de concepts.
+
+    `mode=any` : les articles citant AU MOINS UN des concepts (l'union, ce que montre une
+    carte filtrée). `mode=all` : ceux qui les citent TOUS (l'intersection, ce qu'on veut
+    pour « les articles où ce pathogène ET ce vecteur apparaissent ensemble »).
+
+    La carte est RECALCULÉE sans le plafond d'affichage : les noeuds servis à l'interface
+    ne portent que leurs 40 premiers articles, et hériter de ce plafond ici produirait un
+    fichier tronqué sans le dire. Les concepts sont désignés par `type:label` (le libellé
+    canonique anglais) et non par leur identifiant de noeud, qui n'est qu'une position
+    dans un calcul donné et change d'un recalcul à l'autre."""
+    from .knowledge_graph import _build_concept_graph, _concept_rows
+
+    _get_user_scenario_or_404(scenario_id)
+    wanted: list[tuple[str, str]] = []
+    for part in (concepts or "").split("|"):
+        part = part.strip()
+        if not part:
+            continue
+        if ":" not in part:
+            raise HTTPException(status_code=400,
+                                detail=f"« {part} » doit s'écrire type:label (ex. pathogen:dengue virus).")
+        _t, _lab = part.split(":", 1)
+        wanted.append((_t.strip().lower(), _lab.strip()))
+    if not wanted:
+        raise HTTPException(status_code=400, detail="Aucun concept demandé.")
+
+    rows, n_total = _concept_rows(scenario_id)
+    graph = _build_concept_graph(rows, n_total=n_total, full_articles=True)
+    by_key = {(str(n["type"]).lower(), str((n.get("label") or {}).get("en") or "").strip().lower()): n
+              for n in graph.get("nodes") or []}
+    sets: list[set[int]] = []
+    labels: list[str] = []
+    missing: list[str] = []
+    for t, lab in wanted:
+        node = by_key.get((t, lab.lower()))
+        if node is None:
+            missing.append(f"{t}:{lab}")
+            continue
+        sets.append({int(i) for i in (node.get("articles") or [])})
+        labels.append(str((node.get("label") or {}).get("en") or lab))
+    if missing:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Concept(s) absent(s) de la carte : {', '.join(missing)}. "
+                   f"Les libellés sont ceux de la carte (anglais canonique).")
+    ids = set.union(*sets) if mode == "any" else set.intersection(*sets)
+    articles = articles_by_ids(scenario_id, sorted(ids))
+    _joiner = " OU " if mode == "any" else " ET "
+    _human = _joiner.join(labels)
+    coverage = (
+        f"Articles citant {_human} ({len(articles)}). Calculé sur la TOTALITÉ des "
+        f"{graph.get('n_with_concepts', 0)} articles pertinents porteurs de concepts "
+        f"(sur {graph.get('n_total', n_total)}), sans le plafond d'affichage de la carte."
+    )
+    return articles_export_response(
+        scenario_id, format, articles, include_abstract,
+        subset="concepts", subset_label=_slug("-".join(labels)) or "concepts",
+        coverage=coverage,
+        extra_meta={"concepts": labels, "mode": mode,
+                    "n_with_concepts": graph.get("n_with_concepts"),
+                    "n_total": graph.get("n_total", n_total)})
+
+
+@app.get("/user-scenarios/{scenario_id}/articles/export")
+def export_scenario_article_ids(
+    scenario_id: str,
+    ids: str = Query(..., description="Identifiants d'articles séparés par des virgules."),
+    format: str = Query("csv"),
+    label: str = Query("selection", description="Nom du sous-ensemble, pour le fichier."),
+    include_abstract: bool = True,
+) -> Response:
+    """Export d'une LISTE EXPLICITE d'articles de ce scénario.
+
+    C'est l'export générique : il sert les sources d'une réponse du RAG (qui portent leur
+    `document_id`), une carte des concepts filtrée à l'écran, une sélection faite à la
+    main, et tout découpage à venir, sans qu'il faille un endpoint de plus à chaque fois.
+
+    Borné au scénario : un identifiant qui ne lui appartient pas n'est pas exporté, il est
+    signalé dans `X-Missing-Ids`. La réponse ne peut donc pas servir à extraire le corpus
+    d'un autre scénario en devinant des identifiants."""
+    try:
+        wanted = [int(x) for x in (ids or "").replace(" ", "").split(",") if x]
+    except ValueError:
+        raise HTTPException(status_code=400, detail="`ids` doit être une liste d'entiers séparés par des virgules.")
+    if not wanted:
+        raise HTTPException(status_code=400, detail="Aucun identifiant fourni.")
+    if len(wanted) > 20000:
+        raise HTTPException(status_code=400, detail="Trop d'identifiants (maximum 20000).")
+    _get_user_scenario_or_404(scenario_id)
+    articles = articles_by_ids(scenario_id, wanted)
+    _found = {int(a["id"]) for a in articles}
+    _missing = [i for i in wanted if i not in _found]
+    coverage = (
+        f"Sélection explicite de {len(articles)} article(s) sur {len(wanted)} demandé(s)."
+        + (f" {len(_missing)} identifiant(s) n'appartiennent pas à ce scénario et ont été "
+           f"écartés." if _missing else "")
+    )
+    resp = articles_export_response(
+        scenario_id, format, articles, include_abstract,
+        subset="selection", subset_label=_slug(label) or "selection",
+        coverage=coverage,
+        extra_meta={"requested": len(wanted), "returned": len(articles),
+                    "missing_ids": _missing[:100]})
+    if _missing:
+        resp.headers["X-Missing-Ids"] = str(len(_missing))
+    return resp

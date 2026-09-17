@@ -69,6 +69,9 @@ import {
   fetchKnowledgeGraph,
   fetchConceptGraph,
   exportRelevantArticles,
+  exportClusterArticles,
+  exportConceptArticles,
+  exportArticleIds,
   downloadBlob,
   RELEVANT_EXPORT_FORMATS,
   type RelevantExportFormat,
@@ -2128,16 +2131,25 @@ function VariablesSection({ detail, scenarioId, onGoToModel }: { detail: Scenari
 const CORPUS_PAGE_SIZE = 200;
 
 /** "Export…" select: the relevant articles as csv, xlsx, ris, bibtex, json or md. */
-function RelevantExportMenu({ scenarioId, threshold }: { scenarioId: string; threshold?: number }) {
+/** Le MÊME sélecteur de format partout où l'on peut sortir une liste d'articles :
+ *  corpus pertinent, cluster, concept, réponse du RAG. Seul `run` change, parce que
+ *  seule la SÉLECTION des lignes change : le serveur rend les six mêmes formats avec
+ *  les mêmes colonnes. `title` et `disabled` adaptent l'intitulé au sous-ensemble. */
+function SubsetExportMenu({
+  run, title, disabled = false, compact = false,
+}: {
+  run: (format: RelevantExportFormat) => Promise<{ blob: Blob; filename: string }>;
+  title: string;
+  disabled?: boolean;
+  compact?: boolean;
+}) {
   const { t } = useI18n();
   const [busy, setBusy] = useState(false);
   const [failed, setFailed] = useState(false);
-  const run = async (format: RelevantExportFormat) => {
+  const go = async (format: RelevantExportFormat) => {
     setBusy(true); setFailed(false);
     try {
-      // Le seuil EN COURS (curseur), pas celui enregistré : sinon le fichier décrivait un
-      // autre corpus que le compteur affiché juste à côté.
-      const { blob, filename } = await exportRelevantArticles(scenarioId, format, { threshold });
+      const { blob, filename } = await run(format);
       downloadBlob(blob, filename);
     } catch {
       setFailed(true);
@@ -2146,11 +2158,12 @@ function RelevantExportMenu({ scenarioId, threshold }: { scenarioId: string; thr
     }
   };
   return (
-    <span className="flex items-center gap-1.5" title={t("scenarioDetail.corpus.exportRelevant")}>
+    <span className="flex items-center gap-1.5" title={title}>
       {busy ? <Loader2 size={11} className="animate-spin text-brand-300" /> : <Download size={11} className="text-brand-300" />}
-      <select value="" disabled={busy} aria-label={t("scenarioDetail.corpus.exportRelevant")}
-        onChange={e => { const f = e.target.value as RelevantExportFormat; if (f) void run(f); }}
-        className="rounded-lg border border-brand-500/30 bg-brand-500/10 px-2 py-1 text-[10px] text-brand-300 focus:outline-none">
+      <select value="" disabled={busy || disabled} aria-label={title}
+        onChange={e => { const f = e.target.value as RelevantExportFormat; if (f) void go(f); }}
+        className={`rounded-lg border border-brand-500/30 bg-brand-500/10 px-2 text-brand-300 focus:outline-none disabled:opacity-40 ${
+          compact ? "py-0.5 text-[9px]" : "py-1 text-[10px]"}`}>
         <option value="">{busy ? t("scenarioDetail.corpus.exporting") : t("scenarioDetail.corpus.exportPlaceholder")}</option>
         {RELEVANT_EXPORT_FORMATS.map(f => (
           <option key={f} value={f}>{t(`scenarioDetail.corpus.exportFormats.${f}`)}</option>
@@ -2158,6 +2171,18 @@ function RelevantExportMenu({ scenarioId, threshold }: { scenarioId: string; thr
       </select>
       {failed && <span className="text-[10px] text-rose-300">{t("scenarioDetail.corpus.exportFailed")}</span>}
     </span>
+  );
+}
+
+function RelevantExportMenu({ scenarioId, threshold }: { scenarioId: string; threshold?: number }) {
+  const { t } = useI18n();
+  return (
+    <SubsetExportMenu
+      title={t("scenarioDetail.corpus.exportRelevant")}
+      // Le seuil EN COURS (curseur), pas celui enregistré : sinon le fichier décrivait un
+      // autre corpus que le compteur affiché juste à côté.
+      run={format => exportRelevantArticles(scenarioId, format, { threshold })}
+    />
   );
 }
 
@@ -2874,6 +2899,14 @@ function ClusteringSection({ scenarioId }: { scenarioId: string }) {
                           <p className="text-xs text-white/50 mt-0.5">{activeClusterData.n_docs} {t("scenarioDetail.clustering.denseArticlesInGroup")}</p>
                         </div>
                       </div>
+                      {/* La liste des articles DE CE GROUPE, dans les mêmes formats que
+                          le corpus. Le fichier rappelle que le clustering est une
+                          projection plafonnée, pas le corpus entier. */}
+                      <SubsetExportMenu
+                        title={t("scenarioDetail.clustering.exportCluster")}
+                        run={format => exportClusterArticles(
+                          scenarioId, activeClusterData.cluster_id, format, { lang })}
+                      />
                     </div>
 
                     {/* Résumé clinique LLM */}
@@ -3236,7 +3269,18 @@ function RagSection({ scenarioId, detail }: { scenarioId: string; detail: Scenar
           {/* Sources citées */}
           {sources.length > 0 && (
             <div className="space-y-3">
-              <p className="text-[10px] font-bold uppercase tracking-wider text-white/50">{t("scenarioDetail.rag.citedSources")}</p>
+              <div className="flex items-center justify-between gap-2 flex-wrap">
+                <p className="text-[10px] font-bold uppercase tracking-wider text-white/50">{t("scenarioDetail.rag.citedSources")}</p>
+                {/* Les articles sur lesquels CETTE réponse s'appuie, citables tels quels.
+                    Export générique par identifiants : les sources en portent un. */}
+                <SubsetExportMenu
+                  compact
+                  title={t("scenarioDetail.rag.exportSources")}
+                  run={format => exportArticleIds(
+                    scenarioId, sources.map(s => s.document_id).filter(Boolean), format,
+                    { label: "rag-sources" })}
+                />
+              </div>
               <div className="space-y-2 max-h-[400px] overflow-y-auto pr-1">
                 {sources.map((src, i) => (
                   <div key={i} className="rounded-xl border border-white/5 bg-white/3 p-2.5 text-xs">
@@ -4156,6 +4200,18 @@ function ConceptMapView({ scenarioId }: { scenarioId: string }) {
             {t("scenarioDetail.knowledgeGraph.resetFilters")}
           </button>
         )}
+        {/* La liste des articles de la carte TELLE QU'ELLE EST COMPOSÉE : l'union des
+            concepts visibles, donc exactement ce que l'écran montre. Une carte filtrée
+            pour une question précise devient ainsi une bibliographie. */}
+        <SubsetExportMenu
+          disabled={shown.size === 0}
+          title={t("scenarioDetail.knowledgeGraph.exportVisible")
+            .replace("{n}", String(shown.size))}
+          run={format => exportConceptArticles(
+            scenarioId,
+            data.nodes.filter(n => shown.has(n.id)).map(n => ({ type: n.type, label: n.label.en })),
+            format, { mode: "any" })}
+        />
       </div>
 
       {types.length === 0 && (
@@ -4232,6 +4288,14 @@ function ConceptMapView({ scenarioId }: { scenarioId: string }) {
                   </p>
                 </div>
                 <div className="flex items-center gap-2 shrink-0">
+                  {/* TOUS les articles du concept, pas les 40 que le panneau liste :
+                      le serveur recalcule la carte sans le plafond d'affichage. */}
+                  <SubsetExportMenu
+                    compact
+                    title={t("scenarioDetail.knowledgeGraph.exportConcept")}
+                    run={format => exportConceptArticles(
+                      scenarioId, [{ type: sel.type, label: sel.label.en }], format)}
+                  />
                   <button type="button" onClick={() => { hideNode(sel.id); setSelected(null); }}
                     title={t("scenarioDetail.knowledgeGraph.removeConcept")}
                     className="rounded border border-white/10 px-1.5 py-0.5 text-[9px] text-white/40 hover:border-rose-400/40 hover:text-rose-300">
