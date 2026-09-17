@@ -43,10 +43,21 @@ def _ensure_alert_subscription(conn, email: str, scenario_id: str, frequency: st
             UNIQUE(email, scenario_id)
         )
     """))
+    # `last_notified_at = NOW()` DÈS l'abonnement : le premier digest porte alors sur ce
+    # qui est arrivé APRÈS l'inscription, ce que l'abonné attend. Laissé à NULL, « depuis
+    # la dernière notification » n'avait pas de borne basse et le premier envoi comptait
+    # le corpus ENTIER comme nouveau (2170 articles annoncés « nouveaux » sur un scénario
+    # qui n'en avait pas gagné un seul depuis l'inscription).
+    # COALESCE sur le conflit : on ne REMET PAS la pendule à zéro pour un abonnement déjà
+    # actif (changer la fréquence sauterait tout ce qui est arrivé depuis son dernier
+    # digest) ; on ne la pose que si elle manque.
     conn.execute(text("""
-        INSERT INTO alert_subscriptions (email, scenario_id, frequency)
-        VALUES (:email, :scenario_id, :frequency)
-        ON CONFLICT (email, scenario_id) DO UPDATE SET frequency = :frequency, is_active = TRUE
+        INSERT INTO alert_subscriptions (email, scenario_id, frequency, last_notified_at)
+        VALUES (:email, :scenario_id, :frequency, NOW())
+        ON CONFLICT (email, scenario_id) DO UPDATE SET
+            frequency = :frequency,
+            is_active = TRUE,
+            last_notified_at = COALESCE(alert_subscriptions.last_notified_at, NOW())
     """), {"email": email, "scenario_id": scenario_id, "frequency": frequency})
 
 
@@ -205,16 +216,31 @@ def _digest_is_due(frequency: str | None, last_notified, now) -> bool:
 
 def _render_alert_digest(scenario_id: str, articles: list[dict], total_new: int,
                          base_url: str = "https://literev-scenario.com",
-                         scenario_name: str | None = None) -> tuple[str, str, str]:
+                         scenario_name: str | None = None,
+                         first_digest: bool = False) -> tuple[str, str, str]:
     """(subject, html, text) d'un digest - liste les VRAIS nouveaux articles. Pur/testable.
     Utilise le NOM lisible du scénario (pas l'ID) et un lien PROFOND vers sa page
-    (?scenario=<id>, ouvert directement par le front)."""
+    (?scenario=<id>, ouvert directement par le front).
+
+    `first_digest=True` : l'abonnement n'a JAMAIS été notifié, il n'y a donc pas de borne
+    basse et rien n'est « nouveau » au sens de « depuis la dernière fois ». L'email dit
+    alors ce qu'il est vraiment, un aperçu des articles les plus récents du scénario, au
+    lieu d'annoncer le corpus entier comme une arrivée du jour."""
     import html as _html
     from urllib.parse import quote as _q
     label = (scenario_name or scenario_id).strip() or scenario_id
-    # Accord FR : 1 → « nouvel article » ; ≥2 → « nouveaux articles ».
-    noun = "nouvel article" if total_new == 1 else "nouveaux articles"
-    subj = f"[LiteRev] {total_new} {noun} - {label}"
+    if first_digest:
+        # Accord FR au singulier comme au pluriel, sans « (s) ».
+        noun = "1 article récent" if total_new == 1 else f"{total_new} articles récents"
+        subj = f"[LiteRev] Alertes activées - {label} : {noun}"
+        intro = ("Première notification pour ce scénario : voici ses articles les plus "
+                 "récents. Les prochaines ne porteront que sur les nouveautés.")
+    else:
+        # Accord FR : 1 → « nouvel article » ; ≥2 → « nouveaux articles ».
+        _n = "nouvel article" if total_new == 1 else "nouveaux articles"
+        noun = f"{total_new} {_n}"
+        subj = f"[LiteRev] {noun} - {label}"
+        intro = ""
     scen_url = f"{base_url}/?scenario={_q(scenario_id, safe='')}"
 
     def _row(a):
@@ -224,17 +250,22 @@ def _render_alert_digest(scenario_id: str, articles: list[dict], total_new: int,
         return f'<li style="margin:4px 0"><a href="{_html.escape(str(href))}" style="color:#16a34a">{title}</a>{yr}</li>'
 
     shown = articles[:25]
+    # `noun` porte DÉJÀ le nombre : le répéter donnait « 30 30 nouveaux articles ».
     more = f'<p style="font-size:12px;color:#6b7280">… et {total_new - len(shown)} de plus.</p>' if total_new > len(shown) else ""
+    _intro_html = (f'<p style="font-size:13px;color:#4b5563">{_html.escape(intro)}</p>'
+                   if intro else "")
     html_body = (
         '<html><body style="font-family:system-ui,Arial,sans-serif;color:#111">'
-        f'<h2 style="color:#14532d">LiteRev - {total_new} {noun}</h2>'
+        f'<h2 style="color:#14532d">LiteRev - {noun}</h2>'
         f'<p>Scénario <strong>{_html.escape(label)}</strong> :</p>'
+        f'{_intro_html}'
         f'<ul>{"".join(_row(a) for a in shown)}</ul>{more}'
         f'<p><a href="{_html.escape(scen_url)}" style="color:#16a34a;font-weight:600">Ouvrir le scénario →</a></p>'
         '<hr><p style="font-size:11px;color:#6b7280">Vous recevez cet email car vous êtes abonné aux alertes LiteRev pour ce scénario.</p>'
         '</body></html>'
     )
-    text_body = (f"LiteRev - {total_new} {noun} pour le scénario « {label} » :\n\n"
+    text_body = (f"LiteRev - {noun} pour le scénario « {label} » :\n\n"
+                 + (f"{intro}\n\n" if intro else "")
                  + "\n".join(f"- {a.get('title', '')}" + (f" ({a['year']})" if a.get("year") else "") for a in shown)
                  + (f"\n… et {total_new - len(shown)} de plus." if total_new > len(shown) else "")
                  + f"\n\n{scen_url}\n")
@@ -312,12 +343,20 @@ def _process_alert_digests(scenario_id: str | None, dry_run: bool, respect_frequ
         if respect_frequency and not _digest_is_due(sub.get("frequency"), sub.get("last_notified_at"), now):
             results.append({"email": sub["email"], "scenario_id": sub["scenario_id"], "skipped": "not_due"})
             continue
+        # Jamais notifié : pas de borne basse, donc RIEN n'est « nouveau depuis la
+        # dernière fois ». Le digest est un aperçu des articles les plus récents, et son
+        # total est ce qu'il montre. Compter le corpus entier faisait annoncer « 2170
+        # nouveaux articles » sur un scénario qui n'en avait pas gagné un seul depuis
+        # l'inscription. Les abonnements créés à partir de maintenant partent avec
+        # last_notified_at = NOW(), donc ce cas ne concerne que les lignes héritées.
+        _since = sub.get("last_notified_at")
+        _first = _since is None
         try:
             with engine.connect() as conn:
-                arts = _new_articles_for_scenario(conn, sub["scenario_id"], sub.get("last_notified_at"))
+                arts = _new_articles_for_scenario(conn, sub["scenario_id"], _since)
                 # Le TOTAL, pas le nombre de lignes affichées : c'est lui que l'email annonce.
-                total_new = _count_new_articles_for_scenario(
-                    conn, sub["scenario_id"], sub.get("last_notified_at"))
+                total_new = (len(arts) if _first else
+                             _count_new_articles_for_scenario(conn, sub["scenario_id"], _since))
         except Exception as e:
             logger.warning(f"digest new-articles {sub['scenario_id']}: {e}")
             arts, total_new = [], 0
@@ -331,7 +370,8 @@ def _process_alert_digests(scenario_id: str | None, dry_run: bool, respect_frequ
             # seul prérequis qu'on venait vérifier était le seul qu'il taisait.
             results.append({"email": sub["email"], "scenario_id": sub["scenario_id"],
                             "new": total_new, "listed": len(arts), "sent": False,
-                            "reason": "dry_run", "would_send": bool(smtp_host)})
+                            "reason": "dry_run", "would_send": bool(smtp_host),
+                            "first_digest": _first})
             continue
         if not smtp_host:
             results.append({"email": sub["email"], "scenario_id": sub["scenario_id"],
@@ -345,14 +385,17 @@ def _process_alert_digests(scenario_id: str | None, dry_run: bool, respect_frequ
         # `total_new` et NON len(arts) : le gabarit compare le total au nombre de lignes
         # pour écrire « et N de plus ». Lui passer le nombre de lignes comme total rendait
         # cette branche morte (N valait toujours 0) et faisait annoncer 25 au lieu de 300.
-        subj, html_body, text_body = _render_alert_digest(sub["scenario_id"], arts, total_new, scenario_name=_scen_name)
+        subj, html_body, text_body = _render_alert_digest(
+            sub["scenario_id"], arts, total_new, scenario_name=_scen_name,
+            first_digest=_first)
         try:
             _send_email_smtp(smtp_host, smtp_user, smtp_pass, sub["email"], subj, html_body, text_body)
             with engine.begin() as conn:
                 conn.execute(text("UPDATE alert_subscriptions SET last_notified_at = NOW() WHERE id = :id"), {"id": sub["id"]})
             sent += 1
             results.append({"email": sub["email"], "scenario_id": sub["scenario_id"],
-                            "new": total_new, "listed": len(arts), "sent": True})
+                            "new": total_new, "listed": len(arts), "sent": True,
+                            "first_digest": _first})
         except Exception as e:
             logger.error(f"digest email {sub['email']}: {e}")
             results.append({"email": sub["email"], "scenario_id": sub["scenario_id"],
