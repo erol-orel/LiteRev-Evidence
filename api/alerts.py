@@ -172,6 +172,25 @@ def _new_articles_for_scenario(conn, scenario_id: str, since, limit: int = 25) -
     return [dict(r) for r in rows]
 
 
+def _count_new_articles_for_scenario(conn, scenario_id: str, since) -> int:
+    """Combien d'articles nouveaux AU TOTAL, sans la borne d'affichage.
+
+    `_new_articles_for_scenario` en renvoie au plus 25, pour ne pas mettre 300 lignes
+    dans un email. Ce total-ci est ce que l'email ANNONCE. Les confondre faisait écrire
+    « 25 nouveaux articles » à un abonné dont le scénario en avait gagné 300, et rendait
+    inatteignable la mention « et N de plus » du gabarit (elle compare le total au nombre
+    de lignes affichées : si le total EST le nombre de lignes, elle ne s'affiche jamais).
+    Mêmes conditions exactement que la requête ci-dessus."""
+    return int(conn.execute(text("""
+        SELECT COUNT(DISTINCT d.id)
+        FROM literature_document d
+        WHERE (d.scenario_type = :sid
+               OR EXISTS (SELECT 1 FROM article_scenarios a
+                          WHERE a.document_id = d.id AND a.scenario_id = :sid))
+          AND (CAST(:since AS timestamp) IS NULL OR d.created_at > CAST(:since AS timestamp))
+    """), {"sid": scenario_id, "since": since}).scalar() or 0)
+
+
 def _digest_is_due(frequency: str | None, last_notified, now) -> bool:
     """Un abonnement est-il dû ? immediate = toujours ; daily/weekly selon le délai
     depuis la dernière notification ; jamais notifié = dû."""
@@ -296,35 +315,56 @@ def _process_alert_digests(scenario_id: str | None, dry_run: bool, respect_frequ
         try:
             with engine.connect() as conn:
                 arts = _new_articles_for_scenario(conn, sub["scenario_id"], sub.get("last_notified_at"))
+                # Le TOTAL, pas le nombre de lignes affichées : c'est lui que l'email annonce.
+                total_new = _count_new_articles_for_scenario(
+                    conn, sub["scenario_id"], sub.get("last_notified_at"))
         except Exception as e:
             logger.warning(f"digest new-articles {sub['scenario_id']}: {e}")
-            arts = []
+            arts, total_new = [], 0
         if not arts:
             results.append({"email": sub["email"], "scenario_id": sub["scenario_id"], "new": 0, "sent": False})
             continue
         if dry_run:
-            results.append({"email": sub["email"], "scenario_id": sub["scenario_id"], "new": len(arts), "sent": False, "reason": "dry_run"})
+            # `would_send` : la question que l'aperçu doit trancher. Sans elle, le dry run
+            # court-circuitait AVANT le contrôle SMTP et répondait « dry_run » aussi bien
+            # sur un serveur qui enverra que sur un serveur qui n'enverra jamais rien : le
+            # seul prérequis qu'on venait vérifier était le seul qu'il taisait.
+            results.append({"email": sub["email"], "scenario_id": sub["scenario_id"],
+                            "new": total_new, "listed": len(arts), "sent": False,
+                            "reason": "dry_run", "would_send": bool(smtp_host)})
             continue
         if not smtp_host:
-            results.append({"email": sub["email"], "scenario_id": sub["scenario_id"], "new": len(arts), "sent": False, "reason": "smtp_not_configured"})
+            results.append({"email": sub["email"], "scenario_id": sub["scenario_id"],
+                            "new": total_new, "listed": len(arts), "sent": False,
+                            "reason": "smtp_not_configured"})
             continue
         try:
             _scen_name = _get_scenario_name(sub["scenario_id"])
         except Exception:
             _scen_name = None
-        subj, html_body, text_body = _render_alert_digest(sub["scenario_id"], arts, len(arts), scenario_name=_scen_name)
+        # `total_new` et NON len(arts) : le gabarit compare le total au nombre de lignes
+        # pour écrire « et N de plus ». Lui passer le nombre de lignes comme total rendait
+        # cette branche morte (N valait toujours 0) et faisait annoncer 25 au lieu de 300.
+        subj, html_body, text_body = _render_alert_digest(sub["scenario_id"], arts, total_new, scenario_name=_scen_name)
         try:
             _send_email_smtp(smtp_host, smtp_user, smtp_pass, sub["email"], subj, html_body, text_body)
             with engine.begin() as conn:
                 conn.execute(text("UPDATE alert_subscriptions SET last_notified_at = NOW() WHERE id = :id"), {"id": sub["id"]})
             sent += 1
-            results.append({"email": sub["email"], "scenario_id": sub["scenario_id"], "new": len(arts), "sent": True})
+            results.append({"email": sub["email"], "scenario_id": sub["scenario_id"],
+                            "new": total_new, "listed": len(arts), "sent": True})
         except Exception as e:
             logger.error(f"digest email {sub['email']}: {e}")
-            results.append({"email": sub["email"], "scenario_id": sub["scenario_id"], "new": len(arts), "sent": False, "reason": f"error: {e}"})
+            results.append({"email": sub["email"], "scenario_id": sub["scenario_id"],
+                            "new": total_new, "listed": len(arts), "sent": False,
+                            "reason": f"error: {e}"})
 
     status = "sent" if (not dry_run and sent) else ("dry_run" if dry_run else ("not_configured" if not smtp_host else "no_new_articles"))
-    return {"status": status, "subscriptions": len(subs), "processed": len(results), "sent": sent, "dry_run": dry_run, "results": results}
+    return {"status": status, "subscriptions": len(subs), "processed": len(results), "sent": sent,
+            "dry_run": dry_run,
+            # Au niveau de la réponse aussi : un aperçu qui ne dit pas si SMTP est
+            # configuré ne permet pas de décider s'il est sûr d'activer le cron.
+            "smtp_configured": bool(smtp_host), "results": results}
 
 
 @app.post("/alerts/send-digest")
