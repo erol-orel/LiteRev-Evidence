@@ -2709,6 +2709,62 @@ export async function exportRelevantArticles(
   return { blob: await r.blob(), filename: m?.[1] ?? `relevant-articles.${format === "bibtex" ? "bib" : format}` };
 }
 
+/** Shared tail of every subset export: read the server's filename, hand back the blob. */
+async function _exportResponse(
+  url: string, format: RelevantExportFormat, fallback: string,
+): Promise<{ blob: Blob; filename: string }> {
+  const r = await safeFetch(url);
+  if (!r.ok) throw new Error(httpMessage(r.status));
+  const m = /filename="?([^";]+)"?/.exec(r.headers.get("Content-Disposition") ?? "");
+  const ext = format === "bibtex" ? "bib" : format;
+  return { blob: await r.blob(), filename: m?.[1] ?? `${fallback}.${ext}` };
+}
+
+/** One cluster's articles. Complete for that cluster; the clustering itself is a
+ *  projection over the most relevant CLUSTER_MAX_DOCS, which the file states. */
+export async function exportClusterArticles(
+  scenarioId: string, clusterId: number, format: RelevantExportFormat,
+  opts: { includeAbstract?: boolean; lang?: string } = {},
+): Promise<{ blob: Blob; filename: string }> {
+  const params = new URLSearchParams({ format });
+  if (opts.includeAbstract === false) params.set("include_abstract", "false");
+  if (opts.lang) params.set("lang", opts.lang);
+  return _exportResponse(
+    `${scenarioBase(scenarioId)}/${scenarioId}/clusters/${clusterId}/export?${params}`,
+    format, `cluster-${clusterId}`);
+}
+
+/** The articles behind one concept or a selection of them. `mode` is "any" for the
+ *  union a filtered map shows, "all" for the intersection. Never capped at the map's
+ *  40-article display limit: the server recomputes the graph uncapped. */
+export async function exportConceptArticles(
+  scenarioId: string, concepts: Array<{ type: string; label: string }>,
+  format: RelevantExportFormat,
+  opts: { includeAbstract?: boolean; mode?: "any" | "all" } = {},
+): Promise<{ blob: Blob; filename: string }> {
+  const params = new URLSearchParams({
+    format, concepts: concepts.map(c => `${c.type}:${c.label}`).join("|"),
+  });
+  if (opts.mode) params.set("mode", opts.mode);
+  if (opts.includeAbstract === false) params.set("include_abstract", "false");
+  return _exportResponse(
+    `${scenarioBase(scenarioId)}/${scenarioId}/concepts/export?${params}`, format, "concepts");
+}
+
+/** An explicit list of articles: the RAG sources, a filtered map, a hand-picked set.
+ *  Ids outside this scenario are dropped server-side, never exported. */
+export async function exportArticleIds(
+  scenarioId: string, ids: number[], format: RelevantExportFormat,
+  opts: { includeAbstract?: boolean; label?: string } = {},
+): Promise<{ blob: Blob; filename: string }> {
+  const params = new URLSearchParams({ format, ids: ids.join(",") });
+  if (opts.label) params.set("label", opts.label);
+  if (opts.includeAbstract === false) params.set("include_abstract", "false");
+  return _exportResponse(
+    `${scenarioBase(scenarioId)}/${scenarioId}/articles/export?${params}`, format,
+    opts.label ?? "selection");
+}
+
 /** Hand a blob to the browser as a download. */
 export function downloadBlob(blob: Blob, filename: string): void {
   const url = URL.createObjectURL(blob);
