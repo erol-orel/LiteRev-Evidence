@@ -197,3 +197,92 @@ def test_the_generic_id_export_is_scoped_to_the_scenario(monkeypatch):
 
     assert client.get("/user-scenarios/usr-x/articles/export?ids=").status_code == 400
     assert client.get("/user-scenarios/usr-x/articles/export?ids=abc").status_code == 400
+
+
+# ── The REAL path: no stubs on the cache loader or the article query ─────────
+# The tests above stub `_load_viz_cache` and `articles_by_ids`, so they proved the
+# formatters and the plumbing but NOT that the endpoint talks to the database correctly.
+# It did not: `_load_viz_cache` takes the cache KEY ("clustering"), and the endpoint
+# passed the column name ("clustering_json"), so every cluster export raised KeyError in
+# production while the suite stayed green. These tests go through the database.
+SID_REAL = "usr-export-realpath"
+
+
+def _seed_clustered_scenario(db_conn):
+    from conftest import ensure_document_columns
+    import json as _json
+
+    ensure_document_columns(db_conn.cursor())
+    with db_conn.cursor() as cur:
+        cur.execute("DELETE FROM article_scenarios WHERE scenario_id = %s", (SID_REAL,))
+        cur.execute("DELETE FROM literature_document WHERE id BETWEEN 9200 AND 9209")
+        cur.execute("DELETE FROM scenario_settings WHERE scenario_id = %s", (SID_REAL,))
+        cur.execute("INSERT INTO user_scenarios (id, name, query, created_at, updated_at) "
+                    "VALUES (%s,'Real path','q',NOW(),NOW()) ON CONFLICT (id) DO NOTHING", (SID_REAL,))
+        for i in (9200, 9201, 9202):
+            cur.execute("INSERT INTO literature_document (id, title, abstract, year, journal, doi, "
+                        "source, project_context) VALUES (%s,%s,'abstract',2025,'Circulation',%s,"
+                        "'pubmed','literev')", (i, f"Calcification paper {i}", f"10.1/{i}"))
+            cur.execute("INSERT INTO article_scenarios (document_id, scenario_id, similarity_score) "
+                        "VALUES (%s,%s,0.80)", (i, SID_REAL))
+        payload = {
+            "scenario_id": SID_REAL, "lang": "fr", "n_docs": 3, "n_docs_total": 8,
+            "clusters": [
+                {"cluster_id": 0, "cluster_name": "Calcification", "n_docs": 3,
+                 "top_words": ["calcification"], "summary": "Sur la calcification.",
+                 "points": [{"id": 9200, "x": 0.1, "y": 0.1}, {"id": 9201, "x": 0.2, "y": 0.2},
+                            {"id": 9202, "x": 0.3, "y": 0.3}]},
+            ],
+        }
+        cur.execute("INSERT INTO scenario_settings (scenario_id, clustering_json, clustering_generated_at) "
+                    "VALUES (%s, CAST(%s AS jsonb), NOW()) ON CONFLICT (scenario_id) DO UPDATE "
+                    "SET clustering_json = CAST(%s AS jsonb), clustering_generated_at = NOW()",
+                    (SID_REAL, _json.dumps(payload), _json.dumps(payload)))
+
+
+def test_a_cluster_export_works_against_a_real_clustering_cache(db_conn):
+    """End to end: a real scenario, a real clustering cache, a real article query."""
+    from fastapi.testclient import TestClient
+
+    _seed_clustered_scenario(db_conn)
+    r = TestClient(main.app).get(f"/user-scenarios/{SID_REAL}/clusters/0/export?format=csv")
+    assert r.status_code == 200, r.text
+    assert r.headers["x-article-count"] == "3"
+    body = r.content.decode("utf-8")
+    for i in (9200, 9201, 9202):
+        assert f"Calcification paper {i}" in body
+    assert r.headers["x-export-subset"] == "cluster"
+
+
+def test_the_real_cluster_export_states_its_projection_bound(db_conn):
+    from fastapi.testclient import TestClient
+
+    _seed_clustered_scenario(db_conn)
+    r = TestClient(main.app).get(f"/user-scenarios/{SID_REAL}/clusters/0/export?format=json")
+    assert r.status_code == 200, r.text
+    meta = json.loads(r.text)["meta"]
+    assert meta["n_docs_clustered"] == 3 and meta["n_docs_eligible"] == 8
+    assert "3" in meta["coverage"] and "8" in meta["coverage"]
+
+
+def test_the_real_id_export_is_bounded_by_the_scenario(db_conn):
+    """`articles_by_ids` against the database: an id from another scenario is dropped."""
+    from fastapi.testclient import TestClient
+
+    _seed_clustered_scenario(db_conn)
+    r = TestClient(main.app).get(
+        f"/user-scenarios/{SID_REAL}/articles/export?ids=9200,9999999&format=json")
+    assert r.status_code == 200, r.text
+    assert r.headers["x-article-count"] == "1"
+    assert r.headers["x-missing-ids"] == "1"
+
+
+def test_every_export_route_exists_for_built_in_scenarios_too():
+    """`scenarioBase` sends built-in scenarios to /gesica/scenarios. The relevant export
+    had both routes; the three new ones had only the user-scenario one, so their buttons
+    pointed at routes that did not exist."""
+    paths = {r.path for r in main.app.routes if hasattr(r, "path")}
+    for suffix in ("/clusters/{cluster_id}/export", "/concepts/export", "/articles/export",
+                   "/relevant/export"):
+        assert "/user-scenarios/{scenario_id}" + suffix in paths, suffix
+        assert "/gesica/scenarios/{scenario_id}" + suffix in paths, f"gesica {suffix}"
