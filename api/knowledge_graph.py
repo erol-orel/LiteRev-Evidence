@@ -451,12 +451,19 @@ def _article_concepts(row: dict) -> list[tuple[str, str, dict]]:
 
 
 def _build_concept_graph(rows: list[dict], *, max_nodes: int = 60, min_edge: int | None = None,
-                         n_total: int | None = None) -> dict[str, Any]:
+                         n_total: int | None = None,
+                         full_articles: bool = False) -> dict[str, Any]:
     """Construit la carte des concepts à partir des lignes d'articles (pur, testé hors base).
 
     `rows` : dicts {id, title, year, quality, doi, pmid, country, study_design, pico_json,
     metadata_json, keywords, concepts_json, similarity}, déjà limités au sous-ensemble
-    pertinent du scénario, triés par pertinence décroissante."""
+    pertinent du scénario, triés par pertinence décroissante.
+
+    `full_articles=True` : les noeuds portent TOUS leurs articles, sans le plafond
+    d'affichage. Réservé à l'EXPORT : la charge utile servie à l'interface reste plafonnée
+    (elle ne sert qu'à peupler un panneau), mais un fichier exporté qui s'arrêterait à 40
+    articles sur un concept qui en compte 1 200 serait un échantillon silencieux, ce que ce
+    projet n'autorise nulle part."""
     from collections import Counter, defaultdict
 
     n_articles = len(rows)
@@ -542,10 +549,10 @@ def _build_concept_graph(rows: list[dict], *, max_nodes: int = 60, min_edge: int
         nodes.append({
             "id": i, "type": k[0], "label": labels.get(k, {"en": k[1], "fr": k[1]}),
             "count": len(arts), "new_count": int(node_new.get(i, 0)),
-            "articles": arts[:ARTICLES_PER_NODE],
+            "articles": list(arts) if full_articles else arts[:ARTICLES_PER_NODE],
             # Combien la charge utile en transporte réellement : « Tout afficher » sur un
             # concept annoncé à 1 200 articles en listait 40 sans le dire.
-            "articles_listed": min(len(arts), ARTICLES_PER_NODE),
+            "articles_listed": len(arts) if full_articles else min(len(arts), ARTICLES_PER_NODE),
         })
     edges = []
     for (i, j), w in edge_w.most_common():
