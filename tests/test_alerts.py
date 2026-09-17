@@ -122,18 +122,24 @@ class _FakeEngine:
     def begin(self): return _FakeConn(self._subs)
 
 
-def _drive(monkeypatch, *, listed, total, smtp, dry_run):
-    """Run the real digest loop with the two article helpers stubbed."""
+def _drive(monkeypatch, *, listed, total, smtp, dry_run, last_notified="set"):
+    """Run the real digest loop with the two article helpers stubbed.
+
+    `last_notified="set"` gives the subscription a real timestamp (the normal case);
+    None makes it a never-notified row, which is the first-digest path."""
+    from datetime import datetime
     from conftest import patch_app
 
     captured = {}
 
-    def _fake_render(sid, articles, total_new, scenario_name=None):
+    def _fake_render(sid, articles, total_new, scenario_name=None, first_digest=False):
         captured["listed"], captured["total"] = len(articles), total_new
+        captured["first_digest"] = first_digest
         return ("subject", "<html></html>", "text")
 
+    _ln = datetime(2026, 1, 1) if last_notified == "set" else last_notified
     subs = [{"id": 1, "email": "a@b.c", "scenario_id": "usr-1",
-             "frequency": "daily", "last_notified_at": None}]
+             "frequency": "immediate", "last_notified_at": _ln}]
     patch_app(monkeypatch, "engine", _FakeEngine(subs))
     patch_app(monkeypatch, "_render_alert_digest", _fake_render)
     patch_app(monkeypatch, "_new_articles_for_scenario",
@@ -176,3 +182,53 @@ def test_the_preview_says_whether_anything_would_actually_be_sent(monkeypatch):
     assert out2["results"][0]["would_send"] is True
     # A preview still sends nothing and reports nothing as sent.
     assert out2["sent"] == 0 and out2["results"][0]["sent"] is False
+
+
+# ── the FIRST digest of a never-notified subscription ────────────────────────
+def test_a_never_notified_subscription_does_not_call_the_whole_corpus_new(monkeypatch):
+    """With `last_notified_at` NULL there is no lower bound, so nothing is "new since
+    last time": the count matched the ENTIRE corpus and the email announced "2170
+    nouveaux articles" for a scenario that had gained none since the subscription. A
+    first digest is an introduction, so its total is what it shows."""
+    out, captured = _drive(monkeypatch, listed=25, total=2170,
+                           smtp="smtp.example.org", dry_run=False, last_notified=None)
+    assert captured["first_digest"] is True
+    assert captured["total"] == 25, "a first digest counts what it shows"
+    assert captured["listed"] == 25
+    assert out["results"][0]["new"] == 25
+    assert out["results"][0]["first_digest"] is True
+
+
+def test_a_normal_digest_still_reports_the_real_total(monkeypatch):
+    """The first-digest rule must not swallow the fix above it: once there IS a lower
+    bound, the real total is what the email announces."""
+    out, captured = _drive(monkeypatch, listed=25, total=300,
+                           smtp="smtp.example.org", dry_run=False)
+    assert captured["first_digest"] is False
+    assert captured["total"] == 300
+    assert out["results"][0]["new"] == 300 and out["results"][0]["listed"] == 25
+
+
+def test_the_first_digest_says_recent_not_new():
+    """The wording has to match the arithmetic: "les plus récents", not "nouveaux"."""
+    subj, html, text = main._render_alert_digest(
+        "usr-1", _articles(25), 25, scenario_name="Chikungunya", first_digest=True)
+    assert "nouveaux articles" not in subj
+    assert "25 articles récents" in subj and "Chikungunya" in subj
+    for body in (html, text):
+        assert "Première notification" in body
+        assert "25 25" not in body          # the count is not printed twice
+    # Singular stays grammatical.
+    subj1, _h, _t = main._render_alert_digest("usr-1", _articles(1), 1, first_digest=True)
+    assert "1 article récent" in subj1
+
+
+def test_a_normal_digest_keeps_its_wording_and_overflow_note():
+    """The ordinary path is unchanged, intro included: it must stay absent."""
+    subj, html, text = main._render_alert_digest(
+        "usr-1", _articles(25), 300, scenario_name="Chikungunya")
+    assert "300 nouveaux articles" in subj
+    assert "300 300" not in html and "300 300" not in text
+    assert "275 de plus" in html and "275 de plus" in text
+    for body in (html, text):
+        assert "Première notification" not in body
