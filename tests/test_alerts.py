@@ -89,16 +89,16 @@ def test_render_digest_escapes_html():
 def test_render_digest_overflow_note():
     # 30 new but only 25 listed → the HTML notes the remainder
     _subj, html, text = main._render_alert_digest("s1", _articles(25), 30)
-    assert "5 de plus" in html
-    assert "5 de plus" in text
+    assert "5 more" in html
+    assert "5 more" in text
 
 
 def test_render_digest_singular_plural_french_agreement():
     subj1, _h, _t = main._render_alert_digest("s", _articles(1), 1)
     subj2, _h2, _t2 = main._render_alert_digest("s", _articles(2), 2)
-    assert "1 nouvel article" in subj1              # singular
-    assert "2 nouveaux articles" in subj2           # correct FR plural (not "nouvels")
-    assert "nouvels" not in subj2
+    assert "1 new article" in subj1                 # singular
+    assert "2 new articles" in subj2                # plural
+    assert "2 new article " not in subj2
 
 
 # ── what the RUNNER feeds the renderer, and what the preview reveals ─────────
@@ -219,25 +219,25 @@ def test_the_first_digest_says_recent_not_new():
     """The wording has to match the arithmetic: "les plus récents", not "nouveaux"."""
     subj, html, text = main._render_alert_digest(
         "usr-1", _articles(25), 25, scenario_name="Chikungunya", first_digest=True)
-    assert "nouveaux articles" not in subj
-    assert "25 articles récents" in subj and "Chikungunya" in subj
+    assert "new articles" not in subj
+    assert "25 recent articles" in subj and "Chikungunya" in subj
     for body in (html, text):
-        assert "Première notification" in body
+        assert "first notification for this scenario" in body
         assert "25 25" not in body          # the count is not printed twice
     # Singular stays grammatical.
     subj1, _h, _t = main._render_alert_digest("usr-1", _articles(1), 1, first_digest=True)
-    assert "1 article récent" in subj1
+    assert "1 recent article" in subj1
 
 
 def test_a_normal_digest_keeps_its_wording_and_overflow_note():
     """The ordinary path is unchanged, intro included: it must stay absent."""
     subj, html, text = main._render_alert_digest(
         "usr-1", _articles(25), 300, scenario_name="Chikungunya")
-    assert "300 nouveaux articles" in subj
+    assert "300 new articles" in subj
     assert "300 300" not in html and "300 300" not in text
-    assert "275 de plus" in html and "275 de plus" in text
+    assert "275 more" in html and "275 more" in text
     for body in (html, text):
-        assert "Première notification" not in body
+        assert "first notification for this scenario" not in body
 
 
 # ── How many of the new papers are RELEVANT, and what is worth rereading ─────
@@ -247,13 +247,13 @@ def test_the_digest_says_how_many_of_the_new_papers_clear_the_threshold():
     _s, html, text = main._render_alert_digest(
         "s1", _articles(3), 300, scenario_name="Chik", n_relevant=12)
     for body in (html, text):
-        assert "12 sur 300 passent le seuil" in body
+        assert "12 of 300 clear the relevance threshold" in body
     # When every new article is relevant, say that rather than "300 of 300".
     _s, _h, text_all = main._render_alert_digest("s1", _articles(3), 3, n_relevant=3)
-    assert "Les 3 passent le seuil" in text_all
+    assert "All 3 clear the relevance threshold" in text_all
     # Without the count the sentence is simply absent, never a guess.
     _s, _h, text_none = main._render_alert_digest("s1", _articles(3), 3, n_relevant=None)
-    assert "passent le seuil" not in text_none
+    assert "clear the relevance threshold" not in text_none
 
 
 def test_the_signals_invite_a_review_and_never_claim_the_model_changed():
@@ -265,14 +265,14 @@ def test_the_signals_invite_a_review_and_never_claim_the_model_changed():
                  {"code": "new_concepts", "n": 2, "detail": "Wolbachia"},
                  {"code": "strong_designs", "n": 1, "detail": "Systematic review"}])
     for body in (html, text):
-        assert "3 articles rapportant un paramètre" in body
-        assert "2 concepts absents de la carte" in body
-        assert "1 devis qui relève" in body          # singular agreement, no "(s)"
-        assert "pistes de relecture, pas un constat" in body
-        assert "seule une régénération" in body
+        assert "3 articles reporting an epidemiological parameter" in body
+        assert "2 concepts absent from the concept map" in body
+        assert "1 study design that raises" in body   # singular agreement, no "(s)"
+        assert "leads to review, not findings" in body
+        assert "only regenerating" in body
     # No signals, no block and no caveat dangling on its own.
     _s, _h, quiet = main._render_alert_digest("s1", _articles(2), 10, n_relevant=10, signals=[])
-    assert "pistes de relecture" not in quiet and "À relire" not in quiet
+    assert "leads to review" not in quiet and "Worth rereading" not in quiet
 
 
 def test_signals_agree_in_the_plural_as_well_as_the_singular():
@@ -280,8 +280,8 @@ def test_signals_agree_in_the_plural_as_well_as_the_singular():
         "s1", _articles(1), 1, signals=[{"code": "new_concepts", "n": 1, "detail": "x"}])
     _s2, _h2, many = main._render_alert_digest(
         "s1", _articles(1), 1, signals=[{"code": "new_concepts", "n": 4, "detail": "x"}])
-    assert "1 concept absent de la carte" in one
-    assert "4 concepts absents de la carte" in many
+    assert "1 concept absent from the concept map" in one
+    assert "4 concepts absent from the concept map" in many
     assert "(s)" not in one and "(s)" not in many
 
 
@@ -296,3 +296,29 @@ def test_change_signals_never_break_the_digest(monkeypatch):
     patch_app(monkeypatch, "engine", _Boom())
     out = main.change_signals("usr-x", None, 0.45)
     assert out == {"new_relevant": 0, "signals": []}
+
+
+def test_the_digest_is_in_english_and_leads_back_to_the_scenario():
+    """The email exists to get the reader back into the scenario. The link is a button
+    before the list AND a reminder after it, so it stays reachable without scrolling
+    past twenty-five titles on a phone, and the plain-text part names it rather than
+    leaving a bare URL at the bottom."""
+    subj, html, text = main._render_alert_digest(
+        "usr-abc", _articles(3), 3, scenario_name="Chikungunya Europe", n_relevant=3)
+    url = "https://literev-scenario.com/?scenario=usr-abc"
+    assert html.count(url) == 2, "a button above the list and a reminder below it"
+    assert "Open this scenario in LiteRev" in html
+    assert f"Open this scenario in LiteRev: {url}" in text
+    # English throughout: no leftover French in what a subscriber reads.
+    for fr in ("Scénario", "nouveaux articles", "Ouvrir le scénario", "de plus",
+               "Vous recevez cet email", "À relire", "seuil de pertinence"):
+        assert fr not in subj and fr not in html and fr not in text, fr
+    assert "You are receiving this because you subscribed" in html
+
+
+def test_the_deep_link_uses_the_scenario_id_the_app_reads():
+    """`?scenario=<id>` is the parameter the interface reads on load. An id needing
+    escaping must survive it."""
+    _s, html, text = main._render_alert_digest("usr-a b/c", _articles(1), 1)
+    assert "?scenario=usr-a%20b%2Fc" in html
+    assert "?scenario=usr-a%20b%2Fc" in text

@@ -133,3 +133,37 @@ test("runs a two-facet search on the local corpus and names the scenario with th
   await expect(card).toContainText(`${en.scenarios.savedSearchPrefix}${combined}`);
   check();
 });
+
+test("keeps its place across a reload, and opens a scenario from a shared link", async ({ page }) => {
+  // The app went back to the Search tab on every refresh, and the ?scenario= deep link
+  // the alert emails carry was deliberately wiped on load, so it could not be reused and
+  // did nothing at all unless the Scenarios tab already happened to be open.
+  const check = watchBrowser(page);
+  await openApp(page, { lang: "en" });
+
+  // A tab survives the refresh.
+  await nav(page, en.nav.scenarios).click();
+  await expect(page).toHaveURL(/[?&]tab=scenarios/);
+  await page.reload();
+  await expect(seededCard(page)).toBeVisible();
+
+  // So does an open scenario, and the address bar is the one you would send a colleague.
+  await seededCard(page).getByRole("button", { name: en.scenarios.detailPage, exact: true }).click();
+  await expect(page.getByRole("heading", { level: 2, name: SCENARIO_NAME })).toBeVisible();
+  await expect(page).toHaveURL(/[?&]scenario=/);
+  const shared = page.url();
+  await page.reload();
+  await expect(page.getByRole("heading", { level: 2, name: SCENARIO_NAME })).toBeVisible();
+
+  // That link opens the scenario from a cold start, whatever tab you were last on.
+  await page.goto("/");
+  await expect(nav(page, en.nav.search)).toBeVisible();
+  await page.goto(shared);
+  await expect(page.getByRole("heading", { level: 2, name: SCENARIO_NAME })).toBeVisible();
+
+  // Leaving the scenario drops it from the URL: the address never claims more than what
+  // is on screen.
+  await page.getByRole("button", { name: en.scenarioDetail.page.back, exact: true }).first().click();
+  await expect(page).not.toHaveURL(/[?&]scenario=/);
+  check();
+});
