@@ -6582,6 +6582,39 @@ function ModelMonitorSection({ scenarioId }: { scenarioId: string }) {
                   {diff.features_removed.map((f) => <p key={f} className="text-rose-300">− {f}</p>)}
                 </div>
               )}
+              {/* Les ENTRÉES du SEIR. Sans cette section, une régénération pouvait faire
+                  passer R0 de 2.1 à 4.8, changer la courbe projetée du tout au tout, et
+                  l'écran ne montrer aucune différence. */}
+              {diff.epidemic_parameters?.has_changes && (
+                <div className="rounded-xl border border-gold-500/20 bg-gold-500/5 p-2.5 space-y-1">
+                  <p className="text-[10px] font-bold uppercase tracking-wider text-gold-300">
+                    {t("scenarioDetail.model.epiParamsChanged")}
+                  </p>
+                  {diff.epidemic_parameters.applicable_changed && (
+                    <p className="text-[11px] text-gold-200">
+                      {diff.epidemic_parameters.applicable.new
+                        ? t("scenarioDetail.model.seirBecomesApplicable")
+                        : t("scenarioDetail.model.seirNoLongerApplicable")}
+                    </p>
+                  )}
+                  <div className="text-[11px] font-mono space-y-0.5">
+                    {diff.epidemic_parameters.params_shifted.map((s) => (
+                      <p key={s.param} className="text-gold-200">
+                        {s.param}: {String(s.old ?? "?")} → {String(s.new ?? "?")}
+                        {typeof s.relative === "number" && (
+                          <span className="text-white/35"> ({(s.relative * 100).toFixed(0)}%)</span>
+                        )}
+                      </p>
+                    ))}
+                    {diff.epidemic_parameters.params_added.map((p) => (
+                      <p key={p} className="text-brand-300">+ {p}</p>
+                    ))}
+                    {diff.epidemic_parameters.params_removed.map((p) => (
+                      <p key={p} className="text-rose-300">− {p}</p>
+                    ))}
+                  </div>
+                </div>
+              )}
               <div className="flex gap-2">
                 <button onClick={() => doValidate('accept')} disabled={busy !== null}
                   className="flex items-center gap-1.5 rounded-xl bg-brand-600 text-white font-semibold py-2 px-4 text-xs hover:bg-brand-500 transition disabled:opacity-50">

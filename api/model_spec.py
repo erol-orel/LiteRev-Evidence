@@ -183,6 +183,60 @@ except Exception as _e:
 
 
 
+# Écart relatif au-delà duquel la valeur d'un paramètre est jugée DÉPLACÉE. En dessous,
+# c'est du bruit d'extraction (une décimale de plus dans un article), et le signaler à
+# chaque régénération apprendrait à ignorer le rapport.
+_PARAM_SHIFT_TOL = 0.05
+
+
+def _param_value(blk) -> float | None:
+    """La valeur d'un paramètre, quelle que soit la forme du bloc. None si absente."""
+    if not isinstance(blk, dict):
+        return None
+    for k in ("value", "mean", "median", "point_estimate"):
+        v = blk.get(k)
+        if isinstance(v, (int, float)):
+            return float(v)
+    return None
+
+
+def _diff_epidemic_parameters(old: dict | None, new: dict | None) -> dict:
+    """Diff des paramètres épidémiologiques, c'est-à-dire des ENTRÉES du SEIR (pur).
+
+    `_diff_model_spec` comparait l'outcome, les features et l'algorithme, mais pas ce
+    bloc : une régénération pouvait donc faire passer R0 de 2.1 à 4.8, changer la courbe
+    projetée du tout au tout, et le diff répondre « aucun changement ». C'est la seule
+    partie du spec dont un épidémiologiste lit la valeur chiffrée.
+
+    `applicable` est traité à part : il décide si le scénario a une projection DU TOUT,
+    donc son basculement est un changement à lui seul."""
+    old, new = old or {}, new or {}
+    o_p = {k: v for k, v in (old.get("params") or {}).items() if isinstance(v, dict)}
+    n_p = {k: v for k, v in (new.get("params") or {}).items() if isinstance(v, dict)}
+    added = sorted(k for k in n_p if k not in o_p)
+    removed = sorted(k for k in o_p if k not in n_p)
+    shifted = []
+    for k in sorted(set(o_p) & set(n_p)):
+        ov, nv = _param_value(o_p[k]), _param_value(n_p[k])
+        if ov is None or nv is None:
+            if (ov is None) != (nv is None):           # une valeur apparaît ou disparaît
+                shifted.append({"param": k, "old": ov, "new": nv, "relative": None})
+            continue
+        denom = abs(ov) or 1.0
+        rel = abs(nv - ov) / denom
+        if rel > _PARAM_SHIFT_TOL:
+            shifted.append({"param": k, "old": ov, "new": nv, "relative": round(rel, 4)})
+    o_app, n_app = bool(old.get("applicable")), bool(new.get("applicable"))
+    return {
+        "params_added": added,
+        "params_removed": removed,
+        "params_shifted": shifted,
+        "applicable_changed": o_app != n_app,
+        "applicable": {"old": o_app, "new": n_app},
+        "has_changes": bool(added or removed or shifted or (o_app != n_app)),
+    }
+
+
 def _diff_model_spec(old: dict | None, new: dict | None) -> dict:
     """Diff structuré entre deux model_spec (pur, testable)."""
     old, new = old or {}, new or {}
@@ -212,9 +266,15 @@ def _diff_model_spec(old: dict | None, new: dict | None) -> dict:
         if (o_alg.get(f) or None) != (n_alg.get(f) or None):
             alg_fields[f] = {"old": o_alg.get(f), "new": n_alg.get(f)}
 
-    has_changes = bool(outcome_fields or added or removed or changed or alg_fields)
+    # Les entrées du SEIR comptent comme le reste : sans elles, un R0 qui double passait
+    # pour « aucun changement ».
+    epi = _diff_epidemic_parameters(old.get("epidemic_parameters"), new.get("epidemic_parameters"))
+
+    has_changes = bool(outcome_fields or added or removed or changed or alg_fields
+                       or epi["has_changes"])
     return {
         "has_changes": has_changes,
+        "epidemic_parameters": epi,
         "outcome_changed": bool(outcome_fields),
         "outcome_fields": outcome_fields,
         "features_added": added,
@@ -225,6 +285,7 @@ def _diff_model_spec(old: dict | None, new: dict | None) -> dict:
         "summary": {
             "added": len(added), "removed": len(removed), "changed": len(changed),
             "outcome_changed": bool(outcome_fields), "algorithm_changed": bool(alg_fields),
+            "epidemic_parameters_changed": epi["has_changes"],
         },
     }
 
@@ -670,4 +731,95 @@ def edit_scenario_model_spec(scenario_id: str, payload: dict[str, Any],
         "warnings": warnings,
         "retrain_started": retrain_started,
         "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+# ─── Rapport de changement : ce que la littérature NOUVELLE déplace ──────────
+@app.get("/scenarios/{scenario_id}/change-report")
+def get_scenario_change_report(scenario_id: str) -> dict[str, Any]:
+    """Ce qu'une régénération changerait, et de combien : la réponse COMPLÈTE à
+    « est-ce que ça change l'évidence ou le modèle, et comment ? ».
+
+    Les signaux du digest sont volontairement bon marché : ils repèrent des pistes sans
+    LLM et ne peuvent pas établir qu'une conclusion bouge. Ce rapport-ci le peut, parce
+    qu'il compare deux specs RÉELLEMENT générés : l'actif et la proposition produite par
+    `POST /model/spec/propose` sur le corpus d'aujourd'hui.
+
+    Rien n'est écrasé. La proposition vit dans son propre emplacement et devient le spec
+    actif seulement si vous l'acceptez (`/model/spec/proposal/validate`). Un rapport qui
+    modifierait ce qu'il mesure ne serait pas un rapport.
+
+    `status` : `empty` tant qu'aucune proposition n'existe (lancez la régénération),
+    `generating` pendant, `ready` ensuite."""
+    job = _SPEC_PROPOSAL_JOBS.get(scenario_id, {})
+    if job.get("status") == "running":
+        return {"status": "generating", "scenario_id": scenario_id,
+                "message": "Régénération en cours, réessayez bientôt."}
+    if job.get("status") == "error":
+        return {"status": "error", "scenario_id": scenario_id, "error": job.get("error")}
+
+    with engine.connect() as conn:
+        row = conn.execute(text("""
+            SELECT variables_json, variables_proposal_json, proposal_generated_at,
+                   variables_generated_at
+            FROM scenario_settings WHERE scenario_id = :sid
+        """), {"sid": scenario_id}).mappings().first()
+    if not (row and row["variables_proposal_json"]):
+        return {"status": "empty", "scenario_id": scenario_id,
+                "message": "Aucune régénération à comparer. Lancez POST "
+                           "/scenarios/{id}/model/spec/propose, puis relisez ce rapport."}
+
+    proposal = dict(row["variables_proposal_json"])
+    active = dict(row["variables_json"]) if row["variables_json"] else {}
+    diff = _diff_model_spec(active.get("model_spec"), proposal.get("model_spec"))
+
+    # Sur combien d'articles chacun repose. Un spec régénéré sur un corpus qui a doublé
+    # n'a pas le même poids qu'un spec régénéré sur trois articles de plus.
+    def _n(v: dict) -> int | None:
+        _m = v.get("_meta") or {}
+        for k in ("n_articles", "n_relevant", "articles_used"):
+            if isinstance(_m.get(k), int):
+                return _m[k]
+        return None
+    corpus = {"active_articles": _n(active), "proposal_articles": _n(proposal)}
+    if isinstance(corpus["active_articles"], int) and isinstance(corpus["proposal_articles"], int):
+        corpus["delta"] = corpus["proposal_articles"] - corpus["active_articles"]
+
+    # La liste que l'on lit en premier : ce qui a bougé, en clair. Vide = rien n'a bougé,
+    # ce qui est une réponse et non une absence de réponse.
+    changes: list[str] = []
+    _epi = diff.get("epidemic_parameters") or {}
+    for sh in _epi.get("params_shifted") or []:
+        changes.append(f"{sh['param']} : {sh['old']} vers {sh['new']}")
+    for p in _epi.get("params_added") or []:
+        changes.append(f"{p} : nouveau paramètre mesuré")
+    for p in _epi.get("params_removed") or []:
+        changes.append(f"{p} : n'est plus mesuré")
+    if _epi.get("applicable_changed"):
+        changes.append("projection SEIR : "
+                       + ("devient applicable" if _epi["applicable"]["new"]
+                          else "n'est plus applicable"))
+    if diff.get("outcome_changed"):
+        changes.append("outcome du modèle modifié")
+    if diff.get("features_added"):
+        changes.append(f"{len(diff['features_added'])} variable(s) ajoutée(s)")
+    if diff.get("features_removed"):
+        changes.append(f"{len(diff['features_removed'])} variable(s) retirée(s)")
+    if diff.get("algorithm_changed"):
+        changes.append("famille d'algorithme modifiée")
+
+    return {
+        "status": "ready",
+        "scenario_id": scenario_id,
+        "has_changes": bool(diff.get("has_changes")),
+        "changes": changes,
+        "diff": diff,
+        "corpus": corpus,
+        "active_generated_at": (row["variables_generated_at"].isoformat()
+                                if row["variables_generated_at"] else None),
+        "proposal_generated_at": (row["proposal_generated_at"].isoformat()
+                                  if row["proposal_generated_at"] else None),
+        # Ce rapport n'applique rien : c'est dit dans la réponse, pas seulement ici.
+        "applied": False,
+        "apply_endpoint": f"POST /scenarios/{scenario_id}/model/spec/proposal/validate",
     }
