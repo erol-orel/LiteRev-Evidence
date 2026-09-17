@@ -5,6 +5,7 @@ tools and tests.
 """
 from __future__ import annotations
 
+import json as _json
 import os
 import re
 from typing import Any
@@ -15,6 +16,7 @@ from sqlalchemy import text
 
 from .core import app, engine, logger, require_api_key
 from .gesica import _get_scenario_name
+from .scenario_store import _get_scenario_threshold
 
 # ─── ALERTES EMAIL ────────────────────────────────────────────────────────────
 
@@ -202,6 +204,154 @@ def _count_new_articles_for_scenario(conn, scenario_id: str, since) -> int:
     """), {"sid": scenario_id, "since": since}).scalar() or 0)
 
 
+# ── Ce que les nouveaux articles CHANGENT (signaux, sans LLM) ─────────────────
+# Le digest disait combien d'articles étaient arrivés. Un relecteur veut savoir deux
+# choses de plus, et ces deux-là décident s'il ouvre l'application ou non : combien de
+# ces articles sont PERTINENTS (le compte brut inclut ce que le seuil écarte), et
+# lesquels valent une relecture du modèle.
+#
+# Ces signaux sont calculés en SQL sur les faits DÉJÀ extraits par article (pico_json,
+# concepts_json, study_design) : aucun LLM, aucun coût par envoi. Ils SIGNALENT, ils
+# n'affirment jamais que le modèle a changé : seule une régénération peut le dire, et
+# elle se demande explicitement. Un email quotidien qui annoncerait « votre SEIR a
+# changé » sur la foi d'une expression régulière serait exactement le genre d'affirmation
+# non tenue que ce projet retire partout ailleurs.
+
+# Gate de pertinence : le MÊME prédicat que partout (jamais les exclus, inclus par un
+# relecteur ou au-dessus du seuil).
+_RELEVANT_GATE = """
+      AND COALESCE(a.screening_status, d.screening_status) IS DISTINCT FROM 'excluded'
+      AND (COALESCE(a.screening_status, d.screening_status) = 'included'
+           OR COALESCE(a.similarity_score, 0) >= :thr)
+"""
+
+# Devis qui déplacent le niveau de preuve d'une revue : s'ils arrivent, le brief mérite
+# une relecture même si tout le reste est inchangé.
+_STRONG_DESIGNS = ("systematic review", "meta-analysis", "meta analysis",
+                   "randomized controlled trial", "randomised controlled trial", "rct")
+
+
+def _new_relevant_rows(conn, scenario_id: str, since, threshold: float) -> list[dict]:
+    """Les articles NOUVEAUX ET PERTINENTS, avec les faits déjà extraits sur chacun."""
+    return [dict(r) for r in conn.execute(text(f"""
+        SELECT d.id, d.title, d.abstract, d.year, d.study_design, d.concepts_json
+        FROM literature_document d
+        JOIN article_scenarios a ON a.document_id = d.id AND a.scenario_id = :sid
+        WHERE d.is_duplicate IS NOT TRUE
+          AND (CAST(:since AS timestamp) IS NULL OR d.created_at > CAST(:since AS timestamp))
+          {_RELEVANT_GATE}
+        ORDER BY COALESCE(a.rerank_score, a.similarity_score, 0) DESC NULLS LAST, d.id
+    """), {"sid": scenario_id, "since": since, "thr": float(threshold)}).mappings().all()]
+
+
+def _known_concept_labels(scenario_id: str) -> set[str] | None:
+    """Les concepts DÉJÀ sur la carte en cache, en minuscules. None si aucune carte :
+    sans référence, « nouveau concept » ne veut rien dire et le signal se tait."""
+    try:
+        with engine.connect() as conn:
+            row = conn.execute(text(
+                "SELECT concept_graph_json FROM scenario_settings WHERE scenario_id = :sid"
+            ), {"sid": scenario_id}).mappings().first()
+    except Exception as _e:                                   # noqa: BLE001
+        logger.warning(f"alert signals, concept map {scenario_id}: {_e}")
+        return None
+    payload = (row or {}).get("concept_graph_json")
+    if isinstance(payload, str):
+        try:
+            payload = _json.loads(payload)
+        except Exception:
+            payload = None
+    if not isinstance(payload, dict) or not payload.get("nodes"):
+        return None
+    out: set[str] = set()
+    for n in payload["nodes"]:
+        lab = (n.get("label") or {}) if isinstance(n, dict) else {}
+        for v in (lab.get("en"), lab.get("fr")):
+            if v:
+                out.add(str(v).strip().lower())
+    return out or None
+
+
+def change_signals(scenario_id: str, since, threshold: float) -> dict[str, Any]:
+    """Ce qui, parmi les nouveaux articles pertinents, mérite une relecture.
+
+    Renvoie `{"new_relevant": n, "signals": [{code, n, detail, tab}, ...]}`. Chaque signal
+    est une INVITATION À VÉRIFIER, jamais un constat de changement. Jamais bloquant : une
+    panne de calcul rend une liste vide, le digest part quand même."""
+    out: dict[str, Any] = {"new_relevant": 0, "signals": []}
+    try:
+        with engine.connect() as conn:
+            rows = _new_relevant_rows(conn, scenario_id, since, threshold)
+    except Exception as _e:                                   # noqa: BLE001
+        logger.warning(f"alert signals {scenario_id}: {_e}")
+        return out
+    out["new_relevant"] = len(rows)
+    if not rows:
+        return out
+
+    # 1. Paramètres épidémiologiques : un terme de MESURE dans le titre ou le résumé.
+    #    Même détecteur que l'onglet des paramètres, donc les deux disent la même chose.
+    try:
+        from .variables import params_mentioned          # lazy: variables charge après alerts
+        _params: dict[str, int] = {}
+        _n_param_articles = 0
+        for r in rows:
+            found = params_mentioned(f"{r.get('title') or ''} {r.get('abstract') or ''}")
+            if found:
+                _n_param_articles += 1
+                for p in found:
+                    _params[p] = _params.get(p, 0) + 1
+        if _n_param_articles:
+            _top = ", ".join(k for k, _ in sorted(_params.items(), key=lambda kv: -kv[1])[:4])
+            out["signals"].append({
+                "code": "epidemic_parameters", "n": _n_param_articles, "tab": "variables",
+                "detail": _top,
+            })
+    except Exception as _e:                                   # noqa: BLE001
+        logger.warning(f"alert signals, parameters {scenario_id}: {_e}")
+
+    # 2. Concepts absents de la carte en cache.
+    try:
+        known = _known_concept_labels(scenario_id)
+        if known is not None:
+            fresh: dict[str, int] = {}
+            for r in rows:
+                cj = r.get("concepts_json")
+                if isinstance(cj, str):
+                    try:
+                        cj = _json.loads(cj)
+                    except Exception:
+                        cj = None
+                for c in ((cj or {}).get("concepts") or []) if isinstance(cj, dict) else []:
+                    lab = str((c or {}).get("en") or "").strip()
+                    if lab and lab.lower() not in known:
+                        fresh[lab] = fresh.get(lab, 0) + 1
+            if fresh:
+                _top = ", ".join(k for k, _ in sorted(fresh.items(), key=lambda kv: -kv[1])[:4])
+                out["signals"].append({
+                    "code": "new_concepts", "n": len(fresh), "tab": "concepts", "detail": _top,
+                })
+    except Exception as _e:                                   # noqa: BLE001
+        logger.warning(f"alert signals, concepts {scenario_id}: {_e}")
+
+    # 3. Devis qui relèvent le niveau de preuve.
+    try:
+        _strong: dict[str, int] = {}
+        for r in rows:
+            d = str(r.get("study_design") or "").strip()
+            if d and d.lower() in _STRONG_DESIGNS:
+                _strong[d] = _strong.get(d, 0) + 1
+        if _strong:
+            _top = ", ".join(f"{v} {k}" for k, v in sorted(_strong.items(), key=lambda kv: -kv[1])[:3])
+            out["signals"].append({
+                "code": "strong_designs", "n": sum(_strong.values()), "tab": "brief",
+                "detail": _top,
+            })
+    except Exception as _e:                                   # noqa: BLE001
+        logger.warning(f"alert signals, designs {scenario_id}: {_e}")
+    return out
+
+
 def _digest_is_due(frequency: str | None, last_notified, now) -> bool:
     """Un abonnement est-il dû ? immediate = toujours ; daily/weekly selon le délai
     depuis la dernière notification ; jamais notifié = dû."""
@@ -217,7 +367,9 @@ def _digest_is_due(frequency: str | None, last_notified, now) -> bool:
 def _render_alert_digest(scenario_id: str, articles: list[dict], total_new: int,
                          base_url: str = "https://literev-scenario.com",
                          scenario_name: str | None = None,
-                         first_digest: bool = False) -> tuple[str, str, str]:
+                         first_digest: bool = False,
+                         n_relevant: int | None = None,
+                         signals: list[dict] | None = None) -> tuple[str, str, str]:
     """(subject, html, text) d'un digest - liste les VRAIS nouveaux articles. Pur/testable.
     Utilise le NOM lisible du scénario (pas l'ID) et un lien PROFOND vers sa page
     (?scenario=<id>, ouvert directement par le front).
@@ -225,7 +377,15 @@ def _render_alert_digest(scenario_id: str, articles: list[dict], total_new: int,
     `first_digest=True` : l'abonnement n'a JAMAIS été notifié, il n'y a donc pas de borne
     basse et rien n'est « nouveau » au sens de « depuis la dernière fois ». L'email dit
     alors ce qu'il est vraiment, un aperçu des articles les plus récents du scénario, au
-    lieu d'annoncer le corpus entier comme une arrivée du jour."""
+    lieu d'annoncer le corpus entier comme une arrivée du jour.
+
+    `n_relevant` : combien de ces articles passent le seuil de pertinence. Le total brut
+    seul ne dit pas si trois d'entre eux comptent ou aucun.
+
+    `signals` : ce qui mérite une relecture (paramètres épidémiologiques rapportés,
+    concepts absents de la carte, devis qui relèvent le niveau de preuve). Formulés comme
+    des INVITATIONS À VÉRIFIER : l'email ne peut pas savoir si le modèle a changé, seule
+    une régénération le peut, et il le dit."""
     import html as _html
     from urllib.parse import quote as _q
     label = (scenario_name or scenario_id).strip() or scenario_id
@@ -249,6 +409,44 @@ def _render_alert_digest(scenario_id: str, articles: list[dict], total_new: int,
         href = a.get("url") or (f"https://doi.org/{a['doi']}" if a.get("doi") else scen_url)
         return f'<li style="margin:4px 0"><a href="{_html.escape(str(href))}" style="color:#16a34a">{title}</a>{yr}</li>'
 
+    # Combien passent le seuil, et ce qui mérite une relecture.
+    _rel_txt = ""
+    if n_relevant is not None and total_new:
+        _rel_txt = (f"{n_relevant} sur {total_new} passent le seuil de pertinence."
+                    if n_relevant != total_new else
+                    f"Les {total_new} passent le seuil de pertinence.")
+    # Accord singulier/pluriel écrit, pas de « (s) » : ces lignes partent dans un email
+    # que des collègues lisent.
+    _SIGNAL_LABELS = {
+        "epidemic_parameters": (
+            "article rapportant un paramètre épidémiologique ({detail})"
+            " : la spécification du modèle mérite une relecture",
+            "articles rapportant un paramètre épidémiologique ({detail})"
+            " : la spécification du modèle mérite une relecture"),
+        "new_concepts": (
+            "concept absent de la carte ({detail})",
+            "concepts absents de la carte ({detail})"),
+        "strong_designs": (
+            "devis qui relève le niveau de preuve ({detail})"
+            " : le brief mérite une relecture",
+            "devis qui relèvent le niveau de preuve ({detail})"
+            " : le brief mérite une relecture"),
+    }
+    _sig_lines = []
+    for sg in (signals or []):
+        _tpl = _SIGNAL_LABELS.get(sg.get("code"))
+        _n = sg.get("n")
+        if not _tpl or not _n:
+            continue
+        _sig_lines.append(f"{_n} " + _tpl[0 if _n == 1 else 1]
+                          .replace("{detail}", str(sg.get("detail") or "")))
+    # La phrase qui empêche l'email de se lire comme un constat. Elle accompagne TOUJOURS
+    # les signaux : ils sont calculés sans LLM, sur des faits déjà extraits, et ne peuvent
+    # pas établir qu'une conclusion a changé.
+    _sig_caveat = ("Ces points sont des pistes de relecture, pas un constat : "
+                   "seule une régénération du brief, des variables ou du SEIR peut dire "
+                   "si une conclusion change.")
+
     shown = articles[:25]
     # `noun` porte DÉJÀ le nombre : le répéter donnait « 30 30 nouveaux articles ».
     more = f'<p style="font-size:12px;color:#6b7280">… et {total_new - len(shown)} de plus.</p>' if total_new > len(shown) else ""
@@ -259,13 +457,27 @@ def _render_alert_digest(scenario_id: str, articles: list[dict], total_new: int,
         f'<h2 style="color:#14532d">LiteRev - {noun}</h2>'
         f'<p>Scénario <strong>{_html.escape(label)}</strong> :</p>'
         f'{_intro_html}'
-        f'<ul>{"".join(_row(a) for a in shown)}</ul>{more}'
+        + (f'<p style="font-size:13px;color:#166534;font-weight:600">{_html.escape(_rel_txt)}</p>'
+           if _rel_txt else "")
+        + (('<div style="margin:10px 0;padding:10px 12px;border-left:3px solid #f59e0b;'
+            'background:#fffbeb">'
+            '<p style="margin:0 0 6px;font-size:12px;font-weight:700;color:#92400e">'
+            'À relire</p><ul style="margin:0;padding-left:18px">'
+            + "".join(f'<li style="font-size:12px;color:#78350f">{_html.escape(x)}</li>'
+                      for x in _sig_lines)
+            + f'</ul><p style="margin:6px 0 0;font-size:11px;color:#a16207">'
+              f'{_html.escape(_sig_caveat)}</p></div>')
+           if _sig_lines else "")
+        + f'<ul>{"".join(_row(a) for a in shown)}</ul>{more}'
         f'<p><a href="{_html.escape(scen_url)}" style="color:#16a34a;font-weight:600">Ouvrir le scénario →</a></p>'
         '<hr><p style="font-size:11px;color:#6b7280">Vous recevez cet email car vous êtes abonné aux alertes LiteRev pour ce scénario.</p>'
         '</body></html>'
     )
     text_body = (f"LiteRev - {noun} pour le scénario « {label} » :\n\n"
                  + (f"{intro}\n\n" if intro else "")
+                 + (f"{_rel_txt}\n\n" if _rel_txt else "")
+                 + (("A RELIRE :\n" + "\n".join(f"- {x}" for x in _sig_lines)
+                     + f"\n{_sig_caveat}\n\n") if _sig_lines else "")
                  + "\n".join(f"- {a.get('title', '')}" + (f" ({a['year']})" if a.get("year") else "") for a in shown)
                  + (f"\n… et {total_new - len(shown)} de plus." if total_new > len(shown) else "")
                  + f"\n\n{scen_url}\n")
@@ -360,6 +572,16 @@ def _process_alert_digests(scenario_id: str | None, dry_run: bool, respect_frequ
         except Exception as e:
             logger.warning(f"digest new-articles {sub['scenario_id']}: {e}")
             arts, total_new = [], 0
+        # Combien de ces articles PASSENT le seuil, et ce qui mérite une relecture.
+        # « 300 nouveaux articles » sans cette ligne ne dit pas si trois d'entre eux
+        # comptent ou aucun : c'est le seul chiffre sur lequel un relecteur décide
+        # d'ouvrir l'application un matin chargé.
+        try:
+            _thr = _get_scenario_threshold(sub["scenario_id"])
+            _sig = change_signals(sub["scenario_id"], _since, _thr)
+        except Exception as e:                                # noqa: BLE001 - jamais bloquant
+            logger.warning(f"digest signals {sub['scenario_id']}: {e}")
+            _sig = {"new_relevant": None, "signals": []}
         if not arts:
             results.append({"email": sub["email"], "scenario_id": sub["scenario_id"], "new": 0, "sent": False})
             continue
@@ -371,7 +593,9 @@ def _process_alert_digests(scenario_id: str | None, dry_run: bool, respect_frequ
             results.append({"email": sub["email"], "scenario_id": sub["scenario_id"],
                             "new": total_new, "listed": len(arts), "sent": False,
                             "reason": "dry_run", "would_send": bool(smtp_host),
-                            "first_digest": _first})
+                            "first_digest": _first,
+                            "new_relevant": _sig.get("new_relevant"),
+                            "signals": _sig.get("signals") or []})
             continue
         if not smtp_host:
             results.append({"email": sub["email"], "scenario_id": sub["scenario_id"],
@@ -387,7 +611,8 @@ def _process_alert_digests(scenario_id: str | None, dry_run: bool, respect_frequ
         # cette branche morte (N valait toujours 0) et faisait annoncer 25 au lieu de 300.
         subj, html_body, text_body = _render_alert_digest(
             sub["scenario_id"], arts, total_new, scenario_name=_scen_name,
-            first_digest=_first)
+            first_digest=_first, n_relevant=_sig.get("new_relevant"),
+            signals=_sig.get("signals") or [])
         try:
             _send_email_smtp(smtp_host, smtp_user, smtp_pass, sub["email"], subj, html_body, text_body)
             with engine.begin() as conn:
@@ -395,7 +620,8 @@ def _process_alert_digests(scenario_id: str | None, dry_run: bool, respect_frequ
             sent += 1
             results.append({"email": sub["email"], "scenario_id": sub["scenario_id"],
                             "new": total_new, "listed": len(arts), "sent": True,
-                            "first_digest": _first})
+                            "first_digest": _first,
+                            "new_relevant": _sig.get("new_relevant")})
         except Exception as e:
             logger.error(f"digest email {sub['email']}: {e}")
             results.append({"email": sub["email"], "scenario_id": sub["scenario_id"],
