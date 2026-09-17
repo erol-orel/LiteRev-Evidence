@@ -101,6 +101,35 @@ const PAGE_SIZE = 20;
 const SEARCH_TOP_N = 200;
 
 type AppTab = "search" | "scenarios" | "stats" | "terrain";
+const APP_TABS: readonly AppTab[] = ["search", "scenarios", "stats", "terrain"];
+
+// ── Où l'on est, écrit dans l'URL ────────────────────────────────────────────
+// L'application repartait de l'onglet Recherche à chaque rafraîchissement : un scénario
+// ouvert, un F5, et on recommençait à le chercher. Le lien profond `?scenario=<id>` des
+// emails était même effacé volontairement au chargement, donc irreproductible, et il
+// n'ouvrait rien quand l'onglet actif n'était pas Scénarios (ScenariosView n'est monté
+// que là : l'effet qui lisait le paramètre ne tournait jamais).
+// L'URL porte donc l'endroit : `?tab=` et `?scenario=`. `replaceState` et non `pushState`,
+// pour que le bouton Précédent du navigateur continue de quitter l'application plutôt que
+// de rejouer chaque clic d'onglet.
+function readUrlParam(key: string): string | null {
+  try {
+    return new URLSearchParams(window.location.search).get(key);
+  } catch {
+    return null;                                     // URL exotique : on n'empêche pas l'app de démarrer
+  }
+}
+
+function writeUrlParam(key: string, value: string | null): void {
+  try {
+    const u = new URL(window.location.href);
+    if (value) u.searchParams.set(key, value);
+    else u.searchParams.delete(key);
+    window.history.replaceState({}, "", `${u.pathname}${u.search}${u.hash}`);
+  } catch {
+    /* jamais bloquant : l'URL est un confort, pas l'état de l'application */
+  }
+}
 
 interface SavedSearch {
   id: string;
@@ -1229,15 +1258,18 @@ function ScenariosView({
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [detailScenarioId, setDetailScenarioId] = useState<string | null>(null);
   const [detailInitialTab, setDetailInitialTab] = useState<"model" | undefined>(undefined);
-  // Lien profond (email de living review, partage) : ?scenario=<id> ouvre directement
-  // la page du scénario. On nettoie l'URL ensuite pour ne pas la rouvrir au rafraîchissement.
+  // Lien profond (email d'alerte, partage) : `?scenario=<id>` ouvre la page du scénario.
+  // L'URL est désormais CONSERVÉE, et suit ce qui est ouvert : rafraîchir rouvre le même
+  // scénario, et l'adresse de la barre est celle qu'on envoie à un collègue. Elle était
+  // effacée au chargement, ce qui rendait le lien des emails non reproductible et
+  // ramenait tout rafraîchissement à la liste.
   useEffect(() => {
-    const sid = new URLSearchParams(window.location.search).get("scenario");
-    if (sid) {
-      setDetailScenarioId(sid);
-      window.history.replaceState({}, "", window.location.pathname);
-    }
+    const sid = readUrlParam("scenario");
+    if (sid) setDetailScenarioId(sid);
   }, []);
+  useEffect(() => {
+    writeUrlParam("scenario", detailScenarioId);
+  }, [detailScenarioId]);
   // Demande d'ouverture venue de l'indicateur global (« Ouvrir le scénario »).
   useEffect(() => {
     if (openScenarioId) {
@@ -1752,7 +1784,20 @@ function ScenariosView({
 export default function App() {
   const [projectContext, setProjectContext] = useState<ProjectContext>("literev");
   const { t, lang, setLang } = useI18n();
-  const [activeTab, setActiveTab] = useState<AppTab>("search");
+  const [activeTab, setActiveTab] = useState<AppTab>(() => {
+    // Un `?scenario=` entrant (email, lien partagé) implique l'onglet Scénarios : c'est
+    // le seul où la page de détail est montée.
+    if (readUrlParam("scenario")) return "scenarios";
+    const t = readUrlParam("tab") as AppTab | null;
+    return t && APP_TABS.includes(t) ? t : "search";
+  });
+  // L'onglet courant part dans l'URL : un rafraîchissement revient là où on était.
+  // "search" est l'onglet par défaut, donc on RETIRE le paramètre plutôt que de l'écrire :
+  // l'URL d'accueil reste propre et partageable.
+  useEffect(() => {
+    writeUrlParam("tab", activeTab === "search" ? null : activeTab);
+  }, [activeTab]);
+
   // Clé d'écriture admin (X-API-Key). Saisie une fois, stockée en localStorage côté
   // navigateur - jamais dans le bundle public (cf. authHeaders dans lib/api).
   const [apiKeySet, setApiKeySet] = useState<boolean>(() => hasApiKey());
@@ -1826,7 +1871,8 @@ export default function App() {
   const [activity, setActivity] = useState<ActivityItem[]>([]);
   const [finishedActivity, setFinishedActivity] = useState<ActivityItem[]>([]);
   const [currentSearchSid, setCurrentSearchSid] = useState<string | null>(null);
-  const [requestedScenarioId, setRequestedScenarioId] = useState<string | null>(null);
+  const [requestedScenarioId, setRequestedScenarioId] = useState<string | null>(
+    () => readUrlParam("scenario"));
   const activityRef = useRef<ActivityItem[]>([]);
   useEffect(() => {
     let alive = true;

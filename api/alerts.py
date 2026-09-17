@@ -390,14 +390,12 @@ def _render_alert_digest(scenario_id: str, articles: list[dict], total_new: int,
     from urllib.parse import quote as _q
     label = (scenario_name or scenario_id).strip() or scenario_id
     if first_digest:
-        # Accord FR au singulier comme au pluriel, sans « (s) ».
-        noun = "1 article récent" if total_new == 1 else f"{total_new} articles récents"
-        subj = f"[LiteRev] Alertes activées - {label} : {noun}"
-        intro = ("Première notification pour ce scénario : voici ses articles les plus "
-                 "récents. Les prochaines ne porteront que sur les nouveautés.")
+        noun = "1 recent article" if total_new == 1 else f"{total_new} recent articles"
+        subj = f"[LiteRev] Alerts enabled - {label}: {noun}"
+        intro = ("This is the first notification for this scenario, so it shows its most "
+                 "recent articles. Later ones will carry only what is new.")
     else:
-        # Accord FR : 1 → « nouvel article » ; ≥2 → « nouveaux articles ».
-        _n = "nouvel article" if total_new == 1 else "nouveaux articles"
+        _n = "new article" if total_new == 1 else "new articles"
         noun = f"{total_new} {_n}"
         subj = f"[LiteRev] {noun} - {label}"
         intro = ""
@@ -412,25 +410,25 @@ def _render_alert_digest(scenario_id: str, articles: list[dict], total_new: int,
     # Combien passent le seuil, et ce qui mérite une relecture.
     _rel_txt = ""
     if n_relevant is not None and total_new:
-        _rel_txt = (f"{n_relevant} sur {total_new} passent le seuil de pertinence."
+        _rel_txt = (f"{n_relevant} of {total_new} clear the relevance threshold."
                     if n_relevant != total_new else
-                    f"Les {total_new} passent le seuil de pertinence.")
-    # Accord singulier/pluriel écrit, pas de « (s) » : ces lignes partent dans un email
-    # que des collègues lisent.
+                    (f"All {total_new} clear the relevance threshold."
+                     if total_new > 1 else "It clears the relevance threshold."))
+    # Singular and plural written out, no "(s)": colleagues read these lines.
     _SIGNAL_LABELS = {
         "epidemic_parameters": (
-            "article rapportant un paramètre épidémiologique ({detail})"
-            " : la spécification du modèle mérite une relecture",
-            "articles rapportant un paramètre épidémiologique ({detail})"
-            " : la spécification du modèle mérite une relecture"),
+            "article reporting an epidemiological parameter ({detail})"
+            ": the model specification is worth rereading",
+            "articles reporting an epidemiological parameter ({detail})"
+            ": the model specification is worth rereading"),
         "new_concepts": (
-            "concept absent de la carte ({detail})",
-            "concepts absents de la carte ({detail})"),
+            "concept absent from the concept map ({detail})",
+            "concepts absent from the concept map ({detail})"),
         "strong_designs": (
-            "devis qui relève le niveau de preuve ({detail})"
-            " : le brief mérite une relecture",
-            "devis qui relèvent le niveau de preuve ({detail})"
-            " : le brief mérite une relecture"),
+            "study design that raises the level of evidence ({detail})"
+            ": the evidence brief is worth rereading",
+            "study designs that raise the level of evidence ({detail})"
+            ": the evidence brief is worth rereading"),
     }
     _sig_lines = []
     for sg in (signals or []):
@@ -443,43 +441,55 @@ def _render_alert_digest(scenario_id: str, articles: list[dict], total_new: int,
     # La phrase qui empêche l'email de se lire comme un constat. Elle accompagne TOUJOURS
     # les signaux : ils sont calculés sans LLM, sur des faits déjà extraits, et ne peuvent
     # pas établir qu'une conclusion a changé.
-    _sig_caveat = ("Ces points sont des pistes de relecture, pas un constat : "
-                   "seule une régénération du brief, des variables ou du SEIR peut dire "
-                   "si une conclusion change.")
+    _sig_caveat = ("These are leads to review, not findings: only regenerating the brief, "
+                   "the variables or the SEIR projection can tell you whether a conclusion "
+                   "actually changes.")
 
     shown = articles[:25]
     # `noun` porte DÉJÀ le nombre : le répéter donnait « 30 30 nouveaux articles ».
-    more = f'<p style="font-size:12px;color:#6b7280">… et {total_new - len(shown)} de plus.</p>' if total_new > len(shown) else ""
+    more = (f'<p style="font-size:12px;color:#6b7280">and {total_new - len(shown)} more.</p>'
+            if total_new > len(shown) else "")
     _intro_html = (f'<p style="font-size:13px;color:#4b5563">{_html.escape(intro)}</p>'
                    if intro else "")
+    _button_html = (
+        f'<p style="margin:14px 0"><a href="{_html.escape(scen_url)}" '
+        'style="display:inline-block;background:#16a34a;color:#fff;text-decoration:none;'
+        'font-weight:600;font-size:13px;padding:9px 16px;border-radius:8px">'
+        'Open this scenario in LiteRev</a></p>'
+    )
     html_body = (
         '<html><body style="font-family:system-ui,Arial,sans-serif;color:#111">'
         f'<h2 style="color:#14532d">LiteRev - {noun}</h2>'
-        f'<p>Scénario <strong>{_html.escape(label)}</strong> :</p>'
+        f'<p>Scenario <strong>{_html.escape(label)}</strong>:</p>'
         f'{_intro_html}'
         + (f'<p style="font-size:13px;color:#166534;font-weight:600">{_html.escape(_rel_txt)}</p>'
            if _rel_txt else "")
         + (('<div style="margin:10px 0;padding:10px 12px;border-left:3px solid #f59e0b;'
             'background:#fffbeb">'
             '<p style="margin:0 0 6px;font-size:12px;font-weight:700;color:#92400e">'
-            'À relire</p><ul style="margin:0;padding-left:18px">'
+            'Worth rereading</p><ul style="margin:0;padding-left:18px">'
             + "".join(f'<li style="font-size:12px;color:#78350f">{_html.escape(x)}</li>'
                       for x in _sig_lines)
             + f'</ul><p style="margin:6px 0 0;font-size:11px;color:#a16207">'
               f'{_html.escape(_sig_caveat)}</p></div>')
            if _sig_lines else "")
+        # Le lien EST l'objet de l'email : bouton avant la liste, et rappel après, pour
+        # qu'il reste atteignable sans dérouler vingt-cinq titres sur un téléphone.
+        + _button_html
         + f'<ul>{"".join(_row(a) for a in shown)}</ul>{more}'
-        f'<p><a href="{_html.escape(scen_url)}" style="color:#16a34a;font-weight:600">Ouvrir le scénario →</a></p>'
-        '<hr><p style="font-size:11px;color:#6b7280">Vous recevez cet email car vous êtes abonné aux alertes LiteRev pour ce scénario.</p>'
-        '</body></html>'
+        + _button_html
+        + '<hr><p style="font-size:11px;color:#6b7280">You are receiving this because you '
+          'subscribed to LiteRev alerts for this scenario.</p>'
+          '</body></html>'
     )
-    text_body = (f"LiteRev - {noun} pour le scénario « {label} » :\n\n"
+    text_body = (f"LiteRev - {noun} for the scenario \"{label}\":\n\n"
                  + (f"{intro}\n\n" if intro else "")
                  + (f"{_rel_txt}\n\n" if _rel_txt else "")
-                 + (("A RELIRE :\n" + "\n".join(f"- {x}" for x in _sig_lines)
+                 + (("WORTH REREADING:\n" + "\n".join(f"- {x}" for x in _sig_lines)
                      + f"\n{_sig_caveat}\n\n") if _sig_lines else "")
+                 + f"Open this scenario in LiteRev: {scen_url}\n\n"
                  + "\n".join(f"- {a.get('title', '')}" + (f" ({a['year']})" if a.get("year") else "") for a in shown)
-                 + (f"\n… et {total_new - len(shown)} de plus." if total_new > len(shown) else "")
+                 + (f"\nand {total_new - len(shown)} more." if total_new > len(shown) else "")
                  + f"\n\n{scen_url}\n")
     return subj, html_body, text_body
 
