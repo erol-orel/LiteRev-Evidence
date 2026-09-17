@@ -2475,7 +2475,46 @@ export interface SpecDiff {
   features_changed: { machine_name: string; fields: Record<string, { old: unknown; new: unknown }> }[];
   algorithm_changed: boolean;
   algorithm_fields: Record<string, { old: unknown; new: unknown }>;
-  summary: { added: number; removed: number; changed: number; outcome_changed: boolean; algorithm_changed: boolean };
+  /** The SEIR inputs. Absent from the diff until now, so a regeneration could take R0
+   *  from 2.1 to 4.8 and the screen show no difference. */
+  epidemic_parameters?: {
+    params_added: string[];
+    params_removed: string[];
+    params_shifted: { param: string; old: number | null; new: number | null; relative: number | null }[];
+    applicable_changed: boolean;
+    applicable: { old: boolean; new: boolean };
+    has_changes: boolean;
+  };
+  summary: {
+    added: number; removed: number; changed: number;
+    outcome_changed: boolean; algorithm_changed: boolean;
+    epidemic_parameters_changed?: boolean;
+  };
+}
+
+/** What a regeneration would change, and by how much: the full answer to "does this
+ *  change the evidence or the model". Unlike the digest's cheap signals it compares two
+ *  specs that were really generated. It applies nothing. */
+export interface ChangeReport {
+  status: "ready" | "empty" | "generating" | "error";
+  scenario_id: string;
+  has_changes?: boolean;
+  /** What moved, in plain language, most consequential first. */
+  changes?: string[];
+  diff?: SpecDiff;
+  corpus?: { active_articles: number | null; proposal_articles: number | null; delta?: number };
+  active_generated_at?: string | null;
+  proposal_generated_at?: string | null;
+  applied?: boolean;
+  apply_endpoint?: string;
+  message?: string;
+  error?: string;
+}
+
+export async function getChangeReport(scenarioId: string): Promise<ChangeReport> {
+  const r = await safeFetch(`${API_BASE_URL}/scenarios/${scenarioId}/change-report`);
+  if (!r.ok) throw new Error(httpMessage(r.status));
+  return r.json();
 }
 
 export interface SpecProposal {

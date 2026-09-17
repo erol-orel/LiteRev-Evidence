@@ -1238,6 +1238,9 @@ export const en: Translations = {
       evidenceEvolutionSubtitle:
         "Regenerates the spec from current evidence, compares, and lets you validate the change",
       outcomeChanged: "Outcome changed",
+      epiParamsChanged: "SEIR parameters changed",
+      seirBecomesApplicable: "The scenario becomes projectable: a transmission parameter is now measured.",
+      seirNoLongerApplicable: "The scenario is no longer projectable: no transmission parameter is measured.",
       variablesSuffix: "variable(s)",
       changedSuffix: "changed",
       algorithmChangedPrefix: "Algorithm:",

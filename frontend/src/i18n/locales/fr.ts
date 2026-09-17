@@ -1236,6 +1236,9 @@ export const fr = {
       evidenceEvolutionSubtitle:
         "Régénère le spec depuis l'évidence courante, compare, et validez le changement",
       outcomeChanged: "Outcome modifié",
+      epiParamsChanged: "Paramètres du SEIR modifiés",
+      seirBecomesApplicable: "Le scénario devient projetable : un paramètre de transmission est désormais mesuré.",
+      seirNoLongerApplicable: "Le scénario n'est plus projetable : plus aucun paramètre de transmission mesuré.",
       variablesSuffix: "variable(s)",
       changedSuffix: "modifiée(s)",
       algorithmChangedPrefix: "Algorithme:",
