@@ -132,9 +132,11 @@ def _drive(monkeypatch, *, listed, total, smtp, dry_run, last_notified="set"):
 
     captured = {}
 
-    def _fake_render(sid, articles, total_new, scenario_name=None, first_digest=False):
+    def _fake_render(sid, articles, total_new, scenario_name=None, first_digest=False,
+                     n_relevant=None, signals=None):
         captured["listed"], captured["total"] = len(articles), total_new
         captured["first_digest"] = first_digest
+        captured["n_relevant"], captured["signals"] = n_relevant, signals
         return ("subject", "<html></html>", "text")
 
     _ln = datetime(2026, 1, 1) if last_notified == "set" else last_notified
@@ -147,6 +149,10 @@ def _drive(monkeypatch, *, listed, total, smtp, dry_run, last_notified="set"):
     patch_app(monkeypatch, "_count_new_articles_for_scenario", lambda c, s, since: total)
     patch_app(monkeypatch, "_get_scenario_name", lambda s: "Chikungunya")
     patch_app(monkeypatch, "_send_email_smtp", lambda *a, **k: None)
+    # The signals have their own tests; here they must simply not interfere.
+    patch_app(monkeypatch, "_get_scenario_threshold", lambda sid: 0.45)
+    patch_app(monkeypatch, "change_signals",
+              lambda sid, since, thr: {"new_relevant": 2, "signals": []})
     monkeypatch.setenv("SMTP_HOST", smtp)
 
     out = main._process_alert_digests(None, dry_run=dry_run, respect_frequency=False)
@@ -232,3 +238,61 @@ def test_a_normal_digest_keeps_its_wording_and_overflow_note():
     assert "275 de plus" in html and "275 de plus" in text
     for body in (html, text):
         assert "Première notification" not in body
+
+
+# ── How many of the new papers are RELEVANT, and what is worth rereading ─────
+def test_the_digest_says_how_many_of_the_new_papers_clear_the_threshold():
+    """"300 new articles" does not say whether three of them matter or none. The relevant
+    count is the number a reviewer decides on."""
+    _s, html, text = main._render_alert_digest(
+        "s1", _articles(3), 300, scenario_name="Chik", n_relevant=12)
+    for body in (html, text):
+        assert "12 sur 300 passent le seuil" in body
+    # When every new article is relevant, say that rather than "300 of 300".
+    _s, _h, text_all = main._render_alert_digest("s1", _articles(3), 3, n_relevant=3)
+    assert "Les 3 passent le seuil" in text_all
+    # Without the count the sentence is simply absent, never a guess.
+    _s, _h, text_none = main._render_alert_digest("s1", _articles(3), 3, n_relevant=None)
+    assert "passent le seuil" not in text_none
+
+
+def test_the_signals_invite_a_review_and_never_claim_the_model_changed():
+    """These are computed from cached per-article facts with no LLM, so they cannot
+    establish that a conclusion moved. The caveat travels with them, always."""
+    _s, html, text = main._render_alert_digest(
+        "s1", _articles(2), 10, n_relevant=10,
+        signals=[{"code": "epidemic_parameters", "n": 3, "detail": "r0"},
+                 {"code": "new_concepts", "n": 2, "detail": "Wolbachia"},
+                 {"code": "strong_designs", "n": 1, "detail": "Systematic review"}])
+    for body in (html, text):
+        assert "3 articles rapportant un paramètre" in body
+        assert "2 concepts absents de la carte" in body
+        assert "1 devis qui relève" in body          # singular agreement, no "(s)"
+        assert "pistes de relecture, pas un constat" in body
+        assert "seule une régénération" in body
+    # No signals, no block and no caveat dangling on its own.
+    _s, _h, quiet = main._render_alert_digest("s1", _articles(2), 10, n_relevant=10, signals=[])
+    assert "pistes de relecture" not in quiet and "À relire" not in quiet
+
+
+def test_signals_agree_in_the_plural_as_well_as_the_singular():
+    _s, _h, one = main._render_alert_digest(
+        "s1", _articles(1), 1, signals=[{"code": "new_concepts", "n": 1, "detail": "x"}])
+    _s2, _h2, many = main._render_alert_digest(
+        "s1", _articles(1), 1, signals=[{"code": "new_concepts", "n": 4, "detail": "x"}])
+    assert "1 concept absent de la carte" in one
+    assert "4 concepts absents de la carte" in many
+    assert "(s)" not in one and "(s)" not in many
+
+
+def test_change_signals_never_break_the_digest(monkeypatch):
+    """A failed signal computation must not stop an email going out: the articles are the
+    point, the signals are an extra."""
+    from conftest import patch_app
+
+    class _Boom:
+        def connect(self): raise RuntimeError("no database")
+
+    patch_app(monkeypatch, "engine", _Boom())
+    out = main.change_signals("usr-x", None, 0.45)
+    assert out == {"new_relevant": 0, "signals": []}
