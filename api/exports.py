@@ -385,7 +385,9 @@ def export_scenario_cluster(
     from .clustering import CLUSTER_MAX_DOCS, _load_viz_cache
 
     _get_user_scenario_or_404(scenario_id)
-    cache = _load_viz_cache(scenario_id, "clustering_json")
+    # `_load_viz_cache` prend la CLÉ du cache ("clustering"), pas le nom de colonne :
+    # lui passer "clustering_json" levait un KeyError et l'export échouait toujours.
+    cache = _load_viz_cache(scenario_id, "clustering")
     if not cache or not cache.get("clusters"):
         raise HTTPException(status_code=404,
                             detail="Aucun clustering en cache pour ce scénario : ouvrez "
@@ -536,3 +538,31 @@ def export_scenario_article_ids(
     if _missing:
         resp.headers["X-Missing-Ids"] = str(len(_missing))
     return resp
+
+
+# Les scénarios PRÉRÉGLÉS passent par /gesica/scenarios (cf. `scenarioBase` côté front) :
+# sans ces trois alias, leurs boutons d'export pointaient sur des routes inexistantes,
+# comme l'export des pertinents l'avait déjà prévu de son côté.
+@app.get("/gesica/scenarios/{scenario_id}/clusters/{cluster_id}/export")
+def export_gesica_cluster(scenario_id: str, cluster_id: int, format: str = Query("csv"),
+                          lang: str | None = Query(None),
+                          include_abstract: bool = True) -> Response:
+    """Idem pour les scénarios préréglés."""
+    return export_scenario_cluster(scenario_id, cluster_id, format, lang, include_abstract)
+
+
+@app.get("/gesica/scenarios/{scenario_id}/concepts/export")
+def export_gesica_concept_subset(scenario_id: str, concepts: str = Query(...),
+                                 mode: str = Query("any", pattern="^(any|all)$"),
+                                 format: str = Query("csv"),
+                                 include_abstract: bool = True) -> Response:
+    """Idem pour les scénarios préréglés."""
+    return export_scenario_concept_subset(scenario_id, concepts, mode, format, include_abstract)
+
+
+@app.get("/gesica/scenarios/{scenario_id}/articles/export")
+def export_gesica_article_ids(scenario_id: str, ids: str = Query(...),
+                              format: str = Query("csv"), label: str = Query("selection"),
+                              include_abstract: bool = True) -> Response:
+    """Idem pour les scénarios préréglés."""
+    return export_scenario_article_ids(scenario_id, ids, format, label, include_abstract)
