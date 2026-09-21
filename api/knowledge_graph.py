@@ -287,7 +287,10 @@ CONCEPT_TYPES = ("pathogen", "vector", "host", "population", "exposure", "interv
 # Types que le LLM attribue (les autres viennent des champs structurés).
 _LLM_CONCEPT_TYPES = ("pathogen", "vector", "host", "population", "exposure", "intervention",
                       "outcome", "method", "place")
-CONCEPTS_VERSION = 1
+# 2 : fusion singulier/pluriel et « patients with X » dans _concept_key. Invalide les
+# CARTES en cache (elles portent les nœuds fragmentés) ; les concepts par article
+# (concepts_json) sont réutilisés tels quels, donc aucune ré-extraction LLM.
+CONCEPTS_VERSION = 2
 # Articles transportés par nœud et par arête. Ce n'est PAS un plafond d'extraction (le
 # `count` d'un nœud porte sur tout le corpus) mais la taille de la charge utile envoyée au
 # navigateur ; l'interface dit combien elle en liste sur combien.
@@ -362,10 +365,80 @@ def _normalise_design(raw: str | None) -> str | None:
     return None
 
 
+# Terminaisons qui ne sont PAS des marques de pluriel en anglais médical : les toucher
+# casserait « analysis », « virus », « sepsis », « bias », « abscess »…
+_NOT_PLURAL_ENDINGS = ("ss", "us", "is", "as", "os")
+
+
+# Mots en -s / -es / -ies qui SONT déjà au singulier, ou invariables : latin et grec
+# médicaux, et genres d'arthropodes. Sans cette liste, « case report / series » devenait
+# « case report / sery » et le genre « Aedes » devenait « aede ». Aucune fusion fausse,
+# mais des clés absurdes que le prochain lecteur prendrait pour un bug. À compléter quand
+# une clé bizarre apparaît.
+_INVARIANT_S_WORDS = frozenset({
+    "series", "species", "facies", "caries", "scabies", "rabies", "ascites",
+    "herpes", "diabetes", "measles", "mumps", "feces", "faeces", "adnexa",
+    "aedes", "anopheles", "bacteroides", "salmonelles",
+})
+
+
+def _singularise(word: str) -> str:
+    """Singulier approximatif d'un mot anglais, pour la CLÉ de fusion uniquement.
+
+    Volontairement grossier et conservateur : il vaut mieux rater une fusion que d'en
+    inventer une. Un mot trop court ou terminé par une des formes ci-dessus est laissé
+    tel quel. Le résultat n'est jamais affiché, seulement comparé, donc « diabetes » qui
+    devient « diabete » ne gêne personne tant que la transformation est la MÊME partout."""
+    if len(word) < 4 or word in _INVARIANT_S_WORDS:
+        return word
+    if word.endswith("ies"):
+        return word[:-3] + "y"
+    if word.endswith(_NOT_PLURAL_ENDINGS):
+        return word
+    return word[:-1] if word.endswith("s") else word
+
+
+# Tournures de cohorte : « patients with X » et « X » désignent la même population.
+_COHORT_PREFIXES = (
+    "patients with ", "patient with ", "adults with ", "adult with ",
+    "children with ", "child with ", "subjects with ", "subject with ",
+    "individuals with ", "individual with ", "people with ", "person with ",
+    "cases of ", "case of ",
+)
+
+
 def _concept_key(label: str) -> str:
-    """Clé de fusion d'un libellé : minuscules, espaces normalisés, ponctuation finale ôtée."""
+    """Clé de fusion d'un libellé : minuscules, espaces normalisés, ponctuation finale ôtée,
+    tournure de cohorte retirée, puis chaque mot mis au singulier.
+
+    Sans le singulier, « arterial calcification » et « arterial calcifications » vivaient
+    en deux nœuds : le graphe était fragmenté et CHAQUE compte sous-estimé, ce qui est
+    pire qu'un graphe pauvre parce que les chiffres avaient l'air justes.
+
+    Ce que cette fonction ne fait PAS, délibérément : rapprocher des SYNONYMES.
+    « arterial calcification » et « vascular calcification » restent deux concepts. Les
+    fusionner demanderait un dictionnaire de synonymes, c'est-à-dire une affirmation
+    sémantique sur le domaine, pas une normalisation de surface ; et une fusion fausse
+    est invisible une fois faite."""
     s = re.sub(r"\s+", " ", (label or "").strip().strip(".;,:")).lower()
-    return s
+    for pref in _COHORT_PREFIXES:
+        if s.startswith(pref) and len(s) > len(pref) + 2:
+            s = s[len(pref):]
+            break
+    return " ".join(_singularise(w) for w in s.split(" ") if w)
+
+
+def _best_label(key, votes: dict, fallback: dict) -> dict:
+    """La graphie la PLUS EMPLOYÉE pour ce concept, à égalité la plus courte.
+
+    Départage déterministe (fréquence, longueur, ordre alphabétique) : deux calculs du
+    même corpus doivent donner exactement le même graphe, sinon les copies d'écran d'une
+    présentation ne correspondent plus à ce qui s'affiche."""
+    c = votes.get(key)
+    if not c:
+        return fallback.get(key, {"en": key[1], "fr": key[1]})
+    en, fr = sorted(c.items(), key=lambda kv: (-kv[1], len(kv[0][0]), kv[0][0]))[0][0]
+    return {"en": en, "fr": fr or en}
 
 
 def _iso2(code: Any) -> str | None:
@@ -474,6 +547,11 @@ def _build_concept_graph(rows: list[dict], *, max_nodes: int = 60, min_edge: int
     min_count = 1 if small else 2
 
     per_article: dict[int, set[tuple[str, str]]] = {}
+    # Plusieurs graphies tombent maintenant sur la même clé (singulier/pluriel, « patients
+    # with X »). Le libellé AFFICHÉ est celui que le plus d'articles emploient, et non
+    # celui du premier article rencontré : un nœud « arterial calcification » qui
+    # s'afficherait « arterial calcifications » aurait l'air d'un bug.
+    label_votes: dict[tuple[str, str], Counter] = {}
     labels: dict[tuple[str, str], dict] = {}
     count: Counter = Counter()
     n_with_concepts = 0
@@ -487,6 +565,8 @@ def _build_concept_graph(rows: list[dict], *, max_nodes: int = 60, min_edge: int
         for t, k, lab in cs:
             keys.add((t, k))
             labels.setdefault((t, k), lab)
+            label_votes.setdefault((t, k), Counter())[
+                (str(lab.get("en") or ""), str(lab.get("fr") or ""))] += 1
         per_article[int(r["id"])] = keys
         count.update(keys)
 
@@ -547,7 +627,7 @@ def _build_concept_graph(rows: list[dict], *, max_nodes: int = 60, min_edge: int
         i = node_id[k]
         arts = node_articles.get(i, [])
         nodes.append({
-            "id": i, "type": k[0], "label": labels.get(k, {"en": k[1], "fr": k[1]}),
+            "id": i, "type": k[0], "label": _best_label(k, label_votes, labels),
             "count": len(arts), "new_count": int(node_new.get(i, 0)),
             "articles": list(arts) if full_articles else arts[:ARTICLES_PER_NODE],
             # Combien la charge utile en transporte réellement : « Tout afficher » sur un
