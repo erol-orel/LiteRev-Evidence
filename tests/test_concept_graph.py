@@ -157,3 +157,60 @@ def test_a_small_concept_lists_every_one_of_its_articles():
     node = next(n for n in g["nodes"] if n["label"]["en"] == "chikungunya virus")
     assert node["count"] == node["articles_listed"] == 3
     assert g["edges"][0]["weight"] == g["edges"][0]["articles_listed"] == 3
+
+
+# ── Merging surface variants of one concept ─────────────────────────────────
+def test_singular_and_plural_are_one_concept():
+    """`arterial calcification` (10) and `arterial calcifications` (3) sat as two nodes on
+    a real map. The graph was fragmented and EVERY count understated, which is worse than
+    a sparse graph because the numbers looked right."""
+    for a, b in [("arterial calcification", "arterial calcifications"),
+                 ("vascular smooth muscle cell", "vascular smooth muscle cells"),
+                 ("study", "studies"), ("artery", "arteries"),
+                 ("guideline", "guidelines")]:
+        assert main._concept_key(a) == main._concept_key(b), (a, b)
+
+
+def test_a_cohort_phrasing_is_the_same_population():
+    """`patients with X` and `X` are one population, and were two nodes."""
+    assert main._concept_key("patients with pseudoxanthoma elasticum") == \
+           main._concept_key("pseudoxanthoma elasticum")
+    assert main._concept_key("adults with chronic kidney disease") == \
+           main._concept_key("chronic kidney disease")
+    # The prefix is only stripped when something substantial remains.
+    assert main._concept_key("patients with") == "patient with"
+
+
+def test_medical_words_ending_in_s_are_left_alone():
+    """The cost of a wrong merge is silent, so the rule refuses anything it is unsure of:
+    these are not plurals and must survive untouched."""
+    for w in ("analysis", "sepsis", "virus", "bias", "tuberculosis", "stenosis",
+              "fibrosis", "abscess", "consensus"):
+        assert main._concept_key(w) == w, w
+
+
+def test_synonyms_are_deliberately_not_merged():
+    """`arterial` and `vascular` calcification stay two concepts. Merging them needs a
+    synonym dictionary, which is a claim about the domain rather than a normalisation of
+    surface form, and a wrong merge is invisible once made."""
+    assert main._concept_key("arterial calcification") != main._concept_key("vascular calcification")
+    assert main._concept_key("myopathy") != main._concept_key("myositis")
+
+
+def test_the_merged_node_shows_the_commonest_spelling():
+    """Three articles say "arterial calcification", one says the plural. The node must
+    display the majority form, not whichever article happened to come first."""
+    c = _c("outcome", "arterial calcifications")          # the odd one out, listed FIRST
+    c2 = _c("outcome", "arterial calcification")
+    rows = [_row(1, 2025, [c])] + [_row(i, 2025, [c2]) for i in (2, 3, 4)]
+    g = main._build_concept_graph(rows, n_total=4)
+    node = next(n for n in g["nodes"] if n["type"] == "outcome")
+    assert node["count"] == 4, "all four articles are behind one concept"
+    assert node["label"]["en"] == "arterial calcification"
+
+
+def test_the_map_cache_version_moved_with_the_rule():
+    """A cached map carries the old fragmented nodes, so the version has to move or users
+    keep seeing the split. It must NOT force a re-extraction: the per-article concepts are
+    reused, only the graph is rebuilt."""
+    assert main.CONCEPTS_VERSION >= 2
