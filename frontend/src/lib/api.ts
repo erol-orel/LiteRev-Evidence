@@ -2233,6 +2233,46 @@ export async function getScenarioSettings(scenarioId: string): Promise<ScenarioS
   return r.json();
 }
 
+// The threshold picked by NUMBER of articles rather than by feel. `kept` is what the
+// threshold really leaves (ties make a round target rarely reachable, hence `exact`),
+// and the parameter columns say what that choice costs in articles that report an
+// epidemiological measurement.
+export interface ThresholdCurvePoint {
+  threshold: number;
+  kept: number;
+  kept_scored: number;
+  requested: number | null;
+  exact: boolean | null;
+  with_parameter_kept: number;
+  with_parameter_cut: number;
+}
+
+export interface ThresholdCurve {
+  scenario_id: string;
+  current_threshold: number;
+  candidates: number;
+  included: number;
+  unscored: number;
+  corpus: number;
+  /** What the threshold can actually produce: below `min` the hand-included articles
+   *  pass whatever happens, above `max` there is nothing left. Null on an empty corpus. */
+  reachable: { min: number; max: number } | null;
+  with_parameter_total: number;
+  scoring_in_progress: boolean;
+  curve: ThresholdCurvePoint[];
+  suggestion?: ThresholdCurvePoint | null;
+}
+
+export async function fetchThresholdCurve(
+  scenarioId: string,
+  target?: number,
+): Promise<ThresholdCurve> {
+  const qs = target && target > 0 ? `?target=${Math.round(target)}` : '';
+  const r = await safeFetch(`${API_BASE_URL}/scenarios/${scenarioId}/threshold-curve${qs}`);
+  if (!r.ok) throw new Error(httpMessage(r.status));
+  return r.json();
+}
+
 export async function patchScenarioSettings(
   scenarioId: string,
   payload: { similarity_threshold?: number; variables_json?: Record<string, unknown> | null; variables_validated?: boolean },

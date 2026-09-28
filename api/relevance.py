@@ -5,6 +5,7 @@ tools and tests.
 """
 from __future__ import annotations
 
+import math
 import os
 from typing import Any
 
@@ -700,3 +701,172 @@ def update_scenario_settings(scenario_id: str, payload: dict[str, Any], _: None 
             "updated_at": updated_row["updated_at"].isoformat() if updated_row["updated_at"] else None,
         }
     return {"status": "updated", "scenario_id": scenario_id, "updated": list(updates.keys())}
+
+
+# ─── Courbe du seuil : choisir par le NOMBRE d'articles, pas au jugé ─────────
+# Le seuil se réglait à l'aveugle (« essayez 0.30, voyez ce que ça donne »). Or les
+# scores sont déjà en base : « quel seuil garde 100 articles » est une question à réponse
+# exacte, et « combien d'articles rapportant un paramètre ce seuil écarte-t-il » en fait
+# un choix défendable dans une section Méthodes. C'est cette seconde colonne qui vaut le
+# détour : un seuil justifié par « aucun article mesurant un paramètre n'est exclu »
+# s'écrit dans un article, « nous avons pris 0.45 » non.
+_CURVE_TARGETS = (25, 50, 100, 200, 300, 500, 750, 1000, 1500, 2000, 3000, 5000)
+
+
+def _floor4(x: float) -> float:
+    """Tronque à 4 décimales VERS LE BAS. Le seuil renvoyé est donc toujours ≤ au score
+    de l'article frontière : régler le curseur dessus garde bien ce qu'on a annoncé.
+    Arrondir au plus proche pouvait remonter au-dessus du score et couper un article de
+    plus que le compte affiché."""
+    return math.floor(float(x) * 10000) / 10000
+
+
+def _threshold_curve_inputs(scenario_id: str) -> dict[str, Any]:
+    """Lit d'un coup ce dont la courbe a besoin : un point par article CANDIDAT, plus les
+    deux compteurs que la courbe ne peut pas déduire.
+
+    Candidat = ni doublon, ni exclu, ni inclus à la main. Les inclus passent QUEL QUE SOIT
+    le seuil (c'est la porte de pertinence commune à toute l'app) : ils s'ajoutent donc à
+    chaque total sans jamais peser sur le choix du seuil, d'où leur comptage à part.
+
+    Un article non scoré vaut 0, exactement comme dans la porte
+    (`COALESCE(ars.similarity_score, 0) >= :thr`) : la courbe doit dire ce que la base
+    fera, pas ce qu'elle ferait si tout était scoré. Leur nombre est renvoyé à part pour
+    que l'interface puisse le signaler."""
+    from .variables import _param_regex                     # lazy: variables charge après
+    sql_where = """
+        FROM literature_document d
+        JOIN article_scenarios ars ON ars.document_id = d.id
+        WHERE ars.scenario_id = :sid
+          AND d.is_duplicate IS NOT TRUE
+          AND COALESCE(ars.screening_status, d.screening_status) IS DISTINCT FROM 'excluded'
+    """
+    with engine.connect() as conn:
+        rows = [(float(r["s"]), bool(r["p"])) for r in conn.execute(text(f"""
+            SELECT COALESCE(ars.similarity_score, 0) AS s,
+                   ((COALESCE(d.title, '') || ' ' || COALESCE(d.abstract, '')) ~* :rx) AS p
+            {sql_where}
+              AND COALESCE(ars.screening_status, d.screening_status) IS DISTINCT FROM 'included'
+            ORDER BY s DESC
+        """), {"sid": scenario_id, "rx": _param_regex(boundary=r"\y")}).mappings()]
+        head = conn.execute(text(f"""
+            SELECT COUNT(*) FILTER (
+                     WHERE COALESCE(ars.screening_status, d.screening_status) = 'included') AS included,
+                   COUNT(*) FILTER (
+                     WHERE COALESCE(ars.screening_status, d.screening_status) IS DISTINCT FROM 'included'
+                       AND ars.similarity_score IS NULL) AS unscored
+            {sql_where}
+        """), {"sid": scenario_id}).mappings().first() or {}
+    return {"rows": rows, "included": int(head.get("included") or 0),
+            "unscored": int(head.get("unscored") or 0)}
+
+
+def threshold_curve(rows: list[tuple[float, bool]], included: int = 0, targets=_CURVE_TARGETS,
+                    current: float | None = None) -> list[dict]:
+    """La courbe seuil ↔ nombre d'articles gardés. PURE, testable hors base.
+
+    `rows` : (score, rapporte un paramètre) par candidat, DÉCROISSANT. `included` : les
+    articles retenus à la main, qui passent quel que soit le seuil et s'ajoutent donc à
+    chaque total.
+
+    Les ÉGALITÉS empêchent d'atteindre un nombre rond : viser 100 sur un corpus où trente
+    articles partagent le score frontière en garde 115, pas 100. Chaque point renvoie donc
+    le nombre RÉELLEMENT gardé et `exact`, jamais le nombre demandé reformulé en réponse."""
+    n = len(rows)
+    if n == 0:
+        return []
+    total_param = sum(1 for _, p in rows if p)
+    # Cumul des articles « à paramètre » : with_parameter_kept au rang i se lit en O(1).
+    cum: list[int] = [0] * (n + 1)
+    for i, (_, p) in enumerate(rows):
+        cum[i + 1] = cum[i] + (1 if p else 0)
+    scores = [s for s, _ in rows]
+
+    def _point(thr: float, label: int | None) -> dict:
+        # Compté AU SEUIL RENVOYÉ, pas au score brut : le chiffre affiché est celui que
+        # donnera le curseur une fois posé là. Tous les ex aequo passent, comme en SQL.
+        kept_scored = sum(1 for s in scores if s >= thr)
+        kept_param = cum[kept_scored]
+        return {
+            "threshold": thr,
+            "kept": kept_scored + included,
+            "kept_scored": kept_scored,
+            "requested": label,
+            # None = « sans objet » (point du seuil courant, personne n'a demandé de
+            # nombre) ; False = on a visé et les ex aequo ont fait rater la cible.
+            "exact": None if label is None else (kept_scored + included) == label,
+            "with_parameter_kept": kept_param,
+            "with_parameter_cut": total_param - kept_param,
+        }
+
+    out: list[dict] = []
+    seen: set[float] = set()
+    # L'ORDRE de `targets` fait la priorité : deux cibles voisines peuvent tomber sur le
+    # même seuil (un gros paquet d'ex aequo), et le point ne garde qu'une étiquette. La
+    # cible explicitement demandée est donc passée en tête par l'appelant, sans quoi elle
+    # se ferait absorber par une cible du barème et ressortirait comme « hors de portée ».
+    for t in dict.fromkeys(int(x) for x in targets):
+        want = t - included                     # les inclus manuels comptent déjà dedans
+        if want < 1 or want > n:
+            continue
+        thr = _floor4(scores[want - 1])
+        if thr in seen:
+            continue                            # deux cibles tombent dans le même paquet
+        seen.add(thr)
+        out.append(_point(thr, t))
+    if current is not None:
+        cur = _floor4(current)
+        if cur not in seen:
+            seen.add(cur)
+            out.append(_point(cur, None))
+    out.sort(key=lambda p: -p["threshold"])
+    return out
+
+
+@app.get("/scenarios/{scenario_id}/threshold-curve")
+def get_threshold_curve(scenario_id: str, target: int | None = None) -> dict[str, Any]:
+    """« Quel seuil garde N articles ? » - répondu sur les scores réellement en base.
+
+    Aucun échantillonnage et aucun LLM : un point par article candidat, agrégé en
+    mémoire. `curve` donne, pour une série de tailles de corpus, le seuil qui les
+    approche et ce que ce seuil coûte en articles rapportant un paramètre
+    épidémiologique (le seuil se justifie alors par « ce qu'il écarte », pas par
+    l'habitude). `target` ajoute une cible libre et la renvoie dans `suggestion`, ou
+    `null` si aucun seuil ne l'atteint : `reachable` dit alors ce que le seuil PEUT faire,
+    plutôt que de rendre le point voisin en le faisant passer pour la réponse.
+
+    Ce que la réponse ne cache pas : `unscored` (des articles sans score, comptés 0 comme
+    partout ailleurs, donc gardés seulement à seuil 0) et `scoring_in_progress` (la courbe
+    bouge encore). Aucun point n'est « exact » par construction : les ex aequo font qu'une
+    cible ronde est rarement atteignable, et c'est `kept` qui fait foi."""
+    _get_user_scenario_or_404(scenario_id)
+    data = _threshold_curve_inputs(scenario_id)
+    rows, included = data["rows"], data["included"]
+    current = _get_scenario_threshold(scenario_id)
+    targets = list(_CURVE_TARGETS)
+    if target is not None:
+        t = int(target)
+        if t < 1:
+            raise HTTPException(status_code=422, detail="target doit être un entier positif")
+        targets.insert(0, t)                    # en tête : elle l'emporte sur le barème
+    curve = threshold_curve(rows, included, targets, current)
+    out: dict[str, Any] = {
+        "scenario_id": scenario_id,
+        "current_threshold": current,
+        "candidates": len(rows),
+        "included": included,
+        "unscored": data["unscored"],
+        "corpus": len(rows) + included,
+        # Ce que le seuil peut atteindre : en deçà de `min`, les articles inclus à la main
+        # passent quoi qu'on fasse ; au-delà de `max`, il n'y a plus d'articles.
+        "reachable": {"min": included + 1, "max": len(rows) + included} if rows else None,
+        "with_parameter_total": sum(1 for _, p in rows if p),
+        "scoring_in_progress": _RERANK_JOBS.get(scenario_id, {}).get("status") == "running",
+        "curve": curve,
+    }
+    if target is not None:
+        # La cible peut être hors de portée (plus grande que le corpus, ou entièrement
+        # couverte par les inclus manuels) : on le dit, plutôt que de renvoyer un point
+        # voisin en le faisant passer pour la réponse.
+        out["suggestion"] = next((p for p in curve if p["requested"] == int(target)), None)
+    return out

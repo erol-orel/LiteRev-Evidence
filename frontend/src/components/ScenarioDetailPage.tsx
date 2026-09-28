@@ -64,6 +64,8 @@ import {
   validateSpecProposal,
   getScenarioSettings,
   patchScenarioSettings,
+  fetchThresholdCurve,
+  type ThresholdCurve,
   triggerRerank,
   getRerankStatus,
   fetchKnowledgeGraph,
@@ -5214,6 +5216,8 @@ function SeuilSection({ scenarioId, onSaved, onThresholdChange }: { scenarioId: 
   const [saving, setSaving] = React.useState(false);
   const [saved, setSaved] = React.useState(false);
   const [rerankStatus, setRerankStatus] = React.useState<string | null>(null);
+  const [showCurve, setShowCurve] = React.useState(false);
+  const [curveKey, setCurveKey] = React.useState(0);
   const pollRef = React.useRef<ReturnType<typeof setInterval> | null>(null);
 
   React.useEffect(() => {
@@ -5230,6 +5234,7 @@ function SeuilSection({ scenarioId, onSaved, onThresholdChange }: { scenarioId: 
       await patchScenarioSettings(scenarioId, { similarity_threshold: threshold });
       setSaved(true);
       setTimeout(() => setSaved(false), 2000);
+      setCurveKey(k => k + 1);          // sinon la courbe garde l'ancien « seuil actuel »
       onSaved?.();
     } catch {}
     setSaving(false);
@@ -5289,6 +5294,15 @@ function SeuilSection({ scenarioId, onSaved, onThresholdChange }: { scenarioId: 
           <RefreshCw size={10} />
           {t("scenarioDetail.seuil.recalculateScores")}
         </button>
+        <button onClick={() => setShowCurve(v => !v)}
+          className={`flex items-center gap-1 rounded-lg border px-2.5 py-1 text-[11px] font-medium transition ${
+            showCurve
+              ? "bg-brand-500/15 border-brand-500/20 text-brand-300"
+              : "bg-white/5 hover:bg-white/10 border-white/10 text-white/50 hover:text-white/70"
+          }`}>
+          <Target size={10} />
+          {t("scenarioDetail.seuil.curve.toggle")}
+        </button>
         {rerankStatus && (
           <span className="text-[10px] text-gold-400">{rerankStatus}</span>
         )}
@@ -5297,6 +5311,144 @@ function SeuilSection({ scenarioId, onSaved, onThresholdChange }: { scenarioId: 
         {t("scenarioDetail.seuil.footerMain")}
         <span className="ml-1 text-white/20">{t("scenarioDetail.seuil.footerLegend")}</span>
       </p>
+      {showCurve && (
+        <ThresholdCurvePanel
+          key={curveKey}
+          scenarioId={scenarioId}
+          onPick={v => { setThreshold(v); onThresholdChange?.(v); }}
+        />
+      )}
+    </div>
+  );
+}
+
+/** Choisir le seuil par le NOMBRE d'articles gardés, sur les scores déjà en base.
+ *
+ * Le curseur seul demande de deviner : 0.45 ne dit pas s'il reste 80 articles ou 4 000,
+ * ni ce qu'on écarte en descendant. Ce tableau répond dans l'autre sens (« je veux ~100
+ * articles, quel seuil ? ») et montre, pour chaque seuil, combien d'articles rapportant
+ * un paramètre épidémiologique il garde et combien il coupe : c'est cette colonne qui
+ * rend le choix justifiable ailleurs que de mémoire. */
+function ThresholdCurvePanel({ scenarioId, onPick }: { scenarioId: string; onPick: (v: number) => void }) {
+  const { t } = useI18n();
+  const [data, setData] = React.useState<ThresholdCurve | null>(null);
+  const [loading, setLoading] = React.useState(true);
+  const [error, setError] = React.useState<string | null>(null);
+  const [target, setTarget] = React.useState<string>("");
+
+  const load = React.useCallback((want?: number) => {
+    setLoading(true);
+    setError(null);
+    fetchThresholdCurve(scenarioId, want)
+      .then(setData)
+      .catch(e => setError(e?.message || t("scenarioDetail.seuil.curve.error")))
+      .finally(() => setLoading(false));
+  }, [scenarioId, t]);
+
+  React.useEffect(() => { load(); }, [load]);
+
+  const askedFor = Number(target);
+  const rows = data?.curve ?? [];
+
+  return (
+    <div className="w-full rounded-xl border border-white/8 bg-black/20 px-3 py-2.5 space-y-2">
+      <div className="flex flex-wrap items-center gap-2 text-[11px] text-white/60">
+        <span className="font-medium text-white/70">{t("scenarioDetail.seuil.curve.targetLabel")}</span>
+        <input
+          type="number" min={1} step={25} value={target}
+          onChange={e => setTarget(e.target.value)}
+          onKeyDown={e => { if (e.key === "Enter" && askedFor > 0) load(askedFor); }}
+          placeholder="100"
+          className="w-20 rounded-lg border border-white/10 bg-white/5 px-2 py-1 text-white/80 font-mono"
+        />
+        <span className="text-white/40">{t("scenarioDetail.seuil.curve.targetUnit")}</span>
+        <button
+          onClick={() => load(askedFor > 0 ? askedFor : undefined)}
+          className="rounded-lg bg-brand-500/15 hover:bg-brand-500/25 border border-brand-500/20 text-brand-300 px-2.5 py-1 font-medium transition">
+          {t("scenarioDetail.seuil.curve.find")}
+        </button>
+        {loading && <Loader2 size={11} className="animate-spin text-white/40" />}
+      </div>
+
+      {error && <p className="text-[10px] text-red-300">{error}</p>}
+
+      {data && !error && (
+        <>
+          {/* Ce que la courbe ne peut pas deviner, dit explicitement plutôt que tu. */}
+          <div className="space-y-0.5 text-[10px] text-white/35">
+            <p>{t("scenarioDetail.seuil.curve.corpusLine")
+              .replace("{corpus}", data.corpus.toLocaleString())
+              .replace("{param}", data.with_parameter_total.toLocaleString())}</p>
+            {data.included > 0 && (
+              <p>{t("scenarioDetail.seuil.curve.includedNote").replace("{n}", data.included.toLocaleString())}</p>
+            )}
+            {data.unscored > 0 && (
+              <p className="text-gold-400/70">
+                {t("scenarioDetail.seuil.curve.unscoredNote").replace("{n}", data.unscored.toLocaleString())}
+              </p>
+            )}
+            {data.scoring_in_progress && (
+              <p className="text-gold-400/70">{t("scenarioDetail.seuil.curve.scoringNote")}</p>
+            )}
+          </div>
+
+          {rows.length === 0 ? (
+            <p className="text-[10px] text-white/40">{t("scenarioDetail.seuil.curve.empty")}</p>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="w-full text-[10px] text-white/60">
+                <thead className="text-white/35">
+                  <tr className="text-left">
+                    <th className="py-1 pr-3 font-medium">{t("scenarioDetail.seuil.curve.colThreshold")}</th>
+                    <th className="py-1 pr-3 font-medium">{t("scenarioDetail.seuil.curve.colKept")}</th>
+                    <th className="py-1 pr-3 font-medium">{t("scenarioDetail.seuil.curve.colParamKept")}</th>
+                    <th className="py-1 pr-3 font-medium">{t("scenarioDetail.seuil.curve.colParamCut")}</th>
+                    <th className="py-1" />
+                  </tr>
+                </thead>
+                <tbody>
+                  {rows.map(p => (
+                    <tr key={p.threshold} className="border-t border-white/5">
+                      <td className="py-1 pr-3 font-mono text-brand-300">{p.threshold.toFixed(2)}</td>
+                      <td className="py-1 pr-3 font-mono text-white/80">
+                        {p.kept.toLocaleString()}
+                        {p.requested === null
+                          ? <span className="ml-1 text-white/30">{t("scenarioDetail.seuil.curve.currentTag")}</span>
+                          : p.exact === false
+                            ? <span className="ml-1 text-gold-400/70">
+                                {t("scenarioDetail.seuil.curve.tieTag").replace("{n}", String(p.requested))}
+                              </span>
+                            : null}
+                      </td>
+                      <td className="py-1 pr-3 font-mono">{p.with_parameter_kept.toLocaleString()}</td>
+                      <td className={`py-1 pr-3 font-mono ${p.with_parameter_cut > 0 ? "text-gold-400/70" : "text-white/30"}`}>
+                        {p.with_parameter_cut.toLocaleString()}
+                      </td>
+                      <td className="py-1">
+                        <button
+                          onClick={() => onPick(p.threshold)}
+                          className="rounded-md border border-white/10 bg-white/5 hover:bg-white/10 px-2 py-0.5 text-white/50 hover:text-white/80 transition">
+                          {t("scenarioDetail.seuil.curve.use")}
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+
+          {askedFor > 0 && data.suggestion === null && data.reachable && (
+            <p className="text-[10px] text-gold-400/70">
+              {t("scenarioDetail.seuil.curve.unreachable")
+                .replace("{n}", String(askedFor))
+                .replace("{min}", data.reachable.min.toLocaleString())
+                .replace("{max}", data.reachable.max.toLocaleString())}
+            </p>
+          )}
+          <p className="text-[10px] text-white/25">{t("scenarioDetail.seuil.curve.pickNote")}</p>
+        </>
+      )}
     </div>
   );
 }
