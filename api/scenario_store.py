@@ -40,6 +40,27 @@ def _get_scenario_threshold(scenario_id: str) -> float:
     return float(row["similarity_threshold"]) if row and row["similarity_threshold"] is not None else DEFAULT_SIMILARITY_THRESHOLD
 
 
+# ── La porte de pertinence, écrite UNE fois ──────────────────────────────────
+# « Les articles pertinents d'un scénario » veut dire : jamais un doublon, jamais un
+# article qu'un relecteur a exclu, et sinon inclus à la main OU au-dessus du seuil. Un
+# article sans score compte pour 0, donc il reste dehors tant que le seuil n'est pas nul.
+#
+# Cette condition avait été recopiée à la main dans chaque module et les copies ont
+# divergé : celle du RAG (`/ask/stream/filtered`) avait perdu l'exclusion des doublons ET
+# celle des articles exclus, si bien que l'assistant pouvait citer un article qu'un
+# relecteur venait d'écarter, pendant que le compteur affiché sous la réponse, lui,
+# comptait le bon sous-ensemble. Une fonction, un seul endroit à corriger.
+def relevant_gate_sql(doc: str = "d", link: str = "ars", thr: str = ":thr") -> str:
+    """Le prédicat SQL du sous-ensemble pertinent, à mettre dans un WHERE.
+
+    `doc` et `link` sont les alias de literature_document et article_scenarios ; `thr` le
+    paramètre lié qui porte le seuil. Pur : aucune connexion, testable hors base."""
+    status = f"COALESCE({link}.screening_status, {doc}.screening_status)"
+    return (f"{doc}.is_duplicate IS NOT TRUE"
+            f" AND {status} IS DISTINCT FROM 'excluded'"
+            f" AND ({status} = 'included' OR COALESCE({link}.similarity_score, 0) >= {thr})")
+
+
 # ── Invalidation des artefacts calculés sur le corpus pertinent ───────────────
 # Clustering, réseau de similarité, carte des concepts et actions recommandées sont
 # tous des FONCTIONS du sous-ensemble pertinent : ils périment dès que ce sous-ensemble

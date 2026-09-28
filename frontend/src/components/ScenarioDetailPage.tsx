@@ -3261,10 +3261,23 @@ function RagSection({ scenarioId, detail }: { scenarioId: string; detail: Scenar
               {streamedText}
               {streaming && <span className="inline-block w-0.5 h-3 bg-brand-400 animate-pulse ml-0.5 align-middle"/>}
             </div>
+            {/* Le nombre d'articles INTERROGÉS et le nombre d'articles CITÉS sont deux
+                choses : la ligne annonçait « 2 170 articles utilisés » sous une réponse
+                écrite sur une vingtaine d'extraits. Les chiffres de la réponse, eux,
+                viennent du portrait du corpus entier, d'où la seconde ligne. */}
             {meta && meta.papers_used > 0 && (
-              <p className="mt-2 text-[10px] text-white/40">
-                {meta.papers_used} {t("scenarioDetail.rag.papersUsedSuffix")} (≥ {meta.threshold}) · {meta.papers_with_fulltext} {t("scenarioDetail.rag.withFulltextSuffix")}
-              </p>
+              <div className="mt-2 space-y-0.5 text-[10px] text-white/40">
+                <p>
+                  {meta.papers_used} {t("scenarioDetail.rag.papersSearchedSuffix")} (≥ {meta.threshold})
+                  {meta.papers_quoted ? ` · ${meta.papers_quoted} ${t("scenarioDetail.rag.papersQuotedSuffix")}` : ""}
+                  {" · "}{meta.papers_with_fulltext} {t("scenarioDetail.rag.withFulltextSuffix")}
+                </p>
+                <p className={meta.digest_complete ? "text-white/30" : "text-gold-400/70"}>
+                  {meta.digest_complete
+                    ? t("scenarioDetail.rag.digestCovers")
+                    : t("scenarioDetail.rag.digestMissing")}
+                </p>
+              </div>
             )}
           </div>
 

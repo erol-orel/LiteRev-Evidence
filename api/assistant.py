@@ -16,7 +16,12 @@ from sqlalchemy import text
 
 from .core import RAG_MIN_SIMILARITY, app, engine, logger
 from .documents import _llm_lang_directive
-from .scenario_store import DEFAULT_SIMILARITY_THRESHOLD, _get_scenario_threshold, _get_user_scenario_or_404
+from .scenario_store import (
+    DEFAULT_SIMILARITY_THRESHOLD,
+    _get_scenario_threshold,
+    _get_user_scenario_or_404,
+    relevant_gate_sql,
+)
 from .search import _build_where
 
 class AskIn(BaseModel):
@@ -285,23 +290,37 @@ async def ask_stream(payload: dict[str, Any]) -> StreamingResponse:
             where_extra += " AND d.project_context = :project_context"
             params_extra["project_context"] = project_context
         if scenario_id:
+            # Avec un scénario, la porte est celle de toute l'app : le SEUIL comptait
+            # aussi, et il était le seul ingrédient oublié ici. Sans lui, cet endpoint
+            # répondait sur tout le corpus du scénario, y compris les articles que le
+            # seuil met de côté, en se présentant comme filtré par scénario.
             join_extra = " JOIN article_scenarios ars ON ars.document_id = d.id AND ars.scenario_id = :scenario_id "
             screen_expr = "COALESCE(ars.screening_status, d.screening_status)"
+            where_extra += " AND " + relevant_gate_sql(doc="d", link="ars", thr=":threshold")
             params_extra["scenario_id"] = scenario_id
+            params_extra["threshold"] = _get_scenario_threshold(scenario_id)
+        else:
+            where_extra += (" AND d.is_duplicate IS NOT TRUE"
+                            f" AND {screen_expr} IS DISTINCT FROM 'excluded'")
 
         with engine.connect() as conn:
+            # UN extrait par article (DISTINCT ON) : le budget de contexte sert à citer
+            # plus d'articles, pas à découper trois fois le même.
             rows = conn.execute(text(f"""
-                SELECT c.content, d.title, d.year, d.doi, d.authors, d.id AS doc_id,
-                       1 - (c.embedding <=> CAST(:emb AS vector)) AS similarity
-                FROM document_chunk c
-                JOIN literature_document d ON d.id = c.document_id
-                {join_extra}
-                WHERE c.embedding IS NOT NULL
-                  AND (d.is_duplicate IS NULL OR d.is_duplicate = FALSE)
-                  AND {screen_expr} IS DISTINCT FROM 'excluded'
-                  AND (c.embedding <=> CAST(:emb AS vector)) <= :max_dist
-                  {where_extra}
-                ORDER BY c.embedding <=> CAST(:emb AS vector)
+                SELECT * FROM (
+                    SELECT DISTINCT ON (d.id)
+                           c.content, d.title, d.year, d.doi, d.authors, d.id AS doc_id,
+                           1 - (c.embedding <=> CAST(:emb AS vector)) AS similarity,
+                           (c.embedding <=> CAST(:emb AS vector)) AS distance
+                    FROM document_chunk c
+                    JOIN literature_document d ON d.id = c.document_id
+                    {join_extra}
+                    WHERE c.embedding IS NOT NULL
+                      AND (c.embedding <=> CAST(:emb AS vector)) <= :max_dist
+                      {where_extra}
+                    ORDER BY d.id, c.embedding <=> CAST(:emb AS vector)
+                ) best
+                ORDER BY best.distance
                 LIMIT :top_k
             """), params_extra).mappings().all()
 
@@ -414,22 +433,27 @@ def user_scenario_rag_assistant(scenario_id: str, payload: AskIn) -> dict[str, A
         except Exception as e:
             logger.error(f"Erreur embedding RAG user_scenario {scenario_id}: {e}")
 
+    gate = relevant_gate_sql(doc="d", link="ars", thr=":thr")
     with engine.connect() as conn:
         if query_embedding:
-            rows = conn.execute(text("""
-                SELECT d.id AS document_id, d.title, d.year, d.url, d.source,
-                       d.authors, d.journal, d.doi,
-                       c.content, c.metadata_json,
-                       (1 - (c.embedding <=> CAST(:emb AS vector))) AS score
-                FROM document_chunk c
-                JOIN literature_document d ON d.id = c.document_id
-                JOIN article_scenarios ars ON ars.document_id = d.id AND ars.scenario_id = :sid
-                WHERE c.embedding IS NOT NULL
-                  AND (COALESCE(ars.similarity_score, 0) >= :thr OR COALESCE(ars.screening_status, d.screening_status) = 'included')
-                  AND (d.is_duplicate IS NULL OR d.is_duplicate = FALSE)
-                  AND COALESCE(ars.screening_status, d.screening_status) IS DISTINCT FROM 'excluded'  -- porte de screening (C1, per-scenario)
-                ORDER BY c.embedding <=> CAST(:emb AS vector)
-                LIMIT 8
+            # UN extrait par article, et 24 articles plutôt que 8 : le contexte servait
+            # à découper quelques articles en profondeur au lieu d'en couvrir beaucoup.
+            rows = conn.execute(text(f"""
+                SELECT * FROM (
+                    SELECT DISTINCT ON (d.id)
+                           d.id AS document_id, d.title, d.year, d.url, d.source,
+                           d.authors, d.journal, d.doi,
+                           c.content, c.metadata_json,
+                           (1 - (c.embedding <=> CAST(:emb AS vector))) AS score,
+                           (c.embedding <=> CAST(:emb AS vector)) AS distance
+                    FROM document_chunk c
+                    JOIN literature_document d ON d.id = c.document_id
+                    JOIN article_scenarios ars ON ars.document_id = d.id AND ars.scenario_id = :sid
+                    WHERE c.embedding IS NOT NULL AND {gate}
+                    ORDER BY d.id, c.embedding <=> CAST(:emb AS vector)
+                ) best
+                ORDER BY best.distance
+                LIMIT 24
             """), {"emb": str(query_embedding), "sid": scenario_id, "thr": eff_thr}).mappings().all()
         else:
             terms = [t.strip() for t in re.split(r"\s+", payload.question.lower()) if t.strip()]
@@ -443,17 +467,19 @@ def user_scenario_rag_assistant(scenario_id: str, payload: AskIn) -> dict[str, A
             for i, t in enumerate(terms):
                 params[f"t{i}"] = f"%{t}%"
             rows = conn.execute(text(f"""
-                SELECT d.id AS document_id, d.title, d.year, d.url, d.source,
-                       d.authors, d.journal, d.doi,
-                       c.content, c.metadata_json, 1.0 AS score
-                FROM document_chunk c
-                JOIN literature_document d ON d.id = c.document_id
-                JOIN article_scenarios ars ON ars.document_id = d.id AND ars.scenario_id = :sid
-                WHERE ({like_clauses})
-                  AND (COALESCE(ars.similarity_score, 0) >= :thr OR COALESCE(ars.screening_status, d.screening_status) = 'included')
-                  AND COALESCE(ars.screening_status, d.screening_status) IS DISTINCT FROM 'excluded'  -- porte de screening (C1, per-scenario)
-                ORDER BY d.year DESC NULLS LAST
-                LIMIT 8
+                SELECT * FROM (
+                    SELECT DISTINCT ON (d.id)
+                           d.id AS document_id, d.title, d.year, d.url, d.source,
+                           d.authors, d.journal, d.doi,
+                           c.content, c.metadata_json, 1.0 AS score
+                    FROM document_chunk c
+                    JOIN literature_document d ON d.id = c.document_id
+                    JOIN article_scenarios ars ON ars.document_id = d.id AND ars.scenario_id = :sid
+                    WHERE ({like_clauses}) AND {gate}
+                    ORDER BY d.id
+                ) best
+                ORDER BY best.year DESC NULLS LAST
+                LIMIT 24
             """), params).mappings().all()
 
     if not rows:
@@ -500,12 +526,22 @@ def user_scenario_rag_assistant(scenario_id: str, payload: AskIn) -> dict[str, A
             "2. Citez vos sources avec [SOURCE 1], [SOURCE 2], etc.\n"
             "3. Mentionnez les niveaux de preuve (RCT, méta-analyse, étude observationnelle).\n"
             "4. Soyez précis et structuré. Si le contexte est insuffisant, dites-le.\n"
+            "5. Tout chiffre de volume ou de proportion vient du bloc CORPUS COMPLET, "
+            "jamais d'un comptage des SOURCES reproduites.\n"
+            "6. Ne pas utiliser de tiret cadratin (em dash).\n"
         ) + _llm_lang_directive(payload.lang)
+        # Même forme que le brief : le digest (tout le corpus pertinent, en SQL) porte
+        # les chiffres, les sources reproduites portent les citations.
+        from .digest import corpus_digest, digest_coverage_note, digest_to_prompt
+        _digest = corpus_digest(scenario_id, eff_thr)
+        _digest_block = digest_to_prompt(_digest)
+        _coverage = digest_coverage_note(_digest, len(sources))
         response = client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[
                 {"role": "system", "content": system_prompt},
-                {"role": "user", "content": f"CONTEXTE :\n{context_str}\n\nQUESTION : {payload.question}"},
+                {"role": "user", "content": (f"{_digest_block}\n\n" if _digest_block else "")
+                    + f"CONTEXTE :\n{context_str}\n\n{_coverage}\n\nQUESTION : {payload.question}"},
             ],
             temperature=0.2,
             max_tokens=1200,
@@ -531,11 +567,13 @@ async def ask_stream_filtered(payload: dict[str, Any]):
 
     question = payload.get("question", "")
     scenario_id = payload.get("scenario_id", None)
-    # Public endpoint : borne top_k (débordement de contexte / LIMIT négatif). Plafond généreux.
+    # Public endpoint : borne top_k (débordement de contexte / LIMIT négatif). Plafond
+    # généreux. Depuis que la requête renvoie UN extrait par article, top_k est un nombre
+    # d'ARTICLES cités, pas de morceaux : 24 par défaut au lieu de 12.
     try:
-        top_k = max(1, min(int(payload.get("top_k", 12)), 40))
+        top_k = max(1, min(int(payload.get("top_k", 24)), 40))
     except (TypeError, ValueError):
-        top_k = 12
+        top_k = 24
     project_context = payload.get("project_context", "literev")
     lang = payload.get("lang")
 
@@ -605,33 +643,45 @@ async def ask_stream_filtered(payload: dict[str, Any]):
             params_extra["project_context"] = project_context
 
         if scenario_id:
-            # Filtrer par scénario ET par seuil de similarité (ou validé humainement).
             # JOIN (au lieu d'EXISTS) : (scenario_id, document_id) est unique dans
             # article_scenarios, donc la cardinalité est préservée et asn devient
             # lisible dans le SELECT/ORDER pour le screening par scénario.
+            #
+            # La porte est celle de TOUTE l'app (relevant_gate_sql), plus recopiée ici.
+            # La copie locale avait perdu l'exclusion des doublons ET celle des articles
+            # exclus, et admettait les articles sans score à n'importe quel seuil : le
+            # RAG citait donc des articles qu'un relecteur avait écartés, sous un
+            # compteur « N articles pertinents » calculé, lui, sur le bon sous-ensemble.
             join_extra = " JOIN article_scenarios asn ON asn.document_id = d.id AND asn.scenario_id = :scenario_id "
             screen_expr = "COALESCE(asn.screening_status, d.screening_status)"
-            where_extra += f"""
-                AND (
-                    asn.similarity_score >= :threshold
-                    OR asn.similarity_score IS NULL
-                    OR {screen_expr} = 'included'
-                )
-            """
+            where_extra += " AND " + relevant_gate_sql(doc="d", link="asn", thr=":threshold")
             params_extra["scenario_id"] = scenario_id
+        else:
+            where_extra += (" AND d.is_duplicate IS NOT TRUE"
+                            f" AND {screen_expr} IS DISTINCT FROM 'excluded'")
 
         with engine.connect() as conn:
+            # DISTINCT ON (d.id) : UN extrait par article, le plus proche de la question.
+            # Sans lui, les `top_k` meilleurs chunks pouvaient tous venir de deux ou trois
+            # articles très découpés, et la réponse reposait sur trois papiers tout en
+            # s'affichant sous « 2 170 articles pertinents ». Le budget de contexte sert
+            # maintenant à ÉLARGIR le nombre d'articles cités, pas à en approfondir trois.
             rows = conn.execute(text(f"""
-                SELECT c.content, d.title, d.year, d.doi, d.authors, d.id AS doc_id,
-                       {screen_expr} AS screening_status,
-                       1 - (c.embedding <=> CAST(:emb AS vector)) AS similarity
-                FROM document_chunk c
-                JOIN literature_document d ON d.id = c.document_id
-                {join_extra}
-                WHERE c.embedding IS NOT NULL {where_extra}
+                SELECT * FROM (
+                    SELECT DISTINCT ON (d.id)
+                           c.content, d.title, d.year, d.doi, d.authors, d.id AS doc_id,
+                           {screen_expr} AS screening_status,
+                           1 - (c.embedding <=> CAST(:emb AS vector)) AS similarity,
+                           (c.embedding <=> CAST(:emb AS vector)) AS distance
+                    FROM document_chunk c
+                    JOIN literature_document d ON d.id = c.document_id
+                    {join_extra}
+                    WHERE c.embedding IS NOT NULL {where_extra}
+                    ORDER BY d.id, c.embedding <=> CAST(:emb AS vector)
+                ) best
                 ORDER BY
-                    CASE WHEN {screen_expr} = 'included' THEN 0 ELSE 1 END,
-                    c.embedding <=> CAST(:emb AS vector)
+                    CASE WHEN best.screening_status = 'included' THEN 0 ELSE 1 END,
+                    best.distance
                 LIMIT :top_k
             """), params_extra).mappings().all()
 
@@ -656,26 +706,50 @@ async def ask_stream_filtered(payload: dict[str, Any]):
 
     context_text = "\n\n---\n\n".join(context_chunks[:top_k]) if context_chunks else "Aucun contexte disponible."
 
+    # ── Réduire sur TOUT le corpus pertinent, citer sur les extraits ─────────
+    # La règle de la maison : une extraction porte sur tous les articles pertinents,
+    # jamais sur un échantillon. Une recherche vectorielle ne peut en reproduire qu'une
+    # poignée, donc le RAG suit la même forme que le brief, les variables et les actions :
+    # le DIGEST (agrégé en SQL sur l'intégralité du sous-ensemble pertinent, sans LLM)
+    # porte les chiffres, les extraits portent les citations. Sans lui, l'assistant
+    # répondait « la plupart des études montrent… » sur la foi de douze morceaux.
+    digest_block = coverage_note = ""
+    if scenario_id:
+        from .digest import corpus_digest, digest_coverage_note, digest_to_prompt
+        _digest = corpus_digest(scenario_id, threshold)
+        digest_block = digest_to_prompt(_digest)
+        coverage_note = digest_coverage_note(_digest, len(context_chunks))
+
     system_prompt = """Tu es un assistant expert en sciences de la santé et en revue systématique de la littérature scientifique.
 Tu réponds de manière précise, factuelle et structurée.
 Base-toi exclusivement sur le contexte fourni. Si l'information n'est pas dans le contexte, dis-le clairement.
 Cite les articles pertinents par leur titre quand tu les mentionnes.
+Toute affirmation de volume ou de proportion (combien d'etudes, quelles annees, quels pays,
+quels devis) doit venir du bloc CORPUS COMPLET, jamais d'un comptage des extraits reproduits.
 Ne pas utiliser de tiret cadratin (em dash).""" + _llm_lang_directive(lang)
 
-    user_prompt = f"""Contexte scientifique (extraits d'articles sélectionnés par pertinence sémantique) :
+    user_prompt = (
+        (f"{digest_block}\n\n" if digest_block else "")
+        + f"""Contexte scientifique (extraits d'articles selectionnes par pertinence semantique, un par article) :
 {context_text}
+
+{coverage_note}
 
 Question : {question}
 
-Réponds de manière structurée et cite les sources pertinentes du contexte."""
+Reponds de maniere structuree et cite les sources pertinentes du contexte."""
+    )
 
     async def event_generator():
         import json as _json2
-        # Méta d'abord : combien d'articles pertinents alimentent la réponse et
-        # combien ont un texte intégral (affiché sous la réponse, comme la vue Preuves).
+        # Méta d'abord : le sous-ensemble pertinent interrogé, et combien d'articles la
+        # réponse cite RÉELLEMENT. Les deux nombres étaient confondus : l'interface
+        # annonçait « 2 170 articles » sous une réponse écrite sur douze extraits.
         meta_event = ("event: meta\ndata: "
                       + _json2.dumps({"papers_used": papers_used,
                                       "papers_with_fulltext": papers_with_fulltext,
+                                      "papers_quoted": len({s["document_id"] for s in sources}),
+                                      "digest_complete": bool(digest_block),
                                       "threshold": round(float(threshold), 2)})
                       + "\n\n")
         yield meta_event
