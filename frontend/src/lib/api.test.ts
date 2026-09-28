@@ -6,6 +6,7 @@ import {
   fetchGesicaScenarios,
   fetchScenarioCorpus,
   fetchScenarioDetail,
+  fetchThresholdCurve,
   getApiKey,
   hasApiKey,
   httpMessage,
@@ -197,5 +198,21 @@ describe("scenario endpoints", () => {
     const denied = stubFetch(reply(401));
     await expect(patchScenarioSettings("usr-abc", { similarity_threshold: 0.5 })).rejects.toThrow(en.errors.unauthorized);
     expect((denied.mock.calls[0][1] as RequestInit).headers).toEqual({ "Content-Type": "application/json" });
+  });
+
+  it("asks for a threshold curve, with the target only when there is one", async () => {
+    const body = {
+      scenario_id: "usr-abc", current_threshold: 0.45, candidates: 2, included: 0,
+      unscored: 0, corpus: 2, with_parameter_total: 1, scoring_in_progress: false,
+      curve: [], suggestion: null,
+    };
+    const fetchMock = stubFetch(reply(200, body), reply(200, body), reply(200, body));
+    expect(await fetchThresholdCurve("usr-abc", 100)).toEqual(body);
+    expect(fetchMock.mock.calls[0][0]).toBe("/api/scenarios/usr-abc/threshold-curve?target=100");
+    await fetchThresholdCurve("usr-abc");
+    expect(fetchMock.mock.calls[1][0]).toBe("/api/scenarios/usr-abc/threshold-curve");
+    // A blank or nonsense box must not travel as `target=NaN`: the API would 422 it.
+    await fetchThresholdCurve("usr-abc", Number.NaN);
+    expect(fetchMock.mock.calls[2][0]).toBe("/api/scenarios/usr-abc/threshold-curve");
   });
 });
