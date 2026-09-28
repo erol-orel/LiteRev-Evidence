@@ -1631,10 +1631,16 @@ export async function fetchKnowledgeGraph(
 
 // ─── Streaming RAG SSE ────────────────────────────────────────────────────────
 
-/** Corpus counts behind an AI answer: relevant papers used + how many have full text. */
+/** Corpus counts behind an AI answer. `papers_used` is the relevant subset SEARCHED;
+ *  `papers_quoted` is how many of them the answer actually reproduces. The two are not
+ *  the same number and the interface must not present the first as the second.
+ *  `digest_complete` says whether the answer's figures were backed by the whole-corpus
+ *  digest (SQL over every relevant article) rather than by the excerpts alone. */
 export interface RagMeta {
   papers_used: number;
   papers_with_fulltext: number;
+  papers_quoted?: number;
+  digest_complete?: boolean;
   threshold: number;
 }
 
