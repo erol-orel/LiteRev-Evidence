@@ -7,6 +7,8 @@ import {
   fetchScenarioCorpus,
   fetchScenarioDetail,
   fetchThresholdCurve,
+  applyScenarioSubset,
+  previewScenarioSubset,
   getApiKey,
   hasApiKey,
   httpMessage,
@@ -214,5 +216,35 @@ describe("scenario endpoints", () => {
     // A blank or nonsense box must not travel as `target=NaN`: the API would 422 it.
     await fetchThresholdCurve("usr-abc", Number.NaN);
     expect(fetchMock.mock.calls[2][0]).toBe("/api/scenarios/usr-abc/threshold-curve");
+  });
+
+  it("previews a narrowing without the write key and applies it with one", async () => {
+    const plan = {
+      relevant: 5, keep: 3, exclude: 2, undecided: 1, by_dimension: {}, combine: "all",
+      unassigned: "keep", reason: "scope: ...", meta: {}, exclude_sample: [1, 2],
+      undecided_sample: [3],
+    };
+    setApiKey("secret");
+    const fetchMock = stubFetch(reply(200, plan), reply(200, { ...plan, applied: 2 }));
+    await previewScenarioSubset("usr-abc", { clusters: [0, 1] });
+    const [previewUrl, previewInit] = fetchMock.mock.calls[0];
+    expect(previewUrl).toBe("/api/user-scenarios/usr-abc/subset/preview");
+    // A preview writes nothing, so it must not carry the admin key around.
+    expect((previewInit as RequestInit).headers).toEqual({ "Content-Type": "application/json" });
+    expect((previewInit as RequestInit).body).toBe(JSON.stringify({ clusters: [0, 1] }));
+
+    await applyScenarioSubset("usr-abc", { clusters: [0], unassigned: "exclude" });
+    const [applyUrl, applyInit] = fetchMock.mock.calls[1];
+    expect(applyUrl).toBe("/api/user-scenarios/usr-abc/subset/apply");
+    expect((applyInit as RequestInit).headers).toEqual({
+      "X-API-Key": "secret", "Content-Type": "application/json",
+    });
+    clearApiKey();
+  });
+
+  it("surfaces the API's own reason when a narrowing is refused", async () => {
+    stubFetch(reply(404, { detail: "Cluster 42 inconnu (disponibles : [0, 1])." }));
+    await expect(previewScenarioSubset("usr-abc", { clusters: [42] }))
+      .rejects.toThrow("Cluster 42 inconnu");
   });
 });

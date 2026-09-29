@@ -26,6 +26,7 @@ MODULES = (
     "digest",
     "exports",
     "review",
+    "subsets",
     "evidence",
     "assistant",
     "variables",

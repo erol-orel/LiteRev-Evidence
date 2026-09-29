@@ -1138,6 +1138,9 @@ export interface ScenarioPrisma {
     screening_complete: boolean;
     manually_rescued: number;
     manually_vetoed: number;
+    /** Why the excluded were excluded. One scope narrowing can account for most of the
+     *  total, and a total alone cannot be written into a methods section. */
+    excluded_by_reason?: Array<{ reason: string; articles: number }>;
   };
   evidence: {
     total: number;
@@ -2803,6 +2806,103 @@ async function _exportResponse(
   const m = /filename="?([^";]+)"?/.exec(r.headers.get("Content-Disposition") ?? "");
   const ext = format === "bibtex" ? "bib" : format;
   return { blob: await r.blob(), filename: m?.[1] ?? `${fallback}.${ext}` };
+}
+
+// ─── Narrowing the corpus by cluster or concept ──────────────────────────────
+// The narrowing is a screening decision, written as `excluded` on this scenario's link
+// rows, so PRISMA, the extractions, the exports and the threshold curve all pick it up
+// without being told. `undecided` is the number to read before applying: articles the
+// selection cannot judge (outside the capped clustering, or with no extracted concepts).
+// They are kept unless `unassigned: "exclude"` says otherwise.
+//
+// These four go to /user-scenarios directly rather than through `scenarioBase`: that is
+// the only prefix the routes are registered under, and the lookup behind them resolves a
+// system scenario by id just as well, so the gesica prefix would only produce a 404.
+
+export interface SubsetSelection {
+  clusters?: number[];
+  concepts?: string[];                       // "type:label", the map's canonical English
+  concept_mode?: "any" | "all";
+  combine?: "any" | "all";
+  unassigned?: "keep" | "exclude";
+  reason?: string;
+}
+
+export interface SubsetPlan {
+  relevant: number;
+  keep: number;
+  exclude: number;
+  undecided: number;
+  by_dimension: Record<string, { in: number; out: number; unknown: number }>;
+  combine: string;
+  unassigned: string;
+  reason: string;
+  meta: Record<string, any>;
+  exclude_sample: number[];
+  undecided_sample: number[];
+  applied?: number;
+  status?: string;
+  caveat?: string;
+  message?: string;
+}
+
+export interface SubsetState {
+  scenario_id: string;
+  narrowed: boolean;
+  excluded_by_scope: number;
+  steps: Array<{ reason: string; articles: number; applied_at: string | null }>;
+}
+
+export async function previewScenarioSubset(
+  scenarioId: string, selection: SubsetSelection,
+): Promise<SubsetPlan> {
+  const r = await safeFetch(`${API_BASE_URL}/user-scenarios/${scenarioId}/subset/preview`, {
+    method: 'POST',
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(selection),
+  });
+  if (!r.ok) throw new Error((await _detail(r)) || httpMessage(r.status));
+  return r.json();
+}
+
+export async function applyScenarioSubset(
+  scenarioId: string, selection: SubsetSelection,
+): Promise<SubsetPlan> {
+  const r = await safeFetch(`${API_BASE_URL}/user-scenarios/${scenarioId}/subset/apply`, {
+    method: 'POST',
+    headers: authHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify(selection),
+  });
+  if (!r.ok) throw new Error((await _detail(r)) || httpMessage(r.status));
+  return r.json();
+}
+
+export async function fetchScenarioSubsetState(scenarioId: string): Promise<SubsetState> {
+  const r = await safeFetch(`${API_BASE_URL}/user-scenarios/${scenarioId}/subset`);
+  if (!r.ok) throw new Error(httpMessage(r.status));
+  return r.json();
+}
+
+export async function undoScenarioSubset(
+  scenarioId: string, reason?: string,
+): Promise<{ restored: number; status: string }> {
+  const qs = reason ? `?reason=${encodeURIComponent(reason)}` : '';
+  const r = await safeFetch(`${API_BASE_URL}/user-scenarios/${scenarioId}/subset/undo${qs}`, {
+    method: 'POST', headers: authHeaders(),
+  });
+  if (!r.ok) throw new Error(httpMessage(r.status));
+  return r.json();
+}
+
+/** The API's own `detail` when it has one: "cluster 42 unknown" is worth more to the
+ *  reader than "404". */
+async function _detail(r: Response): Promise<string> {
+  try {
+    const body = await r.json();
+    return typeof body?.detail === "string" ? body.detail : "";
+  } catch {
+    return "";
+  }
 }
 
 /** One cluster's articles. Complete for that cluster; the clustering itself is a

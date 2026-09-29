@@ -659,6 +659,18 @@ export const fr = {
       journal: "Revue :",
       directLink: "Lien direct",
     },
+    subset: {
+      title: "Restreindre le corpus à cette sélection",
+      pickSome: "Cochez les groupes à garder. Tout le reste sort du corpus, et peut être remis.",
+      summary: "{keep} articles gardés sur {relevant} ; {exclude} sortent du corpus.",
+      unjudged: "Écarter aussi les {n} articles que cette sélection ne sait pas juger (hors du clustering, ou sans concepts extraits). Ils sont gardés tant que vous ne cochez pas.",
+      caveat: "Exclure ici n'exclut que pour ce scénario, et cela apparaît dans le PRISMA avec son motif. Toutes les extractions portent ensuite sur ce qui reste.",
+      apply: "Exclure {n} articles",
+      nothingToDo: "Cette sélection ne retire rien",
+      inForce: "{n} articles sont actuellement hors périmètre :",
+      undo: "Annuler la restriction",
+      error: "La restriction n'a pas pu être calculée.",
+    },
     clustering: {
       title: "Clustering & Topic Modelling Avancé",
       subtitle:
@@ -754,6 +766,7 @@ export const fr = {
       rescued: "Repêchés (sous le seuil, inclus manuellement)",
       vetoed: "Écartés (au-dessus du seuil, exclus manuellement)",
       screeningComplete: "Screening terminé",
+      exclusionReasons: "Motifs d'exclusion",
       yes: "Oui",
       inProgress: "En cours",
       stage4: "Étape 4 : Synthèse des preuves",
