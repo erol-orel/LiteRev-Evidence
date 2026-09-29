@@ -2340,6 +2340,16 @@ function CorpusSection({ scenarioId, threshold }: { scenarioId: string; detail: 
                 {data.above_threshold} {t("scenarioDetail.corpus.aboveThreshold")}
               </span>
             )}
+            {/* Le badge ci-dessus compte les SCORES. Depuis qu'on peut restreindre la
+                portée, des articles au-dessus du seuil peuvent être hors périmètre, et
+                « 291 au-dessus du seuil » se lisait comme « 291 alimentent les analyses »
+                alors qu'elles en lisaient 190. Le vrai nombre vient du serveur : le
+                déduire d'une soustraction oubliait les articles repêchés sous le seuil. */}
+            {data.relevant !== undefined && data.relevant !== data.above_threshold && (
+              <span className="rounded-full bg-gold-400/10 border border-gold-400/30 px-3 py-1 text-[10px] font-semibold text-gold-300">
+                {t("scenarioDetail.corpus.relevantUsed").replace("{n}", data.relevant.toLocaleString())}
+              </span>
+            )}
             {(() => {
               const below = data.below_threshold
                 ?? Math.max(0, data.total - (data.above_threshold ?? 0) - (data.unscored ?? 0));
@@ -5589,6 +5599,16 @@ function ThresholdCurvePanel({ scenarioId, onPick }: { scenarioId: string; onPic
             {data.scoring_in_progress && (
               <p className="text-gold-400/70">{t("scenarioDetail.seuil.curve.scoringNote")}</p>
             )}
+            {/* Un découpage par clusters ou concepts n'a jugé que les articles pertinents
+                au moment où il a été posé. Sous ce seuil, la courbe propose des articles
+                que la sélection n'a jamais vus, et elle le proposait sans le dire. */}
+            {data.scope && data.scope.judged_above_threshold !== null && (
+              <p className="text-gold-400/70">
+                {t("scenarioDetail.seuil.curve.scopeNote")
+                  .replace("{n}", data.scope.excluded_by_scope.toLocaleString())
+                  .replace("{thr}", data.scope.judged_above_threshold.toFixed(2))}
+              </p>
+            )}
           </div>
 
           {rows.length === 0 ? (
@@ -5611,13 +5631,14 @@ function ThresholdCurvePanel({ scenarioId, onPick }: { scenarioId: string; onPic
                       <td className="py-1 pr-3 font-mono text-brand-300">{p.threshold.toFixed(2)}</td>
                       <td className="py-1 pr-3 font-mono text-white/80">
                         {p.kept.toLocaleString()}
-                        {p.requested === null
-                          ? <span className="ml-1 text-white/30">{t("scenarioDetail.seuil.curve.currentTag")}</span>
-                          : p.exact === false
-                            ? <span className="ml-1 text-gold-400/70">
-                                {t("scenarioDetail.seuil.curve.tieTag").replace("{n}", String(p.requested))}
-                              </span>
-                            : null}
+                        {p.is_current && (
+                          <span className="ml-1 text-white/30">{t("scenarioDetail.seuil.curve.currentTag")}</span>
+                        )}
+                        {p.exact === false && (
+                          <span className="ml-1 text-gold-400/70">
+                            {t("scenarioDetail.seuil.curve.tieTag").replace("{n}", String(p.requested))}
+                          </span>
+                        )}
                       </td>
                       <td className="py-1 pr-3 font-mono">{p.with_parameter_kept.toLocaleString()}</td>
                       <td className={`py-1 pr-3 font-mono ${p.with_parameter_cut > 0 ? "text-gold-400/70" : "text-white/30"}`}>

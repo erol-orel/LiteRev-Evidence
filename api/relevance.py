@@ -782,6 +782,8 @@ def threshold_curve(rows: list[tuple[float, bool]], included: int = 0, targets=_
         cum[i + 1] = cum[i] + (1 if p else 0)
     scores = [s for s, _ in rows]
 
+    here = _floor4(current) if current is not None else None
+
     def _point(thr: float, label: int | None) -> dict:
         # Compté AU SEUIL RENVOYÉ, pas au score brut : le chiffre affiché est celui que
         # donnera le curseur une fois posé là. Tous les ex aequo passent, comme en SQL.
@@ -791,6 +793,11 @@ def threshold_curve(rows: list[tuple[float, bool]], included: int = 0, targets=_
             "threshold": thr,
             "kept": kept_scored + included,
             "kept_scored": kept_scored,
+            # « Où j'en suis » est une propriété du point, pas une ligne à part : quand une
+            # cible du barème tombe exactement sur le seuil courant, le point n'était
+            # ajouté qu'une fois, étiqueté par la cible, et l'interface n'avait plus rien
+            # pour dire où était le curseur.
+            "is_current": here is not None and thr == here,
             "requested": label,
             # None = « sans objet » (point du seuil courant, personne n'a demandé de
             # nombre) ; False = on a visé et les ex aequo ont fait rater la cible.
@@ -814,13 +821,24 @@ def threshold_curve(rows: list[tuple[float, bool]], included: int = 0, targets=_
             continue                            # deux cibles tombent dans le même paquet
         seen.add(thr)
         out.append(_point(thr, t))
-    if current is not None:
-        cur = _floor4(current)
-        if cur not in seen:
-            seen.add(cur)
-            out.append(_point(cur, None))
+    if here is not None and here not in seen:
+        seen.add(here)
+        out.append(_point(here, None))
     out.sort(key=lambda p: -p["threshold"])
     return out
+
+
+def _scope_note(scenario_id: str) -> dict[str, Any] | None:
+    """Le découpage en vigueur, ou None. Lazy : `subsets` se charge après `relevance`.
+    Silencieux en cas d'échec : la courbe reste utile sans cette mise en garde, elle
+    n'a pas à tomber avec elle."""
+    try:
+        from .subsets import scope_state
+        st = scope_state(scenario_id)
+        return {k: st[k] for k in ("excluded_by_scope", "judged_above_threshold")} if st["narrowed"] else None
+    except Exception as e:                                   # pragma: no cover - défensif
+        logger.warning(f"threshold-curve scope note {scenario_id}: {e}")
+        return None
 
 
 @app.get("/scenarios/{scenario_id}/threshold-curve")
@@ -862,6 +880,11 @@ def get_threshold_curve(scenario_id: str, target: int | None = None) -> dict[str
         "reachable": {"min": included + 1, "max": len(rows) + included} if rows else None,
         "with_parameter_total": sum(1 for _, p in rows if p),
         "scoring_in_progress": _RERANK_JOBS.get(scenario_id, {}).get("status") == "running",
+        # Un découpage par clusters ou par concepts ne juge que les articles pertinents AU
+        # MOMENT où il est posé. Descendre le seuil sous cette frontière fait donc rentrer
+        # des articles que la sélection n'a jamais vus, et la courbe les propose avec le
+        # même aplomb que les autres. Elle doit dire à partir d'où elle ment par omission.
+        "scope": _scope_note(scenario_id),
         "curve": curve,
     }
     if target is not None:
