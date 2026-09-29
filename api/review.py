@@ -12,7 +12,7 @@ from typing import Any
 from fastapi import Depends, HTTPException, Query
 from sqlalchemy import text
 
-from .core import app, engine, require_api_key
+from .core import app, engine, logger, require_api_key
 from .scenario_store import _get_user_scenario_or_404
 from .search import _load_prisma_identification, _reconcile_prisma_identification
 from .double_blind import _write_ars_screening
@@ -202,6 +202,34 @@ def get_user_scenario_prisma(
     with_fulltext   = int(stats["with_fulltext"] or 0)
     embedded        = int(stats["embedded"] or 0)
 
+    # ── Pourquoi les exclus ont été exclus ───────────────────────────────────
+    # `manually_excluded` est un total, et un total ne s'écrit pas dans une section
+    # Méthodes. Depuis qu'un relecteur peut restreindre la portée d'un coup (par cluster
+    # ou par concept), l'essentiel des exclusions peut venir d'UNE décision de périmètre :
+    # sans le motif, un lecteur du PRISMA voit 1 240 articles écartés sans savoir que
+    # c'est une seule règle, ni laquelle.
+    #
+    # C'est un DÉTAIL en plus des chiffres du PRISMA : si sa requête échoue (colonne
+    # absente sur un déploiement ancien), le détail disparaît et le reste du diagramme
+    # s'affiche. Faire tomber tout l'onglet PRISMA pour une ligne d'explication serait
+    # échanger l'essentiel contre l'accessoire.
+    excluded_by_reason: list[dict[str, Any]] = []
+    try:
+        with engine.connect() as conn:
+            _reasons = conn.execute(text("""
+                SELECT COALESCE(NULLIF(TRIM(ars.screening_reason), ''), '(sans motif)') AS reason,
+                       COUNT(*) AS n
+                FROM article_scenarios ars
+                JOIN literature_document d ON d.id = ars.document_id
+                WHERE ars.scenario_id = :sid
+                  AND d.is_duplicate IS NOT TRUE
+                  AND COALESCE(ars.screening_status, d.screening_status) = 'excluded'
+                GROUP BY 1 ORDER BY n DESC LIMIT 12
+            """), {"sid": scenario_id}).mappings().all()
+        excluded_by_reason = [{"reason": r["reason"], "articles": int(r["n"])} for r in _reasons]
+    except Exception as _e_reasons:
+        logger.warning(f"prisma exclusion reasons {scenario_id}: {_e_reasons}")
+
     # Evidence = (above threshold NOT vetoed) + manually rescued
     evidence_total  = (above - man_vetoed) + man_rescued
     screening_done  = (man_included + man_excluded) > 0
@@ -303,6 +331,9 @@ def get_user_scenario_prisma(
             "screening_complete": screening_done,
             "manually_rescued": man_rescued,
             "manually_vetoed": man_vetoed,
+            # Le détail des motifs : sans lui, une restriction de portée appliquée en un
+            # clic se lit comme mille décisions article par article.
+            "excluded_by_reason": excluded_by_reason,
         },
         "evidence": {
             "total": evidence_total,

@@ -661,6 +661,18 @@ export const en: Translations = {
       journal: "Journal:",
       directLink: "Direct link",
     },
+    subset: {
+      title: "Narrow the corpus to this selection",
+      pickSome: "Tick the groups you want to keep. Everything else leaves the corpus, and can be brought back.",
+      summary: "{keep} articles kept out of {relevant}; {exclude} leave the corpus.",
+      unjudged: "Also drop the {n} articles this selection cannot judge (outside the clustering, or with no extracted concepts). They are kept unless you tick this.",
+      caveat: "Excluded here means excluded for this scenario only, and it shows in the PRISMA with its reason. Every extraction then runs on what is left.",
+      apply: "Exclude {n} articles",
+      nothingToDo: "This selection removes nothing",
+      inForce: "{n} articles are currently out of scope:",
+      undo: "Undo the narrowing",
+      error: "The narrowing could not be computed.",
+    },
     clustering: {
       title: "Advanced Clustering & Topic Modelling",
       subtitle:
@@ -756,6 +768,7 @@ export const en: Translations = {
       rescued: "Rescued (below threshold, manually included)",
       vetoed: "Vetoed (above threshold, manually excluded)",
       screeningComplete: "Screening complete",
+      exclusionReasons: "Why they were excluded",
       yes: "Yes",
       inProgress: "In progress",
       stage4: "Stage 4: Evidence Synthesis",

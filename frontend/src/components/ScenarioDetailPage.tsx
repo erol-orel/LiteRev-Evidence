@@ -66,6 +66,13 @@ import {
   patchScenarioSettings,
   fetchThresholdCurve,
   type ThresholdCurve,
+  previewScenarioSubset,
+  applyScenarioSubset,
+  fetchScenarioSubsetState,
+  undoScenarioSubset,
+  type SubsetSelection,
+  type SubsetPlan,
+  type SubsetState,
   triggerRerank,
   getRerankStatus,
   fetchKnowledgeGraph,
@@ -2736,6 +2743,9 @@ function ClusteringSection({ scenarioId }: { scenarioId: string }) {
   const [polling, setPolling] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [selectedCluster, setSelectedCluster] = useState<number | null>(null);
+  // Les groupes cochés sont ceux qu'on GARDE : c'est le sens de la case, et c'est aussi
+  // ce que l'API attend (`clusters` = la sélection retenue, le reste sort).
+  const [keptClusters, setKeptClusters] = useState<Set<number>>(new Set());
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const stopPolling = useCallback(() => {
@@ -2862,26 +2872,47 @@ function ClusteringSection({ scenarioId }: { scenarioId: string }) {
                   <span className="text-[10px] font-bold uppercase tracking-wider text-white/50 block px-1">{t("scenarioDetail.clustering.selectGroup")}</span>
                   <div className="space-y-1 max-h-64 overflow-y-auto pr-1">
                     {data.clusters.map((c) => (
-                      <button
+                      <div
                         key={c.cluster_id}
-                        onClick={() => setSelectedCluster(c.cluster_id)}
-                        className={`w-full text-left rounded-xl px-3 py-2 text-xs transition flex items-center justify-between border ${
+                        className={`w-full rounded-xl px-3 py-2 text-xs transition flex items-center justify-between border gap-2 ${
                           selectedCluster === c.cluster_id
                             ? "border-brand-500/30 bg-brand-500/10 text-brand-300"
                             : "border-transparent text-white/50 hover:text-white hover:bg-white/3"
                         }`}
                       >
-                        <div className="flex items-center gap-2">
-                          <span
-                            className="h-2 w-2 rounded-full shrink-0"
-                            style={{ backgroundColor: getClusterColor(c.cluster_id, c.is_noise) }}
-                          />
-                          <span className="font-medium truncate max-w-[150px]">{c.cluster_name}</span>
-                        </div>
-                        <span className="text-[10px] font-mono opacity-70 bg-white/5 rounded px-1.5 py-0.5">{c.n_docs} {t("scenarioDetail.clustering.articles")}</span>
-                      </button>
+                        {/* Cocher = garder ce groupe dans le corpus ; cliquer le nom =
+                            l'afficher. Deux gestes distincts sur la même ligne. */}
+                        <input
+                          type="checkbox"
+                          aria-label={c.cluster_name}
+                          checked={keptClusters.has(c.cluster_id)}
+                          onChange={e => setKeptClusters(prev => {
+                            const next = new Set(prev);
+                            if (e.target.checked) next.add(c.cluster_id); else next.delete(c.cluster_id);
+                            return next;
+                          })}
+                          className="accent-brand-500 shrink-0"
+                        />
+                        <button onClick={() => setSelectedCluster(c.cluster_id)}
+                          className="flex-1 text-left flex items-center justify-between gap-2 min-w-0">
+                          <div className="flex items-center gap-2 min-w-0">
+                            <span
+                              className="h-2 w-2 rounded-full shrink-0"
+                              style={{ backgroundColor: getClusterColor(c.cluster_id, c.is_noise) }}
+                            />
+                            <span className="font-medium truncate">{c.cluster_name}</span>
+                          </div>
+                          <span className="text-[10px] font-mono opacity-70 bg-white/5 rounded px-1.5 py-0.5 shrink-0">{c.n_docs} {t("scenarioDetail.clustering.articles")}</span>
+                        </button>
+                      </div>
                     ))}
                   </div>
+                  <SubsetNarrowPanel
+                    scenarioId={scenarioId}
+                    selection={{ clusters: [...keptClusters].sort((a, b) => a - b) }}
+                    enabled={keptClusters.size > 0}
+                    onApplied={() => { setKeptClusters(new Set()); load(); }}
+                  />
                 </div>
               </div>
 
@@ -2966,6 +2997,129 @@ function ClusteringSection({ scenarioId }: { scenarioId: string }) {
 const CLUSTER_VIVID = [
   "#34d399","#38bdf8","#a78bfa","#fbbf24","#f472b6","#60a5fa","#2dd4bf","#c084fc","#fb7185",
 ];
+/** Restreindre le corpus à une sélection de groupes ou de concepts.
+ *
+ * Trois choses doivent être dites avant qu'on clique, et aucune n'est cosmétique :
+ * combien d'articles restent, combien sortent, et combien la sélection ne sait PAS juger.
+ * Ce dernier nombre est celui qui trompe : le clustering est plafonné et la carte des
+ * concepts ne couvre que les articles dont les concepts ont été extraits, donc sur un gros
+ * corpus une sélection « garder ces deux groupes » ne dit rien de milliers d'articles. Ils
+ * sont gardés par défaut ; les exclure est une case à cocher, jamais un effet de bord. */
+function SubsetNarrowPanel({ scenarioId, selection, enabled, onApplied }: {
+  scenarioId: string;
+  selection: SubsetSelection;
+  enabled: boolean;
+  onApplied: () => void;
+}) {
+  const { t } = useI18n();
+  const [plan, setPlan] = React.useState<SubsetPlan | null>(null);
+  const [state, setState] = React.useState<SubsetState | null>(null);
+  const [dropUnjudged, setDropUnjudged] = React.useState(false);
+  const [busy, setBusy] = React.useState(false);
+  const [error, setError] = React.useState<string | null>(null);
+  const key = JSON.stringify(selection);
+
+  const refreshState = React.useCallback(() => {
+    fetchScenarioSubsetState(scenarioId).then(setState).catch(() => {});
+  }, [scenarioId]);
+  React.useEffect(() => { refreshState(); }, [refreshState]);
+
+  React.useEffect(() => {
+    if (!enabled) { setPlan(null); setError(null); return; }
+    let live = true;
+    setError(null);
+    previewScenarioSubset(scenarioId, { ...selection, unassigned: dropUnjudged ? "exclude" : "keep" })
+      .then(p => { if (live) setPlan(p); })
+      .catch(e => { if (live) { setPlan(null); setError(e?.message || t("scenarioDetail.subset.error")); } });
+    return () => { live = false; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [scenarioId, key, dropUnjudged, enabled, t]);
+
+  const apply = async () => {
+    if (!plan || plan.exclude === 0) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await applyScenarioSubset(scenarioId, { ...selection, unassigned: dropUnjudged ? "exclude" : "keep" });
+      setPlan(null);
+      refreshState();
+      onApplied();
+    } catch (e: any) {
+      setError(e?.message || t("scenarioDetail.subset.error"));
+    }
+    setBusy(false);
+  };
+
+  const undo = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      await undoScenarioSubset(scenarioId);
+      refreshState();
+      onApplied();
+    } catch (e: any) {
+      setError(e?.message || t("scenarioDetail.subset.error"));
+    }
+    setBusy(false);
+  };
+
+  return (
+    <div className="rounded-xl border border-white/8 bg-black/20 px-3 py-2.5 space-y-2 text-[11px]">
+      <div className="flex items-center gap-1.5 font-medium text-white/70">
+        <Sliders size={11} className="text-brand-400" />
+        {t("scenarioDetail.subset.title")}
+      </div>
+
+      {state?.narrowed && (
+        <div className="rounded-lg border border-gold-400/20 bg-gold-400/5 px-2 py-1.5 space-y-1">
+          <p className="text-gold-300/90">
+            {t("scenarioDetail.subset.inForce").replace("{n}", state.excluded_by_scope.toLocaleString())}
+          </p>
+          {state.steps.map(s => (
+            <p key={s.reason} className="text-[10px] text-white/40 truncate" title={s.reason}>
+              {s.articles.toLocaleString()} · {s.reason}
+            </p>
+          ))}
+          <button onClick={undo} disabled={busy}
+            className="rounded-md border border-white/10 bg-white/5 hover:bg-white/10 px-2 py-0.5 text-white/60 hover:text-white/90 transition disabled:opacity-50">
+            {t("scenarioDetail.subset.undo")}
+          </button>
+        </div>
+      )}
+
+      {!enabled && <p className="text-white/35">{t("scenarioDetail.subset.pickSome")}</p>}
+      {error && <p className="text-red-300">{error}</p>}
+
+      {enabled && plan && !error && (
+        <>
+          <p className="text-white/60">
+            {t("scenarioDetail.subset.summary")
+              .replace("{keep}", plan.keep.toLocaleString())
+              .replace("{relevant}", plan.relevant.toLocaleString())
+              .replace("{exclude}", plan.exclude.toLocaleString())}
+          </p>
+          {plan.undecided > 0 && (
+            <label className="flex items-start gap-1.5 text-gold-400/80 cursor-pointer">
+              <input type="checkbox" checked={dropUnjudged}
+                onChange={e => setDropUnjudged(e.target.checked)}
+                className="accent-gold-400 mt-0.5 shrink-0" />
+              <span>{t("scenarioDetail.subset.unjudged").replace("{n}", plan.undecided.toLocaleString())}</span>
+            </label>
+          )}
+          <p className="text-[10px] text-white/30">{t("scenarioDetail.subset.caveat")}</p>
+          <button onClick={apply} disabled={busy || plan.exclude === 0}
+            className="flex items-center gap-1 rounded-lg bg-brand-500/15 hover:bg-brand-500/25 border border-brand-500/20 text-brand-300 px-2.5 py-1 font-medium transition disabled:opacity-40">
+            {busy ? <Loader2 size={10} className="animate-spin" /> : <Sliders size={10} />}
+            {plan.exclude === 0
+              ? t("scenarioDetail.subset.nothingToDo")
+              : t("scenarioDetail.subset.apply").replace("{n}", plan.exclude.toLocaleString())}
+          </button>
+        </>
+      )}
+    </div>
+  );
+}
+
 function getClusterColor(clusterId: number, isNoise: boolean): string {
   if (isNoise) return "#94a3b8";
   return CLUSTER_VIVID[clusterId % CLUSTER_VIVID.length];
@@ -3738,6 +3892,23 @@ function PrismaSection({ scenarioId }: { scenarioId: string }) {
             <PrismaRow label={t("scenarioDetail.prisma.vetoed")} value={num(mc.manually_vetoed)} accent="text-red-400" />
             <PrismaRow label={t("scenarioDetail.prisma.screeningComplete")} value={mc.screening_complete ? t("scenarioDetail.prisma.yes") : t("scenarioDetail.prisma.inProgress")} />
           </div>
+          {/* Le POURQUOI des exclusions. Une restriction de portée appliquée en un clic
+              peut représenter l'essentiel du total : sans le motif, elle se lit comme un
+              millier de décisions article par article, et ne peut pas s'écrire dans une
+              section Méthodes. */}
+          {(mc.excluded_by_reason?.length ?? 0) > 0 && (
+            <div className="space-y-0.5 border-t border-white/5 pt-2">
+              <p className="text-[9px] font-bold uppercase tracking-wider text-white/40">
+                {t("scenarioDetail.prisma.exclusionReasons")}
+              </p>
+              {mc.excluded_by_reason!.map(r => (
+                <div key={r.reason} className="flex items-start justify-between gap-2 text-[10px]">
+                  <span className="text-white/50 break-words min-w-0">{r.reason}</span>
+                  <span className="font-mono text-white/70 shrink-0">{r.articles.toLocaleString()}</span>
+                </div>
+              ))}
+            </div>
+          )}
         </PrismaStageCard>
 
         <PrismaConnector />
@@ -4022,6 +4193,8 @@ function ConceptMapView({ scenarioId }: { scenarioId: string }) {
   const [hiddenNodes, setHiddenNodes] = React.useState<Set<number>>(new Set());
   const [minArticles, setMinArticles] = React.useState(1);
   const [filtersReady, setFiltersReady] = React.useState(false);
+  // Restreindre le corpus invalide la carte en cache : elle décrivait le corpus d'avant.
+  const [reloadKey, setReloadKey] = React.useState(0);
 
   React.useEffect(() => {
     setFiltersReady(false);
@@ -4072,7 +4245,7 @@ function ConceptMapView({ scenarioId }: { scenarioId: string }) {
     setLoading(true); setError(null); setSelected(null); setShowAll(false);
     load();
     return () => { cancelled = true; if (timer) clearTimeout(timer); };
-  }, [scenarioId]);
+  }, [scenarioId, reloadKey]);
 
   if (loading && !data) return <LoadingSpinner text={t("scenarioDetail.knowledgeGraph.calculating")} />;
   if (error || !data) return <ErrorBox message={error ?? t("scenarioDetail.common.errorKnowledgeGraph")} />;
@@ -4228,6 +4401,19 @@ function ConceptMapView({ scenarioId }: { scenarioId: string }) {
             format, { mode: "any" })}
         />
       </div>
+
+      {/* Composer la carte est déjà une façon de dire ce qui compte : la restreindre au
+          corpus est le geste suivant. La sélection est l'UNION des concepts visibles,
+          exactement ce que l'écran montre et ce que l'export produit. */}
+      <SubsetNarrowPanel
+        scenarioId={scenarioId}
+        selection={{
+          concepts: data.nodes.filter(n => shown.has(n.id)).map(n => `${n.type}:${n.label.en}`),
+          concept_mode: "any",
+        }}
+        enabled={shown.size > 0 && shown.size < data.nodes.length}
+        onApplied={() => setReloadKey(k => k + 1)}
+      />
 
       {types.length === 0 && (
         <p className="rounded-xl border border-white/10 bg-white/3 px-3 py-2 text-xs text-white/50">
