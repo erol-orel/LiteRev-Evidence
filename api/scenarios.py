@@ -16,7 +16,7 @@ from sqlalchemy import text
 
 from .core import _msg, _norm_lang, app, engine, logger, require_api_key
 from .documents import _strategy_is_degraded
-from .scenario_store import _get_scenario_threshold, _get_user_scenario_or_404
+from .scenario_store import _get_scenario_threshold, _get_user_scenario_or_404, relevant_gate_sql
 from .schema_boot import _exec_ddl_isolated
 from .search import (
     LIVE_MAX_PER_SOURCE,
@@ -924,6 +924,18 @@ def get_user_scenario_corpus(
                 COUNT(*) AS total,
                 COUNT(*) FILTER (WHERE ars.similarity_score >= :threshold) AS above_threshold,
                 COUNT(*) FILTER (WHERE ars.similarity_score IS NULL) AS unscored,
+                -- « au-dessus du seuil » est un partage par le SCORE, et c'est devenu
+                -- trompeur : depuis qu'un relecteur peut restreindre la portée par
+                -- cluster ou par concept, des articles au-dessus du seuil peuvent être
+                -- hors périmètre. Le badge annonçait 291 pendant que les extractions
+                -- lisaient 190.
+                --
+                -- Le nombre qui compte est donc COMPTÉ, par la porte commune, et non
+                -- déduit de « au-dessus du seuil moins les exclus » : cette soustraction
+                -- oublie les articles repêchés à la main SOUS le seuil, qui alimentent
+                -- bel et bien les extractions. Sur un corpus réel elle donnait 178 pour
+                -- 190, et l'écart aurait été invisible.
+                COUNT(*) FILTER (WHERE {relevant_gate_sql(doc='d', link='ars', thr=':threshold')}) AS relevant,
                 COUNT(*) FILTER (WHERE :screated IS NOT NULL AND d.created_at >= :screated) AS newly_fetched,
                 COUNT(*) FILTER (WHERE EXISTS (
                     SELECT 1 FROM document_chunk c
@@ -936,6 +948,7 @@ def get_user_scenario_corpus(
                'threshold': eff_threshold, 'screated': _screated}).mappings().first()
         total = int(counts_row["total"] or 0)
         above_threshold = int(counts_row["above_threshold"] or 0)
+        relevant = int(counts_row["relevant"] or 0)
         unscored = int(counts_row["unscored"] or 0)
         newly_fetched = int(counts_row["newly_fetched"] or 0) if _screated else None
         from_local = (total - newly_fetched) if newly_fetched is not None else None
@@ -1032,6 +1045,9 @@ def get_user_scenario_corpus(
         "above_threshold": above_threshold,
         "below_threshold": max(0, total - above_threshold - unscored),
         "unscored": unscored,
+        # Ce que les extractions lisent VRAIMENT : la porte commune, comptée. Distinct de
+        # `above_threshold`, qui n'est qu'un partage par le score.
+        "relevant": relevant,
         "from_local": from_local,
         "newly_fetched": newly_fetched,
         "docs_with_fulltext": with_fulltext,

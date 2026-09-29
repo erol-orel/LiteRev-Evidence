@@ -611,6 +611,7 @@ export const fr = {
       corpusSubtitleNoneValidated:
         "Articles sélectionnés automatiquement : aucun validé par un relecteur humain (screening)",
       aboveThreshold: "au-dessus du seuil",
+      relevantUsed: "{n} alimentent les analyses",
       belowThresholdKept: "sous le seuil (conservés)",
       unscored: "non scorés",
       scoringInProgress: " · scoring en cours…",
@@ -977,6 +978,7 @@ export const fr = {
         includedNote: "{n} articles inclus à la main : gardés quel que soit le seuil.",
         unscoredNote: "{n} articles sans score comptent comme 0 : seul un seuil de 0 les garde.",
         scoringNote: "Le scoring tourne : la courbe va encore bouger.",
+        scopeNote: "Une restriction tient {n} articles hors périmètre. Elle n'a jugé que les articles pertinents à {thr} : sous ce seuil, la courbe fait revenir des articles qu'elle n'a jamais vus.",
         colThreshold: "Seuil",
         colKept: "Articles gardés",
         colParamKept: "Dont un paramètre",

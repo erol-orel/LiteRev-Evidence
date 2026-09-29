@@ -103,10 +103,22 @@ def test_the_current_threshold_is_on_the_curve_as_a_point_nobody_asked_for():
 
 
 def test_the_current_threshold_is_not_repeated_when_a_target_already_lands_on_it():
+    """... but the point must still say it is where the slider stands. It was added only
+    once, labelled by the target, so on a corpus where a ladder target happened to land on
+    the current threshold the interface had nothing left to mark "you are here" with."""
     rows = [(0.9, True), (0.8, False), (0.7, True)]
     curve = threshold_curve(rows, 0, targets=(2,), current=0.8)
     assert [p["threshold"] for p in curve] == [0.8]
     assert curve[0]["requested"] == 2
+    assert curve[0]["is_current"] is True
+    # ... and exactly one point carries it.
+    assert sum(1 for p in threshold_curve(rows, 0, targets=(1, 2, 3), current=0.8)
+               if p["is_current"]) == 1
+
+
+def test_no_point_is_current_when_no_threshold_was_given():
+    rows = [(0.9, True), (0.8, False)]
+    assert all(p["is_current"] is False for p in threshold_curve(rows, 0, targets=(1, 2)))
 
 
 def test_the_target_asked_for_wins_the_label_over_one_from_the_standard_ladder():

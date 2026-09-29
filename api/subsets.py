@@ -24,6 +24,7 @@ line, and excluded only when the caller asks for it in so many words.
 """
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from fastapi import Depends, HTTPException
@@ -134,10 +135,16 @@ def plan_subset(
 
 
 def describe_selection(clusters: list[int] | None, cluster_names: dict[int, str] | None,
-                       concepts: list[str] | None, combine: str, unassigned: str) -> str:
+                       concepts: list[str] | None, combine: str, unassigned: str,
+                       threshold: float | None = None) -> str:
     """La phrase stockée dans `screening_reason`, donc celle que lira la PRISMA et qui
     devra tenir dans une section Méthodes. Elle nomme ce qui a été GARDÉ, pas un
-    identifiant de calcul : les numéros de cluster changent au recalcul suivant."""
+    identifiant de calcul : les numéros de cluster changent au recalcul suivant.
+
+    Elle porte AUSSI le seuil en vigueur au moment où on l'applique, parce que le
+    découpage ne juge que les articles pertinents à ce seuil-là. Abaisser le seuil ensuite
+    fait entrer des articles que la sélection n'a jamais vus, et sans cette mention rien
+    ne le rappelle : ni la PRISMA, ni la courbe du seuil, ni la personne qui relit."""
     parts: list[str] = []
     if clusters:
         names = [f"{(cluster_names or {}).get(c) or f'cluster {c}'}" for c in clusters]
@@ -146,7 +153,50 @@ def describe_selection(clusters: list[int] | None, cluster_names: dict[int, str]
         parts.append("concepts " + ", ".join(concepts))
     joined = (" et " if combine == "all" else " ou ").join(parts) if len(parts) > 1 else (parts[0] if parts else "")
     tail = "" if unassigned == "keep" else " ; articles hors projection exclus aussi"
-    return f"{SUBSET_REASON_PREFIX} hors de {joined}{tail}"[:480]
+    at = f" (seuil {float(threshold):.4g})" if threshold is not None else ""
+    return f"{SUBSET_REASON_PREFIX} hors de {joined}{tail}{at}"[:480]
+
+
+# Le seuil relu dans le motif. Un motif reste du texte libre (un relecteur peut écrire le
+# sien), donc l'absence de correspondance n'est pas une erreur : on ne sait simplement pas
+# à quel seuil ce découpage a été posé, et on le dit plutôt que d'inventer.
+_SCOPE_THRESHOLD_RE = re.compile(r"\(seuil\s+([0-9]*\.?[0-9]+)\)\s*$")
+
+
+def scope_threshold_of(reason: str | None) -> float | None:
+    """Le seuil auquel ce découpage a été appliqué, relu dans son motif. Pur."""
+    m = _SCOPE_THRESHOLD_RE.search(reason or "")
+    if not m:
+        return None
+    try:
+        return float(m.group(1))
+    except ValueError:
+        return None
+
+
+def scope_state(scenario_id: str) -> dict[str, Any]:
+    """Les découpages en vigueur : combien d'articles ils tiennent à l'écart, et le seuil
+    le plus BAS auquel l'un d'eux a été posé. Ce seuil est la frontière au-dessous de
+    laquelle plus rien n'a été jugé par la sélection."""
+    with engine.connect() as conn:
+        rows = conn.execute(text("""
+            SELECT screening_reason AS reason, COUNT(*) AS n, MAX(screened_at) AS at
+            FROM article_scenarios
+            WHERE scenario_id = :sid AND screening_status = 'excluded'
+              AND screening_reason LIKE :pfx
+            GROUP BY screening_reason
+            ORDER BY n DESC
+        """), {"sid": scenario_id, "pfx": SUBSET_REASON_PREFIX + "%"}).mappings().all()
+    steps = [{"reason": r["reason"], "articles": int(r["n"]),
+              "applied_at": r["at"].isoformat() if r["at"] else None,
+              "applied_at_threshold": scope_threshold_of(r["reason"])} for r in rows]
+    thresholds = [s["applied_at_threshold"] for s in steps if s["applied_at_threshold"] is not None]
+    return {
+        "narrowed": bool(steps),
+        "excluded_by_scope": sum(s["articles"] for s in steps),
+        "judged_above_threshold": min(thresholds) if thresholds else None,
+        "steps": steps,
+    }
 
 
 # ─── Lire les trois ingrédients dans la base ────────────────────────────────
@@ -289,7 +339,8 @@ def _build_plan(scenario_id: str, payload: dict[str, Any]) -> dict[str, Any]:
 
     plan["meta"] = meta
     plan["reason"] = describe_selection(sorted(wanted_clusters) if wanted_clusters else None,
-                                        cluster_names, concept_labels or None, combine, unassigned)
+                                        cluster_names, concept_labels or None, combine, unassigned,
+                                        threshold=threshold)
     return plan
 
 
@@ -380,25 +431,13 @@ def get_scenario_subset(scenario_id: str) -> dict[str, Any]:
     """Quel découpage est en vigueur, et combien d'articles il retient à l'écart.
 
     Une restriction de portée qui ne se voit nulle part est une restriction qu'on oublie,
-    puis qu'on lit dans un brief sans savoir qu'elle est là."""
+    puis qu'on lit dans un brief sans savoir qu'elle est là.
+
+    `judged_above_threshold` est la frontière : la sélection n'a jugé que les articles
+    pertinents à ce seuil. En descendant plus bas, on fait entrer des articles qu'elle
+    n'a jamais vus."""
     _get_user_scenario_or_404(scenario_id)
-    with engine.connect() as conn:
-        rows = conn.execute(text("""
-            SELECT screening_reason AS reason, COUNT(*) AS n, MAX(screened_at) AS at
-            FROM article_scenarios
-            WHERE scenario_id = :sid AND screening_status = 'excluded'
-              AND screening_reason LIKE :pfx
-            GROUP BY screening_reason
-            ORDER BY n DESC
-        """), {"sid": scenario_id, "pfx": SUBSET_REASON_PREFIX + "%"}).mappings().all()
-    total = sum(int(r["n"]) for r in rows)
-    return {
-        "scenario_id": scenario_id,
-        "narrowed": total > 0,
-        "excluded_by_scope": total,
-        "steps": [{"reason": r["reason"], "articles": int(r["n"]),
-                   "applied_at": r["at"].isoformat() if r["at"] else None} for r in rows],
-    }
+    return {"scenario_id": scenario_id, **scope_state(scenario_id)}
 
 
 @app.post("/user-scenarios/{scenario_id}/subset/undo")

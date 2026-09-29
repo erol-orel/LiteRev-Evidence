@@ -20,7 +20,12 @@ import pytest
 pytest.importorskip("fastapi")
 
 import main  # noqa: E402
-from api.subsets import SUBSET_REASON_PREFIX, describe_selection, plan_subset  # noqa: E402
+from api.subsets import (  # noqa: E402
+    SUBSET_REASON_PREFIX,
+    describe_selection,
+    plan_subset,
+    scope_threshold_of,
+)
 from conftest import ensure_document_columns  # noqa: E402
 
 SID = "usr-subset-test"
@@ -93,6 +98,20 @@ def test_the_stored_reason_names_the_clusters_rather_than_numbering_them():
     assert "Vector control" in reason and "dengue virus" in reason
     assert "cluster 2" not in reason
     assert "hors projection" in describe_selection([2], {2: "V"}, None, "all", "exclude")
+
+
+def test_the_reason_records_the_threshold_the_narrowing_was_applied_at():
+    """A narrowing only ever judged the articles relevant AT THAT MOMENT. Lowering the
+    threshold afterwards brings in articles it never saw, and with the threshold absent
+    from the record nothing anywhere could say where that boundary is: not PRISMA, not the
+    threshold curve, not the person rereading it next month."""
+    reason = describe_selection([0], {0: "Vector control"}, None, "all", "keep", threshold=0.6801)
+    assert reason.endswith("(seuil 0.6801)")
+    assert scope_threshold_of(reason) == 0.6801
+    # A reviewer's own free-text reason carries no threshold, and that is not an error.
+    assert scope_threshold_of("wrong population") is None
+    assert scope_threshold_of(None) is None
+    assert scope_threshold_of("scope: hors de clusters X") is None
 
 
 # ── Integration: the decision lands where the rest of the app reads ─────────
@@ -270,6 +289,48 @@ def test_the_narrowing_in_force_is_readable_instead_of_invisible(seeded):
     assert state["narrowed"] is True and state["excluded_by_scope"] == 2
     assert len(state["steps"]) == 1 and state["steps"][0]["articles"] == 2
     assert "Transmission" in state["steps"][0]["reason"]
+    assert state["steps"][0]["applied_at_threshold"] == 0.45
+    assert state["judged_above_threshold"] == 0.45
+
+
+def test_the_corpus_reports_what_the_analyses_read_not_only_what_scores_high(seeded):
+    """"N above the threshold" counts SCORES. Once a narrowing can be in force, articles
+    above the threshold can be out of scope, and the badge said 291 while the extractions
+    read 190.
+
+    The count is taken from the shared gate, never derived as "above the threshold minus
+    the excluded": that subtraction drops the articles a reviewer rescued BELOW the
+    threshold, which do feed the extractions. On a real corpus it gave 178 for 190."""
+    before = _client().get(f"/user-scenarios/{SID}/corpus").json()
+    assert before["relevant"] == main.corpus_digest(SID, 0.45)["n_articles"] == 5
+    _client().post(f"/user-scenarios/{SID}/subset/apply", json={"clusters": [0]}, headers=HDR)
+    after = _client().get(f"/user-scenarios/{SID}/corpus").json()
+    assert after["above_threshold"] == before["above_threshold"]      # the scores did not move
+    assert after["relevant"] == 3 == main.corpus_digest(SID, 0.45)["n_articles"]
+    # Now the case where the subtraction really bites: rescue 9605 by hand, BELOW the
+    # threshold. It feeds the extractions and no arithmetic over above-threshold counts
+    # can see it.
+    with seeded.cursor() as cur:
+        cur.execute("UPDATE article_scenarios SET similarity_score = 0.10, "
+                    "screening_status = 'included' WHERE scenario_id = %s AND document_id = 9605",
+                    (SID,))
+    r = _client().get(f"/user-scenarios/{SID}/corpus").json()
+    naive = r["above_threshold"] - 3                  # 9603, 9604 narrowed, 9606 by the reviewer
+    assert naive == 2
+    assert r["relevant"] == 3 == main.corpus_digest(SID, 0.45)["n_articles"] > naive
+
+
+def test_the_threshold_curve_warns_that_a_narrowing_judged_only_part_of_the_corpus(seeded):
+    """The trap a real walkthrough exposed. After narrowing by cluster at threshold 0.45,
+    the curve happily offers thresholds BELOW it, which bring back articles the narrowing
+    never judged, with nothing to say so. The curve now carries the boundary."""
+    assert _client().get(f"/scenarios/{SID}/threshold-curve").json()["scope"] is None
+    _client().post(f"/user-scenarios/{SID}/subset/apply", json={"clusters": [0]}, headers=HDR)
+    scope = _client().get(f"/scenarios/{SID}/threshold-curve").json()["scope"]
+    assert scope == {"excluded_by_scope": 2, "judged_above_threshold": 0.45}
+    # Undoing takes the warning away with the narrowing.
+    _client().post(f"/user-scenarios/{SID}/subset/undo", headers=HDR)
+    assert _client().get(f"/scenarios/{SID}/threshold-curve").json()["scope"] is None
 
 
 def test_a_selection_that_changes_nothing_says_so_instead_of_writing(seeded):

@@ -988,6 +988,11 @@ export interface ScenarioCorpus {
   scenario_id: string;
   total: number;
   above_threshold?: number;
+  /** What the extractions actually read: the shared relevance gate, counted. Distinct
+   *  from `above_threshold`, which is only a split by score: a narrowing can put
+   *  above-threshold articles out of scope, and a reviewer can rescue articles below it.
+   *  Never derive one from the other. */
+  relevant?: number;
   below_threshold?: number;
   unscored?: number;
   from_local?: number | null;
@@ -2250,6 +2255,9 @@ export interface ThresholdCurvePoint {
   threshold: number;
   kept: number;
   kept_scored: number;
+  /** Where the slider stands today. A property of the point, not a row of its own: a
+   *  ladder target can land exactly on it, and then there is only one point. */
+  is_current: boolean;
   requested: number | null;
   exact: boolean | null;
   with_parameter_kept: number;
@@ -2268,6 +2276,10 @@ export interface ThresholdCurve {
   reachable: { min: number; max: number } | null;
   with_parameter_total: number;
   scoring_in_progress: boolean;
+  /** A cluster or concept narrowing in force. It only ever judged the articles relevant
+   *  at `judged_above_threshold`, so a threshold below that brings back articles it never
+   *  saw. Null when nothing is narrowed. */
+  scope: { excluded_by_scope: number; judged_above_threshold: number | null } | null;
   curve: ThresholdCurvePoint[];
   suggestion?: ThresholdCurvePoint | null;
 }
@@ -2850,7 +2862,12 @@ export interface SubsetState {
   scenario_id: string;
   narrowed: boolean;
   excluded_by_scope: number;
-  steps: Array<{ reason: string; articles: number; applied_at: string | null }>;
+  /** The boundary: the narrowing only judged articles relevant at this threshold. */
+  judged_above_threshold: number | null;
+  steps: Array<{
+    reason: string; articles: number; applied_at: string | null;
+    applied_at_threshold: number | null;
+  }>;
 }
 
 export async function previewScenarioSubset(
