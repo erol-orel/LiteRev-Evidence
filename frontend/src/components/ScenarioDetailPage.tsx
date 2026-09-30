@@ -6360,13 +6360,17 @@ function VizTab({ scenarioId }: { scenarioId: string }) {
 /** VariablesModelTab : Variables & Données + Modèle prédictif (sous-tabs) */
 function VariablesModelTab({ scenarioId, detail, initialSub }: { scenarioId: string; detail: ScenarioDetail; initialSub?: "variables" | "monitor" }) {
   const { t } = useI18n();
-  const [sub, setSub] = React.useState<"variables" | "monitor" | "seir">(initialSub ?? "seir");
-  // Onglet SEIR TOUJOURS affiché et en PREMIER. Quand la projection n'est pas applicable
-  // (maladie non transmissible / aucune variable dérivable par SEIR), SeirModelView
-  // l'énonce clairement plutôt que de masquer l'onglet.
+  const [sub, setSub] = React.useState<"variables" | "monitor" | "seir">(initialSub ?? "variables");
+  // L'ordre suit celui du travail : on établit d'abord les données et les variables, on
+  // en tire ensuite une projection SEIR, et le modèle prédictif vient en dernier parce
+  // qu'il se nourrit des deux. SEIR ouvrait la section, ce qui plaçait une projection
+  // avant les variables dont elle dépend.
+  // Il reste TOUJOURS affiché : quand la projection n'est pas applicable (maladie non
+  // transmissible, aucune variable dérivable par SEIR), SeirModelView le dit plutôt que
+  // l'onglet ne disparaisse.
   const SUB = [
-    { key: "seir" as const, label: t("scenarioDetail.variablesModelTab.subSeir"), icon: <TrendingUp size={12} /> },
     { key: "variables" as const, label: t("scenarioDetail.variablesModelTab.subData"), icon: <Database size={12} /> },
+    { key: "seir" as const, label: t("scenarioDetail.variablesModelTab.subSeir"), icon: <TrendingUp size={12} /> },
     { key: "monitor" as const, label: t("scenarioDetail.variablesModelTab.subModel"), icon: <Brain size={12} /> },
   ];
   return (
