@@ -3245,8 +3245,15 @@ export default function App() {
                               <span className="font-semibold text-white">{total.toLocaleString()}</span>{" "}
                               {total > 1 ? t("search.documents") : t("search.document")} {total > 1 ? t("search.relevantPlural") : t("search.relevant")}
                               {" "}· {totalPages > 1 ? `${t("search.page")} ${page}/${totalPages}` : t("search.onePage")}
+                              {/* « le corpus complet est dans le scénario » se lisait comme
+                                  « le texte intégral est dans le corpus » : deux sens à un
+                                  coup d'oeil l'un de l'autre. La phrase dit maintenant ce
+                                  qu'elle voulait dire, à savoir que la liste est un aperçu
+                                  et que les analyses portent sur la totalité. */}
                               {total > dedupedResults.length && (
-                                <span className="text-forest-500"> · {t("search.topShown").replace("{n}", dedupedResults.length.toLocaleString())}</span>
+                                <span className="text-forest-500"> · {t("search.topShown")
+                                  .replace("{n}", dedupedResults.length.toLocaleString())
+                                  .replace("{total}", total.toLocaleString())}</span>
                               )}
                             </>
                           );
