@@ -334,7 +334,7 @@ export const en: Translations = {
     relevantPlural: "relevant",
     page: "page",
     onePage: "1 page",
-    topShown: "top {n} shown - the full corpus is in the scenario",
+    topShown: "list shows the {n} most relevant; all {total} are saved in the scenario and every analysis uses all of them",
     refreshingResults: "Updating results…",
     localBase: "Local database",
     liveApi: "Live API",
