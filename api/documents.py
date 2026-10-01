@@ -14,6 +14,7 @@ from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import text
 
 from .core import _is_openai_quota_error, app, engine, logger, require_api_key
+from llm_usage import model_for as _model
 
 # ── Embedding résilient (anti « lot empoisonné ») ────────────────────────────
 # L'API embeddings rejette TOUT le lot si UN SEUL input est invalide - le plus
@@ -82,7 +83,7 @@ def _embed_one_call(client, batch: list) -> None:
     """Embède `batch` (liste de {id, content}) en UN appel et écrit les vecteurs,
     en mappant chaque vecteur par SON index de réponse (pas positionnel)."""
     resp = client.embeddings.create(
-        model="text-embedding-3-small",
+        model=_model("embedding"),
         input=[_truncate_to_tokens(r["content"]) for r in batch],
     )
     by_index = {d.index: d.embedding for d in resp.data}

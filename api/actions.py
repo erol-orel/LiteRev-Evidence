@@ -14,6 +14,7 @@ from .core import app, engine, logger
 from .documents import _llm_lang_directive
 from .gesica import _get_scenario_name
 from .relevance import _get_above_threshold_articles
+from llm_usage import model_for as _model
 
 # ─── ACTIONS RECOMMANDÉES (carte tableau de bord, généralisé aux user scenarios) ─
 _ACTIONS_JOBS: dict[str, dict] = {}
@@ -69,7 +70,7 @@ def _generate_recommended_actions(scenario_id: str, lang: str | None = None) -> 
     try:
         client = _OAI(timeout=90.0)
         resp = client.chat.completions.create(
-            model="gpt-4.1", temperature=0.2, max_tokens=700,
+            model=_model("write"), temperature=0.2, max_tokens=700,
             response_format={"type": "json_object"},
             messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
         )

@@ -5,6 +5,8 @@ apart. They are cheap, pure tests: what they guard is agreement between two part
 code (a writer and a reader, a docstring and a response, a promise and its prerequisite),
 which is exactly the kind of thing that silently rots between two commits.
 """
+import pytest
+
 import main
 from conftest import patch_app
 
@@ -211,6 +213,51 @@ def test_the_interface_shows_an_unranked_corpus_instead_of_discarding_it():
     for loc in ("en", "fr"):
         text_loc = (root / "frontend" / "src" / "i18n" / "locales" / f"{loc}.ts").read_text(encoding="utf-8")
         assert "corpusUnranked:" in text_loc, f"{loc} is missing the warning string"
+
+
+# ── One place says which model does which job ───────────────────────────────
+def test_no_module_hardcodes_a_model_name():
+    """The model was written out at 27 call sites. Upgrading meant finding and editing
+    all 27, so in practice nobody did, and two of them sat on gpt-4o-mini long after
+    everything else had moved to 4.1. The name now comes from `llm_usage.model_for`,
+    which reads an environment variable, so a deployment changes a model without a code
+    change and `/health` can be asked what it is actually running."""
+    import pathlib
+    import re
+
+    api = pathlib.Path(__file__).resolve().parent.parent / "api"
+    bad: list[str] = []
+    for path in sorted(api.glob("*.py")):
+        for n, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+            if re.search(r'model\s*=\s*"(gpt-|text-embedding-|o[0-9]-)', line):
+                bad.append(f"{path.name}:{n}: {line.strip()[:70]}")
+    assert not bad, "a model name is hardcoded again:\n  " + "\n  ".join(bad)
+
+
+def test_every_role_resolves_and_is_overridable(monkeypatch):
+    from llm_usage import model_for, models_in_use
+
+    roles = models_in_use()
+    assert set(roles) == {"bulk", "write", "chat", "embedding"}
+    assert all(isinstance(v, str) and v for v in roles.values())
+    # The assistant's two calls were the stragglers; its default must not be the old one.
+    assert roles["chat"] != "gpt-4o-mini"
+    # Read at CALL time, so a restart with a new variable is enough.
+    monkeypatch.setenv("LLM_MODEL_BULK", "some-newer-model")
+    assert model_for("bulk") == "some-newer-model"
+    with pytest.raises(ValueError):
+        model_for("not-a-role")
+
+
+def test_health_says_which_models_are_running():
+    """The names are environment-overridable, so the only way to know what a deployment
+    is running is to ask it, and any measurement of extraction quality is a measurement
+    of these exact models."""
+    import inspect
+
+    from api import system
+
+    assert "models_in_use" in inspect.getsource(system.health)
 
 
 # ── The audit script does not quietly recompute anything ────────────────────

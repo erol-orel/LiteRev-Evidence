@@ -16,6 +16,7 @@ from .core import app, engine, logger, require_api_key
 from .scenario_store import _get_user_scenario_or_404
 from .search import _load_prisma_identification, _reconcile_prisma_identification
 from .double_blind import _write_ars_screening
+from llm_usage import model_for as _model
 
 # Taille maximale d'UNE page de /pico-bulk (borne mémoire, pas une troncature cachée :
 # la réponse porte `total`, `returned`, `truncated` et `next_offset`).
@@ -524,7 +525,7 @@ def extract_user_scenario_article_pico(scenario_id: str, article_id: int, _: Non
         from datetime import datetime, timezone
         _client = _OAI(api_key=openai_key, timeout=90.0)
         resp = _client.chat.completions.create(
-            model="gpt-4.1-mini",
+            model=_model("bulk"),
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": f"Title: {title}\n\n{body_label}: {body_text}"},

@@ -16,6 +16,7 @@ from .documents import _llm_lang_directive
 from .scenario_store import _get_scenario_threshold
 from .gesica import _get_scenario_name
 from .relevance import _evidence_fingerprint, _get_above_threshold_articles
+from llm_usage import model_for as _model
 
 # ─── VARIABLES & MODÈLE AUTO-REMPLI DEPUIS PICO ──────────────────────────────
 
@@ -170,7 +171,7 @@ def _epi_extract_batch(client, batch: list[dict], disease_hint: str | None) -> l
     payload = {"disease_of_interest": disease_hint or None, "articles": items}
     try:
         resp = client.chat.completions.create(
-            model="gpt-4.1-mini",
+            model=_model("bulk"),
             messages=[{"role": "system", "content": _EPI_EXTRACT_SYSTEM},
                       {"role": "user", "content": _json.dumps(payload, ensure_ascii=False)}],
             temperature=0, seed=42, max_tokens=3000,
@@ -876,7 +877,7 @@ Retourne UNIQUEMENT le JSON valide."""
         else:
             client = _OAI(timeout=90.0)
             response = client.chat.completions.create(
-                model="gpt-4.1",
+                model=_model("write"),
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt},
@@ -1015,7 +1016,7 @@ def _llm_translate_strings(texts: list, target_lang: str) -> list:
     try:
         client = _OAI(timeout=90.0)
         resp = client.chat.completions.create(
-            model="gpt-4.1",
+            model=_model("write"),
             messages=[{"role": "system", "content": sys}, {"role": "user", "content": usr}],
             temperature=0, seed=42, max_tokens=4000,
             response_format={"type": "json_object"},

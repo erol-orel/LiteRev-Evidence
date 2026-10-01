@@ -16,6 +16,7 @@ import llm_usage as _llm_usage
 
 from .core import _is_openai_quota_error, _openai_in_cooldown, _trip_openai_cooldown, app, engine, logger
 from .documents import _embed_chunks_resilient
+from llm_usage import model_for as _model
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Index de performance
@@ -424,7 +425,7 @@ def startup_event() -> None:
                 # réessaiera quand l'API sera saine.
                 try:
                     resp = client.chat.completions.create(
-                        model="gpt-4.1-mini",
+                        model=_model("bulk"),
                         messages=[
                             {"role": "system", "content": _system_pico},
                             {"role": "user",   "content": f"Title: {title}\n\n{body_label}: {body_text}"},

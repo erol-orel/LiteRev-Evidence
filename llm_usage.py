@@ -43,6 +43,57 @@ from datetime import datetime, timezone
 
 logger = logging.getLogger("llm-usage")
 
+
+# ── Which model does which job ───────────────────────────────────────────────
+# The model name was written out at 27 call sites, which is why two of them were still
+# on gpt-4o-mini long after everything else had moved on: upgrading meant finding and
+# editing all 27, so in practice nobody did. Here they are named by JOB, because the jobs
+# genuinely differ and one model for all of them would be wrong in one direction or the
+# other.
+#
+# Changing a model INVALIDATES any measurement made against the old one. The gold
+# standard records which model it validated (scripts/gold_standard.py), and the figures
+# it produced do not carry over to a different one.
+_MODEL_ROLES = {
+    # Per-article work over the whole corpus: PICO, concepts, epidemiological parameters,
+    # cluster summaries, query translation. Thousands of calls, so cost dominates and the
+    # output is consumed by code rather than read.
+    "bulk": ("LLM_MODEL_BULK", "gpt-4.1-mini"),
+    # Prose a person reads and may quote: the evidence brief, the recommended actions,
+    # the variables and model spec. Few calls, and the quality is the product.
+    "write": ("LLM_MODEL_WRITE", "gpt-4.1"),
+    # The assistant's answers. Interactive, so latency counts as much as quality. These
+    # two call sites were the ones left on gpt-4o-mini; the default now matches `bulk`,
+    # which is both newer and cheaper, so the change is strictly an improvement.
+    "chat": ("LLM_MODEL_CHAT", "gpt-4.1-mini"),
+    # CAREFUL. Every vector already in document_chunk.embedding was produced by this
+    # model at 1536 dimensions, and vectors from two models are not comparable. Changing
+    # it means re-embedding the entire corpus. A model of a different dimension fails
+    # loudly on insert (the column is vector(1536)), which is the good case; one of the
+    # SAME dimension would silently degrade every similarity in the database.
+    "embedding": ("EMBEDDING_MODEL", "text-embedding-3-small"),
+}
+
+
+def model_for(role: str) -> str:
+    """The model to use for a job, overridable per role by environment variable.
+
+    Read at CALL time, not at import: a deployment can change a model and restart the
+    API without a code change, which is the point of having this at all."""
+    try:
+        var, default = _MODEL_ROLES[role]
+    except KeyError:
+        raise ValueError(f"unknown model role {role!r}; known: {sorted(_MODEL_ROLES)}") from None
+    return os.getenv(var) or default
+
+
+def models_in_use() -> dict[str, str]:
+    """What every role resolves to right now. Reported by /health so a deployment can be
+    asked which models it is actually running, and recorded by any measurement that
+    depends on them."""
+    return {role: model_for(role) for role in _MODEL_ROLES}
+
+
 #: Set by `configure()` from main.py. Without it, recording is skipped (never fatal).
 _engine = None
 

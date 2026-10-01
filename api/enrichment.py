@@ -13,6 +13,7 @@ from fastapi import Depends, HTTPException
 from sqlalchemy import text
 
 from .core import app, engine, logger, require_api_key
+from llm_usage import model_for as _model
 
 # ─── Enrichissement LLM Batch ────────────────────────────────────────────────
 
@@ -85,7 +86,7 @@ def extract_pico_batch(
             # → on ne compte PAS de tentative (réessai quand l'API est saine).
             try:
                 response = _client.chat.completions.create(
-                    model="gpt-4.1-mini",
+                    model=_model("bulk"),
                     messages=[
                         {"role": "system", "content": system_prompt},
                         {"role": "user", "content": f"Title: {title}\n\nAbstract: {abstract[:3000]}"},
@@ -209,7 +210,7 @@ def extract_metadata_batch(
                 continue
             try:
                 response = _client.chat.completions.create(
-                    model="gpt-4.1-mini",
+                    model=_model("bulk"),
                     messages=[
                         {"role": "system", "content": system_prompt},
                         {"role": "user", "content": f"Title: {title}\n\nAbstract: {abstract[:2000]}"},

@@ -19,6 +19,7 @@ import lexical_search as _lex
 from .core import app, engine, logger, require_api_key
 from .documents import _strategy_is_degraded
 from .scenario_store import _get_user_scenario_or_404
+from llm_usage import model_for as _model
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Search helpers
@@ -347,7 +348,7 @@ def _search_local_doc_ids(
             client = OpenAI(api_key=openai_key, timeout=90.0)
             query_embedding = client.embeddings.create(
                 input=[query.replace("\n", " ").strip()],
-                model="text-embedding-3-small",
+                model=_model("embedding"),
             ).data[0].embedding
         except Exception as e:
             logger.error(f"_search_local_doc_ids embedding error: {e}")
@@ -1043,7 +1044,7 @@ def _generate_search_strategy(query: str) -> dict:
         from llm_usage import MeteredOpenAI as _OAI_ss
         _client = _OAI_ss(api_key=openai_key)
         response = _client.chat.completions.create(
-            model="gpt-4.1-mini",
+            model=_model("bulk"),
             messages=[
                 {"role": "system", "content": (
                     "You are a systematic review librarian. The user may type EITHER a natural-language "

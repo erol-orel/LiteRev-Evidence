@@ -66,6 +66,21 @@ def _regex_fingerprint() -> str:
     return hashlib.sha256(_param_regex().encode("utf-8")).hexdigest()[:16]
 
 
+def _extraction_config() -> dict:
+    """WHAT was validated. A precision of 0.94 is a fact about one model reading one
+    prompt, and it does not survive either of them changing. Recording this is what lets
+    a reader of the paper know which system the figures describe, and lets the next run
+    notice that the system moved."""
+    from llm_usage import model_for
+    try:
+        from api.variables import _EPI_EXTRACT_SYSTEM
+        prompt_hash = hashlib.sha256(_EPI_EXTRACT_SYSTEM.encode("utf-8")).hexdigest()[:16]
+    except Exception:                                 # noqa: BLE001
+        prompt_hash = None
+    return {"model": model_for("bulk"), "prompt_sha": prompt_hash,
+            "regex_fingerprint": _regex_fingerprint()}
+
+
 # ─── sample ──────────────────────────────────────────────────────────────────
 def _screen_negative_articles(scenario_id: str, threshold: float | None) -> list[dict]:
     """Relevant articles the screen REJECTED. The pipeline can never see these, so they
@@ -148,6 +163,7 @@ def cmd_sample(args: argparse.Namespace) -> int:
         "seed": args.seed,
         "drawn_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "regex_fingerprint": _regex_fingerprint(),
+        "extraction_config": _extraction_config(),
         "parameters": _params(),
         "population": {"screened_in": len(pos), "screened_out": len(neg)},
         "sampled": {"screened_in": sum(1 for r in rows if r["stratum"] == "screened_in"),
@@ -366,6 +382,16 @@ def cmd_score(args: argparse.Namespace) -> int:
               f"sample was drawn against.")
         return 2
 
+    was = sample.get("extraction_config") or {}
+    now = _extraction_config()
+    moved = [k for k in ("model", "prompt_sha") if was.get(k) and was[k] != now[k]]
+    if moved:
+        print(f"WARNING: the extraction has changed since the sample was drawn "
+              f"({', '.join(f'{k}: {was[k]} -> {now[k]}' for k in moved)}).\n"
+              f"         The annotation is still valid, it is about the ARTICLES. The "
+              f"extraction scores below describe the CURRENT system, not the one the "
+              f"sample was drawn against. Say which one the paper reports.\n")
+
     sheets = sorted(f for f in os.listdir(args.out)
                     if f.startswith("annotation_") and f.endswith(".xlsx"))
     if not sheets:
@@ -382,6 +408,7 @@ def cmd_score(args: argparse.Namespace) -> int:
     names = list(annotations)
     report: dict = {"scenario_id": sample["scenario_id"], "sample": sample["sampled"],
                     "annotators": names, "agreement": {}, "screen": {}, "extraction": {},
+                    "extraction_config_at_sample": was, "extraction_config_at_score": now,
                     "scored_at": datetime.now(timezone.utc).isoformat(timespec="seconds")}
     if len(names) >= 2:
         A, B = annotations[names[0]], annotations[names[1]]

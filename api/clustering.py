@@ -16,6 +16,7 @@ from .core import _norm_lang, app, engine, logger
 from .documents import _llm_lang_directive
 from .scenario_store import _get_scenario_threshold, _get_user_scenario_or_404
 from .gesica import _gesica_title, _get_db_gesica_scenario_or_404, _get_scenario_name
+from llm_usage import model_for as _model
 
 # ── Encoder JSON pour types numpy ────────────────────────────────────────────
 class _NumpyEncoder(json.JSONEncoder):
@@ -84,7 +85,7 @@ def _cluster_core(
             all_vecs: list = []
             batch_texts = [t[:2000] for t in texts]
             for i in range(0, len(batch_texts), 100):
-                resp = _oai.embeddings.create(model="text-embedding-3-small",
+                resp = _oai.embeddings.create(model=_model("embedding"),
                                               input=batch_texts[i:i + 100])
                 all_vecs.extend([e.embedding for e in resp.data])
             embeddings_matrix = np.array(all_vecs, dtype=np.float32)
@@ -283,7 +284,7 @@ def _cluster_summary_llm(client, title: str | None, docs: list, lang: str | None
         for d in docs
     )
     completion = client.chat.completions.create(
-        model="gpt-4.1-mini",
+        model=_model("bulk"),
         messages=[{"role": "user", "content": (
             f"Scénario : {title or 'scénario'}.\n"
             f"Articles représentatifs du cluster :\n{llm_ctx}\n\n"
