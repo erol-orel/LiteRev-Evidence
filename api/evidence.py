@@ -15,6 +15,7 @@ from .documents import _GRADE_LEVEL_CASE, _STUDY_DESIGN_CASE, _llm_lang_directiv
 from .scenario_store import _get_scenario_threshold, _get_user_scenario_or_404
 from .gesica import _get_scenario_name
 from .relevance import _evidence_fingerprint, _get_above_threshold_articles
+from llm_usage import model_for as _model
 
 @app.get("/user-scenarios/{scenario_id}/evidence-brief")
 def get_user_scenario_evidence_brief(scenario_id: str) -> dict[str, Any]:
@@ -552,7 +553,7 @@ Retourne UNIQUEMENT le JSON valide."""
     try:
         client = _OAI(timeout=90.0)
         response = client.chat.completions.create(
-            model="gpt-4.1",
+            model=_model("write"),
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},

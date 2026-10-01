@@ -37,6 +37,7 @@ from .search import (
     _store_prisma_identification,
 )
 from .gesica import _gesica_title, _get_db_gesica_scenario_or_404
+from llm_usage import model_for as _model
 
 def _run_semantic_rerank_inline(scenario_id: str, query: str) -> int:
     """Score sémantique (cosinus requête↔article) du corpus, mis dans similarity_score.
@@ -50,7 +51,7 @@ def _run_semantic_rerank_inline(scenario_id: str, query: str) -> int:
     try:
         from llm_usage import MeteredOpenAI as _OAI
         _client = _OAI(timeout=90.0)
-        q_emb = _client.embeddings.create(model="text-embedding-3-small", input=query[:2000]).data[0].embedding
+        q_emb = _client.embeddings.create(model=_model("embedding"), input=query[:2000]).data[0].embedding
         q_str = str(q_emb)
 
         # 1) Rapide : cosinus pgvector en base pour tous les docs déjà vectorisés.
@@ -98,7 +99,7 @@ def _run_semantic_rerank_inline(scenario_id: str, query: str) -> int:
                     break
                 texts = [f"{r['title']}\n\n{(r['abstract'] or '')[:1500]}" for r in batch]
                 try:
-                    emb = _client.embeddings.create(model="text-embedding-3-small", input=texts).data
+                    emb = _client.embeddings.create(model=_model("embedding"), input=texts).data
                     ups = []
                     for j, e in enumerate(emb):
                         _d = _np.asarray(e.embedding, dtype=float)
@@ -245,7 +246,7 @@ def _embed_query_vector(query: str) -> str | None:
         from llm_usage import MeteredOpenAI as _OAI2
         _emb = _OAI2(api_key=os.getenv("OPENAI_API_KEY"), timeout=30.0).embeddings.create(
             input=[query.replace("\n", " ").strip()[:2000]],
-            model="text-embedding-3-small",
+            model=_model("embedding"),
         ).data[0].embedding
         return "[" + ",".join(str(x) for x in _emb) + "]"
     except Exception as _e:

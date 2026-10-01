@@ -23,6 +23,7 @@ from .scenario_store import (
     relevant_gate_sql,
 )
 from .search import _build_where
+from llm_usage import model_for as _model
 
 class AskIn(BaseModel):
     question: str = Field(..., min_length=3, max_length=2000)  # Limite d'entrée RAG (H-5)
@@ -75,7 +76,7 @@ def ask_assistant(payload: AskIn) -> dict[str, Any]:
             # Générer l'embedding de la question
             response = client.embeddings.create(
                 input=[payload.question.replace("\n", " ").strip()],
-                model="text-embedding-3-small"
+                model=_model("embedding")
             )
             query_embedding = response.data[0].embedding
             has_vector = True
@@ -216,7 +217,7 @@ def ask_assistant(payload: AskIn) -> dict[str, Any]:
         )
         
         response = client.chat.completions.create(
-            model="gpt-4o-mini",
+            model=_model("chat"),
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt}
@@ -265,7 +266,7 @@ async def ask_stream(payload: dict[str, Any]) -> StreamingResponse:
         from llm_usage import MeteredOpenAI as SyncOpenAI
         sync_client = SyncOpenAI(timeout=90.0)
         emb_resp = sync_client.embeddings.create(
-            model="text-embedding-3-small",
+            model=_model("embedding"),
             input=question[:2000],
         )
         q_emb = emb_resp.data[0].embedding
@@ -380,7 +381,7 @@ Réponds de manière structurée et cite les sources pertinentes du contexte."""
         try:
             async_client = AsyncOpenAI(timeout=90.0)
             stream = await async_client.chat.completions.create(
-                model="gpt-4.1-mini",
+                model=_model("chat"),
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt},
@@ -427,7 +428,7 @@ def user_scenario_rag_assistant(scenario_id: str, payload: AskIn) -> dict[str, A
             client = OpenAI(api_key=openai_key, timeout=90.0)
             response = client.embeddings.create(
                 input=[payload.question.replace("\n", " ").strip()],
-                model="text-embedding-3-small"
+                model=_model("embedding")
             )
             query_embedding = response.data[0].embedding
         except Exception as e:
@@ -537,7 +538,7 @@ def user_scenario_rag_assistant(scenario_id: str, payload: AskIn) -> dict[str, A
         _digest_block = digest_to_prompt(_digest)
         _coverage = digest_coverage_note(_digest, len(sources))
         response = client.chat.completions.create(
-            model="gpt-4o-mini",
+            model=_model("chat"),
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": (f"{_digest_block}\n\n" if _digest_block else "")
@@ -615,7 +616,7 @@ async def ask_stream_filtered(payload: dict[str, Any]):
     try:
         sync_client = SyncOpenAI(timeout=90.0)
         emb_resp = sync_client.embeddings.create(
-            model="text-embedding-3-small",
+            model=_model("embedding"),
             input=question[:2000],
         )
         q_emb = emb_resp.data[0].embedding
@@ -775,7 +776,7 @@ Reponds de maniere structuree et cite les sources pertinentes du contexte."""
         try:
             async_client = AsyncOpenAI(timeout=90.0)
             stream = await async_client.chat.completions.create(
-                model="gpt-4.1-mini",
+                model=_model("chat"),
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt},

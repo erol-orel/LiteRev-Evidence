@@ -70,6 +70,14 @@ def health() -> dict[str, Any]:
     # Per-IP limits in force (RATE_LIMIT_*_PER_MIN): what a room sharing one IP gets.
     out["rate_limit"] = {"general_per_min": RATE_LIMIT_GENERAL_PER_MIN,
                          "expensive_per_min": RATE_LIMIT_EXPENSIVE_PER_MIN}
+    # Which model is doing which job RIGHT NOW. The names are environment-overridable, so
+    # the only way to know what a deployment is running is to ask it, and any measurement
+    # of extraction quality is a measurement of these exact models.
+    try:
+        from llm_usage import models_in_use
+        out["models"] = models_in_use()
+    except Exception as _e:                          # noqa: BLE001
+        out["models"] = {"error": str(_e)[:200]}
     if not schema_ok:
         # Visible dans la réponse, pas seulement dans les logs du serveur.
         out["schema"]["details"] = _SCHEMA_DDL_FAILURES[:10]

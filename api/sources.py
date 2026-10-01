@@ -17,6 +17,7 @@ from .core import RELIEFWEB_APPNAME, app, engine, logger, require_api_key
 from .documents import _normalize_doi, _normalize_title, sanitize_db_text
 from .scenario_store import _get_scenario_threshold, _get_user_scenario_or_404
 from .search import _plain_keywords
+from llm_usage import model_for as _model
 
 _NCBI_LOCK = _threading_ncbi.Lock()
 _NCBI_LAST = [0.0]
@@ -506,13 +507,13 @@ def _federated_live_search(
             _client = _OAI(api_key=openai_key, timeout=8.0)
             q_emb = _client.embeddings.create(
                 input=[(query or "").replace("\n", " ").strip()],
-                model="text-embedding-3-small",
+                model=_model("embedding"),
             ).data[0].embedding
             texts = [((deduped_list[i].get("title", "") or "") + ". " + (deduped_list[i].get("abstract") or "")).replace("\n", " ").strip()[:2000]
                      for i in cand_idx]
             for b in range(0, len(texts), 256):
                 try:
-                    emb_resp = _client.embeddings.create(input=texts[b:b + 256], model="text-embedding-3-small")
+                    emb_resp = _client.embeddings.create(input=texts[b:b + 256], model=_model("embedding"))
                     for j, d in enumerate(emb_resp.data):
                         res_embs[cand_idx[b + j]] = d.embedding
                 except Exception as _be:

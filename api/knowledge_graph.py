@@ -16,6 +16,7 @@ from sqlalchemy import text
 from .core import app, engine, logger
 from .scenario_store import _get_scenario_threshold, _get_user_scenario_or_404
 from .clustering import _load_viz_cache, _save_viz_cache
+from llm_usage import model_for as _model
 
 # ─── KNOWLEDGE GRAPH (réseau de similarité sémantique) ───────────────────────
 
@@ -771,7 +772,7 @@ def _llm_concepts_for_batch(client, batch: list[dict]) -> dict[int, list[dict]]:
         })
     try:
         resp = client.chat.completions.create(
-            model="gpt-4.1-mini",
+            model=_model("bulk"),
             messages=[{"role": "system", "content": _CONCEPT_SYSTEM},
                       {"role": "user", "content": json.dumps({"articles": items}, ensure_ascii=False)}],
             temperature=0, seed=42, max_tokens=4000,

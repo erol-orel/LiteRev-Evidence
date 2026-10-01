@@ -68,6 +68,7 @@ from .clustering import (
     _run_clustering_background,
 )
 from .knowledge_graph import _precompute_user_kg
+from llm_usage import model_for as _model
 
 
 def _auto_pipeline_after_search() -> bool:
@@ -1864,7 +1865,7 @@ def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict
                             _batch = _new_chunks[_bi:_bi+50]
                             _texts = [_truncate_to_tokens(r["content"]) for r in _batch]
                             _emb_resp = emb_client.embeddings.create(
-                                model="text-embedding-3-small", input=_texts)
+                                model=_model("embedding"), input=_texts)
                             for _k, _ed in enumerate(_emb_resp.data):
                                 _vec = "[" + ",".join(str(x) for x in _ed.embedding) + "]"
                                 with engine.begin() as _c3:
@@ -2131,7 +2132,7 @@ def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict
                     try:
                         _texts = [_truncate_to_tokens(r["content"]) for r in _batch]
                         _emb_resp = _emb_client.embeddings.create(
-                            model="text-embedding-3-small",
+                            model=_model("embedding"),
                             input=_texts
                         )
                         # Batch all updates in a single transaction (not one per chunk)
@@ -2169,7 +2170,7 @@ def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict
                 from llm_usage import MeteredOpenAI as _OAI_rr
                 _rr_client = _OAI_rr(api_key=openai_key)
                 _rr_resp = _rr_client.embeddings.create(
-                    model="text-embedding-3-small", input=query[:2000])
+                    model=_model("embedding"), input=query[:2000])
                 _q_vec = "[" + ",".join(str(x) for x in _rr_resp.data[0].embedding) + "]"
                 with engine.begin() as _rr_conn:
                     _rr_result = _rr_conn.execute(text("""
@@ -2260,7 +2261,7 @@ def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict
                 for row in pico_rows:
                     try:
                         response = _client.chat.completions.create(
-                            model="gpt-4.1-mini",
+                            model=_model("bulk"),
                             messages=[
                                 {"role": "system", "content": system_prompt_pico},
                                 {"role": "user", "content": f"Title: {row['title']}\n\nAbstract: {(row['abstract'] or '')[:3000]}"},
@@ -2370,7 +2371,7 @@ def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict
                 for row in meta_rows:
                     try:
                         response = _client2.chat.completions.create(
-                            model="gpt-4.1-mini",
+                            model=_model("bulk"),
                             messages=[
                                 {"role": "system", "content": system_prompt_meta},
                                 {"role": "user", "content": f"Title: {row['title']}\n\nAbstract: {(row['abstract'] or '')[:2000]}"},
