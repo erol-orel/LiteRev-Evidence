@@ -41,7 +41,10 @@ logger = logging.getLogger("literev-api")
 # toujours pas de python-dotenv.
 from env_files import load_env as _load_env  # noqa: E402
 
-ENV_FILES = _load_env()   # les fichiers effectivement lus, dans l'ordre de priorité
+#: Les fichiers effectivement LUS par ce processus, dans l'ordre de priorité - et non la
+#: liste de ceux à essayer, que portait l'ancien nom. Celle-là vit dans
+#: env_files.SEARCH_PATH ; celle-ci dit ce que cette machine-ci avait.
+ENV_FILES_LOADED = _load_env()
 
 DB_URL = os.getenv("DB_URL")
 if not DB_URL:
