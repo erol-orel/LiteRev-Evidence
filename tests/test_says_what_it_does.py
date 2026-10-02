@@ -353,6 +353,60 @@ def test_a_deployment_can_prove_its_models_answer_without_exercising_the_app():
     assert "require_api_key" in src
 
 
+# ── One module decides where configuration comes from ───────────────────────
+def test_no_module_carries_its_own_list_of_env_file_paths():
+    """There were seven loaders, each with its own list in its own order, and
+    `/etc/literev-api.env` - the file the systemd unit passes to the service - was first in
+    none of them. The service survived on the fact that systemd populates the environment
+    before Python starts and no loader overrides it; the cost landed elsewhere, as a key
+    read out of a file that the API running on that same machine rejected.
+
+    So the paths live in exactly one module. A new loader would reintroduce the problem one
+    script at a time, which is how it happened the first time."""
+    import ast
+    import pathlib
+
+    from env_files import SECONDARY
+
+    root = pathlib.Path(__file__).resolve().parent.parent
+    allowed = {"env_files.py"}                        # and nothing else, ever
+    bad: list[str] = []
+    for path in sorted(root.glob("*.py")) + sorted(root.glob("api/*.py")) \
+            + sorted(root.glob("scripts/*.py")) + sorted(root.glob("tools/*.py")):
+        if path.name in allowed or "archive" in str(path):
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        # Docstrings and comments may discuss these paths freely - that is how the history
+        # gets recorded. A STRING LITERAL holding one is either a loader list or an
+        # instruction telling an operator to edit the wrong file.
+        docstrings = {id(ast.get_docstring(node, clean=False))
+                      for node in ast.walk(tree)
+                      if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef,
+                                           ast.AsyncFunctionDef))}
+        for node in ast.walk(tree):
+            if not (isinstance(node, ast.Constant) and isinstance(node.value, str)):
+                continue
+            if id(node.value) in docstrings:
+                continue
+            for secondary in SECONDARY:
+                if secondary in node.value:
+                    bad.append(f"{path.relative_to(root)}:{node.lineno}: {secondary}")
+    assert not bad, ("a non-canonical env file path is written into the code, as a loader "
+                     "list or as advice to edit a file that is not the one in force:\n  "
+                     + "\n  ".join(bad))
+
+
+def test_the_api_loads_its_environment_through_the_one_loader():
+    """api/core.py had its own parser and its own five-path list, and that list did not
+    contain the canonical file at all."""
+    import pathlib
+
+    src = (pathlib.Path(__file__).resolve().parent.parent / "api" / "core.py").read_text(
+        encoding="utf-8")
+    assert "from env_files import load_env" in src
+    assert "def _load_env_file" not in src, "the second parser is back"
+
+
 # ── The audit script does not quietly recompute anything ────────────────────
 def test_audit_script_can_skip_the_one_check_that_triggers_work():
     """GET /clustering computes the projection when the language is not cached, so the

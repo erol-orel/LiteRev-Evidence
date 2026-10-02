@@ -26,6 +26,49 @@ from .core import (
 from .schema_boot import _REQUIRED_TABLES, _SCHEMA_DDL_FAILURES
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Configuration drift
+# ─────────────────────────────────────────────────────────────────────────────
+#: Cache for the config check below. Re-read rather than computed once at import,
+#: because the interesting case is a file edited AFTER the service started: a snapshot
+#: taken at boot would always agree with the boot it was taken at. Sixty seconds, so a
+#: monitor hitting /health every few seconds costs one read a minute.
+_CONFIG_CACHE: dict[str, Any] = {"at": 0.0, "value": None}
+_CONFIG_TTL_SECONDS = 60.0
+
+
+def _config_state() -> dict[str, Any]:
+    """Which file configures this process, and whether anything on disk contradicts it.
+
+    DELIBERATELY a summary. /health is unauthenticated, so this reports the canonical
+    path, which other files still hold settings, and a COUNT of variables where a file and
+    this process disagree. No variable names and no fingerprints: `scripts/env_audit.py`,
+    which needs root to read /proc, is where the detail belongs."""
+    import time as _time
+    now = _time.monotonic()
+    cached = _CONFIG_CACHE.get("value")
+    if cached is not None and (now - float(_CONFIG_CACHE["at"])) < _CONFIG_TTL_SECONDS:
+        return cached
+    try:
+        import env_files
+        secondary = env_files.secondary_files()
+        out: dict[str, Any] = {
+            "source": env_files.CANONICAL,
+            "readable": env_files._parse(env_files.CANONICAL) is not None,
+            "secondary_files": secondary,
+            "drifting_variables": len(env_files.drift()),
+        }
+        if secondary or out["drifting_variables"]:
+            # The point of saying it here: six files could hold a setting and nothing on
+            # the machine said which one was in force.
+            out["note"] = ("a setting in a secondary file only applies where no "
+                           "higher-precedence file defines it; run "
+                           "scripts/env_audit.py --live for the detail")
+    except Exception as _e:                          # noqa: BLE001
+        out = {"error": str(_e)[:200]}
+    _CONFIG_CACHE.update(at=now, value=out)
+    return out
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Health
 # ─────────────────────────────────────────────────────────────────────────────
 @app.get("/health")
@@ -89,6 +132,11 @@ def health() -> dict[str, Any]:
         out["llm_requests"] = request_policy()
     except Exception as _e:                          # noqa: BLE001
         out["llm_requests"] = {"error": str(_e)[:200]}
+    # Which file configures this process, and whether another one on disk contradicts it.
+    # Four files on the server claimed to hold configuration and only one reached the
+    # service: a WRITE_API_KEY read out of one of the others was rejected by the API that
+    # the same machine was running. `drifting_variables` above zero is that situation.
+    out["config"] = _config_state()
     if not schema_ok:
         # Visible dans la réponse, pas seulement dans les logs du serveur.
         out["schema"]["details"] = _SCHEMA_DDL_FAILURES[:10]

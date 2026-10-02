@@ -25,26 +25,12 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 # Load the SAME env files the service loads (secrets.env holds the NCBI / Semantic Scholar /
 # CORE keys) so the source checks below see the same keys as the running app. Mirrors
-# main.py's autoloader; never overrides a value already set in the environment. Without this,
-# the checks run key-less → CORE is "skipped" and S2 rate-limits, misreporting the service.
-def _load_env_file(path):
-    try:
-        with open(path) as _f:
-            for _line in _f:
-                _line = _line.strip()
-                if not _line or _line.startswith("#") or "=" not in _line:
-                    continue
-                _k, _, _v = _line.partition("=")
-                _k = _k.strip()
-                if _k and _k not in os.environ:
-                    os.environ[_k] = _v.strip().strip('"').strip("'")
-    except FileNotFoundError:
-        pass
+# The service's own loader; never overrides a value already set in the environment. Without
+# it the checks run key-less, CORE reports "skipped" and S2 rate-limits, which misreports
+# the service. One loader for the whole repository: see env_files.py.
+from env_files import load_env  # noqa: E402
 
-
-for _ep in ["/opt/literev-api/.env", "/etc/literev/env", "/etc/literev-api.env",
-            "/etc/literev/secrets", "/opt/literev-api/secrets.env"]:
-    _load_env_file(_ep)
+load_env()
 
 UA = {"User-Agent": "LiteRev-smoke/1.0 (mailto:literev@gesica.ch)"}
 TIMEOUT = 30

@@ -1,38 +1,24 @@
 import logging
 import os
-from pathlib import Path
+import sys
+
 from sqlalchemy import create_engine, text
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("embed-corpus")
 
-# ─── Chargement de la clé API ─────────────────────────────────────────────────
-# Priorité : variable d'environnement > fichier .env > fichier /etc/literev/env
-def _load_env_file(path: str) -> None:
-    """Charge les variables KEY=VALUE d'un fichier dans os.environ (sans dépendance python-dotenv)."""
-    p = Path(path)
-    if not p.exists():
-        return
-    for line in p.read_text().splitlines():
-        line = line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, _, value = line.partition("=")
-        key = key.strip()
-        value = value.strip().strip('"').strip("'")
-        if key and key not in os.environ:
-            os.environ[key] = value
+# ─── Configuration ───────────────────────────────────────────────────────────
+# Un seul chargeur pour tout le dépôt : env_files. Celui-ci lisait six fichiers dans son
+# propre ordre, SANS /etc/literev-api.env - le fichier que systemd passe au service -, et
+# chargeait la moitié de la liste après avoir déjà exigé DB_URL. Voir env_files.py.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from env_files import CANONICAL, load_env  # noqa: E402
 
-# Chercher le .env dans le répertoire courant, le répertoire du script, puis /etc/literev/env
-for _env_path in [".env", str(Path(__file__).parent / ".env"), "/etc/literev/env", "/opt/literev-api/.env"]:
-    _load_env_file(_env_path)
+load_env()
 
 DB_URL = os.getenv("DB_URL") or os.getenv("DATABASE_URL")
 if not DB_URL:
     raise RuntimeError("DB_URL (or DATABASE_URL) environment variable is required")
-# Charger aussi le fichier secrets hors-repo si présent
-for _ep in ["/etc/literev/secrets", "/opt/literev-api/secrets.env"]:
-    _load_env_file(_ep)
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 
@@ -83,10 +69,10 @@ def main():
         logger.error(
             "OPENAI_API_KEY est requise pour générer les embeddings.\n"
             "Solutions (par ordre de priorité) :\n"
-            "  1. Variable d'environnement : export OPENAI_API_KEY=sk-...  && python3 embed_corpus.py\n"
-            "  2. Fichier /opt/literev-api/.env contenant : OPENAI_API_KEY=sk-...\n"
-            "  3. Service systemd : sudo systemctl edit literev-api → [Service] Environment=OPENAI_API_KEY=sk-...\n"
-            "  4. Inline : OPENAI_API_KEY=sk-... python3 embed_corpus.py --project gesica"
+            f"  1. Le fichier de configuration du service : {CANONICAL}\n"
+            "  2. Inline : OPENAI_API_KEY=sk-... python3 embed_corpus.py --project gesica\n"
+            "  3. Variable d'environnement : export OPENAI_API_KEY=sk-...\n"
+            "Les fichiers lus, dans l'ordre : python3 scripts/env_audit.py"
         )
         return
 

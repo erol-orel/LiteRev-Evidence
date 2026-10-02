@@ -26,25 +26,11 @@ import requests
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
-# Load the same env files the service loads (OPENAI / NCBI / S2 / CORE keys) before import.
-def _load_env_file(path):
-    try:
-        with open(path) as _f:
-            for _line in _f:
-                _line = _line.strip()
-                if not _line or _line.startswith("#") or "=" not in _line:
-                    continue
-                _k, _, _v = _line.partition("=")
-                _k = _k.strip()
-                if _k and _k not in os.environ:
-                    os.environ[_k] = _v.strip().strip('"').strip("'")
-    except FileNotFoundError:
-        pass
+# Load the env files the service loads (OPENAI / NCBI / S2 / CORE keys) BEFORE importing
+# main, which reads them at import. One loader for the whole repository: see env_files.py.
+from env_files import load_env  # noqa: E402
 
-
-for _ep in ["/opt/literev-api/.env", "/etc/literev/env", "/etc/literev-api.env",
-            "/etc/literev/secrets", "/opt/literev-api/secrets.env"]:
-    _load_env_file(_ep)
+load_env()
 
 logging.disable(logging.INFO)   # hush main.py's import-time DDL "vérifiées/créées" chatter
 import main  # noqa: E402 - reuse the app's OWN translators so we send what the app sends

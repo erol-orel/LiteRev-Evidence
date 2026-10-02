@@ -21,6 +21,7 @@ import json
 import logging
 import os
 import re
+import sys
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -38,18 +39,21 @@ logger = logging.getLogger("living-review")
 # ─── Configuration ────────────────────────────────────────────────────────────
 
 def _load_secrets() -> str:
-    """Charge la clé OpenAI depuis secrets.env ou l'environnement."""
-    key = os.environ.get("OPENAI_API_KEY", "")
-    if not key:
-        for path in ["/opt/literev-api/secrets.env", Path(__file__).parent / "secrets.env"]:
-            try:
-                for line in Path(path).read_text().splitlines():
-                    if line.startswith("OPENAI_API_KEY="):
-                        key = line.split("=", 1)[1].strip().strip('"').strip("'")
-                        break
-            except Exception:
-                pass
-    return key
+    """La clé OpenAI, via le chargeur unique du dépôt (env_files).
+
+    Cherchait la ligne OPENAI_API_KEY= dans deux fichiers choisis ici, dont un
+    `secrets.env` à la racine du dépôt qui n'a jamais existé, et ignorait celui que
+    systemd passe au service. Voir l'en-tête de env_files.py."""
+    if not os.environ.get("OPENAI_API_KEY"):
+        load_env()
+    return os.environ.get("OPENAI_API_KEY", "")
+
+# Lu AVANT DB_URL : sinon la variable doit venir du shell alors que le fichier canonique
+# la contient.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from env_files import load_env  # noqa: E402
+
+load_env()
 
 DB_URL = os.environ.get("DATABASE_URL") or os.environ.get("DB_URL")
 if not DB_URL:

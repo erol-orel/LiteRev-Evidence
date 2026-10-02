@@ -12,7 +12,6 @@ import secrets as _secrets
 import time
 import time as _time_mod
 from collections import defaultdict
-from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, Header, HTTPException
@@ -29,38 +28,23 @@ def _msg(lang, fr: str, en: str) -> str:
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("literev-api")
 
-# ─── Chargement .env (sans dépendance python-dotenv) ─────────────────────────────────
-def _load_env_file(path: str) -> None:
-    p = Path(path)
-    if not p.exists():
-        return
-    for line in p.read_text().splitlines():
-        line = line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, _, value = line.partition("=")
-        key = key.strip()
-        value = value.strip().strip('"').strip("'")
-        if key and key not in os.environ:
-            os.environ[key] = value
-
-# Fichiers d'environnement chargés, DANS CET ORDRE : la première valeur trouvée gagne et
-# rien n'écrase une variable déjà présente dans l'environnement du processus (systemd).
+# ─── Chargement .env ─────────────────────────────────────────────────────────────────
+# La liste des fichiers, leur ordre et leur analyse vivent dans env_files, et c'est le SEUL
+# chargeur du dépôt. Il y en avait sept, chacun avec sa liste dans son ordre, et
+# /etc/literev-api.env - le fichier que l'unité systemd passe réellement au service -
+# n'était premier dans aucune : voir l'en-tête de env_files.py. Cette liste-ci ne le
+# contenait même pas. Le service y survivait parce que systemd peuple l'environnement AVANT
+# Python et que rien n'écrase une variable déjà présente ; ce qui se payait ailleurs, en
+# clés lues dans un fichier que l'API refusait.
 #
-# Les trois premiers (configuration non secrète) ne l'étaient PAS : seuls les deux
-# fichiers de secrets étaient lus, alors que .env.example dit depuis toujours de mettre la
-# configuration dans ./.env ou /opt/literev-api/.env. Résultat : un opérateur qui plafonne
-# la dépense OpenAI ou le volume de fetch dans le fichier que la documentation lui indique
-# n'avait aucun effet, et aucune erreur. La liste ci-dessous est celle de .env.example.
-ENV_FILES = [
-    ".env",
-    "/opt/literev-api/.env",
-    "/etc/literev/env",
-    "/etc/literev/secrets",
-    "/opt/literev-api/secrets.env",
-]
-for _ep in ENV_FILES:
-    _load_env_file(_ep)
+# env_files n'importe que la bibliothèque standard : le démarrage de l'API ne dépend
+# toujours pas de python-dotenv.
+from env_files import load_env as _load_env  # noqa: E402
+
+#: Les fichiers effectivement LUS par ce processus, dans l'ordre de priorité - et non la
+#: liste de ceux à essayer, que portait l'ancien nom. Celle-là vit dans
+#: env_files.SEARCH_PATH ; celle-ci dit ce que cette machine-ci avait.
+ENV_FILES_LOADED = _load_env()
 
 DB_URL = os.getenv("DB_URL")
 if not DB_URL:
