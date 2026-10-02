@@ -927,7 +927,7 @@ export const fr = {
       stepInsert: "Insertion des nouveaux articles (déduplication automatique)",
       stepEmbeddings:
         "Génération des embeddings (text-embedding-3-small) : active la pertinence sémantique",
-      stepPico: "Extraction PICO par LLM (GPT-4.1-mini)",
+      stepPico: "Extraction PICO par LLM",
       stepFulltext: "Récupération full-text via Unpaywall",
       stepClustering: "Recalcul du clustering thématique",
       stepRerank: "Rerank sémantique (scores cosinus mis à jour)",

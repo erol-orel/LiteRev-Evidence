@@ -929,7 +929,7 @@ export const en: Translations = {
       stepInsert: "Insertion of new articles (automatic deduplication)",
       stepEmbeddings:
         "Embedding generation (text-embedding-3-small): enables semantic relevance",
-      stepPico: "PICO extraction by LLM (GPT-4.1-mini)",
+      stepPico: "PICO extraction by LLM",
       stepFulltext: "Full-text retrieval via Unpaywall",
       stepClustering: "Recompute thematic clustering",
       stepRerank: "Semantic rerank (updated cosine scores)",

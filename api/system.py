@@ -5,6 +5,7 @@ tools and tests.
 """
 from __future__ import annotations
 
+import os
 from typing import Any
 
 from fastapi import Depends, Query
@@ -78,6 +79,16 @@ def health() -> dict[str, Any]:
         out["models"] = models_in_use()
     except Exception as _e:                          # noqa: BLE001
         out["models"] = {"error": str(_e)[:200]}
+    # And in what SHAPE it is asked: the reasoning effort, whether the temperatures the
+    # call sites ask for survive it, and any parameter the API has refused since the last
+    # restart. `learned_repairs` not being empty means the model configuration is wrong
+    # somewhere, which is otherwise visible only in the logs. POST /llm-selftest proves
+    # the whole shape against the live API for one call per role.
+    try:
+        from llm_usage import request_policy
+        out["llm_requests"] = request_policy()
+    except Exception as _e:                          # noqa: BLE001
+        out["llm_requests"] = {"error": str(_e)[:200]}
     if not schema_ok:
         # Visible dans la réponse, pas seulement dans les logs du serveur.
         out["schema"]["details"] = _SCHEMA_DDL_FAILURES[:10]
@@ -108,6 +119,98 @@ def get_llm_usage(hours: int = Query(24, ge=1, le=24 * 90),
 
     Protégé par la clé d'écriture : c'est de la donnée d'exploitation, pas du contenu."""
     return _llm_usage.summary(hours=hours)
+
+
+@app.post("/llm-selftest")
+def llm_selftest(_: None = Depends(require_api_key)) -> dict[str, Any]:
+    """One real, minimal call per role: does this deployment's LLM configuration work?
+
+    THE question a model switch leaves open, and the one nothing else here can answer.
+    Every LLM call site in the application is wrapped in `except Exception` and degrades
+    to "this feature is unavailable", so a model name or a parameter the API refuses
+    produces no error page anywhere: PICO stops filling, briefs come back empty, the
+    assistant apologises, /health stays green and the only trace is a line in the logs of
+    whichever worker happened to run first.
+
+    So this asks the API directly, in the shape the application actually sends (a token
+    ceiling and a temperature, translated for the named model by
+    `llm_usage.shape_chat_kwargs`), and reports per role what came back. `repairs_learned`
+    is the interesting field: a parameter named there was refused by the live API, the
+    call succeeded on the retry, and the mapping in `llm_usage._LEGACY_REQUEST_SHAPE`
+    disagrees with reality for that model.
+
+    About twenty tokens per role. Behind the write key because it spends money, and POST
+    because it does."""
+    from llm_usage import (LLMCallBlocked, MeteredOpenAI, model_for, models_in_use,
+                           request_policy)
+
+    def _repairs() -> dict:
+        try:
+            return request_policy().get("learned_repairs", {})
+        except Exception:                            # noqa: BLE001
+            return {}
+
+    before = _repairs()
+    key = os.getenv("OPENAI_API_KEY")
+    roles: dict[str, Any] = {}
+
+    def _attempt(role: str, call) -> dict[str, Any]:
+        out: dict[str, Any] = {"model": model_for(role)}
+        if not key:
+            return {**out, "ok": False, "error": "OPENAI_API_KEY is not set"}
+        try:
+            resp = call(MeteredOpenAI(api_key=key, timeout=20.0, purpose="llm_selftest"))
+        except LLMCallBlocked as exc:
+            # Not a misconfiguration: the master switch or the daily budget said no.
+            return {**out, "ok": False, "blocked": True, "error": str(exc)[:300]}
+        except Exception as exc:                     # noqa: BLE001
+            return {**out, "ok": False, "error": f"{type(exc).__name__}: {exc}"[:500]}
+        usage = getattr(resp, "usage", None)
+        return {**out, "ok": True, "tokens": _llm_usage._usage_fields(usage)[2],
+                "served_by": getattr(resp, "model", None), "response": resp}
+
+    for role in ("bulk", "write", "chat"):
+        def _chat(client, role=role):
+            return client.chat.completions.create(
+                model=model_for(role),
+                messages=[{"role": "user", "content": "Reply with the single word: ok"}],
+                temperature=0,
+                max_tokens=16,
+            )
+        got = _attempt(role, _chat)
+        resp = got.pop("response", None)
+        if resp is not None:
+            try:
+                got["answer"] = (resp.choices[0].message.content or "")[:80]
+            except Exception as exc:                 # noqa: BLE001
+                got["ok"] = False
+                got["error"] = f"a response with no readable content: {exc}"[:300]
+        roles[role] = got
+
+    got = _attempt("embedding", lambda client: client.embeddings.create(
+        model=model_for("embedding"), input="ok"))
+    resp = got.pop("response", None)
+    if resp is not None:
+        try:
+            # The dimension is the part that matters: document_chunk.embedding is
+            # vector(1536), and a model of another width cannot be inserted into it.
+            got["dimensions"] = len(resp.data[0].embedding)
+        except Exception as exc:                     # noqa: BLE001
+            got["ok"] = False
+            got["error"] = f"a response with no readable vector: {exc}"[:300]
+    roles["embedding"] = got
+
+    after = _repairs()
+    learned = {model: {p: r for p, r in params.items()
+                       if before.get(model, {}).get(p) != r}
+               for model, params in after.items()}
+    return {
+        "ok": all(r.get("ok") for r in roles.values()),
+        "models": models_in_use(),
+        "policy": request_policy(),
+        "repairs_learned": {m: p for m, p in learned.items() if p},
+        "roles": roles,
+    }
 
 
 # ─────────────────────────────────────────────────────────────────────────────

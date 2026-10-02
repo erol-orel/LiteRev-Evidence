@@ -249,15 +249,108 @@ def test_every_role_resolves_and_is_overridable(monkeypatch):
         model_for("not-a-role")
 
 
-def test_health_says_which_models_are_running():
+def test_health_says_which_models_are_running_and_in_what_shape():
     """The names are environment-overridable, so the only way to know what a deployment
     is running is to ask it, and any measurement of extraction quality is a measurement
-    of these exact models."""
+    of these exact models - at this exact reasoning effort, since that decides whether the
+    temperature the call sites ask for was sent or dropped."""
     import inspect
 
     from api import system
 
-    assert "models_in_use" in inspect.getsource(system.health)
+    src = inspect.getsource(system.health)
+    assert "models_in_use" in src
+    assert "request_policy" in src
+
+
+def test_the_token_ceiling_the_call_sites_pass_reaches_the_model_under_some_name():
+    """The gpt-5 generation answers `max_tokens` with a 400. Twenty call sites pass it,
+    and every one of them is wrapped in `except Exception`, so the symptom of getting this
+    wrong is not an error page: it is PICO that stops filling, briefs that come back empty
+    and an assistant that apologises, with /health still green.
+
+    Asserted as behaviour rather than as a name, so that it keeps holding whatever the
+    models become."""
+    from llm_usage import legacy_request_shape, model_for, shape_chat_kwargs
+
+    for role in ("bulk", "write", "chat"):
+        sent = shape_chat_kwargs({"model": model_for(role), "max_tokens": 800,
+                                  "temperature": 0, "seed": 42})
+        if legacy_request_shape(sent["model"]):
+            assert sent["max_tokens"] == 800
+        else:
+            assert "max_tokens" not in sent and sent["max_completion_tokens"] == 800
+        # Temperature 0 and seed 42 are what make an extraction repeatable, and they are
+        # only accepted while the model is not reasoning. If a default ever drops them,
+        # the gold standard's figures stop being reproducible and must say so.
+        assert sent.get("seed") == 42
+        assert "temperature" in sent or sent.get("reasoning_effort") not in (None, "none")
+
+
+def test_no_call_site_in_the_api_sends_a_parameter_its_model_would_refuse():
+    """Read the real call sites out of `api/*.py` and put what each one passes through the
+    shaper, so this cannot drift away from the code the way a hand-written list would.
+
+    The parameter sets here are the ones in production. If a new call site passes
+    `max_tokens` to a gpt-5 model, or a temperature while the model is reasoning, this
+    fails at the call site instead of silently in a worker's log."""
+    import pathlib
+    import re as _re
+
+    from llm_usage import legacy_request_shape, model_for, shape_chat_kwargs
+
+    api = pathlib.Path(__file__).resolve().parent.parent / "api"
+    sites: list[tuple[str, str, dict]] = []
+    for path in sorted(api.glob("*.py")):
+        src = path.read_text(encoding="utf-8")
+        for match in _re.finditer(r"chat\.completions\.create\(", src):
+            # Scan to the matching parenthesis: the call spans several lines.
+            depth, i = 1, match.end()
+            while i < len(src) and depth:
+                depth += {"(": 1, ")": -1}.get(src[i], 0)
+                i += 1
+            body = src[match.end():i - 1]
+            # Top-level `name=` only: nested dicts and lists carry their own.
+            names, depth = [], 0
+            for token in _re.finditer(r"[(\[{]|[)\]}]|(\w+)\s*=", body):
+                if token.group(1) and depth == 0:
+                    names.append(token.group(1))
+                elif token.group(0) in "([{":
+                    depth += 1
+                elif token.group(0) in ")]}":
+                    depth -= 1
+            role = (_re.search(r'_model\("(\w+)"\)', body) or [None, "chat"])[1]
+            sites.append((path.name, role, {n: "x" for n in names}))
+
+    assert len(sites) >= 10, f"only found {len(sites)} call sites; the scan is broken"
+    for name, role, passed in sites:
+        passed["model"] = model_for(role)
+        sent = shape_chat_kwargs(passed)
+        where = f"{name} ({role} -> {sent['model']})"
+        if not legacy_request_shape(sent["model"]):
+            assert "max_tokens" not in sent, f"{where} would be refused for max_tokens"
+            if sent.get("reasoning_effort") not in (None, "none"):
+                assert "temperature" not in sent, f"{where} reasons AND sets a temperature"
+        if "max_tokens" in passed or "max_completion_tokens" in passed:
+            assert "max_completion_tokens" in sent or "max_tokens" in sent, \
+                f"{where} lost its ceiling in translation"
+
+
+def test_a_deployment_can_prove_its_models_answer_without_exercising_the_app():
+    """A model switch is otherwise unverifiable: nothing reports a refused request, so the
+    only test is to use each feature and read the logs. POST /llm-selftest makes one
+    minimal call per role instead."""
+    import inspect
+
+    from api import system
+
+    src = inspect.getsource(system.llm_selftest)
+    for role in ("bulk", "write", "chat", "embedding"):
+        assert f'"{role}"' in src or f"'{role}'" in src
+    # It must send the shape the application sends, or it proves nothing about it.
+    assert "max_tokens=16" in src and "temperature=0" in src
+    # And it must be the write key, because it spends money.
+    assert "require_api_key" in src
 
 
 # ── The audit script does not quietly recompute anything ────────────────────

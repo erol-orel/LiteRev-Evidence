@@ -71,13 +71,17 @@ def _extraction_config() -> dict:
     prompt, and it does not survive either of them changing. Recording this is what lets
     a reader of the paper know which system the figures describe, and lets the next run
     notice that the system moved."""
-    from llm_usage import model_for
+    from llm_usage import model_for, reasoning_effort
     try:
         from api.variables import _EPI_EXTRACT_SYSTEM
         prompt_hash = hashlib.sha256(_EPI_EXTRACT_SYSTEM.encode("utf-8")).hexdigest()[:16]
     except Exception:                                 # noqa: BLE001
         prompt_hash = None
+    # The effort belongs here next to the model: the same model at a different reasoning
+    # effort is a different extractor, and at anything but "none" it stops being
+    # reproducible at all, because the temperature and seed are then refused and dropped.
     return {"model": model_for("bulk"), "prompt_sha": prompt_hash,
+            "reasoning_effort": reasoning_effort() or "api-default",
             "regex_fingerprint": _regex_fingerprint()}
 
 
