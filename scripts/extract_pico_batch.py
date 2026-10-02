@@ -43,40 +43,23 @@ logging.basicConfig(
 )
 log = logging.getLogger("pico")
 
+# ── Configuration ─────────────────────────────────────────────────────────────
+# AVANT de lire DB_URL : ce script cherchait OPENAI_API_KEY ligne par ligne dans trois
+# fichiers choisis ici, mais exigeait DB_URL du shell. Un seul chargeur pour tout le
+# dépôt (env_files), lu une fois, et les deux variables viennent du même endroit.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # racine du dépôt
+from env_files import CANONICAL as _CANONICAL  # noqa: E402
+from env_files import load_env as _load_env  # noqa: E402
+
+log.info(f"Fichiers d'environnement lus : {', '.join(_load_env()) or 'aucun'}")
+
 # ── DB ────────────────────────────────────────────────────────────────────────
 DB_URL = os.environ.get("DATABASE_URL") or os.environ.get("DB_URL")
 if not DB_URL:
     raise RuntimeError("DATABASE_URL (or DB_URL) environment variable is required")
 engine = create_engine(DB_URL, pool_pre_ping=True)
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # racine du dépôt
-import llm_usage as _llm_usage
+import llm_usage as _llm_usage  # noqa: E402
 _llm_usage.configure(engine)              # comptabilise les appels de ce script
-
-# ── OpenAI ────────────────────────────────────────────────────────────────────
-# Charger la clé depuis les fichiers d'environnement si non définie dans le shell
-if not os.environ.get("OPENAI_API_KEY"):
-    # Ordre de priorité : fichier systemd > .env du projet
-    _env_candidates = [
-        "/etc/literev-api.env",           # Fichier systemd EnvironmentFile
-        "/opt/literev-api/.env",           # .env du projet sur le serveur
-        os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"),  # .env local
-    ]
-    for env_file in _env_candidates:
-        if os.path.exists(env_file):
-            try:
-                with open(env_file) as _ef:
-                    for _line in _ef:
-                        _line = _line.strip().strip('"')  # enlever les guillemets systemd
-                        if _line.startswith("OPENAI_API_KEY=") and not _line.startswith("#"):
-                            _val = _line.split("=", 1)[1].strip().strip('"').strip("'")
-                            if _val:
-                                os.environ["OPENAI_API_KEY"] = _val
-                                log.info(f"Clé OpenAI chargée depuis {env_file}")
-                                break
-                if os.environ.get("OPENAI_API_KEY"):
-                    break
-            except Exception as _e:
-                log.debug(f"Impossible de lire {env_file}: {_e}")
 
 try:
     from llm_usage import MeteredOpenAI as OpenAI
@@ -85,9 +68,9 @@ try:
         raise RuntimeError(
             "OPENAI_API_KEY non définie.\n"
             "Solutions :\n"
-            "  1. export OPENAI_API_KEY=sk-...  && python3 extract_pico_batch.py\n"
+            f"  1. L'ajouter au fichier de configuration du service : {_CANONICAL}\n"
             "  2. OPENAI_API_KEY=sk-... python3 extract_pico_batch.py\n"
-            "  3. Ajouter OPENAI_API_KEY=sk-... dans /opt/literev-api/.env"
+            "Les fichiers lus, dans l'ordre : python3 scripts/env_audit.py"
         )
     client = OpenAI(api_key=_api_key, purpose="extract_pico_batch")
     OPENAI_AVAILABLE = True

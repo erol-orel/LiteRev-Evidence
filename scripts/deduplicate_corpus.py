@@ -32,7 +32,6 @@ import logging
 import os
 import re
 import unicodedata
-from pathlib import Path
 from typing import Any, Optional
 
 from sqlalchemy import create_engine, text
@@ -45,22 +44,13 @@ logging.basicConfig(
 logger = logging.getLogger("dedup")
 
 # ─── Configuration ─────────────────────────────────────────────────────────────
-def _load_env_file(path: str) -> None:
-    p = Path(path)
-    if not p.exists():
-        return
-    for line in p.read_text().splitlines():
-        line = line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, _, value = line.partition("=")
-        key = key.strip()
-        value = value.strip().strip('"').strip("'")
-        if key and key not in os.environ:
-            os.environ[key] = value
+# Un seul chargeur pour tout le dépôt : env_files (cf. son en-tête).
+import sys  # noqa: E402
 
-for _ep in [".env", "/opt/literev-api/.env", "/opt/literev-api/secrets.env", "/etc/literev/secrets"]:
-    _load_env_file(_ep)
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from env_files import load_env  # noqa: E402
+
+load_env()
 
 DB_URL = os.environ.get("DB_URL") or os.environ.get("DATABASE_URL")
 if not DB_URL:
