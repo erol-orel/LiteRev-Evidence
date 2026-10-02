@@ -15,6 +15,13 @@ metered, without touching the calls themselves.
 `embeddings.create` record `response.usage` into the `llm_usage` table, tagged with the
 name of the function that built the client. Everything else on the client is untouched.
 
+That seam carries two more things, both of which exist because the call sites are many
+and the model is one setting: the model NAME each job uses (`model_for`, so that a switch
+is an environment variable rather than an edit in twenty files) and the request SHAPE the
+named model accepts (`shape_chat_kwargs`, because the gpt-5 generation refuses the
+`max_tokens` and the `temperature` that the gpt-4 generation required). A chat request is
+therefore rewritten on its way out; an embedding request is not.
+
 Three controls, all off by default so that installing this changes no behaviour:
 
   OPENAI_ENABLED=0             refuse every call, immediately, without a request.
@@ -37,6 +44,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import threading
 import time
 from datetime import datetime, timezone
@@ -47,9 +55,15 @@ logger = logging.getLogger("llm-usage")
 # ── Which model does which job ───────────────────────────────────────────────
 # The model name was written out at 27 call sites, which is why two of them were still
 # on gpt-4o-mini long after everything else had moved on: upgrading meant finding and
-# editing all 27, so in practice nobody did. Here they are named by JOB, because the jobs
-# genuinely differ and one model for all of them would be wrong in one direction or the
-# other.
+# editing all 27, so in practice nobody did. Here they are named by JOB, so that a job
+# whose economics differ can be moved on its own.
+#
+# The three jobs happen to share one model today. gpt-5.6-luna is cheaper per token than
+# the gpt-4.1-mini it replaces for `bulk` and `chat` ($0.20/$1.20 per million against
+# $0.40/$1.60) and an order of magnitude cheaper than the gpt-4.1 it replaces for
+# `write` ($2.00/$8.00), so there is no longer a cost argument for a smaller model on the
+# bulk path. What still separates the jobs is how hard the model is asked to think, and
+# that is `reasoning_effort` below, not the name.
 #
 # Changing a model INVALIDATES any measurement made against the old one. The gold
 # standard records which model it validated (scripts/gold_standard.py), and the figures
@@ -58,14 +72,13 @@ _MODEL_ROLES = {
     # Per-article work over the whole corpus: PICO, concepts, epidemiological parameters,
     # cluster summaries, query translation. Thousands of calls, so cost dominates and the
     # output is consumed by code rather than read.
-    "bulk": ("LLM_MODEL_BULK", "gpt-4.1-mini"),
+    "bulk": ("LLM_MODEL_BULK", "gpt-5.6-luna"),
     # Prose a person reads and may quote: the evidence brief, the recommended actions,
     # the variables and model spec. Few calls, and the quality is the product.
-    "write": ("LLM_MODEL_WRITE", "gpt-4.1"),
+    "write": ("LLM_MODEL_WRITE", "gpt-5.6-luna"),
     # The assistant's answers. Interactive, so latency counts as much as quality. These
-    # two call sites were the ones left on gpt-4o-mini; the default now matches `bulk`,
-    # which is both newer and cheaper, so the change is strictly an improvement.
-    "chat": ("LLM_MODEL_CHAT", "gpt-4.1-mini"),
+    # two call sites were the ones left on gpt-4o-mini.
+    "chat": ("LLM_MODEL_CHAT", "gpt-5.6-luna"),
     # CAREFUL. Every vector already in document_chunk.embedding was produced by this
     # model at 1536 dimensions, and vectors from two models are not comparable. Changing
     # it means re-embedding the entire corpus. A model of a different dimension fails
@@ -92,6 +105,204 @@ def models_in_use() -> dict[str, str]:
     asked which models it is actually running, and recorded by any measurement that
     depends on them."""
     return {role: model_for(role) for role in _MODEL_ROLES}
+
+
+# ── The request shape each generation of model accepts ───────────────────────
+# gpt-4.1 took `max_tokens` and any `temperature`. The gpt-5 generation takes neither:
+# `max_tokens` is refused outright (400 "Unsupported parameter ... use
+# `max_completion_tokens` instead"), and a temperature other than the default is refused
+# while the model is reasoning - which it does by default, at effort "medium".
+#
+# Twenty call sites pass `max_tokens` and most pass a temperature. Pointing LLM_MODEL_*
+# at a gpt-5 model without translating the request would therefore 400 EVERY LLM call in
+# the application, and each one would disappear into its own `except Exception` branch:
+# no PICO, no brief, no assistant, no error page, just features that quietly return
+# nothing. So the translation lives here, in the one place every call already passes
+# through, for the same reason the model names do: a call site expresses an intent (a
+# ceiling on the answer, a low temperature) that does not change when the generation
+# answering it changes, and a switch that needs a twenty-file edit does not get made.
+
+#: Families that still take the old shape. A closed set: everything released since
+#: (gpt-5, gpt-6, the o-series) takes the new one, so an UNKNOWN name is assumed new.
+#: That is the direction the API moved, and a wrong guess either way costs one refused
+#: request and a repair learned from it - see `_create_with_repair`.
+_LEGACY_REQUEST_SHAPE = ("gpt-4", "gpt-3.5", "chatgpt-4o", "text-davinci", "davinci",
+                         "babbage", "curie", "ada")
+
+#: Parameters the gpt-5 generation only accepts while it is NOT reasoning.
+_SAMPLING_PARAMS = ("temperature", "top_p", "presence_penalty", "frequency_penalty")
+
+#: Efforts the gpt-5 generation accepts, cheapest first.
+_REASONING_EFFORTS = ("none", "low", "medium", "high", "xhigh", "max")
+
+
+def _model_family(model: str) -> str:
+    """A model name reduced to what the prefixes below can be matched against: no
+    provider prefix (`openai/gpt-5.6-luna`), no fine-tuning wrapper (`ft:gpt-4.1:org`)."""
+    m = (model or "").strip().lower().rsplit("/", 1)[-1]
+    return m[3:] if m.startswith("ft:") else m
+
+
+def legacy_request_shape(model: str) -> bool:
+    """True if this model wants `max_tokens` and accepts a free temperature."""
+    return _model_family(model).startswith(_LEGACY_REQUEST_SHAPE)
+
+
+def reasoning_effort() -> str:
+    """How hard every chat call asks the model to think, or "" to send nothing and let
+    the API choose (which means "medium").
+
+    "none" by default, and that default is a decision with three consequences - each of
+    them the reason for it:
+
+      - a temperature is only accepted while the effort is "none", and this application
+        asks for temperature 0 and seed 42 wherever the answer is parsed as JSON, so the
+        reproducibility of every extraction hangs on it;
+      - reasoning tokens are billed as output and are absent from the answer, so effort
+        "medium" over a corpus of several thousand abstracts spends an unknown multiple
+        of what the extraction appears to cost;
+      - reasoning tokens come out of the SAME ceiling as the answer, so the 300- and
+        800-token ceilings the extraction call sites pass could be consumed entirely by
+        thinking and return an empty string - a silent extraction failure, the worst
+        shape a failure can take here.
+
+    Raise it (LLM_REASONING_EFFORT=low|medium|high|xhigh|max) for prose, knowing that it
+    strips the temperature from every call and needs larger ceilings. The value `default`
+    sends nothing at all and accepts the API's own choice."""
+    raw = (os.getenv("LLM_REASONING_EFFORT") or "none").strip().lower()
+    if raw in _REASONING_EFFORTS:
+        return raw
+    if raw in ("default", "api", "api-default", ""):
+        return ""
+    logger.warning(f"LLM_REASONING_EFFORT={raw!r} is not one of {_REASONING_EFFORTS}; "
+                   "using 'none'")
+    return "none"
+
+
+def shape_chat_kwargs(kwargs: dict) -> dict:
+    """A chat request as the model named in it will actually accept it.
+
+    Pure, and a copy: the caller's dict is never modified."""
+    out = dict(kwargs)
+    model = out.get("model") or ""
+    if legacy_request_shape(model):
+        return out
+    if "max_tokens" in out:
+        # Both present means the caller was explicit; the new name wins and the old one
+        # must still go, because leaving it in is the 400 this whole function exists for.
+        out.setdefault("max_completion_tokens", out["max_tokens"])
+        del out["max_tokens"]
+    effort = out.get("reasoning_effort") or reasoning_effort()
+    if effort:
+        out["reasoning_effort"] = effort
+    if effort != "none":
+        # Reasoning on: these are refused. Dropping them is not a free choice, it is the
+        # only one - but it means the call is no longer reproducible, which is why
+        # `reasoning_effort` is recorded next to every measurement.
+        for param in _SAMPLING_PARAMS:
+            out.pop(param, None)
+    return _apply_repairs(model, out)
+
+
+# ── What the API itself says it will not accept ───────────────────────────────
+#: Repairs learned from the API's own refusals: {model family: {parameter: new name, or
+#: None to drop it}}. The API is the authority on what it accepts and it names the
+#: offending parameter in the error, so the process learns the shape of a model it has
+#: never seen instead of relying on a hand-written table that goes stale with the next
+#: release. Learned once per process, then applied before the request rather than after a
+#: refusal, so the cost of meeting a new model is a handful of 400s, not one per call.
+_REPAIRS: dict[str, dict[str, str | None]] = {}
+_REPAIRS_LOCK = threading.Lock()
+
+_RE_UNSUPPORTED_PARAM = re.compile(r"unsupported parameter:\s*'([^']+)'", re.I)
+_RE_UNSUPPORTED_VALUE = re.compile(r"unsupported value:\s*'([^']+)'", re.I)
+_RE_UNRECOGNIZED = re.compile(
+    r"unrecognized request argument supplied:?\s*'?([A-Za-z0-9_]+)", re.I)
+#: Not the API refusing but the SDK: `create` takes named parameters and no **kwargs, so
+#: an installation that predates `reasoning_effort` raises TypeError before any request.
+#: requirements.txt sets a floor that rules this out, and pip has been known to leave an
+#: old satisfied requirement in place, so the recovery stays: a call without the effort
+#: still works, at the API's own default.
+_RE_UNEXPECTED_KWARG = re.compile(r"unexpected keyword argument '([^']+)'", re.I)
+_RE_USE_INSTEAD = re.compile(r"use '([^']+)' instead", re.I)
+
+#: A refusal may name one parameter at a time, so a request with several problems needs
+#: several rounds. Bounded because each round must END one: the loop cannot run forever.
+_MAX_REPAIRS_PER_CALL = 4
+
+
+def _repair_from_error(exc: Exception, kwargs: dict) -> tuple[str, str | None] | None:
+    """(parameter, replacement name or None to drop) if this error names a parameter we
+    actually sent, else None - in which case the error is the caller's to see.
+
+    Deliberately narrow. A refusal that names something we did not send (a field inside
+    `messages`), or no parameter at all (a rate limit, an oversized context, an outage),
+    must propagate untouched: retrying those is how a bounded loop becomes an unbounded
+    bill."""
+    msg = str(exc)
+    for pattern in (_RE_UNSUPPORTED_PARAM, _RE_UNSUPPORTED_VALUE, _RE_UNRECOGNIZED,
+                    _RE_UNEXPECTED_KWARG):
+        found = pattern.search(msg)
+        if not found:
+            continue
+        param = found.group(1)
+        if param not in kwargs:
+            continue
+        instead = _RE_USE_INSTEAD.search(msg)
+        replacement = instead.group(1) if instead else None
+        if replacement in (param, *kwargs):
+            # Renaming onto a parameter already in the request would overwrite it; the
+            # request is then simply wrong, so drop the refused one.
+            replacement = None
+        return param, replacement
+    return None
+
+
+def _apply_repair(kwargs: dict, param: str, replacement: str | None) -> dict:
+    out = dict(kwargs)
+    value = out.pop(param, None)
+    if replacement:
+        out[replacement] = value
+    return out
+
+
+def _remember_repair(model: str, param: str, replacement: str | None) -> None:
+    family = _model_family(model) or "unknown"
+    with _REPAIRS_LOCK:
+        _REPAIRS.setdefault(family, {})[param] = replacement
+    logger.warning(
+        f"{family} refused {param!r}; "
+        f"{'renaming to ' + replacement if replacement else 'dropping it'} "
+        "from now on in this process. Check LLM_MODEL_* and llm_usage._LEGACY_REQUEST_SHAPE.")
+
+
+def _apply_repairs(model: str, kwargs: dict) -> dict:
+    with _REPAIRS_LOCK:
+        learned = dict(_REPAIRS.get(_model_family(model), {}))
+    for param, replacement in learned.items():
+        if param in kwargs:
+            kwargs = _apply_repair(kwargs, param, replacement)
+    return kwargs
+
+
+def request_policy() -> dict:
+    """How chat requests are shaped before they leave, and what the API has taught this
+    process about the models it is pointed at.
+
+    Reported by /health: a deployment repairing every call is a deployment whose model
+    configuration is wrong, and that is otherwise visible only in the logs."""
+    effort = reasoning_effort()
+    with _REPAIRS_LOCK:
+        learned = {model: {p: (r or "dropped") for p, r in params.items()}
+                   for model, params in _REPAIRS.items()}
+    return {
+        "reasoning_effort": effort or "api-default",
+        "sampling_params": "sent" if effort == "none" else "stripped",
+        "token_ceiling_param": {
+            role: ("max_tokens" if legacy_request_shape(model) else "max_completion_tokens")
+            for role, model in models_in_use().items() if role != "embedding"},
+        "learned_repairs": learned,
+    }
 
 
 #: Set by `configure()` from main.py. Without it, recording is skipped (never fatal).
@@ -253,10 +464,34 @@ def _caller_name(depth: int = 2) -> str:
         return "unknown"
 
 
+def _create_with_repair(create, args: tuple, kwargs: dict):
+    """Make one chat call in the shape the model accepts, and if the API refuses a
+    parameter anyway, do what the refusal says and try again.
+
+    The retry is bounded and strictly shrinking: every round removes one parameter from
+    the request, so at most `_MAX_REPAIRS_PER_CALL` rounds can happen and the last
+    attempt always raises. A refused parameter costs nothing (the request is rejected
+    before any tokens are read), which is what makes retrying it safe to do silently."""
+    kwargs = shape_chat_kwargs(kwargs)
+    for attempt in range(_MAX_REPAIRS_PER_CALL + 1):
+        try:
+            return create(*args, **kwargs)
+        except Exception as exc:
+            repair = (None if attempt == _MAX_REPAIRS_PER_CALL
+                      else _repair_from_error(exc, kwargs))
+            if repair is None:
+                raise
+            param, replacement = repair
+            _remember_repair(kwargs.get("model") or "", param, replacement)
+            kwargs = _apply_repair(kwargs, param, replacement)
+    raise AssertionError("unreachable: the last attempt re-raises")  # pragma: no cover
+
+
 def _wrap(create, purpose: str, kind: str):
     def metered(*args, **kwargs):
         check_allowed(purpose)
-        resp = create(*args, **kwargs)
+        resp = (_create_with_repair(create, args, kwargs) if kind == "chat"
+                else create(*args, **kwargs))
         try:
             model = kwargs.get("model") or getattr(resp, "model", "") or "unknown"
             # A stream is an iterator, not a response object: it has no usage to read
@@ -298,10 +533,27 @@ def MeteredAsyncOpenAI(*args, purpose: str | None = None, **kwargs):
     client = AsyncOpenAI(*args, **kwargs)
     name = purpose or _caller_name()
 
+    async def _acreate_with_repair(create, a: tuple, kw: dict):
+        """Async twin of `_create_with_repair`; same bound, same reasoning."""
+        kw = shape_chat_kwargs(kw)
+        for attempt in range(_MAX_REPAIRS_PER_CALL + 1):
+            try:
+                return await create(*a, **kw)
+            except Exception as exc:
+                repair = (None if attempt == _MAX_REPAIRS_PER_CALL
+                          else _repair_from_error(exc, kw))
+                if repair is None:
+                    raise
+                param, replacement = repair
+                _remember_repair(kw.get("model") or "", param, replacement)
+                kw = _apply_repair(kw, param, replacement)
+        raise AssertionError("unreachable: the last attempt re-raises")  # pragma: no cover
+
     def _wrap_async(create, kind: str):
         async def metered(*a, **kw):
             check_allowed(name)
-            resp = await create(*a, **kw)
+            resp = (await _acreate_with_repair(create, a, kw) if kind == "chat"
+                    else await create(*a, **kw))
             try:
                 model = kw.get("model") or getattr(resp, "model", "") or "unknown"
                 record(f"{name}:{kind}", model,

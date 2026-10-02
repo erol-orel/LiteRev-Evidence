@@ -71,8 +71,14 @@ graph TD
   PostgreSQL full-text search: one tsvector per document in `document_search`,
   kept current by triggers and a background worker (`lexical_search.py`);
   `/health → lexical_search` says which engine a search uses right now.
-- **OpenAI** - embeddings (`text-embedding-3-small`) and chat (`gpt-4.1` /
-  `gpt-4.1-mini` / `gpt-4o-mini`).
+- **OpenAI** - embeddings and chat. The names are not written here because they are
+  not written in the code either: `llm_usage._MODEL_ROLES` maps four JOBS (`bulk`,
+  `write`, `chat`, `embedding`) to models, overridable per job by environment
+  variable, and `/health → models` says what a deployment resolves them to. The same
+  module translates each request into the shape the named model accepts, since the
+  gpt-5 generation refuses the `max_tokens` and the free `temperature` that the gpt-4
+  generation required; `POST /llm-selftest` (write key) proves the resolved models
+  answer.
 - **Cohere** - reranking (`rerank-v3.5`), optional (no-op without the key).
 - **Literature sources** - public APIs queried live when building a corpus.
 - **Terrain feeds** - live situational data (weather, geo, epidemic signals…)
@@ -333,7 +339,7 @@ sequenceDiagram
     API->>T: spawn daemon thread
     API-->>B: {status: started}
     T->>DB: _get_above_threshold_articles(id)  (relevant subset)
-    T->>OAI: gpt-4.1 -> structured evidence brief
+    T->>OAI: the `write` model -> structured evidence brief
     T->>DB: cache brief in scenario_settings.evidence_brief_json
     T->>API: _BRIEF_GENERATION_JOBS[id] = {status: done}
     loop poll

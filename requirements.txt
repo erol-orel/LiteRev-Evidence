@@ -8,7 +8,14 @@ sqlalchemy>=2.0.0
 psycopg>=3.1.0
 # ── Clients externes / LLM ───────────────────────────────────────────────────
 requests>=2.31.0
-openai>=1.0.0
+# The floor is not decorative. `chat.completions.create` in this SDK takes named
+# parameters and NO **kwargs, so a version that predates `max_completion_tokens` and
+# `reasoning_effort` raises TypeError locally, before any request, on every call made to a
+# gpt-5 generation model - which is all of them (llm_usage._MODEL_ROLES). deploy.sh runs
+# `pip install -r requirements.txt`, and pip leaves an already-satisfied requirement
+# alone, so `>=1.0.0` would have kept whatever version the server happened to install
+# first. 1.99 is comfortably past both parameters.
+openai>=1.99.0
 tiktoken>=0.5.0
 # ── Données & ML ─────────────────────────────────────────────────────────────
 numpy>=1.24.0
