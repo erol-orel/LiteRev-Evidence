@@ -68,6 +68,7 @@ import {
   type ThresholdCurve,
   fetchEvidenceGaps,
   type EvidenceGaps,
+  evidenceReportUrl,
   previewScenarioSubset,
   applyScenarioSubset,
   fetchScenarioSubsetState,
@@ -6147,6 +6148,19 @@ ${llm.future_research ? `<h3>${t("scenarioDetail.evidences.pdf.futureResearch")}
               {exporting ? <Loader2 size={12} className="animate-spin"/> : <Download size={12}/>}
               {exporting ? t("scenarioDetail.evidences.generating") : t("scenarioDetail.evidences.exportPdf")}
             </button>
+          )}
+          {briefData && (
+            /* Le rapport citable : markdown assemblé côté serveur (api/report.py), avec
+               citations renumérotées, tableau des affirmations, matrice de lacunes et
+               bibliographie construite depuis la base. Un lien plutôt qu'un fetch : le
+               endpoint renvoie déjà une pièce jointe, et le navigateur sait faire. */
+            <a href={evidenceReportUrl(scenarioId)}
+              download
+              className="flex items-center gap-2 rounded-2xl border border-brand-500/30 bg-brand-500/10 hover:bg-brand-500/20 text-brand-300 font-semibold px-4 py-2 text-xs transition"
+              title={t("scenarioDetail.evidences.exportReportHint")}>
+              <FileText size={12}/>
+              {t("scenarioDetail.evidences.exportReport")}
+            </a>
           )}
         </div>
       </div>

@@ -1045,6 +1045,8 @@ export const fr = {
       clinicalContext: "Contexte clinique",
       keyFindings: "Résultats clés",
       evidenceSynthesis: "Synthèse des évidences",
+      exportReport: "Rapport citable (.md)",
+      exportReportHint: "Document markdown : méthodes, citations renumérotées, tableau des affirmations, matrice de lacunes et bibliographie construite depuis la base.",
       gaps: {
         title: "Lacunes calculées (matrice de concepts)",
         explain: "Nombre d'articles pertinents associant chaque concept en ligne à chaque concept en colonne. Compté en SQL sur la TOTALITÉ du sous-ensemble pertinent, sans LLM : une case vide signifie qu'aucun article de ce corpus ne traite les deux ensemble.",

@@ -1047,6 +1047,8 @@ export const en: Translations = {
       clinicalContext: "Clinical context",
       keyFindings: "Key findings",
       evidenceSynthesis: "Evidence synthesis",
+      exportReport: "Citable report (.md)",
+      exportReportHint: "Markdown document: methods, renumbered citations, claim table, gap matrix and a bibliography built from the database.",
       gaps: {
         title: "Computed gaps (concept matrix)",
         explain: "How many relevant articles pair each row concept with each column concept. Counted in SQL over the WHOLE relevant subset, with no LLM: an empty cell means no article in this corpus covers both together.",
