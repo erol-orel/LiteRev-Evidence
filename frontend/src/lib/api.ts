@@ -2317,6 +2317,24 @@ export interface EvidenceGaps {
  * would. Built here because every other URL in the app is, and `API_BASE_URL` stays
  * private to this module.
  */
+/**
+ * Which study design maps to which level of evidence, and why. Served from the same table
+ * the distribution charts and the claim grading are computed from, so the legend cannot
+ * drift from the behaviour it explains.
+ */
+export interface StudyDesignVocabulary {
+  levels: string[];
+  note: string;
+  sources: string[];
+  types: Array<{ key: string; label: string; grade: string; why: string; mesh: string }>;
+}
+
+export async function fetchStudyDesignVocabulary(lang: string): Promise<StudyDesignVocabulary> {
+  const r = await safeFetch(`${API_BASE_URL}/study-design-vocabulary?lang=${encodeURIComponent(lang)}`);
+  if (!r.ok) throw new Error(httpMessage(r.status));
+  return r.json();
+}
+
 export function evidenceReportUrl(scenarioId: string): string {
   return `${API_BASE_URL}/user-scenarios/${scenarioId}/evidence-report?download=true`;
 }

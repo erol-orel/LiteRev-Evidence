@@ -65,7 +65,15 @@ def extract_pico_batch(
         "You are a systematic review expert. "
         "Extract PICO elements and return ONLY valid JSON:\n"
         '{"P":"Population","I":"Intervention","C":"Comparator or Not specified",'
-        '"O":"Outcome(s)","study_design":"RCT|Cohort|Systematic review|etc",'
+        '"O":"Outcome(s)",'
+        '"study_design":"UN SEUL de: Randomized controlled trial | Clinical trial | '
+        'Non-randomized trial | Systematic review | Meta-analysis | Cohort study | '
+        'Case-control study | Cross-sectional study | Surveillance | Case report | '
+        'Modelling study | Qualitative study | Guideline | Narrative review | '
+        'Preclinical | Not stated",'
+        '# Pour une revue, PRÉCISE ce qu\'elle inclut quand l\'abstract le dit '
+        '(ex. "Systematic review of cohort studies") : le niveau de preuve en dépend.'
+        ''
         '"pico_confidence":0.0-1.0,"pico_notes":""}\n'
         "Be concise (max 2 sentences per field). Return ONLY the JSON."
     )

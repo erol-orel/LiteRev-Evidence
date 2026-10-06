@@ -3,117 +3,50 @@
 The brief used to carry ONE `evidence_level` for everything it said, so a sentence resting
 on three randomised trials and one resting on a single cross-sectional survey read with
 identical authority. Commercial reports grade per claim but have the model state the grade
-in its own prose ("Strong - repeated across reviews"), which asks the thing being appraised
-to do the appraising.
+in its own prose, which asks the thing being appraised to do the appraising.
 
-So the strength is computed, from the designs of the articles the model cited and the
-ceiling the whole corpus allows, by rules a reader can check. These tests are those rules.
-They are pure: no LLM, no database.
+So the strength is computed: from the designs of the articles the model cited, and capped
+by the ceiling the whole corpus allows.
 
-What is deliberately NOT claimed anywhere here: that this is GRADE. GRADE weighs risk of
-bias, inconsistency, indirectness, imprecision and publication bias, none of which follows
-from a design label.
+The DESIGN rules themselves (which design is which level, and why) live in
+`api/study_design.py` and are tested in `tests/test_study_design.py`, including against
+the generated SQL. This file tests only what is specific to a CLAIM: the three rules that
+turn a set of cited designs into one label, and the verification of the citations.
 """
 import pytest
 
-from api.evidence import (_STRENGTH_ORDER, attach_claim_strength, claim_strength,
-                          corpus_ceiling, design_level)
-
-
-# ── what one design can support ──────────────────────────────────────────────
-@pytest.mark.parametrize("design,expected", [
-    ("Randomized controlled trial", "Fort"),
-    ("essai randomisé contrôlé", "Fort"),
-    ("Meta-analysis", "Fort"),
-    ("Systematic review and meta-analysis of RCTs", "Fort"),
-    ("revue systématique", "Fort"),
-    ("Non-randomized controlled trial", "Faible"),
-    ("quasi-experimental study", "Faible"),
-    ("Prospective cohort study", "Faible"),
-    ("étude de cohorte rétrospective", "Faible"),
-    ("case-control study", "Faible"),
-    ("cross-sectional survey", "Faible"),
-    ("étude transversale", "Faible"),
-    ("surveillance data", "Faible"),
-    ("ecological study", "Faible"),
-])
-def test_a_design_supports_what_its_kind_supports(design, expected):
-    assert design_level(design) == expected
-
-
-@pytest.mark.parametrize("design", [
-    None, "", "   ", "Case report", "série de cas", "Expert opinion", "editorial",
-    "modelling study", "Non classifié", "unknown",
-])
-def test_anything_unrecognised_supports_nothing(design):
-    """Most of a corpus has no usable design label. Reading those as adequate is how an
-    observational corpus comes to carry a strong recommendation."""
-    assert design_level(design) == "Insuffisant"
-
-
-def test_a_non_randomised_trial_is_not_read_as_a_randomised_one():
-    """The inversion a keyword table produced and this test caught: "Non-randomized
-    controlled trial" contains "randomi", so it graded as the strongest evidence there is.
-    The negation has to be tested before the thing it negates.
-
-    They land on "Faible", the same as a quasi-experimental study, because they are the
-    same thing described twice and GRADE starts a non-randomised study of an intervention
-    at low certainty."""
-    for design in ("Non-randomized controlled trial", "non randomised trial",
-                   "essai non randomisé", "nonrandomized intervention study",
-                   "quasi-experimental study"):
-        assert design_level(design) == "Faible", design
-
-
-def test_a_stated_absence_of_randomisation_scores_below_an_unstated_one():
-    """Deliberate, and worth pinning: "clinical trial" says nothing about allocation and
-    scores Modéré, while "non-randomised controlled trial" says it was not randomised and
-    scores Faible. Rating the known weakness below the unknown is the direction that
-    cannot flatter a corpus."""
-    assert design_level("clinical trial") == "Modéré"
-    assert design_level("non-randomised clinical trial") == "Faible"
-
-
-def test_a_synthesis_inherits_from_what_it_includes():
-    """GRADE does not let a review upgrade its inputs. A meta-analysis of cohort studies
-    is observational evidence that has been pooled, not trial evidence, and reading it as
-    "Fort" is how a corpus of observational reviews comes to carry a strong
-    recommendation."""
-    assert design_level("systematic review and meta-analysis of randomised trials") == "Fort"
-    assert design_level("meta-analysis of cohort studies") == "Faible"
-    assert design_level("systematic review of observational studies") == "Faible"
-    assert design_level("revue systématique d'études de cohorte") == "Faible"
-
-
-def test_a_trial_that_does_not_say_randomised_is_only_moderate():
-    """"Controlled trial" is an intervention study; nothing in the label says anyone was
-    randomised, and assuming it would be generous in the one direction that matters."""
-    assert design_level("controlled trial") == "Modéré"
-    assert design_level("clinical trial") == "Modéré"
-    assert design_level("randomized controlled trial") == "Fort"
+from api.evidence import attach_claim_strength, claim_strength, corpus_ceiling
+from api.study_design import (LEVEL_HIGH, LEVEL_LOW, LEVEL_MODERATE, LEVEL_NA,
+                              LEVEL_ORDER, LEVEL_UNKNOWN, LEVEL_VERY_LOW)
 
 
 # ── the corpus ceiling ───────────────────────────────────────────────────────
 def test_the_ceiling_is_the_best_design_in_the_corpus():
     label, sentence = corpus_ceiling(["cohort study", "case-control", "RCT"])
-    assert label == "Fort" and "essais randomisés" in sentence
+    assert label == LEVEL_HIGH and "essais randomisés" in sentence
 
 
-def test_an_observational_corpus_caps_at_faible():
+def test_an_observational_corpus_caps_at_low():
     label, sentence = corpus_ceiling(["cohort study", "cross-sectional", "case report"])
-    assert label == "Faible" and "observationnel" in sentence
+    assert label == LEVEL_LOW and "observationnel" in sentence
+
+
+def test_a_corpus_of_reviews_of_observational_studies_does_not_cap_high():
+    """The production case: 108 systematic reviews in a corpus holding 2 trials used to
+    make the whole corpus look capable of strong evidence."""
+    label, _ = corpus_ceiling(["systematic review of cohort studies", "meta-analysis"])
+    assert label == LEVEL_LOW
 
 
 def test_a_corpus_with_no_designs_at_all_says_so():
     label, sentence = corpus_ceiling([])
-    assert label == "Insuffisant" and "Insuffisante" in sentence
-    assert corpus_ceiling(["Non classifié", ""])[0] == "Insuffisant"
+    assert label == LEVEL_UNKNOWN and "Non évaluable" in sentence
 
 
-# ── grading one claim ────────────────────────────────────────────────────────
+# ── the three claim rules ────────────────────────────────────────────────────
 def test_several_trials_support_a_strong_claim():
-    got = claim_strength(["RCT", "RCT", "meta-analysis"])
-    assert got["strength"] == "Fort"
+    got = claim_strength(["RCT", "RCT", "meta-analysis of randomised trials"])
+    assert got["strength"] == LEVEL_HIGH
     assert got["basis"]["n_articles"] == 3
     assert got["basis"]["downgraded_single_study"] is False
 
@@ -122,33 +55,47 @@ def test_a_single_study_drops_one_level():
     """One study is a result, not a body of evidence. A lone randomised trial must not
     read like a settled question."""
     got = claim_strength(["Randomized controlled trial"])
-    assert got["strength"] == "Modéré"
-    assert got["basis"]["from_designs"] == "Fort"
+    assert got["strength"] == LEVEL_MODERATE
+    assert got["basis"]["from_designs"] == LEVEL_HIGH
     assert got["basis"]["downgraded_single_study"] is True
 
 
 def test_a_single_observational_study_drops_too():
-    assert claim_strength(["cohort study"])["strength"] == "Insuffisant"
+    assert claim_strength(["cohort study"])["strength"] == LEVEL_VERY_LOW
+
+
+def test_a_single_study_off_the_scale_is_not_stepped_down():
+    """A guideline or a model has no rung to fall from, and pretending otherwise would
+    quietly turn "not applicable" into "very low"."""
+    for design in ("WHO guideline", "SEIR modelling study", "qualitative interviews"):
+        got = claim_strength([design])
+        assert got["strength"] == LEVEL_NA, design
+        assert got["basis"]["downgraded_single_study"] is False, design
 
 
 def test_the_strongest_cited_design_sets_the_level():
     got = claim_strength(["case report", "cohort study", "RCT"])
-    assert got["basis"]["from_designs"] == "Fort" and got["strength"] == "Fort"
+    assert got["basis"]["from_designs"] == LEVEL_HIGH and got["strength"] == LEVEL_HIGH
 
 
-def test_the_corpus_ceiling_caps_the_claim(caplog):
-    """THE rule that matters: a claim cannot be more certain than the corpus it is drawn
-    from, whatever the model cited. If an observational corpus produces a claim citing
-    something the model believes is a trial, the ceiling still holds."""
-    got = claim_strength(["RCT", "RCT"], ceiling="Faible")
-    assert got["strength"] == "Faible"
+def test_the_corpus_ceiling_caps_the_claim():
+    """A claim cannot be more certain than the corpus it is drawn from, whatever the model
+    cited."""
+    got = claim_strength(["RCT", "RCT"], ceiling=LEVEL_LOW)
+    assert got["strength"] == LEVEL_LOW
     assert got["basis"]["capped_by_corpus"] is True
-    assert got["basis"]["from_designs"] == "Fort", "the input is still reported"
+    assert got["basis"]["from_designs"] == LEVEL_HIGH, "the input is still reported"
+
+
+def test_a_ceiling_never_raises_a_claim():
+    """It is a ceiling, not a floor: a weak claim in a strong corpus stays weak."""
+    got = claim_strength(["cohort study", "cohort study"], ceiling=LEVEL_HIGH)
+    assert got["strength"] == LEVEL_LOW and got["basis"]["capped_by_corpus"] is False
 
 
 def test_a_claim_citing_nothing_asserts_nothing():
     got = claim_strength([])
-    assert got["strength"] == "Insuffisant"
+    assert got["strength"] == LEVEL_UNKNOWN
     assert got["basis"]["n_articles"] == 0
     assert "aucun article" in got["basis"]["note"]
 
@@ -159,17 +106,17 @@ def test_the_basis_counts_the_designs_it_saw():
 
 
 def test_a_blank_design_is_counted_rather_than_dropped():
-    """Two cited articles with no design label are two articles, and the claim is graded
-    on two. Dropping them would quietly turn a thin claim into no claim."""
+    """Two cited articles with no design label are two articles. Dropping them would
+    quietly turn a thin claim into no claim."""
     got = claim_strength([None, ""])
     assert got["basis"]["n_articles"] == 2
     assert got["basis"]["designs"] == {"non renseigné": 2}
-    assert got["strength"] == "Insuffisant"
+    assert got["strength"] == LEVEL_UNKNOWN
 
 
-def test_every_strength_is_one_of_the_four_labels():
-    for designs in ([], ["RCT"], ["cohort"], ["x"], ["RCT", "cohort"]):
-        assert claim_strength(designs)["strength"] in _STRENGTH_ORDER
+def test_every_strength_is_on_the_published_scale():
+    for designs in ([], ["RCT"], ["cohort"], ["x"], ["RCT", "cohort"], ["guideline"]):
+        assert claim_strength(designs)["strength"] in LEVEL_ORDER
 
 
 # ── verifying the citations ──────────────────────────────────────────────────
@@ -185,15 +132,15 @@ def test_a_claim_keeps_only_citations_the_corpus_can_confirm():
           "reasoning": "two designs"}], _CORPUS)
     assert got[0]["article_ids"] == [11, 22]
     assert got[0]["unverified_ids"] == [999], "an invented id is reported, not swallowed"
-    assert got[0]["strength"] == "Fort"
+    assert got[0]["strength"] == LEVEL_HIGH
 
 
 def test_a_claim_citing_only_invented_articles_asserts_nothing():
-    """The failure mode worth catching: a confident sentence whose every citation is
-    fabricated would otherwise read as confidently as a real one."""
+    """A confident sentence whose every citation is fabricated would otherwise read as
+    confidently as a real one."""
     got = attach_claim_strength(
         [{"claim": "Something sweeping", "article_ids": [404, 405]}], _CORPUS)
-    assert got[0]["strength"] == "Insuffisant"
+    assert got[0]["strength"] == LEVEL_UNKNOWN
     assert got[0]["article_ids"] == [] and got[0]["unverified_ids"] == [404, 405]
 
 
@@ -226,33 +173,28 @@ def test_junk_in_the_claims_array_does_not_break_the_brief():
     assert attach_claim_strength(None, _CORPUS) == []
     assert attach_claim_strength(["a string", 42, None], _CORPUS) == []
     assert attach_claim_strength([{"claim": "ok", "article_ids": "not a list"}],
-                                 _CORPUS)[0]["strength"] == "Insuffisant"
+                                 _CORPUS)[0]["strength"] == LEVEL_UNKNOWN
 
 
 def test_the_ceiling_reaches_every_claim():
     got = attach_claim_strength(
         [{"claim": "a", "article_ids": [11, 11]}, {"claim": "b", "article_ids": [22]}],
-        _CORPUS, ceiling="Faible")
-    assert [c["strength"] for c in got] == ["Faible", "Insuffisant"]
+        _CORPUS, ceiling=LEVEL_LOW)
+    assert [c["strength"] for c in got] == [LEVEL_LOW, LEVEL_VERY_LOW]
 
 
 # ── the wiring the pure tests cannot see ─────────────────────────────────────
 def test_the_generator_grades_the_claims_itself():
-    """The pure rules are worth nothing if the generated brief keeps the model's own
-    claims array. The grading has to happen after the model and outside its reach."""
     import inspect
 
     from api import evidence
 
     src = inspect.getsource(evidence._generate_evidence_brief_llm)
     assert 'brief["claims"] = attach_claim_strength(' in src
-    assert "corpus_ceiling(" in src, "the ceiling must come from the whole corpus"
+    assert "corpus_ceiling(" in src
 
 
 def test_the_prompt_asks_for_citable_ids_and_forbids_self_grading():
-    """Two instructions carry the whole design: cite ids that exist, and do not state a
-    strength. Without the first there is nothing to verify; without the second the model
-    grades its own work."""
     import inspect
 
     from api import evidence
@@ -260,5 +202,15 @@ def test_the_prompt_asks_for_citable_ids_and_forbids_self_grading():
     src = inspect.getsource(evidence._generate_evidence_brief_llm)
     assert '"article_ids"' in src
     assert "N'INDIQUE PAS de niveau de preuve" in src
-    # And the reproduced articles must carry the id the prompt asks it to cite.
     assert '"id": a.get("id")' in src
+
+
+def test_the_module_no_longer_carries_its_own_design_table():
+    """It did, and `api/documents.py` carried a second one in SQL. They disagreed."""
+    import inspect
+
+    from api import evidence
+
+    src = inspect.getsource(evidence)
+    assert "from .study_design import" in src
+    assert "_NOT_RANDOMISED = (" not in src and "_DESIGN_LEVELS = (" not in src

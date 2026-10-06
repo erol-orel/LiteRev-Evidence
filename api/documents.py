@@ -152,45 +152,20 @@ def _strategy_is_degraded(strategy: object, query: str | None = None) -> bool:
 # centaines de variantes uniques). On regroupe en un jeu canonique fixe au moment
 # de l'affichage (les valeurs brutes study_design / pico_json restent intactes).
 # `d` = libellé brut en minuscules (cf. _study_design_distinct_cte). 1er match gagne.
-_STUDY_DESIGN_CASE = """CASE
-        WHEN d = '' THEN 'Non spécifié'
-        WHEN d LIKE '%systematic review%' OR d LIKE '%meta-analysis%' OR d LIKE '%meta analysis%' OR d LIKE '%scoping review%' OR d LIKE '%umbrella review%' THEN 'Revue systématique / Méta-analyse'
-        WHEN d LIKE '%non-randomi%' OR d LIKE '%non randomi%' OR d LIKE '%quasi-experimental%' OR d LIKE '%quasi experimental%' OR d LIKE '%interrupted time series%' OR d LIKE '%controlled before%' THEN 'Essai non randomisé / Quasi-expérimental'
-        WHEN d LIKE '%randomi%' OR d LIKE 'rct%' THEN 'Essai contrôlé randomisé (RCT)'
-        WHEN d LIKE '%controlled trial%' OR d LIKE '%clinical trial%' THEN 'Essai non randomisé / Quasi-expérimental'
-        WHEN d LIKE '%case-control%' OR d LIKE '%case control%' THEN 'Cas-témoins'
-        WHEN d LIKE '%cross-sectional%' OR d LIKE '%cross sectional%' THEN 'Transversale'
-        WHEN d LIKE '%case report%' OR d LIKE '%case series%' THEN 'Cas clinique / Série de cas'
-        WHEN d LIKE '%cohort%' OR d LIKE '%longitudinal%' OR d LIKE '%observational%' OR d LIKE '%retrospective%' OR d LIKE '%prospective%' OR d LIKE '%registry%' OR d LIKE '%surveillance%' THEN 'Cohorte / Observationnelle'
-        WHEN d LIKE '%model%' OR d LIKE '%simulation%' OR d LIKE '%forecast%' OR d LIKE '%machine learning%' OR d LIKE '%in silico%' OR d LIKE '%predictive%' THEN 'Modélisation / Simulation'
-        WHEN d LIKE '%qualitative%' OR d LIKE '%interview%' OR d LIKE '%focus group%' THEN 'Qualitative'
-        WHEN d LIKE '%narrative review%' OR d LIKE '%literature review%' OR d LIKE '%guideline%' OR d LIKE '%review%' THEN 'Revue narrative / Recommandation'
-        WHEN d LIKE '%in vitro%' OR d LIKE '%in vivo%' OR d LIKE '%animal%' OR d LIKE '%experimental%' OR d LIKE '%laboratory%' OR d LIKE '%murine%' OR d LIKE '% mice%' THEN 'Expérimentale / Préclinique'
-        ELSE 'Autre'
-      END"""
+# Les deux CASE ci-dessous sont GÉNÉRÉS depuis `api/study_design`, l'unique table du
+# vocabulaire et de l'échelle GRADE. Ils étaient écrits à la main ici, et une seconde copie
+# des mêmes règles vivait en Python dans `api/evidence.py` ; elles ont divergé, et
+# l'interface affichait une distribution de niveaux que la notation des affirmations ne
+# reproduisait pas. `tests/test_study_design.py` exécute le SQL généré et le Python sur les
+# mêmes chaînes et exige qu'ils répondent pareil.
+#
+# Ce que la correction change, concrètement : une revue systématique n'est plus « Forte »
+# par sa seule forme. Sur un corpus réel, 108 revues d'études observationnelles
+# s'affichaient comme preuves fortes alors qu'il ne contenait que 2 essais randomisés.
+from .study_design import design_case as _design_case, grade_case as _grade_case
 
-# Niveau de preuve GRADE (strict), déterminé par le DEVIS d'étude - PAS par un
-# score composite (citations/récence/échantillon servent au classement, pas à la
-# certitude). En GRADE :
-#   - essais randomisés + synthèses d'essais  → certitude ÉLEVÉE  (« Forte »)
-#   - essais contrôlés non randomisés / quasi-expérimental / recommandations
-#                                             → certitude MODÉRÉE (« Modérée »)
-#   - TOUTES les études observationnelles (cohortes, cas-témoins, transversales,
-#     séries/rapports de cas, registres, surveillance…) partent en certitude
-#     FAIBLE (« Faible ») ; idem revues narratives / avis d'experts.
-# `d` = libellé brut du devis en minuscules. Le 1er match gagne : on teste
-# « non-randomi… » avant « randomi… » pour ne pas surclasser les essais non
-# randomisés. Devis inconnus / modélisation / qualitatif → « Non évaluée ».
-_GRADE_LEVEL_CASE = """CASE
-        WHEN d = '' THEN 'Non évaluée'
-        WHEN d LIKE '%non-randomi%' OR d LIKE '%non randomi%' OR d LIKE '%quasi-experimental%' OR d LIKE '%quasi experimental%' OR d LIKE '%interrupted time series%' OR d LIKE '%controlled before%' THEN 'Modérée'
-        WHEN d LIKE '%systematic review%' OR d LIKE '%meta-analysis%' OR d LIKE '%meta analysis%' OR d LIKE '%umbrella review%' THEN 'Forte'
-        WHEN d LIKE '%randomi%' OR d LIKE 'rct%' THEN 'Forte'
-        WHEN d LIKE '%controlled trial%' OR d LIKE '%clinical trial%' OR d LIKE '%guideline%' OR d LIKE '%recommendation%' THEN 'Modérée'
-        WHEN d LIKE '%cohort%' OR d LIKE '%longitudinal%' OR d LIKE '%observational%' OR d LIKE '%retrospective%' OR d LIKE '%prospective%' OR d LIKE '%registry%' OR d LIKE '%surveillance%' OR d LIKE '%case-control%' OR d LIKE '%case control%' OR d LIKE '%cross-sectional%' OR d LIKE '%cross sectional%' OR d LIKE '%case report%' OR d LIKE '%case series%' OR d LIKE '%ecological%' OR d LIKE '%survey%' THEN 'Faible'
-        WHEN d LIKE '%narrative%' OR d LIKE '%literature review%' OR d LIKE '%scoping review%' OR d LIKE '%editorial%' OR d LIKE '%commentary%' OR d LIKE '%opinion%' OR d LIKE '%review%' THEN 'Faible'
-        ELSE 'Non évaluée'
-      END"""
+_STUDY_DESIGN_CASE = _design_case("d")
+_GRADE_LEVEL_CASE = _grade_case("d")
 
 # Type d'article normalisé → UN vocabulaire contrôlé aligné sur ce que PubMed / Crossref /
 # OpenAlex expriment (liste fusionnée validée). Le champ « Type » brut (source_type) est
@@ -408,6 +383,29 @@ class ChunkIn(BaseModel):
 # ─────────────────────────────────────────────────────────────────────────────
 # Write endpoints (protected)
 # ─────────────────────────────────────────────────────────────────────────────
+@app.get("/study-design-vocabulary")
+def get_study_design_vocabulary(lang: str = "fr") -> dict[str, Any]:
+    """Which study design maps to which level of evidence, and why.
+
+    The question a reader of the two distribution charts has to be able to answer, and
+    could not: the mapping lived in a SQL CASE nobody outside the repository reads. This
+    serves the SAME table the charts and the claim grading are computed from, so the
+    explanation cannot drift from the behaviour it explains.
+
+    Each row names its MeSH provenance. `note` says plainly that this is the ceiling a
+    design allows and not a completed GRADE assessment, because the five domains GRADE
+    weighs cannot be read off a design label."""
+    from .study_design import GRADE_NOTE, LEVEL_ORDER, vocabulary
+
+    return {"levels": list(LEVEL_ORDER), "note": GRADE_NOTE,
+            "sources": [
+                "NLM MeSH Publication Types, tree V03 Study Characteristics",
+                "NLM MeSH Epidemiologic Study Characteristics, tree E05.318",
+                "GRADE: randomised trials start at high certainty, observational studies at low",
+            ],
+            "types": vocabulary(lang)}
+
+
 @app.post("/documents")
 def create_document(
     doc: DocumentIn, _: None = Depends(require_api_key)
