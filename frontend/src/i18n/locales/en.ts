@@ -438,6 +438,8 @@ export const en: Translations = {
       hidePrompt: "Hide",
       showPrompt: "Show",
       extractionPromptSuffix: "the evidence extraction prompt",
+      strategyLoading: "Loading the boolean strategy\u2026",
+      strategyIsWhatWasSent: "The query was written in natural language, then translated into boolean: the query below is the one sent to the databases, and it defines the corpus.",
       booleanStrategy: "Boolean Strategy",
       generateRefresh: "Generate / Refresh",
       generalQuery: "General query",

@@ -300,3 +300,46 @@ def test_an_empty_search_is_not_a_filter(db_conn):
         assert got["filtered_total"] is None and got["total"] == 4
     finally:
         _cleanup(db_conn)
+
+
+# ── la requête sauvegardée est classée pour ce qu'elle est ───────────────────
+# Le sélecteur de l'interface vaut « booléen » par défaut : une question en langage
+# naturel était donc rangée sous BOOLÉEN (1) / NATUREL (0), alors que la recherche,
+# elle, l'avait traduite avant d'interroger les bases.
+
+def _detail_of(db_conn, query: str, mode: str):
+    with db_conn.cursor() as cur:
+        cur.execute("DELETE FROM user_scenarios WHERE id = %s", (SID,))
+        cur.execute("INSERT INTO user_scenarios (id, name, query, mode, created_at, updated_at) "
+                    "VALUES (%s, 'Kind', %s, %s, NOW(), NOW())", (SID, query, mode))
+    return main.get_user_scenario_detail(SID)
+
+
+def test_a_natural_language_question_is_not_filed_as_a_boolean_query(db_conn):
+    try:
+        d = _detail_of(db_conn, "What are the early warning indicators for respiratory infections?", "boolean")
+        assert d["boolean_queries"] == []
+        assert d["nl_queries"] == ["What are the early warning indicators for respiratory infections?"]
+    finally:
+        _cleanup(db_conn)
+
+
+def test_a_real_boolean_query_is_filed_as_one_whatever_the_stored_mode(db_conn):
+    try:
+        d = _detail_of(db_conn, '("respiratory infection"[tiab]) AND wastewater', "hybrid")
+        assert d["boolean_queries"] == ['("respiratory infection"[tiab]) AND wastewater']
+        assert d["nl_queries"] == []
+    finally:
+        _cleanup(db_conn)
+
+
+def test_the_same_heuristic_as_the_search_itself(db_conn):
+    """Classer autrement ici que dans la recherche remettrait les deux en désaccord."""
+    from api.search import _looks_boolean
+    for q in ("dengue AND vaccine", '"severe dengue"', "(a OR b)", "x[tiab]",
+              "What works to prevent dengue?", "dengue vaccine efficacy"):
+        try:
+            d = _detail_of(db_conn, q, "boolean")
+            assert bool(d["boolean_queries"]) is _looks_boolean(q), q
+        finally:
+            _cleanup(db_conn)

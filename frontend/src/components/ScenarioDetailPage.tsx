@@ -249,7 +249,7 @@ function QueriesSection({ detail, scenarioId }: { detail: ScenarioDetail; scenar
     return arr;
   }, [liveData, liveSort]);
 
-  function loadStrategy() {
+  const loadStrategy = useCallback(() => {
     if (!isUserScenario(scenarioId)) return;
     setStrategyLoading(true);
     setStrategyError(null);
@@ -257,7 +257,13 @@ function QueriesSection({ detail, scenarioId }: { detail: ScenarioDetail; scenar
       .then(setStrategy)
       .catch(e => setStrategyError(e.message))
       .finally(() => setStrategyLoading(false));
-  }
+  }, [scenarioId]);
+
+  // La stratégie booléenne est AFFICHÉE à l'ouverture. Elle n'était chargée que par le
+  // bouton « Générer / Rafraîchir », si bien que le panneau restait vide : on ne voyait
+  // nulle part la requête booléenne réellement envoyée aux bases, alors qu'elle est
+  // générée et enregistrée pendant la recherche (user_scenarios.search_strategy).
+  useEffect(() => { loadStrategy(); }, [loadStrategy]);
 
   function runLiveSearch() {
     if (!isUserScenario(scenarioId)) return;
@@ -424,6 +430,16 @@ function QueriesSection({ detail, scenarioId }: { detail: ScenarioDetail; scenar
             </button>
           </div>
           {strategyError && <p className="text-xs text-rose-400">{strategyError}</p>}
+          {strategyLoading && !strategy && (
+            <p className="text-xs text-white/40">{t("scenarioDetail.queries.strategyLoading")}</p>
+          )}
+          {/* Une requête sauvegardée en langage naturel a été TRADUITE avant d'interroger
+              les bases : c'est cette traduction, ci-dessous, qui a défini le corpus. */}
+          {strategy && detail.nl_queries && detail.nl_queries.length > 0 && (
+            <p className="mb-3 rounded-xl border border-violet-500/20 bg-violet-500/5 px-3 py-2 text-[11px] text-violet-200/80 leading-5">
+              {t("scenarioDetail.queries.strategyIsWhatWasSent")}
+            </p>
+          )}
           {strategy && (
             <div className="space-y-3">
               <div className="rounded-xl border border-violet-500/15 bg-violet-500/5 p-3">

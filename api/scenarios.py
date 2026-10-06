@@ -31,6 +31,7 @@ from .search import (
     _facet_ops,
     _generate_search_strategy,
     _load_prisma_identification,
+    _looks_boolean,
     _normalize_sub_queries,
 )
 from .alerts import _clean_email, _ensure_alert_subscription
@@ -797,10 +798,15 @@ def get_user_scenario_detail(scenario_id: str, lang: str | None = Query(None)) -
         facets = [{"kind": s["kind"], "text": s["text"],
                    "op": (None if i == 0 else _ops[i - 1])} for i, s in enumerate(_sub)]
     else:
-        _mode = (row.get("mode") or "hybrid").lower()
+        # La requête sauvegardée est classée pour ce qu'elle EST, par l'heuristique que
+        # la recherche applique elle-même (_looks_boolean), et non par le `mode` stocké :
+        # le sélecteur de l'interface vaut « booléen » par défaut, si bien qu'une question
+        # en langage naturel était rangée sous BOOLÉEN (1) / NATUREL (0) alors que la
+        # recherche, elle, l'avait bel et bien traduite avant d'interroger les bases.
         _saved = [query_text] if query_text else []
-        boolean_queries = _saved if _mode == "boolean" else []
-        nl_queries = [] if _mode == "boolean" else _saved
+        _is_boolean = bool(query_text) and _looks_boolean(query_text)
+        boolean_queries = _saved if _is_boolean else []
+        nl_queries = [] if _is_boolean else _saved
         facets = []
 
     return {

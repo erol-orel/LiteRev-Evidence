@@ -436,6 +436,8 @@ export const fr = {
       hidePrompt: "Masquer",
       showPrompt: "Afficher",
       extractionPromptSuffix: "le prompt d'extraction d'évidence",
+      strategyLoading: "Chargement de la stratégie booléenne\u2026",
+      strategyIsWhatWasSent: "La requête a été posée en langage naturel, puis traduite en booléen : c'est la requête ci-dessous qui a été envoyée aux bases et qui définit le corpus.",
       booleanStrategy: "Stratégie Booléenne",
       generateRefresh: "Générer / Rafraîchir",
       generalQuery: "Requête générale",
