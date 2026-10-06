@@ -626,6 +626,10 @@ export const en: Translations = {
       loadMore: "Load {n} more",
       distributionByYear: "Distribution by Year",
       literatureSources: "Literature Sources",
+      yearHistogramEmpty: "No year recorded in this corpus.",
+      yearHistogramTooltip: "{year} · {n} article(s)",
+      yearHistogramPeak: "peak: {n} in {year}",
+      yearHistogramSpan: "{from} to {to} · {n} years",
     },
     articleRow: {
       fulltext: "Full-text",

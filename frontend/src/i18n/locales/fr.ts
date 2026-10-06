@@ -624,6 +624,10 @@ export const fr = {
       loadMore: "Charger {n} de plus",
       distributionByYear: "Distribution par Année",
       literatureSources: "Sources Littérature",
+      yearHistogramEmpty: "Aucune année renseignée dans ce corpus.",
+      yearHistogramTooltip: "{year} · {n} article(s)",
+      yearHistogramPeak: "pic : {n} en {year}",
+      yearHistogramSpan: "{from} à {to} · {n} années",
     },
     articleRow: {
       fulltext: "Texte intégral",

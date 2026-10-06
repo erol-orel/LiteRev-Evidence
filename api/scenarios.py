@@ -16,7 +16,12 @@ from sqlalchemy import text
 
 from .core import _msg, _norm_lang, app, engine, logger, require_api_key
 from .documents import _strategy_is_degraded
-from .scenario_store import _get_scenario_threshold, _get_user_scenario_or_404, relevant_gate_sql
+from .scenario_store import (
+    _get_scenario_threshold,
+    _get_user_scenario_or_404,
+    relevant_gate_sql,
+    scenario_counts,
+)
 from .schema_boot import _exec_ddl_isolated
 from .search import (
     LIVE_MAX_PER_SOURCE,
@@ -767,23 +772,10 @@ def get_user_scenario_detail(scenario_id: str, lang: str | None = Query(None)) -
     Compatible avec ScenarioDetailPage (boolean_queries, nl_queries, corpus_stats, etc.)
     """
     row = _get_user_scenario_or_404(scenario_id)
-    with engine.connect() as conn:
-        stats = conn.execute(text("""
-            SELECT
-                COUNT(*) AS total,
-                SUM(CASE WHEN EXISTS (
-                    SELECT 1 FROM document_chunk c
-                    WHERE c.document_id = d.id AND c.chunk_type = 'fulltext_section'
-                ) THEN 1 ELSE 0 END) AS with_fulltext,
-                COUNT(DISTINCT d.year) AS years_covered,
-                COUNT(DISTINCT d.journal) AS journals_count,
-                MIN(d.year) FILTER (WHERE d.year BETWEEN 1800 AND EXTRACT(YEAR FROM CURRENT_DATE)::int) AS year_min,
-                MAX(d.year) FILTER (WHERE d.year BETWEEN 1800 AND EXTRACT(YEAR FROM CURRENT_DATE)::int) AS year_max
-            FROM literature_document d
-            JOIN article_scenarios ars ON ars.document_id = d.id
-            WHERE ars.scenario_id = :sid
-              AND (d.is_duplicate IS NULL OR d.is_duplicate = FALSE)
-        """), {"sid": scenario_id}).mappings().first()
+    # UN seul comptage pour toute l'application (cf. scenario_counts) : le bandeau de
+    # cette page annonçait 433 articles pendant que le titre du corpus en annonçait 449,
+    # chacun ayant compté de son côté à son propre instant.
+    counts = scenario_counts(scenario_id)
 
     # Recherche multi-sous-requêtes : on renvoie les vraies listes booléennes /
     # naturelles. Sinon (mono-requête), la requête sauvegardée est booléenne OU en
@@ -831,14 +823,18 @@ def get_user_scenario_detail(scenario_id: str, lang: str | None = Query(None)) -
         "variables_detail": {},
         "keywords": [w for w in query_text.split() if len(w) > 3][:10],
         "clinical_rationale": "",
+        # `corpus_stats` garde sa forme historique, mais ses valeurs viennent du
+        # comptage commun. `counts` expose le jeu complet, identique à celui que
+        # renvoient /corpus, /embedding-status et /counts.
         "corpus_stats": {
-            "total": int(stats["total"] or 0) if stats else 0,
-            "with_fulltext": int(stats["with_fulltext"] or 0) if stats else 0,
-            "years_covered": int(stats["years_covered"] or 0) if stats else 0,
-            "journals_count": int(stats["journals_count"] or 0) if stats else 0,
-            "year_min": stats["year_min"] if stats else None,
-            "year_max": stats["year_max"] if stats else None,
+            "total": counts["total"],
+            "with_fulltext": counts["with_fulltext"],
+            "years_covered": counts["years_covered"],
+            "journals_count": counts["journals_count"],
+            "year_min": counts["year_min"],
+            "year_max": counts["year_max"],
         },
+        "counts": counts,
         "is_user_scenario": True,
         "query": query_text,
         "combined_query": _combined,
@@ -917,42 +913,29 @@ def get_user_scenario_corpus(
         )""")
     where = " AND ".join(conditions)
     _screated = row.get("created_at")
+    _filtered = bool(year_from or year_to or source or fulltext_only)
     with engine.connect() as conn:
-        # Single query for both total and above_threshold to avoid race condition
-        counts_row = conn.execute(text(f"""
-            SELECT
-                COUNT(*) AS total,
-                COUNT(*) FILTER (WHERE ars.similarity_score >= :threshold) AS above_threshold,
-                COUNT(*) FILTER (WHERE ars.similarity_score IS NULL) AS unscored,
-                -- « au-dessus du seuil » est un partage par le SCORE, et c'est devenu
-                -- trompeur : depuis qu'un relecteur peut restreindre la portée par
-                -- cluster ou par concept, des articles au-dessus du seuil peuvent être
-                -- hors périmètre. Le badge annonçait 291 pendant que les extractions
-                -- lisaient 190.
-                --
-                -- Le nombre qui compte est donc COMPTÉ, par la porte commune, et non
-                -- déduit de « au-dessus du seuil moins les exclus » : cette soustraction
-                -- oublie les articles repêchés à la main SOUS le seuil, qui alimentent
-                -- bel et bien les extractions. Sur un corpus réel elle donnait 178 pour
-                -- 190, et l'écart aurait été invisible.
-                COUNT(*) FILTER (WHERE {relevant_gate_sql(doc='d', link='ars', thr=':threshold')}) AS relevant,
-                COUNT(*) FILTER (WHERE :screated IS NOT NULL AND d.created_at >= :screated) AS newly_fetched,
-                COUNT(*) FILTER (WHERE EXISTS (
-                    SELECT 1 FROM document_chunk c
-                    WHERE c.document_id = d.id AND c.chunk_type = 'fulltext_section'
-                )) AS with_fulltext
-            FROM literature_document d
-            JOIN article_scenarios ars ON ars.document_id = d.id AND ars.scenario_id = :sid
-            WHERE {where}
-        """), {**{k: v for k, v in params.items() if k not in ('limit', 'offset')},
-               'threshold': eff_threshold, 'screated': _screated}).mappings().first()
-        total = int(counts_row["total"] or 0)
-        above_threshold = int(counts_row["above_threshold"] or 0)
-        relevant = int(counts_row["relevant"] or 0)
-        unscored = int(counts_row["unscored"] or 0)
-        newly_fetched = int(counts_row["newly_fetched"] or 0) if _screated else None
-        from_local = (total - newly_fetched) if newly_fetched is not None else None
-        with_fulltext = int(counts_row["with_fulltext"] or 0)
+        # Les compteurs du corpus viennent du comptage COMMUN (scenario_counts) : une
+        # instruction, un instantané, les mêmes nombres que /detail et /embedding-status.
+        # Les filtres de la vue (année, source, texte intégral) ne changent PAS la
+        # taille du corpus ; quand il y en a, on compte à part la vue filtrée et on
+        # renvoie les deux - `total` reste le corpus, `filtered_total` la vue.
+        counts = scenario_counts(scenario_id, threshold=eff_threshold, conn=conn)
+        total = counts["total"]
+        above_threshold = counts["above_threshold"]
+        relevant = counts["relevant"]
+        unscored = counts["unscored"]
+        newly_fetched = counts["newly_fetched"] if _screated else None
+        from_local = counts["from_local"] if _screated else None
+        with_fulltext = counts["with_fulltext"]
+        filtered_total = None
+        if _filtered:
+            filtered_total = int(conn.execute(text(f"""
+                SELECT COUNT(*)
+                FROM literature_document d
+                JOIN article_scenarios ars ON ars.document_id = d.id AND ars.scenario_id = :sid
+                WHERE {where}
+            """), {k: v for k, v in params.items() if k not in ('limit', 'offset')}).scalar() or 0)
         articles = conn.execute(text(f"""
             SELECT
                 d.id, d.title, {_abstract_sql} AS abstract, d.year, d.source, d.url,
@@ -1043,7 +1026,7 @@ def get_user_scenario_corpus(
         "scenario_title": row["name"],
         "total": total,
         "above_threshold": above_threshold,
-        "below_threshold": max(0, total - above_threshold - unscored),
+        "below_threshold": counts["below_threshold"],
         "unscored": unscored,
         # Ce que les extractions lisent VRAIMENT : la porte commune, comptée. Distinct de
         # `above_threshold`, qui n'est qu'un partage par le score.
@@ -1052,6 +1035,10 @@ def get_user_scenario_corpus(
         "newly_fetched": newly_fetched,
         "docs_with_fulltext": with_fulltext,
         "docs_abstract_only": max(0, total - with_fulltext),
+        # Le corpus COMPLET quand la vue est filtrée par année / source / texte
+        # intégral : `total` reste la taille du corpus, pas celle de la vue.
+        "filtered_total": filtered_total,
+        "counts": counts,
         "source_breakdown": source_breakdown,
         "rerank_running": rerank_running or (_RERANK_JOBS.get(scenario_id, {}).get("status") == "running"),
         "threshold": eff_threshold,
@@ -1325,19 +1312,21 @@ def _scenario_counts(scenario_id: str, row: dict | None = None) -> dict[str, Any
     _counts_consistency et l'état d'avancement (pipeline ou populate en cours)."""
     from datetime import datetime as _dt, timezone as _tz
     row = row or _get_user_scenario_or_404(scenario_id)
-    thr = _get_scenario_threshold(scenario_id)
+    # Le comptage COMMUN (scenario_counts) : une instruction, un instantané, le même
+    # jeu de nombres que /detail, /corpus et /embedding-status. Cette fonction comptait
+    # auparavant pour son compte, ce qui faisait de la route chargée de RÉCONCILIER les
+    # compteurs une source d'écart de plus. Le seuil est lu dans la même instruction.
     with engine.connect() as conn:
-        r = conn.execute(text("""
-            SELECT COUNT(DISTINCT ars.document_id) AS corpus_links,
-                   COUNT(DISTINCT ars.document_id) FILTER (WHERE COALESCE(ars.similarity_score, 0) >= :thr) AS above,
-                   COUNT(DISTINCT ars.document_id) FILTER (WHERE COALESCE(ars.similarity_score, 0) < :thr) AS below,
-                   COUNT(DISTINCT ars.document_id) FILTER (WHERE EXISTS (
-                       SELECT 1 FROM document_chunk c
-                       WHERE c.document_id = ars.document_id AND c.embedding IS NOT NULL)) AS embedded
+        c = scenario_counts(scenario_id, conn=conn)
+        embedded = int(conn.execute(text("""
+            SELECT COUNT(DISTINCT ars.document_id)
             FROM article_scenarios ars
             JOIN literature_document d ON d.id = ars.document_id
             WHERE ars.scenario_id = :sid AND (d.is_duplicate IS NULL OR d.is_duplicate = FALSE)
-        """), {"sid": scenario_id, "thr": thr}).mappings().first()
+              AND EXISTS (SELECT 1 FROM document_chunk ch
+                           WHERE ch.document_id = ars.document_id AND ch.embedding IS NOT NULL)
+        """), {"sid": scenario_id}).scalar() or 0)
+    thr = c["threshold"]
     figures = _load_prisma_identification(scenario_id)
     job = _user_scenario_pipeline_jobs.get(scenario_id) or {}
     pjob = _user_scenario_populate_jobs.get(scenario_id) or {}
@@ -1347,7 +1336,7 @@ def _scenario_counts(scenario_id: str, row: dict | None = None) -> dict[str, Any
         or job.get("overall_status") in ("running", "starting")
         or pjob.get("status") in ("running", "starting")
     )
-    _corpus_links = int(r["corpus_links"] or 0)
+    _corpus_links = c["total"]
     _screened_at_search = (int(figures.get("records_screened") or 0) if figures else None)
     counts = {
         "article_count": int(row.get("article_count") or 0),
@@ -1359,9 +1348,11 @@ def _scenario_counts(scenario_id: str, row: dict | None = None) -> dict[str, Any
         "prisma_screened": (_corpus_links if figures else None),
         "prisma_screened_at_search": _screened_at_search,
         "prisma_drift": ((_corpus_links - _screened_at_search) if figures else None),
-        "above_threshold": int(r["above"] or 0),
-        "below_threshold": int(r["below"] or 0),
-        "embedded": int(r["embedded"] or 0),
+        "above_threshold": c["above_threshold"],
+        # « En dessous » comprend les articles PAS ENCORE scorés : la somme des deux
+        # est le corpus, et c'est cette somme que _counts_consistency vérifie.
+        "below_threshold": c["below_threshold"] + c["unscored"],
+        "embedded": embedded,
     }
     ok, mismatches = _counts_consistency(counts)
     return {
@@ -1372,6 +1363,10 @@ def _scenario_counts(scenario_id: str, row: dict | None = None) -> dict[str, Any
         "current_step": job.get("current_step") or row.get("pipeline_step"),
         "threshold": thr,
         **counts,
+        # Le jeu COMPLET, tel que le renvoient aussi /detail, /corpus et
+        # /embedding-status : un panneau qui affiche un nombre d'articles lit cet
+        # objet plutôt que de compter lui-même.
+        "counts": c,
         "consistent": ok,
         "mismatches": mismatches,
         "checked_at": _dt.now(_tz.utc).isoformat(),
@@ -1436,18 +1431,11 @@ def get_user_scenario_embedding_status(scenario_id: str) -> dict[str, Any]:
     """
     _get_user_scenario_or_404(scenario_id)
     with engine.connect() as conn:
-        # Univers = corpus du scénario, hors doublons (MÊME filtre que /corpus),
-        # pour réconcilier les compteurs. Inclut les docs SANS chunk (chunkless).
-        corpus = conn.execute(text("""
-            SELECT
-                COUNT(*) AS corpus_total,
-                COUNT(*) FILTER (
-                    WHERE NOT EXISTS (SELECT 1 FROM document_chunk c WHERE c.document_id = ars.document_id)
-                ) AS chunkless
-            FROM article_scenarios ars
-            JOIN literature_document ld ON ld.id = ars.document_id
-            WHERE ars.scenario_id = :sid AND ld.is_duplicate IS NOT TRUE
-        """), {"sid": scenario_id}).mappings().first()
+        # Corpus, scorés et rerankés : le comptage COMMUN, donc un seul instantané.
+        # Comptés séparément, « scorés » pouvait dépasser « total » (441 sur 433) :
+        # en READ COMMITTED, deux instructions d'une même connexion voient deux états
+        # de la base, et le pipeline écrivait entre les deux.
+        counts = scenario_counts(scenario_id, conn=conn)
 
         # Title+abstract: one chunk per doc. Un chunk title_abstract n'est "en
         # attente" QUE s'il sera réellement embeddé par le worker - qui IGNORE
@@ -1503,29 +1491,21 @@ def get_user_scenario_embedding_status(scenario_id: str) -> dict[str, Any]:
             ) ft_emb ON ft_emb.document_id = d.document_id
         """), {"sid": scenario_id}).mappings().first()
 
-        # Scores de pertinence (RANKING) - INDÉPENDANT de l'indexation RAG ci-dessus.
-        # Le similarity_score affiché est calculé EN LIGNE pendant la phase "scoring"
-        # (_run_semantic_rerank_inline : réutilise les embeddings stockés, ré-embedde
-        # le reste à la volée), et le rerank Cohere écrit rerank_score sur le
-        # sous-ensemble pertinent. Ce sont CES compteurs qui pilotent les voyants
-        # "Sémantique" / "Cohere" - PAS le worker d'indexation RAG (chunks).
-        ranking = conn.execute(text("""
-            SELECT
-                COUNT(*) AS total,
-                COUNT(*) FILTER (WHERE ars.similarity_score IS NOT NULL) AS scored,
-                COUNT(*) FILTER (WHERE ars.rerank_score IS NOT NULL) AS reranked
-            FROM article_scenarios ars
-            JOIN literature_document ld ON ld.id = ars.document_id
-            WHERE ars.scenario_id = :sid AND ld.is_duplicate IS NOT TRUE
-        """), {"sid": scenario_id}).mappings().first()
+    # Scores de pertinence (RANKING) - INDÉPENDANT de l'indexation RAG ci-dessus.
+    # Le similarity_score affiché est calculé EN LIGNE pendant la phase "scoring"
+    # (_run_semantic_rerank_inline : réutilise les embeddings stockés, ré-embedde
+    # le reste à la volée), et le rerank Cohere écrit rerank_score sur le
+    # sous-ensemble pertinent. Ce sont CES compteurs qui pilotent les voyants
+    # "Sémantique" / "Cohere" - PAS le worker d'indexation RAG (chunks).
+    ranking = {"total": counts["total"], "scored": counts["scored"],
+               "reranked": counts["reranked"]}
 
     ta_total = int(ta["total_docs"] or 0)
     ta_embedded = int(ta["embedded_docs"] or 0)
     ta_pending = int(ta["pending_docs"] or 0)
 
-    corpus_total = int(corpus["corpus_total"] or 0)
-    chunkless = int(corpus["chunkless"] or 0)
-
+    corpus_total = counts["total"]
+    chunkless = counts["chunkless"]
     ft_total = int(ft["total_ft_docs"] or 0)
     ft_pending_docs = int(ft["ft_docs_pending"] or 0)
     ft_total_chunks = int(ft["total_ft_chunks"] or 0)
@@ -1569,6 +1549,7 @@ def get_user_scenario_embedding_status(scenario_id: str) -> dict[str, Any]:
         "status_label": status_label,
         "corpus_total": corpus_total,
         "chunkless": chunkless,
+        "counts": counts,
         "abstract_only": {
             "total_docs": abstract_only_total,
             "embedded_docs": max(0, abstract_only_total - ta_pending),

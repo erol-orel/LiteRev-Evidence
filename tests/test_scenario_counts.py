@@ -65,9 +65,13 @@ def seeded(db_conn):
         cur.execute("DROP TABLE IF EXISTS document_search")
         cur.execute("DROP TABLE IF EXISTS document_chunk, article_scenarios, literature_document CASCADE")
         cur.execute(
+            # Les colonnes que le comptage commun lit (journal, created_at) et le score
+            # de rerank plus bas : le stand-in doit porter les mêmes colonnes que la
+            # vraie table, sinon il teste une requête que la production n'exécute pas.
             "CREATE TABLE literature_document ("
             "id bigint PRIMARY KEY, title text NOT NULL, source text NOT NULL DEFAULT 'pubmed',"
             "abstract text, year int, is_duplicate boolean DEFAULT false, screening_status text,"
+            "journal text, created_at timestamptz DEFAULT now(),"
             "project_context text DEFAULT 'literev')")
         cur.execute(
             "CREATE TABLE document_chunk ("
@@ -76,7 +80,8 @@ def seeded(db_conn):
             "chunk_index int DEFAULT 0, content text, chunk_type text, embedding text)")
         cur.execute(
             "CREATE TABLE article_scenarios (scenario_id text, document_id bigint,"
-            "similarity_score double precision, screening_status text,"
+            "similarity_score double precision, rerank_score double precision,"
+            "screening_status text,"
             "PRIMARY KEY (scenario_id, document_id))")
         cur.execute("SELECT to_regclass('user_scenarios') IS NULL")
         if cur.fetchone()[0]:
