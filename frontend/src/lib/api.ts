@@ -2353,6 +2353,29 @@ export interface LlmEvidenceBrief {
   grade_recommendation?: string;
   future_research?: string;
   key_references?: Array<{ title: string; year: number | null; journal: string; key_contribution: string }>;
+  /**
+   * One row per claim, with the certainty it is allowed to assert. `strength` is NOT
+   * written by the model: it is computed from the study designs of the cited articles and
+   * capped by what the corpus as a whole supports, so `basis` carries the inputs and a
+   * reader can disagree with the label. `unverified_ids` lists citations that are not in
+   * this scenario's corpus, reported rather than hidden.
+   */
+  claims?: Array<{
+    claim: string;
+    reasoning?: string;
+    strength: string;
+    article_ids: number[];
+    articles: Array<{ id: number; title: string; year: number | null; study_design: string | null }>;
+    basis: {
+      n_articles: number;
+      designs: Record<string, number>;
+      from_designs: string;
+      downgraded_single_study: boolean;
+      capped_by_corpus: boolean;
+      note?: string;
+    };
+    unverified_ids?: Array<number | string | null>;
+  }>;
   _meta?: {
     scenario_id: string;
     scenario_name: string;
@@ -2365,6 +2388,9 @@ export interface LlmEvidenceBrief {
     study_designs: Record<string, number>;
     auto_generated: boolean;
     model: string;
+    reasoning_effort?: string;
+    /** The ceiling the claim grading applied, so "Faible" can be told apart from capped. */
+    grade_ceiling?: string;
   };
   _cached?: boolean;
   _generated_at?: string | null;
