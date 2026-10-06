@@ -2311,6 +2311,16 @@ export interface EvidenceGaps {
   note?: string;
 }
 
+/**
+ * The citable report as a download URL rather than a fetch: the endpoint already returns
+ * a markdown attachment with its own filename, and the browser does that better than we
+ * would. Built here because every other URL in the app is, and `API_BASE_URL` stays
+ * private to this module.
+ */
+export function evidenceReportUrl(scenarioId: string): string {
+  return `${API_BASE_URL}/user-scenarios/${scenarioId}/evidence-report?download=true`;
+}
+
 export async function fetchEvidenceGaps(
   scenarioId: string,
   rows?: string,

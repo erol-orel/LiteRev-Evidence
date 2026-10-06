@@ -28,6 +28,7 @@ MODULES = (
     "review",
     "subsets",
     "evidence",
+    "report",
     "assistant",
     "variables",
     "model_spec",
