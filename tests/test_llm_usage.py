@@ -486,3 +486,59 @@ def test_the_ddl_creates_the_table_and_its_indexes():
     for col in ("prompt_tokens", "completion_tokens", "total_tokens", "purpose", "model"):
         assert col in joined
     assert joined.count("create index if not exists") == 2
+
+
+# ── a truncated answer is no answer ──────────────────────────────────────────
+class _Choice:
+    def __init__(self, content, finish_reason="stop"):
+        self.message = types.SimpleNamespace(content=content)
+        self.finish_reason = finish_reason
+
+
+class _Completion:
+    def __init__(self, content, finish_reason="stop", usage=None):
+        self.choices = [_Choice(content, finish_reason)]
+        self.usage = usage or _Usage(10, 10)
+        self.model = "gpt-5.6-luna"
+
+
+def test_a_complete_answer_is_returned_as_is():
+    assert llm_usage.json_content(_Completion('{"a": 1}')) == '{"a": 1}'
+
+
+def test_an_answer_cut_off_at_the_ceiling_says_so():
+    """What this replaces: `JSONDecodeError: Unterminated string starting at char 18273`,
+    which reads like a bug in the prompt or the parser and sends you looking for one. The
+    API said `finish_reason: length` the whole time."""
+    truncated = _Completion('{"executive_summary": "Les donn', finish_reason="length")
+    with pytest.raises(llm_usage.LLMTruncated) as exc:
+        llm_usage.json_content(truncated, "evidence brief usr-1efa")
+    message = str(exc.value)
+    assert "ceiling" in message and "31 characters" in message
+    assert "evidence brief usr-1efa" in message, "a failure must name what failed"
+    assert "max_tokens" in message and "LLM_REASONING_EFFORT" in message, \
+        "and what to do about it: reasoning tokens share the ceiling with the answer"
+
+
+def test_a_response_with_no_choices_is_not_mistaken_for_a_truncated_one():
+    with pytest.raises(RuntimeError) as exc:
+        llm_usage.json_content(types.SimpleNamespace(choices=[]))
+    assert not isinstance(exc.value, llm_usage.LLMTruncated)
+
+
+def test_a_truncated_completion_is_logged_where_every_call_passes(monkeypatch, caplog):
+    """The dozen call sites that parse JSON do not all have to adopt `json_content` for a
+    truncation to become visible: the metered wrapper names it for all of them."""
+    monkeypatch.setattr(llm_usage, "record", _Recorder())
+    cl = _client(lambda **kw: _Completion("{...", finish_reason="length"), None)
+    with caplog.at_level("WARNING"):
+        cl.chat.completions.create(model="gpt-5.6-luna", max_tokens=300, messages=[])
+    assert any("hit its ceiling of 300 tokens" in r.message for r in caplog.records)
+
+
+def test_a_complete_completion_logs_nothing(monkeypatch, caplog):
+    monkeypatch.setattr(llm_usage, "record", _Recorder())
+    cl = _client(lambda **kw: _Completion('{"a": 1}'), None)
+    with caplog.at_level("WARNING"):
+        cl.chat.completions.create(model="gpt-5.6-luna", max_tokens=300, messages=[])
+    assert not [r for r in caplog.records if "ceiling" in r.message]

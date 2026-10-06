@@ -226,10 +226,17 @@ def test_no_module_hardcodes_a_model_name():
     import re
 
     api = pathlib.Path(__file__).resolve().parent.parent / "api"
+    # Three spellings, because the first version of this test only knew the first, and
+    # `"model": "gpt-4.1"` in the evidence brief's provenance walked straight past it and
+    # went on stamping every brief with the name of a model that had not written it for
+    # four days. A dict value is a hardcoded model name like any other.
+    patterns = (r'model\s*=\s*"(?:gpt-|text-embedding-|o[0-9]-)',
+                r'"model"\s*:\s*"(?:gpt-|text-embedding-|o[0-9]-)',
+                r"'model'\s*:\s*'(?:gpt-|text-embedding-|o[0-9]-)")
     bad: list[str] = []
     for path in sorted(api.glob("*.py")):
         for n, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
-            if re.search(r'model\s*=\s*"(gpt-|text-embedding-|o[0-9]-)', line):
+            if any(re.search(p, line) for p in patterns):
                 bad.append(f"{path.name}:{n}: {line.strip()[:70]}")
     assert not bad, "a model name is hardcoded again:\n  " + "\n  ".join(bad)
 
