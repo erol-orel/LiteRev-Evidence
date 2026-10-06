@@ -48,6 +48,142 @@ def _rows(conn, sql: str, sid: str, thr: float, **extra) -> list[dict]:
     return [dict(r) for r in conn.execute(text(sql), {"sid": sid, "thr": thr, **extra}).mappings().all()]
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Gap matrix: what the corpus has NOT studied
+# ─────────────────────────────────────────────────────────────────────────────
+# A commercial report we compared against prints a matrix of theme against dimension with
+# a paper count in each cell and "Potential gap" where a cell is empty. It is the most
+# useful figure in the document and the least trustworthy one: that report synthesises 50
+# of its 216 eligible papers, so a cell reading "No papers" means none of the fifty, and
+# an empty cell is as likely to be a sampling artefact as a gap in the literature.
+#
+# The same figure computed over the WHOLE relevant subset says something a sample cannot:
+# that no article in this corpus pairs these two things. Which is why this lives here,
+# beside the digest, in SQL, with no LLM: a gap asserted by a model is an opinion, and a
+# gap counted over every relevant article is a finding about the corpus.
+#
+# The axes are two concept TYPES from `concepts_json` (intervention, outcome, pathogen,
+# vector, population, ...), extracted once per article by the map step. Intervention
+# against outcome is the PICO cross-tab a reviewer actually wants: it answers "which
+# intervention has nobody measured against which outcome".
+
+#: How many labels each axis keeps. The matrix is for reading, and a 40x40 grid is not
+#: read. The COUNTS are over the full corpus; only the axes are truncated, and
+#: `rows_shown` / `rows_total` say so.
+_MATRIX_MAX_LABELS = 10
+
+
+def concept_matrix(scenario_id: str, row_type: str, col_type: str,
+                   threshold: float | None = None,
+                   max_labels: int = _MATRIX_MAX_LABELS) -> dict[str, Any]:
+    """Articles pairing each `row_type` concept with each `col_type` concept.
+
+    Every relevant article is counted. An article is counted once per (row, col) pair it
+    carries, and `DISTINCT` guards the case of an article carrying the same label twice.
+
+    What an empty cell means, exactly, and what it does not: no article in this corpus
+    carries both labels. It is not evidence that the pairing is unstudied in the
+    literature, and it cannot be, because the corpus is one search over a few sources. It
+    also cannot see articles whose concepts were never extracted, which is why
+    `coverage` reports how many relevant articles the matrix could read at all. A gap
+    figure that hides its own denominator is the thing this is meant to replace."""
+    thr = _get_scenario_threshold(scenario_id) if threshold is None else float(threshold)
+    out: dict[str, Any] = {"scenario_id": scenario_id, "threshold": thr,
+                           "row_type": row_type, "col_type": col_type}
+    try:
+        with engine.connect() as conn:
+            cov = _rows(conn, f"""
+                SELECT COUNT(*) AS relevant,
+                       COUNT(*) FILTER (
+                           WHERE jsonb_typeof(d.concepts_json->'concepts') = 'array') AS with_concepts
+                {_RELEVANT}
+            """, scenario_id, thr)
+            out["coverage"] = dict(cov[0]) if cov else {"relevant": 0, "with_concepts": 0}
+
+            # Les types disponibles, pour que l'appelant puisse choisir ses axes sans les
+            # deviner : un corpus sans « vector » ne doit pas proposer cet axe.
+            # La porte `_RELEVANT` n'est pas réutilisable ici : elle commence par son
+            # propre FROM et le CROSS JOIN LATERAL doit s'insérer avant le WHERE. La
+            # condition est donc répétée, à l'identique, plutôt que fabriquée par
+            # bricolage de chaîne.
+            out["available_types"] = _rows(conn, """
+                SELECT c->>'t' AS value, COUNT(DISTINCT d.id) AS n
+                FROM literature_document d
+                JOIN article_scenarios ars ON ars.document_id = d.id
+                CROSS JOIN LATERAL jsonb_array_elements(d.concepts_json->'concepts') AS c
+                WHERE ars.scenario_id = :sid
+                  AND d.is_duplicate IS NOT TRUE
+                  AND COALESCE(ars.screening_status, d.screening_status) IS DISTINCT FROM 'excluded'
+                  AND (COALESCE(ars.screening_status, d.screening_status) = 'included'
+                       OR COALESCE(ars.similarity_score, 0) >= :thr)
+                  AND jsonb_typeof(d.concepts_json->'concepts') = 'array'
+                  AND c->>'t' IS NOT NULL
+                GROUP BY 1 ORDER BY n DESC
+            """, scenario_id, thr)
+
+            pairs = _rows(conn, """
+                SELECT r->>'en' AS row_label, c->>'en' AS col_label,
+                       COUNT(DISTINCT d.id) AS n
+                FROM literature_document d
+                JOIN article_scenarios ars ON ars.document_id = d.id
+                CROSS JOIN LATERAL jsonb_array_elements(d.concepts_json->'concepts') AS r
+                CROSS JOIN LATERAL jsonb_array_elements(d.concepts_json->'concepts') AS c
+                WHERE ars.scenario_id = :sid
+                  AND d.is_duplicate IS NOT TRUE
+                  AND COALESCE(ars.screening_status, d.screening_status) IS DISTINCT FROM 'excluded'
+                  AND (COALESCE(ars.screening_status, d.screening_status) = 'included'
+                       OR COALESCE(ars.similarity_score, 0) >= :thr)
+                  AND jsonb_typeof(d.concepts_json->'concepts') = 'array'
+                  AND r->>'t' = :row_type AND c->>'t' = :col_type
+                  AND r->>'en' IS NOT NULL AND c->>'en' IS NOT NULL
+                GROUP BY 1, 2
+            """, scenario_id, thr, row_type=row_type, col_type=col_type)
+        out.update(build_matrix(pairs, max_labels=max_labels))
+        out["complete"] = True
+    except Exception as e:                                   # noqa: BLE001 - jamais bloquant
+        logger.warning(f"concept_matrix {scenario_id} {row_type}x{col_type}: {e}")
+        out.update({"complete": False, "error": str(e)[:300], "rows": [], "cols": [],
+                    "cells": [], "gaps": []})
+    return out
+
+
+def build_matrix(pairs, max_labels: int = _MATRIX_MAX_LABELS) -> dict[str, Any]:
+    """The grid, from (row_label, col_label, n) triples. Pure, so it is testable.
+
+    Axes are ordered by how many articles carry the label, descending, and truncated to
+    `max_labels`. `rows_total` keeps the untruncated count, because an axis silently cut
+    to its ten biggest labels would make the matrix look more complete than it is.
+
+    `gaps` lists the empty cells of the SHOWN grid, which is the only region where an
+    empty cell is informative: outside it, a zero may simply be a label that was cut."""
+    row_totals: dict[str, int] = {}
+    col_totals: dict[str, int] = {}
+    counts: dict[tuple[str, str], int] = {}
+    for p in pairs:
+        row, col, n = p["row_label"], p["col_label"], int(p["n"] or 0)
+        if not row or not col:
+            continue
+        counts[(row, col)] = counts.get((row, col), 0) + n
+        row_totals[row] = row_totals.get(row, 0) + n
+        col_totals[col] = col_totals.get(col, 0) + n
+
+    def _axis(totals):
+        return [label for label, _ in sorted(totals.items(), key=lambda kv: (-kv[1], kv[0]))]
+
+    all_rows, all_cols = _axis(row_totals), _axis(col_totals)
+    rows, cols = all_rows[:max_labels], all_cols[:max_labels]
+    cells = [{"row": r, "col": c, "n": counts.get((r, c), 0)} for r in rows for c in cols]
+    return {
+        "rows": [{"label": r, "n": row_totals[r]} for r in rows],
+        "cols": [{"label": c, "n": col_totals[c]} for c in cols],
+        "rows_total": len(all_rows), "cols_total": len(all_cols),
+        "cells": cells,
+        "gaps": [{"row": c["row"], "col": c["col"]} for c in cells if c["n"] == 0],
+        "pairs_observed": len([c for c in cells if c["n"] > 0]),
+        "cells_shown": len(cells),
+    }
+
+
 def corpus_digest(scenario_id: str, threshold: float | None = None) -> dict[str, Any]:
     """Portrait chiffré du corpus PERTINENT COMPLET : volumétrie, couverture, années,
     devis, pays, journaux, concepts typés, et les articles les mieux établis.
