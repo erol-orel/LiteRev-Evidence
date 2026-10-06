@@ -661,6 +661,8 @@ export const fr = {
       directLink: "Lien direct",
     },
     subset: {
+      byDesign: { hint: "Cliquer pour restreindre le corpus à ce devis d'étude" },
+      byLevel: { hint: "Cliquer pour restreindre le corpus à ce niveau de preuve" },
       title: "Restreindre le corpus à cette sélection",
       pickSome: "Cochez les groupes à garder. Tout le reste sort du corpus, et peut être remis.",
       summary: "{keep} articles gardés sur {relevant} ; {exclude} sortent du corpus.",

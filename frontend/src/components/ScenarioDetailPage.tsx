@@ -5937,17 +5937,35 @@ function EvidencesSection({ scenarioId, detail }: { scenarioId: string; detail: 
   const [genStatus, setGenStatus] = React.useState<string | null>(null);
   const pollRef = React.useRef<ReturnType<typeof setInterval> | null>(null);
 
+  // ── Sélection par devis / niveau de preuve ───────────────────────────────────
+  // Les deux distributions ci-dessous ne sont pas que des graphiques : chaque barre est
+  // un filtre, comme les cases des clusters. Restreindre EXCLUT du corpus (même mécanique
+  // `scope:`, même aperçu avant application, même annulation), donc toute extraction
+  // ultérieure lit le sous-ensemble restreint.
+  const [keptDesigns, setKeptDesigns] = React.useState<Set<string>>(new Set());
+  const [keptLevels, setKeptLevels] = React.useState<Set<string>>(new Set());
+  const toggle = (set: Set<string>, setter: (s: Set<string>) => void, value: string) => {
+    const next = new Set(set);
+    next.has(value) ? next.delete(value) : next.add(value);
+    setter(next);
+  };
+
   // ── PDF export ───────────────────────────────────────────────────────────────
   const [exporting, setExporting] = React.useState(false);
 
   // ── Load both ────────────────────────────────────────────────────────────────
-  React.useEffect(() => {
+  // Extrait en callback parce que restreindre le corpus par devis ou par niveau change
+  // les deux distributions : l'écran doit se recharger sur le corpus qui vient d'être
+  // réduit, pas rester sur celui d'avant.
+  const loadBrief = React.useCallback(() => {
     setBriefLoading(true);
     fetchEvidenceBrief(scenarioId)
       .then(setBriefData)
       .catch(e => setBriefError(e.message))
       .finally(() => setBriefLoading(false));
   }, [scenarioId]);
+
+  React.useEffect(() => { loadBrief(); }, [loadBrief]);
 
   const loadLlm = React.useCallback(() => {
     setLlmLoading(true);
@@ -6298,13 +6316,16 @@ ${llm.future_research ? `<h3>${t("scenarioDetail.evidences.pdf.futureResearch")}
                   const remainder = relevant - top.reduce((s,d)=>s+d.count,0);
                   const rows = remainder > 0 ? [...top, {design:t("scenarioDetail.evidences.other"), count:remainder}] : top;
                   return rows.map(d=>(
-                  <div key={d.design} className="flex items-center gap-2 text-[10px]">
-                    <span className="w-28 text-white/60 truncate">{d.design}</span>
+                  <button key={d.design} type="button"
+                    onClick={() => toggle(keptDesigns, setKeptDesigns, d.design)}
+                    title={t("scenarioDetail.subset.byDesign.hint")}
+                    className={`flex w-full items-center gap-2 text-[10px] rounded px-1 -mx-1 transition ${keptDesigns.has(d.design) ? "bg-brand-500/15" : "hover:bg-white/5"}`}>
+                    <span className={`w-28 truncate text-left ${keptDesigns.has(d.design) ? "text-brand-200" : "text-white/60"}`}>{d.design}</span>
                     <div className="flex-1 h-1 bg-white/5 rounded-full overflow-hidden">
-                      <div className="h-full bg-brand-500 rounded-full" style={{width:`${Math.round(d.count/relevant*100)}%`}}/>
+                      <div className={`h-full rounded-full ${keptDesigns.has(d.design) ? "bg-brand-300" : "bg-brand-500"}`} style={{width:`${Math.round(d.count/relevant*100)}%`}}/>
                     </div>
                     <span className="w-7 text-right text-white/40 font-mono">{d.count}</span>
-                  </div>
+                  </button>
                   ));
                 })()}
               </div>
@@ -6332,17 +6353,32 @@ ${llm.future_research ? `<h3>${t("scenarioDetail.evidences.pdf.futureResearch")}
               <p className="text-[10px] font-bold uppercase tracking-wider text-white/40">{t("scenarioDetail.evidences.evidenceLevels")}</p>
               <div className="space-y-1.5">
                 {(briefData.evidence_level_distribution ?? []).slice(0,6).map(d=>(
-                  <div key={d.level} className="flex items-center gap-2 text-[10px]">
-                    <span className="w-28 text-white/60 truncate capitalize">{d.level}</span>
+                  <button key={d.level} type="button"
+                    onClick={() => toggle(keptLevels, setKeptLevels, d.level)}
+                    title={t("scenarioDetail.subset.byLevel.hint")}
+                    className={`flex w-full items-center gap-2 text-[10px] rounded px-1 -mx-1 transition ${keptLevels.has(d.level) ? "bg-gold-500/15" : "hover:bg-white/5"}`}>
+                    <span className={`w-28 truncate text-left capitalize ${keptLevels.has(d.level) ? "text-gold-200" : "text-white/60"}`}>{d.level}</span>
                     <div className="flex-1 h-1 bg-white/5 rounded-full overflow-hidden">
-                      <div className="h-full bg-gold-400/60 rounded-full" style={{width:`${Math.round(d.count/relevant*100)}%`}}/>
+                      <div className={`h-full rounded-full ${keptLevels.has(d.level) ? "bg-gold-300" : "bg-gold-400/60"}`} style={{width:`${Math.round(d.count/relevant*100)}%`}}/>
                     </div>
                     <span className="w-7 text-right text-white/40 font-mono">{d.count}</span>
-                  </div>
+                  </button>
                 ))}
               </div>
             </div>
           </div>
+          {/* Restreindre le corpus aux devis / niveaux cochés : même mécanique que les
+              clusters, donc même aperçu, même exclusion réelle et même annulation. */}
+          <SubsetNarrowPanel
+            scenarioId={scenarioId}
+            selection={{
+              designs: [...keptDesigns].sort(),
+              levels: [...keptLevels].sort(),
+              combine: "all",
+            }}
+            enabled={keptDesigns.size > 0 || keptLevels.size > 0}
+            onApplied={() => { setKeptDesigns(new Set()); setKeptLevels(new Set()); loadBrief(); }}
+          />
         </>
       )}
 
