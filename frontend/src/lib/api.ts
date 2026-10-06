@@ -2284,6 +2284,47 @@ export interface ThresholdCurve {
   suggestion?: ThresholdCurvePoint | null;
 }
 
+/**
+ * The gap matrix: how many relevant articles pair each row concept with each column
+ * concept, counted in SQL over the WHOLE relevant subset with no LLM in the path. An
+ * empty cell inside the shown grid is therefore a fact about this corpus.
+ *
+ * `coverage` is not decoration: articles whose concepts were never extracted are
+ * invisible here, and a gap figure that hides its own denominator is worthless.
+ */
+export interface EvidenceGaps {
+  row_type: string;
+  col_type: string;
+  threshold: number;
+  coverage: { relevant: number; with_concepts: number };
+  available_types: Array<{ value: string; n: number }>;
+  rows: Array<{ label: string; n: number }>;
+  cols: Array<{ label: string; n: number }>;
+  rows_total: number;
+  cols_total: number;
+  cells: Array<{ row: string; col: string; n: number }>;
+  gaps: Array<{ row: string; col: string }>;
+  pairs_observed: number;
+  cells_shown: number;
+  complete: boolean;
+  error?: string;
+  note?: string;
+}
+
+export async function fetchEvidenceGaps(
+  scenarioId: string,
+  rows?: string,
+  cols?: string,
+): Promise<EvidenceGaps> {
+  const qs = new URLSearchParams();
+  if (rows) qs.set('rows', rows);
+  if (cols) qs.set('cols', cols);
+  const suffix = qs.toString() ? `?${qs.toString()}` : '';
+  const r = await safeFetch(`${API_BASE_URL}/user-scenarios/${scenarioId}/evidence-gaps${suffix}`);
+  if (!r.ok) throw new Error(httpMessage(r.status));
+  return r.json();
+}
+
 export async function fetchThresholdCurve(
   scenarioId: string,
   target?: number,

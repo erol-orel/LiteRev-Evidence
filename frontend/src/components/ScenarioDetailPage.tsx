@@ -66,6 +66,8 @@ import {
   patchScenarioSettings,
   fetchThresholdCurve,
   type ThresholdCurve,
+  fetchEvidenceGaps,
+  type EvidenceGaps,
   previewScenarioSubset,
   applyScenarioSubset,
   fetchScenarioSubsetState,
@@ -5550,6 +5552,140 @@ function SeuilSection({ scenarioId, onSaved, onThresholdChange }: { scenarioId: 
  * articles, quel seuil ? ») et montre, pour chaque seuil, combien d'articles rapportant
  * un paramètre épidémiologique il garde et combien il coupe : c'est cette colonne qui
  * rend le choix justifiable ailleurs que de mémoire. */
+/**
+ * The gap matrix. Counts come from SQL over every relevant article, so an empty cell
+ * inside this grid means no article in the corpus pairs those two concepts. The coverage
+ * line is mandatory, not decoration: articles whose concepts were never extracted cannot
+ * appear here, and a gap figure that hides its denominator is the thing this replaces.
+ */
+function EvidenceGapsPanel({ scenarioId }: { scenarioId: string }) {
+  const { t } = useI18n();
+  const [data, setData] = React.useState<EvidenceGaps | null>(null);
+  const [loading, setLoading] = React.useState(true);
+  const [error, setError] = React.useState<string | null>(null);
+
+  const load = React.useCallback((rows?: string, cols?: string) => {
+    setLoading(true);
+    setError(null);
+    fetchEvidenceGaps(scenarioId, rows, cols)
+      .then(setData)
+      .catch(e => setError(e?.message || t("scenarioDetail.evidences.gaps.error")))
+      .finally(() => setLoading(false));
+  }, [scenarioId, t]);
+
+  React.useEffect(() => { load(); }, [load]);
+
+  const cells = React.useMemo(() => {
+    const m = new Map<string, number>();
+    (data?.cells ?? []).forEach(c => m.set(`${c.row}\u0000${c.col}`, c.n));
+    return m;
+  }, [data]);
+
+  if (loading && !data) return <p className="text-[11px] text-white/40">{t("common.loading")}</p>;
+  if (error) return <p className="text-[11px] text-rose-300/70">{error}</p>;
+  if (!data) return null;
+
+  const types = data.available_types ?? [];
+  const hasGrid = data.rows.length > 0 && data.cols.length > 0;
+  const max = Math.max(1, ...(data.cells ?? []).map(c => c.n));
+
+  return (
+    <div className="space-y-2">
+      <p className="text-[10px] font-bold uppercase tracking-wider text-white/35">
+        {t("scenarioDetail.evidences.gaps.title")}
+      </p>
+      <p className="text-[10px] text-white/40 leading-relaxed">
+        {t("scenarioDetail.evidences.gaps.explain")}
+      </p>
+      {types.length > 1 && (
+        <div className="flex flex-wrap items-center gap-2 text-[10px] text-white/50">
+          <span>{t("scenarioDetail.evidences.gaps.axes")}</span>
+          <select
+            value={data.row_type}
+            onChange={e => load(e.target.value, data.col_type)}
+            className="rounded-md border border-white/10 bg-black/30 px-1.5 py-0.5 text-[10px] text-white/70"
+          >
+            {types.map(x => <option key={x.value} value={x.value}>{x.value} ({x.n})</option>)}
+          </select>
+          <span>×</span>
+          <select
+            value={data.col_type}
+            onChange={e => load(data.row_type, e.target.value)}
+            className="rounded-md border border-white/10 bg-black/30 px-1.5 py-0.5 text-[10px] text-white/70"
+          >
+            {types.map(x => <option key={x.value} value={x.value}>{x.value} ({x.n})</option>)}
+          </select>
+        </div>
+      )}
+      {!hasGrid ? (
+        <p className="text-[11px] text-white/45">
+          {data.note || t("scenarioDetail.evidences.gaps.empty")}
+        </p>
+      ) : (
+        <>
+          <div className="overflow-x-auto">
+            <table className="text-[10px] border-separate border-spacing-0.5">
+              <thead>
+                <tr>
+                  <th />
+                  {data.cols.map(c => (
+                    <th key={c.label} className="px-1 py-0.5 text-left align-bottom font-medium text-white/50">
+                      <span className="block max-w-[5.5rem] truncate" title={`${c.label} (${c.n})`}>{c.label}</span>
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {data.rows.map(r => (
+                  <tr key={r.label}>
+                    <th className="pr-2 text-right font-medium text-white/50">
+                      <span className="block max-w-[7rem] truncate" title={`${r.label} (${r.n})`}>{r.label}</span>
+                    </th>
+                    {data.cols.map(c => {
+                      const n = cells.get(`${r.label}\u0000${c.label}`) ?? 0;
+                      return (
+                        <td
+                          key={c.label}
+                          title={n === 0
+                            ? t("scenarioDetail.evidences.gaps.cellGap")
+                            : t("scenarioDetail.evidences.gaps.cellCount").replace("{n}", String(n))}
+                          className={`px-1.5 py-1 text-center tabular-nums rounded ${
+                            n === 0
+                              ? "bg-rose-500/10 text-rose-300/50"
+                              : "text-brand-200"}`}
+                          style={n > 0 ? { backgroundColor: `rgba(45, 212, 191, ${0.08 + 0.3 * (n / max)})` } : undefined}
+                        >
+                          {n === 0 ? "·" : n}
+                        </td>
+                      );
+                    })}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <p className="text-[10px] text-white/35 leading-relaxed">
+            {t("scenarioDetail.evidences.gaps.summary")
+              .replace("{gaps}", String(data.gaps.length))
+              .replace("{cells}", String(data.cells_shown))}
+            {(data.rows_total > data.rows.length || data.cols_total > data.cols.length) &&
+              ` · ${t("scenarioDetail.evidences.gaps.truncated")
+                .replace("{rows}", String(data.rows.length))
+                .replace("{rowsTotal}", String(data.rows_total))
+                .replace("{cols}", String(data.cols.length))
+                .replace("{colsTotal}", String(data.cols_total))}`}
+          </p>
+          <p className="text-[10px] text-white/35 leading-relaxed">
+            {t("scenarioDetail.evidences.gaps.coverage")
+              .replace("{with}", String(data.coverage.with_concepts))
+              .replace("{total}", String(data.coverage.relevant))}
+          </p>
+        </>
+      )}
+    </div>
+  );
+}
+
 function ThresholdCurvePanel({ scenarioId, onPick }: { scenarioId: string; onPick: (v: number) => void }) {
   const { t } = useI18n();
   const [data, setData] = React.useState<ThresholdCurve | null>(null);
@@ -6354,6 +6490,9 @@ ${llm.future_research ? `<h3>${t("scenarioDetail.evidences.pdf.futureResearch")}
                 </ul>
               </div>
             )}
+            {/* La même question, comptée : lacunes calculées sur TOUT le sous-ensemble
+                pertinent, en SQL, sans LLM. À lire contre la liste en prose au-dessus. */}
+            <EvidenceGapsPanel scenarioId={scenarioId} />
           </div>
           {/* Recherches futures */}
           {llmData.future_research && (

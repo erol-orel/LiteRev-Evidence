@@ -1045,6 +1045,18 @@ export const fr = {
       clinicalContext: "Contexte clinique",
       keyFindings: "Résultats clés",
       evidenceSynthesis: "Synthèse des évidences",
+      gaps: {
+        title: "Lacunes calculées (matrice de concepts)",
+        explain: "Nombre d'articles pertinents associant chaque concept en ligne à chaque concept en colonne. Compté en SQL sur la TOTALITÉ du sous-ensemble pertinent, sans LLM : une case vide signifie qu'aucun article de ce corpus ne traite les deux ensemble.",
+        axes: "Axes :",
+        error: "Matrice indisponible",
+        empty: "Pas assez de concepts extraits pour croiser deux axes.",
+        cellGap: "Aucun article de ce corpus n'associe les deux",
+        cellCount: "{n} article(s) pertinent(s)",
+        summary: "{gaps} case(s) vide(s) sur {cells} affichée(s)",
+        truncated: "axes tronqués pour la lecture : {rows}/{rowsTotal} lignes, {cols}/{colsTotal} colonnes",
+        coverage: "Lisible sur {with} des {total} articles pertinents : les autres n'ont pas de concepts extraits et n'apparaissent nulle part dans cette matrice.",
+      },
       claims: {
         title: "Affirmations et force des preuves",
         computed: "La force n'est pas écrite par le modèle : elle est calculée d'après les devis des articles cités, puis plafonnée par ce que le corpus entier peut soutenir.",

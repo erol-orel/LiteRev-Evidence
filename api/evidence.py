@@ -223,6 +223,42 @@ def attach_claim_strength(claims, articles_by_id: dict, ceiling: str = "Fort") -
     return out
 
 
+@app.get("/user-scenarios/{scenario_id}/evidence-gaps")
+def get_user_scenario_evidence_gaps(
+    scenario_id: str,
+    rows: str | None = Query(None, description="concept type for the rows"),
+    cols: str | None = Query(None, description="concept type for the columns"),
+    max_labels: int = Query(10, ge=2, le=30),
+) -> dict[str, Any]:
+    """Which pairs of concepts no relevant article in this corpus studies together.
+
+    A cross-tab of two concept types over the WHOLE relevant subset: every article that
+    carries both labels is counted, in SQL, with no LLM anywhere in the path. An empty
+    cell therefore states a fact about this corpus rather than an impression of a sample,
+    which is the whole difference from the same figure in a report that synthesises fifty
+    papers out of two hundred.
+
+    Axes default to the two most populated concept types, so the endpoint is useful
+    without knowing what was extracted; `available_types` lists the rest. Intervention
+    against outcome is usually the one worth reading: it answers which intervention
+    nobody has measured against which outcome."""
+    _get_user_scenario_or_404(scenario_id)
+    from .digest import concept_matrix
+
+    if not rows or not cols:
+        probe = concept_matrix(scenario_id, rows or "", cols or "", max_labels=max_labels)
+        types = [t["value"] for t in (probe.get("available_types") or [])]
+        rows = rows or (types[0] if types else "")
+        cols = cols or next((t for t in types if t != rows), rows)
+        if not rows:
+            # Rien d'extrait : on le dit, au lieu de renvoyer une grille vide qui se lit
+            # comme « aucune lacune ».
+            probe["note"] = ("aucun concept extrait sur ce corpus : la matrice ne peut "
+                             "rien affirmer, ni présence ni lacune")
+            return probe
+    return concept_matrix(scenario_id, rows, cols, max_labels=max_labels)
+
+
 @app.get("/user-scenarios/{scenario_id}/evidence-brief")
 def get_user_scenario_evidence_brief(scenario_id: str) -> dict[str, Any]:
     """Evidence Brief d'un scénario utilisateur (délègue au constructeur générique)."""

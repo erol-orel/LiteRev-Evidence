@@ -1047,6 +1047,18 @@ export const en: Translations = {
       clinicalContext: "Clinical context",
       keyFindings: "Key findings",
       evidenceSynthesis: "Evidence synthesis",
+      gaps: {
+        title: "Computed gaps (concept matrix)",
+        explain: "How many relevant articles pair each row concept with each column concept. Counted in SQL over the WHOLE relevant subset, with no LLM: an empty cell means no article in this corpus covers both together.",
+        axes: "Axes:",
+        error: "Matrix unavailable",
+        empty: "Not enough extracted concepts to cross two axes.",
+        cellGap: "No article in this corpus pairs the two",
+        cellCount: "{n} relevant article(s)",
+        summary: "{gaps} empty cell(s) of {cells} shown",
+        truncated: "axes truncated for reading: {rows}/{rowsTotal} rows, {cols}/{colsTotal} columns",
+        coverage: "Readable on {with} of the {total} relevant articles: the others have no extracted concepts and appear nowhere in this matrix.",
+      },
       claims: {
         title: "Claims and evidence strength",
         computed: "The strength is not written by the model: it is computed from the study designs of the cited articles, then capped by what the whole corpus can support.",
