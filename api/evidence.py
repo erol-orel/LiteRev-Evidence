@@ -796,6 +796,17 @@ Génère un JSON avec EXACTEMENT ces champs :
   ]
 }}
 
+CITATIONS DANS LE TEXTE : place des appels de citation `[12]` ou `[12, 34]` dans les champs
+narratifs (`executive_summary`, `clinical_context`, `evidence_synthesis`,
+`population_summary`, `intervention_summary`, `outcome_summary`,
+`methodological_quality`, `clinical_implications`, `future_research`, et les listes
+`key_findings`, `recommended_actions`, `implementation_recommendations`, `limitations`,
+`research_gaps`), en utilisant UNIQUEMENT les identifiants des articles reproduits
+ci-dessus. Chaque appel est renuméroté vers une bibliographie construite depuis la base ;
+un identifiant inconnu reste visible dans le texte suivi d'un `?` et est listé comme non
+résolu. Une phrase qui rapporte un résultat sans appel de citation n'est pas vérifiable :
+cite, ou n'affirme pas.
+
 RÈGLES pour « claims » (4 à 8 affirmations) :
 - `article_ids` ne contient QUE des identifiants présents dans les articles reproduits
   ci-dessus. Chaque identifiant est vérifié contre le corpus : un identifiant absent est
