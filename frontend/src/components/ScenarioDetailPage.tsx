@@ -68,6 +68,8 @@ import {
   type ThresholdCurve,
   fetchEvidenceGaps,
   type EvidenceGaps,
+  fetchStudyDesignVocabulary,
+  type StudyDesignVocabulary,
   evidenceReportUrl,
   previewScenarioSubset,
   applyScenarioSubset,
@@ -5559,6 +5561,68 @@ function SeuilSection({ scenarioId, onSaved, onThresholdChange }: { scenarioId: 
  * line is mandatory, not decoration: articles whose concepts were never extracted cannot
  * appear here, and a gap figure that hides its denominator is the thing this replaces.
  */
+/**
+ * Which study design is which level of evidence, and why. Served from the same table the
+ * charts and the claim grading are computed from (`api/study_design.py`), so there is no
+ * second copy to drift. Collapsed by default: it is a reference, not a reading.
+ */
+function StudyDesignLegend() {
+  const { t, lang } = useI18n();
+  const [open, setOpen] = React.useState(false);
+  const [data, setData] = React.useState<StudyDesignVocabulary | null>(null);
+
+  React.useEffect(() => {
+    if (!open || data) return;
+    fetchStudyDesignVocabulary(lang).then(setData).catch(() => setData(null));
+  }, [open, data, lang]);
+
+  return (
+    <div className="rounded-xl border border-white/8 bg-black/20">
+      <button onClick={() => setOpen(v => !v)}
+        className="flex w-full items-center gap-1.5 px-3 py-2 text-[10px] font-bold uppercase tracking-wider text-white/40 hover:text-white/60 transition">
+        {open ? <ChevronUp size={11} /> : <ChevronDown size={11} />}
+        {t("scenarioDetail.evidences.legend.title")}
+      </button>
+      {open && (
+        <div className="space-y-2 px-3 pb-3">
+          {!data ? (
+            <p className="text-[10px] text-white/35">{t("common.loading")}</p>
+          ) : (
+            <>
+              <div className="overflow-x-auto">
+                <table className="w-full text-[10px]">
+                  <thead>
+                    <tr className="text-white/35">
+                      <th className="py-1 pr-2 text-left font-medium">{t("scenarioDetail.evidences.legend.design")}</th>
+                      <th className="py-1 pr-2 text-left font-medium">{t("scenarioDetail.evidences.legend.level")}</th>
+                      <th className="py-1 pr-2 text-left font-medium">{t("scenarioDetail.evidences.legend.why")}</th>
+                      <th className="py-1 text-left font-medium">{t("scenarioDetail.evidences.legend.source")}</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {data.types.map(row => (
+                      <tr key={row.key} className="border-t border-white/5 align-top">
+                        <td className="py-1 pr-2 text-white/70">{row.label}</td>
+                        <td className="py-1 pr-2 whitespace-nowrap text-white/60">{row.grade}</td>
+                        <td className="py-1 pr-2 text-white/45 leading-snug">{row.why}</td>
+                        <td className="py-1 text-white/30 leading-snug">{row.mesh}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              <p className="text-[10px] text-white/40 leading-relaxed">{data.note}</p>
+              <p className="text-[10px] text-white/25 leading-relaxed">
+                {t("scenarioDetail.evidences.legend.sources")} {data.sources.join(" · ")}
+              </p>
+            </>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function EvidenceGapsPanel({ scenarioId }: { scenarioId: string }) {
   const { t } = useI18n();
   const [data, setData] = React.useState<EvidenceGaps | null>(null);
@@ -6283,6 +6347,11 @@ ${llm.future_research ? `<h3>${t("scenarioDetail.evidences.pdf.futureResearch")}
       )}
 
       {/* ─── SÉPARATEUR ─────────────────────────────────────────────────────── */}
+      {/* La légende des deux distributions ci-dessus : quel devis vaut quel niveau, et
+          pourquoi. Elle sert la MÊME table que les graphiques et la notation des
+          affirmations, donc l'explication ne peut pas diverger du comportement. */}
+      {briefData && <StudyDesignLegend />}
+
       {briefData && (hasLlmContent || llmLoading) && (
         <div className="border-t border-gold-500/20 pt-2">
           <p className="text-[10px] font-bold uppercase tracking-wider text-gold-400/60">{t("scenarioDetail.evidences.narrativeBriefLlm")}</p>

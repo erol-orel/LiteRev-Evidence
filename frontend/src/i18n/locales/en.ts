@@ -1049,6 +1049,14 @@ export const en: Translations = {
       evidenceSynthesis: "Evidence synthesis",
       exportReport: "Citable report (.md)",
       exportReportHint: "Markdown document: methods, renumbered citations, claim table, gap matrix and a bibliography built from the database.",
+      legend: {
+        title: "Which study design is which level of evidence",
+        design: "Study design",
+        level: "Level",
+        why: "Why",
+        source: "Source",
+        sources: "Sources:",
+      },
       gaps: {
         title: "Computed gaps (concept matrix)",
         explain: "How many relevant articles pair each row concept with each column concept. Counted in SQL over the WHOLE relevant subset, with no LLM: an empty cell means no article in this corpus covers both together.",

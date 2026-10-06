@@ -40,111 +40,37 @@ from llm_usage import reasoning_effort as _reasoning_effort
 
 #: Strongest first. The same four labels as the brief's global `evidence_level`, so a claim
 #: and the corpus it comes from are read on one scale.
-_STRENGTH_ORDER = ("Fort", "Modéré", "Faible", "Insuffisant")
+# Le barème des devis et l'échelle GRADE viennent de `api/study_design`, une seule table
+# pour toute l'application. Ils vivaient ici, et une seconde copie en SQL vivait dans
+# `api/documents.py` : les deux ont divergé, et l'interface a fini par afficher une
+# distribution de niveaux à laquelle la notation des affirmations ne croyait pas.
+from .study_design import (LEVEL_HIGH, LEVEL_NA, LEVEL_ORDER, LEVEL_UNKNOWN,  # noqa: E402
+                           LEVEL_VERY_LOW, classify, grade_level, strongest, weaken)
 
-#: Markers that a trial was NOT randomised. Tested FIRST, because they contain the string
-#: that would otherwise promote them: "Non-randomized controlled trial" contains
-#: "randomi". A keyword table got this exactly backwards and graded a non-randomised trial
-#: as the strongest evidence there is.
-_NOT_RANDOMISED = ("non-randomi", "non randomi", "nonrandomi", "non-randomisé",
-                   "non randomisé", "quasi-exper", "quasi exper", "quasi-expérim",
-                   "quasi expérim", "single-arm", "bras unique", "before-after",
-                   "avant-après", "uncontrolled", "non contrôlé")
-_RANDOMISED = ("randomi", "rct", "randomisé", "aléatoire")
-_SYNTHESIS = ("meta-analys", "méta-analys", "systematic review", "revue systématique",
-              "pooled analysis", "umbrella review")
-_OBSERVATIONAL = ("cohort", "cohorte", "case-control", "cas-témoins", "case control",
-                  "cross-sectional", "transversal", "observational", "observationnel",
-                  "registry", "registre", "surveillance", "ecological", "écologique",
-                  "longitudinal", "prospective", "retrospective", "rétrospectiv")
-_TRIAL = ("controlled trial", "clinical trial", "essai contrôlé", "essai clinique",
-          "intervention study", "étude d'intervention", "trial")
-
-
-def design_level(design: str | None) -> str:
-    """The strongest certainty one study design can support on its own.
-
-    Written as ordered guards rather than a keyword table, because the precedences are the
-    whole content and a table expressed them wrongly:
-
-      1. a non-randomisation marker wins over everything. "Non-randomized controlled
-         trial" contains "randomi", and reading it as a randomised trial inverts the
-         appraisal completely.
-      2. a synthesis of OBSERVATIONAL studies inherits from what it includes. In GRADE a
-         systematic review does not upgrade its inputs, so "meta-analysis of cohort
-         studies" caps at "Faible", not "Fort". This is the mistake that lets a corpus of
-         observational reviews carry a strong recommendation.
-      3. only then do randomisation and synthesis markers mean "Fort".
-      4. a controlled or clinical trial with nothing else said is "Modéré": it is an
-         intervention study, but nothing in the label says it was randomised.
-
-    Anything unrecognised - a case report, an opinion piece, a modelling study, a blank
-    field - is "Insuffisant". Unknown must not read as adequate: most of a corpus carries
-    no design label, and defaulting those upward is how an observational corpus comes to
-    support a strong claim."""
-    blob = (design or "").strip().lower()
-    if not blob:
-        return "Insuffisant"
-    has = lambda keys: any(k in blob for k in keys)            # noqa: E731
-    if has(_NOT_RANDOMISED):
-        # "Faible", and the same for an explicitly non-randomised trial as for a
-        # quasi-experimental study: they are the same thing described twice, and GRADE
-        # starts a non-randomised study of an intervention at low certainty, as it does an
-        # observational one. Note what this means next to the rule below: a label that
-        # merely says "clinical trial" scores HIGHER than one that says "non-randomised
-        # controlled trial". That is deliberate. Stated absence of randomisation is a
-        # known weakness; an unstated allocation is an unknown, and rating the known-bad
-        # below the unknown is the direction that cannot flatter a corpus.
-        return "Faible"
-    if has(_SYNTHESIS):
-        # A review inherits its inputs: of trials it is "Fort", of cohorts it is "Faible",
-        # and of nothing in particular it is a review of unknown material.
-        if has(_RANDOMISED) or has(_TRIAL):
-            return "Fort"
-        return "Faible" if has(_OBSERVATIONAL) else "Fort"
-    if has(_RANDOMISED):
-        return "Fort"
-    if has(_OBSERVATIONAL):
-        return "Faible"
-    if has(_TRIAL):
-        return "Modéré"
-    return "Insuffisant"
-
-
-def _strongest(levels) -> str:
-    """The strongest label in an iterable, or "Insuffisant" if it is empty."""
-    best = "Insuffisant"
-    for level in levels:
-        if _STRENGTH_ORDER.index(level) < _STRENGTH_ORDER.index(best):
-            best = level
-    return best
-
-
-def _weaken(level: str, steps: int = 1) -> str:
-    """One step down the scale, floored at "Insuffisant"."""
-    return _STRENGTH_ORDER[min(_STRENGTH_ORDER.index(level) + steps,
-                               len(_STRENGTH_ORDER) - 1)]
+_STRENGTH_ORDER = LEVEL_ORDER
+design_level = grade_level          # nom conservé : l'API publique de ce module
 
 
 def corpus_ceiling(designs) -> tuple[str, str]:
-    """(label, sentence) for the best certainty the corpus's design mix allows.
-
-    Computed over the designs of EVERY relevant article, not of the thirty reproduced for
-    quotation, so the ceiling describes the corpus the brief claims to speak for."""
-    label = _strongest(design_level(d) for d in designs)
+    """(label, phrase) pour la meilleure certitude que le mélange de devis du corpus
+    autorise, calculé sur les devis de TOUS les articles pertinents."""
+    label_ = strongest(grade_level(d) for d in designs)
     sentence = {
-        "Fort": ("Forte possible (essais randomisés / synthèses d'essais présents), "
-                 "à pondérer selon la cohérence et le risque de biais"),
-        "Modéré": "Modérée au mieux (essais contrôlés non randomisés / quasi-expérimental)",
+        LEVEL_HIGH: ("Élevée possible (essais randomisés ou synthèses d'essais présents), "
+                     "à pondérer selon la cohérence et le risque de biais"),
+        "Modérée": "Modérée au mieux (essais dont l'allocation n'est pas précisée)",
         "Faible": ("Faible (corpus observationnel : GRADE plafonne la certitude à faible, "
                    "sauf upgrade explicitement justifié)"),
-        "Insuffisant": ("Insuffisante (aucun devis d'étude identifié : rapports de cas, "
-                        "avis, modélisation ou devis non renseigné)"),
-    }[label]
-    return label, sentence
+        LEVEL_VERY_LOW: ("Très faible (rapports de cas, revues narratives ou éditoriaux "
+                         "uniquement)"),
+        LEVEL_NA: ("Non applicable (recommandations, modélisations ou travaux "
+                   "qualitatifs : pas de preuve d'effet à graduer)"),
+        LEVEL_UNKNOWN: ("Non évaluable (aucun devis identifié dans les notices)"),
+    }[label_]
+    return label_, sentence
 
 
-def claim_strength(designs, ceiling: str = "Fort") -> dict[str, Any]:
+def claim_strength(designs, ceiling: str = LEVEL_HIGH) -> dict[str, Any]:
     """The certainty a claim is allowed to assert, and the inputs that decided it.
 
     Pure, so it is testable without an LLM and without a database - which is the point:
@@ -165,16 +91,23 @@ def claim_strength(designs, ceiling: str = "Fort") -> dict[str, Any]:
         counted[key] = counted.get(key, 0) + 1
     n = len(designs)
     if not n:
-        return {"strength": "Insuffisant",
-                "basis": {"n_articles": 0, "designs": {}, "from_designs": "Insuffisant",
+        return {"strength": LEVEL_UNKNOWN,
+                "basis": {"n_articles": 0, "designs": {}, "from_designs": LEVEL_UNKNOWN,
                           "downgraded_single_study": False, "capped_by_corpus": False,
                           "note": "aucun article vérifiable cité"}}
-    from_designs = _strongest(design_level(d) for d in designs)
+    from_designs = strongest(design_level(d) for d in designs)
     level = from_designs
-    single = n == 1 and level != "Insuffisant"
+    # Une seule étude perd un niveau, sauf si le devis n'est pas sur l'échelle
+    # (recommandation, modélisation, qualitatif, devis non précisé) : on ne descend pas
+    # d'un cran une chose qui n'a pas de cran.
+    single = n == 1 and level in (LEVEL_HIGH, "Modérée", "Faible")
     if single:
-        level = _weaken(level)
-    capped = _STRENGTH_ORDER.index(level) < _STRENGTH_ORDER.index(ceiling)
+        level = weaken(level)
+    # Un plafond ne peut qu'ABAISSER. Les deux non-niveaux sont hors échelle : une
+    # affirmation tirée de modélisations ne devient pas « faible » parce que le corpus le
+    # permettrait.
+    capped = (level in LEVEL_ORDER and ceiling in LEVEL_ORDER
+              and LEVEL_ORDER.index(level) < LEVEL_ORDER.index(ceiling))
     if capped:
         level = ceiling
     return {"strength": level,
@@ -182,7 +115,7 @@ def claim_strength(designs, ceiling: str = "Fort") -> dict[str, Any]:
                       "downgraded_single_study": single, "capped_by_corpus": capped}}
 
 
-def attach_claim_strength(claims, articles_by_id: dict, ceiling: str = "Fort") -> list[dict]:
+def attach_claim_strength(claims, articles_by_id: dict, ceiling: str = LEVEL_HIGH) -> list[dict]:
     """Verify each claim's citations against the corpus, then grade it.
 
     Every cited id is checked against the relevant articles actually in this scenario. An
