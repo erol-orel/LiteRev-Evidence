@@ -663,6 +663,8 @@ export const en: Translations = {
       directLink: "Direct link",
     },
     subset: {
+      byDesign: { hint: "Click to narrow the corpus to this study design" },
+      byLevel: { hint: "Click to narrow the corpus to this evidence level" },
       title: "Narrow the corpus to this selection",
       pickSome: "Tick the groups you want to keep. Everything else leaves the corpus, and can be brought back.",
       summary: "{keep} articles kept out of {relevant}; {exclude} leave the corpus.",

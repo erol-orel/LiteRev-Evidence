@@ -492,3 +492,80 @@ def test_applying_drops_the_caches_computed_on_the_old_corpus(seeded):
         cur.execute("SELECT clustering_json, concept_graph_json, recommended_actions_json "
                     "FROM scenario_settings WHERE scenario_id = %s", (SID,))
         assert cur.fetchone() == (None, None, None)
+
+
+# ── narrowing by study design and by evidence level ──────────────────────────
+# The dimension the user asked for, with the same semantics as the clusters: it EXCLUDES
+# from the corpus, so every extraction afterwards reads the narrowed set and the PRISMA
+# records it as a reviewer decision rather than a display filter.
+from api.subsets import describe_selection, plan_subset  # noqa: E402
+
+_DESIGNS = {1: "Essai contrôlé randomisé", 2: "Cohorte", 3: "Essai contrôlé randomisé",
+            4: "Devis non précisé"}
+_LEVELS = {1: "Élevée", 2: "Faible", 3: "Élevée", 4: "Non évaluée"}
+
+
+def test_keeping_only_one_design_excludes_the_rest():
+    got = plan_subset([1, 2, 3, 4], design_of=_DESIGNS,
+                      designs_wanted={"Essai contrôlé randomisé"})
+    assert got["keep_ids"] == [1, 3] and got["exclude_ids"] == [2, 4]
+
+
+def test_keeping_only_strong_evidence():
+    got = plan_subset([1, 2, 3, 4], level_of=_LEVELS, levels_wanted={"Élevée"})
+    assert got["keep_ids"] == [1, 3] and got["exclude_ids"] == [2, 4]
+
+
+def test_an_unstated_design_is_a_verdict_not_an_abstention():
+    """Unlike a cluster, which can genuinely not know an article (capped projection), the
+    design map has READ every relevant article. "Devis non précisé" is what it found, so a
+    reviewer can decide to keep or drop those rather than have the dimension abstain."""
+    got = plan_subset([1, 2, 3, 4], design_of=_DESIGNS, designs_wanted={"Devis non précisé"})
+    assert got["keep_ids"] == [4]
+    assert got["undecided_ids"] == [], "nothing abstained: every article was judged"
+
+
+def test_an_article_missing_from_the_map_still_abstains():
+    """A row added after the map was built is genuinely unjudged, and `unassigned` decides
+    its fate as it does everywhere else."""
+    got = plan_subset([1, 99], design_of=_DESIGNS, designs_wanted={"Cohorte"})
+    assert got["undecided_ids"] == [99] and 99 in got["keep_ids"]
+    strict = plan_subset([1, 99], design_of=_DESIGNS, designs_wanted={"Cohorte"},
+                         unassigned="exclude")
+    assert 99 in strict["exclude_ids"]
+
+
+def test_design_and_level_combine_like_every_other_dimension():
+    """`all` keeps what both accept; `any` keeps what either does. A dimension that cannot
+    judge still does not vote."""
+    both = plan_subset([1, 2, 3, 4], design_of=_DESIGNS, designs_wanted={"Cohorte"},
+                       level_of=_LEVELS, levels_wanted={"Élevée"}, combine="all")
+    assert both["keep_ids"] == [], "no article is both a cohort and strong evidence"
+    either = plan_subset([1, 2, 3, 4], design_of=_DESIGNS, designs_wanted={"Cohorte"},
+                         level_of=_LEVELS, levels_wanted={"Élevée"}, combine="any")
+    assert either["keep_ids"] == [1, 2, 3]
+
+
+def test_the_tally_names_the_new_dimensions():
+    got = plan_subset([1, 2, 3, 4], design_of=_DESIGNS, designs_wanted={"Cohorte"},
+                      level_of=_LEVELS, levels_wanted={"Élevée"})
+    assert set(got["by_dimension"]) == {"designs", "levels"}
+    assert got["by_dimension"]["designs"] == {"in": 1, "out": 3, "unknown": 0}
+
+
+def test_selecting_nothing_at_all_is_still_refused():
+    with pytest.raises(ValueError, match="aucune dimension"):
+        plan_subset([1, 2])
+
+
+def test_the_reason_names_the_designs_in_words():
+    """It lands in `screening_reason` and has to read in a Methods section, so it names
+    what was kept rather than an internal code."""
+    reason = describe_selection(None, None, None, "all", "keep", threshold=0.45,
+                                designs=["Essai contrôlé randomisé"])
+    assert "devis Essai contrôlé randomisé" in reason
+    assert "seuil 0.45" in reason
+
+    both = describe_selection(None, None, None, "all", "keep",
+                              designs=["Essai contrôlé randomisé"], levels=["Élevée"])
+    assert "devis" in both and "niveaux de preuve Élevée" in both and " et " in both

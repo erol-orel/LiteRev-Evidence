@@ -53,6 +53,10 @@ def plan_subset(
     clusters_wanted: set[int] | None = None,
     concept_match: set[int] | None = None,
     concept_known: set[int] | None = None,
+    design_of: dict[int, str] | None = None,
+    designs_wanted: set[str] | None = None,
+    level_of: dict[int, str] | None = None,
+    levels_wanted: set[str] | None = None,
     combine: str = "all",
     unassigned: str = "keep",
 ) -> dict[str, Any]:
@@ -93,9 +97,32 @@ def plan_subset(
             return "in" if i in concept_match else "out"
 
         verdicts.append(("concepts", _concept))
+    if design_of is not None:
+        wanted_designs = designs_wanted or set()
+
+        def _design(i: int) -> str:
+            # « Devis non précisé » est une VRAIE réponse, pas une absence : l'article a
+            # été lu, et rien n'y indiquait de devis. Le relecteur peut donc choisir de le
+            # garder ou non, au lieu que la dimension s'abstienne pour lui.
+            key = design_of.get(i)
+            if key is None:
+                return "unknown"
+            return "in" if key in wanted_designs else "out"
+
+        verdicts.append(("designs", _design))
+    if level_of is not None:
+        wanted_levels = levels_wanted or set()
+
+        def _level(i: int) -> str:
+            level = level_of.get(i)
+            if level is None:
+                return "unknown"
+            return "in" if level in wanted_levels else "out"
+
+        verdicts.append(("levels", _level))
 
     if not verdicts:
-        raise ValueError("aucune dimension de sélection : donnez des clusters ou des concepts")
+        raise ValueError("aucune dimension de sélection : donnez des clusters, des concepts, des devis d'étude ou des niveaux de preuve")
 
     keep: list[int] = []
     drop: list[int] = []
@@ -136,7 +163,9 @@ def plan_subset(
 
 def describe_selection(clusters: list[int] | None, cluster_names: dict[int, str] | None,
                        concepts: list[str] | None, combine: str, unassigned: str,
-                       threshold: float | None = None) -> str:
+                       threshold: float | None = None,
+                       designs: list[str] | None = None,
+                       levels: list[str] | None = None) -> str:
     """La phrase stockée dans `screening_reason`, donc celle que lira la PRISMA et qui
     devra tenir dans une section Méthodes. Elle nomme ce qui a été GARDÉ, pas un
     identifiant de calcul : les numéros de cluster changent au recalcul suivant.
@@ -151,6 +180,13 @@ def describe_selection(clusters: list[int] | None, cluster_names: dict[int, str]
         parts.append("clusters " + ", ".join(names))
     if concepts:
         parts.append("concepts " + ", ".join(concepts))
+    # Les devis et les niveaux sont nommés en toutes lettres, comme les clusters : une
+    # section Méthodes doit pouvoir dire « restreint aux essais randomisés » sans renvoyer
+    # à un code interne.
+    if designs:
+        parts.append("devis " + ", ".join(designs))
+    if levels:
+        parts.append("niveaux de preuve " + ", ".join(levels))
     joined = (" et " if combine == "all" else " ou ").join(parts) if len(parts) > 1 else (parts[0] if parts else "")
     tail = "" if unassigned == "keep" else " ; articles hors projection exclus aussi"
     at = f" (seuil {float(threshold):.4g})" if threshold is not None else ""
@@ -243,6 +279,49 @@ def _cluster_membership(scenario_id: str) -> tuple[dict[int, int], dict[int, str
     return of, names, meta
 
 
+def _design_membership(scenario_id: str, threshold: float) -> tuple[dict[int, str], dict[int, str], dict]:
+    """({id: devis}, {id: niveau de preuve}, méta), sur tout le sous-ensemble pertinent.
+
+    Les deux viennent de `api/study_design`, la même table que les graphiques et que la
+    notation des affirmations. Un article sans devis identifiable n'est pas absent de ces
+    cartes : il porte « Devis non précisé » et « Non évaluée ». C'est délibéré, et ça
+    change ce que le relecteur peut faire. Pour les clusters, `unknown` veut dire « hors
+    de la projection, la carte ne dit rien de lui » ; ici l'article A été lu, et le fait
+    qu'aucun devis n'y figure est une réponse. Le relecteur peut donc décider de garder ou
+    d'écarter les devis non précisés, au lieu que la dimension s'abstienne pour lui."""
+    from .study_design import classify, grade_level, label
+
+    with engine.connect() as conn:
+        rows = conn.execute(text(f"""
+            SELECT d.id,
+                   COALESCE(NULLIF(d.pico_json->>'study_design', ''), d.study_design, '') AS raw
+            FROM literature_document d
+            JOIN article_scenarios ars ON ars.document_id = d.id
+            WHERE ars.scenario_id = :sid AND {relevant_gate_sql(doc="d", link="ars")}
+        """), {"sid": scenario_id, "thr": threshold}).mappings().all()
+
+    design_of: dict[int, str] = {}
+    level_of: dict[int, str] = {}
+    counts: dict[str, int] = {}
+    level_counts: dict[str, int] = {}
+    for r in rows:
+        article_id = int(r["id"])
+        design_label = label(classify(r["raw"]))
+        level = grade_level(r["raw"])
+        design_of[article_id] = design_label
+        level_of[article_id] = level
+        counts[design_label] = counts.get(design_label, 0) + 1
+        level_counts[level] = level_counts.get(level, 0) + 1
+    meta = {
+        "judged": len(design_of),
+        "designs": [{"value": k, "n": v} for k, v in
+                    sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))],
+        "levels": [{"value": k, "n": v} for k, v in
+                   sorted(level_counts.items(), key=lambda kv: (-kv[1], kv[0]))],
+    }
+    return design_of, level_of, meta
+
+
 def _concept_membership(scenario_id: str, concepts: list[str], mode: str) -> tuple[set[int], set[int], dict]:
     """(articles correspondants, articles JUGEABLES, méta).
 
@@ -292,15 +371,17 @@ def _concept_membership(scenario_id: str, concepts: list[str], mode: str) -> tup
 def _build_plan(scenario_id: str, payload: dict[str, Any]) -> dict[str, Any]:
     clusters = payload.get("clusters")
     concepts = payload.get("concepts")
+    designs = payload.get("designs")
+    levels = payload.get("levels")
     combine = str(payload.get("combine") or "all")
     unassigned = str(payload.get("unassigned") or "keep")
     concept_mode = str(payload.get("concept_mode") or "any")
     if concept_mode not in ("any", "all"):
         raise HTTPException(status_code=422, detail="concept_mode doit valoir 'any' ou 'all'")
-    if not clusters and not concepts:
+    if not clusters and not concepts and not designs and not levels:
         raise HTTPException(status_code=422,
-                            detail="Donnez au moins `clusters` ou `concepts` : sans dimension de "
-                                   "sélection il n'y a rien à découper.")
+                            detail="Donnez au moins `clusters`, `concepts`, `designs` ou `levels` : "
+                                   "sans dimension de sélection il n'y a rien à découper.")
 
     threshold = _get_scenario_threshold(scenario_id)
     relevant = _relevant_ids(scenario_id, threshold)
@@ -330,9 +411,35 @@ def _build_plan(scenario_id: str, payload: dict[str, Any]) -> dict[str, Any]:
         concept_labels = kmeta["labels"]
         meta["concepts"] = kmeta
 
+    design_of = level_of = None
+    wanted_designs = wanted_levels = None
+    if designs or levels:
+        design_map, level_map, dmeta = _design_membership(scenario_id, threshold)
+        meta["study_designs"] = dmeta
+        if designs:
+            wanted_designs = {str(x) for x in designs}
+            known = {d["value"] for d in dmeta["designs"]}
+            unknown_labels = sorted(wanted_designs - known)
+            if unknown_labels:
+                raise HTTPException(status_code=404,
+                                    detail=f"Devis inconnu(s) dans ce corpus : {unknown_labels} "
+                                           f"(disponibles : {sorted(known)}).")
+            design_of = design_map
+        if levels:
+            wanted_levels = {str(x) for x in levels}
+            known_levels = {l["value"] for l in dmeta["levels"]}
+            unknown_levels = sorted(wanted_levels - known_levels)
+            if unknown_levels:
+                raise HTTPException(status_code=404,
+                                    detail=f"Niveau(x) inconnu(s) dans ce corpus : {unknown_levels} "
+                                           f"(disponibles : {sorted(known_levels)}).")
+            level_of = level_map
+
     try:
         plan = plan_subset(relevant, cluster_of=cluster_of, clusters_wanted=wanted_clusters,
                            concept_match=concept_match, concept_known=concept_known,
+                           design_of=design_of, designs_wanted=wanted_designs,
+                           level_of=level_of, levels_wanted=wanted_levels,
                            combine=combine, unassigned=unassigned)
     except ValueError as e:
         raise HTTPException(status_code=422, detail=str(e))
@@ -340,7 +447,9 @@ def _build_plan(scenario_id: str, payload: dict[str, Any]) -> dict[str, Any]:
     plan["meta"] = meta
     plan["reason"] = describe_selection(sorted(wanted_clusters) if wanted_clusters else None,
                                         cluster_names, concept_labels or None, combine, unassigned,
-                                        threshold=threshold)
+                                        threshold=threshold,
+                                        designs=sorted(wanted_designs) if wanted_designs else None,
+                                        levels=sorted(wanted_levels) if wanted_levels else None)
     return plan
 
 

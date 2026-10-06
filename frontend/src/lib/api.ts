@@ -2930,6 +2930,9 @@ export interface SubsetSelection {
   clusters?: number[];
   concepts?: string[];                       // "type:label", the map's canonical English
   concept_mode?: "any" | "all";
+  /** Vocabulary labels from `api/study_design`, as the charts display them. */
+  designs?: string[];
+  levels?: string[];
   combine?: "any" | "all";
   unassigned?: "keep" | "exclude";
   reason?: string;
