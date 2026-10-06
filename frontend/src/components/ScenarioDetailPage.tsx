@@ -144,6 +144,18 @@ import {
  *  affichait encore ses articles comme « pertinents » à partir de 0.45. */
 const DEFAULT_SIMILARITY_THRESHOLD = 0.45;
 
+/**
+ * Claim strength, which the backend computes from the cited studies' designs rather than
+ * letting the model assert it. The labels come from `api/evidence.py::_STRENGTH_ORDER`;
+ * an unknown one falls back to neutral styling rather than disappearing.
+ */
+const CLAIM_STRENGTH_STYLE: Record<string, string> = {
+  Fort: "bg-brand-500/20 text-brand-300",
+  "Modéré": "bg-gold-500/20 text-gold-300",
+  Faible: "bg-orange-500/20 text-orange-300",
+  Insuffisant: "bg-white/10 text-white/45",
+};
+
 const STATUS_COLORS = {
   green: {
     bg: "bg-brand-500/10",
@@ -6202,6 +6214,58 @@ ${llm.future_research ? `<h3>${t("scenarioDetail.evidences.pdf.futureResearch")}
             <div className="space-y-1">
               <p className="text-[10px] font-bold uppercase tracking-wider text-white/35">{t("scenarioDetail.evidences.evidenceSynthesis")}</p>
               <p className="text-xs text-white/65 leading-relaxed whitespace-pre-line">{llmData.evidence_synthesis}</p>
+            </div>
+          )}
+          {/* Affirmations notées : la force est CALCULÉE (devis des articles cités, plafonnée
+              par le corpus), jamais écrite par le modèle. `basis` est affiché parce qu'une
+              note sans ses entrées ne se discute pas. */}
+          {llmData.claims && llmData.claims.length > 0 && (
+            <div className="space-y-2">
+              <p className="text-[10px] font-bold uppercase tracking-wider text-white/35">
+                {t("scenarioDetail.evidences.claims.title")}
+              </p>
+              <p className="text-[10px] text-white/40 leading-relaxed">
+                {t("scenarioDetail.evidences.claims.computed")}
+              </p>
+              <div className="space-y-2">
+                {llmData.claims.map((c, i) => (
+                  <div key={i} className="rounded-xl border border-white/8 bg-white/3 p-3 space-y-1.5">
+                    <div className="flex items-start gap-2">
+                      <span className={`shrink-0 rounded-md px-2 py-0.5 text-[9px] font-bold uppercase tracking-wider ${CLAIM_STRENGTH_STYLE[c.strength] ?? "bg-white/10 text-white/50"}`}>
+                        {c.strength}
+                      </span>
+                      <p className="text-xs text-white/80 leading-relaxed">{c.claim}</p>
+                    </div>
+                    {c.reasoning && (
+                      <p className="text-[11px] text-white/55 leading-relaxed pl-1">{c.reasoning}</p>
+                    )}
+                    <p className="text-[10px] text-white/35 pl-1">
+                      {t("scenarioDetail.evidences.claims.basis")
+                        .replace("{n}", String(c.basis.n_articles))
+                        .replace("{designs}", Object.entries(c.basis.designs)
+                          .map(([d, n]) => `${d} (${n})`).join(", ") || "-")}
+                      {c.basis.downgraded_single_study && ` · ${t("scenarioDetail.evidences.claims.singleStudy")}`}
+                      {c.basis.capped_by_corpus && ` · ${t("scenarioDetail.evidences.claims.capped").replace("{level}", c.basis.from_designs)}`}
+                    </p>
+                    {c.articles.length > 0 && (
+                      <ul className="pl-1 space-y-0.5">
+                        {c.articles.map((a) => (
+                          <li key={a.id} className="text-[10px] text-white/45 leading-snug">
+                            [{a.id}] {a.title}{a.year ? ` (${a.year})` : ""}
+                            {a.study_design ? ` · ${a.study_design}` : ""}
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                    {c.unverified_ids && c.unverified_ids.length > 0 && (
+                      <p className="text-[10px] text-rose-300/70 pl-1">
+                        {t("scenarioDetail.evidences.claims.unverified")
+                          .replace("{ids}", c.unverified_ids.map((x) => String(x)).join(", "))}
+                      </p>
+                    )}
+                  </div>
+                ))}
+              </div>
             </div>
           )}
           {/* PICO Summary */}

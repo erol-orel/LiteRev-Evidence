@@ -19,6 +19,210 @@ from llm_usage import json_content as _json_content
 from llm_usage import model_for as _model
 from llm_usage import reasoning_effort as _reasoning_effort
 
+# ─────────────────────────────────────────────────────────────────────────────
+# What a claim is allowed to assert
+# ─────────────────────────────────────────────────────────────────────────────
+# A brief used to carry ONE `evidence_level` for everything it said, so a well-supported
+# sentence and a thin one read with the same authority. Commercial tools grade per claim
+# and have the model state the grade in prose: "Strong - repeated across reviews". That
+# puts the appraisal in the hands of the thing being appraised.
+#
+# Here the model proposes the claim and names the articles it rests on; the STRENGTH is
+# computed from the study designs of those articles, capped by what the corpus as a whole
+# can support. The model is explicitly told not to state a strength, because it does not
+# decide one.
+#
+# What this is NOT: a GRADE assessment. GRADE weighs risk of bias, inconsistency,
+# indirectness, imprecision and publication bias, none of which is derivable from a design
+# label. This is the CEILING that the design mix and the number of studies allow, which is
+# the half of GRADE a machine can compute without pretending. `basis` carries the inputs so
+# a reader can see why a label came out as it did, and disagree with it.
+
+#: Strongest first. The same four labels as the brief's global `evidence_level`, so a claim
+#: and the corpus it comes from are read on one scale.
+_STRENGTH_ORDER = ("Fort", "Modéré", "Faible", "Insuffisant")
+
+#: Markers that a trial was NOT randomised. Tested FIRST, because they contain the string
+#: that would otherwise promote them: "Non-randomized controlled trial" contains
+#: "randomi". A keyword table got this exactly backwards and graded a non-randomised trial
+#: as the strongest evidence there is.
+_NOT_RANDOMISED = ("non-randomi", "non randomi", "nonrandomi", "non-randomisé",
+                   "non randomisé", "quasi-exper", "quasi exper", "quasi-expérim",
+                   "quasi expérim", "single-arm", "bras unique", "before-after",
+                   "avant-après", "uncontrolled", "non contrôlé")
+_RANDOMISED = ("randomi", "rct", "randomisé", "aléatoire")
+_SYNTHESIS = ("meta-analys", "méta-analys", "systematic review", "revue systématique",
+              "pooled analysis", "umbrella review")
+_OBSERVATIONAL = ("cohort", "cohorte", "case-control", "cas-témoins", "case control",
+                  "cross-sectional", "transversal", "observational", "observationnel",
+                  "registry", "registre", "surveillance", "ecological", "écologique",
+                  "longitudinal", "prospective", "retrospective", "rétrospectiv")
+_TRIAL = ("controlled trial", "clinical trial", "essai contrôlé", "essai clinique",
+          "intervention study", "étude d'intervention", "trial")
+
+
+def design_level(design: str | None) -> str:
+    """The strongest certainty one study design can support on its own.
+
+    Written as ordered guards rather than a keyword table, because the precedences are the
+    whole content and a table expressed them wrongly:
+
+      1. a non-randomisation marker wins over everything. "Non-randomized controlled
+         trial" contains "randomi", and reading it as a randomised trial inverts the
+         appraisal completely.
+      2. a synthesis of OBSERVATIONAL studies inherits from what it includes. In GRADE a
+         systematic review does not upgrade its inputs, so "meta-analysis of cohort
+         studies" caps at "Faible", not "Fort". This is the mistake that lets a corpus of
+         observational reviews carry a strong recommendation.
+      3. only then do randomisation and synthesis markers mean "Fort".
+      4. a controlled or clinical trial with nothing else said is "Modéré": it is an
+         intervention study, but nothing in the label says it was randomised.
+
+    Anything unrecognised - a case report, an opinion piece, a modelling study, a blank
+    field - is "Insuffisant". Unknown must not read as adequate: most of a corpus carries
+    no design label, and defaulting those upward is how an observational corpus comes to
+    support a strong claim."""
+    blob = (design or "").strip().lower()
+    if not blob:
+        return "Insuffisant"
+    has = lambda keys: any(k in blob for k in keys)            # noqa: E731
+    if has(_NOT_RANDOMISED):
+        # "Faible", and the same for an explicitly non-randomised trial as for a
+        # quasi-experimental study: they are the same thing described twice, and GRADE
+        # starts a non-randomised study of an intervention at low certainty, as it does an
+        # observational one. Note what this means next to the rule below: a label that
+        # merely says "clinical trial" scores HIGHER than one that says "non-randomised
+        # controlled trial". That is deliberate. Stated absence of randomisation is a
+        # known weakness; an unstated allocation is an unknown, and rating the known-bad
+        # below the unknown is the direction that cannot flatter a corpus.
+        return "Faible"
+    if has(_SYNTHESIS):
+        # A review inherits its inputs: of trials it is "Fort", of cohorts it is "Faible",
+        # and of nothing in particular it is a review of unknown material.
+        if has(_RANDOMISED) or has(_TRIAL):
+            return "Fort"
+        return "Faible" if has(_OBSERVATIONAL) else "Fort"
+    if has(_RANDOMISED):
+        return "Fort"
+    if has(_OBSERVATIONAL):
+        return "Faible"
+    if has(_TRIAL):
+        return "Modéré"
+    return "Insuffisant"
+
+
+def _strongest(levels) -> str:
+    """The strongest label in an iterable, or "Insuffisant" if it is empty."""
+    best = "Insuffisant"
+    for level in levels:
+        if _STRENGTH_ORDER.index(level) < _STRENGTH_ORDER.index(best):
+            best = level
+    return best
+
+
+def _weaken(level: str, steps: int = 1) -> str:
+    """One step down the scale, floored at "Insuffisant"."""
+    return _STRENGTH_ORDER[min(_STRENGTH_ORDER.index(level) + steps,
+                               len(_STRENGTH_ORDER) - 1)]
+
+
+def corpus_ceiling(designs) -> tuple[str, str]:
+    """(label, sentence) for the best certainty the corpus's design mix allows.
+
+    Computed over the designs of EVERY relevant article, not of the thirty reproduced for
+    quotation, so the ceiling describes the corpus the brief claims to speak for."""
+    label = _strongest(design_level(d) for d in designs)
+    sentence = {
+        "Fort": ("Forte possible (essais randomisés / synthèses d'essais présents), "
+                 "à pondérer selon la cohérence et le risque de biais"),
+        "Modéré": "Modérée au mieux (essais contrôlés non randomisés / quasi-expérimental)",
+        "Faible": ("Faible (corpus observationnel : GRADE plafonne la certitude à faible, "
+                   "sauf upgrade explicitement justifié)"),
+        "Insuffisant": ("Insuffisante (aucun devis d'étude identifié : rapports de cas, "
+                        "avis, modélisation ou devis non renseigné)"),
+    }[label]
+    return label, sentence
+
+
+def claim_strength(designs, ceiling: str = "Fort") -> dict[str, Any]:
+    """The certainty a claim is allowed to assert, and the inputs that decided it.
+
+    Pure, so it is testable without an LLM and without a database - which is the point:
+    the number a reader sees next to a claim comes from a rule they can read, not from the
+    model's opinion of its own output.
+
+    Three rules, in order:
+      1. the strongest design among the cited articles sets the level;
+      2. a SINGLE study drops one level. One study is a result, not a body of evidence,
+         and a lone randomised trial should not read like a settled question;
+      3. the corpus ceiling caps it. A claim cannot be more certain than the corpus it is
+         drawn from, whatever the model cited.
+    """
+    designs = [d for d in (designs or [])]
+    counted: dict[str, int] = {}
+    for d in designs:
+        key = (d or "").strip().lower() or "non renseigné"
+        counted[key] = counted.get(key, 0) + 1
+    n = len(designs)
+    if not n:
+        return {"strength": "Insuffisant",
+                "basis": {"n_articles": 0, "designs": {}, "from_designs": "Insuffisant",
+                          "downgraded_single_study": False, "capped_by_corpus": False,
+                          "note": "aucun article vérifiable cité"}}
+    from_designs = _strongest(design_level(d) for d in designs)
+    level = from_designs
+    single = n == 1 and level != "Insuffisant"
+    if single:
+        level = _weaken(level)
+    capped = _STRENGTH_ORDER.index(level) < _STRENGTH_ORDER.index(ceiling)
+    if capped:
+        level = ceiling
+    return {"strength": level,
+            "basis": {"n_articles": n, "designs": counted, "from_designs": from_designs,
+                      "downgraded_single_study": single, "capped_by_corpus": capped}}
+
+
+def attach_claim_strength(claims, articles_by_id: dict, ceiling: str = "Fort") -> list[dict]:
+    """Verify each claim's citations against the corpus, then grade it.
+
+    Every cited id is checked against the relevant articles actually in this scenario. An
+    id that is not there is moved to `unverified_ids` rather than dropped silently: a
+    model that cites something absent has told you something about itself, and that
+    belongs in the output, not in a log line. This is also the thing a reader cannot do
+    with a commercial report, where the corpus is invisible.
+    """
+    out = []
+    for raw in (claims or []):
+        if not isinstance(raw, dict):
+            continue
+        ids, unverified = [], []
+        for value in (raw.get("article_ids") or []):
+            try:
+                article_id = int(value)
+            except (TypeError, ValueError):
+                unverified.append(value)
+                continue
+            (ids if article_id in articles_by_id else unverified).append(article_id)
+        graded = claim_strength([articles_by_id[i].get("study_design") for i in ids],
+                                ceiling=ceiling)
+        claim = {
+            "claim": str(raw.get("claim") or "").strip(),
+            "reasoning": str(raw.get("reasoning") or "").strip(),
+            "article_ids": ids,
+            "articles": [{"id": i,
+                          "title": (articles_by_id[i].get("title") or "")[:300],
+                          "year": articles_by_id[i].get("year"),
+                          "study_design": articles_by_id[i].get("study_design")}
+                         for i in ids],
+            **graded,
+        }
+        if unverified:
+            claim["unverified_ids"] = unverified
+        if claim["claim"]:
+            out.append(claim)
+    return out
+
+
 @app.get("/user-scenarios/{scenario_id}/evidence-brief")
 def get_user_scenario_evidence_brief(scenario_id: str) -> dict[str, Any]:
     """Evidence Brief d'un scénario utilisateur (délègue au constructeur générique)."""
@@ -438,6 +642,11 @@ def _generate_evidence_brief_llm(scenario_id: str, force: bool = False, lang: st
     for a in articles[:30]:
         pj = a.get("pico_json") or {}
         _ca = {
+            # L'identifiant est reproduit POUR ÊTRE CITÉ : c'est lui qui rend une
+            # affirmation du brief vérifiable, en la rattachant à une ligne du corpus que
+            # le relecteur peut ouvrir. Sans lui, le modèle ne pouvait citer qu'un titre,
+            # et une citation qu'on ne peut pas résoudre ne se vérifie pas.
+            "id": a.get("id"),
             "title": a.get("title", ""),
             "year": a.get("year"),
             "journal": a.get("journal", ""),
@@ -488,17 +697,12 @@ def _generate_evidence_brief_llm(scenario_id: str, force: bool = False, lang: st
     # observationnelle (cohorte, cas-témoins, transversale, série de cas) démarre
     # en certitude FAIBLE ; seuls les essais randomisés et leurs synthèses peuvent
     # soutenir une certitude élevée.
-    _designs_blob = " ".join(study_designs.keys()).lower()
-    if any(k in _designs_blob for k in ("randomi", "rct", "meta-analysis", "méta-analyse",
-                                        "meta analysis", "systematic review", "revue systématique")):
-        _grade_ceiling = ("Forte possible (essais randomisés / synthèses d'essais présents), "
-                          "à pondérer selon la cohérence et le risque de biais")
-    elif any(k in _designs_blob for k in ("controlled trial", "clinical trial", "quasi-exper",
-                                          "quasi exper", "non-randomi", "non randomi")):
-        _grade_ceiling = "Modérée au mieux (essais contrôlés non randomisés / quasi-expérimental)"
-    else:
-        _grade_ceiling = ("Faible (corpus observationnel : GRADE plafonne la certitude à faible, "
-                          "sauf upgrade explicitement justifié)")
+    #
+    # Calculé par `corpus_ceiling`, sur les devis de TOUS les articles pertinents, et
+    # partagé avec le barème des affirmations : c'était une liste de mots-clés en ligne
+    # ici et il en aurait fallu une seconde pour les affirmations, donc deux règles à
+    # faire dériver l'une de l'autre.
+    _ceiling_label, _grade_ceiling = corpus_ceiling(study_designs.keys())
 
     system_prompt = """Tu es un expert en sciences de la santé et en revue systématique de la littérature scientifique.
 Tu génères des Evidence Briefs complets, rigoureux et structurés.
@@ -546,10 +750,27 @@ Génère un JSON avec EXACTEMENT ces champs :
   "evidence_level": "Niveau de preuve global (Fort/Modéré/Faible/Insuffisant)",
   "grade_recommendation": "Grade de recommandation (A/B/C/D/GPP)",
   "future_research": "Directions pour la recherche future",
+  "claims": [
+    {{"claim": "Une affirmation vérifiable, en une phrase",
+      "article_ids": [12, 34],
+      "reasoning": "Ce que ces articles établissent, et ce qu'ils n'établissent pas"}}
+  ],
   "key_references": [
     {{"title": "...", "year": ..., "journal": "...", "key_contribution": "..."}}
   ]
 }}
+
+RÈGLES pour « claims » (4 à 8 affirmations) :
+- `article_ids` ne contient QUE des identifiants présents dans les articles reproduits
+  ci-dessus. Chaque identifiant est vérifié contre le corpus : un identifiant absent est
+  rapporté comme non vérifié à côté de l'affirmation, visible par le relecteur.
+- N'INDIQUE PAS de niveau de preuve, de force ou de grade dans une affirmation. La force
+  est CALCULÉE à partir des devis des articles cités et du plafond du corpus, pas
+  déclarée. Une affirmation qui s'auto-évalue serait évaluée par ce qu'on évalue.
+- Une affirmation porte sur le corpus, pas sur un article. Si un seul article la soutient,
+  cite-le quand même : le barème abaisse d'un niveau une affirmation à une seule étude.
+- `reasoning` dit aussi ce que les articles cités NE montrent pas (population, devis,
+  horizon), car c'est ce qui distingue une affirmation défendable d'un résumé.
 Retourne UNIQUEMENT le JSON valide."""
 
     try:
@@ -578,6 +799,13 @@ Retourne UNIQUEMENT le JSON valide."""
         )
         brief = _json.loads(_json_content(response, f"evidence brief {scenario_id}"))
 
+        # Les affirmations sont VÉRIFIÉES puis NOTÉES ici, après le modèle et hors de son
+        # atteinte : chaque identifiant cité est confronté aux articles pertinents de ce
+        # scénario, et la force vient du barème (`claim_strength`) et non du texte généré.
+        brief["claims"] = attach_claim_strength(
+            brief.get("claims"), {a["id"]: a for a in articles if a.get("id") is not None},
+            ceiling=_ceiling_label)
+
         # Ajouter les métadonnées
         brief["_meta"] = {
             "scenario_id": scenario_id,
@@ -597,6 +825,9 @@ Retourne UNIQUEMENT le JSON valide."""
             # et passait devant une valeur de dictionnaire.
             "model": _model("write"),
             "reasoning_effort": _reasoning_effort() or "api-default",
+            # Le plafond que le barème des affirmations a appliqué : sans lui, une force
+            # « Faible » ne se distingue pas d'un plafonnement par le corpus.
+            "grade_ceiling": _ceiling_label,
         }
 
         # Empreinte du corpus : sert de clé de cache « ne pas régénérer si inchangé »
