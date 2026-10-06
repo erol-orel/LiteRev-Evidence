@@ -208,3 +208,95 @@ def test_filtering_the_view_does_not_shrink_the_corpus(db_conn):
         assert full["filtered_total"] is None
     finally:
         _cleanup(db_conn)
+
+
+# ── chercher DANS le corpus ──────────────────────────────────────────────────
+# Un corpus de plusieurs milliers d'articles se parcourt par pages de cent : filtrer la
+# page affichée ne chercherait que dans ces cent-là.
+
+def test_the_terms_of_a_search_are_cumulative_and_folded():
+    from api.scenario_store import corpus_search_terms
+    assert corpus_search_terms("Dengue Vaccine") == ["%dengue%", "%vaccine%"]
+    assert corpus_search_terms('"severe dengue" Lévy') == ["%severe dengue%", "%levy%"]
+    assert corpus_search_terms("   ") == []
+    # % and _ are LIKE wildcards: typed by a user they are literal characters.
+    assert corpus_search_terms("100%_sure") == [r"%100\%\_sure%"]
+
+
+def test_the_search_looks_at_the_fields_a_reviewer_remembers():
+    from api.scenario_store import corpus_search_sql
+    sql = corpus_search_sql("cq_0", doc="d")
+    for field in ("d.title", "d.abstract", "d.authors", "d.journal", "d.keywords",
+                  "d.doi", "d.pmid"):
+        assert field in sql
+    assert "lower(" in sql and "translate(" in sql
+
+
+def _seed_searchable(db_conn):
+    ensure_document_columns(db_conn.cursor())
+    with db_conn.cursor() as cur:
+        cur.execute("DELETE FROM article_scenarios WHERE scenario_id = %s", (SID,))
+        cur.execute("DELETE FROM literature_document WHERE id BETWEEN 8600 AND 8699")
+        cur.execute("DELETE FROM user_scenarios WHERE id = %s", (SID,))
+        cur.execute("INSERT INTO user_scenarios (id, name, query, created_at, updated_at) "
+                    "VALUES (%s, 'Search', 'dengue', NOW(), NOW())", (SID,))
+        rows = [
+            (8610, "Dengue vaccine efficacy", "A trial of the vaccine.", "Lévy A", 0.90, None),
+            (8611, "Dengue surveillance in Asia", "Wastewater monitoring.", "Roe B", 0.90, None),
+            (8612, "Malaria vaccine efficacy", "Another trial.", "Doe C", 0.10, None),
+            (8613, "Dengue vaccine safety", "Safety follow-up.", "Poe D", 0.10, "excluded"),
+        ]
+        for doc_id, title, abstract, authors, score, status in rows:
+            cur.execute("INSERT INTO literature_document (id, title, abstract, authors, year, source, "
+                        "project_context, quality_score) "
+                        "VALUES (%s,%s,%s,%s,2024,'pubmed','literev',0.8)",
+                        (doc_id, title, abstract, authors))
+            cur.execute("INSERT INTO article_scenarios (document_id, scenario_id, "
+                        "similarity_score, screening_status) VALUES (%s,%s,%s,%s)",
+                        (doc_id, SID, score, status))
+
+
+def test_searching_the_corpus_reaches_articles_beyond_the_displayed_page(db_conn):
+    _seed_searchable(db_conn)
+    try:
+        # limit=1: a client-side filter would have had one article to look at.
+        got = main.get_user_scenario_corpus(SID, limit=1, q="dengue vaccine", abstract_chars=None)
+        assert got["filtered_total"] == 2            # 8610 et 8613
+        assert got["total"] == 4                     # le corpus ne rétrécit pas
+        assert len(got["articles"]) == 1
+    finally:
+        _cleanup(db_conn)
+
+
+def test_a_search_can_be_restricted_to_the_relevant_articles(db_conn):
+    """« au moins les pertinents » : la porte commune, donc jamais un article exclu."""
+    _seed_searchable(db_conn)
+    try:
+        all_hits = main.get_user_scenario_corpus(SID, limit=50, q="dengue", abstract_chars=None)
+        relevant = main.get_user_scenario_corpus(SID, limit=50, q="dengue", relevant_only=True,
+                                                 threshold=0.45, abstract_chars=None)
+        assert all_hits["filtered_total"] == 3       # 8610, 8611, 8613
+        assert relevant["filtered_total"] == 2       # 8613 est exclu par un relecteur
+        assert {a["id"] for a in relevant["articles"]} == {8610, 8611}
+    finally:
+        _cleanup(db_conn)
+
+
+def test_a_search_ignores_accents_in_either_direction(db_conn):
+    _seed_searchable(db_conn)
+    try:
+        assert main.get_user_scenario_corpus(SID, limit=5, q="levy",
+                                             abstract_chars=None)["filtered_total"] == 1
+        assert main.get_user_scenario_corpus(SID, limit=5, q="Lévy",
+                                             abstract_chars=None)["filtered_total"] == 1
+    finally:
+        _cleanup(db_conn)
+
+
+def test_an_empty_search_is_not_a_filter(db_conn):
+    _seed_searchable(db_conn)
+    try:
+        got = main.get_user_scenario_corpus(SID, limit=50, q="   ", abstract_chars=None)
+        assert got["filtered_total"] is None and got["total"] == 4
+    finally:
+        _cleanup(db_conn)

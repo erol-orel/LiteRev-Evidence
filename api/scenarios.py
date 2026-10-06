@@ -19,6 +19,8 @@ from .documents import _strategy_is_degraded
 from .scenario_store import (
     _get_scenario_threshold,
     _get_user_scenario_or_404,
+    corpus_search_sql,
+    corpus_search_terms,
     relevant_gate_sql,
     scenario_counts,
 )
@@ -859,6 +861,8 @@ def get_user_scenario_corpus(
     fulltext_only: bool = False,
     source: str | None = None,
     threshold: float | None = None,
+    q: str | None = None,
+    relevant_only: bool = False,
     abstract_chars: int | None = Query(None, ge=0, le=20000),
 ) -> dict[str, Any]:
     """
@@ -869,6 +873,17 @@ def get_user_scenario_corpus(
     résultats de recherche n'affiche qu'un extrait (600 caractères) et lit le résumé
     complet via /documents/{id} au clic - envoyer 10 000 résumés entiers pesait des
     dizaines de Mo pour rien. Sans le paramètre, le résumé complet est renvoyé.
+
+    `q` cherche DANS le corpus : titre, résumé, auteurs, revue, mots-clés, DOI, PMID.
+    La liste est paginée côté serveur, donc chercher dans la page affichée n'aurait
+    cherché que dans les cent premiers articles sur plusieurs milliers. Les mots sont
+    cumulatifs (tous doivent apparaître), insensibles à la casse et aux accents, et
+    une suite entre guillemets est cherchée telle quelle. `relevant_only` restreint la
+    recherche au sous-ensemble pertinent, par la porte commune (seuil ou inclusion par
+    un relecteur, jamais un exclu) - « chercher au moins dans les pertinents ».
+
+    Ces deux paramètres filtrent la VUE : `total` reste la taille du corpus et
+    `filtered_total` dit combien d'articles la vue retient.
     """
     from .relevance import _RERANK_JOBS, _maybe_autorerank  # lazy: relevance is loaded after this module
     row = _get_user_scenario_or_404(scenario_id)
@@ -911,9 +926,20 @@ def get_user_scenario_corpus(
             SELECT 1 FROM document_chunk c
             WHERE c.document_id = d.id AND c.chunk_type = 'fulltext_section'
         )""")
+    # Lié une fois pour toutes : la porte de pertinence et le tri le lisent, et les
+    # requêtes de distribution partagent le même WHERE.
+    params["threshold"] = eff_threshold
+    # Recherche DANS le corpus : tous les termes doivent apparaître (cf. corpus_search_*).
+    _terms = corpus_search_terms(q or "")
+    for _i, _term in enumerate(_terms):
+        _key = f"cq_{_i}"
+        conditions.append(corpus_search_sql(_key, doc="d"))
+        params[_key] = _term
+    if relevant_only:
+        conditions.append(relevant_gate_sql(doc="d", link="ars", thr=":threshold"))
     where = " AND ".join(conditions)
     _screated = row.get("created_at")
-    _filtered = bool(year_from or year_to or source or fulltext_only)
+    _filtered = bool(year_from or year_to or source or fulltext_only or _terms or relevant_only)
     with engine.connect() as conn:
         # Les compteurs du corpus viennent du comptage COMMUN (scenario_counts) : une
         # instruction, un instantané, les mêmes nombres que /detail et /embedding-status.

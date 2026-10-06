@@ -50,11 +50,26 @@ def _pico(a: dict, key: str) -> str:
     return str((pj or {}).get(key) or "") if isinstance(pj, dict) else ""
 
 
+def _ris_value(value: Any) -> str:
+    """Une étiquette RIS tient sur UNE ligne : un retour à la ligne dans un titre ou un
+    résumé coupait l'enregistrement en deux et l'import s'arrêtait là."""
+    return re.sub(r"\s+", " ", str(value or "")).strip()
+
+
+def _ris_doi(doi: str) -> str:
+    """Le DOI nu : Zotero attend « 10.xxxx/yyy », pas une URL ni un préfixe « doi: »."""
+    d = _ris_value(doi)
+    d = re.sub(r"(?i)^\s*(?:https?://(?:dx\.)?doi\.org/|doi:\s*)", "", d)
+    return d
+
+
 def _article_url(a: dict) -> str:
     if a.get("url"):
         return str(a["url"])
     if a.get("doi"):
-        return f"https://doi.org/{a['doi']}"
+        # Le DOI est parfois stocké déjà sous forme d'URL : le préfixer sans le
+        # normaliser donnait « https://doi.org/https://doi.org/10.… », un lien mort.
+        return f"https://doi.org/{_ris_doi(a['doi'])}"
     if a.get("pmid"):
         return f"https://pubmed.ncbi.nlm.nih.gov/{a['pmid']}/"
     return ""
@@ -110,38 +125,94 @@ def _authors_list(authors: str) -> list[str]:
     return [p.strip() for p in re.split(r"[;\n]|,\s(?=[A-Z][a-z]+\s[A-Z])", authors or "") if p.strip()]
 
 
+# Le type RIS d'un enregistrement. Zotero crée un objet par type et n'affiche pas les
+# mêmes champs pour chacun : tout exporter en JOUR rangeait les préprints et les
+# recommandations parmi les articles de revue, avec un « journal » qui n'existe pas.
+_RIS_PREPRINT = ("biorxiv", "medrxiv", "arxiv", "preprint", "ssrn", "research square", "osf")
+_RIS_TYPE_BY_DESIGN = (
+    ("guideline", "RPRT"), ("recommandation", "RPRT"), ("report", "RPRT"),
+    ("rapport", "RPRT"), ("thesis", "THES"), ("thèse", "THES"),
+    ("clinical trial registration", "DATA"), ("registre", "DATA"),
+)
+
+
+def _ris_type(r: dict) -> str:
+    """JOUR par défaut ; UNPB pour un préprint, RPRT pour une recommandation ou un
+    rapport. Lu sur la source puis sur le type d'étude, tous deux en minuscules."""
+    src = (r.get("source") or "").strip().lower()
+    if any(p in src for p in _RIS_PREPRINT):
+        return "UNPB"
+    design = (r.get("study_design") or "").strip().lower()
+    if any(p in design for p in _RIS_PREPRINT):
+        return "UNPB"
+    for needle, ty in _RIS_TYPE_BY_DESIGN:
+        if needle in design:
+            return ty
+    return "JOUR"
+
+
 def to_ris(rows: list[dict]) -> str:
-    """RIS for Zotero, EndNote, Mendeley: one record per article, JOUR type."""
+    """RIS importable tel quel par Zotero, EndNote et Mendeley.
+
+    Les écarts qui empêchaient Zotero de lire ces fichiers correctement :
+
+    - le journal était écrit en `JO`, que Zotero range dans « Abrév. de revue » ; les
+      références arrivaient donc SANS publication, le champ qui sert à les citer. Le
+      titre de publication est `T2` (et `JF` pour les logiciels qui ne lisent que lui) ;
+    - les enregistrements se suivaient sans ligne vide. `ER  - ` suivi immédiatement du
+      `TY` du suivant n'est pas conforme et EndNote comme Mendeley s'y arrêtent ;
+    - tout sortait en `TY  - JOUR`, y compris les préprints et les recommandations ;
+    - un retour à la ligne resté dans un titre ou un résumé coupait l'enregistrement ;
+    - le DOI pouvait partir sous forme d'URL, que Zotero ne reconnaît pas comme un DOI.
+
+    Le PMID suit la convention de l'export RIS de PubMed lui-même (`DB  - PubMed`,
+    `AN  - <pmid>`), que Zotero range dans Archive et Loc. dans l'archive.
+    """
     out = []
     for r in rows:
-        lines = ["TY  - JOUR", f"TI  - {r['title']}"]
-        for au in _authors_list(r["authors"]):
-            lines.append(f"AU  - {au}")
+        ty = _ris_type(r)
+        lines = [f"TY  - {ty}"]
+        title = _ris_value(r.get("title"))
+        if title:
+            lines.append(f"TI  - {title}")
+        for au in _authors_list(r.get("authors") or ""):
+            lines.append(f"AU  - {_ris_value(au)}")
         if r.get("year"):
             lines.append(f"PY  - {r['year']}")
-        if r.get("journal"):
-            lines.append(f"JO  - {r['journal']}")
-        if r.get("doi"):
-            lines.append(f"DO  - {r['doi']}")
+        journal = _ris_value(r.get("journal"))
+        if journal and ty == "JOUR":
+            # T2 pour Zotero (publicationTitle), JF pour les importeurs qui ne lisent
+            # que lui. JO est réservé à l'ABRÉVIATION et n'est donc plus écrit.
+            lines.append(f"T2  - {journal}")
+            lines.append(f"JF  - {journal}")
+        elif journal:
+            # Préprint ou rapport : le « journal » est le dépôt ou l'organisme.
+            lines.append(f"PB  - {journal}")
+        doi = _ris_doi(r.get("doi") or "")
+        if doi:
+            lines.append(f"DO  - {doi}")
         if r.get("pmid"):
-            lines.append(f"AN  - {r['pmid']}")
+            lines.append("DB  - PubMed")
+            lines.append(f"AN  - {_ris_value(r['pmid'])}")
         if r.get("url"):
-            lines.append(f"UR  - {r['url']}")
+            lines.append(f"UR  - {_ris_value(r['url'])}")
+        if r.get("language"):
+            lines.append(f"LA  - {_ris_value(r['language'])}")
         for kw in [k.strip() for k in (r.get("keywords") or "").split(";") if k.strip()][:20]:
-            lines.append(f"KW  - {kw}")
+            lines.append(f"KW  - {_ris_value(kw)}")
         if r.get("abstract"):
-            _abstract_one_line = re.sub(r"\s+", " ", r["abstract"])
-            lines.append(f"AB  - {_abstract_one_line}")
+            lines.append(f"AB  - {_ris_value(r['abstract'])}")
         notes = []
         if r.get("similarity_score") is not None:
             notes.append(f"relevance {r['similarity_score']}")
         if r.get("study_design"):
-            notes.append(f"design {r['study_design']}")
+            notes.append(f"design {_ris_value(r['study_design'])}")
         if notes:
             lines.append(f"N1  - LiteRev: {', '.join(notes)}")
         lines.append("ER  - ")
         out.append("\r\n".join(lines))
-    return "\r\n".join(out) + ("\r\n" if out else "")
+    # Ligne vide entre deux enregistrements, et fin de fichier après le dernier.
+    return "\r\n\r\n".join(out) + ("\r\n" if out else "")
 
 
 def _bib_escape(s: str) -> str:

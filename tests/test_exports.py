@@ -1,6 +1,7 @@
 """Exports of the relevant articles (api/exports.py): formatters are pure, the endpoint
 serves a file with the right type and name. The relevance query is stubbed."""
 import json
+import re
 
 import main
 from conftest import patch_app  # noqa: E402
@@ -40,6 +41,90 @@ def test_ris_and_bibtex_records():
     assert ris.count("TY  - JOUR") == 2 and ris.count("ER  - ") == 2
     assert "AU  - Rossi Maria\r\nAU  - Bianchi Luca" in ris
     assert "DO  - 10.2807/x" in ris and "AB  - Line one. Line two." in ris and "KW  - Aedes" in ris
+    bib = main.to_bibtex(rows)
+    assert bib.startswith("@article{rossi2024_7,")
+    assert "title = {Autochthonous chikungunya in Italy \\{2024\\}}" in bib   # braces escaped
+    assert "author = {Rossi Maria and Bianchi Luca}" in bib
+    assert "@article{anonnd_8," in bib
+
+
+# ── RIS that Zotero actually reads ───────────────────────────────────────────
+# Chaque test ci-dessous correspond à un écart qui faisait qu'un fichier exporté
+# s'importait mal, ou pas du tout.
+
+def test_the_journal_lands_in_the_publication_field_not_in_the_abbreviation():
+    """THE defect: Zotero maps `JO` to the journal ABBREVIATION, so every imported
+    reference arrived with an empty publication, the one field a citation needs."""
+    ris = main.to_ris(main.export_rows(_articles()))
+    assert "T2  - Eurosurveillance" in ris
+    assert "JF  - Eurosurveillance" in ris
+    assert "JO  - " not in ris
+
+
+def test_records_are_separated_by_a_blank_line():
+    """`ER  - ` immediately followed by the next `TY` is not valid RIS; EndNote and
+    Mendeley stop reading there."""
+    ris = main.to_ris(main.export_rows(_articles()))
+    assert "ER  - \r\n\r\nTY  - " in ris
+    assert "ER  - \r\nTY  - " not in ris
+    assert ris.endswith("ER  - \r\n")
+
+
+def test_a_preprint_is_not_exported_as_a_journal_article():
+    rows = main.export_rows([{"id": 9, "title": "A preprint", "authors": "Roe B", "year": 2025,
+                              "journal": "medRxiv", "source": "medrxiv"}])
+    ris = main.to_ris(rows)
+    assert "TY  - UNPB" in ris and "TY  - JOUR" not in ris
+    # Un dépôt n'est pas une revue : il ne doit pas remplir le titre de publication.
+    assert "T2  - " not in ris and "PB  - medRxiv" in ris
+
+
+def test_a_guideline_is_exported_as_a_report():
+    rows = main.export_rows([{"id": 10, "title": "WHO guideline", "authors": "WHO", "year": 2025,
+                              "study_design": "Clinical practice guideline", "source": "pubmed"}])
+    assert "TY  - RPRT" in main.to_ris(rows)
+
+
+def test_no_field_can_span_two_lines():
+    """A newline left in a title or an abstract splits the record in two and the import
+    stops at that point."""
+    rows = main.export_rows([{"id": 11, "title": "A title\nwith a break", "authors": "Roe B",
+                              "abstract": "First.\n\nSecond.", "keywords": "one\ntwo"}])
+    ris = main.to_ris(rows)
+    assert "TI  - A title with a break" in ris
+    assert "AB  - First. Second." in ris
+    for line in ris.split("\r\n"):
+        assert line == "" or re.match(r"^[A-Z][A-Z0-9]  - ", line), line
+
+
+def test_the_doi_is_bare_so_zotero_recognises_it():
+    rows = main.export_rows([{"id": 12, "title": "T", "doi": "https://doi.org/10.1000/abc"},
+                             {"id": 13, "title": "U", "doi": "doi: 10.1000/def"}])
+    ris = main.to_ris(rows)
+    assert "DO  - 10.1000/abc" in ris and "DO  - 10.1000/def" in ris
+    assert "DO  - https://" not in ris
+
+
+def test_the_pmid_follows_pubmeds_own_ris_convention():
+    ris = main.to_ris(main.export_rows(_articles()))
+    assert "DB  - PubMed\r\nAN  - 39000001" in ris
+
+
+def test_every_record_opens_with_its_type_and_closes_with_er():
+    """Zotero detects a RIS file by its first line and ends each item on `ER`."""
+    ris = main.to_ris(main.export_rows(_articles()))
+    assert ris.startswith("TY  - ")
+    for record in ris.split("\r\n\r\n"):
+        lines = [ln for ln in record.split("\r\n") if ln]
+        assert lines[0].startswith("TY  - ") and lines[-1] == "ER  - "
+
+
+def test_an_empty_export_is_an_empty_file_not_a_broken_record():
+    assert main.to_ris([]) == ""
+
+
+def test_bibtex_records():
+    rows = main.export_rows(_articles())
     bib = main.to_bibtex(rows)
     assert bib.startswith("@article{rossi2024_7,")
     assert "title = {Autochthonous chikungunya in Italy \\{2024\\}}" in bib   # braces escaped
@@ -286,3 +371,9 @@ def test_every_export_route_exists_for_built_in_scenarios_too():
                    "/relevant/export"):
         assert "/user-scenarios/{scenario_id}" + suffix in paths, suffix
         assert "/gesica/scenarios/{scenario_id}" + suffix in paths, f"gesica {suffix}"
+
+
+def test_a_doi_already_stored_as_a_url_does_not_become_a_double_link():
+    """`https://doi.org/https://doi.org/10.…` was a dead link in every format."""
+    rows = main.export_rows([{"id": 14, "title": "T", "doi": "https://doi.org/10.1101/2025.01.01"}])
+    assert rows[0]["url"] == "https://doi.org/10.1101/2025.01.01"

@@ -1222,6 +1222,13 @@ export async function fetchScenarioCorpus(
     fulltextOnly?: boolean;
     source?: string;
     threshold?: number;
+    /** Chercher DANS le corpus (titre, résumé, auteurs, revue, mots-clés, DOI, PMID).
+     *  La liste est paginée côté serveur : filtrer la page affichée ne chercherait
+     *  que dans les cent premiers articles d'un corpus qui en compte des milliers. */
+    q?: string;
+    /** Restreindre au sous-ensemble pertinent (porte commune : seuil ou inclusion par
+     *  un relecteur, jamais un exclu). */
+    relevantOnly?: boolean;
     abstractChars?: number;   // truncate abstracts server-side (excerpt-only views)
   }
 ): Promise<ScenarioCorpus> {
@@ -1233,6 +1240,8 @@ export async function fetchScenarioCorpus(
   if (options?.fulltextOnly) params.set('fulltext_only', 'true');
   if (options?.source) params.set('source', options.source);
   if (options?.threshold != null) params.set('threshold', String(options.threshold));
+  if (options?.q && options.q.trim()) params.set('q', options.q.trim());
+  if (options?.relevantOnly) params.set('relevant_only', 'true');
   // Truncate abstracts server-side when only an excerpt is displayed (search results
   // page): 10,000 full abstracts weighed tens of MB for a 600-character snippet.
   if (options?.abstractChars != null) params.set('abstract_chars', String(options.abstractChars));

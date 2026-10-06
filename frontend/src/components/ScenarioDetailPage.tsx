@@ -2315,19 +2315,33 @@ function CorpusSection({ scenarioId, threshold, counts }:
   const [error, setError] = useState<string | null>(null);
   const [expandedId, setExpandedId] = useState<number | null>(null);
   const [embeddingStatus, setEmbeddingStatus] = useState<EmbeddingStatus | null>(null);
+  // Recherche DANS le corpus. La liste est paginée côté serveur, donc la recherche
+  // l'est aussi : filtrer ici n'aurait cherché que dans les cent articles affichés.
+  const [query, setQuery] = useState("");
+  const [relevantOnly, setRelevantOnly] = useState(false);
+  const [searching, setSearching] = useState(false);
+  const search = useMemo(
+    () => ({ ...(query.trim() ? { q: query.trim() } : {}), ...(relevantOnly ? { relevantOnly: true } : {}) }),
+    [query, relevantOnly]);
 
-  // Recharge la PREMIÈRE page quand le seuil (curseur) change, avec un léger debounce.
+  // Recharge la PREMIÈRE page quand le seuil (curseur) ou la recherche change, avec un
+  // léger debounce - une frappe par caractère ne doit pas faire une requête par frappe.
+  const firstLoad = useRef(true);
   useEffect(() => {
-    if (threshold == null) return;
-    let cancelled = false;   // évite qu'une réponse lente d'un ancien seuil écrase un seuil plus récent
+    if (firstLoad.current) { firstLoad.current = false; return; }
+    let cancelled = false;   // évite qu'une réponse lente d'un ancien état écrase un plus récent
+    setSearching(true);
     const tid = setTimeout(() => {
-      fetchScenarioCorpus(scenarioId, { threshold, limit: CORPUS_PAGE_SIZE })
+      fetchScenarioCorpus(scenarioId, {
+        limit: CORPUS_PAGE_SIZE, ...(threshold != null ? { threshold } : {}), ...search,
+      })
         .then(d => { if (!cancelled) setData(d); })
-        .catch(() => {});
-    }, 250);
+        .catch(() => {})
+        .finally(() => { if (!cancelled) setSearching(false); });
+    }, 300);
     return () => { cancelled = true; clearTimeout(tid); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [threshold]);
+  }, [threshold, search]);
 
   useEffect(() => {
     setLoading(true);
@@ -2350,19 +2364,19 @@ function CorpusSection({ scenarioId, threshold, counts }:
     if (!data?.rerank_running) return;
     const shown = Math.max(CORPUS_PAGE_SIZE, data.articles.length);
     const id = setTimeout(() => {
-      fetchScenarioCorpus(scenarioId, { limit: shown, ...(threshold != null ? { threshold } : {}) })
+      fetchScenarioCorpus(scenarioId, { limit: shown, ...(threshold != null ? { threshold } : {}), ...search })
         .then(setData)
         .catch(() => {});
     }, 4000);
     return () => clearTimeout(id);
-  }, [data, scenarioId, threshold]);
+  }, [data, scenarioId, threshold, search]);
 
   const loadMore = () => {
     if (!data || loadingMore) return;
     setLoadingMore(true);
     fetchScenarioCorpus(scenarioId, {
       limit: CORPUS_PAGE_SIZE, offset: data.articles.length,
-      ...(threshold != null ? { threshold } : {}),
+      ...(threshold != null ? { threshold } : {}), ...search,
     })
       .then((next) => setData((prev) => (prev ? { ...next, articles: [...prev.articles, ...next.articles] } : next)))
       .catch((e) => setError(e.message))
@@ -2496,6 +2510,53 @@ function CorpusSection({ scenarioId, threshold, counts }:
             )}
             <RelevantExportMenu scenarioId={scenarioId} threshold={threshold} />
           </div>
+        </div>
+
+        {/* Chercher DANS le corpus. La recherche est faite en base, sur tout le corpus :
+            la liste n'affiche que cent articles à la fois, et un filtre posé sur ce qui
+            est affiché n'aurait cherché que là-dedans. */}
+        <div className="flex items-center gap-2 flex-wrap">
+          <div className="relative flex-1 min-w-[220px]">
+            <Search size={12} className="absolute left-3 top-1/2 -translate-y-1/2 text-white/30" />
+            <input
+              type="search"
+              value={query}
+              onChange={e => setQuery(e.target.value)}
+              placeholder={t("scenarioDetail.corpus.searchPlaceholder")}
+              className="w-full rounded-xl border border-white/10 bg-white/5 pl-8 pr-8 py-2 text-xs text-white placeholder:text-white/30 focus:border-brand-500/40 focus:outline-none"
+            />
+            {searching && (
+              <Loader2 size={12} className="absolute right-3 top-1/2 -translate-y-1/2 animate-spin text-brand-400" />
+            )}
+          </div>
+          <button
+            type="button"
+            onClick={() => setRelevantOnly(v => !v)}
+            title={t("scenarioDetail.corpus.searchRelevantOnlyHint")}
+            className={`rounded-xl border px-3 py-2 text-[11px] font-medium transition ${
+              relevantOnly
+                ? "border-gold-400/40 bg-gold-500/15 text-gold-300"
+                : "border-white/10 bg-white/5 text-white/50 hover:text-white/80"
+            }`}
+          >
+            {t("scenarioDetail.corpus.searchRelevantOnly")}
+          </button>
+          {data.filtered_total != null && (
+            <span className="text-[11px] text-white/45 font-mono">
+              {t("scenarioDetail.corpus.searchMatches")
+                .replace("{n}", data.filtered_total.toLocaleString())
+                .replace("{total}", n.total.toLocaleString())}
+            </span>
+          )}
+          {(query || relevantOnly) && (
+            <button
+              type="button"
+              onClick={() => { setQuery(""); setRelevantOnly(false); }}
+              className="text-[11px] text-white/40 hover:text-white/70 underline underline-offset-2"
+            >
+              {t("scenarioDetail.corpus.searchClear")}
+            </button>
+          )}
         </div>
         {typeof data.from_local === "number" && (
           <p className="text-[11px] text-white/40"

@@ -155,6 +155,56 @@ def scenario_counts(scenario_id: str, threshold: float | None = None,
     return out
 
 
+# ── Chercher DANS un corpus ──────────────────────────────────────────────────
+# Un corpus de plusieurs milliers d'articles se parcourt par pages de cent : filtrer
+# la page affichée ne cherche que dans ces cent-là. La recherche est donc faite en base,
+# sur les champs qu'un relecteur a en tête quand il cherche un article qu'il a vu passer :
+# titre, résumé, auteurs, revue, mots-clés, DOI, PMID.
+#
+# Les termes sont CUMULATIFS : « dengue vaccine » ne renvoie que les articles qui portent
+# les deux mots, dans n'importe quel ordre et n'importe quel champ. Une suite entre
+# guillemets est cherchée telle quelle. unaccent n'étant pas garanti installé, la
+# comparaison se fait en minuscules sur un texte dont les accents latins sont repliés,
+# des deux côtés : « Lévy » se trouve en tapant « levy », et inversement.
+_ACCENT_FROM = "àáâãäåçèéêëìíîïñòóôõöùúûüýÿ"
+_ACCENT_TO = "aaaaaaceeeeiiiinooooouuuuyy"
+
+
+def corpus_search_sql(param: str, doc: str = "d") -> str:
+    """Le prédicat SQL d'UN terme de recherche dans le corpus, pour un WHERE.
+
+    `param` est le nom du paramètre lié qui porte le motif (déjà en minuscules, accents
+    repliés, encadré de %). Pur : aucune connexion, testable hors base."""
+    fields = (f"{doc}.title", f"{doc}.abstract", f"{doc}.authors", f"{doc}.journal",
+              f"{doc}.keywords", f"{doc}.doi", f"{doc}.pmid")
+    folded = " || ' ' || ".join(f"COALESCE({f}, '')" for f in fields)
+    return (f"translate(lower({folded}), '{_ACCENT_FROM}', '{_ACCENT_TO}')"
+            f" LIKE :{param}")
+
+
+def corpus_search_terms(query: str, max_terms: int = 8) -> list[str]:
+    """Les termes d'une recherche dans le corpus, prêts à être liés en paramètres.
+
+    Une suite entre guillemets reste un seul terme ; sinon on coupe aux espaces. Le
+    résultat est en minuscules, accents repliés, encadré de `%`. Pur."""
+    import re as _re
+    text_ = (query or "").strip()
+    if not text_:
+        return []
+    terms: list[str] = []
+    for phrase, word in _re.findall(r'"([^"]+)"|(\S+)', text_):
+        term = (phrase or word).strip()
+        if not term:
+            continue
+        folded = term.lower().translate(str.maketrans(_ACCENT_FROM, _ACCENT_TO))
+        # LIKE : % et _ seraient des jokers ; \ est l'échappement par défaut.
+        escaped = folded.replace("\\", "\\\\").replace("%", r"\%").replace("_", r"\_")
+        terms.append(f"%{escaped}%")
+        if len(terms) >= max_terms:
+            break
+    return terms
+
+
 # ── Invalidation des artefacts calculés sur le corpus pertinent ───────────────
 # Clustering, réseau de similarité, carte des concepts et actions recommandées sont
 # tous des FONCTIONS du sous-ensemble pertinent : ils périment dès que ce sous-ensemble
