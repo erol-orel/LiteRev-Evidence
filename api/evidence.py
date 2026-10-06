@@ -15,7 +15,9 @@ from .documents import _GRADE_LEVEL_CASE, _STUDY_DESIGN_CASE, _llm_lang_directiv
 from .scenario_store import _get_scenario_threshold, _get_user_scenario_or_404
 from .gesica import _get_scenario_name
 from .relevance import _evidence_fingerprint, _get_above_threshold_articles
+from llm_usage import json_content as _json_content
 from llm_usage import model_for as _model
+from llm_usage import reasoning_effort as _reasoning_effort
 
 @app.get("/user-scenarios/{scenario_id}/evidence-brief")
 def get_user_scenario_evidence_brief(scenario_id: str) -> dict[str, Any]:
@@ -551,7 +553,12 @@ Génère un JSON avec EXACTEMENT ces champs :
 Retourne UNIQUEMENT le JSON valide."""
 
     try:
-        client = _OAI(timeout=90.0)
+        # 90 s suffisait pour un plafond de 3000 jetons ; il ne suffit pas pour 12 000. À
+        # la cadence observée de ces modèles (~200 jetons/s), un brief complet demande une
+        # minute de génération, et un dépassement remplacerait simplement une erreur par
+        # une autre. La génération tourne dans un thread de fond avec un statut interrogé
+        # par l'interface, donc la latence ne bloque personne.
+        client = _OAI(timeout=300.0)
         response = client.chat.completions.create(
             model=_model("write"),
             messages=[
@@ -559,10 +566,17 @@ Retourne UNIQUEMENT le JSON valide."""
                 {"role": "user", "content": user_prompt},
             ],
             temperature=0.2,
-            max_tokens=3000,
+            # 3000 coupait le brief EN PLEINE CHAÎNE : les dix-sept champs demandés
+            # ci-dessus, dont quatre de plusieurs paragraphes, font 18 000 caractères de
+            # français, et le JSON tronqué remontait comme « Unterminated string starting
+            # at char 18273 », c'est-à-dire comme un bug d'analyse. Le plafond n'est pas là
+            # pour dimensionner la réponse mais pour borner un emballement : largement
+            # au-dessus d'un brief complet, et borné. 12 000 jetons de sortie coûtent
+            # 1,4 centime ; un brief tronqué coûte le brief.
+            max_tokens=12000,
             response_format={"type": "json_object"},
         )
-        brief = _json.loads(response.choices[0].message.content)
+        brief = _json.loads(_json_content(response, f"evidence brief {scenario_id}"))
 
         # Ajouter les métadonnées
         brief["_meta"] = {
@@ -576,7 +590,13 @@ Retourne UNIQUEMENT le JSON valide."""
             "year_range": year_range,
             "study_designs": dict(top_designs),
             "auto_generated": True,
-            "model": "gpt-4.1",
+            # Le modèle qui a RÉELLEMENT écrit ce brief, et l'effort de raisonnement avec
+            # lui. C'était « gpt-4.1 » en dur : faux depuis que le rôle `write` a changé,
+            # et c'est le champ de provenance qu'un article reprend. Le test qui interdit
+            # les noms de modèles en dur ne cherchait que les affectations `model = "..."`
+            # et passait devant une valeur de dictionnaire.
+            "model": _model("write"),
+            "reasoning_effort": _reasoning_effort() or "api-default",
         }
 
         # Empreinte du corpus : sert de clé de cache « ne pas régénérer si inchangé »

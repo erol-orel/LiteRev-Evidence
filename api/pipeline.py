@@ -1839,14 +1839,22 @@ def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict
                     ), {"did": doc_id})
                     for _i, _chunk_text in enumerate(chunks):
                         _meta = json.dumps({"source": source_label, "chunk_index": _i})
+                        # `sanitize_db_text` est un filet de sécurité au POINT D'ÉCRITURE :
+                        # l'extracteur nettoie déjà, mais cette fonction est appelée avec du
+                        # texte d'autres provenances (PMC, EuropePMC…) et un seul NUL fait
+                        # échouer toute la transaction - DELETE compris, donc zéro chunk
+                        # conservé.
+                        #
+                        # Ces quatre lignes étaient DANS la chaîne SQL (ab9a9f1, 16/09), où
+                        # Postgres les lisait comme du SQL : « syntax error at or near "#" ».
+                        # Donc l'insertion échouait à CHAQUE appel, la transaction était
+                        # annulée, et le DELETE avec elle : ce chemin n'a stocké aucun chunk
+                        # fulltext pendant trois semaines. L'appelant journalise en WARNING
+                        # et continue, ce qui est exactement pourquoi personne ne l'a vu.
                         _c.execute(text("""
                             INSERT INTO document_chunk
                                 (document_id, content, chunk_index, chunk_type, chunk_weight, metadata_json)
                             VALUES (:did, :content, :idx, 'fulltext_section', 1.0, CAST(:meta AS jsonb))
-                        # Filet de sécurité au POINT D'ÉCRITURE : l'extracteur nettoie
-                        # déjà, mais cette fonction est appelée avec du texte d'autres
-                        # provenances (PMC, EuropePMC…) et un seul NUL fait échouer toute
-                        # la transaction - DELETE compris, donc zéro chunk conservé.
                         """), {"did": doc_id, "content": sanitize_db_text(_chunk_text),
                                "idx": _i, "meta": _meta})
                     _c.execute(text(

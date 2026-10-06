@@ -333,6 +333,36 @@ class LLMCallBlocked(RuntimeError):
     """An OpenAI call was refused locally - by the master switch or the daily budget."""
 
 
+class LLMTruncated(RuntimeError):
+    """The model filled its token ceiling and the answer stops mid-sentence.
+
+    Worth its own type because of how it used to present itself. About a dozen call sites
+    do `json.loads(response.choices[0].message.content)`, and a JSON document cut off at
+    the ceiling raises `JSONDecodeError: Unterminated string starting at char 18273` -
+    which reads exactly like a bug in the prompt or the parser, and sends whoever is
+    holding it looking for one. The API already said what happened, in `finish_reason`."""
+
+
+def json_content(response, label: str = "") -> str:
+    """The text of a completion, or `LLMTruncated` if the model ran out of room.
+
+    For every call site that parses the answer as JSON: a truncated answer is not a
+    smaller answer, it is no answer, and the ceiling is the thing to raise."""
+    try:
+        choice = response.choices[0]
+    except (AttributeError, IndexError, TypeError) as exc:
+        raise RuntimeError(f"a completion with no choices{f' [{label}]' if label else ''}:"
+                           f" {exc}") from None
+    content = getattr(getattr(choice, "message", None), "content", None) or ""
+    if getattr(choice, "finish_reason", None) == "length":
+        raise LLMTruncated(
+            f"the answer hit its token ceiling after {len(content)} characters"
+            f"{f' [{label}]' if label else ''} and is incomplete. Raise the call's "
+            "max_tokens, or lower LLM_REASONING_EFFORT: reasoning tokens come out of the "
+            "same ceiling as the answer.")
+    return content
+
+
 # ── configuration ────────────────────────────────────────────────────────────
 
 def configure(engine) -> None:
@@ -499,10 +529,30 @@ def _wrap(create, purpose: str, kind: str):
             # spot is visible in the table instead of being invisible.
             usage = None if kwargs.get("stream") else getattr(resp, "usage", None)
             record(f"{purpose}:{kind}", model, usage)
+            # A truncated answer, named at the moment it happens. Every call site here is
+            # wrapped in `except Exception`, so a completion cut off at the ceiling used to
+            # surface as whatever the caller then failed to do with it - a JSONDecodeError
+            # about an unterminated string, pointing at the parser instead of the ceiling.
+            if not kwargs.get("stream"):
+                _warn_if_truncated(resp, f"{purpose}:{kind}", model, kwargs)
         except Exception as e:
             logger.debug(f"llm_usage metering failed ({purpose}/{kind}): {e}")
         return resp
     return metered
+
+
+def _warn_if_truncated(resp, purpose: str, model: str, kwargs: dict) -> None:
+    """Log once per truncated completion, with the ceiling that cut it."""
+    try:
+        if getattr(resp.choices[0], "finish_reason", None) != "length":
+            return
+    except (AttributeError, IndexError, TypeError):
+        return
+    ceiling = kwargs.get("max_completion_tokens") or kwargs.get("max_tokens") or "unset"
+    logger.warning(
+        f"{purpose} ({model}): the answer hit its ceiling of {ceiling} tokens and is "
+        "incomplete. Anything parsing it as JSON will fail on a syntax error that is not "
+        "a syntax error.")
 
 
 def instrument(client, purpose: str):
