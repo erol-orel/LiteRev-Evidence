@@ -239,8 +239,14 @@ def _cards(slide, y, items, cols=3, height=None, gap=Inches(0.26),
     return y + rows * (height + gap)
 
 
-def _bullets(slide, x, y, w, lines, size=15, gap=Pt(11), marker=BRAND):
-    tf = _tf(slide, x, y, w, H - y - MARGIN)
+def _bullets(slide, x, y, w, lines, size=15, gap=Pt(12), marker=BRAND):
+    """Une liste à puces, dont le cadre est MESURÉ sur son texte plutôt qu'étendu
+    jusqu'au bas de la diapositive : un cadre trop grand passe les contrôles de
+    géométrie alors que son texte, lui, déborde sur le pied de page."""
+    h = Emu(0)
+    for line in lines:
+        h += _height("\u2022  " + line, w, size, line=1.18) + Emu(int(gap.pt * 12700))
+    tf = _tf(slide, x, y, w, h)
     for i, line in enumerate(lines):
         head, _, rest = line.partition(" · ")
         runs = [("•  ", {"color": marker, "bold": True})]
@@ -250,7 +256,7 @@ def _bullets(slide, x, y, w, lines, size=15, gap=Pt(11), marker=BRAND):
             runs += [(head, {"color": MUTED})]
         _text(tf, runs, size=size, space_after=int(gap.pt) if i < len(lines) - 1 else 0,
               line=1.18)
-    return tf
+    return y + h
 
 
 def _stat_row(slide, y, stats, accent=BRAND):
@@ -320,19 +326,32 @@ def _bars(slide, x, y, w, rows, accent=BRAND, label_w=Inches(2.2), row_h=Inches(
     return y + len(rows) * row_h
 
 
-def _flow(slide, y, steps, accent=BRAND):
-    """Une bande d'étapes reliées par des chevrons."""
+def _flow(slide, y, steps, accent=BRAND, per_row=6):
+    """Une bande d'étapes numérotées.
+
+    La hauteur est MESURÉE sur l'étape la plus longue, et au-delà de `per_row`
+    étapes la bande passe sur deux rangs : huit colonnes sur une seule rangée
+    laissent 1,4 pouce par carte, où le texte était tout simplement coupé."""
     total_w = W - 2 * MARGIN
     gap = Inches(0.12)
-    cw = int((total_w - gap * (len(steps) - 1)) / len(steps))
+    rows = 1 if len(steps) <= per_row else 2
+    cols = len(steps) if rows == 1 else -(-len(steps) // 2)
+    cw = int((total_w - gap * (cols - 1)) / cols)
+    inner = cw - Inches(0.28)
+    h = max(_height(num, inner, 11, bold=True)
+            + _height(head, inner, 12.5, bold=True, line=1.05)
+            + _height(body, inner, 10.5, line=1.14)
+            for num, head, body in steps) + Inches(0.45)
     for i, (num, head, body) in enumerate(steps):
-        x = MARGIN + i * (cw + gap)
-        _box(slide, x, y, cw, Inches(1.82), fill=INK_SOFT, line=BRAND_DIM)
-        tf = _tf(slide, x + Inches(0.14), y + Inches(0.16), cw - Inches(0.28), Inches(1.54))
+        col, row = i % cols, i // cols
+        x = MARGIN + col * (cw + gap)
+        yy = y + row * (h + gap)
+        _box(slide, x, yy, cw, h, fill=INK_SOFT, line=BRAND_DIM)
+        tf = _tf(slide, x + Inches(0.14), yy + Inches(0.16), inner, h - Inches(0.3))
         _text(tf, num, size=11, color=accent, bold=True, space_after=3, font=MONO)
         _text(tf, head, size=12.5, color=PAPER, bold=True, space_after=4, line=1.05)
         _text(tf, body, size=10.5, color=MUTED, space_after=0, line=1.14)
-    return y + Inches(1.82)
+    return y + rows * h + (rows - 1) * gap
 
 
 def _footer(slide, left, right=""):
@@ -428,6 +447,9 @@ def _panel(slide, x, y, w, title, paragraphs, accent=BRAND, size=13):
     h = _height(title, inner, size, bold=True) + Inches(0.66)
     for para in body:
         h += _height(para, inner, size, line=1.26) + Inches(0.14)
+    # Borné au-dessus du pied de page : un encadré qui le dépasse déséquilibre la
+    # diapositive, même quand les deux ne se recouvrent pas.
+    h = min(h, H - Inches(0.72) - y)
     _box(slide, x, y, w, h, fill=INK_SOFT, line=accent)
     tf = _tf(slide, x + Inches(0.26), y + Inches(0.2), inner, h - Inches(0.4))
     _text(tf, title, size=size, color=accent, bold=True, space_after=8)
@@ -508,10 +530,10 @@ def build(uc: UseCase, out: str, live: bool, shots: str = "") -> str:
          "same claim at all."),
         ("Certainty is asserted",
          "A finding resting on two case reports is printed like one resting on three "
-         "randomised trials."),
+         "randomised trials, and nothing on the page separates them."),
         ("The output is inert",
          "A PDF cannot be re-run next month, cannot be audited, and cannot hand its "
-         "parameters to a model."),
+         "parameters to a model or a dashboard."),
         ("Evidence and operations stay apart",
          "What the literature says about an indicator, and what that indicator is "
          "doing in your region this week, live in different tools."),
@@ -551,10 +573,12 @@ def build(uc: UseCase, out: str, live: bool, shots: str = "") -> str:
     # 5 ── De la question à la requête
     s, y = _slide(prs, "The query the databases actually received",
                   kicker="Search strategy")
-    _shot(s, shot("strategy"), MARGIN, y, int((W - 2 * MARGIN) * 0.56), Inches(3.3))
-    bx = MARGIN + int((W - 2 * MARGIN) * 0.56) + Inches(0.4)
+    sw = int((W - 2 * MARGIN) * 0.54)
+    bx = MARGIN + sw + Inches(0.42)
     bw = W - MARGIN - bx
-    _pipe(s, bx, y + Inches(0.1), bw, [
+    # La colonne de texte d'abord : sa hauteur dit où centrer la capture, qui est
+    # large et courte. Alignée en haut, elle laissait un vide sous elle.
+    pipe_bottom = _pipe(s, bx, y + Inches(0.1), bw, [
         ("Translated.", "A question in plain language becomes a boolean expression at "
                         "temperature zero with a fixed seed, and is cached."),
         ("Reproducible.", "The same phrasing always yields the same strategy, so the "
@@ -567,6 +591,15 @@ def build(uc: UseCase, out: str, live: bool, shots: str = "") -> str:
         ("Shown, not hidden.", "A reviewer can paste it into PubMed and obtain the same "
                                "set. That is what makes the corpus auditable."),
     ])
+    from PIL import Image as _Img
+    _Img.MAX_IMAGE_PIXELS = None
+    _band = pipe_bottom - y
+    try:
+        _iw, _ih = _Img.open(shot("strategy")).size
+        _dh = int(sw * _ih / _iw)
+    except Exception:                                             # noqa: BLE001
+        _dh = int(_band)
+    _shot(s, shot("strategy"), MARGIN, y + max(0, int((_band - _dh) / 2)), sw, _band)
     _footer(s, "Stored on the scenario, so the search can be repeated and audited")
 
     # 6 ── Le corpus
@@ -665,8 +698,8 @@ def build(uc: UseCase, out: str, live: bool, shots: str = "") -> str:
     # 10 ── Niveaux de preuve
     s, y = _slide(prs, "Sixteen study designs, four certainties, from official lists",
                   kicker="Study design and GRADE",
-                  subtitle="MeSH Publication Types (tree V03) and Epidemiologic Study "
-                           "Characteristics (E05.318), graded by GRADE.")
+                  subtitle="Taken from the MeSH publication-type and epidemiologic "
+                           "study trees, graded by GRADE.")
     y = _cards(s, y, [
         ("High", "Systematic review and meta-analysis of randomised trials. Randomised "
                  "controlled trials."),
@@ -681,7 +714,6 @@ def build(uc: UseCase, out: str, live: bool, shots: str = "") -> str:
     y += Inches(0.24)
     _bullets(s, MARGIN, y, W - 2 * MARGIN, [
         "Randomised trials start high, observational studies start low, and a synthesis never upgrades its inputs.",
-        "The vocabulary is written once in Python; the SQL that classifies articles is generated from it, with a test running both against a real database.",
         "The interface states which design sits at which level, because a grade nobody can check is a decoration.",
     ], size=14)
     _footer(s, "One vocabulary, one scale, both taken from published lists")
@@ -812,7 +844,7 @@ def build(uc: UseCase, out: str, live: bool, shots: str = "") -> str:
     cw = W - MARGIN - cx
     # Un petit graphe dessiné.
     import math as _math
-    cxn, cyn, rad = int(bx + bw / 2), int(y + Inches(1.5)), Inches(1.15)
+    cxn, cyn, rad = int(bx + bw / 2), int(y + Inches(1.95)), Inches(1.6)
     nodes = []
     for i in range(9):
         a = 2 * _math.pi * i / 9 - _math.pi / 2
@@ -827,7 +859,7 @@ def build(uc: UseCase, out: str, live: bool, shots: str = "") -> str:
                 conn.line.color.rgb = BRAND_DIM
                 conn.line.width = Pt(0.75)
     for i, (nx, ny) in enumerate(nodes):
-        d = Inches(0.2) if i % 3 else Inches(0.28)
+        d = Inches(0.24) if i % 3 else Inches(0.34)
         dot = _box(s, nx - d // 2, ny - d // 2, d, d, fill=cols_g[groups[i]])
         dot.line.fill.background()
     _bullets(s, cx, y, cw, [
@@ -1066,7 +1098,7 @@ def build(uc: UseCase, out: str, live: bool, shots: str = "") -> str:
     ], cols=3)
     y += Inches(0.26)
     _bullets(s, MARGIN, y, W - 2 * MARGIN, [
-        "It does not replace the brief: the brief is counted over everything, this retrieves what is closest to one question.",
+        "Narrow the corpus first, by cluster, design or certainty level, and the same question is answered of that subset alone.",
         "An answer resting on nothing above the threshold says so, instead of producing an unsupported paragraph.",
     ], size=14)
     _footer(s, "Scoped to the relevant subset, and always attributed")
@@ -1074,8 +1106,8 @@ def build(uc: UseCase, out: str, live: bool, shots: str = "") -> str:
     # Les questions deviennent un actif du scénario.
     s, y = _slide(prs, "Questions that are kept, exported and acted on",
                   kicker="From an answer to a change",
-                  subtitle="An answer is not a chat message that scrolls away. It is a "
-                           "dated result on a named corpus, and it can change the work.")
+                  subtitle="An answer is a dated result on a named corpus, not a chat "
+                           "message that scrolls away.")
     bx, bw = MARGIN, int((W - 2 * MARGIN) * 0.5)
     cx = MARGIN + bw + Inches(0.44)
     cw = W - MARGIN - cx
@@ -1180,7 +1212,9 @@ def build(uc: UseCase, out: str, live: bool, shots: str = "") -> str:
     _footer(s, f"Scenario {uc.scenario_id}")
 
     # 26 ── Cas d'usage : ce qu'il produit
-    s, y = _slide(prs, "What this scenario produces", kicker="Worked example")
+    s, y = _slide(prs, "What this scenario produces", kicker="Worked example",
+                  subtitle="Six artefacts from one question, each counted over the same "
+                           "relevant subset and each traceable to the articles behind it.")
     y = _cards(s, y, [
         ("A graded brief",
          "What the literature establishes about early warning indicators, with each "
@@ -1201,7 +1235,8 @@ def build(uc: UseCase, out: str, live: bool, shots: str = "") -> str:
          "A citable document with renumbered references, and the relevant articles as "
          "RIS, BibTeX, CSV or Excel."),
     ], cols=3)
-    _footer(s, f"Scenario {uc.scenario_id}")
+    _footer(s, "Views of one corpus, not separate exports to reconcile, so they cannot "
+               f"disagree about what it contains  ·  scenario {uc.scenario_id}")
 
     # 27 ── Architecture
     s, y = _slide(prs, "How it is built", kicker="Architecture")
@@ -1277,7 +1312,7 @@ def build(uc: UseCase, out: str, live: bool, shots: str = "") -> str:
          "A PDF.",
          "A database, a bibliography, a citable report, a fitted model and a dashboard."),
     ]
-    row_h = Inches(0.8)
+    row_h = Inches(0.74)
     col1 = Inches(2.9)
     col2 = int((W - 2 * MARGIN - col1) / 2)
     x = MARGIN
