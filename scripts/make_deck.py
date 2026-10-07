@@ -54,18 +54,44 @@ class UseCase:
     name: str = "Early warning indicators for respiratory infections in Western Switzerland"
     question: str = ("What are the early warning indicators for respiratory infections "
                      "in Western Switzerland?")
-    as_of: str = "6 October 2026, while the pipeline was still ingesting"
-    total: int = 449
-    above_threshold: int = 52
-    below_threshold: int = 390
-    unscored: int = 7
-    from_local: int = 228
-    newly_fetched: int = 221
+    as_of: str = "7 October 2026, the pipeline having finished"
+    total: int = 6564
+    above_threshold: int = 467
+    below_threshold: int = 6097
+    unscored: int = 0
+    from_local: int = 1246
+    newly_fetched: int = 5318
     threshold: float = 0.45
+    with_fulltext: int = 4275
+    journals: int = 133
+    relevant_with_pico: int = 467
+    relevant_with_fulltext: int = 420
+    # L'axe des années est long (1917-2026) ; la diapositive le coupe à 1995 et le
+    # dit, parce que cent dix barres dont cent sont vides ne se lisent pas.
     years: list[tuple[int, int]] = field(default_factory=lambda: [
-        (2016, 14), (2017, 6), (2018, 11), (2019, 16), (2020, 47), (2021, 53),
-        (2022, 23), (2023, 36), (2024, 37), (2025, 56), (2026, 49)])
-    sources: list[tuple[str, int]] = field(default_factory=list)
+        (1995, 25), (1996, 31), (1997, 28), (1998, 35), (1999, 40), (2000, 44),
+        (2001, 47), (2002, 55), (2003, 78), (2004, 73), (2005, 86), (2006, 95),
+        (2007, 104), (2008, 112), (2009, 169), (2010, 142), (2011, 138),
+        (2012, 149), (2013, 157), (2014, 171), (2015, 196), (2016, 232),
+        (2017, 243), (2018, 290), (2019, 317), (2020, 623), (2021, 613),
+        (2022, 552), (2023, 573), (2024, 505), (2025, 570), (2026, 520)])
+    sources: list[tuple[str, int]] = field(default_factory=lambda: [
+        ("OPENALEX", 5284), ("EUROPEPMC", 823), ("PUBMED", 184), ("CORE", 71),
+        ("CROSSREF", 70), ("PREPRINT", 59), ("SEMANTIC SCHOLAR", 35),
+        ("DOAJ", 20), ("ARXIV", 7), ("PROSPERO", 5), ("OPENAIRE", 5),
+        ("COCHRANE", 1)])
+    # Le profil de preuve, tel que la page l'affiche.
+    designs: list[tuple[str, int]] = field(default_factory=lambda: [
+        ("Cohort", 188), ("Cross-sectional", 70), ("Design not stated", 49),
+        ("Systematic review", 42), ("Surveillance", 31), ("Observational", 25),
+        ("Narrative review", 16), ("Case-control", 14),
+        ("Randomised trial", 12), ("Case report or series", 7)])
+    clusters: list[tuple[str, int]] = field(default_factory=lambda: [
+        ("CLUSTER 5", 183), ("CLUSTER 1", 73), ("CLUSTER 3", 71),
+        ("CLUSTER 2", 36), ("CLUSTER 4", 32)])
+    levels: list[tuple[str, int]] = field(default_factory=lambda: [
+        ("Low", 272), ("Not assessed", 49), ("Very low", 23), ("High", 12),
+        ("Not applicable", 11)])
 
     def refresh(self, api: str, scenario_id: str | None = None) -> str:
         """Relit les compteurs sur une instance en marche. Renvoie une note d'état."""
@@ -291,7 +317,7 @@ def _histogram(slide, x, y, w, h, pairs, bar=BRAND, label_every=2):
         rect = _box(slide, x + i * slot, y + plot_h - bh, bw, bh,
                     fill=bar if count else BRAND_DIM, radius=False)
         rect.line.fill.background()
-        if count:
+        if count and (len(cols) <= 16 or i % 2 == 0 or count == peak):
             tf = _tf(slide, x + i * slot - Inches(0.1), y + plot_h - bh - Inches(0.22),
                      bw + Inches(0.2), Inches(0.2))
             _text(tf, str(count), size=8, color=MUTED, align=PP_ALIGN.CENTER, space_after=0)
@@ -488,6 +514,40 @@ def _scatter(slide, x, y, w, h, groups, seed=7):
             _text(tf, label, size=9.5, color=colour, bold=True, align=PP_ALIGN.CENTER,
                   space_after=0)
     return y + h
+
+
+def _stacked(slide, x, y, w, segments, h=Inches(0.42), colours=None):
+    """Une barre empilée : des parts d'un même tout, en une seule ligne.
+
+    Six barres séparées disaient la même chose en six fois plus de hauteur."""
+    total = sum(n for _, n in segments) or 1
+    palette = colours or [BRAND, RGBColor(0x5F, 0xA8, 0x86), GOLD,
+                          RGBColor(0x6E, 0x9E, 0xE8), RGBColor(0xB4, 0x8A, 0xD4),
+                          BRAND_DIM]
+    cx = x
+    for i, (label, n) in enumerate(segments):
+        seg_w = int(w * n / total) if i < len(segments) - 1 else (x + w - cx)
+        if seg_w <= 0:
+            continue
+        box = _box(slide, cx, y, seg_w, h, fill=palette[i % len(palette)], radius=False)
+        box.line.color.rgb = INK
+        box.line.width = Pt(1.25)
+        if seg_w > Inches(0.5):
+            tf = _tf(slide, cx, y + Inches(0.07), seg_w, h, anchor=MSO_ANCHOR.TOP)
+            _text(tf, str(n), size=11, color=INK, bold=True, align=PP_ALIGN.CENTER,
+                  space_after=0)
+        cx += seg_w
+    # La légende sous la barre, sur une ligne.
+    lx = x
+    for i, (label, n) in enumerate(segments):
+        chip = _box(slide, lx, y + h + Inches(0.14), Inches(0.12), Inches(0.12),
+                    fill=palette[i % len(palette)], radius=False)
+        chip.line.fill.background()
+        tw = Emu(int(len(label) * 9 * _CHAR_W * 12700) + Inches(0.1))
+        tf = _tf(slide, lx + Inches(0.18), y + h + Inches(0.08), tw, Inches(0.24))
+        _text(tf, label, size=9, color=MUTED, space_after=0)
+        lx += Inches(0.18) + tw + Inches(0.16)
+    return y + h + Inches(0.42)
 
 
 # ── Les diapositives ─────────────────────────────────────────────────────────
@@ -796,19 +856,25 @@ def build(uc: UseCase, out: str, live: bool, shots: str = "") -> str:
                   kicker="Topic structure",
                   subtitle="What themes exist in this corpus, how big each is, and which "
                            "articles sit between them.")
+    _shot(s, shot("clusters"), MARGIN, y, W - 2 * MARGIN, H - y - Inches(0.62))
+    _footer(s, "Each cluster is a selectable subset: pick one and every downstream "
+               "panel describes that theme alone")
+
+    # Le détail de la chaîne, sur sa propre diapositive.
+    s, y = _slide(prs, "How the clusters are found", kicker="Topic structure",
+                  subtitle="Found rather than chosen: the number of topics follows the "
+                           "density of the corpus, not a parameter someone picked.")
     bx, bw = MARGIN, int((W - 2 * MARGIN) * 0.52)
     cx = MARGIN + bw + Inches(0.44)
     cw = W - MARGIN - cx
     pipe_bottom = _pipe(s, bx, y, bw, [
-        ("Embeddings.", "Taken from the vectors already stored for the corpus; a TF-IDF "
-                        "fallback keeps it working without a model call."),
-        ("UMAP.", "Reduction to two dimensions, run under a timeout so a slow projection "
-                  "cannot hold the page."),
-        ("HDBSCAN.", "Density clustering, with the minimum cluster size scaled to the "
-                     "corpus: the number of topics is found rather than chosen. K-means "
-                     "over a truncated SVD takes over if either step fails."),
-        ("Summaries.", "Each cluster gets a label and a short description, in the "
-                       "reader's language."),
+        ("Embeddings.", "The vectors already stored for the corpus, with a TF-IDF "
+                        "fallback so it works without a model call."),
+        ("UMAP.", "Reduction to two dimensions, under a timeout."),
+        ("HDBSCAN.", "Density clustering, minimum cluster size scaled to the corpus. "
+                     "K-means over a truncated SVD takes over if either step fails."),
+        ("Summaries.", "A label and a short description per cluster, in the reader's "
+                       "language."),
     ])
     panel_bottom = _panel(s, cx, y, cw, "What it is for", [
         "A cluster is a selectable subset. Picking one narrows the corpus to that theme, "
@@ -817,24 +883,18 @@ def build(uc: UseCase, out: str, live: bool, shots: str = "") -> str:
         "It is also how a reviewer discovers that a question asked as one thing is in "
         "fact three separate literatures.",
     ])
-    # La projection, dessinée sous la colonne de gauche, où la place est libre :
-    # un corpus se range en quelques masses denses et une frange que la densité ne
-    # rattache à rien. Bornée au-dessus du pied de page.
-    fig_y = max(pipe_bottom, panel_bottom) + Inches(0.26)
-    # Hauteur STRICTE : ce qui reste au-dessus du pied de page, sans plancher. Un
-    # plancher poussait la figure par-dessus le pied de page quand la colonne de
-    # gauche était longue.
-    fig_h = min(Inches(1.6), H - Inches(0.82) - (fig_y + Inches(0.34)))
-    tf = _tf(s, bx, fig_y, bw, Inches(0.26))
-    _text(tf, "A PROJECTED CORPUS", size=9.5, color=BRAND, bold=True, space_after=0)
-    _scatter(s, bx, fig_y + Inches(0.34), bw, fig_h, [
-        (0.18, 0.62, 0.15, 28, BRAND, "surveillance"),
-        (0.52, 0.72, 0.13, 22, GOLD, "modelling"),
-        (0.84, 0.50, 0.12, 17, RGBColor(0x6E, 0x9E, 0xE8), "vector control"),
-        (0.52, 0.22, 0.32, 8, BRAND_DIM, ""),
-    ])
-    _footer(s, "The interface states how many articles the projection covers; "
-               "the unclustered fringe is shown rather than forced into a group")
+    fig_y = max(pipe_bottom, panel_bottom) + Inches(0.3)
+    tf = _tf(s, MARGIN, fig_y, W - 2 * MARGIN, Inches(0.28))
+    _text(tf, "WHAT IT FOUND IN THE WORKED EXAMPLE", size=9.5, color=BRAND, bold=True,
+          space_after=0)
+    _clustered = sum(n for _, n in uc.clusters)
+    _fringe = max(0, uc.above_threshold - _clustered)
+    _stacked(s, MARGIN, fig_y + Inches(0.34), W - 2 * MARGIN,
+             [(lbl.replace("CLUSTER ", "Cluster "), n) for lbl, n in uc.clusters]
+             + [("Unclustered", _fringe)])
+    _footer(s, f"Five groups out of {uc.above_threshold} articles, and a fringe of "
+               f"{_fringe} the density attaches to none of them, shown rather than "
+               f"absorbed into the nearest group")
 
     # 14 ── Graphe de connaissances
     s, y = _slide(prs, "The knowledge graph: what sits next to what",
@@ -990,6 +1050,15 @@ def build(uc: UseCase, out: str, live: bool, shots: str = "") -> str:
         "proposed can be checked against the ones the data actually used.",
     ])
     _footer(s, "Every run is kept with its parameters, its metrics and its importances")
+
+    # Capture : la spécification telle qu'elle est produite.
+    s, y = _slide(prs, "The specification the literature produces",
+                  kicker="Model specification",
+                  subtitle="An outcome defined to the unit and the time horizon, with "
+                           "interpretation bands, each carrying the articles behind it.")
+    _shot(s, shot("model"), MARGIN, y, W - 2 * MARGIN, H - y - Inches(0.62))
+    _footer(s, "Generated from the relevant articles, and withheld until a reviewer "
+               "validates it")
 
     # 19 ── SEIR
     s, y = _slide(prs, "SEIR, parameterised from the literature",
@@ -1148,15 +1217,17 @@ def build(uc: UseCase, out: str, live: bool, shots: str = "") -> str:
     # 24 ── Cas d'usage : la question
     s, y = _slide(prs, uc.name, kicker="Worked example",
                   subtitle=f"Scenario {uc.scenario_id} · figures as of {uc.as_of}.")
+    _n = lambda v: f"{v:,}".replace(",", " ")
     y = _stat_row(s, y, [
-        (f"{uc.total:,}".replace(",", " "), "articles in the corpus",
-         f"{uc.from_local} from the local base, {uc.newly_fetched} fetched for this scenario"),
-        (f"{uc.above_threshold:,}".replace(",", " "), "above the threshold",
-         f"cosine similarity at or above {uc.threshold:.2f}"),
-        (f"{uc.below_threshold:,}".replace(",", " "), "below, and kept",
-         "lowering the threshold brings them back"),
-        (f"{uc.unscored:,}".replace(",", " "), "awaiting a score",
-         "scoring runs across the whole corpus"),
+        (_n(uc.total), "articles in the corpus",
+         f"{_n(uc.from_local)} already in the local base, {_n(uc.newly_fetched)} "
+         f"fetched for this question"),
+        (_n(uc.above_threshold), "feed the analyses",
+         f"at or above a cosine similarity of {uc.threshold:.2f}"),
+        (_n(uc.below_threshold), "below, and kept",
+         "the threshold filters; lowering it brings them back"),
+        (_n(uc.with_fulltext), "with full text",
+         f"and {uc.journals} distinct journals across {len(uc.years)} years shown"),
     ])
     y += Inches(0.26)
     qbx, qbw = MARGIN, int((W - 2 * MARGIN) * 0.52)
@@ -1182,13 +1253,15 @@ def build(uc: UseCase, out: str, live: bool, shots: str = "") -> str:
     s, y = _slide(prs, "The corpus, described", kicker="Worked example")
     half = int((W - 2 * MARGIN - Inches(0.5)) / 2)
     tf = _tf(s, MARGIN, y, half, Inches(0.3))
-    _text(tf, "PUBLICATION YEAR", size=9.5, color=BRAND, bold=True, space_after=0)
-    _histogram(s, MARGIN, y + Inches(0.34), half, Inches(2.6), uc.years)
+    _text(tf, f"PUBLICATION YEAR, {uc.years[0][0]} ONWARDS", size=9.5, color=BRAND,
+          bold=True, space_after=0)
+    _histogram(s, MARGIN, y + Inches(0.34), half, Inches(2.6), uc.years, label_every=4)
     rx = MARGIN + half + Inches(0.5)
     if uc.sources:
         tf = _tf(s, rx, y, half, Inches(0.3))
         _text(tf, "LITERATURE SOURCES", size=9.5, color=BRAND, bold=True, space_after=0)
-        _bars(s, rx, y + Inches(0.4), half, uc.sources)
+        _bars(s, rx, y + Inches(0.4), half, uc.sources[:8], label_w=Inches(1.9),
+              row_h=Inches(0.31))
     else:
         tf = _tf(s, rx, y, half, Inches(0.3))
         _text(tf, "WHERE THE CORPUS CAME FROM", size=9.5, color=BRAND, bold=True,
@@ -1206,10 +1279,33 @@ def build(uc: UseCase, out: str, live: bool, shots: str = "") -> str:
         ], accent=GOLD, label_w=Inches(1.5), row_h=Inches(0.34))
     y += Inches(3.2)
     _bullets(s, MARGIN, y, W - 2 * MARGIN, [
-        "The rise from 2020 is the pandemic literature on respiratory surveillance, and it is still the bulk of what is published on the question.",
-        "Roughly half the corpus was already in the local base, which is why a new question on a covered area returns in seconds.",
+        "The corpus reaches back to 1917; the axis starts at 1995 because what precedes it is a handful of articles a year.",
+        "The jump at 2020 is the pandemic surveillance literature, and it has not receded: the four most recent years are the four largest.",
     ], size=14)
-    _footer(s, f"Scenario {uc.scenario_id}")
+    _footer(s, f"Scenario {uc.scenario_id}  ·  the counts above come from one statement, "
+               f"so the panels of the page agree with each other")
+
+    # Cas d'usage : le profil de preuve, chiffré.
+    s, y = _slide(prs, "What this corpus can and cannot support",
+                  kicker="Worked example",
+                  subtitle="The design and certainty profile of the "
+                           f"{uc.above_threshold} articles that feed the analyses.")
+    half = int((W - 2 * MARGIN - Inches(0.5)) / 2)
+    tf = _tf(s, MARGIN, y, half, Inches(0.3))
+    _text(tf, "STUDY DESIGN", size=9.5, color=BRAND, bold=True, space_after=0)
+    _bottom = _bars(s, MARGIN, y + Inches(0.4), half, uc.designs, label_w=Inches(2.0),
+                    row_h=Inches(0.31))
+    rx = MARGIN + half + Inches(0.5)
+    tf = _tf(s, rx, y, half, Inches(0.3))
+    _text(tf, "CERTAINTY, BY GRADE", size=9.5, color=GOLD, bold=True, space_after=0)
+    _bars(s, rx, y + Inches(0.4), half, uc.levels, accent=GOLD, label_w=Inches(2.0),
+          row_h=Inches(0.31))
+    # Mesuré, et non décalé d'une valeur devinée : le texte recouvrait la dernière barre.
+    y = _bottom + Inches(0.26)
+    _bullets(s, MARGIN, y, W - 2 * MARGIN, [
+        "Twelve randomised trials against 188 cohorts and 31 surveillance studies: this is an observational literature, and the ceiling on any claim follows from that.",
+    ], size=14)
+    _footer(s, "Counted over every relevant article, not over a sample of them")
 
     # 26 ── Cas d'usage : ce qu'il produit
     s, y = _slide(prs, "What this scenario produces", kicker="Worked example",
