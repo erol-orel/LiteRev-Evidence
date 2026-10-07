@@ -46,6 +46,76 @@ MARGIN = Inches(0.72)
 FONT = "Inter"
 MONO = "Consolas"
 
+YEAR_AXIS_FROM = 1995      # début de l'axe des années dans l'histogramme
+DESIGN_BARS = 10           # devis montrés en barres, le reste étant regroupé
+
+# Les seize devis, tels que le serveur les nomme, et leur étiquette courte dans
+# la figure. Une barre ne dispose que de deux pouces : « Surveillance / registre
+# / écologique » y serait coupé.
+_DESIGN_SHORT = {
+    "Cohort study": "Cohort",
+    "Cross-sectional study": "Cross-sectional",
+    "Case-control study": "Case-control",
+    "Randomized controlled trial": "Randomised trial",
+    "Clinical trial (allocation unstated)": "Clinical trial",
+    "Non-randomised / quasi-experimental": "Quasi-experimental",
+    "Systematic review / meta-analysis": "Systematic review",
+    "Narrative review / editorial / opinion": "Narrative review",
+    "Surveillance / registry / ecological": "Surveillance",
+    "Observational (subtype unstated)": "Observational",
+    "Case report / case series": "Case report or series",
+    "Guideline / practice guideline": "Guideline",
+    "Modelling / simulation": "Modelling",
+    "Qualitative research": "Qualitative",
+    "Experimental / preclinical": "Preclinical",
+    "Design not stated": "Design not stated",
+}
+
+
+def _short_design(label: str) -> str:
+    """L'étiquette courte d'un devis. Un devis ajouté côté serveur et absent de
+    la table est coupé au premier séparateur plutôt que perdu."""
+    if label in _DESIGN_SHORT:
+        return _DESIGN_SHORT[label]
+    head = label.split(" / ")[0].split(" (")[0].strip()
+    return head[:21] if len(head) > 21 else head
+
+
+# Le barème, si la table de l'application n'est pas importable (diapositives
+# construites hors du dépôt). Sert de repli, jamais de source.
+_GRADE_FALLBACK = {
+    "Inherited": ["Systematic review"],
+    "High": ["Randomised trial"],
+    "Moderate": ["Clinical trial"],
+    "Low": ["Quasi-experimental", "Cohort", "Case-control", "Cross-sectional",
+            "Surveillance", "Observational"],
+    "Very low": ["Case report or series", "Narrative review"],
+    "Not applicable": ["Guideline", "Modelling", "Qualitative", "Preclinical"],
+    "Not assessed": ["Design not stated"],
+}
+
+
+def grade_groups() -> dict[str, list[str]]:
+    """Les devis rangés par niveau de certitude, LUS dans la table de
+    l'application plutôt que recopiés ici.
+
+    Deux cartes de cette diapositive décrivaient encore un barème antérieur :
+    les recommandations y étaient données comme « modérée » et le travail
+    qualitatif comme « très faible », quand l'application les marque toutes deux
+    hors barème. Une table recopiée vieillit ; celle-ci est la même que celle de
+    l'écran."""
+    try:
+        import os
+        sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        from api.study_design import vocabulary
+    except Exception:
+        return dict(_GRADE_FALLBACK)
+    out: dict[str, list[str]] = {}
+    for g in vocabulary("en"):
+        key = "Inherited" if g.get("level") is None else str(g.get("label") or "")
+        out[key] = [_short_design(str(d.get("label") or "")) for d in g.get("designs", [])]
+    return out or dict(_GRADE_FALLBACK)
+
 
 @dataclass
 class UseCase:
@@ -66,13 +136,14 @@ class UseCase:
     journals: int = 133
     relevant_with_pico: int = 467
     relevant_with_fulltext: int = 420
+    year_min: int = 1917
     # L'axe des années est long (1917-2026) ; la diapositive le coupe à 1995 et le
     # dit, parce que cent dix barres dont cent sont vides ne se lisent pas.
     years: list[tuple[int, int]] = field(default_factory=lambda: [
-        (1995, 25), (1996, 31), (1997, 28), (1998, 35), (1999, 40), (2000, 44),
-        (2001, 47), (2002, 55), (2003, 78), (2004, 73), (2005, 86), (2006, 95),
-        (2007, 104), (2008, 112), (2009, 169), (2010, 142), (2011, 138),
-        (2012, 149), (2013, 157), (2014, 171), (2015, 196), (2016, 232),
+        (1995, 5), (1996, 11), (1997, 27), (1998, 11), (1999, 18), (2000, 67),
+        (2001, 12), (2002, 42), (2003, 33), (2004, 29), (2005, 41), (2006, 56),
+        (2007, 42), (2008, 61), (2009, 85), (2010, 99), (2011, 134),
+        (2012, 155), (2013, 165), (2014, 184), (2015, 196), (2016, 232),
         (2017, 243), (2018, 290), (2019, 317), (2020, 623), (2021, 613),
         (2022, 552), (2023, 573), (2024, 505), (2025, 570), (2026, 520)])
     sources: list[tuple[str, int]] = field(default_factory=lambda: [
@@ -80,18 +151,21 @@ class UseCase:
         ("CROSSREF", 70), ("PREPRINT", 59), ("SEMANTIC SCHOLAR", 35),
         ("DOAJ", 20), ("ARXIV", 7), ("PROSPERO", 5), ("OPENAIRE", 5),
         ("COCHRANE", 1)])
-    # Le profil de preuve, tel que la page l'affiche.
+    # Le profil de preuve, tel que la page l'affiche. Les dix devis les plus
+    # fréquents ; `designs_other` porte le reste, pour que la figure ne se lise
+    # pas comme le corpus entier.
     designs: list[tuple[str, int]] = field(default_factory=lambda: [
-        ("Cohort", 188), ("Cross-sectional", 70), ("Design not stated", 49),
-        ("Systematic review", 42), ("Surveillance", 31), ("Observational", 25),
-        ("Narrative review", 16), ("Case-control", 14),
+        ("Cohort", 190), ("Cross-sectional", 61), ("Surveillance", 50),
+        ("Systematic review", 43), ("Observational", 37), ("Narrative review", 18),
+        ("Case-control", 16), ("Design not stated", 13),
         ("Randomised trial", 12), ("Case report or series", 7)])
+    designs_other: tuple[int, int] = (6, 20)      # (combien de devis, combien d'articles)
     clusters: list[tuple[str, int]] = field(default_factory=lambda: [
         ("CLUSTER 5", 183), ("CLUSTER 1", 73), ("CLUSTER 3", 71),
-        ("CLUSTER 2", 36), ("CLUSTER 4", 32)])
+        ("CLUSTER 2", 35), ("CLUSTER 4", 32)])
     levels: list[tuple[str, int]] = field(default_factory=lambda: [
-        ("Low", 272), ("Not assessed", 49), ("Very low", 23), ("High", 12),
-        ("Not applicable", 11)])
+        ("Low", 400), ("Very low", 25), ("Not applicable", 16),
+        ("Not assessed", 13), ("High", 12), ("Moderate", 1)])
 
     def refresh(self, api: str, scenario_id: str | None = None) -> str:
         """Relit les compteurs sur une instance en marche. Renvoie une note d'état."""
@@ -100,8 +174,8 @@ class UseCase:
 
         sid = scenario_id or self.scenario_id
 
-        def _get(path: str):
-            with urllib.request.urlopen(f"{api.rstrip('/')}{path}", timeout=30) as r:
+        def _get(path: str, timeout: int = 30):
+            with urllib.request.urlopen(f"{api.rstrip('/')}{path}", timeout=timeout) as r:
                 return json.loads(r.read().decode("utf-8"))
 
         detail = _get(f"/user-scenarios/{sid}/detail")
@@ -120,11 +194,52 @@ class UseCase:
         self.from_local = int(c.get("from_local", corpus.get("from_local") or 0))
         self.newly_fetched = int(c.get("newly_fetched", corpus.get("newly_fetched") or 0))
         self.threshold = float(c.get("threshold", corpus.get("threshold", self.threshold)))
-        self.years = [(int(y["year"]), int(y["count"]))
-                      for y in corpus.get("year_distribution", []) if y.get("year")]
-        self.years.sort()
-        self.sources = [(str(s["source"]).upper(), int(s["count"]))
+        self.with_fulltext = int(c.get("with_fulltext", self.with_fulltext))
+        self.journals = int(c.get("journals_count", self.journals))
+        self.year_min = int(c.get("year_min") or self.year_min)
+        # L'axe commence en 1995 : le corpus remonte à 1917, et cent dix barres
+        # dont quatre-vingts valent un ou deux ne se lisent pas. La diapositive
+        # porte l'année de départ dans son intitulé.
+        self.years = sorted((int(y["year"]), int(y["count"]))
+                            for y in corpus.get("year_distribution", [])
+                            if y.get("year") and int(y["year"]) >= YEAR_AXIS_FROM)
+        self.sources = [(str(s["source"]).upper().replace("_", " "), int(s["count"]))
                         for s in corpus.get("source_distribution", [])][:10]
+
+        # Le profil de preuve. Ces deux distributions sont celles que l'écran
+        # affiche et que le sélecteur de corpus reprend, lues au même endroit :
+        # les recopier à la main les laissait vieillir d'une version sur l'autre.
+        ev = _get(f"/user-scenarios/{sid}/evidence-brief", timeout=180)
+        designs = [(_short_design(str(d.get("design_en") or d.get("design") or "")),
+                    int(d["count"])) for d in ev.get("study_design_distribution", [])]
+        designs = [(lbl, n) for lbl, n in designs if lbl and n]
+        if designs:
+            self.designs = designs[:DESIGN_BARS]
+            rest = designs[DESIGN_BARS:]
+            self.designs_other = (len(rest), sum(n for _, n in rest))
+        levels = [(str(e.get("level_en") or e.get("level") or ""), int(e["count"]))
+                  for e in ev.get("evidence_level_distribution", [])]
+        levels = [(lbl, n) for lbl, n in levels if lbl and n]
+        if levels:
+            self.levels = levels
+        stats = ev.get("corpus_stats") or {}
+        self.relevant_with_pico = int(stats.get("relevant_with_pico", self.relevant_with_pico))
+        self.relevant_with_fulltext = int(
+            stats.get("relevant_with_fulltext", self.relevant_with_fulltext))
+
+        # Le clustering est recalculé après un redémarrage : une instance encore
+        # froide répond sans groupes, et les chiffres précédents valent mieux
+        # qu'une figure vide.
+        try:
+            cl = _get(f"/user-scenarios/{sid}/clustering", timeout=300)
+            found = [(str(g.get("cluster_name") or "").upper(), int(g.get("n_docs") or 0))
+                     for g in cl.get("clusters", []) if not g.get("is_noise")]
+            found = [(lbl, n) for lbl, n in found if lbl and n]
+            if found:
+                self.clusters = sorted(found, key=lambda r: -r[1])
+        except Exception:
+            pass
+
         self.as_of = _dt.datetime.now().strftime("%-d %B %Y, %H:%M")
         return f"figures read from {api} for {sid}"
 
@@ -182,13 +297,33 @@ _CHAR_W_BOLD = 0.66
 
 
 def _lines(text: str, width: Emu, size: float, bold: bool = False) -> int:
-    """Nombre de lignes qu'occupera `text` dans `width` à la taille `size` (points)."""
+    """Nombre de lignes qu'occupera `text` dans `width` à la taille `size` (points).
+
+    Le retour se fait AU MOT, comme dans le rendu. Diviser la longueur par le
+    nombre de caractères par ligne sous-estimait d'une ou deux lignes dès que les
+    mots étaient longs, parce que la fin de chaque ligne reste vide : la dernière
+    ligne d'une carte passait alors sous sa bordure."""
     if not text:
         return 0
     per_line = max(1, int((width / Inches(1)) * 72 / (size * (_CHAR_W_BOLD if bold else _CHAR_W))))
     total = 0
     for para in text.split("\n"):
-        total += max(1, -(-len(para) // per_line))
+        words = para.split()
+        if not words:
+            total += 1
+            continue
+        count, cur = 1, 0
+        for word in words:
+            need = len(word) if cur == 0 else cur + 1 + len(word)
+            if need <= per_line:
+                cur = need
+                continue
+            count += 1
+            cur = len(word)
+            while cur > per_line:          # un mot plus long qu'une ligne
+                count += 1
+                cur -= per_line
+        total += count
     return total
 
 
@@ -311,13 +446,17 @@ def _histogram(slide, x, y, w, h, pairs, bar=BRAND, label_every=2):
     bw = max(Emu(1), int(slot * 0.74))
     axis_h = Inches(0.3)
     plot_h = h - axis_h
+    # Une colonne sur deux porte sa valeur, et la parité est choisie pour que le
+    # SOMMET en fasse partie : l'ajouter en plus de sa voisine superposait les
+    # deux nombres.
+    parity = next((i for i, (_, c) in enumerate(cols) if c == peak), 0) % 2
     for i, (yv, count) in enumerate(cols):
         bh = int(plot_h * (count / peak)) if count else Emu(1)
         bh = max(bh, Emu(9000)) if count else Emu(4000)
         rect = _box(slide, x + i * slot, y + plot_h - bh, bw, bh,
                     fill=bar if count else BRAND_DIM, radius=False)
         rect.line.fill.background()
-        if count and (len(cols) <= 16 or i % 2 == 0 or count == peak):
+        if count and (len(cols) <= 16 or i % 2 == parity):
             tf = _tf(slide, x + i * slot - Inches(0.1), y + plot_h - bh - Inches(0.22),
                      bw + Inches(0.2), Inches(0.2))
             _text(tf, str(count), size=8, color=MUTED, align=PP_ALIGN.CENTER, space_after=0)
@@ -681,6 +820,7 @@ def build(uc: UseCase, out: str, live: bool, shots: str = "") -> str:
         "The corpus is reset to the boolean match on each run, so stale links cannot accumulate.",
         "A legitimately empty result may empty the corpus; a transient source failure may not.",
         "Lowering the threshold brings articles back: it filters, it never deletes.",
+        "A free-text search runs inside the corpus, over titles, abstracts, authors, journals, keywords and identifiers, accents ignored, and can be held to the relevant subset alone.",
     ], size=13.5)
 
     # 7 ── Pertinence et sélection
@@ -747,23 +887,30 @@ def build(uc: UseCase, out: str, live: bool, shots: str = "") -> str:
     # 10 ── Niveaux de preuve
     s, y = _slide(prs, "Sixteen study designs, four certainties, from official lists",
                   kicker="Study design and GRADE",
-                  subtitle="Taken from the MeSH publication-type and epidemiologic "
-                           "study trees, graded by GRADE.")
-    y = _cards(s, y, [
-        ("High", "Systematic review and meta-analysis of randomised trials. Randomised "
-                 "controlled trials."),
-        ("Moderate", "Controlled clinical trials where allocation is not stated. Clinical "
-                     "practice guidelines."),
-        ("Low", "Cohort, case-control, cross-sectional. Non-randomised and "
-                "quasi-experimental trials. Surveillance. Syntheses of observational "
-                "studies."),
-        ("Very low", "Case reports and series. Narrative reviews. Qualitative studies. "
-                     "Modelling and preclinical work."),
-    ], cols=4, accent=GOLD)
+                  subtitle="Taken from the MeSH publication-type and epidemiologic study "
+                           "trees. A level is the CEILING the design allows, not an "
+                           "appraisal: bias, inconsistency and imprecision only lower it.")
+    gg = grade_groups()
+    _join = lambda k: ", ".join(gg.get(k) or []) + "."
+    # Les devis viennent de la table ; la raison est écrite ici, courte, parce
+    # que celle de l'écran fait un paragraphe et qu'une carte n'en veut pas.
+    _why = {
+        "High": "GRADE starts randomised evidence at the highest certainty.",
+        "Moderate": "An intervention study that does not state whether it randomised.",
+        "Low": "Observational evidence starts low.",
+        "Very low": "No comparison group and no reproducible selection method: no "
+                    "effect estimate.",
+    }
+    y = _cards(s, y, [(k, f"{_join(k)} {_why[k]}")
+                      for k in ("High", "Moderate", "Low", "Very low")],
+               cols=4, accent=GOLD)
     y += Inches(0.24)
     _bullets(s, MARGIN, y, W - 2 * MARGIN, [
-        "Randomised trials start high, observational studies start low, and a synthesis never upgrades its inputs.",
-        "The interface states which design sits at which level, because a grade nobody can check is a decoration.",
+        "A synthesis inherits the certainty of what it includes rather than upgrading it: "
+        "high over randomised trials, low over observational ones.",
+        f"{_join('Not applicable')[:-1]}: not applicable rather than graded, not being "
+        f"primary evidence. {_join('Not assessed')[:-1]}: not assessed, which is not the "
+        f"same as graded low.",
     ], size=14)
 
     # 11 ── Affirmations et rapport
@@ -771,8 +918,8 @@ def build(uc: UseCase, out: str, live: bool, shots: str = "") -> str:
                   kicker="Synthesis")
     y = _cards(s, y, [
         ("A claim, not a paragraph",
-         "Each statement lists the articles supporting it, by number, so a reader can "
-         "check it rather than trust it."),
+         "Each statement carries the articles supporting it as numbered references, "
+         "title, journal and year, each opening the paper itself."),
         ("Graded on its own support",
          "Certainty follows the designs that actually support the claim, capped by what "
          "the corpus as a whole can sustain."),
@@ -1183,7 +1330,8 @@ def build(uc: UseCase, out: str, live: bool, shots: str = "") -> str:
     # 23 ── Capture : la liste des scénarios
     s, y = _slide(prs, "Many questions, side by side", kicker="Scenarios",
                   subtitle="Folders, pinned reviews and recent searches, each with its "
-                           "own corpus, screening state and model.")
+                           "own corpus, screening state and model, and searchable by "
+                           "name or by the question asked.")
     _shot(s, shot("scenarios"), MARGIN, y, W - 2 * MARGIN, H - y - Inches(0.9),
           caption="Each card opens a full workspace, with its own corpus, screening "
                   "state and model")
@@ -1251,9 +1399,18 @@ def build(uc: UseCase, out: str, live: bool, shots: str = "") -> str:
             ("UNSCORED", uc.unscored),
         ], accent=GOLD, label_w=Inches(1.5), row_h=Inches(0.34))
     y += Inches(3.2)
+    # Lu dans la distribution, et non affirmé : la phrase précédente classait les
+    # quatre dernières années en tête, ce que les chiffres ne disent pas.
+    _peak_year, _peak_n = max(uc.years, key=lambda r: r[1]) if uc.years else (0, 0)
+    _prior = dict(uc.years).get(_peak_year - 1)
+    _since = [n for yr, n in uc.years if yr > _peak_year]
     _bullets(s, MARGIN, y, W - 2 * MARGIN, [
-        "The corpus reaches back to 1917; the axis starts at 1995 because what precedes it is a handful of articles a year.",
-        "The jump at 2020 is the pandemic surveillance literature, and it has not receded: the four most recent years are the four largest.",
+        f"The corpus reaches back to {uc.year_min}; the axis starts at "
+        f"{uc.years[0][0] if uc.years else YEAR_AXIS_FROM} because what precedes it is a "
+        f"handful of articles a year.",
+        f"The jump at {_peak_year} is the pandemic surveillance literature: {_peak_n} "
+        f"articles against {_prior} the year before"
+        + (f", and no year since has fallen below {min(_since)}." if _since else "."),
     ], size=14)
 
     # Cas d'usage : le profil de preuve, chiffré.
@@ -1264,18 +1421,39 @@ def build(uc: UseCase, out: str, live: bool, shots: str = "") -> str:
     half = int((W - 2 * MARGIN - Inches(0.5)) / 2)
     tf = _tf(s, MARGIN, y, half, Inches(0.3))
     _text(tf, "STUDY DESIGN", size=9.5, color=BRAND, bold=True, space_after=0)
-    _bottom = _bars(s, MARGIN, y + Inches(0.4), half, uc.designs, label_w=Inches(2.0),
-                    row_h=Inches(0.31))
+    # Le reste des devis en une barre : les dix premiers seuls se liraient comme
+    # le corpus entier, et la somme ne tomberait pas juste.
+    _other_kinds, _other_n = uc.designs_other
+    _design_rows = list(uc.designs)
+    if _other_n:
+        _design_rows.append((f"{_other_kinds} others", _other_n))
+    _bottom = _bars(s, MARGIN, y + Inches(0.4), half, _design_rows,
+                    label_w=Inches(2.0), row_h=Inches(0.285))
     rx = MARGIN + half + Inches(0.5)
     tf = _tf(s, rx, y, half, Inches(0.3))
     _text(tf, "CERTAINTY, BY GRADE", size=9.5, color=GOLD, bold=True, space_after=0)
-    _bars(s, rx, y + Inches(0.4), half, uc.levels, accent=GOLD, label_w=Inches(2.0),
-          row_h=Inches(0.31))
+    _lv_bottom = _bars(s, rx, y + Inches(0.4), half, uc.levels, accent=GOLD,
+                       label_w=Inches(2.0), row_h=Inches(0.285))
+    _lv = dict(uc.levels)
+    tf = _tf(s, rx, _lv_bottom + Inches(0.18), half, Inches(1.0))
+    _text(tf, "Not applicable covers guidelines and other non-primary records; "
+              "not assessed means no design was identifiable. Both are stated rather "
+              "than folded into a low grade.", size=11, color=MUTED, line=1.2,
+          space_after=0)
     # Mesuré, et non décalé d'une valeur devinée : le texte recouvrait la dernière barre.
-    y = _bottom + Inches(0.26)
+    y = max(_bottom, _lv_bottom) + Inches(0.26)
+    # Les chiffres de la phrase sont LUS dans les deux distributions ci-dessus.
+    # Écrits à la main, ils décrivaient la version précédente du comptage.
+    _dz = dict(uc.designs)
+    _obs = sum(n for lbl, n in uc.designs if lbl in (
+        "Cohort", "Cross-sectional", "Case-control", "Surveillance", "Observational"))
     _bullets(s, MARGIN, y, W - 2 * MARGIN, [
-        "Twelve randomised trials against 188 cohorts and 31 surveillance studies: this is an observational literature, and the ceiling on any claim follows from that.",
-    ], size=14)
+        f"{_dz.get('Randomised trial', 0)} randomised trials against {_obs} cohort, "
+        f"cross-sectional, case-control and surveillance studies: an observational "
+        f"literature, and the ceiling on any claim follows from that.",
+        f"{_lv.get('High', 0)} articles could carry a high-certainty claim; "
+        f"{_lv.get('Low', 0)} sit at low certainty on their design alone.",
+    ], size=13.5)
 
     # 26 ── Cas d'usage : ce qu'il produit
     s, y = _slide(prs, "What this scenario produces", kicker="Worked example",
