@@ -3,7 +3,7 @@ import { ScenarioDetailPage, EnrichmentSection } from "./components/ScenarioDeta
 import { fetchActivity } from "./lib/api";
 import type { ActivityItem } from "./lib/api";
 import { useI18n } from "./i18n/LanguageProvider";
-import { Activity, BarChart2, BookOpen, Cloud, Download, ExternalLink, FolderOpen, MapPin, AlertTriangle, Users, Pill, Radio, RefreshCw, RotateCcw, ChevronDown, ChevronUp, Zap, Lock, KeyRound, Wrench, Trash2 } from "lucide-react";
+import { Activity, BarChart2, BookOpen, Cloud, Download, ExternalLink, FolderOpen, MapPin, AlertTriangle, Users, Pill, Radio, RefreshCw, RotateCcw, Search, ChevronDown, ChevronUp, Zap, Lock, KeyRound, Wrench, Trash2 } from "lucide-react";
 
 import {
   fetchDocumentDetail,
@@ -1287,6 +1287,10 @@ function ScenariosView({
   const [editingFolderId, setEditingFolderId] = useState<string | null>(null);
   const [editFolderName, setEditFolderName] = useState('');
   const [editFolderColor, setEditFolderColor] = useState('#6366f1');
+  // Chercher parmi les scénarios : nom, requête, description, cluster. Les termes sont
+  // cumulatifs, insensibles à la casse.
+  const [scenarioQuery, setScenarioQuery] = useState('');
+  const scenarioTerms = scenarioQuery.trim().toLowerCase().split(/\s+/).filter(Boolean);
 
   // Page détail d'un scénario (GESICA ou utilisateur)
   if (detailScenarioId) {
@@ -1615,6 +1619,24 @@ function ScenariosView({
     + userScenarios.reduce((a, s) => a + (s.articleCount ?? 0), 0);
   const totalScenarios = scenarios.length + userScenarios.length;
 
+  // ── Chercher parmi les scénarios ────────────────────────────────────────────
+  // Nom, requête (expression complète), description et cluster. La liste est déjà
+  // entièrement chargée, donc le filtre est posé ici, sans aller-retour serveur. Il
+  // s'applique AVANT le groupement, si bien que dossiers, épinglés et recherches
+  // récentes ne montrent que ce qui correspond.
+  const scenarioMatches = (s: GesicaScenario | UserScenario) => {
+    if (!scenarioTerms.length) return true;
+    const hay = [
+      (s as GesicaScenario).title, (s as any).name, (s as any).query,
+      (s as UserScenario).combined_query, (s as GesicaScenario).description,
+      (s as GesicaScenario).cluster,
+    ].filter(Boolean).join(" ").toLowerCase();
+    return scenarioTerms.every(term => hay.includes(term));
+  };
+  const allRecent = userScenarios.filter(scenarioMatches);
+  const matchingScenarios = userScenarios.filter(scenarioMatches).length
+    + scenarios.filter(scenarioMatches).length;
+
   // Un scénario SAUVEGARDÉ (épinglé) est UNIQUE : on masque toute recherche récente
   // (non épinglée) qui doublonne un scénario épinglé de même query (+ mode) - la 2e carte
   // identique disparaît immédiatement, sans attendre la purge backend à la prochaine liste.
@@ -1622,7 +1644,7 @@ function ScenariosView({
   // partagent la même `query` (facette principale) mais sont deux recherches.
   const _scenKey = (s: UserScenario) => `${s.combined_query ?? s.query ?? ''}\u0000${(s as any).mode ?? ''}`;
   const _pinnedKeys = new Set(userScenarios.filter(s => s.pinned).map(_scenKey));
-  const recentScenarios = userScenarios.filter(
+  const recentScenarios = allRecent.filter(
     s => !s.pinned && !(s as any).folder_id && !_pinnedKeys.has(_scenKey(s)),
   );
 
@@ -1651,9 +1673,47 @@ function ScenariosView({
         )}
       </div>
 
+      {/* Chercher parmi les scénarios */}
+      <div className="flex items-center gap-2 flex-wrap">
+        <div className="relative flex-1 min-w-[240px]">
+          <Search size={13} className="absolute left-3 top-1/2 -translate-y-1/2 text-white/30" />
+          <input
+            type="search"
+            value={scenarioQuery}
+            onChange={e => setScenarioQuery(e.target.value)}
+            placeholder={t("scenarios.searchPlaceholder")}
+            className="w-full rounded-xl border border-white/10 bg-white/5 pl-9 pr-3 py-2 text-xs text-white placeholder:text-white/30 focus:border-brand-500/40 focus:outline-none"
+          />
+        </div>
+        {scenarioTerms.length > 0 && (
+          <>
+            <span className="text-[11px] text-white/45 font-mono">
+              {t("scenarios.searchMatches")
+                .replace("{n}", String(matchingScenarios))
+                .replace("{total}", String(totalScenarios))}
+            </span>
+            <button
+              type="button"
+              onClick={() => setScenarioQuery('')}
+              className="text-[11px] text-white/40 hover:text-white/70 underline underline-offset-2"
+            >
+              {t("scenarios.searchClear")}
+            </button>
+          </>
+        )}
+      </div>
+      {scenarioTerms.length > 0 && matchingScenarios === 0 && (
+        <p className="rounded-2xl border border-white/10 bg-white/3 px-4 py-6 text-center text-xs text-white/40">
+          {t("scenarios.searchNoMatch").replace("{q}", scenarioQuery.trim())}
+        </p>
+      )}
+
       {/* ── Dossiers GESICA (un par cluster) ── */}
       {gesicaClusters.map(cluster => {
-        const clusterScenarios = scenarios.filter(s => s.cluster === cluster);
+        const clusterScenarios = scenarios.filter(s => s.cluster === cluster && scenarioMatches(s));
+        // Pendant une recherche, un groupe sans correspondance est masqué : afficher
+        // dix en-têtes vides ferait passer le résultat pour une liste vide.
+        if (scenarioTerms.length && clusterScenarios.length === 0) return null;
         return (
           <div key={cluster} className="rounded-2xl border border-brand-500/20 bg-brand-500/5 p-4 space-y-2">
             <div className="flex items-center justify-between">
@@ -1722,7 +1782,8 @@ function ScenariosView({
 
           {/* Dossiers */}
           {folders.map(folder => {
-            const folderScenarios = userScenarios.filter(s => (s as any).folder_id === folder.id);
+            const folderScenarios = userScenarios.filter(s => (s as any).folder_id === folder.id && scenarioMatches(s));
+            if (scenarioTerms.length && folderScenarios.length === 0) return null;
             return (
               <div key={folder.id} className="rounded-2xl border p-4 space-y-2" style={{ borderColor: folder.color + '40', backgroundColor: folder.color + '08' }}>
                 <div className="flex items-center justify-between">
@@ -1757,10 +1818,10 @@ function ScenariosView({
           })}
 
           {/* Épinglés (hors dossier) */}
-          {userScenarios.filter(s => s.pinned && !(s as any).folder_id).length > 0 && (
+          {userScenarios.filter(s => s.pinned && !(s as any).folder_id && scenarioMatches(s)).length > 0 && (
             <div className="space-y-2">
               <h3 className="text-xs font-semibold text-gold-400 uppercase tracking-widest">{t("scenarios.pinned")}</h3>
-              {userScenarios.filter(s => s.pinned && !(s as any).folder_id).map(s => (
+              {userScenarios.filter(s => s.pinned && !(s as any).folder_id && scenarioMatches(s)).map(s => (
                 renderScenarioCard(s)
               ))}
             </div>

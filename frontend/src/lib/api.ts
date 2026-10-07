@@ -954,6 +954,8 @@ export interface ScenarioDetail {
     year_min: number | null;
     year_max: number | null;
   };
+  /** Le jeu de compteurs commun, d'un seul instantané (cf. CorpusCounts). */
+  counts?: CorpusCounts;
 }
 
 export interface CorpusArticle {
@@ -1002,6 +1004,11 @@ export interface ScenarioCorpus {
   source_breakdown?: Record<string, number>;
   rerank_running?: boolean;
   threshold?: number;
+  /** Taille de la VUE quand elle est filtrée (année, source, texte intégral) ; null
+   *  sinon. `total` reste la taille du corpus : une vue filtrée ne le rétrécit pas. */
+  filtered_total?: number | null;
+  /** Le jeu de compteurs commun, d'un seul instantané (cf. CorpusCounts). */
+  counts?: CorpusCounts;
   offset: number;
   limit: number;
   articles: CorpusArticle[];
@@ -1215,6 +1222,13 @@ export async function fetchScenarioCorpus(
     fulltextOnly?: boolean;
     source?: string;
     threshold?: number;
+    /** Chercher DANS le corpus (titre, résumé, auteurs, revue, mots-clés, DOI, PMID).
+     *  La liste est paginée côté serveur : filtrer la page affichée ne chercherait
+     *  que dans les cent premiers articles d'un corpus qui en compte des milliers. */
+    q?: string;
+    /** Restreindre au sous-ensemble pertinent (porte commune : seuil ou inclusion par
+     *  un relecteur, jamais un exclu). */
+    relevantOnly?: boolean;
     abstractChars?: number;   // truncate abstracts server-side (excerpt-only views)
   }
 ): Promise<ScenarioCorpus> {
@@ -1226,6 +1240,8 @@ export async function fetchScenarioCorpus(
   if (options?.fulltextOnly) params.set('fulltext_only', 'true');
   if (options?.source) params.set('source', options.source);
   if (options?.threshold != null) params.set('threshold', String(options.threshold));
+  if (options?.q && options.q.trim()) params.set('q', options.q.trim());
+  if (options?.relevantOnly) params.set('relevant_only', 'true');
   // Truncate abstracts server-side when only an excerpt is displayed (search results
   // page): 10,000 full abstracts weighed tens of MB for a 600-character snippet.
   if (options?.abstractChars != null) params.set('abstract_chars', String(options.abstractChars));
@@ -1892,6 +1908,8 @@ export interface EmbeddingStatus {
     pending_chunks: number;
   };
   total_pending_chunks: number;
+  /** Le jeu de compteurs commun, d'un seul instantané (cf. CorpusCounts). */
+  counts?: CorpusCounts;
   // Pertinence (ranking) - scores réellement présents sur le corpus (≠ indexation RAG).
   ranking?: {
     total: number;
@@ -1992,6 +2010,36 @@ export async function fetchUserScenarioPipelineStatus(
   return r.json();
 }
 
+/** LE jeu de compteurs du corpus, compté par une seule instruction SQL donc un seul
+ *  instantané (api/scenario_store.py : scenario_counts). Tout panneau qui affiche un
+ *  nombre d'articles lit cet objet ; aucun ne compte pour son compte, sinon deux
+ *  nombres du même écran se remettent à diverger - l'en-tête annonçait 433 articles
+ *  pendant que le titre du corpus en annonçait 449 et le voyant « 441 scorés sur 433 ».
+ *  Renvoyé à l'identique par /counts, /detail, /corpus et /embedding-status. */
+export interface CorpusCounts {
+  threshold: number;
+  total: number;
+  above_threshold: number;
+  /** Scorés ET sous le seuil. Les non scorés sont à part : les trois font le total. */
+  below_threshold: number;
+  unscored: number;
+  scored: number;
+  reranked: number;
+  /** Ce que les extractions lisent vraiment (porte commune), pas un partage par le score. */
+  relevant: number;
+  included: number;
+  excluded: number;
+  pending: number;
+  with_fulltext: number;
+  chunkless: number;
+  newly_fetched: number;
+  from_local: number;
+  years_covered: number;
+  journals_count: number;
+  year_min: number | null;
+  year_max: number | null;
+}
+
 /** Les nombres d'articles affichés pour un scénario (liste, en-tête, PRISMA, étape
  *  sémantique) comparés entre eux, et si un pipeline/populate tourne encore. */
 export interface ScenarioCounts {
@@ -2010,6 +2058,8 @@ export interface ScenarioCounts {
   above_threshold: number;
   below_threshold: number;
   embedded: number;
+  /** Le jeu complet, d'un seul instantané : ce que TOUS les panneaux affichent. */
+  counts: CorpusCounts;
   consistent: boolean;
   mismatches: Array<{ field: string; value: number; expected: number }>;
   checked_at: string;

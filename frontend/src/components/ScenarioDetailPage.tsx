@@ -139,6 +139,7 @@ import {
   type SituationReport,
   type SituationReportsPage,
   type ReliefWebStatus,
+  type CorpusCounts,
 } from "../lib/api";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -248,7 +249,7 @@ function QueriesSection({ detail, scenarioId }: { detail: ScenarioDetail; scenar
     return arr;
   }, [liveData, liveSort]);
 
-  function loadStrategy() {
+  const loadStrategy = useCallback(() => {
     if (!isUserScenario(scenarioId)) return;
     setStrategyLoading(true);
     setStrategyError(null);
@@ -256,7 +257,13 @@ function QueriesSection({ detail, scenarioId }: { detail: ScenarioDetail; scenar
       .then(setStrategy)
       .catch(e => setStrategyError(e.message))
       .finally(() => setStrategyLoading(false));
-  }
+  }, [scenarioId]);
+
+  // La stratégie booléenne est AFFICHÉE à l'ouverture. Elle n'était chargée que par le
+  // bouton « Générer / Rafraîchir », si bien que le panneau restait vide : on ne voyait
+  // nulle part la requête booléenne réellement envoyée aux bases, alors qu'elle est
+  // générée et enregistrée pendant la recherche (user_scenarios.search_strategy).
+  useEffect(() => { loadStrategy(); }, [loadStrategy]);
 
   function runLiveSearch() {
     if (!isUserScenario(scenarioId)) return;
@@ -423,6 +430,16 @@ function QueriesSection({ detail, scenarioId }: { detail: ScenarioDetail; scenar
             </button>
           </div>
           {strategyError && <p className="text-xs text-rose-400">{strategyError}</p>}
+          {strategyLoading && !strategy && (
+            <p className="text-xs text-white/40">{t("scenarioDetail.queries.strategyLoading")}</p>
+          )}
+          {/* Une requête sauvegardée en langage naturel a été TRADUITE avant d'interroger
+              les bases : c'est cette traduction, ci-dessous, qui a défini le corpus. */}
+          {strategy && detail.nl_queries && detail.nl_queries.length > 0 && (
+            <p className="mb-3 rounded-xl border border-violet-500/20 bg-violet-500/5 px-3 py-2 text-[11px] text-violet-200/80 leading-5">
+              {t("scenarioDetail.queries.strategyIsWhatWasSent")}
+            </p>
+          )}
           {strategy && (
             <div className="space-y-3">
               <div className="rounded-xl border border-violet-500/15 bg-violet-500/5 p-3">
@@ -2212,7 +2229,101 @@ function RelevantExportMenu({ scenarioId, threshold }: { scenarioId: string; thr
   );
 }
 
-function CorpusSection({ scenarioId, threshold }: { scenarioId: string; detail: ScenarioDetail; threshold?: number }) {
+/**
+ * L'histogramme des années de publication. Un histogramme, et non une liste de
+ * barres triées : l'axe des abscisses est le TEMPS, continu, les années sans
+ * article comprises. La liste précédente classait les années par effectif et
+ * sautait les trous, si bien qu'un corpus concentré sur cinq ans ressemblait à
+ * un corpus étalé sur soixante-dix.
+ *
+ * Les années hors domaine (0, 9999, saisies erronées) sont déjà écartées côté
+ * serveur (1800 ≤ year ≤ année courante).
+ */
+function YearHistogram({ distribution }: { distribution: { year: number; count: number }[] }) {
+  const { t } = useI18n();
+  const bars = useMemo(() => {
+    const counts = new Map<number, number>();
+    for (const d of distribution) {
+      if (typeof d.year !== "number" || !Number.isFinite(d.year)) continue;
+      counts.set(d.year, (counts.get(d.year) ?? 0) + (d.count ?? 0));
+    }
+    const years = [...counts.keys()].sort((a, b) => a - b);
+    if (!years.length) return [];
+    const from = years[0];
+    const to = years[years.length - 1];
+    // Remplir les années creuses : c'est ce qui fait la différence entre un
+    // histogramme et un diagramme en barres.
+    const out: { year: number; count: number }[] = [];
+    for (let y = from; y <= to; y++) out.push({ year: y, count: counts.get(y) ?? 0 });
+    return out;
+  }, [distribution]);
+
+  if (!bars.length) {
+    return <p className="text-xs text-white/40">{t("scenarioDetail.corpus.yearHistogramEmpty")}</p>;
+  }
+
+  const max = Math.max(...bars.map(b => b.count), 1);
+  const peak = bars.reduce((a, b) => (b.count > a.count ? b : a), bars[0]);
+  const from = bars[0].year;
+  const to = bars[bars.length - 1].year;
+  // Une graduation tous les ~10 ans, plus les deux extrémités : au-delà, les
+  // étiquettes se chevauchent dans la colonne étroite.
+  const step = bars.length <= 12 ? 1 : bars.length <= 30 ? 5 : 10;
+  const labelled = (y: number) => y === from || y === to || y % step === 0;
+
+  return (
+    <div className="space-y-2">
+      <div className="flex items-baseline justify-between text-[10px] text-white/40 font-mono">
+        <span>
+          {t("scenarioDetail.corpus.yearHistogramSpan")
+            .replace("{from}", String(from))
+            .replace("{to}", String(to))
+            .replace("{n}", String(bars.length))}
+        </span>
+        <span>
+          {t("scenarioDetail.corpus.yearHistogramPeak")
+            .replace("{n}", peak.count.toLocaleString())
+            .replace("{year}", String(peak.year))}
+        </span>
+      </div>
+      {/* Défilement horizontal plutôt que des barres d'un pixel : chaque année
+          garde une largeur survolable même sur soixante-dix ans. */}
+      <div className="overflow-x-auto pb-1">
+        <div className="min-w-full inline-flex flex-col gap-1" style={{ minWidth: `${bars.length * 7}px` }}>
+          <div className="flex items-end gap-px h-28">
+            {bars.map(b => (
+              <div
+                key={b.year}
+                className="flex-1 min-w-[4px] h-full flex items-end"
+                title={t("scenarioDetail.corpus.yearHistogramTooltip")
+                  .replace("{year}", String(b.year))
+                  .replace("{n}", b.count.toLocaleString())}
+              >
+                <div
+                  className={`w-full rounded-t-sm ${b.count ? "bg-brand-500 hover:bg-brand-300" : "bg-white/5"} transition-colors`}
+                  // 2 px minimum pour une année non vide : une barre à zéro pixel
+                  // se lit comme une année sans article.
+                  style={{ height: b.count ? `${Math.max(2, (b.count / max) * 100)}%` : "2px" }}
+                />
+              </div>
+            ))}
+          </div>
+          <div className="h-px bg-white/10" />
+          <div className="flex gap-px text-[9px] text-white/35 font-mono">
+            {bars.map(b => (
+              <div key={b.year} className="flex-1 min-w-[4px] text-center overflow-visible whitespace-nowrap">
+                {labelled(b.year) ? <span className="inline-block -rotate-90 origin-center mt-3">{b.year}</span> : null}
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function CorpusSection({ scenarioId, threshold, counts }:
+  { scenarioId: string; detail: ScenarioDetail; threshold?: number; counts?: CorpusCounts }) {
   const { t } = useI18n();
   const [data, setData] = useState<ScenarioCorpus | null>(null);
   const [loading, setLoading] = useState(true);
@@ -2220,19 +2331,33 @@ function CorpusSection({ scenarioId, threshold }: { scenarioId: string; detail: 
   const [error, setError] = useState<string | null>(null);
   const [expandedId, setExpandedId] = useState<number | null>(null);
   const [embeddingStatus, setEmbeddingStatus] = useState<EmbeddingStatus | null>(null);
+  // Recherche DANS le corpus. La liste est paginée côté serveur, donc la recherche
+  // l'est aussi : filtrer ici n'aurait cherché que dans les cent articles affichés.
+  const [query, setQuery] = useState("");
+  const [relevantOnly, setRelevantOnly] = useState(false);
+  const [searching, setSearching] = useState(false);
+  const search = useMemo(
+    () => ({ ...(query.trim() ? { q: query.trim() } : {}), ...(relevantOnly ? { relevantOnly: true } : {}) }),
+    [query, relevantOnly]);
 
-  // Recharge la PREMIÈRE page quand le seuil (curseur) change, avec un léger debounce.
+  // Recharge la PREMIÈRE page quand le seuil (curseur) ou la recherche change, avec un
+  // léger debounce - une frappe par caractère ne doit pas faire une requête par frappe.
+  const firstLoad = useRef(true);
   useEffect(() => {
-    if (threshold == null) return;
-    let cancelled = false;   // évite qu'une réponse lente d'un ancien seuil écrase un seuil plus récent
+    if (firstLoad.current) { firstLoad.current = false; return; }
+    let cancelled = false;   // évite qu'une réponse lente d'un ancien état écrase un plus récent
+    setSearching(true);
     const tid = setTimeout(() => {
-      fetchScenarioCorpus(scenarioId, { threshold, limit: CORPUS_PAGE_SIZE })
+      fetchScenarioCorpus(scenarioId, {
+        limit: CORPUS_PAGE_SIZE, ...(threshold != null ? { threshold } : {}), ...search,
+      })
         .then(d => { if (!cancelled) setData(d); })
-        .catch(() => {});
-    }, 250);
+        .catch(() => {})
+        .finally(() => { if (!cancelled) setSearching(false); });
+    }, 300);
     return () => { cancelled = true; clearTimeout(tid); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [threshold]);
+  }, [threshold, search]);
 
   useEffect(() => {
     setLoading(true);
@@ -2255,19 +2380,19 @@ function CorpusSection({ scenarioId, threshold }: { scenarioId: string; detail: 
     if (!data?.rerank_running) return;
     const shown = Math.max(CORPUS_PAGE_SIZE, data.articles.length);
     const id = setTimeout(() => {
-      fetchScenarioCorpus(scenarioId, { limit: shown, ...(threshold != null ? { threshold } : {}) })
+      fetchScenarioCorpus(scenarioId, { limit: shown, ...(threshold != null ? { threshold } : {}), ...search })
         .then(setData)
         .catch(() => {});
     }, 4000);
     return () => clearTimeout(id);
-  }, [data, scenarioId, threshold]);
+  }, [data, scenarioId, threshold, search]);
 
   const loadMore = () => {
     if (!data || loadingMore) return;
     setLoadingMore(true);
     fetchScenarioCorpus(scenarioId, {
       limit: CORPUS_PAGE_SIZE, offset: data.articles.length,
-      ...(threshold != null ? { threshold } : {}),
+      ...(threshold != null ? { threshold } : {}), ...search,
     })
       .then((next) => setData((prev) => (prev ? { ...next, articles: [...prev.articles, ...next.articles] } : next)))
       .catch((e) => setError(e.message))
@@ -2276,7 +2401,22 @@ function CorpusSection({ scenarioId, threshold }: { scenarioId: string; detail: 
 
   if (loading) return <LoadingSpinner text={t("scenarioDetail.corpus.loadingCorpus")} />;
   if (error || !data) return <ErrorBox message={error ?? t("scenarioDetail.common.errorCorpus")} />;
-  const hasMore = data.articles.length < data.total;
+  // LE jeu de compteurs affiché par ce panneau : celui de la page (donc le même que le
+  // bandeau), à défaut celui que /corpus porte lui-même - les deux viennent de la même
+  // requête SQL, seul l'instant de lecture peut différer. Plus aucun nombre d'articles
+  // n'est recalculé ici : c'est ainsi que le titre et le bandeau se contredisaient.
+  const n: CorpusCounts = counts ?? data.counts ?? {
+    threshold: data.threshold ?? DEFAULT_SIMILARITY_THRESHOLD,
+    total: data.total, above_threshold: data.above_threshold ?? 0,
+    below_threshold: data.below_threshold ?? 0, unscored: data.unscored ?? 0,
+    scored: data.total - (data.unscored ?? 0), reranked: 0,
+    relevant: data.relevant ?? data.above_threshold ?? 0,
+    included: 0, excluded: 0, pending: data.total,
+    with_fulltext: data.docs_with_fulltext ?? 0, chunkless: 0,
+    newly_fetched: data.newly_fetched ?? 0, from_local: data.from_local ?? 0,
+    years_covered: 0, journals_count: 0, year_min: null, year_max: null,
+  };
+  const hasMore = data.articles.length < (data.filtered_total ?? n.total);
 
   return (
     <div className="space-y-4">
@@ -2292,8 +2432,10 @@ function CorpusSection({ scenarioId, threshold }: { scenarioId: string; detail: 
           scoring). L'indexation RAG (Assistant) vit désormais dans l'onglet
           « Assistant IA », pas ici : elle n'affecte pas ce classement. */}
       {embeddingStatus && (() => {
-        const total = embeddingStatus.corpus_total ?? embeddingStatus.ranking?.total ?? 0;
-        const scored = embeddingStatus.ranking?.scored ?? 0;
+        // « 441 / 433 articles scorés » : les deux nombres venaient de deux requêtes,
+        // d'où un numérateur plus grand que son dénominateur. Un seul objet désormais.
+        const total = embeddingStatus.counts?.total ?? embeddingStatus.corpus_total ?? embeddingStatus.ranking?.total ?? 0;
+        const scored = embeddingStatus.counts?.scored ?? embeddingStatus.ranking?.scored ?? 0;
         const semanticReady = embeddingStatus.score_availability.semantic;
         const cohereReady = embeddingStatus.score_availability.cohere;
         const cohereConfigured = embeddingStatus.score_availability.cohere_configured ?? false;
@@ -2334,12 +2476,18 @@ function CorpusSection({ scenarioId, threshold }: { scenarioId: string; detail: 
         );
       })()}
     <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
-      {/* Liste des articles */}
+      {/* Liste des articles.
+
+          `n` : LE jeu de compteurs de la page (api/scenario_store.py : scenario_counts),
+          celui qu'affiche aussi le bandeau. Un seul instantané pour tous les panneaux :
+          ce titre annonçait 449 articles pendant que le bandeau en annonçait 433, chacun
+          ayant interrogé la base à son propre instant. À défaut (corpus ouvert seul), on
+          retombe sur les compteurs que /corpus porte lui-même, issus de la même requête. */}
       <div className="lg:col-span-2 space-y-4">
         <div className="flex items-center justify-between flex-wrap gap-2">
           <SectionHeader
             icon={<FileText size={14} className="text-brand-400" />}
-            title={`${t("scenarioDetail.corpus.corpusTitlePrefix")} (${data.total} ${t("scenarioDetail.corpus.corpusTitleArticles")})`}
+            title={`${t("scenarioDetail.corpus.corpusTitlePrefix")} (${n.total.toLocaleString()} ${t("scenarioDetail.corpus.corpusTitleArticles")})`}
             // « Aucun validé par un relecteur » était affiché sans condition, y compris
             // sur un corpus dont des articles portent un badge « inclus » juste dessous.
             subtitle={data.articles.some(a => a.screening_status === "included" || a.screening_status === "excluded")
@@ -2352,38 +2500,79 @@ function CorpusSection({ scenarioId, threshold }: { scenarioId: string; detail: 
               était donc inatteignable, et le seuil paraissait définitif pendant que le
               scoring tournait encore. */}
           <div className="flex items-center gap-2 flex-wrap">
-            {data.above_threshold !== undefined && (
-              <span className="rounded-full bg-brand-500/15 border border-brand-500/30 px-3 py-1 text-[10px] font-semibold text-brand-300">
-                {data.above_threshold} {t("scenarioDetail.corpus.aboveThreshold")}
-              </span>
-            )}
+            <span className="rounded-full bg-brand-500/15 border border-brand-500/30 px-3 py-1 text-[10px] font-semibold text-brand-300">
+              {n.above_threshold.toLocaleString()} {t("scenarioDetail.corpus.aboveThreshold")}
+            </span>
             {/* Le badge ci-dessus compte les SCORES. Depuis qu'on peut restreindre la
                 portée, des articles au-dessus du seuil peuvent être hors périmètre, et
                 « 291 au-dessus du seuil » se lisait comme « 291 alimentent les analyses »
                 alors qu'elles en lisaient 190. Le vrai nombre vient du serveur : le
                 déduire d'une soustraction oubliait les articles repêchés sous le seuil. */}
-            {data.relevant !== undefined && data.relevant !== data.above_threshold && (
+            {n.relevant !== n.above_threshold && (
               <span className="rounded-full bg-gold-400/10 border border-gold-400/30 px-3 py-1 text-[10px] font-semibold text-gold-300">
-                {t("scenarioDetail.corpus.relevantUsed").replace("{n}", data.relevant.toLocaleString())}
+                {t("scenarioDetail.corpus.relevantUsed").replace("{n}", n.relevant.toLocaleString())}
               </span>
             )}
-            {(() => {
-              const below = data.below_threshold
-                ?? Math.max(0, data.total - (data.above_threshold ?? 0) - (data.unscored ?? 0));
-              return below > 0 ? (
-                <span className="rounded-full bg-white/5 border border-white/10 px-3 py-1 text-[10px] text-white/40">
-                  {below} {t("scenarioDetail.corpus.belowThresholdKept")}
-                </span>
-              ) : null;
-            })()}
-            {(data.unscored ?? 0) > 0 && (
+            {n.below_threshold > 0 && (
+              <span className="rounded-full bg-white/5 border border-white/10 px-3 py-1 text-[10px] text-white/40">
+                {n.below_threshold.toLocaleString()} {t("scenarioDetail.corpus.belowThresholdKept")}
+              </span>
+            )}
+            {n.unscored > 0 && (
               <span className="rounded-full bg-gold-500/10 border border-gold-500/30 px-3 py-1 text-[10px] text-gold-300 flex items-center gap-1">
                 {data.rerank_running && <Loader2 size={9} className="animate-spin" />}
-                {data.unscored} {t("scenarioDetail.corpus.unscored")}{data.rerank_running ? t("scenarioDetail.corpus.scoringInProgress") : ''}
+                {n.unscored.toLocaleString()} {t("scenarioDetail.corpus.unscored")}{data.rerank_running ? t("scenarioDetail.corpus.scoringInProgress") : ''}
               </span>
             )}
             <RelevantExportMenu scenarioId={scenarioId} threshold={threshold} />
           </div>
+        </div>
+
+        {/* Chercher DANS le corpus. La recherche est faite en base, sur tout le corpus :
+            la liste n'affiche que cent articles à la fois, et un filtre posé sur ce qui
+            est affiché n'aurait cherché que là-dedans. */}
+        <div className="flex items-center gap-2 flex-wrap">
+          <div className="relative flex-1 min-w-[220px]">
+            <Search size={12} className="absolute left-3 top-1/2 -translate-y-1/2 text-white/30" />
+            <input
+              type="search"
+              value={query}
+              onChange={e => setQuery(e.target.value)}
+              placeholder={t("scenarioDetail.corpus.searchPlaceholder")}
+              className="w-full rounded-xl border border-white/10 bg-white/5 pl-8 pr-8 py-2 text-xs text-white placeholder:text-white/30 focus:border-brand-500/40 focus:outline-none"
+            />
+            {searching && (
+              <Loader2 size={12} className="absolute right-3 top-1/2 -translate-y-1/2 animate-spin text-brand-400" />
+            )}
+          </div>
+          <button
+            type="button"
+            onClick={() => setRelevantOnly(v => !v)}
+            title={t("scenarioDetail.corpus.searchRelevantOnlyHint")}
+            className={`rounded-xl border px-3 py-2 text-[11px] font-medium transition ${
+              relevantOnly
+                ? "border-gold-400/40 bg-gold-500/15 text-gold-300"
+                : "border-white/10 bg-white/5 text-white/50 hover:text-white/80"
+            }`}
+          >
+            {t("scenarioDetail.corpus.searchRelevantOnly")}
+          </button>
+          {data.filtered_total != null && (
+            <span className="text-[11px] text-white/45 font-mono">
+              {t("scenarioDetail.corpus.searchMatches")
+                .replace("{n}", data.filtered_total.toLocaleString())
+                .replace("{total}", n.total.toLocaleString())}
+            </span>
+          )}
+          {(query || relevantOnly) && (
+            <button
+              type="button"
+              onClick={() => { setQuery(""); setRelevantOnly(false); }}
+              className="text-[11px] text-white/40 hover:text-white/70 underline underline-offset-2"
+            >
+              {t("scenarioDetail.corpus.searchClear")}
+            </button>
+          )}
         </div>
         {typeof data.from_local === "number" && (
           <p className="text-[11px] text-white/40"
@@ -2430,30 +2619,10 @@ function CorpusSection({ scenarioId, threshold }: { scenarioId: string; detail: 
         </div>
       </div>
 
-      {/* Distribution et stats */}
+      {/* Distribution et stats. Les SOURCES d'abord : elles disent d'où vient le
+          corpus, c'est la première question posée devant une liste d'articles.
+          La distribution par année vient ensuite. */}
       <div className="space-y-6">
-        {/* Années */}
-        <div className="rounded-3xl border border-white/10 bg-white/3 p-5 space-y-4">
-          <SectionHeader
-            icon={<Globe size={14} className="text-brand-400" />}
-            title={t("scenarioDetail.corpus.distributionByYear")}
-          />
-          <div className="space-y-2 text-xs">
-            {data.year_distribution.map((item) => (
-              <div key={item.year} className="flex items-center gap-3">
-                <span className="w-10 text-white/50 font-mono">{item.year}</span>
-                <div className="flex-1 h-2 bg-white/5 rounded-full overflow-hidden">
-                  <div
-                    className="h-full bg-brand-500 rounded-full"
-                    style={{ width: `${(item.count / data.total) * 100}%` }}
-                  />
-                </div>
-                <span className="w-6 text-right text-white/70 font-mono">{item.count}</span>
-              </div>
-            ))}
-          </div>
-        </div>
-
         {/* Sources */}
         <div className="rounded-3xl border border-white/10 bg-white/3 p-5 space-y-4">
           <SectionHeader
@@ -2474,6 +2643,15 @@ function CorpusSection({ scenarioId, threshold }: { scenarioId: string; detail: 
               </div>
             ))}
           </div>
+        </div>
+
+        {/* Années */}
+        <div className="rounded-3xl border border-white/10 bg-white/3 p-5 space-y-4">
+          <SectionHeader
+            icon={<Globe size={14} className="text-brand-400" />}
+            title={t("scenarioDetail.corpus.distributionByYear")}
+          />
+          <YearHistogram distribution={data.year_distribution} />
         </div>
       </div>
     </div>
@@ -5887,7 +6065,7 @@ function ThresholdCurvePanel({ scenarioId, onPick }: { scenarioId: string; onPic
 }
 
 /** ReviewTab : Corpus + PRISMA + Double-Aveugle (sous-tabs) */
-function ReviewTab({ scenarioId, detail }: { scenarioId: string; detail: ScenarioDetail }) {
+function ReviewTab({ scenarioId, detail, counts }: { scenarioId: string; detail: ScenarioDetail; counts?: CorpusCounts }) {
   const { t } = useI18n();
   const [sub, setSub] = React.useState<"corpus" | "prisma" | "screening">("corpus");
   const [corpusRefreshKey, setCorpusRefreshKey] = React.useState(0);
@@ -5912,7 +6090,7 @@ function ReviewTab({ scenarioId, detail }: { scenarioId: string; detail: Scenari
       {sub === "corpus" && (
         <div className="space-y-4">
           <SeuilSection scenarioId={scenarioId} onSaved={() => setCorpusRefreshKey(k => k + 1)} onThresholdChange={setLiveThreshold} />
-          <CorpusSection key={corpusRefreshKey} scenarioId={scenarioId} detail={detail} threshold={liveThreshold} />
+          <CorpusSection key={corpusRefreshKey} scenarioId={scenarioId} detail={detail} threshold={liveThreshold} counts={counts} />
         </div>
       )}
       {sub === "prisma" && <PrismaSection scenarioId={scenarioId} />}
@@ -7599,7 +7777,7 @@ export function ScenarioDetailPage({ scenarioId, onBack, initialTab }: ScenarioD
               {detail.cluster}
             </span>
             <span className="rounded-full border border-white/10 bg-white/5 px-2 py-0.5 text-xs text-white/50 font-mono">
-              {detail.corpus_stats.total} {t("scenarioDetail.page.articles")}
+              {(counts?.counts?.total ?? detail.corpus_stats.total).toLocaleString()} {t("scenarioDetail.page.articles")}
             </span>
           </div>
           <p className="mt-1 text-sm text-white/50 leading-5">
@@ -7703,7 +7881,7 @@ export function ScenarioDetailPage({ scenarioId, onBack, initialTab }: ScenarioD
             recharge ses données (corpus, PRISMA, étape sémantique…) - sinon elle
             garderait les nombres provisoires lus pendant le pipeline. */}
         <div key={`section-${refreshKey}`} className="contents">
-        {activeSection === "review" && <ReviewTab scenarioId={scenarioId} detail={detail} />}
+        {activeSection === "review" && <ReviewTab scenarioId={scenarioId} detail={detail} counts={counts?.counts} />}
         {activeSection === "evidence" && <EvidenceTab scenarioId={scenarioId} detail={detail} />}
         {activeSection === "reports" && <SituationReportsSection scenarioId={scenarioId} />}
         {activeSection === "assistant" && <RagSection scenarioId={scenarioId} detail={detail} />}
