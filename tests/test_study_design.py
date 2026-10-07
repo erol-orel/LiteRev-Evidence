@@ -180,12 +180,24 @@ def test_weakening_moves_down_the_scale_but_not_off_it():
 # ── the explanation ──────────────────────────────────────────────────────────
 def test_the_table_explains_itself():
     """The user asked for a plain explanation of which design is which level. The table
-    IS it, so there is no second copy to drift from the rules."""
-    rows = vocabulary("fr")
-    assert len(rows) == len(STUDY_TYPES)
-    assert all(r["why"] and r["grade"] and r["mesh"] for r in rows)
-    synthesis = next(r for r in rows if r["key"] == "synthesis")
-    assert "hérité" in synthesis["grade"], "a synthesis has no level of its own"
+    IS it, so there is no second copy to drift from the rules.
+
+    Grouped by LEVEL rather than listed per design: sixteen rows restated one rule
+    nine times, and a reader needs the rule, not its recitation. Every design still
+    appears, exactly once, under the level it maps to."""
+    groups = vocabulary("fr")
+    assert all(g["why"] and g["label"] for g in groups)
+    seen = [d["key"] for g in groups for d in g["designs"]]
+    assert sorted(seen) == sorted(STUDY_TYPES), "every design belongs to exactly one group"
+    assert all(d["mesh"] for g in groups for d in g["designs"])
+    synthesis = next(g for g in groups if any(d["key"] == "synthesis" for d in g["designs"]))
+    assert synthesis["level"] is None and "hérité" in synthesis["label"], \
+        "a synthesis has no level of its own"
+
+
+def test_the_grouping_is_shorter_than_the_list_it_replaces():
+    groups = vocabulary("fr")
+    assert len(groups) < len(STUDY_TYPES) / 2
 
 
 def test_the_table_says_it_is_not_a_full_grade_assessment():

@@ -45,7 +45,13 @@ from llm_usage import reasoning_effort as _reasoning_effort
 # `api/documents.py` : les deux ont divergé, et l'interface a fini par afficher une
 # distribution de niveaux à laquelle la notation des affirmations ne croyait pas.
 from .study_design import (LEVEL_HIGH, LEVEL_NA, LEVEL_ORDER, LEVEL_UNKNOWN,  # noqa: E402
-                           LEVEL_VERY_LOW, classify, grade_level, strongest, weaken)
+                           LEVEL_VERY_LOW, classify, design_label, grade_level,
+                           level_label, raw_design_sql, strongest, weaken)
+
+#: Le devis brut d'un article, écrit UNE fois (cf. api/study_design.raw_design_sql).
+#: Ces requêtes lisaient la colonne avant le PICO alors que le sélecteur de corpus
+#: lisait l'inverse : les deux nombres affichés côte à côte ne s'additionnaient pas.
+_raw_design_ld = raw_design_sql("ld")
 
 _STRENGTH_ORDER = LEVEL_ORDER
 design_level = grade_level          # nom conservé : l'API publique de ce module
@@ -252,7 +258,14 @@ def _build_evidence_brief(scenario_id: str) -> dict[str, Any]:
                     AND d.citation_count IS NOT NULL) AS avg_citations,
                 MAX(d.citation_count) FILTER (WHERE d.is_duplicate IS NOT TRUE
                     AND COALESCE(ars.screening_status, d.screening_status) IS DISTINCT FROM 'excluded'
-                    AND (COALESCE(ars.screening_status, d.screening_status) = 'included' OR COALESCE(ars.similarity_score, 0) >= :thr)) AS max_citations
+                    AND (COALESCE(ars.screening_status, d.screening_status) = 'included' OR COALESCE(ars.similarity_score, 0) >= :thr)) AS max_citations,
+                -- Le DÉNOMINATEUR de la moyenne. Peu de sources renvoient un compte de
+                -- citations, si bien que « moyenne 24,0 · max 24 » pouvait décrire UN
+                -- article sur quatre cent soixante-sept, sans que rien ne le dise.
+                COUNT(*) FILTER (WHERE d.is_duplicate IS NOT TRUE
+                    AND COALESCE(ars.screening_status, d.screening_status) IS DISTINCT FROM 'excluded'
+                    AND (COALESCE(ars.screening_status, d.screening_status) = 'included' OR COALESCE(ars.similarity_score, 0) >= :thr)
+                    AND d.citation_count IS NOT NULL) AS citations_known
             FROM article_scenarios ars
             JOIN literature_document d ON d.id = ars.document_id
             WHERE ars.scenario_id = :sid
@@ -280,9 +293,7 @@ def _build_evidence_brief(scenario_id: str) -> dict[str, Any]:
         # au total du corpus (ex. 100).
         study_designs = conn.execute(text(f"""
             WITH b AS (
-                SELECT lower(coalesce(
-                    nullif(trim(ld.study_design), ''),
-                    nullif(trim(ld.pico_json->>'study_design'), ''), '')) AS d
+                SELECT lower({_raw_design_ld}) AS d
                 FROM article_scenarios ars
                 JOIN literature_document ld ON ld.id = ars.document_id
                 WHERE ars.scenario_id = :sid AND ld.is_duplicate IS NOT TRUE
@@ -320,9 +331,7 @@ def _build_evidence_brief(scenario_id: str) -> dict[str, Any]:
         # étude observationnelle part en certitude faible).
         evidence_levels = conn.execute(text(f"""
             WITH b AS (
-                SELECT lower(coalesce(
-                    nullif(trim(ld.study_design), ''),
-                    nullif(trim(ld.pico_json->>'study_design'), ''), '')) AS d
+                SELECT lower({_raw_design_ld}) AS d
                 FROM article_scenarios ars
                 JOIN literature_document ld ON ld.id = ars.document_id
                 WHERE ars.scenario_id = :sid AND ld.is_duplicate IS NOT TRUE
@@ -376,6 +385,7 @@ def _build_evidence_brief(scenario_id: str) -> dict[str, Any]:
             "year_max": corpus_stats["year_max"],
             "avg_citations": round(float(corpus_stats["avg_citations"]), 1) if corpus_stats["avg_citations"] else None,
             "max_citations": int(corpus_stats["max_citations"]) if corpus_stats["max_citations"] else None,
+            "citations_known": int(corpus_stats["citations_known"] or 0),
             "pico_coverage_pct": round(
                 100 * int(corpus_stats["with_pico"] or 0) / max(int(corpus_stats["total"] or 1), 1), 1
             ),
@@ -405,10 +415,17 @@ def _build_evidence_brief(scenario_id: str) -> dict[str, Any]:
             for r in top_articles
         ],
         "pico_table": pico_table,
-        "study_design_distribution": [{"design": d["design"], "count": int(d["n"])} for d in study_designs],
+        # `design` et `level` restent les VALEURS du serveur, celles que le sélecteur
+        # de corpus renvoie ; `*_en` n'est qu'un libellé d'affichage. Sans cette
+        # séparation, traduire la vue aurait cassé la sélection.
+        "study_design_distribution": [
+            {"design": d["design"], "design_en": design_label(d["design"], "en"),
+             "count": int(d["n"])} for d in study_designs],
         "year_distribution": [{"year": d["year"], "count": int(d["n"])} for d in year_dist],
         "source_distribution": [{"source": s["source"], "count": int(s["n"])} for s in source_dist],
-        "evidence_level_distribution": [{"level": e["level"], "count": int(e["n"])} for e in evidence_levels],
+        "evidence_level_distribution": [
+            {"level": e["level"], "level_en": level_label(e["level"], "en"),
+             "count": int(e["n"])} for e in evidence_levels],
     }
 
 
@@ -869,6 +886,71 @@ def get_brief_generation_status(scenario_id: str) -> dict[str, Any]:
     return _BRIEF_GENERATION_JOBS.get(scenario_id, {"status": "idle"})
 
 
+def with_resolved_references(brief: dict, scenario_id: str) -> dict:
+    """The brief with its citations renumbered and a reference list attached.
+
+    The model is asked to cite by article id, which is the only handle it has. Left
+    as written, the reader saw `[8472]`: a database key, pointing at nothing they can
+    open. Resolved here at SERVE time rather than baked into the cache, so the
+    numbering always matches the articles the corpus holds now.
+
+    The same three helpers the citable report uses, so the numbering on screen, in the
+    PDF and in the document agree. An id the corpus cannot resolve is left visible and
+    counted, never quietly dropped."""
+    from .relevance import _get_above_threshold_articles          # lazy: chargé après
+    from .report import cited_ids, renumber                       # lazy: chargé après
+
+    ids = cited_ids(brief)
+    if not ids:
+        return brief
+    rows = _get_above_threshold_articles(scenario_id, full_rows=0) or []
+    by_id = {int(a["id"]): a for a in rows if a.get("id") is not None}
+
+    numbers: dict[int, int] = {}
+    references: list[dict[str, Any]] = []
+    for article_id in ids:
+        article = by_id.get(article_id)
+        if article is None:
+            continue
+        numbers[article_id] = len(references) + 1
+        doi = (article.get("doi") or "").strip()
+        url = (article.get("url") or "").strip()
+        if not url and doi:
+            url = f"https://doi.org/{doi}"
+        if not url and article.get("pmid"):
+            url = f"https://pubmed.ncbi.nlm.nih.gov/{article['pmid']}/"
+        references.append({
+            "n": len(references) + 1, "id": article_id,
+            "title": article.get("title"), "authors": article.get("authors"),
+            "year": article.get("year"), "journal": article.get("journal"),
+            "doi": doi or None, "url": url or None,
+        })
+
+    out = dict(brief)
+    unresolved: list[int] = []
+    from .report import _LIST_FIELDS, _NARRATIVE_FIELDS
+    for field, _ in _NARRATIVE_FIELDS:
+        if isinstance(out.get(field), str):
+            out[field], missing = renumber(out[field], numbers)
+            unresolved += [m for m in missing if m not in unresolved]
+    for field, _ in _LIST_FIELDS:
+        if isinstance(out.get(field), list):
+            rewritten = []
+            for item in out[field]:
+                if isinstance(item, str):
+                    item, missing = renumber(item, numbers)
+                    unresolved += [m for m in missing if m not in unresolved]
+                rewritten.append(item)
+            out[field] = rewritten
+    for claim in (out.get("claims") or []):
+        if isinstance(claim, dict) and claim.get("article_ids"):
+            claim["reference_numbers"] = [numbers[i] for i in claim["article_ids"]
+                                          if i in numbers]
+    out["references"] = references
+    out["unresolved_citations"] = unresolved
+    return out
+
+
 @app.get("/scenarios/{scenario_id}/evidence-brief/llm")
 def get_llm_evidence_brief(scenario_id: str, lang: str | None = Query(None)) -> dict[str, Any]:
     """
@@ -899,7 +981,7 @@ def get_llm_evidence_brief(scenario_id: str, lang: str | None = Query(None)) -> 
         if brief.get("_corpus_fingerprint") == _want_fp:
             brief["_cached"] = True
             brief["_generated_at"] = row["brief_generated_at"].isoformat() if row["brief_generated_at"] else None
-            return brief
+            return with_resolved_references(brief, scenario_id)
 
     # Si un job précédent a ÉCHOUÉ, renvoyer l'erreur au lieu de relancer la
     # génération à chaque appel : sinon un échec persistant (mauvaise sortie LLM,

@@ -4,7 +4,7 @@ import { useI18n } from "../i18n/LanguageProvider";
 import {
   ArrowLeft, Brain,
   ChevronDown, ChevronUp, Database, ExternalLink, FileText,
-  Layers, MessageSquare, RefreshCw, RotateCcw, Search,
+  Layers, MessageSquare, Clock, RefreshCw, RotateCcw, Search,
   Shield, Terminal, Zap, AlertTriangle, Radio,
   Globe, Upload, CheckCircle2, AlertCircle, Info,
   Microscope, Loader2, Download, Table2, BookOpen,
@@ -140,6 +140,12 @@ import {
   type SituationReportsPage,
   type ReliefWebStatus,
   type CorpusCounts,
+  fetchScenarioQuestions,
+  saveScenarioQuestion,
+  deleteScenarioQuestion,
+  decideQuestionProposal,
+  questionExportUrl,
+  type ScenarioQuestionsPage,
 } from "../lib/api";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -3425,8 +3431,171 @@ function UmapScatterPlot({clusters,selectedCluster,onSelectCluster}:{clusters:Cl
 }
 // ─── Section: RAG ─────────────────────────────────────────────────────────────
 
-function RagSection({ scenarioId, detail }: { scenarioId: string; detail: ScenarioDetail }) {
+/**
+ * L'historique des questions posées à ce scénario.
+ *
+ * Une réponse n'est pas un tour de discussion qui défile. Elle porte une portée,
+ * une date et des sources, donc elle se relit, se compare à la suivante, s'exporte
+ * et peut proposer une mise à jour du scénario. Le panneau sert ces quatre usages
+ * et rien d'autre.
+ */
+function QuestionHistory({ scenarioId, refreshKey, onReask }:
+  { scenarioId: string; refreshKey: number; onReask: (q: string) => void }) {
   const { t } = useI18n();
+  const [page, setPage] = useState<ScenarioQuestionsPage | null>(null);
+  const [openId, setOpenId] = useState<number | null>(null);
+  const [busy, setBusy] = useState<string | null>(null);
+
+  const load = useCallback(() => {
+    fetchScenarioQuestions(scenarioId, { limit: 50 })
+      .then(setPage)
+      .catch(() => { /* non bloquant */ });
+  }, [scenarioId]);
+  useEffect(() => { load(); }, [load, refreshKey]);
+
+  const decide = (qid: number, key: string, decision: "accepted" | "rejected") => {
+    setBusy(`${qid}:${key}`);
+    decideQuestionProposal(scenarioId, qid, key, decision)
+      .then(load)
+      .catch(() => { /* non bloquant */ })
+      .finally(() => setBusy(null));
+  };
+
+  const remove = (qid: number) => {
+    setBusy(`del:${qid}`);
+    deleteScenarioQuestion(scenarioId, qid)
+      .then(load)
+      .catch(() => { /* non bloquant */ })
+      .finally(() => setBusy(null));
+  };
+
+  if (!page || page.total === 0) return null;
+
+  return (
+    <div className="rounded-3xl border border-white/10 bg-white/3 p-5 space-y-4">
+      <SectionHeader
+        icon={<Clock size={14} className="text-brand-400" />}
+        title={`${t("scenarioDetail.rag.historyTitle")} (${page.total})`}
+        subtitle={t("scenarioDetail.rag.historySubtitle")}
+      />
+      <div className="space-y-2">
+        {page.items.map(q => {
+          const open = openId === q.id;
+          const pending = (q.proposals ?? []).filter(p => !p.decision);
+          return (
+            <div key={q.id} className="rounded-2xl border border-white/10 bg-white/2">
+              <button
+                type="button"
+                onClick={() => setOpenId(open ? null : q.id)}
+                className="w-full text-left px-4 py-3 flex items-start gap-3"
+              >
+                <div className="flex-1 min-w-0">
+                  <p className="text-sm text-white leading-5">{q.question}</p>
+                  <p className="mt-1 text-[11px] text-white/40 font-mono">
+                    {(q.created_at ?? "").slice(0, 16).replace("T", " ")}
+                    {"  ·  "}{q.scope_label}
+                    {q.papers_used != null && `  ·  ${q.papers_used.toLocaleString()} ${t("scenarioDetail.rag.historyArticles")}`}
+                  </p>
+                </div>
+                <div className="shrink-0 flex items-center gap-1.5">
+                  {(q.asked_times_in_page ?? 1) > 1 && (
+                    <span className="rounded-full border border-brand-500/30 bg-brand-500/10 px-2 py-0.5 text-[10px] text-brand-300"
+                          title={t("scenarioDetail.rag.historyRepeatHint")}>
+                      {t("scenarioDetail.rag.historyRepeat")}
+                    </span>
+                  )}
+                  {pending.length > 0 && (
+                    <span className="rounded-full border border-gold-400/40 bg-gold-500/15 px-2 py-0.5 text-[10px] font-semibold text-gold-300">
+                      {t("scenarioDetail.rag.historyProposals").replace("{n}", String(pending.length))}
+                    </span>
+                  )}
+                  {open ? <ChevronUp size={14} className="text-white/30" />
+                        : <ChevronDown size={14} className="text-white/30" />}
+                </div>
+              </button>
+              {open && (
+                <div className="px-4 pb-4 space-y-3 border-t border-white/5 pt-3">
+                  <p className="text-xs text-white/70 leading-5 whitespace-pre-wrap">{q.answer}</p>
+
+                  {(q.proposals ?? []).length > 0 && (
+                    <div className="rounded-xl border border-gold-400/25 bg-gold-500/5 p-3 space-y-2">
+                      <p className="text-[10px] font-semibold uppercase tracking-wider text-gold-300">
+                        {t("scenarioDetail.rag.proposalsTitle")}
+                      </p>
+                      <p className="text-[11px] text-white/45 leading-4">
+                        {t("scenarioDetail.rag.proposalsHint")}
+                      </p>
+                      {(q.proposals ?? []).map(prop => (
+                        <div key={prop.key} className="flex items-center gap-2 flex-wrap text-[11px]">
+                          <code className="font-mono text-gold-200">{prop.key}</code>
+                          <span className="text-white/70 font-semibold">
+                            {prop.value}
+                            {prop.low != null && prop.high != null && ` (${prop.low}\u2013${prop.high})`}
+                            {prop.unit ? ` ${prop.unit}` : ""}
+                          </span>
+                          <span className="text-white/35">
+                            {prop.current != null
+                              ? t("scenarioDetail.rag.proposalCurrent").replace("{v}", String(prop.current))
+                              : t("scenarioDetail.rag.proposalNew")}
+                          </span>
+                          {prop.decision ? (
+                            <span className={`rounded-full border px-2 py-0.5 ${
+                              prop.decision === "accepted"
+                                ? "border-forest-400/40 bg-forest-500/10 text-forest-300"
+                                : "border-white/10 bg-white/5 text-white/35"}`}>
+                              {prop.decision === "accepted"
+                                ? t("scenarioDetail.rag.proposalAccepted")
+                                : t("scenarioDetail.rag.proposalRejected")}
+                            </span>
+                          ) : (
+                            <span className="flex items-center gap-1.5">
+                              <button type="button" disabled={busy === `${q.id}:${prop.key}`}
+                                onClick={() => decide(q.id, prop.key, "accepted")}
+                                className="rounded-lg border border-forest-400/40 bg-forest-500/10 px-2 py-0.5 text-forest-300 hover:bg-forest-500/20 transition disabled:opacity-50">
+                                {t("scenarioDetail.rag.proposalAccept")}
+                              </button>
+                              <button type="button" disabled={busy === `${q.id}:${prop.key}`}
+                                onClick={() => decide(q.id, prop.key, "rejected")}
+                                className="rounded-lg border border-white/10 px-2 py-0.5 text-white/40 hover:text-white/70 transition disabled:opacity-50">
+                                {t("scenarioDetail.rag.proposalReject")}
+                              </button>
+                            </span>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+
+                  <div className="flex items-center gap-2 flex-wrap text-[11px]">
+                    <button type="button" onClick={() => onReask(q.question)}
+                      className="rounded-xl border border-brand-500/30 bg-brand-500/10 px-2.5 py-1 text-brand-300 hover:bg-brand-500/20 transition">
+                      {t("scenarioDetail.rag.historyReask")}
+                    </button>
+                    <span className="text-white/25">{t("scenarioDetail.rag.historyExport")}</span>
+                    {(["pdf", "docx", "md"] as const).map(fmt => (
+                      <a key={fmt} href={questionExportUrl(scenarioId, q.id, fmt)}
+                         className="rounded-xl border border-white/10 px-2.5 py-1 text-white/50 hover:text-white hover:bg-white/10 transition font-mono uppercase">
+                        {fmt}
+                      </a>
+                    ))}
+                    <button type="button" disabled={busy === `del:${q.id}`}
+                      onClick={() => remove(q.id)}
+                      className="ml-auto rounded-xl border border-white/10 px-2.5 py-1 text-white/30 hover:text-rose-300 hover:border-rose-500/25 transition disabled:opacity-50">
+                      {t("common.delete")}
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function RagSection({ scenarioId, detail }: { scenarioId: string; detail: ScenarioDetail }) {
+  const { t, lang } = useI18n();
   const [question, setQuestion] = useState("");
   const [streaming, setStreaming] = useState(false);
   const [streamedText, setStreamedText] = useState("");
@@ -3436,6 +3605,12 @@ function RagSection({ scenarioId, detail }: { scenarioId: string; detail: Scenar
   const [done, setDone] = useState(false);
   const cancelRef = useRef<(() => void) | null>(null);
   const answerRef = useRef<HTMLDivElement>(null);
+  // Le texte, les sources et la méta tels qu'ils sont À LA FIN du flux : les états
+  // React correspondants ne sont pas encore à jour quand onDone se déclenche.
+  const answerSoFar = useRef("");
+  const sourcesSoFar = useRef<ScenarioRagResponse['sources']>([]);
+  const metaSoFar = useRef<RagMeta | null>(null);
+  const [historyKey, setHistoryKey] = useState(0);
 
   // Indexation RAG du corpus : combien de documents l'Assistant peut déjà
   // interroger. Rafraîchi tant que des chunks restent à vectoriser, pour que la
@@ -3472,18 +3647,42 @@ function RagSection({ scenarioId, detail }: { scenarioId: string; detail: Scenar
     setMeta(null);
     setError(null);
     setDone(false);
+    answerSoFar.current = "";
+    sourcesSoFar.current = [];
+    metaSoFar.current = null;
 
     const cancel = askScenarioRagStreamFiltered(scenarioId, qText, {
-      onSources: (s) => setSources(s),
-      onMeta: (m) => setMeta(m),
+      onSources: (s) => { sourcesSoFar.current = s; setSources(s); },
+      onMeta: (m) => { metaSoFar.current = m; setMeta(m); },
       onToken: (t) => {
+        answerSoFar.current += t;
         setStreamedText(prev => prev + t);
         // Auto-scroll
         if (answerRef.current) {
           answerRef.current.scrollTop = answerRef.current.scrollHeight;
         }
       },
-      onDone: () => { setStreaming(false); setDone(true); },
+      onDone: () => {
+        setStreaming(false);
+        setDone(true);
+        // La réponse est CONSERVÉE avec sa portée, sa date et ses sources : sans
+        // cela, elle n'est ni comparable à la prochaine, ni citable, ni vérifiable.
+        // Échec silencieux : perdre l'archive ne doit pas effacer la réponse à
+        // l'écran.
+        saveScenarioQuestion(scenarioId, {
+          question: qText,
+          answer: answerSoFar.current,
+          lang,
+          threshold: metaSoFar.current?.threshold ?? null,
+          scope: {},
+          sources: sourcesSoFar.current,
+          papers_used: metaSoFar.current?.papers_used ?? null,
+          papers_quoted: metaSoFar.current?.papers_quoted ?? null,
+          digest_complete: Boolean(metaSoFar.current?.digest_complete),
+        })
+          .then(() => setHistoryKey(k => k + 1))
+          .catch(() => { /* l'archive est un plus, pas une condition */ });
+      },
       onError: (e) => { setError(e); setStreaming(false); },
     });
     cancelRef.current = cancel;
@@ -3503,7 +3702,8 @@ function RagSection({ scenarioId, detail }: { scenarioId: string; detail: Scenar
   const suggestedQuestions = detail.nl_queries.slice(0, 3);
 
   return (
-    <div className="rounded-3xl border border-white/10 bg-white/3 p-5 space-y-5">
+    <div className="space-y-4">
+      <div className="rounded-3xl border border-white/10 bg-white/3 p-5 space-y-5">
       <SectionHeader
         icon={<MessageSquare size={14} className="text-brand-400" />}
         title={t("scenarioDetail.rag.title")}
@@ -3684,6 +3884,10 @@ function RagSection({ scenarioId, detail }: { scenarioId: string; detail: Scenar
           )}
         </div>
       )}
+      </div>
+
+      <QuestionHistory scenarioId={scenarioId} refreshKey={historyKey}
+                       onReask={(q) => { setQuestion(q); ask(q); }} />
     </div>
   );
 }
@@ -5744,6 +5948,16 @@ function SeuilSection({ scenarioId, onSaved, onThresholdChange }: { scenarioId: 
  * charts and the claim grading are computed from (`api/study_design.py`), so there is no
  * second copy to drift. Collapsed by default: it is a reference, not a reading.
  */
+/** La teinte d'un niveau, par sa VALEUR serveur (qui reste en français). */
+const LEVEL_TONE: Record<string, string> = {
+  "Élevée": "text-forest-300",
+  "Modérée": "text-brand-300",
+  "Faible": "text-gold-300",
+  "Très faible": "text-gold-400/80",
+  "Non applicable": "text-white/45",
+  "Non évaluée": "text-white/40",
+};
+
 function StudyDesignLegend() {
   const { t, lang } = useI18n();
   const [open, setOpen] = React.useState(false);
@@ -5767,27 +5981,32 @@ function StudyDesignLegend() {
             <p className="text-[10px] text-white/35">{t("common.loading")}</p>
           ) : (
             <>
-              <div className="overflow-x-auto">
-                <table className="w-full text-[10px]">
-                  <thead>
-                    <tr className="text-white/35">
-                      <th className="py-1 pr-2 text-left font-medium">{t("scenarioDetail.evidences.legend.design")}</th>
-                      <th className="py-1 pr-2 text-left font-medium">{t("scenarioDetail.evidences.legend.level")}</th>
-                      <th className="py-1 pr-2 text-left font-medium">{t("scenarioDetail.evidences.legend.why")}</th>
-                      <th className="py-1 text-left font-medium">{t("scenarioDetail.evidences.legend.source")}</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {data.types.map(row => (
-                      <tr key={row.key} className="border-t border-white/5 align-top">
-                        <td className="py-1 pr-2 text-white/70">{row.label}</td>
-                        <td className="py-1 pr-2 whitespace-nowrap text-white/60">{row.grade}</td>
-                        <td className="py-1 pr-2 text-white/45 leading-snug">{row.why}</td>
-                        <td className="py-1 text-white/30 leading-snug">{row.mesh}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
+              {/* Groupé par NIVEAU : la règle une fois, puis les devis qu'elle
+                  couvre. Les seize lignes précédentes répétaient « observationnel :
+                  départ en certitude faible » neuf fois. */}
+              <div className="space-y-2">
+                {data.groups.map(g => (
+                  <div key={g.level ?? "inherited"}
+                       className="rounded-lg border border-white/5 bg-white/2 px-3 py-2">
+                    <div className="flex items-baseline gap-2 flex-wrap">
+                      <span className={`text-[11px] font-semibold ${
+                        g.level === null ? "text-white/50" : LEVEL_TONE[g.level] ?? "text-white/60"}`}>
+                        {g.label}
+                      </span>
+                      <span className="text-[10px] text-white/45 leading-snug flex-1 min-w-[16rem]">
+                        {g.why}
+                      </span>
+                    </div>
+                    <div className="mt-1.5 flex flex-wrap gap-1">
+                      {g.designs.map(d => (
+                        <span key={d.key} title={d.mesh}
+                              className="rounded-md border border-white/8 bg-white/4 px-1.5 py-0.5 text-[10px] text-white/55">
+                          {d.label}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                ))}
               </div>
               <p className="text-[10px] text-white/40 leading-relaxed">{data.note}</p>
               <p className="text-[10px] text-white/25 leading-relaxed">
@@ -6198,7 +6417,11 @@ function EvidencesSection({ scenarioId, detail }: { scenarioId: string; detail: 
             if (pollRef.current) clearInterval(pollRef.current);
             setGenStatus(null);
             setRegenerating(false);
+            // Les DEUX : le PDF est construit sur `briefData` autant que sur le
+            // récit, et ne recharger que le second le faisait sortir avec les
+            // chiffres de la version précédente.
             loadLlm();
+            loadBrief();
           } else if (s.status === 'error') {
             if (pollRef.current) clearInterval(pollRef.current);
             setGenStatus(null);
@@ -6317,7 +6540,7 @@ ${b.corpus_stats.year_min && b.corpus_stats.year_max ? `<p class="meta">${t("sce
 <div class="dist-grid">
   <div class="dist-box">
     <div class="dist-title">${t("scenarioDetail.evidences.pdf.studyTypes")}</div>
-    ${(()=>{const top=b.study_design_distribution;const rem=relevant_pdf-top.reduce((s,d)=>s+d.count,0);const rows=rem>0?[...top,{design:t("scenarioDetail.evidences.pdf.other"),count:rem}]:top;return rows.map(d=>`<div class="bar-row"><span class="bar-label">${d.design}</span><div class="bar-track"><div class="bar-fill-green" style="width:${Math.round(d.count/rTotal_pdf*100)}%"></div></div><span class="bar-count">${d.count}</span></div>`).join('');})()}
+    ${(()=>{const top=b.study_design_distribution;const rem=relevant_pdf-top.reduce((s,d)=>s+d.count,0);const rows=rem>0?[...top,{design:t("scenarioDetail.evidences.pdf.other"),count:rem}]:top;return rows.map(d=>`<div class="bar-row"><span class="bar-label">${(lang==="en"&&d.design_en)||d.design}</span><div class="bar-track"><div class="bar-fill-green" style="width:${Math.round(d.count/rTotal_pdf*100)}%"></div></div><span class="bar-count">${d.count}</span></div>`).join('');})()}
   </div>
   <div class="dist-box">
     <div class="dist-title">${t("scenarioDetail.evidences.pdf.sources")}</div>
@@ -6325,7 +6548,7 @@ ${b.corpus_stats.year_min && b.corpus_stats.year_max ? `<p class="meta">${t("sce
   </div>
   <div class="dist-box">
     <div class="dist-title">${t("scenarioDetail.evidences.pdf.evidenceLevels")}</div>
-    ${(b.evidence_level_distribution??[]).slice(0,6).map(d=>`<div class="bar-row"><span class="bar-label">${d.level}</span><div class="bar-track"><div class="bar-fill-gold" style="width:${Math.round(d.count/rTotal_pdf*100)}%"></div></div><span class="bar-count">${d.count}</span></div>`).join('')}
+    ${(b.evidence_level_distribution??[]).slice(0,6).map(d=>`<div class="bar-row"><span class="bar-label">${(lang==="en"&&d.level_en)||d.level}</span><div class="bar-track"><div class="bar-fill-gold" style="width:${Math.round(d.count/rTotal_pdf*100)}%"></div></div><span class="bar-count">${d.count}</span></div>`).join('')}
   </div>
 </div>
 
@@ -6478,7 +6701,18 @@ ${llm.future_research ? `<h3>${t("scenarioDetail.evidences.pdf.futureResearch")}
           {briefData.corpus_stats.year_min && briefData.corpus_stats.year_max && (
             <div className="flex flex-wrap gap-4 text-xs text-white/50">
               <span>{t("scenarioDetail.evidences.coverage")} <span className="text-white/70 font-semibold">{briefData.corpus_stats.year_min} – {briefData.corpus_stats.year_max}</span></span>
-              {briefData.corpus_stats.avg_citations != null && <span>{t("scenarioDetail.evidences.avgCitations")} <span className="text-white/70 font-semibold">{briefData.corpus_stats.avg_citations.toFixed(1)}</span></span>}
+              {briefData.corpus_stats.avg_citations != null && (
+                <span>{t("scenarioDetail.evidences.avgCitations")}{" "}
+                  <span className="text-white/70 font-semibold">{briefData.corpus_stats.avg_citations.toFixed(1)}</span>
+                  {/* Le dénominateur : « moyenne 24,0 · max 24 » pouvait décrire UN
+                      article sur quatre cent soixante-sept sans le dire. */}
+                  {briefData.corpus_stats.citations_known != null && (
+                    <span className="text-white/35">{" "}
+                      {t("scenarioDetail.evidences.citationsOver").replace("{n}", String(briefData.corpus_stats.citations_known))}
+                    </span>
+                  )}
+                </span>
+              )}
               {briefData.corpus_stats.max_citations != null && <span>{t("scenarioDetail.evidences.max")} <span className="text-white/70 font-semibold">{briefData.corpus_stats.max_citations}</span></span>}
             </div>
           )}
@@ -6498,7 +6732,8 @@ ${llm.future_research ? `<h3>${t("scenarioDetail.evidences.pdf.futureResearch")}
                     onClick={() => toggle(keptDesigns, setKeptDesigns, d.design)}
                     title={t("scenarioDetail.subset.byDesign.hint")}
                     className={`flex w-full items-center gap-2 text-[10px] rounded px-1 -mx-1 transition ${keptDesigns.has(d.design) ? "bg-brand-500/15" : "hover:bg-white/5"}`}>
-                    <span className={`w-28 truncate text-left ${keptDesigns.has(d.design) ? "text-brand-200" : "text-white/60"}`}>{d.design}</span>
+                    <span className={`w-28 truncate text-left ${keptDesigns.has(d.design) ? "text-brand-200" : "text-white/60"}`}
+                          title={d.design}>{(lang === "en" && d.design_en) || d.design}</span>
                     <div className="flex-1 h-1 bg-white/5 rounded-full overflow-hidden">
                       <div className={`h-full rounded-full ${keptDesigns.has(d.design) ? "bg-brand-300" : "bg-brand-500"}`} style={{width:`${Math.round(d.count/relevant*100)}%`}}/>
                     </div>
@@ -6535,7 +6770,8 @@ ${llm.future_research ? `<h3>${t("scenarioDetail.evidences.pdf.futureResearch")}
                     onClick={() => toggle(keptLevels, setKeptLevels, d.level)}
                     title={t("scenarioDetail.subset.byLevel.hint")}
                     className={`flex w-full items-center gap-2 text-[10px] rounded px-1 -mx-1 transition ${keptLevels.has(d.level) ? "bg-gold-500/15" : "hover:bg-white/5"}`}>
-                    <span className={`w-28 truncate text-left capitalize ${keptLevels.has(d.level) ? "text-gold-200" : "text-white/60"}`}>{d.level}</span>
+                    <span className={`w-28 truncate text-left ${keptLevels.has(d.level) ? "text-gold-200" : "text-white/60"}`}
+                          title={d.level}>{(lang === "en" && d.level_en) || d.level}</span>
                     <div className="flex-1 h-1 bg-white/5 rounded-full overflow-hidden">
                       <div className={`h-full rounded-full ${keptLevels.has(d.level) ? "bg-gold-300" : "bg-gold-400/60"}`} style={{width:`${Math.round(d.count/relevant*100)}%`}}/>
                     </div>
@@ -6796,6 +7032,41 @@ ${llm.future_research ? `<h3>${t("scenarioDetail.evidences.pdf.futureResearch")}
             <div className="space-y-1">
               <p className="text-[10px] font-bold uppercase tracking-wider text-white/35">{t("scenarioDetail.evidences.futureResearch")}</p>
               <p className="text-xs text-white/55 leading-relaxed">{llmData.future_research}</p>
+            </div>
+          )}
+
+          {/* Références. Le modèle cite par identifiant d'article, le seul repère
+              dont il dispose ; laissé tel quel, le lecteur voyait « [8472] », une clé
+              de base de données qui n'ouvre rien. Résolues côté serveur, les mêmes
+              que celles du rapport citable, et cliquables. */}
+          {(llmData.references?.length ?? 0) > 0 && (
+            <div className="space-y-1.5 pt-1">
+              <p className="text-[10px] font-bold uppercase tracking-wider text-white/35">
+                {t("scenarioDetail.evidences.references")} ({llmData.references!.length})
+              </p>
+              <ol className="space-y-1">
+                {llmData.references!.map(r => (
+                  <li key={r.n} className="flex gap-2 text-[11px] leading-snug">
+                    <span className="shrink-0 w-5 text-right text-white/30 font-mono">{r.n}.</span>
+                    <span className="text-white/55">
+                      {r.authors ? `${r.authors.replace(/\.$/, "")}. ` : ""}
+                      {r.url ? (
+                        <a href={r.url} target="_blank" rel="noopener noreferrer"
+                           className="text-brand-300 hover:text-brand-200 underline underline-offset-2">
+                          {r.title || t("scenarioDetail.evidences.untitled")}
+                        </a>
+                      ) : (r.title || t("scenarioDetail.evidences.untitled"))}
+                      {r.journal ? `. ${r.journal}` : ""}{r.year ? `. ${r.year}` : ""}.
+                    </span>
+                  </li>
+                ))}
+              </ol>
+              {(llmData.unresolved_citations?.length ?? 0) > 0 && (
+                <p className="text-[10px] text-gold-400/70">
+                  {t("scenarioDetail.evidences.unresolvedCitations")
+                    .replace("{n}", String(llmData.unresolved_citations!.length))}
+                </p>
+              )}
             </div>
           )}
 

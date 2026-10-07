@@ -1470,6 +1470,8 @@ export interface EvidenceBriefData {
     year_max: number | null;
     avg_citations: number | null;
     max_citations: number | null;
+    /** Sur combien d'articles la moyenne porte : peu de sources en renvoient un. */
+    citations_known?: number;
     pico_coverage_pct: number;
   };
   double_blind_stats: {
@@ -1519,10 +1521,10 @@ export interface EvidenceBriefData {
       evidence_level: string;
     };
   }>;
-  study_design_distribution: Array<{ design: string; count: number }>;
+  study_design_distribution: Array<{ design: string; design_en?: string; count: number }>;
   year_distribution: Array<{ year: number; count: number }>;
   source_distribution: Array<{ source: string; count: number }>;
-  evidence_level_distribution: Array<{ level: string; count: number }>;
+  evidence_level_distribution: Array<{ level: string; level_en?: string; count: number }>;
 }
 
 export async function fetchEvidenceBrief(scenarioId: string): Promise<EvidenceBriefData> {
@@ -2373,10 +2375,17 @@ export interface EvidenceGaps {
  * drift from the behaviour it explains.
  */
 export interface StudyDesignVocabulary {
-  levels: string[];
+  /** Les niveaux : `value` est celle du serveur, `label` est affichable. */
+  levels: Array<{ value: string; label: string }>;
   note: string;
   sources: string[];
-  types: Array<{ key: string; label: string; grade: string; why: string; mesh: string }>;
+  /** Groupé PAR NIVEAU : seize lignes répétaient six explications. */
+  groups: Array<{
+    level: string | null;          // null pour la synthèse, qui hérite
+    label: string;
+    why: string;
+    designs: Array<{ key: string; label: string; mesh: string }>;
+  }>;
 }
 
 export async function fetchStudyDesignVocabulary(lang: string): Promise<StudyDesignVocabulary> {
@@ -2454,7 +2463,22 @@ export async function getRerankStatus(
 
 // ─── Evidence Brief LLM ──────────────────────────────────────────────────────
 
+export interface BriefReference {
+  n: number;
+  id: number;
+  title?: string | null;
+  authors?: string | null;
+  year?: number | null;
+  journal?: string | null;
+  doi?: string | null;
+  url?: string | null;
+}
+
 export interface LlmEvidenceBrief {
+  /** Les citations du texte, résolues en références numérotées et cliquables. */
+  references?: BriefReference[];
+  /** Les identifiants cités que le corpus ne résout pas : laissés visibles. */
+  unresolved_citations?: number[];
   executive_summary?: string;
   clinical_context?: string;
   key_findings?: string[];
@@ -3555,4 +3579,110 @@ export async function ingestSituationReports(
   });
   if (!r.ok) throw new Error(httpMessage(r.status));
   return r.json();
+}
+
+// ─── Questions asked of a scenario ───────────────────────────────────────────
+// Une réponse de l'assistant n'est pas un tour de discussion qui défile : elle a
+// une PORTÉE (quel scénario, quel seuil, quel resserrement), une DATE et des
+// SOURCES. Conservée avec les trois, elle redevient comparable, citable et
+// vérifiable, et peut proposer une mise à jour du scénario.
+
+export interface QuestionProposal {
+  key: string;
+  value: number | null;
+  low: number | null;
+  high: number | null;
+  unit: string | null;
+  /** La valeur que le scénario tient aujourd'hui, ou null s'il n'en tient aucune. */
+  current: number | null;
+  kind: "update" | "new";
+  quote?: string;
+  decision?: "accepted" | "rejected";
+  decided_at?: string;
+}
+
+export interface ScenarioQuestion {
+  id: number;
+  scenario_id: string;
+  question: string;
+  answer: string;
+  lang: string | null;
+  threshold: number | null;
+  scope: Record<string, unknown> | null;
+  /** La portée en une phrase, telle que le serveur la formule. */
+  scope_label: string;
+  sources: Array<{ document_id?: number; title?: string; authors?: string;
+                   year?: number; doi?: string; score?: number }> | null;
+  papers_used: number | null;
+  papers_quoted: number | null;
+  digest_complete: boolean;
+  proposals: QuestionProposal[] | null;
+  created_at: string | null;
+  /** Combien de fois ce même libellé apparaît dans la page listée. */
+  asked_times_in_page?: number;
+}
+
+export interface ScenarioQuestionsPage {
+  scenario_id: string;
+  total: number;
+  items: ScenarioQuestion[];
+}
+
+export async function saveScenarioQuestion(
+  scenarioId: string,
+  body: {
+    question: string; answer: string; lang?: string | null; threshold?: number | null;
+    scope?: Record<string, unknown>; sources?: unknown[];
+    papers_used?: number | null; papers_quoted?: number | null;
+    digest_complete?: boolean;
+  },
+): Promise<ScenarioQuestion> {
+  const r = await safeFetch(`${API_BASE_URL}/user-scenarios/${scenarioId}/questions`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!r.ok) throw new Error(httpMessage(r.status));
+  return r.json();
+}
+
+export async function fetchScenarioQuestions(
+  scenarioId: string, options?: { limit?: number; offset?: number },
+): Promise<ScenarioQuestionsPage> {
+  const params = new URLSearchParams();
+  if (options?.limit) params.set("limit", String(options.limit));
+  if (options?.offset) params.set("offset", String(options.offset));
+  const r = await safeFetch(
+    `${API_BASE_URL}/user-scenarios/${scenarioId}/questions?${params}`);
+  if (!r.ok) throw new Error(httpMessage(r.status));
+  return r.json();
+}
+
+export async function deleteScenarioQuestion(scenarioId: string, questionId: number): Promise<void> {
+  const r = await safeFetch(
+    `${API_BASE_URL}/user-scenarios/${scenarioId}/questions/${questionId}`,
+    { method: "DELETE", headers: authHeaders() });
+  if (!r.ok) throw new Error(httpMessage(r.status));
+}
+
+export async function decideQuestionProposal(
+  scenarioId: string, questionId: number, key: string,
+  decision: "accepted" | "rejected",
+): Promise<{ proposals: QuestionProposal[] }> {
+  const r = await safeFetch(
+    `${API_BASE_URL}/user-scenarios/${scenarioId}/questions/${questionId}/proposals`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...authHeaders() },
+      body: JSON.stringify({ key, decision }),
+    });
+  if (!r.ok) throw new Error(httpMessage(r.status));
+  return r.json();
+}
+
+/** Lien de téléchargement d'une réponse : Markdown, Word ou PDF. */
+export function questionExportUrl(
+  scenarioId: string, questionId: number, format: "md" | "docx" | "pdf",
+): string {
+  return `${API_BASE_URL}/user-scenarios/${scenarioId}/questions/${questionId}/export?format=${format}`;
 }
