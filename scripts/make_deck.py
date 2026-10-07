@@ -294,9 +294,22 @@ def _box(slide, x, y, w, h, fill=None, line=None, radius=True, shadow=False):
 # linéale. Majorée à dessein : mieux vaut une carte un peu haute qu'un texte coupé.
 _CHAR_W = 0.63
 _CHAR_W_BOLD = 0.66
+# Le gras d'un TITRE, à trente points, est sensiblement plus étroit en moyenne que
+# le gras d'un intertitre : à 0,66 un titre de quarante-cinq signes était compté
+# sur deux lignes alors qu'il en tient une, et le sous-titre descendait d'un cran,
+# laissant un trou sous le titre. Mesuré sur le rendu, le rapport réel est de 0,58
+# même avec la police de remplacement, la plus large des deux.
+_CHAR_W_TITLE = 0.60
+
+# La taille du corps des cartes, UNE pour tout le jeu. Laisser chaque grille se
+# réduire pour son propre compte donnait cinq tailles différentes du même composant,
+# de neuf à treize points, ce que l'on remarque sans savoir le nommer.
+CARD_BODY = 12.0
+_CARD_TIGHT: list[tuple[str, float]] = []
 
 
-def _lines(text: str, width: Emu, size: float, bold: bool = False) -> int:
+def _lines(text: str, width: Emu, size: float, bold: bool = False,
+           ratio: float | None = None) -> int:
     """Nombre de lignes qu'occupera `text` dans `width` à la taille `size` (points).
 
     Le retour se fait AU MOT, comme dans le rendu. Diviser la longueur par le
@@ -305,7 +318,8 @@ def _lines(text: str, width: Emu, size: float, bold: bool = False) -> int:
     ligne d'une carte passait alors sous sa bordure."""
     if not text:
         return 0
-    per_line = max(1, int((width / Inches(1)) * 72 / (size * (_CHAR_W_BOLD if bold else _CHAR_W))))
+    w_ratio = ratio or (_CHAR_W_BOLD if bold else _CHAR_W)
+    per_line = max(1, int((width / Inches(1)) * 72 / (size * w_ratio)))
     total = 0
     for para in text.split("\n"):
         words = para.split()
@@ -327,8 +341,9 @@ def _lines(text: str, width: Emu, size: float, bold: bool = False) -> int:
     return total
 
 
-def _height(text: str, width: Emu, size: float, bold: bool = False, line: float = 1.18) -> Emu:
-    return Emu(int(_lines(text, width, size, bold) * size * line * 12700))
+def _height(text: str, width: Emu, size: float, bold: bool = False, line: float = 1.18,
+            ratio: float | None = None) -> Emu:
+    return Emu(int(_lines(text, width, size, bold, ratio) * size * line * 12700))
 
 
 def _tf(slide, x, y, w, h, anchor=MSO_ANCHOR.TOP):
@@ -350,7 +365,7 @@ def _slide(prs, title=None, kicker=None, subtitle=None):
         _text(tf, kicker.upper(), size=12, color=BRAND, bold=True, space_after=0)
         y += Inches(0.34)
     if title:
-        th = _height(title, W - 2 * MARGIN, 30, bold=True, line=1.05)
+        th = _height(title, W - 2 * MARGIN, 30, bold=True, line=1.05, ratio=_CHAR_W_TITLE)
         tf = _tf(s, MARGIN, y, W - 2 * MARGIN, th)
         _text(tf, title, size=30, color=PAPER, bold=True, space_after=0, line=1.05)
         y += th + Inches(0.2)
@@ -363,11 +378,17 @@ def _slide(prs, title=None, kicker=None, subtitle=None):
 
 
 def _cards(slide, y, items, cols=3, height=None, gap=Inches(0.26),
-           accent=BRAND, body_size=13):
+           accent=BRAND, body_size=None):
     """Une grille de cartes titre + corps.
 
     La hauteur est MESURÉE sur la carte la plus longue, pas fixée d'avance : une
-    hauteur en dur coupait le dernier mot de la carte la plus chargée."""
+    hauteur en dur coupait le dernier mot de la carte la plus chargée.
+
+    Le corps garde la taille du jeu entier (`CARD_BODY`). La réduction qui suit
+    n'est qu'un garde-fou : une grille qui y tombe est signalée à la construction,
+    parce que la réponse est de raccourcir la carte la plus longue, pas de
+    rapetisser ce composant sur cette diapositive-là seulement."""
+    body_size = CARD_BODY if body_size is None else body_size
     total_w = W - 2 * MARGIN
     cw = int((total_w - gap * (cols - 1)) / cols)
     inner = cw - Inches(0.44)
@@ -378,15 +399,16 @@ def _cards(slide, y, items, cols=3, height=None, gap=Inches(0.26),
                    + _height(b, inner, bs, line=1.18)
                    for h, b in items) + Inches(0.58)
 
-    # La grille doit tenir SOUS le titre, pied de page compris. Si elle déborde, on
-    # réduit le corps d'un point à la fois plutôt que de laisser les cartes du bas
-    # sortir de la diapositive - ce qui n'est visible qu'une fois projeté.
     avail = H - y - MARGIN - Inches(0.2)
     cap = int((avail - gap * (rows - 1)) / rows)
     needed = _needed(body_size)
     while needed > cap and body_size > 9:
         body_size -= 0.5
         needed = _needed(body_size)
+    if body_size < CARD_BODY:
+        longest = max(items, key=lambda it: len(it[1]))
+        _CARD_TIGHT.append((f"{items[0][0]!r} … {longest[0]!r} "
+                            f"({len(longest[1])} signes)", body_size))
     height = min(max(height or 0, needed), cap) if cap > 0 else needed
     for i, (head, body) in enumerate(items):
         col, row = i % cols, i // cols
@@ -604,12 +626,23 @@ def _panel(slide, x, y, w, title, paragraphs, accent=BRAND, size=13):
     voit qu'une fois projeté."""
     inner = w - Inches(0.52)
     body = [paragraphs] if isinstance(paragraphs, str) else list(paragraphs)
-    h = _height(title, inner, size, bold=True) + Inches(0.66)
-    for para in body:
-        h += _height(para, inner, size, line=1.26) + Inches(0.14)
-    # Borné au-dessus du pied de page : un encadré qui le dépasse déséquilibre la
-    # diapositive, même quand les deux ne se recouvrent pas.
-    h = min(h, H - Inches(0.72) - y)
+
+    def _needed(sz):
+        n = _height(title, inner, sz, bold=True) + Inches(0.66)
+        for para in body:
+            n += _height(para, inner, sz, line=1.26) + Inches(0.14)
+        return n
+
+    # L'encadré reste au-dessus du bas de page : un encadré qui le dépasse
+    # déséquilibre la diapositive, même quand les deux ne se recouvrent pas. Mais
+    # le BORNER sans toucher au texte posait la dernière ligne sur la bordure ; on
+    # réduit le corps jusqu'à ce qu'il tienne, comme le fait une grille de cartes.
+    cap = H - Inches(0.72) - y
+    h = _needed(size)
+    while h > cap and size > 10.5:
+        size -= 0.5
+        h = _needed(size)
+    h = min(h, cap)
     _box(slide, x, y, w, h, fill=INK_SOFT, line=accent)
     tf = _tf(slide, x + Inches(0.26), y + Inches(0.2), inner, h - Inches(0.4))
     _text(tf, title, size=size, color=accent, bold=True, space_after=8)
@@ -650,6 +683,14 @@ def _scatter(slide, x, y, w, h, groups, seed=7):
     return y + h
 
 
+def _readable_on(fill: RGBColor) -> RGBColor:
+    """Le texte posé SUR une couleur : sombre sur une couleur claire, clair sur une
+    sombre. Écrire toujours en encre laissait le nombre du dernier segment, le seul
+    tracé dans le vert éteint, illisible sur son propre fond."""
+    r, g, b = fill[0], fill[1], fill[2]
+    return INK if (0.299 * r + 0.587 * g + 0.114 * b) > 110 else PAPER
+
+
 def _stacked(slide, x, y, w, segments, h=Inches(0.42), colours=None):
     """Une barre empilée : des parts d'un même tout, en une seule ligne.
 
@@ -668,8 +709,8 @@ def _stacked(slide, x, y, w, segments, h=Inches(0.42), colours=None):
         box.line.width = Pt(1.25)
         if seg_w > Inches(0.5):
             tf = _tf(slide, cx, y + Inches(0.07), seg_w, h, anchor=MSO_ANCHOR.TOP)
-            _text(tf, str(n), size=11, color=INK, bold=True, align=PP_ALIGN.CENTER,
-                  space_after=0)
+            _text(tf, str(n), size=11, color=_readable_on(palette[i % len(palette)]),
+                  bold=True, align=PP_ALIGN.CENTER, space_after=0)
         cx += seg_w
     # La légende sous la barre, sur une ligne.
     lx = x
@@ -715,22 +756,20 @@ def build(uc: UseCase, out: str, live: bool, shots: str = "") -> str:
                   kicker="The problem")
     y = _cards(s, y, [
         ("Reading does not scale",
-         "A reviewer reads a few hundred abstracts; the corpus holds thousands. "
-         "Whatever goes unread is absent from the conclusion, and nothing on the page "
-         "says which part that was."),
+         "A reviewer reads a few hundred abstracts; the corpus holds thousands. What "
+         "goes unread is absent from the conclusion, unmarked."),
         ("The tools that help, sample",
-         "Synthesis tools summarise a few dozen of the eligible papers. An empty cell "
-         "in their gap table then means \"none of those few dozen\", which is not the "
-         "same claim at all."),
+         "Synthesis tools summarise a few dozen eligible papers, so an empty cell in "
+         "their gap table is not the claim it looks like."),
         ("Certainty is asserted",
          "A finding resting on two case reports is printed like one resting on three "
-         "randomised trials, and nothing on the page separates them."),
+         "randomised trials, and nothing separates them."),
         ("The output is inert",
          "A PDF cannot be re-run next month, cannot be audited, and cannot hand its "
-         "parameters to a model or a dashboard."),
+         "parameters to a model."),
         ("Evidence and operations stay apart",
-         "What the literature says about an indicator, and what that indicator is "
-         "doing in your region this week, live in different tools."),
+         "What the literature says about an indicator, and what it is doing in your "
+         "region this week, live in different tools."),
         ("Nothing is reproducible",
          "Re-run the question six months later and nobody can say what moved: the "
          "literature, the search, or the reviewer."),
@@ -828,18 +867,17 @@ def build(uc: UseCase, out: str, live: bool, shots: str = "") -> str:
                   kicker="Ranking and screening")
     y = _cards(s, y, [
         ("Scored in full",
-         "Every article in the corpus gets a cosine score against the question, reusing "
-         "stored embeddings and embedding the rest on the fly."),
+         "Every article gets a cosine score against the question, reusing stored "
+         "embeddings and embedding the rest on the fly."),
         ("Reranked where it matters",
          "A cross-encoder refines the ordering of the relevant subset, where the gap "
          "between rank 5 and rank 50 changes what gets read."),
         ("The shared gate",
-         "Relevant means: never a duplicate, never excluded by a reviewer, and otherwise "
-         "included by hand OR above the threshold. One SQL predicate, used by every "
-         "panel and every extraction."),
+         "Never a duplicate, never excluded by a reviewer, otherwise included by hand "
+         "OR above the threshold. One predicate, used by every panel."),
         ("Reviewer decisions win",
          "An article rescued below the threshold feeds the analyses; one excluded above "
-         "it does not. Screening is per scenario, not per document."),
+         "it does not. Screening is per scenario."),
         ("Double-blind when needed",
          "Two reviewers, blind to each other, disagreements surfaced. The path a formal "
          "systematic review requires."),
@@ -1114,36 +1152,39 @@ def build(uc: UseCase, out: str, live: bool, shots: str = "") -> str:
     # 17 ── Choix de l'algorithme
     s, y = _slide(prs, "Choosing the algorithm, and saying why",
                   kicker="Model specification",
-                  subtitle="The family follows the task and the data, not fashion. The "
-                           "spec is editable, and every field is explicit.")
-    tf = _tf(s, MARGIN, y, W - 2 * MARGIN, Inches(0.3))
-    _text(tf, "ALGORITHM FAMILIES", size=9.5, color=BRAND, bold=True, space_after=0)
-    yy = _chips(s, MARGIN, y + Inches(0.34), W - 2 * MARGIN, [
+                  subtitle="The family follows the task and the data, not fashion, and "
+                           "the spec stays editable.")
+    # Les cartes d'abord, la liste des familles ensuite : deux rangs de pastilles
+    # posés en haut ne laissaient aux cartes qu'un pouce de hauteur, et ce
+    # composant descendait alors à neuf points, le plus petit du jeu.
+    yy = _cards(s, y, [
+        ("Tabular and tree-based",
+         "Boosting and forests for mixed operational tables, where interactions "
+         "matter."),
+        ("Linear and regularised",
+         "When the coefficient itself is the deliverable and has to be defensible."),
+        ("Time series",
+         "Prophet and SARIMAX leave the tabular path: a dated target is a forecast, "
+         "not a regression on rows."),
+        ("Survival",
+         "Cox proportional hazards with the concordance index, for time-to-event "
+         "outcomes."),
+        ("Extremal",
+         "A quantile forest for surge and overload: it predicts the upper tail, scored "
+         "with pinball loss."),
+        ("Comparison, not assertion",
+         "Several families fitted on the same data and ranked on the same metric, each "
+         "run's parameters kept."),
+    ], cols=3)
+    yy += Inches(0.30)
+    tf = _tf(s, MARGIN, yy, W - 2 * MARGIN, Inches(0.3))
+    _text(tf, "ALGORITHM FAMILIES AVAILABLE", size=9.5, color=BRAND, bold=True,
+          space_after=0)
+    _chips(s, MARGIN, yy + Inches(0.34), W - 2 * MARGIN, [
         "gradient_boosting", "lightgbm", "xgboost", "random_forest", "extremal_rf",
         "logistic_regression", "linear_regression", "elasticnet", "svm", "mlp",
         "knn", "cox_ph", "prophet", "sarimax",
     ], size=10)
-    yy += Inches(0.3)
-    yy = _cards(s, yy, [
-        ("Tabular and tree-based",
-         "Boosting and forests for mixed operational tables, where interactions matter "
-         "and the sample is modest."),
-        ("Linear and regularised",
-         "When the coefficient itself is the deliverable and has to be defensible to a "
-         "committee."),
-        ("Time series",
-         "Prophet and SARIMAX are routed out of the tabular path: a dated target is a "
-         "forecasting problem, not a regression on rows."),
-        ("Survival",
-         "Cox proportional hazards with the concordance index, for time-to-event "
-         "outcomes rather than a yes or no at one horizon."),
-        ("Extremal",
-         "A quantile random forest for surge and overload: it predicts the upper tail, "
-         "scored with pinball loss, because the mean is not what breaks a service."),
-        ("Comparison, not assertion",
-         "Several families can be fitted on the same data and ranked on the same metric, "
-         "with each run's parameters kept."),
-    ], cols=3)
 
     # 18 ── Entraînement et hyperparamètres
     s, y = _slide(prs, "Training, tuning and validation",
@@ -1267,7 +1308,7 @@ def build(uc: UseCase, out: str, live: bool, shots: str = "") -> str:
          "changes a claim rather than when any paper appears."),
         ("Why it can be trusted",
          "Every number traces back: to the articles counted, the screening decisions "
-         "taken, the parameters searched. Nothing on the dashboard is unattributable."),
+         "taken, the parameters searched."),
     ], cols=3)
 
     # 22 ── L'assistant
@@ -1643,6 +1684,12 @@ def main(argv=None) -> int:
         uc.scenario_id = args.scenario
 
     out = build(uc, args.out, live, args.shots)
+    # Une grille de cartes qui a dû descendre sous la taille commune se voit à côté
+    # des autres : on la signale plutôt que de la laisser passer, la réponse étant
+    # de raccourcir sa carte la plus longue.
+    for what, size in _CARD_TIGHT:
+        print(f"card grid shrunk to {size:g}pt (deck uses {CARD_BODY:g}pt): {what}",
+              file=sys.stderr)
     print(out)
     return 0
 
