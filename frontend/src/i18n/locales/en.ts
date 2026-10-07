@@ -1119,6 +1119,10 @@ export const en: Translations = {
       implementationRecommendations: "Implementation recommendations",
       limitations: "Limitations",
       researchGaps: "Research gaps",
+      references: "References",
+      untitled: "[title missing]",
+      unresolvedCitations: "{n} citation(s) point at an article the corpus no longer holds: left visible rather than removed.",
+      citationsOver: "(over {n} articles that report one)",
       futureResearch: "Future research directions",
       pdf: {
         docTitlePrefix: "Evidence:",

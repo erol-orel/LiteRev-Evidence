@@ -289,12 +289,12 @@ def _design_membership(scenario_id: str, threshold: float) -> tuple[dict[int, st
     de la projection, la carte ne dit rien de lui » ; ici l'article A été lu, et le fait
     qu'aucun devis n'y figure est une réponse. Le relecteur peut donc décider de garder ou
     d'écarter les devis non précisés, au lieu que la dimension s'abstienne pour lui."""
-    from .study_design import classify, grade_level, label
+    from .study_design import classify, grade_level, label, raw_design_sql
+    _raw_design_d = raw_design_sql("d")
 
     with engine.connect() as conn:
         rows = conn.execute(text(f"""
-            SELECT d.id,
-                   COALESCE(NULLIF(d.pico_json->>'study_design', ''), d.study_design, '') AS raw
+            SELECT d.id, {_raw_design_d} AS raw
             FROM literature_document d
             JOIN article_scenarios ars ON ars.document_id = d.id
             WHERE ars.scenario_id = :sid AND {relevant_gate_sql(doc="d", link="ars")}

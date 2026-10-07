@@ -380,25 +380,19 @@ def _flow(slide, y, steps, accent=BRAND, per_row=6):
     return y + rows * h + (rows - 1) * gap
 
 
-def _footer(slide, left, right=""):
-    tf = _tf(slide, MARGIN, H - Inches(0.52), W - 2 * MARGIN, Inches(0.3))
-    _text(tf, left, size=10, color=MUTED, space_after=0)
-    if right:
-        tf2 = _tf(slide, MARGIN, H - Inches(0.52), W - 2 * MARGIN, Inches(0.3))
-        _text(tf2, right, size=10, color=BRAND_DIM, align=PP_ALIGN.RIGHT, space_after=0)
-
-# ── Primitives supplémentaires ───────────────────────────────────────────────
 def _shot(slide, path, x, y, w, h, caption=None, accent=BRAND):
     """Une copie d'écran, cadrée dans `w` x `h` en conservant ses proportions.
 
     L'image est posée dans un cadre de la couleur des cartes : une capture
-    d'interface sombre posée nue sur un fond sombre n'a plus de bord."""
+    d'interface sombre posée nue sur un fond sombre n'a plus de bord. La légende,
+    quand il y en a une, est centrée sous l'image : elle fait partie de la figure."""
     import os
     if not (path and os.path.exists(path)):
         # Pas de capture disponible : un cadre vide vaut mieux qu'une image absente
         # qui décalerait tout le reste de la diapositive.
         _box(slide, x, y, w, h, fill=INK_SOFT, line=BRAND_DIM)
-        tf = _tf(slide, x + Inches(0.2), Emu(int(y + h / 2 - Inches(0.15))), w - Inches(0.4), Inches(0.3))
+        tf = _tf(slide, x + Inches(0.2), Emu(int(y + h / 2 - Inches(0.15))),
+                 w - Inches(0.4), Inches(0.3))
         _text(tf, "screenshot not available at build time", size=10, color=MUTED,
               align=PP_ALIGN.CENTER, space_after=0)
         return y + h
@@ -408,15 +402,16 @@ def _shot(slide, path, x, y, w, h, caption=None, accent=BRAND):
     scale = min(w / iw, h / ih)
     dw, dh = int(iw * scale), int(ih * scale)
     dx = x + int((w - dw) / 2)
-    frame = _box(slide, dx - Emu(12000), y - Emu(12000), dw + Emu(24000), dh + Emu(24000),
-                 fill=INK_SOFT, line=BRAND_DIM)
-    frame.shadow.inherit = False
+    # Pas de cadre : l'image porte déjà ses propres bords, et un rectangle arrondi
+    # par-dessus ne faisait qu'ajouter une ligne de plus à regarder.
     slide.shapes.add_picture(path, dx, y, dw, dh)
     out = y + dh
     if caption:
-        tf = _tf(slide, x, out + Inches(0.12), w, Inches(0.3))
-        _text(tf, caption, size=9.5, color=MUTED, align=PP_ALIGN.CENTER, space_after=0)
-        out += Inches(0.4)
+        ch = _height(caption, w, 10.5, line=1.2)
+        tf = _tf(slide, x, out + Inches(0.16), w, ch)
+        _text(tf, caption, size=10.5, color=MUTED, align=PP_ALIGN.CENTER, space_after=0,
+              line=1.2)
+        out += Inches(0.16) + ch
     return out
 
 
@@ -601,7 +596,6 @@ def build(uc: UseCase, out: str, live: bool, shots: str = "") -> str:
          "Re-run the question six months later and nobody can say what moved: the "
          "literature, the search, or the reviewer."),
     ], cols=3)
-    _footer(s, "LiteRev-Evidence")
 
     # 3 ── L'arc complet
     s, y = _slide(prs, "One question in. A review, a model and a dashboard out.",
@@ -621,14 +615,13 @@ def build(uc: UseCase, out: str, live: bool, shots: str = "") -> str:
         "Steps 1 to 6 are the review. Steps 7 and 8 are what makes it operational, and are the part no synthesis tool offers.",
         "Every step writes to the same database, so each one can be re-run on its own without redoing the ones before it.",
     ], size=14)
-    _footer(s, "LiteRev-Evidence")
 
     # 4 ── Capture : l'espace de travail
     s, y = _slide(prs, "The workspace", kicker="One scenario, one page")
     _shot(s, shot("workspace"), MARGIN, y - Inches(0.1), W - 2 * MARGIN,
-          H - y - Inches(0.55))
-    _footer(s, "Threshold, corpus, screening, search inside the corpus, and the profile "
-               "of what was retrieved, on one screen")
+          H - y - Inches(0.9),
+          caption="Threshold, corpus, screening, search inside the corpus, and the "
+                  "profile of what was retrieved, on one screen")
 
     # 5 ── De la question à la requête
     s, y = _slide(prs, "The query the databases actually received",
@@ -660,7 +653,6 @@ def build(uc: UseCase, out: str, live: bool, shots: str = "") -> str:
     except Exception:                                             # noqa: BLE001
         _dh = int(_band)
     _shot(s, shot("strategy"), MARGIN, y + max(0, int((_band - _dh) / 2)), sw, _band)
-    _footer(s, "Stored on the scenario, so the search can be repeated and audited")
 
     # 6 ── Le corpus
     s, y = _slide(prs, "What is in the corpus, and why",
@@ -690,7 +682,6 @@ def build(uc: UseCase, out: str, live: bool, shots: str = "") -> str:
         "A legitimately empty result may empty the corpus; a transient source failure may not.",
         "Lowering the threshold brings articles back: it filters, it never deletes.",
     ], size=13.5)
-    _footer(s, "Each source has its own ceiling and date window, and the interface states them")
 
     # 7 ── Pertinence et sélection
     s, y = _slide(prs, "Relevance, screening, and one definition of \"relevant\"",
@@ -716,7 +707,6 @@ def build(uc: UseCase, out: str, live: bool, shots: str = "") -> str:
          "Identified, duplicates removed, removed for other reasons, screened: taken "
          "from the links actually merged, not from a flag nobody sets."),
     ], cols=3)
-    _footer(s, "One definition of relevant, shared by every panel and every extraction")
 
     # 8 ── Lire tout le corpus
     s, y = _slide(prs, "Every extraction reads every relevant article",
@@ -745,15 +735,14 @@ def build(uc: UseCase, out: str, live: bool, shots: str = "") -> str:
         "Every figure downstream inherits this property, which is why it is a rule and "
         "not a setting.",
     ], accent=GOLD)
-    _footer(s, "Enforced by the test suite, not by convention")
 
     # 9 ── Capture : profils du corpus
     s, y = _slide(prs, "What the corpus is made of", kicker="Evidence profile",
                   subtitle="Study designs, sources and certainty levels, counted over "
                            "every relevant article, and usable as a filter.")
-    _shot(s, shot("evidence"), MARGIN, y, W - 2 * MARGIN, H - y - Inches(0.6))
-    _footer(s, "Clicking a design or a level narrows the corpus to it, the way a cluster "
-               "selection does, and the choice is reversible")
+    _shot(s, shot("evidence"), MARGIN, y, W - 2 * MARGIN, H - y - Inches(0.95),
+          caption="Clicking a design or a level narrows the corpus to it, the way a "
+                  "cluster selection does, and the choice is reversible")
 
     # 10 ── Niveaux de preuve
     s, y = _slide(prs, "Sixteen study designs, four certainties, from official lists",
@@ -776,7 +765,6 @@ def build(uc: UseCase, out: str, live: bool, shots: str = "") -> str:
         "Randomised trials start high, observational studies start low, and a synthesis never upgrades its inputs.",
         "The interface states which design sits at which level, because a grade nobody can check is a decoration.",
     ], size=14)
-    _footer(s, "One vocabulary, one scale, both taken from published lists")
 
     # 11 ── Affirmations et rapport
     s, y = _slide(prs, "Claims, each carrying the evidence behind it",
@@ -801,7 +789,6 @@ def build(uc: UseCase, out: str, live: bool, shots: str = "") -> str:
          "RIS, BibTeX, CSV, Excel, JSON. The RIS lands in Zotero with journals, authors "
          "and DOIs in the right fields."),
     ], cols=3)
-    _footer(s, "Synthesis, citable report and bibliography, from the same relevant subset")
 
     # 12 ── Matrice des manques
     s, y = _slide(prs, "The gap matrix: what nobody has studied together",
@@ -849,16 +836,15 @@ def build(uc: UseCase, out: str, live: bool, shots: str = "") -> str:
         "Ties break by label, so a matrix on identical data does not reorder itself between runs.",
         "A reviewer's exclusion empties a cell, as it should.",
     ], size=13.5)
-    _footer(s, "Counted in the database over every relevant article, never sampled")
 
     # 13 ── Clustering
     s, y = _slide(prs, "Clustering: the shape of the literature",
                   kicker="Topic structure",
                   subtitle="What themes exist in this corpus, how big each is, and which "
                            "articles sit between them.")
-    _shot(s, shot("clusters"), MARGIN, y, W - 2 * MARGIN, H - y - Inches(0.62))
-    _footer(s, "Each cluster is a selectable subset: pick one and every downstream "
-               "panel describes that theme alone")
+    _shot(s, shot("clusters"), MARGIN, y, W - 2 * MARGIN, H - y - Inches(0.95),
+          caption="Each cluster is a selectable subset: pick one and every downstream "
+                  "panel describes that theme alone")
 
     # Le détail de la chaîne, sur sa propre diapositive.
     s, y = _slide(prs, "How the clusters are found", kicker="Topic structure",
@@ -891,10 +877,7 @@ def build(uc: UseCase, out: str, live: bool, shots: str = "") -> str:
     _fringe = max(0, uc.above_threshold - _clustered)
     _stacked(s, MARGIN, fig_y + Inches(0.34), W - 2 * MARGIN,
              [(lbl.replace("CLUSTER ", "Cluster "), n) for lbl, n in uc.clusters]
-             + [("Unclustered", _fringe)])
-    _footer(s, f"Five groups out of {uc.above_threshold} articles, and a fringe of "
-               f"{_fringe} the density attaches to none of them, shown rather than "
-               f"absorbed into the nearest group")
+             + [(f"Unclustered ({_fringe})", _fringe)])
 
     # 14 ── Graphe de connaissances
     s, y = _slide(prs, "The knowledge graph: what sits next to what",
@@ -929,7 +912,6 @@ def build(uc: UseCase, out: str, live: bool, shots: str = "") -> str:
         "An isolated node with a high relevance score is usually either a mis-filed article or the only paper on something.",
         "Like clustering, it is a projection, and the interface says how many articles it covers.",
     ], size=14)
-    _footer(s, "A projection of the corpus, bounded and declared as such")
 
     # 15 ── Du texte aux variables
     s, y = _slide(prs, "From abstracts to candidate variables",
@@ -949,7 +931,6 @@ def build(uc: UseCase, out: str, live: bool, shots: str = "") -> str:
         "Each variable carries a machine name, a data type and a source, so the spec that follows is directly usable as a schema.",
         "Epidemiological parameters are extracted the same way: R0, incubation, serial interval, case fatality, reported with their spread across the corpus rather than as a single borrowed number.",
     ], size=14)
-    _footer(s, "Every proposal carries the articles it came from")
 
     # 16 ── Les outcomes
     s, y = _slide(prs, "Defining the outcome properly, before anything is fitted",
@@ -982,7 +963,6 @@ def build(uc: UseCase, out: str, live: bool, shots: str = "") -> str:
     tf = _tf(s, cx, yy + Inches(0.26), cw, Inches(0.3))
     _text(tf, "VARIABLE TYPES", size=9.5, color=BRAND, bold=True, space_after=0)
     _chips(s, cx, yy + Inches(0.6), cw, ["float", "int", "bool", "category", "datetime"])
-    _footer(s, "A target that is named, typed and measurable before any model is fitted")
 
     # 17 ── Choix de l'algorithme
     s, y = _slide(prs, "Choosing the algorithm, and saying why",
@@ -1017,7 +997,6 @@ def build(uc: UseCase, out: str, live: bool, shots: str = "") -> str:
          "Several families can be fitted on the same data and ranked on the same metric, "
          "with each run's parameters kept."),
     ], cols=3)
-    _footer(s, "The specification is editable, and every field is explicit")
 
     # 18 ── Entraînement et hyperparamètres
     s, y = _slide(prs, "Training, tuning and validation",
@@ -1049,16 +1028,15 @@ def build(uc: UseCase, out: str, live: bool, shots: str = "") -> str:
         "Feature importances come back with the model, so the variables the literature "
         "proposed can be checked against the ones the data actually used.",
     ])
-    _footer(s, "Every run is kept with its parameters, its metrics and its importances")
 
     # Capture : la spécification telle qu'elle est produite.
     s, y = _slide(prs, "The specification the literature produces",
                   kicker="Model specification",
                   subtitle="An outcome defined to the unit and the time horizon, with "
                            "interpretation bands, each carrying the articles behind it.")
-    _shot(s, shot("model"), MARGIN, y, W - 2 * MARGIN, H - y - Inches(0.62))
-    _footer(s, "Generated from the relevant articles, and withheld until a reviewer "
-               "validates it")
+    _shot(s, shot("model"), MARGIN, y, W - 2 * MARGIN, H - y - Inches(0.95),
+          caption="Generated from the relevant articles, and withheld until a "
+                  "reviewer validates it")
 
     # 19 ── SEIR
     s, y = _slide(prs, "SEIR, parameterised from the literature",
@@ -1100,7 +1078,6 @@ def build(uc: UseCase, out: str, live: bool, shots: str = "") -> str:
         "The variants carrying vaccination and quarantine compartments extend the same "
         "idea to interventions.",
     ], accent=GOLD)
-    _footer(s, "Projection parameters traceable to the articles they were read from")
 
     # 20 ── Revue vivante (capture)
     s, y = _slide(prs, "A review that keeps itself current",
@@ -1120,7 +1097,6 @@ def build(uc: UseCase, out: str, live: bool, shots: str = "") -> str:
         ("Reported.", "Email digests, immediate, daily or weekly, and a dry run that "
                       "shows what an update would change before it changes it."),
     ])
-    _footer(s, "Scheduled, with a dry run that shows what an update would change")
 
     # 21 ── Tableau de bord praticien
     s, y = _slide(prs, "A monitoring dashboard a practitioner can actually watch",
@@ -1146,7 +1122,6 @@ def build(uc: UseCase, out: str, live: bool, shots: str = "") -> str:
          "Every number traces back: to the articles counted, the screening decisions "
          "taken, the parameters searched. Nothing on the dashboard is unattributable."),
     ], cols=3)
-    _footer(s, "Living review, field data, trained model and projection on one scenario")
 
     # 22 ── L'assistant
     s, y = _slide(prs, "Asking the corpus a question", kicker="Retrieval",
@@ -1170,7 +1145,6 @@ def build(uc: UseCase, out: str, live: bool, shots: str = "") -> str:
         "Narrow the corpus first, by cluster, design or certainty level, and the same question is answered of that subset alone.",
         "An answer resting on nothing above the threshold says so, instead of producing an unsupported paragraph.",
     ], size=14)
-    _footer(s, "Scoped to the relevant subset, and always attributed")
 
     # Les questions deviennent un actif du scénario.
     s, y = _slide(prs, "Questions that are kept, exported and acted on",
@@ -1205,14 +1179,14 @@ def build(uc: UseCase, out: str, live: bool, shots: str = "") -> str:
         "literature stops being something you read and becomes something that updates "
         "the model.",
     ], accent=GOLD)
-    _footer(s, "Each answer carries its scope, its date and its sources")
 
     # 23 ── Capture : la liste des scénarios
     s, y = _slide(prs, "Many questions, side by side", kicker="Scenarios",
                   subtitle="Folders, pinned reviews and recent searches, each with its "
                            "own corpus, screening state and model.")
-    _shot(s, shot("scenarios"), MARGIN, y, W - 2 * MARGIN, H - y - Inches(0.55))
-    _footer(s, "Each card opens a full workspace")
+    _shot(s, shot("scenarios"), MARGIN, y, W - 2 * MARGIN, H - y - Inches(0.9),
+          caption="Each card opens a full workspace, with its own corpus, screening "
+                  "state and model")
 
     # 24 ── Cas d'usage : la question
     s, y = _slide(prs, uc.name, kicker="Worked example",
@@ -1247,7 +1221,6 @@ def build(uc: UseCase, out: str, live: bool, shots: str = "") -> str:
     _bullets(s, MARGIN, y, W - 2 * MARGIN, [
         "Asked once in plain English. Sources queried in parallel, a boolean strategy generated and stored, a corpus assembled, deduplicated and scored against the question.",
     ], size=13.5)
-    _footer(s, "Early warning indicators for respiratory infections in Western Switzerland")
 
     # 25 ── Cas d'usage : le corpus décrit
     s, y = _slide(prs, "The corpus, described", kicker="Worked example")
@@ -1282,8 +1255,6 @@ def build(uc: UseCase, out: str, live: bool, shots: str = "") -> str:
         "The corpus reaches back to 1917; the axis starts at 1995 because what precedes it is a handful of articles a year.",
         "The jump at 2020 is the pandemic surveillance literature, and it has not receded: the four most recent years are the four largest.",
     ], size=14)
-    _footer(s, f"Scenario {uc.scenario_id}  ·  the counts above come from one statement, "
-               f"so the panels of the page agree with each other")
 
     # Cas d'usage : le profil de preuve, chiffré.
     s, y = _slide(prs, "What this corpus can and cannot support",
@@ -1305,7 +1276,6 @@ def build(uc: UseCase, out: str, live: bool, shots: str = "") -> str:
     _bullets(s, MARGIN, y, W - 2 * MARGIN, [
         "Twelve randomised trials against 188 cohorts and 31 surveillance studies: this is an observational literature, and the ceiling on any claim follows from that.",
     ], size=14)
-    _footer(s, "Counted over every relevant article, not over a sample of them")
 
     # 26 ── Cas d'usage : ce qu'il produit
     s, y = _slide(prs, "What this scenario produces", kicker="Worked example",
@@ -1331,8 +1301,6 @@ def build(uc: UseCase, out: str, live: bool, shots: str = "") -> str:
          "A citable document with renumbered references, and the relevant articles as "
          "RIS, BibTeX, CSV or Excel."),
     ], cols=3)
-    _footer(s, "Views of one corpus, not separate exports to reconcile, so they cannot "
-               f"disagree about what it contains  ·  scenario {uc.scenario_id}")
 
     # 27 ── Architecture
     s, y = _slide(prs, "How it is built", kicker="Architecture")
@@ -1356,7 +1324,6 @@ def build(uc: UseCase, out: str, live: bool, shots: str = "") -> str:
          "Every merge to the main branch deploys and restarts the API; work in flight is "
          "relaunched at startup."),
     ], cols=3)
-    _footer(s, "One service, one database, one deployment")
 
     # 28 ── Garanties
     s, y = _slide(prs, "What is guaranteed, and by what",
@@ -1383,11 +1350,12 @@ def build(uc: UseCase, out: str, live: bool, shots: str = "") -> str:
          "A locale test fails when a key or a placeholder exists in one language and not "
          "the other."),
     ], cols=3)
-    _footer(s, "Each guarantee is a test in the build, not an intention in a document")
 
     # 29 ── Comparaison
     s, y = _slide(prs, "Against the tools it is usually compared to",
-                  kicker="Where it differs")
+                  kicker="Where it differs",
+                  subtitle="Drawn from a published synthesis report answering a real "
+                           "question, not from a feature list.")
     rows = [
         ("Coverage of the eligible set",
          "A sample: a few dozen of the eligible papers, not stated on the page.",
@@ -1430,7 +1398,6 @@ def build(uc: UseCase, out: str, live: bool, shots: str = "") -> str:
         tf = _tf(s, MARGIN + col1 + col2, y, col2 - Inches(0.16), row_h)
         _text(tf, us, size=11, color=PAPER, space_after=0, line=1.16)
         y += row_h
-    _footer(s, "Comparison drawn from a published synthesis report on a real question")
 
     # 30 ── Limites
     s, y = _slide(prs, "What it does not do, and what is next",
@@ -1455,7 +1422,6 @@ def build(uc: UseCase, out: str, live: bool, shots: str = "") -> str:
          "Which claims changed, which are new, which lost their support, when the "
          "literature moves under a living review."),
     ], cols=3)
-    _footer(s, "Stated limits, and what is being built next")
 
     # 31 ── Fin
     s = prs.slides.add_slide(prs.slide_layouts[6])

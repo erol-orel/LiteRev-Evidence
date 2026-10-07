@@ -395,15 +395,16 @@ def get_study_design_vocabulary(lang: str = "fr") -> dict[str, Any]:
     Each row names its MeSH provenance. `note` says plainly that this is the ceiling a
     design allows and not a completed GRADE assessment, because the five domains GRADE
     weighs cannot be read off a design label."""
-    from .study_design import GRADE_NOTE, LEVEL_ORDER, vocabulary
+    from .study_design import LEVEL_ORDER, grade_note, level_label, vocabulary
 
-    return {"levels": list(LEVEL_ORDER), "note": GRADE_NOTE,
+    return {"levels": [{"value": lv, "label": level_label(lv, lang)} for lv in LEVEL_ORDER],
+            "note": grade_note(lang),
             "sources": [
                 "NLM MeSH Publication Types, tree V03 Study Characteristics",
                 "NLM MeSH Epidemiologic Study Characteristics, tree E05.318",
                 "GRADE: randomised trials start at high certainty, observational studies at low",
             ],
-            "types": vocabulary(lang)}
+            "groups": vocabulary(lang)}
 
 
 @app.post("/documents")

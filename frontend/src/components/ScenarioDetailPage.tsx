@@ -5948,6 +5948,16 @@ function SeuilSection({ scenarioId, onSaved, onThresholdChange }: { scenarioId: 
  * charts and the claim grading are computed from (`api/study_design.py`), so there is no
  * second copy to drift. Collapsed by default: it is a reference, not a reading.
  */
+/** La teinte d'un niveau, par sa VALEUR serveur (qui reste en français). */
+const LEVEL_TONE: Record<string, string> = {
+  "Élevée": "text-forest-300",
+  "Modérée": "text-brand-300",
+  "Faible": "text-gold-300",
+  "Très faible": "text-gold-400/80",
+  "Non applicable": "text-white/45",
+  "Non évaluée": "text-white/40",
+};
+
 function StudyDesignLegend() {
   const { t, lang } = useI18n();
   const [open, setOpen] = React.useState(false);
@@ -5971,27 +5981,32 @@ function StudyDesignLegend() {
             <p className="text-[10px] text-white/35">{t("common.loading")}</p>
           ) : (
             <>
-              <div className="overflow-x-auto">
-                <table className="w-full text-[10px]">
-                  <thead>
-                    <tr className="text-white/35">
-                      <th className="py-1 pr-2 text-left font-medium">{t("scenarioDetail.evidences.legend.design")}</th>
-                      <th className="py-1 pr-2 text-left font-medium">{t("scenarioDetail.evidences.legend.level")}</th>
-                      <th className="py-1 pr-2 text-left font-medium">{t("scenarioDetail.evidences.legend.why")}</th>
-                      <th className="py-1 text-left font-medium">{t("scenarioDetail.evidences.legend.source")}</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {data.types.map(row => (
-                      <tr key={row.key} className="border-t border-white/5 align-top">
-                        <td className="py-1 pr-2 text-white/70">{row.label}</td>
-                        <td className="py-1 pr-2 whitespace-nowrap text-white/60">{row.grade}</td>
-                        <td className="py-1 pr-2 text-white/45 leading-snug">{row.why}</td>
-                        <td className="py-1 text-white/30 leading-snug">{row.mesh}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
+              {/* Groupé par NIVEAU : la règle une fois, puis les devis qu'elle
+                  couvre. Les seize lignes précédentes répétaient « observationnel :
+                  départ en certitude faible » neuf fois. */}
+              <div className="space-y-2">
+                {data.groups.map(g => (
+                  <div key={g.level ?? "inherited"}
+                       className="rounded-lg border border-white/5 bg-white/2 px-3 py-2">
+                    <div className="flex items-baseline gap-2 flex-wrap">
+                      <span className={`text-[11px] font-semibold ${
+                        g.level === null ? "text-white/50" : LEVEL_TONE[g.level] ?? "text-white/60"}`}>
+                        {g.label}
+                      </span>
+                      <span className="text-[10px] text-white/45 leading-snug flex-1 min-w-[16rem]">
+                        {g.why}
+                      </span>
+                    </div>
+                    <div className="mt-1.5 flex flex-wrap gap-1">
+                      {g.designs.map(d => (
+                        <span key={d.key} title={d.mesh}
+                              className="rounded-md border border-white/8 bg-white/4 px-1.5 py-0.5 text-[10px] text-white/55">
+                          {d.label}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                ))}
               </div>
               <p className="text-[10px] text-white/40 leading-relaxed">{data.note}</p>
               <p className="text-[10px] text-white/25 leading-relaxed">
@@ -6402,7 +6417,11 @@ function EvidencesSection({ scenarioId, detail }: { scenarioId: string; detail: 
             if (pollRef.current) clearInterval(pollRef.current);
             setGenStatus(null);
             setRegenerating(false);
+            // Les DEUX : le PDF est construit sur `briefData` autant que sur le
+            // récit, et ne recharger que le second le faisait sortir avec les
+            // chiffres de la version précédente.
             loadLlm();
+            loadBrief();
           } else if (s.status === 'error') {
             if (pollRef.current) clearInterval(pollRef.current);
             setGenStatus(null);
@@ -6521,7 +6540,7 @@ ${b.corpus_stats.year_min && b.corpus_stats.year_max ? `<p class="meta">${t("sce
 <div class="dist-grid">
   <div class="dist-box">
     <div class="dist-title">${t("scenarioDetail.evidences.pdf.studyTypes")}</div>
-    ${(()=>{const top=b.study_design_distribution;const rem=relevant_pdf-top.reduce((s,d)=>s+d.count,0);const rows=rem>0?[...top,{design:t("scenarioDetail.evidences.pdf.other"),count:rem}]:top;return rows.map(d=>`<div class="bar-row"><span class="bar-label">${d.design}</span><div class="bar-track"><div class="bar-fill-green" style="width:${Math.round(d.count/rTotal_pdf*100)}%"></div></div><span class="bar-count">${d.count}</span></div>`).join('');})()}
+    ${(()=>{const top=b.study_design_distribution;const rem=relevant_pdf-top.reduce((s,d)=>s+d.count,0);const rows=rem>0?[...top,{design:t("scenarioDetail.evidences.pdf.other"),count:rem}]:top;return rows.map(d=>`<div class="bar-row"><span class="bar-label">${(lang==="en"&&d.design_en)||d.design}</span><div class="bar-track"><div class="bar-fill-green" style="width:${Math.round(d.count/rTotal_pdf*100)}%"></div></div><span class="bar-count">${d.count}</span></div>`).join('');})()}
   </div>
   <div class="dist-box">
     <div class="dist-title">${t("scenarioDetail.evidences.pdf.sources")}</div>
@@ -6529,7 +6548,7 @@ ${b.corpus_stats.year_min && b.corpus_stats.year_max ? `<p class="meta">${t("sce
   </div>
   <div class="dist-box">
     <div class="dist-title">${t("scenarioDetail.evidences.pdf.evidenceLevels")}</div>
-    ${(b.evidence_level_distribution??[]).slice(0,6).map(d=>`<div class="bar-row"><span class="bar-label">${d.level}</span><div class="bar-track"><div class="bar-fill-gold" style="width:${Math.round(d.count/rTotal_pdf*100)}%"></div></div><span class="bar-count">${d.count}</span></div>`).join('')}
+    ${(b.evidence_level_distribution??[]).slice(0,6).map(d=>`<div class="bar-row"><span class="bar-label">${(lang==="en"&&d.level_en)||d.level}</span><div class="bar-track"><div class="bar-fill-gold" style="width:${Math.round(d.count/rTotal_pdf*100)}%"></div></div><span class="bar-count">${d.count}</span></div>`).join('')}
   </div>
 </div>
 
@@ -6682,7 +6701,18 @@ ${llm.future_research ? `<h3>${t("scenarioDetail.evidences.pdf.futureResearch")}
           {briefData.corpus_stats.year_min && briefData.corpus_stats.year_max && (
             <div className="flex flex-wrap gap-4 text-xs text-white/50">
               <span>{t("scenarioDetail.evidences.coverage")} <span className="text-white/70 font-semibold">{briefData.corpus_stats.year_min} – {briefData.corpus_stats.year_max}</span></span>
-              {briefData.corpus_stats.avg_citations != null && <span>{t("scenarioDetail.evidences.avgCitations")} <span className="text-white/70 font-semibold">{briefData.corpus_stats.avg_citations.toFixed(1)}</span></span>}
+              {briefData.corpus_stats.avg_citations != null && (
+                <span>{t("scenarioDetail.evidences.avgCitations")}{" "}
+                  <span className="text-white/70 font-semibold">{briefData.corpus_stats.avg_citations.toFixed(1)}</span>
+                  {/* Le dénominateur : « moyenne 24,0 · max 24 » pouvait décrire UN
+                      article sur quatre cent soixante-sept sans le dire. */}
+                  {briefData.corpus_stats.citations_known != null && (
+                    <span className="text-white/35">{" "}
+                      {t("scenarioDetail.evidences.citationsOver").replace("{n}", String(briefData.corpus_stats.citations_known))}
+                    </span>
+                  )}
+                </span>
+              )}
               {briefData.corpus_stats.max_citations != null && <span>{t("scenarioDetail.evidences.max")} <span className="text-white/70 font-semibold">{briefData.corpus_stats.max_citations}</span></span>}
             </div>
           )}
@@ -6702,7 +6732,8 @@ ${llm.future_research ? `<h3>${t("scenarioDetail.evidences.pdf.futureResearch")}
                     onClick={() => toggle(keptDesigns, setKeptDesigns, d.design)}
                     title={t("scenarioDetail.subset.byDesign.hint")}
                     className={`flex w-full items-center gap-2 text-[10px] rounded px-1 -mx-1 transition ${keptDesigns.has(d.design) ? "bg-brand-500/15" : "hover:bg-white/5"}`}>
-                    <span className={`w-28 truncate text-left ${keptDesigns.has(d.design) ? "text-brand-200" : "text-white/60"}`}>{d.design}</span>
+                    <span className={`w-28 truncate text-left ${keptDesigns.has(d.design) ? "text-brand-200" : "text-white/60"}`}
+                          title={d.design}>{(lang === "en" && d.design_en) || d.design}</span>
                     <div className="flex-1 h-1 bg-white/5 rounded-full overflow-hidden">
                       <div className={`h-full rounded-full ${keptDesigns.has(d.design) ? "bg-brand-300" : "bg-brand-500"}`} style={{width:`${Math.round(d.count/relevant*100)}%`}}/>
                     </div>
@@ -6739,7 +6770,8 @@ ${llm.future_research ? `<h3>${t("scenarioDetail.evidences.pdf.futureResearch")}
                     onClick={() => toggle(keptLevels, setKeptLevels, d.level)}
                     title={t("scenarioDetail.subset.byLevel.hint")}
                     className={`flex w-full items-center gap-2 text-[10px] rounded px-1 -mx-1 transition ${keptLevels.has(d.level) ? "bg-gold-500/15" : "hover:bg-white/5"}`}>
-                    <span className={`w-28 truncate text-left capitalize ${keptLevels.has(d.level) ? "text-gold-200" : "text-white/60"}`}>{d.level}</span>
+                    <span className={`w-28 truncate text-left ${keptLevels.has(d.level) ? "text-gold-200" : "text-white/60"}`}
+                          title={d.level}>{(lang === "en" && d.level_en) || d.level}</span>
                     <div className="flex-1 h-1 bg-white/5 rounded-full overflow-hidden">
                       <div className={`h-full rounded-full ${keptLevels.has(d.level) ? "bg-gold-300" : "bg-gold-400/60"}`} style={{width:`${Math.round(d.count/relevant*100)}%`}}/>
                     </div>
@@ -7000,6 +7032,41 @@ ${llm.future_research ? `<h3>${t("scenarioDetail.evidences.pdf.futureResearch")}
             <div className="space-y-1">
               <p className="text-[10px] font-bold uppercase tracking-wider text-white/35">{t("scenarioDetail.evidences.futureResearch")}</p>
               <p className="text-xs text-white/55 leading-relaxed">{llmData.future_research}</p>
+            </div>
+          )}
+
+          {/* Références. Le modèle cite par identifiant d'article, le seul repère
+              dont il dispose ; laissé tel quel, le lecteur voyait « [8472] », une clé
+              de base de données qui n'ouvre rien. Résolues côté serveur, les mêmes
+              que celles du rapport citable, et cliquables. */}
+          {(llmData.references?.length ?? 0) > 0 && (
+            <div className="space-y-1.5 pt-1">
+              <p className="text-[10px] font-bold uppercase tracking-wider text-white/35">
+                {t("scenarioDetail.evidences.references")} ({llmData.references!.length})
+              </p>
+              <ol className="space-y-1">
+                {llmData.references!.map(r => (
+                  <li key={r.n} className="flex gap-2 text-[11px] leading-snug">
+                    <span className="shrink-0 w-5 text-right text-white/30 font-mono">{r.n}.</span>
+                    <span className="text-white/55">
+                      {r.authors ? `${r.authors.replace(/\.$/, "")}. ` : ""}
+                      {r.url ? (
+                        <a href={r.url} target="_blank" rel="noopener noreferrer"
+                           className="text-brand-300 hover:text-brand-200 underline underline-offset-2">
+                          {r.title || t("scenarioDetail.evidences.untitled")}
+                        </a>
+                      ) : (r.title || t("scenarioDetail.evidences.untitled"))}
+                      {r.journal ? `. ${r.journal}` : ""}{r.year ? `. ${r.year}` : ""}.
+                    </span>
+                  </li>
+                ))}
+              </ol>
+              {(llmData.unresolved_citations?.length ?? 0) > 0 && (
+                <p className="text-[10px] text-gold-400/70">
+                  {t("scenarioDetail.evidences.unresolvedCitations")
+                    .replace("{n}", String(llmData.unresolved_citations!.length))}
+                </p>
+              )}
             </div>
           )}
 

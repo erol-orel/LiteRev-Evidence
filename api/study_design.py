@@ -61,6 +61,24 @@ LEVEL_UNKNOWN = "Non évaluée"
 LEVEL_ORDER = (LEVEL_HIGH, LEVEL_MODERATE, LEVEL_LOW, LEVEL_VERY_LOW,
                LEVEL_NA, LEVEL_UNKNOWN)
 
+#: Les niveaux ci-dessus sont les VALEURS canoniques : elles voyagent entre le serveur
+#: et l'interface, servent de clé de sélection et sont comparées. On ne les traduit donc
+#: pas à la source ; on expose un libellé à côté, et l'interface affiche celui-là.
+LEVEL_EN = {
+    LEVEL_HIGH: "High",
+    LEVEL_MODERATE: "Moderate",
+    LEVEL_LOW: "Low",
+    LEVEL_VERY_LOW: "Very low",
+    LEVEL_NA: "Not applicable",
+    LEVEL_UNKNOWN: "Not assessed",
+}
+
+
+def level_label(level: str, lang: str = "fr") -> str:
+    """Le libellé affichable d'un niveau. La valeur reste celle du serveur."""
+    return LEVEL_EN.get(level, level) if (lang or "fr").lower().startswith("en") else level
+
+
 GRADE_NOTE = (
     "Ces niveaux sont le PLAFOND que permet le devis d'étude, avant toute appréciation du "
     "risque de biais, de la cohérence, du caractère direct, de la précision et du biais de "
@@ -68,6 +86,16 @@ GRADE_NOTE = (
     "n'importe quelle ligne de ce tableau ; elle ne peut pas la relever, sauf justification "
     "explicite (effet de grande taille, gradient dose-réponse)."
 )
+GRADE_NOTE_EN = (
+    "These levels are the CEILING a study design allows, before any appraisal of risk of "
+    "bias, inconsistency, indirectness, imprecision and publication bias. A full GRADE "
+    "assessment weighs those five domains and can lower any line of this table; it cannot "
+    "raise one, save on explicit grounds (a large effect, a dose-response gradient)."
+)
+
+
+def grade_note(lang: str = "fr") -> str:
+    return GRADE_NOTE_EN if (lang or "fr").lower().startswith("en") else GRADE_NOTE
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -290,19 +318,92 @@ def weaken(level: str, steps: int = 1) -> str:
     return LEVEL_ORDER[index]
 
 
+#: Index inverse du libellé français vers l'anglais, pour afficher une distribution
+#: dont les valeurs restent celles du serveur.
+DESIGN_EN = {v["fr"]: v["en"] for v in STUDY_TYPES.values()}
+
+
+def design_label(fr_label: str, lang: str = "fr") -> str:
+    """Le libellé affichable d'un devis. La valeur reste celle du serveur."""
+    return DESIGN_EN.get(fr_label, fr_label) if (lang or "fr").lower().startswith("en") else fr_label
+
+
+#: Pourquoi un NIVEAU vaut ce qu'il vaut. Une explication par niveau, et non une par
+#: devis : seize paragraphes disaient six choses, et les quinze premiers répétaient
+#: « observationnel : départ en certitude faible ». Le lecteur a besoin de la règle,
+#: pas de sa récitation ligne à ligne.
+LEVEL_WHY = {
+    LEVEL_HIGH: (
+        "GRADE fait partir les essais randomisés de la certitude la plus haute.",
+        "GRADE starts randomised evidence at the highest certainty."),
+    LEVEL_MODERATE: (
+        "Étude d'intervention dont l'étiquette ne dit pas s'il y a eu randomisation. "
+        "L'inconnu est noté au-dessus de la faiblesse déclarée.",
+        "An intervention study whose label does not say whether it randomised. The "
+        "unknown is placed above the stated weakness."),
+    LEVEL_LOW: (
+        "Observationnel : GRADE part en certitude faible. Un essai qui déclare ne pas "
+        "avoir randomisé est traité de même, une faiblesse déclarée pesant plus qu'une "
+        "inconnue.",
+        "Observational: GRADE starts at low certainty. A trial that states it did not "
+        "randomise is treated the same, a stated weakness weighing more than an "
+        "unknown one."),
+    LEVEL_VERY_LOW: (
+        "Sans groupe de comparaison, ni méthode de recherche et de sélection "
+        "reproductible : ne soutient pas une estimation d'effet.",
+        "No comparison group, and no reproducible search and selection method: does "
+        "not support an effect estimate."),
+    LEVEL_NA: (
+        "Pas une preuve primaire. Une recommandation DÉRIVE d'études, et lui donner une "
+        "certitude compterait deux fois celles qu'elle cite ; un modèle vaut ses "
+        "paramètres d'entrée, pas son devis ; le qualitatif s'évalue par CERQual, pas "
+        "par GRADE ; le préclinique ne porte pas sur une population humaine.",
+        "Not primary evidence. A guideline DERIVES from studies, and giving it a "
+        "certainty would count those studies twice; a model is worth its inputs, not "
+        "its design; qualitative work is appraised with CERQual, not GRADE; preclinical "
+        "work is not about a human population."),
+    LEVEL_UNKNOWN: (
+        "Aucun devis identifiable dans la notice. Explicitement NON évalué plutôt que "
+        "rangé au plus bas : l'inconnu n'est pas une faiblesse mesurée.",
+        "No design identifiable in the record. Explicitly NOT assessed rather than "
+        "filed at the bottom: an unknown is not a measured weakness."),
+}
+
+#: Le cas de la synthèse, qui n'a pas de niveau propre.
+INHERITED = ("hérité des études incluses", "inherited from the studies it includes")
+INHERITED_WHY = (
+    "Élevée si elle synthétise des essais randomisés, faible si elle synthétise de "
+    "l'observationnel. Une revue ne relève pas ce qu'elle inclut.",
+    "High if it synthesises randomised trials, low if it synthesises observational "
+    "studies. A review does not upgrade what it includes.")
+
+
+def _pick(pair: tuple[str, str], lang: str) -> str:
+    return pair[1] if (lang or "fr").lower().startswith("en") else pair[0]
+
+
 def vocabulary(lang: str = "fr") -> list[dict[str, Any]]:
-    """The table, for the interface and for the report: which design is which level, and
-    why. This IS the plain-language explanation; there is no second copy to drift."""
-    out = []
+    """Which design is which level, GROUPED BY LEVEL.
+
+    This IS the plain-language explanation; there is no second copy to drift. Grouped
+    rather than listed per design, because the reader needs the rule and six groups
+    state it, where sixteen rows restated one of them fifteen times."""
+    en = (lang or "fr").lower().startswith("en")
+    groups: dict[str, dict[str, Any]] = {}
     for key, entry in STUDY_TYPES.items():
-        out.append({
-            "key": key,
-            "label": label(key, lang),
-            "mesh": entry["mesh"],
-            "grade": entry["grade"] or "hérité des études incluses",
-            "why": entry["why_fr"],
+        grade = entry["grade"]
+        bucket = grade or "inherited"
+        g = groups.setdefault(bucket, {
+            "level": grade,                       # la VALEUR, ou None pour la synthèse
+            "label": (_pick(INHERITED, lang) if grade is None
+                      else (LEVEL_EN.get(grade, grade) if en else grade)),
+            "why": (_pick(INHERITED_WHY, lang) if grade is None
+                    else _pick(LEVEL_WHY.get(grade, (entry["why_fr"], entry["why_fr"])), lang)),
+            "designs": [],
         })
-    return out
+        g["designs"].append({"key": key, "label": label(key, lang), "mesh": entry["mesh"]})
+    order = ["inherited"] + [lv for lv in LEVEL_ORDER if lv in groups]
+    return [groups[k] for k in order if k in groups]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -323,6 +424,39 @@ def _sql_literal(value: str) -> str:
     generator that produces invalid SQL for its own vocabulary is a generator that will
     produce it for the next word someone adds."""
     return "'" + str(value).replace("'", "''") + "'"
+
+
+#: Ce que les deux extractions écrivent quand elles n'ont rien trouvé. Traité comme
+#: une absence des DEUX côtés : sans cela, un « non précisé » venant d'une extraction
+#: l'emportait sur un devis réel trouvé par l'autre.
+_DESIGN_PLACEHOLDERS = (
+    "", "non précisé", "non precise", "non précisée", "non spécifié", "non spécifiée",
+    "not specified", "unspecified", "not stated", "unknown", "inconnu", "n/a", "na",
+    "none", "null", "autre", "other",
+)
+
+
+def raw_design_sql(doc: str = "d") -> str:
+    """L'expression SQL du devis BRUT d'un article, écrite UNE fois.
+
+    Deux extractions indépendantes écrivent un devis depuis le même résumé : la passe
+    PICO (`pico_json.study_design`) et la passe métadonnées (`study_design`). Aucune
+    n'est meilleure que l'autre, mais chacune se tait parfois, et chacune écrit alors
+    un marqueur plutôt que rien.
+
+    Six endroits du code combinaient ces deux champs, et pas dans le même ordre : les
+    graphiques du profil de preuve lisaient la colonne d'abord, le sélecteur de corpus
+    lisait le PICO d'abord. Un article dont les deux passes divergent tombait donc dans
+    un niveau sur le graphique et dans un autre dans la sélection, et les deux nombres
+    affichés côte à côte ne s'additionnaient pas. Une seule expression, un seul devis.
+    """
+    def _meaningful(expr: str) -> str:
+        placeholders = ", ".join(_sql_literal(p) for p in _DESIGN_PLACEHOLDERS)
+        return (f"CASE WHEN lower(trim(coalesce({expr}, ''))) IN ({placeholders})"
+                f" THEN NULL ELSE trim({expr}) END")
+    pico = _meaningful(f"{doc}.pico_json->>'study_design'")
+    column = _meaningful(f"{doc}.study_design")
+    return f"COALESCE({pico}, {column}, '')"
 
 
 def _like(column: str, keywords) -> str:

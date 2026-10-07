@@ -1117,6 +1117,10 @@ export const fr = {
       implementationRecommendations: "Recommandations d'implémentation",
       limitations: "Limites",
       researchGaps: "Lacunes de recherche",
+      references: "Références",
+      untitled: "[titre non renseigné]",
+      unresolvedCitations: "{n} citation(s) renvoient à un article que le corpus ne contient plus : laissées visibles plutôt que supprimées.",
+      citationsOver: "(sur {n} articles qui en déclarent un)",
       futureResearch: "Directions de recherche futures",
       pdf: {
         docTitlePrefix: "Evidences :",

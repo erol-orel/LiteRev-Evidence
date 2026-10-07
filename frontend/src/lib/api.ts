@@ -1470,6 +1470,8 @@ export interface EvidenceBriefData {
     year_max: number | null;
     avg_citations: number | null;
     max_citations: number | null;
+    /** Sur combien d'articles la moyenne porte : peu de sources en renvoient un. */
+    citations_known?: number;
     pico_coverage_pct: number;
   };
   double_blind_stats: {
@@ -1519,10 +1521,10 @@ export interface EvidenceBriefData {
       evidence_level: string;
     };
   }>;
-  study_design_distribution: Array<{ design: string; count: number }>;
+  study_design_distribution: Array<{ design: string; design_en?: string; count: number }>;
   year_distribution: Array<{ year: number; count: number }>;
   source_distribution: Array<{ source: string; count: number }>;
-  evidence_level_distribution: Array<{ level: string; count: number }>;
+  evidence_level_distribution: Array<{ level: string; level_en?: string; count: number }>;
 }
 
 export async function fetchEvidenceBrief(scenarioId: string): Promise<EvidenceBriefData> {
@@ -2373,10 +2375,17 @@ export interface EvidenceGaps {
  * drift from the behaviour it explains.
  */
 export interface StudyDesignVocabulary {
-  levels: string[];
+  /** Les niveaux : `value` est celle du serveur, `label` est affichable. */
+  levels: Array<{ value: string; label: string }>;
   note: string;
   sources: string[];
-  types: Array<{ key: string; label: string; grade: string; why: string; mesh: string }>;
+  /** Groupé PAR NIVEAU : seize lignes répétaient six explications. */
+  groups: Array<{
+    level: string | null;          // null pour la synthèse, qui hérite
+    label: string;
+    why: string;
+    designs: Array<{ key: string; label: string; mesh: string }>;
+  }>;
 }
 
 export async function fetchStudyDesignVocabulary(lang: string): Promise<StudyDesignVocabulary> {
@@ -2454,7 +2463,22 @@ export async function getRerankStatus(
 
 // ─── Evidence Brief LLM ──────────────────────────────────────────────────────
 
+export interface BriefReference {
+  n: number;
+  id: number;
+  title?: string | null;
+  authors?: string | null;
+  year?: number | null;
+  journal?: string | null;
+  doi?: string | null;
+  url?: string | null;
+}
+
 export interface LlmEvidenceBrief {
+  /** Les citations du texte, résolues en références numérotées et cliquables. */
+  references?: BriefReference[];
+  /** Les identifiants cités que le corpus ne résout pas : laissés visibles. */
+  unresolved_citations?: number[];
   executive_summary?: string;
   clinical_context?: string;
   key_findings?: string[];

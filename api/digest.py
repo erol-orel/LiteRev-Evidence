@@ -24,6 +24,11 @@ from typing import Any
 from sqlalchemy import text
 
 from .core import engine, logger
+from .study_design import raw_design_sql
+
+#: Le devis brut d'un article, écrit une seule fois.
+_raw_design_d = raw_design_sql("d")
+
 from .scenario_store import _get_scenario_threshold
 
 # Sous-ensemble PERTINENT : même porte que partout ailleurs (jamais les exclus ; inclus
@@ -219,14 +224,12 @@ def corpus_digest(scenario_id: str, threshold: float | None = None) -> dict[str,
                 GROUP BY d.year ORDER BY d.year DESC LIMIT 20
             """, scenario_id, thr)
 
-            # Devis d'étude : le PICO d'abord (extrait par article), sinon la colonne.
+            # Devis d'étude : l'expression COMMUNE (cf. api/study_design.raw_design_sql),
+            # qui traite les marqueurs d'absence comme une absence des deux côtés.
             out["by_design"] = _rows(conn, f"""
-                SELECT LOWER(TRIM(COALESCE(NULLIF(d.pico_json->>'study_design', ''), d.study_design))) AS value,
-                       COUNT(*) AS n
+                SELECT LOWER({_raw_design_d}) AS value, COUNT(*) AS n
                 {_RELEVANT}
-                  AND COALESCE(NULLIF(d.pico_json->>'study_design', ''), d.study_design) IS NOT NULL
-                GROUP BY 1 HAVING LOWER(TRIM(COALESCE(NULLIF(d.pico_json->>'study_design', ''), d.study_design)))
-                                  NOT IN ('non précisé', 'not specified', 'unknown', 'n/a')
+                GROUP BY 1 HAVING LOWER({_raw_design_d}) <> ''
                 ORDER BY n DESC LIMIT :top
             """, scenario_id, thr, top=_TOP_N)
 
