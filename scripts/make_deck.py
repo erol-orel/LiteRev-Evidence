@@ -49,6 +49,26 @@ MONO = "Consolas"
 YEAR_AXIS_FROM = 1995      # début de l'axe des années dans l'histogramme
 DESIGN_BARS = 10           # devis montrés en barres, le reste étant regroupé
 
+# Le cadrage de chaque capture, en pouces (x, y, largeur, hauteur), tel que
+# l'auteur de la présentation l'a posé. Ce sont SES découpes et SES positions :
+# le rapport de chaque rectangle est celui de son image, rien n'est recadré ici,
+# et le texte de la diapositive se range autour, jamais dessous.
+SHOTS = {
+    "workspace": (4.396, 0.213, 8.453, 7.074),
+    "strategy":  (0.278, 1.884, 7.058, 5.280),
+    "evidence":  (5.773, 0.720, 7.439, 6.416),
+    "clusters":  (1.933, 2.180, 9.468, 5.035),
+    "model":     (6.081, 1.698, 7.050, 5.774),
+    "living":    (0.309, 2.224, 7.503, 4.721),
+    "scenarios": (3.496, 2.031, 8.252, 5.413),
+}
+
+
+def shot_box(name: str) -> tuple[Emu, Emu, Emu, Emu]:
+    """Le rectangle d'une capture, en EMU."""
+    x, y, w, h = SHOTS[name]
+    return Inches(x), Inches(y), Inches(w), Inches(h)
+
 # Les seize devis, tels que le serveur les nomme, et leur étiquette courte dans
 # la figure. Une barre ne dispose que de deux pouces : « Surveillance / registre
 # / écologique » y serait coupé.
@@ -355,23 +375,37 @@ def _tf(slide, x, y, w, h, anchor=MSO_ANCHOR.TOP):
     return tf
 
 
-def _slide(prs, title=None, kicker=None, subtitle=None):
+def _slide(prs, title=None, kicker=None, subtitle=None, text_w=None, subtitle_w=None,
+           tight=False):
+    """L'en-tête d'une diapositive.
+
+    `text_w` et `subtitle_w` bornent la largeur du texte : sur une diapositive où
+    la capture occupe la moitié droite, un titre laissé sur toute la largeur passe
+    SOUS l'image et s'y perd au milieu d'un mot. `tight` resserre l'espace après le
+    titre, quand le sous-titre doit rester au-dessus d'une image placée haut."""
     s = prs.slides.add_slide(prs.slide_layouts[6])     # vierge
     bg = _box(s, 0, 0, W, H, fill=INK, radius=False)
     bg.line.fill.background()
+    tw = text_w or (W - 2 * MARGIN)
+    sw = subtitle_w or tw
     y = MARGIN
     if kicker:
-        tf = _tf(s, MARGIN, y, W - 2 * MARGIN, Inches(0.3))
+        tf = _tf(s, MARGIN, y, tw, Inches(0.3))
         _text(tf, kicker.upper(), size=12, color=BRAND, bold=True, space_after=0)
         y += Inches(0.34)
     if title:
-        th = _height(title, W - 2 * MARGIN, 30, bold=True, line=1.05, ratio=_CHAR_W_TITLE)
-        tf = _tf(s, MARGIN, y, W - 2 * MARGIN, th)
+        # En pleine largeur, le rapport mesuré sur le rendu (0,60) ; dans une
+        # colonne étroite, le rapport prudent, parce qu'un titre qui y passe d'une
+        # ligne à deux selon la police vient alors buter dans le sous-titre, et
+        # une ligne réservée pour rien ne se voit pas.
+        ratio = _CHAR_W_TITLE if tw >= (W - 2 * MARGIN) else _CHAR_W_BOLD
+        th = _height(title, tw, 30, bold=True, line=1.05, ratio=ratio)
+        tf = _tf(s, MARGIN, y, tw, th)
         _text(tf, title, size=30, color=PAPER, bold=True, space_after=0, line=1.05)
-        y += th + Inches(0.2)
+        y += th + (Inches(0.08) if tight else Inches(0.2))
     if subtitle:
-        sh = _height(subtitle, W - 2 * MARGIN, 15, line=1.2)
-        tf = _tf(s, MARGIN, y, W - 2 * MARGIN, sh)
+        sh = _height(subtitle, sw, 15, line=1.2)
+        tf = _tf(s, MARGIN, y, sw, sh)
         _text(tf, subtitle, size=15, color=MUTED, space_after=0, line=1.2)
         y += sh + Inches(0.1)
     return s, y + Inches(0.18)
@@ -541,12 +575,15 @@ def _flow(slide, y, steps, accent=BRAND, per_row=6):
     return y + rows * h + (rows - 1) * gap
 
 
-def _shot(slide, path, x, y, w, h, caption=None, accent=BRAND):
-    """Une copie d'écran, cadrée dans `w` x `h` en conservant ses proportions.
+def _shot(slide, path, x, y, w, h):
+    """Une copie d'écran, posée EXACTEMENT dans le rectangle donné.
 
-    L'image est posée dans un cadre de la couleur des cartes : une capture
-    d'interface sombre posée nue sur un fond sombre n'a plus de bord. La légende,
-    quand il y en a une, est centrée sous l'image : elle fait partie de la figure."""
+    Pas de légende : le petit texte sous une capture est illisible de loin et
+    alourdit la diapositive. Ce qu'il disait d'utile se lit maintenant à côté de
+    l'image, dans la colonne de texte.
+
+    Le rectangle vient du cadrage choisi par l'auteur de la présentation, qui porte
+    déjà le rapport de l'image : rien n'est recentré ni redimensionné ici."""
     import os
     if not (path and os.path.exists(path)):
         # Pas de capture disponible : un cadre vide vaut mieux qu'une image absente
@@ -557,23 +594,10 @@ def _shot(slide, path, x, y, w, h, caption=None, accent=BRAND):
         _text(tf, "screenshot not available at build time", size=10, color=MUTED,
               align=PP_ALIGN.CENTER, space_after=0)
         return y + h
-    from PIL import Image
-    Image.MAX_IMAGE_PIXELS = None
-    iw, ih = Image.open(path).size
-    scale = min(w / iw, h / ih)
-    dw, dh = int(iw * scale), int(ih * scale)
-    dx = x + int((w - dw) / 2)
     # Pas de cadre : l'image porte déjà ses propres bords, et un rectangle arrondi
     # par-dessus ne faisait qu'ajouter une ligne de plus à regarder.
-    slide.shapes.add_picture(path, dx, y, dw, dh)
-    out = y + dh
-    if caption:
-        ch = _height(caption, w, 10.5, line=1.2)
-        tf = _tf(slide, x, out + Inches(0.16), w, ch)
-        _text(tf, caption, size=10.5, color=MUTED, align=PP_ALIGN.CENTER, space_after=0,
-              line=1.2)
-        out += Inches(0.16) + ch
-    return out
+    slide.shapes.add_picture(path, int(x), int(y), int(w), int(h))
+    return Emu(int(y + h))
 
 
 def _chips(slide, x, y, w, items, accent=BRAND, size=11.5, gap=Inches(0.11)):
@@ -795,21 +819,19 @@ def build(uc: UseCase, out: str, live: bool, shots: str = "") -> str:
     ], size=14)
 
     # 4 ── Capture : l'espace de travail
-    s, y = _slide(prs, "The workspace", kicker="One scenario, one page")
-    _shot(s, shot("workspace"), MARGIN, y - Inches(0.1), W - 2 * MARGIN,
-          H - y - Inches(0.9),
-          caption="Threshold, corpus, screening, search inside the corpus, and the "
-                  "profile of what was retrieved, on one screen")
+    # Ce que disait la légende se lit dans la colonne de gauche, à côté de l'écran
+    # qu'elle décrit, et non en petit sous l'image.
+    s, y = _slide(prs, "The workspace", kicker="One scenario, one page",
+                  text_w=Inches(SHOTS["workspace"][0]) - MARGIN - Inches(0.20),
+                  subtitle="Threshold, corpus, screening, search inside the corpus, and "
+                           "the profile of what was retrieved, on one screen.")
+    _shot(s, shot("workspace"), *shot_box("workspace"))
 
     # 5 ── De la question à la requête
     s, y = _slide(prs, "The query the databases actually received",
                   kicker="Search strategy")
-    sw = int((W - 2 * MARGIN) * 0.54)
-    bx = MARGIN + sw + Inches(0.42)
-    bw = W - MARGIN - bx
-    # La colonne de texte d'abord : sa hauteur dit où centrer la capture, qui est
-    # large et courte. Alignée en haut, elle laissait un vide sous elle.
-    pipe_bottom = _pipe(s, bx, y + Inches(0.1), bw, [
+    bx, bw = Inches(7.86), Inches(4.75)
+    _pipe(s, bx, Inches(1.98), bw, [
         ("Translated.", "A question in plain language becomes a boolean expression at "
                         "temperature zero with a fixed seed, and is cached."),
         ("Reproducible.", "The same phrasing always yields the same strategy, so the "
@@ -822,15 +844,7 @@ def build(uc: UseCase, out: str, live: bool, shots: str = "") -> str:
         ("Shown, not hidden.", "A reviewer can paste it into PubMed and obtain the same "
                                "set. That is what makes the corpus auditable."),
     ])
-    from PIL import Image as _Img
-    _Img.MAX_IMAGE_PIXELS = None
-    _band = pipe_bottom - y
-    try:
-        _iw, _ih = _Img.open(shot("strategy")).size
-        _dh = int(sw * _ih / _iw)
-    except Exception:                                             # noqa: BLE001
-        _dh = int(_band)
-    _shot(s, shot("strategy"), MARGIN, y + max(0, int((_band - _dh) / 2)), sw, _band)
+    _shot(s, shot("strategy"), *shot_box("strategy"))
 
     # 6 ── Le corpus
     s, y = _slide(prs, "What is in the corpus, and why",
@@ -915,12 +929,16 @@ def build(uc: UseCase, out: str, live: bool, shots: str = "") -> str:
     ], accent=GOLD)
 
     # 9 ── Capture : profils du corpus
+    _ev_w = Inches(SHOTS["evidence"][0]) - MARGIN - Inches(0.25)
     s, y = _slide(prs, "What the corpus is made of", kicker="Evidence profile",
+                  text_w=_ev_w,
                   subtitle="Study designs, sources and certainty levels, counted over "
                            "every relevant article, and usable as a filter.")
-    _shot(s, shot("evidence"), MARGIN, y, W - 2 * MARGIN, H - y - Inches(0.95),
-          caption="Clicking a design or a level narrows the corpus to it, the way a "
-                  "cluster selection does, and the choice is reversible")
+    _bullets(s, MARGIN, y + Inches(0.1), _ev_w, [
+        "Clicking a design or a level narrows the corpus to it, the way a cluster selection does.",
+        "The choice is reversible: it filters the analyses, it never deletes an article.",
+    ], size=13.5)
+    _shot(s, shot("evidence"), *shot_box("evidence"))
 
     # 10 ── Niveaux de preuve
     s, y = _slide(prs, "Sixteen study designs, four certainties, from official lists",
@@ -1023,13 +1041,14 @@ def build(uc: UseCase, out: str, live: bool, shots: str = "") -> str:
     ], size=13.5)
 
     # 13 ── Clustering
+    # `tight` : la capture commence haut, et le sous-titre doit tenir au-dessus
+    # d'elle plutôt que d'être tranché par son bord supérieur.
     s, y = _slide(prs, "Clustering: the shape of the literature",
-                  kicker="Topic structure",
-                  subtitle="What themes exist in this corpus, how big each is, and which "
-                           "articles sit between them.")
-    _shot(s, shot("clusters"), MARGIN, y, W - 2 * MARGIN, H - y - Inches(0.95),
-          caption="Each cluster is a selectable subset: pick one and every downstream "
-                  "panel describes that theme alone")
+                  kicker="Topic structure", tight=True,
+                  subtitle="What themes exist in this corpus and how big each is. Each "
+                           "cluster is selectable: pick one and every panel downstream "
+                           "describes that theme alone.")
+    _shot(s, shot("clusters"), *shot_box("clusters"))
 
     # Le détail de la chaîne, sur sa propre diapositive.
     s, y = _slide(prs, "How the clusters are found", kicker="Topic structure",
@@ -1218,13 +1237,16 @@ def build(uc: UseCase, out: str, live: bool, shots: str = "") -> str:
     ])
 
     # Capture : la spécification telle qu'elle est produite.
+    _md_w = Inches(SHOTS["model"][0]) - MARGIN - Inches(0.25)
     s, y = _slide(prs, "The specification the literature produces",
-                  kicker="Model specification",
+                  kicker="Model specification", subtitle_w=_md_w,
                   subtitle="An outcome defined to the unit and the time horizon, with "
                            "interpretation bands, each carrying the articles behind it.")
-    _shot(s, shot("model"), MARGIN, y, W - 2 * MARGIN, H - y - Inches(0.95),
-          caption="Generated from the relevant articles, and withheld until a "
-                  "reviewer validates it")
+    _bullets(s, MARGIN, y + Inches(0.1), _md_w, [
+        "Generated from the relevant articles, and withheld until a reviewer validates it.",
+        "Every threshold cites the articles it rests on, so a band can be argued with rather than accepted.",
+    ], size=13.5)
+    _shot(s, shot("model"), *shot_box("model"))
 
     # 19 ── SEIR
     s, y = _slide(prs, "SEIR, parameterised from the literature",
@@ -1272,10 +1294,9 @@ def build(uc: UseCase, out: str, live: bool, shots: str = "") -> str:
                   kicker="Living review",
                   subtitle="The same question, re-asked on a schedule, with only what "
                            "changed brought to your attention.")
-    _shot(s, shot("living"), MARGIN, y, int((W - 2 * MARGIN) * 0.58), H - y - Inches(0.8))
-    bx = MARGIN + int((W - 2 * MARGIN) * 0.58) + Inches(0.42)
-    bwr = W - MARGIN - bx
-    _pipe(s, bx, y + Inches(0.1), bwr, [
+    _shot(s, shot("living"), *shot_box("living"))
+    bx, bwr = Inches(8.34), Inches(4.28)
+    _pipe(s, bx, Inches(2.58), bwr, [
         ("Re-queried.", "The scenario's own query is re-run against every source, and "
                         "new references are inserted and deduplicated."),
         ("Re-indexed.", "New articles are embedded, their PICO extracted, their full text "
@@ -1370,12 +1391,12 @@ def build(uc: UseCase, out: str, live: bool, shots: str = "") -> str:
 
     # 23 ── Capture : la liste des scénarios
     s, y = _slide(prs, "Many questions, side by side", kicker="Scenarios",
+                  subtitle_w=Inches(SHOTS["scenarios"][0]) - MARGIN - Inches(0.22),
                   subtitle="Folders, pinned reviews and recent searches, each with its "
                            "own corpus, screening state and model, and searchable by "
-                           "name or by the question asked.")
-    _shot(s, shot("scenarios"), MARGIN, y, W - 2 * MARGIN, H - y - Inches(0.9),
-          caption="Each card opens a full workspace, with its own corpus, screening "
-                  "state and model")
+                           "name or by the question asked. Each card opens a full "
+                           "workspace.")
+    _shot(s, shot("scenarios"), *shot_box("scenarios"))
 
     # 24 ── Cas d'usage : la question
     s, y = _slide(prs, uc.name, kicker="Worked example",
