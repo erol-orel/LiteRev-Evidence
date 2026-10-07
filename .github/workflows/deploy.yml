@@ -56,10 +56,13 @@ jobs:
           # openpyxl : dépendance d'exécution (requirements.txt) de l'export Excel. Sans
           #   elle, tests/test_model_export.py se SAUTE entièrement via importorskip et
           #   la CI passait au vert sans jamais exécuter le code d'export.
+          # reportlab : dépendance d'exécution (requirements.txt) des exports PDF, celui du
+          #   dossier de preuves comme celui d'une réponse à une question. Sans elle, les
+          #   tests qui fabriquent un PDF échouent au lieu de vérifier le document.
           # uvicorn + requests : servent l'API au smoke test navigateur (scripts/smoke_e2e.py)
           #   plus bas - la construction d'un corpus importe requests même sans source en direct.
           pip install pytest fastapi pydantic "sqlalchemy>=2.0" python-dotenv python-multipart "psycopg[binary]" \
-            httpx openpyxl uvicorn requests \
+            httpx openpyxl reportlab uvicorn requests \
             numpy pandas scikit-learn scipy optuna joblib lightgbm xgboost statsmodels
           pytest -q
 
