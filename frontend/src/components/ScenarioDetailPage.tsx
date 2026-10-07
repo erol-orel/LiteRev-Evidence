@@ -4,7 +4,7 @@ import { useI18n } from "../i18n/LanguageProvider";
 import {
   ArrowLeft, Brain,
   ChevronDown, ChevronUp, Database, ExternalLink, FileText,
-  Layers, MessageSquare, RefreshCw, RotateCcw, Search,
+  Layers, MessageSquare, Clock, RefreshCw, RotateCcw, Search,
   Shield, Terminal, Zap, AlertTriangle, Radio,
   Globe, Upload, CheckCircle2, AlertCircle, Info,
   Microscope, Loader2, Download, Table2, BookOpen,
@@ -140,6 +140,12 @@ import {
   type SituationReportsPage,
   type ReliefWebStatus,
   type CorpusCounts,
+  fetchScenarioQuestions,
+  saveScenarioQuestion,
+  deleteScenarioQuestion,
+  decideQuestionProposal,
+  questionExportUrl,
+  type ScenarioQuestionsPage,
 } from "../lib/api";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -3425,8 +3431,171 @@ function UmapScatterPlot({clusters,selectedCluster,onSelectCluster}:{clusters:Cl
 }
 // ─── Section: RAG ─────────────────────────────────────────────────────────────
 
-function RagSection({ scenarioId, detail }: { scenarioId: string; detail: ScenarioDetail }) {
+/**
+ * L'historique des questions posées à ce scénario.
+ *
+ * Une réponse n'est pas un tour de discussion qui défile. Elle porte une portée,
+ * une date et des sources, donc elle se relit, se compare à la suivante, s'exporte
+ * et peut proposer une mise à jour du scénario. Le panneau sert ces quatre usages
+ * et rien d'autre.
+ */
+function QuestionHistory({ scenarioId, refreshKey, onReask }:
+  { scenarioId: string; refreshKey: number; onReask: (q: string) => void }) {
   const { t } = useI18n();
+  const [page, setPage] = useState<ScenarioQuestionsPage | null>(null);
+  const [openId, setOpenId] = useState<number | null>(null);
+  const [busy, setBusy] = useState<string | null>(null);
+
+  const load = useCallback(() => {
+    fetchScenarioQuestions(scenarioId, { limit: 50 })
+      .then(setPage)
+      .catch(() => { /* non bloquant */ });
+  }, [scenarioId]);
+  useEffect(() => { load(); }, [load, refreshKey]);
+
+  const decide = (qid: number, key: string, decision: "accepted" | "rejected") => {
+    setBusy(`${qid}:${key}`);
+    decideQuestionProposal(scenarioId, qid, key, decision)
+      .then(load)
+      .catch(() => { /* non bloquant */ })
+      .finally(() => setBusy(null));
+  };
+
+  const remove = (qid: number) => {
+    setBusy(`del:${qid}`);
+    deleteScenarioQuestion(scenarioId, qid)
+      .then(load)
+      .catch(() => { /* non bloquant */ })
+      .finally(() => setBusy(null));
+  };
+
+  if (!page || page.total === 0) return null;
+
+  return (
+    <div className="rounded-3xl border border-white/10 bg-white/3 p-5 space-y-4">
+      <SectionHeader
+        icon={<Clock size={14} className="text-brand-400" />}
+        title={`${t("scenarioDetail.rag.historyTitle")} (${page.total})`}
+        subtitle={t("scenarioDetail.rag.historySubtitle")}
+      />
+      <div className="space-y-2">
+        {page.items.map(q => {
+          const open = openId === q.id;
+          const pending = (q.proposals ?? []).filter(p => !p.decision);
+          return (
+            <div key={q.id} className="rounded-2xl border border-white/10 bg-white/2">
+              <button
+                type="button"
+                onClick={() => setOpenId(open ? null : q.id)}
+                className="w-full text-left px-4 py-3 flex items-start gap-3"
+              >
+                <div className="flex-1 min-w-0">
+                  <p className="text-sm text-white leading-5">{q.question}</p>
+                  <p className="mt-1 text-[11px] text-white/40 font-mono">
+                    {(q.created_at ?? "").slice(0, 16).replace("T", " ")}
+                    {"  ·  "}{q.scope_label}
+                    {q.papers_used != null && `  ·  ${q.papers_used.toLocaleString()} ${t("scenarioDetail.rag.historyArticles")}`}
+                  </p>
+                </div>
+                <div className="shrink-0 flex items-center gap-1.5">
+                  {(q.asked_times_in_page ?? 1) > 1 && (
+                    <span className="rounded-full border border-brand-500/30 bg-brand-500/10 px-2 py-0.5 text-[10px] text-brand-300"
+                          title={t("scenarioDetail.rag.historyRepeatHint")}>
+                      {t("scenarioDetail.rag.historyRepeat")}
+                    </span>
+                  )}
+                  {pending.length > 0 && (
+                    <span className="rounded-full border border-gold-400/40 bg-gold-500/15 px-2 py-0.5 text-[10px] font-semibold text-gold-300">
+                      {t("scenarioDetail.rag.historyProposals").replace("{n}", String(pending.length))}
+                    </span>
+                  )}
+                  {open ? <ChevronUp size={14} className="text-white/30" />
+                        : <ChevronDown size={14} className="text-white/30" />}
+                </div>
+              </button>
+              {open && (
+                <div className="px-4 pb-4 space-y-3 border-t border-white/5 pt-3">
+                  <p className="text-xs text-white/70 leading-5 whitespace-pre-wrap">{q.answer}</p>
+
+                  {(q.proposals ?? []).length > 0 && (
+                    <div className="rounded-xl border border-gold-400/25 bg-gold-500/5 p-3 space-y-2">
+                      <p className="text-[10px] font-semibold uppercase tracking-wider text-gold-300">
+                        {t("scenarioDetail.rag.proposalsTitle")}
+                      </p>
+                      <p className="text-[11px] text-white/45 leading-4">
+                        {t("scenarioDetail.rag.proposalsHint")}
+                      </p>
+                      {(q.proposals ?? []).map(prop => (
+                        <div key={prop.key} className="flex items-center gap-2 flex-wrap text-[11px]">
+                          <code className="font-mono text-gold-200">{prop.key}</code>
+                          <span className="text-white/70 font-semibold">
+                            {prop.value}
+                            {prop.low != null && prop.high != null && ` (${prop.low}\u2013${prop.high})`}
+                            {prop.unit ? ` ${prop.unit}` : ""}
+                          </span>
+                          <span className="text-white/35">
+                            {prop.current != null
+                              ? t("scenarioDetail.rag.proposalCurrent").replace("{v}", String(prop.current))
+                              : t("scenarioDetail.rag.proposalNew")}
+                          </span>
+                          {prop.decision ? (
+                            <span className={`rounded-full border px-2 py-0.5 ${
+                              prop.decision === "accepted"
+                                ? "border-forest-400/40 bg-forest-500/10 text-forest-300"
+                                : "border-white/10 bg-white/5 text-white/35"}`}>
+                              {prop.decision === "accepted"
+                                ? t("scenarioDetail.rag.proposalAccepted")
+                                : t("scenarioDetail.rag.proposalRejected")}
+                            </span>
+                          ) : (
+                            <span className="flex items-center gap-1.5">
+                              <button type="button" disabled={busy === `${q.id}:${prop.key}`}
+                                onClick={() => decide(q.id, prop.key, "accepted")}
+                                className="rounded-lg border border-forest-400/40 bg-forest-500/10 px-2 py-0.5 text-forest-300 hover:bg-forest-500/20 transition disabled:opacity-50">
+                                {t("scenarioDetail.rag.proposalAccept")}
+                              </button>
+                              <button type="button" disabled={busy === `${q.id}:${prop.key}`}
+                                onClick={() => decide(q.id, prop.key, "rejected")}
+                                className="rounded-lg border border-white/10 px-2 py-0.5 text-white/40 hover:text-white/70 transition disabled:opacity-50">
+                                {t("scenarioDetail.rag.proposalReject")}
+                              </button>
+                            </span>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+
+                  <div className="flex items-center gap-2 flex-wrap text-[11px]">
+                    <button type="button" onClick={() => onReask(q.question)}
+                      className="rounded-xl border border-brand-500/30 bg-brand-500/10 px-2.5 py-1 text-brand-300 hover:bg-brand-500/20 transition">
+                      {t("scenarioDetail.rag.historyReask")}
+                    </button>
+                    <span className="text-white/25">{t("scenarioDetail.rag.historyExport")}</span>
+                    {(["pdf", "docx", "md"] as const).map(fmt => (
+                      <a key={fmt} href={questionExportUrl(scenarioId, q.id, fmt)}
+                         className="rounded-xl border border-white/10 px-2.5 py-1 text-white/50 hover:text-white hover:bg-white/10 transition font-mono uppercase">
+                        {fmt}
+                      </a>
+                    ))}
+                    <button type="button" disabled={busy === `del:${q.id}`}
+                      onClick={() => remove(q.id)}
+                      className="ml-auto rounded-xl border border-white/10 px-2.5 py-1 text-white/30 hover:text-rose-300 hover:border-rose-500/25 transition disabled:opacity-50">
+                      {t("common.delete")}
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function RagSection({ scenarioId, detail }: { scenarioId: string; detail: ScenarioDetail }) {
+  const { t, lang } = useI18n();
   const [question, setQuestion] = useState("");
   const [streaming, setStreaming] = useState(false);
   const [streamedText, setStreamedText] = useState("");
@@ -3436,6 +3605,12 @@ function RagSection({ scenarioId, detail }: { scenarioId: string; detail: Scenar
   const [done, setDone] = useState(false);
   const cancelRef = useRef<(() => void) | null>(null);
   const answerRef = useRef<HTMLDivElement>(null);
+  // Le texte, les sources et la méta tels qu'ils sont À LA FIN du flux : les états
+  // React correspondants ne sont pas encore à jour quand onDone se déclenche.
+  const answerSoFar = useRef("");
+  const sourcesSoFar = useRef<ScenarioRagResponse['sources']>([]);
+  const metaSoFar = useRef<RagMeta | null>(null);
+  const [historyKey, setHistoryKey] = useState(0);
 
   // Indexation RAG du corpus : combien de documents l'Assistant peut déjà
   // interroger. Rafraîchi tant que des chunks restent à vectoriser, pour que la
@@ -3472,18 +3647,42 @@ function RagSection({ scenarioId, detail }: { scenarioId: string; detail: Scenar
     setMeta(null);
     setError(null);
     setDone(false);
+    answerSoFar.current = "";
+    sourcesSoFar.current = [];
+    metaSoFar.current = null;
 
     const cancel = askScenarioRagStreamFiltered(scenarioId, qText, {
-      onSources: (s) => setSources(s),
-      onMeta: (m) => setMeta(m),
+      onSources: (s) => { sourcesSoFar.current = s; setSources(s); },
+      onMeta: (m) => { metaSoFar.current = m; setMeta(m); },
       onToken: (t) => {
+        answerSoFar.current += t;
         setStreamedText(prev => prev + t);
         // Auto-scroll
         if (answerRef.current) {
           answerRef.current.scrollTop = answerRef.current.scrollHeight;
         }
       },
-      onDone: () => { setStreaming(false); setDone(true); },
+      onDone: () => {
+        setStreaming(false);
+        setDone(true);
+        // La réponse est CONSERVÉE avec sa portée, sa date et ses sources : sans
+        // cela, elle n'est ni comparable à la prochaine, ni citable, ni vérifiable.
+        // Échec silencieux : perdre l'archive ne doit pas effacer la réponse à
+        // l'écran.
+        saveScenarioQuestion(scenarioId, {
+          question: qText,
+          answer: answerSoFar.current,
+          lang,
+          threshold: metaSoFar.current?.threshold ?? null,
+          scope: {},
+          sources: sourcesSoFar.current,
+          papers_used: metaSoFar.current?.papers_used ?? null,
+          papers_quoted: metaSoFar.current?.papers_quoted ?? null,
+          digest_complete: Boolean(metaSoFar.current?.digest_complete),
+        })
+          .then(() => setHistoryKey(k => k + 1))
+          .catch(() => { /* l'archive est un plus, pas une condition */ });
+      },
       onError: (e) => { setError(e); setStreaming(false); },
     });
     cancelRef.current = cancel;
@@ -3503,7 +3702,8 @@ function RagSection({ scenarioId, detail }: { scenarioId: string; detail: Scenar
   const suggestedQuestions = detail.nl_queries.slice(0, 3);
 
   return (
-    <div className="rounded-3xl border border-white/10 bg-white/3 p-5 space-y-5">
+    <div className="space-y-4">
+      <div className="rounded-3xl border border-white/10 bg-white/3 p-5 space-y-5">
       <SectionHeader
         icon={<MessageSquare size={14} className="text-brand-400" />}
         title={t("scenarioDetail.rag.title")}
@@ -3684,6 +3884,10 @@ function RagSection({ scenarioId, detail }: { scenarioId: string; detail: Scenar
           )}
         </div>
       )}
+      </div>
+
+      <QuestionHistory scenarioId={scenarioId} refreshKey={historyKey}
+                       onReask={(q) => { setQuestion(q); ask(q); }} />
     </div>
   );
 }

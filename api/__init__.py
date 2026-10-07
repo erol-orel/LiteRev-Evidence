@@ -31,6 +31,7 @@ MODULES = (
     "evidence",
     "report",
     "assistant",
+    "questions",
     "variables",
     "model_spec",
     "actions",
