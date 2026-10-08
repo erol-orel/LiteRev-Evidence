@@ -924,8 +924,10 @@ export interface VariableDetail {
  *  c'est-a-dire tout, comme avant. */
 export type ScenarioKind = 'review' | 'predictive';
 
-/** Les deux seules capacités qui retirent quelque chose à un scénario. */
-export type ScenarioCapability = 'model_spec' | 'field_data';
+/** La seule capacité qui retire quelque chose à un scénario : la moitié modèle.
+ *  Tout le reste, y compris la littérature grise des rapports de situation, est une
+ *  source de littérature que les deux natures lisent. */
+export type ScenarioCapability = 'model_spec';
 
 export interface ScenarioDetail {
   id: string;

@@ -22,7 +22,8 @@ from .documents import (
     _truncate_to_tokens,
     sanitize_db_text,
 )
-from .scenario_store import _get_scenario_threshold, _get_user_scenario_or_404
+from .scenario_store import (_get_scenario_threshold, _get_user_scenario_or_404,
+                             pipeline_enrich_scope, scenario_scope_sql)
 from .search import (
     LIVE_MAX_PER_SOURCE,
     _boolean_corpus_ids,
@@ -69,6 +70,17 @@ from .clustering import (
 )
 from .knowledge_graph import _precompute_user_kg
 from llm_usage import model_for as _model
+
+
+
+def _enrich_gate() -> str:
+    """Le périmètre des étapes d'enrichissement du pipeline, en SQL.
+
+    `all` par défaut, soit exactement la sélection d'avant : hors doublons et hors
+    articles écartés, ce qui n'a jamais été une restriction mais la même règle que
+    partout. `PIPELINE_ENRICH_SCOPE=relevant` la réduit au sous-ensemble pertinent,
+    pour un jour où le budget de modèle doit être tenu."""
+    return scenario_scope_sql(pipeline_enrich_scope(), doc="ld", link="asn")
 
 
 def _auto_pipeline_after_search() -> bool:
@@ -2266,6 +2278,7 @@ def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict
                         JOIN article_scenarios asn ON asn.document_id = ld.id
                         WHERE asn.scenario_id = :sid
                           AND ld.project_context = 'literev'
+                          AND (""" + _enrich_gate() + """)
                           AND (ld.pico_json IS NULL OR (ld.pico_json->>'pico_confidence')::float < 0.5)
                           AND ld.abstract IS NOT NULL AND length(ld.abstract) > 50
                           AND COALESCE(ld.pico_attempts, 0) < 3  -- borne les échecs déterministes (token-bleed)
@@ -2378,6 +2391,7 @@ def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict
                         JOIN article_scenarios asn ON asn.document_id = ld.id
                         WHERE asn.scenario_id = :sid
                           AND ld.project_context = 'literev'
+                          AND (""" + _enrich_gate() + """)
                           AND (ld.metadata_json IS NULL OR ld.metadata_json = '{}'::jsonb)
                         ORDER BY ld.id
                     """), {"sid": scenario_id}).mappings().fetchall()

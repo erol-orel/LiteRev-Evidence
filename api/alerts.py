@@ -369,7 +369,8 @@ def _render_alert_digest(scenario_id: str, articles: list[dict], total_new: int,
                          scenario_name: str | None = None,
                          first_digest: bool = False,
                          n_relevant: int | None = None,
-                         signals: list[dict] | None = None) -> tuple[str, str, str]:
+                         signals: list[dict] | None = None,
+                         can_model: bool = True) -> tuple[str, str, str]:
     """(subject, html, text) d'un digest - liste les VRAIS nouveaux articles. Pur/testable.
     Utilise le NOM lisible du scénario (pas l'ID) et un lien PROFOND vers sa page
     (?scenario=<id>, ouvert directement par le front).
@@ -415,12 +416,18 @@ def _render_alert_digest(scenario_id: str, articles: list[dict], total_new: int,
                     (f"All {total_new} clear the relevance threshold."
                      if total_new > 1 else "It clears the relevance threshold."))
     # Singular and plural written out, no "(s)": colleagues read these lines.
+    # Ce qu'il faut relire dépend de ce que le scénario POSSÈDE. Une revue de
+    # littérature n'a pas de spécification de modèle : l'envoyer la relire nommait la
+    # seule chose que sa nature lui retire. Ses paramètres se relisent dans la
+    # synthèse, où ils sont mis en commun.
+    _param_tail = (": the model specification is worth rereading" if can_model
+                   else ": the pooled parameters are worth rereading")
     _SIGNAL_LABELS = {
         "epidemic_parameters": (
             "article reporting an epidemiological parameter ({detail})"
-            ": the model specification is worth rereading",
+            + _param_tail,
             "articles reporting an epidemiological parameter ({detail})"
-            ": the model specification is worth rereading"),
+            + _param_tail),
         "new_concepts": (
             "concept absent from the concept map ({detail})",
             "concepts absent from the concept map ({detail})"),
@@ -442,8 +449,8 @@ def _render_alert_digest(scenario_id: str, articles: list[dict], total_new: int,
     # les signaux : ils sont calculés sans LLM, sur des faits déjà extraits, et ne peuvent
     # pas établir qu'une conclusion a changé.
     _sig_caveat = ("These are leads to review, not findings: only regenerating the brief, "
-                   "the variables or the SEIR projection can tell you whether a conclusion "
-                   "actually changes.")
+                   + ("the variables or the SEIR projection " if can_model else "")
+                   + "can tell you whether a conclusion actually changes.")
 
     shown = articles[:25]
     # `noun` porte DÉJÀ le nombre : le répéter donnait « 30 30 nouveaux articles ».
@@ -619,10 +626,18 @@ def _process_alert_digests(scenario_id: str | None, dry_run: bool, respect_frequ
         # `total_new` et NON len(arts) : le gabarit compare le total au nombre de lignes
         # pour écrire « et N de plus ». Lui passer le nombre de lignes comme total rendait
         # cette branche morte (N valait toujours 0) et faisait annoncer 25 au lieu de 300.
+        # La nature du scénario, pour que le digest ne renvoie pas vers une moitié de
+        # l'application que ce scénario n'a pas. Illisible : on suppose tout, comme
+        # partout ailleurs, un email ne doit pas être le premier à retirer quelque chose.
+        try:
+            from .scenario_store import CAP_MODEL, scenario_can
+            _can_model = scenario_can(sub["scenario_id"], CAP_MODEL)
+        except Exception:                                             # noqa: BLE001
+            _can_model = True
         subj, html_body, text_body = _render_alert_digest(
             sub["scenario_id"], arts, total_new, scenario_name=_scen_name,
             first_digest=_first, n_relevant=_sig.get("new_relevant"),
-            signals=_sig.get("signals") or [])
+            signals=_sig.get("signals") or [], can_model=_can_model)
         try:
             _send_email_smtp(smtp_host, smtp_user, smtp_pass, sub["email"], subj, html_body, text_body)
             with engine.begin() as conn:

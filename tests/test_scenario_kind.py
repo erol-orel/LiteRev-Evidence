@@ -25,7 +25,6 @@ pytest.importorskip("fastapi")
 import main  # noqa: E402
 from conftest import patch_app  # noqa: E402
 from api.scenario_store import (  # noqa: E402
-    CAP_FIELD_DATA,
     CAP_MODEL,
     CAPABILITIES,
     DEFAULT_KIND,
@@ -70,14 +69,17 @@ def test_the_cut_only_ever_subtracts():
     assert predictive == frozenset(CAPABILITIES)
 
 
-def test_only_two_things_are_ever_withheld():
-    """Everything else belongs to both natures, so there is nothing else to check."""
-    assert set(CAPABILITIES) == {CAP_MODEL, CAP_FIELD_DATA}
+def test_only_one_thing_is_ever_withheld():
+    """Everything else belongs to both natures, so there is nothing else to check.
+    The grey literature of the situation reports is a literature SOURCE: it was
+    withheld for a while, which removed a source from a humanitarian review while
+    the ingestion that fills it carried on."""
+    assert set(CAPABILITIES) == {CAP_MODEL}
 
 
-def test_a_review_withholds_the_model_half_and_the_field_reports():
+def test_a_review_withholds_the_model_half_and_nothing_else():
     assert kind_has(KIND_REVIEW, CAP_MODEL) is False
-    assert kind_has(KIND_REVIEW, CAP_FIELD_DATA) is False
+    assert capabilities_for(KIND_REVIEW) == frozenset()
 
 
 def test_a_predictive_scenario_is_never_short_of_anything():

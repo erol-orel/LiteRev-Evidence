@@ -57,6 +57,39 @@ _STRENGTH_ORDER = LEVEL_ORDER
 design_level = grade_level          # nom conservé : l'API publique de ce module
 
 
+
+def _double_blind_counts(scenario_id: str) -> dict[str, int]:
+    """Ce que les deux relecteurs ont réellement fait, en UNE instruction.
+
+    Le bloc était écrit à zéro en dur dans la charge utile de la synthèse : un
+    scénario entièrement relu à deux s'y décrivait comme jamais relu. Les colonnes
+    existent depuis le début (article_scenarios.reviewer_1_status / _2_status) ; il
+    n'y avait qu'à les compter."""
+    try:
+        with engine.connect() as conn:
+            row = conn.execute(text("""
+                SELECT
+                    COUNT(*) FILTER (WHERE reviewer_1_status IS NOT NULL) AS reviewer_1_done,
+                    COUNT(*) FILTER (WHERE reviewer_2_status IS NOT NULL) AS reviewer_2_done,
+                    COUNT(*) FILTER (WHERE reviewer_1_status IS NOT NULL
+                                       AND reviewer_2_status IS NOT NULL) AS both_done,
+                    COUNT(*) FILTER (WHERE reviewer_1_status IS NOT NULL
+                                       AND reviewer_2_status IS NOT NULL
+                                       AND reviewer_1_status = reviewer_2_status) AS agreements,
+                    COUNT(*) FILTER (WHERE reviewer_1_status IS NOT NULL
+                                       AND reviewer_2_status IS NOT NULL
+                                       AND reviewer_1_status <> reviewer_2_status) AS conflicts
+                FROM article_scenarios WHERE scenario_id = :sid
+            """), {"sid": scenario_id}).mappings().first()
+    except Exception as e:                                            # noqa: BLE001
+        # Les colonnes peuvent manquer sur une base ancienne : zéro reste faux, mais
+        # il vaut mieux une synthèse servie qu'une synthèse en erreur pour un encadré.
+        logger.warning(f"Compteurs double aveugle {scenario_id}: {e}")
+        row = None
+    keys = ("reviewer_1_done", "reviewer_2_done", "both_done", "agreements", "conflicts")
+    return {k: int((row or {}).get(k) or 0) for k in keys}
+
+
 def corpus_ceiling(designs) -> tuple[str, str]:
     """(label, phrase) pour la meilleure certitude que le mélange de devis du corpus
     autorise, calculé sur les devis de TOUS les articles pertinents."""
@@ -386,11 +419,19 @@ def _build_evidence_brief(scenario_id: str) -> dict[str, Any]:
             "avg_citations": round(float(corpus_stats["avg_citations"]), 1) if corpus_stats["avg_citations"] else None,
             "max_citations": int(corpus_stats["max_citations"]) if corpus_stats["max_citations"] else None,
             "citations_known": int(corpus_stats["citations_known"] or 0),
+            # Compté sur le sous-ensemble PERTINENT, comme tout le reste de cette
+            # charge utile et comme l'écran : rapporté sur le corpus entier, ce
+            # pourcentage était le seul chiffre ici à décrire une autre population,
+            # et il descendait avec chaque article sous le seuil.
             "pico_coverage_pct": round(
-                100 * int(corpus_stats["with_pico"] or 0) / max(int(corpus_stats["total"] or 1), 1), 1
+                100 * int(corpus_stats["relevant_with_pico"] or 0)
+                / max(int(corpus_stats["relevant"] or 1), 1), 1
             ),
         },
-        "double_blind_stats": {"reviewer_1_done": 0, "reviewer_2_done": 0, "both_done": 0, "agreements": 0, "conflicts": 0},
+        # Les VRAIS compteurs du double aveugle. Ils étaient écrits à zéro en dur :
+        # tout appelant de cette route s'entendait dire qu'aucun relecteur n'avait
+        # travaillé, y compris sur un scénario entièrement relu à deux.
+        "double_blind_stats": _double_blind_counts(scenario_id),
         "top_articles": [
             {
                 "id": r["id"],

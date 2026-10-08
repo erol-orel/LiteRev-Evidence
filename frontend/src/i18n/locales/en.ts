@@ -1007,6 +1007,7 @@ export const en: Translations = {
         "Every reference in the scenario, including those below the threshold. One model call per article.",
       toProcess: "{n} to process",
       nothingToProcess: "Nothing to process",
+      cappedBy: "of {n} pending, the rest on the next run",
       autoEnrichmentTitle: "Automatic enrichment active",
       autoEnrichmentBody:
         ": The pipeline automatically runs PICO extraction and metadata enrichment when articles are ingested. Use the buttons below only to complete articles that may have been missed or to re-run a specific enrichment.",
