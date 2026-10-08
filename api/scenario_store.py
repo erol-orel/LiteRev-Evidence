@@ -5,7 +5,7 @@ tools and tests.
 """
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Optional
 
 from fastapi import HTTPException
 from sqlalchemy import text
@@ -21,7 +21,7 @@ def _get_user_scenario_or_404(scenario_id: str) -> dict[str, Any]:
             SELECT id, name, query, mode, filters, result_count, pinned, folder_id, created_at, updated_at,
                    search_strategy, populate_status, pipeline_status, pipeline_step,
                    pipeline_progress, pipeline_started_at, article_count, is_system,
-                   sub_queries, combinator
+                   sub_queries, combinator, kind, created_ip
             FROM user_scenarios WHERE id = :id
         """), {"id": scenario_id}).mappings().first()
     if not row:
@@ -59,6 +59,128 @@ def relevant_gate_sql(doc: str = "d", link: str = "ars", thr: str = ":thr") -> s
     return (f"{doc}.is_duplicate IS NOT TRUE"
             f" AND {status} IS DISTINCT FROM 'excluded'"
             f" AND ({status} = 'included' OR COALESCE({link}.similarity_score, 0) >= {thr})")
+
+
+# ── La nature d'une question, et ce qu'elle rend disponible ──────────────────
+# Toute question n'appelle pas un modèle. Beaucoup se terminent par une synthèse :
+# ce que la littérature établit, avec quelle certitude, et ce qui manque. Pour
+# celles-là, la moitié prédictive de l'application n'est pas seulement du décor,
+# elle coûte un passage de modèle par scénario qui fabrique des variables
+# candidates que personne n'ajustera jamais.
+#
+# La coupe n'est pas symétrique : la revue est un sous-ensemble strict sur lequel la
+# prédiction est bâtie. Une porte n'a donc jamais qu'à RETIRER la moitié prédictive,
+# jamais à retirer quoi que ce soit à un scénario prédictif. D'où deux natures, une
+# seule colonne, et NULL qui vaut « tout », c'est-à-dire exactement ce qui existait.
+KIND_REVIEW = "review"
+KIND_PREDICTIVE = "predictive"
+KINDS = (KIND_REVIEW, KIND_PREDICTIVE)
+DEFAULT_KIND = KIND_PREDICTIVE          # NULL en base : rien ne change pour l'existant
+
+# Les deux seules capacités qui RETIRENT quelque chose. Tout le reste (corpus,
+# seuil, screening, PICO, concepts, synthèse, graphes, assistant, questions,
+# exports, revue vivante, enrichissement) appartient aux deux natures.
+CAP_MODEL = "model_spec"                # variables prédictives, spec, entraînement, SEIR
+CAP_FIELD_DATA = "field_data"           # rapports de situation (littérature grise)
+CAPABILITIES = (CAP_MODEL, CAP_FIELD_DATA)
+
+_CAPABILITIES_BY_KIND = {
+    KIND_REVIEW: frozenset(),
+    KIND_PREDICTIVE: frozenset(CAPABILITIES),
+}
+
+# Délibérément HORS de CAP_MODEL : les paramètres épidémiologiques mis en commun
+# (api/variables.py). Ils se lisent sans modèle, sans appel LLM, sur tout le corpus
+# pertinent, et un R0 pondéré par la qualité avec la provenance de chaque étude EST
+# un produit de revue. Les ranger avec la prévision les retirerait à une
+# méta-analyse de paramètres, qui est précisément une revue.
+
+
+def normalise_kind(value: Optional[str]) -> str:
+    """La nature d'un scénario, NULL et inconnu valant l'ancien comportement."""
+    text_value = (value or "").strip().lower()
+    return text_value if text_value in KINDS else DEFAULT_KIND
+
+
+def capabilities_for(kind: Optional[str]) -> frozenset:
+    return _CAPABILITIES_BY_KIND[normalise_kind(kind)]
+
+
+def kind_has(kind: Optional[str], capability: str) -> bool:
+    """La seule question que le code pose : ce scénario fait-il cela ?"""
+    if capability not in CAPABILITIES:
+        raise ValueError(f"capacité inconnue : {capability!r}")
+    return capability in capabilities_for(kind)
+
+
+def scenario_kind(scenario_id: str, conn=None) -> str:
+    """La nature enregistrée du scénario. Un scénario absent vaut l'ancien
+    comportement : une porte ne doit pas être la première à signaler un 404."""
+    sql = text("SELECT kind FROM user_scenarios WHERE id = :sid")
+    if conn is not None:
+        row = conn.execute(sql, {"sid": scenario_id}).mappings().first()
+    else:
+        with engine.connect() as c:
+            row = c.execute(sql, {"sid": scenario_id}).mappings().first()
+    return normalise_kind(row["kind"] if row else None)
+
+
+def scenario_can(scenario_id: str, capability: str, conn=None) -> bool:
+    return kind_has(scenario_kind(scenario_id, conn=conn), capability)
+
+
+def capability_refusal(scenario_id: str, capability: str) -> dict[str, Any]:
+    """La forme d'un refus d'applicabilité.
+
+    L'application en a déjà une (cf. api/seir.py) : `applicable: false`, un
+    `reason_code` stable que l'interface traduit, et une phrase lisible. On ne lui en
+    ajoute pas une deuxième. Ce n'est pas une erreur : la question posée n'appelle pas
+    cette moitié de l'outil, et le dire par un 4xx ferait croire à une panne."""
+    return {
+        "applicable": False,
+        "scenario_id": scenario_id,
+        "capability": capability,
+        "kind": KIND_REVIEW,
+        "reason_code": "review_scenario",
+        "reason": ("Ce scénario est une revue de littérature : la moitié prédictive "
+                   "(variables candidates, spécification de modèle, entraînement, "
+                   "projection) n'y est pas activée. Changez sa nature pour l'ouvrir ; "
+                   "rien de ce qui a déjà été produit n'est supprimé."),
+    }
+
+
+# ── Le périmètre d'un traitement par lot sur un scénario ─────────────────────
+# Un enrichissement coûte un appel de modèle PAR ARTICLE. Sur un scénario de six mille
+# cinq cents références dont quatre cent soixante-sept passent le seuil, le lancer sur
+# tout le scénario coûte quatorze fois le lot utile, pour la même réponse. D'où un
+# périmètre explicite, et un seul endroit qui l'écrit.
+SCOPES = ("all", "relevant")
+
+
+def scenario_threshold_sql(sid: str = ":sid") -> str:
+    """Le seuil du scénario, LU DANS la requête plutôt que passé en paramètre, pour
+    que le lot et le compteur qui l'annonce voient le même instantané."""
+    return (f"COALESCE((SELECT ss.similarity_threshold FROM scenario_settings ss"
+            f" WHERE ss.scenario_id = {sid}), {DEFAULT_SIMILARITY_THRESHOLD})")
+
+
+def scenario_scope_sql(scope: str, doc: str = "ld", link: str = "asn",
+                       sid: str = ":sid") -> str:
+    """Le prédicat d'un lot sur un scénario, à mettre dans un WHERE après la jointure.
+
+    `all` : tout le scénario, hors doublons et hors articles écartés par un relecteur.
+    Exclure ces deux-là n'est pas une restriction du périmètre, c'est la même règle que
+    partout : on ne paie pas un modèle pour un doublon ni pour un article déjà écarté.
+
+    `relevant` : le sous-ensemble pertinent, par la porte partagée ci-dessus. Les trois
+    lots d'enrichissement filtraient chacun à leur façon, l'un excluant les articles
+    écartés et les deux autres non."""
+    if scope not in SCOPES:
+        raise ValueError(f"portée inconnue : {scope!r} (attendu : {', '.join(SCOPES)})")
+    if scope == "relevant":
+        return relevant_gate_sql(doc, link, scenario_threshold_sql(sid))
+    status = f"COALESCE({link}.screening_status, {doc}.screening_status)"
+    return f"{doc}.is_duplicate IS NOT TRUE AND {status} IS DISTINCT FROM 'excluded'"
 
 
 # ── Les compteurs d'articles, comptés UNE fois ───────────────────────────────

@@ -10,17 +10,20 @@ import os
 import threading
 from typing import Any
 
-from fastapi import Depends, HTTPException, Query
+from fastapi import Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field, field_validator, model_validator
 from sqlalchemy import text
 
-from .core import _msg, _norm_lang, app, engine, logger, require_api_key
+from .core import _msg, _norm_lang, app, client_ip, engine, logger, require_api_key
 from .documents import _strategy_is_degraded
 from .scenario_store import (
+    KINDS,
     _get_scenario_threshold,
     _get_user_scenario_or_404,
+    capabilities_for,
     corpus_search_sql,
     corpus_search_terms,
+    normalise_kind,
     relevant_gate_sql,
     scenario_counts,
 )
@@ -158,6 +161,21 @@ def _ensure_user_scenarios_table() -> None:
             "ALTER TABLE user_scenarios ADD COLUMN IF NOT EXISTS combinator VARCHAR(12)",
             # Propriétaire (email) : living review + alertes email par utilisateur.
             "ALTER TABLE user_scenarios ADD COLUMN IF NOT EXISTS owner_email VARCHAR(255)",
+            # La NATURE de la question. Toute question n'appelle pas un modèle : une
+            # revue de littérature se termine par une synthèse, et la moitié
+            # prédictive de l'application ne lui sert à rien - elle lui coûte même un
+            # passage de modèle par scénario, qui fabrique des variables candidates
+            # que personne n'ajustera (cf. api/pipeline.py, étape « variables »).
+            # NULL = l'ancien comportement, tout est disponible : aucune ligne
+            # existante ne change, et rien n'est caché sur la foi d'une devinette.
+            "ALTER TABLE user_scenarios ADD COLUMN IF NOT EXISTS kind VARCHAR(20)",
+            # Provenance d'une recherche enregistrée : l'adresse du poste qui l'a
+            # créée, à côté de la date et de l'heure que porte déjà created_at.
+            # 45 signes : la plus longue écriture d'une adresse IPv6. NULL pour tout
+            # ce qui n'a pas de requête derrière (amorçage de démonstration, scripts)
+            # et pour les lignes antérieures à la colonne : l'inconnu se dit, il ne
+            # s'invente pas.
+            "ALTER TABLE user_scenarios ADD COLUMN IF NOT EXISTS created_ip VARCHAR(45)",
             "CREATE INDEX IF NOT EXISTS ix_user_scenarios_owner ON user_scenarios (owner_email)",
             # Scénarios GESICA : _list_db_gesica_scenarios (main.py:3720-3727) filtre sur
             # is_system / hidden et trie sur title, SANS qualificatif de table. Ces
@@ -247,6 +265,10 @@ class UserScenarioPatch(BaseModel):
     name: str | None = None
     pinned: bool | None = None
     mode: str | None = None
+    # La nature de la question : « review » ou « predictive ». Modifiable à tout
+    # moment et dans les deux sens ; rien n'est supprimé en passant de l'une à
+    # l'autre, une spec déjà produite attend simplement qu'on rouvre l'onglet.
+    kind: str | None = None
     filters: dict[str, Any] | None = None
     folder_id: str | None = None  # Assigner à un dossier (None = hors dossier)
 
@@ -350,10 +372,13 @@ def _user_scenario_to_gesica_format(
         "sub_queries": _sub_clean if len(_sub_clean) >= 2 else None,
         "combinator": (row.get("combinator") if len(_sub_clean) >= 2 else None),
         "mode": row["mode"],
+        "kind": normalise_kind(row.get("kind")),
+        "capabilities": sorted(capabilities_for(row.get("kind"))),
         "filters": row.get("filters") or {},
         "result_count": row.get("result_count", 0),
         "folder_id": row.get("folder_id"),
         "created_at": row["created_at"].isoformat() if row.get("created_at") else None,
+        "created_ip": row.get("created_ip"),
         "updated_at": row["updated_at"].isoformat() if row.get("updated_at") else None,
         "is_user_scenario": True,
         "populate_status": row.get("populate_status", "idle"),
@@ -401,8 +426,8 @@ def list_user_scenarios() -> list[dict[str, Any]]:
         """))
         rows = conn.execute(text("""
             SELECT
-                us.id, us.name, us.query, us.mode, us.filters,
-                us.pinned, us.folder_id, us.created_at, us.updated_at,
+                us.id, us.name, us.query, us.mode, us.kind, us.filters,
+                us.pinned, us.folder_id, us.created_at, us.created_ip, us.updated_at,
                 us.populate_status, us.pipeline_status, us.pipeline_step, us.pipeline_progress,
                 COALESCE(us.result_count, 0) AS result_count,
                 COALESCE(us.article_count, 0) AS article_count,
@@ -435,7 +460,7 @@ def list_user_scenarios() -> list[dict[str, Any]]:
 
 
 @app.post("/user-scenarios", status_code=201)
-def create_user_scenario(payload: UserScenarioIn, lang: str | None = Query(None),
+def create_user_scenario(payload: UserScenarioIn, request: Request = None, lang: str | None = Query(None),
                          _: None = Depends(require_api_key)) -> dict[str, Any]:
     """Crée ou met à jour un scénario utilisateur depuis une recherche sauvegardée.
     Pour les recherches récentes (non épinglées, sans dossier), upsert par query+mode
@@ -522,8 +547,8 @@ def create_user_scenario(payload: UserScenarioIn, lang: str | None = Query(None)
     new_id = "usr-" + str(uuid.uuid4()).replace("-", "")[:12]
     with engine.begin() as conn:
         conn.execute(text("""
-            INSERT INTO user_scenarios (id, name, query, mode, filters, result_count, pinned, folder_id, search_strategy, sub_queries, combinator, owner_email)
-            VALUES (:id, :name, :query, :mode, CAST(:filters AS jsonb), :result_count, :pinned, :folder_id, CAST(:strategy AS jsonb), CAST(:sub_queries AS jsonb), :combinator, :owner_email)
+            INSERT INTO user_scenarios (id, name, query, mode, filters, result_count, pinned, folder_id, search_strategy, sub_queries, combinator, owner_email, created_ip)
+            VALUES (:id, :name, :query, :mode, CAST(:filters AS jsonb), :result_count, :pinned, :folder_id, CAST(:strategy AS jsonb), CAST(:sub_queries AS jsonb), :combinator, :owner_email, :created_ip)
         """), {
             "id": new_id,
             "name": payload.name,
@@ -537,6 +562,7 @@ def create_user_scenario(payload: UserScenarioIn, lang: str | None = Query(None)
             "sub_queries": json.dumps(payload.sub_queries) if payload.sub_queries else None,
             "combinator": payload.combinator if payload.sub_queries else None,
             "owner_email": payload.owner_email,
+            "created_ip": client_ip(request) if request is not None else None,
         })
         # Propriétaire renseigné → l'abonner aux alertes de SON scénario (living review).
         if payload.owner_email:
@@ -655,6 +681,13 @@ def patch_user_scenario(scenario_id: str, payload: UserScenarioPatch, lang: str 
     if payload.mode is not None:
         updates.append("mode = :mode")
         params["mode"] = payload.mode
+    if payload.kind is not None:
+        if payload.kind not in KINDS:
+            raise HTTPException(status_code=400,
+                                detail=f"Nature inconnue : {payload.kind!r} "
+                                       f"(attendu : {', '.join(KINDS)})")
+        updates.append("kind = :kind")
+        params["kind"] = payload.kind
     if payload.filters is not None:
         updates.append("filters = CAST(:filters AS jsonb)")
         params["filters"] = json.dumps(payload.filters)
@@ -849,9 +882,12 @@ def get_user_scenario_detail(scenario_id: str, lang: str | None = Query(None)) -
         "facets": facets,
         "combinator": _combinator if _sub else None,
         "mode": row["mode"],
+        "kind": normalise_kind(row.get("kind")),
+        "capabilities": sorted(capabilities_for(row.get("kind"))),
         "filters": row.get("filters") or {},
         "pinned": bool(row.get("pinned", False)),
         "created_at": row["created_at"].isoformat() if row.get("created_at") else None,
+        "created_ip": row.get("created_ip"),
     }
 
 

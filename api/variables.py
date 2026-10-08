@@ -1146,6 +1146,12 @@ def generate_scenario_variables(scenario_id: str, lang: str | None = Query(None)
     """Déclenche la génération asynchrone des Variables & Modèle depuis les articles pertinents."""
     import threading, time
 
+    # Une revue de littérature ne fabrique pas de variables prédictives : on le dit
+    # dans la forme que l'API parle déjà, plutôt que par une erreur.
+    from .scenario_store import CAP_MODEL, capability_refusal, scenario_can
+    if not scenario_can(scenario_id, CAP_MODEL):
+        return {"status": "not_applicable", **capability_refusal(scenario_id, CAP_MODEL)}
+
     if _job_is_active(_VARIABLES_GENERATION_JOBS.get(scenario_id)):
         return {"status": "already_running"}
 

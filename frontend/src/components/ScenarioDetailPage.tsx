@@ -13,6 +13,7 @@ import {
 } from "lucide-react";
 import {
   fetchScenarioDetail,
+  patchUserScenario,
   fetchScenarioCorpus,
   fetchScenarioClustering,
   fetchScenarioClusteringStatus,
@@ -108,6 +109,9 @@ import {
   type LiveSearchResponse,
   type SearchStrategy,
   type EnrichmentStatus,
+  type EnrichmentScope,
+  type ScenarioCapability,
+  type ScenarioKind,
   type EmbeddingStatus,
   type ScenarioDetail,
   type ScenarioCorpus,
@@ -5655,27 +5659,32 @@ export function EnrichmentSection({ scenarioId }: { scenarioId?: string }) {
   const [running, setRunning] = React.useState<string | null>(null);
   const [lastResult, setLastResult] = React.useState<{ type: string; msg: string; error: boolean } | null>(null);
   const [limit, setLimit] = React.useState(100000);
+  // Sur un scénario, le défaut est le sous-ensemble PERTINENT : un enrichissement
+  // coûte un appel de modèle par article, et c'est ce sous-ensemble que les
+  // analyses lisent. Hors scénario la question ne se pose pas.
+  const [scope, setScope] = React.useState<EnrichmentScope>(scenarioId ? "relevant" : "all");
 
   const loadStatus = React.useCallback(async () => {
     setLoadingStatus(true);
     try {
-      const s = await fetchEnrichmentStatus(scenarioId);
+      const s = await fetchEnrichmentStatus(scenarioId, scenarioId ? scope : undefined);
       setStatus(s);
     } catch {/* ignore */} finally {
       setLoadingStatus(false);
     }
-  }, [scenarioId]);
+  }, [scenarioId, scope]);
 
   React.useEffect(() => { loadStatus(); }, [loadStatus]);
 
   const run = async (type: "pico" | "metadata" | "fulltext") => {
     setRunning(type);
     setLastResult(null);
+    const sc = scenarioId ? scope : undefined;
     try {
       let res;
-      if (type === "pico") res = await extractPicoBatchGlobal(scenarioId, limit);
-      else if (type === "metadata") res = await extractMetadataBatch(scenarioId, limit);
-      else res = await fetchFulltextBatch(scenarioId, Math.min(limit, 1000));
+      if (type === "pico") res = await extractPicoBatchGlobal(scenarioId, limit, sc);
+      else if (type === "metadata") res = await extractMetadataBatch(scenarioId, limit, sc);
+      else res = await fetchFulltextBatch(scenarioId, Math.min(limit, 1000), sc);
       setLastResult({ type, msg: res.message, error: false });
       await loadStatus();
     } catch (e: any) {
@@ -5693,6 +5702,7 @@ export function EnrichmentSection({ scenarioId }: { scenarioId?: string }) {
       icon: <Microscope size={15} className="text-brand-400" />,
       stat: status ? `${status.pico.count} / ${status.total} (${status.pico.pct}%)` : "-",
       pct: status ? status.pico.pct : 0,
+      todo: status ? status.pico.todo : null,
       color: "bg-brand-500",
     },
     {
@@ -5702,6 +5712,7 @@ export function EnrichmentSection({ scenarioId }: { scenarioId?: string }) {
       icon: <Database size={15} className="text-gold-400" />,
       stat: status ? `${status.metadata.count} / ${status.total} (${status.metadata.pct}%)` : "-",
       pct: status ? status.metadata.pct : 0,
+      todo: status ? status.metadata.todo : null,
       color: "bg-gold-500",
     },
     {
@@ -5711,6 +5722,7 @@ export function EnrichmentSection({ scenarioId }: { scenarioId?: string }) {
       icon: <Globe size={15} className="text-forest-300" />,
       stat: status ? `${status.fulltext.count} / ${status.total} (${status.fulltext.pct}%)` : "-",
       pct: status ? status.fulltext.pct : 0,
+      todo: status ? status.fulltext.todo : null,
       color: "bg-forest-400",
     },
   ];
@@ -5724,7 +5736,9 @@ export function EnrichmentSection({ scenarioId }: { scenarioId?: string }) {
       <SectionHeader
         icon={<Zap size={16} className="text-gold-400" />}
         title={t("scenarioDetail.enrichment.title")}
-        subtitle={t("scenarioDetail.enrichment.subtitle")}
+        subtitle={t(scenarioId
+          ? "scenarioDetail.enrichment.subtitleScenario"
+          : "scenarioDetail.enrichment.subtitle")}
       />
 
       {showAutoNote && (
@@ -5733,6 +5747,43 @@ export function EnrichmentSection({ scenarioId }: { scenarioId?: string }) {
           <div className="text-xs text-brand-200/80 leading-relaxed">
             <strong className="text-brand-300">{t("scenarioDetail.enrichment.autoEnrichmentTitle")}</strong>{t("scenarioDetail.enrichment.autoEnrichmentBody")}
           </div>
+        </div>
+      )}
+
+      {/* Portée : un enrichissement coûte un appel de modèle PAR ARTICLE, et le
+          sous-ensemble pertinent est une fraction du scénario. Le choix est posé
+          avant le bouton, avec les deux comptes, pour qu'on sache ce qu'on lance. */}
+      {scenarioId && (
+        <div className="rounded-2xl border border-white/8 bg-white/3 px-4 py-3 space-y-2">
+          <div className="flex items-center gap-2 flex-wrap">
+            <label className="text-xs text-white/50 shrink-0">{t("scenarioDetail.enrichment.scopeLabel")}</label>
+            {(["relevant", "all"] as EnrichmentScope[]).map(opt => {
+              const n = status?.by_scope?.[opt]?.total;
+              const on = scope === opt;
+              return (
+                <button
+                  key={opt}
+                  onClick={() => setScope(opt)}
+                  disabled={running !== null}
+                  className={`rounded-xl border px-3 py-1.5 text-xs transition disabled:opacity-50 ${
+                    on
+                      ? "border-brand-500/40 bg-brand-500/15 text-brand-200"
+                      : "border-white/10 text-white/50 hover:text-white hover:bg-white/8"
+                  }`}
+                >
+                  {t(opt === "relevant"
+                    ? "scenarioDetail.enrichment.scopeRelevant"
+                    : "scenarioDetail.enrichment.scopeAll")}
+                  {typeof n === "number" ? ` (${n.toLocaleString()})` : ""}
+                </button>
+              );
+            })}
+          </div>
+          <p className="text-[11px] text-white/35 leading-relaxed">
+            {t(scope === "relevant"
+              ? "scenarioDetail.enrichment.scopeRelevantHint"
+              : "scenarioDetail.enrichment.scopeAllHint")}
+          </p>
         </div>
       )}
 
@@ -5781,6 +5832,14 @@ export function EnrichmentSection({ scenarioId }: { scenarioId?: string }) {
                   style={{ width: `${job.pct}%` }}
                 />
               </div>
+              {/* Ce que CE bouton traiterait, annoncé avant qu'on le presse. */}
+              {typeof job.todo === "number" && (
+                <p className="text-[10px] text-white/35">
+                  {job.todo > 0
+                    ? t("scenarioDetail.enrichment.toProcess").replace("{n}", job.todo.toLocaleString())
+                    : t("scenarioDetail.enrichment.nothingToProcess")}
+                </p>
+              )}
             </div>
 
             <button
@@ -7903,7 +7962,14 @@ function SituationReportsSection({ scenarioId }: { scenarioId: string }) {
   );
 }
 
-type SectionKey = "review" | "evidence" | "reports" | "assistant" | "viz" | "variables" | "queries" | "alerts";
+type SectionKey = "review" | "evidence" | "reports" | "assistant" | "viz" | "variables" | "queries" | "enrichment" | "alerts";
+
+// Ce qu'un onglet EXIGE du scénario. Sans entrée ici, il est de tous les scénarios :
+// la coupe ne retire que la moitié prédictive, elle n'enlève rien à une prévision.
+const SECTION_NEEDS: Partial<Record<SectionKey, ScenarioCapability>> = {
+  variables: "model_spec",
+  reports: "field_data",
+};
 
 const SECTIONS: Array<{ key: SectionKey; icon: React.ReactNode }> = [
   { key: "review",      icon: <FileText size={13} /> },
@@ -7916,6 +7982,10 @@ const SECTIONS: Array<{ key: SectionKey; icon: React.ReactNode }> = [
   { key: "viz",         icon: <Layers size={13} /> },
   { key: "variables",   icon: <Database size={13} /> },
   { key: "queries",     icon: <Search size={13} /> },
+  // L'enrichissement revient DANS le scénario : il avait été déplacé vers la page
+  // Corpus au motif qu'il est automatique et à l'échelle du corpus, mais une
+  // extraction se paie par article et c'est ici que l'on sait lesquels comptent.
+  { key: "enrichment",  icon: <Zap size={13} /> },
   { key: "alerts",      icon: <Bell size={13} /> },
 ];
 
@@ -7932,6 +8002,21 @@ export function ScenarioDetailPage({ scenarioId, onBack, initialTab }: ScenarioD
   const [error, setError] = useState<string | null>(null);
   // initialTab="model" ouvre directement l'onglet Variables & Modèle (sous-tab Modèle prédictif).
   const [activeSection, setActiveSection] = useState<SectionKey>(initialTab === "model" ? "variables" : "review");
+  // Les capacités du scénario. Tant que le détail n'est pas chargé, on ne retire
+  // rien : mieux vaut un onglet qui apparaît qu'un onglet qui clignote.
+  const caps: ScenarioCapability[] | null = detail?.capabilities ?? null;
+  const visibleSections = React.useMemo(
+    () => SECTIONS.filter(s => {
+      const needed = SECTION_NEEDS[s.key];
+      return !needed || !caps || caps.includes(needed);
+    }),
+    [caps],
+  );
+  // Si la nature change pendant qu'on est sur un onglet qui disparaît, on revient
+  // au corpus plutôt que de laisser une page vide.
+  React.useEffect(() => {
+    if (!visibleSections.some(s => s.key === activeSection)) setActiveSection("review");
+  }, [visibleSections, activeSection]);
 
   // Compteurs et pipeline. Tant qu'un pipeline ou un populate tourne, les nombres
   // d'articles peuvent différer d'un panneau à l'autre : la liste lit une copie stockée
@@ -7942,6 +8027,7 @@ export function ScenarioDetailPage({ scenarioId, onBack, initialTab }: ScenarioD
   const [counts, setCounts] = useState<Counts | null>(null);
   const [justFinished, setJustFinished] = useState(false);
   const [refreshKey, setRefreshKey] = useState(0);
+  const [savingKind, setSavingKind] = useState(false);
   useEffect(() => {
     if (!isUserScenario(scenarioId)) return;
     let alive = true;
@@ -8127,9 +8213,10 @@ export function ScenarioDetailPage({ scenarioId, onBack, initialTab }: ScenarioD
         </div>
       )}
 
-      {/* Navigation par onglets */}
+      {/* Navigation par onglets - filtrée par la nature de la question. Un onglet
+          qu'un scénario n'utilise jamais ne s'affiche pas grisé : il n'est pas là. */}
       <div className="flex flex-wrap gap-1.5 border-b border-white/5 pb-4">
-        {SECTIONS.map((section) => (
+        {visibleSections.map((section) => (
           <button
             key={section.key}
             onClick={() => setActiveSection(section.key)}
@@ -8143,6 +8230,38 @@ export function ScenarioDetailPage({ scenarioId, onBack, initialTab }: ScenarioD
             {t(`scenarioDetail.page.sections.${section.key}`)}
           </button>
         ))}
+        {/* La nature de la question, posée là où son effet se voit : les onglets
+            qu'elle retire sont dans la même rangée. Réversible, et rien n'est
+            supprimé en changeant d'avis. */}
+        {isUserScenario(scenarioId) && detail && (
+          <div className="ml-auto flex items-center gap-1 rounded-xl border border-white/8 bg-white/3 p-0.5"
+               title={t("scenarioDetail.page.kindHint")}>
+            {(["review", "predictive"] as ScenarioKind[]).map(k => (
+              <button
+                key={k}
+                onClick={() => {
+                  if (detail.kind === k || savingKind) return;
+                  setSavingKind(true);
+                  patchUserScenario(scenarioId, { kind: k })
+                    .then(() => fetchScenarioDetail(scenarioId))
+                    .then(setDetail)
+                    .catch(() => {})
+                    .finally(() => setSavingKind(false));
+                }}
+                disabled={savingKind}
+                className={`rounded-lg px-2.5 py-1 text-[11px] transition disabled:opacity-50 ${
+                  (detail.kind ?? "predictive") === k
+                    ? "bg-brand-700 text-gold-400 font-semibold"
+                    : "text-white/45 hover:text-white hover:bg-white/8"
+                }`}
+              >
+                {t(k === "review"
+                  ? "scenarioDetail.page.kindReview"
+                  : "scenarioDetail.page.kindPredictive")}
+              </button>
+            ))}
+          </div>
+        )}
       </div>
 
       {/* Contenu de la section active - isolé par une limite d'erreur : un crash
@@ -8159,6 +8278,7 @@ export function ScenarioDetailPage({ scenarioId, onBack, initialTab }: ScenarioD
         {activeSection === "viz" && <VizTab scenarioId={scenarioId} />}
         {activeSection === "variables" && <VariablesModelTab detail={detail} scenarioId={scenarioId} initialSub={initialTab === "model" ? "monitor" : undefined} />}
         {activeSection === "queries" && <QueriesSection detail={detail} scenarioId={scenarioId} />}
+        {activeSection === "enrichment" && <EnrichmentSection scenarioId={scenarioId} />}
         {activeSection === "alerts" && <AlertsSection scenarioId={scenarioId} />}
         </div>
       </ErrorBoundary>

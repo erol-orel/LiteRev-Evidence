@@ -249,6 +249,9 @@ export const en: Translations = {
     openModel: "Predict / open model",
     trainAndPredict: "Train & predict (detail page)",
     allScenarios: "All scenarios",
+    kindAll: "All kinds",
+    createdOn: "Created on {date}",
+    createdFrom: "from {ip}",
     searchPlaceholder: "Search the scenarios: name, query, description",
     searchMatches: "{n} of {total}",
     searchClear: "Clear",
@@ -981,6 +984,16 @@ export const en: Translations = {
       fulltextDesc: "Searches for open-access full text via Unpaywall (DOI required).",
       title: "LLM Enrichment",
       subtitle: "Run automatic enrichments across the whole corpus",
+      subtitleScenario: "Run the enrichments on this scenario",
+      scopeLabel: "Scope:",
+      scopeRelevant: "Relevant articles",
+      scopeAll: "Whole scenario",
+      scopeRelevantHint:
+        "The subset the analyses read: above the threshold or kept by hand, never a duplicate and never an excluded article.",
+      scopeAllHint:
+        "Every reference in the scenario, including those below the threshold. One model call per article.",
+      toProcess: "{n} to process",
+      nothingToProcess: "Nothing to process",
       autoEnrichmentTitle: "Automatic enrichment active",
       autoEnrichmentBody:
         ": The pipeline automatically runs PICO extraction and metadata enrichment when articles are ingested. Use the buttons below only to complete articles that may have been missed or to re-run a specific enrichment.",
@@ -1393,6 +1406,10 @@ export const en: Translations = {
         enrichment: "LLM Enrichment",
         alerts: "Alerts",
       },
+      kindReview: "Literature review",
+      kindPredictive: "Predictive scenario",
+      kindHint:
+        "The nature of the question. A literature review ends in a synthesis: the predictive half of the tool is not offered to it, and its pipeline does not compute it. Reversible at any time, and nothing is deleted.",
       loading: "Loading the scenario...",
       backToScenarios: "Back to scenarios",
       scenarioNotFound: "Scenario not found",

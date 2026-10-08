@@ -1290,6 +1290,8 @@ function ScenariosView({
   // Chercher parmi les scénarios : nom, requête, description, cluster. Les termes sont
   // cumulatifs, insensibles à la casse.
   const [scenarioQuery, setScenarioQuery] = useState('');
+  // « all » par défaut : la page ne cache rien tant qu'on ne le demande pas.
+  const [kindFilter, setKindFilter] = useState<'all' | 'review' | 'predictive'>('all');
   const scenarioTerms = scenarioQuery.trim().toLowerCase().split(/\s+/).filter(Boolean);
 
   // Page détail d'un scénario (GESICA ou utilisateur)
@@ -1376,6 +1378,14 @@ function ScenariosView({
               ) : (
                 <span className="rounded-full bg-forest-700/40 border border-white/5 px-2 py-0.5 text-xs text-forest-500">
                   0 {t("scenarios.articles")}
+                </span>
+              )}
+              {/* La nature de la question. Seule la revue porte une pastille : le
+                  scénario prédictif est le cas par défaut, et marquer les deux
+                  ferait du bruit sur chaque carte. */}
+              {(scenario as any).kind === "review" && (
+                <span className="rounded-full border border-gold-500/25 bg-gold-500/10 px-2 py-0.5 text-xs text-gold-300">
+                  {t("scenarioDetail.page.kindReview")}
                 </span>
               )}
             </div>
@@ -1494,6 +1504,19 @@ function ScenariosView({
 
         {isExpanded && (
           <div className="mt-4 space-y-4 border-t border-white/10 pt-4">
+            {/* Provenance : quand la recherche a été créée, et depuis quel poste.
+                Posée en tête du dépliant plutôt que sur la carte fermée : elle sert
+                à retrouver qui a lancé quoi, pas à lire la liste. */}
+            {isUser && (scenario as any).created_at && (
+              <p className="text-[11px] text-white/35 font-mono">
+                {t("scenarios.createdOn")
+                  .replace("{date}", new Date((scenario as any).created_at).toLocaleString())}
+                {(scenario as any).created_ip
+                  ? " · " + t("scenarios.createdFrom").replace("{ip}", (scenario as any).created_ip)
+                  : ""}
+              </p>
+            )}
+
             {/* Actions recommandées (hooks isolés dans le composant hoisté) */}
             <RecommendedActions scenario={scenario} isUser={isUser} />
 
@@ -1625,6 +1648,12 @@ function ScenariosView({
   // s'applique AVANT le groupement, si bien que dossiers, épinglés et recherches
   // récentes ne montrent que ce qui correspond.
   const scenarioMatches = (s: GesicaScenario | UserScenario) => {
+    // La nature de la question d'abord : c'est la coupe la plus large, et c'est
+    // celle que l'on vient chercher quand on veut « mes revues ».
+    if (kindFilter !== "all") {
+      const kind = (s as any).kind === "review" ? "review" : "predictive";
+      if (kind !== kindFilter) return false;
+    }
     if (!scenarioTerms.length) return true;
     const hay = [
       (s as GesicaScenario).title, (s as any).name, (s as any).query,
@@ -1685,6 +1714,22 @@ function ScenariosView({
             className="w-full rounded-xl border border-white/10 bg-white/5 pl-9 pr-3 py-2 text-xs text-white placeholder:text-white/30 focus:border-brand-500/40 focus:outline-none"
           />
         </div>
+        {(["all", "review", "predictive"] as const).map(k => (
+          <button
+            key={k}
+            type="button"
+            onClick={() => setKindFilter(k)}
+            className={`rounded-xl border px-3 py-1.5 text-xs transition ${
+              kindFilter === k
+                ? "border-brand-500/40 bg-brand-500/15 text-brand-200"
+                : "border-white/10 text-white/50 hover:text-white hover:bg-white/8"
+            }`}
+          >
+            {t(k === "all" ? "scenarios.kindAll"
+              : k === "review" ? "scenarioDetail.page.kindReview"
+              : "scenarioDetail.page.kindPredictive")}
+          </button>
+        ))}
         {scenarioTerms.length > 0 && (
           <>
             <span className="text-[11px] text-white/45 font-mono">

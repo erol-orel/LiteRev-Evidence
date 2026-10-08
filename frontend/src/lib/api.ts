@@ -919,9 +919,19 @@ export interface VariableDetail {
   source: string;
 }
 
+/** La nature d'une question : une revue de littérature, ou un scénario qui se
+ *  termine par un modèle. Absente d'une ancienne réponse, elle vaut "predictive",
+ *  c'est-a-dire tout, comme avant. */
+export type ScenarioKind = 'review' | 'predictive';
+
+/** Les deux seules capacités qui retirent quelque chose à un scénario. */
+export type ScenarioCapability = 'model_spec' | 'field_data';
+
 export interface ScenarioDetail {
   id: string;
   title: string;
+  kind?: ScenarioKind;
+  capabilities?: ScenarioCapability[];
   description: string;
   cluster: string;
   query?: string;   // requête d'origine (user scenarios) - pour un libellé localisé
@@ -1775,11 +1785,16 @@ export interface UserScenario extends GesicaScenario {
   sub_queries?: SubQuery[] | null;
   combinator?: "union" | "intersection" | null;
   mode: string;
+  /** La nature de la question ; absente d'une ancienne réponse, elle vaut tout. */
+  kind?: ScenarioKind;
   filters: Record<string, any>;
   result_count: number;
   resultCount: number;           // alias camelCase de result_count
   pinned: boolean;
   created_at: string | null;
+  /** L'adresse du poste qui a créé la recherche. Nulle pour tout ce qui n'a pas de
+   *  requête derrière (amorçage, scripts) et pour les lignes antérieures. */
+  created_ip?: string | null;
   updated_at: string | null;
   is_user_scenario: true;
   populate_status?: string;
@@ -1949,6 +1964,7 @@ function _mapUserScenario(u: any): UserScenario {
     pipeline_status: u.pipeline_status ?? 'idle',
     pipeline_step: u.pipeline_step ?? null,
     pipeline_progress: u.pipeline_progress ?? 0,
+    kind: (u.kind === 'review' ? 'review' : 'predictive') as ScenarioKind,
   };
 }
 
@@ -1979,7 +1995,7 @@ export async function deleteUserScenario(scenarioId: string): Promise<{ deleted:
 
 export async function patchUserScenario(
   scenarioId: string,
-  patch: { name?: string; pinned?: boolean; mode?: string; filters?: Record<string, any>; folder_id?: string | null },
+  patch: { name?: string; pinned?: boolean; mode?: string; kind?: ScenarioKind; filters?: Record<string, any>; folder_id?: string | null },
 ): Promise<UserScenario> {
   // `lang`: pinning starts the full pipeline; everything it caches is produced in the
   // interface language, so no tab has to generate at its first opening.
@@ -2170,20 +2186,43 @@ export interface EnrichmentBatchResult {
   message: string;
 }
 
+/** La portée d'un lot d'enrichissement sur un scénario. */
+export type EnrichmentScope = 'all' | 'relevant';
+
+export interface EnrichmentJobStatus {
+  count: number;
+  pct: number;
+  /** Ce qu'une exécution traiterait réellement, donc ce qu'elle coûterait. */
+  todo: number;
+}
+
+export interface EnrichmentScopeStatus {
+  total: number;
+  pico: EnrichmentJobStatus;
+  metadata: EnrichmentJobStatus;
+  fulltext: EnrichmentJobStatus;
+}
+
 export interface EnrichmentStatus {
   scenario_id: string | null;
+  scope: EnrichmentScope;
   total: number;
-  pico: { count: number; pct: number };
-  metadata: { count: number; pct: number };
-  fulltext: { count: number; pct: number };
+  pico: EnrichmentJobStatus;
+  metadata: EnrichmentJobStatus;
+  fulltext: EnrichmentJobStatus;
+  /** Les deux portées d'un coup, pour annoncer chaque choix avant de le lancer.
+   *  Nul hors scénario : à l'échelle du corpus la question ne se pose pas. */
+  by_scope: Record<EnrichmentScope, EnrichmentScopeStatus> | null;
 }
 
 export async function extractPicoBatchGlobal(
   scenarioId?: string,
   limit = 100000,
+  scope?: EnrichmentScope,
 ): Promise<EnrichmentBatchResult> {
   const params = new URLSearchParams({ limit: String(limit) });
   if (scenarioId) params.set('scenario_id', scenarioId);
+  if (scope) params.set('scope', scope);
   const r = await safeFetch(`${API_BASE_URL}/pico/extract?${params}`, { method: 'POST', headers: authHeaders() });
   if (!r.ok) throw new Error(httpMessage(r.status));
   return r.json();
@@ -2192,9 +2231,11 @@ export async function extractPicoBatchGlobal(
 export async function extractMetadataBatch(
   scenarioId?: string,
   limit = 100000,
+  scope?: EnrichmentScope,
 ): Promise<EnrichmentBatchResult> {
   const params = new URLSearchParams({ limit: String(limit) });
   if (scenarioId) params.set('scenario_id', scenarioId);
+  if (scope) params.set('scope', scope);
   const r = await safeFetch(`${API_BASE_URL}/metadata/extract?${params}`, { method: 'POST', headers: authHeaders() });
   if (!r.ok) throw new Error(httpMessage(r.status));
   return r.json();
@@ -2203,9 +2244,11 @@ export async function extractMetadataBatch(
 export async function fetchFulltextBatch(
   scenarioId?: string,
   limit = 100000,
+  scope?: EnrichmentScope,
 ): Promise<EnrichmentBatchResult & { fetched: number; not_available: number }> {
   const params = new URLSearchParams({ limit: String(limit) });
   if (scenarioId) params.set('scenario_id', scenarioId);
+  if (scope) params.set('scope', scope);
   const r = await safeFetch(`${API_BASE_URL}/fulltext/fetch?${params}`, { method: 'POST', headers: authHeaders() });
   if (!r.ok) throw new Error(httpMessage(r.status));
   return r.json();
@@ -2213,9 +2256,11 @@ export async function fetchFulltextBatch(
 
 export async function fetchEnrichmentStatus(
   scenarioId?: string,
+  scope?: EnrichmentScope,
 ): Promise<EnrichmentStatus> {
   const params = new URLSearchParams();
   if (scenarioId) params.set('scenario_id', scenarioId);
+  if (scope) params.set('scope', scope);
   const r = await safeFetch(`${API_BASE_URL}/enrichment/status?${params}`);
   if (!r.ok) throw new Error(httpMessage(r.status));
   return r.json();

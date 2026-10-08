@@ -247,6 +247,9 @@ export const fr = {
     openModel: "Prédire / ouvrir le modèle",
     trainAndPredict: "Entraîner & prédire (page détail)",
     allScenarios: "Tous les scénarios",
+    kindAll: "Toutes natures",
+    createdOn: "Créée le {date}",
+    createdFrom: "depuis {ip}",
     searchPlaceholder: "Chercher parmi les scénarios : nom, requête, description",
     searchMatches: "{n} sur {total}",
     searchClear: "Effacer",
@@ -979,6 +982,16 @@ export const fr = {
       fulltextDesc: "Recherche le texte intégral en accès libre via Unpaywall (DOI requis).",
       title: "Enrichissement LLM",
       subtitle: "Lancez les enrichissements automatiques sur l'ensemble du corpus",
+      subtitleScenario: "Lancez les enrichissements sur ce scénario",
+      scopeLabel: "Portée :",
+      scopeRelevant: "Articles pertinents",
+      scopeAll: "Tout le scénario",
+      scopeRelevantHint:
+        "Le sous-ensemble que les analyses lisent : au-dessus du seuil ou retenu à la main, jamais un doublon ni un article écarté.",
+      scopeAllHint:
+        "Toutes les références du scénario, y compris celles sous le seuil. Un appel de modèle par article.",
+      toProcess: "{n} à traiter",
+      nothingToProcess: "Rien à traiter",
       autoEnrichmentTitle: "Enrichissement automatique actif",
       autoEnrichmentBody:
         ": Le pipeline lance automatiquement l'extraction PICO et l'enrichissement des métadonnées lors de l'ingestion des articles. Utilisez les boutons ci-dessous uniquement pour compléter les articles qui auraient été manqués ou pour relancer un enrichissement spécifique.",
@@ -1391,6 +1404,10 @@ export const fr = {
         enrichment: "Enrichissement LLM",
         alerts: "Alertes",
       },
+      kindReview: "Revue de littérature",
+      kindPredictive: "Scénario prédictif",
+      kindHint:
+        "La nature de la question. Une revue de littérature se termine par une synthèse : la moitié prédictive de l'outil ne lui est pas proposée, et son pipeline ne la calcule pas. Réversible à tout moment, sans rien supprimer.",
       loading: "Chargement du scénario...",
       backToScenarios: "Retour aux scénarios",
       scenarioNotFound: "Scénario introuvable",
