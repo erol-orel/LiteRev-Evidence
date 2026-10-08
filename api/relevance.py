@@ -129,33 +129,71 @@ def _run_semantic_rerank_inline(scenario_id: str, query: str) -> int:
         return 0
 
 
+#: Le rerank est limité en débit côté fournisseur, et le dépassement est la panne
+#: NORMALE d'un balayage, pas l'exception : sur un rattrapage de 119 lots, 99 ont échoué
+#: d'affilée après une vingtaine de succès. Sans reprise, un rattrapage ne finit jamais.
+_RERANK_RETRIES = _env_int("RERANK_RETRIES", 5, 0)
+_RERANK_BACKOFF_S = 4.0
+
+
 def _cohere_rerank(query: str, docs: list[str], model: str = "rerank-v3.5") -> list[float] | None:
-    """Cross-encoder rerank via l'API Cohere. Renvoie un score de pertinence par
-    document (aligné sur `docs`), ou None si pas de clé / échec. Pas de dépendance
-    Python ajoutée : appel REST direct. Activé seulement si COHERE_API_KEY est défini.
-    """
+    """Cross-encoder rerank via Cohere, avec reprise sur limite de débit.
+
+    Renvoie un score par document (aligné sur `docs`), ou None après épuisement des
+    tentatives. Appel REST direct, aucune dépendance ajoutée.
+
+    429 et 5xx sont RÉESSAYÉS avec une attente qui double, en respectant `Retry-After`
+    quand le serveur le donne ; une erreur de requête (4xx autre que 429) ne l'est pas,
+    puisque la réessayer donnera la même réponse. Avant, toute erreur rendait None du
+    premier coup, et comme l'appelant jetait alors le lot entier, un simple dépassement de
+    débit se présentait comme « ce scénario n'a pas de scores »."""
     key = os.getenv("COHERE_API_KEY")
     if not key or not docs:
         return None
-    try:
-        import requests as _rq
-        resp = _rq.post(
-            "https://api.cohere.com/v2/rerank",
-            headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
-            json={"model": model, "query": query[:4000], "documents": docs, "top_n": len(docs)},
-            timeout=60,
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        scores: list[float | None] = [None] * len(docs)
-        for item in data.get("results", []):
-            idx = item.get("index")
-            if idx is not None and 0 <= idx < len(docs):
-                scores[idx] = float(item.get("relevance_score", 0.0))
-        return scores  # type: ignore[return-value]
-    except Exception as _e:
-        logger.warning(f"Cohere rerank failed: {_e}")
-        return None
+    import time as _t
+
+    import requests as _rq
+    wait = _RERANK_BACKOFF_S
+    for attempt in range(_RERANK_RETRIES + 1):
+        try:
+            resp = _rq.post(
+                "https://api.cohere.com/v2/rerank",
+                headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+                json={"model": model, "query": query[:4000], "documents": docs, "top_n": len(docs)},
+                timeout=60,
+            )
+            if resp.status_code == 429 or resp.status_code >= 500:
+                if attempt >= _RERANK_RETRIES:
+                    logger.warning(f"Cohere rerank: {resp.status_code} after "
+                                   f"{_RERANK_RETRIES} retries, giving up on this batch")
+                    return None
+                # Le serveur sait mieux que nous combien attendre quand il le dit.
+                try:
+                    hinted = float(resp.headers.get("Retry-After") or 0)
+                except ValueError:
+                    hinted = 0.0
+                _t.sleep(max(wait, hinted))
+                wait *= 2
+                continue
+            resp.raise_for_status()
+            data = resp.json()
+            scores: list[float | None] = [None] * len(docs)
+            for item in data.get("results", []):
+                idx = item.get("index")
+                if idx is not None and 0 <= idx < len(docs):
+                    scores[idx] = float(item.get("relevance_score", 0.0))
+            return scores  # type: ignore[return-value]
+        except _rq.exceptions.RequestException as _e:
+            # Panne réseau ou délai dépassé : réessayable, contrairement à un 400.
+            if attempt >= _RERANK_RETRIES:
+                logger.warning(f"Cohere rerank failed after {_RERANK_RETRIES} retries: {_e}")
+                return None
+            _t.sleep(wait)
+            wait *= 2
+        except Exception as _e:
+            logger.warning(f"Cohere rerank failed: {_e}")
+            return None
+    return None
 
 
 # Aucun plafond par défaut : le rerank note TOUT le corpus du scénario, jamais un
@@ -168,6 +206,8 @@ RERANK_MAX_ARTICLES = _env_int("RERANK_MAX_ARTICLES", 0, 0)
 #: Documents par requête Cohere. Tout partait en UN appel, donc un scénario de 3 424
 #: candidats tentait de les envoyer ensemble, et la moindre erreur perdait le lot entier.
 _RERANK_BATCH = 100
+#: Pause entre deux lots. Mieux vaut ne pas déclencher la limite que la rattraper.
+_RERANK_PAUSE_S = float(os.getenv("RERANK_PAUSE_S", "1.0") or 1.0)
 
 
 def _run_cross_encoder_rerank(scenario_id: str, query: str, top_k: int | None = None,
@@ -211,7 +251,10 @@ def _run_cross_encoder_rerank(scenario_id: str, query: str, top_k: int | None = 
         out["candidates"] = len(rows)
         if not rows:
             return out
+        import time as _t_batch
         for _b in range(0, len(rows), _RERANK_BATCH):
+            if _b:
+                _t_batch.sleep(_RERANK_PAUSE_S)
             chunk = rows[_b:_b + _RERANK_BATCH]
             docs = [f"{r['title']}\n\n{(r['abstract'] or '')[:1500]}" for r in chunk]
             scores = _cohere_rerank(query, docs)
