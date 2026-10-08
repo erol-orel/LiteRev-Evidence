@@ -255,3 +255,29 @@ def test_a_weak_extraction_is_not_counted_as_coverage_corpus_wide_either(seeded,
                     ('{"P": "x", "pico_confidence": 0.2}',))
     g = main.get_enrichment_status()
     assert g["pico"]["count"] + g["pico"]["todo"] <= g["total"]
+
+
+# ── the pipeline's own enrichment, as a setting ──────────────────────────────
+
+def test_the_pipeline_enriches_the_whole_scenario_by_default(monkeypatch):
+    """The map half is what the rule "every extraction reads all the relevant
+    articles" rests on: narrowing it is a choice someone makes, never a default."""
+    monkeypatch.delenv("PIPELINE_ENRICH_SCOPE", raising=False)
+    from api.scenario_store import pipeline_enrich_scope
+    assert pipeline_enrich_scope() == "all"
+    assert "similarity_threshold" not in main._enrich_gate()
+
+
+def test_the_pipeline_can_be_held_to_the_relevant_subset(monkeypatch):
+    monkeypatch.setenv("PIPELINE_ENRICH_SCOPE", "relevant")
+    from api.scenario_store import pipeline_enrich_scope
+    assert pipeline_enrich_scope() == "relevant"
+    assert "similarity_threshold" in main._enrich_gate()
+
+
+def test_an_unreadable_setting_keeps_the_whole_scenario(monkeypatch):
+    """A typo in an environment variable must not quietly stop extracting."""
+    for junk in ("", "  ", "RELEVENT", "true", "0"):
+        monkeypatch.setenv("PIPELINE_ENRICH_SCOPE", junk)
+        from api.scenario_store import pipeline_enrich_scope
+        assert pipeline_enrich_scope() == "all", junk

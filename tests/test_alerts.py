@@ -133,10 +133,11 @@ def _drive(monkeypatch, *, listed, total, smtp, dry_run, last_notified="set"):
     captured = {}
 
     def _fake_render(sid, articles, total_new, scenario_name=None, first_digest=False,
-                     n_relevant=None, signals=None):
+                     n_relevant=None, signals=None, can_model=True):
         captured["listed"], captured["total"] = len(articles), total_new
         captured["first_digest"] = first_digest
         captured["n_relevant"], captured["signals"] = n_relevant, signals
+        captured["can_model"] = can_model
         return ("subject", "<html></html>", "text")
 
     _ln = datetime(2026, 1, 1) if last_notified == "set" else last_notified
@@ -322,3 +323,31 @@ def test_the_deep_link_uses_the_scenario_id_the_app_reads():
     _s, html, text = main._render_alert_digest("usr-a b/c", _articles(1), 1)
     assert "?scenario=usr-a%20b%2Fc" in html
     assert "?scenario=usr-a%20b%2Fc" in text
+
+
+def test_the_digest_sends_a_review_to_its_pooled_parameters_not_to_a_model_spec():
+    """A literature review has no model specification: naming it in the one sentence
+    that tells the reader what to do pointed at the half its nature withholds."""
+    import main
+    _, _, text_review = main._render_alert_digest(
+        "s1", [{"title": "A", "year": 2026}], 1, scenario_name="Review",
+        signals=[{"code": "epidemic_parameters", "n": 2, "detail": "R0"}],
+        can_model=False)
+    assert "pooled parameters are worth rereading" in text_review
+    assert "model specification" not in text_review
+    assert "SEIR" not in text_review
+
+    _, _, text_pred = main._render_alert_digest(
+        "s1", [{"title": "A", "year": 2026}], 1, scenario_name="Predictive",
+        signals=[{"code": "epidemic_parameters", "n": 2, "detail": "R0"}],
+        can_model=True)
+    assert "model specification is worth rereading" in text_pred
+
+
+def test_the_digest_keeps_its_old_wording_when_the_kind_is_not_known():
+    """Every caller that never heard of the kind keeps the email it had."""
+    import main
+    _, _, body = main._render_alert_digest(
+        "s1", [{"title": "A", "year": 2026}], 1,
+        signals=[{"code": "epidemic_parameters", "n": 1, "detail": "R0"}])
+    assert "model specification is worth rereading" in body

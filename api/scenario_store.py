@@ -81,8 +81,14 @@ DEFAULT_KIND = KIND_PREDICTIVE          # NULL en base : rien ne change pour l'e
 # seuil, screening, PICO, concepts, synthèse, graphes, assistant, questions,
 # exports, revue vivante, enrichissement) appartient aux deux natures.
 CAP_MODEL = "model_spec"                # variables prédictives, spec, entraînement, SEIR
-CAP_FIELD_DATA = "field_data"           # rapports de situation (littérature grise)
-CAPABILITIES = (CAP_MODEL, CAP_FIELD_DATA)
+CAPABILITIES = (CAP_MODEL,)
+
+# Il y en avait une deuxième, `field_data`, qui retirait l'onglet des rapports de
+# situation. Retirée : la littérature grise de ReliefWeb EST une source de
+# littérature, qu'une revue humanitaire veut lire, et la capacité ne gardait rien
+# côté serveur, si bien que marquer un scénario « revue » retirait une source de
+# l'écran pendant que l'ingestion continuait. Une capacité qui cache sans garder
+# n'est pas une porte, c'est un oubli.
 
 _CAPABILITIES_BY_KIND = {
     KIND_REVIEW: frozenset(),
@@ -155,6 +161,24 @@ def capability_refusal(scenario_id: str, capability: str) -> dict[str, Any]:
 # tout le scénario coûte quatorze fois le lot utile, pour la même réponse. D'où un
 # périmètre explicite, et un seul endroit qui l'écrit.
 SCOPES = ("all", "relevant")
+
+
+def pipeline_enrich_scope() -> str:
+    """La portée des étapes d'enrichissement DU PIPELINE, réglée par l'environnement.
+
+    `all` par défaut : le comportement d'aujourd'hui, inchangé. La carte (les faits
+    par article, mis en cache sur la ligne) est la moitié sur laquelle repose la règle
+    « toute extraction lit tous les articles pertinents » : la réduire au sous-ensemble
+    pertinent du moment économise beaucoup, et laisse sans faits les articles qu'un
+    seuil abaissé rendra pertinents plus tard. Le digest dit déjà combien d'articles
+    pertinents portent un PICO, et le panneau d'enrichissement dit ce qu'il reste à
+    faire, donc le manque se voit et se rattrape ; mais c'est un choix, pas un défaut.
+
+    `PIPELINE_ENRICH_SCOPE=relevant` pour l'économie, comme les plafonds d'articles
+    sont un repli opérationnel pour un jour où le budget doit être tenu."""
+    import os
+    value = (os.getenv("PIPELINE_ENRICH_SCOPE") or "all").strip().lower()
+    return value if value in SCOPES else "all"
 
 
 def scenario_threshold_sql(sid: str = ":sid") -> str:

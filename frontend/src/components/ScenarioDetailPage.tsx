@@ -5713,6 +5713,7 @@ export function EnrichmentSection({ scenarioId }: { scenarioId?: string }) {
       stat: status ? `${status.pico.count} / ${status.total} (${status.pico.pct}%)` : "-",
       pct: status ? status.pico.pct : 0,
       todo: status ? status.pico.todo : null,
+      cap: limit,
       color: "bg-brand-500",
     },
     {
@@ -5723,6 +5724,7 @@ export function EnrichmentSection({ scenarioId }: { scenarioId?: string }) {
       stat: status ? `${status.metadata.count} / ${status.total} (${status.metadata.pct}%)` : "-",
       pct: status ? status.metadata.pct : 0,
       todo: status ? status.metadata.todo : null,
+      cap: limit,
       color: "bg-gold-500",
     },
     {
@@ -5733,6 +5735,7 @@ export function EnrichmentSection({ scenarioId }: { scenarioId?: string }) {
       stat: status ? `${status.fulltext.count} / ${status.total} (${status.fulltext.pct}%)` : "-",
       pct: status ? status.fulltext.pct : 0,
       todo: status ? status.fulltext.todo : null,
+      cap: Math.min(limit, 1000),
       color: "bg-forest-400",
     },
   ];
@@ -5846,7 +5849,12 @@ export function EnrichmentSection({ scenarioId }: { scenarioId?: string }) {
               {typeof job.todo === "number" && (
                 <p className="text-[10px] text-white/35">
                   {job.todo > 0
-                    ? t("scenarioDetail.enrichment.toProcess").replace("{n}", job.todo.toLocaleString())
+                    ? t("scenarioDetail.enrichment.toProcess")
+                        .replace("{n}", Math.min(job.todo, job.cap).toLocaleString())
+                      + (job.todo > job.cap
+                          ? " " + t("scenarioDetail.enrichment.cappedBy")
+                              .replace("{n}", job.todo.toLocaleString())
+                          : "")
                     : t("scenarioDetail.enrichment.nothingToProcess")}
                 </p>
               )}
@@ -8090,7 +8098,6 @@ type SectionKey = "review" | "evidence" | "reports" | "assistant" | "viz" | "var
 // la coupe ne retire que la moitié prédictive, elle n'enlève rien à une prévision.
 const SECTION_NEEDS: Partial<Record<SectionKey, ScenarioCapability>> = {
   variables: "model_spec",
-  reports: "field_data",
 };
 
 const SECTIONS: Array<{ key: SectionKey; icon: React.ReactNode }> = [

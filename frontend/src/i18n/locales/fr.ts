@@ -1004,6 +1004,7 @@ export const fr = {
         "Toutes les références du scénario, y compris celles sous le seuil. Un appel de modèle par article.",
       toProcess: "{n} à traiter",
       nothingToProcess: "Rien à traiter",
+      cappedBy: "sur {n} en attente, le reste au prochain lancement",
       autoEnrichmentTitle: "Enrichissement automatique actif",
       autoEnrichmentBody:
         ": Le pipeline lance automatiquement l'extraction PICO et l'enrichissement des métadonnées lors de l'ingestion des articles. Utilisez les boutons ci-dessous uniquement pour compléter les articles qui auraient été manqués ou pour relancer un enrichissement spécifique.",
