@@ -745,6 +745,64 @@ def get_scenario_extraction_coverage(scenario_id: str) -> dict[str, Any]:
     return extraction_digest(scenario_id)
 
 
+#: Same bound as the PICO list: a page is at most this many articles.
+EXTRACTION_PAGE_MAX = 5000
+
+
+@app.get("/user-scenarios/{scenario_id}/extraction/articles")
+def list_scenario_extraction_articles(scenario_id: str, limit: int = EXTRACTION_PAGE_MAX,
+                                      offset: int = 0) -> dict[str, Any]:
+    """EVERY relevant article of the scenario with what its extraction found, paged.
+
+    The extracted ones come first. The rows carry counts, not the observations (read one
+    article's with /articles/{id}/extraction), so the page stays small. The response says
+    how many articles exist, how many are extracted and whether more pages remain, so the
+    screen never reads a page as the whole corpus."""
+    _get_user_scenario_or_404(scenario_id)
+    limit = max(1, min(int(limit), EXTRACTION_PAGE_MAX))
+    offset = max(0, int(offset))
+    thr = _get_scenario_threshold(scenario_id)
+    gate = relevant_gate_sql("d", "ars", ":thr")
+    obs = ("CASE WHEN jsonb_typeof(d.extraction_json->'observations') = 'array' "
+           "THEN d.extraction_json->'observations' ELSE '[]'::jsonb END")
+    with engine.connect() as conn:
+        rows = [dict(r) for r in conn.execute(text(f"""
+            SELECT d.id, d.title, d.year, d.doi, d.journal,
+                   COALESCE(jsonb_typeof(d.extraction_json) = 'object', FALSE) AS has_extraction,
+                   d.extraction_json->>'source' AS source,
+                   COALESCE(d.extraction_json->>'truncated', 'false') = 'true' AS text_truncated,
+                   d.extraction_json->'coverage' AS coverage,
+                   jsonb_array_length({obs}) AS n_observations,
+                   (SELECT COUNT(*) FROM jsonb_array_elements({obs}) o
+                     WHERE o->>'quote_verified' = 'true') AS n_quote_found,
+                   COALESCE(d.extraction_attempts, 0) AS attempts
+            FROM literature_document d
+            JOIN article_scenarios ars ON ars.document_id = d.id
+            WHERE ars.scenario_id = :sid AND {gate}
+            ORDER BY COALESCE(jsonb_typeof(d.extraction_json) = 'object', FALSE) DESC, d.year DESC NULLS LAST, d.id DESC
+            LIMIT :limit OFFSET :offset
+        """), {"sid": scenario_id, "thr": thr, "limit": limit, "offset": offset}).mappings().all()]
+        head = conn.execute(text(f"""
+            SELECT COUNT(*) AS total,
+                   COUNT(*) FILTER (WHERE jsonb_typeof(d.extraction_json) = 'object') AS extracted
+            FROM literature_document d JOIN article_scenarios ars ON ars.document_id = d.id
+            WHERE ars.scenario_id = :sid AND {gate}
+        """), {"sid": scenario_id, "thr": thr}).mappings().first()
+    for r in rows:
+        r["n_observations"] = int(r["n_observations"] or 0)
+        r["n_quote_found"] = int(r["n_quote_found"] or 0)
+        r["coverage"] = {k: bool((r["coverage"] or {}).get(k)) for k in COVERAGE_KEYS} if r["has_extraction"] else None
+    total = int(head["total"] or 0)
+    returned = len(rows)
+    return {
+        "scenario_id": scenario_id, "threshold": thr, "total": total,
+        "extracted": int(head["extracted"] or 0), "offset": offset, "limit": limit,
+        "returned": returned, "truncated": offset + returned < total,
+        "next_offset": offset + returned if offset + returned < total else None,
+        "page_max": EXTRACTION_PAGE_MAX, "articles": rows,
+    }
+
+
 @app.get("/user-scenarios/{scenario_id}/articles/{article_id}/extraction")
 def get_article_extraction(scenario_id: str, article_id: int) -> dict[str, Any]:
     _get_user_scenario_or_404(scenario_id)

@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useLayoutEffect, useCallback, useRef, useMemo } from "react";
 import { ErrorBoundary } from "./ErrorBoundary";
+import { ExtractionSection } from "./ExtractionSection";
 import { useI18n } from "../i18n/LanguageProvider";
 import {
   ArrowLeft, Brain,
@@ -7138,10 +7139,11 @@ ${llm.future_research ? `<h3>${t("scenarioDetail.evidences.pdf.futureResearch")}
 /** EvidenceTab : Evidences fusionnées + Tableau PICO (sous-tabs) */
 function EvidenceTab({ scenarioId, detail }: { scenarioId: string; detail: ScenarioDetail }) {
   const { t } = useI18n();
-  const [sub, setSub] = React.useState<"evidences" | "pico">("evidences");
+  const [sub, setSub] = React.useState<"evidences" | "pico" | "extraction">("evidences");
   const SUB = [
     { key: "evidences" as const, label: t("scenarioDetail.evidenceTab.subEvidences"), icon: <BookOpen size={12} /> },
     { key: "pico" as const,      label: t("scenarioDetail.evidenceTab.subPicoTable"), icon: <Table2 size={12} /> },
+    { key: "extraction" as const, label: t("scenarioDetail.evidenceTab.subExtraction"), icon: <ClipboardList size={12} /> },
   ];
   return (
     <div className="space-y-4">
@@ -7157,6 +7159,7 @@ function EvidenceTab({ scenarioId, detail }: { scenarioId: string; detail: Scena
       </div>
       {sub === "evidences" && <EvidencesSection scenarioId={scenarioId} detail={detail} />}
       {sub === "pico" && <PicoSection scenarioId={scenarioId} />}
+      {sub === "extraction" && <ExtractionSection key={scenarioId} scenarioId={scenarioId} />}
     </div>
   );
 }
