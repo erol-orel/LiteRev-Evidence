@@ -30,6 +30,18 @@ def _get_user_scenario_or_404(scenario_id: str) -> dict[str, Any]:
 
 DEFAULT_SIMILARITY_THRESHOLD = 0.45
 
+# Le rerank juge la PERTINENCE À LA QUESTION, le cosinus la proximité de vocabulaire, et
+# sur un corpus thématique les deux ne disent pas du tout la même chose. Mesuré sur le
+# scénario HPAI (602 pertinents) : les articles hors sujet (COVID, dengue, Ebola) ont une
+# similarité MÉDIANE PLUS HAUTE que les articles aviaires, 0.398 contre 0.361, si bien que
+# monter le curseur de similarité jette d'abord ce qu'on voulait garder. Le rerank, lui,
+# les sépare : 0.588 contre 0.070. Un second seuil était donc le seul moyen de nettoyer un
+# corpus sans le mutiler, et il ne remplace pas le premier, il s'y ajoute.
+#
+# Par défaut 0 : la porte se comporte alors EXACTEMENT comme avant, puisque tout score de
+# rerank est positif. Rien ne change pour un scénario existant tant que personne n'y touche.
+DEFAULT_RERANK_THRESHOLD = 0.0
+
 
 def _get_scenario_threshold(scenario_id: str) -> float:
     """Retourne le seuil de similarité configuré pour ce scénario."""
@@ -38,6 +50,26 @@ def _get_scenario_threshold(scenario_id: str) -> float:
             SELECT similarity_threshold FROM scenario_settings WHERE scenario_id = :sid
         """), {"sid": scenario_id}).mappings().first()
     return float(row["similarity_threshold"]) if row and row["similarity_threshold"] is not None else DEFAULT_SIMILARITY_THRESHOLD
+
+
+def _get_scenario_rerank_threshold(scenario_id: str) -> float:
+    """Retourne le seuil de rerank configuré pour ce scénario (0 = aucun filtrage)."""
+    with engine.connect() as conn:
+        row = conn.execute(text("""
+            SELECT rerank_threshold FROM scenario_settings WHERE scenario_id = :sid
+        """), {"sid": scenario_id}).mappings().first()
+    return float(row["rerank_threshold"]) if row and row["rerank_threshold"] is not None else DEFAULT_RERANK_THRESHOLD
+
+
+def scenario_rerank_threshold_sql(sid: str = ":sid") -> str:
+    """Le seuil de rerank, LU DANS la requête, comme celui de similarité.
+
+    Passé en sous-requête corrélée plutôt qu'en paramètre lié pour que la porte reste UNE
+    chaîne utilisable telle quelle par les quinze appelants : ajouter un `:rthr` aurait
+    obligé chacun à le lier, et le premier oubli aurait fait diverger un compteur de son
+    lot, ce que cette fonction existe précisément pour empêcher."""
+    return (f"COALESCE((SELECT ss.rerank_threshold FROM scenario_settings ss"
+            f" WHERE ss.scenario_id = {sid}), {DEFAULT_RERANK_THRESHOLD})")
 
 
 # ── La porte de pertinence, écrite UNE fois ──────────────────────────────────
@@ -54,11 +86,26 @@ def relevant_gate_sql(doc: str = "d", link: str = "ars", thr: str = ":thr") -> s
     """Le prédicat SQL du sous-ensemble pertinent, à mettre dans un WHERE.
 
     `doc` et `link` sont les alias de literature_document et article_scenarios ; `thr` le
-    paramètre lié qui porte le seuil. Pur : aucune connexion, testable hors base."""
+    paramètre lié qui porte le seuil de similarité. Pur : aucune connexion, testable hors
+    base.
+
+    Le seuil de rerank s'y ajoute, lu dans la requête (`scenario_rerank_threshold_sql`).
+    Les deux scores ne sont PAS traités pareil, et l'asymétrie est voulue :
+
+      - pas de score de similarité vaut 0, donc dehors dès que le seuil est non nul ;
+      - pas de score de RERANK ne vaut rien du tout, donc l'article reste.
+
+    Parce que le rerank est calculé après coup et par lots : sur le scénario HPAI, 45 des
+    602 pertinents n'en avaient pas encore. Le compter pour 0 aurait fait disparaître ces
+    45 articles à la seconde où quelqu'un bouge le curseur, sans que rien ne le dise. Un
+    article non encore jugé n'est pas un article jugé mauvais."""
     status = f"COALESCE({link}.screening_status, {doc}.screening_status)"
+    rthr = scenario_rerank_threshold_sql(f"{link}.scenario_id")
     return (f"{doc}.is_duplicate IS NOT TRUE"
             f" AND {status} IS DISTINCT FROM 'excluded'"
-            f" AND ({status} = 'included' OR COALESCE({link}.similarity_score, 0) >= {thr})")
+            f" AND ({status} = 'included' OR ("
+            f"COALESCE({link}.similarity_score, 0) >= {thr}"
+            f" AND ({link}.rerank_score IS NULL OR {link}.rerank_score >= {rthr})))")
 
 
 # ── La nature d'une question, et ce qu'elle rend disponible ──────────────────

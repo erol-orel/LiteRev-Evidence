@@ -2759,9 +2759,14 @@ export async function assignScenarioToFolder(
 
 // ─── Scoring sémantique + Paramètres par scénario ────────────────────────────
 
+export type CurveScore = 'similarity' | 'rerank';
+
 export interface ScenarioSettings {
   scenario_id: string;
   similarity_threshold: number;
+  /** The second gate, on the rerank score. 0 means no filtering, which is the default
+   *  and exactly the behaviour that existed before it was added. */
+  rerank_threshold: number;
   brief_generated_at: string | null;
   variables_validated: boolean;
   variables_generated_at: string | null;
@@ -2795,10 +2800,18 @@ export interface ThresholdCurvePoint {
 
 export interface ThresholdCurve {
   scenario_id: string;
+  /** Which score the curve is drawn over. The two differ on one point, below. */
+  score: CurveScore;
   current_threshold: number;
   candidates: number;
   included: number;
   unscored: number;
+  /** The asymmetry, stated rather than implied: an article with no similarity score
+   *  counts as 0 and leaves, while an article the rerank has not judged yet stays. */
+  unscored_are_kept: boolean;
+  /** Everything that passes whatever the threshold: hand-included articles, plus the
+   *  not-yet-reranked ones when this is the rerank curve. */
+  always_kept: number;
   corpus: number;
   /** What the threshold can actually produce: below `min` the hand-included articles
    *  pass whatever happens, above `max` there is nothing left. Null on an empty corpus. */
@@ -2892,8 +2905,12 @@ export async function fetchEvidenceGaps(
 export async function fetchThresholdCurve(
   scenarioId: string,
   target?: number,
+  score: CurveScore = 'similarity',
 ): Promise<ThresholdCurve> {
-  const qs = target && target > 0 ? `?target=${Math.round(target)}` : '';
+  const p = new URLSearchParams();
+  if (target && target > 0) p.set('target', String(Math.round(target)));
+  if (score !== 'similarity') p.set('score', score);
+  const qs = p.toString() ? `?${p.toString()}` : '';
   const r = await safeFetch(`${API_BASE_URL}/scenarios/${scenarioId}/threshold-curve${qs}`);
   if (!r.ok) throw new Error(httpMessage(r.status));
   return r.json();
@@ -2901,7 +2918,7 @@ export async function fetchThresholdCurve(
 
 export async function patchScenarioSettings(
   scenarioId: string,
-  payload: { similarity_threshold?: number; variables_json?: Record<string, unknown> | null; variables_validated?: boolean },
+  payload: { similarity_threshold?: number; rerank_threshold?: number; variables_json?: Record<string, unknown> | null; variables_validated?: boolean },
 ): Promise<{ status: string; scenario_id: string; updated: string[] }> {
   const r = await safeFetch(`${API_BASE_URL}/scenarios/${scenarioId}/settings`, {
     method: 'PATCH',

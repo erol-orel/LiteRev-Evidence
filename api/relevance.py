@@ -24,7 +24,9 @@ from .core import (
 )
 from .scenario_store import (
     CORPUS_DERIVED_CACHE_RESET,
+    DEFAULT_RERANK_THRESHOLD,
     DEFAULT_SIMILARITY_THRESHOLD,
+    _get_scenario_rerank_threshold,
     _get_scenario_threshold,
     _get_user_scenario_or_404,
 )
@@ -218,6 +220,7 @@ def _ensure_scenario_settings_table():
             CREATE TABLE IF NOT EXISTS scenario_settings (
                 scenario_id     VARCHAR(80) PRIMARY KEY,
                 similarity_threshold FLOAT DEFAULT 0.45,
+                rerank_threshold     FLOAT DEFAULT 0,
                 evidence_brief_json  JSONB DEFAULT NULL,
                 brief_generated_at   TIMESTAMP DEFAULT NULL,
                 variables_json       JSONB DEFAULT NULL,
@@ -226,6 +229,11 @@ def _ensure_scenario_settings_table():
                 updated_at           TIMESTAMP DEFAULT NOW()
             )
         """))
+        # Ajoutée après coup : la table existe déjà en production, donc le CREATE ci-dessus
+        # ne la crée pas et la colonne doit être posée séparément. NULL vaut 0, soit la
+        # porte d'avant, pour tous les scénarios déjà là.
+        conn.execute(text(
+            "ALTER TABLE scenario_settings ADD COLUMN IF NOT EXISTS rerank_threshold FLOAT DEFAULT 0"))
     logger.info("Table scenario_settings vérifiée/créée.")
 
 try:
@@ -625,12 +633,17 @@ def get_scenario_settings(scenario_id: str) -> dict[str, Any]:
         return {
             "scenario_id": scenario_id,
             "similarity_threshold": DEFAULT_SIMILARITY_THRESHOLD,
+            "rerank_threshold": DEFAULT_RERANK_THRESHOLD,
             "brief_generated_at": None,
             "variables_validated": False,
             "variables_generated_at": None,
             "cached": {c[:-5]: False for c in _SETTINGS_BLOB_COLUMNS},
         }
     out = {k: v for k, v in dict(row).items() if k not in _SETTINGS_BLOB_COLUMNS}
+    # NULL en base veut dire « jamais réglé », et la porte le lit comme 0. L'interface doit
+    # lire la même chose, sans quoi le curseur s'afficherait vide sur un corpus non filtré.
+    if out.get("rerank_threshold") is None:
+        out["rerank_threshold"] = DEFAULT_RERANK_THRESHOLD
     out["cached"] = {c[:-5]: bool(row.get(c)) for c in _SETTINGS_BLOB_COLUMNS if c in row}
     return out
 
@@ -638,10 +651,21 @@ def get_scenario_settings(scenario_id: str) -> dict[str, Any]:
 @app.patch("/scenarios/{scenario_id}/settings")
 def update_scenario_settings(scenario_id: str, payload: dict[str, Any], _: None = Depends(require_api_key)) -> dict[str, Any]:
     """Met à jour les paramètres du scénario (seuil, variables validées, etc.)."""
-    allowed = {"similarity_threshold", "variables_json", "variables_validated"}
+    allowed = {"similarity_threshold", "rerank_threshold", "variables_json", "variables_validated"}
     updates = {k: v for k, v in payload.items() if k in allowed}
     if not updates:
         raise HTTPException(status_code=422, detail="Aucun champ valide à mettre à jour")
+    # Les deux seuils bornent un score, et un score hors de [0, 1] ne veut rien dire. Sans
+    # cette garde, un 45 tapé pour 0.45 vidait le corpus sans un mot d'explication.
+    for _k in ("similarity_threshold", "rerank_threshold"):
+        if _k in updates:
+            try:
+                _v = float(updates[_k])
+            except (TypeError, ValueError):
+                raise HTTPException(status_code=422, detail=f"{_k} doit être un nombre")
+            if not (0.0 <= _v <= 1.0):
+                raise HTTPException(status_code=422, detail=f"{_k} doit être compris entre 0 et 1")
+            updates[_k] = _v
 
     with engine.begin() as conn:
         # Upsert
@@ -665,7 +689,10 @@ def update_scenario_settings(scenario_id: str, payload: dict[str, Any], _: None 
         # n'étaient invalidés par rien : déplacer le curseur de pertinence laissait servir,
         # jusqu'à 30 jours, des visualisations calculées sur un sous-ensemble qui n'existe
         # plus, et une édition du spec laissait une projection issue des anciens paramètres.
-        if "similarity_threshold" in updates:
+        # Le seuil de rerank découpe le corpus exactement comme celui de similarité, donc
+        # il périme exactement les mêmes artefacts. L'oublier ici aurait servi un
+        # clustering et des actions recommandées calculés sur le corpus d'avant.
+        if "similarity_threshold" in updates or "rerank_threshold" in updates:
             # Les actions recommandées étaient les seules oubliées : elles sont générées
             # sur les articles pertinents ET sur le digest du corpus, mais leur cache
             # n'est indexé que par (scénario, langue). Déplacer le seuil de 0.45 à 0.60
@@ -688,7 +715,7 @@ def update_scenario_settings(scenario_id: str, payload: dict[str, Any], _: None 
     # Retourner l'objet settings complet mis à jour
     with engine.connect() as conn:
         updated_row = conn.execute(text("""
-            SELECT scenario_id, similarity_threshold, brief_generated_at,
+            SELECT scenario_id, similarity_threshold, rerank_threshold, brief_generated_at,
                    variables_validated, variables_generated_at, updated_at
             FROM scenario_settings WHERE scenario_id = :sid
         """), {"sid": scenario_id}).mappings().first()
@@ -698,6 +725,7 @@ def update_scenario_settings(scenario_id: str, payload: dict[str, Any], _: None 
             "scenario_id": scenario_id,
             "updated": list(updates.keys()),
             "similarity_threshold": float(updated_row["similarity_threshold"]) if updated_row["similarity_threshold"] is not None else 0.45,
+            "rerank_threshold": float(updated_row["rerank_threshold"]) if updated_row["rerank_threshold"] is not None else 0.0,
             "variables_validated": bool(updated_row["variables_validated"]),
             "updated_at": updated_row["updated_at"].isoformat() if updated_row["updated_at"] else None,
         }
@@ -722,19 +750,34 @@ def _floor4(x: float) -> float:
     return math.floor(float(x) * 10000) / 10000
 
 
-def _threshold_curve_inputs(scenario_id: str) -> dict[str, Any]:
+CURVE_SCORES = ("similarity", "rerank")
+
+
+def _threshold_curve_inputs(scenario_id: str, score: str = "similarity") -> dict[str, Any]:
     """Lit d'un coup ce dont la courbe a besoin : un point par article CANDIDAT, plus les
-    deux compteurs que la courbe ne peut pas déduire.
+    compteurs que la courbe ne peut pas déduire.
 
     Candidat = ni doublon, ni exclu, ni inclus à la main. Les inclus passent QUEL QUE SOIT
     le seuil (c'est la porte de pertinence commune à toute l'app) : ils s'ajoutent donc à
     chaque total sans jamais peser sur le choix du seuil, d'où leur comptage à part.
 
-    Un article non scoré vaut 0, exactement comme dans la porte
-    (`COALESCE(ars.similarity_score, 0) >= :thr`) : la courbe doit dire ce que la base
-    fera, pas ce qu'elle ferait si tout était scoré. Leur nombre est renvoyé à part pour
-    que l'interface puisse le signaler."""
+    `score` choisit la métrique, et les deux ne traitent PAS l'article non scoré pareil,
+    parce que la porte ne le traite pas pareil :
+
+      - `similarity` : un article sans score vaut 0, donc il sort dès que le seuil est non
+        nul. Il est dans `rows`, à 0.
+      - `rerank` : un article sans score n'est pas jugé, donc il reste quel que soit le
+        seuil. Il n'est PAS dans `rows`, il rejoint le compte des articles qui passent
+        d'office, sans quoi la courbe promettrait une coupe que la base ne ferait pas.
+
+    `unscored_are_kept` dit laquelle des deux règles s'applique, pour que l'interface
+    puisse l'écrire au lieu de laisser deviner."""
     from .variables import _param_regex                     # lazy: variables charge après
+    if score not in CURVE_SCORES:
+        raise HTTPException(status_code=422,
+                            detail=f"score inconnu : '{score}' (attendu : {', '.join(CURVE_SCORES)})")
+    rerank = score == "rerank"
+    col = "ars.rerank_score" if rerank else "COALESCE(ars.similarity_score, 0)"
     sql_where = """
         FROM literature_document d
         JOIN article_scenarios ars ON ars.document_id = d.id
@@ -742,12 +785,16 @@ def _threshold_curve_inputs(scenario_id: str) -> dict[str, Any]:
           AND d.is_duplicate IS NOT TRUE
           AND COALESCE(ars.screening_status, d.screening_status) IS DISTINCT FROM 'excluded'
     """
+    # Le non scoré sort de la courbe pour le rerank : il passe d'office, donc il n'a pas
+    # de place sur un axe de seuils.
+    only_scored = " AND ars.rerank_score IS NOT NULL" if rerank else ""
     with engine.connect() as conn:
         rows = [(float(r["s"]), bool(r["p"])) for r in conn.execute(text(f"""
-            SELECT COALESCE(ars.similarity_score, 0) AS s,
+            SELECT {col} AS s,
                    ((COALESCE(d.title, '') || ' ' || COALESCE(d.abstract, '')) ~* :rx) AS p
             {sql_where}
               AND COALESCE(ars.screening_status, d.screening_status) IS DISTINCT FROM 'included'
+              {only_scored}
             ORDER BY s DESC
         """), {"sid": scenario_id, "rx": _param_regex(boundary=r"\y")}).mappings()]
         head = conn.execute(text(f"""
@@ -755,11 +802,12 @@ def _threshold_curve_inputs(scenario_id: str) -> dict[str, Any]:
                      WHERE COALESCE(ars.screening_status, d.screening_status) = 'included') AS included,
                    COUNT(*) FILTER (
                      WHERE COALESCE(ars.screening_status, d.screening_status) IS DISTINCT FROM 'included'
-                       AND ars.similarity_score IS NULL) AS unscored
+                       AND {'ars.rerank_score' if rerank else 'ars.similarity_score'} IS NULL) AS unscored
             {sql_where}
         """), {"sid": scenario_id}).mappings().first() or {}
     return {"rows": rows, "included": int(head.get("included") or 0),
-            "unscored": int(head.get("unscored") or 0)}
+            "unscored": int(head.get("unscored") or 0),
+            "score": score, "unscored_are_kept": rerank}
 
 
 def threshold_curve(rows: list[tuple[float, bool]], included: int = 0, targets=_CURVE_TARGETS,
@@ -843,7 +891,8 @@ def _scope_note(scenario_id: str) -> dict[str, Any] | None:
 
 
 @app.get("/scenarios/{scenario_id}/threshold-curve")
-def get_threshold_curve(scenario_id: str, target: int | None = None) -> dict[str, Any]:
+def get_threshold_curve(scenario_id: str, target: int | None = None,
+                        score: str = "similarity") -> dict[str, Any]:
     """« Quel seuil garde N articles ? » - répondu sur les scores réellement en base.
 
     Aucun échantillonnage et aucun LLM : un point par article candidat, agrégé en
@@ -859,26 +908,36 @@ def get_threshold_curve(scenario_id: str, target: int | None = None) -> dict[str
     bouge encore). Aucun point n'est « exact » par construction : les ex aequo font qu'une
     cible ronde est rarement atteignable, et c'est `kept` qui fait foi."""
     _get_user_scenario_or_404(scenario_id)
-    data = _threshold_curve_inputs(scenario_id)
+    data = _threshold_curve_inputs(scenario_id, score)
     rows, included = data["rows"], data["included"]
-    current = _get_scenario_threshold(scenario_id)
+    # Ce qui passe quel que soit le seuil : les inclus à la main, plus, pour le rerank,
+    # les articles que le rerank n'a pas encore jugés. La courbe les ajoute à chaque
+    # point, exactement comme la porte les laissera passer.
+    free = included + (data["unscored"] if data["unscored_are_kept"] else 0)
+    current = (_get_scenario_rerank_threshold(scenario_id) if score == "rerank"
+               else _get_scenario_threshold(scenario_id))
     targets = list(_CURVE_TARGETS)
     if target is not None:
         t = int(target)
         if t < 1:
             raise HTTPException(status_code=422, detail="target doit être un entier positif")
         targets.insert(0, t)                    # en tête : elle l'emporte sur le barème
-    curve = threshold_curve(rows, included, targets, current)
+    curve = threshold_curve(rows, free, targets, current)
     out: dict[str, Any] = {
         "scenario_id": scenario_id,
+        "score": score,
         "current_threshold": current,
         "candidates": len(rows),
         "included": included,
         "unscored": data["unscored"],
-        "corpus": len(rows) + included,
-        # Ce que le seuil peut atteindre : en deçà de `min`, les articles inclus à la main
-        # passent quoi qu'on fasse ; au-delà de `max`, il n'y a plus d'articles.
-        "reachable": {"min": included + 1, "max": len(rows) + included} if rows else None,
+        # Le point sur lequel les deux courbes diffèrent, écrit plutôt que sous-entendu :
+        # un article non scoré sort (similarité) ou reste (rerank).
+        "unscored_are_kept": data["unscored_are_kept"],
+        "always_kept": free,
+        "corpus": len(rows) + free,
+        # Ce que le seuil peut atteindre : en deçà de `min`, les articles qui passent
+        # d'office passent quoi qu'on fasse ; au-delà de `max`, il n'y a plus d'articles.
+        "reachable": {"min": free + 1, "max": len(rows) + free} if rows else None,
         "with_parameter_total": sum(1 for _, p in rows if p),
         "scoring_in_progress": _RERANK_JOBS.get(scenario_id, {}).get("status") == "running",
         # Un découpage par clusters ou par concepts ne juge que les articles pertinents AU

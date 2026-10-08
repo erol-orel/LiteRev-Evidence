@@ -69,6 +69,7 @@ import {
   patchScenarioSettings,
   fetchThresholdCurve,
   type ThresholdCurve,
+  type CurveScore,
   fetchEvidenceGaps,
   type EvidenceGaps,
   fetchStudyDesignVocabulary,
@@ -5900,6 +5901,9 @@ export function EnrichmentSection({ scenarioId }: { scenarioId?: string }) {
 function SeuilSection({ scenarioId, onSaved, onThresholdChange }: { scenarioId: string; onSaved?: () => void; onThresholdChange?: (v: number) => void }) {
   const { t } = useI18n();
   const [threshold, setThreshold] = React.useState<number>(DEFAULT_SIMILARITY_THRESHOLD);
+  // Le second seuil. 0 = pas de filtrage, donc la porte d'avant, pour tout scénario
+  // auquel personne n'a touché.
+  const [rerankThreshold, setRerankThreshold] = React.useState<number>(0);
   const [saving, setSaving] = React.useState(false);
   const [saved, setSaved] = React.useState(false);
   const [rerankStatus, setRerankStatus] = React.useState<string | null>(null);
@@ -5909,7 +5913,10 @@ function SeuilSection({ scenarioId, onSaved, onThresholdChange }: { scenarioId: 
 
   React.useEffect(() => {
     getScenarioSettings(scenarioId)
-      .then(s => setThreshold(s.similarity_threshold ?? DEFAULT_SIMILARITY_THRESHOLD))
+      .then(s => {
+        setThreshold(s.similarity_threshold ?? DEFAULT_SIMILARITY_THRESHOLD);
+        setRerankThreshold(s.rerank_threshold ?? 0);
+      })
       .catch(() => {});
     return () => { if (pollRef.current) clearInterval(pollRef.current); };
   }, [scenarioId]);
@@ -5918,7 +5925,9 @@ function SeuilSection({ scenarioId, onSaved, onThresholdChange }: { scenarioId: 
     setSaving(true);
     setSaved(false);
     try {
-      await patchScenarioSettings(scenarioId, { similarity_threshold: threshold });
+      await patchScenarioSettings(scenarioId, {
+        similarity_threshold: threshold, rerank_threshold: rerankThreshold,
+      });
       setSaved(true);
       setTimeout(() => setSaved(false), 2000);
       setCurveKey(k => k + 1);          // sinon la courbe garde l'ancien « seuil actuel »
@@ -5970,6 +5979,20 @@ function SeuilSection({ scenarioId, onSaved, onThresholdChange }: { scenarioId: 
         />
         <span className="font-mono text-brand-300 w-10 text-center">{threshold.toFixed(2)}</span>
       </div>
+      <div className="flex items-center gap-2 text-xs text-white/60"
+           title={t("scenarioDetail.seuil.rerankHelp")}>
+        <Target size={12} className="text-gold-400 shrink-0" />
+        <span className="font-medium text-white/70">{t("scenarioDetail.seuil.rerankLabel")}</span>
+        <input
+          type="range" min={0} max={0.9} step={0.01}
+          value={rerankThreshold}
+          onChange={e => setRerankThreshold(parseFloat(e.target.value))}
+          className="w-28 accent-gold-400"
+        />
+        <span className="font-mono text-gold-300 w-10 text-center">
+          {rerankThreshold > 0 ? rerankThreshold.toFixed(2) : t("scenarioDetail.seuil.rerankOff")}
+        </span>
+      </div>
       <div className="flex items-center gap-2">
         <button onClick={handleSave} disabled={saving}
           className="flex items-center gap-1 rounded-lg bg-brand-500/15 hover:bg-brand-500/25 border border-brand-500/20 text-brand-300 px-2.5 py-1 text-[11px] font-medium transition disabled:opacity-50">
@@ -5998,11 +6021,13 @@ function SeuilSection({ scenarioId, onSaved, onThresholdChange }: { scenarioId: 
         {t("scenarioDetail.seuil.footerMain")}
         <span className="ml-1 text-white/20">{t("scenarioDetail.seuil.footerLegend")}</span>
       </p>
+      <p className="text-[10px] text-white/30 w-full -mt-2">{t("scenarioDetail.seuil.rerankFooter")}</p>
       {showCurve && (
         <ThresholdCurvePanel
           key={curveKey}
           scenarioId={scenarioId}
           onPick={v => { setThreshold(v); onThresholdChange?.(v); }}
+          onPickRerank={v => setRerankThreshold(v)}
         />
       )}
     </div>
@@ -6227,26 +6252,28 @@ function EvidenceGapsPanel({ scenarioId }: { scenarioId: string }) {
   );
 }
 
-function ThresholdCurvePanel({ scenarioId, onPick }: { scenarioId: string; onPick: (v: number) => void }) {
+function ThresholdCurvePanel({ scenarioId, onPick, onPickRerank }: { scenarioId: string; onPick: (v: number) => void; onPickRerank?: (v: number) => void }) {
   const { t } = useI18n();
   const [data, setData] = React.useState<ThresholdCurve | null>(null);
   const [loading, setLoading] = React.useState(true);
   const [error, setError] = React.useState<string | null>(null);
   const [target, setTarget] = React.useState<string>("");
+  const [score, setScore] = React.useState<CurveScore>("similarity");
 
-  const load = React.useCallback((want?: number) => {
+  const load = React.useCallback((want?: number, which: CurveScore = score) => {
     setLoading(true);
     setError(null);
-    fetchThresholdCurve(scenarioId, want)
+    fetchThresholdCurve(scenarioId, want, which)
       .then(setData)
       .catch(e => setError(e?.message || t("scenarioDetail.seuil.curve.error")))
       .finally(() => setLoading(false));
-  }, [scenarioId, t]);
+  }, [scenarioId, t, score]);
 
   React.useEffect(() => { load(); }, [load]);
 
   const askedFor = Number(target);
   const rows = data?.curve ?? [];
+  const pick = (v: number) => (data?.score === "rerank" ? onPickRerank?.(v) : onPick(v));
 
   return (
     <div className="w-full rounded-xl border border-white/8 bg-black/20 px-3 py-2.5 space-y-2">
@@ -6260,6 +6287,17 @@ function ThresholdCurvePanel({ scenarioId, onPick }: { scenarioId: string; onPic
           className="w-20 rounded-lg border border-white/10 bg-white/5 px-2 py-1 text-white/80 font-mono"
         />
         <span className="text-white/40">{t("scenarioDetail.seuil.curve.targetUnit")}</span>
+        <div className="flex items-center gap-1 rounded-lg border border-white/10 bg-white/5 p-0.5">
+          {(["similarity", "rerank"] as CurveScore[]).map(k => (
+            <button key={k}
+              onClick={() => { setScore(k); load(askedFor > 0 ? askedFor : undefined, k); }}
+              className={`rounded-md px-2 py-0.5 text-[10px] transition ${
+                score === k ? "bg-brand-700 text-gold-400 font-semibold" : "text-white/45 hover:text-white"
+              }`}>
+              {t(k === "rerank" ? "scenarioDetail.seuil.curve.scoreRerank" : "scenarioDetail.seuil.curve.scoreSimilarity")}
+            </button>
+          ))}
+        </div>
         <button
           onClick={() => load(askedFor > 0 ? askedFor : undefined)}
           className="rounded-lg bg-brand-500/15 hover:bg-brand-500/25 border border-brand-500/20 text-brand-300 px-2.5 py-1 font-medium transition">
@@ -6282,7 +6320,9 @@ function ThresholdCurvePanel({ scenarioId, onPick }: { scenarioId: string; onPic
             )}
             {data.unscored > 0 && (
               <p className="text-gold-400/70">
-                {t("scenarioDetail.seuil.curve.unscoredNote").replace("{n}", data.unscored.toLocaleString())}
+                {t(data.unscored_are_kept
+                    ? "scenarioDetail.seuil.curve.unscoredKeptNote"
+                    : "scenarioDetail.seuil.curve.unscoredNote").replace("{n}", data.unscored.toLocaleString())}
               </p>
             )}
             {data.scoring_in_progress && (
@@ -6335,7 +6375,7 @@ function ThresholdCurvePanel({ scenarioId, onPick }: { scenarioId: string; onPic
                       </td>
                       <td className="py-1">
                         <button
-                          onClick={() => onPick(p.threshold)}
+                          onClick={() => pick(p.threshold)}
                           className="rounded-md border border-white/10 bg-white/5 hover:bg-white/10 px-2 py-0.5 text-white/50 hover:text-white/80 transition">
                           {t("scenarioDetail.seuil.curve.use")}
                         </button>
