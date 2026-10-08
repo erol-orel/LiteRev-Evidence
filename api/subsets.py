@@ -259,6 +259,19 @@ def _cluster_membership(scenario_id: str) -> tuple[dict[int, int], dict[int, str
 
     cache = _load_viz_cache(scenario_id, "clustering")
     if not cache or not cache.get("clusters"):
+        # Deux absences très différentes derrière le même cache vide, et l'ancien message
+        # ne disait que la première. Bouger le seuil périme le clustering et en relance
+        # un : l'écran continue d'afficher les groupes d'AVANT, le relecteur en coche un,
+        # et on lui répondait « ouvrez l'onglet Clusters pour le calculer » alors qu'il y
+        # était et que le calcul tournait. Dire laquelle des deux c'est, et dans le cas
+        # qui passe, dire d'attendre.
+        from .clustering import _clustering_jobs
+        if (_clustering_jobs.get(scenario_id) or {}).get("status") == "running":
+            raise HTTPException(status_code=409,
+                                detail="Le clustering est en cours de recalcul pour ce "
+                                       "scénario : les groupes affichés sont ceux d'avant. "
+                                       "Attendez la fin du calcul, puis refaites la sélection "
+                                       "sur les nouveaux groupes.")
         raise HTTPException(status_code=404,
                             detail="Aucun clustering en cache pour ce scénario : ouvrez "
                                    "l'onglet Clusters pour le calculer, puis réessayez.")

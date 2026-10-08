@@ -6403,7 +6403,7 @@ function ThresholdCurvePanel({ scenarioId, onPick, onPickRerank }: { scenarioId:
 }
 
 /** ReviewTab : Corpus + PRISMA + Double-Aveugle (sous-tabs) */
-function ReviewTab({ scenarioId, detail, counts }: { scenarioId: string; detail: ScenarioDetail; counts?: CorpusCounts }) {
+function ReviewTab({ scenarioId, detail, counts, onRefreshCounts }: { scenarioId: string; detail: ScenarioDetail; counts?: CorpusCounts; onRefreshCounts?: () => void }) {
   const { t } = useI18n();
   const [sub, setSub] = React.useState<"corpus" | "prisma" | "screening">("corpus");
   const [corpusRefreshKey, setCorpusRefreshKey] = React.useState(0);
@@ -6427,7 +6427,10 @@ function ReviewTab({ scenarioId, detail, counts }: { scenarioId: string; detail:
       </div>
       {sub === "corpus" && (
         <div className="space-y-4">
-          <SeuilSection scenarioId={scenarioId} onSaved={() => setCorpusRefreshKey(k => k + 1)} onThresholdChange={setLiveThreshold} />
+          <SeuilSection
+            scenarioId={scenarioId}
+            onSaved={() => { setCorpusRefreshKey(k => k + 1); onRefreshCounts?.(); }}
+            onThresholdChange={setLiveThreshold} />
           <CorpusSection key={corpusRefreshKey} scenarioId={scenarioId} detail={detail} threshold={liveThreshold} counts={counts} />
         </div>
       )}
@@ -8448,7 +8451,11 @@ export function ScenarioDetailPage({ scenarioId, onBack, initialTab }: ScenarioD
             recharge ses données (corpus, PRISMA, étape sémantique…) - sinon elle
             garderait les nombres provisoires lus pendant le pipeline. */}
         <div key={`section-${refreshKey}`} className="contents">
-        {activeSection === "review" && <ReviewTab scenarioId={scenarioId} detail={detail} counts={counts?.counts} />}
+        {activeSection === "review" && (
+          <ReviewTab
+            scenarioId={scenarioId} detail={detail} counts={counts?.counts}
+            onRefreshCounts={() => { fetchScenarioCounts(scenarioId).then(setCounts).catch(() => {}); }} />
+        )}
         {activeSection === "evidence" && <EvidenceTab scenarioId={scenarioId} detail={detail} />}
         {activeSection === "reports" && <SituationReportsSection scenarioId={scenarioId} />}
         {activeSection === "assistant" && <RagSection scenarioId={scenarioId} detail={detail} />}
