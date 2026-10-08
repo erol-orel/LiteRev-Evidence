@@ -530,12 +530,21 @@ def user_scenario_rag_assistant(scenario_id: str, payload: AskIn) -> dict[str, A
             "5. Tout chiffre de volume ou de proportion vient du bloc CORPUS COMPLET, "
             "jamais d'un comptage des SOURCES reproduites.\n"
             "6. Ne pas utiliser de tiret cadratin (em dash).\n"
+            "7. Le bloc EXTRACTION STRUCTUREE compte les articles qui rapportent sexe, age, "
+            "profession, CAP, EPI, vaccination : cite toujours son denominateur (articles "
+            "extraits sur articles pertinents) et ne generalise pas aux articles non extraits.\n"
         ) + _llm_lang_directive(payload.lang)
         # Même forme que le brief : le digest (tout le corpus pertinent, en SQL) porte
         # les chiffres, les sources reproduites portent les citations.
         from .digest import corpus_digest, digest_coverage_note, digest_to_prompt
         _digest = corpus_digest(scenario_id, eff_thr)
         _digest_block = digest_to_prompt(_digest)
+        # Ce que l'extraction structuree a trouve (sexe, age, CAP, EPI...), compte sur TOUS
+        # les articles pertinents deja extraits, avec son denominateur.
+        from .extraction import extraction_digest, extraction_to_prompt
+        _extraction_block = extraction_to_prompt(extraction_digest(scenario_id, eff_thr))
+        if _extraction_block:
+            _digest_block = f"{_digest_block}\n\n{_extraction_block}" if _digest_block else _extraction_block
         _coverage = digest_coverage_note(_digest, len(sources))
         response = client.chat.completions.create(
             model=_model("chat"),
@@ -720,6 +729,12 @@ async def ask_stream_filtered(payload: dict[str, Any]):
         _digest = corpus_digest(scenario_id, threshold)
         digest_block = digest_to_prompt(_digest)
         coverage_note = digest_coverage_note(_digest, len(context_chunks))
+        # Ce que l'extraction structuree a trouve (sexe, age, CAP, EPI...), compte sur TOUS
+        # les articles pertinents deja extraits, avec son denominateur.
+        from .extraction import extraction_digest, extraction_to_prompt
+        _extraction_block = extraction_to_prompt(extraction_digest(scenario_id, threshold))
+        if _extraction_block:
+            digest_block = f"{digest_block}\n\n{_extraction_block}" if digest_block else _extraction_block
 
     system_prompt = """Tu es un assistant expert en sciences de la santé et en revue systématique de la littérature scientifique.
 Tu réponds de manière précise, factuelle et structurée.
@@ -727,6 +742,9 @@ Base-toi exclusivement sur le contexte fourni. Si l'information n'est pas dans l
 Cite les articles pertinents par leur titre quand tu les mentionnes.
 Toute affirmation de volume ou de proportion (combien d'etudes, quelles annees, quels pays,
 quels devis) doit venir du bloc CORPUS COMPLET, jamais d'un comptage des extraits reproduits.
+Le bloc EXTRACTION STRUCTUREE compte les articles qui rapportent sexe, age, profession, CAP,
+EPI, vaccination : cite toujours son denominateur (articles extraits sur articles pertinents)
+et ne generalise pas aux articles non extraits.
 Ne pas utiliser de tiret cadratin (em dash).""" + _llm_lang_directive(lang)
 
     user_prompt = (
