@@ -977,6 +977,7 @@ export const fr = {
       subtitle:
         "Mis en commun sur tout le corpus pertinent, pondérés par la qualité de chaque étude. Un intervalle, un nombre d'études, et la provenance derrière chaque valeur.",
       recompute: "Recalculer",
+      needsKey: "Recalculer demande la clé admin : l'en-tête indique Lecture seule. Cliquez dessus pour saisir la clé.",
       candidates: "{n} articles du corpus rapportent un paramètre",
       studies: "{n} études",
       notYet: "Aucun paramètre mis en commun pour l'instant. Lancez le calcul pour les extraire des articles qui en rapportent.",

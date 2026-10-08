@@ -979,6 +979,7 @@ export const en: Translations = {
       subtitle:
         "Pooled over the whole relevant corpus, weighted by the quality of each study. An interval, a number of studies, and the provenance behind every value.",
       recompute: "Recompute",
+      needsKey: "Recalculating needs the admin key: the header shows Read-only. Click it to set the key.",
       candidates: "{n} articles in the corpus report a parameter",
       studies: "{n} studies",
       notYet: "No parameter pooled yet. Run the computation to extract them from the articles that report one.",
