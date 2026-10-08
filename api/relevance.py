@@ -451,10 +451,7 @@ def _get_above_threshold_articles(scenario_id: str, threshold: float | None = No
                   -- Décision produit : un article NON scoré (similarity_score NULL)
                   -- n'est PAS pertinent - même définition que tous les affichages
                   -- (COALESCE(score,0) >= seuil). On garde le rattrapage 'included'.
-                  AND (
-                      COALESCE(asn.screening_status, ld.screening_status) = 'included'
-                      OR COALESCE(asn.similarity_score, 0) >= :threshold
-                  )
+                  AND (COALESCE(asn.screening_status, ld.screening_status) = 'included' OR (COALESCE(asn.similarity_score, 0) >= :threshold AND (asn.rerank_score IS NULL OR asn.rerank_score >= COALESCE((SELECT ss.rerank_threshold FROM scenario_settings ss WHERE ss.scenario_id = asn.scenario_id), 0.0))))
                   {"AND ld.pico_json IS NOT NULL" if require_pico else ""}
             ) ranked
             ORDER BY rn

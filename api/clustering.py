@@ -173,8 +173,7 @@ def _clustering_docs(scenario_id: str, threshold: float, cap: int | None = None)
           AND d.abstract IS NOT NULL
           AND LENGTH(d.abstract) > 50
           AND COALESCE(asn.screening_status, d.screening_status) IS DISTINCT FROM 'excluded'
-          AND (COALESCE(asn.screening_status, d.screening_status) = 'included'
-               OR COALESCE(asn.similarity_score, 0) >= :thr)
+          AND (COALESCE(asn.screening_status, d.screening_status) = 'included' OR (COALESCE(asn.similarity_score, 0) >= :thr AND (asn.rerank_score IS NULL OR asn.rerank_score >= COALESCE((SELECT ss.rerank_threshold FROM scenario_settings ss WHERE ss.scenario_id = asn.scenario_id), 0.0))))
     """
     with engine.connect() as conn:
         n_total = int(conn.execute(text(f"SELECT COUNT(*) {_relevant}"),

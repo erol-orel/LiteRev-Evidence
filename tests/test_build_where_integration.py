@@ -19,7 +19,8 @@ def _seed(conn):
         )
         c.execute(
             "CREATE TABLE article_scenarios ("
-            "scenario_id text, document_id int, PRIMARY KEY (scenario_id, document_id))"
+            "scenario_id text, document_id int, rerank_score double precision,"
+            " PRIMARY KEY (scenario_id, document_id))"
         )
         c.execute(
             "INSERT INTO literature_document VALUES "

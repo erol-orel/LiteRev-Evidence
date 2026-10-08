@@ -56,11 +56,7 @@ def _scenario_seed(scenario_id: str) -> tuple[float, float, str | None]:
                     WHERE ld.project_context = 'literev'
                       AND ld.is_duplicate IS NOT TRUE
                       AND ld.geographic_scope IS NOT NULL
-                      AND COALESCE(asn.screening_status, ld.screening_status) IS DISTINCT FROM 'excluded'
-                      AND (
-                          COALESCE(asn.screening_status, ld.screening_status) = 'included'
-                          OR COALESCE(asn.similarity_score, 0) >= :threshold
-                      )
+                      AND COALESCE(asn.screening_status, ld.screening_status) IS DISTINCT FROM 'excluded' AND (COALESCE(asn.screening_status, ld.screening_status) = 'included' OR (COALESCE(asn.similarity_score, 0) >= :threshold AND (asn.rerank_score IS NULL OR asn.rerank_score >= COALESCE((SELECT ss.rerank_threshold FROM scenario_settings ss WHERE ss.scenario_id = asn.scenario_id), 0.0))))
                     GROUP BY ld.geographic_scope
                     ORDER BY n DESC, ld.geographic_scope ASC
                 """), {"sid": scenario_id, "threshold": threshold}).mappings().all()

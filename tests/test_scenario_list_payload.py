@@ -55,6 +55,7 @@ def seeded(db_conn):
         cur.execute(
             "CREATE TABLE article_scenarios ("
             "scenario_id text, document_id bigint, similarity_score double precision,"
+            "rerank_score double precision,"
             "screening_status text, PRIMARY KEY (scenario_id, document_id))"
         )
         # The scenario tables come from the app's own boot DDL (run at import); only the

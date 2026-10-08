@@ -143,7 +143,8 @@ def corpus(db_conn, monkeypatch):
             "document_id bigint NOT NULL REFERENCES literature_document(id) ON DELETE CASCADE,"
             "chunk_index int NOT NULL DEFAULT 0, content text NOT NULL, chunk_type text)")
         cur.execute("CREATE TABLE article_scenarios (scenario_id text, document_id bigint, "
-                    "similarity_score double precision, PRIMARY KEY (scenario_id, document_id))")
+                    "similarity_score double precision, rerank_score double precision, "
+                    "PRIMARY KEY (scenario_id, document_id))")
     # The real boot function, on tables that exist this time. On CI the session's
     # import of main ran it against an EMPTY database (no literature_document yet, so
     # the table, its indexes and the triggers failed and were recorded); this rerun

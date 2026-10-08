@@ -154,7 +154,8 @@ def seeded(db_conn):
             "chunk_index int DEFAULT 0, content text, chunk_type text, embedding text)")
         cur.execute(
             "CREATE TABLE article_scenarios (scenario_id text, document_id bigint,"
-            "similarity_score double precision, screening_status text, screening_reason text,"
+            "similarity_score double precision, rerank_score double precision,"
+            "screening_status text, screening_reason text,"
             "PRIMARY KEY (scenario_id, document_id))")
         cur.execute("SELECT to_regclass('user_scenarios') IS NULL")
         if cur.fetchone()[0]:

@@ -174,8 +174,7 @@ def get_user_scenario_prisma(
                 SUM(CASE WHEN (d.is_duplicate IS NULL OR d.is_duplicate = FALSE) AND EXISTS (
                     SELECT 1 FROM document_chunk c
                     WHERE c.document_id = d.id AND c.chunk_type = 'fulltext_section'
-                ) AND COALESCE(ars.screening_status, d.screening_status) IS DISTINCT FROM 'excluded'
-                  AND (COALESCE(ars.similarity_score, 0) >= :thr OR COALESCE(ars.screening_status, d.screening_status) = 'included')
+                ) AND COALESCE(ars.screening_status, d.screening_status) IS DISTINCT FROM 'excluded' AND (COALESCE(ars.screening_status, d.screening_status) = 'included' OR (COALESCE(ars.similarity_score, 0) >= :thr AND (ars.rerank_score IS NULL OR ars.rerank_score >= COALESCE((SELECT ss.rerank_threshold FROM scenario_settings ss WHERE ss.scenario_id = ars.scenario_id), 0.0))))
                   THEN 1 ELSE 0 END) AS with_fulltext,
                 -- embeddings : MÊME sous-ensemble non dupliqué que les étapes
                 -- post-identification ci-dessus. Sans le filtre, la carte PRISMA pouvait

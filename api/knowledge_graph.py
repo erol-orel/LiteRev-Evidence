@@ -215,9 +215,7 @@ def _compute_user_kg(scenario_id: str, max_nodes: int = 400, min_similarity: flo
     # corpus_above et l'Assistant RAG. Sinon les communautés étaient diluées par des
     # centaines d'articles hors-sujet ramenés par la fédération.
     _thr = _get_scenario_threshold(scenario_id)
-    _relevant = (" AND COALESCE(ars.screening_status, d.screening_status) IS DISTINCT FROM 'excluded'"
-                 " AND (COALESCE(ars.screening_status, d.screening_status) = 'included'"
-                 "      OR COALESCE(ars.similarity_score, 0) >= :thr)")
+    _relevant = " AND " + "COALESCE(ars.screening_status, d.screening_status) IS DISTINCT FROM 'excluded' AND (COALESCE(ars.screening_status, d.screening_status) = 'included' OR (COALESCE(ars.similarity_score, 0) >= :thr AND (ars.rerank_score IS NULL OR ars.rerank_score >= COALESCE((SELECT ss.rerank_threshold FROM scenario_settings ss WHERE ss.scenario_id = ars.scenario_id), 0.0))))"
     sql = _KG_NODE_SQL.format(
         join=("JOIN article_scenarios ars ON ars.document_id = d.id"
               " JOIN document_chunk c ON c.document_id = d.id"),
@@ -231,8 +229,7 @@ def _compute_user_kg(scenario_id: str, max_nodes: int = 400, min_similarity: flo
             WHERE ars.scenario_id = :sid
               AND d.is_duplicate IS NOT TRUE AND d.abstract IS NOT NULL
               AND COALESCE(ars.screening_status, d.screening_status) IS DISTINCT FROM 'excluded'
-              AND (COALESCE(ars.screening_status, d.screening_status) = 'included'
-                   OR COALESCE(ars.similarity_score, 0) >= :thr)
+              AND (COALESCE(ars.screening_status, d.screening_status) = 'included' OR (COALESCE(ars.similarity_score, 0) >= :thr AND (ars.rerank_score IS NULL OR ars.rerank_score >= COALESCE((SELECT ss.rerank_threshold FROM scenario_settings ss WHERE ss.scenario_id = ars.scenario_id), 0.0))))
               AND EXISTS (SELECT 1 FROM document_chunk c
                           WHERE c.document_id = d.id AND c.embedding IS NOT NULL)
         """), {"sid": scenario_id, "thr": _thr}).scalar() or 0
@@ -709,8 +706,7 @@ _CONCEPT_ROWS_SQL = """
       AND d.is_duplicate IS NOT TRUE
       AND d.abstract IS NOT NULL
       AND COALESCE(ars.screening_status, d.screening_status) IS DISTINCT FROM 'excluded'
-      AND (COALESCE(ars.screening_status, d.screening_status) = 'included'
-           OR COALESCE(ars.similarity_score, 0) >= :thr)
+      AND (COALESCE(ars.screening_status, d.screening_status) = 'included' OR (COALESCE(ars.similarity_score, 0) >= :thr AND (ars.rerank_score IS NULL OR ars.rerank_score >= COALESCE((SELECT ss.rerank_threshold FROM scenario_settings ss WHERE ss.scenario_id = ars.scenario_id), 0.0))))
     ORDER BY (COALESCE(ars.screening_status, d.screening_status) = 'included') DESC,
              ars.similarity_score DESC NULLS LAST, d.year DESC NULLS LAST, d.id
     LIMIT :cap
@@ -730,9 +726,7 @@ def _concept_rows(scenario_id: str) -> tuple[list[dict], int]:
         n_total = conn.execute(text(
             "SELECT COUNT(*) FROM literature_document d JOIN article_scenarios ars ON ars.document_id = d.id "
             "WHERE ars.scenario_id = :sid AND d.is_duplicate IS NOT TRUE AND d.abstract IS NOT NULL "
-            "AND COALESCE(ars.screening_status, d.screening_status) IS DISTINCT FROM 'excluded' "
-            "AND (COALESCE(ars.screening_status, d.screening_status) = 'included' "
-            "     OR COALESCE(ars.similarity_score, 0) >= :thr)"
+            "AND " + "COALESCE(ars.screening_status, d.screening_status) IS DISTINCT FROM 'excluded' AND (COALESCE(ars.screening_status, d.screening_status) = 'included' OR (COALESCE(ars.similarity_score, 0) >= :thr AND (ars.rerank_score IS NULL OR ars.rerank_score >= COALESCE((SELECT ss.rerank_threshold FROM scenario_settings ss WHERE ss.scenario_id = ars.scenario_id), 0.0))))"
         ), {"sid": scenario_id, "thr": thr}).scalar() or 0
     return rows, int(n_total)
 
