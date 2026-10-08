@@ -221,8 +221,7 @@ def _count_new_articles_for_scenario(conn, scenario_id: str, since) -> int:
 # relecteur ou au-dessus du seuil).
 _RELEVANT_GATE = """
       AND COALESCE(a.screening_status, d.screening_status) IS DISTINCT FROM 'excluded'
-      AND (COALESCE(a.screening_status, d.screening_status) = 'included'
-           OR COALESCE(a.similarity_score, 0) >= :thr)
+      AND (COALESCE(a.screening_status, d.screening_status) = 'included' OR (COALESCE(a.similarity_score, 0) >= :thr AND (a.rerank_score IS NULL OR a.rerank_score >= COALESCE((SELECT ss.rerank_threshold FROM scenario_settings ss WHERE ss.scenario_id = a.scenario_id), 0.0))))
 """
 
 # Devis qui déplacent le niveau de preuve d'une revue : s'ils arrivent, le brief mérite

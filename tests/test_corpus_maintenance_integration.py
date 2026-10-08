@@ -52,6 +52,7 @@ def _seed(conn):
         cur.execute(
             "CREATE TABLE article_scenarios ("  # deliberately NO FK, mirroring production
             "scenario_id text, document_id bigint, similarity_score double precision,"
+            "rerank_score double precision,"
             "PRIMARY KEY (scenario_id, document_id))"
         )
         cur.execute(
@@ -169,6 +170,7 @@ def test_corpus_maintenance_detects_content_duplicates(db_conn):
         cur.execute(
             "CREATE TABLE article_scenarios ("
             "scenario_id text, document_id bigint, similarity_score double precision,"
+            "rerank_score double precision,"
             "PRIMARY KEY (scenario_id, document_id))"
         )
         # Même article (external_id 'pmid:5' vs '5' → clé 'ext:5' commune), AUCUN flag posé ;

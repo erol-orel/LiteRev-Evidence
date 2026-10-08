@@ -605,10 +605,10 @@ async def ask_stream_filtered(payload: dict[str, Any]):
                     SELECT
                         COUNT(*) FILTER (WHERE d.is_duplicate IS NOT TRUE
                             AND COALESCE(ars.screening_status, d.screening_status) IS DISTINCT FROM 'excluded'
-                            AND (COALESCE(ars.screening_status, d.screening_status) = 'included' OR COALESCE(ars.similarity_score, 0) >= :thr)) AS relevant,
+                            AND (COALESCE(ars.screening_status, d.screening_status) = 'included' OR (COALESCE(ars.similarity_score, 0) >= :thr AND (ars.rerank_score IS NULL OR ars.rerank_score >= COALESCE((SELECT ss.rerank_threshold FROM scenario_settings ss WHERE ss.scenario_id = ars.scenario_id), 0.0))))) AS relevant,
                         COUNT(*) FILTER (WHERE d.is_duplicate IS NOT TRUE
                             AND COALESCE(ars.screening_status, d.screening_status) IS DISTINCT FROM 'excluded'
-                            AND (COALESCE(ars.screening_status, d.screening_status) = 'included' OR COALESCE(ars.similarity_score, 0) >= :thr)
+                            AND (COALESCE(ars.screening_status, d.screening_status) = 'included' OR (COALESCE(ars.similarity_score, 0) >= :thr AND (ars.rerank_score IS NULL OR ars.rerank_score >= COALESCE((SELECT ss.rerank_threshold FROM scenario_settings ss WHERE ss.scenario_id = ars.scenario_id), 0.0))))
                             AND EXISTS (SELECT 1 FROM document_chunk c
                                 WHERE c.document_id = d.id AND c.chunk_type = 'fulltext_section')) AS relevant_with_fulltext
                     FROM article_scenarios ars

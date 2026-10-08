@@ -39,8 +39,7 @@ _RELEVANT = """
     WHERE ars.scenario_id = :sid
       AND d.is_duplicate IS NOT TRUE
       AND COALESCE(ars.screening_status, d.screening_status) IS DISTINCT FROM 'excluded'
-      AND (COALESCE(ars.screening_status, d.screening_status) = 'included'
-           OR COALESCE(ars.similarity_score, 0) >= :thr)
+      AND (COALESCE(ars.screening_status, d.screening_status) = 'included' OR (COALESCE(ars.similarity_score, 0) >= :thr AND (ars.rerank_score IS NULL OR ars.rerank_score >= COALESCE((SELECT ss.rerank_threshold FROM scenario_settings ss WHERE ss.scenario_id = ars.scenario_id), 0.0))))
 """
 
 # Combien de modalités on garde par distribution : de quoi décrire un corpus sans noyer
@@ -119,8 +118,7 @@ def concept_matrix(scenario_id: str, row_type: str, col_type: str,
                 WHERE ars.scenario_id = :sid
                   AND d.is_duplicate IS NOT TRUE
                   AND COALESCE(ars.screening_status, d.screening_status) IS DISTINCT FROM 'excluded'
-                  AND (COALESCE(ars.screening_status, d.screening_status) = 'included'
-                       OR COALESCE(ars.similarity_score, 0) >= :thr)
+                  AND (COALESCE(ars.screening_status, d.screening_status) = 'included' OR (COALESCE(ars.similarity_score, 0) >= :thr AND (ars.rerank_score IS NULL OR ars.rerank_score >= COALESCE((SELECT ss.rerank_threshold FROM scenario_settings ss WHERE ss.scenario_id = ars.scenario_id), 0.0))))
                   AND jsonb_typeof(d.concepts_json->'concepts') = 'array'
                   AND c->>'t' IS NOT NULL
                 GROUP BY 1 ORDER BY n DESC
@@ -136,8 +134,7 @@ def concept_matrix(scenario_id: str, row_type: str, col_type: str,
                 WHERE ars.scenario_id = :sid
                   AND d.is_duplicate IS NOT TRUE
                   AND COALESCE(ars.screening_status, d.screening_status) IS DISTINCT FROM 'excluded'
-                  AND (COALESCE(ars.screening_status, d.screening_status) = 'included'
-                       OR COALESCE(ars.similarity_score, 0) >= :thr)
+                  AND (COALESCE(ars.screening_status, d.screening_status) = 'included' OR (COALESCE(ars.similarity_score, 0) >= :thr AND (ars.rerank_score IS NULL OR ars.rerank_score >= COALESCE((SELECT ss.rerank_threshold FROM scenario_settings ss WHERE ss.scenario_id = ars.scenario_id), 0.0))))
                   AND jsonb_typeof(d.concepts_json->'concepts') = 'array'
                   AND r->>'t' = :row_type AND c->>'t' = :col_type
                   AND r->>'en' IS NOT NULL AND c->>'en' IS NOT NULL
@@ -256,8 +253,7 @@ def corpus_digest(scenario_id: str, threshold: float | None = None) -> dict[str,
                     WHERE ars.scenario_id = :sid
                       AND d.is_duplicate IS NOT TRUE
                       AND COALESCE(ars.screening_status, d.screening_status) IS DISTINCT FROM 'excluded'
-                      AND (COALESCE(ars.screening_status, d.screening_status) = 'included'
-                           OR COALESCE(ars.similarity_score, 0) >= :thr)
+                      AND (COALESCE(ars.screening_status, d.screening_status) = 'included' OR (COALESCE(ars.similarity_score, 0) >= :thr AND (ars.rerank_score IS NULL OR ars.rerank_score >= COALESCE((SELECT ss.rerank_threshold FROM scenario_settings ss WHERE ss.scenario_id = ars.scenario_id), 0.0))))
                       AND jsonb_typeof(d.concepts_json->'concepts') = 'array'
                       AND c->>'en' IS NOT NULL
                     GROUP BY 1, 2 ORDER BY n DESC

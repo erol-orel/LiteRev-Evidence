@@ -173,8 +173,7 @@ def _clustering_docs(scenario_id: str, threshold: float, cap: int | None = None)
           AND d.abstract IS NOT NULL
           AND LENGTH(d.abstract) > 50
           AND COALESCE(asn.screening_status, d.screening_status) IS DISTINCT FROM 'excluded'
-          AND (COALESCE(asn.screening_status, d.screening_status) = 'included'
-               OR COALESCE(asn.similarity_score, 0) >= :thr)
+          AND (COALESCE(asn.screening_status, d.screening_status) = 'included' OR (COALESCE(asn.similarity_score, 0) >= :thr AND (asn.rerank_score IS NULL OR asn.rerank_score >= COALESCE((SELECT ss.rerank_threshold FROM scenario_settings ss WHERE ss.scenario_id = asn.scenario_id), 0.0))))
     """
     with engine.connect() as conn:
         n_total = int(conn.execute(text(f"SELECT COUNT(*) {_relevant}"),
@@ -434,15 +433,23 @@ def _summarize_clusters_in_lang(scenario_id: str, payload: dict, lang: str) -> d
 
 
 def _persist_clustering_result(scenario_id: str, result: dict) -> None:
-    """Cache DB (durable) + /tmp (compat) d'un payload de clustering."""
+    """Cache DB, et LUI SEUL.
+
+    Il y avait une seconde copie sous /tmp, étiquetée « compat », avec son propre TTL de
+    24 h. Elle était lue AVANT tout calcul, et sur un succès réécrite en base avec un
+    horodatage frais. Conséquence mesurée en production : bouger le seuil vidait bien
+    `clustering_json`, puis la copie /tmp du POOL PRÉCÉDENT ressuscitait et se
+    réinstallait en base. Le scénario HPAI affichait ainsi « 602 articles, 5 clusters »
+    alors que son sous-ensemble pertinent en comptait 201, avec clustering_generated_at
+    égal à updated_at à la microseconde près, après le PATCH du seuil. Trois scénarios sur
+    les dix-neuf qui portent un clustering annonçaient plus d'articles que leur corpus
+    pertinent n'en contient, ce qui est arithmétiquement impossible.
+
+    Une invalidation ne peut pas atteindre ce qu'elle ne connaît pas, et un cache que
+    l'invalidation n'atteint pas n'est pas un cache, c'est une seconde vérité. Le cache DB
+    est durable, porte son horodatage et se vide avec le reste ; /tmp disparaît de toute
+    façon à chaque déploiement, donc il ne servait même pas de filet."""
     _save_viz_cache(scenario_id, "clustering", json.loads(json.dumps(result, cls=_NumpyEncoder, default=str)))
-    try:
-        cache_dir = "/tmp/literev_clustering_cache"
-        os.makedirs(cache_dir, exist_ok=True)
-        with open(os.path.join(cache_dir, f"{scenario_id}.json"), "w") as f:
-            json.dump(result, f, cls=_NumpyEncoder, default=str)
-    except Exception:
-        pass
 
 
 def _relocalize_clustering_background(scenario_id: str, payload: dict, lang: str) -> None:
@@ -535,33 +542,8 @@ def _build_clusters_payload(scenario_id: str, docs: list, cc: dict, *,
 
 
 def _run_clustering_background(scenario_id: str, force_refresh: bool = False, lang: str | None = None) -> None:
-    """Calcule le clustering dans un thread séparé et stocke le résultat en cache."""
-    import time as _time
-
-    cache_dir = "/tmp/literev_clustering_cache"
-    os.makedirs(cache_dir, exist_ok=True)
-    cache_file = os.path.join(cache_dir, f"{scenario_id}.json")
-    TTL = 86400
+    """Calcule le clustering dans un thread séparé et stocke le résultat en cache DB."""
     want = _norm_lang(lang) or "fr"
-
-    # Vérifier le cache d'abord - dans la LANGUE demandée : un cache frais dont les
-    # résumés sont dans l'autre langue (ou sans résumés) garde sa structure, seuls les
-    # résumés sont régénérés. Avant, le cache était servi tel quel → résumés en
-    # français sous le toggle anglais.
-    if not force_refresh and os.path.exists(cache_file):
-        try:
-            mtime = os.path.getmtime(cache_file)
-            if _time.time() - mtime < TTL:
-                with open(cache_file, "r") as f:
-                    cached = json.load(f)
-                if _clusters_have_lang(cached, want) or not cached.get("clusters") or not os.getenv("OPENAI_API_KEY"):
-                    cached["from_cache"] = True
-                    _clustering_jobs[scenario_id] = {"status": "done", "result": cached}
-                else:
-                    _relocalize_clustering_background(scenario_id, cached, want)
-                return
-        except Exception:
-            pass
 
     try:
         meta_for_cluster = {}

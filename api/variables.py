@@ -114,8 +114,7 @@ def _parameter_candidate_articles(scenario_id: str, threshold: float | None = No
           AND d.is_duplicate IS NOT TRUE
           AND d.abstract IS NOT NULL
           AND COALESCE(ars.screening_status, d.screening_status) IS DISTINCT FROM 'excluded'
-          AND (COALESCE(ars.screening_status, d.screening_status) = 'included'
-               OR COALESCE(ars.similarity_score, 0) >= :thr)
+          AND (COALESCE(ars.screening_status, d.screening_status) = 'included' OR (COALESCE(ars.similarity_score, 0) >= :thr AND (ars.rerank_score IS NULL OR ars.rerank_score >= COALESCE((SELECT ss.rerank_threshold FROM scenario_settings ss WHERE ss.scenario_id = ars.scenario_id), 0.0))))
           AND (d.title || ' ' || d.abstract) ~* :rx
         ORDER BY
           CASE WHEN COALESCE(d.study_design, '') ~* 'systematic|meta-analy|méta-analy' THEN 0 ELSE 1 END,

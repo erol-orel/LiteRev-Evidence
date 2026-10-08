@@ -237,3 +237,97 @@ def test_the_status_reports_real_coverage_not_just_the_in_memory_job(seeded, mon
     R._run_cross_encoder_rerank(SID, "hpai")
     st2 = main.get_rerank_status(SID)
     assert st2["missing"] == 0 and st2["scorable"] == 25
+
+
+# ─── La reprise sur limite de débit ──────────────────────────────────────────
+# Mesuré en production pendant le rattrapage : sur 119 lots, 99 ont échoué d'affilée
+# après une vingtaine de succès, et sur un autre scénario 80 sur 109. Le fournisseur
+# limite le débit, et sans reprise un rattrapage ne finit jamais. Le lot par lot avait
+# déjà transformé « rien n'est écrit » en « 2 000 lignes écrites », ce qui est ce qui a
+# rendu la panne visible ; la reprise la rend survivable.
+
+class _Resp:
+    def __init__(self, status: int, payload=None, headers=None):
+        self.status_code = status
+        self._payload = payload or {}
+        self.headers = headers or {}
+
+    def json(self):
+        return self._payload
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise RuntimeError(f"HTTP {self.status_code}")
+
+
+def _ok_payload(n: int):
+    return {"results": [{"index": i, "relevance_score": 0.5} for i in range(n)]}
+
+
+def test_a_rate_limit_is_retried_and_then_succeeds(monkeypatch):
+    import api.relevance as RR
+    monkeypatch.setenv("COHERE_API_KEY", "k")
+    monkeypatch.setattr(RR, "_RERANK_BACKOFF_S", 0.0)
+    calls = {"n": 0}
+
+    def _post(url, headers=None, json=None, timeout=None):
+        calls["n"] += 1
+        if calls["n"] < 3:
+            return _Resp(429, headers={"Retry-After": "0"})
+        return _Resp(200, _ok_payload(len(json["documents"])))
+
+    import requests as _rq
+    monkeypatch.setattr(_rq, "post", _post)
+    out = RR._cohere_rerank("q", ["a", "b"])
+    assert out == [0.5, 0.5]
+    assert calls["n"] == 3, "la reprise n'a pas eu lieu"
+
+
+def test_a_server_error_is_retried_too(monkeypatch):
+    import api.relevance as RR
+    monkeypatch.setenv("COHERE_API_KEY", "k")
+    monkeypatch.setattr(RR, "_RERANK_BACKOFF_S", 0.0)
+    calls = {"n": 0}
+
+    def _post(url, headers=None, json=None, timeout=None):
+        calls["n"] += 1
+        return _Resp(503) if calls["n"] == 1 else _Resp(200, _ok_payload(len(json["documents"])))
+
+    import requests as _rq
+    monkeypatch.setattr(_rq, "post", _post)
+    assert RR._cohere_rerank("q", ["a"]) == [0.5]
+    assert calls["n"] == 2
+
+
+def test_a_bad_request_is_not_retried(monkeypatch):
+    """Réessayer un 400 donne le même 400 : c'est du temps et des appels pour rien."""
+    import api.relevance as RR
+    monkeypatch.setenv("COHERE_API_KEY", "k")
+    monkeypatch.setattr(RR, "_RERANK_BACKOFF_S", 0.0)
+    calls = {"n": 0}
+
+    def _post(url, headers=None, json=None, timeout=None):
+        calls["n"] += 1
+        return _Resp(400)
+
+    import requests as _rq
+    monkeypatch.setattr(_rq, "post", _post)
+    assert RR._cohere_rerank("q", ["a"]) is None
+    assert calls["n"] == 1
+
+
+def test_retries_are_bounded(monkeypatch):
+    import api.relevance as RR
+    monkeypatch.setenv("COHERE_API_KEY", "k")
+    monkeypatch.setattr(RR, "_RERANK_BACKOFF_S", 0.0)
+    monkeypatch.setattr(RR, "_RERANK_RETRIES", 3)
+    calls = {"n": 0}
+
+    def _post(url, headers=None, json=None, timeout=None):
+        calls["n"] += 1
+        return _Resp(429, headers={"Retry-After": "0"})
+
+    import requests as _rq
+    monkeypatch.setattr(_rq, "post", _post)
+    assert RR._cohere_rerank("q", ["a"]) is None
+    assert calls["n"] == 4, "une tentative initiale plus trois reprises"

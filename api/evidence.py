@@ -265,39 +265,39 @@ def _build_evidence_brief(scenario_id: str) -> dict[str, Any]:
                 )) AS with_fulltext,
                 COUNT(*) FILTER (WHERE d.is_duplicate IS NOT TRUE
                     AND COALESCE(ars.screening_status, d.screening_status) IS DISTINCT FROM 'excluded'
-                    AND (COALESCE(ars.screening_status, d.screening_status) = 'included' OR COALESCE(ars.similarity_score, 0) >= :thr)) AS relevant,
+                    AND (COALESCE(ars.screening_status, d.screening_status) = 'included' OR (COALESCE(ars.similarity_score, 0) >= :thr AND (ars.rerank_score IS NULL OR ars.rerank_score >= COALESCE((SELECT ss.rerank_threshold FROM scenario_settings ss WHERE ss.scenario_id = ars.scenario_id), 0.0))))) AS relevant,
                 COUNT(*) FILTER (WHERE d.is_duplicate IS NOT TRUE
                     AND COALESCE(ars.screening_status, d.screening_status) IS DISTINCT FROM 'excluded'
-                    AND (COALESCE(ars.screening_status, d.screening_status) = 'included' OR COALESCE(ars.similarity_score, 0) >= :thr)
+                    AND (COALESCE(ars.screening_status, d.screening_status) = 'included' OR (COALESCE(ars.similarity_score, 0) >= :thr AND (ars.rerank_score IS NULL OR ars.rerank_score >= COALESCE((SELECT ss.rerank_threshold FROM scenario_settings ss WHERE ss.scenario_id = ars.scenario_id), 0.0))))
                     AND d.pico_json IS NOT NULL) AS relevant_with_pico,
                 COUNT(*) FILTER (WHERE d.is_duplicate IS NOT TRUE
                     AND COALESCE(ars.screening_status, d.screening_status) IS DISTINCT FROM 'excluded'
-                    AND (COALESCE(ars.screening_status, d.screening_status) = 'included' OR COALESCE(ars.similarity_score, 0) >= :thr)
+                    AND (COALESCE(ars.screening_status, d.screening_status) = 'included' OR (COALESCE(ars.similarity_score, 0) >= :thr AND (ars.rerank_score IS NULL OR ars.rerank_score >= COALESCE((SELECT ss.rerank_threshold FROM scenario_settings ss WHERE ss.scenario_id = ars.scenario_id), 0.0))))
                     AND EXISTS (SELECT 1 FROM document_chunk c
                         WHERE c.document_id = d.id AND c.chunk_type = 'fulltext_section')) AS relevant_with_fulltext,
                 -- Couverture & citations : calculées sur le SOUS-ENSEMBLE PERTINENT
                 -- (au-dessus du seuil), pas sur le corpus complet.
                 MIN(d.year) FILTER (WHERE d.is_duplicate IS NOT TRUE
                     AND COALESCE(ars.screening_status, d.screening_status) IS DISTINCT FROM 'excluded'
-                    AND (COALESCE(ars.screening_status, d.screening_status) = 'included' OR COALESCE(ars.similarity_score, 0) >= :thr)
+                    AND (COALESCE(ars.screening_status, d.screening_status) = 'included' OR (COALESCE(ars.similarity_score, 0) >= :thr AND (ars.rerank_score IS NULL OR ars.rerank_score >= COALESCE((SELECT ss.rerank_threshold FROM scenario_settings ss WHERE ss.scenario_id = ars.scenario_id), 0.0))))
                     AND d.year BETWEEN 1800 AND EXTRACT(YEAR FROM CURRENT_DATE)::int) AS year_min,
                 MAX(d.year) FILTER (WHERE d.is_duplicate IS NOT TRUE
                     AND COALESCE(ars.screening_status, d.screening_status) IS DISTINCT FROM 'excluded'
-                    AND (COALESCE(ars.screening_status, d.screening_status) = 'included' OR COALESCE(ars.similarity_score, 0) >= :thr)
+                    AND (COALESCE(ars.screening_status, d.screening_status) = 'included' OR (COALESCE(ars.similarity_score, 0) >= :thr AND (ars.rerank_score IS NULL OR ars.rerank_score >= COALESCE((SELECT ss.rerank_threshold FROM scenario_settings ss WHERE ss.scenario_id = ars.scenario_id), 0.0))))
                     AND d.year BETWEEN 1800 AND EXTRACT(YEAR FROM CURRENT_DATE)::int) AS year_max,
                 AVG(d.citation_count) FILTER (WHERE d.is_duplicate IS NOT TRUE
                     AND COALESCE(ars.screening_status, d.screening_status) IS DISTINCT FROM 'excluded'
-                    AND (COALESCE(ars.screening_status, d.screening_status) = 'included' OR COALESCE(ars.similarity_score, 0) >= :thr)
+                    AND (COALESCE(ars.screening_status, d.screening_status) = 'included' OR (COALESCE(ars.similarity_score, 0) >= :thr AND (ars.rerank_score IS NULL OR ars.rerank_score >= COALESCE((SELECT ss.rerank_threshold FROM scenario_settings ss WHERE ss.scenario_id = ars.scenario_id), 0.0))))
                     AND d.citation_count IS NOT NULL) AS avg_citations,
                 MAX(d.citation_count) FILTER (WHERE d.is_duplicate IS NOT TRUE
                     AND COALESCE(ars.screening_status, d.screening_status) IS DISTINCT FROM 'excluded'
-                    AND (COALESCE(ars.screening_status, d.screening_status) = 'included' OR COALESCE(ars.similarity_score, 0) >= :thr)) AS max_citations,
+                    AND (COALESCE(ars.screening_status, d.screening_status) = 'included' OR (COALESCE(ars.similarity_score, 0) >= :thr AND (ars.rerank_score IS NULL OR ars.rerank_score >= COALESCE((SELECT ss.rerank_threshold FROM scenario_settings ss WHERE ss.scenario_id = ars.scenario_id), 0.0))))) AS max_citations,
                 -- Le DÉNOMINATEUR de la moyenne. Peu de sources renvoient un compte de
                 -- citations, si bien que « moyenne 24,0 · max 24 » pouvait décrire UN
                 -- article sur quatre cent soixante-sept, sans que rien ne le dise.
                 COUNT(*) FILTER (WHERE d.is_duplicate IS NOT TRUE
                     AND COALESCE(ars.screening_status, d.screening_status) IS DISTINCT FROM 'excluded'
-                    AND (COALESCE(ars.screening_status, d.screening_status) = 'included' OR COALESCE(ars.similarity_score, 0) >= :thr)
+                    AND (COALESCE(ars.screening_status, d.screening_status) = 'included' OR (COALESCE(ars.similarity_score, 0) >= :thr AND (ars.rerank_score IS NULL OR ars.rerank_score >= COALESCE((SELECT ss.rerank_threshold FROM scenario_settings ss WHERE ss.scenario_id = ars.scenario_id), 0.0))))
                     AND d.citation_count IS NOT NULL) AS citations_known
             FROM article_scenarios ars
             JOIN literature_document d ON d.id = ars.document_id
@@ -313,7 +313,7 @@ def _build_evidence_brief(scenario_id: str) -> dict[str, Any]:
             WHERE ars.scenario_id = :sid
               AND d.is_duplicate IS NOT TRUE AND d.abstract IS NOT NULL
               AND COALESCE(ars.screening_status, d.screening_status) IS DISTINCT FROM 'excluded'
-              AND (COALESCE(ars.screening_status, d.screening_status) = 'included' OR COALESCE(ars.similarity_score, 0) >= :thr)
+              AND (COALESCE(ars.screening_status, d.screening_status) = 'included' OR (COALESCE(ars.similarity_score, 0) >= :thr AND (ars.rerank_score IS NULL OR ars.rerank_score >= COALESCE((SELECT ss.rerank_threshold FROM scenario_settings ss WHERE ss.scenario_id = ars.scenario_id), 0.0))))
             ORDER BY
                 CASE WHEN COALESCE(ars.screening_status, d.screening_status) = 'included' THEN 0 ELSE 1 END,
                 d.citation_count DESC NULLS LAST, d.year DESC NULLS LAST
@@ -331,7 +331,7 @@ def _build_evidence_brief(scenario_id: str) -> dict[str, Any]:
                 JOIN literature_document ld ON ld.id = ars.document_id
                 WHERE ars.scenario_id = :sid AND ld.is_duplicate IS NOT TRUE
                   AND COALESCE(ars.screening_status, ld.screening_status) IS DISTINCT FROM 'excluded'
-                  AND (COALESCE(ars.screening_status, ld.screening_status) = 'included' OR COALESCE(ars.similarity_score, 0) >= :thr)
+                  AND (COALESCE(ars.screening_status, ld.screening_status) = 'included' OR (COALESCE(ars.similarity_score, 0) >= :thr AND (ars.rerank_score IS NULL OR ars.rerank_score >= COALESCE((SELECT ss.rerank_threshold FROM scenario_settings ss WHERE ss.scenario_id = ars.scenario_id), 0.0))))
             )
             SELECT {_STUDY_DESIGN_CASE} AS design, COUNT(*) AS n
             FROM b GROUP BY 1 ORDER BY 2 DESC
@@ -343,7 +343,7 @@ def _build_evidence_brief(scenario_id: str) -> dict[str, Any]:
             JOIN literature_document d ON d.id = ars.document_id
             WHERE ars.scenario_id = :sid AND d.is_duplicate IS NOT TRUE
               AND COALESCE(ars.screening_status, d.screening_status) IS DISTINCT FROM 'excluded'
-              AND (COALESCE(ars.screening_status, d.screening_status) = 'included' OR COALESCE(ars.similarity_score, 0) >= :thr)
+              AND (COALESCE(ars.screening_status, d.screening_status) = 'included' OR (COALESCE(ars.similarity_score, 0) >= :thr AND (ars.rerank_score IS NULL OR ars.rerank_score >= COALESCE((SELECT ss.rerank_threshold FROM scenario_settings ss WHERE ss.scenario_id = ars.scenario_id), 0.0))))
               AND d.year >= 1800 AND d.year <= EXTRACT(YEAR FROM CURRENT_DATE)::int
             GROUP BY d.year ORDER BY d.year ASC
         """), {"sid": scenario_id, "thr": eff_thr}).mappings().fetchall()
@@ -354,7 +354,7 @@ def _build_evidence_brief(scenario_id: str) -> dict[str, Any]:
             JOIN literature_document d ON d.id = ars.document_id
             WHERE ars.scenario_id = :sid AND d.is_duplicate IS NOT TRUE
               AND COALESCE(ars.screening_status, d.screening_status) IS DISTINCT FROM 'excluded'
-              AND (COALESCE(ars.screening_status, d.screening_status) = 'included' OR COALESCE(ars.similarity_score, 0) >= :thr)
+              AND (COALESCE(ars.screening_status, d.screening_status) = 'included' OR (COALESCE(ars.similarity_score, 0) >= :thr AND (ars.rerank_score IS NULL OR ars.rerank_score >= COALESCE((SELECT ss.rerank_threshold FROM scenario_settings ss WHERE ss.scenario_id = ars.scenario_id), 0.0))))
             GROUP BY d.source ORDER BY n DESC LIMIT 8
         """), {"sid": scenario_id, "thr": eff_thr}).mappings().fetchall()
 
@@ -369,7 +369,7 @@ def _build_evidence_brief(scenario_id: str) -> dict[str, Any]:
                 JOIN literature_document ld ON ld.id = ars.document_id
                 WHERE ars.scenario_id = :sid AND ld.is_duplicate IS NOT TRUE
                   AND COALESCE(ars.screening_status, ld.screening_status) IS DISTINCT FROM 'excluded'
-                  AND (COALESCE(ars.screening_status, ld.screening_status) = 'included' OR COALESCE(ars.similarity_score, 0) >= :thr)
+                  AND (COALESCE(ars.screening_status, ld.screening_status) = 'included' OR (COALESCE(ars.similarity_score, 0) >= :thr AND (ars.rerank_score IS NULL OR ars.rerank_score >= COALESCE((SELECT ss.rerank_threshold FROM scenario_settings ss WHERE ss.scenario_id = ars.scenario_id), 0.0))))
             )
             SELECT {_GRADE_LEVEL_CASE} AS level, COUNT(*) AS n
             FROM b GROUP BY 1 ORDER BY 2 DESC
@@ -521,22 +521,22 @@ def get_user_scenario_evidence_brief_pdf(scenario_id: str):
                 COUNT(*) FILTER (WHERE d.is_duplicate IS NOT TRUE) AS total,
                 COUNT(*) FILTER (WHERE d.is_duplicate IS NOT TRUE
                     AND COALESCE(ars.screening_status, d.screening_status) IS DISTINCT FROM 'excluded'
-                    AND (COALESCE(ars.screening_status, d.screening_status) = 'included' OR COALESCE(ars.similarity_score, 0) >= :thr)) AS relevant,
+                    AND (COALESCE(ars.screening_status, d.screening_status) = 'included' OR (COALESCE(ars.similarity_score, 0) >= :thr AND (ars.rerank_score IS NULL OR ars.rerank_score >= COALESCE((SELECT ss.rerank_threshold FROM scenario_settings ss WHERE ss.scenario_id = ars.scenario_id), 0.0))))) AS relevant,
                 MIN(d.year) FILTER (WHERE d.is_duplicate IS NOT TRUE
                     AND COALESCE(ars.screening_status, d.screening_status) IS DISTINCT FROM 'excluded'
-                    AND (COALESCE(ars.screening_status, d.screening_status) = 'included' OR COALESCE(ars.similarity_score, 0) >= :thr)
+                    AND (COALESCE(ars.screening_status, d.screening_status) = 'included' OR (COALESCE(ars.similarity_score, 0) >= :thr AND (ars.rerank_score IS NULL OR ars.rerank_score >= COALESCE((SELECT ss.rerank_threshold FROM scenario_settings ss WHERE ss.scenario_id = ars.scenario_id), 0.0))))
                     AND d.year BETWEEN 1800 AND EXTRACT(YEAR FROM CURRENT_DATE)::int) AS year_min,
                 MAX(d.year) FILTER (WHERE d.is_duplicate IS NOT TRUE
                     AND COALESCE(ars.screening_status, d.screening_status) IS DISTINCT FROM 'excluded'
-                    AND (COALESCE(ars.screening_status, d.screening_status) = 'included' OR COALESCE(ars.similarity_score, 0) >= :thr)
+                    AND (COALESCE(ars.screening_status, d.screening_status) = 'included' OR (COALESCE(ars.similarity_score, 0) >= :thr AND (ars.rerank_score IS NULL OR ars.rerank_score >= COALESCE((SELECT ss.rerank_threshold FROM scenario_settings ss WHERE ss.scenario_id = ars.scenario_id), 0.0))))
                     AND d.year BETWEEN 1800 AND EXTRACT(YEAR FROM CURRENT_DATE)::int) AS year_max,
                 COUNT(*) FILTER (WHERE d.is_duplicate IS NOT TRUE
                     AND COALESCE(ars.screening_status, d.screening_status) IS DISTINCT FROM 'excluded'
-                    AND (COALESCE(ars.screening_status, d.screening_status) = 'included' OR COALESCE(ars.similarity_score, 0) >= :thr)
+                    AND (COALESCE(ars.screening_status, d.screening_status) = 'included' OR (COALESCE(ars.similarity_score, 0) >= :thr AND (ars.rerank_score IS NULL OR ars.rerank_score >= COALESCE((SELECT ss.rerank_threshold FROM scenario_settings ss WHERE ss.scenario_id = ars.scenario_id), 0.0))))
                     AND COALESCE(ars.screening_status, d.screening_status) = 'included') AS included,
                 COUNT(*) FILTER (WHERE d.is_duplicate IS NOT TRUE
                     AND COALESCE(ars.screening_status, d.screening_status) IS DISTINCT FROM 'excluded'
-                    AND (COALESCE(ars.screening_status, d.screening_status) = 'included' OR COALESCE(ars.similarity_score, 0) >= :thr)
+                    AND (COALESCE(ars.screening_status, d.screening_status) = 'included' OR (COALESCE(ars.similarity_score, 0) >= :thr AND (ars.rerank_score IS NULL OR ars.rerank_score >= COALESCE((SELECT ss.rerank_threshold FROM scenario_settings ss WHERE ss.scenario_id = ars.scenario_id), 0.0))))
                     AND d.pico_json IS NOT NULL) AS with_pico
             FROM article_scenarios ars
             JOIN literature_document d ON d.id = ars.document_id
@@ -550,7 +550,7 @@ def get_user_scenario_evidence_brief_pdf(scenario_id: str):
             WHERE d.project_context = 'literev' AND ars.scenario_id = :sid
               AND d.is_duplicate IS NOT TRUE AND d.abstract IS NOT NULL
               AND COALESCE(ars.screening_status, d.screening_status) IS DISTINCT FROM 'excluded'
-              AND (COALESCE(ars.screening_status, d.screening_status) = 'included' OR COALESCE(ars.similarity_score, 0) >= :thr)
+              AND (COALESCE(ars.screening_status, d.screening_status) = 'included' OR (COALESCE(ars.similarity_score, 0) >= :thr AND (ars.rerank_score IS NULL OR ars.rerank_score >= COALESCE((SELECT ss.rerank_threshold FROM scenario_settings ss WHERE ss.scenario_id = ars.scenario_id), 0.0))))
             -- « Articles les plus pertinents » dans le PDF : trier par qualité donnait une
             -- liste qui n'est pas celle du tri par pertinence de l'application.
             ORDER BY (COALESCE(ars.screening_status, d.screening_status) = 'included') DESC,
@@ -567,7 +567,7 @@ def get_user_scenario_evidence_brief_pdf(scenario_id: str):
             WHERE d.project_context = 'literev' AND ars.scenario_id = :sid
               AND d.is_duplicate IS NOT TRUE
               AND COALESCE(ars.screening_status, d.screening_status) IS DISTINCT FROM 'excluded'
-              AND (COALESCE(ars.screening_status, d.screening_status) = 'included' OR COALESCE(ars.similarity_score, 0) >= :thr)
+              AND (COALESCE(ars.screening_status, d.screening_status) = 'included' OR (COALESCE(ars.similarity_score, 0) >= :thr AND (ars.rerank_score IS NULL OR ars.rerank_score >= COALESCE((SELECT ss.rerank_threshold FROM scenario_settings ss WHERE ss.scenario_id = ars.scenario_id), 0.0))))
             GROUP BY 1 ORDER BY 2 DESC LIMIT 8
         """), {"sid": scenario_id, "thr": eff_thr}).mappings().all()
 
