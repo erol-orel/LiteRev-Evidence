@@ -341,7 +341,7 @@ def pooled_comparisons(rows: list[dict[str, Any]], order: dict[tuple, int], min_
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def _first_author(authors: str | None) -> str:
+def _pool_first_author(authors: str | None) -> str:
     first = (authors or "").replace("\n", ";").split(";")[0].split(",")[0].strip()
     return first.split()[0] if first else ""
 
@@ -381,7 +381,7 @@ def collect_rows(scenario_id: str, reviewed_only: bool = False, verified_only: b
                 excl[f"{c}_counts"] += 1
                 continue
             rows.append({"article_id": int(a["id"]), "title": a["title"], "year": a["year"],
-                         "first_author": _first_author(a["authors"]), "x": c[0], "n": c[1],
+                         "first_author": _pool_first_author(a["authors"]), "x": c[0], "n": c[1],
                          "review_status": st, "obs": eff})
     return rows, excl, index
 

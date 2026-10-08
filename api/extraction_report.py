@@ -32,6 +32,7 @@ from .codebook import get_codebook, unmapped_labels
 from .core import app
 from .extraction import extraction_digest, extraction_status
 from .extraction_review import review_summary
+from .geography import geography
 from .pooling import pooled_estimates
 from .scenario_store import _get_scenario_threshold, _get_user_scenario_or_404
 
@@ -75,6 +76,9 @@ _S = {
         "lim_unmapped": "{n} rows carry a label that is not in the codebook; they are pooled only with an identical spelling.",
         "lim_het": "{n} pooled estimates show substantial or considerable disagreement between studies (I2 of 50% or more). Read their prediction interval, not only the pooled value.",
         "lim_combine": "Studies that are combined may differ in population, setting and definition, which the pooled value cannot show.",
+        "geo_h": "Where the evidence comes from", "geo_t": "{n} of the {total} extracted articles name a place that resolves to a country; the NUTS list in use is {src}.",
+        "geo_builtin": "the built-in one (countries; Germany NUTS 1; Italy NUTS 1 and 2)", "geo_loaded": "Eurostat's official list",
+        "col_country": "Country", "col_nuts": "NUTS 0", "col_regions": "Regions (articles)", "geo_unres": "{n} articles name no place that can be resolved, or name several countries.",
         "appendix": "Studies behind each pooled estimate", "band": {"low": "low", "moderate": "moderate", "substantial": "substantial", "considerable": "considerable"},
         "all_diseases": "all diseases", "versus": "against", "not_stated": "not stated",
     },
@@ -115,6 +119,9 @@ _S = {
         "lim_unmapped": "{n} lignes portent un libellé absent du codebook ; elles ne sont combinées qu'à orthographe identique.",
         "lim_het": "{n} estimations combinées montrent un désaccord important ou considérable entre études (I2 d'au moins 50 %). Lisez leur intervalle de prédiction, pas seulement la valeur combinée.",
         "lim_combine": "Les études combinées peuvent différer par la population, le contexte et la définition, ce que la valeur combinée ne montre pas.",
+        "geo_h": "D'où vient la preuve", "geo_t": "{n} des {total} articles extraits nomment un lieu qui se résout en un pays ; la liste NUTS utilisée est {src}.",
+        "geo_builtin": "la liste intégrée (pays ; Allemagne NUTS 1 ; Italie NUTS 1 et 2)", "geo_loaded": "la liste officielle d'Eurostat",
+        "col_country": "Pays", "col_nuts": "NUTS 0", "col_regions": "Régions (articles)", "geo_unres": "{n} articles ne nomment aucun lieu résoluble, ou nomment plusieurs pays.",
         "appendix": "Les études derrière chaque estimation combinée", "band": {"low": "faible", "moderate": "modéré", "substantial": "important", "considerable": "considérable"},
         "all_diseases": "toutes maladies", "versus": "contre", "not_stated": "non précisée",
     },
@@ -149,7 +156,7 @@ def _author(s: dict) -> str:
 # ─────────────────────────────────────────────────────────────────────────────
 # The document model
 # ─────────────────────────────────────────────────────────────────────────────
-def build_report(scenario_id: str, lang: str = "en") -> dict[str, Any]:
+def build_extraction_report(scenario_id: str, lang: str = "en") -> dict[str, Any]:
     """Everything the report says, as {title, subtitle, snapshot, blocks}. Blocks are
     ("h1"|"h2"|"p"|"note", text), ("bullets", [text]), ("table", header, rows) and, for
     the PDF only, ("figure", kind, data)."""
@@ -195,6 +202,16 @@ def build_report(scenario_id: str, lang: str = "en") -> dict[str, Any]:
     add(("table", [S["col_item"], S["col_papers"], S["col_share"], S["col_ft"]],
          [[S["items"][key], str(digest["coverage"].get(key, 0)), f"{round(100 * digest['coverage'].get(key, 0) / n_ex)}%",
            str(digest["coverage_fulltext"].get(key, 0))] for key in S["items"]]))
+
+    geo = geography(scenario_id)
+    add(("h2", S["geo_h"]))
+    add(("p", S["geo_t"].format(n=geo["n_resolved"], total=geo["n_papers"], src=S["geo_loaded"] if geo["nuts_source"] == "loaded" else S["geo_builtin"])))
+    if geo["countries"]:
+        add(("table", [S["col_country"], S["col_nuts"], S["col_papers"], S["col_rows"], S["col_regions"]],
+             [[c["name"], c["nuts0"] or "-", str(c["n_papers"]), str(c["n_rows"]),
+               "; ".join(f"{g['name']} {g['code']} ({g['n_papers']})" for g in c["regions"][:8]) or "-"] for c in geo["countries"][:25]]))
+    if geo["n_unresolved"]:
+        add(("p", S["geo_unres"].format(n=geo["n_unresolved"])))
 
     add(("h2", S["review_h"]))
     add(("table", [S["col_status"], S["col_rows"]], [[S["status"][k_], str(rev["counts"].get(k_, 0))] for k_ in S["status"]]))
@@ -267,7 +284,7 @@ def build_report(scenario_id: str, lang: str = "en") -> dict[str, Any]:
 # ─────────────────────────────────────────────────────────────────────────────
 # Markdown
 # ─────────────────────────────────────────────────────────────────────────────
-def to_markdown(doc: dict[str, Any]) -> str:
+def report_to_markdown(doc: dict[str, Any]) -> str:
     cell = lambda v: str(v).replace("|", "/").replace("\n", " ")
     out = [f"# {doc['title']}", "", f"**{doc['subtitle']}**", "", f"*{doc['meta']}*", ""]
     for b in doc["blocks"]:
@@ -288,7 +305,7 @@ def to_markdown(doc: dict[str, Any]) -> str:
 # ─────────────────────────────────────────────────────────────────────────────
 # Word, without a library
 # ─────────────────────────────────────────────────────────────────────────────
-def to_docx(doc: dict[str, Any]) -> bytes:
+def report_to_docx(doc: dict[str, Any]) -> bytes:
     def run(txt: str, bold: bool = False, size: int | None = None, color: str | None = None, italic: bool = False) -> str:
         pr = ("<w:b/>" if bold else "") + ("<w:i/>" if italic else "") + (f'<w:color w:val="{color}"/>' if color else "") + (f'<w:sz w:val="{size}"/>' if size else "")
         return f'<w:r>{f"<w:rPr>{pr}</w:rPr>" if pr else ""}<w:t xml:space="preserve">{escape(str(txt))}</w:t></w:r>'
@@ -414,7 +431,7 @@ def _forest(kind: str, data: dict[str, Any], S: dict[str, Any]):
     return d
 
 
-def to_pdf(doc: dict[str, Any], lang: str = "en") -> bytes:
+def report_to_pdf(doc: dict[str, Any], lang: str = "en") -> bytes:
     from reportlab.lib import colors
     from reportlab.lib.pagesizes import A4
     from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
@@ -471,8 +488,8 @@ def export_extraction_report(scenario_id: str, format: str = Query("pdf"), lang:
     fmt = (format or "pdf").lower()
     if fmt not in _TYPES:
         raise HTTPException(status_code=422, detail=f"format must be one of {', '.join(_TYPES)}")
-    doc = build_report(scenario_id, lang)
-    data = {"md": lambda: to_markdown(doc).encode("utf-8"), "docx": lambda: to_docx(doc), "pdf": lambda: to_pdf(doc, lang)}[fmt]()
+    doc = build_extraction_report(scenario_id, lang)
+    data = {"md": lambda: report_to_markdown(doc).encode("utf-8"), "docx": lambda: report_to_docx(doc), "pdf": lambda: report_to_pdf(doc, lang)}[fmt]()
     name = f"extraction_report_{re.sub(r'[^A-Za-z0-9_-]', '_', scenario_id)}_{doc['snapshot']}.{fmt}"
     return Response(content=data, media_type=_TYPES[fmt], headers={
         "Content-Disposition": f'attachment; filename="{name}"', "X-Snapshot": doc["snapshot"]})

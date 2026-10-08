@@ -35,14 +35,14 @@ def test_numbers_are_formatted_for_a_reader():
 
 def test_markdown_tables_survive_a_pipe_in_a_cell():
     doc = {"title": "T", "subtitle": "S", "meta": "m", "blocks": [("table", ["a|b", "c"], [["x|y", "z"]])]}
-    md = R.to_markdown(doc)
+    md = R.report_to_markdown(doc)
     assert "| a/b | c |" in md and "| x/y | z |" in md
 
 
 def test_the_word_file_escapes_markup_and_stays_well_formed():
     doc = {"title": "A & B <draft>", "subtitle": 'He said "no"', "meta": "m",
            "blocks": [("h2", "Tom & Jerry"), ("table", ["a<b", "c"], [["1 & 2", "<x>"]]), ("bullets", ["x < y"])]}
-    data = R.to_docx(doc)
+    data = R.report_to_docx(doc)
     with zipfile.ZipFile(io.BytesIO(data)) as z:
         assert z.testzip() is None
         xml = z.read("word/document.xml").decode("utf-8")

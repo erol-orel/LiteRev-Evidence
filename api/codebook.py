@@ -36,7 +36,7 @@ from .scenario_store import (_get_scenario_threshold, _get_user_scenario_or_404,
                              relevant_gate_sql)
 from .schema_boot import _exec_ddl_isolated
 
-SHEETS = ("human_susc", "human_exp", "env", "animal", "vector")
+CODEBOOK_SHEETS = ("human_susc", "human_exp", "env", "animal", "vector")
 #: The template's own sheet names, accepted in an imported file.
 _SHEET_ALIASES = {
     "human_cov_susc": "human_susc", "human_cov_exp": "human_exp", "env_cov": "env",
@@ -200,8 +200,8 @@ def _clean_node(raw: Any) -> dict[str, Any]:
         raise ValueError("a codebook node must be an object")
     sheet = str(raw.get("sheet") or "").strip().lower()
     sheet = _SHEET_ALIASES.get(sheet, sheet)
-    if sheet not in SHEETS:
-        raise ValueError(f"unknown sheet {raw.get('sheet')!r}; use one of {', '.join(SHEETS)}")
+    if sheet not in CODEBOOK_SHEETS:
+        raise ValueError(f"unknown sheet {raw.get('sheet')!r}; use one of {', '.join(CODEBOOK_SHEETS)}")
     l1, l2, l3 = (key_slug(raw.get(k)) or None for k in ("l1", "l2", "l3"))
     if not l1:
         raise ValueError("level 1 is required")
@@ -284,8 +284,8 @@ class Index:
 
     def __init__(self, nodes: list[dict[str, Any]]):
         self.nodes = nodes
-        self.by_sheet: dict[str, list[dict[str, Any]]] = {s: [] for s in SHEETS}
-        self.l1_syn: dict[str, dict[str, str]] = {s: {} for s in SHEETS}
+        self.by_sheet: dict[str, list[dict[str, Any]]] = {s: [] for s in CODEBOOK_SHEETS}
+        self.l1_syn: dict[str, dict[str, str]] = {s: {} for s in CODEBOOK_SHEETS}
         for n in nodes:
             syns = {clean_label(n["l1"].replace("_", " "))}
             if n.get("l2"):
@@ -366,7 +366,7 @@ def vocabulary_prompt(nodes: list[dict[str, Any]]) -> str:
         if n.get("l2") and n["l2"] not in by[n["sheet"]][n["l1"]]:
             by[n["sheet"]][n["l1"]].append(n["l2"])
     lines = []
-    for sheet in SHEETS:
+    for sheet in CODEBOOK_SHEETS:
         if sheet in by:
             items = "; ".join(f"{l1}" + (f" ({', '.join(v[:8])})" if v else "") for l1, v in by[sheet].items())
             lines.append(f"{sheet}: {items}")
@@ -507,7 +507,7 @@ def add_synonym(scenario_id: str, payload: dict[str, Any], _: None = Depends(req
     sheet = _SHEET_ALIASES.get(str(payload.get("sheet") or "").lower(), str(payload.get("sheet") or "").lower())
     l1, l2 = key_slug(payload.get("l1")) or None, key_slug(payload.get("l2")) or None
     label = clean_label(payload.get("label"))
-    if sheet not in SHEETS or not l1 or not label:
+    if sheet not in CODEBOOK_SHEETS or not l1 or not label:
         raise HTTPException(status_code=422, detail="sheet, l1 and label are required")
     cb = get_codebook(scenario_id)
     target = next((n for n in cb["nodes"] if n["sheet"] == sheet and n["l1"] == l1 and n.get("l2") == l2), None)

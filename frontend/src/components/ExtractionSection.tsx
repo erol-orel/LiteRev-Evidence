@@ -5,6 +5,7 @@ import {
 } from "lucide-react";
 import { currentLang, useI18n } from "../i18n/LanguageProvider";
 import { CodebookPanel } from "./CodebookPanel";
+import { GeographyPanel } from "./GeographyPanel";
 import { ObservationPanel } from "./ObservationPanel";
 import { PooledPanel } from "./PooledPanel";
 import type { Detail } from "./ObservationPanel";
@@ -308,6 +309,8 @@ export function ExtractionSection({ scenarioId }: { scenarioId: string }) {
           </div>
 
           <CodebookPanel scenarioId={scenarioId} onChanged={() => { void reload(); }} />
+
+          <GeographyPanel scenarioId={scenarioId} />
 
           {/* Rows by sheet */}
           {digest.by_sheet.length > 0 && (

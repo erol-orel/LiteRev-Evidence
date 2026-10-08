@@ -41,6 +41,7 @@ from sqlalchemy import text
 from .codebook import annotate, get_codebook, get_index, normalise, vocabulary_prompt
 from .core import _env_int, app, engine, logger, require_api_key
 from .extraction_review import load_reviews, overlay, overlay_annotated
+from .geography import get_nuts_index, resolve_location
 from .digest import _rows
 from .scenario_store import (_get_scenario_threshold, _get_user_scenario_or_404,
                              relevant_gate_sql)
@@ -351,7 +352,7 @@ def _needs_extraction(row: dict) -> bool:
 
 
 _ARTICLE_ROWS_SQL = """
-    SELECT d.id, d.title, d.abstract, d.doi, d.year, d.authors, d.has_fulltext,
+    SELECT d.id, d.title, d.abstract, d.doi, d.year, d.authors, d.has_fulltext, d.country,
            d.extraction_json, COALESCE(d.extraction_attempts, 0) AS extraction_attempts,
            COALESCE(ars.screening_status, d.screening_status) AS screening_status
     FROM literature_document d
@@ -667,7 +668,7 @@ def _cell(v: Any) -> Any:
 
 
 def template_rows(articles: list[dict], id_prefix: str = "LR", index=None, reviews: dict | None = None,
-                  include_rejected: bool = False) -> dict[str, list[dict]]:
+                  include_rejected: bool = False, nuts_index=None) -> dict[str, list[dict]]:
     """The extractions as template rows: `{"ref": [...], "human_susc": [...], ...}`.
     `articles` are relevant-article rows carrying an `extraction_json`. Pure."""
     out: dict[str, list[dict]] = {"ref": [], **{s: [] for s in SHEETS}}
@@ -678,13 +679,15 @@ def template_rows(articles: list[dict], id_prefix: str = "LR", index=None, revie
         aid = f"{id_prefix}{a['id']}"
         ref = ex.get("ref") or {}
         doi = (a.get("doi") or "").strip()
+        place = resolve_location(ref.get("location"), a.get("country"), nuts_index) if nuts_index is not None else {}
         out["ref"].append({
             "id": aid, "first_author": _first_author(a.get("authors")),
             "reference": f"https://doi.org/{doi}" if doi and not doi.startswith("http") else doi,
             "year": a.get("year"), "description": ref.get("description"),
             "article_type": ref.get("article_type"), "study_start": ref.get("study_start"),
             "study_end": ref.get("study_end"), "location": ref.get("location"),
-            "nuts1": None, "nuts2": None, "nuts3": None, "notes_geo": ref.get("notes_geo"),
+            "nuts1": place.get("nuts1"), "nuts2": place.get("nuts2"), "nuts3": place.get("nuts3"),
+            "notes_geo": ref.get("notes_geo"),
             "risk_pop": ref.get("risk_pop"), "positive": ref.get("positive"),
             "percent_positive": ref.get("percent_positive"),
             "math_model": ref.get("math_model"), "model_type": ref.get("model_type"),
@@ -719,13 +722,13 @@ def _models_line(articles: list[dict]) -> str:
 
 
 def build_workbook(articles: list[dict], coverage_note: str, id_prefix: str = "LR", index=None,
-                   reviews: dict | None = None, include_rejected: bool = False) -> bytes:
+                   reviews: dict | None = None, include_rejected: bool = False, nuts_index=None) -> bytes:
     """An .xlsx with the template's sheets and column titles, plus review columns on the
     right and a README sheet that says what the numbers cover."""
     from openpyxl import Workbook
     from openpyxl.styles import Font
 
-    rows = template_rows(articles, id_prefix, index, reviews, include_rejected)
+    rows = template_rows(articles, id_prefix, index, reviews, include_rejected, nuts_index)
     wb = Workbook()
     readme = wb.active
     readme.title = "README"
@@ -737,7 +740,9 @@ def build_workbook(articles: list[dict], coverage_note: str, id_prefix: str = "L
         "check that row first.",
         "'Extracted from' = abstract means the paper's full text was not available: tables "
         "are not in abstracts, so most values are missing, not absent from the paper.",
-        "NUTS columns are empty: geography is resolved in a later step.",
+        "NUTS columns are filled from the place name where it matches the NUTS list in use: the "
+        "country always, a region only when the list knows it (load Eurostat's NUTS file for the "
+        "whole of Europe). A blank means the place could not be resolved, not that it is nowhere.",
         "'Review status' says what the reviewers decided (accepted, edited, rejected, conflict or "
         "unreviewed). Edited values are the reviewers' corrections; rejected rows are left out "
         "unless the file was exported with them.",
@@ -770,9 +775,9 @@ def build_workbook(articles: list[dict], coverage_note: str, id_prefix: str = "L
 
 
 def build_long_csv(articles: list[dict], id_prefix: str = "LR", index=None, reviews: dict | None = None,
-                   include_rejected: bool = False) -> str:
+                   include_rejected: bool = False, nuts_index=None) -> str:
     """One flat table, one row per observation, with its sheet: for scripts and datasets."""
-    rows = template_rows(articles, id_prefix, index, reviews, include_rejected)
+    rows = template_rows(articles, id_prefix, index, reviews, include_rejected, nuts_index)
     fields = ["id", "sheet", "transmission_mode", "disease", "group", "covariate", "l1", "l2", "value", "descr",
               "notes", "n_cases", "pop_risk", "original_name", "page_section", "source_kind",
               "quote", "quote_verified", "review_status", "reviewed_by", "source"]
@@ -1044,7 +1049,7 @@ def export_scenario_extraction(scenario_id: str, format: str = Query("xlsx"),
         body, media, ext = (build_long_csv(done, prefix, get_index(scenario_id), reviews, include_rejected)
                             .encode("utf-8-sig"), "text/csv; charset=utf-8", "csv")
     else:
-        body, media, ext = (build_workbook(done, note, prefix, get_index(scenario_id), reviews, include_rejected),
+        body, media, ext = (build_workbook(done, note, prefix, get_index(scenario_id), reviews, include_rejected, get_nuts_index()),
                             "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "xlsx")
     return Response(content=body, media_type=media, headers={
         "Content-Disposition": f'attachment; filename="extraction_{re.sub(r"[^A-Za-z0-9_-]", "_", scenario_id)}.{ext}"',

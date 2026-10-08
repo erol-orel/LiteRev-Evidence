@@ -29,7 +29,7 @@ from typing import Any
 from fastapi import Depends, HTTPException
 from sqlalchemy import text
 
-from .codebook import SHEETS, annotate, clean_label, get_index
+from .codebook import CODEBOOK_SHEETS, annotate, clean_label, get_index
 from .core import app, engine, logger, require_api_key
 from .scenario_store import (_get_scenario_threshold, _get_user_scenario_or_404,
                              relevant_gate_sql)
@@ -41,7 +41,7 @@ _TEXT_FIELDS = {"group": 120, "covariate": 200, "descr": 400, "notes": 400, "dis
                 "transmission_mode": 80}
 _REVIEWER_MIN, _REVIEWER_MAX = 2, 40
 
-_DDL = [
+_REVIEW_DDL = [
     """CREATE TABLE IF NOT EXISTS extraction_review (
         id BIGSERIAL PRIMARY KEY,
         document_id BIGINT NOT NULL,
@@ -56,7 +56,7 @@ _DDL = [
     "CREATE INDEX IF NOT EXISTS extraction_review_doc_idx ON extraction_review (document_id)",
 ]
 try:
-    _exec_ddl_isolated(_DDL, "_ensure_extraction_review")
+    _exec_ddl_isolated(_REVIEW_DDL, "_ensure_extraction_review")
 except Exception as _e:                                       # noqa: BLE001 - never blocks startup
     logger.warning(f"_ensure_extraction_review: {_e}")
 
@@ -105,7 +105,7 @@ def clean_edits(raw: Any) -> dict[str, Any]:
         elif k in _TEXT_FIELDS:
             out[k] = (re.sub(r"\s+", " ", str(v)).strip()[:_TEXT_FIELDS[k]] or None) if v is not None else None
         elif k == "sheet":
-            if v not in SHEETS:
+            if v not in CODEBOOK_SHEETS:
                 raise ValueError(f"unknown sheet {v!r}")
             out[k] = v
         else:

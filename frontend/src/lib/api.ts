@@ -1696,6 +1696,51 @@ export async function fetchTextWindow(scenarioId: string, articleId: number, quo
   return r.json();
 }
 
+// ─── Where the evidence comes from (country and NUTS region of each study) ───
+export interface GeoRegion { code: string; name: string; n_papers: number }
+export interface GeoCountry {
+  iso2: string;
+  name: string;
+  nuts0: string | null;
+  n_papers: number;
+  n_rows: number;
+  regions: GeoRegion[];
+}
+export interface GeographyResponse {
+  scenario_id: string;
+  n_papers: number;
+  n_resolved: number;
+  n_unresolved: number;
+  n_several_countries: number;
+  nuts_source: "builtin" | "loaded";
+  countries: GeoCountry[];
+  unresolved: { location: string; n: number }[];
+}
+
+export async function fetchGeography(scenarioId: string): Promise<GeographyResponse> {
+  const r = await safeFetch(`${scenarioBase(scenarioId)}/${scenarioId}/extraction/geography`);
+  if (!r.ok) throw new Error(httpMessage(r.status));
+  return r.json();
+}
+
+export async function fetchNutsStatus(): Promise<{ source: "builtin" | "loaded"; n_regions: number; note: string }> {
+  const r = await safeFetch(`${API_BASE_URL}/geo/nuts/status`);
+  if (!r.ok) throw new Error(httpMessage(r.status));
+  return r.json();
+}
+
+export async function importNutsCsv(csv: string): Promise<{ loaded: number; by_level: Record<string, number>; countries: number }> {
+  const r = await safeFetch(`${API_BASE_URL}/geo/nuts/import`, {
+    method: "POST", headers: authHeaders({ "Content-Type": "text/csv" }), body: csv,
+  });
+  if (!r.ok) {
+    let detail = "";
+    try { detail = (await r.json()).detail ?? ""; } catch { /* the body is not JSON */ }
+    throw new Error(detail || httpMessage(r.status));
+  }
+  return r.json();
+}
+
 // ─── Pooled estimates (random-effects meta-analysis of what the studies report) ───
 export interface PooledStudy {
   article_id: number;

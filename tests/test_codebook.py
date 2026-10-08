@@ -87,7 +87,7 @@ def test_the_annotation_adds_to_an_observation_and_changes_nothing_else():
 
 
 def test_every_sheet_has_a_default_vocabulary():
-    for sheet in codebook.SHEETS:
+    for sheet in codebook.CODEBOOK_SHEETS:
         assert any(n["sheet"] == sheet for n in codebook.DEFAULT_NODES), sheet
     assert chr(0x2014) not in json.dumps(codebook.DEFAULT_NODES, ensure_ascii=False)
 
