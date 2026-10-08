@@ -806,6 +806,70 @@ def get_scenario_extraction_status(scenario_id: str) -> dict[str, Any]:
     return extraction_status(scenario_id)
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Seeing a quote in the paper
+# ─────────────────────────────────────────────────────────────────────────────
+_WORD = re.compile(r"[^\W_]+", re.UNICODE)
+_MIN_PARTIAL_WORDS = 4
+
+
+def locate_quote(source_text: str, quote: str | None) -> dict[str, Any] | None:
+    """Where a quote sits in the text: `{start, end, partial}` or None.
+
+    Words and figures must match in order, and anything that is not a letter or a digit may
+    stand between them, which is what line breaks, hyphenation and spacing in a PDF text look
+    like. When the whole quote is not there, the longest run of its first or last words that is
+    (at least four) is returned as `partial`, so a reviewer can see where the model most likely
+    took it from and how it differs. The first occurrence is returned."""
+    words = _WORD.findall(quote or "")
+    if not words or not source_text:
+        return None
+
+    def find(ws: list[str]) -> tuple[int, int] | None:
+        m = re.search(r"\W+".join(re.escape(w) for w in ws), source_text, re.IGNORECASE)
+        return (m.start(), m.end()) if m else None
+
+    whole = find(words)
+    if whole:
+        return {"start": whole[0], "end": whole[1], "partial": False}
+    for n in range(len(words) - 1, _MIN_PARTIAL_WORDS - 1, -1):
+        for part in (words[:n], words[-n:]):
+            hit = find(part)
+            if hit:
+                return {"start": hit[0], "end": hit[1], "partial": True}
+    return None
+
+
+@app.get("/user-scenarios/{scenario_id}/articles/{article_id}/text")
+def get_article_text_window(scenario_id: str, article_id: int, quote: str | None = Query(None, max_length=600),
+                            context: int = Query(700, ge=0, le=6000)) -> dict[str, Any]:
+    """The text the model read for this article, around a quote: `before`, `match`, `after`.
+
+    `source` is `fulltext` or `abstract`, as for the extraction. `found` says whether the quote
+    is in the text, `partial` whether only part of it is; without a match the start of the text
+    is returned. The text is the same one the quote was checked against, cut at the same size."""
+    _get_user_scenario_or_404(scenario_id)
+    with engine.connect() as conn:
+        row = conn.execute(text("""
+            SELECT d.id, d.title, d.abstract FROM literature_document d
+            JOIN article_scenarios ars ON ars.document_id = d.id
+            WHERE ars.scenario_id = :sid AND d.id = :id
+        """), {"sid": scenario_id, "id": article_id}).mappings().first()
+        if not row:
+            raise HTTPException(status_code=404, detail="Article not in this scenario.")
+        body, source, truncated = _article_text(conn, dict(row))
+    hit = locate_quote(body, quote)
+    if hit:
+        start, end = hit["start"], hit["end"]
+    else:
+        start = end = 0
+    lo, hi = max(0, start - context), min(len(body), end + context)
+    return {"article_id": article_id, "title": row["title"], "source": source, "text_truncated": truncated,
+            "n_chars": len(body), "found": bool(hit and not hit["partial"]), "partial": bool(hit and hit["partial"]),
+            "start": start, "end": end, "window_start": lo, "window_end": hi,
+            "before": body[lo:start], "match": body[start:end], "after": body[end:hi]}
+
+
 @app.get("/user-scenarios/{scenario_id}/extraction/coverage")
 def get_scenario_extraction_coverage(scenario_id: str) -> dict[str, Any]:
     """What the extraction found, counted over ALL the relevant articles (see

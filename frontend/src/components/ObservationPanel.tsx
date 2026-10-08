@@ -1,5 +1,6 @@
 import React from "react";
-import { AlertTriangle, Check, CheckCheck, CheckCircle2, Pencil, RotateCcw, Trash2, X } from "lucide-react";
+import { AlertTriangle, BookOpen, Check, CheckCheck, CheckCircle2, Pencil, RotateCcw, Trash2, X } from "lucide-react";
+import { SourceTextDrawer } from "./SourceTextDrawer";
 import { useI18n } from "../i18n/LanguageProvider";
 import { hasApiKey, reviewBulk, reviewObservation } from "../lib/api";
 import type { ArticleExtraction, ExtractionObservation, ReviewStatus } from "../lib/api";
@@ -28,6 +29,7 @@ export function ObservationPanel({ scenarioId, articleId, detail, reviewer, onUp
   const [form, setForm] = React.useState({ value: "", n_cases: "", pop_risk: "", covariate: "" });
   const [busy, setBusy] = React.useState(false);
   const [msg, setMsg] = React.useState<string | null>(null);
+  const [viewing, setViewing] = React.useState<string | null>(null);      // the quote being read in the paper
   const keyed = hasApiKey();
   const named = reviewer.trim().length >= 2;
   const can = keyed && named;
@@ -81,6 +83,7 @@ export function ObservationPanel({ scenarioId, articleId, detail, reviewer, onUp
 
   return (
     <div className="space-y-3">
+      {viewing && <SourceTextDrawer scenarioId={scenarioId} articleId={articleId} quote={viewing} onClose={() => setViewing(null)} />}
       {ex.ref?.description && <p className="text-[11px] text-white/60 leading-4">{ex.ref.description}</p>}
       {ex.model && (
         <p className="text-[10px] text-white/35">
@@ -161,6 +164,11 @@ export function ObservationPanel({ scenarioId, articleId, detail, reviewer, onUp
                           : <AlertTriangle size={11} className="mt-0.5 text-gold-400 shrink-0" aria-label={T("quoteNotFound")} />}
                         <span className={`leading-4 italic ${o.quote_verified ? "text-white/55" : "text-gold-400/80"}`}>{o.quote || "-"}</span>
                       </div>
+                      {o.quote && (
+                        <button onClick={() => setViewing(o.quote)} className="mt-1 flex items-center gap-1 text-[10px] text-brand-300/80 hover:text-brand-300 underline-offset-2 hover:underline">
+                          <BookOpen size={10} />{T("source.view")}
+                        </button>
+                      )}
                     </td>
                     <td className="px-2.5 py-1.5 whitespace-nowrap">
                       <div className="mb-1 text-[9px] uppercase tracking-wider text-white/45">

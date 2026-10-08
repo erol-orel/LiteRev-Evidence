@@ -1667,6 +1667,31 @@ export function extractionDatasetUrl(scenarioId: string): string {
   return `${scenarioBase(scenarioId)}/${scenarioId}/extraction/dataset`;
 }
 
+// ─── The paper's text around a quote ───
+export interface TextWindow {
+  article_id: number;
+  title: string;
+  source: "fulltext" | "abstract";
+  text_truncated: boolean;
+  n_chars: number;
+  found: boolean;
+  partial: boolean;
+  start: number;
+  end: number;
+  window_start: number;
+  window_end: number;
+  before: string;
+  match: string;
+  after: string;
+}
+
+export async function fetchTextWindow(scenarioId: string, articleId: number, quote: string, context = 700): Promise<TextWindow> {
+  const q = `quote=${encodeURIComponent(quote.slice(0, 600))}&context=${context}`;
+  const r = await safeFetch(`${scenarioBase(scenarioId)}/${scenarioId}/articles/${articleId}/text?${q}`);
+  if (!r.ok) throw new Error(httpMessage(r.status));
+  return r.json();
+}
+
 // ─── Pooled estimates (random-effects meta-analysis of what the studies report) ───
 export interface PooledStudy {
   article_id: number;

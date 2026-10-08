@@ -559,3 +559,44 @@ def test_a_changed_prompt_changes_its_fingerprint():
 def test_the_digest_says_which_models_made_the_extractions(extracted):
     d = extraction.extraction_digest(SID)
     assert d["by_model"] == [{"model": "unknown", "prompt_sha": "unknown", "n": 3}]
+
+
+# ── Seeing a quote in the paper ─────────────────────────────────────────────
+def test_a_quote_is_located_through_line_breaks_case_and_punctuation():
+    text_ = "Methods. Of the 17 exposed persons,\n7 of 7 veterinary-authority staff were NOT vaccinated against seasonal influenza."
+    hit = extraction.locate_quote(text_, "7 of 7 veterinary authority staff were not vaccinated")
+    assert hit and hit["partial"] is False
+    assert text_[hit["start"]:hit["end"]].startswith("7 of 7 veterinary-authority") and text_[hit["start"]:hit["end"]].endswith("vaccinated")
+    # Decimals and percentages survive, and the first occurrence is the one returned.
+    assert extraction.locate_quote("a 12.5% rate; later a 12.5% rate", "12.5% rate")["start"] == 2
+
+
+def test_a_quote_that_is_only_partly_there_is_located_as_partial_and_one_that_is_not_there_is_not():
+    text_ = "The holding had no biosecurity measures and comprised ca 21 chickens and nine free-roaming cats."
+    part = extraction.locate_quote(text_, "The holding had no biosecurity measures, which the inspectors judged very poor indeed")
+    assert part and part["partial"] is True and text_[part["start"]:part["end"]].startswith("The holding had no biosecurity measures")
+    assert extraction.locate_quote(text_, "completely unrelated words about something else entirely") is None
+    assert extraction.locate_quote(text_, "") is None and extraction.locate_quote(text_, None) is None
+    assert extraction.locate_quote("", "anything at all here now") is None
+    assert extraction.locate_quote(text_, "no biosecurity") is not None and extraction.locate_quote(text_, "no biosecurity")["partial"] is False
+
+
+def test_the_text_window_endpoint_returns_the_quote_with_its_context(extracted):
+    from fastapi.testclient import TestClient
+    c = TestClient(main.app)
+    r = c.get(f"/user-scenarios/{SID}/articles/9702/text", params={"quote": "7 of 7 were not vaccinated against seasonal influenza", "context": 40}).json()
+    assert r["source"] == "fulltext" and r["found"] is True and r["partial"] is False
+    assert r["match"].lower().startswith("7 of 7 were not vaccinated") and len(r["before"]) <= 40 and len(r["after"]) <= 40
+    assert r["window_start"] <= r["start"] < r["end"] <= r["window_end"] and r["n_chars"] > 600
+    # Part of a quote still shows where it probably came from.
+    p = c.get(f"/user-scenarios/{SID}/articles/9702/text", params={"quote": "Table 4. Veterinary authority staff, 7, none vaccinated and many other invented words"}).json()
+    assert p["found"] is False and p["partial"] is True and p["match"].startswith("Table 4")
+    # No quote, or one that is not there: the start of the text, found false.
+    n = c.get(f"/user-scenarios/{SID}/articles/9702/text", params={"quote": "nothing like this appears"}).json()
+    assert n["found"] is False and n["partial"] is False and n["start"] == 0 and n["match"] == ""
+    # An abstract-only article, and the bounds.
+    a = c.get(f"/user-scenarios/{SID}/articles/9701/text", params={"quote": "Seventeen exposed persons"}).json()
+    assert a["source"] == "abstract" and a["found"] is True
+    assert c.get(f"/user-scenarios/{SID}/articles/9702/text", params={"context": 99999}).status_code == 422
+    assert c.get(f"/user-scenarios/{SID}/articles/99999/text").status_code == 404
+    assert c.get(f"/user-scenarios/nope/articles/9702/text").status_code == 404
