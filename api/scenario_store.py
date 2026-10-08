@@ -21,7 +21,7 @@ def _get_user_scenario_or_404(scenario_id: str) -> dict[str, Any]:
             SELECT id, name, query, mode, filters, result_count, pinned, folder_id, created_at, updated_at,
                    search_strategy, populate_status, pipeline_status, pipeline_step,
                    pipeline_progress, pipeline_started_at, article_count, is_system,
-                   sub_queries, combinator, kind
+                   sub_queries, combinator, kind, created_ip
             FROM user_scenarios WHERE id = :id
         """), {"id": scenario_id}).mappings().first()
     if not row:

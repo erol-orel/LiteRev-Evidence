@@ -205,22 +205,33 @@ def _compile_expensive_patterns(paths: set[str]) -> list[re.Pattern]:
 
 _EXPENSIVE_PATTERNS = _compile_expensive_patterns(EXPENSIVE_PATHS)
 
+def client_ip(request: Request) -> str:
+    """L'IP réelle du client derrière le proxy inverse.
+
+    On ne fait confiance qu'aux `_TRUSTED_PROXY_HOPS` derniers sauts, qui sont notre
+    infrastructure, et on prend le client réel juste avant : les entrées antérieures
+    du X-Forwarded-For sont écrites par le client et donc falsifiables. Les segments
+    vides sont ignorés, et on retombe sur l'adresse de la connexion quand l'en-tête
+    est absent ou illisible.
+
+    Écrite ICI parce que deux endroits en ont besoin : la limitation de débit, qui
+    compte par IP, et l'enregistrement de la provenance d'un scénario. Deux copies
+    auraient divergé, et celle qui se trompe de saut accorde à un en-tête forgé le
+    crédit d'une adresse réelle."""
+    forwarded_for = request.headers.get("X-Forwarded-For")
+    ip = ""
+    if forwarded_for:
+        parts = [p.strip() for p in forwarded_for.split(",") if p.strip()]
+        if parts:
+            ip = parts[-_TRUSTED_PROXY_HOPS] if len(parts) >= _TRUSTED_PROXY_HOPS else parts[0]
+    if not ip:
+        ip = request.client.host if request.client else "unknown"
+    return ip[:45]                     # une adresse IPv6 tient en 45 signes
+
+
 @app.middleware("http")
 async def rate_limit_middleware(request: Request, call_next):
-    # Récupérer l'IP réelle du client (gère le proxy reverse de production)
-    # IP réelle derrière le reverse proxy : on ne fait confiance qu'aux
-    # _TRUSTED_PROXY_HOPS derniers sauts (notre infra) et on prend le client réel
-    # juste avant. Les entrées antérieures du X-Forwarded-For sont spoofables. On
-    # ignore les segments vides et on retombe sur request.client si l'en-tête est
-    # absent ou malformé (évite un bucket de rate-limit partagé sur IP "" ).
-    forwarded_for = request.headers.get("X-Forwarded-For")
-    client_ip = ""
-    if forwarded_for:
-        _parts = [p.strip() for p in forwarded_for.split(",") if p.strip()]
-        if _parts:
-            client_ip = _parts[-_TRUSTED_PROXY_HOPS] if len(_parts) >= _TRUSTED_PROXY_HOPS else _parts[0]
-    if not client_ip:
-        client_ip = request.client.host if request.client else "unknown"
+    client_ip_value = client_ip(request)
 
     path = request.url.path
 
@@ -234,8 +245,8 @@ async def rate_limit_middleware(request: Request, call_next):
     is_expensive = any(rx.match(path) for rx in _EXPENSIVE_PATTERNS)
 
     limiter = expensive_limiter if is_expensive else general_limiter
-    if not limiter.is_allowed(client_ip):
-        logger.warning(f"Rate limit exceeded for IP: {client_ip} on path: {path}")
+    if not limiter.is_allowed(client_ip_value):
+        logger.warning(f"Rate limit exceeded for IP: {client_ip_value} on path: {path}")
         # IMPORTANT : dans un BaseHTTPMiddleware, lever HTTPException ne passe pas
         # par les gestionnaires d'exceptions FastAPI → cela remonte en 500.
         # On retourne donc directement une réponse 429 propre, avec Retry-After
@@ -257,7 +268,7 @@ async def rate_limit_middleware(request: Request, call_next):
         response = await call_next(request)
     except Exception as exc:
         logger.error(
-            f"Unhandled error on {request.method} {path} from {client_ip}: {exc}",
+            f"Unhandled error on {request.method} {path} from {client_ip_value}: {exc}",
             exc_info=True,
         )
         raise
@@ -265,7 +276,7 @@ async def rate_limit_middleware(request: Request, call_next):
     if _ms >= _SLOW_REQUEST_MS:
         logger.warning(
             f"slow request: {request.method} {path} {int(_ms)} ms status={response.status_code} "
-            f"bytes={response.headers.get('content-length', '?')} ip={client_ip}"
+            f"bytes={response.headers.get('content-length', '?')} ip={client_ip_value}"
         )
     return response
 

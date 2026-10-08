@@ -250,6 +250,8 @@ export const en: Translations = {
     trainAndPredict: "Train & predict (detail page)",
     allScenarios: "All scenarios",
     kindAll: "All kinds",
+    createdOn: "Created on {date}",
+    createdFrom: "from {ip}",
     searchPlaceholder: "Search the scenarios: name, query, description",
     searchMatches: "{n} of {total}",
     searchClear: "Clear",

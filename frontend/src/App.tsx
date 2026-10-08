@@ -1504,6 +1504,19 @@ function ScenariosView({
 
         {isExpanded && (
           <div className="mt-4 space-y-4 border-t border-white/10 pt-4">
+            {/* Provenance : quand la recherche a été créée, et depuis quel poste.
+                Posée en tête du dépliant plutôt que sur la carte fermée : elle sert
+                à retrouver qui a lancé quoi, pas à lire la liste. */}
+            {isUser && (scenario as any).created_at && (
+              <p className="text-[11px] text-white/35 font-mono">
+                {t("scenarios.createdOn")
+                  .replace("{date}", new Date((scenario as any).created_at).toLocaleString())}
+                {(scenario as any).created_ip
+                  ? " · " + t("scenarios.createdFrom").replace("{ip}", (scenario as any).created_ip)
+                  : ""}
+              </p>
+            )}
+
             {/* Actions recommandées (hooks isolés dans le composant hoisté) */}
             <RecommendedActions scenario={scenario} isUser={isUser} />
 

@@ -248,6 +248,8 @@ export const fr = {
     trainAndPredict: "Entraîner & prédire (page détail)",
     allScenarios: "Tous les scénarios",
     kindAll: "Toutes natures",
+    createdOn: "Créée le {date}",
+    createdFrom: "depuis {ip}",
     searchPlaceholder: "Chercher parmi les scénarios : nom, requête, description",
     searchMatches: "{n} sur {total}",
     searchClear: "Effacer",

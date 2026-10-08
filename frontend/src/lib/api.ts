@@ -1792,6 +1792,9 @@ export interface UserScenario extends GesicaScenario {
   resultCount: number;           // alias camelCase de result_count
   pinned: boolean;
   created_at: string | null;
+  /** L'adresse du poste qui a créé la recherche. Nulle pour tout ce qui n'a pas de
+   *  requête derrière (amorçage, scripts) et pour les lignes antérieures. */
+  created_ip?: string | null;
   updated_at: string | null;
   is_user_scenario: true;
   populate_status?: string;
