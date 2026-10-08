@@ -649,6 +649,8 @@ export const fr = {
       rerankTooltip:
         "Pertinence (reranking Cohere) - c'est ce score qui ordonne les articles",
       similarityTooltip: "Similarité sémantique (cosinus)",
+      cutHereSimilarity: "Couper ici : porter le seuil sémantique au score de cet article, qui reste gardé",
+      cutHereRerank: "Couper ici : porter le seuil de rerank au score de cet article, qui reste gardé",
       statusIncluded: "Inclus",
       statusExcluded: "Exclu",
       statusPending: "En attente",

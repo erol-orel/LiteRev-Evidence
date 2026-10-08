@@ -2340,8 +2340,9 @@ function YearHistogram({ distribution }: { distribution: { year: number; count: 
   );
 }
 
-function CorpusSection({ scenarioId, threshold, counts }:
-  { scenarioId: string; detail: ScenarioDetail; threshold?: number; counts?: CorpusCounts }) {
+function CorpusSection({ scenarioId, threshold, counts, onUseAsThreshold }:
+  { scenarioId: string; detail: ScenarioDetail; threshold?: number; counts?: CorpusCounts;
+    onUseAsThreshold?: (kind: "similarity" | "rerank", value: number) => void }) {
   const { t } = useI18n();
   const [data, setData] = useState<ScenarioCorpus | null>(null);
   const [loading, setLoading] = useState(true);
@@ -2607,6 +2608,7 @@ function CorpusSection({ scenarioId, threshold, counts }:
               threshold={data.threshold ?? threshold ?? DEFAULT_SIMILARITY_THRESHOLD}
               isExpanded={expandedId === article.id}
               onToggle={() => setExpandedId(expandedId === article.id ? null : article.id)}
+              onUseAsThreshold={onUseAsThreshold}
               onScreeningChange={(_id, _status) => {
                 // Rafraîchir les stats PRISMA si nécessaire
               }}
@@ -2684,6 +2686,7 @@ function ArticleRow({
   isExpanded,
   onToggle,
   onScreeningChange,
+  onUseAsThreshold,
 }: {
   article: CorpusArticle;
   scenarioId: string;
@@ -2692,6 +2695,11 @@ function ArticleRow({
       avant alors que le corpus pertinent l'exclut. */
   threshold: number;
   isExpanded: boolean;
+  /** « Couper ici » : porter le seuil exactement au score de CET article, qui reste donc
+      le dernier gardé (la porte compare avec >=). Le curseur ne peut pas viser 0.4226,
+      et le lire sur un article que l'on veut garder est la façon dont on choisit
+      vraiment un seuil. */
+  onUseAsThreshold?: (kind: "similarity" | "rerank", value: number) => void;
   onToggle: () => void;
   onScreeningChange?: (id: number, status: string) => void;
 }) {
@@ -2767,20 +2775,32 @@ function ArticleRow({
             {/* Score de PERTINENCE (Cohere) = celui qui détermine le classement,
                 affiché en premier pour que l'ordre soit lisible. */}
             {article.rerank_score !== undefined && article.rerank_score !== null && (
-              <span className="rounded-full px-2 py-0.5 text-[9px] font-medium bg-violet-500/15 border border-violet-500/30 text-violet-300"
-                title={t("scenarioDetail.articleRow.rerankTooltip")}>
+              <button
+                type="button"
+                disabled={!onUseAsThreshold}
+                onClick={e => { e.stopPropagation(); onUseAsThreshold?.("rerank", article.rerank_score as number); }}
+                className="rounded-full px-2 py-0.5 text-[9px] font-medium bg-violet-500/15 border border-violet-500/30 text-violet-300 enabled:hover:bg-violet-500/30 transition"
+                title={onUseAsThreshold
+                  ? t("scenarioDetail.articleRow.cutHereRerank")
+                  : t("scenarioDetail.articleRow.rerankTooltip")}>
                 ⊕ {article.rerank_score.toFixed(3)}
-              </span>
+              </button>
             )}
             {article.similarity_score !== undefined && article.similarity_score !== null && (
-              <span className={`rounded-full px-2 py-0.5 text-[9px] font-medium ${
-                article.similarity_score >= threshold
-                  ? 'bg-brand-500/15 border border-brand-500/30 text-brand-300'
-                  : 'bg-white/5 border border-white/10 text-white/30'
-              }`}
-              title={t("scenarioDetail.articleRow.similarityTooltip")}>
+              <button
+                type="button"
+                disabled={!onUseAsThreshold}
+                onClick={e => { e.stopPropagation(); onUseAsThreshold?.("similarity", article.similarity_score as number); }}
+                className={`rounded-full px-2 py-0.5 text-[9px] font-medium transition ${
+                  article.similarity_score >= threshold
+                    ? 'bg-brand-500/15 border border-brand-500/30 text-brand-300 enabled:hover:bg-brand-500/30'
+                    : 'bg-white/5 border border-white/10 text-white/30 enabled:hover:bg-white/10'
+                }`}
+                title={onUseAsThreshold
+                  ? t("scenarioDetail.articleRow.cutHereSimilarity")
+                  : t("scenarioDetail.articleRow.similarityTooltip")}>
                 ◎ {article.similarity_score.toFixed(3)}
-              </span>
+              </button>
             )}
             <span className={`rounded-full px-2 py-0.5 text-[9px] font-medium ${statusBadge}`}>
               {statusLabel}
@@ -5896,9 +5916,29 @@ export function EnrichmentSection({ scenarioId }: { scenarioId?: string }) {
 // ─── Composite Tabs ──────────────────────────────────────────────────────────
 
 
+/** Un seuil, écrit avec la précision qu'il a VRAIMENT.
+ *
+ * Le curseur affichait `toFixed(2)`. Choisir un seuil par le nombre d'articles en
+ * enregistre un à quatre décimales, tiré du score d'un article réel (0.4226), et l'écran
+ * le montrait comme « 0.42 ». Un article à 0.421 semblait donc devoir passer alors que la
+ * base le coupait, à juste titre : 0.4212 < 0.4226. Le calcul était bon, l'affichage
+ * mentait, et c'est pire qu'un bug de calcul parce que personne ne peut le voir.
+ *
+ * On montre donc jusqu'à quatre décimales, sans zéros inutiles : 0.45 reste « 0.45 ». */
+function fmtThreshold(v: number): string {
+  if (!Number.isFinite(v)) return "0";
+  return String(Math.round(v * 1e4) / 1e4);
+}
+
 // ─── Seuil de similarite ajustable ─────────────────────────────────────────
 
-function SeuilSection({ scenarioId, onSaved, onThresholdChange }: { scenarioId: string; onSaved?: () => void; onThresholdChange?: (v: number) => void }) {
+function SeuilSection({ scenarioId, onSaved, onThresholdChange, incoming }: {
+  scenarioId: string; onSaved?: () => void; onThresholdChange?: (v: number) => void;
+  /** Un seuil demandé depuis ailleurs (le score d'un article). `nonce` change à chaque
+      demande, y compris quand la valeur est la même : sans lui, recliquer le même
+      article ne ferait rien. */
+  incoming?: { kind: "similarity" | "rerank"; value: number; nonce: number };
+}) {
   const { t } = useI18n();
   const [threshold, setThreshold] = React.useState<number>(DEFAULT_SIMILARITY_THRESHOLD);
   // Le second seuil. 0 = pas de filtrage, donc la porte d'avant, pour tout scénario
@@ -5920,6 +5960,17 @@ function SeuilSection({ scenarioId, onSaved, onThresholdChange }: { scenarioId: 
       .catch(() => {});
     return () => { if (pollRef.current) clearInterval(pollRef.current); };
   }, [scenarioId]);
+
+  // Porter le seuil au score d'un article. On NE sauvegarde pas d'office : le curseur
+  // bouge, la courbe suit, et c'est Enregistrer qui engage, comme pour toute autre
+  // façon de le régler.
+  React.useEffect(() => {
+    if (!incoming) return;
+    const v = Math.min(1, Math.max(0, incoming.value));
+    if (incoming.kind === "rerank") setRerankThreshold(v);
+    else { setThreshold(v); onThresholdChange?.(v); }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [incoming?.nonce]);
 
   const handleSave = async () => {
     setSaving(true);
@@ -5972,25 +6023,49 @@ function SeuilSection({ scenarioId, onSaved, onThresholdChange }: { scenarioId: 
         <Zap size={12} className="text-brand-400 shrink-0" />
         <span className="font-medium text-white/70">{t("scenarioDetail.seuil.thresholdLabel")}</span>
         <input
-          type="range" min={0.1} max={0.9} step={0.05}
+          type="range" min={0} max={1} step={0.0001}
           value={threshold}
           onChange={e => { const v = parseFloat(e.target.value); setThreshold(v); onThresholdChange?.(v); }}
           className="w-28 accent-brand-500"
         />
-        <span className="font-mono text-brand-300 w-10 text-center">{threshold.toFixed(2)}</span>
+        {/* Le curseur ne peut pas viser 0.4226 ; la saisie, si. Les deux écrivent la
+            même valeur, et le nombre affiché est celui qui sera enregistré. */}
+        <input
+          type="number" min={0} max={1} step={0.0001}
+          value={fmtThreshold(threshold)}
+          onChange={e => {
+            const v = parseFloat(e.target.value);
+            if (!Number.isFinite(v)) return;
+            const c = Math.min(1, Math.max(0, v));
+            setThreshold(c); onThresholdChange?.(c);
+          }}
+          aria-label={t("scenarioDetail.seuil.thresholdLabel")}
+          className="w-20 rounded-lg border border-white/10 bg-white/5 px-1.5 py-0.5 font-mono text-brand-300 text-center"
+        />
       </div>
       <div className="flex items-center gap-2 text-xs text-white/60"
            title={t("scenarioDetail.seuil.rerankHelp")}>
         <Target size={12} className="text-gold-400 shrink-0" />
         <span className="font-medium text-white/70">{t("scenarioDetail.seuil.rerankLabel")}</span>
         <input
-          type="range" min={0} max={0.9} step={0.01}
+          type="range" min={0} max={1} step={0.0001}
           value={rerankThreshold}
           onChange={e => setRerankThreshold(parseFloat(e.target.value))}
           className="w-28 accent-gold-400"
         />
-        <span className="font-mono text-gold-300 w-10 text-center">
-          {rerankThreshold > 0 ? rerankThreshold.toFixed(2) : t("scenarioDetail.seuil.rerankOff")}
+        <input
+          type="number" min={0} max={1} step={0.0001}
+          value={fmtThreshold(rerankThreshold)}
+          onChange={e => {
+            const v = parseFloat(e.target.value);
+            if (!Number.isFinite(v)) return;
+            setRerankThreshold(Math.min(1, Math.max(0, v)));
+          }}
+          aria-label={t("scenarioDetail.seuil.rerankLabel")}
+          className="w-20 rounded-lg border border-white/10 bg-white/5 px-1.5 py-0.5 font-mono text-gold-300 text-center"
+        />
+        <span className="text-[10px] text-white/30 w-6">
+          {rerankThreshold > 0 ? "" : t("scenarioDetail.seuil.rerankOff")}
         </span>
       </div>
       <div className="flex items-center gap-2">
@@ -6335,7 +6410,7 @@ function ThresholdCurvePanel({ scenarioId, onPick, onPickRerank }: { scenarioId:
               <p className="text-gold-400/70">
                 {t("scenarioDetail.seuil.curve.scopeNote")
                   .replace("{n}", data.scope.excluded_by_scope.toLocaleString())
-                  .replace("{thr}", data.scope.judged_above_threshold.toFixed(2))}
+                  .replace("{thr}", fmtThreshold(data.scope.judged_above_threshold))}
               </p>
             )}
           </div>
@@ -6357,7 +6432,7 @@ function ThresholdCurvePanel({ scenarioId, onPick, onPickRerank }: { scenarioId:
                 <tbody>
                   {rows.map(p => (
                     <tr key={p.threshold} className="border-t border-white/5">
-                      <td className="py-1 pr-3 font-mono text-brand-300">{p.threshold.toFixed(2)}</td>
+                      <td className="py-1 pr-3 font-mono text-brand-300">{fmtThreshold(p.threshold)}</td>
                       <td className="py-1 pr-3 font-mono text-white/80">
                         {p.kept.toLocaleString()}
                         {p.is_current && (
@@ -6407,6 +6482,8 @@ function ReviewTab({ scenarioId, detail, counts, onRefreshCounts }: { scenarioId
   const { t } = useI18n();
   const [sub, setSub] = React.useState<"corpus" | "prisma" | "screening">("corpus");
   const [corpusRefreshKey, setCorpusRefreshKey] = React.useState(0);
+  const [askedThreshold, setAskedThreshold] =
+    React.useState<{ kind: "similarity" | "rerank"; value: number; nonce: number } | undefined>();
   const [liveThreshold, setLiveThreshold] = React.useState<number | undefined>(undefined);
   const SUB = [
     { key: "corpus" as const,    label: t("scenarioDetail.review.subCorpus"),    icon: <FileText size={12} /> },
@@ -6430,8 +6507,13 @@ function ReviewTab({ scenarioId, detail, counts, onRefreshCounts }: { scenarioId
           <SeuilSection
             scenarioId={scenarioId}
             onSaved={() => { setCorpusRefreshKey(k => k + 1); onRefreshCounts?.(); }}
-            onThresholdChange={setLiveThreshold} />
-          <CorpusSection key={corpusRefreshKey} scenarioId={scenarioId} detail={detail} threshold={liveThreshold} counts={counts} />
+            onThresholdChange={setLiveThreshold}
+            incoming={askedThreshold} />
+          <CorpusSection
+            key={corpusRefreshKey} scenarioId={scenarioId} detail={detail}
+            threshold={liveThreshold} counts={counts}
+            onUseAsThreshold={(kind, value) =>
+              setAskedThreshold(a => ({ kind, value, nonce: (a?.nonce ?? 0) + 1 }))} />
         </div>
       )}
       {sub === "prisma" && <PrismaSection scenarioId={scenarioId} />}

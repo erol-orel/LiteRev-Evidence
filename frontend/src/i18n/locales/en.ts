@@ -651,6 +651,8 @@ export const en: Translations = {
       rerankTooltip:
         "Relevance (Cohere reranking) - this is the score that orders the articles",
       similarityTooltip: "Semantic similarity (cosine)",
+      cutHereSimilarity: "Cut here: set the semantic threshold to this article's score, which keeps it",
+      cutHereRerank: "Cut here: set the rerank threshold to this article's score, which keeps it",
       statusIncluded: "Included",
       statusExcluded: "Excluded",
       statusPending: "Pending",
