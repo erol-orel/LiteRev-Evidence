@@ -1030,7 +1030,14 @@ export const fr = {
         "Les articles avec un score de similarité supérieur à ce seuil (ou validés humainement) sont utilisés dans les sections PICO & Evidence, Assistant IA et Variables & Modèle.",
       footerLegend:
         "Le bouton recalculer les scores lance le calcul des scores.",
+      rerankLabel: "Seuil de pertinence rerank :",
+      rerankOff: "off",
+      rerankHelp: "Le rerank juge la pertinence à la question, le cosinus la proximité de vocabulaire. Sur un corpus thématique les deux divergent, et un article hors sujet peut avoir un cosinus plus élevé qu'un article du sujet. Ce second seuil est ce qui les sépare. Un article que le rerank n'a pas encore noté est gardé.",
+      rerankFooter: "Le second seuil s'ajoute au premier : un article doit passer les deux. 0 le désactive, et c'est la valeur par défaut. Un article pas encore reranké est gardé plutôt que compté zéro.",
       curve: {
+        scoreSimilarity: "Cosinus",
+        scoreRerank: "Rerank",
+        unscoredKeptNote: "{n} articles n'ont pas encore de score de rerank et sont gardés quel que soit le seuil : pas jugé n'est pas mal jugé.",
         toggle: "Choisir par nombre d'articles",
         targetLabel: "Garder environ",
         targetUnit: "articles",

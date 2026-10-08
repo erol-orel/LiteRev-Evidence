@@ -1032,7 +1032,14 @@ export const en: Translations = {
         "Articles with a similarity score above this threshold (or human-validated) are used in the PICO & Evidence, AI Assistant and Variables & Model sections.",
       footerLegend:
         "The recompute-scores button launches the score computation.",
+      rerankLabel: "Rerank relevance threshold:",
+      rerankOff: "off",
+      rerankHelp: "The rerank judges relevance to the question, the cosine judges closeness of vocabulary. On a thematic corpus the two disagree, and off-topic papers can score higher on the cosine than on-topic ones. This second gate is what separates them. An article the rerank has not scored yet is kept.",
+      rerankFooter: "The second threshold applies on top of the first: an article must clear both. 0 disables it, which is the default. An article not yet reranked is kept rather than counted as zero.",
       curve: {
+        scoreSimilarity: "Cosine",
+        scoreRerank: "Rerank",
+        unscoredKeptNote: "{n} articles have no rerank score yet and are kept whatever the threshold: not judged is not judged badly.",
         toggle: "Pick by number of articles",
         targetLabel: "Keep about",
         targetUnit: "articles",
