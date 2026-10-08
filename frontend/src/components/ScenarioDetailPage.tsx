@@ -5947,6 +5947,9 @@ function SeuilSection({ scenarioId, onSaved, onThresholdChange, incoming }: {
   const [saving, setSaving] = React.useState(false);
   const [saved, setSaved] = React.useState(false);
   const [rerankStatus, setRerankStatus] = React.useState<string | null>(null);
+  // Ce que le bouton va VRAIMENT faire : combien d'articles n'ont pas de score, et
+  // combien n'en auront jamais faute de résumé exploitable.
+  const [coverage, setCoverage] = React.useState<{ scorable: number; missing: number; unscorable: number } | null>(null);
   const [showCurve, setShowCurve] = React.useState(false);
   const [curveKey, setCurveKey] = React.useState(0);
   const pollRef = React.useRef<ReturnType<typeof setInterval> | null>(null);
@@ -5957,6 +5960,10 @@ function SeuilSection({ scenarioId, onSaved, onThresholdChange, incoming }: {
         setThreshold(s.similarity_threshold ?? DEFAULT_SIMILARITY_THRESHOLD);
         setRerankThreshold(s.rerank_threshold ?? 0);
       })
+      .catch(() => {});
+    getRerankStatus(scenarioId)
+      .then(s => setCoverage({
+        scorable: s.scorable ?? 0, missing: s.missing ?? 0, unscorable: s.unscorable ?? 0 }))
       .catch(() => {});
     return () => { if (pollRef.current) clearInterval(pollRef.current); };
   }, [scenarioId]);
@@ -5987,10 +5994,10 @@ function SeuilSection({ scenarioId, onSaved, onThresholdChange, incoming }: {
     setSaving(false);
   };
 
-  const handleRerank = async () => {
+  const handleRerank = async (missingOnly = false) => {
     setRerankStatus(t("scenarioDetail.seuil.launchScoring"));
     try {
-      await triggerRerank(scenarioId);
+      await triggerRerank(scenarioId, undefined, missingOnly);
       // Refresh the corpus so it picks up rerank_running and auto-refreshes the
       // relevance (Cohere) badges live, instead of only on a manual page reload.
       onSaved?.();
@@ -6000,6 +6007,7 @@ function SeuilSection({ scenarioId, onSaved, onThresholdChange, incoming }: {
           if (s.status === "done") {
             if (pollRef.current) clearInterval(pollRef.current);
             setRerankStatus(t("scenarioDetail.seuil.scoringDonePrefix") + (s.updated ?? "?") + t("scenarioDetail.seuil.scoringDoneSuffix"));
+            setCoverage({ scorable: s.scorable ?? 0, missing: s.missing ?? 0, unscorable: s.unscorable ?? 0 });
             setTimeout(() => setRerankStatus(null), 4000);
             onSaved?.();   // final refresh so the computed scores/badges show
           } else if (s.status === "error") {
@@ -6074,11 +6082,20 @@ function SeuilSection({ scenarioId, onSaved, onThresholdChange, incoming }: {
           {saving ? (<Loader2 size={10} className="animate-spin" />) : (<CheckCircle2 size={10} />)}
           {saved ? t("scenarioDetail.seuil.saved") : t("scenarioDetail.seuil.save")}
         </button>
-        <button onClick={handleRerank}
+        <button onClick={() => handleRerank(false)}
+          title={t("scenarioDetail.seuil.rescoreAllHint")}
           className="flex items-center gap-1 rounded-lg bg-white/5 hover:bg-white/10 border border-white/10 text-white/50 hover:text-white/70 px-2.5 py-1 text-[11px] font-medium transition">
           <RefreshCw size={10} />
           {t("scenarioDetail.seuil.recalculateScores")}
         </button>
+        {coverage && coverage.missing > 0 && (
+          <button onClick={() => handleRerank(true)}
+            title={t("scenarioDetail.seuil.scoreMissingHint")}
+            className="flex items-center gap-1 rounded-lg bg-gold-400/15 hover:bg-gold-400/25 border border-gold-400/30 text-gold-300 px-2.5 py-1 text-[11px] font-medium transition">
+            <Target size={10} />
+            {t("scenarioDetail.seuil.scoreMissing").replace("{n}", coverage.missing.toLocaleString())}
+          </button>
+        )}
         <button onClick={() => setShowCurve(v => !v)}
           className={`flex items-center gap-1 rounded-lg border px-2.5 py-1 text-[11px] font-medium transition ${
             showCurve
@@ -6097,6 +6114,20 @@ function SeuilSection({ scenarioId, onSaved, onThresholdChange, incoming }: {
         <span className="ml-1 text-white/20">{t("scenarioDetail.seuil.footerLegend")}</span>
       </p>
       <p className="text-[10px] text-white/30 w-full -mt-2">{t("scenarioDetail.seuil.rerankFooter")}</p>
+      {coverage && (
+        <p className="text-[10px] w-full -mt-2">
+          <span className={coverage.missing > 0 ? "text-gold-400/80" : "text-white/30"}>
+            {t("scenarioDetail.seuil.coverageLine")
+              .replace("{scored}", (coverage.scorable - coverage.missing).toLocaleString())
+              .replace("{scorable}", coverage.scorable.toLocaleString())}
+          </span>
+          {coverage.unscorable > 0 && (
+            <span className="ml-1 text-white/25">
+              {t("scenarioDetail.seuil.coverageUnscorable").replace("{n}", coverage.unscorable.toLocaleString())}
+            </span>
+          )}
+        </p>
+      )}
       {showCurve && (
         <ThresholdCurvePanel
           key={curveKey}

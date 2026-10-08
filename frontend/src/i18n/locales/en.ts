@@ -1030,6 +1030,11 @@ export const en: Translations = {
       saved: "Saved!",
       save: "Save",
       recalculateScores: "Recompute scores",
+      scoreMissing: "Score the {n} missing",
+      scoreMissingHint: "Only scores the articles that have none. Costs nothing for the ones already scored.",
+      rescoreAllHint: "Recomputes the cosine for the whole scenario and then the rerank score of every article, overwriting the existing ones. Worth it after full texts arrive.",
+      coverageLine: "Rerank score: {scored} of {scorable} articles.",
+      coverageUnscorable: "{n} cannot be scored: no usable abstract.",
       footerMain:
         "Articles with a similarity score above this threshold (or human-validated) are used in the PICO & Evidence, AI Assistant and Variables & Model sections.",
       footerLegend:

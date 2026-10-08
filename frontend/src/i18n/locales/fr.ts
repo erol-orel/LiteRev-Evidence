@@ -1028,6 +1028,11 @@ export const fr = {
       saved: "Sauvegardé !",
       save: "Sauvegarder",
       recalculateScores: "Recalculer scores",
+      scoreMissing: "Noter les {n} manquants",
+      scoreMissingHint: "Ne note que les articles qui n'ont pas de score. Ne redépense rien pour les autres.",
+      rescoreAllHint: "Recalcule le cosinus de tout le scénario puis le score de rerank de chaque article, en écrasant les anciens. Utile après l'arrivée de textes intégraux.",
+      coverageLine: "Score de rerank : {scored} articles sur {scorable}.",
+      coverageUnscorable: "{n} ne peuvent pas être notés : pas de résumé exploitable.",
       footerMain:
         "Les articles avec un score de similarité supérieur à ce seuil (ou validés humainement) sont utilisés dans les sections PICO & Evidence, Assistant IA et Variables & Modèle.",
       footerLegend:
