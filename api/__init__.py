@@ -43,4 +43,5 @@ MODULES = (
     "codebook",
     "extraction_review",
     "extraction",
+    "pooling",
 )

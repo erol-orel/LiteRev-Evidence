@@ -1667,6 +1667,76 @@ export function extractionDatasetUrl(scenarioId: string): string {
   return `${scenarioBase(scenarioId)}/${scenarioId}/extraction/dataset`;
 }
 
+// ─── Pooled estimates (random-effects meta-analysis of what the studies report) ───
+export interface PooledStudy {
+  article_id: number;
+  title: string | null;
+  year: number | null;
+  first_author: string;
+  x: number;
+  n: number;
+  review_status: string;
+  p?: number;
+  or?: number;
+  ci_low?: number;
+  ci_high?: number;
+  weight_pct?: number;
+  x1?: number; n1?: number; x2?: number; n2?: number;
+}
+
+export interface Heterogeneity {
+  Q: number; df: number; p: number; I2: number; tau2: number;
+  band: "low" | "moderate" | "substantial" | "considerable";
+}
+
+export interface PooledGroup {
+  sheet: string;
+  group: string;
+  label: string;
+  disease: string | null;
+  label_path: string | null;
+  mapped: boolean;
+  k: number;
+  n_total: number;
+  events_total: number;
+  pooled: { p: number; ci_low: number; ci_high: number; pi_low: number | null; pi_high: number | null } | null;
+  heterogeneity: Heterogeneity | null;
+  reason: string | null;
+  studies: PooledStudy[];
+}
+
+export interface PooledComparison {
+  sheet: string;
+  group: string;
+  disease: string | null;
+  a: string;
+  b: string;
+  k: number;
+  pooled: { or: number; ci_low: number; ci_high: number; pi_low: number | null; pi_high: number | null };
+  heterogeneity: Heterogeneity;
+  studies: PooledStudy[];
+}
+
+export interface PooledResponse {
+  scenario_id: string;
+  filters: { reviewed_only: boolean; verified_only: boolean; split_disease: boolean; min_studies: number };
+  n_rows_used: number;
+  n_duplicate_rows_dropped: number;
+  excluded: Record<string, number>;
+  pooled: PooledGroup[];
+  comparisons: PooledComparison[];
+}
+
+export async function fetchPooled(
+  scenarioId: string,
+  o: { reviewedOnly: boolean; verifiedOnly: boolean; splitDisease: boolean },
+): Promise<PooledResponse> {
+  const q = `reviewed_only=${o.reviewedOnly}&verified_only=${o.verifiedOnly}&split_disease=${o.splitDisease}`;
+  const r = await safeFetch(`${scenarioBase(scenarioId)}/${scenarioId}/extraction/pooled?${q}`);
+  if (!r.ok) throw new Error(httpMessage(r.status));
+  return r.json();
+}
+
 // ─── Label codebook (hierarchy per extraction sheet, applied when the labels are read) ───
 export interface CodebookNode {
   sheet: string;

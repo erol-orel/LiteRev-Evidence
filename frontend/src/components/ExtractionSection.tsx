@@ -6,6 +6,7 @@ import {
 import { useI18n } from "../i18n/LanguageProvider";
 import { CodebookPanel } from "./CodebookPanel";
 import { ObservationPanel } from "./ObservationPanel";
+import { PooledPanel } from "./PooledPanel";
 import type { Detail } from "./ObservationPanel";
 import { ReviewSummaryCard } from "./ReviewSummaryCard";
 import {
@@ -330,6 +331,8 @@ export function ExtractionSection({ scenarioId }: { scenarioId: string }) {
       {extracted > 0 && (
         <ReviewSummaryCard scenarioId={scenarioId} reviewer={reviewer} onReviewer={setReviewer} tick={reviewTick} />
       )}
+
+      {extracted > 0 && <PooledPanel scenarioId={scenarioId} tick={reviewTick} />}
 
       {/* Controls */}
       <div className="flex flex-wrap gap-2 items-center">
