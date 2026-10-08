@@ -407,6 +407,14 @@ function ObservationPanel({ detail, T, sheetName }: {
   return (
     <div className="space-y-3">
       {ex.ref?.description && <p className="text-[11px] text-white/60 leading-4">{ex.ref.description}</p>}
+      {ex.model && (
+        <p className="text-[10px] text-white/35">
+          {T("provenance")
+            .replace("{model}", ex.model)
+            .replace("{prompt}", ex.prompt_sha ?? "?")
+            .replace("{date}", (ex.extracted_at ?? "").slice(0, 10) || "?")}
+        </p>
+      )}
       {obs.length === 0 ? (
         <p className="text-[11px] text-white/40">{T("detailEmpty")}</p>
       ) : (

@@ -1543,6 +1543,10 @@ export interface ArticleExtraction {
   extraction: {
     source: string;
     truncated: boolean;
+    /** The reproducibility record: which model and prompt made this, and when. */
+    model?: string;
+    prompt_sha?: string;
+    extracted_at?: string;
     ref: { description?: string | null; article_type?: string | null; location?: string | null };
     observations: ExtractionObservation[];
   } | null;

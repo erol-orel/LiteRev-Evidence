@@ -1302,6 +1302,7 @@ export const fr = {
       obsQuote: "Citation",
       quoteFound: "Citation retrouvée dans le texte",
       quoteNotFound: "Citation non retrouvée dans le texte : à vérifier dans l'article",
+      provenance: "Extrait avec {model}, prompt {prompt}, le {date}.",
     },
     vizTab: {
       subClustering: "Clustering & Thèmes",

@@ -22,13 +22,16 @@ not a sample of the corpus, and the extraction records when it had to cut.
 from __future__ import annotations
 
 import csv
+import hashlib
 import io
 import json
 import os
 import re
 import threading
 import time
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
 from typing import Any
 
 from fastapi import Depends, HTTPException, Query
@@ -172,6 +175,11 @@ _EXTRACTION_SYSTEM = (
 )
 
 
+#: Which prompt produced an extraction, for the reproducibility record: any edit to the prompt
+#: changes it, so two extractions of the same corpus can be told apart.
+PROMPT_SHA = hashlib.sha256(_EXTRACTION_SYSTEM.encode("utf-8")).hexdigest()[:10]
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Pure parsing and checking
 # ─────────────────────────────────────────────────────────────────────────────
@@ -312,8 +320,11 @@ def extract_article(client, row: dict, source_text: str, source: str, truncated:
     )
     parsed = parse_extraction(json.loads(_json_content(resp, f"extraction {row.get('id')}")),
                               source_text)
+    # The record of how this was made: the model, the prompt, and when. An extraction that
+    # cannot say which model and prompt produced it cannot be reproduced or compared.
     parsed.update({"v": EXTRACTION_VERSION, "source": source, "truncated": truncated,
-                   "n_chars": len(source_text)})
+                   "n_chars": len(source_text), "model": _model("bulk"), "prompt_sha": PROMPT_SHA,
+                   "extracted_at": datetime.now(timezone.utc).isoformat(timespec="seconds")})
     return parsed
 
 
@@ -528,6 +539,16 @@ def extraction_digest(scenario_id: str, threshold: float | None = None) -> dict[
             out["coverage"] = {k: int(head[f"c_{k}"] or 0) for k in COVERAGE_KEYS}
             out["coverage_fulltext"] = {k: int(head[f"f_{k}"] or 0) for k in COVERAGE_KEYS}
 
+            out["by_model"] = [
+                {"model": r["model"], "prompt_sha": r["prompt_sha"], "n": int(r["n"])}
+                for r in _rows(conn, f"""
+                    SELECT COALESCE(d.extraction_json->>'model', 'unknown') AS model,
+                           COALESCE(d.extraction_json->>'prompt_sha', 'unknown') AS prompt_sha,
+                           COUNT(*) AS n
+                    FROM literature_document d JOIN article_scenarios ars ON ars.document_id = d.id
+                    WHERE ars.scenario_id = :sid AND {gate} AND jsonb_typeof(d.extraction_json) = 'object'
+                    GROUP BY 1, 2 ORDER BY n DESC
+                """, scenario_id, thr)]
             out["by_sheet"] = [
                 {"sheet": r["sheet"], "n_rows": int(r["n_rows"]), "n_articles": int(r["n_articles"]),
                  "n_quote_found": int(r["n_verified"])}
@@ -655,6 +676,16 @@ def template_rows(articles: list[dict], id_prefix: str = "LR") -> dict[str, list
     return out
 
 
+def _models_line(articles: list[dict]) -> str:
+    """'model, prompt abc123 (12 papers); ...' from what each extraction says about itself."""
+    c: Counter = Counter()
+    for a in articles:
+        ex = a.get("extraction_json")
+        if isinstance(ex, dict):
+            c[(ex.get("model") or "unknown", ex.get("prompt_sha") or "unknown")] += 1
+    return "; ".join(f"{m}, prompt {p} ({n} papers)" for (m, p), n in c.most_common())
+
+
 def build_workbook(articles: list[dict], coverage_note: str, id_prefix: str = "LR") -> bytes:
     """An .xlsx with the template's sheets and column titles, plus review columns on the
     right and a README sheet that says what the numbers cover."""
@@ -675,6 +706,7 @@ def build_workbook(articles: list[dict], coverage_note: str, id_prefix: str = "L
         "are not in abstracts, so most values are missing, not absent from the paper.",
         "NUTS columns are empty: geography is resolved in a later step.",
         "ID is LR + the LiteRev article id; rename it to your initials and a number if needed.",
+        "Made with: " + (_models_line(articles) or "unknown") + ".",
     ):
         readme.append([line])
     readme.column_dimensions["A"].width = 120

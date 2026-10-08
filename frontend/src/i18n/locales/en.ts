@@ -1304,6 +1304,7 @@ export const en: Translations = {
       obsQuote: "Quote",
       quoteFound: "Quote found in the text",
       quoteNotFound: "Quote not found in the text: check it against the paper",
+      provenance: "Extracted with {model}, prompt {prompt}, on {date}.",
     },
     vizTab: {
       subClustering: "Clustering & Topics",

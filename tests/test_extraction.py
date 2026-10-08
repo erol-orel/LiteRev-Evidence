@@ -158,6 +158,9 @@ def test_one_article_goes_through_one_call_and_comes_back_stamped():
     assert json.loads(seen[0]["messages"][1]["content"])["disease_of_interest"] == "HPAI"
     assert out["v"] == extraction.EXTRACTION_VERSION and out["source"] == "abstract"
     assert out["truncated"] is False and out["n_chars"] == len(PAPER)
+    # The reproducibility record: which model, which prompt, when.
+    assert out["model"] and out["prompt_sha"] == extraction.PROMPT_SHA and len(out["prompt_sha"]) == 10
+    assert out["extracted_at"].endswith("+00:00")
     assert out["observations"][0]["quote_verified"] is True
 
 
@@ -187,6 +190,8 @@ def test_the_workbook_has_the_templates_sheets_columns_and_the_review_columns_on
     assert wb.sheetnames == ["README", "REF", "HUMAN_COV_SUSC", "HUMAN_COV_EXP", "ENV_COV",
                              "ANIMALorRESERVOIR_COV", "VECTOR_COV"]
     assert "1 of the 2 relevant" in wb["README"]["A2"].value
+    readme_text = " ".join(str(r[0].value) for r in wb["README"].iter_rows())
+    assert "Made with: unknown, prompt unknown (1 papers)" in readme_text
     ref = [c.value for c in wb["REF"][1]]
     assert ref == [t for t, _ in extraction.REF_COLUMNS]
     row = {h: c.value for h, c in zip(ref, wb["REF"][2])}
@@ -543,3 +548,14 @@ def test_the_article_list_pages_and_says_whether_more_remain(extracted):
     assert (last["returned"], last["truncated"], last["next_offset"]) == (1, False, None)
     assert c.get(f"/user-scenarios/{SID}/extraction/articles?limit=999999").json()["limit"] == extraction.EXTRACTION_PAGE_MAX
     assert c.get("/user-scenarios/nope/extraction/articles").status_code == 404
+
+
+def test_a_changed_prompt_changes_its_fingerprint():
+    import hashlib
+    assert extraction.PROMPT_SHA == hashlib.sha256(extraction._EXTRACTION_SYSTEM.encode()).hexdigest()[:10]
+    assert extraction.PROMPT_SHA != hashlib.sha256((extraction._EXTRACTION_SYSTEM + " ").encode()).hexdigest()[:10]
+
+
+def test_the_digest_says_which_models_made_the_extractions(extracted):
+    d = extraction.extraction_digest(SID)
+    assert d["by_model"] == [{"model": "unknown", "prompt_sha": "unknown", "n": 3}]
