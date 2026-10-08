@@ -69,7 +69,8 @@ def ensure_document_columns(cur) -> bool:
                 id BIGSERIAL PRIMARY KEY, document_id BIGINT NOT NULL,
                 chunk_index INTEGER NOT NULL DEFAULT 0, content TEXT NOT NULL DEFAULT '',
                 chunk_type TEXT, created_at TIMESTAMP DEFAULT now())""")
-    for ensure_name in ("_ensure_bibliographic_columns", "_ensure_double_blind_columns", "_ensure_dedup_columns"):
+    for ensure_name in ("_ensure_bibliographic_columns", "_ensure_double_blind_columns", "_ensure_dedup_columns",
+                        "_ensure_extraction_columns"):
         ensure = getattr(main, ensure_name, None)
         if ensure:
             ensure()
