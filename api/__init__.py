@@ -41,5 +41,6 @@ MODULES = (
     "model_training",
     "gesica_routes",
     "codebook",
+    "extraction_review",
     "extraction",
 )

@@ -40,6 +40,7 @@ from sqlalchemy import text
 
 from .codebook import annotate, get_codebook, get_index, normalise, vocabulary_prompt
 from .core import _env_int, app, engine, logger, require_api_key
+from .extraction_review import load_reviews, overlay, overlay_annotated
 from .digest import _rows
 from .scenario_store import (_get_scenario_threshold, _get_user_scenario_or_404,
                              relevant_gate_sql)
@@ -110,7 +111,8 @@ SHEET_COLUMNS = {
 }
 #: Added to the right of the template columns, so the template stays intact and a reviewer
 #: can still check each value against the paper.
-REVIEW_COLUMNS = (("Page/section", "page_section"), ("Codebook label", "label_path"), ("Quote", "quote"),
+REVIEW_COLUMNS = (("Page/section", "page_section"), ("Codebook label", "label_path"),
+                  ("Review status", "review_status"), ("Reviewed by", "reviewed_by"), ("Quote", "quote"),
                   ("Quote found in text", "quote_verified"), ("Extracted from", "source"))
 
 
@@ -664,7 +666,8 @@ def _cell(v: Any) -> Any:
     return v
 
 
-def template_rows(articles: list[dict], id_prefix: str = "LR", index=None) -> dict[str, list[dict]]:
+def template_rows(articles: list[dict], id_prefix: str = "LR", index=None, reviews: dict | None = None,
+                  include_rejected: bool = False) -> dict[str, list[dict]]:
     """The extractions as template rows: `{"ref": [...], "human_susc": [...], ...}`.
     `articles` are relevant-article rows carrying an `extraction_json`. Pure."""
     out: dict[str, list[dict]] = {"ref": [], **{s: [] for s in SHEETS}}
@@ -687,10 +690,21 @@ def template_rows(articles: list[dict], id_prefix: str = "LR", index=None) -> di
             "math_model": ref.get("math_model"), "model_type": ref.get("model_type"),
             "exclusion": (a.get("screening_reason") if a.get("screening_status") == "excluded" else None),
         })
-        for o in ex.get("observations") or []:
-            if o.get("sheet") in out:
-                row = annotate(index, o) if index is not None else dict(o)
-                out[o["sheet"]].append({**row, "id": aid, "source": ex.get("source")})
+        observations = [o for o in (ex.get("observations") or []) if isinstance(o, dict)]
+        if reviews is not None:
+            reviewed, _stale = overlay(int(a["id"]), observations, reviews)
+        else:
+            reviewed = [{**o, "review_status": "unreviewed", "reviews": [], "effective": o} for o in observations]
+        for o in reviewed:
+            if o["review_status"] == "rejected" and not include_rejected:
+                continue
+            fields = o["effective"]                              # the reviewers' corrections applied
+            sheet = fields.get("sheet")
+            if sheet in out:
+                row = annotate(index, fields) if index is not None else dict(fields)
+                out[sheet].append({**row, "id": aid, "source": ex.get("source"),
+                                   "review_status": o["review_status"],
+                                   "reviewed_by": ", ".join(r["reviewer"] for r in o["reviews"]) or None})
     return out
 
 
@@ -704,13 +718,14 @@ def _models_line(articles: list[dict]) -> str:
     return "; ".join(f"{m}, prompt {p} ({n} papers)" for (m, p), n in c.most_common())
 
 
-def build_workbook(articles: list[dict], coverage_note: str, id_prefix: str = "LR", index=None) -> bytes:
+def build_workbook(articles: list[dict], coverage_note: str, id_prefix: str = "LR", index=None,
+                   reviews: dict | None = None, include_rejected: bool = False) -> bytes:
     """An .xlsx with the template's sheets and column titles, plus review columns on the
     right and a README sheet that says what the numbers cover."""
     from openpyxl import Workbook
     from openpyxl.styles import Font
 
-    rows = template_rows(articles, id_prefix, index)
+    rows = template_rows(articles, id_prefix, index, reviews, include_rejected)
     wb = Workbook()
     readme = wb.active
     readme.title = "README"
@@ -723,6 +738,9 @@ def build_workbook(articles: list[dict], coverage_note: str, id_prefix: str = "L
         "'Extracted from' = abstract means the paper's full text was not available: tables "
         "are not in abstracts, so most values are missing, not absent from the paper.",
         "NUTS columns are empty: geography is resolved in a later step.",
+        "'Review status' says what the reviewers decided (accepted, edited, rejected, conflict or "
+        "unreviewed). Edited values are the reviewers' corrections; rejected rows are left out "
+        "unless the file was exported with them.",
         "ID is LR + the LiteRev article id; rename it to your initials and a number if needed.",
         "Made with: " + (_models_line(articles) or "unknown") + ".",
     ):
@@ -751,12 +769,13 @@ def build_workbook(articles: list[dict], coverage_note: str, id_prefix: str = "L
     return buf.getvalue()
 
 
-def build_long_csv(articles: list[dict], id_prefix: str = "LR", index=None) -> str:
+def build_long_csv(articles: list[dict], id_prefix: str = "LR", index=None, reviews: dict | None = None,
+                   include_rejected: bool = False) -> str:
     """One flat table, one row per observation, with its sheet: for scripts and datasets."""
-    rows = template_rows(articles, id_prefix, index)
+    rows = template_rows(articles, id_prefix, index, reviews, include_rejected)
     fields = ["id", "sheet", "transmission_mode", "disease", "group", "covariate", "l1", "l2", "value", "descr",
               "notes", "n_cases", "pop_risk", "original_name", "page_section", "source_kind",
-              "quote", "quote_verified", "source"]
+              "quote", "quote_verified", "review_status", "reviewed_by", "source"]
     buf = io.StringIO()
     w = csv.writer(buf)
     w.writerow(fields)
@@ -793,6 +812,31 @@ def get_scenario_extraction_coverage(scenario_id: str) -> dict[str, Any]:
     `extraction_digest`): who reports sex, age, KAP, PPE..., and out of how many."""
     _get_user_scenario_or_404(scenario_id)
     return extraction_digest(scenario_id)
+
+
+def _review_counts(doc_ids: list[int]) -> dict[int, dict[str, int]]:
+    """Per article: observations with a decision, rejected, and in conflict. Only the
+    articles that have any decision are read."""
+    reviews = load_reviews(doc_ids)
+    with_reviews = sorted({d for d, _k in reviews})
+    if not with_reviews:
+        return {}
+    from .extraction_review import combine, observation_keys
+    with engine.connect() as conn:
+        rows = conn.execute(text("SELECT id, extraction_json->'observations' AS obs FROM literature_document "
+                                 "WHERE id = ANY(:ids)"), {"ids": with_reviews}).mappings().all()
+    out: dict[int, dict[str, int]] = {}
+    for r in rows:
+        obs = [o for o in (r["obs"] or []) if isinstance(o, dict)] if isinstance(r["obs"], list) else []
+        c = {"n_reviewed": 0, "n_rejected": 0, "n_conflict": 0}
+        for k in observation_keys(obs):
+            st = combine(reviews.get((int(r["id"]), k), []))["status"]
+            if st != "unreviewed":
+                c["n_reviewed"] += 1
+            c["n_rejected"] += st == "rejected"
+            c["n_conflict"] += st == "conflict"
+        out[int(r["id"])] = c
+    return out
 
 
 #: Same bound as the PICO list: a page is at most this many articles.
@@ -838,7 +882,9 @@ def list_scenario_extraction_articles(scenario_id: str, limit: int = EXTRACTION_
             FROM literature_document d JOIN article_scenarios ars ON ars.document_id = d.id
             WHERE ars.scenario_id = :sid AND {gate}
         """), {"sid": scenario_id, "thr": thr}).mappings().first()
+    counts = _review_counts([int(r["id"]) for r in rows if int(r["n_observations"] or 0) > 0])
     for r in rows:
+        r.update(counts.get(int(r["id"]), {"n_reviewed": 0, "n_rejected": 0, "n_conflict": 0}))
         r["n_observations"] = int(r["n_observations"] or 0)
         r["n_quote_found"] = int(r["n_quote_found"] or 0)
         r["coverage"] = {k: bool((r["coverage"] or {}).get(k)) for k in COVERAGE_KEYS} if r["has_extraction"] else None
@@ -865,16 +911,57 @@ def get_article_extraction(scenario_id: str, article_id: int) -> dict[str, Any]:
     if not row:
         raise HTTPException(status_code=404, detail="Article not in this scenario.")
     ex = row["extraction_json"]
+    stale: list[dict] = []
     if isinstance(ex, dict) and isinstance(ex.get("observations"), list):
         index = get_index(scenario_id)
-        ex = {**ex, "observations": [annotate(index, o) for o in ex["observations"] if isinstance(o, dict)]}
+        stored = [o for o in ex["observations"] if isinstance(o, dict)]
+        obs, stale = overlay_annotated(int(row["id"]), stored, index)
+        ex = {**ex, "observations": obs}
     return {"id": row["id"], "title": row["title"], "extracted_at": row["extraction_at"],
-            "extraction": ex}
+            "extraction": ex, "stale_reviews": stale}
+
+
+@app.get("/user-scenarios/{scenario_id}/extraction/dataset")
+def export_extraction_dataset(scenario_id: str, include_unreviewed: bool = Query(False)) -> Response:
+    """The annotated dataset, one JSON object per line (JSONL): each observation a reviewer
+    accepted or corrected, with the quote it rests on, its codebook label, who validated it, and
+    the model and prompt that produced it. This is the labelled data the protocol wants for
+    training and evaluating extraction models. Rejected and conflicting rows are never in it;
+    unreviewed ones only with `include_unreviewed`."""
+    _get_user_scenario_or_404(scenario_id)
+    rows = [r for r in _relevant_rows(scenario_id) if isinstance(r.get("extraction_json"), dict)]
+    reviews = load_reviews([int(r["id"]) for r in rows])
+    index = get_index(scenario_id)
+    lines = []
+    for a in rows:
+        ex = a["extraction_json"]
+        stored = [o for o in (ex.get("observations") or []) if isinstance(o, dict)]
+        obs, _stale = overlay(int(a["id"]), stored, reviews)
+        for o in obs:
+            st = o["review_status"]
+            if st in ("rejected", "conflict") or (st == "unreviewed" and not include_unreviewed):
+                continue
+            eff = annotate(index, o["effective"])
+            lines.append(json.dumps({
+                "article": {"id": a["id"], "title": a.get("title"), "doi": a.get("doi"), "year": a.get("year")},
+                "observation": {k: eff.get(k) for k in ("sheet", "group", "covariate", "value", "descr", "n_cases",
+                                                        "pop_risk", "disease", "transmission_mode", "page_section",
+                                                        "source_kind", "l1", "l2", "label_path")},
+                "quote": eff.get("quote"), "quote_found_in_text": eff.get("quote_verified"),
+                "review": {"status": st, "reviewers": [r["reviewer"] for r in o["reviews"]]},
+                "extraction": {"source": ex.get("source"), "model": ex.get("model"),
+                               "prompt_sha": ex.get("prompt_sha"), "extracted_at": ex.get("extracted_at")},
+            }, ensure_ascii=False))
+    body = ("\n".join(lines) + ("\n" if lines else "")).encode("utf-8")
+    return Response(content=body, media_type="application/x-ndjson; charset=utf-8", headers={
+        "Content-Disposition": f'attachment; filename="extraction_dataset_{re.sub(r"[^A-Za-z0-9_-]", "_", scenario_id)}.jsonl"',
+        "X-Rows": str(len(lines))})
 
 
 @app.get("/user-scenarios/{scenario_id}/extraction/export")
 def export_scenario_extraction(scenario_id: str, format: str = Query("xlsx"),
-                               id_prefix: str = Query("LR", max_length=12)) -> Response:
+                               id_prefix: str = Query("LR", max_length=12),
+                               include_rejected: bool = Query(False)) -> Response:
     """The extractions of ALL the relevant articles, as the template workbook (`xlsx`) or
     one flat table (`csv`). Articles not extracted yet are not in it; the README sheet and
     the `X-Coverage` header say how many that is."""
@@ -888,10 +975,12 @@ def export_scenario_extraction(scenario_id: str, format: str = Query("xlsx"),
     note = (f"{len(done)} of the {len(rows)} relevant articles are extracted "
             f"({len(rows) - len(done)} not yet); {from_abs} of them from the abstract only.")
     prefix = re.sub(r"[^A-Za-z0-9_-]", "", id_prefix) or "LR"
+    reviews = load_reviews([int(r["id"]) for r in done])
     if fmt == "csv":
-        body, media, ext = build_long_csv(done, prefix, get_index(scenario_id)).encode("utf-8-sig"), "text/csv; charset=utf-8", "csv"
+        body, media, ext = (build_long_csv(done, prefix, get_index(scenario_id), reviews, include_rejected)
+                            .encode("utf-8-sig"), "text/csv; charset=utf-8", "csv")
     else:
-        body, media, ext = (build_workbook(done, note, prefix, get_index(scenario_id)),
+        body, media, ext = (build_workbook(done, note, prefix, get_index(scenario_id), reviews, include_rejected),
                             "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "xlsx")
     return Response(content=body, media_type=media, headers={
         "Content-Disposition": f'attachment; filename="extraction_{re.sub(r"[^A-Za-z0-9_-]", "_", scenario_id)}.{ext}"',

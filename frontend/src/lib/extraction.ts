@@ -15,7 +15,7 @@ export function share(n: number, d: number): number {
   return Math.max(0, Math.min(100, Math.round((n / d) * 100)));
 }
 
-export type ExtractionFilter = "all" | "extracted" | "pending" | "quote_missing";
+export type ExtractionFilter = "all" | "extracted" | "pending" | "quote_missing" | "to_review" | "conflict";
 export type ItemMode = "reports" | "missing";
 export type ExtractionSort = "year" | "rows" | "quotes";
 
@@ -39,6 +39,8 @@ export function filterArticles(articles: ExtractionArticle[], v: ExtractionView)
     if (v.filter === "extracted" && !a.has_extraction) return false;
     if (v.filter === "pending" && a.has_extraction) return false;
     if (v.filter === "quote_missing" && quotesToCheck(a) === 0) return false;
+    if (v.filter === "to_review" && !(a.has_extraction && a.n_observations > (a.n_reviewed ?? 0))) return false;
+    if (v.filter === "conflict" && !((a.n_conflict ?? 0) > 0)) return false;
     if (q && !(a.title || "").toLowerCase().includes(q)) return false;
     if (v.item) {
       if (!a.has_extraction || !a.coverage) return false;
@@ -60,4 +62,27 @@ export function sortArticles(articles: ExtractionArticle[], by: ExtractionSort):
     return (b.year ?? 0) - (a.year ?? 0) || b.id - a.id;
   });
   return out;
+}
+
+/** Kappa in words (Landis and Koch), for a reader who does not know the scale. */
+export function kappaBand(k: number | null | undefined): "undefined" | "poor" | "fair" | "moderate" | "substantial" | "almost" {
+  if (k == null || !Number.isFinite(k)) return "undefined";
+  if (k < 0.2) return "poor";
+  if (k < 0.4) return "fair";
+  if (k < 0.6) return "moderate";
+  if (k < 0.8) return "substantial";
+  return "almost";
+}
+
+/** Fields a reviewer may type, as the payload of an edit. Empty text clears a number. */
+export function editPayload(f: { value: string; n_cases: string; pop_risk: string; covariate: string }): Record<string, unknown> {
+  const num = (s: string) => (s.trim() === "" ? null : Number(s.trim().replace(",", ".")));
+  return { value: num(f.value), n_cases: num(f.n_cases), pop_risk: num(f.pop_risk), covariate: f.covariate.trim() };
+}
+
+/** Whether every typed number is a number, so a bad entry is caught before it is sent. */
+export function editIsValid(f: { value: string; n_cases: string; pop_risk: string; covariate: string }): boolean {
+  const p = editPayload(f);
+  return f.covariate.trim().length > 0
+    && (["value", "n_cases", "pop_risk"] as const).every((k) => p[k] === null || Number.isFinite(p[k] as number));
 }

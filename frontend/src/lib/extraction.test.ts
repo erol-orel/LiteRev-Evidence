@@ -1,12 +1,12 @@
 import { describe, expect, it } from "vitest";
 import type { ExtractionArticle } from "./api";
-import { COVERAGE_KEYS, filterArticles, quotesToCheck, share, sortArticles } from "./extraction";
+import { COVERAGE_KEYS, editIsValid, editPayload, filterArticles, kappaBand, quotesToCheck, share, sortArticles } from "./extraction";
 
 const art = (id: number, over: Partial<ExtractionArticle> = {}): ExtractionArticle => ({
   id, title: `Paper ${id}`, year: 2020 + id, doi: null, journal: null, has_extraction: true,
   source: "fulltext", text_truncated: false,
   coverage: Object.fromEntries(COVERAGE_KEYS.map((k) => [k, false])),
-  n_observations: 4, n_quote_found: 4, attempts: 0, ...over,
+  n_observations: 4, n_quote_found: 4, attempts: 0, n_reviewed: 0, n_rejected: 0, n_conflict: 0, ...over,
 });
 
 const view = { filter: "all" as const, search: "", item: null, itemMode: "reports" as const };
@@ -66,5 +66,45 @@ describe("sortArticles", () => {
     for (const by of ["year", "rows", "quotes"] as const) {
       expect(sortArticles(items, by).map((a) => a.id)).toEqual([1, 9]);
     }
+  });
+});
+
+describe("review filters", () => {
+  const items = [
+    art(1, { n_reviewed: 4 }),
+    art(2, { n_reviewed: 1, n_conflict: 1 }),
+    art(3, { has_extraction: false, source: null, coverage: null, n_observations: 0, n_quote_found: 0 }),
+    art(4),
+  ];
+  const v = { filter: "all" as const, search: "", item: null, itemMode: "reports" as const };
+
+  it("lists the papers that still have rows to review, and only extracted ones", () => {
+    expect(filterArticles(items, { ...v, filter: "to_review" }).map((a) => a.id)).toEqual([2, 4]);
+  });
+  it("lists the papers with a disagreement between reviewers", () => {
+    expect(filterArticles(items, { ...v, filter: "conflict" }).map((a) => a.id)).toEqual([2]);
+  });
+});
+
+describe("kappaBand", () => {
+  it("puts a score in the usual words and never guesses when it is undefined", () => {
+    expect(kappaBand(null)).toBe("undefined");
+    expect(kappaBand(Number.NaN)).toBe("undefined");
+    expect(kappaBand(-0.1)).toBe("poor");
+    expect(kappaBand(0.4)).toBe("moderate");
+    expect(kappaBand(0.7)).toBe("substantial");
+    expect(kappaBand(0.9)).toBe("almost");
+  });
+});
+
+describe("edit payload", () => {
+  const f = { value: "4,5", n_cases: "", pop_risk: "12", covariate: " male " };
+  it("reads a decimal comma, clears an empty number and trims the label", () => {
+    expect(editPayload(f)).toEqual({ value: 4.5, n_cases: null, pop_risk: 12, covariate: "male" });
+  });
+  it("rejects a typed value that is not a number, or an empty label", () => {
+    expect(editIsValid(f)).toBe(true);
+    expect(editIsValid({ ...f, value: "abc" })).toBe(false);
+    expect(editIsValid({ ...f, covariate: "  " })).toBe(false);
   });
 });

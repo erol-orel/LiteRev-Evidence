@@ -1504,6 +1504,9 @@ export interface ExtractionArticle {
   n_observations: number;
   n_quote_found: number;
   attempts: number;
+  n_reviewed: number;
+  n_rejected: number;
+  n_conflict: number;
 }
 
 export interface ExtractionArticlesResponse {
@@ -1539,7 +1542,14 @@ export interface ExtractionObservation {
   l2?: string | null;
   label_path?: string | null;
   matched?: boolean;
+  /** The review state over all reviewers, and the fields after their corrections. */
+  obs_key?: string;
+  review_status?: ReviewStatus;
+  reviews?: { reviewer: string; status: string; edits: Record<string, unknown> | null; note: string | null }[];
+  effective?: Partial<ExtractionObservation>;
 }
+
+export type ReviewStatus = "unreviewed" | "accepted" | "edited" | "rejected" | "conflict";
 
 export interface ArticleExtraction {
   id: number;
@@ -1555,6 +1565,8 @@ export interface ArticleExtraction {
     ref: { description?: string | null; article_type?: string | null; location?: string | null };
     observations: ExtractionObservation[];
   } | null;
+  /** Decisions whose observation the extraction no longer has (a re-extraction read the paper differently). */
+  stale_reviews?: { obs_key: string; reviewer: string; status: string }[];
 }
 
 export async function fetchExtractionStatus(scenarioId: string): Promise<ExtractionStatus> {
@@ -1604,6 +1616,55 @@ export async function startExtraction(scenarioId: string): Promise<{ status: str
 
 export function extractionExportUrl(scenarioId: string, format: "xlsx" | "csv"): string {
   return `${scenarioBase(scenarioId)}/${scenarioId}/extraction/export?format=${format}`;
+}
+
+export interface ReviewSummary {
+  scenario_id: string;
+  n_observations: number;
+  counts: Record<ReviewStatus, number>;
+  n_reviewed: number;
+  share_reviewed: number;
+  reviewers: { reviewer: string; n_decisions: number }[];
+  agreement: { reviewers: [string, string]; n_common: number; observed: number | null; kappa: number | null }[];
+  n_stale_decisions: number;
+}
+
+export async function fetchReviewSummary(scenarioId: string): Promise<ReviewSummary> {
+  const r = await safeFetch(`${scenarioBase(scenarioId)}/${scenarioId}/extraction/review/summary`);
+  if (!r.ok) throw new Error(httpMessage(r.status));
+  return r.json();
+}
+
+/** Accept, edit or reject one observation as `reviewer`; status "clear" removes that reviewer's decision. */
+export async function reviewObservation(
+  scenarioId: string, articleId: number,
+  body: { obs_key: string; reviewer: string; status: "accepted" | "edited" | "rejected" | "clear";
+          edits?: Record<string, unknown>; note?: string },
+): Promise<{ observation: ExtractionObservation }> {
+  const r = await safeFetch(`${scenarioBase(scenarioId)}/${scenarioId}/articles/${articleId}/extraction/review`, {
+    method: "POST", headers: authHeaders({ "Content-Type": "application/json" }), body: JSON.stringify(body),
+  });
+  if (!r.ok) {
+    let detail = "";
+    try { detail = (await r.json()).detail ?? ""; } catch { /* the body is not JSON */ }
+    throw new Error(detail || httpMessage(r.status));
+  }
+  return r.json();
+}
+
+export async function reviewBulk(
+  scenarioId: string, articleId: number, reviewer: string, status: "accepted" | "rejected",
+): Promise<{ n_recorded: number; n_skipped: number }> {
+  const r = await safeFetch(`${scenarioBase(scenarioId)}/${scenarioId}/articles/${articleId}/extraction/review/bulk`, {
+    method: "POST", headers: authHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify({ reviewer, status, verified_only: true }),
+  });
+  if (!r.ok) throw new Error(httpMessage(r.status));
+  return r.json();
+}
+
+export function extractionDatasetUrl(scenarioId: string): string {
+  return `${scenarioBase(scenarioId)}/${scenarioId}/extraction/dataset`;
 }
 
 // ─── Label codebook (hierarchy per extraction sheet, applied when the labels are read) ───

@@ -202,13 +202,13 @@ def test_the_workbook_has_the_templates_sheets_columns_and_the_review_columns_on
     exp = wb["HUMAN_COV_EXP"]
     head = [c.value for c in exp[1]]
     assert head[:13] == [t for t, _ in extraction.SHEET_COLUMNS["human_exp"][1]]
-    assert head[13:] == ["Codebook label", "Quote", "Quote found in text", "Extracted from"]
+    assert head[13:] == ["Codebook label", "Review status", "Reviewed by", "Quote", "Quote found in text", "Extracted from"]
     vals = {h: c.value for h, c in zip(head, exp[2])}
     assert vals["COVARIATE_hum"] == "veterinary authority staff" and vals["Value_hum"] == 7
     assert vals["Quote found in text"] == "Y" and vals["Extracted from"] == "abstract"
     # The environment sheet has no page column in the template: it is added on the right.
     env_head = [c.value for c in wb["ENV_COV"][1]]
-    assert env_head[-5:] == ["Page/section", "Codebook label", "Quote", "Quote found in text", "Extracted from"]
+    assert env_head[-7:] == ["Page/section", "Codebook label", "Review status", "Reviewed by", "Quote", "Quote found in text", "Extracted from"]
     assert wb["ENV_COV"][2][env_head.index("Page/section")].value == "Table 2"
     assert wb["HUMAN_COV_SUSC"].max_row == 1
 
