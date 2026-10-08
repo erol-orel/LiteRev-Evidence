@@ -147,3 +147,4 @@ def test_no_extraction_path_keeps_a_default_article_cap():
     assert main.EPI_PARAM_MAX_ARTICLES == 0
     assert main.CONCEPT_MAX_ARTICLES == 0
     assert main.CONCEPT_GRAPH_MAX_ARTICLES == 0
+    assert main.EXTRACTION_MAX_ARTICLES == 0
