@@ -6403,7 +6403,7 @@ function ThresholdCurvePanel({ scenarioId, onPick, onPickRerank }: { scenarioId:
 }
 
 /** ReviewTab : Corpus + PRISMA + Double-Aveugle (sous-tabs) */
-function ReviewTab({ scenarioId, detail, counts }: { scenarioId: string; detail: ScenarioDetail; counts?: CorpusCounts }) {
+function ReviewTab({ scenarioId, detail, counts, onRefreshCounts }: { scenarioId: string; detail: ScenarioDetail; counts?: CorpusCounts; onRefreshCounts?: () => void }) {
   const { t } = useI18n();
   const [sub, setSub] = React.useState<"corpus" | "prisma" | "screening">("corpus");
   const [corpusRefreshKey, setCorpusRefreshKey] = React.useState(0);
@@ -6427,7 +6427,10 @@ function ReviewTab({ scenarioId, detail, counts }: { scenarioId: string; detail:
       </div>
       {sub === "corpus" && (
         <div className="space-y-4">
-          <SeuilSection scenarioId={scenarioId} onSaved={() => setCorpusRefreshKey(k => k + 1)} onThresholdChange={setLiveThreshold} />
+          <SeuilSection
+            scenarioId={scenarioId}
+            onSaved={() => { setCorpusRefreshKey(k => k + 1); onRefreshCounts?.(); }}
+            onThresholdChange={setLiveThreshold} />
           <CorpusSection key={corpusRefreshKey} scenarioId={scenarioId} detail={detail} threshold={liveThreshold} counts={counts} />
         </div>
       )}
@@ -8313,6 +8316,37 @@ export function ScenarioDetailPage({ scenarioId, onBack, initialTab }: ScenarioD
             <span className="rounded-full border border-white/10 bg-white/5 px-2 py-0.5 text-xs text-white/50 font-mono">
               {(counts?.counts?.total ?? detail.corpus_stats.total).toLocaleString()} {t("scenarioDetail.page.articles")}
             </span>
+            {/* La nature de la question se lit avec le nom et la taille du corpus : c'est
+                l'identité du scénario, pas un réglage de la rangée d'onglets. */}
+            {isUserScenario(scenarioId) && detail && (
+              <div className="flex items-center gap-1 rounded-xl border border-white/8 bg-white/3 p-0.5"
+                   title={t("scenarioDetail.page.kindHint")}>
+                {(["review", "predictive"] as ScenarioKind[]).map(k => (
+                  <button
+                    key={k}
+                    onClick={() => {
+                      if (detail.kind === k || savingKind) return;
+                      setSavingKind(true);
+                      patchUserScenario(scenarioId, { kind: k })
+                        .then(() => fetchScenarioDetail(scenarioId))
+                        .then(setDetail)
+                        .catch(() => {})
+                        .finally(() => setSavingKind(false));
+                    }}
+                    disabled={savingKind}
+                    className={`rounded-lg px-2.5 py-1 text-[11px] transition disabled:opacity-50 ${
+                      (detail.kind ?? "predictive") === k
+                        ? "bg-brand-700 text-gold-400 font-semibold"
+                        : "text-white/45 hover:text-white hover:bg-white/8"
+                    }`}
+                  >
+                    {t(k === "review"
+                      ? "scenarioDetail.page.kindReview"
+                      : "scenarioDetail.page.kindPredictive")}
+                  </button>
+                ))}
+              </div>
+            )}
           </div>
           <p className="mt-1 text-sm text-white/50 leading-5">
             {isUserScenario(scenarioId) && detail.query
@@ -8407,38 +8441,6 @@ export function ScenarioDetailPage({ scenarioId, onBack, initialTab }: ScenarioD
             {t(`scenarioDetail.page.sections.${section.key}`)}
           </button>
         ))}
-        {/* La nature de la question, posée là où son effet se voit : les onglets
-            qu'elle retire sont dans la même rangée. Réversible, et rien n'est
-            supprimé en changeant d'avis. */}
-        {isUserScenario(scenarioId) && detail && (
-          <div className="ml-auto flex items-center gap-1 rounded-xl border border-white/8 bg-white/3 p-0.5"
-               title={t("scenarioDetail.page.kindHint")}>
-            {(["review", "predictive"] as ScenarioKind[]).map(k => (
-              <button
-                key={k}
-                onClick={() => {
-                  if (detail.kind === k || savingKind) return;
-                  setSavingKind(true);
-                  patchUserScenario(scenarioId, { kind: k })
-                    .then(() => fetchScenarioDetail(scenarioId))
-                    .then(setDetail)
-                    .catch(() => {})
-                    .finally(() => setSavingKind(false));
-                }}
-                disabled={savingKind}
-                className={`rounded-lg px-2.5 py-1 text-[11px] transition disabled:opacity-50 ${
-                  (detail.kind ?? "predictive") === k
-                    ? "bg-brand-700 text-gold-400 font-semibold"
-                    : "text-white/45 hover:text-white hover:bg-white/8"
-                }`}
-              >
-                {t(k === "review"
-                  ? "scenarioDetail.page.kindReview"
-                  : "scenarioDetail.page.kindPredictive")}
-              </button>
-            ))}
-          </div>
-        )}
       </div>
 
       {/* Contenu de la section active - isolé par une limite d'erreur : un crash
@@ -8448,7 +8450,11 @@ export function ScenarioDetailPage({ scenarioId, onBack, initialTab }: ScenarioD
             recharge ses données (corpus, PRISMA, étape sémantique…) - sinon elle
             garderait les nombres provisoires lus pendant le pipeline. */}
         <div key={`section-${refreshKey}`} className="contents">
-        {activeSection === "review" && <ReviewTab scenarioId={scenarioId} detail={detail} counts={counts?.counts} />}
+        {activeSection === "review" && (
+          <ReviewTab
+            scenarioId={scenarioId} detail={detail} counts={counts?.counts}
+            onRefreshCounts={() => { fetchScenarioCounts(scenarioId).then(setCounts).catch(() => {}); }} />
+        )}
         {activeSection === "evidence" && <EvidenceTab scenarioId={scenarioId} detail={detail} />}
         {activeSection === "reports" && <SituationReportsSection scenarioId={scenarioId} />}
         {activeSection === "assistant" && <RagSection scenarioId={scenarioId} detail={detail} />}

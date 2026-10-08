@@ -470,6 +470,33 @@ def _build_evidence_brief(scenario_id: str) -> dict[str, Any]:
     }
 
 
+def _pdf_text(value: Any, limit: int, fallback: str = "") -> str:
+    """Un texte de base rendu sûr pour un Paragraph reportlab.
+
+    Un Paragraph n'est pas du texte, c'est un mini-balisage : reportlab y lit `<i>`, `<b>`,
+    `<sub>`, et une balise non fermée fait LEVER la construction du document, pas rendre
+    un caractère de travers. Trois sources de titres sur sept en posent :
+
+      « ... Multidrug-Resistant Bacteria and <i>Candida auris</i> »
+
+    tronqué à 120 caractères par le code d'avant, devenait « ... and <i>Candida auris</ »,
+    une balise coupée en deux, et le PDF entier répondait 500. Un seul article sur les 602
+    du scénario HPAI suffisait, et l'export était donc cassé sans que rien ne dise lequel.
+
+    On tronque DONC le texte brut d'abord, puis on échappe : dans cet ordre, ni une balise
+    ni une entité ne peut sortir coupée en deux, puisque l'échappement arrive après et
+    produit forcément des entités entières. Une balise que l'auteur avait vraiment écrite
+    s'affiche alors en toutes lettres plutôt que d'être interprétée, ce qui est le bon
+    compromis pour une bibliographie : visible et jamais fatal."""
+    from xml.sax.saxutils import escape as _esc
+    raw = ("" if value is None else str(value)).strip()
+    if not raw:
+        return _esc(fallback)
+    if len(raw) > limit:
+        raw = raw[:limit].rstrip() + "…"
+    return _esc(raw)
+
+
 @app.get("/user-scenarios/{scenario_id}/evidence-brief/pdf")
 def get_user_scenario_evidence_brief_pdf(scenario_id: str):
     """PDF Evidence Brief pour un scénario utilisateur."""
@@ -593,10 +620,12 @@ def get_user_scenario_evidence_brief_pdf(scenario_id: str):
     if top_articles:
         _story.append(Paragraph("Articles les plus pertinents", _h2_style))
         for _i, _art in enumerate(top_articles, 1):
-            _story.append(Paragraph(f"<b>{_i}. {(_art['title'] or 'Sans titre')[:120]}</b>",
+            _story.append(Paragraph(f"<b>{_i}. {_pdf_text(_art['title'], 120, 'Sans titre')}</b>",
                                     ParagraphStyle("at", parent=_body_style, fontSize=9, textColor=_dark_green)))
-            _story.append(Paragraph((_art['authors'] or '')[:80], _small_style))
-            _story.append(Paragraph(f"{_art['year'] or 'N/A'} · {_art['journal'] or 'Journal inconnu'} · {_art['design']}", _small_style))
+            _story.append(Paragraph(_pdf_text(_art['authors'], 80), _small_style))
+            _story.append(Paragraph(
+                f"{_art['year'] or 'N/A'} · {_pdf_text(_art['journal'], 120, 'Journal inconnu')}"
+                f" · {_pdf_text(_art['design'], 60)}", _small_style))
             _story.append(Spacer(1, 4))
 
     _story.append(HRFlowable(width="100%", thickness=1, color=colors.HexColor("#e5e7eb"), spaceBefore=16))
