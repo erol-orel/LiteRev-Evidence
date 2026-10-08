@@ -44,4 +44,5 @@ MODULES = (
     "extraction_review",
     "extraction",
     "pooling",
+    "extraction_report",
 )

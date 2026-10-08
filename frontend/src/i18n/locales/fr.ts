@@ -1222,6 +1222,8 @@ export const fr = {
       givenUp: "{n} articles ont échoué trois fois et sont laissés de côté.",
       downloadExcel: "Excel (modèle de la revue)",
       downloadCsv: "CSV",
+      downloadReportPdf: "Rapport (PDF)",
+      downloadReportWord: "Rapport (Word)",
       abstractWarning: "{n} articles ont été lus dans le résumé seul. Les tableaux ne sont pas dans les résumés : pour eux, les comptes ci-dessous sont des minimums, pas une preuve d'absence.",
       nothingYet: "Aucun article n'est encore extrait. Lancez l'extraction pour voir ce que rapportent les articles.",
       coverageTitle: "Ce que rapportent les articles",

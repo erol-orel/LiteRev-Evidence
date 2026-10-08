@@ -1224,6 +1224,8 @@ export const en: Translations = {
       givenUp: "{n} articles failed three times and are left alone.",
       downloadExcel: "Excel (review template)",
       downloadCsv: "CSV",
+      downloadReportPdf: "Report (PDF)",
+      downloadReportWord: "Report (Word)",
       abstractWarning: "{n} articles were read from the abstract only. Tables are not in abstracts, so for them the counts below are minimums, not proof of absence.",
       nothingYet: "No article is extracted yet. Start the extraction to see what the papers report.",
       coverageTitle: "What the papers report",

@@ -3,14 +3,14 @@ import {
   AlertTriangle, CheckCircle2, ChevronDown, ChevronUp, Download, Info, Loader2,
   RotateCcw, Sparkles, Table2,
 } from "lucide-react";
-import { useI18n } from "../i18n/LanguageProvider";
+import { currentLang, useI18n } from "../i18n/LanguageProvider";
 import { CodebookPanel } from "./CodebookPanel";
 import { ObservationPanel } from "./ObservationPanel";
 import { PooledPanel } from "./PooledPanel";
 import type { Detail } from "./ObservationPanel";
 import { ReviewSummaryCard } from "./ReviewSummaryCard";
 import {
-  extractionExportUrl, fetchAllExtractionArticles, fetchArticleExtraction, fetchExtractionDigest,
+  extractionExportUrl, extractionReportUrl, fetchAllExtractionArticles, fetchArticleExtraction, fetchExtractionDigest,
   fetchExtractionStatus, hasApiKey, startExtraction,
 } from "../lib/api";
 import type {
@@ -233,6 +233,12 @@ export function ExtractionSection({ scenarioId }: { scenarioId: string }) {
             <a key={f} href={extractionExportUrl(scenarioId, f)} download
               className="flex items-center gap-1.5 rounded-xl border border-white/10 bg-white/5 px-3 py-1.5 text-[11px] text-white/70 hover:bg-white/10 transition">
               <Download size={11} />{f === "xlsx" ? T("downloadExcel") : T("downloadCsv")}
+            </a>
+          ))}
+          {extracted > 0 && (["pdf", "docx"] as const).map((f) => (
+            <a key={f} href={extractionReportUrl(scenarioId, f, currentLang())} download
+              className="flex items-center gap-1.5 rounded-xl border border-brand-500/30 bg-brand-500/10 px-3 py-1.5 text-[11px] text-brand-300 hover:bg-brand-500/20 transition">
+              <Download size={11} />{f === "pdf" ? T("downloadReportPdf") : T("downloadReportWord")}
             </a>
           ))}
         </div>

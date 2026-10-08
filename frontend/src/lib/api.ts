@@ -1663,6 +1663,10 @@ export async function reviewBulk(
   return r.json();
 }
 
+export function extractionReportUrl(scenarioId: string, format: "pdf" | "docx" | "md", lang: string): string {
+  return `${scenarioBase(scenarioId)}/${scenarioId}/extraction/report?format=${format}&lang=${lang.toLowerCase().startsWith("fr") ? "fr" : "en"}`;
+}
+
 export function extractionDatasetUrl(scenarioId: string): string {
   return `${scenarioBase(scenarioId)}/${scenarioId}/extraction/dataset`;
 }
