@@ -1534,6 +1534,11 @@ export interface ExtractionObservation {
   source_kind: string | null;
   quote: string | null;
   quote_verified: boolean;
+  /** Where the labels sit in the codebook (added when read; the stored words are untouched). */
+  l1?: string | null;
+  l2?: string | null;
+  label_path?: string | null;
+  matched?: boolean;
 }
 
 export interface ArticleExtraction {
@@ -1599,6 +1604,85 @@ export async function startExtraction(scenarioId: string): Promise<{ status: str
 
 export function extractionExportUrl(scenarioId: string, format: "xlsx" | "csv"): string {
   return `${scenarioBase(scenarioId)}/${scenarioId}/extraction/export?format=${format}`;
+}
+
+// ─── Label codebook (hierarchy per extraction sheet, applied when the labels are read) ───
+export interface CodebookNode {
+  sheet: string;
+  l1: string;
+  l2: string | null;
+  l3: string | null;
+  synonyms: string[];
+  label_en: string | null;
+  label_fr: string | null;
+}
+
+export interface CodebookResponse {
+  scenario_id: string;
+  source: "default" | "custom";
+  n_nodes: number;
+  nodes: CodebookNode[];
+}
+
+export interface UnmappedLabel {
+  sheet: string;
+  group: string | null;
+  covariate: string | null;
+  n_rows: number;
+  n_articles: number;
+  l1: string | null;
+}
+
+export interface UnmappedResponse {
+  scenario_id: string;
+  rows_mapped: number;
+  rows_unmapped: number;
+  n_distinct_unmapped: number;
+  unmapped: UnmappedLabel[];
+}
+
+export async function fetchCodebook(scenarioId: string): Promise<CodebookResponse> {
+  const r = await safeFetch(`${scenarioBase(scenarioId)}/${scenarioId}/codebook`);
+  if (!r.ok) throw new Error(httpMessage(r.status));
+  return r.json();
+}
+
+export async function fetchUnmappedLabels(scenarioId: string, top = 50): Promise<UnmappedResponse> {
+  const r = await safeFetch(`${scenarioBase(scenarioId)}/${scenarioId}/codebook/unmapped?top=${top}`);
+  if (!r.ok) throw new Error(httpMessage(r.status));
+  return r.json();
+}
+
+export async function addCodebookSynonym(
+  scenarioId: string, body: { sheet: string; l1: string; l2: string | null; label: string },
+): Promise<void> {
+  const r = await safeFetch(`${scenarioBase(scenarioId)}/${scenarioId}/codebook/synonym`, {
+    method: "POST", headers: authHeaders({ "Content-Type": "application/json" }), body: JSON.stringify(body),
+  });
+  if (!r.ok) throw new Error(httpMessage(r.status));
+}
+
+export async function importCodebookCsv(scenarioId: string, csv: string): Promise<{ n_nodes: number }> {
+  const r = await safeFetch(`${scenarioBase(scenarioId)}/${scenarioId}/codebook/import`, {
+    method: "POST", headers: authHeaders({ "Content-Type": "text/csv" }), body: csv,
+  });
+  if (!r.ok) {
+    let detail = "";
+    try { detail = (await r.json()).detail ?? ""; } catch { /* the body is not JSON */ }
+    throw new Error(detail || httpMessage(r.status));
+  }
+  return r.json();
+}
+
+export async function resetCodebook(scenarioId: string): Promise<void> {
+  const r = await safeFetch(`${scenarioBase(scenarioId)}/${scenarioId}/codebook`, {
+    method: "DELETE", headers: authHeaders(),
+  });
+  if (!r.ok) throw new Error(httpMessage(r.status));
+}
+
+export function codebookExportUrl(scenarioId: string): string {
+  return `${scenarioBase(scenarioId)}/${scenarioId}/codebook/export`;
 }
 
 // ─── Evidence Brief ───────────────────────────────────────────────────────────

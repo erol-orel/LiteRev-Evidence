@@ -38,6 +38,7 @@ from fastapi import Depends, HTTPException, Query
 from fastapi.responses import Response
 from sqlalchemy import text
 
+from .codebook import annotate, get_codebook, get_index, normalise, vocabulary_prompt
 from .core import _env_int, app, engine, logger, require_api_key
 from .digest import _rows
 from .scenario_store import (_get_scenario_threshold, _get_user_scenario_or_404,
@@ -109,7 +110,7 @@ SHEET_COLUMNS = {
 }
 #: Added to the right of the template columns, so the template stays intact and a reviewer
 #: can still check each value against the paper.
-REVIEW_COLUMNS = (("Page/section", "page_section"), ("Quote", "quote"),
+REVIEW_COLUMNS = (("Page/section", "page_section"), ("Codebook label", "label_path"), ("Quote", "quote"),
                   ("Quote found in text", "quote_verified"), ("Extracted from", "source"))
 
 
@@ -307,13 +308,14 @@ def _article_text(conn, row: dict) -> tuple[str, str, bool]:
 
 
 def extract_article(client, row: dict, source_text: str, source: str, truncated: bool,
-                    disease_hint: str | None = None) -> dict[str, Any]:
+                    disease_hint: str | None = None, system: str | None = None) -> dict[str, Any]:
     """One LLM call for one article, parsed and checked. Raises on any failure, so the
     caller counts an attempt instead of caching an empty result as if it were an answer."""
+    system = system or _EXTRACTION_SYSTEM
     payload = {"disease_of_interest": disease_hint or None, "text_is": source, "text": source_text}
     resp = client.chat.completions.create(
         model=_model("bulk"),
-        messages=[{"role": "system", "content": _EXTRACTION_SYSTEM},
+        messages=[{"role": "system", "content": system},
                   {"role": "user", "content": json.dumps(payload, ensure_ascii=False)}],
         temperature=0, seed=42, max_tokens=8000,
         response_format={"type": "json_object"},
@@ -323,7 +325,8 @@ def extract_article(client, row: dict, source_text: str, source: str, truncated:
     # The record of how this was made: the model, the prompt, and when. An extraction that
     # cannot say which model and prompt produced it cannot be reproduced or compared.
     parsed.update({"v": EXTRACTION_VERSION, "source": source, "truncated": truncated,
-                   "n_chars": len(source_text), "model": _model("bulk"), "prompt_sha": PROMPT_SHA,
+                   "n_chars": len(source_text), "model": _model("bulk"),
+                   "prompt_sha": hashlib.sha256(system.encode("utf-8")).hexdigest()[:10],
                    "extracted_at": datetime.now(timezone.utc).isoformat(timespec="seconds")})
     return parsed
 
@@ -389,12 +392,14 @@ def _extract_scenario(scenario_id: str, disease_hint: str | None, max_articles: 
     if not rows:
         return {"total": 0, "done": 0, "failed": 0}
     client = _llm_client()
+    # The scenario's own codebook steers how the model names its groups.
+    system = _EXTRACTION_SYSTEM + vocabulary_prompt(get_codebook(scenario_id)["nodes"])
 
     def _work(row: dict) -> bool:
         try:
             with engine.connect() as conn:
                 src_text, source, truncated = _article_text(conn, row)
-            result = extract_article(client, row, src_text, source, truncated, disease_hint)
+            result = extract_article(client, row, src_text, source, truncated, disease_hint, system)
             with engine.begin() as conn:
                 conn.execute(text("""
                     UPDATE literature_document
@@ -491,6 +496,11 @@ _COVERAGE_LABELS_FR = {
     "environment": "environnement", "vector": "vecteurs",
 }
 _TOP_GROUPS = 12
+
+
+def normalise_group(index, sheet: str, group: str) -> str:
+    """A group as the codebook names it (its level-1 key), else the folded text."""
+    return normalise(index, sheet or "", group, "")["group_key"] or (group or "").lower()
 _TOP_CRUDE = 12
 
 _OBS_FROM = """
@@ -559,11 +569,18 @@ def extraction_digest(scenario_id: str, threshold: float | None = None) -> dict[
                     GROUP BY 1 ORDER BY n_rows DESC
                 """, scenario_id, thr)]
 
-            out["top_groups"] = _rows(conn, f"""
-                SELECT o->>'sheet' AS sheet, LOWER(o->>'group') AS value, COUNT(DISTINCT d.id) AS n
+            index = get_index(scenario_id)
+            ids_by_group: dict[tuple[str, str], set] = {}
+            for r in _rows(conn, f"""
+                SELECT o->>'sheet' AS sheet, o->>'group' AS grp, array_agg(DISTINCT d.id) AS ids
                 {_OBS_FROM.format(gate=gate)} AND NULLIF(TRIM(o->>'group'), '') IS NOT NULL
-                GROUP BY 1, 2 ORDER BY n DESC, 2 LIMIT :top
-            """, scenario_id, thr, top=_TOP_GROUPS)
+                GROUP BY 1, 2
+            """, scenario_id, thr):
+                key = normalise_group(index, r["sheet"], r["grp"])
+                ids_by_group.setdefault((r["sheet"], key), set()).update(r["ids"])
+            out["top_groups"] = [
+                {"sheet": sh, "value": v, "n": len(ids)}
+                for (sh, v), ids in sorted(ids_by_group.items(), key=lambda kv: (-len(kv[1]), kv[0]))[:_TOP_GROUPS]]
 
             crude = _rows(conn, f"""
                 SELECT o->>'sheet' AS sheet, LOWER(TRIM(o->>'covariate')) AS covariate,
@@ -647,7 +664,7 @@ def _cell(v: Any) -> Any:
     return v
 
 
-def template_rows(articles: list[dict], id_prefix: str = "LR") -> dict[str, list[dict]]:
+def template_rows(articles: list[dict], id_prefix: str = "LR", index=None) -> dict[str, list[dict]]:
     """The extractions as template rows: `{"ref": [...], "human_susc": [...], ...}`.
     `articles` are relevant-article rows carrying an `extraction_json`. Pure."""
     out: dict[str, list[dict]] = {"ref": [], **{s: [] for s in SHEETS}}
@@ -672,7 +689,8 @@ def template_rows(articles: list[dict], id_prefix: str = "LR") -> dict[str, list
         })
         for o in ex.get("observations") or []:
             if o.get("sheet") in out:
-                out[o["sheet"]].append({**o, "id": aid, "source": ex.get("source")})
+                row = annotate(index, o) if index is not None else dict(o)
+                out[o["sheet"]].append({**row, "id": aid, "source": ex.get("source")})
     return out
 
 
@@ -686,13 +704,13 @@ def _models_line(articles: list[dict]) -> str:
     return "; ".join(f"{m}, prompt {p} ({n} papers)" for (m, p), n in c.most_common())
 
 
-def build_workbook(articles: list[dict], coverage_note: str, id_prefix: str = "LR") -> bytes:
+def build_workbook(articles: list[dict], coverage_note: str, id_prefix: str = "LR", index=None) -> bytes:
     """An .xlsx with the template's sheets and column titles, plus review columns on the
     right and a README sheet that says what the numbers cover."""
     from openpyxl import Workbook
     from openpyxl.styles import Font
 
-    rows = template_rows(articles, id_prefix)
+    rows = template_rows(articles, id_prefix, index)
     wb = Workbook()
     readme = wb.active
     readme.title = "README"
@@ -733,10 +751,10 @@ def build_workbook(articles: list[dict], coverage_note: str, id_prefix: str = "L
     return buf.getvalue()
 
 
-def build_long_csv(articles: list[dict], id_prefix: str = "LR") -> str:
+def build_long_csv(articles: list[dict], id_prefix: str = "LR", index=None) -> str:
     """One flat table, one row per observation, with its sheet: for scripts and datasets."""
-    rows = template_rows(articles, id_prefix)
-    fields = ["id", "sheet", "transmission_mode", "disease", "group", "covariate", "value", "descr",
+    rows = template_rows(articles, id_prefix, index)
+    fields = ["id", "sheet", "transmission_mode", "disease", "group", "covariate", "l1", "l2", "value", "descr",
               "notes", "n_cases", "pop_risk", "original_name", "page_section", "source_kind",
               "quote", "quote_verified", "source"]
     buf = io.StringIO()
@@ -846,8 +864,12 @@ def get_article_extraction(scenario_id: str, article_id: int) -> dict[str, Any]:
         """), {"sid": scenario_id, "id": article_id}).mappings().first()
     if not row:
         raise HTTPException(status_code=404, detail="Article not in this scenario.")
+    ex = row["extraction_json"]
+    if isinstance(ex, dict) and isinstance(ex.get("observations"), list):
+        index = get_index(scenario_id)
+        ex = {**ex, "observations": [annotate(index, o) for o in ex["observations"] if isinstance(o, dict)]}
     return {"id": row["id"], "title": row["title"], "extracted_at": row["extraction_at"],
-            "extraction": row["extraction_json"]}
+            "extraction": ex}
 
 
 @app.get("/user-scenarios/{scenario_id}/extraction/export")
@@ -867,9 +889,9 @@ def export_scenario_extraction(scenario_id: str, format: str = Query("xlsx"),
             f"({len(rows) - len(done)} not yet); {from_abs} of them from the abstract only.")
     prefix = re.sub(r"[^A-Za-z0-9_-]", "", id_prefix) or "LR"
     if fmt == "csv":
-        body, media, ext = build_long_csv(done, prefix).encode("utf-8-sig"), "text/csv; charset=utf-8", "csv"
+        body, media, ext = build_long_csv(done, prefix, get_index(scenario_id)).encode("utf-8-sig"), "text/csv; charset=utf-8", "csv"
     else:
-        body, media, ext = (build_workbook(done, note, prefix),
+        body, media, ext = (build_workbook(done, note, prefix, get_index(scenario_id)),
                             "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "xlsx")
     return Response(content=body, media_type=media, headers={
         "Content-Disposition": f'attachment; filename="extraction_{re.sub(r"[^A-Za-z0-9_-]", "_", scenario_id)}.{ext}"',

@@ -4,6 +4,7 @@ import {
   RotateCcw, Sparkles, Table2,
 } from "lucide-react";
 import { useI18n } from "../i18n/LanguageProvider";
+import { CodebookPanel } from "./CodebookPanel";
 import {
   extractionExportUrl, fetchAllExtractionArticles, fetchArticleExtraction, fetchExtractionDigest,
   fetchExtractionStatus, hasApiKey, startExtraction,
@@ -271,6 +272,8 @@ export function ExtractionSection({ scenarioId }: { scenarioId: string }) {
             )}
           </div>
 
+          <CodebookPanel scenarioId={scenarioId} onChanged={() => { void reload(); }} />
+
           {/* Rows by sheet */}
           {digest.by_sheet.length > 0 && (
             <div className="space-y-2">
@@ -432,7 +435,12 @@ function ObservationPanel({ detail, T, sheetName }: {
                 <tr key={i} className="border-b border-white/5 align-top">
                   <td className="px-2.5 py-1.5 whitespace-nowrap text-white/55">{sheetName(o.sheet)}</td>
                   <td className="px-2.5 py-1.5 text-white/60">{o.group || "-"}</td>
-                  <td className="px-2.5 py-1.5 text-white/80">{o.covariate}</td>
+                  <td className="px-2.5 py-1.5 text-white/80">
+                    {o.covariate}
+                    {o.label_path
+                      ? <div className="text-[9px] text-brand-300/70">{o.label_path.replace(/_/g, " ")}</div>
+                      : <div className="text-[9px] text-gold-400/70">{T("unmapped")}</div>}
+                  </td>
                   <td className="px-2.5 py-1.5 font-mono text-white/70">{o.value ?? "-"}</td>
                   <td className="px-2.5 py-1.5 font-mono text-white/60">{o.n_cases ?? "-"}</td>
                   <td className="px-2.5 py-1.5 font-mono text-white/60">{o.pop_risk ?? "-"}</td>
