@@ -981,6 +981,16 @@ export const en: Translations = {
       fulltextDesc: "Searches for open-access full text via Unpaywall (DOI required).",
       title: "LLM Enrichment",
       subtitle: "Run automatic enrichments across the whole corpus",
+      subtitleScenario: "Run the enrichments on this scenario",
+      scopeLabel: "Scope:",
+      scopeRelevant: "Relevant articles",
+      scopeAll: "Whole scenario",
+      scopeRelevantHint:
+        "The subset the analyses read: above the threshold or kept by hand, never a duplicate and never an excluded article.",
+      scopeAllHint:
+        "Every reference in the scenario, including those below the threshold. One model call per article.",
+      toProcess: "{n} to process",
+      nothingToProcess: "Nothing to process",
       autoEnrichmentTitle: "Automatic enrichment active",
       autoEnrichmentBody:
         ": The pipeline automatically runs PICO extraction and metadata enrichment when articles are ingested. Use the buttons below only to complete articles that may have been missed or to re-run a specific enrichment.",

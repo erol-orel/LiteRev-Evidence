@@ -61,6 +61,40 @@ def relevant_gate_sql(doc: str = "d", link: str = "ars", thr: str = ":thr") -> s
             f" AND ({status} = 'included' OR COALESCE({link}.similarity_score, 0) >= {thr})")
 
 
+# ── Le périmètre d'un traitement par lot sur un scénario ─────────────────────
+# Un enrichissement coûte un appel de modèle PAR ARTICLE. Sur un scénario de six mille
+# cinq cents références dont quatre cent soixante-sept passent le seuil, le lancer sur
+# tout le scénario coûte quatorze fois le lot utile, pour la même réponse. D'où un
+# périmètre explicite, et un seul endroit qui l'écrit.
+SCOPES = ("all", "relevant")
+
+
+def scenario_threshold_sql(sid: str = ":sid") -> str:
+    """Le seuil du scénario, LU DANS la requête plutôt que passé en paramètre, pour
+    que le lot et le compteur qui l'annonce voient le même instantané."""
+    return (f"COALESCE((SELECT ss.similarity_threshold FROM scenario_settings ss"
+            f" WHERE ss.scenario_id = {sid}), {DEFAULT_SIMILARITY_THRESHOLD})")
+
+
+def scenario_scope_sql(scope: str, doc: str = "ld", link: str = "asn",
+                       sid: str = ":sid") -> str:
+    """Le prédicat d'un lot sur un scénario, à mettre dans un WHERE après la jointure.
+
+    `all` : tout le scénario, hors doublons et hors articles écartés par un relecteur.
+    Exclure ces deux-là n'est pas une restriction du périmètre, c'est la même règle que
+    partout : on ne paie pas un modèle pour un doublon ni pour un article déjà écarté.
+
+    `relevant` : le sous-ensemble pertinent, par la porte partagée ci-dessus. Les trois
+    lots d'enrichissement filtraient chacun à leur façon, l'un excluant les articles
+    écartés et les deux autres non."""
+    if scope not in SCOPES:
+        raise ValueError(f"portée inconnue : {scope!r} (attendu : {', '.join(SCOPES)})")
+    if scope == "relevant":
+        return relevant_gate_sql(doc, link, scenario_threshold_sql(sid))
+    status = f"COALESCE({link}.screening_status, {doc}.screening_status)"
+    return f"{doc}.is_duplicate IS NOT TRUE AND {status} IS DISTINCT FROM 'excluded'"
+
+
 # ── Les compteurs d'articles, comptés UNE fois ───────────────────────────────
 # « Combien d'articles ? » recevait des réponses différentes sur le même écran : 433
 # dans le bandeau (/detail), 449 dans le titre du corpus (/corpus), 441 scorés sur 433
