@@ -516,3 +516,30 @@ def test_the_scenario_assistant_really_receives_the_block(extracted, monkeypatch
     system, user = seen[0][0]["content"], seen[0][1]["content"]
     assert "EXTRACTION STRUCTUREE: 3 des 4 articles pertinents" in user
     assert "denominateur" in system and "EXTRACTION STRUCTUREE" in system
+
+
+def test_the_article_list_has_every_relevant_article_extracted_ones_first(extracted):
+    from fastapi.testclient import TestClient
+    c = TestClient(main.app)
+    body = c.get(f"/user-scenarios/{SID}/extraction/articles").json()
+    assert (body["total"], body["extracted"], body["returned"], body["truncated"]) == (4, 3, 4, False)
+    ids = [a["id"] for a in body["articles"]]
+    assert set(ids) == {9701, 9702, 9703, 9706}                  # the relevant ones, not 9704 or 9705
+    assert ids[-1] == 9706 and body["articles"][-1]["has_extraction"] is False
+    assert body["articles"][-1]["coverage"] is None and body["articles"][-1]["n_observations"] == 0
+    by_id = {a["id"]: a for a in body["articles"]}
+    assert by_id[9701]["n_observations"] == 2 and by_id[9701]["n_quote_found"] == 1
+    assert by_id[9701]["source"] == "fulltext" and by_id[9703]["source"] == "abstract"
+    assert by_id[9702]["coverage"]["age"] is True and by_id[9702]["coverage"]["ppe"] is False
+    assert set(by_id[9702]["coverage"]) == set(extraction.COVERAGE_KEYS)
+
+
+def test_the_article_list_pages_and_says_whether_more_remain(extracted):
+    from fastapi.testclient import TestClient
+    c = TestClient(main.app)
+    first = c.get(f"/user-scenarios/{SID}/extraction/articles?limit=3").json()
+    assert (first["returned"], first["truncated"], first["next_offset"]) == (3, True, 3)
+    last = c.get(f"/user-scenarios/{SID}/extraction/articles?limit=3&offset=3").json()
+    assert (last["returned"], last["truncated"], last["next_offset"]) == (1, False, None)
+    assert c.get(f"/user-scenarios/{SID}/extraction/articles?limit=999999").json()["limit"] == extraction.EXTRACTION_PAGE_MAX
+    assert c.get("/user-scenarios/nope/extraction/articles").status_code == 404

@@ -1460,6 +1460,143 @@ export async function fetchScenarioPicoBulk(
   return r.json();
 }
 
+// ─── Structured extraction (template shaped, one row per observation) ─────────
+export interface ExtractionStatus {
+  scenario_id: string;
+  n_relevant: number;
+  n_extracted: number;
+  n_from_fulltext: number;
+  n_from_abstract: number;
+  n_pending: number;
+  n_observations: number;
+  n_given_up: number;
+  running: boolean;
+  job: { total: number; done: number; failed: number } | null;
+  version: number;
+}
+
+export interface ExtractionDigest {
+  complete?: boolean;
+  error?: string;
+  n_relevant: number;
+  n_extracted: number;
+  n_fulltext: number;
+  n_abstract: number;
+  n_unread: number;
+  coverage: Record<string, number>;
+  coverage_fulltext: Record<string, number>;
+  by_sheet: { sheet: string; n_rows: number; n_articles: number; n_quote_found: number }[];
+  top_groups: { sheet: string; value: string; n: number }[];
+  crude_counts: { sheet: string; covariate: string; n_studies: number; n_cases: number; pop_risk: number }[];
+  crude_counts_note?: string;
+}
+
+export interface ExtractionArticle {
+  id: number;
+  title: string;
+  year: number | null;
+  doi: string | null;
+  journal: string | null;
+  has_extraction: boolean;
+  source: "fulltext" | "abstract" | null;
+  text_truncated: boolean;
+  coverage: Record<string, boolean> | null;
+  n_observations: number;
+  n_quote_found: number;
+  attempts: number;
+}
+
+export interface ExtractionArticlesResponse {
+  scenario_id: string;
+  total: number;
+  extracted: number;
+  offset: number;
+  limit: number;
+  returned: number;
+  truncated: boolean;
+  next_offset: number | null;
+  articles: ExtractionArticle[];
+}
+
+export interface ExtractionObservation {
+  sheet: string;
+  transmission_mode: string | null;
+  disease: string | null;
+  group: string | null;
+  covariate: string;
+  value: number | null;
+  descr: string | null;
+  notes: string | null;
+  n_cases: number | null;
+  pop_risk: number | null;
+  original_name: string | null;
+  page_section: string | null;
+  source_kind: string | null;
+  quote: string | null;
+  quote_verified: boolean;
+}
+
+export interface ArticleExtraction {
+  id: number;
+  title: string;
+  extracted_at: string | null;
+  extraction: {
+    source: string;
+    truncated: boolean;
+    ref: { description?: string | null; article_type?: string | null; location?: string | null };
+    observations: ExtractionObservation[];
+  } | null;
+}
+
+export async function fetchExtractionStatus(scenarioId: string): Promise<ExtractionStatus> {
+  const r = await safeFetch(`${scenarioBase(scenarioId)}/${scenarioId}/extraction/status`);
+  if (!r.ok) throw new Error(httpMessage(r.status));
+  return r.json();
+}
+
+export async function fetchExtractionDigest(scenarioId: string): Promise<ExtractionDigest> {
+  const r = await safeFetch(`${scenarioBase(scenarioId)}/${scenarioId}/extraction/coverage`);
+  if (!r.ok) throw new Error(httpMessage(r.status));
+  return r.json();
+}
+
+/** EVERY relevant article, page by page: the screen says "all", so it loads all. */
+export async function fetchAllExtractionArticles(scenarioId: string, maxPages = 20): Promise<ExtractionArticlesResponse> {
+  const base = `${scenarioBase(scenarioId)}/${scenarioId}/extraction/articles`;
+  let offset: number | null = 0;
+  let first: ExtractionArticlesResponse | null = null;
+  const all: ExtractionArticle[] = [];
+  for (let page = 0; offset !== null && page < maxPages; page++) {
+    const r = await safeFetch(`${base}?limit=5000&offset=${offset}`);
+    if (!r.ok) throw new Error(httpMessage(r.status));
+    const chunk: ExtractionArticlesResponse = await r.json();
+    first = first ?? chunk;
+    all.push(...chunk.articles);
+    offset = chunk.truncated ? chunk.next_offset : null;
+  }
+  if (!first) throw new Error(httpMessage(500));
+  return { ...first, articles: all, returned: all.length, offset: 0, truncated: offset !== null, next_offset: offset };
+}
+
+export async function fetchArticleExtraction(scenarioId: string, articleId: number): Promise<ArticleExtraction> {
+  const r = await safeFetch(`${scenarioBase(scenarioId)}/${scenarioId}/articles/${articleId}/extraction`);
+  if (!r.ok) throw new Error(httpMessage(r.status));
+  return r.json();
+}
+
+/** Starts the background extraction (needs the admin key). `status` is started, running, no_llm... */
+export async function startExtraction(scenarioId: string): Promise<{ status: string }> {
+  const r = await safeFetch(`${scenarioBase(scenarioId)}/${scenarioId}/extraction/run`, {
+    method: "POST", headers: authHeaders(),
+  });
+  if (!r.ok) throw new Error(httpMessage(r.status));
+  return r.json();
+}
+
+export function extractionExportUrl(scenarioId: string, format: "xlsx" | "csv"): string {
+  return `${scenarioBase(scenarioId)}/${scenarioId}/extraction/export?format=${format}`;
+}
+
 // ─── Evidence Brief ───────────────────────────────────────────────────────────
 export interface EvidenceBriefData {
   scenario_id: string;
