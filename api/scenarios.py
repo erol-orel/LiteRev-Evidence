@@ -17,10 +17,13 @@ from sqlalchemy import text
 from .core import _msg, _norm_lang, app, engine, logger, require_api_key
 from .documents import _strategy_is_degraded
 from .scenario_store import (
+    KINDS,
     _get_scenario_threshold,
     _get_user_scenario_or_404,
+    capabilities_for,
     corpus_search_sql,
     corpus_search_terms,
+    normalise_kind,
     relevant_gate_sql,
     scenario_counts,
 )
@@ -158,6 +161,14 @@ def _ensure_user_scenarios_table() -> None:
             "ALTER TABLE user_scenarios ADD COLUMN IF NOT EXISTS combinator VARCHAR(12)",
             # Propriétaire (email) : living review + alertes email par utilisateur.
             "ALTER TABLE user_scenarios ADD COLUMN IF NOT EXISTS owner_email VARCHAR(255)",
+            # La NATURE de la question. Toute question n'appelle pas un modèle : une
+            # revue de littérature se termine par une synthèse, et la moitié
+            # prédictive de l'application ne lui sert à rien - elle lui coûte même un
+            # passage de modèle par scénario, qui fabrique des variables candidates
+            # que personne n'ajustera (cf. api/pipeline.py, étape « variables »).
+            # NULL = l'ancien comportement, tout est disponible : aucune ligne
+            # existante ne change, et rien n'est caché sur la foi d'une devinette.
+            "ALTER TABLE user_scenarios ADD COLUMN IF NOT EXISTS kind VARCHAR(20)",
             "CREATE INDEX IF NOT EXISTS ix_user_scenarios_owner ON user_scenarios (owner_email)",
             # Scénarios GESICA : _list_db_gesica_scenarios (main.py:3720-3727) filtre sur
             # is_system / hidden et trie sur title, SANS qualificatif de table. Ces
@@ -247,6 +258,10 @@ class UserScenarioPatch(BaseModel):
     name: str | None = None
     pinned: bool | None = None
     mode: str | None = None
+    # La nature de la question : « review » ou « predictive ». Modifiable à tout
+    # moment et dans les deux sens ; rien n'est supprimé en passant de l'une à
+    # l'autre, une spec déjà produite attend simplement qu'on rouvre l'onglet.
+    kind: str | None = None
     filters: dict[str, Any] | None = None
     folder_id: str | None = None  # Assigner à un dossier (None = hors dossier)
 
@@ -350,6 +365,8 @@ def _user_scenario_to_gesica_format(
         "sub_queries": _sub_clean if len(_sub_clean) >= 2 else None,
         "combinator": (row.get("combinator") if len(_sub_clean) >= 2 else None),
         "mode": row["mode"],
+        "kind": normalise_kind(row.get("kind")),
+        "capabilities": sorted(capabilities_for(row.get("kind"))),
         "filters": row.get("filters") or {},
         "result_count": row.get("result_count", 0),
         "folder_id": row.get("folder_id"),
@@ -401,7 +418,7 @@ def list_user_scenarios() -> list[dict[str, Any]]:
         """))
         rows = conn.execute(text("""
             SELECT
-                us.id, us.name, us.query, us.mode, us.filters,
+                us.id, us.name, us.query, us.mode, us.kind, us.filters,
                 us.pinned, us.folder_id, us.created_at, us.updated_at,
                 us.populate_status, us.pipeline_status, us.pipeline_step, us.pipeline_progress,
                 COALESCE(us.result_count, 0) AS result_count,
@@ -655,6 +672,13 @@ def patch_user_scenario(scenario_id: str, payload: UserScenarioPatch, lang: str 
     if payload.mode is not None:
         updates.append("mode = :mode")
         params["mode"] = payload.mode
+    if payload.kind is not None:
+        if payload.kind not in KINDS:
+            raise HTTPException(status_code=400,
+                                detail=f"Nature inconnue : {payload.kind!r} "
+                                       f"(attendu : {', '.join(KINDS)})")
+        updates.append("kind = :kind")
+        params["kind"] = payload.kind
     if payload.filters is not None:
         updates.append("filters = CAST(:filters AS jsonb)")
         params["filters"] = json.dumps(payload.filters)
@@ -849,6 +873,8 @@ def get_user_scenario_detail(scenario_id: str, lang: str | None = Query(None)) -
         "facets": facets,
         "combinator": _combinator if _sub else None,
         "mode": row["mode"],
+        "kind": normalise_kind(row.get("kind")),
+        "capabilities": sorted(capabilities_for(row.get("kind"))),
         "filters": row.get("filters") or {},
         "pinned": bool(row.get("pinned", False)),
         "created_at": row["created_at"].isoformat() if row.get("created_at") else None,

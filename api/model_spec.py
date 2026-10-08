@@ -295,6 +295,10 @@ def propose_scenario_spec(scenario_id: str, lang: str | None = Query(None), _: N
     """Régénère le spec depuis l'évidence courante dans un slot de proposition (async)."""
     import threading, time
 
+    from .scenario_store import CAP_MODEL, capability_refusal, scenario_can
+    if not scenario_can(scenario_id, CAP_MODEL):
+        return {"status": "not_applicable", **capability_refusal(scenario_id, CAP_MODEL)}
+
     if _job_is_active(_SPEC_PROPOSAL_JOBS.get(scenario_id)):
         return {"status": "already_running", "scenario_id": scenario_id}
 

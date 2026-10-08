@@ -2534,20 +2534,31 @@ def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict
 
         # ── Variables & Modèle (spec déterministe : outcome, features, algorithme,
         # data_template, paramètres SEIR) - le scénario est « modèle-prêt » d'emblée.
-        try:
-            update_step("variables", "running")
-            _generate_variables_from_pico(scenario_id, lang=lang or "fr")
-            # Projection SEIR par défaut (365 j, 300 tirages) calculée et mise en cache ICI :
-            # l'onglet Modèle l'affiche sans simuler sous les yeux de l'utilisateur.
+        #
+        # La SEULE étape des onze qui ne serve qu'à un scénario prédictif, et la seule
+        # qui coûte un appel de modèle pour une question qui n'en attend pas. Une revue
+        # de littérature la saute : la décision est prise AVANT la dépense, au lieu
+        # d'être découverte après par les écrans qui refusent ensuite de s'ouvrir.
+        from .scenario_store import CAP_MODEL, scenario_can  # lazy: ordre de chargement
+        if not scenario_can(scenario_id, CAP_MODEL):
+            update_step("variables", "skipped",
+                        reason="Revue de littérature : pas de variables prédictives")
+            logger.info(f"Variables & modèle ignorés pour {scenario_id} : revue de littérature")
+        else:
             try:
-                from .seir import _precompute_seir_projection  # lazy: seir is loaded after this module
-                _precompute_seir_projection(scenario_id)
-            except Exception as _e_seir:
-                logger.warning(f"Précalcul SEIR {scenario_id}: {_e_seir}")
-            update_step("variables", "done")
-        except Exception as _e_var:
-            logger.warning(f"Génération variables pipeline {scenario_id}: {_e_var}")
-            update_step("variables", "error", error=str(_e_var))
+                update_step("variables", "running")
+                _generate_variables_from_pico(scenario_id, lang=lang or "fr")
+                # Projection SEIR par défaut (365 j, 300 tirages) calculée et mise en cache ICI :
+                # l'onglet Modèle l'affiche sans simuler sous les yeux de l'utilisateur.
+                try:
+                    from .seir import _precompute_seir_projection  # lazy: seir is loaded after this module
+                    _precompute_seir_projection(scenario_id)
+                except Exception as _e_seir:
+                    logger.warning(f"Précalcul SEIR {scenario_id}: {_e_seir}")
+                update_step("variables", "done")
+            except Exception as _e_var:
+                logger.warning(f"Génération variables pipeline {scenario_id}: {_e_var}")
+                update_step("variables", "error", error=str(_e_var))
 
         # ── Actions recommandées (carte du tableau de bord) : générées ICI, dans la
         # langue de l'interface - elles l'étaient à la première ouverture de la carte.
@@ -2658,8 +2669,11 @@ def trigger_full_pipeline_with_brief(scenario_id: str, lang: str | None = Query(
         _run_semantic_rerank_inline(scenario_id, query)
         # 2. Evidence Brief LLM
         _generate_evidence_brief_llm(scenario_id, force=True, lang=_lang)
-        # 3. Variables & Modèle
-        _generate_variables_from_pico(scenario_id, lang=_lang)
+        # 3. Variables & Modèle - sautées pour une revue de littérature, comme dans
+        #    le pipeline complet : la même question, la même réponse.
+        from .scenario_store import CAP_MODEL, scenario_can  # lazy: ordre de chargement
+        if scenario_can(scenario_id, CAP_MODEL):
+            _generate_variables_from_pico(scenario_id, lang=_lang)
         logger.info(f"Full pipeline with brief done: {scenario_id}")
 
     threading.Thread(target=_run, daemon=True).start()

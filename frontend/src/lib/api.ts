@@ -919,9 +919,19 @@ export interface VariableDetail {
   source: string;
 }
 
+/** La nature d'une question : une revue de littérature, ou un scénario qui se
+ *  termine par un modèle. Absente d'une ancienne réponse, elle vaut "predictive",
+ *  c'est-a-dire tout, comme avant. */
+export type ScenarioKind = 'review' | 'predictive';
+
+/** Les deux seules capacités qui retirent quelque chose à un scénario. */
+export type ScenarioCapability = 'model_spec' | 'field_data';
+
 export interface ScenarioDetail {
   id: string;
   title: string;
+  kind?: ScenarioKind;
+  capabilities?: ScenarioCapability[];
   description: string;
   cluster: string;
   query?: string;   // requête d'origine (user scenarios) - pour un libellé localisé
@@ -1775,6 +1785,8 @@ export interface UserScenario extends GesicaScenario {
   sub_queries?: SubQuery[] | null;
   combinator?: "union" | "intersection" | null;
   mode: string;
+  /** La nature de la question ; absente d'une ancienne réponse, elle vaut tout. */
+  kind?: ScenarioKind;
   filters: Record<string, any>;
   result_count: number;
   resultCount: number;           // alias camelCase de result_count
@@ -1949,6 +1961,7 @@ function _mapUserScenario(u: any): UserScenario {
     pipeline_status: u.pipeline_status ?? 'idle',
     pipeline_step: u.pipeline_step ?? null,
     pipeline_progress: u.pipeline_progress ?? 0,
+    kind: (u.kind === 'review' ? 'review' : 'predictive') as ScenarioKind,
   };
 }
 
@@ -1979,7 +1992,7 @@ export async function deleteUserScenario(scenarioId: string): Promise<{ deleted:
 
 export async function patchUserScenario(
   scenarioId: string,
-  patch: { name?: string; pinned?: boolean; mode?: string; filters?: Record<string, any>; folder_id?: string | null },
+  patch: { name?: string; pinned?: boolean; mode?: string; kind?: ScenarioKind; filters?: Record<string, any>; folder_id?: string | null },
 ): Promise<UserScenario> {
   // `lang`: pinning starts the full pipeline; everything it caches is produced in the
   // interface language, so no tab has to generate at its first opening.

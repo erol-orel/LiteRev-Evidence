@@ -249,6 +249,7 @@ export const en: Translations = {
     openModel: "Predict / open model",
     trainAndPredict: "Train & predict (detail page)",
     allScenarios: "All scenarios",
+    kindAll: "All kinds",
     searchPlaceholder: "Search the scenarios: name, query, description",
     searchMatches: "{n} of {total}",
     searchClear: "Clear",
@@ -1403,6 +1404,10 @@ export const en: Translations = {
         enrichment: "LLM Enrichment",
         alerts: "Alerts",
       },
+      kindReview: "Literature review",
+      kindPredictive: "Predictive scenario",
+      kindHint:
+        "The nature of the question. A literature review ends in a synthesis: the predictive half of the tool is not offered to it, and its pipeline does not compute it. Reversible at any time, and nothing is deleted.",
       loading: "Loading the scenario...",
       backToScenarios: "Back to scenarios",
       scenarioNotFound: "Scenario not found",

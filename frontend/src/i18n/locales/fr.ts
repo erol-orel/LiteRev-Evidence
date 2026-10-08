@@ -247,6 +247,7 @@ export const fr = {
     openModel: "Prédire / ouvrir le modèle",
     trainAndPredict: "Entraîner & prédire (page détail)",
     allScenarios: "Tous les scénarios",
+    kindAll: "Toutes natures",
     searchPlaceholder: "Chercher parmi les scénarios : nom, requête, description",
     searchMatches: "{n} sur {total}",
     searchClear: "Effacer",
@@ -1401,6 +1402,10 @@ export const fr = {
         enrichment: "Enrichissement LLM",
         alerts: "Alertes",
       },
+      kindReview: "Revue de littérature",
+      kindPredictive: "Scénario prédictif",
+      kindHint:
+        "La nature de la question. Une revue de littérature se termine par une synthèse : la moitié prédictive de l'outil ne lui est pas proposée, et son pipeline ne la calcule pas. Réversible à tout moment, sans rien supprimer.",
       loading: "Chargement du scénario...",
       backToScenarios: "Retour aux scénarios",
       scenarioNotFound: "Scénario introuvable",

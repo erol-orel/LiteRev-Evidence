@@ -13,6 +13,7 @@ import {
 } from "lucide-react";
 import {
   fetchScenarioDetail,
+  patchUserScenario,
   fetchScenarioCorpus,
   fetchScenarioClustering,
   fetchScenarioClusteringStatus,
@@ -109,6 +110,8 @@ import {
   type SearchStrategy,
   type EnrichmentStatus,
   type EnrichmentScope,
+  type ScenarioCapability,
+  type ScenarioKind,
   type EmbeddingStatus,
   type ScenarioDetail,
   type ScenarioCorpus,
@@ -7961,6 +7964,13 @@ function SituationReportsSection({ scenarioId }: { scenarioId: string }) {
 
 type SectionKey = "review" | "evidence" | "reports" | "assistant" | "viz" | "variables" | "queries" | "enrichment" | "alerts";
 
+// Ce qu'un onglet EXIGE du scénario. Sans entrée ici, il est de tous les scénarios :
+// la coupe ne retire que la moitié prédictive, elle n'enlève rien à une prévision.
+const SECTION_NEEDS: Partial<Record<SectionKey, ScenarioCapability>> = {
+  variables: "model_spec",
+  reports: "field_data",
+};
+
 const SECTIONS: Array<{ key: SectionKey; icon: React.ReactNode }> = [
   { key: "review",      icon: <FileText size={13} /> },
   { key: "evidence",    icon: <BookOpen size={13} /> },
@@ -7992,6 +8002,21 @@ export function ScenarioDetailPage({ scenarioId, onBack, initialTab }: ScenarioD
   const [error, setError] = useState<string | null>(null);
   // initialTab="model" ouvre directement l'onglet Variables & Modèle (sous-tab Modèle prédictif).
   const [activeSection, setActiveSection] = useState<SectionKey>(initialTab === "model" ? "variables" : "review");
+  // Les capacités du scénario. Tant que le détail n'est pas chargé, on ne retire
+  // rien : mieux vaut un onglet qui apparaît qu'un onglet qui clignote.
+  const caps: ScenarioCapability[] | null = detail?.capabilities ?? null;
+  const visibleSections = React.useMemo(
+    () => SECTIONS.filter(s => {
+      const needed = SECTION_NEEDS[s.key];
+      return !needed || !caps || caps.includes(needed);
+    }),
+    [caps],
+  );
+  // Si la nature change pendant qu'on est sur un onglet qui disparaît, on revient
+  // au corpus plutôt que de laisser une page vide.
+  React.useEffect(() => {
+    if (!visibleSections.some(s => s.key === activeSection)) setActiveSection("review");
+  }, [visibleSections, activeSection]);
 
   // Compteurs et pipeline. Tant qu'un pipeline ou un populate tourne, les nombres
   // d'articles peuvent différer d'un panneau à l'autre : la liste lit une copie stockée
@@ -8002,6 +8027,7 @@ export function ScenarioDetailPage({ scenarioId, onBack, initialTab }: ScenarioD
   const [counts, setCounts] = useState<Counts | null>(null);
   const [justFinished, setJustFinished] = useState(false);
   const [refreshKey, setRefreshKey] = useState(0);
+  const [savingKind, setSavingKind] = useState(false);
   useEffect(() => {
     if (!isUserScenario(scenarioId)) return;
     let alive = true;
@@ -8187,9 +8213,10 @@ export function ScenarioDetailPage({ scenarioId, onBack, initialTab }: ScenarioD
         </div>
       )}
 
-      {/* Navigation par onglets */}
+      {/* Navigation par onglets - filtrée par la nature de la question. Un onglet
+          qu'un scénario n'utilise jamais ne s'affiche pas grisé : il n'est pas là. */}
       <div className="flex flex-wrap gap-1.5 border-b border-white/5 pb-4">
-        {SECTIONS.map((section) => (
+        {visibleSections.map((section) => (
           <button
             key={section.key}
             onClick={() => setActiveSection(section.key)}
@@ -8203,6 +8230,38 @@ export function ScenarioDetailPage({ scenarioId, onBack, initialTab }: ScenarioD
             {t(`scenarioDetail.page.sections.${section.key}`)}
           </button>
         ))}
+        {/* La nature de la question, posée là où son effet se voit : les onglets
+            qu'elle retire sont dans la même rangée. Réversible, et rien n'est
+            supprimé en changeant d'avis. */}
+        {isUserScenario(scenarioId) && detail && (
+          <div className="ml-auto flex items-center gap-1 rounded-xl border border-white/8 bg-white/3 p-0.5"
+               title={t("scenarioDetail.page.kindHint")}>
+            {(["review", "predictive"] as ScenarioKind[]).map(k => (
+              <button
+                key={k}
+                onClick={() => {
+                  if (detail.kind === k || savingKind) return;
+                  setSavingKind(true);
+                  patchUserScenario(scenarioId, { kind: k })
+                    .then(() => fetchScenarioDetail(scenarioId))
+                    .then(setDetail)
+                    .catch(() => {})
+                    .finally(() => setSavingKind(false));
+                }}
+                disabled={savingKind}
+                className={`rounded-lg px-2.5 py-1 text-[11px] transition disabled:opacity-50 ${
+                  (detail.kind ?? "predictive") === k
+                    ? "bg-brand-700 text-gold-400 font-semibold"
+                    : "text-white/45 hover:text-white hover:bg-white/8"
+                }`}
+              >
+                {t(k === "review"
+                  ? "scenarioDetail.page.kindReview"
+                  : "scenarioDetail.page.kindPredictive")}
+              </button>
+            ))}
+          </div>
+        )}
       </div>
 
       {/* Contenu de la section active - isolé par une limite d'erreur : un crash
