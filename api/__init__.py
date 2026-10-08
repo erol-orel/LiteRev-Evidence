@@ -40,5 +40,10 @@ MODULES = (
     "situation_reports",
     "model_training",
     "gesica_routes",
+    "codebook",
+    "extraction_review",
+    "geography",
     "extraction",
+    "pooling",
+    "extraction_report",
 )

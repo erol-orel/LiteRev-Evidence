@@ -1504,6 +1504,9 @@ export interface ExtractionArticle {
   n_observations: number;
   n_quote_found: number;
   attempts: number;
+  n_reviewed: number;
+  n_rejected: number;
+  n_conflict: number;
 }
 
 export interface ExtractionArticlesResponse {
@@ -1534,7 +1537,19 @@ export interface ExtractionObservation {
   source_kind: string | null;
   quote: string | null;
   quote_verified: boolean;
+  /** Where the labels sit in the codebook (added when read; the stored words are untouched). */
+  l1?: string | null;
+  l2?: string | null;
+  label_path?: string | null;
+  matched?: boolean;
+  /** The review state over all reviewers, and the fields after their corrections. */
+  obs_key?: string;
+  review_status?: ReviewStatus;
+  reviews?: { reviewer: string; status: string; edits: Record<string, unknown> | null; note: string | null }[];
+  effective?: Partial<ExtractionObservation>;
 }
+
+export type ReviewStatus = "unreviewed" | "accepted" | "edited" | "rejected" | "conflict";
 
 export interface ArticleExtraction {
   id: number;
@@ -1543,9 +1558,15 @@ export interface ArticleExtraction {
   extraction: {
     source: string;
     truncated: boolean;
+    /** The reproducibility record: which model and prompt made this, and when. */
+    model?: string;
+    prompt_sha?: string;
+    extracted_at?: string;
     ref: { description?: string | null; article_type?: string | null; location?: string | null };
     observations: ExtractionObservation[];
   } | null;
+  /** Decisions whose observation the extraction no longer has (a re-extraction read the paper differently). */
+  stale_reviews?: { obs_key: string; reviewer: string; status: string }[];
 }
 
 export async function fetchExtractionStatus(scenarioId: string): Promise<ExtractionStatus> {
@@ -1595,6 +1616,278 @@ export async function startExtraction(scenarioId: string): Promise<{ status: str
 
 export function extractionExportUrl(scenarioId: string, format: "xlsx" | "csv"): string {
   return `${scenarioBase(scenarioId)}/${scenarioId}/extraction/export?format=${format}`;
+}
+
+export interface ReviewSummary {
+  scenario_id: string;
+  n_observations: number;
+  counts: Record<ReviewStatus, number>;
+  n_reviewed: number;
+  share_reviewed: number;
+  reviewers: { reviewer: string; n_decisions: number }[];
+  agreement: { reviewers: [string, string]; n_common: number; observed: number | null; kappa: number | null }[];
+  n_stale_decisions: number;
+}
+
+export async function fetchReviewSummary(scenarioId: string): Promise<ReviewSummary> {
+  const r = await safeFetch(`${scenarioBase(scenarioId)}/${scenarioId}/extraction/review/summary`);
+  if (!r.ok) throw new Error(httpMessage(r.status));
+  return r.json();
+}
+
+/** Accept, edit or reject one observation as `reviewer`; status "clear" removes that reviewer's decision. */
+export async function reviewObservation(
+  scenarioId: string, articleId: number,
+  body: { obs_key: string; reviewer: string; status: "accepted" | "edited" | "rejected" | "clear";
+          edits?: Record<string, unknown>; note?: string },
+): Promise<{ observation: ExtractionObservation }> {
+  const r = await safeFetch(`${scenarioBase(scenarioId)}/${scenarioId}/articles/${articleId}/extraction/review`, {
+    method: "POST", headers: authHeaders({ "Content-Type": "application/json" }), body: JSON.stringify(body),
+  });
+  if (!r.ok) {
+    let detail = "";
+    try { detail = (await r.json()).detail ?? ""; } catch { /* the body is not JSON */ }
+    throw new Error(detail || httpMessage(r.status));
+  }
+  return r.json();
+}
+
+export async function reviewBulk(
+  scenarioId: string, articleId: number, reviewer: string, status: "accepted" | "rejected",
+): Promise<{ n_recorded: number; n_skipped: number }> {
+  const r = await safeFetch(`${scenarioBase(scenarioId)}/${scenarioId}/articles/${articleId}/extraction/review/bulk`, {
+    method: "POST", headers: authHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify({ reviewer, status, verified_only: true }),
+  });
+  if (!r.ok) throw new Error(httpMessage(r.status));
+  return r.json();
+}
+
+export function extractionReportUrl(scenarioId: string, format: "pdf" | "docx" | "md", lang: string): string {
+  return `${scenarioBase(scenarioId)}/${scenarioId}/extraction/report?format=${format}&lang=${lang.toLowerCase().startsWith("fr") ? "fr" : "en"}`;
+}
+
+export function extractionDatasetUrl(scenarioId: string): string {
+  return `${scenarioBase(scenarioId)}/${scenarioId}/extraction/dataset`;
+}
+
+// ─── The paper's text around a quote ───
+export interface TextWindow {
+  article_id: number;
+  title: string;
+  source: "fulltext" | "abstract";
+  text_truncated: boolean;
+  n_chars: number;
+  found: boolean;
+  partial: boolean;
+  start: number;
+  end: number;
+  window_start: number;
+  window_end: number;
+  before: string;
+  match: string;
+  after: string;
+}
+
+export async function fetchTextWindow(scenarioId: string, articleId: number, quote: string, context = 700): Promise<TextWindow> {
+  const q = `quote=${encodeURIComponent(quote.slice(0, 600))}&context=${context}`;
+  const r = await safeFetch(`${scenarioBase(scenarioId)}/${scenarioId}/articles/${articleId}/text?${q}`);
+  if (!r.ok) throw new Error(httpMessage(r.status));
+  return r.json();
+}
+
+// ─── Where the evidence comes from (country and NUTS region of each study) ───
+export interface GeoRegion { code: string; name: string; n_papers: number }
+export interface GeoCountry {
+  iso2: string;
+  name: string;
+  nuts0: string | null;
+  n_papers: number;
+  n_rows: number;
+  regions: GeoRegion[];
+}
+export interface GeographyResponse {
+  scenario_id: string;
+  n_papers: number;
+  n_resolved: number;
+  n_unresolved: number;
+  n_several_countries: number;
+  nuts_source: "builtin" | "loaded";
+  countries: GeoCountry[];
+  unresolved: { location: string; n: number }[];
+}
+
+export async function fetchGeography(scenarioId: string): Promise<GeographyResponse> {
+  const r = await safeFetch(`${scenarioBase(scenarioId)}/${scenarioId}/extraction/geography`);
+  if (!r.ok) throw new Error(httpMessage(r.status));
+  return r.json();
+}
+
+export async function fetchNutsStatus(): Promise<{ source: "builtin" | "loaded"; n_regions: number; note: string }> {
+  const r = await safeFetch(`${API_BASE_URL}/geo/nuts/status`);
+  if (!r.ok) throw new Error(httpMessage(r.status));
+  return r.json();
+}
+
+export async function importNutsCsv(csv: string): Promise<{ loaded: number; by_level: Record<string, number>; countries: number }> {
+  const r = await safeFetch(`${API_BASE_URL}/geo/nuts/import`, {
+    method: "POST", headers: authHeaders({ "Content-Type": "text/csv" }), body: csv,
+  });
+  if (!r.ok) {
+    let detail = "";
+    try { detail = (await r.json()).detail ?? ""; } catch { /* the body is not JSON */ }
+    throw new Error(detail || httpMessage(r.status));
+  }
+  return r.json();
+}
+
+// ─── Pooled estimates (random-effects meta-analysis of what the studies report) ───
+export interface PooledStudy {
+  article_id: number;
+  title: string | null;
+  year: number | null;
+  first_author: string;
+  x: number;
+  n: number;
+  review_status: string;
+  p?: number;
+  or?: number;
+  ci_low?: number;
+  ci_high?: number;
+  weight_pct?: number;
+  x1?: number; n1?: number; x2?: number; n2?: number;
+}
+
+export interface Heterogeneity {
+  Q: number; df: number; p: number; I2: number; tau2: number;
+  band: "low" | "moderate" | "substantial" | "considerable";
+}
+
+export interface PooledGroup {
+  sheet: string;
+  group: string;
+  label: string;
+  disease: string | null;
+  label_path: string | null;
+  mapped: boolean;
+  k: number;
+  n_total: number;
+  events_total: number;
+  pooled: { p: number; ci_low: number; ci_high: number; pi_low: number | null; pi_high: number | null } | null;
+  heterogeneity: Heterogeneity | null;
+  reason: string | null;
+  studies: PooledStudy[];
+}
+
+export interface PooledComparison {
+  sheet: string;
+  group: string;
+  disease: string | null;
+  a: string;
+  b: string;
+  k: number;
+  pooled: { or: number; ci_low: number; ci_high: number; pi_low: number | null; pi_high: number | null };
+  heterogeneity: Heterogeneity;
+  studies: PooledStudy[];
+}
+
+export interface PooledResponse {
+  scenario_id: string;
+  filters: { reviewed_only: boolean; verified_only: boolean; split_disease: boolean; min_studies: number };
+  n_rows_used: number;
+  n_duplicate_rows_dropped: number;
+  excluded: Record<string, number>;
+  pooled: PooledGroup[];
+  comparisons: PooledComparison[];
+}
+
+export async function fetchPooled(
+  scenarioId: string,
+  o: { reviewedOnly: boolean; verifiedOnly: boolean; splitDisease: boolean },
+): Promise<PooledResponse> {
+  const q = `reviewed_only=${o.reviewedOnly}&verified_only=${o.verifiedOnly}&split_disease=${o.splitDisease}`;
+  const r = await safeFetch(`${scenarioBase(scenarioId)}/${scenarioId}/extraction/pooled?${q}`);
+  if (!r.ok) throw new Error(httpMessage(r.status));
+  return r.json();
+}
+
+// ─── Label codebook (hierarchy per extraction sheet, applied when the labels are read) ───
+export interface CodebookNode {
+  sheet: string;
+  l1: string;
+  l2: string | null;
+  l3: string | null;
+  synonyms: string[];
+  label_en: string | null;
+  label_fr: string | null;
+}
+
+export interface CodebookResponse {
+  scenario_id: string;
+  source: "default" | "custom";
+  n_nodes: number;
+  nodes: CodebookNode[];
+}
+
+export interface UnmappedLabel {
+  sheet: string;
+  group: string | null;
+  covariate: string | null;
+  n_rows: number;
+  n_articles: number;
+  l1: string | null;
+}
+
+export interface UnmappedResponse {
+  scenario_id: string;
+  rows_mapped: number;
+  rows_unmapped: number;
+  n_distinct_unmapped: number;
+  unmapped: UnmappedLabel[];
+}
+
+export async function fetchCodebook(scenarioId: string): Promise<CodebookResponse> {
+  const r = await safeFetch(`${scenarioBase(scenarioId)}/${scenarioId}/codebook`);
+  if (!r.ok) throw new Error(httpMessage(r.status));
+  return r.json();
+}
+
+export async function fetchUnmappedLabels(scenarioId: string, top = 50): Promise<UnmappedResponse> {
+  const r = await safeFetch(`${scenarioBase(scenarioId)}/${scenarioId}/codebook/unmapped?top=${top}`);
+  if (!r.ok) throw new Error(httpMessage(r.status));
+  return r.json();
+}
+
+export async function addCodebookSynonym(
+  scenarioId: string, body: { sheet: string; l1: string; l2: string | null; label: string },
+): Promise<void> {
+  const r = await safeFetch(`${scenarioBase(scenarioId)}/${scenarioId}/codebook/synonym`, {
+    method: "POST", headers: authHeaders({ "Content-Type": "application/json" }), body: JSON.stringify(body),
+  });
+  if (!r.ok) throw new Error(httpMessage(r.status));
+}
+
+export async function importCodebookCsv(scenarioId: string, csv: string): Promise<{ n_nodes: number }> {
+  const r = await safeFetch(`${scenarioBase(scenarioId)}/${scenarioId}/codebook/import`, {
+    method: "POST", headers: authHeaders({ "Content-Type": "text/csv" }), body: csv,
+  });
+  if (!r.ok) {
+    let detail = "";
+    try { detail = (await r.json()).detail ?? ""; } catch { /* the body is not JSON */ }
+    throw new Error(detail || httpMessage(r.status));
+  }
+  return r.json();
+}
+
+export async function resetCodebook(scenarioId: string): Promise<void> {
+  const r = await safeFetch(`${scenarioBase(scenarioId)}/${scenarioId}/codebook`, {
+    method: "DELETE", headers: authHeaders(),
+  });
+  if (!r.ok) throw new Error(httpMessage(r.status));
+}
+
+export function codebookExportUrl(scenarioId: string): string {
+  return `${scenarioBase(scenarioId)}/${scenarioId}/codebook/export`;
 }
 
 // ─── Evidence Brief ───────────────────────────────────────────────────────────

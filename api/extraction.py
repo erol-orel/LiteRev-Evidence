@@ -22,20 +22,26 @@ not a sample of the corpus, and the extraction records when it had to cut.
 from __future__ import annotations
 
 import csv
+import hashlib
 import io
 import json
 import os
 import re
 import threading
 import time
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
 from typing import Any
 
 from fastapi import Depends, HTTPException, Query
 from fastapi.responses import Response
 from sqlalchemy import text
 
+from .codebook import annotate, get_codebook, get_index, normalise, vocabulary_prompt
 from .core import _env_int, app, engine, logger, require_api_key
+from .extraction_review import load_reviews, overlay, overlay_annotated
+from .geography import get_nuts_index, resolve_location
 from .digest import _rows
 from .scenario_store import (_get_scenario_threshold, _get_user_scenario_or_404,
                              relevant_gate_sql)
@@ -106,7 +112,8 @@ SHEET_COLUMNS = {
 }
 #: Added to the right of the template columns, so the template stays intact and a reviewer
 #: can still check each value against the paper.
-REVIEW_COLUMNS = (("Page/section", "page_section"), ("Quote", "quote"),
+REVIEW_COLUMNS = (("Page/section", "page_section"), ("Codebook label", "label_path"),
+                  ("Review status", "review_status"), ("Reviewed by", "reviewed_by"), ("Quote", "quote"),
                   ("Quote found in text", "quote_verified"), ("Extracted from", "source"))
 
 
@@ -170,6 +177,11 @@ _EXTRACTION_SYSTEM = (
     "gives data on that item, false otherwise. Never write the em dash character; use a comma "
     "or a hyphen. Return ONLY the JSON."
 )
+
+
+#: Which prompt produced an extraction, for the reproducibility record: any edit to the prompt
+#: changes it, so two extractions of the same corpus can be told apart.
+PROMPT_SHA = hashlib.sha256(_EXTRACTION_SYSTEM.encode("utf-8")).hexdigest()[:10]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -299,21 +311,26 @@ def _article_text(conn, row: dict) -> tuple[str, str, bool]:
 
 
 def extract_article(client, row: dict, source_text: str, source: str, truncated: bool,
-                    disease_hint: str | None = None) -> dict[str, Any]:
+                    disease_hint: str | None = None, system: str | None = None) -> dict[str, Any]:
     """One LLM call for one article, parsed and checked. Raises on any failure, so the
     caller counts an attempt instead of caching an empty result as if it were an answer."""
+    system = system or _EXTRACTION_SYSTEM
     payload = {"disease_of_interest": disease_hint or None, "text_is": source, "text": source_text}
     resp = client.chat.completions.create(
         model=_model("bulk"),
-        messages=[{"role": "system", "content": _EXTRACTION_SYSTEM},
+        messages=[{"role": "system", "content": system},
                   {"role": "user", "content": json.dumps(payload, ensure_ascii=False)}],
         temperature=0, seed=42, max_tokens=8000,
         response_format={"type": "json_object"},
     )
     parsed = parse_extraction(json.loads(_json_content(resp, f"extraction {row.get('id')}")),
                               source_text)
+    # The record of how this was made: the model, the prompt, and when. An extraction that
+    # cannot say which model and prompt produced it cannot be reproduced or compared.
     parsed.update({"v": EXTRACTION_VERSION, "source": source, "truncated": truncated,
-                   "n_chars": len(source_text)})
+                   "n_chars": len(source_text), "model": _model("bulk"),
+                   "prompt_sha": hashlib.sha256(system.encode("utf-8")).hexdigest()[:10],
+                   "extracted_at": datetime.now(timezone.utc).isoformat(timespec="seconds")})
     return parsed
 
 
@@ -335,7 +352,7 @@ def _needs_extraction(row: dict) -> bool:
 
 
 _ARTICLE_ROWS_SQL = """
-    SELECT d.id, d.title, d.abstract, d.doi, d.year, d.authors, d.has_fulltext,
+    SELECT d.id, d.title, d.abstract, d.doi, d.year, d.authors, d.has_fulltext, d.country,
            d.extraction_json, COALESCE(d.extraction_attempts, 0) AS extraction_attempts,
            COALESCE(ars.screening_status, d.screening_status) AS screening_status
     FROM literature_document d
@@ -378,12 +395,14 @@ def _extract_scenario(scenario_id: str, disease_hint: str | None, max_articles: 
     if not rows:
         return {"total": 0, "done": 0, "failed": 0}
     client = _llm_client()
+    # The scenario's own codebook steers how the model names its groups.
+    system = _EXTRACTION_SYSTEM + vocabulary_prompt(get_codebook(scenario_id)["nodes"])
 
     def _work(row: dict) -> bool:
         try:
             with engine.connect() as conn:
                 src_text, source, truncated = _article_text(conn, row)
-            result = extract_article(client, row, src_text, source, truncated, disease_hint)
+            result = extract_article(client, row, src_text, source, truncated, disease_hint, system)
             with engine.begin() as conn:
                 conn.execute(text("""
                     UPDATE literature_document
@@ -480,6 +499,11 @@ _COVERAGE_LABELS_FR = {
     "environment": "environnement", "vector": "vecteurs",
 }
 _TOP_GROUPS = 12
+
+
+def normalise_group(index, sheet: str, group: str) -> str:
+    """A group as the codebook names it (its level-1 key), else the folded text."""
+    return normalise(index, sheet or "", group, "")["group_key"] or (group or "").lower()
 _TOP_CRUDE = 12
 
 _OBS_FROM = """
@@ -528,6 +552,16 @@ def extraction_digest(scenario_id: str, threshold: float | None = None) -> dict[
             out["coverage"] = {k: int(head[f"c_{k}"] or 0) for k in COVERAGE_KEYS}
             out["coverage_fulltext"] = {k: int(head[f"f_{k}"] or 0) for k in COVERAGE_KEYS}
 
+            out["by_model"] = [
+                {"model": r["model"], "prompt_sha": r["prompt_sha"], "n": int(r["n"])}
+                for r in _rows(conn, f"""
+                    SELECT COALESCE(d.extraction_json->>'model', 'unknown') AS model,
+                           COALESCE(d.extraction_json->>'prompt_sha', 'unknown') AS prompt_sha,
+                           COUNT(*) AS n
+                    FROM literature_document d JOIN article_scenarios ars ON ars.document_id = d.id
+                    WHERE ars.scenario_id = :sid AND {gate} AND jsonb_typeof(d.extraction_json) = 'object'
+                    GROUP BY 1, 2 ORDER BY n DESC
+                """, scenario_id, thr)]
             out["by_sheet"] = [
                 {"sheet": r["sheet"], "n_rows": int(r["n_rows"]), "n_articles": int(r["n_articles"]),
                  "n_quote_found": int(r["n_verified"])}
@@ -538,11 +572,18 @@ def extraction_digest(scenario_id: str, threshold: float | None = None) -> dict[
                     GROUP BY 1 ORDER BY n_rows DESC
                 """, scenario_id, thr)]
 
-            out["top_groups"] = _rows(conn, f"""
-                SELECT o->>'sheet' AS sheet, LOWER(o->>'group') AS value, COUNT(DISTINCT d.id) AS n
+            index = get_index(scenario_id)
+            ids_by_group: dict[tuple[str, str], set] = {}
+            for r in _rows(conn, f"""
+                SELECT o->>'sheet' AS sheet, o->>'group' AS grp, array_agg(DISTINCT d.id) AS ids
                 {_OBS_FROM.format(gate=gate)} AND NULLIF(TRIM(o->>'group'), '') IS NOT NULL
-                GROUP BY 1, 2 ORDER BY n DESC, 2 LIMIT :top
-            """, scenario_id, thr, top=_TOP_GROUPS)
+                GROUP BY 1, 2
+            """, scenario_id, thr):
+                key = normalise_group(index, r["sheet"], r["grp"])
+                ids_by_group.setdefault((r["sheet"], key), set()).update(r["ids"])
+            out["top_groups"] = [
+                {"sheet": sh, "value": v, "n": len(ids)}
+                for (sh, v), ids in sorted(ids_by_group.items(), key=lambda kv: (-len(kv[1]), kv[0]))[:_TOP_GROUPS]]
 
             crude = _rows(conn, f"""
                 SELECT o->>'sheet' AS sheet, LOWER(TRIM(o->>'covariate')) AS covariate,
@@ -626,7 +667,8 @@ def _cell(v: Any) -> Any:
     return v
 
 
-def template_rows(articles: list[dict], id_prefix: str = "LR") -> dict[str, list[dict]]:
+def template_rows(articles: list[dict], id_prefix: str = "LR", index=None, reviews: dict | None = None,
+                  include_rejected: bool = False, nuts_index=None) -> dict[str, list[dict]]:
     """The extractions as template rows: `{"ref": [...], "human_susc": [...], ...}`.
     `articles` are relevant-article rows carrying an `extraction_json`. Pure."""
     out: dict[str, list[dict]] = {"ref": [], **{s: [] for s in SHEETS}}
@@ -637,31 +679,56 @@ def template_rows(articles: list[dict], id_prefix: str = "LR") -> dict[str, list
         aid = f"{id_prefix}{a['id']}"
         ref = ex.get("ref") or {}
         doi = (a.get("doi") or "").strip()
+        place = resolve_location(ref.get("location"), a.get("country"), nuts_index) if nuts_index is not None else {}
         out["ref"].append({
             "id": aid, "first_author": _first_author(a.get("authors")),
             "reference": f"https://doi.org/{doi}" if doi and not doi.startswith("http") else doi,
             "year": a.get("year"), "description": ref.get("description"),
             "article_type": ref.get("article_type"), "study_start": ref.get("study_start"),
             "study_end": ref.get("study_end"), "location": ref.get("location"),
-            "nuts1": None, "nuts2": None, "nuts3": None, "notes_geo": ref.get("notes_geo"),
+            "nuts1": place.get("nuts1"), "nuts2": place.get("nuts2"), "nuts3": place.get("nuts3"),
+            "notes_geo": ref.get("notes_geo"),
             "risk_pop": ref.get("risk_pop"), "positive": ref.get("positive"),
             "percent_positive": ref.get("percent_positive"),
             "math_model": ref.get("math_model"), "model_type": ref.get("model_type"),
             "exclusion": (a.get("screening_reason") if a.get("screening_status") == "excluded" else None),
         })
-        for o in ex.get("observations") or []:
-            if o.get("sheet") in out:
-                out[o["sheet"]].append({**o, "id": aid, "source": ex.get("source")})
+        observations = [o for o in (ex.get("observations") or []) if isinstance(o, dict)]
+        if reviews is not None:
+            reviewed, _stale = overlay(int(a["id"]), observations, reviews)
+        else:
+            reviewed = [{**o, "review_status": "unreviewed", "reviews": [], "effective": o} for o in observations]
+        for o in reviewed:
+            if o["review_status"] == "rejected" and not include_rejected:
+                continue
+            fields = o["effective"]                              # the reviewers' corrections applied
+            sheet = fields.get("sheet")
+            if sheet in out:
+                row = annotate(index, fields) if index is not None else dict(fields)
+                out[sheet].append({**row, "id": aid, "source": ex.get("source"),
+                                   "review_status": o["review_status"],
+                                   "reviewed_by": ", ".join(r["reviewer"] for r in o["reviews"]) or None})
     return out
 
 
-def build_workbook(articles: list[dict], coverage_note: str, id_prefix: str = "LR") -> bytes:
+def _models_line(articles: list[dict]) -> str:
+    """'model, prompt abc123 (12 papers); ...' from what each extraction says about itself."""
+    c: Counter = Counter()
+    for a in articles:
+        ex = a.get("extraction_json")
+        if isinstance(ex, dict):
+            c[(ex.get("model") or "unknown", ex.get("prompt_sha") or "unknown")] += 1
+    return "; ".join(f"{m}, prompt {p} ({n} papers)" for (m, p), n in c.most_common())
+
+
+def build_workbook(articles: list[dict], coverage_note: str, id_prefix: str = "LR", index=None,
+                   reviews: dict | None = None, include_rejected: bool = False, nuts_index=None) -> bytes:
     """An .xlsx with the template's sheets and column titles, plus review columns on the
     right and a README sheet that says what the numbers cover."""
     from openpyxl import Workbook
     from openpyxl.styles import Font
 
-    rows = template_rows(articles, id_prefix)
+    rows = template_rows(articles, id_prefix, index, reviews, include_rejected, nuts_index)
     wb = Workbook()
     readme = wb.active
     readme.title = "README"
@@ -673,8 +740,14 @@ def build_workbook(articles: list[dict], coverage_note: str, id_prefix: str = "L
         "check that row first.",
         "'Extracted from' = abstract means the paper's full text was not available: tables "
         "are not in abstracts, so most values are missing, not absent from the paper.",
-        "NUTS columns are empty: geography is resolved in a later step.",
+        "NUTS columns are filled from the place name where it matches the NUTS list in use: the "
+        "country always, a region only when the list knows it (load Eurostat's NUTS file for the "
+        "whole of Europe). A blank means the place could not be resolved, not that it is nowhere.",
+        "'Review status' says what the reviewers decided (accepted, edited, rejected, conflict or "
+        "unreviewed). Edited values are the reviewers' corrections; rejected rows are left out "
+        "unless the file was exported with them.",
         "ID is LR + the LiteRev article id; rename it to your initials and a number if needed.",
+        "Made with: " + (_models_line(articles) or "unknown") + ".",
     ):
         readme.append([line])
     readme.column_dimensions["A"].width = 120
@@ -701,12 +774,13 @@ def build_workbook(articles: list[dict], coverage_note: str, id_prefix: str = "L
     return buf.getvalue()
 
 
-def build_long_csv(articles: list[dict], id_prefix: str = "LR") -> str:
+def build_long_csv(articles: list[dict], id_prefix: str = "LR", index=None, reviews: dict | None = None,
+                   include_rejected: bool = False, nuts_index=None) -> str:
     """One flat table, one row per observation, with its sheet: for scripts and datasets."""
-    rows = template_rows(articles, id_prefix)
-    fields = ["id", "sheet", "transmission_mode", "disease", "group", "covariate", "value", "descr",
+    rows = template_rows(articles, id_prefix, index, reviews, include_rejected, nuts_index)
+    fields = ["id", "sheet", "transmission_mode", "disease", "group", "covariate", "l1", "l2", "value", "descr",
               "notes", "n_cases", "pop_risk", "original_name", "page_section", "source_kind",
-              "quote", "quote_verified", "source"]
+              "quote", "quote_verified", "review_status", "reviewed_by", "source"]
     buf = io.StringIO()
     w = csv.writer(buf)
     w.writerow(fields)
@@ -737,12 +811,101 @@ def get_scenario_extraction_status(scenario_id: str) -> dict[str, Any]:
     return extraction_status(scenario_id)
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Seeing a quote in the paper
+# ─────────────────────────────────────────────────────────────────────────────
+_WORD = re.compile(r"[^\W_]+", re.UNICODE)
+_MIN_PARTIAL_WORDS = 4
+
+
+def locate_quote(source_text: str, quote: str | None) -> dict[str, Any] | None:
+    """Where a quote sits in the text: `{start, end, partial}` or None.
+
+    Words and figures must match in order, and anything that is not a letter or a digit may
+    stand between them, which is what line breaks, hyphenation and spacing in a PDF text look
+    like. When the whole quote is not there, the longest run of its first or last words that is
+    (at least four) is returned as `partial`, so a reviewer can see where the model most likely
+    took it from and how it differs. The first occurrence is returned."""
+    words = _WORD.findall(quote or "")
+    if not words or not source_text:
+        return None
+
+    def find(ws: list[str]) -> tuple[int, int] | None:
+        m = re.search(r"\W+".join(re.escape(w) for w in ws), source_text, re.IGNORECASE)
+        return (m.start(), m.end()) if m else None
+
+    whole = find(words)
+    if whole:
+        return {"start": whole[0], "end": whole[1], "partial": False}
+    for n in range(len(words) - 1, _MIN_PARTIAL_WORDS - 1, -1):
+        for part in (words[:n], words[-n:]):
+            hit = find(part)
+            if hit:
+                return {"start": hit[0], "end": hit[1], "partial": True}
+    return None
+
+
+@app.get("/user-scenarios/{scenario_id}/articles/{article_id}/text")
+def get_article_text_window(scenario_id: str, article_id: int, quote: str | None = Query(None, max_length=600),
+                            context: int = Query(700, ge=0, le=6000)) -> dict[str, Any]:
+    """The text the model read for this article, around a quote: `before`, `match`, `after`.
+
+    `source` is `fulltext` or `abstract`, as for the extraction. `found` says whether the quote
+    is in the text, `partial` whether only part of it is; without a match the start of the text
+    is returned. The text is the same one the quote was checked against, cut at the same size."""
+    _get_user_scenario_or_404(scenario_id)
+    with engine.connect() as conn:
+        row = conn.execute(text("""
+            SELECT d.id, d.title, d.abstract FROM literature_document d
+            JOIN article_scenarios ars ON ars.document_id = d.id
+            WHERE ars.scenario_id = :sid AND d.id = :id
+        """), {"sid": scenario_id, "id": article_id}).mappings().first()
+        if not row:
+            raise HTTPException(status_code=404, detail="Article not in this scenario.")
+        body, source, truncated = _article_text(conn, dict(row))
+    hit = locate_quote(body, quote)
+    if hit:
+        start, end = hit["start"], hit["end"]
+    else:
+        start = end = 0
+    lo, hi = max(0, start - context), min(len(body), end + context)
+    return {"article_id": article_id, "title": row["title"], "source": source, "text_truncated": truncated,
+            "n_chars": len(body), "found": bool(hit and not hit["partial"]), "partial": bool(hit and hit["partial"]),
+            "start": start, "end": end, "window_start": lo, "window_end": hi,
+            "before": body[lo:start], "match": body[start:end], "after": body[end:hi]}
+
+
 @app.get("/user-scenarios/{scenario_id}/extraction/coverage")
 def get_scenario_extraction_coverage(scenario_id: str) -> dict[str, Any]:
     """What the extraction found, counted over ALL the relevant articles (see
     `extraction_digest`): who reports sex, age, KAP, PPE..., and out of how many."""
     _get_user_scenario_or_404(scenario_id)
     return extraction_digest(scenario_id)
+
+
+def _review_counts(doc_ids: list[int]) -> dict[int, dict[str, int]]:
+    """Per article: observations with a decision, rejected, and in conflict. Only the
+    articles that have any decision are read."""
+    reviews = load_reviews(doc_ids)
+    with_reviews = sorted({d for d, _k in reviews})
+    if not with_reviews:
+        return {}
+    from .extraction_review import combine, observation_keys
+    with engine.connect() as conn:
+        rows = conn.execute(text("SELECT id, extraction_json->'observations' AS obs FROM literature_document "
+                                 "WHERE id = ANY(:ids)"), {"ids": with_reviews}).mappings().all()
+    out: dict[int, dict[str, int]] = {}
+    for r in rows:
+        obs = [o for o in (r["obs"] or []) if isinstance(o, dict)] if isinstance(r["obs"], list) else []
+        c = {"n_reviewed": 0, "n_rejected": 0, "n_conflict": 0}
+        for k in observation_keys(obs):
+            st = combine(reviews.get((int(r["id"]), k), []))["status"]
+            if st != "unreviewed":
+                c["n_reviewed"] += 1
+            c["n_rejected"] += st == "rejected"
+            c["n_conflict"] += st == "conflict"
+        out[int(r["id"])] = c
+    return out
 
 
 #: Same bound as the PICO list: a page is at most this many articles.
@@ -788,7 +951,9 @@ def list_scenario_extraction_articles(scenario_id: str, limit: int = EXTRACTION_
             FROM literature_document d JOIN article_scenarios ars ON ars.document_id = d.id
             WHERE ars.scenario_id = :sid AND {gate}
         """), {"sid": scenario_id, "thr": thr}).mappings().first()
+    counts = _review_counts([int(r["id"]) for r in rows if int(r["n_observations"] or 0) > 0])
     for r in rows:
+        r.update(counts.get(int(r["id"]), {"n_reviewed": 0, "n_rejected": 0, "n_conflict": 0}))
         r["n_observations"] = int(r["n_observations"] or 0)
         r["n_quote_found"] = int(r["n_quote_found"] or 0)
         r["coverage"] = {k: bool((r["coverage"] or {}).get(k)) for k in COVERAGE_KEYS} if r["has_extraction"] else None
@@ -814,13 +979,58 @@ def get_article_extraction(scenario_id: str, article_id: int) -> dict[str, Any]:
         """), {"sid": scenario_id, "id": article_id}).mappings().first()
     if not row:
         raise HTTPException(status_code=404, detail="Article not in this scenario.")
+    ex = row["extraction_json"]
+    stale: list[dict] = []
+    if isinstance(ex, dict) and isinstance(ex.get("observations"), list):
+        index = get_index(scenario_id)
+        stored = [o for o in ex["observations"] if isinstance(o, dict)]
+        obs, stale = overlay_annotated(int(row["id"]), stored, index)
+        ex = {**ex, "observations": obs}
     return {"id": row["id"], "title": row["title"], "extracted_at": row["extraction_at"],
-            "extraction": row["extraction_json"]}
+            "extraction": ex, "stale_reviews": stale}
+
+
+@app.get("/user-scenarios/{scenario_id}/extraction/dataset")
+def export_extraction_dataset(scenario_id: str, include_unreviewed: bool = Query(False)) -> Response:
+    """The annotated dataset, one JSON object per line (JSONL): each observation a reviewer
+    accepted or corrected, with the quote it rests on, its codebook label, who validated it, and
+    the model and prompt that produced it. This is the labelled data the protocol wants for
+    training and evaluating extraction models. Rejected and conflicting rows are never in it;
+    unreviewed ones only with `include_unreviewed`."""
+    _get_user_scenario_or_404(scenario_id)
+    rows = [r for r in _relevant_rows(scenario_id) if isinstance(r.get("extraction_json"), dict)]
+    reviews = load_reviews([int(r["id"]) for r in rows])
+    index = get_index(scenario_id)
+    lines = []
+    for a in rows:
+        ex = a["extraction_json"]
+        stored = [o for o in (ex.get("observations") or []) if isinstance(o, dict)]
+        obs, _stale = overlay(int(a["id"]), stored, reviews)
+        for o in obs:
+            st = o["review_status"]
+            if st in ("rejected", "conflict") or (st == "unreviewed" and not include_unreviewed):
+                continue
+            eff = annotate(index, o["effective"])
+            lines.append(json.dumps({
+                "article": {"id": a["id"], "title": a.get("title"), "doi": a.get("doi"), "year": a.get("year")},
+                "observation": {k: eff.get(k) for k in ("sheet", "group", "covariate", "value", "descr", "n_cases",
+                                                        "pop_risk", "disease", "transmission_mode", "page_section",
+                                                        "source_kind", "l1", "l2", "label_path")},
+                "quote": eff.get("quote"), "quote_found_in_text": eff.get("quote_verified"),
+                "review": {"status": st, "reviewers": [r["reviewer"] for r in o["reviews"]]},
+                "extraction": {"source": ex.get("source"), "model": ex.get("model"),
+                               "prompt_sha": ex.get("prompt_sha"), "extracted_at": ex.get("extracted_at")},
+            }, ensure_ascii=False))
+    body = ("\n".join(lines) + ("\n" if lines else "")).encode("utf-8")
+    return Response(content=body, media_type="application/x-ndjson; charset=utf-8", headers={
+        "Content-Disposition": f'attachment; filename="extraction_dataset_{re.sub(r"[^A-Za-z0-9_-]", "_", scenario_id)}.jsonl"',
+        "X-Rows": str(len(lines))})
 
 
 @app.get("/user-scenarios/{scenario_id}/extraction/export")
 def export_scenario_extraction(scenario_id: str, format: str = Query("xlsx"),
-                               id_prefix: str = Query("LR", max_length=12)) -> Response:
+                               id_prefix: str = Query("LR", max_length=12),
+                               include_rejected: bool = Query(False)) -> Response:
     """The extractions of ALL the relevant articles, as the template workbook (`xlsx`) or
     one flat table (`csv`). Articles not extracted yet are not in it; the README sheet and
     the `X-Coverage` header say how many that is."""
@@ -834,10 +1044,12 @@ def export_scenario_extraction(scenario_id: str, format: str = Query("xlsx"),
     note = (f"{len(done)} of the {len(rows)} relevant articles are extracted "
             f"({len(rows) - len(done)} not yet); {from_abs} of them from the abstract only.")
     prefix = re.sub(r"[^A-Za-z0-9_-]", "", id_prefix) or "LR"
+    reviews = load_reviews([int(r["id"]) for r in done])
     if fmt == "csv":
-        body, media, ext = build_long_csv(done, prefix).encode("utf-8-sig"), "text/csv; charset=utf-8", "csv"
+        body, media, ext = (build_long_csv(done, prefix, get_index(scenario_id), reviews, include_rejected)
+                            .encode("utf-8-sig"), "text/csv; charset=utf-8", "csv")
     else:
-        body, media, ext = (build_workbook(done, note, prefix),
+        body, media, ext = (build_workbook(done, note, prefix, get_index(scenario_id), reviews, include_rejected, get_nuts_index()),
                             "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "xlsx")
     return Response(content=body, media_type=media, headers={
         "Content-Disposition": f'attachment; filename="extraction_{re.sub(r"[^A-Za-z0-9_-]", "_", scenario_id)}.{ext}"',

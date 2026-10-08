@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useLayoutEffect, useCallback, useRef, useMemo } from "react";
 import { ErrorBoundary } from "./ErrorBoundary";
 import { ExtractionSection } from "./ExtractionSection";
+import { formatEpiInterval, formatEpiNumber } from "../lib/epiFormat";
 import { useI18n } from "../i18n/LanguageProvider";
 import {
   ArrowLeft, Brain,
@@ -105,6 +106,7 @@ import {
   fetchEnrichmentStatus,
   fetchEpidemicParameterCandidates,
   extractEpidemicParameters,
+  hasApiKey,
   fetchUserScenarioEmbeddingStatus,
   searchLive,
   getSearchStrategy,
@@ -7203,13 +7205,19 @@ function EpidemicParametersPanel({ scenarioId }: { scenarioId: string }) {
             {t("scenarioDetail.epiParams.subtitle")}
           </p>
         </div>
-        <button
-          onClick={run}
-          disabled={running}
-          className="shrink-0 rounded-xl border border-brand-500/25 bg-brand-500/10 px-3 py-1.5 text-xs text-brand-300 hover:bg-brand-500/20 transition disabled:opacity-50"
-        >
-          {running ? t("common.loading") : t("scenarioDetail.epiParams.recompute")}
-        </button>
+        {hasApiKey() ? (
+          <button
+            onClick={run}
+            disabled={running}
+            className="shrink-0 rounded-xl border border-brand-500/25 bg-brand-500/10 px-3 py-1.5 text-xs text-brand-300 hover:bg-brand-500/20 transition disabled:opacity-50"
+          >
+            {running ? t("common.loading") : t("scenarioDetail.epiParams.recompute")}
+          </button>
+        ) : (
+          <span className="shrink-0 max-w-[220px] text-right text-[10px] leading-4 text-white/35">
+            {t("scenarioDetail.epiParams.needsKey")}
+          </span>
+        )}
       </div>
 
       {cands && (
@@ -7229,10 +7237,10 @@ function EpidemicParametersPanel({ scenarioId }: { scenarioId: string }) {
             <div key={k} className="grid grid-cols-12 items-baseline gap-2 text-[11px] border-b border-white/5 pb-1.5">
               <code className="col-span-4 sm:col-span-3 font-mono text-white/75">{k}</code>
               <span className="col-span-3 sm:col-span-2 font-mono text-white/90">
-                {p.value != null ? p.value : "-"}{p.unit ? ` ${p.unit}` : ""}
+                {formatEpiNumber(p.value, p.unit)}{p.unit && p.unit !== "proportion" ? ` ${p.unit}` : ""}
               </span>
               <span className="col-span-5 sm:col-span-4 font-mono text-white/40">
-                {p.ci_low != null && p.ci_high != null ? `[${p.ci_low} \u2013 ${p.ci_high}]` : "-"}
+                {formatEpiInterval(p.ci_low, p.ci_high, p.unit)}
               </span>
               <span className="hidden sm:block col-span-3 text-right text-white/40">
                 {p.n_studies != null

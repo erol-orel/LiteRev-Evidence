@@ -158,6 +158,9 @@ def test_one_article_goes_through_one_call_and_comes_back_stamped():
     assert json.loads(seen[0]["messages"][1]["content"])["disease_of_interest"] == "HPAI"
     assert out["v"] == extraction.EXTRACTION_VERSION and out["source"] == "abstract"
     assert out["truncated"] is False and out["n_chars"] == len(PAPER)
+    # The reproducibility record: which model, which prompt, when.
+    assert out["model"] and out["prompt_sha"] == extraction.PROMPT_SHA and len(out["prompt_sha"]) == 10
+    assert out["extracted_at"].endswith("+00:00")
     assert out["observations"][0]["quote_verified"] is True
 
 
@@ -187,6 +190,8 @@ def test_the_workbook_has_the_templates_sheets_columns_and_the_review_columns_on
     assert wb.sheetnames == ["README", "REF", "HUMAN_COV_SUSC", "HUMAN_COV_EXP", "ENV_COV",
                              "ANIMALorRESERVOIR_COV", "VECTOR_COV"]
     assert "1 of the 2 relevant" in wb["README"]["A2"].value
+    readme_text = " ".join(str(r[0].value) for r in wb["README"].iter_rows())
+    assert "Made with: unknown, prompt unknown (1 papers)" in readme_text
     ref = [c.value for c in wb["REF"][1]]
     assert ref == [t for t, _ in extraction.REF_COLUMNS]
     row = {h: c.value for h, c in zip(ref, wb["REF"][2])}
@@ -197,13 +202,13 @@ def test_the_workbook_has_the_templates_sheets_columns_and_the_review_columns_on
     exp = wb["HUMAN_COV_EXP"]
     head = [c.value for c in exp[1]]
     assert head[:13] == [t for t, _ in extraction.SHEET_COLUMNS["human_exp"][1]]
-    assert head[13:] == ["Quote", "Quote found in text", "Extracted from"]
+    assert head[13:] == ["Codebook label", "Review status", "Reviewed by", "Quote", "Quote found in text", "Extracted from"]
     vals = {h: c.value for h, c in zip(head, exp[2])}
     assert vals["COVARIATE_hum"] == "veterinary authority staff" and vals["Value_hum"] == 7
     assert vals["Quote found in text"] == "Y" and vals["Extracted from"] == "abstract"
     # The environment sheet has no page column in the template: it is added on the right.
     env_head = [c.value for c in wb["ENV_COV"][1]]
-    assert env_head[-4:] == ["Page/section", "Quote", "Quote found in text", "Extracted from"]
+    assert env_head[-7:] == ["Page/section", "Codebook label", "Review status", "Reviewed by", "Quote", "Quote found in text", "Extracted from"]
     assert wb["ENV_COV"][2][env_head.index("Page/section")].value == "Table 2"
     assert wb["HUMAN_COV_SUSC"].max_row == 1
 
@@ -437,7 +442,7 @@ def test_the_digest_counts_every_relevant_extracted_article_and_only_those(extra
     by_sheet = {r["sheet"]: r for r in d["by_sheet"]}
     assert by_sheet["human_susc"] == {"sheet": "human_susc", "n_rows": 3, "n_articles": 2, "n_quote_found": 2}
     assert by_sheet["human_exp"]["n_rows"] == 1
-    assert {"sheet": "human_susc", "value": "sex", "n": 2} in d["top_groups"]
+    assert {"sheet": "human_susc", "value": "sex_gender", "n": 2} in d["top_groups"]       # "sex" is folded to its codebook key
     # Crude counts: only rows with cases AND population AND a quote found; labels folded.
     assert d["crude_counts"] == [{"sheet": "human_susc", "covariate": "male", "n_studies": 2,
                                   "n_cases": 8.0, "pop_risk": 60.0}]
@@ -543,3 +548,55 @@ def test_the_article_list_pages_and_says_whether_more_remain(extracted):
     assert (last["returned"], last["truncated"], last["next_offset"]) == (1, False, None)
     assert c.get(f"/user-scenarios/{SID}/extraction/articles?limit=999999").json()["limit"] == extraction.EXTRACTION_PAGE_MAX
     assert c.get("/user-scenarios/nope/extraction/articles").status_code == 404
+
+
+def test_a_changed_prompt_changes_its_fingerprint():
+    import hashlib
+    assert extraction.PROMPT_SHA == hashlib.sha256(extraction._EXTRACTION_SYSTEM.encode()).hexdigest()[:10]
+    assert extraction.PROMPT_SHA != hashlib.sha256((extraction._EXTRACTION_SYSTEM + " ").encode()).hexdigest()[:10]
+
+
+def test_the_digest_says_which_models_made_the_extractions(extracted):
+    d = extraction.extraction_digest(SID)
+    assert d["by_model"] == [{"model": "unknown", "prompt_sha": "unknown", "n": 3}]
+
+
+# ── Seeing a quote in the paper ─────────────────────────────────────────────
+def test_a_quote_is_located_through_line_breaks_case_and_punctuation():
+    text_ = "Methods. Of the 17 exposed persons,\n7 of 7 veterinary-authority staff were NOT vaccinated against seasonal influenza."
+    hit = extraction.locate_quote(text_, "7 of 7 veterinary authority staff were not vaccinated")
+    assert hit and hit["partial"] is False
+    assert text_[hit["start"]:hit["end"]].startswith("7 of 7 veterinary-authority") and text_[hit["start"]:hit["end"]].endswith("vaccinated")
+    # Decimals and percentages survive, and the first occurrence is the one returned.
+    assert extraction.locate_quote("a 12.5% rate; later a 12.5% rate", "12.5% rate")["start"] == 2
+
+
+def test_a_quote_that_is_only_partly_there_is_located_as_partial_and_one_that_is_not_there_is_not():
+    text_ = "The holding had no biosecurity measures and comprised ca 21 chickens and nine free-roaming cats."
+    part = extraction.locate_quote(text_, "The holding had no biosecurity measures, which the inspectors judged very poor indeed")
+    assert part and part["partial"] is True and text_[part["start"]:part["end"]].startswith("The holding had no biosecurity measures")
+    assert extraction.locate_quote(text_, "completely unrelated words about something else entirely") is None
+    assert extraction.locate_quote(text_, "") is None and extraction.locate_quote(text_, None) is None
+    assert extraction.locate_quote("", "anything at all here now") is None
+    assert extraction.locate_quote(text_, "no biosecurity") is not None and extraction.locate_quote(text_, "no biosecurity")["partial"] is False
+
+
+def test_the_text_window_endpoint_returns_the_quote_with_its_context(extracted):
+    from fastapi.testclient import TestClient
+    c = TestClient(main.app)
+    r = c.get(f"/user-scenarios/{SID}/articles/9702/text", params={"quote": "7 of 7 were not vaccinated against seasonal influenza", "context": 40}).json()
+    assert r["source"] == "fulltext" and r["found"] is True and r["partial"] is False
+    assert r["match"].lower().startswith("7 of 7 were not vaccinated") and len(r["before"]) <= 40 and len(r["after"]) <= 40
+    assert r["window_start"] <= r["start"] < r["end"] <= r["window_end"] and r["n_chars"] > 600
+    # Part of a quote still shows where it probably came from.
+    p = c.get(f"/user-scenarios/{SID}/articles/9702/text", params={"quote": "Table 4. Veterinary authority staff, 7, none vaccinated and many other invented words"}).json()
+    assert p["found"] is False and p["partial"] is True and p["match"].startswith("Table 4")
+    # No quote, or one that is not there: the start of the text, found false.
+    n = c.get(f"/user-scenarios/{SID}/articles/9702/text", params={"quote": "nothing like this appears"}).json()
+    assert n["found"] is False and n["partial"] is False and n["start"] == 0 and n["match"] == ""
+    # An abstract-only article, and the bounds.
+    a = c.get(f"/user-scenarios/{SID}/articles/9701/text", params={"quote": "Seventeen exposed persons"}).json()
+    assert a["source"] == "abstract" and a["found"] is True
+    assert c.get(f"/user-scenarios/{SID}/articles/9702/text", params={"context": 99999}).status_code == 422
+    assert c.get(f"/user-scenarios/{SID}/articles/99999/text").status_code == 404
+    assert c.get(f"/user-scenarios/nope/articles/9702/text").status_code == 404

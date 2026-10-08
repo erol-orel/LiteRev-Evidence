@@ -3,21 +3,25 @@ import {
   AlertTriangle, CheckCircle2, ChevronDown, ChevronUp, Download, Info, Loader2,
   RotateCcw, Sparkles, Table2,
 } from "lucide-react";
-import { useI18n } from "../i18n/LanguageProvider";
+import { currentLang, useI18n } from "../i18n/LanguageProvider";
+import { CodebookPanel } from "./CodebookPanel";
+import { GeographyPanel } from "./GeographyPanel";
+import { ObservationPanel } from "./ObservationPanel";
+import { PooledPanel } from "./PooledPanel";
+import type { Detail } from "./ObservationPanel";
+import { ReviewSummaryCard } from "./ReviewSummaryCard";
 import {
-  extractionExportUrl, fetchAllExtractionArticles, fetchArticleExtraction, fetchExtractionDigest,
+  extractionExportUrl, extractionReportUrl, fetchAllExtractionArticles, fetchArticleExtraction, fetchExtractionDigest,
   fetchExtractionStatus, hasApiKey, startExtraction,
 } from "../lib/api";
 import type {
-  ArticleExtraction, ExtractionArticle, ExtractionArticlesResponse, ExtractionDigest, ExtractionStatus,
+  ExtractionArticle, ExtractionArticlesResponse, ExtractionDigest, ExtractionObservation, ExtractionStatus,
 } from "../lib/api";
 import { COVERAGE_KEYS, SHEET_KEYS, filterArticles, quotesToCheck, share, sortArticles } from "../lib/extraction";
 import type { CoverageKey, ExtractionFilter, ExtractionSort, ItemMode } from "../lib/extraction";
 
 const PAGE = 100;
 const POLL_MS = 4000;
-
-type Detail = { loading: boolean; error?: string; data?: ArticleExtraction };
 
 /** Structured extraction: what each relevant paper reports, in the review template's shape,
  *  with the exact quote behind every value. Counts always say out of how many papers. */
@@ -44,6 +48,16 @@ export function ExtractionSection({ scenarioId }: { scenarioId: string }) {
   const visible = shownRows.key === viewKey ? shownRows.n : PAGE;
   const [open, setOpen] = React.useState<number | null>(null);
   const [details, setDetails] = React.useState<Record<number, Detail>>({});
+  // Who is reviewing: a name kept in this browser. It labels each decision and the agreement
+  // between reviewers; the application has one write key, not user accounts.
+  const [reviewer, setReviewerState] = React.useState<string>(() => {
+    try { return localStorage.getItem("literev-reviewer") ?? ""; } catch { return ""; }
+  });
+  const setReviewer = (v: string) => {
+    setReviewerState(v);
+    try { localStorage.setItem("literev-reviewer", v); } catch { /* storage unavailable */ }
+  };
+  const [reviewTick, setReviewTick] = React.useState(0);
 
   const load = React.useCallback(
     () => Promise.all([
@@ -113,6 +127,23 @@ export function ExtractionSection({ scenarioId }: { scenarioId: string }) {
         .then((data) => setDetails((d) => ({ ...d, [a.id]: { loading: false, data } })))
         .catch((e: Error) => setDetails((d) => ({ ...d, [a.id]: { loading: false, error: e.message } })));
     }
+  };
+
+  const afterReview = (articleId: number, updated: ExtractionObservation | null) => {
+    if (updated?.obs_key) {
+      setDetails((d) => {
+        const cur = d[articleId];
+        const ex = cur?.data?.extraction;
+        if (!cur || !ex) return d;
+        const observations = ex.observations.map((o) => (o.obs_key === updated.obs_key ? { ...o, ...updated } : o));
+        return { ...d, [articleId]: { ...cur, data: { ...cur.data!, extraction: { ...ex, observations } } } };
+      });
+    } else {
+      setDetails((d) => { const n = { ...d }; delete n[articleId]; return n; });    // re-read on next open
+      setOpen(null);
+    }
+    setReviewTick((n) => n + 1);                                    // the counts and the summary
+    reload().catch(() => undefined);
   };
 
   const shown = React.useMemo(
@@ -205,6 +236,12 @@ export function ExtractionSection({ scenarioId }: { scenarioId: string }) {
               <Download size={11} />{f === "xlsx" ? T("downloadExcel") : T("downloadCsv")}
             </a>
           ))}
+          {extracted > 0 && (["pdf", "docx"] as const).map((f) => (
+            <a key={f} href={extractionReportUrl(scenarioId, f, currentLang())} download
+              className="flex items-center gap-1.5 rounded-xl border border-brand-500/30 bg-brand-500/10 px-3 py-1.5 text-[11px] text-brand-300 hover:bg-brand-500/20 transition">
+              <Download size={11} />{f === "pdf" ? T("downloadReportPdf") : T("downloadReportWord")}
+            </a>
+          ))}
         </div>
         {notice && <p className="text-[11px] text-rose-300">{notice}</p>}
         {status.n_given_up > 0 && (
@@ -271,6 +308,10 @@ export function ExtractionSection({ scenarioId }: { scenarioId: string }) {
             )}
           </div>
 
+          <CodebookPanel scenarioId={scenarioId} onChanged={() => { void reload(); }} />
+
+          <GeographyPanel scenarioId={scenarioId} />
+
           {/* Rows by sheet */}
           {digest.by_sheet.length > 0 && (
             <div className="space-y-2">
@@ -296,12 +337,18 @@ export function ExtractionSection({ scenarioId }: { scenarioId: string }) {
         </>
       )}
 
+      {extracted > 0 && (
+        <ReviewSummaryCard scenarioId={scenarioId} reviewer={reviewer} onReviewer={setReviewer} tick={reviewTick} />
+      )}
+
+      {extracted > 0 && <PooledPanel scenarioId={scenarioId} tick={reviewTick} />}
+
       {/* Controls */}
       <div className="flex flex-wrap gap-2 items-center">
         <input type="text" placeholder={T("searchPlaceholder")} value={search} onChange={(e) => setSearch(e.target.value)}
           className="flex-1 min-w-[200px] rounded-xl border border-white/10 bg-white/5 px-3 py-1.5 text-xs text-white focus:outline-none focus:border-brand-500/50" />
         <div className="flex gap-1">
-          {(["all", "extracted", "pending", "quote_missing"] as const).map((f) => (
+          {(["all", "extracted", "pending", "quote_missing", "to_review", "conflict"] as const).map((f) => (
             <button key={f} onClick={() => setFilter(f)}
               className={`px-2.5 py-1.5 rounded-lg text-[10px] font-medium transition ${
                 filter === f ? "bg-brand-700 text-gold-400 font-semibold" : "text-white/60 hover:text-white hover:bg-white/8"}`}>
@@ -322,7 +369,7 @@ export function ExtractionSection({ scenarioId }: { scenarioId: string }) {
         <table className="w-full text-[10px] border-collapse">
           <thead>
             <tr className="border-b border-white/5 bg-white/3">
-              {["colTitle", "colYear", "colSource", "colReports", "colRows", "colQuotes"].map((h) => (
+              {["colTitle", "colYear", "colSource", "colReports", "colRows", "colQuotes", "colReview"].map((h) => (
                 <th key={h} className="text-left px-3 py-2 text-white/40 font-semibold uppercase tracking-wider whitespace-nowrap">{T(h)}</th>
               ))}
             </tr>
@@ -368,11 +415,20 @@ export function ExtractionSection({ scenarioId }: { scenarioId: string }) {
                           : <span className="font-semibold text-gold-400">{T("quotesCheck").replace("{n}", String(check))}</span>)
                         : <span className="text-white/25">-</span>}
                     </td>
+                    <td className="px-3 py-2 whitespace-nowrap">
+                      {a.has_extraction && a.n_observations > 0 ? (
+                        <span className={a.n_reviewed >= a.n_observations ? "text-brand-300" : "text-white/55"}>
+                          {a.n_reviewed}/{a.n_observations}
+                          {a.n_conflict > 0 && <span className="ml-1.5 font-semibold text-gold-400">{T("review.conflicts").replace("{n}", String(a.n_conflict))}</span>}
+                        </span>
+                      ) : <span className="text-white/25">-</span>}
+                    </td>
                   </tr>
                   {isOpen && (
                     <tr className="border-b border-white/5 bg-white/2">
-                      <td colSpan={6} className="px-4 py-3">
-                        <ObservationPanel detail={details[a.id]} T={T} sheetName={sheetName} />
+                      <td colSpan={7} className="px-4 py-3">
+                        <ObservationPanel scenarioId={scenarioId} articleId={a.id} detail={details[a.id]} reviewer={reviewer}
+                          onUpdated={(u) => afterReview(a.id, u)} />
                       </td>
                     </tr>
                   )}
@@ -389,62 +445,6 @@ export function ExtractionSection({ scenarioId }: { scenarioId: string }) {
         )}
         {shown.length === 0 && <div className="text-center py-8 text-xs text-white/35">{T("noMatch")}</div>}
       </div>
-    </div>
-  );
-}
-
-function ObservationPanel({ detail, T, sheetName }: {
-  detail: Detail | undefined; T: (k: string) => string; sheetName: (k: string) => string;
-}) {
-  if (!detail || detail.loading) {
-    return <div className="flex items-center gap-2 text-white/50 text-[11px]"><RotateCcw size={12} className="animate-spin" />{T("detailLoading")}</div>;
-  }
-  if (detail.error || !detail.data?.extraction) {
-    return <p className="text-[11px] text-rose-300">{detail.error ?? T("detailError")}</p>;
-  }
-  const ex = detail.data.extraction;
-  const obs = ex.observations ?? [];
-  return (
-    <div className="space-y-3">
-      {ex.ref?.description && <p className="text-[11px] text-white/60 leading-4">{ex.ref.description}</p>}
-      {obs.length === 0 ? (
-        <p className="text-[11px] text-white/40">{T("detailEmpty")}</p>
-      ) : (
-        <div className="overflow-x-auto rounded-xl border border-white/5">
-          <table className="w-full text-[10px] border-collapse">
-            <thead>
-              <tr className="border-b border-white/5 bg-white/3">
-                {["obsSheet", "obsGroup", "obsCovariate", "obsValue", "obsCases", "obsPopulation", "obsWhere", "obsQuote"].map((h) => (
-                  <th key={h} className="text-left px-2.5 py-1.5 text-white/40 font-semibold uppercase tracking-wider whitespace-nowrap">{T(h)}</th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {obs.map((o, i) => (
-                <tr key={i} className="border-b border-white/5 align-top">
-                  <td className="px-2.5 py-1.5 whitespace-nowrap text-white/55">{sheetName(o.sheet)}</td>
-                  <td className="px-2.5 py-1.5 text-white/60">{o.group || "-"}</td>
-                  <td className="px-2.5 py-1.5 text-white/80">{o.covariate}</td>
-                  <td className="px-2.5 py-1.5 font-mono text-white/70">{o.value ?? "-"}</td>
-                  <td className="px-2.5 py-1.5 font-mono text-white/60">{o.n_cases ?? "-"}</td>
-                  <td className="px-2.5 py-1.5 font-mono text-white/60">{o.pop_risk ?? "-"}</td>
-                  <td className="px-2.5 py-1.5 text-white/50 whitespace-nowrap">
-                    {[o.page_section, o.source_kind].filter(Boolean).join(" · ") || "-"}
-                  </td>
-                  <td className="px-2.5 py-1.5 max-w-[340px]">
-                    <div className="flex items-start gap-1.5">
-                      {o.quote_verified
-                        ? <CheckCircle2 size={11} className="mt-0.5 text-brand-300 shrink-0" aria-label={T("quoteFound")} />
-                        : <AlertTriangle size={11} className="mt-0.5 text-gold-400 shrink-0" aria-label={T("quoteNotFound")} />}
-                      <span className={`leading-4 italic ${o.quote_verified ? "text-white/55" : "text-gold-400/80"}`}>{o.quote || "-"}</span>
-                    </div>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
     </div>
   );
 }
