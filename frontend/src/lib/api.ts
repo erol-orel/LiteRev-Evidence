@@ -2671,6 +2671,62 @@ export interface ScenarioVariables {
   error?: string;
 }
 
+/** Un paramètre épidémiologique mis en commun sur le corpus pertinent : la valeur
+ *  pondérée par la qualité, son intervalle, le nombre d'études. Produit de REVUE
+ *  autant que de prévision, d'où un accès qui ne passe pas par le modèle. */
+export interface PooledEpidemicParameter {
+  value: number | null;
+  ci_low: number | null;
+  ci_high: number | null;
+  n_studies: number | null;
+  unit: string | null;
+}
+
+export interface EpidemicParameterCandidates {
+  scenario_id: string;
+  /** Compté sur TOUT le corpus pertinent, jamais sur un échantillon. */
+  n_candidates: number;
+  by_parameter: Record<string, number>;
+  articles_listed: number;
+  articles: {
+    id: number; title: string; year: number | null; doi: string | null;
+    study_design: string | null; quality_score: number | null; parameters: string[];
+  }[];
+}
+
+export interface EpidemicParameterExtraction {
+  status: string;
+  scenario_id?: string;
+  n_candidates?: number;
+  n_articles_with_values?: number;
+  disease?: string | null;
+  applicable?: boolean;
+  parameters?: Record<string, PooledEpidemicParameter>;
+  message?: string;
+}
+
+/** Lecture seule, sans appel de modèle : ce que la littérature du scénario contient
+ *  avant toute extraction. */
+export async function fetchEpidemicParameterCandidates(
+  scenarioId: string,
+  limit = 0,
+): Promise<EpidemicParameterCandidates> {
+  const r = await safeFetch(
+    `${API_BASE_URL}/scenarios/${scenarioId}/epidemic-parameters/candidates?limit=${limit}`);
+  if (!r.ok) throw new Error(httpMessage(r.status));
+  return r.json();
+}
+
+export async function extractEpidemicParameters(
+  scenarioId: string,
+): Promise<EpidemicParameterExtraction> {
+  const r = await safeFetch(
+    `${API_BASE_URL}/scenarios/${scenarioId}/epidemic-parameters/extract`,
+    { method: 'POST', headers: authHeaders() });
+  if (!r.ok) throw new Error(httpMessage(r.status));
+  return r.json();
+}
+
 export async function getScenarioVariables(scenarioId: string): Promise<ScenarioVariables> {
   const r = await safeFetch(`${API_BASE_URL}/scenarios/${scenarioId}/variables?lang=${currentLang()}`);
   if (!r.ok) throw new Error(httpMessage(r.status));

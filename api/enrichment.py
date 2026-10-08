@@ -364,8 +364,14 @@ def _scope_counts_sql() -> str:
     reste à faire venaient de deux requêtes, il pourrait annoncer un chiffre et en
     traiter un autre. `todo` est le nombre d'articles qu'un lot prendrait réellement,
     c'est-à-dire ce que l'appel au modèle va coûter."""
-    done_pico = "ld.pico_json IS NOT NULL"
-    todo_pico = ("(ld.pico_json IS NULL OR (ld.pico_json->>'pico_confidence')::float < 0.5)"
+    # « Fait » doit être le CONTRAIRE de « à faire », sinon la barre et la ligne
+    # au-dessous se contredisent : une extraction de faible confiance est reprise par
+    # le lot, elle comptait pourtant comme faite, et fait + à faire dépassait le total.
+    # Un article épuisé (trois tentatives) n'est dans ni l'un ni l'autre : il est
+    # bloqué, ce qui n'est ni un succès ni une dépense à venir.
+    _weak_pico = "(ld.pico_json->>'pico_confidence')::float < 0.5"
+    done_pico = f"ld.pico_json IS NOT NULL AND NOT ({_weak_pico})"
+    todo_pico = (f"(ld.pico_json IS NULL OR {_weak_pico})"
                  " AND COALESCE(ld.pico_attempts, 0) < 3")
     done_meta = "ld.metadata_json IS NOT NULL AND ld.metadata_json != '{}'::jsonb"
     todo_meta = "ld.metadata_json IS NULL OR ld.metadata_json = '{}'::jsonb"
@@ -425,7 +431,8 @@ def get_enrichment_status(scenario_id: Optional[str] = None, scope: Optional[str
             row = conn.execute(text("""
                 SELECT
                     COUNT(*) as total,
-                    COUNT(pico_json) as with_pico,
+                    COUNT(*) FILTER (WHERE pico_json IS NOT NULL
+                        AND NOT ((pico_json->>'pico_confidence')::float < 0.5)) as with_pico,
                     COUNT(*) FILTER (WHERE (pico_json IS NULL
                         OR (pico_json->>'pico_confidence')::float < 0.5)
                         AND COALESCE(pico_attempts, 0) < 3) as todo_pico,

@@ -1520,8 +1520,10 @@ function ScenariosView({
             {/* Actions recommandées (hooks isolés dans le composant hoisté) */}
             <RecommendedActions scenario={scenario} isUser={isUser} />
 
-            {/* Modèle Prédictif - carte générique (scénarios utilisateur) */}
-            {isUser && (
+            {/* Modèle Prédictif - carte générique (scénarios utilisateur). Pas sur
+                une revue de littérature : son bouton « Entraîner & prédire » ouvrait
+                un onglet que la revue n'a pas, et la page retombait sur le corpus. */}
+            {isUser && (scenario as any).kind !== "review" && (
               <div className="rounded-2xl border border-brand-500/20 bg-brand-500/5 p-4">
                 <div className="flex items-center justify-between mb-2">
                   <div className="flex items-center gap-2">

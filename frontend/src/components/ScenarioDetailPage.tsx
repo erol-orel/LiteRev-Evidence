@@ -102,6 +102,8 @@ import {
   extractMetadataBatch,
   fetchFulltextBatch,
   fetchEnrichmentStatus,
+  fetchEpidemicParameterCandidates,
+  extractEpidemicParameters,
   fetchUserScenarioEmbeddingStatus,
   searchLive,
   getSearchStrategy,
@@ -110,6 +112,8 @@ import {
   type SearchStrategy,
   type EnrichmentStatus,
   type EnrichmentScope,
+  type EpidemicParameterCandidates,
+  type PooledEpidemicParameter,
   type ScenarioCapability,
   type ScenarioKind,
   type EmbeddingStatus,
@@ -3443,8 +3447,8 @@ function UmapScatterPlot({clusters,selectedCluster,onSelectCluster}:{clusters:Cl
  * et peut proposer une mise à jour du scénario. Le panneau sert ces quatre usages
  * et rien d'autre.
  */
-function QuestionHistory({ scenarioId, refreshKey, onReask }:
-  { scenarioId: string; refreshKey: number; onReask: (q: string) => void }) {
+function QuestionHistory({ scenarioId, refreshKey, onReask, canAdopt }:
+  { scenarioId: string; refreshKey: number; onReask: (q: string) => void; canAdopt: boolean }) {
   const { t } = useI18n();
   const [page, setPage] = useState<ScenarioQuestionsPage | null>(null);
   const [openId, setOpenId] = useState<number | null>(null);
@@ -3527,7 +3531,9 @@ function QuestionHistory({ scenarioId, refreshKey, onReask }:
                         {t("scenarioDetail.rag.proposalsTitle")}
                       </p>
                       <p className="text-[11px] text-white/45 leading-4">
-                        {t("scenarioDetail.rag.proposalsHint")}
+                        {t(canAdopt
+                          ? "scenarioDetail.rag.proposalsHint"
+                          : "scenarioDetail.rag.proposalsHintReview")}
                       </p>
                       {(q.proposals ?? []).map(prop => (
                         <div key={prop.key} className="flex items-center gap-2 flex-wrap text-[11px]">
@@ -3553,11 +3559,13 @@ function QuestionHistory({ scenarioId, refreshKey, onReask }:
                             </span>
                           ) : (
                             <span className="flex items-center gap-1.5">
+                              {canAdopt && (
                               <button type="button" disabled={busy === `${q.id}:${prop.key}`}
                                 onClick={() => decide(q.id, prop.key, "accepted")}
                                 className="rounded-lg border border-forest-400/40 bg-forest-500/10 px-2 py-0.5 text-forest-300 hover:bg-forest-500/20 transition disabled:opacity-50">
                                 {t("scenarioDetail.rag.proposalAccept")}
                               </button>
+                              )}
                               <button type="button" disabled={busy === `${q.id}:${prop.key}`}
                                 onClick={() => decide(q.id, prop.key, "rejected")}
                                 className="rounded-lg border border-white/10 px-2 py-0.5 text-white/40 hover:text-white/70 transition disabled:opacity-50">
@@ -3891,6 +3899,7 @@ function RagSection({ scenarioId, detail }: { scenarioId: string; detail: Scenar
       </div>
 
       <QuestionHistory scenarioId={scenarioId} refreshKey={historyKey}
+                       canAdopt={(detail.capabilities ?? ["model_spec"]).includes("model_spec")}
                        onReask={(q) => { setQuestion(q); ask(q); }} />
     </div>
   );
@@ -7136,6 +7145,111 @@ ${llm.future_research ? `<h3>${t("scenarioDetail.evidences.pdf.futureResearch")}
 }
 
 /** EvidenceTab : Evidences fusionnées + Tableau PICO (sous-tabs) */
+/** Les paramètres épidémiologiques mis en commun sur le corpus pertinent.
+ *
+ *  Posé DANS l'onglet des preuves, et non dans la moitié prédictive, parce qu'un R0
+ *  pondéré par la qualité, avec son intervalle et la provenance de chaque étude, est
+ *  le produit d'une méta-analyse de paramètres : c'est une revue. Le rangement
+ *  précédent le laissait derrière l'onglet Variables & Modèle, donc invisible aux
+ *  scénarios qui en font leur objet même. */
+function EpidemicParametersPanel({ scenarioId }: { scenarioId: string }) {
+  const { t } = useI18n();
+  const [cands, setCands] = React.useState<EpidemicParameterCandidates | null>(null);
+  const [pooled, setPooled] = React.useState<Record<string, PooledEpidemicParameter> | null>(null);
+  const [running, setRunning] = React.useState(false);
+  const [note, setNote] = React.useState<string | null>(null);
+
+  React.useEffect(() => {
+    let alive = true;
+    fetchEpidemicParameterCandidates(scenarioId, 0)
+      .then(c => { if (alive) setCands(c); })
+      .catch(() => {});
+    // Ce qui est déjà en commun, s'il y en a : on ne relance rien pour l'afficher.
+    getScenarioVariables(scenarioId)
+      .then((v: any) => {
+        if (!alive) return;
+        const block = v?.epidemic_parameters_pooled ?? v?.model_spec?.epidemic_parameters;
+        if (block?.params) setPooled(block.params);
+      })
+      .catch(() => {});
+    return () => { alive = false; };
+  }, [scenarioId]);
+
+  const run = async () => {
+    setRunning(true); setNote(null);
+    try {
+      const out = await extractEpidemicParameters(scenarioId);
+      if (out.parameters && Object.keys(out.parameters).length) setPooled(out.parameters);
+      else setNote(out.message ?? t("scenarioDetail.epiParams.none"));
+    } catch (e: any) {
+      setNote(e.message);
+    } finally {
+      setRunning(false);
+    }
+  };
+
+  // Rien dans le corpus ne rapporte de paramètre : on ne propose pas une extraction
+  // qui ne trouverait rien, et on ne laisse pas un panneau vide sans explication.
+  if (cands && cands.n_candidates === 0 && !pooled) return null;
+
+  const rows = Object.entries(pooled ?? {});
+  return (
+    <div className="rounded-2xl border border-white/8 bg-white/3 p-4 space-y-3">
+      <div className="flex items-start justify-between gap-3 flex-wrap">
+        <div>
+          <p className="text-sm font-semibold text-white">{t("scenarioDetail.epiParams.title")}</p>
+          <p className="text-[11px] text-white/40 mt-0.5 leading-relaxed">
+            {t("scenarioDetail.epiParams.subtitle")}
+          </p>
+        </div>
+        <button
+          onClick={run}
+          disabled={running}
+          className="shrink-0 rounded-xl border border-brand-500/25 bg-brand-500/10 px-3 py-1.5 text-xs text-brand-300 hover:bg-brand-500/20 transition disabled:opacity-50"
+        >
+          {running ? t("common.loading") : t("scenarioDetail.epiParams.recompute")}
+        </button>
+      </div>
+
+      {cands && (
+        <p className="text-[11px] text-white/45">
+          {t("scenarioDetail.epiParams.candidates").replace("{n}", String(cands.n_candidates))}
+          {Object.keys(cands.by_parameter).length > 0
+            ? " · " + Object.entries(cands.by_parameter)
+                .sort((a, b) => b[1] - a[1])
+                .map(([k, n]) => `${k} (${n})`).join(", ")
+            : ""}
+        </p>
+      )}
+
+      {rows.length > 0 ? (
+        <div className="space-y-1.5">
+          {rows.map(([k, p]) => (
+            <div key={k} className="grid grid-cols-12 items-baseline gap-2 text-[11px] border-b border-white/5 pb-1.5">
+              <code className="col-span-4 sm:col-span-3 font-mono text-white/75">{k}</code>
+              <span className="col-span-3 sm:col-span-2 font-mono text-white/90">
+                {p.value != null ? p.value : "-"}{p.unit ? ` ${p.unit}` : ""}
+              </span>
+              <span className="col-span-5 sm:col-span-4 font-mono text-white/40">
+                {p.ci_low != null && p.ci_high != null ? `[${p.ci_low} \u2013 ${p.ci_high}]` : "-"}
+              </span>
+              <span className="hidden sm:block col-span-3 text-right text-white/40">
+                {p.n_studies != null
+                  ? t("scenarioDetail.epiParams.studies").replace("{n}", String(p.n_studies))
+                  : ""}
+              </span>
+            </div>
+          ))}
+        </div>
+      ) : (
+        <p className="text-[11px] text-white/35">{t("scenarioDetail.epiParams.notYet")}</p>
+      )}
+
+      {note && <p className="text-[11px] text-gold-300/80">{note}</p>}
+    </div>
+  );
+}
+
 function EvidenceTab({ scenarioId, detail }: { scenarioId: string; detail: ScenarioDetail }) {
   const { t } = useI18n();
   const [sub, setSub] = React.useState<"evidences" | "pico">("evidences");
@@ -7155,7 +7269,12 @@ function EvidenceTab({ scenarioId, detail }: { scenarioId: string; detail: Scena
           </button>
         ))}
       </div>
-      {sub === "evidences" && <EvidencesSection scenarioId={scenarioId} detail={detail} />}
+      {sub === "evidences" && (
+        <>
+          <EpidemicParametersPanel scenarioId={scenarioId} />
+          <EvidencesSection scenarioId={scenarioId} detail={detail} />
+        </>
+      )}
       {sub === "pico" && <PicoSection scenarioId={scenarioId} />}
     </div>
   );

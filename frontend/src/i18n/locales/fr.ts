@@ -728,6 +728,8 @@ export const fr = {
       historyReask: "Reposer la question",
       historyExport: "Exporter :",
       proposalsTitle: "Valeurs proposées par cette réponse",
+      proposalsHintReview:
+        "Ce scénario est une revue de littérature : une valeur ne peut pas y être adoptée dans une spécification de modèle. Elle reste lisible ici, et peut être écartée.",
       proposalsHint: "Rien n'est appliqué au scénario tant que vous n'avez pas accepté. Une valeur acceptée est écrite dans la spécification du modèle, avec sa provenance.",
       proposalCurrent: "actuellement {v}",
       proposalNew: "pas encore renseignée",
@@ -969,6 +971,16 @@ export const fr = {
       stepClustering: "Recalcul du clustering thématique",
       stepRerank: "Rerank sémantique (scores cosinus mis à jour)",
       simulateDryRun: "Simuler (dry run)",
+    },
+    epiParams: {
+      title: "Paramètres épidémiologiques",
+      subtitle:
+        "Mis en commun sur tout le corpus pertinent, pondérés par la qualité de chaque étude. Un intervalle, un nombre d'études, et la provenance derrière chaque valeur.",
+      recompute: "Recalculer",
+      candidates: "{n} articles du corpus rapportent un paramètre",
+      studies: "{n} études",
+      notYet: "Aucun paramètre mis en commun pour l'instant. Lancez le calcul pour les extraire des articles qui en rapportent.",
+      none: "Aucune valeur exploitable dans les articles qui mentionnent un paramètre.",
     },
     enrichment: {
       errorPrefix: "Erreur :",
