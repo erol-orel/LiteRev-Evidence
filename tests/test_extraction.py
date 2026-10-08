@@ -252,6 +252,7 @@ def seeded(db_conn):
                          ("screening_notes", "TEXT"), ("screened_at", "TIMESTAMP")):
             cur.execute(f"ALTER TABLE article_scenarios ADD COLUMN IF NOT EXISTS {col} {typ}")
         cur.execute("ALTER TABLE document_chunk ADD COLUMN IF NOT EXISTS embedding TEXT")
+        cur.execute("ALTER TABLE document_chunk ADD COLUMN IF NOT EXISTS metadata_json JSONB")
         main._ensure_extraction_columns()
         for sid in (SID, OTHER):
             cur.execute("DELETE FROM article_scenarios WHERE scenario_id = %s", (sid,))
@@ -392,3 +393,126 @@ def test_the_endpoints_status_article_export_and_run(seeded, monkeypatch):
     assert c.post(f"/user-scenarios/{SID}/extraction/run").status_code in (401, 403)
     monkeypatch.setenv("OPENAI_API_KEY", "")
     assert c.post(f"/user-scenarios/{SID}/extraction/run", headers=HDR).json()["status"] == "no_llm"
+
+
+# ── The reduce half: counts over every relevant article ─────────────────────
+def _ex(source, coverage, observations):
+    return json.dumps({"v": 1, "source": source, "truncated": False,
+                       "ref": {}, "coverage": {k: True for k in coverage}, "observations": observations})
+
+
+def _obs(group, covariate, n_cases, pop_risk, verified, sheet="human_susc"):
+    return {"sheet": sheet, "group": group, "covariate": covariate, "value": None, "descr": None,
+            "n_cases": n_cases, "pop_risk": pop_risk, "quote": "q", "quote_verified": verified}
+
+
+@pytest.fixture()
+def extracted(seeded):
+    """9701 and 9702 read from the full text, 9703 from the abstract, 9706 not read at all;
+    9704 (below the threshold) and 9705 (excluded) carry extractions that must NOT count."""
+    rows = {
+        9701: _ex("fulltext", ["sex_gender"], [_obs("sex", "Male", 3, 10, True),
+                                               _obs("sex", "female", 2, 20, False)]),
+        9702: _ex("fulltext", ["sex_gender", "age"], [_obs("sex", "male ", 5, 50, True),
+                                                      _obs("occupation", "farmer", None, None, True, "human_exp")]),
+        9703: _ex("abstract", ["ppe"], []),
+        9704: _ex("fulltext", ["sex_gender", "age", "ppe"], [_obs("sex", "male", 99, 999, True)]),
+        9705: _ex("fulltext", ["sex_gender"], [_obs("sex", "male", 99, 999, True)]),
+    }
+    with seeded.cursor() as cur:
+        for i, j in rows.items():
+            cur.execute("UPDATE literature_document SET extraction_json = %s::jsonb WHERE id = %s", (j, i))
+    return seeded
+
+
+def test_the_digest_counts_every_relevant_extracted_article_and_only_those(extracted):
+    d = extraction.extraction_digest(SID)
+    assert d["complete"] is True
+    assert (d["n_relevant"], d["n_extracted"], d["n_unread"]) == (4, 3, 1)
+    assert (d["n_fulltext"], d["n_abstract"]) == (2, 1)
+    # The below-threshold and the excluded article are out of every count.
+    assert d["coverage"]["sex_gender"] == 2 and d["coverage"]["age"] == 1 and d["coverage"]["ppe"] == 1
+    assert d["coverage_fulltext"]["sex_gender"] == 2 and d["coverage_fulltext"]["ppe"] == 0
+    assert d["coverage"]["vector"] == 0
+    by_sheet = {r["sheet"]: r for r in d["by_sheet"]}
+    assert by_sheet["human_susc"] == {"sheet": "human_susc", "n_rows": 3, "n_articles": 2, "n_quote_found": 2}
+    assert by_sheet["human_exp"]["n_rows"] == 1
+    assert {"sheet": "human_susc", "value": "sex", "n": 2} in d["top_groups"]
+    # Crude counts: only rows with cases AND population AND a quote found; labels folded.
+    assert d["crude_counts"] == [{"sheet": "human_susc", "covariate": "male", "n_studies": 2,
+                                  "n_cases": 8.0, "pop_risk": 60.0}]
+    assert "Not a pooled estimate" in d["crude_counts_note"]
+
+
+def test_the_digest_follows_the_threshold_it_is_given(extracted):
+    low = extraction.extraction_digest(SID, threshold=0.0)
+    assert low["n_relevant"] == 5                       # 9704 (below 0.45) now counts; 9705 never does
+    assert low["coverage"]["sex_gender"] == 3
+
+
+def test_the_prompt_block_states_its_denominator_and_its_source(extracted):
+    block = extraction.extraction_to_prompt(extraction.extraction_digest(SID))
+    assert block.startswith("EXTRACTION STRUCTUREE: 3 des 4 articles pertinents")
+    assert "2 depuis le texte integral, 1 depuis le resume seul" in block
+    assert "1 articles pertinents ne sont pas encore extraits" in block
+    assert "sexe ou genre 2 (dont 2 en texte integral)" in block
+    assert "male [human_susc] 2 etudes, 8 cas sur 60" in block and "pas une estimation poolee" in block
+    assert "denominateur (3 articles extraits sur 4)" in block
+    assert chr(0x2014) not in block
+
+
+def test_the_prompt_block_says_nothing_when_there_is_nothing_to_say():
+    assert extraction.extraction_to_prompt(None) == ""
+    assert extraction.extraction_to_prompt({"complete": True, "n_extracted": 0, "n_relevant": 9}) == ""
+    # An aggregation that failed must assert nothing, not a total of zero.
+    assert extraction.extraction_to_prompt({"complete": False, "n_extracted": 5, "n_relevant": 9}) == ""
+    none_reported = {"complete": True, "n_extracted": 2, "n_relevant": 2, "n_fulltext": 2, "n_abstract": 0,
+                     "n_unread": 0, "coverage": {k: 0 for k in extraction.COVERAGE_KEYS},
+                     "coverage_fulltext": {k: 0 for k in extraction.COVERAGE_KEYS}}
+    assert "aucun des elements suivis" in extraction.extraction_to_prompt(none_reported)
+
+
+def test_the_coverage_endpoint_serves_the_same_digest(extracted):
+    from fastapi.testclient import TestClient
+    c = TestClient(main.app)
+    body = c.get(f"/user-scenarios/{SID}/extraction/coverage").json()
+    assert body["n_extracted"] == 3 and body["coverage"]["sex_gender"] == 2
+    assert c.get("/user-scenarios/nope/extraction/coverage").status_code == 404
+
+
+def test_both_assistant_paths_put_the_extraction_digest_in_their_prompt():
+    import inspect
+
+    from api import assistant
+    for fn in (assistant.ask_stream_filtered, assistant.user_scenario_rag_assistant):
+        src = inspect.getsource(fn)
+        assert "extraction_digest" in src and "extraction_to_prompt" in src, fn.__name__
+        assert "EXTRACTION STRUCTUREE" in src, f"{fn.__name__} does not tell the model to quote the denominator"
+
+
+def test_the_scenario_assistant_really_receives_the_block(extracted, monkeypatch):
+    """End to end through the endpoint, LLM stubbed: what the model is sent contains the
+    extraction counts and the instruction to quote the denominator."""
+    import llm_usage
+    from fastapi.testclient import TestClient
+    seen: list = []
+
+    class _Fake:
+        def __init__(self, *a, **kw):
+            def _boom(**_):
+                raise RuntimeError("no embeddings here")        # falls back to the lexical branch
+            def _chat(**kw):
+                seen.append(kw["messages"])
+                msg = types.SimpleNamespace(content="ok")
+                return types.SimpleNamespace(choices=[types.SimpleNamespace(message=msg)])
+            self.embeddings = types.SimpleNamespace(create=_boom)
+            self.chat = types.SimpleNamespace(completions=types.SimpleNamespace(create=_chat))
+
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    monkeypatch.setattr(llm_usage, "MeteredOpenAI", _Fake)
+    out = TestClient(main.app).post(f"/user-scenarios/{SID}/rag",
+                                    json={"question": "vaccinated veterinary"}).json()
+    assert out["answer"] == "ok", out
+    system, user = seen[0][0]["content"], seen[0][1]["content"]
+    assert "EXTRACTION STRUCTUREE: 3 des 4 articles pertinents" in user
+    assert "denominateur" in system and "EXTRACTION STRUCTUREE" in system

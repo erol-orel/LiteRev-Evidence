@@ -36,6 +36,7 @@ from fastapi.responses import Response
 from sqlalchemy import text
 
 from .core import _env_int, app, engine, logger, require_api_key
+from .digest import _rows
 from .scenario_store import (_get_scenario_threshold, _get_user_scenario_or_404,
                              relevant_gate_sql)
 from .schema_boot import _exec_ddl_isolated
@@ -458,6 +459,151 @@ def extraction_status(scenario_id: str) -> dict[str, Any]:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# The REDUCE half: counts over EVERY relevant article, in SQL, no LLM
+# ─────────────────────────────────────────────────────────────────────────────
+# What the assistant and the reviewers need is not a paragraph written from 24 excerpts
+# but "how many of the relevant papers report sex-disaggregated data", counted over all of
+# them. The map step above wrote the per-article facts; this aggregates them, the way
+# api/digest.py does for the concepts.
+#
+# Two things the figures must never hide. The DENOMINATOR: only articles already extracted
+# can be counted, so every count says out of how many, and how many relevant articles are
+# still unread. And the SOURCE: a paper extracted from its abstract alone cannot show a
+# table, so its "false" is weaker than a "false" read from the full text. Both are reported
+# next to the count, not behind it.
+
+_COVERAGE_LABELS_FR = {
+    "sex_gender": "sexe ou genre", "age": "age", "occupation": "profession",
+    "kap_risk_perception": "connaissances, attitudes, pratiques ou perception du risque",
+    "ppe": "equipements de protection", "vaccination": "vaccination",
+    "human_testing": "tests chez l'humain", "animal_host": "hotes animaux",
+    "environment": "environnement", "vector": "vecteurs",
+}
+_TOP_GROUPS = 12
+_TOP_CRUDE = 12
+
+_OBS_FROM = """
+    FROM literature_document d
+    JOIN article_scenarios ars ON ars.document_id = d.id
+    CROSS JOIN LATERAL jsonb_array_elements(d.extraction_json->'observations') AS o
+    WHERE ars.scenario_id = :sid AND {gate}
+      AND jsonb_typeof(d.extraction_json->'observations') = 'array'
+"""
+
+
+def extraction_digest(scenario_id: str, threshold: float | None = None) -> dict[str, Any]:
+    """Counts over ALL the relevant articles of what the extraction found.
+
+    `n_extracted` is the denominator of every proportion below it; `n_relevant` -
+    `n_extracted` articles have not been read yet and say nothing. `coverage[key]` counts
+    the extracted articles that report the item, and `coverage_fulltext[key]` the ones read
+    from the full text. `crude_counts` sums cases and population over rows that report both
+    and whose quote was found in the text: it is a tally, NOT a pooled estimate (the
+    populations differ, the labels are free text until the codebook, and one population can
+    appear in two rows), and the digest says so."""
+    thr = _get_scenario_threshold(scenario_id) if threshold is None else float(threshold)
+    gate = relevant_gate_sql("d", "ars", ":thr")
+    out: dict[str, Any] = {"scenario_id": scenario_id, "threshold": thr, "version": EXTRACTION_VERSION}
+    try:
+        cov_sql = ",\n".join(
+            f"COUNT(*) FILTER (WHERE d.extraction_json->'coverage'->>'{k}' = 'true') AS c_{k}, "
+            f"COUNT(*) FILTER (WHERE d.extraction_json->'coverage'->>'{k}' = 'true' "
+            f"AND d.extraction_json->>'source' = 'fulltext') AS f_{k}" for k in COVERAGE_KEYS)
+        with engine.connect() as conn:
+            head = _rows(conn, f"""
+                SELECT COUNT(*) AS n_relevant,
+                       COUNT(*) FILTER (WHERE jsonb_typeof(d.extraction_json) = 'object') AS n_extracted,
+                       COUNT(*) FILTER (WHERE d.extraction_json->>'source' = 'fulltext') AS n_fulltext,
+                       COUNT(*) FILTER (WHERE d.extraction_json->>'source' = 'abstract') AS n_abstract,
+                       {cov_sql}
+                FROM literature_document d
+                JOIN article_scenarios ars ON ars.document_id = d.id
+                WHERE ars.scenario_id = :sid AND {gate}
+            """, scenario_id, thr)[0]
+            out["n_relevant"] = int(head["n_relevant"] or 0)
+            out["n_extracted"] = int(head["n_extracted"] or 0)
+            out["n_fulltext"] = int(head["n_fulltext"] or 0)
+            out["n_abstract"] = int(head["n_abstract"] or 0)
+            out["n_unread"] = out["n_relevant"] - out["n_extracted"]
+            out["coverage"] = {k: int(head[f"c_{k}"] or 0) for k in COVERAGE_KEYS}
+            out["coverage_fulltext"] = {k: int(head[f"f_{k}"] or 0) for k in COVERAGE_KEYS}
+
+            out["by_sheet"] = [
+                {"sheet": r["sheet"], "n_rows": int(r["n_rows"]), "n_articles": int(r["n_articles"]),
+                 "n_quote_found": int(r["n_verified"])}
+                for r in _rows(conn, f"""
+                    SELECT o->>'sheet' AS sheet, COUNT(*) AS n_rows, COUNT(DISTINCT d.id) AS n_articles,
+                           COUNT(*) FILTER (WHERE o->>'quote_verified' = 'true') AS n_verified
+                    {_OBS_FROM.format(gate=gate)}
+                    GROUP BY 1 ORDER BY n_rows DESC
+                """, scenario_id, thr)]
+
+            out["top_groups"] = _rows(conn, f"""
+                SELECT o->>'sheet' AS sheet, LOWER(o->>'group') AS value, COUNT(DISTINCT d.id) AS n
+                {_OBS_FROM.format(gate=gate)} AND NULLIF(TRIM(o->>'group'), '') IS NOT NULL
+                GROUP BY 1, 2 ORDER BY n DESC, 2 LIMIT :top
+            """, scenario_id, thr, top=_TOP_GROUPS)
+
+            crude = _rows(conn, f"""
+                SELECT o->>'sheet' AS sheet, LOWER(TRIM(o->>'covariate')) AS covariate,
+                       COUNT(DISTINCT d.id) AS n_studies,
+                       SUM((o->>'n_cases')::numeric) AS n_cases,
+                       SUM((o->>'pop_risk')::numeric) AS pop_risk
+                {_OBS_FROM.format(gate=gate)}
+                  AND jsonb_typeof(o->'n_cases') = 'number' AND jsonb_typeof(o->'pop_risk') = 'number'
+                  AND o->>'quote_verified' = 'true'
+                GROUP BY 1, 2 ORDER BY n_studies DESC, pop_risk DESC, 2 LIMIT :top
+            """, scenario_id, thr, top=_TOP_CRUDE)
+            out["crude_counts"] = [
+                {"sheet": r["sheet"], "covariate": r["covariate"], "n_studies": int(r["n_studies"]),
+                 "n_cases": float(r["n_cases"] or 0), "pop_risk": float(r["pop_risk"] or 0)}
+                for r in crude]
+        out["crude_counts_note"] = ("A tally of rows that report both cases and population with a quote "
+                                    "found in the text. Not a pooled estimate: populations differ, labels "
+                                    "are free text, and one population may appear in two rows.")
+        out["complete"] = True
+    except Exception as e:                                   # noqa: BLE001 - never blocks the caller
+        logger.warning(f"extraction_digest {scenario_id}: {e}")
+        out.update({"complete": False, "error": str(e)[:300]})
+    return out
+
+
+def extraction_to_prompt(d: dict | None, max_chars: int = 2200) -> str:
+    """The extraction digest as a block for a prompt, or "" when there is nothing to say
+    (nothing extracted, or the aggregation failed: an incomplete block must assert nothing).
+
+    It states its own denominator and its source, and tells the model to quote them, so
+    "34 papers report sex-disaggregated data" is never read as "34 of all the relevant"."""
+    if not d or not d.get("complete") or not d.get("n_extracted"):
+        return ""
+    n, rel = d["n_extracted"], d["n_relevant"]
+    lines = [
+        f"EXTRACTION STRUCTUREE: {n} des {rel} articles pertinents ont ete lus ({d['n_fulltext']} "
+        f"depuis le texte integral, {d['n_abstract']} depuis le resume seul, qui ne contient pas les "
+        f"tableaux : pour eux un element absent est un minorant, pas une absence).",
+    ]
+    if d.get("n_unread"):
+        lines.append(f"{d['n_unread']} articles pertinents ne sont pas encore extraits : ne rien conclure sur eux.")
+    cov = [f"{_COVERAGE_LABELS_FR[k]} {d['coverage'][k]} (dont {d['coverage_fulltext'][k]} en texte integral)"
+           for k in COVERAGE_KEYS if d["coverage"].get(k)]
+    lines.append(f"Parmi les {n} articles extraits, rapportent des donnees sur : "
+                 + (", ".join(cov) if cov else "aucun des elements suivis (sexe, age, profession, CAP, EPI, vaccination...)") + ".")
+    if d.get("by_sheet"):
+        lines.append("Lignes extraites : " + ", ".join(
+            f"{r['sheet']} {r['n_rows']} ({r['n_articles']} articles, citation retrouvee {r['n_quote_found']})"
+            for r in d["by_sheet"]) + ".")
+    if d.get("top_groups"):
+        lines.append("Groupes les plus frequents : " + ", ".join(
+            f"{r['value']} [{r['sheet']}] ({r['n']})" for r in d["top_groups"]) + ".")
+    if d.get("crude_counts"):
+        lines.append("Totaux bruts (lignes avec cas et population, citation retrouvee ; pas une estimation poolee) : "
+                     + "; ".join(f"{r['covariate']} [{r['sheet']}] {r['n_studies']} etudes, "
+                                 f"{r['n_cases']:g} cas sur {r['pop_risk']:g}" for r in d["crude_counts"]) + ".")
+    lines.append(f"Toute proportion tiree de ce bloc doit citer son denominateur ({n} articles extraits sur {rel}).")
+    return "\n".join(lines)[:max_chars]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Export in the template's shape
 # ─────────────────────────────────────────────────────────────────────────────
 def _first_author(authors: str | None) -> str:
@@ -589,6 +735,14 @@ def run_scenario_extraction(scenario_id: str, max_articles: int = 0,
 def get_scenario_extraction_status(scenario_id: str) -> dict[str, Any]:
     _get_user_scenario_or_404(scenario_id)
     return extraction_status(scenario_id)
+
+
+@app.get("/user-scenarios/{scenario_id}/extraction/coverage")
+def get_scenario_extraction_coverage(scenario_id: str) -> dict[str, Any]:
+    """What the extraction found, counted over ALL the relevant articles (see
+    `extraction_digest`): who reports sex, age, KAP, PPE..., and out of how many."""
+    _get_user_scenario_or_404(scenario_id)
+    return extraction_digest(scenario_id)
 
 
 @app.get("/user-scenarios/{scenario_id}/articles/{article_id}/extraction")
