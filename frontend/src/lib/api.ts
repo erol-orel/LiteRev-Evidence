@@ -2940,8 +2940,12 @@ export async function fetchUserScenarioEmbeddingStatus(
 export async function triggerRerank(
   scenarioId: string,
   query?: string,
+  missingOnly = false,
 ): Promise<{ status: string; scenario_id: string; query?: string }> {
-  const params = query ? `?query=${encodeURIComponent(query)}` : '';
+  const p = new URLSearchParams();
+  if (query) p.set('query', query);
+  if (missingOnly) p.set('missing_only', 'true');
+  const params = p.toString() ? `?${p.toString()}` : '';
   const r = await safeFetch(`${API_BASE_URL}/scenarios/${scenarioId}/rerank${params}`, { method: 'POST', headers: authHeaders() });
   if (!r.ok) throw new Error(httpMessage(r.status));
   return r.json();
@@ -2949,7 +2953,13 @@ export async function triggerRerank(
 
 export async function getRerankStatus(
   scenarioId: string,
-): Promise<{ status: string; updated?: number; error?: string }> {
+): Promise<{
+  status: string; updated?: number; error?: string;
+  /** Read from the database, not from the in-memory job: "idle" used to mean "I have
+   *  forgotten", since every deploy wipes the job. These say what is true now. */
+  scorable?: number; missing?: number; unscorable?: number;
+  reranked?: number; rerank_batches_failed?: number; rerank_skipped_no_key?: boolean;
+}> {
   const r = await safeFetch(`${API_BASE_URL}/scenarios/${scenarioId}/rerank/status`);
   if (!r.ok) throw new Error(httpMessage(r.status));
   return r.json();

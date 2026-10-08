@@ -13,6 +13,7 @@ from fastapi import Depends, HTTPException
 from sqlalchemy import text
 
 from .core import (
+    _env_int,
     _is_openai_quota_error,
     _job_is_active,
     _openai_in_cooldown,
@@ -157,51 +158,85 @@ def _cohere_rerank(query: str, docs: list[str], model: str = "rerank-v3.5") -> l
         return None
 
 
-def _run_cross_encoder_rerank(scenario_id: str, query: str, top_k: int = 1000) -> int:
-    """Reranke le sous-ensemble PERTINENT (cosinus >= seuil) avec un cross-encoder
-    (Cohere). La SÉLECTION reste pilotée par le cosinus + seuil ; on ne fait
-    qu'AMÉLIORER l'ORDRE des articles pertinents (précision). No-op sans clé Cohere.
-    """
+# Aucun plafond par défaut : le rerank note TOUT le corpus du scénario, jamais un
+# échantillon. Il y avait `top_k: int = 1000` en dur dans la signature, qu'aucun appelant
+# ne surchargeait, et la conséquence se mesure : sur l'installation, 10 480 lignes
+# pertinentes de 7 scénarios n'ont pas de score parce qu'elles tombaient au-delà du
+# millième rang. RERANK_MAX_ARTICLES > 0 repose un plafond (secours d'exploitation),
+# comme EPI_PARAM_MAX_ARTICLES pour l'extraction.
+RERANK_MAX_ARTICLES = _env_int("RERANK_MAX_ARTICLES", 0, 0)
+#: Documents par requête Cohere. Tout partait en UN appel, donc un scénario de 3 424
+#: candidats tentait de les envoyer ensemble, et la moindre erreur perdait le lot entier.
+_RERANK_BATCH = 100
+
+
+def _run_cross_encoder_rerank(scenario_id: str, query: str, top_k: int | None = None,
+                              only_missing: bool = False) -> dict[str, int]:
+    """Note le corpus du scénario avec le cross-encoder, par lots, en écrivant au fur.
+
+    Trois choses ont changé, et chacune corrigeait une cause mesurée de trous :
+
+    1. LA SÉLECTION NE LIT PLUS LE SEUIL. Elle le lisait au moment du lancement, si bien
+       que tout ce qui passait sous le curseur n'était JAMAIS envoyé. Sur HPAI la coupure
+       se voyait à six décimales : plus bas score noté 0.303309, plus haut non noté
+       0.299115, rien entre les deux. Une variable continue ne se partitionne pas toute
+       seule, seul un filtre le fait. Or c'est exactement l'article sous le seuil dont on
+       a besoin du score pour décider de le faire entrer. On note donc tout le corpus.
+    2. PLUS DE PLAFOND (voir RERANK_MAX_ARTICLES).
+    3. PAR LOTS, ÉCRITS AU FUR ET À MESURE. Un lot qui échoue n'emporte plus les autres :
+       avant, une seule requête portait tout et `return 0` jetait le travail entier.
+
+    `only_missing` ne note que les lignes sans score : c'est le balayage de rattrapage,
+    qui ne redépense rien pour ce qui est déjà noté.
+
+    Renvoie le compte de ce qui s'est passé, au lieu d'un entier qui ne disait pas la
+    différence entre « rien à faire » et « tout a échoué »."""
+    out = {"scored": 0, "batches_ok": 0, "batches_failed": 0, "candidates": 0, "skipped_no_key": 0}
     if not os.getenv("COHERE_API_KEY"):
-        return 0
+        out["skipped_no_key"] = 1
+        return out
+    cap = RERANK_MAX_ARTICLES if top_k is None else top_k
     try:
-        eff_threshold = 0.45
         with engine.connect() as _tc:
-            _ts = _tc.execute(text(
-                "SELECT similarity_threshold FROM scenario_settings WHERE scenario_id = :sid"
-            ), {"sid": scenario_id}).scalar()
-            if _ts is not None:
-                eff_threshold = float(_ts)
-            rows = _tc.execute(text("""
+            rows = _tc.execute(text(f"""
                 SELECT ld.id, ld.title, ld.abstract
                 FROM literature_document ld
                 JOIN article_scenarios asn ON asn.document_id = ld.id AND asn.scenario_id = :sid
-                WHERE COALESCE(asn.similarity_score, 0.0) >= :thr
+                WHERE ld.is_duplicate IS NOT TRUE
                   AND ld.abstract IS NOT NULL AND length(ld.abstract) > 30
-                ORDER BY asn.similarity_score DESC NULLS LAST
-                LIMIT :k
-            """), {"sid": scenario_id, "thr": eff_threshold, "k": top_k}).mappings().all()
+                  {"AND asn.rerank_score IS NULL" if only_missing else ""}
+                ORDER BY asn.similarity_score DESC NULLS LAST, ld.id
+                {"LIMIT :k" if cap > 0 else ""}
+            """), ({"sid": scenario_id, "k": cap} if cap > 0 else {"sid": scenario_id})).mappings().all()
+        out["candidates"] = len(rows)
         if not rows:
-            return 0
-        docs = [f"{r['title']}\n\n{(r['abstract'] or '')[:1500]}" for r in rows]
-        scores = _cohere_rerank(query, docs)
-        if not scores:
-            return 0
-        updated = 0
-        with engine.begin() as _c:
-            for r, s in zip(rows, scores):
-                if s is None:
-                    continue
+            return out
+        for _b in range(0, len(rows), _RERANK_BATCH):
+            chunk = rows[_b:_b + _RERANK_BATCH]
+            docs = [f"{r['title']}\n\n{(r['abstract'] or '')[:1500]}" for r in chunk]
+            scores = _cohere_rerank(query, docs)
+            if not scores:
+                # Le lot échoue, les suivants continuent : c'est tout l'intérêt des lots.
+                out["batches_failed"] += 1
+                continue
+            ups = [{"s": s, "doc_id": r["id"], "sid": scenario_id}
+                   for r, s in zip(chunk, scores) if s is not None]
+            if not ups:
+                out["batches_failed"] += 1
+                continue
+            with engine.begin() as _c:
                 _c.execute(text("""
                     UPDATE article_scenarios SET rerank_score = :s
                     WHERE document_id = :doc_id AND scenario_id = :sid
-                """), {"s": s, "doc_id": r["id"], "sid": scenario_id})
-                updated += 1
-        logger.info(f"Cross-encoder rerank {scenario_id}: {updated} articles pertinents réordonnés.")
-        return updated
+                """), ups)
+            out["scored"] += len(ups)
+            out["batches_ok"] += 1
+        logger.info(f"Cross-encoder rerank {scenario_id}: {out['scored']}/{out['candidates']} notés, "
+                    f"{out['batches_ok']} lots OK, {out['batches_failed']} en échec.")
+        return out
     except Exception as _e:
         logger.warning(f"Cross-encoder rerank {scenario_id} failed: {_e}")
-        return 0
+        return out
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -404,7 +439,8 @@ def _evidence_fingerprint(doc_ids: list, threshold: float | None, lang: str | No
 
 
 @app.post("/scenarios/{scenario_id}/rerank")
-def trigger_rerank(scenario_id: str, _: None = Depends(require_api_key)) -> dict[str, Any]:
+def trigger_rerank(scenario_id: str, missing_only: bool = False,
+                   _: None = Depends(require_api_key)) -> dict[str, Any]:
     """
     Déclenche le scoring sémantique post-ingestion pour un scénario.
     Fonctionne pour GESICA et user_scenarios.
@@ -428,17 +464,29 @@ def trigger_rerank(scenario_id: str, _: None = Depends(require_api_key)) -> dict
 
     def _run():
         try:
-            _backfill_title_abstract_chunks(scenario_id)  # docs sans chunk résumé -> searchable
-            n = _run_semantic_rerank_inline(scenario_id, query)
+            n = 0
+            if not missing_only:
+                _backfill_title_abstract_chunks(scenario_id)  # docs sans chunk -> searchable
+                n = _run_semantic_rerank_inline(scenario_id, query)
             # Recalcul COMPLET : après le cosinus, relancer AUSSI le cross-encoder Cohere
             # sur le sous-ensemble pertinent - sinon « Recalculer scores » ne rafraîchissait
             # que le cosinus et les rerank_score restaient figés/partiels.
+            _ce = {"scored": 0, "candidates": 0, "batches_failed": 0, "skipped_no_key": 0}
             try:
-                _nce = _run_cross_encoder_rerank(scenario_id, query)
-                logger.info(f"Rerank manuel {scenario_id}: {n} cosinus + {_nce} cross-encoder Cohere.")
+                _ce = _run_cross_encoder_rerank(scenario_id, query, only_missing=missing_only)
+                logger.info(f"Rerank manuel {scenario_id}: {n} cosinus + {_ce['scored']} cross-encoder.")
             except Exception as _ece:
                 logger.warning(f"cross-encoder (recalcul manuel) {scenario_id}: {_ece}")
-            _RERANK_JOBS[scenario_id] = {"status": "done", "updated": n}
+            # Le job disait « done » avec le seul compte du cosinus, quoi qu'ait fait le
+            # cross-encoder : un échec total ressortait identique à un succès. Il porte
+            # maintenant les deux, et dit si des lots ont échoué.
+            _RERANK_JOBS[scenario_id] = {
+                "status": "done", "updated": n,
+                "reranked": _ce.get("scored", 0),
+                "rerank_candidates": _ce.get("candidates", 0),
+                "rerank_batches_failed": _ce.get("batches_failed", 0),
+                "rerank_skipped_no_key": bool(_ce.get("skipped_no_key")),
+            }
         except Exception as e:
             # Sans ce filet, une exception laisse le job en "running" pour toujours
             # (→ "already_running" + badge "recalcul en cours" figé jusqu'au restart).
@@ -451,8 +499,37 @@ def trigger_rerank(scenario_id: str, _: None = Depends(require_api_key)) -> dict
 
 @app.get("/scenarios/{scenario_id}/rerank/status")
 def get_rerank_status(scenario_id: str) -> dict[str, Any]:
-    """Statut du job de reranking sémantique."""
-    return _RERANK_JOBS.get(scenario_id, {"status": "idle"})
+    """Statut du job de reranking, ET l'état réel de la couverture en base.
+
+    Le job vit en mémoire, donc tout redémarrage le remet à « idle », et l'API redémarre
+    à chaque déploiement. « idle » ne voulait donc pas dire « à jour », il voulait dire
+    « je ne me souviens de rien ». Les deux compteurs ci-dessous viennent de la base, en
+    UNE instruction, et disent ce qui est vrai maintenant : combien d'articles du corpus
+    pourraient porter un score, et combien n'en ont pas. L'interface peut enfin écrire
+    sur le bouton ce qu'il va faire."""
+    out = dict(_RERANK_JOBS.get(scenario_id, {"status": "idle"}))
+    try:
+        with engine.connect() as _c:
+            row = _c.execute(text("""
+                SELECT COUNT(*) FILTER (WHERE ld.abstract IS NOT NULL
+                                          AND length(ld.abstract) > 30)            AS scorable,
+                       COUNT(*) FILTER (WHERE ld.abstract IS NOT NULL
+                                          AND length(ld.abstract) > 30
+                                          AND asn.rerank_score IS NULL)            AS missing,
+                       COUNT(*) FILTER (WHERE ld.abstract IS NULL
+                                           OR length(ld.abstract) <= 30)           AS unscorable
+                FROM article_scenarios asn
+                JOIN literature_document ld ON ld.id = asn.document_id
+                WHERE asn.scenario_id = :sid AND ld.is_duplicate IS NOT TRUE
+            """), {"sid": scenario_id}).mappings().first() or {}
+        out["scorable"] = int(row.get("scorable") or 0)
+        out["missing"] = int(row.get("missing") or 0)
+        # Un article sans résumé utilisable ne peut PAS recevoir de score : le dire, plutôt
+        # que de laisser croire qu'un lancement de plus le rattrapera.
+        out["unscorable"] = int(row.get("unscorable") or 0)
+    except Exception as _e:
+        logger.warning(f"rerank coverage {scenario_id}: {_e}")
+    return out
 
 
 @app.post("/scenarios/{scenario_id}/rebuild-corpus")

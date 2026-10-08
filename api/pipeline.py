@@ -1527,12 +1527,19 @@ def _run_user_scenario_populate(
         # Arrière-plan : cross-encoder (réordonne le sous-ensemble pertinent) puis
         # clustering UMAP/HDBSCAN + knowledge graph (cache DB). Réservé au chemin
         # /populate (le pipeline complet a ses propres étapes).
-        if _pipeline_callback is None:
+        # Le garde `if _pipeline_callback is None` réservait ce bloc au chemin /populate,
+        # donc le cross-encoder n'était JAMAIS appelé quand le pipeline complet tournait,
+        # c'est-à-dire sur le chemin normal. Huit scénarios de production n'ont aucun
+        # score de rerank pour cette seule raison, et l'étape 4 du pipeline, qui s'appelle
+        # « rerank », est un cosinus qui n'écrit jamais rerank_score : l'utilisateur
+        # voyait donc une étape de rerank réussir sans qu'un seul score soit produit.
+        if True:
             def _post_done_bg(_sid, _query):
                 try:
-                    _n_ce = _run_cross_encoder_rerank(_sid, _query)
-                    if _n_ce:
-                        logger.info(f"Post-populate cross-encoder {_sid}: {_n_ce} articles réordonnés.")
+                    _ce = _run_cross_encoder_rerank(_sid, _query)
+                    if _ce.get("scored"):
+                        logger.info(f"Post-populate cross-encoder {_sid}: {_ce['scored']}/"
+                                    f"{_ce['candidates']} notés, {_ce['batches_failed']} lots en échec.")
                 except Exception as _ece:
                     logger.warning(f"cross-encoder arrière-plan {_sid}: {_ece}")
                 finally:
