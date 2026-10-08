@@ -23,6 +23,7 @@ import pytest
 pytest.importorskip("fastapi")
 
 import main  # noqa: E402
+from conftest import patch_app  # noqa: E402
 from api.scenario_store import (  # noqa: E402
     CAP_FIELD_DATA,
     CAP_MODEL,
@@ -162,6 +163,7 @@ def scenario(db_conn):
     yield db_conn
     with db_conn.cursor() as cur:
         cur.execute("DELETE FROM user_scenarios WHERE id = %s", (SID,))
+        cur.execute("DELETE FROM scenario_settings WHERE scenario_id = %s", (SID,))
 
 
 def test_a_scenario_created_before_the_column_existed_keeps_everything(scenario):
@@ -226,3 +228,49 @@ def test_generating_variables_on_a_review_answers_not_applicable(scenario):
     out = main.generate_scenario_variables(SID)
     assert out["status"] == "not_applicable"
     assert out["applicable"] is False and out["reason_code"] == "review_scenario"
+
+
+# ── the pooled parameters, which a review keeps ──────────────────────────────
+
+def test_a_review_can_pool_its_parameters_without_a_model_being_built(scenario, monkeypatch, db_conn):
+    """The commit promises a review KEEPS the pooled epidemiological parameters. It
+    could not: the only endpoint that recomputes them refused without a stored
+    specification, which the review's skipped pipeline step is the only thing that
+    writes. A quality weighted R0 with each study's provenance is a review
+    deliverable, so it is produced without fabricating an outcome, features and an
+    algorithm around it."""
+    main.patch_user_scenario(SID, main.UserScenarioPatch(kind=KIND_REVIEW))
+    # La forme que rend vraiment l'extraction ciblée : une observation PAR ARTICLE,
+    # d'où la mise en commun pondérée tire ensuite sa valeur et son intervalle.
+    patch_app(monkeypatch, "extract_epidemic_observations", lambda sid, disease_hint=None, max_articles=0: {
+        "params": {"r0": {"observations": [{"article_id": 1, "value": 2.4},
+                                           {"article_id": 2, "value": 2.0}]}},
+        "articles": [{"id": 1, "quality_score": 0.7, "title": "A"},
+                     {"id": 2, "quality_score": 0.6, "title": "B"}],
+        "n_candidates": 7, "n_with_values": 2, "disease": "RSV",
+    })
+    patch_app(monkeypatch, "_get_above_threshold_articles", lambda sid, thr, full_rows=0: [])
+
+    out = main.extract_scenario_epidemic_parameters(SID)
+    assert out["status"] == "ok"
+    assert "r0" in out["parameters"]
+    assert out["n_candidates"] == 7
+
+    with db_conn.cursor() as cur:
+        cur.execute("SELECT variables_json FROM scenario_settings WHERE scenario_id = %s", (SID,))
+        row = cur.fetchone()
+    stored = row[0] if row else None
+    assert stored, "la ligne de réglages est créée, elle n'existait pas"
+    assert "epidemic_parameters_pooled" in stored
+    # Et surtout : aucune spécification de modèle n'a été fabriquée au passage.
+    assert "model_spec" not in stored
+
+
+def test_reading_the_variables_of_a_review_says_not_applicable_not_generating(scenario, monkeypatch):
+    """It used to answer "Generating, try again in 30 seconds" for a generation that
+    had been refused and would never start."""
+    main.patch_user_scenario(SID, main.UserScenarioPatch(kind=KIND_REVIEW))
+    patch_app(monkeypatch, "_get_above_threshold_articles", lambda sid, thr, full_rows=0: [{"id": 1}])
+    out = main.get_scenario_variables(SID, lang="en")
+    assert out["status"] == "not_applicable"
+    assert out["reason_code"] == "review_scenario"

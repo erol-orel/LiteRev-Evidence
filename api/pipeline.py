@@ -2539,8 +2539,20 @@ def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict
         # qui coûte un appel de modèle pour une question qui n'en attend pas. Une revue
         # de littérature la saute : la décision est prise AVANT la dépense, au lieu
         # d'être découverte après par les écrans qui refusent ensuite de s'ouvrir.
-        from .scenario_store import CAP_MODEL, scenario_can  # lazy: ordre de chargement
-        if not scenario_can(scenario_id, CAP_MODEL):
+        # La lecture de la nature est DANS le try de l'étape : elle ouvre une connexion,
+        # et une connexion peut échouer. Laissée dehors, son exception remontait au
+        # gestionnaire du pipeline entier, qui saute alors non seulement cette étape
+        # mais toute la fin de la course, si bien qu'un run complet de onze étapes
+        # n'écrivait jamais son « done » pour un SELECT d'une ligne.
+        try:
+            from .scenario_store import CAP_MODEL, scenario_can
+            _wants_model = scenario_can(scenario_id, CAP_MODEL)
+        except Exception as _e_kind:                                  # noqa: BLE001
+            # On ne sait pas : on fait comme avant, c'est-à-dire tout. Une porte ne
+            # doit pas retirer une moitié de l'application sur une panne de lecture.
+            logger.warning(f"Nature du scénario illisible pour {scenario_id}: {_e_kind}")
+            _wants_model = True
+        if not _wants_model:
             update_step("variables", "skipped",
                         reason="Revue de littérature : pas de variables prédictives")
             logger.info(f"Variables & modèle ignorés pour {scenario_id} : revue de littérature")

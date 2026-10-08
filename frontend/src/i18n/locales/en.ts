@@ -730,6 +730,8 @@ export const en: Translations = {
       historyReask: "Ask again",
       historyExport: "Export:",
       proposalsTitle: "Values this answer proposes",
+      proposalsHintReview:
+        "This scenario is a literature review, so a value cannot be adopted into a model specification here. It stays readable, and can be set aside.",
       proposalsHint: "Nothing is applied to the scenario until you accept it. An accepted value is written into the model specification, with its provenance.",
       proposalCurrent: "currently {v}",
       proposalNew: "not currently held",
@@ -971,6 +973,16 @@ export const en: Translations = {
       stepClustering: "Recompute thematic clustering",
       stepRerank: "Semantic rerank (updated cosine scores)",
       simulateDryRun: "Simulate (dry run)",
+    },
+    epiParams: {
+      title: "Epidemiological parameters",
+      subtitle:
+        "Pooled over the whole relevant corpus, weighted by the quality of each study. An interval, a number of studies, and the provenance behind every value.",
+      recompute: "Recompute",
+      candidates: "{n} articles in the corpus report a parameter",
+      studies: "{n} studies",
+      notYet: "No parameter pooled yet. Run the computation to extract them from the articles that report one.",
+      none: "No usable value in the articles that mention a parameter.",
     },
     enrichment: {
       errorPrefix: "Error:",

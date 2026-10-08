@@ -1224,10 +1224,11 @@ def extract_scenario_epidemic_parameters(scenario_id: str, max_articles: int = 0
         row = conn.execute(text(
             "SELECT variables_json FROM scenario_settings WHERE scenario_id = :sid"
         ), {"sid": scenario_id}).mappings().first()
-    if not (row and row["variables_json"]):
-        return {"status": "empty", "message": "Aucun spec stocké : générez d'abord les Variables & Modèle."}
-
-    variables = dict(row["variables_json"])
+    # Une revue de littérature n'aura JAMAIS de spécification : l'étape qui en écrit
+    # une lui est retirée. Exiger une spécification ici revenait à lui demander de
+    # faire d'abord une chose qu'elle ne peut pas faire, pour obtenir une mise en
+    # commun qui est pourtant un produit de revue à part entière.
+    variables = dict(row["variables_json"]) if (row and row["variables_json"]) else {}
     name = _get_scenario_name(scenario_id)
     targeted = extract_epidemic_observations(scenario_id, disease_hint=name, max_articles=max_articles)
     if not targeted.get("params"):
@@ -1247,7 +1248,21 @@ def extract_scenario_epidemic_parameters(scenario_id: str, max_articles: int = 0
         if a.get("id") not in seen:
             pool.append(a)
             seen.add(a.get("id"))
-    variables = _attach_model_spec(variables, pool)
+    from .scenario_store import CAP_MODEL, scenario_can
+    if scenario_can(scenario_id, CAP_MODEL):
+        variables = _attach_model_spec(variables, pool)
+    else:
+        # Le regroupement pondéré par la qualité vit dans un module PUR : on l'appelle
+        # seul. Une revue obtient ses paramètres mis en commun, avec leurs intervalles
+        # et la provenance de chaque étude, sans qu'on lui fabrique un outcome, des
+        # variables explicatives et un algorithme dont elle n'a que faire.
+        import seir_model as _seir
+        _ids = {a["id"] for a in pool if a.get("id") is not None}
+        _q = {a["id"]: a.get("quality_score") for a in pool if a.get("id") is not None}
+        _pooled = _seir.normalize_extracted_parameters(
+            variables.get("epidemic_parameters"), _ids, _q)
+        variables["epidemic_parameters_pooled"] = {
+            k: v for k, v in _pooled.items() if k != "cited"}
     meta = dict(variables.get("_meta") or {})
     meta["epidemic_parameter_candidates"] = int(targeted.get("n_candidates", 0))
     meta["epidemic_parameter_articles_with_values"] = int(targeted.get("n_with_values", 0))
@@ -1255,13 +1270,16 @@ def extract_scenario_epidemic_parameters(scenario_id: str, max_articles: int = 0
 
     with engine.begin() as conn:
         conn.execute(text("""
-            UPDATE scenario_settings
+            INSERT INTO scenario_settings (scenario_id, variables_json, updated_at)
+            VALUES (:sid, CAST(:v AS jsonb), NOW())
+            ON CONFLICT (scenario_id) DO UPDATE
             SET variables_json = CAST(:v AS jsonb), variables_i18n = NULL,
-                seir_projection_json = NULL, seir_projection_generated_at = NULL, updated_at = NOW()
-            WHERE scenario_id = :sid
+                seir_projection_json = NULL, seir_projection_generated_at = NULL,
+                updated_at = NOW()
         """), {"v": _json.dumps(variables, default=str), "sid": scenario_id})
 
-    _epi = (variables.get("model_spec") or {}).get("epidemic_parameters") or {}
+    _epi = ((variables.get("model_spec") or {}).get("epidemic_parameters")
+            or variables.get("epidemic_parameters_pooled") or {})
     return {
         "status": "ok",
         "scenario_id": scenario_id,
@@ -1315,7 +1333,11 @@ def get_scenario_variables(scenario_id: str, lang: str | None = Query(None)) -> 
     # Déclencher la génération. On passe lang EXPLICITEMENT : appeler l'endpoint
     # directement sans cet argument passerait l'objet Query(None) par défaut (et non
     # None) jusqu'à _llm_lang_directive → crash « 'Query' object has no attribute 'strip' ».
-    generate_scenario_variables(scenario_id, lang=lang)
+    started = generate_scenario_variables(scenario_id, lang=lang)
+    # Refusée parce que la question n'appelle pas de modèle : on le dit, au lieu
+    # d'annoncer une génération qui n'a pas commencé et ne commencera pas.
+    if isinstance(started, dict) and started.get("status") == "not_applicable":
+        return started
     return {"status": "generating", "message": _msg(lang, "Génération en cours, réessayez dans 30 secondes.",
                                                     "Generating, try again in 30 seconds.")}
 

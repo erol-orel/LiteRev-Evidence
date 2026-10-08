@@ -230,3 +230,28 @@ def test_the_corpus_wide_status_still_answers_and_says_so(seeded):
     g = main.get_enrichment_status()
     assert g["scenario_id"] is None and g["by_scope"] is None
     assert g["total"] >= 4 and "todo" in g["pico"]
+
+
+def test_done_and_todo_never_overlap(seeded, db_conn):
+    """A weak extraction is reprocessed by the batch, so it is NOT done. Counting it
+    in both made done plus todo exceed the total, and the bar contradict the line
+    under it."""
+    with db_conn.cursor() as cur:
+        cur.execute("UPDATE literature_document SET pico_json = %s WHERE id = 1",
+                    ('{"P": "x", "pico_confidence": 0.2}',))      # faible
+        cur.execute("UPDATE literature_document SET pico_json = %s WHERE id = 2",
+                    ('{"P": "x", "pico_confidence": 0.9}',))      # bonne
+    for scope in ("all", "relevant"):
+        s = main.get_enrichment_status(scenario_id=SID, scope=scope)
+        assert s["pico"]["count"] + s["pico"]["todo"] <= s["total"], scope
+    s = main.get_enrichment_status(scenario_id=SID, scope="relevant")
+    assert s["pico"]["count"] == 1                 # seule la bonne compte comme faite
+    assert s["pico"]["todo"] == 2                  # la faible est reprise, avec la vide
+
+
+def test_a_weak_extraction_is_not_counted_as_coverage_corpus_wide_either(seeded, db_conn):
+    with db_conn.cursor() as cur:
+        cur.execute("UPDATE literature_document SET pico_json = %s WHERE id = 1",
+                    ('{"P": "x", "pico_confidence": 0.2}',))
+    g = main.get_enrichment_status()
+    assert g["pico"]["count"] + g["pico"]["todo"] <= g["total"]
