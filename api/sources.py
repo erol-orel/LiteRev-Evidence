@@ -754,7 +754,7 @@ def search_live(
 
 
 @app.get("/sources/health")
-def sources_health(query: str = "cardiac arrest", timeout: int = 12) -> dict[str, Any]:
+def sources_health(query: str = "cardiac arrest", timeout: int = 12, raw: bool = False) -> dict[str, Any]:
     """Diagnostic des sources externes (live search).
 
     Interroge en parallèle les SEPT sources sondées (PubMed, OpenAlex, Crossref,
@@ -767,6 +767,11 @@ def sources_health(query: str = "cardiac arrest", timeout: int = 12) -> dict[str
     ClinicalTrials.gov, CORE, arXiv) ne sont PAS sondés. « 7 joignables sur 7 » ne
     signifie donc pas que toute la fédération est saine ; la réponse porte `probed` et
     `not_probed` pour que ce soit explicite.
+
+    `raw=true` : OpenAlex reçoit la requête TELLE QUELLE (et non ses mots-clés), et DOAJ
+    est sondée de la même façon. C'est le mode qui permet de bissecter, depuis la
+    production et sans créer de scénario, ce qu'une de ces deux API refuse d'un booléen :
+    sur HPAI_last, toutes deux ont répondu 400 au booléen portable brut.
     Lecture seule, aucune écriture, aucune clé requise.
     """
     import concurrent.futures
@@ -793,7 +798,7 @@ def sources_health(query: str = "cardiac arrest", timeout: int = 12) -> dict[str
          eutils_params, ua,
          lambda j: int(j.get("esearchresult", {}).get("count", 0) or 0)),
         ("OpenAlex", "https://api.openalex.org/works",
-         {"search": _plain_keywords(query), "per-page": 1, "select": "id,title"}, ua,
+         {"search": (query if raw else _plain_keywords(query)), "per-page": 1, "select": "id,title"}, ua,
          lambda j: j.get("meta", {}).get("count")),
         ("Crossref", "https://api.crossref.org/works",
          {"query": query, "rows": 1, "select": "DOI,title"}, ua,
@@ -820,6 +825,12 @@ def sources_health(query: str = "cardiac arrest", timeout: int = 12) -> dict[str
           "filter[field]": "disaster_type.name", "filter[value]": "Epidemic"}, ua,
          lambda j: j.get("totalCount")),
     ]
+
+    if raw:
+        import urllib.parse as _ulib
+        # Le même chemin que le fetcher du populate : la requête dans le CHEMIN de l'URL.
+        probes.append(("DOAJ", f"https://doaj.org/api/search/articles/{_ulib.quote(query, safe='')}",
+                       {"pageSize": 1}, ua, lambda j: j.get("total")))
 
     def _probe(name: str, url: str, params, headers, count_fn) -> dict[str, Any]:
         t0 = _t.time()
@@ -856,7 +867,8 @@ def sources_health(query: str = "cardiac arrest", timeout: int = 12) -> dict[str
     results.sort(key=lambda r: r["source"])
     # Les fetchers de la fédération que ce diagnostic NE sonde PAS. Les nommer dans la
     # réponse évite de lire « 6 joignables sur 6 » comme « toute la fédération est saine ».
-    not_probed = ["Semantic Scholar", "DOAJ", "ClinicalTrials.gov", "CORE", "arXiv"]
+    not_probed = [s for s in ("Semantic Scholar", "DOAJ", "ClinicalTrials.gov", "CORE", "arXiv")
+                  if not (raw and s == "DOAJ")]
     return {
         "query": query,
         "checked_at": _dtm.now(_tz.utc).isoformat(),

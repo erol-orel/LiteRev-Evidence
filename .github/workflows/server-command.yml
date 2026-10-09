@@ -19,6 +19,7 @@ on:
           - logs                # 100 dernières lignes du service
           - deploy              # bash deploy.sh (déploiement complet)
           - pipeline-status     # état du pipeline fulltext + stats DB
+          - set-s2-key          # écrit le secret SEMANTIC_SCHOLAR_API_KEY dans /etc/literev-api.env + restart
           - custom              # commande libre (champ custom_command)
       custom_command:
         description: "Commande libre (utilisée seulement si command = custom)"
@@ -58,6 +59,13 @@ jobs:
             logs)     echo 'cmd=journalctl -u literev-api --no-pager -n 100' >> "$GITHUB_OUTPUT" ;;
             deploy)   echo 'cmd=cd /opt/literev-api && bash deploy.sh' >> "$GITHUB_OUTPUT" ;;
             pipeline-status) echo "cmd=ps aux | grep -E 'fetch_fulltext|embed_corpus' | grep -v grep; echo '---reprocess log (last 20 lines)---'; tail -20 /tmp/fulltext_reprocess.log 2>/dev/null || echo 'not started'; echo '---new docs log (last 5 lines)---'; tail -5 /tmp/fulltext_new.log 2>/dev/null || echo 'not started'; echo '---embed log (last 5 lines)---'; tail -5 /tmp/embed_after_fulltext.log 2>/dev/null || echo 'not started'" >> "$GITHUB_OUTPUT" ;;
+            # La clé Semantic Scholar arrive par STDIN depuis le secret du dépôt (comme la
+            # clé NCBI), jamais dans la commande ni dans les journaux : la commande ne
+            # manipule que le NOM de la variable, la valeur est développée sur le serveur.
+            # Écrite dans le fichier canonique (env_files.CANONICAL), puis redémarrage :
+            # le processus lit l'environnement au démarrage. ATTENTION : un redémarrage
+            # coupe les recherches en cours (relancées au démarrage).
+            set-s2-key) echo 'cmd=set -e; if [ -z "${SEMANTIC_SCHOLAR_API_KEY:-}" ]; then echo "le secret SEMANTIC_SCHOLAR_API_KEY n'"'"'est pas défini dans le dépôt (Settings > Secrets and variables > Actions)"; exit 1; fi; f=/etc/literev-api.env; if grep -q "^SEMANTIC_SCHOLAR_API_KEY=" "$f"; then sed -i "s|^SEMANTIC_SCHOLAR_API_KEY=.*|SEMANTIC_SCHOLAR_API_KEY=$SEMANTIC_SCHOLAR_API_KEY|" "$f"; else printf "SEMANTIC_SCHOLAR_API_KEY=%s\n" "$SEMANTIC_SCHOLAR_API_KEY" >> "$f"; fi; systemctl restart literev-api; sleep 3; curl -fsS http://localhost:8000/health >/dev/null; echo "SEMANTIC_SCHOLAR_API_KEY écrite dans $f, service redémarré"' >> "$GITHUB_OUTPUT" ;;
             custom)
               if [ -z "$CUSTOM_CMD" ]; then
                 echo "custom_command est vide" >&2; exit 1
@@ -80,12 +88,16 @@ jobs:
           # clé NCBI côté serveur sans jamais l'exposer. Vide si le secret n'existe
           # pas (alors l'export est omis).
           NCBI_API_KEY: ${{ secrets.NCBI_API_KEY }}
+          # Même mécanisme pour la clé Semantic Scholar : par STDIN, masquée par GitHub,
+          # vide si le secret n'existe pas (alors l'export est omis et `set-s2-key` le dit).
+          SEMANTIC_SCHOLAR_API_KEY: ${{ secrets.SEMANTIC_SCHOLAR_API_KEY }}
         run: |
           mkdir -p ~/.ssh
           printf '%s\n' "$SSH_KEY" > ~/.ssh/deploy_key
           chmod 600 ~/.ssh/deploy_key
           {
             if [ -n "${NCBI_API_KEY:-}" ]; then printf 'export NCBI_API_KEY=%q\n' "$NCBI_API_KEY"; fi
+            if [ -n "${SEMANTIC_SCHOLAR_API_KEY:-}" ]; then printf 'export SEMANTIC_SCHOLAR_API_KEY=%q\n' "$SEMANTIC_SCHOLAR_API_KEY"; fi
             echo "$REMOTE_CMD"
           } | ssh -o StrictHostKeyChecking=accept-new \
               -o ConnectTimeout=15 \

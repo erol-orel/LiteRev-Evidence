@@ -31,6 +31,7 @@ from .search import (
     _boolean_corpus_ids,
     _boolean_to_arxiv,
     _boolean_to_s2,
+    _clean_boolean,
     _dedup_scenario_links,
     _facet_ops,
     _facets_intersect,
@@ -526,9 +527,15 @@ def _run_user_scenario_populate(
         # comme du texte. 2 398 notices sans tags contre 3 avec, mesure faite sur la sonde
         # de production : les tags coutaient 99,9 % du rappel de cette source.
         _epmc_q = epmc_query(_boolean)
-        _portable_bool = _strip_field_tags(_boolean).strip()
+        _portable_bool = " ".join(_strip_field_tags(_boolean).split())
         _bool_is_real = bool(_portable_bool) and _looks_boolean(_portable_bool)
-        _send_bool = _bool_is_real and len(_portable_bool) <= 1200
+        # La forme PROPRE du booléen entier pour les API qui le reçoivent dans une URL
+        # (OpenAlex, DOAJ, CORE, ClinicalTrials.gov) : rendue depuis l'arbre, guillemets
+        # normalisés, sans étoile de troncature, exclusions comprises. Sur HPAI_last,
+        # OpenAlex et DOAJ répondaient 400 au booléen portable recopié tel quel
+        # (« "occupational*" », « "farm worker*" »), CORE et ClinicalTrials.gov l'acceptaient.
+        _clean_bool = _clean_boolean(_portable_bool) if _bool_is_real else ""
+        _send_bool = bool(_clean_bool) and len(_clean_bool) <= 1200
         # Au-delà de la limite (ou devant un NOT, pour arXiv) : la requête RÉDUITE, pas
         # huit mots. Même arbre, chaque bloc OU tronqué à ses premiers termes, les
         # exclusions retirées, jusqu'à tenir sous la limite. Le sac de mots perdait la
@@ -541,7 +548,7 @@ def _run_user_scenario_populate(
         # qu'à Crossref (texte libre) et quand il n'y a pas de booléen du tout.
         _short_bool = _shorten_boolean(_portable_bool, 1200) if _bool_is_real else ""
         _fallback_q = _short_bool or _plain_q
-        _bool_query = _portable_bool if _send_bool else _fallback_q       # OpenAlex/DOAJ/CORE/CT/OpenAIRE
+        _bool_query = _clean_bool if _send_bool else _fallback_q          # OpenAlex/DOAJ/CORE/CT
         _arxiv_q, _arxiv_native = f"all:{_plain_q}", False                # arXiv : syntaxe dédiée
         if _bool_is_real:
             try:
@@ -575,7 +582,7 @@ def _run_user_scenario_populate(
             _fallback_queries["arxiv"] = _arxiv_q
         _fallback_queries["openaire"] = _openaire_q
         logger.info(f"Populate {scenario_id}: requête réduite pour {', '.join(_kw_fallback)} "
-                    f"(booléen portable de {len(_portable_bool)} caractères) ; "
+                    f"(booléen propre de {len(_clean_bool)} caractères) ; "
                     f"soumis = « {_fallback_q} » ; OpenAIRE = « {_openaire_q} »")
         # PubMed RECALL : la requête MeSH générée par le LLM (_pubmed_q) est parfois
         # BEAUCOUP plus étroite que le booléen général - p. ex. 35 résultats contre 306

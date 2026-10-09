@@ -311,7 +311,7 @@ def test_the_real_hpai_query_still_trips_the_1200_character_gate():
     import inspect
     from api import pipeline as P
     src = inspect.getsource(P._run_user_scenario_populate)
-    assert "len(_portable_bool) <= 1200" in src
+    assert "len(_clean_bool) <= 1200" in src
     # La requête abrégée de ce fichier tient SOUS la limite : elle sert à tester la
     # structure du repli, pas le franchissement. La vraie requête de production fait
     # 2 465 caractères portables, mesurés sur le scénario HPAI ; on ne l'embarque pas
