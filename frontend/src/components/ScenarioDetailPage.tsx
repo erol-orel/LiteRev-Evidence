@@ -4306,27 +4306,42 @@ function PrismaSection({ scenarioId }: { scenarioId: string }) {
   // le budget ou sans clé d'API, alors que le compte affiché juste au-dessus les
   // comptait. Un relecteur lisait « 7 sources interrogées » sans pouvoir voir que PubMed
   // n'en faisait pas partie.
+  // Chaque source sous SON nom : des chiffres antérieurs au repli côté serveur portent
+  // encore les enregistrements sous la clé d'écriture du fetcher (« preprint »,
+  // « biorxiv », « medrxiv ») à côté d'une issue sous le nom de la source, ce qui donnait
+  // deux puces, « preprint 249 » sans issue et « preprints 0 · a répondu ».
+  const SOURCE_OF_RECORD_KEY: Record<string, string> = {
+    preprint: "preprints", biorxiv: "biorxiv_medrxiv", medrxiv: "biorxiv_medrxiv",
+  };
+  const outcomesKnown = ident.source_outcomes != null;
   const outcomes = ident.source_outcomes ?? {};
-  const allSourceNames = Array.from(new Set([
-    ...Object.keys(ident.by_source ?? {}),
-    ...Object.keys(outcomes),
-  ]));
+  const counts: Record<string, number> = {};
+  for (const [key, v] of Object.entries(ident.by_source ?? {})) {
+    const src = SOURCE_OF_RECORD_KEY[key] ?? key;
+    counts[src] = (counts[src] ?? 0) + num(v);
+  }
+  const allSourceNames = Array.from(new Set([...Object.keys(counts), ...Object.keys(outcomes)]));
   const SEARCHED = new Set(["ok", "empty", "cached"]);
   const activeSources = allSourceNames
-    .map((src) => [src, num((ident.by_source ?? {})[src])] as [string, number])
+    .map((src) => [src, counts[src] ?? 0] as [string, number])
     .filter(([src, v]) => v > 0 || outcomes[src] != null)
     .sort((a, b) => b[1] - a[1]);
-  // Le dénominateur honnête : les sources dont la réponse est DANS ces chiffres.
-  const searchedCount = ident.sources_searched
-    ?? activeSources.filter(([src]) => SEARCHED.has(outcomes[src] ?? "ok")).length;
-  const launchedCount = ident.sources_launched ?? activeSources.length;
+  // Le dénominateur honnête : les sources dont la réponse est DANS ces chiffres. Quand la
+  // recherche n'a pas enregistré d'issues (chiffres antérieurs au registre des sources),
+  // on n'en invente pas : un `?? "ok"` faisait lire « 6 sources interrogées », en vert,
+  // pour une recherche dont on ne sait pas ce que chaque source a fait.
+  const searchedCount: number | null = ident.sources_searched
+    ?? (outcomesKnown ? activeSources.filter(([src]) => SEARCHED.has(outcomes[src] ?? "")).length : null);
+  const launchedCount: number | null = ident.sources_launched
+    ?? (outcomesKnown ? activeSources.length : null);
   const notSearched = [
     ...(ident.sources_failed ?? []),
     ...(ident.sources_cut_off ?? []),
     ...(ident.sources_skipped ?? []),
   ];
   const outcomeStyle = (o?: string): string =>
-    o === "error" ? "bg-rose-900/40 text-rose-300"
+    o == null ? "bg-slate-800/60 text-slate-300"
+      : o === "error" ? "bg-rose-900/40 text-rose-300"
       : o === "cut_by_budget" ? "bg-amber-900/40 text-amber-300"
       : o === "skipped" ? "bg-slate-800/60 text-slate-400"
       : o === "empty" ? "bg-emerald-900/20 text-emerald-300/60"
@@ -4356,11 +4371,14 @@ function PrismaSection({ scenarioId }: { scenarioId: string }) {
           icon={<Database size={13} className="text-emerald-400" />}
         >
           <PrismaBigNum value={totalRecords} sub={
-            launchedCount > searchedCount
-              ? t("scenarioDetail.prisma.sourcesSearchedOfLaunched")
-                  .replace("{searched}", String(searchedCount))
-                  .replace("{launched}", String(launchedCount))
-              : `${searchedCount} ${searchedCount !== 1 ? t("scenarioDetail.prisma.sourceSearchedPlural") : t("scenarioDetail.prisma.sourceSearchedSingular")}`
+            searchedCount == null
+              ? t("scenarioDetail.prisma.outcomesNotRecorded")
+                  .replace("{reported}", String(activeSources.length))
+              : (launchedCount ?? searchedCount) > searchedCount
+                ? t("scenarioDetail.prisma.sourcesSearchedOfLaunched")
+                    .replace("{searched}", String(searchedCount))
+                    .replace("{launched}", String(launchedCount))
+                : `${searchedCount} ${searchedCount !== 1 ? t("scenarioDetail.prisma.sourceSearchedPlural") : t("scenarioDetail.prisma.sourceSearchedSingular")}`
           } />
           {/* « records identified » = étape PRISMA d'identification : compté AVANT
               déduplication (norme PRISMA 2020), donc légitimement ≥ au corpus dédupliqué
@@ -4471,7 +4489,7 @@ function PrismaSection({ scenarioId }: { scenarioId: string }) {
             <p className="text-[10px] text-amber-300/80 pt-1 leading-relaxed">
               {t("scenarioDetail.prisma.cappedNote")
                 .replace("{sources}", (ident.sources_capped ?? [])
-                  .map((s) => `${SOURCE_LABELS_MAP[s] ?? s} (${num(ident.by_source?.[s]).toLocaleString()} / ${num(ident.source_totals?.[s]).toLocaleString()})`)
+                  .map((s) => `${SOURCE_LABELS_MAP[s] ?? s} (${num(counts[s]).toLocaleString()} / ${num(ident.source_totals?.[s]).toLocaleString()})`)
                   .join(", "))
                 .replace("{cap}", (ident.per_source_cap ?? 0).toLocaleString())}
             </p>

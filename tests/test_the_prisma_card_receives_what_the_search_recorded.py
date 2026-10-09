@@ -69,7 +69,9 @@ def test_every_recorded_key_reaches_the_card(scenario):
     assert ident["per_source_cap"] == 2000
     assert ident["sources_failed"] == ["openalex"]
     assert ident["sources_skipped"] == ["core"]
-    assert ident["by_source"]["preprint"] == 5 and "preprints" not in ident["by_source"]
+    # Une ligne par source, sous son nom : le compte des préprints est sous « preprints »,
+    # la clé d'écriture du fetcher ne remonte plus à côté.
+    assert ident["by_source"]["preprints"] == 5 and "preprint" not in ident["by_source"]
 
 
 def test_a_legacy_run_without_outcomes_emits_none_of_the_new_keys(scenario):

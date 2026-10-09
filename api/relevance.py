@@ -50,6 +50,28 @@ from .gesica import _gesica_title, _get_db_gesica_scenario_or_404
 from .study_design import raw_design_sql as _raw_design
 from llm_usage import model_for as _model
 
+#: Borne de sécurité sous les 8 191 jetons de text-embedding-3-small : 20 000 caractères
+#: d'une requête booléenne anglaise font environ 5 000 jetons. L'ancienne borne, 2 000
+#: caractères, coupait la requête du scénario HPAI (3 075 caractères) à 239 caractères
+#: AVANT son bloc « ET (virus aviaires) » : les 201 articles « pertinents » de ce scénario
+#: ont été classés par similarité avec un plongement qui ne contenait ni « influenza » ni
+#: « H5N1 ». Tout ce qui en découle (extraction, estimations groupées, brief) reposait sur
+#: un classement qui n'avait jamais vu la maladie.
+EMBED_QUERY_MAX_CHARS = 20_000
+
+
+def embedding_text_for_query(query: str) -> str:
+    """Le texte RÉELLEMENT plongé pour une requête : la requête entière, sans les tags.
+
+    Les tags de champ de PubMed (`[mh]`, `[tiab]`) n'apportent rien à un plongement et
+    en gaspillent la place ; les retirer d'abord, c'est exactement ce que fait le reste du
+    module pour les sources qui ne les parlent pas. Les blancs sont repliés, et la borne
+    est celle du modèle, pas un 2 000 arbitraire. PUR/testable."""
+    from .search import _strip_field_tags
+    text_ = " ".join(_strip_field_tags(query or "").split())
+    return text_[:EMBED_QUERY_MAX_CHARS]
+
+
 def _run_semantic_rerank_inline(scenario_id: str, query: str) -> int:
     """Score sémantique (cosinus requête↔article) du corpus, mis dans similarity_score.
 
@@ -62,7 +84,8 @@ def _run_semantic_rerank_inline(scenario_id: str, query: str) -> int:
     try:
         from llm_usage import MeteredOpenAI as _OAI
         _client = _OAI(timeout=90.0)
-        q_emb = _client.embeddings.create(model=_model("embedding"), input=query[:2000]).data[0].embedding
+        q_emb = _client.embeddings.create(model=_model("embedding"),
+                                          input=embedding_text_for_query(query)).data[0].embedding
         q_str = str(q_emb)
 
         # 1) Rapide : cosinus pgvector en base pour tous les docs déjà vectorisés.
@@ -355,7 +378,7 @@ def _embed_query_vector(query: str) -> str | None:
     try:
         from llm_usage import MeteredOpenAI as _OAI2
         _emb = _OAI2(api_key=os.getenv("OPENAI_API_KEY"), timeout=30.0).embeddings.create(
-            input=[query.replace("\n", " ").strip()[:2000]],
+            input=[embedding_text_for_query(query)],
             model=_model("embedding"),
         ).data[0].embedding
         return "[" + ",".join(str(x) for x in _emb) + "]"

@@ -44,6 +44,7 @@ from .search import (
     _prisma_identification_figures,
     _search_local_doc_ids,
     _set_scenario_corpus,
+    _shorten_boolean,
     _source_label,
     _store_prisma_identification,
     source_record_keys,
@@ -60,6 +61,7 @@ from .sources import (
     _ncbi_get,
     epmc_query,
     _parse_arxiv,
+    _parse_arxiv_total,
     _parse_biorxiv,
     _parse_clinicaltrials,
     _parse_core,
@@ -336,11 +338,13 @@ def _run_user_scenario_populate(
         Deux conséquences : l'issue annoncée de la source devenait `ok`/`empty` comme si
         elle avait fini de répondre, et `_fed_incomplete` restait faux tant que
         `as_completed` ne débordait pas lui-même, donc le corpus était autorisé à se
-        vider sur une fédération pourtant partielle.
+        VIDER sur une fédération pourtant partielle. Précisément : `_fed_incomplete`
+        éteint `allow_empty`, donc un résultat vide ne remplace pas l'ancien corpus ;
+        un résultat plus petit, lui, le remplace toujours (le corpus peut rétrécir).
         """
         if _time.time() < _fed_deadline[0]:
             return False
-        _fed_incomplete[0] = True       # fetch partiel : le corpus ne peut pas rétrécir
+        _fed_incomplete[0] = True       # fetch partiel : le corpus ne peut pas se VIDER
         _f = getattr(_tls, "fetcher", None)
         if _f:
             with _counter_lock:
@@ -456,6 +460,7 @@ def _run_user_scenario_populate(
     # l'enregistrement des chiffres sans trace.
     _kw_fallback: list[str] = []
     _plain_q = query
+    _fallback_q = query
     try:
         # Le corpus = résultat de la REQUÊTE BOOLÉENNE (générée par LLM). On
         # récupère search_strategy.general ; à défaut on la génère depuis la requête.
@@ -521,26 +526,42 @@ def _run_user_scenario_populate(
         _portable_bool = _strip_field_tags(_boolean).strip()
         _bool_is_real = bool(_portable_bool) and _looks_boolean(_portable_bool)
         _send_bool = _bool_is_real and len(_portable_bool) <= 1200
-        _bool_query = _portable_bool if _send_bool else _plain_q          # OpenAlex/DOAJ/CORE/CT
+        # Au-delà de la limite (ou devant un NOT, pour arXiv) : la requête RÉDUITE, pas
+        # huit mots. Même arbre, chaque bloc OU tronqué à ses premiers termes, les
+        # exclusions retirées, jusqu'à tenir sous la limite. Le sac de mots perdait la
+        # structure et chaque moteur en faisait autre chose, mesuré sur le premier run de
+        # production après #326 : arXiv et CORE le lisaient en OU (2 000 notices chacun,
+        # sur « exposure » ou « virus », toutes hors requête), OpenAlex, DOAJ et
+        # ClinicalTrials.gov en ET de huit mots dont des variantes qui s'excluent
+        # (« h5n1 » ET « h7n9 »). Les notices de ces sources restent ré-appariées en local
+        # contre le booléen entier (boolean_native=False) ; le sac de mots ne sert plus
+        # qu'à Crossref (texte libre) et quand il n'y a pas de booléen du tout.
+        _short_bool = _shorten_boolean(_portable_bool, 1200) if _bool_is_real else ""
+        _fallback_q = _short_bool or _plain_q
+        _bool_query = _portable_bool if _send_bool else _fallback_q       # OpenAlex/DOAJ/CORE/CT/OpenAIRE
         _arxiv_q, _arxiv_native = f"all:{_plain_q}", False                # arXiv : syntaxe dédiée
         if _bool_is_real:
             try:
                 _ax = _boolean_to_arxiv(_parse_boolean_ast(_tokenize_boolean(_portable_bool)))
                 if _ax and len(_ax) <= 1200:
                     _arxiv_q, _arxiv_native = _ax, True
+                else:
+                    _ax_short = _shorten_boolean(_portable_bool, 1200, render=_boolean_to_arxiv)
+                    if _ax_short:
+                        _arxiv_q = _ax_short
             except Exception:
                 pass
-        # Les sources qui ont reçu des MOTS-CLÉS et non le booléen, à DIRE : PRISMA-S
-        # demande la stratégie réellement soumise à chaque base, et le tableau
-        # d'identification présentait leurs notices comme le produit d'une recherche
-        # booléenne. Un booléen portable de plus de 1 200 caractères y basculait les cinq
-        # sources ci-dessous en silence.
-        _kw_fallback = ([] if _send_bool else ["openalex", "doaj", "core", "clinicaltrials"]) \
+        # Les sources qui n'ont PAS reçu le booléen entier, à DIRE : PRISMA-S demande la
+        # stratégie réellement soumise à chaque base, et le tableau d'identification
+        # présentait leurs notices comme le produit d'une recherche booléenne. Un booléen
+        # portable de plus de 1 200 caractères y basculait les six sources ci-dessous en
+        # silence.
+        _kw_fallback = ([] if _send_bool else ["openalex", "doaj", "core", "clinicaltrials", "openaire"]) \
             + ([] if _arxiv_native else ["arxiv"])
         if _kw_fallback:
-            logger.info(f"Populate {scenario_id}: repli mots-clés pour {', '.join(_kw_fallback)} "
+            logger.info(f"Populate {scenario_id}: requête réduite pour {', '.join(_kw_fallback)} "
                         f"(booléen portable de {len(_portable_bool)} caractères) ; "
-                        f"mots-clés soumis = « {_plain_q} »")
+                        f"soumis = « {_fallback_q} »")
         # PubMed RECALL : la requête MeSH générée par le LLM (_pubmed_q) est parfois
         # BEAUCOUP plus étroite que le booléen général - p. ex. 35 résultats contre 306
         # pour le même booléen collé sur le site PubMed. On interroge donc PubMed sur
@@ -1226,6 +1247,7 @@ def _run_user_scenario_populate(
                 _429 = 0                          # cette page est passée
                 _r.raise_for_status()
                 _payload = _r.json()
+                _note_total("core", _payload.get("totalHits"))
                 _n = len(_payload.get("results") or [])
                 if _n == 0:
                     break
@@ -1254,6 +1276,7 @@ def _run_user_scenario_populate(
                     timeout=25,
                 )
                 _r.raise_for_status()
+                _note_total("arxiv", _parse_arxiv_total(_r.text))
                 _docs = _parse_arxiv(_r.text)
                 if not _docs:
                     break
@@ -1272,8 +1295,10 @@ def _run_user_scenario_populate(
         # Migration vers l'API Graph v2 : l'ancien /search/publications a été RETIRÉ le
         # 2026-05-31. `search=` accepte AND/OR/NOT + parenthèses + guillemets → source-union
         # quand on a un vrai booléen (sinon mots-clés). Pagination par CURSEUR.
-        _oa_q = _portable_bool if _bool_is_real else _plain_q
-        _oa_native = bool(_bool_is_real)
+        # Même porte que les quatre autres sources booléennes : au-delà de 1 200 caractères
+        # portables, la requête réduite. Le booléen entier de la requête HPAI de production
+        # (2 465 caractères portables, étoiles dans les phrases) lui valait un 400.
+        _oa_q, _oa_native = _bool_query, _send_bool
         try:
             _cursor, _fetched = "*", 0
             while _fetched < max_results:
@@ -1621,7 +1646,7 @@ def _run_user_scenario_populate(
                 source_outcomes=(dict(_fetcher_outcome) if include_live else {}),
                 per_source_cap=int(max_results),
                 keyword_fallback_sources=(list(_kw_fallback) if include_live else []),
-                keyword_fallback_query=(_plain_q if (include_live and _kw_fallback) else None),
+                keyword_fallback_query=(_fallback_q if (include_live and _kw_fallback) else None),
                 source_error_reasons=(dict(_fetcher_errors) if include_live else {}),
                 source_totals=(_totals_snapshot if include_live else {}))
             _store_prisma_identification(scenario_id, _figures)

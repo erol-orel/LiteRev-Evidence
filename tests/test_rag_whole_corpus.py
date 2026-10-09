@@ -289,5 +289,5 @@ def test_the_streaming_rag_reports_the_two_counts_separately(seeded, monkeypatch
                  if line.startswith("data: {") and "papers_used" in line), None)
     assert meta is not None, f"no meta event in the stream: {body[:400]}"
     assert meta["papers_used"] == 2          # the relevant subset: 9501 and 9505
-    assert meta["papers_quoted"] == 2        # and the answer reproduces both
+    assert meta["papers_retrieved"] == 2     # and the answer reproduces both
     assert meta["digest_complete"] is True   # the figures rest on the whole-corpus digest
