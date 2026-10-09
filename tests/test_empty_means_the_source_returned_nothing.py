@@ -76,7 +76,9 @@ def test_no_outcome_contradicts_its_own_count():
         source_outcomes={"_fetch_preprints": "ok", "_fetch_biorxiv_medrxiv": "ok",
                          "_fetch_pubmed": "ok", "_fetch_crossref": "empty"})
     for src, outcome in f["source_outcomes"].items():
-        count = sum(f["records_by_source"].get(k, 0) for k in source_record_keys(src))
+        # Les lignes sont sous le nom de la source : le compte de `_fetch_preprints` est
+        # sous « preprints », replié depuis la clé d'écriture « preprint ».
+        count = f["records_by_source"].get(src, 0)
         if outcome == "empty":
             assert count == 0, f"{src} est dite vide avec {count} enregistrements"
         if outcome == "ok":
@@ -109,15 +111,27 @@ def test_the_mapping_matches_what_the_fetchers_actually_write():
         "une correspondance a été ajoutée ou retirée sans que ce test le dise")
 
 
-def test_no_phantom_zero_row_beside_the_real_one():
+def test_one_row_per_source_under_its_own_name():
+    """« preprint 5 » et « preprints 0 » se lisaient comme deux sources dont l'une n'avait
+    rien trouvé. La première version du correctif supprimait la ligne fantôme côté
+    serveur, mais la carte, qui réunit les clés des comptes et celles des issues,
+    refabriquait les deux puces : « preprint 249 » sans issue et « preprints 0 · a
+    répondu », vu sur le premier run de production après #326. Le compte est désormais
+    replié sous le nom de la source, là où est son issue."""
     f = _prisma_identification_figures(
         {"preprint": 5, "biorxiv": 2, "medrxiv": 1}, 8, 0, 8,
         source_outcomes={"_fetch_preprints": "ok", "_fetch_biorxiv_medrxiv": "ok"})
-    assert "preprints" not in f["records_by_source"], (
-        "« preprint 5 » et « preprints 0 » se lisaient comme deux sources dont l'une "
-        "n'avait rien trouvé")
-    assert "biorxiv_medrxiv" not in f["records_by_source"]
+    assert f["records_by_source"] == {"preprints": 5, "biorxiv_medrxiv": 3}, f["records_by_source"]
     assert f["records_identified"] == 8
+
+
+def test_a_record_key_no_launched_source_claims_keeps_its_own_row():
+    """La bibliothèque locale est retirée avant ; une clé inconnue (ancienne source) reste
+    visible sous son nom plutôt que de disparaître du total."""
+    f = _prisma_identification_figures(
+        {"pubmed": 30, "pmc": 4}, 34, 0, 34, source_outcomes={"_fetch_pubmed": "ok"})
+    assert f["records_by_source"] == {"pubmed": 30, "pmc": 4}
+    assert f["records_identified"] == 34
 
 
 def test_a_source_with_no_records_at_all_still_gets_its_row():

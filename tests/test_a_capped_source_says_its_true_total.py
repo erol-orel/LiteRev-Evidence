@@ -50,13 +50,46 @@ def test_a_source_that_announced_more_than_it_returned_is_named_capped():
 
 
 def test_a_source_without_an_announced_total_is_never_called_capped():
-    """arXiv et ClinicalTrials n'annoncent pas de total : ne pas inventer."""
+    """ClinicalTrials.gov n'annonce pas de total (sans `countTotal`) : ne pas inventer."""
     f = _prisma_identification_figures(
-        {"arxiv": 2000, "pubmed": 30}, 2030, 0, 2030,
-        source_outcomes={"_fetch_arxiv": "ok", "_fetch_pubmed": "ok"},
+        {"clinicaltrials": 2000, "pubmed": 30}, 2030, 0, 2030,
+        source_outcomes={"_fetch_clinicaltrials": "ok", "_fetch_pubmed": "ok"},
         per_source_cap=2000, source_totals={"pubmed": 30})
     assert f["sources_capped"] == []
-    assert "arxiv" not in f["source_totals"]
+    assert "clinicaltrials" not in f["source_totals"]
+
+
+def test_a_gap_under_the_cap_is_not_a_cap():
+    """Le cas réel du premier run de production après #326 : PubMed 1 176 gardés sur 1 182
+    annoncés, OpenAlex 1 051 sur 1 058, sous un plafond de 2 000. Des notices perdues au
+    nettoyage, pas un plafond : la carte disait pourtant « plafonnée », avec la phrase sur
+    les 2 000 plus pertinents. Europe PMC, 1 984 gardés sur 5 469 annoncés, l'est."""
+    f = _prisma_identification_figures(
+        {"pubmed": 1176, "openalex": 1051, "europepmc": 1984}, 4211, 0, 4211,
+        source_outcomes={"_fetch_pubmed": "ok", "_fetch_openalex": "ok", "_fetch_europepmc": "ok"},
+        per_source_cap=2000,
+        source_totals={"pubmed": 1182, "openalex": 1058, "europepmc": 5469})
+    assert f["sources_capped"] == ["europepmc"], f["sources_capped"]
+    # Le « n / total » garde l'écart visible, lui : le total est servi tel quel.
+    assert f["source_totals"] == {"pubmed": 1182, "openalex": 1058, "europepmc": 5469}
+
+
+def test_without_a_cap_nothing_is_capped():
+    for cap in (None, 0):
+        f = _prisma_identification_figures(
+            {"pubmed": 10}, 10, 0, 10, source_outcomes={"_fetch_pubmed": "ok"},
+            per_source_cap=cap, source_totals={"pubmed": 500})
+        assert f["sources_capped"] == [], cap
+        assert f["source_totals"] == {"pubmed": 500}
+
+
+def test_a_cut_or_failed_source_is_not_called_capped_on_top():
+    """Son issue dit déjà pourquoi le compte n'est pas un total."""
+    f = _prisma_identification_figures(
+        {"pubmed": 300, "openalex": 50}, 350, 0, 350,
+        source_outcomes={"_fetch_pubmed": "cut_by_budget", "_fetch_openalex": "error"},
+        per_source_cap=2000, source_totals={"pubmed": 9000, "openalex": 9000})
+    assert f["sources_capped"] == []
 
 
 def test_a_total_that_is_not_a_number_is_ignored_not_crashed():
@@ -70,7 +103,7 @@ def test_a_total_that_is_not_a_number_is_ignored_not_crashed():
 def test_totals_are_keyed_by_source_label_like_everything_else():
     f = _prisma_identification_figures(
         {"pubmed": 10}, 10, 0, 10, source_outcomes={"_fetch_pubmed": "ok"},
-        source_totals={"_fetch_pubmed": 500})
+        per_source_cap=10, source_totals={"_fetch_pubmed": 500})
     assert f["source_totals"] == {"pubmed": 500}
     assert f["sources_capped"] == ["pubmed"]
 
@@ -88,9 +121,11 @@ def test_the_helper_keeps_the_largest_total_and_rejects_junk():
 
 @pytest.mark.parametrize("source,field", [
     # PubMed passe la variable `total_found`, elle-même lue dans `esearchresult.count` :
-    # c'est cette lecture qu'on vérifie juste en dessous.
+    # c'est cette lecture qu'on vérifie juste en dessous. arXiv passe par le parseur de
+    # son flux Atom (`opensearch:totalResults`), CORE lit `totalHits`.
     ("pubmed", "total_found"), ("openalex", "count"), ("crossref", "total-results"),
     ("europepmc", "hitCount"), ("semantic_scholar", "total"), ("doaj", "total"),
+    ("core", "totalHits"), ("arxiv", "_parse_arxiv_total"),
 ])
 def test_each_api_total_is_noted(source, field):
     calls = [n for n in ast.walk(TREE) if isinstance(n, ast.Call)

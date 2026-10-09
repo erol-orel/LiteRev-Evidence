@@ -757,16 +757,16 @@ def search_live(
 def sources_health(query: str = "cardiac arrest", timeout: int = 12) -> dict[str, Any]:
     """Diagnostic des sources externes (live search).
 
-    Interroge en parallèle les SIX sources sondées (PubMed, OpenAlex, Crossref,
-    Europe PMC, bioRxiv/medRxiv, ReliefWeb) avec une requête minimale et renvoie, par
-    source, le statut HTTP, la latence (ms), un compteur de résultats et l'erreur
-    éventuelle. Permet de diagnostiquer « sources lentes / ne répondent plus »
+    Interroge en parallèle les SEPT sources sondées (PubMed, OpenAlex, Crossref,
+    Europe PMC, OpenAIRE, bioRxiv/medRxiv, ReliefWeb) avec une requête minimale et
+    renvoie, par source, le statut HTTP, la latence (ms), un compteur de résultats et
+    l'erreur éventuelle. Permet de diagnostiquer « sources lentes / ne répondent plus »
     directement en production (où l'accès réseau sortant diffère du sandbox).
 
     ATTENTION : les autres fetchers de la fédération (Semantic Scholar, DOAJ,
-    ClinicalTrials.gov, CORE, arXiv, OpenAIRE) ne sont PAS sondés. « 6 joignables sur 6 »
-    ne signifie donc pas que toute la fédération est saine ; la réponse porte
-    `probed` et `not_probed` pour que ce soit explicite.
+    ClinicalTrials.gov, CORE, arXiv) ne sont PAS sondés. « 7 joignables sur 7 » ne
+    signifie donc pas que toute la fédération est saine ; la réponse porte `probed` et
+    `not_probed` pour que ce soit explicite.
     Lecture seule, aucune écriture, aucune clé requise.
     """
     import concurrent.futures
@@ -801,6 +801,14 @@ def sources_health(query: str = "cardiac arrest", timeout: int = 12) -> dict[str
         ("EuropePMC", EPMC_SEARCH_URL,
          {"query": epmc_query(query), "resultType": "lite", "pageSize": 1, "format": "json"}, ua,
          lambda j: j.get("hitCount")),
+        # OpenAIRE (Graph API v2) : sondée AUSSI, parce que la fédération l'a vue répondre
+        # 400 au booléen entier de la requête HPAI de production sans que rien d'autre que
+        # le journal du populate ne le dise. `search=` reçoit la requête telle quelle :
+        # sonder avec le booléen portable d'un scénario dit si c'est la syntaxe ou la
+        # longueur qu'elle refuse. `header.numFound` est son total.
+        ("OpenAIRE", "https://api.openaire.eu/graph/v2/researchProducts",
+         {"search": query, "pageSize": 1}, {**ua, "Accept": "application/json"},
+         lambda j: int((j.get("header") or {}).get("numFound"))),
         ("bioRxiv/medRxiv", "https://api.biorxiv.org/details/biorxiv/2024-01-01/2024-01-07/0/json",
          None, ua,
          lambda j: (j.get("messages", [{}])[0] or {}).get("total")),
@@ -848,8 +856,7 @@ def sources_health(query: str = "cardiac arrest", timeout: int = 12) -> dict[str
     results.sort(key=lambda r: r["source"])
     # Les fetchers de la fédération que ce diagnostic NE sonde PAS. Les nommer dans la
     # réponse évite de lire « 6 joignables sur 6 » comme « toute la fédération est saine ».
-    not_probed = ["Semantic Scholar", "DOAJ", "ClinicalTrials.gov", "CORE", "arXiv",
-                  "OpenAIRE"]
+    not_probed = ["Semantic Scholar", "DOAJ", "ClinicalTrials.gov", "CORE", "arXiv"]
     return {
         "query": query,
         "checked_at": _dtm.now(_tz.utc).isoformat(),
@@ -996,6 +1003,19 @@ def _parse_arxiv(xml_text: str) -> list[dict]:
             "external_id": f"arxiv:{aid}", "source_type": "preprint",
         })
     return out
+
+
+def _parse_arxiv_total(xml_text: str) -> int | None:
+    """Le total annoncé par arXiv (`opensearch:totalResults`), ou None.
+
+    arXiv ne rendait aucun total au tableau d'identification : « arxiv 2 000 » au plafond
+    se lisait comme ce qu'arXiv contient. Sur le premier run de production après #326, le
+    sac de huit mots, lu en OU, y avait 2 000 notices ; ce total aurait dit combien de
+    dizaines de milliers il y en avait derrière, et donc que la requête reçue n'était pas
+    la bonne. PUR/testable."""
+    import re as _re
+    m = _re.search(r"<opensearch:totalResults[^>]*>\s*(\d+)\s*<", xml_text or "")
+    return int(m.group(1)) if m else None
 
 
 def _parse_biorxiv(payload: dict, terms: list[str], server: str) -> list[dict]:

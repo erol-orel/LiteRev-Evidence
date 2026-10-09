@@ -46,11 +46,19 @@ def test_no_pubmed_field_tag_survives():
 
 
 def test_the_terms_and_the_operators_survive():
-    """Seuls les tags partent : la requête doit rester la même recherche."""
+    """Seuls les tags partent : la requête doit rester la même recherche.
+
+    À une exception près, qui est l'objet de `test_a_publication_type_is_not_a_word.py` :
+    l'exclusion des types de publication n'est pas une recherche de texte. Envoyée telle
+    quelle, elle faisait exclure à Europe PMC tout enregistrement dont le texte contient
+    « news » ou « letter »."""
     q = epmc_query(HPAI)
     for kept in ('"Environmental Exposure"', '"Occupational Exposure"', '"avian influenza"',
-                 '"H5N1"', '"Influenza in Birds"', "AND", "OR", "NOT", "(", ")"):
+                 '"H5N1"', '"Influenza in Birds"', "AND", "OR", "(", ")"):
         assert kept in q, f"{kept} a disparu de la requête : {q}"
+    for gone in ('"news"', '"letter"', "NOT"):
+        assert gone not in q, f"{gone} part encore vers Europe PMC comme texte : {q}"
+    assert q.count("(") == q.count(")") and "( )" not in q, q
 
 
 def test_an_input_made_only_of_tags_yields_nothing_not_the_tag():

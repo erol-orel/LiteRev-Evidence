@@ -78,12 +78,79 @@ def _build_where(filters: dict[str, Any] | None) -> tuple[str, dict[str, Any]]:
 
     return " AND " + " AND ".join(clauses), params
 
+#: Les tags de champ dont le terme N'EST PAS un mot du texte : type de publication, date,
+#: langue, sous-ensemble, filtre, revue. Hors de PubMed, personne ne sait les évaluer, et
+#: garder le terme comme mot faisait pire que l'ignorer. « NOT ("news"[Publication Type]
+#: OR "letter"[Publication Type] OR "comment"[Publication Type] OR "editorial"[Publication
+#: Type]) », la clause finale de la requête HPAI de production, devenait en local « aucun
+#: article dont le titre, le résumé ou le texte intégral contient news, letter, comment ou
+#: editorial » (« newsletter », « comments », « letters to »...), et à Europe PMC la même
+#: exclusion en texte libre : un article sur la couverture médiatique du H5N1 sortait du
+#: corpus pour le mot « news ». « "2021"[dp] : "3000"[dp] » laissait 2021 et 3000 comme
+#: mots requis. Le terme part avec son tag ; PubMed, qui reçoit la requête taguée, reste
+#: seul à les appliquer.
+_NON_CONTENT_TAGS = (
+    "pt", "ptyp", "publication type", "dp", "pdat", "edat", "mhda", "crdt",
+    "date - publication", "date - entry", "date - create", "la", "lang", "language",
+    "sb", "subset", "filter", "filt", "ta", "journal",
+)
+_NON_CONTENT_UNIT_RE = re.compile(
+    r'(?:"[^"]*"|[^\s()\[\]"]+)\s*\[\s*(?:'
+    + "|".join(re.escape(t) for t in _NON_CONTENT_TAGS) + r')\s*\]',
+    re.IGNORECASE,
+)
+_EMPTY_GROUP_RE = re.compile(r"\(\s*(?:(?:AND|OR|NOT)\s*)*\)", re.IGNORECASE)
+_DANGLING_OPERATOR_RES = (
+    (re.compile(r"\(\s*(?:AND|OR)\b", re.IGNORECASE), "("),                 # « ( OR x »
+    (re.compile(r"\b(?:AND|OR|NOT)\s*\)", re.IGNORECASE), ")"),             # « x AND ) »
+    (re.compile(r"\b(?:AND|OR)\s+(?=(?:AND|OR)\b)", re.IGNORECASE), ""),    # « x AND OR y »
+    (re.compile(r"\bNOT\s+(?=NOT\b)", re.IGNORECASE), ""),                  # « x NOT NOT (y) »
+    (re.compile(r"\bNOT\s*(?=(?:AND|OR)\b|$)", re.IGNORECASE), ""),         # « NOT AND y », « NOT » final
+    (re.compile(r"^\s*(?:AND|OR)\b", re.IGNORECASE), ""),                   # « OR x » en tête
+    (re.compile(r"\b(?:AND|OR)\s*$", re.IGNORECASE), ""),                   # « x AND » en queue
+)
+
+
+def _tidy_boolean_operators(s: str) -> str:
+    """Après le retrait d'unités entières : plus de groupe vide ni d'opérateur orphelin.
+
+    « a NOT ( ) », « ( OR b ) », « a AND AND b », « NOT » en queue : chacun est soit une
+    erreur de syntaxe chez une API qui reçoit la chaîne telle quelle (OpenAlex, DOAJ,
+    CORE, ClinicalTrials.gov, OpenAIRE), soit, pour le parseur local, un jeton parasite
+    dont la tolérance peut retourner le sens (« a NOT NOT (b) » lisait b comme requis).
+    Les phrases entre guillemets sont masquées pendant le nettoyage : un « and or » dans
+    une phrase n'est pas un opérateur."""
+    phrases: list[str] = []
+
+    def _mask(m):
+        phrases.append(m.group(0))
+        return f'"\x00{len(phrases) - 1}\x00"'
+
+    s = re.sub(r'"[^"]*"', _mask, s)
+    prev = None
+    while prev != s:
+        prev = s
+        s = _EMPTY_GROUP_RE.sub(" ", s)
+        for rx, rep in _DANGLING_OPERATOR_RES:
+            s = rx.sub(rep, s)
+    return re.sub(r'"\x00(\d+)\x00"', lambda m: phrases[int(m.group(1))], s)
+
+
 def _strip_field_tags(query: str) -> str:
     """Enlève les tags de champ PubMed ([MeSH Terms], [Title/Abstract], [tiab]…).
     Ils n'ont pas d'équivalent dans la base locale (on apparie titre+résumé+texte, soit
     l'équivalent de [Title/Abstract]) et, laissés en place, polluaient le parsing en
-    devenant des termes REQUIS parasites (« titleabstract », « meshterms »)."""
-    return re.sub(r"\[[^\]]*\]", " ", query or "")
+    devenant des termes REQUIS parasites (« titleabstract », « meshterms »).
+
+    Un terme dont le tag n'est pas un champ de texte (`_NON_CONTENT_TAGS` : type de
+    publication, date, langue...) part AVEC son tag, et la requête est renettoyée pour
+    rester bien formée. Sans unité de ce genre, la sortie est strictement celle d'avant."""
+    q = query or ""
+    if not _NON_CONTENT_UNIT_RE.search(q):
+        return re.sub(r"\[[^\]]*\]", " ", q)
+    q = _NON_CONTENT_UNIT_RE.sub(" ", q)
+    q = re.sub(r"(?<!\S):(?!\S)", " ", q)                 # la borne « : » d'une plage de dates
+    return _tidy_boolean_operators(re.sub(r"\[[^\]]*\]", " ", q))
 
 
 # Conservés dans un terme : lettres (accentuées comprises - « cathéter » doit rester
@@ -318,6 +385,119 @@ def _boolean_to_s2(ast) -> str | None:
             return None
         return "(" + (" " if typ == "and" else " | ").join(parts) + ")"
     return None
+
+
+def _positive_boolean(ast):
+    """L'arbre sans ses exclusions, aplati, chaque bloc sans doublon.
+
+    Base de la requête RÉDUITE : un `NOT` n'a pas d'équivalent sûr sur arXiv ni sur
+    Semantic Scholar, et le ré-appariement local applique de toute façon la requête
+    entière, exclusions comprises. Les OU imbriqués (« ((A OU B) OU C) OU D ») sont fondus
+    en un seul bloc pour que la troncature compte des termes, pas des niveaux ; et
+    « Environmental Exposure » suivi de « Environmental Exposure* » ne fait qu'un terme
+    une fois l'étoile retirée. PUR/testable."""
+    if not isinstance(ast, tuple):
+        return None
+    typ = ast[0]
+    if typ == "term":
+        return ast if str(ast[1]).rstrip("*").strip() else None
+    if typ == "not":
+        return None
+    if typ in ("and", "or"):
+        children: list = []
+        seen: set = set()
+        for child in ast[1]:
+            sub = _positive_boolean(child)
+            if sub is None:
+                continue
+            parts = sub[1] if (isinstance(sub, tuple) and sub[0] == typ) else [sub]
+            for p in parts:
+                key = (" ".join(str(p[1]).rstrip("*").lower().split()) if p[0] == "term"
+                       else repr(p))
+                if key in seen:
+                    continue
+                seen.add(key)
+                children.append(p)
+        if not children:
+            return None
+        return children[0] if len(children) == 1 else (typ, children)
+    return None
+
+
+def _or_width(ast) -> int:
+    """Le plus large bloc OU de l'arbre (1 s'il n'y en a pas)."""
+    if not isinstance(ast, tuple) or ast[0] == "term":
+        return 1
+    if ast[0] == "not":
+        return _or_width(ast[1])
+    width = len(ast[1]) if ast[0] == "or" else 1
+    return max([width] + [_or_width(c) for c in ast[1]])
+
+
+def _truncate_or_groups(ast, keep: int):
+    """Chaque bloc OU réduit à ses `keep` premiers termes ; les ET gardent tous les leurs.
+
+    C'est la structure de la requête qui est conservée (le ET entre les concepts, qui dit
+    de quoi parle la revue), et c'est la largeur des synonymes qui est sacrifiée."""
+    if not isinstance(ast, tuple) or ast[0] == "term":
+        return ast
+    if ast[0] == "not":
+        inner = _truncate_or_groups(ast[1], keep)
+        return ("not", inner) if inner is not None else None
+    children = [c for c in (_truncate_or_groups(c, keep) for c in ast[1]) if c is not None]
+    if ast[0] == "or":
+        children = children[:max(1, keep)]
+    if not children:
+        return None
+    return children[0] if len(children) == 1 else (ast[0], children)
+
+
+def _boolean_to_generic(ast, top: bool = True) -> str | None:
+    """AST booléen → la syntaxe commune d'OpenAlex, DOAJ, CORE, ClinicalTrials.gov et
+    OpenAIRE : AND/OR en toutes lettres, guillemets pour les phrases, parenthèses pour les
+    groupes, pas d'étoile. None sur un NOT (la requête réduite n'en porte pas). PUR/testable."""
+    if ast is None:
+        return None
+    typ = ast[0]
+    if typ == "term":
+        _t = " ".join(str(ast[1]).rstrip("*").split())
+        return f'"{_t}"' if " " in _t else _t
+    if typ == "not":
+        return None
+    if typ in ("and", "or"):
+        parts = [_boolean_to_generic(c, top=False) for c in ast[1]]
+        if any(p is None for p in parts):
+            return None
+        body = (" AND " if typ == "and" else " OR ").join(parts)
+        return body if top else "(" + body + ")"
+    return None
+
+
+def _shorten_boolean(portable: str, limit: int = 1200, render=None) -> str:
+    """La requête RÉDUITE : le même booléen, sans exclusions, chaque bloc OU tronqué à ses
+    premiers termes jusqu'à tenir sous `limit` caractères. "" si rien ne tient.
+
+    Au-delà de la limite d'URL (1 200 caractères portables), cinq sources recevaient huit
+    mots-clés sans structure, et chaque moteur en faisait autre chose. Mesuré sur le
+    premier run de production après #326 : arXiv et CORE lisaient le sac de mots en OU
+    (2 000 notices chacun, sur « exposure » ou « virus », toutes hors requête) ; OpenAlex,
+    DOAJ et ClinicalTrials.gov le lisaient en ET de huit mots dont des variantes qui
+    s'excluent (« h5n1 » ET « h7n9 »). Le ET entre les concepts est ce qui dit de quoi
+    parle la revue : il est gardé ; c'est la largeur des synonymes qui est sacrifiée.
+    `render` est le compilateur de la cible (générique par défaut, arXiv sinon), parce que
+    la longueur se mesure dans la syntaxe envoyée. PUR/testable."""
+    render = render or _boolean_to_generic
+    try:
+        ast = _positive_boolean(_parse_boolean_ast(_tokenize_boolean(portable or "")))
+    except Exception:                                    # noqa: BLE001
+        return ""
+    if ast is None:
+        return ""
+    for keep in range(_or_width(ast), 0, -1):
+        out = render(_truncate_or_groups(ast, keep))
+        if out and len(out) <= limit:
+            return out
+    return ""
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -927,15 +1107,20 @@ def _prisma_identification_figures(records_by_source: dict, unique_records: int,
     outcomes = {_source_label(k): str(v) for k, v in (source_outcomes or {}).items()}
     # Les sources LANCÉES, y compris celles qui n'ont rien rapporté : le tableau doit
     # porter la ligne et son issue, sinon le lecteur ne peut pas savoir que PubMed a
-    # échoué, il peut seulement constater que PubMed n'y est pas.
-    records = {k: v for k, v in _raw.items() if v > 0}
+    # échoué, il peut seulement constater que PubMed n'y est pas. Et chaque source sous
+    # SON nom : un fetcher qui écrit ses enregistrements sous une autre clé (« preprint »
+    # pour `_fetch_preprints`, « biorxiv » et « medrxiv » pour `_fetch_biorxiv_medrxiv`)
+    # donnait deux lignes à la carte, « preprint 249 » sans issue et « preprints 0 · a
+    # répondu », parce que l'issue et le compte ne se retrouvaient pas sous la même clé.
+    records: dict[str, int] = {}
+    folded: set[str] = set()
     for name in outcomes:
-        # Une source dont les enregistrements sont DÉJÀ au tableau sous une autre clé n'y
-        # ajoute pas une ligne fantôme à zéro à côté de la vraie : « preprint 5 » puis
-        # « preprints 0 » se lisait comme deux sources dont l'une n'avait rien trouvé.
-        if any(_raw.get(k) for k in source_record_keys(name)):
-            continue
-        records.setdefault(name, 0)
+        keys = source_record_keys(name)
+        records[name] = sum(_raw.get(k, 0) for k in keys)
+        folded.update(keys)
+    for k, v in _raw.items():
+        if k not in folded and v > 0:
+            records[k] = v
     by_outcome = {o: sorted(k for k, v in outcomes.items() if v == o) for o in SOURCE_OUTCOMES}
     searched = sum(len(by_outcome[o]) for o in SOURCE_OUTCOMES_COUNTED)
     totals = {}
@@ -944,11 +1129,17 @@ def _prisma_identification_figures(records_by_source: dict, unique_records: int,
             totals[_source_label(k)] = int(v)
         except (TypeError, ValueError):
             continue
-    # « Plafonnée » = l'API a annoncé plus que ce que la source a rapporté. Que la cause
-    # soit le plafond ou le nettoyage, le lecteur doit savoir que ce compte n'est pas
-    # le total de la source.
-    capped = sorted(name for name, got in records.items()
-                    if totals.get(name) is not None and totals[name] > int(got or 0))
+    # « Plafonnée » = l'API a annoncé PLUS que le plafond par source : c'est le plafond qui
+    # a coupé, et le compte est un plancher. Un écart SOUS le plafond n'en est pas un :
+    # sur le premier run de production après #326, PubMed avait 1 176 gardés sur 1 182
+    # annoncés sous un plafond de 2 000 (six notices perdues au nettoyage), et la carte la
+    # disait « plafonnée », avec la phrase sur les 2 000 plus pertinents. Le « n / total »
+    # reste affiché, lui, dès que l'API a annoncé plus que ce qu'on a gardé. Une source
+    # coupée par le budget ou en échec n'est pas « plafonnée » non plus : son issue le dit.
+    _cap = int(per_source_cap or 0)
+    capped = sorted(name for name in records
+                    if _cap > 0 and totals.get(name) is not None and totals[name] > _cap
+                    and outcomes.get(name, "ok") in SOURCE_OUTCOMES_COUNTED)
     from_databases = sum(records.values())
     identified = from_databases + library
     across = max(0, identified - max(0, int(unique_records or 0)))

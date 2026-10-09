@@ -41,8 +41,10 @@ import pytest
 pytest.importorskip("fastapi")
 
 from api.search import (  # noqa: E402
+    _boolean_to_arxiv,
     _plain_keywords,
     _prisma_identification_figures,
+    _shorten_boolean,
     _strip_field_tags,
     _terms_in_order,
 )
@@ -175,8 +177,8 @@ def test_the_populate_computes_the_fallback_list_from_the_two_gates():
     src = inspect.getsource(P._run_user_scenario_populate)
     assert "_kw_fallback" in src
     _i = src.index("_kw_fallback = ")
-    block = src[_i:_i + 260]
-    for name in ("openalex", "doaj", "core", "clinicaltrials", "arxiv"):
+    block = src[_i:_i + 320]
+    for name in ("openalex", "doaj", "core", "clinicaltrials", "openaire", "arxiv"):
         assert name in block, f"{name} reçoit le repli mais n'est pas déclarée : {block}"
     assert "_send_bool" in block and "_arxiv_native" in block
     # Et le nom doit être lié au niveau de la fonction : les chiffres PRISMA le lisent
@@ -200,6 +202,105 @@ def test_the_panel_shows_the_degraded_strategy_in_both_languages():
         assert "keywordFallback:" in txt, f"clé absente de {loc}.ts"
         line = next(l for l in txt.splitlines() if "keywordFallback:" in l)
         assert "{sources}" in line and "{keywords}" in line, line
+
+
+# ── La requête RÉDUITE : la structure plutôt que huit mots ───────────────────
+#
+# Premier run de production après #326, requête HPAI entière : les cinq sources en repli
+# ont reçu « environmental exposure influenza birds virus h5n1 subtype h7n9 ». arXiv et
+# CORE l'ont lu en OU : 2 000 notices chacun, sur « exposure » ou « virus », 4 917 notices
+# retirées ensuite comme hors requête. OpenAlex, DOAJ et ClinicalTrials.gov l'ont lu en ET
+# de huit mots, dont « h5n1 » ET « h7n9 », deux variantes que la requête met en OU. Le sac
+# de mots n'a pas de structure, et c'est la structure, le ET entre les concepts, qui dit
+# de quoi parle la revue.
+
+def test_under_the_limit_the_reduced_query_is_the_boolean_without_its_exclusions():
+    out = _shorten_boolean(_strip_field_tags(HPAI), 1200)
+    assert " AND " in out and " OR " in out, out
+    low = out.lower()
+    assert "influenza in birds" in low and "environmental exposure" in low, out
+    assert "h1n1" not in low, "l'exclusion est devenue un terme cherché"
+    assert "NOT" not in out and "[" not in out and "*" not in out, out
+
+
+def test_the_reduced_query_keeps_every_concept_block_when_it_must_shrink():
+    """Sous une limite serrée, chaque bloc ET garde au moins un terme : le ET entre les
+    concepts est gardé, c'est la largeur des synonymes qui est sacrifiée."""
+    out = _shorten_boolean(_strip_field_tags(HPAI), 90)
+    assert out and len(out) <= 90, out
+    assert " AND " in out, out
+    low = out.lower()
+    assert any(w in low for w in ("influenza", "h5n1", "h7n9")), out
+    assert any(w in low for w in ("environmental", "exposure", "occupational")), out
+
+
+def test_the_or_blocks_shrink_first_terms_first_and_the_and_never_shrinks():
+    q = '("alpha" OR "alpha two" OR "alpha three") AND ("beta" OR "beta two")'
+    full = '(alpha OR "alpha two" OR "alpha three") AND (beta OR "beta two")'     # 64 caractères
+    two = '(alpha OR "alpha two") AND (beta OR "beta two")'                       # 47
+    assert _shorten_boolean(q, 1000) == full
+    assert _shorten_boolean(q, len(full)) == full
+    assert _shorten_boolean(q, len(full) - 1) == two
+    assert _shorten_boolean(q, len(two) - 1) == "alpha AND beta"
+    assert _shorten_boolean(q, 13) == "", "rien ne tient : l'appelant retombe sur les mots-clés"
+
+
+def test_nested_or_blocks_are_one_block_for_the_truncation():
+    q = '(("a" OR "b") OR ("c" OR "d")) AND "e"'
+    assert _shorten_boolean(q, 100) == "(a OR b OR c OR d) AND e"
+    assert _shorten_boolean(q, 7) == "a AND e"
+
+
+def test_a_wildcard_variant_of_the_same_term_is_not_a_second_term():
+    q = '("Environmental Exposure" OR "Environmental Exposure*" OR "Fomites") AND "H5N1"'
+    out = _shorten_boolean(q, 100)
+    assert out.lower().count("environmental exposure") == 1, out
+    assert "*" not in out
+
+
+def test_the_arxiv_rendering_measures_its_own_syntax():
+    """`all:` et les guillemets comptent dans l'URL d'arXiv : la longueur se mesure dans
+    la syntaxe envoyée, pas dans la générique."""
+    out = _shorten_boolean(_strip_field_tags(HPAI), 160, render=_boolean_to_arxiv)
+    assert out and len(out) <= 160, out
+    assert out.count("all:") >= 2 and " AND " in out, out
+    assert "h1n1" not in out.lower()
+
+
+@pytest.mark.parametrize("query", ['NOT "H5N1"', "", "   ", "AND OR", "()"])
+def test_nothing_positive_gives_nothing(query):
+    assert _shorten_boolean(query, 1200) == ""
+
+
+def test_the_populate_sends_the_reduced_query_not_the_bag_of_words():
+    """Les quatre sources à la limite d'URL, OpenAIRE et arXiv reçoivent la requête réduite ;
+    le sac de mots ne reste qu'à Crossref et au cas sans booléen. Et la carte reçoit ce
+    qui a été soumis, pas autre chose."""
+    import ast
+    import inspect
+    import textwrap
+    from api import pipeline as P
+    tree = ast.parse(textwrap.dedent(inspect.getsource(P._run_user_scenario_populate)))
+    assigned: dict[str, list[str]] = {}
+    for n in ast.walk(tree):
+        if isinstance(n, ast.Assign):
+            for tgt in n.targets:
+                elts = tgt.elts if isinstance(tgt, ast.Tuple) else [tgt]
+                for e in elts:
+                    if isinstance(e, ast.Name):
+                        assigned.setdefault(e.id, []).append(ast.unparse(n.value))
+    assert any("_shorten_boolean(" in v for v in assigned.get("_short_bool", [])), assigned.get("_short_bool")
+    assert any("_short_bool" in v and "_plain_q" in v for v in assigned.get("_fallback_q", [])), (
+        "le repli doit être la requête réduite, et les mots-clés seulement s'il n'y en a pas")
+    assert any("_fallback_q" in v for v in assigned.get("_bool_query", [])), assigned.get("_bool_query")
+    assert any("_bool_query" in v for v in assigned.get("_oa_q", [])), (
+        "OpenAIRE recevait le booléen entier quelle que soit sa longueur : 400 sur la requête HPAI")
+    assert any("_boolean_to_arxiv" in v and "_shorten_boolean(" in v for v in assigned.get("_ax_short", []))
+    assert any("_ax_short" in v for v in assigned.get("_arxiv_q", [])), assigned.get("_arxiv_q")
+    disclosed = [kw.value for n in ast.walk(tree) if isinstance(n, ast.Call)
+                 for kw in n.keywords if kw.arg == "keyword_fallback_query"]
+    assert disclosed and all("_fallback_q" in ast.unparse(v) for v in disclosed), (
+        "la carte doit recevoir la requête réellement soumise aux sources en repli")
 
 
 # ── La forme qui a produit le bug, mesurée ───────────────────────────────────
