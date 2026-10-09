@@ -83,8 +83,30 @@ def test_settings_default_when_no_row():
     from fastapi.testclient import TestClient
     body = TestClient(main.app).get("/scenarios/usr-does-not-exist/settings").json()
     assert body["similarity_threshold"] == main.DEFAULT_SIMILARITY_THRESHOLD
-    assert body["cached"] == {"evidence_brief": False, "variables": False, "clustering": False,
-                              "knowledge_graph": False, "recommended_actions": False}
+    # TOUTE colonne JSON de scenario_settings est annoncée par sa présence, jamais
+    # servie : la liste en oubliait cinq, dont les trois plus grosses, si bien qu'une
+    # lecture de deux flottants rapatriait 208 ko sur le scénario HPAI (122 ko de
+    # projection SEIR, 63 ko de carte des concepts, 38 ko de traductions).
+    assert body["cached"] == {
+        "evidence_brief": False, "variables": False, "variables_proposal": False,
+        "variables_i18n": False, "clustering": False, "knowledge_graph": False,
+        "concept_graph": False, "seir_projection": False, "seir_observed": False,
+        "codebook": False, "recommended_actions": False}
+
+
+def test_every_json_column_of_the_settings_table_is_declared_a_blob():
+    """Une colonne JSON ajoutée sans être listée repart dans chaque ouverture de page."""
+    if not _engine_ok():
+        pytest.skip("main.engine cannot reach the database")
+    from sqlalchemy import text
+    with main.engine.connect() as conn:
+        cols = {r[0] for r in conn.execute(text(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_name = 'scenario_settings' AND data_type IN ('json', 'jsonb')"))}
+    missing = cols - set(main._SETTINGS_BLOB_COLUMNS)
+    assert not missing, (
+        "ces colonnes JSON sont servies à chaque lecture des paramètres ; ajoutez-les à "
+        f"_SETTINGS_BLOB_COLUMNS : {sorted(missing)}")
 
 
 def test_corpus_abstracts_can_be_truncated_for_excerpt_views(seeded):

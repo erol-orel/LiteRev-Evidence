@@ -451,10 +451,22 @@ def corpus_search_terms(query: str, max_terms: int = 8) -> list[str]:
 # et la living review nettoyaient les trois visualisations mais oubliaient les actions
 # recommandées, qui restaient servies indéfiniment alors qu'elles décrivaient le corpus
 # précédent.
+#
+# La PROJECTION SEIR en fait partie. Elle est une fonction des paramètres extraits, qui
+# sont eux-mêmes extraits du sous-ensemble pertinent : bouger le seuil changeait le lot
+# d'articles que l'extraction lit, et la projection en cache continuait d'être servie
+# telle quelle. Son invalidation ne regardait que `variables_generated_at`, donc elle ne
+# voyait jamais un changement de seuil. Le commentaire du code prétendait l'inverse.
+#
+# Le SPEC (`variables_json`) n'y est PAS : il coûte un passage de modèle complet, et
+# l'effacer sur un mouvement de curseur ferait perdre un travail que le relecteur a
+# peut-être validé. Il porte sa propre empreinte (seuil + identifiants des articles) et
+# s'annonce périmé ; c'est ce qu'on veut : dire, pas détruire.
 CORPUS_DERIVED_CACHE_RESET = """
     clustering_json = NULL, clustering_generated_at = NULL,
     knowledge_graph_json = NULL, kg_generated_at = NULL,
     concept_graph_json = NULL, concept_graph_generated_at = NULL,
     recommended_actions_json = NULL, recommended_actions_lang = NULL,
-    actions_generated_at = NULL
+    actions_generated_at = NULL,
+    seir_projection_json = NULL, seir_projection_generated_at = NULL
 """

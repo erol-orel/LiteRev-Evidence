@@ -1325,7 +1325,10 @@ function SeirModelView({ scenarioId }: { scenarioId: string }) {
   // Une projection dont le R₀ est SAISI ou SUPPOSÉ doit le dire : sans cette mention,
   // l'UI promet « paramétré par la littérature extraite » au-dessus d'un chiffre inventé.
   const r0Source = proj.r0_source ?? "literature";
-  const notSourced = r0Source !== "literature" || proj.forced === true;
+  // La période infectieuse compte autant que le R₀ : elle fixe gamma, donc le jour du
+  // pic, sa hauteur et la durée. Elle était posée à 7 jours en silence.
+  const assumed = proj.assumed_parameters ?? [];
+  const notSourced = r0Source !== "literature" || proj.forced === true || assumed.length > 0;
 
   return (
     <div className="space-y-4">
@@ -1335,7 +1338,19 @@ function SeirModelView({ scenarioId }: { scenarioId: string }) {
           <p className="text-[11px] text-gold-100/80 leading-relaxed">
             {r0Source === "assumed"
               ? t("scenarioDetail.seirTab.r0Assumed")
-              : t("scenarioDetail.seirTab.r0UserSupplied")}
+              : r0Source === "user" || proj.forced === true
+                ? t("scenarioDetail.seirTab.r0UserSupplied")
+                : ""}
+            {assumed.length > 0 && (
+              <>
+                {r0Source !== "literature" || proj.forced === true ? " " : ""}
+                {t("scenarioDetail.seirTab.parametersAssumed")
+                  .replace("{params}", assumed
+                    .map(k => _SEIR_PARAM_LABEL[k] ?? k).join(", "))
+                  .replace("{value}", proj.infectious_period_days != null
+                    ? String(proj.infectious_period_days) : "?")}
+              </>
+            )}
           </p>
         </div>
       )}
@@ -4125,12 +4140,31 @@ function AutoFetchPanel({ scenarioId, spec, onFetched }: {
  *  stable (et un texte français pour l'API / les logs) ; sans code connu, on montre ce
  *  texte plutôt que rien. */
 export function seirReasonText(
-  p: { reason?: string; reason_code?: string; available_parameters?: string[] } | null | undefined,
+  p: {
+    reason?: string; reason_code?: string; available_parameters?: string[];
+    articles_reporting_parameters?: number;
+    articles_with_values?: number | null;
+    values_never_extracted?: boolean;
+  } | null | undefined,
   t: (path: string) => string,
 ): string {
   switch (p?.reason_code) {
-    case "no_parameters":
+    case "no_parameters": {
+      // « Aucun paramètre extrait de la littérature » est une affirmation sur les
+      // articles. Elle s'affichait à côté d'un bloc de zéros sur des corpus où 55 à 73
+      // articles pertinents rapportent un R0, parce que les compteurs venaient d'un
+      // spec qui ne les portait pas et que « absent » devenait 0.
+      const n = p.articles_reporting_parameters ?? 0;
+      if (p.values_never_extracted && n > 0) {
+        return t("scenarioDetail.seirTab.reasonValuesNeverExtracted").replace("{n}", String(n));
+      }
+      if (n > 0) {
+        return t("scenarioDetail.seirTab.reasonNoUsableValue")
+          .replace("{n}", String(n))
+          .replace("{k}", String(p.articles_with_values ?? 0));
+      }
       return t("scenarioDetail.seirTab.reasonNoParameters");
+    }
     case "not_transmissible":
       return t("scenarioDetail.seirTab.reasonNotTransmissible");
     case "no_transmission_parameter": {

@@ -759,8 +759,22 @@ def _maybe_autorerank(scenario_id: str) -> bool:
     return True
 
 
-_SETTINGS_BLOB_COLUMNS = ("evidence_brief_json", "variables_json", "clustering_json",
-                          "knowledge_graph_json", "recommended_actions_json")
+#: Les colonnes JSON volumineuses de `scenario_settings`, dont /settings n'indique que
+#: la PRÉSENCE. La liste en oubliait cinq, et notamment les trois plus grosses : une
+#: lecture de deux flottants rapatriait 208 776 octets sur le scénario HPAI, dont
+#: 122 863 de projection SEIR, 63 672 de carte des concepts et 38 924 de traductions.
+#: Toute colonne JSON de cette table y appartient : si une nouvelle est ajoutée sans
+#: être listée, elle repart dans chaque ouverture de page (cf. test_scenario_payload_sizes).
+_SETTINGS_BLOB_COLUMNS = ("evidence_brief_json", "variables_json", "variables_proposal_json",
+                          "variables_i18n", "clustering_json", "knowledge_graph_json",
+                          "concept_graph_json", "seir_projection_json", "seir_observed_json",
+                          "codebook_json", "recommended_actions_json")
+
+
+def _blob_key(column: str) -> str:
+    """La clé servie pour une colonne JSON. Le suffixe `_json` était retiré par une
+    coupe de cinq caractères, ce qui mutilerait `variables_i18n` en `variables_`."""
+    return column[:-5] if column.endswith("_json") else column
 
 
 @app.get("/scenarios/{scenario_id}/settings")
@@ -783,14 +797,14 @@ def get_scenario_settings(scenario_id: str) -> dict[str, Any]:
             "brief_generated_at": None,
             "variables_validated": False,
             "variables_generated_at": None,
-            "cached": {c[:-5]: False for c in _SETTINGS_BLOB_COLUMNS},
+            "cached": {_blob_key(c): False for c in _SETTINGS_BLOB_COLUMNS},
         }
     out = {k: v for k, v in dict(row).items() if k not in _SETTINGS_BLOB_COLUMNS}
     # NULL en base veut dire « jamais réglé », et la porte le lit comme 0. L'interface doit
     # lire la même chose, sans quoi le curseur s'afficherait vide sur un corpus non filtré.
     if out.get("rerank_threshold") is None:
         out["rerank_threshold"] = DEFAULT_RERANK_THRESHOLD
-    out["cached"] = {c[:-5]: bool(row.get(c)) for c in _SETTINGS_BLOB_COLUMNS if c in row}
+    out["cached"] = {_blob_key(c): bool(row.get(c)) for c in _SETTINGS_BLOB_COLUMNS if c in row}
     return out
 
 

@@ -3575,6 +3575,14 @@ export interface SeirProjection {
   forced?: boolean;
   /** Provenance du R₀ effectivement simulé - l'UI ne doit pas présenter "assumed"/"user" comme sourcé. */
   r0_source?: "literature" | "user" | "assumed";
+  /** The infectious period decides gamma, hence the peak day, the peak height, the
+   *  growth rate and the epidemic duration. It was silently set to 7 days on any corpus
+   *  that does not report one, and the resulting curve was labelled "from the
+   *  literature". Its provenance now travels with it. */
+  infectious_period_days?: number | null;
+  infectious_period_source?: "literature" | "user" | "assumed";
+  parameter_sources?: Record<string, "literature" | "user" | "assumed">;
+  assumed_parameters?: string[];
   /** Paramètres extraits mais inexploitables (le backend nomme ce qui manque). */
   missing?: string[];
   available_parameters?: string[];
