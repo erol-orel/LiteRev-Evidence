@@ -345,8 +345,15 @@ def render_export(fmt: str, rows: list[dict], title: str, meta: dict | None = No
     that travels on its own has to say what it is."""
     prov = provenance_lines(meta)
     if fmt == "csv":
+        # Le BOM reste au PREMIER octet : Excel ne détecte l'UTF-8 que là. Préfixer les
+        # lignes de provenance devant lui faisait ouvrir « Rossi MÃ¼ller » au lieu de
+        # « Rossi Müller ». On le retire de `to_csv` et on le remet en tête.
+        body = to_csv(rows)
+        bom = "\ufeff"
+        if body.startswith(bom):
+            body = body[len(bom):]
         head = "".join(f"# {ln}\n" for ln in prov)
-        return (head + to_csv(rows)).encode("utf-8")
+        return (bom + head + body).encode("utf-8")
     if fmt == "json":
         return to_json(rows, meta).encode("utf-8")
     if fmt == "ris":
