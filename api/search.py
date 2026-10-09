@@ -991,9 +991,9 @@ def _prisma_identification_figures(records_by_source: dict, unique_records: int,
         # Le TOTAL VRAI que chaque API a annoncé, et les sources dont on a gardé MOINS que
         # ce total. Au plafond par source, « pubmed 2 000 » se lisait comme un total : c'est
         # un plancher. Sur le scénario de contrôle de production, cinq sources étaient au
-        # plafond et rien ne le disait ; et le lot gardé dépend de l'ordre de la source
-        # (PubMed trie par date, donc garde les plus récents ; OpenAlex et Europe PMC par
-        # pertinence). PRISMA-S demande ce nombre.
+        # plafond et rien ne le disait ; et le lot gardé dépend de l'ordre de la source.
+        # PubMed, OpenAlex et Europe PMC sont désormais interrogées par pertinence ; PubMed
+        # triait par date et gardait les plus récents. PRISMA-S demande ce nombre.
         "source_totals": totals,
         "sources_capped": capped,
         "sources_ok": by_outcome["ok"],

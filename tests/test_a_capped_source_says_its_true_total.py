@@ -137,9 +137,27 @@ def test_the_card_shows_n_of_total_and_the_cap_note():
             f"{loc}: la note doit dire quel lot chaque source garde, c'est tout son intérêt")
 
 
-def test_pubmed_keeps_the_newest_and_the_note_says_so():
-    """Le fait que la note affirme, épinglé contre le code qui le rend vrai."""
-    assert '"sort": "pub_date"' in SRC, (
-        "l'esearch de PubMed ne trie plus par date : la note de la carte, qui dit que PubMed "
-        "garde les plus récents, devient fausse et doit changer avec ce test")
-    assert "relevance_score:desc" in SRC, "OpenAlex ne trie plus par pertinence : idem"
+def test_the_three_capped_sources_are_asked_by_relevance_and_the_note_says_so():
+    """Le fait que la note affirme, épinglé contre le code qui le rend vrai.
+
+    Décision du propriétaire du projet : au plafond, PubMed garde les plus pertinents
+    (`sort=relevance`, le « Best Match »), comme OpenAlex et Europe PMC. Trié par date, il
+    gardait les 2 000 plus récents et perdait la littérature H5N1 de 2004 à 2012. Si l'un
+    des trois change d'ordre, la note de la carte devient fausse et doit changer ici."""
+    assert '"sort": "relevance"' in SRC, "l'esearch du populate ne trie plus par pertinence"
+    assert '"sort": "pub_date"' not in SRC, "PubMed est de nouveau trié par date"
+    assert "relevance_score:desc" in SRC, "OpenAlex ne trie plus par pertinence"
+    import inspect
+    from api import sources as S
+    assert '"sort": "relevance"' in inspect.getsource(S._live_fetch_pubmed), (
+        "le panneau de recherche en direct montre une autre liste que le corpus")
+    # Europe PMC : pas de paramètre `sort`, son défaut est la pertinence (commentaire du
+    # fetcher) ; on vérifie qu'aucun tri par date n'y a été ajouté.
+    _i = SRC.index("def _fetch_europepmc")
+    assert '"sort"' not in SRC[_i:SRC.index("def _fetch_preprints")], (
+        "un tri a été ajouté à Europe PMC : la note doit le dire")
+    for loc in ("fr", "en"):
+        line = next(l for l in (ROOT / "frontend" / "src" / "i18n" / "locales" / f"{loc}.ts")
+                    .read_text(encoding="utf-8").splitlines() if "cappedNote:" in l)
+        assert ("pertinen" in line or "relevan" in line) and "récent" not in line.split("pas des")[0] \
+            if loc == "fr" else ("relevan" in line), f"{loc}: la note ne dit plus l'ordre réel"

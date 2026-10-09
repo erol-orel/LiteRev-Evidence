@@ -146,6 +146,9 @@ def _live_fetch_pubmed(query: str, max_results: int) -> tuple[list[dict], int]:
         base = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
         r = _ncbi_get(f"{base}/esearch.fcgi", {
             "db": "pubmed", "term": query, "retmax": max_results,
+            # Le même ordre que le populate : le panneau montrait les plus récents pendant
+            # que le corpus gardait les plus pertinents, deux listes pour une requête.
+            "sort": "relevance",
             "retmode": "json", "tool": "literev", "email": "api@literev.app"
         })
         _esr = r.json().get("esearchresult", {})

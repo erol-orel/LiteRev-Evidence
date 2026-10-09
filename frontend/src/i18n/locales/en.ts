@@ -805,7 +805,7 @@ export const en: Translations = {
       perSourceCap: "cap applied: {cap} records per source",
       keywordFallback: "Degraded strategy for {sources}: the boolean query exceeds these APIs' URL limit, so they received the keywords \"{keywords}\". Their records are therefore not the product of the boolean query above.",
       capped: "capped",
-      cappedNote: "Cap reached for {sources}: these APIs announce more records than the {cap} per source retrieved. Which records were kept depends on each source's own order: PubMed sorts by publication date and therefore keeps the most recent, OpenAlex and Europe PMC sort by relevance.",
+      cappedNote: "Cap reached for {sources}: these APIs announce more records than the {cap} per source retrieved. PubMed, OpenAlex and Europe PMC are queried by relevance: what was kept is each source's {cap} most relevant records, not its most recent.",
       outcome: {
         ok: "answered",
         empty: "no results",

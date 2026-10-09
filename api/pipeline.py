@@ -615,8 +615,13 @@ def _run_user_scenario_populate(
             # n'insérer aucune ligne (ON CONFLICT) : la quasi-totalité du trafic PubMed.
             r = _ncbi_get(
                 f"{ENTREZ_BASE}/esearch.fcgi",
+                # `sort=relevance` (le « Best Match » de PubMed) : au plafond par source, on
+                # garde les plus PERTINENTS, comme OpenAlex et Europe PMC. Trié par date
+                # jusqu'ici, PubMed plafonné gardait les 2 000 plus récents et perdait la
+                # littérature H5N1 de 2004 à 2012 ; même plafond, deux politiques. Décision
+                # de méthode prise par le propriétaire du projet, pas un correctif.
                 {"db": "pubmed", "term": _pubmed_q, "retmax": max(0, min(int(max_results), 10000)),
-                 "sort": "pub_date", "retmode": "json", "email": EMAIL},
+                 "sort": "relevance", "retmode": "json", "email": EMAIL},
                 timeout=30,
             )
             r.raise_for_status()

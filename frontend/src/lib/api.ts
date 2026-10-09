@@ -1165,9 +1165,10 @@ export interface ScenarioPrisma {
      *  said "openalex: failed" and diagnosing it meant reading the server's logs. */
     source_error_reasons?: Record<string, string>;
     /** The TRUE total each API announced, and the sources that kept fewer than it. At the
-     *  per-source cap, "pubmed 2000" read as a total; it is a floor, and the records kept
-     *  depend on the source's own order (PubMed: newest first; OpenAlex, Europe PMC: most
-     *  relevant first). Five sources were capped on a production run and nothing said so. */
+     *  per-source cap, "pubmed 2000" read as a total; it is a floor. PubMed, OpenAlex and
+     *  Europe PMC are now queried by relevance, so what is kept is each source's most
+     *  relevant records (PubMed used to sort by date and keep the newest). Five sources
+     *  were capped on a production run and nothing said so. */
     source_totals?: Record<string, number>;
     sources_capped?: string[];
     /** "populate" = sources were searched; "rebuild" = the boolean query was replayed
