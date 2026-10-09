@@ -824,10 +824,10 @@ def _backfill_ars_screening_from_document() -> None:
         logger.info("Screening par revue : aucune décision globale à recopier.")
 
 
-try:
-    _backfill_ars_screening_from_document()
-except Exception as _e:
-    logger.warning(f"_backfill_ars_screening_from_document: {_e}")
+# L'APPEL est plus bas, après `_ensure_bibliographic_columns`, qui est la fonction qui
+# CRÉE `literature_document.screening_status` (absente de schema.sql). Appelé ici, sur
+# une base neuve, il échouait sur « column d.screening_status does not exist » et n'était
+# retenté qu'au démarrage suivant.
 
 
 def _ensure_dedup_columns():
@@ -907,3 +907,11 @@ try:
     _ensure_bibliographic_columns()
 except Exception as _e:
     logger.warning(f"_ensure_bibliographic_columns: {_e}")
+
+
+# Après la création de `literature_document.screening_status` : la recopie des décisions
+# qui ne vivaient que sur la ligne globale (cf. sa docstring) a besoin de cette colonne.
+try:
+    _backfill_ars_screening_from_document()
+except Exception as _e:
+    logger.warning(f"_backfill_ars_screening_from_document: {_e}")

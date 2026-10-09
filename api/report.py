@@ -31,7 +31,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from fastapi import Query
+from fastapi import HTTPException, Query
 from sqlalchemy import text
 
 from .core import app, engine, logger
