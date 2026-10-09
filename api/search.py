@@ -511,6 +511,14 @@ def _clean_boolean(portable: str) -> str:
 #: vers cette API, OpenAIRE ne répondait donc qu'aux requêtes sans booléen.
 OPENAIRE_MAX_OPERATORS = 4
 
+#: DOAJ sert la première page d'un booléen long et répond 502 à toutes les suivantes,
+#: quelle que soit la taille de page. Mesuré depuis le serveur de production sur la
+#: requête du scénario HPAI_last : 894 caractères propres, page 2 en 502 (en 100 comme en
+#: 10 par page) ; la même requête réduite à 796 caractères pagine normalement, comme la
+#: requête de contrôle de 372 caractères et toute requête courte. La limite est prise
+#: sous le plus long qui passe, avec de la marge.
+DOAJ_MAX_QUERY_CHARS = 700
+
 
 def _count_operators(rendered: str) -> int:
     """Les opérateurs d'une requête rendue. Les termes sont en minuscules (tokenisation),
