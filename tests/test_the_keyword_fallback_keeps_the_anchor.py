@@ -213,11 +213,12 @@ def test_the_real_hpai_query_still_trips_the_1200_character_gate():
     from api import pipeline as P
     src = inspect.getsource(P._run_user_scenario_populate)
     assert "len(_portable_bool) <= 1200" in src
+    # La requête abrégée de ce fichier tient SOUS la limite : elle sert à tester la
+    # structure du repli, pas le franchissement. La vraie requête de production fait
+    # 2 465 caractères portables, mesurés sur le scénario HPAI ; on ne l'embarque pas
+    # ici parce qu'une fixture de 3 000 caractères n'apprendrait rien de plus que ce
+    # chiffre, qui est dans la docstring du module.
     portable = " ".join(_strip_field_tags(HPAI).split())
     assert len(portable) < 1200, (
-        "la requête abrégée de ce test ne déclenche plus le repli ; "
-        "elle doit rester représentative")
-    strategy = ROOT / "tests" / "fixtures"
-    # La vraie requête fait 2 465 caractères portables. On épingle l'ordre de grandeur
-    # sans dépendre d'un fichier : la structure testée ci-dessus est la même.
-    assert strategy is not None
+        "la requête abrégée de ce test a grossi au-delà de la limite : elle ne teste plus "
+        "ce qu'elle croit tester")

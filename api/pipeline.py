@@ -46,6 +46,7 @@ from .search import (
     _set_scenario_corpus,
     _source_label,
     _store_prisma_identification,
+    source_record_keys,
     _strip_field_tags,
     _tokenize_boolean,
     _widen_boolean_for_or_facets,
@@ -1426,7 +1427,16 @@ def _run_user_scenario_populate(
                 # compte qui n'est pas un total, et son zéro qui ne vaut pas « rien ».
                 _outcome = "cut_by_budget"
             else:
-                _outcome = "ok" if _returned[_n] > 0 else "empty"
+                # Ce que la source a RENVOYÉ, et non les lignes qu'on en a insérées.
+                # `_returned` porte le compteur du fetcher, qui ne s'incrémente que sur une
+                # ligne NOUVELLE : une source dont les 500 notices étaient déjà toutes en
+                # bibliothèque rendait donc 0, et l'issue calculée était `empty`, c'est-à-dire
+                # « cette base n'a rien sur le sujet ». La carte affichait « openalex 500 ·
+                # aucun résultat », un compte et son démenti côte à côte.
+                with _counter_lock:
+                    _recs = sum(int(_ident_records.get(_k) or 0)
+                                for _k in source_record_keys(_n))
+                _outcome = "ok" if _recs > 0 else "empty"
             _fetcher_outcome[_n] = _outcome
             if _outcome in SOURCE_OUTCOMES_COUNTED:
                 _queried.add(_n)

@@ -195,23 +195,86 @@ def test_the_health_probe_counts_the_same_thing_for_every_source():
         assert marker in _probes, f"une sonde ne lit plus son total : {marker}"
 
 
-def test_an_esummary_that_succeeds_with_nothing_in_it_is_also_partial():
+class _EutilsSpy:
+    """eutils simulé : l'esearch trouve `n_ids` identifiants, l'esummary en rend `n_back`."""
+
+    def __init__(self, n_ids: int, n_back: int, count: int | None = None):
+        self.n_ids, self.n_back = n_ids, n_back
+        self.count = n_ids if count is None else count
+
+    def _resp(self, payload):
+        class _R:
+            status_code = 200
+
+            def json(_self):
+                return payload
+
+            def raise_for_status(_self):
+                return None
+        return _R()
+
+    def get(self, url, params=None, timeout=None, **kw):
+        if "esearch" in url:
+            return self._resp({"esearchresult": {"count": str(self.count),
+                                                 "idlist": [str(39000000 + i) for i in range(self.n_ids)]}})
+        if "esummary" in url:
+            uids = [str(39000000 + i) for i in range(self.n_back)]
+            result = {"uids": uids}
+            for u in uids:
+                result[u] = {"title": f"t{u}", "pubdate": "2025 Jan", "articleids": [], "authors": []}
+            return self._resp({"result": result})
+        raise AssertionError(url)
+
+    post = get
+
+
+def test_an_esummary_that_succeeds_with_nothing_in_it_is_also_partial(monkeypatch):
     """`{"result": {"uids": []}}` est un 200. Rien ne levait, donc rien ne le disait.
 
     Sous charge, eutils rend ce corps pour des identifiants que l'esearch venait de
     donner. La fonction rendait alors `([], 306)` et l'appelant lisait « vide » : une
-    affirmation sur la littérature pour un aller-retour manqué. Vu en déroulant un
-    scénario neuf de bout en bout."""
-    import inspect
+    affirmation sur la littérature pour un aller-retour manqué.
+
+    MESURÉ, et non lu dans le source : la première version de ce test cherchait la ligne
+    `len(results) < len(ids)` dans le texte, et la relecture a montré qu'on pouvait
+    déplacer la garde APRÈS le `return`, ce qui la rend morte, sans que le test rougisse."""
+    import sys
     from api import sources as S
-    src = inspect.getsource(S._live_fetch_pubmed)
-    head, _, tail = src.partition("    except Exception as _e:")
-    assert "raise PartialSourceFetch" in tail.split("return results, total")[0]
-    # Et le test du manque est APRÈS le bloc except, donc sur le chemin qui a réussi.
-    after = tail[tail.index("from _e"):]
-    assert "len(results) < len(ids)" in after, (
-        "un esummary plus court que sa liste d'identifiants passe encore pour complet")
-    assert "raise PartialSourceFetch" in after
+    monkeypatch.setitem(sys.modules, "requests", _EutilsSpy(n_ids=30, n_back=0, count=306))
+    monkeypatch.setattr(S, "_NCBI_LAST", [0.0], raising=False)
+    monkeypatch.setattr(S, "_NCBI_MIN_INTERVAL", 0.0, raising=False)
+    monkeypatch.delenv("NCBI_API_KEY", raising=False)
+    with pytest.raises(S.PartialSourceFetch) as exc:
+        S._live_fetch_pubmed("avian influenza", 30)
+    assert exc.value.total == 306, "le vrai total de l'esearch doit voyager avec le partiel"
+    assert exc.value.items == []
+    assert "30" in exc.value.reason and "0" in exc.value.reason
+
+
+def test_an_esummary_that_returns_fewer_than_asked_is_partial_and_keeps_what_came(monkeypatch):
+    """Vingt notices sur trente : partiel, et les vingt sont gardées."""
+    import sys
+    from api import sources as S
+    monkeypatch.setitem(sys.modules, "requests", _EutilsSpy(n_ids=30, n_back=20))
+    monkeypatch.setattr(S, "_NCBI_LAST", [0.0], raising=False)
+    monkeypatch.setattr(S, "_NCBI_MIN_INTERVAL", 0.0, raising=False)
+    monkeypatch.delenv("NCBI_API_KEY", raising=False)
+    with pytest.raises(S.PartialSourceFetch) as exc:
+        S._live_fetch_pubmed("avian influenza", 30)
+    assert len(exc.value.items) == 20
+    assert exc.value.total == 30
+
+
+def test_a_complete_esummary_is_not_partial(monkeypatch):
+    """Et le chemin normal ne doit pas lever : trente demandés, trente rendus."""
+    import sys
+    from api import sources as S
+    monkeypatch.setitem(sys.modules, "requests", _EutilsSpy(n_ids=30, n_back=30))
+    monkeypatch.setattr(S, "_NCBI_LAST", [0.0], raising=False)
+    monkeypatch.setattr(S, "_NCBI_MIN_INTERVAL", 0.0, raising=False)
+    monkeypatch.delenv("NCBI_API_KEY", raising=False)
+    results, total = S._live_fetch_pubmed("avian influenza", 30)
+    assert len(results) == 30 and total == 30
 
 
 def test_a_failed_source_is_not_listed_among_the_sources_searched():

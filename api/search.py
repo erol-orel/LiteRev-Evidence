@@ -830,6 +830,24 @@ def _source_label(fetcher_name: str) -> str:
     return str(fetcher_name or "").replace("_fetch_", "", 1)
 
 
+#: La ou les clés sous lesquelles un fetcher ÉCRIT ses enregistrements, quand elles
+#: diffèrent de son propre nom. Deux le font : `_fetch_preprints` écrit sous « preprint »
+#: au singulier, et `_fetch_biorxiv_medrxiv` sous « biorxiv » et « medrxiv » séparément.
+#: Le tableau d'identification portait donc une ligne fantôme à zéro juste à côté de la
+#: vraie (« preprint 5 » et « preprints 0 »), et l'issue de la source se décidait sur un
+#: compteur qui n'était pas le sien.
+SOURCE_RECORD_KEYS = {
+    "preprints": ("preprint",),
+    "biorxiv_medrxiv": ("biorxiv", "medrxiv"),
+}
+
+
+def source_record_keys(name: str) -> tuple[str, ...]:
+    """Les clés de `records_by_source` qu'alimente ce fetcher (ou cette source)."""
+    label = _source_label(name)
+    return SOURCE_RECORD_KEYS.get(label, (label,))
+
+
 def _coverage_caveat(outcomes: dict) -> str:
     """Ce que la ligne de couverture doit dire en plus du nombre de sources.
 
@@ -911,6 +929,11 @@ def _prisma_identification_figures(records_by_source: dict, unique_records: int,
     # échoué, il peut seulement constater que PubMed n'y est pas.
     records = {k: v for k, v in _raw.items() if v > 0}
     for name in outcomes:
+        # Une source dont les enregistrements sont DÉJÀ au tableau sous une autre clé n'y
+        # ajoute pas une ligne fantôme à zéro à côté de la vraie : « preprint 5 » puis
+        # « preprints 0 » se lisait comme deux sources dont l'une n'avait rien trouvé.
+        if any(_raw.get(k) for k in source_record_keys(name)):
+            continue
         records.setdefault(name, 0)
     by_outcome = {o: sorted(k for k, v in outcomes.items() if v == o) for o in SOURCE_OUTCOMES}
     searched = sum(len(by_outcome[o]) for o in SOURCE_OUTCOMES_COUNTED)
