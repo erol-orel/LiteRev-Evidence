@@ -80,8 +80,6 @@ def test_no_module_writes_its_own_relevance_gate():
             continue
         if any(tag in line for _n, tag in ALLOWED if _n == name):
             continue
-        if "rerank_score IS NULL OR" in line:       # copie connue, voir KNOWN_PASTED
-            continue
         offenders.append(f"{name}:{i}: {line.strip()[:110]}")
     assert not offenders, (
         "une porte de pertinence écrite à la main est revenue ; utilisez "
@@ -97,20 +95,12 @@ def test_the_gate_still_carries_both_scores():
     assert "IS DISTINCT FROM 'excluded'" in sql
 
 
-#: Les sites qui portent le TEXTE de la porte au lieu de l'appeler. La requête qu'ils
-#: exécutent est aujourd'hui exactement celle que la fonction produit, parce qu'elle y a
-#: été copiée depuis sa sortie ; mais une clause ajoutée demain à la fonction ne les
-#: suivra pas, ce qui est précisément le défaut que l'unification devait supprimer.
-#: Ce nombre ne doit que DIMINUER. Le convertir demande de transformer 34 chaînes SQL en
-#: f-strings, ce qui se fait fichier par fichier et se vérifie requête par requête.
-KNOWN_PASTED = {
-    "evidence.py": 20, "digest.py": 4, "knowledge_graph.py": 4, "assistant.py": 2,
-    "alerts.py": 1, "clustering.py": 1, "relevance.py": 1, "review.py": 1,
-    "seir.py": 1, "sources.py": 1, "variables.py": 1,
-}
-
-
 def _pasted_by_file() -> dict:
+    """Les sites qui portent le TEXTE de la porte au lieu de l'appeler.
+
+    Il y en avait 37, dans 11 modules. La liste des copies tolérées a disparu avec
+    elles : la clause de rerank, elle, était restée dans la seule requête qui appelle la
+    fonction, et c'est ce qui faisait dire 201 au compteur et 602 au brief."""
     out: dict[str, int] = {}
     for name, _i, line in _sql_lines():
         if "rerank_score IS NULL OR" in line:
@@ -118,24 +108,32 @@ def _pasted_by_file() -> dict:
     return out
 
 
-def test_the_pasted_copies_never_grow():
-    """Une copie de plus est une régression, même si son SQL est juste le jour où elle
-    est écrite. C'est le texte qui est le problème, pas sa valeur actuelle."""
+def test_no_module_carries_the_text_of_the_gate():
     now = _pasted_by_file()
-    worse = {f: (n, KNOWN_PASTED.get(f, 0)) for f, n in now.items() if n > KNOWN_PASTED.get(f, 0)}
-    assert not worse, (
-        "le texte de la porte a été recopié dans de nouveaux endroits au lieu d'appeler "
-        f"relevant_gate_sql() ; fichier -> (maintenant, connu) : {worse}")
+    assert not now, (
+        "le texte de la porte a été recopié au lieu d'appeler relevant_gate_sql() ou "
+        f"relevant_gate_tail_sql() ; fichier -> nombre de copies : {now}")
 
 
-def test_the_known_list_is_not_stale():
-    """Si un fichier a été converti, il doit sortir de la liste, sinon elle protège un
-    problème qui n'existe plus et masque le suivant."""
-    now = _pasted_by_file()
-    stale = {f: n for f, n in KNOWN_PASTED.items() if now.get(f, 0) < n}
-    assert not stale, (
-        "des copies ont été converties sans mettre KNOWN_PASTED à jour ; "
-        f"fichier -> ancien compte : {stale}")
+def test_the_tail_helper_is_the_gate_minus_its_first_clause():
+    """La queue est obtenue en coupant la porte sur son premier « AND ». Si la clause des
+    doublons cessait d'arriver en tête, treize requêtes perdraient autre chose qu'elle."""
+    from api.scenario_store import relevant_gate_sql, relevant_gate_tail_sql
+    full, tail = relevant_gate_sql(), relevant_gate_tail_sql()
+    assert full.endswith(tail)
+    assert full[: -len(tail)] == "d.is_duplicate IS NOT TRUE AND "
+    assert "rerank_score" in tail and "IS DISTINCT FROM 'excluded'" in tail
+
+
+def test_the_shared_sql_constants_really_interpolate_the_gate():
+    """Les constantes SQL partagées portent la SORTIE de la fonction, donc elles suivront
+    la prochaine clause. Épinglé en comparant leur texte à ce que la fonction rend
+    aujourd'hui, sans recharger les modules (un reload rebâtirait des routeurs)."""
+    from api.scenario_store import relevant_gate_sql, relevant_gate_tail_sql
+    from api import alerts, digest, knowledge_graph
+    assert relevant_gate_sql("d", "ars", ":thr") in digest._RELEVANT
+    assert relevant_gate_tail_sql("d", "a", ":thr") in alerts._RELEVANT_GATE
+    assert relevant_gate_tail_sql("d", "ars", ":thr") in knowledge_graph._CONCEPT_ROWS_SQL
 
 
 def test_the_allowed_exceptions_still_exist():

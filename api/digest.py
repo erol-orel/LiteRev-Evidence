@@ -29,17 +29,15 @@ from .study_design import raw_design_sql
 #: Le devis brut d'un article, écrit une seule fois.
 _raw_design_d = raw_design_sql("d")
 
-from .scenario_store import _get_scenario_threshold
+from .scenario_store import _get_scenario_threshold, relevant_gate_sql
 
 # Sous-ensemble PERTINENT : même porte que partout ailleurs (jamais les exclus ; inclus
 # manuellement OU au-dessus du seuil). Une seule définition, reprise par chaque agrégat.
-_RELEVANT = """
+_RELEVANT = f"""
     FROM literature_document d
     JOIN article_scenarios ars ON ars.document_id = d.id
     WHERE ars.scenario_id = :sid
-      AND d.is_duplicate IS NOT TRUE
-      AND COALESCE(ars.screening_status, d.screening_status) IS DISTINCT FROM 'excluded'
-      AND (COALESCE(ars.screening_status, d.screening_status) = 'included' OR (COALESCE(ars.similarity_score, 0) >= :thr AND (ars.rerank_score IS NULL OR ars.rerank_score >= COALESCE((SELECT ss.rerank_threshold FROM scenario_settings ss WHERE ss.scenario_id = ars.scenario_id), 0.0))))
+      AND {relevant_gate_sql('d', 'ars', ':thr')}
 """
 
 # Combien de modalités on garde par distribution : de quoi décrire un corpus sans noyer
@@ -110,21 +108,19 @@ def concept_matrix(scenario_id: str, row_type: str, col_type: str,
             # propre FROM et le CROSS JOIN LATERAL doit s'insérer avant le WHERE. La
             # condition est donc répétée, à l'identique, plutôt que fabriquée par
             # bricolage de chaîne.
-            out["available_types"] = _rows(conn, """
+            out["available_types"] = _rows(conn, f"""
                 SELECT c->>'t' AS value, COUNT(DISTINCT d.id) AS n
                 FROM literature_document d
                 JOIN article_scenarios ars ON ars.document_id = d.id
                 CROSS JOIN LATERAL jsonb_array_elements(d.concepts_json->'concepts') AS c
                 WHERE ars.scenario_id = :sid
-                  AND d.is_duplicate IS NOT TRUE
-                  AND COALESCE(ars.screening_status, d.screening_status) IS DISTINCT FROM 'excluded'
-                  AND (COALESCE(ars.screening_status, d.screening_status) = 'included' OR (COALESCE(ars.similarity_score, 0) >= :thr AND (ars.rerank_score IS NULL OR ars.rerank_score >= COALESCE((SELECT ss.rerank_threshold FROM scenario_settings ss WHERE ss.scenario_id = ars.scenario_id), 0.0))))
+                  AND {relevant_gate_sql('d', 'ars', ':thr')}
                   AND jsonb_typeof(d.concepts_json->'concepts') = 'array'
                   AND c->>'t' IS NOT NULL
                 GROUP BY 1 ORDER BY n DESC
             """, scenario_id, thr)
 
-            pairs = _rows(conn, """
+            pairs = _rows(conn, f"""
                 SELECT r->>'en' AS row_label, c->>'en' AS col_label,
                        COUNT(DISTINCT d.id) AS n
                 FROM literature_document d
@@ -132,9 +128,7 @@ def concept_matrix(scenario_id: str, row_type: str, col_type: str,
                 CROSS JOIN LATERAL jsonb_array_elements(d.concepts_json->'concepts') AS r
                 CROSS JOIN LATERAL jsonb_array_elements(d.concepts_json->'concepts') AS c
                 WHERE ars.scenario_id = :sid
-                  AND d.is_duplicate IS NOT TRUE
-                  AND COALESCE(ars.screening_status, d.screening_status) IS DISTINCT FROM 'excluded'
-                  AND (COALESCE(ars.screening_status, d.screening_status) = 'included' OR (COALESCE(ars.similarity_score, 0) >= :thr AND (ars.rerank_score IS NULL OR ars.rerank_score >= COALESCE((SELECT ss.rerank_threshold FROM scenario_settings ss WHERE ss.scenario_id = ars.scenario_id), 0.0))))
+                  AND {relevant_gate_sql('d', 'ars', ':thr')}
                   AND jsonb_typeof(d.concepts_json->'concepts') = 'array'
                   AND r->>'t' = :row_type AND c->>'t' = :col_type
                   AND r->>'en' IS NOT NULL AND c->>'en' IS NOT NULL
@@ -245,15 +239,13 @@ def corpus_digest(scenario_id: str, threshold: float | None = None) -> dict[str,
             # Concepts typés (concepts_json, un par article, normalisés par le LLM une
             # seule fois) : la vue la plus fidèle de ce dont TOUT le corpus parle.
             try:
-                concepts = _rows(conn, """
+                concepts = _rows(conn, f"""
                     SELECT c->>'t' AS type, c->>'en' AS label, COUNT(*) AS n
                     FROM literature_document d
                     JOIN article_scenarios ars ON ars.document_id = d.id
                     CROSS JOIN LATERAL jsonb_array_elements(d.concepts_json->'concepts') AS c
                     WHERE ars.scenario_id = :sid
-                      AND d.is_duplicate IS NOT TRUE
-                      AND COALESCE(ars.screening_status, d.screening_status) IS DISTINCT FROM 'excluded'
-                      AND (COALESCE(ars.screening_status, d.screening_status) = 'included' OR (COALESCE(ars.similarity_score, 0) >= :thr AND (ars.rerank_score IS NULL OR ars.rerank_score >= COALESCE((SELECT ss.rerank_threshold FROM scenario_settings ss WHERE ss.scenario_id = ars.scenario_id), 0.0))))
+                      AND {relevant_gate_sql('d', 'ars', ':thr')}
                       AND jsonb_typeof(d.concepts_json->'concepts') = 'array'
                       AND c->>'en' IS NOT NULL
                     GROUP BY 1, 2 ORDER BY n DESC

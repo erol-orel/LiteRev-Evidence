@@ -15,7 +15,8 @@ from sqlalchemy import text
 
 from .core import RELIEFWEB_APPNAME, app, engine, logger, require_api_key
 from .documents import _normalize_doi, _normalize_title, sanitize_db_text
-from .scenario_store import _get_scenario_threshold, _get_user_scenario_or_404
+from .scenario_store import (_get_scenario_threshold, _get_user_scenario_or_404,
+                             relevant_gate_tail_sql)
 from .search import _plain_keywords
 from llm_usage import model_for as _model
 
@@ -600,9 +601,9 @@ def search_live(
     corpus_above = 0
     try:
         with engine.connect() as _cc:
-            _cr = _cc.execute(text("""
+            _cr = _cc.execute(text(f"""
                 SELECT COUNT(*) AS total,
-                       COUNT(*) FILTER (WHERE COALESCE(ars.screening_status, d.screening_status) IS DISTINCT FROM 'excluded' AND (COALESCE(ars.screening_status, d.screening_status) = 'included' OR (COALESCE(ars.similarity_score, 0) >= :thr AND (ars.rerank_score IS NULL OR ars.rerank_score >= COALESCE((SELECT ss.rerank_threshold FROM scenario_settings ss WHERE ss.scenario_id = ars.scenario_id), 0.0))))) AS above
+                       COUNT(*) FILTER (WHERE {relevant_gate_tail_sql('d', 'ars', ':thr')}) AS above
                 FROM article_scenarios ars
                 JOIN literature_document d ON d.id = ars.document_id
                 WHERE ars.scenario_id = :sid AND (d.is_duplicate IS NULL OR d.is_duplicate = FALSE)

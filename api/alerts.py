@@ -16,7 +16,7 @@ from sqlalchemy import text
 
 from .core import app, engine, logger, require_api_key
 from .gesica import _get_scenario_name
-from .scenario_store import _get_scenario_threshold
+from .scenario_store import _get_scenario_threshold, relevant_gate_tail_sql
 
 # ─── ALERTES EMAIL ────────────────────────────────────────────────────────────
 
@@ -219,9 +219,8 @@ def _count_new_articles_for_scenario(conn, scenario_id: str, since) -> int:
 
 # Gate de pertinence : le MÊME prédicat que partout (jamais les exclus, inclus par un
 # relecteur ou au-dessus du seuil).
-_RELEVANT_GATE = """
-      AND COALESCE(a.screening_status, d.screening_status) IS DISTINCT FROM 'excluded'
-      AND (COALESCE(a.screening_status, d.screening_status) = 'included' OR (COALESCE(a.similarity_score, 0) >= :thr AND (a.rerank_score IS NULL OR a.rerank_score >= COALESCE((SELECT ss.rerank_threshold FROM scenario_settings ss WHERE ss.scenario_id = a.scenario_id), 0.0))))
+_RELEVANT_GATE = f"""
+      AND {relevant_gate_tail_sql('d', 'a', ':thr')}
 """
 
 # Devis qui déplacent le niveau de preuve d'une revue : s'ils arrivent, le brief mérite

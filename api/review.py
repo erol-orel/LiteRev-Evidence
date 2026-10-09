@@ -13,7 +13,7 @@ from fastapi import Depends, HTTPException, Query
 from sqlalchemy import text
 
 from .core import app, engine, logger, require_api_key
-from .scenario_store import _get_user_scenario_or_404
+from .scenario_store import _get_user_scenario_or_404, relevant_gate_tail_sql
 from .search import _load_prisma_identification, _reconcile_prisma_identification
 from .double_blind import _write_ars_screening
 from llm_usage import model_for as _model
@@ -131,7 +131,7 @@ def get_user_scenario_prisma(
     )
 
     with engine.connect() as conn:
-        stats = conn.execute(text("""
+        stats = conn.execute(text(f"""
             SELECT
                 COUNT(*) AS total,
                 SUM(CASE WHEN d.source = 'pubmed'   THEN 1 ELSE 0 END) AS pubmed,
@@ -174,7 +174,7 @@ def get_user_scenario_prisma(
                 SUM(CASE WHEN (d.is_duplicate IS NULL OR d.is_duplicate = FALSE) AND EXISTS (
                     SELECT 1 FROM document_chunk c
                     WHERE c.document_id = d.id AND c.chunk_type = 'fulltext_section'
-                ) AND COALESCE(ars.screening_status, d.screening_status) IS DISTINCT FROM 'excluded' AND (COALESCE(ars.screening_status, d.screening_status) = 'included' OR (COALESCE(ars.similarity_score, 0) >= :thr AND (ars.rerank_score IS NULL OR ars.rerank_score >= COALESCE((SELECT ss.rerank_threshold FROM scenario_settings ss WHERE ss.scenario_id = ars.scenario_id), 0.0))))
+                ) AND {relevant_gate_tail_sql('d', 'ars', ':thr')}
                   THEN 1 ELSE 0 END) AS with_fulltext,
                 -- embeddings : MÊME sous-ensemble non dupliqué que les étapes
                 -- post-identification ci-dessus. Sans le filtre, la carte PRISMA pouvait

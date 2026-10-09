@@ -30,6 +30,7 @@ from .scenario_store import (
     _get_scenario_rerank_threshold,
     _get_scenario_threshold,
     _get_user_scenario_or_404,
+    relevant_gate_sql,
 )
 from .search import (
     _boolean_corpus_ids,
@@ -444,14 +445,10 @@ def _get_above_threshold_articles(scenario_id: str, threshold: float | None = No
                 FROM literature_document ld
                 JOIN article_scenarios asn ON asn.document_id = ld.id AND asn.scenario_id = :sid
                 WHERE ld.project_context = 'literev'
-                  AND ld.is_duplicate IS NOT TRUE
-                  -- Porte de screening (C1) : ne jamais alimenter le modèle avec un
-                  -- article explicitement exclu (les autres statuts restent admis).
-                  AND COALESCE(asn.screening_status, ld.screening_status) IS DISTINCT FROM 'excluded'
-                  -- Décision produit : un article NON scoré (similarity_score NULL)
-                  -- n'est PAS pertinent - même définition que tous les affichages
-                  -- (COALESCE(score,0) >= seuil). On garde le rattrapage 'included'.
-                  AND (COALESCE(asn.screening_status, ld.screening_status) = 'included' OR (COALESCE(asn.similarity_score, 0) >= :threshold AND (asn.rerank_score IS NULL OR asn.rerank_score >= COALESCE((SELECT ss.rerank_threshold FROM scenario_settings ss WHERE ss.scenario_id = asn.scenario_id), 0.0))))
+                  -- La porte de pertinence, appelée et non recopiée : jamais un doublon,
+                  -- jamais un article exclu par un relecteur, sinon inclus à la main OU
+                  -- au-dessus des deux seuils. Un article non scoré compte pour 0.
+                  AND {relevant_gate_sql('ld', 'asn', ':threshold')}
                   {"AND ld.pico_json IS NOT NULL" if require_pico else ""}
             ) ranked
             ORDER BY rn

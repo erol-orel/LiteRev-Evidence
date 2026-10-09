@@ -14,7 +14,8 @@ from sqlalchemy import text
 
 from .core import _norm_lang, app, engine, logger
 from .documents import _llm_lang_directive
-from .scenario_store import _get_scenario_threshold, _get_user_scenario_or_404
+from .scenario_store import (_get_scenario_threshold, _get_user_scenario_or_404,
+                             relevant_gate_tail_sql)
 from .gesica import _gesica_title, _get_db_gesica_scenario_or_404, _get_scenario_name
 from llm_usage import model_for as _model
 
@@ -164,7 +165,7 @@ def _clustering_docs(scenario_id: str, threshold: float, cap: int | None = None)
     processus API sur le serveur. Les clusters sont visuellement identiques sur les
     3 000 articles les plus pertinents."""
     cap = CLUSTER_MAX_DOCS if cap is None else max(5, int(cap))
-    _relevant = """
+    _relevant = f"""
         FROM literature_document d
         JOIN article_scenarios asn ON asn.document_id = d.id
         WHERE asn.scenario_id = :sid
@@ -172,8 +173,7 @@ def _clustering_docs(scenario_id: str, threshold: float, cap: int | None = None)
           AND (d.is_duplicate IS NULL OR d.is_duplicate = FALSE)
           AND d.abstract IS NOT NULL
           AND LENGTH(d.abstract) > 50
-          AND COALESCE(asn.screening_status, d.screening_status) IS DISTINCT FROM 'excluded'
-          AND (COALESCE(asn.screening_status, d.screening_status) = 'included' OR (COALESCE(asn.similarity_score, 0) >= :thr AND (asn.rerank_score IS NULL OR asn.rerank_score >= COALESCE((SELECT ss.rerank_threshold FROM scenario_settings ss WHERE ss.scenario_id = asn.scenario_id), 0.0))))
+          AND {relevant_gate_tail_sql('d', 'asn', ':thr')}
     """
     with engine.connect() as conn:
         n_total = int(conn.execute(text(f"SELECT COUNT(*) {_relevant}"),

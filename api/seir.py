@@ -13,7 +13,7 @@ from pydantic import BaseModel
 from sqlalchemy import text
 
 from .core import app, engine, logger, require_api_key
-from .scenario_store import _get_scenario_threshold
+from .scenario_store import _get_scenario_threshold, relevant_gate_tail_sql
 from .model_data import _get_model_spec
 
 def _scenario_seed(scenario_id: str) -> tuple[float, float, str | None]:
@@ -49,14 +49,14 @@ def _scenario_seed(scenario_id: str) -> tuple[float, float, str | None]:
         try:
             threshold = _get_scenario_threshold(scenario_id)
             with engine.connect() as conn:
-                rows = conn.execute(text("""
+                rows = conn.execute(text(f"""
                     SELECT ld.geographic_scope AS geo, COUNT(*) AS n
                     FROM literature_document ld
                     JOIN article_scenarios asn ON asn.document_id = ld.id AND asn.scenario_id = :sid
                     WHERE ld.project_context = 'literev'
                       AND ld.is_duplicate IS NOT TRUE
                       AND ld.geographic_scope IS NOT NULL
-                      AND COALESCE(asn.screening_status, ld.screening_status) IS DISTINCT FROM 'excluded' AND (COALESCE(asn.screening_status, ld.screening_status) = 'included' OR (COALESCE(asn.similarity_score, 0) >= :threshold AND (asn.rerank_score IS NULL OR asn.rerank_score >= COALESCE((SELECT ss.rerank_threshold FROM scenario_settings ss WHERE ss.scenario_id = asn.scenario_id), 0.0))))
+                      AND {relevant_gate_tail_sql('ld', 'asn', ':threshold')}
                     GROUP BY ld.geographic_scope
                     ORDER BY n DESC, ld.geographic_scope ASC
                 """), {"sid": scenario_id, "threshold": threshold}).mappings().all()

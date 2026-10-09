@@ -13,7 +13,7 @@ from sqlalchemy import text
 
 from .core import _env_int, _job_is_active, _msg, _norm_lang, app, engine, logger, require_api_key
 from .documents import _llm_lang_directive
-from .scenario_store import _get_scenario_threshold
+from .scenario_store import _get_scenario_threshold, relevant_gate_tail_sql
 from .gesica import _get_scenario_name
 from .relevance import _evidence_fingerprint, _get_above_threshold_articles
 from llm_usage import model_for as _model
@@ -104,7 +104,7 @@ def _parameter_candidate_articles(scenario_id: str, threshold: float | None = No
     `limit <= 0` : aucun plafond (le cas par défaut)."""
     if threshold is None:
         threshold = _get_scenario_threshold(scenario_id)
-    sql = text("""
+    sql = text(f"""
         SELECT d.id, d.title, d.abstract, d.year, d.doi, d.study_design,
                d.quality_score, d.citation_count, d.source,
                COALESCE(ars.similarity_score, 0) AS similarity
@@ -113,8 +113,7 @@ def _parameter_candidate_articles(scenario_id: str, threshold: float | None = No
         WHERE ars.scenario_id = :sid
           AND d.is_duplicate IS NOT TRUE
           AND d.abstract IS NOT NULL
-          AND COALESCE(ars.screening_status, d.screening_status) IS DISTINCT FROM 'excluded'
-          AND (COALESCE(ars.screening_status, d.screening_status) = 'included' OR (COALESCE(ars.similarity_score, 0) >= :thr AND (ars.rerank_score IS NULL OR ars.rerank_score >= COALESCE((SELECT ss.rerank_threshold FROM scenario_settings ss WHERE ss.scenario_id = ars.scenario_id), 0.0))))
+          AND {relevant_gate_tail_sql('d', 'ars', ':thr')}
           AND (d.title || ' ' || d.abstract) ~* :rx
         ORDER BY
           CASE WHEN COALESCE(d.study_design, '') ~* 'systematic|meta-analy|méta-analy' THEN 0 ELSE 1 END,

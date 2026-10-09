@@ -108,6 +108,29 @@ def relevant_gate_sql(doc: str = "d", link: str = "ars", thr: str = ":thr") -> s
             f" AND ({link}.rerank_score IS NULL OR {link}.rerank_score >= {rthr})))")
 
 
+#: La première clause de la porte, celle que `relevant_gate_tail_sql` retire. Épinglée
+#: ici parce que la queue est obtenue en coupant sur le premier « AND » : si la clause
+#: des doublons cessait d'arriver en tête, la coupe emporterait autre chose.
+_GATE_FIRST_CLAUSE = "is_duplicate IS NOT TRUE"
+
+
+def relevant_gate_tail_sql(doc: str = "d", link: str = "ars", thr: str = ":thr") -> str:
+    """La porte SANS sa clause sur les doublons, pour les WHERE qui l'écrivent déjà.
+
+    Treize des requêtes converties portaient la porte en deux morceaux : la clause des
+    doublons en haut du WHERE, parmi les prédicats de contexte, et le reste plus bas.
+    Leur donner la porte entière ajouterait un prédicat, et je ne veux pas qu'une
+    unification change le SQL qui part en base le jour où elle est faite : ce qui doit
+    changer, c'est où la condition est ÉCRITE, pas ce qu'elle dit.
+
+    Le reste de leur WHERE exclut déjà les doublons, donc le lot est le même ; et la
+    clause ajoutée demain à la porte les atteindra, elles aussi."""
+    full = relevant_gate_sql(doc, link, thr)
+    head, _, tail = full.partition(" AND ")
+    assert _GATE_FIRST_CLAUSE in head, head
+    return tail
+
+
 # ── La nature d'une question, et ce qu'elle rend disponible ──────────────────
 # Toute question n'appelle pas un modèle. Beaucoup se terminent par une synthèse :
 # ce que la littérature établit, avec quelle certitude, et ce qui manque. Pour
