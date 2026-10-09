@@ -185,3 +185,55 @@ def test_a_failed_source_is_not_listed_among_the_sources_searched():
         "le nom est encore ajouté dans la branche d'échec : le panneau liste la source "
         "parmi celles qu'il dit avoir interrogées")
     assert tail.count("source_status[name]") == 1
+
+
+# ── Le fichier doit s'ouvrir dans un tableur ────────────────────────────────
+
+def test_the_csv_keeps_its_byte_order_mark_at_the_very_first_byte():
+    """Excel ne détecte l'UTF-8 que par un BOM en PREMIER octet.
+
+    Le bloc de provenance ajouté en tête le repoussait de sept lignes : le fichier
+    s'ouvrait alors en « Rossi MÃ¼ller » au lieu de « Rossi Müller ». Vu sur l'export
+    réel du scénario HPAI, juste après le déploiement."""
+    from api.exports import render_export
+    body = render_export("csv", [{"rank": 1, "id": 9, "title": "Rossi Müller"}], "T",
+                         {"scenario": "S", "subset_label": "relevant", "n_articles": 1,
+                          "similarity_threshold": 0.4226})
+    assert body[:3] == b"\xef\xbb\xbf", "le BOM n'est plus le premier octet"
+    text = body.decode("utf-8-sig")
+    assert text.startswith("# Scenario: S")
+    assert "Rossi Müller" in text
+    # Et une seule fois : le BOM ne doit pas réapparaître au milieu du fichier.
+    assert text.count("\ufeff") == 0
+
+
+def test_every_format_carries_the_provenance_in_its_own_comment_syntax():
+    from api.exports import render_export
+    meta = {"scenario": "S", "scenario_id": "usr-1", "query": "q",
+            "subset_label": "relevant", "n_articles": 1,
+            "similarity_threshold": 0.4226, "rerank_threshold": 0.2,
+            "coverage": "tous les pertinents"}
+    # Une ligne COMPLÈTE : les formateurs lisent toutes les colonnes de l'export.
+    from api.exports import EXPORT_COLUMNS
+    rows = [{**{c: "" for c in EXPORT_COLUMNS},
+             "rank": 1, "id": 9, "title": "A paper", "authors": "Rossi M",
+             "url": "https://doi.org/10.1/a", "doi": "10.1/a", "year": 2025}]
+    for fmt, marker in (("csv", "# Scenario: S"), ("md", "> Scenario: S"),
+                        ("bibtex", "% Scenario: S"), ("ris", "N1  - Scenario: S")):
+        out = render_export(fmt, rows, "T", meta).decode("utf-8-sig")
+        assert marker in out, f"{fmt} ne porte pas sa provenance"
+        assert "0.4226" in out, f"{fmt} ne porte pas le seuil qui a défini son lot"
+    # Le JSON la porte dans son bloc `meta`, et le XLSX sur une feuille à part.
+    import json as _json
+    assert _json.loads(render_export("json", rows, "T", meta))["meta"]["similarity_threshold"] == 0.4226
+    _x = render_export("xlsx", rows, "T", meta)
+    assert _x[:2] == b"PK" and len(_x) > 3000
+
+
+def test_a_threshold_of_zero_is_called_out_rather_than_labelled_relevant():
+    """`?threshold=0` rend le corpus ENTIER. Le fichier doit le dire."""
+    from api.exports import provenance_lines
+    lines = " ".join(provenance_lines({"subset_label": "relevant-articles", "n_articles": 640,
+                                       "similarity_threshold": 0}))
+    assert "WHOLE corpus" in lines
+
