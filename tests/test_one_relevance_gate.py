@@ -76,11 +76,11 @@ def test_no_module_writes_its_own_relevance_gate():
             continue
         if not re.search(r"similarity_score,?\s*0?\)?\s*>=", line):
             continue
-        if "rerank_score IS NULL" in line:          # passe par la porte
-            continue
         if line.lstrip().startswith(("#", "--")) or "--" in line.split("similarity_score")[0]:
             continue
         if any(tag in line for _n, tag in ALLOWED if _n == name):
+            continue
+        if "rerank_score IS NULL OR" in line:       # copie connue, voir KNOWN_PASTED
             continue
         offenders.append(f"{name}:{i}: {line.strip()[:110]}")
     assert not offenders, (
@@ -95,6 +95,47 @@ def test_the_gate_still_carries_both_scores():
     assert "similarity_score" in sql and "rerank_score" in sql
     assert "is_duplicate IS NOT TRUE" in sql
     assert "IS DISTINCT FROM 'excluded'" in sql
+
+
+#: Les sites qui portent le TEXTE de la porte au lieu de l'appeler. La requête qu'ils
+#: exécutent est aujourd'hui exactement celle que la fonction produit, parce qu'elle y a
+#: été copiée depuis sa sortie ; mais une clause ajoutée demain à la fonction ne les
+#: suivra pas, ce qui est précisément le défaut que l'unification devait supprimer.
+#: Ce nombre ne doit que DIMINUER. Le convertir demande de transformer 34 chaînes SQL en
+#: f-strings, ce qui se fait fichier par fichier et se vérifie requête par requête.
+KNOWN_PASTED = {
+    "evidence.py": 20, "digest.py": 4, "knowledge_graph.py": 4, "assistant.py": 2,
+    "alerts.py": 1, "clustering.py": 1, "relevance.py": 1, "review.py": 1,
+    "seir.py": 1, "sources.py": 1, "variables.py": 1,
+}
+
+
+def _pasted_by_file() -> dict:
+    out: dict[str, int] = {}
+    for name, _i, line in _sql_lines():
+        if "rerank_score IS NULL OR" in line:
+            out[name] = out.get(name, 0) + 1
+    return out
+
+
+def test_the_pasted_copies_never_grow():
+    """Une copie de plus est une régression, même si son SQL est juste le jour où elle
+    est écrite. C'est le texte qui est le problème, pas sa valeur actuelle."""
+    now = _pasted_by_file()
+    worse = {f: (n, KNOWN_PASTED.get(f, 0)) for f, n in now.items() if n > KNOWN_PASTED.get(f, 0)}
+    assert not worse, (
+        "le texte de la porte a été recopié dans de nouveaux endroits au lieu d'appeler "
+        f"relevant_gate_sql() ; fichier -> (maintenant, connu) : {worse}")
+
+
+def test_the_known_list_is_not_stale():
+    """Si un fichier a été converti, il doit sortir de la liste, sinon elle protège un
+    problème qui n'existe plus et masque le suivant."""
+    now = _pasted_by_file()
+    stale = {f: n for f, n in KNOWN_PASTED.items() if now.get(f, 0) < n}
+    assert not stale, (
+        "des copies ont été converties sans mettre KNOWN_PASTED à jour ; "
+        f"fichier -> ancien compte : {stale}")
 
 
 def test_the_allowed_exceptions_still_exist():

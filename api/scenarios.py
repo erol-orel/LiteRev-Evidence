@@ -390,40 +390,60 @@ def _user_scenario_to_gesica_format(
 
 # ── CRUD ──────────────────────────────────────────────────────────────────────
 
+def _purge_duplicate_searches(conn) -> int:
+    """Supprime les recherches récentes qui doublonnent une autre, AVEC leurs enfants.
+
+    Cette purge vivait dans le GET qui liste les scénarios. Une lecture, sans clé d'API,
+    effaçait donc des lignes à chaque ouverture du tableau de bord, y compris par un
+    aperçu de lien ou un visiteur anonyme, alors que la route DELETE du même objet exige
+    la clé. Pire que la suppression elle-même : elle ne nettoyait rien d'autre, si bien
+    que les décisions de relecture (`article_scenarios`), le seuil et les caches
+    (`scenario_settings`), l'historique de questions et les entraînements restaient sans
+    parent, pour toujours. Un relecteur qui avait passé l'après-midi à trier la copie la
+    plus ancienne de sa recherche la perdait au rechargement suivant.
+
+    Elle est désormais appelée depuis la CRÉATION d'un scénario, là où la clé est déjà
+    exigée et où l'on sait quelle recherche vient d'arriver, et elle nettoie les mêmes
+    tables que la route DELETE."""
+    doomed = [r[0] for r in conn.execute(text("""
+        SELECT id FROM user_scenarios
+        WHERE pinned = false AND folder_id IS NULL
+          AND id NOT IN (
+            SELECT DISTINCT ON (query, mode, sub_queries, combinator) id
+            FROM user_scenarios
+            WHERE pinned = false AND folder_id IS NULL
+            ORDER BY query, mode, sub_queries, combinator, created_at DESC
+          )
+        UNION
+        SELECT u.id FROM user_scenarios u
+        WHERE u.pinned = false AND u.folder_id IS NULL
+          AND EXISTS (
+            SELECT 1 FROM user_scenarios p
+            WHERE p.pinned = true AND p.query = u.query AND p.mode = u.mode
+              AND p.sub_queries IS NOT DISTINCT FROM u.sub_queries
+              AND COALESCE(p.combinator, '') = COALESCE(u.combinator, '')
+          )
+    """))]
+    if not doomed:
+        return 0
+    for _t in ("article_scenarios", "scenario_settings", "scenario_question",
+               "scenario_model_dataset", "scenario_model_run"):
+        try:
+            conn.execute(text(f"DELETE FROM {_t} WHERE scenario_id = ANY(:ids)"), {"ids": doomed})
+        except Exception as _e:                      # table absente selon la version
+            logger.debug(f"purge {_t}: {_e}")
+    conn.execute(text("DELETE FROM user_scenarios WHERE id = ANY(:ids)"), {"ids": doomed})
+    logger.info(f"Purge des recherches en double : {len(doomed)} supprimées avec leurs enfants.")
+    return len(doomed)
+
+
 @app.get("/user-scenarios")
 def list_user_scenarios() -> list[dict[str, Any]]:
     """Liste tous les scénarios utilisateur (recherches sauvegardées).
-    Déduplique au passage les recherches récentes (non épinglées) par query+mode
-    en ne conservant que la plus récente de chaque groupe."""
+
+    LECTURE PURE. Elle dédupliquait au passage, c'est-à-dire qu'elle supprimait des
+    lignes : voir `_purge_duplicate_searches`, qui s'exécute maintenant à la création."""
     with engine.begin() as conn:
-        # Delete stale duplicates: for unpinned/unfoldered scenarios keep only
-        # the most recent row per (query, mode) pair.
-        # Identité COMPLÈTE d'une recherche = query + mode + sous-requêtes + combinateur :
-        # « A » et « (A) AND (B) » partagent la même `query` (facette principale) mais
-        # sont deux recherches distinctes - l'une ne doit pas purger l'autre.
-        conn.execute(text("""
-            DELETE FROM user_scenarios
-            WHERE pinned = false AND folder_id IS NULL
-              AND id NOT IN (
-                SELECT DISTINCT ON (query, mode, sub_queries, combinator) id
-                FROM user_scenarios
-                WHERE pinned = false AND folder_id IS NULL
-                ORDER BY query, mode, sub_queries, combinator, created_at DESC
-              )
-        """))
-        # Un scénario SAUVEGARDÉ (épinglé) est unique : purge toute recherche récente
-        # (non épinglée) qui DOUBLONNE un scénario épinglé de même query+mode. Sans ça,
-        # relancer une recherche déjà sauvegardée laissait une 2e carte identique.
-        conn.execute(text("""
-            DELETE FROM user_scenarios u
-            WHERE u.pinned = false AND u.folder_id IS NULL
-              AND EXISTS (
-                SELECT 1 FROM user_scenarios p
-                WHERE p.pinned = true AND p.query = u.query AND p.mode = u.mode
-                  AND p.sub_queries IS NOT DISTINCT FROM u.sub_queries
-                  AND COALESCE(p.combinator, '') = COALESCE(u.combinator, '')
-              )
-        """))
         rows = conn.execute(text("""
             SELECT
                 us.id, us.name, us.query, us.mode, us.kind, us.filters,
@@ -466,6 +486,15 @@ def create_user_scenario(payload: UserScenarioIn, request: Request = None, lang:
     Pour les recherches récentes (non épinglées, sans dossier), upsert par query+mode
     afin d'éviter l'accumulation de doublons lors des relances de recherche."""
     import uuid
+    # La purge des doublons vit ICI désormais, et non plus dans le GET qui liste : une
+    # lecture ne doit pas supprimer, et celle-là le faisait sans clé d'API et sans
+    # nettoyer les enfants. À la création on a la clé, et on sait qu'une recherche
+    # vient d'arriver, donc c'est le moment exact où un doublon peut apparaître.
+    try:
+        with engine.begin() as _pc:
+            _purge_duplicate_searches(_pc)
+    except Exception as _e_purge:                    # la purge ne doit jamais bloquer
+        logger.warning(f"purge des doublons à la création : {_e_purge}")
     # For unpinned auto-saved searches: upsert by query+mode to avoid duplicates.
     # Skip the upsert for multi-sub-query searches: they share the synthesized
     # display `query` yet are distinct searches, so query+mode dedup would wrongly
