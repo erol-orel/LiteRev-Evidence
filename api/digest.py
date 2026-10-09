@@ -29,7 +29,8 @@ from .study_design import raw_design_sql
 #: Le devis brut d'un article, écrit une seule fois.
 _raw_design_d = raw_design_sql("d")
 
-from .scenario_store import _get_scenario_threshold, relevant_gate_sql
+from .scenario_store import (_get_scenario_threshold, relevant_gate_sql,
+                             screening_status_sql)
 
 # Sous-ensemble PERTINENT : même porte que partout ailleurs (jamais les exclus ; inclus
 # manuellement OU au-dessus du seuil). Une seule définition, reprise par chaque agrégat.
@@ -193,7 +194,7 @@ def corpus_digest(scenario_id: str, threshold: float | None = None) -> dict[str,
         with engine.connect() as conn:
             head = _rows(conn, f"""
                 SELECT COUNT(*) AS n_articles,
-                       COUNT(*) FILTER (WHERE COALESCE(ars.screening_status, d.screening_status) = 'included') AS n_included,
+                       COUNT(*) FILTER (WHERE {screening_status_sql('d', 'ars')} = 'included') AS n_included,
                        COUNT(*) FILTER (WHERE d.pico_json IS NOT NULL) AS n_with_pico,
                        COUNT(*) FILTER (WHERE d.concepts_json IS NOT NULL) AS n_with_concepts,
                        COUNT(*) FILTER (WHERE d.has_fulltext IS TRUE) AS n_with_fulltext,

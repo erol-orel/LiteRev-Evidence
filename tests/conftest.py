@@ -81,7 +81,13 @@ def ensure_document_columns(cur) -> bool:
                      ("study_design", "TEXT"), ("quality_score", "FLOAT"),
                      ("project_context", "VARCHAR(32) DEFAULT 'literev'")):
         cur.execute(f"ALTER TABLE literature_document ADD COLUMN IF NOT EXISTS {col} {typ}")
-    for col, typ in (("rerank_score", "FLOAT"), ("screening_status", "TEXT"), ("reviewer_1_status", "VARCHAR(20)")):
+    for col, typ in (("rerank_score", "FLOAT"), ("screening_status", "TEXT"),
+                     ("reviewer_1_status", "VARCHAR(20)"),
+                     # L'état d'avant un découpage : `undo` écrivait littéralement
+                     # 'pending', ce qui détruisait les inclusions manuelles qu'une
+                     # restriction de portée avait recouvertes.
+                     ("prior_screening_status", "VARCHAR(20)"),
+                     ("prior_screening_reason", "TEXT")):
         cur.execute(f"ALTER TABLE article_scenarios ADD COLUMN IF NOT EXISTS {col} {typ}")
     return created_chunk_table
 

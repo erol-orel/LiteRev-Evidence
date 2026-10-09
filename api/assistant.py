@@ -21,6 +21,7 @@ from .scenario_store import (
     _get_scenario_threshold,
     _get_user_scenario_or_404,
     relevant_gate_sql,
+    screening_status_sql,
 )
 from .search import _build_where
 from llm_usage import model_for as _model
@@ -296,7 +297,7 @@ async def ask_stream(payload: dict[str, Any]) -> StreamingResponse:
             # répondait sur tout le corpus du scénario, y compris les articles que le
             # seuil met de côté, en se présentant comme filtré par scénario.
             join_extra = " JOIN article_scenarios ars ON ars.document_id = d.id AND ars.scenario_id = :scenario_id "
-            screen_expr = "COALESCE(ars.screening_status, d.screening_status)"
+            screen_expr = f"{screening_status_sql('d', 'ars')}"
             where_extra += " AND " + relevant_gate_sql(doc="d", link="ars", thr=":threshold")
             params_extra["scenario_id"] = scenario_id
             params_extra["threshold"] = _get_scenario_threshold(scenario_id)
@@ -659,7 +660,7 @@ async def ask_stream_filtered(payload: dict[str, Any]):
             # RAG citait donc des articles qu'un relecteur avait écartés, sous un
             # compteur « N articles pertinents » calculé, lui, sur le bon sous-ensemble.
             join_extra = " JOIN article_scenarios asn ON asn.document_id = d.id AND asn.scenario_id = :scenario_id "
-            screen_expr = "COALESCE(asn.screening_status, d.screening_status)"
+            screen_expr = f"{screening_status_sql('d', 'asn')}"
             where_extra += " AND " + relevant_gate_sql(doc="d", link="asn", thr=":threshold")
             params_extra["scenario_id"] = scenario_id
         else:

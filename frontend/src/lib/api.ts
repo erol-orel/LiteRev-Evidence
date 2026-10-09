@@ -1192,6 +1192,11 @@ export interface ScenarioPrisma {
     excluded: number;
     pending: number;
     screening_complete: boolean;
+    /** What "complete" means, in figures: a single decision used to flip
+     *  screening_complete to true on a corpus of 6 564 articles. */
+    screening_started?: boolean;
+    screened?: number;
+    to_screen?: number;
     manually_rescued: number;
     manually_vetoed: number;
     /** Why the excluded were excluded. One scope narrowing can account for most of the
@@ -1199,11 +1204,17 @@ export interface ScenarioPrisma {
     excluded_by_reason?: Array<{ reason: string; articles: number }>;
   };
   evidence: {
+    /** The relevant subset through the shared gate, so equal to counts.relevant,
+     *  rerank threshold included. It used to be arithmetic over a similarity-only
+     *  counter, which diverged the moment a rerank threshold was set. */
     total: number;
     ai_auto_selected: number;
     manually_rescued: number;
     with_fulltext: number;
     screening_complete: boolean;
+    screening_started?: boolean;
+    screened?: number;
+    to_screen?: number;
   };
   // legacy fields kept for backward compat
   screening?: {
@@ -2166,10 +2177,13 @@ export interface KappaStats {
 
 export interface DoubleBlindDecision {
   article_id: number;
-  reviewer: 1 | 2;
+  /** Kept for backward compatibility and ignored by the API: the role is derived from
+   *  the reviewer code, server side. A client that picks its own role ends up giving
+   *  the same one to two people. */
+  reviewer?: 1 | 2;
   status: "included" | "excluded" | "pending";
   reason?: string;
-  reviewer_code?: string;
+  reviewer_code: string;
 }
 
 export async function submitDoubleBlindDecision(
@@ -2185,6 +2199,79 @@ export async function submitDoubleBlindDecision(
       body: JSON.stringify(payload),
     },
   );
+  if (!r.ok) throw new Error(httpMessage(r.status));
+  return r.json();
+}
+
+export interface DoubleBlindQueue {
+  scenario_id: string;
+  reviewer: 1 | 2;
+  reviewer_code: string;
+  remaining: number;
+  returned: number;
+  articles: Array<{
+    id: number;
+    title: string;
+    abstract?: string | null;
+    year?: number | null;
+    journal?: string | null;
+    doi?: string | null;
+    similarity_score?: number | null;
+    rerank_score?: number | null;
+    reviewer_1_status?: string | null;
+    reviewer_2_status?: string | null;
+  }>;
+}
+
+/** The articles THIS reviewer has not voted on yet. Until now there was no way to cast
+ *  a double-blind vote at all: the panel's only buttons were the arbitration ones, and
+ *  the conflicts list can only fill once both reviewers have voted. */
+export async function fetchDoubleBlindQueue(
+  scenarioId: string,
+  reviewerCode: string,
+  limit = 25,
+): Promise<DoubleBlindQueue> {
+  const base = scenarioBase(scenarioId);
+  const qs = new URLSearchParams({ reviewer_code: reviewerCode, limit: String(limit) });
+  const r = await safeFetch(`${base}/${scenarioId}/double-blind/queue?${qs}`);
+  if (!r.ok) throw new Error(httpMessage(r.status));
+  return r.json();
+}
+
+/** Register a reviewer code on a scenario and get back THE role the server assigns:
+ *  first code registered is reviewer 1, second is reviewer 2, a third is refused (409).
+ *  The role used to be decided by the browser from a per-tab sessionStorage, so two
+ *  reviewers on two machines both became reviewer 1 and the second overwrote the first. */
+export async function registerDoubleBlindReviewer(
+  scenarioId: string,
+  reviewerCode: string,
+): Promise<{ reviewer: 1 | 2; reviewer_code: string; registered: Record<string, string> }> {
+  const base = scenarioBase(scenarioId);
+  const r = await safeFetch(
+    `${base}/${scenarioId}/double-blind/register?reviewer_code=${encodeURIComponent(reviewerCode)}`,
+    { method: "POST", headers: authHeaders() },
+  );
+  if (!r.ok) {
+    const body = await r.json().catch(() => null);
+    throw new Error(body?.detail || httpMessage(r.status));
+  }
+  return r.json();
+}
+
+/** Arbitrate a disagreement. This is NOT the decision endpoint: pressing the
+ *  arbitration buttons used to rewrite a reviewer's own vote, which manufactured the
+ *  agreement the kappa then counted. */
+export async function resolveDoubleBlindConflict(
+  scenarioId: string,
+  articleId: number,
+  finalStatus: "included" | "excluded",
+  arbitratorNotes?: string,
+): Promise<{ id: number; final_status: string; resolved: boolean }> {
+  const base = scenarioBase(scenarioId);
+  const qs = new URLSearchParams({ article_id: String(articleId), final_status: finalStatus });
+  if (arbitratorNotes) qs.set("arbitrator_notes", arbitratorNotes);
+  const r = await safeFetch(`${base}/${scenarioId}/double-blind/resolve?${qs}`,
+                            { method: "POST", headers: authHeaders() });
   if (!r.ok) throw new Error(httpMessage(r.status));
   return r.json();
 }

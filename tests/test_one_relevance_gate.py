@@ -33,6 +33,11 @@ ALLOWED = {
     # « Écarté à la main alors qu'il passait le seuil » : par construction, des articles
     # que la porte REFUSE. Les faire passer par elle donnerait toujours zéro.
     ("review.py", "manually_vetoed"),
+    # La courbe d'un seuil : son lot candidat est ce que l'AUTRE moitié de la porte a
+    # déjà retenu, puisque c'est précisément la moitié restante qu'elle fait varier. La
+    # porte entière appliquerait le seuil qu'on est en train de choisir, et la courbe
+    # serait plate. C'est bien une demi-porte, écrite volontairement, et nommée.
+    ("relevance.py", "other_half"),
 }
 
 
@@ -139,6 +144,6 @@ def test_the_shared_sql_constants_really_interpolate_the_gate():
 def test_the_allowed_exceptions_still_exist():
     """Si l'un de ces compteurs disparaît, l'exception doit disparaître avec lui, sinon
     elle devient une porte dérobée silencieuse."""
-    src = (API / "review.py").read_text(encoding="utf-8")
     for name, tag in ALLOWED:
+        src = (API / name).read_text(encoding="utf-8")
         assert tag in src, f"l'exception {tag} ne correspond plus à rien dans {name}"

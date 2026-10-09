@@ -82,6 +82,25 @@ def scenario_rerank_threshold_sql(sid: str = ":sid") -> str:
 # celle des articles exclus, si bien que l'assistant pouvait citer un article qu'un
 # relecteur venait d'écarter, pendant que le compteur affiché sous la réponse, lui,
 # comptait le bon sous-ensemble. Une fonction, un seul endroit à corriger.
+def screening_status_sql(doc: str = "d", link: str = "ars") -> str:
+    """Le statut de screening d'un article DANS CETTE REVUE.
+
+    Il se lisait `COALESCE(ars.screening_status, d.screening_status)`, c'est-à-dire : à
+    défaut de décision dans cette revue, la décision prise dans une AUTRE. Or
+    `literature_document` est partagé par tous les scénarios qui contiennent l'article.
+    Un relecteur excluait un article dans sa revue, et l'article quittait aussitôt le
+    sous-ensemble pertinent de toutes les autres revues qui le contiennent : leur brief,
+    leurs extractions, leurs exports et leurs compteurs, sans qu'un seul de leurs écrans
+    ne le dise. Deux scénarios de production partagent une requête sur la grippe aviaire
+    et se déplaçaient ainsi l'un l'autre.
+
+    Les écritures sur la ligne globale ont été retirées, et les décisions déjà prises y
+    ont été recopiées une fois sur les liens (`_backfill_ars_screening_from_document`),
+    pour qu'aucune ne soit perdue. `doc` reste dans la signature : il documente de quelle
+    table on NE lit plus, et garde les appelants symétriques de `relevant_gate_sql`."""
+    return f"{link}.screening_status"
+
+
 def relevant_gate_sql(doc: str = "d", link: str = "ars", thr: str = ":thr") -> str:
     """Le prédicat SQL du sous-ensemble pertinent, à mettre dans un WHERE.
 
@@ -99,7 +118,7 @@ def relevant_gate_sql(doc: str = "d", link: str = "ars", thr: str = ":thr") -> s
     602 pertinents n'en avaient pas encore. Le compter pour 0 aurait fait disparaître ces
     45 articles à la seconde où quelqu'un bouge le curseur, sans que rien ne le dise. Un
     article non encore jugé n'est pas un article jugé mauvais."""
-    status = f"COALESCE({link}.screening_status, {doc}.screening_status)"
+    status = screening_status_sql(doc, link)
     rthr = scenario_rerank_threshold_sql(f"{link}.scenario_id")
     return (f"{doc}.is_duplicate IS NOT TRUE"
             f" AND {status} IS DISTINCT FROM 'excluded'"
@@ -273,7 +292,7 @@ def scenario_scope_sql(scope: str, doc: str = "ld", link: str = "asn",
         raise ValueError(f"portée inconnue : {scope!r} (attendu : {', '.join(SCOPES)})")
     if scope == "relevant":
         return relevant_gate_sql(doc, link, scenario_threshold_sql(sid))
-    status = f"COALESCE({link}.screening_status, {doc}.screening_status)"
+    status = screening_status_sql(doc, link)
     return f"{doc}.is_duplicate IS NOT TRUE AND {status} IS DISTINCT FROM 'excluded'"
 
 
@@ -296,7 +315,7 @@ def scenario_counts_sql() -> str:
     """L'instruction unique qui compte le corpus d'un scénario. Pure : aucune
     connexion, testable hors base. Paramètres liés : `sid`, et `thr` (seuil forcé,
     NULL → le seuil enregistré du scénario, à défaut 0.45)."""
-    status = "COALESCE(ars.screening_status, d.screening_status)"
+    status = screening_status_sql("d", "ars")
     fulltext = ("EXISTS (SELECT 1 FROM document_chunk c"
                 " WHERE c.document_id = d.id AND c.chunk_type = 'fulltext_section')")
     chunkless = "NOT EXISTS (SELECT 1 FROM document_chunk c WHERE c.document_id = d.id)"

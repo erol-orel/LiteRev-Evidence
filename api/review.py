@@ -13,7 +13,9 @@ from fastapi import Depends, HTTPException, Query
 from sqlalchemy import text
 
 from .core import app, engine, logger, require_api_key
-from .scenario_store import _get_user_scenario_or_404, relevant_gate_tail_sql
+from .scenario_store import (_get_scenario_threshold, _get_user_scenario_or_404,
+                             relevant_gate_sql, relevant_gate_tail_sql,
+                             screening_status_sql)
 from .search import _load_prisma_identification, _reconcile_prisma_identification
 from .double_blind import _write_ars_screening
 from llm_usage import model_for as _model
@@ -32,16 +34,16 @@ def get_user_scenario_screening_progress(scenario_id: str) -> dict[str, Any]:
     """Progression du screening PRISMA pour un scénario utilisateur."""
     _get_user_scenario_or_404(scenario_id)
     with engine.connect() as conn:
-        stats = conn.execute(text("""
+        stats = conn.execute(text(f"""
             SELECT
                 COUNT(*) AS total,
                 SUM(CASE WHEN d.is_duplicate = TRUE THEN 1 ELSE 0 END) AS duplicates,
                 -- included/excluded/pending comptés sur le sous-ensemble NON dupliqué
                 -- (même base que `unique = total - duplicates`), sinon un doublon
                 -- marqué inclus/exclu faisait dépasser 100 % / rendait `pending` négatif.
-                SUM(CASE WHEN (d.is_duplicate IS NULL OR d.is_duplicate = FALSE) AND COALESCE(ars.screening_status, d.screening_status) = 'included' THEN 1 ELSE 0 END) AS included,
-                SUM(CASE WHEN (d.is_duplicate IS NULL OR d.is_duplicate = FALSE) AND COALESCE(ars.screening_status, d.screening_status) = 'excluded' THEN 1 ELSE 0 END) AS excluded,
-                SUM(CASE WHEN (d.is_duplicate IS NULL OR d.is_duplicate = FALSE) AND (COALESCE(ars.screening_status, d.screening_status) IS NULL OR COALESCE(ars.screening_status, d.screening_status) = 'pending') THEN 1 ELSE 0 END) AS pending
+                SUM(CASE WHEN (d.is_duplicate IS NULL OR d.is_duplicate = FALSE) AND {screening_status_sql('d', 'ars')} = 'included' THEN 1 ELSE 0 END) AS included,
+                SUM(CASE WHEN (d.is_duplicate IS NULL OR d.is_duplicate = FALSE) AND {screening_status_sql('d', 'ars')} = 'excluded' THEN 1 ELSE 0 END) AS excluded,
+                SUM(CASE WHEN (d.is_duplicate IS NULL OR d.is_duplicate = FALSE) AND ({screening_status_sql('d', 'ars')} IS NULL OR {screening_status_sql('d', 'ars')} = 'pending') THEN 1 ELSE 0 END) AS pending
             FROM article_scenarios ars
             JOIN literature_document d ON d.id = ars.document_id
             WHERE ars.scenario_id = :sid
@@ -73,19 +75,37 @@ def get_user_scenario_screening_progress(scenario_id: str) -> dict[str, Any]:
 def get_user_scenario_pico_stats(scenario_id: str) -> dict[str, Any]:
     """Statistiques PICO pour un scénario utilisateur."""
     _get_user_scenario_or_404(scenario_id)
+    # ── UNE définition de « structuré », et DEUX dénominateurs nommés ────────
+    # Ce panneau répondait « 100 % » quand celui d'enrichissement, un onglet plus loin,
+    # répondait « 98,5 % avec 3 articles à faire ». Deux raisons, cumulées :
+    #   - son numérateur comptait tout `pico_json`, y compris les extractions de faible
+    #     confiance que le lot d'enrichissement va REPRENDRE (donc pas faites) ;
+    #   - son dénominateur était le corpus entier (640 articles) et non le sous-ensemble
+    #     pertinent (201), qui est ce que le brief lit réellement.
+    # Le chiffre de tête porte désormais sur le sous-ensemble pertinent, avec le même
+    # prédicat que l'enrichissement, et celui du corpus est à côté, nommé.
+    _weak = "(d.pico_json->>'pico_confidence')::float < 0.5"
+    _done = f"d.pico_json IS NOT NULL AND NOT ({_weak})"
+    _gate = relevant_gate_sql("d", "ars", ":thr")
+    _thr = _get_scenario_threshold(scenario_id)
     with engine.connect() as conn:
-        counts = conn.execute(text("""
+        counts = conn.execute(text(f"""
             SELECT
-                COUNT(*) AS total,
-                COUNT(*) FILTER (WHERE d.pico_json IS NOT NULL) AS with_pico,
-                COUNT(*) FILTER (WHERE d.pico_json IS NULL) AS without_pico,
+                COUNT(*) AS corpus_total,
+                COUNT(*) FILTER (WHERE {_done}) AS corpus_with_pico,
+                COUNT(*) FILTER (WHERE {_gate}) AS total,
+                COUNT(*) FILTER (WHERE {_gate} AND {_done}) AS with_pico,
+                COUNT(*) FILTER (WHERE {_gate} AND NOT ({_done})) AS without_pico,
+                COUNT(*) FILTER (WHERE {_gate} AND d.pico_json IS NOT NULL AND {_weak})
+                    AS weak_pico,
                 ROUND(AVG((d.pico_json->>'pico_confidence')::float)
-                    FILTER (WHERE d.pico_json IS NOT NULL)::numeric, 2) AS avg_confidence
+                    FILTER (WHERE {_gate} AND d.pico_json IS NOT NULL)::numeric, 2)
+                    AS avg_confidence
             FROM article_scenarios ars
             JOIN literature_document d ON d.id = ars.document_id
             WHERE ars.scenario_id = :sid
               AND (d.is_duplicate IS NULL OR d.is_duplicate = FALSE)
-        """), {"sid": scenario_id}).mappings().fetchone()
+        """), {"sid": scenario_id, "thr": _thr}).mappings().fetchone()
         designs = conn.execute(text("""
             SELECT
                 COALESCE(d.pico_json->>'study_design', 'Non extrait') AS design,
@@ -96,14 +116,26 @@ def get_user_scenario_pico_stats(scenario_id: str) -> dict[str, Any]:
               AND (d.is_duplicate IS NULL OR d.is_duplicate = FALSE)
             GROUP BY 1 ORDER BY 2 DESC
         """), {"sid": scenario_id}).mappings().fetchall()
-    total = counts["total"] if counts else 0
-    with_pico = counts["with_pico"] if counts else 0
+    total = int(counts["total"] or 0) if counts else 0
+    with_pico = int(counts["with_pico"] or 0) if counts else 0
+    corpus_total = int(counts["corpus_total"] or 0) if counts else 0
+    corpus_with = int(counts["corpus_with_pico"] or 0) if counts else 0
     return {
         "scenario_id": scenario_id,
+        # Le sous-ensemble PERTINENT : ce que le brief, les extractions et les exports
+        # lisent. C'est de lui qu'on parle quand on demande « combien est structuré ».
         "total": total,
         "with_pico": with_pico,
-        "without_pico": counts["without_pico"] if counts else 0,
+        "without_pico": int(counts["without_pico"] or 0) if counts else 0,
+        "weak_pico": int(counts["weak_pico"] or 0) if counts else 0,
         "coverage_pct": round((with_pico / total * 100) if total > 0 else 0, 1),
+        # Le corpus entier, à côté, pour que les deux chiffres soient lisibles ensemble
+        # au lieu de s'opposer d'un onglet à l'autre.
+        "corpus_total": corpus_total,
+        "corpus_with_pico": corpus_with,
+        "corpus_coverage_pct": round((corpus_with / corpus_total * 100) if corpus_total > 0 else 0, 1),
+        "threshold": _thr,
+        "counts_weak_as_done": False,
         "avg_confidence": float(counts["avg_confidence"]) if counts and counts["avg_confidence"] else None,
         "study_design_distribution": [{"design": d["design"], "count": d["n"]} for d in designs],
     }
@@ -158,15 +190,15 @@ def get_user_scenario_prisma(
                 SUM(CASE WHEN (d.is_duplicate IS NULL OR d.is_duplicate = FALSE) AND COALESCE(ars.similarity_score, 0) >= :thr THEN 1 ELSE 0 END) AS above_threshold,
                 SUM(CASE WHEN (d.is_duplicate IS NULL OR d.is_duplicate = FALSE) AND COALESCE(ars.similarity_score, 0) <  :thr THEN 1 ELSE 0 END) AS below_threshold,
                 -- manual curation
-                SUM(CASE WHEN (d.is_duplicate IS NULL OR d.is_duplicate = FALSE) AND COALESCE(ars.screening_status, d.screening_status) = 'included' THEN 1 ELSE 0 END) AS manually_included,
-                SUM(CASE WHEN (d.is_duplicate IS NULL OR d.is_duplicate = FALSE) AND COALESCE(ars.screening_status, d.screening_status) = 'excluded' THEN 1 ELSE 0 END) AS manually_excluded,
-                SUM(CASE WHEN (d.is_duplicate IS NULL OR d.is_duplicate = FALSE) AND (COALESCE(ars.screening_status, d.screening_status) IS NULL OR COALESCE(ars.screening_status, d.screening_status) = 'pending')
+                SUM(CASE WHEN (d.is_duplicate IS NULL OR d.is_duplicate = FALSE) AND {screening_status_sql('d', 'ars')} = 'included' THEN 1 ELSE 0 END) AS manually_included,
+                SUM(CASE WHEN (d.is_duplicate IS NULL OR d.is_duplicate = FALSE) AND {screening_status_sql('d', 'ars')} = 'excluded' THEN 1 ELSE 0 END) AS manually_excluded,
+                SUM(CASE WHEN (d.is_duplicate IS NULL OR d.is_duplicate = FALSE) AND ({screening_status_sql('d', 'ars')} IS NULL OR {screening_status_sql('d', 'ars')} = 'pending')
                          THEN 1 ELSE 0 END) AS pending,
                 -- manually included but below threshold (override)
-                SUM(CASE WHEN (d.is_duplicate IS NULL OR d.is_duplicate = FALSE) AND COALESCE(ars.screening_status, d.screening_status) = 'included'
+                SUM(CASE WHEN (d.is_duplicate IS NULL OR d.is_duplicate = FALSE) AND {screening_status_sql('d', 'ars')} = 'included'
                            AND COALESCE(ars.similarity_score, 0) < :thr THEN 1 ELSE 0 END) AS manually_rescued,
                 -- manually excluded above threshold (veto)
-                SUM(CASE WHEN (d.is_duplicate IS NULL OR d.is_duplicate = FALSE) AND COALESCE(ars.screening_status, d.screening_status) = 'excluded'
+                SUM(CASE WHEN (d.is_duplicate IS NULL OR d.is_duplicate = FALSE) AND {screening_status_sql('d', 'ars')} = 'excluded'
                            AND COALESCE(ars.similarity_score, 0) >= :thr THEN 1 ELSE 0 END) AS manually_vetoed,
                 -- full text - RESTREINT à l'ensemble de preuves (≥ seuil OU inclus
                 -- manuellement, hors exclus), pas au corpus entier : sinon le "X of Y"
@@ -183,7 +215,14 @@ def get_user_scenario_prisma(
                 SUM(CASE WHEN (d.is_duplicate IS NULL OR d.is_duplicate = FALSE) AND EXISTS (
                     SELECT 1 FROM document_chunk c
                     WHERE c.document_id = d.id AND c.embedding IS NOT NULL
-                ) THEN 1 ELSE 0 END) AS embedded
+                ) THEN 1 ELSE 0 END) AS embedded,
+                -- L'ENSEMBLE DE PREUVES, par la porte partagée. Il était calculé par
+                -- arithmétique sur `above_threshold`, qui ne connaît que la similarité :
+                -- poser un seuil de rerank faisait tomber /counts.relevant et l'onglet
+                -- Corpus, pendant que l'étape 4 du PRISMA continuait d'afficher le
+                -- chiffre d'avant comme « ensemble de preuves final ». Deux nombres, deux
+                -- onglets voisins, la même question.
+                COUNT(*) FILTER (WHERE {relevant_gate_sql('d', 'ars', ':thr')}) AS relevant_total
             FROM article_scenarios ars
             JOIN literature_document d ON d.id = ars.document_id
             WHERE ars.scenario_id = :sid
@@ -216,23 +255,32 @@ def get_user_scenario_prisma(
     excluded_by_reason: list[dict[str, Any]] = []
     try:
         with engine.connect() as conn:
-            _reasons = conn.execute(text("""
+            _reasons = conn.execute(text(f"""
                 SELECT COALESCE(NULLIF(TRIM(ars.screening_reason), ''), '(sans motif)') AS reason,
                        COUNT(*) AS n
                 FROM article_scenarios ars
                 JOIN literature_document d ON d.id = ars.document_id
                 WHERE ars.scenario_id = :sid
                   AND d.is_duplicate IS NOT TRUE
-                  AND COALESCE(ars.screening_status, d.screening_status) = 'excluded'
+                  AND {screening_status_sql('d', 'ars')} = 'excluded'
                 GROUP BY 1 ORDER BY n DESC LIMIT 12
             """), {"sid": scenario_id}).mappings().all()
         excluded_by_reason = [{"reason": r["reason"], "articles": int(r["n"])} for r in _reasons]
     except Exception as _e_reasons:
         logger.warning(f"prisma exclusion reasons {scenario_id}: {_e_reasons}")
 
-    # Evidence = (above threshold NOT vetoed) + manually rescued
-    evidence_total  = (above - man_vetoed) + man_rescued
-    screening_done  = (man_included + man_excluded) > 0
+    # L'ensemble de preuves = le sous-ensemble pertinent, tel que la porte le définit,
+    # et non une arithmétique sur un compteur qui ignore la moitié de la porte.
+    evidence_total  = int(stats["relevant_total"] or 0)
+    # ── « Screening terminé » veut dire qu'il ne reste rien à juger ───────────
+    # Le test était « au moins une décision existe » : un relecteur excluait UN article
+    # hors sujet sur 6 564 et la carte PRISMA affichait aussitôt « Screening terminé :
+    # oui », l'étape 4 se titrait « ensemble de preuves final », et l'avertissement
+    # disant que 6 563 articles restaient en attente disparaissait. Un partenaire lisant
+    # le diagramme y voyait une revue achevée.
+    screened        = man_included + man_excluded
+    screening_done  = unique > 0 and pending == 0
+    screening_started = screened > 0
 
     # ── Identification : chiffres de la RECHERCHE quand ils existent ─────────
     # Un populate/rebuild récent a stocké ce que chaque source a ramené, les doublons
@@ -348,6 +396,11 @@ def get_user_scenario_prisma(
             "excluded": man_excluded,
             "pending": pending,
             "screening_complete": screening_done,
+            # Ce que « terminé » veut dire, en chiffres, pour que l'interface puisse
+            # écrire « 2 jugés sur 1 102 » au lieu d'un oui ou d'un non.
+            "screening_started": screening_started,
+            "screened": screened,
+            "to_screen": unique,
             "manually_rescued": man_rescued,
             "manually_vetoed": man_vetoed,
             # Le détail des motifs : sans lui, une restriction de portée appliquée en un
@@ -355,11 +408,16 @@ def get_user_scenario_prisma(
             "excluded_by_reason": excluded_by_reason,
         },
         "evidence": {
+            # = le sous-ensemble pertinent par la porte partagée, donc égal à
+            # /counts.relevant, seuil de rerank compris.
             "total": evidence_total,
             "ai_auto_selected": above - man_vetoed,
             "manually_rescued": man_rescued,
             "with_fulltext": with_fulltext,
             "screening_complete": screening_done,
+            "screening_started": screening_started,
+            "screened": screened,
+            "to_screen": unique,
         },
         # Keep legacy fields for backward compatibility
         "screening": {
@@ -378,10 +436,20 @@ def get_user_scenario_prisma(
             "fulltext_excluded": 0,
         },
         "included": {
-            "total_included": man_included if screening_done else evidence_total,
+            # UNE définition, toujours la même : le sous-ensemble pertinent. Le
+            # dénominateur basculait sur `man_included` dès la première décision d'un
+            # relecteur, si bien que la case passait de 467 à 1 dans la même réponse que
+            # `fulltext_assessed: 467`, et un partenaire lisant l'API obtenait un
+            # diagramme de flux qui ne se referme pas.
+            "total_included": evidence_total,
+            "manually_included": man_included,
             "awaiting_assessment": pending,
             "screening_complete": screening_done,
-            "note": "" if screening_done else "Screening manuel non encore effectué.",
+            "screening_started": screening_started,
+            "screened": screened,
+            "to_screen": unique,
+            "note": "" if screening_done
+                    else f"Screening manuel en cours : {screened} jugés sur {unique}.",
         },
     }
 
@@ -400,9 +468,9 @@ def get_user_scenario_pico_bulk(scenario_id: str, limit: int = 100000, offset: i
     limit = min(_requested, PICO_BULK_MAX_PAGE)
     offset = max(0, int(offset))
     with engine.connect() as conn:
-        rows = conn.execute(text("""
+        rows = conn.execute(text(f"""
             SELECT d.id, d.title, d.abstract, d.year, d.source, d.authors, d.doi, d.journal,
-                   d.study_design, d.pico_json, d.pico_extracted_at, COALESCE(ars.screening_status, d.screening_status) AS screening_status
+                   d.study_design, d.pico_json, d.pico_extracted_at, {screening_status_sql('d', 'ars')} AS screening_status
             FROM article_scenarios ars
             JOIN literature_document d ON d.id = ars.document_id
             WHERE ars.scenario_id = :sid AND d.is_duplicate IS NOT TRUE
@@ -477,22 +545,17 @@ def screen_user_scenario_article(
         """), {"doc_id": article_id, "sid": scenario_id}).first()
     if not exists:
         raise HTTPException(status_code=404, detail="Article non trouvé dans ce scénario utilisateur")
+    # La décision est écrite SUR LA REVUE, et nulle part ailleurs.
+    #
+    # Elle était aussi écrite sur `literature_document.screening_status`, une ligne
+    # partagée par tous les scénarios qui contiennent l'article. Un article exclu dans
+    # une revue sortait donc silencieusement du sous-ensemble pertinent de toutes les
+    # autres : de leur brief, de leurs extractions, de leurs exports et de leurs
+    # compteurs, sans qu'un écran de ces revues ne le dise. Deux scénarios de production
+    # partagent une requête sur la grippe aviaire et se déplaçaient ainsi l'un l'autre.
     with engine.begin() as conn:
-        row = conn.execute(text("""
-            UPDATE literature_document
-            SET screening_status = :status, screening_reason = :reason, screening_notes = :notes
-            WHERE id = :article_id AND project_context = 'literev'
-            RETURNING id
-        """), {"status": status, "reason": reason, "notes": notes, "article_id": article_id}).first()
-        # Migration 2 dual-write: also record the decision on the per-scenario row
         _write_ars_screening(conn, scenario_id, article_id, status, reason, notes)
-    # L'UPDATE ci-dessus ne touche que les lignes `project_context = 'literev'` ; la
-    # décision qui COMPTE est celle écrite sur article_scenarios (toutes les lectures
-    # font COALESCE(ars.screening_status, d.screening_status)), et elle est déjà
-    # committée ici. Répondre 404 « Article non trouvé » disait au relecteur que son
-    # screening avait échoué alors qu'il était enregistré et appliqué.
-    return {"id": article_id, "status": status, "updated": True,
-            "document_row_updated": bool(row)}
+    return {"id": article_id, "status": status, "updated": True, "scope": "scenario"}
 
 
 @app.post("/user-scenarios/{scenario_id}/articles/{article_id}/pico/extract")

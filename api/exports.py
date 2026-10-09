@@ -18,7 +18,7 @@ from fastapi.responses import Response
 from sqlalchemy import text
 
 from .core import app, engine, logger
-from .scenario_store import _get_user_scenario_or_404
+from .scenario_store import _get_user_scenario_or_404, screening_status_sql
 from .relevance import _get_above_threshold_articles
 
 EXPORT_FORMATS = ("csv", "xlsx", "ris", "bibtex", "json", "md")
@@ -332,15 +332,15 @@ def _normalize_format(fmt: str) -> str:
 # Colonnes lues pour un export par identifiants. Mêmes noms que
 # `_get_above_threshold_articles`, pour que `export_rows` ne voie aucune différence
 # entre un sous-ensemble et le corpus pertinent.
-_BY_IDS_SQL = """
+_BY_IDS_SQL = f"""
     SELECT d.id, d.title, d.year, d.journal, d.authors, d.doi, d.study_design,
            d.citation_count, d.quality_score, d.abstract, d.pico_json,
-           COALESCE(ars.screening_status, d.screening_status) AS screening_status,
+           {screening_status_sql('d', 'ars')} AS screening_status,
            ars.similarity_score
     FROM literature_document d
     JOIN article_scenarios ars ON ars.document_id = d.id AND ars.scenario_id = :sid
     WHERE d.id = ANY(:ids) AND d.is_duplicate IS NOT TRUE
-    ORDER BY (COALESCE(ars.screening_status, d.screening_status) = 'included') DESC,
+    ORDER BY ({screening_status_sql('d', 'ars')} = 'included') DESC,
              COALESCE(ars.rerank_score, ars.similarity_score, 0) DESC NULLS LAST,
              d.citation_count DESC NULLS LAST, d.id
 """

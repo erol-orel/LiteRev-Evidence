@@ -26,6 +26,7 @@ from .scenario_store import (
     normalise_kind,
     relevant_gate_sql,
     scenario_counts,
+    screening_status_sql,
 )
 from .schema_boot import _exec_ddl_isolated
 from .search import (
@@ -297,14 +298,14 @@ def _user_scenario_to_gesica_format(
         counts = counts_map.get(str(row["id"]))
     else:
         with engine.connect() as conn:
-            counts = conn.execute(text("""
+            counts = conn.execute(text(f"""
                 SELECT
                     COUNT(DISTINCT ars.document_id) AS article_count,
                     COUNT(DISTINCT ars.document_id) FILTER (
-                        WHERE COALESCE(ars.screening_status, d.screening_status) = 'included'
+                        WHERE {screening_status_sql('d', 'ars')} = 'included'
                     ) AS included_count,
                     COUNT(DISTINCT ars.document_id) FILTER (
-                        WHERE COALESCE(ars.screening_status, d.screening_status) = 'excluded'
+                        WHERE {screening_status_sql('d', 'ars')} = 'excluded'
                     ) AS excluded_count
                 FROM article_scenarios ars
                 JOIN literature_document d ON d.id = ars.document_id
@@ -461,14 +462,14 @@ def list_user_scenarios() -> list[dict[str, Any]]:
         # ligne (N+1). Même forme que sql_counts dans /gesica/scenarios.
         counts_map: dict[str, Any] = {
             str(cr["scenario_id"]): dict(cr)
-            for cr in conn.execute(text("""
+            for cr in conn.execute(text(f"""
                 SELECT ars.scenario_id,
                        COUNT(DISTINCT ars.document_id) AS article_count,
                        COUNT(DISTINCT ars.document_id) FILTER (
-                           WHERE COALESCE(ars.screening_status, d.screening_status) = 'included'
+                           WHERE {screening_status_sql('d', 'ars')} = 'included'
                        ) AS included_count,
                        COUNT(DISTINCT ars.document_id) FILTER (
-                           WHERE COALESCE(ars.screening_status, d.screening_status) = 'excluded'
+                           WHERE {screening_status_sql('d', 'ars')} = 'excluded'
                        ) AS excluded_count
                 FROM article_scenarios ars
                 JOIN literature_document d ON d.id = ars.document_id
@@ -1039,7 +1040,7 @@ def get_user_scenario_corpus(
                 d.authors, d.doi, d.journal, d.keywords, d.language,
                 d.study_design, d.sample_size, d.country, d.citation_count,
                 d.open_access, d.pmid, d.publication_type, d.quality_score,
-                COALESCE(ars.screening_status, d.screening_status) AS screening_status,
+                {screening_status_sql('d', 'ars')} AS screening_status,
                 COALESCE(ars.reviewer_1_status, d.reviewer_1_status) AS reviewer_1_status,
                 COALESCE(ars.similarity_score, 0.0) AS similarity_score,
                 ars.rerank_score AS rerank_score,

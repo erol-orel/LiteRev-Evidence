@@ -37,7 +37,11 @@ def test_the_gate_carries_all_three_conditions():
     threshold is 0: the same convention as every other count in the app."""
     sql = relevant_gate_sql(doc="d", link="ars", thr=":thr")
     assert "d.is_duplicate IS NOT TRUE" in sql
-    assert "COALESCE(ars.screening_status, d.screening_status) IS DISTINCT FROM 'excluded'" in sql
+    # Le statut lu est celui DE CETTE REVUE : il se lisait
+    # COALESCE(ars.screening_status, d.screening_status), donc « à défaut de décision
+    # ici, la décision prise dans une autre revue », sur une ligne partagée.
+    assert "ars.screening_status IS DISTINCT FROM 'excluded'" in sql
+    assert "d.screening_status" not in sql
     assert "COALESCE(ars.similarity_score, 0) >= :thr" in sql
     assert "= 'included'" in sql
 

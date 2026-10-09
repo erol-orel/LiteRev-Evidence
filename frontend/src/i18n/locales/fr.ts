@@ -809,6 +809,7 @@ export const fr = {
       },
       rebuiltFromLibrary: "Corpus reconstruit depuis la bibliothèque locale : aucune source n'a été interrogée.",
       lastRealSearch: "Dernière recherche réelle le {date} : {sources} sources interrogées, {records} enregistrements.",
+      screenedOf: "{screened} jugés sur {total}",
       embeddedSearchable: "Vectorisés (cherchables)",
       duplicatesRemoved: "Doublons retirés",
       uniqueRecords: "Enregistrements uniques",
@@ -966,6 +967,10 @@ export const fr = {
       noEvaluationYet:
         "Aucune évaluation double-aveugle n'a encore été soumise. Commencez à évaluer les articles dans la section Corpus.",
       conflictsToResolve: "conflit(s) à résoudre",
+      toScreen: "{remaining} articles à juger (votre vote)",
+      queueEmpty: "Vous avez statué sur tous les articles pertinents de ce scénario.",
+      voteInclude: "Inclure",
+      voteExclude: "Exclure",
       includeArbitration: "Inclure (arbitrage)",
       excludeArbitration: "Exclure (arbitrage)",
     },

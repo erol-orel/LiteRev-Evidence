@@ -811,6 +811,7 @@ export const en: Translations = {
       },
       rebuiltFromLibrary: "Corpus rebuilt from the local library: no source was searched.",
       lastRealSearch: "Last real search on {date}: {sources} sources searched, {records} records.",
+      screenedOf: "{screened} of {total} screened",
       embeddedSearchable: "Embedded (searchable)",
       duplicatesRemoved: "Duplicates removed",
       uniqueRecords: "Unique records",
@@ -968,6 +969,10 @@ export const en: Translations = {
       noEvaluationYet:
         "No double-blind evaluation has been submitted yet. Start evaluating articles in the Corpus section.",
       conflictsToResolve: "conflict(s) to resolve",
+      toScreen: "{remaining} articles to screen (your vote)",
+      queueEmpty: "You have voted on every relevant article of this scenario.",
+      voteInclude: "Include",
+      voteExclude: "Exclude",
       includeArbitration: "Include (arbitration)",
       excludeArbitration: "Exclude (arbitration)",
     },

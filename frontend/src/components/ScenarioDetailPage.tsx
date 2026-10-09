@@ -98,6 +98,10 @@ import {
   type ConceptType,
   fetchKappaStats,
   fetchDoubleBlindConflicts,
+  fetchDoubleBlindQueue,
+  type DoubleBlindQueue,
+  registerDoubleBlindReviewer,
+  resolveDoubleBlindConflict,
   submitDoubleBlindDecision,
   subscribeAlerts,
   triggerLivingReview,
@@ -4270,7 +4274,11 @@ function PrismaSection({ scenarioId }: { scenarioId: string }) {
       : "bg-emerald-900/40 text-emerald-300";
 
   const totalRecords = num(ident.total_records ?? ident.total_records_identified);
-  const evidenceTotal = num(ev.ai_auto_selected) + num(ev.manually_rescued);
+  // L'ensemble de preuves tel que le serveur le compte, par la porte de pertinence,
+  // et non une addition de deux compteurs qui ignorent le seuil de rerank : poser ce
+  // second seuil faisait tomber /counts et l'onglet Corpus pendant que l'étape 4
+  // continuait d'afficher le chiffre d'avant comme « ensemble de preuves final ».
+  const evidenceTotal = num(ev.total ?? (num(ev.ai_auto_selected) + num(ev.manually_rescued)));
 
   return (
     <div className="rounded-3xl border border-white/10 bg-white/3 p-5 space-y-4">
@@ -4436,7 +4444,19 @@ function PrismaSection({ scenarioId }: { scenarioId: string }) {
           <div className="space-y-1 border-t border-white/5 pt-2">
             <PrismaRow label={t("scenarioDetail.prisma.rescued")} value={num(mc.manually_rescued)} accent="text-green-400" />
             <PrismaRow label={t("scenarioDetail.prisma.vetoed")} value={num(mc.manually_vetoed)} accent="text-red-400" />
-            <PrismaRow label={t("scenarioDetail.prisma.screeningComplete")} value={mc.screening_complete ? t("scenarioDetail.prisma.yes") : t("scenarioDetail.prisma.inProgress")} />
+            {/* « Screening terminé » disait oui dès la PREMIÈRE décision : un article
+                hors sujet écarté sur 6 564 et la carte annonçait une revue achevée.
+                On affiche la couverture, qui est la seule chose qu'un lecteur peut
+                vérifier. */}
+            <PrismaRow
+              label={t("scenarioDetail.prisma.screeningComplete")}
+              value={mc.screening_complete
+                ? t("scenarioDetail.prisma.yes")
+                : t("scenarioDetail.prisma.screenedOf")
+                    .replace("{screened}", num(mc.screened).toLocaleString())
+                    .replace("{total}", num(mc.to_screen).toLocaleString())}
+              accent={mc.screening_complete ? undefined : "text-amber-300"}
+            />
           </div>
           {/* Le POURQUOI des exclusions. Une restriction de portée appliquée en un clic
               peut représenter l'essentiel du total : sans le motif, elle se lit comme un
@@ -5463,36 +5483,30 @@ function DoubleBlindSection({ scenarioId }: { scenarioId: string }) {
   );
   const [codeInput, setCodeInput] = React.useState('');
   const [codeError, setCodeError] = React.useState('');
+  const [queue, setQueue] = React.useState<DoubleBlindQueue | null>(null);
   const reviewer: 1|2 = reviewerRole ?? 1;
 
-  const handleCodeSubmit = () => {
+  // Le rôle est demandé AU SERVEUR, qui le tient par scénario. Il était calculé ici,
+  // à partir d'un `sessionStorage` propre à l'onglet : deux relecteurs sur deux
+  // machines, ce qui est la définition même du double aveugle, recevaient tous les deux
+  // le rôle 1, et le second écrasait les décisions du premier.
+  const handleCodeSubmit = async () => {
     const code = codeInput.trim().toUpperCase();
     if (!/^R-?\d{4}$/.test(code) && !/^\d{4}$/.test(code)) {
       setCodeError(t("scenarioDetail.doubleBlind.invalidCodeFormat"));
       return;
     }
     const normalized = code.startsWith('R-') ? code : `R-${code}`;
-    // Assign role based on existing registrations
-    const existingCode = localStorage.getItem(REVIEWER_CODE_KEY);
-    const existingRole = localStorage.getItem(REVIEWER_ROLE_KEY);
-    let role: 1|2;
-    if (existingCode === normalized && existingRole) {
-      role = parseInt(existingRole) as 1|2;
-    } else {
-      // Check if R1 slot is taken (stored in sessionStorage for cross-tab)
-      const r1Code = sessionStorage.getItem(`literev_r1_${scenarioId}`);
-      if (!r1Code || r1Code === normalized) {
-        role = 1;
-        sessionStorage.setItem(`literev_r1_${scenarioId}`, normalized);
-      } else {
-        role = 2;
-      }
+    try {
+      const res = await registerDoubleBlindReviewer(scenarioId, normalized);
+      localStorage.setItem(REVIEWER_CODE_KEY, normalized);
+      localStorage.setItem(REVIEWER_ROLE_KEY, String(res.reviewer));
+      setReviewerCode(normalized);
+      setReviewerRole(res.reviewer);
+      setCodeError('');
+    } catch (e: any) {
+      setCodeError(e?.message || t("scenarioDetail.doubleBlind.invalidCodeFormat"));
     }
-    localStorage.setItem(REVIEWER_CODE_KEY, normalized);
-    localStorage.setItem(REVIEWER_ROLE_KEY, String(role));
-    setReviewerCode(normalized);
-    setReviewerRole(role);
-    setCodeError('');
   };
 
   const handleResetCode = () => {
@@ -5508,10 +5522,13 @@ function DoubleBlindSection({ scenarioId }: { scenarioId: string }) {
     Promise.all([
       fetchKappaStats(scenarioId),
       fetchDoubleBlindConflicts(scenarioId),
-    ]).then(([k, c]) => { setKappa(k); setConflicts(c); })
+      // Le lot à juger : sans lui, le panneau n'offrait aucun moyen de voter, donc
+      // aucun conflit ne pouvait apparaître et aucun kappa ne pouvait être calculé.
+      reviewerCode ? fetchDoubleBlindQueue(scenarioId, reviewerCode).catch(() => null) : null,
+    ]).then(([k, c, q]) => { setKappa(k); setConflicts(c); setQueue(q); })
       .catch(() => {})
       .finally(() => setLoading(false));
-  }, [scenarioId]);
+  }, [scenarioId, reviewerCode]);
 
   React.useEffect(() => { reload(); }, [reload]);
 
@@ -5519,7 +5536,19 @@ function DoubleBlindSection({ scenarioId }: { scenarioId: string }) {
     if (!reviewerCode) { alert(t("scenarioDetail.doubleBlind.enterCodeFirst")); return; }
     setSubmitting(articleId);
     try {
-      await submitDoubleBlindDecision(scenarioId, { article_id: articleId, reviewer, status, reviewer_code: reviewerCode });
+      await submitDoubleBlindDecision(scenarioId, { article_id: articleId, status, reviewer_code: reviewerCode });
+      reload();
+    } catch (e: any) {
+      alert(e.message);
+    } finally {
+      setSubmitting(null);
+    }
+  };
+
+  const arbitrate = async (articleId: number, finalStatus: "included"|"excluded") => {
+    setSubmitting(articleId);
+    try {
+      await resolveDoubleBlindConflict(scenarioId, articleId, finalStatus);
       reload();
     } catch (e: any) {
       alert(e.message);
@@ -5614,6 +5643,48 @@ function DoubleBlindSection({ scenarioId }: { scenarioId: string }) {
         </div>
       )}
 
+      {/* ── Le lot à juger ──────────────────────────────────────────────────
+          Il n'existait aucun moyen de voter : les deux seuls boutons du panneau
+          étaient ceux d'arbitrage, et la liste des conflits ne se remplit que si les
+          deux relecteurs ont voté. Le kappa affiché ne pouvait donc jamais exister. */}
+      {reviewerCode && queue && (
+        <div className="space-y-3">
+          <p className="text-[10px] font-bold uppercase tracking-wider text-brand-300">
+            {t("scenarioDetail.doubleBlind.toScreen")
+              .replace("{remaining}", queue.remaining.toLocaleString())}
+          </p>
+          {queue.articles.length === 0 ? (
+            <p className="text-[10px] text-white/35">{t("scenarioDetail.doubleBlind.queueEmpty")}</p>
+          ) : (
+            <div className="space-y-2 max-h-[400px] overflow-y-auto">
+              {queue.articles.map(art => (
+                <div key={art.id} className="rounded-xl border border-white/5 bg-white/2 p-3 space-y-2">
+                  <p className="text-xs font-semibold text-white/80 leading-4">{art.title}</p>
+                  <p className="text-[10px] text-white/40 line-clamp-3 leading-4">{art.abstract}</p>
+                  <div className="flex items-center gap-3 text-[9px] text-white/30 font-mono">
+                    {art.year ? <span>{art.year}</span> : null}
+                    {art.journal ? <span className="truncate">{art.journal}</span> : null}
+                    {art.rerank_score != null
+                      ? <span>rerank {art.rerank_score.toFixed(3)}</span>
+                      : art.similarity_score != null
+                        ? <span>sim {art.similarity_score.toFixed(3)}</span>
+                        : null}
+                  </div>
+                  <div className="flex gap-2">
+                    <button onClick={() => decide(art.id, 'included')} disabled={submitting === art.id}
+                      className="flex-1 rounded-lg bg-brand-500/20 border border-brand-500/30 text-brand-300 text-[10px] py-1.5 hover:bg-brand-500/30 transition disabled:opacity-50"
+                    >{t("scenarioDetail.doubleBlind.voteInclude")}</button>
+                    <button onClick={() => decide(art.id, 'excluded')} disabled={submitting === art.id}
+                      className="flex-1 rounded-lg bg-rose-500/10 border border-rose-500/20 text-rose-300 text-[10px] py-1.5 hover:bg-rose-500/20 transition disabled:opacity-50"
+                    >{t("scenarioDetail.doubleBlind.voteExclude")}</button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
       {/* Conflits */}
       {conflicts.length > 0 && (
         <div className="space-y-3">
@@ -5628,11 +5699,15 @@ function DoubleBlindSection({ scenarioId }: { scenarioId: string }) {
                   <span>R1 {art.reviewer_1_code ? <span className="font-mono text-white/40">[{art.reviewer_1_code}]</span> : ''} : <span className={art.reviewer_1_status === 'included' ? 'text-brand-300' : 'text-rose-300'}>{art.reviewer_1_status}</span></span>
                   <span>R2 {art.reviewer_2_code ? <span className="font-mono text-white/40">[{art.reviewer_2_code}]</span> : ''} : <span className={art.reviewer_2_status === 'included' ? 'text-brand-300' : 'text-rose-300'}>{art.reviewer_2_status}</span></span>
                 </div>
+                {/* ARBITRAGE, pas un vote : ces boutons appelaient l'endpoint de
+                    décision, qui réécrivait le vote d'un relecteur. r1 == r2 devenait
+                    alors vrai et le kappa comptait une concordance que personne
+                    n'avait exprimée. */}
                 <div className="flex gap-2">
-                  <button onClick={() => decide(art.id, 'included')} disabled={submitting === art.id}
+                  <button onClick={() => arbitrate(art.id, 'included')} disabled={submitting === art.id}
                     className="flex-1 rounded-lg bg-brand-500/20 border border-brand-500/30 text-brand-300 text-[10px] py-1.5 hover:bg-brand-500/30 transition disabled:opacity-50"
                   >{t("scenarioDetail.doubleBlind.includeArbitration")}</button>
-                  <button onClick={() => decide(art.id, 'excluded')} disabled={submitting === art.id}
+                  <button onClick={() => arbitrate(art.id, 'excluded')} disabled={submitting === art.id}
                     className="flex-1 rounded-lg bg-rose-500/10 border border-rose-500/20 text-rose-300 text-[10px] py-1.5 hover:bg-rose-500/20 transition disabled:opacity-50"
                   >{t("scenarioDetail.doubleBlind.excludeArbitration")}</button>
                 </div>

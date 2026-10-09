@@ -13,7 +13,8 @@ from sqlalchemy import text
 from .core import _job_is_active, _msg, app, engine, logger, require_api_key
 from .documents import _GRADE_LEVEL_CASE, _STUDY_DESIGN_CASE, _llm_lang_directive
 from .scenario_store import (_get_scenario_threshold, _get_user_scenario_or_404,
-                             relevant_gate_sql, relevant_gate_tail_sql)
+                             relevant_gate_sql, relevant_gate_tail_sql,
+                             screening_status_sql)
 from .gesica import _get_scenario_name
 from .relevance import _evidence_fingerprint, _get_above_threshold_articles
 from llm_usage import json_content as _json_content
@@ -257,9 +258,9 @@ def _build_evidence_brief(scenario_id: str) -> dict[str, Any]:
                 COUNT(*) FILTER (WHERE d.is_duplicate IS NOT TRUE) AS total,
                 COUNT(*) FILTER (WHERE d.is_duplicate IS TRUE) AS duplicates,
                 COUNT(*) FILTER (WHERE d.is_duplicate IS NOT TRUE AND d.pico_json IS NOT NULL) AS with_pico,
-                COUNT(*) FILTER (WHERE d.is_duplicate IS NOT TRUE AND COALESCE(ars.screening_status, d.screening_status) = 'included') AS included,
-                COUNT(*) FILTER (WHERE d.is_duplicate IS NOT TRUE AND COALESCE(ars.screening_status, d.screening_status) = 'excluded') AS excluded,
-                COUNT(*) FILTER (WHERE d.is_duplicate IS NOT TRUE AND (COALESCE(ars.screening_status, d.screening_status) = 'pending' OR COALESCE(ars.screening_status, d.screening_status) IS NULL)) AS pending,
+                COUNT(*) FILTER (WHERE d.is_duplicate IS NOT TRUE AND {screening_status_sql('d', 'ars')} = 'included') AS included,
+                COUNT(*) FILTER (WHERE d.is_duplicate IS NOT TRUE AND {screening_status_sql('d', 'ars')} = 'excluded') AS excluded,
+                COUNT(*) FILTER (WHERE d.is_duplicate IS NOT TRUE AND ({screening_status_sql('d', 'ars')} = 'pending' OR {screening_status_sql('d', 'ars')} IS NULL)) AS pending,
                 COUNT(*) FILTER (WHERE d.is_duplicate IS NOT TRUE AND EXISTS (
                     SELECT 1 FROM document_chunk c
                     WHERE c.document_id = d.id AND c.chunk_type = 'fulltext_section'
@@ -291,7 +292,7 @@ def _build_evidence_brief(scenario_id: str) -> dict[str, Any]:
 
         top_articles = conn.execute(text(f"""
             SELECT d.id, d.title, d.abstract, d.year, d.journal, d.authors, d.doi,
-                   d.study_design, d.pico_json, d.citation_count, COALESCE(ars.screening_status, d.screening_status) AS screening_status,
+                   d.study_design, d.pico_json, d.citation_count, {screening_status_sql('d', 'ars')} AS screening_status,
                    d.quality_score, ars.similarity_score
             FROM article_scenarios ars
             JOIN literature_document d ON d.id = ars.document_id
@@ -299,7 +300,7 @@ def _build_evidence_brief(scenario_id: str) -> dict[str, Any]:
               AND d.is_duplicate IS NOT TRUE AND d.abstract IS NOT NULL
               AND {relevant_gate_tail_sql('d', 'ars', ':thr')}
             ORDER BY
-                CASE WHEN COALESCE(ars.screening_status, d.screening_status) = 'included' THEN 0 ELSE 1 END,
+                CASE WHEN {screening_status_sql('d', 'ars')} = 'included' THEN 0 ELSE 1 END,
                 d.citation_count DESC NULLS LAST, d.year DESC NULLS LAST
             LIMIT 15
         """), {"sid": scenario_id, "thr": eff_thr}).mappings().fetchall()
@@ -501,7 +502,7 @@ def get_user_scenario_evidence_brief_pdf(scenario_id: str):
                 MAX(d.year) FILTER (WHERE {relevant_gate_sql('d', 'ars', ':thr')}
                     AND d.year BETWEEN 1800 AND EXTRACT(YEAR FROM CURRENT_DATE)::int) AS year_max,
                 COUNT(*) FILTER (WHERE {relevant_gate_sql('d', 'ars', ':thr')}
-                    AND COALESCE(ars.screening_status, d.screening_status) = 'included') AS included,
+                    AND {screening_status_sql('d', 'ars')} = 'included') AS included,
                 COUNT(*) FILTER (WHERE {relevant_gate_sql('d', 'ars', ':thr')}
                     AND d.pico_json IS NOT NULL) AS with_pico
             FROM article_scenarios ars
@@ -518,7 +519,7 @@ def get_user_scenario_evidence_brief_pdf(scenario_id: str):
               AND {relevant_gate_tail_sql('d', 'ars', ':thr')}
             -- « Articles les plus pertinents » dans le PDF : trier par qualité donnait une
             -- liste qui n'est pas celle du tri par pertinence de l'application.
-            ORDER BY (COALESCE(ars.screening_status, d.screening_status) = 'included') DESC,
+            ORDER BY ({screening_status_sql('d', 'ars')} = 'included') DESC,
                      COALESCE(ars.rerank_score, ars.similarity_score, 0) DESC NULLS LAST,
                      d.quality_score DESC NULLS LAST, d.year DESC NULLS LAST
             LIMIT 100000

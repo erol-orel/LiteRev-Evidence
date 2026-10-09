@@ -44,7 +44,7 @@ from .extraction_review import load_reviews, overlay, overlay_annotated
 from .geography import get_nuts_index, resolve_location
 from .digest import _rows
 from .scenario_store import (_get_scenario_threshold, _get_user_scenario_or_404,
-                             relevant_gate_sql)
+                             relevant_gate_sql, screening_status_sql)
 from .schema_boot import _exec_ddl_isolated
 from llm_usage import json_content as _json_content
 from llm_usage import model_for as _model
@@ -351,13 +351,13 @@ def _needs_extraction(row: dict) -> bool:
     return ex.get("source") == "abstract" and bool(row.get("has_fulltext"))
 
 
-_ARTICLE_ROWS_SQL = """
+_ARTICLE_ROWS_SQL = f"""
     SELECT d.id, d.title, d.abstract, d.doi, d.year, d.authors, d.has_fulltext, d.country,
            d.extraction_json, COALESCE(d.extraction_attempts, 0) AS extraction_attempts,
-           COALESCE(ars.screening_status, d.screening_status) AS screening_status
+           {screening_status_sql('d', 'ars')} AS screening_status
     FROM literature_document d
     JOIN article_scenarios ars ON ars.document_id = d.id
-    WHERE ars.scenario_id = :sid AND {gate}
+    WHERE ars.scenario_id = :sid AND {{gate}}
     ORDER BY d.id
 """
 

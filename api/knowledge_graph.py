@@ -15,7 +15,7 @@ from sqlalchemy import text
 
 from .core import app, engine, logger
 from .scenario_store import (_get_scenario_threshold, _get_user_scenario_or_404,
-                             relevant_gate_tail_sql)
+                             relevant_gate_tail_sql, screening_status_sql)
 from .clustering import _load_viz_cache, _save_viz_cache
 from llm_usage import model_for as _model
 
@@ -185,17 +185,17 @@ def _build_knowledge_graph(
 # sur quality_score : les 400 nœuds dessinés n'étaient donc pas les 400 que l'utilisateur
 # obtient en triant son corpus par pertinence, alors que le sous-titre annonce « les N
 # articles les plus pertinents ». Inclus d'abord, puis rerank, puis score sémantique.
-_KG_NODE_SQL = """
+_KG_NODE_SQL = f"""
     SELECT * FROM (
         SELECT DISTINCT ON (d.id)
             d.id, d.title, d.year, d.journal, d.study_design, d.quality_score,
             c.embedding::text AS emb_str,
-            (COALESCE(ars.screening_status, d.screening_status) = 'included') AS is_included,
+            ({screening_status_sql('d', 'ars')} = 'included') AS is_included,
             COALESCE(ars.rerank_score, ars.similarity_score, 0) AS relevance,
             COALESCE((d.pico_json->>'study_design'), d.study_design, 'unknown') AS design
         FROM literature_document d
-        {join}
-        WHERE {where}
+        {{join}}
+        WHERE {{where}}
           AND d.is_duplicate IS NOT TRUE
           AND c.embedding IS NOT NULL
           AND d.abstract IS NOT NULL
@@ -706,7 +706,7 @@ _CONCEPT_ROWS_SQL = f"""
       AND d.is_duplicate IS NOT TRUE
       AND d.abstract IS NOT NULL
       AND {relevant_gate_tail_sql('d', 'ars', ':thr')}
-    ORDER BY (COALESCE(ars.screening_status, d.screening_status) = 'included') DESC,
+    ORDER BY ({screening_status_sql('d', 'ars')} = 'included') DESC,
              ars.similarity_score DESC NULLS LAST, d.year DESC NULLS LAST, d.id
     LIMIT :cap
 """

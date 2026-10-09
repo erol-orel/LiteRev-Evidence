@@ -15,7 +15,7 @@ from sqlalchemy import text
 from .core import _norm_lang, app, engine, logger
 from .documents import _llm_lang_directive
 from .scenario_store import (_get_scenario_threshold, _get_user_scenario_or_404,
-                             relevant_gate_tail_sql)
+                             relevant_gate_tail_sql, screening_status_sql)
 from .gesica import _gesica_title, _get_db_gesica_scenario_or_404, _get_scenario_name
 from llm_usage import model_for as _model
 
@@ -191,7 +191,7 @@ def _clustering_docs(scenario_id: str, threshold: float, cap: int | None = None)
                        LIMIT 1
                    ) AS embedding_str
             {_relevant}
-            ORDER BY (COALESCE(asn.screening_status, d.screening_status) = 'included') DESC,
+            ORDER BY ({screening_status_sql('d', 'asn')} = 'included') DESC,
                      asn.similarity_score DESC NULLS LAST, d.year DESC NULLS LAST, d.id
             LIMIT :cap
         """), {"sid": scenario_id, "thr": threshold, "cap": cap}).mappings().all())

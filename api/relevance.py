@@ -31,6 +31,9 @@ from .scenario_store import (
     _get_scenario_threshold,
     _get_user_scenario_or_404,
     relevant_gate_sql,
+    scenario_rerank_threshold_sql,
+    scenario_threshold_sql,
+    screening_status_sql,
 )
 from .search import (
     _boolean_corpus_ids,
@@ -436,11 +439,11 @@ def _get_above_threshold_articles(scenario_id: str, threshold: float | None = No
             FROM (
                 SELECT ld.id, ld.title, ld.abstract, ld.year, ld.journal, ld.authors, ld.doi,
                        ld.study_design, ld.pico_json, ld.citation_count,
-                       COALESCE(asn.screening_status, ld.screening_status) AS screening_status,
+                       {screening_status_sql('ld', 'asn')} AS screening_status,
                        ld.quality_score, asn.similarity_score,
                        (ld.pico_json IS NOT NULL) AS has_pico,
                        ROW_NUMBER() OVER (ORDER BY
-                           CASE WHEN COALESCE(asn.screening_status, ld.screening_status) = 'included' THEN 0 ELSE 1 END,
+                           CASE WHEN {screening_status_sql('ld', 'asn')} = 'included' THEN 0 ELSE 1 END,
                            asn.similarity_score DESC NULLS LAST,
                            ld.citation_count DESC NULLS LAST, ld.id) AS rn
                 FROM literature_document ld
@@ -904,19 +907,39 @@ def _threshold_curve_inputs(scenario_id: str, score: str = "similarity") -> dict
         d'office, sans quoi la courbe promettrait une coupe que la base ne ferait pas.
 
     `unscored_are_kept` dit laquelle des deux règles s'applique, pour que l'interface
-    puisse l'écrire au lieu de laisser deviner."""
+    puisse l'écrire au lieu de laisser deviner.
+
+    Le lot candidat passe par l'AUTRE moitié de la porte : une courbe de rerank ne porte
+    que sur les articles qui passent déjà le seuil de similarité, et réciproquement. Sans
+    cela, le panneau comptait le corpus entier et promettait des coupes que la base
+    n'aurait jamais faites."""
     from .variables import _param_regex                     # lazy: variables charge après
     if score not in CURVE_SCORES:
         raise HTTPException(status_code=422,
                             detail=f"score inconnu : '{score}' (attendu : {', '.join(CURVE_SCORES)})")
     rerank = score == "rerank"
     col = "ars.rerank_score" if rerank else "COALESCE(ars.similarity_score, 0)"
-    sql_where = """
+    # ── L'AUTRE moitié de la porte est déjà appliquée ────────────────────────
+    # Le lot candidat était « ni doublon, ni exclu, ni inclus à la main », et rien de
+    # plus : le seuil de l'autre score était ignoré. Le panneau annonçait donc, pour le
+    # rerank du scénario HPAI, « 640 articles gardés » et « 640 articles candidats » là
+    # où toutes les autres surfaces de l'application en lisent 201, et proposait
+    # « mettre 0,7144 pour en garder 25 ». Sur un scénario de 6 564 articles, il
+    # affirmait qu'aucun seuil de rerank ne pourrait jamais en laisser moins de 6 323.
+    #
+    # Une courbe de seuil doit montrer ce que CE seuil fait, à partir de ce que l'autre
+    # a déjà retenu : c'est exactement ce que la porte calcule.
+    other_half = (f" AND COALESCE(ars.similarity_score, 0) >= {scenario_threshold_sql(':sid')}"
+                  if rerank else
+                  f" AND (ars.rerank_score IS NULL"
+                  f" OR ars.rerank_score >= {scenario_rerank_threshold_sql(':sid')})")
+    sql_where = f"""
         FROM literature_document d
         JOIN article_scenarios ars ON ars.document_id = d.id
         WHERE ars.scenario_id = :sid
           AND d.is_duplicate IS NOT TRUE
-          AND COALESCE(ars.screening_status, d.screening_status) IS DISTINCT FROM 'excluded'
+          AND {screening_status_sql('d', 'ars')} IS DISTINCT FROM 'excluded'
+          {other_half}
     """
     # Le non scoré sort de la courbe pour le rerank : il passe d'office, donc il n'a pas
     # de place sur un axe de seuils.
@@ -926,15 +949,15 @@ def _threshold_curve_inputs(scenario_id: str, score: str = "similarity") -> dict
             SELECT {col} AS s,
                    ((COALESCE(d.title, '') || ' ' || COALESCE(d.abstract, '')) ~* :rx) AS p
             {sql_where}
-              AND COALESCE(ars.screening_status, d.screening_status) IS DISTINCT FROM 'included'
+              AND {screening_status_sql('d', 'ars')} IS DISTINCT FROM 'included'
               {only_scored}
             ORDER BY s DESC
         """), {"sid": scenario_id, "rx": _param_regex(boundary=r"\y")}).mappings()]
         head = conn.execute(text(f"""
             SELECT COUNT(*) FILTER (
-                     WHERE COALESCE(ars.screening_status, d.screening_status) = 'included') AS included,
+                     WHERE {screening_status_sql('d', 'ars')} = 'included') AS included,
                    COUNT(*) FILTER (
-                     WHERE COALESCE(ars.screening_status, d.screening_status) IS DISTINCT FROM 'included'
+                     WHERE {screening_status_sql('d', 'ars')} IS DISTINCT FROM 'included'
                        AND {'ars.rerank_score' if rerank else 'ars.similarity_score'} IS NULL) AS unscored
             {sql_where}
         """), {"sid": scenario_id}).mappings().first() or {}

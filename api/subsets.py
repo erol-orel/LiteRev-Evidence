@@ -59,6 +59,9 @@ def plan_subset(
     levels_wanted: set[str] | None = None,
     combine: str = "all",
     unassigned: str = "keep",
+    # Les articles qu'un relecteur a INCLUS À LA MAIN. Ils ne sont jamais exclus par
+    # une restriction de portée : la lecture d'un relecteur ne se défait pas en un clic.
+    included_ids: set[int] | None = None,
 ) -> dict[str, Any]:
     """Qui reste, qui sort, et qui n'a pas pu être jugé. PUR.
 
@@ -147,11 +150,23 @@ def plan_subset(
     else:
         keep.extend(undecided)
 
+    # Une INCLUSION POSÉE À LA MAIN n'est jamais recouverte en silence par une
+    # restriction de portée. Un relecteur avait rescapé l'article en le lisant ; une
+    # règle de périmètre appliquée en un clic ne défait pas cette lecture. Ils sont
+    # gardés et COMPTÉS à part, pour que la restriction dise ce qu'elle n'a pas fait.
+    kept_manual = [i for i in drop if included_ids and i in included_ids]
+    if kept_manual:
+        kept = set(kept_manual)
+        drop = [i for i in drop if i not in kept]
+        keep.extend(kept_manual)
+
     return {
         "relevant": len(relevant),
         "keep_ids": keep,
         "exclude_ids": drop,
         "undecided_ids": undecided,
+        "kept_manual_ids": kept_manual,
+        "kept_manual": len(kept_manual),
         "keep": len(keep),
         "exclude": len(drop),
         "undecided": len(undecided),
@@ -249,6 +264,16 @@ def _relevant_ids(scenario_id: str, threshold: float) -> list[int]:
             WHERE ars.scenario_id = :sid AND {gate}
             ORDER BY d.id
         """), {"sid": scenario_id, "thr": threshold}).all()]
+
+
+def _manually_included_ids(scenario_id: str) -> set[int]:
+    """Les articles que CE scénario a inclus à la main. Une restriction de portée les
+    garde et le DIT, au lieu de recouvrir une décision de relecteur en silence."""
+    with engine.connect() as conn:
+        return {int(r[0]) for r in conn.execute(text("""
+            SELECT document_id FROM article_scenarios
+            WHERE scenario_id = :sid AND screening_status = 'included'
+        """), {"sid": scenario_id}).all()}
 
 
 def _cluster_membership(scenario_id: str) -> tuple[dict[int, int], dict[int, str], dict]:
@@ -453,7 +478,8 @@ def _build_plan(scenario_id: str, payload: dict[str, Any]) -> dict[str, Any]:
                            concept_match=concept_match, concept_known=concept_known,
                            design_of=design_of, designs_wanted=wanted_designs,
                            level_of=level_of, levels_wanted=wanted_levels,
-                           combine=combine, unassigned=unassigned)
+                           combine=combine, unassigned=unassigned,
+                           included_ids=_manually_included_ids(scenario_id))
     except ValueError as e:
         raise HTTPException(status_code=422, detail=str(e))
 
@@ -488,6 +514,7 @@ def _public(plan: dict[str, Any], sample: int = 20) -> dict[str, Any]:
     out = {k: v for k, v in plan.items() if not k.endswith("_ids")}
     out["exclude_sample"] = plan["exclude_ids"][:sample]
     out["undecided_sample"] = plan["undecided_ids"][:sample]
+    out["kept_manual_sample"] = plan.get("kept_manual_ids", [])[:sample]
     return out
 
 
@@ -535,14 +562,25 @@ def apply_scenario_subset(scenario_id: str, payload: dict[str, Any],
     if not reason.startswith(SUBSET_REASON_PREFIX):
         reason = f"{SUBSET_REASON_PREFIX} {reason}"
     with engine.begin() as conn:
-        conn.execute(text("""
+        # L'état ANTÉRIEUR est conservé avant d'être recouvert, et seulement s'il ne
+        # l'est pas déjà : deux découpages successifs ne doivent pas faire oublier ce
+        # qu'il y avait avant le premier. `undo` écrivait littéralement 'pending' et
+        # NULL, si bien qu'un article rescapé à la main puis exclu par un découpage
+        # revenait « en attente, sans motif » : sous le seuil et sans inclusion, il
+        # quittait le corpus pertinent, et le travail du relecteur avec lui.
+        n = conn.execute(text("""
             UPDATE article_scenarios
-            SET screening_status = 'excluded', screening_reason = :reason, screened_at = NOW()
+            SET prior_screening_status = COALESCE(prior_screening_status, screening_status),
+                prior_screening_reason = COALESCE(prior_screening_reason, screening_reason),
+                screening_status = 'excluded',
+                screening_reason = :reason,
+                screened_at = NOW()
             WHERE scenario_id = :sid AND document_id = ANY(:ids)
-        """), {"sid": scenario_id, "ids": ids, "reason": reason})
+        """), {"sid": scenario_id, "ids": ids, "reason": reason}).rowcount or 0
         _reset_corpus_caches(conn, scenario_id)
-    logger.info(f"subset apply {scenario_id}: {len(ids)} articles excluded ({reason})")
-    return {**_public(plan), "applied": len(ids), "status": "applied", "reason": reason,
+    logger.info(f"subset apply {scenario_id}: {n} articles excluded ({reason}); "
+                f"{plan['kept_manual']} inclusion(s) manuelle(s) laissée(s) en place")
+    return {**_public(plan), "applied": int(n), "status": "applied", "reason": reason,
             "caveat": ("Ce découpage porte sur les articles pertinents au seuil "
                        f"{plan['meta']['threshold']}. Abaisser le seuil ensuite fera entrer "
                        "des articles que cette sélection n'a jamais jugés.")}
@@ -577,9 +615,17 @@ def undo_scenario_subset(scenario_id: str, reason: str | None = None,
         extra = " AND screening_reason = :reason"
         params["reason"] = reason
     with engine.begin() as conn:
+        # On RESTAURE l'état d'avant le découpage, au lieu d'écrire 'pending' : une
+        # inclusion manuelle recouverte par une restriction de portée revient
+        # inclusion, avec son motif. À défaut d'état conservé (découpage appliqué par
+        # une version antérieure), on retombe sur 'pending', l'ancien comportement.
         n = conn.execute(text(f"""
             UPDATE article_scenarios
-            SET screening_status = 'pending', screening_reason = NULL, screened_at = NOW()
+            SET screening_status = COALESCE(prior_screening_status, 'pending'),
+                screening_reason = prior_screening_reason,
+                prior_screening_status = NULL,
+                prior_screening_reason = NULL,
+                screened_at = NOW()
             WHERE scenario_id = :sid AND screening_status = 'excluded'
               AND screening_reason LIKE :pfx{extra}
         """), params).rowcount or 0

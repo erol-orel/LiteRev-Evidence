@@ -55,9 +55,16 @@ def test_the_whole_scenario_scope_still_drops_duplicates_and_excluded_articles()
 
 
 def test_relevant_is_strictly_narrower_than_all():
-    """The relevant scope adds a condition, it never removes one."""
+    """The relevant scope adds a condition, it never removes one.
+
+    Compared clause by clause rather than by string prefix: both now read the status of
+    THIS review (`asn.screening_status`) instead of falling back to the document row
+    shared with every other scenario, so `relevant` carries the same two clauses as
+    `all` plus the two thresholds."""
     wide, narrow = scenario_scope_sql("all"), scenario_scope_sql("relevant")
-    assert narrow.startswith(wide)
+    for clause in wide.split(" AND "):
+        assert clause in narrow, clause
+    assert "similarity_score" in narrow and "rerank_score" in narrow
     assert len(narrow) > len(wide)
 
 

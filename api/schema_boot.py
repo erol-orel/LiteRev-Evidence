@@ -753,6 +753,74 @@ except Exception as _e:
     logger.warning(f"_ensure_double_blind_columns: {_e}")
 
 
+def _ensure_prior_screening_columns() -> None:
+    """De quoi ANNULER un découpage sans détruire ce qu'il a recouvert.
+
+    `undo` réécrivait littéralement 'pending' et NULL. Un article qu'un relecteur avait
+    rescapé à la main, puis que le découpage avait exclu, revenait donc « en attente,
+    sans motif » : sous le seuil et sans inclusion, il disparaissait du corpus pertinent,
+    et le travail du relecteur avec lui. L'état antérieur est maintenant conservé."""
+    with engine.begin() as conn:
+        if not conn.execute(text("SELECT to_regclass('public.article_scenarios')")).scalar():
+            return
+        conn.execute(text("""
+            ALTER TABLE article_scenarios
+            ADD COLUMN IF NOT EXISTS prior_screening_status VARCHAR(20),
+            ADD COLUMN IF NOT EXISTS prior_screening_reason TEXT
+        """))
+    logger.info("Colonnes d'état antérieur du screening (découpage) vérifiées/créées.")
+
+
+try:
+    _ensure_prior_screening_columns()
+except Exception as _e:
+    logger.warning(f"_ensure_prior_screening_columns: {_e}")
+
+
+def _backfill_ars_screening_from_document() -> None:
+    """Recopie UNE FOIS, sur les liens, les décisions qui ne vivaient que globalement.
+
+    Le statut de screening se lisait `COALESCE(ars.screening_status,
+    d.screening_status)` : à défaut de décision dans cette revue, la décision prise dans
+    une AUTRE. `literature_document` étant partagé, un article exclu dans une revue
+    sortait du sous-ensemble pertinent de toutes les autres qui le contiennent, sans
+    qu'un seul de leurs écrans ne le dise.
+
+    Les lectures ne regardent plus que le lien. Les décisions antérieures à l'écriture
+    par scénario n'existent que sur la ligne globale : sans cette recopie, elles
+    seraient silencieusement annulées, et un relecteur verrait ses exclusions revenir.
+    On les recopie donc sur les liens EXISTANTS, ce qui ne change rien à ce qui est
+    affiché aujourd'hui, et on arrête là : un scénario créé après ce démarrage part de
+    liens vierges, donc d'une revue qui n'hérite de rien.
+
+    Idempotent (ne touche que les liens sans statut) et sans effet sur une base neuve."""
+    with engine.begin() as conn:
+        if not conn.execute(text("SELECT to_regclass('public.article_scenarios')")).scalar():
+            return
+        n = conn.execute(text("""
+            UPDATE article_scenarios ars
+            SET screening_status = d.screening_status,
+                screening_reason = COALESCE(ars.screening_reason, d.screening_reason)
+            FROM literature_document d
+            WHERE d.id = ars.document_id
+              AND ars.screening_status IS NULL
+              AND d.screening_status IN ('included', 'excluded')
+        """)).rowcount or 0
+    if n:
+        logger.warning(
+            f"Screening par revue : {n} décision(s) recopiée(s) depuis la ligne globale "
+            f"du document vers les liens. Les lectures ne regardent plus que le lien, "
+            f"donc une décision prise dans une revue ne déplace plus le corpus d'une autre.")
+    else:
+        logger.info("Screening par revue : aucune décision globale à recopier.")
+
+
+try:
+    _backfill_ars_screening_from_document()
+except Exception as _e:
+    logger.warning(f"_backfill_ars_screening_from_document: {_e}")
+
+
 def _ensure_dedup_columns():
     """Colonne title_norm (titre normalisé) pour la déduplication inter-sources par
     TITRE - en complément du DOI, afin de capter les doublons SANS DOI (préprints,

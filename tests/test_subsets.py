@@ -282,6 +282,62 @@ def test_undo_restores_the_scope_exclusions_and_only_those(seeded):
     assert main.corpus_digest(SID, 0.45)["n_articles"] == 5
 
 
+def test_a_manual_inclusion_is_never_covered_in_silence_by_a_narrowing(seeded):
+    """Un relecteur avait rescapé l'article en le LISANT. Une règle de périmètre
+    appliquée en un clic ne défait pas cette lecture.
+
+    Avant : le découpage l'écrivait 'excluded' avec un motif « scope: … », puis `undo`
+    remettait littéralement 'pending' et NULL. L'article, sous le seuil et sans
+    inclusion, quittait le corpus pertinent, et le travail du relecteur avec lui."""
+    with seeded.cursor() as cur:
+        # 9603 est dans le cluster « Vector control », donc hors d'une sélection sur le
+        # cluster 0 ; et un relecteur l'a inclus à la main.
+        cur.execute("UPDATE article_scenarios SET screening_status = 'included',"
+                    " screening_reason = 'relu, pertinent malgré le devis'"
+                    " WHERE scenario_id = %s AND document_id = 9603", (SID,))
+        seeded.commit()
+    plan = _client().post(f"/user-scenarios/{SID}/subset/preview",
+                          json={"clusters": [0]}).json()
+    assert plan["kept_manual"] == 1, "l'inclusion manuelle allait être recouverte"
+    assert 9603 in plan["kept_manual_sample"]
+    assert 9603 not in plan["exclude_sample"]
+    out = _client().post(f"/user-scenarios/{SID}/subset/apply",
+                         json={"clusters": [0]}, headers=HDR).json()
+    assert out["applied"] == 1 and out["kept_manual"] == 1
+    with seeded.cursor() as cur:
+        cur.execute("SELECT screening_status, screening_reason FROM article_scenarios"
+                    " WHERE scenario_id = %s AND document_id = 9603", (SID,))
+        assert cur.fetchone() == ("included", "relu, pertinent malgré le devis")
+
+
+def test_undo_restores_the_prior_state_instead_of_writing_a_literal_pending(seeded):
+    """`undo` RESTAURE, il ne réécrit pas.
+
+    Il écrivait littéralement 'pending' et NULL sur toute ligne portant un motif
+    « scope: … ». Ce qui s'y trouvait avant était donc perdu, quoi que ce fût. Le
+    découpage conserve maintenant l'état antérieur, et `undo` le rend ; à défaut (un
+    découpage appliqué par une version antérieure), il retombe sur 'pending'."""
+    _client().post(f"/user-scenarios/{SID}/subset/apply", json={"clusters": [0]}, headers=HDR)
+    with seeded.cursor() as cur:
+        # L'état conservé est rendu tel quel : on le pose ici pour éprouver la
+        # restauration elle-même, sans dépendre de ce qu'un découpage recouvre.
+        cur.execute("UPDATE article_scenarios SET prior_screening_status = 'included',"
+                    " prior_screening_reason = 'relu, pertinent malgré le devis'"
+                    " WHERE scenario_id = %s AND document_id = 9603", (SID,))
+        seeded.commit()
+    _client().post(f"/user-scenarios/{SID}/subset/undo", headers=HDR)
+    with seeded.cursor() as cur:
+        cur.execute("SELECT document_id, screening_status, screening_reason,"
+                    " prior_screening_status FROM article_scenarios"
+                    " WHERE scenario_id = %s AND document_id IN (9603, 9604)"
+                    " ORDER BY document_id", (SID,))
+        rows = cur.fetchall()
+    assert rows[0] == (9603, "included", "relu, pertinent malgré le devis", None), (
+        "l'état conservé n'a pas été rendu : undo écrit encore 'pending' et NULL")
+    # 9604 n'avait rien avant le découpage : il revient « en attente », sans motif.
+    assert rows[1] == (9604, "pending", None, None)
+
+
 def test_the_narrowing_in_force_is_readable_instead_of_invisible(seeded):
     assert _client().get(f"/user-scenarios/{SID}/subset").json()["narrowed"] is False
     _client().post(f"/user-scenarios/{SID}/subset/apply", json={"clusters": [0]}, headers=HDR)
