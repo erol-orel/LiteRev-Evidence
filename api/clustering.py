@@ -7,12 +7,13 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 from typing import Any
 
-from fastapi import Query
+from fastapi import Depends, Query
 from sqlalchemy import text
 
-from .core import _norm_lang, app, engine, logger
+from .core import _norm_lang, app, engine, logger, require_api_key_if_forced
 from .documents import _llm_lang_directive
 from .scenario_store import (_get_scenario_threshold, _get_user_scenario_or_404,
                              relevant_gate_tail_sql, screening_status_sql)
@@ -617,8 +618,19 @@ def _run_clustering_background(scenario_id: str, force_refresh: bool = False, la
         _clustering_jobs[scenario_id] = {"status": "error", "error": str(e)}
 
 
+#: Le verrou qui garantit un seul calcul de clustering en vol par scénario. Il n'y en
+#: avait pas : le test et l'écriture du job étaient deux instructions séparées, et
+#: `force_refresh` sautait le test.
+_clustering_start_lock = threading.Lock()
+
+
 @app.get("/user-scenarios/{scenario_id}/clustering")
-def get_user_scenario_clustering(scenario_id: str, force_refresh: bool = False, lang: str | None = Query(None)) -> dict[str, Any]:
+def get_user_scenario_clustering(scenario_id: str, force_refresh: bool = False,
+                                 lang: str | None = Query(None),
+                                 # Un rafraîchissement FORCÉ recalcule et paie les
+                                 # résumés : il demande la clé, comme toute écriture.
+                                 # Le GET simple reste une lecture de cache.
+                                 _: None = Depends(require_api_key_if_forced)) -> dict[str, Any]:
     """Clustering pour un scénario utilisateur, dans la langue demandée (`lang`).
 
     Le cache (DB, puis job en mémoire) n'est servi tel quel que s'il porte les résumés
@@ -645,11 +657,19 @@ def get_user_scenario_clustering(scenario_id: str, force_refresh: bool = False, 
                 threading.Thread(target=_relocalize_clustering_background,
                                  args=(scenario_id, cached, want), daemon=True).start()
             return _clustering_running_payload(scenario_id, want)
-    job = _clustering_jobs.get(scenario_id)
-    if not job or job.get("status") not in ("running",) or force_refresh:
+    # ── UN seul calcul à la fois, `force_refresh` compris ───────────────────
+    # `or force_refresh` passait OUTRE le verrou : chaque appel avec
+    # force_refresh=true démarrait un fil de plus, sans borne, chacun refaisant
+    # UMAP/HDBSCAN et payant les résumés de clusters. Un rafraîchissement forcé demande
+    # un nouveau calcul, pas N calculs simultanés du même scénario, et le dernier à
+    # finir écrasait de toute façon les autres.
+    with _clustering_start_lock:
+        job = _clustering_jobs.get(scenario_id)
+        if job and job.get("status") == "running":
+            return _clustering_running_payload(scenario_id, want)
         _clustering_jobs[scenario_id] = {"status": "running"}
-        t = threading.Thread(target=_run_clustering_background, args=(scenario_id, force_refresh, want), daemon=True)
-        t.start()
+    threading.Thread(target=_run_clustering_background,
+                     args=(scenario_id, force_refresh, want), daemon=True).start()
     return _clustering_running_payload(scenario_id, want)
 
 
@@ -658,11 +678,16 @@ def get_user_scenario_clustering_status(scenario_id: str, lang: str | None = Que
     """Statut du clustering pour un scénario utilisateur (résultat dans la langue demandée)."""
     _get_user_scenario_or_404(scenario_id)
     want = _norm_lang(lang) or "fr"
+    # Le statut DIT toujours lequel des quatre états il décrit. Un résultat terminé ne
+    # portait aucun champ `status`, si bien que l'interface déduisait « terminé » de
+    # « il y a au moins un cluster » : un corpus trop petit pour être groupé (zéro
+    # cluster, qui EST un résultat) faisait tourner le sondage indéfiniment, une requête
+    # toutes les cinq secondes jusqu'à la fermeture de l'onglet.
     job = _clustering_jobs.get(scenario_id)
     if not job:
         _db = _load_viz_cache(scenario_id, "clustering")
         if _db:
-            return _localize_clusters_payload(_db, want)
+            return {**_localize_clusters_payload(_db, want), "status": "done"}
         return {"scenario_id": scenario_id, "status": "not_started",
                 "message": "Aucun calcul lancé." if want == "fr" else "No computation started."}
     if job["status"] == "running":
@@ -670,4 +695,4 @@ def get_user_scenario_clustering_status(scenario_id: str, lang: str | None = Que
                 "message": _CLUSTER_MESSAGES["running"][want]}
     if job["status"] == "error":
         return {"scenario_id": scenario_id, "status": "error", "error": job.get("error", "Erreur inconnue")}
-    return _localize_clusters_payload(job["result"], want)
+    return {**_localize_clusters_payload(job["result"], want), "status": "done"}

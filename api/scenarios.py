@@ -14,7 +14,8 @@ from fastapi import Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field, field_validator, model_validator
 from sqlalchemy import text
 
-from .core import _msg, _norm_lang, app, client_ip, engine, logger, require_api_key
+from .core import (_job_is_active, _msg, _norm_lang, app, client_ip, engine, logger,
+                   require_api_key)
 from .documents import _strategy_is_degraded
 from .scenario_store import (
     KINDS,
@@ -1138,7 +1139,9 @@ def get_user_scenario_corpus(
         "filtered_total": filtered_total,
         "counts": counts,
         "source_breakdown": source_breakdown,
-        "rerank_running": rerank_running or (_RERANK_JOBS.get(scenario_id, {}).get("status") == "running"),
+        # `_job_is_active` : une entrée « en cours » laissée par un fil tué au
+        # redémarrage faisait afficher un scoring en cours pour toujours.
+        "rerank_running": rerank_running or _job_is_active(_RERANK_JOBS.get(scenario_id)),
         "threshold": eff_threshold,
         "offset": offset,
         "limit": limit,

@@ -397,7 +397,14 @@ Réponds de manière structurée et cite les sources pertinentes du contexte."""
                     token_event = f"data: {_json.dumps({'token': delta.content})}\n\n"
                     yield token_event
         except Exception as e:
+            # `return`, PAS une continuation : `event: done` suivait l'erreur, et le
+            # client archive sur `done`. Une réponse en échec était donc enregistrée
+            # dans l'historique comme une réponse terminée, avec les compteurs du corpus
+            # attachés, et se relisait comme une réponse établie sur N articles.
+            logger.error(f"RAG stream {scenario_id if 'scenario_id' in dir() else ''}: {e}",
+                         exc_info=True)
             yield f"event: error\ndata: {_json.dumps({'error': str(e)})}\n\n"
+            return
 
         yield "event: done\ndata: {}\n\n"
 
@@ -812,7 +819,11 @@ Reponds de maniere structuree et cite les sources pertinentes du contexte."""
                     token_event = f"data: {_json2.dumps({'token': delta.content})}\n\n"
                     yield token_event
         except Exception as e:
+            # Même raison : une erreur n'est pas suivie de `done`, sans quoi le client
+            # archive l'échec comme une réponse complète.
+            logger.error(f"RAG stream (filtered): {e}", exc_info=True)
             yield f"event: error\ndata: {_json2.dumps({'error': str(e)})}\n\n"
+            return
 
         yield "event: done\ndata: {}\n\n"
 

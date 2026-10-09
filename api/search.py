@@ -1244,7 +1244,10 @@ def _generate_search_strategy(query: str) -> dict:
 
 
 class SearchStrategyIn(BaseModel):
-    query: str = Field(..., min_length=1)
+    # BORNÉE. Ce texte devient le prompt d'un appel au modèle ET la clé d'une ligne de
+    # cache persistée : sans longueur maximale, une chaîne arbitrairement longue
+    # coûtait un appel et laissait une ligne, autant de fois qu'on la faisait varier.
+    query: str = Field(..., min_length=1, max_length=2000)
 
 
 @app.post("/search-strategy")

@@ -126,8 +126,16 @@ def test_the_actions_prompt_carries_the_whole_corpus_not_the_sample(monkeypatch)
     patch_app(monkeypatch, "engine", main.engine)            # unchanged, kept explicit
     monkeypatch.setattr(main, "_maybe_generate_actions", lambda *a, **k: True, raising=False)
 
+    class _Result:
+        """La génération LIT le cache des actions avant d'y écrire sa langue : un
+        emplacement par langue, au lieu d'un seul que l'autre langue écrasait."""
+        def mappings(self): return self
+        def first(self): return None
+
     class _Conn:
-        def execute(self, *a, **k): written["saved"] = True
+        def execute(self, *a, **k):
+            written["saved"] = True
+            return _Result()
         def __enter__(self): return self
         def __exit__(self, *a): return False
     monkeypatch.setattr(main.engine, "begin", lambda: _Conn())

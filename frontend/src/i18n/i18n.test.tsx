@@ -120,3 +120,35 @@ describe("LanguageProvider", () => {
     expect(() => render(<Consumer />)).toThrow(/LanguageProvider/);
   });
 });
+
+/** Every literal key a component asks for must exist. `t()` falls back to French and
+ *  then to the PATH ITSELF, so a key that exists nowhere renders as the literal string
+ *  "common.loading" on the page, silently. Three call sites did exactly that.
+ *
+ *  The sources are read through Vite's `import.meta.glob` rather than node:fs, so this
+ *  file type-checks under the app's own tsconfig (which has no @types/node). */
+const SOURCES = import.meta.glob("../**/*.{ts,tsx}", {
+  query: "?raw", import: "default", eager: true,
+}) as Record<string, string>;
+
+describe("every translation key a component asks for exists", () => {
+  const flatFr = flatten(fr);
+
+  it("has no t(\"a.b.c\") pointing at a key that is not in the locales", () => {
+    const missing: string[] = [];
+    for (const [file, src] of Object.entries(SOURCES)) {
+      if (file.includes(".test.")) continue;
+      // `t("a.b.c")` with a LITERAL key, which is a FULL locale path. `T(...)` is
+      // excluded on purpose: several components define it as a prefixed helper whose
+      // argument is only the tail of a path. Template literals and computed keys are
+      // out of reach of a static check and are left alone.
+      for (const m of src.matchAll(/(?<![a-zA-Z0-9_.$])t\(\s*"([a-zA-Z0-9_.]+)"\s*\)/g)) {
+        const key = m[1];
+        if (!key.includes(".")) continue;
+        if (key in flatFr) continue;
+        missing.push(`${file}: ${key}`);
+      }
+    }
+    expect(missing).toEqual([]);
+  });
+});

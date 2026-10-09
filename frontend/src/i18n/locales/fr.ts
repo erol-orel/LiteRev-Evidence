@@ -712,6 +712,8 @@ export const fr = {
       pollingText:
         "Calcul en cours en arrière-plan (UMAP + HDBSCAN)... Mise à jour automatique toutes les 5s",
       startingText: "Lancement de l'analyse (Embeddings → UMAP 2D → HDBSCAN)...",
+      interrupted: "Le calcul a été interrompu (redémarrage de l'API). Relancez-le.",
+      pollTimedOut: "Le calcul n'a pas abouti dans le délai attendu. Relancez-le.",
       errorClustering: "Erreur lors du clustering",
       umapProjection: "Projection UMAP 2D",
       umapCaption:
@@ -1048,6 +1050,7 @@ export const fr = {
       launchSuffix: "articles)",
     },
     seuil: {
+      saveFailed: "Le seuil n'a pas été enregistré : réessayez (clé d'API ou réseau).",
       launchScoring: "Lancement du scoring...",
       scoringDonePrefix: "Scoring terminé : ",
       scoringDoneSuffix: " articles mis à jour.",

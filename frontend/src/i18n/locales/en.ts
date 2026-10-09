@@ -714,6 +714,8 @@ export const en: Translations = {
       pollingText:
         "Computing in the background (UMAP + HDBSCAN)... Auto-refresh every 5s",
       startingText: "Starting analysis (Embeddings → UMAP 2D → HDBSCAN)...",
+      interrupted: "The computation was interrupted (API restart). Start it again.",
+      pollTimedOut: "The computation did not finish in the expected time. Start it again.",
       errorClustering: "Error during clustering",
       umapProjection: "UMAP 2D projection",
       umapCaption:
@@ -1050,6 +1052,7 @@ export const en: Translations = {
       launchSuffix: "articles)",
     },
     seuil: {
+      saveFailed: "The threshold was not saved: try again (API key or network).",
       launchScoring: "Starting scoring...",
       scoringDonePrefix: "Scoring complete: ",
       scoringDoneSuffix: " articles updated.",

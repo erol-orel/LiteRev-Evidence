@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import math
 import os
+import threading
 from typing import Any
 
 from fastapi import Depends, HTTPException
@@ -295,6 +296,22 @@ def _run_cross_encoder_rerank(scenario_id: str, query: str, top_k: int | None = 
 # ─── SCORING SÉMANTIQUE POST-INGESTION ───────────────────────────────────────
 
 _RERANK_JOBS: dict[str, dict] = {}
+#: Le verrou qui rend « lire puis écrire » indivisible. Deux appels simultanés
+#: pouvaient tous deux voir « pas de job » et démarrer leur fil.
+_rerank_jobs_lock = threading.Lock()
+
+
+def _mark_rerank_running(scenario_id: str) -> None:
+    """Pose l'entrée « en cours » SOUS UNE SEULE forme, horodatée.
+
+    Les entrées étaient écrites de deux façons : avec `started_at` à un endroit, sans à
+    trois autres. `_job_is_active` lit cet horodatage, donc une entrée qui n'en portait
+    pas était jugée vieille de 1970, c'est-à-dire morte : la garde laissait démarrer un
+    SECOND scoring du même scénario pendant que le premier tournait."""
+    import time as _t
+    with _rerank_jobs_lock:
+        _RERANK_JOBS[scenario_id] = {"status": "running", "updated": 0,
+                                     "started_at": _t.time()}
 
 
 def _ensure_scenario_settings_table():
@@ -511,7 +528,7 @@ def trigger_rerank(scenario_id: str, missing_only: bool = False,
     if _job_is_active(_RERANK_JOBS.get(scenario_id)):
         return {"status": "already_running", "scenario_id": scenario_id}
 
-    _RERANK_JOBS[scenario_id] = {"status": "running", "updated": 0, "started_at": time.time()}
+    _mark_rerank_running(scenario_id)
 
     def _run():
         try:
@@ -634,9 +651,9 @@ def rebuild_corpus(scenario_id: str, _: None = Depends(require_api_key)) -> dict
         raise HTTPException(status_code=422,
                             detail="Scénario sans requête exploitable : reconstruction impossible.")
 
-    if _RERANK_JOBS.get(scenario_id, {}).get("status") == "running":
+    if _job_is_active(_RERANK_JOBS.get(scenario_id)):
         return {"status": "already_running", "scenario_id": scenario_id}
-    _RERANK_JOBS[scenario_id] = {"status": "running", "updated": 0}
+    _mark_rerank_running(scenario_id)
 
     def _run():
         try:
@@ -727,8 +744,13 @@ def _maybe_autorerank(scenario_id: str) -> bool:
     """
     import threading
 
-    st = _RERANK_JOBS.get(scenario_id, {}).get("status")
-    if st in ("running", "done"):
+    # `_job_is_active`, comme les autres gardes : lire `status == "running"` nu
+    # traitait une entrée laissée par un fil tué au redémarrage comme vivante (donc
+    # blocage définitif), et une entrée POSÉE SANS HORODATAGE comme morte (donc un
+    # second scoring concurrent du même scénario).
+    if _job_is_active(_RERANK_JOBS.get(scenario_id)):
+        return False
+    if _RERANK_JOBS.get(scenario_id, {}).get("status") == "done":
         return False
     try:
         if scenario_id.startswith("usr-"):
@@ -743,7 +765,7 @@ def _maybe_autorerank(scenario_id: str) -> bool:
     if not query:
         return False
 
-    _RERANK_JOBS[scenario_id] = {"status": "running", "updated": 0}
+    _mark_rerank_running(scenario_id)
 
     def _run():
         try:
@@ -1119,7 +1141,7 @@ def get_threshold_curve(scenario_id: str, target: int | None = None,
         # d'office passent quoi qu'on fasse ; au-delà de `max`, il n'y a plus d'articles.
         "reachable": {"min": free + 1, "max": len(rows) + free} if rows else None,
         "with_parameter_total": sum(1 for _, p in rows if p),
-        "scoring_in_progress": _RERANK_JOBS.get(scenario_id, {}).get("status") == "running",
+        "scoring_in_progress": _job_is_active(_RERANK_JOBS.get(scenario_id)),
         # Un découpage par clusters ou par concepts ne juge que les articles pertinents AU
         # MOMENT où il est posé. Descendre le seuil sous cette frontière fait donc rentrer
         # des articles que la sélection n'a jamais vus, et la courbe les propose avec le

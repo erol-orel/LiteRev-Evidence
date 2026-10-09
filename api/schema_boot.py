@@ -129,6 +129,15 @@ def _ensure_performance_indexes() -> None:
         "WHERE pmid IS NOT NULL",
         "CREATE INDEX IF NOT EXISTS ix_litdoc_external_id ON literature_document (external_id) "
         "WHERE external_id IS NOT NULL",
+        # La cible que l'INSERT de la living review nomme : `ON CONFLICT (external_id,
+        # source)`. Aucun index unique n'y correspondait, donc Postgres rejetait CHAQUE
+        # insertion (« there is no unique or exclusion constraint matching the ON
+        # CONFLICT specification »), l'exception était avalée par un `except` qui
+        # journalise, et le compteur d'erreurs montait pendant que la tâche se déclarait
+        # réussie. La living review n'a jamais pu ingérer un article.
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_litdoc_external_source "
+        "ON literature_document (external_id, source) "
+        "WHERE external_id IS NOT NULL AND external_id <> ''",
         "CREATE INDEX IF NOT EXISTS ix_litdoc_project_context ON literature_document (project_context)",
         "CREATE INDEX IF NOT EXISTS ix_doc_chunk_document ON document_chunk (document_id)",
         "CREATE INDEX IF NOT EXISTS ix_doc_chunk_type ON document_chunk (chunk_type)",

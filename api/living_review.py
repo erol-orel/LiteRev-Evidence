@@ -38,8 +38,49 @@ def living_review_status(lang: str | None = Query(None)):
         "status": "no_run_yet",
         "message": _msg(lang, "Aucune living review n'a encore été exécutée.", "No living review has run yet."),
         "command": "python3 living_review_scheduler.py --all-scenarios",
-        "scenarios_available": list(SCENARIO_LIVING_REVIEW_IDS),
+        # Ce que la veille peut RÉELLEMENT faire, pas une seconde liste tenue à la main.
+        # `SCENARIO_LIVING_REVIEW_IDS` en annonçait 27 ; le planificateur n'a de requêtes
+        # que pour 6 d'entre eux, et les 21 autres répondaient « scénario inconnu ».
+        "scenarios_available": _scenarios_the_scheduler_can_run(),
+        "scenarios_listed_but_unsupported": sorted(
+            set(SCENARIO_LIVING_REVIEW_IDS) - set(_scenarios_the_scheduler_can_run())),
     }
+
+
+def _scenarios_with_new_documents() -> set[str]:
+    """Les scénarios que la DERNIÈRE exécution a réellement enrichis.
+
+    Le planificateur écrit un rapport par scénario avec son `new_documents` ; c'est la
+    seule source qui sache ce qui a changé. Sans elle, l'invalidation portait sur tous
+    les scénarios demandés, y compris ceux pour lesquels le planificateur n'a pas de
+    requête, et un cycle vide faisait tout recalculer."""
+    try:
+        _rep = living_review_status()
+    except Exception as _e:                                  # noqa: BLE001 - jamais bloquant
+        logger.warning(f"living review report: {_e}")
+        return set()
+    out: set[str] = set()
+    for _s in (_rep.get("scenarios") or []):
+        if isinstance(_s, dict) and int(_s.get("new_documents") or 0) > 0:
+            _sid = _s.get("scenario_id") or _s.get("scenario") or _s.get("id")
+            if _sid:
+                out.add(str(_sid))
+    return out
+
+
+def _scenarios_the_scheduler_can_run() -> list[str]:
+    """Les scénarios pour lesquels le PLANIFICATEUR a des requêtes.
+
+    Le statut annonçait `SCENARIO_LIVING_REVIEW_IDS`, une liste tenue à la main dans
+    api/gesica.py, qui comptait 27 identifiants là où `living_review_scheduler.
+    SCENARIO_QUERIES` en couvre 6 : les 21 autres étaient proposés à l'interface et
+    répondaient « scénario inconnu » au lancement. La capacité est lue à sa source."""
+    try:
+        import living_review_scheduler as _lrs
+        return sorted(_lrs.SCENARIO_QUERIES)
+    except Exception as _e:                                  # noqa: BLE001 - jamais bloquant
+        logger.warning(f"living review capability: {_e}")
+        return []
 
 
 @app.post("/living-review/run")
@@ -157,22 +198,30 @@ def trigger_living_review(
                 logger.info(f"Living Review pipeline: {result.stdout[:500]}")
                 if result.returncode != 0:
                     logger.error(f"Living Review error: {result.stderr[:500]}")
-                elif _sids:
-                    # Le corpus a gagné des articles : tout ce qui en est calculé ne le
-                    # décrit plus. L'étape 4 annoncée par la docstring n'existait nulle
-                    # part dans le scheduler ; elle est faite ici, où l'on sait quels
-                    # scénarios ont été rafraîchis. La liste est celle du changement de
-                    # seuil (CORPUS_DERIVED_CACHE_RESET) : les deux se sont déjà désaccordées
-                    # une fois, sur les actions recommandées.
-                    try:
-                        with engine.begin() as _c:
-                            _c.execute(text(f"""
-                                UPDATE scenario_settings SET {CORPUS_DERIVED_CACHE_RESET}
-                                WHERE scenario_id = ANY(:sids)
-                            """), {"sids": _sids})
-                        logger.info(f"Living Review: caches dérivés du corpus invalidés pour {_sids}")
-                    except Exception as _ce:
-                        logger.warning(f"Living Review cache invalidation: {_ce}")
+                else:
+                    # ── On n'invalide QUE ce qui a changé ────────────────────
+                    # L'invalidation portait sur tous les scénarios DEMANDÉS, qu'ils
+                    # aient gagné un article ou non : un cycle qui ne ramène rien - le
+                    # cas de loin le plus fréquent, et le cas de TOUS les scénarios pour
+                    # lesquels le planificateur n'a pas de requête - effaçait quand même
+                    # le clustering, le graphe, la carte des concepts, les actions et la
+                    # projection de chacun, qu'il fallait ensuite tout recalculer.
+                    # Le planificateur écrit son compte par scénario : on le lit.
+                    _changed = _scenarios_with_new_documents()
+                    _touched = [s for s in _sids if s in _changed] if _sids else sorted(_changed)
+                    if not _touched:
+                        logger.info("Living Review: aucun article nouveau, aucun cache invalidé.")
+                    else:
+                        try:
+                            with engine.begin() as _c:
+                                _c.execute(text(f"""
+                                    UPDATE scenario_settings SET {CORPUS_DERIVED_CACHE_RESET}
+                                    WHERE scenario_id = ANY(:sids)
+                                """), {"sids": _touched})
+                            logger.info(f"Living Review: caches dérivés du corpus invalidés "
+                                        f"pour {_touched}")
+                        except Exception as _ce:
+                            logger.warning(f"Living Review cache invalidation: {_ce}")
             except Exception as e:
                 logger.error(f"Living Review pipeline error: {e}")
 

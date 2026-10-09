@@ -206,6 +206,30 @@ def _insert_document(conn, doc: dict) -> Optional[int]:
     """Insère un document dans literature_document et retourne son ID."""
     try:
         with conn.cursor() as cur:
+            # ── Dédup par pré-SELECT, pas par ON CONFLICT ────────────────────
+            # L'INSERT nommait `ON CONFLICT (external_id, source)`, cible à laquelle
+            # AUCUN index unique ne correspondait : Postgres rejetait chaque insertion
+            # (« there is no unique or exclusion constraint matching the ON CONFLICT
+            # specification »), l'exception était avalée par le `except` plus bas, et le
+            # compteur d'erreurs montait pendant que la tâche se déclarait réussie. La
+            # living review n'a jamais ingéré un article.
+            # L'index manquant est désormais créé au démarrage, mais on ne s'y fie pas :
+            # il peut échouer sur une base qui porte déjà des collisions, et un chemin
+            # d'ingestion ne doit pas dépendre d'un index pour ne pas lever.
+            _eid = (doc.get("external_id") or "").strip()
+            _src = doc.get("source", "pubmed")
+            if _eid:
+                cur.execute(
+                    "SELECT id FROM literature_document WHERE external_id = %s AND source = %s"
+                    " LIMIT 1", (_eid, _src))
+                _hit = cur.fetchone()
+                if _hit:
+                    conn.commit()
+                    # 0, PAS None : « déjà connu » est le cas normal d'une veille, et
+                    # les trois appelants comptaient le None comme une ERREUR. Un cycle
+                    # qui ne ramène que des articles déjà vus annonçait autant d'erreurs
+                    # que d'articles.
+                    return 0
             cur.execute("""
                 INSERT INTO literature_document
                     (title, abstract, source, external_id, url, year,
@@ -213,7 +237,6 @@ def _insert_document(conn, doc: dict) -> Optional[int]:
                      metadata_json, created_at, updated_at)
                 VALUES
                     (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, CAST(%s AS jsonb), NOW(), NOW())
-                ON CONFLICT (external_id, source) DO NOTHING
                 RETURNING id
             """, (
                 doc.get("title", "")[:500],
@@ -420,7 +443,7 @@ def run_living_review_for_scenario(
                     "living_review": True,
                 })
                 new_docs.append(art)
-            else:
+            elif doc_id != 0:
                 errors += 1
 
     # bioRxiv / medRxiv
@@ -444,7 +467,7 @@ def run_living_review_for_scenario(
                         "living_review": True,
                     })
                     new_docs.append(p)
-                else:
+                elif doc_id != 0:        # 0 = déjà connu, ce qui n'est pas une erreur
                     errors += 1
 
     result = {
@@ -514,7 +537,7 @@ def run_user_scenarios(conn, dry_run: bool = False, days: int = 30,
                 _insert_chunk(conn, doc_id, f"{art['title']}\n\n{art['abstract']}", "title_abstract",
                               {"source": art["source"], "living_review": True, "user_scenario": sid})
                 new_docs.append(art)
-            else:
+            elif doc_id != 0:            # 0 = déjà connu, ce qui n'est pas une erreur
                 errors += 1
         results.append({
             "scenario_id": sid, "label": name or sid, "user_scenario": True,

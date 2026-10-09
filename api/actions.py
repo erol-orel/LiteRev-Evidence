@@ -11,7 +11,7 @@ from typing import Any
 from fastapi import Query
 from sqlalchemy import text
 
-from .core import app, engine, logger
+from .core import _norm_lang, app, engine, logger
 from .documents import _llm_lang_directive
 from .gesica import _get_scenario_name
 from .relevance import _get_above_threshold_articles
@@ -87,16 +87,42 @@ def _generate_recommended_actions(scenario_id: str, lang: str | None = None) -> 
         logger.error(f"Génération actions {scenario_id}: {e}", exc_info=True)
         return []
 
-    _lang_norm = (lang or "fr")[:2].lower()
+    # ── Un emplacement PAR LANGUE, pas un seul avec une étiquette ───────────
+    # Le cache avait un emplacement unique plus une colonne de langue : générer en
+    # anglais ÉCRASAIT les actions françaises, et comme le verrou du job était par langue
+    # et disait « fait », la carte française restait vide pour toute la durée de vie du
+    # processus. Un aller-retour entre les deux langues effaçait donc les deux.
+    # `recommended_actions_json` porte maintenant {"fr": [...], "en": [...]}, et une
+    # valeur LEGACY (une liste) est reclassée sous sa langue enregistrée.
+    _lang_norm = _norm_lang(lang) or "fr"
     with engine.begin() as conn:
+        _row = conn.execute(text(
+            "SELECT recommended_actions_json AS j, recommended_actions_lang AS l "
+            "FROM scenario_settings WHERE scenario_id = :sid"
+        ), {"sid": scenario_id}).mappings().first()
+        _by_lang = _actions_by_lang(_row["j"] if _row else None,
+                                    _row["l"] if _row else None)
+        _by_lang[_lang_norm] = actions
         conn.execute(text("""
             INSERT INTO scenario_settings (scenario_id, recommended_actions_json, recommended_actions_lang, actions_generated_at, updated_at)
             VALUES (:sid, CAST(:a AS jsonb), :lng, NOW(), NOW())
             ON CONFLICT (scenario_id) DO UPDATE
             SET recommended_actions_json = CAST(:a AS jsonb), recommended_actions_lang = :lng,
                 actions_generated_at = NOW(), updated_at = NOW()
-        """), {"sid": scenario_id, "a": _json.dumps(actions), "lng": _lang_norm})
+        """), {"sid": scenario_id, "a": _json.dumps(_by_lang), "lng": _lang_norm})
     return actions
+
+
+def _actions_by_lang(stored, legacy_lang: str | None) -> dict[str, list]:
+    """Les actions en cache, PAR LANGUE, quelle que soit la forme stockée.
+
+    Forme actuelle : {"fr": [...], "en": [...]}. Forme LEGACY : une liste, dont la
+    langue est dans `recommended_actions_lang`. Les deux se lisent, une seule s'écrit."""
+    if isinstance(stored, dict):
+        return {str(k): list(v) for k, v in stored.items() if isinstance(v, list)}
+    if isinstance(stored, list) and stored:
+        return {(_norm_lang(legacy_lang) or "fr"): list(stored)}
+    return {}
 
 
 def _maybe_generate_actions(scenario_id: str, lang: str | None = None) -> bool:
@@ -104,7 +130,7 @@ def _maybe_generate_actions(scenario_id: str, lang: str | None = None) -> bool:
     La clé de job inclut la langue : un changement de langue relance la génération
     (au lieu du garde-fou « une seule fois » qui figeait la 1re langue)."""
     import threading
-    _job_key = f"{scenario_id}:{(lang or 'fr')[:2].lower()}"
+    _job_key = f"{scenario_id}:{_norm_lang(lang) or 'fr'}"
     # ── Le verrou ne retient que ce qui TOURNE ───────────────────────────────
     # Il retenait aussi « fait », et « fait » était écrit même quand la génération
     # n'avait rien produit. Deux conséquences, toutes deux vues en production :
@@ -153,16 +179,19 @@ def _maybe_generate_actions(scenario_id: str, lang: str | None = None) -> bool:
 @app.get("/scenarios/{scenario_id}/recommended-actions")
 def get_recommended_actions(scenario_id: str, lang: str | None = Query(None)) -> dict[str, Any]:
     """Actions recommandées (cache) ; génère en arrière-plan au 1er appel si absentes."""
-    _lang_norm = (lang or "fr")[:2].lower()
+    # `_norm_lang` ne rend que 'fr' ou 'en'. La normalisation précédente,
+    # `(lang or "fr")[:2].lower()`, acceptait n'importe quelles deux lettres : 1 296
+    # clés de cache possibles par scénario, et autant de générations payantes
+    # déclenchables par un simple GET.
+    _lang_norm = _norm_lang(lang) or "fr"
     with engine.connect() as conn:
         row = conn.execute(text(
             "SELECT recommended_actions_json, recommended_actions_lang, actions_generated_at FROM scenario_settings WHERE scenario_id = :sid"
         ), {"sid": scenario_id}).mappings().first()
-    # Ne servir le cache que s'il est DANS LA LANGUE demandée. Les actions anciennes
-    # sans langue enregistrée (NULL) sont considérées françaises.
-    if (row and isinstance(row["recommended_actions_json"], list) and row["recommended_actions_json"]
-            and (row["recommended_actions_lang"] or "fr") == _lang_norm):
-        return {"status": "ready", "actions": row["recommended_actions_json"],
+    _cached = _actions_by_lang(row["recommended_actions_json"] if row else None,
+                               row["recommended_actions_lang"] if row else None)
+    if _cached.get(_lang_norm):
+        return {"status": "ready", "actions": _cached[_lang_norm],
                 "generated_at": row["actions_generated_at"].isoformat() if row["actions_generated_at"] else None}
     started = _maybe_generate_actions(scenario_id, lang=lang)
     job = _ACTIONS_JOBS.get(f"{scenario_id}:{_lang_norm}", {})

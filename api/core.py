@@ -184,6 +184,16 @@ EXPENSIVE_PATHS = {
     "/user-scenarios/{scenario_id}/rag",
     "/gesica/scenarios/{scenario_id}/rag",
     "/scenarios/{scenario_id}/full-pipeline",
+    # La projection SEIR : jusqu'à 1 000 tirages sur 3 650 jours, soit une centaine de
+    # secondes de CPU par requête, sans clé. Elle n'était pas dans cette classe.
+    "/scenarios/{scenario_id}/seir/projection",
+    # La traduction d'une requête en stratégie booléenne : un appel au modèle par
+    # chaîne distincte, et une ligne de cache persistée par chaîne.
+    "/search-strategy",
+    # Les actions recommandées et la carte des concepts : un GET y déclenche une
+    # génération payante (cf. leurs commentaires respectifs).
+    "/scenarios/{scenario_id}/recommended-actions",
+    "/user-scenarios/{scenario_id}/concept-graph",
 }
 
 def _compile_expensive_patterns(paths: set[str]) -> list[re.Pattern]:
@@ -314,6 +324,17 @@ def require_api_key(x_api_key: str | None = Header(default=None)) -> None:
         raise HTTPException(status_code=503, detail="Server not configured for authenticated writes")
     if not x_api_key or not _secrets.compare_digest(x_api_key, WRITE_API_KEY):
         raise HTTPException(status_code=401, detail="Invalid API key")
+
+
+def require_api_key_if_forced(force_refresh: bool = False,
+                              x_api_key: str | None = Header(default=None)) -> None:
+    """La clé seulement quand la requête DEMANDE un recalcul.
+
+    Une route de lecture qui accepte `?force_refresh=true` n'est plus une lecture : le
+    rafraîchissement forcé du clustering recalculait UMAP/HDBSCAN et payait les résumés,
+    sans clé et sans borne. Le GET simple reste ouvert, le recalcul demande la clé."""
+    if force_refresh:
+        require_api_key(x_api_key)
 
 
 # Seuil minimal de similarité (cosinus) pour qu'un chunk soit jugé pertinent par

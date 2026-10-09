@@ -74,7 +74,7 @@ import {
   type EvidenceGaps,
   fetchStudyDesignVocabulary,
   type StudyDesignVocabulary,
-  evidenceReportUrl,
+  downloadEvidenceReport,
   previewScenarioSubset,
   applyScenarioSubset,
   fetchScenarioSubsetState,
@@ -2465,11 +2465,15 @@ function CorpusSection({ scenarioId, threshold, counts, onUseAsThreshold }:
 
   if (loading) return <LoadingSpinner text={t("scenarioDetail.corpus.loadingCorpus")} />;
   if (error || !data) return <ErrorBox message={error ?? t("scenarioDetail.common.errorCorpus")} />;
-  // LE jeu de compteurs affiché par ce panneau : celui de la page (donc le même que le
-  // bandeau), à défaut celui que /corpus porte lui-même - les deux viennent de la même
-  // requête SQL, seul l'instant de lecture peut différer. Plus aucun nombre d'articles
-  // n'est recalculé ici : c'est ainsi que le titre et le bandeau se contredisaient.
-  const n: CorpusCounts = counts ?? data.counts ?? {
+  // LE jeu de compteurs affiché par ce panneau. Les deux viennent de la même requête
+  // SQL ; ce qui les distingue est le SEUIL avec lequel ils ont été comptés.
+  //
+  // La priorité était toujours donnée à ceux de la PAGE, calculés au seuil enregistré.
+  // Dès qu'un seuil est en cours d'essai au curseur, la liste, les pastilles et
+  // l'export suivent ce seuil pendant que les compteurs du titre restent sur l'ancien :
+  // « 201 pertinents » au-dessus d'une liste de 602 articles. Quand la requête portait
+  // un seuil, ses propres compteurs l'emportent, puisqu'ils ont été comptés pour lui.
+  const n: CorpusCounts = (threshold != null ? data.counts : counts) ?? data.counts ?? counts ?? {
     threshold: data.threshold ?? DEFAULT_SIMILARITY_THRESHOLD,
     total: data.total, above_threshold: data.above_threshold ?? 0,
     below_threshold: data.below_threshold ?? 0, unscored: data.unscored ?? 0,
@@ -3063,17 +3067,38 @@ function ClusteringSection({ scenarioId }: { scenarioId: string }) {
         setLoading(false);
         setPolling(true);
         setData(result);
+        // ── Le sondage a une FIN ───────────────────────────────────────────
+        // Il ne s'arrêtait que sur « done AVEC des clusters » ou sur « error » : un
+        // corpus trop petit pour être groupé (zéro cluster, ce qui est un résultat) et
+        // un redémarrage de l'API (le job en mémoire disparaît, le statut retombe sur
+        // « idle ») laissaient le fuseau tourner indéfiniment, une requête toutes les
+        // cinq secondes, jusqu'à la fermeture de l'onglet.
+        let _ticks = 0;
+        const MAX_TICKS = 180;            // 15 minutes, soit bien au-delà d'un calcul
         pollRef.current = setInterval(async () => {
+          _ticks += 1;
           try {
             const status = await fetchScenarioClusteringStatus(scenarioId);
-            if (status.status === "done" || (status.clusters && status.clusters.length > 0)) {
+            if (status.status === "done") {
               stopPolling();
-              handleResult(status);
+              handleResult(status);      // y compris un résultat à zéro cluster
             } else if (status.status === "error") {
               stopPolling();
               setError(status.error || t("scenarioDetail.clustering.errorClustering"));
+            } else if (status.status === "not_started") {
+              // Plus de job et rien en cache : l'API a redémarré pendant le calcul.
+              stopPolling();
+              setError(t("scenarioDetail.clustering.interrupted"));
+            } else if (_ticks >= MAX_TICKS) {
+              stopPolling();
+              setError(t("scenarioDetail.clustering.pollTimedOut"));
             }
-          } catch (_) {}
+          } catch (_) {
+            if (_ticks >= MAX_TICKS) {
+              stopPolling();
+              setError(t("scenarioDetail.clustering.pollTimedOut"));
+            }
+          }
         }, 5000);
       } else {
         handleResult(result);
@@ -6156,6 +6181,7 @@ function SeuilSection({ scenarioId, onSaved, onThresholdChange, incoming }: {
   const [saving, setSaving] = React.useState(false);
   const [saved, setSaved] = React.useState(false);
   const [rerankStatus, setRerankStatus] = React.useState<string | null>(null);
+  const [saveError, setSaveError] = React.useState<string | null>(null);
   // Ce que le bouton va VRAIMENT faire : combien d'articles n'ont pas de score, et
   // combien n'en auront jamais faute de résumé exploitable.
   const [coverage, setCoverage] = React.useState<{ scorable: number; missing: number; unscorable: number } | null>(null);
@@ -6198,8 +6224,15 @@ function SeuilSection({ scenarioId, onSaved, onThresholdChange, incoming }: {
       setSaved(true);
       setTimeout(() => setSaved(false), 2000);
       setCurveKey(k => k + 1);          // sinon la courbe garde l'ancien « seuil actuel »
+      setSaveError(null);
       onSaved?.();
-    } catch {}
+    } catch (e: any) {
+      // L'erreur était AVALÉE : un 401 sans clé, un 422 sur une valeur hors de [0, 1]
+      // ou une coupure réseau laissaient l'interface sur un seuil que le serveur n'a
+      // jamais enregistré, et le prochain rechargement le faisait reculer sans
+      // explication. L'échec s'affiche à côté du bouton.
+      setSaveError(e?.message || t("scenarioDetail.seuil.saveFailed"));
+    }
     setSaving(false);
   };
 
@@ -6317,6 +6350,11 @@ function SeuilSection({ scenarioId, onSaved, onThresholdChange, incoming }: {
         {rerankStatus && (
           <span className="text-[10px] text-gold-400">{rerankStatus}</span>
         )}
+        {/* L'échec d'enregistrement, dit. Il était avalé, et l'interface restait sur un
+            seuil que le serveur n'a jamais reçu. */}
+        {saveError && (
+          <span className="text-[10px] text-rose-400">{saveError}</span>
+        )}
       </div>
       <p className="text-[10px] text-white/30 w-full">
         {t("scenarioDetail.seuil.footerMain")}
@@ -6397,7 +6435,7 @@ function StudyDesignLegend() {
       {open && (
         <div className="space-y-2 px-3 pb-3">
           {!data ? (
-            <p className="text-[10px] text-white/35">{t("common.loading")}</p>
+            <p className="text-[10px] text-white/35">{t("common.loadingEllipsis")}</p>
           ) : (
             <>
               {/* Groupé par NIVEAU : la règle une fois, puis les devis qu'elle
@@ -6462,7 +6500,7 @@ function EvidenceGapsPanel({ scenarioId }: { scenarioId: string }) {
     return m;
   }, [data]);
 
-  if (loading && !data) return <p className="text-[11px] text-white/40">{t("common.loading")}</p>;
+  if (loading && !data) return <p className="text-[11px] text-white/40">{t("common.loadingEllipsis")}</p>;
   if (error) return <p className="text-[11px] text-rose-300/70">{error}</p>;
   if (!data) return null;
 
@@ -6793,6 +6831,7 @@ function EvidencesSection({ scenarioId, detail }: { scenarioId: string; detail: 
 
   // ── PDF export ───────────────────────────────────────────────────────────────
   const [exporting, setExporting] = React.useState(false);
+  const [reportError, setReportError] = React.useState<string | null>(null);
 
   // ── Load both ────────────────────────────────────────────────────────────────
   // Extrait en callback parce que restreindre le corpus par devis ou par niveau change
@@ -6979,7 +7018,7 @@ function EvidencesSection({ scenarioId, detail }: { scenarioId: string; detail: 
   <div class="stat"><div class="stat-val" style="color:#3b82f6">${ftRel_pdf}</div><div class="stat-sub">${Math.round(ftRel_pdf/rTotal_pdf*100)}% ${t("scenarioDetail.evidences.pdf.ofRelevant")}</div><div class="stat-label">${t("scenarioDetail.evidences.pdf.fulltext")}</div></div>
 </div>
 ${(b.corpus_stats.included||b.corpus_stats.excluded||(b.corpus_stats.pending??0)) ? `<p class="meta">${t("scenarioDetail.evidences.pdf.screeningPrefix")} <strong>${b.corpus_stats.included}</strong> ${t("scenarioDetail.evidences.pdf.screeningIncluded")} · <strong>${b.corpus_stats.excluded}</strong> ${t("scenarioDetail.evidences.pdf.screeningExcluded")} · <strong>${b.corpus_stats.pending ?? Math.max(0, uniqueTotal_pdf - b.corpus_stats.included - b.corpus_stats.excluded)}</strong> ${t("scenarioDetail.evidences.pdf.screeningPending")}</p>` : ''}
-${b.corpus_stats.year_min && b.corpus_stats.year_max ? `<p class="meta">${t("scenarioDetail.evidences.pdf.coveragePrefix")} <strong>${b.corpus_stats.year_min} – ${b.corpus_stats.year_max}</strong>${b.corpus_stats.avg_citations != null ? ` · ${t("scenarioDetail.evidences.pdf.avgCitations")} <strong>${b.corpus_stats.avg_citations.toFixed(1)}</strong>` : ''}</p>` : ''}
+${b.corpus_stats.year_min && b.corpus_stats.year_max ? `<p class="meta">${t("scenarioDetail.evidences.pdf.coveragePrefix")} <strong>${b.corpus_stats.year_min} – ${b.corpus_stats.year_max}</strong>${b.corpus_stats.avg_citations != null ? ` · ${t("scenarioDetail.evidences.pdf.avgCitations")} <strong>${b.corpus_stats.avg_citations.toFixed(1)}</strong>${b.corpus_stats.citations_known != null ? ` ${t("scenarioDetail.evidences.citationsOver").replace("{n}", String(b.corpus_stats.citations_known))}` : ''}` : ''}</p>` : ''}
 
 <div class="dist-grid">
   <div class="dist-box">
@@ -7079,18 +7118,31 @@ ${llm.future_research ? `<h3>${t("scenarioDetail.evidences.pdf.futureResearch")}
           {briefData && (
             /* Le rapport citable : markdown assemblé côté serveur (api/report.py), avec
                citations renumérotées, tableau des affirmations, matrice de lacunes et
-               bibliographie construite depuis la base. Un lien plutôt qu'un fetch : le
-               endpoint renvoie déjà une pièce jointe, et le navigateur sait faire. */
-            <a href={evidenceReportUrl(scenarioId)}
-              download
+               bibliographie construite depuis la base.
+               Un BOUTON et non un lien : un `<a download>` enregistre ce qu'on lui
+               donne, et quand aucun brief n'était généré le endpoint répondait 200 avec
+               un corps JSON d'erreur. Le navigateur sauvegardait donc 166 octets
+               d'erreur sous le nom du rapport. On lit la réponse, puis on enregistre. */
+            <button type="button"
+              onClick={async () => {
+                setReportError(null);
+                try { await downloadEvidenceReport(scenarioId); }
+                catch (e: any) { setReportError(e?.message || t("common.unknownError")); }
+              }}
               className="flex items-center gap-2 rounded-2xl border border-brand-500/30 bg-brand-500/10 hover:bg-brand-500/20 text-brand-300 font-semibold px-4 py-2 text-xs transition"
               title={t("scenarioDetail.evidences.exportReportHint")}>
               <FileText size={12}/>
               {t("scenarioDetail.evidences.exportReport")}
-            </a>
+            </button>
           )}
         </div>
       </div>
+
+      {/* Pourquoi le rapport n'est pas sorti. Le navigateur enregistrait l'erreur
+          elle-même, sous le nom du rapport. */}
+      {reportError && (
+        <p className="text-[10px] text-rose-400">{reportError}</p>
+      )}
 
       {/* ─── BANNIÈRE AVERTISSEMENT ──────────────────────────────────────────── */}
       {briefData && briefData.corpus_stats.included === 0 && (
@@ -7235,7 +7287,13 @@ ${llm.future_research ? `<h3>${t("scenarioDetail.evidences.pdf.futureResearch")}
               combine: "all",
             }}
             enabled={keptDesigns.size > 0 || keptLevels.size > 0}
-            onApplied={() => { setKeptDesigns(new Set()); setKeptLevels(new Set()); loadBrief(); }}
+            // `loadLlm()` aussi : restreindre le corpus rechargeait les CHIFFRES et
+            // laissait le récit, qui porte l'ancien nombre d'articles dans son propre
+            // bandeau et dans le PDF qu'on exporte juste à côté.
+            onApplied={() => {
+              setKeptDesigns(new Set()); setKeptLevels(new Set());
+              loadBrief(); loadLlm();
+            }}
           />
         </>
       )}
@@ -7597,7 +7655,7 @@ function EpidemicParametersPanel({ scenarioId }: { scenarioId: string }) {
             disabled={running}
             className="shrink-0 rounded-xl border border-brand-500/25 bg-brand-500/10 px-3 py-1.5 text-xs text-brand-300 hover:bg-brand-500/20 transition disabled:opacity-50"
           >
-            {running ? t("common.loading") : t("scenarioDetail.epiParams.recompute")}
+            {running ? t("common.loadingEllipsis") : t("scenarioDetail.epiParams.recompute")}
           </button>
         ) : (
           <span className="shrink-0 max-w-[220px] text-right text-[10px] leading-4 text-white/35">

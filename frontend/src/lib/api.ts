@@ -3020,6 +3020,32 @@ export function evidenceReportUrl(scenarioId: string): string {
   return `${API_BASE_URL}/user-scenarios/${scenarioId}/evidence-report?download=true`;
 }
 
+/** Downloads the citable report, and REFUSES instead of saving a refusal.
+ *
+ *  It was a plain `<a download>`: when no brief had been generated the endpoint used to
+ *  answer 200 with a JSON error body, so the browser saved a 166-byte file bearing the
+ *  report's name. The endpoint now answers 409; this reads it and throws the detail, so
+ *  the page can say why. */
+export async function downloadEvidenceReport(scenarioId: string): Promise<void> {
+  const r = await safeFetch(evidenceReportUrl(scenarioId));
+  if (!r.ok) {
+    const body = await r.json().catch(() => null);
+    throw new Error(body?.detail || httpMessage(r.status));
+  }
+  const blob = await r.blob();
+  const name = (r.headers.get("Content-Disposition") || "")
+    .match(/filename="?([^"]+)"?/)?.[1] || `report-${scenarioId}.md`;
+  const url = URL.createObjectURL(blob);
+  try {
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = name;
+    a.click();
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+}
+
 export async function fetchEvidenceGaps(
   scenarioId: string,
   rows?: string,
@@ -4353,7 +4379,9 @@ export async function saveScenarioQuestion(
 ): Promise<ScenarioQuestion> {
   const r = await safeFetch(`${API_BASE_URL}/user-scenarios/${scenarioId}/questions`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    // La clé, comme pour la suppression de la même ligne : l'écriture dans
+    // l'historique ne demandait rien, pendant que le badge disait « lecture seule ».
+    headers: authHeaders({ "Content-Type": "application/json" }),
     body: JSON.stringify(body),
   });
   if (!r.ok) throw new Error(httpMessage(r.status));

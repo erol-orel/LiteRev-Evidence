@@ -233,9 +233,15 @@ def _row_to_question(row) -> dict[str, Any]:
 
 
 @app.post("/user-scenarios/{scenario_id}/questions")
-def save_scenario_question(scenario_id: str, payload: QuestionIn) -> dict[str, Any]:
+def save_scenario_question(scenario_id: str, payload: QuestionIn,
+                           _: None = Depends(require_api_key)) -> dict[str, Any]:
     """Enregistre une question et sa réponse, avec la portée sur laquelle elle a
-    été posée. Appelé par l'interface une fois la réponse reçue en entier."""
+    été posée. Appelé par l'interface une fois la réponse reçue en entier.
+
+    La clé est exigée, comme elle l'est déjà pour SUPPRIMER la même ligne : écrire dans
+    l'historique de n'importe quel scénario, avec un texte arbitraire de 200 000
+    caractères et une adresse de propriétaire choisie, ne demandait rien, pendant que
+    l'interface affichait un badge « lecture seule »."""
     _get_user_scenario_or_404(scenario_id)
     threshold = (payload.threshold if payload.threshold is not None
                  else _get_scenario_threshold(scenario_id))
