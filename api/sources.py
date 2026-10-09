@@ -49,16 +49,31 @@ _NCBI_LAST = [0.0]
 _NCBI_MIN_INTERVAL = 0.4  # ~2.5 req/s, sous la limite de 3/s
 
 
+#: Au-delà de cette longueur de paramètres encodés, eutils est interrogé en POST. NCBI
+#: documente le POST pour les requêtes longues, et une URL de GET au-delà de ~2 000
+#: caractères est refusée ou tronquée par les proxys. La requête du scénario HPAI fait
+#: 3 075 caractères, soit une URL de GET de 4 247 : son esearch partait donc dans une URL
+#: que rien ne garantit. `efetch` postait déjà sa longue liste d'identifiants ; c'est
+#: `esearch`, qui porte la REQUÊTE, qui ne le faisait pas.
+_NCBI_POST_ABOVE = 1800
+
+
 def _ncbi_get(url: str, params: dict, timeout: int = 12):
-    """GET eutils throttlé (verrou global) avec un petit retry sur 429/erreur."""
+    """Requête eutils throttlée (verrou global), avec un petit retry sur 429/erreur.
+
+    En GET par défaut, en POST dès que les paramètres encodés dépassent
+    `_NCBI_POST_ABOVE` : eutils accepte les mêmes paramètres dans le corps, et c'est la
+    forme que NCBI prescrit pour une requête longue."""
     import requests as _req
     import time as _time
+    import urllib.parse as _up
     key = os.getenv("NCBI_API_KEY")
     if key:
         params = {**params, "api_key": key}
     # Avec une clé API, NCBI autorise 10 req/s (vs 3 sans) : on resserre l'espacement
     # pour réduire la sérialisation du verrou global sur le trio PubMed/PROSPERO/Cochrane.
     min_interval = 0.11 if key else _NCBI_MIN_INTERVAL
+    _long = len(_up.urlencode({k: v for k, v in params.items() if v is not None})) > _NCBI_POST_ABOVE
     r = None
     last_exc: Exception | None = None
     for attempt in range(3):
@@ -67,7 +82,8 @@ def _ncbi_get(url: str, params: dict, timeout: int = 12):
             if wait > 0:
                 _time.sleep(wait)
             try:
-                r = _req.get(url, params=params, timeout=timeout)
+                r = (_req.post(url, data=params, timeout=timeout) if _long
+                     else _req.get(url, params=params, timeout=timeout))
             except Exception as _e:  # timeout / ConnectionError : transitoire → retry (cf. docstring)
                 last_exc = _e
                 r = None
