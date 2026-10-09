@@ -175,20 +175,35 @@ def test_the_fetcher_stops_at_the_first_502_and_the_reason_names_the_page(federa
     assert calls[DOAJ_URL] == 2, dict(calls)
 
 
-def _ingestion_schema_available() -> bool:
+def _ingestion_works() -> bool:
     """La base de CI est amorcée par l'application, sans toutes les colonnes de la base de
-    production (`literature_document.external_id` y manque) : rien ne s'y ingère, donc le
-    compte par source y reste à zéro quoi que fasse le fetcher. La mesure du compte gardé
-    n'a de sens que sur un schéma complet."""
-    with engine.connect() as c:
-        return bool(c.execute(text(
-            "SELECT 1 FROM information_schema.columns "
-            "WHERE table_name = 'literature_document' AND column_name = 'external_id'")).scalar())
+    production (`d.year`, `document_chunk.created_at`...) : rien ne s'y ingère, donc le
+    compte par source y reste à zéro quoi que fasse le fetcher. Plutôt que de deviner les
+    colonnes qui manquent, on ESSAIE d'ingérer un document sonde par le même chemin que
+    la fédération, et on le retire. La mesure du compte gardé n'a de sens que là où cela
+    marche."""
+    from api.sources import _ingest_doc_direct
+    probe = "doaj:probe-ingestion-0001"
+    try:
+        did, _new = _ingest_doc_direct(
+            source="doaj", title="Ingestion probe for the DOAJ pagination test",
+            abstract="A probe document, inserted then deleted by the test.", year=2021,
+            url=None, external_id=probe, doi=None)
+    except Exception:                                    # noqa: BLE001
+        return False
+    try:
+        with engine.begin() as c:
+            if did is not None:
+                c.execute(text("DELETE FROM document_chunk WHERE document_id = :d"), {"d": did})
+            c.execute(text("DELETE FROM literature_document WHERE external_id = :e"), {"e": probe})
+    except Exception:                                    # noqa: BLE001
+        pass
+    return did is not None
 
 
 def test_the_first_page_is_kept_in_the_table(federation):
-    if not _ingestion_schema_available():
-        pytest.skip("schéma d'ingestion incomplet : le compte par source n'est pas mesurable ici")
+    if not _ingestion_works():
+        pytest.skip("l'ingestion ne marche pas sur ce schéma : le compte par source n'est pas mesurable ici")
     run, _calls, _sid = federation
     job = run()
     figures = job.get("prisma_identification") or {}
