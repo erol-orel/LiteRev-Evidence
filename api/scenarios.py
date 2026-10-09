@@ -25,6 +25,7 @@ from .scenario_store import (
     corpus_search_sql,
     corpus_search_terms,
     normalise_kind,
+    relevance_order_sql,
     relevant_gate_sql,
     scenario_counts,
     screening_status_sql,
@@ -1056,14 +1057,9 @@ def get_user_scenario_corpus(
             FROM literature_document d
             JOIN article_scenarios ars ON ars.document_id = d.id AND ars.scenario_id = :sid
             WHERE {where}
-            ORDER BY
-                CASE WHEN COALESCE(ars.similarity_score, 0.0) >= :threshold THEN 0 ELSE 1 END ASC,
-                (ars.rerank_score IS NOT NULL) DESC,
-                ars.rerank_score DESC NULLS LAST,
-                ars.similarity_score DESC NULLS LAST,
-                d.year DESC NULLS LAST,
-                d.citation_count DESC NULLS LAST,
-                d.title ASC
+            -- L'ordre de pertinence, par la fonction partagée : l'export et cet écran
+            -- en avaient deux différents, sous une docstring promettant le même.
+            ORDER BY {relevance_order_sql('d', 'ars', ':threshold')}
             LIMIT :limit OFFSET :offset
         """), {**params, 'threshold': eff_threshold, 'screated': _screated,
                **({'abstract_chars': int(abstract_chars)} if abstract_chars is not None else {})}).mappings().all()

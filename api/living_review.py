@@ -8,11 +8,11 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from fastapi import Depends, Query
+from fastapi import Depends, HTTPException, Query
 from sqlalchemy import text
 
 from .core import _msg, app, engine, logger, require_api_key
-from .scenario_store import CORPUS_DERIVED_CACHE_RESET
+from .scenario_store import CORPUS_DERIVED_CACHE_RESET, _get_user_scenario_or_404
 from .gesica import (
     SCENARIO_LIVING_REVIEW_IDS,
     _gesica_title,
@@ -149,10 +149,21 @@ def trigger_living_review(
     """
     import threading
 
+    # ── Un scénario UTILISATEUR est un scénario ──────────────────────────────
+    # La résolution passait par `_get_db_gesica_scenario_or_404`, qui exige
+    # `is_system = TRUE` ET le dossier GESICA : tout scénario réel recevait donc 404, et
+    # le bouton « Simuler (à blanc) » du panneau ne pouvait fonctionner pour aucun d'eux.
+    # Le planificateur sait pourtant traiter les deux (`--scenario` et
+    # `--user-scenarios`).
+    _is_user_scenario = False
     scenarios_to_update = []
     with engine.connect() as conn:
         if scenario_id:
-            meta = _get_db_gesica_scenario_or_404(scenario_id, conn)
+            try:
+                meta = _get_db_gesica_scenario_or_404(scenario_id, conn)
+            except HTTPException:
+                meta = _get_user_scenario_or_404(scenario_id)
+                _is_user_scenario = True
             scenarios_to_update = [(scenario_id, meta)]
         else:
             scenarios_to_update = [(row["id"], row) for row in _list_db_gesica_scenarios(conn)]
@@ -187,8 +198,12 @@ def trigger_living_review(
                 # --project/--query (--all-scenarios y était un flag INVALIDE →
                 # argparse échouait → la « vraie » exécution ne faisait rien).
                 _cmd = [_sys.executable, _script, "--mode", "once"]
-                if scenario_id:
+                if scenario_id and not _is_user_scenario:
                     _cmd += ["--scenario", scenario_id]
+                elif scenario_id:
+                    # Le planificateur traite les scénarios utilisateur par leur propre
+                    # chemin ; `--scenario` n'y attend qu'un identifiant GESICA.
+                    _cmd.append("--user-scenarios")
                 else:
                     _cmd.append("--all-scenarios")
                 result = subprocess.run(

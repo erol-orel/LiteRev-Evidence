@@ -106,6 +106,12 @@ class _FakeResult:
     def __init__(self, rows): self._rows = rows
     def mappings(self): return self
     def all(self): return self._rows
+    def scalar(self):
+        """Le digest compte aussi la population LIÉE au scénario, à part du total : les
+        deux se confondaient dans la même phrase, et l'email écrivait « 0 of 12 clear
+        the relevance threshold » pour exactement les articles qu'une veille apporte
+        (elle ingère en posant `scenario_type`, sans créer de lien)."""
+        return len(self._rows)
 
 
 class _FakeConn:
@@ -133,10 +139,14 @@ def _drive(monkeypatch, *, listed, total, smtp, dry_run, last_notified="set"):
     captured = {}
 
     def _fake_render(sid, articles, total_new, scenario_name=None, first_digest=False,
-                     n_relevant=None, signals=None, can_model=True):
+                     n_relevant=None, n_linked=None, signals=None, can_model=True):
         captured["listed"], captured["total"] = len(articles), total_new
         captured["first_digest"] = first_digest
         captured["n_relevant"], captured["signals"] = n_relevant, signals
+        # La population sur laquelle le compte des pertinents porte réellement : les
+        # articles LIÉS au scénario. Le total annoncé compte aussi ceux qu'une veille a
+        # ingérés sans créer de lien, et les confondre faisait écrire « 0 of 12 ».
+        captured["n_linked"] = n_linked
         captured["can_model"] = can_model
         return ("subject", "<html></html>", "text")
 

@@ -993,16 +993,14 @@ export const fr = {
       subscribeButton: "S'abonner aux alertes",
       livingReviewPipeline: "Pipeline Living Review",
       livingReviewDesc:
-        "Le pipeline Living Review interroge automatiquement le cache local et 13 sources API (PubMed, OpenAlex, Crossref, EuropePMC, Semantic Scholar, DOAJ, ClinicalTrials.gov, CORE, arXiv, OpenAIRE, bioRxiv, medRxiv, préprints Europe PMC) avec la requête de ce scénario, insère les nouveaux articles, génère les embeddings et recalcule le clustering.",
+        "La Living Review interroge PubMed avec la requête de ce scénario sur les N derniers jours et insère les articles qu'elle ne détient pas déjà. Elle n'interroge PAS les autres sources fédérées, et ne produit ni embeddings, ni PICO, ni textes intégraux : le worker d'arrière-plan et l'onglet Enrichissement s'en chargent ensuite. Les vues dérivées (clustering, graphe, carte des concepts, actions recommandées, projection SEIR) sont invalidées pour les scénarios qui ont réellement gagné un article.",
       stepMultiSource:
-        "Interrogation multi-sources : cache local + PubMed + OpenAlex + Crossref + EuropePMC + Semantic Scholar + DOAJ + ClinicalTrials.gov + CORE + arXiv + OpenAIRE + bioRxiv + medRxiv + préprints Europe PMC",
-      stepInsert: "Insertion des nouveaux articles (déduplication automatique)",
-      stepEmbeddings:
-        "Génération des embeddings (text-embedding-3-small) : active la pertinence sémantique",
-      stepPico: "Extraction PICO par LLM",
-      stepFulltext: "Récupération full-text via Unpaywall",
-      stepClustering: "Recalcul du clustering thématique",
-      stepRerank: "Rerank sémantique (scores cosinus mis à jour)",
+        "Requête : PubMed (scénario utilisateur) ; PubMed plus bioRxiv/medRxiv pour les six scénarios GESICA qui portent des termes de prépublication",
+      stepInsert: "Insertion des articles non déjà détenus (dédupliqués sur l'identifiant externe et la source)",
+      stepInvalidate:
+        "Invalidation des vues dérivées du corpus, pour les scénarios qui ont gagné un article",
+      stepAfterwards:
+        "Ensuite, et non par cette tâche : embeddings (worker d'arrière-plan), PICO, textes intégraux, clustering et scores sont calculés par l'onglet Enrichissement ou par la recherche suivante",
       simulateDryRun: "Simuler (dry run)",
     },
     epiParams: {

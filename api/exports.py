@@ -19,7 +19,8 @@ from sqlalchemy import text
 
 from .core import app, engine, logger
 from .scenario_store import (_get_scenario_rerank_threshold, _get_scenario_threshold,
-                             _get_user_scenario_or_404, screening_status_sql)
+                             _get_user_scenario_or_404, relevance_order_sql,
+                             screening_status_sql)
 from .relevance import _get_above_threshold_articles
 
 EXPORT_FORMATS = ("csv", "xlsx", "ris", "bibtex", "json", "md")
@@ -410,9 +411,7 @@ _BY_IDS_SQL = f"""
     FROM literature_document d
     JOIN article_scenarios ars ON ars.document_id = d.id AND ars.scenario_id = :sid
     WHERE d.id = ANY(:ids) AND d.is_duplicate IS NOT TRUE
-    ORDER BY ({screening_status_sql('d', 'ars')} = 'included') DESC,
-             COALESCE(ars.rerank_score, ars.similarity_score, 0) DESC NULLS LAST,
-             d.citation_count DESC NULLS LAST, d.id
+    ORDER BY {relevance_order_sql('d', 'ars')}
 """
 
 

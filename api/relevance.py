@@ -31,6 +31,7 @@ from .scenario_store import (
     _get_scenario_rerank_threshold,
     _get_scenario_threshold,
     _get_user_scenario_or_404,
+    relevance_order_sql,
     relevant_gate_sql,
     scenario_rerank_threshold_sql,
     scenario_threshold_sql,
@@ -469,10 +470,11 @@ def _get_above_threshold_articles(scenario_id: str, threshold: float | None = No
                        {screening_status_sql('ld', 'asn')} AS screening_status,
                        ld.quality_score, asn.similarity_score,
                        (ld.pico_json IS NOT NULL) AS has_pico,
+                       -- MÊME ordre que l'onglet Corpus, par la fonction partagée : la
+                       -- docstring de l'export promettait « le même ensemble et le même
+                       -- ordre », et en livrait un troisième.
                        ROW_NUMBER() OVER (ORDER BY
-                           CASE WHEN {screening_status_sql('ld', 'asn')} = 'included' THEN 0 ELSE 1 END,
-                           asn.similarity_score DESC NULLS LAST,
-                           ld.citation_count DESC NULLS LAST, ld.id) AS rn
+                           {relevance_order_sql('ld', 'asn', ':threshold')}) AS rn
                 FROM literature_document ld
                 JOIN article_scenarios asn ON asn.document_id = ld.id AND asn.scenario_id = :sid
                 WHERE ld.project_context = 'literev'

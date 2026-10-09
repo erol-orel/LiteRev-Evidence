@@ -995,16 +995,14 @@ export const en: Translations = {
       subscribeButton: "Subscribe to alerts",
       livingReviewPipeline: "Living Review Pipeline",
       livingReviewDesc:
-        "The Living Review pipeline automatically queries the local cache and 13 API sources (PubMed, OpenAlex, Crossref, EuropePMC, Semantic Scholar, DOAJ, ClinicalTrials.gov, CORE, arXiv, OpenAIRE, bioRxiv, medRxiv, Europe PMC preprints) with this scenario's query, inserts new articles, generates embeddings and recomputes clustering.",
+        "The Living Review queries PubMed with this scenario's query over the last N days and inserts the articles it does not already hold. It does NOT query the other federated sources, and it does not generate embeddings, PICO or full texts: the background worker and the enrichment tab do that afterwards. The derived views (clustering, graph, concept map, recommended actions, SEIR projection) are invalidated for the scenarios that actually gained an article.",
       stepMultiSource:
-        "Multi-source query: local cache + PubMed + OpenAlex + Crossref + EuropePMC + Semantic Scholar + DOAJ + ClinicalTrials.gov + CORE + arXiv + OpenAIRE + bioRxiv + medRxiv + Europe PMC preprints",
-      stepInsert: "Insertion of new articles (automatic deduplication)",
-      stepEmbeddings:
-        "Embedding generation (text-embedding-3-small): enables semantic relevance",
-      stepPico: "PICO extraction by LLM",
-      stepFulltext: "Full-text retrieval via Unpaywall",
-      stepClustering: "Recompute thematic clustering",
-      stepRerank: "Semantic rerank (updated cosine scores)",
+        "Query: PubMed (a user scenario); PubMed plus bioRxiv/medRxiv for the six GESICA scenarios that carry preprint terms",
+      stepInsert: "Insertion of the articles not already held (deduplicated on external id and source)",
+      stepInvalidate:
+        "Invalidation of the views derived from the corpus, for the scenarios that gained an article",
+      stepAfterwards:
+        "Afterwards, and not by this task: embeddings (background worker), PICO, full texts, clustering and scores are computed by the enrichment tab or the next search",
       simulateDryRun: "Simulate (dry run)",
     },
     epiParams: {

@@ -5883,14 +5883,16 @@ function AlertsSection({ scenarioId }: { scenarioId: string }) {
           {t("scenarioDetail.alerts.livingReviewDesc")}
         </p>
         <div className="rounded-xl border border-white/5 bg-white/2 p-3 space-y-1.5 text-[10px] text-white/40">
+          {/* Les étapes que la veille FAIT. Le panneau en annonçait sept, dont les
+              embeddings, le PICO, les textes intégraux, le clustering et le rerank : le
+              planificateur en fait deux (interroger PubMed, insérer), plus
+              l'invalidation des vues. Les cinq autres sont faites ailleurs, et la
+              dernière ligne le dit au lieu de les promettre ici. */}
           {[
             t("scenarioDetail.alerts.stepMultiSource"),
             t("scenarioDetail.alerts.stepInsert"),
-            t("scenarioDetail.alerts.stepEmbeddings"),
-            t("scenarioDetail.alerts.stepPico"),
-            t("scenarioDetail.alerts.stepFulltext"),
-            t("scenarioDetail.alerts.stepClustering"),
-            t("scenarioDetail.alerts.stepRerank"),
+            t("scenarioDetail.alerts.stepInvalidate"),
+            t("scenarioDetail.alerts.stepAfterwards"),
           ].map((step, i) => (
             <div key={i} className="flex items-center gap-2">
               <span className="h-1 w-1 rounded-full bg-brand-400"/>

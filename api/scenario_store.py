@@ -133,6 +133,31 @@ def relevant_gate_sql(doc: str = "d", link: str = "ars", thr: str = ":thr") -> s
 _GATE_FIRST_CLAUSE = "is_duplicate IS NOT TRUE"
 
 
+def relevance_order_sql(doc: str = "d", link: str = "ars", thr: str | None = None) -> str:
+    """L'ORDRE DE PERTINENCE d'un corpus, écrit UNE fois.
+
+    Il y en avait trois, pour la même question : l'onglet Corpus triait par
+    « au-dessus du seuil, puis reranké, puis rerank, puis similarité, puis année » ;
+    l'export relisait « inclus à la main, puis similarité, puis citations » sous une
+    docstring promettant « le même ensemble et le même ordre que l'onglet Corpus » ; et
+    l'export par identifiants en avait un troisième. Un relecteur qui compare son écran
+    au fichier qu'il vient de télécharger ne retrouvait pas ses dix premiers articles.
+
+    `thr` : quand un seuil est donné, les articles qui le passent viennent d'abord,
+    comme sur l'écran. Sans seuil, l'ordre est le même, sans cette première coupe."""
+    status = screening_status_sql(doc, link)
+    head = (f"CASE WHEN COALESCE({link}.similarity_score, 0) >= {thr} THEN 0 ELSE 1 END ASC, "
+            if thr else "")
+    return (head
+            + f"({status} = 'included') DESC, "
+            + f"({link}.rerank_score IS NOT NULL) DESC, "
+            + f"{link}.rerank_score DESC NULLS LAST, "
+            + f"{link}.similarity_score DESC NULLS LAST, "
+            + f"{doc}.year DESC NULLS LAST, "
+            + f"{doc}.citation_count DESC NULLS LAST, "
+            + f"{doc}.id")
+
+
 def relevant_gate_tail_sql(doc: str = "d", link: str = "ars", thr: str = ":thr") -> str:
     """La porte SANS sa clause sur les doublons, pour les WHERE qui l'écrivent déjà.
 

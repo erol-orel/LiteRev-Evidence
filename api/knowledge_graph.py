@@ -706,7 +706,39 @@ def _build_concept_graph(rows: list[dict], *, max_nodes: int = 60, min_edge: int
             if pair_c.get((i, j), 0) == 0 and a["count"] >= 2 and o["count"] >= 2:
                 gaps.append({"nodes": [a["id"], o["id"]], "expected": a["count"] * o["count"]})
     gaps.sort(key=lambda g: -g["expected"])
-    gaps = gaps[:8]
+    # ── Une lacune VÉRIFIÉE contre le texte, pas contre l'index ──────────────
+    # « Aucun article ne relie A et O » était déduit d'une co-occurrence nulle dans un
+    # index de HUIT concepts par article : deux articles pouvaient très bien traiter les
+    # deux sujets sans que l'un et l'autre figurent parmi les huit retenus. La carte
+    # affirmait alors une lacune de la LITTÉRATURE là où il n'y avait qu'une lacune de
+    # l'index. Chaque candidate est confrontée aux titres et résumés que ce graphe a
+    # lus : si un article mentionne les deux libellés, ce n'est pas une lacune.
+    _by_id = {n["id"]: n for n in nodes}
+    _hay = [((str(r.get("title") or "") + " " + str(r.get("abstract") or "")).lower())
+            for r in rows]
+
+    def _mentions_both(a_id: int, o_id: int) -> bool:
+        _a = _by_id.get(a_id, {}).get("label") or {}
+        _o = _by_id.get(o_id, {}).get("label") or {}
+        _at = [str(v).lower() for v in (_a.get("en"), _a.get("fr")) if v and len(str(v)) > 3]
+        _ot = [str(v).lower() for v in (_o.get("en"), _o.get("fr")) if v and len(str(v)) > 3]
+        if not _at or not _ot:
+            return False
+        return any(any(x in h for x in _at) and any(y in h for y in _ot) for h in _hay)
+
+    _verified = []
+    for g in gaps:
+        _a, _o = g["nodes"]
+        if _mentions_both(_a, _o):
+            continue                      # lacune de l'index, pas de la littérature
+        # Ce sur quoi la lacune repose, dit avec elle : un index de N concepts par
+        # article, plus une vérification sur les titres et résumés lus.
+        g["basis"] = "no_co_occurrence_and_no_textual_mention"
+        g["concepts_indexed_per_article"] = CONCEPTS_PER_ARTICLE_MAX
+        _verified.append(g)
+        if len(_verified) >= 8:
+            break
+    gaps = _verified
 
     referenced: set[int] = set()
     for n in nodes:
@@ -840,7 +872,7 @@ def _llm_concepts_for_batch(client, batch: list[dict]) -> dict[int, list[dict]]:
             fr = str(c.get("fr") or en).strip()
             if t in _LLM_CONCEPT_TYPES and en:
                 clean.append({"t": t, "en": en[:80], "fr": fr[:80]})
-        out[aid] = clean[:8]
+        out[aid] = clean[:CONCEPTS_PER_ARTICLE_MAX]
     return out
 
 
@@ -848,6 +880,11 @@ def _llm_concepts_for_batch(client, batch: list[dict]) -> dict[int, list[dict]]:
 #: un article qu'un lot ne sait pas annoter restait « manquant » pour toujours et
 #: relançait un passage payant à chaque affichage de la carte.
 CONCEPTS_MAX_ATTEMPTS = int(os.getenv("CONCEPTS_MAX_ATTEMPTS", "3") or 3)
+#: Concepts retenus PAR ARTICLE. C'est la profondeur de l'index, et donc la limite de ce
+#: que la carte peut dire : une « lacune » déduite d'une co-occurrence nulle dans huit
+#: concepts par article est une lacune de l'index, pas de la littérature. Le nombre part
+#: avec chaque lacune pour qu'on puisse en juger.
+CONCEPTS_PER_ARTICLE_MAX = 8
 
 
 def _concepts_annotatable(row: dict) -> bool:
