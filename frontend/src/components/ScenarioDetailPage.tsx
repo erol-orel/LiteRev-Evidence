@@ -4426,7 +4426,12 @@ function PrismaSection({ scenarioId }: { scenarioId: string }) {
             <div className="flex flex-wrap gap-1.5 pt-1 border-t border-white/5">
               {activeSources.map(([src, cnt]) => (
                 <span key={src}
-                      title={outcomes[src] ? t(`scenarioDetail.prisma.outcome.${outcomes[src]}`) : undefined}
+                      // La RAISON de l'échec dans l'infobulle : l'issue était servie nue,
+                      // et diagnostiquer « openalex : échec » demandait les journaux du
+                      // serveur.
+                      title={[outcomes[src] ? t(`scenarioDetail.prisma.outcome.${outcomes[src]}`) : null,
+                              ident.source_error_reasons?.[src] || null]
+                        .filter(Boolean).join(" : ") || undefined}
                       className={`rounded px-2 py-0.5 text-[10px] font-mono ${outcomeStyle(outcomes[src])}`}>
                   {SOURCE_LABELS_MAP[src] ?? src.toUpperCase()} {cnt.toLocaleString()}
                   {outcomes[src] && !SEARCHED.has(outcomes[src])
@@ -4442,6 +4447,13 @@ function PrismaSection({ scenarioId }: { scenarioId: string }) {
               {notSearched.length > 0 && t("scenarioDetail.prisma.coverageIncomplete")
                 .replace("{sources}", notSearched.map((s) => SOURCE_LABELS_MAP[s] ?? s).join(", "))}
               {ident.federation_incomplete ? ` ${t("scenarioDetail.prisma.federationIncomplete")}` : ""}
+              {/* La raison, en clair sous le paragraphe : une infobulle ne se cite pas
+                  dans un rapport, et c'est ce paragraphe qu'un relecteur recopie. */}
+              {Object.entries(ident.source_error_reasons ?? {}).map(([src, why]) => (
+                <span key={src} className="block text-rose-300/70">
+                  {(SOURCE_LABELS_MAP[src] ?? src)} : {why}
+                </span>
+              ))}
             </p>
           )}
           {/* La stratégie RÉELLEMENT soumise, quand elle n'a pas été la même pour toutes.

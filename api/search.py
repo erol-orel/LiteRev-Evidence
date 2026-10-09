@@ -859,7 +859,8 @@ def _prisma_identification_figures(records_by_source: dict, unique_records: int,
                                    per_source_cap: int | None = None,
                                    records_from_library: int = 0,
                                    keyword_fallback_sources: list | None = None,
-                                   keyword_fallback_query: str | None = None) -> dict[str, Any]:
+                                   keyword_fallback_query: str | None = None,
+                                   source_error_reasons: dict | None = None) -> dict[str, Any]:
     """Chiffres PRISMA 2020 de l'étape « identification », calculés à partir de ce qu'une
     recherche a RÉELLEMENT ramené - et non du corpus déjà dédupliqué.
 
@@ -948,6 +949,10 @@ def _prisma_identification_figures(records_by_source: dict, unique_records: int,
         # les sources en repli mots-clés, et les mots-clés qu'elles ont reçus.
         "keyword_fallback_sources": sorted({_source_label(s) for s in (keyword_fallback_sources or [])}),
         "keyword_fallback_query": str(keyword_fallback_query or "") or None,
+        # POURQUOI une source a échoué. L'issue `error` était servie nue : la carte
+        # disait « openalex : échec » et diagnostiquer demandait les journaux du serveur.
+        "source_error_reasons": {_source_label(k): str(v)[:200]
+                                 for k, v in (source_error_reasons or {}).items() if v},
         "sources_ok": by_outcome["ok"],
         "sources_empty": by_outcome["empty"],
         "sources_cached": by_outcome["cached"],

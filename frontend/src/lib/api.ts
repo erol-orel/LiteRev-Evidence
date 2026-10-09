@@ -1161,6 +1161,9 @@ export interface ScenarioPrisma {
      *  strategy actually submitted to each database. */
     keyword_fallback_sources?: string[];
     keyword_fallback_query?: string | null;
+    /** WHY a source failed, by source. The `error` outcome was served bare, so the card
+     *  said "openalex: failed" and diagnosing it meant reading the server's logs. */
+    source_error_reasons?: Record<string, string>;
     /** "populate" = sources were searched; "rebuild" = the boolean query was replayed
      *  over the local library and nothing was searched. The panel called both a search. */
     method?: string;
