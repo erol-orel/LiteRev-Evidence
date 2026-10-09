@@ -733,9 +733,15 @@ def sources_health(query: str = "cardiac arrest", timeout: int = 12) -> dict[str
 
     # (nom, url, params, headers, extracteur de compteur depuis le JSON)
     probes = [
+        # `esearchresult.count` : le VRAI nombre d'enregistrements, celui du site PubMed.
+        # Le sondage lisait la longueur de `idlist`, qui vaut au plus `retmax` (1 ici) :
+        # PubMed affichait donc « 1 » dans le diagnostic là où les cinq autres sondes
+        # rendaient leur total réel, et la source la plus fournie passait pour la plus
+        # maigre. Le compteur sert à comparer les sources entre elles : il doit compter
+        # la même chose chez toutes.
         ("PubMed (eutils)", "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi",
          eutils_params, ua,
-         lambda j: len(j.get("esearchresult", {}).get("idlist", []))),
+         lambda j: int(j.get("esearchresult", {}).get("count", 0) or 0)),
         ("OpenAlex", "https://api.openalex.org/works",
          {"search": _plain_keywords(query), "per-page": 1, "select": "id,title"}, ua,
          lambda j: j.get("meta", {}).get("count")),
