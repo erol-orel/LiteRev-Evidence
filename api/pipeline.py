@@ -51,11 +51,13 @@ from .search import (
     _widen_boolean_for_or_facets,
 )
 from .sources import (
+    EPMC_SEARCH_URL,
     _NCBI_LAST,
     _NCBI_LOCK,
     _NCBI_MIN_INTERVAL,
     _ingest_doc_direct,
     _ncbi_get,
+    epmc_query,
     _parse_arxiv,
     _parse_biorxiv,
     _parse_clinicaltrials,
@@ -489,6 +491,10 @@ def _run_user_scenario_populate(
         # leur envoie donc le booléen PORTABLE (tags de champ PubMed retirés) au lieu de
         # mots-clés aplatis, et on les traite en SOURCE-UNION. Repli mots-clés si pas de vrai
         # booléen (mode dégradé) ou si l'URL dépasse ~4 Ko (limite OpenAlex).
+        # Europe PMC et ses preprints : SANS les tags de champ de PubMed, qu'elle apparie
+        # comme du texte. 2 398 notices sans tags contre 3 avec, mesure faite sur la sonde
+        # de production : les tags coutaient 99,9 % du rappel de cette source.
+        _epmc_q = epmc_query(_boolean)
         _portable_bool = _strip_field_tags(_boolean).strip()
         _bool_is_real = bool(_portable_bool) and _looks_boolean(_portable_bool)
         _send_bool = _bool_is_real and len(_portable_bool) <= 1200
@@ -875,10 +881,10 @@ def _run_user_scenario_populate(
                 if _budget_exhausted():
                     break  # budget fédération dépassé - on arrête de paginer
                 ep_resp = _requests.get(
-                    "https://www.ebi.ac.uk/europepmc/webservices/rest/search",
+                    EPMC_SEARCH_URL,
                     # Pas de tri par date : on laisse le tri par PERTINENCE (défaut Europe PMC)
                     # → au plafond de 2000, on garde les plus pertinents et non les plus récents.
-                    params={"query": _boolean, "format": "json", "pageSize": _ep_page_size,
+                    params={"query": _epmc_q, "format": "json", "pageSize": _ep_page_size,
                             "resultType": "core",
                             "cursorMark": _ep_cursor_mark},
                     timeout=20,
@@ -942,12 +948,12 @@ def _run_user_scenario_populate(
         try:
             _pp_cursor = "*"
             _pp_fetched = 0
-            _pp_query = f"({_boolean}) AND (SRC:PPR)"
+            _pp_query = f"({_epmc_q}) AND (SRC:PPR)"
             while _pp_fetched < max_results:
                 if _budget_exhausted():
                     break  # budget fédération dépassé
                 _pp_resp = _requests.get(
-                    "https://www.ebi.ac.uk/europepmc/webservices/rest/search",
+                    EPMC_SEARCH_URL,
                     params={"query": _pp_query, "format": "json", "pageSize": 100,
                             "resultType": "core", "sort": "P_PDATE_D desc",
                             "cursorMark": _pp_cursor},
