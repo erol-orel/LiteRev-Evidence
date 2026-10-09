@@ -80,8 +80,11 @@ def seeded(db_conn):
             "(1, 'Sys doc one', 'pubmed', 'abstract one', 2021, false, 'included'),"
             "(2, 'Sys doc two', 'pubmed', 'abstract two', 2022, false, NULL),"
             "(3, 'Sys doc dup', 'pubmed', 'abstract dup', 2022, true, NULL)")
-        cur.execute("INSERT INTO article_scenarios (scenario_id, document_id) VALUES "
-                    "(%s, 1), (%s, 2), (%s, 3)", (SYS_ID, SYS_ID, SYS_ID))
+        # La décision de screening vit SUR LE LIEN, pas sur la ligne du document : une
+        # exclusion prise dans une revue ne doit pas déplacer le corpus d'une autre.
+        cur.execute("INSERT INTO article_scenarios (scenario_id, document_id, screening_status)"
+                    " VALUES (%s, 1, 'included'), (%s, 2, NULL), (%s, 3, NULL)",
+                    (SYS_ID, SYS_ID, SYS_ID))
         # user scenario: many articles with long abstracts - the payload that used to leak
         cur.executemany(
             "INSERT INTO literature_document (id, title, source, abstract, year) VALUES (%s, %s, 'pubmed', %s, 2020)",

@@ -336,10 +336,19 @@ def fetch_fulltext_batch(
             if data.get("is_oa") and data.get("best_oa_location"):
                 oa_url = data["best_oa_location"].get("url_for_pdf") or data["best_oa_location"].get("url")
             if oa_url:
+                # ── Un LIEN n'est pas un texte ───────────────────────────────
+                # On posait `has_fulltext = true` et on écrasait `url`, sans stocker une
+                # ligne de texte. Le panneau annonçait ensuite « couverture texte
+                # intégral 2 582 sur 9 493 » et un relecteur en concluait que le système
+                # détenait le texte de 2 582 articles ; pour au moins 28 d'entre eux il
+                # ne détenait qu'une adresse. L'extraction, elle, se fiait au même
+                # drapeau pour décider qu'il y avait quelque chose à lire.
+                # Le lien a sa propre colonne, et ne touche plus ni le drapeau ni `url`.
                 with engine.begin() as conn:
                     conn.execute(text("""
                         UPDATE literature_document
-                        SET has_fulltext = true, url = :url
+                        SET oa_url = :url, oa_url_found_at = NOW(),
+                            url = COALESCE(NULLIF(TRIM(COALESCE(url, '')), ''), :url)
                         WHERE id = :article_id
                     """), {"url": oa_url, "article_id": article_id})
                 fetched += 1
@@ -375,8 +384,14 @@ def _scope_counts_sql() -> str:
                  " AND COALESCE(ld.pico_attempts, 0) < 3")
     done_meta = "ld.metadata_json IS NOT NULL AND ld.metadata_json != '{}'::jsonb"
     todo_meta = "ld.metadata_json IS NULL OR ld.metadata_json = '{}'::jsonb"
-    done_ft = "ld.has_fulltext = true"
-    todo_ft = "(ld.has_fulltext IS NULL OR ld.has_fulltext = false) AND ld.doi IS NOT NULL"
+    # « Fait » pour le texte intégral veut dire qu'on DÉTIENT le texte : un morceau de
+    # texte intégral en base, la même question que pose scenario_counts_sql. Le drapeau
+    # `has_fulltext` répondait « un lien d'accès ouvert existe », si bien que ce panneau
+    # et l'onglet Corpus annonçaient deux nombres différents pour la même chose.
+    _ft_chunk = ("EXISTS (SELECT 1 FROM document_chunk c WHERE c.document_id = ld.id"
+                 " AND c.chunk_type IN ('fulltext_section', 'full_text'))")
+    done_ft = _ft_chunk
+    todo_ft = f"NOT {_ft_chunk} AND ld.doi IS NOT NULL"
     cols = []
     for scope in SCOPES:
         gate = scenario_scope_sql(scope)

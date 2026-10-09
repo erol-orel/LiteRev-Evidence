@@ -11,14 +11,21 @@ import re
 import threading
 from typing import Any
 
+from fastapi import Query
 from sqlalchemy import text
 
 from .core import app, engine, logger
-from .scenario_store import _get_scenario_threshold, _get_user_scenario_or_404
+from .scenario_store import (_get_scenario_threshold, _get_user_scenario_or_404,
+                             relevant_gate_tail_sql, screening_status_sql)
 from .clustering import _load_viz_cache, _save_viz_cache
 from llm_usage import model_for as _model
 
 # ─── KNOWLEDGE GRAPH (réseau de similarité sémantique) ───────────────────────
+
+#: Plafond de nœuds du graphe. La similarité est calculée par une matrice n × n : 1 000
+#: nœuds font un million de paires, ce qui tient ; 20 000 en font quatre cents millions,
+#: ce qui ne tient pas. `max_nodes` était un paramètre de requête sans borne.
+_KG_MAX_NODES = int(os.getenv("KG_MAX_NODES", "1000") or 1000)
 
 # Mots vides (EN + FR + remplissage scientifique) pour étiqueter les communautés
 # thématiques à partir des titres d'articles.
@@ -114,17 +121,36 @@ def _build_knowledge_graph(
             "weight": round(float(w), 3),
         })
 
-    # Détection de communautés greedy (lien fort ≥ 0.5)
+    # ── Communautés = composantes CONNEXES du graphe affiché ─────────────────
+    # Elles étaient calculées sur un seuil de 0,5 codé en dur, quel que soit le
+    # `min_similarity` de la requête : le curseur du panneau changeait les arêtes
+    # dessinées et ne touchait PAS les communautés qu'il colore et dénombre. Pire, le
+    # parcours était un seul balayage en avant - un voisin déjà numéroté n'absorbait pas
+    # sa propre composante - donc deux articles reliés pouvaient porter deux couleurs.
+    # Une union-find sur les arêtes retenues : la légende décrit ce qui est à l'écran.
+    parent = list(range(n))
+
+    def _find(x: int) -> int:
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def _union(a: int, b: int) -> None:
+        ra, rb = _find(a), _find(b)
+        if ra != rb:
+            parent[max(ra, rb)] = min(ra, rb)
+
+    for i, j in zip(iu[mask], ju[mask]):
+        _union(int(i), int(j))
+    _root_to_cluster: dict[int, int] = {}
     cluster_ids = [-1] * n
-    cluster_counter = 0
     for i in range(n):
-        if cluster_ids[i] == -1:
-            cluster_ids[i] = cluster_counter
-            strong = np.where(sim_matrix[i] >= 0.5)[0]
-            for j in strong:
-                if cluster_ids[j] == -1:
-                    cluster_ids[j] = cluster_counter
-            cluster_counter += 1
+        r = _find(i)
+        if r not in _root_to_cluster:
+            _root_to_cluster[r] = len(_root_to_cluster)
+        cluster_ids[i] = _root_to_cluster[r]
+    cluster_counter = len(_root_to_cluster)
 
     # Degré (centralité) par nœud
     degree: dict[int, int] = {nd["id"]: 0 for nd in nodes_data}
@@ -184,17 +210,17 @@ def _build_knowledge_graph(
 # sur quality_score : les 400 nœuds dessinés n'étaient donc pas les 400 que l'utilisateur
 # obtient en triant son corpus par pertinence, alors que le sous-titre annonce « les N
 # articles les plus pertinents ». Inclus d'abord, puis rerank, puis score sémantique.
-_KG_NODE_SQL = """
+_KG_NODE_SQL = f"""
     SELECT * FROM (
         SELECT DISTINCT ON (d.id)
             d.id, d.title, d.year, d.journal, d.study_design, d.quality_score,
             c.embedding::text AS emb_str,
-            (COALESCE(ars.screening_status, d.screening_status) = 'included') AS is_included,
+            ({screening_status_sql('d', 'ars')} = 'included') AS is_included,
             COALESCE(ars.rerank_score, ars.similarity_score, 0) AS relevance,
             COALESCE((d.pico_json->>'study_design'), d.study_design, 'unknown') AS design
         FROM literature_document d
-        {join}
-        WHERE {where}
+        {{join}}
+        WHERE {{where}}
           AND d.is_duplicate IS NOT TRUE
           AND c.embedding IS NOT NULL
           AND d.abstract IS NOT NULL
@@ -206,16 +232,27 @@ _KG_NODE_SQL = """
 """
 
 
-@app.get("/user-scenarios/{scenario_id}/knowledge-graph")
 def _compute_user_kg(scenario_id: str, max_nodes: int = 400, min_similarity: float = 0.35) -> dict[str, Any]:
     """Calcul du knowledge graph d'un scénario utilisateur (un seul endroit, réutilisé
-    par l'endpoint ET le précalcul)."""
+    par l'endpoint ET le précalcul).
+
+    Fonction INTERNE, comme son nom le dit. Le décorateur @app.get était posé ici, si
+    bien que l'endpoint appelait le calcul et que `get_user_scenario_knowledge_graph`,
+    qui porte le 404 et le cache, n'était jamais routé ni appelé : un identifiant de
+    scénario inexistant recevait un graphe vide bien formé, que l'onglet affichait comme
+    « ce corpus n'a pas de graphe », et CHAQUE affichage recalculait tout (5,2 s et
+    3,9 Mo sur un scénario de 9 389 articles).
+
+    Les bornes de `max_nodes` et `min_similarity` sont aussi appliquées ICI : la matrice
+    est de taille n × n, et un appelant direct ne doit pas pouvoir la faire exploser."""
+    max_nodes = max(10, min(int(max_nodes), _KG_MAX_NODES))
+    min_similarity = max(0.0, min(float(min_similarity), 1.0))
     # Le clustering porte sur le SOUS-ENSEMBLE PERTINENT (≥ seuil sémantique OU inclus
     # manuellement ; jamais les exclus), PAS sur tout le corpus - même définition que
     # corpus_above et l'Assistant RAG. Sinon les communautés étaient diluées par des
     # centaines d'articles hors-sujet ramenés par la fédération.
     _thr = _get_scenario_threshold(scenario_id)
-    _relevant = " AND " + "COALESCE(ars.screening_status, d.screening_status) IS DISTINCT FROM 'excluded' AND (COALESCE(ars.screening_status, d.screening_status) = 'included' OR (COALESCE(ars.similarity_score, 0) >= :thr AND (ars.rerank_score IS NULL OR ars.rerank_score >= COALESCE((SELECT ss.rerank_threshold FROM scenario_settings ss WHERE ss.scenario_id = ars.scenario_id), 0.0))))"
+    _relevant = " AND " + f"{relevant_gate_tail_sql('d', 'ars', ':thr')}"
     sql = _KG_NODE_SQL.format(
         join=("JOIN article_scenarios ars ON ars.document_id = d.id"
               " JOIN document_chunk c ON c.document_id = d.id"),
@@ -223,13 +260,12 @@ def _compute_user_kg(scenario_id: str, max_nodes: int = 400, min_similarity: flo
     )
     with engine.connect() as conn:
         rows = conn.execute(text(sql), {"sid": scenario_id, "max_nodes": max_nodes, "thr": _thr}).mappings().all()
-        n_total = conn.execute(text("""
+        n_total = conn.execute(text(f"""
             SELECT COUNT(*) FROM literature_document d
             JOIN article_scenarios ars ON ars.document_id = d.id
             WHERE ars.scenario_id = :sid
               AND d.is_duplicate IS NOT TRUE AND d.abstract IS NOT NULL
-              AND COALESCE(ars.screening_status, d.screening_status) IS DISTINCT FROM 'excluded'
-              AND (COALESCE(ars.screening_status, d.screening_status) = 'included' OR (COALESCE(ars.similarity_score, 0) >= :thr AND (ars.rerank_score IS NULL OR ars.rerank_score >= COALESCE((SELECT ss.rerank_threshold FROM scenario_settings ss WHERE ss.scenario_id = ars.scenario_id), 0.0))))
+              AND {relevant_gate_tail_sql('d', 'ars', ':thr')}
               AND EXISTS (SELECT 1 FROM document_chunk c
                           WHERE c.document_id = d.id AND c.embedding IS NOT NULL)
         """), {"sid": scenario_id, "thr": _thr}).scalar() or 0
@@ -247,10 +283,15 @@ def _precompute_user_kg(scenario_id: str) -> None:
     _precompute_concept_graph(scenario_id, extract=False)
 
 
+@app.get("/user-scenarios/{scenario_id}/knowledge-graph")
 def get_user_scenario_knowledge_graph(
     scenario_id: str,
-    max_nodes: int = 400,
-    min_similarity: float = 0.35,
+    # Bornés : `max_nodes` alimente une matrice n × n et une liste d'arêtes en
+    # np.triu_indices(n, 1). Un GET avec max_nodes=20000 allouait des gigaoctets dans
+    # le processus de l'API, et comme la route n'était pas celle qui cache, le travail
+    # était refait à chaque appel.
+    max_nodes: int = Query(400, ge=10, le=_KG_MAX_NODES),
+    min_similarity: float = Query(0.35, ge=0.0, le=1.0),
 ) -> dict[str, Any]:
     """Graphe de connaissance d'un scénario utilisateur (réseau de similarité sémantique)."""
     _get_user_scenario_or_404(scenario_id)
@@ -665,7 +706,39 @@ def _build_concept_graph(rows: list[dict], *, max_nodes: int = 60, min_edge: int
             if pair_c.get((i, j), 0) == 0 and a["count"] >= 2 and o["count"] >= 2:
                 gaps.append({"nodes": [a["id"], o["id"]], "expected": a["count"] * o["count"]})
     gaps.sort(key=lambda g: -g["expected"])
-    gaps = gaps[:8]
+    # ── Une lacune VÉRIFIÉE contre le texte, pas contre l'index ──────────────
+    # « Aucun article ne relie A et O » était déduit d'une co-occurrence nulle dans un
+    # index de HUIT concepts par article : deux articles pouvaient très bien traiter les
+    # deux sujets sans que l'un et l'autre figurent parmi les huit retenus. La carte
+    # affirmait alors une lacune de la LITTÉRATURE là où il n'y avait qu'une lacune de
+    # l'index. Chaque candidate est confrontée aux titres et résumés que ce graphe a
+    # lus : si un article mentionne les deux libellés, ce n'est pas une lacune.
+    _by_id = {n["id"]: n for n in nodes}
+    _hay = [((str(r.get("title") or "") + " " + str(r.get("abstract") or "")).lower())
+            for r in rows]
+
+    def _mentions_both(a_id: int, o_id: int) -> bool:
+        _a = _by_id.get(a_id, {}).get("label") or {}
+        _o = _by_id.get(o_id, {}).get("label") or {}
+        _at = [str(v).lower() for v in (_a.get("en"), _a.get("fr")) if v and len(str(v)) > 3]
+        _ot = [str(v).lower() for v in (_o.get("en"), _o.get("fr")) if v and len(str(v)) > 3]
+        if not _at or not _ot:
+            return False
+        return any(any(x in h for x in _at) and any(y in h for y in _ot) for h in _hay)
+
+    _verified = []
+    for g in gaps:
+        _a, _o = g["nodes"]
+        if _mentions_both(_a, _o):
+            continue                      # lacune de l'index, pas de la littérature
+        # Ce sur quoi la lacune repose, dit avec elle : un index de N concepts par
+        # article, plus une vérification sur les titres et résumés lus.
+        g["basis"] = "no_co_occurrence_and_no_textual_mention"
+        g["concepts_indexed_per_article"] = CONCEPTS_PER_ARTICLE_MAX
+        _verified.append(g)
+        if len(_verified) >= 8:
+            break
+    gaps = _verified
 
     referenced: set[int] = set()
     for n in nodes:
@@ -687,7 +760,15 @@ def _build_concept_graph(rows: list[dict], *, max_nodes: int = 60, min_edge: int
         "kind": "concepts", "version": CONCEPTS_VERSION,
         "n_articles": n_articles, "n_total": n_total,
         "n_with_concepts": n_with_concepts,
-        "n_missing_concepts": sum(1 for r in rows if not r.get("concepts_json")),
+        # « Manquants » doit vouloir dire « qu'un passage pourrait annoter ». Ce compte
+        # incluait les articles qu'AUCUN passage ne peut annoter (pas de PICO, résumé de
+        # 80 caractères ou moins, ou trois tentatives déjà faites), alors que `todo` les
+        # écarte : l'extraction rendait 0, le graphe était remis en cache avec le même
+        # `n_missing`, et le relaunch repartait. L'interface interroge jusqu'à quarante
+        # fois par affichage, donc quarante départs de passage payant pour rien.
+        "n_missing_concepts": sum(1 for r in rows if _concepts_annotatable(r)),
+        "n_unannotatable": sum(1 for r in rows
+                               if not r.get("concepts_json") and not _concepts_annotatable(r)),
         "source": "llm" if n_with_concepts else "structured",
         "latest_year": latest_year,
         "types": [{"type": t, "count": int(c)} for t, c in type_counts.most_common()],
@@ -696,18 +777,18 @@ def _build_concept_graph(rows: list[dict], *, max_nodes: int = 60, min_edge: int
     }
 
 
-_CONCEPT_ROWS_SQL = """
+_CONCEPT_ROWS_SQL = f"""
     SELECT d.id, d.title, d.year, d.quality_score AS quality, d.doi, d.pmid, d.country,
            d.study_design, d.pico_json, d.metadata_json, d.keywords, d.concepts_json, d.abstract,
+           COALESCE(d.concepts_attempts, 0) AS concepts_attempts,
            COALESCE(ars.similarity_score, 0) AS similarity
     FROM literature_document d
     JOIN article_scenarios ars ON ars.document_id = d.id
     WHERE ars.scenario_id = :sid
       AND d.is_duplicate IS NOT TRUE
       AND d.abstract IS NOT NULL
-      AND COALESCE(ars.screening_status, d.screening_status) IS DISTINCT FROM 'excluded'
-      AND (COALESCE(ars.screening_status, d.screening_status) = 'included' OR (COALESCE(ars.similarity_score, 0) >= :thr AND (ars.rerank_score IS NULL OR ars.rerank_score >= COALESCE((SELECT ss.rerank_threshold FROM scenario_settings ss WHERE ss.scenario_id = ars.scenario_id), 0.0))))
-    ORDER BY (COALESCE(ars.screening_status, d.screening_status) = 'included') DESC,
+      AND {relevant_gate_tail_sql('d', 'ars', ':thr')}
+    ORDER BY ({screening_status_sql('d', 'ars')} = 'included') DESC,
              ars.similarity_score DESC NULLS LAST, d.year DESC NULLS LAST, d.id
     LIMIT :cap
 """
@@ -726,7 +807,7 @@ def _concept_rows(scenario_id: str) -> tuple[list[dict], int]:
         n_total = conn.execute(text(
             "SELECT COUNT(*) FROM literature_document d JOIN article_scenarios ars ON ars.document_id = d.id "
             "WHERE ars.scenario_id = :sid AND d.is_duplicate IS NOT TRUE AND d.abstract IS NOT NULL "
-            "AND " + "COALESCE(ars.screening_status, d.screening_status) IS DISTINCT FROM 'excluded' AND (COALESCE(ars.screening_status, d.screening_status) = 'included' OR (COALESCE(ars.similarity_score, 0) >= :thr AND (ars.rerank_score IS NULL OR ars.rerank_score >= COALESCE((SELECT ss.rerank_threshold FROM scenario_settings ss WHERE ss.scenario_id = ars.scenario_id), 0.0))))"
+            "AND " + f"{relevant_gate_tail_sql('d', 'ars', ':thr')}"
         ), {"sid": scenario_id, "thr": thr}).scalar() or 0
     return rows, int(n_total)
 
@@ -791,8 +872,32 @@ def _llm_concepts_for_batch(client, batch: list[dict]) -> dict[int, list[dict]]:
             fr = str(c.get("fr") or en).strip()
             if t in _LLM_CONCEPT_TYPES and en:
                 clean.append({"t": t, "en": en[:80], "fr": fr[:80]})
-        out[aid] = clean[:8]
+        out[aid] = clean[:CONCEPTS_PER_ARTICLE_MAX]
     return out
+
+
+#: Tentatives d'annotation par article avant de le laisser tranquille. Sans ce compteur,
+#: un article qu'un lot ne sait pas annoter restait « manquant » pour toujours et
+#: relançait un passage payant à chaque affichage de la carte.
+CONCEPTS_MAX_ATTEMPTS = int(os.getenv("CONCEPTS_MAX_ATTEMPTS", "3") or 3)
+#: Concepts retenus PAR ARTICLE. C'est la profondeur de l'index, et donc la limite de ce
+#: que la carte peut dire : une « lacune » déduite d'une co-occurrence nulle dans huit
+#: concepts par article est une lacune de l'index, pas de la littérature. Le nombre part
+#: avec chaque lacune pour qu'on puisse en juger.
+CONCEPTS_PER_ARTICLE_MAX = 8
+
+
+def _concepts_annotatable(row: dict) -> bool:
+    """Cet article peut-il encore être annoté ? MÊME prédicat que la sélection du lot.
+
+    `todo` l'appliquait et `n_missing_concepts` non : les deux comptes divergeaient, et
+    c'est l'écart qui faisait repartir un passage payant indéfiniment."""
+    if row.get("concepts_json"):
+        return False
+    if int(row.get("concepts_attempts") or 0) >= CONCEPTS_MAX_ATTEMPTS:
+        return False
+    return bool(isinstance(row.get("pico_json"), dict)
+                or (row.get("abstract") and len(row["abstract"]) > 80))
 
 
 def _extract_concepts_for_scenario(scenario_id: str, max_articles: int | None = None) -> int:
@@ -804,8 +909,7 @@ def _extract_concepts_for_scenario(scenario_id: str, max_articles: int | None = 
     from concurrent.futures import ThreadPoolExecutor
     from llm_usage import MeteredOpenAI as _OAI
     rows, _ = _concept_rows(scenario_id)
-    todo = [r for r in rows if not r.get("concepts_json")
-            and (isinstance(r.get("pico_json"), dict) or (r.get("abstract") and len(r["abstract"]) > 80))]
+    todo = [r for r in rows if _concepts_annotatable(r)]
     _cap = int(max_articles or CONCEPT_MAX_ARTICLES or 0)
     if _cap > 0:
         todo = todo[:_cap]
@@ -818,17 +922,25 @@ def _extract_concepts_for_scenario(scenario_id: str, max_articles: int | None = 
     def _work(batch):
         res = _llm_concepts_for_batch(client, batch)
         n = 0
-        if res:
-            try:
-                with engine.begin() as conn:
-                    for aid, concepts in res.items():
-                        conn.execute(text(
-                            "UPDATE literature_document SET concepts_json = CAST(:c AS jsonb) WHERE id = :id"
-                        ), {"c": json.dumps({"v": CONCEPTS_VERSION, "concepts": concepts}, ensure_ascii=False),
-                            "id": aid})
-                        n += 1
-            except Exception as e:
-                logger.warning(f"concepts_json write: {e}")
+        try:
+            with engine.begin() as conn:
+                # La tentative est comptée pour TOUS les articles du lot, qu'ils soient
+                # revenus ou non : un article que le modèle ne sait pas annoter restait
+                # sinon « manquant » pour toujours et relançait un passage payant à
+                # chaque affichage de la carte.
+                conn.execute(text("""
+                    UPDATE literature_document
+                    SET concepts_attempts = COALESCE(concepts_attempts, 0) + 1
+                    WHERE id = ANY(CAST(:ids AS bigint[]))
+                """), {"ids": [int(a["id"]) for a in batch]})
+                for aid, concepts in (res or {}).items():
+                    conn.execute(text(
+                        "UPDATE literature_document SET concepts_json = CAST(:c AS jsonb) WHERE id = :id"
+                    ), {"c": json.dumps({"v": CONCEPTS_VERSION, "concepts": concepts}, ensure_ascii=False),
+                        "id": aid})
+                    n += 1
+        except Exception as e:
+            logger.warning(f"concepts_json write: {e}")
         return n
 
     with ThreadPoolExecutor(max_workers=_CONCEPT_WORKERS) as ex:

@@ -14,7 +14,8 @@ from fastapi import Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field, field_validator, model_validator
 from sqlalchemy import text
 
-from .core import _msg, _norm_lang, app, client_ip, engine, logger, require_api_key
+from .core import (_job_is_active, _msg, _norm_lang, app, client_ip, engine, logger,
+                   require_api_key)
 from .documents import _strategy_is_degraded
 from .scenario_store import (
     KINDS,
@@ -24,8 +25,10 @@ from .scenario_store import (
     corpus_search_sql,
     corpus_search_terms,
     normalise_kind,
+    relevance_order_sql,
     relevant_gate_sql,
     scenario_counts,
+    screening_status_sql,
 )
 from .schema_boot import _exec_ddl_isolated
 from .search import (
@@ -297,14 +300,14 @@ def _user_scenario_to_gesica_format(
         counts = counts_map.get(str(row["id"]))
     else:
         with engine.connect() as conn:
-            counts = conn.execute(text("""
+            counts = conn.execute(text(f"""
                 SELECT
                     COUNT(DISTINCT ars.document_id) AS article_count,
                     COUNT(DISTINCT ars.document_id) FILTER (
-                        WHERE COALESCE(ars.screening_status, d.screening_status) = 'included'
+                        WHERE {screening_status_sql('d', 'ars')} = 'included'
                     ) AS included_count,
                     COUNT(DISTINCT ars.document_id) FILTER (
-                        WHERE COALESCE(ars.screening_status, d.screening_status) = 'excluded'
+                        WHERE {screening_status_sql('d', 'ars')} = 'excluded'
                     ) AS excluded_count
                 FROM article_scenarios ars
                 JOIN literature_document d ON d.id = ars.document_id
@@ -390,40 +393,60 @@ def _user_scenario_to_gesica_format(
 
 # ── CRUD ──────────────────────────────────────────────────────────────────────
 
+def _purge_duplicate_searches(conn) -> int:
+    """Supprime les recherches récentes qui doublonnent une autre, AVEC leurs enfants.
+
+    Cette purge vivait dans le GET qui liste les scénarios. Une lecture, sans clé d'API,
+    effaçait donc des lignes à chaque ouverture du tableau de bord, y compris par un
+    aperçu de lien ou un visiteur anonyme, alors que la route DELETE du même objet exige
+    la clé. Pire que la suppression elle-même : elle ne nettoyait rien d'autre, si bien
+    que les décisions de relecture (`article_scenarios`), le seuil et les caches
+    (`scenario_settings`), l'historique de questions et les entraînements restaient sans
+    parent, pour toujours. Un relecteur qui avait passé l'après-midi à trier la copie la
+    plus ancienne de sa recherche la perdait au rechargement suivant.
+
+    Elle est désormais appelée depuis la CRÉATION d'un scénario, là où la clé est déjà
+    exigée et où l'on sait quelle recherche vient d'arriver, et elle nettoie les mêmes
+    tables que la route DELETE."""
+    doomed = [r[0] for r in conn.execute(text("""
+        SELECT id FROM user_scenarios
+        WHERE pinned = false AND folder_id IS NULL
+          AND id NOT IN (
+            SELECT DISTINCT ON (query, mode, sub_queries, combinator) id
+            FROM user_scenarios
+            WHERE pinned = false AND folder_id IS NULL
+            ORDER BY query, mode, sub_queries, combinator, created_at DESC
+          )
+        UNION
+        SELECT u.id FROM user_scenarios u
+        WHERE u.pinned = false AND u.folder_id IS NULL
+          AND EXISTS (
+            SELECT 1 FROM user_scenarios p
+            WHERE p.pinned = true AND p.query = u.query AND p.mode = u.mode
+              AND p.sub_queries IS NOT DISTINCT FROM u.sub_queries
+              AND COALESCE(p.combinator, '') = COALESCE(u.combinator, '')
+          )
+    """))]
+    if not doomed:
+        return 0
+    for _t in ("article_scenarios", "scenario_settings", "scenario_question",
+               "scenario_model_dataset", "scenario_model_run"):
+        try:
+            conn.execute(text(f"DELETE FROM {_t} WHERE scenario_id = ANY(:ids)"), {"ids": doomed})
+        except Exception as _e:                      # table absente selon la version
+            logger.debug(f"purge {_t}: {_e}")
+    conn.execute(text("DELETE FROM user_scenarios WHERE id = ANY(:ids)"), {"ids": doomed})
+    logger.info(f"Purge des recherches en double : {len(doomed)} supprimées avec leurs enfants.")
+    return len(doomed)
+
+
 @app.get("/user-scenarios")
 def list_user_scenarios() -> list[dict[str, Any]]:
     """Liste tous les scénarios utilisateur (recherches sauvegardées).
-    Déduplique au passage les recherches récentes (non épinglées) par query+mode
-    en ne conservant que la plus récente de chaque groupe."""
+
+    LECTURE PURE. Elle dédupliquait au passage, c'est-à-dire qu'elle supprimait des
+    lignes : voir `_purge_duplicate_searches`, qui s'exécute maintenant à la création."""
     with engine.begin() as conn:
-        # Delete stale duplicates: for unpinned/unfoldered scenarios keep only
-        # the most recent row per (query, mode) pair.
-        # Identité COMPLÈTE d'une recherche = query + mode + sous-requêtes + combinateur :
-        # « A » et « (A) AND (B) » partagent la même `query` (facette principale) mais
-        # sont deux recherches distinctes - l'une ne doit pas purger l'autre.
-        conn.execute(text("""
-            DELETE FROM user_scenarios
-            WHERE pinned = false AND folder_id IS NULL
-              AND id NOT IN (
-                SELECT DISTINCT ON (query, mode, sub_queries, combinator) id
-                FROM user_scenarios
-                WHERE pinned = false AND folder_id IS NULL
-                ORDER BY query, mode, sub_queries, combinator, created_at DESC
-              )
-        """))
-        # Un scénario SAUVEGARDÉ (épinglé) est unique : purge toute recherche récente
-        # (non épinglée) qui DOUBLONNE un scénario épinglé de même query+mode. Sans ça,
-        # relancer une recherche déjà sauvegardée laissait une 2e carte identique.
-        conn.execute(text("""
-            DELETE FROM user_scenarios u
-            WHERE u.pinned = false AND u.folder_id IS NULL
-              AND EXISTS (
-                SELECT 1 FROM user_scenarios p
-                WHERE p.pinned = true AND p.query = u.query AND p.mode = u.mode
-                  AND p.sub_queries IS NOT DISTINCT FROM u.sub_queries
-                  AND COALESCE(p.combinator, '') = COALESCE(u.combinator, '')
-              )
-        """))
         rows = conn.execute(text("""
             SELECT
                 us.id, us.name, us.query, us.mode, us.kind, us.filters,
@@ -441,14 +464,14 @@ def list_user_scenarios() -> list[dict[str, Any]]:
         # ligne (N+1). Même forme que sql_counts dans /gesica/scenarios.
         counts_map: dict[str, Any] = {
             str(cr["scenario_id"]): dict(cr)
-            for cr in conn.execute(text("""
+            for cr in conn.execute(text(f"""
                 SELECT ars.scenario_id,
                        COUNT(DISTINCT ars.document_id) AS article_count,
                        COUNT(DISTINCT ars.document_id) FILTER (
-                           WHERE COALESCE(ars.screening_status, d.screening_status) = 'included'
+                           WHERE {screening_status_sql('d', 'ars')} = 'included'
                        ) AS included_count,
                        COUNT(DISTINCT ars.document_id) FILTER (
-                           WHERE COALESCE(ars.screening_status, d.screening_status) = 'excluded'
+                           WHERE {screening_status_sql('d', 'ars')} = 'excluded'
                        ) AS excluded_count
                 FROM article_scenarios ars
                 JOIN literature_document d ON d.id = ars.document_id
@@ -466,6 +489,15 @@ def create_user_scenario(payload: UserScenarioIn, request: Request = None, lang:
     Pour les recherches récentes (non épinglées, sans dossier), upsert par query+mode
     afin d'éviter l'accumulation de doublons lors des relances de recherche."""
     import uuid
+    # La purge des doublons vit ICI désormais, et non plus dans le GET qui liste : une
+    # lecture ne doit pas supprimer, et celle-là le faisait sans clé d'API et sans
+    # nettoyer les enfants. À la création on a la clé, et on sait qu'une recherche
+    # vient d'arriver, donc c'est le moment exact où un doublon peut apparaître.
+    try:
+        with engine.begin() as _pc:
+            _purge_duplicate_searches(_pc)
+    except Exception as _e_purge:                    # la purge ne doit jamais bloquer
+        logger.warning(f"purge des doublons à la création : {_e_purge}")
     # For unpinned auto-saved searches: upsert by query+mode to avoid duplicates.
     # Skip the upsert for multi-sub-query searches: they share the synthesized
     # display `query` yet are distinct searches, so query+mode dedup would wrongly
@@ -1010,7 +1042,7 @@ def get_user_scenario_corpus(
                 d.authors, d.doi, d.journal, d.keywords, d.language,
                 d.study_design, d.sample_size, d.country, d.citation_count,
                 d.open_access, d.pmid, d.publication_type, d.quality_score,
-                COALESCE(ars.screening_status, d.screening_status) AS screening_status,
+                {screening_status_sql('d', 'ars')} AS screening_status,
                 COALESCE(ars.reviewer_1_status, d.reviewer_1_status) AS reviewer_1_status,
                 COALESCE(ars.similarity_score, 0.0) AS similarity_score,
                 ars.rerank_score AS rerank_score,
@@ -1025,14 +1057,9 @@ def get_user_scenario_corpus(
             FROM literature_document d
             JOIN article_scenarios ars ON ars.document_id = d.id AND ars.scenario_id = :sid
             WHERE {where}
-            ORDER BY
-                CASE WHEN COALESCE(ars.similarity_score, 0.0) >= :threshold THEN 0 ELSE 1 END ASC,
-                (ars.rerank_score IS NOT NULL) DESC,
-                ars.rerank_score DESC NULLS LAST,
-                ars.similarity_score DESC NULLS LAST,
-                d.year DESC NULLS LAST,
-                d.citation_count DESC NULLS LAST,
-                d.title ASC
+            -- L'ordre de pertinence, par la fonction partagée : l'export et cet écran
+            -- en avaient deux différents, sous une docstring promettant le même.
+            ORDER BY {relevance_order_sql('d', 'ars', ':threshold')}
             LIMIT :limit OFFSET :offset
         """), {**params, 'threshold': eff_threshold, 'screated': _screated,
                **({'abstract_chars': int(abstract_chars)} if abstract_chars is not None else {})}).mappings().all()
@@ -1108,7 +1135,9 @@ def get_user_scenario_corpus(
         "filtered_total": filtered_total,
         "counts": counts,
         "source_breakdown": source_breakdown,
-        "rerank_running": rerank_running or (_RERANK_JOBS.get(scenario_id, {}).get("status") == "running"),
+        # `_job_is_active` : une entrée « en cours » laissée par un fil tué au
+        # redémarrage faisait afficher un scoring en cours pour toujours.
+        "rerank_running": rerank_running or _job_is_active(_RERANK_JOBS.get(scenario_id)),
         "threshold": eff_threshold,
         "offset": offset,
         "limit": limit,
@@ -1190,7 +1219,12 @@ def _launch_populate_job(scenario_id: str, query: str, filters: dict, max_result
 @app.post("/user-scenarios/{scenario_id}/populate")
 def populate_user_scenario(
     scenario_id: str,
-    max_results: int = 100000,
+    # LE plafond par source de l'application (LIVE_MAX_PER_SOURCE, 2000 par défaut),
+    # et non un 100000 écrit ici. `_run_user_scenario_populate` le ramenait de toute
+    # façon à LIVE_MAX_PER_SOURCE, mais la valeur annoncée dans la réponse et dans
+    # l'OpenAPI était l'autre : la documentation de l'API promettait un corpus que le
+    # code ne construit pas.
+    max_results: int = LIVE_MAX_PER_SOURCE,
     include_live: bool = True,
     lang: str | None = Query(None),
     force_live: bool = False,

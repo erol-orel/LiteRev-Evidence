@@ -59,6 +59,10 @@ _FRACTION_FIELDS = frozenset(("cfr", "vaccine_efficacy"))
 # normalize_extracted_parameters.
 GREY_WEIGHT_CAP = 0.10      # poids maximal d'une observation grise dans le pool
 MIN_PEER_STUDIES = 2        # observations revues par les pairs requises avant tout pooling gris
+#: Période infectieuse de repli, en jours, quand la littérature n'en donne aucune. Elle
+#: était le DÉFAUT d'un champ de dataclass, donc appliquée sans que rien ne le dise,
+#: alors qu'elle fixe gamma et donc la forme entière de la trajectoire.
+DEFAULT_INFECTIOUS_PERIOD_DAYS = 7.0
 
 
 @dataclass
@@ -66,7 +70,13 @@ class SeirParams:
     """Paramètres d'UNE trajectoire. Les champs à None/0 désactivent leur structure."""
     r0: float | None = None                       # nombre de reproduction de base
     beta: float | None = None                     # taux de transmission /j (sinon dérivé de r0)
-    infectious_period_days: float = 7.0           # → gamma = 1/période
+    # None = non fourni. La valeur par défaut était 7.0, posée en silence : un corpus
+    # qui rapporte un R0 sans période infectieuse - le cas de tous les scénarios de
+    # production qui portent une projection - voyait gamma fixé à 1/7, donc
+    # beta = R0/7, et le jour du pic, sa hauteur, le taux de croissance et la durée de
+    # l'épidémie étaient tous décidés par une constante qu'aucun article n'a fournie,
+    # sous une étiquette « issue de la littérature ».
+    infectious_period_days: float | None = None   # → gamma = 1/période
     incubation_period_days: float | None = None   # → sigma ; présent ⇒ compartiment E (SEIR)
     cfr: float = 0.0                              # létalité 0..1 ; > 0 ⇒ compartiment D
     immunity_duration_days: float | None = None   # → omega ; présent ⇒ R→S (immunité décroissante)
@@ -87,7 +97,13 @@ def _rates(p: SeirParams) -> dict:
     vaut échouer franchement (simulate_ensemble écarte le tirage) que rendre un chiffre
     faux avec assurance."""
     per = p.infectious_period_days
-    if per is None or not math.isfinite(float(per)) or float(per) < _MIN_PERIOD_DAYS:
+    infectious_period_source = "literature"
+    if per is None:
+        # Repli ASSUMÉ, pas silencieux : la valeur et son statut repartent dans le
+        # résumé, pour que le panneau et l'export puissent l'écrire.
+        per = DEFAULT_INFECTIOUS_PERIOD_DAYS
+        infectious_period_source = "assumed"
+    if not math.isfinite(float(per)) or float(per) < _MIN_PERIOD_DAYS:
         raise ValueError(
             f"SEIR: période infectieuse implausible ({per!r} j ; minimum "
             f"{_MIN_PERIOD_DAYS} j). Paramètre manquant ou dans la mauvaise unité ?")
@@ -132,6 +148,8 @@ def _rates(p: SeirParams) -> dict:
         "r0": beta / gamma if gamma > 0 else float("nan"),
         "rc": beta / (gamma + kappa) if (gamma + kappa) > 0 else float("nan"),
         "r0_source": r0_source,
+        "infectious_period_days": float(per),
+        "infectious_period_source": infectious_period_source,
     }
 
 
@@ -268,6 +286,10 @@ def simulate(p: SeirParams, days: int = 365, dt: float = 0.25) -> dict:
         "r0": round(r0v, 3),
         "r_control": round(rcv, 3),      # == r0 sans quarantaine
         "r0_source": r["r0_source"],     # "literature" | "assumed" (repli codé en dur)
+        # La période infectieuse décide gamma, donc le pic et la durée. Sa provenance
+        # compte autant que celle du R0, et elle n'était dite nulle part.
+        "infectious_period_days": round(r["infectious_period_days"], 3),
+        "infectious_period_source": r["infectious_period_source"],
         "peak_incidence": round(incidence[peak_inc_i], 2),
         "peak_incidence_day": days_out[peak_inc_i],
         "peak_prevalence": round(prevalence[peak_prev_i], 2),
@@ -493,6 +515,8 @@ def simulate_ensemble(
         # La structure du modèle est fixée pour tout l'ensemble : la provenance du R0
         # (littérature vs repli codé en dur) l'est donc aussi.
         "r0_source": runs[0]["summary"]["r0_source"],
+        "infectious_period_days": runs[0]["summary"]["infectious_period_days"],
+        "infectious_period_source": runs[0]["summary"]["infectious_period_source"],
         "r0": _sum_band("r0"),
         "r_control": _sum_band("r_control"),
         "peak_incidence": _sum_band("peak_incidence"),
@@ -822,6 +846,7 @@ def normalize_extracted_parameters(raw, valid_ids=None, quality_by_id=None,
         if not isinstance(blk, dict):
             continue
         val = _num_or_none(blk.get("value"))         # estimation LLM (peut être None)
+        value_source = "narrative" if val is not None else None
         lo = _num_or_none(blk.get("ci_low"))
         hi = _num_or_none(blk.get("ci_high"))
         if lo is not None and hi is not None and lo > hi:
@@ -873,8 +898,17 @@ def normalize_extracted_parameters(raw, valid_ids=None, quality_by_id=None,
             # `_weights` reste LOCAL au paramètre : plafonner globalement ferait fuiter
             # le plafond d'un paramètre sur les suivants.
             pooled = pool_weighted(_obs, _weights)
-            if pooled and pooled["n_studies"] >= 2:
+            # ── UNE règle pour tous les paramètres ───────────────────────────
+            # Le pool n'était retenu qu'à partir de DEUX études, alors qu'une valeur
+            # écrite par la passe narrative sur les 25 articles les plus pertinents
+            # était retenue quel que soit le nombre d'études. Un paramètre mesuré par UNE
+            # étude ne survivait donc que si le modèle avait aussi deviné un nombre, et
+            # c'était le nombre DEVINÉ qui était gardé, pas l'observation.
+            # Une observation réelle vaut mieux qu'une estimation narrative : le pool est
+            # autoritaire dès une étude, sans intervalle inventé, et `n_studies` le dit.
+            if pooled and pooled["n_studies"] >= 1:
                 val, lo, hi = pooled["value"], pooled["ci_low"], pooled["ci_high"]
+                value_source = "pooled"
                 # L'IC du pool est moyenne ± 1.96·écart-type : sur une dispersion
                 # inter-études large il descend sous zéro, ce qui n'a de sens pour
                 # AUCUNE de ces grandeurs (R0, durées, létalité sont ≥ 0).
@@ -903,6 +937,10 @@ def normalize_extracted_parameters(raw, valid_ids=None, quality_by_id=None,
             "value": val, "ci_low": lo, "ci_high": hi,
             "unit": unit,
             "n_studies": max(n_studies, len(prov)),
+            # D'où vient la VALEUR : du pool pondéré des observations par étude, ou de
+            # l'estimation narrative du modèle sur les articles reproduits. Les deux
+            # n'ont pas le même statut, et rien ne les distinguait.
+            "value_source": value_source,
             "provenance": prov,
         }
     applicable = bool(raw.get("applicable")) and bool(params)

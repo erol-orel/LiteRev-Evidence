@@ -82,6 +82,25 @@ def scenario_rerank_threshold_sql(sid: str = ":sid") -> str:
 # celle des articles exclus, si bien que l'assistant pouvait citer un article qu'un
 # relecteur venait d'écarter, pendant que le compteur affiché sous la réponse, lui,
 # comptait le bon sous-ensemble. Une fonction, un seul endroit à corriger.
+def screening_status_sql(doc: str = "d", link: str = "ars") -> str:
+    """Le statut de screening d'un article DANS CETTE REVUE.
+
+    Il se lisait `COALESCE(ars.screening_status, d.screening_status)`, c'est-à-dire : à
+    défaut de décision dans cette revue, la décision prise dans une AUTRE. Or
+    `literature_document` est partagé par tous les scénarios qui contiennent l'article.
+    Un relecteur excluait un article dans sa revue, et l'article quittait aussitôt le
+    sous-ensemble pertinent de toutes les autres revues qui le contiennent : leur brief,
+    leurs extractions, leurs exports et leurs compteurs, sans qu'un seul de leurs écrans
+    ne le dise. Deux scénarios de production partagent une requête sur la grippe aviaire
+    et se déplaçaient ainsi l'un l'autre.
+
+    Les écritures sur la ligne globale ont été retirées, et les décisions déjà prises y
+    ont été recopiées une fois sur les liens (`_backfill_ars_screening_from_document`),
+    pour qu'aucune ne soit perdue. `doc` reste dans la signature : il documente de quelle
+    table on NE lit plus, et garde les appelants symétriques de `relevant_gate_sql`."""
+    return f"{link}.screening_status"
+
+
 def relevant_gate_sql(doc: str = "d", link: str = "ars", thr: str = ":thr") -> str:
     """Le prédicat SQL du sous-ensemble pertinent, à mettre dans un WHERE.
 
@@ -99,13 +118,61 @@ def relevant_gate_sql(doc: str = "d", link: str = "ars", thr: str = ":thr") -> s
     602 pertinents n'en avaient pas encore. Le compter pour 0 aurait fait disparaître ces
     45 articles à la seconde où quelqu'un bouge le curseur, sans que rien ne le dise. Un
     article non encore jugé n'est pas un article jugé mauvais."""
-    status = f"COALESCE({link}.screening_status, {doc}.screening_status)"
+    status = screening_status_sql(doc, link)
     rthr = scenario_rerank_threshold_sql(f"{link}.scenario_id")
     return (f"{doc}.is_duplicate IS NOT TRUE"
             f" AND {status} IS DISTINCT FROM 'excluded'"
             f" AND ({status} = 'included' OR ("
             f"COALESCE({link}.similarity_score, 0) >= {thr}"
             f" AND ({link}.rerank_score IS NULL OR {link}.rerank_score >= {rthr})))")
+
+
+#: La première clause de la porte, celle que `relevant_gate_tail_sql` retire. Épinglée
+#: ici parce que la queue est obtenue en coupant sur le premier « AND » : si la clause
+#: des doublons cessait d'arriver en tête, la coupe emporterait autre chose.
+_GATE_FIRST_CLAUSE = "is_duplicate IS NOT TRUE"
+
+
+def relevance_order_sql(doc: str = "d", link: str = "ars", thr: str | None = None) -> str:
+    """L'ORDRE DE PERTINENCE d'un corpus, écrit UNE fois.
+
+    Il y en avait trois, pour la même question : l'onglet Corpus triait par
+    « au-dessus du seuil, puis reranké, puis rerank, puis similarité, puis année » ;
+    l'export relisait « inclus à la main, puis similarité, puis citations » sous une
+    docstring promettant « le même ensemble et le même ordre que l'onglet Corpus » ; et
+    l'export par identifiants en avait un troisième. Un relecteur qui compare son écran
+    au fichier qu'il vient de télécharger ne retrouvait pas ses dix premiers articles.
+
+    `thr` : quand un seuil est donné, les articles qui le passent viennent d'abord,
+    comme sur l'écran. Sans seuil, l'ordre est le même, sans cette première coupe."""
+    status = screening_status_sql(doc, link)
+    head = (f"CASE WHEN COALESCE({link}.similarity_score, 0) >= {thr} THEN 0 ELSE 1 END ASC, "
+            if thr else "")
+    return (head
+            + f"({status} = 'included') DESC, "
+            + f"({link}.rerank_score IS NOT NULL) DESC, "
+            + f"{link}.rerank_score DESC NULLS LAST, "
+            + f"{link}.similarity_score DESC NULLS LAST, "
+            + f"{doc}.year DESC NULLS LAST, "
+            + f"{doc}.citation_count DESC NULLS LAST, "
+            + f"{doc}.id")
+
+
+def relevant_gate_tail_sql(doc: str = "d", link: str = "ars", thr: str = ":thr") -> str:
+    """La porte SANS sa clause sur les doublons, pour les WHERE qui l'écrivent déjà.
+
+    Treize des requêtes converties portaient la porte en deux morceaux : la clause des
+    doublons en haut du WHERE, parmi les prédicats de contexte, et le reste plus bas.
+    Leur donner la porte entière ajouterait un prédicat, et je ne veux pas qu'une
+    unification change le SQL qui part en base le jour où elle est faite : ce qui doit
+    changer, c'est où la condition est ÉCRITE, pas ce qu'elle dit.
+
+    Le reste de leur WHERE exclut déjà les doublons, donc le lot est le même ; et la
+    clause ajoutée demain à la porte les atteindra, elles aussi."""
+    full = relevant_gate_sql(doc, link, thr)
+    head, _, tail = full.partition(" AND ")
+    assert _GATE_FIRST_CLAUSE in head, head
+    return tail
 
 
 # ── La nature d'une question, et ce qu'elle rend disponible ──────────────────
@@ -250,7 +317,7 @@ def scenario_scope_sql(scope: str, doc: str = "ld", link: str = "asn",
         raise ValueError(f"portée inconnue : {scope!r} (attendu : {', '.join(SCOPES)})")
     if scope == "relevant":
         return relevant_gate_sql(doc, link, scenario_threshold_sql(sid))
-    status = f"COALESCE({link}.screening_status, {doc}.screening_status)"
+    status = screening_status_sql(doc, link)
     return f"{doc}.is_duplicate IS NOT TRUE AND {status} IS DISTINCT FROM 'excluded'"
 
 
@@ -273,7 +340,7 @@ def scenario_counts_sql() -> str:
     """L'instruction unique qui compte le corpus d'un scénario. Pure : aucune
     connexion, testable hors base. Paramètres liés : `sid`, et `thr` (seuil forcé,
     NULL → le seuil enregistré du scénario, à défaut 0.45)."""
-    status = "COALESCE(ars.screening_status, d.screening_status)"
+    status = screening_status_sql("d", "ars")
     fulltext = ("EXISTS (SELECT 1 FROM document_chunk c"
                 " WHERE c.document_id = d.id AND c.chunk_type = 'fulltext_section')")
     chunkless = "NOT EXISTS (SELECT 1 FROM document_chunk c WHERE c.document_id = d.id)"
@@ -409,10 +476,22 @@ def corpus_search_terms(query: str, max_terms: int = 8) -> list[str]:
 # et la living review nettoyaient les trois visualisations mais oubliaient les actions
 # recommandées, qui restaient servies indéfiniment alors qu'elles décrivaient le corpus
 # précédent.
+#
+# La PROJECTION SEIR en fait partie. Elle est une fonction des paramètres extraits, qui
+# sont eux-mêmes extraits du sous-ensemble pertinent : bouger le seuil changeait le lot
+# d'articles que l'extraction lit, et la projection en cache continuait d'être servie
+# telle quelle. Son invalidation ne regardait que `variables_generated_at`, donc elle ne
+# voyait jamais un changement de seuil. Le commentaire du code prétendait l'inverse.
+#
+# Le SPEC (`variables_json`) n'y est PAS : il coûte un passage de modèle complet, et
+# l'effacer sur un mouvement de curseur ferait perdre un travail que le relecteur a
+# peut-être validé. Il porte sa propre empreinte (seuil + identifiants des articles) et
+# s'annonce périmé ; c'est ce qu'on veut : dire, pas détruire.
 CORPUS_DERIVED_CACHE_RESET = """
     clustering_json = NULL, clustering_generated_at = NULL,
     knowledge_graph_json = NULL, kg_generated_at = NULL,
     concept_graph_json = NULL, concept_graph_generated_at = NULL,
     recommended_actions_json = NULL, recommended_actions_lang = NULL,
-    actions_generated_at = NULL
+    actions_generated_at = NULL,
+    seir_projection_json = NULL, seir_projection_generated_at = NULL
 """

@@ -12,7 +12,9 @@ from sqlalchemy import text
 
 from .core import _job_is_active, _msg, app, engine, logger, require_api_key
 from .documents import _GRADE_LEVEL_CASE, _STUDY_DESIGN_CASE, _llm_lang_directive
-from .scenario_store import _get_scenario_threshold, _get_user_scenario_or_404
+from .scenario_store import (_get_scenario_threshold, _get_user_scenario_or_404,
+                             relevant_gate_sql, relevant_gate_tail_sql,
+                             screening_status_sql)
 from .gesica import _get_scenario_name
 from .relevance import _evidence_fingerprint, _get_above_threshold_articles
 from llm_usage import json_content as _json_content
@@ -52,6 +54,8 @@ from .study_design import (LEVEL_HIGH, LEVEL_NA, LEVEL_ORDER, LEVEL_UNKNOWN,  # 
 #: Ces requêtes lisaient la colonne avant le PICO alors que le sélecteur de corpus
 #: lisait l'inverse : les deux nombres affichés côte à côte ne s'additionnaient pas.
 _raw_design_ld = raw_design_sql("ld")
+#: Le même, pour les requêtes qui aliasent literature_document en `d` (le PDF).
+_raw_design_d = raw_design_sql("d")
 
 _STRENGTH_ORDER = LEVEL_ORDER
 design_level = grade_level          # nom conservé : l'API publique de ce module
@@ -248,7 +252,7 @@ def _build_evidence_brief(scenario_id: str) -> dict[str, Any]:
         # `relevant*` = sous-ensemble PERTINENT (au-dessus du seuil sémantique) sur
         # lequel l'Evidence Brief / le modèle s'appuient ; `total`/`with_*` couvrent
         # le corpus complet (pour le contexte).
-        corpus_stats = conn.execute(text("""
+        corpus_stats = conn.execute(text(f"""
             SELECT
                 -- total/with_pico/with_fulltext/included/excluded/pending comptés hors
                 -- doublons (comme la sortie PDF « (uniques) » et la carte scénario) →
@@ -256,66 +260,49 @@ def _build_evidence_brief(scenario_id: str) -> dict[str, Any]:
                 COUNT(*) FILTER (WHERE d.is_duplicate IS NOT TRUE) AS total,
                 COUNT(*) FILTER (WHERE d.is_duplicate IS TRUE) AS duplicates,
                 COUNT(*) FILTER (WHERE d.is_duplicate IS NOT TRUE AND d.pico_json IS NOT NULL) AS with_pico,
-                COUNT(*) FILTER (WHERE d.is_duplicate IS NOT TRUE AND COALESCE(ars.screening_status, d.screening_status) = 'included') AS included,
-                COUNT(*) FILTER (WHERE d.is_duplicate IS NOT TRUE AND COALESCE(ars.screening_status, d.screening_status) = 'excluded') AS excluded,
-                COUNT(*) FILTER (WHERE d.is_duplicate IS NOT TRUE AND (COALESCE(ars.screening_status, d.screening_status) = 'pending' OR COALESCE(ars.screening_status, d.screening_status) IS NULL)) AS pending,
+                COUNT(*) FILTER (WHERE d.is_duplicate IS NOT TRUE AND {screening_status_sql('d', 'ars')} = 'included') AS included,
+                COUNT(*) FILTER (WHERE d.is_duplicate IS NOT TRUE AND {screening_status_sql('d', 'ars')} = 'excluded') AS excluded,
+                COUNT(*) FILTER (WHERE d.is_duplicate IS NOT TRUE AND ({screening_status_sql('d', 'ars')} = 'pending' OR {screening_status_sql('d', 'ars')} IS NULL)) AS pending,
                 COUNT(*) FILTER (WHERE d.is_duplicate IS NOT TRUE AND EXISTS (
                     SELECT 1 FROM document_chunk c
                     WHERE c.document_id = d.id AND c.chunk_type = 'fulltext_section'
                 )) AS with_fulltext,
-                COUNT(*) FILTER (WHERE d.is_duplicate IS NOT TRUE
-                    AND COALESCE(ars.screening_status, d.screening_status) IS DISTINCT FROM 'excluded'
-                    AND (COALESCE(ars.screening_status, d.screening_status) = 'included' OR (COALESCE(ars.similarity_score, 0) >= :thr AND (ars.rerank_score IS NULL OR ars.rerank_score >= COALESCE((SELECT ss.rerank_threshold FROM scenario_settings ss WHERE ss.scenario_id = ars.scenario_id), 0.0))))) AS relevant,
-                COUNT(*) FILTER (WHERE d.is_duplicate IS NOT TRUE
-                    AND COALESCE(ars.screening_status, d.screening_status) IS DISTINCT FROM 'excluded'
-                    AND (COALESCE(ars.screening_status, d.screening_status) = 'included' OR (COALESCE(ars.similarity_score, 0) >= :thr AND (ars.rerank_score IS NULL OR ars.rerank_score >= COALESCE((SELECT ss.rerank_threshold FROM scenario_settings ss WHERE ss.scenario_id = ars.scenario_id), 0.0))))
+                COUNT(*) FILTER (WHERE {relevant_gate_sql('d', 'ars', ':thr')}) AS relevant,
+                COUNT(*) FILTER (WHERE {relevant_gate_sql('d', 'ars', ':thr')}
                     AND d.pico_json IS NOT NULL) AS relevant_with_pico,
-                COUNT(*) FILTER (WHERE d.is_duplicate IS NOT TRUE
-                    AND COALESCE(ars.screening_status, d.screening_status) IS DISTINCT FROM 'excluded'
-                    AND (COALESCE(ars.screening_status, d.screening_status) = 'included' OR (COALESCE(ars.similarity_score, 0) >= :thr AND (ars.rerank_score IS NULL OR ars.rerank_score >= COALESCE((SELECT ss.rerank_threshold FROM scenario_settings ss WHERE ss.scenario_id = ars.scenario_id), 0.0))))
+                COUNT(*) FILTER (WHERE {relevant_gate_sql('d', 'ars', ':thr')}
                     AND EXISTS (SELECT 1 FROM document_chunk c
                         WHERE c.document_id = d.id AND c.chunk_type = 'fulltext_section')) AS relevant_with_fulltext,
                 -- Couverture & citations : calculées sur le SOUS-ENSEMBLE PERTINENT
                 -- (au-dessus du seuil), pas sur le corpus complet.
-                MIN(d.year) FILTER (WHERE d.is_duplicate IS NOT TRUE
-                    AND COALESCE(ars.screening_status, d.screening_status) IS DISTINCT FROM 'excluded'
-                    AND (COALESCE(ars.screening_status, d.screening_status) = 'included' OR (COALESCE(ars.similarity_score, 0) >= :thr AND (ars.rerank_score IS NULL OR ars.rerank_score >= COALESCE((SELECT ss.rerank_threshold FROM scenario_settings ss WHERE ss.scenario_id = ars.scenario_id), 0.0))))
+                MIN(d.year) FILTER (WHERE {relevant_gate_sql('d', 'ars', ':thr')}
                     AND d.year BETWEEN 1800 AND EXTRACT(YEAR FROM CURRENT_DATE)::int) AS year_min,
-                MAX(d.year) FILTER (WHERE d.is_duplicate IS NOT TRUE
-                    AND COALESCE(ars.screening_status, d.screening_status) IS DISTINCT FROM 'excluded'
-                    AND (COALESCE(ars.screening_status, d.screening_status) = 'included' OR (COALESCE(ars.similarity_score, 0) >= :thr AND (ars.rerank_score IS NULL OR ars.rerank_score >= COALESCE((SELECT ss.rerank_threshold FROM scenario_settings ss WHERE ss.scenario_id = ars.scenario_id), 0.0))))
+                MAX(d.year) FILTER (WHERE {relevant_gate_sql('d', 'ars', ':thr')}
                     AND d.year BETWEEN 1800 AND EXTRACT(YEAR FROM CURRENT_DATE)::int) AS year_max,
-                AVG(d.citation_count) FILTER (WHERE d.is_duplicate IS NOT TRUE
-                    AND COALESCE(ars.screening_status, d.screening_status) IS DISTINCT FROM 'excluded'
-                    AND (COALESCE(ars.screening_status, d.screening_status) = 'included' OR (COALESCE(ars.similarity_score, 0) >= :thr AND (ars.rerank_score IS NULL OR ars.rerank_score >= COALESCE((SELECT ss.rerank_threshold FROM scenario_settings ss WHERE ss.scenario_id = ars.scenario_id), 0.0))))
+                AVG(d.citation_count) FILTER (WHERE {relevant_gate_sql('d', 'ars', ':thr')}
                     AND d.citation_count IS NOT NULL) AS avg_citations,
-                MAX(d.citation_count) FILTER (WHERE d.is_duplicate IS NOT TRUE
-                    AND COALESCE(ars.screening_status, d.screening_status) IS DISTINCT FROM 'excluded'
-                    AND (COALESCE(ars.screening_status, d.screening_status) = 'included' OR (COALESCE(ars.similarity_score, 0) >= :thr AND (ars.rerank_score IS NULL OR ars.rerank_score >= COALESCE((SELECT ss.rerank_threshold FROM scenario_settings ss WHERE ss.scenario_id = ars.scenario_id), 0.0))))) AS max_citations,
+                MAX(d.citation_count) FILTER (WHERE {relevant_gate_sql('d', 'ars', ':thr')}) AS max_citations,
                 -- Le DÉNOMINATEUR de la moyenne. Peu de sources renvoient un compte de
                 -- citations, si bien que « moyenne 24,0 · max 24 » pouvait décrire UN
                 -- article sur quatre cent soixante-sept, sans que rien ne le dise.
-                COUNT(*) FILTER (WHERE d.is_duplicate IS NOT TRUE
-                    AND COALESCE(ars.screening_status, d.screening_status) IS DISTINCT FROM 'excluded'
-                    AND (COALESCE(ars.screening_status, d.screening_status) = 'included' OR (COALESCE(ars.similarity_score, 0) >= :thr AND (ars.rerank_score IS NULL OR ars.rerank_score >= COALESCE((SELECT ss.rerank_threshold FROM scenario_settings ss WHERE ss.scenario_id = ars.scenario_id), 0.0))))
+                COUNT(*) FILTER (WHERE {relevant_gate_sql('d', 'ars', ':thr')}
                     AND d.citation_count IS NOT NULL) AS citations_known
             FROM article_scenarios ars
             JOIN literature_document d ON d.id = ars.document_id
             WHERE ars.scenario_id = :sid
         """), {"sid": scenario_id, "thr": eff_thr}).mappings().fetchone()
 
-        top_articles = conn.execute(text("""
+        top_articles = conn.execute(text(f"""
             SELECT d.id, d.title, d.abstract, d.year, d.journal, d.authors, d.doi,
-                   d.study_design, d.pico_json, d.citation_count, COALESCE(ars.screening_status, d.screening_status) AS screening_status,
+                   d.study_design, d.pico_json, d.citation_count, {screening_status_sql('d', 'ars')} AS screening_status,
                    d.quality_score, ars.similarity_score
             FROM article_scenarios ars
             JOIN literature_document d ON d.id = ars.document_id
             WHERE ars.scenario_id = :sid
               AND d.is_duplicate IS NOT TRUE AND d.abstract IS NOT NULL
-              AND COALESCE(ars.screening_status, d.screening_status) IS DISTINCT FROM 'excluded'
-              AND (COALESCE(ars.screening_status, d.screening_status) = 'included' OR (COALESCE(ars.similarity_score, 0) >= :thr AND (ars.rerank_score IS NULL OR ars.rerank_score >= COALESCE((SELECT ss.rerank_threshold FROM scenario_settings ss WHERE ss.scenario_id = ars.scenario_id), 0.0))))
+              AND {relevant_gate_tail_sql('d', 'ars', ':thr')}
             ORDER BY
-                CASE WHEN COALESCE(ars.screening_status, d.screening_status) = 'included' THEN 0 ELSE 1 END,
+                CASE WHEN {screening_status_sql('d', 'ars')} = 'included' THEN 0 ELSE 1 END,
                 d.citation_count DESC NULLS LAST, d.year DESC NULLS LAST
             LIMIT 15
         """), {"sid": scenario_id, "thr": eff_thr}).mappings().fetchall()
@@ -329,32 +316,26 @@ def _build_evidence_brief(scenario_id: str) -> dict[str, Any]:
                 SELECT lower({_raw_design_ld}) AS d
                 FROM article_scenarios ars
                 JOIN literature_document ld ON ld.id = ars.document_id
-                WHERE ars.scenario_id = :sid AND ld.is_duplicate IS NOT TRUE
-                  AND COALESCE(ars.screening_status, ld.screening_status) IS DISTINCT FROM 'excluded'
-                  AND (COALESCE(ars.screening_status, ld.screening_status) = 'included' OR (COALESCE(ars.similarity_score, 0) >= :thr AND (ars.rerank_score IS NULL OR ars.rerank_score >= COALESCE((SELECT ss.rerank_threshold FROM scenario_settings ss WHERE ss.scenario_id = ars.scenario_id), 0.0))))
+                WHERE ars.scenario_id = :sid AND {relevant_gate_sql('ld', 'ars', ':thr')}
             )
             SELECT {_STUDY_DESIGN_CASE} AS design, COUNT(*) AS n
             FROM b GROUP BY 1 ORDER BY 2 DESC
         """), {"sid": scenario_id, "thr": eff_thr}).mappings().fetchall()
 
-        year_dist = conn.execute(text("""
+        year_dist = conn.execute(text(f"""
             SELECT d.year, COUNT(*) AS n
             FROM article_scenarios ars
             JOIN literature_document d ON d.id = ars.document_id
-            WHERE ars.scenario_id = :sid AND d.is_duplicate IS NOT TRUE
-              AND COALESCE(ars.screening_status, d.screening_status) IS DISTINCT FROM 'excluded'
-              AND (COALESCE(ars.screening_status, d.screening_status) = 'included' OR (COALESCE(ars.similarity_score, 0) >= :thr AND (ars.rerank_score IS NULL OR ars.rerank_score >= COALESCE((SELECT ss.rerank_threshold FROM scenario_settings ss WHERE ss.scenario_id = ars.scenario_id), 0.0))))
+            WHERE ars.scenario_id = :sid AND {relevant_gate_sql('d', 'ars', ':thr')}
               AND d.year >= 1800 AND d.year <= EXTRACT(YEAR FROM CURRENT_DATE)::int
             GROUP BY d.year ORDER BY d.year ASC
         """), {"sid": scenario_id, "thr": eff_thr}).mappings().fetchall()
 
-        source_dist = conn.execute(text("""
+        source_dist = conn.execute(text(f"""
             SELECT d.source, COUNT(*) AS n
             FROM article_scenarios ars
             JOIN literature_document d ON d.id = ars.document_id
-            WHERE ars.scenario_id = :sid AND d.is_duplicate IS NOT TRUE
-              AND COALESCE(ars.screening_status, d.screening_status) IS DISTINCT FROM 'excluded'
-              AND (COALESCE(ars.screening_status, d.screening_status) = 'included' OR (COALESCE(ars.similarity_score, 0) >= :thr AND (ars.rerank_score IS NULL OR ars.rerank_score >= COALESCE((SELECT ss.rerank_threshold FROM scenario_settings ss WHERE ss.scenario_id = ars.scenario_id), 0.0))))
+            WHERE ars.scenario_id = :sid AND {relevant_gate_sql('d', 'ars', ':thr')}
             GROUP BY d.source ORDER BY n DESC LIMIT 8
         """), {"sid": scenario_id, "thr": eff_thr}).mappings().fetchall()
 
@@ -367,9 +348,7 @@ def _build_evidence_brief(scenario_id: str) -> dict[str, Any]:
                 SELECT lower({_raw_design_ld}) AS d
                 FROM article_scenarios ars
                 JOIN literature_document ld ON ld.id = ars.document_id
-                WHERE ars.scenario_id = :sid AND ld.is_duplicate IS NOT TRUE
-                  AND COALESCE(ars.screening_status, ld.screening_status) IS DISTINCT FROM 'excluded'
-                  AND (COALESCE(ars.screening_status, ld.screening_status) = 'included' OR (COALESCE(ars.similarity_score, 0) >= :thr AND (ars.rerank_score IS NULL OR ars.rerank_score >= COALESCE((SELECT ss.rerank_threshold FROM scenario_settings ss WHERE ss.scenario_id = ars.scenario_id), 0.0))))
+                WHERE ars.scenario_id = :sid AND {relevant_gate_sql('ld', 'ars', ':thr')}
             )
             SELECT {_GRADE_LEVEL_CASE} AS level, COUNT(*) AS n
             FROM b GROUP BY 1 ORDER BY 2 DESC
@@ -516,59 +495,55 @@ def get_user_scenario_evidence_brief_pdf(scenario_id: str):
     # PERTINENT (≥ seuil sémantique, via article_scenarios), pas le corpus complet.
     eff_thr = _get_scenario_threshold(scenario_id)
     with engine.connect() as _conn:
-        corpus_stats = _conn.execute(text("""
+        corpus_stats = _conn.execute(text(f"""
             SELECT
                 COUNT(*) FILTER (WHERE d.is_duplicate IS NOT TRUE) AS total,
-                COUNT(*) FILTER (WHERE d.is_duplicate IS NOT TRUE
-                    AND COALESCE(ars.screening_status, d.screening_status) IS DISTINCT FROM 'excluded'
-                    AND (COALESCE(ars.screening_status, d.screening_status) = 'included' OR (COALESCE(ars.similarity_score, 0) >= :thr AND (ars.rerank_score IS NULL OR ars.rerank_score >= COALESCE((SELECT ss.rerank_threshold FROM scenario_settings ss WHERE ss.scenario_id = ars.scenario_id), 0.0))))) AS relevant,
-                MIN(d.year) FILTER (WHERE d.is_duplicate IS NOT TRUE
-                    AND COALESCE(ars.screening_status, d.screening_status) IS DISTINCT FROM 'excluded'
-                    AND (COALESCE(ars.screening_status, d.screening_status) = 'included' OR (COALESCE(ars.similarity_score, 0) >= :thr AND (ars.rerank_score IS NULL OR ars.rerank_score >= COALESCE((SELECT ss.rerank_threshold FROM scenario_settings ss WHERE ss.scenario_id = ars.scenario_id), 0.0))))
+                COUNT(*) FILTER (WHERE {relevant_gate_sql('d', 'ars', ':thr')}) AS relevant,
+                MIN(d.year) FILTER (WHERE {relevant_gate_sql('d', 'ars', ':thr')}
                     AND d.year BETWEEN 1800 AND EXTRACT(YEAR FROM CURRENT_DATE)::int) AS year_min,
-                MAX(d.year) FILTER (WHERE d.is_duplicate IS NOT TRUE
-                    AND COALESCE(ars.screening_status, d.screening_status) IS DISTINCT FROM 'excluded'
-                    AND (COALESCE(ars.screening_status, d.screening_status) = 'included' OR (COALESCE(ars.similarity_score, 0) >= :thr AND (ars.rerank_score IS NULL OR ars.rerank_score >= COALESCE((SELECT ss.rerank_threshold FROM scenario_settings ss WHERE ss.scenario_id = ars.scenario_id), 0.0))))
+                MAX(d.year) FILTER (WHERE {relevant_gate_sql('d', 'ars', ':thr')}
                     AND d.year BETWEEN 1800 AND EXTRACT(YEAR FROM CURRENT_DATE)::int) AS year_max,
-                COUNT(*) FILTER (WHERE d.is_duplicate IS NOT TRUE
-                    AND COALESCE(ars.screening_status, d.screening_status) IS DISTINCT FROM 'excluded'
-                    AND (COALESCE(ars.screening_status, d.screening_status) = 'included' OR (COALESCE(ars.similarity_score, 0) >= :thr AND (ars.rerank_score IS NULL OR ars.rerank_score >= COALESCE((SELECT ss.rerank_threshold FROM scenario_settings ss WHERE ss.scenario_id = ars.scenario_id), 0.0))))
-                    AND COALESCE(ars.screening_status, d.screening_status) = 'included') AS included,
-                COUNT(*) FILTER (WHERE d.is_duplicate IS NOT TRUE
-                    AND COALESCE(ars.screening_status, d.screening_status) IS DISTINCT FROM 'excluded'
-                    AND (COALESCE(ars.screening_status, d.screening_status) = 'included' OR (COALESCE(ars.similarity_score, 0) >= :thr AND (ars.rerank_score IS NULL OR ars.rerank_score >= COALESCE((SELECT ss.rerank_threshold FROM scenario_settings ss WHERE ss.scenario_id = ars.scenario_id), 0.0))))
+                COUNT(*) FILTER (WHERE {relevant_gate_sql('d', 'ars', ':thr')}
+                    AND {screening_status_sql('d', 'ars')} = 'included') AS included,
+                COUNT(*) FILTER (WHERE {relevant_gate_sql('d', 'ars', ':thr')}
                     AND d.pico_json IS NOT NULL) AS with_pico
             FROM article_scenarios ars
             JOIN literature_document d ON d.id = ars.document_id
             WHERE d.project_context = 'literev' AND ars.scenario_id = :sid
         """), {"sid": scenario_id, "thr": eff_thr}).mappings().first()
-        top_articles = _conn.execute(text("""
+        top_articles = _conn.execute(text(f"""
             SELECT d.title, d.year, d.journal, d.authors,
                    COALESCE((d.pico_json->>'study_design'), d.study_design, 'N/A') AS design
             FROM article_scenarios ars
             JOIN literature_document d ON d.id = ars.document_id
             WHERE d.project_context = 'literev' AND ars.scenario_id = :sid
               AND d.is_duplicate IS NOT TRUE AND d.abstract IS NOT NULL
-              AND COALESCE(ars.screening_status, d.screening_status) IS DISTINCT FROM 'excluded'
-              AND (COALESCE(ars.screening_status, d.screening_status) = 'included' OR (COALESCE(ars.similarity_score, 0) >= :thr AND (ars.rerank_score IS NULL OR ars.rerank_score >= COALESCE((SELECT ss.rerank_threshold FROM scenario_settings ss WHERE ss.scenario_id = ars.scenario_id), 0.0))))
+              AND {relevant_gate_tail_sql('d', 'ars', ':thr')}
             -- « Articles les plus pertinents » dans le PDF : trier par qualité donnait une
             -- liste qui n'est pas celle du tri par pertinence de l'application.
-            ORDER BY (COALESCE(ars.screening_status, d.screening_status) = 'included') DESC,
+            ORDER BY ({screening_status_sql('d', 'ars')} = 'included') DESC,
                      COALESCE(ars.rerank_score, ars.similarity_score, 0) DESC NULLS LAST,
                      d.quality_score DESC NULLS LAST, d.year DESC NULLS LAST
             LIMIT 100000
         """), {"sid": scenario_id, "thr": eff_thr}).mappings().all()
-        study_designs = _conn.execute(text("""
-            SELECT
-                COALESCE((d.pico_json->>'study_design'), d.study_design, 'Non classifié') AS design,
-                COUNT(*) AS n
-            FROM article_scenarios ars
-            JOIN literature_document d ON d.id = ars.document_id
-            WHERE d.project_context = 'literev' AND ars.scenario_id = :sid
-              AND d.is_duplicate IS NOT TRUE
-              AND COALESCE(ars.screening_status, d.screening_status) IS DISTINCT FROM 'excluded'
-              AND (COALESCE(ars.screening_status, d.screening_status) = 'included' OR (COALESCE(ars.similarity_score, 0) >= :thr AND (ars.rerank_score IS NULL OR ars.rerank_score >= COALESCE((SELECT ss.rerank_threshold FROM scenario_settings ss WHERE ss.scenario_id = ars.scenario_id), 0.0))))
-            GROUP BY 1 ORDER BY 2 DESC LIMIT 8
+        # ── La MÊME distribution que l'écran ─────────────────────────────────
+        # Celle-ci combinait les deux champs à la main, dans l'autre ordre, sans écarter
+        # les marqueurs d'absence, et coupait à huit lignes : le PDF remis au partenaire
+        # annonçait 60 revues systématiques là où l'écran en comptait 77, « Non précisé 3 »
+        # contre 10, imprimait une phrase de 95 caractères comme libellé de devis, et sa
+        # colonne sommait 93 des 201 articles pertinents, sans reste ni note.
+        # Même expression, même regroupement, et aucune coupe : une ligne « autres »
+        # porterait le reste, mais il n'y en a plus puisque la casse borne les libellés.
+        study_designs = _conn.execute(text(f"""
+            WITH b AS (
+                SELECT lower({_raw_design_d}) AS d
+                FROM article_scenarios ars
+                JOIN literature_document d ON d.id = ars.document_id
+                WHERE d.project_context = 'literev' AND ars.scenario_id = :sid
+                  AND {relevant_gate_sql('d', 'ars', ':thr')}
+            )
+            SELECT {_STUDY_DESIGN_CASE} AS design, COUNT(*) AS n
+            FROM b GROUP BY 1 ORDER BY 2 DESC
         """), {"sid": scenario_id, "thr": eff_thr}).mappings().all()
 
     _buf = _io.BytesIO()
@@ -1061,8 +1036,20 @@ def get_llm_evidence_brief(scenario_id: str, lang: str | None = Query(None)) -> 
     if _bj.get("status") == "error":
         return {"status": "error", "message": _bj.get("error", "Échec de la génération du brief.")}
 
-    # Pas de brief en cache valide (absent, corpus changé, ou autre langue) :
-    # déclencher la génération DANS LA LANGUE demandée.
-    generate_evidence_brief(scenario_id, lang=lang)
-    return {"status": "generating", "message": _msg(lang, "Génération en cours, réessayez dans 30 secondes.",
-                                                    "Generating, try again in 30 seconds.")}
+    # ── Un GET ne DÉPENSE pas ───────────────────────────────────────────────
+    # Cette ligne appelait `generate_evidence_brief`, qui est pourtant déclaré avec
+    # `Depends(require_api_key)` : invoqué comme une fonction ordinaire, la dépendance
+    # ne s'applique pas. N'importe quel GET non authentifié lançait donc une génération
+    # LLM complète et ÉCRASAIT le brief en cache, une fois par langue et par changement
+    # de corpus. La génération reste derrière son POST, qui porte la clé.
+    _job = _BRIEF_GENERATION_JOBS.get(scenario_id, {})
+    if _job.get("status") == "running":
+        return {"status": "generating",
+                "message": _msg(lang, "Génération en cours, réessayez dans 30 secondes.",
+                                "Generating, try again in 30 seconds.")}
+    return {"status": "not_generated",
+            "message": _msg(lang,
+                            "Aucun Evidence Brief à jour pour ce corpus et cette langue. "
+                            "Lancez la génération depuis le bouton dédié.",
+                            "No up-to-date evidence brief for this corpus and language. "
+                            "Start the generation from its own button.")}

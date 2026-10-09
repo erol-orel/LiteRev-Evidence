@@ -33,6 +33,11 @@ ALLOWED = {
     # « Écarté à la main alors qu'il passait le seuil » : par construction, des articles
     # que la porte REFUSE. Les faire passer par elle donnerait toujours zéro.
     ("review.py", "manually_vetoed"),
+    # La courbe d'un seuil : son lot candidat est ce que l'AUTRE moitié de la porte a
+    # déjà retenu, puisque c'est précisément la moitié restante qu'elle fait varier. La
+    # porte entière appliquerait le seuil qu'on est en train de choisir, et la courbe
+    # serait plate. C'est bien une demi-porte, écrite volontairement, et nommée.
+    ("relevance.py", "other_half"),
 }
 
 
@@ -76,8 +81,6 @@ def test_no_module_writes_its_own_relevance_gate():
             continue
         if not re.search(r"similarity_score,?\s*0?\)?\s*>=", line):
             continue
-        if "rerank_score IS NULL" in line:          # passe par la porte
-            continue
         if line.lstrip().startswith(("#", "--")) or "--" in line.split("similarity_score")[0]:
             continue
         if any(tag in line for _n, tag in ALLOWED if _n == name):
@@ -97,9 +100,50 @@ def test_the_gate_still_carries_both_scores():
     assert "IS DISTINCT FROM 'excluded'" in sql
 
 
+def _pasted_by_file() -> dict:
+    """Les sites qui portent le TEXTE de la porte au lieu de l'appeler.
+
+    Il y en avait 37, dans 11 modules. La liste des copies tolérées a disparu avec
+    elles : la clause de rerank, elle, était restée dans la seule requête qui appelle la
+    fonction, et c'est ce qui faisait dire 201 au compteur et 602 au brief."""
+    out: dict[str, int] = {}
+    for name, _i, line in _sql_lines():
+        if "rerank_score IS NULL OR" in line:
+            out[name] = out.get(name, 0) + 1
+    return out
+
+
+def test_no_module_carries_the_text_of_the_gate():
+    now = _pasted_by_file()
+    assert not now, (
+        "le texte de la porte a été recopié au lieu d'appeler relevant_gate_sql() ou "
+        f"relevant_gate_tail_sql() ; fichier -> nombre de copies : {now}")
+
+
+def test_the_tail_helper_is_the_gate_minus_its_first_clause():
+    """La queue est obtenue en coupant la porte sur son premier « AND ». Si la clause des
+    doublons cessait d'arriver en tête, treize requêtes perdraient autre chose qu'elle."""
+    from api.scenario_store import relevant_gate_sql, relevant_gate_tail_sql
+    full, tail = relevant_gate_sql(), relevant_gate_tail_sql()
+    assert full.endswith(tail)
+    assert full[: -len(tail)] == "d.is_duplicate IS NOT TRUE AND "
+    assert "rerank_score" in tail and "IS DISTINCT FROM 'excluded'" in tail
+
+
+def test_the_shared_sql_constants_really_interpolate_the_gate():
+    """Les constantes SQL partagées portent la SORTIE de la fonction, donc elles suivront
+    la prochaine clause. Épinglé en comparant leur texte à ce que la fonction rend
+    aujourd'hui, sans recharger les modules (un reload rebâtirait des routeurs)."""
+    from api.scenario_store import relevant_gate_sql, relevant_gate_tail_sql
+    from api import alerts, digest, knowledge_graph
+    assert relevant_gate_sql("d", "ars", ":thr") in digest._RELEVANT
+    assert relevant_gate_tail_sql("d", "a", ":thr") in alerts._RELEVANT_GATE
+    assert relevant_gate_tail_sql("d", "ars", ":thr") in knowledge_graph._CONCEPT_ROWS_SQL
+
+
 def test_the_allowed_exceptions_still_exist():
     """Si l'un de ces compteurs disparaît, l'exception doit disparaître avec lui, sinon
     elle devient une porte dérobée silencieuse."""
-    src = (API / "review.py").read_text(encoding="utf-8")
     for name, tag in ALLOWED:
+        src = (API / name).read_text(encoding="utf-8")
         assert tag in src, f"l'exception {tag} ne correspond plus à rien dans {name}"

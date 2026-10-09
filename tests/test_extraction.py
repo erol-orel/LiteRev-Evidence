@@ -120,11 +120,18 @@ def test_an_article_is_extracted_once_then_again_only_for_a_reason():
     cur = {"v": extraction.EXTRACTION_VERSION, "source": "abstract"}
     assert extraction._needs_extraction({"abstract": abstract}) is True
     assert extraction._needs_extraction({"abstract": abstract, "extraction_json": cur}) is False
-    # The full text arrived after an abstract-only pass: read it again.
-    assert extraction._needs_extraction({"abstract": abstract, "has_fulltext": True,
+    # The full text arrived after an abstract-only pass: read it again. "Arrived" is a
+    # stored CHUNK, not the has_fulltext flag, which the enrichment pass sets as soon as
+    # Unpaywall returns an open access LINK. An article flagged that way with no chunk was
+    # re-read, re-written with source "abstract" and attempts reset to zero, then picked
+    # again on the same grounds: a paid loop with no end.
+    assert extraction._needs_extraction({"abstract": abstract, "has_fulltext_chunk": True,
                                          "extraction_json": cur}) is True
-    assert extraction._needs_extraction({"abstract": abstract, "has_fulltext": True,
+    assert extraction._needs_extraction({"abstract": abstract, "has_fulltext_chunk": True,
                                          "extraction_json": {**cur, "source": "fulltext"}}) is False
+    # The flag alone changes nothing: a link is not a text.
+    assert extraction._needs_extraction({"abstract": abstract, "has_fulltext": True,
+                                         "extraction_json": cur}) is False
     # A newer extraction version makes everything eligible again.
     assert extraction._needs_extraction({"abstract": abstract,
                                          "extraction_json": {**cur, "v": extraction.EXTRACTION_VERSION - 1}}) is True

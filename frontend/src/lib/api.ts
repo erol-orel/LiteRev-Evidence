@@ -1140,6 +1140,38 @@ export interface ScenarioPrisma {
     figures_from?: "search_run" | "corpus";
     computed_at?: string | null;
     federation_incomplete?: boolean;
+    /** What each launched source actually did: ok, empty, cached, skipped, error,
+     *  cut_by_budget. A source that failed is not a source that was searched, and the
+     *  table used to show neither its row nor its status while still counting it. */
+    source_outcomes?: Record<string, string>;
+    sources_launched?: number;
+    sources_searched?: number;
+    sources_failed?: string[];
+    sources_skipped?: string[];
+    sources_cut_off?: string[];
+    /** PRISMA 2020 splits identification: databases searched, and other methods. The
+     *  local library belongs to the second, and counting it in the first inflated both
+     *  the identified total and the duplicates. */
+    records_identified_databases?: number;
+    records_identified_library?: number;
+    per_source_cap?: number | null;
+    /** "populate" = sources were searched; "rebuild" = the boolean query was replayed
+     *  over the local library and nothing was searched. The panel called both a search. */
+    method?: string;
+    /** What the last real search had established, kept when a rebuild replaces the
+     *  figures, so the record of what was searched is not lost. */
+    last_search?: {
+      computed_at?: string | null;
+      records_identified?: number;
+      records_identified_databases?: number;
+      records_by_source?: Record<string, number>;
+      source_outcomes?: Record<string, string>;
+      sources_searched?: number;
+      sources_launched?: number;
+      sources_failed?: string[];
+      federation_incomplete?: boolean;
+      per_source_cap?: number | null;
+    } | null;
     // legacy
     total_records_identified?: number;
   };
@@ -1160,6 +1192,11 @@ export interface ScenarioPrisma {
     excluded: number;
     pending: number;
     screening_complete: boolean;
+    /** What "complete" means, in figures: a single decision used to flip
+     *  screening_complete to true on a corpus of 6 564 articles. */
+    screening_started?: boolean;
+    screened?: number;
+    to_screen?: number;
     manually_rescued: number;
     manually_vetoed: number;
     /** Why the excluded were excluded. One scope narrowing can account for most of the
@@ -1167,11 +1204,17 @@ export interface ScenarioPrisma {
     excluded_by_reason?: Array<{ reason: string; articles: number }>;
   };
   evidence: {
+    /** The relevant subset through the shared gate, so equal to counts.relevant,
+     *  rerank threshold included. It used to be arithmetic over a similarity-only
+     *  counter, which diverged the moment a rerank threshold was set. */
     total: number;
     ai_auto_selected: number;
     manually_rescued: number;
     with_fulltext: number;
     screening_complete: boolean;
+    screening_started?: boolean;
+    screened?: number;
+    to_screen?: number;
   };
   // legacy fields kept for backward compat
   screening?: {
@@ -1801,6 +1844,17 @@ export interface PooledResponse {
   excluded: Record<string, number>;
   pooled: PooledGroup[];
   comparisons: PooledComparison[];
+  /** What EXISTS, beside what is served. The lists are capped (120 groups, 40
+   *  comparisons) and the panel used to count its "too few studies" line on the capped
+   *  list: it said 120 where there were 306, and the CSV carried only the 120. */
+  groups_total?: number;
+  groups_returned?: number;
+  groups_truncated?: boolean;
+  groups_too_few_studies?: number;
+  comparisons_total?: number;
+  comparisons_returned?: number;
+  comparisons_truncated?: boolean;
+  caps?: { groups: number; comparisons: number; pairs_per_group: number };
 }
 
 export async function fetchPooled(
@@ -2100,14 +2154,16 @@ export async function fetchKnowledgeGraph(
 // ─── Streaming RAG SSE ────────────────────────────────────────────────────────
 
 /** Corpus counts behind an AI answer. `papers_used` is the relevant subset SEARCHED;
- *  `papers_quoted` is how many of them the answer actually reproduces. The two are not
- *  the same number and the interface must not present the first as the second.
+ *  `papers_retrieved` is how many of them were pulled in to compose the answer. Neither
+ *  is the number of articles the answer QUOTES, which nothing measures: the field used
+ *  to be called papers_quoted and the interface, the stored record and the exported
+ *  document all presented the retrieval depth as the citation count.
  *  `digest_complete` says whether the answer's figures were backed by the whole-corpus
  *  digest (SQL over every relevant article) rather than by the excerpts alone. */
 export interface RagMeta {
   papers_used: number;
   papers_with_fulltext: number;
-  papers_quoted?: number;
+  papers_retrieved?: number;
   digest_complete?: boolean;
   threshold: number;
 }
@@ -2134,10 +2190,13 @@ export interface KappaStats {
 
 export interface DoubleBlindDecision {
   article_id: number;
-  reviewer: 1 | 2;
+  /** Kept for backward compatibility and ignored by the API: the role is derived from
+   *  the reviewer code, server side. A client that picks its own role ends up giving
+   *  the same one to two people. */
+  reviewer?: 1 | 2;
   status: "included" | "excluded" | "pending";
   reason?: string;
-  reviewer_code?: string;
+  reviewer_code: string;
 }
 
 export async function submitDoubleBlindDecision(
@@ -2153,6 +2212,79 @@ export async function submitDoubleBlindDecision(
       body: JSON.stringify(payload),
     },
   );
+  if (!r.ok) throw new Error(httpMessage(r.status));
+  return r.json();
+}
+
+export interface DoubleBlindQueue {
+  scenario_id: string;
+  reviewer: 1 | 2;
+  reviewer_code: string;
+  remaining: number;
+  returned: number;
+  articles: Array<{
+    id: number;
+    title: string;
+    abstract?: string | null;
+    year?: number | null;
+    journal?: string | null;
+    doi?: string | null;
+    similarity_score?: number | null;
+    rerank_score?: number | null;
+    reviewer_1_status?: string | null;
+    reviewer_2_status?: string | null;
+  }>;
+}
+
+/** The articles THIS reviewer has not voted on yet. Until now there was no way to cast
+ *  a double-blind vote at all: the panel's only buttons were the arbitration ones, and
+ *  the conflicts list can only fill once both reviewers have voted. */
+export async function fetchDoubleBlindQueue(
+  scenarioId: string,
+  reviewerCode: string,
+  limit = 25,
+): Promise<DoubleBlindQueue> {
+  const base = scenarioBase(scenarioId);
+  const qs = new URLSearchParams({ reviewer_code: reviewerCode, limit: String(limit) });
+  const r = await safeFetch(`${base}/${scenarioId}/double-blind/queue?${qs}`);
+  if (!r.ok) throw new Error(httpMessage(r.status));
+  return r.json();
+}
+
+/** Register a reviewer code on a scenario and get back THE role the server assigns:
+ *  first code registered is reviewer 1, second is reviewer 2, a third is refused (409).
+ *  The role used to be decided by the browser from a per-tab sessionStorage, so two
+ *  reviewers on two machines both became reviewer 1 and the second overwrote the first. */
+export async function registerDoubleBlindReviewer(
+  scenarioId: string,
+  reviewerCode: string,
+): Promise<{ reviewer: 1 | 2; reviewer_code: string; registered: Record<string, string> }> {
+  const base = scenarioBase(scenarioId);
+  const r = await safeFetch(
+    `${base}/${scenarioId}/double-blind/register?reviewer_code=${encodeURIComponent(reviewerCode)}`,
+    { method: "POST", headers: authHeaders() },
+  );
+  if (!r.ok) {
+    const body = await r.json().catch(() => null);
+    throw new Error(body?.detail || httpMessage(r.status));
+  }
+  return r.json();
+}
+
+/** Arbitrate a disagreement. This is NOT the decision endpoint: pressing the
+ *  arbitration buttons used to rewrite a reviewer's own vote, which manufactured the
+ *  agreement the kappa then counted. */
+export async function resolveDoubleBlindConflict(
+  scenarioId: string,
+  articleId: number,
+  finalStatus: "included" | "excluded",
+  arbitratorNotes?: string,
+): Promise<{ id: number; final_status: string; resolved: boolean }> {
+  const base = scenarioBase(scenarioId);
+  const qs = new URLSearchParams({ article_id: String(articleId), final_status: finalStatus });
+  if (arbitratorNotes) qs.set("arbitrator_notes", arbitratorNotes);
+  const r = await safeFetch(`${base}/${scenarioId}/double-blind/resolve?${qs}`,
+                            { method: "POST", headers: authHeaders() });
   if (!r.ok) throw new Error(httpMessage(r.status));
   return r.json();
 }
@@ -2888,6 +3020,32 @@ export function evidenceReportUrl(scenarioId: string): string {
   return `${API_BASE_URL}/user-scenarios/${scenarioId}/evidence-report?download=true`;
 }
 
+/** Downloads the citable report, and REFUSES instead of saving a refusal.
+ *
+ *  It was a plain `<a download>`: when no brief had been generated the endpoint used to
+ *  answer 200 with a JSON error body, so the browser saved a 166-byte file bearing the
+ *  report's name. The endpoint now answers 409; this reads it and throws the detail, so
+ *  the page can say why. */
+export async function downloadEvidenceReport(scenarioId: string): Promise<void> {
+  const r = await safeFetch(evidenceReportUrl(scenarioId));
+  if (!r.ok) {
+    const body = await r.json().catch(() => null);
+    throw new Error(body?.detail || httpMessage(r.status));
+  }
+  const blob = await r.blob();
+  const name = (r.headers.get("Content-Disposition") || "")
+    .match(/filename="?([^"]+)"?/)?.[1] || `report-${scenarioId}.md`;
+  const url = URL.createObjectURL(blob);
+  try {
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = name;
+    a.click();
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+}
+
 export async function fetchEvidenceGaps(
   scenarioId: string,
   rows?: string,
@@ -3445,6 +3603,14 @@ export interface SeirProjection {
   forced?: boolean;
   /** Provenance du R₀ effectivement simulé - l'UI ne doit pas présenter "assumed"/"user" comme sourcé. */
   r0_source?: "literature" | "user" | "assumed";
+  /** The infectious period decides gamma, hence the peak day, the peak height, the
+   *  growth rate and the epidemic duration. It was silently set to 7 days on any corpus
+   *  that does not report one, and the resulting curve was labelled "from the
+   *  literature". Its provenance now travels with it. */
+  infectious_period_days?: number | null;
+  infectious_period_source?: "literature" | "user" | "assumed";
+  parameter_sources?: Record<string, "literature" | "user" | "assumed">;
+  assumed_parameters?: string[];
   /** Paramètres extraits mais inexploitables (le backend nomme ce qui manque). */
   missing?: string[];
   available_parameters?: string[];
@@ -4005,7 +4171,19 @@ export interface LiveSearchResponse {
   corpus_total?: number;
   corpus_above_threshold?: number;
   threshold?: number;
+  /** Only the sources whose answer is in `results`: a source that failed is no longer
+   *  listed here, because the panel printed it among the sources it had searched. */
   sources_queried: string[];
+  /** Per source: ok, empty, partial, error, timeout, with its latency and count. Built
+   *  and returned by the API since the start, and rendered nowhere until now. */
+  source_status?: Record<string, {
+    status: string;
+    count?: number;
+    fetched?: number;
+    latency_ms?: number | null;
+    error?: string;
+  }>;
+  source_raw_counts?: Record<string, number>;
   ingesting_background: boolean;
 }
 
@@ -4174,6 +4352,8 @@ export interface ScenarioQuestion {
   sources: Array<{ document_id?: number; title?: string; authors?: string;
                    year?: number; doi?: string; score?: number }> | null;
   papers_used: number | null;
+  /** The number of articles RETRIEVED to compose the answer. The server still stores it
+   *  in a column named papers_quoted; nothing measures how many the answer quotes. */
   papers_quoted: number | null;
   digest_complete: boolean;
   proposals: QuestionProposal[] | null;
@@ -4193,13 +4373,15 @@ export async function saveScenarioQuestion(
   body: {
     question: string; answer: string; lang?: string | null; threshold?: number | null;
     scope?: Record<string, unknown>; sources?: unknown[];
-    papers_used?: number | null; papers_quoted?: number | null;
+    papers_used?: number | null; papers_retrieved?: number | null;
     digest_complete?: boolean;
   },
 ): Promise<ScenarioQuestion> {
   const r = await safeFetch(`${API_BASE_URL}/user-scenarios/${scenarioId}/questions`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    // La clé, comme pour la suppression de la même ligne : l'écriture dans
+    // l'historique ne demandait rien, pendant que le badge disait « lecture seule ».
+    headers: authHeaders({ "Content-Type": "application/json" }),
     body: JSON.stringify(body),
   });
   if (!r.ok) throw new Error(httpMessage(r.status));

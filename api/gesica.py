@@ -15,6 +15,7 @@ from gesica_i18n import localize_gesica as _localize_gesica
 from .core import _msg, app, engine, logger
 from .documents import _extract_gesica_evidence
 from .corpus import _canonical_source
+from .scenario_store import screening_status_sql
 
 # GESICA_ENRICHED et GESICA_SCENARIO_METADATA sont désormais stockés en base de données (user_scenarios is_system=TRUE)
 # Les imports statiques ci-dessous sont conservés pour compatibilité ascendante uniquement
@@ -539,11 +540,11 @@ def get_gesica_scenarios(lang: str | None = Query(None)) -> list[dict[str, Any]]
         db_counts = {row["scenario_id"]: row["article_count"]
                      for row in conn.execute(sql_counts, {"ids": sys_ids}).mappings().all()}
 
-        sql_screening = text("""
+        sql_screening = text(f"""
             SELECT
                 ars.scenario_id,
-                COUNT(CASE WHEN COALESCE(ars.screening_status, d.screening_status) = 'included' THEN 1 END) as included_count,
-                COUNT(CASE WHEN COALESCE(ars.screening_status, d.screening_status) = 'excluded' THEN 1 END) as excluded_count
+                COUNT(CASE WHEN {screening_status_sql('d', 'ars')} = 'included' THEN 1 END) as included_count,
+                COUNT(CASE WHEN {screening_status_sql('d', 'ars')} = 'excluded' THEN 1 END) as excluded_count
             FROM article_scenarios ars
             JOIN literature_document d ON d.id = ars.document_id
             WHERE ars.scenario_id = ANY(CAST(:ids AS text[]))

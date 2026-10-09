@@ -108,7 +108,12 @@ def test_inconsistent_inputs_never_go_negative_or_drop_zero_sources():
     f = main._prisma_identification_figures(
         {"db_cache": 5, "core": 0, "arxiv": None}, unique_records=9,
         duplicate_rows_removed=20, corpus_total=50, removed_no_abstract=99, removed_not_matching=99)
-    assert f["records_by_source"] == {"db_cache": 5}          # empty sources are not "searched"
+    # La bibliothèque locale a sa propre ligne (PRISMA 2020 : « autres méthodes ») et
+    # ne figure plus parmi les bases interrogées ; une source nommée dans les issues
+    # garde en revanche sa ligne, même à zéro.
+    assert f["records_by_source"] == {}
+    assert f["records_identified_library"] == 5 and f["records_identified_databases"] == 0
+    assert f["records_identified"] == 5
     assert f["duplicates_removed"] == 5                       # never more than identified
     assert f["unique_records"] == 0 and f["removed_before_screening"] == 0
     assert f["removed_no_abstract"] == 0 and f["removed_not_matching"] == 0   # bounded by what is left to explain
@@ -210,7 +215,10 @@ def test_the_endpoint_reports_the_search_run(seeded):
     assert ident["removed_no_abstract"] == 15
     assert ident["removed_not_matching"] == 8
     assert ident["removed_other_reasons"] == 0
-    assert ident["by_source"] == {"db_cache": 557, "openalex": 1673, "europepmc": 907, "pubmed": 89}
+    assert ident["by_source"] == {"openalex": 1673, "europepmc": 907, "pubmed": 89}
+    # 557 enregistrements venaient de la bibliothèque locale, pas d'une base interrogée.
+    assert ident["records_identified_library"] == 557
+    assert ident["records_identified_databases"] == 2669
     # The corpus as it stands NOW is 2 documents; the search had screened 2,740. The
     # difference is a line of its own and the arithmetic holds on what is displayed.
     assert ident["records_screened"] == 2

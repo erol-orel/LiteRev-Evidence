@@ -19,10 +19,12 @@ from sqlalchemy import text
 from .core import app, engine, logger, require_api_key
 from .variables import _norm_col
 
-# Défaut SOUS la racine de déploiement, comme annoncé par .env.example : le défaut réel
-# était /home/ubuntu/uploads_datasets, donc hors du répertoire qu'un opérateur
-# sauvegarde ou nettoie, et sans rapport avec la documentation.
-MODEL_DATA_DIR = Path(_os_mod.environ.get("MODEL_DATA_DIR", "/opt/literev-api/uploads_datasets"))
+# HORS de l'arbre git. Le défaut était /opt/literev-api/uploads_datasets, c'est-à-dire
+# DANS le répertoire de déploiement, et deploy.sh y fait `git clean -fd` : chaque fusion
+# sur main effaçait tous les CSV de données et tous les modèles entraînés, pendant que
+# les lignes `scenario_model_dataset` et `scenario_model_run` survivaient avec leurs
+# chemins, si bien que /model/run continuait de répondre « prêt » et « utilisable ».
+MODEL_DATA_DIR = Path(_os_mod.environ.get("MODEL_DATA_DIR", "/var/lib/literev/model_data"))
 
 
 def _ensure_model_dataset_table():
@@ -699,6 +701,18 @@ def generate_synthetic_model_dataset(scenario_id: str, n_rows: int = 400,
         df.to_csv(stored_path, index=False)
     except Exception as e:
         logger.error(f"Stockage dataset synthétique {scenario_id}: {e}", exc_info=True)
+
+    # MÊME garde que le chemin de téléversement (voir plus haut) : ne pas activer un
+    # dataset dont le fichier n'existe pas. Sans elle, disque plein ou répertoire non
+    # inscriptible - l'état normal juste après un déploiement qui a effacé le dossier -
+    # donnaient un 200 « stored », un rapport de validation disant can_train, un
+    # entraînement lancé, et l'ANCIEN dataset désactivé au passage. L'activation ne vient
+    # qu'après l'écriture du fichier.
+    if stored_path is None:
+        raise HTTPException(status_code=500,
+                            detail="Échec du stockage du dataset synthétique "
+                                   "(espace disque, ou répertoire de données absent). "
+                                   "Le dataset précédent est conservé.")
 
     with engine.begin() as conn:
         conn.execute(text(

@@ -37,7 +37,11 @@ def test_the_gate_carries_all_three_conditions():
     threshold is 0: the same convention as every other count in the app."""
     sql = relevant_gate_sql(doc="d", link="ars", thr=":thr")
     assert "d.is_duplicate IS NOT TRUE" in sql
-    assert "COALESCE(ars.screening_status, d.screening_status) IS DISTINCT FROM 'excluded'" in sql
+    # Le statut lu est celui DE CETTE REVUE : il se lisait
+    # COALESCE(ars.screening_status, d.screening_status), donc « à défaut de décision
+    # ici, la décision prise dans une autre revue », sur une ligne partagée.
+    assert "ars.screening_status IS DISTINCT FROM 'excluded'" in sql
+    assert "d.screening_status" not in sql
     assert "COALESCE(ars.similarity_score, 0) >= :thr" in sql
     assert "= 'included'" in sql
 
@@ -101,11 +105,17 @@ def test_the_scenario_rag_prompts_carry_the_whole_corpus_digest():
     assert "CORPUS COMPLET" in src["/user-scenarios/{id}/rag"]
 
 
-def test_the_stream_reports_what_it_quoted_not_only_what_it_searched():
+def test_the_stream_reports_how_many_it_retrieved_not_only_what_it_searched():
     """`papers_used` is the subset SEARCHED. Alone under the answer it read as "this
-    answer is built on 2,170 papers", which was never true of a generated paragraph."""
+    answer is built on 2,170 papers", which was never true of a generated paragraph.
+
+    The second number is the RETRIEVAL depth, and it is now called that: it used to be
+    called `papers_quoted`, and the interface, the stored record and the exported
+    document all presented it as the number of articles the answer cites. Nothing
+    measures that."""
     src = _rag_sources()["/ask/stream/filtered"]
-    assert '"papers_quoted"' in src
+    assert '"papers_retrieved"' in src
+    assert '"papers_quoted"' not in src
     assert '"digest_complete"' in src
 
 

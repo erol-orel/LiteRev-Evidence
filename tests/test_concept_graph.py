@@ -73,7 +73,30 @@ def test_without_llm_concepts_the_graph_still_stands_on_structured_fields():
     g = main._build_concept_graph(rows)
     types = {n["type"] for n in g["nodes"]}
     assert types == {"place", "design", "topic"}
-    assert g["source"] == "structured" and g["n_missing_concepts"] == 5
+    assert g["source"] == "structured"
+    # « Manquants » veut dire « qu'un passage pourrait annoter ». Ces articles n'ont ni
+    # PICO ni résumé : aucun passage ne les annotera, et les compter comme manquants
+    # faisait repartir un passage payant à chaque affichage de la carte, jusqu'à quarante
+    # fois par page, pendant que l'extraction rendait 0.
+    assert g["n_missing_concepts"] == 0
+    assert g["n_unannotatable"] == 5
+
+
+def test_an_article_with_an_abstract_is_counted_as_annotatable():
+    rows = [_row(1, 2024, None, country="IT", design="Cohort study")]
+    rows[0]["abstract"] = "x" * 200
+    g = main._build_concept_graph(rows)
+    assert g["n_missing_concepts"] == 1 and g["n_unannotatable"] == 0
+
+
+def test_an_article_that_failed_three_times_stops_being_counted_as_missing():
+    rows = [_row(1, 2024, None)]
+    rows[0].update({"abstract": "x" * 200, "concepts_attempts": 3})
+    g = main._build_concept_graph(rows)
+    assert g["n_missing_concepts"] == 0, (
+        "un article que trois passages n'ont pas su annoter relançait un passage payant "
+        "à chaque affichage")
+    assert g["n_unannotatable"] == 1
 
 
 def test_the_endpoint_serves_the_cache_and_recomputes_without_it(monkeypatch):

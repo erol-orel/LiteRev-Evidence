@@ -403,14 +403,32 @@ def test_normalize_ignores_observations_without_quality_map():
     assert norm["params"]["r0"]["value"] == 12.0
 
 
-def test_normalize_single_observation_falls_back_to_llm_value():
+def test_one_real_observation_beats_the_narrative_guess():
+    """ONE rule for every parameter, instead of two that contradict each other.
+
+    The pool used to be trusted only from two studies, while a value written by the
+    narrative pass over the 25 most relevant articles was kept whatever the study count.
+    So a parameter measured by ONE study survived only when the model had also guessed a
+    number, and it was the GUESS that was kept, not the observation."""
     blk = {
         "applicable": True,
         "r0": {"value": 12.0, "provenance": [1],
-               "observations": [{"article_id": 1, "value": 15.0}]},  # only one → no pool override
+               "observations": [{"article_id": 1, "value": 15.0}]},
     }
     norm = sm.normalize_extracted_parameters(blk, valid_ids={1}, quality_by_id={1: 5.0})
-    assert norm["params"]["r0"]["value"] == 12.0                # < 2 studies → LLM estimate retained
+    r0 = norm["params"]["r0"]
+    assert r0["value"] == 15.0, "l'estimation narrative a été préférée à l'observation"
+    assert r0["value_source"] == "pooled"
+    assert r0["n_studies"] == 1
+    # Une étude ne porte pas d'intervalle : on n'en invente pas un de largeur nulle.
+    assert r0["ci_low"] is None and r0["ci_high"] is None
+
+
+def test_a_parameter_with_no_observation_keeps_the_narrative_value_and_says_so():
+    blk = {"applicable": True, "r0": {"value": 12.0, "provenance": [1]}}
+    norm = sm.normalize_extracted_parameters(blk, valid_ids={1}, quality_by_id={1: 5.0})
+    assert norm["params"]["r0"]["value"] == 12.0
+    assert norm["params"]["r0"]["value_source"] == "narrative"
 
 
 def test_normalize_pooling_works_when_llm_value_absent():
@@ -637,12 +655,30 @@ def test_band_drops_non_finite_instead_of_mis_sorting():
 def test_diverged_run_raises_instead_of_returning_nan():
     # NaN cannot be caught by the negativity clamp (`nan < 0` is False), so simulate()
     # must detect it explicitly rather than hand back a NaN summary.
-    for bad in (0.0, None, -3.0, 1e-9):
+    for bad in (0.0, -3.0, 1e-9):
         try:
             sm.simulate(sm.SeirParams(r0=2.0, infectious_period_days=bad), days=10)
             raise AssertionError(f"implausible infectious period {bad!r} was accepted")
         except ValueError:
             pass
+
+
+def test_a_missing_infectious_period_is_run_as_an_assumption_and_says_so():
+    """None is not an implausible value, it is an ABSENT one, and the two differ.
+
+    The field defaulted to 7.0, applied in silence: a corpus reporting an R0 and no
+    infectious period - every production scenario carrying a projection - had gamma set
+    to 1/7, so beta = R0/7, and the peak day, the peak height, the growth rate and the
+    epidemic duration were all decided by a constant no article supplied, under a label
+    reading "from the literature"."""
+    out = sm.simulate(sm.SeirParams(r0=2.0), days=60)["summary"]
+    assert out["infectious_period_days"] == sm.DEFAULT_INFECTIOUS_PERIOD_DAYS
+    assert out["infectious_period_source"] == "assumed"
+    given = sm.simulate(sm.SeirParams(r0=2.0, infectious_period_days=11), days=60)["summary"]
+    assert given["infectious_period_days"] == 11.0
+    assert given["infectious_period_source"] == "literature"
+    ens = sm.simulate_ensemble({"r0": 2.0}, days=60, n_samples=5)
+    assert ens["summary"]["infectious_period_source"] == "assumed"
 
 
 def test_fallback_r0_is_labelled_assumed_not_literature():

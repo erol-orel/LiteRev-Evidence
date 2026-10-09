@@ -112,7 +112,11 @@ _PARAM_PATTERNS: tuple[tuple[str, str, str], ...] = (
     ("serial_interval", r"\bserial interval\b|\bintervalle sériel\b", "days"),
     ("latent_period", r"\blatent period\b|\bpériode de latence\b", "days"),
     ("infectious_period", r"\binfectious period\b|\bpériode infectieuse\b", "days"),
-    ("case_fatality_rate", r"\bcase[- ]fatality (?:rate|ratio)\b|\bCFR\b|\bletalité\b|\bléthalité\b", "%"),
+    # « létalité » manquait : le motif ne portait que « letalité » (sans accent) et
+    # « léthalité » (avec un h), si bien que l'orthographe courante n'était pas reconnue.
+    ("case_fatality_rate",
+     r"\bcase[- ]fatality (?:rate|ratio)\b|\bCFR\b|\bl[eé]talit[eé]\b|\bléthalité\b"
+     r"|\btaux de l[eé]talit[eé]\b", "%"),
     ("attack_rate", r"\battack rate\b|\btaux d'attaque\b", "%"),
 )
 # Un nombre, éventuellement décimal, éventuellement un intervalle « 2.1 to 3.4 ».
@@ -127,11 +131,63 @@ def _as_float(raw: str) -> float | None:
         return None
 
 
+#: Les mots qui comptent des OBJETS, pas une grandeur. « Sur 24 études, le nombre de
+#: reproduction de base n'est pas rapporté » rendait R0 = 24, parce que le nombre était
+#: cherché dans TOUTE la phrase, y compris avant le libellé, et qu'aucun mot n'était
+#: récusé. Cette valeur était ensuite proposée pour adoption dans la spécification du
+#: modèle, sans que la phrase soit montrée.
+_COUNTING_WORDS = (
+    "article", "articles", "study", "studies", "étude", "études", "paper", "papers",
+    "patient", "patients", "cas", "case", "cases", "country", "countries", "pays",
+    "review", "reviews", "revue", "revues", "n", "total", "sample", "échantillon",
+    "cohort", "cohorte", "participants", "participant", "sujets", "sujet",
+    "outbreak", "outbreaks", "foyer", "foyers", "reference", "references",
+)
+#: Ce qui FERME une proposition : au-delà, le nombre ne porte plus sur le libellé.
+_CLAUSE_END = re.compile(r"[;:]|,\s*(?:and|but|while|whereas|et|mais|alors que|tandis que)\b",
+                         re.IGNORECASE)
+#: Au plus ce nombre de caractères entre le libellé et son nombre. « La période
+#: infectieuse est de 5 jours » en compte 9 ; une phrase entière en compte cent.
+_MAX_GAP_CHARS = 60
+#: Une NÉGATION entre le libellé et le nombre : « la létalité n'est pas rapportée dans
+#: 24 études » ne dit pas que la létalité vaut 24.
+_NEGATION = re.compile(r"\b(?:not|no|never|pas|aucun|aucune|non|sans)\b", re.IGNORECASE)
+
+
+def _value_after_label(tail: str) -> re.Match | None:
+    """Le nombre qui suit le libellé, s'il lui appartient vraiment.
+
+    Trois conditions, toutes nécessaires : il est APRÈS le libellé (et non n'importe où
+    dans la phrase), avant la fin de la proposition, et pas précédé d'un mot qui compte
+    des objets. Sinon, rien : une valeur inventée proposée pour adoption dans la
+    spécification du modèle est pire qu'une absence de valeur."""
+    cut = _CLAUSE_END.search(tail)
+    window = tail[: cut.start()] if cut else tail
+    for m in (re.search(_RANGE, window), re.search(_NUMBER, window)):
+        if not m:
+            continue
+        gap = window[: m.start()]
+        if len(gap) > _MAX_GAP_CHARS:
+            return None
+        if _NEGATION.search(gap):
+            return None
+        words = re.findall(r"[\wÀ-ÿ=]+", gap.lower())
+        if words and words[-1].strip("=") in _COUNTING_WORDS:
+            return None
+        return m
+    return None
+
+
 def extract_parameter_claims(answer: str) -> list[dict[str, Any]]:
     """Les grandeurs épidémiologiques nommées dans une réponse, avec leur valeur.
 
-    Pure. Ne renvoie QUE ce qui est écrit : une grandeur reconnue suivie, dans la
-    même phrase, d'un nombre ou d'un intervalle. Rien n'est déduit."""
+    Pure. Ne renvoie QUE ce qui est écrit : une grandeur reconnue SUIVIE, dans la même
+    proposition, d'un nombre ou d'un intervalle qui lui appartient. Rien n'est déduit.
+
+    Le nombre était cherché dans toute la phrase, libellé masqué mais texte AVANT le
+    libellé inclus : « Sur 24 études, le nombre de reproduction de base n'est pas
+    rapporté » rendait R0 = 24, et l'historique proposait cette valeur pour adoption
+    dans la spécification du modèle sans montrer la phrase."""
     out: list[dict[str, Any]] = []
     if not answer:
         return out
@@ -142,22 +198,17 @@ def extract_parameter_claims(answer: str) -> list[dict[str, Any]]:
             label = re.search(pattern, sentence, re.IGNORECASE)
             if not label:
                 continue
-            # Le NOM de la grandeur contient parfois un chiffre ("R0", "CFR"), qui
-            # serait lu comme sa valeur. On le masque avant de chercher le nombre.
-            masked = (sentence[:label.start()]
-                      + " " * (label.end() - label.start())
-                      + sentence[label.end():])
-            m_range = re.search(_RANGE, masked)
-            if m_range:
-                lo, hi = _as_float(m_range.group(1)), _as_float(m_range.group(2))
+            m = _value_after_label(sentence[label.end():])
+            if m is None:
+                break
+            if m.re.pattern == _RANGE:
+                lo, hi = _as_float(m.group(1)), _as_float(m.group(2))
                 if lo is not None and hi is not None:
                     out.append({"key": key, "unit": unit, "low": lo, "high": hi,
                                 "value": round((lo + hi) / 2, 4),
                                 "quote": sentence.strip()[:400]})
-                break
-            m_one = re.search(_NUMBER, masked)
-            if m_one:
-                v = _as_float(m_one.group(1))
+            else:
+                v = _as_float(m.group(1))
                 if v is not None:
                     out.append({"key": key, "unit": unit, "low": None, "high": None,
                                 "value": v, "quote": sentence.strip()[:400]})
@@ -209,7 +260,10 @@ class QuestionIn(BaseModel):
     scope: dict[str, Any] | None = None
     sources: list[dict[str, Any]] | None = None
     papers_used: int | None = None
-    papers_quoted: int | None = None
+    # Les articles RAPATRIÉS, pas ceux que la réponse cite. La colonne en base garde son
+    # ancien nom (`papers_quoted`) : renommer une colonne n'ajoute rien, mais le champ
+    # servi et affiché doit dire ce qu'il compte.
+    papers_retrieved: int | None = None
     digest_complete: bool = False
     owner_email: str | None = None
 
@@ -230,9 +284,15 @@ def _row_to_question(row) -> dict[str, Any]:
 
 
 @app.post("/user-scenarios/{scenario_id}/questions")
-def save_scenario_question(scenario_id: str, payload: QuestionIn) -> dict[str, Any]:
+def save_scenario_question(scenario_id: str, payload: QuestionIn,
+                           _: None = Depends(require_api_key)) -> dict[str, Any]:
     """Enregistre une question et sa réponse, avec la portée sur laquelle elle a
-    été posée. Appelé par l'interface une fois la réponse reçue en entier."""
+    été posée. Appelé par l'interface une fois la réponse reçue en entier.
+
+    La clé est exigée, comme elle l'est déjà pour SUPPRIMER la même ligne : écrire dans
+    l'historique de n'importe quel scénario, avec un texte arbitraire de 200 000
+    caractères et une adresse de propriétaire choisie, ne demandait rien, pendant que
+    l'interface affichait un badge « lecture seule »."""
     _get_user_scenario_or_404(scenario_id)
     threshold = (payload.threshold if payload.threshold is not None
                  else _get_scenario_threshold(scenario_id))
@@ -255,7 +315,7 @@ def save_scenario_question(scenario_id: str, payload: QuestionIn) -> dict[str, A
             "lang": payload.lang, "thr": threshold,
             "scope": json.dumps(payload.scope or {}),
             "sources": json.dumps(payload.sources or []),
-            "used": payload.papers_used, "quoted": payload.papers_quoted,
+            "used": payload.papers_used, "quoted": payload.papers_retrieved,
             "complete": bool(payload.digest_complete),
             "proposals": json.dumps(proposals),
             "email": payload.owner_email,
@@ -433,11 +493,11 @@ def question_markdown(q: dict[str, Any], scenario_name: str = "") -> str:
     meta.append(q.get("scope_label") or describe_scope(q.get("scope"), q.get("threshold")))
     out.append("*" + "  ·  ".join(meta) + "*")
     out.append("")
-    used, quoted = q.get("papers_used"), q.get("papers_quoted")
+    used, retrieved = q.get("papers_used"), q.get("papers_quoted")
     if used is not None:
         line = f"Answered over {used} relevant articles"
-        if quoted is not None:
-            line += f", quoting {quoted}"
+        if retrieved is not None:
+            line += f", {retrieved} of them retrieved for the answer"
         out.append(line + ".")
         out.append("")
     out.append(q.get("answer") or "")

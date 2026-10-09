@@ -16,7 +16,7 @@ from sqlalchemy import text
 
 from .core import app, engine, logger, require_api_key
 from .gesica import _get_scenario_name
-from .scenario_store import _get_scenario_threshold
+from .scenario_store import _get_scenario_threshold, relevant_gate_tail_sql
 
 # ─── ALERTES EMAIL ────────────────────────────────────────────────────────────
 
@@ -185,6 +185,25 @@ def _new_articles_for_scenario(conn, scenario_id: str, since, limit: int = 25) -
     return [dict(r) for r in rows]
 
 
+def _count_new_linked_articles(conn, scenario_id: str, since) -> int:
+    """Combien de ces articles nouveaux sont LIÉS au scénario.
+
+    Deux populations se mélangeaient dans la même phrase. Le total annoncé compte les
+    articles rattachés PAR L'UNE OU L'AUTRE voie : un lien `article_scenarios`, ou un
+    `scenario_type` posé à l'ingestion. Le compte des pertinents, lui, JOINT
+    `article_scenarios` : il ne peut voir que les premiers. Or la living review ingère
+    en posant `scenario_type` et SANS créer de lien, donc ses articles comptaient dans
+    le total et jamais dans les pertinents : l'email annonçait « 0 of 12 clear the
+    relevance threshold » pour exactement les articles qu'une veille apporte.
+    On compte donc la population qui PEUT être scorée, et la phrase le dit."""
+    return int(conn.execute(text("""
+        SELECT COUNT(DISTINCT d.id)
+        FROM literature_document d
+        JOIN article_scenarios a ON a.document_id = d.id AND a.scenario_id = :sid
+        WHERE (CAST(:since AS timestamp) IS NULL OR d.created_at > CAST(:since AS timestamp))
+    """), {"sid": scenario_id, "since": since}).scalar() or 0)
+
+
 def _count_new_articles_for_scenario(conn, scenario_id: str, since) -> int:
     """Combien d'articles nouveaux AU TOTAL, sans la borne d'affichage.
 
@@ -219,9 +238,8 @@ def _count_new_articles_for_scenario(conn, scenario_id: str, since) -> int:
 
 # Gate de pertinence : le MÊME prédicat que partout (jamais les exclus, inclus par un
 # relecteur ou au-dessus du seuil).
-_RELEVANT_GATE = """
-      AND COALESCE(a.screening_status, d.screening_status) IS DISTINCT FROM 'excluded'
-      AND (COALESCE(a.screening_status, d.screening_status) = 'included' OR (COALESCE(a.similarity_score, 0) >= :thr AND (a.rerank_score IS NULL OR a.rerank_score >= COALESCE((SELECT ss.rerank_threshold FROM scenario_settings ss WHERE ss.scenario_id = a.scenario_id), 0.0))))
+_RELEVANT_GATE = f"""
+      AND {relevant_gate_tail_sql('d', 'a', ':thr')}
 """
 
 # Devis qui déplacent le niveau de preuve d'une revue : s'ils arrivent, le brief mérite
@@ -368,6 +386,7 @@ def _render_alert_digest(scenario_id: str, articles: list[dict], total_new: int,
                          scenario_name: str | None = None,
                          first_digest: bool = False,
                          n_relevant: int | None = None,
+                         n_linked: int | None = None,
                          signals: list[dict] | None = None,
                          can_model: bool = True) -> tuple[str, str, str]:
     """(subject, html, text) d'un digest - liste les VRAIS nouveaux articles. Pur/testable.
@@ -408,12 +427,21 @@ def _render_alert_digest(scenario_id: str, articles: list[dict], total_new: int,
         return f'<li style="margin:4px 0"><a href="{_html.escape(str(href))}" style="color:#16a34a">{title}</a>{yr}</li>'
 
     # Combien passent le seuil, et ce qui mérite une relecture.
+    # Le dénominateur est la population qui PEUT être scorée (les articles liés au
+    # scénario), pas le total annoncé, qui compte aussi ceux qu'une veille a ingérés sans
+    # créer de lien. Les deux se confondaient, et l'email écrivait « 0 of 12 » pour
+    # exactement les articles qu'une veille apporte.
     _rel_txt = ""
-    if n_relevant is not None and total_new:
-        _rel_txt = (f"{n_relevant} of {total_new} clear the relevance threshold."
-                    if n_relevant != total_new else
-                    (f"All {total_new} clear the relevance threshold."
-                     if total_new > 1 else "It clears the relevance threshold."))
+    _den = n_linked if n_linked is not None else total_new
+    if n_relevant is not None and _den:
+        _rel_txt = (f"{n_relevant} of {_den} clear the relevance threshold."
+                    if n_relevant != _den else
+                    (f"All {_den} clear the relevance threshold."
+                     if _den > 1 else "It clears the relevance threshold."))
+    _unlinked = max(0, int(total_new or 0) - int(_den or 0))
+    if _unlinked:
+        _rel_txt += (f" {_unlinked} more are in the library but not yet in this "
+                     "scenario's corpus: they are scored by the next search.")
     # Singular and plural written out, no "(s)": colleagues read these lines.
     # Ce qu'il faut relire dépend de ce que le scénario POSSÈDE. Une revue de
     # littérature n'a pas de spécification de modèle : l'envoyer la relire nommait la
@@ -579,12 +607,16 @@ def _process_alert_digests(scenario_id: str | None, dry_run: bool, respect_frequ
         # last_notified_at = NOW(), donc ce cas ne concerne que les lignes héritées.
         _since = sub.get("last_notified_at")
         _first = _since is None
+        _n_linked = None
         try:
             with engine.connect() as conn:
                 arts = _new_articles_for_scenario(conn, sub["scenario_id"], _since)
                 # Le TOTAL, pas le nombre de lignes affichées : c'est lui que l'email annonce.
                 total_new = (len(arts) if _first else
                              _count_new_articles_for_scenario(conn, sub["scenario_id"], _since))
+                # Et la population qui peut être SCORÉE, qui est celle sur laquelle le
+                # compte des pertinents porte réellement.
+                _n_linked = _count_new_linked_articles(conn, sub["scenario_id"], _since)
         except Exception as e:
             logger.warning(f"digest new-articles {sub['scenario_id']}: {e}")
             arts, total_new = [], 0
@@ -636,6 +668,7 @@ def _process_alert_digests(scenario_id: str | None, dry_run: bool, respect_frequ
         subj, html_body, text_body = _render_alert_digest(
             sub["scenario_id"], arts, total_new, scenario_name=_scen_name,
             first_digest=_first, n_relevant=_sig.get("new_relevant"),
+            n_linked=_n_linked,
             signals=_sig.get("signals") or [], can_model=_can_model)
         try:
             _send_email_smtp(smtp_host, smtp_user, smtp_pass, sub["email"], subj, html_body, text_body)

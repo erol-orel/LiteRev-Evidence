@@ -676,11 +676,15 @@ def _set_scenario_corpus(scenario_id: str, ids: list, allow_empty: bool = False)
                            {"sid": scenario_id})
         return 0
     with engine.begin() as _c:
-        _c.execute(
-            text("DELETE FROM article_scenarios WHERE scenario_id = :sid "
-                 "AND document_id NOT IN :ids").bindparams(bindparam("ids", expanding=True)),
-            {"sid": scenario_id, "ids": list(ids)},
-        )
+        # Un TABLEAU côté serveur, pas une liste de paramètres qui s'étend : la version
+        # `NOT IN :ids` expansée fabriquait un paramètre par identifiant, et Postgres
+        # refuse au-delà de 65 535. La suppression levait donc sur tout corpus de plus
+        # de ~65 000 articles, l'exception était avalée par l'appelant, et la recherche
+        # s'annonçait terminée sur un corpus dont les liens obsolètes étaient restés.
+        # Même forme que l'INSERT juste en dessous, qui utilisait déjà un tableau.
+        _c.execute(text("DELETE FROM article_scenarios WHERE scenario_id = :sid "
+                        "AND NOT (document_id = ANY(CAST(:ids AS bigint[])))"),
+                   {"sid": scenario_id, "ids": list(ids)})
         # Insertion en masse (un seul aller-retour) plutôt qu'une requête par
         # document : la (ré)construction du corpus local doit être quasi immédiate.
         _c.execute(text("""
@@ -709,9 +713,65 @@ def _dedup_scenario_links(scenario_id: str) -> int:
     supérieurs déjà retirés ici). Aucune fusion abusive : seules des clés EXACTES
     (même DOI, même external_id normalisé, ou même titre long) sont réunies ; un
     external_id vide retombe sur le titre puis sur l'id (jamais fusionné). Renvoie le
-    nombre de liens supprimés. Tolérant aux pannes (journalise et renvoie 0)."""
+    nombre de liens supprimés. Tolérant aux pannes (journalise et renvoie 0).
+
+    Le lien supprimé est FUSIONNÉ dans le survivant avant de disparaître. La règle « on
+    garde le plus petit document_id » est purement arbitraire vis-à-vis du contenu : le
+    lien du plus grand id pouvait porter la décision d'un relecteur, ses motifs, ses
+    votes de double aveugle et ses deux scores, et la suppression les emportait sans
+    laisser de trace. Un relecteur voyait son exclusion revenir en « en attente » après
+    une relance de la recherche. On ne remplace jamais une valeur du survivant, on ne
+    comble que ses trous, et le choix du canonique ne change pas (même règle que
+    `scripts/_softdedup.py`, donc aucun glissement quand la dédup globale tournera)."""
+    _MERGED = ("similarity_score", "rerank_score", "screening_status", "screening_reason",
+               "screening_notes", "screened_at", "reviewer_1_status", "reviewer_1_reason",
+               "reviewer_2_status", "reviewer_2_reason", "kappa_final_status",
+               "cluster_id", "cluster_label")
     try:
         with engine.begin() as _c:
+            # ── Fusion AVANT suppression ─────────────────────────────────────
+            # Un seul donneur par survivant : celui qui porte le plus d'information
+            # (une décision de screening d'abord, puis un score de rerank, puis un
+            # score de similarité), pour que deux doublons ne se contredisent pas.
+            _c.execute(text(f"""
+                WITH keyed AS (
+                    SELECT a.document_id,
+                           COALESCE(
+                             NULLIF(lower(btrim(d.doi)), ''),
+                             NULLIF('ext:' || lower(btrim(
+                                 regexp_replace(d.external_id, '^(pmid|pmcid):', '', 'i')
+                             )), 'ext:'),
+                             CASE WHEN d.title_norm IS NOT NULL
+                                   AND length(d.title_norm) >= 20
+                                  THEN 'tn:' || d.title_norm END,
+                             'id:' || a.document_id::text
+                           ) AS k
+                    FROM article_scenarios a
+                    JOIN literature_document d ON d.id = a.document_id
+                    WHERE a.scenario_id = :sid
+                ),
+                ranked AS (
+                    SELECT document_id, k, MIN(document_id) OVER (PARTITION BY k) AS keep_id
+                    FROM keyed
+                ),
+                donor AS (
+                    SELECT DISTINCT ON (r.keep_id) r.keep_id, a.*
+                    FROM ranked r
+                    JOIN article_scenarios a
+                      ON a.scenario_id = :sid AND a.document_id = r.document_id
+                    WHERE r.document_id <> r.keep_id
+                    ORDER BY r.keep_id,
+                             (a.screening_status IS NOT NULL) DESC,
+                             (a.reviewer_1_status IS NOT NULL) DESC,
+                             (a.rerank_score IS NOT NULL) DESC,
+                             (a.similarity_score IS NOT NULL) DESC,
+                             a.document_id
+                )
+                UPDATE article_scenarios k
+                SET {", ".join(f"{c} = COALESCE(k.{c}, donor.{c})" for c in _MERGED)}
+                FROM donor
+                WHERE k.scenario_id = :sid AND k.document_id = donor.keep_id
+            """), {"sid": scenario_id})
             n = _c.execute(text("""
                 WITH keyed AS (
                     SELECT a.document_id,
@@ -749,12 +809,55 @@ def _dedup_scenario_links(scenario_id: str) -> int:
         return 0
 
 
+#: Les issues possibles d'une source, dans l'ordre où elles se lisent. `ok` et `empty`
+#: sont les deux seules qui veuillent dire « interrogée, et sa réponse est dans ces
+#: chiffres » ; `cached` les rejoint, la réponse venant d'un appel antérieur identique.
+SOURCE_OUTCOMES = ("ok", "empty", "cached", "skipped", "error", "cut_by_budget")
+#: Celles qui comptent dans la couverture annoncée.
+SOURCE_OUTCOMES_COUNTED = ("ok", "empty", "cached")
+
+
+def _outcome_summary(outcomes: dict) -> str:
+    """« ok: 4 | empty: 2 | error: 5 | skipped: 1 », pour le journal et le message."""
+    counts: dict[str, int] = {}
+    for v in (outcomes or {}).values():
+        counts[str(v)] = counts.get(str(v), 0) + 1
+    return " | ".join(f"{k}: {counts[k]}" for k in SOURCE_OUTCOMES if k in counts) or "aucune"
+
+
+def _source_label(fetcher_name: str) -> str:
+    """Le nom de source derrière un nom de fetcher (`_fetch_europepmc` → `europepmc`)."""
+    return str(fetcher_name or "").replace("_fetch_", "", 1)
+
+
+def _coverage_caveat(outcomes: dict) -> str:
+    """Ce que la ligne de couverture doit dire en plus du nombre de sources.
+
+    « Sources interrogées : 7/12 » laissait au lecteur le soin de deviner ce qu'étaient
+    les cinq autres. Une recherche dont la moitié des sources ont échoué n'est pas une
+    recherche sur sept sources, et un relecteur qui cite cette ligne doit pouvoir le
+    lire sans ouvrir les journaux."""
+    buckets = {o: sorted(_source_label(k) for k, v in (outcomes or {}).items() if v == o)
+               for o in ("error", "skipped", "cut_by_budget")}
+    parts = []
+    if buckets["error"]:
+        parts.append(f"en échec : {', '.join(buckets['error'])}")
+    if buckets["cut_by_budget"]:
+        parts.append(f"coupées par le budget de temps : {', '.join(buckets['cut_by_budget'])}")
+    if buckets["skipped"]:
+        parts.append(f"non interrogées (clé d'API absente) : {', '.join(buckets['skipped'])}")
+    return (" ; " + " ; ".join(parts)) if parts else ""
+
+
 def _prisma_identification_figures(records_by_source: dict, unique_records: int,
                                    duplicate_rows_removed: int, corpus_total: int,
                                    method: str = "populate",
                                    federation_incomplete: bool = False,
                                    removed_no_abstract: int = 0,
-                                   removed_not_matching: int = 0) -> dict[str, Any]:
+                                   removed_not_matching: int = 0,
+                                   source_outcomes: dict | None = None,
+                                   per_source_cap: int | None = None,
+                                   records_from_library: int = 0) -> dict[str, Any]:
     """Chiffres PRISMA 2020 de l'étape « identification », calculés à partir de ce qu'une
     recherche a RÉELLEMENT ramené - et non du corpus déjà dédupliqué.
 
@@ -770,13 +873,37 @@ def _prisma_identification_figures(records_by_source: dict, unique_records: int,
     duplicate_rows_removed : liens retirés par _dedup_scenario_links (même DOI/PMID/titre
                              sous deux lignes distinctes de la base)
     corpus_total           : liens restants après nettoyage (sans résumé, doublons)
+    source_outcomes        : issue de CHAQUE source lancée (cf. SOURCE_OUTCOMES). Une
+                             source à zéro n'est pas une source absente : sans ce
+                             paramètre, le tableau ne nommait que celles qui avaient
+                             rapporté quelque chose et annonçait pourtant un nombre de
+                             sources interrogées.
+    per_source_cap         : le plafond par source RÉELLEMENT appliqué à ce run, pour
+                             qu'un chiffre puisse être rattaché au run qui l'a produit.
+    records_from_library   : les correspondances déjà présentes dans la bibliothèque
+                             locale. PRISMA 2020 les met dans « autres méthodes », pas
+                             dans « bases de données interrogées » : les y compter
+                             gonflait les identifiés ET les doublons de tout article
+                             trouvé à la fois en local et en ligne.
 
     PRISMA 2020 : identifiés → doublons retirés → (retirés pour d'autres raisons) →
     passés au screening. « Autres raisons » ici : pas de résumé, ou enregistrement d'une
     source par mots-clés qui ne correspond pas à la requête booléenne en local."""
     from datetime import datetime as _dt, timezone as _tz
-    records = {str(k): int(v) for k, v in (records_by_source or {}).items() if int(v or 0) > 0}
-    identified = sum(records.values())
+    _raw = {str(k): int(v or 0) for k, v in (records_by_source or {}).items()}
+    library = max(0, int(records_from_library or 0) or _raw.pop("db_cache", 0))
+    _raw.pop("db_cache", None)
+    outcomes = {_source_label(k): str(v) for k, v in (source_outcomes or {}).items()}
+    # Les sources LANCÉES, y compris celles qui n'ont rien rapporté : le tableau doit
+    # porter la ligne et son issue, sinon le lecteur ne peut pas savoir que PubMed a
+    # échoué, il peut seulement constater que PubMed n'y est pas.
+    records = {k: v for k, v in _raw.items() if v > 0}
+    for name in outcomes:
+        records.setdefault(name, 0)
+    by_outcome = {o: sorted(k for k, v in outcomes.items() if v == o) for o in SOURCE_OUTCOMES}
+    searched = sum(len(by_outcome[o]) for o in SOURCE_OUTCOMES_COUNTED)
+    from_databases = sum(records.values())
+    identified = from_databases + library
     across = max(0, identified - max(0, int(unique_records or 0)))
     rows = max(0, int(duplicate_rows_removed or 0))
     duplicates = min(identified, across + rows)
@@ -797,6 +924,22 @@ def _prisma_identification_figures(records_by_source: dict, unique_records: int,
         "federation_incomplete": bool(federation_incomplete),
         "records_by_source": records,
         "records_identified": identified,
+        # Les deux moitiés de l'identification, nommées. « identified » reste leur somme
+        # pour que identifiés − doublons − retraits = passés au screening tienne.
+        "records_identified_databases": from_databases,
+        "records_identified_library": library,
+        # Ce que la fédération a fait, source par source. `sources_searched` ne compte
+        # que ok/empty/cached : un échec n'est pas une interrogation.
+        "source_outcomes": outcomes,
+        "sources_launched": len(outcomes),
+        "sources_searched": searched,
+        "sources_ok": by_outcome["ok"],
+        "sources_empty": by_outcome["empty"],
+        "sources_cached": by_outcome["cached"],
+        "sources_skipped": by_outcome["skipped"],
+        "sources_failed": by_outcome["error"],
+        "sources_cut_off": by_outcome["cut_by_budget"],
+        "per_source_cap": (int(per_source_cap) if per_source_cap is not None else None),
         "duplicate_records_across_sources": across,
         "duplicate_rows_in_database": rows,
         "duplicates_removed": duplicates,
@@ -1101,7 +1244,10 @@ def _generate_search_strategy(query: str) -> dict:
 
 
 class SearchStrategyIn(BaseModel):
-    query: str = Field(..., min_length=1)
+    # BORNÉE. Ce texte devient le prompt d'un appel au modèle ET la clé d'une ligne de
+    # cache persistée : sans longueur maximale, une chaîne arbitrairement longue
+    # coûtait un appel et laissait une ligne, autant de fois qu'on la faisait varier.
+    query: str = Field(..., min_length=1, max_length=2000)
 
 
 @app.post("/search-strategy")

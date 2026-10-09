@@ -756,13 +756,28 @@ def model_guardrails(pipe, Xtr, ytr, Xte, yte, task_type: str, cv_scores,
 
     # 3) Stabilité de la validation croisée (écart-type inter-folds du meilleur modèle).
     try:
-        cvs = np.abs(np.asarray(list(cv_scores), dtype=float))   # neg_* → positif
+        # ── La VALEUR du score, pas sa valeur absolue ────────────────────────
+        # `np.abs` était appliqué à TOUS les scores sous le commentaire « neg_* →
+        # positif ». Or r2, roc_auc et average_precision peuvent être négatifs, et leur
+        # zéro veut dire quelque chose. Des folds [+2, -2, +2, -2] - un modèle dont le
+        # signe change avec le découpage - devenaient [2, 2, 2, 2] : écart-type nul,
+        # « Résultats stables entre folds », et une moyenne de r2 de +2, impossible,
+        # affichée comme telle. Seuls les scorers `neg_` sont retournés, et jamais pris
+        # en valeur absolue.
+        _raw = np.asarray(list(cv_scores), dtype=float)
+        cvs = -_raw if str(scoring or "").startswith("neg_") else _raw
         mean, std = float(np.mean(cvs)), float(np.std(cvs))
         rel = std / (abs(mean) + 1e-9)
+        _impossible = (str(scoring or "") in ("r2", "roc_auc", "average_precision")
+                       and (mean > 1.0 + 1e-9 or mean < -1.0 - 1e-9))
         checks.append({
             "key": "cv_stability", "name": "Stabilité (validation croisée)",
-            "status": "warn" if rel > 0.25 else "ok",
+            "status": "warn" if (rel > 0.25 or _impossible) else "ok",
             "statistic": round(rel, 3), "mean": round(mean, 4), "std": round(std, 4),
+            "scoring": str(scoring or ""),
+            # Les scores par fold, servis : une moyenne seule cache un changement de
+            # signe, qui est l'information qui compte.
+            "folds": [round(float(v), 4) for v in cvs],
             "detail": (f"Écart-type inter-folds {std:.3f} (moyenne {mean:.3f}). "
                        + ("Variance élevée : résultat sensible au découpage / peu de données."
                           if rel > 0.25 else "Résultats stables entre folds.")),

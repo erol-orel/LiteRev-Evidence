@@ -51,3 +51,9 @@ frontend/node_modules/
 __pycache__/
 *.pyc
 .claude/
+
+# Datasets et modèles entraînés déposés sur le serveur. `git clean -fd` de
+# deploy.sh n'enlève pas les fichiers IGNORÉS : les lister ici protège aussi
+# les installations qui gardent l'ancien chemin sous la racine de déploiement.
+uploads_datasets/
+model_data/

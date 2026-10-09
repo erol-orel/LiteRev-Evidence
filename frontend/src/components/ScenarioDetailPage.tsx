@@ -74,7 +74,7 @@ import {
   type EvidenceGaps,
   fetchStudyDesignVocabulary,
   type StudyDesignVocabulary,
-  evidenceReportUrl,
+  downloadEvidenceReport,
   previewScenarioSubset,
   applyScenarioSubset,
   fetchScenarioSubsetState,
@@ -98,6 +98,10 @@ import {
   type ConceptType,
   fetchKappaStats,
   fetchDoubleBlindConflicts,
+  fetchDoubleBlindQueue,
+  type DoubleBlindQueue,
+  registerDoubleBlindReviewer,
+  resolveDoubleBlindConflict,
   submitDoubleBlindDecision,
   subscribeAlerts,
   triggerLivingReview,
@@ -532,6 +536,32 @@ function QueriesSection({ detail, scenarioId }: { detail: ScenarioDetail; scenar
                 )}
                 <span>{liveData.sources_queried.join(", ")}</span>
               </div>
+              {/* L'état de CHAQUE source interrogée. L'API le calcule et le renvoie
+                  depuis le début ; aucun écran ne l'affichait, et la ligne ci-dessus
+                  listait les sources en échec parmi celles qu'elle disait avoir
+                  interrogées. Une source injoignable se lisait « aucun résultat ». */}
+              {liveData.source_status && Object.keys(liveData.source_status).length > 0 && (
+                <div className="flex flex-wrap gap-1.5 text-[10px] font-mono">
+                  {Object.entries(liveData.source_status).map(([src, st]) => (
+                    <span
+                      key={src}
+                      title={st.error || t(`scenarioDetail.queries.sourceStatus.${st.status}`)}
+                      className={`rounded px-2 py-0.5 ${
+                        st.status === "ok" ? "bg-emerald-900/40 text-emerald-300"
+                        : st.status === "empty" ? "bg-white/5 text-forest-400"
+                        : st.status === "partial" ? "bg-amber-900/40 text-amber-300"
+                        : st.status === "timeout" ? "bg-amber-900/30 text-amber-300/80"
+                        : "bg-rose-900/40 text-rose-300"}`}
+                    >
+                      {src} · {t(`scenarioDetail.queries.sourceStatus.${st.status}`)}
+                      {st.status === "ok" || st.status === "partial"
+                        ? ` (${(st.fetched ?? 0).toLocaleString()})`
+                        : ""}
+                      {typeof st.latency_ms === "number" ? ` ${st.latency_ms} ms` : ""}
+                    </span>
+                  ))}
+                </div>
+              )}
               {typeof liveData.corpus_total === "number" && (
                 <div className="rounded-xl border border-brand-500/20 bg-brand-500/5 px-3 py-2 text-[11px] text-brand-200"
                      title={t("scenarioDetail.queries.corpusTooltip")}>
@@ -1295,7 +1325,10 @@ function SeirModelView({ scenarioId }: { scenarioId: string }) {
   // Une projection dont le R₀ est SAISI ou SUPPOSÉ doit le dire : sans cette mention,
   // l'UI promet « paramétré par la littérature extraite » au-dessus d'un chiffre inventé.
   const r0Source = proj.r0_source ?? "literature";
-  const notSourced = r0Source !== "literature" || proj.forced === true;
+  // La période infectieuse compte autant que le R₀ : elle fixe gamma, donc le jour du
+  // pic, sa hauteur et la durée. Elle était posée à 7 jours en silence.
+  const assumed = proj.assumed_parameters ?? [];
+  const notSourced = r0Source !== "literature" || proj.forced === true || assumed.length > 0;
 
   return (
     <div className="space-y-4">
@@ -1305,7 +1338,19 @@ function SeirModelView({ scenarioId }: { scenarioId: string }) {
           <p className="text-[11px] text-gold-100/80 leading-relaxed">
             {r0Source === "assumed"
               ? t("scenarioDetail.seirTab.r0Assumed")
-              : t("scenarioDetail.seirTab.r0UserSupplied")}
+              : r0Source === "user" || proj.forced === true
+                ? t("scenarioDetail.seirTab.r0UserSupplied")
+                : ""}
+            {assumed.length > 0 && (
+              <>
+                {r0Source !== "literature" || proj.forced === true ? " " : ""}
+                {t("scenarioDetail.seirTab.parametersAssumed")
+                  .replace("{params}", assumed
+                    .map(k => _SEIR_PARAM_LABEL[k] ?? k).join(", "))
+                  .replace("{value}", proj.infectious_period_days != null
+                    ? String(proj.infectious_period_days) : "?")}
+              </>
+            )}
           </p>
         </div>
       )}
@@ -2420,11 +2465,15 @@ function CorpusSection({ scenarioId, threshold, counts, onUseAsThreshold }:
 
   if (loading) return <LoadingSpinner text={t("scenarioDetail.corpus.loadingCorpus")} />;
   if (error || !data) return <ErrorBox message={error ?? t("scenarioDetail.common.errorCorpus")} />;
-  // LE jeu de compteurs affiché par ce panneau : celui de la page (donc le même que le
-  // bandeau), à défaut celui que /corpus porte lui-même - les deux viennent de la même
-  // requête SQL, seul l'instant de lecture peut différer. Plus aucun nombre d'articles
-  // n'est recalculé ici : c'est ainsi que le titre et le bandeau se contredisaient.
-  const n: CorpusCounts = counts ?? data.counts ?? {
+  // LE jeu de compteurs affiché par ce panneau. Les deux viennent de la même requête
+  // SQL ; ce qui les distingue est le SEUIL avec lequel ils ont été comptés.
+  //
+  // La priorité était toujours donnée à ceux de la PAGE, calculés au seuil enregistré.
+  // Dès qu'un seuil est en cours d'essai au curseur, la liste, les pastilles et
+  // l'export suivent ce seuil pendant que les compteurs du titre restent sur l'ancien :
+  // « 201 pertinents » au-dessus d'une liste de 602 articles. Quand la requête portait
+  // un seuil, ses propres compteurs l'emportent, puisqu'ils ont été comptés pour lui.
+  const n: CorpusCounts = (threshold != null ? data.counts : counts) ?? data.counts ?? counts ?? {
     threshold: data.threshold ?? DEFAULT_SIMILARITY_THRESHOLD,
     total: data.total, above_threshold: data.above_threshold ?? 0,
     below_threshold: data.below_threshold ?? 0, unscored: data.unscored ?? 0,
@@ -3018,17 +3067,38 @@ function ClusteringSection({ scenarioId }: { scenarioId: string }) {
         setLoading(false);
         setPolling(true);
         setData(result);
+        // ── Le sondage a une FIN ───────────────────────────────────────────
+        // Il ne s'arrêtait que sur « done AVEC des clusters » ou sur « error » : un
+        // corpus trop petit pour être groupé (zéro cluster, ce qui est un résultat) et
+        // un redémarrage de l'API (le job en mémoire disparaît, le statut retombe sur
+        // « idle ») laissaient le fuseau tourner indéfiniment, une requête toutes les
+        // cinq secondes, jusqu'à la fermeture de l'onglet.
+        let _ticks = 0;
+        const MAX_TICKS = 180;            // 15 minutes, soit bien au-delà d'un calcul
         pollRef.current = setInterval(async () => {
+          _ticks += 1;
           try {
             const status = await fetchScenarioClusteringStatus(scenarioId);
-            if (status.status === "done" || (status.clusters && status.clusters.length > 0)) {
+            if (status.status === "done") {
               stopPolling();
-              handleResult(status);
+              handleResult(status);      // y compris un résultat à zéro cluster
             } else if (status.status === "error") {
               stopPolling();
               setError(status.error || t("scenarioDetail.clustering.errorClustering"));
+            } else if (status.status === "not_started") {
+              // Plus de job et rien en cache : l'API a redémarré pendant le calcul.
+              stopPolling();
+              setError(t("scenarioDetail.clustering.interrupted"));
+            } else if (_ticks >= MAX_TICKS) {
+              stopPolling();
+              setError(t("scenarioDetail.clustering.pollTimedOut"));
             }
-          } catch (_) {}
+          } catch (_) {
+            if (_ticks >= MAX_TICKS) {
+              stopPolling();
+              setError(t("scenarioDetail.clustering.pollTimedOut"));
+            }
+          }
         }, 5000);
       } else {
         handleResult(result);
@@ -3713,7 +3783,7 @@ function RagSection({ scenarioId, detail }: { scenarioId: string; detail: Scenar
           scope: {},
           sources: sourcesSoFar.current,
           papers_used: metaSoFar.current?.papers_used ?? null,
-          papers_quoted: metaSoFar.current?.papers_quoted ?? null,
+          papers_retrieved: metaSoFar.current?.papers_retrieved ?? null,
           digest_complete: Boolean(metaSoFar.current?.digest_complete),
         })
           .then(() => setHistoryKey(k => k + 1))
@@ -3864,7 +3934,7 @@ function RagSection({ scenarioId, detail }: { scenarioId: string; detail: Scenar
               <div className="mt-2 space-y-0.5 text-[10px] text-white/40">
                 <p>
                   {meta.papers_used} {t("scenarioDetail.rag.papersSearchedSuffix")} (≥ {meta.threshold})
-                  {meta.papers_quoted ? ` · ${meta.papers_quoted} ${t("scenarioDetail.rag.papersQuotedSuffix")}` : ""}
+                  {meta.papers_retrieved ? ` · ${meta.papers_retrieved} ${t("scenarioDetail.rag.papersRetrievedSuffix")}` : ""}
                   {" · "}{meta.papers_with_fulltext} {t("scenarioDetail.rag.withFulltextSuffix")}
                 </p>
                 <p className={meta.digest_complete ? "text-white/30" : "text-gold-400/70"}>
@@ -4095,12 +4165,31 @@ function AutoFetchPanel({ scenarioId, spec, onFetched }: {
  *  stable (et un texte français pour l'API / les logs) ; sans code connu, on montre ce
  *  texte plutôt que rien. */
 export function seirReasonText(
-  p: { reason?: string; reason_code?: string; available_parameters?: string[] } | null | undefined,
+  p: {
+    reason?: string; reason_code?: string; available_parameters?: string[];
+    articles_reporting_parameters?: number;
+    articles_with_values?: number | null;
+    values_never_extracted?: boolean;
+  } | null | undefined,
   t: (path: string) => string,
 ): string {
   switch (p?.reason_code) {
-    case "no_parameters":
+    case "no_parameters": {
+      // « Aucun paramètre extrait de la littérature » est une affirmation sur les
+      // articles. Elle s'affichait à côté d'un bloc de zéros sur des corpus où 55 à 73
+      // articles pertinents rapportent un R0, parce que les compteurs venaient d'un
+      // spec qui ne les portait pas et que « absent » devenait 0.
+      const n = p.articles_reporting_parameters ?? 0;
+      if (p.values_never_extracted && n > 0) {
+        return t("scenarioDetail.seirTab.reasonValuesNeverExtracted").replace("{n}", String(n));
+      }
+      if (n > 0) {
+        return t("scenarioDetail.seirTab.reasonNoUsableValue")
+          .replace("{n}", String(n))
+          .replace("{k}", String(p.articles_with_values ?? 0));
+      }
       return t("scenarioDetail.seirTab.reasonNoParameters");
+    }
     case "not_transmissible":
       return t("scenarioDetail.seirTab.reasonNotTransmissible");
     case "no_transmission_parameter": {
@@ -4212,12 +4301,43 @@ function PrismaSection({ scenarioId }: { scenarioId: string }) {
   const mc = data.manual_curation ?? ({} as ScenarioPrisma["manual_curation"]);
   const ev = data.evidence ?? ({} as ScenarioPrisma["evidence"]);
 
-  const activeSources = Object.entries(ident.by_source ?? {})
-    .filter(([, v]) => num(v) > 0)
-    .sort(([, a], [, b]) => num(b) - num(a));
+  // Toutes les sources LANCÉES, pas seulement celles qui ont rapporté quelque chose :
+  // filtrer sur « > 0 » faisait disparaître du tableau les sources en échec, coupées par
+  // le budget ou sans clé d'API, alors que le compte affiché juste au-dessus les
+  // comptait. Un relecteur lisait « 7 sources interrogées » sans pouvoir voir que PubMed
+  // n'en faisait pas partie.
+  const outcomes = ident.source_outcomes ?? {};
+  const allSourceNames = Array.from(new Set([
+    ...Object.keys(ident.by_source ?? {}),
+    ...Object.keys(outcomes),
+  ]));
+  const SEARCHED = new Set(["ok", "empty", "cached"]);
+  const activeSources = allSourceNames
+    .map((src) => [src, num((ident.by_source ?? {})[src])] as [string, number])
+    .filter(([src, v]) => v > 0 || outcomes[src] != null)
+    .sort((a, b) => b[1] - a[1]);
+  // Le dénominateur honnête : les sources dont la réponse est DANS ces chiffres.
+  const searchedCount = ident.sources_searched
+    ?? activeSources.filter(([src]) => SEARCHED.has(outcomes[src] ?? "ok")).length;
+  const launchedCount = ident.sources_launched ?? activeSources.length;
+  const notSearched = [
+    ...(ident.sources_failed ?? []),
+    ...(ident.sources_cut_off ?? []),
+    ...(ident.sources_skipped ?? []),
+  ];
+  const outcomeStyle = (o?: string): string =>
+    o === "error" ? "bg-rose-900/40 text-rose-300"
+      : o === "cut_by_budget" ? "bg-amber-900/40 text-amber-300"
+      : o === "skipped" ? "bg-slate-800/60 text-slate-400"
+      : o === "empty" ? "bg-emerald-900/20 text-emerald-300/60"
+      : "bg-emerald-900/40 text-emerald-300";
 
   const totalRecords = num(ident.total_records ?? ident.total_records_identified);
-  const evidenceTotal = num(ev.ai_auto_selected) + num(ev.manually_rescued);
+  // L'ensemble de preuves tel que le serveur le compte, par la porte de pertinence,
+  // et non une addition de deux compteurs qui ignorent le seuil de rerank : poser ce
+  // second seuil faisait tomber /counts et l'onglet Corpus pendant que l'étape 4
+  // continuait d'afficher le chiffre d'avant comme « ensemble de preuves final ».
+  const evidenceTotal = num(ev.total ?? (num(ev.ai_auto_selected) + num(ev.manually_rescued)));
 
   return (
     <div className="rounded-3xl border border-white/10 bg-white/3 p-5 space-y-4">
@@ -4235,7 +4355,13 @@ function PrismaSection({ scenarioId }: { scenarioId: string }) {
           label={t("scenarioDetail.prisma.stage1")}
           icon={<Database size={13} className="text-emerald-400" />}
         >
-          <PrismaBigNum value={totalRecords} sub={`${activeSources.length} ${activeSources.length !== 1 ? t("scenarioDetail.prisma.sourceSearchedPlural") : t("scenarioDetail.prisma.sourceSearchedSingular")}`} />
+          <PrismaBigNum value={totalRecords} sub={
+            launchedCount > searchedCount
+              ? t("scenarioDetail.prisma.sourcesSearchedOfLaunched")
+                  .replace("{searched}", String(searchedCount))
+                  .replace("{launched}", String(launchedCount))
+              : `${searchedCount} ${searchedCount !== 1 ? t("scenarioDetail.prisma.sourceSearchedPlural") : t("scenarioDetail.prisma.sourceSearchedSingular")}`
+          } />
           {/* « records identified » = étape PRISMA d'identification : compté AVANT
               déduplication (norme PRISMA 2020), donc légitimement ≥ au corpus dédupliqué
               affiché ailleurs. La note l'explicite pour éviter la lecture « incohérence ». */}
@@ -4247,6 +4373,19 @@ function PrismaSection({ scenarioId }: { scenarioId: string }) {
               ? t("scenarioDetail.prisma.recordsIdentifiedNoteCorpus")
               : t("scenarioDetail.prisma.recordsIdentifiedNote")}
           </div>
+          {/* Une reconstruction n'interroge AUCUNE source : elle rejoue la requête sur
+              la bibliothèque locale. Le panneau appelait le résultat une recherche. */}
+          {ident.method === "rebuild" && (
+            <div className="text-center text-[10px] text-amber-300/80 -mt-0.5">
+              {t("scenarioDetail.prisma.rebuiltFromLibrary")}
+              {ident.last_search?.computed_at
+                ? " " + t("scenarioDetail.prisma.lastRealSearch")
+                    .replace("{date}", new Date(ident.last_search.computed_at).toLocaleDateString())
+                    .replace("{sources}", String(ident.last_search.sources_searched ?? 0))
+                    .replace("{records}", (ident.last_search.records_identified_databases ?? 0).toLocaleString())
+                : ""}
+            </div>
+          )}
           <div className="space-y-1">
             <PrismaRow label={t("scenarioDetail.prisma.duplicatesRemoved")} value={num(ident.duplicates_removed)} />
             {ident.unique_records != null && (
@@ -4273,13 +4412,41 @@ function PrismaSection({ scenarioId }: { scenarioId: string }) {
             )}
             <PrismaRow label={t("scenarioDetail.prisma.embeddedSearchable")} value={num(ident.embedded)} />
           </div>
+          {/* La bibliothèque locale a sa propre ligne : PRISMA 2020 la range dans
+              « autres méthodes », pas dans les bases interrogées. */}
+          {num(ident.records_identified_library) > 0 && (
+            <div className="space-y-1">
+              <PrismaRow label={t("scenarioDetail.prisma.identifiedDatabases")} value={num(ident.records_identified_databases)} />
+              <PrismaRow label={t("scenarioDetail.prisma.identifiedLibrary")} value={num(ident.records_identified_library)} />
+            </div>
+          )}
+          {/* L'issue de chaque source, nommée. Une source à zéro reste dans le tableau :
+              c'est la seule façon de lire qu'elle a échoué plutôt que de ne rien trouver. */}
           {activeSources.length > 0 && (
             <div className="flex flex-wrap gap-1.5 pt-1 border-t border-white/5">
               {activeSources.map(([src, cnt]) => (
-                <span key={src} className="rounded px-2 py-0.5 bg-emerald-900/40 text-[10px] font-mono text-emerald-300">
-                  {SOURCE_LABELS_MAP[src] ?? src.toUpperCase()} {(cnt as number).toLocaleString()}
+                <span key={src}
+                      title={outcomes[src] ? t(`scenarioDetail.prisma.outcome.${outcomes[src]}`) : undefined}
+                      className={`rounded px-2 py-0.5 text-[10px] font-mono ${outcomeStyle(outcomes[src])}`}>
+                  {SOURCE_LABELS_MAP[src] ?? src.toUpperCase()} {cnt.toLocaleString()}
+                  {outcomes[src] && !SEARCHED.has(outcomes[src])
+                    ? ` · ${t(`scenarioDetail.prisma.outcome.${outcomes[src]}`)}`
+                    : ""}
                 </span>
               ))}
+            </div>
+          )}
+          {/* Le paragraphe qu'un relecteur peut citer : la recherche est-elle complète ? */}
+          {(notSearched.length > 0 || ident.federation_incomplete) && (
+            <p className="text-[10px] text-amber-300/80 pt-1 leading-relaxed">
+              {notSearched.length > 0 && t("scenarioDetail.prisma.coverageIncomplete")
+                .replace("{sources}", notSearched.map((s) => SOURCE_LABELS_MAP[s] ?? s).join(", "))}
+              {ident.federation_incomplete ? ` ${t("scenarioDetail.prisma.federationIncomplete")}` : ""}
+            </p>
+          )}
+          {ident.per_source_cap != null && (
+            <div className="text-center text-[9px] text-emerald-300/40">
+              {t("scenarioDetail.prisma.perSourceCap").replace("{cap}", ident.per_source_cap.toLocaleString())}
             </div>
           )}
         </PrismaStageCard>
@@ -4336,7 +4503,19 @@ function PrismaSection({ scenarioId }: { scenarioId: string }) {
           <div className="space-y-1 border-t border-white/5 pt-2">
             <PrismaRow label={t("scenarioDetail.prisma.rescued")} value={num(mc.manually_rescued)} accent="text-green-400" />
             <PrismaRow label={t("scenarioDetail.prisma.vetoed")} value={num(mc.manually_vetoed)} accent="text-red-400" />
-            <PrismaRow label={t("scenarioDetail.prisma.screeningComplete")} value={mc.screening_complete ? t("scenarioDetail.prisma.yes") : t("scenarioDetail.prisma.inProgress")} />
+            {/* « Screening terminé » disait oui dès la PREMIÈRE décision : un article
+                hors sujet écarté sur 6 564 et la carte annonçait une revue achevée.
+                On affiche la couverture, qui est la seule chose qu'un lecteur peut
+                vérifier. */}
+            <PrismaRow
+              label={t("scenarioDetail.prisma.screeningComplete")}
+              value={mc.screening_complete
+                ? t("scenarioDetail.prisma.yes")
+                : t("scenarioDetail.prisma.screenedOf")
+                    .replace("{screened}", num(mc.screened).toLocaleString())
+                    .replace("{total}", num(mc.to_screen).toLocaleString())}
+              accent={mc.screening_complete ? undefined : "text-amber-300"}
+            />
           </div>
           {/* Le POURQUOI des exclusions. Une restriction de portée appliquée en un clic
               peut représenter l'essentiel du total : sans le motif, elle se lit comme un
@@ -5363,36 +5542,30 @@ function DoubleBlindSection({ scenarioId }: { scenarioId: string }) {
   );
   const [codeInput, setCodeInput] = React.useState('');
   const [codeError, setCodeError] = React.useState('');
+  const [queue, setQueue] = React.useState<DoubleBlindQueue | null>(null);
   const reviewer: 1|2 = reviewerRole ?? 1;
 
-  const handleCodeSubmit = () => {
+  // Le rôle est demandé AU SERVEUR, qui le tient par scénario. Il était calculé ici,
+  // à partir d'un `sessionStorage` propre à l'onglet : deux relecteurs sur deux
+  // machines, ce qui est la définition même du double aveugle, recevaient tous les deux
+  // le rôle 1, et le second écrasait les décisions du premier.
+  const handleCodeSubmit = async () => {
     const code = codeInput.trim().toUpperCase();
     if (!/^R-?\d{4}$/.test(code) && !/^\d{4}$/.test(code)) {
       setCodeError(t("scenarioDetail.doubleBlind.invalidCodeFormat"));
       return;
     }
     const normalized = code.startsWith('R-') ? code : `R-${code}`;
-    // Assign role based on existing registrations
-    const existingCode = localStorage.getItem(REVIEWER_CODE_KEY);
-    const existingRole = localStorage.getItem(REVIEWER_ROLE_KEY);
-    let role: 1|2;
-    if (existingCode === normalized && existingRole) {
-      role = parseInt(existingRole) as 1|2;
-    } else {
-      // Check if R1 slot is taken (stored in sessionStorage for cross-tab)
-      const r1Code = sessionStorage.getItem(`literev_r1_${scenarioId}`);
-      if (!r1Code || r1Code === normalized) {
-        role = 1;
-        sessionStorage.setItem(`literev_r1_${scenarioId}`, normalized);
-      } else {
-        role = 2;
-      }
+    try {
+      const res = await registerDoubleBlindReviewer(scenarioId, normalized);
+      localStorage.setItem(REVIEWER_CODE_KEY, normalized);
+      localStorage.setItem(REVIEWER_ROLE_KEY, String(res.reviewer));
+      setReviewerCode(normalized);
+      setReviewerRole(res.reviewer);
+      setCodeError('');
+    } catch (e: any) {
+      setCodeError(e?.message || t("scenarioDetail.doubleBlind.invalidCodeFormat"));
     }
-    localStorage.setItem(REVIEWER_CODE_KEY, normalized);
-    localStorage.setItem(REVIEWER_ROLE_KEY, String(role));
-    setReviewerCode(normalized);
-    setReviewerRole(role);
-    setCodeError('');
   };
 
   const handleResetCode = () => {
@@ -5408,10 +5581,13 @@ function DoubleBlindSection({ scenarioId }: { scenarioId: string }) {
     Promise.all([
       fetchKappaStats(scenarioId),
       fetchDoubleBlindConflicts(scenarioId),
-    ]).then(([k, c]) => { setKappa(k); setConflicts(c); })
+      // Le lot à juger : sans lui, le panneau n'offrait aucun moyen de voter, donc
+      // aucun conflit ne pouvait apparaître et aucun kappa ne pouvait être calculé.
+      reviewerCode ? fetchDoubleBlindQueue(scenarioId, reviewerCode).catch(() => null) : null,
+    ]).then(([k, c, q]) => { setKappa(k); setConflicts(c); setQueue(q); })
       .catch(() => {})
       .finally(() => setLoading(false));
-  }, [scenarioId]);
+  }, [scenarioId, reviewerCode]);
 
   React.useEffect(() => { reload(); }, [reload]);
 
@@ -5419,7 +5595,19 @@ function DoubleBlindSection({ scenarioId }: { scenarioId: string }) {
     if (!reviewerCode) { alert(t("scenarioDetail.doubleBlind.enterCodeFirst")); return; }
     setSubmitting(articleId);
     try {
-      await submitDoubleBlindDecision(scenarioId, { article_id: articleId, reviewer, status, reviewer_code: reviewerCode });
+      await submitDoubleBlindDecision(scenarioId, { article_id: articleId, status, reviewer_code: reviewerCode });
+      reload();
+    } catch (e: any) {
+      alert(e.message);
+    } finally {
+      setSubmitting(null);
+    }
+  };
+
+  const arbitrate = async (articleId: number, finalStatus: "included"|"excluded") => {
+    setSubmitting(articleId);
+    try {
+      await resolveDoubleBlindConflict(scenarioId, articleId, finalStatus);
       reload();
     } catch (e: any) {
       alert(e.message);
@@ -5514,6 +5702,48 @@ function DoubleBlindSection({ scenarioId }: { scenarioId: string }) {
         </div>
       )}
 
+      {/* ── Le lot à juger ──────────────────────────────────────────────────
+          Il n'existait aucun moyen de voter : les deux seuls boutons du panneau
+          étaient ceux d'arbitrage, et la liste des conflits ne se remplit que si les
+          deux relecteurs ont voté. Le kappa affiché ne pouvait donc jamais exister. */}
+      {reviewerCode && queue && (
+        <div className="space-y-3">
+          <p className="text-[10px] font-bold uppercase tracking-wider text-brand-300">
+            {t("scenarioDetail.doubleBlind.toScreen")
+              .replace("{remaining}", queue.remaining.toLocaleString())}
+          </p>
+          {queue.articles.length === 0 ? (
+            <p className="text-[10px] text-white/35">{t("scenarioDetail.doubleBlind.queueEmpty")}</p>
+          ) : (
+            <div className="space-y-2 max-h-[400px] overflow-y-auto">
+              {queue.articles.map(art => (
+                <div key={art.id} className="rounded-xl border border-white/5 bg-white/2 p-3 space-y-2">
+                  <p className="text-xs font-semibold text-white/80 leading-4">{art.title}</p>
+                  <p className="text-[10px] text-white/40 line-clamp-3 leading-4">{art.abstract}</p>
+                  <div className="flex items-center gap-3 text-[9px] text-white/30 font-mono">
+                    {art.year ? <span>{art.year}</span> : null}
+                    {art.journal ? <span className="truncate">{art.journal}</span> : null}
+                    {art.rerank_score != null
+                      ? <span>rerank {art.rerank_score.toFixed(3)}</span>
+                      : art.similarity_score != null
+                        ? <span>sim {art.similarity_score.toFixed(3)}</span>
+                        : null}
+                  </div>
+                  <div className="flex gap-2">
+                    <button onClick={() => decide(art.id, 'included')} disabled={submitting === art.id}
+                      className="flex-1 rounded-lg bg-brand-500/20 border border-brand-500/30 text-brand-300 text-[10px] py-1.5 hover:bg-brand-500/30 transition disabled:opacity-50"
+                    >{t("scenarioDetail.doubleBlind.voteInclude")}</button>
+                    <button onClick={() => decide(art.id, 'excluded')} disabled={submitting === art.id}
+                      className="flex-1 rounded-lg bg-rose-500/10 border border-rose-500/20 text-rose-300 text-[10px] py-1.5 hover:bg-rose-500/20 transition disabled:opacity-50"
+                    >{t("scenarioDetail.doubleBlind.voteExclude")}</button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
       {/* Conflits */}
       {conflicts.length > 0 && (
         <div className="space-y-3">
@@ -5528,11 +5758,15 @@ function DoubleBlindSection({ scenarioId }: { scenarioId: string }) {
                   <span>R1 {art.reviewer_1_code ? <span className="font-mono text-white/40">[{art.reviewer_1_code}]</span> : ''} : <span className={art.reviewer_1_status === 'included' ? 'text-brand-300' : 'text-rose-300'}>{art.reviewer_1_status}</span></span>
                   <span>R2 {art.reviewer_2_code ? <span className="font-mono text-white/40">[{art.reviewer_2_code}]</span> : ''} : <span className={art.reviewer_2_status === 'included' ? 'text-brand-300' : 'text-rose-300'}>{art.reviewer_2_status}</span></span>
                 </div>
+                {/* ARBITRAGE, pas un vote : ces boutons appelaient l'endpoint de
+                    décision, qui réécrivait le vote d'un relecteur. r1 == r2 devenait
+                    alors vrai et le kappa comptait une concordance que personne
+                    n'avait exprimée. */}
                 <div className="flex gap-2">
-                  <button onClick={() => decide(art.id, 'included')} disabled={submitting === art.id}
+                  <button onClick={() => arbitrate(art.id, 'included')} disabled={submitting === art.id}
                     className="flex-1 rounded-lg bg-brand-500/20 border border-brand-500/30 text-brand-300 text-[10px] py-1.5 hover:bg-brand-500/30 transition disabled:opacity-50"
                   >{t("scenarioDetail.doubleBlind.includeArbitration")}</button>
-                  <button onClick={() => decide(art.id, 'excluded')} disabled={submitting === art.id}
+                  <button onClick={() => arbitrate(art.id, 'excluded')} disabled={submitting === art.id}
                     className="flex-1 rounded-lg bg-rose-500/10 border border-rose-500/20 text-rose-300 text-[10px] py-1.5 hover:bg-rose-500/20 transition disabled:opacity-50"
                   >{t("scenarioDetail.doubleBlind.excludeArbitration")}</button>
                 </div>
@@ -5649,14 +5883,16 @@ function AlertsSection({ scenarioId }: { scenarioId: string }) {
           {t("scenarioDetail.alerts.livingReviewDesc")}
         </p>
         <div className="rounded-xl border border-white/5 bg-white/2 p-3 space-y-1.5 text-[10px] text-white/40">
+          {/* Les étapes que la veille FAIT. Le panneau en annonçait sept, dont les
+              embeddings, le PICO, les textes intégraux, le clustering et le rerank : le
+              planificateur en fait deux (interroger PubMed, insérer), plus
+              l'invalidation des vues. Les cinq autres sont faites ailleurs, et la
+              dernière ligne le dit au lieu de les promettre ici. */}
           {[
             t("scenarioDetail.alerts.stepMultiSource"),
             t("scenarioDetail.alerts.stepInsert"),
-            t("scenarioDetail.alerts.stepEmbeddings"),
-            t("scenarioDetail.alerts.stepPico"),
-            t("scenarioDetail.alerts.stepFulltext"),
-            t("scenarioDetail.alerts.stepClustering"),
-            t("scenarioDetail.alerts.stepRerank"),
+            t("scenarioDetail.alerts.stepInvalidate"),
+            t("scenarioDetail.alerts.stepAfterwards"),
           ].map((step, i) => (
             <div key={i} className="flex items-center gap-2">
               <span className="h-1 w-1 rounded-full bg-brand-400"/>
@@ -5947,6 +6183,7 @@ function SeuilSection({ scenarioId, onSaved, onThresholdChange, incoming }: {
   const [saving, setSaving] = React.useState(false);
   const [saved, setSaved] = React.useState(false);
   const [rerankStatus, setRerankStatus] = React.useState<string | null>(null);
+  const [saveError, setSaveError] = React.useState<string | null>(null);
   // Ce que le bouton va VRAIMENT faire : combien d'articles n'ont pas de score, et
   // combien n'en auront jamais faute de résumé exploitable.
   const [coverage, setCoverage] = React.useState<{ scorable: number; missing: number; unscorable: number } | null>(null);
@@ -5989,8 +6226,15 @@ function SeuilSection({ scenarioId, onSaved, onThresholdChange, incoming }: {
       setSaved(true);
       setTimeout(() => setSaved(false), 2000);
       setCurveKey(k => k + 1);          // sinon la courbe garde l'ancien « seuil actuel »
+      setSaveError(null);
       onSaved?.();
-    } catch {}
+    } catch (e: any) {
+      // L'erreur était AVALÉE : un 401 sans clé, un 422 sur une valeur hors de [0, 1]
+      // ou une coupure réseau laissaient l'interface sur un seuil que le serveur n'a
+      // jamais enregistré, et le prochain rechargement le faisait reculer sans
+      // explication. L'échec s'affiche à côté du bouton.
+      setSaveError(e?.message || t("scenarioDetail.seuil.saveFailed"));
+    }
     setSaving(false);
   };
 
@@ -6108,6 +6352,11 @@ function SeuilSection({ scenarioId, onSaved, onThresholdChange, incoming }: {
         {rerankStatus && (
           <span className="text-[10px] text-gold-400">{rerankStatus}</span>
         )}
+        {/* L'échec d'enregistrement, dit. Il était avalé, et l'interface restait sur un
+            seuil que le serveur n'a jamais reçu. */}
+        {saveError && (
+          <span className="text-[10px] text-rose-400">{saveError}</span>
+        )}
       </div>
       <p className="text-[10px] text-white/30 w-full">
         {t("scenarioDetail.seuil.footerMain")}
@@ -6188,7 +6437,7 @@ function StudyDesignLegend() {
       {open && (
         <div className="space-y-2 px-3 pb-3">
           {!data ? (
-            <p className="text-[10px] text-white/35">{t("common.loading")}</p>
+            <p className="text-[10px] text-white/35">{t("common.loadingEllipsis")}</p>
           ) : (
             <>
               {/* Groupé par NIVEAU : la règle une fois, puis les devis qu'elle
@@ -6253,7 +6502,7 @@ function EvidenceGapsPanel({ scenarioId }: { scenarioId: string }) {
     return m;
   }, [data]);
 
-  if (loading && !data) return <p className="text-[11px] text-white/40">{t("common.loading")}</p>;
+  if (loading && !data) return <p className="text-[11px] text-white/40">{t("common.loadingEllipsis")}</p>;
   if (error) return <p className="text-[11px] text-rose-300/70">{error}</p>;
   if (!data) return null;
 
@@ -6584,6 +6833,7 @@ function EvidencesSection({ scenarioId, detail }: { scenarioId: string; detail: 
 
   // ── PDF export ───────────────────────────────────────────────────────────────
   const [exporting, setExporting] = React.useState(false);
+  const [reportError, setReportError] = React.useState<string | null>(null);
 
   // ── Load both ────────────────────────────────────────────────────────────────
   // Extrait en callback parce que restreindre le corpus par devis ou par niveau change
@@ -6770,7 +7020,7 @@ function EvidencesSection({ scenarioId, detail }: { scenarioId: string; detail: 
   <div class="stat"><div class="stat-val" style="color:#3b82f6">${ftRel_pdf}</div><div class="stat-sub">${Math.round(ftRel_pdf/rTotal_pdf*100)}% ${t("scenarioDetail.evidences.pdf.ofRelevant")}</div><div class="stat-label">${t("scenarioDetail.evidences.pdf.fulltext")}</div></div>
 </div>
 ${(b.corpus_stats.included||b.corpus_stats.excluded||(b.corpus_stats.pending??0)) ? `<p class="meta">${t("scenarioDetail.evidences.pdf.screeningPrefix")} <strong>${b.corpus_stats.included}</strong> ${t("scenarioDetail.evidences.pdf.screeningIncluded")} · <strong>${b.corpus_stats.excluded}</strong> ${t("scenarioDetail.evidences.pdf.screeningExcluded")} · <strong>${b.corpus_stats.pending ?? Math.max(0, uniqueTotal_pdf - b.corpus_stats.included - b.corpus_stats.excluded)}</strong> ${t("scenarioDetail.evidences.pdf.screeningPending")}</p>` : ''}
-${b.corpus_stats.year_min && b.corpus_stats.year_max ? `<p class="meta">${t("scenarioDetail.evidences.pdf.coveragePrefix")} <strong>${b.corpus_stats.year_min} – ${b.corpus_stats.year_max}</strong>${b.corpus_stats.avg_citations != null ? ` · ${t("scenarioDetail.evidences.pdf.avgCitations")} <strong>${b.corpus_stats.avg_citations.toFixed(1)}</strong>` : ''}</p>` : ''}
+${b.corpus_stats.year_min && b.corpus_stats.year_max ? `<p class="meta">${t("scenarioDetail.evidences.pdf.coveragePrefix")} <strong>${b.corpus_stats.year_min} – ${b.corpus_stats.year_max}</strong>${b.corpus_stats.avg_citations != null ? ` · ${t("scenarioDetail.evidences.pdf.avgCitations")} <strong>${b.corpus_stats.avg_citations.toFixed(1)}</strong>${b.corpus_stats.citations_known != null ? ` ${t("scenarioDetail.evidences.citationsOver").replace("{n}", String(b.corpus_stats.citations_known))}` : ''}` : ''}</p>` : ''}
 
 <div class="dist-grid">
   <div class="dist-box">
@@ -6870,18 +7120,31 @@ ${llm.future_research ? `<h3>${t("scenarioDetail.evidences.pdf.futureResearch")}
           {briefData && (
             /* Le rapport citable : markdown assemblé côté serveur (api/report.py), avec
                citations renumérotées, tableau des affirmations, matrice de lacunes et
-               bibliographie construite depuis la base. Un lien plutôt qu'un fetch : le
-               endpoint renvoie déjà une pièce jointe, et le navigateur sait faire. */
-            <a href={evidenceReportUrl(scenarioId)}
-              download
+               bibliographie construite depuis la base.
+               Un BOUTON et non un lien : un `<a download>` enregistre ce qu'on lui
+               donne, et quand aucun brief n'était généré le endpoint répondait 200 avec
+               un corps JSON d'erreur. Le navigateur sauvegardait donc 166 octets
+               d'erreur sous le nom du rapport. On lit la réponse, puis on enregistre. */
+            <button type="button"
+              onClick={async () => {
+                setReportError(null);
+                try { await downloadEvidenceReport(scenarioId); }
+                catch (e: any) { setReportError(e?.message || t("common.unknownError")); }
+              }}
               className="flex items-center gap-2 rounded-2xl border border-brand-500/30 bg-brand-500/10 hover:bg-brand-500/20 text-brand-300 font-semibold px-4 py-2 text-xs transition"
               title={t("scenarioDetail.evidences.exportReportHint")}>
               <FileText size={12}/>
               {t("scenarioDetail.evidences.exportReport")}
-            </a>
+            </button>
           )}
         </div>
       </div>
+
+      {/* Pourquoi le rapport n'est pas sorti. Le navigateur enregistrait l'erreur
+          elle-même, sous le nom du rapport. */}
+      {reportError && (
+        <p className="text-[10px] text-rose-400">{reportError}</p>
+      )}
 
       {/* ─── BANNIÈRE AVERTISSEMENT ──────────────────────────────────────────── */}
       {briefData && briefData.corpus_stats.included === 0 && (
@@ -7026,7 +7289,13 @@ ${llm.future_research ? `<h3>${t("scenarioDetail.evidences.pdf.futureResearch")}
               combine: "all",
             }}
             enabled={keptDesigns.size > 0 || keptLevels.size > 0}
-            onApplied={() => { setKeptDesigns(new Set()); setKeptLevels(new Set()); loadBrief(); }}
+            // `loadLlm()` aussi : restreindre le corpus rechargeait les CHIFFRES et
+            // laissait le récit, qui porte l'ancien nombre d'articles dans son propre
+            // bandeau et dans le PDF qu'on exporte juste à côté.
+            onApplied={() => {
+              setKeptDesigns(new Set()); setKeptLevels(new Set());
+              loadBrief(); loadLlm();
+            }}
           />
         </>
       )}
@@ -7058,6 +7327,19 @@ ${llm.future_research ? `<h3>${t("scenarioDetail.evidences.pdf.futureResearch")}
           <Loader2 size={14} className="text-gold-400 animate-spin shrink-0 mt-0.5" />
           <div className="text-xs text-gold-200/80">
             <strong className="text-gold-300">{t("scenarioDetail.evidences.briefGeneratingTitle")}</strong> : {llmData.message ?? t("scenarioDetail.evidences.briefGeneratingDefault")}
+          </div>
+        </div>
+      )}
+      {/* Un GET ne dépense plus : il répond « pas encore généré » au lieu de lancer une
+          génération LLM complète, non authentifiée, qui écrasait le brief en cache. Le
+          bouton « régénérer » juste au-dessus est la voie, et il porte la clé. */}
+      {llmData && llmData.status === 'not_generated' && (
+        <div className="rounded-2xl border border-brand-500/20 bg-brand-500/5 px-5 py-4 flex items-start gap-3">
+          <Sparkles size={14} className="text-brand-300 shrink-0 mt-0.5" />
+          <div className="text-xs text-brand-100/80">
+            <strong className="text-brand-300">{t("scenarioDetail.evidences.briefNotGeneratedTitle")}</strong>
+            {" : "}
+            {llmData.message ?? t("scenarioDetail.evidences.briefNotGeneratedDefault")}
           </div>
         </div>
       )}
@@ -7375,7 +7657,7 @@ function EpidemicParametersPanel({ scenarioId }: { scenarioId: string }) {
             disabled={running}
             className="shrink-0 rounded-xl border border-brand-500/25 bg-brand-500/10 px-3 py-1.5 text-xs text-brand-300 hover:bg-brand-500/20 transition disabled:opacity-50"
           >
-            {running ? t("common.loading") : t("scenarioDetail.epiParams.recompute")}
+            {running ? t("common.loadingEllipsis") : t("scenarioDetail.epiParams.recompute")}
           </button>
         ) : (
           <span className="shrink-0 max-w-[220px] text-right text-[10px] leading-4 text-white/35">

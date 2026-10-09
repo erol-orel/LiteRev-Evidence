@@ -34,13 +34,16 @@ from .search import (
     _facets_intersect,
     _generate_search_strategy,
     _looks_boolean,
+    _coverage_caveat,
     _multi_query_corpus_ids,
     _normalize_sub_queries,
+    _outcome_summary,
     _parse_boolean_ast,
     _plain_keywords,
     _prisma_identification_figures,
     _search_local_doc_ids,
     _set_scenario_corpus,
+    _source_label,
     _store_prisma_identification,
     _strip_field_tags,
     _tokenize_boolean,
@@ -274,6 +277,11 @@ def _run_user_scenario_populate(
     _tls = threading.local()
     _run_links: dict[str, list] = {}
     _fetcher_errors: set[str] = set()
+    # Sources écartées SANS appel réseau, et pourquoi. Une source sans clé d'API n'a pas
+    # répondu « rien » : elle n'a pas été interrogée. Les deux se lisaient pareil dans la
+    # ligne de couverture, et le cache des sources mémorisait même la non-interrogation
+    # comme une réponse vide valable douze heures.
+    _fetcher_skipped: dict[str, str] = {}
 
     def _mark_source_error():
         _source_errors[0] += 1
@@ -281,6 +289,13 @@ def _run_user_scenario_populate(
         if _f:
             with _counter_lock:
                 _fetcher_errors.add(_f)
+
+    def _mark_source_skipped(reason: str):
+        """Cette source n'a pas été interrogée. À dire, pas à compter comme vide."""
+        _f = getattr(_tls, "fetcher", None)
+        if _f:
+            with _counter_lock:
+                _fetcher_skipped[_f] = reason
 
     def _run_fetcher(fn):
         _tls.fetcher = fn.__name__
@@ -434,9 +449,14 @@ def _run_user_scenario_populate(
                 and _portable_bool not in _pubmed_q
                 and len(_pubmed_q) + len(_portable_bool) <= 1900):
             _pubmed_q = f"({_pubmed_q}) OR ({_portable_bool})"
+        # Le MÊME helper que l'assemblage final (ligne ~1290) et que la recherche :
+        # ce bloc appelait `_search_local_doc_ids(..., limit=100_000)` là où
+        # `_boolean_corpus_ids` coupe à 500 000. Deux plafonds pour une seule question
+        # (« quels documents locaux correspondent ») donnaient deux corpus différents
+        # au même scénario selon l'étape, et le plus bas des deux était sous la taille
+        # de la table.
         _local_ids = (_multi_query_corpus_ids(_sub_queries, _combinator, filters)
-                      if _sub_queries
-                      else _search_local_doc_ids(_boolean, "boolean", filters, limit=100_000))
+                      if _sub_queries else _boolean_corpus_ids(_boolean, filters))
 
         if _local_ids:
             with engine.begin() as _lc2:
@@ -446,12 +466,13 @@ def _run_user_scenario_populate(
                 # qui avait gonflé le corpus à des dizaines de milliers d'articles).
                 # Le corpus = EXACTEMENT le résultat de la requête booléenne (base
                 # locale) ∪ les nouvelles références live ajoutées plus bas.
-                _lc2.execute(
-                    text("DELETE FROM article_scenarios WHERE scenario_id = :sid "
-                         "AND document_id NOT IN :ids").bindparams(
-                             bindparam("ids", expanding=True)),
-                    {"sid": scenario_id, "ids": list(_local_ids)},
-                )
+                # Tableau côté serveur : un paramètre, pas un par identifiant. La forme
+                # expansée refusait au-delà de 65 535 liens (limite du protocole), et
+                # l'échec remontait dans un `except` qui journalise, puis la recherche
+                # se déclarait terminée avec ses liens obsolètes intacts.
+                _lc2.execute(text("DELETE FROM article_scenarios WHERE scenario_id = :sid "
+                                  "AND NOT (document_id = ANY(CAST(:ids AS bigint[])))"),
+                             {"sid": scenario_id, "ids": list(_local_ids)})
                 # Insertion en masse (un seul aller-retour) : le corpus local doit
                 # être lié quasi instantanément, sans une requête par document.
                 _lc2.execute(text("""
@@ -510,10 +531,21 @@ def _run_user_scenario_populate(
                 _chunk = _pmids[_ki:_ki + 1000]
                 try:
                     with engine.connect() as _kc:
-                        _krows = _kc.execute(text(
-                            "SELECT id, pmid::text AS pmid, external_id FROM literature_document "
-                            "WHERE pmid::text = ANY(:p) OR external_id = ANY(:e)"
-                        ), {"p": _chunk, "e": [f"pmid:{p}" for p in _chunk]}).mappings().all()
+                        # Deux recherches indexées réunies par UNION, et non un OR sur
+                        # deux colonnes : Postgres ne peut pas combiner deux index pour
+                        # un OR portant sur des colonnes différentes, il balayait donc
+                        # toute la table literature_document (des centaines de milliers
+                        # de lignes) une fois par lot de 1 000 PMID, par recherche.
+                        # `pmid::text` écartait de surcroît l'index : on compare la
+                        # colonne telle quelle à un tableau de texte.
+                        _krows = _kc.execute(text("""
+                            SELECT id, pmid::text AS pmid, external_id
+                            FROM literature_document WHERE pmid = ANY(:p)
+                            UNION
+                            SELECT id, pmid::text AS pmid, external_id
+                            FROM literature_document WHERE external_id = ANY(:e)
+                        """), {"p": _chunk,
+                               "e": [f"pmid:{p}" for p in _chunk]}).mappings().all()
                 except Exception:                            # base sans colonne external_id
                     with engine.connect() as _kc:
                         _krows = _kc.execute(text(
@@ -1047,6 +1079,7 @@ def _run_user_scenario_populate(
         _core_key = os.getenv("CORE_API_KEY")
         if not _core_key:
             logger.info(f"CORE populate {scenario_id}: CORE_API_KEY absent - source ignorée.")
+            _mark_source_skipped("no_api_key")
             return ("core", 0)
         count = 0
         try:
@@ -1194,6 +1227,12 @@ def _run_user_scenario_populate(
     # annoncée à l'utilisateur en fin de recherche doit être celle-là, pas un « 13 »
     # constant. Une source coupée par le budget n'y figure pas.
     _queried: set[str] = set()
+    # Ce que chaque fetcher a RENVOYÉ (nombre d'articles ingérés), et l'issue nommée
+    # qu'on en tire : ok, empty, cached, skipped, error, cut_by_budget. Le PRISMA et la
+    # ligne de couverture lisent celle-ci, plus un compte de sources « interrogées » qui
+    # incluait les échecs.
+    _returned: dict[str, int] = {}
+    _fetcher_outcome: dict[str, str] = {}
     _qhash = _source_query_hash(query, filters, max_results)
     if include_live:
         _set_phase("federation")
@@ -1229,14 +1268,20 @@ def _run_user_scenario_populate(
                     _fname = futures[future]
                     try:
                         src_name, src_count = future.result()
-                        _queried.add(_fname)          # a réellement répondu dans le budget
+                        _returned[_fname] = int(src_count or 0)
                         logger.info(f"Populate {scenario_id} [{src_name}]: {src_count} articles ingérés")
-                        # Pagination allée au bout AVANT le budget et sans erreur : la
-                        # réponse de ce fetcher peut être rejouée à la prochaine relance.
-                        if _time.time() < _fed_deadline[0] and _fname not in _fetcher_errors:
+                        # Pagination allée au bout AVANT le budget, sans erreur et sans
+                        # avoir été écartée faute de clé : la réponse de ce fetcher peut
+                        # être rejouée à la prochaine relance. Mémoriser une source NON
+                        # INTERROGÉE revenait à cacher douze heures une réponse vide
+                        # qu'aucune source n'avait donnée.
+                        if (_time.time() < _fed_deadline[0] and _fname not in _fetcher_errors
+                                and _fname not in _fetcher_skipped):
                             _completed_ok.add(_fname)
                     except Exception as _fe:
                         logger.warning(f"Populate {scenario_id} source future error: {_fe}")
+                        with _counter_lock:
+                            _fetcher_errors.add(_fname)
             # CRITIQUE - sur Python <3.11, as_completed lève
             # concurrent.futures.TimeoutError (≠ TimeoutError natif). Sans
             # _FuturesTimeout dans le except, l'exception remontait, le bloc
@@ -1260,9 +1305,31 @@ def _run_user_scenario_populate(
             with _counter_lock:
                 _links_now = list(_run_links.get(_fname, []))
             _save_source_cache(_fname, _qhash, query, _links_now)
+        # ── L'issue de CHAQUE source, nommée ─────────────────────────────────
+        # `_queried` ne distinguait pas « a répondu » de « a échoué » : un fetcher qui
+        # lève est tout de même passé par la boucle, donc la ligne de couverture
+        # annonçait « 12/12 sources interrogées » pour une recherche où la moitié
+        # avaient échoué, et le PRISMA ne nommait que celles qui avaient rapporté
+        # quelque chose. Cinq issues, exclusives, et aucune muette.
+        for _fn in source_funcs:
+            _n = _fn.__name__
+            if _n in _cached:
+                _outcome = "cached"
+            elif _n in _fetcher_skipped:
+                _outcome = "skipped"
+            elif _n in _fetcher_errors:
+                _outcome = "error"
+            elif _n not in _returned:
+                _outcome = "cut_by_budget"      # pas revenue dans le budget
+            else:
+                _outcome = "ok" if _returned[_n] > 0 else "empty"
+            _fetcher_outcome[_n] = _outcome
+            if _outcome in ("ok", "empty", "cached"):
+                _queried.add(_n)
         t_elapsed = _time.time() - t_start
         logger.info(f"Populate {scenario_id}: fédération terminée en {t_elapsed:.1f}s "
-                    f"({len(_cached)} fetcher(s) depuis le cache, {len(_completed_ok)} mémorisé(s))")
+                    f"({len(_cached)} fetcher(s) depuis le cache, {len(_completed_ok)} mémorisé(s)) ; "
+                    f"issues = {_outcome_summary(_fetcher_outcome)}")
     else:
         logger.info(f"Populate {scenario_id}: include_live=False - base locale uniquement")
 
@@ -1395,7 +1462,12 @@ def _run_user_scenario_populate(
                 _recs_snapshot, len(_ids_snapshot), _n_dup_rows or 0, int(_corpus_now),
                 method="populate", federation_incomplete=bool(_fed_incomplete[0]),
                 removed_no_abstract=_no_abs,
-                removed_not_matching=max(0, _not_linked - int(_n_dup_rows or 0)))
+                removed_not_matching=max(0, _not_linked - int(_n_dup_rows or 0)),
+                # L'issue de chaque source lancée, et le plafond qui a servi : sans eux,
+                # le tableau d'identification taisait les sources en échec ou coupées et
+                # annonçait quand même un nombre de sources interrogées.
+                source_outcomes=(dict(_fetcher_outcome) if include_live else {}),
+                per_source_cap=int(max_results))
             _store_prisma_identification(scenario_id, _figures)
             # Le même total pour tout le monde : le statut du job expose le corpus
             # RETENU (= article_count = « passés au screening » du PRISMA), et non le
@@ -1519,9 +1591,13 @@ def _run_user_scenario_populate(
                        if not include_live else
                        f"Sources interrogées : {len(_queried)}/{len(source_funcs)} "
                        f"({_src_summary})"
+                       + _coverage_caveat(_fetcher_outcome)
                        + (f" ; {len(_cached)} rejouée(s) depuis le cache de la recherche identique."
                           if _cached else "."))
                 ),
+                # L'issue de chaque source, servie telle quelle : la ligne de couverture
+                # résume, le panneau peut nommer.
+                "source_outcomes": {_source_label(k): v for k, v in _fetcher_outcome.items()},
             }
 
         # Arrière-plan : cross-encoder (réordonne le sous-ensemble pertinent) puis
@@ -1608,8 +1684,13 @@ def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict
     from .variables import _generate_variables_from_pico  # lazy: variables is loaded after this module
     import time as _time
 
-    STEP_ORDER = ["ingest", "fulltext", "embed", "rerank", "pico", "metadata",
-                  "clustering", "knowledge_graph", "evidence", "variables", "actions"]
+    # L'étape 4 s'appelait « rerank » et n'était qu'un cosinus sur les embeddings
+    # stockés : elle n'écrivait JAMAIS rerank_score. L'utilisateur voyait donc une étape
+    # de rerank réussir sans qu'un seul score de rerank existe, et le cross-encoder, lui,
+    # ne tournait que sur le chemin /populate. Deux étapes, nommées pour ce qu'elles font.
+    STEP_ORDER = ["ingest", "fulltext", "embed", "semantic_scoring", "cross_encoder",
+                  "pico", "metadata", "clustering", "knowledge_graph", "evidence",
+                  "variables", "actions"]
 
     def update_step(step: str, status: str, **kwargs):
         job = _user_scenario_pipeline_jobs.get(scenario_id, {})
@@ -2189,8 +2270,10 @@ def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict
         except Exception as _emb_ex:
             update_step("embed", "error", error=str(_emb_ex))
 
-        # ── Étape 4 : Rerank via pgvector (cosinus sur embeddings stockés) ──────────────
-        update_step("rerank", "running")
+        # ── Étape 4 : Score SÉMANTIQUE via pgvector (cosinus sur embeddings stockés) ───
+        # Ce qui est écrit ici est `similarity_score`, et rien d'autre. Le cross-encoder
+        # est l'étape 5, séparée, parce que c'est elle qui écrit `rerank_score`.
+        update_step("semantic_scoring", "running")
         try:
             openai_key = os.getenv("OPENAI_API_KEY")
             if openai_key:
@@ -2217,7 +2300,7 @@ def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict
                           AND ars.document_id = sub.document_id
                     """), {"q_vec": _q_vec, "sid": scenario_id})
                 n_reranked = _rr_result.rowcount
-                update_step("rerank", "done", updated=n_reranked)
+                update_step("semantic_scoring", "done", updated=n_reranked)
 
                 # Seuil SÉMANTIQUE = SOFT : on ne supprime JAMAIS d'article du
                 # corpus. Le corpus = résultat INTÉGRAL de la requête booléenne
@@ -2242,11 +2325,31 @@ def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict
                 except Exception as _ce:
                     logger.warning(f"Post-rerank article_count update {scenario_id}: {_ce}")
             else:
-                update_step("rerank", "skipped", reason="Clé OpenAI non configurée")
+                update_step("semantic_scoring", "skipped", reason="Clé OpenAI non configurée")
         except Exception as e:
-            update_step("rerank", "error", error=str(e))
+            update_step("semantic_scoring", "error", error=str(e))
 
-        # ── Étape 5 : Extraction PICO ─────────────────────────────────────────────────────
+        # ── Étape 5 : Cross-encoder (c'est CELLE-CI qui écrit rerank_score) ────────────
+        # Elle manquait au pipeline complet, c'est-à-dire au chemin normal : huit
+        # scénarios de production n'avaient aucun score de rerank pour cette seule
+        # raison, et le second seuil ne pouvait donc rien filtrer chez eux.
+        update_step("cross_encoder", "running")
+        try:
+            if os.getenv("COHERE_API_KEY"):
+                _ce_res = _run_cross_encoder_rerank(scenario_id, query)
+                if _ce_res.get("skipped_no_key"):
+                    update_step("cross_encoder", "skipped", reason="Clé Cohere non configurée")
+                else:
+                    update_step("cross_encoder", "done",
+                                scored=_ce_res.get("scored", 0),
+                                candidates=_ce_res.get("candidates", 0),
+                                batches_failed=_ce_res.get("batches_failed", 0))
+            else:
+                update_step("cross_encoder", "skipped", reason="Clé Cohere non configurée")
+        except Exception as _ce_ex:
+            update_step("cross_encoder", "error", error=str(_ce_ex))
+
+        # ── Étape 6 : Extraction PICO ─────────────────────────────────────────────────────
         update_step("pico", "running")
         try:
             openai_key = os.getenv("OPENAI_API_KEY")
@@ -2366,7 +2469,7 @@ def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict
         except Exception as e:
             update_step("pico", "error", error=str(e))
 
-        # ── Étape 6 : Extraction métadonnées ─────────────────────────────────
+        # ── Étape 7 : Extraction métadonnées ─────────────────────────────────
         update_step("metadata", "running")
         try:
             openai_key = os.getenv("OPENAI_API_KEY")
@@ -2474,7 +2577,7 @@ def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict
         except Exception as e:
             update_step("metadata", "error", error=str(e))
 
-        # ── Étape 7 : Clustering (UMAP+HDBSCAN avec fallback KMeans) ────────────
+        # ── Étape 8 : Clustering (UMAP+HDBSCAN avec fallback KMeans) ────────────
         update_step("clustering", "running")
         try:
             # Clustering du pipeline sur le SOUS-ENSEMBLE PERTINENT (≥ seuil sémantique

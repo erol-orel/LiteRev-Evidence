@@ -13,7 +13,7 @@ from pydantic import BaseModel
 from sqlalchemy import text
 
 from .core import app, engine, logger, require_api_key
-from .scenario_store import _get_scenario_threshold
+from .scenario_store import _get_scenario_threshold, relevant_gate_tail_sql
 from .model_data import _get_model_spec
 
 def _scenario_seed(scenario_id: str) -> tuple[float, float, str | None]:
@@ -49,14 +49,14 @@ def _scenario_seed(scenario_id: str) -> tuple[float, float, str | None]:
         try:
             threshold = _get_scenario_threshold(scenario_id)
             with engine.connect() as conn:
-                rows = conn.execute(text("""
+                rows = conn.execute(text(f"""
                     SELECT ld.geographic_scope AS geo, COUNT(*) AS n
                     FROM literature_document ld
                     JOIN article_scenarios asn ON asn.document_id = ld.id AND asn.scenario_id = :sid
                     WHERE ld.project_context = 'literev'
                       AND ld.is_duplicate IS NOT TRUE
                       AND ld.geographic_scope IS NOT NULL
-                      AND COALESCE(asn.screening_status, ld.screening_status) IS DISTINCT FROM 'excluded' AND (COALESCE(asn.screening_status, ld.screening_status) = 'included' OR (COALESCE(asn.similarity_score, 0) >= :threshold AND (asn.rerank_score IS NULL OR asn.rerank_score >= COALESCE((SELECT ss.rerank_threshold FROM scenario_settings ss WHERE ss.scenario_id = asn.scenario_id), 0.0))))
+                      AND {relevant_gate_tail_sql('ld', 'asn', ':threshold')}
                     GROUP BY ld.geographic_scope
                     ORDER BY n DESC, ld.geographic_scope ASC
                 """), {"sid": scenario_id, "threshold": threshold}).mappings().all()
@@ -156,20 +156,42 @@ def _seir_projection_payload(
 
     dists = seir_model.params_to_distributions(eff_params)
 
-    def _scan_counts() -> dict[str, int]:
-        """Ce que la recherche de paramètres a trouvé dans le corpus (stocké par la
-        génération). « Aucun paramètre extrait » laissait croire à une panne ; dire
-        « 0 valeur sur 37 articles qui en parlent » est une information."""
+    def _scan_counts() -> dict[str, Any]:
+        """Ce que le corpus contient, compté MAINTENANT.
+
+        Ces deux nombres étaient lus dans `variables_json._meta`, écrit par la seule
+        génération et seulement quand elle ne réutilisait pas un spec existant. Un spec
+        antérieur à ces compteurs, ou réutilisé sur des preuves inchangées, les laissait
+        absents, et `int(... or 0)` transformait « absent » en 0. L'onglet SEIR affirmait
+        alors que 0 article du corpus mentionne un paramètre, sur des corpus où 55 à 73
+        articles pertinents rapportent un R0, suivi d'un bloc de zéros.
+
+        Le nombre d'articles qui MENTIONNENT un paramètre est une question sur le corpus,
+        sans LLM : on la pose directement, comme le fait déjà
+        /epidemic-parameters/candidates. Le nombre qui en DONNENT une valeur demande une
+        extraction : s'il n'a jamais été mesuré, on le dit au lieu d'écrire 0."""
+        out: dict[str, Any] = {"articles_reporting_parameters": 0,
+                               "articles_with_values": None,
+                               "values_never_extracted": True}
+        try:
+            from .variables import _parameter_candidate_articles
+            out["articles_reporting_parameters"] = len(
+                _parameter_candidate_articles(scenario_id, None, 0))
+        except Exception as _e:                              # noqa: BLE001 - jamais bloquant
+            logger.warning(f"seir scan counts {scenario_id}: {_e}")
         try:
             with engine.connect() as _c:
                 _r = _c.execute(text(
                     "SELECT variables_json FROM scenario_settings WHERE scenario_id = :sid"
                 ), {"sid": scenario_id}).mappings().first()
             _m = (dict(_r["variables_json"]).get("_meta") or {}) if _r and _r["variables_json"] else {}
-            return {"articles_reporting_parameters": int(_m.get("epidemic_parameter_candidates") or 0),
-                    "articles_with_values": int(_m.get("epidemic_parameter_articles_with_values") or 0)}
+            _wv = _m.get("epidemic_parameter_articles_with_values")
+            if _wv is not None:
+                out["articles_with_values"] = int(_wv)
+                out["values_never_extracted"] = False
         except Exception:                                    # noqa: BLE001 - jamais bloquant
-            return {"articles_reporting_parameters": 0, "articles_with_values": 0}
+            pass
+        return out
     # ── Trois portes AVANT de simuler ────────────────────────────────────────────
     # Un override explicite de l'utilisateur vaut décision consciente : il ouvre les
     # portes 1 et 2 (exploration « et si ? »), et la réponse est marquée `forced`.
@@ -185,7 +207,11 @@ def _seir_projection_payload(
             "reason": ("Aucun paramètre épidémiologique extrait de la littérature "
                        "(scénario non transmissible, ou paramètres non rapportés). "
                        f"{_sc['articles_reporting_parameters']} article(s) du corpus mentionnent "
-                       f"un paramètre, {_sc['articles_with_values']} en donnent une valeur."),
+                       f"un paramètre, "
+                       + ("et l'extraction de leurs valeurs n'a jamais été lancée sur ce "
+                          "scénario : relancez-la avant de conclure."
+                          if _sc.get("values_never_extracted")
+                          else f"{_sc['articles_with_values']} en donnent une valeur.")),
             **_sc,
         }
     # Porte 1 - le LLM a EXPLICITEMENT jugé le scénario non transmissible. Sans ce
@@ -257,6 +283,27 @@ def _seir_projection_payload(
         # Un R0 tapé à la main ne doit pas être annoncé comme sourcé.
         "r0_source": ("user" if ({"r0", "beta"} & set(applied))
                       else ens["summary"].get("r0_source", "literature")),
+        # ── La provenance de CHAQUE paramètre qui pilote la trajectoire ──────
+        # Seul le R0 portait la sienne. La période infectieuse fixe gamma, donc le jour
+        # du pic, sa hauteur, le taux de croissance et la durée de l'épidémie : elle
+        # était posée à 7 jours en silence sur tout corpus qui n'en donne pas, et la
+        # courbe qui en découlait s'affichait « issue de la littérature ».
+        "infectious_period_days": ens["summary"].get("infectious_period_days"),
+        "infectious_period_source": (
+            "user" if "infectious_period_days" in applied
+            else ens["summary"].get("infectious_period_source", "literature")),
+        "parameter_sources": {
+            name: ("user" if name in applied
+                   else "literature" if isinstance(src_params.get(name), dict)
+                   else "assumed")
+            for name in ("r0", "beta", "infectious_period_days", "incubation_period_days",
+                         "cfr", "immunity_duration_days")
+        },
+        # Les paramètres qu'AUCUN article n'a fournis et que le moteur a supposés : la
+        # ligne qu'un relecteur doit lire avant de citer un pic.
+        "assumed_parameters": sorted(
+            name for name in ("infectious_period_days",)
+            if name not in applied and not isinstance(src_params.get(name), dict)),
         "n_samples": ens["n_samples"],
         "n_dropped": ens.get("n_dropped", 0),
         "population": dists["population"],

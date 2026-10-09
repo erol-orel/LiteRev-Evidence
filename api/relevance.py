@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import math
 import os
+import threading
 from typing import Any
 
 from fastapi import Depends, HTTPException
@@ -30,16 +31,23 @@ from .scenario_store import (
     _get_scenario_rerank_threshold,
     _get_scenario_threshold,
     _get_user_scenario_or_404,
+    relevance_order_sql,
+    relevant_gate_sql,
+    scenario_rerank_threshold_sql,
+    scenario_threshold_sql,
+    screening_status_sql,
 )
 from .search import (
     _boolean_corpus_ids,
     _dedup_scenario_links,
     _generate_search_strategy,
+    _load_prisma_identification,
     _prisma_identification_figures,
     _set_scenario_corpus,
     _store_prisma_identification,
 )
 from .gesica import _gesica_title, _get_db_gesica_scenario_or_404
+from .study_design import raw_design_sql as _raw_design
 from llm_usage import model_for as _model
 
 def _run_semantic_rerank_inline(scenario_id: str, query: str) -> int:
@@ -289,6 +297,22 @@ def _run_cross_encoder_rerank(scenario_id: str, query: str, top_k: int | None = 
 # ─── SCORING SÉMANTIQUE POST-INGESTION ───────────────────────────────────────
 
 _RERANK_JOBS: dict[str, dict] = {}
+#: Le verrou qui rend « lire puis écrire » indivisible. Deux appels simultanés
+#: pouvaient tous deux voir « pas de job » et démarrer leur fil.
+_rerank_jobs_lock = threading.Lock()
+
+
+def _mark_rerank_running(scenario_id: str) -> None:
+    """Pose l'entrée « en cours » SOUS UNE SEULE forme, horodatée.
+
+    Les entrées étaient écrites de deux façons : avec `started_at` à un endroit, sans à
+    trois autres. `_job_is_active` lit cet horodatage, donc une entrée qui n'en portait
+    pas était jugée vieille de 1970, c'est-à-dire morte : la garde laissait démarrer un
+    SECOND scoring du même scénario pendant que le premier tournait."""
+    import time as _t
+    with _rerank_jobs_lock:
+        _RERANK_JOBS[scenario_id] = {"status": "running", "updated": 0,
+                                     "started_at": _t.time()}
 
 
 def _ensure_scenario_settings_table():
@@ -432,26 +456,32 @@ def _get_above_threshold_articles(scenario_id: str, threshold: float | None = No
                    CASE WHEN :fr < 0 OR rn <= :fr THEN abstract END AS abstract,
                    CASE WHEN :fr < 0 OR rn <= :fr THEN pico_json END AS pico_json
             FROM (
+                -- `study_design` est le devis RÉSOLU, par l'expression partagée : deux
+                -- passes indépendantes écrivent un devis depuis le même résumé (PICO et
+                -- métadonnées), et chacune se tait parfois en écrivant un marqueur.
+                -- Lire la seule colonne laissait 61 % du corpus HPAI sans devis pour la
+                -- notation des affirmations, pendant que le profil de preuve, juste à
+                -- côté, en classait 95 % : une étude transversale de 65 622 travailleurs
+                -- exposés soutenait une affirmation marquée « Non évaluée », trois
+                -- lignes sous un profil qui la classait en certitude faible.
                 SELECT ld.id, ld.title, ld.abstract, ld.year, ld.journal, ld.authors, ld.doi,
-                       ld.study_design, ld.pico_json, ld.citation_count,
-                       COALESCE(asn.screening_status, ld.screening_status) AS screening_status,
+                       NULLIF({_raw_design('ld')}, '') AS study_design,
+                       ld.pico_json, ld.citation_count,
+                       {screening_status_sql('ld', 'asn')} AS screening_status,
                        ld.quality_score, asn.similarity_score,
                        (ld.pico_json IS NOT NULL) AS has_pico,
+                       -- MÊME ordre que l'onglet Corpus, par la fonction partagée : la
+                       -- docstring de l'export promettait « le même ensemble et le même
+                       -- ordre », et en livrait un troisième.
                        ROW_NUMBER() OVER (ORDER BY
-                           CASE WHEN COALESCE(asn.screening_status, ld.screening_status) = 'included' THEN 0 ELSE 1 END,
-                           asn.similarity_score DESC NULLS LAST,
-                           ld.citation_count DESC NULLS LAST, ld.id) AS rn
+                           {relevance_order_sql('ld', 'asn', ':threshold')}) AS rn
                 FROM literature_document ld
                 JOIN article_scenarios asn ON asn.document_id = ld.id AND asn.scenario_id = :sid
                 WHERE ld.project_context = 'literev'
-                  AND ld.is_duplicate IS NOT TRUE
-                  -- Porte de screening (C1) : ne jamais alimenter le modèle avec un
-                  -- article explicitement exclu (les autres statuts restent admis).
-                  AND COALESCE(asn.screening_status, ld.screening_status) IS DISTINCT FROM 'excluded'
-                  -- Décision produit : un article NON scoré (similarity_score NULL)
-                  -- n'est PAS pertinent - même définition que tous les affichages
-                  -- (COALESCE(score,0) >= seuil). On garde le rattrapage 'included'.
-                  AND (COALESCE(asn.screening_status, ld.screening_status) = 'included' OR (COALESCE(asn.similarity_score, 0) >= :threshold AND (asn.rerank_score IS NULL OR asn.rerank_score >= COALESCE((SELECT ss.rerank_threshold FROM scenario_settings ss WHERE ss.scenario_id = asn.scenario_id), 0.0))))
+                  -- La porte de pertinence, appelée et non recopiée : jamais un doublon,
+                  -- jamais un article exclu par un relecteur, sinon inclus à la main OU
+                  -- au-dessus des deux seuils. Un article non scoré compte pour 0.
+                  AND {relevant_gate_sql('ld', 'asn', ':threshold')}
                   {"AND ld.pico_json IS NOT NULL" if require_pico else ""}
             ) ranked
             ORDER BY rn
@@ -500,7 +530,7 @@ def trigger_rerank(scenario_id: str, missing_only: bool = False,
     if _job_is_active(_RERANK_JOBS.get(scenario_id)):
         return {"status": "already_running", "scenario_id": scenario_id}
 
-    _RERANK_JOBS[scenario_id] = {"status": "running", "updated": 0, "started_at": time.time()}
+    _mark_rerank_running(scenario_id)
 
     def _run():
         try:
@@ -623,9 +653,9 @@ def rebuild_corpus(scenario_id: str, _: None = Depends(require_api_key)) -> dict
         raise HTTPException(status_code=422,
                             detail="Scénario sans requête exploitable : reconstruction impossible.")
 
-    if _RERANK_JOBS.get(scenario_id, {}).get("status") == "running":
+    if _job_is_active(_RERANK_JOBS.get(scenario_id)):
         return {"status": "already_running", "scenario_id": scenario_id}
-    _RERANK_JOBS[scenario_id] = {"status": "running", "updated": 0}
+    _mark_rerank_running(scenario_id)
 
     def _run():
         try:
@@ -633,10 +663,28 @@ def rebuild_corpus(scenario_id: str, _: None = Depends(require_api_key)) -> dict
             n_corpus = _set_scenario_corpus(scenario_id, ids)  # fixe l'appartenance
             _n_dup_rows = _dedup_scenario_links(scenario_id)   # un seul lien / article distinct
             n_corpus -= _n_dup_rows
-            # PRISMA : une reconstruction n'interroge que la base locale → une seule
-            # source ; les seuls doublons sont les lignes fusionnées par la dédup.
-            _store_prisma_identification(scenario_id, _prisma_identification_figures(
-                {"db_cache": len(ids)}, len(set(ids)), _n_dup_rows, max(0, n_corpus), method="rebuild"))
+            # PRISMA : une reconstruction n'interroge AUCUNE source. Elle rejoue la
+            # requête booléenne sur la bibliothèque locale, et ses doublons sont les
+            # lignes fusionnées par la dédup.
+            #
+            # Elle écrasait les chiffres de la dernière VRAIE recherche par une
+            # identification à une seule source fabriquée (« db_cache »), et le panneau
+            # continuait d'appeler le résultat une recherche : la trace de ce qui avait
+            # été interrogé, et de ce qui avait échoué, disparaissait sans retour. On
+            # garde donc ce que la dernière recherche avait établi, sous son propre nom.
+            _figs = _prisma_identification_figures(
+                {}, len(set(ids)), _n_dup_rows, max(0, n_corpus), method="rebuild",
+                records_from_library=len(ids))
+            _prev = _load_prisma_identification(scenario_id) or {}
+            if _prev.get("method") == "populate":
+                _figs["last_search"] = {
+                    k: _prev.get(k) for k in (
+                        "computed_at", "records_identified", "records_identified_databases",
+                        "records_by_source", "source_outcomes", "sources_launched",
+                        "sources_searched", "sources_failed", "sources_skipped",
+                        "sources_cut_off", "per_source_cap", "federation_incomplete")
+                    if _prev.get(k) is not None}
+            _store_prisma_identification(scenario_id, _figs)
             _backfill_title_abstract_chunks(scenario_id)       # chunks résumé manquants
             n = _run_semantic_rerank_inline(scenario_id, query or boolean)  # cosinus pgvector
             try:
@@ -698,8 +746,13 @@ def _maybe_autorerank(scenario_id: str) -> bool:
     """
     import threading
 
-    st = _RERANK_JOBS.get(scenario_id, {}).get("status")
-    if st in ("running", "done"):
+    # `_job_is_active`, comme les autres gardes : lire `status == "running"` nu
+    # traitait une entrée laissée par un fil tué au redémarrage comme vivante (donc
+    # blocage définitif), et une entrée POSÉE SANS HORODATAGE comme morte (donc un
+    # second scoring concurrent du même scénario).
+    if _job_is_active(_RERANK_JOBS.get(scenario_id)):
+        return False
+    if _RERANK_JOBS.get(scenario_id, {}).get("status") == "done":
         return False
     try:
         if scenario_id.startswith("usr-"):
@@ -714,7 +767,7 @@ def _maybe_autorerank(scenario_id: str) -> bool:
     if not query:
         return False
 
-    _RERANK_JOBS[scenario_id] = {"status": "running", "updated": 0}
+    _mark_rerank_running(scenario_id)
 
     def _run():
         try:
@@ -730,8 +783,22 @@ def _maybe_autorerank(scenario_id: str) -> bool:
     return True
 
 
-_SETTINGS_BLOB_COLUMNS = ("evidence_brief_json", "variables_json", "clustering_json",
-                          "knowledge_graph_json", "recommended_actions_json")
+#: Les colonnes JSON volumineuses de `scenario_settings`, dont /settings n'indique que
+#: la PRÉSENCE. La liste en oubliait cinq, et notamment les trois plus grosses : une
+#: lecture de deux flottants rapatriait 208 776 octets sur le scénario HPAI, dont
+#: 122 863 de projection SEIR, 63 672 de carte des concepts et 38 924 de traductions.
+#: Toute colonne JSON de cette table y appartient : si une nouvelle est ajoutée sans
+#: être listée, elle repart dans chaque ouverture de page (cf. test_scenario_payload_sizes).
+_SETTINGS_BLOB_COLUMNS = ("evidence_brief_json", "variables_json", "variables_proposal_json",
+                          "variables_i18n", "clustering_json", "knowledge_graph_json",
+                          "concept_graph_json", "seir_projection_json", "seir_observed_json",
+                          "codebook_json", "recommended_actions_json")
+
+
+def _blob_key(column: str) -> str:
+    """La clé servie pour une colonne JSON. Le suffixe `_json` était retiré par une
+    coupe de cinq caractères, ce qui mutilerait `variables_i18n` en `variables_`."""
+    return column[:-5] if column.endswith("_json") else column
 
 
 @app.get("/scenarios/{scenario_id}/settings")
@@ -754,14 +821,14 @@ def get_scenario_settings(scenario_id: str) -> dict[str, Any]:
             "brief_generated_at": None,
             "variables_validated": False,
             "variables_generated_at": None,
-            "cached": {c[:-5]: False for c in _SETTINGS_BLOB_COLUMNS},
+            "cached": {_blob_key(c): False for c in _SETTINGS_BLOB_COLUMNS},
         }
     out = {k: v for k, v in dict(row).items() if k not in _SETTINGS_BLOB_COLUMNS}
     # NULL en base veut dire « jamais réglé », et la porte le lit comme 0. L'interface doit
     # lire la même chose, sans quoi le curseur s'afficherait vide sur un corpus non filtré.
     if out.get("rerank_threshold") is None:
         out["rerank_threshold"] = DEFAULT_RERANK_THRESHOLD
-    out["cached"] = {c[:-5]: bool(row.get(c)) for c in _SETTINGS_BLOB_COLUMNS if c in row}
+    out["cached"] = {_blob_key(c): bool(row.get(c)) for c in _SETTINGS_BLOB_COLUMNS if c in row}
     return out
 
 
@@ -888,19 +955,39 @@ def _threshold_curve_inputs(scenario_id: str, score: str = "similarity") -> dict
         d'office, sans quoi la courbe promettrait une coupe que la base ne ferait pas.
 
     `unscored_are_kept` dit laquelle des deux règles s'applique, pour que l'interface
-    puisse l'écrire au lieu de laisser deviner."""
+    puisse l'écrire au lieu de laisser deviner.
+
+    Le lot candidat passe par l'AUTRE moitié de la porte : une courbe de rerank ne porte
+    que sur les articles qui passent déjà le seuil de similarité, et réciproquement. Sans
+    cela, le panneau comptait le corpus entier et promettait des coupes que la base
+    n'aurait jamais faites."""
     from .variables import _param_regex                     # lazy: variables charge après
     if score not in CURVE_SCORES:
         raise HTTPException(status_code=422,
                             detail=f"score inconnu : '{score}' (attendu : {', '.join(CURVE_SCORES)})")
     rerank = score == "rerank"
     col = "ars.rerank_score" if rerank else "COALESCE(ars.similarity_score, 0)"
-    sql_where = """
+    # ── L'AUTRE moitié de la porte est déjà appliquée ────────────────────────
+    # Le lot candidat était « ni doublon, ni exclu, ni inclus à la main », et rien de
+    # plus : le seuil de l'autre score était ignoré. Le panneau annonçait donc, pour le
+    # rerank du scénario HPAI, « 640 articles gardés » et « 640 articles candidats » là
+    # où toutes les autres surfaces de l'application en lisent 201, et proposait
+    # « mettre 0,7144 pour en garder 25 ». Sur un scénario de 6 564 articles, il
+    # affirmait qu'aucun seuil de rerank ne pourrait jamais en laisser moins de 6 323.
+    #
+    # Une courbe de seuil doit montrer ce que CE seuil fait, à partir de ce que l'autre
+    # a déjà retenu : c'est exactement ce que la porte calcule.
+    other_half = (f" AND COALESCE(ars.similarity_score, 0) >= {scenario_threshold_sql(':sid')}"
+                  if rerank else
+                  f" AND (ars.rerank_score IS NULL"
+                  f" OR ars.rerank_score >= {scenario_rerank_threshold_sql(':sid')})")
+    sql_where = f"""
         FROM literature_document d
         JOIN article_scenarios ars ON ars.document_id = d.id
         WHERE ars.scenario_id = :sid
           AND d.is_duplicate IS NOT TRUE
-          AND COALESCE(ars.screening_status, d.screening_status) IS DISTINCT FROM 'excluded'
+          AND {screening_status_sql('d', 'ars')} IS DISTINCT FROM 'excluded'
+          {other_half}
     """
     # Le non scoré sort de la courbe pour le rerank : il passe d'office, donc il n'a pas
     # de place sur un axe de seuils.
@@ -910,15 +997,15 @@ def _threshold_curve_inputs(scenario_id: str, score: str = "similarity") -> dict
             SELECT {col} AS s,
                    ((COALESCE(d.title, '') || ' ' || COALESCE(d.abstract, '')) ~* :rx) AS p
             {sql_where}
-              AND COALESCE(ars.screening_status, d.screening_status) IS DISTINCT FROM 'included'
+              AND {screening_status_sql('d', 'ars')} IS DISTINCT FROM 'included'
               {only_scored}
             ORDER BY s DESC
         """), {"sid": scenario_id, "rx": _param_regex(boundary=r"\y")}).mappings()]
         head = conn.execute(text(f"""
             SELECT COUNT(*) FILTER (
-                     WHERE COALESCE(ars.screening_status, d.screening_status) = 'included') AS included,
+                     WHERE {screening_status_sql('d', 'ars')} = 'included') AS included,
                    COUNT(*) FILTER (
-                     WHERE COALESCE(ars.screening_status, d.screening_status) IS DISTINCT FROM 'included'
+                     WHERE {screening_status_sql('d', 'ars')} IS DISTINCT FROM 'included'
                        AND {'ars.rerank_score' if rerank else 'ars.similarity_score'} IS NULL) AS unscored
             {sql_where}
         """), {"sid": scenario_id}).mappings().first() or {}
@@ -1056,7 +1143,7 @@ def get_threshold_curve(scenario_id: str, target: int | None = None,
         # d'office passent quoi qu'on fasse ; au-delà de `max`, il n'y a plus d'articles.
         "reachable": {"min": free + 1, "max": len(rows) + free} if rows else None,
         "with_parameter_total": sum(1 for _, p in rows if p),
-        "scoring_in_progress": _RERANK_JOBS.get(scenario_id, {}).get("status") == "running",
+        "scoring_in_progress": _job_is_active(_RERANK_JOBS.get(scenario_id)),
         # Un découpage par clusters ou par concepts ne juge que les articles pertinents AU
         # MOMENT où il est posé. Descendre le seuil sous cette frontière fait donc rentrer
         # des articles que la sélection n'a jamais vus, et la courbe les propose avec le

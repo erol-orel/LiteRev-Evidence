@@ -120,6 +120,24 @@ def _ensure_performance_indexes() -> None:
         "CREATE INDEX IF NOT EXISTS ix_litdoc_screening_status ON literature_document (screening_status)",
         "CREATE INDEX IF NOT EXISTS ix_litdoc_is_duplicate ON literature_document (is_duplicate)",
         "CREATE INDEX IF NOT EXISTS ix_litdoc_source ON literature_document (source)",
+        # PMID et external_id : les DEUX clés par lesquelles le populate PubMed demande
+        # « ces 1 000 identifiants sont-ils déjà en base ? ». Sans index, chaque lot
+        # balayait toute la table, une fois par lot et par recherche ; et comme la
+        # requête réunit maintenant deux recherches par UNION au lieu d'un OR sur deux
+        # colonnes, il faut un index pour chacune.
+        "CREATE INDEX IF NOT EXISTS ix_litdoc_pmid ON literature_document (pmid) "
+        "WHERE pmid IS NOT NULL",
+        "CREATE INDEX IF NOT EXISTS ix_litdoc_external_id ON literature_document (external_id) "
+        "WHERE external_id IS NOT NULL",
+        # La cible que l'INSERT de la living review nomme : `ON CONFLICT (external_id,
+        # source)`. Aucun index unique n'y correspondait, donc Postgres rejetait CHAQUE
+        # insertion (« there is no unique or exclusion constraint matching the ON
+        # CONFLICT specification »), l'exception était avalée par un `except` qui
+        # journalise, et le compteur d'erreurs montait pendant que la tâche se déclarait
+        # réussie. La living review n'a jamais pu ingérer un article.
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_litdoc_external_source "
+        "ON literature_document (external_id, source) "
+        "WHERE external_id IS NOT NULL AND external_id <> ''",
         "CREATE INDEX IF NOT EXISTS ix_litdoc_project_context ON literature_document (project_context)",
         "CREATE INDEX IF NOT EXISTS ix_doc_chunk_document ON document_chunk (document_id)",
         "CREATE INDEX IF NOT EXISTS ix_doc_chunk_type ON document_chunk (chunk_type)",
@@ -744,6 +762,74 @@ except Exception as _e:
     logger.warning(f"_ensure_double_blind_columns: {_e}")
 
 
+def _ensure_prior_screening_columns() -> None:
+    """De quoi ANNULER un découpage sans détruire ce qu'il a recouvert.
+
+    `undo` réécrivait littéralement 'pending' et NULL. Un article qu'un relecteur avait
+    rescapé à la main, puis que le découpage avait exclu, revenait donc « en attente,
+    sans motif » : sous le seuil et sans inclusion, il disparaissait du corpus pertinent,
+    et le travail du relecteur avec lui. L'état antérieur est maintenant conservé."""
+    with engine.begin() as conn:
+        if not conn.execute(text("SELECT to_regclass('public.article_scenarios')")).scalar():
+            return
+        conn.execute(text("""
+            ALTER TABLE article_scenarios
+            ADD COLUMN IF NOT EXISTS prior_screening_status VARCHAR(20),
+            ADD COLUMN IF NOT EXISTS prior_screening_reason TEXT
+        """))
+    logger.info("Colonnes d'état antérieur du screening (découpage) vérifiées/créées.")
+
+
+try:
+    _ensure_prior_screening_columns()
+except Exception as _e:
+    logger.warning(f"_ensure_prior_screening_columns: {_e}")
+
+
+def _backfill_ars_screening_from_document() -> None:
+    """Recopie UNE FOIS, sur les liens, les décisions qui ne vivaient que globalement.
+
+    Le statut de screening se lisait `COALESCE(ars.screening_status,
+    d.screening_status)` : à défaut de décision dans cette revue, la décision prise dans
+    une AUTRE. `literature_document` étant partagé, un article exclu dans une revue
+    sortait du sous-ensemble pertinent de toutes les autres qui le contiennent, sans
+    qu'un seul de leurs écrans ne le dise.
+
+    Les lectures ne regardent plus que le lien. Les décisions antérieures à l'écriture
+    par scénario n'existent que sur la ligne globale : sans cette recopie, elles
+    seraient silencieusement annulées, et un relecteur verrait ses exclusions revenir.
+    On les recopie donc sur les liens EXISTANTS, ce qui ne change rien à ce qui est
+    affiché aujourd'hui, et on arrête là : un scénario créé après ce démarrage part de
+    liens vierges, donc d'une revue qui n'hérite de rien.
+
+    Idempotent (ne touche que les liens sans statut) et sans effet sur une base neuve."""
+    with engine.begin() as conn:
+        if not conn.execute(text("SELECT to_regclass('public.article_scenarios')")).scalar():
+            return
+        n = conn.execute(text("""
+            UPDATE article_scenarios ars
+            SET screening_status = d.screening_status,
+                screening_reason = COALESCE(ars.screening_reason, d.screening_reason)
+            FROM literature_document d
+            WHERE d.id = ars.document_id
+              AND ars.screening_status IS NULL
+              AND d.screening_status IN ('included', 'excluded')
+        """)).rowcount or 0
+    if n:
+        logger.warning(
+            f"Screening par revue : {n} décision(s) recopiée(s) depuis la ligne globale "
+            f"du document vers les liens. Les lectures ne regardent plus que le lien, "
+            f"donc une décision prise dans une revue ne déplace plus le corpus d'une autre.")
+    else:
+        logger.info("Screening par revue : aucune décision globale à recopier.")
+
+
+# L'APPEL est plus bas, après `_ensure_bibliographic_columns`, qui est la fonction qui
+# CRÉE `literature_document.screening_status` (absente de schema.sql). Appelé ici, sur
+# une base neuve, il échouait sur « column d.screening_status does not exist » et n'était
+# retenté qu'au démarrage suivant.
+
+
 def _ensure_dedup_columns():
     """Colonne title_norm (titre normalisé) pour la déduplication inter-sources par
     TITRE - en complément du DOI, afin de capter les doublons SANS DOI (préprints,
@@ -821,3 +907,11 @@ try:
     _ensure_bibliographic_columns()
 except Exception as _e:
     logger.warning(f"_ensure_bibliographic_columns: {_e}")
+
+
+# Après la création de `literature_document.screening_status` : la recopie des décisions
+# qui ne vivaient que sur la ligne globale (cf. sa docstring) a besoin de cette colonne.
+try:
+    _backfill_ars_screening_from_document()
+except Exception as _e:
+    logger.warning(f"_backfill_ars_screening_from_document: {_e}")

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import threading
+from pathlib import Path
 from typing import Any
 
 from fastapi import Depends, HTTPException, Query
@@ -346,7 +347,7 @@ def get_model_run(scenario_id: str) -> dict[str, Any]:
         row = conn.execute(text("""
             SELECT id, dataset_id, status, family, task_type, metric, metrics_json,
                    best_params_json, feature_importance_json, summary_json, error,
-                   (artifact_path IS NOT NULL) AS has_artifact, created_at
+                   artifact_path, (artifact_path IS NOT NULL) AS has_artifact, created_at
             FROM scenario_model_run
             WHERE scenario_id = :sid AND is_active = TRUE
             ORDER BY created_at DESC LIMIT 1
@@ -355,13 +356,30 @@ def get_model_run(scenario_id: str) -> dict[str, Any]:
     if not row:
         return {"status": "empty", "message": "Aucun modèle entraîné. Lancez l'entraînement après avoir branché des données."}
 
+    # « Prêt » veut dire que le FICHIER est là, pas que la colonne porte un chemin. Le
+    # dossier des modèles était sous la racine de déploiement, et `git clean -fd` de
+    # deploy.sh l'effaçait à chaque fusion sur main : les lignes survivaient avec leurs
+    # chemins, l'onglet Modèle annonçait « prêt » et « utilisable », et la prédiction
+    # répondait 400.
+    _artifact_on_disk = False
+    try:
+        _ap = row["artifact_path"]
+        _artifact_on_disk = bool(_ap) and Path(str(_ap)).exists()
+    except Exception as _e:                                  # noqa: BLE001 - jamais bloquant
+        logger.warning(f"model artifact check {scenario_id}: {_e}")
+
     return {
         # « ready » était renvoyé en dur, y compris pour un run dont la sérialisation du
         # modèle avait échoué (artifact_path NULL) : l'onglet Modèle annonçait un modèle
         # prêt pendant que la prédiction répondait 400 et le monitoring « unavailable ».
-        "status": "ready" if row["has_artifact"] else "no_artifact",
-        "usable": bool(row["has_artifact"]),
-        "message": (None if row["has_artifact"] else
+        "status": ("ready" if _artifact_on_disk
+                   else "artifact_missing" if row["has_artifact"] else "no_artifact"),
+        "usable": _artifact_on_disk,
+        "message": (None if _artifact_on_disk else
+                    "Le modèle entraîné n'est plus sur le disque (un déploiement a-t-il "
+                    "nettoyé le répertoire de données ?) : prédiction et monitoring "
+                    "indisponibles. Relancez l'entraînement."
+                    if row["has_artifact"] else
                     "Entraînement terminé mais le modèle n'a pas pu être enregistré : "
                     "prédiction et monitoring indisponibles. Relancez l'entraînement."),
         "run_id": row["id"],

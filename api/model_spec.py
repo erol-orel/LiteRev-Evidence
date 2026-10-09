@@ -539,6 +539,28 @@ def apply_outcome_template(scenario_id: str, payload: dict[str, Any],
     spec["version"] = int(spec.get("version", 0) or 0) + 1
     spec.setdefault("epidemic_parameters", {"applicable": False, "disease": None, "params": {}})
     vj["model_spec"] = spec
+    # ── UN seul outcome dans la charge utile ─────────────────────────────────
+    # `primary_outcome` (ce que montre l'onglet Variables) était laissé intact pendant
+    # que `model_spec.outcome` (ce que le modèle entraîne) était remplacé par le
+    # modèle d'outcome. La même réponse portait donc deux outcomes contradictoires :
+    # sur le scénario HPAI, un « signal d'émergence » en classification dans l'onglet
+    # Variables et un taux d'occupation des lits en régression dans l'entraînement.
+    # Appliquer un modèle d'outcome, c'est choisir ce qu'on prédit : les deux le disent.
+    _po = dict(vj.get("primary_outcome") or {})
+    _po.update({
+        "name": outcome["name"],
+        "machine_name": outcome["machine_name"],
+        "task_type": outcome["task_type"],
+        "unit": outcome["unit"],
+        "positive_class": outcome["positive_class"],
+        "definition": tpl.get("description", "") or _po.get("definition", ""),
+        # D'où vient cet outcome : un modèle appliqué à la main, pas une lecture des
+        # articles. Sa provenance d'avant ne lui appartient plus.
+        "source": "outcome_template",
+        "outcome_template_id": tpl["id"],
+        "provenance": [],
+    })
+    vj["primary_outcome"] = _po
     if tpl.get("alert_thresholds"):
         vj["alert_thresholds"] = tpl["alert_thresholds"]
     vj["outcome_template_id"] = tpl["id"]

@@ -269,12 +269,59 @@ def test_the_similarity_curve_is_unchanged(seeded):
     assert out["always_kept"] == out["included"]
 
 
+def _set_similarity_threshold(conn, thr: float) -> None:
+    with conn.cursor() as cur:
+        cur.execute("INSERT INTO scenario_settings (scenario_id, similarity_threshold)"
+                    " VALUES (%s, %s) ON CONFLICT (scenario_id) DO UPDATE"
+                    " SET similarity_threshold = %s", (SID, thr, thr))
+        conn.commit()
+
+
 def test_the_rerank_curve_counts_the_unreranked_among_those_kept_for_free(seeded):
     """Un article non reranké passe quel que soit le seuil, donc il appartient au compte
     de ce qui passe d'office, pas à l'axe des seuils."""
+    _set_similarity_threshold(seeded, 0.30)        # sinon rien ne passe la similarité
     out = main.get_threshold_curve(SID, None, "rerank")
     assert out["score"] == "rerank"
     assert out["unscored_are_kept"] is True
     assert out["unscored"] == 1                        # l'article 3
     assert out["always_kept"] == out["included"] + 1   # l'inclus à la main, plus lui
     assert all(p["kept"] >= out["always_kept"] for p in out["curve"])
+
+
+def test_the_rerank_curve_only_sees_what_the_similarity_gate_already_kept(seeded):
+    """LE défaut du panneau : son lot candidat ignorait l'autre moitié de la porte.
+
+    Sur le scénario HPAI il annonçait « 640 articles gardés » et « 640 candidats » là où
+    toutes les autres surfaces lisent 201, et proposait « mettre 0,7144 pour en garder
+    25 ». Sur un scénario de 6 564 articles, il affirmait qu'aucun seuil de rerank ne
+    pourrait jamais en laisser moins de 6 323.
+
+    Ici, l'article 4 (similarité 0,10) a le MEILLEUR score de rerank du lot (0,90) : s'il
+    entre dans la courbe, elle promet de le garder alors que la porte l'écarte."""
+    _set_similarity_threshold(seeded, 0.30)
+    out = main.get_threshold_curve(SID, None, "rerank")
+    # Candidats = 1 et 2 : scorés au rerank, au-dessus du seuil de similarité, non inclus.
+    assert out["candidates"] == 2, (
+        "le lot candidat contient des articles que le seuil de similarité écarte déjà")
+    assert out["corpus"] == len(_relevant(0.30)), (
+        "le corpus annoncé par la courbe n'est pas le sous-ensemble pertinent")
+    # Aucun point ne peut promettre de garder l'article 4.
+    assert all(p["kept"] <= out["corpus"] for p in out["curve"])
+    # Et en remontant le seuil de similarité, le lot du rerank se réduit avec lui.
+    _set_similarity_threshold(seeded, 0.39)
+    tighter = main.get_threshold_curve(SID, None, "rerank")
+    assert tighter["candidates"] == 1               # il ne reste que l'article 2 (0,40)
+    assert tighter["unscored"] == 0                 # l'article 3 (0,38) est sorti
+
+
+def test_the_similarity_curve_only_sees_what_the_rerank_gate_already_kept(seeded):
+    """Symétrique : poser un seuil de rerank doit réduire le lot de la courbe de
+    similarité, sinon elle propose des coupes sur des articles déjà écartés."""
+    _set_similarity_threshold(seeded, 0.30)
+    before = main.get_threshold_curve(SID, None, "similarity")["candidates"]
+    main.update_scenario_settings(SID, {"rerank_threshold": 0.5})
+    after = main.get_threshold_curve(SID, None, "similarity")["candidates"]
+    assert after < before, (
+        "un seuil de rerank de 0,5 écarte les articles 2 et 4 : la courbe de similarité "
+        "les comptait encore")

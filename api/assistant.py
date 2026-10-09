@@ -21,6 +21,7 @@ from .scenario_store import (
     _get_scenario_threshold,
     _get_user_scenario_or_404,
     relevant_gate_sql,
+    screening_status_sql,
 )
 from .search import _build_where
 from llm_usage import model_for as _model
@@ -296,7 +297,7 @@ async def ask_stream(payload: dict[str, Any]) -> StreamingResponse:
             # répondait sur tout le corpus du scénario, y compris les articles que le
             # seuil met de côté, en se présentant comme filtré par scénario.
             join_extra = " JOIN article_scenarios ars ON ars.document_id = d.id AND ars.scenario_id = :scenario_id "
-            screen_expr = "COALESCE(ars.screening_status, d.screening_status)"
+            screen_expr = f"{screening_status_sql('d', 'ars')}"
             where_extra += " AND " + relevant_gate_sql(doc="d", link="ars", thr=":threshold")
             params_extra["scenario_id"] = scenario_id
             params_extra["threshold"] = _get_scenario_threshold(scenario_id)
@@ -396,7 +397,14 @@ Réponds de manière structurée et cite les sources pertinentes du contexte."""
                     token_event = f"data: {_json.dumps({'token': delta.content})}\n\n"
                     yield token_event
         except Exception as e:
+            # `return`, PAS une continuation : `event: done` suivait l'erreur, et le
+            # client archive sur `done`. Une réponse en échec était donc enregistrée
+            # dans l'historique comme une réponse terminée, avec les compteurs du corpus
+            # attachés, et se relisait comme une réponse établie sur N articles.
+            logger.error(f"RAG stream {scenario_id if 'scenario_id' in dir() else ''}: {e}",
+                         exc_info=True)
             yield f"event: error\ndata: {_json.dumps({'error': str(e)})}\n\n"
+            return
 
         yield "event: done\ndata: {}\n\n"
 
@@ -601,14 +609,10 @@ async def ask_stream_filtered(payload: dict[str, Any]):
     if scenario_id:
         try:
             with engine.connect() as _cc:
-                _cnt = _cc.execute(text("""
+                _cnt = _cc.execute(text(f"""
                     SELECT
-                        COUNT(*) FILTER (WHERE d.is_duplicate IS NOT TRUE
-                            AND COALESCE(ars.screening_status, d.screening_status) IS DISTINCT FROM 'excluded'
-                            AND (COALESCE(ars.screening_status, d.screening_status) = 'included' OR (COALESCE(ars.similarity_score, 0) >= :thr AND (ars.rerank_score IS NULL OR ars.rerank_score >= COALESCE((SELECT ss.rerank_threshold FROM scenario_settings ss WHERE ss.scenario_id = ars.scenario_id), 0.0))))) AS relevant,
-                        COUNT(*) FILTER (WHERE d.is_duplicate IS NOT TRUE
-                            AND COALESCE(ars.screening_status, d.screening_status) IS DISTINCT FROM 'excluded'
-                            AND (COALESCE(ars.screening_status, d.screening_status) = 'included' OR (COALESCE(ars.similarity_score, 0) >= :thr AND (ars.rerank_score IS NULL OR ars.rerank_score >= COALESCE((SELECT ss.rerank_threshold FROM scenario_settings ss WHERE ss.scenario_id = ars.scenario_id), 0.0))))
+                        COUNT(*) FILTER (WHERE {relevant_gate_sql('d', 'ars', ':thr')}) AS relevant,
+                        COUNT(*) FILTER (WHERE {relevant_gate_sql('d', 'ars', ':thr')}
                             AND EXISTS (SELECT 1 FROM document_chunk c
                                 WHERE c.document_id = d.id AND c.chunk_type = 'fulltext_section')) AS relevant_with_fulltext
                     FROM article_scenarios ars
@@ -663,7 +667,7 @@ async def ask_stream_filtered(payload: dict[str, Any]):
             # RAG citait donc des articles qu'un relecteur avait écartés, sous un
             # compteur « N articles pertinents » calculé, lui, sur le bon sous-ensemble.
             join_extra = " JOIN article_scenarios asn ON asn.document_id = d.id AND asn.scenario_id = :scenario_id "
-            screen_expr = "COALESCE(asn.screening_status, d.screening_status)"
+            screen_expr = f"{screening_status_sql('d', 'asn')}"
             where_extra += " AND " + relevant_gate_sql(doc="d", link="asn", thr=":threshold")
             params_extra["scenario_id"] = scenario_id
         else:
@@ -767,7 +771,13 @@ Reponds de maniere structuree et cite les sources pertinentes du contexte."""
         meta_event = ("event: meta\ndata: "
                       + _json2.dumps({"papers_used": papers_used,
                                       "papers_with_fulltext": papers_with_fulltext,
-                                      "papers_quoted": len({s["document_id"] for s in sources}),
+                                      # Le nombre d'articles RAPATRIÉS pour composer la
+                                      # réponse, qui n'est pas le nombre d'articles
+                                      # qu'elle cite. Ce compte s'appelait
+                                      # `papers_quoted` et l'interface, l'historique et
+                                      # le document exporté le présentaient tous trois
+                                      # comme « cités ».
+                                      "papers_retrieved": len({s["document_id"] for s in sources}),
                                       "digest_complete": bool(digest_block),
                                       "threshold": round(float(threshold), 2)})
                       + "\n\n")
@@ -809,7 +819,11 @@ Reponds de maniere structuree et cite les sources pertinentes du contexte."""
                     token_event = f"data: {_json2.dumps({'token': delta.content})}\n\n"
                     yield token_event
         except Exception as e:
+            # Même raison : une erreur n'est pas suivie de `done`, sans quoi le client
+            # archive l'échec comme une réponse complète.
+            logger.error(f"RAG stream (filtered): {e}", exc_info=True)
             yield f"event: error\ndata: {_json2.dumps({'error': str(e)})}\n\n"
+            return
 
         yield "event: done\ndata: {}\n\n"
 
