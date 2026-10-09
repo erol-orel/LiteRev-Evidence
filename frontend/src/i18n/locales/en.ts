@@ -804,7 +804,7 @@ export const en: Translations = {
       coverageIncomplete: "Incomplete search: {sources} were not searched to completion (a failure, a missing API key, or the time budget cut them off). Whatever they returned before that stays in the table; their count is not a total.",
       federationIncomplete: "The federation time budget was reached: some sources were cut off mid-pagination.",
       perSourceCap: "cap applied: {cap} records per source",
-      keywordFallback: "Degraded strategy for {sources}: these APIs cannot take the whole boolean query (a URL, operator or syntax limit), so they received the reduced version \"{keywords}\" (same structure, each OR block cut to its shortest terms, exclusions dropped). Their records are therefore not the product of the boolean query above; they are re-matched locally against it before entering the corpus.",
+      keywordFallback: "Degraded strategy for {sources}: these APIs cannot take the whole boolean query (a URL, operator or syntax limit), so they received the reduced version \"{keywords}\" (same structure, each OR block cut to its simplest terms, exclusions dropped). Their records are therefore not the product of the boolean query above; they are re-matched locally against it before entering the corpus.",
       capped: "capped",
       cappedNote: "Cap reached for {sources}: these APIs announce more records than the {cap} per source retrieved. PubMed, OpenAlex and Europe PMC are queried by relevance: what was kept is each source's {cap} most relevant records, not its most recent.",
       outcome: {

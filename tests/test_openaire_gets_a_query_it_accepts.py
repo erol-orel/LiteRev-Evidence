@@ -80,6 +80,16 @@ def test_the_shortest_terms_of_each_block_are_the_ones_kept():
         '(h5n1 OR "avian influenza") AND (farmers OR "occupational exposure")')
 
 
+def test_single_words_keep_the_authors_order_not_their_length():
+    """Sous quatre opérateurs, c'est le concept que l'auteur a mis en tête qui doit rester,
+    pas le mot le plus court : « cullers » passait devant « occupational »."""
+    q = ('("Occupational Exposure"[mh] OR "occupational*"[tiab] OR "veterinarians"[tiab] '
+         'OR "farmers"[tiab] OR "cullers"[tiab]) '
+         'AND ("Influenza in Birds"[mh] OR "HPAI"[tiab] OR "H5N1"[tiab] OR "H7N9"[tiab])')
+    assert _shorten_boolean(_strip_field_tags(q), 1200, max_operators=4) == (
+        "(occupational OR veterinarians) AND (hpai OR h5n1)")
+
+
 def test_counting_operators_ignores_the_words_inside_terms():
     assert _count_operators('"mortality and or morbidity" AND h5n1') == 1
     assert _count_operators("(a OR b) AND (c OR d)") == 3

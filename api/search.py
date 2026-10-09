@@ -419,12 +419,13 @@ def _positive_boolean(ast):
                 seen.add(key)
                 children.append(p)
         if typ == "or":
-            # Les plus courts d'abord, à ordre égal sinon : sous une troncature, « h5n1 »
-            # et « avian influenza » valent mieux que « influenza a virus h5n1 subtype »
-            # (une vedette MeSH que personne n'écrit), et davantage de termes tiennent
-            # sous la limite.
-            children.sort(key=lambda p: ((0, len(str(p[1]).split()), len(str(p[1])))
-                                         if p[0] == "term" else (1, 0, 0)))
+            # Les mots seuls d'abord, puis les phrases courtes, et à nombre de mots égal
+            # l'ordre de l'auteur, qui met d'ordinaire le concept principal en tête. Sous
+            # une troncature serrée (OpenAIRE : quatre opérateurs), « occupational » et
+            # « h5n1 » valent mieux que « influenza a virus h5n1 subtype », une vedette
+            # MeSH que personne n'écrit ; et trier les mots seuls par longueur gardait
+            # « cullers » avant « occupational ».
+            children.sort(key=lambda p: ((0, len(str(p[1]).split())) if p[0] == "term" else (1, 0)))
         if not children:
             return None
         return children[0] if len(children) == 1 else (typ, children)
