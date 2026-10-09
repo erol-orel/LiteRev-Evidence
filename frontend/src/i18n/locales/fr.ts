@@ -802,7 +802,7 @@ export const fr = {
       coverageIncomplete: "Recherche incomplète : {sources} n'ont pas été interrogées jusqu'au bout (échec, clé d'API absente, ou coupure par le budget de temps). Ce qu'elles ont rapporté avant reste au tableau ; leur compte n'est pas un total.",
       federationIncomplete: "Le budget de temps de la fédération a été atteint : des sources ont été coupées en cours de pagination.",
       perSourceCap: "plafond appliqué : {cap} enregistrements par source",
-      keywordFallback: "Stratégie dégradée pour {sources} : la requête booléenne dépasse la limite d'URL de ces API, elles ont reçu la version réduite « {keywords} » (même structure, chaque bloc OU tronqué à ses premiers termes, sans les exclusions). Leurs enregistrements ne sont donc pas le produit de la requête booléenne ci-dessus ; ils sont ré-appariés en local contre elle avant d'entrer au corpus.",
+      keywordFallback: "Stratégie dégradée pour {sources} : ces API ne peuvent pas recevoir la requête booléenne entière (limite d'URL, d'opérateurs ou de syntaxe), elles ont reçu la version réduite « {keywords} » (même structure, chaque bloc OU tronqué à ses termes les plus courts, sans les exclusions). Leurs enregistrements ne sont donc pas le produit de la requête booléenne ci-dessus ; ils sont ré-appariés en local contre elle avant d'entrer au corpus.",
       capped: "plafonnée",
       cappedNote: "Plafond atteint pour {sources} : ces API annoncent plus d'enregistrements que les {cap} par source rapatriés. PubMed, OpenAlex et Europe PMC sont interrogées par pertinence : le lot gardé est celui des {cap} plus pertinents selon chaque source, pas des plus récents.",
       outcome: {

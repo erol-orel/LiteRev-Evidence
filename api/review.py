@@ -348,6 +348,8 @@ def get_user_scenario_prisma(
                 "keyword_fallback_sources": list(_figures.get("keyword_fallback_sources") or []),
                 "keyword_fallback_query": (str(_figures.get("keyword_fallback_query"))
                                            if _figures.get("keyword_fallback_query") else None),
+                "keyword_fallback_queries": {str(k): str(v) for k, v in
+                                             (_figures.get("keyword_fallback_queries") or {}).items() if v},
                 "source_error_reasons": {str(k): str(v)[:200] for k, v in
                                          (_figures.get("source_error_reasons") or {}).items() if v},
                 "source_totals": {str(k): int(v) for k, v in

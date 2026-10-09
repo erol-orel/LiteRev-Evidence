@@ -47,6 +47,7 @@ def _figures_with_everything():
         per_source_cap=2000,
         keyword_fallback_sources=["openalex", "doaj", "core", "clinicaltrials", "arxiv"],
         keyword_fallback_query="occupational exposure influenza birds",
+        keyword_fallback_queries={"_fetch_openaire": '"occupational exposure" AND "avian influenza"'},
         source_error_reasons={"_fetch_openalex": "403 Client Error: Forbidden"},
         source_totals={"pubmed": 7412, "doaj": 999})
 
@@ -59,8 +60,10 @@ def test_every_recorded_key_reaches_the_card(scenario):
     assert r.status_code == 200, r.text[:300]
     ident = r.json()["identification"]
 
-    assert ident["keyword_fallback_sources"] == ["arxiv", "clinicaltrials", "core", "doaj", "openalex"]
+    # OpenAIRE, qui a sa propre requête, rejoint la liste par le dictionnaire des requêtes.
+    assert ident["keyword_fallback_sources"] == ["arxiv", "clinicaltrials", "core", "doaj", "openaire", "openalex"]
     assert ident["keyword_fallback_query"] == "occupational exposure influenza birds"
+    assert ident["keyword_fallback_queries"] == {"openaire": '"occupational exposure" AND "avian influenza"'}
     assert ident["source_error_reasons"] == {"openalex": "403 Client Error: Forbidden"}
     assert ident["source_totals"] == {"pubmed": 7412, "doaj": 999}
     assert ident["sources_capped"] == ["pubmed"], (
@@ -78,16 +81,17 @@ def test_a_legacy_run_without_outcomes_emits_none_of_the_new_keys(scenario):
     """Une recherche antérieure au registre : absence, pas zéro, pas liste vide inventée."""
     legacy = _prisma_identification_figures({"pubmed": 300, "db_cache": 120}, 400, 0, 400)
     legacy.pop("source_outcomes", None)
-    for k in ("keyword_fallback_sources", "keyword_fallback_query", "source_error_reasons",
-              "source_totals", "sources_capped", "sources_launched", "sources_searched"):
+    for k in ("keyword_fallback_sources", "keyword_fallback_query", "keyword_fallback_queries",
+              "source_error_reasons", "source_totals", "sources_capped", "sources_launched",
+              "sources_searched"):
         legacy.pop(k, None)
     _store_prisma_identification(scenario, legacy)
     with TestClient(main.app) as c:
         r = c.get(f"/user-scenarios/{scenario}/prisma")
     assert r.status_code == 200
     ident = r.json()["identification"]
-    for k in ("keyword_fallback_sources", "keyword_fallback_query", "source_error_reasons",
-              "source_totals", "sources_capped", "sources_searched"):
+    for k in ("keyword_fallback_sources", "keyword_fallback_query", "keyword_fallback_queries",
+              "source_error_reasons", "source_totals", "sources_capped", "sources_searched"):
         assert k not in ident, f"{k} est servi pour une recherche qui ne l'a jamais enregistré"
     # Le partage bases / bibliothèque reste déduit de la ligne db_cache.
     assert ident["records_identified_library"] == 120

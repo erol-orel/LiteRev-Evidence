@@ -418,6 +418,13 @@ def _positive_boolean(ast):
                     continue
                 seen.add(key)
                 children.append(p)
+        if typ == "or":
+            # Les plus courts d'abord, à ordre égal sinon : sous une troncature, « h5n1 »
+            # et « avian influenza » valent mieux que « influenza a virus h5n1 subtype »
+            # (une vedette MeSH que personne n'écrit), et davantage de termes tiennent
+            # sous la limite.
+            children.sort(key=lambda p: ((0, len(str(p[1]).split()), len(str(p[1])))
+                                         if p[0] == "term" else (1, 0, 0)))
         if not children:
             return None
         return children[0] if len(children) == 1 else (typ, children)
@@ -473,9 +480,27 @@ def _boolean_to_generic(ast, top: bool = True) -> str | None:
     return None
 
 
-def _shorten_boolean(portable: str, limit: int = 1200, render=None) -> str:
+#: OpenAIRE (Graph API v2) refuse toute recherche de plus de QUATRE opérateurs logiques :
+#: « Too many logical operators found. Max allowed is 4 », mesuré en production avec la
+#: sonde /sources/health : 48 opérateurs sur la requête recommandée, 52 sur la requête
+#: HPAI réduite, 95 sur la requête HPAI entière, 400 à chaque fois. Depuis la migration
+#: vers cette API, OpenAIRE ne répondait donc qu'aux requêtes sans booléen.
+OPENAIRE_MAX_OPERATORS = 4
+
+
+def _count_operators(rendered: str) -> int:
+    """Les opérateurs d'une requête rendue. Les termes sont en minuscules (tokenisation),
+    donc un « AND » ou un « OR » en capitales entouré d'espaces ne vient que des
+    compilateurs."""
+    return rendered.count(" AND ") + rendered.count(" OR ")
+
+
+def _shorten_boolean(portable: str, limit: int = 1200, render=None,
+                     max_operators: int | None = None) -> str:
     """La requête RÉDUITE : le même booléen, sans exclusions, chaque bloc OU tronqué à ses
-    premiers termes jusqu'à tenir sous `limit` caractères. "" si rien ne tient.
+    premiers termes jusqu'à tenir sous `limit` caractères (et, si `max_operators` est
+    donné, sous ce nombre d'opérateurs : OpenAIRE n'en accepte que quatre). "" si rien
+    ne tient.
 
     Au-delà de la limite d'URL (1 200 caractères portables), cinq sources recevaient huit
     mots-clés sans structure, et chaque moteur en faisait autre chose. Mesuré sur le
@@ -495,8 +520,11 @@ def _shorten_boolean(portable: str, limit: int = 1200, render=None) -> str:
         return ""
     for keep in range(_or_width(ast), 0, -1):
         out = render(_truncate_or_groups(ast, keep))
-        if out and len(out) <= limit:
-            return out
+        if not out or len(out) > limit:
+            continue
+        if max_operators is not None and _count_operators(out) > max_operators:
+            continue
+        return out
     return ""
 
 
@@ -1059,7 +1087,8 @@ def _prisma_identification_figures(records_by_source: dict, unique_records: int,
                                    keyword_fallback_sources: list | None = None,
                                    keyword_fallback_query: str | None = None,
                                    source_error_reasons: dict | None = None,
-                                   source_totals: dict | None = None) -> dict[str, Any]:
+                                   source_totals: dict | None = None,
+                                   keyword_fallback_queries: dict | None = None) -> dict[str, Any]:
     """Chiffres PRISMA 2020 de l'étape « identification », calculés à partir de ce qu'une
     recherche a RÉELLEMENT ramené - et non du corpus déjà dédupliqué.
 
@@ -1156,6 +1185,17 @@ def _prisma_identification_figures(records_by_source: dict, unique_records: int,
     no_abstract = min(to_explain, max(0, int(removed_no_abstract or 0)))
     not_matching = min(to_explain - no_abstract, max(0, int(removed_not_matching or 0)))
     other = to_explain - no_abstract - not_matching
+    # La requête RÉELLEMENT soumise à chaque source en repli. Elles ne reçoivent pas toutes
+    # la même : les sources à la limite d'URL partagent une réduction, arXiv a la sienne
+    # (syntaxe `all:`), OpenAIRE la sienne (quatre opérateurs au plus). La chaîne unique
+    # `keyword_fallback_query` reste servie pour qui ne lit qu'elle : celle donnée, sinon
+    # la plus partagée.
+    fb_queries = {_source_label(k): str(v) for k, v in (keyword_fallback_queries or {}).items() if v}
+    fb_sources = sorted({_source_label(s) for s in (keyword_fallback_sources or [])} | set(fb_queries))
+    fb_query = str(keyword_fallback_query or "") or None
+    if fb_query is None and fb_queries:
+        from collections import Counter as _Counter
+        fb_query = _Counter(fb_queries.values()).most_common(1)[0][0]
     return {
         "method": method,
         "computed_at": _dt.now(_tz.utc).isoformat(),
@@ -1173,8 +1213,9 @@ def _prisma_identification_figures(records_by_source: dict, unique_records: int,
         "sources_searched": searched,
         # La stratégie RÉELLEMENT soumise, quand elle n'a pas été la même pour toutes :
         # les sources en repli mots-clés, et les mots-clés qu'elles ont reçus.
-        "keyword_fallback_sources": sorted({_source_label(s) for s in (keyword_fallback_sources or [])}),
-        "keyword_fallback_query": str(keyword_fallback_query or "") or None,
+        "keyword_fallback_sources": fb_sources,
+        "keyword_fallback_query": fb_query,
+        "keyword_fallback_queries": fb_queries,
         # POURQUOI une source a échoué. L'issue `error` était servie nue : la carte
         # disait « openalex : échec » et diagnostiquer demandait les journaux du serveur.
         "source_error_reasons": {_source_label(k): str(v)[:200]

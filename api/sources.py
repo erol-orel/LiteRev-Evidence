@@ -872,6 +872,11 @@ def sources_health(query: str = "cardiac arrest", timeout: int = 12) -> dict[str
         "config": {
             "ncbi_api_key": bool(ncbi_key),
             "openai_api_key": bool(os.getenv("OPENAI_API_KEY")),
+            # Présence seulement, jamais la valeur : « Semantic Scholar : 429 après 3
+            # tentatives » ne dit pas si la clé est configurée, et c'est la première
+            # question à se poser.
+            "semantic_scholar_api_key": bool(os.getenv("SEMANTIC_SCHOLAR_API_KEY")),
+            "core_api_key": bool(os.getenv("CORE_API_KEY")),
         },
     }
 

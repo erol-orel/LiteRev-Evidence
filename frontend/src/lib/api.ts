@@ -1161,6 +1161,10 @@ export interface ScenarioPrisma {
      *  strategy actually submitted to each database. */
     keyword_fallback_sources?: string[];
     keyword_fallback_query?: string | null;
+    /** The query each reduced-strategy source ACTUALLY received: the sources at the URL
+     *  limit share one reduction, arXiv has its own syntax, OpenAIRE its own four-operator
+     *  form. Absent on figures stored before it existed (one query for all, above). */
+    keyword_fallback_queries?: Record<string, string>;
     /** WHY a source failed, by source. The `error` outcome was served bare, so the card
      *  said "openalex: failed" and diagnosing it meant reading the server's logs. */
     source_error_reasons?: Record<string, string>;
