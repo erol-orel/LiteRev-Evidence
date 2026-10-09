@@ -1155,6 +1155,22 @@ export interface ScenarioPrisma {
     records_identified_databases?: number;
     records_identified_library?: number;
     per_source_cap?: number | null;
+    /** The sources that received KEYWORDS instead of the boolean query, and the keywords
+     *  they received. Past 1200 characters of portable boolean, five of the twelve fall
+     *  back (OpenAlex's URL limit) and nothing said so, while PRISMA-S requires the
+     *  strategy actually submitted to each database. */
+    keyword_fallback_sources?: string[];
+    keyword_fallback_query?: string | null;
+    /** WHY a source failed, by source. The `error` outcome was served bare, so the card
+     *  said "openalex: failed" and diagnosing it meant reading the server's logs. */
+    source_error_reasons?: Record<string, string>;
+    /** The TRUE total each API announced, and the sources that kept fewer than it. At the
+     *  per-source cap, "pubmed 2000" read as a total; it is a floor. PubMed, OpenAlex and
+     *  Europe PMC are now queried by relevance, so what is kept is each source's most
+     *  relevant records (PubMed used to sort by date and keep the newest). Five sources
+     *  were capped on a production run and nothing said so. */
+    source_totals?: Record<string, number>;
+    sources_capped?: string[];
     /** "populate" = sources were searched; "rebuild" = the boolean query was replayed
      *  over the local library and nothing was searched. The panel called both a search. */
     method?: string;

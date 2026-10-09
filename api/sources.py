@@ -17,7 +17,7 @@ from .core import RELIEFWEB_APPNAME, app, engine, logger, require_api_key
 from .documents import _normalize_doi, _normalize_title, sanitize_db_text
 from .scenario_store import (_get_scenario_threshold, _get_user_scenario_or_404,
                              relevant_gate_tail_sql)
-from .search import LIVE_MAX_PER_SOURCE, _plain_keywords
+from .search import LIVE_MAX_PER_SOURCE, _plain_keywords, _strip_field_tags
 from llm_usage import model_for as _model
 
 
@@ -49,16 +49,61 @@ _NCBI_LAST = [0.0]
 _NCBI_MIN_INTERVAL = 0.4  # ~2.5 req/s, sous la limite de 3/s
 
 
+#: L'URL de base de la recherche Europe PMC, écrite une fois : quatre appels la répétaient.
+EPMC_SEARCH_URL = "https://www.ebi.ac.uk/europepmc/webservices/rest/search"
+
+
+def epmc_query(boolean: str) -> str:
+    """La requête telle qu'Europe PMC la comprend : SANS les tags de champ de PubMed.
+
+    Europe PMC ne parle pas `[mh]` ni `[tiab]` : elle les apparie comme du TEXTE, que
+    presque rien ne contient. Mesuré sur la sonde de production, pour la même question :
+
+        avian influenza AND occupational exposure            2 398 notices
+        "Influenza in Birds"[mh] AND "Occupational Exposure"[mh]      3 notices
+        "avian influenza"[tiab] AND "occupational*"[tiab]             6 notices
+
+    Les tags coûtaient donc 99,9 % du rappel de la deuxième source biomédicale de la
+    fédération, et c'est l'explication du `europepmc: 0` au tableau d'identification du
+    scénario HPAI, dont la requête porte des dizaines de ces tags.
+
+    Une TRADUCTION vers la syntaxe d'Europe PMC (`MESH:`, `TITLE:`, `ABSTRACT:`) serait
+    plus précise que ce simple retrait, qui élargit la recherche à tous les champs. Elle
+    demande d'éprouver chaque nom de champ contre l'API, ce que l'environnement de
+    développement ne peut pas faire : à écrire le jour où on peut la vérifier, plutôt
+    qu'à deviner. Le retrait, lui, est sûr et va dans le sens du rappel.
+
+    Une entrée faite UNIQUEMENT de tags rend la chaîne vide, et non l'entrée : un repli
+    « si le retrait ne laisse rien, garde l'original » rendait précisément le tag que
+    cette fonction existe pour enlever."""
+    return " ".join(_strip_field_tags(boolean or "").split())
+
+
+#: Au-delà de cette longueur de paramètres encodés, eutils est interrogé en POST. NCBI
+#: documente le POST pour les requêtes longues, et une URL de GET au-delà de ~2 000
+#: caractères est refusée ou tronquée par les proxys. La requête du scénario HPAI fait
+#: 3 075 caractères, soit une URL de GET de 4 247 : son esearch partait donc dans une URL
+#: que rien ne garantit. `efetch` postait déjà sa longue liste d'identifiants ; c'est
+#: `esearch`, qui porte la REQUÊTE, qui ne le faisait pas.
+_NCBI_POST_ABOVE = 1800
+
+
 def _ncbi_get(url: str, params: dict, timeout: int = 12):
-    """GET eutils throttlé (verrou global) avec un petit retry sur 429/erreur."""
+    """Requête eutils throttlée (verrou global), avec un petit retry sur 429/erreur.
+
+    En GET par défaut, en POST dès que les paramètres encodés dépassent
+    `_NCBI_POST_ABOVE` : eutils accepte les mêmes paramètres dans le corps, et c'est la
+    forme que NCBI prescrit pour une requête longue."""
     import requests as _req
     import time as _time
+    import urllib.parse as _up
     key = os.getenv("NCBI_API_KEY")
     if key:
         params = {**params, "api_key": key}
     # Avec une clé API, NCBI autorise 10 req/s (vs 3 sans) : on resserre l'espacement
     # pour réduire la sérialisation du verrou global sur le trio PubMed/PROSPERO/Cochrane.
     min_interval = 0.11 if key else _NCBI_MIN_INTERVAL
+    _long = len(_up.urlencode({k: v for k, v in params.items() if v is not None})) > _NCBI_POST_ABOVE
     r = None
     last_exc: Exception | None = None
     for attempt in range(3):
@@ -67,7 +112,8 @@ def _ncbi_get(url: str, params: dict, timeout: int = 12):
             if wait > 0:
                 _time.sleep(wait)
             try:
-                r = _req.get(url, params=params, timeout=timeout)
+                r = (_req.post(url, data=params, timeout=timeout) if _long
+                     else _req.get(url, params=params, timeout=timeout))
             except Exception as _e:  # timeout / ConnectionError : transitoire → retry (cf. docstring)
                 last_exc = _e
                 r = None
@@ -100,6 +146,9 @@ def _live_fetch_pubmed(query: str, max_results: int) -> tuple[list[dict], int]:
         base = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
         r = _ncbi_get(f"{base}/esearch.fcgi", {
             "db": "pubmed", "term": query, "retmax": max_results,
+            # Le même ordre que le populate : le panneau montrait les plus récents pendant
+            # que le corpus gardait les plus pertinents, deux listes pour une requête.
+            "sort": "relevance",
             "retmode": "json", "tool": "literev", "email": "api@literev.app"
         })
         _esr = r.json().get("esearchresult", {})
@@ -213,8 +262,9 @@ def _live_fetch_europepmc(query: str, max_results: int) -> list[dict]:
         # NB : ne PAS passer sort=RELEVANCE - c'est une valeur invalide pour
         # EuropePMC qui renvoie alors une liste vide. Sans 'sort', l'API trie
         # par pertinence par défaut.
-        r = _req.get("https://www.ebi.ac.uk/europepmc/webservices/rest/search", params={
-            "query": query, "resultType": "lite", "pageSize": min(max_results, 50),
+        r = _req.get(EPMC_SEARCH_URL, params={
+            # Sans les tags de champ de PubMed, qu'Europe PMC apparie comme du texte.
+            "query": epmc_query(query), "resultType": "lite", "pageSize": min(max_results, 50),
             "format": "json"
         }, headers={"User-Agent": "LiteRev/1.0 (mailto:api@literev.app)"}, timeout=10)
         r.raise_for_status()      # un 429 ou un 500 n'est pas « aucun résultat »
@@ -244,8 +294,8 @@ def _live_fetch_preprints(query: str, max_results: int) -> list[dict]:
     import requests as _req
     results = []
     try:
-        r = _req.get("https://www.ebi.ac.uk/europepmc/webservices/rest/search", params={
-            "query": f"({query}) AND (SRC:PPR)", "resultType": "lite",
+        r = _req.get(EPMC_SEARCH_URL, params={
+            "query": f"({epmc_query(query)}) AND (SRC:PPR)", "resultType": "lite",
             "pageSize": min(max_results, 50), "format": "json",
         }, headers={"User-Agent": "LiteRev/1.0 (mailto:api@literev.app)"}, timeout=10)
         r.raise_for_status()      # un 429 ou un 500 n'est pas « aucun résultat »
@@ -748,8 +798,8 @@ def sources_health(query: str = "cardiac arrest", timeout: int = 12) -> dict[str
         ("Crossref", "https://api.crossref.org/works",
          {"query": query, "rows": 1, "select": "DOI,title"}, ua,
          lambda j: j.get("message", {}).get("total-results")),
-        ("EuropePMC", "https://www.ebi.ac.uk/europepmc/webservices/rest/search",
-         {"query": query, "resultType": "lite", "pageSize": 1, "format": "json"}, ua,
+        ("EuropePMC", EPMC_SEARCH_URL,
+         {"query": epmc_query(query), "resultType": "lite", "pageSize": 1, "format": "json"}, ua,
          lambda j: j.get("hitCount")),
         ("bioRxiv/medRxiv", "https://api.biorxiv.org/details/biorxiv/2024-01-01/2024-01-07/0/json",
          None, ua,

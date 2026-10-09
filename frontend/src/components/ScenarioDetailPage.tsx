@@ -4426,9 +4426,20 @@ function PrismaSection({ scenarioId }: { scenarioId: string }) {
             <div className="flex flex-wrap gap-1.5 pt-1 border-t border-white/5">
               {activeSources.map(([src, cnt]) => (
                 <span key={src}
-                      title={outcomes[src] ? t(`scenarioDetail.prisma.outcome.${outcomes[src]}`) : undefined}
+                      // La RAISON de l'échec dans l'infobulle : l'issue était servie nue,
+                      // et diagnostiquer « openalex : échec » demandait les journaux du
+                      // serveur.
+                      title={[outcomes[src] ? t(`scenarioDetail.prisma.outcome.${outcomes[src]}`) : null,
+                              ident.source_error_reasons?.[src] || null]
+                        .filter(Boolean).join(" : ") || undefined}
                       className={`rounded px-2 py-0.5 text-[10px] font-mono ${outcomeStyle(outcomes[src])}`}>
                   {SOURCE_LABELS_MAP[src] ?? src.toUpperCase()} {cnt.toLocaleString()}
+                  {/* « n / total » quand l'API a annoncé plus que ce qu'on a gardé : au
+                      plafond par source, le compte seul se lisait comme le total. */}
+                  {(ident.source_totals?.[src] ?? 0) > cnt
+                    ? ` / ${(ident.source_totals?.[src] ?? 0).toLocaleString()}`
+                    : ""}
+                  {ident.sources_capped?.includes(src) ? ` · ${t("scenarioDetail.prisma.capped")}` : ""}
                   {outcomes[src] && !SEARCHED.has(outcomes[src])
                     ? ` · ${t(`scenarioDetail.prisma.outcome.${outcomes[src]}`)}`
                     : ""}
@@ -4442,6 +4453,35 @@ function PrismaSection({ scenarioId }: { scenarioId: string }) {
               {notSearched.length > 0 && t("scenarioDetail.prisma.coverageIncomplete")
                 .replace("{sources}", notSearched.map((s) => SOURCE_LABELS_MAP[s] ?? s).join(", "))}
               {ident.federation_incomplete ? ` ${t("scenarioDetail.prisma.federationIncomplete")}` : ""}
+              {/* La raison, en clair sous le paragraphe : une infobulle ne se cite pas
+                  dans un rapport, et c'est ce paragraphe qu'un relecteur recopie. */}
+              {Object.entries(ident.source_error_reasons ?? {}).map(([src, why]) => (
+                <span key={src} className="block text-rose-300/70">
+                  {(SOURCE_LABELS_MAP[src] ?? src)} : {why}
+                </span>
+              ))}
+            </p>
+          )}
+          {/* La stratégie RÉELLEMENT soumise, quand elle n'a pas été la même pour toutes.
+              Sans cette ligne, les notices des sources en repli se lisaient comme le
+              produit de la requête booléenne affichée au-dessus. */}
+          {/* Le plafond, nommé : « pubmed 2 000 » se lisait comme un total. Cinq sources
+              étaient au plafond sur le scénario de contrôle de production, sans un mot. */}
+          {(ident.sources_capped?.length ?? 0) > 0 && (
+            <p className="text-[10px] text-amber-300/80 pt-1 leading-relaxed">
+              {t("scenarioDetail.prisma.cappedNote")
+                .replace("{sources}", (ident.sources_capped ?? [])
+                  .map((s) => `${SOURCE_LABELS_MAP[s] ?? s} (${num(ident.by_source?.[s]).toLocaleString()} / ${num(ident.source_totals?.[s]).toLocaleString()})`)
+                  .join(", "))
+                .replace("{cap}", (ident.per_source_cap ?? 0).toLocaleString())}
+            </p>
+          )}
+          {(ident.keyword_fallback_sources?.length ?? 0) > 0 && (
+            <p className="text-[10px] text-amber-300/80 pt-1 leading-relaxed">
+              {t("scenarioDetail.prisma.keywordFallback")
+                .replace("{sources}", (ident.keyword_fallback_sources ?? [])
+                  .map((s) => SOURCE_LABELS_MAP[s] ?? s).join(", "))
+                .replace("{keywords}", ident.keyword_fallback_query || "")}
             </p>
           )}
           {ident.per_source_cap != null && (

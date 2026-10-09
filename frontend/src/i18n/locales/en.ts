@@ -800,9 +800,12 @@ export const en: Translations = {
       sourcesSearchedOfLaunched: "{searched} of {launched} sources searched",
       identifiedDatabases: "Identified from databases searched",
       identifiedLibrary: "Already in the local library",
-      coverageIncomplete: "Incomplete search: {sources} returned no answer for this query.",
+      coverageIncomplete: "Incomplete search: {sources} were not searched to completion (a failure, a missing API key, or the time budget cut them off). Whatever they returned before that stays in the table; their count is not a total.",
       federationIncomplete: "The federation time budget was reached: some sources were cut off mid-pagination.",
       perSourceCap: "cap applied: {cap} records per source",
+      keywordFallback: "Degraded strategy for {sources}: the boolean query exceeds these APIs' URL limit, so they received the keywords \"{keywords}\". Their records are therefore not the product of the boolean query above.",
+      capped: "capped",
+      cappedNote: "Cap reached for {sources}: these APIs announce more records than the {cap} per source retrieved. PubMed, OpenAlex and Europe PMC are queried by relevance: what was kept is each source's {cap} most relevant records, not its most recent.",
       outcome: {
         ok: "answered",
         empty: "no results",

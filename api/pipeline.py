@@ -46,16 +46,19 @@ from .search import (
     _set_scenario_corpus,
     _source_label,
     _store_prisma_identification,
+    source_record_keys,
     _strip_field_tags,
     _tokenize_boolean,
     _widen_boolean_for_or_facets,
 )
 from .sources import (
+    EPMC_SEARCH_URL,
     _NCBI_LAST,
     _NCBI_LOCK,
     _NCBI_MIN_INTERVAL,
     _ingest_doc_direct,
     _ncbi_get,
+    epmc_query,
     _parse_arxiv,
     _parse_biorxiv,
     _parse_clinicaltrials,
@@ -277,7 +280,9 @@ def _run_user_scenario_populate(
     # prochaine relance de la même requête, et les fetchers tombés en erreur.
     _tls = threading.local()
     _run_links: dict[str, list] = {}
-    _fetcher_errors: set[str] = set()
+    # Sources en ÉCHEC, et la raison de chacune : l'issue `error` était servie nue, donc
+    # la carte PRISMA disait « échec » sans dire de quoi.
+    _fetcher_errors: dict[str, str] = {}
     # Sources écartées SANS appel réseau, et pourquoi. Une source sans clé d'API n'a pas
     # répondu « rien » : elle n'a pas été interrogée. Les deux se lisaient pareil dans la
     # ligne de couverture, et le cache des sources mémorisait même la non-interrogation
@@ -289,13 +294,33 @@ def _run_user_scenario_populate(
     # source coupée revenait avec 0 et sans erreur, donc d'issue `empty` : « rien dans la
     # littérature » pour une source qu'on avait cessé de lire.
     _fetcher_cut: set[str] = set()
+    # Le TOTAL VRAI que chaque API annonce pour la requête (le compteur du site), quand
+    # elle en annonce un. Au plafond par source, une ligne « pubmed 2 000 » se lisait comme
+    # un total ; c'est un plancher, et le vrai nombre est ici. Cinq sources l'atteignaient
+    # sur le scénario de contrôle de production sans que rien ne le dise.
+    _source_totals: dict[str, int] = {}
 
-    def _mark_source_error():
+    def _note_total(source: str, total) -> None:
+        try:
+            _t = int(total)
+        except (TypeError, ValueError):
+            return
+        if _t >= 0:
+            with _counter_lock:
+                _source_totals[source] = max(_t, _source_totals.get(source, 0))
+
+    def _mark_source_error(reason: object = None):
+        """Cette source a ÉCHOUÉ, et pourquoi.
+
+        L'issue `error` était servie nue : la carte PRISMA affichait « openalex : échec »
+        sans rien de plus, et diagnostiquer demandait de retrouver la ligne de journal du
+        serveur. La raison est désormais enregistrée avec l'issue et servie avec elle."""
         _source_errors[0] += 1
         _f = getattr(_tls, "fetcher", None)
         if _f:
             with _counter_lock:
-                _fetcher_errors.add(_f)
+                _fetcher_errors[_f] = (str(reason)[:200] if reason is not None
+                                       else _fetcher_errors.get(_f) or "")
 
     def _mark_source_skipped(reason: str):
         """Cette source n'a pas été interrogée. À dire, pas à compter comme vide."""
@@ -425,6 +450,12 @@ def _run_user_scenario_populate(
     # Le seuil sémantique n'intervient QUE dans la page scénario pour sélectionner
     # le sous-ensemble pertinent (_get_above_threshold_articles).
     local_linked = 0
+    # Lié ICI et non dans le try : les chiffres PRISMA, écrits bien plus bas dans un AUTRE
+    # bloc, les lisent. Assignés seulement dans le try, une exception avant leur ligne les
+    # laissait non liés, et le NameError, avalé par le try du bloc PRISMA, faisait sauter
+    # l'enregistrement des chiffres sans trace.
+    _kw_fallback: list[str] = []
+    _plain_q = query
     try:
         # Le corpus = résultat de la REQUÊTE BOOLÉENNE (générée par LLM). On
         # récupère search_strategy.general ; à défaut on la génère depuis la requête.
@@ -483,6 +514,10 @@ def _run_user_scenario_populate(
         # leur envoie donc le booléen PORTABLE (tags de champ PubMed retirés) au lieu de
         # mots-clés aplatis, et on les traite en SOURCE-UNION. Repli mots-clés si pas de vrai
         # booléen (mode dégradé) ou si l'URL dépasse ~4 Ko (limite OpenAlex).
+        # Europe PMC et ses preprints : SANS les tags de champ de PubMed, qu'elle apparie
+        # comme du texte. 2 398 notices sans tags contre 3 avec, mesure faite sur la sonde
+        # de production : les tags coutaient 99,9 % du rappel de cette source.
+        _epmc_q = epmc_query(_boolean)
         _portable_bool = _strip_field_tags(_boolean).strip()
         _bool_is_real = bool(_portable_bool) and _looks_boolean(_portable_bool)
         _send_bool = _bool_is_real and len(_portable_bool) <= 1200
@@ -495,6 +530,17 @@ def _run_user_scenario_populate(
                     _arxiv_q, _arxiv_native = _ax, True
             except Exception:
                 pass
+        # Les sources qui ont reçu des MOTS-CLÉS et non le booléen, à DIRE : PRISMA-S
+        # demande la stratégie réellement soumise à chaque base, et le tableau
+        # d'identification présentait leurs notices comme le produit d'une recherche
+        # booléenne. Un booléen portable de plus de 1 200 caractères y basculait les cinq
+        # sources ci-dessous en silence.
+        _kw_fallback = ([] if _send_bool else ["openalex", "doaj", "core", "clinicaltrials"]) \
+            + ([] if _arxiv_native else ["arxiv"])
+        if _kw_fallback:
+            logger.info(f"Populate {scenario_id}: repli mots-clés pour {', '.join(_kw_fallback)} "
+                        f"(booléen portable de {len(_portable_bool)} caractères) ; "
+                        f"mots-clés soumis = « {_plain_q} »")
         # PubMed RECALL : la requête MeSH générée par le LLM (_pubmed_q) est parfois
         # BEAUCOUP plus étroite que le booléen général - p. ex. 35 résultats contre 306
         # pour le même booléen collé sur le site PubMed. On interroge donc PubMed sur
@@ -569,13 +615,19 @@ def _run_user_scenario_populate(
             # n'insérer aucune ligne (ON CONFLICT) : la quasi-totalité du trafic PubMed.
             r = _ncbi_get(
                 f"{ENTREZ_BASE}/esearch.fcgi",
+                # `sort=relevance` (le « Best Match » de PubMed) : au plafond par source, on
+                # garde les plus PERTINENTS, comme OpenAlex et Europe PMC. Trié par date
+                # jusqu'ici, PubMed plafonné gardait les 2 000 plus récents et perdait la
+                # littérature H5N1 de 2004 à 2012 ; même plafond, deux politiques. Décision
+                # de méthode prise par le propriétaire du projet, pas un correctif.
                 {"db": "pubmed", "term": _pubmed_q, "retmax": max(0, min(int(max_results), 10000)),
-                 "sort": "pub_date", "retmode": "json", "email": EMAIL},
+                 "sort": "relevance", "retmode": "json", "email": EMAIL},
                 timeout=30,
             )
             r.raise_for_status()
             search_result = r.json()["esearchresult"]
             total_found = int(search_result.get("count", 0))
+            _note_total("pubmed", total_found)
             if _pipeline_callback:
                 _pipeline_callback("pubmed_found", total_found)
             _pmids = [str(p).strip() for p in (search_result.get("idlist") or []) if str(p).strip()]
@@ -655,7 +707,7 @@ def _run_user_scenario_populate(
                     # complet et sa liste amputée était mémorisée dans le cache des
                     # sources, donc rejouée telle quelle pendant douze heures.
                     logger.warning(f"PubMed efetch batch {batch_idx}: {_e_fetch}")
-                    _mark_source_error()
+                    _mark_source_error(_e_fetch)
                     _time.sleep(1)
                     continue
                 root = ET.fromstring(r2.content)
@@ -712,7 +764,7 @@ def _run_user_scenario_populate(
                         _inc("pubmed", 0, 1)
         except Exception as _e:
             logger.warning(f"PubMed populate {scenario_id}: {_e}")
-            _mark_source_error()
+            _mark_source_error(_e)
         return ("pubmed", count)
 
     def _fetch_openalex():
@@ -730,12 +782,20 @@ def _run_user_scenario_populate(
                     # sort=relevance_score:desc → quand on plafonne à max_results, on garde
                     # les 2000 LES PLUS PERTINENTS (BM25 OpenAlex) et non les plus récents.
                     # OpenAlex ordonne par pertinence par défaut sous `search` ; on l'explicite.
-                    params={"search": _bool_query, "per_page": _oa_batch, "page": _oa_page,
+                    # `per-page`, avec un TRAIT D'UNION : c'est le nom du paramètre chez
+                    # OpenAlex, et celui qu'emploient les deux autres appels de ce dépôt
+                    # (recherche en direct, sonde de diagnostic). Seul celui-ci, qui
+                    # construit le corpus, écrivait `per_page` : OpenAlex refuse un
+                    # paramètre inconnu, et c'est un candidat direct à l'issue `error`
+                    # relevée sur une recherche de contrôle en production.
+                    params={"search": _bool_query, "per-page": _oa_batch, "page": _oa_page,
                             "sort": "relevance_score:desc", "mailto": "literev@gesica.ch"},
                     timeout=20,
                 )
                 oa_resp.raise_for_status()
-                _oa_results = oa_resp.json().get("results", [])
+                _oa_json = oa_resp.json()
+                _note_total("openalex", (_oa_json.get("meta") or {}).get("count"))
+                _oa_results = _oa_json.get("results", [])
                 if not _oa_results:
                     break
                 for work in _oa_results:
@@ -778,7 +838,7 @@ def _run_user_scenario_populate(
                 _time.sleep(0.3)
         except Exception as _e:
             logger.warning(f"OpenAlex populate {scenario_id}: {_e}")
-            _mark_source_error()
+            _mark_source_error(_e)
         return ("openalex", count)
 
     def _fetch_crossref():
@@ -803,7 +863,9 @@ def _run_user_scenario_populate(
                     timeout=20,
                 )
                 cr_resp.raise_for_status()
-                _cr_items = cr_resp.json().get("message", {}).get("items", [])
+                _cr_msg = cr_resp.json().get("message", {})
+                _note_total("crossref", _cr_msg.get("total-results"))
+                _cr_items = _cr_msg.get("items", [])
                 if not _cr_items:
                     break
                 for item in _cr_items:
@@ -844,7 +906,7 @@ def _run_user_scenario_populate(
                 _time.sleep(0.3)
         except Exception as _e:
             logger.warning(f"Crossref populate {scenario_id}: {_e}")
-            _mark_source_error()
+            _mark_source_error(_e)
         return ("crossref", count)
 
     def _fetch_europepmc():
@@ -858,16 +920,17 @@ def _run_user_scenario_populate(
                 if _budget_exhausted():
                     break  # budget fédération dépassé - on arrête de paginer
                 ep_resp = _requests.get(
-                    "https://www.ebi.ac.uk/europepmc/webservices/rest/search",
+                    EPMC_SEARCH_URL,
                     # Pas de tri par date : on laisse le tri par PERTINENCE (défaut Europe PMC)
                     # → au plafond de 2000, on garde les plus pertinents et non les plus récents.
-                    params={"query": _boolean, "format": "json", "pageSize": _ep_page_size,
+                    params={"query": _epmc_q, "format": "json", "pageSize": _ep_page_size,
                             "resultType": "core",
                             "cursorMark": _ep_cursor_mark},
                     timeout=20,
                 )
                 ep_resp.raise_for_status()
                 _ep_data = ep_resp.json()
+                _note_total("europepmc", _ep_data.get("hitCount"))
                 _ep_results = _ep_data.get("resultList", {}).get("result", [])
                 if not _ep_results:
                     break
@@ -914,7 +977,7 @@ def _run_user_scenario_populate(
                 _time.sleep(0.3)
         except Exception as _e:
             logger.warning(f"EuropePMC populate {scenario_id}: {_e}")
-            _mark_source_error()
+            _mark_source_error(_e)
         return ("europepmc", count)
 
     def _fetch_preprints():
@@ -925,12 +988,12 @@ def _run_user_scenario_populate(
         try:
             _pp_cursor = "*"
             _pp_fetched = 0
-            _pp_query = f"({_boolean}) AND (SRC:PPR)"
+            _pp_query = f"({_epmc_q}) AND (SRC:PPR)"
             while _pp_fetched < max_results:
                 if _budget_exhausted():
                     break  # budget fédération dépassé
                 _pp_resp = _requests.get(
-                    "https://www.ebi.ac.uk/europepmc/webservices/rest/search",
+                    EPMC_SEARCH_URL,
                     params={"query": _pp_query, "format": "json", "pageSize": 100,
                             "resultType": "core", "sort": "P_PDATE_D desc",
                             "cursorMark": _pp_cursor},
@@ -983,7 +1046,7 @@ def _run_user_scenario_populate(
                 _time.sleep(0.3)
         except Exception as _e:
             logger.warning(f"Préprints (Europe PMC) populate {scenario_id}: {_e}")
-            _mark_source_error()
+            _mark_source_error(_e)
         return ("preprints", count)
 
     def _ingest_parsed(source, docs, boolean_native=False):
@@ -1040,6 +1103,7 @@ def _run_user_scenario_populate(
                     _429 = 0                      # cette page est passée
                     _r.raise_for_status()
                     _payload = _r.json()
+                    _note_total("semantic_scholar", _payload.get("total"))
                     _n = len(_payload.get("data") or [])
                     count += _ingest_parsed("semantic_scholar", _parse_semantic_scholar(_payload),
                                             boolean_native=True)
@@ -1066,6 +1130,7 @@ def _run_user_scenario_populate(
                     _429 = 0                      # cette page est passée
                     _r.raise_for_status()
                     _payload = _r.json()
+                    _note_total("semantic_scholar", _payload.get("total"))
                     _got = len(_payload.get("data") or [])
                     count += _ingest_parsed("semantic_scholar", _parse_semantic_scholar(_payload))
                     if _got < _bulk:
@@ -1074,7 +1139,7 @@ def _run_user_scenario_populate(
                     _time.sleep(0.3)
         except Exception as _e:
             logger.warning(f"Semantic Scholar populate {scenario_id}: {_e}")
-            _mark_source_error()
+            _mark_source_error(_e)
         return ("semantic_scholar", count)
 
     def _fetch_doaj():
@@ -1094,6 +1159,7 @@ def _run_user_scenario_populate(
                 _n = len(_payload.get("results") or [])
                 if _n == 0:
                     break
+                _note_total("doaj", _payload.get("total"))
                 count += _ingest_parsed("doaj", _parse_doaj(_payload), boolean_native=_send_bool)
                 _fetched += _n
                 if _n < 100:
@@ -1102,7 +1168,7 @@ def _run_user_scenario_populate(
                 _time.sleep(0.3)
         except Exception as _e:
             logger.warning(f"DOAJ populate {scenario_id}: {_e}")
-            _mark_source_error()
+            _mark_source_error(_e)
         return ("doaj", count)
 
     def _fetch_clinicaltrials():
@@ -1129,7 +1195,7 @@ def _run_user_scenario_populate(
                 _time.sleep(0.3)
         except Exception as _e:
             logger.warning(f"ClinicalTrials.gov populate {scenario_id}: {_e}")
-            _mark_source_error()
+            _mark_source_error(_e)
         return ("clinicaltrials", count)
 
     def _fetch_core():
@@ -1171,7 +1237,7 @@ def _run_user_scenario_populate(
                 _time.sleep(0.3)
         except Exception as _e:
             logger.warning(f"CORE populate {scenario_id}: {_e}")
-            _mark_source_error()
+            _mark_source_error(_e)
         return ("core", count)
 
     def _fetch_arxiv():
@@ -1198,7 +1264,7 @@ def _run_user_scenario_populate(
                 _time.sleep(3)      # arXiv demande ≥3 s entre requêtes
         except Exception as _e:
             logger.warning(f"arXiv populate {scenario_id}: {_e}")
-            _mark_source_error()
+            _mark_source_error(_e)
         return ("arxiv", count)
 
     def _fetch_openaire():
@@ -1230,7 +1296,7 @@ def _run_user_scenario_populate(
                 _time.sleep(0.5)
         except Exception as _e:
             logger.warning(f"OpenAIRE (Graph API v2) populate {scenario_id}: {_e}")
-            _mark_source_error()
+            _mark_source_error(_e)
         return ("openaire", count)
 
     def _fetch_biorxiv_medrxiv():
@@ -1272,7 +1338,7 @@ def _run_user_scenario_populate(
                     _time.sleep(0.4)
         except Exception as _e:
             logger.warning(f"bioRxiv/medRxiv populate {scenario_id}: {_e}")
-            _mark_source_error()
+            _mark_source_error(_e)
         return ("biorxiv_medrxiv", count)
 
     # Lancer toutes les sources en parallèle
@@ -1342,7 +1408,7 @@ def _run_user_scenario_populate(
                     except Exception as _fe:
                         logger.warning(f"Populate {scenario_id} source future error: {_fe}")
                         with _counter_lock:
-                            _fetcher_errors.add(_fname)
+                            _fetcher_errors[_fname] = str(_fe)[:200]
             # CRITIQUE - sur Python <3.11, as_completed lève
             # concurrent.futures.TimeoutError (≠ TimeoutError natif). Sans
             # _FuturesTimeout dans le except, l'exception remontait, le bloc
@@ -1389,7 +1455,16 @@ def _run_user_scenario_populate(
                 # compte qui n'est pas un total, et son zéro qui ne vaut pas « rien ».
                 _outcome = "cut_by_budget"
             else:
-                _outcome = "ok" if _returned[_n] > 0 else "empty"
+                # Ce que la source a RENVOYÉ, et non les lignes qu'on en a insérées.
+                # `_returned` porte le compteur du fetcher, qui ne s'incrémente que sur une
+                # ligne NOUVELLE : une source dont les 500 notices étaient déjà toutes en
+                # bibliothèque rendait donc 0, et l'issue calculée était `empty`, c'est-à-dire
+                # « cette base n'a rien sur le sujet ». La carte affichait « openalex 500 ·
+                # aucun résultat », un compte et son démenti côte à côte.
+                with _counter_lock:
+                    _recs = sum(int(_ident_records.get(_k) or 0)
+                                for _k in source_record_keys(_n))
+                _outcome = "ok" if _recs > 0 else "empty"
             _fetcher_outcome[_n] = _outcome
             if _outcome in SOURCE_OUTCOMES_COUNTED:
                 _queried.add(_n)
@@ -1402,13 +1477,6 @@ def _run_user_scenario_populate(
 
     ingested = _ingested_total[0]
     errors = _errors_total[0]
-    # Les enregistrements que les sources ont RENVOYÉS, recoupements compris : le
-    # « identifiés » du PRISMA. `ingested` est un compteur de travail (lignes nouvelles),
-    # donc toujours inférieur dès qu'une source redonne un article qu'une autre a déjà
-    # donné ; servi sous le nom `total_found`, il annonçait un total trouvé plus petit
-    # que le nombre d'articles identifiés par la recherche.
-    with _counter_lock:
-        total_found = sum(_ident_records.values())
 
     # ── Corpus = correspondance BOOLÉENNE (ou multi-sous-requêtes) sur base enrichie ─
     # Après ingestion des articles live, on recalcule l'appartenance au corpus via
@@ -1421,6 +1489,16 @@ def _run_user_scenario_populate(
         # cette recherche (cf. _corpus_frozen). Le corpus et ses chiffres sont figés ensemble.
         with _corpus_lock:
             _corpus_frozen[0] = True
+            # Les enregistrements que les sources ont RENVOYÉS, recoupements compris : le
+            # « identifiés » du PRISMA. Lu APRÈS le gel, et sous les deux verrous dans
+            # l'ordre du reste du module (corpus puis compteurs) : lu avant, une source
+            # lente pouvait encore lier des notices entre la lecture et le gel, et le
+            # `total_found` servi au job était plus petit que le `records_identified`
+            # servi dans la même réponse. `ingested`, lui, ne compte que les lignes
+            # nouvelles : servi sous ce nom, il annonçait moins que ce que la recherche
+            # avait identifié.
+            with _counter_lock:
+                total_found = sum(_ident_records.values())
         # Appartenance = re-match booléen LOCAL (base locale ∪ live) pour les sources par
         # mots-clés + la base existante…
         if _sub_queries:
@@ -1513,6 +1591,7 @@ def _run_user_scenario_populate(
                 """), {"sid": scenario_id}).scalar() or 0
             with _counter_lock:
                 _recs_snapshot = dict(_ident_records)
+                _totals_snapshot = dict(_source_totals)
                 _ids_snapshot = list(_ident_docs)
             # Ventilation des documents identifiés mais ABSENTS du corpus : sans résumé
             # (règle qualité, appliquée avant la dédup - donc les lignes fusionnées par
@@ -1540,7 +1619,11 @@ def _run_user_scenario_populate(
                 # le tableau d'identification taisait les sources en échec ou coupées et
                 # annonçait quand même un nombre de sources interrogées.
                 source_outcomes=(dict(_fetcher_outcome) if include_live else {}),
-                per_source_cap=int(max_results))
+                per_source_cap=int(max_results),
+                keyword_fallback_sources=(list(_kw_fallback) if include_live else []),
+                keyword_fallback_query=(_plain_q if (include_live and _kw_fallback) else None),
+                source_error_reasons=(dict(_fetcher_errors) if include_live else {}),
+                source_totals=(_totals_snapshot if include_live else {}))
             _store_prisma_identification(scenario_id, _figures)
             # Le même total pour tout le monde : le statut du job expose le corpus
             # RETENU (= article_count = « passés au screening » du PRISMA), et non le
