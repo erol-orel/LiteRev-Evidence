@@ -387,27 +387,31 @@ def _boolean_to_s2(ast) -> str | None:
     return None
 
 
-def _positive_boolean(ast):
-    """L'arbre sans ses exclusions, aplati, chaque bloc sans doublon.
+def _positive_boolean(ast, keep_not: bool = False):
+    """L'arbre aplati, chaque bloc sans doublon, et sans ses exclusions sauf `keep_not`.
 
     Base de la requête RÉDUITE : un `NOT` n'a pas d'équivalent sûr sur arXiv ni sur
     Semantic Scholar, et le ré-appariement local applique de toute façon la requête
     entière, exclusions comprises. Les OU imbriqués (« ((A OU B) OU C) OU D ») sont fondus
     en un seul bloc pour que la troncature compte des termes, pas des niveaux ; et
     « Environmental Exposure » suivi de « Environmental Exposure* » ne fait qu'un terme
-    une fois l'étoile retirée. PUR/testable."""
+    une fois l'étoile retirée. Avec `keep_not`, les exclusions restent (la forme PROPRE du
+    booléen entier, pour les API qui acceptent NOT). PUR/testable."""
     if not isinstance(ast, tuple):
         return None
     typ = ast[0]
     if typ == "term":
         return ast if str(ast[1]).rstrip("*").strip() else None
     if typ == "not":
-        return None
+        if not keep_not:
+            return None
+        inner = _positive_boolean(ast[1], keep_not=True)
+        return ("not", inner) if inner is not None else None
     if typ in ("and", "or"):
         children: list = []
         seen: set = set()
         for child in ast[1]:
-            sub = _positive_boolean(child)
+            sub = _positive_boolean(child, keep_not=keep_not)
             if sub is None:
                 continue
             parts = sub[1] if (isinstance(sub, tuple) and sub[0] == typ) else [sub]
@@ -471,7 +475,8 @@ def _boolean_to_generic(ast, top: bool = True) -> str | None:
         _t = " ".join(str(ast[1]).rstrip("*").split())
         return f'"{_t}"' if " " in _t else _t
     if typ == "not":
-        return None
+        inner = _boolean_to_generic(ast[1], top=False)
+        return f"NOT {inner}" if inner else None
     if typ in ("and", "or"):
         parts = [_boolean_to_generic(c, top=False) for c in ast[1]]
         if any(p is None for p in parts):
@@ -479,6 +484,24 @@ def _boolean_to_generic(ast, top: bool = True) -> str | None:
         body = (" AND " if typ == "and" else " OR ").join(parts)
         return body if top else "(" + body + ")"
     return None
+
+
+def _clean_boolean(portable: str) -> str:
+    """Le booléen ENTIER, exclusions comprises, dans la syntaxe propre que les API
+    acceptent dans une URL : AND/OR/NOT en capitales, phrases entre guillemets, un seul
+    espace, pas d'étoile. "" si rien n'en sort.
+
+    Mesuré sur le scénario HPAI_last de production : OpenAlex et DOAJ ont répondu 400 au
+    booléen portable brut (« ( "Occupational Exposure" OR "occupational*" OR "farm
+    worker*" ... »), pendant que CORE et ClinicalTrials.gov l'acceptaient ; la requête de
+    contrôle, sans troncature, passait chez les quatre. L'étoile de troncature n'a pas de
+    sens pour ces moteurs, qui racinisent ; elle part, et le reste est rendu depuis
+    l'arbre, pas recopié. PUR/testable."""
+    try:
+        ast = _positive_boolean(_parse_boolean_ast(_tokenize_boolean(portable or "")), keep_not=True)
+    except Exception:                                    # noqa: BLE001
+        return ""
+    return (_boolean_to_generic(ast) or "") if ast is not None else ""
 
 
 #: OpenAIRE (Graph API v2) refuse toute recherche de plus de QUATRE opérateurs logiques :
