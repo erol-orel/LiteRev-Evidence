@@ -801,6 +801,7 @@ export const fr = {
       coverageIncomplete: "Recherche incomplète : {sources} n'ont pas livré de réponse à cette requête.",
       federationIncomplete: "Le budget de temps de la fédération a été atteint : des sources ont été coupées en cours de pagination.",
       perSourceCap: "plafond appliqué : {cap} enregistrements par source",
+      keywordFallback: "Stratégie dégradée pour {sources} : la requête booléenne dépasse la limite d'URL de ces API, elles ont reçu les mots-clés « {keywords} ». Leurs enregistrements ne sont donc pas le produit de la requête booléenne ci-dessus.",
       outcome: {
         ok: "a répondu",
         empty: "aucun résultat",

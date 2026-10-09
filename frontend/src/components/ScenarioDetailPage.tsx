@@ -4444,6 +4444,17 @@ function PrismaSection({ scenarioId }: { scenarioId: string }) {
               {ident.federation_incomplete ? ` ${t("scenarioDetail.prisma.federationIncomplete")}` : ""}
             </p>
           )}
+          {/* La stratégie RÉELLEMENT soumise, quand elle n'a pas été la même pour toutes.
+              Sans cette ligne, les notices des sources en repli se lisaient comme le
+              produit de la requête booléenne affichée au-dessus. */}
+          {(ident.keyword_fallback_sources?.length ?? 0) > 0 && (
+            <p className="text-[10px] text-amber-300/80 pt-1 leading-relaxed">
+              {t("scenarioDetail.prisma.keywordFallback")
+                .replace("{sources}", (ident.keyword_fallback_sources ?? [])
+                  .map((s) => SOURCE_LABELS_MAP[s] ?? s).join(", "))
+                .replace("{keywords}", ident.keyword_fallback_query || "")}
+            </p>
+          )}
           {ident.per_source_cap != null && (
             <div className="text-center text-[9px] text-emerald-300/40">
               {t("scenarioDetail.prisma.perSourceCap").replace("{cap}", ident.per_source_cap.toLocaleString())}

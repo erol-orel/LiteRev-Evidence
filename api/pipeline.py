@@ -425,6 +425,12 @@ def _run_user_scenario_populate(
     # Le seuil sémantique n'intervient QUE dans la page scénario pour sélectionner
     # le sous-ensemble pertinent (_get_above_threshold_articles).
     local_linked = 0
+    # Lié ICI et non dans le try : les chiffres PRISMA, écrits bien plus bas dans un AUTRE
+    # bloc, les lisent. Assignés seulement dans le try, une exception avant leur ligne les
+    # laissait non liés, et le NameError, avalé par le try du bloc PRISMA, faisait sauter
+    # l'enregistrement des chiffres sans trace.
+    _kw_fallback: list[str] = []
+    _plain_q = query
     try:
         # Le corpus = résultat de la REQUÊTE BOOLÉENNE (générée par LLM). On
         # récupère search_strategy.general ; à défaut on la génère depuis la requête.
@@ -495,6 +501,17 @@ def _run_user_scenario_populate(
                     _arxiv_q, _arxiv_native = _ax, True
             except Exception:
                 pass
+        # Les sources qui ont reçu des MOTS-CLÉS et non le booléen, à DIRE : PRISMA-S
+        # demande la stratégie réellement soumise à chaque base, et le tableau
+        # d'identification présentait leurs notices comme le produit d'une recherche
+        # booléenne. Un booléen portable de plus de 1 200 caractères y basculait les cinq
+        # sources ci-dessous en silence.
+        _kw_fallback = ([] if _send_bool else ["openalex", "doaj", "core", "clinicaltrials"]) \
+            + ([] if _arxiv_native else ["arxiv"])
+        if _kw_fallback:
+            logger.info(f"Populate {scenario_id}: repli mots-clés pour {', '.join(_kw_fallback)} "
+                        f"(booléen portable de {len(_portable_bool)} caractères) ; "
+                        f"mots-clés soumis = « {_plain_q} »")
         # PubMed RECALL : la requête MeSH générée par le LLM (_pubmed_q) est parfois
         # BEAUCOUP plus étroite que le booléen général - p. ex. 35 résultats contre 306
         # pour le même booléen collé sur le site PubMed. On interroge donc PubMed sur
@@ -1540,7 +1557,9 @@ def _run_user_scenario_populate(
                 # le tableau d'identification taisait les sources en échec ou coupées et
                 # annonçait quand même un nombre de sources interrogées.
                 source_outcomes=(dict(_fetcher_outcome) if include_live else {}),
-                per_source_cap=int(max_results))
+                per_source_cap=int(max_results),
+                keyword_fallback_sources=(list(_kw_fallback) if include_live else []),
+                keyword_fallback_query=(_plain_q if (include_live and _kw_fallback) else None))
             _store_prisma_identification(scenario_id, _figures)
             # Le même total pour tout le monde : le statut du job expose le corpus
             # RETENU (= article_count = « passés au screening » du PRISMA), et non le

@@ -803,6 +803,7 @@ export const en: Translations = {
       coverageIncomplete: "Incomplete search: {sources} returned no answer for this query.",
       federationIncomplete: "The federation time budget was reached: some sources were cut off mid-pagination.",
       perSourceCap: "cap applied: {cap} records per source",
+      keywordFallback: "Degraded strategy for {sources}: the boolean query exceeds these APIs' URL limit, so they received the keywords \"{keywords}\". Their records are therefore not the product of the boolean query above.",
       outcome: {
         ok: "answered",
         empty: "no results",

@@ -1155,6 +1155,12 @@ export interface ScenarioPrisma {
     records_identified_databases?: number;
     records_identified_library?: number;
     per_source_cap?: number | null;
+    /** The sources that received KEYWORDS instead of the boolean query, and the keywords
+     *  they received. Past 1200 characters of portable boolean, five of the twelve fall
+     *  back (OpenAlex's URL limit) and nothing said so, while PRISMA-S requires the
+     *  strategy actually submitted to each database. */
+    keyword_fallback_sources?: string[];
+    keyword_fallback_query?: string | null;
     /** "populate" = sources were searched; "rebuild" = the boolean query was replayed
      *  over the local library and nothing was searched. The panel called both a search. */
     method?: string;

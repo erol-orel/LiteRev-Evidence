@@ -857,7 +857,9 @@ def _prisma_identification_figures(records_by_source: dict, unique_records: int,
                                    removed_not_matching: int = 0,
                                    source_outcomes: dict | None = None,
                                    per_source_cap: int | None = None,
-                                   records_from_library: int = 0) -> dict[str, Any]:
+                                   records_from_library: int = 0,
+                                   keyword_fallback_sources: list | None = None,
+                                   keyword_fallback_query: str | None = None) -> dict[str, Any]:
     """Chiffres PRISMA 2020 de l'étape « identification », calculés à partir de ce qu'une
     recherche a RÉELLEMENT ramené - et non du corpus déjà dédupliqué.
 
@@ -885,6 +887,15 @@ def _prisma_identification_figures(records_by_source: dict, unique_records: int,
                              dans « bases de données interrogées » : les y compter
                              gonflait les identifiés ET les doublons de tout article
                              trouvé à la fois en local et en ligne.
+    keyword_fallback_*     : les sources qui ont reçu des MOTS-CLÉS et non la requête
+                             booléenne, et ces mots-clés. Au-delà de 1 200 caractères de
+                             booléen portable, cinq sources sur douze basculent en repli
+                             (limite d'URL d'OpenAlex). Rien ne le disait : le tableau
+                             montrait leurs notices sous l'étiquette d'une recherche
+                             booléenne, et PRISMA-S demande la stratégie RÉELLEMENT
+                             soumise à chaque base. Sur le scénario HPAI, arXiv et CORE
+                             ont ainsi rapporté 12 438 notices à une requête de huit mots
+                             dont aucun ne nommait la grippe.
 
     PRISMA 2020 : identifiés → doublons retirés → (retirés pour d'autres raisons) →
     passés au screening. « Autres raisons » ici : pas de résumé, ou enregistrement d'une
@@ -933,6 +944,10 @@ def _prisma_identification_figures(records_by_source: dict, unique_records: int,
         "source_outcomes": outcomes,
         "sources_launched": len(outcomes),
         "sources_searched": searched,
+        # La stratégie RÉELLEMENT soumise, quand elle n'a pas été la même pour toutes :
+        # les sources en repli mots-clés, et les mots-clés qu'elles ont reçus.
+        "keyword_fallback_sources": sorted({_source_label(s) for s in (keyword_fallback_sources or [])}),
+        "keyword_fallback_query": str(keyword_fallback_query or "") or None,
         "sources_ok": by_outcome["ok"],
         "sources_empty": by_outcome["empty"],
         "sources_cached": by_outcome["cached"],
@@ -1094,24 +1109,104 @@ def _count_corpus_duplicates(conn, project_context: str | None = None) -> int:
 # Live federated search
 # ─────────────────────────────────────────────────────────────────────────────
 
+#: Mots que la syntaxe de PubMed laisse derrière elle (les crochets retirés, le tag
+#: reste un mot) et liaisons sans valeur de recherche. « mh » et « tiab » cherchés comme
+#: des termes, c'est ce que cinq sources sur douze ont reçu du scénario HPAI.
+_TAG_WORDS = {
+    "mh", "majr", "tiab", "ti", "ab", "tw", "dp", "pt", "la", "sb", "mesh", "terms",
+    "title", "abstract", "noexp", "publication", "type", "all", "fields", "author",
+    "journal", "subheading", "supplementary", "concept", "words",
+}
+_FILLER_WORDS = {"a", "an", "the", "of", "in", "on", "to", "and", "or", "not", "by",
+                 "for", "with", "at", "as", "is", "are"}
+
+
+def _terms_in_order(node) -> list[str]:
+    """Les termes d'un sous-arbre, dans l'ordre, ceux sous un NOT exclus.
+
+    Un terme nié est ce que la requête REFUSE : le repli mots-clés le cherchait, parce
+    qu'il se contentait de retirer le mot « not » et de garder ses voisins. Une requête
+    « ... NOT H1N1 » demandait donc du H1N1 aux sources en repli."""
+    if not isinstance(node, tuple):
+        return []
+    if node[0] == "term":
+        return [node[1]]
+    if node[0] == "not":
+        return []
+    if node[0] in ("and", "or"):
+        out: list[str] = []
+        for child in node[1]:
+            out.extend(_terms_in_order(child))
+        return out
+    return []
+
+
 def _plain_keywords(query: str, max_words: int = 8) -> str:
     """Convertit une requête booléenne en mots-clés simples pour les API qui
     n'acceptent PAS la syntaxe booléenne (OpenAlex `search` renvoie 400, les
-    serveurs de prépublications n'ont pas de recherche plein-texte). On retire
-    les opérateurs AND/OR/NOT, parenthèses, guillemets et jokers, en gardant
-    les termes significatifs uniques."""
+    serveurs de prépublications n'ont pas de recherche plein-texte).
+
+    Les mots sont pris UN PAR CONJONCTION, à tour de rôle, et non dans l'ordre du texte.
+    La version positionnelle gardait les `max_words` premiers mots, donc le PREMIER bloc
+    de concept et lui seul : sur le scénario HPAI, une requête de 3 075 caractères
+    structurée en « (exposition OU fomites OU transmission OU perception) ET (virus
+    aviaires) SAUF H1N1 » devenait « environmental exposure mh tiab exposure,
+    occupational diseases disease ». Pas un terme de grippe. L'ancre de la revue, le bloc
+    ET qui dit de quelle maladie il s'agit, n'atteignait aucune des cinq sources en repli,
+    qui ont rapporté 6 644 notices depuis arXiv et 5 794 depuis CORE pour une revue sur la
+    grippe aviaire. Un tour de table garantit à chaque conjonction d'être représentée.
+
+    PUR/testable : aucune entrée/sortie."""
     import re as _re
-    raw = _re.sub(r'["()\[\]*]', " ", query or "")
-    words = []
-    for w in _re.split(r"\s+", raw):
-        wl = w.strip().lower()
-        if not wl or wl in ("and", "or", "not"):
-            continue
-        if wl not in words:
-            words.append(wl)
-        if len(words) >= max_words:
-            break
-    return " ".join(words)
+    # Les tags de champ D'ABORD : `_strip_field_tags` enlève `[mh]` en entier, là où un
+    # simple retrait des crochets laissait `mh` dans les mots cherchés.
+    plain = _strip_field_tags(query or "")
+
+    groups: list[list[str]] = []
+    parsed = False
+    try:
+        ast = _parse_boolean_ast(_tokenize_boolean(plain))
+        if ast is not None:
+            parsed = True
+            if isinstance(ast, tuple) and ast[0] == "and":
+                groups = [_terms_in_order(child) for child in ast[1]]
+            else:
+                groups = [_terms_in_order(ast)]
+    except Exception:                                    # noqa: BLE001 - repli positionnel
+        parsed = False
+    groups = [g for g in groups if g]
+    # L'arbre a été lu et ne contient AUCUN terme positif (« NOT "H5N1" ») : la réponse est
+    # « rien ». Retomber sur le balayage positionnel rendrait justement le terme nié, qui
+    # est l'ancien bug : il retirait le mot « not » et gardait ses voisins.
+    if parsed and not groups:
+        return ""
+
+    def _add(word: str, into: list[str]) -> None:
+        wl = word.strip().lower().strip(",;:.")
+        if not wl or wl in _TAG_WORDS or wl in _FILLER_WORDS or wl in into:
+            return
+        into.append(wl)
+
+    words: list[str] = []
+    if groups:
+        # Tour de table : le i-ème terme de chaque conjonction avant de passer au i+1-ème,
+        # pour qu'aucun bloc ne soit muet même quand le budget est petit.
+        for depth in range(max(len(g) for g in groups)):
+            for g in groups:
+                if depth >= len(g) or len(words) >= max_words:
+                    continue
+                for w in _re.split(r"[\s\*\"()\[\]]+", g[depth]):
+                    if len(words) >= max_words:
+                        break
+                    _add(w, words)
+            if len(words) >= max_words:
+                break
+    else:
+        for w in _re.split(r"[\s\*\"()\[\]]+", _re.sub(r"[\[\]]", " ", plain)):
+            if len(words) >= max_words:
+                break
+            _add(w, words)
+    return " ".join(words[:max_words])
 
 
 @app.get("/user-scenarios/{scenario_id}/search-strategy")
