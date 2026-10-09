@@ -764,7 +764,13 @@ Reponds de maniere structuree et cite les sources pertinentes du contexte."""
         meta_event = ("event: meta\ndata: "
                       + _json2.dumps({"papers_used": papers_used,
                                       "papers_with_fulltext": papers_with_fulltext,
-                                      "papers_quoted": len({s["document_id"] for s in sources}),
+                                      # Le nombre d'articles RAPATRIÉS pour composer la
+                                      # réponse, qui n'est pas le nombre d'articles
+                                      # qu'elle cite. Ce compte s'appelait
+                                      # `papers_quoted` et l'interface, l'historique et
+                                      # le document exporté le présentaient tous trois
+                                      # comme « cités ».
+                                      "papers_retrieved": len({s["document_id"] for s in sources}),
                                       "digest_complete": bool(digest_block),
                                       "threshold": round(float(threshold), 2)})
                       + "\n\n")

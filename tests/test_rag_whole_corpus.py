@@ -105,11 +105,17 @@ def test_the_scenario_rag_prompts_carry_the_whole_corpus_digest():
     assert "CORPUS COMPLET" in src["/user-scenarios/{id}/rag"]
 
 
-def test_the_stream_reports_what_it_quoted_not_only_what_it_searched():
+def test_the_stream_reports_how_many_it_retrieved_not_only_what_it_searched():
     """`papers_used` is the subset SEARCHED. Alone under the answer it read as "this
-    answer is built on 2,170 papers", which was never true of a generated paragraph."""
+    answer is built on 2,170 papers", which was never true of a generated paragraph.
+
+    The second number is the RETRIEVAL depth, and it is now called that: it used to be
+    called `papers_quoted`, and the interface, the stored record and the exported
+    document all presented it as the number of articles the answer cites. Nothing
+    measures that."""
     src = _rag_sources()["/ask/stream/filtered"]
-    assert '"papers_quoted"' in src
+    assert '"papers_retrieved"' in src
+    assert '"papers_quoted"' not in src
     assert '"digest_complete"' in src
 
 

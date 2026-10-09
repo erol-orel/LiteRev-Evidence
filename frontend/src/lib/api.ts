@@ -2154,14 +2154,16 @@ export async function fetchKnowledgeGraph(
 // ─── Streaming RAG SSE ────────────────────────────────────────────────────────
 
 /** Corpus counts behind an AI answer. `papers_used` is the relevant subset SEARCHED;
- *  `papers_quoted` is how many of them the answer actually reproduces. The two are not
- *  the same number and the interface must not present the first as the second.
+ *  `papers_retrieved` is how many of them were pulled in to compose the answer. Neither
+ *  is the number of articles the answer QUOTES, which nothing measures: the field used
+ *  to be called papers_quoted and the interface, the stored record and the exported
+ *  document all presented the retrieval depth as the citation count.
  *  `digest_complete` says whether the answer's figures were backed by the whole-corpus
  *  digest (SQL over every relevant article) rather than by the excerpts alone. */
 export interface RagMeta {
   papers_used: number;
   papers_with_fulltext: number;
-  papers_quoted?: number;
+  papers_retrieved?: number;
   digest_complete?: boolean;
   threshold: number;
 }
@@ -4324,6 +4326,8 @@ export interface ScenarioQuestion {
   sources: Array<{ document_id?: number; title?: string; authors?: string;
                    year?: number; doi?: string; score?: number }> | null;
   papers_used: number | null;
+  /** The number of articles RETRIEVED to compose the answer. The server still stores it
+   *  in a column named papers_quoted; nothing measures how many the answer quotes. */
   papers_quoted: number | null;
   digest_complete: boolean;
   proposals: QuestionProposal[] | null;
@@ -4343,7 +4347,7 @@ export async function saveScenarioQuestion(
   body: {
     question: string; answer: string; lang?: string | null; threshold?: number | null;
     scope?: Record<string, unknown>; sources?: unknown[];
-    papers_used?: number | null; papers_quoted?: number | null;
+    papers_used?: number | null; papers_retrieved?: number | null;
     digest_complete?: boolean;
   },
 ): Promise<ScenarioQuestion> {

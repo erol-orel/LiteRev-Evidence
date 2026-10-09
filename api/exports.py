@@ -18,7 +18,8 @@ from fastapi.responses import Response
 from sqlalchemy import text
 
 from .core import app, engine, logger
-from .scenario_store import _get_user_scenario_or_404, screening_status_sql
+from .scenario_store import (_get_scenario_rerank_threshold, _get_scenario_threshold,
+                             _get_user_scenario_or_404, screening_status_sql)
 from .relevance import _get_above_threshold_articles
 
 EXPORT_FORMATS = ("csv", "xlsx", "ris", "bibtex", "json", "md")
@@ -64,8 +65,20 @@ def _ris_doi(doi: str) -> str:
 
 
 def _article_url(a: dict) -> str:
-    if a.get("url"):
-        return str(a["url"])
+    # `url` n'est pas toujours une URL : un cinquième à un tiers des notices y portent un
+    # DOI nu (« 10.1016/… »), hérité d'une source qui n'a pas d'autre adresse. La colonne
+    # `url` de l'export, le tag UR du RIS et les liens Markdown étaient alors des chaînes
+    # sur lesquelles rien ne clique. Ce qui ne commence pas par http est traité pour ce
+    # que c'est.
+    _u = str(a.get("url") or "").strip()
+    if _u.lower().startswith(("http://", "https://")):
+        return _u
+    if _u:
+        _d = _ris_doi(_u)
+        if _d.startswith("10."):
+            return f"https://doi.org/{_d}"
+        if _u.isdigit():                      # un PMID écrit dans la colonne url
+            return f"https://pubmed.ncbi.nlm.nih.gov/{_u}/"
     if a.get("doi"):
         # Le DOI est parfois stocké déjà sous forme d'URL : le préfixer sans le
         # normaliser donnait « https://doi.org/https://doi.org/10.… », un lien mort.
@@ -238,10 +251,14 @@ def to_bibtex(rows: list[dict]) -> str:
     return "\n\n".join(out) + ("\n" if out else "")
 
 
-def to_markdown(rows: list[dict], title: str = "") -> str:
+def to_markdown(rows: list[dict], title: str = "", provenance: list[str] | None = None) -> str:
     lines = [f"# {title}".rstrip(), ""] if title else []
-    lines.append(f"{len(rows)} relevant articles, most relevant first.")
+    # « relevant articles » quel que soit le sous-ensemble : un export fait à seuil zéro
+    # s'annonçait ainsi, et un export par cluster aussi.
+    lines.append(f"{len(rows)} articles, most relevant first.")
     lines.append("")
+    if provenance:
+        lines += [f"> {ln}" for ln in provenance] + [""]
     for r in rows:
         head = f"{r['rank']}. **{r['title']}**"
         meta = ", ".join(x for x in (r.get("authors"), str(r.get("year") or ""), r.get("journal")) if x)
@@ -260,10 +277,19 @@ def to_markdown(rows: list[dict], title: str = "") -> str:
     return "\n".join(lines)
 
 
-def to_xlsx(rows: list[dict], sheet_title: str = "Relevant articles") -> bytes:
+def to_xlsx(rows: list[dict], sheet_title: str = "Relevant articles",
+            provenance: list[str] | None = None) -> bytes:
     from openpyxl import Workbook
     from openpyxl.utils import get_column_letter
     wb = Workbook()
+    # La provenance sur sa propre FEUILLE : en l'écrivant au-dessus du tableau, on
+    # casserait le filtre automatique et la première ligne d'en-têtes.
+    if provenance:
+        _ps = wb.create_sheet("Provenance")
+        _ps.append(["LiteRev export"])
+        for _ln in provenance:
+            _ps.append([_ln])
+        _ps.column_dimensions["A"].width = 120
     ws = wb.active
     ws.title = sheet_title[:31] or "Articles"
     ws.append(list(EXPORT_COLUMNS))
@@ -280,20 +306,64 @@ def to_xlsx(rows: list[dict], sheet_title: str = "Relevant articles") -> bytes:
     return buf.getvalue()
 
 
+def provenance_lines(meta: dict | None) -> list[str]:
+    """Ce qu'un fichier doit porter pour se lire SEUL : quel scénario, quelle requête,
+    quel sous-ensemble, quels seuils, et la phrase de couverture.
+
+    Seul le JSON recevait `meta`. Les cinq autres formats partaient sans une ligne de
+    provenance, si bien qu'un CSV de 190 lignes et un CSV de 640 lignes du même scénario
+    étaient indistinguables, et que le Markdown appelait « relevant articles » n'importe
+    quel sous-ensemble, y compris un export fait à seuil zéro."""
+    m = meta or {}
+    out: list[str] = []
+    if m.get("scenario"):
+        out.append(f"Scenario: {m['scenario']}" + (f" ({m['scenario_id']})" if m.get("scenario_id") else ""))
+    if m.get("query"):
+        out.append(f"Query: {m['query']}")
+    if m.get("subset_label"):
+        out.append(f"Subset: {m['subset_label']} ({m.get('n_articles', 0)} articles)")
+    _thr, _rthr = m.get("similarity_threshold"), m.get("rerank_threshold")
+    if _thr is not None:
+        out.append(f"Similarity threshold: {_thr}"
+                   + (f" | rerank threshold: {_rthr}" if _rthr else "")
+                   + (" | WARNING: threshold 0 means the WHOLE corpus, not a relevant subset"
+                      if (_thr == 0 and not _rthr) else ""))
+    if m.get("include_abstract") is False:
+        out.append("Abstracts: not included in this file")
+    if m.get("coverage"):
+        out.append(f"Coverage: {m['coverage']}")
+    if m.get("generated_at"):
+        out.append(f"Generated: {m['generated_at']}")
+    return out
+
+
 def render_export(fmt: str, rows: list[dict], title: str, meta: dict | None = None) -> bytes:
-    """Bytes of the export in `fmt`. Pure (openpyxl for xlsx)."""
+    """Bytes of the export in `fmt`. Pure (openpyxl for xlsx).
+
+    Every format carries the provenance block, each in its own comment syntax: a file
+    that travels on its own has to say what it is."""
+    prov = provenance_lines(meta)
     if fmt == "csv":
-        return to_csv(rows).encode("utf-8")
+        head = "".join(f"# {ln}\n" for ln in prov)
+        return (head + to_csv(rows)).encode("utf-8")
     if fmt == "json":
         return to_json(rows, meta).encode("utf-8")
     if fmt == "ris":
-        return to_ris(rows).encode("utf-8")
+        # RIS n'a pas de commentaire : on utilise une notice GEN (« generic ») en tête,
+        # que Zotero importe comme une note et qu'aucun gestionnaire ne confond avec un
+        # article.
+        head = ""
+        if prov:
+            head = ("TY  - GEN\nTI  - LiteRev export provenance\n"
+                    + "".join(f"N1  - {ln}\n" for ln in prov) + "ER  - \n\n")
+        return (head + to_ris(rows)).encode("utf-8")
     if fmt == "bibtex":
-        return to_bibtex(rows).encode("utf-8")
+        head = "".join(f"% {ln}\n" for ln in prov) + ("\n" if prov else "")
+        return (head + to_bibtex(rows)).encode("utf-8")
     if fmt == "md":
-        return to_markdown(rows, title).encode("utf-8")
+        return to_markdown(rows, title, prov).encode("utf-8")
     if fmt == "xlsx":
-        return to_xlsx(rows, title)
+        return to_xlsx(rows, title, prov)
     raise ValueError(fmt)
 
 
@@ -362,7 +432,8 @@ def articles_by_ids(scenario_id: str, ids: list[int]) -> list[dict]:
 
 def articles_export_response(scenario_id: str, fmt: str, articles: list[dict],
                              include_abstract: bool, *, subset: str, subset_label: str,
-                             coverage: str = "", extra_meta: dict | None = None) -> Response:
+                             coverage: str = "", extra_meta: dict | None = None,
+                             threshold: float | None = None) -> Response:
     """Rend N'IMPORTE QUEL sous-ensemble d'articles dans les six formats.
 
     Les formateurs étaient déjà purs ; seule la SÉLECTION des lignes était câblée sur le
@@ -381,9 +452,18 @@ def articles_export_response(scenario_id: str, fmt: str, articles: list[dict],
         a.update({k: v for k, v in (extra.get(int(a["id"])) or {}).items() if k != "id"})
     rows = export_rows(articles, include_abstract=include_abstract)
     title = str(row.get("name") or scenario_id)
+    from datetime import datetime as _dt, timezone as _tz
+    # Les SEUILS qui ont défini ce sous-ensemble. Sans eux, `?threshold=0` rendait le
+    # corpus entier sous l'étiquette « tous les articles pertinents du scénario », et
+    # rien dans le fichier ne permettait de s'en apercevoir.
+    _thr = _get_scenario_threshold(scenario_id) if threshold is None else float(threshold)
+    _rthr = _get_scenario_rerank_threshold(scenario_id)
     meta = {"scenario_id": scenario_id, "scenario": title, "query": row.get("query"),
             "n_articles": len(rows), "format": fmt,
-            "subset": subset, "subset_label": subset_label}
+            "subset": subset, "subset_label": subset_label,
+            "similarity_threshold": _thr, "rerank_threshold": _rthr,
+            "include_abstract": bool(include_abstract),
+            "generated_at": _dt.now(_tz.utc).isoformat(timespec="seconds")}
     if coverage:
         meta["coverage"] = coverage
     meta.update(extra_meta or {})
@@ -400,7 +480,7 @@ def relevant_articles_export(scenario_id: str, fmt: str, threshold: float | None
                              include_abstract: bool) -> Response:
     articles = _get_above_threshold_articles(scenario_id, threshold=threshold)
     return articles_export_response(
-        scenario_id, fmt, articles, include_abstract,
+        scenario_id, fmt, articles, include_abstract, threshold=threshold,
         subset="relevant", subset_label="relevant-articles",
         coverage=("Tous les articles pertinents du scénario : au-dessus du seuil de "
                   "similarité ou inclus par un relecteur, jamais les exclus."))

@@ -774,7 +774,7 @@ export const fr = {
       citedSources: "Sources scientifiques citées",
       exportSources: "Exporter les articles cités par cette réponse",
       papersSearchedSuffix: "articles pertinents interrogés",
-      papersQuotedSuffix: "cités ci-dessous",
+      papersRetrievedSuffix: "rapatriés pour composer la réponse (listés ci-dessous)",
       withFulltextSuffix: "avec texte intégral",
       digestCovers: "Les chiffres et répartitions de la réponse portent sur la totalité d'entre eux, pas sur les extraits cités.",
       digestMissing: "Le portrait du corpus n'a pas pu être calculé : la réponse ne repose que sur les extraits cités, ne la lisez donc pas comme un comptage sur tout le corpus.",
@@ -1141,6 +1141,8 @@ export const fr = {
       noArticleForBriefDefault: "Ajoutez des articles ou abaissez le seuil de similarité.",
       briefGeneratingTitle: "Brief LLM en cours de génération",
       briefGeneratingDefault: "Réessayez dans 30 secondes.",
+      briefNotGeneratedTitle: "Brief non généré",
+      briefNotGeneratedDefault: "Aucun Evidence Brief à jour pour ce corpus et cette langue. Lancez la génération avec le bouton ci-dessus.",
       noBriefAvailable:
         "Aucun brief LLM disponible. Cliquez sur \"Régénérer brief\" pour lancer la génération.",
       levelPrefix: "Niveau :",

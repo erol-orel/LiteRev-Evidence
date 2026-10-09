@@ -1036,8 +1036,20 @@ def get_llm_evidence_brief(scenario_id: str, lang: str | None = Query(None)) -> 
     if _bj.get("status") == "error":
         return {"status": "error", "message": _bj.get("error", "Échec de la génération du brief.")}
 
-    # Pas de brief en cache valide (absent, corpus changé, ou autre langue) :
-    # déclencher la génération DANS LA LANGUE demandée.
-    generate_evidence_brief(scenario_id, lang=lang)
-    return {"status": "generating", "message": _msg(lang, "Génération en cours, réessayez dans 30 secondes.",
-                                                    "Generating, try again in 30 seconds.")}
+    # ── Un GET ne DÉPENSE pas ───────────────────────────────────────────────
+    # Cette ligne appelait `generate_evidence_brief`, qui est pourtant déclaré avec
+    # `Depends(require_api_key)` : invoqué comme une fonction ordinaire, la dépendance
+    # ne s'applique pas. N'importe quel GET non authentifié lançait donc une génération
+    # LLM complète et ÉCRASAIT le brief en cache, une fois par langue et par changement
+    # de corpus. La génération reste derrière son POST, qui porte la clé.
+    _job = _BRIEF_GENERATION_JOBS.get(scenario_id, {})
+    if _job.get("status") == "running":
+        return {"status": "generating",
+                "message": _msg(lang, "Génération en cours, réessayez dans 30 secondes.",
+                                "Generating, try again in 30 seconds.")}
+    return {"status": "not_generated",
+            "message": _msg(lang,
+                            "Aucun Evidence Brief à jour pour ce corpus et cette langue. "
+                            "Lancez la génération depuis le bouton dédié.",
+                            "No up-to-date evidence brief for this corpus and language. "
+                            "Start the generation from its own button.")}

@@ -422,13 +422,29 @@ def _summarize_clusters_in_lang(scenario_id: str, payload: dict, lang: str) -> d
             texts = list(ex.map(_one, dense))
     else:
         texts = []
+    # ── Un résumé RATÉ n'est pas un résumé ──────────────────────────────────
+    # La chaîne vide rendue par `_one` sur un échec (ou sans clé) était écrite dans
+    # `summaries[want]`, donc `_clusters_have_lang` répondait True pour toujours et la
+    # synthèse de groupe restait vide définitivement, sans un mot. On ne POSE la clé que
+    # si le résumé existe, et on compte les échecs.
+    _failed = 0
     for c, s in zip(dense, texts):
         summaries = dict(c.get("summaries") or {})
-        summaries[want] = s
-        c["summaries"] = summaries
-        c["summary"] = s
+        if s:
+            summaries[want] = s
+            c["summaries"] = summaries
+            c["summary"] = s
+        else:
+            _failed += 1
+            c["summaries"] = summaries
+            c.setdefault("summary", "")
     out["lang"] = want
     out["from_cache"] = False
+    out["summaries_failed"] = _failed
+    out["summaries_total"] = len(dense)
+    if _failed:
+        logger.warning(f"Résumés de clusters {scenario_id} ({want}) : {_failed}/{len(dense)} "
+                       f"non générés ; ils seront retentés au prochain affichage.")
     return out
 
 

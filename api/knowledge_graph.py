@@ -121,17 +121,36 @@ def _build_knowledge_graph(
             "weight": round(float(w), 3),
         })
 
-    # Détection de communautés greedy (lien fort ≥ 0.5)
+    # ── Communautés = composantes CONNEXES du graphe affiché ─────────────────
+    # Elles étaient calculées sur un seuil de 0,5 codé en dur, quel que soit le
+    # `min_similarity` de la requête : le curseur du panneau changeait les arêtes
+    # dessinées et ne touchait PAS les communautés qu'il colore et dénombre. Pire, le
+    # parcours était un seul balayage en avant - un voisin déjà numéroté n'absorbait pas
+    # sa propre composante - donc deux articles reliés pouvaient porter deux couleurs.
+    # Une union-find sur les arêtes retenues : la légende décrit ce qui est à l'écran.
+    parent = list(range(n))
+
+    def _find(x: int) -> int:
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def _union(a: int, b: int) -> None:
+        ra, rb = _find(a), _find(b)
+        if ra != rb:
+            parent[max(ra, rb)] = min(ra, rb)
+
+    for i, j in zip(iu[mask], ju[mask]):
+        _union(int(i), int(j))
+    _root_to_cluster: dict[int, int] = {}
     cluster_ids = [-1] * n
-    cluster_counter = 0
     for i in range(n):
-        if cluster_ids[i] == -1:
-            cluster_ids[i] = cluster_counter
-            strong = np.where(sim_matrix[i] >= 0.5)[0]
-            for j in strong:
-                if cluster_ids[j] == -1:
-                    cluster_ids[j] = cluster_counter
-            cluster_counter += 1
+        r = _find(i)
+        if r not in _root_to_cluster:
+            _root_to_cluster[r] = len(_root_to_cluster)
+        cluster_ids[i] = _root_to_cluster[r]
+    cluster_counter = len(_root_to_cluster)
 
     # Degré (centralité) par nœud
     degree: dict[int, int] = {nd["id"]: 0 for nd in nodes_data}

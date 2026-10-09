@@ -3758,7 +3758,7 @@ function RagSection({ scenarioId, detail }: { scenarioId: string; detail: Scenar
           scope: {},
           sources: sourcesSoFar.current,
           papers_used: metaSoFar.current?.papers_used ?? null,
-          papers_quoted: metaSoFar.current?.papers_quoted ?? null,
+          papers_retrieved: metaSoFar.current?.papers_retrieved ?? null,
           digest_complete: Boolean(metaSoFar.current?.digest_complete),
         })
           .then(() => setHistoryKey(k => k + 1))
@@ -3909,7 +3909,7 @@ function RagSection({ scenarioId, detail }: { scenarioId: string; detail: Scenar
               <div className="mt-2 space-y-0.5 text-[10px] text-white/40">
                 <p>
                   {meta.papers_used} {t("scenarioDetail.rag.papersSearchedSuffix")} (≥ {meta.threshold})
-                  {meta.papers_quoted ? ` · ${meta.papers_quoted} ${t("scenarioDetail.rag.papersQuotedSuffix")}` : ""}
+                  {meta.papers_retrieved ? ` · ${meta.papers_retrieved} ${t("scenarioDetail.rag.papersRetrievedSuffix")}` : ""}
                   {" · "}{meta.papers_with_fulltext} {t("scenarioDetail.rag.withFulltextSuffix")}
                 </p>
                 <p className={meta.digest_complete ? "text-white/30" : "text-gold-400/70"}>
@@ -7267,6 +7267,19 @@ ${llm.future_research ? `<h3>${t("scenarioDetail.evidences.pdf.futureResearch")}
           <Loader2 size={14} className="text-gold-400 animate-spin shrink-0 mt-0.5" />
           <div className="text-xs text-gold-200/80">
             <strong className="text-gold-300">{t("scenarioDetail.evidences.briefGeneratingTitle")}</strong> : {llmData.message ?? t("scenarioDetail.evidences.briefGeneratingDefault")}
+          </div>
+        </div>
+      )}
+      {/* Un GET ne dépense plus : il répond « pas encore généré » au lieu de lancer une
+          génération LLM complète, non authentifiée, qui écrasait le brief en cache. Le
+          bouton « régénérer » juste au-dessus est la voie, et il porte la clé. */}
+      {llmData && llmData.status === 'not_generated' && (
+        <div className="rounded-2xl border border-brand-500/20 bg-brand-500/5 px-5 py-4 flex items-start gap-3">
+          <Sparkles size={14} className="text-brand-300 shrink-0 mt-0.5" />
+          <div className="text-xs text-brand-100/80">
+            <strong className="text-brand-300">{t("scenarioDetail.evidences.briefNotGeneratedTitle")}</strong>
+            {" : "}
+            {llmData.message ?? t("scenarioDetail.evidences.briefNotGeneratedDefault")}
           </div>
         </div>
       )}

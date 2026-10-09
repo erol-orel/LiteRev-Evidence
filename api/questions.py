@@ -209,7 +209,10 @@ class QuestionIn(BaseModel):
     scope: dict[str, Any] | None = None
     sources: list[dict[str, Any]] | None = None
     papers_used: int | None = None
-    papers_quoted: int | None = None
+    # Les articles RAPATRIÉS, pas ceux que la réponse cite. La colonne en base garde son
+    # ancien nom (`papers_quoted`) : renommer une colonne n'ajoute rien, mais le champ
+    # servi et affiché doit dire ce qu'il compte.
+    papers_retrieved: int | None = None
     digest_complete: bool = False
     owner_email: str | None = None
 
@@ -255,7 +258,7 @@ def save_scenario_question(scenario_id: str, payload: QuestionIn) -> dict[str, A
             "lang": payload.lang, "thr": threshold,
             "scope": json.dumps(payload.scope or {}),
             "sources": json.dumps(payload.sources or []),
-            "used": payload.papers_used, "quoted": payload.papers_quoted,
+            "used": payload.papers_used, "quoted": payload.papers_retrieved,
             "complete": bool(payload.digest_complete),
             "proposals": json.dumps(proposals),
             "email": payload.owner_email,
@@ -433,11 +436,11 @@ def question_markdown(q: dict[str, Any], scenario_name: str = "") -> str:
     meta.append(q.get("scope_label") or describe_scope(q.get("scope"), q.get("threshold")))
     out.append("*" + "  ·  ".join(meta) + "*")
     out.append("")
-    used, quoted = q.get("papers_used"), q.get("papers_quoted")
+    used, retrieved = q.get("papers_used"), q.get("papers_quoted")
     if used is not None:
         line = f"Answered over {used} relevant articles"
-        if quoted is not None:
-            line += f", quoting {quoted}"
+        if retrieved is not None:
+            line += f", {retrieved} of them retrieved for the answer"
         out.append(line + ".")
         out.append("")
     out.append(q.get("answer") or "")

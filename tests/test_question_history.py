@@ -133,7 +133,9 @@ def test_the_export_states_the_scope_the_date_and_the_denominator():
     assert md.startswith("# Which indicators lead clinical reporting?")
     assert "Respiratory indicators" in md and "2026-10-07 09:30:00" in md
     assert "threshold 0.45" in md and "cluster: wastewater" in md
-    assert "Answered over 1049 relevant articles, quoting 24." in md
+    # « quoting 24 » était faux : 24 est le nombre d'articles RAPATRIÉS pour composer la
+    # réponse, et rien ne mesure ceux qu'elle cite.
+    assert "Answered over 1049 relevant articles, 24 of them retrieved for the answer." in md
 
 
 def test_the_export_lists_its_sources():

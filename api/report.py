@@ -383,10 +383,15 @@ def evidence_report(scenario_id: str, download: bool = Query(False),
     # dépenserait des jetons derrière un simple GET. Pas de brief en cache : on le dit.
     llm = _cached_brief(scenario_id)
     if llm is None:
-        return {"status": "no_brief",
-                "message": ("Aucun Evidence Brief généré pour ce scénario. Générez-le "
-                            "d'abord : le rapport assemble un brief existant, il n'en "
-                            "produit pas.")}
+        _detail = ("Aucun Evidence Brief généré pour ce scénario. Générez-le "
+                   "d'abord : le rapport assemble un brief existant, il n'en "
+                   "produit pas.")
+        if download:
+            # Le navigateur suit un <a download> : renvoyer 200 avec un corps JSON
+            # d'erreur lui faisait enregistrer un fichier de 166 octets PORTANT LE NOM
+            # DU RAPPORT. Un refus doit être un refus.
+            raise HTTPException(status_code=409, detail=_detail)
+        return {"status": "no_brief", "message": _detail}
     digest = corpus_digest(scenario_id, threshold)
 
     matrix = None

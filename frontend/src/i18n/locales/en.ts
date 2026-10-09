@@ -776,7 +776,7 @@ export const en: Translations = {
       citedSources: "Cited scientific sources",
       exportSources: "Export the articles this answer cites",
       papersSearchedSuffix: "relevant papers searched",
-      papersQuotedSuffix: "quoted below",
+      papersRetrievedSuffix: "retrieved to compose the answer (listed below)",
       withFulltextSuffix: "with full text",
       digestCovers: "Counts and distributions in the answer are computed over all of them, not over the quoted excerpts.",
       digestMissing: "The corpus summary could not be computed: the answer rests on the quoted excerpts alone, so do not read it as a count over the whole corpus.",
@@ -1143,6 +1143,8 @@ export const en: Translations = {
       noArticleForBriefDefault: "Add articles or lower the similarity threshold.",
       briefGeneratingTitle: "LLM brief being generated",
       briefGeneratingDefault: "Try again in 30 seconds.",
+      briefNotGeneratedTitle: "Brief not generated",
+      briefNotGeneratedDefault: "No up-to-date evidence brief for this corpus and language. Start the generation with the button above.",
       noBriefAvailable:
         "No LLM brief available. Click \"Regenerate brief\" to start generation.",
       levelPrefix: "Level:",
