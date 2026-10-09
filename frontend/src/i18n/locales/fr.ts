@@ -798,7 +798,7 @@ export const fr = {
       sourcesSearchedOfLaunched: "{searched} sources interrogées sur {launched} lancées",
       identifiedDatabases: "Identifiés par les bases interrogées",
       identifiedLibrary: "Déjà dans la bibliothèque locale",
-      coverageIncomplete: "Recherche incomplète : {sources} n'ont pas livré de réponse à cette requête.",
+      coverageIncomplete: "Recherche incomplète : {sources} n'ont pas été interrogées jusqu'au bout (échec, clé d'API absente, ou coupure par le budget de temps). Ce qu'elles ont rapporté avant reste au tableau ; leur compte n'est pas un total.",
       federationIncomplete: "Le budget de temps de la fédération a été atteint : des sources ont été coupées en cours de pagination.",
       perSourceCap: "plafond appliqué : {cap} enregistrements par source",
       keywordFallback: "Stratégie dégradée pour {sources} : la requête booléenne dépasse la limite d'URL de ces API, elles ont reçu les mots-clés « {keywords} ». Leurs enregistrements ne sont donc pas le produit de la requête booléenne ci-dessus.",
