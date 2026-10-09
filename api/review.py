@@ -323,21 +323,42 @@ def get_user_scenario_prisma(
             "last_search": _figures.get("last_search") or None,
             "computed_at": _figures.get("computed_at"),
             "federation_incomplete": bool(_figures.get("federation_incomplete")),
-            # Ce que la fédération a fait, source par source. Le tableau ne montrait que
-            # les sources ayant rapporté quelque chose, sous un compte de « sources
-            # interrogées » qui, lui, comptait aussi les autres : une source en échec
-            # était donc invisible ET comptée.
-            "source_outcomes": {str(k): str(v) for k, v in
-                                (_figures.get("source_outcomes") or {}).items()},
-            "sources_launched": int(_figures.get("sources_launched") or 0),
-            "sources_searched": int(_figures.get("sources_searched") or 0),
-            "sources_failed": list(_figures.get("sources_failed") or []),
-            "sources_skipped": list(_figures.get("sources_skipped") or []),
-            "sources_cut_off": list(_figures.get("sources_cut_off") or []),
-            "records_identified_databases": int(_figures.get("records_identified_databases") or 0),
-            "records_identified_library": int(_figures.get("records_identified_library") or 0),
             "per_source_cap": _figures.get("per_source_cap"),
         }
+        # ── Ce que la fédération a fait, QUAND la recherche l'a enregistré ────
+        # Ces champs ne sont servis que si les chiffres STOCKÉS les portent. Les émettre
+        # à zéro pour une recherche antérieure à leur existence remplaçait une inconnue
+        # par une affirmation : la carte d'un scénario listant sept sources annonçait
+        # « 0 sources interrogées », parce que le repli de l'interface ne s'enclenche que
+        # sur une valeur absente, pas sur un zéro.
+        if _figures.get("source_outcomes") is not None:
+            _identification.update({
+                "source_outcomes": {str(k): str(v) for k, v in
+                                    (_figures.get("source_outcomes") or {}).items()},
+                "sources_launched": int(_figures.get("sources_launched") or 0),
+                "sources_searched": int(_figures.get("sources_searched") or 0),
+                "sources_failed": list(_figures.get("sources_failed") or []),
+                "sources_skipped": list(_figures.get("sources_skipped") or []),
+                "sources_cut_off": list(_figures.get("sources_cut_off") or []),
+            })
+        # La séparation « bases interrogées / bibliothèque locale » : prise telle quelle
+        # si elle est stockée, sinon DÉDUITE de la ligne `db_cache` que les anciennes
+        # recherches portent déjà, au lieu d'afficher deux zéros à côté d'un tableau qui
+        # compte 641 enregistrements de la bibliothèque.
+        _by_src = {str(k): int(v or 0) for k, v in (_figures.get("records_by_source") or {}).items()}
+        _lib = _figures.get("records_identified_library")
+        if _lib is None:
+            _lib = _by_src.get("db_cache", 0)
+        _db = _figures.get("records_identified_databases")
+        if _db is None:
+            _db = max(0, sum(v for k, v in _by_src.items() if k != "db_cache"))
+        if _lib or _db:
+            _identification["records_identified_library"] = int(_lib)
+            _identification["records_identified_databases"] = int(_db)
+            # `by_source` ne doit pas compter la bibliothèque parmi les bases
+            # interrogées : la ligne lui appartient en propre (PRISMA 2020, « autres
+            # méthodes »).
+            _identification["by_source"] = {k: v for k, v in _by_src.items() if k != "db_cache"}
     else:
         _identification = {
             "total_records": total,

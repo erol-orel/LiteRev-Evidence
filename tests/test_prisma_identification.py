@@ -229,6 +229,36 @@ def test_the_endpoint_reports_the_search_run(seeded):
     assert ident["computed_at"]
 
 
+def test_a_search_older_than_the_source_ledger_says_nothing_rather_than_zero(seeded):
+    """Les chiffres STOCKÉS par une recherche antérieure ne portent pas les issues par
+    source. Les servir à zéro remplaçait une inconnue par une affirmation : la carte
+    d'un scénario listant sept sources annonçait « 0 sources interrogées », parce que le
+    repli de l'interface ne s'enclenche que sur une valeur ABSENTE, pas sur un zéro.
+
+    La séparation bases / bibliothèque, elle, se DÉDUIT de la ligne `db_cache` que ces
+    recherches portent déjà."""
+    legacy = {
+        "method": "populate",
+        "computed_at": "2026-09-01T10:00:00+00:00",
+        "records_by_source": {"db_cache": 641, "openalex": 156, "crossref": 1907},
+        "records_identified": 2704,
+        "duplicates_removed": 0, "unique_records": 2704,
+        "removed_no_abstract": 0, "removed_not_matching": 0, "removed_other_reasons": 0,
+        "removed_before_screening": 0, "records_screened": 2704,
+    }
+    main._store_prisma_identification(SID_RUN, legacy)
+    ident = _prisma(SID_RUN)
+    # ABSENTS, pas à zéro : l'interface retombe alors sur son propre compte.
+    assert "sources_searched" not in ident
+    assert "sources_launched" not in ident
+    assert "source_outcomes" not in ident
+    # Et la séparation est déduite, au lieu d'afficher deux zéros à côté d'un tableau
+    # qui compte 641 enregistrements de la bibliothèque.
+    assert ident["records_identified_library"] == 641
+    assert ident["records_identified_databases"] == 2063
+    assert "db_cache" not in ident["by_source"]
+
+
 def test_documents_added_after_the_search_are_shown_not_hidden(seeded):
     """The September 16 panel: figures computed for a corpus of 2,491, a corpus of 3,602
     afterwards (late pages of slow sources kept linking). The extra documents get their
