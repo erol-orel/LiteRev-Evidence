@@ -190,5 +190,15 @@ def test_the_total_found_is_what_the_sources_returned_not_what_was_inserted():
     assigns = [n for n in _top_level(outer) if isinstance(n, ast.Assign)
                and any(isinstance(t, ast.Name) and t.id == "total_found" for t in n.targets)]
     assert assigns, "total_found n'est plus assigné au niveau du job"
+    # Et lu APRÈS le gel du corpus : avant, une source lente pouvait encore lier des
+    # notices entre la lecture et le gel, et le total servi au job était plus petit que le
+    # `records_identified` servi dans la même réponse. Ordre lu sur l'arbre, pas sur le
+    # texte : un commentaire ajouté ne change rien.
+    freezes = [n for n in _top_level(outer) if isinstance(n, ast.Assign)
+               and ast.unparse(n).replace(" ", "") == "_corpus_frozen[0]=True"]
+    assert freezes, "le gel du corpus a disparu"
+    assert all(a.lineno > freezes[0].lineno for a in assigns), (
+        "total_found est lu avant le gel du corpus : une source lente peut encore y "
+        "ajouter des notices, et le total servi sera plus petit que les identifiés")
     assert all("_ident_records" in ast.unparse(a.value) for a in assigns), (
         [ast.unparse(a) for a in assigns])

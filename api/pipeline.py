@@ -294,6 +294,20 @@ def _run_user_scenario_populate(
     # source coupée revenait avec 0 et sans erreur, donc d'issue `empty` : « rien dans la
     # littérature » pour une source qu'on avait cessé de lire.
     _fetcher_cut: set[str] = set()
+    # Le TOTAL VRAI que chaque API annonce pour la requête (le compteur du site), quand
+    # elle en annonce un. Au plafond par source, une ligne « pubmed 2 000 » se lisait comme
+    # un total ; c'est un plancher, et le vrai nombre est ici. Cinq sources l'atteignaient
+    # sur le scénario de contrôle de production sans que rien ne le dise.
+    _source_totals: dict[str, int] = {}
+
+    def _note_total(source: str, total) -> None:
+        try:
+            _t = int(total)
+        except (TypeError, ValueError):
+            return
+        if _t >= 0:
+            with _counter_lock:
+                _source_totals[source] = max(_t, _source_totals.get(source, 0))
 
     def _mark_source_error(reason: object = None):
         """Cette source a ÉCHOUÉ, et pourquoi.
@@ -608,6 +622,7 @@ def _run_user_scenario_populate(
             r.raise_for_status()
             search_result = r.json()["esearchresult"]
             total_found = int(search_result.get("count", 0))
+            _note_total("pubmed", total_found)
             if _pipeline_callback:
                 _pipeline_callback("pubmed_found", total_found)
             _pmids = [str(p).strip() for p in (search_result.get("idlist") or []) if str(p).strip()]
@@ -773,7 +788,9 @@ def _run_user_scenario_populate(
                     timeout=20,
                 )
                 oa_resp.raise_for_status()
-                _oa_results = oa_resp.json().get("results", [])
+                _oa_json = oa_resp.json()
+                _note_total("openalex", (_oa_json.get("meta") or {}).get("count"))
+                _oa_results = _oa_json.get("results", [])
                 if not _oa_results:
                     break
                 for work in _oa_results:
@@ -841,7 +858,9 @@ def _run_user_scenario_populate(
                     timeout=20,
                 )
                 cr_resp.raise_for_status()
-                _cr_items = cr_resp.json().get("message", {}).get("items", [])
+                _cr_msg = cr_resp.json().get("message", {})
+                _note_total("crossref", _cr_msg.get("total-results"))
+                _cr_items = _cr_msg.get("items", [])
                 if not _cr_items:
                     break
                 for item in _cr_items:
@@ -906,6 +925,7 @@ def _run_user_scenario_populate(
                 )
                 ep_resp.raise_for_status()
                 _ep_data = ep_resp.json()
+                _note_total("europepmc", _ep_data.get("hitCount"))
                 _ep_results = _ep_data.get("resultList", {}).get("result", [])
                 if not _ep_results:
                     break
@@ -1078,6 +1098,7 @@ def _run_user_scenario_populate(
                     _429 = 0                      # cette page est passée
                     _r.raise_for_status()
                     _payload = _r.json()
+                    _note_total("semantic_scholar", _payload.get("total"))
                     _n = len(_payload.get("data") or [])
                     count += _ingest_parsed("semantic_scholar", _parse_semantic_scholar(_payload),
                                             boolean_native=True)
@@ -1104,6 +1125,7 @@ def _run_user_scenario_populate(
                     _429 = 0                      # cette page est passée
                     _r.raise_for_status()
                     _payload = _r.json()
+                    _note_total("semantic_scholar", _payload.get("total"))
                     _got = len(_payload.get("data") or [])
                     count += _ingest_parsed("semantic_scholar", _parse_semantic_scholar(_payload))
                     if _got < _bulk:
@@ -1132,6 +1154,7 @@ def _run_user_scenario_populate(
                 _n = len(_payload.get("results") or [])
                 if _n == 0:
                     break
+                _note_total("doaj", _payload.get("total"))
                 count += _ingest_parsed("doaj", _parse_doaj(_payload), boolean_native=_send_bool)
                 _fetched += _n
                 if _n < 100:
@@ -1449,13 +1472,6 @@ def _run_user_scenario_populate(
 
     ingested = _ingested_total[0]
     errors = _errors_total[0]
-    # Les enregistrements que les sources ont RENVOYÉS, recoupements compris : le
-    # « identifiés » du PRISMA. `ingested` est un compteur de travail (lignes nouvelles),
-    # donc toujours inférieur dès qu'une source redonne un article qu'une autre a déjà
-    # donné ; servi sous le nom `total_found`, il annonçait un total trouvé plus petit
-    # que le nombre d'articles identifiés par la recherche.
-    with _counter_lock:
-        total_found = sum(_ident_records.values())
 
     # ── Corpus = correspondance BOOLÉENNE (ou multi-sous-requêtes) sur base enrichie ─
     # Après ingestion des articles live, on recalcule l'appartenance au corpus via
@@ -1468,6 +1484,16 @@ def _run_user_scenario_populate(
         # cette recherche (cf. _corpus_frozen). Le corpus et ses chiffres sont figés ensemble.
         with _corpus_lock:
             _corpus_frozen[0] = True
+            # Les enregistrements que les sources ont RENVOYÉS, recoupements compris : le
+            # « identifiés » du PRISMA. Lu APRÈS le gel, et sous les deux verrous dans
+            # l'ordre du reste du module (corpus puis compteurs) : lu avant, une source
+            # lente pouvait encore lier des notices entre la lecture et le gel, et le
+            # `total_found` servi au job était plus petit que le `records_identified`
+            # servi dans la même réponse. `ingested`, lui, ne compte que les lignes
+            # nouvelles : servi sous ce nom, il annonçait moins que ce que la recherche
+            # avait identifié.
+            with _counter_lock:
+                total_found = sum(_ident_records.values())
         # Appartenance = re-match booléen LOCAL (base locale ∪ live) pour les sources par
         # mots-clés + la base existante…
         if _sub_queries:
@@ -1560,6 +1586,7 @@ def _run_user_scenario_populate(
                 """), {"sid": scenario_id}).scalar() or 0
             with _counter_lock:
                 _recs_snapshot = dict(_ident_records)
+                _totals_snapshot = dict(_source_totals)
                 _ids_snapshot = list(_ident_docs)
             # Ventilation des documents identifiés mais ABSENTS du corpus : sans résumé
             # (règle qualité, appliquée avant la dédup - donc les lignes fusionnées par
@@ -1590,7 +1617,8 @@ def _run_user_scenario_populate(
                 per_source_cap=int(max_results),
                 keyword_fallback_sources=(list(_kw_fallback) if include_live else []),
                 keyword_fallback_query=(_plain_q if (include_live and _kw_fallback) else None),
-                source_error_reasons=(dict(_fetcher_errors) if include_live else {}))
+                source_error_reasons=(dict(_fetcher_errors) if include_live else {}),
+                source_totals=(_totals_snapshot if include_live else {}))
             _store_prisma_identification(scenario_id, _figures)
             # Le même total pour tout le monde : le statut du job expose le corpus
             # RETENU (= article_count = « passés au screening » du PRISMA), et non le

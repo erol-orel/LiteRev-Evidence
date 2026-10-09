@@ -4434,6 +4434,12 @@ function PrismaSection({ scenarioId }: { scenarioId: string }) {
                         .filter(Boolean).join(" : ") || undefined}
                       className={`rounded px-2 py-0.5 text-[10px] font-mono ${outcomeStyle(outcomes[src])}`}>
                   {SOURCE_LABELS_MAP[src] ?? src.toUpperCase()} {cnt.toLocaleString()}
+                  {/* « n / total » quand l'API a annoncé plus que ce qu'on a gardé : au
+                      plafond par source, le compte seul se lisait comme le total. */}
+                  {(ident.source_totals?.[src] ?? 0) > cnt
+                    ? ` / ${(ident.source_totals?.[src] ?? 0).toLocaleString()}`
+                    : ""}
+                  {ident.sources_capped?.includes(src) ? ` · ${t("scenarioDetail.prisma.capped")}` : ""}
                   {outcomes[src] && !SEARCHED.has(outcomes[src])
                     ? ` · ${t(`scenarioDetail.prisma.outcome.${outcomes[src]}`)}`
                     : ""}
@@ -4459,6 +4465,17 @@ function PrismaSection({ scenarioId }: { scenarioId: string }) {
           {/* La stratégie RÉELLEMENT soumise, quand elle n'a pas été la même pour toutes.
               Sans cette ligne, les notices des sources en repli se lisaient comme le
               produit de la requête booléenne affichée au-dessus. */}
+          {/* Le plafond, nommé : « pubmed 2 000 » se lisait comme un total. Cinq sources
+              étaient au plafond sur le scénario de contrôle de production, sans un mot. */}
+          {(ident.sources_capped?.length ?? 0) > 0 && (
+            <p className="text-[10px] text-amber-300/80 pt-1 leading-relaxed">
+              {t("scenarioDetail.prisma.cappedNote")
+                .replace("{sources}", (ident.sources_capped ?? [])
+                  .map((s) => `${SOURCE_LABELS_MAP[s] ?? s} (${num(ident.by_source?.[s]).toLocaleString()} / ${num(ident.source_totals?.[s]).toLocaleString()})`)
+                  .join(", "))
+                .replace("{cap}", (ident.per_source_cap ?? 0).toLocaleString())}
+            </p>
+          )}
           {(ident.keyword_fallback_sources?.length ?? 0) > 0 && (
             <p className="text-[10px] text-amber-300/80 pt-1 leading-relaxed">
               {t("scenarioDetail.prisma.keywordFallback")

@@ -878,7 +878,8 @@ def _prisma_identification_figures(records_by_source: dict, unique_records: int,
                                    records_from_library: int = 0,
                                    keyword_fallback_sources: list | None = None,
                                    keyword_fallback_query: str | None = None,
-                                   source_error_reasons: dict | None = None) -> dict[str, Any]:
+                                   source_error_reasons: dict | None = None,
+                                   source_totals: dict | None = None) -> dict[str, Any]:
     """Chiffres PRISMA 2020 de l'étape « identification », calculés à partir de ce qu'une
     recherche a RÉELLEMENT ramené - et non du corpus déjà dédupliqué.
 
@@ -937,6 +938,17 @@ def _prisma_identification_figures(records_by_source: dict, unique_records: int,
         records.setdefault(name, 0)
     by_outcome = {o: sorted(k for k, v in outcomes.items() if v == o) for o in SOURCE_OUTCOMES}
     searched = sum(len(by_outcome[o]) for o in SOURCE_OUTCOMES_COUNTED)
+    totals = {}
+    for k, v in (source_totals or {}).items():
+        try:
+            totals[_source_label(k)] = int(v)
+        except (TypeError, ValueError):
+            continue
+    # « Plafonnée » = l'API a annoncé plus que ce que la source a rapporté. Que la cause
+    # soit le plafond ou le nettoyage, le lecteur doit savoir que ce compte n'est pas
+    # le total de la source.
+    capped = sorted(name for name, got in records.items()
+                    if totals.get(name) is not None and totals[name] > int(got or 0))
     from_databases = sum(records.values())
     identified = from_databases + library
     across = max(0, identified - max(0, int(unique_records or 0)))
@@ -976,6 +988,14 @@ def _prisma_identification_figures(records_by_source: dict, unique_records: int,
         # disait « openalex : échec » et diagnostiquer demandait les journaux du serveur.
         "source_error_reasons": {_source_label(k): str(v)[:200]
                                  for k, v in (source_error_reasons or {}).items() if v},
+        # Le TOTAL VRAI que chaque API a annoncé, et les sources dont on a gardé MOINS que
+        # ce total. Au plafond par source, « pubmed 2 000 » se lisait comme un total : c'est
+        # un plancher. Sur le scénario de contrôle de production, cinq sources étaient au
+        # plafond et rien ne le disait ; et le lot gardé dépend de l'ordre de la source
+        # (PubMed trie par date, donc garde les plus récents ; OpenAlex et Europe PMC par
+        # pertinence). PRISMA-S demande ce nombre.
+        "source_totals": totals,
+        "sources_capped": capped,
         "sources_ok": by_outcome["ok"],
         "sources_empty": by_outcome["empty"],
         "sources_cached": by_outcome["cached"],

@@ -804,6 +804,8 @@ export const en: Translations = {
       federationIncomplete: "The federation time budget was reached: some sources were cut off mid-pagination.",
       perSourceCap: "cap applied: {cap} records per source",
       keywordFallback: "Degraded strategy for {sources}: the boolean query exceeds these APIs' URL limit, so they received the keywords \"{keywords}\". Their records are therefore not the product of the boolean query above.",
+      capped: "capped",
+      cappedNote: "Cap reached for {sources}: these APIs announce more records than the {cap} per source retrieved. Which records were kept depends on each source's own order: PubMed sorts by publication date and therefore keeps the most recent, OpenAlex and Europe PMC sort by relevance.",
       outcome: {
         ok: "answered",
         empty: "no results",

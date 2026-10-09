@@ -1164,6 +1164,12 @@ export interface ScenarioPrisma {
     /** WHY a source failed, by source. The `error` outcome was served bare, so the card
      *  said "openalex: failed" and diagnosing it meant reading the server's logs. */
     source_error_reasons?: Record<string, string>;
+    /** The TRUE total each API announced, and the sources that kept fewer than it. At the
+     *  per-source cap, "pubmed 2000" read as a total; it is a floor, and the records kept
+     *  depend on the source's own order (PubMed: newest first; OpenAlex, Europe PMC: most
+     *  relevant first). Five sources were capped on a production run and nothing said so. */
+    source_totals?: Record<string, number>;
+    sources_capped?: string[];
     /** "populate" = sources were searched; "rebuild" = the boolean query was replayed
      *  over the local library and nothing was searched. The panel called both a search. */
     method?: string;

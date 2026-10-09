@@ -340,6 +340,20 @@ def get_user_scenario_prisma(
                 "sources_failed": list(_figures.get("sources_failed") or []),
                 "sources_skipped": list(_figures.get("sources_skipped") or []),
                 "sources_cut_off": list(_figures.get("sources_cut_off") or []),
+                # Ce que la recherche a RÉELLEMENT fait de plus, et qu'elle a enregistré :
+                # les sources passées en mots-clés et les mots-clés reçus, la raison de
+                # chaque échec, le total vrai annoncé par chaque API et les sources dont
+                # on a gardé moins que ce total. Écrits dans les chiffres stockés depuis
+                # #326, ils n'étaient pas relus ici : la carte ne pouvait pas les afficher.
+                "keyword_fallback_sources": list(_figures.get("keyword_fallback_sources") or []),
+                "keyword_fallback_query": (str(_figures.get("keyword_fallback_query"))
+                                           if _figures.get("keyword_fallback_query") else None),
+                "source_error_reasons": {str(k): str(v)[:200] for k, v in
+                                         (_figures.get("source_error_reasons") or {}).items() if v},
+                "source_totals": {str(k): int(v) for k, v in
+                                  (_figures.get("source_totals") or {}).items()
+                                  if isinstance(v, (int, float)) and not isinstance(v, bool)},
+                "sources_capped": list(_figures.get("sources_capped") or []),
             })
         # La séparation « bases interrogées / bibliothèque locale » : prise telle quelle
         # si elle est stockée, sinon DÉDUITE de la ligne `db_cache` que les anciennes
