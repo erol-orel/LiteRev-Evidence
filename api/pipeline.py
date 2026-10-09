@@ -25,6 +25,7 @@ from .documents import (
 from .scenario_store import (_get_scenario_threshold, _get_user_scenario_or_404,
                              pipeline_enrich_scope, scenario_scope_sql)
 from .search import (
+    DOAJ_MAX_QUERY_CHARS,
     LIVE_MAX_PER_SOURCE,
     OPENAIRE_MAX_OPERATORS,
     SOURCE_OUTCOMES_COUNTED,
@@ -359,8 +360,14 @@ def _run_user_scenario_populate(
     # frappait l'API une quarantaine de fois de plus - ce qui durcit la limite - et en
     # sortait avec zéro article SANS marquer d'erreur. Toute recherche neuve y perdait
     # trois minutes, et le panneau PRISMA lisait « Semantic Scholar : aucun résultat ».
-    _RATE_LIMIT_ATTEMPTS = 3
-    _RATE_LIMIT_MAX_SLEEP_S = 8.0
+    # Cinq tentatives par page, 2 s puis 4, 6, 8 s (20 s au plus), et non trois pour 6 s :
+    # mesuré depuis le serveur de production, le quota anonyme de Semantic Scholar répond
+    # 200 puis 429 deux secondes plus tard. Sur HPAI_last, la première recherche a perdu
+    # la seconde page (977 notices puis erreur) et la seconde l'a obtenue (1 961) : la
+    # même requête, à six minutes de patience près. Une clé d'API reste le vrai remède ;
+    # chaque fil de source attend seul, les onze autres ne l'attendent pas.
+    _RATE_LIMIT_ATTEMPTS = 5
+    _RATE_LIMIT_MAX_SLEEP_S = 12.0
 
     def _wait_out_rate_limit(resp, attempt: int, source: str) -> None:
         """Attendre un 429 une fois de plus, ou LEVER quand il n'y a plus lieu d'attendre.
@@ -573,13 +580,24 @@ def _run_user_scenario_populate(
         # en opérateurs, et ses notices sont ré-appariées en local.
         _openaire_q = (_shorten_boolean(_portable_bool, 1200, max_operators=OPENAIRE_MAX_OPERATORS)
                        if _bool_is_real else "") or _plain_q
+        # DOAJ ne pagine pas au-delà de DOAJ_MAX_QUERY_CHARS (502 dès la page 2, mesuré en
+        # production) : au-delà, sa propre réduction, et ses notices ré-appariées en local.
+        _doaj_q, _doaj_native = _bool_query, _send_bool
+        if _bool_is_real and len(_doaj_q) > DOAJ_MAX_QUERY_CHARS:
+            _doaj_q = _shorten_boolean(_portable_bool, DOAJ_MAX_QUERY_CHARS) or _plain_q
+            _doaj_native = False
         _kw_fallback = ([] if _send_bool else ["openalex", "doaj", "core", "clinicaltrials"]) \
             + ([] if _arxiv_native else ["arxiv"]) + ["openaire"]
+        if not _doaj_native and "doaj" not in _kw_fallback:
+            _kw_fallback.append("doaj")
         # La requête RÉELLEMENT soumise à chacune : la même pour les sources à la limite
-        # d'URL, la syntaxe `all:` pour arXiv, la forme à quatre opérateurs pour OpenAIRE.
-        _fallback_queries = {s: _fallback_q for s in _kw_fallback if s not in ("arxiv", "openaire")}
+        # d'URL, la syntaxe `all:` pour arXiv, la forme à quatre opérateurs pour OpenAIRE,
+        # la forme courte pour DOAJ.
+        _fallback_queries = {s: _fallback_q for s in _kw_fallback if s not in ("arxiv", "openaire", "doaj")}
         if "arxiv" in _kw_fallback:
             _fallback_queries["arxiv"] = _arxiv_q
+        if "doaj" in _kw_fallback:
+            _fallback_queries["doaj"] = _doaj_q
         _fallback_queries["openaire"] = _openaire_q
         logger.info(f"Populate {scenario_id}: requête réduite pour {', '.join(_kw_fallback)} "
                     f"(booléen propre de {len(_clean_bool)} caractères) ; "
@@ -1194,16 +1212,26 @@ def _run_user_scenario_populate(
                 if _budget_exhausted():
                     break
                 _r = _requests.get(
-                    f"https://doaj.org/api/search/articles/{_ulib.quote(_bool_query, safe='')}",
+                    f"https://doaj.org/api/search/articles/{_ulib.quote(_doaj_q, safe='')}",
                     params={"pageSize": 100, "page": _page}, timeout=20,
                 )
+                # DOAJ sert la première page d'un booléen long et répond 502 à toutes les
+                # suivantes, quelle que soit la taille de page (reproduit depuis le serveur
+                # de production sur HPAI_last ; une requête courte pagine normalement). La
+                # raison servie à la carte dit la page et ce qui a été gardé, au lieu d'une
+                # URL de 1 300 caractères coupée avant le numéro de page.
+                if _r.status_code >= 500 and _page > 1:
+                    raise RuntimeError(
+                        f"DOAJ : {_r.status_code} à la page {_page} ({_fetched} notices de la "
+                        f"première page gardées) ; l'API ne pagine pas plus loin sur une requête "
+                        f"de cette longueur")
                 _r.raise_for_status()
                 _payload = _r.json()
                 _n = len(_payload.get("results") or [])
                 if _n == 0:
                     break
                 _note_total("doaj", _payload.get("total"))
-                count += _ingest_parsed("doaj", _parse_doaj(_payload), boolean_native=_send_bool)
+                count += _ingest_parsed("doaj", _parse_doaj(_payload), boolean_native=_doaj_native)
                 _fetched += _n
                 if _n < 100:
                     break
