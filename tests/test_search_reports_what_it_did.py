@@ -176,6 +176,44 @@ def test_the_partial_fetch_carries_what_came_back():
     assert e.items and e.total == 306 and "esummary" in e.reason
 
 
+def test_the_health_probe_counts_the_same_thing_for_every_source():
+    """Le diagnostic des sources sert à les COMPARER : six compteurs, une définition.
+
+    La sonde PubMed rendait `len(idlist)`, qui vaut au plus `retmax` (1 ici), pendant que
+    les cinq autres rendaient leur total réel. Sur une requête à 300 000 enregistrements,
+    PubMed s'affichait « 1 » et passait pour la source la plus maigre de la fédération."""
+    import inspect
+    from api import sources as S
+    src = inspect.getsource(S.sources_health)
+    _probes = src[src.index("probes = ["):src.index("def _probe")]
+    assert "len(j.get(\"esearchresult\"" not in _probes, (
+        "la sonde PubMed compte encore les identifiants rendus, pas les enregistrements")
+    assert 'esearchresult", {}).get("count"' in _probes
+    # Les cinq autres lisent bien un total, pas une longueur de page.
+    for marker in ('meta", {}).get("count")', 'message", {}).get("total-results")',
+                   'get("hitCount")', 'get("totalCount")'):
+        assert marker in _probes, f"une sonde ne lit plus son total : {marker}"
+
+
+def test_an_esummary_that_succeeds_with_nothing_in_it_is_also_partial():
+    """`{"result": {"uids": []}}` est un 200. Rien ne levait, donc rien ne le disait.
+
+    Sous charge, eutils rend ce corps pour des identifiants que l'esearch venait de
+    donner. La fonction rendait alors `([], 306)` et l'appelant lisait « vide » : une
+    affirmation sur la littérature pour un aller-retour manqué. Vu en déroulant un
+    scénario neuf de bout en bout."""
+    import inspect
+    from api import sources as S
+    src = inspect.getsource(S._live_fetch_pubmed)
+    head, _, tail = src.partition("    except Exception as _e:")
+    assert "raise PartialSourceFetch" in tail.split("return results, total")[0]
+    # Et le test du manque est APRÈS le bloc except, donc sur le chemin qui a réussi.
+    after = tail[tail.index("from _e"):]
+    assert "len(results) < len(ids)" in after, (
+        "un esummary plus court que sa liste d'identifiants passe encore pour complet")
+    assert "raise PartialSourceFetch" in after
+
+
 def test_a_failed_source_is_not_listed_among_the_sources_searched():
     import inspect
     from api import sources as S

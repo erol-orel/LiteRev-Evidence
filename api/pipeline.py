@@ -26,6 +26,7 @@ from .scenario_store import (_get_scenario_threshold, _get_user_scenario_or_404,
                              pipeline_enrich_scope, scenario_scope_sql)
 from .search import (
     LIVE_MAX_PER_SOURCE,
+    SOURCE_OUTCOMES_COUNTED,
     _boolean_corpus_ids,
     _boolean_to_arxiv,
     _boolean_to_s2,
@@ -282,6 +283,12 @@ def _run_user_scenario_populate(
     # ligne de couverture, et le cache des sources mémorisait même la non-interrogation
     # comme une réponse vide valable douze heures.
     _fetcher_skipped: dict[str, str] = {}
+    # Sources ARRÊTÉES EN COURS de pagination par le budget. Elles ont répondu, mais pas
+    # jusqu'au bout : leur compteur est un plancher, pas un total, et surtout un
+    # « 0 article » de leur part ne dit RIEN sur la littérature. Sans ce marquage, une
+    # source coupée revenait avec 0 et sans erreur, donc d'issue `empty` : « rien dans la
+    # littérature » pour une source qu'on avait cessé de lire.
+    _fetcher_cut: set[str] = set()
 
     def _mark_source_error():
         _source_errors[0] += 1
@@ -296,6 +303,54 @@ def _run_user_scenario_populate(
         if _f:
             with _counter_lock:
                 _fetcher_skipped[_f] = reason
+
+    def _budget_exhausted() -> bool:
+        """Le budget de fédération est-il écoulé ? Si oui, la source est MARQUÉE coupée.
+
+        Les treize boucles de pagination testaient le budget et sortaient en silence.
+        Deux conséquences : l'issue annoncée de la source devenait `ok`/`empty` comme si
+        elle avait fini de répondre, et `_fed_incomplete` restait faux tant que
+        `as_completed` ne débordait pas lui-même, donc le corpus était autorisé à se
+        vider sur une fédération pourtant partielle.
+        """
+        if _time.time() < _fed_deadline[0]:
+            return False
+        _fed_incomplete[0] = True       # fetch partiel : le corpus ne peut pas rétrécir
+        _f = getattr(_tls, "fetcher", None)
+        if _f:
+            with _counter_lock:
+                _fetcher_cut.add(_f)
+        return True
+
+    # Un 429 se réessaie un nombre BORNÉ de fois. Trois fetchers bouclaient sans limite
+    # (`if 429: sleep(2); continue`) : Semantic Scholar répond 429 à la moindre rafale
+    # sans clé d'API, la boucle tenait donc son fil jusqu'au budget (180 s par défaut),
+    # frappait l'API une quarantaine de fois de plus - ce qui durcit la limite - et en
+    # sortait avec zéro article SANS marquer d'erreur. Toute recherche neuve y perdait
+    # trois minutes, et le panneau PRISMA lisait « Semantic Scholar : aucun résultat ».
+    _RATE_LIMIT_ATTEMPTS = 3
+    _RATE_LIMIT_MAX_SLEEP_S = 8.0
+
+    def _wait_out_rate_limit(resp, attempt: int, source: str) -> None:
+        """Attendre un 429 une fois de plus, ou LEVER quand il n'y a plus lieu d'attendre.
+
+        `attempt` compte les 429 déjà reçus pour cette page. Lève au-delà de
+        `_RATE_LIMIT_ATTEMPTS`, et lève aussi quand le budget ne laisse plus le temps
+        d'une attente : dans les deux cas la source finit en `error`, nommée dans la
+        ligne de couverture, au lieu de passer pour vide.
+        """
+        if attempt + 1 >= _RATE_LIMIT_ATTEMPTS:
+            raise RuntimeError(f"{source} : 429 après {_RATE_LIMIT_ATTEMPTS} tentatives "
+                               f"(limite de débit ; une clé d'API la relèverait)")
+        try:
+            _after = float((getattr(resp, "headers", None) or {}).get("Retry-After") or 0)
+        except (TypeError, ValueError):
+            _after = 0.0
+        _delay = min(max(_after, 2.0 * (attempt + 1)), _RATE_LIMIT_MAX_SLEEP_S)
+        _delay = min(_delay, max(0.0, _fed_deadline[0] - _time.time()))
+        if _delay <= 0:
+            raise RuntimeError(f"{source} : 429 et budget de fédération épuisé")
+        _time.sleep(_delay)
 
     def _run_fetcher(fn):
         _tls.fetcher = fn.__name__
@@ -572,7 +627,7 @@ def _run_user_scenario_populate(
                 # ingérer APRÈS la reconstruction finale du corpus (liens
                 # boolean_native écrits trop tard) → membres non scorés + divergence
                 # de article_count.
-                if _time.time() >= _fed_deadline[0]:
+                if _budget_exhausted():
                     break
                 _batch_ids = _unknown[batch_idx * BATCH_SIZE:(batch_idx + 1) * BATCH_SIZE]
                 if not _batch_ids:
@@ -667,7 +722,7 @@ def _run_user_scenario_populate(
             _oa_fetched = 0
             _oa_limit = min(max_results, max_results)
             while _oa_fetched < _oa_limit:
-                if _time.time() >= _fed_deadline[0]:
+                if _budget_exhausted():
                     break  # budget fédération dépassé - on arrête de paginer
                 _oa_batch = min(200, _oa_limit - _oa_fetched)
                 oa_resp = _requests.get(
@@ -734,7 +789,7 @@ def _run_user_scenario_populate(
             _cr_limit = min(max_results, max_results)
             _cr_rows = min(1000, _cr_limit)   # max Crossref : 10× moins d'allers-retours
             while _cr_fetched < _cr_limit:
-                if _time.time() >= _fed_deadline[0]:
+                if _budget_exhausted():
                     break  # budget fédération dépassé - on arrête de paginer
                 cr_resp = _requests.get(
                     "https://api.crossref.org/works",
@@ -800,7 +855,7 @@ def _run_user_scenario_populate(
             _ep_limit = min(max_results, max_results)
             _ep_page_size = 1000   # max Europe PMC : moins d'allers-retours → fédération plus rapide
             while _ep_fetched < _ep_limit:
-                if _time.time() >= _fed_deadline[0]:
+                if _budget_exhausted():
                     break  # budget fédération dépassé - on arrête de paginer
                 ep_resp = _requests.get(
                     "https://www.ebi.ac.uk/europepmc/webservices/rest/search",
@@ -872,7 +927,7 @@ def _run_user_scenario_populate(
             _pp_fetched = 0
             _pp_query = f"({_boolean}) AND (SRC:PPR)"
             while _pp_fetched < max_results:
-                if _time.time() >= _fed_deadline[0]:
+                if _budget_exhausted():
                     break  # budget fédération dépassé
                 _pp_resp = _requests.get(
                     "https://www.ebi.ac.uk/europepmc/webservices/rest/search",
@@ -969,9 +1024,9 @@ def _run_user_scenario_populate(
                 _s2_bool = None
         try:
             if _s2_bool:
-                _tok, _fetched = None, 0
+                _tok, _fetched, _429 = None, 0, 0
                 while _fetched < max_results:
-                    if _time.time() >= _fed_deadline[0]:
+                    if _budget_exhausted():
                         break
                     _p = {"query": _s2_bool, "fields": _fields}
                     if _tok:
@@ -979,8 +1034,10 @@ def _run_user_scenario_populate(
                     _r = _requests.get("https://api.semanticscholar.org/graph/v1/paper/search/bulk",
                                        params=_p, headers=_hdrs, timeout=25)
                     if _r.status_code == 429:
-                        _time.sleep(2)
+                        _wait_out_rate_limit(_r, _429, "Semantic Scholar")
+                        _429 += 1
                         continue
+                    _429 = 0                      # cette page est passée
                     _r.raise_for_status()
                     _payload = _r.json()
                     _n = len(_payload.get("data") or [])
@@ -992,9 +1049,9 @@ def _run_user_scenario_populate(
                         break
                     _time.sleep(0.3)
             else:
-                _off, _cap = 0, min(max_results, 1000)   # search classique : offset+limit ≤ 1000
+                _off, _cap, _429 = 0, min(max_results, 1000), 0   # search classique : offset+limit ≤ 1000
                 while _off < _cap:
-                    if _time.time() >= _fed_deadline[0]:
+                    if _budget_exhausted():
                         break
                     _bulk = min(100, _cap - _off)
                     _r = _requests.get(
@@ -1003,8 +1060,10 @@ def _run_user_scenario_populate(
                         headers=_hdrs, timeout=20,
                     )
                     if _r.status_code == 429:
-                        _time.sleep(2)
+                        _wait_out_rate_limit(_r, _429, "Semantic Scholar")
+                        _429 += 1
                         continue
+                    _429 = 0                      # cette page est passée
                     _r.raise_for_status()
                     _payload = _r.json()
                     _got = len(_payload.get("data") or [])
@@ -1024,7 +1083,7 @@ def _run_user_scenario_populate(
             import urllib.parse as _ulib
             _page, _fetched = 1, 0
             while _fetched < max_results:
-                if _time.time() >= _fed_deadline[0]:
+                if _budget_exhausted():
                     break
                 _r = _requests.get(
                     f"https://doaj.org/api/search/articles/{_ulib.quote(_bool_query, safe='')}",
@@ -1051,7 +1110,7 @@ def _run_user_scenario_populate(
         try:
             _ct_token, _ct_fetched = None, 0
             while _ct_fetched < max_results:
-                if _time.time() >= _fed_deadline[0]:
+                if _budget_exhausted():
                     break
                 _params = {"query.term": _bool_query, "pageSize": 100, "format": "json"}
                 if _ct_token:
@@ -1083,9 +1142,9 @@ def _run_user_scenario_populate(
             return ("core", 0)
         count = 0
         try:
-            _core_offset, _core_fetched = 0, 0
+            _core_offset, _core_fetched, _429 = 0, 0, 0
             while _core_fetched < max_results:
-                if _time.time() >= _fed_deadline[0]:
+                if _budget_exhausted():
                     break
                 _bulk = min(100, max_results - _core_fetched)
                 _r = _requests.post(
@@ -1095,8 +1154,10 @@ def _run_user_scenario_populate(
                     timeout=25,
                 )
                 if _r.status_code == 429:
-                    _time.sleep(3)
+                    _wait_out_rate_limit(_r, _429, "CORE")
+                    _429 += 1
                     continue
+                _429 = 0                          # cette page est passée
                 _r.raise_for_status()
                 _payload = _r.json()
                 _n = len(_payload.get("results") or [])
@@ -1118,7 +1179,7 @@ def _run_user_scenario_populate(
         try:
             _ax_start = 0
             while _ax_start < max_results:
-                if _time.time() >= _fed_deadline[0]:
+                if _budget_exhausted():
                     break
                 _bulk = min(100, max_results - _ax_start)
                 _r = _requests.get(
@@ -1150,7 +1211,7 @@ def _run_user_scenario_populate(
         try:
             _cursor, _fetched = "*", 0
             while _fetched < max_results:
-                if _time.time() >= _fed_deadline[0]:
+                if _budget_exhausted():
                     break
                 _r = _requests.get(
                     "https://api.openaire.eu/graph/v2/researchProducts",
@@ -1193,7 +1254,7 @@ def _run_user_scenario_populate(
             for _server in ("biorxiv", "medrxiv"):
                 _cursor, _pages = 0, 0
                 while _pages < 30:          # borne dure ; les ~45 j récents tiennent dedans
-                    if _time.time() >= _fed_deadline[0]:
+                    if _budget_exhausted():
                         break
                     _r = _requests.get(
                         f"https://api.biorxiv.org/details/{_server}/{_win}/{_cursor}/json", timeout=20)
@@ -1319,12 +1380,18 @@ def _run_user_scenario_populate(
                 _outcome = "skipped"
             elif _n in _fetcher_errors:
                 _outcome = "error"
-            elif _n not in _returned:
-                _outcome = "cut_by_budget"      # pas revenue dans le budget
+            elif _n in _fetcher_cut or _n not in _returned:
+                # Coupée par le budget : soit elle n'est pas revenue du tout, soit elle a
+                # cessé de paginer en cours de route. Les deux se disent de la même
+                # façon, parce que le lecteur doit en tirer la même conclusion : cette
+                # source n'a pas été lue jusqu'au bout. Les enregistrements qu'elle a
+                # tout de même rapportés restent dans le tableau par source ; c'est son
+                # compte qui n'est pas un total, et son zéro qui ne vaut pas « rien ».
+                _outcome = "cut_by_budget"
             else:
                 _outcome = "ok" if _returned[_n] > 0 else "empty"
             _fetcher_outcome[_n] = _outcome
-            if _outcome in ("ok", "empty", "cached"):
+            if _outcome in SOURCE_OUTCOMES_COUNTED:
                 _queried.add(_n)
         t_elapsed = _time.time() - t_start
         logger.info(f"Populate {scenario_id}: fédération terminée en {t_elapsed:.1f}s "
@@ -1335,7 +1402,13 @@ def _run_user_scenario_populate(
 
     ingested = _ingested_total[0]
     errors = _errors_total[0]
-    total_found = ingested  # Approximation - PubMed callback met à jour séparément
+    # Les enregistrements que les sources ont RENVOYÉS, recoupements compris : le
+    # « identifiés » du PRISMA. `ingested` est un compteur de travail (lignes nouvelles),
+    # donc toujours inférieur dès qu'une source redonne un article qu'une autre a déjà
+    # donné ; servi sous le nom `total_found`, il annonçait un total trouvé plus petit
+    # que le nombre d'articles identifiés par la recherche.
+    with _counter_lock:
+        total_found = sum(_ident_records.values())
 
     # ── Corpus = correspondance BOOLÉENNE (ou multi-sous-requêtes) sur base enrichie ─
     # Après ingestion des articles live, on recalcule l'appartenance au corpus via

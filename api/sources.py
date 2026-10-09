@@ -112,7 +112,8 @@ def _live_fetch_pubmed(query: str, max_results: int) -> tuple[list[dict], int]:
             "tool": "literev", "email": "api@literev.app"
         })
         res2 = r2.json().get("result", {})
-        for uid in res2.get("uids", []):
+        _uids = list(res2.get("uids", []))
+        for uid in _uids:
             item = res2.get(uid, {})
             results.append({
                 "title": item.get("title", ""),
@@ -130,6 +131,15 @@ def _live_fetch_pubmed(query: str, max_results: int) -> tuple[list[dict], int]:
         # Un échec APRÈS l'esearch laisse un vrai total et aucune notice : c'est un
         # fetch partiel, à dire comme tel. Avant l'esearch, il n'y a rien du tout.
         raise PartialSourceFetch(results, total, str(_e)[:200]) from _e
+    # L'esummary peut RÉUSSIR et rendre moins de notices qu'on lui a demandé d'identifiants
+    # (sous charge, eutils renvoie `{"result": {"uids": []}}`). Rien ne lève alors, et une
+    # recherche dont l'esearch avait trouvé 306 enregistrements s'affichait « aucun
+    # résultat » : une affirmation sur la littérature pour un aller-retour manqué. C'est le
+    # même fetch partiel que l'exception ci-dessus, et il se dit de la même façon.
+    if len(results) < len(ids):
+        raise PartialSourceFetch(
+            results, total,
+            f"esummary a rendu {len(results)} notice(s) pour {len(ids)} identifiant(s)")
     return results, total
 
 
@@ -723,9 +733,15 @@ def sources_health(query: str = "cardiac arrest", timeout: int = 12) -> dict[str
 
     # (nom, url, params, headers, extracteur de compteur depuis le JSON)
     probes = [
+        # `esearchresult.count` : le VRAI nombre d'enregistrements, celui du site PubMed.
+        # Le sondage lisait la longueur de `idlist`, qui vaut au plus `retmax` (1 ici) :
+        # PubMed affichait donc « 1 » dans le diagnostic là où les cinq autres sondes
+        # rendaient leur total réel, et la source la plus fournie passait pour la plus
+        # maigre. Le compteur sert à comparer les sources entre elles : il doit compter
+        # la même chose chez toutes.
         ("PubMed (eutils)", "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi",
          eutils_params, ua,
-         lambda j: len(j.get("esearchresult", {}).get("idlist", []))),
+         lambda j: int(j.get("esearchresult", {}).get("count", 0) or 0)),
         ("OpenAlex", "https://api.openalex.org/works",
          {"search": _plain_keywords(query), "per-page": 1, "select": "id,title"}, ua,
          lambda j: j.get("meta", {}).get("count")),
