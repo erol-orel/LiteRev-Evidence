@@ -1219,7 +1219,12 @@ def _launch_populate_job(scenario_id: str, query: str, filters: dict, max_result
 @app.post("/user-scenarios/{scenario_id}/populate")
 def populate_user_scenario(
     scenario_id: str,
-    max_results: int = 100000,
+    # LE plafond par source de l'application (LIVE_MAX_PER_SOURCE, 2000 par défaut),
+    # et non un 100000 écrit ici. `_run_user_scenario_populate` le ramenait de toute
+    # façon à LIVE_MAX_PER_SOURCE, mais la valeur annoncée dans la réponse et dans
+    # l'OpenAPI était l'autre : la documentation de l'API promettait un corpus que le
+    # code ne construit pas.
+    max_results: int = LIVE_MAX_PER_SOURCE,
     include_live: bool = True,
     lang: str | None = Query(None),
     force_live: bool = False,

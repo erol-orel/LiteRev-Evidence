@@ -17,8 +17,32 @@ from .core import RELIEFWEB_APPNAME, app, engine, logger, require_api_key
 from .documents import _normalize_doi, _normalize_title, sanitize_db_text
 from .scenario_store import (_get_scenario_threshold, _get_user_scenario_or_404,
                              relevant_gate_tail_sql)
-from .search import _plain_keywords
+from .search import LIVE_MAX_PER_SOURCE, _plain_keywords
 from llm_usage import model_for as _model
+
+
+class SourceFetchError(RuntimeError):
+    """Une source live a échoué.
+
+    Les cinq fetchers de la recherche en direct avalaient leur propre exception et
+    renvoyaient une liste vide. L'appelant, lui, a une branche `error` et une branche
+    `empty` : la branche `error` ne pouvait donc jamais s'allumer, et une source
+    injoignable s'affichait « aucun résultat », ce qui est une affirmation sur la
+    littérature et non sur le réseau."""
+
+
+class PartialSourceFetch(RuntimeError):
+    """Une source a renvoyé une PARTIE de sa réponse, puis a échoué.
+
+    PubMed en est le cas typique : l'esearch réussit et donne le vrai total, l'esummary
+    échoue. Ni « ok » ni « error » : ce qui est revenu est utilisable, le compte ne l'est
+    pas."""
+
+    def __init__(self, items: list, total: int | None, reason: str):
+        super().__init__(reason)
+        self.items = items or []
+        self.total = total
+        self.reason = reason
 
 _NCBI_LOCK = _threading_ncbi.Lock()
 _NCBI_LAST = [0.0]
@@ -103,6 +127,9 @@ def _live_fetch_pubmed(query: str, max_results: int) -> tuple[list[dict], int]:
             })
     except Exception as _e:
         logger.warning(f"_live_fetch_pubmed error: {_e}")
+        # Un échec APRÈS l'esearch laisse un vrai total et aucune notice : c'est un
+        # fetch partiel, à dire comme tel. Avant l'esearch, il n'y a rien du tout.
+        raise PartialSourceFetch(results, total, str(_e)[:200]) from _e
     return results, total
 
 
@@ -116,6 +143,7 @@ def _live_fetch_openalex(query: str, max_results: int) -> list[dict]:
             "search": _plain_keywords(query), "per-page": min(max_results, 50),
             "select": "id,title,abstract_inverted_index,doi,publication_year,authorships,primary_location,open_access"
         }, headers={"User-Agent": "LiteRev/1.0 (mailto:api@literev.app)"}, timeout=10)
+        r.raise_for_status()      # un 429 ou un 500 n'est pas « aucun résultat »
         for item in r.json().get("results", []):
             doi = item.get("doi", "")
             if doi and doi.startswith("https://doi.org/"):
@@ -135,6 +163,7 @@ def _live_fetch_openalex(query: str, max_results: int) -> list[dict]:
             })
     except Exception as _e:
         logger.warning(f"_live_fetch_openalex error: {_e}")
+        raise SourceFetchError(str(_e)[:200]) from _e
     return results
 
 
@@ -146,6 +175,7 @@ def _live_fetch_crossref(query: str, max_results: int) -> list[dict]:
             "query": query, "rows": min(max_results, 50),
             "select": "DOI,title,abstract,published,author,container-title"
         }, headers={"User-Agent": "LiteRev/1.0 (mailto:api@literev.app)"}, timeout=10)
+        r.raise_for_status()      # un 429 ou un 500 n'est pas « aucun résultat »
         for item in r.json().get("message", {}).get("items", []):
             pub = item.get("published", {}).get("date-parts", [[None]])[0]
             year = pub[0] if pub else None
@@ -162,6 +192,7 @@ def _live_fetch_crossref(query: str, max_results: int) -> list[dict]:
             })
     except Exception as _e:
         logger.warning(f"_live_fetch_crossref error: {_e}")
+        raise SourceFetchError(str(_e)[:200]) from _e
     return results
 
 
@@ -176,6 +207,7 @@ def _live_fetch_europepmc(query: str, max_results: int) -> list[dict]:
             "query": query, "resultType": "lite", "pageSize": min(max_results, 50),
             "format": "json"
         }, headers={"User-Agent": "LiteRev/1.0 (mailto:api@literev.app)"}, timeout=10)
+        r.raise_for_status()      # un 429 ou un 500 n'est pas « aucun résultat »
         for item in r.json().get("resultList", {}).get("result", []):
             results.append({
                 "title": item.get("title", ""),
@@ -190,6 +222,7 @@ def _live_fetch_europepmc(query: str, max_results: int) -> list[dict]:
             })
     except Exception as _e:
         logger.warning(f"_live_fetch_europepmc error: {_e}")
+        raise SourceFetchError(str(_e)[:200]) from _e
     return results
 
 
@@ -205,6 +238,7 @@ def _live_fetch_preprints(query: str, max_results: int) -> list[dict]:
             "query": f"({query}) AND (SRC:PPR)", "resultType": "lite",
             "pageSize": min(max_results, 50), "format": "json",
         }, headers={"User-Agent": "LiteRev/1.0 (mailto:api@literev.app)"}, timeout=10)
+        r.raise_for_status()      # un 429 ou un 500 n'est pas « aucun résultat »
         for item in r.json().get("resultList", {}).get("result", []):
             results.append({
                 "title": item.get("title", ""),
@@ -219,6 +253,7 @@ def _live_fetch_preprints(query: str, max_results: int) -> list[dict]:
             })
     except Exception as _e:
         logger.warning(f"_live_fetch_preprints error: {_e}")
+        raise SourceFetchError(str(_e)[:200]) from _e
     return results
 
 
@@ -388,7 +423,6 @@ def _federated_live_search(
         try:
             for future in concurrent.futures.as_completed(futures, timeout=30):
                 name = futures[future]
-                sources_queried.append(name)
                 _ms = round((_t_fed.time() - _t0_fed) * 1000)
                 try:
                     _res = future.result()
@@ -406,7 +440,23 @@ def _federated_live_search(
                         "status": "ok" if items else "empty",
                         "count": _found, "fetched": len(items), "latency_ms": _ms,
                     }
+                    sources_queried.append(name)      # a répondu, et sa réponse est là
+                except PartialSourceFetch as _pe:
+                    # La moitié d'une réponse : ce qui est revenu est gardé, et le
+                    # panneau le dit « partiel » au lieu de l'afficher complet.
+                    logger.warning(f"federated source {name} partial: {_pe.reason}")
+                    raw_counts[name] = _pe.total or len(_pe.items)
+                    all_results.extend(_pe.items)
+                    source_status[name] = {
+                        "status": "partial", "count": raw_counts[name],
+                        "fetched": len(_pe.items), "latency_ms": _ms,
+                        "error": _pe.reason,
+                    }
+                    sources_queried.append(name)
                 except Exception as _fe:
+                    # PAS dans sources_queried : une source en échec n'est pas une
+                    # source interrogée, et le panneau la listait parmi celles qu'il
+                    # annonçait avoir fouillées.
                     logger.warning(f"federated source {name} error: {_fe}")
                     source_status[name] = {
                         "status": "error", "count": 0, "latency_ms": _ms,
@@ -619,7 +669,12 @@ def search_live(
     ingesting_background = False
     if new_count > 0:
         try:
-            status = _launch_populate_job(scenario_id, query, row.get("filters") or {}, 200, lang=lang)
+            # LE plafond par source, celui du reste de l'application. Un 200 écrit à la
+            # main ici construisait, pour le même scénario et la même requête, un corpus
+            # d'une autre taille que /populate (LIVE_MAX_PER_SOURCE) et que le pipeline
+            # complet : trois chemins, trois corpus, aucun moyen de savoir lequel on lit.
+            status = _launch_populate_job(scenario_id, query, row.get("filters") or {},
+                                          LIVE_MAX_PER_SOURCE, lang=lang)
             ingesting_background = (status == "started")
         except Exception as _be:
             logger.warning(f"search_live background ingest error: {_be}")
@@ -1069,6 +1124,40 @@ def _ingest_doc_direct(
                 "WHERE external_id = :eid AND project_context = :ctx LIMIT 1"
             ), {"eid": external_id, "ctx": project_context}).scalar()
     if existing:
+        # ── La notice retrouvée peut être MEILLEURE que celle en base ────────
+        # Le document existait, donc on le renvoyait tel quel et on jetait le reste.
+        # Or la ligne en base vient souvent de PubMed eSummary, qui ne donne PAS de
+        # résumé : l'article restait sans résumé, et la règle « pas de résumé → hors
+        # corpus » l'écartait de toutes les recherches à venir, alors qu'Europe PMC ou
+        # Crossref venaient précisément de le fournir dans la même fédération.
+        # On ne REMPLACE rien : on ne comble que les champs vides.
+        if any((abstract, year, authors, journal, doi, _pmid)):
+            try:
+                with engine.begin() as _uc:
+                    _uc.execute(text("""
+                        UPDATE literature_document SET
+                            abstract = COALESCE(NULLIF(TRIM(COALESCE(abstract, '')), ''), :abstract),
+                            year     = COALESCE(year, :year),
+                            authors  = COALESCE(NULLIF(TRIM(COALESCE(authors, '')), ''), :authors),
+                            journal  = COALESCE(NULLIF(TRIM(COALESCE(journal, '')), ''), :journal),
+                            doi      = COALESCE(NULLIF(TRIM(COALESCE(doi, '')), ''), :doi),
+                            pmid     = COALESCE(NULLIF(TRIM(COALESCE(pmid, '')), ''), :pmid)
+                        WHERE id = :id
+                    """), {"id": existing, "abstract": abstract, "year": year,
+                           "authors": authors, "journal": journal, "doi": doi,
+                           "pmid": _pmid})
+                    # Résumé enfin présent : le chunk title_abstract doit exister, sinon
+                    # le document reste invisible au scoring sémantique.
+                    if abstract:
+                        _uc.execute(text("""
+                            INSERT INTO document_chunk (document_id, chunk_index, content, chunk_type)
+                            SELECT :id, 0, :content, 'title_abstract'
+                            WHERE NOT EXISTS (
+                                SELECT 1 FROM document_chunk
+                                WHERE document_id = :id AND chunk_type = 'title_abstract')
+                        """), {"id": existing, "content": content_text})
+            except Exception as _ue:
+                logger.warning(f"_ingest_doc_direct enrichissement {existing}: {_ue}")
         return (existing, False)   # dédup pré-SELECT (external_id / titre normalisé / DOI)
 
     # INSERT document + chunk dans UNE SEULE transaction : sinon un crash entre

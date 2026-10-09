@@ -1140,6 +1140,38 @@ export interface ScenarioPrisma {
     figures_from?: "search_run" | "corpus";
     computed_at?: string | null;
     federation_incomplete?: boolean;
+    /** What each launched source actually did: ok, empty, cached, skipped, error,
+     *  cut_by_budget. A source that failed is not a source that was searched, and the
+     *  table used to show neither its row nor its status while still counting it. */
+    source_outcomes?: Record<string, string>;
+    sources_launched?: number;
+    sources_searched?: number;
+    sources_failed?: string[];
+    sources_skipped?: string[];
+    sources_cut_off?: string[];
+    /** PRISMA 2020 splits identification: databases searched, and other methods. The
+     *  local library belongs to the second, and counting it in the first inflated both
+     *  the identified total and the duplicates. */
+    records_identified_databases?: number;
+    records_identified_library?: number;
+    per_source_cap?: number | null;
+    /** "populate" = sources were searched; "rebuild" = the boolean query was replayed
+     *  over the local library and nothing was searched. The panel called both a search. */
+    method?: string;
+    /** What the last real search had established, kept when a rebuild replaces the
+     *  figures, so the record of what was searched is not lost. */
+    last_search?: {
+      computed_at?: string | null;
+      records_identified?: number;
+      records_identified_databases?: number;
+      records_by_source?: Record<string, number>;
+      source_outcomes?: Record<string, string>;
+      sources_searched?: number;
+      sources_launched?: number;
+      sources_failed?: string[];
+      federation_incomplete?: boolean;
+      per_source_cap?: number | null;
+    } | null;
     // legacy
     total_records_identified?: number;
   };
@@ -4005,7 +4037,19 @@ export interface LiveSearchResponse {
   corpus_total?: number;
   corpus_above_threshold?: number;
   threshold?: number;
+  /** Only the sources whose answer is in `results`: a source that failed is no longer
+   *  listed here, because the panel printed it among the sources it had searched. */
   sources_queried: string[];
+  /** Per source: ok, empty, partial, error, timeout, with its latency and count. Built
+   *  and returned by the API since the start, and rendered nowhere until now. */
+  source_status?: Record<string, {
+    status: string;
+    count?: number;
+    fetched?: number;
+    latency_ms?: number | null;
+    error?: string;
+  }>;
+  source_raw_counts?: Record<string, number>;
   ingesting_background: boolean;
 }
 

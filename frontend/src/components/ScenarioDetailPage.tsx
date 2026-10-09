@@ -532,6 +532,32 @@ function QueriesSection({ detail, scenarioId }: { detail: ScenarioDetail; scenar
                 )}
                 <span>{liveData.sources_queried.join(", ")}</span>
               </div>
+              {/* L'état de CHAQUE source interrogée. L'API le calcule et le renvoie
+                  depuis le début ; aucun écran ne l'affichait, et la ligne ci-dessus
+                  listait les sources en échec parmi celles qu'elle disait avoir
+                  interrogées. Une source injoignable se lisait « aucun résultat ». */}
+              {liveData.source_status && Object.keys(liveData.source_status).length > 0 && (
+                <div className="flex flex-wrap gap-1.5 text-[10px] font-mono">
+                  {Object.entries(liveData.source_status).map(([src, st]) => (
+                    <span
+                      key={src}
+                      title={st.error || t(`scenarioDetail.queries.sourceStatus.${st.status}`)}
+                      className={`rounded px-2 py-0.5 ${
+                        st.status === "ok" ? "bg-emerald-900/40 text-emerald-300"
+                        : st.status === "empty" ? "bg-white/5 text-forest-400"
+                        : st.status === "partial" ? "bg-amber-900/40 text-amber-300"
+                        : st.status === "timeout" ? "bg-amber-900/30 text-amber-300/80"
+                        : "bg-rose-900/40 text-rose-300"}`}
+                    >
+                      {src} · {t(`scenarioDetail.queries.sourceStatus.${st.status}`)}
+                      {st.status === "ok" || st.status === "partial"
+                        ? ` (${(st.fetched ?? 0).toLocaleString()})`
+                        : ""}
+                      {typeof st.latency_ms === "number" ? ` ${st.latency_ms} ms` : ""}
+                    </span>
+                  ))}
+                </div>
+              )}
               {typeof liveData.corpus_total === "number" && (
                 <div className="rounded-xl border border-brand-500/20 bg-brand-500/5 px-3 py-2 text-[11px] text-brand-200"
                      title={t("scenarioDetail.queries.corpusTooltip")}>
@@ -4212,9 +4238,36 @@ function PrismaSection({ scenarioId }: { scenarioId: string }) {
   const mc = data.manual_curation ?? ({} as ScenarioPrisma["manual_curation"]);
   const ev = data.evidence ?? ({} as ScenarioPrisma["evidence"]);
 
-  const activeSources = Object.entries(ident.by_source ?? {})
-    .filter(([, v]) => num(v) > 0)
-    .sort(([, a], [, b]) => num(b) - num(a));
+  // Toutes les sources LANCÉES, pas seulement celles qui ont rapporté quelque chose :
+  // filtrer sur « > 0 » faisait disparaître du tableau les sources en échec, coupées par
+  // le budget ou sans clé d'API, alors que le compte affiché juste au-dessus les
+  // comptait. Un relecteur lisait « 7 sources interrogées » sans pouvoir voir que PubMed
+  // n'en faisait pas partie.
+  const outcomes = ident.source_outcomes ?? {};
+  const allSourceNames = Array.from(new Set([
+    ...Object.keys(ident.by_source ?? {}),
+    ...Object.keys(outcomes),
+  ]));
+  const SEARCHED = new Set(["ok", "empty", "cached"]);
+  const activeSources = allSourceNames
+    .map((src) => [src, num((ident.by_source ?? {})[src])] as [string, number])
+    .filter(([src, v]) => v > 0 || outcomes[src] != null)
+    .sort((a, b) => b[1] - a[1]);
+  // Le dénominateur honnête : les sources dont la réponse est DANS ces chiffres.
+  const searchedCount = ident.sources_searched
+    ?? activeSources.filter(([src]) => SEARCHED.has(outcomes[src] ?? "ok")).length;
+  const launchedCount = ident.sources_launched ?? activeSources.length;
+  const notSearched = [
+    ...(ident.sources_failed ?? []),
+    ...(ident.sources_cut_off ?? []),
+    ...(ident.sources_skipped ?? []),
+  ];
+  const outcomeStyle = (o?: string): string =>
+    o === "error" ? "bg-rose-900/40 text-rose-300"
+      : o === "cut_by_budget" ? "bg-amber-900/40 text-amber-300"
+      : o === "skipped" ? "bg-slate-800/60 text-slate-400"
+      : o === "empty" ? "bg-emerald-900/20 text-emerald-300/60"
+      : "bg-emerald-900/40 text-emerald-300";
 
   const totalRecords = num(ident.total_records ?? ident.total_records_identified);
   const evidenceTotal = num(ev.ai_auto_selected) + num(ev.manually_rescued);
@@ -4235,7 +4288,13 @@ function PrismaSection({ scenarioId }: { scenarioId: string }) {
           label={t("scenarioDetail.prisma.stage1")}
           icon={<Database size={13} className="text-emerald-400" />}
         >
-          <PrismaBigNum value={totalRecords} sub={`${activeSources.length} ${activeSources.length !== 1 ? t("scenarioDetail.prisma.sourceSearchedPlural") : t("scenarioDetail.prisma.sourceSearchedSingular")}`} />
+          <PrismaBigNum value={totalRecords} sub={
+            launchedCount > searchedCount
+              ? t("scenarioDetail.prisma.sourcesSearchedOfLaunched")
+                  .replace("{searched}", String(searchedCount))
+                  .replace("{launched}", String(launchedCount))
+              : `${searchedCount} ${searchedCount !== 1 ? t("scenarioDetail.prisma.sourceSearchedPlural") : t("scenarioDetail.prisma.sourceSearchedSingular")}`
+          } />
           {/* « records identified » = étape PRISMA d'identification : compté AVANT
               déduplication (norme PRISMA 2020), donc légitimement ≥ au corpus dédupliqué
               affiché ailleurs. La note l'explicite pour éviter la lecture « incohérence ». */}
@@ -4247,6 +4306,19 @@ function PrismaSection({ scenarioId }: { scenarioId: string }) {
               ? t("scenarioDetail.prisma.recordsIdentifiedNoteCorpus")
               : t("scenarioDetail.prisma.recordsIdentifiedNote")}
           </div>
+          {/* Une reconstruction n'interroge AUCUNE source : elle rejoue la requête sur
+              la bibliothèque locale. Le panneau appelait le résultat une recherche. */}
+          {ident.method === "rebuild" && (
+            <div className="text-center text-[10px] text-amber-300/80 -mt-0.5">
+              {t("scenarioDetail.prisma.rebuiltFromLibrary")}
+              {ident.last_search?.computed_at
+                ? " " + t("scenarioDetail.prisma.lastRealSearch")
+                    .replace("{date}", new Date(ident.last_search.computed_at).toLocaleDateString())
+                    .replace("{sources}", String(ident.last_search.sources_searched ?? 0))
+                    .replace("{records}", (ident.last_search.records_identified_databases ?? 0).toLocaleString())
+                : ""}
+            </div>
+          )}
           <div className="space-y-1">
             <PrismaRow label={t("scenarioDetail.prisma.duplicatesRemoved")} value={num(ident.duplicates_removed)} />
             {ident.unique_records != null && (
@@ -4273,13 +4345,41 @@ function PrismaSection({ scenarioId }: { scenarioId: string }) {
             )}
             <PrismaRow label={t("scenarioDetail.prisma.embeddedSearchable")} value={num(ident.embedded)} />
           </div>
+          {/* La bibliothèque locale a sa propre ligne : PRISMA 2020 la range dans
+              « autres méthodes », pas dans les bases interrogées. */}
+          {num(ident.records_identified_library) > 0 && (
+            <div className="space-y-1">
+              <PrismaRow label={t("scenarioDetail.prisma.identifiedDatabases")} value={num(ident.records_identified_databases)} />
+              <PrismaRow label={t("scenarioDetail.prisma.identifiedLibrary")} value={num(ident.records_identified_library)} />
+            </div>
+          )}
+          {/* L'issue de chaque source, nommée. Une source à zéro reste dans le tableau :
+              c'est la seule façon de lire qu'elle a échoué plutôt que de ne rien trouver. */}
           {activeSources.length > 0 && (
             <div className="flex flex-wrap gap-1.5 pt-1 border-t border-white/5">
               {activeSources.map(([src, cnt]) => (
-                <span key={src} className="rounded px-2 py-0.5 bg-emerald-900/40 text-[10px] font-mono text-emerald-300">
-                  {SOURCE_LABELS_MAP[src] ?? src.toUpperCase()} {(cnt as number).toLocaleString()}
+                <span key={src}
+                      title={outcomes[src] ? t(`scenarioDetail.prisma.outcome.${outcomes[src]}`) : undefined}
+                      className={`rounded px-2 py-0.5 text-[10px] font-mono ${outcomeStyle(outcomes[src])}`}>
+                  {SOURCE_LABELS_MAP[src] ?? src.toUpperCase()} {cnt.toLocaleString()}
+                  {outcomes[src] && !SEARCHED.has(outcomes[src])
+                    ? ` · ${t(`scenarioDetail.prisma.outcome.${outcomes[src]}`)}`
+                    : ""}
                 </span>
               ))}
+            </div>
+          )}
+          {/* Le paragraphe qu'un relecteur peut citer : la recherche est-elle complète ? */}
+          {(notSearched.length > 0 || ident.federation_incomplete) && (
+            <p className="text-[10px] text-amber-300/80 pt-1 leading-relaxed">
+              {notSearched.length > 0 && t("scenarioDetail.prisma.coverageIncomplete")
+                .replace("{sources}", notSearched.map((s) => SOURCE_LABELS_MAP[s] ?? s).join(", "))}
+              {ident.federation_incomplete ? ` ${t("scenarioDetail.prisma.federationIncomplete")}` : ""}
+            </p>
+          )}
+          {ident.per_source_cap != null && (
+            <div className="text-center text-[9px] text-emerald-300/40">
+              {t("scenarioDetail.prisma.perSourceCap").replace("{cap}", ident.per_source_cap.toLocaleString())}
             </div>
           )}
         </PrismaStageCard>

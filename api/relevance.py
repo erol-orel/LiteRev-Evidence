@@ -36,6 +36,7 @@ from .search import (
     _boolean_corpus_ids,
     _dedup_scenario_links,
     _generate_search_strategy,
+    _load_prisma_identification,
     _prisma_identification_figures,
     _set_scenario_corpus,
     _store_prisma_identification,
@@ -630,10 +631,28 @@ def rebuild_corpus(scenario_id: str, _: None = Depends(require_api_key)) -> dict
             n_corpus = _set_scenario_corpus(scenario_id, ids)  # fixe l'appartenance
             _n_dup_rows = _dedup_scenario_links(scenario_id)   # un seul lien / article distinct
             n_corpus -= _n_dup_rows
-            # PRISMA : une reconstruction n'interroge que la base locale → une seule
-            # source ; les seuls doublons sont les lignes fusionnées par la dédup.
-            _store_prisma_identification(scenario_id, _prisma_identification_figures(
-                {"db_cache": len(ids)}, len(set(ids)), _n_dup_rows, max(0, n_corpus), method="rebuild"))
+            # PRISMA : une reconstruction n'interroge AUCUNE source. Elle rejoue la
+            # requête booléenne sur la bibliothèque locale, et ses doublons sont les
+            # lignes fusionnées par la dédup.
+            #
+            # Elle écrasait les chiffres de la dernière VRAIE recherche par une
+            # identification à une seule source fabriquée (« db_cache »), et le panneau
+            # continuait d'appeler le résultat une recherche : la trace de ce qui avait
+            # été interrogé, et de ce qui avait échoué, disparaissait sans retour. On
+            # garde donc ce que la dernière recherche avait établi, sous son propre nom.
+            _figs = _prisma_identification_figures(
+                {}, len(set(ids)), _n_dup_rows, max(0, n_corpus), method="rebuild",
+                records_from_library=len(ids))
+            _prev = _load_prisma_identification(scenario_id) or {}
+            if _prev.get("method") == "populate":
+                _figs["last_search"] = {
+                    k: _prev.get(k) for k in (
+                        "computed_at", "records_identified", "records_identified_databases",
+                        "records_by_source", "source_outcomes", "sources_launched",
+                        "sources_searched", "sources_failed", "sources_skipped",
+                        "sources_cut_off", "per_source_cap", "federation_incomplete")
+                    if _prev.get(k) is not None}
+            _store_prisma_identification(scenario_id, _figs)
             _backfill_title_abstract_chunks(scenario_id)       # chunks résumé manquants
             n = _run_semantic_rerank_inline(scenario_id, query or boolean)  # cosinus pgvector
             try:

@@ -268,8 +268,27 @@ def get_user_scenario_prisma(
             "records_screened": unique,
             "embedded": embedded,
             "figures_from": "search_run",
+            # « populate » = une recherche a interrogé les sources ; « rebuild » = la
+            # requête a été rejouée sur la bibliothèque locale, sans interroger quoi que
+            # ce soit. Le panneau appelait les deux une recherche.
+            "method": str(_figures.get("method") or "populate"),
+            "last_search": _figures.get("last_search") or None,
             "computed_at": _figures.get("computed_at"),
             "federation_incomplete": bool(_figures.get("federation_incomplete")),
+            # Ce que la fédération a fait, source par source. Le tableau ne montrait que
+            # les sources ayant rapporté quelque chose, sous un compte de « sources
+            # interrogées » qui, lui, comptait aussi les autres : une source en échec
+            # était donc invisible ET comptée.
+            "source_outcomes": {str(k): str(v) for k, v in
+                                (_figures.get("source_outcomes") or {}).items()},
+            "sources_launched": int(_figures.get("sources_launched") or 0),
+            "sources_searched": int(_figures.get("sources_searched") or 0),
+            "sources_failed": list(_figures.get("sources_failed") or []),
+            "sources_skipped": list(_figures.get("sources_skipped") or []),
+            "sources_cut_off": list(_figures.get("sources_cut_off") or []),
+            "records_identified_databases": int(_figures.get("records_identified_databases") or 0),
+            "records_identified_library": int(_figures.get("records_identified_library") or 0),
+            "per_source_cap": _figures.get("per_source_cap"),
         }
     else:
         _identification = {

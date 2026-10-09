@@ -120,6 +120,15 @@ def _ensure_performance_indexes() -> None:
         "CREATE INDEX IF NOT EXISTS ix_litdoc_screening_status ON literature_document (screening_status)",
         "CREATE INDEX IF NOT EXISTS ix_litdoc_is_duplicate ON literature_document (is_duplicate)",
         "CREATE INDEX IF NOT EXISTS ix_litdoc_source ON literature_document (source)",
+        # PMID et external_id : les DEUX clés par lesquelles le populate PubMed demande
+        # « ces 1 000 identifiants sont-ils déjà en base ? ». Sans index, chaque lot
+        # balayait toute la table, une fois par lot et par recherche ; et comme la
+        # requête réunit maintenant deux recherches par UNION au lieu d'un OR sur deux
+        # colonnes, il faut un index pour chacune.
+        "CREATE INDEX IF NOT EXISTS ix_litdoc_pmid ON literature_document (pmid) "
+        "WHERE pmid IS NOT NULL",
+        "CREATE INDEX IF NOT EXISTS ix_litdoc_external_id ON literature_document (external_id) "
+        "WHERE external_id IS NOT NULL",
         "CREATE INDEX IF NOT EXISTS ix_litdoc_project_context ON literature_document (project_context)",
         "CREATE INDEX IF NOT EXISTS ix_doc_chunk_document ON document_chunk (document_id)",
         "CREATE INDEX IF NOT EXISTS ix_doc_chunk_type ON document_chunk (chunk_type)",
