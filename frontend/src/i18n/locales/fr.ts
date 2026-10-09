@@ -1382,6 +1382,7 @@ export const fr = {
         comparisonsHint: "Odds ratio entre deux libellés d'un même groupe, sur les articles qui rapportent les deux. 1 signifie aucune différence.",
         versus: "contre",
         papers: "{n} articles",
+        truncated: "{shown} libellés affichés sur {total} : la liste et le CSV sont coupés par un plafond",
         tooFew: "Libellés avec moins de {min} études ({n}) : affichés sans valeur combinée",
         rowsUsed: "{n} lignes ont été combinées.",
         duplicates: "{n} lignes répétées d'un même article ont été comptées une fois.",

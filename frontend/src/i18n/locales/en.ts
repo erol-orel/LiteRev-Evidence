@@ -1384,6 +1384,7 @@ export const en: Translations = {
         comparisonsHint: "Odds ratio between two labels of the same group, over the papers that report both. 1 means no difference.",
         versus: "against",
         papers: "{n} papers",
+        truncated: "{shown} of {total} labels shown: the list and the CSV are capped",
         tooFew: "Labels with fewer than {min} studies ({n}): shown without a pooled value",
         rowsUsed: "{n} rows were pooled.",
         duplicates: "{n} repeated rows of one paper were counted once.",

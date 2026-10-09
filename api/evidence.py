@@ -54,6 +54,8 @@ from .study_design import (LEVEL_HIGH, LEVEL_NA, LEVEL_ORDER, LEVEL_UNKNOWN,  # 
 #: Ces requêtes lisaient la colonne avant le PICO alors que le sélecteur de corpus
 #: lisait l'inverse : les deux nombres affichés côte à côte ne s'additionnaient pas.
 _raw_design_ld = raw_design_sql("ld")
+#: Le même, pour les requêtes qui aliasent literature_document en `d` (le PDF).
+_raw_design_d = raw_design_sql("d")
 
 _STRENGTH_ORDER = LEVEL_ORDER
 design_level = grade_level          # nom conservé : l'API publique de ce module
@@ -524,15 +526,24 @@ def get_user_scenario_evidence_brief_pdf(scenario_id: str):
                      d.quality_score DESC NULLS LAST, d.year DESC NULLS LAST
             LIMIT 100000
         """), {"sid": scenario_id, "thr": eff_thr}).mappings().all()
+        # ── La MÊME distribution que l'écran ─────────────────────────────────
+        # Celle-ci combinait les deux champs à la main, dans l'autre ordre, sans écarter
+        # les marqueurs d'absence, et coupait à huit lignes : le PDF remis au partenaire
+        # annonçait 60 revues systématiques là où l'écran en comptait 77, « Non précisé 3 »
+        # contre 10, imprimait une phrase de 95 caractères comme libellé de devis, et sa
+        # colonne sommait 93 des 201 articles pertinents, sans reste ni note.
+        # Même expression, même regroupement, et aucune coupe : une ligne « autres »
+        # porterait le reste, mais il n'y en a plus puisque la casse borne les libellés.
         study_designs = _conn.execute(text(f"""
-            SELECT
-                COALESCE((d.pico_json->>'study_design'), d.study_design, 'Non classifié') AS design,
-                COUNT(*) AS n
-            FROM article_scenarios ars
-            JOIN literature_document d ON d.id = ars.document_id
-            WHERE d.project_context = 'literev' AND ars.scenario_id = :sid
-              AND {relevant_gate_sql('d', 'ars', ':thr')}
-            GROUP BY 1 ORDER BY 2 DESC LIMIT 8
+            WITH b AS (
+                SELECT lower({_raw_design_d}) AS d
+                FROM article_scenarios ars
+                JOIN literature_document d ON d.id = ars.document_id
+                WHERE d.project_context = 'literev' AND ars.scenario_id = :sid
+                  AND {relevant_gate_sql('d', 'ars', ':thr')}
+            )
+            SELECT {_STUDY_DESIGN_CASE} AS design, COUNT(*) AS n
+            FROM b GROUP BY 1 ORDER BY 2 DESC
         """), {"sid": scenario_id, "thr": eff_thr}).mappings().all()
 
     _buf = _io.BytesIO()

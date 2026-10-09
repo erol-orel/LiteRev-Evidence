@@ -1844,6 +1844,17 @@ export interface PooledResponse {
   excluded: Record<string, number>;
   pooled: PooledGroup[];
   comparisons: PooledComparison[];
+  /** What EXISTS, beside what is served. The lists are capped (120 groups, 40
+   *  comparisons) and the panel used to count its "too few studies" line on the capped
+   *  list: it said 120 where there were 306, and the CSV carried only the 120. */
+  groups_total?: number;
+  groups_returned?: number;
+  groups_truncated?: boolean;
+  groups_too_few_studies?: number;
+  comparisons_total?: number;
+  comparisons_returned?: number;
+  comparisons_truncated?: boolean;
+  caps?: { groups: number; comparisons: number; pairs_per_group: number };
 }
 
 export async function fetchPooled(

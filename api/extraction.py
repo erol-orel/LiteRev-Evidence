@@ -122,6 +122,21 @@ def _ensure_extraction_columns() -> None:
         "ALTER TABLE literature_document ADD COLUMN IF NOT EXISTS extraction_json JSONB",
         "ALTER TABLE literature_document ADD COLUMN IF NOT EXISTS extraction_at TIMESTAMP",
         "ALTER TABLE literature_document ADD COLUMN IF NOT EXISTS extraction_attempts INTEGER DEFAULT 0",
+        # Paramètres épidémiologiques extraits PAR ARTICLE. La règle de la maison : le
+        # travail par article est mis en cache sur sa ligne (comme pico_json et
+        # concepts_json), et seule la réduction est refaite. Cette extraction ne cachait
+        # rien et renvoyait au modèle les mêmes résumés à chaque régénération.
+        "ALTER TABLE literature_document ADD COLUMN IF NOT EXISTS epi_params_json JSONB",
+        "ALTER TABLE literature_document ADD COLUMN IF NOT EXISTS epi_params_at TIMESTAMP",
+        # Le lien d'accès ouvert rendu par Unpaywall. Il était écrit dans `url` en
+        # posant `has_fulltext = true`, sans stocker une ligne de texte : le panneau
+        # annonçait « texte intégral récupéré » pour une adresse.
+        "ALTER TABLE literature_document ADD COLUMN IF NOT EXISTS oa_url TEXT",
+        "ALTER TABLE literature_document ADD COLUMN IF NOT EXISTS oa_url_found_at TIMESTAMP",
+        # Tentatives d'annotation des concepts. Sans ce compteur, un article qu'aucun
+        # passage ne sait annoter restait « manquant » et relançait un passage payant à
+        # chaque affichage de la carte des concepts, jusqu'à quarante fois par page.
+        "ALTER TABLE literature_document ADD COLUMN IF NOT EXISTS concepts_attempts INTEGER DEFAULT 0",
     ]
     _exec_ddl_isolated(stmts, "_ensure_extraction_columns")
 
@@ -337,10 +352,19 @@ def extract_article(client, row: dict, source_text: str, source: str, truncated:
 def _needs_extraction(row: dict) -> bool:
     """An article is (re)extracted when it has none, when the extraction version moved, or
     when the full text arrived after an abstract-only pass. It is skipped once it has
-    failed `_MAX_ATTEMPTS` times, and when it has nothing to read."""
+    failed `_MAX_ATTEMPTS` times, and when it has nothing to read.
+
+    "The full text arrived" is asked of the stored CHUNKS (`has_fulltext_chunk`), never of
+    the `has_fulltext` flag. That flag is set by the enrichment pass as soon as Unpaywall
+    returns an open access LINK, and no text is stored with it. An article flagged that
+    way with no full text chunk was therefore selected on every run, read from its
+    abstract, written back with `source: "abstract"` and `extraction_attempts` reset to
+    zero, then selected again on exactly the same grounds: an unbounded loop, paid every
+    time, with 60 000 characters of model budget per article."""
     if int(row.get("extraction_attempts") or 0) >= _MAX_ATTEMPTS:
         return False
-    has_text = bool(row.get("has_fulltext")) or len((row.get("abstract") or "").strip()) >= _MIN_ABSTRACT_CHARS
+    has_chunk = bool(row.get("has_fulltext_chunk"))
+    has_text = has_chunk or len((row.get("abstract") or "").strip()) >= _MIN_ABSTRACT_CHARS
     if not has_text:
         return False
     ex = row.get("extraction_json")
@@ -348,12 +372,19 @@ def _needs_extraction(row: dict) -> bool:
         return True
     if int(ex.get("v") or 0) < EXTRACTION_VERSION:
         return True
-    return ex.get("source") == "abstract" and bool(row.get("has_fulltext"))
+    return ex.get("source") == "abstract" and has_chunk
 
 
 _ARTICLE_ROWS_SQL = f"""
     SELECT d.id, d.title, d.abstract, d.doi, d.year, d.authors, d.has_fulltext, d.country,
            d.extraction_json, COALESCE(d.extraction_attempts, 0) AS extraction_attempts,
+           -- « On DÉTIENT le texte », qui n'est pas « un lien existe » : c'est la
+           -- présence d'un morceau de texte intégral, la même question que se pose
+           -- scenario_store.scenario_counts_sql.
+           EXISTS (SELECT 1 FROM document_chunk c
+                    WHERE c.document_id = d.id
+                      AND c.chunk_type IN ('fulltext_section', 'full_text'))
+               AS has_fulltext_chunk,
            {screening_status_sql('d', 'ars')} AS screening_status
     FROM literature_document d
     JOIN article_scenarios ars ON ars.document_id = d.id

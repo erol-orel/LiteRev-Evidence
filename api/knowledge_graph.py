@@ -11,6 +11,7 @@ import re
 import threading
 from typing import Any
 
+from fastapi import Query
 from sqlalchemy import text
 
 from .core import app, engine, logger
@@ -20,6 +21,11 @@ from .clustering import _load_viz_cache, _save_viz_cache
 from llm_usage import model_for as _model
 
 # ─── KNOWLEDGE GRAPH (réseau de similarité sémantique) ───────────────────────
+
+#: Plafond de nœuds du graphe. La similarité est calculée par une matrice n × n : 1 000
+#: nœuds font un million de paires, ce qui tient ; 20 000 en font quatre cents millions,
+#: ce qui ne tient pas. `max_nodes` était un paramètre de requête sans borne.
+_KG_MAX_NODES = int(os.getenv("KG_MAX_NODES", "1000") or 1000)
 
 # Mots vides (EN + FR + remplissage scientifique) pour étiqueter les communautés
 # thématiques à partir des titres d'articles.
@@ -207,10 +213,21 @@ _KG_NODE_SQL = f"""
 """
 
 
-@app.get("/user-scenarios/{scenario_id}/knowledge-graph")
 def _compute_user_kg(scenario_id: str, max_nodes: int = 400, min_similarity: float = 0.35) -> dict[str, Any]:
     """Calcul du knowledge graph d'un scénario utilisateur (un seul endroit, réutilisé
-    par l'endpoint ET le précalcul)."""
+    par l'endpoint ET le précalcul).
+
+    Fonction INTERNE, comme son nom le dit. Le décorateur @app.get était posé ici, si
+    bien que l'endpoint appelait le calcul et que `get_user_scenario_knowledge_graph`,
+    qui porte le 404 et le cache, n'était jamais routé ni appelé : un identifiant de
+    scénario inexistant recevait un graphe vide bien formé, que l'onglet affichait comme
+    « ce corpus n'a pas de graphe », et CHAQUE affichage recalculait tout (5,2 s et
+    3,9 Mo sur un scénario de 9 389 articles).
+
+    Les bornes de `max_nodes` et `min_similarity` sont aussi appliquées ICI : la matrice
+    est de taille n × n, et un appelant direct ne doit pas pouvoir la faire exploser."""
+    max_nodes = max(10, min(int(max_nodes), _KG_MAX_NODES))
+    min_similarity = max(0.0, min(float(min_similarity), 1.0))
     # Le clustering porte sur le SOUS-ENSEMBLE PERTINENT (≥ seuil sémantique OU inclus
     # manuellement ; jamais les exclus), PAS sur tout le corpus - même définition que
     # corpus_above et l'Assistant RAG. Sinon les communautés étaient diluées par des
@@ -247,10 +264,15 @@ def _precompute_user_kg(scenario_id: str) -> None:
     _precompute_concept_graph(scenario_id, extract=False)
 
 
+@app.get("/user-scenarios/{scenario_id}/knowledge-graph")
 def get_user_scenario_knowledge_graph(
     scenario_id: str,
-    max_nodes: int = 400,
-    min_similarity: float = 0.35,
+    # Bornés : `max_nodes` alimente une matrice n × n et une liste d'arêtes en
+    # np.triu_indices(n, 1). Un GET avec max_nodes=20000 allouait des gigaoctets dans
+    # le processus de l'API, et comme la route n'était pas celle qui cache, le travail
+    # était refait à chaque appel.
+    max_nodes: int = Query(400, ge=10, le=_KG_MAX_NODES),
+    min_similarity: float = Query(0.35, ge=0.0, le=1.0),
 ) -> dict[str, Any]:
     """Graphe de connaissance d'un scénario utilisateur (réseau de similarité sémantique)."""
     _get_user_scenario_or_404(scenario_id)
@@ -687,7 +709,15 @@ def _build_concept_graph(rows: list[dict], *, max_nodes: int = 60, min_edge: int
         "kind": "concepts", "version": CONCEPTS_VERSION,
         "n_articles": n_articles, "n_total": n_total,
         "n_with_concepts": n_with_concepts,
-        "n_missing_concepts": sum(1 for r in rows if not r.get("concepts_json")),
+        # « Manquants » doit vouloir dire « qu'un passage pourrait annoter ». Ce compte
+        # incluait les articles qu'AUCUN passage ne peut annoter (pas de PICO, résumé de
+        # 80 caractères ou moins, ou trois tentatives déjà faites), alors que `todo` les
+        # écarte : l'extraction rendait 0, le graphe était remis en cache avec le même
+        # `n_missing`, et le relaunch repartait. L'interface interroge jusqu'à quarante
+        # fois par affichage, donc quarante départs de passage payant pour rien.
+        "n_missing_concepts": sum(1 for r in rows if _concepts_annotatable(r)),
+        "n_unannotatable": sum(1 for r in rows
+                               if not r.get("concepts_json") and not _concepts_annotatable(r)),
         "source": "llm" if n_with_concepts else "structured",
         "latest_year": latest_year,
         "types": [{"type": t, "count": int(c)} for t, c in type_counts.most_common()],
@@ -699,6 +729,7 @@ def _build_concept_graph(rows: list[dict], *, max_nodes: int = 60, min_edge: int
 _CONCEPT_ROWS_SQL = f"""
     SELECT d.id, d.title, d.year, d.quality_score AS quality, d.doi, d.pmid, d.country,
            d.study_design, d.pico_json, d.metadata_json, d.keywords, d.concepts_json, d.abstract,
+           COALESCE(d.concepts_attempts, 0) AS concepts_attempts,
            COALESCE(ars.similarity_score, 0) AS similarity
     FROM literature_document d
     JOIN article_scenarios ars ON ars.document_id = d.id
@@ -794,6 +825,25 @@ def _llm_concepts_for_batch(client, batch: list[dict]) -> dict[int, list[dict]]:
     return out
 
 
+#: Tentatives d'annotation par article avant de le laisser tranquille. Sans ce compteur,
+#: un article qu'un lot ne sait pas annoter restait « manquant » pour toujours et
+#: relançait un passage payant à chaque affichage de la carte.
+CONCEPTS_MAX_ATTEMPTS = int(os.getenv("CONCEPTS_MAX_ATTEMPTS", "3") or 3)
+
+
+def _concepts_annotatable(row: dict) -> bool:
+    """Cet article peut-il encore être annoté ? MÊME prédicat que la sélection du lot.
+
+    `todo` l'appliquait et `n_missing_concepts` non : les deux comptes divergeaient, et
+    c'est l'écart qui faisait repartir un passage payant indéfiniment."""
+    if row.get("concepts_json"):
+        return False
+    if int(row.get("concepts_attempts") or 0) >= CONCEPTS_MAX_ATTEMPTS:
+        return False
+    return bool(isinstance(row.get("pico_json"), dict)
+                or (row.get("abstract") and len(row["abstract"]) > 80))
+
+
 def _extract_concepts_for_scenario(scenario_id: str, max_articles: int | None = None) -> int:
     """Normalise par le LLM les concepts des articles pertinents qui n'en ont pas encore
     (`concepts_json`), une fois pour toutes - les autres scénarios les réutilisent.
@@ -803,8 +853,7 @@ def _extract_concepts_for_scenario(scenario_id: str, max_articles: int | None = 
     from concurrent.futures import ThreadPoolExecutor
     from llm_usage import MeteredOpenAI as _OAI
     rows, _ = _concept_rows(scenario_id)
-    todo = [r for r in rows if not r.get("concepts_json")
-            and (isinstance(r.get("pico_json"), dict) or (r.get("abstract") and len(r["abstract"]) > 80))]
+    todo = [r for r in rows if _concepts_annotatable(r)]
     _cap = int(max_articles or CONCEPT_MAX_ARTICLES or 0)
     if _cap > 0:
         todo = todo[:_cap]
@@ -817,17 +866,25 @@ def _extract_concepts_for_scenario(scenario_id: str, max_articles: int | None = 
     def _work(batch):
         res = _llm_concepts_for_batch(client, batch)
         n = 0
-        if res:
-            try:
-                with engine.begin() as conn:
-                    for aid, concepts in res.items():
-                        conn.execute(text(
-                            "UPDATE literature_document SET concepts_json = CAST(:c AS jsonb) WHERE id = :id"
-                        ), {"c": json.dumps({"v": CONCEPTS_VERSION, "concepts": concepts}, ensure_ascii=False),
-                            "id": aid})
-                        n += 1
-            except Exception as e:
-                logger.warning(f"concepts_json write: {e}")
+        try:
+            with engine.begin() as conn:
+                # La tentative est comptée pour TOUS les articles du lot, qu'ils soient
+                # revenus ou non : un article que le modèle ne sait pas annoter restait
+                # sinon « manquant » pour toujours et relançait un passage payant à
+                # chaque affichage de la carte.
+                conn.execute(text("""
+                    UPDATE literature_document
+                    SET concepts_attempts = COALESCE(concepts_attempts, 0) + 1
+                    WHERE id = ANY(CAST(:ids AS bigint[]))
+                """), {"ids": [int(a["id"]) for a in batch]})
+                for aid, concepts in (res or {}).items():
+                    conn.execute(text(
+                        "UPDATE literature_document SET concepts_json = CAST(:c AS jsonb) WHERE id = :id"
+                    ), {"c": json.dumps({"v": CONCEPTS_VERSION, "concepts": concepts}, ensure_ascii=False),
+                        "id": aid})
+                    n += 1
+        except Exception as e:
+            logger.warning(f"concepts_json write: {e}")
         return n
 
     with ThreadPoolExecutor(max_workers=_CONCEPT_WORKERS) as ex:

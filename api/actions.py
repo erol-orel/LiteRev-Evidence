@@ -5,6 +5,7 @@ tools and tests.
 """
 from __future__ import annotations
 
+import os
 from typing import Any
 
 from fastapi import Query
@@ -18,6 +19,10 @@ from llm_usage import model_for as _model
 
 # ─── ACTIONS RECOMMANDÉES (carte tableau de bord, généralisé aux user scenarios) ─
 _ACTIONS_JOBS: dict[str, dict] = {}
+#: Tentatives automatiques avant d'arrêter de relancer de soi-même. La carte est
+#: interrogée à chaque affichage : sans borne, un modèle en panne coûterait un appel par
+#: ouverture d'onglet.
+_ACTIONS_MAX_ATTEMPTS = int(os.getenv("ACTIONS_MAX_ATTEMPTS", "3") or 3)
 
 
 def _generate_recommended_actions(scenario_id: str, lang: str | None = None) -> list[str]:
@@ -34,6 +39,8 @@ def _generate_recommended_actions(scenario_id: str, lang: str | None = None) -> 
     pico_articles = _get_above_threshold_articles(scenario_id, full_rows=20, require_pico=True)
     base = pico_articles or _get_above_threshold_articles(scenario_id, full_rows=20)
     if not base:
+        logger.warning(f"Génération actions {scenario_id}: aucun article pertinent ; "
+                       f"rien à générer (ce n'est pas un échec du modèle).")
         return []
 
     scenario_name = _get_scenario_name(scenario_id)
@@ -98,16 +105,45 @@ def _maybe_generate_actions(scenario_id: str, lang: str | None = None) -> bool:
     (au lieu du garde-fou « une seule fois » qui figeait la 1re langue)."""
     import threading
     _job_key = f"{scenario_id}:{(lang or 'fr')[:2].lower()}"
-    if _ACTIONS_JOBS.get(_job_key, {}).get("status") in ("running", "done"):
+    # ── Le verrou ne retient que ce qui TOURNE ───────────────────────────────
+    # Il retenait aussi « fait », et « fait » était écrit même quand la génération
+    # n'avait rien produit. Deux conséquences, toutes deux vues en production :
+    #   - un appel au modèle qui échoue une fois (quota, délai, JSON malformé) laissait
+    #     la carte vide, sans erreur, pour toute la durée de vie du processus ;
+    #   - bouger le seuil vide `recommended_actions_json` par CORPUS_DERIVED_CACHE_RESET,
+    #     mais le verrou reste « fait » : la carte restait blanche jusqu'au prochain
+    #     redémarrage de l'API, et un changement de langue l'effaçait définitivement pour
+    #     l'autre langue.
+    # La colonne est la vérité ; le verrou n'empêche qu'une génération concurrente.
+    _prev = _ACTIONS_JOBS.get(_job_key, {})
+    if _prev.get("status") == "running":
         return False
-    _ACTIONS_JOBS[_job_key] = {"status": "running"}
+    # Une génération qui échoue n'est pas relancée indéfiniment : la carte est
+    # interrogée à chaque affichage, et réessayer sans borne sur un modèle en panne
+    # serait un appel payant par ouverture d'onglet. Trois tentatives, puis l'erreur
+    # reste affichée jusqu'à un rafraîchissement explicite.
+    _attempts = int(_prev.get("attempts") or 0)
+    if _prev.get("status") == "error" and _attempts >= _ACTIONS_MAX_ATTEMPTS:
+        return False
+    _ACTIONS_JOBS[_job_key] = {"status": "running", "attempts": _attempts + 1}
 
     def _run():
         try:
             n = _generate_recommended_actions(scenario_id, lang=lang)
-            _ACTIONS_JOBS[_job_key] = {"status": "done", "count": len(n)}
+            if n:
+                _ACTIONS_JOBS[_job_key] = {"status": "done", "count": len(n),
+                                           "attempts": _attempts + 1}
+            else:
+                # Rien produit n'est pas un succès : le dire, pour que l'endpoint
+                # réponde « erreur » et que le prochain appel réessaie.
+                _ACTIONS_JOBS[_job_key] = {
+                    "status": "error", "attempts": _attempts + 1,
+                    "error": "La génération n'a produit aucune action (appel au modèle "
+                             "en échec, ou corpus sans article pertinent).",
+                }
         except Exception as e:
-            _ACTIONS_JOBS[_job_key] = {"status": "error", "error": str(e)}
+            _ACTIONS_JOBS[_job_key] = {"status": "error", "error": str(e),
+                                       "attempts": _attempts + 1}
             logger.warning(f"Actions job {scenario_id}: {e}")
 
     threading.Thread(target=_run, daemon=True).start()

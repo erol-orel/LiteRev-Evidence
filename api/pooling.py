@@ -305,7 +305,12 @@ def pooled_groups(rows: list[dict[str, Any]], min_studies: int = MIN_STUDIES, sp
                 s["p"], (s["ci_low"], s["ci_high"]) = s["x"] / s["n"], wilson(s["x"], s["n"])
         out.append(entry)
     out.sort(key=lambda e: (-e["k"], -e["n_total"], e["sheet"], e["label"]))
-    return out[:_MAX_GROUPS]
+    # AUCUNE coupe ici : la fonction est pure et rend tout ce qu'elle a calculé. La
+    # coupe appartient à la réponse servie, qui doit la DIRE (cf. pooled_estimates) : le
+    # panneau affichait « Libellés avec moins de 3 études (120) » alors qu'il y en avait
+    # 306, parce qu'il comptait la liste déjà tronquée, et le CSV téléchargé ne portait
+    # que les 120 premiers sans un mot.
+    return out
 
 
 def pooled_comparisons(rows: list[dict[str, Any]], order: dict[tuple, int], min_studies: int = MIN_STUDIES,
@@ -333,7 +338,7 @@ def pooled_comparisons(rows: list[dict[str, Any]], order: dict[tuple, int], min_
             out.append({"sheet": sheet, "group": g, "disease": disease or None, "a": first, "b": second,
                         "k": len(studies), **pool_odds_ratios(studies)})
     out.sort(key=lambda e: (-e["k"], e["sheet"], e["group"], e["a"]))
-    return out[:_MAX_PAIRS]
+    return out
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -391,13 +396,32 @@ def pooled_estimates(scenario_id: str, reviewed_only: bool = False, verified_onl
     rows, excl, index = collect_rows(scenario_id, reviewed_only, verified_only)
     order = {(n["sheet"], n["l1"], n["l2"]): i for i, n in enumerate(index.nodes) if n.get("l2")}
     _groups, dropped = build_groups(rows, split_disease)
+    _all_pooled = pooled_groups(rows, min_studies, split_disease)
+    _all_comps = pooled_comparisons(rows, order, min_studies, split_disease)
+    pooled, pooled_total = _all_pooled[:_MAX_GROUPS], len(_all_pooled)
+    comps, comps_total = _all_comps[:_MAX_PAIRS], len(_all_comps)
+    # Compté sur TOUT ce qui existe, pas sur la page servie : c'est la ligne que le
+    # panneau affiche, et elle disait 120 pour 306.
+    _too_few = sum(1 for g in _all_pooled if g.get("reason") == "too_few_studies")
     return {
         "scenario_id": scenario_id,
         "filters": {"reviewed_only": reviewed_only, "verified_only": verified_only,
                     "split_disease": split_disease, "min_studies": min_studies},
         "n_rows_used": len(rows), "n_duplicate_rows_dropped": dropped, "excluded": excl,
-        "pooled": pooled_groups(rows, min_studies, split_disease),
-        "comparisons": pooled_comparisons(rows, order, min_studies, split_disease),
+        "pooled": pooled,
+        "comparisons": comps,
+        # Ce qui EXISTE, à côté de ce qui est servi. Le panneau comptait ses libellés
+        # « trop peu nombreux » sur la liste tronquée, et le CSV téléchargé ne portait
+        # que les 120 premiers sans le dire.
+        "groups_total": pooled_total,
+        "groups_returned": len(pooled),
+        "groups_truncated": pooled_total > len(pooled),
+        "groups_too_few_studies": _too_few,
+        "comparisons_total": comps_total,
+        "comparisons_returned": len(comps),
+        "comparisons_truncated": comps_total > len(comps),
+        "caps": {"groups": _MAX_GROUPS, "comparisons": _MAX_PAIRS,
+                 "pairs_per_group": _MAX_PAIRS_PER_GROUP},
     }
 
 

@@ -79,6 +79,10 @@ def ensure_document_columns(cur) -> bool:
                      ("open_access", "BOOLEAN"), ("sample_size", "INTEGER"), ("pico_json", "JSONB"),
                      ("metadata_json", "JSONB"), ("concepts_json", "JSONB"), ("country", "TEXT"),
                      ("study_design", "TEXT"), ("quality_score", "FLOAT"),
+                     ("epi_params_json", "JSONB"), ("epi_params_at", "TIMESTAMP"),
+                     ("oa_url", "TEXT"), ("oa_url_found_at", "TIMESTAMP"),
+                     ("concepts_attempts", "INTEGER DEFAULT 0"),
+                     ("has_fulltext", "BOOLEAN"),
                      ("project_context", "VARCHAR(32) DEFAULT 'literev'")):
         cur.execute(f"ALTER TABLE literature_document ADD COLUMN IF NOT EXISTS {col} {typ}")
     for col, typ in (("rerank_score", "FLOAT"), ("screening_status", "TEXT"),

@@ -107,6 +107,13 @@ def _parameter_candidate_articles(scenario_id: str, threshold: float | None = No
     sql = text(f"""
         SELECT d.id, d.title, d.abstract, d.year, d.doi, d.study_design,
                d.quality_score, d.citation_count, d.source,
+               -- Le résultat DÉJÀ extrait pour cet article, s'il existe : la règle de la
+               -- maison veut que le travail par article soit mis en cache sur sa ligne,
+               -- et que seule la réduction soit refaite. Cette extraction ne cachait
+               -- rien : chaque régénération des variables renvoyait au modèle les mêmes
+               -- résumés, 21 appels de dix résumés de 2 000 caractères sur un scénario
+               -- de 9 389 articles, en entier, à chaque fois.
+               d.epi_params_json,
                COALESCE(ars.similarity_score, 0) AS similarity
         FROM literature_document d
         JOIN article_scenarios ars ON ars.document_id = d.id
@@ -182,6 +189,61 @@ def _epi_extract_batch(client, batch: list[dict], disease_hint: str | None) -> l
     return [a for a in (data.get("articles") or []) if isinstance(a, dict)] if isinstance(data, dict) else []
 
 
+#: Version du format mis en cache. L'incrémenter invalide les lignes déjà extraites.
+EPI_PARAM_VERSION = 1
+
+
+def _epi_cache_hit(row: dict, disease_hint: str | None) -> dict | None:
+    """Le résultat en cache de cet article, s'il est utilisable.
+
+    Un résultat VIDE est un fait, pas une absence : « cet article mentionne un paramètre
+    et n'en donne aucune valeur exploitable » a coûté un appel au modèle et vaut d'être
+    gardé. Le cache porte l'indice de maladie qui a servi, parce que la réponse en
+    dépend : un autre indice est un défaut de cache, pas une erreur."""
+    cached = row.get("epi_params_json")
+    if not isinstance(cached, dict):
+        return None
+    if int(cached.get("v") or 0) != EPI_PARAM_VERSION:
+        return None
+    if (cached.get("hint") or None) != (disease_hint or None):
+        return None
+    return {"id": int(row["id"]), "disease": cached.get("disease"),
+            "parameters": cached.get("parameters") or []}
+
+
+def _epi_cache_write(results: list[dict], candidate_ids: set[int],
+                     disease_hint: str | None) -> int:
+    """Écrit sur la ligne de chaque article ce que le modèle en a dit. Une fois pour
+    toutes : la réduction (agrégation sur tout le sous-ensemble pertinent) se refait sans
+    rien repayer."""
+    import json as _json
+    rows = [{"id": int(r["id"]),
+             "j": _json.dumps({"v": EPI_PARAM_VERSION, "hint": disease_hint or None,
+                               "disease": r.get("disease"),
+                               "parameters": r.get("parameters") or []}, ensure_ascii=False)}
+            for r in results if _as_int(r.get("id")) in candidate_ids]
+    if not rows:
+        return 0
+    try:
+        with engine.begin() as conn:
+            conn.execute(text("""
+                UPDATE literature_document
+                SET epi_params_json = CAST(:j AS jsonb), epi_params_at = NOW()
+                WHERE id = :id
+            """), rows)
+    except Exception as _e:                                  # noqa: BLE001 - jamais bloquant
+        logger.warning(f"cache des paramètres épidémiologiques: {_e}")
+        return 0
+    return len(rows)
+
+
+def _as_int(v) -> int | None:
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return None
+
+
 def extract_epidemic_observations(scenario_id: str, disease_hint: str | None = None,
                                   threshold: float | None = None,
                                   max_articles: int = 0) -> dict[str, Any]:
@@ -202,6 +264,11 @@ def extract_epidemic_observations(scenario_id: str, disease_hint: str | None = N
     out: dict[str, Any] = {
         "params": {}, "disease": None, "n_candidates": len(candidates),
         "n_articles_used": 0, "n_with_values": 0,
+        # Ce que l'extraction a FAIT, pas seulement ce qu'elle a trouvé. Sans ces
+        # compteurs, une panne complète du modèle se lisait comme un constat sur la
+        # littérature.
+        "n_batches": 0, "n_batches_failed": 0, "n_from_cache": 0, "n_not_examined": 0,
+        "status": "no_key" if not _os.getenv("OPENAI_API_KEY") else "ok",
         "articles": [{"id": a["id"], "title": a.get("title"), "year": a.get("year"),
                       "doi": a.get("doi"), "quality_score": a.get("quality_score"),
                       "study_design": a.get("study_design"), "source": a.get("source"),
@@ -214,13 +281,40 @@ def extract_epidemic_observations(scenario_id: str, disease_hint: str | None = N
     except Exception as _e:                                  # noqa: BLE001 - SDK absent ou clé illisible
         logger.warning(f"Extraction des paramètres {scenario_id}: client LLM indisponible ({_e})")
         return out                                           # les candidats restent comptés
-    batches = [candidates[i:i + _EPI_PARAM_BATCH] for i in range(0, len(candidates), _EPI_PARAM_BATCH)]
+    # ── map : ce qui est déjà extrait n'est pas redemandé ────────────────────
+    cached, to_ask = [], []
+    for a in candidates:
+        hit = _epi_cache_hit(a, disease_hint)
+        (cached.append(hit) if hit else to_ask.append(a))
+    batches = [to_ask[i:i + _EPI_PARAM_BATCH] for i in range(0, len(to_ask), _EPI_PARAM_BATCH)]
     valid_ids = {int(a["id"]) for a in candidates}
     diseases: dict[str, int] = {}
-    with ThreadPoolExecutor(max_workers=_EPI_PARAM_WORKERS) as ex:
-        results = list(ex.map(lambda b: _epi_extract_batch(client, b, disease_hint), batches))
+    fresh: list[list[dict]] = []
+    if batches:
+        with ThreadPoolExecutor(max_workers=_EPI_PARAM_WORKERS) as ex:
+            fresh = list(ex.map(lambda b: _epi_extract_batch(client, b, disease_hint), batches))
+    # ── Ce que les lots ont fait, compté ─────────────────────────────────────
+    # Un lot en échec (quota, délai, clé invalide, réponse malformée) renvoyait [] et
+    # devenait indistinguable d'un lot où aucun article ne donne de valeur. Sur une
+    # panne complète, le relecteur lisait « aucune valeur exploitable dans les articles
+    # qui mentionnent un paramètre » : une affirmation définitive sur 205 articles que
+    # le modèle n'a jamais examinés.
+    _failed = sum(1 for b, r in zip(batches, fresh) if not r)
+    out["n_batches"] = len(batches)
+    out["n_batches_failed"] = _failed
+    out["n_from_cache"] = len(cached)
+    _asked_ids = {int(a["id"]) for b in batches for a in b}
+    _answered_ids = {i for r in fresh for a in r if (i := _as_int(a.get("id"))) is not None}
+    out["n_not_examined"] = len(_asked_ids - _answered_ids)
+    if _failed:
+        logger.warning(f"Paramètres épidémiologiques {scenario_id}: {_failed}/{len(batches)} "
+                       f"lots en échec ; {out['n_not_examined']} articles non examinés.")
+    _written = _epi_cache_write([a for r in fresh for a in r], valid_ids, disease_hint)
+    if _written:
+        logger.info(f"Paramètres épidémiologiques {scenario_id}: {_written} articles mis en "
+                    f"cache, {len(cached)} relus depuis le cache.")
     import seir_model as _seir
-    for res in results:
+    for res in [cached] + fresh:
         for art in res:
             try:
                 aid = int(art.get("id"))
@@ -247,7 +341,13 @@ def extract_epidemic_observations(scenario_id: str, disease_hint: str | None = N
                 _d = str(art.get("disease") or "").strip()
                 if _d:
                     diseases[_d] = diseases.get(_d, 0) + 1
-    out["n_articles_used"] = len(candidates)
+    # Les articles réellement examinés : ceux relus du cache, plus ceux dont un lot a
+    # répondu. Il annonçait `len(candidates)` quoi qu'il arrive, donc 205 articles
+    # examinés sur une panne où aucun ne l'avait été.
+    out["n_articles_used"] = len(cached) + len(_answered_ids)
+    out["status"] = ("llm_partial" if _failed and _failed < len(batches)
+                     else "llm_unavailable" if _failed and _failed == len(batches)
+                     else "ok")
     if diseases:
         out["disease"] = max(diseases.items(), key=lambda kv: kv[1])[0]
     logger.info(f"Paramètres épidémiologiques {scenario_id}: {len(candidates)} articles candidats, "
@@ -1230,11 +1330,38 @@ def extract_scenario_epidemic_parameters(scenario_id: str, max_articles: int = 0
     name = _get_scenario_name(scenario_id)
     targeted = extract_epidemic_observations(scenario_id, disease_hint=name, max_articles=max_articles)
     if not targeted.get("params"):
-        return {"status": "no_parameters", "scenario_id": scenario_id,
+        # ── Dire ce qui s'est passé, pas ce que dirait la littérature ────────
+        # « Aucune valeur exploitable dans les articles qui mentionnent un paramètre »
+        # est une affirmation définitive sur les articles. Elle était servie telle quelle
+        # quand TOUS les lots avaient échoué (quota, délai, clé invalide, réponse
+        # malformée) : le modèle n'avait jamais examiné un seul des 205 articles.
+        _st = str(targeted.get("status") or "ok")
+        _failed = int(targeted.get("n_batches_failed") or 0)
+        _nb = int(targeted.get("n_batches") or 0)
+        _unexamined = int(targeted.get("n_not_examined") or 0)
+        if _st == "no_key":
+            _msg = ("Aucune clé de modèle n'est configurée : l'extraction n'a pas eu "
+                    "lieu. Ce n'est pas un constat sur les articles.")
+        elif _st == "llm_unavailable":
+            _msg = (f"L'extraction n'a pas pu être faite : les {_nb} lots ont tous "
+                    f"échoué et {_unexamined} articles n'ont pas été examinés. "
+                    "Ce n'est pas un constat sur les articles.")
+        elif _st == "llm_partial":
+            _msg = (f"Extraction partielle : {_failed} lots sur {_nb} ont échoué et "
+                    f"{_unexamined} articles n'ont pas été examinés. Aucune valeur "
+                    "exploitable dans ceux qui l'ont été.")
+        elif targeted.get("n_candidates"):
+            _msg = "Aucune valeur exploitable dans les articles qui mentionnent un paramètre."
+        else:
+            _msg = "Aucun article du corpus ne rapporte de paramètre épidémiologique."
+        return {"status": ("llm_unavailable" if _st in ("llm_unavailable", "no_key")
+                           else "partial" if _st == "llm_partial" else "no_parameters"),
+                "scenario_id": scenario_id,
                 "n_candidates": targeted.get("n_candidates", 0),
-                "message": ("Aucune valeur exploitable dans les articles qui mentionnent un paramètre."
-                            if targeted.get("n_candidates")
-                            else "Aucun article du corpus ne rapporte de paramètre épidémiologique.")}
+                "n_articles_examined": targeted.get("n_articles_used", 0),
+                "n_batches": _nb, "n_batches_failed": _failed,
+                "n_not_examined": _unexamined,
+                "message": _msg}
 
     variables["epidemic_parameters"] = merge_epidemic_observations(
         variables.get("epidemic_parameters"), targeted)

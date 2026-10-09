@@ -232,7 +232,11 @@ export function PooledPanel({ scenarioId, tick }: { scenarioId: string; tick: nu
       {small.length > 0 && (
         <div>
           <button onClick={() => setShowSmall((v) => !v)} className="text-[10px] text-white/45 underline hover:text-white">
-            {T("tooFew").replace("{n}", String(small.length)).replace("{min}", String(data?.filters.min_studies ?? 3))}
+            {/* Compté sur TOUT ce qui existe : ce bouton annonçait 120 pour 306,
+                parce qu'il comptait la liste déjà coupée par un plafond constant. */}
+            {T("tooFew")
+              .replace("{n}", String(data?.groups_too_few_studies ?? small.length))
+              .replace("{min}", String(data?.filters.min_studies ?? 3))}
           </button>
           {showSmall && (
             <ul className="mt-2 space-y-1 text-[10px] text-white/50">
@@ -250,6 +254,15 @@ export function PooledPanel({ scenarioId, tick }: { scenarioId: string; tick: nu
       {data && (
         <p className="text-[10px] text-white/35">
           {T("rowsUsed").replace("{n}", String(data.n_rows_used))}
+          {/* La coupe, dite. Le CSV téléchargé ne portait que la page servie. */}
+          {data.groups_truncated && (
+            <span className="text-amber-300/70">
+              {" · "}
+              {T("truncated")
+                .replace("{shown}", String(data.groups_returned ?? data.pooled.length))
+                .replace("{total}", String(data.groups_total ?? data.pooled.length))}
+            </span>
+          )}
           {data.n_duplicate_rows_dropped > 0 && ` ${T("duplicates").replace("{n}", String(data.n_duplicate_rows_dropped))}`}
           {excluded.length > 0 && ` ${T("leftOut")} ${excluded.map(([k, n]) => `${T(`excl.${k}`)} ${n}`).join(", ")}.`}
         </p>

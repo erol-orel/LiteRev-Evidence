@@ -45,6 +45,7 @@ from .search import (
     _store_prisma_identification,
 )
 from .gesica import _gesica_title, _get_db_gesica_scenario_or_404
+from .study_design import raw_design_sql as _raw_design
 from llm_usage import model_for as _model
 
 def _run_semantic_rerank_inline(scenario_id: str, query: str) -> int:
@@ -437,8 +438,17 @@ def _get_above_threshold_articles(scenario_id: str, threshold: float | None = No
                    CASE WHEN :fr < 0 OR rn <= :fr THEN abstract END AS abstract,
                    CASE WHEN :fr < 0 OR rn <= :fr THEN pico_json END AS pico_json
             FROM (
+                -- `study_design` est le devis RÉSOLU, par l'expression partagée : deux
+                -- passes indépendantes écrivent un devis depuis le même résumé (PICO et
+                -- métadonnées), et chacune se tait parfois en écrivant un marqueur.
+                -- Lire la seule colonne laissait 61 % du corpus HPAI sans devis pour la
+                -- notation des affirmations, pendant que le profil de preuve, juste à
+                -- côté, en classait 95 % : une étude transversale de 65 622 travailleurs
+                -- exposés soutenait une affirmation marquée « Non évaluée », trois
+                -- lignes sous un profil qui la classait en certitude faible.
                 SELECT ld.id, ld.title, ld.abstract, ld.year, ld.journal, ld.authors, ld.doi,
-                       ld.study_design, ld.pico_json, ld.citation_count,
+                       NULLIF({_raw_design('ld')}, '') AS study_design,
+                       ld.pico_json, ld.citation_count,
                        {screening_status_sql('ld', 'asn')} AS screening_status,
                        ld.quality_score, asn.similarity_score,
                        (ld.pico_json IS NOT NULL) AS has_pico,
