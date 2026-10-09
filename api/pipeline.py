@@ -26,6 +26,7 @@ from .scenario_store import (_get_scenario_threshold, _get_user_scenario_or_404,
                              pipeline_enrich_scope, scenario_scope_sql)
 from .search import (
     LIVE_MAX_PER_SOURCE,
+    OPENAIRE_MAX_OPERATORS,
     SOURCE_OUTCOMES_COUNTED,
     _boolean_corpus_ids,
     _boolean_to_arxiv,
@@ -461,6 +462,8 @@ def _run_user_scenario_populate(
     _kw_fallback: list[str] = []
     _plain_q = query
     _fallback_q = query
+    _openaire_q = query
+    _fallback_queries: dict[str, str] = {}
     try:
         # Le corpus = résultat de la REQUÊTE BOOLÉENNE (générée par LLM). On
         # récupère search_strategy.general ; à défaut on la génère depuis la requête.
@@ -556,12 +559,24 @@ def _run_user_scenario_populate(
         # présentait leurs notices comme le produit d'une recherche booléenne. Un booléen
         # portable de plus de 1 200 caractères y basculait les six sources ci-dessous en
         # silence.
-        _kw_fallback = ([] if _send_bool else ["openalex", "doaj", "core", "clinicaltrials", "openaire"]) \
-            + ([] if _arxiv_native else ["arxiv"])
-        if _kw_fallback:
-            logger.info(f"Populate {scenario_id}: requête réduite pour {', '.join(_kw_fallback)} "
-                        f"(booléen portable de {len(_portable_bool)} caractères) ; "
-                        f"soumis = « {_fallback_q} »")
+        # OpenAIRE n'accepte que QUATRE opérateurs logiques (« Too many logical operators
+        # found. Max allowed is 4 », mesuré en production : 48 sur la requête recommandée,
+        # 95 sur la requête HPAI entière). Toute stratégie booléenne lui valait donc un 400
+        # depuis la migration vers l'API Graph v2 : elle reçoit sa propre réduction, bornée
+        # en opérateurs, et ses notices sont ré-appariées en local.
+        _openaire_q = (_shorten_boolean(_portable_bool, 1200, max_operators=OPENAIRE_MAX_OPERATORS)
+                       if _bool_is_real else "") or _plain_q
+        _kw_fallback = ([] if _send_bool else ["openalex", "doaj", "core", "clinicaltrials"]) \
+            + ([] if _arxiv_native else ["arxiv"]) + ["openaire"]
+        # La requête RÉELLEMENT soumise à chacune : la même pour les sources à la limite
+        # d'URL, la syntaxe `all:` pour arXiv, la forme à quatre opérateurs pour OpenAIRE.
+        _fallback_queries = {s: _fallback_q for s in _kw_fallback if s not in ("arxiv", "openaire")}
+        if "arxiv" in _kw_fallback:
+            _fallback_queries["arxiv"] = _arxiv_q
+        _fallback_queries["openaire"] = _openaire_q
+        logger.info(f"Populate {scenario_id}: requête réduite pour {', '.join(_kw_fallback)} "
+                    f"(booléen portable de {len(_portable_bool)} caractères) ; "
+                    f"soumis = « {_fallback_q} » ; OpenAIRE = « {_openaire_q} »")
         # PubMed RECALL : la requête MeSH générée par le LLM (_pubmed_q) est parfois
         # BEAUCOUP plus étroite que le booléen général - p. ex. 35 résultats contre 306
         # pour le même booléen collé sur le site PubMed. On interroge donc PubMed sur
@@ -1199,12 +1214,16 @@ def _run_user_scenario_populate(
             while _ct_fetched < max_results:
                 if _budget_exhausted():
                     break
-                _params = {"query.term": _bool_query, "pageSize": 100, "format": "json"}
+                # `countTotal` : le total annoncé, pour que « clinicaltrials 2 000 » au
+                # plafond ne se lise pas comme ce que le registre contient.
+                _params = {"query.term": _bool_query, "pageSize": 100, "format": "json",
+                           "countTotal": "true"}
                 if _ct_token:
                     _params["pageToken"] = _ct_token
                 _r = _requests.get("https://clinicaltrials.gov/api/v2/studies", params=_params, timeout=20)
                 _r.raise_for_status()
                 _payload = _r.json()
+                _note_total("clinicaltrials", _payload.get("totalCount"))
                 _n = len(_payload.get("studies") or [])
                 if _n == 0:
                     break
@@ -1293,12 +1312,12 @@ def _run_user_scenario_populate(
     def _fetch_openaire():
         count = 0
         # Migration vers l'API Graph v2 : l'ancien /search/publications a été RETIRÉ le
-        # 2026-05-31. `search=` accepte AND/OR/NOT + parenthèses + guillemets → source-union
-        # quand on a un vrai booléen (sinon mots-clés). Pagination par CURSEUR.
-        # Même porte que les quatre autres sources booléennes : au-delà de 1 200 caractères
-        # portables, la requête réduite. Le booléen entier de la requête HPAI de production
-        # (2 465 caractères portables, étoiles dans les phrases) lui valait un 400.
-        _oa_q, _oa_native = _bool_query, _send_bool
+        # 2026-05-31. `search=` accepte AND/OR/NOT + parenthèses + guillemets, mais QUATRE
+        # opérateurs au plus (mesuré en production). Pagination par CURSEUR.
+        # Sa propre réduction, bornée à OPENAIRE_MAX_OPERATORS opérateurs (calculée avec les
+        # autres requêtes, plus haut) ; jamais « native » : ses notices sont ré-appariées
+        # en local contre le booléen entier.
+        _oa_q, _oa_native = _openaire_q, False
         try:
             _cursor, _fetched = "*", 0
             while _fetched < max_results:
@@ -1646,7 +1665,7 @@ def _run_user_scenario_populate(
                 source_outcomes=(dict(_fetcher_outcome) if include_live else {}),
                 per_source_cap=int(max_results),
                 keyword_fallback_sources=(list(_kw_fallback) if include_live else []),
-                keyword_fallback_query=(_fallback_q if (include_live and _kw_fallback) else None),
+                keyword_fallback_queries=(dict(_fallback_queries) if include_live else {}),
                 source_error_reasons=(dict(_fetcher_errors) if include_live else {}),
                 source_totals=(_totals_snapshot if include_live else {}))
             _store_prisma_identification(scenario_id, _figures)

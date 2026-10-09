@@ -293,14 +293,12 @@ def test_the_populate_sends_the_reduced_query_not_the_bag_of_words():
     assert any("_short_bool" in v and "_plain_q" in v for v in assigned.get("_fallback_q", [])), (
         "le repli doit être la requête réduite, et les mots-clés seulement s'il n'y en a pas")
     assert any("_fallback_q" in v for v in assigned.get("_bool_query", [])), assigned.get("_bool_query")
-    assert any("_bool_query" in v for v in assigned.get("_oa_q", [])), (
-        "OpenAIRE recevait le booléen entier quelle que soit sa longueur : 400 sur la requête HPAI")
     assert any("_boolean_to_arxiv" in v and "_shorten_boolean(" in v for v in assigned.get("_ax_short", []))
     assert any("_ax_short" in v for v in assigned.get("_arxiv_q", [])), assigned.get("_arxiv_q")
     disclosed = [kw.value for n in ast.walk(tree) if isinstance(n, ast.Call)
-                 for kw in n.keywords if kw.arg == "keyword_fallback_query"]
-    assert disclosed and all("_fallback_q" in ast.unparse(v) for v in disclosed), (
-        "la carte doit recevoir la requête réellement soumise aux sources en repli")
+                 for kw in n.keywords if kw.arg == "keyword_fallback_queries"]
+    assert disclosed and all("_fallback_queries" in ast.unparse(v) for v in disclosed), (
+        "la carte doit recevoir la requête réellement soumise à chaque source en repli")
 
 
 # ── La forme qui a produit le bug, mesurée ───────────────────────────────────

@@ -4339,6 +4339,18 @@ function PrismaSection({ scenarioId }: { scenarioId: string }) {
     ...(ident.sources_cut_off ?? []),
     ...(ident.sources_skipped ?? []),
   ];
+  // Un paragraphe par requête distincte RÉELLEMENT soumise : les sources à la limite d'URL
+  // reçoivent la même réduction, arXiv la sienne (syntaxe `all:`), OpenAIRE la sienne
+  // (quatre opérateurs au plus). Les chiffres antérieurs n'ont qu'une requête pour toutes.
+  const fallbackGroups: Array<[string, string[]]> = (() => {
+    const perSource = ident.keyword_fallback_queries ?? {};
+    const groups = new Map<string, string[]>();
+    for (const s of ident.keyword_fallback_sources ?? []) {
+      const q = perSource[s] ?? ident.keyword_fallback_query ?? "";
+      groups.set(q, [...(groups.get(q) ?? []), s]);
+    }
+    return Array.from(groups.entries());
+  })();
   const outcomeStyle = (o?: string): string =>
     o == null ? "bg-slate-800/60 text-slate-300"
       : o === "error" ? "bg-rose-900/40 text-rose-300"
@@ -4494,14 +4506,13 @@ function PrismaSection({ scenarioId }: { scenarioId: string }) {
                 .replace("{cap}", (ident.per_source_cap ?? 0).toLocaleString())}
             </p>
           )}
-          {(ident.keyword_fallback_sources?.length ?? 0) > 0 && (
-            <p className="text-[10px] text-amber-300/80 pt-1 leading-relaxed">
+          {fallbackGroups.map(([q, srcs]) => (
+            <p key={q} className="text-[10px] text-amber-300/80 pt-1 leading-relaxed break-words">
               {t("scenarioDetail.prisma.keywordFallback")
-                .replace("{sources}", (ident.keyword_fallback_sources ?? [])
-                  .map((s) => SOURCE_LABELS_MAP[s] ?? s).join(", "))
-                .replace("{keywords}", ident.keyword_fallback_query || "")}
+                .replace("{sources}", srcs.map((s) => SOURCE_LABELS_MAP[s] ?? s).join(", "))
+                .replace("{keywords}", q)}
             </p>
-          )}
+          ))}
           {ident.per_source_cap != null && (
             <div className="text-center text-[9px] text-emerald-300/40">
               {t("scenarioDetail.prisma.perSourceCap").replace("{cap}", ident.per_source_cap.toLocaleString())}

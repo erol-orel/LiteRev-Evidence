@@ -50,13 +50,14 @@ def test_a_source_that_announced_more_than_it_returned_is_named_capped():
 
 
 def test_a_source_without_an_announced_total_is_never_called_capped():
-    """ClinicalTrials.gov n'annonce pas de total (sans `countTotal`) : ne pas inventer."""
+    """Les préprints d'Europe PMC et bioRxiv/medRxiv n'annoncent pas de total : ne pas
+    inventer."""
     f = _prisma_identification_figures(
-        {"clinicaltrials": 2000, "pubmed": 30}, 2030, 0, 2030,
-        source_outcomes={"_fetch_clinicaltrials": "ok", "_fetch_pubmed": "ok"},
+        {"preprint": 2000, "pubmed": 30}, 2030, 0, 2030,
+        source_outcomes={"_fetch_preprints": "ok", "_fetch_pubmed": "ok"},
         per_source_cap=2000, source_totals={"pubmed": 30})
     assert f["sources_capped"] == []
-    assert "clinicaltrials" not in f["source_totals"]
+    assert "preprints" not in f["source_totals"]
 
 
 def test_a_gap_under_the_cap_is_not_a_cap():
@@ -125,7 +126,7 @@ def test_the_helper_keeps_the_largest_total_and_rejects_junk():
     # son flux Atom (`opensearch:totalResults`), CORE lit `totalHits`.
     ("pubmed", "total_found"), ("openalex", "count"), ("crossref", "total-results"),
     ("europepmc", "hitCount"), ("semantic_scholar", "total"), ("doaj", "total"),
-    ("core", "totalHits"), ("arxiv", "_parse_arxiv_total"),
+    ("core", "totalHits"), ("arxiv", "_parse_arxiv_total"), ("clinicaltrials", "totalCount"),
 ])
 def test_each_api_total_is_noted(source, field):
     calls = [n for n in ast.walk(TREE) if isinstance(n, ast.Call)
