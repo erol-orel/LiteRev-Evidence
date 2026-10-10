@@ -805,6 +805,11 @@ export const fr = {
       keywordFallback: "Stratégie dégradée pour {sources} : ces API ne peuvent pas recevoir la requête booléenne entière (limite d'URL, d'opérateurs ou de syntaxe), elles ont reçu la version réduite « {keywords} » (même structure, chaque bloc OU tronqué à ses termes les plus simples, sans les exclusions). Leurs enregistrements ne sont donc pas le produit de la requête booléenne ci-dessus ; ils sont ré-appariés en local contre elle avant d'entrer au corpus.",
       capped: "plafonnée",
       cappedNote: "Plafond atteint pour {sources} : ces API annoncent plus d'enregistrements que les {cap} par source rapatriés. PubMed, OpenAlex et Europe PMC sont interrogées par pertinence : le lot gardé est celui des {cap} plus pertinents selon chaque source, pas des plus récents.",
+      cappedNoteExhaustive: "Limite atteinte pour {sources} : ces bases annoncent plus d'enregistrements que ceux rapatriés.",
+      unrankedNote: "{sources} rend les correspondances booléennes dans l'ordre des identifiants, pas par pertinence : le lot gardé est un sous-ensemble arbitraire de ses correspondances, pas les plus pertinentes.",
+      titleAbstractNote: "{sources} : interrogée sur titre et résumé (sa recherche par défaut lit aussi le texte intégral).",
+      splitNote: "{source} : la stratégie entière, découpée en {n} requêtes (son API ne pagine pas une requête longue).",
+      exhaustiveCap: "recherche exhaustive : toutes les notices appariées par chaque base, jusqu'à {cap} par base ; Crossref, qui classe des mots-clés, a gardé ses {crossrefCap} plus pertinentes",
       outcome: {
         ok: "a répondu",
         empty: "aucun résultat",

@@ -560,6 +560,75 @@ def _shorten_boolean(portable: str, limit: int = 1200, render=None,
     return ""
 
 
+#: Au-delà, une stratégie découpée serait une rafale de requêtes pour une seule source :
+#: on garde alors sa requête réduite, et la carte le dit comme avant.
+SPLIT_MAX_PARTS = 16
+
+
+def _split_boolean(portable: str, limit: int, render=None,
+                   max_parts: int = SPLIT_MAX_PARTS) -> list[str]:
+    """Le booléen ENTIER en plusieurs requêtes courtes dont l'UNION est le booléen.
+
+    La requête réduite (`_shorten_boolean`) tient sous la limite en retirant des
+    synonymes : DOAJ recevait ainsi 428 notices là où le booléen entier en annonce 514,
+    parce qu'elle ne pagine pas une requête de plus de DOAJ_MAX_QUERY_CHARS caractères.
+    Pour une recherche exhaustive, on garde tous les termes et on découpe à la place.
+
+    La règle est la distributivité : (A1 OU A2) ET B = (A1 ET B) OU (A2 ET B). Un bloc OU
+    trop long est coupé en deux, sous un ET le plus large de ses blocs OU est coupé en
+    deux, et ainsi de suite jusqu'à ce que chaque morceau tienne. Les exclusions restent
+    attachées à chaque morceau, donc l'union est exactement le booléen. [] si un terme
+    seul ne tient pas, ou s'il faudrait plus de `max_parts` requêtes. PUR/testable."""
+    render = render or _boolean_to_generic
+    try:
+        ast = _positive_boolean(_parse_boolean_ast(_tokenize_boolean(portable or "")), keep_not=True)
+    except Exception:                                    # noqa: BLE001
+        return []
+    if ast is None:
+        return []
+
+    def _fits(node) -> bool:
+        out = render(node)
+        return bool(out) and len(out) <= limit
+
+    def _halves(children: list) -> list:
+        mid = len(children) // 2
+        return [h[0] if len(h) == 1 else ("or", h) for h in (children[:mid], children[mid:])]
+
+    def _split(node) -> list | None:
+        if _fits(node):
+            return [node]
+        if not isinstance(node, tuple) or node[0] not in ("and", "or"):
+            return None                                  # un terme seul trop long
+        kids = list(node[1])
+        if node[0] == "or":
+            if len(kids) < 2:
+                return None
+            pieces = _halves(kids)
+        else:
+            ors = [i for i, k in enumerate(kids)
+                   if isinstance(k, tuple) and k[0] == "or" and len(k[1]) > 1]
+            if not ors:
+                return None
+            widest = max(ors, key=lambda i: len(render(kids[i]) or ""))
+            pieces = [("and", kids[:widest] + [half] + kids[widest + 1:])
+                      for half in _halves(list(kids[widest][1]))]
+        out: list = []
+        for piece in pieces:
+            sub = _split(piece)
+            if sub is None:
+                return None
+            out.extend(sub)
+            if len(out) > max_parts:
+                return None
+        return out
+
+    nodes = _split(ast)
+    if not nodes or len(nodes) > max_parts:
+        return []
+    return [render(n) for n in nodes]
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Search (Hybride & Vectorielle pgvector)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -711,6 +780,16 @@ try:
     LIVE_MAX_PER_SOURCE = int(os.getenv("LIVE_MAX_PER_SOURCE", "2000"))
 except (TypeError, ValueError):
     LIVE_MAX_PER_SOURCE = 2000
+
+# Le plafond d'une recherche EXHAUSTIVE, par base appariant le booléen. Ce n'est pas un
+# échantillon : c'est un garde-fou, assez haut pour qu'aucune base ne soit coupée sur une
+# question de revue (Europe PMC rend 13 810 notices sur la question HPAI, toutes
+# récupérées), assez bas pour qu'une stratégie écrite trop large ne verse pas un index
+# entier dans la bibliothèque. Une base qui le dépasse est dite « plafonnée » sur la carte.
+try:
+    EXHAUSTIVE_MAX_PER_SOURCE = int(os.getenv("EXHAUSTIVE_MAX_PER_SOURCE", "20000"))
+except (TypeError, ValueError):
+    EXHAUSTIVE_MAX_PER_SOURCE = 20000
 
 
 def _boolean_corpus_ids(boolean_query: str, filters: dict) -> list:
@@ -1120,7 +1199,12 @@ def _prisma_identification_figures(records_by_source: dict, unique_records: int,
                                    keyword_fallback_query: str | None = None,
                                    source_error_reasons: dict | None = None,
                                    source_totals: dict | None = None,
-                                   keyword_fallback_queries: dict | None = None) -> dict[str, Any]:
+                                   keyword_fallback_queries: dict | None = None,
+                                   search_mode: str = "standard",
+                                   source_caps: dict | None = None,
+                                   title_abstract_sources: list | None = None,
+                                   unranked_sources: list | None = None,
+                                   split_queries: dict | None = None) -> dict[str, Any]:
     """Chiffres PRISMA 2020 de l'étape « identification », calculés à partir de ce qu'une
     recherche a RÉELLEMENT ramené - et non du corpus déjà dédupliqué.
 
@@ -1157,6 +1241,21 @@ def _prisma_identification_figures(records_by_source: dict, unique_records: int,
                              soumise à chaque base. Sur le scénario HPAI, arXiv et CORE
                              ont ainsi rapporté 12 438 notices à une requête de huit mots
                              dont aucun ne nommait la grippe.
+    search_mode            : « standard » (au plus `per_source_cap` notices par source, dans
+                             l'ordre de pertinence de la source) ou « exhaustive » (toutes
+                             les notices que chaque base appariant le booléen renvoie).
+    source_caps            : le plafond APPLIQUÉ à chaque source quand il n'est pas le même
+                             pour toutes : en mode exhaustif, Crossref, qui classe des
+                             mots-clés au lieu d'appliquer le booléen, garde le plafond
+                             standard. « Plafonnée » se juge contre le plafond de la source.
+    title_abstract_sources : les sources interrogées sur titre et résumé seulement (OpenAlex
+                             en mode exhaustif : sa recherche par défaut lit aussi le texte
+                             intégral, 43 181 notices sur HPAI contre 1 648 pour PubMed).
+    unranked_sources       : les sources dont l'ordre N'EST PAS la pertinence (Semantic
+                             Scholar, endpoint bulk : ordre des identifiants). Au plafond,
+                             ce qui est gardé y est un sous-ensemble arbitraire.
+    split_queries          : les sources qui ont reçu le booléen entier découpé en
+                             plusieurs requêtes (DOAJ ne pagine pas une requête longue).
 
     PRISMA 2020 : identifiés → doublons retirés → (retirés pour d'autres raisons) →
     passés au screening. « Autres raisons » ici : pas de résumé, ou enregistrement d'une
@@ -1197,9 +1296,19 @@ def _prisma_identification_figures(records_by_source: dict, unique_records: int,
     # disait « plafonnée », avec la phrase sur les 2 000 plus pertinents. Le « n / total »
     # reste affiché, lui, dès que l'API a annoncé plus que ce qu'on a gardé. Une source
     # coupée par le budget ou en échec n'est pas « plafonnée » non plus : son issue le dit.
-    _cap = int(per_source_cap or 0)
+    caps: dict[str, int] = {}
+    for k, v in (source_caps or {}).items():
+        try:
+            caps[_source_label(k)] = int(v)
+        except (TypeError, ValueError):
+            continue
+
+    def _cap_of(name: str) -> int:
+        return int(caps.get(name, per_source_cap or 0) or 0)
+
     capped = sorted(name for name in records
-                    if _cap > 0 and totals.get(name) is not None and totals[name] > _cap
+                    if _cap_of(name) > 0 and totals.get(name) is not None
+                    and totals[name] > _cap_of(name)
                     and outcomes.get(name, "ok") in SOURCE_OUTCOMES_COUNTED)
     from_databases = sum(records.values())
     identified = from_databases + library
@@ -1267,6 +1376,12 @@ def _prisma_identification_figures(records_by_source: dict, unique_records: int,
         "sources_failed": by_outcome["error"],
         "sources_cut_off": by_outcome["cut_by_budget"],
         "per_source_cap": (int(per_source_cap) if per_source_cap is not None else None),
+        "search_mode": "exhaustive" if search_mode == "exhaustive" else "standard",
+        "source_caps": caps,
+        "title_abstract_sources": sorted({_source_label(s) for s in (title_abstract_sources or [])}),
+        "unranked_sources": sorted({_source_label(s) for s in (unranked_sources or [])}),
+        "split_queries": {_source_label(k): [str(q) for q in v]
+                          for k, v in (split_queries or {}).items() if v},
         "duplicate_records_across_sources": across,
         "duplicate_rows_in_database": rows,
         "duplicates_removed": duplicates,

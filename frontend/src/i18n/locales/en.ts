@@ -807,6 +807,11 @@ export const en: Translations = {
       keywordFallback: "Degraded strategy for {sources}: these APIs cannot take the whole boolean query (a URL, operator or syntax limit), so they received the reduced version \"{keywords}\" (same structure, each OR block cut to its simplest terms, exclusions dropped). Their records are therefore not the product of the boolean query above; they are re-matched locally against it before entering the corpus.",
       capped: "capped",
       cappedNote: "Cap reached for {sources}: these APIs announce more records than the {cap} per source retrieved. PubMed, OpenAlex and Europe PMC are queried by relevance: what was kept is each source's {cap} most relevant records, not its most recent.",
+      cappedNoteExhaustive: "Limit reached for {sources}: these databases announce more records than were retrieved.",
+      unrankedNote: "{sources} returns Boolean matches in record-ID order, not by relevance: the records kept are an arbitrary subset of its matches, not its most relevant.",
+      titleAbstractNote: "{sources}: searched in titles and abstracts (the default search also matches full texts).",
+      splitNote: "{source}: the whole strategy, split into {n} queries (its API does not page through a long query).",
+      exhaustiveCap: "exhaustive search: every record each database matched, up to {cap} per database; Crossref, which ranks keywords, kept its {crossrefCap} most relevant",
       outcome: {
         ok: "answered",
         empty: "no results",

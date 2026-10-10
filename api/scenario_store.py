@@ -295,6 +295,37 @@ def pipeline_enrich_scope() -> str:
     return value if value in SCOPES else "all"
 
 
+#: Les deux modes d'une recherche. `standard` : au plus LIVE_MAX_PER_SOURCE notices par
+#: source, dans l'ordre de pertinence de la source. `exhaustive` : toutes les notices que
+#: chaque base appariant le booléen renvoie (cf. _run_user_scenario_populate).
+SEARCH_MODES = ("standard", "exhaustive")
+
+
+def scenario_search_mode(scenario_id: str) -> str:
+    """Le mode de recherche ENREGISTRÉ sur le scénario, `standard` par défaut.
+
+    Jamais d'erreur : une base sans la colonne (antérieure à elle) est en mode standard,
+    c'est-à-dire le comportement qu'elle a toujours eu."""
+    try:
+        with engine.connect() as conn:
+            value = conn.execute(text("SELECT search_mode FROM user_scenarios WHERE id = :id"),
+                                 {"id": scenario_id}).scalar()
+    except Exception:                                    # noqa: BLE001
+        return "standard"
+    value = str(value or "").strip().lower()
+    return value if value in SEARCH_MODES else "standard"
+
+
+def set_scenario_search_mode(scenario_id: str, mode: str) -> None:
+    """Enregistre le mode sur le scénario, pour qu'une relance refasse la même recherche."""
+    mode = str(mode or "").strip().lower()
+    if mode not in SEARCH_MODES:
+        raise ValueError(f"Mode de recherche inconnu : {mode!r} (attendu : {', '.join(SEARCH_MODES)})")
+    with engine.begin() as conn:
+        conn.execute(text("UPDATE user_scenarios SET search_mode = :m WHERE id = :id"),
+                     {"m": mode, "id": scenario_id})
+
+
 def scenario_threshold_sql(sid: str = ":sid") -> str:
     """Le seuil du scénario, LU DANS la requête plutôt que passé en paramètre, pour
     que le lot et le compteur qui l'annonce voient le même instantané."""

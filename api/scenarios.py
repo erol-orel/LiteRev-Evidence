@@ -28,7 +28,9 @@ from .scenario_store import (
     relevance_order_sql,
     relevant_gate_sql,
     scenario_counts,
+    scenario_search_mode,
     screening_status_sql,
+    set_scenario_search_mode,
 )
 from .schema_boot import _exec_ddl_isolated
 from .search import (
@@ -179,6 +181,12 @@ def _ensure_user_scenarios_table() -> None:
             # et pour les lignes antérieures à la colonne : l'inconnu se dit, il ne
             # s'invente pas.
             "ALTER TABLE user_scenarios ADD COLUMN IF NOT EXISTS created_ip VARCHAR(45)",
+            # Le MODE de la recherche : NULL ou 'standard' (au plus LIVE_MAX_PER_SOURCE
+            # notices par source, par pertinence), 'exhaustive' (toutes les notices que
+            # chaque base appariant le booléen renvoie). Porté par le scénario et non par
+            # un appel : une relance (bouton, pipeline, redémarrage) refait la MÊME
+            # recherche, au lieu de ramener en silence un corpus exhaustif au plafond.
+            "ALTER TABLE user_scenarios ADD COLUMN IF NOT EXISTS search_mode VARCHAR(16)",
             "CREATE INDEX IF NOT EXISTS ix_user_scenarios_owner ON user_scenarios (owner_email)",
             # Scénarios GESICA : _list_db_gesica_scenarios (main.py:3720-3727) filtre sur
             # is_system / hidden et trie sur title, SANS qualificatif de table. Ces
@@ -1158,7 +1166,8 @@ _user_scenario_pipeline_jobs: dict[str, dict] = {}
 
 def _launch_populate_job(scenario_id: str, query: str, filters: dict, max_results: int,
                          include_live: bool = True, lang: str | None = None,
-                         force_live: bool = False) -> str:
+                         force_live: bool = False, exhaustive: bool | None = None,
+                         auto_pipeline: bool = True) -> str:
     """
     Démarre un job d'ingestion en arrière-plan pour un scénario, en garantissant
     qu'un seul job tourne à la fois (verrou partagé). Renvoie l'état : "started"
@@ -1196,7 +1205,8 @@ def _launch_populate_job(scenario_id: str, query: str, filters: dict, max_result
         # the browser smoke test on an API without `requests`.
         try:
             _run_user_scenario_populate(scenario_id, query, filters or {}, max_results, None, include_live,
-                                        _norm_lang(lang) or "fr", force_live=force_live)
+                                        _norm_lang(lang) or "fr", force_live=force_live,
+                                        exhaustive=exhaustive, auto_pipeline=auto_pipeline)
         except BaseException as _e:                          # noqa: BLE001
             logger.error(f"Populate {scenario_id} crashed before its own error handling: {_e}", exc_info=True)
             _job = _user_scenario_populate_jobs.get(scenario_id)
@@ -1228,20 +1238,29 @@ def populate_user_scenario(
     include_live: bool = True,
     lang: str | None = Query(None),
     force_live: bool = False,
+    exhaustive: bool | None = None,
+    auto_pipeline: bool = True,
     _: None = Depends(require_api_key),
 ) -> dict[str, Any]:
     """
     Construit le corpus du scénario = requête booléenne sur (base locale ∪ live).
     Plafond LIVE_MAX_PER_SOURCE par source. include_live=False : base locale seule.
     force_live=True : ignorer le cache des réponses des sources (SOURCE_CACHE_TTL_S).
+    exhaustive=true : recherche EXHAUSTIVE (toutes les notices que chaque base appariant
+    le booléen renvoie) ; false : standard. Le choix est ENREGISTRÉ sur le scénario, et
+    toute relance le reprend ; absent, c'est le mode déjà enregistré qui s'applique.
+    auto_pipeline=false : ne pas enchaîner le pipeline complet après cette recherche.
     """
     row = _get_user_scenario_or_404(scenario_id)
     query = row["query"]
+    if exhaustive is not None:
+        set_scenario_search_mode(scenario_id, "exhaustive" if exhaustive else "standard")
 
     # `lang` : la langue de l'interface qui lance la recherche : les résumés de clusters
     # précalculés à la fin le sont dans cette langue (plus de première ouverture qui attend).
     if _launch_populate_job(scenario_id, query, row.get("filters") or {}, max_results, include_live,
-                            _norm_lang(lang), force_live=force_live) == "already_running":
+                            _norm_lang(lang), force_live=force_live, exhaustive=exhaustive,
+                            auto_pipeline=auto_pipeline) == "already_running":
         job = _user_scenario_populate_jobs.get(scenario_id) or {}
         return {
             "scenario_id": scenario_id,
@@ -1255,6 +1274,7 @@ def populate_user_scenario(
         "status": "started",
         "query": query,
         "max_results": max_results,
+        "search_mode": scenario_search_mode(scenario_id),
         "message": f"Ingération multi-sources lancée en arrière-plan pour '{row['name']}' "
                    "(DB Cache + PubMed + OpenAlex + Crossref + EuropePMC + Preprints + "
                    "Semantic Scholar + DOAJ + ClinicalTrials.gov + CORE + arXiv + OpenAIRE + "

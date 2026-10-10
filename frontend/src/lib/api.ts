@@ -1175,6 +1175,20 @@ export interface ScenarioPrisma {
      *  were capped on a production run and nothing said so. */
     source_totals?: Record<string, number>;
     sources_capped?: string[];
+    /** "standard": at most `per_source_cap` records per source, in each source's relevance
+     *  order. "exhaustive": every record each database applying the boolean returned.
+     *  Absent on figures stored before the mode existed (they are standard). */
+    search_mode?: "standard" | "exhaustive";
+    /** The cap actually applied to a source when it differs from `per_source_cap`: in an
+     *  exhaustive search Crossref, which ranks keywords, keeps the standard cap. */
+    source_caps?: Record<string, number>;
+    /** Sources searched in titles and abstracts only (OpenAlex in an exhaustive search). */
+    title_abstract_sources?: string[];
+    /** Sources whose order is not relevance (Semantic Scholar's bulk endpoint): when they
+     *  are capped, what was kept is an arbitrary subset, not the most relevant. */
+    unranked_sources?: string[];
+    /** Sources that received the whole boolean split into several short queries. */
+    split_queries?: Record<string, string[]>;
     /** "populate" = sources were searched; "rebuild" = the boolean query was replayed
      *  over the local library and nothing was searched. The panel called both a search. */
     method?: string;
