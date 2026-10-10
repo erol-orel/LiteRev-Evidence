@@ -241,9 +241,11 @@ def _run_user_scenario_populate(
     EXHAUSTIVE_MAX_PER_SOURCE, garde-fou et non échantillon), avec le budget
     EXHAUSTIVE_FEDERATION_BUDGET ; Crossref, qui classe des mots-clés au lieu d'appliquer
     le booléen et dont la liste complète est l'index entier, garde le plafond standard ;
-    OpenAlex est interrogée sur titre et résumé (sa recherche par défaut lit le texte
-    intégral : 43 181 notices sur la question HPAI, contre 1 648 pour PubMed) ; DOAJ reçoit
-    le booléen entier découpé en requêtes courtes, qu'elle sait paginer.
+    OpenAlex rend toutes ses correspondances sur titre et résumé (sa recherche par défaut
+    lit le texte intégral : 43 181 notices sur la question HPAI, contre 1 648 pour PubMed),
+    plus le passage de la recherche standard, pour qu'une recherche exhaustive ne trouve
+    jamais moins qu'une standard ; DOAJ reçoit le booléen entier découpé en requêtes
+    courtes, qu'elle sait paginer.
     `auto_pipeline=False` : ne pas enchaîner le pipeline complet après la recherche.
     """
     from .relevance import _backfill_title_abstract_chunks, _run_cross_encoder_rerank, _run_semantic_rerank_inline  # lazy: relevance is loaded after this module
@@ -693,9 +695,9 @@ def _run_user_scenario_populate(
                 _s2_bool_q[0] = None
         if _s2_bool_q[0]:
             _unranked_sources.add("semantic_scholar")
-        # OpenAlex en mode exhaustif : titre et résumé seulement (filtre
-        # title_and_abstract.search, qui accepte le booléen). Sa recherche par défaut lit
-        # aussi le texte intégral, d'où 43 181 notices sur la question HPAI.
+        # OpenAlex en mode exhaustif : TOUTES ses correspondances sur titre et résumé (filtre
+        # title_and_abstract.search, qui accepte le booléen), plus le passage standard. Sa
+        # recherche par défaut lit aussi le texte intégral, d'où 43 181 notices sur HPAI.
         if exhaustive and _send_bool:
             _title_abstract_sources.add("openalex")
         # La requête RÉELLEMENT soumise à chacune : la même pour les sources à la limite
@@ -940,97 +942,109 @@ def _run_user_scenario_populate(
 
     def _fetch_openalex():
         count = 0
+        # Un ou deux passages. Standard : la recherche par défaut (titre, résumé ET texte
+        # intégral), par pertinence, jusqu'au plafond. Exhaustive : TOUTES les
+        # correspondances sur titre et résumé (filtre title_and_abstract.search, qui accepte
+        # le booléen ; pagination par curseur, celle par numéro de page s'arrêtant à 10 000),
+        # PUIS le même passage que la recherche standard, pour qu'une recherche exhaustive ne
+        # trouve jamais moins qu'une standard : sans lui, 30 articles pertinents de HPAI_last,
+        # trouvés par le texte intégral, sortaient du corpus. Une notice rendue par les deux
+        # passages n'est comptée qu'une fois.
+        if not exhaustive:
+            _passes = ["fulltext_top"]
+        elif "openalex" in _title_abstract_sources:
+            _passes = ["scoped", "fulltext_top"]
+        else:
+            _passes = ["fulltext_all"]
+        _seen: set = set()
         try:
-            _oa_page = 1
-            _oa_fetched = 0
-            _oa_limit = _cap_strategy
-            # Recherche exhaustive : titre et résumé (filtre qui accepte le booléen, comme
-            # le paramètre `search`), et pagination par CURSEUR, la pagination par numéro
-            # de page s'arrêtant à 10 000 notices. L'ordre n'importe plus quand on prend tout.
-            _oa_scoped = "openalex" in _title_abstract_sources
-            _oa_cursor = "*" if exhaustive else None
-            while _oa_fetched < _oa_limit:
-                if _budget_exhausted():
-                    break  # budget fédération dépassé - on arrête de paginer
-                _oa_batch = min(200, _oa_limit - _oa_fetched)
-                if exhaustive:
-                    # Pas de virgule dans un filtre OpenAlex : elle y sépare deux filtres.
-                    _oa_params = ({"filter": "title_and_abstract.search:" + _bool_query.replace(",", " ")}
-                                  if _oa_scoped else {"search": _bool_query})
-                    _oa_params.update({"per-page": _oa_batch, "cursor": _oa_cursor,
-                                       "mailto": "literev@gesica.ch"})
-                else:
-                    # sort=relevance_score:desc → quand on plafonne à max_results, on garde
-                    # les 2000 LES PLUS PERTINENTS (BM25 OpenAlex) et non les plus récents.
-                    # OpenAlex ordonne par pertinence par défaut sous `search` ; on l'explicite.
-                    # `per-page`, avec un TRAIT D'UNION : c'est le nom du paramètre chez
-                    # OpenAlex, et celui qu'emploient les deux autres appels de ce dépôt
-                    # (recherche en direct, sonde de diagnostic). Seul celui-ci, qui
-                    # construit le corpus, écrivait `per_page` : OpenAlex refuse un
-                    # paramètre inconnu, et c'est un candidat direct à l'issue `error`
-                    # relevée sur une recherche de contrôle en production.
-                    _oa_params = {"search": _bool_query, "per-page": _oa_batch, "page": _oa_page,
-                                  "sort": "relevance_score:desc", "mailto": "literev@gesica.ch"}
-                oa_resp = _requests.get("https://api.openalex.org/works", params=_oa_params, timeout=20)
-                if _oa_scoped and _oa_fetched == 0 and 400 <= oa_resp.status_code < 500:
-                    # Le filtre titre+résumé refusé : la recherche par défaut plutôt que
-                    # rien, et la carte ne dit plus « titre et résumé ». Cette réponse ne se
-                    # met pas en cache : une relance doit retenter le filtre.
-                    logger.warning(f"OpenAlex populate {scenario_id}: filtre title_and_abstract.search "
-                                   f"refusé ({oa_resp.status_code}) ; recherche par défaut")
-                    _oa_scoped = False
-                    with _counter_lock:
-                        _title_abstract_sources.discard("openalex")
-                        _no_cache.add("_fetch_openalex")
-                    continue
-                oa_resp.raise_for_status()
-                _oa_json = oa_resp.json()
-                _note_total("openalex", (_oa_json.get("meta") or {}).get("count"))
-                _oa_results = _oa_json.get("results", [])
-                if not _oa_results:
-                    break
-                for work in _oa_results:
-                    ext_id = work.get("id", "").split("/")[-1]
-                    title = work.get("title") or ""
-                    if not ext_id or not title:
-                        continue
-                    abstract = None
-                    inv = work.get("abstract_inverted_index")
-                    if inv:
-                        try:
-                            words = {}
-                            for w, positions in inv.items():
-                                for pos in positions:
-                                    words[pos] = w
-                            abstract = " ".join([words[i] for i in sorted(words.keys())])
-                        except Exception:
-                            pass
-                    year = work.get("publication_year")
-                    doi = _normalize_doi(work.get("doi"))
-                    url = doi or f"https://openalex.org/{ext_id}"
-                    content_text = f"{title}\n\n{abstract or ''}".strip()
-                    if len(content_text) < 30:
-                        continue
-                    try:
-                        doc_id, _new = _ingest_doc_direct(
-                            source="openalex", title=title, abstract=abstract or None,
-                            year=year, url=url, external_id=ext_id, doi=doi,
-                        )
-                        _link_to_scenario(doc_id, boolean_native=_send_bool, source="openalex")   # source-union si booléen
-                        if _new:
-                            count += 1
-                            _inc("openalex")
-                    except Exception:
-                        _inc("openalex", 0, 1)
-                _oa_fetched += len(_oa_results)
-                if exhaustive:
-                    _oa_cursor = (_oa_json.get("meta") or {}).get("next_cursor")
-                    if not _oa_cursor or _oa_fetched >= _oa_limit:
+            while _passes:
+                _pass = _passes.pop(0)
+                _oa_page, _oa_fetched = 1, 0
+                _oa_limit = int(max_results) if _pass == "fulltext_top" else _cap_strategy
+                _oa_cursor = "*"
+                while _oa_fetched < _oa_limit:
+                    if _budget_exhausted():
+                        break  # budget fédération dépassé - on arrête de paginer
+                    _oa_batch = min(200, _oa_limit - _oa_fetched)
+                    if _pass == "fulltext_top":
+                        # sort=relevance_score:desc → quand on plafonne à max_results, on
+                        # garde les 2000 LES PLUS PERTINENTS (BM25 OpenAlex) et non les plus
+                        # récents. `per-page`, avec un TRAIT D'UNION : c'est le nom du
+                        # paramètre chez OpenAlex ; `per_page` était refusé.
+                        _oa_params = {"search": _bool_query, "per-page": _oa_batch, "page": _oa_page,
+                                      "sort": "relevance_score:desc", "mailto": "literev@gesica.ch"}
+                    else:
+                        # Pas de virgule dans un filtre OpenAlex : elle y sépare deux filtres.
+                        _oa_params = ({"filter": "title_and_abstract.search:" + _bool_query.replace(",", " ")}
+                                      if _pass == "scoped" else {"search": _bool_query})
+                        _oa_params.update({"per-page": _oa_batch, "cursor": _oa_cursor,
+                                           "mailto": "literev@gesica.ch"})
+                    oa_resp = _requests.get("https://api.openalex.org/works", params=_oa_params, timeout=20)
+                    if _pass == "scoped" and _oa_fetched == 0 and 400 <= oa_resp.status_code < 500:
+                        # Le filtre titre+résumé refusé : toute la recherche par défaut, et
+                        # la carte ne dit plus « titre et résumé ». Pas de mise en cache :
+                        # une relance doit retenter le filtre.
+                        logger.warning(f"OpenAlex populate {scenario_id}: filtre title_and_abstract.search "
+                                       f"refusé ({oa_resp.status_code}) ; recherche par défaut")
+                        with _counter_lock:
+                            _title_abstract_sources.discard("openalex")
+                            _no_cache.add("_fetch_openalex")
+                        _passes = ["fulltext_all"]
                         break
-                elif len(_oa_results) < _oa_batch or _oa_fetched >= _oa_limit:
-                    break
-                _oa_page += 1
-                _time.sleep(0.3)
+                    oa_resp.raise_for_status()
+                    _oa_json = oa_resp.json()
+                    # Le total de la recherche faite : en exhaustif, celui du passage qui
+                    # prend tout ; le passage « comme en standard » n'en est qu'un ajout.
+                    if not (exhaustive and _pass == "fulltext_top"):
+                        _note_total("openalex", (_oa_json.get("meta") or {}).get("count"))
+                    _oa_results = _oa_json.get("results", [])
+                    if not _oa_results:
+                        break
+                    for work in _oa_results:
+                        ext_id = work.get("id", "").split("/")[-1]
+                        title = work.get("title") or ""
+                        if not ext_id or not title or ext_id in _seen:
+                            continue
+                        _seen.add(ext_id)
+                        abstract = None
+                        inv = work.get("abstract_inverted_index")
+                        if inv:
+                            try:
+                                words = {}
+                                for w, positions in inv.items():
+                                    for pos in positions:
+                                        words[pos] = w
+                                abstract = " ".join([words[i] for i in sorted(words.keys())])
+                            except Exception:
+                                pass
+                        year = work.get("publication_year")
+                        doi = _normalize_doi(work.get("doi"))
+                        url = doi or f"https://openalex.org/{ext_id}"
+                        content_text = f"{title}\n\n{abstract or ''}".strip()
+                        if len(content_text) < 30:
+                            continue
+                        try:
+                            doc_id, _new = _ingest_doc_direct(
+                                source="openalex", title=title, abstract=abstract or None,
+                                year=year, url=url, external_id=ext_id, doi=doi,
+                            )
+                            _link_to_scenario(doc_id, boolean_native=_send_bool, source="openalex")   # source-union si booléen
+                            if _new:
+                                count += 1
+                                _inc("openalex")
+                        except Exception:
+                            _inc("openalex", 0, 1)
+                    _oa_fetched += len(_oa_results)
+                    if _pass == "fulltext_top":
+                        if len(_oa_results) < _oa_batch or _oa_fetched >= _oa_limit:
+                            break
+                        _oa_page += 1
+                    else:
+                        _oa_cursor = (_oa_json.get("meta") or {}).get("next_cursor")
+                        if not _oa_cursor or _oa_fetched >= _oa_limit:
+                            break
+                    _time.sleep(0.3)
         except Exception as _e:
             logger.warning(f"OpenAlex populate {scenario_id}: {_e}")
             _mark_source_error(_e)
@@ -2094,7 +2108,7 @@ def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict
     # des articles en portaient (type d'étude, effectif, risque de biais, quality_score),
     # et les niveaux de preuve du brief se calculaient sur ce quart.
     # `tests/test_no_undefined_names.py` passe désormais tout le paquet au crible.
-    from .relevance import _run_cross_encoder_rerank  # lazy: relevance is loaded after this module
+    from .relevance import _run_cross_encoder_rerank, _run_semantic_rerank_inline  # lazy: relevance is loaded after this module
     import time as _time
 
     # L'étape 4 s'appelait « rerank » et n'était qu'un cosinus sur les embeddings
@@ -2690,29 +2704,14 @@ def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict
         try:
             openai_key = os.getenv("OPENAI_API_KEY")
             if openai_key:
-                from llm_usage import MeteredOpenAI as _OAI_rr
-                _rr_client = _OAI_rr(api_key=openai_key)
-                _rr_resp = _rr_client.embeddings.create(
-                    model=_model("embedding"), input=query[:2000])
-                _q_vec = "[" + ",".join(str(x) for x in _rr_resp.data[0].embedding) + "]"
-                with engine.begin() as _rr_conn:
-                    _rr_result = _rr_conn.execute(text("""
-                        UPDATE article_scenarios ars
-                        SET similarity_score = sub.best_sim
-                        FROM (
-                            SELECT c.document_id,
-                                   MAX(1.0 - (c.embedding <=> CAST(:q_vec AS vector))) AS best_sim
-                            FROM document_chunk c
-                            JOIN article_scenarios a ON a.document_id = c.document_id
-                            WHERE a.scenario_id = :sid
-                              AND c.embedding IS NOT NULL
-                              AND c.chunk_type IN ('title_abstract', 'fulltext_section')
-                            GROUP BY c.document_id
-                        ) sub
-                        WHERE ars.scenario_id = :sid
-                          AND ars.document_id = sub.document_id
-                    """), {"q_vec": _q_vec, "sid": scenario_id})
-                n_reranked = _rr_result.rowcount
+                # LA fonction de score de la recherche, et non une copie. Celle-ci plongeait
+                # `query[:2000]`, la requête BRUTE avec ses tags PubMed, quand la recherche
+                # plonge `embedding_text_for_query` (requête entière, sans tags, #327) : deux
+                # vecteurs de requête pour un même scénario, selon le dernier chemin passé.
+                # Mesuré sur HPAI_last : les 6 453 articles communs aux deux chemins ont
+                # tous changé de score (−0,024 en moyenne), et le seuil réglé pour garder
+                # 1 000 articles n'en gardait plus que 288 après une recherche relancée.
+                n_reranked = _run_semantic_rerank_inline(scenario_id, query)
                 update_step("semantic_scoring", "done", updated=n_reranked)
 
                 # Seuil SÉMANTIQUE = SOFT : on ne supprime JAMAIS d'article du

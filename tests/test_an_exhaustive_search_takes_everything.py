@@ -230,12 +230,21 @@ class _FakeSources:
                       "abstract": _ABSTRACT, "created": {"date-parts": [[2023]]}} for i in range(rows)]
             return _Resp(200, {"message": {"items": items, "total-results": 1_000_000}})
         if "openalex" in url:
-            first = params.get("cursor") in (None, "*") and str(params.get("page", "1")) == "1"
-            results = [{"id": f"https://openalex.org/Wexh{self.tag}{i}", "title": self._title(f"oa {i}"),
+            # Titre et résumé (filtre, curseur) : les notices 0 et 1, 2 au total. Recherche
+            # par défaut (texte intégral, par pages) : 1 et 2, 43 181 au total. La notice 1
+            # est rendue par les deux passages.
+            def _work(i):
+                return {"id": f"https://openalex.org/Wexh{self.tag}{i}", "title": self._title(f"oa {i}"),
                         "abstract_inverted_index": {"exposure": [0], "of": [1], "poultry": [2],
                                                     "workers": [3], "to": [4], "influenza": [5]},
-                        "publication_year": 2021, "doi": None} for i in range(2)] if first else []
-            return _Resp(200, {"results": results, "meta": {"count": 2, "next_cursor": "c2" if first else None}})
+                        "publication_year": 2021, "doi": None}
+            if "filter" in params:
+                first = params.get("cursor") == "*"
+                return _Resp(200, {"results": [_work(0), _work(1)] if first else [],
+                                   "meta": {"count": 2, "next_cursor": "c2" if first else None}})
+            first = str(params.get("page", "1")) == "1" and params.get("cursor") in (None, "*")
+            return _Resp(200, {"results": [_work(1), _work(2)] if first else [],
+                               "meta": {"count": 43181, "next_cursor": None}})
         if "doaj.org" in url:
             if str(params.get("page", 1)) != "1":
                 return _Resp(200, {"results": []})
@@ -338,10 +347,17 @@ def test_an_exhaustive_search_takes_every_record_the_strategy_matches(federation
     # Crossref ranks keywords: it keeps the standard cap.
     assert by.get("crossref") == 150, by
     assert all(int(p.get("rows") or 0) <= 150 for _, p in fake.urls("crossref"))
-    # OpenAlex: titles and abstracts, cursor paging, no relevance sort needed.
+    # OpenAlex: every title/abstract match (cursor paging), THEN the standard pass, so an
+    # exhaustive search never finds less than a standard one; a record both return counts once.
     oa = fake.urls("openalex")
     assert oa and oa[0][1].get("filter", "").startswith("title_and_abstract.search:"), oa[0]
     assert oa[0][1].get("cursor") == "*" and "page" not in oa[0][1] and "search" not in oa[0][1]
+    assert any(p.get("search") and p.get("page") == 1 and p.get("sort") == "relevance_score:desc"
+               for _, p in oa), oa
+    assert by.get("openalex") == 3, by
+    # Its total is the exhaustive pass's: the standard pass is an addition, not the search.
+    assert (fig.get("source_totals") or {}).get("openalex") == 2
+    assert "openalex" not in (fig.get("sources_capped") or [])
     # DOAJ: the whole strategy in several queries, a record found by two of them counted once.
     doaj_queries = {u for u, p in fake.urls("doaj.org")}
     assert len(doaj_queries) >= 2, doaj_queries
@@ -362,6 +378,9 @@ def test_a_standard_search_is_unchanged(federation):
     assert by.get("semantic_scholar") == 200, by           # stops past the cap, as before
     oa = fake.urls("openalex")
     assert oa and "search" in oa[0][1] and "filter" not in oa[0][1] and oa[0][1].get("page") == 1
+    assert not any("filter" in p for _, p in oa)
+    assert by.get("openalex") == 2, by
+    assert "openalex" in (fig.get("sources_capped") or [])  # 43 181 announced, 150 kept
     assert len({u for u, p in fake.urls("doaj.org")}) == 1   # the shortened query, as before
     assert "doaj" in (fig.get("keyword_fallback_sources") or [])
     assert fig.get("search_mode") == "standard"
@@ -395,6 +414,24 @@ def test_a_cached_replay_still_says_a_source_was_capped(federation):
     assert len(fake.urls("europepmc")) + len(fake.urls("ebi.ac.uk")) == calls_before
     assert (fig2.get("source_totals") or {}).get("europepmc") == 13810
     assert "europepmc" in (fig2.get("sources_capped") or []), fig2.get("sources_capped")
+
+
+def test_the_search_and_the_pipeline_score_with_the_same_query_vector():
+    """The full pipeline's scoring step had its own copy of the scoring SQL, and embedded
+    `query[:2000]`, the RAW query with its PubMed tags, where the search embeds
+    `embedding_text_for_query` (the whole query, tags stripped). One scenario had two query
+    vectors depending on the last path taken: on HPAI_last every one of the 6 453 articles
+    both paths scored moved (-0.024 on average), and a threshold set to keep 1 000 articles
+    kept 288 after a re-run. One scoring function now serves both."""
+    import inspect
+
+    from api import pipeline as P
+    from api import relevance as R
+
+    src = inspect.getsource(P._run_user_scenario_full_pipeline)
+    assert "_run_semantic_rerank_inline(scenario_id, query)" in src
+    assert "input=query" not in src
+    assert "embedding_text_for_query(query)" in inspect.getsource(R._run_semantic_rerank_inline)
 
 
 def test_an_exhaustive_search_never_replays_a_capped_answer():

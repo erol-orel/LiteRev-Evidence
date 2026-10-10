@@ -1248,9 +1248,11 @@ def _prisma_identification_figures(records_by_source: dict, unique_records: int,
                              pour toutes : en mode exhaustif, Crossref, qui classe des
                              mots-clés au lieu d'appliquer le booléen, garde le plafond
                              standard. « Plafonnée » se juge contre le plafond de la source.
-    title_abstract_sources : les sources interrogées sur titre et résumé seulement (OpenAlex
-                             en mode exhaustif : sa recherche par défaut lit aussi le texte
-                             intégral, 43 181 notices sur HPAI contre 1 648 pour PubMed).
+    title_abstract_sources : les sources dont TOUTES les correspondances sur titre et résumé
+                             ont été prises (OpenAlex en mode exhaustif : sa recherche par
+                             défaut lit aussi le texte intégral, 43 181 notices sur HPAI
+                             contre 1 648 pour PubMed), en plus des plus pertinentes de leur
+                             recherche par défaut, comme en mode standard.
     unranked_sources       : les sources dont l'ordre N'EST PAS la pertinence (Semantic
                              Scholar, endpoint bulk : ordre des identifiants). Au plafond,
                              ce qui est gardé y est un sous-ensemble arbitraire.
