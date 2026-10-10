@@ -325,3 +325,30 @@ def test_the_similarity_curve_only_sees_what_the_rerank_gate_already_kept(seeded
     assert after < before, (
         "un seuil de rerank de 0,5 écarte les articles 2 et 4 : la courbe de similarité "
         "les comptait encore")
+
+
+# ─── Le second seuil, dit dans le PRISMA ─────────────────────────────────────
+
+def test_the_prisma_payload_reports_the_rerank_threshold_and_what_it_removed(seeded):
+    """Confirmé par la relecture adversariale : un seuil de rerank posé façonnait
+    l'ensemble de preuves sans apparaître nulle part dans le PRISMA. L'étape 2 annonçait
+    quatre articles au-dessus du seuil de similarité, l'étape 4 en comptait trois, et la
+    sélection automatique (`above - man_vetoed`, aveugle au rerank) en annonçait quatre,
+    plus que le total qu'elle détaille."""
+    _set_rerank_threshold(0.26)
+    out = main.get_user_scenario_prisma(SID, threshold=0.3)
+    sem, ev = out["semantic_screening"], out["evidence"]
+    assert sem["rerank_threshold"] == pytest.approx(0.26)
+    # L'article 2 : similarité 0.40 au-dessus de 0.3, non jugé, rerank 0.07 sous 0.26.
+    # Le 5 (inclus à la main) et le 3 (pas encore reranké) ne sont pas retirés.
+    assert sem["below_rerank_threshold"] == 1, sem
+    assert ev["total"] == len(_relevant(0.3)) == 3
+    assert ev["ai_auto_selected"] + ev["manually_rescued"] == ev["total"], ev
+
+
+def test_without_a_rerank_threshold_the_prisma_says_zero_and_removes_nothing(seeded):
+    out = main.get_user_scenario_prisma(SID, threshold=0.3)
+    assert out["semantic_screening"]["rerank_threshold"] == 0.0
+    assert out["semantic_screening"]["below_rerank_threshold"] == 0
+    ev = out["evidence"]
+    assert ev["ai_auto_selected"] + ev["manually_rescued"] == ev["total"] == 4

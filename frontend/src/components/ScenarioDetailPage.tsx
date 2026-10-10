@@ -4518,6 +4518,14 @@ function PrismaSection({ scenarioId }: { scenarioId: string }) {
               {t("scenarioDetail.prisma.perSourceCap").replace("{cap}", ident.per_source_cap.toLocaleString())}
             </div>
           )}
+          {/* La date de la recherche (PRISMA-S, item 9) : elle était stockée avec les
+              chiffres et ne s'affichait que pour une reconstruction. Une section Méthodes
+              la demande, et c'est sur cette carte qu'on la cherche. */}
+          {ident.method !== "rebuild" && ident.computed_at && (
+            <div className="text-center text-[9px] text-emerald-300/40">
+              {t("scenarioDetail.prisma.searchedOn").replace("{date}", new Date(ident.computed_at).toLocaleDateString())}
+            </div>
+          )}
         </PrismaStageCard>
 
         <PrismaConnector />
@@ -4538,6 +4546,14 @@ function PrismaSection({ scenarioId }: { scenarioId: string }) {
           </div>
           <div className="space-y-1">
             <PrismaRow label={t("scenarioDetail.prisma.similarityThreshold")} value={`≥ ${(num(sem.threshold) * 100).toFixed(0)}%`} />
+            {/* Le second seuil, quand il est posé : il retire des articles de l'ensemble de
+                preuves, et l'étape 4 contredisait l'étape 2 sans que rien ne dise pourquoi. */}
+            {num(sem.rerank_threshold) > 0 && (
+              <>
+                <PrismaRow label={t("scenarioDetail.prisma.rerankThreshold")} value={`≥ ${num(sem.rerank_threshold).toFixed(2)}`} />
+                <PrismaRow label={t("scenarioDetail.prisma.belowRerankThreshold")} value={num(sem.below_rerank_threshold)} />
+              </>
+            )}
             <PrismaRow label={t("scenarioDetail.prisma.method")} value={sem.method ?? "-"} />
             <PrismaRow
               label={t("scenarioDetail.prisma.fullTextsAvailable")}

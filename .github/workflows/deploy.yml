@@ -61,8 +61,12 @@ jobs:
           #   tests qui fabriquent un PDF échouent au lieu de vérifier le document.
           # uvicorn + requests : servent l'API au smoke test navigateur (scripts/smoke_e2e.py)
           #   plus bas - la construction d'un corpus importe requests même sans source en direct.
+          # pyflakes : tests/test_no_undefined_names.py. Trois noms jamais importés dans
+          #   api/pipeline.py faisaient échouer en silence les étapes PICO, métadonnées et
+          #   cross-encoder de chaque pipeline complet ; ni la compilation ni les tests ne
+          #   le voyaient, parce qu'un nom indéfini ne lève qu'au moment où la ligne tourne.
           pip install pytest fastapi pydantic "sqlalchemy>=2.0" python-dotenv python-multipart "psycopg[binary]" \
-            httpx openpyxl reportlab uvicorn requests \
+            httpx openpyxl reportlab uvicorn requests pyflakes \
             numpy pandas scikit-learn scipy optuna joblib lightgbm xgboost statsmodels
           pytest -q
 

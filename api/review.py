@@ -13,9 +13,9 @@ from fastapi import Depends, HTTPException, Query
 from sqlalchemy import text
 
 from .core import app, engine, logger, require_api_key
-from .scenario_store import (_get_scenario_threshold, _get_user_scenario_or_404,
-                             relevant_gate_sql, relevant_gate_tail_sql,
-                             screening_status_sql)
+from .scenario_store import (_get_scenario_rerank_threshold, _get_scenario_threshold,
+                             _get_user_scenario_or_404, relevant_gate_sql,
+                             relevant_gate_tail_sql, screening_status_sql)
 from .search import _load_prisma_identification, _reconcile_prisma_identification
 from .double_blind import _write_ars_screening
 from llm_usage import model_for as _model
@@ -161,6 +161,9 @@ def get_user_scenario_prisma(
     eff_threshold = threshold if threshold is not None else (
         float(ss[0]) if ss and ss[0] is not None else 0.45
     )
+    # Le second seuil de la porte de pertinence (score du cross-encoder). Il façonne
+    # l'ensemble de preuves exactement comme le premier, mais n'était servi nulle part.
+    rerank_threshold = float(_get_scenario_rerank_threshold(scenario_id) or 0.0)
 
     with engine.connect() as conn:
         stats = conn.execute(text(f"""
@@ -272,6 +275,12 @@ def get_user_scenario_prisma(
     # L'ensemble de preuves = le sous-ensemble pertinent, tel que la porte le définit,
     # et non une arithmétique sur un compteur qui ignore la moitié de la porte.
     evidence_total  = int(stats["relevant_total"] or 0)
+    # Ce que le SECOND seuil (rerank) retire de l'ensemble de preuves, DÉDUIT des compteurs
+    # qui passent déjà par la porte partagée plutôt que réécrit à la main : au-dessus du
+    # seuil de similarité et non écartés, plus les repêchés sous le seuil, moins
+    # l'ensemble de preuves. Nul sans seuil de rerank, par construction. Sans ce compte,
+    # l'étape 2 et l'étape 4 se contredisaient dès qu'un seuil de rerank était posé.
+    below_rerank    = max(0, above - man_vetoed + man_rescued - evidence_total)
     # ── « Screening terminé » veut dire qu'il ne reste rien à juger ───────────
     # Le test était « au moins une décision existe » : un relecteur excluait UN article
     # hors sujet sur 6 564 et la carte PRISMA affichait aussitôt « Screening terminé :
@@ -418,6 +427,10 @@ def get_user_scenario_prisma(
             "above_threshold": above,
             "below_threshold": below,
             "method": "cosine similarity (text-embedding-3-small)",
+            # 0 = pas de second seuil. Quand il est posé, `below_rerank_threshold` dit
+            # combien d'articles au-dessus du seuil de similarité il retire.
+            "rerank_threshold": rerank_threshold,
+            "below_rerank_threshold": below_rerank,
         },
         "full_text": {
             # Numérateur ET dénominateur sur le MÊME ensemble (les preuves) : with_fulltext
@@ -448,7 +461,10 @@ def get_user_scenario_prisma(
             # = le sous-ensemble pertinent par la porte partagée, donc égal à
             # /counts.relevant, seuil de rerank compris.
             "total": evidence_total,
-            "ai_auto_selected": above - man_vetoed,
+            # Compté par la MÊME porte que `total` : `above - man_vetoed` ignorait le seuil
+            # de rerank, et la somme sélection auto + repêchés dépassait alors le total
+            # qu'elle détaille. Ainsi, ai_auto_selected + manually_rescued = total, toujours.
+            "ai_auto_selected": max(0, evidence_total - man_rescued),
             "manually_rescued": man_rescued,
             "with_fulltext": with_fulltext,
             "screening_complete": screening_done,
