@@ -809,7 +809,7 @@ export const en: Translations = {
       cappedNote: "Cap reached for {sources}: these APIs announce more records than the {cap} per source retrieved. PubMed, OpenAlex and Europe PMC are queried by relevance: what was kept is each source's {cap} most relevant records, not its most recent.",
       cappedNoteExhaustive: "Limit reached for {sources}: these databases announce more records than were retrieved.",
       unrankedNote: "{sources} returns Boolean matches in record-ID order, not by relevance: the records kept are an arbitrary subset of its matches, not its most relevant.",
-      titleAbstractNote: "{sources}: searched in titles and abstracts (the default search also matches full texts).",
+      titleAbstractNote: "{sources}: every match in titles and abstracts, plus the most relevant matches of its default search, which also reads full texts (as in a standard search).",
       splitNote: "{source}: the whole strategy, split into {n} queries (its API does not page through a long query).",
       exhaustiveCap: "exhaustive search: every record each database matched, up to {cap} per database; Crossref, which ranks keywords, kept its {crossrefCap} most relevant",
       outcome: {
