@@ -485,11 +485,16 @@ def articles_export_response(scenario_id: str, fmt: str, articles: list[dict],
 def relevant_articles_export(scenario_id: str, fmt: str, threshold: float | None,
                              include_abstract: bool) -> Response:
     articles = _get_above_threshold_articles(scenario_id, threshold=threshold)
+    # Le second seuil, dans la phrase de couverture aussi : elle définissait « pertinent »
+    # par la seule similarité alors qu'un seuil de rerank posé retire des articles.
+    _rthr = float(_get_scenario_rerank_threshold(scenario_id) or 0.0)
+    _rerank = (f" et, quand il a été calculé, au-dessus du seuil de reclassement "
+               f"(cross-encoder) {_rthr:.2f}" if _rthr > 0 else "")
     return articles_export_response(
         scenario_id, fmt, articles, include_abstract, threshold=threshold,
         subset="relevant", subset_label="relevant-articles",
-        coverage=("Tous les articles pertinents du scénario : au-dessus du seuil de "
-                  "similarité ou inclus par un relecteur, jamais les exclus."))
+        coverage=(f"Tous les articles pertinents du scénario : au-dessus du seuil de "
+                  f"similarité{_rerank}, ou inclus par un relecteur, jamais les exclus."))
 
 
 @app.get("/user-scenarios/{scenario_id}/relevant/export")

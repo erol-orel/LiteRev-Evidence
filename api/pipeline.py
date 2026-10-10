@@ -17,6 +17,7 @@ from .core import POPULATE_FEDERATION_BUDGET, _norm_lang, app, engine, logger, r
 from .documents import (
     _coerce_int,
     _compute_quality_score,
+    _llm_lang_directive,
     _normalize_doi,
     _strategy_is_degraded,
     _truncate_to_tokens,
@@ -445,7 +446,13 @@ def _run_user_scenario_populate(
         with _counter_lock:
             _ingested_total[0] += count
             _errors_total[0] += err
-            if _pipeline_callback is None:
+            # Après le gel, une page tardive d'une source coupée insère encore ses lignes
+            # en base, mais elle ne fait plus partie de cette recherche : le corpus et les
+            # chiffres PRISMA l'ignorent déjà (cf. _corpus_frozen). Le job servi à
+            # l'interface l'ignorait pas : `ingested` et `sources` continuaient de monter
+            # après la publication, jusqu'à afficher une ventilation par source plus
+            # grande que le total qu'elle détaille (relecture adversariale, reproduit).
+            if _pipeline_callback is None and not _corpus_frozen[0]:
                 job = _user_scenario_populate_jobs[scenario_id]
                 job["ingested"] = _ingested_total[0]
                 # Remonter les erreurs dans l'état du job : sans cela, errors=0
@@ -468,6 +475,9 @@ def _run_user_scenario_populate(
     # laissait non liés, et le NameError, avalé par le try du bloc PRISMA, faisait sauter
     # l'enregistrement des chiffres sans trace.
     _kw_fallback: list[str] = []
+    # Les compteurs par source au gel du corpus (cf. le bloc du gel) ; None tant qu'il n'a
+    # pas eu lieu, et alors le statut final relit le dict vivant, comme avant.
+    _sources_snapshot: dict | None = None
     _plain_q = query
     _fallback_q = query
     _openaire_q = query
@@ -1578,6 +1588,12 @@ def _run_user_scenario_populate(
             # avait identifié.
             with _counter_lock:
                 total_found = sum(_ident_records.values())
+                # Le même instant pour les compteurs du job : lus plus tôt, ou relus après
+                # le scoring, ils ne décrivaient pas la même recherche que `total_found`.
+                ingested = _ingested_total[0]
+                errors = _errors_total[0]
+                _sources_snapshot = dict(
+                    (_user_scenario_populate_jobs.get(scenario_id) or {}).get("sources") or {})
         # Appartenance = re-match booléen LOCAL (base locale ∪ live) pour les sources par
         # mots-clés + la base existante…
         if _sub_queries:
@@ -1780,7 +1796,10 @@ def _run_user_scenario_populate(
         # (rerank_status). Plus d'attente synchrone sur l'API Cohere.
         _cohere_enabled = bool(os.getenv("COHERE_API_KEY"))
         if _pipeline_callback is None:
-            _sources_final = _user_scenario_populate_jobs.get(scenario_id, {}).get("sources", {})
+            # L'instantané pris au gel, en COPIE : le dict vivant du job était publié tel
+            # quel, et tout ce qui l'aurait encore modifié réécrivait le statut final.
+            _sources_final = dict(_sources_snapshot if _sources_snapshot is not None else
+                                  _user_scenario_populate_jobs.get(scenario_id, {}).get("sources", {}))
             _src_parts = [f"{src}: {cnt}" for src, cnt in _sources_final.items() if cnt > 0]
             _src_summary = " | ".join(_src_parts) if _src_parts else "aucune source"
             _user_scenario_populate_jobs[scenario_id] = {
@@ -1917,6 +1936,15 @@ def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict
     """
     from .evidence import _generate_evidence_brief_llm  # lazy: evidence is loaded after this module
     from .variables import _generate_variables_from_pico  # lazy: variables is loaded after this module
+    # Ces deux noms n'étaient importés nulle part dans ce module : l'étape cross-encoder
+    # (depuis #322) et les étapes PICO et métadonnées (depuis #278) levaient un NameError à
+    # chaque pipeline complet, rattrapé par le try de l'étape et rangé en « error ». Le
+    # PICO, extrait aussi en arrière-plan à l'ingestion, ne manquait guère ; les
+    # MÉTADONNÉES, elles, n'avaient pas d'autre chemin automatique : sur HPAI_last, 23 %
+    # des articles en portaient (type d'étude, effectif, risque de biais, quality_score),
+    # et les niveaux de preuve du brief se calculaient sur ce quart.
+    # `tests/test_no_undefined_names.py` passe désormais tout le paquet au crible.
+    from .relevance import _run_cross_encoder_rerank  # lazy: relevance is loaded after this module
     import time as _time
 
     # L'étape 4 s'appelait « rerank » et n'était qu'un cosinus sur les embeddings

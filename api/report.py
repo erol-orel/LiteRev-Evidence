@@ -35,7 +35,8 @@ from fastapi import HTTPException, Query
 from sqlalchemy import text
 
 from .core import app, engine, logger
-from .scenario_store import _get_scenario_threshold, _get_user_scenario_or_404
+from .scenario_store import (_get_scenario_rerank_threshold, _get_scenario_threshold,
+                             _get_user_scenario_or_404)
 
 #: `[12]` or `[12, 34]`: what the brief's prompt asks the model to place in its prose. A
 #: bare number in brackets is also how a numbered reference appears in a paper, which is
@@ -188,9 +189,23 @@ def _table(headers: list[str], rows: list[list[str]]) -> list[str]:
     return out
 
 
+def _rerank_clause(rerank_threshold: float | None) -> str:
+    """La phrase qui dit le SECOND seuil, quand il est posé. La définition de « pertinent »
+    de la section Méthodes ne nommait que la similarité : un seuil de rerank retirait des
+    articles de l'ensemble analysé sans que le rapport le dise. Vide sans second seuil."""
+    try:
+        r = float(rerank_threshold or 0.0)
+    except (TypeError, ValueError):
+        return ""
+    if r <= 0:
+        return ""
+    return (f" et, quand il a été calculé, dont le score de reclassement (cross-encoder) "
+            f"atteint {r:.2f}")
+
+
 def build_report(brief: dict, digest: dict, matrix: dict | None, funnel: dict | None,
                  articles_by_id: dict, scenario_name: str, query: str | None,
-                 threshold: float) -> dict[str, Any]:
+                 threshold: float, rerank_threshold: float | None = None) -> dict[str, Any]:
     """The whole document as markdown, plus what could not be resolved. Pure.
 
     Figures are numbered in the order they appear, as a paper numbers them, so the text
@@ -219,7 +234,8 @@ def build_report(brief: dict, digest: dict, matrix: dict | None, funnel: dict | 
         f"Corpus interrogé par la requête booléenne suivante : `{query or 'non renseignée'}`.",
         "",
         f"Un article est *pertinent* lorsqu'il dépasse le seuil de similarité "
-        f"({threshold:.2f}) **ou** qu'un relecteur l'a inclus à la main ; les articles "
+        f"({threshold:.2f}){_rerank_clause(rerank_threshold)} **ou** qu'un relecteur l'a "
+        f"inclus à la main ; les articles "
         f"écartés au screening ne le sont jamais. La synthèse ci-dessous porte sur la "
         f"**totalité des {n_relevant} articles pertinents** : les agrégats (années, devis, "
         f"pays, revues, concepts, matrice de lacunes) sont calculés en SQL sur l'ensemble "
@@ -428,7 +444,8 @@ def evidence_report(scenario_id: str, download: bool = Query(False),
     except Exception as e:                                   # noqa: BLE001
         logger.info(f"evidence_report name {scenario_id}: {e}")
 
-    out = build_report(llm, digest, matrix, funnel, by_id, name, query, threshold)
+    out = build_report(llm, digest, matrix, funnel, by_id, name, query, threshold,
+                       rerank_threshold=_get_scenario_rerank_threshold(scenario_id))
     if download:
         return PlainTextResponse(
             out["markdown"], media_type="text/markdown; charset=utf-8",

@@ -1200,6 +1200,11 @@ export interface ScenarioPrisma {
     above_threshold: number;
     below_threshold: number;
     method: string;
+    /** The second threshold of the relevance gate (cross-encoder score), 0 when unset,
+     *  and how many articles above the similarity threshold it removes. It shaped the
+     *  evidence set without appearing anywhere on the card. */
+    rerank_threshold?: number;
+    below_rerank_threshold?: number;
   };
   full_text: {
     with_fulltext: number;
