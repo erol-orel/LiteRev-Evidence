@@ -343,6 +343,48 @@ def _compute_quality_score(
     return round(score, 4)
 
 
+#: L'écriture d'une extraction de métadonnées, commune aux deux chemins qui en font une
+#: (l'étape du pipeline et le lot `/metadata/extract`). `COALESCE` : une valeur que
+#: l'extraction n'a pas trouvée ne doit pas effacer celle que la ligne portait.
+METADATA_UPDATE_SQL = """
+    UPDATE literature_document
+    SET metadata_json = CAST(:meta AS jsonb),
+        study_design = COALESCE(:study_design, study_design),
+        sample_size = COALESCE(:sample_size, sample_size),
+        quality_score = COALESCE(:quality_score, quality_score)
+    WHERE id = :article_id
+"""
+
+
+def _metadata_update_params(article_id: int, metadata: dict, row: Any) -> dict:
+    """Les paramètres de `METADATA_UPDATE_SQL` pour une extraction de métadonnées.
+
+    Une extraction ne remplit pas seulement `metadata_json` : le devis et l'effectif
+    qu'elle a trouvés passent dans leurs colonnes, et le score de qualité déterministe
+    se calcule dessus. Le lot `/metadata/extract` n'écrivait que le JSON ; sur le
+    scénario HPAI_last, 861 des 1 000 articles pertinents gardaient ainsi le 0.0 par
+    défaut de la colonne, le brief annonçait « score de qualité moyen 0.08 » et le
+    regroupement des paramètres pondérait ces articles non notés à 1.0, au-dessus de
+    tout article noté. Une fonction, deux appelants : ils ne peuvent plus diverger.
+
+    `row` porte ce que la ligne savait déjà (year, citation_count, open_access,
+    study_design, sample_size) ; une clé absente vaut None."""
+    _get = row.get if hasattr(row, "get") else (lambda k: None)
+    study_design = metadata.get("study_type") or _get("study_design")
+    sample_size = _coerce_int(metadata.get("sample_size")) or _get("sample_size")
+    quality_score = _compute_quality_score(
+        study_design=study_design,
+        year=_get("year"),
+        sample_size=sample_size,
+        citation_count=_get("citation_count"),
+        open_access=_get("open_access"),
+        bias_risk=metadata.get("bias_risk"),
+    )
+    return {"meta": json.dumps(metadata), "study_design": study_design,
+            "sample_size": sample_size, "quality_score": quality_score,
+            "article_id": article_id}
+
+
 class DocumentIn(BaseModel):
     source: str = Field(..., min_length=1)
     title: str = Field(..., min_length=1)
@@ -676,6 +718,7 @@ def get_evidence_summary(document_id: int) -> dict[str, Any]:
 def recompute_quality_scores(
     limit: int = 5000,
     only_missing: bool = True,
+    scenario_id: str | None = None,
     _: None = Depends(require_api_key),
 ) -> dict[str, Any]:
     """
@@ -683,8 +726,12 @@ def recompute_quality_scores(
     colonnes structurées et de metadata_json (study_type, sample_size, bias_risk).
     Idempotent. `only_missing=True` ne traite que les documents sans score
     (quality_score NULL ou 0). À appeler par lots (`limit`) pour le backfill.
+    `scenario_id` borne le calcul aux articles d'un scénario, pour réparer celui-là
+    sans toucher au reste de la bibliothèque.
     """
     where_missing = "AND (quality_score IS NULL OR quality_score = 0)" if only_missing else ""
+    where_scenario = ("AND id IN (SELECT document_id FROM article_scenarios WHERE scenario_id = :sid)"
+                      if scenario_id else "")
     with engine.connect() as conn:
         rows = conn.execute(text(f"""
             SELECT id, year, citation_count, open_access, study_design, sample_size,
@@ -692,9 +739,11 @@ def recompute_quality_scores(
             FROM literature_document
             WHERE project_context = 'literev'
               {where_missing}
+              {where_scenario}
             ORDER BY id
             LIMIT :limit
-        """), {"limit": max(1, min(limit, 50000))}).mappings().fetchall()
+        """), {"limit": max(1, min(limit, 50000)),
+               **({"sid": scenario_id} if scenario_id else {})}).mappings().fetchall()
 
     updated = 0
     skipped_no_signal = 0

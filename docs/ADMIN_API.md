@@ -82,7 +82,7 @@ watch -n3 "curl -s $BASE/user-scenarios/usr-XXXX/populate/status | jq '{status,p
 |--------|------|------|-----------|
 | POST | `/admin/corpus-maintenance` | ✅ | optional JSON body; idempotent + reversible: purge duplicates, normalize legacy chunks |
 | POST | `/admin/embed-pending?limit=200` | ✅ | embed chunks still missing vectors (`limit` per call) |
-| POST | `/admin/recompute-quality-scores?limit=5000&only_missing=true` | ✅ | recompute per-doc quality scores |
+| POST | `/admin/recompute-quality-scores?limit=5000&only_missing=true` | ✅ | recompute per-doc quality scores; `&scenario_id=<id>` holds it to one scenario's articles |
 
 ```bash
 curl -s "${auth[@]}" -X POST "$BASE/admin/corpus-maintenance"
@@ -99,7 +99,7 @@ Each accepts `?scenario_id=<id>` (omit = whole library) and `?limit=<n>`.
 |--------|------|------|---------|
 | POST | `/fulltext/fetch?scenario_id=…&limit=…` | ✅ | fetch full text (Unpaywall / PMC) |
 | POST | `/pico/extract?scenario_id=…&limit=…` | ✅ | LLM PICO extraction |
-| POST | `/metadata/extract?scenario_id=…&limit=…` | ✅ | LLM metadata (design, quality) extraction |
+| POST | `/metadata/extract?scenario_id=…&limit=…` | ✅ | LLM metadata extraction; fills the design, sample size and quality score columns, as the pipeline step does |
 
 ```bash
 curl -s "${auth[@]}" -X POST "$BASE/fulltext/fetch?scenario_id=usr-XXXX&limit=1000"

@@ -200,8 +200,18 @@ def corpus_digest(scenario_id: str, threshold: float | None = None) -> dict[str,
                        COUNT(*) FILTER (WHERE d.has_fulltext IS TRUE) AS n_with_fulltext,
                        COUNT(*) FILTER (WHERE d.abstract IS NOT NULL) AS n_with_abstract,
                        MIN(d.year) AS year_min, MAX(d.year) AS year_max,
-                       ROUND(AVG(d.quality_score)::numeric, 3) AS mean_quality,
-                       SUM(COALESCE(d.citation_count, 0)) AS total_citations
+                       -- Une moyenne sur les seuls articles NOTÉS, et leur nombre. La
+                       -- colonne a longtemps porté un défaut 0.0 : 0 y veut dire « jamais
+                       -- calculé » (même convention que api/corpus.py). Sur HPAI_last, 861
+                       -- zéros sur 1 000 faisaient une « qualité moyenne 0.08 » que le brief
+                       -- recopiait en conclusion.
+                       ROUND((AVG(d.quality_score) FILTER (WHERE d.quality_score > 0))::numeric, 3)
+                           AS mean_quality,
+                       COUNT(*) FILTER (WHERE d.quality_score > 0) AS n_with_quality,
+                       -- Un nombre de citations absent est INCONNU, pas nul : la somme ne
+                       -- porte que sur les articles qui en ont un, et leur nombre est dit.
+                       SUM(d.citation_count) AS total_citations,
+                       COUNT(d.citation_count) AS n_with_citations
                 {_RELEVANT}
             """, scenario_id, thr)
             # AVG renvoie un Decimal : coercé en float pour rester sérialisable en JSON.
@@ -274,6 +284,34 @@ def corpus_digest(scenario_id: str, threshold: float | None = None) -> dict[str,
     return out
 
 
+def _quality_and_citation_lines(d: dict) -> list[str]:
+    """Le score de qualité et les citations, chacun avec ce qu'il couvre.
+
+    La ligne d'avant, « Qualite moyenne: 0.08; citations cumulees: 0 », donnait au modèle
+    deux chiffres sans dénominateur ni définition, et il en tirait une conclusion : « la
+    qualité méthodologique d'ensemble est faible, avec un score moyen de 0.08 et zéro
+    citation ». Le 0.08 était une moyenne sur 861 articles jamais notés ; le zéro, une
+    somme de nombres de citations que personne n'avait collectés. Ici, un chiffre vient
+    avec sa définition et le nombre d'articles qu'il couvre, et une donnée absente est
+    dite absente."""
+    n = d.get("n_articles") or 0
+    lines: list[str] = []
+    nq = d.get("n_with_quality") or 0
+    if d.get("mean_quality") is not None and nq:
+        lines.append(f"Score de qualite composite (0 a 1; devis 50 %, effectif 18 %, citations "
+                     f"12 %, recence 12 %, acces ouvert 8 %; pas une evaluation GRADE): moyenne "
+                     f"{d['mean_quality']} sur {nq} articles notes / {n}.")
+    else:
+        lines.append("Score de qualite composite: non calcule pour ce corpus.")
+    nc = d.get("n_with_citations") or 0
+    if nc:
+        lines.append(f"Citations: {d.get('total_citations') or 0} au total sur {nc} articles "
+                     f"dont le nombre est connu / {n}.")
+    else:
+        lines.append("Citations: inconnues pour tous les articles (non collectees), pas nulles.")
+    return lines
+
+
 def digest_to_prompt(digest: dict, max_chars: int = 2600) -> str:
     """Le digest en un bloc de texte compact pour un prompt. Dit d'emblée sur combien
     d'articles il porte, pour que le modèle ne parle jamais au nom d'un échantillon."""
@@ -287,8 +325,7 @@ def digest_to_prompt(digest: dict, max_chars: int = 2600) -> str:
              f"{d.get('n_with_pico') or 0} avec PICO extrait, {d.get('n_with_fulltext') or 0} avec texte integral."]
     if d.get("year_min") and d.get("year_max"):
         lines.append(f"Annees: {d['year_min']} a {d['year_max']}.")
-    if d.get("mean_quality") is not None:
-        lines.append(f"Qualite moyenne: {d['mean_quality']}; citations cumulees: {d.get('total_citations') or 0}.")
+    lines.extend(_quality_and_citation_lines(d))
 
     def _dist(label, rows, fmt=lambda r: f"{r['value']} ({r['n']})"):
         if rows:

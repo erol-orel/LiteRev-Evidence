@@ -15,9 +15,9 @@ from sqlalchemy import text, bindparam
 
 from .core import POPULATE_FEDERATION_BUDGET, _norm_lang, app, engine, logger, require_api_key
 from .documents import (
-    _coerce_int,
-    _compute_quality_score,
+    METADATA_UPDATE_SQL,
     _llm_lang_directive,
+    _metadata_update_params,
     _normalize_doi,
     _strategy_is_degraded,
     _truncate_to_tokens,
@@ -2785,34 +2785,11 @@ def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict
                         )
                         metadata = json.loads(response.choices[0].message.content)
                         metadata["metadata_confidence"] = float(metadata.get("metadata_confidence", 0.5))
-                        # Renseigner les colonnes structurées depuis le JSON extrait
-                        # (study_design / sample_size), puis calculer un quality_score
-                        # déterministe - sinon l'évaluation GRADE buckette tout en « Faible ».
-                        study_design = metadata.get("study_type") or row.get("study_design")
-                        sample_size = _coerce_int(metadata.get("sample_size")) or row.get("sample_size")
-                        quality_score = _compute_quality_score(
-                            study_design=study_design,
-                            year=row.get("year"),
-                            sample_size=sample_size,
-                            citation_count=row.get("citation_count"),
-                            open_access=row.get("open_access"),
-                            bias_risk=metadata.get("bias_risk"),
-                        )
+                        # Colonnes structurées (study_design / sample_size) et quality_score
+                        # déterministe, par l'écriture commune au lot /metadata/extract.
                         with engine.begin() as conn:
-                            conn.execute(text("""
-                                UPDATE literature_document
-                                SET metadata_json = CAST(:meta AS jsonb),
-                                    study_design = COALESCE(:study_design, study_design),
-                                    sample_size = COALESCE(:sample_size, sample_size),
-                                    quality_score = COALESCE(:quality_score, quality_score)
-                                WHERE id = :article_id
-                            """), {
-                                "meta": json.dumps(metadata),
-                                "study_design": study_design,
-                                "sample_size": sample_size,
-                                "quality_score": quality_score,
-                                "article_id": row["id"],
-                            })
+                            conn.execute(text(METADATA_UPDATE_SQL),
+                                         _metadata_update_params(row["id"], metadata, row))
                         meta_extracted += 1
                     except Exception as e:
                         logger.warning(f"Pipeline metadata article {row['id']}: {e}")

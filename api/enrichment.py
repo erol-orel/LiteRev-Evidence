@@ -13,6 +13,7 @@ from fastapi import Depends, HTTPException
 from sqlalchemy import text
 
 from .core import app, engine, logger, require_api_key
+from .documents import METADATA_UPDATE_SQL, _metadata_update_params
 from .scenario_store import SCOPES, scenario_scope_sql
 from llm_usage import model_for as _model
 
@@ -181,7 +182,9 @@ def extract_metadata_batch(
     _: None = Depends(require_api_key),
 ):
     """
-    Enrichit les métadonnées (type d'étude, année, journal) via LLM pour un lot d'articles.
+    Enrichit les métadonnées (type d'étude, effectif, pays, risque de biais) via LLM pour
+    un lot d'articles, et calcule le score de qualité déterministe qu'elles permettent :
+    la même écriture que l'étape du pipeline (`_metadata_update_params`).
 
     `scope` : `all` pour tout le scénario, `relevant` pour son seul sous-ensemble
     pertinent.
@@ -191,10 +194,13 @@ def extract_metadata_batch(
     if not openai_key:
         raise HTTPException(status_code=503, detail="Clé OpenAI non configurée")
 
+    # Ce que la ligne sait déjà entre dans le score : année, citations, accès ouvert, et
+    # le devis ou l'effectif qu'une extraction précédente aurait laissés.
     with engine.connect() as conn:
         if scenario_id:
             rows = conn.execute(text(f"""
-                SELECT ld.id, ld.title, ld.abstract, ld.source, ld.year
+                SELECT ld.id, ld.title, ld.abstract, ld.source, ld.year, ld.citation_count,
+                       ld.open_access, ld.study_design, ld.sample_size
                 FROM literature_document ld
                 JOIN article_scenarios asn ON asn.document_id = ld.id AND asn.scenario_id = :sid
                 WHERE ld.project_context = 'literev'
@@ -205,7 +211,8 @@ def extract_metadata_batch(
             """), {"sid": scenario_id, "lim": limit}).mappings().fetchall()
         else:
             rows = conn.execute(text("""
-                SELECT id, title, abstract, source, year
+                SELECT id, title, abstract, source, year, citation_count,
+                       open_access, study_design, sample_size
                 FROM literature_document
                 WHERE project_context = 'literev'
                   AND (metadata_json IS NULL OR metadata_json = '{}'::jsonb)
@@ -252,14 +259,8 @@ def extract_metadata_batch(
                 metadata = json.loads(response.choices[0].message.content)
                 metadata["metadata_confidence"] = float(metadata.get("metadata_confidence", 0.5))
                 with engine.begin() as conn:
-                    conn.execute(text("""
-                        UPDATE literature_document
-                        SET metadata_json = CAST(:meta AS jsonb)
-                        WHERE id = :article_id
-                    """), {
-                        "meta": json.dumps(metadata),
-                        "article_id": article_id,
-                    })
+                    conn.execute(text(METADATA_UPDATE_SQL),
+                                 _metadata_update_params(article_id, metadata, row))
                 extracted += 1
             except Exception as e:
                 logger.warning(f"Metadata batch error article {article_id}: {e}")
