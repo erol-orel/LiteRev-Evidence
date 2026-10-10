@@ -49,6 +49,7 @@ def test_the_client_reads_the_response_before_saving_it():
 
     page = (pathlib.Path(__file__).resolve().parent.parent
             / "frontend" / "src" / "components" / "ScenarioDetailPage.tsx").read_text(encoding="utf-8")
-    assert "downloadEvidenceReport(scenarioId)" in page
-    assert "href={evidenceReportUrl(scenarioId)}" not in page, (
+    # La page passe aussi sa langue : le rapport s'écrit dans celle de l'interface.
+    assert "downloadEvidenceReport(scenarioId, lang)" in page
+    assert "href={evidenceReportUrl(scenarioId" not in page, (
         "le lien direct est revenu : le navigateur enregistrera de nouveau le refus")

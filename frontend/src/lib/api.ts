@@ -3055,8 +3055,11 @@ export async function fetchStudyDesignVocabulary(lang: string): Promise<StudyDes
   return r.json();
 }
 
-export function evidenceReportUrl(scenarioId: string): string {
-  return `${API_BASE_URL}/user-scenarios/${scenarioId}/evidence-report?download=true`;
+/** The report is written in the interface's language (its headings, notes and claim
+ *  strengths); the brief's own prose stays in the language it was generated in. */
+export function evidenceReportUrl(scenarioId: string, lang?: string): string {
+  const qs = lang ? `&lang=${encodeURIComponent(lang)}` : "";
+  return `${API_BASE_URL}/user-scenarios/${scenarioId}/evidence-report?download=true${qs}`;
 }
 
 /** Downloads the citable report, and REFUSES instead of saving a refusal.
@@ -3065,8 +3068,8 @@ export function evidenceReportUrl(scenarioId: string): string {
  *  answer 200 with a JSON error body, so the browser saved a 166-byte file bearing the
  *  report's name. The endpoint now answers 409; this reads it and throws the detail, so
  *  the page can say why. */
-export async function downloadEvidenceReport(scenarioId: string): Promise<void> {
-  const r = await safeFetch(evidenceReportUrl(scenarioId));
+export async function downloadEvidenceReport(scenarioId: string, lang?: string): Promise<void> {
+  const r = await safeFetch(evidenceReportUrl(scenarioId, lang));
   if (!r.ok) {
     const body = await r.json().catch(() => null);
     throw new Error(body?.detail || httpMessage(r.status));

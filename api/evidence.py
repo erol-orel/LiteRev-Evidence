@@ -61,6 +61,36 @@ _STRENGTH_ORDER = LEVEL_ORDER
 design_level = grade_level          # nom conservé : l'API publique de ce module
 
 
+#: Le niveau GLOBAL du brief (« evidence_level »), dans ses deux langues. Le gabarit du
+#: prompt donne les quatre valeurs en français, et le modèle les recopie parfois telles
+#: quelles dans un brief anglais : le brief anglais de HPAI_last s'affichait « Level:
+#: Faible ». Le plus spécifique d'abord : « très faible » contient « faible ».
+_BRIEF_LEVELS = (
+    (("très faible", "tres faible", "very low"), "Très faible", "Very low"),
+    (("insuffisante", "insuffisant", "insufficient"), "Insuffisant", "Insufficient"),
+    (("modérée", "modéré", "moderee", "modere", "moderate"), "Modéré", "Moderate"),
+    (("forte", "fort", "élevée", "élevé", "elevee", "eleve", "strong", "high"), "Fort", "Strong"),
+    (("faible", "low"), "Faible", "Low"),
+)
+
+
+def brief_level(value: Any, lang: str | None = "fr") -> Any:
+    """Le niveau global d'un brief, dans la langue du brief. La tête est traduite, le reste
+    (« Faible (corpus observationnel) ») est gardé ; une valeur inconnue est rendue telle
+    quelle. PUR/testable."""
+    if not isinstance(value, str) or not value.strip():
+        return value
+    import re as _re
+    en = (lang or "fr").lower().startswith("en")
+    low = value.strip().lower()
+    for synonyms, fr_label, en_label in _BRIEF_LEVELS:
+        for s in synonyms:
+            m = _re.match(rf"{_re.escape(s)}(?![\w])", low)
+            if m:
+                return (en_label if en else fr_label) + value.strip()[m.end():]
+    return value
+
+
 
 def _double_blind_counts(scenario_id: str) -> dict[str, int]:
     """Ce que les deux relecteurs ont réellement fait, en UNE instruction.
@@ -840,6 +870,9 @@ Retourne UNIQUEMENT le JSON valide."""
             response_format={"type": "json_object"},
         )
         brief = _json.loads(_json_content(response, f"evidence brief {scenario_id}"))
+        # Le niveau global dans la langue du brief (le gabarit le propose en français).
+        if brief.get("evidence_level"):
+            brief["evidence_level"] = brief_level(brief["evidence_level"], lang)
 
         # Les affirmations sont VÉRIFIÉES puis NOTÉES ici, après le modèle et hors de son
         # atteinte : chaque identifiant cité est confronté aux articles pertinents de ce
@@ -870,6 +903,8 @@ Retourne UNIQUEMENT le JSON valide."""
             # Le plafond que le barème des affirmations a appliqué : sans lui, une force
             # « Faible » ne se distingue pas d'un plafonnement par le corpus.
             "grade_ceiling": _ceiling_label,
+            # La langue du brief : le rapport citable s'écrit dans la même.
+            "lang": "en" if (lang or "fr").lower().startswith("en") else "fr",
         }
 
         # Empreinte du corpus : sert de clé de cache « ne pas régénérer si inchangé »
@@ -1026,6 +1061,10 @@ def get_llm_evidence_brief(scenario_id: str, lang: str | None = Query(None)) -> 
         if brief.get("_corpus_fingerprint") == _want_fp:
             brief["_cached"] = True
             brief["_generated_at"] = row["brief_generated_at"].isoformat() if row["brief_generated_at"] else None
+            # À la lecture aussi : les briefs écrits avant la normalisation la reçoivent
+            # sans être régénérés (l'empreinte garantit que `lang` est celle du brief).
+            if brief.get("evidence_level"):
+                brief["evidence_level"] = brief_level(brief["evidence_level"], lang)
             return with_resolved_references(brief, scenario_id)
 
     # Si un job précédent a ÉCHOUÉ, renvoyer l'erreur au lieu de relancer la
