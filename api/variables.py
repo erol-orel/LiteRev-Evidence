@@ -948,7 +948,11 @@ Retourne UNIQUEMENT le JSON valide."""
         # v6 : les paramètres épidémiologiques viennent désormais d'une extraction CIBLÉE
         # sur les articles qui les mesurent, pas des seuls 25 plus pertinents. Le suffixe
         # invalide UNE FOIS les specs construits sans elle.
-        _CTX_VERSION = "ctx-v7-full-corpus-digest"
+        # v8 : le digest ne présente plus un score jamais calculé ni des citations
+        # inconnues comme des zéros, et les articles enrichis par le lot de métadonnées
+        # portent enfin un score : les paramètres poolés avec les anciens poids (un article
+        # non noté pesait 1.0, plus que tout article noté) sont recalculés une fois.
+        _CTX_VERSION = "ctx-v8-quality-known-or-unknown"
         evidence_fingerprint = _evidence_fingerprint(
             [a.get("id") for a in pico_articles[:25] if a.get("id") is not None],
             threshold, lang, _CTX_VERSION)[:16]
