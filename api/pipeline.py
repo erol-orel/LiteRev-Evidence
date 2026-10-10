@@ -13,7 +13,8 @@ from typing import Any
 from fastapi import Depends, Query
 from sqlalchemy import text, bindparam
 
-from .core import POPULATE_FEDERATION_BUDGET, _norm_lang, app, engine, logger, require_api_key
+from .core import (EXHAUSTIVE_FEDERATION_BUDGET, POPULATE_FEDERATION_BUDGET, _norm_lang, app,
+                   engine, logger, require_api_key)
 from .documents import (
     METADATA_UPDATE_SQL,
     _llm_lang_directive,
@@ -24,9 +25,10 @@ from .documents import (
     sanitize_db_text,
 )
 from .scenario_store import (_get_scenario_threshold, _get_user_scenario_or_404,
-                             pipeline_enrich_scope, scenario_scope_sql)
+                             pipeline_enrich_scope, scenario_scope_sql, scenario_search_mode)
 from .search import (
     DOAJ_MAX_QUERY_CHARS,
+    EXHAUSTIVE_MAX_PER_SOURCE,
     LIVE_MAX_PER_SOURCE,
     OPENAIRE_MAX_OPERATORS,
     SOURCE_OUTCOMES_COUNTED,
@@ -50,6 +52,7 @@ from .search import (
     _set_scenario_corpus,
     _shorten_boolean,
     _source_label,
+    _split_boolean,
     _store_prisma_identification,
     source_record_keys,
     _strip_field_tags,
@@ -129,6 +132,11 @@ def _ensure_source_query_cache() -> None:
                     PRIMARY KEY (fetcher, query_hash)
                 )
             """))
+            # Le total que la source avait annoncé, rejoué avec ses liens : sans lui, une
+            # recherche servie depuis le cache ne savait plus qu'une source avait été
+            # plafonnée, et la carte PRISMA de HPAI_last n'en nommait aucune alors que
+            # quatre l'étaient (Europe PMC 1 996 sur 13 810).
+            _c.execute(text("ALTER TABLE source_query_cache ADD COLUMN IF NOT EXISTS totals JSONB"))
     except Exception as _e:                                  # noqa: BLE001 - never blocks boot
         logger.warning(f"_ensure_source_query_cache: {_e}")
 
@@ -139,49 +147,71 @@ except Exception as _e:                                      # noqa: BLE001
     logger.warning(f"_ensure_source_query_cache: {_e}")
 
 
-def _source_query_hash(query: str, filters: dict | None, max_results: int) -> str:
-    """Clé de cache : même requête, mêmes filtres, même plafond par source."""
+def _source_query_hash(query: str, filters: dict | None, max_results: int,
+                       mode: str = "standard") -> str:
+    """Clé de cache : même requête, mêmes filtres, même plafond par source, même mode.
+
+    Le mode n'entre dans la clé que s'il n'est pas `standard` : les entrées déjà en cache
+    gardent leur clé, et une recherche exhaustive ne rejoue jamais une réponse plafonnée."""
     import hashlib
-    payload = json.dumps({"q": (query or "").strip(), "f": filters or {}, "m": int(max_results)},
-                         sort_keys=True, ensure_ascii=False, default=str)
+    _p = {"q": (query or "").strip(), "f": filters or {}, "m": int(max_results)}
+    if mode and mode != "standard":
+        _p["x"] = str(mode)
+    payload = json.dumps(_p, sort_keys=True, ensure_ascii=False, default=str)
     return hashlib.sha1(payload.encode("utf-8")).hexdigest()[:40]
 
 
 def _load_source_cache(query_hash: str, ttl_s: int | None = None) -> dict[str, dict]:
-    """{fetcher: {links: [[doc_id, source, boolean_native], ...], n_records, age_s}} pour les
-    entrées plus fraîches que le TTL. Vide (jamais d'erreur) si la table manque."""
+    """{fetcher: {links: [[doc_id, source, boolean_native], ...], n_records, totals, age_s}}
+    pour les entrées plus fraîches que le TTL. Vide (jamais d'erreur) si la table manque.
+    `totals` : {source: total annoncé par l'API}, {} pour une entrée antérieure à la colonne."""
     ttl = SOURCE_CACHE_TTL_S if ttl_s is None else ttl_s
     if ttl <= 0:
         return {}
     out: dict[str, dict] = {}
     try:
         with engine.connect() as _c:
-            rows = _c.execute(text(
-                "SELECT fetcher, links, n_records, EXTRACT(EPOCH FROM (NOW() - fetched_at)) AS age_s "
-                "FROM source_query_cache WHERE query_hash = :h"
-            ), {"h": query_hash}).mappings().all()
+            try:
+                rows = _c.execute(text(
+                    "SELECT fetcher, links, n_records, totals, "
+                    "EXTRACT(EPOCH FROM (NOW() - fetched_at)) AS age_s "
+                    "FROM source_query_cache WHERE query_hash = :h"
+                ), {"h": query_hash}).mappings().all()
+            except Exception:                            # noqa: BLE001 - colonne pas encore là
+                _c.rollback()
+                rows = _c.execute(text(
+                    "SELECT fetcher, links, n_records, NULL AS totals, "
+                    "EXTRACT(EPOCH FROM (NOW() - fetched_at)) AS age_s "
+                    "FROM source_query_cache WHERE query_hash = :h"
+                ), {"h": query_hash}).mappings().all()
         for r in rows:
             age = float(r["age_s"] or 0)
             if age > ttl:
                 continue
             links = r["links"] if isinstance(r["links"], list) else json.loads(r["links"] or "[]")
+            totals = r["totals"] if isinstance(r["totals"], dict) else json.loads(r["totals"] or "{}")
             out[r["fetcher"]] = {"links": [tuple(x) for x in links if isinstance(x, list) and len(x) == 3],
-                                 "n_records": int(r["n_records"] or 0), "age_s": age}
+                                 "n_records": int(r["n_records"] or 0), "age_s": age,
+                                 "totals": {str(k): int(v) for k, v in (totals or {}).items()
+                                            if isinstance(v, (int, float)) and not isinstance(v, bool)}}
     except Exception as _e:                                  # noqa: BLE001
         logger.warning(f"_load_source_cache: {_e}")
     return out
 
 
-def _save_source_cache(fetcher: str, query_hash: str, query: str, links: list) -> None:
+def _save_source_cache(fetcher: str, query_hash: str, query: str, links: list,
+                       totals: dict | None = None) -> None:
     try:
         with engine.begin() as _c:
             _c.execute(text("""
-                INSERT INTO source_query_cache (fetcher, query_hash, query, links, n_records, fetched_at)
-                VALUES (:f, :h, :q, CAST(:l AS jsonb), :n, NOW())
+                INSERT INTO source_query_cache (fetcher, query_hash, query, links, n_records, totals, fetched_at)
+                VALUES (:f, :h, :q, CAST(:l AS jsonb), :n, CAST(:t AS jsonb), NOW())
                 ON CONFLICT (fetcher, query_hash) DO UPDATE
-                SET links = CAST(:l AS jsonb), n_records = :n, query = :q, fetched_at = NOW()
+                SET links = CAST(:l AS jsonb), n_records = :n, query = :q,
+                    totals = CAST(:t AS jsonb), fetched_at = NOW()
             """), {"f": fetcher, "h": query_hash, "q": (query or "")[:4000],
-                   "l": json.dumps([list(x) for x in links]), "n": len(links)})
+                   "l": json.dumps([list(x) for x in links]), "n": len(links),
+                   "t": json.dumps(dict(totals or {}))})
     except Exception as _e:                                  # noqa: BLE001
         logger.warning(f"_save_source_cache {fetcher}: {_e}")
 from .scenarios import _scenario_counts, _user_scenario_pipeline_jobs, _user_scenario_populate_jobs
@@ -195,6 +225,8 @@ def _run_user_scenario_populate(
     include_live: bool = True,
     lang: str | None = None,
     force_live: bool = False,
+    exhaustive: bool | None = None,
+    auto_pipeline: bool = True,
 ) -> int:
     """
     Construit le corpus d'un scénario = résultat de la REQUÊTE BOOLÉENNE sur
@@ -203,6 +235,16 @@ def _run_user_scenario_populate(
     la correspondance booléenne (_boolean_corpus_ids) - la même que la recherche.
     Plafond : LIVE_MAX_PER_SOURCE articles par source. include_live=False = base
     locale seulement. Retourne le nombre total d'articles ingérés.
+
+    `exhaustive` : None lit le mode enregistré sur le scénario. En mode exhaustif, chaque
+    base qui applique le booléen renvoie TOUT ce qu'elle apparie (jusqu'à
+    EXHAUSTIVE_MAX_PER_SOURCE, garde-fou et non échantillon), avec le budget
+    EXHAUSTIVE_FEDERATION_BUDGET ; Crossref, qui classe des mots-clés au lieu d'appliquer
+    le booléen et dont la liste complète est l'index entier, garde le plafond standard ;
+    OpenAlex est interrogée sur titre et résumé (sa recherche par défaut lit le texte
+    intégral : 43 181 notices sur la question HPAI, contre 1 648 pour PubMed) ; DOAJ reçoit
+    le booléen entier découpé en requêtes courtes, qu'elle sait paginer.
+    `auto_pipeline=False` : ne pas enchaîner le pipeline complet après la recherche.
     """
     from .relevance import _backfill_title_abstract_chunks, _run_cross_encoder_rerank, _run_semantic_rerank_inline  # lazy: relevance is loaded after this module
     import time as _time
@@ -217,6 +259,21 @@ def _run_user_scenario_populate(
 
     # Plafond par source identique pour recherche et corpus (déterminisme).
     max_results = min(max_results, LIVE_MAX_PER_SOURCE)
+    # Le mode de la recherche : celui du scénario, sauf demande explicite. En exhaustif, le
+    # plafond des bases qui appliquent le booléen devient un garde-fou ; Crossref (mots-clés)
+    # garde `max_results`.
+    if exhaustive is None:
+        exhaustive = scenario_search_mode(scenario_id) == "exhaustive"
+    _search_mode = "exhaustive" if exhaustive else "standard"
+    _cap_strategy = max(int(max_results), EXHAUSTIVE_MAX_PER_SOURCE) if exhaustive else int(max_results)
+    _fed_budget = max(POPULATE_FEDERATION_BUDGET, EXHAUSTIVE_FEDERATION_BUDGET) if exhaustive \
+        else POPULATE_FEDERATION_BUDGET
+    # Ce que la carte PRISMA doit dire de ce run, source par source : interrogée sur titre
+    # et résumé seulement, gardée dans un ordre qui n'est pas la pertinence, ou interrogée
+    # avec le booléen découpé.
+    _title_abstract_sources: set[str] = set()
+    _unranked_sources: set[str] = set()
+    _split_queries: dict[str, list[str]] = {}
 
     # Garde-temps partagé entre les boucles de pagination des sources lentes
     # (OpenAlex/Crossref/EuropePMC). Quand le budget fédération est dépassé, elles
@@ -232,6 +289,7 @@ def _run_user_scenario_populate(
             # client) : local → federation → scoring → rerank → done. `rerank_status`
             # suit le cross-encoder qui tourne en arrière-plan après l'affichage.
             "phase": "local", "rerank_status": "idle",
+            "search_mode": _search_mode,
             "sources": {
                 "db_cache": 0, "pubmed": 0, "openalex": 0, "crossref": 0,
                 "europepmc": 0, "preprint": 0, "semantic_scholar": 0, "doaj": 0,
@@ -300,11 +358,17 @@ def _run_user_scenario_populate(
     # source coupée revenait avec 0 et sans erreur, donc d'issue `empty` : « rien dans la
     # littérature » pour une source qu'on avait cessé de lire.
     _fetcher_cut: set[str] = set()
+    # Fetchers dont la réponse ne doit pas être mise en cache même complète : OpenAlex
+    # quand son filtre titre+résumé a été refusé, pour que la relance le retente.
+    _no_cache: set[str] = set()
     # Le TOTAL VRAI que chaque API annonce pour la requête (le compteur du site), quand
     # elle en annonce un. Au plafond par source, une ligne « pubmed 2 000 » se lisait comme
     # un total ; c'est un plancher, et le vrai nombre est ici. Cinq sources l'atteignaient
     # sur le scénario de contrôle de production sans que rien ne le dise.
     _source_totals: dict[str, int] = {}
+    # Les mêmes totaux, rangés par fetcher, pour être mémorisés avec ses liens dans le cache
+    # des sources et rejoués avec eux.
+    _fetcher_totals: dict[str, dict[str, int]] = {}
 
     def _note_total(source: str, total) -> None:
         try:
@@ -314,6 +378,10 @@ def _run_user_scenario_populate(
         if _t >= 0:
             with _counter_lock:
                 _source_totals[source] = max(_t, _source_totals.get(source, 0))
+                _f = getattr(_tls, "fetcher", None)
+                if _f:
+                    _ft = _fetcher_totals.setdefault(_f, {})
+                    _ft[source] = max(_t, _ft.get(source, 0))
 
     def _mark_source_error(reason: object = None):
         """Cette source a ÉCHOUÉ, et pourquoi.
@@ -482,6 +550,9 @@ def _run_user_scenario_populate(
     _fallback_q = query
     _openaire_q = query
     _fallback_queries: dict[str, str] = {}
+    # Liés ICI, hors du try, pour la même raison que `_kw_fallback` : les fetchers les lisent.
+    _doaj_parts: list[str] = []                 # DOAJ, recherche exhaustive : le booléen découpé
+    _s2_bool_q: list = [None]                   # la forme bulk de Semantic Scholar, ou None
     try:
         # Le corpus = résultat de la REQUÊTE BOOLÉENNE (générée par LLM). On
         # récupère search_strategy.general ; à défaut on la génère depuis la requête.
@@ -596,10 +667,37 @@ def _run_user_scenario_populate(
         if _bool_is_real and len(_doaj_q) > DOAJ_MAX_QUERY_CHARS:
             _doaj_q = _shorten_boolean(_portable_bool, DOAJ_MAX_QUERY_CHARS) or _plain_q
             _doaj_native = False
+        # Recherche EXHAUSTIVE : au lieu de synonymes en moins, le booléen ENTIER découpé en
+        # requêtes que DOAJ pagine. Leur union est le booléen, exclusions comprises : les
+        # notices sont donc natives, comme celles d'une requête entière.
+        if exhaustive and _bool_is_real and not _doaj_native:
+            _parts = _split_boolean(_portable_bool, DOAJ_MAX_QUERY_CHARS)
+            if _parts:
+                _doaj_parts[:] = _parts
+                _doaj_native = True
+                _split_queries["doaj"] = list(_parts)
         _kw_fallback = ([] if _send_bool else ["openalex", "doaj", "core", "clinicaltrials"]) \
             + ([] if _arxiv_native else ["arxiv"]) + ["openaire"]
         if not _doaj_native and "doaj" not in _kw_fallback:
             _kw_fallback.append("doaj")
+        if _doaj_parts and "doaj" in _kw_fallback:
+            _kw_fallback.remove("doaj")
+        # Semantic Scholar : un vrai booléen part vers l'endpoint BULK, qui ne classe pas par
+        # pertinence (ordre des identifiants). Au plafond, ce qu'on y garde est un
+        # sous-ensemble arbitraire : la carte doit le dire, que la réponse soit fraîche ou
+        # rejouée depuis le cache.
+        if _bool_is_real:
+            try:
+                _s2_bool_q[0] = _boolean_to_s2(_parse_boolean_ast(_tokenize_boolean(_portable_bool)))
+            except Exception:                            # noqa: BLE001
+                _s2_bool_q[0] = None
+        if _s2_bool_q[0]:
+            _unranked_sources.add("semantic_scholar")
+        # OpenAlex en mode exhaustif : titre et résumé seulement (filtre
+        # title_and_abstract.search, qui accepte le booléen). Sa recherche par défaut lit
+        # aussi le texte intégral, d'où 43 181 notices sur la question HPAI.
+        if exhaustive and _send_bool:
+            _title_abstract_sources.add("openalex")
         # La requête RÉELLEMENT soumise à chacune : la même pour les sources à la limite
         # d'URL, la syntaxe `all:` pour arXiv, la forme à quatre opérateurs pour OpenAIRE,
         # la forme courte pour DOAJ.
@@ -691,7 +789,9 @@ def _run_user_scenario_populate(
                 # jusqu'ici, PubMed plafonné gardait les 2 000 plus récents et perdait la
                 # littérature H5N1 de 2004 à 2012 ; même plafond, deux politiques. Décision
                 # de méthode prise par le propriétaire du projet, pas un correctif.
-                {"db": "pubmed", "term": _pubmed_q, "retmax": max(0, min(int(max_results), 10000)),
+                # eutils ne rend pas plus de 10 000 identifiants par esearch : c'est aussi
+                # le plafond de PubMed en recherche exhaustive (dit sur la carte s'il mord).
+                {"db": "pubmed", "term": _pubmed_q, "retmax": max(0, min(_cap_strategy, 10000)),
                  "sort": "relevance", "retmode": "json", "email": EMAIL},
                 timeout=30,
             )
@@ -702,7 +802,7 @@ def _run_user_scenario_populate(
             if _pipeline_callback:
                 _pipeline_callback("pubmed_found", total_found)
             _pmids = [str(p).strip() for p in (search_result.get("idlist") or []) if str(p).strip()]
-            _pmids = _pmids[:max(0, int(max_results))]
+            _pmids = _pmids[:max(0, min(_cap_strategy, 10000))]
             _pmid_set = set(_pmids)
             _known: dict[str, int] = {}
             for _ki in range(0, len(_pmids), 1000):
@@ -843,13 +943,23 @@ def _run_user_scenario_populate(
         try:
             _oa_page = 1
             _oa_fetched = 0
-            _oa_limit = min(max_results, max_results)
+            _oa_limit = _cap_strategy
+            # Recherche exhaustive : titre et résumé (filtre qui accepte le booléen, comme
+            # le paramètre `search`), et pagination par CURSEUR, la pagination par numéro
+            # de page s'arrêtant à 10 000 notices. L'ordre n'importe plus quand on prend tout.
+            _oa_scoped = "openalex" in _title_abstract_sources
+            _oa_cursor = "*" if exhaustive else None
             while _oa_fetched < _oa_limit:
                 if _budget_exhausted():
                     break  # budget fédération dépassé - on arrête de paginer
                 _oa_batch = min(200, _oa_limit - _oa_fetched)
-                oa_resp = _requests.get(
-                    "https://api.openalex.org/works",
+                if exhaustive:
+                    # Pas de virgule dans un filtre OpenAlex : elle y sépare deux filtres.
+                    _oa_params = ({"filter": "title_and_abstract.search:" + _bool_query.replace(",", " ")}
+                                  if _oa_scoped else {"search": _bool_query})
+                    _oa_params.update({"per-page": _oa_batch, "cursor": _oa_cursor,
+                                       "mailto": "literev@gesica.ch"})
+                else:
                     # sort=relevance_score:desc → quand on plafonne à max_results, on garde
                     # les 2000 LES PLUS PERTINENTS (BM25 OpenAlex) et non les plus récents.
                     # OpenAlex ordonne par pertinence par défaut sous `search` ; on l'explicite.
@@ -859,10 +969,20 @@ def _run_user_scenario_populate(
                     # construit le corpus, écrivait `per_page` : OpenAlex refuse un
                     # paramètre inconnu, et c'est un candidat direct à l'issue `error`
                     # relevée sur une recherche de contrôle en production.
-                    params={"search": _bool_query, "per-page": _oa_batch, "page": _oa_page,
-                            "sort": "relevance_score:desc", "mailto": "literev@gesica.ch"},
-                    timeout=20,
-                )
+                    _oa_params = {"search": _bool_query, "per-page": _oa_batch, "page": _oa_page,
+                                  "sort": "relevance_score:desc", "mailto": "literev@gesica.ch"}
+                oa_resp = _requests.get("https://api.openalex.org/works", params=_oa_params, timeout=20)
+                if _oa_scoped and _oa_fetched == 0 and 400 <= oa_resp.status_code < 500:
+                    # Le filtre titre+résumé refusé : la recherche par défaut plutôt que
+                    # rien, et la carte ne dit plus « titre et résumé ». Cette réponse ne se
+                    # met pas en cache : une relance doit retenter le filtre.
+                    logger.warning(f"OpenAlex populate {scenario_id}: filtre title_and_abstract.search "
+                                   f"refusé ({oa_resp.status_code}) ; recherche par défaut")
+                    _oa_scoped = False
+                    with _counter_lock:
+                        _title_abstract_sources.discard("openalex")
+                        _no_cache.add("_fetch_openalex")
+                    continue
                 oa_resp.raise_for_status()
                 _oa_json = oa_resp.json()
                 _note_total("openalex", (_oa_json.get("meta") or {}).get("count"))
@@ -903,7 +1023,11 @@ def _run_user_scenario_populate(
                     except Exception:
                         _inc("openalex", 0, 1)
                 _oa_fetched += len(_oa_results)
-                if len(_oa_results) < _oa_batch or _oa_fetched >= _oa_limit:
+                if exhaustive:
+                    _oa_cursor = (_oa_json.get("meta") or {}).get("next_cursor")
+                    if not _oa_cursor or _oa_fetched >= _oa_limit:
+                        break
+                elif len(_oa_results) < _oa_batch or _oa_fetched >= _oa_limit:
                     break
                 _oa_page += 1
                 _time.sleep(0.3)
@@ -985,7 +1109,7 @@ def _run_user_scenario_populate(
         try:
             _ep_cursor_mark = "*"
             _ep_fetched = 0
-            _ep_limit = min(max_results, max_results)
+            _ep_limit = _cap_strategy
             _ep_page_size = 1000   # max Europe PMC : moins d'allers-retours → fédération plus rapide
             while _ep_fetched < _ep_limit:
                 if _budget_exhausted():
@@ -1060,7 +1184,7 @@ def _run_user_scenario_populate(
             _pp_cursor = "*"
             _pp_fetched = 0
             _pp_query = f"({_epmc_q}) AND (SRC:PPR)"
-            while _pp_fetched < max_results:
+            while _pp_fetched < _cap_strategy:
                 if _budget_exhausted():
                     break  # budget fédération dépassé
                 _pp_resp = _requests.get(
@@ -1150,16 +1274,13 @@ def _run_user_scenario_populate(
         _fields = "title,abstract,year,externalIds,url"
         # Vrai booléen → endpoint BULK (opérateurs AND/OR + jusqu'à 10M via token) +
         # source-union. Sinon → endpoint classique (relevance, offset≤1000) + mots-clés.
-        _s2_bool = None
-        if _bool_is_real:
-            try:
-                _s2_bool = _boolean_to_s2(_parse_boolean_ast(_tokenize_boolean(_portable_bool)))
-            except Exception:
-                _s2_bool = None
+        # L'endpoint bulk rend les notices dans l'ordre des identifiants, PAS par pertinence
+        # (calculé avec les autres requêtes, plus haut, pour que la carte le dise).
+        _s2_bool = _s2_bool_q[0]
         try:
             if _s2_bool:
                 _tok, _fetched, _429 = None, 0, 0
-                while _fetched < max_results:
+                while _fetched < _cap_strategy:
                     if _budget_exhausted():
                         break
                     _p = {"query": _s2_bool, "fields": _fields}
@@ -1217,36 +1338,46 @@ def _run_user_scenario_populate(
         count = 0
         try:
             import urllib.parse as _ulib
-            _page, _fetched = 1, 0
-            while _fetched < max_results:
-                if _budget_exhausted():
-                    break
-                _r = _requests.get(
-                    f"https://doaj.org/api/search/articles/{_ulib.quote(_doaj_q, safe='')}",
-                    params={"pageSize": 100, "page": _page}, timeout=20,
-                )
-                # DOAJ sert la première page d'un booléen long et répond 502 à toutes les
-                # suivantes, quelle que soit la taille de page (reproduit depuis le serveur
-                # de production sur HPAI_last ; une requête courte pagine normalement). La
-                # raison servie à la carte dit la page et ce qui a été gardé, au lieu d'une
-                # URL de 1 300 caractères coupée avant le numéro de page.
-                if _r.status_code >= 500 and _page > 1:
-                    raise RuntimeError(
-                        f"DOAJ : {_r.status_code} à la page {_page} ({_fetched} notices de la "
-                        f"première page gardées) ; l'API ne pagine pas plus loin sur une requête "
-                        f"de cette longueur")
-                _r.raise_for_status()
-                _payload = _r.json()
-                _n = len(_payload.get("results") or [])
-                if _n == 0:
-                    break
-                _note_total("doaj", _payload.get("total"))
-                count += _ingest_parsed("doaj", _parse_doaj(_payload), boolean_native=_doaj_native)
-                _fetched += _n
-                if _n < 100:
-                    break
-                _page += 1
-                _time.sleep(0.3)
+            # Une requête, ou le booléen découpé (recherche exhaustive) : une notice rendue
+            # par deux morceaux n'est comptée qu'une fois, sinon elle gonflerait le compte de
+            # DOAJ et les doublons du PRISMA d'une notice que la base n'a rendue qu'une fois.
+            _seen: set = set()
+            for _dq in (_doaj_parts or [_doaj_q]):
+                _page, _fetched = 1, 0
+                while _fetched < _cap_strategy:
+                    if _budget_exhausted():
+                        break
+                    _r = _requests.get(
+                        f"https://doaj.org/api/search/articles/{_ulib.quote(_dq, safe='')}",
+                        params={"pageSize": 100, "page": _page}, timeout=20,
+                    )
+                    # DOAJ sert la première page d'un booléen long et répond 502 à toutes les
+                    # suivantes, quelle que soit la taille de page (reproduit depuis le serveur
+                    # de production sur HPAI_last ; une requête courte pagine normalement). La
+                    # raison servie à la carte dit la page et ce qui a été gardé, au lieu d'une
+                    # URL de 1 300 caractères coupée avant le numéro de page.
+                    if _r.status_code >= 500 and _page > 1:
+                        raise RuntimeError(
+                            f"DOAJ : {_r.status_code} à la page {_page} ({_fetched} notices de la "
+                            f"première page gardées) ; l'API ne pagine pas plus loin sur une requête "
+                            f"de cette longueur")
+                    _r.raise_for_status()
+                    _payload = _r.json()
+                    _n = len(_payload.get("results") or [])
+                    if _n == 0:
+                        break
+                    # Le total d'UNE requête ; celui d'un booléen découpé n'est pas la somme
+                    # des morceaux (ils se recoupent), il n'est donc pas annoncé.
+                    if not _doaj_parts:
+                        _note_total("doaj", _payload.get("total"))
+                    _docs = [d for d in _parse_doaj(_payload) if d.get("external_id") not in _seen]
+                    _seen.update(d.get("external_id") for d in _docs)
+                    count += _ingest_parsed("doaj", _docs, boolean_native=_doaj_native)
+                    _fetched += _n
+                    if _n < 100:
+                        break
+                    _page += 1
+                    _time.sleep(0.3)
         except Exception as _e:
             logger.warning(f"DOAJ populate {scenario_id}: {_e}")
             _mark_source_error(_e)
@@ -1256,7 +1387,7 @@ def _run_user_scenario_populate(
         count = 0
         try:
             _ct_token, _ct_fetched = None, 0
-            while _ct_fetched < max_results:
+            while _ct_fetched < _cap_strategy:
                 if _budget_exhausted():
                     break
                 # `countTotal` : le total annoncé, pour que « clinicaltrials 2 000 » au
@@ -1294,10 +1425,10 @@ def _run_user_scenario_populate(
         count = 0
         try:
             _core_offset, _core_fetched, _429 = 0, 0, 0
-            while _core_fetched < max_results:
+            while _core_fetched < _cap_strategy:
                 if _budget_exhausted():
                     break
-                _bulk = min(100, max_results - _core_fetched)
+                _bulk = min(100, _cap_strategy - _core_fetched)
                 _r = _requests.post(
                     "https://api.core.ac.uk/v3/search/works",
                     headers={"Authorization": f"Bearer {_core_key}"},
@@ -1330,10 +1461,10 @@ def _run_user_scenario_populate(
         count = 0
         try:
             _ax_start = 0
-            while _ax_start < max_results:
+            while _ax_start < _cap_strategy:
                 if _budget_exhausted():
                     break
-                _bulk = min(100, max_results - _ax_start)
+                _bulk = min(100, _cap_strategy - _ax_start)
                 _r = _requests.get(
                     "http://export.arxiv.org/api/query",
                     params={"search_query": _arxiv_q, "start": _ax_start, "max_results": _bulk},
@@ -1365,7 +1496,7 @@ def _run_user_scenario_populate(
         _oa_q, _oa_native = _openaire_q, False
         try:
             _cursor, _fetched = "*", 0
-            while _fetched < max_results:
+            while _fetched < _cap_strategy:
                 if _budget_exhausted():
                     break
                 _r = _requests.get(
@@ -1449,12 +1580,12 @@ def _run_user_scenario_populate(
     # incluait les échecs.
     _returned: dict[str, int] = {}
     _fetcher_outcome: dict[str, str] = {}
-    _qhash = _source_query_hash(query, filters, max_results)
+    _qhash = _source_query_hash(query, filters, max_results, mode=_search_mode)
     if include_live:
         _set_phase("federation")
         # Garde-temps : passé ce délai, les boucles de pagination des sources lentes
         # s'arrêtent (cf. _fed_deadline) et on poursuit avec le corpus partiel.
-        _fed_deadline[0] = t_start + POPULATE_FEDERATION_BUDGET
+        _fed_deadline[0] = t_start + _fed_budget
         # Cache des sources : les fetchers dont la réponse à CETTE requête est encore
         # fraîche (SOURCE_CACHE_TTL_S) sont rejoués depuis la base, sans appel réseau,
         # avec les mêmes compteurs ; les autres partent normalement.
@@ -1462,6 +1593,10 @@ def _run_user_scenario_populate(
         for _fname, _entry in _cached.items():
             for _cd, _cs, _cn in _entry["links"]:
                 _link_to_scenario(_cd, boolean_native=_cn, source=_cs)
+            # Le total annoncé par la source rejoue avec ses liens : la carte peut encore
+            # dire qu'elle a été plafonnée.
+            for _src, _tot in (_entry.get("totals") or {}).items():
+                _note_total(_src, _tot)
             if _pipeline_callback is None:
                 with _counter_lock:
                     _job = _user_scenario_populate_jobs.get(scenario_id)
@@ -1480,7 +1615,7 @@ def _run_user_scenario_populate(
             futures = {executor.submit(_run_fetcher, fn): fn.__name__ for fn in _to_run}
             try:
                 # Budget global : ne pas attendre indéfiniment une source lente.
-                for future in as_completed(futures, timeout=POPULATE_FEDERATION_BUDGET):
+                for future in as_completed(futures, timeout=_fed_budget):
                     _fname = futures[future]
                     try:
                         src_name, src_count = future.result()
@@ -1508,7 +1643,7 @@ def _run_user_scenario_populate(
                 _fed_incomplete[0] = True   # fetch partiel → corpus non autorisé à rétrécir
                 _done = sum(1 for _f in futures if _f.done())
                 logger.warning(
-                    f"Populate {scenario_id}: budget fédération {POPULATE_FEDERATION_BUDGET:.0f}s dépassé - "
+                    f"Populate {scenario_id}: budget fédération {_fed_budget:.0f}s dépassé - "
                     f"{_done}/{len(futures)} sources terminées ; poursuite avec le corpus partiel "
                     f"(les sources lentes continuent en arrière-plan)."
                 )
@@ -1518,9 +1653,12 @@ def _run_user_scenario_populate(
             # prochain tour de pagination grâce à _fed_deadline.
             executor.shutdown(wait=False, cancel_futures=True)
         for _fname in _completed_ok:
+            if _fname in _no_cache:
+                continue
             with _counter_lock:
                 _links_now = list(_run_links.get(_fname, []))
-            _save_source_cache(_fname, _qhash, query, _links_now)
+                _totals_now = dict(_fetcher_totals.get(_fname) or {})
+            _save_source_cache(_fname, _qhash, query, _links_now, totals=_totals_now)
         # ── L'issue de CHAQUE source, nommée ─────────────────────────────────
         # `_queried` ne distinguait pas « a répondu » de « a échoué » : un fetcher qui
         # lève est tout de même passé par la boucle, donc la ligne de couverture
@@ -1714,11 +1852,20 @@ def _run_user_scenario_populate(
                 # le tableau d'identification taisait les sources en échec ou coupées et
                 # annonçait quand même un nombre de sources interrogées.
                 source_outcomes=(dict(_fetcher_outcome) if include_live else {}),
-                per_source_cap=int(max_results),
+                per_source_cap=int(_cap_strategy),
                 keyword_fallback_sources=(list(_kw_fallback) if include_live else []),
                 keyword_fallback_queries=(dict(_fallback_queries) if include_live else {}),
                 source_error_reasons=(dict(_fetcher_errors) if include_live else {}),
-                source_totals=(_totals_snapshot if include_live else {}))
+                source_totals=(_totals_snapshot if include_live else {}),
+                # Le mode, et le plafond de chaque source quand il diffère : en exhaustif,
+                # Crossref garde le plafond standard, et PubMed ne rend pas plus de 10 000
+                # identifiants par recherche.
+                search_mode=_search_mode,
+                source_caps=({"crossref": int(max_results), "pubmed": min(int(_cap_strategy), 10000)}
+                             if exhaustive and include_live else {}),
+                title_abstract_sources=(sorted(_title_abstract_sources) if include_live else []),
+                unranked_sources=(sorted(_unranked_sources) if include_live else []),
+                split_queries=(dict(_split_queries) if include_live else {}))
             _store_prisma_identification(scenario_id, _figures)
             # Le même total pour tout le monde : le statut du job expose le corpus
             # RETENU (= article_count = « passés au screening » du PRISMA), et non le
@@ -1809,6 +1956,7 @@ def _run_user_scenario_populate(
                 # (classement et seuil sans signification), sans un mot nulle part.
                 "status": "done" if _auto_ok[0] else "unranked",
                 "phase": "done",
+                "search_mode": _search_mode,
                 **({} if _auto_ok[0] else {
                     # PAS une erreur de recherche : le corpus est construit et lisible,
                     # c'est son CLASSEMENT qui manque. L'interface l'affiche donc avec un
@@ -1889,8 +2037,10 @@ def _run_user_scenario_populate(
                 # Enrichissement COMPLET automatique (embeddings, PICO, métadonnées, résumés,
                 # brief, variables et modèle, actions, carte des concepts) dès que le corpus
                 # est construit et scoré : un scénario est prêt sans qu'on ait à l'épingler.
-                # AUTO_PIPELINE_AFTER_SEARCH=0 pour s'en tenir à la recherche seule.
-                if _auto_ok[0] and _auto_pipeline_after_search():
+                # AUTO_PIPELINE_AFTER_SEARCH=0 pour s'en tenir à la recherche seule ;
+                # `auto_pipeline=False` pour cette recherche-ci (une recherche exhaustive
+                # dont on enrichit soi-même le sous-ensemble pertinent, par exemple).
+                if _auto_ok[0] and _auto_pipeline_after_search() and auto_pipeline:
                     try:
                         from .scenarios import _launch_full_pipeline
                         _st = _launch_full_pipeline(_sid, lang=lang)

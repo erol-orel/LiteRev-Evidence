@@ -4499,13 +4499,42 @@ function PrismaSection({ scenarioId }: { scenarioId: string }) {
               étaient au plafond sur le scénario de contrôle de production, sans un mot. */}
           {(ident.sources_capped?.length ?? 0) > 0 && (
             <p className="text-[10px] text-amber-300/80 pt-1 leading-relaxed">
-              {t("scenarioDetail.prisma.cappedNote")
+              {t(ident.search_mode === "exhaustive"
+                  ? "scenarioDetail.prisma.cappedNoteExhaustive"
+                  : "scenarioDetail.prisma.cappedNote")
                 .replace("{sources}", (ident.sources_capped ?? [])
                   .map((s) => `${SOURCE_LABELS_MAP[s] ?? s} (${num(counts[s]).toLocaleString()} / ${num(ident.source_totals?.[s]).toLocaleString()})`)
                   .join(", "))
                 .replace("{cap}", (ident.per_source_cap ?? 0).toLocaleString())}
             </p>
           )}
+          {/* Une source dont l'ordre n'est pas la pertinence (Semantic Scholar, endpoint
+              bulk) : plafonnée, elle garde un sous-ensemble ARBITRAIRE, pas ses notices les
+              plus pertinentes. La note sur le plafond disait le contraire pour toutes. */}
+          {(ident.unranked_sources ?? []).some((s) => ident.sources_capped?.includes(s)) && (
+            <p className="text-[10px] text-amber-300/80 pt-1 leading-relaxed">
+              {t("scenarioDetail.prisma.unrankedNote")
+                .replace("{sources}", (ident.unranked_sources ?? [])
+                  .filter((s) => ident.sources_capped?.includes(s))
+                  .map((s) => SOURCE_LABELS_MAP[s] ?? s).join(", "))}
+            </p>
+          )}
+          {/* Les champs interrogés (PRISMA-S) quand ils ne sont pas ceux par défaut, et les
+              sources qui ont reçu le booléen entier en plusieurs requêtes. */}
+          {(ident.title_abstract_sources?.length ?? 0) > 0 && (
+            <p className="text-[10px] text-emerald-300/60 pt-1 leading-relaxed">
+              {t("scenarioDetail.prisma.titleAbstractNote")
+                .replace("{sources}", (ident.title_abstract_sources ?? [])
+                  .map((s) => SOURCE_LABELS_MAP[s] ?? s).join(", "))}
+            </p>
+          )}
+          {Object.entries(ident.split_queries ?? {}).map(([src, parts]) => (
+            <p key={src} className="text-[10px] text-emerald-300/60 pt-1 leading-relaxed">
+              {t("scenarioDetail.prisma.splitNote")
+                .replace("{source}", SOURCE_LABELS_MAP[src] ?? src)
+                .replace("{n}", String(parts.length))}
+            </p>
+          ))}
           {fallbackGroups.map(([q, srcs]) => (
             <p key={q} className="text-[10px] text-amber-300/80 pt-1 leading-relaxed break-words">
               {t("scenarioDetail.prisma.keywordFallback")
@@ -4515,7 +4544,11 @@ function PrismaSection({ scenarioId }: { scenarioId: string }) {
           ))}
           {ident.per_source_cap != null && (
             <div className="text-center text-[9px] text-emerald-300/40">
-              {t("scenarioDetail.prisma.perSourceCap").replace("{cap}", ident.per_source_cap.toLocaleString())}
+              {ident.search_mode === "exhaustive"
+                ? t("scenarioDetail.prisma.exhaustiveCap")
+                    .replace("{cap}", ident.per_source_cap.toLocaleString())
+                    .replace("{crossrefCap}", (ident.source_caps?.crossref ?? ident.per_source_cap).toLocaleString())
+                : t("scenarioDetail.prisma.perSourceCap").replace("{cap}", ident.per_source_cap.toLocaleString())}
             </div>
           )}
           {/* La date de la recherche (PRISMA-S, item 9) : elle était stockée avec les

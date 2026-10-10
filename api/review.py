@@ -366,6 +366,18 @@ def get_user_scenario_prisma(
                                   if isinstance(v, (int, float)) and not isinstance(v, bool)},
                 "sources_capped": list(_figures.get("sources_capped") or []),
             })
+        # Le mode de la recherche et ce qu'il a changé, source par source, quand la
+        # recherche l'a enregistré (absents des recherches antérieures : rien n'est servi).
+        if _figures.get("search_mode") is not None:
+            _identification.update({
+                "search_mode": str(_figures.get("search_mode") or "standard"),
+                "source_caps": {str(k): int(v) for k, v in (_figures.get("source_caps") or {}).items()
+                                if isinstance(v, (int, float)) and not isinstance(v, bool)},
+                "title_abstract_sources": list(_figures.get("title_abstract_sources") or []),
+                "unranked_sources": list(_figures.get("unranked_sources") or []),
+                "split_queries": {str(k): [str(q) for q in (v or [])]
+                                  for k, v in (_figures.get("split_queries") or {}).items() if v},
+            })
         # La séparation « bases interrogées / bibliothèque locale » : prise telle quelle
         # si elle est stockée, sinon DÉDUITE de la ligne `db_cache` que les anciennes
         # recherches portent déjà, au lieu d'afficher deux zéros à côté d'un tableau qui

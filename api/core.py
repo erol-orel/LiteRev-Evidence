@@ -359,6 +359,15 @@ try:
 except (TypeError, ValueError):
     POPULATE_FEDERATION_BUDGET = 180.0
 
+# Le budget d'une recherche EXHAUSTIVE : chaque base renvoie tout ce qu'elle apparie,
+# soit des dizaines de pages là où le mode standard en lit deux. 180 s couperaient Europe
+# PMC à mi-chemin (13 810 notices sur la question HPAI) ; 45 minutes laissent finir une
+# question de revue, et bornent encore une source réellement bloquée.
+try:
+    EXHAUSTIVE_FEDERATION_BUDGET = float(os.getenv("EXHAUSTIVE_FEDERATION_BUDGET", "2700"))
+except (TypeError, ValueError):
+    EXHAUSTIVE_FEDERATION_BUDGET = 2700.0
+
 
 # ─── Disjoncteur OpenAI (quota épuisé) ───────────────────────────────────────
 # Quand le compte OpenAI est à court de quota, l'API renvoie 429
