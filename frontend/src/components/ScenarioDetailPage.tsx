@@ -7246,7 +7246,7 @@ ${llm.future_research ? `<h3>${t("scenarioDetail.evidences.pdf.futureResearch")}
             <button type="button"
               onClick={async () => {
                 setReportError(null);
-                try { await downloadEvidenceReport(scenarioId); }
+                try { await downloadEvidenceReport(scenarioId, lang); }
                 catch (e: any) { setReportError(e?.message || t("common.unknownError")); }
               }}
               className="flex items-center gap-2 rounded-2xl border border-brand-500/30 bg-brand-500/10 hover:bg-brand-500/20 text-brand-300 font-semibold px-4 py-2 text-xs transition"
@@ -7473,7 +7473,7 @@ ${llm.future_research ? `<h3>${t("scenarioDetail.evidences.pdf.futureResearch")}
             <div className="flex flex-wrap gap-2">
               {llmData.evidence_level && (
                 <span className={`rounded-xl px-3 py-1 text-xs font-semibold border ${
-                  llmData.evidence_level.toLowerCase().includes('fort') ? 'bg-brand-500/15 border-brand-500/30 text-brand-300' :
+                  /fort|strong|high|élev/.test(llmData.evidence_level.toLowerCase()) ? 'bg-brand-500/15 border-brand-500/30 text-brand-300' :
                   llmData.evidence_level.toLowerCase().includes('mod') ? 'bg-gold-500/15 border-gold-500/30 text-gold-300' :
                   'bg-white/5 border-white/10 text-white/50'
                 }`}>{t("scenarioDetail.evidences.levelPrefix")} {llmData.evidence_level}</span>
