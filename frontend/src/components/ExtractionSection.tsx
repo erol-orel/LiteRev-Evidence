@@ -497,6 +497,11 @@ export function ExtractionSection({ scenarioId }: { scenarioId: string }) {
           </div>
         )}
         {shown.length === 0 && <div className="text-center py-8 text-xs text-white/35">{T("noMatch")}</div>}
+        {list?.truncated && (
+          <div className="text-center pb-3 text-[10px] text-gold-300">
+            {T("listTruncated").replace("{n}", String(list.articles.length)).replace("{total}", String(list.total))}
+          </div>
+        )}
       </div>
     </div>
   );

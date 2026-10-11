@@ -30,6 +30,8 @@ export const en: Translations = {
     loadingEllipsis: "Loading…",
     recommendedActions: "Recommended actions",
     generatingRecommendedActions: "Generating recommended actions from the evidence…",
+    recommendedActionsStillRunning:
+      "The recommended actions were still being generated when this page lost contact with the server: reload it in a moment to see them.",
     unknownError: "Unknown error",
   },
   errors: {
@@ -63,6 +65,16 @@ export const en: Translations = {
     unknownError: "Unknown error.",
     retry: "Retry",
     appLabel: "the application",
+  },
+  lists: {
+    more: "+{n} more",
+    showLess: "Show less",
+    showAll: "Show all ({n})",
+    loadMore: "Load {n} more",
+  },
+  jobs: {
+    lostContact:
+      "Contact with the server was lost after several attempts. The work is probably still running there: reload this page in a moment to see where it stands.",
   },
   terrain: {
     loadError: "Failed to load field data.",
@@ -285,14 +297,9 @@ export const en: Translations = {
     filters: "Filters",
     resetFiltersTooltip: "Reset filters",
     reset: "Reset",
-    all: "All",
-    searchDiseasePlaceholder: "Search for a disease...",
     years: "Years",
-    filterSourceType: "Source type",
-    filterDiseaseOrCondition: "Disease / condition",
-    filterScenarioType: "Scenario type",
-    filterGeographicScope: "Geographic scope",
-    filterEvidenceCategory: "Evidence category",
+    yearsHint:
+      "Applied to the search, live sources included. A bound also leaves out the articles without a year.",
     explainerPart1: "Write your research topic in natural language",
     explainerExample1: "(“ambulance demand forecasting”)",
     explainerPart2: "or as a Boolean query",
@@ -341,11 +348,23 @@ export const en: Translations = {
     launchPrompt: "Run a search to display results.",
     document: "document",
     documents: "documents",
-    relevant: "relevant",
-    relevantPlural: "relevant",
     page: "page",
     onePage: "1 page",
-    topShown: "list shows the {n} most relevant; all {total} are saved in the scenario and every analysis uses all of them",
+    topShown: "the list shows the first {n} of the {total}, in the chosen order; all of them are saved in the scenario",
+    relevantCount:
+      "{n} relevant (above the threshold or included by hand): these are what the analyses read",
+    stillRunning:
+      "This page lost contact with the server while the corpus was being built; the build is probably still running there. The articles found so far are shown; the final count will appear in the scenario (activity indicator at the top of the page).",
+    buildNotFollowed:
+      "The server no longer reports this build (it may have restarted): the articles found so far are shown. Open the scenario to see where it stands, or run the search again.",
+    rerankRunning: "The ranking is still being refined on the server (rerank): the order shown is provisional.",
+    rerankReady: "The refined ranking is ready.",
+    reloadList: "Reload the list",
+    exportTitle:
+      "Export the relevant articles or the whole corpus, in full: not only the list shown",
+    exportPlaceholder: "Export…",
+    exportRelevantGroup: "Relevant articles ({n})",
+    exportCorpusGroup: "Whole corpus ({n})",
     refreshingResults: "Updating results…",
     localBase: "Local database",
     liveApi: "Live API",
@@ -458,6 +477,10 @@ export const en: Translations = {
       searching: "Searching...",
       searchAllSources: "Search all sources",
       liveResultsSuffix: "results (live APIs)",
+      livePerSource: "at most {n} per source",
+      livePerSourceHint:
+        "A preview: each source returns only its first results here. The scenario's corpus is built by the search, without this cap.",
+      fetchedOf: "{n} of {total}",
       newUnindexed: "new unindexed",
       ingestingInProgress: " (ingestion in progress...)",
       corpusTooltip:
@@ -720,7 +743,8 @@ export const en: Translations = {
         "Computing in the background (UMAP + HDBSCAN)... Auto-refresh every 5s",
       startingText: "Starting analysis (Embeddings → UMAP 2D → HDBSCAN)...",
       interrupted: "The computation was interrupted (API restart). Start it again.",
-      pollTimedOut: "The computation did not finish in the expected time. Start it again.",
+      pollTimedOut:
+        "Contact with the server was lost during the computation. It is probably still running there: reopen this tab in a moment rather than starting it again.",
       errorClustering: "Error during clustering",
       umapProjection: "UMAP 2D projection",
       umapCaption:
@@ -740,6 +764,7 @@ export const en: Translations = {
     rag: {
       historyTitle: "Questions asked",
       historySubtitle: "Every answer is kept with the scope it was obtained on, its date and its sources.",
+      historyShownOf: "{shown} of {total} questions shown",
       historyArticles: "articles",
       historyRepeat: "re-asked",
       historyRepeatHint: "This question has been asked before: compare the answers to see what the literature changed.",
@@ -861,6 +886,7 @@ export const en: Translations = {
       vetoed: "Vetoed (above threshold, manually excluded)",
       screeningComplete: "Screening complete",
       exclusionReasons: "Why they were excluded",
+      otherReasons: "Other reasons ({n})",
       yes: "Yes",
       inProgress: "In progress",
       stage4: "Stage 4: Evidence Synthesis",
@@ -898,8 +924,11 @@ export const en: Translations = {
       colIntervention: "I: Intervention",
       colComparator: "C: Comparator",
       colOutcome: "O: Outcome",
-      showingFirstPart1: "Showing the first 100 results of",
-      showingFirstPart2: "Use search to filter.",
+      showingFirst: "First {n} of {total}, in the chosen order.",
+      expandRow: "Click to expand the row",
+      collapseRow: "Click to collapse the row",
+      truncated:
+        "The table holds the first {n} articles of {total}: loading stops at this limit, and both the sort and the CSV cover only those.",
       noArticleMatch: "No article matches the filters.",
       csvTitle: "Title",
       csvYear: "Year",
@@ -940,7 +969,10 @@ export const en: Translations = {
       includeType: "Put {type} back in the graph",
       removeConcept: "Remove",
       exportConcept: "Export every article of this concept (no display cap)",
-      exportVisible: "Export the articles of the map as composed ({n} concepts visible)",
+      exportVisible: "Export the articles of the map as composed: {n} concepts of the full index, not only the ones drawn",
+      drawnPerType: "At most {max} concepts are drawn per type: {list}.",
+      drawnOf: "{type} {shown} of {total}",
+      serverCap: "The map draws the {nodes} most cited concepts (cap {max}, at least {min} articles each) of the {total} found in the relevant articles. The export and the corpus narrowing read all of them, filtered by your choices only.",
       removedConcepts: "{n} concept(s) removed",
       resetFilters: "Show everything again",
       filtered: "filtered from {total} concepts",
@@ -1019,6 +1051,8 @@ export const en: Translations = {
       strataAuditEmpty: "No article of the sample has been judged by both reviewers yet.",
       voteInclude: "Include",
       voteExclude: "Exclude",
+      collapseAbstract: "Collapse the abstract",
+      expandAbstract: "Show the whole abstract",
       includeArbitration: "Include (arbitration)",
       excludeArbitration: "Exclude (arbitration)",
     },
@@ -1069,8 +1103,9 @@ export const en: Translations = {
       metadataLabel: "Metadata Enrichment",
       metadataDesc:
         "Fills in study type, sample size, country and risk of bias via LLM.",
-      fulltextLabel: "Full-Text Retrieval",
-      fulltextDesc: "Searches for open-access full text via Unpaywall (DOI required).",
+      fulltextLabel: "Open-access links",
+      fulltextDesc:
+        "Searches Unpaywall (DOI required) for a link to the open-access version of each article. It downloads no text: the pipeline's full-text step reads these links.",
       title: "LLM Enrichment",
       subtitle: "Run automatic enrichments across the whole corpus",
       subtitleScenario: "Run the enrichments on this scenario",
@@ -1088,11 +1123,15 @@ export const en: Translations = {
       autoEnrichmentBody:
         ": The pipeline automatically runs PICO extraction and metadata enrichment when articles are ingested. Use the buttons below only to complete articles that may have been missed or to re-run a specific enrichment.",
       batchSizeLabel: "Batch size:",
-      articlesPerRun: "articles per run",
+      batchSizeAll: "all",
+      articlesPerRun: "articles per run (empty: every pending article)",
       coverage: "Coverage",
       running: "In progress...",
-      launchPrefix: "Run (",
-      launchSuffix: "articles)",
+      launch: "Run ({n} articles)",
+      launchLinks: "Run ({n} articles, at most {cap} per run)",
+      progress: "On the server: {done} of {total} processed",
+      resultExtracted: "{n} articles enriched, {skipped} skipped, {errors} errors.",
+      resultLinks: "{n} open-access links found, {na} not available, {errors} errors.",
     },
     seuil: {
       saveFailed: "The threshold was not saved: try again (API key or network).",
@@ -1190,6 +1229,7 @@ export const en: Translations = {
       max: "Max:",
       studyTypes: "Study types",
       other: "Other",
+      otherNotSelectable: "The articles the design classification puts in none of the rows above. It is not a study design: the corpus cannot be narrowed to this remainder.",
       sources: "Sources",
       evidenceLevels: "Evidence levels",
       narrativeBriefLlm: "LLM narrative brief",
@@ -1408,6 +1448,8 @@ export const en: Translations = {
       quotesCheck: "{n} to check",
       showingFirst: "Showing the first {n} of {total}.",
       showMore: "Show more",
+      listTruncated:
+        "The list holds the first {n} articles of {total}: loading stops at this limit, and this table's filters and counts cover only those.",
       noMatch: "No article matches.",
       detailLoading: "Loading the observations...",
       detailError: "The observations could not be loaded.",
@@ -1457,6 +1499,7 @@ export const en: Translations = {
         papers: "{n} papers",
         truncated: "{shown} of {total} labels shown here: the CSV download carries every one",
         tooFew: "Labels with fewer than {min} studies ({n}): shown without a pooled value",
+        tooFewShown: "{shown} of {total} listed.",
         rowsUsed: "{n} rows were pooled.",
         duplicates: "{n} repeated rows of one paper were counted once.",
         leftOut: "Left out:",
@@ -1560,6 +1603,7 @@ export const en: Translations = {
         colArticles: "Articles",
         colMapTo: "Map to",
         mapPlaceholder: "Choose...",
+        shownOf: "{shown} of {total} labels shown, most frequent first.",
         map: "Map",
       },
     },
@@ -1584,6 +1628,7 @@ export const en: Translations = {
       emptyTitle: "No situation reports yet",
       empty: "Nothing has been ingested for this scenario. Once ReliefWeb is configured, reports matching the scenario's pathogens and countries appear here - separately from the scientific corpus.",
       count: "reports",
+      shownOf: "{shown} of {total} reports",
     },
     seirTab: {
       loadFailed: "Could not load the SEIR model",
@@ -1671,6 +1716,7 @@ export const en: Translations = {
     },
     model: {
       loadingTrained: "Loading the trained model...",
+      jobFailed: "The computation failed on the server: the model shown is the previous one.",
       liveStatus: "Live Status (trained model)",
       dashboard: {
         title: "Model dashboard",

@@ -20,7 +20,7 @@ from sqlalchemy import text
 from .core import app, engine, logger
 from .scenario_store import (_get_scenario_rerank_threshold, _get_scenario_threshold,
                              _get_user_scenario_or_404, relevance_order_sql,
-                             screening_status_sql, threshold_provenance)
+                             relevant_gate_sql, screening_status_sql, threshold_provenance)
 from .relevance import _get_above_threshold_articles
 
 EXPORT_FORMATS = ("csv", "xlsx", "ris", "bibtex", "json", "md")
@@ -34,11 +34,14 @@ _CONTENT_TYPES = {
 }
 _EXTENSIONS = {"csv": "csv", "xlsx": "xlsx", "ris": "ris", "bibtex": "bib", "json": "json", "md": "md"}
 
-# One row per article, the same columns in every tabular format.
+# One row per article, the same columns in every tabular format. `rerank_score` sits
+# next to the cosine: the rows are ORDERED by it first (relevance_order_sql), and a file
+# that sorts on a score it does not carry cannot be checked against the screen.
 EXPORT_COLUMNS = (
     "rank", "id", "title", "authors", "year", "journal", "doi", "pmid", "url", "source",
-    "study_design", "similarity_score", "quality_score", "citation_count", "screening_status",
-    "keywords", "pico_population", "pico_intervention", "pico_comparator", "pico_outcome", "abstract",
+    "study_design", "similarity_score", "rerank_score", "quality_score", "citation_count",
+    "screening_status", "keywords", "pico_population", "pico_intervention", "pico_comparator",
+    "pico_outcome", "abstract",
 )
 
 
@@ -107,6 +110,9 @@ def export_rows(articles: list[dict], include_abstract: bool = True) -> list[dic
             "study_design": (a.get("study_design") or _pico(a, "study_design") or "").strip(),
             "similarity_score": (round(float(a["similarity_score"]), 4)
                                  if a.get("similarity_score") is not None else None),
+            "rerank_score": (round(float(a["rerank_score"]), 4)
+                             if a.get("rerank_score") is not None else None),
+            "language": (a.get("language") or "").strip(),
             "quality_score": (round(float(a["quality_score"]), 3)
                               if a.get("quality_score") is not None else None),
             "citation_count": a.get("citation_count"),
@@ -212,13 +218,17 @@ def to_ris(rows: list[dict]) -> str:
             lines.append(f"UR  - {_ris_value(r['url'])}")
         if r.get("language"):
             lines.append(f"LA  - {_ris_value(r['language'])}")
-        for kw in [k.strip() for k in (r.get("keywords") or "").split(";") if k.strip()][:20]:
+        # TOUS les mots-clés : le CSV, l'XLSX et le BibTeX les gardaient tous, le RIS
+        # s'arrêtait au vingtième sans le dire.
+        for kw in [k.strip() for k in (r.get("keywords") or "").split(";") if k.strip()]:
             lines.append(f"KW  - {_ris_value(kw)}")
         if r.get("abstract"):
             lines.append(f"AB  - {_ris_value(r['abstract'])}")
         notes = []
-        if r.get("similarity_score") is not None:
-            notes.append(f"relevance {r['similarity_score']}")
+        # Le cosinus est une similarité, pas « la pertinence » : l'ordre du fichier est
+        # celui du reclassement quand il existe, qui part avec lui.
+        if _score_note(r):
+            notes.append(_score_note(r))
         if r.get("study_design"):
             notes.append(f"design {_ris_value(r['study_design'])}")
         if notes:
@@ -239,6 +249,16 @@ def _bib_key(r: dict) -> str:
     return f"{first.lower()}{r.get('year') or 'nd'}_{r.get('id')}"
 
 
+def _score_note(r: dict) -> str:
+    """Les deux scores, chacun sous son nom : « relevance » désignait le cosinus."""
+    bits = []
+    if r.get("similarity_score") is not None:
+        bits.append(f"cosine similarity {r['similarity_score']}")
+    if r.get("rerank_score") is not None:
+        bits.append(f"rerank score {r['rerank_score']}")
+    return ", ".join(bits)
+
+
 def to_bibtex(rows: list[dict]) -> str:
     out = []
     for r in rows:
@@ -246,7 +266,8 @@ def to_bibtex(rows: list[dict]) -> str:
                   ("year", str(r.get("year") or "")), ("journal", r.get("journal") or ""),
                   ("doi", r.get("doi") or ""), ("url", r.get("url") or ""),
                   ("keywords", r.get("keywords") or ""), ("abstract", r.get("abstract") or ""),
-                  ("note", f"LiteRev relevance {r['similarity_score']}" if r.get("similarity_score") is not None else "")]
+                  ("language", r.get("language") or ""),
+                  ("note", f"LiteRev {_score_note(r)}" if _score_note(r) else "")]
         body = ",\n".join(f"  {k} = {{{_bib_escape(v)}}}" for k, v in fields if v)
         out.append(f"@article{{{_bib_key(r)},\n{body}\n}}")
     return "\n\n".join(out) + ("\n" if out else "")
@@ -268,14 +289,26 @@ def to_markdown(rows: list[dict], title: str = "", provenance: list[str] | None 
         if meta:
             lines.append(f"   {meta}")
         extras = []
-        if r.get("similarity_score") is not None:
-            extras.append(f"relevance {r['similarity_score']}")
+        if _score_note(r):
+            extras.append(_score_note(r))
         if r.get("study_design"):
             extras.append(r["study_design"])
         if extras:
             lines.append(f"   _{' · '.join(extras)}_")
         lines.append("")
     return "\n".join(lines)
+
+
+#: Les caractères de contrôle qu'un classeur XML ne peut pas porter. openpyxl lève
+#: IllegalCharacterError au premier d'entre eux : UN titre ou UN résumé importé avec un
+#: \x0b ou un \x1f faisait échouer l'export entier. Même classe que celle d'openpyxl.
+_XLSX_ILLEGAL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
+
+
+def _xlsx_safe(value: Any) -> Any:
+    """La valeur telle qu'une cellule peut la porter : les chaînes perdent leurs
+    caractères de contrôle interdits, le reste passe inchangé."""
+    return _XLSX_ILLEGAL.sub("", value) if isinstance(value, str) else value
 
 
 def to_xlsx(rows: list[dict], sheet_title: str = "Relevant articles",
@@ -289,13 +322,14 @@ def to_xlsx(rows: list[dict], sheet_title: str = "Relevant articles",
         _ps = wb.create_sheet("Provenance")
         _ps.append(["LiteRev export"])
         for _ln in provenance:
-            _ps.append([_ln])
+            _ps.append([_xlsx_safe(_ln)])
         _ps.column_dimensions["A"].width = 120
     ws = wb.active
-    ws.title = sheet_title[:31] or "Articles"
+    # Un titre de feuille refuse aussi []:*?/\ ; le nom du scénario peut en porter.
+    ws.title = re.sub(r"[\[\]:*?/\\]", " ", _xlsx_safe(sheet_title))[:31].strip() or "Articles"
     ws.append(list(EXPORT_COLUMNS))
     for r in rows:
-        ws.append([r.get(k) for k in EXPORT_COLUMNS])
+        ws.append([_xlsx_safe(r.get(k)) for k in EXPORT_COLUMNS])
     widths = {"title": 60, "authors": 40, "journal": 28, "abstract": 80, "url": 36, "doi": 24,
               "pico_population": 30, "pico_intervention": 30, "pico_comparator": 24, "pico_outcome": 30}
     for i, col in enumerate(EXPORT_COLUMNS, 1):
@@ -382,18 +416,38 @@ def render_export(fmt: str, rows: list[dict], title: str, meta: dict | None = No
 
 
 def _export_extra_fields(ids: list[int]) -> dict[int, dict]:
-    """PMID, source, URL and keywords of the articles: the relevance query does not carry them."""
+    """PMID, source, URL, keywords and language of the articles: the relevance query does
+    not carry them (without the language, the RIS `LA` tag was never written)."""
     if not ids:
         return {}
     out: dict[int, dict] = {}
     try:
         with engine.connect() as conn:
             for r in conn.execute(text(
-                "SELECT id, pmid, source, url, keywords FROM literature_document WHERE id = ANY(:ids)"
+                "SELECT id, pmid, source, url, keywords, language FROM literature_document "
+                "WHERE id = ANY(:ids)"
             ), {"ids": [int(i) for i in ids]}).mappings():
                 out[int(r["id"])] = dict(r)
     except Exception as _e:                                  # a database without `url`, say
         logger.warning(f"export extra fields: {_e}")
+    return out
+
+
+def _export_link_fields(scenario_id: str, ids: list[int]) -> dict[int, dict]:
+    """The scenario's own scores of the articles that a row does not already carry: the
+    relevance query reads the cosine but not the rerank score that orders it."""
+    if not ids:
+        return {}
+    out: dict[int, dict] = {}
+    try:
+        with engine.connect() as conn:
+            for r in conn.execute(text(
+                "SELECT document_id AS id, rerank_score FROM article_scenarios "
+                "WHERE scenario_id = :sid AND document_id = ANY(:ids)"
+            ), {"sid": scenario_id, "ids": [int(i) for i in ids]}).mappings():
+                out[int(r["id"])] = {"rerank_score": r["rerank_score"]}
+    except Exception as _e:                                  # noqa: BLE001 - a detail, never the export
+        logger.warning(f"export link fields: {_e}")
     return out
 
 
@@ -420,7 +474,7 @@ _BY_IDS_SQL = f"""
     SELECT d.id, d.title, d.year, d.journal, d.authors, d.doi, d.study_design,
            d.citation_count, d.quality_score, d.abstract, d.pico_json,
            {screening_status_sql('d', 'ars')} AS screening_status,
-           ars.similarity_score
+           ars.similarity_score, ars.rerank_score
     FROM literature_document d
     JOIN article_scenarios ars ON ars.document_id = d.id AND ars.scenario_id = :sid
     WHERE d.id = ANY(:ids) AND d.is_duplicate IS NOT TRUE
@@ -462,6 +516,11 @@ def articles_export_response(scenario_id: str, fmt: str, articles: list[dict],
     extra = _export_extra_fields([a["id"] for a in articles])
     for a in articles:
         a.update({k: v for k, v in (extra.get(int(a["id"])) or {}).items() if k != "id"})
+    _without_rerank = [a["id"] for a in articles if "rerank_score" not in a]
+    if _without_rerank:
+        links = _export_link_fields(scenario_id, _without_rerank)
+        for a in articles:
+            a.setdefault("rerank_score", (links.get(int(a["id"])) or {}).get("rerank_score"))
     rows = export_rows(articles, include_abstract=include_abstract)
     title = str(row.get("name") or scenario_id)
     from datetime import datetime as _dt, timezone as _tz
@@ -530,6 +589,54 @@ def export_gesica_scenario_relevant(
 ) -> Response:
     """Same export for the built-in scenarios."""
     return relevant_articles_export(scenario_id, format, threshold, include_abstract)
+
+
+# ── Le corpus ENTIER d'une recherche ─────────────────────────────────────────
+# La page de recherche exportait les 200 lignes de son aperçu, avec des colonnes
+# héritées que le corpus construit en direct ne porte pas (toutes vides). Elle passe
+# désormais par le serveur : les pertinents (ci-dessus), ou tout ce que la recherche a
+# trouvé, pertinent ou non (ici). `?threshold=0` sur l'export des pertinents n'en tient
+# pas lieu : il garde la porte, donc écarte les exclus et ce que le seuil de rerank retire.
+
+def corpus_articles_export(scenario_id: str, fmt: str, include_abstract: bool) -> Response:
+    _get_user_scenario_or_404(scenario_id)
+    thr = float(_get_scenario_threshold(scenario_id) or 0.0)
+    with engine.connect() as conn:
+        ids = [int(i) for i in conn.execute(text(
+            "SELECT ars.document_id FROM article_scenarios ars "
+            "JOIN literature_document d ON d.id = ars.document_id "
+            "WHERE ars.scenario_id = :sid AND d.is_duplicate IS NOT TRUE"
+        ), {"sid": scenario_id}).scalars()]
+        n_relevant = int(conn.execute(text(
+            "SELECT COUNT(DISTINCT ars.document_id) FROM article_scenarios ars "
+            "JOIN literature_document d ON d.id = ars.document_id "
+            f"WHERE ars.scenario_id = :sid AND {relevant_gate_sql('d', 'ars')}"
+        ), {"sid": scenario_id, "thr": thr}).scalar() or 0)
+    articles = articles_by_ids(scenario_id, ids)
+    return articles_export_response(
+        scenario_id, fmt, articles, include_abstract,
+        subset="corpus", subset_label="whole-corpus",
+        coverage=(f"Le corpus ENTIER de la recherche ({len(articles)} articles, doublons "
+                  f"retirés) : au-dessus du seuil ou non, exclus au screening compris "
+                  f"(colonne screening_status). {n_relevant} sont pertinents (seuil de "
+                  f"similarité {thr:.2f}, ou inclus à la main) : ce sont eux que lisent "
+                  f"les analyses."),
+        extra_meta={"n_relevant": n_relevant})
+
+
+@app.get("/user-scenarios/{scenario_id}/corpus/export")
+def export_user_scenario_corpus(scenario_id: str, format: str = Query("csv"),
+                                include_abstract: bool = True) -> Response:
+    """Every article a search found, relevant or not, in the six formats, in the
+    relevance order of the app. The relevant subset is `/relevant/export`."""
+    return corpus_articles_export(scenario_id, format, include_abstract)
+
+
+@app.get("/gesica/scenarios/{scenario_id}/corpus/export")
+def export_gesica_scenario_corpus(scenario_id: str, format: str = Query("csv"),
+                                  include_abstract: bool = True) -> Response:
+    """Same export for the built-in scenarios."""
+    return corpus_articles_export(scenario_id, format, include_abstract)
 
 
 # ─── Exports de SOUS-ENSEMBLES du corpus ─────────────────────────────────────
@@ -601,76 +708,84 @@ def export_scenario_cluster(
                     "cluster_summary": match.get("summary") or ""})
 
 
+def _csv_set(value: str | None) -> set[str]:
+    return {p.strip().lower() for p in (value or "").split(",") if p.strip()}
+
+
 @app.get("/user-scenarios/{scenario_id}/concepts/export")
 def export_scenario_concept_subset(
     scenario_id: str,
-    concepts: str = Query(..., description="type:label, séparés par « | ». Ex: pathogen:dengue virus|vector:Aedes albopictus"),
+    concepts: str | None = Query(None, description="type:label, séparés par « | ». Ex: pathogen:dengue virus|vector:Aedes albopictus"),
     mode: str = Query("any", pattern="^(any|all)$"),
     format: str = Query("csv"),
     include_abstract: bool = True,
+    composed: bool = Query(False, description="La carte telle que composée : tous les concepts de l'index, moins les filtres ci-dessous."),
+    exclude_types: str | None = Query(None, description="Types masqués, séparés par des virgules (avec composed)."),
+    min_count: int = Query(1, ge=1, description="Nombre minimal d'articles d'un concept (avec composed)."),
+    exclude: str | None = Query(None, description="Concepts retirés à la main, type:label séparés par « | » (avec composed)."),
 ) -> Response:
-    """Les articles derrière un concept, ou derrière une SÉLECTION de concepts.
+    """Les articles derrière un concept, une SÉLECTION de concepts, ou la carte COMPOSÉE.
 
-    `mode=any` : les articles citant AU MOINS UN des concepts (l'union, ce que montre une
-    carte filtrée). `mode=all` : ceux qui les citent TOUS (l'intersection, ce qu'on veut
-    pour « les articles où ce pathogène ET ce vecteur apparaissent ensemble »).
+    `concepts` + `mode=any` : les articles citant AU MOINS UN des concepts (l'union).
+    `mode=all` : ceux qui les citent TOUS (l'intersection, ce qu'on veut pour « les
+    articles où ce pathogène ET ce vecteur apparaissent ensemble »).
+    `composed=true` (sans `concepts`) : la carte telle que l'utilisateur l'a composée,
+    c'est-à-dire tous les concepts moins les types masqués, ceux de moins de `min_count`
+    articles et ceux retirés à la main. Toujours l'union.
 
-    La carte est RECALCULÉE sans le plafond d'affichage : les noeuds servis à l'interface
-    ne portent que leurs 40 premiers articles, et hériter de ce plafond ici produirait un
-    fichier tronqué sans le dire. Les concepts sont désignés par `type:label` (le libellé
-    canonique anglais) et non par leur identifiant de noeud, qui n'est qu'une position
-    dans un calcul donné et change d'un recalcul à l'autre."""
-    from .knowledge_graph import _build_concept_graph, _concept_rows
+    Tout se résout sur l'index COMPLET des concepts des articles pertinents, jamais sur
+    la carte servie : ses soixante noeuds, ses quatorze concepts par type à l'écran et
+    ses quarante articles par noeud sont des coupes d'affichage, et en hériter ici
+    produisait un fichier amputé sans le dire (ou un 404 pour un concept bien présent
+    dans le corpus). Les concepts sont désignés par `type:label` (le libellé canonique
+    anglais, ou toute graphie qui s'y ramène) et non par leur identifiant de noeud, qui
+    n'est qu'une position dans un calcul donné."""
+    from .knowledge_graph import _concept_rows, parse_concept_refs, select_concepts
 
     _get_user_scenario_or_404(scenario_id)
-    wanted: list[tuple[str, str]] = []
-    for part in (concepts or "").split("|"):
-        part = part.strip()
-        if not part:
-            continue
-        if ":" not in part:
-            raise HTTPException(status_code=400,
-                                detail=f"« {part} » doit s'écrire type:label (ex. pathogen:dengue virus).")
-        _t, _lab = part.split(":", 1)
-        wanted.append((_t.strip().lower(), _lab.strip()))
-    if not wanted:
+    try:
+        wanted = parse_concept_refs((concepts or "").split("|"))
+        removed = parse_concept_refs((exclude or "").split("|"))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    if not wanted and not composed:
         raise HTTPException(status_code=400, detail="Aucun concept demandé.")
 
     rows, n_total = _concept_rows(scenario_id)
-    graph = _build_concept_graph(rows, n_total=n_total, full_articles=True)
-    by_key = {(str(n["type"]).lower(), str((n.get("label") or {}).get("en") or "").strip().lower()): n
-              for n in graph.get("nodes") or []}
-    sets: list[set[int]] = []
-    labels: list[str] = []
-    missing: list[str] = []
-    for t, lab in wanted:
-        node = by_key.get((t, lab.lower()))
-        if node is None:
-            missing.append(f"{t}:{lab}")
-            continue
-        sets.append({int(i) for i in (node.get("articles") or [])})
-        labels.append(str((node.get("label") or {}).get("en") or lab))
-    if missing:
+    sel = select_concepts(rows, concepts=wanted or None, mode=mode,
+                          exclude_types=_csv_set(exclude_types), min_count=min_count,
+                          exclude=removed)
+    if sel["missing"]:
         raise HTTPException(
             status_code=404,
-            detail=f"Concept(s) absent(s) de la carte : {', '.join(missing)}. "
+            detail=f"Concept(s) absent(s) des articles pertinents : {', '.join(sel['missing'])}. "
                    f"Les libellés sont ceux de la carte (anglais canonique).")
-    ids = set.union(*sets) if mode == "any" else set.intersection(*sets)
-    articles = articles_by_ids(scenario_id, sorted(ids))
-    _joiner = " OU " if mode == "any" else " ET "
-    _human = _joiner.join(labels)
-    coverage = (
-        f"Articles citant {_human} ({len(articles)}). Calculé sur la TOTALITÉ des "
-        f"{graph.get('n_with_concepts', 0)} articles pertinents porteurs de concepts "
-        f"(sur {graph.get('n_total', n_total)}), sans le plafond d'affichage de la carte."
-    )
+    articles = articles_by_ids(scenario_id, sorted(sel["ids"]))
+    _basis = (f"Calculé sur l'index COMPLET des concepts des {sel['n_with_concepts']} articles "
+              f"pertinents porteurs de concepts (sur {n_total}), sans les coupes d'affichage "
+              f"de la carte (noeuds dessinés, concepts par type, articles par noeud).")
+    if wanted:
+        labels = sel["labels"]
+        coverage = f"Articles citant {sel['description']} ({len(articles)}). {_basis}"
+        subset_label = _slug("-".join(labels)) or "concepts"
+    else:
+        labels = []
+        coverage = (f"Articles de la carte des concepts telle que composée ({len(articles)}) : "
+                    f"{sel['description']}, soit {sel['n_concepts']} concepts. {_basis}")
+        subset_label = "concept-map"
     return articles_export_response(
         scenario_id, format, articles, include_abstract,
-        subset="concepts", subset_label=_slug("-".join(labels)) or "concepts",
+        subset="concepts", subset_label=subset_label,
         coverage=coverage,
-        extra_meta={"concepts": labels, "mode": mode,
-                    "n_with_concepts": graph.get("n_with_concepts"),
-                    "n_total": graph.get("n_total", n_total)})
+        extra_meta={"concepts": labels, "mode": mode if wanted else "any",
+                    "composed": not wanted,
+                    "concept_filter": (None if wanted else
+                                       {"exclude_types": sorted(_csv_set(exclude_types)),
+                                        "min_count": int(min_count),
+                                        "exclude": [f"{t}:{lab}" for t, lab in removed]}),
+                    "n_concepts": sel["n_concepts"],
+                    "n_with_concepts": sel["n_with_concepts"],
+                    "n_total": n_total})
 
 
 @app.get("/user-scenarios/{scenario_id}/articles/export")
@@ -689,11 +804,38 @@ def export_scenario_article_ids(
 
     Borné au scénario : un identifiant qui ne lui appartient pas n'est pas exporté, il est
     signalé dans `X-Missing-Ids`. La réponse ne peut donc pas servir à extraire le corpus
-    d'un autre scénario en devinant des identifiants."""
+    d'un autre scénario en devinant des identifiants.
+
+    Au-delà d'un millier d'identifiants, la ligne de requête dépasse ce que nginx accepte
+    (414) : la variante POST ci-dessous prend la même liste dans le corps."""
     try:
         wanted = [int(x) for x in (ids or "").replace(" ", "").split(",") if x]
     except ValueError:
         raise HTTPException(status_code=400, detail="`ids` doit être une liste d'entiers séparés par des virgules.")
+    return _article_ids_export(scenario_id, wanted, format, label, include_abstract)
+
+
+@app.post("/user-scenarios/{scenario_id}/articles/export")
+def export_scenario_article_ids_post(scenario_id: str, payload: dict[str, Any]) -> Response:
+    """La même sélection explicite, la liste dans le CORPS : `{"ids": [...], "format":
+    "csv", "label": "selection", "include_abstract": true}`. Une lecture comme le GET,
+    donc sans clé ; elle existe parce qu'une carte filtrée ou une grosse sélection
+    dépasse la longueur d'URL qu'accepte le proxy."""
+    raw = payload.get("ids")
+    if isinstance(raw, str):
+        raw = raw.replace(" ", "").split(",")
+    try:
+        wanted = [int(x) for x in (raw or []) if str(x).strip()]
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="`ids` doit être une liste d'entiers.")
+    return _article_ids_export(scenario_id, wanted, str(payload.get("format") or "csv"),
+                               str(payload.get("label") or "selection"),
+                               payload.get("include_abstract") is not False)
+
+
+def _article_ids_export(scenario_id: str, wanted: list[int], format: str, label: str,
+                        include_abstract: bool) -> Response:
+    """Le coeur partagé des deux variantes de l'export par identifiants."""
     if not wanted:
         raise HTTPException(status_code=400, detail="Aucun identifiant fourni.")
     if len(wanted) > 20000:
@@ -730,12 +872,17 @@ def export_gesica_cluster(scenario_id: str, cluster_id: int, format: str = Query
 
 
 @app.get("/gesica/scenarios/{scenario_id}/concepts/export")
-def export_gesica_concept_subset(scenario_id: str, concepts: str = Query(...),
+def export_gesica_concept_subset(scenario_id: str, concepts: str | None = Query(None),
                                  mode: str = Query("any", pattern="^(any|all)$"),
                                  format: str = Query("csv"),
-                                 include_abstract: bool = True) -> Response:
+                                 include_abstract: bool = True,
+                                 composed: bool = Query(False),
+                                 exclude_types: str | None = Query(None),
+                                 min_count: int = Query(1, ge=1),
+                                 exclude: str | None = Query(None)) -> Response:
     """Idem pour les scénarios préréglés."""
-    return export_scenario_concept_subset(scenario_id, concepts, mode, format, include_abstract)
+    return export_scenario_concept_subset(scenario_id, concepts, mode, format, include_abstract,
+                                          composed, exclude_types, min_count, exclude)
 
 
 @app.get("/gesica/scenarios/{scenario_id}/articles/export")
@@ -744,3 +891,9 @@ def export_gesica_article_ids(scenario_id: str, ids: str = Query(...),
                               include_abstract: bool = True) -> Response:
     """Idem pour les scénarios préréglés."""
     return export_scenario_article_ids(scenario_id, ids, format, label, include_abstract)
+
+
+@app.post("/gesica/scenarios/{scenario_id}/articles/export")
+def export_gesica_article_ids_post(scenario_id: str, payload: dict[str, Any]) -> Response:
+    """Idem pour les scénarios préréglés."""
+    return export_scenario_article_ids_post(scenario_id, payload)

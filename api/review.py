@@ -253,17 +253,34 @@ def get_user_scenario_prisma(
     excluded_by_reason: list[dict[str, Any]] = []
     try:
         with engine.connect() as conn:
+            # Les douze motifs les plus fréquents, et, dans la MÊME instruction, le total
+            # et le nombre de motifs distincts : la liste s'arrêtait au douzième sans
+            # ligne pour le reste, et ses chiffres sommaient moins que le total des
+            # exclus affiché juste au-dessus.
             _reasons = conn.execute(text(f"""
-                SELECT COALESCE(NULLIF(TRIM(ars.screening_reason), ''), '(sans motif)') AS reason,
-                       COUNT(*) AS n
-                FROM article_scenarios ars
-                JOIN literature_document d ON d.id = ars.document_id
-                WHERE ars.scenario_id = :sid
-                  AND d.is_duplicate IS NOT TRUE
-                  AND {screening_status_sql('d', 'ars')} = 'excluded'
-                GROUP BY 1 ORDER BY n DESC LIMIT 12
+                SELECT reason, n, SUM(n) OVER () AS total, COUNT(*) OVER () AS n_reasons
+                FROM (
+                    SELECT COALESCE(NULLIF(TRIM(ars.screening_reason), ''), '(sans motif)') AS reason,
+                           COUNT(*) AS n
+                    FROM article_scenarios ars
+                    JOIN literature_document d ON d.id = ars.document_id
+                    WHERE ars.scenario_id = :sid
+                      AND d.is_duplicate IS NOT TRUE
+                      AND {screening_status_sql('d', 'ars')} = 'excluded'
+                    GROUP BY 1
+                ) r
+                ORDER BY n DESC, reason LIMIT 12
             """), {"sid": scenario_id}).mappings().all()
         excluded_by_reason = [{"reason": r["reason"], "articles": int(r["n"])} for r in _reasons]
+        if _reasons:
+            _rest = int(_reasons[0]["total"] or 0) - sum(r["articles"] for r in excluded_by_reason)
+            _rest_reasons = int(_reasons[0]["n_reasons"] or 0) - len(excluded_by_reason)
+            if _rest > 0:
+                # Une ligne « autres motifs » pour que la liste somme au total. `other`
+                # et `reasons` laissent l'interface la dire dans sa langue.
+                excluded_by_reason.append({
+                    "reason": f"(autres motifs : {_rest_reasons})", "articles": _rest,
+                    "other": True, "reasons": _rest_reasons})
     except Exception as _e_reasons:
         logger.warning(f"prisma exclusion reasons {scenario_id}: {_e_reasons}")
 

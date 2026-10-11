@@ -1249,8 +1249,10 @@ export interface ScenarioPrisma {
     manually_rescued: number;
     manually_vetoed: number;
     /** Why the excluded were excluded. One scope narrowing can account for most of the
-     *  total, and a total alone cannot be written into a methods section. */
-    excluded_by_reason?: Array<{ reason: string; articles: number }>;
+     *  total, and a total alone cannot be written into a methods section. The twelve most
+     *  frequent reasons, then, when more exist, one `other` row grouping `reasons` reasons,
+     *  so the rows add up to the exclusion total. */
+    excluded_by_reason?: Array<{ reason: string; articles: number; other?: boolean; reasons?: number }>;
   };
   evidence: {
     /** The relevant subset through the shared gate, so equal to counts.relevant,
@@ -1334,10 +1336,14 @@ export async function fetchScenarioCorpus(
      *  un relecteur, jamais un exclu). */
     relevantOnly?: boolean;
     abstractChars?: number;   // truncate abstracts server-side (excerpt-only views)
+    /** Order of the WHOLE corpus, on the server: a page sorted by year in the browser
+     *  only re-sorted the rows it had downloaded. */
+    sort?: "relevance" | "year_desc" | "year_asc";
   }
 ): Promise<ScenarioCorpus> {
   const params = new URLSearchParams();
   if (options?.limit) params.set('limit', String(options.limit));
+  if (options?.sort && options.sort !== "relevance") params.set('sort', options.sort);
   if (options?.offset) params.set('offset', String(options.offset));
   if (options?.yearFrom) params.set('year_from', String(options.yearFrom));
   if (options?.yearTo) params.set('year_to', String(options.yearTo));
@@ -1479,16 +1485,8 @@ export async function fetchArticlePico(
   return response.json();
 }
 
-export async function extractPicoBatch(
-  scenarioId?: string,
-  limit = 100000
-): Promise<{ extracted: number; skipped: number; errors: number; message: string }> {
-  const params = new URLSearchParams({ limit: String(limit) });
-  if (scenarioId) params.set('scenario_id', scenarioId);
-  const response = await safeFetch(`${API_BASE_URL}/pico/extract?${params}`, { method: 'POST', headers: authHeaders() });
-  if (!response.ok) throw new Error(httpMessage(response.status));
-  return response.json();
-}
+// (Le lot PICO se lance par `startEnrichmentBatch("pico", ...)` : la requête rend la
+// main tout de suite et le lot tourne sur le serveur.)
 
 // ─── PICO Bulk ────────────────────────────────────────────────────────────────
 export interface PicoBulkArticle {
@@ -1998,6 +1996,8 @@ export interface UnmappedResponse {
   rows_mapped: number;
   rows_unmapped: number;
   n_distinct_unmapped: number;
+  /** Where this page starts in the full list (most frequent first). */
+  offset?: number;
   unmapped: UnmappedLabel[];
 }
 
@@ -2007,10 +2007,23 @@ export async function fetchCodebook(scenarioId: string): Promise<CodebookRespons
   return r.json();
 }
 
-export async function fetchUnmappedLabels(scenarioId: string, top = 50): Promise<UnmappedResponse> {
-  const r = await safeFetch(`${scenarioBase(scenarioId)}/${scenarioId}/codebook/unmapped?top=${top}`);
+export async function fetchUnmappedLabels(scenarioId: string, top = 50, offset = 0): Promise<UnmappedResponse> {
+  const r = await safeFetch(`${scenarioBase(scenarioId)}/${scenarioId}/codebook/unmapped?top=${top}&offset=${offset}`);
   if (!r.ok) throw new Error(httpMessage(r.status));
   return r.json();
+}
+
+/** The first `n` unmapped labels, in pages the server accepts (500 at most each), so a
+ *  "show more" can reach every one of them. */
+export async function fetchUnmappedLabelsUpTo(scenarioId: string, n: number): Promise<UnmappedResponse> {
+  const first = await fetchUnmappedLabels(scenarioId, Math.min(500, Math.max(1, n)), 0);
+  const all = [...first.unmapped];
+  while (all.length < Math.min(n, first.n_distinct_unmapped)) {
+    const page = await fetchUnmappedLabels(scenarioId, Math.min(500, n - all.length), all.length);
+    if (!page.unmapped.length) break;
+    all.push(...page.unmapped);
+  }
+  return { ...first, unmapped: all };
 }
 
 export async function addCodebookSynonym(
@@ -2221,6 +2234,14 @@ export interface ConceptGraphData {
   scenario_id: string;
   n_articles: number;
   n_total: number;
+  /** What the map does NOT draw: the server's node cap, the minimum number of articles
+   *  of a drawn node, the number of distinct concepts in the full index, and per type how
+   *  many concepts are cited by how many articles ({type: {articles: concepts}}). Absent
+   *  from a map cached before they existed. */
+  max_nodes?: number;
+  min_count?: number;
+  concepts_total?: number;
+  concept_counts?: Partial<Record<ConceptType, Record<string, number>>>;
   n_with_concepts: number;
   /** Relevant articles a pass can still annotate. Reading the map never starts the pass. */
   n_missing_concepts: number;
@@ -2946,41 +2967,57 @@ export interface EnrichmentStatus {
   by_scope: Record<EnrichmentScope, EnrichmentScopeStatus> | null;
 }
 
-export async function extractPicoBatchGlobal(
+export type EnrichmentKind = 'pico' | 'metadata' | 'fulltext';
+
+/** A batch the server runs in the background (GET /enrichment/jobs). The batches used to
+ *  run INSIDE the POST, model call after model call: a large one outlived the proxy
+ *  timeout and the screen showed an error while the server went on working. */
+export interface EnrichmentJob {
+  kind: EnrichmentKind;
+  scenario_id: string | null;
+  scope: EnrichmentScope;
+  /** null: every pending article. */
+  limit: number | null;
+  status: 'running' | 'done' | 'error';
+  processed: number;
+  total: number | null;
+  started_at: string;
+  elapsed_s: number;
+  /** The batch's own answer, once done: extracted/skipped/errors, or for open-access
+   *  links fetched/not_available/errors. */
+  result: (Partial<EnrichmentBatchResult> & { fetched?: number; not_available?: number }) | null;
+  error: string | null;
+}
+
+const ENRICHMENT_PATHS: Record<EnrichmentKind, string> = {
+  pico: '/pico/extract', metadata: '/metadata/extract', fulltext: '/fulltext/fetch',
+};
+
+/** Starts a batch in the background; `running` when one of the same kind already runs
+ *  for this scenario. `limit` null or 0: every pending article. */
+export async function startEnrichmentBatch(
+  kind: EnrichmentKind,
   scenarioId?: string,
-  limit = 100000,
+  limit?: number | null,
   scope?: EnrichmentScope,
-): Promise<EnrichmentBatchResult> {
-  const params = new URLSearchParams({ limit: String(limit) });
+): Promise<{ status: 'started' | 'running'; job: EnrichmentJob }> {
+  const params = new URLSearchParams();
+  if (limit && limit > 0) params.set('limit', String(Math.floor(limit)));
   if (scenarioId) params.set('scenario_id', scenarioId);
   if (scope) params.set('scope', scope);
-  const r = await safeFetch(`${API_BASE_URL}/pico/extract?${params}`, { method: 'POST', headers: authHeaders() });
-  if (!r.ok) throw new Error(httpMessage(r.status));
+  const r = await safeFetch(`${API_BASE_URL}${ENRICHMENT_PATHS[kind]}?${params}`, { method: 'POST', headers: authHeaders() });
+  if (!r.ok) throw new Error((await _detail(r)) || httpMessage(r.status));
   return r.json();
 }
 
-export async function extractMetadataBatch(
+/** Where the batches of a scenario (or of the whole corpus) stand. `null`: none started
+ *  since the API last started. */
+export async function fetchEnrichmentJobs(
   scenarioId?: string,
-  limit = 100000,
-  scope?: EnrichmentScope,
-): Promise<EnrichmentBatchResult> {
-  const params = new URLSearchParams({ limit: String(limit) });
+): Promise<{ scenario_id: string | null; jobs: Record<EnrichmentKind, EnrichmentJob | null> }> {
+  const params = new URLSearchParams();
   if (scenarioId) params.set('scenario_id', scenarioId);
-  if (scope) params.set('scope', scope);
-  const r = await safeFetch(`${API_BASE_URL}/metadata/extract?${params}`, { method: 'POST', headers: authHeaders() });
-  if (!r.ok) throw new Error(httpMessage(r.status));
-  return r.json();
-}
-
-export async function fetchFulltextBatch(
-  scenarioId?: string,
-  limit = 100000,
-  scope?: EnrichmentScope,
-): Promise<EnrichmentBatchResult & { fetched: number; not_available: number }> {
-  const params = new URLSearchParams({ limit: String(limit) });
-  if (scenarioId) params.set('scenario_id', scenarioId);
-  if (scope) params.set('scope', scope);
-  const r = await safeFetch(`${API_BASE_URL}/fulltext/fetch?${params}`, { method: 'POST', headers: authHeaders() });
+  const r = await safeFetch(`${API_BASE_URL}/enrichment/jobs?${params}`);
   if (!r.ok) throw new Error(httpMessage(r.status));
   return r.json();
 }
@@ -3911,11 +3948,26 @@ export async function exportRelevantArticles(
   return { blob: await r.blob(), filename: m?.[1] ?? `relevant-articles.${format === "bibtex" ? "bib" : format}` };
 }
 
+/** Every article the search found, relevant or not (below the threshold and excluded
+ *  included), in the same formats and columns; `exportRelevantArticles` is the subset the
+ *  analyses read. */
+export async function exportScenarioCorpus(
+  scenarioId: string,
+  format: RelevantExportFormat,
+  opts: { includeAbstract?: boolean } = {},
+): Promise<{ blob: Blob; filename: string }> {
+  const params = new URLSearchParams({ format });
+  if (opts.includeAbstract === false) params.set("include_abstract", "false");
+  return _exportResponse(`${scenarioBase(scenarioId)}/${scenarioId}/corpus/export?${params}`,
+    format, "whole-corpus");
+}
+
 /** Shared tail of every subset export: read the server's filename, hand back the blob. */
 async function _exportResponse(
-  url: string, format: RelevantExportFormat, fallback: string,
+  url: string, format: RelevantExportFormat, fallback: string, init?: RequestInit,
 ): Promise<{ blob: Blob; filename: string }> {
-  const r = await safeFetch(url);
+  // A read, even as a POST: a 502/503/504 is retried like a GET's.
+  const r = await safeFetch(url, init, init ? { retryOn5xx: true } : {});
   if (!r.ok) throw new Error(httpMessage(r.status));
   const m = /filename="?([^";]+)"?/.exec(r.headers.get("Content-Disposition") ?? "");
   const ext = format === "bibtex" ? "bib" : format;
@@ -3937,6 +3989,9 @@ export interface SubsetSelection {
   clusters?: number[];
   concepts?: string[];                       // "type:label", the map's canonical English
   concept_mode?: "any" | "all";
+  /** The concept map as composed (its filters), resolved on the full concept index:
+   *  what the user chose, never what the screen had room to draw. */
+  concept_filter?: ConceptMapFilter;
   /** Vocabulary labels from `api/study_design`, as the charts display them. */
   designs?: string[];
   levels?: string[];
@@ -4041,35 +4096,55 @@ export async function exportClusterArticles(
     format, `cluster-${clusterId}`);
 }
 
-/** The articles behind one concept or a selection of them. `mode` is "any" for the
- *  union a filtered map shows, "all" for the intersection. Never capped at the map's
- *  40-article display limit: the server recomputes the graph uncapped. */
+/** The concept map as the user composed it: hidden types, minimum number of articles,
+ *  concepts removed by hand (`type:label`). The server applies it to the full index. */
+export interface ConceptMapFilter {
+  exclude_types: string[];
+  min_count: number;
+  exclude: string[];
+}
+
+/** The articles behind one concept, a selection of them, or the composed map. `mode` is
+ *  "any" for the union, "all" for the intersection. Everything is resolved server-side
+ *  on the FULL concept index of the relevant articles, never on the drawn map: its node
+ *  cap, its fourteen concepts per type and its 40 articles per node are display cuts.
+ *  `composed` exports the map as composed (its filters) instead of a list of concepts. */
 export async function exportConceptArticles(
   scenarioId: string, concepts: Array<{ type: string; label: string }>,
   format: RelevantExportFormat,
-  opts: { includeAbstract?: boolean; mode?: "any" | "all" } = {},
+  opts: { includeAbstract?: boolean; mode?: "any" | "all"; composed?: ConceptMapFilter } = {},
 ): Promise<{ blob: Blob; filename: string }> {
-  const params = new URLSearchParams({
-    format, concepts: concepts.map(c => `${c.type}:${c.label}`).join("|"),
-  });
+  const params = new URLSearchParams({ format });
+  if (opts.composed) {
+    params.set("composed", "true");
+    if (opts.composed.exclude_types.length) params.set("exclude_types", opts.composed.exclude_types.join(","));
+    params.set("min_count", String(opts.composed.min_count));
+    if (opts.composed.exclude.length) params.set("exclude", opts.composed.exclude.join("|"));
+  } else {
+    params.set("concepts", concepts.map(c => `${c.type}:${c.label}`).join("|"));
+  }
   if (opts.mode) params.set("mode", opts.mode);
   if (opts.includeAbstract === false) params.set("include_abstract", "false");
   return _exportResponse(
-    `${scenarioBase(scenarioId)}/${scenarioId}/concepts/export?${params}`, format, "concepts");
+    `${scenarioBase(scenarioId)}/${scenarioId}/concepts/export?${params}`, format,
+    opts.composed ? "concept-map" : "concepts");
 }
 
 /** An explicit list of articles: the RAG sources, a filtered map, a hand-picked set.
- *  Ids outside this scenario are dropped server-side, never exported. */
+ *  Ids outside this scenario are dropped server-side, never exported. The list travels
+ *  in the BODY of a POST: in a query string, a few thousand ids exceeded the request
+ *  line nginx accepts (414). */
 export async function exportArticleIds(
   scenarioId: string, ids: number[], format: RelevantExportFormat,
   opts: { includeAbstract?: boolean; label?: string } = {},
 ): Promise<{ blob: Blob; filename: string }> {
-  const params = new URLSearchParams({ format, ids: ids.join(",") });
-  if (opts.label) params.set("label", opts.label);
-  if (opts.includeAbstract === false) params.set("include_abstract", "false");
+  const body: Record<string, unknown> = { ids, format };
+  if (opts.label) body.label = opts.label;
+  if (opts.includeAbstract === false) body.include_abstract = false;
   return _exportResponse(
-    `${scenarioBase(scenarioId)}/${scenarioId}/articles/export?${params}`, format,
-    opts.label ?? "selection");
+    `${scenarioBase(scenarioId)}/${scenarioId}/articles/export`, format,
+    opts.label ?? "selection",
+    { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
 }
 
 /** Hand a blob to the browser as a download. */
@@ -4609,6 +4684,19 @@ export async function fetchScenarioQuestions(
     `${API_BASE_URL}/user-scenarios/${scenarioId}/questions?${params}`);
   if (!r.ok) throw new Error(httpMessage(r.status));
   return r.json();
+}
+
+/** The `n` most recent questions, in pages the server accepts (500 at most each): the
+ *  history listed 50 under a header announcing the total, and the rest was unreachable. */
+export async function fetchScenarioQuestionsUpTo(scenarioId: string, n: number): Promise<ScenarioQuestionsPage> {
+  const first = await fetchScenarioQuestions(scenarioId, { limit: Math.min(500, Math.max(1, n)) });
+  const items = [...first.items];
+  while (items.length < Math.min(n, first.total)) {
+    const next = await fetchScenarioQuestions(scenarioId, { limit: Math.min(500, n - items.length), offset: items.length });
+    if (!next.items.length) break;
+    items.push(...next.items);
+  }
+  return { ...first, items };
 }
 
 export async function deleteScenarioQuestion(scenarioId: string, questionId: number): Promise<void> {

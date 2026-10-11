@@ -955,10 +955,16 @@ def get_user_scenario_corpus(
     q: str | None = None,
     relevant_only: bool = False,
     abstract_chars: int | None = Query(None, ge=0, le=20000),
+    sort: str = "relevance",
 ) -> dict[str, Any]:
     """
     Retourne le corpus d'articles pour un scénario utilisateur.
     Compatible avec fetchScenarioCorpus (même format de réponse).
+
+    `sort` : `relevance` (défaut, l'ordre partagé de l'application), `year_desc` ou
+    `year_asc`. Le tri par année se fait ICI, sur tout le corpus : la page de recherche
+    n'en télécharge que les deux cents premiers, et les retrier dans le navigateur ne
+    montrait que les plus récents de ces deux cents-là.
 
     `abstract_chars` tronque le résumé de chaque article à N caractères : la page de
     résultats de recherche n'affiche qu'un extrait (600 caractères) et lit le résumé
@@ -977,12 +983,17 @@ def get_user_scenario_corpus(
     `filtered_total` dit combien d'articles la vue retient.
     """
     from .relevance import _maybe_autorerank, _rerank_job_active  # lazy: relevance is loaded after this module
+    if sort not in ("relevance", "year_desc", "year_asc"):
+        raise HTTPException(status_code=422,
+                            detail="sort doit valoir relevance, year_desc ou year_asc")
     row = _get_user_scenario_or_404(scenario_id)
     # Endpoint ouvert : borne limit/offset (un ?limit=100000000 matérialiserait toute
     # la jointure en RAM/JSON). 100000 couvre largement le plus gros corpus.
     limit = max(1, min(int(limit), 100000))
     offset = max(0, int(offset))
     _abstract_sql = "d.abstract" if abstract_chars is None else "LEFT(d.abstract, :abstract_chars)"
+    _year_order = {"year_desc": "d.year DESC NULLS LAST, ",
+                   "year_asc": "d.year ASC NULLS LAST, "}.get(sort, "")
     # Seuil effectif : paramètre explicite (curseur en direct) > seuil EN VIGUEUR du
     # scénario, par la lecture commune (scenario_threshold_info). Elle était recopiée ici
     # avec un 0.45 en dur et un `except: pass` : une erreur de base affichait le corpus à
@@ -1080,8 +1091,9 @@ def get_user_scenario_corpus(
             JOIN article_scenarios ars ON ars.document_id = d.id AND ars.scenario_id = :sid
             WHERE {where}
             -- L'ordre de pertinence, par la fonction partagée : l'export et cet écran
-            -- en avaient deux différents, sous une docstring promettant le même.
-            ORDER BY {relevance_order_sql('d', 'ars', ':threshold')}
+            -- en avaient deux différents, sous une docstring promettant le même. Trié
+            -- par année, il départage les années égales.
+            ORDER BY {_year_order}{relevance_order_sql('d', 'ars', ':threshold')}
             LIMIT :limit OFFSET :offset
         """), {**params, 'threshold': eff_threshold, 'screated': _screated,
                **({'abstract_chars': int(abstract_chars)} if abstract_chars is not None else {})}).mappings().all()
