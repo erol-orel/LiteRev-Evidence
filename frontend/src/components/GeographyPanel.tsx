@@ -2,10 +2,12 @@ import React from "react";
 import { AlertTriangle, Upload } from "lucide-react";
 import { useI18n } from "../i18n/LanguageProvider";
 import { fetchGeography, fetchNutsStatus, hasApiKey, importNutsCsv } from "../lib/api";
-import type { GeographyResponse } from "../lib/api";
+import type { GeographyResponse, GeoUnresolvedReason } from "../lib/api";
 import { share } from "../lib/extraction";
 
 const TOP = 15;
+const REASONS: GeoUnresolvedReason[] = ["no_place", "several_countries", "multi_country_area", "not_recognised"];
+const NO_PLACE_KEY = "(no place stated)";
 
 /** Where the studies took place: a country per bar, its regions beneath, and the places that could
  *  not be resolved. Counted over ALL the extracted relevant articles. The NUTS list in use is said,
@@ -113,9 +115,23 @@ export function GeographyPanel({ scenarioId }: { scenarioId: string }) {
             {T("unresolved").replace("{n}", String(g.n_unresolved))}
           </button>
           {showUnres && (
-            <ul className="mt-2 space-y-0.5 text-[10px] text-white/50">
-              {g.unresolved.map((u) => <li key={u.location}><span className="text-white/70">{u.location}</span> <span className="text-white/35">{u.n}</span></li>)}
-            </ul>
+            <>
+              <p className="mt-2 text-[10px] text-white/40">
+                {REASONS.filter((r) => g.unresolved_by_reason?.[r]).map((r) => `${T(`reason.${r}`)} ${g.unresolved_by_reason[r]}`).join(" · ")}
+              </p>
+              <ul className="mt-2 space-y-0.5 text-[10px] text-white/50">
+                {g.unresolved.map((u) => {
+                  // The API's "(no place stated)" stands for the empty ones: say it in the interface's language.
+                  const empty = u.reason === "no_place" && u.location === NO_PLACE_KEY;
+                  return (
+                    <li key={u.location}>
+                      <span className="text-white/70">{empty ? T("reason.no_place") : u.location}</span>{" "}
+                      <span className="text-white/35">{u.n}{u.reason && !empty ? ` · ${T(`reason.${u.reason}`)}` : ""}</span>
+                    </li>
+                  );
+                })}
+              </ul>
+            </>
           )}
         </div>
       )}

@@ -78,7 +78,8 @@ _S = {
         "lim_combine": "Studies that are combined may differ in population, setting and definition, which the pooled value cannot show.",
         "geo_h": "Where the evidence comes from", "geo_t": "{n} of the {total} extracted articles name a place that resolves to a country; the NUTS list in use is {src}.",
         "geo_builtin": "the built-in one (countries; Germany NUTS 1; Italy NUTS 1 and 2)", "geo_loaded": "Eurostat's official list",
-        "col_country": "Country", "col_nuts": "NUTS 0", "col_regions": "Regions (articles)", "geo_unres": "{n} articles name no place that can be resolved, or name several countries.",
+        "col_country": "Country", "col_nuts": "NUTS 0", "col_regions": "Regions (articles)",
+        "geo_unres": "{n} articles do not resolve to a single country: no place stated {none}, several countries named {several}, a continent or a region spanning several countries {area}, a place the list does not know {unknown}.",
         "appendix": "Studies behind each pooled estimate", "band": {"low": "low", "moderate": "moderate", "substantial": "substantial", "considerable": "considerable"},
         "all_diseases": "all diseases", "versus": "against", "not_stated": "not stated",
     },
@@ -121,7 +122,8 @@ _S = {
         "lim_combine": "Les études combinées peuvent différer par la population, le contexte et la définition, ce que la valeur combinée ne montre pas.",
         "geo_h": "D'où vient la preuve", "geo_t": "{n} des {total} articles extraits nomment un lieu qui se résout en un pays ; la liste NUTS utilisée est {src}.",
         "geo_builtin": "la liste intégrée (pays ; Allemagne NUTS 1 ; Italie NUTS 1 et 2)", "geo_loaded": "la liste officielle d'Eurostat",
-        "col_country": "Pays", "col_nuts": "NUTS 0", "col_regions": "Régions (articles)", "geo_unres": "{n} articles ne nomment aucun lieu résoluble, ou nomment plusieurs pays.",
+        "col_country": "Pays", "col_nuts": "NUTS 0", "col_regions": "Régions (articles)",
+        "geo_unres": "{n} articles ne se résolvent pas en un seul pays : aucun lieu indiqué {none}, plusieurs pays nommés {several}, un continent ou une région à cheval sur plusieurs pays {area}, un lieu que la liste ne connaît pas {unknown}.",
         "appendix": "Les études derrière chaque estimation combinée", "band": {"low": "faible", "moderate": "modéré", "substantial": "important", "considerable": "considérable"},
         "all_diseases": "toutes maladies", "versus": "contre", "not_stated": "non précisée",
     },
@@ -211,7 +213,9 @@ def build_extraction_report(scenario_id: str, lang: str = "en") -> dict[str, Any
              [[c["name"], c["nuts0"] or "-", str(c["n_papers"]), str(c["n_rows"]),
                "; ".join(f"{g['name']} {g['code']} ({g['n_papers']})" for g in c["regions"][:8]) or "-"] for c in geo["countries"][:25]]))
     if geo["n_unresolved"]:
-        add(("p", S["geo_unres"].format(n=geo["n_unresolved"])))
+        why = geo["unresolved_by_reason"]
+        add(("p", S["geo_unres"].format(n=geo["n_unresolved"], none=why["no_place"], several=why["several_countries"],
+                                        area=why["multi_country_area"], unknown=why["not_recognised"])))
 
     add(("h2", S["review_h"]))
     add(("table", [S["col_status"], S["col_rows"]], [[S["status"][k_], str(rev["counts"].get(k_, 0))] for k_ in S["status"]]))
