@@ -135,31 +135,14 @@ def s_semantic_scholar():
     return total, docs
 
 
-def s_biorxiv_medrxiv():
-    # bioRxiv + medRxiv are STILL live (native, source="biorxiv"/"medrxiv"), separate from
-    # the Europe PMC "preprint" facet. They have NO keyword search - the API only serves a
-    # date window - so "total" here is ALL preprints in the last 45 days, not query hits;
-    # the fetcher keeps those matching >= 1/3 of the terms, then the corpus re-match applies.
-    from datetime import date, timedelta
-    to = date.today()
-    win = f"{(to - timedelta(days=45)).isoformat()}/{to.isoformat()}"
-    total, docs = 0, []
-    for server in ("biorxiv", "medrxiv"):
-        r = requests.get(f"https://api.biorxiv.org/details/{server}/{win}/0/json",
-                         headers=UA, timeout=TIMEOUT).json()
-        total += int((r.get("messages") or [{}])[0].get("total", 0) or 0)
-        for it in (r.get("collection") or [])[:100]:
-            docs.append((it.get("title") or "", it.get("abstract") or ""))
-    return total, docs
-
-
 SOURCES = [
     ("PubMed", "pubmed boolean", s_pubmed),
     ("Europe PMC", "general boolean", s_europepmc),
     ("OpenAlex", "plain keywords", s_openalex),
     ("Crossref", "plain keywords", s_crossref),
     ("Semantic Scholar", "plain keywords", s_semantic_scholar),
-    ("bioRxiv+medRxiv", "45d window scan", s_biorxiv_medrxiv),   # native, NOT the EPMC facet
+    # bioRxiv + medRxiv: no longer a source of their own (no keyword API); the Europe PMC
+    # preprint facet searches them.
 ]
 
 if __name__ == "__main__":

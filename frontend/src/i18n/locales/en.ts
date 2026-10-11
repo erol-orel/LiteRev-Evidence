@@ -302,8 +302,11 @@ export const en: Translations = {
     searching: "Searching...",
     searchButton: "Search",
     includeLive:
-      "Include live API sources (PubMed, OpenAlex, Crossref, EuropePMC, Semantic Scholar, DOAJ, ClinicalTrials.gov, CORE, arXiv, OpenAIRE, bioRxiv, medRxiv, Europe PMC preprints)",
+      "Include live API sources (PubMed, OpenAlex, Crossref, EuropePMC, Semantic Scholar, DOAJ, ClinicalTrials.gov, CORE, arXiv, OpenAIRE, Europe PMC preprints: bioRxiv, medRxiv, Research Square…)",
     includeLiveHint: "Slower search, adds articles not yet indexed",
+    excludePreprints: "Exclude preprints",
+    excludePreprintsHint:
+      "Preprint servers are not searched, PubMed and Europe PMC exclude them in the query, and those the other databases return are removed before screening (stated on the PRISMA card)",
     addSubQuery: "Add a sub-query",
     combineHint: "The main query above is combined with these sub-queries:",
     combinator: "Combine by",
@@ -601,7 +604,7 @@ export const en: Translations = {
       loadingCorpus: "Loading article corpus...",
       autoSelectionTitle: "Automatic selection",
       autoSelectionBody1:
-        ": These articles were retrieved from the local cache and 13 API sources (PubMed, OpenAlex, Crossref, EuropePMC, Semantic Scholar, DOAJ, ClinicalTrials.gov, CORE, arXiv, OpenAIRE, bioRxiv, medRxiv, Europe PMC preprints) via multi-source search.",
+        ": These articles were retrieved from the local cache and up to 11 API sources (PubMed, OpenAlex, Crossref, EuropePMC, Semantic Scholar, DOAJ, ClinicalTrials.gov, CORE, arXiv, OpenAIRE, Europe PMC preprints) via multi-source search; the PRISMA card says which ones answered.",
       autoSelectionBody2: "None have been validated by a human reviewer.",
       autoSelectionBody3:
         "For a formal systematic review, double-blind human screening is required (Review tab).",
@@ -827,6 +830,11 @@ export const en: Translations = {
       duplicatesRemoved: "Duplicates removed",
       uniqueRecords: "Unique records",
       removedNoAbstract: "Removed: no abstract",
+      removedPreprints: "Removed: preprints (search without preprints)",
+      preprintsExcluded: "Search without preprints (exclusion criterion):",
+      preprintsNotSearched: "preprint servers not searched: {sources}",
+      preprintsAtSource: "excluded in the query by {sources}",
+      preprintsRemoved: "{n} preprints returned by the other databases, removed before screening",
       removedNotMatching: "Removed: off the Boolean query (returned by a keyword-only source)",
       addedAfterSearch: "Added after the search (later pages of a source, corpus rebuild)",
       removedAfterSearch: "Removed after the search (duplicates marked since, purged documents)",

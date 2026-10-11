@@ -22,6 +22,86 @@ from .scenario_store import _get_user_scenario_or_404
 from llm_usage import model_for as _model
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Préprints : ce qu'on appelle ainsi, en UN endroit
+# ─────────────────────────────────────────────────────────────────────────────
+# Un préprint arrive par toutes les bases, pas seulement par les serveurs de préprints :
+# OpenAlex, Crossref, Semantic Scholar, CORE, OpenAIRE et même PubMed (le programme
+# pilote du NIH y indexe bioRxiv, medRxiv, Research Square) en rendent. Le type que la
+# source annonce n'est pas toujours enregistré (une notice déjà en base garde le type de
+# sa première ingestion) : on reconnaît donc un préprint à ce qui reste sur la ligne.
+#
+#   - son DOI, quand il est celui d'un serveur de préprints (bioRxiv et medRxiv sous la
+#     forme datée « 10.1101/2020.03.05.20031773 » ou l'ancienne à six chiffres, et non
+#     « 10.1101/gr. » ou « 10.1101/cshperspect. », qui sont des revues de Cold Spring
+#     Harbor) ;
+#   - la source ou le type d'ingestion (« preprint », arXiv), l'URL ou le nom de revue
+#     d'un serveur de préprints.
+#
+# Sauf trace d'une version PUBLIÉE sur la même ligne : un DOI de revue (arXiv donne celui
+# de la version publiée quand elle existe), ou un nom de revue qui n'est pas celui d'un
+# serveur de préprints. La déduplication par titre réunit souvent le préprint et l'article
+# publié sous une seule ligne, qui garde le DOI de la première arrivée et reçoit la revue
+# de la seconde : cette ligne est un article publié, et l'exclusion ne doit pas l'écarter.
+PREPRINT_DOI_RE = (
+    r"^10\.1101/(\d{4}\.\d{2}\.\d{2}\.\d+|\d{6}(v\d+)?$)"       # bioRxiv, medRxiv
+    # Le préfixe que portent les DOI datés de bioRxiv et medRxiv en 2026 (vu sur HPAI_last :
+    # « 10.64898/2026.08.06.26359901 », revue « medRxiv : the preprint server… »).
+    r"|^10\.64898/\d{4}\.\d{2}\.\d{2}\.\d+"
+    r"|^10\.21203/rs\."                                         # Research Square
+    r"|^10\.2139/ssrn\."                                        # SSRN
+    r"|^10\.20944/preprints"                                    # Preprints.org
+    r"|^10\.48550/arxiv\."                                      # arXiv
+    r"|^10\.3123[45]/osf\.io/|^10\.31219/osf\.io/"              # OSF, PsyArXiv, SocArXiv
+    r"|^10\.26434/chemrxiv|^10\.36227/techrxiv|^10\.32942/"     # ChemRxiv, TechRxiv, EcoEvoRxiv
+    r"|^10\.22541/au\.|^10\.2196/preprints\."                   # Authorea, JMIR Preprints
+    r"|^10\.1590/scielopreprints\."                             # SciELO Preprints
+)
+PREPRINT_URL_RE = (
+    r"(biorxiv\.org|medrxiv\.org|arxiv\.org/|researchsquare\.com|ssrn\.com|preprints\.org"
+    r"|chemrxiv\.org|psyarxiv\.com|osf\.io/preprints|authorea\.com"
+    r"|europepmc\.org/article/ppr/)"
+)
+#: Nom de revue d'un serveur de préprints, en tête du champ (PubMed écrit « bioRxiv : the
+#: preprint server for biology », Crossref « SSRN Electronic Journal »).
+PREPRINT_JOURNAL_RE = (
+    r"^(biorxiv|medrxiv|arxiv|research ?square|ssrn|preprints?(\.org)?|chemrxiv|techrxiv"
+    r"|psyarxiv|socarxiv|osf preprints|authorea|scielo preprints|jmir preprints)\y"
+)
+PREPRINT_SOURCES = ("preprint", "biorxiv", "medrxiv", "arxiv")
+
+
+def preprint_sql(doc: str = "d") -> str:
+    """Le prédicat SQL « ce document est un préprint » sur l'alias `doc` de
+    literature_document. Un seul endroit : le filtre de recherche, la règle de corpus, le
+    lien incrémental et les chiffres PRISMA l'emploient tous."""
+    _doi = f"lower(COALESCE({doc}.doi, ''))"
+    _journal = f"TRIM(COALESCE({doc}.journal, ''))"
+    _sources = ", ".join(f"'{s}'" for s in PREPRINT_SOURCES)
+    _says_preprint = (
+        f"({_doi} ~ '{PREPRINT_DOI_RE}'"
+        f" OR {doc}.source_type = 'preprint'"
+        f" OR lower(COALESCE({doc}.source, '')) IN ({_sources})"
+        f" OR lower(COALESCE({doc}.url, '')) ~ '{PREPRINT_URL_RE}'"
+        f" OR {_journal} ~* '{PREPRINT_JOURNAL_RE}')"
+    )
+    # Le DOI d'une ligne venue d'un serveur ou d'une facette de préprints est celui du
+    # préprint, même quand le serveur n'est pas dans la liste (Qeios, ScienceOpen) : il ne
+    # vaut pas version publiée. Celui d'arXiv, si.
+    _from_server = f"lower(COALESCE({doc}.source, '')) IN ('preprint', 'biorxiv', 'medrxiv')"
+    _published = (
+        f"(({_doi} ~ '^10\\.' AND NOT {_doi} ~ '{PREPRINT_DOI_RE}' AND NOT {_from_server})"
+        f" OR ({_journal} <> '' AND NOT {_journal} ~* '{PREPRINT_JOURNAL_RE}'))"
+    )
+    return f"({_says_preprint} AND NOT {_published})"
+
+
+def excludes_preprints(filters: dict[str, Any] | None) -> bool:
+    """Les filtres d'une recherche excluent-ils les préprints ?"""
+    _v = (filters or {}).get("exclude_preprints")
+    return _v is True or str(_v).strip().lower() in ("1", "true", "yes", "on")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Search helpers
 # ─────────────────────────────────────────────────────────────────────────────
 def _build_where(filters: dict[str, Any] | None) -> tuple[str, dict[str, Any]]:
@@ -72,6 +152,10 @@ def _build_where(filters: dict[str, Any] | None) -> tuple[str, dict[str, Any]]:
     if year_max not in (None, ""):
         clauses.append("d.year <= :year_max")
         params["year_max"] = int(year_max)
+
+    # Recherche « sans préprints » : la bibliothèque locale n'en apparie plus aucun.
+    if excludes_preprints(filters):
+        clauses.append(f"NOT {preprint_sql('d')}")
 
     if not clauses:
         return "", {}
@@ -1150,14 +1234,15 @@ def _source_label(fetcher_name: str) -> str:
 
 
 #: La ou les clés sous lesquelles un fetcher ÉCRIT ses enregistrements, quand elles
-#: diffèrent de son propre nom. Deux le font : `_fetch_preprints` écrit sous « preprint »
-#: au singulier, et `_fetch_biorxiv_medrxiv` sous « biorxiv » et « medrxiv » séparément.
+#: diffèrent de son propre nom : `_fetch_preprints` écrit sous « preprint » au singulier.
 #: Le tableau d'identification portait donc une ligne fantôme à zéro juste à côté de la
 #: vraie (« preprint 5 » et « preprints 0 »), et l'issue de la source se décidait sur un
-#: compteur qui n'était pas le sien.
+#: compteur qui n'était pas le sien. (`_fetch_biorxiv_medrxiv`, qui écrivait sous
+#: « biorxiv » et « medrxiv », a quitté la fédération : l'API bioRxiv ne cherche pas par
+#: mots-clés, et Europe PMC indexe ces deux serveurs. Les chiffres déjà enregistrés sont
+#: stockés tout calculés ; l'interface replie encore ses clés pour les afficher.)
 SOURCE_RECORD_KEYS = {
     "preprints": ("preprint",),
-    "biorxiv_medrxiv": ("biorxiv", "medrxiv"),
 }
 
 
@@ -1204,7 +1289,11 @@ def _prisma_identification_figures(records_by_source: dict, unique_records: int,
                                    source_caps: dict | None = None,
                                    title_abstract_sources: list | None = None,
                                    unranked_sources: list | None = None,
-                                   split_queries: dict | None = None) -> dict[str, Any]:
+                                   split_queries: dict | None = None,
+                                   preprints_excluded: bool = False,
+                                   removed_preprints: int = 0,
+                                   preprints_excluded_at_source: list | None = None,
+                                   preprint_sources_not_searched: list | None = None) -> dict[str, Any]:
     """Chiffres PRISMA 2020 de l'étape « identification », calculés à partir de ce qu'une
     recherche a RÉELLEMENT ramené - et non du corpus déjà dédupliqué.
 
@@ -1258,10 +1347,19 @@ def _prisma_identification_figures(records_by_source: dict, unique_records: int,
                              ce qui est gardé y est un sous-ensemble arbitraire.
     split_queries          : les sources qui ont reçu le booléen entier découpé en
                              plusieurs requêtes (DOAJ ne pagine pas une requête longue).
+    preprints_excluded     : la recherche exclut les préprints (critère choisi par
+                             l'utilisateur). Les serveurs de préprints ne sont alors pas
+                             interrogés (`preprint_sources_not_searched`), certaines bases
+                             les excluent dans la requête elle-même
+                             (`preprints_excluded_at_source` : « NOT preprint[pt] » pour
+                             PubMed, « NOT SRC:PPR » pour Europe PMC), et ceux que les
+                             autres bases rendent sont retirés avant le screening
+                             (`removed_preprints`), sur leur propre ligne.
 
     PRISMA 2020 : identifiés → doublons retirés → (retirés pour d'autres raisons) →
-    passés au screening. « Autres raisons » ici : pas de résumé, ou enregistrement d'une
-    source par mots-clés qui ne correspond pas à la requête booléenne en local."""
+    passés au screening. « Autres raisons » ici : pas de résumé, préprint quand la
+    recherche les exclut, ou enregistrement d'une source par mots-clés qui ne correspond
+    pas à la requête booléenne en local."""
     from datetime import datetime as _dt, timezone as _tz
     _raw = {str(k): int(v or 0) for k, v in (records_by_source or {}).items()}
     library = max(0, int(records_from_library or 0) or _raw.pop("db_cache", 0))
@@ -1271,9 +1369,9 @@ def _prisma_identification_figures(records_by_source: dict, unique_records: int,
     # porter la ligne et son issue, sinon le lecteur ne peut pas savoir que PubMed a
     # échoué, il peut seulement constater que PubMed n'y est pas. Et chaque source sous
     # SON nom : un fetcher qui écrit ses enregistrements sous une autre clé (« preprint »
-    # pour `_fetch_preprints`, « biorxiv » et « medrxiv » pour `_fetch_biorxiv_medrxiv`)
-    # donnait deux lignes à la carte, « preprint 249 » sans issue et « preprints 0 · a
-    # répondu », parce que l'issue et le compte ne se retrouvaient pas sous la même clé.
+    # pour `_fetch_preprints`, et naguère « biorxiv » et « medrxiv ») donnait deux lignes
+    # à la carte, « preprint 249 » sans issue et « preprints 0 · a répondu », parce que
+    # l'issue et le compte ne se retrouvaient pas sous la même clé.
     records: dict[str, int] = {}
     folded: set[str] = set()
     for name in outcomes:
@@ -1326,8 +1424,9 @@ def _prisma_identification_figures(records_by_source: dict, unique_records: int,
     # identifiés − doublons − retraits = passés au screening tienne toujours.
     to_explain = max(0, unique_after - corpus)
     no_abstract = min(to_explain, max(0, int(removed_no_abstract or 0)))
-    not_matching = min(to_explain - no_abstract, max(0, int(removed_not_matching or 0)))
-    other = to_explain - no_abstract - not_matching
+    preprints = min(to_explain - no_abstract, max(0, int(removed_preprints or 0)))
+    not_matching = min(to_explain - no_abstract - preprints, max(0, int(removed_not_matching or 0)))
+    other = to_explain - no_abstract - preprints - not_matching
     # La requête RÉELLEMENT soumise à chaque source en repli. Elles ne reçoivent pas toutes
     # la même : les sources à la limite d'URL partagent une réduction, arXiv a la sienne
     # (syntaxe `all:`), OpenAIRE la sienne (quatre opérateurs au plus). La chaîne unique
@@ -1393,6 +1492,12 @@ def _prisma_identification_figures(records_by_source: dict, unique_records: int,
         "removed_other_reasons": other,
         "removed_before_screening": to_explain,
         "records_screened": corpus,
+        # L'exclusion des préprints, quand la recherche la demande : un critère
+        # d'éligibilité appliqué par l'outil, à dire comme tel (PRISMA 2020).
+        "preprints_excluded": bool(preprints_excluded),
+        "removed_preprints": preprints,
+        "preprints_excluded_at_source": sorted({_source_label(s) for s in (preprints_excluded_at_source or [])}),
+        "preprint_sources_not_searched": sorted({_source_label(s) for s in (preprint_sources_not_searched or [])}),
     }
 
 
@@ -1417,6 +1522,7 @@ def _reconcile_prisma_identification(figures: dict, corpus_now: int) -> dict[str
     duplicates = int(figures.get("duplicates_removed") or 0)
     unique = int(figures.get("unique_records") or 0)
     no_abstract = int(figures.get("removed_no_abstract") or 0)
+    preprints = int(figures.get("removed_preprints") or 0)
     not_matching = int(figures.get("removed_not_matching") or 0)
     other = int(figures.get("removed_other_reasons") or 0)
     screened_then = max(0, int(figures.get("records_screened") or 0))
@@ -1427,9 +1533,10 @@ def _reconcile_prisma_identification(figures: dict, corpus_now: int) -> dict[str
         "duplicates_removed": duplicates,
         "unique_records": unique,
         "removed_no_abstract": no_abstract,
+        "removed_preprints": preprints,
         "removed_not_matching": not_matching,
         "removed_other_reasons": other,
-        "removed_before_screening": no_abstract + not_matching + other,
+        "removed_before_screening": no_abstract + preprints + not_matching + other,
         "records_screened_at_search": screened_then,
         "added_after_search": max(0, corpus_now - screened_then),
         "removed_after_search": max(0, screened_then - corpus_now),

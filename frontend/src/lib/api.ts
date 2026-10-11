@@ -1129,6 +1129,14 @@ export interface ScenarioPrisma {
     removed_no_abstract?: number;
     removed_not_matching?: number;
     removed_other_reasons?: number;
+    /** A search without preprints: the preprints other databases returned, removed before
+     *  screening (an eligibility criterion applied by the tool). */
+    removed_preprints?: number;
+    preprints_excluded?: boolean;
+    /** Databases that excluded preprints in the query itself (PubMed, Europe PMC). */
+    preprints_excluded_at_source?: string[];
+    /** Preprint servers not searched at all (Europe PMC preprints, arXiv). */
+    preprint_sources_not_searched?: string[];
     // Corpus changes since the search that produced the figures (their own lines in the panel).
     added_after_search?: number;
     removed_after_search?: number;
@@ -2713,12 +2721,17 @@ export async function fetchActivity(): Promise<{ running: ActivityItem[]; count:
 /** Construit le corpus (= requête booléenne sur base locale ∪ live) en arrière-plan. */
 export async function populateUserScenario(
   scenarioId: string,
-  opts?: { includeLive?: boolean; maxResults?: number },
+  opts?: { includeLive?: boolean; maxResults?: number; excludePreprints?: boolean },
 ): Promise<{ scenario_id: string; status: string; message?: string }> {
   const params = new URLSearchParams();
   params.set('max_results', String(opts?.maxResults ?? 2000));
   params.set('include_live', String(opts?.includeLive ?? true));
   params.set('lang', currentLang());          // cluster summaries precomputed in this language
+  // Saved on the scenario by the server, so a pinned scenario searched again with the
+  // toggle changed is rebuilt with it. Absent: the scenario keeps its recorded choice.
+  if (opts?.excludePreprints !== undefined) {
+    params.set('exclude_preprints', String(opts.excludePreprints));
+  }
   const r = await safeFetch(
     `${API_BASE_URL}/user-scenarios/${scenarioId}/populate?${params}`,
     { method: 'POST', headers: authHeaders() },

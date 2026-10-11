@@ -30,6 +30,7 @@ from .scenario_store import (
     scenario_counts,
     scenario_search_mode,
     screening_status_sql,
+    set_scenario_exclude_preprints,
     set_scenario_search_mode,
 )
 from .schema_boot import _exec_ddl_isolated
@@ -41,6 +42,7 @@ from .search import (
     _load_prisma_identification,
     _looks_boolean,
     _normalize_sub_queries,
+    excludes_preprints,
 )
 from .alerts import _clean_email, _ensure_alert_subscription
 
@@ -1184,8 +1186,7 @@ def _launch_populate_job(scenario_id: str, query: str, filters: dict, max_result
             "status": "running", "ingested": 0, "errors": 0, "total_found": 0,
             "sources": {"db_cache": 0, "pubmed": 0, "openalex": 0, "crossref": 0,
                         "europepmc": 0, "preprint": 0, "semantic_scholar": 0, "doaj": 0,
-                        "clinicaltrials": 0, "core": 0, "arxiv": 0, "openaire": 0,
-                        "biorxiv": 0, "medrxiv": 0},
+                        "clinicaltrials": 0, "core": 0, "arxiv": 0, "openaire": 0},
         }
     # Persister l'état « en cours » : la liste des scénarios et l'indicateur global
     # (/activity) le lisent en base - une recherche lancée puis quittée (autre page,
@@ -1240,6 +1241,7 @@ def populate_user_scenario(
     force_live: bool = False,
     exhaustive: bool | None = None,
     auto_pipeline: bool = True,
+    exclude_preprints: bool | None = None,
     _: None = Depends(require_api_key),
 ) -> dict[str, Any]:
     """
@@ -1250,11 +1252,18 @@ def populate_user_scenario(
     le booléen renvoie) ; false : standard. Le choix est ENREGISTRÉ sur le scénario, et
     toute relance le reprend ; absent, c'est le mode déjà enregistré qui s'applique.
     auto_pipeline=false : ne pas enchaîner le pipeline complet après cette recherche.
+    exclude_preprints=true : recherche SANS préprints (serveurs de préprints non
+    interrogés, préprints rendus par les autres bases retirés avant le screening, et dits
+    sur la carte PRISMA) ; false : avec. Enregistré dans les filtres du scénario, comme le
+    mode ; absent, c'est le choix déjà enregistré qui s'applique.
     """
     row = _get_user_scenario_or_404(scenario_id)
     query = row["query"]
     if exhaustive is not None:
         set_scenario_search_mode(scenario_id, "exhaustive" if exhaustive else "standard")
+    if exclude_preprints is not None:
+        set_scenario_exclude_preprints(scenario_id, bool(exclude_preprints))
+        row = _get_user_scenario_or_404(scenario_id)
 
     # `lang` : la langue de l'interface qui lance la recherche : les résumés de clusters
     # précalculés à la fin le sont dans cette langue (plus de première ouverture qui attend).
@@ -1275,11 +1284,15 @@ def populate_user_scenario(
         "query": query,
         "max_results": max_results,
         "search_mode": scenario_search_mode(scenario_id),
-        "message": f"Ingération multi-sources lancée en arrière-plan pour '{row['name']}' "
-                   "(DB Cache + PubMed + OpenAlex + Crossref + EuropePMC + Preprints + "
-                   "Semantic Scholar + DOAJ + ClinicalTrials.gov + CORE + arXiv + OpenAIRE + "
-                   "medRxiv + bioRxiv). "
-                   "Utilisez /user-scenarios/{id}/populate/status pour suivre la progression.",
+        "exclude_preprints": excludes_preprints(row.get("filters")),
+        "message": f"Ingestion multi-sources lancée en arrière-plan pour '{row['name']}' "
+                   + ("(DB Cache + PubMed + OpenAlex + Crossref + EuropePMC + "
+                      "Semantic Scholar + DOAJ + ClinicalTrials.gov + CORE + OpenAIRE ; "
+                      "préprints exclus). "
+                      if excludes_preprints(row.get("filters")) else
+                      "(DB Cache + PubMed + OpenAlex + Crossref + EuropePMC + Préprints Europe PMC + "
+                      "Semantic Scholar + DOAJ + ClinicalTrials.gov + CORE + arXiv + OpenAIRE). ")
+                   + "Utilisez /user-scenarios/{id}/populate/status pour suivre la progression.",
     }
 
 

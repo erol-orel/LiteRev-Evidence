@@ -4424,6 +4424,11 @@ function PrismaSection({ scenarioId }: { scenarioId: string }) {
             {ident.figures_from === "search_run" && (
               <>
                 <PrismaRow label={t("scenarioDetail.prisma.removedNoAbstract")} value={num(ident.removed_no_abstract)} />
+                {/* Une recherche sans préprints : un critère d'éligibilité appliqué par
+                    l'outil, sur sa propre ligne (PRISMA 2020). */}
+                {ident.preprints_excluded && (
+                  <PrismaRow label={t("scenarioDetail.prisma.removedPreprints")} value={num(ident.removed_preprints)} />
+                )}
                 <PrismaRow label={t("scenarioDetail.prisma.removedNotMatching")} value={num(ident.removed_not_matching)} />
                 {num(ident.removed_other_reasons) > 0 && (
                   <PrismaRow label={t("scenarioDetail.prisma.removedOtherReasons")} value={num(ident.removed_other_reasons)} />
@@ -4535,6 +4540,31 @@ function PrismaSection({ scenarioId }: { scenarioId: string }) {
                 .replace("{n}", String(parts.length))}
             </p>
           ))}
+          {/* L'exclusion des préprints et ses trois moyens, à citer dans une section
+              Méthodes : serveurs non interrogés, exclusion dans la requête, retrait. */}
+          {ident.preprints_excluded && (
+            <p className="text-[10px] text-emerald-300/60 pt-1 leading-relaxed">
+              {t("scenarioDetail.prisma.preprintsExcluded")}
+              {(ident.preprint_sources_not_searched?.length ?? 0) > 0 && (
+                <span className="block">
+                  · {t("scenarioDetail.prisma.preprintsNotSearched")
+                    .replace("{sources}", (ident.preprint_sources_not_searched ?? [])
+                      .map((s) => SOURCE_LABELS_MAP[s] ?? s).join(", "))}
+                </span>
+              )}
+              {(ident.preprints_excluded_at_source?.length ?? 0) > 0 && (
+                <span className="block">
+                  · {t("scenarioDetail.prisma.preprintsAtSource")
+                    .replace("{sources}", (ident.preprints_excluded_at_source ?? [])
+                      .map((s) => SOURCE_LABELS_MAP[s] ?? s).join(", "))}
+                </span>
+              )}
+              <span className="block">
+                · {t("scenarioDetail.prisma.preprintsRemoved")
+                  .replace("{n}", num(ident.removed_preprints).toLocaleString())}
+              </span>
+            </p>
+          )}
           {fallbackGroups.map(([q, srcs]) => (
             <p key={q} className="text-[10px] text-amber-300/80 pt-1 leading-relaxed break-words">
               {t("scenarioDetail.prisma.keywordFallback")

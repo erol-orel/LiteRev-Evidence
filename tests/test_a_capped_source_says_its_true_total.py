@@ -50,8 +50,8 @@ def test_a_source_that_announced_more_than_it_returned_is_named_capped():
 
 
 def test_a_source_without_an_announced_total_is_never_called_capped():
-    """Les préprints d'Europe PMC et bioRxiv/medRxiv n'annoncent pas de total : ne pas
-    inventer."""
+    """Une source qui n'a pas transmis de total (le cas de la facette préprints d'Europe PMC
+    avant qu'elle note le sien) n'est jamais dite plafonnée : ne pas inventer."""
     f = _prisma_identification_figures(
         {"preprint": 2000, "pubmed": 30}, 2030, 0, 2030,
         source_outcomes={"_fetch_preprints": "ok", "_fetch_pubmed": "ok"},

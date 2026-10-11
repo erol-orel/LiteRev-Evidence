@@ -116,8 +116,10 @@ test("runs a two-facet search on the local corpus and names the scenario with th
   await page.getByPlaceholder(en.search.subQueryPlaceholder).fill("wastewater");
   await page.getByRole("button", { name: en.search.combinatorIntersection, exact: true }).click();
 
-  // Live sources stay off (the checkbox is unchecked by default): local corpus only.
-  await expect(page.getByRole("checkbox")).not.toBeChecked();
+  // Live sources stay off (the checkbox is unchecked by default): local corpus only. The
+  // preprint exclusion is off by default too: a search keeps preprints unless asked.
+  await expect(page.getByRole("checkbox", { name: en.search.includeLive })).not.toBeChecked();
+  await expect(page.getByRole("checkbox", { name: en.search.excludePreprints })).not.toBeChecked();
   await page.locator("#search-btn").click();             // the nav tab is also named "Search"
 
   // The corpus is built server-side, then the most relevant articles are shown.

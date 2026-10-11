@@ -300,8 +300,11 @@ export const fr = {
     searching: "Recherche...",
     searchButton: "Rechercher",
     includeLive:
-      "Inclure les sources API en direct (PubMed, OpenAlex, Crossref, EuropePMC, Semantic Scholar, DOAJ, ClinicalTrials.gov, CORE, arXiv, OpenAIRE, bioRxiv, medRxiv, préprints Europe PMC)",
+      "Inclure les sources API en direct (PubMed, OpenAlex, Crossref, EuropePMC, Semantic Scholar, DOAJ, ClinicalTrials.gov, CORE, arXiv, OpenAIRE, préprints Europe PMC : bioRxiv, medRxiv, Research Square…)",
     includeLiveHint: "Recherche plus lente, ajoute les articles non encore indexes",
+    excludePreprints: "Exclure les préprints",
+    excludePreprintsHint:
+      "Les serveurs de préprints ne sont pas interrogés, PubMed et Europe PMC les excluent dans la requête, et ceux que rendent les autres bases sont retirés avant le screening (dit sur la carte PRISMA)",
     addSubQuery: "Ajouter une sous-requête",
     combineHint: "La requête principale ci-dessus est combinée avec ces sous-requêtes :",
     combinator: "Combiner par",
@@ -599,7 +602,7 @@ export const fr = {
       loadingCorpus: "Chargement du corpus d'articles...",
       autoSelectionTitle: "Sélection automatique",
       autoSelectionBody1:
-        ": Ces articles ont été récupérés depuis le cache local et 13 sources API (PubMed, OpenAlex, Crossref, EuropePMC, Semantic Scholar, DOAJ, ClinicalTrials.gov, CORE, arXiv, OpenAIRE, bioRxiv, medRxiv, préprints Europe PMC) par recherche multi-sources.",
+        ": Ces articles ont été récupérés depuis le cache local et jusqu'à 11 sources API (PubMed, OpenAlex, Crossref, EuropePMC, Semantic Scholar, DOAJ, ClinicalTrials.gov, CORE, arXiv, OpenAIRE, préprints Europe PMC) par recherche multi-sources ; la carte PRISMA dit lesquelles ont répondu.",
       autoSelectionBody2: "Aucun n'a été validé par un relecteur humain.",
       autoSelectionBody3:
         "Pour une revue systématique formelle, un screening humain en double-aveugle est requis (onglet Revue).",
@@ -825,6 +828,11 @@ export const fr = {
       duplicatesRemoved: "Doublons retirés",
       uniqueRecords: "Enregistrements uniques",
       removedNoAbstract: "Retirés : sans résumé",
+      removedPreprints: "Retirés : préprints (recherche sans préprints)",
+      preprintsExcluded: "Recherche sans préprints (critère d'exclusion) :",
+      preprintsNotSearched: "serveurs de préprints non interrogés : {sources}",
+      preprintsAtSource: "exclus dans la requête par {sources}",
+      preprintsRemoved: "{n} préprints rendus par les autres bases, retirés avant le screening",
       removedNotMatching: "Retirés : hors requête booléenne (renvoyés par une source par mots-clés)",
       addedAfterSearch: "Ajoutés après la recherche (pages tardives d'une source, reconstruction du corpus)",
       removedAfterSearch: "Retirés après la recherche (doublons marqués ensuite, documents purgés)",

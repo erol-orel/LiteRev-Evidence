@@ -163,12 +163,14 @@ def src_openaire():
 
 
 def src_biorxiv_medrxiv():
+    # Not a search source any more (no keyword API; the Europe PMC preprint facet searches
+    # both servers): reachability only, because the full-text step asks it by DOI.
     from datetime import date, timedelta
     to = date.today(); win = f"{(to - timedelta(days=45)).isoformat()}/{to.isoformat()}"
     for server in ("biorxiv", "medrxiv"):
         r = requests.get(f"https://api.biorxiv.org/details/{server}/{win}/0/json", headers=UA, timeout=TIMEOUT)
         n = int((r.json().get("messages") or [{}])[0].get("total", 0) or 0)
-        line(f"{server} (45d window)", r.ok, n, "no keyword search - window scan + local filter")
+        line(f"{server} API (full text)", r.ok, n, "not a search source: full text by DOI")
 
 
 # ── data connectors ───────────────────────────────────────────────────────────
@@ -221,13 +223,13 @@ if __name__ == "__main__":
     print(f"keys: NCBI={bool(os.getenv('NCBI_API_KEY'))} "
           f"S2={bool(os.getenv('SEMANTIC_SCHOLAR_API_KEY'))} CORE={bool(os.getenv('CORE_API_KEY'))}")
     print("=" * 78)
-    print("13 literature sources (each source's OWN total for the query):")
+    print("11 literature sources (each source's OWN total for the query), then the bioRxiv API:")
     for fn, nm in [
         (src_pubmed, "PubMed"), (src_openalex, "OpenAlex"), (src_crossref, "Crossref"),
         (src_europepmc, "Europe PMC"), (src_preprints, "Preprints"),
         (src_semantic_scholar, "Semantic Scholar"), (src_doaj, "DOAJ"),
         (src_clinicaltrials, "ClinicalTrials.gov"), (src_core, "CORE"),
-        (src_arxiv, "arXiv"), (src_openaire, "OpenAIRE"), (src_biorxiv_medrxiv, "bioRxiv/medRxiv"),
+        (src_arxiv, "arXiv"), (src_openaire, "OpenAIRE"), (src_biorxiv_medrxiv, "bioRxiv/medRxiv API (full text)"),
     ]:
         _try(fn, nm)
     connectors()

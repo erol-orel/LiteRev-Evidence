@@ -406,7 +406,7 @@ def test_parse_core():
         assert main._parse_core(bad) == []
 
 
-# ── PR B2 parsers: arXiv (XML), bioRxiv (scan+filter), OpenAIRE (nested) ──────
+# ── PR B2 parsers: arXiv (XML), OpenAIRE (nested) ─────────────────────────────
 def test_parse_arxiv():
     xml = """<?xml version="1.0" encoding="UTF-8"?>
     <feed xmlns="http://www.w3.org/2005/Atom" xmlns:arxiv="http://arxiv.org/schemas/atom">
@@ -426,21 +426,6 @@ def test_parse_arxiv():
     assert d["title"] == "Deep learning for ILI nowcasting"        # whitespace collapsed
     assert d["doi"] == "10.9/arxiv.x" and d["source_type"] == "preprint"
     assert main._parse_arxiv("not xml at all") == []               # malformed → []
-
-
-def test_parse_biorxiv_filters_by_keywords():
-    payload = {"collection": [
-        {"doi": "10.1101/aaa", "title": "Respiratory virus wastewater",
-         "abstract": "influenza surveillance", "date": "2025-03-01"},
-        {"doi": "10.1101/bbb", "title": "Unrelated", "abstract": "quantum widgets", "date": "2025-02-01"},
-        {"doi": None, "title": "no doi", "abstract": "influenza respiratory wastewater"},
-    ]}
-    terms = ["respiratory", "influenza", "wastewater"]
-    docs = main._parse_biorxiv(payload, terms, "biorxiv")
-    assert len(docs) == 1                                          # only the matching, DOI-bearing one
-    assert docs[0]["external_id"] == "biorxiv:10.1101/aaa" and docs[0]["year"] == 2025
-    # no terms → keep all DOI-bearing entries
-    assert len(main._parse_biorxiv(payload, [], "medrxiv")) == 2
 
 
 def test_openaire_text_helper():

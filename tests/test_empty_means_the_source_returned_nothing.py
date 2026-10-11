@@ -11,11 +11,11 @@ l'application.
    démenti côte à côte. C'est exactement le mensonge que la table des issues existe pour
    empêcher, dans la table elle-même.
 
-2. Deux fetchers sur douze écrivent leurs enregistrements sous une clé qui n'est pas leur
-   nom : `_fetch_preprints` sous « preprint » au singulier, et `_fetch_biorxiv_medrxiv`
-   sous « biorxiv » et « medrxiv » séparément. Le tableau portait donc une ligne fantôme à
-   zéro juste à côté de la vraie, et l'issue se décidait sur un compteur qui n'était pas
-   celui de la source.
+2. Des fetchers écrivaient leurs enregistrements sous une clé qui n'est pas leur nom :
+   `_fetch_preprints` sous « preprint » au singulier (et `_fetch_biorxiv_medrxiv`, retiré
+   depuis de la fédération, sous « biorxiv » et « medrxiv »). Le tableau portait donc une
+   ligne fantôme à zéro juste à côté de la vraie, et l'issue se décidait sur un compteur
+   qui n'était pas celui de la source.
 """
 import inspect
 
@@ -71,9 +71,9 @@ def test_a_source_whose_whole_batch_was_already_known_is_not_empty():
 def test_no_outcome_contradicts_its_own_count():
     """La règle, énoncée : `empty` et un compte positif ne peuvent pas coexister."""
     f = _prisma_identification_figures(
-        {"preprint": 5, "biorxiv": 2, "medrxiv": 1, "pubmed": 30, "crossref": 0},
-        38, 0, 38,
-        source_outcomes={"_fetch_preprints": "ok", "_fetch_biorxiv_medrxiv": "ok",
+        {"preprint": 5, "pubmed": 30, "crossref": 0},
+        35, 0, 35,
+        source_outcomes={"_fetch_preprints": "ok",
                          "_fetch_pubmed": "ok", "_fetch_crossref": "empty"})
     for src, outcome in f["source_outcomes"].items():
         # Les lignes sont sous le nom de la source : le compte de `_fetch_preprints` est
@@ -87,9 +87,8 @@ def test_no_outcome_contradicts_its_own_count():
 
 # ── Les clés d'enregistrement ────────────────────────────────────────────────
 
-def test_the_two_fetchers_that_write_under_another_name_are_mapped():
+def test_the_fetcher_that_writes_under_another_name_is_mapped():
     assert source_record_keys("_fetch_preprints") == ("preprint",)
-    assert source_record_keys("_fetch_biorxiv_medrxiv") == ("biorxiv", "medrxiv")
     # Les dix autres écrivent sous leur propre nom.
     for n in ("pubmed", "openalex", "crossref", "europepmc", "semantic_scholar",
               "doaj", "clinicaltrials", "core", "arxiv", "openaire"):
@@ -100,14 +99,11 @@ def test_the_two_fetchers_that_write_under_another_name_are_mapped():
 def test_the_mapping_matches_what_the_fetchers_actually_write():
     """Épingle la correspondance contre le CODE, pour qu'un fetcher renommé la casse ici.
 
-    `_fetch_preprints` passe `source="preprint"`, et `_fetch_biorxiv_medrxiv` passe
-    `_server`, qui vaut « biorxiv » ou « medrxiv »."""
+    `_fetch_preprints` passe `source="preprint"`."""
     assert 'source="preprint"' in SRC, (
         "le fetcher préprints n'écrit plus sous « preprint » : la correspondance "
         "SOURCE_RECORD_KEYS doit suivre")
-    assert "_ingest_parsed(_server, _parse_biorxiv(" in SRC, (
-        "le fetcher bioRxiv/medRxiv n'écrit plus sous le nom du serveur")
-    assert set(SOURCE_RECORD_KEYS) == {"preprints", "biorxiv_medrxiv"}, (
+    assert set(SOURCE_RECORD_KEYS) == {"preprints"}, (
         "une correspondance a été ajoutée ou retirée sans que ce test le dise")
 
 
@@ -119,9 +115,9 @@ def test_one_row_per_source_under_its_own_name():
     répondu », vu sur le premier run de production après #326. Le compte est désormais
     replié sous le nom de la source, là où est son issue."""
     f = _prisma_identification_figures(
-        {"preprint": 5, "biorxiv": 2, "medrxiv": 1}, 8, 0, 8,
-        source_outcomes={"_fetch_preprints": "ok", "_fetch_biorxiv_medrxiv": "ok"})
-    assert f["records_by_source"] == {"preprints": 5, "biorxiv_medrxiv": 3}, f["records_by_source"]
+        {"preprint": 5, "pubmed": 3}, 8, 0, 8,
+        source_outcomes={"_fetch_preprints": "ok", "_fetch_pubmed": "ok"})
+    assert f["records_by_source"] == {"preprints": 5, "pubmed": 3}, f["records_by_source"]
     assert f["records_identified"] == 8
 
 
@@ -140,7 +136,7 @@ def test_a_source_with_no_records_at_all_still_gets_its_row():
     f = _prisma_identification_figures(
         {"pubmed": 30}, 30, 0, 30,
         source_outcomes={"_fetch_pubmed": "ok", "_fetch_openalex": "error",
-                         "_fetch_preprints": "empty", "_fetch_biorxiv_medrxiv": "empty"})
-    for name in ("openalex", "preprints", "biorxiv_medrxiv"):
+                         "_fetch_preprints": "empty"})
+    for name in ("openalex", "preprints"):
         assert name in f["records_by_source"], f"{name} a perdu sa ligne"
         assert f["records_by_source"][name] == 0

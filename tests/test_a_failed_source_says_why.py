@@ -32,14 +32,15 @@ SRC = inspect.getsource(_run_user_scenario_populate)
 # ── La raison voyage ─────────────────────────────────────────────────────────
 
 def test_every_source_failure_passes_its_reason():
-    """Treize `except` marquent une source en échec ; aucun ne doit le faire en silence."""
+    """Douze `except` marquent une source en échec (treize avant que le fetcher natif
+    bioRxiv/medRxiv quitte la fédération) ; aucun ne doit le faire en silence."""
     bare = SRC.count("_mark_source_error()")
     assert bare == 0, (
         f"{bare} site(s) marquent encore un échec sans sa raison ; la carte PRISMA dira "
         "« échec » sans dire de quoi")
     with_reason = len(re.findall(r"_mark_source_error\(_e[_a-z]*\)", SRC))
-    assert with_reason >= 13, (
-        f"seulement {with_reason} sites passent la raison, 13 attendus")
+    assert with_reason >= 12, (
+        f"seulement {with_reason} sites passent la raison, 12 attendus")
 
 
 def test_the_reasons_are_kept_by_source_not_counted():

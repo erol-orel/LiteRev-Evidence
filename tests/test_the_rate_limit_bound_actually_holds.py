@@ -179,12 +179,13 @@ def test_the_coverage_line_names_the_rate_limited_source(federation):
     assert "échec" in msg or "error" in msg
 
 
-def test_the_other_eleven_sources_are_not_held_up_by_the_throttled_one(federation):
-    """Le fil de la source limitée ne doit pas retarder la recherche entière."""
+def test_the_other_ten_sources_are_not_held_up_by_the_throttled_one(federation):
+    """Le fil de la source limitée ne doit pas retarder la recherche entière. (Onze
+    sources depuis que le fetcher natif bioRxiv/medRxiv a quitté la fédération.)"""
     run, calls, _sid = federation
     job = run()
     outcomes = job.get("source_outcomes") or {}
-    assert len(outcomes) >= 12, f"seulement {len(outcomes)} sources déclarées"
+    assert len(outcomes) >= 11, f"seulement {len(outcomes)} sources déclarées"
     # Les autres ont bien répondu (vide, ici), donc elles ont été interrogées.
     searched = (job.get("prisma_identification") or {}).get("sources_searched")
     assert searched is not None and searched >= 9, (

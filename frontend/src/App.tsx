@@ -144,6 +144,9 @@ interface SavedSearch {
   // between the facets is part of the search - replaying only `query` lost it).
   subQueries?: SubQuery[] | null;
   combinator?: "union" | "intersection" | null;
+  // A search without preprints (`exclude_preprints` in the scenario's filters): restored
+  // on replay, so the same search runs again.
+  excludePreprints?: boolean;
 }
 
 // localStorage supprimé : les recherches sauvegardées sont désormais persistées en backend (table user_scenarios)
@@ -1924,6 +1927,8 @@ export default function App() {
   };
   const [mode, setMode] = useState<SearchMode>("boolean");
   const [includeLive, setIncludeLive] = useState(false);
+  // Recherche sans préprints : enregistrée dans les filtres du scénario par le serveur.
+  const [excludePreprints, setExcludePreprints] = useState(false);
   const [query, setQuery] = useState("");
   // Type de la requête principale : "auto" (détecté) par défaut, comme les sous-requêtes ;
   // cliquable pour forcer. Remplace l'ancien toggle mode (défaut "boolean") qui traitait
@@ -2147,6 +2152,7 @@ export default function App() {
             pinned: u.pinned,
             subQueries: u.sub_queries ?? null,
             combinator: u.combinator ?? null,
+            excludePreprints: u.filters?.exclude_preprints === true,
           })));
           setLoadingScenarios(false);
         })
@@ -2293,7 +2299,7 @@ export default function App() {
         name: scenarioDisplayName(_sub ? combinedQueryText(_sub, combinator) : query),
         query: query.trim(),
         mode,
-        filters: { projectContext },
+        filters: { projectContext, ...(excludePreprints ? { exclude_preprints: true } : {}) },
         result_count: 0,
         pinned: false,
         search_strategy: strategy ?? undefined,
@@ -2301,7 +2307,9 @@ export default function App() {
       });
       const sid = newScenario.id;
       setCurrentSearchSid(sid);   // → indicateur global (« Voir les résultats » revient ici)
-      await populateUserScenario(sid, { includeLive, maxResults: 2000 });
+      // Le choix part AUSSI avec la recherche : un scénario épinglé de même requête est
+      // renvoyé tel quel à la création, filtres compris, et serait sinon relancé sans lui.
+      await populateUserScenario(sid, { includeLive, maxResults: 2000, excludePreprints });
       // ── CONSTRUCTION COMPLÈTE PUIS AFFICHAGE ─────────────────────────────────
       // On construit tout le corpus (base locale ∪ sources en direct), on le score,
       // puis on l'affiche EN UNE FOIS. `renderCorpus` lit le corpus FINAL ; il
@@ -2449,6 +2457,7 @@ export default function App() {
           pinned: false,
           subQueries: newScenario.sub_queries ?? null,
           combinator: newScenario.combinator ?? null,
+          excludePreprints,
         }, ...filtered].slice(0, 50);
       });
     } catch (err) {
@@ -2505,6 +2514,7 @@ export default function App() {
                 pinned: u.pinned,
                 subQueries: u.sub_queries ?? null,
                 combinator: u.combinator ?? null,
+                excludePreprints: u.filters?.exclude_preprints === true,
               })));
             }).catch(console.warn);
           }
@@ -2549,7 +2559,7 @@ export default function App() {
         name,
         query: query.trim(),
         mode,
-        filters: { projectContext },
+        filters: { projectContext, ...(excludePreprints ? { exclude_preprints: true } : {}) },
         result_count: searchTotalMatching ?? results.length,
         pinned: true,
         search_strategy: (mode === "boolean" ? booleanStrategy : null) ?? undefined,
@@ -2568,6 +2578,7 @@ export default function App() {
           pinned: true,
           subQueries: newScenario.sub_queries ?? null,
           combinator: newScenario.combinator ?? null,
+          excludePreprints: newScenario.filters?.exclude_preprints === true,
         }, ...prev]);
         _launchPipelineForScenario(newScenario.id);
       }).catch(err => console.warn('Create user_scenario failed:', err));
@@ -2589,6 +2600,8 @@ export default function App() {
     // Recherche unifiée : toujours en mode booléen (traduction automatique si besoin).
     setMode("boolean");
     setProjectContext(s.projectContext);
+    // La même recherche : avec ou sans préprints, comme elle a été faite.
+    setExcludePreprints(!!s.excludePreprints);
     setActiveTab("search");
     // Déclencher la recherche après mise à jour du state
     setTimeout(() => {
@@ -3057,6 +3070,23 @@ export default function App() {
                   </span>
                 </label>
 
+                {/* Sans préprints : les serveurs de préprints ne sont pas interrogés, et ceux
+                    que rendent les autres bases sortent du corpus avant le screening ; la
+                    carte PRISMA du scénario dit combien. Vaut aussi pour la bibliothèque
+                    locale, d'où une case visible même sans les sources en direct. */}
+                <label className="mt-2 flex items-start gap-2 text-xs text-forest-300 cursor-pointer select-none">
+                  <input
+                    type="checkbox"
+                    checked={excludePreprints}
+                    onChange={(e) => setExcludePreprints(e.target.checked)}
+                    className="mt-0.5 h-4 w-4 accent-brand-400 shrink-0"
+                  />
+                  <span>
+                    <span>{t("search.excludePreprints")}</span>
+                    <span className="block text-forest-500 mt-0.5">{t("search.excludePreprintsHint")}</span>
+                  </span>
+                </label>
+
                 {/* Recherche multi-sous-requêtes (avancé) : combine la requête
                     principale ci-dessus avec des sous-requêtes additionnelles, par
                     union (OU) ou intersection (ET). */}
@@ -3260,8 +3290,10 @@ export default function App() {
                 // Étapes de la recherche pilotées par la PHASE RÉELLE du backend
                 // (/populate/status), pas par un minuteur : le libellé affiché
                 // correspond donc à ce que fait réellement le serveur.
-                const liveSources = ["PubMed", "OpenAlex", "Crossref", "EuropePMC", "Preprints (Europe PMC)",
-                  "Semantic Scholar", "DOAJ", "ClinicalTrials.gov", "CORE", "arXiv", "OpenAIRE", "bioRxiv", "medRxiv"];
+                const liveSources = ["PubMed", "OpenAlex", "Crossref", "EuropePMC",
+                  ...(excludePreprints ? [] : ["Preprints (Europe PMC)"]),
+                  "Semantic Scholar", "DOAJ", "ClinicalTrials.gov", "CORE",
+                  ...(excludePreprints ? [] : ["arXiv"]), "OpenAIRE"];
                 const translating = searchPhase === 'translating';
                 const rankOf: Record<string, number> = { local: 1, federation: 2, scoring: 3, done: 4 };
                 const rank = searchBackendPhase ? rankOf[searchBackendPhase] : 0;

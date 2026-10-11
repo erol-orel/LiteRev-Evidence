@@ -55,13 +55,15 @@ string is derived from it. Each source gets the variant it understands:
 | **Portable boolean** (field tags stripped) | OpenAlex, DOAJ, CORE, ClinicalTrials.gov, OpenAIRE (Graph v2) | ✅ |
 | **Dialect boolean** | arXiv (`all:"…"`, `ANDNOT`); Semantic Scholar (`/paper/search/bulk`: space=AND, `\|`=OR) | ✅ |
 | **Plain keywords / relevance** (no boolean upstream) | Crossref¹ | - (local re-filter) |
-| **No query** (date-window scan + local term filter) | bioRxiv, medRxiv (native)² | - |
 
 ¹ Crossref is the only literature source with no boolean support (relevance-ranked free text).
 Semantic Scholar now uses its **bulk** endpoint for boolean (falls back to the relevance endpoint if
 the query has a `NOT`). OpenAIRE was **migrated to the Graph API v2** (`/graph/v2/researchProducts`,
 cursor-paged) after its legacy `search/publications` endpoint was retired 2026-05-31.
-² bioRxiv/medRxiv have no keyword API; their preprints are boolean-searched via the Europe PMC facet.
+² bioRxiv/medRxiv have no keyword API (date windows only). The native fetcher that scanned their
+last 45 days and filtered on the client found 0 records on HPAI_last and was **removed from the
+federation**; their preprints are boolean-searched through the Europe PMC preprint facet (#5), which
+returned 457 on the same search. The bioRxiv API is still used by the full-text step, by DOI.
 
 **Source-union** (`main.py:_link_to_scenario(boolean_native=True)`): the ✅ sources applied the *real*
 boolean, so their hits enter the corpus **directly** (not re-filtered locally). Falls back to plain
@@ -83,25 +85,25 @@ the corpus count itself stays pure lexical.
 
 ## 1. Literature sources - quick table
 
-| # | Source | Page size | Practical max / search | Date coverage | Key needed | Search type |
-|---|--------|-----------|------------------------|---------------|-----------|-------------|
-| 1 | **PubMed** | 200 | 2000 (newest first) | full history | optional (`NCBI_API_KEY`) | boolean |
-| 2 | **OpenAlex** | 200 | 2000 (newest first) | full history | none (polite email) | keyword |
-| 3 | **Crossref** | 100 | 2000 (by relevance) | full history | none (polite email) | keyword |
-| 4 | **Europe PMC** | 200 | 2000 (newest first) | full history | none | boolean |
-| 5 | **Preprints (Europe PMC)** | 100 | 2000 | full history | none | boolean |
-| 6 | **Semantic Scholar** | 100 | **1000 (API hard cap)** | full history | optional (`SEMANTIC_SCHOLAR_API_KEY`) | keyword |
-| 7 | **DOAJ** | 100 | 2000 | full history (OA only) | none | keyword |
-| 8 | **ClinicalTrials.gov** | 100 | 2000 (trials, not papers) | full registry | none | keyword |
-| 9 | **CORE** | 100 | 2000 | full history | **required (`CORE_API_KEY`, free)** | keyword |
-| 10 | **arXiv** | 100 | **~100 (3 s/req vs 180 s budget)** | full history | none | keyword |
-| 11 | **OpenAIRE** | 50 | 2000 | full history | none | keyword |
-| 12 | **bioRxiv + medRxiv** | 100 | **last 45 days only** | **recent window, no keyword search** | none | date-window + local filter |
+| # | Source | Page size | Standard search keeps | Exhaustive search keeps | Key needed |
+|---|--------|-----------|-----------------------|-------------------------|-----------|
+| 1 | **PubMed** | 200 | 2000, by relevance | every match (eutils stops at 10 000) | optional (`NCBI_API_KEY`) |
+| 2 | **OpenAlex** | 200 | 2000, by relevance | every title/abstract match + its 2000 most relevant | none (polite email) |
+| 3 | **Crossref** | 1000 | 2000, by relevance | **2000, by relevance** (keywords only) | none (polite email) |
+| 4 | **Europe PMC** | 1000 | 2000, by relevance | every match | none |
+| 5 | **Preprints (Europe PMC)** | 100 | 2000, by relevance | every match | none |
+| 6 | **Semantic Scholar** | bulk | 2000, **unranked** (ID order) | every match | optional (`SEMANTIC_SCHOLAR_API_KEY`) |
+| 7 | **DOAJ** | 100 | 2000 | every match (strategy split in parts) | none |
+| 8 | **ClinicalTrials.gov** | 100 | 2000 (trials, not papers) | every match | none |
+| 9 | **CORE** | 100 | 2000 | every match | **required (`CORE_API_KEY`, free)** |
+| 10 | **arXiv** | 100 | 2000 (3 s/request) | every match | none |
+| 11 | **OpenAIRE** | 50 | 2000 (4-operator query) | every match | none |
 
-> Every **`2000`** above is the *default* `LIVE_MAX_PER_SOURCE` - **env-configurable**; raise
-> it (e.g. `100000`) to remove the cap, after which the `POPULATE_FEDERATION_BUDGET` (180 s
-> default) time budget governs. Semantic Scholar's **1000** and bioRxiv's **45-day window**
-> are upstream limits and are *not* configurable.
+> `2000` is the default `LIVE_MAX_PER_SOURCE`; "every match" stops at `EXHAUSTIVE_MAX_PER_SOURCE`
+> (20 000, a guard rail). The federation budget (`POPULATE_FEDERATION_BUDGET`, or
+> `EXHAUSTIVE_FEDERATION_BUDGET` in exhaustive mode) governs how long sources may page. The PRISMA
+> card names every source that kept fewer records than it announced ("capped").
+> bioRxiv and medRxiv are no longer a source of their own: see footnote ² above.
 
 ---
 
@@ -109,13 +111,14 @@ the corpus count itself stays pure lexical.
 
 ### 1. PubMed - `eutils.ncbi.nlm.nih.gov/entrez/eutils` (`main.py:7618`)
 - esearch (`usehistory=y`) → efetch in batches of **`BATCH_SIZE = 200`** (`main.py:7500`).
-- `sort=pub_date` → **newest first**, so the 2000 cap keeps the most recent.
+- `sort=relevance` (PubMed's Best Match): at the cap, the most relevant are kept.
 - Rate limit: **3 req/s keyless**, ~10 req/s with `NCBI_API_KEY` (optional). A
   shared lock throttles all eutils calls (`_NCBI_LOCK`) to avoid 429s.
 - Uses the translated **PubMed boolean** query. Extracts authors, journal, DOI.
 
 ### 2. OpenAlex - `api.openalex.org/works` (`main.py:7716`)
-- `per_page` up to **200**, `sort=publication_date:desc` (newest first), cap 2000.
+- `per-page` up to **200**, `sort=relevance_score:desc`, cap 2000 (exhaustive: every
+  title/abstract match by cursor, plus the standard pass).
 - Keyless; uses the "polite pool" via `mailto`. No key = shared rate pool.
 - Abstract is reconstructed from OpenAlex's *inverted index* (occasionally lossy).
 - Uses the plain (non-boolean) query string.
@@ -128,14 +131,15 @@ the corpus count itself stays pure lexical.
   rule, so Crossref's *net* contribution is smaller than its raw count.
 
 ### 4. Europe PMC - `ebi.ac.uk/europepmc/webservices/rest/search` (`main.py:7844`)
-- `pageSize = 200`, cursorMark pagination, `resultType=core`, `sort=P_PDATE_D desc`.
+- `pageSize = 1000`, cursorMark pagination, `resultType=core`, default order (relevance).
 - Keyless, cap 2000. Uses the **boolean** query. Covers PubMed + PMC + Agricola + preprints.
 
 ### 5. Preprints (Europe PMC, `SRC:PPR`) (`main.py:7911`)
-- Same EBI endpoint, query = `(<boolean>) AND (SRC:PPR)`, `pageSize = 100`, cap 2000.
+- Same EBI endpoint, query = `(<boolean>) AND (SRC:PPR)`, `pageSize = 100`, cap 2000, default
+  order (relevance; it sorted by date until the cap was found to keep the most recent).
 - Real keyword search over preprints **as indexed by Europe PMC** (Research Square,
   bioRxiv, medRxiv, Preprints.org…). Labelled `source="preprint"`, `source_type="preprint"`.
-- This is distinct from source #12 (the native bioRxiv/medRxiv scan).
+- The only way bioRxiv and medRxiv are searched: their own API has no keyword search.
 
 ### 6. Semantic Scholar - `api.semanticscholar.org/graph/v1/paper/search` (`main.py:7999`)
 - `limit = 100`/page, offset pagination.
@@ -170,14 +174,27 @@ the corpus count itself stays pure lexical.
 - `size = 50`/page (smallest page of the set), page pagination, cap 2000, keyless,
   0.5 s between requests.
 
-### 12. bioRxiv + medRxiv (native) - `api.biorxiv.org/details/...` (`main.py:8173`)
-- **The bioRxiv API has NO keyword search** - it only serves date windows.
-- The fetcher scans the **last 45 days** (from cursor 0 forward), ≤ 30 pages ×100/page
-  **per server**, then filters client-side: a preprint is kept only if **≥ one-third of
-  the query's ≥4-char terms** appear in title+abstract (`_parse_biorxiv`, `main.py:7288`).
-- **Fundamental limitation:** this only surfaces *recent* preprints matching your terms.
-  For older preprints, rely on source #5 (Europe PMC `SRC:PPR`), which *does* index them.
-- Ingested under distinct `source="biorxiv"` / `source="medrxiv"` labels.
+### Retired: bioRxiv + medRxiv (native)
+- The bioRxiv API has no keyword search, only date windows: the fetcher scanned the last
+  45 days and filtered on the client, and returned 0 records on HPAI_last. Removed from
+  the federation; source #5 searches both servers. Older library rows keep their
+  `source="biorxiv"` / `source="medrxiv"` labels.
+
+### Excluding preprints (search option)
+- The search form's "Exclude preprints" box stores `exclude_preprints: true` in the
+  scenario's filters (`POST /user-scenarios/{id}/populate?exclude_preprints=true` does the
+  same from the API).
+- The preprint servers (#5 and arXiv) are not searched; PubMed receives
+  `(<query>) NOT preprint[pt]` and Europe PMC `(<query>) NOT SRC:PPR`; the local library
+  matches no preprint; and the preprints the other databases return (OpenAlex, Semantic
+  Scholar, Crossref, CORE…) leave the corpus before screening.
+- What a preprint is lives in one SQL predicate (`api/search.py:preprint_sql`): a
+  preprint-server DOI (bioRxiv/medRxiv dated DOIs, Research Square, SSRN, Preprints.org,
+  arXiv, OSF…), or a preprint source, URL or journal name, unless the row carries a
+  journal DOI or a journal name (a preprint merged with its published version by the
+  title dedup is a published article and stays).
+- The PRISMA card shows the removed preprints on their own line and names the servers
+  not searched and the databases that excluded preprints in the query.
 
 ---
 
@@ -211,8 +228,9 @@ These feed the **auto-fetch** panel (predictors for a scenario's model), not the
    sources (arXiv especially, sometimes deep Crossref/OpenAlex pages). Both are
    env-configurable (`POPULATE_FEDERATION_BUDGET`, `LIVE_MAX_PER_SOURCE`) - raise them
    together to fetch deeper; ⚠ multiplies API calls + OpenAI embedding cost per search.
-2. **Semantic Scholar tops out at 1000/query** (hard API limit - not configurable).
-3. **bioRxiv/medRxiv native = recent 45-day window only** (no historical keyword search).
+2. **Semantic Scholar**: its relevance endpoint tops out at 1000/query (hard API limit); the bulk
+   endpoint, used for a real boolean, has no such limit but returns matches unranked (ID order).
+3. **bioRxiv/medRxiv are searched only through Europe PMC** (their own API has no keyword search).
 4. **CORE contributes 0 until `CORE_API_KEY` (free) is set** in the environment.
 5. **No-abstract records are dropped** → Crossref and ClinicalTrials net lower than raw.
 6. **arXiv/DOAJ/ClinicalTrials are domain-skewed** (preprints / OA journals / trials) -

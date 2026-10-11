@@ -41,6 +41,8 @@ from .search import (
     _facets_intersect,
     _generate_search_strategy,
     _looks_boolean,
+    excludes_preprints,
+    preprint_sql,
     _coverage_caveat,
     _multi_query_corpus_ids,
     _normalize_sub_queries,
@@ -69,7 +71,6 @@ from .sources import (
     epmc_query,
     _parse_arxiv,
     _parse_arxiv_total,
-    _parse_biorxiv,
     _parse_clinicaltrials,
     _parse_core,
     _parse_doaj,
@@ -276,6 +277,11 @@ def _run_user_scenario_populate(
     _title_abstract_sources: set[str] = set()
     _unranked_sources: set[str] = set()
     _split_queries: dict[str, list[str]] = {}
+    # Recherche SANS préprints (filtre `exclude_preprints` du scénario) : les serveurs de
+    # préprints ne sont pas interrogés, PubMed et Europe PMC les excluent dans la requête,
+    # et ceux que rendent les autres bases sont retirés du corpus avant le screening.
+    _no_preprints = excludes_preprints(filters)
+    _preprints_at_source: list[str] = []
 
     # Garde-temps partagé entre les boucles de pagination des sources lentes
     # (OpenAlex/Crossref/EuropePMC). Quand le budget fédération est dépassé, elles
@@ -292,11 +298,11 @@ def _run_user_scenario_populate(
             # suit le cross-encoder qui tourne en arrière-plan après l'affichage.
             "phase": "local", "rerank_status": "idle",
             "search_mode": _search_mode,
+            "exclude_preprints": _no_preprints,
             "sources": {
                 "db_cache": 0, "pubmed": 0, "openalex": 0, "crossref": 0,
                 "europepmc": 0, "preprint": 0, "semantic_scholar": 0, "doaj": 0,
                 "clinicaltrials": 0, "core": 0, "arxiv": 0, "openaire": 0,
-                "biorxiv": 0, "medrxiv": 0
             }
         }
 
@@ -502,11 +508,15 @@ def _run_user_scenario_populate(
             # le compteur du corpus grandisse EN DIRECT pendant la recherche (172 → … →
             # total), au lieu de sauter d'un coup à la fin. Score NULL ici → renseigné au
             # scoring. best-effort : l'assemblage final refait l'union de toute façon.
+            # Sans préprints, un préprint n'est pas lié : le compteur en direct ne doit pas
+            # monter de notices que l'assemblage retirera.
             try:
                 with engine.begin() as _lc:
                     _lc.execute(text(
                         "INSERT INTO article_scenarios (document_id, scenario_id, similarity_score) "
-                        "VALUES (:d, :s, NULL) ON CONFLICT (document_id, scenario_id) DO NOTHING"),
+                        "SELECT d.id, :s, NULL FROM literature_document d WHERE d.id = :d"
+                        + (f" AND NOT {preprint_sql('d')}" if _no_preprints else "")
+                        + " ON CONFLICT (document_id, scenario_id) DO NOTHING"),
                         {"d": doc_id, "s": scenario_id})
             except Exception:
                 pass
@@ -721,6 +731,14 @@ def _run_user_scenario_populate(
                 and _portable_bool not in _pubmed_q
                 and len(_pubmed_q) + len(_portable_bool) <= 1900):
             _pubmed_q = f"({_pubmed_q}) OR ({_portable_bool})"
+        # Sans préprints : PubMed et Europe PMC les écartent dans la requête elle-même (le
+        # type de publication « Preprint » de PubMed, la collection PPR d'Europe PMC), et le
+        # total qu'elles annoncent est celui de la recherche réellement faite. Les autres
+        # bases n'ont pas de filtre sûr ; leurs préprints sont retirés à l'assemblage.
+        if _no_preprints:
+            _pubmed_q = f"({_pubmed_q}) NOT preprint[pt]"
+            _epmc_q = f"({_epmc_q}) NOT SRC:PPR"
+            _preprints_at_source[:] = ["pubmed", "europepmc"]
         # Le MÊME helper que l'assemblage final (ligne ~1290) et que la recherche :
         # ce bloc appelait `_search_local_doc_ids(..., limit=100_000)` là où
         # `_boolean_corpus_ids` coupe à 500 000. Deux plafonds pour une seule question
@@ -769,9 +787,9 @@ def _run_user_scenario_populate(
     except Exception as _e_local:
         logger.warning(f"Local DB link failed for {scenario_id}: {_e_local}")
 
-    # ── Étape 1 : Interrogation parallèle des 13 sources externes ────────────
-    # (13 sources nommées = 12 fetchers ; bioRxiv+medRxiv partagent un fetcher, et
-    #  Europe PMC sert 2 facettes - europepmc + préprints. Cf. source_funcs plus bas.)
+    # ── Étape 1 : Interrogation parallèle des 11 sources externes ────────────
+    # (11 fetchers ; Europe PMC sert 2 facettes - europepmc + préprints. Cf. source_funcs
+    #  plus bas : sans préprints, la facette préprints et arXiv ne partent pas.)
 
     def _fetch_pubmed():
         count = 0
@@ -1191,8 +1209,9 @@ def _run_user_scenario_populate(
 
     def _fetch_preprints():
         # Préprints (bioRxiv, medRxiv, Research Square, …) via Europe PMC (SRC:PPR) :
-        # recherche par mots-clés RÉELLE. L'API biorxiv ne fait que dates/DOI, d'où
-        # l'ancien scan des 90 derniers jours filtré côté client (~0 résultat).
+        # recherche par mots-clés RÉELLE. L'API bioRxiv ne fait que dates et DOI : le
+        # fetcher natif qui scannait ses 45 derniers jours et filtrait côté client ne
+        # trouvait rien, et a quitté la fédération ; Europe PMC indexe les deux serveurs.
         count = 0
         try:
             _pp_cursor = "*"
@@ -1203,13 +1222,17 @@ def _run_user_scenario_populate(
                     break  # budget fédération dépassé
                 _pp_resp = _requests.get(
                     EPMC_SEARCH_URL,
+                    # Par PERTINENCE (le tri par défaut d'Europe PMC), comme toutes les bases
+                    # qui le permettent : au plafond, on garde les préprints les plus
+                    # pertinents. Triés par date, on gardait les plus récents.
                     params={"query": _pp_query, "format": "json", "pageSize": 100,
-                            "resultType": "core", "sort": "P_PDATE_D desc",
-                            "cursorMark": _pp_cursor},
+                            "resultType": "core", "cursorMark": _pp_cursor},
                     timeout=20,
                 )
                 _pp_resp.raise_for_status()
                 _pp_data = _pp_resp.json()
+                # Le total annoncé : au plafond, la carte dit « n / total » et « plafonnée ».
+                _note_total("preprints", _pp_data.get("hitCount"))
                 _pp_results = _pp_data.get("resultList", {}).get("result", [])
                 if not _pp_results:
                     break
@@ -1533,55 +1556,26 @@ def _run_user_scenario_populate(
             _mark_source_error(_e)
         return ("openaire", count)
 
-    def _fetch_biorxiv_medrxiv():
-        # L'API bioRxiv/medRxiv n'offre PAS de recherche par mots-clés. On scanne une
-        # fenêtre RÉCENTE (les ~45 derniers jours) DEPUIS le curseur 0 vers aujourd'hui
-        # - de sorte que la couverture porte réellement sur les préprints récents (le
-        # bug précédent scannait le DÉBUT d'une fenêtre de 18 mois → les plus VIEUX,
-        # jamais pertinents). Puis filtrage lexical (_parse_biorxiv). Chaque serveur
-        # ingère sous sa propre source ("biorxiv" / "medrxiv"), distinctes des
-        # "Preprints" (facette Europe PMC).
-        count = 0
-        try:
-            from datetime import date as _date, timedelta as _td
-            _terms = [re.sub(r"[^a-z0-9]", "", w) for w in (_plain_q or "").lower().split()]
-            _terms = [t for t in _terms if len(t) >= 4]
-            try:
-                _to = _date.today()
-                _win = f"{(_to - _td(days=45)).isoformat()}/{_to.isoformat()}"
-            except Exception:
-                _win = "2026-05-01/2026-12-31"
-            for _server in ("biorxiv", "medrxiv"):
-                _cursor, _pages = 0, 0
-                while _pages < 30:          # borne dure ; les ~45 j récents tiennent dedans
-                    if _budget_exhausted():
-                        break
-                    _r = _requests.get(
-                        f"https://api.biorxiv.org/details/{_server}/{_win}/{_cursor}/json", timeout=20)
-                    _r.raise_for_status()
-                    _payload = _r.json()
-                    _coll = _payload.get("collection") or []
-                    if not _coll:
-                        break
-                    count += _ingest_parsed(_server, _parse_biorxiv(_payload, _terms, _server))
-                    _pages += 1
-                    _total = int((_payload.get("messages") or [{}])[0].get("total", 0) or 0)
-                    _cursor += len(_coll)
-                    if _cursor >= _total or len(_coll) < 100:
-                        break
-                    _time.sleep(0.4)
-        except Exception as _e:
-            logger.warning(f"bioRxiv/medRxiv populate {scenario_id}: {_e}")
-            _mark_source_error(_e)
-        return ("biorxiv_medrxiv", count)
-
-    # Lancer toutes les sources en parallèle
+    # Lancer toutes les sources en parallèle. bioRxiv et medRxiv n'y sont plus en direct :
+    # leur API ne cherche pas par mots-clés (fenêtre de dates seulement), le fetcher
+    # scannait les 45 derniers jours et filtrait côté client, et rendait 0 notice sur
+    # HPAI_last quand la facette préprints d'Europe PMC, qui indexe ces deux serveurs, en
+    # rendait 457 (tous serveurs confondus). L'API bioRxiv reste employée pour le texte
+    # intégral, par DOI.
     source_funcs = [
         _fetch_pubmed, _fetch_openalex, _fetch_crossref,
         _fetch_europepmc, _fetch_preprints,
         _fetch_semantic_scholar, _fetch_doaj, _fetch_clinicaltrials, _fetch_core,
-        _fetch_arxiv, _fetch_openaire, _fetch_biorxiv_medrxiv,
+        _fetch_arxiv, _fetch_openaire,
     ]
+    # Sans préprints : les serveurs de préprints ne sont pas interrogés du tout. Ils ne
+    # sont pas « lancés », donc ni comptés parmi les sources interrogées ni annoncés en
+    # échec : la carte PRISMA les nomme sur la ligne de l'exclusion.
+    _preprint_servers = (_fetch_preprints, _fetch_arxiv)
+    _preprint_servers_skipped = ([_source_label(fn.__name__) for fn in _preprint_servers]
+                                 if _no_preprints else [])
+    if _no_preprints:
+        source_funcs = [fn for fn in source_funcs if fn not in _preprint_servers]
     t_start = _time.time()
     _completed_ok: set[str] = set()
     # Fetchers qui ont RÉPONDU pendant ce run (cache rejoué inclus) : la couverture
@@ -1800,6 +1794,25 @@ def _run_user_scenario_populate(
         except Exception as _e_noabs:
             logger.warning(f"Suppression articles sans abstract {scenario_id}: {_e_noabs}")
 
+        # ── Recherche sans préprints : ceux que les autres bases ont rendus sortent ──
+        # La bibliothèque locale n'en apparie déjà plus (filtre de recherche), mais
+        # l'union des sources booléennes-natives entre sans re-filtrage : OpenAlex,
+        # Semantic Scholar, CORE rendent des préprints de bioRxiv, Research Square, SSRN.
+        # AVANT la dédup, pour que les lignes qu'elle fusionne soient toutes des articles.
+        if _no_preprints:
+            try:
+                with engine.begin() as conn:
+                    _removed_pp = conn.execute(text(f"""
+                        DELETE FROM article_scenarios a
+                        USING literature_document d
+                        WHERE a.document_id = d.id AND a.scenario_id = :sid
+                          AND {preprint_sql('d')}
+                    """), {"sid": scenario_id}).rowcount
+                if _removed_pp:
+                    logger.info(f"Populate {scenario_id}: {_removed_pp} préprints retirés (recherche sans préprints).")
+            except Exception as _e_pp:
+                logger.warning(f"Retrait des préprints {scenario_id}: {_e_pp}")
+
         # ── Dédup INTRA-scénario : un seul lien par article distinct ─────────
         # APRÈS le retrait des articles sans abstract, pour ne jamais garder par
         # erreur une copie sans résumé au détriment d'une copie complète du même
@@ -1842,20 +1855,28 @@ def _run_user_scenario_populate(
                 _ids_snapshot = list(_ident_docs)
             # Ventilation des documents identifiés mais ABSENTS du corpus : sans résumé
             # (règle qualité, appliquée avant la dédup - donc les lignes fusionnées par
-            # la dédup ont toutes un résumé et sont à soustraire de l'autre poche), ou
-            # avec résumé mais non liés (source par mots-clés hors requête booléenne).
-            _no_abs, _not_linked = 0, 0
+            # la dédup ont toutes un résumé et sont à soustraire de l'autre poche),
+            # préprints quand la recherche les exclut (retirés eux aussi avant la dédup),
+            # ou avec résumé mais non liés (source par mots-clés hors requête booléenne).
+            _no_abs, _not_linked, _pp_out = 0, 0, 0
             if _ids_snapshot:
+                _is_pp = preprint_sql("d") if _no_preprints else "FALSE"
                 with engine.connect() as _bc:
-                    _br = _bc.execute(text("""
+                    _br = _bc.execute(text(f"""
                         SELECT COUNT(*) FILTER (WHERE d.abstract IS NULL OR length(TRIM(d.abstract)) < 30) AS no_abstract,
                                COUNT(*) FILTER (WHERE NOT (d.abstract IS NULL OR length(TRIM(d.abstract)) < 30)
+                                                  AND {_is_pp}
+                                                  AND NOT EXISTS (SELECT 1 FROM article_scenarios a
+                                                                   WHERE a.scenario_id = :sid AND a.document_id = d.id)) AS preprints,
+                               COUNT(*) FILTER (WHERE NOT (d.abstract IS NULL OR length(TRIM(d.abstract)) < 30)
+                                                  AND NOT {_is_pp}
                                                   AND NOT EXISTS (SELECT 1 FROM article_scenarios a
                                                                    WHERE a.scenario_id = :sid AND a.document_id = d.id)) AS not_linked
                         FROM literature_document d
                         WHERE d.id = ANY(CAST(:ids AS bigint[]))
                     """), {"sid": scenario_id, "ids": _ids_snapshot}).mappings().first()
                 _no_abs = int(_br["no_abstract"] or 0)
+                _pp_out = int(_br["preprints"] or 0)
                 _not_linked = int(_br["not_linked"] or 0)
             _figures = _prisma_identification_figures(
                 _recs_snapshot, len(_ids_snapshot), _n_dup_rows or 0, int(_corpus_now),
@@ -1879,7 +1900,13 @@ def _run_user_scenario_populate(
                              if exhaustive and include_live else {}),
                 title_abstract_sources=(sorted(_title_abstract_sources) if include_live else []),
                 unranked_sources=(sorted(_unranked_sources) if include_live else []),
-                split_queries=(dict(_split_queries) if include_live else {}))
+                split_queries=(dict(_split_queries) if include_live else {}),
+                # L'exclusion des préprints, et ses trois moyens : serveurs non interrogés,
+                # exclusion dans la requête, retrait avant le screening.
+                preprints_excluded=_no_preprints,
+                removed_preprints=_pp_out,
+                preprints_excluded_at_source=(list(_preprints_at_source) if include_live else []),
+                preprint_sources_not_searched=(list(_preprint_servers_skipped) if include_live else []))
             _store_prisma_identification(scenario_id, _figures)
             # Le même total pour tout le monde : le statut du job expose le corpus
             # RETENU (= article_count = « passés au screening » du PRISMA), et non le
@@ -1971,6 +1998,7 @@ def _run_user_scenario_populate(
                 "status": "done" if _auto_ok[0] else "unranked",
                 "phase": "done",
                 "search_mode": _search_mode,
+                "exclude_preprints": _no_preprints,
                 **({} if _auto_ok[0] else {
                     # PAS une erreur de recherche : le corpus est construit et lisible,
                     # c'est son CLASSEMENT qui manque. L'interface l'affiche donc avec un
@@ -2008,6 +2036,8 @@ def _run_user_scenario_populate(
                        f"Sources interrogées : {len(_queried)}/{len(source_funcs)} "
                        f"({_src_summary})"
                        + _coverage_caveat(_fetcher_outcome)
+                       + (f" ; préprints exclus (non interrogés : {', '.join(_preprint_servers_skipped)})"
+                          if _no_preprints else "")
                        + (f" ; {len(_cached)} rejouée(s) depuis le cache de la recherche identique."
                           if _cached else "."))
                 ),
@@ -2067,7 +2097,8 @@ def _run_user_scenario_populate(
             except Exception as _e_viz:
                 logger.warning(f"Tâches arrière-plan {scenario_id}: {_e_viz}")
 
-        logger.info(f"Populate user_scenario {scenario_id}: {ingested} articles ingérés (13 sources, parallèle).")
+        logger.info(f"Populate user_scenario {scenario_id}: {ingested} articles ingérés "
+                    f"({len(source_funcs)} sources, parallèle).")
         return ingested
 
     except Exception as e:
@@ -2090,7 +2121,7 @@ def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict
     """
     Pipeline complet d'enrichissement pour un scénario utilisateur.
     Ordre optimal :
-    1. ingest    – Ingestion multi-sources (PubMed+OpenAlex+Crossref+EuropePMC+Preprints+SemanticScholar+DOAJ+ClinicalTrials.gov+CORE+arXiv+OpenAIRE+medRxiv+bioRxiv)
+    1. ingest    – Ingestion multi-sources (PubMed+OpenAlex+Crossref+EuropePMC+Preprints+SemanticScholar+DOAJ+ClinicalTrials.gov+CORE+arXiv+OpenAIRE)
     2. fulltext  – Récupération full-text (PMC→EuropePMC→Unpaywall) pendant que les IDs sont frais
     3. embed     – Embeddings sur title+abstract+fulltext chunks (contenu enrichi)
     4. rerank    – Score cosinus via pgvector (pas de re-embedding API)
@@ -2187,7 +2218,11 @@ def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict
 
         if _real_ingested == 0:
             _user_scenario_pipeline_jobs[scenario_id]["overall_status"] = "done"
-            _user_scenario_pipeline_jobs[scenario_id]["message"] = "Aucun article trouvé (13 sources interrogées)."
+            # Le détail de ce que chaque source a fait est sur la carte PRISMA : un nombre de
+            # sources écrit ici en dur était faux dès qu'une source échouait ou n'était pas
+            # lancée (recherche sans préprints).
+            _user_scenario_pipeline_jobs[scenario_id]["message"] = (
+                "Aucun article trouvé (le détail par source est sur la carte PRISMA).")
             return
 
         # ── Étape 2 : Full-text multi-sources (avant embedding pour enrichir les chunks) (PMC → EuropePMC → Unpaywall → bioRxiv → Semantic Scholar → OpenAlex) ──

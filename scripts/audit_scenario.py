@@ -109,7 +109,8 @@ class Audit:
         if ident:
             identified = ident.get("total_records") or ident.get("records_identified")
             dups, unique = ident.get("duplicates_removed"), ident.get("unique_records")
-            buckets = [ident.get(k) or 0 for k in ("removed_no_abstract", "removed_not_matching", "removed_other_reasons")]
+            buckets = [ident.get(k) or 0 for k in ("removed_no_abstract", "removed_preprints",
+                                                   "removed_not_matching", "removed_other_reasons")]
             screened = ident.get("records_screened")
             added, gone = int(ident.get("added_after_search") or 0), int(ident.get("removed_after_search") or 0)
             arith_ok = (identified is not None and dups is not None and unique is not None
