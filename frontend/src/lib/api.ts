@@ -1562,6 +1562,8 @@ export interface ExtractionStatus {
   n_pending: number;
   n_observations: number;
   n_given_up: number;
+  /** Read through the condensed retry: the answer was cut off, so fewer rows were kept. */
+  n_condensed?: number;
   running: boolean;
   job: { total: number; done: number; failed: number } | null;
   version: number;
@@ -1592,6 +1594,8 @@ export interface ExtractionArticle {
   has_extraction: boolean;
   source: "fulltext" | "abstract" | null;
   text_truncated: boolean;
+  /** The paper held more data than one answer carries: a condensed answer was kept. */
+  condensed?: boolean;
   coverage: Record<string, boolean> | null;
   n_observations: number;
   n_quote_found: number;
@@ -1697,9 +1701,11 @@ export async function fetchArticleExtraction(scenarioId: string, articleId: numb
   return r.json();
 }
 
-/** Starts the background extraction (needs the admin key). `status` is started, running, no_llm... */
-export async function startExtraction(scenarioId: string): Promise<{ status: string }> {
-  const r = await safeFetch(`${scenarioBase(scenarioId)}/${scenarioId}/extraction/run`, {
+/** Starts the background extraction (needs the admin key). `status` is started, running, no_llm...
+ *  `retryGivenUp` first gives back their attempts to the articles left alone after three failures. */
+export async function startExtraction(scenarioId: string, retryGivenUp = false): Promise<{ status: string; n_reset?: number }> {
+  const q = retryGivenUp ? "?retry_given_up=true" : "";
+  const r = await safeFetch(`${scenarioBase(scenarioId)}/${scenarioId}/extraction/run${q}`, {
     method: "POST", headers: authHeaders(),
   });
   if (!r.ok) throw new Error(httpMessage(r.status));
