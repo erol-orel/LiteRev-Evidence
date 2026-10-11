@@ -316,9 +316,15 @@ def get_user_scenario_prisma(
             "duplicate_rows_in_database": int(_figures.get("duplicate_rows_in_database") or 0),
             "unique_records": int(_rec.get("unique_records") or 0),
             "removed_no_abstract": int(_rec.get("removed_no_abstract") or 0),
+            "removed_preprints": int(_rec.get("removed_preprints") or 0),
             "removed_not_matching": int(_rec.get("removed_not_matching") or 0),
             "removed_other_reasons": int(_rec.get("removed_other_reasons") or 0),
             "removed_before_screening": int(_rec.get("removed_before_screening") or 0),
+            # La recherche excluait-elle les préprints, et par quels moyens : la carte le
+            # dit sur la ligne de l'exclusion. Faux pour une recherche antérieure.
+            "preprints_excluded": bool(_figures.get("preprints_excluded")),
+            "preprints_excluded_at_source": list(_figures.get("preprints_excluded_at_source") or []),
+            "preprint_sources_not_searched": list(_figures.get("preprint_sources_not_searched") or []),
             "added_after_search": int(_rec.get("added_after_search") or 0),
             "removed_after_search": int(_rec.get("removed_after_search") or 0),
             "records_screened_at_search": int(_rec.get("records_screened_at_search") or 0),

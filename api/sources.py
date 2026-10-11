@@ -353,83 +353,6 @@ def _live_fetch_pubmed_term(term: str, source_name: str, id_prefix: str, max_res
     return results
 
 
-def _live_fetch_preprint_server(server: str, source_name: str, query: str, max_results: int) -> list[dict]:
-    """Récupère les prépublications récentes (biorxiv/medrxiv API) puis filtre par
-    correspondance de mots-clés de la requête (pas d'API plein-texte côté serveur)."""
-    import requests as _req
-    import datetime as _dt
-    results = []
-    try:
-        # Mots-clés significatifs (booléen nettoyé). Les 2 premiers sont les
-        # termes "primaires" (concept central) : on EXIGE qu'au moins un soit
-        # présent, plus un nombre minimal de correspondances totales - sinon le
-        # filtre laisse passer n'importe quel preprint contenant 2 mots courants.
-        words = _plain_keywords(query, max_words=12).split()
-        primary = words[:2]
-        min_hits = min(3, len(words)) if len(words) >= 3 else 1
-        date_to = _dt.date.today()
-        date_from = date_to - _dt.timedelta(days=180)
-        cursor = 0
-        scanned = 0
-        # Plafond resserré : l'API biorxiv ne fait pas de recherche plein-texte, on
-        # filtre côté client par mots-clés → le taux de correspondance est faible et
-        # scanner 300 prépublications (3 pages × 10s) consommait quasi tout le budget
-        # de 30s de la fédération pour ~0 résultat. 120 + timeout court suffit.
-        max_scan = 120  # plafond pour rester dans le budget temps de la fédération
-        _hdrs = {"User-Agent": "LiteRev/1.0 (mailto:api@literev.app)"}
-        while scanned < max_scan and len(results) < max_results:
-            url = (f"https://api.biorxiv.org/details/{server}/"
-                   f"{date_from.isoformat()}/{date_to.isoformat()}/{cursor}/json")
-            r = _req.get(url, timeout=6, headers=_hdrs)
-            if not r.ok:
-                break
-            payload = r.json()
-            coll = payload.get("collection", []) or []
-            if not coll:
-                break
-            for item in coll:
-                scanned += 1
-                hay = (item.get("title", "") + " " + item.get("abstract", "")).lower()
-                if words:
-                    hits = sum(1 for w in words if w in hay)
-                    has_primary = any(p in hay for p in primary) if primary else True
-                    if not (has_primary and hits >= min_hits):
-                        continue
-                yr = None
-                d = item.get("date", "")
-                if len(d) >= 4 and d[:4].isdigit():
-                    yr = int(d[:4])
-                doi = item.get("doi")
-                results.append({
-                    "title": item.get("title", ""),
-                    "abstract": item.get("abstract"),
-                    "doi": doi,
-                    "year": yr,
-                    "authors": [a.strip() for a in (item.get("authors", "") or "").split(";")[:5] if a.strip()],
-                    "journal": source_name,
-                    "url": f"https://doi.org/{doi}" if doi else None,
-                    "external_id": doi,
-                    "source_name": source_name,
-                })
-                if len(results) >= max_results:
-                    break
-            total = int(payload.get("messages", [{}])[0].get("total", 0) or 0)
-            cursor += len(coll)
-            if cursor >= total:
-                break
-    except Exception as _e:
-        logger.warning(f"_live_fetch_preprint_server({server}) error: {_e}")
-    return results
-
-
-def _live_fetch_medrxiv(query: str, max_results: int) -> list[dict]:
-    return _live_fetch_preprint_server("medrxiv", "medRxiv", query, max_results)
-
-
-def _live_fetch_biorxiv(query: str, max_results: int) -> list[dict]:
-    return _live_fetch_preprint_server("biorxiv", "bioRxiv", query, max_results)
-
-
 def _federated_live_search(
     query: str,
     max_per_source: int = 50,
@@ -757,11 +680,14 @@ def search_live(
 def sources_health(query: str = "cardiac arrest", timeout: int = 12, raw: bool = False) -> dict[str, Any]:
     """Diagnostic des sources externes (live search).
 
-    Interroge en parallèle les SEPT sources sondées (PubMed, OpenAlex, Crossref,
-    Europe PMC, OpenAIRE, bioRxiv/medRxiv, ReliefWeb) avec une requête minimale et
-    renvoie, par source, le statut HTTP, la latence (ms), un compteur de résultats et
-    l'erreur éventuelle. Permet de diagnostiquer « sources lentes / ne répondent plus »
-    directement en production (où l'accès réseau sortant diffère du sandbox).
+    Interroge en parallèle les SEPT sondes (PubMed, OpenAlex, Crossref, Europe PMC,
+    OpenAIRE, l'API bioRxiv/medRxiv, ReliefWeb) avec une requête minimale et renvoie, par
+    sonde, le statut HTTP, la latence (ms), un compteur de résultats et l'erreur
+    éventuelle. Permet de diagnostiquer « sources lentes / ne répondent plus »
+    directement en production (où l'accès réseau sortant diffère du sandbox). L'API
+    bioRxiv/medRxiv n'est plus une source de la recherche (elle ne cherche pas par
+    mots-clés ; Europe PMC indexe ces deux serveurs) : elle reste sondée parce que l'étape
+    du texte intégral l'interroge par DOI. ReliefWeb est un flux séparé.
 
     ATTENTION : les autres fetchers de la fédération (Semantic Scholar, DOAJ,
     ClinicalTrials.gov, CORE, arXiv) ne sont PAS sondés. « 7 joignables sur 7 » ne
@@ -814,7 +740,8 @@ def sources_health(query: str = "cardiac arrest", timeout: int = 12, raw: bool =
         ("OpenAIRE", "https://api.openaire.eu/graph/v2/researchProducts",
          {"search": query, "pageSize": 1}, {**ua, "Accept": "application/json"},
          lambda j: int((j.get("header") or {}).get("numFound"))),
-        ("bioRxiv/medRxiv", "https://api.biorxiv.org/details/biorxiv/2024-01-01/2024-01-07/0/json",
+        # Plus une source de recherche : l'API du texte intégral des préprints, par DOI.
+        ("bioRxiv/medRxiv (full text)", "https://api.biorxiv.org/details/biorxiv/2024-01-01/2024-01-07/0/json",
          None, ua,
          lambda j: (j.get("messages", [{}])[0] or {}).get("total")),
         # ReliefWeb (flux SÉPARÉ, littérature grise) : sondé ici pour qu'une panne, un
@@ -877,9 +804,12 @@ def sources_health(query: str = "cardiac arrest", timeout: int = 12, raw: bool =
         "total": len(results),
         "probed": [r["source"] for r in results],
         "not_probed": not_probed,
+        # Sept sondes, dont deux ne sont pas des sources de la recherche (ReliefWeb, flux
+        # séparé ; l'API bioRxiv, texte intégral) : « 7 sur 12 fetchers » additionnait
+        # des sondes et des fetchers. On nomme ce qui n'est pas testé, sans compte.
         "coverage_note": (
-            f"{len(results)} sources sondées sur {len(results) + len(not_probed)} "
-            f"fetchers ; les autres ne sont pas testées par cet endpoint."
+            f"{len(results)} sondes ; sources de la recherche non testées par cet endpoint : "
+            f"{', '.join(not_probed) or 'aucune'}."
         ),
         "config": {
             "ncbi_api_key": bool(ncbi_key),
@@ -1033,36 +963,6 @@ def _parse_arxiv_total(xml_text: str) -> int | None:
     import re as _re
     m = _re.search(r"<opensearch:totalResults[^>]*>\s*(\d+)\s*<", xml_text or "")
     return int(m.group(1)) if m else None
-
-
-def _parse_biorxiv(payload: dict, terms: list[str], server: str) -> list[dict]:
-    """bioRxiv/medRxiv details API collection → docs FILTRÉS par mots-clés.
-    L'API n'offre pas de recherche : le fetcher scanne une fenêtre de dates RÉCENTE
-    et le filtrage lexical se fait ici (garde un preprint si ≥ un TIERS des termes
-    ≥4 car. apparaissent dans titre+résumé). external_id = <server>:<doi>."""
-    out: list[dict] = []
-    coll = payload.get("collection") if isinstance(payload, dict) else None
-    kw = [t for t in (terms or []) if len(t) >= 4]
-    need = max(1, (len(kw) + 2) // 3) if kw else 0
-    for it in (coll or []):
-        if not isinstance(it, dict):
-            continue
-        title = (it.get("title") or "").strip()
-        doi = it.get("doi")
-        if not title or not doi:
-            continue
-        abstract = it.get("abstract") or None
-        hay = f"{title} {abstract or ''}".lower()
-        if kw and sum(1 for t in kw if t in hay) < need:
-            continue
-        date = it.get("date") or ""
-        out.append({
-            "title": title, "abstract": abstract,
-            "year": int(date[:4]) if date[:4].isdigit() else None,
-            "url": f"https://doi.org/{doi}", "doi": doi,
-            "external_id": f"{server}:{doi}", "source_type": "preprint",
-        })
-    return out
 
 
 def _openaire_text(v: Any) -> str | None:

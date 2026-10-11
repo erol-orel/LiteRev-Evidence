@@ -10,8 +10,9 @@ uses in populate - main._strip_field_tags / _boolean_to_arxiv / _boolean_to_s2 /
 boolean - and prints each source's own total for that query. That is the apples-to-apples
 view: the corpus is the SOURCE-UNION of these boolean hits (minus records with no abstract).
 
-Only Crossref (relevance-only upstream) and bioRxiv/medRxiv (no keyword API - date-window scan)
-can't take the boolean; every other source does. Pass a natural-language query and it is first
+Only Crossref (relevance-only upstream) can't take the boolean; every other source does.
+(bioRxiv/medRxiv have no keyword API and are no longer a source of their own: the Europe PMC
+preprint facet searches them.) Pass a natural-language query and it is first
 translated via the app's LLM strategy (needs OPENAI_API_KEY); pass a boolean and it's used as-is
 (no LLM call). Uses the app venv - it imports `main`. No DB writes.
 """

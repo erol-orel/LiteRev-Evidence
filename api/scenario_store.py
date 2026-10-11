@@ -326,6 +326,23 @@ def set_scenario_search_mode(scenario_id: str, mode: str) -> None:
                      {"m": mode, "id": scenario_id})
 
 
+def set_scenario_exclude_preprints(scenario_id: str, exclude: bool) -> None:
+    """Enregistre l'exclusion des préprints dans les filtres du scénario, pour qu'une
+    relance refasse la même recherche. La clé n'est écrite que quand elle est vraie : une
+    recherche avec préprints garde des filtres identiques à ceux d'avant cette option, et
+    donc sa clé dans le cache des sources."""
+    with engine.begin() as conn:
+        if exclude:
+            conn.execute(text(
+                "UPDATE user_scenarios SET filters = (CASE WHEN jsonb_typeof(filters) = 'object' "
+                "THEN filters ELSE '{}'::jsonb END) || jsonb_build_object('exclude_preprints', true) "
+                "WHERE id = :id"), {"id": scenario_id})
+        else:
+            conn.execute(text(
+                "UPDATE user_scenarios SET filters = filters - 'exclude_preprints' "
+                "WHERE id = :id AND jsonb_typeof(filters) = 'object'"), {"id": scenario_id})
+
+
 def scenario_threshold_sql(sid: str = ":sid") -> str:
     """Le seuil du scénario, LU DANS la requête plutôt que passé en paramètre, pour
     que le lot et le compteur qui l'annonce voient le même instantané."""
