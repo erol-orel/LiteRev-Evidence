@@ -14,7 +14,7 @@ pytest.importorskip("fastapi")
 import main  # noqa: E402
 from api import extraction_report as R  # noqa: E402
 from test_extraction import HDR, SID, extracted, seeded  # noqa: E402,F401
-from test_pooling import pool_corpus  # noqa: E402,F401
+from test_pooling import composition_corpus, pool_corpus  # noqa: E402,F401
 
 
 def _client():
@@ -82,6 +82,20 @@ def test_the_french_report_is_in_french(pool_corpus):
                    "sex gender > male (non précisée)"):
         assert needle in md, needle
     assert "How this was made" not in md and chr(0x2014) not in md
+
+
+def test_the_report_says_which_rows_give_the_composition_of_a_sample(composition_corpus):
+    md = _get("md").text
+    # No odds ratio is left, and the section says why instead of disappearing.
+    assert "## Comparisons between groups" in md and "| Comparison |" not in md
+    assert "5 pairs of rows were left out of the odds ratios" in md
+    assert "| sex gender > male (composition of the sample in 5 of 5 studies) |" in md
+    # The appendix: the disease named once, the mark, then the spelling the papers used.
+    assert "sex gender > male (A(H5N1)), composition of the sample in 5 of 5 studies. As written: HPAI A(H5N1) (5)" in md
+    assert "2 pooled proportions rest wholly or partly on rows that give the composition of the sample" in md
+    fr = _get("md", "fr").text
+    assert "5 paires de lignes ont été écartées des odds ratios" in fr
+    assert "composition de l'échantillon dans 5 études sur 5" in fr and chr(0x2014) not in md + fr
 
 
 def test_the_word_report_opens_and_holds_the_tables(pool_corpus):

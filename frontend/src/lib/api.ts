@@ -1921,6 +1921,9 @@ export interface PooledStudy {
   ci_high?: number;
   weight_pct?: number;
   x1?: number; n1?: number; x2?: number; n2?: number;
+  /** The row gives the composition of the paper's sample (142 men among 225 people), not a
+   *  group with its cases: the paper counts the group's other labels out of the same total. */
+  composition?: boolean;
 }
 
 export interface Heterogeneity {
@@ -1949,6 +1952,9 @@ export interface PooledGroup {
   k: number;
   n_total: number;
   events_total: number;
+  /** How many of the k studies give the composition of their sample: where it is all of them,
+   *  the pooled value is the share of this label among the people studied, not a rate. */
+  k_composition?: number;
   pooled: { p: number; ci_low: number; ci_high: number; pi_low: number | null; pi_high: number | null } | null;
   heterogeneity: Heterogeneity | null;
   reason: string | null;
@@ -1963,6 +1969,9 @@ export interface PooledComparison {
   a: string;
   b: string;
   k: number;
+  /** Papers reporting both labels that were left out because a row gives the composition of
+   *  their sample: 142 men and 81 women among 225 people are not two groups with cases. */
+  excluded_composition?: number;
   pooled: { or: number; ci_low: number; ci_high: number; pi_low: number | null; pi_high: number | null };
   heterogeneity: Heterogeneity;
   studies: PooledStudy[];
@@ -1973,6 +1982,8 @@ export interface PooledResponse {
   filters: { reviewed_only: boolean; verified_only: boolean; split_disease: boolean; min_studies: number };
   n_rows_used: number;
   n_duplicate_rows_dropped: number;
+  /** Rows left out of every estimate, by reason; `composition` counts PAIRS of rows left out of
+   *  the odds ratios only (their rows still count, marked, in the proportions). */
   excluded: Record<string, number>;
   pooled: PooledGroup[];
   comparisons: PooledComparison[];

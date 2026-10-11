@@ -76,6 +76,12 @@ describe("tone and csv", () => {
     expect(csv[1]).toContain('"say ""hi"""');
     expect(csv[2]).toContain(",,,,,,");
   });
+  it("says in the csv how many studies give the composition of their sample", () => {
+    const csv = csvOfPooled([group({ k_composition: 2 }), group()]).split("\n");
+    expect(csv[0].endsWith(",heterogeneity,k_composition")).toBe(true);
+    expect(csv[1].endsWith(',"substantial",2')).toBe(true);
+    expect(csv[2].endsWith(',"substantial",')).toBe(true);                 // an older answer without the count
+  });
 });
 
 describe("disease spellings", () => {

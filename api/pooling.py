@@ -21,8 +21,14 @@ shows its working:
   - a row counts only if both counts are whole numbers with 0 <= cases <= population, and (by
     default) the quote it rests on was found in the text; rejected rows and rows two reviewers
     disagree on never count; a reviewer's correction replaces the model's value;
-  - one study contributes one row per label (the largest population), and the ones dropped are
-    counted;
+  - rows of one paper and one group that share their denominator and whose counts add up to it
+    (142 men and 81 women among 225 people) give the composition of that sample, not groups
+    with their cases. They stay in the proportions, marked, where the pooled value is then the
+    share of that label among the people studied; every pair that holds one is left out of the
+    odds ratios, and counted;
+  - one study contributes one row per label (one that counts a group's cases before one that
+    gives the composition of the sample, then the largest population), and the ones dropped
+    are counted;
   - every result carries its studies, their weights, and I2, so a wide disagreement is
     visible beside the number and not hidden behind it.
 
@@ -276,22 +282,103 @@ def _spelt(rows: list[dict[str, Any]]) -> list[Any]:
     return list(seen.values())
 
 
+#: Rows whose counts add up to their shared denominator give or take 2 people or 2% of it,
+#: whichever is larger (a few people whose sex was not recorded, a rounding), but never more
+#: than 5% of it: in a sample of a handful two people are not a rounding, and two species
+#: tested in batches of four (2 and 1 positive) are not one sample split in two.
+COMPOSITION_TOLERANCE_PEOPLE = 2
+COMPOSITION_TOLERANCE_SHARE = 0.02
+COMPOSITION_TOLERANCE_CAP = 0.05
+
+
+def adds_up_to(total: int, n: int) -> bool:
+    """Whether counts that add up to `total` account for the `n` people they are counted out of."""
+    tolerance = min(max(COMPOSITION_TOLERANCE_PEOPLE, COMPOSITION_TOLERANCE_SHARE * n), COMPOSITION_TOLERANCE_CAP * n)
+    return abs(total - n) <= tolerance
+
+
+def is_composition_pair(x1: int, n1: int, x2: int, n2: int) -> bool:
+    """Whether two rows of one paper, (cases, population) for two labels of one group, give the
+    composition of one sample (142 men and 81 women among 225 people) rather than two groups
+    with their cases: one denominator, and counts that add up to it. An odds ratio between them
+    compares how the sample divides, not a risk. Two real groups each have their own size, so
+    different denominators are never composition, and nor are counts well short of the total
+    (5 and 20 cases in two arms of 100)."""
+    return n1 == n2 and adds_up_to(x1 + x2, n1)
+
+
+def composition_labels(counts: dict[str, int], n: int) -> set[str]:
+    """Of the labels one paper counts out of the same `n` people in one group ({label: count}),
+    those whose rows give the composition of that sample: all of them when their counts add up
+    to n (children, adults and older adults among the same 225 people, which no two of them do
+    alone), else each pair that does."""
+    if len(counts) < 2:
+        return set()
+    if adds_up_to(sum(counts.values()), n):
+        return set(counts)
+    return {lab for a, b in combinations(sorted(counts), 2) if is_composition_pair(counts[a], n, counts[b], n)
+            for lab in (a, b)}
+
+
+def composition_rows(rows: list[dict[str, Any]], split_disease: bool = True) -> set[tuple]:
+    """The rows that give the composition of their paper's sample, as (sheet, group, disease,
+    article, label, population): in one paper and one group, the labels counted out of the same
+    population whose counts split it (`composition_labels`)."""
+    cells: dict[tuple, dict[int, dict[str, int]]] = {}
+    for r in rows:
+        sheet, g, label, disease = group_key(r["obs"], split_disease)
+        counts = cells.setdefault((sheet, g, disease, r["article_id"]), {}).setdefault(r["n"], {})
+        # One label read twice out of the same population: the larger count is the one that can
+        # be a share of the sample (cases counted among everyone would be the smaller).
+        counts[label] = max(counts.get(label, 0), r["x"])
+    return {(*cell, label, n) for cell, by_n in cells.items() for n, counts in by_n.items()
+            for label in composition_labels(counts, n)}
+
+
 def build_groups(rows: list[dict[str, Any]], split_disease: bool = True) -> tuple[dict[tuple, list[dict]], int]:
     """{(sheet, group, label, disease key): [one study per article]}, and how many rows were
-    dropped because the same article gave the same label twice for one disease, however spelt
-    (the largest population is kept)."""
+    dropped because the same article gave the same label twice for one disease, however spelt.
+    The row kept is one that counts a group's cases rather than one that gives the composition
+    of the sample, then the one with the largest population: a paper's table of who was studied
+    (142 men among 225) has the larger denominator, and must not displace its count of cases
+    among the men. Each row kept carries `composition`."""
+    composition = composition_rows(rows, split_disease)
     best: dict[tuple, dict[int, dict]] = {}
     dropped = 0
     for r in rows:
         k = group_key(r["obs"], split_disease)
+        sheet, g, label, disease = k
+        row = {**r, "composition": (sheet, g, disease, r["article_id"], label, r["n"]) in composition}
         cur = best.setdefault(k, {}).get(r["article_id"])
         if cur is None:
-            best[k][r["article_id"]] = r
+            best[k][r["article_id"]] = row
         else:
             dropped += 1
-            if r["n"] > cur["n"]:
-                best[k][r["article_id"]] = r
+            if (not row["composition"], row["n"]) > (not cur["composition"], cur["n"]):
+                best[k][r["article_id"]] = row
     return {k: list(v.values()) for k, v in best.items()}, dropped
+
+
+def _by_category(groups: dict[tuple, list[dict]]) -> dict[tuple, dict[str, dict[int, dict]]]:
+    """{(sheet, group, disease): {label: {article: row}}}: the labels of one group side by side."""
+    by_cat: dict[tuple, dict[str, dict[int, dict]]] = {}
+    for (sheet, g, label, disease), items in groups.items():
+        for r in items:
+            by_cat.setdefault((sheet, g, disease), {}).setdefault(label, {})[r["article_id"]] = r
+    return by_cat
+
+
+def composition_pairs(groups: dict[tuple, list[dict]]) -> int:
+    """How many pairs of rows (two labels of one group, from one paper) the odds ratios leave out
+    because one of the two gives the composition of the sample."""
+    n = 0
+    for labels in _by_category(groups).values():
+        flags: dict[int, list[bool]] = {}
+        for by_article in labels.values():
+            for aid, r in by_article.items():
+                flags.setdefault(aid, []).append(r["composition"])
+        n += sum(math.comb(len(f), 2) - math.comb(f.count(False), 2) for f in flags.values())
+    return n
 
 
 def _study(r: dict[str, Any]) -> dict[str, Any]:
@@ -303,12 +390,15 @@ def pooled_groups(rows: list[dict[str, Any]], min_studies: int = MIN_STUDIES, sp
     groups, _ = build_groups(rows, split_disease)
     out = []
     for (sheet, g, label, disease), items in groups.items():
-        studies = [_study(r) for r in items]
+        studies = [{**_study(r), "composition": r["composition"]} for r in items]
         entry: dict[str, Any] = {
             "sheet": sheet, "group": g, "label": label, "disease": disease or None,
             "disease_spellings": disease_spellings(r["obs"].get("disease") for r in items),
             "label_path": items[0]["obs"].get("label_path"), "mapped": bool(items[0]["obs"].get("matched")),
             "k": len(studies), "n_total": sum(s["n"] for s in studies), "events_total": sum(s["x"] for s in studies),
+            # Studies whose row is the share of this label in their sample: where they are all
+            # of k, the pooled value is who was studied, not how often this group is a case.
+            "k_composition": sum(1 for s in studies if s["composition"]),
             "pooled": None, "heterogeneity": None, "studies": studies, "reason": None,
         }
         if len(studies) >= max(min_studies, 2):
@@ -330,29 +420,28 @@ def pooled_groups(rows: list[dict[str, Any]], min_studies: int = MIN_STUDIES, sp
 def pooled_comparisons(rows: list[dict[str, Any]], order: dict[tuple, int], min_studies: int = MIN_STUDIES,
                        split_disease: bool = True) -> list[dict[str, Any]]:
     """Odds ratios between two labels of one group, over the papers that report both. The pair is
-    ordered as the codebook orders its labels (male before female)."""
+    ordered as the codebook orders its labels (male before female). A paper whose row for either
+    label gives the composition of its sample is left out of the pair, and counted in
+    `excluded_composition`: 142 men and 81 women among 225 people are not two groups with cases."""
     groups, _ = build_groups(rows, split_disease)
-    by_cat: dict[tuple, dict[str, dict[int, dict]]] = {}
-    for (sheet, g, label, disease), items in groups.items():
-        for r in items:
-            by_cat.setdefault((sheet, g, disease), {}).setdefault(label, {})[r["article_id"]] = r
     out = []
-    for (sheet, g, disease), labels in by_cat.items():
+    for (sheet, g, disease), labels in _by_category(groups).items():
         pairs = []
         for a, b in combinations(sorted(labels), 2):
             common = labels[a].keys() & labels[b].keys()
-            if len(common) >= max(min_studies, 2):
-                pairs.append((len(common), a, b))
-        for k, a, b in sorted(pairs, reverse=True):
+            kept = sorted(aid for aid in common if not (labels[a][aid]["composition"] or labels[b][aid]["composition"]))
+            if len(kept) >= max(min_studies, 2):
+                pairs.append((len(kept), a, b, kept, len(common) - len(kept)))
+        for _k, a, b, kept, left_out in sorted(pairs, key=lambda p: p[:3], reverse=True):
             first, second = sorted((a, b), key=lambda lab: (order.get((sheet, g, lab), 10 ** 6), lab))
             studies, written = [], []
-            for aid in sorted(labels[a].keys() & labels[b].keys()):
+            for aid in kept:
                 r1, r2 = labels[first][aid], labels[second][aid]
                 studies.append({**_study(r1), "x1": r1["x"], "n1": r1["n"], "x2": r2["x"], "n2": r2["n"]})
                 written += _spelt([r1, r2])
             out.append({"sheet": sheet, "group": g, "disease": disease or None,
                         "disease_spellings": disease_spellings(written), "a": first, "b": second,
-                        "k": len(studies), **pool_odds_ratios(studies)})
+                        "k": len(studies), "excluded_composition": left_out, **pool_odds_ratios(studies)})
     out.sort(key=lambda e: (-e["k"], e["sheet"], e["group"], e["a"]))
     return out
 
@@ -412,6 +501,9 @@ def pooled_estimates(scenario_id: str, reviewed_only: bool = False, verified_onl
     rows, excl, index = collect_rows(scenario_id, reviewed_only, verified_only)
     order = {(n["sheet"], n["l1"], n["l2"]): i for i, n in enumerate(index.nodes) if n.get("l2")}
     _groups, dropped = build_groups(rows, split_disease)
+    # Pairs, where the other reasons count rows: a row that gives the composition of a sample
+    # still counts in the proportions, marked, and only the odds ratios leave it out.
+    excl = {**excl, "composition": composition_pairs(_groups)}
     _all_pooled = pooled_groups(rows, min_studies, split_disease)
     _all_comps = pooled_comparisons(rows, order, min_studies, split_disease)
     pooled, pooled_total = (_all_pooled if full else _all_pooled[:_MAX_GROUPS]), len(_all_pooled)

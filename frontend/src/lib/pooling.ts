@@ -67,14 +67,16 @@ export function spellingsText(spellings: DiseaseSpelling[]): string {
   return spellings.map((s) => `${s.spelling} (${s.n})`).join(" · ");
 }
 
+/** The pooled table as CSV. `k_composition` says how many of the k studies give the composition
+ *  of their sample: a file read away from the panel must not pass a share of men for a rate. */
 export function csvOfPooled(groups: PooledGroup[]): string {
   const q = (s: string | null) => `"${(s ?? "").replace(/"/g, '""')}"`;
   const head = ["sheet", "group", "label", "disease", "k", "n_total", "events_total", "pooled_p", "ci_low", "ci_high",
-    "pi_low", "pi_high", "I2", "tau2", "heterogeneity"];
+    "pi_low", "pi_high", "I2", "tau2", "heterogeneity", "k_composition"];
   const rows = groups.map((g) => [
     g.sheet, g.group, g.label, g.disease ?? "", g.k, g.n_total, g.events_total,
     g.pooled?.p ?? "", g.pooled?.ci_low ?? "", g.pooled?.ci_high ?? "", g.pooled?.pi_low ?? "", g.pooled?.pi_high ?? "",
-    g.heterogeneity?.I2 ?? "", g.heterogeneity?.tau2 ?? "", g.heterogeneity?.band ?? "",
+    g.heterogeneity?.I2 ?? "", g.heterogeneity?.tau2 ?? "", g.heterogeneity?.band ?? "", g.k_composition ?? "",
   ].map((v) => (typeof v === "string" && v !== "" ? q(v) : v)).join(","));
   return [head.join(","), ...rows].join("\n");
 }

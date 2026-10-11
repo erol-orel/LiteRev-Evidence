@@ -70,6 +70,8 @@ _S = {
         "none_pooled": "No label has {k} or more studies with a case count and a group size.",
         "few": "Labels with fewer than {k} studies, not pooled:", "cmp_h": "Comparisons between groups",
         "cmp_t": "Odds ratio of the first label against the second, over the papers that report both. 1 means no difference.",
+        "cmp_composition": "{n} pairs of rows were left out of the odds ratios because one of the two gives the composition of the paper's sample: rows that share one total and whose counts add up to it (142 men and 81 women among 225 people) say how the sample divides, not how often each group is a case.",
+        "composition_mark": "composition of the sample in {n} of {k} studies",
         "col_cmp": "Comparison", "col_papers_n": "Papers", "col_or": "Odds ratio (95% interval)",
         "left_h": "Rows left out of the pooled estimates", "left": {"rejected": "Rejected by a reviewer", "conflict": "Reviewers disagree",
             "not_reviewed": "Not reviewed (only when reviewed rows alone were asked for)", "quote_not_found": "Quote not found in the text",
@@ -86,6 +88,7 @@ _S = {
         "more_regions": "{n} more regions are not listed here: see the sheet COUNTRIES of the Excel export.",
         "more_few": "{n} more labels with fewer than {k} studies are not listed here: the Excel export lists every label (sheet POOLED).",
         "more_cmp": "{n} more comparisons are not listed here: the Excel export lists every comparison (sheet COMPARISONS).",
+        "lim_composition": "{n} pooled proportions rest wholly or partly on rows that give the composition of the sample (142 men among 225 people): there the pooled value is the share of that label among the people studied, not how often it is a case.",
         "geo_h": "Where the evidence comes from", "geo_t": "{n} of the {total} extracted articles name a place that resolves to a country; the NUTS list in use is {src}.",
         "geo_builtin": "the built-in one (countries; Germany NUTS 1; Italy NUTS 1 and 2)", "geo_loaded": "Eurostat's official list",
         "col_country": "Country", "col_nuts": "NUTS 0", "col_regions": "Regions (articles)",
@@ -120,6 +123,8 @@ _S = {
         "none_pooled": "Aucun libellé n'a {k} études ou plus avec un nombre de cas et une taille de groupe.",
         "few": "Libellés avec moins de {k} études, non combinés :", "cmp_h": "Comparaisons entre groupes",
         "cmp_t": "Odds ratio du premier libellé contre le second, sur les articles qui rapportent les deux. 1 signifie aucune différence.",
+        "cmp_composition": "{n} paires de lignes ont été écartées des odds ratios parce que l'une des deux donne la composition de l'échantillon de l'article : des lignes qui partagent un même total et dont les effectifs s'y additionnent (142 hommes et 81 femmes sur 225 personnes) disent comment l'échantillon se répartit, pas la fréquence des cas dans chaque groupe.",
+        "composition_mark": "composition de l'échantillon dans {n} études sur {k}",
         "col_cmp": "Comparaison", "col_papers_n": "Articles", "col_or": "Odds ratio (intervalle à 95 %)",
         "left_h": "Lignes écartées des estimations combinées", "left": {"rejected": "Rejetées par un relecteur", "conflict": "Les relecteurs divergent",
             "not_reviewed": "Non relues (seulement si les lignes relues étaient seules demandées)", "quote_not_found": "Citation non retrouvée dans le texte",
@@ -136,6 +141,7 @@ _S = {
         "more_regions": "{n} autres régions ne sont pas listées ici : voir la feuille COUNTRIES de l'export Excel.",
         "more_few": "{n} autres libellés avec moins de {k} études ne sont pas listés ici : l'export Excel liste chaque libellé (feuille POOLED).",
         "more_cmp": "{n} autres comparaisons ne sont pas listées ici : l'export Excel liste chaque comparaison (feuille COMPARISONS).",
+        "lim_composition": "{n} proportions combinées reposent en tout ou partie sur des lignes qui donnent la composition de l'échantillon (142 hommes sur 225 personnes) : la valeur combinée y est la part de ce libellé parmi les personnes étudiées, pas la fréquence des cas.",
         "geo_h": "D'où vient la preuve", "geo_t": "{n} des {total} articles extraits nomment un lieu qui se résout en un pays ; la liste NUTS utilisée est {src}.",
         "geo_builtin": "la liste intégrée (pays ; Allemagne NUTS 1 ; Italie NUTS 1 et 2)", "geo_loaded": "la liste officielle d'Eurostat",
         "col_country": "Pays", "col_nuts": "NUTS 0", "col_regions": "Régions (articles)",
@@ -165,6 +171,13 @@ def _interval(lo: float | None, hi: float | None, f) -> str:
 
 def _label(g: dict) -> str:
     return (g.get("label_path") or g["label"]).replace("_", " ")
+
+
+def _composition_mark(g: dict, S: dict) -> str:
+    """How many of a pooled group's studies give the composition of their sample rather than a
+    group with its cases, in words, or nothing."""
+    n = g.get("k_composition") or 0
+    return S["composition_mark"].format(n=n, k=g["k"]) if n else ""
 
 
 def _author(s: dict) -> str:
@@ -267,7 +280,8 @@ def build_extraction_report(scenario_id: str, lang: str = "en") -> dict[str, Any
         add(("p", S["none_pooled"].format(k=k)))
     else:
         add(("table", [S["col_label"], S["col_disease"], S["col_studies"], S["col_people"], S["col_pooled"], S["col_pred"], S["col_het"]],
-             [[_label(g), _disease_name(g, S), str(g["k"]), f"{g['events_total']}/{g['n_total']}",
+             [[_label(g) + (f" ({_composition_mark(g, S)})" if g.get("k_composition") else ""),
+               _disease_name(g, S), str(g["k"]), f"{g['events_total']}/{g['n_total']}",
                f"{pct(g['pooled']['p'])} ({_interval(g['pooled']['ci_low'], g['pooled']['ci_high'], pct)})",
                _interval(g["pooled"]["pi_low"], g["pooled"]["pi_high"], pct),
                f"{round(g['heterogeneity']['I2'])}% ({S['band'][g['heterogeneity']['band']]})"] for g in groups]))
@@ -280,8 +294,11 @@ def build_extraction_report(scenario_id: str, lang: str = "en") -> dict[str, Any
         if len(small) > _FEW_LISTED:
             add(("p", S["more_few"].format(n=len(small) - _FEW_LISTED, k=k)))
 
-    if pooled["comparisons"]:
+    # Said even when no comparison is left: the pairs that split one sample are why there is none.
+    n_composition = pooled["excluded"].get("composition", 0)
+    if pooled["comparisons"] or n_composition:
         add(("h2", S["cmp_h"]))
+    if pooled["comparisons"]:
         add(("p", S["cmp_t"]))
         add(("table", [S["col_cmp"], S["col_disease"], S["col_papers_n"], S["col_or"], S["col_het"]],
              [[f"{c['a'].replace('_', ' ')} {S['versus']} {c['b'].replace('_', ' ')}", _disease_name(c, S), str(c["k"]),
@@ -291,6 +308,8 @@ def build_extraction_report(scenario_id: str, lang: str = "en") -> dict[str, Any
             add(("p", S["more_cmp"].format(n=len(pooled["comparisons"]) - _COMPARISONS_LISTED)))
         for c in pooled["comparisons"][:_FIGURES]:
             add(("figure", "odds", c))
+    if n_composition:
+        add(("p", S["cmp_composition"].format(n=n_composition)))
 
     left = [(S["left"][key], str(n)) for key, n in pooled["excluded"].items() if n and key in S["left"]]
     if left:
@@ -313,6 +332,9 @@ def build_extraction_report(scenario_id: str, lang: str = "en") -> dict[str, Any
         limits.append(S["lim_unmapped"].format(n=un["rows_unmapped"]))
     if het_n:
         limits.append(S["lim_het"].format(n=het_n))
+    composition_n = sum(1 for g in groups if g.get("k_composition"))
+    if composition_n:
+        limits.append(S["lim_composition"].format(n=composition_n))
     limits.append(S["lim_combine"])
     add(("h2", S["limits"]))
     add(("bullets", limits))
@@ -320,7 +342,8 @@ def build_extraction_report(scenario_id: str, lang: str = "en") -> dict[str, Any
     if groups:
         add(("h2", S["appendix"]))
         for g in groups:
-            add(("p", f"{_label(g)} ({_disease_name(g, S)}){_as_written(g, S)}"))
+            mark = _composition_mark(g, S)
+            add(("p", f"{_label(g)} ({_disease_name(g, S)})" + (f", {mark}" if mark else "") + _as_written(g, S)))
             add(("table", ["", S["col_people"], S["col_share"]],
                  [[f"{_author(s)}: {(s['title'] or '')[:90]}", f"{s['x']}/{s['n']}", pct(s.get("p"))] for s in g["studies"]]))
 
