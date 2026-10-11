@@ -31,6 +31,7 @@ from .search import (
     EXHAUSTIVE_MAX_PER_SOURCE,
     LIVE_MAX_PER_SOURCE,
     OPENAIRE_MAX_OPERATORS,
+    RANKED_PASS_MAX,
     SOURCE_OUTCOMES_COUNTED,
     URL_QUERY_MAX_ENCODED,
     _url_encoded_len,
@@ -404,6 +405,9 @@ def _run_user_scenario_populate(
         exhaustive = scenario_search_mode(scenario_id) == "exhaustive"
     _search_mode = "exhaustive" if exhaustive else "standard"
     _cap_strategy = max(int(max_results), EXHAUSTIVE_MAX_PER_SOURCE) if exhaustive else int(max_results)
+    # Les passages classés par pertinence (Crossref, le texte intégral d'OpenAlex) gardent
+    # leur plafond propre, quel que soit `max_results` : cf. RANKED_PASS_MAX.
+    _cap_ranked = max(1, min(int(max_results), RANKED_PASS_MAX))
     _fed_budget = max(POPULATE_FEDERATION_BUDGET, EXHAUSTIVE_FEDERATION_BUDGET) if exhaustive \
         else POPULATE_FEDERATION_BUDGET
     # Ce que la carte PRISMA doit dire de ce run, source par source : interrogée sur titre
@@ -1213,14 +1217,14 @@ def _run_user_scenario_populate(
         # partage le plafond standard entre les morceaux.
         _oa_split = list(_openalex_parts)
         if not exhaustive:
-            _passes = [("fulltext_top", _bool_query, _send_bool, int(max_results))]
+            _passes = [("fulltext_top", _bool_query, _send_bool, _cap_ranked)]
         elif "openalex" in _title_abstract_sources and _oa_split:
-            _top_each = max(1, math.ceil(int(max_results) / len(_oa_split)))
+            _top_each = max(1, math.ceil(_cap_ranked / len(_oa_split)))
             _passes = ([("scoped", p, True, _cap_strategy) for p in _oa_split]
                        + [("fulltext_top", p, True, _top_each) for p in _oa_split])
         elif "openalex" in _title_abstract_sources:
             _passes = [("scoped", _bool_query, True, _cap_strategy),
-                       ("fulltext_top", _bool_query, True, int(max_results))]
+                       ("fulltext_top", _bool_query, True, _cap_ranked)]
         else:
             _passes = [("fulltext_all", _bool_query, _send_bool, _cap_strategy)]
         _seen: set = set()
@@ -1326,7 +1330,7 @@ def _run_user_scenario_populate(
         try:
             _cr_offset = 0
             _cr_fetched = 0
-            _cr_limit = min(max_results, max_results)
+            _cr_limit = _cap_ranked
             _cr_rows = min(1000, _cr_limit)   # max Crossref : 10× moins d'allers-retours
             while _cr_fetched < _cr_limit:
                 if _budget_exhausted():
@@ -2202,8 +2206,9 @@ def _run_user_scenario_populate(
                 search_mode=_search_mode,
                 # Et l'endpoint classique de Semantic Scholar, qui ne rend pas plus de
                 # 1 000 notices, dans les deux modes.
-                source_caps=(({"crossref": int(max_results), "pubmed": min(int(_cap_strategy), 10000)}
-                              if exhaustive else {}) | dict(_source_caps_run)
+                source_caps=(({"crossref": int(_cap_ranked)} if _cap_ranked < int(_cap_strategy) else {})
+                             | ({"pubmed": min(int(_cap_strategy), 10000)} if exhaustive else {})
+                             | dict(_source_caps_run)
                              if include_live else {}),
                 title_abstract_sources=(sorted(_title_abstract_sources) if include_live else []),
                 unranked_sources=(sorted(_unranked_sources) if include_live else []),
