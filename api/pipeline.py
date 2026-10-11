@@ -2125,7 +2125,9 @@ def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict
     2. fulltext  – Récupération full-text (PMC→EuropePMC→Unpaywall) pendant que les IDs sont frais
     3. embed     – Embeddings sur title+abstract+fulltext chunks (contenu enrichi)
     4. rerank    – Score cosinus via pgvector (pas de re-embedding API)
-    5. pico      – Extraction PICO (LLM, utilise fulltext si dispo)
+    5. pico      – Extraction PICO (LLM) : le résumé, plus les méthodes et les résultats du
+                   texte intégral quand il existe, et le résultat principal de l'article ;
+                   puis ce résultat pour les PICO pertinents écrits avant ce champ
     6. metadata  – Extraction métadonnées étude (LLM)
     7. clustering – K-means sur embeddings pgvector
     """
@@ -2806,31 +2808,16 @@ def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict
             if openai_key:
                 from llm_usage import MeteredOpenAI as _OAI
                 from datetime import datetime, timezone
+                from .pico_map import PicoUnreadable, extract_pico, pico_fulltext_chunks
                 _client = _OAI(api_key=openai_key, timeout=90.0)
                 # Le PICO est AFFICHÉ tel quel (onglet PICO, export CSV) : sa PROSE suit
                 # donc la langue de l'interface, comme le reste du pipeline. `study_design`
-                # reste en anglais : c'est un identifiant que le code regroupe et normalise
-                # (digest, carte des concepts), et le traduire scinderait « cohort » et
-                # « cohorte » en deux catégories pour le même devis.
-                system_prompt_pico = (
-                    "You are a systematic review expert. "
-                    "Extract PICO elements and return ONLY valid JSON:\n"
-                    '{"P":"Population","I":"Intervention","C":"Comparator or Not specified",'
-                    '"O":"Outcome(s)",'
-        '"study_design":"UN SEUL de: Randomized controlled trial | Clinical trial | '
-        'Non-randomized trial | Systematic review | Meta-analysis | Cohort study | '
-        'Case-control study | Cross-sectional study | Surveillance | Case report | '
-        'Modelling study | Qualitative study | Guideline | Narrative review | '
-        'Preclinical | Not stated",'
-        '# Pour une revue, PRÉCISE ce qu\'elle inclut quand l\'abstract le dit '
-        '(ex. "Systematic review of cohort studies") : le niveau de preuve en dépend.'
-        ''
-                    '"pico_confidence":0.0-1.0,"pico_notes":""}\n'
-                    "Be concise (max 2 sentences per field). Return ONLY the JSON."
-                    + _llm_lang_directive(lang)
-                    + " Exception: keep \"study_design\" in English, from the list above, "
-                      "as a stable identifier."
-                )
+                # et `finding_direction` restent en anglais : ce sont des identifiants que
+                # le code regroupe et compte (digest, carte des concepts), et les traduire
+                # scinderait « cohort » et « cohorte » en deux catégories pour le même devis.
+                # Le prompt, le texte lu et la normalisation sont ceux de tous les
+                # rédacteurs PICO (api/pico_map) : cette étape ne lisait que le résumé.
+                _pico_lang = _llm_lang_directive(lang)
                 with engine.connect() as conn:
                     pico_rows = conn.execute(text("""
                         SELECT ld.id, ld.title, ld.abstract
@@ -2849,45 +2836,14 @@ def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict
                 pico_errors = 0
                 for row in pico_rows:
                     try:
-                        response = _client.chat.completions.create(
-                            model=_model("bulk"),
-                            messages=[
-                                {"role": "system", "content": system_prompt_pico},
-                                {"role": "user", "content": f"Title: {row['title']}\n\nAbstract: {(row['abstract'] or '')[:3000]}"},
-                            ],
-                            temperature=0,
-                            seed=42,
-                            max_tokens=800,  # 400 tronquait le JSON verbeux → JSON invalide
-                            response_format={"type": "json_object"},
-                        )
-                    except Exception as e:
-                        logger.warning(f"Pipeline PICO API article {row['id']}: {e}")
-                        pico_errors += 1
-                        _time.sleep(0.05)
-                        continue  # transitoire - ne PAS consommer une tentative
-                    # Réponse reçue → COMPTE la tentative (borne le token-bleed) ;
-                    # remplissage tolérant des clés plutôt que rejet en boucle.
-                    try:
-                        pico = json.loads(response.choices[0].message.content)
-                        if not isinstance(pico, dict):
-                            raise ValueError("réponse PICO non-dict")
-                        for _k in ("P", "I", "C", "O"):
-                            pico.setdefault(_k, "")
-                        pico.setdefault("study_design", "not specified")   # identifiant stable, jamais affiché brut sans traduction
-                        try:
-                            pico["pico_confidence"] = float(pico.get("pico_confidence", 0.3))
-                        except (TypeError, ValueError):
-                            pico["pico_confidence"] = 0.3
-                        pico["pico_notes"] = pico.get("pico_notes", "")
-                        with engine.begin() as conn:
-                            conn.execute(text("""
-                                UPDATE literature_document
-                                SET pico_json = CAST(:pico AS jsonb), pico_extracted_at = :ts,
-                                    pico_attempts = COALESCE(pico_attempts, 0) + 1
-                                WHERE id = :article_id
-                            """), {"pico": json.dumps(pico), "ts": datetime.now(timezone.utc), "article_id": row["id"]})
-                        pico_extracted += 1
-                    except Exception as e:
+                        with engine.connect() as _ftc:
+                            _chunks = pico_fulltext_chunks(_ftc, row["id"])
+                        pico, _pico_src = extract_pico(_client, row["title"], row["abstract"], _chunks,
+                                                       lang_directive=_pico_lang,
+                                                       label=f"Pipeline PICO {row['id']}")
+                    except PicoUnreadable as e:
+                        # Réponse reçue mais inutilisable → COMPTE la tentative (borne le
+                        # token-bleed d'une sortie déterministe malformée).
                         logger.warning(f"Pipeline PICO parse article {row['id']}: {e}")
                         try:
                             with engine.begin() as conn:
@@ -2897,7 +2853,38 @@ def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict
                         except Exception:
                             pass
                         pico_errors += 1
+                        _time.sleep(0.05)
+                        continue
+                    except Exception as e:
+                        logger.warning(f"Pipeline PICO API article {row['id']}: {e}")
+                        pico_errors += 1
+                        _time.sleep(0.05)
+                        continue  # transitoire - ne PAS consommer une tentative
+                    try:
+                        with engine.begin() as conn:
+                            conn.execute(text("""
+                                UPDATE literature_document
+                                SET pico_json = CAST(:pico AS jsonb), pico_extracted_at = :ts,
+                                    pico_attempts = COALESCE(pico_attempts, 0) + 1
+                                WHERE id = :article_id
+                            """), {"pico": json.dumps(pico), "ts": datetime.now(timezone.utc), "article_id": row["id"]})
+                        pico_extracted += 1
+                    except Exception as e:
+                        logger.warning(f"Pipeline PICO write article {row['id']}: {e}")
+                        pico_errors += 1
                     _time.sleep(0.05)
+                # Le résultat principal des articles PERTINENTS dont le PICO précède ce champ
+                # (écrit avant qu'un rédacteur ne le demande) : une passe courte, une fois
+                # par article et mise en cache, sur tous ceux qui en manquent. Le brief,
+                # les actions et le spec, plus loin dans ce pipeline, comptent les
+                # résultats sur le corpus complet.
+                _findings: dict[str, Any] = {}
+                try:
+                    from .enrichment import run_findings_pass
+                    _findings = run_findings_pass(scenario_id, lang_directive=_pico_lang)
+                except Exception as _fe:
+                    logger.warning(f"Pipeline résultats principaux {scenario_id}: {_fe}")
+                    _findings = {"status": "error", "error": str(_fe)[:300]}
                 # Total coverage from DB (includes previously extracted articles)
                 with engine.connect() as _pico_stat_conn:
                     _pico_total_in_scenario = _pico_stat_conn.execute(text("""
@@ -2913,7 +2900,10 @@ def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict
                             total_with_pico=_pico_total_with,
                             total_articles=_pico_total_in_scenario,
                             pct=round(_pico_total_with / _pico_total_in_scenario * 100, 1) if _pico_total_in_scenario > 0 else 0,
-                            errors=pico_errors)
+                            errors=pico_errors,
+                            findings_status=_findings.get("status"),
+                            findings_filled=_findings.get("done", 0),
+                            findings_failed=_findings.get("failed", 0))
             else:
                 update_step("pico", "skipped", reason="Clé OpenAI non configurée")
         except Exception as e:
@@ -2926,7 +2916,10 @@ def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict
             if openai_key:
                 from llm_usage import MeteredOpenAI as _OAI2
                 from datetime import datetime, timezone
-                _client2 = _OAI2(api_key=openai_key)
+                from .pico_map import json_completion
+                # Un délai, comme tous les autres appels : sans lui, une requête pendue
+                # bloquait l'étape, et le pipeline avec elle.
+                _client2 = _OAI2(api_key=openai_key, timeout=90.0)
                 # Seul `primary_outcome` est de la prose affichée : il suit la langue de
                 # l'interface. Tous les autres champs sont des VALEURS D'ÉNUMÉRATION que le
                 # code compare et regroupe (study_type → study_design, setting, funding,
@@ -2938,7 +2931,8 @@ def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict
                     '"primary_outcome":"brief description or null","funding":"public|industry|mixed|not reported",'
                     '"bias_risk":"low|moderate|high|unclear","metadata_confidence":0.0-1.0}\n'
                     "Return ONLY the JSON. Every field except \"primary_outcome\" is an "
-                    "identifier: keep it in English, exactly from the lists above."
+                    "identifier: keep it in English, exactly from the lists above. Do not "
+                    "use the em dash character."
                     + _llm_lang_directive(lang)
                     + " That language applies to \"primary_outcome\" only."
                 )
@@ -2960,17 +2954,22 @@ def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict
                 meta_errors = 0
                 for row in meta_rows:
                     try:
-                        response = _client2.chat.completions.create(
-                            model=_model("bulk"),
-                            messages=[
-                                {"role": "system", "content": system_prompt_meta},
-                                {"role": "user", "content": f"Title: {row['title']}\n\nAbstract: {(row['abstract'] or '')[:2000]}"},
-                            ],
-                            temperature=0.1,
-                            max_tokens=300,
-                            response_format={"type": "json_object"},
-                        )
-                        metadata = json.loads(response.choices[0].message.content)
+                        def _ask_meta(messages):
+                            return _client2.chat.completions.create(
+                                model=_model("bulk"),
+                                messages=messages,
+                                temperature=0.1,
+                                max_tokens=300,
+                                response_format={"type": "json_object"},
+                            )
+
+                        # Coupée au plafond, la réponse est redemandée une fois, plus courte,
+                        # au lieu de remonter en erreur d'analyse JSON.
+                        metadata = json.loads(json_completion(
+                            _ask_meta,
+                            [{"role": "system", "content": system_prompt_meta},
+                             {"role": "user", "content": f"Title: {row['title']}\n\nAbstract: {(row['abstract'] or '')[:2000]}"}],
+                            f"Pipeline metadata {row['id']}"))
                         metadata["metadata_confidence"] = float(metadata.get("metadata_confidence", 0.5))
                         # Colonnes structurées (study_design / sample_size) et quality_score
                         # déterministe, par l'écriture commune au lot /metadata/extract.

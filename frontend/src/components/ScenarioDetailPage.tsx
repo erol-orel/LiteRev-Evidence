@@ -3729,6 +3729,9 @@ function RagSection({ scenarioId, detail }: { scenarioId: string; detail: Scenar
   const [meta, setMeta] = useState<RagMeta | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [done, setDone] = useState(false);
+  // La réponse a atteint sa longueur maximale (événement `cut` du flux) : elle est
+  // affichée et archivée AVEC cet avertissement, pas comme une réponse complète.
+  const [cut, setCut] = useState(false);
   const cancelRef = useRef<(() => void) | null>(null);
   const answerRef = useRef<HTMLDivElement>(null);
   // Le texte, les sources et la méta tels qu'ils sont À LA FIN du flux : les états
@@ -3736,6 +3739,7 @@ function RagSection({ scenarioId, detail }: { scenarioId: string; detail: Scenar
   const answerSoFar = useRef("");
   const sourcesSoFar = useRef<ScenarioRagResponse['sources']>([]);
   const metaSoFar = useRef<RagMeta | null>(null);
+  const cutSoFar = useRef(false);
   const [historyKey, setHistoryKey] = useState(0);
 
   // Indexation RAG du corpus : combien de documents l'Assistant peut déjà
@@ -3773,13 +3777,16 @@ function RagSection({ scenarioId, detail }: { scenarioId: string; detail: Scenar
     setMeta(null);
     setError(null);
     setDone(false);
+    setCut(false);
     answerSoFar.current = "";
     sourcesSoFar.current = [];
     metaSoFar.current = null;
+    cutSoFar.current = false;
 
     const cancel = askScenarioRagStreamFiltered(scenarioId, qText, {
       onSources: (s) => { sourcesSoFar.current = s; setSources(s); },
       onMeta: (m) => { metaSoFar.current = m; setMeta(m); },
+      onCut: () => { cutSoFar.current = true; setCut(true); },
       onToken: (t) => {
         answerSoFar.current += t;
         setStreamedText(prev => prev + t);
@@ -3797,7 +3804,11 @@ function RagSection({ scenarioId, detail }: { scenarioId: string; detail: Scenar
         // l'écran.
         saveScenarioQuestion(scenarioId, {
           question: qText,
-          answer: answerSoFar.current,
+          // Une réponse coupée garde son avertissement dans l'historique et dans les
+          // documents exportés, qui la reprennent telle quelle.
+          answer: cutSoFar.current
+            ? `${answerSoFar.current}\n\n[${t("scenarioDetail.rag.answerCut")}]`
+            : answerSoFar.current,
           lang,
           threshold: metaSoFar.current?.threshold ?? null,
           scope: {},
@@ -3821,6 +3832,7 @@ function RagSection({ scenarioId, detail }: { scenarioId: string; detail: Scenar
     setMeta(null);
     setError(null);
     setDone(false);
+    setCut(false);
     setStreaming(false);
     setQuestion("");
   };
@@ -3946,6 +3958,11 @@ function RagSection({ scenarioId, detail }: { scenarioId: string; detail: Scenar
               {streamedText}
               {streaming && <span className="inline-block w-0.5 h-3 bg-brand-400 animate-pulse ml-0.5 align-middle"/>}
             </div>
+            {cut && (
+              <p className="mt-2 rounded-xl border border-gold-500/25 bg-gold-500/5 px-3 py-2 text-[11px] text-gold-300">
+                {t("scenarioDetail.rag.answerCut")}
+              </p>
+            )}
             {/* Le nombre d'articles INTERROGÉS et le nombre d'articles CITÉS sont deux
                 choses : la ligne annonçait « 2 170 articles utilisés » sous une réponse
                 écrite sur une vingtaine d'extraits. Les chiffres de la réponse, eux,

@@ -15,6 +15,7 @@ from .core import _norm_lang, app, engine, logger
 from .documents import _llm_lang_directive
 from .gesica import _get_scenario_name
 from .relevance import _get_above_threshold_articles
+from .pico_map import json_completion
 from llm_usage import model_for as _model
 
 # ─── ACTIONS RECOMMANDÉES (carte tableau de bord, généralisé aux user scenarios) ─
@@ -23,6 +24,27 @@ _ACTIONS_JOBS: dict[str, dict] = {}
 #: interrogée à chaque affichage : sans borne, un modèle en panne coûterait un appel par
 #: ouverture d'onglet.
 _ACTIONS_MAX_ATTEMPTS = int(os.getenv("ACTIONS_MAX_ATTEMPTS", "3") or 3)
+
+
+def _action_context_line(a: dict) -> str:
+    """Un article reproduit, en une ligne : titre, année, devis, outcome, résultat
+    principal. Rien n'y est coupé ; les retours à la ligne sont repliés. PUR."""
+    def _flat(v) -> str:
+        return " ".join(str(v or "").split())
+
+    pj = a.get("pico_json") or {}
+    design = _flat(a.get("study_design") or pj.get("study_design"))
+    head = f"- [{a.get('id')}] {_flat(a.get('title')) or 'Sans titre'} ({a.get('year') or 'année inconnue'}"
+    head += f"; {design})" if design else ")"
+    parts = [head]
+    outcome = _flat(pj.get("outcome", pj.get("O", "")))
+    if outcome:
+        parts.append(f"outcome: {outcome}")
+    finding = _flat(pj.get("key_finding", pj.get("conclusion", "")))
+    if finding:
+        direction = _flat(pj.get("finding_direction"))
+        parts.append(f"résultat: {finding}" + (f" [{direction}]" if direction else ""))
+    return " | ".join(parts)
 
 
 def _generate_recommended_actions(scenario_id: str, lang: str | None = None) -> list[str]:
@@ -44,20 +66,18 @@ def _generate_recommended_actions(scenario_id: str, lang: str | None = None) -> 
         return []
 
     scenario_name = _get_scenario_name(scenario_id)
-    ctx = []
-    for a in base[:20]:
-        pj = a.get("pico_json") or {}
-        ctx.append({
-            "title": (a.get("title") or "")[:120],
-            "O": pj.get("outcome", pj.get("O", "")),
-            "key_finding": pj.get("key_finding", pj.get("conclusion", "")),
-        })
+    # Une ligne par article, entière. Le contexte était un JSON coupé à 6 000 caractères :
+    # les trois derniers des « 20 » articles annoncés arrivaient tronqués au milieu d'une
+    # chaîne, ou pas du tout, et chacun portait un `key_finding` toujours vide.
+    ctx = [_action_context_line(a) for a in base[:20]]
 
     # Les actions engagent le corpus ENTIER, pas les 20 articles reproduits : le digest
-    # (agrégats sur TOUS les articles pertinents) précède, le verbatim illustre.
+    # (agrégats sur TOUS les articles pertinents, résultats compris) précède, le verbatim
+    # illustre. Taille par défaut : coupé à 1 800 caractères, il perdait ses derniers types
+    # de concepts.
     from .digest import corpus_digest, digest_coverage_note, digest_to_prompt
     _digest = corpus_digest(scenario_id)
-    _digest_block = digest_to_prompt(_digest, max_chars=1800)
+    _digest_block = digest_to_prompt(_digest)
     _coverage = digest_coverage_note(_digest, len(ctx))
     _n_total = _digest.get("n_articles") or len(base)
 
@@ -70,18 +90,24 @@ def _generate_recommended_actions(scenario_id: str, lang: str | None = None) -> 
             # incomplet il interdit de généraliser au-delà des articles reproduits.
             + (f"{_digest_block}\n\n{_coverage}\n\n" if _digest_block
                else f"Basé sur {_n_total} articles.\n\n{_coverage}\n\n")
-            + f"Articles reproduits ({len(ctx)} les mieux établis) :\n"
-            + f"{_json.dumps(ctx, ensure_ascii=False)[:6000]}\n\n"
+            + f"Articles reproduits ({len(ctx)} les plus proches de la question du scénario ; "
+              f"titre, année, devis, outcome, résultat principal) :\n"
+            + "\n".join(ctx) + "\n\n"
             "Génère un JSON {\"recommended_actions\": [\"action 1\", ...]} avec 4 à 5 actions "
             "concrètes déduites de l'évidence du corpus complet. Retourne UNIQUEMENT le JSON.")
     try:
         client = _OAI(timeout=90.0)
-        resp = client.chat.completions.create(
-            model=_model("write"), temperature=0.2, max_tokens=700,
-            response_format={"type": "json_object"},
-            messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
-        )
-        data = _json.loads(resp.choices[0].message.content)
+
+        def _ask(messages):
+            return client.chat.completions.create(
+                model=_model("write"), temperature=0.2, max_tokens=700,
+                response_format={"type": "json_object"},
+                messages=messages,
+            )
+
+        data = _json.loads(json_completion(
+            _ask, [{"role": "system", "content": system}, {"role": "user", "content": user}],
+            f"recommended actions {scenario_id}"))
         actions = [str(x) for x in (data.get("recommended_actions") or []) if str(x).strip()][:6]
     except Exception as e:
         logger.error(f"Génération actions {scenario_id}: {e}", exc_info=True)

@@ -6,14 +6,18 @@ several thousand abstracts cannot be pasted into one prompt, so the rule is hono
 only way that scales, map then reduce:
 
   map     per article, once, cached on the article row: PICO (`pico_json`, extracted for
-          every article by the pipeline and the background worker) and typed concepts
+          every article by the pipeline and the background worker, with the article's
+          main finding and its direction, see api/pico_map) and typed concepts
           (`concepts_json`);
   reduce  this module aggregates those per-article facts over the ENTIRE relevant subset,
           in SQL, with no LLM and no sampling.
 
 A generator then writes its narrative over the digest, which covers every article, plus
-the verbatim text of the best few for quotation. Before this, the brief spoke for 30
-articles out of 2,732 while announcing the full count.
+the verbatim text of a few for quotation: the closest to the question, in the corpus's
+relevance order. Before this, the brief spoke for 30 articles out of 2,732 while
+announcing the full count. And until the findings were counted here, whatever it said
+about RESULTS still came from those 30: the digest counted designs and concepts, never
+what the studies found.
 
 Everything here is deterministic: the same corpus gives the same digest.
 """
@@ -24,6 +28,7 @@ from typing import Any
 from sqlalchemy import text
 
 from .core import engine, logger
+from .pico_map import FINDING_DIRECTIONS
 from .study_design import raw_design_sql
 
 #: Le devis brut d'un article, écrit une seule fois.
@@ -45,6 +50,13 @@ _RELEVANT = f"""
 # le prompt. Les totaux, eux, portent TOUJOURS sur l'ensemble complet.
 _TOP_N = 12
 _TOP_CONCEPTS_PER_TYPE = 8
+#: Outcomes dont les directions de résultat sont détaillées. Les totaux par direction,
+#: eux, portent sur tous les articles pertinents, et le nombre d'outcomes est dit.
+_TOP_FINDING_OUTCOMES = 8
+
+#: Taille par défaut d'un bloc de prompt. 2 600 coupait le digest au milieu d'une ligne,
+#: si bien que les derniers types de concepts n'atteignaient jamais le modèle.
+PROMPT_BLOCK_CHARS = 6000
 
 
 def _rows(conn, sql: str, sid: str, thr: float, **extra) -> list[dict]:
@@ -181,9 +193,87 @@ def build_matrix(pairs, max_labels: int = _MATRIX_MAX_LABELS) -> dict[str, Any]:
     }
 
 
+def _findings(conn, scenario_id: str, thr: float) -> dict[str, Any]:
+    """Ce que les études ont TROUVÉ, compté sur TOUS les articles pertinents.
+
+    La direction du résultat principal de chaque article (`pico_json.finding_direction`,
+    lue une fois par article, cf. api/pico_map) : au total, puis pour les outcomes les plus
+    fréquents. Les outcomes sont les concepts typés « outcome » de `concepts_json` quand le
+    corpus en porte ; sinon le texte O du PICO, ramené à un libellé normalisé (minuscules,
+    première proposition, sans ponctuation). `n_read` dit combien d'articles ont été lus
+    pour leur résultat : les autres ne disent rien, ni dans un sens ni dans l'autre."""
+    dirs = ",\n".join(f"COUNT(*) FILTER (WHERE d.pico_json->>'finding_direction' = '{k}') AS f_{k}"
+                      for k in FINDING_DIRECTIONS)
+    head = _rows(conn, f"""
+        SELECT COUNT(*) FILTER (WHERE d.pico_json->>'finding_direction' IS NOT NULL) AS n_read,
+               COUNT(*) FILTER (WHERE NULLIF(TRIM(d.pico_json->>'key_finding'), '') IS NOT NULL)
+                   AS n_with_finding,
+               {dirs}
+        {_RELEVANT}
+    """, scenario_id, thr)[0]
+    out: dict[str, Any] = {
+        "n_read": int(head["n_read"] or 0),
+        "n_with_finding": int(head["n_with_finding"] or 0),
+        "by_direction": {k: int(head[f"f_{k}"] or 0) for k in FINDING_DIRECTIONS},
+    }
+
+    def _by_label(rows: list[dict]) -> list[dict]:
+        return [{"label": r["label"], "n": int(r["n"]), "n_read": int(r["n_read"] or 0),
+                 "by_direction": {k: int(r[f"f_{k}"] or 0) for k in FINDING_DIRECTIONS}}
+                for r in rows]
+
+    # Un article compte UNE fois par libellé (DISTINCT), même s'il porte le concept deux fois.
+    per_concept = ",\n".join(
+        f"COUNT(DISTINCT d.id) FILTER (WHERE d.pico_json->>'finding_direction' = '{k}') AS f_{k}"
+        for k in FINDING_DIRECTIONS)
+    try:
+        with conn.begin_nested():                            # base sans concepts_json : repli
+            rows = _rows(conn, f"""
+                SELECT c->>'en' AS label, COUNT(DISTINCT d.id) AS n,
+                       COUNT(DISTINCT d.id) FILTER (
+                           WHERE d.pico_json->>'finding_direction' IS NOT NULL) AS n_read,
+                       {per_concept},
+                       COUNT(*) OVER () AS n_labels
+                FROM literature_document d
+                JOIN article_scenarios ars ON ars.document_id = d.id
+                CROSS JOIN LATERAL jsonb_array_elements(d.concepts_json->'concepts') AS c
+                WHERE ars.scenario_id = :sid
+                  AND {relevant_gate_sql('d', 'ars', ':thr')}
+                  AND jsonb_typeof(d.concepts_json->'concepts') = 'array'
+                  AND c->>'t' = 'outcome' AND NULLIF(TRIM(c->>'en'), '') IS NOT NULL
+                GROUP BY 1 ORDER BY n DESC, 1 LIMIT :top
+            """, scenario_id, thr, top=_TOP_FINDING_OUTCOMES)
+    except Exception as _ce:                                 # noqa: BLE001
+        logger.info(f"corpus_digest outcome concepts {scenario_id}: {_ce}")
+        rows = []
+    out["outcome_basis"] = "concepts"
+    if not rows:
+        # Aucun concept « outcome » : le texte O du PICO, à un libellé près.
+        label = ("NULLIF(LEFT(TRIM(regexp_replace(regexp_replace(lower(split_part(split_part("
+                 "split_part(COALESCE(NULLIF(TRIM(d.pico_json->>'O'), ''), d.pico_json->>'outcome', ''),"
+                 " ';', 1), ',', 1), '(', 1)), '[^[:alnum:][:space:]]+', ' ', 'g'),"
+                 " '[[:space:]]+', ' ', 'g')), 80), '')")
+        per_label = ",\n".join(f"COUNT(*) FILTER (WHERE o.dir = '{k}') AS f_{k}"
+                               for k in FINDING_DIRECTIONS)
+        rows = _rows(conn, f"""
+            SELECT o.label, COUNT(*) AS n, COUNT(*) FILTER (WHERE o.dir IS NOT NULL) AS n_read,
+                   {per_label},
+                   COUNT(*) OVER () AS n_labels
+            FROM (SELECT d.pico_json->>'finding_direction' AS dir, {label} AS label
+                  {_RELEVANT}) o
+            WHERE o.label IS NOT NULL
+            GROUP BY 1 ORDER BY n DESC, 1 LIMIT :top
+        """, scenario_id, thr, top=_TOP_FINDING_OUTCOMES)
+        out["outcome_basis"] = "pico_outcome"
+    out["by_outcome"] = _by_label(rows)
+    out["n_outcome_labels"] = int(rows[0]["n_labels"]) if rows else 0
+    return out
+
+
 def corpus_digest(scenario_id: str, threshold: float | None = None) -> dict[str, Any]:
     """Portrait chiffré du corpus PERTINENT COMPLET : volumétrie, couverture, années,
-    devis, pays, journaux, concepts typés, et les articles les mieux établis.
+    devis, pays, journaux, concepts typés, et ce que les études ont trouvé (direction du
+    résultat principal de chaque article, au total et par outcome).
 
     Aucun échantillonnage : chaque compteur est calculé sur tous les articles pertinents.
     Les distributions sont tronquées aux modalités les plus fréquentes, mais leur total
@@ -265,11 +355,26 @@ def corpus_digest(scenario_id: str, threshold: float | None = None) -> dict[str,
                 logger.info(f"corpus_digest concepts {scenario_id}: {_ce}")
                 concepts = []
             by_type: dict[str, list] = {}
+            labels_per_type: dict[str, int] = {}
             for c in concepts:
                 lst = by_type.setdefault(c["type"] or "topic", [])
+                labels_per_type[c["type"] or "topic"] = labels_per_type.get(c["type"] or "topic", 0) + 1
                 if len(lst) < _TOP_CONCEPTS_PER_TYPE:
                     lst.append({"label": c["label"], "n": c["n"]})
             out["concepts"] = by_type
+            # Combien de libellés chaque type porte en tout : le prompt dit « (+N more) »
+            # au lieu de laisser croire que les huit premiers sont tout le corpus.
+            out["concepts_total"] = labels_per_type
+
+        # Les résultats ont leur propre connexion : une requête de concepts en échec (base
+        # sans concepts_json) a annulé la transaction de la première. Un décompte en échec
+        # est DIT dans le prompt, jamais rendu comme « aucun résultat ».
+        try:
+            with engine.connect() as fconn:
+                out["findings"] = _findings(fconn, scenario_id, thr)
+        except Exception as _fe:                             # noqa: BLE001 - jamais bloquant
+            logger.warning(f"corpus_digest findings {scenario_id}: {_fe}")
+            out["findings"] = {"error": str(_fe)[:300]}
         out["complete"] = True                               # calculé sur TOUT le corpus pertinent
     except Exception as e:                                   # noqa: BLE001 - jamais bloquant
         # `complete` était posé HORS du try : une agrégation en échec renvoyait
@@ -312,37 +417,146 @@ def _quality_and_citation_lines(d: dict) -> list[str]:
     return lines
 
 
-def digest_to_prompt(digest: dict, max_chars: int = 2600) -> str:
+def _more_marker(labels: list[str]) -> str:
+    shown = ", ".join(labels[:6]) + (", ..." if len(labels) > 6 else "")
+    return f"(+{len(labels)} more, left out for length: {shown})"
+
+
+def fit_prompt_sections(sections: list[tuple[str, str]], max_chars: int = PROMPT_BLOCK_CHARS,
+                        mandatory: int = 1) -> str:
+    """Les sections d'un bloc de prompt, ENTIÈRES, dans l'ordre où on les donne.
+
+    Les blocs étaient coupés à `max_chars` caractères au milieu d'une ligne : la fin d'une
+    liste, puis des sections entières disparaissaient sans un mot, et avec elles la
+    dernière ligne, qui portait l'instruction de citer le dénominateur. Ici, les
+    `mandatory` premières sections passent toujours (l'en-tête et les instructions, que
+    l'appelant place en tête pour cela) ; les suivantes passent entières tant qu'elles
+    tiennent, et celles qui ne tiennent pas sont nommées sur une dernière ligne
+    « (+N more ...) ». `sections` : des paires (nom, texte), le texte vide est ignoré. PUR."""
+    sections = [(label, t) for label, t in sections if t]
+    if sum(len(t) + 1 for _, t in sections) - 1 <= max_chars:
+        return "\n".join(t for _, t in sections)
+    kept = [i for i in range(min(mandatory, len(sections)))]
+    used = sum(len(sections[i][1]) + 1 for i in kept)
+    for i in range(len(kept), len(sections)):
+        if used + len(sections[i][1]) + 1 <= max_chars:
+            kept.append(i)
+            used += len(sections[i][1]) + 1
+
+    def _marker() -> str:
+        return _more_marker([sections[i][0] for i in range(len(sections)) if i not in kept])
+
+    # La ligne « (+N more) » doit tenir aussi : on retire, au besoin, les dernières
+    # sections facultatives retenues.
+    while len(kept) > mandatory and used + len(_marker()) > max_chars:
+        used -= len(sections[kept.pop()][1]) + 1
+    return "\n".join([sections[i][1] for i in kept] + [_marker()])
+
+
+#: Les directions de résultat, telles que le prompt les nomme.
+_DIRECTION_LABELS = {"increase": "hausse", "decrease": "baisse", "no_difference": "sans difference",
+                     "mixed": "mixte", "descriptive": "descriptif", "none": "aucun resultat"}
+
+
+def _findings_sections(d: dict) -> list[tuple[str, str]]:
+    """Ce que les études ont trouvé, en une ou deux lignes, sur TOUS les articles pertinents.
+
+    Rien si le digest ne porte pas ce décompte (forme ancienne) ; une ligne qui le DIT s'il
+    a échoué ou si aucun article n'a encore été lu pour son résultat, pour que le modèle
+    n'en déduise pas « aucun résultat » ni ne parte des seuls articles reproduits."""
+    f = d.get("findings")
+    if not isinstance(f, dict):
+        return []
+    n = d.get("n_articles") or 0
+    if f.get("error"):
+        return [("Resultats", "RESULTATS: le decompte des resultats sur le corpus complet a echoue: "
+                              "n'enonce aucune tendance des resultats du corpus.")]
+    read = int(f.get("n_read") or 0)
+    if not read:
+        return [("Resultats", f"RESULTATS: aucun des {n} articles pertinents n'a encore ete lu pour "
+                              f"son resultat principal: n'enonce aucune tendance des resultats du "
+                              f"corpus, et ne la deduis pas des seuls articles reproduits.")]
+    by_dir = f.get("by_direction") or {}
+    line = (f"RESULTATS sur les {n} articles pertinents (resultat principal de chaque article, lu "
+            f"une fois et compte ici sur tous): {read} lus, dont {f.get('n_with_finding') or 0} "
+            f"rapportent un resultat. Direction: "
+            + ", ".join(f"{_DIRECTION_LABELS[k]} {by_dir.get(k, 0)}" for k in FINDING_DIRECTIONS) + ".")
+    if read < n:
+        line += f" {n - read} articles ne sont pas encore lus pour leur resultat: ne conclus rien sur eux."
+    out = [("Resultats", line)]
+    rows = f.get("by_outcome") or []
+    if rows:
+        basis = ("concepts d'outcome" if f.get("outcome_basis") == "concepts"
+                 else "outcome du PICO, libelle normalise")
+
+        def _one(r: dict) -> str:
+            parts = [f"{_DIRECTION_LABELS[k]} {r['by_direction'][k]}" for k in FINDING_DIRECTIONS
+                     if r["by_direction"].get(k)]
+            if r["n"] > r["n_read"]:
+                parts.append(f"non lus {r['n'] - r['n_read']}")
+            return f"{r['label']} ({r['n']} articles: {', '.join(parts)})"
+
+        more = int(f.get("n_outcome_labels") or len(rows)) - len(rows)
+        out.append(("Resultats par outcome",
+                    f"Directions par outcome ({basis}, les {len(rows)} plus frequents): "
+                    + "; ".join(_one(r) for r in rows)
+                    + (f" (+{more} more)" if more > 0 else "") + "."))
+    return out
+
+
+def digest_to_prompt(digest: dict, max_chars: int = PROMPT_BLOCK_CHARS) -> str:
     """Le digest en un bloc de texte compact pour un prompt. Dit d'emblée sur combien
-    d'articles il porte, pour que le modèle ne parle jamais au nom d'un échantillon."""
+    d'articles il porte, pour que le modèle ne parle jamais au nom d'un échantillon.
+
+    Coupé par sections ENTIÈRES (`fit_prompt_sections`), jamais au milieu d'une ligne, dans
+    l'ordre de ce qui compte : l'en-tête, ce que les études ont trouvé, puis les
+    distributions, les concepts, et en dernier les revues et les années récentes."""
     # Un digest incomplet ne doit RIEN affirmer : mieux vaut un bloc vide (le générateur
     # reprend alors son repli explicite) qu'un total faux présenté comme exhaustif.
     if not digest or not digest.get("n_articles") or not digest.get("complete"):
         return ""
     d = digest
-    lines = [f"CORPUS COMPLET: {d['n_articles']} articles pertinents "
-             f"(seuil {d.get('threshold')}), dont {d.get('n_included') or 0} inclus par un relecteur, "
-             f"{d.get('n_with_pico') or 0} avec PICO extrait, {d.get('n_with_fulltext') or 0} avec texte integral."]
+    sections: list[tuple[str, str]] = [(
+        "Corpus",
+        f"CORPUS COMPLET: {d['n_articles']} articles pertinents "
+        f"(seuil {d.get('threshold')}), dont {d.get('n_included') or 0} inclus par un relecteur, "
+        f"{d.get('n_with_pico') or 0} avec PICO extrait, {d.get('n_with_fulltext') or 0} avec texte integral.")]
+    sections += _findings_sections(d)
     if d.get("year_min") and d.get("year_max"):
-        lines.append(f"Annees: {d['year_min']} a {d['year_max']}.")
-    lines.extend(_quality_and_citation_lines(d))
+        sections.append(("Annees", f"Annees: {d['year_min']} a {d['year_max']}."))
+    sections.append(("Qualite et citations", "\n".join(_quality_and_citation_lines(d))))
 
     def _dist(label, rows, fmt=lambda r: f"{r['value']} ({r['n']})"):
         if rows:
-            lines.append(f"{label}: " + ", ".join(fmt(r) for r in rows if r.get("value")))
+            sections.append((label, f"{label}: " + ", ".join(fmt(r) for r in rows if r.get("value"))))
 
     _dist("Devis d'etude", d.get("by_design"))
     _dist("Pays", d.get("by_country"))
-    _dist("Revues", (d.get("by_journal") or [])[:6])
-    _dist("Annees recentes", (d.get("by_year") or [])[:8], lambda r: f"{r['value']}: {r['n']}")
+    totals = d.get("concepts_total") or {}
     for t, items in (d.get("concepts") or {}).items():
         if items:
-            lines.append(f"Concepts [{t}]: " + ", ".join(f"{i['label']} ({i['n']})" for i in items))
-    block = "\n".join(lines)
-    return block[:max_chars]
+            more = int(totals.get(t) or len(items)) - len(items)
+            sections.append((f"Concepts [{t}]", f"Concepts [{t}]: "
+                             + ", ".join(f"{i['label']} ({i['n']})" for i in items)
+                             + (f" (+{more} more)" if more > 0 else "")))
+    _dist("Revues", (d.get("by_journal") or [])[:6])
+    _dist("Annees recentes", (d.get("by_year") or [])[:8], lambda r: f"{r['value']}: {r['n']}")
+    return fit_prompt_sections(sections, max_chars, mandatory=1)
 
 
-def digest_coverage_note(digest: dict, n_verbatim: int) -> str:
+#: Comment les articles reproduits sont choisis, dit tel que le code le fait. Le prompt les
+#: appelait « les mieux établis (qualité, citations) » alors qu'ils sont pris dans l'ordre
+#: de pertinence du corpus (`relevance_order_sql`) : le modèle pouvait leur prêter une
+#: autorité qu'ils n'ont pas, et s'y appuyer plutôt que sur le corpus complet.
+VERBATIM_BY_RELEVANCE = ("les plus proches de la question du scenario (ordre de pertinence du "
+                         "corpus: score de rerank, puis similarite semantique)")
+#: Pour l'assistant : des extraits pris par proximité avec la question posée.
+VERBATIM_BY_QUESTION = ("les plus proches de la question posee (similarite semantique, un "
+                        "extrait par article)")
+
+
+def digest_coverage_note(digest: dict, n_verbatim: int,
+                         chosen_by: str = VERBATIM_BY_RELEVANCE) -> str:
     """La phrase que chaque prompt porte : le digest couvre tout, le verbatim illustre.
 
     Si le digest est INCOMPLET, la phrase s'inverse au lieu de disparaître. Elle
@@ -359,7 +573,8 @@ def digest_coverage_note(digest: dict, n_verbatim: int) -> str:
                 f"d'ensemble du corpus n'etait pas disponible.")
     n = digest.get("n_articles") or 0
     return (f"Les chiffres ci-dessus portent sur la TOTALITE des {n} articles pertinents. "
-            f"Les {n_verbatim} articles reproduits ensuite en sont les mieux etablis "
-            f"(qualite, citations) et servent a citer et a illustrer: tes conclusions "
-            f"doivent rester coherentes avec les chiffres du corpus complet, jamais "
-            f"tirees de ces seuls {n_verbatim} articles.")
+            f"Les {n_verbatim} articles reproduits ensuite en sont {chosen_by}; ils ne sont "
+            f"choisis ni pour leur qualite ni pour leurs citations, et ne forment pas un "
+            f"echantillon representatif. Ils servent a citer et a illustrer: tes conclusions, y "
+            f"compris sur les resultats, doivent rester coherentes avec les chiffres du corpus "
+            f"complet, jamais tirees de ces seuls {n_verbatim} articles.")

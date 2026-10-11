@@ -6,6 +6,7 @@ functions). `main` at the repository root is the composition root and entry poin
 MODULES = (
     "core",
     "study_design",
+    "pico_map",
     "documents",
     "scenario_store",
     "schema_boot",

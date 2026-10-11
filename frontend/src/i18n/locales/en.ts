@@ -787,6 +787,7 @@ export const en: Translations = {
       withFulltextSuffix: "with full text",
       digestCovers: "Counts and distributions in the answer are computed over all of them, not over the quoted excerpts.",
       digestMissing: "The corpus summary could not be computed: the answer rests on the quoted excerpts alone, so do not read it as a count over the whole corpus.",
+      answerCut: "The answer reached its length limit and was cut: its end is missing. Ask a narrower question for a complete answer.",
       sourceLabel: "SOURCE",
       relevance: "Relevance:",
       loadingSources: "Loading sources...",

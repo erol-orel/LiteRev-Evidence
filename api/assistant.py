@@ -26,6 +26,40 @@ from .scenario_store import (
 from .search import _build_where
 from llm_usage import model_for as _model
 
+#: Le plafond d'une réponse de l'assistant de scénario. 1 500 (1 200 sans flux) coupait les
+#: réponses structurées qui citent une vingtaine d'articles, et rien ne le disait : le flux
+#: envoyait `done` et l'interface archivait la réponse coupée comme complète.
+_ANSWER_MAX_TOKENS = 3000
+
+
+def _cut_event(max_tokens: int) -> str:
+    """L'événement SSE qui précède `done` quand la réponse a atteint son plafond : distinct
+    d'une erreur (la réponse est là, elle est incomplète) et de `done` (qui la dit finie)."""
+    import json as _json
+    return ("event: cut\ndata: "
+            + _json.dumps({"cut": True, "reason": "length", "max_tokens": max_tokens}) + "\n\n")
+
+
+async def _answer_events(stream, max_tokens: int, label: str = ""):
+    """Les événements SSE d'une réponse en flux : un `data` par morceau de texte, puis
+    `cut` si le flux s'est arrêté sur son plafond. Le dernier morceau dit pourquoi il
+    s'arrête (`finish_reason`) ; il n'était jamais lu, et une réponse coupée se terminait
+    par `done` comme une autre."""
+    import json as _json
+    finish_reason = None
+    async for chunk in stream:
+        if not getattr(chunk, "choices", None):
+            continue
+        choice = chunk.choices[0]
+        finish_reason = getattr(choice, "finish_reason", None) or finish_reason
+        delta = getattr(choice, "delta", None)
+        if delta is not None and getattr(delta, "content", None):
+            yield f"data: {_json.dumps({'token': delta.content})}\n\n"
+    if finish_reason == "length":
+        logger.warning(f"{label or 'RAG stream'}: réponse coupée à {max_tokens} jetons.")
+        yield _cut_event(max_tokens)
+
+
 class AskIn(BaseModel):
     question: str = Field(..., min_length=3, max_length=2000)  # Limite d'entrée RAG (H-5)
     project_context: str | None = None
@@ -544,7 +578,8 @@ def user_scenario_rag_assistant(scenario_id: str, payload: AskIn) -> dict[str, A
         ) + _llm_lang_directive(payload.lang)
         # Même forme que le brief : le digest (tout le corpus pertinent, en SQL) porte
         # les chiffres, les sources reproduites portent les citations.
-        from .digest import corpus_digest, digest_coverage_note, digest_to_prompt
+        from .digest import (VERBATIM_BY_QUESTION, corpus_digest, digest_coverage_note,
+                             digest_to_prompt)
         _digest = corpus_digest(scenario_id, eff_thr)
         _digest_block = digest_to_prompt(_digest)
         # Ce que l'extraction structuree a trouve (sexe, age, CAP, EPI...), compte sur TOUS
@@ -553,7 +588,7 @@ def user_scenario_rag_assistant(scenario_id: str, payload: AskIn) -> dict[str, A
         _extraction_block = extraction_to_prompt(extraction_digest(scenario_id, eff_thr))
         if _extraction_block:
             _digest_block = f"{_digest_block}\n\n{_extraction_block}" if _digest_block else _extraction_block
-        _coverage = digest_coverage_note(_digest, len(sources))
+        _coverage = digest_coverage_note(_digest, len(sources), chosen_by=VERBATIM_BY_QUESTION)
         response = client.chat.completions.create(
             model=_model("chat"),
             messages=[
@@ -562,11 +597,16 @@ def user_scenario_rag_assistant(scenario_id: str, payload: AskIn) -> dict[str, A
                     + f"CONTEXTE :\n{context_str}\n\n{_coverage}\n\nQUESTION : {payload.question}"},
             ],
             temperature=0.2,
-            max_tokens=1200,
+            max_tokens=_ANSWER_MAX_TOKENS,
         )
+        # Une réponse coupée au plafond est DITE coupée : elle se lisait comme complète.
+        _cut = getattr(response.choices[0], "finish_reason", None) == "length"
+        if _cut:
+            logger.warning(f"RAG user_scenario {scenario_id}: réponse coupée à {_ANSWER_MAX_TOKENS} jetons.")
         return {
             "answer": response.choices[0].message.content,
             "sources": sources, "scenario_id": scenario_id, "model": "Assistant IA",
+            "cut": _cut,
         }
     except Exception as e:
         logger.error(f"Erreur OpenAI RAG user_scenario {scenario_id}: {e}")
@@ -587,7 +627,8 @@ async def ask_stream_filtered(payload: dict[str, Any]):
     scenario_id = payload.get("scenario_id", None)
     # Public endpoint : borne top_k (débordement de contexte / LIMIT négatif). Plafond
     # généreux. Depuis que la requête renvoie UN extrait par article, top_k est un nombre
-    # d'ARTICLES cités, pas de morceaux : 24 par défaut au lieu de 12.
+    # d'ARTICLES cités, pas de morceaux : 24 par défaut au lieu de 12. L'interface ne
+    # l'envoie plus (elle envoyait 12) : c'est ce défaut qui s'applique.
     try:
         top_k = max(1, min(int(payload.get("top_k", 24)), 40))
     except (TypeError, ValueError):
@@ -729,10 +770,12 @@ async def ask_stream_filtered(payload: dict[str, Any]):
     # répondait « la plupart des études montrent… » sur la foi de douze morceaux.
     digest_block = coverage_note = ""
     if scenario_id:
-        from .digest import corpus_digest, digest_coverage_note, digest_to_prompt
+        from .digest import (VERBATIM_BY_QUESTION, corpus_digest, digest_coverage_note,
+                             digest_to_prompt)
         _digest = corpus_digest(scenario_id, threshold)
         digest_block = digest_to_prompt(_digest)
-        coverage_note = digest_coverage_note(_digest, len(context_chunks))
+        coverage_note = digest_coverage_note(_digest, len(context_chunks),
+                                             chosen_by=VERBATIM_BY_QUESTION)
         # Ce que l'extraction structuree a trouve (sexe, age, CAP, EPI...), compte sur TOUS
         # les articles pertinents deja extraits, avec son denominateur.
         from .extraction import extraction_digest, extraction_to_prompt
@@ -811,13 +854,13 @@ Reponds de maniere structuree et cite les sources pertinentes du contexte."""
                 ],
                 stream=True,
                 temperature=0.2,
-                max_tokens=1500,
+                max_tokens=_ANSWER_MAX_TOKENS,
             )
-            async for chunk in stream:
-                delta = chunk.choices[0].delta
-                if delta.content:
-                    token_event = f"data: {_json2.dumps({'token': delta.content})}\n\n"
-                    yield token_event
+            # Une réponse coupée à son plafond est DITE coupée (`event: cut`), AVANT
+            # `done` : l'interface l'affiche et l'archive avec cet avertissement.
+            async for event in _answer_events(stream, _ANSWER_MAX_TOKENS,
+                                              f"RAG stream (filtered) {scenario_id}"):
+                yield event
         except Exception as e:
             # Même raison : une erreur n'est pas suivie de `done`, sans quoi le client
             # archive l'échec comme une réponse complète.

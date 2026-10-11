@@ -13,9 +13,11 @@ from sqlalchemy import text
 
 from .core import _env_int, _job_is_active, _msg, _norm_lang, app, engine, logger, require_api_key
 from .documents import _llm_lang_directive
-from .scenario_store import _get_scenario_threshold, relevant_gate_tail_sql
+from .scenario_store import _get_scenario_threshold, relevant_gate_sql, relevant_gate_tail_sql
 from .gesica import _get_scenario_name
+from .pico_map import CutAnswer, json_completion
 from .relevance import _evidence_fingerprint, _get_above_threshold_articles
+from llm_usage import LLMTruncated, json_content
 from llm_usage import model_for as _model
 
 # ─── VARIABLES & MODÈLE AUTO-REMPLI DEPUIS PICO ──────────────────────────────
@@ -69,6 +71,12 @@ _TRANSMISSION_PARAMS = ("r0", "serial_interval_days", "incubation_period_days")
 EPI_PARAM_MAX_ARTICLES = _env_int("EPI_PARAM_MAX_ARTICLES", 0, 0)
 _EPI_PARAM_BATCH = 10
 _EPI_PARAM_WORKERS = 4
+# Les passages du texte intégral envoyés avec le titre et le résumé : une fenêtre autour de
+# chaque terme de mesure (la valeur suit d'ordinaire le terme), quelques milliers de
+# caractères au plus par article.
+_EPI_WINDOW_BEFORE = 300
+_EPI_WINDOW_AFTER = 600
+_EPI_PASSAGES_CHARS = 3000
 
 
 def _param_regex(params=None, boundary: str = r"\b") -> str:
@@ -87,7 +95,8 @@ _PARAM_SCAN_RE = re.compile(_param_regex(), re.IGNORECASE)
 
 def params_mentioned(text: str) -> list[str]:
     """Paramètres épidémiologiques dont un terme de MESURE apparaît dans ce texte
-    (titre + résumé), dans l'ordre de _PARAM_PHRASES. Pur, testé hors ligne."""
+    (titre + résumé + passages du texte intégral), dans l'ordre de _PARAM_PHRASES. Pur,
+    testé hors ligne."""
     t = text or ""
     found = []
     for name in _PARAM_PHRASES:
@@ -99,9 +108,14 @@ def params_mentioned(text: str) -> list[str]:
 def _parameter_candidate_articles(scenario_id: str, threshold: float | None = None,
                                   limit: int = 0) -> list[dict]:
     """TOUS les articles du sous-ensemble PERTINENT qui rapportent un paramètre (terme de
-    mesure dans le titre ou le résumé), les meilleurs d'abord : synthèses en tête, puis
-    qualité, citations et année. Même porte de screening que partout ailleurs.
-    `limit <= 0` : aucun plafond (le cas par défaut)."""
+    mesure dans le titre, le résumé OU le texte intégral), les meilleurs d'abord : synthèses
+    en tête, puis qualité, citations et année. Même porte de screening que partout ailleurs.
+    `limit <= 0` : aucun plafond (le cas par défaut).
+
+    Il fallait un résumé, et le terme dans le titre ou le résumé : un article qui ne donne
+    son R0 ou sa période d'incubation que dans ses résultats n'était jamais lu, et un
+    article sans résumé non plus. Ceux dont le texte intégral porte un terme de mesure
+    reçoivent les passages qui l'entourent (`fulltext_passages`)."""
     if threshold is None:
         threshold = _get_scenario_threshold(scenario_id)
     sql = text(f"""
@@ -114,14 +128,20 @@ def _parameter_candidate_articles(scenario_id: str, threshold: float | None = No
                -- résumés, 21 appels de dix résumés de 2 000 caractères sur un scénario
                -- de 9 389 articles, en entier, à chaque fois.
                d.epi_params_json,
-               COALESCE(ars.similarity_score, 0) AS similarity
+               COALESCE(ars.similarity_score, 0) AS similarity,
+               ft.in_fulltext
         FROM literature_document d
         JOIN article_scenarios ars ON ars.document_id = d.id
+        CROSS JOIN LATERAL (
+            SELECT EXISTS (SELECT 1 FROM document_chunk c
+                           WHERE c.document_id = d.id
+                             AND c.chunk_type IN ('fulltext_section', 'full_text')
+                             AND c.content ~* :rx) AS in_fulltext
+        ) ft
         WHERE ars.scenario_id = :sid
           AND d.is_duplicate IS NOT TRUE
-          AND d.abstract IS NOT NULL
           AND {relevant_gate_tail_sql('d', 'ars', ':thr')}
-          AND (d.title || ' ' || d.abstract) ~* :rx
+          AND ((COALESCE(d.title, '') || ' ' || COALESCE(d.abstract, '')) ~* :rx OR ft.in_fulltext)
         ORDER BY
           CASE WHEN COALESCE(d.study_design, '') ~* 'systematic|meta-analy|méta-analy' THEN 0 ELSE 1 END,
           d.quality_score DESC NULLS LAST,
@@ -132,19 +152,82 @@ def _parameter_candidate_articles(scenario_id: str, threshold: float | None = No
     """)
     # NULL en LIMIT = pas de limite en SQL : le défaut lit tout le corpus pertinent.
     _cap = int(limit) if int(limit or 0) > 0 else None
+    rx = _param_regex(boundary=r"\y")
     with engine.connect() as conn:
         rows = [dict(r) for r in conn.execute(
-            sql, {"sid": scenario_id, "thr": threshold, "rx": _param_regex(boundary=r"\y"),
-                  "cap": _cap}).mappings().all()]
+            sql, {"sid": scenario_id, "thr": threshold, "rx": rx, "cap": _cap}).mappings().all()]
+        passages = _fulltext_passages(conn, [r["id"] for r in rows if r.get("in_fulltext")], rx)
     for r in rows:
-        r["params_mentioned"] = params_mentioned(f"{r.get('title') or ''} {r.get('abstract') or ''}")
+        r["fulltext_passages"] = passages.get(r["id"], "")
+        # Ce que le modèle lira de cet article : la clé de son cache (`_epi_cache_hit`).
+        r["epi_source"] = "fulltext" if r["fulltext_passages"] else "abstract"
+        r["params_mentioned"] = params_mentioned(
+            f"{r.get('title') or ''} {r.get('abstract') or ''} {r['fulltext_passages']}")
     return [r for r in rows if r["params_mentioned"]]
 
 
+def _fulltext_passages(conn, ids: list[int], rx: str) -> dict[int, str]:
+    """{id: passages} : pour chaque article, le texte intégral autour de chaque terme de
+    mesure (une fenêtre par occurrence, les fenêtres qui se chevauchent fusionnées), au
+    plus `_EPI_PASSAGES_CHARS` caractères. Le type de morceau actuel d'abord, l'ancien à
+    défaut, pour ne pas lire deux fois le même texte."""
+    if not ids:
+        return {}
+    rows = conn.execute(text("""
+        SELECT document_id, chunk_type, content
+        FROM document_chunk
+        WHERE document_id = ANY(CAST(:ids AS bigint[]))
+          AND chunk_type IN ('fulltext_section', 'full_text')
+          AND content ~* :rx
+        ORDER BY document_id, (chunk_type = 'fulltext_section') DESC, chunk_index, id
+    """), {"ids": list(ids), "rx": rx}).all()
+    by_doc: dict[int, list[tuple[str, str]]] = {}
+    for doc_id, kind, content in rows:
+        by_doc.setdefault(int(doc_id), []).append((kind, content or ""))
+    out: dict[int, str] = {}
+    for doc_id, chunks in by_doc.items():
+        kind = chunks[0][0]
+        kept: list[str] = []
+        used = 0
+        for k, content in chunks:
+            if k != kind:
+                continue
+            body = " ".join(content.split())
+            spans: list[list[int]] = []
+            for m in _PARAM_SCAN_RE.finditer(body):
+                lo, hi = max(0, m.start() - _EPI_WINDOW_BEFORE), min(len(body), m.end() + _EPI_WINDOW_AFTER)
+                if spans and lo <= spans[-1][1]:
+                    spans[-1][1] = max(spans[-1][1], hi)
+                else:
+                    spans.append([lo, hi])
+            for lo, hi in spans:
+                window = body[lo:hi].strip()
+                # Les morceaux se recouvrent : une fenêtre déjà lue n'est pas reprise, et
+                # celle qui la prolonge (coupée au bout du morceau précédent) la remplace.
+                if not window or any(window in w for w in kept):
+                    continue
+                shorter = next((j for j, w in enumerate(kept) if w in window), None)
+                if shorter is not None:
+                    used -= len(kept.pop(shorter))
+                room = _EPI_PASSAGES_CHARS - used
+                if room < 200:
+                    break
+                if len(window) > room:
+                    window = window[:room].rsplit(" ", 1)[0]
+                kept.append(window)
+                used += len(window)
+            if _EPI_PASSAGES_CHARS - used < 200:
+                break
+        if kept:
+            out[doc_id] = " [...] ".join(kept)
+    return out
+
+
 _EPI_EXTRACT_SYSTEM = (
-    "You extract epidemiological parameters from study abstracts, for a compartmental "
-    "(SEIR family) model. Report ONLY values the abstract states for the disease under "
-    "study: never infer, never carry a value over from another disease, never invent. "
+    "You extract epidemiological parameters from study abstracts and, when an article "
+    "carries them, from passages of its full text around the measurement terms, for a "
+    "compartmental (SEIR family) model. Report ONLY values the text states for the disease "
+    "under study: never infer, never carry a value over from another disease, never invent. "
     "Normalise units: r0 is a ratio; serial_interval_days, incubation_period_days, "
     "infectious_period_days and immunity_duration_days are in DAYS; cfr is a PROPORTION "
     "between 0 and 1 (a case fatality of 1.5 percent is 0.015). When a study gives a "
@@ -165,28 +248,62 @@ def _epi_llm_client():
 
 def _epi_extract_batch(client, batch: list[dict], disease_hint: str | None) -> list[dict]:
     """Un appel LLM pour un lot d'articles. Renvoie [{id, disease, parameters:[...]}].
-    Robuste : un lot perdu renvoie []."""
+
+    LÈVE en cas d'échec, et `LLMTruncated` quand la réponse est coupée au plafond : c'est
+    `_epi_extract_resilient` qui décide (scinder le lot, le compter perdu). Le lot perdu
+    renvoyait [], indistinguable d'un lot sans valeur, et un lot coupé l'était de nouveau,
+    identique, à chaque régénération."""
     import json as _json
-    items = [{
-        "id": int(a["id"]),
-        "title": (a.get("title") or "")[:300],
-        "abstract": (a.get("abstract") or "")[:2000],
-        "looks_like": a.get("params_mentioned") or [],
-    } for a in batch]
+    items = []
+    for a in batch:
+        item = {
+            "id": int(a["id"]),
+            "title": (a.get("title") or "")[:300],
+            "abstract": (a.get("abstract") or "")[:2000],
+            "looks_like": a.get("params_mentioned") or [],
+        }
+        if a.get("fulltext_passages"):
+            item["fulltext_passages"] = a["fulltext_passages"]
+        items.append(item)
     payload = {"disease_of_interest": disease_hint or None, "articles": items}
+    resp = client.chat.completions.create(
+        model=_model("bulk"),
+        messages=[{"role": "system", "content": _EPI_EXTRACT_SYSTEM},
+                  {"role": "user", "content": _json.dumps(payload, ensure_ascii=False)}],
+        temperature=0, seed=42, max_tokens=3000,
+        response_format={"type": "json_object"},
+    )
+    data = _json.loads(json_content(resp, f"epidemic parameters ({len(batch)} articles)"))
+    return [a for a in (data.get("articles") or []) if isinstance(a, dict)] if isinstance(data, dict) else []
+
+
+def _epi_extract_resilient(client, batch: list[dict], disease_hint: str | None) -> dict[str, Any]:
+    """Un lot, repris s'il est coupé : scindé en deux moitiés, chacune demandée une fois.
+
+    Renvoie {articles, failed_ids, split}. `failed_ids` : les articles qu'aucune réponse
+    n'a couverts (lot ou moitié en échec), comptés et rapportés au lieu de disparaître."""
+    ids = [int(a["id"]) for a in batch]
     try:
-        resp = client.chat.completions.create(
-            model=_model("bulk"),
-            messages=[{"role": "system", "content": _EPI_EXTRACT_SYSTEM},
-                      {"role": "user", "content": _json.dumps(payload, ensure_ascii=False)}],
-            temperature=0, seed=42, max_tokens=3000,
-            response_format={"type": "json_object"},
-        )
-        data = _json.loads(resp.choices[0].message.content)
+        return {"articles": _epi_extract_batch(client, batch, disease_hint),
+                "failed_ids": [], "split": False}
+    except LLMTruncated as cut:
+        if len(batch) < 2:
+            logger.warning(f"epidemic parameter extraction: article {ids} {cut}")
+            return {"articles": [], "failed_ids": ids, "split": False}
+        logger.warning(f"epidemic parameter extraction: lot de {len(batch)} coupé au plafond, "
+                       f"scindé en deux.")
     except Exception as e:                                   # noqa: BLE001
         logger.warning(f"epidemic parameter extraction batch: {e}")
-        return []
-    return [a for a in (data.get("articles") or []) if isinstance(a, dict)] if isinstance(data, dict) else []
+        return {"articles": [], "failed_ids": ids, "split": False}
+    out: dict[str, Any] = {"articles": [], "failed_ids": [], "split": True}
+    half = (len(batch) + 1) // 2
+    for part in (batch[:half], batch[half:]):
+        try:
+            out["articles"] += _epi_extract_batch(client, part, disease_hint)
+        except Exception as e:                               # noqa: BLE001 - coupé encore, ou panne
+            logger.warning(f"epidemic parameter extraction, demi-lot de {len(part)}: {e}")
+            out["failed_ids"] += [int(a["id"]) for a in part]
+    return out
 
 
 #: Version du format mis en cache. L'incrémenter invalide les lignes déjà extraites.
@@ -207,21 +324,27 @@ def _epi_cache_hit(row: dict, disease_hint: str | None) -> dict | None:
         return None
     if (cached.get("hint") or None) != (disease_hint or None):
         return None
+    # Ce que le modèle avait lu : un résultat tiré du seul résumé ne vaut plus quand des
+    # passages du texte intégral sont arrivés depuis (la valeur est souvent là). Les
+    # entrées écrites avant ce champ venaient toutes du résumé.
+    if (cached.get("src") or "abstract") != (row.get("epi_source") or "abstract"):
+        return None
     return {"id": int(row["id"]), "disease": cached.get("disease"),
             "parameters": cached.get("parameters") or []}
 
 
-def _epi_cache_write(results: list[dict], candidate_ids: set[int],
+def _epi_cache_write(results: list[dict], sources: dict[int, str],
                      disease_hint: str | None) -> int:
     """Écrit sur la ligne de chaque article ce que le modèle en a dit. Une fois pour
     toutes : la réduction (agrégation sur tout le sous-ensemble pertinent) se refait sans
-    rien repayer."""
+    rien repayer. `sources` : {id candidat: ce que le modèle a lu, abstract ou fulltext}."""
     import json as _json
     rows = [{"id": int(r["id"]),
              "j": _json.dumps({"v": EPI_PARAM_VERSION, "hint": disease_hint or None,
+                               "src": sources.get(int(r["id"])) or "abstract",
                                "disease": r.get("disease"),
                                "parameters": r.get("parameters") or []}, ensure_ascii=False)}
-            for r in results if _as_int(r.get("id")) in candidate_ids]
+            for r in results if _as_int(r.get("id")) in sources]
     if not rows:
         return 0
     try:
@@ -263,16 +386,19 @@ def extract_epidemic_observations(scenario_id: str, disease_hint: str | None = N
     # _attach_model_spec filtrerait justement les observations qu'on vient de mesurer.
     out: dict[str, Any] = {
         "params": {}, "disease": None, "n_candidates": len(candidates),
+        "n_from_fulltext": sum(1 for a in candidates if a.get("fulltext_passages")),
         "n_articles_used": 0, "n_with_values": 0,
         # Ce que l'extraction a FAIT, pas seulement ce qu'elle a trouvé. Sans ces
         # compteurs, une panne complète du modèle se lisait comme un constat sur la
         # littérature.
-        "n_batches": 0, "n_batches_failed": 0, "n_from_cache": 0, "n_not_examined": 0,
+        "n_batches": 0, "n_batches_failed": 0, "n_batches_split": 0, "n_from_cache": 0,
+        "n_not_examined": 0, "failed_article_ids": [],
         "status": "no_key" if not _os.getenv("OPENAI_API_KEY") else "ok",
         "articles": [{"id": a["id"], "title": a.get("title"), "year": a.get("year"),
                       "doi": a.get("doi"), "quality_score": a.get("quality_score"),
                       "study_design": a.get("study_design"), "source": a.get("source"),
-                      "params_mentioned": a.get("params_mentioned")} for a in candidates],
+                      "params_mentioned": a.get("params_mentioned"),
+                      "from_fulltext": bool(a.get("fulltext_passages"))} for a in candidates],
     }
     if not candidates or not _os.getenv("OPENAI_API_KEY"):
         return out
@@ -290,26 +416,33 @@ def extract_epidemic_observations(scenario_id: str, disease_hint: str | None = N
     valid_ids = {int(a["id"]) for a in candidates}
     diseases: dict[str, int] = {}
     fresh: list[list[dict]] = []
+    runs: list[dict] = []
     if batches:
         with ThreadPoolExecutor(max_workers=_EPI_PARAM_WORKERS) as ex:
-            fresh = list(ex.map(lambda b: _epi_extract_batch(client, b, disease_hint), batches))
+            runs = list(ex.map(lambda b: _epi_extract_resilient(client, b, disease_hint), batches))
+        fresh = [r["articles"] for r in runs]
     # ── Ce que les lots ont fait, compté ─────────────────────────────────────
     # Un lot en échec (quota, délai, clé invalide, réponse malformée) renvoyait [] et
     # devenait indistinguable d'un lot où aucun article ne donne de valeur. Sur une
     # panne complète, le relecteur lisait « aucune valeur exploitable dans les articles
     # qui mentionnent un paramètre » : une affirmation définitive sur 205 articles que
-    # le modèle n'a jamais examinés.
-    _failed = sum(1 for b, r in zip(batches, fresh) if not r)
+    # le modèle n'a jamais examinés. Un lot coupé au plafond est désormais scindé ; ce qui
+    # échoue encore est compté, lot par lot et article par article.
+    _failed = sum(1 for r in runs if r["failed_ids"])
     out["n_batches"] = len(batches)
     out["n_batches_failed"] = _failed
+    out["n_batches_split"] = sum(1 for r in runs if r["split"])
     out["n_from_cache"] = len(cached)
+    out["failed_article_ids"] = sorted({i for r in runs for i in r["failed_ids"]})
     _asked_ids = {int(a["id"]) for b in batches for a in b}
     _answered_ids = {i for r in fresh for a in r if (i := _as_int(a.get("id"))) is not None}
     out["n_not_examined"] = len(_asked_ids - _answered_ids)
     if _failed:
         logger.warning(f"Paramètres épidémiologiques {scenario_id}: {_failed}/{len(batches)} "
                        f"lots en échec ; {out['n_not_examined']} articles non examinés.")
-    _written = _epi_cache_write([a for r in fresh for a in r], valid_ids, disease_hint)
+    _written = _epi_cache_write([a for r in fresh for a in r],
+                                {int(a["id"]): a.get("epi_source") or "abstract" for a in candidates},
+                                disease_hint)
     if _written:
         logger.info(f"Paramètres épidémiologiques {scenario_id}: {_written} articles mis en "
                     f"cache, {len(cached)} relus depuis le cache.")
@@ -345,14 +478,31 @@ def extract_epidemic_observations(scenario_id: str, disease_hint: str | None = N
     # répondu. Il annonçait `len(candidates)` quoi qu'il arrive, donc 205 articles
     # examinés sur une panne où aucun ne l'avait été.
     out["n_articles_used"] = len(cached) + len(_answered_ids)
-    out["status"] = ("llm_partial" if _failed and _failed < len(batches)
-                     else "llm_unavailable" if _failed and _failed == len(batches)
+    # Indisponible quand AUCUN article demandé n'a reçu de réponse ; partiel quand une
+    # partie seulement (un demi-lot coupé deux fois ne rend pas le reste du lot muet).
+    out["status"] = ("llm_unavailable" if _asked_ids and not (_answered_ids & _asked_ids)
+                     else "llm_partial" if _failed or out["n_not_examined"]
                      else "ok")
     if diseases:
         out["disease"] = max(diseases.items(), key=lambda kv: kv[1])[0]
     logger.info(f"Paramètres épidémiologiques {scenario_id}: {len(candidates)} articles candidats, "
                 f"{out['n_with_values']} avec une valeur, paramètres={sorted(out['params'])}")
     return out
+
+
+def _epi_meta(targeted: dict) -> dict[str, Any]:
+    """Les compteurs de l'extraction ciblée tels que le spec les garde dans `_meta` : ce
+    qu'elle a trouvé, ET ce qu'elle n'a pas pu lire (lots perdus, articles non examinés)."""
+    return {
+        "epidemic_parameter_candidates": int(targeted.get("n_candidates", 0)),
+        "epidemic_parameter_articles_with_values": int(targeted.get("n_with_values", 0)),
+        "epidemic_parameter_from_fulltext": int(targeted.get("n_from_fulltext", 0)),
+        "epidemic_parameter_batches": int(targeted.get("n_batches", 0)),
+        "epidemic_parameter_batches_failed": int(targeted.get("n_batches_failed", 0)),
+        "epidemic_parameter_batches_split": int(targeted.get("n_batches_split", 0)),
+        "epidemic_parameter_not_examined": int(targeted.get("n_not_examined", 0)),
+        "epidemic_parameter_failed_article_ids": list(targeted.get("failed_article_ids") or []),
+    }
 
 
 def merge_epidemic_observations(block, targeted) -> dict:
@@ -711,13 +861,16 @@ def _attach_model_spec(variables: dict, prov_articles: list[dict]) -> dict:
     return variables
 
 
-def _loads_lenient(raw: str) -> dict:
+def _loads_lenient(raw: str, report: dict | None = None) -> dict:
     """`json.loads` TOLÉRANT aux sorties LLM tronquées (max_tokens atteint) : retire un
     éventuel fence ```json, puis, si le JSON est incomplet, ferme les chaînes / tableaux /
     objets restés ouverts en rognant la fin jusqu'à obtenir un objet valide. Best-effort :
     renvoie le meilleur dict récupérable (au pire {}) - les champs manquants sont
     reconstruits en aval (_attach_model_spec dérive les champs machine des champs humains).
-    Évite qu'une réponse coupée d'un caractère fasse échouer TOUTE la génération."""
+    Évite qu'une réponse coupée d'un caractère fasse échouer TOUTE la génération.
+
+    `report`, s'il est donné, reçoit `repaired`, `kept_chars` et `total_chars` quand la fin
+    a été rognée : le spec le dit dans son `_meta` au lieu de le laisser au journal."""
     import json as _j
     s = (raw or "").strip()
     if s.startswith("```"):                                   # fence markdown éventuel
@@ -745,10 +898,75 @@ def _loads_lenient(raw: str) -> dict:
             if isinstance(out, dict) and out:
                 logger.warning("Variables/JSON LLM tronqué → réparé (best-effort, %d/%d caractères).",
                                cut + 1, len(s))
+                if report is not None:
+                    report.update(repaired=True, kept_chars=cut + 1, total_chars=len(s))
                 return out
         except Exception:
             continue
     return {}
+
+
+#: La règle du compte de preuves d'une variable, recopiée dans le `_meta` du spec.
+EVIDENCE_COUNT_RULE = (
+    "evidence_count = the number of relevant articles of the scenario (all of them, counted "
+    "in SQL, never the articles shown to the model) whose title, abstract or PICO (P, I, C, "
+    "O, key finding) mentions the variable's name or one of the keywords the spec gives it, "
+    "case-insensitive, as whole words. evidence_level = evidence_count / relevant articles.")
+_MAX_EVIDENCE_TERMS = 12
+
+
+def _evidence_terms(pv: dict) -> list[str]:
+    """Le nom d'une variable et ses mots-clés / synonymes tels que le spec les donne,
+    dédupliqués sans tenir compte de la casse. PUR."""
+    raw: list = [pv.get("name")]
+    for key in ("keywords", "synonyms"):
+        val = pv.get(key)
+        raw += val if isinstance(val, list) else ([val] if isinstance(val, str) else [])
+    out: list[str] = []
+    seen: set[str] = set()
+    for term in raw:
+        t = " ".join(str(term).split()) if isinstance(term, str) else ""
+        if len(t) >= 3 and t.lower() not in seen:
+            seen.add(t.lower())
+            out.append(t)
+    return out[:_MAX_EVIDENCE_TERMS]
+
+
+def variable_evidence_counts(scenario_id: str, threshold: float,
+                             variables: dict) -> dict[str, Any]:
+    """Pour chaque variable prédictive, combien d'articles PERTINENTS la mentionnent :
+    compté en SQL sur TOUT le sous-ensemble pertinent, selon `EVIDENCE_COUNT_RULE`.
+
+    « evidence_level : Nombre d'études qui la mentionnent » était demandé au modèle, qui
+    comptait parmi les 25 articles qu'il voyait sur un corpus de plusieurs milliers. Le
+    compte est écrit sur chaque variable (`evidence_count`, `evidence_level` « n/N » et les
+    termes cherchés, `evidence_terms`) ; renvoie {denominator, counted}."""
+    pvs = [pv for pv in (variables.get("predictor_variables") or []) if isinstance(pv, dict)]
+    terms = [_evidence_terms(pv) for pv in pvs]
+    rxs = {f"rx{i}": r"\y(" + "|".join(re.escape(t) for t in ts) + r")\y"
+           for i, ts in enumerate(terms) if ts}
+    cols = "".join(f", COUNT(*) FILTER (WHERE t.txt ~* :{k}) AS {k}" for k in rxs)
+    with engine.connect() as conn:
+        row = conn.execute(text(f"""
+            SELECT COUNT(*) AS n_relevant{cols}
+            FROM (
+                SELECT concat_ws(' ', d.title, d.abstract,
+                                 d.pico_json->>'P', d.pico_json->>'I', d.pico_json->>'C',
+                                 d.pico_json->>'O', d.pico_json->>'population',
+                                 d.pico_json->>'intervention', d.pico_json->>'outcome',
+                                 d.pico_json->>'key_finding') AS txt
+                FROM literature_document d
+                JOIN article_scenarios ars ON ars.document_id = d.id
+                WHERE ars.scenario_id = :sid AND {relevant_gate_sql('d', 'ars', ':thr')}
+            ) t
+        """), {"sid": scenario_id, "thr": threshold, **rxs}).mappings().first()
+    denominator = int(row["n_relevant"] or 0) if row else 0
+    for i, (pv, ts) in enumerate(zip(pvs, terms)):
+        n = int(row[f"rx{i}"] or 0) if (row and ts) else None
+        pv["evidence_count"] = n
+        pv["evidence_level"] = f"{n}/{denominator}" if n is not None else None
+        pv["evidence_terms"] = ts
+    return {"denominator": denominator, "counted": sum(1 for ts in terms if ts)}
 
 
 def _generate_variables_from_pico(scenario_id: str, persist: str = "active", lang: str | None = None) -> dict[str, Any]:
@@ -797,7 +1015,10 @@ def _generate_variables_from_pico(scenario_id: str, persist: str = "active", lan
             "I": pj.get("intervention", pj.get("I", "")),
             "C": pj.get("comparator", pj.get("C", "")),
             "O": pj.get("outcome", pj.get("O", "")),
+            # Rempli désormais par chaque rédacteur PICO (api/pico_map) ; il était lu ici et
+            # toujours vide.
             "key_finding": pj.get("key_finding", pj.get("conclusion", "")),
+            "finding_direction": pj.get("finding_direction", ""),
             "abstract": (a.get("abstract") or "")[:1200],
         }
         _ft = (a.get("fulltext") or "").strip()
@@ -826,7 +1047,7 @@ Tu génères un JSON structuré. Ne pas utiliser de tiret cadratin (em dash)."""
 
 {_coverage}
 
-Articles reproduits ({len(pico_context)} les mieux établis ; PICO, abstract et extrait de texte intégral quand disponibles) :
+Articles reproduits ({len(pico_context)} les plus proches de la question du scénario, dans l'ordre de pertinence du corpus ; PICO, abstract et extrait de texte intégral quand disponibles) :
 
 {context_str}
 
@@ -853,7 +1074,7 @@ Génère un JSON avec EXACTEMENT ces champs :
       "definition": "Définition clinique",
       "data_source": "Source de données recommandée",
       "importance": "high|medium|low",
-      "evidence_level": "Nombre d'études qui la mentionnent",
+      "keywords": ["3 à 8 mots-clés ou synonymes, en anglais ET en français, tels qu'un article les écrirait (ex: temperature, température, heat)"],
       "machine_name": "identifiant_snake_case_court (ex: temp_max_j1)",
       "dtype": "float|int|bool|category|datetime",
       "source": "user (fournie par l'utilisateur) | public_api (récupérable: météo, open data...) | seir (DÉRIVÉE du sous-modèle épidémique: incidence/prévalence/cumul/décès)",
@@ -898,6 +1119,11 @@ IMPORTANT pour les champs "provenance" : ce sont des listes d'identifiants (cham
 des articles figurant dans la liste ci-dessus. N'invente AUCUN id : n'utilise que des id
 réellement présents. Les "machine_name" doivent être de courts identifiants snake_case
 (minuscules, chiffres, underscores) utilisables comme noms de colonnes.
+
+IMPORTANT pour "keywords" : le serveur compte, sur TOUS les articles pertinents, ceux dont
+le titre, le résumé ou le PICO contient le nom de la variable ou l'un de ces mots-clés. Donne
+les termes qu'un article emploierait (pas des phrases), en anglais et en français ; ne
+compte pas toi-même les études.
 
 IMPORTANT pour "alert_thresholds" : donne des plages de valeurs NUMÉRIQUES concrètes de
 l'OUTCOME (pas des phrases vagues), cohérentes avec son "unit" et son "task_type", et
@@ -952,9 +1178,14 @@ Retourne UNIQUEMENT le JSON valide."""
         # inconnues comme des zéros, et les articles enrichis par le lot de métadonnées
         # portent enfin un score : les paramètres poolés avec les anciens poids (un article
         # non noté pesait 1.0, plus que tout article noté) sont recalculés une fois.
-        _CTX_VERSION = "ctx-v8-quality-known-or-unknown"
+        # v9 : l'empreinte porte TOUS les articles pertinents, comme celle du brief. Elle
+        # ne prenait que les 25 premiers : un article ajouté ou retiré plus bas réutilisait
+        # l'ancien spec et sautait l'extraction des paramètres épidémiologiques, qui lit,
+        # elle, tout le corpus. Et le contexte change : résultats comptés dans le digest,
+        # compte de preuves par variable calculé en SQL.
+        _CTX_VERSION = "ctx-v9-whole-corpus-fingerprint"
         evidence_fingerprint = _evidence_fingerprint(
-            [a.get("id") for a in pico_articles[:25] if a.get("id") is not None],
+            [a.get("id") for a in pico_articles if a.get("id") is not None],
             threshold, lang, _CTX_VERSION)[:16]
 
         _reused = None
@@ -972,26 +1203,42 @@ Retourne UNIQUEMENT le JSON valide."""
                 _reused = _cand
                 break
 
+        _carried: dict[str, Any] = {}
+        _parse: dict[str, Any] = {}
+        _cut = False
         if _reused is not None:
             variables = dict(_reused)
+            # Ce que la génération d'origine a constaté reste vrai du spec réutilisé.
+            _carried = {k: v for k, v in (variables.get("_meta") or {}).items()
+                        if k.startswith(("epidemic_parameter_", "truncated", "evidence_count_"))}
             logger.info(f"Variables {scenario_id}: évidence inchangée (fingerprint {evidence_fingerprint}) "
                         f"→ spec réutilisé (déterministe, sans appel LLM).")
         else:
-            client = _OAI(timeout=90.0)
-            response = client.chat.completions.create(
-                model=_model("write"),
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt},
-                ],
-                temperature=0,
-                seed=42,
-                max_tokens=8000,  # 3000 tronquait le spec (observations par étude + SEIR) → JSON invalide
-                response_format={"type": "json_object"},
-            )
-            # Parse TOLÉRANT : une réponse coupée (rare à 8000 tokens) est réparée au lieu
-            # de faire échouer toute la génération avec « Expecting ',' delimiter … ».
-            variables = _loads_lenient(response.choices[0].message.content)
+            # 90 s pour une réponse de 8 000 jetons, qui en demande 40 à 80 : au bord, et un
+            # dépassement relançait la requête entière dans le SDK. La génération tourne en
+            # arrière-plan, la latence ne bloque personne.
+            client = _OAI(timeout=300.0)
+
+            def _ask(messages):
+                return client.chat.completions.create(
+                    model=_model("write"),
+                    messages=messages,
+                    temperature=0,
+                    seed=42,
+                    max_tokens=8000,  # 3000 tronquait le spec (observations par étude + SEIR) → JSON invalide
+                    response_format={"type": "json_object"},
+                )
+
+            # Coupé au plafond : redemandé une fois, plus court. Coupé encore, la réponse est
+            # réparée au mieux (TOLÉRANT : sa fin est rognée) et le spec le DIT dans son
+            # `_meta`, au lieu de le laisser au seul journal.
+            try:
+                _raw = json_completion(_ask, [{"role": "system", "content": system_prompt},
+                                              {"role": "user", "content": user_prompt}],
+                                       f"variables {scenario_id}")
+            except CutAnswer as _c:
+                _raw, _cut = _c.content, True
+            variables = _loads_lenient(_raw, report=_parse)
             if not variables:
                 raise ValueError("Réponse LLM (variables) vide ou illisible même après réparation.")
 
@@ -1023,6 +1270,24 @@ Retourne UNIQUEMENT le JSON valide."""
             except Exception as spec_err:  # le spec machine ne doit jamais bloquer la génération
                 logger.error(f"model_spec build {scenario_id}: {spec_err}", exc_info=True)
 
+            # Le compte de preuves de chaque variable, sur TOUT le corpus pertinent, en SQL :
+            # il était demandé au modèle, qui comptait parmi ses 25 articles.
+            try:
+                _counts = variable_evidence_counts(scenario_id, threshold, variables)
+                _carried["evidence_count_rule"] = EVIDENCE_COUNT_RULE
+                _carried["evidence_count_denominator"] = _counts["denominator"]
+            except Exception as _ev_err:                     # jamais bloquant, jamais le compte du modèle
+                logger.warning(f"Comptes de preuves des variables {scenario_id}: {_ev_err}")
+                for _pv in (variables.get("predictor_variables") or []):
+                    if isinstance(_pv, dict):
+                        _pv["evidence_count"], _pv["evidence_level"] = None, None
+                _carried["evidence_count_error"] = str(_ev_err)[:300]
+            _carried.update(_epi_meta(_epi_targeted))
+            _carried["truncated"] = bool(_cut or _parse.get("repaired"))
+            if _parse.get("repaired"):
+                _carried["truncated_repair"] = {"kept_chars": _parse["kept_chars"],
+                                                "total_chars": _parse["total_chars"]}
+
         try:
             with engine.connect() as _cc:
                 _corpus_total = _cc.execute(text("""
@@ -1043,13 +1308,13 @@ Retourne UNIQUEMENT le JSON valide."""
             "validation_status": "pending",
             "evidence_fingerprint": evidence_fingerprint,
             "reused": _reused is not None,
+            # Combien d'articles du corpus MESURENT un paramètre, combien en ont donné une
+            # valeur, et ce que l'extraction n'a pas pu lire : l'onglet Modèle peut dire « 0
+            # sur 2 732 » au lieu de « aucun paramètre extrait », qui laissait croire à une
+            # panne. Puis la règle du compte de preuves des variables, et si la réponse a dû
+            # être réparée (`truncated`).
+            **_carried,
         }
-        if _reused is None:
-            # Combien d'articles du corpus MESURENT un paramètre, et combien en ont donné
-            # une valeur : l'onglet Modèle peut dire « 0 sur 2 732 » au lieu de « aucun
-            # paramètre extrait », qui laissait croire à une panne.
-            variables["_meta"]["epidemic_parameter_candidates"] = int(_epi_targeted.get("n_candidates", 0))
-            variables["_meta"]["epidemic_parameter_articles_with_values"] = int(_epi_targeted.get("n_with_values", 0))
 
         # Sauvegarder en DB. persist="proposal" (Phase 5) écrit dans un slot
         # de staging sans toucher le spec actif validé.
@@ -1101,37 +1366,54 @@ def _detect_variables_lang(variables: dict) -> str:
     return "en" if en > fr else "fr"
 
 
-def _llm_translate_strings(texts: list, target_lang: str) -> list:
-    """Traduit une liste de chaînes vers 'en'/'fr' (ordre + longueur conservés).
-    Renvoie les chaînes d'ORIGINE en cas d'échec - jamais de corruption."""
+def _translate_batch(client, texts: list, lang_name: str, may_split: bool = True) -> list:
+    """Un appel de traduction. Coupé au plafond, le lot est scindé en deux moitiés, chacune
+    demandée une fois : une traduction coupée n'est pas une traduction plus courte. LÈVE
+    sur toute autre panne et sur une réponse de mauvaise forme."""
     import json as _json
-    from llm_usage import MeteredOpenAI as _OAI
-    if not texts:
-        return texts
-    lang_name = "English" if target_lang == "en" else "French"
     sys = (f"You are a professional medical translator. Translate each string in the input "
            f"array to {lang_name}. Preserve medical/technical terms, units (e.g. /100k, mg, %), "
            "acronyms (ARI, RSV, SARIMAX, ED), and all numbers. Do NOT add explanations or notes. "
+           "Do not use the em dash character. "
            'Return ONLY a JSON object {"items": [...]} whose "items" is a JSON array of the '
            "translated strings, in the SAME order and with EXACTLY the same length as the input.")
     usr = _json.dumps({"items": list(texts)}, ensure_ascii=False)
     try:
-        client = _OAI(timeout=90.0)
         resp = client.chat.completions.create(
             model=_model("write"),
             messages=[{"role": "system", "content": sys}, {"role": "user", "content": usr}],
             temperature=0, seed=42, max_tokens=4000,
             response_format={"type": "json_object"},
         )
-        out = _json.loads(resp.choices[0].message.content)
-        items = out.get("items") if isinstance(out, dict) else None
-        if isinstance(items, list) and len(items) == len(texts) and all(isinstance(x, str) for x in items):
-            return items
-        logger.warning(f"translate_strings: shape mismatch ({type(items).__name__}, "
-                       f"{len(items) if isinstance(items, list) else 'n/a'} vs {len(texts)})")
+        out = _json.loads(json_content(resp, f"translate_strings ({len(texts)} strings)"))
+    except LLMTruncated:
+        if not may_split or len(texts) < 2:
+            raise
+        half = (len(texts) + 1) // 2
+        return (_translate_batch(client, texts[:half], lang_name, may_split=False)
+                + _translate_batch(client, texts[half:], lang_name, may_split=False))
+    items = out.get("items") if isinstance(out, dict) else None
+    if isinstance(items, list) and len(items) == len(texts) and all(isinstance(x, str) for x in items):
+        return items
+    raise ValueError(f"shape mismatch ({type(items).__name__}, "
+                     f"{len(items) if isinstance(items, list) else 'n/a'} vs {len(texts)})")
+
+
+def _llm_translate_strings(texts: list, target_lang: str) -> list | None:
+    """Traduit une liste de chaînes vers 'en'/'fr' (ordre + longueur conservés).
+
+    Renvoie None en cas d'échec : il renvoyait les chaînes d'ORIGINE, que l'appelant
+    mettait en cache COMME la traduction, si bien qu'une panne passagère figeait l'anglais
+    dans l'affichage français jusqu'à la prochaine régénération du spec."""
+    from llm_usage import MeteredOpenAI as _OAI
+    if not texts:
+        return texts
+    lang_name = "English" if target_lang == "en" else "French"
+    try:
+        return _translate_batch(_OAI(timeout=90.0), list(texts), lang_name)
     except Exception as e:
         logger.warning(f"translate_strings failed: {e}")
-    return texts
+        return None
 
 
 def _translate_variables_payload(variables: dict, target_lang: str) -> dict:
@@ -1140,6 +1422,12 @@ def _translate_variables_payload(variables: dict, target_lang: str) -> dict:
     dtype, task_type, family, metric, cv, provenance, ranges numériques et structure du
     model_spec restent identiques. Les noms/justification traduits sont propagés dans le
     model_spec miroir (lu par /model/spec)."""
+    return _translate_variables(variables, target_lang)[0]
+
+
+def _translate_variables(variables: dict, target_lang: str) -> tuple[dict, bool]:
+    """(copie traduite, traduite ou non). Une traduction en échec rend la copie NON
+    traduite et False : servie telle quelle, elle ne doit pas être mise en cache."""
     import copy
     v = copy.deepcopy(variables or {})
     texts: list = []
@@ -1184,10 +1472,10 @@ def _translate_variables_payload(variables: dict, target_lang: str) -> dict:
         _add(v, k)
 
     if not texts:
-        return v
+        return v, True
     translated = _llm_translate_strings(texts, target_lang)
-    if len(translated) != len(texts):
-        return v   # sécurité : ne jamais corrompre
+    if not isinstance(translated, list) or len(translated) != len(texts):
+        return v, False   # sécurité : ne jamais corrompre, et ne rien mettre en cache
     for idx, setter in setters:
         setter(translated[idx])
 
@@ -1203,7 +1491,7 @@ def _translate_variables_payload(variables: dict, target_lang: str) -> dict:
                 f["name"] = name_by_mn[f["machine_name"]]
         if isinstance(ms.get("algorithm"), dict) and ra.get("rationale"):
             ms["algorithm"]["rationale"] = ra["rationale"]
-    return v
+    return v, True
 
 
 def _get_localized_variables(scenario_id: str, lang, base_variables: dict | None = None,
@@ -1230,7 +1518,11 @@ def _get_localized_variables(scenario_id: str, lang, base_variables: dict | None
     cache = variables_i18n if isinstance(variables_i18n, dict) else {}
     if isinstance(cache.get(req), dict):
         return cache[req]
-    translated = _translate_variables_payload(base_variables, req)
+    translated, ok = _translate_variables(base_variables, req)
+    if not ok:
+        # Un échec n'est pas une traduction : servi tel quel, NON mis en cache, pour que le
+        # prochain affichage réessaie au lieu de resservir l'original pour toujours.
+        return translated
     try:  # cache best-effort ; l'affichage ne doit pas échouer si l'écriture échoue
         with engine.begin() as conn:
             conn.execute(text(
@@ -1393,8 +1685,7 @@ def extract_scenario_epidemic_parameters(scenario_id: str, max_articles: int = 0
         variables["epidemic_parameters_pooled"] = {
             k: v for k, v in _pooled.items() if k != "cited"}
     meta = dict(variables.get("_meta") or {})
-    meta["epidemic_parameter_candidates"] = int(targeted.get("n_candidates", 0))
-    meta["epidemic_parameter_articles_with_values"] = int(targeted.get("n_with_values", 0))
+    meta.update(_epi_meta(targeted))
     variables["_meta"] = meta
 
     with engine.begin() as conn:
@@ -1414,6 +1705,15 @@ def extract_scenario_epidemic_parameters(scenario_id: str, max_articles: int = 0
         "scenario_id": scenario_id,
         "n_candidates": targeted.get("n_candidates", 0),
         "n_articles_with_values": targeted.get("n_with_values", 0),
+        # Ce qui n'a PAS pu être lu, même quand le reste a donné des valeurs : la réponse
+        # de succès taisait les lots perdus.
+        "n_articles_examined": targeted.get("n_articles_used", 0),
+        "n_from_fulltext": targeted.get("n_from_fulltext", 0),
+        "n_batches": targeted.get("n_batches", 0),
+        "n_batches_failed": targeted.get("n_batches_failed", 0),
+        "n_batches_split": targeted.get("n_batches_split", 0),
+        "n_not_examined": targeted.get("n_not_examined", 0),
+        "failed_article_ids": targeted.get("failed_article_ids") or [],
         "disease": _epi.get("disease") or targeted.get("disease"),
         "applicable": bool(_epi.get("applicable")),
         "parameters": {k: {"value": v.get("value"), "ci_low": v.get("ci_low"), "ci_high": v.get("ci_high"),
