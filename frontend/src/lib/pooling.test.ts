@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import type { PooledComparison, PooledGroup } from "./api";
-import { bandTone, csvOfPooled, fmtOr, forestScale, intervalText, orDomain, pct, proportionDomain } from "./pooling";
+import {
+  bandTone, csvOfPooled, fmtOr, foldDisease, forestScale, intervalText, mergedSpellings, orDomain, pct, proportionDomain, spellingsText,
+} from "./pooling";
 
 const study = (p: number, lo: number, hi: number) => ({ article_id: 1, title: "t", year: 2020, first_author: "A", x: 1, n: 10, review_status: "accepted", p, ci_low: lo, ci_high: hi });
 const group = (over: Partial<PooledGroup> = {}): PooledGroup => ({
@@ -73,5 +75,35 @@ describe("tone and csv", () => {
     expect(csv[0].startsWith("sheet,group,label,disease,k")).toBe(true);
     expect(csv[1]).toContain('"say ""hi"""');
     expect(csv[2]).toContain(",,,,,,");
+  });
+  it("ends each csv row with the disease as the papers wrote it", () => {
+    const csv = csvOfPooled([group({ disease: "A(H5N1)", disease_spellings: [{ spelling: "HPAI H5N1", n: 5 }, { spelling: "H5N1", n: 3 }] }),
+      group({ disease_spellings: undefined })]).split("\n");
+    expect(csv[0].endsWith(",heterogeneity,disease_as_written")).toBe(true);
+    expect(csv[1]).toContain(',"A(H5N1)",');
+    expect(csv[1].endsWith(',"HPAI H5N1 (5); H5N1 (3)"')).toBe(true);
+    expect(csv[2].endsWith(",")).toBe(true);
+  });
+});
+
+describe("disease spellings", () => {
+  const sp = [{ spelling: "HPAI H5N1", n: 5 }, { spelling: "H5N1", n: 3 }];
+  it("folds a name as the API does", () => {
+    expect(foldDisease("Influenza A(H5N1)")).toBe("influenza a h5n1");
+    expect(foldDisease("influenza aviaire hautement pathogène")).toBe("influenza aviaire hautement pathogene");
+    expect(foldDisease(null)).toBe("");
+  });
+  it("shows what a pool merged, but not a single spelling that already reads as the disease", () => {
+    expect(mergedSpellings("A(H5N1)", sp)).toEqual(sp);
+    expect(mergedSpellings("A(H5N1)", [{ spelling: "HPAI H5N1", n: 4 }])).toHaveLength(1);
+    expect(mergedSpellings("A(H5N1)", [{ spelling: "A(H5N1)", n: 4 }])).toEqual([]);
+    expect(mergedSpellings("covid 19", [{ spelling: "COVID-19", n: 4 }])).toEqual([]);
+    expect(mergedSpellings(null, [{ spelling: "COVID-19", n: 4 }])).toHaveLength(1);       // all diseases merged: say which
+    expect(mergedSpellings("A(H5N1)", undefined)).toEqual([]);
+  });
+  it("writes each spelling with its number of studies", () => {
+    expect(spellingsText(sp)).toBe("HPAI H5N1 (5) · H5N1 (3)");
+    expect(spellingsText(sp, "; ")).toBe("HPAI H5N1 (5); H5N1 (3)");
+    expect(spellingsText([])).toBe("");
   });
 });

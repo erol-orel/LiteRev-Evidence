@@ -59,6 +59,7 @@ the model's unchecked reading.
 |---|---|---|
 | Per-article extraction (map), cached in `literature_document.extraction_json` | `api/extraction.py` | `ExtractionSection.tsx` (Evidence tab, Extraction sub-tab) |
 | Codebook (label normalisation at read time, never rewrites stored labels) | `api/codebook.py` | `CodebookPanel.tsx` |
+| Disease names (one key per disease at read time: A(H5N1) for HPAI H5N1, influenza A(H5N1), H5N1...; other diseases as written) | `api/diseases.py` | `PooledPanel.tsx` (Disease column, with the spellings each pool merged) |
 | Reviewer decisions (accept, edit, reject, clear; Cohen's kappa) in table `extraction_review` | `api/extraction_review.py` | `ObservationPanel.tsx`, `ReviewSummaryCard.tsx` |
 | Pooled estimates (logit, DerSimonian-Laird, Hartung-Knapp CI, prediction interval, min 3 studies) | `api/pooling.py` | `PooledPanel.tsx` (forest plots) |
 | Report as Markdown, Word, PDF | `api/extraction_report.py` | download buttons |

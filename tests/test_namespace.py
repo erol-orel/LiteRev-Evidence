@@ -11,7 +11,7 @@ import glob
 import os
 from collections import defaultdict
 
-NEW = {"codebook", "extraction", "extraction_review", "pooling", "extraction_report", "geography"}
+NEW = {"codebook", "diseases", "extraction", "extraction_review", "pooling", "extraction_report", "geography"}
 
 
 def _top_level_names(path):

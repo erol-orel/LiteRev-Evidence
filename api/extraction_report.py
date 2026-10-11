@@ -30,6 +30,7 @@ from fastapi.responses import Response
 
 from .codebook import get_codebook, unmapped_labels
 from .core import app
+from .diseases import NOT_STATED, fold_disease
 from .extraction import extraction_digest, extraction_status
 from .extraction_review import review_summary
 from .geography import geography
@@ -51,7 +52,7 @@ _S = {
         "review": "Review", "review_t": "{n} of {total} extracted rows were reviewed by {who}.",
         "review_none": "No row has been reviewed yet: every value below is the model's reading, unchecked.",
         "stats": "Statistics",
-        "stats_t": "Pooled proportions and odds ratios are random-effects estimates (DerSimonian-Laird between-study variance) on the logit and log scales, with Hartung-Knapp-Sidik-Jonkman 95% intervals, a 95% prediction interval from three studies, and Wilson intervals for single studies. Studies are combined only within one codebook label and disease; a label needs at least {k} studies.",
+        "stats_t": "Pooled proportions and odds ratios are random-effects estimates (DerSimonian-Laird between-study variance) on the logit and log scales, with Hartung-Knapp-Sidik-Jonkman 95% intervals, a 95% prediction interval from three studies, and Wilson intervals for single studies. Studies are combined only within one codebook label and disease; a label needs at least {k} studies. A disease is recognised whatever its spelling: HPAI H5N1, influenza A(H5N1) and H5N1 are one disease, A(H5N1), and A(H9N2) is another; a disease other than influenza is matched by its name as written.",
         "reports": "What the papers report", "reports_t": "Counts are out of the {n} extracted articles.",
         "col_item": "Item", "col_papers": "Papers", "col_share": "Share", "col_ft": "From full text",
         "items": {"sex_gender": "Sex or gender", "age": "Age", "occupation": "Occupation",
@@ -80,7 +81,7 @@ _S = {
         "geo_builtin": "the built-in one (countries; Germany NUTS 1; Italy NUTS 1 and 2)", "geo_loaded": "Eurostat's official list",
         "col_country": "Country", "col_nuts": "NUTS 0", "col_regions": "Regions (articles)", "geo_unres": "{n} articles name no place that can be resolved, or name several countries.",
         "appendix": "Studies behind each pooled estimate", "band": {"low": "low", "moderate": "moderate", "substantial": "substantial", "considerable": "considerable"},
-        "all_diseases": "all diseases", "versus": "against", "not_stated": "not stated",
+        "all_diseases": "all diseases", "versus": "against", "not_stated": "not stated", "as_written": "As written:",
     },
     "fr": {
         "title": "Rapport d'extraction structurée", "generated": "Généré le", "snapshot": "Instantané",
@@ -94,7 +95,7 @@ _S = {
         "review": "Relecture", "review_t": "{n} lignes extraites sur {total} ont été relues par {who}.",
         "review_none": "Aucune ligne n'a encore été relue : chaque valeur ci-dessous est la lecture du modèle, non vérifiée.",
         "stats": "Statistiques",
-        "stats_t": "Les proportions et odds ratios combinés sont des estimations à effets aléatoires (variance inter-études de DerSimonian-Laird) sur les échelles logit et log, avec des intervalles à 95 % de Hartung-Knapp-Sidik-Jonkman, un intervalle de prédiction à 95 % à partir de trois études, et des intervalles de Wilson pour une étude seule. Les études ne sont combinées que dans un même libellé du codebook et une même maladie ; un libellé demande au moins {k} études.",
+        "stats_t": "Les proportions et odds ratios combinés sont des estimations à effets aléatoires (variance inter-études de DerSimonian-Laird) sur les échelles logit et log, avec des intervalles à 95 % de Hartung-Knapp-Sidik-Jonkman, un intervalle de prédiction à 95 % à partir de trois études, et des intervalles de Wilson pour une étude seule. Les études ne sont combinées que dans un même libellé du codebook et une même maladie ; un libellé demande au moins {k} études. Une maladie est reconnue quelle que soit sa graphie : HPAI H5N1, influenza A(H5N1) et H5N1 sont une seule maladie, A(H5N1), et A(H9N2) en est une autre ; une maladie autre que la grippe est rapprochée par son nom tel qu'écrit.",
         "reports": "Ce que rapportent les articles", "reports_t": "Les comptes portent sur les {n} articles extraits.",
         "col_item": "Élément", "col_papers": "Articles", "col_share": "Part", "col_ft": "En texte intégral",
         "items": {"sex_gender": "Sexe ou genre", "age": "Âge", "occupation": "Profession",
@@ -123,7 +124,7 @@ _S = {
         "geo_builtin": "la liste intégrée (pays ; Allemagne NUTS 1 ; Italie NUTS 1 et 2)", "geo_loaded": "la liste officielle d'Eurostat",
         "col_country": "Pays", "col_nuts": "NUTS 0", "col_regions": "Régions (articles)", "geo_unres": "{n} articles ne nomment aucun lieu résoluble, ou nomment plusieurs pays.",
         "appendix": "Les études derrière chaque estimation combinée", "band": {"low": "faible", "moderate": "modéré", "substantial": "important", "considerable": "considérable"},
-        "all_diseases": "toutes maladies", "versus": "contre", "not_stated": "non précisée",
+        "all_diseases": "toutes maladies", "versus": "contre", "not_stated": "non précisée", "as_written": "Tel qu'écrit :",
     },
 }
 
@@ -151,6 +152,20 @@ def _label(g: dict) -> str:
 
 def _author(s: dict) -> str:
     return f"{s.get('first_author') or '?'} {s.get('year') or ''}".strip()
+
+
+def _disease_name(g: dict, S: dict) -> str:
+    d = g.get("disease")
+    return S["all_diseases"] if d is None else S["not_stated"] if d == NOT_STATED else d
+
+
+def _as_written(g: dict, S: dict) -> str:
+    """The disease as the papers of a pool wrote it, when the pool merged spellings or renamed
+    the one it has: what the canonical name stands for."""
+    sp = g.get("disease_spellings") or []
+    if not sp or (len(sp) == 1 and fold_disease(sp[0]["spelling"]) == fold_disease(g.get("disease"))):
+        return ""
+    return f". {S['as_written']} " + "; ".join(f"{s['spelling']} ({s['n']})" for s in sp)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -228,7 +243,7 @@ def build_extraction_report(scenario_id: str, lang: str = "en") -> dict[str, Any
         add(("p", S["none_pooled"].format(k=k)))
     else:
         add(("table", [S["col_label"], S["col_disease"], S["col_studies"], S["col_people"], S["col_pooled"], S["col_pred"], S["col_het"]],
-             [[_label(g), g["disease"] or S["all_diseases"], str(g["k"]), f"{g['events_total']}/{g['n_total']}",
+             [[_label(g), _disease_name(g, S), str(g["k"]), f"{g['events_total']}/{g['n_total']}",
                f"{pct(g['pooled']['p'])} ({_interval(g['pooled']['ci_low'], g['pooled']['ci_high'], pct)})",
                _interval(g["pooled"]["pi_low"], g["pooled"]["pi_high"], pct),
                f"{round(g['heterogeneity']['I2'])}% ({S['band'][g['heterogeneity']['band']]})"] for g in groups]))
@@ -236,14 +251,14 @@ def build_extraction_report(scenario_id: str, lang: str = "en") -> dict[str, Any
             add(("figure", "proportion", g))
     if small:
         add(("p", S["few"].format(k=k)))
-        add(("bullets", [f"{_label(g)} ({g['disease'] or S['all_diseases']}): " + "; ".join(f"{_author(s)} {s['x']}/{s['n']}" for s in g["studies"])
+        add(("bullets", [f"{_label(g)} ({_disease_name(g, S)}): " + "; ".join(f"{_author(s)} {s['x']}/{s['n']}" for s in g["studies"])
                          for g in small[:30]]))
 
     if pooled["comparisons"]:
         add(("h2", S["cmp_h"]))
         add(("p", S["cmp_t"]))
         add(("table", [S["col_cmp"], S["col_disease"], S["col_papers_n"], S["col_or"], S["col_het"]],
-             [[f"{c['a'].replace('_', ' ')} {S['versus']} {c['b'].replace('_', ' ')}", c["disease"] or S["all_diseases"], str(c["k"]),
+             [[f"{c['a'].replace('_', ' ')} {S['versus']} {c['b'].replace('_', ' ')}", _disease_name(c, S), str(c["k"]),
                f"{fmt_or(c['pooled']['or'])} ({_interval(c['pooled']['ci_low'], c['pooled']['ci_high'], fmt_or)})",
                f"{round(c['heterogeneity']['I2'])}% ({S['band'][c['heterogeneity']['band']]})"] for c in pooled["comparisons"]]))
         for c in pooled["comparisons"][:_FIGURES]:
@@ -272,7 +287,7 @@ def build_extraction_report(scenario_id: str, lang: str = "en") -> dict[str, Any
     if groups:
         add(("h2", S["appendix"]))
         for g in groups:
-            add(("p", f"{_label(g)} ({g['disease'] or S['all_diseases']})"))
+            add(("p", f"{_label(g)} ({_disease_name(g, S)}){_as_written(g, S)}"))
             add(("table", ["", S["col_people"], S["col_share"]],
                  [[f"{_author(s)}: {(s['title'] or '')[:90]}", f"{s['x']}/{s['n']}", pct(s.get("p"))] for s in g["studies"]]))
 

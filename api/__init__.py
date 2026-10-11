@@ -40,6 +40,7 @@ MODULES = (
     "situation_reports",
     "model_training",
     "gesica_routes",
+    "diseases",
     "codebook",
     "extraction_review",
     "geography",

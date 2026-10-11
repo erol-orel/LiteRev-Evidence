@@ -13,7 +13,10 @@ A pooled number is only as good as the question "are these studies measuring the
 thing?", and this code does not pretend to answer it. So it narrows what it will combine and it
 shows its working:
 
-  - rows are pooled only within one codebook label, one sheet and (by default) one disease;
+  - rows are pooled only within one codebook label, one sheet and (by default) one disease. The
+    disease is recognised whatever the spelling (`api/diseases.py`): "HPAI H5N1", "influenza
+    A(H5N1)" and "H5N1" are one disease, A(H5N1), and A(H9N2) is another. Each pool lists the
+    spellings it merged, so the merge can be checked;
   - fewer than `MIN_STUDIES` studies get no pooled estimate, only the studies themselves;
   - a row counts only if both counts are whole numbers with 0 <= cases <= population, and (by
     default) the quote it rests on was found in the text; rejected rows and rows two reviewers
@@ -38,8 +41,9 @@ from typing import Any
 from fastapi import Query
 from sqlalchemy import text
 
-from .codebook import Index, clean_label, get_index
+from .codebook import Index, get_index
 from .core import app, engine, logger
+from .diseases import disease_key, disease_spellings, fold_disease
 from .extraction_review import load_reviews, overlay_annotated
 from .scenario_store import (_get_scenario_threshold, _get_user_scenario_or_404,
                              relevant_gate_sql)
@@ -259,14 +263,23 @@ def row_counts(o: dict[str, Any]) -> tuple[int, int] | str:
 
 
 def group_key(o: dict[str, Any], split_disease: bool) -> tuple:
-    disease = clean_label(o.get("disease")) or "(not stated)"
     return (o.get("sheet") or "", o.get("group_key") or "", o.get("covariate_key") or "",
-            disease if split_disease else "")
+            disease_key(o.get("disease")) if split_disease else "")
+
+
+def _spelt(rows: list[dict[str, Any]]) -> list[Any]:
+    """The disease as one study's rows wrote it, each spelling once (a study's two rows of a
+    comparison may write it alike or not)."""
+    seen: dict[str, Any] = {}
+    for r in rows:
+        seen.setdefault(fold_disease(r["obs"].get("disease")), r["obs"].get("disease"))
+    return list(seen.values())
 
 
 def build_groups(rows: list[dict[str, Any]], split_disease: bool = True) -> tuple[dict[tuple, list[dict]], int]:
-    """{(sheet, group, label, disease): [one study per article]}, and how many rows were
-    dropped because the same article gave the same label twice (the largest population is kept)."""
+    """{(sheet, group, label, disease key): [one study per article]}, and how many rows were
+    dropped because the same article gave the same label twice for one disease, however spelt
+    (the largest population is kept)."""
     best: dict[tuple, dict[int, dict]] = {}
     dropped = 0
     for r in rows:
@@ -293,6 +306,7 @@ def pooled_groups(rows: list[dict[str, Any]], min_studies: int = MIN_STUDIES, sp
         studies = [_study(r) for r in items]
         entry: dict[str, Any] = {
             "sheet": sheet, "group": g, "label": label, "disease": disease or None,
+            "disease_spellings": disease_spellings(r["obs"].get("disease") for r in items),
             "label_path": items[0]["obs"].get("label_path"), "mapped": bool(items[0]["obs"].get("matched")),
             "k": len(studies), "n_total": sum(s["n"] for s in studies), "events_total": sum(s["x"] for s in studies),
             "pooled": None, "heterogeneity": None, "studies": studies, "reason": None,
@@ -331,11 +345,13 @@ def pooled_comparisons(rows: list[dict[str, Any]], order: dict[tuple, int], min_
                 pairs.append((len(common), a, b))
         for k, a, b in sorted(pairs, reverse=True)[:_MAX_PAIRS_PER_GROUP]:
             first, second = sorted((a, b), key=lambda lab: (order.get((sheet, g, lab), 10 ** 6), lab))
-            studies = []
+            studies, written = [], []
             for aid in sorted(labels[a].keys() & labels[b].keys()):
                 r1, r2 = labels[first][aid], labels[second][aid]
                 studies.append({**_study(r1), "x1": r1["x"], "n1": r1["n"], "x2": r2["x"], "n2": r2["n"]})
-            out.append({"sheet": sheet, "group": g, "disease": disease or None, "a": first, "b": second,
+                written += _spelt([r1, r2])
+            out.append({"sheet": sheet, "group": g, "disease": disease or None,
+                        "disease_spellings": disease_spellings(written), "a": first, "b": second,
                         "k": len(studies), **pool_odds_ratios(studies)})
     out.sort(key=lambda e: (-e["k"], e["sheet"], e["group"], e["a"]))
     return out
