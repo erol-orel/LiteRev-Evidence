@@ -95,10 +95,12 @@ def test_without_an_openai_key_the_candidates_are_still_counted(monkeypatch):
 def _seed(db_conn):
     ensure_document_columns(db_conn.cursor())
     rows = [
-        (9001, "Estimating the basic reproduction number of chikungunya", "R0 was 2.1.", "Systematic review", 0.9, 120),
+        # Des résumés d'au moins 30 caractères : sans résumé, un article n'est pertinent que
+        # si un relecteur l'inclut (scenario_store.has_abstract_sql).
+        (9001, "Estimating the basic reproduction number of chikungunya", "R0 was 2.1 in the 2017 outbreak.", "Systematic review", 0.9, 120),
         (9002, "Incubation period of chikungunya virus", "Median incubation period 3 days.", "Cohort", 0.7, 40),
-        (9003, "Vector control against Aedes albopictus", "Larvicide programmes only.", "Cross-sectional", 0.6, 10),
-        (9004, "Macro0 hospital bed occupancy", "Capacity model.", "Modelling", 0.95, 3),
+        (9003, "Vector control against Aedes albopictus", "Larvicide programmes only, in two districts.", "Cross-sectional", 0.6, 10),
+        (9004, "Macro0 hospital bed occupancy", "Capacity model of hospital beds in winter.", "Modelling", 0.95, 3),
     ]
     with db_conn.cursor() as cur:
         cur.execute("DELETE FROM article_scenarios WHERE scenario_id = %s", (SID,))
@@ -206,15 +208,18 @@ def test_the_full_text_makes_candidates_and_its_passages_reach_the_model(db_conn
         cur.execute("DELETE FROM document_chunk WHERE document_id = ANY(%s)", (list(FT_IDS),))
         cur.execute("DELETE FROM literature_document WHERE id = ANY(%s)", (list(FT_IDS),))
         for doc_id, title, abstract in (
-                (9011, "Chikungunya in returning travellers", "A case series of travellers."),
+                (9011, "Chikungunya in returning travellers", "A case series of travellers returning home."),
                 (9012, "Outbreak report", None),
-                (9013, "R0 of chikungunya in Reunion", "We estimated R0 at 3.1."),
-                (9014, "Vector ecology", "Larval habitats only.")):
+                (9013, "R0 of chikungunya in Reunion", "We estimated R0 at 3.1 from the outbreak curve."),
+                (9014, "Vector ecology", "Larval habitats only, mapped across the island.")):
             cur.execute("INSERT INTO literature_document (id, title, abstract, study_design, quality_score, "
                         "citation_count, source, project_context, year) "
                         "VALUES (%s,%s,%s,'Cohort',0.5,1,'pubmed','literev',2024)", (doc_id, title, abstract))
             cur.execute("INSERT INTO article_scenarios (document_id, scenario_id, similarity_score) "
                         "VALUES (%s,%s,0.8)", (doc_id, SID))
+        # 9012 has no abstract: it never enters on its score, a reviewer included it.
+        cur.execute("UPDATE article_scenarios SET screening_status = 'included' "
+                    "WHERE document_id = 9012 AND scenario_id = %s", (SID,))
         cur.execute("INSERT INTO document_chunk (document_id, chunk_index, content, chunk_type) VALUES "
                     "(9011, 0, %s, 'fulltext_section'), (9012, 0, %s, 'fulltext_section'), "
                     "(9014, 0, %s, 'fulltext_section')",

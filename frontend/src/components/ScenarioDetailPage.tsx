@@ -2440,10 +2440,14 @@ function CorpusSection({ scenarioId, threshold, counts, onUseAsThreshold }:
   // l'est aussi : filtrer ici n'aurait cherché que dans les cent articles affichés.
   const [query, setQuery] = useState("");
   const [relevantOnly, setRelevantOnly] = useState(false);
+  // Les notices SANS résumé, à part : gardées au corpus, jamais pertinentes sur leur
+  // score, elles attendent un relecteur qui les juge sur leur titre.
+  const [noAbstractOnly, setNoAbstractOnly] = useState(false);
   const [searching, setSearching] = useState(false);
   const search = useMemo(
-    () => ({ ...(query.trim() ? { q: query.trim() } : {}), ...(relevantOnly ? { relevantOnly: true } : {}) }),
-    [query, relevantOnly]);
+    () => ({ ...(query.trim() ? { q: query.trim() } : {}), ...(relevantOnly ? { relevantOnly: true } : {}),
+             ...(noAbstractOnly ? { noAbstract: true } : {}) }),
+    [query, relevantOnly, noAbstractOnly]);
 
   // Recharge la PREMIÈRE page quand le seuil (curseur) ou la recherche change, avec un
   // léger debounce - une frappe par caractère ne doit pas faire une requête par frappe.
@@ -2543,7 +2547,12 @@ function CorpusSection({ scenarioId, threshold, counts, onUseAsThreshold }:
       {embeddingStatus && (() => {
         // « 441 / 433 articles scorés » : les deux nombres venaient de deux requêtes,
         // d'où un numérateur plus grand que son dénominateur. Un seul objet désormais.
-        const total = embeddingStatus.counts?.total ?? embeddingStatus.corpus_total ?? embeddingStatus.ranking?.total ?? 0;
+        // Les notices sans résumé ne se scorent pas (jugées sur leur titre) : hors du
+        // dénominateur, sinon la ligne ne serait jamais complète.
+        const noAbstract = embeddingStatus.counts?.no_abstract ?? embeddingStatus.ranking?.no_abstract ?? 0;
+        const total = embeddingStatus.counts?.total != null
+          ? Math.max(0, embeddingStatus.counts.total - noAbstract)
+          : embeddingStatus.ranking?.total ?? Math.max(0, (embeddingStatus.corpus_total ?? 0) - noAbstract);
         const scored = embeddingStatus.counts?.scored ?? embeddingStatus.ranking?.scored ?? 0;
         const reranked = embeddingStatus.ranking?.reranked ?? embeddingStatus.counts?.reranked ?? 0;
         const rerankScorable = embeddingStatus.ranking?.rerank_scorable ?? total;
@@ -2652,6 +2661,24 @@ function CorpusSection({ scenarioId, threshold, counts, onUseAsThreshold }:
                 {n.unscored.toLocaleString()} {t("scenarioDetail.corpus.unscored")}{data.rerank_running ? t("scenarioDetail.corpus.scoringInProgress") : ''}
               </span>
             )}
+            {/* Les notices sans résumé ne sont pas « non scorées » : elles ne le seront
+                jamais. Elles ont leur pastille, qui les liste pour les juger sur leur titre. */}
+            {(n.no_abstract ?? data.no_abstract ?? 0) > 0 && (
+              <button
+                type="button"
+                onClick={() => setNoAbstractOnly(v => !v)}
+                aria-pressed={noAbstractOnly}
+                title={t("scenarioDetail.corpus.noAbstractHint")}
+                className={`rounded-full border px-3 py-1 text-[10px] transition ${
+                  noAbstractOnly
+                    ? "bg-gold-500/15 border-gold-400/40 text-gold-300"
+                    : "bg-white/5 border-white/15 text-white/55 hover:text-white/80"
+                }`}
+              >
+                {t("scenarioDetail.corpus.noAbstractChip")
+                  .replace("{n}", (n.no_abstract ?? data.no_abstract ?? 0).toLocaleString())}
+              </button>
+            )}
             <RelevantExportMenu scenarioId={scenarioId} threshold={threshold} />
           </div>
         </div>
@@ -2692,10 +2719,10 @@ function CorpusSection({ scenarioId, threshold, counts, onUseAsThreshold }:
                 .replace("{total}", n.total.toLocaleString())}
             </span>
           )}
-          {(query || relevantOnly) && (
+          {(query || relevantOnly || noAbstractOnly) && (
             <button
               type="button"
-              onClick={() => { setQuery(""); setRelevantOnly(false); }}
+              onClick={() => { setQuery(""); setRelevantOnly(false); setNoAbstractOnly(false); }}
               className="text-[11px] text-white/40 hover:text-white/70 underline underline-offset-2"
             >
               {t("scenarioDetail.corpus.searchClear")}
@@ -2883,6 +2910,13 @@ function ArticleRow({
             {article.has_fulltext && (
               <span className="rounded-full bg-brand-500/10 border border-brand-500/20 px-2 py-0.5 text-[9px] text-brand-300 font-medium">
                 {t("scenarioDetail.articleRow.fulltext")}
+              </span>
+            )}
+            {/* Sans résumé : gardée au corpus, à juger sur son titre, jamais retenue sur un score. */}
+            {article.has_abstract === false && (
+              <span className="rounded-full bg-gold-500/10 border border-gold-500/25 px-2 py-0.5 text-[9px] text-gold-300 font-medium"
+                    title={t("scenarioDetail.articleRow.noAbstractTooltip")}>
+                {t("scenarioDetail.articleRow.noAbstract")}
               </span>
             )}
             {/* Score de PERTINENCE (Cohere) = celui qui détermine le classement,
@@ -4543,7 +4577,11 @@ function PrismaSection({ scenarioId }: { scenarioId: string }) {
             )}
             {ident.figures_from === "search_run" && (
               <>
-                <PrismaRow label={t("scenarioDetail.prisma.removedNoAbstract")} value={num(ident.removed_no_abstract)} />
+                {/* Les notices sans résumé ne sont plus retirées : la ligne ne reste que
+                    pour des chiffres enregistrés avant (elle y porte un nombre). */}
+                {num(ident.removed_no_abstract) > 0 && (
+                  <PrismaRow label={t("scenarioDetail.prisma.removedNoAbstract")} value={num(ident.removed_no_abstract)} />
+                )}
                 {/* Une recherche sans préprints : un critère d'éligibilité appliqué par
                     l'outil, sur sa propre ligne (PRISMA 2020). */}
                 {ident.preprints_excluded && (
@@ -4563,6 +4601,11 @@ function PrismaSection({ scenarioId }: { scenarioId: string }) {
                   <PrismaRow label={t("scenarioDetail.prisma.removedAfterSearch")} value={`−${num(ident.removed_after_search).toLocaleString()}`} accent="text-amber-300" />
                 )}
                 <PrismaRow label={t("scenarioDetail.prisma.recordsScreened")} value={num(ident.records_screened)} accent="text-emerald-300" />
+                {/* Gardées SANS résumé : elles passent au screening (comptées ci-dessus),
+                    jugées sur leur titre par un relecteur, jamais pertinentes sur un score. */}
+                {num(ident.kept_no_abstract) > 0 && (
+                  <PrismaRow label={t("scenarioDetail.prisma.keptNoAbstract")} value={num(ident.kept_no_abstract)} />
+                )}
               </>
             )}
             <PrismaRow label={t("scenarioDetail.prisma.embeddedSearchable")} value={num(ident.embedded)} />
@@ -4660,6 +4703,25 @@ function PrismaSection({ scenarioId }: { scenarioId: string }) {
                 .replace("{n}", String(parts.length))}
             </p>
           ))}
+          {/* Les facettes OU d'une recherche multi-facettes trop longues pour être
+              fédérées : aucune base ne les a reçues, la bibliothèque locale seule. */}
+          {(ident.facets_skipped?.length ?? 0) > 0 && (
+            <p className="text-[10px] text-amber-300/80 pt-1 leading-relaxed break-words">
+              {t("scenarioDetail.prisma.facetsSkipped")}
+              {(ident.facets_skipped ?? []).map((f, i) => (
+                <span key={i} className="block">
+                  · {f.length > 160 ? `${f.slice(0, 160)}…` : f}
+                </span>
+              ))}
+            </p>
+          )}
+          {/* La correspondance locale a atteint sa borne de lignes : le corpus peut en
+              manquer, et la carte le dit plutôt qu'un total qui se lirait complet. */}
+          {ident.local_match_capped && (
+            <p className="text-[10px] text-amber-300/80 pt-1 leading-relaxed">
+              {t("scenarioDetail.prisma.localMatchCapped")}
+            </p>
+          )}
           {/* L'exclusion des préprints et ses trois moyens, à citer dans une section
               Méthodes : serveurs non interrogés, exclusion dans la requête, retrait. */}
           {ident.preprints_excluded && (
@@ -4728,6 +4790,11 @@ function PrismaSection({ scenarioId }: { scenarioId: string }) {
             </div>
           </div>
           <div className="space-y-1">
+            {/* Les notices sans résumé ne passent pas par le seuil : ni au-dessus ni
+                au-dessous, elles attendent un relecteur qui les juge sur leur titre. */}
+            {num(sem.no_abstract) > 0 && (
+              <PrismaRow label={t("scenarioDetail.prisma.noAbstractByTitle")} value={num(sem.no_abstract)} accent="text-amber-300" />
+            )}
             <PrismaRow label={t("scenarioDetail.prisma.similarityThreshold")} value={`≥ ${(num(sem.threshold) * 100).toFixed(0)}%`} />
             {/* Le second seuil, quand il est posé : il retire des articles de l'ensemble de
                 preuves, et l'étape 4 contredisait l'étape 2 sans que rien ne dise pourquoi. */}

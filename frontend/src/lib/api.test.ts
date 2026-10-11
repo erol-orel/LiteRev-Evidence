@@ -197,6 +197,34 @@ describe("calls that start server-side work carry the interface language", () =>
     expect(urls[1]).toBe("/api/user-scenarios/usr-abc/pipeline?max_results=500&lang=en");
     expect(urls[2]).toBe("/api/user-scenarios/usr-abc/populate?max_results=2000&include_live=true&lang=en");
   });
+
+  it("sends the search mode and leaves the per-source cap to the server", async () => {
+    localStorage.setItem("literev-lang", "en");
+    setApiKey("secret");
+    const fetchMock = stubFetch(reply(200, {}), reply(200, {}), reply(200, {}), reply(200, {}));
+    // What the search screen sends: the mode chosen, never a cap of its own.
+    await populateUserScenario("usr-abc", { includeLive: true, excludePreprints: false, exhaustive: true });
+    await populateUserScenario("usr-abc", { includeLive: false, exhaustive: false });
+    // A pipeline started without a cap: the server applies LIVE_MAX_PER_SOURCE, as the
+    // search does. The old default sent max_results=100000.
+    await startUserScenarioPipeline("usr-abc");
+    await startUserScenarioPipeline("usr-abc", undefined, { exhaustive: true });
+    const urls = fetchMock.mock.calls.map((c) => String(c[0]));
+    expect(urls[0]).toBe("/api/user-scenarios/usr-abc/populate?include_live=true&lang=en&exhaustive=true&exclude_preprints=false");
+    expect(urls[1]).toBe("/api/user-scenarios/usr-abc/populate?include_live=false&lang=en&exhaustive=false");
+    expect(urls[2]).toBe("/api/user-scenarios/usr-abc/pipeline?lang=en");
+    expect(urls[3]).toBe("/api/user-scenarios/usr-abc/pipeline?lang=en&exhaustive=true");
+    for (const u of urls) expect(u).not.toContain("max_results");
+  });
+
+  it("keeps the scenario's recorded mode when none is given", async () => {
+    localStorage.setItem("literev-lang", "fr");
+    const fetchMock = stubFetch(reply(200, {}));
+    await populateUserScenario("usr-abc");
+    const url = String(fetchMock.mock.calls[0][0]);
+    expect(url).toBe("/api/user-scenarios/usr-abc/populate?include_live=true&lang=fr");
+    expect(url).not.toContain("exhaustive");
+  });
 });
 
 describe("scenario endpoints", () => {
@@ -205,6 +233,14 @@ describe("scenario endpoints", () => {
     await fetchScenarioCorpus("usr-abc", { limit: 200, abstractChars: 600, threshold: 0.42, fulltextOnly: true });
     expect(fetchMock.mock.calls[0][0])
       .toBe("/api/user-scenarios/usr-abc/corpus?limit=200&fulltext_only=true&threshold=0.42&abstract_chars=600");
+  });
+
+  it("lists the records kept without an abstract on request", async () => {
+    const fetchMock = stubFetch(reply(200, { articles: [], total: 0 }), reply(200, { articles: [], total: 0 }));
+    await fetchScenarioCorpus("usr-abc", { limit: 100, noAbstract: true });
+    expect(fetchMock.mock.calls[0][0]).toBe("/api/user-scenarios/usr-abc/corpus?limit=100&no_abstract=true");
+    await fetchScenarioCorpus("usr-abc", { limit: 100, noAbstract: false });
+    expect(fetchMock.mock.calls[1][0]).toBe("/api/user-scenarios/usr-abc/corpus?limit=100");
   });
 
   it("exports the relevant articles as a named file", async () => {

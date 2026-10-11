@@ -31,7 +31,7 @@ def _seed(db_conn, n_relevant=6):
         for i in range(8100, 8104):
             cur.execute("INSERT INTO literature_document (id, title, abstract, year, country, journal, "
                         "study_design, quality_score, citation_count, source, project_context) VALUES "
-                        "(%s,%s,'abstract',2024,'IT','Eurosurveillance','Cohort',0.8,10,'pubmed','literev')",
+                        "(%s,%s,'A seeded abstract, long enough to count.',2024,'IT','Eurosurveillance','Cohort',0.8,10,'pubmed','literev')",
                         (i, f"Relevant article {i}"))
             cur.execute("INSERT INTO article_scenarios (document_id, scenario_id, similarity_score) "
                         "VALUES (%s,%s,0.80)", (i, SID))
@@ -39,17 +39,17 @@ def _seed(db_conn, n_relevant=6):
                     (pico, concepts))
         # below threshold, NOT relevant
         cur.execute("INSERT INTO literature_document (id, title, abstract, year, source, project_context, "
-                    "quality_score) VALUES (8110,'Below threshold','a',2020,'pubmed','literev',0.5)")
+                    "quality_score) VALUES (8110,'Below threshold','A seeded abstract, long enough to count.',2020,'pubmed','literev',0.5)")
         cur.execute("INSERT INTO article_scenarios (document_id, scenario_id, similarity_score) "
                     "VALUES (8110,%s,0.10)", (SID,))
         # below threshold but INCLUDED by a reviewer: relevant
         cur.execute("INSERT INTO literature_document (id, title, abstract, year, source, project_context, "
-                    "quality_score) VALUES (8111,'Hand picked','a',2019,'pubmed','literev',0.5)")
+                    "quality_score) VALUES (8111,'Hand picked','A seeded abstract, long enough to count.',2019,'pubmed','literev',0.5)")
         cur.execute("INSERT INTO article_scenarios (document_id, scenario_id, similarity_score, screening_status) "
                     "VALUES (8111,%s,0.10,'included')", (SID,))
         # above threshold but EXCLUDED by a reviewer: not relevant
         cur.execute("INSERT INTO literature_document (id, title, abstract, year, source, project_context, "
-                    "quality_score) VALUES (8112,'Thrown out','a',2024,'pubmed','literev',0.9)")
+                    "quality_score) VALUES (8112,'Thrown out','A seeded abstract, long enough to count.',2024,'pubmed','literev',0.9)")
         cur.execute("INSERT INTO article_scenarios (document_id, scenario_id, similarity_score, screening_status) "
                     "VALUES (8112,%s,0.95,'excluded')", (SID,))
 

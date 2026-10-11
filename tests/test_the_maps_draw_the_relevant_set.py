@@ -83,7 +83,7 @@ def corpus(db_conn):
         *[(i, f"Reranked {i}", long_abstract, 0.50, 0.27 + i / 100, None, False, "literev")
           for i in RERANKED],
         (13, "Another project context", long_abstract, 0.80, 0.95, None, False, "gesica"),
-        (14, "Relevant, no usable abstract", "tiny", 0.70, None, None, False, "literev"),
+        (14, "Relevant, no usable abstract", "an abstract too short for the map", 0.70, None, None, False, "literev"),
         (15, "Below the threshold", long_abstract, 0.20, None, None, False, "literev"),
         (16, "Excluded by a reviewer", long_abstract, 0.99, 0.99, "excluded", False, "literev"),
         (17, "A duplicate", long_abstract, 0.99, 0.99, None, True, "literev"),

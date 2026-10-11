@@ -109,11 +109,11 @@ def seeded(db_conn):
             "VALUES (%s, 'Rerank', 'hpai', 'boolean', '{}')", (SID,))
         cur.execute(
             "INSERT INTO literature_document (id, title, abstract) VALUES "
-            "(1, 'On topic, reranked high', 'abstract one long enough'),"
-            "(2, 'Off topic, similar but reranked low', 'abstract two long enough'),"
-            "(3, 'Never reranked yet', 'abstract three long enough'),"
-            "(4, 'Below the similarity threshold', 'abstract four long enough'),"
-            "(5, 'Reranked low but included by hand', 'abstract five long enough')")
+            "(1, 'On topic, reranked high', 'abstract one, long enough to count'),"
+            "(2, 'Off topic, similar but reranked low', 'abstract two, long enough to count'),"
+            "(3, 'Never reranked yet', 'abstract three, long enough to count'),"
+            "(4, 'Below the similarity threshold', 'abstract four, long enough to count'),"
+            "(5, 'Reranked low but included by hand', 'abstract five, long enough to count')")
         # 2 a une similarité PLUS HAUTE que 1 : c'est la situation réelle du corpus HPAI.
         cur.execute(
             "INSERT INTO article_scenarios (scenario_id, document_id, similarity_score,"

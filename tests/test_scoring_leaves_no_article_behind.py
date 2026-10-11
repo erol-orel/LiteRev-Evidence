@@ -139,7 +139,9 @@ def test_the_fallback_has_no_ceiling_any_more(corpus, monkeypatch):
     rep: dict = {}
     n = R._run_semantic_rerank_inline(SID, "avian influenza", report=rep)
     assert len(calls) == 203 and n == 203 and _unscored(conn) == 0
-    assert rep["fallback"] == 203 and rep["unscored"] == 1   # the article with no text at all
+    # The record with no text at all is no longer "waiting for a score": without an abstract
+    # it enters only by a reviewer's hand, so it is not counted as unscored.
+    assert rep["fallback"] == 203 and rep["unscored"] == 0
     assert rep["retryable"] == 0
 
 
@@ -169,7 +171,7 @@ def test_three_failed_batches_in_a_row_stop_the_fallback_and_say_so(corpus, monk
     R._run_semantic_rerank_inline(SID, "avian influenza", report=rep)
     assert len(calls) == R._FALLBACK_MAX_STALLED == 3
     assert rep["partial"] is True and rep["partial_reason"] == "failures"
-    assert rep["unscored"] == 51 and rep["retryable"] == 50 and _unscored(conn) == 50
+    assert rep["unscored"] == 50 and rep["retryable"] == 50 and _unscored(conn) == 50
     # ... and the automatic scoring is re-armed rather than left for a restart.
     assert scheduled and scheduled[-1][0] == SID
 
@@ -187,7 +189,7 @@ def test_the_cooldown_ends_the_pass_partial_and_rearms_after_it(corpus, monkeypa
     assert calls == [], "the fallback ran during the cooldown"
     assert rep["partial"] is True and rep["partial_reason"] == "cooldown"
     assert 100 <= rep["retry_after_s"] <= 121
-    assert rep["unscored"] == 9 and _unscored(conn) == 8
+    assert rep["unscored"] == 8 and _unscored(conn) == 8
     assert scheduled and scheduled[-1][1] >= rep["retry_after_s"], "the retry comes before the end of the pause"
     assert R._rerank_final_entry(0, {}, rep)["status"] == "partial"
 
@@ -313,5 +315,6 @@ def test_the_unscored_count_is_the_articles_waiting_to_enter(corpus):
         cur.execute("UPDATE article_scenarios SET screening_status = 'excluded' WHERE document_id = 2")
         cur.execute("UPDATE article_scenarios SET screening_status = 'included' WHERE document_id = 3")
     from api.scenario_store import scenario_unscored_count
-    assert scenario_unscored_count(SID) == 2           # article 4 and the one without text
-    assert main.threshold_provenance(SID) == {"threshold_chosen": False, "unscored": 2}
+    # Article 4 only: the record without text waits for a reviewer, not for a score.
+    assert scenario_unscored_count(SID) == 1
+    assert main.threshold_provenance(SID) == {"threshold_chosen": False, "unscored": 1}

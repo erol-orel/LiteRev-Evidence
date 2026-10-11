@@ -284,3 +284,74 @@ def test_the_search_log_line_names_the_engine(corpus, caplog):
     with caplog.at_level(logging.INFO, logger="literev-api"):
         _search("influenza")
     assert re.search(r"lexical search \[fts\] 1 docs in \d+ ms", caplog.text), caplog.text
+
+
+# ── la ponctuation dans un terme sépare des mots, des deux côtés ─────────────
+# « 2.3.4.4b » (dans la requête HPAI_last, `"2.3.4.4b"[tiab]`) devenait « 2344b »,
+# « A(H5N1) » et « A/H5N1 » « ah5n1 », « PM2.5 » « pm25 » : des formes qu'aucun document
+# ne contient, envoyées telles quelles aux bases. La ponctuation sépare désormais deux mots,
+# dans le terme comme dans le texte, sur les deux moteurs.
+
+PUNCT = {
+    6: ("Influenza A(H5N1) in dairy cattle", "Clade 2.3.4.4b viruses spread among dairy herds in 2024."),
+    7: ("A/H5N1 surveillance in wild birds", None),           # sans résumé : le titre suffit
+    8: ("Fine particles and asthma", "Daily PM2.5 exposure and asthma admissions in children."),
+    9: ("Older lineages", "Clade 2.3.4.4 viruses in Asia, a review of older lineages."),
+    10: ("Human cases", "Human infections with H5N1 reported to the WHO since 2003."),
+}
+
+
+@pytest.mark.parametrize("engine", ["like", "fts"])
+def test_punctuation_inside_a_term_separates_words_on_both_sides(corpus, monkeypatch, engine):
+    with corpus.cursor() as cur:
+        for i, (title, abstract) in PUNCT.items():
+            cur.execute("INSERT INTO literature_document (id, title, abstract, year) VALUES (%s, %s, %s, 2024)",
+                        (i, title, abstract))
+    if engine == "like":
+        monkeypatch.setenv("LEXICAL_SEARCH_ENGINE", "like")
+    else:
+        lex.refresh_once()
+        _reset_state()
+    assert lex.use_fts() is (engine == "fts")
+    assert {6, 7, 10} <= _search("H5N1")
+    # Le plein texte ignore le mot vide « a » : il rend aussi le 10 ; le LIKE, non.
+    assert {6, 7} <= _search('"A(H5N1)"') and {6, 7} <= _search('"A/H5N1"')
+    assert _search('"2.3.4.4b"') == {6}, "le 2.3.4.4 du document 9 n'est pas 2.3.4.4b"
+    assert _search('"PM2.5"') == {8} == _search("PM2.5")
+
+
+def test_python_and_postgres_separate_the_same_way(corpus):
+    for s in ("Influenza A(H5N1)", "A/H5N1", "2.3.4.4b", "PM2.5", "SARS-CoV-2", " (x) ", "a.b,c;d:e!f?g"):
+        with corpus.cursor() as cur:
+            cur.execute("SELECT literev_separate(%s)", (s,))
+            assert cur.fetchone()[0] == lex.separate(s), s
+
+
+def test_each_database_gets_a_form_it_matches():
+    """Une phrase entre guillemets qui garde le point DANS un mot là où l'API le lit comme
+    un seul mot (OpenAlex, DOAJ, CORE, ClinicalTrials.gov, OpenAIRE, arXiv, Semantic
+    Scholar), une espace pour le reste ; la requête telle que saisie pour Europe PMC et
+    PubMed, qui apparient la phrase eux-mêmes ; les mots séparés pour la base locale."""
+    from api.sources import epmc_query
+    q = '"2.3.4.4b" OR "A(H5N1)" OR "A/H5N1" OR "PM2.5" OR H5N1'
+    assert main._tokenize_boolean('"2.3.4.4b" "A/H5N1" PM2.5') == [
+        ("TERM", "2 3 4 4b"), ("TERM", "a h5n1"), ("TERM", "pm2 5")]
+    assert main._clean_boolean(q) == 'h5n1 OR "a h5n1" OR "pm2.5" OR "2.3.4.4b"'
+    assert main._shorten_boolean(q, 1800, max_operators=4) == 'h5n1 OR "a h5n1" OR "pm2.5" OR "2.3.4.4b"'
+    assert main._boolean_to_arxiv(_ast(q)) == (
+        '(all:"2.3.4.4b" OR all:"a h5n1" OR all:"a h5n1" OR all:"pm2.5" OR all:"h5n1")')
+    assert main._boolean_to_s2(_ast(q)) == '("2.3.4.4b" | "a h5n1" | "a h5n1" | "pm2.5" | h5n1)'
+    assert epmc_query('"2.3.4.4b"[tiab] AND "A(H5N1)"[tiab]') == '"2.3.4.4b" AND "A(H5N1)"'
+    params: dict = {}
+    main._build_boolean_match_sql_from_query('"2.3.4.4b"', params)
+    assert params["bq_0"] == "%2 3 4 4b%" and params["bq_0_w"] == "%2%3%4%4b%"
+    params = {}
+    lex.ast_to_tsquery_sql(_ast('"2.3.4.4b" AND "PM2.5"'), params)
+    assert params == {"tq_0": "2 3 4 4b", "tq_1": "pm2 5"}
+    # Les accents, les chiffres, le trait d'union, '_' et l'étoile finale restent.
+    assert main._tokenize_boolean("SARS-CoV-2 cathéters forecast*") == [
+        ("TERM", "sars-cov-2"), ("TERM", "cathéters"), ("TERM", "forecast*")]
+    # Des guillemets courbes ou français, collés depuis un traitement de texte, séparent
+    # aussi : ils ne restent pas accrochés au mot.
+    assert main._tokenize_boolean("“avian influenza” AND «h5n1»") == [
+        ("TERM", "avian"), ("TERM", "influenza"), ("AND", None), ("TERM", "h5n1")]

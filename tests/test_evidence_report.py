@@ -273,7 +273,8 @@ def _seed(db_conn, with_brief=True):
                     "ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name", (SID,))
         cur.execute("INSERT INTO literature_document (id, title, abstract, year, journal, "
                     "authors, doi, study_design, source, project_context, quality_score) VALUES "
-                    "(8400,'Seeded trial','a',2022,'Lancet','Smith J','10.1/x','RCT','pubmed','literev',0.9)")
+                    "(8400,'Seeded trial','A seeded abstract, long enough to count.',2022,'Lancet','Smith J',"
+                    "'10.1/x','RCT','pubmed','literev',0.9)")
         cur.execute("INSERT INTO article_scenarios (document_id, scenario_id, similarity_score) "
                     "VALUES (8400,%s,0.9)", (SID,))
         if with_brief:

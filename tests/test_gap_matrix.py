@@ -121,7 +121,8 @@ def _seed(db_conn):
         ]
         for doc_id, concepts, score, status in rows:
             cur.execute("INSERT INTO literature_document (id, title, abstract, year, source, "
-                        "project_context, quality_score) VALUES (%s,%s,'a',2024,'pubmed','literev',0.8)",
+                        "project_context, quality_score) VALUES "
+                        "(%s,%s,'A seeded abstract, long enough to count.',2024,'pubmed','literev',0.8)",
                         (doc_id, f"Article {doc_id}"))
             if concepts:
                 cur.execute("UPDATE literature_document SET concepts_json = %s WHERE id = %s",

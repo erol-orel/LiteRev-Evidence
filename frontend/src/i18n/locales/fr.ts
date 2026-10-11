@@ -314,6 +314,13 @@ export const fr = {
     excludePreprints: "Exclure les préprints",
     excludePreprintsHint:
       "Les serveurs de préprints ne sont pas interrogés, PubMed et Europe PMC les excluent dans la requête, et ceux que rendent les autres bases sont retirés avant le screening (dit sur la carte PRISMA)",
+    depthLabel: "Profondeur de la recherche",
+    depthExhaustive: "Recherche exhaustive",
+    depthExhaustiveHint: "Toutes les notices que chaque base apparie, jusqu'à 20 000 par base : plus long",
+    depthStandard: "Recherche standard",
+    depthStandardHint: "Les 2 000 notices les plus pertinentes de chaque base : plus rapide",
+    strategyTruncated:
+      "La stratégie booléenne rédigée par le modèle a été coupée à son plafond : la recherche utilise la requête telle que saisie.",
     addSubQuery: "Ajouter une sous-requête",
     combineHint: "La requête principale ci-dessus est combinée avec ces sous-requêtes :",
     combinator: "Combiner par",
@@ -663,6 +670,9 @@ export const fr = {
       belowThresholdKept: "sous le seuil (conservés)",
       unscored: "non scorés",
       scoringInProgress: " · scoring en cours…",
+      noAbstractChip: "Sans résumé ({n}) : à juger sur leur titre",
+      noAbstractHint:
+        "Ces notices restent au corpus mais ne sont jamais pertinentes sur leur score : un relecteur les juge sur leur titre. Cliquer pour ne lister qu'elles.",
       fromLocalTooltip:
         "Le corpus combine les correspondances de la base locale partagée (déjà ingérées) et les nouvelles références récupérées en direct. Estimation d'après la date d'entrée des documents en base (≥ création du scénario = récupérés pour ce scénario).",
       alreadyInLocal: "déjà en base locale",
@@ -684,6 +694,8 @@ export const fr = {
     },
     articleRow: {
       fulltext: "Texte intégral",
+      noAbstract: "Sans résumé",
+      noAbstractTooltip: "Aucun résumé : à juger sur le titre, jamais retenue sur un score",
       rerankTooltip:
         "Pertinence (reranking Cohere) - c'est ce score qui ordonne les articles",
       similarityTooltip: "Similarité sémantique (cosinus)",
@@ -841,7 +853,9 @@ export const fr = {
       cappedNoteExhaustive: "Limite atteinte pour {sources} : ces bases annoncent plus d'enregistrements que ceux rapatriés.",
       unrankedNote: "{sources} rend les correspondances booléennes dans l'ordre des identifiants, pas par pertinence : le lot gardé est un sous-ensemble arbitraire de ses correspondances, pas les plus pertinentes.",
       titleAbstractNote: "{sources} : toutes les correspondances sur titre et résumé, plus les plus pertinentes de sa recherche par défaut, qui lit aussi le texte intégral (comme en recherche standard).",
-      splitNote: "{source} : la stratégie entière, découpée en {n} requêtes (son API ne pagine pas une requête longue).",
+      splitNote: "{source} : la stratégie entière, découpée en {n} requêtes dont l'union est la stratégie (trop longue, ou trop riche en opérateurs, pour son API en une seule requête).",
+      facetsSkipped: "Facettes OU non fédérées : trop longues pour être ajoutées à la requête des bases, elles n'ont été cherchées que dans la bibliothèque locale.",
+      localMatchCapped: "La correspondance dans la bibliothèque locale a atteint sa limite de lignes : le corpus peut manquer des correspondances, qu'une requête plus étroite retrouverait.",
       exhaustiveCap: "recherche exhaustive : toutes les notices appariées par chaque base, jusqu'à {cap} par base ; Crossref, qui classe des mots-clés, a gardé ses {crossrefCap} plus pertinentes",
       outcome: {
         ok: "a répondu",
@@ -858,6 +872,8 @@ export const fr = {
       duplicatesRemoved: "Doublons retirés",
       uniqueRecords: "Enregistrements uniques",
       removedNoAbstract: "Retirés : sans résumé",
+      keptNoAbstract: "dont gardés sans résumé, jugés sur leur titre par un relecteur",
+      noAbstractByTitle: "Sans résumé → hors seuil, jugés sur leur titre",
       removedPreprints: "Retirés : préprints (recherche sans préprints)",
       preprintsExcluded: "Recherche sans préprints (critère d'exclusion) :",
       preprintsNotSearched: "serveurs de préprints non interrogés : {sources}",

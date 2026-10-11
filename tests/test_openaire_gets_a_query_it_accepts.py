@@ -112,8 +112,19 @@ def test_the_populate_gives_openaire_its_own_query_and_never_trusts_it_as_native
     assert any("_shorten_boolean(" in v and "max_operators=OPENAIRE_MAX_OPERATORS" in v
                for v in assigned.get("_openaire_q", [])), assigned.get("_openaire_q")
     assert any(v == "_openaire_q" for v in assigned.get("_oa_q", [])), assigned.get("_oa_q")
-    assert all(v == "False" for v in assigned.get("_oa_native", [])), (
-        "une requête réduite n'est jamais « native » : ses notices doivent être ré-appariées")
+    assert "False" in assigned.get("_oa_native", []), assigned.get("_oa_native")
+    # Une requête RÉDUITE n'est jamais « native » : ses notices doivent être ré-appariées.
+    # Seul le booléen ENTIER découpé en morceaux de quatre opérateurs (recherche
+    # exhaustive), dont l'union est le booléen, l'est : sous `if _openaire_parts`, et là
+    # seulement.
+    guarded = {id(s) for n in ast.walk(tree)
+               if isinstance(n, ast.If) and ast.unparse(n.test) == "_openaire_parts"
+               for s in ast.walk(n) if isinstance(s, ast.Assign)}
+    for n in ast.walk(tree):
+        if isinstance(n, ast.Assign) and any(
+                isinstance(t, ast.Name) and t.id == "_oa_native" for t in n.targets):
+            assert ast.unparse(n.value) == "False" or id(n) in guarded, (
+                "une requête réduite n'est jamais « native » : ses notices doivent être ré-appariées")
     assert any("openaire" in v for v in assigned.get("_kw_fallback", [])), (
         "OpenAIRE reçoit une requête réduite : la carte doit la nommer")
     # Et ce qu'elle a reçu est écrit dans le dictionnaire par source que la carte lit.

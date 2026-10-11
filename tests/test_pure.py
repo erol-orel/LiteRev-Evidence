@@ -243,10 +243,19 @@ def test_or_facets_widen_the_live_federation_queries():
 
 
 def test_or_facets_are_skipped_when_the_query_would_exceed_the_url_budget():
-    long_facet = "x" * 1300
+    # The bound is the boolean that Europe PMC and Semantic Scholar receive whole in a GET;
+    # the URL-limited sources shorten or split their own form, PubMed posts. A facet that
+    # still does not fit is named, not only logged.
+    long_facet = "x" * (main.FACET_WIDEN_MAX_CHARS + 100)
+    skipped: list = []
     b, p, n = main._widen_boolean_for_or_facets("A", "A", [{"text": "A"}, {"kind": "boolean", "text": long_facet, "op": "or"}],
-                                                "union")
+                                                "union", skipped=skipped)
     assert (b, p, n) == ("A", "A", 0)
+    assert skipped == [long_facet]
+    # 1 300 characters used to be dropped (the old URL bound); they are federated now.
+    b, p, n = main._widen_boolean_for_or_facets("A", "A", [{"text": "A"}, {"kind": "boolean", "text": "y" * 1300, "op": "or"}],
+                                                "union")
+    assert n == 1 and p == "(A) OR (" + "y" * 1300 + ")"
     # translation failure → raw text is used, never an exception
     def _boom(q):
         raise RuntimeError("no LLM")

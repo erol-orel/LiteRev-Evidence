@@ -62,11 +62,11 @@ def seeded(db_conn):
         # 1 et 2 pertinents et avec PICO, 3 pertinent sans PICO, 4 et 5 sous le seuil.
         cur.execute(
             "INSERT INTO literature_document (id, title, abstract, pico_json) VALUES "
-            "(1, 'A', 'abstract one long enough', '{\"P\": \"x\"}'),"
-            "(2, 'B', 'abstract two long enough', '{\"P\": \"y\"}'),"
-            "(3, 'C', 'abstract three long enough', NULL),"
-            "(4, 'D', 'abstract four long enough', NULL),"
-            "(5, 'E', 'abstract five long enough', NULL)")
+            "(1, 'A', 'abstract one, long enough to count', '{\"P\": \"x\"}'),"
+            "(2, 'B', 'abstract two, long enough to count', '{\"P\": \"y\"}'),"
+            "(3, 'C', 'abstract three, long enough to count', NULL),"
+            "(4, 'D', 'abstract four, long enough to count', NULL),"
+            "(5, 'E', 'abstract five, long enough to count', NULL)")
         cur.execute(
             "INSERT INTO article_scenarios (scenario_id, document_id, similarity_score,"
             " reviewer_1_status, reviewer_2_status) VALUES "
