@@ -44,6 +44,8 @@ import {
   fetchSearchStrategy,
   type SearchStrategy,
   populateUserScenario,
+  fetchSearchLimits,
+  type SearchLimits,
   fetchUserScenarioPopulateStatus,
   fetchScenarioCorpus,
   type CorpusArticle,
@@ -2020,9 +2022,20 @@ export default function App() {
   // Recherche sans préprints : enregistrée dans les filtres du scénario par le serveur.
   const [excludePreprints, setExcludePreprints] = useState(false);
   // Le mode de la recherche, enregistré sur le scénario par le serveur. Exhaustive par
-  // défaut : toutes les notices que chaque base apparie (jusqu'à 20 000 par base) ;
-  // standard : les 2 000 plus pertinentes par base, plus vite.
+  // défaut : toutes les notices que chaque base apparie ; standard : les plus pertinentes
+  // de chaque base, plus vite.
   const [exhaustiveSearch, setExhaustiveSearch] = useState(true);
+  // Les plafonds de ces deux modes viennent de l'environnement du serveur (la production
+  // lève celui du standard à 100 000) : l'écran les lit au lieu d'écrire 2 000 et 20 000.
+  // Les défauts du serveur tant qu'il n'a pas répondu.
+  const [searchLimits, setSearchLimits] = useState<SearchLimits>({
+    standard_per_source: 2000, exhaustive_per_source: 20000, ranked_per_source: 2000,
+  });
+  useEffect(() => {
+    let alive = true;
+    fetchSearchLimits().then((l) => { if (alive && l) setSearchLimits(l); });
+    return () => { alive = false; };
+  }, []);
   const [query, setQuery] = useState("");
   // Type de la requête principale : "auto" (détecté) par défaut, comme les sous-requêtes ;
   // cliquable pour forcer. Remplace l'ancien toggle mode (défaut "boolean") qui traitait
@@ -3211,7 +3224,13 @@ export default function App() {
                       <span>
                         <span>{t(ex ? "search.depthExhaustive" : "search.depthStandard")}</span>
                         <span className="block text-forest-500 mt-0.5">
-                          {t(ex ? "search.depthExhaustiveHint" : "search.depthStandardHint")}
+                          {ex
+                            ? t("search.depthExhaustiveHint")
+                                .replace("{n}", searchLimits.exhaustive_per_source.toLocaleString())
+                            : t(searchLimits.ranked_per_source < searchLimits.standard_per_source
+                                  ? "search.depthStandardHintRanked" : "search.depthStandardHint")
+                                .replace("{n}", searchLimits.standard_per_source.toLocaleString())
+                                .replace("{ranked}", searchLimits.ranked_per_source.toLocaleString())}
                         </span>
                       </span>
                     </label>

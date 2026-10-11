@@ -44,6 +44,7 @@ KEY=$(tr '\0' '\n' < /proc/$PID/environ | sed -n 's/^WRITE_API_KEY=//p')
 |--------|------|------|---------|
 | GET | `/health` | open | liveness (`{"status":"ok"}`) |
 | GET | `/sources/health?query=cardiac%20arrest&timeout=12` | open | per-source live probe (status, latency, count) - diagnose slow/broken sources |
+| GET | `/search/limits` | open | the per-source caps this server applies (standard, exhaustive, relevance-ranked passes), as the search screen states them |
 | GET | `/corpus/stats` | open | global corpus counts |
 | GET | `/corpus/fulltext-stats` | open | full-text vs abstract-only breakdown |
 | GET | `/enrichment/status` | open | PICO / metadata / full-text backfill progress |

@@ -17,7 +17,8 @@ from .core import RELIEFWEB_APPNAME, app, engine, logger, require_api_key
 from .documents import _normalize_doi, _normalize_title, sanitize_db_text
 from .scenario_store import (_get_scenario_threshold, _get_user_scenario_or_404,
                              has_abstract_sql, relevant_gate_tail_sql)
-from .search import LIVE_MAX_PER_SOURCE, _plain_keywords, _strip_field_tags
+from .search import (EXHAUSTIVE_MAX_PER_SOURCE, LIVE_MAX_PER_SOURCE, RANKED_PASS_MAX,
+                     _plain_keywords, _strip_field_tags)
 from llm_usage import model_for as _model
 
 
@@ -687,6 +688,25 @@ def search_live(
         "source_raw_counts": raw_counts,
         "source_status": source_status,
         "ingesting_background": ingesting_background,
+    }
+
+
+@app.get("/search/limits")
+def search_limits() -> dict[str, Any]:
+    """Les plafonds par source qu'applique CE serveur, pour l'écran de recherche.
+
+    L'écran les écrivait en dur (« les 2 000 plus pertinentes », « jusqu'à 20 000 ») alors
+    qu'ils viennent de l'environnement : la production règle LIVE_MAX_PER_SOURCE à
+    100 000, et l'écran annonçait 2 000. Mêmes formules que `_run_user_scenario_populate`
+    pour une recherche lancée de l'écran (sans `max_results`, donc LIVE_MAX_PER_SOURCE) :
+    ce que la carte PRISMA dira après la recherche. Lecture seule, aucune clé requise.
+    """
+    standard = int(LIVE_MAX_PER_SOURCE)
+    return {
+        "standard_per_source": standard,
+        "exhaustive_per_source": max(standard, int(EXHAUSTIVE_MAX_PER_SOURCE)),
+        # Crossref et le passage en texte intégral d'OpenAlex, classés par pertinence.
+        "ranked_per_source": max(1, min(standard, int(RANKED_PASS_MAX))),
     }
 
 

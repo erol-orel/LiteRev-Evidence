@@ -982,6 +982,19 @@ try:
 except (TypeError, ValueError):
     LIVE_MAX_PER_SOURCE = 2000
 
+# Le plafond des passages CLASSÉS PAR PERTINENCE : Crossref, qui ne cherche que des
+# mots-clés (2,6 millions de réponses sur la question HPAI, une queue de bruit), et le
+# passage « meilleures correspondances en texte intégral » d'OpenAlex. Il ne suit PAS
+# LIVE_MAX_PER_SOURCE : mis très haut pour lever le plafond d'une recherche standard, ce
+# dernier faisait paginer ces deux passages jusqu'au refus de l'API (400 au-delà de
+# 10 000 résultats paginés par décalage ou par numéro de page), et le passage d'OpenAlex
+# versait au corpus des milliers d'articles qui ne répondent au booléen que dans leur
+# texte intégral. Jamais au-delà de 10 000, la borne de ces API.
+try:
+    RANKED_PASS_MAX = max(1, min(int(os.getenv("RANKED_PASS_MAX", "2000")), 10000))
+except (TypeError, ValueError):
+    RANKED_PASS_MAX = 2000
+
 # Le plafond d'une recherche EXHAUSTIVE, par base appariant le booléen. Ce n'est pas un
 # échantillon : c'est un garde-fou, assez haut pour qu'aucune base ne soit coupée sur une
 # question de revue (Europe PMC rend 13 810 notices sur la question HPAI, toutes

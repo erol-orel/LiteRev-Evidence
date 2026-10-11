@@ -115,9 +115,35 @@ def test_the_screen_offers_both_depths_and_sends_the_one_chosen():
     api_ts = (ROOT / "frontend" / "src" / "lib" / "api.ts").read_text(encoding="utf-8")
     assert "params.set('exhaustive'" in api_ts
     assert "maxResults = 100000" not in api_ts
+    # Les plafonds viennent du serveur (`/search/limits`), pas d'un 2 000 et d'un 20 000
+    # écrits dans les textes : la production lève le plafond standard à 100 000, et l'écran
+    # annonçait 2 000.
+    assert "fetchSearchLimits()" in app and "searchLimits.exhaustive_per_source" in app
+    assert "searchLimits.standard_per_source" in app and "searchLimits.ranked_per_source" in app
     for loc in ("fr", "en"):
         txt = (ROOT / "frontend" / "src" / "i18n" / "locales" / f"{loc}.ts").read_text(encoding="utf-8")
-        hint = next(line for line in txt.splitlines() if "depthExhaustiveHint:" in line)
-        assert "20" in hint and "000" in hint, hint
-        hint = next(line for line in txt.splitlines() if "depthStandardHint:" in line)
-        assert "2" in hint and "000" in hint, hint
+        for key, marks in (("depthExhaustiveHint", ("{n}",)), ("depthStandardHint", ("{n}",)),
+                           ("depthStandardHintRanked", ("{n}", "{ranked}", "Crossref", "OpenAlex"))):
+            hint = next(line for line in txt.splitlines() if f"{key}:" in line)
+            assert all(m in hint for m in marks), (loc, hint)
+            assert "000" not in hint, f"{loc}: un plafond écrit en dur ({hint})"
+
+
+@pytest.mark.parametrize("live,exhaustive,ranked,expected", [
+    # Les défauts : 2 000 en standard, 20 000 en exhaustif, 2 000 pour les passages classés.
+    (2000, 20000, 2000, (2000, 20000, 2000)),
+    # La production : LIVE_MAX_PER_SOURCE à 100 000 lève aussi le plafond exhaustif ; les
+    # passages classés gardent le leur.
+    (100000, 20000, 2000, (100000, 100000, 2000)),
+    # Un plafond standard plus bas que celui des passages classés les borne aussi.
+    (500, 20000, 2000, (500, 20000, 500)),
+])
+def test_the_server_says_which_caps_it_applies(monkeypatch, live, exhaustive, ranked, expected):
+    from api import sources as S
+    monkeypatch.setattr(S, "LIVE_MAX_PER_SOURCE", live)
+    monkeypatch.setattr(S, "EXHAUSTIVE_MAX_PER_SOURCE", exhaustive)
+    monkeypatch.setattr(S, "RANKED_PASS_MAX", ranked)
+    r = _client().get("/search/limits")
+    assert r.status_code == 200, r.text
+    j = r.json()
+    assert (j["standard_per_source"], j["exhaustive_per_source"], j["ranked_per_source"]) == expected, j

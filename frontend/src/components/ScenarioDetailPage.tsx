@@ -4469,6 +4469,12 @@ function PrismaSection({ scenarioId }: { scenarioId: string }) {
   };
   const outcomesKnown = ident.source_outcomes != null;
   const outcomes = ident.source_outcomes ?? {};
+  // Le plafond propre des passages classés par pertinence (Crossref, et OpenAlex en
+  // standard), quand il est sous le plafond commun : la production lève ce dernier à
+  // 100 000 et ces deux passages gardent leurs 2 000 plus pertinents.
+  const rankedCap = typeof ident.source_caps?.crossref === "number"
+    && ident.per_source_cap != null && ident.source_caps.crossref < ident.per_source_cap
+    ? ident.source_caps.crossref : null;
   const counts: Record<string, number> = {};
   for (const [key, v] of Object.entries(ident.by_source ?? {})) {
     const src = SOURCE_OF_RECORD_KEY[key] ?? key;
@@ -4672,8 +4678,7 @@ function PrismaSection({ scenarioId }: { scenarioId: string }) {
                   : "scenarioDetail.prisma.cappedNote")
                 .replace("{sources}", (ident.sources_capped ?? [])
                   .map((s) => `${SOURCE_LABELS_MAP[s] ?? s} (${num(counts[s]).toLocaleString()} / ${num(ident.source_totals?.[s]).toLocaleString()})`)
-                  .join(", "))
-                .replace("{cap}", (ident.per_source_cap ?? 0).toLocaleString())}
+                  .join(", "))}
             </p>
           )}
           {/* Une source dont l'ordre n'est pas la pertinence (Semantic Scholar, endpoint
@@ -4760,7 +4765,10 @@ function PrismaSection({ scenarioId }: { scenarioId: string }) {
                 ? t("scenarioDetail.prisma.exhaustiveCap")
                     .replace("{cap}", ident.per_source_cap.toLocaleString())
                     .replace("{crossrefCap}", (ident.source_caps?.crossref ?? ident.per_source_cap).toLocaleString())
-                : t("scenarioDetail.prisma.perSourceCap").replace("{cap}", ident.per_source_cap.toLocaleString())}
+                : (rankedCap != null
+                    ? t("scenarioDetail.prisma.perSourceCapRanked").replace("{rankedCap}", rankedCap.toLocaleString())
+                    : t("scenarioDetail.prisma.perSourceCap"))
+                    .replace("{cap}", ident.per_source_cap.toLocaleString())}
             </div>
           )}
           {/* La date de la recherche (PRISMA-S, item 9) : elle était stockée avec les
