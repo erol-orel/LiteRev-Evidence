@@ -2,11 +2,15 @@ import React from "react";
 import { AlertTriangle, ChevronDown, ChevronUp, Download, Upload } from "lucide-react";
 import { useI18n, currentLang } from "../i18n/LanguageProvider";
 import {
-  addCodebookSynonym, codebookExportUrl, fetchCodebook, fetchUnmappedLabels, hasApiKey,
+  addCodebookSynonym, codebookExportUrl, fetchCodebook, fetchUnmappedLabelsUpTo, hasApiKey,
   importCodebookCsv, resetCodebook,
 } from "../lib/api";
 import type { CodebookResponse, UnmappedResponse } from "../lib/api";
 import { mappedShare, nodeOptions } from "../lib/codebook";
+
+// Labels listed per step. The table stopped at the first 50 under "N labels still to
+// map", and the endpoint at 500: past them a label could not be mapped from the screen.
+const UNMAPPED_PAGE = 50;
 
 /** The labels of the extraction against the codebook: how many rows are mapped, the labels
  *  that are not (most frequent first), and a way to map them, to load the reviewers' own
@@ -20,12 +24,23 @@ export function CodebookPanel({ scenarioId, onChanged }: { scenarioId: string; o
   const [error, setError] = React.useState<string | null>(null);
   const [msg, setMsg] = React.useState<string | null>(null);
   const [pick, setPick] = React.useState<Record<string, string>>({});
+  const [loadingMore, setLoadingMore] = React.useState(false);
   const fileRef = React.useRef<HTMLInputElement>(null);
   const keyed = hasApiKey();
+  // How many labels the table lists; a mapping reloads that many, not the first 50.
+  const wanted = React.useRef(UNMAPPED_PAGE);
 
   const load = React.useCallback(() => (
-    Promise.all([fetchCodebook(scenarioId), fetchUnmappedLabels(scenarioId)])
+    Promise.all([fetchCodebook(scenarioId), fetchUnmappedLabelsUpTo(scenarioId, wanted.current)])
   ), [scenarioId]);
+
+  const showMore = async () => {
+    setLoadingMore(true);
+    wanted.current += UNMAPPED_PAGE;
+    try { setUn(await fetchUnmappedLabelsUpTo(scenarioId, wanted.current)); }
+    catch (e) { setMsg((e as Error).message); }
+    finally { setLoadingMore(false); }
+  };
 
   React.useEffect(() => {
     let alive = true;
@@ -158,6 +173,15 @@ export function CodebookPanel({ scenarioId, onChanged }: { scenarioId: string; o
                   })}
                 </tbody>
               </table>
+              {un.n_distinct_unmapped > un.unmapped.length && (
+                <div className="flex items-center justify-between gap-2 border-t border-white/5 px-2.5 py-1.5 text-[10px] text-white/45">
+                  <span>{T("shownOf").replace("{shown}", String(un.unmapped.length)).replace("{total}", String(un.n_distinct_unmapped))}</span>
+                  <button disabled={loadingMore} onClick={() => void showMore()}
+                    className="text-brand-300 underline hover:text-brand-200 disabled:opacity-40">
+                    {t("lists.loadMore").replace("{n}", String(Math.min(UNMAPPED_PAGE, un.n_distinct_unmapped - un.unmapped.length)))}
+                  </button>
+                </div>
+              )}
             </div>
           )}
         </div>

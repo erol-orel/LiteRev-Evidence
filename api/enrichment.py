@@ -10,7 +10,7 @@ import os
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from fastapi import Depends, HTTPException
 from sqlalchemy import text
@@ -34,14 +34,28 @@ def _scope(scope: Optional[str]) -> str:
             detail=f"Portée inconnue : {scope!r} (attendu : {', '.join(SCOPES)})")
     return value
 
-# ─── Enrichissement LLM Batch ────────────────────────────────────────────────
 
-@app.post("/pico/extract")
+def _tracked(rows, progress: Optional[Callable[[int, int], None]]):
+    """Les lignes d'un lot, en disant à `progress(fait, total)` où il en est : c'est ce
+    que le suivi d'un lot en arrière-plan affiche (« 340 sur 1 200 »)."""
+    total = len(rows)
+    for i, row in enumerate(rows):
+        if progress:
+            progress(i, total)
+        yield row
+    if progress:
+        progress(total, total)
+
+# ─── Enrichissement LLM Batch ────────────────────────────────────────────────
+# Les trois fonctions ci-dessous sont les lots eux-mêmes, synchrones. Les routes POST
+# qui les servent sont en fin de module : elles les lancent en arrière-plan, ou les
+# attendent quand l'appelant passe `wait=true`. `limit` vide ou nul : tout ce qui reste.
+
 def extract_pico_batch(
     scenario_id: Optional[str] = None,
-    limit: int = 100000,
+    limit: Optional[int] = None,
     scope: Optional[str] = None,
-    _: None = Depends(require_api_key),
+    progress: Optional[Callable[[int, int], None]] = None,
 ):
     """
     Extrait le PICO pour un lot d'articles (un scénario, ou tout le corpus).
@@ -90,7 +104,7 @@ def extract_pico_batch(
         from datetime import datetime, timezone
         _client = _OAI(api_key=openai_key, timeout=90.0)
 
-        for row in rows:
+        for row in _tracked(rows, progress):
             article_id = row["id"]
             title = row["title"] or ""
             abstract = row["abstract"] or ""
@@ -150,12 +164,11 @@ def extract_pico_batch(
     }
 
 
-@app.post("/metadata/extract")
 def extract_metadata_batch(
     scenario_id: Optional[str] = None,
-    limit: int = 100000,
+    limit: Optional[int] = None,
     scope: Optional[str] = None,
-    _: None = Depends(require_api_key),
+    progress: Optional[Callable[[int, int], None]] = None,
 ):
     """
     Enrichit les métadonnées (type d'étude, effectif, pays, risque de biais) via LLM pour
@@ -214,7 +227,7 @@ def extract_metadata_batch(
         from llm_usage import MeteredOpenAI as _OAI
         _client = _OAI(api_key=openai_key, timeout=90.0)
 
-        for row in rows:
+        for row in _tracked(rows, progress):
             article_id = row["id"]
             title = row["title"] or ""
             abstract = row["abstract"] or ""
@@ -256,16 +269,16 @@ def extract_metadata_batch(
     }
 
 
-@app.post("/fulltext/fetch")
 def fetch_fulltext_batch(
     scenario_id: Optional[str] = None,
-    limit: int = 100000,
+    limit: Optional[int] = None,
     scope: Optional[str] = None,
-    _: None = Depends(require_api_key),
+    progress: Optional[Callable[[int, int], None]] = None,
 ):
     """
-    Tente de récupérer le texte intégral (via DOI/URL) pour un lot d'articles.
-    Utilise Unpaywall + CrossRef pour les accès ouverts.
+    Cherche un LIEN d'accès ouvert (Unpaywall, par DOI) pour un lot d'articles. Il ne
+    télécharge aucun texte : il range l'adresse dans `oa_url`, que l'étape texte
+    intégral du pipeline lira.
 
     `scope` : `all` pour tout le scénario, `relevant` pour son seul sous-ensemble
     pertinent.
@@ -301,7 +314,7 @@ def fetch_fulltext_batch(
     not_available = 0
     errors = 0
 
-    for row in rows:
+    for row in _tracked(rows, progress):
         article_id = row["id"]
         doi = row["doi"]
         if not doi:
@@ -339,11 +352,13 @@ def fetch_fulltext_batch(
             logger.warning(f"Fulltext fetch error article {article_id}: {e}")
             errors += 1
 
+    # Ce lot trouve des LIENS : il annonçait « N textes intégraux récupérés » pour des
+    # adresses dont aucune ligne de texte n'était stockée.
     return {
         "fetched": fetched,
         "not_available": not_available,
         "errors": errors,
-        "message": f"{fetched} textes intégraux récupérés, {not_available} non disponibles, {errors} erreurs",
+        "message": f"{fetched} liens d'accès ouvert trouvés, {not_available} non disponibles, {errors} erreurs",
     }
 
 
@@ -683,3 +698,127 @@ def run_scenario_findings(scenario_id: str, max_articles: int = 0, lang: Optiona
 def get_scenario_findings_status(scenario_id: str) -> dict[str, Any]:
     _get_user_scenario_or_404(scenario_id)
     return findings_status(scenario_id)
+
+
+# ─── Les lots en ARRIÈRE-PLAN ─────────────────────────────────────────────────
+# Les trois POST bouclaient sur les appels au modèle DANS la requête, jusqu'à 90 s
+# chacun : un lot de quelques centaines d'articles dépassait le délai du proxy,
+# l'écran affichait une erreur, et le serveur continuait de travailler (et de payer)
+# sans que personne ne le voie. Un lot démarre maintenant en arrière-plan, un à la fois
+# par type et par scénario, et se suit par GET /enrichment/jobs, comme l'extraction
+# structurée. `wait=true` garde la réponse synchrone d'avant, telle quelle, pour les
+# scripts qui appellent ces POST et lisent leur JSON.
+
+ENRICHMENT_KINDS = ("pico", "metadata", "fulltext")
+_enrich_jobs_lock = threading.Lock()
+_enrich_jobs: dict[tuple[str, str], dict[str, Any]] = {}
+
+
+def _batch_worker(kind: str) -> Callable[..., dict]:
+    """Le lot synchrone d'un type. Lu à l'appel, pour que les tests puissent le remplacer."""
+    return {"pico": extract_pico_batch, "metadata": extract_metadata_batch,
+            "fulltext": fetch_fulltext_batch}[kind]
+
+
+def _job_view(job: dict[str, Any]) -> dict[str, Any]:
+    out = dict(job)
+    out["elapsed_s"] = round((job.get("finished_ts") or time.time()) - job["started_ts"], 1)
+    out.pop("started_ts", None)
+    out.pop("finished_ts", None)
+    return out
+
+
+def start_enrichment_batch(kind: str, scenario_id: Optional[str], limit: Optional[int],
+                           scope: Optional[str], wait: bool = False) -> dict[str, Any]:
+    """Lance (ou attend, avec `wait`) le lot `kind`. La portée et la clé du modèle sont
+    vérifiées AVANT de lancer quoi que ce soit : une erreur de saisie répond 400 et une
+    configuration manquante 503, au lieu d'un job qui échoue dans le dos de l'écran."""
+    if kind not in ENRICHMENT_KINDS:
+        raise HTTPException(status_code=400, detail=f"Lot inconnu : {kind!r}")
+    scope_v = _scope(scope)
+    lim = int(limit) if limit and int(limit) > 0 else None
+    if kind != "fulltext" and not os.getenv("OPENAI_API_KEY"):
+        raise HTTPException(status_code=503, detail="Clé OpenAI non configurée")
+    worker = _batch_worker(kind)
+    if wait:
+        return worker(scenario_id=scenario_id, limit=lim, scope=scope_v)
+
+    key = (kind, scenario_id or "*")
+    with _enrich_jobs_lock:
+        current = _enrich_jobs.get(key)
+        if current and current.get("status") == "running":
+            return {"status": "running", "job": _job_view(current)}
+        job: dict[str, Any] = {
+            "kind": kind, "scenario_id": scenario_id, "scope": scope_v, "limit": lim,
+            "status": "running", "processed": 0, "total": None,
+            "started_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "started_ts": time.time(), "finished_ts": None,
+            "result": None, "error": None,
+        }
+        _enrich_jobs[key] = job
+
+    def _progress(done: int, total: int) -> None:
+        with _enrich_jobs_lock:
+            job["processed"], job["total"] = int(done), int(total)
+
+    def _run() -> None:
+        try:
+            result = worker(scenario_id=scenario_id, limit=lim, scope=scope_v, progress=_progress)
+            with _enrich_jobs_lock:
+                job.update(status="done", result=result)
+        except HTTPException as e:
+            with _enrich_jobs_lock:
+                job.update(status="error", error=str(e.detail)[:300])
+        except Exception as e:                               # noqa: BLE001 - dit au suivi, jamais avalé
+            logger.warning(f"enrichment {kind} {scenario_id}: {e}")
+            with _enrich_jobs_lock:
+                job.update(status="error", error=str(e)[:300])
+        finally:
+            with _enrich_jobs_lock:
+                job["finished_ts"] = time.time()
+
+    threading.Thread(target=_run, daemon=True,
+                     name=f"enrich-{kind}-{scenario_id or 'corpus'}").start()
+    with _enrich_jobs_lock:
+        return {"status": "started", "job": _job_view(job)}
+
+
+@app.post("/pico/extract")
+def start_pico_batch(scenario_id: Optional[str] = None, limit: int = 0,
+                     scope: Optional[str] = None, wait: bool = False,
+                     _: None = Depends(require_api_key)) -> dict[str, Any]:
+    """Extrait le PICO des articles qui n'en ont pas (ou d'un PICO de faible confiance),
+    en arrière-plan ; suivi par GET /enrichment/jobs. `limit` 0 : tout ce qui reste.
+    `wait=true` : synchrone, la réponse d'avant ({extracted, skipped, errors, message}).
+    `scope` : `all` pour tout le scénario, `relevant` pour son sous-ensemble pertinent."""
+    return start_enrichment_batch("pico", scenario_id, limit, scope, wait)
+
+
+@app.post("/metadata/extract")
+def start_metadata_batch(scenario_id: Optional[str] = None, limit: int = 0,
+                         scope: Optional[str] = None, wait: bool = False,
+                         _: None = Depends(require_api_key)) -> dict[str, Any]:
+    """Les métadonnées (devis, effectif, pays, risque de biais) et le score de qualité,
+    en arrière-plan ; mêmes paramètres que /pico/extract."""
+    return start_enrichment_batch("metadata", scenario_id, limit, scope, wait)
+
+
+@app.post("/fulltext/fetch")
+def start_fulltext_batch(scenario_id: Optional[str] = None, limit: int = 0,
+                         scope: Optional[str] = None, wait: bool = False,
+                         _: None = Depends(require_api_key)) -> dict[str, Any]:
+    """Les liens d'accès ouvert (Unpaywall, par DOI), en arrière-plan ; mêmes paramètres
+    que /pico/extract. Aucun texte n'est téléchargé ici : la réponse compte des liens."""
+    return start_enrichment_batch("fulltext", scenario_id, limit, scope, wait)
+
+
+@app.get("/enrichment/jobs")
+def get_enrichment_jobs(scenario_id: Optional[str] = None) -> dict[str, Any]:
+    """Où en sont les lots de ce scénario (ou du corpus entier, sans scénario) : par
+    type, `status` (running, done, error), `processed` sur `total`, puis le résultat ou
+    l'erreur. `null` : aucun lot lancé depuis le démarrage de l'API."""
+    sid = scenario_id or "*"
+    with _enrich_jobs_lock:
+        jobs = {kind: (_job_view(_enrich_jobs[(kind, sid)]) if (kind, sid) in _enrich_jobs else None)
+                for kind in ENRICHMENT_KINDS}
+    return {"scenario_id": scenario_id, "jobs": jobs}

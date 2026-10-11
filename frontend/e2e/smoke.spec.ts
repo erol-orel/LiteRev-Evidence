@@ -122,8 +122,9 @@ test("runs a two-facet search on the local corpus and names the scenario with th
   await expect(page.getByRole("checkbox", { name: en.search.excludePreprints })).not.toBeChecked();
   await page.locator("#search-btn").click();             // the nav tab is also named "Search"
 
-  // The corpus is built server-side, then the most relevant articles are shown.
-  await expect(page.getByText(new RegExp(`\\d+ ${en.search.documents} ${en.search.relevantPlural}`)).first())
+  // The corpus is built server-side, then its first articles are shown. The count is the
+  // whole corpus, no longer called "relevant": the relevant ones have their own line.
+  await expect(page.getByText(new RegExp(`\\d+ ${en.search.documents} · `)).first())
     .toBeVisible({ timeout: 60_000 });
   await expect(page.getByText(/Benchmark article \d+/).first()).toBeVisible();
 

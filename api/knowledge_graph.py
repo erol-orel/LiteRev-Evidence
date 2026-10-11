@@ -771,9 +771,19 @@ def _build_concept_graph(rows: list[dict], *, max_nodes: int = 60, min_edge: int
             }
 
     type_counts = Counter(n["type"] for n in nodes)
+    # Ce que la carte NE dessine PAS, pour que l'écran puisse le dire : le plafond de
+    # noeuds, le seuil d'articles d'un noeud, et, par type, combien de concepts de
+    # l'index complet sont cités par combien d'articles ({type: {nb d'articles: nb de
+    # concepts}}). L'écran en déduit « 14 sur N » pour n'importe quel minimum choisi.
+    concept_counts: dict[str, dict[str, int]] = {}
+    for (t, _k), c in count.items():
+        _bucket = concept_counts.setdefault(t, {})
+        _bucket[str(c)] = _bucket.get(str(c), 0) + 1
     return {
         "kind": "concepts", "version": CONCEPTS_VERSION,
         "n_articles": n_articles, "n_total": n_total,
+        "max_nodes": int(max_nodes), "min_count": int(min_count),
+        "concepts_total": len(count), "concept_counts": concept_counts,
         "n_with_concepts": n_with_concepts,
         # « Manquants » doit vouloir dire « qu'un passage pourrait annoter ». Ce compte
         # incluait les articles qu'AUCUN passage ne peut annoter (pas de PICO, résumé de
@@ -790,6 +800,120 @@ def _build_concept_graph(rows: list[dict], *, max_nodes: int = 60, min_edge: int
         "nodes": nodes, "edges": edges, "triples": triples, "gaps": gaps,
         "articles": articles,
     }
+
+
+# ── L'index COMPLET des concepts : ce que lisent l'export et le découpage ─────
+# La carte dessine `max_nodes` concepts et l'écran au plus quatorze par type : ce sont
+# des projections pour l'oeil. L'export et le découpage les prenaient pour une
+# sélection : un concept au-delà des soixante noeuds répondait 404, et ses articles
+# sortaient d'un « garder la carte composée » que personne n'avait demandé. L'index
+# ci-dessous porte TOUS les concepts des articles pertinents, chacun avec TOUS ses
+# articles, lus dans les mêmes colonnes que la carte (concepts_json et champs
+# structurés), sans appel au modèle.
+
+def concept_index(rows: list[dict]) -> dict[tuple[str, str], dict[str, Any]]:
+    """{(type, clé): {type, key, label, articles}} pour TOUS les concepts des lignes. Pur.
+
+    Les articles suivent l'ordre des lignes (la pertinence) ; le libellé est la graphie
+    la plus employée, comme sur la carte, pour qu'un concept s'y lise de la même façon."""
+    from collections import Counter
+
+    votes: dict[tuple[str, str], Counter] = {}
+    labels: dict[tuple[str, str], dict] = {}
+    arts: dict[tuple[str, str], list[int]] = {}
+    for r in rows:
+        aid = int(r["id"])
+        for t, k, lab in _article_concepts(r):
+            labels.setdefault((t, k), lab)
+            votes.setdefault((t, k), Counter())[
+                (str(lab.get("en") or ""), str(lab.get("fr") or ""))] += 1
+            arts.setdefault((t, k), []).append(aid)
+    return {key: {"type": key[0], "key": key[1], "label": _best_label(key, votes, labels),
+                  "articles": ids}
+            for key, ids in arts.items()}
+
+
+def concept_index_key(type_: str, label: str) -> tuple[str, str]:
+    """La clé d'index d'un concept désigné par `type:label`, avec la MÊME normalisation
+    que l'index : le libellé canonique anglais de la carte, ou toute autre graphie qui
+    se ramène à lui (singulier, pluriel, casse). Un lieu est son code ISO2."""
+    t = (type_ or "").strip().lower()
+    if t == "place":
+        return t, (label or "").strip().upper()
+    return t, _concept_key(label or "")
+
+
+def parse_concept_refs(parts: list[str] | None) -> list[tuple[str, str]]:
+    """« type:label » → (type, label). ValueError sur une forme que l'on ne sait pas lire,
+    pour que l'appelant réponde 400 au lieu d'ignorer le morceau."""
+    out: list[tuple[str, str]] = []
+    for part in parts or []:
+        part = (part or "").strip()
+        if not part:
+            continue
+        if ":" not in part:
+            raise ValueError(f"« {part} » doit s'écrire type:label (ex. pathogen:dengue virus).")
+        t, lab = part.split(":", 1)
+        out.append((t.strip().lower(), lab.strip()))
+    return out
+
+
+def select_concepts(rows: list[dict], *, concepts: list[tuple[str, str]] | None = None,
+                    mode: str = "any", exclude_types: set[str] | None = None,
+                    min_count: int = 1,
+                    exclude: list[tuple[str, str]] | None = None) -> dict[str, Any]:
+    """Les articles derrière une sélection de concepts, résolue sur l'index COMPLET. Pur.
+
+    Deux façons de sélectionner :
+      - `concepts`, une liste explicite de (type, libellé) : `mode='any'` est l'union,
+        `mode='all'` l'intersection. Un concept que l'index ne connaît pas revient dans
+        `missing` (l'appelant répond 404), il n'est jamais ignoré en silence ;
+      - sinon, la carte telle que l'utilisateur l'a COMPOSÉE : tous les concepts de
+        l'index, moins les types masqués (`exclude_types`), ceux cités par moins de
+        `min_count` articles et ceux retirés un par un (`exclude`). Toujours l'union.
+        Ni le plafond de noeuds ni les quatorze par type n'y entrent : ce sont des
+        coupes d'affichage, pas des choix.
+
+    Renvoie {ids, labels, missing, n_concepts, n_with_concepts, description}."""
+    index = concept_index(rows)
+    n_with = sum(1 for r in rows
+                 if any(t in _LLM_CONCEPT_TYPES and t != "place" for t, _, _ in _article_concepts(r)))
+    if concepts:
+        sets: list[set[int]] = []
+        labels: list[str] = []
+        missing: list[str] = []
+        for t, lab in concepts:
+            entry = index.get(concept_index_key(t, lab))
+            if entry is None:
+                missing.append(f"{t}:{lab}")
+                continue
+            sets.append(set(entry["articles"]))
+            labels.append(str(entry["label"].get("en") or lab))
+        ids: set[int] = set()
+        if sets:
+            ids = set.union(*sets) if mode == "any" else set.intersection(*sets)
+        return {"ids": ids, "labels": labels, "missing": missing, "n_concepts": len(sets),
+                "n_with_concepts": n_with,
+                "description": (" OU " if mode == "any" else " ET ").join(labels)}
+
+    hidden = {str(t).strip().lower() for t in (exclude_types or set()) if str(t).strip()}
+    removed = {concept_index_key(t, lab) for t, lab in (exclude or [])}
+    floor = max(1, int(min_count or 1))
+    kept = [e for key, e in index.items()
+            if e["type"] not in hidden and len(e["articles"]) >= floor and key not in removed]
+    ids = set()
+    for e in kept:
+        ids.update(e["articles"])
+    bits = []
+    if hidden:
+        bits.append("sans les types " + ", ".join(sorted(hidden)))
+    if floor > 1:
+        bits.append(f"cités par au moins {floor} articles")
+    if removed:
+        bits.append("sauf " + ", ".join(lab for _t, lab in (exclude or [])))
+    description = ("tous les concepts de l'index" + (" (" + " ; ".join(bits) + ")" if bits else ""))
+    return {"ids": ids, "labels": [], "missing": [], "n_concepts": len(kept),
+            "n_with_concepts": n_with, "description": description}
 
 
 _CONCEPT_ROWS_SQL = f"""

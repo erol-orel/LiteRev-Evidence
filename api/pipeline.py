@@ -1813,6 +1813,31 @@ def _run_user_scenario_populate(
             except Exception as _e_pp:
                 logger.warning(f"Retrait des préprints {scenario_id}: {_e_pp}")
 
+        # ── Recherche bornée en années : l'union native aussi ────────────────
+        # La correspondance locale applique les bornes `year_min` / `year_max` des
+        # filtres du scénario (_build_where), mais l'union des sources booléennes-natives
+        # entre sans re-filtrage : une recherche « 2015-2024 » gardait les notices PubMed
+        # de 1987. La MÊME condition, écrite une fois dans _build_where, appliquée au
+        # corpus assemblé.
+        _year_bounds = {_k: (filters or {}).get(_k) for _k in ("year_min", "year_max")
+                        if (filters or {}).get(_k) not in (None, "")}
+        if _year_bounds:
+            try:
+                from .search import _build_where as _year_where   # lazy: une seule définition
+                _yw, _yp = _year_where(_year_bounds)
+                with engine.begin() as conn:
+                    _removed_y = conn.execute(text(f"""
+                        DELETE FROM article_scenarios a
+                        USING literature_document d
+                        WHERE a.document_id = d.id AND a.scenario_id = :sid
+                          AND (TRUE {_yw}) IS NOT TRUE
+                    """), {"sid": scenario_id, **_yp}).rowcount
+                if _removed_y:
+                    logger.info(f"Populate {scenario_id}: {_removed_y} articles hors des années "
+                                f"{_year_bounds} retirés.")
+            except Exception as _e_y:
+                logger.warning(f"Bornes d'années {scenario_id}: {_e_y}")
+
         # ── Dédup INTRA-scénario : un seul lien par article distinct ─────────
         # APRÈS le retrait des articles sans abstract, pour ne jamais garder par
         # erreur une copie sans résumé au détriment d'une copie complète du même

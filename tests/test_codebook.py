@@ -192,6 +192,25 @@ def test_unmapped_labels_are_listed_and_a_synonym_maps_them(extracted):
     c.delete(f"/user-scenarios/{SID}/codebook", headers=HDR)
 
 
+def test_every_unmapped_label_can_be_reached_page_by_page(extracted):
+    """The table listed the first fifty unmapped labels under "N labels still to map", and
+    the endpoint stopped at 500: past them, a label could not be mapped from the screen."""
+    with extracted.cursor() as cur:
+        for doc_id, obs, label in ((9701, 0, "Hombres"), (9701, 1, "Mujeres"), (9702, 0, "Varones")):
+            cur.execute("UPDATE literature_document SET extraction_json = jsonb_set(extraction_json, "
+                        f"'{{observations,{obs},covariate}}', %s::jsonb) WHERE id = %s",
+                        (json.dumps(label), doc_id))
+    c = _client()
+    whole = c.get(f"/user-scenarios/{SID}/codebook/unmapped").json()
+    assert whole["n_distinct_unmapped"] == 3 and whole["offset"] == 0
+    paged = [c.get(f"/user-scenarios/{SID}/codebook/unmapped", params={"top": 1, "offset": k}).json()
+             for k in range(4)]
+    assert [len(p["unmapped"]) for p in paged] == [1, 1, 1, 0]
+    assert sorted(p["unmapped"][0]["covariate"] for p in paged[:3]) == ["Hombres", "Mujeres", "Varones"]
+    assert all(p["n_distinct_unmapped"] == 3 for p in paged)
+    assert c.get(f"/user-scenarios/{SID}/codebook/unmapped", params={"offset": -1}).status_code == 422
+
+
 def test_a_scenario_run_sends_the_codebook_vocabulary_and_records_its_own_prompt(seeded, monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "test-key")
     systems = []

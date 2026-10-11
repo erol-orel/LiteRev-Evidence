@@ -68,37 +68,118 @@ import {
   type SubQuery,
   previewSearchFacets,
   type FacetPreviewResponse,
+  exportRelevantArticles,
+  exportScenarioCorpus,
+  downloadBlob,
+  RELEVANT_EXPORT_FORMATS,
+  type RelevantExportFormat,
+  type ScenarioCorpus,
 } from "./lib/api";
+import { pollDelay, pollJob, POLL_MAX_ERRORS } from "./lib/poll";
 import {
   combinedQueryText,
-  csvEscape,
   effectiveKind,
   looksBoolean,
   scenarioDisplayName,
+  yearBoundsFilter,
+  yearRangeOf,
   yearSliderBounds,
 } from "./lib/searchText";
 import type {
   ProjectContext,
   RelevanceLabel,
-  SearchFilters,
   SearchMode,
   SearchResult,
 } from "./types/search";
 
-// The second tuple element is an i18n key resolved via t() at render time
-// (this array lives at module level, where the t() hook is unavailable).
-const FILTER_FIELDS: Array<[keyof FilterOptions, string]> = [
-  ["sourceType", "search.filterSourceType"],
-  ["diseaseOrCondition", "search.filterDiseaseOrCondition"],
-  ["scenarioType", "search.filterScenarioType"],
-  ["geographicScope", "search.filterGeographicScope"],
-  ["evidenceCategory", "search.filterEvidenceCategory"],
-];
+// Les cinq listes de filtres GESICA (type de source, maladie, type de scénario, zone,
+// catégorie de preuve) ont été retirées de la page de recherche : elles filtraient des
+// colonnes que le corpus construit en direct ne porte pas, n'étaient envoyées nulle part,
+// et l'union des sources natives ne les aurait pas appliquées. Seules les années restent,
+// et partent désormais avec la recherche (yearBoundsFilter).
 
 const PAGE_SIZE = 20;
 // Nombre d'articles téléchargés pour la page de résultats : les plus pertinents du
 // corpus (ordre serveur). Le corpus complet reste consultable dans le scénario.
 const SEARCH_TOP_N = 200;
+
+// Le tri de la liste. Ceux par année sont faits par le SERVEUR, sur le corpus entier :
+// trier dans le navigateur ne rangeait que les 200 articles téléchargés, les plus
+// pertinents, si bien que « Année ↓ » montrait les plus récents de ces 200-là.
+type SearchSort = "relevance" | "semantic" | "lexical" | "year_desc" | "year_asc";
+const serverSortOf = (s: SearchSort): "relevance" | "year_desc" | "year_asc" =>
+  s === "year_desc" || s === "year_asc" ? s : "relevance";
+
+// Une page du corpus d'un scénario, sous la forme de la liste de résultats : une seule
+// conversion, pour les lectures pendant la construction comme pour un changement de tri.
+function corpusToResults(corpus: ScenarioCorpus): SearchResult[] {
+  return (corpus.articles || []).map((a: CorpusArticle) => ({
+    id: `${a.id}-0`,
+    documentId: a.id,
+    chunkIndex: 0,
+    content: a.abstract ?? '',
+    title: a.title,
+    abstract: a.abstract,
+    source: a.source,
+    year: a.year,
+    url: a.url,
+    highlight: (a.abstract ?? '').slice(0, 600),
+    hasFulltext: a.has_fulltext,
+    isNew: a.is_new ?? false,
+    semanticScore: a.similarity_score ?? null,
+    rerankScore: a.rerank_score ?? null,
+    score: a.similarity_score ?? 0,
+  }));
+}
+
+/** L'export de la page de recherche, fait par le SERVEUR : le jeu entier, pas les 200
+ *  lignes de l'aperçu (l'ancien CSV/JSON n'exportait qu'elles, avec cinq colonnes héritées
+ *  toujours vides). Deux jeux : les pertinents, que lisent les analyses, ou tout le
+ *  corpus trouvé. Les six formats et les colonnes des exports du scénario. */
+function SearchExportMenu({ scenarioId, relevant, total }: {
+  scenarioId: string | null; relevant: number | null; total: number;
+}) {
+  const { t } = useI18n();
+  const [busy, setBusy] = useState(false);
+  const [failed, setFailed] = useState(false);
+  const go = async (choice: string) => {
+    const [scope, format] = choice.split(":") as ["relevant" | "corpus", RelevantExportFormat];
+    if (!scenarioId || !format) return;
+    setBusy(true); setFailed(false);
+    try {
+      const { blob, filename } = scope === "corpus"
+        ? await exportScenarioCorpus(scenarioId, format)
+        : await exportRelevantArticles(scenarioId, format);
+      downloadBlob(blob, filename);
+    } catch {
+      setFailed(true);
+    } finally {
+      setBusy(false);
+    }
+  };
+  const fmt = (n: number | null) => (n == null ? "?" : n.toLocaleString());
+  return (
+    <span className="flex items-center gap-1.5" title={t("search.exportTitle")}>
+      {busy ? <RefreshCw size={12} className="animate-spin text-forest-300" /> : <Download size={12} className="text-forest-300" />}
+      <select value="" disabled={busy || !scenarioId} aria-label={t("search.exportTitle")}
+        onChange={(e) => { if (e.target.value) void go(e.target.value); }}
+        className="rounded-xl border border-white/10 bg-forest-950/80 px-2 py-1.5 text-xs text-forest-300 transition hover:border-white/20 focus:outline-none disabled:opacity-40">
+        <option value="">{busy ? t("scenarioDetail.corpus.exporting") : t("search.exportPlaceholder")}</option>
+        <optgroup label={t("search.exportRelevantGroup").replace("{n}", fmt(relevant))}>
+          {RELEVANT_EXPORT_FORMATS.map((f) => (
+            <option key={`relevant-${f}`} value={`relevant:${f}`}>{t(`scenarioDetail.corpus.exportFormats.${f}`)}</option>
+          ))}
+        </optgroup>
+        <optgroup label={t("search.exportCorpusGroup").replace("{n}", fmt(total))}>
+          {RELEVANT_EXPORT_FORMATS.map((f) => (
+            <option key={`corpus-${f}`} value={`corpus:${f}`}>{t(`scenarioDetail.corpus.exportFormats.${f}`)}</option>
+          ))}
+        </optgroup>
+      </select>
+      {failed && <span className="text-[10px] text-rose-300">{t("scenarioDetail.corpus.exportFailed")}</span>}
+    </span>
+  );
+}
 
 type AppTab = "search" | "scenarios" | "stats" | "terrain";
 const APP_TABS: readonly AppTab[] = ["search", "scenarios", "stats", "terrain"];
@@ -1170,32 +1251,39 @@ function RecommendedActions({ scenario, isUser }: { scenario: GesicaScenario; is
   const { t, lang } = useI18n();
   const [fetchedActions, setFetchedActions] = React.useState<string[] | null>(null);
   const [actionsGenerating, setActionsGenerating] = React.useState(false);
+  // La génération tournait quand le suivi a perdu le serveur : on le dit, au lieu de
+  // faire disparaître le bloc comme le faisait l'ancienne boucle au bout de 20 essais.
+  const [lostWhileGenerating, setLostWhileGenerating] = React.useState(false);
   React.useEffect(() => {
     if (!isUser) return;
     if (scenario.recommendedActions && scenario.recommendedActions.length > 0) return;
-    let cancelled = false;
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const tick = (tries: number) => {
-      getRecommendedActions(scenario.id).then(r => {
-        if (cancelled) return;
-        if (r.status === "ready") { setFetchedActions(r.actions); setActionsGenerating(false); }
-        else if (r.status === "generating" && tries < 20) { setActionsGenerating(true); timer = setTimeout(() => tick(tries + 1), 4000); }
-        else { setFetchedActions([]); setActionsGenerating(false); }
-      }).catch(() => { if (!cancelled) { setFetchedActions([]); setActionsGenerating(false); } });
-    };
     // Réinitialiser avant de (re)charger : au changement de langue on ne veut pas
     // afficher les anciennes actions (autre langue) le temps de la régénération.
     setFetchedActions(null);
-    tick(0);
-    // Annuler + purger le timer en attente au démontage / changement de langue,
-    // sinon un tick déjà planifié refait une requête réseau inutile.
-    return () => { cancelled = true; if (timer) clearTimeout(timer); };
+    setLostWhileGenerating(false);
+    let generating = false;
+    // Tant que le serveur dit « generating », sans plafond (plus lentement après 5 min).
+    const job = pollJob({
+      intervalMs: 4000,
+      firstDelayMs: 0,
+      read: () => getRecommendedActions(scenario.id),
+      running: (r) => r.status === "generating",
+      onStatus: (r) => { generating = r.status === "generating"; setActionsGenerating(generating); },
+    });
+    job.promise.then((out) => {
+      if (out.kind === "cancelled") return;
+      setActionsGenerating(false);
+      if (out.kind === "done") setFetchedActions(out.status.status === "ready" ? (out.status.actions ?? []) : []);
+      else { setFetchedActions([]); setLostWhileGenerating(generating); }
+    });
+    // Au démontage / changement de langue : plus de lecture planifiée.
+    return () => job.cancel();
     // `lang` dans les deps : changer la langue de l'UI régénère les actions.
   }, [isUser, scenario.id, lang]);
   const actions = (scenario.recommendedActions && scenario.recommendedActions.length > 0)
     ? scenario.recommendedActions
     : (fetchedActions ?? []);
-  if (!(actions.length > 0 || actionsGenerating)) return null;
+  if (!(actions.length > 0 || actionsGenerating || lostWhileGenerating)) return null;
   return (
     <div>
       <h4 className="mb-2 text-xs font-semibold uppercase tracking-wider text-forest-400">{t("common.recommendedActions")}</h4>
@@ -1208,6 +1296,8 @@ function RecommendedActions({ scenario, isUser }: { scenario: GesicaScenario; is
             </li>
           ))}
         </ul>
+      ) : lostWhileGenerating ? (
+        <p className="text-xs text-white/45">{t("common.recommendedActionsStillRunning")}</p>
       ) : (
         <p className="text-xs text-forest-400 flex items-center gap-1.5">
           <RefreshCw size={11} className="animate-spin" /> {t("common.generatingRecommendedActions")}
@@ -1942,10 +2032,6 @@ export default function App() {
   // union/intersection, calculé sur la bibliothèque locale AVANT la recherche.
   const [facetPreview, setFacetPreview] = useState<FacetPreviewResponse | null>(null);
   const [facetPreviewLoading, setFacetPreviewLoading] = useState(false);
-  const [filters, setFilters] = useState<SearchFilters>({
-    projectContext: "literev",
-  });
-  const [diseaseSearch, setDiseaseSearch] = useState<string>("");
   const [yearRange, setYearRange] = useState<[number, number]>([
     1990,
     new Date().getFullYear(),
@@ -2033,6 +2119,16 @@ export default function App() {
   const activeSearchRef = useRef(0);
   const [searchSourceBreakdown, setSearchSourceBreakdown] = useState<Record<string, number> | null>(null);
   const [searchTotalMatching, setSearchTotalMatching] = useState<number | null>(null);
+  // Les pertinents du corpus (au-dessus du seuil ou inclus à la main) : ce que lisent
+  // les analyses. Le titre disait « N documents pertinents » du corpus ENTIER.
+  const [searchRelevantCount, setSearchRelevantCount] = useState<number | null>(null);
+  // La page a cessé de suivre la construction sans qu'elle soit finie (contact perdu,
+  // ou le serveur ne la connaît plus) : on le dit, au lieu de figer un compte partiel.
+  const [searchStillRunning, setSearchStillRunning] = useState<string | null>(null);
+  // Le rerank, attendu un temps avant l'affichage, tournait encore : l'ordre affiché est
+  // provisoire, puis le classement affiné est prêt à être relu.
+  const [searchRerank, setSearchRerank] = useState<"running" | "ready" | "lost" | null>(null);
+  const rerankFollowRef = useRef<{ cancel: () => void } | null>(null);
   const [searchFulltextDocs, setSearchFulltextDocs] = useState<number | null>(null);
   const [searchAbstractDocs, setSearchAbstractDocs] = useState<number | null>(null);
   const [searchLiveNewCount, setSearchLiveNewCount] = useState<number | null>(null);
@@ -2072,7 +2168,12 @@ export default function App() {
   // Tri par défaut = pertinence (le score est désormais calculé pour TOUS les
   // documents affichés, la recherche attendant la fin du scoring). "relevance" =
   // rerank Cohere quand présent, sinon score sémantique (cosinus).
-  const [sortBy, setSortBy] = useState<"relevance" | "semantic" | "lexical" | "year_desc" | "year_asc">("relevance");
+  const [sortBy, setSortBy] = useState<SearchSort>("relevance");
+  // Le tri en cours, lu par les lectures du corpus pendant la construction ; et celui des
+  // articles téléchargés, pour ne relire que quand le tri du serveur change.
+  const sortByRef = useRef<SearchSort>(sortBy);
+  sortByRef.current = sortBy;
+  const loadedSortRef = useRef<"relevance" | "year_desc" | "year_asc">("relevance");
 
 
   useEffect(() => {
@@ -2096,8 +2197,51 @@ export default function App() {
     };
   }, []);
 
+  // Le suivi du rerank s'arrête avec la page.
+  useEffect(() => () => rerankFollowRef.current?.cancel(), []);
+
+  // Relire les SEARCH_TOP_N premiers articles du corpus affiché, dans l'ordre choisi.
+  // Écrit seulement si aucune recherche n'a démarré entre-temps.
+  async function reloadSearchTop(sid: string): Promise<void> {
+    const token = activeSearchRef.current;
+    const sort = serverSortOf(sortByRef.current);
+    const corpus = await fetchScenarioCorpus(sid, { limit: SEARCH_TOP_N, abstractChars: 600, sort });
+    if (activeSearchRef.current !== token) return;
+    setResults(corpusToResults(corpus));
+    setSearchTotalMatching(corpus.total);
+    setSearchRelevantCount(corpus.relevant ?? null);
+    loadedSortRef.current = sort;
+  }
+
+  // Le rerank qui tournait encore à l'affichage : suivi sans plafond, puis l'ordre affiné
+  // est PROPOSÉ (bouton), pas imposé : la liste ne se réordonne pas sous les yeux.
+  function followRerank(sid: string, mySearch: number) {
+    rerankFollowRef.current?.cancel();
+    setSearchRerank("running");
+    const job = pollJob({
+      intervalMs: 5000,
+      read: () => fetchUserScenarioPopulateStatus(sid),
+      running: (st) => st.rerank_status === "running",
+    });
+    rerankFollowRef.current = job;
+    job.promise.then((out) => {
+      if (out.kind === "cancelled" || activeSearchRef.current !== mySearch) return;
+      setSearchRerank(out.kind === "done" ? "ready" : "lost");
+    });
+  }
+
+  // Un tri par année demandé sur un corpus plus grand que la liste : le serveur relit les
+  // 200 premiers dans cet ordre (le navigateur ne trierait que ceux qu'il a déjà).
   useEffect(() => {
-    setFilters((prev) => ({ ...prev, projectContext }));
+    if (!currentSearchSid || loading) return;
+    const sort = serverSortOf(sortBy);
+    if (loadedSortRef.current === sort) return;
+    if ((searchTotalMatching ?? 0) <= results.length) { loadedSortRef.current = sort; return; }
+    reloadSearchTop(currentSearchSid).catch(() => { /* la liste reste triée dans le navigateur */ });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sortBy, currentSearchSid, loading]);
+
+  useEffect(() => {
     setPage(1);
     setSelectedResult(null);
     setSelectedDocument(null);
@@ -2175,8 +2319,12 @@ export default function App() {
     }
     const deduped = Array.from(byDoc.values());
     return deduped.sort((a, b) => {
-      if (sortBy === "year_desc") return (b.year ?? 0) - (a.year ?? 0);
-      if (sortBy === "year_asc") return (a.year ?? 0) - (b.year ?? 0);
+      if (sortBy === "year_desc" || sortBy === "year_asc") {
+        // Comme le serveur : sans année en dernier dans les deux sens (NULLS LAST), et à
+        // année égale l'ordre reçu, celui de la pertinence (le tri est stable).
+        if (a.year == null || b.year == null) return a.year == null ? (b.year == null ? 0 : 1) : -1;
+        return sortBy === "year_desc" ? b.year - a.year : a.year - b.year;
+      }
       if (sortBy === "semantic") return (b.semanticScore ?? 0) - (a.semanticScore ?? 0);
       if (sortBy === "lexical") return (b.lexicalScore ?? 0) - (a.lexicalScore ?? 0);
       // "relevance" (défaut) = MÊME ordre de pertinence que le backend : rerank
@@ -2246,14 +2394,15 @@ export default function App() {
     let cancelled = false;
     setFacetPreviewLoading(true);
     const handle = setTimeout(() => {
-      previewSearchFacets(sub, combinator, { projectContext })
+      // Les bornes d'années aussi : la recherche les applique à la même correspondance.
+      previewSearchFacets(sub, combinator, { projectContext, ...yearBoundsFilter(yearRange, filterOptions?.year) })
         .then((res) => { if (!cancelled) setFacetPreview(res); })
         .catch(() => { if (!cancelled) setFacetPreview(null); })
         .finally(() => { if (!cancelled) setFacetPreviewLoading(false); });
     }, 700);
     return () => { cancelled = true; clearTimeout(handle); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [query, extraQueries, combinator, mode, projectContext]);
+  }, [query, extraQueries, combinator, mode, projectContext, yearRange, filterOptions]);
 
   async function handleSearch() {
     if (!query.trim()) return;
@@ -2261,6 +2410,10 @@ export default function App() {
     setLoading(true);
     setError(null);
     setSearchUnranked(null);      // l'avertissement décrit le corpus précédent
+    setSearchStillRunning(null);  // idem
+    setSearchRelevantCount(null);
+    rerankFollowRef.current?.cancel();
+    setSearchRerank(null);
     setPage(1);
     setSelectedResult(null);
     setSelectedDocument(null);
@@ -2299,7 +2452,7 @@ export default function App() {
         name: scenarioDisplayName(_sub ? combinedQueryText(_sub, combinator) : query),
         query: query.trim(),
         mode,
-        filters: { projectContext, ...(excludePreprints ? { exclude_preprints: true } : {}) },
+        filters: { projectContext, ...(excludePreprints ? { exclude_preprints: true } : {}), ...yearBoundsFilter(yearRange, filterOptions?.year) },
         result_count: 0,
         pinned: false,
         search_strategy: strategy ?? undefined,
@@ -2324,27 +2477,15 @@ export default function App() {
         // reste la taille TOTALE du corpus (corpus.total). Résumés tronqués à 600
         // caractères : la liste n'affiche qu'un extrait et le panneau de détail relit
         // le résumé complet via /documents/{id}. Avant : 10 000 articles entiers (27 Mo).
-        const corpus = await fetchScenarioCorpus(sid, { limit: SEARCH_TOP_N, abstractChars: 600 });
+        // Dans l'ordre choisi : un tri par année est fait par le serveur, sur tout le corpus.
+        const sort = serverSortOf(sortByRef.current);
+        const corpus = await fetchScenarioCorpus(sid, { limit: SEARCH_TOP_N, abstractChars: 600, sort });
         if (activeSearchRef.current !== mySearch) return 0;   // supersédée pendant le fetch
-        const corpusResults: SearchResult[] = (corpus.articles || []).map((a: CorpusArticle) => ({
-          id: `${a.id}-0`,
-          documentId: a.id,
-          chunkIndex: 0,
-          content: a.abstract ?? '',
-          title: a.title,
-          abstract: a.abstract,
-          source: a.source,
-          year: a.year,
-          url: a.url,
-          highlight: (a.abstract ?? '').slice(0, 600),
-          hasFulltext: a.has_fulltext,
-          isNew: a.is_new ?? false,
-          semanticScore: a.similarity_score ?? null,
-          rerankScore: a.rerank_score ?? null,
-          score: a.similarity_score ?? 0,
-        }));
+        const corpusResults = corpusToResults(corpus);
         setResults(corpusResults);
+        loadedSortRef.current = sort;
         setSearchTotalMatching(corpus.total);   // == taille du corpus
+        setSearchRelevantCount(corpus.relevant ?? null);
         // Répartition par source (base locale vs API en direct), nouvelles
         // références live, et texte intégral vs résumé seul - lus depuis le corpus.
         setSearchSourceBreakdown(corpus.source_breakdown ?? null);
@@ -2374,10 +2515,22 @@ export default function App() {
       // Affichage PROGRESSIF : le corpus se remplit EN DIRECT pendant la fédération
       // (liens incrémentaux des sources booléennes-natives). On montre les résultats dès
       // qu'ils arrivent et on rafraîchit le compteur, au lieu d'un écran d'attente figé
-      // jusqu'à la fin (~10 min avec CORE/Crossref). Cap relevé (450 × 2 s = 15 min) pour
-      // atteindre le statut 'done' RÉEL et se figer sur le compteur FINAL (fin du « 172
-      // au lieu de 5758 » : on ne rendait qu'une fois, avant la fin de la construction).
-      for (let i = 0; i < 450; i++) {
+      // jusqu'à la fin (~10 min avec CORE/Crossref), et on va jusqu'au statut 'done' RÉEL
+      // pour se figer sur le compteur FINAL.
+      // SANS PLAFOND : tant que le serveur dit que la construction tourne, on la suit.
+      // L'ancien plafond (450 × 2 s = 15 min) figeait un compte partiel, présenté comme
+      // final, pendant que le serveur continuait. Toutes les 2 s, toutes les 15 s après
+      // 5 minutes. Une erreur de lecture passagère ne l'arrête pas (un redémarrage de
+      // l'API pendant un déploiement en produit une minute) : seules des erreurs de suite
+      // pendant plus de deux minutes le font, et la page dit alors que la construction
+      // continue sur le serveur.
+      const t0 = Date.now();
+      let lastRender = t0;
+      let readErrors = 0;
+      let failingSince: number | null = null;
+      let unknownSince: number | null = null;
+      let stopped: "lost" | "unknown" | null = null;
+      for (;;) {
         if (activeSearchRef.current !== mySearch) return;   // une recherche plus récente a démarré → on abandonne
         let status = 'pending';
         let phase: 'local' | 'federation' | 'scoring' | 'done' | null = null;
@@ -2387,11 +2540,19 @@ export default function App() {
           phase = st.phase ?? null;
           if (st.sources) setSearchSourceProgress(st.sources);
           if (st.cached_sources?.length) setSearchCachedSources(st.cached_sources);
-        } catch { /* transient - keep polling */ }
+          readErrors = 0;
+          failingSince = null;
+        } catch {
+          readErrors += 1;
+          if (failingSince == null) failingSince = Date.now();
+          if (readErrors >= POLL_MAX_ERRORS && Date.now() - failingSince >= 120_000) { stopped = "lost"; break; }
+        }
+        if (activeSearchRef.current !== mySearch) return;
         if (phase) setSearchBackendPhase(phase);
         // Rafraîchir le corpus affiché ~toutes les 8 s ; dès qu'il contient des documents,
         // on quitte l'écran d'attente et on affiche la liste qui grandit (compteur en direct).
-        if (i > 0 && i % 4 === 0) {
+        if (Date.now() - lastRender >= 8000) {
+          lastRender = Date.now();
           try {
             const n = await renderCorpus();
             if (n > 0 && !shownResults) { shownResults = true; setLoading(false); setLiveRefreshing(true); }
@@ -2403,7 +2564,16 @@ export default function App() {
         // message d'échec serait faux : ils sont en base et lisibles.
         if (status === 'unranked') { reachedDone = true; setSearchUnranked(t("search.corpusUnranked")); break; }
         if (status === 'error') throw new Error(t("search.corpusBuildFailed"));
-        await new Promise((r) => setTimeout(r, 2000));
+        // `not_started` : le serveur ne connaît pas (ou plus) ce travail. Après un
+        // redémarrage, il est relancé et repasse « en cours » ; s'il ne l'est pas en deux
+        // minutes, on cesse d'attendre ce qui ne viendra pas.
+        if (status === 'not_started') {
+          if (unknownSince == null) unknownSince = Date.now();
+          if (Date.now() - unknownSince >= 120_000) { stopped = "unknown"; break; }
+        } else {
+          unknownSince = null;
+        }
+        await new Promise((r) => setTimeout(r, pollDelay(Date.now() - t0, { intervalMs: 2000 })));
       }
       // Récupération + scoring (cosinus) terminés. Le cross-encoder Cohere réordonne
       // ENSUITE le sous-ensemble pertinent : on l'attend AUSSI pour que l'ordre soit
@@ -2411,6 +2581,10 @@ export default function App() {
       // l'utilisateur). Sans clé Cohere, l'étape est instantanée.
       if (activeSearchRef.current !== mySearch) return;   // supersédée juste avant l'affichage final
       setSearchBackendPhase('done');
+      // Le rerank est attendu 80 s au plus avant l'affichage. S'il tourne encore, la liste
+      // s'affiche quand même, le DIT, et le suivi continue : l'ordre affiné est proposé
+      // quand il est prêt (followRerank), au lieu d'un abandon silencieux.
+      let rerankStill = false;
       if (reachedDone) {
         setSearchFinalizing(true);
         for (let j = 0; j < 40; j++) {
@@ -2419,20 +2593,29 @@ export default function App() {
             const st = await fetchUserScenarioPopulateStatus(sid);
             rerank = st.rerank_status ?? 'done';
           } catch { rerank = 'done'; }
-          if (rerank !== 'running') break;
+          rerankStill = rerank === 'running';
+          if (!rerankStill) break;
           await new Promise((r) => setTimeout(r, 2000));
         }
         setSearchFinalizing(false);
       }
-      // Tout est prêt (corpus final + scores + rerank) → on affiche UNE fois. Le
-      // `loading` repasse à false dans le finally juste après : la page d'attente
-      // disparaît et les résultats finaux (compteur == corpus) apparaissent ensemble.
-      try {
-        await renderCorpus();
-      } catch {
-        await new Promise((r) => setTimeout(r, 1500));
-        await renderCorpus(); // une erreur ici remonte au catch externe (message lisible)
+      if (stopped) {
+        // La page cesse de suivre une construction inachevée : elle le dit, et montre ce
+        // qui est déjà là sans en faire une erreur (le serveur est peut-être injoignable).
+        setSearchStillRunning(t(stopped === "lost" ? "search.stillRunning" : "search.buildNotFollowed"));
+        try { await renderCorpus(); } catch { /* la liste déjà affichée reste */ }
+      } else {
+        // Tout est prêt (corpus final + scores + rerank) → on affiche UNE fois. Le
+        // `loading` repasse à false dans le finally juste après : la page d'attente
+        // disparaît et les résultats finaux (compteur == corpus) apparaissent ensemble.
+        try {
+          await renderCorpus();
+        } catch {
+          await new Promise((r) => setTimeout(r, 1500));
+          await renderCorpus(); // une erreur ici remonte au catch externe (message lisible)
+        }
       }
+      if (rerankStill && activeSearchRef.current === mySearch) followRerank(sid, mySearch);
       const corpus = { total: lastTotal };
       // Mettre à jour les listes locales (scénario désormais construit).
       // Identité d'une recherche = expression COMPLÈTE (facettes + ET/OU) + mode :
@@ -2559,7 +2742,7 @@ export default function App() {
         name,
         query: query.trim(),
         mode,
-        filters: { projectContext, ...(excludePreprints ? { exclude_preprints: true } : {}) },
+        filters: { projectContext, ...(excludePreprints ? { exclude_preprints: true } : {}), ...yearBoundsFilter(yearRange, filterOptions?.year) },
         result_count: searchTotalMatching ?? results.length,
         pinned: true,
         search_strategy: (mode === "boolean" ? booleanStrategy : null) ?? undefined,
@@ -2599,6 +2782,8 @@ export default function App() {
     setCombinator(sub ? (s.combinator ?? "union") : "union");
     // Recherche unifiée : toujours en mode booléen (traduction automatique si besoin).
     setMode("boolean");
+    // Les mêmes bornes d'années, lues dans les filtres du scénario.
+    setYearRange(yearRangeOf(userScenarios.find((u) => u.id === s.id)?.filters, filterOptions?.year));
     setProjectContext(s.projectContext);
     // La même recherche : avec ou sans préprints, comme elle a été faite.
     setExcludePreprints(!!s.excludePreprints);
@@ -2643,7 +2828,6 @@ export default function App() {
   }
 
   function handleReset() {
-    setFilters({ projectContext });
     setResults([]);
     setError(null);
     setPage(1);
@@ -2652,29 +2836,6 @@ export default function App() {
     setEvidenceSummary(null);
     const b = yearSliderBounds(filterOptions?.year);
     setYearRange([b.min, b.max]);
-  }
-
-  function handleExport(format: "csv" | "json") {
-    if (!dedupedResults.length) return;
-    if (format === "json") {
-      const blob = new Blob([JSON.stringify(dedupedResults, null, 2)], { type: "application/json" });
-      const a = document.createElement("a");
-      a.href = URL.createObjectURL(blob);
-      a.download = "literev-results.json";
-      a.click();
-      URL.revokeObjectURL(a.href);
-      return;
-    }
-    const headers = ["title", "score", "source", "year", "projectContext", "sourceType", "diseaseOrCondition", "scenarioType", "geographicScope", "evidenceCategory", "url"];
-    const rows = dedupedResults.map((r) =>
-      headers.map((h) => csvEscape((r as Record<string, unknown>)[h])).join(","),
-    );
-    const blob = new Blob([[headers.join(","), ...rows].join("\n")], { type: "text/csv;charset=utf-8" });
-    const a = document.createElement("a");
-    a.href = URL.createObjectURL(blob);
-    a.download = "literev-results.csv";
-    a.click();
-    URL.revokeObjectURL(a.href);
   }
 
   const hasResults = dedupedResults.length > 0;
@@ -2876,68 +3037,6 @@ export default function App() {
                 </div>
 
                 <div className="mt-5 space-y-4">
-                  {FILTER_FIELDS.map(([key, label]) => {
-                    const options = filterOptions?.[key] ?? [];
-                    const isDiseaseField = key === "diseaseOrCondition";
-                    const filteredOptions = isDiseaseField && diseaseSearch
-                      ? options.filter(o => o.label.toLowerCase().includes(diseaseSearch.toLowerCase()))
-                      : options;
-                    return (
-                      <div key={key} className="block">
-                        <span className="mb-2 block text-sm font-medium text-white/80">
-                          {t(label)}
-                        </span>
-                        {isDiseaseField && (
-                          <div className="relative mb-1">
-                            <input
-                              type="text"
-                              placeholder={t("search.searchDiseasePlaceholder")}
-                              value={diseaseSearch}
-                              onChange={e => setDiseaseSearch(e.target.value)}
-                              className="w-full rounded-xl border border-white/10 bg-forest-950/80 px-3 py-2 text-xs text-white placeholder-white/30 focus:border-brand-400 focus:outline-none"
-                            />
-                            {diseaseSearch.trim() && filteredOptions.length > 0 &&
-                              !(filteredOptions.length === 1 && filteredOptions[0].label.toLowerCase() === diseaseSearch.trim().toLowerCase()) && (
-                              <ul className="absolute z-20 mt-1 max-h-56 w-full overflow-auto rounded-xl border border-white/10 bg-forest-950 shadow-2xl">
-                                {filteredOptions.slice(0, 10).map((opt) => (
-                                  <li key={String(opt.value)}>
-                                    <button
-                                      type="button"
-                                      onClick={() => {
-                                        setFilters((prev) => ({ ...prev, [key]: String(opt.value) }));
-                                        setDiseaseSearch(opt.label);
-                                      }}
-                                      className="block w-full px-3 py-2 text-left text-xs text-white/80 transition hover:bg-brand-500/20 hover:text-white"
-                                    >
-                                      {opt.label}
-                                    </button>
-                                  </li>
-                                ))}
-                              </ul>
-                            )}
-                          </div>
-                        )}
-                        <select
-                          value={(filters as Record<string, string | undefined>)[key] ?? ""}
-                          onChange={(e) =>
-                            setFilters((prev) => ({
-                              ...prev,
-                              [key]: e.target.value || undefined,
-                            }))
-                          }
-                          className="w-full appearance-none rounded-2xl border border-white/10 bg-forest-950/80 px-3 py-3 text-sm text-white focus:border-brand-400 focus:outline-none"
-                        >
-                          <option value="">{t("search.all")}</option>
-                          {filteredOptions.map((opt) => (
-                            <option key={String(opt.value)} value={String(opt.value)}>
-                              {opt.label}
-                            </option>
-                          ))}
-                        </select>
-                      </div>
-                    );
-                  })}
-
                   {/* Rendu UNIQUEMENT quand les filtres sont chargés : sinon le
                       curseur Années affiche brièvement les bornes de repli (1990)
                       avant de sauter à l'année réelle du corpus (ex. 1845). React 19
@@ -2992,6 +3091,7 @@ export default function App() {
                       <span>{yearSliderBounds(filterOptions?.year).min}</span>
                       <span>{yearSliderBounds(filterOptions?.year).max}</span>
                     </div>
+                    <p className="mt-2 text-[10px] leading-snug text-white/35">{t("search.yearsHint")}</p>
                   </div>
                   )}
                 </div>
@@ -3286,6 +3386,15 @@ export default function App() {
                 </div>
               )}
 
+              {/* La page a cessé de suivre une construction inachevée : dit, et non
+                  présenté comme un compte final (ni comme un échec). */}
+              {searchStillRunning && !loading && (
+                <div className="flex items-start gap-2 rounded-2xl border border-gold-500/30 bg-gold-500/10 p-4 text-sm text-gold-200">
+                  <AlertTriangle size={14} className="mt-0.5 shrink-0" />
+                  <span>{searchStillRunning}</span>
+                </div>
+              )}
+
               {loading && searchPhase !== 'idle' && (() => {
                 // Étapes de la recherche pilotées par la PHASE RÉELLE du backend
                 // (/populate/status), pas par un minuteur : le libellé affiché
@@ -3366,7 +3475,7 @@ export default function App() {
                 );
               })()}
 
-              {!loading && !error && !hasResults && (
+              {!loading && !error && !hasResults && !searchStillRunning && (
                 <div className="rounded-3xl border border-dashed border-white/10 bg-white/5 p-10 text-center text-forest-300">
                   {t("search.launchPrompt")}
                 </div>
@@ -3382,14 +3491,15 @@ export default function App() {
                           const total = searchTotalMatching ?? uniqueDocCount;
                           return (
                             <>
+                              {/* Le corpus ENTIER, sans « pertinents » : ce mot comptait
+                                  tout ce que la recherche a trouvé. Les pertinents ont leur
+                                  propre ligne, juste dessous. */}
                               <span className="font-semibold text-white">{total.toLocaleString()}</span>{" "}
-                              {total > 1 ? t("search.documents") : t("search.document")} {total > 1 ? t("search.relevantPlural") : t("search.relevant")}
+                              {total > 1 ? t("search.documents") : t("search.document")}
                               {" "}· {totalPages > 1 ? `${t("search.page")} ${page}/${totalPages}` : t("search.onePage")}
-                              {/* « le corpus complet est dans le scénario » se lisait comme
-                                  « le texte intégral est dans le corpus » : deux sens à un
-                                  coup d'oeil l'un de l'autre. La phrase dit maintenant ce
-                                  qu'elle voulait dire, à savoir que la liste est un aperçu
-                                  et que les analyses portent sur la totalité. */}
+                              {/* La liste est un aperçu : les premiers dans l'ordre choisi.
+                                  Elle disait aussi que « toutes les analyses » utilisent
+                                  les {total} : elles lisent les pertinents (ligne suivante). */}
                               {total > dedupedResults.length && (
                                 <span className="text-forest-500"> · {t("search.topShown")
                                   .replace("{n}", dedupedResults.length.toLocaleString())
@@ -3399,6 +3509,30 @@ export default function App() {
                           );
                         })()}
                       </p>
+                      {searchRelevantCount != null && !searchUnranked && (
+                        <p className="text-xs text-forest-400">
+                          {t("search.relevantCount").replace("{n}", searchRelevantCount.toLocaleString())}
+                        </p>
+                      )}
+                      {/* Le rerank tournait encore à l'affichage : l'ordre est provisoire,
+                          et le classement affiné est proposé quand il est prêt. */}
+                      {searchRerank && (
+                        <p className="flex flex-wrap items-center gap-2 text-xs text-white/50">
+                          {searchRerank === "running" && <RefreshCw size={11} className="animate-spin" />}
+                          <span>{t(searchRerank === "running" ? "search.rerankRunning"
+                            : searchRerank === "ready" ? "search.rerankReady" : "jobs.lostContact")}</span>
+                          {searchRerank !== "running" && currentSearchSid && (
+                            <button type="button" className="text-brand-300 underline hover:text-brand-200"
+                              onClick={() => {
+                                reloadSearchTop(currentSearchSid)
+                                  .then(() => { setSearchRerank(null); setPage(1); })
+                                  .catch(() => { /* le bouton reste, on peut réessayer */ });
+                              }}>
+                              {t("search.reloadList")}
+                            </button>
+                          )}
+                        </p>
+                      )}
                       {liveRefreshing && (
                         <p className="flex items-center gap-2 text-xs text-emerald-300/80">
                           <span className="h-3 w-3 animate-spin rounded-full border-2 border-emerald-300/30 border-t-emerald-300" />
@@ -3466,22 +3600,8 @@ export default function App() {
                         <BookOpen size={12} />
                         {t("search.saveAsScenario")}
                       </button>
-                      <button
-                        type="button"
-                        onClick={() => handleExport("csv")}
-                        className="flex items-center gap-1.5 rounded-xl border border-white/10 px-3 py-1.5 text-xs text-forest-300 transition hover:border-white/20 hover:text-white"
-                      >
-                        <Download size={12} />
-                        CSV
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => handleExport("json")}
-                        className="flex items-center gap-1.5 rounded-xl border border-white/10 px-3 py-1.5 text-xs text-forest-300 transition hover:border-white/20 hover:text-white"
-                      >
-                        <Download size={12} />
-                        JSON
-                      </button>
+                      <SearchExportMenu scenarioId={currentSearchSid} relevant={searchUnranked ? null : searchRelevantCount}
+                        total={searchTotalMatching ?? uniqueDocCount} />
                     </div>
                   </div>
 

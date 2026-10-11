@@ -87,6 +87,7 @@ export function PooledPanel({ scenarioId, tick }: { scenarioId: string; tick: nu
   const [error, setError] = React.useState<string | null>(null);
   const [open, setOpen] = React.useState<string | null>(null);
   const [showSmall, setShowSmall] = React.useState(false);
+  const [allSmall, setAllSmall] = React.useState(false);   // past the first 40 of that list
 
   React.useEffect(() => {
     let alive = true;
@@ -247,12 +248,20 @@ export function PooledPanel({ scenarioId, tick }: { scenarioId: string; tick: nu
           </button>
           {showSmall && (
             <ul className="mt-2 space-y-1 text-[10px] text-white/50">
-              {small.slice(0, 40).map((g) => (
+              {(allSmall ? small : small.slice(0, 40)).map((g) => (
                 <li key={`${g.sheet}|${g.group}|${g.label}|${g.disease}`}>
                   <span className="text-white/70">{name(g)}</span> ({g.disease ?? T("allDiseases")}):{" "}
                   {g.studies.map((s) => `${studyLabel(s)} ${s.x}/${s.n} (${pct(s.p)})`).join("; ")}
                 </li>
               ))}
+              {small.length > 40 && (
+                <li className="text-white/40">
+                  {T("tooFewShown").replace("{shown}", String(allSmall ? small.length : 40)).replace("{total}", String(small.length))}{" "}
+                  <button onClick={() => setAllSmall((v) => !v)} className="text-brand-300/80 underline hover:text-brand-300">
+                    {allSmall ? t("lists.showLess") : t("lists.showAll").replace("{n}", String(small.length))}
+                  </button>
+                </li>
+              )}
             </ul>
           )}
         </div>

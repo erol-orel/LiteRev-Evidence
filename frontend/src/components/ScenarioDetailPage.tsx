@@ -106,9 +106,10 @@ import {
   submitDoubleBlindDecision,
   subscribeAlerts,
   triggerLivingReview,
-  extractPicoBatchGlobal,
-  extractMetadataBatch,
-  fetchFulltextBatch,
+  startEnrichmentBatch,
+  fetchEnrichmentJobs,
+  type EnrichmentJob,
+  type EnrichmentKind,
   fetchEnrichmentStatus,
   fetchEpidemicParameterCandidates,
   extractEpidemicParameters,
@@ -158,6 +159,7 @@ import {
   type ReliefWebStatus,
   type CorpusCounts,
   fetchScenarioQuestions,
+  fetchScenarioQuestionsUpTo,
   saveScenarioQuestion,
   deleteScenarioQuestion,
   decideQuestionProposal,
@@ -165,6 +167,10 @@ import {
   type ScenarioQuestionsPage,
   type RerankJob,
 } from "../lib/api";
+import { pollJob, type PollHandle } from "../lib/poll";
+import {
+  CONCEPTS_DRAWN_PER_TYPE, composeConceptMap, composedConceptCount, composedFilter,
+} from "../lib/conceptMap";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -248,7 +254,32 @@ function ErrorBox({ message }: { message: string }) {
   );
 }
 
+/** Une liste coupée pour la place dit ce qu'elle coupe (« +N ») et se déplie. `items` est
+ *  la liste ENTIÈRE, `initial` ce qu'on en montre replié. */
+function MoreList<T>({ items, initial, render, buttonClassName }: {
+  items: T[]; initial: number; render: (item: T, i: number) => React.ReactNode; buttonClassName?: string;
+}) {
+  const { t } = useI18n();
+  const [open, setOpen] = useState(false);
+  const rest = items.length - initial;
+  return (
+    <>
+      {(open ? items : items.slice(0, initial)).map(render)}
+      {rest > 0 && (
+        <button type="button" onClick={() => setOpen(o => !o)}
+          className={buttonClassName ?? "text-[10px] text-brand-300/80 hover:text-brand-300 underline underline-offset-2"}>
+          {open ? t("lists.showLess") : t("lists.more").replace("{n}", String(rest))}
+        </button>
+      )}
+    </>
+  );
+}
+
 // ─── Section: Queries ─────────────────────────────────────────────────────────
+
+/** Ce que le panneau « recherche en direct » rapatrie de chaque source : un aperçu, pas
+ *  le corpus (que la recherche construit, elle, jusqu'au plafond de l'application). */
+const LIVE_PANEL_PER_SOURCE = 50;
 
 function QueriesSection({ detail, scenarioId }: { detail: ScenarioDetail; scenarioId: string }) {
   const { t } = useI18n();
@@ -293,7 +324,7 @@ function QueriesSection({ detail, scenarioId }: { detail: ScenarioDetail; scenar
     if (!isUserScenario(scenarioId)) return;
     setLiveLoading(true);
     setLiveError(null);
-    searchLive(scenarioId)
+    searchLive(scenarioId, LIVE_PANEL_PER_SOURCE)
       .then(setLiveData)
       .catch(e => setLiveError(e.message))
       .finally(() => setLiveLoading(false));
@@ -530,6 +561,10 @@ function QueriesSection({ detail, scenarioId }: { detail: ScenarioDetail; scenar
               <div className="flex flex-wrap items-center gap-3 text-xs text-forest-400">
                 <span className="text-white font-semibold">{liveData.total} {t("scenarioDetail.queries.liveResultsSuffix")}</span>
                 <span>·</span>
+                <span title={t("scenarioDetail.queries.livePerSourceHint")}>
+                  {t("scenarioDetail.queries.livePerSource").replace("{n}", String(LIVE_PANEL_PER_SOURCE))}
+                </span>
+                <span>·</span>
                 {liveData.new_count > 0 && (
                   <span className="rounded-full border border-amber-500/40 bg-amber-500/10 px-2 py-0.5 text-amber-300">
                     {liveData.new_count} {t("scenarioDetail.queries.newUnindexed")}
@@ -556,8 +591,17 @@ function QueriesSection({ detail, scenarioId }: { detail: ScenarioDetail; scenar
                         : "bg-rose-900/40 text-rose-300"}`}
                     >
                       {src} · {t(`scenarioDetail.queries.sourceStatus.${st.status}`)}
+                      {/* Rapatriés sur le total que la source annonce : « 50 » se lisait
+                          comme tout ce que PubMed avait, quand il en annonçait 1 840. */}
                       {st.status === "ok" || st.status === "partial"
-                        ? ` (${(st.fetched ?? 0).toLocaleString()})`
+                        ? ` (${(() => {
+                            const fetched = st.fetched ?? 0;
+                            const raw = liveData.source_raw_counts?.[src] ?? st.count ?? fetched;
+                            return raw > fetched
+                              ? t("scenarioDetail.queries.fetchedOf")
+                                  .replace("{n}", fetched.toLocaleString()).replace("{total}", raw.toLocaleString())
+                              : fetched.toLocaleString();
+                          })()})`
                         : ""}
                       {typeof st.latency_ms === "number" ? ` ${st.latency_ms} ms` : ""}
                     </span>
@@ -599,7 +643,7 @@ function QueriesSection({ detail, scenarioId }: { detail: ScenarioDetail; scenar
                   <div key={i} className={`rounded-xl border p-3 ${r.in_local_db ? 'border-white/10 bg-white/3' : 'border-amber-500/30 bg-amber-500/5'}`}>
                     <div className="flex items-start justify-between gap-2">
                       <div className="flex-1 min-w-0">
-                        <p className="text-xs font-medium text-white leading-5 truncate">{r.title || t("scenarioDetail.queries.untitled")}</p>
+                        <p className="text-xs font-medium text-white leading-5 truncate" title={r.title || undefined}>{r.title || t("scenarioDetail.queries.untitled")}</p>
                         <div className="flex flex-wrap gap-1.5 mt-1 items-center">
                           {r.hybrid_score != null && (
                             <span className="text-[10px] rounded-full bg-violet-500/20 px-1.5 py-0.5 text-violet-300" title={t("scenarioDetail.queries.relevanceScoreTooltip")}>
@@ -621,7 +665,7 @@ function QueriesSection({ detail, scenarioId }: { detail: ScenarioDetail; scenar
                             <span className="text-[10px] text-forest-500">+{r.also_in_sources.join(", ")}</span>
                           )}
                           {r.year && <span className="text-[10px] text-forest-400">{r.year}</span>}
-                          {r.journal && <span className="text-[10px] text-forest-500 truncate max-w-[120px]">{r.journal}</span>}
+                          {r.journal && <span className="text-[10px] text-forest-500 truncate max-w-[120px]" title={r.journal}>{r.journal}</span>}
                           {r.in_local_db
                             ? <span className="text-[10px] rounded-full border border-emerald-500/40 bg-emerald-500/10 px-1.5 py-0.5 text-emerald-300">{t("scenarioDetail.queries.alreadyIndexed")}</span>
                             : <span className="text-[10px] rounded-full border border-amber-500/40 bg-amber-500/10 px-1.5 py-0.5 text-amber-300">{t("scenarioDetail.queries.notIndexed")}</span>}
@@ -764,7 +808,7 @@ function SpecEditor({ scenarioId, spec, onApplied }: { scenarioId: string; spec:
                 const gone = f.machine_name ? removed.has(f.machine_name) : false;
                 return (
                   <div key={f.machine_name} className={`flex items-center gap-2 text-[11px] rounded-lg px-2 py-1 border ${gone ? "border-rose-500/20 bg-rose-500/5" : "border-white/8 bg-white/2"}`}>
-                    <span className={`flex-1 truncate ${gone ? "line-through text-white/40" : "text-white/70"}`}>{f.name || f.machine_name}</span>
+                    <span className={`flex-1 truncate ${gone ? "line-through text-white/40" : "text-white/70"}`} title={f.name || f.machine_name}>{f.name || f.machine_name}</span>
                     <span className="text-[9px] text-white/30 font-mono">{f.dtype}</span>
                     <button onClick={() => toggleRemove(f.machine_name)} className="text-white/40 hover:text-rose-300"
                       title={gone ? t("scenarioDetail.specEditor.restore") : t("scenarioDetail.specEditor.remove")}>
@@ -775,7 +819,7 @@ function SpecEditor({ scenarioId, spec, onApplied }: { scenarioId: string; spec:
               })}
               {added.map((a, i) => (
                 <div key={`add-${i}`} className="flex items-center gap-2 text-[11px] rounded-lg px-2 py-1 border border-brand-500/25 bg-brand-500/5">
-                  <span className="flex-1 truncate text-brand-200">{a.name}</span>
+                  <span className="flex-1 truncate text-brand-200" title={a.name}>{a.name}</span>
                   <span className="text-[9px] text-white/30 font-mono">{a.dtype}</span>
                   <span className="text-[9px] text-brand-300/60">{t("scenarioDetail.specEditor.new")}</span>
                   <button onClick={() => setAdded(prev => prev.filter((_, j) => j !== i))} className="text-white/40 hover:text-rose-300"><X size={12} /></button>
@@ -1451,7 +1495,8 @@ function SeirModelView({ scenarioId }: { scenarioId: string }) {
                   {p.unit ? ` ${p.unit}` : ""}
                 </div>
                 <div className="hidden sm:flex col-span-3 flex-wrap gap-1 justify-end">
-                  {arts.slice(0, 3).map((a, i) => <ArticleSourceLink key={i} a={a} label={t("scenarioDetail.common.ref")} />)}
+                  <MoreList items={arts} initial={3}
+                    render={(a, i) => <ArticleSourceLink key={i} a={a} label={t("scenarioDetail.common.ref")} />} />
                 </div>
               </div>
             );
@@ -1688,11 +1733,11 @@ function VariablesSection({ detail, scenarioId, onGoToModel }: { detail: Scenari
   const [llmGenStatus, setLlmGenStatus] = useState<string | null>(null);
   const [llmValidating, setLlmValidating] = useState(false);
   const [llmError, setLlmError] = useState<string | null>(null);
-  const llmPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const llmPollRef = useRef<PollHandle<unknown> | null>(null);
   // Anti-setState-après-démontage : garde-fou pour le suivi d'entraînement lancé
-  // depuis l'upload (le poll récursif ci-dessous peut survivre au démontage).
+  // depuis l'upload (le poll ci-dessous peut survivre au démontage).
   const mountedRef = useRef(true);
-  const trainPollRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const trainPollRef = useRef<PollHandle<unknown> | null>(null);
 
   const loadLlmVars = React.useCallback(() => {
     setLlmLoading(true);
@@ -1703,43 +1748,48 @@ function VariablesSection({ detail, scenarioId, onGoToModel }: { detail: Scenari
 
   React.useEffect(() => {
     loadLlmVars();
-    return () => { if (llmPollRef.current) clearInterval(llmPollRef.current); };
+    return () => { llmPollRef.current?.cancel(); };
   }, [loadLlmVars]);
 
   // Démontage : stoppe le suivi d'entraînement et bloque tout setState tardif.
   React.useEffect(() => () => {
     mountedRef.current = false;
-    if (trainPollRef.current) clearTimeout(trainPollRef.current);
+    trainPollRef.current?.cancel();
   }, []);
+
+  // Suivre la génération jusqu'à ce que le serveur ne la dise plus en cours. Une erreur
+  // réseau passagère n'affiche plus « Erreur de génération » : seules plusieurs de suite
+  // arrêtent le suivi, et l'écran dit alors que la génération continue sans doute.
+  const followGeneration = React.useCallback(() => {
+    llmPollRef.current?.cancel();   // pas d'orphelin
+    const h = pollJob({
+      intervalMs: 5000,
+      read: () => getVariablesGenerationStatus(scenarioId),
+      running: s => s.status === "running",
+    });
+    llmPollRef.current = h as PollHandle<unknown>;
+    h.promise.then(out => {
+      if (out.kind === "cancelled") return;
+      setLlmGenStatus(null);
+      setLlmGenerating(false);
+      if (out.kind === "lost") { setLlmError(t("jobs.lostContact")); return; }
+      if (out.status.status === "error") {
+        setLlmError(out.status.error ?? t("scenarioDetail.variables.genError"));
+        return;
+      }
+      loadLlmVars();
+      reloadModelState();   // le model_spec devient "ready" à la fin de la génération
+                            // → rafraîchir pour afficher « Ajuster le modèle » sans reload
+    });
+  }, [scenarioId, loadLlmVars, reloadModelState, t]);
 
   // Polling si generation en cours
   React.useEffect(() => {
     if (!llmVars || llmVars.status !== 'generating') return;
     setLlmGenStatus(t("scenarioDetail.variables.genInProgress"));
-    if (llmPollRef.current) clearInterval(llmPollRef.current);   // pas d'orphelin
-    llmPollRef.current = setInterval(() => {
-      getVariablesGenerationStatus(scenarioId).then(s => {
-        if (s.status === 'done') {
-          if (llmPollRef.current) clearInterval(llmPollRef.current);
-          setLlmGenStatus(null);
-          loadLlmVars();
-          reloadModelState();   // le model_spec devient "ready" à la fin de la génération
-                                // → rafraîchir pour afficher « Ajuster le modèle » sans reload
-        } else if (s.status === 'error') {
-          if (llmPollRef.current) clearInterval(llmPollRef.current);
-          setLlmGenStatus(null);
-          setLlmError(s.error ?? t("scenarioDetail.variables.genError"));
-        }
-      }).catch(() => {
-        // Erreur transitoire (réseau/500) : SANS ce catch, l'intervalle n'était
-        // jamais nettoyé (rejet non géré) → spinner "génération" bloqué à vie.
-        if (llmPollRef.current) clearInterval(llmPollRef.current);
-        setLlmGenStatus(null);
-        setLlmError(t("scenarioDetail.variables.genError"));
-      });
-    }, 5000);
-    return () => { if (llmPollRef.current) clearInterval(llmPollRef.current); };
-  }, [llmVars, scenarioId, loadLlmVars, reloadModelState, t]);
+    followGeneration();
+    return () => { llmPollRef.current?.cancel(); };
+  }, [llmVars, followGeneration, t]);
 
   const handleGenerateLlm = async () => {
     setLlmGenerating(true);
@@ -1747,30 +1797,7 @@ function VariablesSection({ detail, scenarioId, onGoToModel }: { detail: Scenari
     setLlmError(null);
     try {
       await generateScenarioVariables(scenarioId);
-      if (llmPollRef.current) clearInterval(llmPollRef.current);   // avoid orphaning the effect's poll
-      llmPollRef.current = setInterval(() => {
-        getVariablesGenerationStatus(scenarioId).then(s => {
-          if (s.status === 'done') {
-            if (llmPollRef.current) clearInterval(llmPollRef.current);
-            setLlmGenStatus(null);
-            setLlmGenerating(false);
-            loadLlmVars();
-            reloadModelState();   // idem : rendre « Ajuster le modèle » visible immédiatement
-          } else if (s.status === 'error') {
-            if (llmPollRef.current) clearInterval(llmPollRef.current);
-            setLlmGenStatus(null);
-            setLlmGenerating(false);
-            setLlmError(s.error ?? t("scenarioDetail.variables.genError"));
-          }
-        }).catch(() => {
-          // Erreur transitoire : nettoyer l'intervalle + sortir de l'état "génération"
-          // (sinon rejet non géré + spinner bloqué à vie).
-          if (llmPollRef.current) clearInterval(llmPollRef.current);
-          setLlmGenStatus(null);
-          setLlmGenerating(false);
-          setLlmError(t("scenarioDetail.variables.genError"));
-        });
-      }, 5000);
+      followGeneration();
     } catch (e: any) {
       setLlmGenerating(false);
       setLlmGenStatus(null);
@@ -1826,12 +1853,23 @@ function VariablesSection({ detail, scenarioId, onGoToModel }: { detail: Scenari
       // Rafraîchit l'état modèle/données ; si l'entraînement a démarré, on le suit.
       getModelDataset(scenarioId).then(setModelDataset).catch(() => {});
       if (res.training_started) {
-        const poll = () => getModelTrainStatus(scenarioId).then(s => {
-          if (!mountedRef.current) return;   // composant démonté → on arrête
-          if (s.status === 'running') { trainPollRef.current = setTimeout(poll, 3000); }
-          else { getModelRun(scenarioId).then(r => { if (mountedRef.current) setModelRun(r); }).catch(() => {}); }
-        }).catch(() => {});
-        trainPollRef.current = setTimeout(poll, 2000);
+        // Suivi jusqu'à la fin RÉELLE de l'entraînement. Une erreur réseau y mettait fin
+        // en silence (`.catch(() => {})`) : le modèle affiché restait le précédent.
+        trainPollRef.current?.cancel();
+        const h = pollJob({
+          intervalMs: 3000, firstDelayMs: 2000,
+          read: () => getModelTrainStatus(scenarioId),
+          running: s => s.status === "running",
+        });
+        trainPollRef.current = h as PollHandle<unknown>;
+        h.promise.then(out => {
+          if (!mountedRef.current || out.kind === "cancelled") return;   // composant démonté
+          if (out.kind === "lost") { setUploadError(t("jobs.lostContact")); return; }
+          if (out.status.status === "error") {
+            setUploadError(out.status.error ?? t("scenarioDetail.variables.uploadError"));
+          }
+          getModelRun(scenarioId).then(r => { if (mountedRef.current) setModelRun(r); }).catch(() => {});
+        });
       }
     } catch (err: any) {
       setUploadError(err.message || t("scenarioDetail.variables.uploadError"));
@@ -1980,7 +2018,8 @@ function VariablesSection({ detail, scenarioId, onGoToModel }: { detail: Scenari
                       {(band0.rationale || band0.description) && (
                         <p className="text-[10px] text-white/40 leading-snug">{band0.rationale || band0.description}</p>
                       )}
-                      {srcArts.slice(0, 3).map((a, i) => <ArticleSourceLink key={i} a={a} label={t("scenarioDetail.common.ref")} />)}
+                      <MoreList items={srcArts} initial={3}
+                        render={(a, i) => <ArticleSourceLink key={i} a={a} label={t("scenarioDetail.common.ref")} />} />
                     </div>
                   </div>
                 );
@@ -2688,10 +2727,13 @@ function CorpusSection({ scenarioId, threshold, counts, onUseAsThreshold }:
           )}
           {data.articles.length > 0 && (
             <div className="flex items-center justify-between gap-3 pt-1 text-[11px] text-white/40">
+              {/* Les deux nombres comptent la VUE : pendant une recherche dans le corpus,
+                  « 200 sur 6 031 » et « charger 200 de plus » parlaient du corpus entier
+                  alors que la liste n'en retenait que 37. */}
               <span>
                 {t("scenarioDetail.corpus.showing")
                   .replace("{shown}", data.articles.length.toLocaleString())
-                  .replace("{total}", data.total.toLocaleString())}
+                  .replace("{total}", (data.filtered_total ?? data.total).toLocaleString())}
               </span>
               {hasMore && (
                 <button
@@ -2701,7 +2743,8 @@ function CorpusSection({ scenarioId, threshold, counts, onUseAsThreshold }:
                   className="flex items-center gap-1.5 rounded-xl border border-brand-500/20 bg-brand-500/10 px-3 py-1.5 text-xs text-brand-300 hover:bg-brand-500/20 transition disabled:opacity-50"
                 >
                   {loadingMore ? <Loader2 size={11} className="animate-spin" /> : <ChevronDown size={11} />}
-                  {t("scenarioDetail.corpus.loadMore").replace("{n}", String(Math.min(CORPUS_PAGE_SIZE, data.total - data.articles.length)))}
+                  {t("scenarioDetail.corpus.loadMore").replace("{n}", String(Math.min(CORPUS_PAGE_SIZE,
+                    (data.filtered_total ?? data.total) - data.articles.length)))}
                 </button>
               )}
             </div>
@@ -2877,8 +2920,10 @@ function ArticleRow({
             </span>
           </div>
           <h4 className="text-sm font-semibold text-white mt-1.5 leading-5">{article.title}</h4>
+          {/* La liste complète des auteurs quand l'article est déplié : elle n'était
+              lisible nulle part. */}
           {article.authors && (
-            <p className="text-xs text-white/35 mt-1 truncate">{article.authors}</p>
+            <p className={`text-xs text-white/35 mt-1 ${isExpanded ? "" : "truncate"}`} title={article.authors}>{article.authors}</p>
           )}
         </div>
         <button className="text-white/35 hover:text-white shrink-0 mt-1">
@@ -3031,11 +3076,13 @@ function ArticleRow({
             )}
             {article.keywords && (
               <div className="flex flex-wrap gap-1">
-                {article.keywords.split(",").slice(0, 5).map((kw, i) => (
-                  <span key={i} className="text-[10px] text-white/35 bg-forest-800/50 px-1 rounded">
-                    #{kw.trim()}
-                  </span>
-                ))}
+                <MoreList items={article.keywords.split(",").filter(kw => kw.trim())} initial={5}
+                  buttonClassName="text-[10px] text-brand-300/80 hover:text-brand-300 px-1"
+                  render={(kw, i) => (
+                    <span key={i} className="text-[10px] text-white/35 bg-forest-800/50 px-1 rounded">
+                      #{kw.trim()}
+                    </span>
+                  )} />
               </div>
             )}
           </div>
@@ -3059,11 +3106,11 @@ function ClusteringSection({ scenarioId }: { scenarioId: string }) {
   // Les groupes cochés sont ceux qu'on GARDE : c'est le sens de la case, et c'est aussi
   // ce que l'API attend (`clusters` = la sélection retenue, le reste sort).
   const [keptClusters, setKeptClusters] = useState<Set<number>>(new Set());
-  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const pollRef = useRef<PollHandle<unknown> | null>(null);
 
   const stopPolling = useCallback(() => {
     if (pollRef.current) {
-      clearInterval(pollRef.current);
+      pollRef.current.cancel();
       pollRef.current = null;
     }
     setPolling(false);
@@ -3088,39 +3135,33 @@ function ClusteringSection({ scenarioId }: { scenarioId: string }) {
         setLoading(false);
         setPolling(true);
         setData(result);
-        // ── Le sondage a une FIN ───────────────────────────────────────────
-        // Il ne s'arrêtait que sur « done AVEC des clusters » ou sur « error » : un
-        // corpus trop petit pour être groupé (zéro cluster, ce qui est un résultat) et
-        // un redémarrage de l'API (le job en mémoire disparaît, le statut retombe sur
-        // « idle ») laissaient le fuseau tourner indéfiniment, une requête toutes les
-        // cinq secondes, jusqu'à la fermeture de l'onglet.
-        let _ticks = 0;
-        const MAX_TICKS = 180;            // 15 minutes, soit bien au-delà d'un calcul
-        pollRef.current = setInterval(async () => {
-          _ticks += 1;
-          try {
-            const status = await fetchScenarioClusteringStatus(scenarioId);
-            if (status.status === "done") {
-              stopPolling();
-              handleResult(status);      // y compris un résultat à zéro cluster
-            } else if (status.status === "error") {
-              stopPolling();
-              setError(status.error || t("scenarioDetail.clustering.errorClustering"));
-            } else if (status.status === "not_started") {
-              // Plus de job et rien en cache : l'API a redémarré pendant le calcul.
-              stopPolling();
-              setError(t("scenarioDetail.clustering.interrupted"));
-            } else if (_ticks >= MAX_TICKS) {
-              stopPolling();
-              setError(t("scenarioDetail.clustering.pollTimedOut"));
-            }
-          } catch (_) {
-            if (_ticks >= MAX_TICKS) {
-              stopPolling();
-              setError(t("scenarioDetail.clustering.pollTimedOut"));
-            }
+        // ── Le sondage a une FIN, et ce n'est pas un plafond ─────────────────
+        // Il s'arrête quand le serveur ne dit plus « en cours » : résultat (y compris à
+        // zéro cluster), erreur, ou job disparu après un redémarrage (« not_started »).
+        // Il s'arrêtait aussi au bout de 15 minutes en annonçant « n'a pas abouti,
+        // relancez », pendant que le calcul continuait : il ralentit maintenant au lieu
+        // de s'arrêter, et ne lâche qu'après plusieurs erreurs réseau de suite, en disant
+        // que le calcul continue sans doute sur le serveur.
+        const h = pollJob({
+          intervalMs: 5000,
+          read: () => fetchScenarioClusteringStatus(scenarioId),
+          running: s => s.status === "running",
+        });
+        pollRef.current = h as PollHandle<unknown>;
+        h.promise.then(out => {
+          if (out.kind === "cancelled") return;
+          stopPolling();
+          if (out.kind === "lost") { setError(t("scenarioDetail.clustering.pollTimedOut")); return; }
+          const status = out.status;
+          if (status.status === "done") {
+            handleResult(status);      // y compris un résultat à zéro cluster
+          } else if (status.status === "error") {
+            setError(status.error || t("scenarioDetail.clustering.errorClustering"));
+          } else {
+            // Plus de job et rien en cache : l'API a redémarré pendant le calcul.
+            setError(t("scenarioDetail.clustering.interrupted"));
           }
-        }, 5000);
+        });
       } else {
         handleResult(result);
         setLoading(false);
@@ -3562,19 +3603,48 @@ function UmapScatterPlot({clusters,selectedCluster,onSelectCluster}:{clusters:Cl
  * et peut proposer une mise à jour du scénario. Le panneau sert ces quatre usages
  * et rien d'autre.
  */
+const QUESTIONS_PAGE = 50;
+
 function QuestionHistory({ scenarioId, refreshKey, onReask, canAdopt }:
   { scenarioId: string; refreshKey: number; onReask: (q: string) => void; canAdopt: boolean }) {
   const { t } = useI18n();
   const [page, setPage] = useState<ScenarioQuestionsPage | null>(null);
   const [openId, setOpenId] = useState<number | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
+  const [loadingMore, setLoadingMore] = useState(false);
+  // Combien de questions la liste montre. Une décision ou une suppression recharge ces
+  // N-là, pas les cinquante premières : la liste ne se replie pas sous la main.
+  const wantedRef = useRef(QUESTIONS_PAGE);
 
   const load = useCallback(() => {
-    fetchScenarioQuestions(scenarioId, { limit: 50 })
+    fetchScenarioQuestionsUpTo(scenarioId, wantedRef.current)
       .then(setPage)
       .catch(() => { /* non bloquant */ });
   }, [scenarioId]);
   useEffect(() => { load(); }, [load, refreshKey]);
+
+  const loadMore = () => {
+    if (!page || loadingMore) return;
+    setLoadingMore(true);
+    fetchScenarioQuestions(scenarioId, { limit: QUESTIONS_PAGE, offset: page.items.length })
+      .then(next => {
+        setPage(prev => (prev ? { ...next, items: [...prev.items, ...next.items] } : next));
+        wantedRef.current = page.items.length + next.items.length;
+      })
+      .catch(() => { /* non bloquant */ })
+      .finally(() => setLoadingMore(false));
+  };
+
+  // « Posée plusieurs fois » sur TOUTE la liste chargée : le serveur ne le compte que
+  // dans la page qu'il rend, et la liste en assemble maintenant plusieurs.
+  const repeats = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const it of page?.items ?? []) {
+      const key = (it.question ?? "").trim().toLowerCase().replace(/\s+/g, " ");
+      counts.set(key, (counts.get(key) ?? 0) + 1);
+    }
+    return counts;
+  }, [page]);
 
   const decide = (qid: number, key: string, decision: "accepted" | "rejected") => {
     setBusy(`${qid}:${key}`);
@@ -3621,7 +3691,7 @@ function QuestionHistory({ scenarioId, refreshKey, onReask, canAdopt }:
                   </p>
                 </div>
                 <div className="shrink-0 flex items-center gap-1.5">
-                  {(q.asked_times_in_page ?? 1) > 1 && (
+                  {(repeats.get((q.question ?? "").trim().toLowerCase().replace(/\s+/g, " ")) ?? 1) > 1 && (
                     <span className="rounded-full border border-brand-500/30 bg-brand-500/10 px-2 py-0.5 text-[10px] text-brand-300"
                           title={t("scenarioDetail.rag.historyRepeatHint")}>
                       {t("scenarioDetail.rag.historyRepeat")}
@@ -3717,6 +3787,18 @@ function QuestionHistory({ scenarioId, refreshKey, onReask, canAdopt }:
           );
         })}
       </div>
+      {page.total > page.items.length && (
+        <div className="flex items-center justify-between gap-3 text-[11px] text-white/40">
+          <span>{t("scenarioDetail.rag.historyShownOf")
+            .replace("{shown}", page.items.length.toLocaleString())
+            .replace("{total}", page.total.toLocaleString())}</span>
+          <button type="button" onClick={loadMore} disabled={loadingMore}
+            className="flex items-center gap-1.5 rounded-xl border border-brand-500/20 bg-brand-500/10 px-3 py-1.5 text-xs text-brand-300 hover:bg-brand-500/20 transition disabled:opacity-50">
+            {loadingMore ? <Loader2 size={11} className="animate-spin" /> : <ChevronDown size={11} />}
+            {t("lists.loadMore").replace("{n}", String(Math.min(QUESTIONS_PAGE, page.total - page.items.length)))}
+          </button>
+        </div>
+      )}
     </div>
   );
 }
@@ -4008,8 +4090,8 @@ function RagSection({ scenarioId, detail }: { scenarioId: string; detail: Scenar
                       </span>
                       <span className="text-[10px] text-white/35 font-mono">{t("scenarioDetail.rag.relevance")} {(src.score * 100).toFixed(0)}%</span>
                     </div>
-                    <h5 className="font-semibold text-white mt-1.5 leading-4 line-clamp-2">{src.title}</h5>
-                    <p className="text-[10px] text-white/35 mt-1 truncate">
+                    <h5 className="font-semibold text-white mt-1.5 leading-4 line-clamp-2" title={src.title}>{src.title}</h5>
+                    <p className="text-[10px] text-white/35 mt-1 truncate" title={`${src.authors ?? ""} • ${src.year || "N/A"}`}>
                       {src.authors} • {src.year || "N/A"}
                     </p>
                   </div>
@@ -4712,9 +4794,15 @@ function PrismaSection({ scenarioId }: { scenarioId: string }) {
               <p className="text-[9px] font-bold uppercase tracking-wider text-white/40">
                 {t("scenarioDetail.prisma.exclusionReasons")}
               </p>
+              {/* La dernière ligne regroupe, quand il y en a, les motifs au-delà des douze
+                  premiers : la liste somme ainsi au total des exclus. */}
               {mc.excluded_by_reason!.map(r => (
-                <div key={r.reason} className="flex items-start justify-between gap-2 text-[10px]">
-                  <span className="text-white/50 break-words min-w-0">{r.reason}</span>
+                <div key={r.other ? "__other" : r.reason} className="flex items-start justify-between gap-2 text-[10px]">
+                  <span className={`break-words min-w-0 ${r.other ? "text-white/40 italic" : "text-white/50"}`}>
+                    {r.other
+                      ? t("scenarioDetail.prisma.otherReasons").replace("{n}", String(r.reasons ?? 0))
+                      : r.reason}
+                  </span>
                   <span className="font-mono text-white/70 shrink-0">{r.articles.toLocaleString()}</span>
                 </div>
               ))}
@@ -4755,6 +4843,8 @@ function PrismaSection({ scenarioId }: { scenarioId: string }) {
 
 
 // ─── Section: PICO Tableau Comparatif ─────────────────────────────────────────
+const PICO_PAGE = 100;
+
 function PicoSection({ scenarioId }: { scenarioId: string }) {
   const { t } = useI18n();
   const [data, setData] = React.useState<PicoBulkResponse | null>(null);
@@ -4763,6 +4853,19 @@ function PicoSection({ scenarioId }: { scenarioId: string }) {
   const [filter, setFilter] = React.useState<'all'|'with_pico'|'without_pico'>('all');
   const [search, setSearch] = React.useState('');
   const [sortBy, setSortBy] = React.useState<'year'|'confidence'|'design'>('year');
+  // Les lignes montrées, par tranches de 100, remises à 100 quand la vue change (même
+  // mécanique que la table d'extraction). La table s'arrêtait aux cent premières sans
+  // autre recours que le CSV.
+  const viewKey = `${filter}|${search}|${sortBy}`;
+  const [shownRows, setShownRows] = React.useState({ key: viewKey, n: PICO_PAGE });
+  const visible = shownRows.key === viewKey ? shownRows.n : PICO_PAGE;
+  // Les lignes dépliées : P, I, C et O étaient coupés à trois lignes, sans recours.
+  const [openRows, setOpenRows] = React.useState<Set<number>>(new Set());
+  const toggleRow = (id: number) => setOpenRows(prev => {
+    const next = new Set(prev);
+    if (next.has(id)) next.delete(id); else next.add(id);
+    return next;
+  });
 
   React.useEffect(() => {
     setLoading(true);
@@ -4839,6 +4942,15 @@ function PicoSection({ scenarioId }: { scenarioId: string }) {
           <div className="h-full bg-brand-500 rounded-full transition-all" style={{width:`${coverage}%`}}/>
         </div>
       </div>
+      {/* Le chargement suit les pages jusqu'à une limite : au-delà, le tableau, son tri
+          et son CSV ne portent que ce qui a été chargé, et le disent. */}
+      {data.truncated && (
+        <p className="rounded-xl border border-gold-500/20 bg-gold-500/5 px-3 py-2 text-[10px] text-gold-300">
+          {t("scenarioDetail.pico.truncated")
+            .replace("{n}", data.articles.length.toLocaleString())
+            .replace("{total}", data.total.toLocaleString())}
+        </p>
+      )}
       {/* Controls */}
       <div className="flex flex-wrap gap-2 items-center">
         <input
@@ -4883,15 +4995,22 @@ function PicoSection({ scenarioId }: { scenarioId: string }) {
             </tr>
           </thead>
           <tbody>
-            {filtered.slice(0,100).map((a,i)=>(
-              <tr key={a.id} className={`border-b border-white/3 transition ${i%2===0?'bg-white/1':'bg-transparent'} hover:bg-white/4`}>
+            {/* Trié sur TOUTES les lignes filtrées, puis montré par tranches : la
+                tranche affichée est le début de l'ordre choisi, jamais un tri des seules
+                lignes déjà à l'écran. Un clic sur une ligne la déplie. */}
+            {filtered.slice(0, visible).map((a,i)=>{
+              const open = openRows.has(a.id);
+              return (
+              <tr key={a.id} onClick={() => toggleRow(a.id)}
+                title={open ? t("scenarioDetail.pico.collapseRow") : t("scenarioDetail.pico.expandRow")}
+                className={`border-b border-white/3 transition cursor-pointer ${i%2===0?'bg-white/1':'bg-transparent'} hover:bg-white/4`}>
                 <td className="px-3 py-2 max-w-[200px]">
                   <div className="flex items-start gap-1.5">
                     {a.has_pico
                       ? <span className="mt-0.5 h-1.5 w-1.5 rounded-full bg-brand-400 shrink-0"/>
                       : <span className="mt-0.5 h-1.5 w-1.5 rounded-full bg-white/20 shrink-0"/>
                     }
-                    <span className="text-white/70 leading-4 line-clamp-2">{a.title}</span>
+                    <span className={`text-white/70 leading-4 ${open ? "" : "line-clamp-2"}`}>{a.title}</span>
                   </div>
                 </td>
                 <td className="px-3 py-2 text-white/50 font-mono whitespace-nowrap">{a.year||'-'}</td>
@@ -4911,16 +5030,23 @@ function PicoSection({ scenarioId }: { scenarioId: string }) {
                 </td>
                 {(['P','I','C','O'] as const).map(key=>(
                   <td key={key} className="px-3 py-2 max-w-[160px]">
-                    <span className="text-white/60 leading-4 line-clamp-3">{(a as any)[key]||<span className="text-white/20"> - </span>}</span>
+                    <span className={`text-white/60 leading-4 ${open ? "whitespace-pre-line" : "line-clamp-3"}`}>{(a as any)[key]||<span className="text-white/20"> - </span>}</span>
                   </td>
                 ))}
               </tr>
-            ))}
+              );
+            })}
           </tbody>
         </table>
-        {filtered.length > 100 && (
-          <div className="text-center py-3 text-[10px] text-white/35">
-            {t("scenarioDetail.pico.showingFirstPart1")} {filtered.length}. {t("scenarioDetail.pico.showingFirstPart2")}
+        {filtered.length > visible && (
+          <div className="text-center py-3 text-[10px] text-white/45">
+            {t("scenarioDetail.pico.showingFirst")
+              .replace("{n}", visible.toLocaleString())
+              .replace("{total}", filtered.length.toLocaleString())}{" "}
+            <button onClick={() => setShownRows({ key: viewKey, n: visible + PICO_PAGE })}
+              className="text-brand-300 underline">
+              {t("lists.loadMore").replace("{n}", String(Math.min(PICO_PAGE, filtered.length - visible)))}
+            </button>
           </div>
         )}
         {filtered.length === 0 && (
@@ -5006,6 +5132,10 @@ function ConceptMapView({ scenarioId }: { scenarioId: string }) {
   const [filtersReady, setFiltersReady] = React.useState(false);
   // Restreindre le corpus invalide la carte en cache : elle décrivait le corpus d'avant.
   const [reloadKey, setReloadKey] = React.useState(0);
+  // Le suivi de l'annotation a perdu le contact : le serveur continue sans doute.
+  const [pollLost, setPollLost] = React.useState(false);
+  // Le concept dont les voisins sont dépliés (tous, et non les huit premiers).
+  const [neighboursOpenFor, setNeighboursOpenFor] = React.useState<number | null>(null);
 
   React.useEffect(() => {
     setFiltersReady(false);
@@ -5040,22 +5170,25 @@ function ConceptMapView({ scenarioId }: { scenarioId: string }) {
 
   React.useEffect(() => {
     let cancelled = false;
-    let timer: ReturnType<typeof setTimeout> | null = null;
-    let polls = 0;
-    const load = () => {
-      fetchConceptGraph(scenarioId)
-        .then(d => {
-          if (cancelled) return;
-          setData(d);
-          setLoading(false);
-          // The API normalises the missing concepts in the background: re-read until done.
-          if (d.enriching && polls < 40) { polls += 1; timer = setTimeout(load, 6000); }
-        })
-        .catch((e: Error) => { if (!cancelled) { setError(e.message); setLoading(false); } });
-    };
-    setLoading(true); setError(null); setSelected(null); setShowAll(false);
-    load();
-    return () => { cancelled = true; if (timer) clearTimeout(timer); };
+    let poll: PollHandle<ConceptGraphData> | null = null;
+    setLoading(true); setError(null); setSelected(null); setShowAll(false); setPollLost(false);
+    fetchConceptGraph(scenarioId)
+      .then(d => {
+        if (cancelled) return;
+        setData(d);
+        setLoading(false);
+        // The API normalises the missing concepts in the background: re-read the map for
+        // as long as it says so. It stopped after 40 reads (4 minutes) and the banner kept
+        // promising a refresh that never came.
+        if (!d.enriching) return;
+        poll = pollJob({
+          intervalMs: 6000, read: () => fetchConceptGraph(scenarioId),
+          running: s => !!s.enriching, onStatus: s => { if (!cancelled) setData(s); },
+        });
+        poll.promise.then(out => { if (!cancelled && out.kind === "lost") setPollLost(true); });
+      })
+      .catch((e: Error) => { if (!cancelled) { setError(e.message); setLoading(false); } });
+    return () => { cancelled = true; poll?.cancel(); };
   }, [scenarioId, reloadKey]);
 
   if (loading && !data) return <LoadingSpinner text={t("scenarioDetail.knowledgeGraph.calculating")} />;
@@ -5072,19 +5205,18 @@ function ConceptMapView({ scenarioId }: { scenarioId: string }) {
 
   // ── Layered layout: one column per type, nodes stacked by article count ─────
   // Le graphe ne montre que ce que l'utilisateur a retenu : catégories cochées,
-  // concepts non retirés, au moins `minArticles` articles derrière chacun.
+  // concepts non retirés, au moins `minArticles` articles derrière chacun ; puis, faute
+  // de place, quatorze concepts par colonne. Cette dernière coupe est l'affaire de
+  // l'écran seul : l'export et la restriction envoient les FILTRES, que le serveur
+  // applique à l'index complet des concepts (lib/conceptMap.ts).
   const presentTypes = CONCEPT_TYPE_ORDER.filter(ty => data.nodes.some(n => n.type === ty));
   const keep = (n: ConceptNode) => !hiddenNodes.has(n.id) && n.count >= minArticles;
-  const types = presentTypes.filter(ty => !hiddenTypes.has(ty) && data.nodes.some(n => n.type === ty && keep(n)));
   const countInType = (ty: ConceptType) => data.nodes.filter(n => n.type === ty && keep(n)).length;
-  const byType: Partial<Record<ConceptType, ConceptNode[]>> = {};
-  for (const ty of types) {
-    byType[ty] = data.nodes.filter(n => n.type === ty && keep(n))
-      .sort((a, b) => b.count - a.count).slice(0, 14);
-  }
-  const filtersActive = hiddenTypes.size > 0 || hiddenNodes.size > 0 || minArticles > 1;
-  const shown = new Set<number>();
-  for (const ty of types) for (const n of byType[ty] ?? []) shown.add(n.id);
+  const mapFilters = { hiddenTypes, hiddenNodes, minArticles };
+  const composed = composeConceptMap(data, mapFilters, CONCEPT_TYPE_ORDER);
+  const { types, byType, shown, filtersActive } = composed;
+  const composedCount = composedConceptCount(data, mapFilters);
+  const cutTypes = composed.perType.filter(p => p.total > p.shown);
   const maxCount = Math.max(1, ...data.nodes.map(n => n.count));
   const radius = (n: ConceptNode) => 4 + 12 * Math.sqrt(n.count / maxCount);
   const W = 980;
@@ -5202,30 +5334,55 @@ function ConceptMapView({ scenarioId }: { scenarioId: string }) {
             {t("scenarioDetail.knowledgeGraph.resetFilters")}
           </button>
         )}
-        {/* La liste des articles de la carte TELLE QU'ELLE EST COMPOSÉE : l'union des
-            concepts visibles, donc exactement ce que l'écran montre. Une carte filtrée
-            pour une question précise devient ainsi une bibliographie. */}
+        {/* La liste des articles de la carte TELLE QU'ELLE EST COMPOSÉE : tous les
+            concepts de l'index que les choix de l'utilisateur retiennent, et non les seuls
+            concepts que l'écran a la place de dessiner. Une carte filtrée pour une
+            question précise devient ainsi une bibliographie complète. */}
         <SubsetExportMenu
-          disabled={shown.size === 0}
+          disabled={composedCount === 0}
           title={t("scenarioDetail.knowledgeGraph.exportVisible")
-            .replace("{n}", String(shown.size))}
+            .replace("{n}", composedCount.toLocaleString())}
           run={format => exportConceptArticles(
-            scenarioId,
-            data.nodes.filter(n => shown.has(n.id)).map(n => ({ type: n.type, label: n.label.en })),
-            format, { mode: "any" })}
+            scenarioId, [], format, { composed: composedFilter(data, mapFilters) })}
         />
       </div>
 
+      {/* Ce que l'écran ne dessine pas, dit : quatorze concepts par colonne, sur les
+          noeuds que le serveur garde pour la carte. L'export et la restriction n'en
+          tiennent pas compte. */}
+      {(cutTypes.length > 0 || (data.concepts_total ?? 0) > data.nodes.length || pollLost) && (
+        <div className="rounded-xl border border-white/8 bg-white/2 px-3 py-2 text-[10px] leading-4 text-white/45 space-y-0.5">
+          {cutTypes.length > 0 && (
+            <p>
+              {t("scenarioDetail.knowledgeGraph.drawnPerType")
+                .replace("{max}", String(CONCEPTS_DRAWN_PER_TYPE))
+                .replace("{list}", cutTypes.map(p => t("scenarioDetail.knowledgeGraph.drawnOf")
+                  .replace("{type}", typeName(p.type))
+                  .replace("{shown}", String(p.shown))
+                  .replace("{total}", p.total.toLocaleString())).join(", "))}
+            </p>
+          )}
+          {data.max_nodes != null && data.concepts_total != null && data.concepts_total > data.nodes.length && (
+            <p>
+              {t("scenarioDetail.knowledgeGraph.serverCap")
+                .replace("{nodes}", String(data.nodes.length))
+                .replace("{min}", String(data.min_count ?? 1))
+                .replace("{total}", data.concepts_total.toLocaleString())
+                .replace("{max}", String(data.max_nodes))}
+            </p>
+          )}
+          {pollLost && <p className="text-gold-300/80">{t("jobs.lostContact")}</p>}
+        </div>
+      )}
+
       {/* Composer la carte est déjà une façon de dire ce qui compte : la restreindre au
-          corpus est le geste suivant. La sélection est l'UNION des concepts visibles,
-          exactement ce que l'écran montre et ce que l'export produit. */}
+          corpus est le geste suivant. La sélection est la carte composée, ses FILTRES,
+          appliqués à l'index complet : exactement ce que l'export produit. Seul un choix
+          de l'utilisateur l'ouvre, jamais la place qui manque à l'écran. */}
       <SubsetNarrowPanel
         scenarioId={scenarioId}
-        selection={{
-          concepts: data.nodes.filter(n => shown.has(n.id)).map(n => `${n.type}:${n.label.en}`),
-          concept_mode: "any",
-        }}
-        enabled={shown.size > 0 && shown.size < data.nodes.length}
+        selection={{ concept_filter: composedFilter(data, mapFilters) }}
+        enabled={filtersActive && composedCount > 0}
         onApplied={() => setReloadKey(k => k + 1)}
       />
 
@@ -5322,16 +5479,24 @@ function ConceptMapView({ scenarioId }: { scenarioId: string }) {
               {neighbours.length > 0 && (
                 <div className="space-y-1">
                   <p className="text-[10px] font-bold uppercase tracking-wider text-white/40">{t("scenarioDetail.knowledgeGraph.connectedConcepts")}</p>
-                  {neighbours.slice(0, 8).map(({ n, w }) => (
+                  {(neighboursOpenFor === sel.id ? neighbours : neighbours.slice(0, 8)).map(({ n, w }) => (
                     <button key={n.id} type="button" onClick={() => setSelected(n.id)}
                       className="flex w-full items-center justify-between gap-2 rounded px-1 py-0.5 text-left text-[10px] hover:bg-white/3">
                       <span className="flex items-center gap-1.5 min-w-0">
                         <span className="h-1.5 w-1.5 rounded-full shrink-0" style={{ background: CONCEPT_TYPE_COLORS[n.type] }} />
-                        <span className="truncate text-white/70">{label(n)}</span>
+                        <span className="truncate text-white/70" title={label(n)}>{label(n)}</span>
                       </span>
                       <span className="font-mono text-brand-300 shrink-0">{w}</span>
                     </button>
                   ))}
+                  {neighbours.length > 8 && (
+                    <button type="button" onClick={() => setNeighboursOpenFor(neighboursOpenFor === sel.id ? null : sel.id)}
+                      className="text-[10px] text-brand-300 hover:underline">
+                      {neighboursOpenFor === sel.id
+                        ? t("lists.showLess")
+                        : t("lists.showAll").replace("{n}", String(neighbours.length))}
+                    </button>
+                  )}
                 </div>
               )}
               <div className="space-y-1">
@@ -5341,7 +5506,7 @@ function ConceptMapView({ scenarioId }: { scenarioId: string }) {
                   return (
                     <div key={id} className="flex items-start gap-1.5 text-[10px]">
                       <span className="font-mono text-white/30 shrink-0 w-8">{a.y ?? "-"}</span>
-                      <span className="text-white/65 leading-3 line-clamp-2 flex-1">{a.t}</span>
+                      <span className="text-white/65 leading-3 line-clamp-2 flex-1" title={a.t}>{a.t}</span>
                       {href && <a href={href} target="_blank" rel="noreferrer" className="text-brand-300 shrink-0"><ExternalLink size={10} /></a>}
                     </div>
                   );
@@ -5376,7 +5541,7 @@ function ConceptMapView({ scenarioId }: { scenarioId: string }) {
               {links.map((e, i) => (
                 <button key={i} type="button" onClick={() => setSelected(e.source)}
                   className="flex w-full items-center justify-between gap-2 rounded px-1 py-0.5 text-left text-[10px] hover:bg-white/3">
-                  <span className="truncate text-white/65">{nameOf(e.source)} <span className="text-white/30"> - </span> {nameOf(e.target)}</span>
+                  <span className="truncate text-white/65" title={`${nameOf(e.source)} - ${nameOf(e.target)}`}>{nameOf(e.source)} <span className="text-white/30"> - </span> {nameOf(e.target)}</span>
                   <span className="font-mono text-brand-300 shrink-0">{e.weight}</span>
                 </button>
               ))}
@@ -5388,7 +5553,7 @@ function ConceptMapView({ scenarioId }: { scenarioId: string }) {
               <p className="text-[10px] font-bold uppercase tracking-wider text-white/40">{t("scenarioDetail.knowledgeGraph.documentedChains")}</p>
               {data.triples.map((tr, i) => (
                 <div key={i} className="flex items-center justify-between gap-2 text-[10px]">
-                  <span className="truncate text-white/65">{tr.nodes.map(nameOf).join(" › ")}</span>
+                  <span className="truncate text-white/65" title={tr.nodes.map(nameOf).join(" › ")}>{tr.nodes.map(nameOf).join(" › ")}</span>
                   <span className="font-mono text-brand-300 shrink-0">{tr.count}</span>
                 </div>
               ))}
@@ -5400,7 +5565,7 @@ function ConceptMapView({ scenarioId }: { scenarioId: string }) {
               <p className="text-[10px] font-bold uppercase tracking-wider text-amber-200/70">{t("scenarioDetail.knowledgeGraph.evidenceGaps")}</p>
               <p className="text-[9px] text-white/35">{t("scenarioDetail.knowledgeGraph.gapsHint")}</p>
               {data.gaps.map((g, i) => (
-                <div key={i} className="text-[10px] text-white/65 truncate">{nameOf(g.nodes[0])} <span className="text-amber-300/70">×</span> {nameOf(g.nodes[1])}</div>
+                <div key={i} className="text-[10px] text-white/65 truncate" title={`${nameOf(g.nodes[0])} × ${nameOf(g.nodes[1])}`}>{nameOf(g.nodes[0])} <span className="text-amber-300/70">×</span> {nameOf(g.nodes[1])}</div>
               ))}
             </div>
           )}
@@ -5641,7 +5806,7 @@ function ArticleSimilarityGraph({ scenarioId }: { scenarioId: string }) {
               </div>
               <div className="space-y-1.5 text-[10px] text-white/50">
                 <div className="flex justify-between"><span>{t("scenarioDetail.knowledgeGraph.year")}</span><span className="text-white/70">{selectedNodeData.year || 'N/A'}</span></div>
-                <div className="flex justify-between"><span>{t("scenarioDetail.knowledgeGraph.journal")}</span><span className="text-white/70 text-right max-w-[120px] truncate">{selectedNodeData.journal || '-'}</span></div>
+                <div className="flex justify-between"><span>{t("scenarioDetail.knowledgeGraph.journal")}</span><span className="text-white/70 text-right max-w-[120px] truncate" title={selectedNodeData.journal || undefined}>{selectedNodeData.journal || '-'}</span></div>
                 <div className="flex justify-between"><span>{t("scenarioDetail.knowledgeGraph.studyType")}</span><span className="rounded bg-brand-500/10 border border-brand-500/20 px-1 text-brand-300">{selectedNodeData.design}</span></div>
                 <div className="flex justify-between"><span>{t("scenarioDetail.knowledgeGraph.connections")}</span><span className="text-brand-300 font-semibold">{selectedNodeData.degree}</span></div>
                 <div className="flex justify-between"><span>{t("scenarioDetail.knowledgeGraph.quality")}</span><span className="text-gold-400 font-semibold">{selectedNodeData.quality > 0 ? Math.round(selectedNodeData.quality * 100) + '%' : '-'}</span></div>
@@ -5737,6 +5902,14 @@ function DoubleBlindSection({ scenarioId }: { scenarioId: string }) {
   const [queue, setQueue] = React.useState<DoubleBlindQueue | null>(null);
   const [auditError, setAuditError] = React.useState<string | null>(null);
   const reviewer: 1|2 = reviewerRole ?? 1;
+  // Le relecteur vote sur le résumé ENTIER, que le serveur envoie : il était coupé à
+  // trois lignes sans moyen de le déplier. Replier reste possible, article par article.
+  const [collapsedAbstracts, setCollapsedAbstracts] = React.useState<Set<number>>(new Set());
+  const toggleAbstract = (id: number) => setCollapsedAbstracts(prev => {
+    const next = new Set(prev);
+    if (next.has(id)) next.delete(id); else next.add(id);
+    return next;
+  });
 
   // Le rôle est demandé AU SERVEUR, qui le tient par scénario. Il était calculé ici,
   // à partir d'un `sessionStorage` propre à l'onglet : deux relecteurs sur deux
@@ -5985,7 +6158,15 @@ function DoubleBlindSection({ scenarioId }: { scenarioId: string }) {
               {queue.articles.map(art => (
                 <div key={art.id} className="rounded-xl border border-white/5 bg-white/2 p-3 space-y-2">
                   <p className="text-xs font-semibold text-white/80 leading-4">{art.title}</p>
-                  <p className="text-[10px] text-white/40 line-clamp-3 leading-4">{art.abstract}</p>
+                  <p className={`text-[10px] text-white/55 leading-4 whitespace-pre-line ${collapsedAbstracts.has(art.id) ? "line-clamp-3" : ""}`}>{art.abstract}</p>
+                  {(art.abstract ?? "").length > 240 && (
+                    <button type="button" onClick={() => toggleAbstract(art.id)}
+                      className="flex items-center gap-1 text-[10px] text-brand-300/80 hover:text-brand-300">
+                      {collapsedAbstracts.has(art.id)
+                        ? <><ChevronDown size={10} />{t("scenarioDetail.doubleBlind.expandAbstract")}</>
+                        : <><ChevronUp size={10} />{t("scenarioDetail.doubleBlind.collapseAbstract")}</>}
+                    </button>
+                  )}
                   <div className="flex items-center gap-3 text-[9px] text-white/30 font-mono">
                     {art.year ? <span>{art.year}</span> : null}
                     {art.journal ? <span className="truncate">{art.journal}</span> : null}
@@ -6190,17 +6371,29 @@ function AlertsSection({ scenarioId }: { scenarioId: string }) {
 
 // ─── Section: Enrichissement LLM Batch ────────────────────────────────────────
 
+// Un lot de liens d'accès ouvert interroge Unpaywall article par article (8 s au plus
+// chacun) : il garde son plafond par exécution, que le bouton dit.
+const FULLTEXT_BATCH_CAP = 1000;
+const ENRICHMENT_KINDS: EnrichmentKind[] = ["pico", "metadata", "fulltext"];
+
 export function EnrichmentSection({ scenarioId }: { scenarioId?: string }) {
   const { t } = useI18n();
   const [status, setStatus] = React.useState<EnrichmentStatus | null>(null);
   const [loadingStatus, setLoadingStatus] = React.useState(false);
-  const [running, setRunning] = React.useState<string | null>(null);
+  // Les lots tels que le SERVEUR les décrit : ils tournent en arrière-plan, et un lot
+  // lancé avant d'ouvrir l'onglet (ou avant un rechargement) se suit aussi.
+  const [jobs, setJobs] = React.useState<Partial<Record<EnrichmentKind, EnrichmentJob | null>>>({});
+  const [starting, setStarting] = React.useState<EnrichmentKind | null>(null);
   const [lastResult, setLastResult] = React.useState<{ type: string; msg: string; error: boolean } | null>(null);
-  const [limit, setLimit] = React.useState(100000);
+  // Vide : tout ce qui reste à traiter. Le défaut était 100 000, un nombre que le
+  // bouton affichait tel quel (« Lancer (100000 articles) »).
+  const [limit, setLimit] = React.useState<number | null>(null);
   // Sur un scénario, le défaut est le sous-ensemble PERTINENT : un enrichissement
   // coûte un appel de modèle par article, et c'est ce sous-ensemble que les
   // analyses lisent. Hors scénario la question ne se pose pas.
   const [scope, setScope] = React.useState<EnrichmentScope>(scenarioId ? "relevant" : "all");
+  const pollRef = React.useRef<PollHandle<unknown> | null>(null);
+  const lastStatusRef = React.useRef<Partial<Record<EnrichmentKind, string>>>({});
 
   const loadStatus = React.useCallback(async () => {
     setLoadingStatus(true);
@@ -6214,24 +6407,71 @@ export function EnrichmentSection({ scenarioId }: { scenarioId?: string }) {
 
   React.useEffect(() => { loadStatus(); }, [loadStatus]);
 
-  const run = async (type: "pico" | "metadata" | "fulltext") => {
-    setRunning(type);
+  // Ce qu'un lot terminé a fait, dit dans la langue de l'écran.
+  const describe = React.useCallback((kind: EnrichmentKind, job: EnrichmentJob): { msg: string; error: boolean } => {
+    if (job.status === "error") {
+      return { msg: `${t("scenarioDetail.enrichment.errorPrefix")} ${job.error ?? ""}`, error: true };
+    }
+    const r = job.result ?? {};
+    if (kind === "fulltext") {
+      return { msg: t("scenarioDetail.enrichment.resultLinks")
+        .replace("{n}", String(r.fetched ?? 0)).replace("{na}", String(r.not_available ?? 0))
+        .replace("{errors}", String(r.errors ?? 0)), error: false };
+    }
+    return { msg: t("scenarioDetail.enrichment.resultExtracted")
+      .replace("{n}", String(r.extracted ?? 0)).replace("{skipped}", String(r.skipped ?? 0))
+      .replace("{errors}", String(r.errors ?? 0)), error: false };
+  }, [t]);
+
+  // Suivre les lots du serveur jusqu'à ce qu'aucun ne tourne, sans plafond. Un lot qui
+  // vient de finir dit ce qu'il a fait et rafraîchit les compteurs.
+  const follow = React.useCallback(() => {
+    pollRef.current?.cancel();
+    const h = pollJob({
+      intervalMs: 3000, firstDelayMs: 0,
+      read: () => fetchEnrichmentJobs(scenarioId),
+      running: r => ENRICHMENT_KINDS.some(k => r.jobs[k]?.status === "running"),
+      onStatus: r => {
+        setJobs(r.jobs);
+        for (const k of ENRICHMENT_KINDS) {
+          const job = r.jobs[k];
+          if (lastStatusRef.current[k] === "running" && job && job.status !== "running") {
+            setLastResult({ type: k, ...describe(k, job) });
+            void loadStatus();
+          }
+          lastStatusRef.current[k] = job?.status;
+        }
+      },
+    });
+    pollRef.current = h as PollHandle<unknown>;
+    h.promise.then(out => {
+      if (out.kind === "lost") setLastResult({ type: "", msg: t("jobs.lostContact"), error: true });
+    });
+  }, [scenarioId, describe, loadStatus, t]);
+
+  React.useEffect(() => {
+    follow();
+    return () => { pollRef.current?.cancel(); };
+  }, [follow]);
+
+  const run = async (type: EnrichmentKind) => {
+    setStarting(type);
     setLastResult(null);
     const sc = scenarioId ? scope : undefined;
+    const lim = type === "fulltext" ? Math.min(limit ?? FULLTEXT_BATCH_CAP, FULLTEXT_BATCH_CAP) : limit;
     try {
-      let res;
-      if (type === "pico") res = await extractPicoBatchGlobal(scenarioId, limit, sc);
-      else if (type === "metadata") res = await extractMetadataBatch(scenarioId, limit, sc);
-      else res = await fetchFulltextBatch(scenarioId, Math.min(limit, 1000), sc);
-      setLastResult({ type, msg: res.message, error: false });
-      await loadStatus();
+      const out = await startEnrichmentBatch(type, scenarioId, lim, sc);
+      setJobs(prev => ({ ...prev, [type]: out.job }));
+      lastStatusRef.current[type] = "running";
+      follow();
     } catch (e: any) {
       setLastResult({ type, msg: `${t("scenarioDetail.enrichment.errorPrefix")} ${e.message}`, error: true });
     } finally {
-      setRunning(null);
+      setStarting(null);
     }
   };
 
+  const anyRunning = ENRICHMENT_KINDS.some(k => jobs[k]?.status === "running");
   const JOBS = [
     {
       key: "pico" as const,
@@ -6241,7 +6481,7 @@ export function EnrichmentSection({ scenarioId }: { scenarioId?: string }) {
       stat: status ? `${status.pico.count} / ${status.total} (${status.pico.pct}%)` : "-",
       pct: status ? status.pico.pct : 0,
       todo: status ? status.pico.todo : null,
-      cap: limit,
+      cap: limit ?? Infinity,
       color: "bg-brand-500",
     },
     {
@@ -6252,7 +6492,7 @@ export function EnrichmentSection({ scenarioId }: { scenarioId?: string }) {
       stat: status ? `${status.metadata.count} / ${status.total} (${status.metadata.pct}%)` : "-",
       pct: status ? status.metadata.pct : 0,
       todo: status ? status.metadata.todo : null,
-      cap: limit,
+      cap: limit ?? Infinity,
       color: "bg-gold-500",
     },
     {
@@ -6263,7 +6503,7 @@ export function EnrichmentSection({ scenarioId }: { scenarioId?: string }) {
       stat: status ? `${status.fulltext.count} / ${status.total} (${status.fulltext.pct}%)` : "-",
       pct: status ? status.fulltext.pct : 0,
       todo: status ? status.fulltext.todo : null,
-      cap: Math.min(limit, 1000),
+      cap: Math.min(limit ?? FULLTEXT_BATCH_CAP, FULLTEXT_BATCH_CAP),
       color: "bg-forest-400",
     },
   ];
@@ -6305,7 +6545,7 @@ export function EnrichmentSection({ scenarioId }: { scenarioId?: string }) {
                 <button
                   key={opt}
                   onClick={() => setScope(opt)}
-                  disabled={running !== null}
+                  disabled={anyRunning || starting !== null}
                   className={`rounded-xl border px-3 py-1.5 text-xs transition disabled:opacity-50 ${
                     on
                       ? "border-brand-500/40 bg-brand-500/15 text-brand-200"
@@ -6333,10 +6573,14 @@ export function EnrichmentSection({ scenarioId }: { scenarioId?: string }) {
         <label className="text-xs text-white/50 shrink-0">{t("scenarioDetail.enrichment.batchSizeLabel")}</label>
         <input
           type="number"
-          min={5} max={100000} step={100}
-          value={limit}
-          onChange={e => setLimit(Number(e.target.value))}
-          className="w-20 rounded-lg border border-white/10 bg-white/5 px-2 py-1 text-xs text-white text-center focus:outline-none focus:border-brand-500/50"
+          min={1} step={100}
+          value={limit ?? ""}
+          placeholder={t("scenarioDetail.enrichment.batchSizeAll")}
+          onChange={e => {
+            const v = Math.floor(Number(e.target.value));
+            setLimit(e.target.value === "" || !Number.isFinite(v) || v <= 0 ? null : v);
+          }}
+          className="w-24 rounded-lg border border-white/10 bg-white/5 px-2 py-1 text-xs text-white text-center placeholder:text-white/35 focus:outline-none focus:border-brand-500/50"
         />
         <span className="text-xs text-white/30">{t("scenarioDetail.enrichment.articlesPerRun")}</span>
         <button
@@ -6386,19 +6630,38 @@ export function EnrichmentSection({ scenarioId }: { scenarioId?: string }) {
                     : t("scenarioDetail.enrichment.nothingToProcess")}
                 </p>
               )}
+              {/* Le lot tourne sur le serveur : où il en est, lu chez lui. */}
+              {jobs[job.key]?.status === "running" && (
+                <p className="text-[10px] text-brand-300/80">
+                  {t("scenarioDetail.enrichment.progress")
+                    .replace("{done}", (jobs[job.key]!.processed ?? 0).toLocaleString())
+                    .replace("{total}", jobs[job.key]!.total != null ? jobs[job.key]!.total!.toLocaleString() : "?")}
+                </p>
+              )}
             </div>
 
-            <button
-              onClick={() => run(job.key)}
-              disabled={running !== null}
-              className="w-full flex items-center justify-center gap-2 rounded-xl bg-brand-500/15 border border-brand-500/25 py-2 text-xs font-medium text-brand-300 hover:bg-brand-500/25 transition disabled:opacity-50 disabled:cursor-not-allowed"
-            >
-              {running === job.key ? (
-                <><Loader2 size={12} className="animate-spin" /> {t("scenarioDetail.enrichment.running")}</>
-              ) : (
-                <><Zap size={12} /> {t("scenarioDetail.enrichment.launchPrefix")}{limit} {t("scenarioDetail.enrichment.launchSuffix")}</>
-              )}
-            </button>
+            {(() => {
+              // Le VRAI nombre : ce qui reste à traiter, borné par la taille de lot choisie
+              // (et, pour les liens d'accès ouvert, par leur plafond par exécution).
+              const n = typeof job.todo === "number" ? Math.min(job.todo, job.cap) : null;
+              const isRunning = jobs[job.key]?.status === "running";
+              return (
+                <button
+                  onClick={() => run(job.key)}
+                  disabled={isRunning || starting !== null || n === 0}
+                  className="w-full flex items-center justify-center gap-2 rounded-xl bg-brand-500/15 border border-brand-500/25 py-2 text-xs font-medium text-brand-300 hover:bg-brand-500/25 transition disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  {isRunning || starting === job.key ? (
+                    <><Loader2 size={12} className="animate-spin" /> {t("scenarioDetail.enrichment.running")}</>
+                  ) : (
+                    <><Zap size={12} /> {(job.key === "fulltext"
+                      ? t("scenarioDetail.enrichment.launchLinks").replace("{cap}", FULLTEXT_BATCH_CAP.toLocaleString())
+                      : t("scenarioDetail.enrichment.launch"))
+                      .replace("{n}", n != null ? n.toLocaleString() : "?")}</>
+                  )}
+                </button>
+              );
+            })()}
           </div>
         ))}
       </div>
@@ -6411,7 +6674,7 @@ export function EnrichmentSection({ scenarioId }: { scenarioId?: string }) {
             : "border-brand-500/20 bg-brand-500/5 text-brand-200"
         }`}>
           {lastResult.error ? <AlertCircle size={13} className="mt-0.5 shrink-0" /> : <CheckCircle2 size={13} className="mt-0.5 shrink-0" />}
-          <span><strong className="font-semibold capitalize">{lastResult.type}</strong> : {lastResult.msg}</span>
+          <span>{lastResult.type && <><strong className="font-semibold capitalize">{lastResult.type}</strong> : </>}{lastResult.msg}</span>
         </div>
       )}
     </div>
@@ -6468,7 +6731,7 @@ function SeuilSection({ scenarioId, onSaved, onThresholdChange, incoming }: {
   const [coverage, setCoverage] = React.useState<{ scorable: number; missing: number; unscorable: number } | null>(null);
   const [showCurve, setShowCurve] = React.useState(false);
   const [curveKey, setCurveKey] = React.useState(0);
-  const pollRef = React.useRef<ReturnType<typeof setInterval> | null>(null);
+  const pollRef = React.useRef<PollHandle<unknown> | null>(null);
 
   // Ce que fait le scoring en cours, en une ligne : la phase, puis les lots notés et
   // refusés. Sans elle, l'écran restait sur « Lancement du scoring... » jusqu'à la fin.
@@ -6486,47 +6749,55 @@ function SeuilSection({ scenarioId, onSaved, onThresholdChange, incoming }: {
   };
 
   const startPolling = () => {
-    if (pollRef.current) clearInterval(pollRef.current);   // pas d'orphelin
-    pollRef.current = setInterval(() => {
-      getRerankStatus(scenarioId).then(s => {
+    pollRef.current?.cancel();   // pas d'orphelin
+    // Suivi sans plafond tant que le scoring tourne ; UNE erreur réseau affichait
+    // « Erreur de scoring » pendant que le job continuait. Plusieurs de suite arrêtent le
+    // suivi, et l'écran dit alors que le scoring continue sans doute sur le serveur.
+    const h = pollJob({
+      intervalMs: 3000,
+      read: () => getRerankStatus(scenarioId),
+      running: s => s.status === "running",
+      onStatus: s => {
         // La couverture suit le scoring : le bouton « Noter les N manquants » descend
         // au fil des lots écrits.
         setCoverage({ scorable: s.scorable ?? 0, missing: s.missing ?? 0, unscorable: s.unscorable ?? 0 });
-        if (s.status === "running") {
-          setRerankStatus(describeJob(s));
-          return;
+        if (s.status === "running") setRerankStatus(describeJob(s));
+      },
+    });
+    pollRef.current = h as PollHandle<unknown>;
+    h.promise.then(out => {
+      if (out.kind === "cancelled") return;
+      if (out.kind === "lost") {
+        setRerankStatus(null);
+        setRerankError(t("jobs.lostContact"));
+        return;
+      }
+      const s = out.status;
+      if (s.status === "done") {
+        let msg = t("scenarioDetail.seuil.scoringDone")
+          .replace("{reranked}", (s.reranked ?? 0).toLocaleString())
+          .replace("{candidates}", (s.rerank_candidates ?? 0).toLocaleString());
+        if ((s.updated ?? 0) > 0) {
+          msg += " · " + t("scenarioDetail.seuil.scoringDoneCosine").replace("{n}", (s.updated ?? 0).toLocaleString());
         }
-        if (pollRef.current) clearInterval(pollRef.current);
-        if (s.status === "done") {
-          let msg = t("scenarioDetail.seuil.scoringDone")
-            .replace("{reranked}", (s.reranked ?? 0).toLocaleString())
-            .replace("{candidates}", (s.rerank_candidates ?? 0).toLocaleString());
-          if ((s.updated ?? 0) > 0) {
-            msg += " · " + t("scenarioDetail.seuil.scoringDoneCosine").replace("{n}", (s.updated ?? 0).toLocaleString());
-          }
-          setRerankStatus(msg);
-          setTimeout(() => setRerankStatus(null), 8000);
-        } else if (s.status === "partial") {
-          // Ni un succès ni une panne : des articles restent sans score, donc hors du
-          // corpus pertinent, et le serveur a prévu un nouvel essai.
-          setRerankStatus(t("scenarioDetail.seuil.scoringPartial")
-            .replace("{n}", (s.unscored ?? 0).toLocaleString()));
-        } else {
-          setRerankStatus(null);
-          setRerankError(s.status === "stalled"
-            ? t("scenarioDetail.seuil.scoringStalled")
-            : t("scenarioDetail.seuil.scoringStopped")
-                .replace("{scored}", (s.reranked ?? 0).toLocaleString())
-                .replace("{candidates}", (s.rerank_candidates ?? 0).toLocaleString())
-                .replace("{reason}", s.rerank_stopped || s.error || "?"));
-        }
-        onSaved?.();   // final refresh so the computed scores/badges show
-      }).catch(() => {
-        // Erreur transitoire : nettoyer l'intervalle (sinon poll infini + rejet non géré).
-        if (pollRef.current) clearInterval(pollRef.current);
-        setRerankStatus(t("scenarioDetail.seuil.scoringError"));
-      });
-    }, 3000);
+        setRerankStatus(msg);
+        setTimeout(() => setRerankStatus(null), 8000);
+      } else if (s.status === "partial") {
+        // Ni un succès ni une panne : des articles restent sans score, donc hors du
+        // corpus pertinent, et le serveur a prévu un nouvel essai.
+        setRerankStatus(t("scenarioDetail.seuil.scoringPartial")
+          .replace("{n}", (s.unscored ?? 0).toLocaleString()));
+      } else {
+        setRerankStatus(null);
+        setRerankError(s.status === "stalled"
+          ? t("scenarioDetail.seuil.scoringStalled")
+          : t("scenarioDetail.seuil.scoringStopped")
+              .replace("{scored}", (s.reranked ?? 0).toLocaleString())
+              .replace("{candidates}", (s.rerank_candidates ?? 0).toLocaleString())
+              .replace("{reason}", s.rerank_stopped || s.error || "?"));
+      }
+      onSaved?.();   // final refresh so the computed scores/badges show
+    });
   };
 
   React.useEffect(() => {
@@ -6547,7 +6818,7 @@ function SeuilSection({ scenarioId, onSaved, onThresholdChange, incoming }: {
         if (s.status === "running") { setRerankStatus(describeJob(s)); startPolling(); }
       })
       .catch(() => {});
-    return () => { if (pollRef.current) clearInterval(pollRef.current); };
+    return () => { pollRef.current?.cancel(); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [scenarioId]);
 
@@ -7169,7 +7440,7 @@ function EvidencesSection({ scenarioId, detail }: { scenarioId: string; detail: 
   const [llmError, setLlmError] = React.useState<string | null>(null);
   const [regenerating, setRegenerating] = React.useState(false);
   const [genStatus, setGenStatus] = React.useState<string | null>(null);
-  const pollRef = React.useRef<ReturnType<typeof setInterval> | null>(null);
+  const pollRef = React.useRef<PollHandle<unknown> | null>(null);
 
   // ── Sélection par devis / niveau de preuve ───────────────────────────────────
   // Les deux distributions ci-dessous ne sont pas que des graphiques : chaque barre est
@@ -7213,66 +7484,48 @@ function EvidencesSection({ scenarioId, detail }: { scenarioId: string; detail: 
 
   React.useEffect(() => {
     loadLlm();
-    return () => { if (pollRef.current) clearInterval(pollRef.current); };
+    return () => { pollRef.current?.cancel(); };
   }, [loadLlm]);
+
+  // Suivre la génération jusqu'à ce que le serveur ne la dise plus en cours. La première
+  // erreur réseau affichait « Erreur de génération » pendant que le brief s'écrivait ;
+  // seules plusieurs de suite arrêtent maintenant le suivi, en disant qu'il continue.
+  const followBrief = React.useCallback((errorKey: string, reloadFigures: boolean) => {
+    pollRef.current?.cancel();   // pas d'orphelin
+    const h = pollJob({
+      intervalMs: 5000,
+      read: () => getBriefGenerationStatus(scenarioId),
+      running: s => s.status === "running",
+    });
+    pollRef.current = h as PollHandle<unknown>;
+    h.promise.then(out => {
+      if (out.kind === "cancelled") return;
+      setGenStatus(null);
+      setRegenerating(false);
+      if (out.kind === "lost") { setLlmError(t("jobs.lostContact")); return; }
+      if (out.status.status === "error") { setLlmError(out.status.error ?? t(errorKey)); return; }
+      // Les DEUX après une régénération : le PDF est construit sur `briefData` autant
+      // que sur le récit, et ne recharger que le second le faisait sortir avec les
+      // chiffres de la version précédente.
+      loadLlm();
+      if (reloadFigures) loadBrief();
+    });
+  }, [scenarioId, loadLlm, loadBrief, t]);
 
   // Polling si génération LLM en cours
   React.useEffect(() => {
     if (!llmData || llmData.status !== 'generating') return;
     setGenStatus(t("scenarioDetail.evidences.generatingInProgress"));
-    if (pollRef.current) clearInterval(pollRef.current);   // pas d'orphelin
-    pollRef.current = setInterval(() => {
-      getBriefGenerationStatus(scenarioId).then(s => {
-        if (s.status === 'done') {
-          if (pollRef.current) clearInterval(pollRef.current);
-          setGenStatus(null);
-          loadLlm();
-        } else if (s.status === 'error') {
-          if (pollRef.current) clearInterval(pollRef.current);
-          setGenStatus(null);
-          setLlmError(s.error ?? t("scenarioDetail.evidences.genError"));
-        }
-      }).catch(() => {
-        // Erreur transitoire : nettoyer l'intervalle + sortir de "génération"
-        // (sinon rejet non géré + spinner bloqué à vie).
-        if (pollRef.current) clearInterval(pollRef.current);
-        setGenStatus(null);
-        setLlmError(t("scenarioDetail.evidences.genError"));
-      });
-    }, 5000);
-    return () => { if (pollRef.current) clearInterval(pollRef.current); };
-  }, [llmData, scenarioId, loadLlm, t]);
+    followBrief("scenarioDetail.evidences.genError", false);
+    return () => { pollRef.current?.cancel(); };
+  }, [llmData, followBrief, t]);
 
   const handleRegenerate = async () => {
     setRegenerating(true);
     setGenStatus(t("scenarioDetail.evidences.regenLaunched"));
     try {
       await generateEvidenceBrief(scenarioId, true);
-      if (pollRef.current) clearInterval(pollRef.current);   // avoid orphaning the effect's poll
-      pollRef.current = setInterval(() => {
-        getBriefGenerationStatus(scenarioId).then(s => {
-          if (s.status === 'done') {
-            if (pollRef.current) clearInterval(pollRef.current);
-            setGenStatus(null);
-            setRegenerating(false);
-            // Les DEUX : le PDF est construit sur `briefData` autant que sur le
-            // récit, et ne recharger que le second le faisait sortir avec les
-            // chiffres de la version précédente.
-            loadLlm();
-            loadBrief();
-          } else if (s.status === 'error') {
-            if (pollRef.current) clearInterval(pollRef.current);
-            setGenStatus(null);
-            setRegenerating(false);
-            setLlmError(s.error ?? t("scenarioDetail.evidences.regenError"));
-          }
-        }).catch(() => {
-          if (pollRef.current) clearInterval(pollRef.current);
-          setGenStatus(null);
-          setRegenerating(false);
-          setLlmError(t("scenarioDetail.evidences.regenError"));
-        });
-      }, 5000);
+      followBrief("scenarioDetail.evidences.regenError", true);
     } catch (e: any) {
       setRegenerating(false);
       setGenStatus(null);
@@ -7386,7 +7639,7 @@ ${b.corpus_stats.year_min && b.corpus_stats.year_max ? `<p class="meta">${t("sce
   </div>
   <div class="dist-box">
     <div class="dist-title">${t("scenarioDetail.evidences.pdf.evidenceLevels")}</div>
-    ${(b.evidence_level_distribution??[]).slice(0,6).map(d=>`<div class="bar-row"><span class="bar-label">${(lang==="en"&&d.level_en)||d.level}</span><div class="bar-track"><div class="bar-fill-gold" style="width:${Math.round(d.count/rTotal_pdf*100)}%"></div></div><span class="bar-count">${d.count}</span></div>`).join('')}
+    ${(b.evidence_level_distribution??[]).map(d=>`<div class="bar-row"><span class="bar-label">${(lang==="en"&&d.level_en)||d.level}</span><div class="bar-track"><div class="bar-fill-gold" style="width:${Math.round(d.count/rTotal_pdf*100)}%"></div></div><span class="bar-count">${d.count}</span></div>`).join('')}
   </div>
 </div>
 
@@ -7577,8 +7830,8 @@ ${llm.future_research ? `<h3>${t("scenarioDetail.evidences.pdf.futureResearch")}
                   // Toutes les catégories + « Autres » (reste) pour que la somme corresponde au corpus
                   const top = briefData.study_design_distribution;
                   const remainder = relevant - top.reduce((s,d)=>s+d.count,0);
-                  const rows = remainder > 0 ? [...top, {design:t("scenarioDetail.evidences.other"), count:remainder}] : top;
-                  return rows.map(d=>(
+                  return [
+                    ...top.map(d=>(
                   <button key={d.design} type="button"
                     onClick={() => toggle(keptDesigns, setKeptDesigns, d.design)}
                     title={t("scenarioDetail.subset.byDesign.hint")}
@@ -7590,7 +7843,21 @@ ${llm.future_research ? `<h3>${t("scenarioDetail.evidences.pdf.futureResearch")}
                     </div>
                     <span className="w-7 text-right text-white/40 font-mono">{d.count}</span>
                   </button>
-                  ));
+                    )),
+                    // Le reste n'est PAS un devis : un clic le passait au serveur comme
+                    // filtre (le mot « Autres » traduit), qui ne pouvait que le refuser.
+                    // Il se lit, il ne se sélectionne pas.
+                    remainder > 0 && (
+                  <div key="__other" className="flex w-full items-center gap-2 text-[10px] px-1 -mx-1"
+                    title={t("scenarioDetail.evidences.otherNotSelectable")}>
+                    <span className="w-28 truncate text-left text-white/40 italic">{t("scenarioDetail.evidences.other")}</span>
+                    <div className="flex-1 h-1 bg-white/5 rounded-full overflow-hidden">
+                      <div className="h-full rounded-full bg-white/20" style={{width:`${Math.round(remainder/relevant*100)}%`}}/>
+                    </div>
+                    <span className="w-7 text-right text-white/40 font-mono">{remainder}</span>
+                  </div>
+                    ),
+                  ];
                 })()}
               </div>
             </div>
@@ -7603,7 +7870,7 @@ ${llm.future_research ? `<h3>${t("scenarioDetail.evidences.pdf.futureResearch")}
                   const rows = remainder > 0 ? [...top, {source:t("scenarioDetail.evidences.other"), count:remainder}] : top;
                   return rows.map(d=>(
                   <div key={d.source} className="flex items-center gap-2 text-[10px]">
-                    <span className="w-28 text-white/60 truncate capitalize">{d.source}</span>
+                    <span className="w-28 text-white/60 truncate capitalize" title={d.source}>{d.source}</span>
                     <div className="flex-1 h-1 bg-white/5 rounded-full overflow-hidden">
                       <div className="h-full bg-blue-500/60 rounded-full" style={{width:`${Math.round(d.count/relevant*100)}%`}}/>
                     </div>
@@ -7616,7 +7883,9 @@ ${llm.future_research ? `<h3>${t("scenarioDetail.evidences.pdf.futureResearch")}
             <div className="rounded-2xl border border-white/5 bg-white/2 p-4 space-y-2">
               <p className="text-[10px] font-bold uppercase tracking-wider text-white/40">{t("scenarioDetail.evidences.evidenceLevels")}</p>
               <div className="space-y-1.5">
-                {(briefData.evidence_level_distribution ?? []).slice(0,6).map(d=>(
+                {/* Tous les niveaux : la distribution est complète côté serveur, et la
+                    coupe à six aurait fait disparaître le septième sans le dire. */}
+                {(briefData.evidence_level_distribution ?? []).map(d=>(
                   <button key={d.level} type="button"
                     onClick={() => toggle(keptLevels, setKeptLevels, d.level)}
                     title={t("scenarioDetail.subset.byLevel.hint")}
@@ -8382,30 +8651,29 @@ function ModelMonitorSection({ scenarioId }: { scenarioId: string }) {
     return () => clearInterval(id);
   }, [scenarioId]);
 
-  // Anti-setState-après-démontage : le poll récursif ci-dessous appelle done()
+  // Anti-setState-après-démontage : le suivi ci-dessous appelle done()
   // (→ setBusy/load) et peut survivre au démontage de l'onglet Modèle.
   const mountedRef = useRef(true);
-  const pollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pollTimerRef = useRef<PollHandle<unknown> | null>(null);
   useEffect(() => () => {
     mountedRef.current = false;
-    if (pollTimerRef.current) clearTimeout(pollTimerRef.current);
+    pollTimerRef.current?.cancel();
   }, []);
 
-  const poll = (fn: () => Promise<{ status: string }>, done: () => void) => {
-    let tries = 0;
-    const tick = async () => {
-      if (!mountedRef.current) return;
-      tries += 1;
-      try {
-        const s = await fn();
-        if (!mountedRef.current) return;
-        if (s.status === "running") {
-          if (tries < 40) { pollTimerRef.current = setTimeout(tick, 3000); return; }
-        }
-      } catch { /* ignore transient */ }
-      if (mountedRef.current) done();
-    };
-    pollTimerRef.current = setTimeout(tick, 2000);
+  // Suivi d'un entraînement, d'une comparaison ou d'une proposition jusqu'à sa fin
+  // RÉELLE. Il s'arrêtait au bout de 40 essais (2 minutes) ou à la première erreur et
+  // appelait done() : l'écran montrait alors le modèle PRÉCÉDENT comme l'actuel, sans un
+  // mot. Une erreur du travail est dite ; une perte de contact aussi, comme telle.
+  const poll = (fn: () => Promise<{ status: string; error?: string }>, done: () => void) => {
+    pollTimerRef.current?.cancel();
+    const h = pollJob({ intervalMs: 3000, firstDelayMs: 2000, read: fn, running: s => s.status === "running" });
+    pollTimerRef.current = h as PollHandle<unknown>;
+    h.promise.then(out => {
+      if (!mountedRef.current || out.kind === "cancelled") return;
+      if (out.kind === "lost") setError(t("jobs.lostContact"));
+      else if (out.status.status === "error") setError(out.status.error ?? t("scenarioDetail.model.jobFailed"));
+      done();
+    });
   };
 
   const doTrain = async () => {
@@ -8467,7 +8735,9 @@ function ModelMonitorSection({ scenarioId }: { scenarioId: string }) {
     ? Object.entries(byVar)
         .map(([mn, v]) => ({ label: nameByMachine[mn] ?? mn, value: Number(v) }))
         .sort((a, b) => b.value - a.value).slice(0, 6)
-    : (run?.feature_importances ?? []).slice(0, 6).map(fi => {
+    // Trier AVANT de couper : sans quoi les six premiers dans l'ordre de la réponse
+    // passaient pour les six plus influents.
+    : [...(run?.feature_importances ?? [])].sort((a, b) => b.importance - a.importance).slice(0, 6).map(fi => {
         const base = fi.feature.includes("__") ? fi.feature.split("__").slice(1).join("__") : fi.feature;
         return { label: nameByMachine[base] ?? base, value: fi.importance };
       });
@@ -8553,7 +8823,7 @@ function ModelMonitorSection({ scenarioId }: { scenarioId: string }) {
                     {topImportances.map((fi) => (
                       <div key={fi.label} className="flex items-center gap-2">
                         <div className="h-1.5 rounded-full bg-brand-500/60" style={{ width: `${Math.max(4, Math.min(100, fi.value * 100))}%` }} />
-                        <span className="text-[10px] text-white/50 truncate">{fi.label}</span>
+                        <span className="text-[10px] text-white/50 truncate" title={fi.label}>{fi.label}</span>
                       </div>
                     ))}
                   </div>
@@ -8784,19 +9054,26 @@ function ModelMonitorSection({ scenarioId }: { scenarioId: string }) {
 // OMS paraît en jours, l'article correspondant en 6 à 24 mois) et le TERRAIN (ouvertures
 // de centres de traitement, doses de vaccin, logistique) - que nulle revue ne publie.
 // Ce qu'il n'apporte pas : la relecture par les pairs. L'UI le dit, en toutes lettres.
+const SITREP_PAGE = 50;
+
 function SituationReportsSection({ scenarioId }: { scenarioId: string }) {
   const { t } = useI18n();
   const [page, setPage] = useState<SituationReportsPage | null>(null);
   const [status, setStatus] = useState<ReliefWebStatus | null>(null);
   const [q, setQ] = useState("");
+  // La recherche dont la liste affiche le résultat : « charger plus » la poursuit, même
+  // si le champ a changé depuis.
+  const [shownQ, setShownQ] = useState("");
   const [loading, setLoading] = useState(true);
+  const [loadingMore, setLoadingMore] = useState(false);
   const [err, setErr] = useState("");
 
   const load = React.useCallback((search: string) => {
     setLoading(true);
     setErr("");
+    setShownQ(search);
     Promise.all([
-      fetchSituationReports({ scenarioId, q: search || undefined, limit: 50 }),
+      fetchSituationReports({ scenarioId, q: search || undefined, limit: SITREP_PAGE }),
       fetchReliefWebStatus().catch(() => null),
     ]).then(([p, s]) => { setPage(p); setStatus(s); })
       .catch((e: unknown) => setErr(e instanceof Error ? e.message : String(e)))
@@ -8804,6 +9081,17 @@ function SituationReportsSection({ scenarioId }: { scenarioId: string }) {
   }, [scenarioId]);
 
   useEffect(() => { load(""); }, [load]);
+
+  // Les rapports au-delà des cinquante premiers étaient inaccessibles sous un compteur
+  // qui annonçait le total.
+  const loadMore = () => {
+    if (!page || loadingMore) return;
+    setLoadingMore(true);
+    fetchSituationReports({ scenarioId, q: shownQ || undefined, limit: SITREP_PAGE, offset: page.reports.length })
+      .then(next => setPage(prev => (prev ? { ...next, reports: [...prev.reports, ...next.reports] } : next)))
+      .catch((e: unknown) => setErr(e instanceof Error ? e.message : String(e)))
+      .finally(() => setLoadingMore(false));
+  };
 
   const reports = page?.reports ?? [];
   return (
@@ -8859,7 +9147,11 @@ function SituationReportsSection({ scenarioId }: { scenarioId: string }) {
       {reports.length > 0 && (
         <>
           <p className="text-[10px] uppercase tracking-wider text-white/35">
-            {page?.total} {t("scenarioDetail.reports.count")}
+            {(page?.total ?? 0) > reports.length
+              ? t("scenarioDetail.reports.shownOf")
+                  .replace("{shown}", reports.length.toLocaleString())
+                  .replace("{total}", (page?.total ?? 0).toLocaleString())
+              : `${page?.total} ${t("scenarioDetail.reports.count")}`}
           </p>
           <div className="space-y-2">
             {reports.map((r: SituationReport) => (
@@ -8876,15 +9168,28 @@ function SituationReportsSection({ scenarioId }: { scenarioId: string }) {
                 </div>
                 <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[10px] text-white/40">
                   {r.published_at && <span className="font-mono">{r.published_at.slice(0, 10)}</span>}
-                  {r.sources.length > 0 && <span>· {r.sources.slice(0, 2).join(", ")}</span>}
+                  {r.sources.length > 0 && (
+                    <span title={r.sources.join(", ")}>
+                      · {r.sources.slice(0, 2).join(", ")}
+                      {r.sources.length > 2 && ` ${t("lists.more").replace("{n}", String(r.sources.length - 2))}`}
+                    </span>
+                  )}
                   {r.format && <span>· {r.format}</span>}
                   {r.primary_country && <span>· {r.primary_country}</span>}
                   {r.glide && <span className="font-mono text-white/30">· {r.glide}</span>}
                 </div>
-                {r.excerpt && <p className="text-[11px] text-white/50 leading-relaxed line-clamp-2">{r.excerpt}</p>}
+                {r.excerpt && <p className="text-[11px] text-white/50 leading-relaxed line-clamp-2" title={r.excerpt}>{r.excerpt}</p>}
               </article>
             ))}
           </div>
+          {(page?.total ?? 0) > reports.length && (
+            <button onClick={loadMore} disabled={loadingMore}
+              className="flex items-center gap-1.5 rounded-lg border border-white/15 bg-white/5 px-3 py-1.5 text-[11px] text-white/80 hover:bg-white/10 disabled:opacity-40">
+              {loadingMore ? <Loader2 size={11} className="animate-spin" /> : <ChevronDown size={11} />}
+              {t("lists.loadMore").replace("{n}",
+                String(Math.min(SITREP_PAGE, (page?.total ?? 0) - reports.length)))}
+            </button>
+          )}
         </>
       )}
     </div>
@@ -9125,14 +9430,18 @@ export function ScenarioDetailPage({ scenarioId, onBack, initialTab }: ScenarioD
           )}
 
           {/* Actions recommandées */}
+          {/* Les deux premières, coupées à 80 caractères pour tenir dans l'en-tête : le
+              texte entier en infobulle, et les autres derrière « +N ». */}
           {detail.recommended_actions.length > 0 && (
             <div className="mt-3 flex flex-wrap gap-2">
-              {detail.recommended_actions.slice(0, 2).map((action, i) => (
-                <span key={i} className="flex items-center gap-1.5 rounded-xl border border-white/5 bg-white/3 px-2.5 py-1 text-xs text-white/70">
-                  <span className="h-1.5 w-1.5 rounded-full bg-brand-400 shrink-0" />
-                  {action.length > 80 ? action.slice(0, 80) + "..." : action}
-                </span>
-              ))}
+              <MoreList items={detail.recommended_actions} initial={2}
+                buttonClassName="rounded-xl border border-white/5 bg-white/3 px-2.5 py-1 text-xs text-brand-300/80 hover:text-brand-300"
+                render={(action, i) => (
+                  <span key={i} title={action} className="flex items-center gap-1.5 rounded-xl border border-white/5 bg-white/3 px-2.5 py-1 text-xs text-white/70">
+                    <span className="h-1.5 w-1.5 rounded-full bg-brand-400 shrink-0" />
+                    {action.length > 80 ? action.slice(0, 80) + "..." : action}
+                  </span>
+                )} />
             </div>
           )}
         </div>

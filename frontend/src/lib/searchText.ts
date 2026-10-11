@@ -9,6 +9,37 @@ export function yearSliderBounds(yearOpts?: Array<{ value: string | number }> | 
   return { min: yrs.length ? Math.min(...yrs) : 1990, max: new Date().getFullYear() };
 }
 
+// Les bornes d'années qui partent avec la recherche, dans les filtres du scénario : celles
+// que le curseur a resserrées, et elles seules. Le curseur était affiché sans être envoyé
+// nulle part. Une borne écarte aussi les articles SANS année (`d.year >= x` est faux sur
+// NULL) : le curseur laissé à ses extrémités ne doit donc rien borner.
+export function yearBoundsFilter(
+  range: [number, number],
+  yearOpts?: Array<{ value: string | number }> | null,
+): { year_min?: number; year_max?: number } {
+  const b = yearSliderBounds(yearOpts);
+  return {
+    ...(range[0] > b.min ? { year_min: range[0] } : {}),
+    ...(range[1] < b.max ? { year_max: range[1] } : {}),
+  };
+}
+
+// Le curseur d'une recherche rejouée : ses bornes enregistrées, ramenées dans celles du
+// curseur ; une borne absente le laisse à son extrémité.
+export function yearRangeOf(
+  filters: Record<string, unknown> | null | undefined,
+  yearOpts?: Array<{ value: string | number }> | null,
+): [number, number] {
+  const b = yearSliderBounds(yearOpts);
+  const at = (v: unknown, fallback: number) => {
+    const n = typeof v === "number" ? v : typeof v === "string" && v.trim() ? Number(v) : NaN;
+    return Number.isFinite(n) ? Math.min(Math.max(Math.round(n), b.min), b.max) : fallback;
+  };
+  const lo = at(filters?.year_min, b.min);
+  const hi = at(filters?.year_max, b.max);
+  return lo <= hi ? [lo, hi] : [hi, lo];
+}
+
 export function csvEscape(value: unknown): string {
   return JSON.stringify(value ?? "");
 }

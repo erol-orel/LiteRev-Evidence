@@ -349,7 +349,7 @@ def test_the_batch_writer_stores_the_finding_and_reads_the_full_text(seeded, mon
     fake = _FakeLLM(lambda kw: _completion(json.dumps(answer)))
     monkeypatch.setenv("OPENAI_API_KEY", "test-key")
     monkeypatch.setattr(llm_usage, "MeteredOpenAI", fake)
-    out = main.extract_pico_batch(scenario_id=SID, scope="relevant", _=None)
+    out = main.extract_pico_batch(scenario_id=SID, scope="relevant")
     assert out["extracted"] == 2, out
     sent = {int(_user(kw).split("Article ")[1].split()[0]): kw for kw in fake.calls}
     assert '"key_finding"' in sent[8601]["messages"][0]["content"]
@@ -369,7 +369,7 @@ def test_a_writer_asks_again_when_the_answer_is_cut(seeded, monkeypatch):
                     if "CUT OFF" not in kw["messages"][0]["content"] else _completion(good))
     monkeypatch.setenv("OPENAI_API_KEY", "test-key")
     monkeypatch.setattr(llm_usage, "MeteredOpenAI", fake)
-    assert main.extract_pico_batch(scenario_id=SID, scope="relevant", _=None)["extracted"] == 1
+    assert main.extract_pico_batch(scenario_id=SID, scope="relevant")["extracted"] == 1
     pico, attempts = _pico_of(seeded, 8601)
     assert pico["finding_direction"] == "decrease" and attempts == 1
     assert len(fake.calls) == 2

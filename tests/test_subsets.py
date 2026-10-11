@@ -106,12 +106,31 @@ def test_the_reason_records_the_threshold_the_narrowing_was_applied_at():
     from the record nothing anywhere could say where that boundary is: not PRISMA, not the
     threshold curve, not the person rereading it next month."""
     reason = describe_selection([0], {0: "Vector control"}, None, "all", "keep", threshold=0.6801)
-    assert reason.endswith("(seuil 0.6801)")
+    assert reason.startswith(f"{SUBSET_REASON_PREFIX} (seuil 0.6801) hors de")
     assert scope_threshold_of(reason) == 0.6801
     # A reviewer's own free-text reason carries no threshold, and that is not an error.
     assert scope_threshold_of("wrong population") is None
     assert scope_threshold_of(None) is None
     assert scope_threshold_of("scope: hors de clusters X") is None
+
+
+def test_a_long_selection_keeps_its_threshold():
+    """The reason is cut at 480 characters. With the threshold written last, a selection
+    of thirty concepts lost it, and with it `judged_above_threshold` and the curve's
+    warning. It is written first now."""
+    concepts = [f"a fairly long concept label number {i}" for i in range(30)]
+    reason = describe_selection(None, None, concepts, "all", "keep", threshold=0.52)
+    assert len(reason) == 480
+    assert scope_threshold_of(reason) == 0.52
+
+
+def test_a_reason_written_before_the_change_is_still_read():
+    """Narrowings already in production carry the threshold at the END of their reason."""
+    old = "scope: hors de clusters Transmission (seuil 0.45)"
+    assert scope_threshold_of(old) == 0.45
+    # A cluster NAMED with a threshold-like text does not fool the new reading.
+    new = describe_selection([0], {0: "Seuils (seuil 0.3)"}, None, "all", "keep", threshold=0.6)
+    assert scope_threshold_of(new) == 0.6
 
 
 # ── Integration: the decision lands where the rest of the app reads ─────────
@@ -517,6 +536,61 @@ def test_a_concept_absent_from_the_map_is_a_404_not_an_empty_selection(seeded):
     r = _client().post(f"/user-scenarios/{SID}/subset/preview",
                        json={"concepts": ["pathogen:measles virus"]})
     assert r.status_code == 404 and "measles virus" in r.json()["detail"]
+
+
+def _many_concepts(conn, n=70):
+    """9601 and 9602 cite seventy outcomes each: more than the sixty nodes the map draws.
+    9603 and 9604 cite one pathogen; 9605 has no concept at all."""
+    with conn.cursor() as cur:
+        payload = json.dumps({"concepts": [{"t": "outcome", "en": f"outcome number {k:02d}",
+                                            "fr": f"issue {k:02d}"} for k in range(n)]})
+        cur.execute("UPDATE literature_document SET concepts_json = %s::jsonb WHERE id IN (9601, 9602)",
+                    (payload,))
+    _tag(conn, 9603, ("pathogen", "dengue virus"))
+    _tag(conn, 9604, ("pathogen", "dengue virus"))
+
+
+def test_a_concept_beyond_the_drawn_map_can_narrow_the_corpus(seeded):
+    """THE defect: the narrowing looked concepts up among the map's sixty nodes, so a
+    concept of the corpus the map did not draw answered 404, and a "keep the map as
+    composed" could only keep what the screen had room for."""
+    _many_concepts(seeded)
+    rows, n_total = main._concept_rows(SID)
+    drawn = {n["label"]["en"] for n in main._build_concept_graph(rows, n_total=n_total)["nodes"]}
+    beyond = next(f"outcome number {k:02d}" for k in range(70)
+                  if f"outcome number {k:02d}" not in drawn)
+    body = _client().post(f"/user-scenarios/{SID}/subset/preview",
+                          json={"concepts": [f"outcome:{beyond}"]}).json()
+    assert body["by_dimension"]["concepts"] == {"in": 2, "out": 2, "unknown": 1}
+    assert body["exclude_sample"] == [9603, 9604]
+
+
+def test_the_composed_map_narrows_by_its_filters_not_by_what_is_drawn(seeded):
+    """Hiding a type, raising the minimum or removing a concept is a choice; the sixty
+    nodes and the fourteen per type are not. The composed map is sent as its filters and
+    resolved on the full index."""
+    _many_concepts(seeded)
+    body = _client().post(f"/user-scenarios/{SID}/subset/preview",
+                          json={"concept_filter": {"exclude_types": ["pathogen"], "min_count": 1,
+                                                   "exclude": []}}).json()
+    # Every outcome is kept, not only the ones the map draws: 9601 and 9602 are in.
+    assert body["by_dimension"]["concepts"] == {"in": 2, "out": 2, "unknown": 1}
+    assert body["exclude_sample"] == [9603, 9604]
+    assert body["meta"]["concepts"]["composed"] is True
+    assert body["meta"]["concepts"]["n_concepts"] == 70
+    assert "carte composée" in body["reason"] and "sans les types pathogen" in body["reason"]
+    # Removing the dengue concept by hand instead of its type gives the same corpus.
+    same = _client().post(f"/user-scenarios/{SID}/subset/preview",
+                          json={"concept_filter": {"exclude": ["pathogen:dengue virus"]}}).json()
+    assert same["exclude_sample"] == [9603, 9604]
+
+
+def test_a_reason_given_by_the_caller_still_records_the_threshold(seeded):
+    out = _client().post(f"/user-scenarios/{SID}/subset/apply",
+                         json={"clusters": [0], "reason": "hors sujet pour la revue"},
+                         headers=HDR).json()
+    assert out["reason"] == f"{SUBSET_REASON_PREFIX} (seuil 0.45) hors sujet pour la revue"
+    assert _client().get(f"/user-scenarios/{SID}/subset").json()["judged_above_threshold"] == 0.45
 
 
 def test_a_selection_without_a_clustering_cache_says_so_instead_of_emptying_the_corpus(seeded):

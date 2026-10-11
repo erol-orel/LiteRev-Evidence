@@ -428,9 +428,10 @@ def _store(scenario_id: str, nodes: list[dict[str, Any]] | None) -> None:
         """), {"sid": scenario_id, "j": payload})
 
 
-def unmapped_labels(scenario_id: str, top: int = 50) -> dict[str, Any]:
+def unmapped_labels(scenario_id: str, top: int = 50, offset: int = 0) -> dict[str, Any]:
     """Labels in the relevant corpus that match nothing in the codebook, most frequent first,
-    so a reviewer can map them. Counted over ALL the relevant articles."""
+    so a reviewer can map them. Counted over ALL the relevant articles; `offset` pages
+    through them, so every label can be reached from the screen, not only the first 500."""
     thr = _get_scenario_threshold(scenario_id)
     gate = relevant_gate_sql("d", "ars", ":thr")
     index = get_index(scenario_id)
@@ -458,7 +459,7 @@ def unmapped_labels(scenario_id: str, top: int = 50) -> dict[str, Any]:
                          "l1": n["l1"]})
     miss.sort(key=lambda m: (-m["n_rows"], str(m["covariate"])))
     return {"scenario_id": scenario_id, "rows_mapped": mapped, "rows_unmapped": unmapped,
-            "n_distinct_unmapped": len(miss), "unmapped": miss[:top]}
+            "n_distinct_unmapped": len(miss), "offset": offset, "unmapped": miss[offset:offset + top]}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -514,9 +515,10 @@ def reset_codebook(scenario_id: str, _: None = Depends(require_api_key)) -> dict
 
 
 @app.get("/user-scenarios/{scenario_id}/codebook/unmapped")
-def read_unmapped(scenario_id: str, top: int = Query(50, ge=1, le=500)) -> dict[str, Any]:
+def read_unmapped(scenario_id: str, top: int = Query(50, ge=1, le=500),
+                  offset: int = Query(0, ge=0)) -> dict[str, Any]:
     _get_user_scenario_or_404(scenario_id)
-    return unmapped_labels(scenario_id, top)
+    return unmapped_labels(scenario_id, top, offset)
 
 
 @app.post("/user-scenarios/{scenario_id}/codebook/synonym")

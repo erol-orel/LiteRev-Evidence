@@ -28,6 +28,8 @@ export const fr = {
     loadingEllipsis: "Chargement…",
     recommendedActions: "Actions recommandées",
     generatingRecommendedActions: "Génération des actions recommandées depuis l'évidence…",
+    recommendedActionsStillRunning:
+      "Les actions recommandées étaient encore en cours de génération quand cette page a perdu le contact avec le serveur : rechargez-la dans un moment pour les voir.",
     unknownError: "Erreur inconnue",
   },
   errors: {
@@ -61,6 +63,18 @@ export const fr = {
     unknownError: "Erreur inconnue.",
     retry: "Réessayer",
     appLabel: "l'application",
+  },
+  // Les listes coupées pour la place disent ce qu'elles coupent, et se déplient.
+  lists: {
+    more: "+{n} de plus",
+    showLess: "Replier",
+    showAll: "Tout afficher ({n})",
+    loadMore: "Charger {n} de plus",
+  },
+  // Le suivi d'un travail mené par le serveur.
+  jobs: {
+    lostContact:
+      "Le contact avec le serveur a été perdu après plusieurs tentatives. Le travail continue sans doute là-bas : rechargez cette page dans un moment pour voir où il en est.",
   },
   terrain: {
     loadError: "Erreur de chargement des données terrain.",
@@ -283,14 +297,9 @@ export const fr = {
     filters: "Filtres",
     resetFiltersTooltip: "Réinitialiser les filtres",
     reset: "Réinitialiser",
-    all: "Tous",
-    searchDiseasePlaceholder: "Rechercher une maladie...",
     years: "Années",
-    filterSourceType: "Type de source",
-    filterDiseaseOrCondition: "Maladie / pathologie",
-    filterScenarioType: "Type de scénario",
-    filterGeographicScope: "Zone géographique",
-    filterEvidenceCategory: "Catégorie de preuve",
+    yearsHint:
+      "Appliquées à la recherche, sources en direct comprises. Une borne écarte aussi les articles sans année.",
     explainerPart1: "Écrivez votre sujet de recherche en langage naturel",
     explainerExample1: "(« prévision de la demande d'ambulances »)",
     explainerPart2: "ou en requête booléenne",
@@ -339,11 +348,23 @@ export const fr = {
     launchPrompt: "Lancez une recherche pour afficher les résultats.",
     document: "document",
     documents: "documents",
-    relevant: "pertinent",
-    relevantPlural: "pertinents",
     page: "page",
     onePage: "1 page",
-    topShown: "la liste montre les {n} plus pertinents ; les {total} sont enregistrés dans le scénario et toutes les analyses les utilisent tous",
+    topShown: "la liste montre les {n} premiers des {total}, dans l'ordre choisi ; tous sont enregistrés dans le scénario",
+    relevantCount:
+      "{n} pertinents (au-dessus du seuil ou inclus à la main) : ce sont eux que lisent les analyses",
+    stillRunning:
+      "Cette page a perdu le contact avec le serveur pendant la construction du corpus, qui continue sans doute là-bas. Les articles trouvés jusqu'ici sont affichés ; le compte final apparaîtra dans le scénario (indicateur d'activité en haut de page).",
+    buildNotFollowed:
+      "Le serveur ne signale plus cette construction (il a peut-être redémarré) : les articles trouvés jusqu'ici sont affichés. Ouvrez le scénario pour voir où il en est, ou relancez la recherche.",
+    rerankRunning: "Le classement est encore affiné sur le serveur (rerank) : l'ordre affiché est provisoire.",
+    rerankReady: "Le classement affiné est prêt.",
+    reloadList: "Recharger la liste",
+    exportTitle:
+      "Exporter les articles pertinents ou tout le corpus, en entier : pas seulement la liste affichée",
+    exportPlaceholder: "Exporter…",
+    exportRelevantGroup: "Articles pertinents ({n})",
+    exportCorpusGroup: "Corpus entier ({n})",
     refreshingResults: "Mise à jour des résultats en cours…",
     localBase: "Base locale",
     liveApi: "API en direct",
@@ -456,6 +477,10 @@ export const fr = {
       searching: "Recherche...",
       searchAllSources: "Rechercher toutes les sources",
       liveResultsSuffix: "résultats (APIs en direct)",
+      livePerSource: "au plus {n} par source",
+      livePerSourceHint:
+        "Un aperçu : chaque source ne rend ici que ses premiers résultats. Le corpus du scénario est construit par la recherche, sans ce plafond.",
+      fetchedOf: "{n} sur {total}",
       newUnindexed: "nouveaux non-indexés",
       ingestingInProgress: " (ingestion en cours...)",
       corpusTooltip:
@@ -718,7 +743,8 @@ export const fr = {
         "Calcul en cours en arrière-plan (UMAP + HDBSCAN)... Mise à jour automatique toutes les 5s",
       startingText: "Lancement de l'analyse (Embeddings → UMAP 2D → HDBSCAN)...",
       interrupted: "Le calcul a été interrompu (redémarrage de l'API). Relancez-le.",
-      pollTimedOut: "Le calcul n'a pas abouti dans le délai attendu. Relancez-le.",
+      pollTimedOut:
+        "Le contact avec le serveur a été perdu pendant le calcul. Il continue sans doute là-bas : rouvrez cet onglet dans un moment plutôt que de le relancer.",
       errorClustering: "Erreur lors du clustering",
       umapProjection: "Projection UMAP 2D",
       umapCaption:
@@ -738,6 +764,7 @@ export const fr = {
     rag: {
       historyTitle: "Questions posées",
       historySubtitle: "Chaque réponse est conservée avec la portée sur laquelle elle a été obtenue, sa date et ses sources.",
+      historyShownOf: "{shown} questions affichées sur {total}",
       historyArticles: "articles",
       historyRepeat: "reposée",
       historyRepeatHint: "Cette question a déjà été posée : comparez les réponses pour voir ce que la littérature a changé.",
@@ -859,6 +886,7 @@ export const fr = {
       vetoed: "Écartés (au-dessus du seuil, exclus manuellement)",
       screeningComplete: "Screening terminé",
       exclusionReasons: "Motifs d'exclusion",
+      otherReasons: "Autres motifs ({n})",
       yes: "Oui",
       inProgress: "En cours",
       stage4: "Étape 4 : Synthèse des preuves",
@@ -896,8 +924,11 @@ export const fr = {
       colIntervention: "I : Intervention",
       colComparator: "C : Comparateur",
       colOutcome: "O : Outcome",
-      showingFirstPart1: "Affichage des 100 premiers résultats sur",
-      showingFirstPart2: "Utilisez la recherche pour filtrer.",
+      showingFirst: "{n} premiers sur {total}, dans l'ordre choisi.",
+      expandRow: "Cliquer pour déplier la ligne",
+      collapseRow: "Cliquer pour replier la ligne",
+      truncated:
+        "Le tableau porte les {n} premiers articles sur {total} : le chargement s'arrête à cette limite, et le tri comme le CSV ne portent que sur eux.",
       noArticleMatch: "Aucun article ne correspond aux filtres.",
       csvTitle: "Titre",
       csvYear: "Année",
@@ -938,7 +969,10 @@ export const fr = {
       includeType: "Remettre {type} dans le graphe",
       removeConcept: "Retirer",
       exportConcept: "Exporter tous les articles de ce concept (sans le plafond d'affichage)",
-      exportVisible: "Exporter les articles de la carte telle qu'elle est composée ({n} concepts visibles)",
+      exportVisible: "Exporter les articles de la carte telle qu'elle est composée : {n} concepts de l'index complet, et non les seuls concepts dessinés",
+      drawnPerType: "Au plus {max} concepts dessinés par type : {list}.",
+      drawnOf: "{type} {shown} sur {total}",
+      serverCap: "La carte dessine les {nodes} concepts les plus cités (plafond {max}, au moins {min} articles chacun) sur les {total} des articles pertinents. L'export et la restriction du corpus les lisent tous, filtrés par vos seuls choix.",
       removedConcepts: "{n} concept(s) retiré(s)",
       resetFilters: "Tout réafficher",
       filtered: "filtré sur {total} concepts",
@@ -1017,6 +1051,8 @@ export const fr = {
       strataAuditEmpty: "Aucun article de l'échantillon n'a encore été jugé par les deux relecteurs.",
       voteInclude: "Inclure",
       voteExclude: "Exclure",
+      collapseAbstract: "Replier le résumé",
+      expandAbstract: "Afficher le résumé entier",
       includeArbitration: "Inclure (arbitrage)",
       excludeArbitration: "Exclure (arbitrage)",
     },
@@ -1067,8 +1103,9 @@ export const fr = {
       metadataLabel: "Enrichissement Métadonnées",
       metadataDesc:
         "Complète le type d'étude, la taille d'échantillon, le pays, le risque de biais via LLM.",
-      fulltextLabel: "Récupération Full-Text",
-      fulltextDesc: "Recherche le texte intégral en accès libre via Unpaywall (DOI requis).",
+      fulltextLabel: "Liens d'accès ouvert",
+      fulltextDesc:
+        "Cherche via Unpaywall (DOI requis) un lien vers la version en accès ouvert de chaque article. Il ne télécharge pas de texte : l'étape texte intégral du pipeline lira ces liens.",
       title: "Enrichissement LLM",
       subtitle: "Lancez les enrichissements automatiques sur l'ensemble du corpus",
       subtitleScenario: "Lancez les enrichissements sur ce scénario",
@@ -1086,11 +1123,15 @@ export const fr = {
       autoEnrichmentBody:
         ": Le pipeline lance automatiquement l'extraction PICO et l'enrichissement des métadonnées lors de l'ingestion des articles. Utilisez les boutons ci-dessous uniquement pour compléter les articles qui auraient été manqués ou pour relancer un enrichissement spécifique.",
       batchSizeLabel: "Taille du lot :",
-      articlesPerRun: "articles par exécution",
+      batchSizeAll: "tous",
+      articlesPerRun: "articles par exécution (vide : tout ce qui reste à traiter)",
       coverage: "Couverture",
       running: "En cours...",
-      launchPrefix: "Lancer (",
-      launchSuffix: "articles)",
+      launch: "Lancer ({n} articles)",
+      launchLinks: "Lancer ({n} articles, {cap} au plus par exécution)",
+      progress: "Sur le serveur : {done} sur {total} traités",
+      resultExtracted: "{n} articles enrichis, {skipped} ignorés, {errors} erreurs.",
+      resultLinks: "{n} liens d'accès ouvert trouvés, {na} non disponibles, {errors} erreurs.",
     },
     seuil: {
       saveFailed: "Le seuil n'a pas été enregistré : réessayez (clé d'API ou réseau).",
@@ -1188,6 +1229,7 @@ export const fr = {
       max: "Max :",
       studyTypes: "Types d'étude",
       other: "Autres",
+      otherNotSelectable: "Les articles que la classification des devis ne range dans aucune des lignes ci-dessus. Ce n'est pas un devis : on ne peut pas restreindre le corpus à ce reste.",
       sources: "Sources",
       evidenceLevels: "Niveaux de preuve",
       narrativeBriefLlm: "Brief narratif LLM",
@@ -1406,6 +1448,8 @@ export const fr = {
       quotesCheck: "{n} à vérifier",
       showingFirst: "Affichage des {n} premiers sur {total}.",
       showMore: "Afficher plus",
+      listTruncated:
+        "La liste porte les {n} premiers articles sur {total} : le chargement s'arrête à cette limite, et les filtres comme les comptes de ce tableau ne portent que sur eux.",
       noMatch: "Aucun article ne correspond.",
       detailLoading: "Chargement des observations...",
       detailError: "Les observations n'ont pas pu être chargées.",
@@ -1455,6 +1499,7 @@ export const fr = {
         papers: "{n} articles",
         truncated: "{shown} libellés affichés ici sur {total} : le CSV téléchargé les porte tous",
         tooFew: "Libellés avec moins de {min} études ({n}) : affichés sans valeur combinée",
+        tooFewShown: "{shown} sur {total} listés.",
         rowsUsed: "{n} lignes ont été combinées.",
         duplicates: "{n} lignes répétées d'un même article ont été comptées une fois.",
         leftOut: "Écartées :",
@@ -1558,6 +1603,7 @@ export const fr = {
         colArticles: "Articles",
         colMapTo: "Rattacher à",
         mapPlaceholder: "Choisir...",
+        shownOf: "{shown} libellés affichés sur {total}, les plus fréquents d'abord.",
         map: "Rattacher",
       },
     },
@@ -1582,6 +1628,7 @@ export const fr = {
       emptyTitle: "Aucun rapport de situation",
       empty: "Rien n'a encore été ingéré pour ce scénario. Une fois ReliefWeb configuré, les rapports correspondant aux pathogènes et aux pays du scénario apparaissent ici - séparément du corpus scientifique.",
       count: "rapports",
+      shownOf: "{shown} sur {total} rapports",
     },
     seirTab: {
       loadFailed: "Impossible de charger le modèle SEIR",
@@ -1669,6 +1716,7 @@ export const fr = {
     },
     model: {
       loadingTrained: "Chargement du modèle entraîné...",
+      jobFailed: "Le calcul a échoué sur le serveur : le modèle affiché est le précédent.",
       liveStatus: "Statut Live (modèle entraîné)",
       dashboard: {
         title: "Tableau de bord du modèle",
