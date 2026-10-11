@@ -37,6 +37,9 @@ from .pooling import pooled_estimates
 from .scenario_store import _get_scenario_threshold, _get_user_scenario_or_404
 
 _FIGURES = 6                                  # forest plots drawn in the PDF
+#: How long the lists of the report run. Each cut is said under its list, with where the rest
+#: is: the Excel export of the extraction holds every country, label and comparison.
+_COUNTRIES_LISTED, _REGIONS_LISTED, _FEW_LISTED, _COMPARISONS_LISTED = 25, 8, 30, 40
 
 _S = {
     "en": {
@@ -76,6 +79,12 @@ _S = {
         "lim_unmapped": "{n} rows carry a label that is not in the codebook; they are pooled only with an identical spelling.",
         "lim_het": "{n} pooled estimates show substantial or considerable disagreement between studies (I2 of 50% or more). Read their prediction interval, not only the pooled value.",
         "lim_combine": "Studies that are combined may differ in population, setting and definition, which the pooled value cannot show.",
+        "lim_condensed": "{n} articles held more data than one answer of the model can carry and were read in a condensed form (at most 50 rows each, rows with counts first): some of their rows are missing.",
+        "lim_truncated": "{n} articles were read from a text cut at the size limit ({max} characters per article today): the end of their text, often tables and supplementary material, was not read.",
+        "more_countries": "{n} more countries are not listed here: the Excel export of the extraction lists every country with its regions (sheet COUNTRIES).",
+        "more_regions": "{n} more regions are not listed here: see the sheet COUNTRIES of the Excel export.",
+        "more_few": "{n} more labels with fewer than {k} studies are not listed here: the Excel export lists every label (sheet POOLED).",
+        "more_cmp": "{n} more comparisons are not listed here: the Excel export lists every comparison (sheet COMPARISONS).",
         "geo_h": "Where the evidence comes from", "geo_t": "{n} of the {total} extracted articles name a place that resolves to a country; the NUTS list in use is {src}.",
         "geo_builtin": "the built-in one (countries; Germany NUTS 1; Italy NUTS 1 and 2)", "geo_loaded": "Eurostat's official list",
         "col_country": "Country", "col_nuts": "NUTS 0", "col_regions": "Regions (articles)", "geo_unres": "{n} articles name no place that can be resolved, or name several countries.",
@@ -119,6 +128,12 @@ _S = {
         "lim_unmapped": "{n} lignes portent un libellé absent du codebook ; elles ne sont combinées qu'à orthographe identique.",
         "lim_het": "{n} estimations combinées montrent un désaccord important ou considérable entre études (I2 d'au moins 50 %). Lisez leur intervalle de prédiction, pas seulement la valeur combinée.",
         "lim_combine": "Les études combinées peuvent différer par la population, le contexte et la définition, ce que la valeur combinée ne montre pas.",
+        "lim_condensed": "{n} articles contenaient plus de données qu'une réponse du modèle ne peut en porter et ont été lus sous forme condensée (au plus 50 lignes chacun, les lignes avec effectifs d'abord) : une partie de leurs lignes manque.",
+        "lim_truncated": "{n} articles ont été lus dans un texte coupé à la taille limite ({max} caractères par article aujourd'hui) : la fin de leur texte, souvent les tableaux et le matériel supplémentaire, n'a pas été lue.",
+        "more_countries": "{n} autres pays ne sont pas listés ici : l'export Excel de l'extraction liste chaque pays avec ses régions (feuille COUNTRIES).",
+        "more_regions": "{n} autres régions ne sont pas listées ici : voir la feuille COUNTRIES de l'export Excel.",
+        "more_few": "{n} autres libellés avec moins de {k} études ne sont pas listés ici : l'export Excel liste chaque libellé (feuille POOLED).",
+        "more_cmp": "{n} autres comparaisons ne sont pas listées ici : l'export Excel liste chaque comparaison (feuille COMPARISONS).",
         "geo_h": "D'où vient la preuve", "geo_t": "{n} des {total} articles extraits nomment un lieu qui se résout en un pays ; la liste NUTS utilisée est {src}.",
         "geo_builtin": "la liste intégrée (pays ; Allemagne NUTS 1 ; Italie NUTS 1 et 2)", "geo_loaded": "la liste officielle d'Eurostat",
         "col_country": "Pays", "col_nuts": "NUTS 0", "col_regions": "Régions (articles)", "geo_unres": "{n} articles ne nomment aucun lieu résoluble, ou nomment plusieurs pays.",
@@ -168,7 +183,7 @@ def build_extraction_report(scenario_id: str, lang: str = "en") -> dict[str, Any
     if not digest.get("complete") or not digest.get("n_extracted"):
         raise HTTPException(status_code=409, detail="Nothing is extracted yet: there is nothing to report.")
     rev = review_summary(scenario_id)
-    pooled = pooled_estimates(scenario_id)
+    pooled = pooled_estimates(scenario_id, full=True)              # everything; each cut list below says so
     cb = get_codebook(scenario_id)
     un = unmapped_labels(scenario_id, top=1)
     n_ex, n_rel = digest["n_extracted"], digest["n_relevant"]
@@ -209,7 +224,12 @@ def build_extraction_report(scenario_id: str, lang: str = "en") -> dict[str, Any
     if geo["countries"]:
         add(("table", [S["col_country"], S["col_nuts"], S["col_papers"], S["col_rows"], S["col_regions"]],
              [[c["name"], c["nuts0"] or "-", str(c["n_papers"]), str(c["n_rows"]),
-               "; ".join(f"{g['name']} {g['code']} ({g['n_papers']})" for g in c["regions"][:8]) or "-"] for c in geo["countries"][:25]]))
+               "; ".join(f"{g['name']} {g['code']} ({g['n_papers']})" for g in c["regions"][:_REGIONS_LISTED]) or "-"] for c in geo["countries"][:_COUNTRIES_LISTED]]))
+        if len(geo["countries"]) > _COUNTRIES_LISTED:
+            add(("p", S["more_countries"].format(n=len(geo["countries"]) - _COUNTRIES_LISTED)))
+        hidden_regions = sum(max(0, len(c["regions"]) - _REGIONS_LISTED) for c in geo["countries"][:_COUNTRIES_LISTED])
+        if hidden_regions:
+            add(("p", S["more_regions"].format(n=hidden_regions)))
     if geo["n_unresolved"]:
         add(("p", S["geo_unres"].format(n=geo["n_unresolved"])))
 
@@ -237,7 +257,9 @@ def build_extraction_report(scenario_id: str, lang: str = "en") -> dict[str, Any
     if small:
         add(("p", S["few"].format(k=k)))
         add(("bullets", [f"{_label(g)} ({g['disease'] or S['all_diseases']}): " + "; ".join(f"{_author(s)} {s['x']}/{s['n']}" for s in g["studies"])
-                         for g in small[:30]]))
+                         for g in small[:_FEW_LISTED]]))
+        if len(small) > _FEW_LISTED:
+            add(("p", S["more_few"].format(n=len(small) - _FEW_LISTED, k=k)))
 
     if pooled["comparisons"]:
         add(("h2", S["cmp_h"]))
@@ -245,7 +267,9 @@ def build_extraction_report(scenario_id: str, lang: str = "en") -> dict[str, Any
         add(("table", [S["col_cmp"], S["col_disease"], S["col_papers_n"], S["col_or"], S["col_het"]],
              [[f"{c['a'].replace('_', ' ')} {S['versus']} {c['b'].replace('_', ' ')}", c["disease"] or S["all_diseases"], str(c["k"]),
                f"{fmt_or(c['pooled']['or'])} ({_interval(c['pooled']['ci_low'], c['pooled']['ci_high'], fmt_or)})",
-               f"{round(c['heterogeneity']['I2'])}% ({S['band'][c['heterogeneity']['band']]})"] for c in pooled["comparisons"]]))
+               f"{round(c['heterogeneity']['I2'])}% ({S['band'][c['heterogeneity']['band']]})"] for c in pooled["comparisons"][:_COMPARISONS_LISTED]]))
+        if len(pooled["comparisons"]) > _COMPARISONS_LISTED:
+            add(("p", S["more_cmp"].format(n=len(pooled["comparisons"]) - _COMPARISONS_LISTED)))
         for c in pooled["comparisons"][:_FIGURES]:
             add(("figure", "odds", c))
 
@@ -259,6 +283,11 @@ def build_extraction_report(scenario_id: str, lang: str = "en") -> dict[str, Any
     limits = []
     if digest["n_abstract"]:
         limits.append(S["lim_abstract"].format(n=digest["n_abstract"]))
+    if digest.get("n_truncated"):                                 # fewer rows than the paper reports
+        max_chars = f"{digest.get('max_chars') or 0:,}".replace(",", " " if S is _S["fr"] else ",")
+        limits.append(S["lim_truncated"].format(n=digest["n_truncated"], max=max_chars))
+    if digest.get("n_condensed"):
+        limits.append(S["lim_condensed"].format(n=digest["n_condensed"]))
     if unreviewed_pct:
         limits.append(S["lim_review"].format(pct=unreviewed_pct))
     if un["rows_unmapped"]:

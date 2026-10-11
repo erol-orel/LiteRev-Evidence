@@ -1,9 +1,9 @@
 import React from "react";
 import { AlertTriangle, ChevronDown, ChevronUp, Download, Info } from "lucide-react";
 import { useI18n } from "../i18n/LanguageProvider";
-import { fetchPooled } from "../lib/api";
+import { fetchPooled, pooledExportUrl } from "../lib/api";
 import type { PooledComparison, PooledGroup, PooledResponse, PooledStudy } from "../lib/api";
-import { bandTone, csvOfPooled, fmtOr, forestScale, intervalText, orDomain, pct, proportionDomain } from "../lib/pooling";
+import { bandTone, fmtOr, forestScale, intervalText, orDomain, pct, proportionDomain } from "../lib/pooling";
 
 const W = 360;            // width of the plotting area
 const ROW = 20;
@@ -96,14 +96,13 @@ export function PooledPanel({ scenarioId, tick }: { scenarioId: string; tick: nu
     return () => { alive = false; };
   }, [scenarioId, opts, tick]);
 
+  // The file comes from the server, whole: every label (those with too few studies too) and
+  // every comparison. Built from the page in hand, it carried 120 labels and no comparison.
   const download = () => {
-    if (!data) return;
-    const blob = new Blob([csvOfPooled(data.pooled)], { type: "text/csv;charset=utf-8" });
     const a = document.createElement("a");
-    a.href = URL.createObjectURL(blob);
+    a.href = pooledExportUrl(scenarioId, opts);
     a.download = `pooled_${scenarioId}.csv`;
     a.click();
-    URL.revokeObjectURL(a.href);
   };
 
   const big = (data?.pooled ?? []).filter((g) => g.pooled);
@@ -226,6 +225,14 @@ export function PooledPanel({ scenarioId, tick }: { scenarioId: string; tick: nu
               );
             })}
           </div>
+          {/* La coupe des comparaisons, dite : 40 au plus ici, toutes dans le fichier. */}
+          {data!.comparisons_truncated && (
+            <p className="text-[10px] text-amber-300/70">
+              {T("comparisonsTruncated")
+                .replace("{shown}", String(data!.comparisons_returned ?? data!.comparisons.length))
+                .replace("{total}", String(data!.comparisons_total ?? data!.comparisons.length))}
+            </p>
+          )}
         </div>
       )}
 

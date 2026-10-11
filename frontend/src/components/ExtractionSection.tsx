@@ -12,7 +12,7 @@ import type { Detail } from "./ObservationPanel";
 import { ReviewSummaryCard } from "./ReviewSummaryCard";
 import {
   extractionExportUrl, extractionReportUrl, fetchAllExtractionArticles, fetchArticleExtraction, fetchExtractionDigest,
-  fetchExtractionStatus, hasApiKey, startExtraction,
+  fetchExtractionStatus, hasApiKey, reverifyExtractionQuotes, startExtraction,
 } from "../lib/api";
 import type {
   ExtractionArticle, ExtractionArticlesResponse, ExtractionDigest, ExtractionObservation, ExtractionStatus,
@@ -35,6 +35,7 @@ export function ExtractionSection({ scenarioId }: { scenarioId: string }) {
   const [loading, setLoading] = React.useState(true);
   const [error, setError] = React.useState<string | null>(null);
   const [notice, setNotice] = React.useState<string | null>(null);
+  const [recheck, setRecheck] = React.useState<{ busy: boolean; text: string | null }>({ busy: false, text: null });
 
   const [filter, setFilter] = React.useState<ExtractionFilter>("all");
   const [search, setSearch] = React.useState("");
@@ -112,9 +113,26 @@ export function ExtractionSection({ scenarioId }: { scenarioId: string }) {
     try {
       const r = await startExtraction(scenarioId, retryGivenUp);
       if (r.status === "no_llm") setNotice(T("runNoLlm"));
+      else if (r.status === "paused") setNotice(T("runPaused").replace("{reason}", r.reason ?? ""));
       else setStatus(await fetchExtractionStatus(scenarioId));
     } catch (e) {
       setNotice(`${T("runFailed")} ${(e as Error).message}`);
+    }
+  };
+
+  // The stored quotes checked again against each paper's whole text, with today's check (it
+  // undoes ligatures and words split at a line break): no AI call, nothing else changes.
+  const recheckQuotes = async () => {
+    setRecheck({ busy: true, text: null });
+    try {
+      const r = await reverifyExtractionQuotes(scenarioId);
+      setRecheck({ busy: false, text: T("recheckDone")
+        .replace("{before}", String(r.verified_before)).replace("{after}", String(r.verified_after))
+        .replace("{total}", String(r.n_observations)) });
+      setReviewTick((n) => n + 1);
+      reload().catch(() => undefined);
+    } catch (e) {
+      setRecheck({ busy: false, text: `${T("recheckFailed")} ${(e as Error).message}` });
     }
   };
 
@@ -243,8 +261,19 @@ export function ExtractionSection({ scenarioId }: { scenarioId: string }) {
               <Download size={11} />{f === "pdf" ? T("downloadReportPdf") : T("downloadReportWord")}
             </a>
           ))}
+          {extracted > 0 && hasApiKey() && !status.running && (
+            <button onClick={recheckQuotes} disabled={recheck.busy} title={T("recheckHint")}
+              className="flex items-center gap-1.5 rounded-xl border border-white/10 bg-white/5 px-3 py-1.5 text-[11px] text-white/70 hover:bg-white/10 transition disabled:opacity-50">
+              {recheck.busy ? <Loader2 size={11} className="animate-spin" /> : <RotateCcw size={11} />}{T("recheckQuotes")}
+            </button>
+          )}
         </div>
         {notice && <p className="text-[11px] text-rose-300">{notice}</p>}
+        {recheck.text && <p className="text-[10px] text-white/50">{recheck.text}</p>}
+        {/* A run that stopped early because the provider looked down: no article was charged for it. */}
+        {status.job?.paused && !status.running && (
+          <p className="text-[10px] text-amber-300/80">{T("pausedProvider").replace("{reason}", status.job.paused)}</p>
+        )}
         {status.n_given_up > 0 && (
           <p className="text-[10px] text-white/40">
             {T("givenUp").replace("{n}", String(status.n_given_up))}
@@ -258,6 +287,17 @@ export function ExtractionSection({ scenarioId }: { scenarioId: string }) {
         )}
         {(status.n_condensed ?? 0) > 0 && (
           <p className="text-[10px] text-white/40">{T("condensedCount").replace("{n}", String(status.n_condensed))}</p>
+        )}
+        {(status.n_truncated ?? 0) > 0 && (
+          <p className="text-[10px] text-white/40">
+            {T("truncatedCount").replace("{n}", String(status.n_truncated)).replace("{max}", (status.max_chars ?? 0).toLocaleString())}
+          </p>
+        )}
+        {(status.n_to_reread ?? 0) > 0 && !status.running && (
+          <p className="text-[10px] text-white/40">{T("rereadCount").replace("{n}", String(status.n_to_reread))}</p>
+        )}
+        {(status.n_rows_dropped ?? 0) > 0 && (
+          <p className="text-[10px] text-white/40">{T("rowsDroppedCount").replace("{n}", String(status.n_rows_dropped))}</p>
         )}
       </div>
 

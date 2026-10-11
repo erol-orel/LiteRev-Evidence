@@ -363,6 +363,97 @@ def json_content(response, label: str = "") -> str:
     return content
 
 
+# ── A failure that says nothing about the question asked ─────────────────────
+#: Exception classes (matched by name along the MRO, so the SDK is never imported here) of a
+#: call that never got an answer: the openai SDK's, httpx's and the standard library's.
+_TRANSIENT_CLASSES = frozenset({
+    "RateLimitError", "APITimeoutError", "APIConnectionError", "InternalServerError",
+    "TimeoutException", "NetworkError", "RemoteProtocolError", "TimeoutError", "ConnectionError",
+})
+#: HTTP statuses the SDK itself retries: timeout, conflict, rate limit or quota, and 5xx.
+_TRANSIENT_STATUSES = frozenset({408, 409, 429})
+_RE_TRANSIENT_TEXT = re.compile(
+    r"insufficient_quota|exceeded your current quota|rate limit|error code: (?:429|5\d\d)\b"
+    r"|connection error|timed out", re.I)
+
+
+def is_transient_llm_error(exc: BaseException) -> bool:
+    """True when a failed call says nothing about the item it was about: refused here
+    (`LLMCallBlocked`: the master switch or the budget), refused by the provider (quota, rate
+    limit), or never answered (timeout, connection, 5xx). The same call may well succeed later,
+    so a per-item attempt counter must NOT be charged for it: three outages used to give up
+    every article still in the queue.
+
+    False for what repeats identically at temperature 0 and fixed seed: an answer cut at its
+    ceiling (`LLMTruncated`), an unreadable answer, a refused parameter. Those are charged."""
+    if isinstance(exc, LLMCallBlocked):
+        return True
+    if isinstance(exc, LLMTruncated):
+        return False
+    if any(c.__name__ in _TRANSIENT_CLASSES for c in type(exc).__mro__):
+        return True
+    status = getattr(exc, "status_code", None)
+    if isinstance(status, int) and (status in _TRANSIENT_STATUSES or status >= 500):
+        return True
+    return bool(_RE_TRANSIENT_TEXT.search(str(exc)))
+
+
+#: Transient failures in a row, with no answer between them, after which a batch job takes the
+#: provider to be down and stops instead of failing through the rest of its queue.
+TRANSIENT_STREAK_LIMIT = 4
+
+
+class ProviderWatch:
+    """Whether a batch job should keep calling the provider. One per job, shared by its workers.
+
+    `failure` records a transient failure (never charged to the item); `success` any answer.
+    The job stops (`stopped()` true, `reason` says why) at the first refused call, since every
+    next one would be refused the same way, after `limit` transient failures in a row, or while
+    `cooldown()` is true (the quota circuit breaker, which lives with the application)."""
+
+    def __init__(self, limit: int = TRANSIENT_STREAK_LIMIT, cooldown=None):
+        self.limit = max(1, int(limit))
+        self.n_transient = 0
+        self.reason: str | None = None
+        self._streak = 0
+        self._cooldown = cooldown
+        self._lock = threading.Lock()
+
+    def preflight(self, purpose: str = "") -> bool:
+        """True (and `reason` set) when no call can be made right now: the master switch is
+        off, the day's budget is spent, or the circuit breaker is open. A job asks before it
+        starts, so it says why instead of queueing calls that would all be refused."""
+        try:
+            check_allowed(purpose)
+        except LLMCallBlocked as exc:
+            with self._lock:
+                self.reason = f"calls refused: {str(exc)[:200]}"
+        return self.stopped()
+
+    def success(self) -> None:
+        with self._lock:
+            self._streak = 0
+
+    def failure(self, exc: BaseException) -> None:
+        with self._lock:
+            self.n_transient += 1
+            self._streak += 1
+            if self.reason is None and isinstance(exc, LLMCallBlocked):
+                self.reason = f"calls refused: {str(exc)[:200]}"
+            elif self.reason is None and self._streak >= self.limit:
+                self.reason = f"{self._streak} failures in a row, the last: {str(exc)[:200]}"
+
+    def stopped(self) -> bool:
+        with self._lock:
+            if self.reason is None and self._cooldown is not None:
+                try:
+                    if self._cooldown():
+                        self.reason = "the quota circuit breaker is open"
+                except Exception:                      # a broken probe must not stop a job
+                    pass
+            return self.reason is not None
+
+
 # ── configuration ────────────────────────────────────────────────────────────
 
 def configure(engine) -> None:

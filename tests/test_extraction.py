@@ -236,7 +236,10 @@ def test_the_workbook_has_the_templates_sheets_columns_and_the_review_columns_on
     readme_text = " ".join(str(r[0].value) for r in wb["README"].iter_rows())
     assert "Made with: unknown, prompt unknown (1 papers)" in readme_text
     ref = [c.value for c in wb["REF"][1]]
-    assert ref == [t for t, _ in extraction.REF_COLUMNS]
+    # The template's columns to the letter, then what was read of each paper on the right.
+    assert ref[:len(extraction.REF_COLUMNS)] == [t for t, _ in extraction.REF_COLUMNS]
+    assert ref[len(extraction.REF_COLUMNS):] == ["Extracted from", "Characters read", "Text cut at the size limit (Y/N)",
+                                                 "Condensed answer (Y/N)"]
     row = {h: c.value for h, c in zip(ref, wb["REF"][2])}
     assert row["ID"] == "AB77" and row["first author name"] == "Dressler"
     assert row["reference"] == "https://doi.org/10.2807/x" and row["Mathematical model (Y/N)"] == "Y"

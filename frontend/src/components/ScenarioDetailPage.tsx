@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useLayoutEffect, useCallback, useRef, useMemo } from "react";
 import { ErrorBoundary } from "./ErrorBoundary";
 import { ExtractionSection } from "./ExtractionSection";
+import { ConceptAnnotationStatus } from "./ConceptAnnotationStatus";
 import { formatEpiInterval, formatEpiNumber } from "../lib/epiFormat";
 import { useI18n } from "../i18n/LanguageProvider";
 import {
@@ -5064,6 +5065,7 @@ function ConceptMapView({ scenarioId }: { scenarioId: string }) {
       <div className="space-y-2 p-4 text-xs text-white/40">
         <p>{t("scenarioDetail.knowledgeGraph.noConcepts")}</p>
         {data.enriching && <p className="flex items-center gap-2 text-brand-300"><Loader2 size={12} className="animate-spin" />{t("scenarioDetail.knowledgeGraph.enriching")}</p>}
+        <ConceptAnnotationStatus scenarioId={scenarioId} data={data} onStarted={() => setReloadKey(k => k + 1)} />
       </div>
     );
   }
@@ -5148,6 +5150,8 @@ function ConceptMapView({ scenarioId }: { scenarioId: string }) {
           {t("scenarioDetail.knowledgeGraph.structuredOnly")}
         </div>
       )}
+      {/* L'annotation ne part plus à la lecture de la carte : ses comptes, et le bouton qui la lance. */}
+      <ConceptAnnotationStatus scenarioId={scenarioId} data={data} onStarted={() => setReloadKey(k => k + 1)} />
 
       <div className="flex flex-wrap items-center gap-3">
         {data.latest_year !== null && (

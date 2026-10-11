@@ -1566,8 +1566,17 @@ export interface ExtractionStatus {
   n_given_up: number;
   /** Read through the condensed retry: the answer was cut off, so fewer rows were kept. */
   n_condensed?: number;
+  /** Read from a text cut at `max_chars` characters: the end of the paper was not read. */
+  n_truncated?: number;
+  max_chars?: number;
+  /** Of `n_pending`, the extracted ones the next run reads again (cut under a smaller limit, or full text arrived). */
+  n_to_reread?: number;
+  /** Rows of the answers that named no sheet of the template, or no covariate. */
+  n_rows_dropped?: number;
   running: boolean;
-  job: { total: number; done: number; failed: number } | null;
+  /** `transient`: failures that cost no attempt (an outage); `skipped`: not tried once the run paused;
+   *  `paused`: why the run stopped early (the provider looked down), or null. */
+  job: { total: number; done: number; failed: number; transient?: number; skipped?: number; paused?: string | null } | null;
   version: number;
 }
 
@@ -1703,14 +1712,38 @@ export async function fetchArticleExtraction(scenarioId: string, articleId: numb
   return r.json();
 }
 
-/** Starts the background extraction (needs the admin key). `status` is started, running, no_llm...
+/** Starts the background extraction (needs the admin key). `status` is started, running, no_llm, or
+ *  paused (no call can be made: the master switch, the budget, the quota breaker; `reason` says which).
  *  `retryGivenUp` first gives back their attempts to the articles left alone after three failures. */
-export async function startExtraction(scenarioId: string, retryGivenUp = false): Promise<{ status: string; n_reset?: number }> {
+export async function startExtraction(scenarioId: string, retryGivenUp = false): Promise<{ status: string; n_reset?: number; reason?: string }> {
   const q = retryGivenUp ? "?retry_given_up=true" : "";
   const r = await safeFetch(`${scenarioBase(scenarioId)}/${scenarioId}/extraction/run${q}`, {
     method: "POST", headers: authHeaders(),
   });
   if (!r.ok) throw new Error(httpMessage(r.status));
+  return r.json();
+}
+
+export interface QuoteRecheck {
+  n_articles: number;
+  n_articles_changed: number;
+  n_observations: number;
+  verified_before: number;
+  verified_after: number;
+  newly_found: number;
+  no_longer_found: number;
+}
+
+/** Checks the stored quotes again against each paper's whole text, with no AI call (needs the admin key). */
+export async function reverifyExtractionQuotes(scenarioId: string): Promise<QuoteRecheck> {
+  const r = await safeFetch(`${scenarioBase(scenarioId)}/${scenarioId}/extraction/reverify`, {
+    method: "POST", headers: authHeaders(),
+  });
+  if (!r.ok) {
+    let detail = "";
+    try { detail = (await r.json()).detail ?? ""; } catch { /* the body is not JSON */ }
+    throw new Error(detail || httpMessage(r.status));
+  }
   return r.json();
 }
 
@@ -1909,6 +1942,8 @@ export interface PooledResponse {
   comparisons_total?: number;
   comparisons_returned?: number;
   comparisons_truncated?: boolean;
+  /** Comparisons computed but not listed because their group already lists `caps.pairs_per_group`. */
+  comparisons_over_group_cap?: number;
   caps?: { groups: number; comparisons: number; pairs_per_group: number };
 }
 
@@ -1920,6 +1955,15 @@ export async function fetchPooled(
   const r = await safeFetch(`${scenarioBase(scenarioId)}/${scenarioId}/extraction/pooled?${q}`);
   if (!r.ok) throw new Error(httpMessage(r.status));
   return r.json();
+}
+
+/** The CSV of EVERY label and EVERY comparison, with the panel's filters (the panel lists a capped page). */
+export function pooledExportUrl(
+  scenarioId: string,
+  o: { reviewedOnly: boolean; verifiedOnly: boolean; splitDisease: boolean },
+): string {
+  const q = `reviewed_only=${o.reviewedOnly}&verified_only=${o.verifiedOnly}&split_disease=${o.splitDisease}`;
+  return `${scenarioBase(scenarioId)}/${scenarioId}/extraction/pooled/export?${q}`;
 }
 
 // ─── Label codebook (hierarchy per extraction sheet, applied when the labels are read) ───
@@ -1975,7 +2019,12 @@ export async function addCodebookSynonym(
   const r = await safeFetch(`${scenarioBase(scenarioId)}/${scenarioId}/codebook/synonym`, {
     method: "POST", headers: authHeaders({ "Content-Type": "application/json" }), body: JSON.stringify(body),
   });
-  if (!r.ok) throw new Error(httpMessage(r.status));
+  if (!r.ok) {
+    // A node full of synonyms refuses a new one and says why: the reason is shown, not a bare status.
+    let detail = "";
+    try { detail = (await r.json()).detail ?? ""; } catch { /* the body is not JSON */ }
+    throw new Error(detail || httpMessage(r.status));
+  }
 }
 
 export async function importCodebookCsv(scenarioId: string, csv: string): Promise<{ n_nodes: number }> {
@@ -2173,7 +2222,15 @@ export interface ConceptGraphData {
   n_articles: number;
   n_total: number;
   n_with_concepts: number;
+  /** Relevant articles a pass can still annotate. Reading the map never starts the pass. */
   n_missing_concepts: number;
+  /** Relevant articles no pass can annotate: given up after three failed attempts
+   *  (`n_concepts_given_up`, which can be tried again) or without any text (`n_without_text`). */
+  n_unannotatable?: number;
+  n_concepts_given_up?: number;
+  n_without_text?: number;
+  /** The last annotation pass in this server process: paused when the provider was unavailable. */
+  annotation?: { status: "done" | "paused"; reason: string | null; annotated: number; charged: number; pending: number } | null;
   source: "llm" | "structured";
   /** True while the API normalises the missing concepts with the LLM; re-fetch later. */
   enriching?: boolean;
@@ -2189,6 +2246,21 @@ export interface ConceptGraphData {
 export async function fetchConceptGraph(scenarioId: string, refresh = false): Promise<ConceptGraphData> {
   const base = scenarioBase(scenarioId);
   const r = await safeFetch(`${base}/${scenarioId}/concept-graph${refresh ? "?refresh=true" : ""}`);
+  if (!r.ok) throw new Error(httpMessage(r.status));
+  return r.json();
+}
+
+/** Starts the concept annotation of the relevant articles that have none (needs the admin key).
+ *  `status`: started, running, no_llm, or paused with a `reason` (switch, budget, quota breaker).
+ *  `retryGivenUp` first gives back their attempts to the articles left alone after three failures.
+ *  One route for every scenario: the built-in ones are scenarios of the same table. */
+export async function startConceptAnnotation(
+  scenarioId: string, retryGivenUp = false,
+): Promise<{ status: string; reason?: string; n_reset?: number }> {
+  const q = retryGivenUp ? "?retry_given_up=true" : "";
+  const r = await safeFetch(`${API_BASE_URL}/user-scenarios/${scenarioId}/concept-graph/annotate${q}`, {
+    method: "POST", headers: authHeaders(),
+  });
   if (!r.ok) throw new Error(httpMessage(r.status));
   return r.json();
 }
