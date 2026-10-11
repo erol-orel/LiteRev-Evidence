@@ -135,6 +135,22 @@ def scenario_rerank_threshold_sql(sid: str = ":sid") -> str:
 # celle des articles exclus, si bien que l'assistant pouvait citer un article qu'un
 # relecteur venait d'écarter, pendant que le compteur affiché sous la réponse, lui,
 # comptait le bon sous-ensemble. Une fonction, un seul endroit à corriger.
+
+#: La longueur sous laquelle un résumé n'en est pas un (« [No abstract available] »).
+ABSTRACT_MIN_CHARS = 30
+
+
+def has_abstract_sql(doc: str = "d") -> str:
+    """Le prédicat « cette notice a un résumé », lu sur `doc` (literature_document).
+
+    Évalué À LA LECTURE, jamais figé sur le lien : une notice dont le résumé est comblé
+    plus tard (backfill Europe PMC, une autre source dans une recherche suivante)
+    devient d'elle-même une notice avec résumé, éligible au score. Les notices sans
+    résumé restent au corpus, signalées, et hors du sous-ensemble pertinent tant qu'un
+    relecteur ne les inclut pas à la main (cf. relevant_gate_sql). Pur."""
+    return f"({doc}.abstract IS NOT NULL AND length(TRIM({doc}.abstract)) >= {ABSTRACT_MIN_CHARS})"
+
+
 def screening_status_sql(doc: str = "d", link: str = "ars") -> str:
     """Le statut de screening d'un article DANS CETTE REVUE.
 
@@ -170,14 +186,18 @@ def relevant_gate_sql(doc: str = "d", link: str = "ars", thr: str = ":thr") -> s
     Parce que le rerank est calculé après coup et par lots : sur le scénario HPAI, 45 des
     602 pertinents n'en avaient pas encore. Le compter pour 0 aurait fait disparaître ces
     45 articles à la seconde où quelqu'un bouge le curseur, sans que rien ne le dise. Un
-    article non encore jugé n'est pas un article jugé mauvais."""
+    article non encore jugé n'est pas un article jugé mauvais.
+
+    Une notice SANS résumé (has_abstract_sql) n'est jamais pertinente par son score, qui
+    ne lit que son titre : elle ne l'est que si un relecteur l'inclut à la main."""
     status = screening_status_sql(doc, link)
     rthr = scenario_rerank_threshold_sql(f"{link}.scenario_id")
     return (f"{doc}.is_duplicate IS NOT TRUE"
             f" AND {status} IS DISTINCT FROM 'excluded'"
             f" AND ({status} = 'included' OR ("
             f"COALESCE({link}.similarity_score, 0) >= {thr}"
-            f" AND ({link}.rerank_score IS NULL OR {link}.rerank_score >= {rthr})))")
+            f" AND ({link}.rerank_score IS NULL OR {link}.rerank_score >= {rthr})"
+            f" AND {has_abstract_sql(doc)}))")
 
 
 #: La première clause de la porte, celle que `relevant_gate_tail_sql` retire. Épinglée
@@ -455,6 +475,10 @@ def scenario_counts_sql() -> str:
                 " WHERE c.document_id = d.id AND c.chunk_type = 'fulltext_section')")
     chunkless = "NOT EXISTS (SELECT 1 FROM document_chunk c WHERE c.document_id = d.id)"
     in_range = "d.year BETWEEN 1800 AND EXTRACT(YEAR FROM CURRENT_DATE)::int"
+    # Les notices sans résumé forment leur propre case : ni au-dessus, ni en dessous du
+    # seuil, ni « non scorées » (leur score, s'il existe, ne lit que le titre et n'ouvre
+    # pas le sous-ensemble pertinent). above + below + unscored + no_abstract = total.
+    has_abs = has_abstract_sql("d")
     return f"""
         WITH s AS (
             SELECT COALESCE(CAST(:thr AS double precision),
@@ -464,11 +488,15 @@ def scenario_counts_sql() -> str:
         SELECT
             MIN(s.thr)                                                        AS threshold,
             COUNT(*)                                                          AS total,
-            COUNT(*) FILTER (WHERE ars.similarity_score >= s.thr)             AS above_threshold,
+            COUNT(*) FILTER (WHERE ars.similarity_score >= s.thr AND {has_abs})
+                                                                              AS above_threshold,
             COUNT(*) FILTER (WHERE ars.similarity_score IS NOT NULL
-                               AND ars.similarity_score < s.thr)              AS below_threshold,
-            COUNT(*) FILTER (WHERE ars.similarity_score IS NULL)              AS unscored,
-            COUNT(*) FILTER (WHERE ars.similarity_score IS NOT NULL)          AS scored,
+                               AND ars.similarity_score < s.thr AND {has_abs}) AS below_threshold,
+            COUNT(*) FILTER (WHERE ars.similarity_score IS NULL AND {has_abs}) AS unscored,
+            COUNT(*) FILTER (WHERE ars.similarity_score IS NOT NULL AND {has_abs})
+                                                                              AS scored,
+            COUNT(*) FILTER (WHERE NOT {has_abs})                             AS no_abstract,
+            COUNT(*) FILTER (WHERE d.year IS NULL)                            AS year_unknown,
             COUNT(*) FILTER (WHERE ars.rerank_score IS NOT NULL)              AS reranked,
             COUNT(*) FILTER (WHERE {relevant_gate_sql(doc='d', link='ars', thr='s.thr')})
                                                                               AS relevant,
@@ -495,6 +523,7 @@ def scenario_counts_sql() -> str:
 
 
 _COUNT_KEYS = ("total", "above_threshold", "below_threshold", "unscored", "scored",
+               "no_abstract", "year_unknown",
                "reranked", "relevant", "included", "excluded", "pending",
                "with_fulltext", "chunkless", "newly_fetched", "from_local",
                "years_covered", "journals_count")
@@ -533,8 +562,13 @@ def unscored_sql(doc: str = "d", link: str = "ars") -> str:
     catégorie d'articles qui ne peut pas devenir pertinente par son score (les notices
     sans résumé, par exemple) : `doc` est l'alias de literature_document, prêt pour cela.
     La partition de `scenario_counts` (au-dessus + en dessous + non scorés = total) ne la
-    lit pas, puisqu'elle doit rester une partition."""
-    return f"{link}.similarity_score IS NULL"
+    lit pas, puisqu'elle doit rester une partition.
+
+    Les notices sans résumé en sortent : gardées au corpus, elles n'entrent jamais par leur
+    score (relevant_gate_sql), seulement par une inclusion à la main ; les compter comme
+    « en attente d'un score » relançait le scoring automatique pour rien et gonflait le
+    compte que lisent le rapport, les exports et le brief."""
+    return f"({link}.similarity_score IS NULL AND {has_abstract_sql(doc)})"
 
 
 def scenario_unscored_count(scenario_id: str, conn: Any = None) -> int:

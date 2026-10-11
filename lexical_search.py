@@ -25,7 +25,9 @@ saved queries answer in milliseconds instead of minutes (scripts/compare_fts.py)
 What changes for the person searching: stemming (forecast = forecasting = forecasts),
 no more substrings (`ai` no longer matches "chain"), stop words ignored ("the", "it",
 "of" - PostgreSQL drops them from the query, and `stopword_terms` lets the caller say
-so), `word*` is a real prefix, accents are kept.
+so), `word*` is a real prefix, accents are kept. Punctuation inside a word separates it
+the same way in the query and in the text (SEPARATOR_PATTERN): A(H5N1), A/H5N1 and
+"A H5N1" are one phrase, and 2.3.4.4b is found where it is written.
 
 HOW IT STAYS CURRENT
 --------------------
@@ -46,6 +48,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import threading
 import time
 from typing import Any
@@ -55,6 +58,33 @@ logger = logging.getLogger("literev-api")
 #: Same configuration in the stored vectors and in every query. If these diverge the
 #: match silently degrades (a stem on one side only), so it lives in exactly one place.
 TS_CONFIG = "english"
+
+#: The punctuation that SEPARATES two words, in a search term and in the text the term
+#: is matched against, written once for both sides and both engines. It used to be
+#: deleted from terms only: "2.3.4.4b" became "2344b", "influenza A(H5N1)" became
+#: "influenza ah5n1", "PM2.5" became "pm25", forms that no document contains. The text
+#: side had its own accidents: PostgreSQL's parser reads "A/H5N1" as one file-path token
+#: and "2.3.4.4b" as a version number, so a search for H5N1 missed every abstract that
+#: wrote only "A/H5N1". Both sides now turn this punctuation into a space, the same way.
+#: ASCII only, spelled out rather than "anything that is not a letter": a negated class
+#: depends on the database locale (in the C locale every accented letter is "not a
+#: letter"), this list does not. The hyphen, the underscore and the star stay: the
+#: parser splits hyphenated words itself (sars-cov-2), the underscore is a word
+#: character, the star is PubMed truncation. The same string compiles as a Python and
+#: as a PostgreSQL regular expression.
+SEPARATOR_PATTERN = r"""[\]\[!"#$%&'()+,./:;<=>?@\\^`{|}~\s]+"""
+_SEPARATOR_RE = re.compile(SEPARATOR_PATTERN)
+#: The pattern as an SQL string literal, for DDL and queries that inline it.
+SEPARATOR_SQL = "'" + SEPARATOR_PATTERN.replace("'", "''") + "'"
+
+#: The version of the text normalisation the stored vectors were computed with. Rows of an
+#: older version are recomputed by the worker, in the background, like stale rows.
+TSV_VERSION = 2
+
+
+def separate(text_: str | None) -> str:
+    """Separators become one space, ends trimmed: the rule of `literev_separate` in SQL."""
+    return _SEPARATOR_RE.sub(" ", text_ or "").strip()
 
 #: Chunks whose text is NOT part of the document vector: a `title_abstract` chunk is a
 #: copy of two columns the vector already covers, and counting it twice would only
@@ -68,18 +98,35 @@ _HEAD_ONLY_CHUNK_TYPE = "title_abstract"
 # through DO blocks because `CREATE OR REPLACE TRIGGER` needs PostgreSQL 14 and the
 # logic lives in the functions anyway - replacing a function updates every trigger.
 DDL: tuple[str, ...] = (
-    """
+    f"""
     CREATE TABLE IF NOT EXISTS document_search (
         document_id BIGINT PRIMARY KEY
                     REFERENCES literature_document (id) ON DELETE CASCADE,
         tsv         TSVECTOR,
         -- TRUE = a chunk changed since `tsv` was computed; the worker recomputes it.
         stale       BOOLEAN NOT NULL DEFAULT TRUE,
-        updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+        updated_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+        -- The text normalisation `tsv` was computed with (TSV_VERSION); an older one is
+        -- recomputed by the worker, as a stale row is.
+        tsv_version SMALLINT DEFAULT {TSV_VERSION}
     )
     """,
+    # A table created before the column: its rows keep NULL, i.e. "an older version", and
+    # the worker recomputes them in the background. The default applies from then on.
+    "ALTER TABLE document_search ADD COLUMN IF NOT EXISTS tsv_version SMALLINT",
+    f"ALTER TABLE document_search ALTER COLUMN tsv_version SET DEFAULT {TSV_VERSION}",
     "CREATE INDEX IF NOT EXISTS ix_document_search_tsv ON document_search USING gin (tsv)",
     "CREATE INDEX IF NOT EXISTS ix_document_search_stale ON document_search (document_id) WHERE stale",
+    f"CREATE INDEX IF NOT EXISTS ix_document_search_outdated_v{TSV_VERSION} ON document_search (document_id) "
+    f"WHERE tsv_version IS DISTINCT FROM {TSV_VERSION}",
+    # The separator rule of SEPARATOR_PATTERN, for the text side. IMMUTABLE: a pure
+    # function of its argument.
+    f"""
+    CREATE OR REPLACE FUNCTION literev_separate(p_text TEXT) RETURNS TEXT
+    LANGUAGE sql IMMUTABLE PARALLEL SAFE AS $$
+        SELECT btrim(regexp_replace(coalesce(p_text, ''), {SEPARATOR_SQL}, ' ', 'g'))
+    $$
+    """,
     # The one definition of "the document's text", used by the trigger and by the worker.
     # VOLATILE on purpose: the worker's UPDATE may wait on a row lock held by a chunk
     # writer, and a volatile function takes a fresh snapshot after that writer commits,
@@ -91,7 +138,7 @@ DDL: tuple[str, ...] = (
         v_head TSVECTOR;
         v_body TSVECTOR;
     BEGIN
-        SELECT to_tsvector('{TS_CONFIG}', coalesce(title, '') || ' ' || coalesce(abstract, ''))
+        SELECT to_tsvector('{TS_CONFIG}', literev_separate(coalesce(title, '') || ' ' || coalesce(abstract, '')))
           INTO v_head
           FROM literature_document
          WHERE id = p_id;
@@ -99,7 +146,7 @@ DDL: tuple[str, ...] = (
             RETURN NULL;                       -- no such document
         END IF;
         BEGIN
-            SELECT to_tsvector('{TS_CONFIG}', string_agg(content, ' ' ORDER BY chunk_index, id))
+            SELECT to_tsvector('{TS_CONFIG}', literev_separate(string_agg(content, ' ' ORDER BY chunk_index, id)))
               INTO v_body
               FROM document_chunk
              WHERE document_id = p_id
@@ -111,14 +158,15 @@ DDL: tuple[str, ...] = (
     END
     $$
     """,
-    """
+    f"""
     CREATE OR REPLACE FUNCTION literev_document_search_doc_trg() RETURNS TRIGGER
     LANGUAGE plpgsql AS $$
     BEGIN
-        INSERT INTO document_search (document_id, tsv, stale, updated_at)
-        VALUES (NEW.id, literev_document_tsv(NEW.id), FALSE, now())
+        INSERT INTO document_search (document_id, tsv, stale, updated_at, tsv_version)
+        VALUES (NEW.id, literev_document_tsv(NEW.id), FALSE, now(), {TSV_VERSION})
         ON CONFLICT (document_id) DO UPDATE
-            SET tsv = EXCLUDED.tsv, stale = FALSE, updated_at = now();
+            SET tsv = EXCLUDED.tsv, stale = FALSE, updated_at = now(),
+                tsv_version = EXCLUDED.tsv_version;
         RETURN NULL;
     END
     $$
@@ -309,6 +357,7 @@ _STATE: dict[str, Any] = {
     "ready": False,          # every document has a row → the FTS path answers in full
     "missing": None,         # documents without a row (backfill remaining)
     "stale": None,           # rows whose chunks changed since the vector was computed
+    "outdated": None,        # rows computed with an older text normalisation (TSV_VERSION)
     "checked_at": None,      # epoch seconds of the last check of any kind
     "missing_checked_at": None,   # epoch seconds of the last missing-count (the anti-join)
     "last_error": None,
@@ -346,18 +395,23 @@ def _check_state(conn, count_missing: bool = True) -> None:
     callers in steady state ask for it only every few minutes."""
     from sqlalchemy import text
     now = time.time()
+    outdated_sql = f"(SELECT count(*) FROM document_search WHERE tsv_version IS DISTINCT FROM {TSV_VERSION})"
     if count_missing:
-        row = conn.execute(text("""
+        row = conn.execute(text(f"""
             SELECT (SELECT count(*) FROM literature_document d
                      WHERE NOT EXISTS (SELECT 1 FROM document_search s WHERE s.document_id = d.id)) AS missing,
-                   (SELECT count(*) FROM document_search WHERE stale) AS stale
+                   (SELECT count(*) FROM document_search WHERE stale) AS stale,
+                   {outdated_sql} AS outdated
         """)).mappings().first()
         _STATE.update(missing=int(row["missing"]), stale=int(row["stale"]),
+                      outdated=int(row["outdated"]),
                       ready=int(row["missing"]) == 0, checked_at=now, missing_checked_at=now,
                       last_error=None)
     else:
-        stale = conn.execute(text("SELECT count(*) FROM document_search WHERE stale")).scalar()
-        _STATE.update(stale=int(stale or 0), checked_at=now, last_error=None)
+        row = conn.execute(text(f"SELECT (SELECT count(*) FROM document_search WHERE stale) AS stale, "
+                                f"{outdated_sql} AS outdated")).mappings().first()
+        _STATE.update(stale=int(row["stale"] or 0), outdated=int(row["outdated"] or 0),
+                      checked_at=now, last_error=None)
 
 
 def is_ready(refresh: bool = True) -> bool:
@@ -416,9 +470,9 @@ def stopword_terms(terms: list[str]) -> list[str]:
 
 # ── the worker: backfill + refresh ───────────────────────────────────────────
 
-_BACKFILL_SQL = """
-    INSERT INTO document_search (document_id, tsv, stale, updated_at)
-    SELECT d.id, literev_document_tsv(d.id), FALSE, now()
+_BACKFILL_SQL = f"""
+    INSERT INTO document_search (document_id, tsv, stale, updated_at, tsv_version)
+    SELECT d.id, literev_document_tsv(d.id), FALSE, now(), {TSV_VERSION}
       FROM literature_document d
      WHERE NOT EXISTS (SELECT 1 FROM document_search s WHERE s.document_id = d.id)
      ORDER BY d.id
@@ -429,22 +483,37 @@ _BACKFILL_SQL = """
 # FOR UPDATE SKIP LOCKED: two workers (or a worker and a chunk writer holding the row)
 # never wait on each other. A mark set while this runs waits for our commit, then
 # lands, and the next pass recomputes - nothing is lost.
-_REFRESH_SQL = """
+_REFRESH_SQL = f"""
     UPDATE document_search s
-       SET tsv = literev_document_tsv(s.document_id), stale = FALSE, updated_at = now()
+       SET tsv = literev_document_tsv(s.document_id), stale = FALSE, updated_at = now(),
+           tsv_version = {TSV_VERSION}
      WHERE s.document_id IN (SELECT document_id FROM document_search
                               WHERE stale ORDER BY document_id LIMIT :n
+                                FOR UPDATE SKIP LOCKED)
+"""
+
+# The same recomputation for the rows of an older text normalisation, after a change of
+# TSV_VERSION: in the background, batch by batch, through the partial index that lists
+# them. Until a row is redone it keeps its old vector, which still answers searches.
+_UPGRADE_SQL = f"""
+    UPDATE document_search s
+       SET tsv = literev_document_tsv(s.document_id), stale = FALSE, updated_at = now(),
+           tsv_version = {TSV_VERSION}
+     WHERE s.document_id IN (SELECT document_id FROM document_search
+                              WHERE tsv_version IS DISTINCT FROM {TSV_VERSION}
+                              ORDER BY document_id LIMIT :n
                                 FOR UPDATE SKIP LOCKED)
 """
 
 
 def refresh_once(batch: int = 400, max_batches: int = 5, check_missing: bool = True) -> dict[str, Any]:
     """One pass: backfill up to `max_batches` × `batch` missing documents, recompute up
-    to as many stale rows, then re-measure. Returns what it did plus the state."""
+    to as many stale rows and as many rows of an older normalisation, then re-measure.
+    Returns what it did plus the state."""
     from sqlalchemy import text
     if _engine is None:
         raise RuntimeError("lexical_search.configure(engine) has not been called")
-    done = {"backfilled": 0, "refreshed": 0}
+    done = {"backfilled": 0, "refreshed": 0, "upgraded": 0}
     backfill = check_missing or _STATE["missing"] is None or (_STATE["missing"] or 0) > 0
     if backfill:
         for _ in range(max_batches):
@@ -460,6 +529,13 @@ def refresh_once(batch: int = 400, max_batches: int = 5, check_missing: bool = T
         done["refreshed"] += n
         if n < batch:
             break
+    if (_STATE["outdated"] is None) or (_STATE["outdated"] or 0) > 0:
+        for _ in range(max_batches):
+            with _engine.begin() as c:
+                n = c.execute(text(_UPGRADE_SQL), {"n": batch}).rowcount or 0
+            done["upgraded"] += n
+            if n < batch:
+                break
     with _engine.connect() as c:
         _check_state(c, count_missing=backfill)
     done.update(_STATE)
@@ -475,10 +551,11 @@ def worker_loop(idle_sleep: float = 30.0, busy_sleep: float = 1.0, missing_every
             last = _STATE["missing_checked_at"]
             due = (not _STATE["ready"]) or last is None or time.time() - last > missing_every
             r = refresh_once(check_missing=due)
-            busy = bool(r["backfilled"] or r["refreshed"])
+            busy = bool(r["backfilled"] or r["refreshed"] or r["upgraded"])
             if busy:
                 logger.info(f"document_search: +{r['backfilled']} backfilled, "
-                            f"{r['refreshed']} refreshed, {r['missing']} missing, {r['stale']} stale")
+                            f"{r['refreshed']} refreshed, {r['upgraded']} upgraded, "
+                            f"{r['missing']} missing, {r['stale']} stale, {r['outdated']} outdated")
             if r["ready"] and not was_ready:
                 logger.info("document_search: complete - boolean search now uses full text.")
             was_ready = bool(r["ready"])

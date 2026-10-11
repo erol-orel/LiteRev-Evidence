@@ -187,11 +187,11 @@ def seeded(db_conn):
                         "VALUES (%s, %s, 'dengue', 'boolean', '{}', TRUE)", (sid, name))
         cur.execute(
             "INSERT INTO literature_document (id, title, abstract, source, is_duplicate, project_context) VALUES "
-            "(9601, 'Transmission A', 'a study of transmission', 'pubmed', false, 'literev'),"
-            "(9602, 'Transmission B', 'another transmission study', 'pubmed', false, 'literev'),"
-            "(9603, 'Vector A', 'a study of vector control', 'pubmed', false, 'literev'),"
-            "(9604, 'Vector B', 'another vector study', 'pubmed', false, 'literev'),"
-            "(9605, 'Never clustered', 'past the projection cap', 'pubmed', false, 'literev'),"
+            "(9601, 'Transmission A', 'a study of transmission in households', 'pubmed', false, 'literev'),"
+            "(9602, 'Transmission B', 'another transmission study, in schools', 'pubmed', false, 'literev'),"
+            "(9603, 'Vector A', 'a study of vector control by larviciding', 'pubmed', false, 'literev'),"
+            "(9604, 'Vector B', 'another vector study, with bed nets', 'pubmed', false, 'literev'),"
+            "(9605, 'Never clustered', 'past the projection cap of the clustering', 'pubmed', false, 'literev'),"
             "(9606, 'Reviewer excluded', 'thrown out by hand, for its own reason', 'pubmed', false, 'literev')")
         cur.execute("INSERT INTO article_scenarios (scenario_id, document_id, similarity_score, screening_status, screening_reason) VALUES "
                     "(%s, 9601, 0.90, NULL, NULL), (%s, 9602, 0.85, NULL, NULL),"

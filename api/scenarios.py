@@ -24,6 +24,7 @@ from .scenario_store import (
     capabilities_for,
     corpus_search_ids_sql,
     corpus_search_terms,
+    has_abstract_sql,
     normalise_kind,
     relevance_order_sql,
     relevant_gate_sql,
@@ -956,6 +957,7 @@ def get_user_scenario_corpus(
     relevant_only: bool = False,
     abstract_chars: int | None = Query(None, ge=0, le=20000),
     sort: str = "relevance",
+    no_abstract: bool = False,
 ) -> dict[str, Any]:
     """
     Retourne le corpus d'articles pour un scénario utilisateur.
@@ -965,6 +967,10 @@ def get_user_scenario_corpus(
     `year_asc`. Le tri par année se fait ICI, sur tout le corpus : la page de recherche
     n'en télécharge que les deux cents premiers, et les retrier dans le navigateur ne
     montrait que les plus récents de ces deux cents-là.
+
+    `no_abstract` ne liste que les notices SANS résumé : gardées au corpus, hors du
+    sous-ensemble pertinent tant qu'un relecteur ne les inclut pas, elles se jugent sur
+    leur titre. Chaque article porte `has_abstract`.
 
     `abstract_chars` tronque le résumé de chaque article à N caractères : la page de
     résultats de recherche n'affiche qu'un extrait (600 caractères) et lit le résumé
@@ -1028,6 +1034,8 @@ def get_user_scenario_corpus(
     params["threshold"] = eff_threshold
     if relevant_only:
         conditions.append(relevant_gate_sql(doc="d", link="ars", thr=":threshold"))
+    if no_abstract:
+        conditions.append(f"NOT {has_abstract_sql('d')}")
     # Recherche DANS le corpus : tous les termes doivent apparaître. Les articles qui les
     # portent sont trouvés UNE fois, parmi ceux du scénario qui passent déjà les filtres
     # ci-dessus, puis les quatre requêtes de la vue les lisent par identifiant
@@ -1036,7 +1044,8 @@ def get_user_scenario_corpus(
     _terms = corpus_search_terms(q or "")
     _term_params = {f"cq_{_i}": _term for _i, _term in enumerate(_terms)}
     _screated = row.get("created_at")
-    _filtered = bool(year_from or year_to or source or fulltext_only or _terms or relevant_only)
+    _filtered = bool(year_from or year_to or source or fulltext_only or _terms or relevant_only
+                     or no_abstract)
     with engine.connect() as conn:
         if _terms:
             _hits = conn.execute(
@@ -1079,7 +1088,10 @@ def get_user_scenario_corpus(
                 -- confondait avec un vrai zéro. La porte le compte 0, l'écran dit « non scoré ».
                 ars.similarity_score AS similarity_score,
                 ars.rerank_score AS rerank_score,
-                (COALESCE(ars.similarity_score, 0.0) >= :threshold) AS above_threshold,
+                -- Sans résumé, un score ne lit que le titre : il ne place pas l'article
+                -- au-dessus du seuil (cf. la porte de pertinence).
+                (COALESCE(ars.similarity_score, 0.0) >= :threshold AND {has_abstract_sql('d')}) AS above_threshold,
+                {has_abstract_sql('d')} AS has_abstract,
                 -- is_new : ingéré pendant CE scénario (vs déjà présent en base).
                 -- Donne un sens au badge "Nouveau" vs "Base locale" côté UI.
                 (:screated IS NOT NULL AND d.created_at >= :screated) AS is_new,
@@ -1157,6 +1169,9 @@ def get_user_scenario_corpus(
         "above_threshold": above_threshold,
         "below_threshold": counts["below_threshold"],
         "unscored": unscored,
+        # Les notices sans résumé, à juger sur leur titre (`no_abstract=true` les liste) :
+        # above + below + unscored + no_abstract = total.
+        "no_abstract": counts["no_abstract"],
         # Ce que les extractions lisent VRAIMENT : la porte commune, comptée. Distinct de
         # `above_threshold`, qui n'est qu'un partage par le score.
         "relevant": relevant,
@@ -1392,6 +1407,7 @@ def start_user_scenario_pipeline(
     scenario_id: str,
     max_results: int = LIVE_MAX_PER_SOURCE,
     lang: str | None = Query(None),
+    exhaustive: bool | None = None,
     _: None = Depends(require_api_key),
 ) -> dict[str, Any]:
     """
@@ -1399,8 +1415,13 @@ def start_user_scenario_pipeline(
     ingest → fulltext → embed → rerank → PICO → métadonnées → clustering →
     knowledge graph → evidence brief → variables & modèle.
     Appelé dès qu'une recherche est sauvegardée en scénario, et par « tout recalculer ».
+    `exhaustive` : le mode de la recherche, ENREGISTRÉ sur le scénario avant le lancement,
+    comme le fait /populate ; il sert quand le corpus reste à construire. Absent, le
+    scénario garde le sien (standard par défaut).
     """
     row = _get_user_scenario_or_404(scenario_id)
+    if exhaustive is not None:
+        set_scenario_search_mode(scenario_id, "exhaustive" if exhaustive else "standard")
     status = _launch_full_pipeline(scenario_id, max_results, lang)
     if status == "already_running":
         job = _user_scenario_pipeline_jobs.get(scenario_id) or {}
@@ -1510,9 +1531,11 @@ def _scenario_counts(scenario_id: str, row: dict | None = None) -> dict[str, Any
         "prisma_screened_at_search": _screened_at_search,
         "prisma_drift": ((_corpus_links - _screened_at_search) if figures else None),
         "above_threshold": c["above_threshold"],
-        # « En dessous » comprend les articles PAS ENCORE scorés : la somme des deux
-        # est le corpus, et c'est cette somme que _counts_consistency vérifie.
-        "below_threshold": c["below_threshold"] + c["unscored"],
+        # « En dessous » comprend les articles PAS ENCORE scorés, et les notices sans
+        # résumé (jamais au-dessus du seuil par leur score) : la somme des deux est le
+        # corpus, et c'est cette somme que _counts_consistency vérifie.
+        "below_threshold": c["below_threshold"] + c["unscored"] + c["no_abstract"],
+        "no_abstract": c["no_abstract"],
         "embedded": embedded,
     }
     ok, mismatches = _counts_consistency(counts)
@@ -1661,8 +1684,11 @@ def get_user_scenario_embedding_status(scenario_id: str) -> dict[str, Any]:
     # le reste à la volée), et le rerank Cohere écrit rerank_score sur le
     # sous-ensemble pertinent. Ce sont CES compteurs qui pilotent les voyants
     # "Sémantique" / "Cohere" - PAS le worker d'indexation RAG (chunks).
-    ranking = {"total": counts["total"], "scored": counts["scored"],
-               "reranked": counts["reranked"]}
+    # Le classement porte sur les notices qui ONT un résumé : une notice sans résumé ne
+    # s'ordonne pas sur son seul titre, elle se juge à la main. La compter dans le total
+    # laissait le voyant sémantique « en cours » pour toujours.
+    ranking = {"total": counts["total"] - counts["no_abstract"], "scored": counts["scored"],
+               "reranked": counts["reranked"], "no_abstract": counts["no_abstract"]}
 
     ta_total = int(ta["total_docs"] or 0)
     ta_embedded = int(ta["embedded_docs"] or 0)
@@ -1745,6 +1771,7 @@ def get_user_scenario_embedding_status(scenario_id: str) -> dict[str, Any]:
             "total": rank_total,
             "scored": rank_scored,
             "reranked": rank_reranked,
+            "no_abstract": int(ranking["no_abstract"] or 0),
             "complete": semantic_ready,
             # Le dénominateur du rerank : les articles qui ont un résumé exploitable.
             "rerank_scorable": rerank_scorable,

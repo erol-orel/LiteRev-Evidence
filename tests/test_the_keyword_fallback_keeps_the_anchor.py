@@ -177,7 +177,9 @@ def test_the_populate_computes_the_fallback_list_from_the_two_gates():
     src = inspect.getsource(P._run_user_scenario_populate)
     assert "_kw_fallback" in src
     _i = src.index("_kw_fallback = ")
-    block = src[_i:_i + 320]
+    # Une fenêtre plus large qu'à l'origine : le découpage de la recherche exhaustive
+    # ajoute une condition par source que l'URL limite.
+    block = src[_i:_i + 480]
     for name in ("openalex", "doaj", "core", "clinicaltrials", "openaire", "arxiv"):
         assert name in block, f"{name} reçoit le repli mais n'est pas déclarée : {block}"
     assert "_send_bool" in block and "_arxiv_native" in block
@@ -303,21 +305,25 @@ def test_the_populate_sends_the_reduced_query_not_the_bag_of_words():
 
 # ── La forme qui a produit le bug, mesurée ───────────────────────────────────
 
-def test_the_real_hpai_query_still_trips_the_1200_character_gate():
+def test_the_real_hpai_query_still_trips_the_url_gate():
     """Le repli n'est pas un cas limite : la requête de production le déclenche.
 
     Ce test documente le chiffre. Si quelqu'un relève la limite, il doit le voir ici et
-    décider sciemment, parce que la limite vient de l'URL d'OpenAlex, pas de nous."""
+    décider sciemment, parce que la limite vient de l'URL d'OpenAlex, pas de nous. Elle se
+    mesure désormais sur la requête ENCODÉE (1 800 octets), et non plus sur 1 200
+    caractères en clair : les guillemets et les parenthèses y prennent trois octets."""
     import inspect
     from api import pipeline as P
+    from api.search import URL_QUERY_MAX_ENCODED, _url_encoded_len
     src = inspect.getsource(P._run_user_scenario_populate)
-    assert "len(_clean_bool) <= 1200" in src
+    assert "_url_encoded_len(_clean_bool) <= URL_QUERY_MAX_ENCODED" in src
+    assert URL_QUERY_MAX_ENCODED == 1800
     # La requête abrégée de ce fichier tient SOUS la limite : elle sert à tester la
     # structure du repli, pas le franchissement. La vraie requête de production fait
-    # 2 465 caractères portables, mesurés sur le scénario HPAI ; on ne l'embarque pas
-    # ici parce qu'une fixture de 3 000 caractères n'apprendrait rien de plus que ce
-    # chiffre, qui est dans la docstring du module.
+    # 2 465 caractères portables, mesurés sur le scénario HPAI, donc davantage encodée ;
+    # on ne l'embarque pas ici parce qu'une fixture de 3 000 caractères n'apprendrait rien
+    # de plus que ce chiffre, qui est dans la docstring du module.
     portable = " ".join(_strip_field_tags(HPAI).split())
-    assert len(portable) < 1200, (
+    assert _url_encoded_len(portable) < URL_QUERY_MAX_ENCODED, (
         "la requête abrégée de ce test a grossi au-delà de la limite : elle ne teste plus "
         "ce qu'elle croit tester")

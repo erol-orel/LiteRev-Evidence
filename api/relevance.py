@@ -31,6 +31,7 @@ from .scenario_store import (
     _get_scenario_rerank_threshold,
     _get_scenario_threshold,
     _get_user_scenario_or_404,
+    has_abstract_sql,
     relevance_order_sql,
     relevant_gate_sql,
     reset_corpus_derived_caches,
@@ -1635,7 +1636,9 @@ def _threshold_curve_inputs(scenario_id: str, score: str = "similarity") -> dict
           {other_half}
     """
     # Le non scoré sort de la courbe pour le rerank : il passe d'office, donc il n'a pas
-    # de place sur un axe de seuils.
+    # de place sur un axe de seuils. Une notice sans résumé n'en a pas non plus : aucun
+    # seuil ne la fait entrer (relevant_gate_sql), seule une inclusion à la main, et
+    # celle-là est comptée avec les inclus.
     only_scored = " AND ars.rerank_score IS NOT NULL" if rerank else ""
     with engine.connect() as conn:
         rows = [(float(r["s"]), bool(r["p"])) for r in conn.execute(text(f"""
@@ -1643,6 +1646,7 @@ def _threshold_curve_inputs(scenario_id: str, score: str = "similarity") -> dict
                    ((COALESCE(d.title, '') || ' ' || COALESCE(d.abstract, '')) ~* :rx) AS p
             {sql_where}
               AND {screening_status_sql('d', 'ars')} IS DISTINCT FROM 'included'
+              AND {has_abstract_sql('d')}
               {only_scored}
             ORDER BY s DESC
         """), {"sid": scenario_id, "rx": _param_regex(boundary=r"\y")}).mappings()]
@@ -1651,6 +1655,7 @@ def _threshold_curve_inputs(scenario_id: str, score: str = "similarity") -> dict
                      WHERE {screening_status_sql('d', 'ars')} = 'included') AS included,
                    COUNT(*) FILTER (
                      WHERE {screening_status_sql('d', 'ars')} IS DISTINCT FROM 'included'
+                       AND {has_abstract_sql('d')}
                        AND {'ars.rerank_score' if rerank else 'ars.similarity_score'} IS NULL) AS unscored
             {sql_where}
         """), {"sid": scenario_id}).mappings().first() or {}

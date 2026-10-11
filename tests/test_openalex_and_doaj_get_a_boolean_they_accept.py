@@ -37,7 +37,9 @@ def test_the_clean_form_keeps_the_structure_and_drops_the_stars():
     assert " AND " in out and " OR " in out, out
     assert "*" not in out and "[" not in out and "  " not in out, out
     assert '"occupational exposure"' in out and "occupational" in out and '"farm worker"' in out, out
-    assert "h5n1" in out and "2344b" in out, out
+    # Le nom de clade part entre guillemets, ses points gardés : « 2344b », sa forme
+    # d'avant, ne correspondait à rien dans aucune base.
+    assert "h5n1" in out and '"2.3.4.4b"' in out and "2344b" not in out, out
     assert out.count("(") == out.count(")") and out.count('"') % 2 == 0, out
 
 
@@ -69,7 +71,9 @@ def test_the_populate_sends_the_clean_form_and_measures_the_gate_on_it():
                 if isinstance(tgt, ast.Name):
                     assigned.setdefault(tgt.id, []).append(ast.unparse(n.value))
     assert any("_clean_boolean(_portable_bool)" in v for v in assigned.get("_clean_bool", [])), assigned.get("_clean_bool")
-    assert any("len(_clean_bool) <= 1200" in v for v in assigned.get("_send_bool", [])), assigned.get("_send_bool")
+    # La limite se mesure sur la requête ENCODÉE, celle qui part dans l'URL.
+    assert any("_url_encoded_len(_clean_bool) <= URL_QUERY_MAX_ENCODED" in v
+               for v in assigned.get("_send_bool", [])), assigned.get("_send_bool")
     assert any(v.startswith("_clean_bool if _send_bool") for v in assigned.get("_bool_query", [])), assigned.get("_bool_query")
     # Le booléen portable est replié sur une espace : un retour à la ligne dans la requête
     # collée partait tel quel dans l'URL.

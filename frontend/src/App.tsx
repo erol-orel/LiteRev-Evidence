@@ -2019,6 +2019,10 @@ export default function App() {
   const [includeLive, setIncludeLive] = useState(false);
   // Recherche sans préprints : enregistrée dans les filtres du scénario par le serveur.
   const [excludePreprints, setExcludePreprints] = useState(false);
+  // Le mode de la recherche, enregistré sur le scénario par le serveur. Exhaustive par
+  // défaut : toutes les notices que chaque base apparie (jusqu'à 20 000 par base) ;
+  // standard : les 2 000 plus pertinentes par base, plus vite.
+  const [exhaustiveSearch, setExhaustiveSearch] = useState(true);
   const [query, setQuery] = useState("");
   // Type de la requête principale : "auto" (détecté) par défaut, comme les sous-requêtes ;
   // cliquable pour forcer. Remplace l'ancien toggle mode (défaut "boolean") qui traitait
@@ -2443,8 +2447,8 @@ export default function App() {
       // ── LA recherche CONSTRUIT le corpus, puis l'affiche ─────────────────────
       // Le nombre affiché == la taille du corpus du scénario (même opération, même
       // helper booléen). On crée le scénario, on construit le corpus (requête
-      // booléenne sur base locale ∪ sources live, plafond 2000/source), puis on
-      // lit le corpus et on l'affiche. Plus de "preview" divergente.
+      // booléenne sur base locale ∪ sources live, dans le mode choisi : exhaustive ou
+      // standard), puis on lit le corpus et on l'affiche. Plus de "preview" divergente.
       const _sub = buildSubQueries();
       const newScenario = await createUserScenario({
         // Nom par défaut = l'expression COMPLÈTE (facettes + ET/OU), pas seulement
@@ -2462,7 +2466,8 @@ export default function App() {
       setCurrentSearchSid(sid);   // → indicateur global (« Voir les résultats » revient ici)
       // Le choix part AUSSI avec la recherche : un scénario épinglé de même requête est
       // renvoyé tel quel à la création, filtres compris, et serait sinon relancé sans lui.
-      await populateUserScenario(sid, { includeLive, maxResults: 2000, excludePreprints });
+      // Pas de plafond envoyé : le mode le fixe, et le serveur applique le sien.
+      await populateUserScenario(sid, { includeLive, excludePreprints, exhaustive: exhaustiveSearch });
       // ── CONSTRUCTION COMPLÈTE PUIS AFFICHAGE ─────────────────────────────────
       // On construit tout le corpus (base locale ∪ sources en direct), on le score,
       // puis on l'affiche EN UNE FOIS. `renderCorpus` lit le corpus FINAL ; il
@@ -2707,12 +2712,14 @@ export default function App() {
     pipelinePollRef.current[scenarioId] = pollInterval;
   }
 
-  function _launchPipelineForScenario(scenarioId: string) {
+  function _launchPipelineForScenario(scenarioId: string, exhaustive?: boolean) {
     // Déclencher le pipeline complet dès qu'un scénario est épinglé. Pas de plafond
     // explicite : le serveur applique LIVE_MAX_PER_SOURCE (2000 par défaut), le MÊME
     // que le populate lancé depuis l'API - 500 ici donnait un corpus différent pour
-    // la même requête selon le point d'entrée.
-    startUserScenarioPipeline(scenarioId)
+    // la même requête selon le point d'entrée. `exhaustive` : le mode d'un scénario
+    // NEUF, dont le corpus reste à construire (recherche multi-facettes) ; absent, le
+    // scénario garde le mode avec lequel sa recherche l'a construit.
+    startUserScenarioPipeline(scenarioId, undefined, exhaustive === undefined ? undefined : { exhaustive })
       .then(() => _pollPipelineStatus(scenarioId))
       .catch(err => console.warn('Pipeline launch failed:', err));
   }
@@ -2763,7 +2770,7 @@ export default function App() {
           combinator: newScenario.combinator ?? null,
           excludePreprints: newScenario.filters?.exclude_preprints === true,
         }, ...prev]);
-        _launchPipelineForScenario(newScenario.id);
+        _launchPipelineForScenario(newScenario.id, exhaustiveSearch);
       }).catch(err => console.warn('Create user_scenario failed:', err));
     }
     setShowSaveDialog(false);
@@ -3187,6 +3194,30 @@ export default function App() {
                   </span>
                 </label>
 
+                {/* Le mode de la recherche, enregistré sur le scénario : exhaustive (par
+                    défaut) ou standard. Une ligne d'explication pour chacun. */}
+                <div role="radiogroup" aria-label={t("search.depthLabel")}
+                     className="mt-2 space-y-1.5 text-xs text-forest-300">
+                  {([true, false] as const).map((ex) => (
+                    <label key={ex ? "exhaustive" : "standard"}
+                           className="flex items-start gap-2 cursor-pointer select-none">
+                      <input
+                        type="radio"
+                        name="search-depth"
+                        checked={exhaustiveSearch === ex}
+                        onChange={() => setExhaustiveSearch(ex)}
+                        className="mt-0.5 h-4 w-4 accent-brand-400 shrink-0"
+                      />
+                      <span>
+                        <span>{t(ex ? "search.depthExhaustive" : "search.depthStandard")}</span>
+                        <span className="block text-forest-500 mt-0.5">
+                          {t(ex ? "search.depthExhaustiveHint" : "search.depthStandardHint")}
+                        </span>
+                      </span>
+                    </label>
+                  ))}
+                </div>
+
                 {/* Recherche multi-sous-requêtes (avancé) : combine la requête
                     principale ci-dessus avec des sous-requêtes additionnelles, par
                     union (OU) ou intersection (ET). */}
@@ -3375,6 +3406,11 @@ export default function App() {
                       <code className="mt-1.5 block break-words font-mono text-xs text-white/80">
                         {booleanStrategy.general}
                       </code>
+                    )}
+                    {/* Réponse du modèle coupée à son plafond de tokens : la recherche part
+                        sur la requête telle que saisie, et l'écran le dit. */}
+                    {booleanStrategy?.truncated && (
+                      <p className="mt-1.5 text-[11px] text-amber-300/90">{t("search.strategyTruncated")}</p>
                     )}
                   </div>
                 )}

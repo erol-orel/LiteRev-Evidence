@@ -314,6 +314,13 @@ export const en: Translations = {
     excludePreprints: "Exclude preprints",
     excludePreprintsHint:
       "Preprint servers are not searched, PubMed and Europe PMC exclude them in the query, and those the other databases return are removed before screening (stated on the PRISMA card)",
+    depthLabel: "Search depth",
+    depthExhaustive: "Exhaustive search",
+    depthExhaustiveHint: "Every record each database matches, up to 20,000 per database: takes longer",
+    depthStandard: "Standard search",
+    depthStandardHint: "The 2,000 most relevant records from each database: faster",
+    strategyTruncated:
+      "The Boolean strategy written by the model was cut off at its limit: the search uses the query as typed.",
     addSubQuery: "Add a sub-query",
     combineHint: "The main query above is combined with these sub-queries:",
     combinator: "Combine by",
@@ -663,6 +670,9 @@ export const en: Translations = {
       belowThresholdKept: "below the threshold (kept)",
       unscored: "unscored",
       scoringInProgress: " · scoring in progress…",
+      noAbstractChip: "Without abstract ({n}): screen them by title",
+      noAbstractHint:
+        "These records stay in the corpus but are never relevant on a score: a reviewer screens them by their title. Click to list only them.",
       fromLocalTooltip:
         "The corpus combines matches from the shared local database (already ingested) and new references fetched live. Estimated from the documents' entry date in the database (≥ scenario creation = fetched for this scenario).",
       alreadyInLocal: "already in local database",
@@ -684,6 +694,8 @@ export const en: Translations = {
     },
     articleRow: {
       fulltext: "Full-text",
+      noAbstract: "No abstract",
+      noAbstractTooltip: "No abstract: screen it by its title, it is never kept on a score",
       rerankTooltip:
         "Relevance (Cohere reranking) - this is the score that orders the articles",
       similarityTooltip: "Semantic similarity (cosine)",
@@ -841,7 +853,9 @@ export const en: Translations = {
       cappedNoteExhaustive: "Limit reached for {sources}: these databases announce more records than were retrieved.",
       unrankedNote: "{sources} returns Boolean matches in record-ID order, not by relevance: the records kept are an arbitrary subset of its matches, not its most relevant.",
       titleAbstractNote: "{sources}: every match in titles and abstracts, plus the most relevant matches of its default search, which also reads full texts (as in a standard search).",
-      splitNote: "{source}: the whole strategy, split into {n} queries (its API does not page through a long query).",
+      splitNote: "{source}: the whole strategy, split into {n} queries whose union is the strategy (too long, or too rich in operators, for its API in a single query).",
+      facetsSkipped: "OR facets not federated: too long to be added to the databases' query, they were searched in the local library only.",
+      localMatchCapped: "The local library match reached its row limit: the corpus may miss matches, which a narrower query would find.",
       exhaustiveCap: "exhaustive search: every record each database matched, up to {cap} per database; Crossref, which ranks keywords, kept its {crossrefCap} most relevant",
       outcome: {
         ok: "answered",
@@ -858,6 +872,8 @@ export const en: Translations = {
       duplicatesRemoved: "Duplicates removed",
       uniqueRecords: "Unique records",
       removedNoAbstract: "Removed: no abstract",
+      keptNoAbstract: "of which kept without an abstract, screened by title by hand",
+      noAbstractByTitle: "No abstract → outside the threshold, screened by title",
       removedPreprints: "Removed: preprints (search without preprints)",
       preprintsExcluded: "Search without preprints (exclusion criterion):",
       preprintsNotSearched: "preprint servers not searched: {sources}",

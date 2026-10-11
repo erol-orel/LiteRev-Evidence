@@ -95,10 +95,12 @@ def test_without_an_openai_key_the_candidates_are_still_counted(monkeypatch):
 def _seed(db_conn):
     ensure_document_columns(db_conn.cursor())
     rows = [
-        (9001, "Estimating the basic reproduction number of chikungunya", "R0 was 2.1.", "Systematic review", 0.9, 120),
+        # Des résumés d'au moins 30 caractères : sans résumé, un article n'est pertinent que
+        # si un relecteur l'inclut (scenario_store.has_abstract_sql).
+        (9001, "Estimating the basic reproduction number of chikungunya", "R0 was 2.1 in the 2017 outbreak.", "Systematic review", 0.9, 120),
         (9002, "Incubation period of chikungunya virus", "Median incubation period 3 days.", "Cohort", 0.7, 40),
-        (9003, "Vector control against Aedes albopictus", "Larvicide programmes only.", "Cross-sectional", 0.6, 10),
-        (9004, "Macro0 hospital bed occupancy", "Capacity model.", "Modelling", 0.95, 3),
+        (9003, "Vector control against Aedes albopictus", "Larvicide programmes only, in two districts.", "Cross-sectional", 0.6, 10),
+        (9004, "Macro0 hospital bed occupancy", "Capacity model of hospital beds in winter.", "Modelling", 0.95, 3),
     ]
     with db_conn.cursor() as cur:
         cur.execute("DELETE FROM article_scenarios WHERE scenario_id = %s", (SID,))

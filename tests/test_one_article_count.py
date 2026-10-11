@@ -82,7 +82,7 @@ def _seed(db_conn):
         for doc_id, score, status, dup in rows:
             cur.execute("INSERT INTO literature_document (id, title, abstract, year, source, "
                         "project_context, quality_score, is_duplicate) "
-                        "VALUES (%s,%s,'abstract',2024,'pubmed','literev',0.8,%s)",
+                        "VALUES (%s,%s,'A seeded abstract, long enough to count.',2024,'pubmed','literev',0.8,%s)",
                         (doc_id, f"Article {doc_id}", dup))
             cur.execute("INSERT INTO article_scenarios (document_id, scenario_id, "
                         "similarity_score, screening_status) VALUES (%s,%s,%s,%s)",
@@ -98,14 +98,14 @@ def _cleanup(db_conn):
 
 
 def test_the_parts_add_up_to_the_whole(db_conn):
-    """Above + below + unscored == total. The three badges under the corpus title are
-    read as a partition of it, so they have to be one."""
+    """Above + below + unscored + without an abstract == total. The badges under the
+    corpus title are read as a partition of it, so they have to be one."""
     _seed(db_conn)
     try:
         c = scenario_counts(SID, threshold=0.45)
         assert c["total"] == 6                      # le doublon est dehors
-        assert c["above_threshold"] + c["below_threshold"] + c["unscored"] == c["total"]
-        assert c["scored"] + c["unscored"] == c["total"]
+        assert c["above_threshold"] + c["below_threshold"] + c["unscored"] + c["no_abstract"] == c["total"]
+        assert c["scored"] + c["unscored"] + c["no_abstract"] == c["total"]
         assert c["included"] + c["excluded"] + c["pending"] == c["total"]
         assert c["from_local"] + c["newly_fetched"] == c["total"]
     finally:
@@ -304,11 +304,13 @@ def _seed_searchable(db_conn):
         cur.execute("DELETE FROM user_scenarios WHERE id = %s", (SID,))
         cur.execute("INSERT INTO user_scenarios (id, name, query, created_at, updated_at) "
                     "VALUES (%s, 'Search', 'dengue', NOW(), NOW())", (SID,))
+        # Des résumés d'au moins 30 caractères : sans résumé, un article n'est pertinent que
+        # si un relecteur l'inclut (scenario_store.has_abstract_sql).
         rows = [
-            (8610, "Dengue vaccine efficacy", "A trial of the vaccine.", "Lévy A", 0.90, None),
-            (8611, "Dengue surveillance in Asia", "Wastewater monitoring.", "Roe B", 0.90, None),
-            (8612, "Malaria vaccine efficacy", "Another trial.", "Doe C", 0.10, None),
-            (8613, "Dengue vaccine safety", "Safety follow-up.", "Poe D", 0.10, "excluded"),
+            (8610, "Dengue vaccine efficacy", "A randomised trial of the vaccine in children.", "Lévy A", 0.90, None),
+            (8611, "Dengue surveillance in Asia", "Wastewater monitoring across three countries.", "Roe B", 0.90, None),
+            (8612, "Malaria vaccine efficacy", "Another trial, in adults living in endemic areas.", "Doe C", 0.10, None),
+            (8613, "Dengue vaccine safety", "Safety follow-up over two years after the doses.", "Poe D", 0.10, "excluded"),
         ]
         for doc_id, title, abstract, authors, score, status in rows:
             cur.execute("INSERT INTO literature_document (id, title, abstract, authors, year, source, "

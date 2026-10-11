@@ -15,8 +15,8 @@ Line references point at `main.py` / `data_connectors.py` so this stays verifiab
   after which the time budget below is the real governor). This is the *fetch* cap, before
   boolean filtering. ⚠ raising it multiplies API calls (429 risk) and OpenAI embedding cost
   on every search.
-- **Wall-clock budget: `POPULATE_FEDERATION_BUDGET = 180 s`** (`main.py:242`, default;
-  set the env var higher - e.g. `600` - for a more complete corpus). Populate runs in a
+- **Wall-clock budget: `POPULATE_FEDERATION_BUDGET = 600 s`** (`api/core.py`, default;
+  set the env var higher - e.g. `1800` - for a more complete corpus). Populate runs in a
   **background thread**, so a larger budget doesn't block the request; it only delays the
   scenario reaching "done". Not unbounded on purpose: a truly stuck source would otherwise
   keep the job alive forever. When it expires, slow sources stop paginating mid-stream and
@@ -27,10 +27,17 @@ Line references point at `main.py` / `data_connectors.py` so this stays verifiab
   (`_boolean_corpus_ids` / `_multi_query_corpus_ids`, `main.py:8276`). The 2000
   cap and the API quirks below only affect *what gets discovered*, never how a
   discovered paper is judged.
-- **Quality filters that drop documents:** title+abstract < 30 chars is discarded
-  at ingest; **any article with no abstract is removed from the corpus** after
-  populate (`main.py:8293`). Sources that return abstract-less records (Crossref,
-  ClinicalTrials) therefore contribute fewer papers than they return.
+- **Quality filter that drops documents:** title+abstract < 30 chars is discarded
+  at ingest. **Records without an abstract are KEPT in the corpus**, flagged
+  (`no_abstract` in the counts, `has_abstract` per article, `?no_abstract=true` on
+  `/corpus`): they match the boolean on their title, are never relevant on their
+  similarity score (it reads only the title), and enter the relevant subset only when a
+  reviewer includes them by hand. PRISMA reports them as "kept without an abstract,
+  screened by title by hand". The background backfill asks Europe PMC for their abstract
+  (by DOI, else by PMID); an abstract filled later makes the record eligible by itself.
+- **Retries:** a page that fails on a timeout, a connection error, a 429 or a 5xx is
+  retried (3 attempts, 2 s then 4 s, `Retry-After` honoured up to 30 s, never past the
+  federation budget) before the source ends in `error`; a PubMed efetch batch likewise.
 - **Dedup (on ingest):** ① same `(source, external_id)` → reuse; ② `ON CONFLICT (doi)`
   → cross-source DOI merge; ③ **normalized-title** match (`title_norm` = lowercased,
   punctuation-stripped) for records **without** a DOI or with a DOI in only one source.
@@ -66,10 +73,12 @@ federation**; their preprints are boolean-searched through the Europe PMC prepri
 returned 457 on the same search. The bioRxiv API is still used by the full-text step, by DOI.
 
 **Source-union** (`main.py:_link_to_scenario(boolean_native=True)`): the ✅ sources applied the *real*
-boolean, so their hits enter the corpus **directly** (not re-filtered locally). Falls back to plain
-keywords + local re-filter if there's no real boolean (degraded/no OpenAI) or the URL would exceed
-OpenAlex's ~4 KB limit. Only the no-abstract rule filters afterward. That's why per-source counts differ
-for the same search.
+boolean, so their hits enter the corpus **directly** (not re-filtered locally). The URL-limited sources
+(OpenAlex, ClinicalTrials.gov, arXiv, OpenAIRE) receive the whole boolean when its URL-encoded form fits
+`URL_QUERY_MAX_ENCODED` (1 800 bytes); otherwise a reduced form re-filtered locally, or, in an
+exhaustive search, the whole boolean split into parts whose union is the strategy (as DOAJ). CORE
+receives it in a POST body and PubMed always gets the union "(MeSH) OR (portable boolean)" (POST past
+the URL limit), whatever their length. That's why per-source counts differ for the same search.
 
 ### When the scores are computed (never as a separate "search" step)
 - **Corpus membership / count** = the boolean lexical match above. No score involved.
@@ -127,8 +136,10 @@ the corpus count itself stays pure lexical.
 - `rows` up to **100**, offset pagination, cap 2000.
 - **Sorted by relevance, NOT date** - deliberately: Crossref publication dates are
   unreliable (records with dates like "2121" would poison a date sort) (`main.py:7792`).
-- **Many Crossref records have no abstract** → those are dropped by the no-abstract
-  rule, so Crossref's *net* contribution is smaller than its raw count.
+- **Many Crossref records have no abstract** → they are kept, flagged, and screened by
+  title by hand (see the quality filter above) until the backfill finds their abstract.
+- The year is the publication date (`issued`, then `published-print`, `published-online`,
+  `published`), and the DOI deposit date (`created`) only last.
 
 ### 4. Europe PMC - `ebi.ac.uk/europepmc/webservices/rest/search` (`main.py:7844`)
 - `pageSize = 1000`, cursorMark pagination, `resultType=core`, default order (relevance).
@@ -165,9 +176,9 @@ the corpus count itself stays pure lexical.
 
 ### 10. arXiv - `export.arxiv.org/api/query` (`main.py:8121`)
 - `max_results = 100`/page, `start` pagination, Atom XML.
-- **arXiv requires ≥ 3 s between requests** (`main.py:8142`). Against the 180 s
-  federation budget, that means **usually only the first few hundred results** land
-  before the budget cuts pagination. Keyless.
+- **arXiv requires ≥ 3 s between requests** (`main.py:8142`), retries included. The 600 s
+  federation budget leaves room for the standard cap of 2000 (20 pages); an exhaustive
+  search pages further within its own budget. Keyless.
 - Coverage skew: physics / CS / math / **quantitative biology** preprints.
 
 ### 11. OpenAIRE - `api.openaire.eu/search/publications` (`main.py:8147`)
@@ -224,7 +235,7 @@ These feed the **auto-fetch** panel (predictors for a scenario's model), not the
 
 ## 4. The limitations that actually bite
 
-1. **The 180 s budget, not the 2000 cap, is usually the binding constraint** for slow
+1. **The 600 s budget, not the 2000 cap, is usually the binding constraint** for slow
    sources (arXiv especially, sometimes deep Crossref/OpenAlex pages). Both are
    env-configurable (`POPULATE_FEDERATION_BUDGET`, `LIVE_MAX_PER_SOURCE`) - raise them
    together to fetch deeper; ⚠ multiplies API calls + OpenAI embedding cost per search.
@@ -232,9 +243,10 @@ These feed the **auto-fetch** panel (predictors for a scenario's model), not the
    endpoint, used for a real boolean, has no such limit but returns matches unranked (ID order).
 3. **bioRxiv/medRxiv are searched only through Europe PMC** (their own API has no keyword search).
 4. **CORE contributes 0 until `CORE_API_KEY` (free) is set** in the environment.
-5. **No-abstract records are dropped** → Crossref and ClinicalTrials net lower than raw.
+5. **No-abstract records are kept but never relevant on their score** → a reviewer screens
+   them by title (the corpus view lists them apart).
 6. **arXiv/DOAJ/ClinicalTrials are domain-skewed** (preprints / OA journals / trials) -
    good for recall breadth, not representative on their own.
 7. **All caps are per-source, pre-boolean.** Final corpus size = boolean match over the
    union of everything ingested + your local DB, so it is typically **smaller** than the
-   sum of raw fetches (dedup + boolean filter + no-abstract rule).
+   sum of raw fetches (dedup + boolean filter).

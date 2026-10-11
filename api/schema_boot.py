@@ -100,6 +100,57 @@ except Exception as _e:
     logger.warning(f"_ensure_document_search: {_e}")
 
 
+#: L'index unique qui ferme la course entre fetchers parallèles sur le titre normalisé,
+#: avec la règle de dédup de _ingest_doc_direct : même titre (≥ 20 caractères normalisés)
+#: ET même DOI normalisé, un DOI absent valant ''. Il portait sur (project_context,
+#: title_norm) seul : deux notices de même titre générique et de DOI différents ne
+#: pouvaient pas coexister, la seconde était refusée et repliée sur la première. La clé
+#: nouvelle est strictement plus lâche que l'ancienne : construite sur une table que
+#: l'ancienne tenait sans doublon, elle ne peut pas en trouver.
+TITLE_DOI_INDEX = "uq_litdoc_title_norm_doi"
+_OLD_TITLE_INDEX = "uq_litdoc_title_norm"
+_TITLE_DOI_INDEX_SQL = (
+    f"CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS {TITLE_DOI_INDEX} "
+    "ON literature_document (project_context, title_norm, lower(btrim(COALESCE(doi, '')))) "
+    "WHERE title_norm IS NOT NULL AND length(title_norm) >= 20 "
+    "AND (is_duplicate IS NULL OR is_duplicate = FALSE)")
+
+
+def _ensure_title_doi_unique_index() -> str:
+    """Remplace uq_litdoc_title_norm par uq_litdoc_title_norm_doi, au démarrage.
+
+    Sur la table de production (≈ 494 000 lignes), sans bloquer les écritures : le nouvel
+    index est bâti CONCURRENTLY, donc hors de toute transaction (AUTOCOMMIT), AVANT que
+    l'ancien soit retiré, et l'ancien n'est retiré que si le nouveau est VALIDE. Un
+    échec de construction laisse un index invalide, retiré aussitôt ; l'ancien reste
+    alors en place et la relance suivante réessaie. Idempotent et peu coûteux à rejouer :
+    une lecture du catalogue, un IF NOT EXISTS, un DROP IF EXISTS. Renvoie « ok »,
+    « invalid » ou « failed »."""
+    def _state(conn):
+        return conn.execute(text("SELECT i.indisvalid FROM pg_index i "
+                                 "WHERE i.indexrelid = to_regclass(:n)"),
+                            {"n": TITLE_DOI_INDEX}).scalar()
+    try:
+        with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
+            if _state(conn) is False:                 # reste d'une construction interrompue
+                conn.execute(text(f"DROP INDEX CONCURRENTLY IF EXISTS {TITLE_DOI_INDEX}"))
+            try:
+                conn.execute(text(_TITLE_DOI_INDEX_SQL))
+            except Exception as e:                       # noqa: BLE001
+                logger.warning(f"{TITLE_DOI_INDEX} : construction impossible ({e}) ; "
+                               f"{_OLD_TITLE_INDEX} reste en place")
+                conn.execute(text(f"DROP INDEX CONCURRENTLY IF EXISTS {TITLE_DOI_INDEX}"))
+                return "failed"
+            if not _state(conn):
+                conn.execute(text(f"DROP INDEX CONCURRENTLY IF EXISTS {TITLE_DOI_INDEX}"))
+                return "invalid"
+            conn.execute(text(f"DROP INDEX CONCURRENTLY IF EXISTS {_OLD_TITLE_INDEX}"))
+        return "ok"
+    except Exception as e:                               # noqa: BLE001
+        logger.warning(f"_ensure_title_doi_unique_index : {e}")
+        return "failed"
+
+
 def _ensure_performance_indexes() -> None:
     """Crée les index manquants sur les colonnes chaudes + un index ANN pgvector.
 
@@ -154,15 +205,7 @@ def _ensure_performance_indexes() -> None:
         #    y compris après une reconstruction depuis les seules migrations.
         "CREATE UNIQUE INDEX IF NOT EXISTS uq_literature_document_doi "
         "ON literature_document (doi) WHERE doi IS NOT NULL",
-        #  • Titre normalisé : même règle de dédup que _ingest_doc_direct (len≥20),
-        #    limitée aux lignes CANONIQUES (is_duplicate NULL/FALSE) - ne rejette pas
-        #    les doublons déjà marqués (en attente de purge). Si des collisions
-        #    canoniques subsistent, la création échoue et est journalisée : la course
-        #    reste alors ouverte jusqu'à ce que la maintenance nettoie les doublons.
-        "CREATE UNIQUE INDEX IF NOT EXISTS uq_litdoc_title_norm "
-        "ON literature_document (project_context, title_norm) "
-        "WHERE title_norm IS NOT NULL AND length(title_norm) >= 20 "
-        "AND (is_duplicate IS NULL OR is_duplicate = FALSE)",
+        #  • Titre normalisé : cf. _ensure_title_doi_unique_index, juste après.
     ]
     for ddl in btree:
         try:
@@ -170,6 +213,7 @@ def _ensure_performance_indexes() -> None:
                 conn.execute(text(ddl))
         except Exception as e:
             logger.warning(f"_ensure_performance_indexes (btree) « {ddl[:60]}… » : {e}")
+    _ensure_title_doi_unique_index()
 
     # 2) Index ANN pgvector (HNSW, cosinus). CONCURRENTLY → hors transaction, ne
     # bloque pas les écritures. Accélère « ORDER BY embedding <=> q LIMIT k » qui
@@ -244,11 +288,181 @@ def _startup_flag(name: str, default: str = "1") -> bool:
     return os.getenv(name, default).strip().lower() not in ("0", "false", "no", "off")
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Backfill des résumés (worker d'arrière-plan)
+# ─────────────────────────────────────────────────────────────────────────────
+EPMC_REST_SEARCH = "https://www.ebi.ac.uk/europepmc/webservices/rest/search"
+#: Europe PMC rend au plus 1 000 notices par page. Une page à la taille du lot (20 DOI)
+#: poussait hors de la page les notices d'un DOI qui en a plusieurs, et l'absence d'un
+#: DOI de la page se lisait « pas de résumé » : la notice était marquée tentée à jamais.
+_EPMC_ABSTRACT_PAGE = 1000
+_EPMC_ABSTRACT_GROUP = 20          # identifiants par requête
+
+
+def _clean_epmc_abstract(raw: str | None) -> str | None:
+    """Le résumé Europe PMC sans son balisage JATS/HTML, ou None s'il n'en est pas un."""
+    if not raw:
+        return None
+    ab = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", raw)).strip()
+    return ab if len(ab) >= 30 else None
+
+
+def _epmc_abstract_lookup(kind: str, values: list[str], http_get=None) -> tuple[dict[str, str | None], bool]:
+    """Les résumés de `values` (DOI si kind='doi', PMID si kind='pmid') demandés à Europe
+    PMC en UNE requête. Renvoie ({valeur: résumé ou None} pour chaque valeur RÉPONDUE, ok).
+
+    Une valeur est répondue quand la requête a abouti et qu'elle figure dans la page, ou
+    que la page tient TOUTES les notices trouvées (son absence est alors un vrai « pas de
+    notice »). `ok=False` : la requête a échoué (réseau, 5xx, 429) ; rien n'est répondu,
+    rien ne sera marqué tenté, le prochain cycle réessaie. Un refus 4xx est propre à la
+    requête : un lot est redemandé valeur par valeur, et une valeur seule refusée est
+    répondue « sans résumé » (sinon elle bloquerait la file à jamais)."""
+    import requests as _rq
+    http_get = http_get or _rq.get
+    vals = [v for v in dict.fromkeys(values) if v]
+    if not vals:
+        return {}, True
+    if kind == "doi":
+        # Ni guillemet ni barre oblique inverse dans la phrase : ils casseraient la requête.
+        clauses = ['DOI:"' + re.sub(r'["\\]', "", v) + '"' for v in vals]
+    else:
+        clauses = [f"(EXT_ID:{v} AND SRC:MED)" for v in vals if v.isdigit()]
+        if not clauses:
+            return {v: None for v in vals}, True
+    try:
+        r = http_get(EPMC_REST_SEARCH,
+                     params={"query": " OR ".join(clauses), "resultType": "core",
+                             "format": "json", "pageSize": _EPMC_ABSTRACT_PAGE},
+                     timeout=30)
+    except Exception as e:                               # noqa: BLE001 - réseau : réessayé plus tard
+        logger.info(f"EuropePMC abstract lookup ({kind}, {len(vals)}): {e}")
+        return {}, False
+    status = int(getattr(r, "status_code", 200) or 200)
+    if 400 <= status < 500 and status != 429:
+        if len(vals) == 1:
+            return {vals[0]: None}, True
+        out: dict[str, str | None] = {}
+        ok_all = True
+        for v in vals:
+            sub, ok = _epmc_abstract_lookup(kind, [v], http_get)
+            out.update(sub)
+            ok_all = ok_all and ok
+        return out, ok_all
+    if status >= 400:
+        logger.info(f"EuropePMC abstract lookup ({kind}, {len(vals)}): HTTP {status}")
+        return {}, False
+    try:
+        data = r.json() or {}
+    except Exception as e:                               # noqa: BLE001
+        logger.info(f"EuropePMC abstract lookup ({kind}): {e}")
+        return {}, False
+    results = (data.get("resultList") or {}).get("result") or []
+    found: dict[str, str | None] = {}
+    for res in results:
+        key = ((res.get("doi") or "").lower().strip() if kind == "doi"
+               else str(res.get("pmid") or "").strip())
+        if not key:
+            continue
+        ab = _clean_epmc_abstract(res.get("abstractText"))
+        if ab or key not in found:
+            found[key] = ab or found.get(key)
+    try:
+        complete = int(data.get("hitCount") or 0) <= len(results)
+    except (TypeError, ValueError):
+        complete = False
+    answered: dict[str, str | None] = {}
+    for v in vals:
+        k = v.lower().strip() if kind == "doi" else v
+        if k in found:
+            answered[v] = found[k]
+        elif complete:
+            answered[v] = None
+    return answered, True
+
+
+def _backfill_abstracts_once(limit: int = 50, http_get=None) -> dict[str, int]:
+    """Un passage du backfill des résumés : les notices `literev` sans résumé qui ont un
+    DOI ou, à défaut, un PMID, demandées à Europe PMC.
+
+    Seules les notices dont l'identifiant a été RÉPONDU sont marquées tentées. La version
+    d'avant avalait l'erreur d'une requête échouée et marquait quand même les cinquante
+    notices du lot : une panne passagère d'Europe PMC les privait de résumé à jamais. Un
+    résumé trouvé reconstruit le chunk titre+résumé de la notice (cf.
+    sources._refresh_title_abstract_chunks), pour qu'elle soit scorée sur son résumé et
+    non sur son titre, et la rend éligible au sous-ensemble pertinent d'elle-même."""
+    from .relevance import _backfill_title_abstract_chunks  # lazy: relevance is loaded after this module
+    from .sources import _refresh_title_abstract_chunks  # lazy: sources is loaded after this module
+    stats = {"candidates": 0, "filled": 0, "marked": 0, "failed_requests": 0}
+    with engine.connect() as conn:
+        rows = conn.execute(text("""
+            SELECT id, doi, pmid::text AS pmid FROM literature_document
+            WHERE project_context = 'literev'
+              AND (NULLIF(btrim(doi), '') IS NOT NULL OR NULLIF(btrim(pmid::text), '') IS NOT NULL)
+              AND (abstract IS NULL OR length(trim(abstract)) < 30)
+              AND abstract_backfill_attempted IS NOT TRUE
+            ORDER BY id LIMIT :lim
+        """), {"lim": int(limit)}).mappings().fetchall()
+    stats["candidates"] = len(rows)
+    if not rows:
+        return stats
+    by_doi: dict[str, list[int]] = {}
+    by_pmid: dict[str, list[int]] = {}
+    for r in rows:
+        doi = (r["doi"] or "").strip()
+        pmid = re.sub(r"\D", "", str(r["pmid"] or ""))
+        if doi:
+            by_doi.setdefault(doi.lower(), []).append(int(r["id"]))
+        elif pmid:
+            by_pmid.setdefault(pmid, []).append(int(r["id"]))
+    filled_ids: list[int] = []
+    marked_ids: list[int] = []
+    for kind, groups in (("doi", by_doi), ("pmid", by_pmid)):
+        keys = list(groups)
+        for k in range(0, len(keys), _EPMC_ABSTRACT_GROUP):
+            chunk = keys[k:k + _EPMC_ABSTRACT_GROUP]
+            answered, ok = _epmc_abstract_lookup(kind, chunk, http_get)
+            if not ok:
+                stats["failed_requests"] += 1
+            if not answered:
+                if not ok:
+                    break                                # service en panne : le cycle suivant réessaie
+                continue
+            chunk_filled: list[int] = []
+            with engine.begin() as cu:
+                for value, abstract in answered.items():
+                    ids = groups.get(value, [])
+                    marked_ids.extend(ids)
+                    if not abstract:
+                        continue
+                    for doc_id in ids:
+                        n = cu.execute(text("""
+                            UPDATE literature_document SET abstract = :ab
+                            WHERE id = :id AND (abstract IS NULL OR length(trim(abstract)) < 30)
+                        """), {"ab": abstract, "id": doc_id}).rowcount
+                        if n:
+                            chunk_filled.append(doc_id)
+                if chunk_filled:
+                    _refresh_title_abstract_chunks(cu, chunk_filled)
+            filled_ids.extend(chunk_filled)
+            if not ok:
+                break
+    if marked_ids:
+        with engine.begin() as cu:
+            cu.execute(text("UPDATE literature_document SET abstract_backfill_attempted = TRUE "
+                            "WHERE id = ANY(CAST(:ids AS bigint[]))"), {"ids": marked_ids})
+    stats["filled"] = len(filled_ids)
+    stats["marked"] = len(marked_ids)
+    if filled_ids:
+        # Les notices qui n'avaient AUCUN chunk (titre trop court) en reçoivent un.
+        _backfill_title_abstract_chunks()
+        logger.info(f"BG abstract backfill: {len(filled_ids)} résumés récupérés (EuropePMC).")
+    return stats
+
+
 @app.on_event("startup")
 def startup_event() -> None:
     from .scenarios import _pipeline_jobs_lock, _user_scenario_pipeline_jobs  # lazy: scenarios is loaded after this module
     from .pipeline import _run_user_scenario_full_pipeline  # lazy: pipeline is loaded after this module
-    from .relevance import _backfill_title_abstract_chunks  # lazy: relevance is loaded after this module
     from .model_training import _seed_demo_scenarios  # lazy: model_training is loaded after this module
     with engine.connect() as conn:
         conn.execute(text("SELECT 1"))
@@ -475,36 +689,6 @@ def startup_event() -> None:
                 logger.debug(f"BG PICO doc {row['id']}: {_pe}")
                 return None
 
-        def _europepmc_abstracts_by_doi(dois: list[str]) -> dict[str, str]:
-            """Récupère le résumé via EuropePMC pour une liste de DOI (une requête
-            OR groupée). EuropePMC agrège MEDLINE + PMC : meilleure couverture
-            DOI→abstract que Crossref/OpenAlex. Renvoie {doi_minuscule: abstract}."""
-            import requests as _rq
-            out: dict[str, str] = {}
-            _dois = [d for d in dois if d]
-            if not _dois:
-                return out
-            q = " OR ".join(f'DOI:"{d}"' for d in _dois)
-            try:
-                _r = _rq.get(
-                    "https://www.ebi.ac.uk/europepmc/webservices/rest/search",
-                    params={"query": f"({q})", "resultType": "core",
-                            "format": "json", "pageSize": len(_dois)},
-                    timeout=30,
-                )
-                _r.raise_for_status()
-                for _res in ((_r.json().get("resultList") or {}).get("result") or []):
-                    _d = (_res.get("doi") or "").lower().strip()
-                    _ab = _res.get("abstractText")
-                    if _d and _ab:
-                        _ab = re.sub(r"<[^>]+>", " ", _ab)      # retirer le JATS/HTML
-                        _ab = re.sub(r"\s+", " ", _ab).strip()
-                        if len(_ab) >= 30:
-                            out[_d] = _ab
-            except Exception as _ee:
-                logger.debug(f"EuropePMC abstract batch: {_ee}")
-            return out
-
         # Colonne de suivi : évite de re-tenter indéfiniment les notices dont
         # EuropePMC n'a pas de résumé (sinon le même lot bloquerait la file).
         try:
@@ -544,49 +728,14 @@ def startup_event() -> None:
 
                 _client = _OAI_bg(api_key=openai_key, timeout=90.0)
 
-                # ── 0. BACKFILL DES RÉSUMÉS (notices sans abstract, via DOI) ──
+                # ── 0. BACKFILL DES RÉSUMÉS (notices sans abstract, via DOI ou PMID) ──
                 # Beaucoup de notices Crossref/OpenAlex arrivent sans résumé. On
-                # tente de le récupérer via EuropePMC (par DOI) pour les rendre
-                # exploitables (puis embedding + PICO par les étapes suivantes).
+                # tente de le récupérer via EuropePMC (par DOI, sinon par PMID) pour les
+                # rendre exploitables (puis embedding + PICO par les étapes suivantes).
+                # Cf. _backfill_abstracts_once : seules les notices répondues sont
+                # marquées tentées, et le chunk titre+résumé est reconstruit.
                 try:
-                    with engine.connect() as _conn:
-                        _stub_rows = _conn.execute(text("""
-                            SELECT id, doi FROM literature_document
-                            WHERE project_context = 'literev'
-                              AND doi IS NOT NULL
-                              AND (abstract IS NULL OR length(trim(abstract)) < 30)
-                              AND abstract_backfill_attempted IS NOT TRUE
-                            ORDER BY id LIMIT :lim
-                        """), {"lim": _ABS_BATCH}).mappings().fetchall()
-                    if _stub_rows:
-                        _doi_map: dict[str, list[int]] = {}
-                        for _r in _stub_rows:
-                            _doi_map.setdefault((_r["doi"] or "").lower().strip(), []).append(_r["id"])
-                        _dois = [d for d in _doi_map if d]
-                        _found: dict[str, str] = {}
-                        for _k in range(0, len(_dois), 20):       # 20 DOI / requête
-                            _found.update(_europepmc_abstracts_by_doi(_dois[_k:_k + 20]))
-                        _filled = 0
-                        with engine.begin() as _cu:
-                            for _d, _ab in _found.items():
-                                for _docid in _doi_map.get(_d, []):
-                                    _cu.execute(text("""
-                                        UPDATE literature_document SET abstract = :ab
-                                        WHERE id = :id
-                                          AND (abstract IS NULL OR length(trim(abstract)) < 30)
-                                    """), {"ab": _ab, "id": _docid})
-                                    _filled += 1
-                            # Marquer TOUTES les notices tentées (trouvées ou non).
-                            _cu.execute(
-                                text("UPDATE literature_document SET abstract_backfill_attempted = TRUE "
-                                     "WHERE id IN :ids").bindparams(bindparam("ids", expanding=True)),
-                                {"ids": [_r["id"] for _r in _stub_rows]},
-                            )
-                        if _found:
-                            # Créer les chunks title_abstract des docs nouvellement dotés
-                            # d'un résumé (l'embedding ci-dessous les vectorisera).
-                            _backfill_title_abstract_chunks()
-                            logger.info(f"BG abstract backfill: {_filled} résumés récupérés (EuropePMC).")
+                    _backfill_abstracts_once(_ABS_BATCH)
                 except Exception as _abe:
                     logger.warning(f"BG abstract backfill error: {_abe}")
 

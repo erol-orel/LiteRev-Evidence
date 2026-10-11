@@ -189,7 +189,8 @@ def pool_corpus(extracted):
     with extracted.cursor() as cur:
         for k, i in enumerate(EXTRA):
             cur.execute("INSERT INTO literature_document (id, title, abstract, authors, year, source, is_duplicate, project_context, "
-                        "extraction_json) VALUES (%s,%s,'a','Smith J; Doe A',2021,'pubmed',false,'literev',%s::jsonb)",
+                        "extraction_json) VALUES (%s,%s,'Attack rates by sex among exposed poultry workers.',"
+                        "'Smith J; Doe A',2021,'pubmed',false,'literev',%s::jsonb)",
                         (i, f"Pool paper {i}", _doc(i, MALE[k], FEMALE[k])))
             cur.execute("INSERT INTO article_scenarios (scenario_id, document_id, similarity_score) VALUES (%s,%s,0.9)", (SID, i))
         cur.execute("DELETE FROM extraction_review WHERE document_id BETWEEN 9701 AND 9720")

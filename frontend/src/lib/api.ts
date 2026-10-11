@@ -996,6 +996,8 @@ export interface CorpusArticle {
   pmid?: string | null;
   publication_type?: string | null;
   quality_score?: number | null;
+  /** False for a record kept without an abstract: screened on its title, by hand. */
+  has_abstract?: boolean;
 }
 
 export interface ScenarioCorpus {
@@ -1009,6 +1011,9 @@ export interface ScenarioCorpus {
   relevant?: number;
   below_threshold?: number;
   unscored?: number;
+  /** Records kept without an abstract (listed by `noAbstract`): above + below + unscored
+   *  + no_abstract = total. */
+  no_abstract?: number;
   from_local?: number | null;
   newly_fetched?: number | null;
   docs_with_fulltext?: number;
@@ -1126,9 +1131,18 @@ export interface ScenarioPrisma {
     // d'autres raisons. figures_from="corpus" = scénario antérieur à cette
     // comptabilité : les nombres viennent du corpus déjà dédupliqué.
     unique_records?: number;
-    // Retraits avant screening, ventilés : sans résumé (règle qualité), hors requête
-    // (source par mots-clés ne correspondant pas au booléen en local), résiduel.
+    // Retraits avant screening, ventilés : sans résumé (ancienne règle, 0 depuis qu'elles
+    // sont gardées), hors requête (source par mots-clés ne correspondant pas au booléen
+    // en local), résiduel.
     removed_no_abstract?: number;
+    /** Records kept WITHOUT an abstract: they go to screening, judged on their title by a
+     *  reviewer, and are never relevant on a score. Counted in records_screened. */
+    kept_no_abstract?: number;
+    /** OR facets of a multi-facet search too long to be federated: matched in the local
+     *  library only, no database received them. */
+    facets_skipped?: string[];
+    /** The local library match reached its row limit: the corpus may miss matches. */
+    local_match_capped?: boolean;
     removed_not_matching?: number;
     removed_other_reasons?: number;
     /** A search without preprints: the preprints other databases returned, removed before
@@ -1229,6 +1243,8 @@ export interface ScenarioPrisma {
      *  evidence set without appearing anywhere on the card. */
     rerank_threshold?: number;
     below_rerank_threshold?: number;
+    /** Records without an abstract: not scored against the threshold, screened by title. */
+    no_abstract?: number;
   };
   full_text: {
     with_fulltext: number;
@@ -1335,6 +1351,8 @@ export async function fetchScenarioCorpus(
     /** Restreindre au sous-ensemble pertinent (porte commune : seuil ou inclusion par
      *  un relecteur, jamais un exclu). */
     relevantOnly?: boolean;
+    /** Ne lister que les notices sans résumé, à juger sur leur titre. */
+    noAbstract?: boolean;
     abstractChars?: number;   // truncate abstracts server-side (excerpt-only views)
     /** Order of the WHOLE corpus, on the server: a page sorted by year in the browser
      *  only re-sorted the rows it had downloaded. */
@@ -1352,6 +1370,7 @@ export async function fetchScenarioCorpus(
   if (options?.threshold != null) params.set('threshold', String(options.threshold));
   if (options?.q && options.q.trim()) params.set('q', options.q.trim());
   if (options?.relevantOnly) params.set('relevant_only', 'true');
+  if (options?.noAbstract) params.set('no_abstract', 'true');
   // Truncate abstracts server-side when only an excerpt is displayed (search results
   // page): 10,000 full abstracts weighed tens of MB for a 600-character snippet.
   if (options?.abstractChars != null) params.set('abstract_chars', String(options.abstractChars));
@@ -2671,9 +2690,12 @@ export interface EmbeddingStatus {
   counts?: CorpusCounts;
   // Pertinence (ranking) - scores réellement présents sur le corpus (≠ indexation RAG).
   ranking?: {
+    /** Les notices qui ONT un résumé : celles sans résumé ne se classent pas. */
     total: number;
     scored: number;
     reranked: number;
+    /** Les notices sans résumé, hors classement (jugées sur leur titre). */
+    no_abstract?: number;
     complete: boolean;
     /** Le dénominateur du rerank : les articles qui ont un résumé exploitable. */
     rerank_scorable?: number;
@@ -2755,12 +2777,21 @@ export async function patchUserScenario(
   return _mapUserScenario(await r.json());
 }
 
+/** Lance le pipeline complet. `maxResults` absent : le serveur applique son plafond par
+ *  source (LIVE_MAX_PER_SOURCE), le même que la recherche. `exhaustive` : le mode de la
+ *  recherche, enregistré sur le scénario avant que le corpus ne soit construit ; absent,
+ *  le scénario garde le sien. */
 export async function startUserScenarioPipeline(
   scenarioId: string,
-  maxResults = 100000,
+  maxResults?: number,
+  opts?: { exhaustive?: boolean },
 ): Promise<{ scenario_id: string; status: string; message: string; steps: string[] }> {
+  const params = new URLSearchParams();
+  if (maxResults !== undefined) params.set('max_results', String(maxResults));
+  params.set('lang', currentLang());
+  if (opts?.exhaustive !== undefined) params.set('exhaustive', String(opts.exhaustive));
   const r = await safeFetch(
-    `${API_BASE_URL}/user-scenarios/${scenarioId}/pipeline?max_results=${maxResults}&lang=${currentLang()}`,
+    `${API_BASE_URL}/user-scenarios/${scenarioId}/pipeline?${params}`,
     { method: 'POST', headers: authHeaders() },
   );
   if (!r.ok) throw new Error(httpMessage(r.status));
@@ -2785,9 +2816,15 @@ export interface CorpusCounts {
   threshold: number;
   total: number;
   above_threshold: number;
-  /** Scorés ET sous le seuil. Les non scorés sont à part : les trois font le total. */
+  /** Scorés ET sous le seuil. Les non scorés et les notices sans résumé sont à part :
+   *  les quatre font le total. */
   below_threshold: number;
   unscored: number;
+  /** Notices sans résumé : gardées au corpus, jamais pertinentes sur leur score, jugées
+   *  sur leur titre par un relecteur. Absent des réponses antérieures. */
+  no_abstract?: number;
+  /** Notices sans année connue : gardées par un filtre d'années, et comptées ici. */
+  year_unknown?: number;
   scored: number;
   reranked: number;
   /** Ce que les extractions lisent vraiment (porte commune), pas un partage par le score. */
@@ -2854,15 +2891,20 @@ export async function fetchActivity(): Promise<{ running: ActivityItem[]; count:
   return r.json();
 }
 
-/** Construit le corpus (= requête booléenne sur base locale ∪ live) en arrière-plan. */
+/** Construit le corpus (= requête booléenne sur base locale ∪ live) en arrière-plan.
+ *  `exhaustive` : le mode de la recherche (true : toutes les notices que chaque base
+ *  apparie, jusqu'à 20 000 par base ; false : les 2 000 plus pertinentes par base),
+ *  enregistré sur le scénario par le serveur ; absent, le scénario garde le sien.
+ *  `maxResults` absent : le serveur applique son plafond par source (LIVE_MAX_PER_SOURCE). */
 export async function populateUserScenario(
   scenarioId: string,
-  opts?: { includeLive?: boolean; maxResults?: number; excludePreprints?: boolean },
+  opts?: { includeLive?: boolean; maxResults?: number; excludePreprints?: boolean; exhaustive?: boolean },
 ): Promise<{ scenario_id: string; status: string; message?: string }> {
   const params = new URLSearchParams();
-  params.set('max_results', String(opts?.maxResults ?? 2000));
+  if (opts?.maxResults !== undefined) params.set('max_results', String(opts.maxResults));
   params.set('include_live', String(opts?.includeLive ?? true));
   params.set('lang', currentLang());          // cluster summaries precomputed in this language
+  if (opts?.exhaustive !== undefined) params.set('exhaustive', String(opts.exhaustive));
   // Saved on the scenario by the server, so a pinned scenario searched again with the
   // toggle changed is rebuilt with it. Absent: the scenario keeps its recorded choice.
   if (opts?.excludePreprints !== undefined) {
@@ -4492,6 +4534,13 @@ export interface SearchStrategy {
   pubmed: string;
   explanation: string;
   synonyms: string[][];
+  /** No usable strategy: the search runs on the query as typed. */
+  degraded?: boolean;
+  /** The model's answer was cut at its token limit (`degraded_reason: "truncated"`),
+   *  and `reason` says so in a sentence. */
+  truncated?: boolean;
+  degraded_reason?: string;
+  reason?: string;
 }
 
 /** Traduit une requête en langage naturel en stratégie booléenne (LLM). */

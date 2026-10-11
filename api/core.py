@@ -350,19 +350,21 @@ except (TypeError, ValueError):
 # Budget temps (s) de la fédération des sources lors du populate. Borne le temps
 # d'attente quand une source est lente/bloquée (PubMed efetch timeout=90). Les sources
 # non terminées continuent en arrière-plan ; le corpus est reconstruit avec ce qui est
-# déjà ingéré. Réglable via l'env POPULATE_FEDERATION_BUDGET (mettre p. ex. 600 pour un
-# corpus plus complet). Défaut 180 s : le populate tourne dans un THREAD de fond, donc
-# un budget plus large ne bloque pas la requête - il retarde juste le passage à « done ».
+# déjà ingéré. Réglable via l'env POPULATE_FEDERATION_BUDGET. Défaut 600 s (180 avant) :
+# 180 s coupaient les sources lentes en pleine pagination (arXiv, trois secondes par
+# page ; Semantic Scholar sans clé), et les pages réessayées après une erreur passagère
+# ont besoin de place. Le populate tourne dans un THREAD de fond, donc un budget plus
+# large ne bloque pas la requête - il retarde juste le passage à « done ».
 # On NE le met pas à l'infini : une source réellement bloquée maintiendrait le job en vie.
 try:
-    POPULATE_FEDERATION_BUDGET = float(os.getenv("POPULATE_FEDERATION_BUDGET", "180"))
+    POPULATE_FEDERATION_BUDGET = float(os.getenv("POPULATE_FEDERATION_BUDGET", "600"))
 except (TypeError, ValueError):
-    POPULATE_FEDERATION_BUDGET = 180.0
+    POPULATE_FEDERATION_BUDGET = 600.0
 
 # Le budget d'une recherche EXHAUSTIVE : chaque base renvoie tout ce qu'elle apparie,
-# soit des dizaines de pages là où le mode standard en lit deux. 180 s couperaient Europe
-# PMC à mi-chemin (13 810 notices sur la question HPAI) ; 45 minutes laissent finir une
-# question de revue, et bornent encore une source réellement bloquée.
+# soit des dizaines de pages là où le mode standard en lit deux. Le budget standard
+# couperait Europe PMC à mi-chemin (13 810 notices sur la question HPAI) ; 45 minutes
+# laissent finir une question de revue, et bornent encore une source réellement bloquée.
 try:
     EXHAUSTIVE_FEDERATION_BUDGET = float(os.getenv("EXHAUSTIVE_FEDERATION_BUDGET", "2700"))
 except (TypeError, ValueError):

@@ -14,7 +14,7 @@ from sqlalchemy import text
 
 from .core import app, engine, logger, require_api_key
 from .scenario_store import (_get_scenario_rerank_threshold, _get_scenario_threshold,
-                             _get_user_scenario_or_404, relevant_gate_sql,
+                             _get_user_scenario_or_404, has_abstract_sql, relevant_gate_sql,
                              relevant_gate_tail_sql, screening_status_sql)
 from .search import _load_prisma_identification, _reconcile_prisma_identification
 from .double_blind import _write_ars_screening
@@ -184,20 +184,23 @@ def get_user_scenario_prisma(
                 -- sur le sous-ensemble NON dupliqué - cohérent avec toutes les autres
                 -- surfaces "pertinentes" (evidence-brief, RAG, cartes). L'identification
                 -- ci-dessus (total/by_source/duplicates) reste sur le corpus ENTIER.
-                -- semantic split at effective threshold
-                SUM(CASE WHEN (d.is_duplicate IS NULL OR d.is_duplicate = FALSE) AND COALESCE(ars.similarity_score, 0) >= :thr THEN 1 ELSE 0 END) AS above_threshold,
-                SUM(CASE WHEN (d.is_duplicate IS NULL OR d.is_duplicate = FALSE) AND COALESCE(ars.similarity_score, 0) <  :thr THEN 1 ELSE 0 END) AS below_threshold,
+                -- semantic split at effective threshold, over the records that HAVE an
+                -- abstract: a record without one is never pre-selected by its score (it
+                -- only reads the title) and has its own line, screened by title by hand.
+                SUM(CASE WHEN (d.is_duplicate IS NULL OR d.is_duplicate = FALSE) AND COALESCE(ars.similarity_score, 0) >= :thr AND {has_abstract_sql('d')} THEN 1 ELSE 0 END) AS above_threshold,
+                SUM(CASE WHEN (d.is_duplicate IS NULL OR d.is_duplicate = FALSE) AND COALESCE(ars.similarity_score, 0) <  :thr AND {has_abstract_sql('d')} THEN 1 ELSE 0 END) AS below_threshold,
+                SUM(CASE WHEN (d.is_duplicate IS NULL OR d.is_duplicate = FALSE) AND NOT {has_abstract_sql('d')} THEN 1 ELSE 0 END) AS no_abstract,
                 -- manual curation
                 SUM(CASE WHEN (d.is_duplicate IS NULL OR d.is_duplicate = FALSE) AND {screening_status_sql('d', 'ars')} = 'included' THEN 1 ELSE 0 END) AS manually_included,
                 SUM(CASE WHEN (d.is_duplicate IS NULL OR d.is_duplicate = FALSE) AND {screening_status_sql('d', 'ars')} = 'excluded' THEN 1 ELSE 0 END) AS manually_excluded,
                 SUM(CASE WHEN (d.is_duplicate IS NULL OR d.is_duplicate = FALSE) AND ({screening_status_sql('d', 'ars')} IS NULL OR {screening_status_sql('d', 'ars')} = 'pending')
                          THEN 1 ELSE 0 END) AS pending,
-                -- manually included but below threshold (override)
+                -- manually included but not pre-selected (below threshold, or no abstract)
                 SUM(CASE WHEN (d.is_duplicate IS NULL OR d.is_duplicate = FALSE) AND {screening_status_sql('d', 'ars')} = 'included'
-                           AND COALESCE(ars.similarity_score, 0) < :thr THEN 1 ELSE 0 END) AS manually_rescued,
-                -- manually excluded above threshold (veto)
+                           AND (COALESCE(ars.similarity_score, 0) < :thr OR NOT {has_abstract_sql('d')}) THEN 1 ELSE 0 END) AS manually_rescued,
+                -- manually excluded although pre-selected (veto)
                 SUM(CASE WHEN (d.is_duplicate IS NULL OR d.is_duplicate = FALSE) AND {screening_status_sql('d', 'ars')} = 'excluded'
-                           AND COALESCE(ars.similarity_score, 0) >= :thr THEN 1 ELSE 0 END) AS manually_vetoed,
+                           AND COALESCE(ars.similarity_score, 0) >= :thr AND {has_abstract_sql('d')} THEN 1 ELSE 0 END) AS manually_vetoed,
                 -- full text - RESTREINT à l'ensemble de preuves (≥ seuil OU inclus
                 -- manuellement, hors exclus), pas au corpus entier : sinon le "X of Y"
                 -- du PRISMA pouvait dépasser Y (le fameux "5 of 4").
@@ -231,6 +234,7 @@ def get_user_scenario_prisma(
     unique          = max(0, total - duplicates)   # après retrait des doublons
     above           = int(stats["above_threshold"] or 0)
     below           = int(stats["below_threshold"] or 0)
+    no_abstract     = int(stats["no_abstract"] or 0)    # gardées, à juger sur le titre
     man_included    = int(stats["manually_included"] or 0)
     man_excluded    = int(stats["manually_excluded"] or 0)
     pending         = int(stats["pending"] or 0)
@@ -341,6 +345,13 @@ def get_user_scenario_prisma(
             "removed_after_search": int(_rec.get("removed_after_search") or 0),
             "records_screened_at_search": int(_rec.get("records_screened_at_search") or 0),
             "records_screened": unique,
+            # Dont sans résumé, gardées et à juger sur le titre : compté sur le corpus tel
+            # qu'il est (un résumé comblé plus tard en sort de lui-même), comme `unique`.
+            "kept_no_abstract": no_abstract,
+            # Les facettes OU qu'aucune base n'a reçues, et la borne de la correspondance
+            # locale quand elle a mordu : ce que la recherche a enregistré.
+            "facets_skipped": [str(f) for f in (_figures.get("facets_skipped") or [])],
+            "local_match_capped": bool(_figures.get("local_match_capped")),
             "embedded": embedded,
             "figures_from": "search_run",
             # « populate » = une recherche a interrogé les sources ; « rebuild » = la
@@ -444,6 +455,7 @@ def get_user_scenario_prisma(
             "removed_after_search": 0,
             "records_screened_at_search": unique,
             "records_screened": unique,
+            "kept_no_abstract": no_abstract,
             "embedded": embedded,
             "figures_from": "corpus",
         }
@@ -456,6 +468,9 @@ def get_user_scenario_prisma(
             "threshold": eff_threshold,
             "above_threshold": above,
             "below_threshold": below,
+            # Ni au-dessus ni en dessous : sans résumé, à juger sur le titre à la main.
+            # above + below + no_abstract = passés au screening.
+            "no_abstract": no_abstract,
             "method": "cosine similarity (text-embedding-3-small)",
             # 0 = pas de second seuil. Quand il est posé, `below_rerank_threshold` dit
             # combien d'articles au-dessus du seuil de similarité il retire.
