@@ -120,8 +120,8 @@ curl -s "${auth[@]}" -X POST "$BASE/fulltext/fetch?scenario_id=usr-XXXX&limit=10
 
 | Method | Path | Auth | Key params |
 |--------|------|------|-----------|
-| GET | `/living-review/status` | open | scheduler state |
-| POST | `/living-review/run?scenario_id=all&days=30&dry_run=false` | ✅ | run living review (async) |
+| GET | `/living-review/status` | open | last report, and `run`: running · done · error · interrupted |
+| POST | `/living-review/run?scenario_id=all&dry_run=false` | ✅ | run living review (detached; `days` optional, applies to every scenario run, otherwise each preset keeps its own window) |
 | POST | `/alerts/run-digests?dry_run=false` | ✅ | send all due email digests |
 | POST | `/alerts/send-digest` | ✅ | send one subscription's digest |
 | GET | `/alerts/subscriptions` | open | list subscriptions |

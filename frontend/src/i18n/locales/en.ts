@@ -1017,10 +1017,11 @@ export const en: Translations = {
       subscribeButton: "Subscribe to alerts",
       livingReviewPipeline: "Living Review Pipeline",
       livingReviewDesc:
-        "The Living Review queries PubMed with this scenario's query over the last N days and inserts the articles it does not already hold. It does NOT query the other federated sources, and it does not generate embeddings, PICO or full texts: the background worker and the enrichment tab do that afterwards. The derived views (clustering, graph, concept map, recommended actions, SEIR projection) are invalidated for the scenarios that actually gained an article.",
+        "The Living Review queries PubMed with this scenario's query over the last N days, reads every record of that window, adds to the library the articles it does not already hold and links them to this scenario. It does NOT query the other federated sources, and it does not generate embeddings, PICO or full texts: the background worker and the enrichment tab do that afterwards. The derived views (clustering, graph, concept map, recommended actions, SEIR projection) are invalidated for the scenarios that actually gained an article.",
       stepMultiSource:
-        "Query: PubMed (a user scenario); PubMed plus bioRxiv/medRxiv for the six GESICA scenarios that carry preprint terms",
-      stepInsert: "Insertion of the articles not already held (deduplicated on external id and source)",
+        "Query: PubMed (a user scenario); PubMed plus preprints (bioRxiv, medRxiv and others, through Europe PMC) for the GESICA scenarios the scheduler has queries for",
+      stepInsert:
+        "Insertion into the library of the articles not already held (deduplicated as a search does: identifier, DOI or title), and a link to this scenario",
       stepInvalidate:
         "Invalidation of the views derived from the corpus, for the scenarios that gained an article",
       stepAfterwards:

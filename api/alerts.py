@@ -168,18 +168,44 @@ def list_subscriptions(email: str) -> list[dict[str, Any]]:
         return []
 
 
+# ── Ce qui est NOUVEAU pour un scénario : la date de son arrivée dans le corpus ─
+# « Nouveau » voulait dire `d.created_at > last_notified_at` : créé dans la BIBLIOTHÈQUE
+# depuis le dernier digest. Un article déjà en bibliothèque, qu'une recherche ou une veille
+# lie ensuite au scénario, n'était donc jamais signalé, alors que c'est l'arrivée la plus
+# courante sur une bibliothèque de près d'un demi-million de documents. La date qui compte
+# est celle du LIEN (`article_scenarios.assigned_at`, désormais posée par défaut à
+# l'insertion) ; à défaut, pour un lien antérieur à ce défaut et pour l'appartenance par
+# `scenario_type`, celle de la création du document, comme avant. Un article présent par
+# les deux voies est arrivé à la PREMIÈRE : un lien posé après coup ne le refait pas neuf.
+_ARRIVALS_CTE = """
+    WITH arrivals AS (
+        SELECT a.document_id AS id, COALESCE(a.assigned_at, d.created_at) AS arrived_at
+          FROM article_scenarios a
+          JOIN literature_document d ON d.id = a.document_id
+         WHERE a.scenario_id = :sid
+        UNION ALL
+        SELECT d.id, d.created_at
+          FROM literature_document d
+         WHERE d.scenario_type = :sid
+    ), first_arrival AS (
+        SELECT id, MIN(arrived_at) AS arrived_at FROM arrivals GROUP BY id
+    )
+"""
+_IS_NEW = "(CAST(:since AS timestamp) IS NULL OR f.arrived_at > CAST(:since AS timestamp))"
+
+
 def _new_articles_for_scenario(conn, scenario_id: str, since, limit: int = 25) -> list[dict]:
-    """Articles du corpus d'un scénario ingérés APRÈS `since`. Couvre les deux modèles
-    d'appartenance : préréglé (literature_document.scenario_type) ET utilisateur
-    (article_scenarios). since=None (1re notification) → les plus récents (bornés)."""
-    rows = conn.execute(text("""
-        SELECT DISTINCT d.id, d.title, d.year, d.doi, d.url, d.created_at
-        FROM literature_document d
-        WHERE (d.scenario_type = :sid
-               OR EXISTS (SELECT 1 FROM article_scenarios a
-                          WHERE a.document_id = d.id AND a.scenario_id = :sid))
-          AND (CAST(:since AS timestamp) IS NULL OR d.created_at > CAST(:since AS timestamp))
-        ORDER BY d.created_at DESC
+    """Articles ARRIVÉS dans le corpus d'un scénario après `since` (cf. _ARRIVALS_CTE).
+    Couvre les deux modèles d'appartenance : préréglé (literature_document.scenario_type)
+    ET lien (article_scenarios). since=None (1re notification) → les plus récents
+    (bornés)."""
+    rows = conn.execute(text(f"""
+        {_ARRIVALS_CTE}
+        SELECT d.id, d.title, d.year, d.doi, d.url, d.created_at, f.arrived_at
+        FROM first_arrival f
+        JOIN literature_document d ON d.id = f.id
+        WHERE {_IS_NEW}
+        ORDER BY f.arrived_at DESC NULLS LAST, d.id DESC
         LIMIT :lim
     """), {"sid": scenario_id, "since": since, "lim": int(limit)}).mappings().all()
     return [dict(r) for r in rows]
@@ -191,16 +217,19 @@ def _count_new_linked_articles(conn, scenario_id: str, since) -> int:
     Deux populations se mélangeaient dans la même phrase. Le total annoncé compte les
     articles rattachés PAR L'UNE OU L'AUTRE voie : un lien `article_scenarios`, ou un
     `scenario_type` posé à l'ingestion. Le compte des pertinents, lui, JOINT
-    `article_scenarios` : il ne peut voir que les premiers. Or la living review ingère
-    en posant `scenario_type` et SANS créer de lien, donc ses articles comptaient dans
-    le total et jamais dans les pertinents : l'email annonçait « 0 of 12 clear the
+    `article_scenarios` : il ne peut voir que les premiers. Les articles qu'un ancien
+    passage de la living review a rangés par `scenario_type`, sans lien, comptaient
+    dans le total et jamais dans les pertinents : l'email annonçait « 0 of 12 clear the
     relevance threshold » pour exactement les articles qu'une veille apporte.
-    On compte donc la population qui PEUT être scorée, et la phrase le dit."""
-    return int(conn.execute(text("""
-        SELECT COUNT(DISTINCT d.id)
-        FROM literature_document d
-        JOIN article_scenarios a ON a.document_id = d.id AND a.scenario_id = :sid
-        WHERE (CAST(:since AS timestamp) IS NULL OR d.created_at > CAST(:since AS timestamp))
+    On compte donc la population qui PEUT être scorée, et la phrase le dit. Même arrivée
+    que le total (_ARRIVALS_CTE), pour que l'une reste une partie de l'autre."""
+    return int(conn.execute(text(f"""
+        {_ARRIVALS_CTE}
+        SELECT COUNT(*)
+        FROM first_arrival f
+        WHERE {_IS_NEW}
+          AND EXISTS (SELECT 1 FROM article_scenarios a
+                      WHERE a.document_id = f.id AND a.scenario_id = :sid)
     """), {"sid": scenario_id, "since": since}).scalar() or 0)
 
 
@@ -213,13 +242,11 @@ def _count_new_articles_for_scenario(conn, scenario_id: str, since) -> int:
     inatteignable la mention « et N de plus » du gabarit (elle compare le total au nombre
     de lignes affichées : si le total EST le nombre de lignes, elle ne s'affiche jamais).
     Mêmes conditions exactement que la requête ci-dessus."""
-    return int(conn.execute(text("""
-        SELECT COUNT(DISTINCT d.id)
-        FROM literature_document d
-        WHERE (d.scenario_type = :sid
-               OR EXISTS (SELECT 1 FROM article_scenarios a
-                          WHERE a.document_id = d.id AND a.scenario_id = :sid))
-          AND (CAST(:since AS timestamp) IS NULL OR d.created_at > CAST(:since AS timestamp))
+    return int(conn.execute(text(f"""
+        {_ARRIVALS_CTE}
+        SELECT COUNT(*)
+        FROM first_arrival f
+        WHERE {_IS_NEW}
     """), {"sid": scenario_id, "since": since}).scalar() or 0)
 
 
@@ -249,13 +276,16 @@ _STRONG_DESIGNS = ("systematic review", "meta-analysis", "meta analysis",
 
 
 def _new_relevant_rows(conn, scenario_id: str, since, threshold: float) -> list[dict]:
-    """Les articles NOUVEAUX ET PERTINENTS, avec les faits déjà extraits sur chacun."""
+    """Les articles NOUVEAUX ET PERTINENTS, avec les faits déjà extraits sur chacun.
+    Nouveaux au sens du total (_ARRIVALS_CTE) : arrivés dans le corpus après `since`."""
     return [dict(r) for r in conn.execute(text(f"""
+        {_ARRIVALS_CTE}
         SELECT d.id, d.title, d.abstract, d.year, d.study_design, d.concepts_json
-        FROM literature_document d
+        FROM first_arrival f
+        JOIN literature_document d ON d.id = f.id
         JOIN article_scenarios a ON a.document_id = d.id AND a.scenario_id = :sid
         WHERE d.is_duplicate IS NOT TRUE
-          AND (CAST(:since AS timestamp) IS NULL OR d.created_at > CAST(:since AS timestamp))
+          AND {_IS_NEW}
           {_RELEVANT_GATE}
         ORDER BY COALESCE(a.rerank_score, a.similarity_score, 0) DESC NULLS LAST, d.id
     """), {"sid": scenario_id, "since": since, "thr": float(threshold)}).mappings().all()]

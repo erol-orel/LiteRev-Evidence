@@ -9,7 +9,7 @@ import json
 from typing import Any
 
 from fastapi import Depends, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import text
 
 from .core import RELIEFWEB_APPNAME, app, engine, logger, require_api_key
@@ -161,10 +161,16 @@ class ReliefWebIngestIn(BaseModel):
     countries: list[str] | None = None          # ISO3
     date_from: str | None = None
     date_to: str | None = None
-    languages: list[str] | None = ["en"]
-    limit: int = 100                            # par appel (max 1000, cf. quotas)
+    # Toutes les langues par défaut. ["en"] écartait les rapports publiés seulement en
+    # français, en espagnol ou en arabe : le bulletin d'un bureau OMS d'Afrique de l'Ouest,
+    # l'alerte d'un ministère, soit les rapports précoces que ce flux existe pour donner.
+    languages: list[str] | None = None
+    # Par appel : le maximum documenté. Le quota compte des APPELS, pas des rapports : 100
+    # par appel et 3 appels plafonnaient une ingestion à 300 rapports pour le même coût.
+    limit: int = 1000
     max_calls: int = 3                          # plafond volontaire pour ce run
-    keep_per_series: int = 1
+    # 1 = le rapport le plus récent de chaque série (défaut) ; 0 = toute la série.
+    keep_per_series: int = Field(1, ge=0)
     scenario_id: str | None = None              # rattachement facultatif à un scénario
 
 
@@ -173,11 +179,13 @@ def reliefweb_ingest(payload: ReliefWebIngestIn,
                      _: None = Depends(require_api_key)) -> dict[str, Any]:
     """Ingère des rapports de situation ReliefWeb dans le flux SÉPARÉ `situation_report`.
 
-    Respecte le quota documenté (1000 appels/jour) en le comptant localement, déduplique
-    AVANT insertion (4 000+ sources couvrent le même événement, et le même document existe
-    en EN/FR/ES/AR sous des ids distincts), et signale explicitement une couverture
-    partielle (`truncated`) - un balayage écourté par le quota ne doit jamais se lire
-    comme exhaustif."""
+    Respecte le quota documenté (1000 appels/jour) en le comptant localement, une fois par
+    appel, déduplique AVANT insertion (4 000+ sources couvrent le même événement, et le
+    même document existe en EN/FR/ES/AR sous des ids distincts), et signale explicitement
+    une couverture partielle (`truncated`, et `branches` pour chacune des deux recherches
+    de l'union étiquette OU termes) - un balayage écourté par le quota ne doit jamais se
+    lire comme exhaustif. Une erreur en cours de route garde ce qui a été reçu et le dit
+    (`error`) ; seule une erreur avant toute page répond 502."""
     import reliefweb_source
     if not RELIEFWEB_APPNAME:
         raise HTTPException(status_code=503, detail=(
@@ -191,33 +199,65 @@ def reliefweb_ingest(payload: ReliefWebIngestIn,
             f"({reliefweb_source.QUOTA_CALLS_PER_DAY} appels/jour)."))
 
     max_calls = max(1, min(int(payload.max_calls or 1), budget))
-    limit = max(1, min(int(payload.limit or 100), reliefweb_source.MAX_LIMIT_PER_CALL))
-    collected, total_available, calls = [], 0, 0
+    limit = max(1, min(int(payload.limit or reliefweb_source.MAX_LIMIT_PER_CALL),
+                       reliefweb_source.MAX_LIMIT_PER_CALL))
+    collected, calls, error = [], 0, None
+    # Le balayage est l'UNION « étiquette Epidemic OU termes de pathogènes », que l'API ne
+    # sait pas écrire en une requête : deux recherches disjointes (reliefweb_source), dont
+    # les pages sont prises à tour de rôle dans le budget d'appels. Une seule recherche ne
+    # peut ainsi pas manger tout le budget, et la seconde, celle des rapports non encore
+    # étiquetés, n'est jamais la seule sacrifiée.
+    branches = {b: {"offset": 0, "total": None, "fetched": 0, "done": False}
+                for b in reliefweb_source.reports_branches()}
     try:
-        for page in range(max_calls):
-            q = reliefweb_source.build_reports_query(
-                pathogens=payload.pathogens, countries=payload.countries,
-                date_from=payload.date_from, date_to=payload.date_to,
-                languages=payload.languages, limit=limit, offset=page * limit)
-            reports, total = reliefweb_source.fetch_reports(q, RELIEFWEB_APPNAME)
-            calls += 1
-            total_available = max(total_available, total)
-            collected.extend(reports)
-            if len(reports) < limit:
-                break                       # dernière page atteinte
+        while calls < max_calls and not all(st["done"] for st in branches.values()):
+            for name, st in branches.items():
+                if st["done"] or calls >= max_calls:
+                    continue
+                q = reliefweb_source.build_reports_query(
+                    pathogens=payload.pathogens, countries=payload.countries,
+                    date_from=payload.date_from, date_to=payload.date_to,
+                    languages=payload.languages, limit=limit, offset=st["offset"],
+                    branch=name)
+                # Compté AVANT l'appel : un appel qui échoue a pu être compté par ReliefWeb.
+                calls += 1
+                reports, total = reliefweb_source.fetch_reports(q, RELIEFWEB_APPNAME)
+                st["total"] = total
+                st["fetched"] += len(reports)
+                st["offset"] += limit
+                collected.extend(reports)
+                if len(reports) < limit or st["offset"] >= total:
+                    st["done"] = True           # dernière page atteinte
     except Exception as e:
-        _rw_note_calls(calls)
-        raise HTTPException(status_code=502, detail=f"ReliefWeb: {e}") from e
-    finally:
-        _rw_note_calls(calls)
+        # On GARDE les pages déjà reçues : l'erreur était levée en 502 et tout ce qui avait
+        # été lu était jeté, appels compris.
+        error = f"{type(e).__name__}: {e}"[:300]
+        logger.warning(f"ReliefWeb ingest: {error} ({len(collected)} rapports déjà reçus)")
+    # Une fois chaque appel, échec compris : il l'était deux fois sur erreur, dans
+    # `except` puis dans `finally`, ce qui brûlait le quota quotidien au double.
+    _rw_note_calls(calls)
+    if error and not collected:
+        raise HTTPException(status_code=502, detail=f"ReliefWeb: {error}")
 
     kept = reliefweb_source.dedupe(collected, keep_per_series=payload.keep_per_series)
     inserted, updated = _rw_upsert_reports(kept)
     linked = (_rw_link_to_scenario(payload.scenario_id, [r.rw_id for r in kept])
               if payload.scenario_id else 0)
+    # Les deux recherches sont disjointes : leurs totaux s'additionnent. Une recherche que
+    # le budget n'a pas laissé finir (ou pas commencer) rend la couverture partielle,
+    # quoi que dise l'arithmétique sur les seuls totaux connus.
+    total_available = sum(int(st["total"] or 0) for st in branches.values())
     out = reliefweb_source.summarise_ingest(collected, kept, total_available, calls)
+    out["truncated"] = bool(out["truncated"] or error
+                            or not all(st["done"] for st in branches.values()))
     out.update({"inserted": inserted, "updated": updated, "linked_to_scenario": linked,
-                "calls_remaining_today": _rw_budget_remaining()})
+                "calls_remaining_today": _rw_budget_remaining(),
+                "languages": payload.languages or "all",
+                "keep_per_series": payload.keep_per_series,
+                "branches": {name: {"total": st["total"], "fetched": st["fetched"],
+                                    "complete": st["done"]}
+                             for name, st in branches.items()},
+                "error": error})
     return out
 
 
