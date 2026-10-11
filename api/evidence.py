@@ -551,7 +551,7 @@ def get_user_scenario_evidence_brief_pdf(scenario_id: str):
               AND {relevant_gate_tail_sql('d', 'ars', ':thr')}
             -- « Articles les plus pertinents » dans le PDF : trier par qualité donnait une
             -- liste qui n'est pas celle du tri par pertinence de l'application.
-            ORDER BY ({screening_status_sql('d', 'ars')} = 'included') DESC,
+            ORDER BY ({screening_status_sql('d', 'ars')} = 'included') IS TRUE DESC,
                      COALESCE(ars.rerank_score, ars.similarity_score, 0) DESC NULLS LAST,
                      d.quality_score DESC NULLS LAST, d.year DESC NULLS LAST
             LIMIT 100000

@@ -795,7 +795,7 @@ _CONCEPT_ROWS_SQL = f"""
       AND d.is_duplicate IS NOT TRUE
       AND d.abstract IS NOT NULL
       AND {relevant_gate_tail_sql('d', 'ars', ':thr')}
-    ORDER BY ({screening_status_sql('d', 'ars')} = 'included') DESC,
+    ORDER BY ({screening_status_sql('d', 'ars')} = 'included') IS TRUE DESC,
              ars.similarity_score DESC NULLS LAST, d.year DESC NULLS LAST, d.id
     LIMIT :cap
 """
