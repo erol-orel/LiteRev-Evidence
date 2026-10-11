@@ -14,7 +14,7 @@ from fastapi import Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field, field_validator, model_validator
 from sqlalchemy import text
 
-from .core import (_job_is_active, _msg, _norm_lang, app, client_ip, engine, logger,
+from .core import (_msg, _norm_lang, app, client_ip, engine, logger,
                    require_api_key)
 from .documents import _strategy_is_degraded
 from .scenario_store import (
@@ -22,7 +22,7 @@ from .scenario_store import (
     _get_scenario_threshold,
     _get_user_scenario_or_404,
     capabilities_for,
-    corpus_search_sql,
+    corpus_search_ids_sql,
     corpus_search_terms,
     normalise_kind,
     relevance_order_sql,
@@ -969,7 +969,7 @@ def get_user_scenario_corpus(
     Ces deux paramètres filtrent la VUE : `total` reste la taille du corpus et
     `filtered_total` dit combien d'articles la vue retient.
     """
-    from .relevance import _RERANK_JOBS, _maybe_autorerank  # lazy: relevance is loaded after this module
+    from .relevance import _maybe_autorerank, _rerank_job_active  # lazy: relevance is loaded after this module
     row = _get_user_scenario_or_404(scenario_id)
     # Endpoint ouvert : borne limit/offset (un ?limit=100000000 matérialiserait toute
     # la jointure en RAM/JSON). 100000 couvre largement le plus gros corpus.
@@ -1013,18 +1013,26 @@ def get_user_scenario_corpus(
     # Lié une fois pour toutes : la porte de pertinence et le tri le lisent, et les
     # requêtes de distribution partagent le même WHERE.
     params["threshold"] = eff_threshold
-    # Recherche DANS le corpus : tous les termes doivent apparaître (cf. corpus_search_*).
-    _terms = corpus_search_terms(q or "")
-    for _i, _term in enumerate(_terms):
-        _key = f"cq_{_i}"
-        conditions.append(corpus_search_sql(_key, doc="d"))
-        params[_key] = _term
     if relevant_only:
         conditions.append(relevant_gate_sql(doc="d", link="ars", thr=":threshold"))
-    where = " AND ".join(conditions)
+    # Recherche DANS le corpus : tous les termes doivent apparaître. Les articles qui les
+    # portent sont trouvés UNE fois, parmi ceux du scénario qui passent déjà les filtres
+    # ci-dessus, puis les quatre requêtes de la vue les lisent par identifiant
+    # (cf. corpus_search_ids_sql : posé dans leur WHERE, le prédicat pouvait balayer
+    # toute la bibliothèque, quatre fois).
+    _terms = corpus_search_terms(q or "")
+    _term_params = {f"cq_{_i}": _term for _i, _term in enumerate(_terms)}
     _screated = row.get("created_at")
     _filtered = bool(year_from or year_to or source or fulltext_only or _terms or relevant_only)
     with engine.connect() as conn:
+        if _terms:
+            _hits = conn.execute(
+                text(corpus_search_ids_sql(list(_term_params), " AND ".join(conditions))),
+                {**{k: v for k, v in params.items() if k not in ('limit', 'offset')},
+                 **_term_params}).scalars().all()
+            conditions.append("d.id = ANY(CAST(:cq_ids AS bigint[]))")
+            params["cq_ids"] = [int(i) for i in _hits]
+        where = " AND ".join(conditions)
         # Les compteurs du corpus viennent du comptage COMMUN (scenario_counts) : une
         # instruction, un instantané, les mêmes nombres que /detail et /embedding-status.
         # Les filtres de la vue (année, source, texte intégral) ne changent PAS la
@@ -1145,9 +1153,9 @@ def get_user_scenario_corpus(
         "filtered_total": filtered_total,
         "counts": counts,
         "source_breakdown": source_breakdown,
-        # `_job_is_active` : une entrée « en cours » laissée par un fil tué au
-        # redémarrage faisait afficher un scoring en cours pour toujours.
-        "rerank_running": rerank_running or _job_is_active(_RERANK_JOBS.get(scenario_id)),
+        # Lu sur le signe de vie du job : une entrée « en cours » laissée par un fil tué
+        # au redémarrage faisait afficher un scoring en cours pour toujours.
+        "rerank_running": rerank_running or _rerank_job_active(scenario_id),
         "threshold": eff_threshold,
         "offset": offset,
         "limit": limit,
@@ -1571,6 +1579,9 @@ def get_user_scenario_embedding_status(scenario_id: str) -> dict[str, Any]:
         # en READ COMMITTED, deux instructions d'une même connexion voient deux états
         # de la base, et le pipeline écrivait entre les deux.
         counts = scenario_counts(scenario_id, conn=conn)
+        # Ce que le rerank PEUT couvrir : les articles qui ont un résumé exploitable.
+        from .relevance import _rerank_coverage  # lazy: relevance is loaded after this module
+        rerank_cov = _rerank_coverage(scenario_id, conn=conn)
 
         # Title+abstract: one chunk per doc. Un chunk title_abstract n'est "en
         # attente" QUE s'il sera réellement embeddé par le worker - qui IGNORE
@@ -1661,9 +1672,14 @@ def get_user_scenario_embedding_status(scenario_id: str) -> dict[str, Any]:
     # un chunk vectorisé"). Tant que des articles restent non scorés, le classement
     # sémantique est incomplet → voyant non vert.
     semantic_ready = rank_total > 0 and rank_scored >= rank_total
-    # Cohere : prêt SEULEMENT quand le rerank a RÉELLEMENT tourné (≥ 1 rerank_score),
-    # pas simplement parce qu'une clé existe.
-    cohere_ready = cohere_configured and rank_reranked > 0
+    # Cohere : prêt quand TOUT ce qui peut être reranké l'est, comme la sémantique.
+    # Le voyant passait au vert dès UN score : sur HPAI_last, « 15660 / 15660 scorés » et
+    # « Cohere » en vert, pour 100 articles rerankés sur 15 660, pendant que le panneau du
+    # seuil disait l'inverse. Partiel, il est ambre et dit combien.
+    rerank_scorable = int(rerank_cov.get("scorable") or 0)
+    rerank_missing = int(rerank_cov.get("missing") or 0)
+    cohere_ready = cohere_configured and rerank_scorable > 0 and rerank_missing == 0
+    cohere_partial = cohere_configured and rank_reranked > 0 and not cohere_ready
 
     if chunkless > 0:
         status = "partial"
@@ -1712,15 +1728,21 @@ def get_user_scenario_embedding_status(scenario_id: str) -> dict[str, Any]:
             "scored": rank_scored,
             "reranked": rank_reranked,
             "complete": semantic_ready,
+            # Le dénominateur du rerank : les articles qui ont un résumé exploitable.
+            "rerank_scorable": rerank_scorable,
+            "rerank_missing": rerank_missing,
+            "rerank_complete": cohere_ready,
         },
         # Disponibilité RÉELLE de chaque mode de pertinence (plus de voyant "lexical"
         # toujours vert, qui n'apportait aucune information) :
         # - sémantique : vert seulement quand TOUT le corpus est scoré.
-        # - cohere     : vert seulement quand le rerank a réellement tourné.
+        # - cohere     : vert seulement quand tout ce qui peut être reranké l'est.
+        # - cohere_partial : une partie seulement (ambre, avec le compte).
         # - cohere_configured : distingue "pas de clé" de "clé OK, rerank pas encore".
         "score_availability": {
             "semantic": semantic_ready,
             "cohere": cohere_ready,
+            "cohere_partial": cohere_partial,
             "cohere_configured": cohere_configured,
         }
     }

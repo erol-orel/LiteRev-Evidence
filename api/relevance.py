@@ -167,23 +167,54 @@ _RERANK_RETRIES = _env_int("RERANK_RETRIES", 5, 0)
 _RERANK_BACKOFF_S = 4.0
 
 
-def _cohere_rerank(query: str, docs: list[str], model: str = "rerank-v3.5") -> list[float] | None:
+def _cohere_error_text(resp) -> str:
+    """Ce que Cohere dit de son refus : le champ `message` de son JSON, sinon le corps."""
+    try:
+        payload = resp.json()
+        if isinstance(payload, dict) and payload.get("message"):
+            return str(payload["message"])
+    except Exception:
+        pass
+    return str(getattr(resp, "text", "") or "")
+
+
+def _cohere_quota_exhausted(message: str) -> bool:
+    """Un 429 qui ne passera pas en attendant une minute : le quota MENSUEL d'une clé
+    d'essai (« limited to 1000 API calls / month »). Le plafond par minute, lui, se
+    réessaie."""
+    return "month" in (message or "").lower()
+
+
+def _cohere_rerank(query: str, docs: list[str], model: str = "rerank-v3.5",
+                   failure: dict | None = None) -> list[float] | None:
     """Cross-encoder rerank via Cohere, avec reprise sur limite de débit.
 
     Renvoie un score par document (aligné sur `docs`), ou None après épuisement des
-    tentatives. Appel REST direct, aucune dépendance ajoutée.
+    tentatives. Appel REST direct, aucune dépendance ajoutée. En cas d'échec, `failure`
+    (si fourni) reçoit le code HTTP, le message du fournisseur et `permanent` : vrai quand
+    réessayer ne changera rien, pour que l'appelant cesse d'envoyer des lots.
 
     429 et 5xx sont RÉESSAYÉS avec une attente qui double, en respectant `Retry-After`
-    quand le serveur le donne ; une erreur de requête (4xx autre que 429) ne l'est pas,
-    puisque la réessayer donnera la même réponse. Avant, toute erreur rendait None du
-    premier coup, et comme l'appelant jetait alors le lot entier, un simple dépassement de
-    débit se présentait comme « ce scénario n'a pas de scores »."""
+    quand le serveur le donne. Une erreur de requête (4xx autre que 429) ne l'est pas,
+    puisque la réessayer donnera la même réponse, ni un 429 de quota mensuel épuisé.
+
+    Le code le promettait déjà, et réessayait pourtant les 400, 401 et 403 : il passait
+    par `raise_for_status()`, dont l'exception est une `RequestException`, attrapée par la
+    branche « panne réseau ». Une clé refusée coûtait ainsi deux minutes d'attentes par
+    lot, et un balayage de 157 lots plus de cinq heures, sans un mot à l'écran."""
     key = os.getenv("COHERE_API_KEY")
     if not key or not docs:
         return None
     import time as _t
 
     import requests as _rq
+
+    def _failed(status: int | None, message: str, permanent: bool) -> None:
+        if failure is not None:
+            failure.update({"status": status, "message": (message or "")[:300],
+                            "permanent": permanent})
+        return None
+
     wait = _RERANK_BACKOFF_S
     for attempt in range(_RERANK_RETRIES + 1):
         try:
@@ -193,11 +224,24 @@ def _cohere_rerank(query: str, docs: list[str], model: str = "rerank-v3.5") -> l
                 json={"model": model, "query": query[:4000], "documents": docs, "top_n": len(docs)},
                 timeout=60,
             )
+        except _rq.exceptions.RequestException as _e:
+            # Panne réseau ou délai dépassé : réessayable, contrairement à un 400.
+            if attempt >= _RERANK_RETRIES:
+                logger.warning(f"Cohere rerank failed after {_RERANK_RETRIES} retries: {_e}")
+                return _failed(None, f"{type(_e).__name__}: {_e}", False)
+            _t.sleep(wait)
+            wait *= 2
+            continue
+        try:
             if resp.status_code == 429 or resp.status_code >= 500:
+                detail = _cohere_error_text(resp)
+                if resp.status_code == 429 and _cohere_quota_exhausted(detail):
+                    logger.warning(f"Cohere rerank: monthly quota exhausted: {detail[:200]}")
+                    return _failed(429, detail, True)
                 if attempt >= _RERANK_RETRIES:
                     logger.warning(f"Cohere rerank: {resp.status_code} after "
                                    f"{_RERANK_RETRIES} retries, giving up on this batch")
-                    return None
+                    return _failed(resp.status_code, detail, False)
                 # Le serveur sait mieux que nous combien attendre quand il le dit.
                 try:
                     hinted = float(resp.headers.get("Retry-After") or 0)
@@ -206,7 +250,10 @@ def _cohere_rerank(query: str, docs: list[str], model: str = "rerank-v3.5") -> l
                 _t.sleep(max(wait, hinted))
                 wait *= 2
                 continue
-            resp.raise_for_status()
+            if resp.status_code >= 400:
+                detail = _cohere_error_text(resp)
+                logger.warning(f"Cohere rerank: {resp.status_code} {detail[:200]}")
+                return _failed(resp.status_code, detail, True)
             data = resp.json()
             scores: list[float | None] = [None] * len(docs)
             for item in data.get("results", []):
@@ -214,17 +261,18 @@ def _cohere_rerank(query: str, docs: list[str], model: str = "rerank-v3.5") -> l
                 if idx is not None and 0 <= idx < len(docs):
                     scores[idx] = float(item.get("relevance_score", 0.0))
             return scores  # type: ignore[return-value]
-        except _rq.exceptions.RequestException as _e:
-            # Panne réseau ou délai dépassé : réessayable, contrairement à un 400.
-            if attempt >= _RERANK_RETRIES:
-                logger.warning(f"Cohere rerank failed after {_RERANK_RETRIES} retries: {_e}")
-                return None
-            _t.sleep(wait)
-            wait *= 2
         except Exception as _e:
             logger.warning(f"Cohere rerank failed: {_e}")
-            return None
+            return _failed(getattr(resp, "status_code", None), f"{type(_e).__name__}: {_e}", False)
     return None
+
+
+def _describe_rerank_failure(failure: dict) -> str:
+    """Une ligne lisible pour l'écran : « Cohere 429 : <message> »."""
+    status = failure.get("status")
+    head = f"Cohere {status}" if status else "Cohere"
+    msg = (failure.get("message") or "").strip()
+    return f"{head}: {msg}" if msg else head
 
 
 # Aucun plafond par défaut : le rerank note TOUT le corpus du scénario, jamais un
@@ -239,10 +287,14 @@ RERANK_MAX_ARTICLES = _env_int("RERANK_MAX_ARTICLES", 0, 0)
 _RERANK_BATCH = 100
 #: Pause entre deux lots. Mieux vaut ne pas déclencher la limite que la rattraper.
 _RERANK_PAUSE_S = float(os.getenv("RERANK_PAUSE_S", "1.0") or 1.0)
+#: Lots refusés d'affilée, reprises épuisées, avant d'arrêter le balayage. Chaque lot a
+#: déjà attendu deux minutes de reprises : trois refus de suite ne sont plus une limite
+#: par minute, et continuer ne ferait que brûler le temps et le quota restant.
+_RERANK_MAX_CONSECUTIVE_FAILURES = _env_int("RERANK_MAX_CONSECUTIVE_FAILURES", 3, 1)
 
 
 def _run_cross_encoder_rerank(scenario_id: str, query: str, top_k: int | None = None,
-                              only_missing: bool = False) -> dict[str, int]:
+                              only_missing: bool = False, progress=None) -> dict[str, Any]:
     """Note le corpus du scénario avec le cross-encoder, par lots, en écrivant au fur.
 
     Trois choses ont changé, et chacune corrigeait une cause mesurée de trous :
@@ -261,8 +313,24 @@ def _run_cross_encoder_rerank(scenario_id: str, query: str, top_k: int | None = 
     qui ne redépense rien pour ce qui est déjà noté.
 
     Renvoie le compte de ce qui s'est passé, au lieu d'un entier qui ne disait pas la
-    différence entre « rien à faire » et « tout a échoué »."""
-    out = {"scored": 0, "batches_ok": 0, "batches_failed": 0, "candidates": 0, "skipped_no_key": 0}
+    différence entre « rien à faire » et « tout a échoué ». `last_error` dit le dernier
+    refus du fournisseur ; `stopped` dit pourquoi le balayage s'est arrêté avant la fin
+    (refus définitif, ou `_RERANK_MAX_CONSECUTIVE_FAILURES` lots refusés d'affilée) ; les
+    articles non notés restent sans score, donc gardés par la porte, jamais comptés zéro.
+
+    `progress`, s'il est fourni, reçoit ces compteurs après chaque lot : c'est ce que lit
+    l'écran pendant le balayage, qui affichait « Lancement du scoring... » pendant des
+    heures sans rien dire."""
+    out: dict[str, Any] = {"scored": 0, "batches_ok": 0, "batches_failed": 0, "candidates": 0,
+                           "skipped_no_key": 0, "last_error": None, "stopped": None}
+
+    def _report() -> None:
+        if progress is not None:
+            try:
+                progress(dict(out))
+            except Exception:
+                pass
+
     if not os.getenv("COHERE_API_KEY"):
         out["skipped_no_key"] = 1
         return out
@@ -280,24 +348,37 @@ def _run_cross_encoder_rerank(scenario_id: str, query: str, top_k: int | None = 
                 {"LIMIT :k" if cap > 0 else ""}
             """), ({"sid": scenario_id, "k": cap} if cap > 0 else {"sid": scenario_id})).mappings().all()
         out["candidates"] = len(rows)
+        _report()
         if not rows:
             return out
         import time as _t_batch
+        consecutive = 0
         for _b in range(0, len(rows), _RERANK_BATCH):
             if _b:
                 _t_batch.sleep(_RERANK_PAUSE_S)
             chunk = rows[_b:_b + _RERANK_BATCH]
             docs = [f"{r['title']}\n\n{(r['abstract'] or '')[:1500]}" for r in chunk]
-            scores = _cohere_rerank(query, docs)
-            if not scores:
-                # Le lot échoue, les suivants continuent : c'est tout l'intérêt des lots.
-                out["batches_failed"] += 1
-                continue
+            failure: dict[str, Any] = {}
+            scores = _cohere_rerank(query, docs, failure=failure)
             ups = [{"s": s, "doc_id": r["id"], "sid": scenario_id}
-                   for r, s in zip(chunk, scores) if s is not None]
+                   for r, s in zip(chunk, scores or []) if s is not None]
             if not ups:
+                # Le lot échoue, les suivants continuent : c'est tout l'intérêt des lots.
+                # Mais pas indéfiniment : un refus définitif (clé refusée, quota du mois
+                # épuisé) ou trois refus d'affilée arrêtent le balayage, et le disent.
                 out["batches_failed"] += 1
+                consecutive += 1
+                out["last_error"] = _describe_rerank_failure(failure) if failure else \
+                    "Cohere: no score returned"
+                if failure.get("permanent") or consecutive >= _RERANK_MAX_CONSECUTIVE_FAILURES:
+                    out["stopped"] = out["last_error"]
+                    logger.warning(f"Cross-encoder rerank {scenario_id} arrêté après "
+                                   f"{out['batches_failed']} lot(s) refusé(s) : {out['stopped']}")
+                    _report()
+                    break
+                _report()
                 continue
+            consecutive = 0
             with engine.begin() as _c:
                 _c.execute(text("""
                     UPDATE article_scenarios SET rerank_score = :s
@@ -305,11 +386,13 @@ def _run_cross_encoder_rerank(scenario_id: str, query: str, top_k: int | None = 
                 """), ups)
             out["scored"] += len(ups)
             out["batches_ok"] += 1
+            _report()
         logger.info(f"Cross-encoder rerank {scenario_id}: {out['scored']}/{out['candidates']} notés, "
                     f"{out['batches_ok']} lots OK, {out['batches_failed']} en échec.")
         return out
     except Exception as _e:
         logger.warning(f"Cross-encoder rerank {scenario_id} failed: {_e}")
+        out["last_error"] = out["stopped"] = f"{type(_e).__name__}: {_e}"
         return out
 
 
@@ -325,17 +408,76 @@ _RERANK_JOBS: dict[str, dict] = {}
 _rerank_jobs_lock = threading.Lock()
 
 
-def _mark_rerank_running(scenario_id: str) -> None:
-    """Pose l'entrée « en cours » SOUS UNE SEULE forme, horodatée.
+#: Silence au-delà duquel un scoring « en cours » est tenu pour mort. Lu sur le dernier
+#: signe de vie (`heartbeat`, posé après chaque lot), et non sur l'heure de départ : avec
+#: les 180 secondes communes comptées depuis le départ, un balayage de 157 lots était
+#: « mort » au bout de trois minutes, et le clic suivant en lançait un SECOND, en
+#: parallèle du premier, contre le même fournisseur. Un lot, reprises comprises, tient
+#: sous dix minutes.
+_RERANK_STALE_S = 900.0
 
-    Les entrées étaient écrites de deux façons : avec `started_at` à un endroit, sans à
-    trois autres. `_job_is_active` lit cet horodatage, donc une entrée qui n'en portait
-    pas était jugée vieille de 1970, c'est-à-dire morte : la garde laissait démarrer un
-    SECOND scoring du même scénario pendant que le premier tournait."""
+
+def _rerank_job_active(scenario_id: str) -> bool:
+    return _job_is_active(_RERANK_JOBS.get(scenario_id), stale_after=_RERANK_STALE_S)
+
+
+def _claim_rerank_job(scenario_id: str) -> str | None:
+    """Vérifie qu'aucun scoring ne tourne et pose l'entrée « en cours », SOUS LE VERROU.
+
+    Renvoie l'identifiant du job, ou None si un autre tourne déjà. La vérification se
+    faisait hors du verrou, avant la pose de l'entrée : deux clics simultanés pouvaient
+    tous deux la passer. L'entrée porte `started_at` ET `heartbeat` sous une seule forme
+    (une entrée sans horodatage était jugée vieille de 1970, donc morte), et l'identifiant
+    sert à ce qu'un fil ancien ne réécrive pas l'entrée d'un job plus récent."""
+    import time as _t
+    import uuid as _uuid
+    with _rerank_jobs_lock:
+        if _job_is_active(_RERANK_JOBS.get(scenario_id), stale_after=_RERANK_STALE_S):
+            return None
+        job_id = _uuid.uuid4().hex[:12]
+        now = _t.time()
+        _RERANK_JOBS[scenario_id] = {"status": "running", "updated": 0, "job": job_id,
+                                     "started_at": now, "heartbeat": now}
+        return job_id
+
+
+def _rerank_job_update(scenario_id: str, job_id: str, **fields) -> None:
+    """Avancement d'un scoring en cours (phase, lots, dernier refus) et signe de vie.
+    N'écrit que dans l'entrée de CE job."""
     import time as _t
     with _rerank_jobs_lock:
-        _RERANK_JOBS[scenario_id] = {"status": "running", "updated": 0,
-                                     "started_at": _t.time()}
+        job = _RERANK_JOBS.get(scenario_id)
+        if job is not None and job.get("job") == job_id and job.get("status") == "running":
+            job.update(fields)
+            job["heartbeat"] = _t.time()
+
+
+def _rerank_job_finish(scenario_id: str, job_id: str, entry: dict) -> None:
+    """L'état final d'un scoring, sauf si un job plus récent a pris la place."""
+    with _rerank_jobs_lock:
+        job = _RERANK_JOBS.get(scenario_id)
+        if job is None or job.get("job") in (None, job_id):
+            _RERANK_JOBS[scenario_id] = {**entry, "job": job_id}
+
+
+def _rerank_final_entry(n_cosine: int, ce: dict) -> dict:
+    """Ce qu'un scoring terminé laisse à lire : le cosinus, le cross-encoder, et, quand le
+    fournisseur a refusé, pourquoi. Un balayage arrêté par un refus finit en « error » :
+    finir en « done » avec 100 articles sur 15 660 se lisait comme un succès."""
+    entry = {
+        "status": "error" if ce.get("stopped") else "done",
+        "updated": n_cosine,
+        "reranked": ce.get("scored", 0),
+        "rerank_candidates": ce.get("candidates", 0),
+        "rerank_batches_ok": ce.get("batches_ok", 0),
+        "rerank_batches_failed": ce.get("batches_failed", 0),
+        "rerank_skipped_no_key": bool(ce.get("skipped_no_key")),
+        "rerank_last_error": ce.get("last_error"),
+        "rerank_stopped": ce.get("stopped"),
+    }
+    if ce.get("stopped"):
+        entry["error"] = ce["stopped"]
+    return entry
 
 
 def _ensure_scenario_settings_table():
@@ -549,42 +691,50 @@ def trigger_rerank(scenario_id: str, missing_only: bool = False,
         nl_queries = meta.get("nl_queries") or []
         query = nl_queries[0] if nl_queries else _gesica_title(meta)
 
-    import time
-    if _job_is_active(_RERANK_JOBS.get(scenario_id)):
-        return {"status": "already_running", "scenario_id": scenario_id}
-
-    _mark_rerank_running(scenario_id)
+    job_id = _claim_rerank_job(scenario_id)
+    if job_id is None:
+        # L'écran affichait « Lancement du scoring... » et attendait un « done » qui
+        # pouvait ne venir que des heures plus tard : il reçoit maintenant l'avancement du
+        # scoring en cours, et peut le dire.
+        return {"status": "already_running", "scenario_id": scenario_id,
+                "job": {k: v for k, v in (_RERANK_JOBS.get(scenario_id) or {}).items()
+                        if k != "job"}}
 
     def _run():
         try:
             n = 0
             if not missing_only:
+                _rerank_job_update(scenario_id, job_id, phase="cosine")
                 _backfill_title_abstract_chunks(scenario_id)  # docs sans chunk -> searchable
                 n = _run_semantic_rerank_inline(scenario_id, query)
             # Recalcul COMPLET : après le cosinus, relancer AUSSI le cross-encoder Cohere
             # sur le sous-ensemble pertinent - sinon « Recalculer scores » ne rafraîchissait
             # que le cosinus et les rerank_score restaient figés/partiels.
-            _ce = {"scored": 0, "candidates": 0, "batches_failed": 0, "skipped_no_key": 0}
+            _rerank_job_update(scenario_id, job_id, phase="rerank", updated=n)
+            _ce: dict[str, Any] = {"scored": 0, "candidates": 0, "batches_failed": 0,
+                                   "skipped_no_key": 0}
             try:
-                _ce = _run_cross_encoder_rerank(scenario_id, query, only_missing=missing_only)
+                _ce = _run_cross_encoder_rerank(
+                    scenario_id, query, only_missing=missing_only,
+                    progress=lambda p: _rerank_job_update(
+                        scenario_id, job_id, phase="rerank",
+                        reranked=p.get("scored", 0), rerank_candidates=p.get("candidates", 0),
+                        rerank_batches_ok=p.get("batches_ok", 0),
+                        rerank_batches_failed=p.get("batches_failed", 0),
+                        rerank_last_error=p.get("last_error")))
                 logger.info(f"Rerank manuel {scenario_id}: {n} cosinus + {_ce['scored']} cross-encoder.")
             except Exception as _ece:
                 logger.warning(f"cross-encoder (recalcul manuel) {scenario_id}: {_ece}")
+                _ce["stopped"] = f"{type(_ece).__name__}: {_ece}"
             # Le job disait « done » avec le seul compte du cosinus, quoi qu'ait fait le
             # cross-encoder : un échec total ressortait identique à un succès. Il porte
-            # maintenant les deux, et dit si des lots ont échoué.
-            _RERANK_JOBS[scenario_id] = {
-                "status": "done", "updated": n,
-                "reranked": _ce.get("scored", 0),
-                "rerank_candidates": _ce.get("candidates", 0),
-                "rerank_batches_failed": _ce.get("batches_failed", 0),
-                "rerank_skipped_no_key": bool(_ce.get("skipped_no_key")),
-            }
+            # maintenant les deux, dit si des lots ont échoué, et pourquoi il s'est arrêté.
+            _rerank_job_finish(scenario_id, job_id, _rerank_final_entry(n, _ce))
         except Exception as e:
             # Sans ce filet, une exception laisse le job en "running" pour toujours
             # (→ "already_running" + badge "recalcul en cours" figé jusqu'au restart).
             logger.error(f"Rerank job {scenario_id}: {e}", exc_info=True)
-            _RERANK_JOBS[scenario_id] = {"status": "error", "error": str(e), "updated": 0}
+            _rerank_job_finish(scenario_id, job_id, {"status": "error", "error": str(e), "updated": 0})
 
     threading.Thread(target=_run, daemon=True).start()
     return {"status": "started", "scenario_id": scenario_id, "query": query}
@@ -599,30 +749,46 @@ def get_rerank_status(scenario_id: str) -> dict[str, Any]:
     « je ne me souviens de rien ». Les deux compteurs ci-dessous viennent de la base, en
     UNE instruction, et disent ce qui est vrai maintenant : combien d'articles du corpus
     pourraient porter un score, et combien n'en ont pas. L'interface peut enfin écrire
-    sur le bouton ce qu'il va faire."""
+    sur le bouton ce qu'il va faire.
+
+    Un job « running » sans signe de vie depuis `_RERANK_STALE_S` se lit « stalled » :
+    l'écran qui attendait sa fin cesse d'attendre, et un nouveau lancement est permis."""
     out = dict(_RERANK_JOBS.get(scenario_id, {"status": "idle"}))
+    out.pop("job", None)
+    if out.get("status") == "running" and not _rerank_job_active(scenario_id):
+        out["status"] = "stalled"
     try:
-        with engine.connect() as _c:
-            row = _c.execute(text("""
-                SELECT COUNT(*) FILTER (WHERE ld.abstract IS NOT NULL
-                                          AND length(ld.abstract) > 30)            AS scorable,
-                       COUNT(*) FILTER (WHERE ld.abstract IS NOT NULL
-                                          AND length(ld.abstract) > 30
-                                          AND asn.rerank_score IS NULL)            AS missing,
-                       COUNT(*) FILTER (WHERE ld.abstract IS NULL
-                                           OR length(ld.abstract) <= 30)           AS unscorable
-                FROM article_scenarios asn
-                JOIN literature_document ld ON ld.id = asn.document_id
-                WHERE asn.scenario_id = :sid AND ld.is_duplicate IS NOT TRUE
-            """), {"sid": scenario_id}).mappings().first() or {}
-        out["scorable"] = int(row.get("scorable") or 0)
-        out["missing"] = int(row.get("missing") or 0)
-        # Un article sans résumé utilisable ne peut PAS recevoir de score : le dire, plutôt
-        # que de laisser croire qu'un lancement de plus le rattrapera.
-        out["unscorable"] = int(row.get("unscorable") or 0)
+        out.update(_rerank_coverage(scenario_id))
     except Exception as _e:
         logger.warning(f"rerank coverage {scenario_id}: {_e}")
     return out
+
+
+def _rerank_coverage(scenario_id: str, conn=None) -> dict[str, int]:
+    """Combien d'articles du corpus peuvent porter un score de rerank (`scorable`),
+    combien n'en ont pas encore (`missing`), et combien n'en auront jamais faute de
+    résumé exploitable (`unscorable`). Une instruction, lue en base."""
+    sql = text("""
+        SELECT COUNT(*) FILTER (WHERE ld.abstract IS NOT NULL
+                                  AND length(ld.abstract) > 30)            AS scorable,
+               COUNT(*) FILTER (WHERE ld.abstract IS NOT NULL
+                                  AND length(ld.abstract) > 30
+                                  AND asn.rerank_score IS NULL)            AS missing,
+               COUNT(*) FILTER (WHERE ld.abstract IS NULL
+                                   OR length(ld.abstract) <= 30)           AS unscorable
+        FROM article_scenarios asn
+        JOIN literature_document ld ON ld.id = asn.document_id
+        WHERE asn.scenario_id = :sid AND ld.is_duplicate IS NOT TRUE
+    """)
+    if conn is None:
+        with engine.connect() as _c:
+            row = _c.execute(sql, {"sid": scenario_id}).mappings().first() or {}
+    else:
+        row = conn.execute(sql, {"sid": scenario_id}).mappings().first() or {}
+    # Un article sans résumé utilisable ne peut PAS recevoir de score : le dire, plutôt
+    # que de laisser croire qu'un lancement de plus le rattrapera.
+    return {"scorable": int(row.get("scorable") or 0), "missing": int(row.get("missing") or 0),
+            "unscorable": int(row.get("unscorable") or 0)}
 
 
 @app.post("/scenarios/{scenario_id}/rebuild-corpus")
@@ -676,9 +842,11 @@ def rebuild_corpus(scenario_id: str, _: None = Depends(require_api_key)) -> dict
         raise HTTPException(status_code=422,
                             detail="Scénario sans requête exploitable : reconstruction impossible.")
 
-    if _job_is_active(_RERANK_JOBS.get(scenario_id)):
-        return {"status": "already_running", "scenario_id": scenario_id}
-    _mark_rerank_running(scenario_id)
+    job_id = _claim_rerank_job(scenario_id)
+    if job_id is None:
+        return {"status": "already_running", "scenario_id": scenario_id,
+                "job": {k: v for k, v in (_RERANK_JOBS.get(scenario_id) or {}).items()
+                        if k != "job"}}
 
     def _run():
         try:
@@ -708,16 +876,26 @@ def rebuild_corpus(scenario_id: str, _: None = Depends(require_api_key)) -> dict
                         "sources_cut_off", "per_source_cap", "federation_incomplete")
                     if _prev.get(k) is not None}
             _store_prisma_identification(scenario_id, _figs)
+            _rerank_job_update(scenario_id, job_id, phase="cosine")
             _backfill_title_abstract_chunks(scenario_id)       # chunks résumé manquants
             n = _run_semantic_rerank_inline(scenario_id, query or boolean)  # cosinus pgvector
+            _rerank_job_update(scenario_id, job_id, phase="rerank", updated=n)
+            _ce: dict[str, Any] = {}
             try:
-                _run_cross_encoder_rerank(scenario_id, query or boolean)    # Cohere (si clé)
+                _ce = _run_cross_encoder_rerank(                             # Cohere (si clé)
+                    scenario_id, query or boolean,
+                    progress=lambda p: _rerank_job_update(
+                        scenario_id, job_id, reranked=p.get("scored", 0),
+                        rerank_candidates=p.get("candidates", 0),
+                        rerank_batches_failed=p.get("batches_failed", 0),
+                        rerank_last_error=p.get("last_error")))
             except Exception as _ece:
                 logger.warning(f"rebuild-corpus cross-encoder {scenario_id}: {_ece}")
-            _RERANK_JOBS[scenario_id] = {"status": "done", "corpus": n_corpus, "updated": n}
+                _ce = {"stopped": f"{type(_ece).__name__}: {_ece}"}
+            _rerank_job_finish(scenario_id, job_id, {**_rerank_final_entry(n, _ce), "corpus": n_corpus})
             logger.info(f"Rebuild corpus {scenario_id}: {n_corpus} liens, {n} scorés.")
         except Exception as _e:
-            _RERANK_JOBS[scenario_id] = {"status": "error", "error": str(_e)}
+            _rerank_job_finish(scenario_id, job_id, {"status": "error", "error": str(_e)})
             logger.error(f"Rebuild corpus {scenario_id}: {_e}", exc_info=True)
 
     threading.Thread(target=_run, daemon=True).start()
@@ -773,7 +951,7 @@ def _maybe_autorerank(scenario_id: str) -> bool:
     # traitait une entrée laissée par un fil tué au redémarrage comme vivante (donc
     # blocage définitif), et une entrée POSÉE SANS HORODATAGE comme morte (donc un
     # second scoring concurrent du même scénario).
-    if _job_is_active(_RERANK_JOBS.get(scenario_id)):
+    if _rerank_job_active(scenario_id):
         return False
     if _RERANK_JOBS.get(scenario_id, {}).get("status") == "done":
         return False
@@ -790,17 +968,20 @@ def _maybe_autorerank(scenario_id: str) -> bool:
     if not query:
         return False
 
-    _mark_rerank_running(scenario_id)
+    job_id = _claim_rerank_job(scenario_id)
+    if job_id is None:
+        return False
 
     def _run():
         try:
+            _rerank_job_update(scenario_id, job_id, phase="cosine")
             _backfill_title_abstract_chunks(scenario_id)  # docs sans chunk résumé -> searchable
             n = _run_semantic_rerank_inline(scenario_id, query)
-            _RERANK_JOBS[scenario_id] = {"status": "done", "updated": n}
+            _rerank_job_finish(scenario_id, job_id, {"status": "done", "updated": n})
             logger.info(f"Auto-rerank {scenario_id}: {n} articles scorés.")
         except Exception as e:
             logger.warning(f"Auto-rerank {scenario_id}: {e}")
-            _RERANK_JOBS[scenario_id] = {"status": "error", "error": str(e)}
+            _rerank_job_finish(scenario_id, job_id, {"status": "error", "error": str(e)})
 
     threading.Thread(target=_run, daemon=True).start()
     return True
@@ -1166,7 +1347,7 @@ def get_threshold_curve(scenario_id: str, target: int | None = None,
         # d'office passent quoi qu'on fasse ; au-delà de `max`, il n'y a plus d'articles.
         "reachable": {"min": free + 1, "max": len(rows) + free} if rows else None,
         "with_parameter_total": sum(1 for _, p in rows if p),
-        "scoring_in_progress": _job_is_active(_RERANK_JOBS.get(scenario_id)),
+        "scoring_in_progress": _rerank_job_active(scenario_id),
         # Un découpage par clusters ou par concepts ne juge que les articles pertinents AU
         # MOMENT où il est posé. Descendre le seuil sous cette frontière fait donc rentrer
         # des articles que la sélection n'a jamais vus, et la courbe les propose avec le

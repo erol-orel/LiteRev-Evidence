@@ -400,11 +400,16 @@ def _job_is_active(job: dict | None, stale_after: float = 180.0) -> bool:
     """True only if a background job is genuinely still running. A "running"
     entry older than stale_after seconds (a thread killed by a restart or hung
     on a network call) is treated as STALE, so a crashed/killed job never locks
-    out retries permanently with "already_running"."""
+    out retries permanently with "already_running".
+
+    A job that reports progress carries a `heartbeat`, and its age is measured from
+    the last one: a long job that is still working is not stale, however long ago it
+    started."""
     import time
     if not job or job.get("status") != "running":
         return False
-    return (time.time() - job.get("started_at", 0)) < stale_after
+    last = job.get("heartbeat") or job.get("started_at", 0)
+    return (time.time() - last) < stale_after
 
 
 # ─── Localisation NON DESTRUCTIVE des Variables/Modèle (affichage FR/EN) ──────
