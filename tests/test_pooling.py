@@ -170,6 +170,98 @@ def test_comparisons_use_only_papers_reporting_both_labels_and_follow_the_codebo
     assert P.pooled_comparisons(rows[:4], order) == []                # two papers: nothing to pool
 
 
+# ── Rows that give the composition of a sample, not groups with cases ───────
+# The male against female rows of avian influenza papers in HPAI_last (Whitlow 2025, Charania
+# 2014, Rehman 2023, Hinjoy 2023): each pair is one sample split by sex. The fifth is two people
+# short of its total, as when a few people's sex was not recorded.
+SPLIT = [(142, 81, 225), (80, 26, 106), (119, 81, 200), (162, 184, 346), (110, 118, 230)]
+SEX = {("human_susc", "sex_gender", "male"): 0, ("human_susc", "sex_gender", "female"): 1}
+
+
+def test_complementary_shares_of_one_sample_are_composition():
+    assert all(P.is_composition_pair(men, n, women, n) for men, women, n in SPLIT)
+    # Within 2 people or 2% of the total, whichever is larger, on either side of it.
+    assert P.is_composition_pair(110, 225, 111, 225) and not P.is_composition_pair(110, 225, 110, 225)
+    assert P.is_composition_pair(24, 50, 24, 50) and not P.is_composition_pair(24, 50, 23, 50)
+    assert P.is_composition_pair(30, 50, 22, 50) and not P.is_composition_pair(30, 50, 23, 50)
+    assert P.is_composition_pair(0, 12, 12, 12)                      # everyone studied was a woman
+    # Never more than 5% of the total: in a small sample the counts must add up (nearly) exactly.
+    assert P.is_composition_pair(9, 30, 20, 30) and not P.is_composition_pair(9, 30, 19, 30)
+    assert P.is_composition_pair(3, 8, 5, 8) and not P.is_composition_pair(2, 4, 1, 4)
+    assert not P.is_composition_pair(1, 1, 1, 1)                     # one cat and one dog, both positive
+
+
+def test_a_real_two_group_contrast_is_not_composition():
+    # Each group has its own size: 12 cases among 40 men, 10 among 45 women.
+    assert not P.is_composition_pair(12, 40, 10, 45)
+    # Counts that add up to a total, but not the same total: two groups, whatever their sum.
+    assert not P.is_composition_pair(142, 225, 81, 223)
+    # The same size by design (two arms of 100), with counts well short of it.
+    assert not P.is_composition_pair(5, 100, 20, 100)
+
+
+def test_three_labels_can_split_one_sample_where_no_two_of_them_do():
+    ages = {"child": 40, "adult": 160, "elderly": 25}
+    assert P.composition_labels(ages, 225) == {"child", "adult", "elderly"}
+    assert not any(P.is_composition_pair(ages[a], 225, ages[b], 225) for a in ages for b in ages if a < b)
+    # A label that breaks the sum does not hide the pair that splits the total.
+    assert P.composition_labels({"male": 142, "female": 81, "non_binary": 30}, 225) == {"male", "female"}
+    assert P.composition_labels({"male": 142}, 225) == set()
+    assert P.composition_labels({"child": 4, "adult": 16}, 225) == set()
+
+
+def test_pairs_that_split_one_sample_give_no_odds_ratio_and_are_counted():
+    rows = []
+    for aid, (men, women, n) in enumerate(SPLIT, 1):
+        rows += [_row(aid, men, n), _row(aid, women, n, label="female")]
+    assert P.pooled_comparisons(rows, SEX) == []
+    groups, _ = P.build_groups(rows)
+    assert P.composition_pairs(groups) == 5
+    # The proportions keep the rows and mark them: a "male 63%" here is the share of men studied.
+    male = next(g for g in P.pooled_groups(rows) if g["label"] == "male")
+    assert (male["k"], male["k_composition"]) == (5, 5) and male["pooled"] is not None
+    assert all(s["composition"] for s in male["studies"])
+
+
+def test_a_comparison_keeps_its_real_contrasts_and_says_how_many_papers_split_one_sample():
+    rows = []
+    for aid in range(1, 5):                                           # four papers with two groups and their cases
+        rows += [_row(aid, 4 + aid, 30), _row(aid, 3 + aid, 32, label="female")]
+    for aid, (men, women, n) in enumerate(SPLIT[:2], 11):             # two that split one sample
+        rows += [_row(aid, men, n), _row(aid, women, n, label="female")]
+    (cmp_,) = P.pooled_comparisons(rows, SEX)
+    assert (cmp_["k"], cmp_["excluded_composition"]) == (4, 2)
+    assert {s["article_id"] for s in cmp_["studies"]} == {1, 2, 3, 4}
+    ref = P.pool_odds_ratios([dict(x1=4 + i, n1=30, x2=3 + i, n2=32) for i in range(1, 5)])
+    assert cmp_["pooled"]["or"] == pytest.approx(ref["pooled"]["or"])
+    assert P.composition_pairs(P.build_groups(rows)[0]) == 2
+    # Every pair that holds a row giving the composition is left out, not only the pair that splits:
+    # three age bands of one sample give three pairs.
+    ages = [_row(21, 40, 225, label="child", group="age"), _row(21, 160, 225, label="adult", group="age"),
+            _row(21, 25, 225, label="elderly", group="age")]
+    assert P.composition_pairs(P.build_groups(ages)[0]) == 3
+
+
+def test_a_paper_s_count_of_cases_is_kept_over_its_table_of_who_was_studied():
+    # The paper gives who was studied (142 men and 81 women among 225) AND the cases among the men
+    # and among the women. The table of who was studied has the larger denominator; it used to win.
+    rows = [_row(1, 142, 225), _row(1, 81, 225, label="female"), _row(1, 3, 142), _row(1, 2, 81, label="female")]
+    for aid in range(2, 4):
+        rows += [_row(aid, 4 + aid, 30), _row(aid, 3 + aid, 32, label="female")]
+    groups, dropped = P.build_groups(rows)
+    kept = {k[2]: next(r for r in items if r["article_id"] == 1) for k, items in groups.items()}
+    assert dropped == 2
+    assert (kept["male"]["x"], kept["male"]["n"], kept["male"]["composition"]) == (3, 142, False)
+    assert (kept["female"]["x"], kept["female"]["n"], kept["female"]["composition"]) == (2, 81, False)
+    (cmp_,) = P.pooled_comparisons(rows, SEX)
+    assert (cmp_["k"], cmp_["excluded_composition"]) == (3, 0)
+    assert next(s for s in cmp_["studies"] if s["article_id"] == 1)["x1"] == 3
+    # Where the paper gives nothing else, the row that splits the sample is the one there is.
+    alone = [_row(1, 142, 225), _row(1, 81, 225, label="female"), _row(1, 3, 142)]
+    female = next(r for k, items in P.build_groups(alone)[0].items() if k[2] == "female" for r in items)
+    assert (female["n"], female["composition"]) == (225, True)
+
+
 # ── Endpoint ────────────────────────────────────────────────────────────────
 MALE = [(12, 40), (5, 30), (20, 60), (8, 25), (15, 50), (9, 35)]
 FEMALE = [(10, 45), (6, 38), (14, 55), (7, 30), (11, 48), (8, 40)]
@@ -292,3 +384,44 @@ def test_invalid_and_missing_counts_are_reported_not_silently_dropped(pool_corpu
 def test_unknown_scenario_is_a_404():
     from fastapi.testclient import TestClient
     assert TestClient(main.app).get("/user-scenarios/nope/extraction/pooled").status_code == 404
+
+
+SPLIT_IDS = list(range(9721, 9721 + len(SPLIT)))
+
+
+@pytest.fixture()
+def composition_corpus(extracted):
+    """Five avian influenza papers whose male and female rows split one sample (SPLIT)."""
+    with extracted.cursor() as cur:
+        for i, (men, women, n) in zip(SPLIT_IDS, SPLIT):
+            cur.execute("INSERT INTO literature_document (id, title, abstract, authors, year, source, is_duplicate, project_context, "
+                        "extraction_json) VALUES (%s,%s,'a','Whitlow K; Doe A',2025,'pubmed',false,'literev',%s::jsonb)",
+                        (i, f"Split paper {i}", _doc(i, (men, n), (women, n))))
+            cur.execute("INSERT INTO article_scenarios (scenario_id, document_id, similarity_score) VALUES (%s,%s,0.9)", (SID, i))
+    yield extracted
+    with extracted.cursor() as cur:
+        cur.execute("DELETE FROM extraction_review WHERE document_id = ANY(%s)", (SPLIT_IDS,))
+        cur.execute("DELETE FROM article_scenarios WHERE document_id = ANY(%s)", (SPLIT_IDS,))
+        cur.execute("DELETE FROM literature_document WHERE id = ANY(%s)", (SPLIT_IDS,))
+
+
+def test_the_hpai_pairs_that_split_one_sample_no_longer_give_an_odds_ratio(composition_corpus):
+    body = _get().json()
+    assert [c for c in body["comparisons"] if c["disease"] == "hpai a h5n1"] == []
+    # Counted in what was left out, as pairs: the rows themselves still count in the proportions.
+    assert body["excluded"]["composition"] == 5
+    male = _group(body, "male", "hpai a h5n1")
+    assert (male["k"], male["k_composition"]) == (5, 5) and all(s["composition"] for s in male["studies"])
+    assert male["events_total"] == sum(men for men, _, _ in SPLIT) and body["n_rows_used"] >= 10
+
+
+def test_a_comparison_beside_them_keeps_its_real_contrasts_and_counts_what_it_left_out(pool_corpus, composition_corpus):
+    body = _get().json()
+    cmp_ = next(c for c in body["comparisons"] if c["disease"] == "hpai a h5n1")
+    assert (cmp_["a"], cmp_["b"], cmp_["k"], cmp_["excluded_composition"]) == ("male", "female", 6, 5)
+    assert sorted(s["article_id"] for s in cmp_["studies"]) == EXTRA
+    ref = P.pool_odds_ratios([dict(x1=m[0], n1=m[1], x2=f[0], n2=f[1]) for m, f in zip(MALE, FEMALE)])
+    assert cmp_["pooled"]["or"] == pytest.approx(ref["pooled"]["or"])
+    male = _group(body, "male", "hpai a h5n1")
+    assert (male["k"], male["k_composition"]) == (11, 5)
+    assert body["excluded"]["composition"] == 5
