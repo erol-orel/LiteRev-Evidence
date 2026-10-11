@@ -131,3 +131,126 @@ def test_the_corpus_query_finds_the_measuring_articles_only(db_conn):
         cur.execute("DELETE FROM article_scenarios WHERE scenario_id = %s", (SID,))
         cur.execute("DELETE FROM literature_document WHERE id BETWEEN 9001 AND 9004")
         cur.execute("DELETE FROM user_scenarios WHERE id = %s", (SID,))
+
+
+# ── The full text, and the batches that are cut ──────────────────────────────
+# Candidates needed an abstract and a measurement term in the title or the abstract, and
+# only the title and the abstract were sent: a paper that gives its incubation period in
+# its results only was never read. And a batch of ten whose answer hit the ceiling was
+# lost whole, uncached, and lost again identically at every regeneration, while the
+# success response said nothing about it.
+
+def test_a_cut_batch_is_split_and_each_half_is_asked_once(monkeypatch):
+    import llm_usage
+
+    calls = []
+
+    def fake_batch(client, batch, hint):
+        ids = [a["id"] for a in batch]
+        calls.append(ids)
+        if len(batch) == 10 or ids[0] == 6:              # the batch, then its second half, cut
+            raise llm_usage.LLMTruncated("cut")
+        return [{"id": i, "parameters": [{"name": "r0", "value": 2.0}]} for i in ids]
+
+    patch_app(monkeypatch, "_epi_extract_batch", fake_batch)
+    out = main._epi_extract_resilient(object(), [{"id": i} for i in range(1, 11)], "dengue")
+    assert calls == [list(range(1, 11)), [1, 2, 3, 4, 5], [6, 7, 8, 9, 10]]
+    assert out["split"] is True and out["failed_ids"] == [6, 7, 8, 9, 10]
+    assert [a["id"] for a in out["articles"]] == [1, 2, 3, 4, 5]
+    # Any other failure loses the batch, and says which articles.
+    patch_app(monkeypatch, "_epi_extract_batch", lambda c, b, h: (_ for _ in ()).throw(RuntimeError("quota")))
+    assert main._epi_extract_resilient(object(), [{"id": 1}, {"id": 2}], None)["failed_ids"] == [1, 2]
+
+
+def test_the_lost_articles_are_reported_not_hidden(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    patch_app(monkeypatch, "_epi_llm_client", lambda: object())
+    patch_app(monkeypatch, "_epi_cache_write", lambda results, sources, hint: 0)
+    patch_app(monkeypatch, "_parameter_candidate_articles", lambda sid, thr=None, cap=0: [
+        {"id": i, "title": "R0", "abstract": "R0", "params_mentioned": ["r0"], "epi_source": "abstract"}
+        for i in range(1, 13)])
+
+    def fake_batch(client, batch, hint):
+        if any(a["id"] == 11 for a in batch):
+            raise RuntimeError("timeout")
+        return [{"id": a["id"], "parameters": [{"name": "r0", "value": 2.0}]} for a in batch]
+
+    patch_app(monkeypatch, "_epi_extract_batch", fake_batch)
+    out = main.extract_epidemic_observations(SID, disease_hint="dengue")
+    assert (out["n_batches"], out["n_batches_failed"]) == (2, 1)
+    assert out["failed_article_ids"] == [11, 12] and out["n_not_examined"] == 2
+    assert out["status"] == "llm_partial" and out["n_with_values"] == 10
+    meta = main._epi_meta(out)
+    assert meta["epidemic_parameter_failed_article_ids"] == [11, 12]
+    assert meta["epidemic_parameter_batches_failed"] == 1 and meta["epidemic_parameter_not_examined"] == 2
+
+
+def test_a_result_read_from_the_abstract_alone_is_asked_again_once_the_full_text_speaks():
+    cached = {"id": 1, "epi_params_json": {"v": main.EPI_PARAM_VERSION, "hint": None, "parameters": []}}
+    assert main._epi_cache_hit({**cached, "epi_source": "abstract"}, None) is not None
+    assert main._epi_cache_hit({**cached, "epi_source": "fulltext"}, None) is None
+    fresh = {"id": 1, "epi_params_json": {"v": main.EPI_PARAM_VERSION, "hint": None, "src": "fulltext",
+                                          "parameters": []}, "epi_source": "fulltext"}
+    assert main._epi_cache_hit(fresh, None) is not None
+
+
+FT_IDS = (9011, 9012, 9013, 9014)
+
+
+def test_the_full_text_makes_candidates_and_its_passages_reach_the_model(db_conn):
+    import json
+    import types
+
+    _seed(db_conn)                                   # the scenario, and its first four articles
+    with db_conn.cursor() as cur:
+        cur.execute("DELETE FROM document_chunk WHERE document_id = ANY(%s)", (list(FT_IDS),))
+        cur.execute("DELETE FROM literature_document WHERE id = ANY(%s)", (list(FT_IDS),))
+        for doc_id, title, abstract in (
+                (9011, "Chikungunya in returning travellers", "A case series of travellers."),
+                (9012, "Outbreak report", None),
+                (9013, "R0 of chikungunya in Reunion", "We estimated R0 at 3.1."),
+                (9014, "Vector ecology", "Larval habitats only.")):
+            cur.execute("INSERT INTO literature_document (id, title, abstract, study_design, quality_score, "
+                        "citation_count, source, project_context, year) "
+                        "VALUES (%s,%s,%s,'Cohort',0.5,1,'pubmed','literev',2024)", (doc_id, title, abstract))
+            cur.execute("INSERT INTO article_scenarios (document_id, scenario_id, similarity_score) "
+                        "VALUES (%s,%s,0.8)", (doc_id, SID))
+        cur.execute("INSERT INTO document_chunk (document_id, chunk_index, content, chunk_type) VALUES "
+                    "(9011, 0, %s, 'fulltext_section'), (9012, 0, %s, 'fulltext_section'), "
+                    "(9014, 0, %s, 'fulltext_section')",
+                    ("Introduction. " + "Travel history was recorded. " * 40
+                     + "The median incubation period was 4.2 days (95% CI 3.1-5.0) in this series. "
+                     + "Symptoms resolved. " * 40,
+                     "The basic reproduction number was estimated at 1.8 during the first month.",
+                     "Breeding sites were mapped across the island."))
+    try:
+        cands = {c["id"]: c for c in main._parameter_candidate_articles(SID)}
+        # 9011: nothing in its abstract, the value in its full text; 9012: no abstract at all.
+        assert cands[9011]["params_mentioned"] == ["incubation_period_days"]
+        assert "4.2 days" in cands[9011]["fulltext_passages"]
+        assert len(cands[9011]["fulltext_passages"]) <= 3000
+        assert "Travel history was recorded. " * 20 not in cands[9011]["fulltext_passages"]
+        assert cands[9011]["epi_source"] == "fulltext"
+        assert cands[9012]["params_mentioned"] == ["r0"] and "1.8" in cands[9012]["fulltext_passages"]
+        assert (cands[9013]["epi_source"], cands[9013]["fulltext_passages"]) == ("abstract", "")
+        assert 9014 not in cands
+
+        sent = []
+
+        def _create(**kw):
+            sent.append(json.loads(kw["messages"][1]["content"]))
+            msg = types.SimpleNamespace(content='{"articles": []}')
+            return types.SimpleNamespace(choices=[types.SimpleNamespace(message=msg, finish_reason="stop")])
+
+        client = types.SimpleNamespace(chat=types.SimpleNamespace(completions=types.SimpleNamespace(create=_create)))
+        main._epi_extract_batch(client, [cands[9011], cands[9013]], "chikungunya")
+        items = {a["id"]: a for a in sent[0]["articles"]}
+        assert "4.2 days" in items[9011]["fulltext_passages"]
+        assert "fulltext_passages" not in items[9013]
+    finally:
+        with db_conn.cursor() as cur:
+            cur.execute("DELETE FROM document_chunk WHERE document_id = ANY(%s)", (list(FT_IDS),))
+            cur.execute("DELETE FROM article_scenarios WHERE scenario_id = %s", (SID,))
+            cur.execute("DELETE FROM literature_document WHERE id = ANY(%s) OR id BETWEEN 9001 AND 9004",
+                        (list(FT_IDS),))
+            cur.execute("DELETE FROM user_scenarios WHERE id = %s", (SID,))

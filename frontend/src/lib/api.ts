@@ -1107,6 +1107,8 @@ export interface ScenarioRagResponse {
   }>;
   scenario_id: string;
   model?: string;
+  /** The answer reached its length limit and was cut. */
+  cut?: boolean;
 }
 
 export type ScenarioRagSource = ScenarioRagResponse['sources'][number];
@@ -2225,6 +2227,9 @@ export interface RagStreamCallbacks {
   onSources: (sources: ScenarioRagSource[]) => void;
   onToken: (token: string) => void;
   onMeta?: (meta: RagMeta) => void;
+  /** The answer reached its length limit and stops mid-way. Sent before `onDone`: the
+   *  stream used to end with `done` alone, and a cut answer was archived as complete. */
+  onCut?: () => void;
   onDone: () => void;
   onError: (err: string) => void;
 }
@@ -3329,7 +3334,10 @@ export interface ScenarioVariables {
     definition: string;
     data_source: string;
     importance: 'high' | 'medium' | 'low';
-    evidence_level: string;
+    /** "n/N": relevant articles mentioning the variable, counted by the server over ALL
+     *  of them (`_meta.evidence_count_rule`), no longer by the model over 25. */
+    evidence_level: string | null;
+    evidence_count?: number | null;
     machine_name?: string;
     source?: 'user' | 'public_api' | 'seir';
     // Rôle vis-à-vis du sous-modèle SEIR (annoté côté serveur, scénarios épidémiques) :
@@ -4165,11 +4173,12 @@ export function askScenarioRagStreamFiltered(
       const resp = await safeFetch(`${API_BASE_URL}/ask/stream/filtered`, {
         method: 'POST',
         headers: authHeaders({ "Content-Type": "application/json" }),
+        // No `top_k`: the server's default (24 articles, one excerpt each) applies. This
+        // sent 12, half the evidence the server would otherwise put behind each answer.
         body: JSON.stringify({
           question,
           project_context: 'literev',
           scenario_id: scenarioId,
-          top_k: 12,
           lang: currentLang(),
         }),
         signal: controller.signal,
@@ -4193,6 +4202,7 @@ export function askScenarioRagStreamFiltered(
           if (line.startsWith('event: sources')) continue;
           if (line.startsWith('event: meta')) continue;
           if (line.startsWith('event: error')) continue;
+          if (line.startsWith('event: cut')) continue;
           if (line.startsWith('event: done')) {
             callbacks.onDone();
             return;
@@ -4208,6 +4218,8 @@ export function askScenarioRagStreamFiltered(
                 callbacks.onSources(parsed as ScenarioRagSource[]);
               } else if (parsed.papers_used !== undefined) {
                 callbacks.onMeta?.(parsed as RagMeta);
+              } else if (parsed.cut === true) {
+                callbacks.onCut?.();
               } else if (parsed.error) {
                 callbacks.onError(parsed.error);
               }

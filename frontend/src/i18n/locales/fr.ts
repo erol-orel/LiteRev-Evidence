@@ -785,6 +785,7 @@ export const fr = {
       withFulltextSuffix: "avec texte intégral",
       digestCovers: "Les chiffres et répartitions de la réponse portent sur la totalité d'entre eux, pas sur les extraits cités.",
       digestMissing: "Le portrait du corpus n'a pas pu être calculé : la réponse ne repose que sur les extraits cités, ne la lisez donc pas comme un comptage sur tout le corpus.",
+      answerCut: "La réponse a atteint sa longueur maximale et a été coupée : sa fin manque. Posez une question plus précise pour une réponse complète.",
       sourceLabel: "SOURCE",
       relevance: "Pertinence:",
       loadingSources: "Chargement des sources...",

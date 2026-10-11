@@ -571,8 +571,10 @@ def corpus_search_terms(query: str, max_terms: int = 8) -> list[str]:
 #
 # Le SPEC (`variables_json`) n'y est PAS : il coûte un passage de modèle complet, et
 # l'effacer sur un mouvement de curseur ferait perdre un travail que le relecteur a
-# peut-être validé. Il porte sa propre empreinte (seuil + identifiants des articles) et
-# s'annonce périmé ; c'est ce qu'on veut : dire, pas détruire.
+# peut-être validé. Il porte sa propre empreinte (seuil + identifiants de TOUS les
+# articles pertinents, depuis ctx-v9 : elle ne couvrait que les 25 premiers), et la
+# génération suivante ne le réutilise tel quel que si elle n'a pas bougé ; c'est ce qu'on
+# veut : ne pas détruire.
 CORPUS_DERIVED_CACHE_RESET = """
     clustering_json = NULL, clustering_generated_at = NULL,
     knowledge_graph_json = NULL, kg_generated_at = NULL,

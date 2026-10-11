@@ -684,39 +684,47 @@ def extraction_digest(scenario_id: str, threshold: float | None = None) -> dict[
     return out
 
 
-def extraction_to_prompt(d: dict | None, max_chars: int = 2200) -> str:
+def extraction_to_prompt(d: dict | None, max_chars: int = 6000) -> str:
     """The extraction digest as a block for a prompt, or "" when there is nothing to say
     (nothing extracted, or the aggregation failed: an incomplete block must assert nothing).
 
     It states its own denominator and its source, and tells the model to quote them, so
-    "34 papers report sex-disaggregated data" is never read as "34 of all the relevant"."""
+    "34 papers report sex-disaggregated data" is never read as "34 of all the relevant".
+
+    The instructions come first and the block is cut by whole sections, never mid-line: at
+    2,200 characters it was cut from the end, and the crude counts went first, then the
+    last line, the very instruction to quote the denominator."""
+    from .digest import fit_prompt_sections                  # the same whole-section cut as the digest
     if not d or not d.get("complete") or not d.get("n_extracted"):
         return ""
     n, rel = d["n_extracted"], d["n_relevant"]
-    lines = [
-        f"EXTRACTION STRUCTUREE: {n} des {rel} articles pertinents ont ete lus ({d['n_fulltext']} "
-        f"depuis le texte integral, {d['n_abstract']} depuis le resume seul, qui ne contient pas les "
-        f"tableaux : pour eux un element absent est un minorant, pas une absence).",
+    sections = [
+        ("Extraction", f"EXTRACTION STRUCTUREE: {n} des {rel} articles pertinents ont ete lus ({d['n_fulltext']} "
+                       f"depuis le texte integral, {d['n_abstract']} depuis le resume seul, qui ne contient pas les "
+                       f"tableaux : pour eux un element absent est un minorant, pas une absence)."),
+        ("Denominateur", f"Toute proportion tiree de ce bloc doit citer son denominateur ({n} articles "
+                         f"extraits sur {rel})."),
     ]
     if d.get("n_unread"):
-        lines.append(f"{d['n_unread']} articles pertinents ne sont pas encore extraits : ne rien conclure sur eux.")
+        sections.append(("Non extraits", f"{d['n_unread']} articles pertinents ne sont pas encore extraits : "
+                                         f"ne rien conclure sur eux."))
+    mandatory = len(sections)
     cov = [f"{_COVERAGE_LABELS_FR[k]} {d['coverage'][k]} (dont {d['coverage_fulltext'][k]} en texte integral)"
            for k in COVERAGE_KEYS if d["coverage"].get(k)]
-    lines.append(f"Parmi les {n} articles extraits, rapportent des donnees sur : "
-                 + (", ".join(cov) if cov else "aucun des elements suivis (sexe, age, profession, CAP, EPI, vaccination...)") + ".")
+    sections.append(("Couverture", f"Parmi les {n} articles extraits, rapportent des donnees sur : "
+                     + (", ".join(cov) if cov else "aucun des elements suivis (sexe, age, profession, CAP, EPI, vaccination...)") + "."))
     if d.get("by_sheet"):
-        lines.append("Lignes extraites : " + ", ".join(
+        sections.append(("Lignes extraites", "Lignes extraites : " + ", ".join(
             f"{r['sheet']} {r['n_rows']} ({r['n_articles']} articles, citation retrouvee {r['n_quote_found']})"
-            for r in d["by_sheet"]) + ".")
+            for r in d["by_sheet"]) + "."))
     if d.get("top_groups"):
-        lines.append("Groupes les plus frequents : " + ", ".join(
-            f"{r['value']} [{r['sheet']}] ({r['n']})" for r in d["top_groups"]) + ".")
+        sections.append(("Groupes", "Groupes les plus frequents : " + ", ".join(
+            f"{r['value']} [{r['sheet']}] ({r['n']})" for r in d["top_groups"]) + "."))
     if d.get("crude_counts"):
-        lines.append("Totaux bruts (lignes avec cas et population, citation retrouvee ; pas une estimation poolee) : "
-                     + "; ".join(f"{r['covariate']} [{r['sheet']}] {r['n_studies']} etudes, "
-                                 f"{r['n_cases']:g} cas sur {r['pop_risk']:g}" for r in d["crude_counts"]) + ".")
-    lines.append(f"Toute proportion tiree de ce bloc doit citer son denominateur ({n} articles extraits sur {rel}).")
-    return "\n".join(lines)[:max_chars]
+        sections.append(("Totaux bruts", "Totaux bruts (lignes avec cas et population, citation retrouvee ; pas une estimation poolee) : "
+                         + "; ".join(f"{r['covariate']} [{r['sheet']}] {r['n_studies']} etudes, "
+                                     f"{r['n_cases']:g} cas sur {r['pop_risk']:g}" for r in d["crude_counts"]) + "."))
+    return fit_prompt_sections(sections, max_chars, mandatory=mandatory)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

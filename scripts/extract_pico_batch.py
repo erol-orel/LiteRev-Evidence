@@ -2,8 +2,11 @@
 """
 extract_pico_batch.py - Extraction PICO en batch pour le corpus GESICA
 ======================================================================
-Utilise gpt-4.1-mini (via l'API OpenAI configurée dans l'environnement)
-pour extraire les éléments PICO de chaque article à partir du titre + abstract.
+Utilise le modèle du rôle `bulk` (llm_usage.model_for, réglable par LLM_MODEL_BULK) et
+le contrat PICO de l'application (api/pico_map) : le même prompt, le même texte lu (le
+résumé, plus les méthodes et les résultats du texte intégral quand il existe) et les
+mêmes champs que les autres rédacteurs. Il codait en dur un nom de modèle, un plafond de
+400 jetons et un prompt à lui, sans le résultat principal que le brief et le digest lisent.
 
 Usage :
     python3 extract_pico_batch.py --dry-run          # Aperçu sans modification
@@ -12,15 +15,18 @@ Usage :
     python3 extract_pico_batch.py --execute --scenario triage-support  # Par scénario
     python3 extract_pico_batch.py --execute --reprocess  # Réextraire même si déjà fait
 
-Sortie JSON par article :
+Sortie JSON par article (api/pico_map.normalise_pico) :
     {
         "P": "Population étudiée",
         "I": "Intervention ou exposition",
-        "C": "Comparateur (ou 'Non spécifié')",
+        "C": "Comparateur (ou 'Not specified')",
         "O": "Outcome(s) principal(aux)",
-        "study_design": "RCT | Observational | Systematic Review | ...",
+        "study_design": "un terme du vocabulaire contrôlé (api/pico_map.PICO_DESIGNS)",
+        "key_finding": "le résultat principal, en une phrase (vide si l'article n'en rapporte pas)",
+        "finding_direction": "increase | decrease | no_difference | mixed | descriptive | none",
         "pico_confidence": 0.0-1.0,
-        "pico_notes": "Remarques éventuelles"
+        "pico_notes": "Remarques éventuelles",
+        "pico_source": "abstract | fulltext"
     }
 """
 
@@ -72,7 +78,7 @@ try:
             "  2. OPENAI_API_KEY=sk-... python3 extract_pico_batch.py\n"
             "Les fichiers lus, dans l'ordre : python3 scripts/env_audit.py"
         )
-    client = OpenAI(api_key=_api_key, purpose="extract_pico_batch")
+    client = OpenAI(api_key=_api_key, purpose="extract_pico_batch", timeout=90.0)
     OPENAI_AVAILABLE = True
 except ImportError:
     OPENAI_AVAILABLE = False
@@ -81,66 +87,24 @@ except RuntimeError as e:
     log.error(str(e))
     sys.exit(1)
 
-# ── Prompt PICO ───────────────────────────────────────────────────────────────
-SYSTEM_PROMPT = """You are a systematic review expert specializing in emergency medicine, 
-pre-hospital care, and disaster medicine. Your task is to extract PICO elements from 
-scientific article abstracts.
+# ── Le contrat PICO de l'application ─────────────────────────────────────────
+# Le prompt, le texte lu, l'appel (modèle du rôle `bulk`, plafond, nouvelle demande plus
+# courte si la réponse est coupée) et la normalisation des champs : les mêmes que ceux
+# des autres rédacteurs. Module pur, importé sans démarrer l'API.
+from api.pico_map import PicoUnreadable, extract_pico, pico_fulltext_chunks  # noqa: E402
 
-Extract the following elements and return ONLY valid JSON (no markdown, no explanation):
-{
-  "P": "Population studied (patients, setting, demographics)",
-  "I": "Intervention or exposure studied",
-  "C": "Comparator or control group (write 'Not specified' if absent)",
-  "O": "Primary outcome(s) measured",
-  "study_design": "One of: RCT | Quasi-experimental | Cohort | Case-control | Cross-sectional | Systematic review | Meta-analysis | Narrative review | Case report | Simulation | Modelling | Other",
-  "pico_confidence": <float 0.0-1.0, confidence in extraction quality>,
-  "pico_notes": "Any important caveats or missing information (empty string if none)"
-}
 
-Rules:
-- Be concise (max 2 sentences per field)
-- If the abstract is too short or uninformative, set pico_confidence < 0.4
-- Always respond in English regardless of input language
-- Return ONLY the JSON object, nothing else"""
-
-def extract_pico_for_article(title: str, abstract: str) -> Optional[dict]:
-    """Appelle le LLM pour extraire le PICO d'un article."""
+def extract_pico_for_article(doc_id: int, title: str, abstract: str) -> Optional[dict]:
+    """Appelle le LLM pour extraire le PICO d'un article (et son résultat principal)."""
     if not OPENAI_AVAILABLE:
         return None
-    
-    # Tronquer l'abstract si trop long (max ~2000 tokens)
-    abstract_truncated = abstract[:3000] if abstract else ""
-    
-    user_content = f"Title: {title}\n\nAbstract: {abstract_truncated}"
-    
     try:
-        response = client.chat.completions.create(
-            model="gpt-4.1-mini",
-            messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": user_content},
-            ],
-            temperature=0.1,
-            max_tokens=400,
-            response_format={"type": "json_object"},
-        )
-        raw = response.choices[0].message.content
-        pico = json.loads(raw)
-        
-        # Validation minimale
-        required = {"P", "I", "C", "O", "study_design", "pico_confidence"}
-        if not required.issubset(pico.keys()):
-            log.warning("PICO incomplet : %s", list(pico.keys()))
-            return None
-        
-        # Normaliser pico_confidence
-        pico["pico_confidence"] = float(pico.get("pico_confidence", 0.5))
-        pico["pico_notes"] = pico.get("pico_notes", "")
-        
+        with engine.connect() as conn:
+            chunks = pico_fulltext_chunks(conn, doc_id)
+        pico, _source = extract_pico(client, title, abstract, chunks, label=f"PICO script {doc_id}")
         return pico
-    
-    except json.JSONDecodeError as e:
-        log.warning("JSON invalide : %s", e)
+    except PicoUnreadable as e:
+        log.warning("Réponse inutilisable : %s", e)
         return None
     except Exception as e:
         log.error("Erreur LLM : %s", e)
@@ -212,13 +176,13 @@ def run_extraction(dry_run: bool, limit: Optional[int], scenario: Optional[str],
         log.info("[%d/%d] Extraction PICO pour doc #%d (%s)...",
                  i + 1, total, doc_id, row["scenario_type"])
         
-        pico = extract_pico_for_article(title, abstract)
-        
+        pico = extract_pico_for_article(doc_id, title, abstract)
+
         if pico:
             with engine.begin() as conn:
                 conn.execute(text("""
                     UPDATE literature_document
-                    SET pico_json = :pico,
+                    SET pico_json = CAST(:pico AS jsonb),
                         pico_extracted_at = :ts
                     WHERE id = :doc_id
                 """), {
@@ -227,9 +191,9 @@ def run_extraction(dry_run: bool, limit: Optional[int], scenario: Optional[str],
                     "doc_id": doc_id,
                 })
             success += 1
-            log.info("  ✓ P: %s | O: %s | Design: %s | Conf: %.2f",
-                     pico["P"][:50], pico["O"][:50],
-                     pico["study_design"], pico["pico_confidence"])
+            log.info("  ✓ P: %s | O: %s | Design: %s | Résultat: %s | Conf: %.2f",
+                     str(pico.get("P") or "")[:50], str(pico.get("O") or "")[:50],
+                     pico["study_design"], pico["finding_direction"], pico["pico_confidence"])
         else:
             failed += 1
             log.warning("  ✗ Extraction échouée pour doc #%d", doc_id)

@@ -1,4 +1,4 @@
-"""Batch LLM enrichment: PICO, metadata, full text.
+"""Batch LLM enrichment: PICO, metadata, full text, and the main finding of each article.
 
 Extracted from main.py (LiteRev API); `main` re-exports everything for the scripts,
 tools and tests.
@@ -7,14 +7,21 @@ from __future__ import annotations
 
 import json
 import os
-from typing import Optional
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
+from typing import Any, Optional
 
 from fastapi import Depends, HTTPException
 from sqlalchemy import text
 
-from .core import app, engine, logger, require_api_key
-from .documents import METADATA_UPDATE_SQL, _metadata_update_params
-from .scenario_store import SCOPES, scenario_scope_sql
+from .core import (_env_int, _is_openai_quota_error, _trip_openai_cooldown, app, engine, logger,
+                   require_api_key)
+from .documents import METADATA_UPDATE_SQL, _llm_lang_directive, _metadata_update_params
+from .pico_map import (PicoUnreadable, extract_finding, extract_pico, fulltext_excerpt,
+                       json_completion, pico_fulltext_chunks)
+from .scenario_store import (SCOPES, _get_scenario_threshold, _get_user_scenario_or_404,
+                             relevance_order_sql, relevant_gate_sql, scenario_scope_sql)
 from llm_usage import model_for as _model
 
 
@@ -78,23 +85,6 @@ def extract_pico_batch(
     skipped = 0
     errors = 0
 
-    system_prompt = (
-        "You are a systematic review expert. "
-        "Extract PICO elements and return ONLY valid JSON:\n"
-        '{"P":"Population","I":"Intervention","C":"Comparator or Not specified",'
-        '"O":"Outcome(s)",'
-        '"study_design":"UN SEUL de: Randomized controlled trial | Clinical trial | '
-        'Non-randomized trial | Systematic review | Meta-analysis | Cohort study | '
-        'Case-control study | Cross-sectional study | Surveillance | Case report | '
-        'Modelling study | Qualitative study | Guideline | Narrative review | '
-        'Preclinical | Not stated",'
-        '# Pour une revue, PRÉCISE ce qu\'elle inclut quand l\'abstract le dit '
-        '(ex. "Systematic review of cohort studies") : le niveau de preuve en dépend.'
-        ''
-        '"pico_confidence":0.0-1.0,"pico_notes":""}\n'
-        "Be concise (max 2 sentences per field). Return ONLY the JSON."
-    )
-
     try:
         from llm_usage import MeteredOpenAI as _OAI
         from datetime import datetime, timezone
@@ -107,39 +97,33 @@ def extract_pico_batch(
             if not abstract or len(abstract) < 50:
                 skipped += 1
                 continue
-            # Appel LLM isolé : une erreur d'API (quota/réseau) est TRANSITOIRE
-            # → on ne compte PAS de tentative (réessai quand l'API est saine).
+            # Le prompt, le texte lu (résumé + méthodes et résultats du texte intégral) et
+            # la normalisation sont ceux de tous les rédacteurs PICO (api/pico_map).
             try:
-                response = _client.chat.completions.create(
-                    model=_model("bulk"),
-                    messages=[
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": f"Title: {title}\n\nAbstract: {abstract[:3000]}"},
-                    ],
-                    temperature=0,
-                    seed=42,
-                    max_tokens=800,  # 400 tronquait le JSON des articles verbeux → JSON invalide
-                    response_format={"type": "json_object"},
-                )
+                with engine.connect() as conn:
+                    chunks = pico_fulltext_chunks(conn, article_id)
+                pico, _source = extract_pico(_client, title, abstract, chunks,
+                                             label=f"PICO batch {article_id}")
+            except PicoUnreadable as e:
+                # Une RÉPONSE inutilisable → on COMPTE la tentative (borne le token-bleed :
+                # une sortie déterministe malformée ne sera pas ré-extraite à l'infini).
+                logger.warning(f"PICO batch parse error article {article_id}: {e}")
+                try:
+                    with engine.begin() as conn:
+                        conn.execute(text(
+                            "UPDATE literature_document SET pico_attempts = COALESCE(pico_attempts, 0) + 1 WHERE id = :aid"
+                        ), {"aid": article_id})
+                except Exception:
+                    pass
+                errors += 1
+                continue
             except Exception as e:
+                # Appel en échec (quota/réseau) : TRANSITOIRE → on ne compte PAS de
+                # tentative (réessai quand l'API est saine).
                 logger.warning(f"PICO batch API error article {article_id}: {e}")
                 errors += 1
-                continue  # transitoire - ne PAS consommer une tentative
-            # On a une RÉPONSE → on COMPTE la tentative quoi qu'il arrive (borne le
-            # token-bleed : une sortie déterministe malformée ne sera pas ré-extraite
-            # à l'infini). Remplissage tolérant des clés plutôt que rejet en boucle.
+                continue
             try:
-                pico = json.loads(response.choices[0].message.content)
-                if not isinstance(pico, dict):
-                    raise ValueError("réponse PICO non-dict")
-                for _k in ("P", "I", "C", "O"):
-                    pico.setdefault(_k, "")
-                pico.setdefault("study_design", "non précisé")
-                try:
-                    pico["pico_confidence"] = float(pico.get("pico_confidence", 0.3))
-                except (TypeError, ValueError):
-                    pico["pico_confidence"] = 0.3
-                pico["pico_notes"] = pico.get("pico_notes", "")
                 with engine.begin() as conn:
                     conn.execute(text("""
                         UPDATE literature_document
@@ -153,15 +137,7 @@ def extract_pico_batch(
                     })
                 extracted += 1
             except Exception as e:
-                logger.warning(f"PICO batch parse error article {article_id}: {e}")
-                # Réponse reçue mais JSON invalide → COMPTE la tentative (borne le token-bleed).
-                try:
-                    with engine.begin() as conn:
-                        conn.execute(text(
-                            "UPDATE literature_document SET pico_attempts = COALESCE(pico_attempts, 0) + 1 WHERE id = :aid"
-                        ), {"aid": article_id})
-                except Exception:
-                    pass
+                logger.warning(f"PICO batch write error article {article_id}: {e}")
                 errors += 1
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Erreur LLM batch: {str(e)}")
@@ -231,7 +207,7 @@ def extract_metadata_batch(
         '"sample_size":null,"country":"ISO2 or null","setting":"hospital|prehospital|community|other|null",'
         '"primary_outcome":"brief description or null","funding":"public|industry|mixed|not reported",'
         '"bias_risk":"low|moderate|high|unclear","metadata_confidence":0.0-1.0}\n'
-        "Return ONLY the JSON."
+        "Do not use the em dash character. Return ONLY the JSON."
     )
 
     try:
@@ -246,17 +222,21 @@ def extract_metadata_batch(
                 skipped += 1
                 continue
             try:
-                response = _client.chat.completions.create(
-                    model=_model("bulk"),
-                    messages=[
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": f"Title: {title}\n\nAbstract: {abstract[:2000]}"},
-                    ],
-                    temperature=0.1,
-                    max_tokens=300,
-                    response_format={"type": "json_object"},
-                )
-                metadata = json.loads(response.choices[0].message.content)
+                def _ask(messages):
+                    return _client.chat.completions.create(
+                        model=_model("bulk"),
+                        messages=messages,
+                        temperature=0.1,
+                        max_tokens=300,
+                        response_format={"type": "json_object"},
+                    )
+
+                # Une réponse coupée au plafond est redemandée une fois, plus courte, au
+                # lieu de remonter en erreur d'analyse JSON que seul le journal voyait.
+                metadata = json.loads(json_completion(
+                    _ask, [{"role": "system", "content": system_prompt},
+                           {"role": "user", "content": f"Title: {title}\n\nAbstract: {abstract[:2000]}"}],
+                    f"metadata batch {article_id}"))
                 metadata["metadata_confidence"] = float(metadata.get("metadata_confidence", 0.5))
                 with engine.begin() as conn:
                     conn.execute(text(METADATA_UPDATE_SQL),
@@ -475,3 +455,231 @@ def get_enrichment_status(scenario_id: Optional[str] = None, scope: Optional[str
                      "todo": row["todo_fulltext"]},
         "by_scope": None,
     }
+
+
+# ─── Résultat principal des PICO déjà extraits (key_finding / finding_direction) ──
+# Les rédacteurs PICO demandent désormais le résultat principal de chaque article
+# (api/pico_map) ; les PICO écrits avant n'en ont pas. Cette passe le complète, une fois
+# par article, mis en cache sur la ligne (fusionné dans pico_json), pour TOUS les articles
+# pertinents qui en manquent : jamais un échantillon. Le titre et le résumé en entrée, les
+# deux champs en sortie, un appel court par article. Lancée par le pipeline après l'étape
+# PICO, et par POST /user-scenarios/{id}/findings/run.
+
+#: Aucun plafond par défaut, comme pour toute extraction. FINDINGS_MAX_ARTICLES > 0 en pose
+#: un par passe (secours d'exploitation, un jour où le budget LLM doit être tenu).
+FINDINGS_MAX_ARTICLES = _env_int("FINDINGS_MAX_ARTICLES", 0, 0)
+_FINDINGS_WORKERS = 4
+#: Réponses inutilisables (déterministes à température 0) après lesquelles un article n'est
+#: plus redemandé. Une panne de l'API, elle, n'est comptée à personne.
+_FINDINGS_MAX_ATTEMPTS = 3
+_findings_lock = threading.Lock()
+_findings_jobs: dict[str, dict[str, Any]] = {}
+
+_FINDINGS_ATTEMPTS_SQL = ("CASE WHEN jsonb_typeof(d.pico_json->'findings_attempts') = 'number' "
+                          "THEN (d.pico_json->>'findings_attempts')::int ELSE 0 END")
+#: Un PICO sans résultat principal : à compléter tant qu'il n'a pas épuisé ses tentatives.
+_LACKS_FINDING_SQL = ("d.pico_json IS NOT NULL AND (d.pico_json->>'finding_direction') IS NULL")
+
+
+def _findings_rows(scenario_id: str) -> list[dict]:
+    """Les articles pertinents dont le PICO attend son résultat principal, TOUS (la porte
+    de toute l'application), dans l'ordre de pertinence du corpus : un plafond
+    d'exploitation prendrait les plus proches de la question, pas les plus petits
+    identifiants."""
+    thr = _get_scenario_threshold(scenario_id)
+    with engine.connect() as conn:
+        return [dict(r) for r in conn.execute(text(f"""
+            SELECT d.id, d.title, d.abstract
+            FROM literature_document d
+            JOIN article_scenarios ars ON ars.document_id = d.id
+            WHERE ars.scenario_id = :sid AND {relevant_gate_sql('d', 'ars', ':thr')}
+              AND {_LACKS_FINDING_SQL} AND {_FINDINGS_ATTEMPTS_SQL} < :max_attempts
+            ORDER BY {relevance_order_sql('d', 'ars', ':thr')}
+        """), {"sid": scenario_id, "thr": thr,
+               "max_attempts": _FINDINGS_MAX_ATTEMPTS}).mappings().all()]
+
+
+def findings_status(scenario_id: str) -> dict[str, Any]:
+    """Où en est le scénario, compté sur TOUS ses articles pertinents, en une instruction."""
+    thr = _get_scenario_threshold(scenario_id)
+    with engine.connect() as conn:
+        row = dict(conn.execute(text(f"""
+            SELECT COUNT(*) AS n_relevant,
+                   COUNT(*) FILTER (WHERE d.pico_json IS NOT NULL) AS n_with_pico,
+                   COUNT(*) FILTER (WHERE (d.pico_json->>'finding_direction') IS NOT NULL)
+                       AS n_with_finding,
+                   COUNT(*) FILTER (WHERE {_LACKS_FINDING_SQL}
+                                      AND {_FINDINGS_ATTEMPTS_SQL} < :max_attempts) AS n_pending,
+                   COUNT(*) FILTER (WHERE {_LACKS_FINDING_SQL}
+                                      AND {_FINDINGS_ATTEMPTS_SQL} >= :max_attempts) AS n_given_up
+            FROM literature_document d
+            JOIN article_scenarios ars ON ars.document_id = d.id
+            WHERE ars.scenario_id = :sid AND {relevant_gate_sql('d', 'ars', ':thr')}
+        """), {"sid": scenario_id, "thr": thr,
+               "max_attempts": _FINDINGS_MAX_ATTEMPTS}).mappings().first() or {})
+    with _findings_lock:
+        job = dict(_findings_jobs.get(scenario_id) or {})
+    counts = {k: int(row.get(k) or 0) for k in ("n_relevant", "n_with_pico", "n_with_finding",
+                                                 "n_pending", "n_given_up")}
+    return {
+        "scenario_id": scenario_id,
+        **counts,
+        # Sans PICO, pas de résultat à compléter : c'est le travail des rédacteurs PICO, et
+        # le digest compte ces articles comme « pas encore lus pour leur résultat ».
+        "n_without_pico": counts["n_relevant"] - counts["n_with_pico"],
+        "running": bool(job.get("running")),
+        "job": {k: job.get(k, 0) for k in ("total", "done", "failed")} if job else None,
+        "error": job.get("error"),
+        "max_articles": FINDINGS_MAX_ARTICLES,
+    }
+
+
+def _findings_client():
+    """Le client LLM de la passe, en un seul endroit que les tests remplacent."""
+    from llm_usage import MeteredOpenAI as _OAI
+    return _OAI(timeout=90.0)
+
+
+def _count_finding_attempt(article_id: int) -> None:
+    try:
+        with engine.begin() as conn:
+            conn.execute(text(f"""
+                UPDATE literature_document AS d
+                SET pico_json = d.pico_json
+                    || jsonb_build_object('findings_attempts', {_FINDINGS_ATTEMPTS_SQL} + 1)
+                WHERE d.id = :id AND d.pico_json IS NOT NULL
+            """), {"id": article_id})
+    except Exception as e:                                   # noqa: BLE001
+        logger.warning(f"findings attempts {article_id}: {e}")
+
+
+def _fill_findings(scenario_id: str, max_articles: int = 0, lang_directive: str = "") -> dict[str, int]:
+    """La passe elle-même, le scénario déjà réservé (`_claim_findings`)."""
+    rows = _findings_rows(scenario_id)
+    cap = int(max_articles or FINDINGS_MAX_ARTICLES or 0)
+    if cap > 0:
+        rows = rows[:cap]
+    with _findings_lock:
+        _findings_jobs[scenario_id].update({"total": len(rows), "done": 0, "failed": 0})
+    if not rows:
+        return {"total": 0, "done": 0, "failed": 0}
+    client = _findings_client()
+
+    def _work(row: dict) -> bool:
+        aid = row["id"]
+        try:
+            body, label, source = (row.get("abstract") or "").strip(), "Abstract", "abstract"
+            if len(body) < 50:
+                # Sans résumé, les méthodes et les résultats du texte intégral.
+                with engine.connect() as conn:
+                    body = fulltext_excerpt(pico_fulltext_chunks(conn, aid))
+                label, source = "Full text, methods and results (excerpt)", "fulltext"
+            if not body:
+                raise PicoUnreadable("ni résumé ni texte intégral à lire")
+            key_finding, direction = extract_finding(
+                client, row.get("title"), body, body_label=label,
+                lang_directive=lang_directive, label=f"finding {aid}")
+        except PicoUnreadable as e:
+            logger.warning(f"finding article {aid}: {e}")
+            _count_finding_attempt(aid)
+            return False
+        except Exception as e:                               # noqa: BLE001 - appel en échec : transitoire
+            if _is_openai_quota_error(e):
+                _trip_openai_cooldown()
+            logger.warning(f"finding article {aid}: {e}")
+            return False
+        try:
+            with engine.begin() as conn:
+                conn.execute(text("""
+                    UPDATE literature_document
+                    SET pico_json = pico_json || CAST(:f AS jsonb)
+                    WHERE id = :id AND pico_json IS NOT NULL
+                """), {"id": aid, "f": json.dumps({"key_finding": key_finding,
+                                                    "finding_direction": direction,
+                                                    "finding_source": source}, ensure_ascii=False)})
+        except Exception as e:                               # noqa: BLE001
+            logger.warning(f"finding article {aid}: {e}")
+            return False
+        return True
+
+    with ThreadPoolExecutor(max_workers=_FINDINGS_WORKERS) as ex:
+        for ok in ex.map(_work, rows):
+            with _findings_lock:
+                _findings_jobs[scenario_id]["done" if ok else "failed"] += 1
+    with _findings_lock:
+        return {k: _findings_jobs[scenario_id][k] for k in ("total", "done", "failed")}
+
+
+def _claim_findings(scenario_id: str) -> bool:
+    """Une passe à la fois par scénario : deux passes simultanées paieraient deux fois les
+    mêmes articles."""
+    with _findings_lock:
+        if _findings_jobs.get(scenario_id, {}).get("running"):
+            return False
+        _findings_jobs[scenario_id] = {"running": True, "started_at": time.time(),
+                                       "total": 0, "done": 0, "failed": 0}
+        return True
+
+
+def _release_findings(scenario_id: str, error: str | None = None) -> None:
+    with _findings_lock:
+        job = _findings_jobs.setdefault(scenario_id, {})
+        job["running"] = False
+        if error:
+            job["error"] = error[:300]
+
+
+def run_findings_pass(scenario_id: str, max_articles: int = 0, lang_directive: str = "") -> dict[str, Any]:
+    """La passe, SYNCHRONE : pour le pipeline, qui l'enchaîne après l'étape PICO."""
+    if not os.getenv("OPENAI_API_KEY"):
+        return {"status": "no_llm"}
+    if not _claim_findings(scenario_id):
+        return {"status": "running"}
+    try:
+        out = _fill_findings(scenario_id, max_articles, lang_directive)
+    except Exception as e:
+        _release_findings(scenario_id, str(e))
+        raise
+    _release_findings(scenario_id)
+    return {"status": "done", **out}
+
+
+def start_findings(scenario_id: str, max_articles: int = 0, lang_directive: str = "") -> dict[str, Any]:
+    """La passe en arrière-plan, une à la fois par scénario."""
+    if not os.getenv("OPENAI_API_KEY"):
+        return {"status": "no_llm"}
+    if not _claim_findings(scenario_id):
+        return {"status": "running"}
+
+    def _run():
+        try:
+            _fill_findings(scenario_id, max_articles, lang_directive)
+        except Exception as e:                               # noqa: BLE001
+            logger.warning(f"findings {scenario_id}: {e}")
+            _release_findings(scenario_id, str(e))
+            return
+        _release_findings(scenario_id)
+
+    threading.Thread(target=_run, daemon=True, name=f"findings-{scenario_id}").start()
+    return {"status": "started"}
+
+
+@app.post("/user-scenarios/{scenario_id}/findings/run")
+def run_scenario_findings(scenario_id: str, max_articles: int = 0, lang: Optional[str] = None,
+                          _: None = Depends(require_api_key)) -> dict[str, Any]:
+    """Complète, en arrière-plan, le résultat principal (`key_finding`,
+    `finding_direction`) de TOUS les articles pertinents dont le PICO n'en a pas. Aucun
+    plafond sauf `max_articles` ou FINDINGS_MAX_ARTICLES. `lang` : langue de la phrase de
+    résultat (anglais sans) ; la direction reste un identifiant anglais.
+    Suivi : GET /user-scenarios/{id}/findings/status."""
+    _get_user_scenario_or_404(scenario_id)
+    directive = _llm_lang_directive(lang) if isinstance(lang, str) and lang.strip() else ""
+    out = start_findings(scenario_id, max(0, int(max_articles or 0)), directive)
+    status = findings_status(scenario_id)
+    return {**out, "n_relevant": status["n_relevant"], "n_pending": status["n_pending"]}
+
+
+@app.get("/user-scenarios/{scenario_id}/findings/status")
+def get_scenario_findings_status(scenario_id: str) -> dict[str, Any]:
+    _get_user_scenario_or_404(scenario_id)
+    return findings_status(scenario_id)

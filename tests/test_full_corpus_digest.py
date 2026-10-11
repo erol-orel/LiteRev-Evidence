@@ -156,3 +156,178 @@ def test_no_extraction_path_keeps_a_default_article_cap():
     assert main.CONCEPT_MAX_ARTICLES == 0
     assert main.CONCEPT_GRAPH_MAX_ARTICLES == 0
     assert main.EXTRACTION_MAX_ARTICLES == 0
+    assert main.FINDINGS_MAX_ARTICLES == 0
+
+
+# ── What the studies FOUND, counted over the whole relevant subset ───────────
+# The digest counted designs, countries and concepts, never results: whatever a generator
+# said about findings came from the 20 to 30 articles it reproduces. Each article now
+# carries its main finding and its direction (api/pico_map), and the digest counts the
+# directions over every relevant article, in SQL.
+
+def _finding(direction: str, outcome: str = "cases") -> str:
+    return json.dumps({"P": "residents", "O": outcome, "study_design": "Cohort",
+                       "key_finding": f"A finding ({direction}).", "finding_direction": direction})
+
+
+def test_the_digest_counts_the_findings_of_every_relevant_article(db_conn):
+    _seed(db_conn)
+    try:
+        outcome = json.dumps({"v": 1, "concepts": [{"t": "outcome", "en": "mortality", "fr": "mortalite"}]})
+        with db_conn.cursor() as cur:
+            for doc_id, direction in ((8100, "increase"), (8101, "increase"), (8102, "decrease"),
+                                      (8111, "no_difference"),
+                                      # below the threshold and excluded: never counted
+                                      (8110, "increase"), (8112, "increase")):
+                cur.execute("UPDATE literature_document SET pico_json = %s, concepts_json = %s WHERE id = %s",
+                            (_finding(direction), outcome, doc_id))
+            # 8103 is relevant and was never read for its finding.
+        d = main.corpus_digest(SID, threshold=0.45)
+        f = d["findings"]
+        assert (f["n_read"], f["n_with_finding"]) == (4, 4)
+        assert f["by_direction"] == {"increase": 2, "decrease": 1, "no_difference": 1,
+                                     "mixed": 0, "descriptive": 0, "none": 0}
+        assert f["outcome_basis"] == "concepts" and f["n_outcome_labels"] == 1
+        assert f["by_outcome"] == [{"label": "mortality", "n": 4, "n_read": 4, "by_direction": {
+            "increase": 2, "decrease": 1, "no_difference": 1, "mixed": 0, "descriptive": 0, "none": 0}}]
+
+        block = main.digest_to_prompt(d)
+        assert "RESULTATS sur les 5 articles pertinents" in block
+        assert "4 lus, dont 4 rapportent un resultat" in block
+        assert "hausse 2, baisse 1, sans difference 1, mixte 0" in block
+        assert "1 articles ne sont pas encore lus pour leur resultat" in block
+        assert "mortality (4 articles: hausse 2, baisse 1, sans difference 1)" in block
+    finally:
+        _cleanup(db_conn)
+
+
+def test_without_outcome_concepts_the_pico_outcome_is_grouped(db_conn):
+    _seed(db_conn)
+    try:
+        with db_conn.cursor() as cur:
+            cur.execute("UPDATE literature_document SET pico_json = %s WHERE id = 8100", (_finding("increase", "Mortality; ICU"),))
+            cur.execute("UPDATE literature_document SET pico_json = %s WHERE id = 8101", (_finding("decrease", "mortality (28 days)"),))
+        f = main.corpus_digest(SID, threshold=0.45)["findings"]
+        assert f["outcome_basis"] == "pico_outcome"
+        assert f["by_outcome"][0]["label"] == "mortality" and f["by_outcome"][0]["n"] == 2
+        assert f["by_outcome"][0]["by_direction"]["increase"] == 1
+    finally:
+        _cleanup(db_conn)
+
+
+def test_a_corpus_read_for_nothing_forbids_a_trend_instead_of_staying_silent():
+    d = {"n_articles": 40, "complete": True, "findings": {"n_read": 0, "n_with_finding": 0,
+                                                          "by_direction": {}, "by_outcome": []}}
+    assert "aucun des 40 articles pertinents n'a encore ete lu" in main.digest_to_prompt(d)
+    d["findings"] = {"error": "boom"}
+    assert "le decompte des resultats sur le corpus complet a echoue" in main.digest_to_prompt(d)
+
+
+def _fake_engine_begin(monkeypatch):
+    """The generators write their result to scenario_settings: a connection that accepts
+    the statements and returns nothing."""
+    class _Result:
+        def mappings(self): return self
+        def first(self): return None
+
+    class _Conn:
+        def execute(self, *a, **k): return _Result()
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+    monkeypatch.setattr(main.engine, "begin", lambda: _Conn())
+
+
+_DIGEST = {
+    "n_articles": 2732, "n_included": 12, "n_with_pico": 2700, "n_with_fulltext": 400,
+    "threshold": 0.45, "year_min": 1998, "year_max": 2026, "mean_quality": 0.61,
+    "n_with_quality": 2000, "total_citations": 90000, "n_with_citations": 2500,
+    "by_design": [{"value": "cohort", "n": 800}], "by_country": [], "by_journal": [],
+    "by_year": [], "concepts": {}, "complete": True,
+    "findings": {"n_read": 2600, "n_with_finding": 2400, "outcome_basis": "concepts",
+                 "by_direction": {"increase": 900, "decrease": 500, "no_difference": 400,
+                                  "mixed": 100, "descriptive": 500, "none": 200},
+                 "by_outcome": [], "n_outcome_labels": 0},
+}
+
+
+def test_the_brief_prompt_carries_the_findings_and_the_extraction_block(monkeypatch):
+    """The brief writes over the digest, now with the findings counted over the whole
+    corpus, and over the structured extraction counts the assistant already received.
+    The reproduced articles carry their key finding, which no writer used to store."""
+    import llm_usage
+
+    sample = [{"id": i, "title": f"Article {i}", "year": 2020, "study_design": "Cohort study",
+               "abstract": "a", "has_pico": True,
+               "pico_json": {"O": "cases", "key_finding": f"Finding number {i}.", "finding_direction": "increase"}}
+              for i in range(1, 41)]
+    patch_app(monkeypatch, "_get_above_threshold_articles", lambda sid, *a, **k: sample)
+    patch_app(monkeypatch, "_get_scenario_name", lambda sid: "Dengue in Europe")
+    patch_app(monkeypatch, "_get_scenario_threshold", lambda sid: 0.45)
+    patch_app(monkeypatch, "corpus_digest", lambda sid, thr=None: dict(_DIGEST))
+    patch_app(monkeypatch, "extraction_digest", lambda sid, thr=None: {
+        "complete": True, "n_extracted": 12, "n_relevant": 2732, "n_fulltext": 5, "n_abstract": 7,
+        "n_unread": 2720, "coverage": {"sex_gender": 3}, "coverage_fulltext": {"sex_gender": 2}})
+    captured = _CapturedLLM({"executive_summary": "x", "claims": []})
+    monkeypatch.setattr(llm_usage, "MeteredOpenAI", lambda **kw: captured)
+    _fake_engine_begin(monkeypatch)
+
+    brief = main._generate_evidence_brief_llm("usr-x", force=True, lang="en")
+    assert "error" not in brief, brief
+    prompt = captured.prompts[0]
+    assert "RESULTATS sur les 2732 articles pertinents" in prompt
+    assert "hausse 900, baisse 500, sans difference 400" in prompt
+    assert "EXTRACTION STRUCTUREE: 12 des 2732 articles pertinents" in prompt
+    assert "denominateur (12 articles extraits sur 2732)" in prompt
+    assert "Finding number 7." in prompt and "Finding number 31." not in prompt   # 30 reproduced
+    assert "TOTALITE des 2732 articles" in prompt and "30 articles reproduits" in prompt
+    assert "mieux" not in prompt and "les plus proches de la question" in prompt
+
+
+def test_the_actions_prompt_reproduces_each_article_whole_with_its_finding(monkeypatch):
+    """Twenty articles were promised and a JSON cut at 6,000 characters delivered about
+    seventeen, the last one torn mid-string, each with an empty key finding."""
+    import llm_usage
+
+    long_title = "A long title about vector control and dengue in southern Europe " * 4
+    sample = [{"id": i, "title": f"{long_title}{i}", "year": 2021, "study_design": "Cohort study",
+               "pico_json": {"O": "dengue incidence", "key_finding": f"Incidence fell by {i}%.",
+                             "finding_direction": "decrease"}} for i in range(1, 21)]
+    patch_app(monkeypatch, "_get_above_threshold_articles", lambda sid, *a, **k: sample)
+    patch_app(monkeypatch, "_get_scenario_name", lambda sid: "Dengue in Europe")
+    patch_app(monkeypatch, "corpus_digest", lambda sid, thr=None: dict(_DIGEST))
+    captured = _CapturedLLM({"recommended_actions": ["a", "b", "c", "d"]})
+    monkeypatch.setattr(llm_usage, "MeteredOpenAI", lambda **kw: captured)
+    _fake_engine_begin(monkeypatch)
+
+    assert main._generate_recommended_actions("usr-x", lang="en") == ["a", "b", "c", "d"]
+    prompt = captured.prompts[0]
+    for i in range(1, 21):
+        assert f"- [{i}] {long_title}{i} (2021; Cohort study) | outcome: dengue incidence | " \
+               f"résultat: Incidence fell by {i}%. [decrease]" in prompt
+    assert "RESULTATS sur les 2732 articles pertinents" in prompt
+    assert "mieux" not in prompt
+
+
+def test_the_actions_are_asked_again_shorter_when_the_answer_is_cut(monkeypatch):
+    import types
+
+    import llm_usage
+
+    calls: list = []
+
+    def _create(**kw):
+        calls.append(kw)
+        content, finish = (('{"recommended_actions": ["a very long', "length") if len(calls) == 1
+                           else ('{"recommended_actions": ["a", "b"]}', "stop"))
+        msg = types.SimpleNamespace(content=content)
+        return types.SimpleNamespace(choices=[types.SimpleNamespace(message=msg, finish_reason=finish)])
+
+    client = types.SimpleNamespace(chat=types.SimpleNamespace(completions=types.SimpleNamespace(create=_create)))
+    patch_app(monkeypatch, "_get_above_threshold_articles",
+              lambda sid, *a, **k: [{"id": 1, "title": "t", "pico_json": {"O": "x"}}])
+    patch_app(monkeypatch, "_get_scenario_name", lambda sid: "Dengue")
+    patch_app(monkeypatch, "corpus_digest", lambda sid, thr=None: dict(_DIGEST))
+    monkeypatch.setattr(llm_usage, "MeteredOpenAI", lambda **kw: client)
+    _fake_engine_begin(monkeypatch)
+    assert main._generate_recommended_actions("usr-x", lang="fr") == ["a", "b"]
+    assert len(calls) == 2 and "CUT OFF" in calls[1]["messages"][0]["content"]

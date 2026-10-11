@@ -634,9 +634,13 @@ def extract_user_scenario_article_pico(scenario_id: str, article_id: int, _: Non
     """Extraction PICO à la demande pour UN article d'un scénario utilisateur.
 
     Implémentation réelle (les endpoints GESICA `.../pico/extract` délèguent ici).
-    Utilise le texte intégral si disponible (meilleure qualité), sinon le résumé ;
-    max_tokens=800 (400 tronquait le JSON verbeux) et remplissage tolérant des clés.
+    Le prompt, le texte lu et la normalisation sont ceux de tous les rédacteurs PICO
+    (api/pico_map) : le résumé, plus les méthodes et les résultats du texte intégral quand
+    il existe, et le résultat principal de l'article (`key_finding`, `finding_direction`).
+    Le texte intégral remplaçait le résumé, et seuls ses 14 000 premiers caractères (en-tête,
+    introduction) étaient lus.
     """
+    from .pico_map import PicoUnreadable, extract_pico, pico_fulltext_chunks, pico_source_text
     _get_user_scenario_or_404(scenario_id)
     openai_key = os.getenv("OPENAI_API_KEY")
     if not openai_key:
@@ -653,54 +657,20 @@ def extract_user_scenario_article_pico(scenario_id: str, article_id: int, _: Non
         raise HTTPException(status_code=404, detail="Article non trouvé dans ce scénario")
     title = row["title"] or ""
     abstract = row["abstract"] or ""
-    body_text, body_label, pico_source = abstract[:3000], "Abstract", "abstract"
     with engine.connect() as _ftc:
-        _ft = _ftc.execute(text("""
-            SELECT string_agg(content, chr(10) || chr(10) ORDER BY chunk_index) AS ft
-            FROM document_chunk
-            WHERE document_id = :id AND chunk_type = 'fulltext_section'
-        """), {"id": article_id}).scalar()
-    if _ft and len(_ft) > len(abstract):
-        body_text, body_label, pico_source = _ft[:14000], "Full text", "fulltext"
-    if not body_text or len(body_text.strip()) < 30:
+        chunks = pico_fulltext_chunks(_ftc, article_id)
+    if len(abstract.strip()) < 30 and pico_source_text(title, abstract, chunks)[1] != "fulltext":
         raise HTTPException(status_code=422, detail="Article sans texte exploitable pour l'extraction PICO")
-    system_prompt = (
-        "You are a systematic review expert. "
-        "Extract PICO elements and return ONLY valid JSON:\n"
-        '{"P":"Population","I":"Intervention","C":"Comparator or Not specified",'
-        '"O":"Outcome(s)","study_design":"RCT|Cohort|Systematic review|etc",'
-        '"pico_confidence":0.0-1.0,"pico_notes":""}\n'
-        "Be concise (max 2 sentences per field). Return ONLY the JSON."
-    )
     try:
         from llm_usage import MeteredOpenAI as _OAI
         from datetime import datetime, timezone
         _client = _OAI(api_key=openai_key, timeout=90.0)
-        resp = _client.chat.completions.create(
-            model=_model("bulk"),
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": f"Title: {title}\n\n{body_label}: {body_text}"},
-            ],
-            temperature=0,
-            seed=42,
-            max_tokens=800,
-            response_format={"type": "json_object"},
-        )
-        pico = json.loads(resp.choices[0].message.content)
+        pico, pico_source = extract_pico(_client, title, abstract, chunks,
+                                         label=f"PICO article {article_id}")
+    except PicoUnreadable as e:
+        raise HTTPException(status_code=502, detail=f"Réponse PICO invalide: {str(e)[:200]}")
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"Échec de l'extraction PICO: {str(e)[:200]}")
-    if not isinstance(pico, dict):
-        raise HTTPException(status_code=502, detail="Réponse PICO invalide (JSON attendu)")
-    for _k in ("P", "I", "C", "O"):
-        pico.setdefault(_k, "")
-    pico.setdefault("study_design", "non précisé")
-    try:
-        pico["pico_confidence"] = float(pico.get("pico_confidence", 0.3))
-    except (TypeError, ValueError):
-        pico["pico_confidence"] = 0.3
-    pico["pico_notes"] = pico.get("pico_notes", "")
-    pico["pico_source"] = pico_source
     with engine.begin() as conn:
         conn.execute(text("""
             UPDATE literature_document

@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  askScenarioRagStreamFiltered,
   clearApiKey,
   exportRelevantArticles,
   fetchConceptGraph,
@@ -87,6 +88,65 @@ describe("safeFetch", () => {
     const fetchMock = stubFetch(reply(404), reply(200));
     expect((await safeFetch("/api/x")).status).toBe(404);
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+});
+
+/** A streamed SSE response, delivered in the pieces given (so a line can straddle two). */
+function sseReply(pieces: string[]): Response {
+  const encoder = new TextEncoder();
+  let i = 0;
+  return {
+    ok: true,
+    status: 200,
+    headers: { get: () => null },
+    body: {
+      getReader: () => ({
+        read: async () => (i < pieces.length
+          ? { done: false, value: encoder.encode(pieces[i++]) }
+          : { done: true, value: undefined }),
+      }),
+    },
+  } as unknown as Response;
+}
+
+describe("the assistant stream", () => {
+  it("reports a cut answer before it is done, and lets the server choose top_k", async () => {
+    const fetchMock = stubFetch(sseReply([
+      'event: meta\ndata: {"papers_used": 40, "papers_with_fulltext": 3, "threshold": 0.45}\n\n',
+      'data: {"token": "An answer that "}\n\ndata: {"tok',
+      'en": "stops mid"}\n\n',
+      'event: cut\ndata: {"cut": true, "reason": "length", "max_tokens": 3000}\n\n',
+      "event: done\ndata: {}\n\n",
+    ]));
+    const order: string[] = [];
+    let text = "";
+    await new Promise<void>((resolve, reject) => {
+      askScenarioRagStreamFiltered("usr-abc", "What did the studies find?", {
+        onSources: () => order.push("sources"),
+        onMeta: () => order.push("meta"),
+        onToken: (t) => { text += t; },
+        onCut: () => order.push("cut"),
+        onDone: () => { order.push("done"); resolve(); },
+        onError: (e) => reject(new Error(e)),
+      });
+    });
+    expect(text).toBe("An answer that stops mid");
+    expect(order).toEqual(["meta", "cut", "done"]);
+    const body = JSON.parse(String((fetchMock.mock.calls[0][1] as RequestInit).body));
+    expect(body).not.toHaveProperty("top_k");
+    expect(body.scenario_id).toBe("usr-abc");
+  });
+
+  it("does not report a cut for a complete answer", async () => {
+    stubFetch(sseReply(['data: {"token": "Whole."}\n\n', "event: done\ndata: {}\n\n"]));
+    let cut = false;
+    await new Promise<void>((resolve, reject) => {
+      askScenarioRagStreamFiltered("usr-abc", "Q?", {
+        onSources: () => {}, onToken: () => {}, onCut: () => { cut = true; },
+        onDone: () => resolve(), onError: (e) => reject(new Error(e)),
+      });
+    });
+    expect(cut).toBe(false);
   });
 });
 

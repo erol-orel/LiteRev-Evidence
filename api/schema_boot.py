@@ -407,85 +407,45 @@ def startup_event() -> None:
         _PICO_MAX_ATTEMPTS = 3 # essais max par article (borne les échecs déterministes)
         _ABS_BATCH     = 50    # notices sans résumé traitées par cycle (backfill)
 
-        _system_pico = (
-            "You are a systematic review expert. "
-            "Extract PICO elements and return ONLY valid JSON:\n"
-            '{"P":"Population","I":"Intervention","C":"Comparator or Not specified",'
-            '"O":"Outcome(s)","study_design":"RCT|Cohort|Systematic review|etc",'
-            '"pico_confidence":0.0-1.0,"pico_notes":""}\n'
-            "Be concise (max 2 sentences per field). Return ONLY the JSON."
-        )
-
         def _extract_pico_one(row, client):
+            from .pico_map import PicoUnreadable, extract_pico, pico_fulltext_chunks
             try:
                 title    = row["title"] or ""
                 abstract = row["abstract"] or ""
-                # Évidence extraite du TEXTE INTÉGRAL si disponible, sinon du résumé.
-                # Les chunks fulltext_section sont concaténés dans l'ordre ; on
-                # marque la source (`pico_source`) pour pouvoir ré-extraire plus
-                # tard les articles dont le PICO venait du résumé seul.
-                body_text   = abstract[:3000]
-                body_label  = "Abstract"
-                pico_source = "abstract"
+                # Le texte lu : TOUJOURS le résumé, plus, quand le texte intégral existe,
+                # ses méthodes et ses résultats (api/pico_map.pico_source_text). Il
+                # remplaçait le résumé et n'en lisait que les 14 000 premiers caractères :
+                # l'en-tête, l'introduction, le début des méthodes. On marque la source
+                # (`pico_source`) pour ré-extraire plus tard les articles dont le PICO
+                # venait du résumé seul.
+                chunks = []
                 if row.get("has_fulltext"):
                     with engine.connect() as _ftc:
-                        _ft = _ftc.execute(text("""
-                            SELECT string_agg(content, E'\n\n' ORDER BY chunk_index) AS ft
-                            FROM document_chunk
-                            WHERE document_id = :id AND chunk_type = 'fulltext_section'
-                        """), {"id": row["id"]}).scalar()
-                    if _ft and len(_ft) > len(abstract):
-                        body_text   = _ft[:14000]
-                        body_label  = "Full text"
-                        pico_source = "fulltext"
+                        chunks = pico_fulltext_chunks(_ftc, row["id"])
                 # Appel LLM isolé : une erreur d'API (quota/réseau) est TRANSITOIRE
                 # → on ne compte PAS de tentative (le cooldown s'en charge) et on
                 # réessaiera quand l'API sera saine.
+                #
+                # Une RÉPONSE inutilisable (coupée deux fois, JSON invalide), elle, COMPTE
+                # la tentative : un article dont la sortie est malformée de façon
+                # déterministe (temperature=0/seed=42) serait sinon ré-extrait à l'infini.
+                # pico_attempts (plafonné par _PICO_MAX_ATTEMPTS dans le sélecteur) borne
+                # ces échecs. Les clés manquantes, elles, sont complétées (TOLÉRANT).
                 try:
-                    resp = client.chat.completions.create(
-                        model=_model("bulk"),
-                        messages=[
-                            {"role": "system", "content": _system_pico},
-                            {"role": "user",   "content": f"Title: {title}\n\n{body_label}: {body_text}"},
-                        ],
-                        temperature=0,
-                        seed=42,
-                        max_tokens=800,  # 400 tronquait le JSON des articles verbeux → json invalide
-                        response_format={"type": "json_object"},
-                    )
+                    # `pico_source` (fulltext ou abstract) est porté par le PICO lui-même.
+                    _pico, _src = extract_pico(client, title, abstract, chunks,
+                                               label=f"BG PICO {row['id']}")
+                except PicoUnreadable as _bad:
+                    logger.debug(f"BG PICO doc {row['id']}: {_bad}")
+                    _pico = None
                 except Exception as _api_e:
                     if _is_openai_quota_error(_api_e):
                         _trip_openai_cooldown()
                     logger.debug(f"BG PICO API doc {row['id']}: {_api_e}")
                     return None
 
-                # On a une RÉPONSE → on COMPTE la tentative quoi qu'il arrive. Sinon,
-                # un article dont la sortie LLM est malformée de façon déterministe
-                # (clé manquante / JSON invalide, identique à chaque fois car
-                # temperature=0/seed=42) serait ré-extrait à l'infini. pico_attempts
-                # (plafonné par _PICO_MAX_ATTEMPTS dans le sélecteur) borne ces échecs.
-                _pico = None
-                try:
-                    _pico = json.loads(resp.choices[0].message.content)
-                except Exception:
-                    _pico = None
                 with engine.begin() as _c:
                     if isinstance(_pico, dict):
-                        # TOLÉRANT : on complète les clés manquantes plutôt que de
-                        # rejeter (et ré-essayer en boucle). Une extraction partielle
-                        # à faible confiance vaut mieux qu'un article jamais traité -
-                        # l'aval filtre déjà sur pico_confidence. Seul un JSON INVALIDE
-                        # (rare avec response_format json_object + max_tokens relevé)
-                        # est compté comme échec à borner.
-                        for _k in ("P", "I", "C", "O"):
-                            _pico.setdefault(_k, "")
-                        _pico.setdefault("study_design", "not specified")   # identifiant stable (cf. api/pipeline.py)
-                        try:
-                            _pico["pico_confidence"] = float(_pico.get("pico_confidence", 0.3))
-                        except (TypeError, ValueError):
-                            _pico["pico_confidence"] = 0.3
-                        _pico["pico_notes"]  = _pico.get("pico_notes", "")
-                        _pico["pico_source"] = pico_source
                         _c.execute(text("""
                             UPDATE literature_document
                             SET pico_json = CAST(:pico AS jsonb),
