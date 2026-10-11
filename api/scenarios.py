@@ -29,6 +29,7 @@ from .scenario_store import (
     relevant_gate_sql,
     scenario_counts,
     scenario_search_mode,
+    scenario_threshold_info,
     screening_status_sql,
     set_scenario_exclude_preprints,
     set_scenario_search_mode,
@@ -982,21 +983,16 @@ def get_user_scenario_corpus(
     limit = max(1, min(int(limit), 100000))
     offset = max(0, int(offset))
     _abstract_sql = "d.abstract" if abstract_chars is None else "LEFT(d.abstract, :abstract_chars)"
-    # Seuil effectif : paramètre explicite (curseur en direct) > seuil sauvegardé
-    # dans scenario_settings > défaut 0.45. (Auparavant codé en dur à 0.45, donc
-    # le compteur « auto-sélectionnés » ne suivait jamais le curseur.)
-    eff_threshold = 0.45
-    try:
-        with engine.connect() as _tc:
-            _ts = _tc.execute(text(
-                "SELECT similarity_threshold FROM scenario_settings WHERE scenario_id = :sid"
-            ), {"sid": scenario_id}).scalar()
-        if _ts is not None:
-            eff_threshold = float(_ts)
-    except Exception:
-        pass
+    # Seuil effectif : paramètre explicite (curseur en direct) > seuil EN VIGUEUR du
+    # scénario, par la lecture commune (scenario_threshold_info). Elle était recopiée ici
+    # avec un 0.45 en dur et un `except: pass` : une erreur de base affichait le corpus à
+    # 0.45 sans un mot, comme si c'était son seuil.
     if threshold is not None:
         eff_threshold = float(threshold)
+        threshold_chosen = True
+    else:
+        _thr_info = scenario_threshold_info(scenario_id)
+        eff_threshold, threshold_chosen = _thr_info["threshold"], _thr_info["chosen"]
     # Conditions de filtre (article_scenarios géré par JOIN)
     conditions = [
         "(d.is_duplicate IS NULL OR d.is_duplicate = FALSE)",
@@ -1068,7 +1064,9 @@ def get_user_scenario_corpus(
                 d.open_access, d.pmid, d.publication_type, d.quality_score,
                 {screening_status_sql('d', 'ars')} AS screening_status,
                 COALESCE(ars.reviewer_1_status, d.reviewer_1_status) AS reviewer_1_status,
-                COALESCE(ars.similarity_score, 0.0) AS similarity_score,
+                -- NULL quand l'article n'est pas encore scoré : l'afficher 0.00 le
+                -- confondait avec un vrai zéro. La porte le compte 0, l'écran dit « non scoré ».
+                ars.similarity_score AS similarity_score,
                 ars.rerank_score AS rerank_score,
                 (COALESCE(ars.similarity_score, 0.0) >= :threshold) AS above_threshold,
                 -- is_new : ingéré pendant CE scénario (vs déjà présent en base).
@@ -1163,6 +1161,8 @@ def get_user_scenario_corpus(
         # au redémarrage faisait afficher un scoring en cours pour toujours.
         "rerank_running": rerank_running or _rerank_job_active(scenario_id),
         "threshold": eff_threshold,
+        # Faux tant que personne n'a réglé le seuil : la vue tourne sur le seuil de départ.
+        "threshold_chosen": threshold_chosen,
         "offset": offset,
         "limit": limit,
         "abstract_truncated": abstract_chars is not None,

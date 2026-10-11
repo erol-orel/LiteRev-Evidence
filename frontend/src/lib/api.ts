@@ -2234,6 +2234,20 @@ export interface RagStreamCallbacks {
   onError: (err: string) => void;
 }
 
+/** Agreement over one population of double-blind votes, and what that population is. */
+export interface KappaStratum {
+  n_evaluated: number;
+  kappa: number | null;
+  po_observed?: number;
+  pe_expected?: number;
+  interpretation: string;
+  conflicts: number;
+  agreements: Record<string, number>;
+  matrix?: Record<string, Record<string, number>>;
+  /** What the stratum covers, in words: a kappa must say what it is computed on. */
+  covers?: string;
+}
+
 export interface KappaStats {
   scenario_id: string;
   n_evaluated: number;
@@ -2244,6 +2258,13 @@ export interface KappaStats {
   conflicts: number;
   agreements: Record<string, number>;
   matrix: Record<string, Record<string, number>>;
+  /** The top-level figures are the relevant set's. Each stratum is reported apart: the
+   *  relevant set (the machine's selection plus hand inclusions) and the audit sample
+   *  drawn below the threshold. */
+  covers?: string;
+  strata?: { relevant: KappaStratum; audit_sample: KappaStratum };
+  /** Size of the below-threshold audit sample (0 = switched off). */
+  audit_sample_size?: number;
 }
 
 export interface DoubleBlindDecision {
@@ -2279,6 +2300,10 @@ export interface DoubleBlindQueue {
   reviewer: 1 | 2;
   reviewer_code: string;
   remaining: number;
+  /** `remaining` split between the relevant set and the below-threshold audit sample. */
+  remaining_relevant?: number;
+  remaining_audit?: number;
+  audit_sample_size?: number;
   returned: number;
   articles: Array<{
     id: number;
@@ -2291,6 +2316,8 @@ export interface DoubleBlindQueue {
     rerank_score?: number | null;
     reviewer_1_status?: string | null;
     reviewer_2_status?: string | null;
+    /** Drawn below the threshold to audit the automatic exclusion. */
+    audit_sample?: boolean;
   }>;
 }
 
@@ -2963,10 +2990,16 @@ export type CurveScore = 'similarity' | 'rerank';
 
 export interface ScenarioSettings {
   scenario_id: string;
+  /** The threshold in force: the stored one when a person set it, else the starting value. */
   similarity_threshold: number;
+  /** False while nobody has set the threshold: reports then print "default, not chosen". */
+  threshold_chosen?: boolean;
+  similarity_threshold_set_at?: string | null;
   /** The second gate, on the rerank score. 0 means no filtering, which is the default
    *  and exactly the behaviour that existed before it was added. */
   rerank_threshold: number;
+  /** Size of the double-blind audit sample drawn below the threshold (0 = off). */
+  double_blind_below_sample?: number;
   brief_generated_at: string | null;
   variables_validated: boolean;
   variables_generated_at: string | null;
@@ -3147,8 +3180,8 @@ export async function fetchThresholdCurve(
 
 export async function patchScenarioSettings(
   scenarioId: string,
-  payload: { similarity_threshold?: number; rerank_threshold?: number; variables_json?: Record<string, unknown> | null; variables_validated?: boolean },
-): Promise<{ status: string; scenario_id: string; updated: string[] }> {
+  payload: { similarity_threshold?: number; rerank_threshold?: number; variables_json?: Record<string, unknown> | null; variables_validated?: boolean; double_blind_below_sample?: number },
+): Promise<{ status: string; scenario_id: string; updated: string[]; threshold_chosen?: boolean; double_blind_below_sample?: number }> {
   const r = await safeFetch(`${API_BASE_URL}/scenarios/${scenarioId}/settings`, {
     method: 'PATCH',
     headers: authHeaders({ "Content-Type": "application/json" }),
@@ -3168,7 +3201,7 @@ export async function fetchUserScenarioEmbeddingStatus(
 
 /** Un scoring en cours ou terminé, tel que le serveur le décrit. */
 export interface RerankJob {
-  /** idle | running | done | error | stalled (en cours, mais sans signe de vie). */
+  /** idle | running | done | partial | error | stalled (en cours, mais sans signe de vie). */
   status: string;
   /** cosine (similarité) puis rerank (Cohere), pendant le scoring. */
   phase?: string;
@@ -3182,6 +3215,18 @@ export interface RerankJob {
   /** Le dernier refus du fournisseur, et pourquoi le balayage s'est arrêté avant la fin. */
   rerank_last_error?: string | null;
   rerank_stopped?: string | null;
+  /** Le passage cosinus : les articles restés sans score (hors de la porte), ceux qu'un
+   *  nouvel essai peut scorer, les échecs, et ce que le re-scoring a changé. Un passage
+   *  « partial » s'est arrêté avant la fin (pause OpenAI, lots en échec) et sera repris. */
+  unscored?: number | null;
+  unscored_retryable?: number | null;
+  cosine_failed?: number;
+  cosine_changed?: number;
+  cosine_newly_scored?: number;
+  cosine_cleared?: number;
+  cosine_partial?: boolean;
+  retry_after_s?: number | null;
+  message?: string;
 }
 
 export async function triggerRerank(

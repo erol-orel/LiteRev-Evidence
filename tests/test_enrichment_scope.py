@@ -34,15 +34,19 @@ def test_an_unknown_scope_is_refused_rather_than_silently_widened():
 def test_the_relevant_scope_is_the_shared_gate_and_not_a_fourth_copy():
     """The condition that defines "relevant" is written in exactly one place."""
     sql = scenario_scope_sql("relevant", doc="ld", link="asn")
-    threshold = ("COALESCE((SELECT ss.similarity_threshold FROM scenario_settings ss"
-                 " WHERE ss.scenario_id = :sid), 0.45)")
+    # The stored threshold counts only when a person chose it (threshold_chosen_sql);
+    # otherwise the starting value applies, as it does for every other reader.
+    threshold = ("COALESCE((SELECT CASE WHEN (ss.similarity_threshold IS NOT NULL"
+                 " AND (ss.similarity_threshold_set_at IS NOT NULL"
+                 " OR ss.similarity_threshold <> 0.45)) THEN ss.similarity_threshold END"
+                 " FROM scenario_settings ss WHERE ss.scenario_id = :sid), 0.45)")
     assert sql == relevant_gate_sql("ld", "asn", threshold)
 
 
 def test_the_relevant_scope_reads_the_threshold_inside_the_statement():
     """Passing it as a parameter would reopen two readings at two instants."""
     sql = scenario_scope_sql("relevant")
-    assert "SELECT ss.similarity_threshold FROM scenario_settings" in sql
+    assert "THEN ss.similarity_threshold END FROM scenario_settings" in sql
     assert "0.45" in sql                      # the default when the scenario stored none
 
 

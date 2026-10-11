@@ -551,7 +551,7 @@ def get_user_scenario_evidence_brief_pdf(scenario_id: str):
               AND {relevant_gate_tail_sql('d', 'ars', ':thr')}
             -- « Articles les plus pertinents » dans le PDF : trier par qualité donnait une
             -- liste qui n'est pas celle du tri par pertinence de l'application.
-            ORDER BY ({screening_status_sql('d', 'ars')} = 'included') DESC,
+            ORDER BY ({screening_status_sql('d', 'ars')} = 'included') IS TRUE DESC,
                      COALESCE(ars.rerank_score, ars.similarity_score, 0) DESC NULLS LAST,
                      d.quality_score DESC NULLS LAST, d.year DESC NULLS LAST
             LIMIT 100000
@@ -897,6 +897,7 @@ Retourne UNIQUEMENT le JSON valide."""
             ceiling=_ceiling_label)
 
         # Ajouter les métadonnées
+        from .scenario_store import threshold_provenance as _thr_provenance  # lazy: provenance du seuil
         brief["_meta"] = {
             "scenario_id": scenario_id,
             "scenario_name": scenario_name,
@@ -904,6 +905,9 @@ Retourne UNIQUEMENT le JSON valide."""
             "articles_used": total,
             "articles_above_threshold": total,
             "threshold": threshold,
+            # Le seuil était-il CHOISI (sinon « par défaut, non choisi »), et combien
+            # d'articles restent hors du sous-ensemble faute de score.
+            **_thr_provenance(scenario_id),
             "human_validated": included,
             "year_range": year_range,
             "study_designs": dict(top_designs),

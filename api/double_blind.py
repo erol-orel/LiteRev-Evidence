@@ -13,7 +13,8 @@ from sqlalchemy import text
 
 from .core import app, engine, require_api_key
 from .scenario_store import (_get_scenario_threshold, _get_user_scenario_or_404,
-                             relevant_gate_sql)
+                             relevant_gate_sql, reset_corpus_derived_caches,
+                             screening_status_sql)
 
 class DoubleBlindDecisionIn(BaseModel):
     article_id: int
@@ -51,6 +52,19 @@ def _ensure_reviewer_registry() -> None:
         """))
         conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS uq_scenario_reviewer_index "
                           "ON scenario_reviewer (scenario_id, reviewer_index)"))
+        # Les articles jugés comme ÉCHANTILLON D'AUDIT (sous le seuil), notés au premier
+        # vote. C'est ce qui permet au kappa de séparer les deux populations même après
+        # coup : un article de l'échantillon que les deux relecteurs incluent passe dans
+        # le sous-ensemble pertinent, et ne doit pas pour autant changer de strate. Une
+        # table à part, comme le registre : rien à ajouter à `article_scenarios`.
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS double_blind_audit (
+                scenario_id  TEXT      NOT NULL,
+                document_id  BIGINT    NOT NULL,
+                recorded_at  TIMESTAMP NOT NULL DEFAULT NOW(),
+                PRIMARY KEY (scenario_id, document_id)
+            )
+        """))
 
 
 try:
@@ -110,7 +124,18 @@ def _write_ars_screening(
     decision on the (scenario_id, document_id) article_scenarios row. Callers
     also keep the global literature_document.screening_status updated, which
     remains authoritative until the Phase 5 cutover. No-op for rows that are not
-    members of the scenario (UPDATE matches nothing)."""
+    members of the scenario (UPDATE matches nothing).
+
+    Toutes les décisions de screening passent par ici (le bouton d'un article, l'accord
+    de deux relecteurs, un arbitrage). Quand le statut CHANGE, le sous-ensemble pertinent
+    a bougé : les cartes calculées dessus sont périmées dans la même transaction
+    (reset_corpus_derived_caches). Elles ne l'étaient pas, et une inclusion à la main
+    restait absente des thèmes, du graphe et de la carte des concepts pendant 30 jours."""
+    before = conn.execute(text("""
+        SELECT screening_status FROM article_scenarios
+        WHERE scenario_id = :sid AND document_id = :doc_id
+        FOR UPDATE
+    """), {"sid": scenario_id, "doc_id": document_id}).first()
     conn.execute(text("""
         UPDATE article_scenarios
         SET screening_status = :status,
@@ -120,6 +145,90 @@ def _write_ars_screening(
         WHERE scenario_id = :sid AND document_id = :doc_id
     """), {"status": status, "reason": reason, "notes": notes,
            "sid": scenario_id, "doc_id": document_id})
+    # « En attente » et « jamais jugé » se lisent pareil à la porte : passer de l'un à
+    # l'autre ne change aucun article de côté.
+    def _side(s):
+        return s if s in ("included", "excluded") else None
+
+    if before is not None and _side(before[0]) != _side(status):
+        reset_corpus_derived_caches(conn, scenario_id)
+
+
+# ── L'échantillon d'audit : ce que la machine a écarté, jugé lui aussi ───────
+# La file ne proposait QUE le sous-ensemble pertinent. Les articles sous le seuil n'étaient
+# donc jamais montrés aux deux relecteurs : l'exclusion automatique n'était jamais
+# contrôlée, et le kappa ne couvrait que la sélection de la machine, sans que le panneau le
+# dise. Une option du scénario (`scenario_settings.double_blind_below_sample`, 0 = éteinte)
+# ajoute N articles tirés au hasard SOUS le seuil, avec un résumé, les mêmes pour les deux
+# relecteurs : l'ordre est un hachage de (scénario, article), stable d'un appel à l'autre.
+#
+# Le tirage ne bouge pas sous les votes. Un article de l'échantillon reste dans le vivier
+# une fois jugé (`double_blind_audit`, noté au premier vote), même quand l'accord des deux
+# relecteurs l'a inclus ou exclu : sans cela, chaque article tranché sortait du vivier et
+# le hachage en faisait entrer un autre, et l'échantillon ne finissait jamais.
+
+#: La taille proposée quand on allume l'option, et le plafond accepté.
+AUDIT_SAMPLE_DEFAULT = 100
+AUDIT_SAMPLE_MAX = 1000
+
+#: Le libellé de chaque strate, renvoyé avec ses chiffres : un kappa doit dire sur quoi il
+#: porte. `{n}` est la taille de l'échantillon.
+_STRATUM_COVERS = {
+    "relevant": ("Articles retenus par la revue (au-dessus du seuil, ou inclus à la main), "
+                 "tels que présentés aux relecteurs : ce kappa mesure l'accord sur la "
+                 "sélection de la machine, pas sur ce qu'elle a écarté."),
+    "audit_sample": ("Échantillon aléatoire d'articles SOUS le seuil (au plus {n}), "
+                     "présentés aux relecteurs pour contrôler l'exclusion automatique."),
+}
+
+
+def _audit_sample_size(scenario_id: str) -> int:
+    """La taille d'échantillon d'audit réglée pour ce scénario, 0 si l'option est éteinte
+    ou illisible (une base antérieure à la colonne n'a pas d'échantillon)."""
+    try:
+        with engine.connect() as conn:
+            n = conn.execute(text(
+                "SELECT double_blind_below_sample FROM scenario_settings WHERE scenario_id = :sid"
+            ), {"sid": scenario_id}).scalar()
+    except Exception:                                        # noqa: BLE001
+        return 0
+    return max(0, min(int(n or 0), AUDIT_SAMPLE_MAX))
+
+
+def _audit_recorded_sql(link: str = "ars") -> str:
+    """L'article a été jugé comme échantillon d'audit dans ce scénario."""
+    return (f"EXISTS (SELECT 1 FROM double_blind_audit dba"
+            f" WHERE dba.scenario_id = {link}.scenario_id AND dba.document_id = {link}.document_id)")
+
+
+def _audit_pool_sql() -> str:
+    """Les `:n_audit` articles de l'échantillon d'audit de `:sid`, au seuil `:thr`.
+
+    Le vivier : les articles avec un résumé que la machine a écartés et que personne n'a
+    encore tranchés ni jugés, plus ceux déjà jugés comme échantillon tant qu'ils portent
+    un vote. C'est la règle du vote (un premier vote sur un article non retenu l'inscrit
+    à l'audit), lue dans l'autre sens. `IS NOT TRUE`, et non `NOT` : la porte vaut NULL
+    pour un article sous le seuil jamais jugé (`NULL = 'included' OR faux`), et `NOT NULL`
+    l'aurait laissé dehors."""
+    status = screening_status_sql("d", "ars")
+    return f"""
+        SELECT ars.document_id
+        FROM article_scenarios ars
+        JOIN literature_document d ON d.id = ars.document_id
+        WHERE ars.scenario_id = :sid
+          AND d.is_duplicate IS NOT TRUE
+          AND d.abstract IS NOT NULL AND length(d.abstract) > 30
+          AND (({_audit_recorded_sql('ars')}
+                AND (ars.reviewer_1_status IS NOT NULL OR ars.reviewer_2_status IS NOT NULL))
+               OR (({status} IS NULL OR {status} = 'pending')
+                   AND ars.reviewer_1_status IS NULL AND ars.reviewer_2_status IS NULL
+                   AND ({relevant_gate_sql('d', 'ars', ':thr')}) IS NOT TRUE))
+        -- Ceux qu'un relecteur a déjà jugés d'abord : un article lié plus tard ne doit
+        -- pas chasser de l'échantillon un article qui attend son second vote.
+        ORDER BY {_audit_recorded_sql('ars')} DESC,
+                 md5(ars.scenario_id || ':' || ars.document_id::text)
+        LIMIT :n_audit
+    """
 
 
 @app.post("/gesica/scenarios/{scenario_id}/double-blind/decision")
@@ -135,6 +244,7 @@ def submit_double_blind_decision(
     if payload.status not in ("included", "excluded", "pending"):
         raise HTTPException(status_code=422, detail="status invalide")
     code = _normalise_reviewer_code(payload.reviewer_code)
+    thr = _get_scenario_threshold(scenario_id)
 
     with engine.begin() as conn:
         # Vérifier que l'article appartient bien au scénario (via article_scenarios)
@@ -152,6 +262,21 @@ def submit_double_blind_decision(
         reviewer = _reviewer_index_for_code(conn, scenario_id, code)
         col_status = f"reviewer_{reviewer}_status"
         col_reason = f"reviewer_{reviewer}_reason"
+
+        # PREMIER vote sur un article que la revue ne retient pas : il est jugé comme
+        # échantillon d'audit, et le reste pour le kappa, quoi que l'accord en fasse
+        # ensuite. Décidé par le serveur au moment du vote, jamais par le client. Annulé
+        # avec le reste si ce relecteur avait déjà voté (409 plus bas).
+        conn.execute(text(f"""
+            INSERT INTO double_blind_audit (scenario_id, document_id)
+            SELECT ars.scenario_id, ars.document_id
+            FROM article_scenarios ars
+            JOIN literature_document d ON d.id = ars.document_id
+            WHERE ars.scenario_id = :sid AND ars.document_id = :article_id
+              AND ars.reviewer_1_status IS NULL AND ars.reviewer_2_status IS NULL
+              AND ({relevant_gate_sql('d', 'ars', ':thr')}) IS NOT TRUE
+            ON CONFLICT DO NOTHING
+        """), {"sid": scenario_id, "article_id": payload.article_id, "thr": thr})
 
         # Décision reviewer PAR SCÉNARIO (article_scenarios) - autoritative pour le
         # kappa : un document partagé entre scénarios porte des votes distincts. On
@@ -277,19 +402,40 @@ def resolve_conflict(
 
 @app.get("/user-scenarios/{scenario_id}/double-blind/kappa")
 def get_user_scenario_kappa(scenario_id: str) -> dict[str, Any]:
-    """Kappa de Cohen pour un scénario utilisateur."""
+    """Kappa de Cohen pour un scénario utilisateur, PAR STRATE.
+
+    Deux populations que les relecteurs jugent pour deux raisons différentes, et qu'un
+    seul kappa mélangeait : le sous-ensemble pertinent (la sélection de la machine, plus
+    les inclusions à la main) et l'échantillon d'audit pris sous le seuil. Les champs de
+    tête restent ceux du sous-ensemble pertinent, la seule strate qui existait ; `strata`
+    porte les deux, chacune avec ce qu'elle couvre (`covers`)."""
     _get_user_scenario_or_404(scenario_id)
     with engine.connect() as conn:
-        rows = conn.execute(text("""
-            SELECT ars.reviewer_1_status, ars.reviewer_2_status
+        rows = conn.execute(text(f"""
+            SELECT ars.reviewer_1_status, ars.reviewer_2_status,
+                   {_audit_recorded_sql('ars')} AS audit
             FROM article_scenarios ars
             WHERE ars.scenario_id = :sid
               AND ars.reviewer_1_status IS NOT NULL
               AND ars.reviewer_2_status IS NOT NULL
         """), {"sid": scenario_id}).mappings().all()
+    size = _audit_sample_size(scenario_id)
+    strata = {
+        "relevant": {**_kappa_stats([r for r in rows if not r["audit"]]),
+                     "covers": _STRATUM_COVERS["relevant"]},
+        "audit_sample": {**_kappa_stats([r for r in rows if r["audit"]]),
+                         "covers": _STRATUM_COVERS["audit_sample"].format(
+                             n=size or AUDIT_SAMPLE_DEFAULT)},
+    }
+    return {"scenario_id": scenario_id, **strata["relevant"], "stratum": "relevant",
+            "strata": strata, "audit_sample_size": size}
+
+
+def _kappa_stats(rows) -> dict[str, Any]:
+    """Accord observé, accord attendu et kappa de Cohen sur des paires de votes. PUR."""
     if not rows:
         return {
-            "scenario_id": scenario_id, "n_evaluated": 0, "kappa": None,
+            "n_evaluated": 0, "kappa": None,
             "interpretation": "Aucune évaluation double-aveugle disponible",
             "agreements": {}, "conflicts": 0,
         }
@@ -310,7 +456,7 @@ def get_user_scenario_kappa(scenario_id: str) -> dict[str, Any]:
     else: interpretation = "Médiocre (< 0.21)"
     conflicts = sum(matrix[r1][r2] for r1 in categories for r2 in categories if r1 != r2)
     return {
-        "scenario_id": scenario_id, "n_evaluated": n, "kappa": round(kappa, 4),
+        "n_evaluated": n, "kappa": round(kappa, 4),
         "po_observed": round(po, 4), "pe_expected": round(pe, 4),
         "interpretation": interpretation, "conflicts": conflicts,
         "agreements": {c: matrix[c][c] for c in categories}, "matrix": matrix,
@@ -319,13 +465,15 @@ def get_user_scenario_kappa(scenario_id: str) -> dict[str, Any]:
 
 @app.get("/user-scenarios/{scenario_id}/double-blind/conflicts")
 def get_user_scenario_conflicts(scenario_id: str) -> list[dict[str, Any]]:
-    """Conflits double-aveugle pour un scénario utilisateur."""
+    """Conflits double-aveugle pour un scénario utilisateur. `audit_sample` dit si
+    l'article a été jugé comme échantillon d'audit, pris sous le seuil."""
     _get_user_scenario_or_404(scenario_id)
     with engine.connect() as conn:
-        rows = conn.execute(text("""
+        rows = conn.execute(text(f"""
             SELECT d.id, d.title, d.abstract, d.year, d.journal,
                    ars.reviewer_1_status, ars.reviewer_1_reason,
                    ars.reviewer_2_status, ars.reviewer_2_reason, ars.kappa_final_status,
+                   {_audit_recorded_sql('ars')} AS audit_sample,
                    -- Qui a voté. Le panneau affichait déjà `reviewer_1_code` et
                    -- `reviewer_2_code`, qui n'existaient nulle part : la ligne était
                    -- donc toujours vide, et un conflit ne nommait personne.
@@ -361,36 +509,65 @@ def get_user_scenario_double_blind_queue(
     pouvait jamais exister.
 
     Le lot est le sous-ensemble pertinent, trié par pertinence : on ne demande pas à un
-    relecteur de juger un article que la revue n'a pas retenu."""
+    relecteur de juger un article que la revue n'a pas retenu. Quand l'échantillon
+    d'audit est allumé, ses articles s'y ajoutent, marqués `audit_sample`, et sont
+    intercalés à proportion (chaque partie avance au même rythme : un article d'audit
+    tous les dix, pour mille pertinents et cent d'audit), pour que les deux kappas se
+    remplissent ensemble au lieu que l'audit attende la fin du sous-ensemble pertinent."""
     _get_user_scenario_or_404(scenario_id)
     code = _normalise_reviewer_code(reviewer_code)
     thr = _get_scenario_threshold(scenario_id)
+    n_audit = _audit_sample_size(scenario_id)
     with engine.begin() as conn:
         reviewer = _reviewer_index_for_code(conn, scenario_id, code)
         col = f"reviewer_{reviewer}_status"
+        # Ce que CE relecteur n'a pas encore jugé : le sous-ensemble pertinent, plus
+        # l'échantillon d'audit (le même pour les deux relecteurs).
+        pending = f"""
+            WITH audit AS ({_audit_pool_sql()}),
+            q AS (
+                SELECT d.id, d.title, d.abstract, d.year, d.journal, d.doi,
+                       ars.similarity_score, ars.rerank_score,
+                       ars.reviewer_1_status, ars.reviewer_2_status,
+                       (au.document_id IS NOT NULL) AS audit_sample,
+                       CASE WHEN au.document_id IS NOT NULL
+                            THEN md5(ars.scenario_id || ':' || ars.document_id::text) END AS audit_key
+                FROM article_scenarios ars
+                JOIN literature_document d ON d.id = ars.document_id
+                LEFT JOIN audit au ON au.document_id = ars.document_id
+                WHERE ars.scenario_id = :sid
+                  AND ars.{col} IS NULL
+                  AND (au.document_id IS NOT NULL OR {relevant_gate_sql('d', 'ars', ':thr')})
+            )
+        """
+        params = {"sid": scenario_id, "thr": thr, "n_audit": n_audit}
         rows = conn.execute(text(f"""
-            SELECT d.id, d.title, d.abstract, d.year, d.journal, d.doi,
-                   ars.similarity_score, ars.rerank_score,
-                   ars.reviewer_1_status, ars.reviewer_2_status
-            FROM article_scenarios ars
-            JOIN literature_document d ON d.id = ars.document_id
-            WHERE ars.scenario_id = :sid
-              AND ars.{col} IS NULL
-              AND {relevant_gate_sql('d', 'ars', ':thr')}
-            ORDER BY COALESCE(ars.rerank_score, ars.similarity_score, 0) DESC NULLS LAST,
-                     d.id
+            {pending}
+            SELECT id, title, abstract, year, journal, doi, similarity_score, rerank_score,
+                   reviewer_1_status, reviewer_2_status, audit_sample
+            FROM (
+                SELECT q.*,
+                       ROW_NUMBER() OVER (PARTITION BY audit_sample
+                           ORDER BY audit_key,
+                                    COALESCE(rerank_score, similarity_score, 0) DESC NULLS LAST,
+                                    id) AS rn,
+                       COUNT(*) OVER (PARTITION BY audit_sample) AS n_part
+                FROM q
+            ) ranked
+            ORDER BY (rn - 0.5) / n_part, audit_sample, id
             LIMIT :lim
-        """), {"sid": scenario_id, "thr": thr, "lim": max(1, min(int(limit), 200))}
-        ).mappings().all()
-        remaining = conn.execute(text(f"""
-            SELECT COUNT(*) FROM article_scenarios ars
-            JOIN literature_document d ON d.id = ars.document_id
-            WHERE ars.scenario_id = :sid AND ars.{col} IS NULL
-              AND {relevant_gate_sql('d', 'ars', ':thr')}
-        """), {"sid": scenario_id, "thr": thr}).scalar() or 0
+        """), {**params, "lim": max(1, min(int(limit), 200))}).mappings().all()
+        counts = conn.execute(text(f"""
+            {pending}
+            SELECT COUNT(*) FILTER (WHERE NOT audit_sample) AS relevant,
+                   COUNT(*) FILTER (WHERE audit_sample) AS audit
+            FROM q
+        """), params).mappings().first() or {}
+    n_rel, n_aud = int(counts.get("relevant") or 0), int(counts.get("audit") or 0)
     return {
         "scenario_id": scenario_id, "reviewer": reviewer, "reviewer_code": code,
-        "remaining": int(remaining), "returned": len(rows),
+        "remaining": n_rel + n_aud, "remaining_relevant": n_rel, "remaining_audit": n_aud,
+        "audit_sample_size": n_audit, "returned": len(rows),
         "articles": [dict(r) for r in rows],
     }
 

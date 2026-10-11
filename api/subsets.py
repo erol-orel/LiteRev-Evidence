@@ -44,6 +44,9 @@ from .scenario_store import (
 # refaire.
 SUBSET_REASON_PREFIX = "scope:"
 
+#: L'identifiant que HDBSCAN donne aux articles qu'il n'a rangés dans aucun thème.
+NOISE_CLUSTER = -1
+
 
 # ─── La décision, pure et testable hors base ────────────────────────────────
 def plan_subset(
@@ -67,7 +70,8 @@ def plan_subset(
 
     Une dimension vaut `None` quand la sélection ne s'en sert pas. Pour chaque article et
     chaque dimension employée, le verdict est `in`, `out`, ou `unknown` (l'article est
-    hors de la projection : jamais clusterisé, ou sans concepts extraits).
+    hors de la projection : jamais clusterisé, rangé dans aucun thème (groupe -1, sauf si
+    ce groupe est coché), ou sans concepts extraits).
 
     `combine='all'` garde l'article si TOUTES les dimensions qui savent le juger disent
     `in` ; `combine='any'` s'il y en a au moins une. Dans les deux cas une dimension qui ne
@@ -81,6 +85,7 @@ def plan_subset(
         raise ValueError("unassigned doit valoir 'keep' ou 'exclude'")
 
     verdicts: list[tuple[str, Any]] = []
+    unclustered = 0
     if cluster_of is not None:
         wanted = clusters_wanted or set()
 
@@ -88,8 +93,16 @@ def plan_subset(
             c = cluster_of.get(i)
             if c is None:
                 return "unknown"
+            # Le groupe -1 n'est pas un thème : c'est ce que HDBSCAN n'a PAS su grouper.
+            # Le traiter comme un cluster qu'on n'a pas coché écrivait `excluded` sur
+            # chacun de ses articles (« garder A et B » jetait tout le bruit, qui pèse
+            # lourd sur un petit corpus). Il ne juge donc rien, comme un article au-delà
+            # du plafond, sauf si le relecteur a coché ce groupe en toutes lettres.
+            if c == NOISE_CLUSTER:
+                return "in" if c in wanted else "unknown"
             return "in" if c in wanted else "out"
 
+        unclustered = sum(1 for i in relevant if cluster_of.get(i) == NOISE_CLUSTER)
         verdicts.append(("clusters", _cluster))
     if concept_match is not None:
         known = concept_known if concept_known is not None else set(concept_match)
@@ -170,6 +183,9 @@ def plan_subset(
         "keep": len(keep),
         "exclude": len(drop),
         "undecided": len(undecided),
+        # Combien d'articles pertinents la projection n'a pas groupés (le groupe -1) :
+        # l'aperçu doit pouvoir dire quelle part de « non jugés » vient de là.
+        "unclustered": unclustered,
         "by_dimension": tally,
         "combine": combine,
         "unassigned": unassigned,

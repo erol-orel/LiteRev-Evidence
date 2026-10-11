@@ -153,14 +153,9 @@ def get_user_scenario_prisma(
     """
     row = _get_user_scenario_or_404(scenario_id)
 
-    # Effective threshold (param > saved setting > default 0.45)
-    with engine.connect() as conn:
-        ss = conn.execute(text(
-            "SELECT similarity_threshold FROM scenario_settings WHERE scenario_id=:sid"
-        ), {"sid": scenario_id}).first()
-    eff_threshold = threshold if threshold is not None else (
-        float(ss[0]) if ss and ss[0] is not None else 0.45
-    )
+    # Seuil effectif : le paramètre, sinon le seuil EN VIGUEUR du scénario, par la lecture
+    # commune (un seuil jamais choisi vaut le seuil de départ, pas un 0.45 recopié ici).
+    eff_threshold = threshold if threshold is not None else _get_scenario_threshold(scenario_id)
     # Le second seuil de la porte de pertinence (score du cross-encoder). Il façonne
     # l'ensemble de preuves exactement comme le premier, mais n'était servi nulle part.
     rerank_threshold = float(_get_scenario_rerank_threshold(scenario_id) or 0.0)
@@ -624,6 +619,9 @@ def screen_user_scenario_article(
     # autres : de leur brief, de leurs extractions, de leurs exports et de leurs
     # compteurs, sans qu'un écran de ces revues ne le dise. Deux scénarios de production
     # partagent une requête sur la grippe aviaire et se déplaçaient ainsi l'un l'autre.
+    #
+    # Une décision qui change le statut périme aussi les cartes (thèmes, graphe, concepts)
+    # dans la même transaction : `_write_ars_screening` s'en charge pour tous ses appelants.
     with engine.begin() as conn:
         _write_ars_screening(conn, scenario_id, article_id, status, reason, notes)
     return {"id": article_id, "status": status, "updated": True, "scope": "scenario"}

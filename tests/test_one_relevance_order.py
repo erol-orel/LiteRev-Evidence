@@ -47,7 +47,9 @@ def test_a_threshold_puts_the_relevant_first_and_nothing_else_changes():
 def test_the_screening_status_read_is_the_per_scenario_one():
     """Un article exclu dans une AUTRE revue ne doit pas remonter en tête de celle-ci."""
     sql = relevance_order_sql("d", "ars")
-    assert "(ars.screening_status = 'included') DESC" in sql
+    # `IS TRUE`: an unscreened article has a NULL status, and a NULL key sorts FIRST in a
+    # descending order, ahead of the hand inclusions it was meant to follow.
+    assert "(ars.screening_status = 'included') IS TRUE DESC" in sql
     assert "d.screening_status" not in sql
 
 
