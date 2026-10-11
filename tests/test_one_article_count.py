@@ -224,12 +224,76 @@ def test_the_terms_of_a_search_are_cumulative_and_folded():
 
 
 def test_the_search_looks_at_the_fields_a_reviewer_remembers():
-    from api.scenario_store import corpus_search_sql
-    sql = corpus_search_sql("cq_0", doc="d")
-    for field in ("d.title", "d.abstract", "d.authors", "d.journal", "d.keywords",
-                  "d.doi", "d.pmid"):
-        assert field in sql
-    assert "lower(" in sql and "translate(" in sql
+    from api.scenario_store import corpus_search_ids_sql, corpus_search_sql
+    for sql in (corpus_search_sql("cq_0", doc="d"), corpus_search_ids_sql(["cq_0"], "TRUE")):
+        for field in ("d.title", "d.abstract", "d.authors", "d.journal", "d.keywords",
+                      "d.doi", "d.pmid"):
+            assert field in sql
+        assert "lower(" in sql and "translate(" in sql
+
+
+# Sur HPAI_last (15 660 articles dans une bibliothèque de 494 213), « poultry cats » avec
+# « Pertinents seulement » prenait 208 secondes en production : le prédicat, posé dans le
+# WHERE de la jointure, était évalué sur la bibliothèque entière avant la jointure.
+
+def test_the_folded_text_is_computed_only_behind_a_fence_over_the_scenario():
+    from api.scenario_store import corpus_search_ids_sql
+    sql = corpus_search_ids_sql(["cq_0", "cq_1"], "d.year > 2000")
+    fence, after = sql.split("SELECT id FROM scope", 1)
+    assert "AS MATERIALIZED" in fence, "sans barrière, l'optimiseur peut repousser le LIKE"
+    assert "ars.scenario_id = :sid" in fence and "d.year > 2000" in fence
+    assert "translate(" in fence and "translate(" not in after
+    assert "hay LIKE :cq_0" in after and "hay LIKE :cq_1" in after
+
+
+def test_the_corpus_endpoint_no_longer_puts_the_term_predicate_in_its_joins():
+    src = open("api/scenarios.py", encoding="utf-8").read()
+    assert "corpus_search_sql(" not in src
+    assert "corpus_search_ids_sql(" in src and "d.id = ANY(CAST(:cq_ids AS bigint[]))" in src
+
+
+def _plan_nodes(node):
+    yield node
+    for child in node.get("Plans", []) or []:
+        yield from _plan_nodes(child)
+
+
+def test_the_library_is_never_scanned_with_the_folded_text(db_conn):
+    """Sous le plan que la production choisissait (jointure par hachage), l'ancien
+    prédicat filtrait le parcours de literature_document lui-même ; le nouveau ne le
+    calcule qu'après la jointure avec le scénario."""
+    import json as _json
+    from api.scenario_store import corpus_search_ids_sql, corpus_search_sql, relevant_gate_sql
+    _seed_searchable(db_conn)
+    try:
+        scope = " AND ".join(["(d.is_duplicate IS NULL OR d.is_duplicate = FALSE)",
+                              relevant_gate_sql(doc="d", link="ars", thr="0.45")])
+        old = (f"SELECT d.id FROM literature_document d JOIN article_scenarios ars"
+               f" ON ars.document_id = d.id AND ars.scenario_id = %(sid)s"
+               f" WHERE {scope} AND {corpus_search_sql('cq_0')} AND {corpus_search_sql('cq_1')}")
+        new = corpus_search_ids_sql(["cq_0", "cq_1"], scope)
+        params = {"sid": SID, "cq_0": "%dengue%", "cq_1": "%vaccine%"}
+
+        def _scans_with_fold(sql):
+            sql = sql.replace(":sid", "%(sid)s").replace(":cq_0", "%(cq_0)s").replace(":cq_1", "%(cq_1)s")
+            with db_conn.cursor() as cur:
+                cur.execute("SET enable_nestloop = off")
+                cur.execute("EXPLAIN (VERBOSE, FORMAT JSON) " + sql, params)
+                plan = cur.fetchone()[0]
+                cur.execute("RESET enable_nestloop")
+            plan = plan if isinstance(plan, list) else _json.loads(plan)
+            return [n for n in _plan_nodes(plan[0]["Plan"])
+                    if n.get("Relation Name") == "literature_document"
+                    and "translate(" in (n.get("Filter") or "")]
+
+        assert _scans_with_fold(old), "le témoin ne reproduit plus le plan fautif"
+        assert not _scans_with_fold(new)
+        with db_conn.cursor() as cur:
+            cur.execute(new.replace(":sid", "%(sid)s").replace(":cq_0", "%(cq_0)s")
+                        .replace(":cq_1", "%(cq_1)s"), params)
+            assert sorted(r[0] for r in cur.fetchall()) == [8610]   # 8613 est exclu
+    finally:
+        _cleanup(db_conn)
 
 
 def _seed_searchable(db_conn):
@@ -293,6 +357,20 @@ def test_a_search_ignores_accents_in_either_direction(db_conn):
         _cleanup(db_conn)
 
 
+def test_a_search_and_the_relevant_filter_still_compose(db_conn):
+    """Les termes sont cherchés parmi les articles qui passent déjà les autres filtres."""
+    _seed_searchable(db_conn)
+    try:
+        got = main.get_user_scenario_corpus(SID, limit=50, q="vaccine efficacy", relevant_only=True,
+                                            threshold=0.45, abstract_chars=None)
+        assert got["filtered_total"] == 1 and [a["id"] for a in got["articles"]] == [8610]
+        none = main.get_user_scenario_corpus(SID, limit=50, q="nothing-matches-this",
+                                             abstract_chars=None)
+        assert none["filtered_total"] == 0 and none["articles"] == [] and none["total"] == 4
+    finally:
+        _cleanup(db_conn)
+
+
 def test_an_empty_search_is_not_a_filter(db_conn):
     _seed_searchable(db_conn)
     try:
@@ -343,3 +421,31 @@ def test_the_same_heuristic_as_the_search_itself(db_conn):
             assert bool(d["boolean_queries"]) is _looks_boolean(q), q
         finally:
             _cleanup(db_conn)
+
+
+# ── le voyant Cohere dit combien d'articles sont rerankés ─────────────────────
+# Sur HPAI_last, la carte « Scores de pertinence » affichait « 15660 / 15660 articles
+# scorés » et un voyant Cohere vert, pour 100 articles rerankés sur 15 660.
+
+def test_a_partial_rerank_is_reported_as_partial_not_as_ready(db_conn, monkeypatch):
+    monkeypatch.setenv("COHERE_API_KEY", "test-key")
+    _seed(db_conn)
+    try:
+        with db_conn.cursor() as cur:
+            cur.execute("UPDATE literature_document SET abstract = repeat('a long enough abstract ', 3)"
+                        " WHERE id BETWEEN 8600 AND 8606")
+            cur.execute("UPDATE article_scenarios SET rerank_score = 0.7"
+                        " WHERE scenario_id = %s AND document_id = 8600", (SID,))
+        st = main.get_user_scenario_embedding_status(SID)
+        assert st["ranking"]["reranked"] == 1
+        assert st["ranking"]["rerank_scorable"] == 6          # le doublon est dehors
+        assert st["score_availability"]["cohere"] is False
+        assert st["score_availability"]["cohere_partial"] is True
+        with db_conn.cursor() as cur:
+            cur.execute("UPDATE article_scenarios SET rerank_score = 0.7 WHERE scenario_id = %s", (SID,))
+        st = main.get_user_scenario_embedding_status(SID)
+        assert st["score_availability"]["cohere"] is True
+        assert st["score_availability"]["cohere_partial"] is False
+        assert st["ranking"]["rerank_complete"] is True
+    finally:
+        _cleanup(db_conn)

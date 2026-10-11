@@ -162,6 +162,7 @@ import {
   decideQuestionProposal,
   questionExportUrl,
   type ScenarioQuestionsPage,
+  type RerankJob,
 } from "../lib/api";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -2504,15 +2505,25 @@ function CorpusSection({ scenarioId, threshold, counts, onUseAsThreshold }:
         // d'où un numérateur plus grand que son dénominateur. Un seul objet désormais.
         const total = embeddingStatus.counts?.total ?? embeddingStatus.corpus_total ?? embeddingStatus.ranking?.total ?? 0;
         const scored = embeddingStatus.counts?.scored ?? embeddingStatus.ranking?.scored ?? 0;
+        const reranked = embeddingStatus.ranking?.reranked ?? embeddingStatus.counts?.reranked ?? 0;
+        const rerankScorable = embeddingStatus.ranking?.rerank_scorable ?? total;
         const semanticReady = embeddingStatus.score_availability.semantic;
         const cohereReady = embeddingStatus.score_availability.cohere;
+        const coherePartial = embeddingStatus.score_availability.cohere_partial ?? false;
         const cohereConfigured = embeddingStatus.score_availability.cohere_configured ?? false;
-        // Voyant tri-état : vert (prêt) / ambre (en cours) / gris (indisponible).
+        // Voyant tri-état : vert (prêt) / ambre (en cours ou partiel) / gris (indisponible).
         type S = 'on' | 'pending' | 'off';
         const dot = (s: S) => s === 'on' ? 'bg-brand-400' : s === 'pending' ? 'bg-gold-400' : 'bg-white/20';
         const txt = (s: S) => s === 'on' ? 'text-forest-400' : s === 'pending' ? 'text-gold-300' : 'text-white/25';
         const semanticState: S = semanticReady ? 'on' : (scored > 0 ? 'pending' : 'off');
         const cohereState: S = cohereReady ? 'on' : (cohereConfigured ? 'pending' : 'off');
+        // Les deux scores, chacun avec SON compte. Le compte affiché était celui de la
+        // similarité seule (« 15660 / 15660 scorés ») à côté d'un voyant Cohere vert, pour
+        // 100 articles rerankés sur 15 660 : la carte disait « tout est classé » quand le
+        // panneau du seuil, juste au-dessus, disait le contraire.
+        const cohereSuffix = cohereState === 'off' ? t("scenarioDetail.corpus.cohereNotConfigured")
+          : coherePartial ? t("scenarioDetail.corpus.coherePartial")
+          : cohereState === 'pending' ? t("scenarioDetail.corpus.cohereWaiting") : '';
         return (
           <div className="rounded-2xl border border-white/10 bg-white/3 px-4 py-3">
             <div className="space-y-1.5">
@@ -2524,9 +2535,18 @@ function CorpusSection({ scenarioId, threshold, counts, onUseAsThreshold }:
                 </span>
               </div>
               <p className="text-[11px] text-white/70">
-                <span className="text-white font-semibold">{scored}</span> / {total} {t("scenarioDetail.corpus.articlesScoredSuffix")}
-                {!semanticReady && scored < total && ` · ${total - scored} ${t("scenarioDetail.corpus.inProgressSuffix")}`}
+                {t("scenarioDetail.corpus.semanticLine")
+                  .replace("{scored}", scored.toLocaleString())
+                  .replace("{total}", total.toLocaleString())}
+                {!semanticReady && scored < total && ` · ${(total - scored).toLocaleString()} ${t("scenarioDetail.corpus.inProgressSuffix")}`}
               </p>
+              {cohereConfigured && (
+                <p className={`text-[11px] ${cohereReady ? 'text-white/70' : 'text-gold-300/90'}`}>
+                  {t("scenarioDetail.corpus.rerankLine")
+                    .replace("{reranked}", reranked.toLocaleString())
+                    .replace("{scorable}", rerankScorable.toLocaleString())}
+                </p>
+              )}
               <div className="flex items-center gap-3 flex-wrap">
                 <span title={t("scenarioDetail.corpus.semanticTooltip")}
                   className={`text-[10px] flex items-center gap-1 ${txt(semanticState)}`}>
@@ -2536,7 +2556,7 @@ function CorpusSection({ scenarioId, threshold, counts, onUseAsThreshold }:
                 <span title={t("scenarioDetail.corpus.cohereTooltip")}
                   className={`text-[10px] flex items-center gap-1 ${txt(cohereState)}`}>
                   <span className={`h-1.5 w-1.5 rounded-full ${dot(cohereState)}`} />
-                  {t("scenarioDetail.corpus.cohere")}{cohereState === 'pending' ? t("scenarioDetail.corpus.cohereWaiting") : cohereState === 'off' ? t("scenarioDetail.corpus.cohereNotConfigured") : ''}
+                  {t("scenarioDetail.corpus.cohere")}{cohereSuffix}
                 </span>
               </div>
             </div>
@@ -6331,6 +6351,9 @@ function SeuilSection({ scenarioId, onSaved, onThresholdChange, incoming }: {
   const [saving, setSaving] = React.useState(false);
   const [saved, setSaved] = React.useState(false);
   const [rerankStatus, setRerankStatus] = React.useState<string | null>(null);
+  // Pourquoi un scoring s'est arrêté (refus du fournisseur, job sans signe de vie) : dit
+  // en rouge, au lieu d'un « Lancement du scoring... » qui restait affiché des heures.
+  const [rerankError, setRerankError] = React.useState<string | null>(null);
   const [saveError, setSaveError] = React.useState<string | null>(null);
   // Ce que le bouton va VRAIMENT faire : combien d'articles n'ont pas de score, et
   // combien n'en auront jamais faute de résumé exploitable.
@@ -6338,6 +6361,60 @@ function SeuilSection({ scenarioId, onSaved, onThresholdChange, incoming }: {
   const [showCurve, setShowCurve] = React.useState(false);
   const [curveKey, setCurveKey] = React.useState(0);
   const pollRef = React.useRef<ReturnType<typeof setInterval> | null>(null);
+
+  // Ce que fait le scoring en cours, en une ligne : la phase, puis les lots notés et
+  // refusés. Sans elle, l'écran restait sur « Lancement du scoring... » jusqu'à la fin.
+  const describeJob = (s: RerankJob): string => {
+    if (s.phase === "cosine") return t("scenarioDetail.seuil.progressCosine");
+    let line = t("scenarioDetail.seuil.progressRerank")
+      .replace("{scored}", (s.reranked ?? 0).toLocaleString())
+      .replace("{candidates}", (s.rerank_candidates ?? 0).toLocaleString());
+    if ((s.rerank_batches_failed ?? 0) > 0) {
+      line += " · " + t("scenarioDetail.seuil.progressRefused")
+        .replace("{n}", String(s.rerank_batches_failed))
+        .replace("{reason}", s.rerank_last_error || "?");
+    }
+    return line;
+  };
+
+  const startPolling = () => {
+    if (pollRef.current) clearInterval(pollRef.current);   // pas d'orphelin
+    pollRef.current = setInterval(() => {
+      getRerankStatus(scenarioId).then(s => {
+        // La couverture suit le scoring : le bouton « Noter les N manquants » descend
+        // au fil des lots écrits.
+        setCoverage({ scorable: s.scorable ?? 0, missing: s.missing ?? 0, unscorable: s.unscorable ?? 0 });
+        if (s.status === "running") {
+          setRerankStatus(describeJob(s));
+          return;
+        }
+        if (pollRef.current) clearInterval(pollRef.current);
+        if (s.status === "done") {
+          let msg = t("scenarioDetail.seuil.scoringDone")
+            .replace("{reranked}", (s.reranked ?? 0).toLocaleString())
+            .replace("{candidates}", (s.rerank_candidates ?? 0).toLocaleString());
+          if ((s.updated ?? 0) > 0) {
+            msg += " · " + t("scenarioDetail.seuil.scoringDoneCosine").replace("{n}", (s.updated ?? 0).toLocaleString());
+          }
+          setRerankStatus(msg);
+          setTimeout(() => setRerankStatus(null), 8000);
+        } else {
+          setRerankStatus(null);
+          setRerankError(s.status === "stalled"
+            ? t("scenarioDetail.seuil.scoringStalled")
+            : t("scenarioDetail.seuil.scoringStopped")
+                .replace("{scored}", (s.reranked ?? 0).toLocaleString())
+                .replace("{candidates}", (s.rerank_candidates ?? 0).toLocaleString())
+                .replace("{reason}", s.rerank_stopped || s.error || "?"));
+        }
+        onSaved?.();   // final refresh so the computed scores/badges show
+      }).catch(() => {
+        // Erreur transitoire : nettoyer l'intervalle (sinon poll infini + rejet non géré).
+        if (pollRef.current) clearInterval(pollRef.current);
+        setRerankStatus(t("scenarioDetail.seuil.scoringError"));
+      });
+    }, 3000);
+  };
 
   React.useEffect(() => {
     getScenarioSettings(scenarioId)
@@ -6347,10 +6424,14 @@ function SeuilSection({ scenarioId, onSaved, onThresholdChange, incoming }: {
       })
       .catch(() => {});
     getRerankStatus(scenarioId)
-      .then(s => setCoverage({
-        scorable: s.scorable ?? 0, missing: s.missing ?? 0, unscorable: s.unscorable ?? 0 }))
+      .then(s => {
+        setCoverage({ scorable: s.scorable ?? 0, missing: s.missing ?? 0, unscorable: s.unscorable ?? 0 });
+        // Un scoring lancé avant d'ouvrir la page (ou avant un rechargement) se suit aussi.
+        if (s.status === "running") { setRerankStatus(describeJob(s)); startPolling(); }
+      })
       .catch(() => {});
     return () => { if (pollRef.current) clearInterval(pollRef.current); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [scenarioId]);
 
   // Porter le seuil au score d'un article. On NE sauvegarde pas d'office : le curseur
@@ -6387,31 +6468,19 @@ function SeuilSection({ scenarioId, onSaved, onThresholdChange, incoming }: {
   };
 
   const handleRerank = async (missingOnly = false) => {
+    setRerankError(null);
     setRerankStatus(t("scenarioDetail.seuil.launchScoring"));
     try {
-      await triggerRerank(scenarioId, undefined, missingOnly);
+      const r = await triggerRerank(scenarioId, undefined, missingOnly);
+      // Un scoring tourne déjà : le dire, avec son avancement, plutôt que de laisser
+      // croire que ce clic en a lancé un.
+      if (r.status === "already_running") {
+        setRerankStatus(t("scenarioDetail.seuil.alreadyRunning") + (r.job ? " " + describeJob(r.job) : ""));
+      }
       // Refresh the corpus so it picks up rerank_running and auto-refreshes the
       // relevance (Cohere) badges live, instead of only on a manual page reload.
       onSaved?.();
-      if (pollRef.current) clearInterval(pollRef.current);   // pas d'orphelin
-      pollRef.current = setInterval(() => {
-        getRerankStatus(scenarioId).then(s => {
-          if (s.status === "done") {
-            if (pollRef.current) clearInterval(pollRef.current);
-            setRerankStatus(t("scenarioDetail.seuil.scoringDonePrefix") + (s.updated ?? "?") + t("scenarioDetail.seuil.scoringDoneSuffix"));
-            setCoverage({ scorable: s.scorable ?? 0, missing: s.missing ?? 0, unscorable: s.unscorable ?? 0 });
-            setTimeout(() => setRerankStatus(null), 4000);
-            onSaved?.();   // final refresh so the computed scores/badges show
-          } else if (s.status === "error") {
-            if (pollRef.current) clearInterval(pollRef.current);
-            setRerankStatus(t("scenarioDetail.seuil.scoringError"));
-          }
-        }).catch(() => {
-          // Erreur transitoire : nettoyer l'intervalle (sinon poll infini + rejet non géré).
-          if (pollRef.current) clearInterval(pollRef.current);
-          setRerankStatus(t("scenarioDetail.seuil.scoringError"));
-        });
-      }, 3000);
+      startPolling();
     } catch (e: any) {
       setRerankStatus(t("scenarioDetail.seuil.errorPrefix") + e.message);
     }
@@ -6499,6 +6568,9 @@ function SeuilSection({ scenarioId, onSaved, onThresholdChange, incoming }: {
         </button>
         {rerankStatus && (
           <span className="text-[10px] text-gold-400">{rerankStatus}</span>
+        )}
+        {rerankError && (
+          <span className="text-[10px] text-rose-400">{rerankError}</span>
         )}
         {/* L'échec d'enregistrement, dit. Il était avalé, et l'interface restait sur un
             seuil que le serveur n'a jamais reçu. */}

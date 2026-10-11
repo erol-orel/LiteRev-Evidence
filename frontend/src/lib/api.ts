@@ -2544,10 +2544,15 @@ export interface EmbeddingStatus {
     scored: number;
     reranked: number;
     complete: boolean;
+    /** Le dénominateur du rerank : les articles qui ont un résumé exploitable. */
+    rerank_scorable?: number;
+    rerank_missing?: number;
+    rerank_complete?: boolean;
   };
   score_availability: {
     semantic: boolean;            // vert seulement quand TOUT le corpus est scoré
-    cohere: boolean;              // vert seulement quand le rerank a réellement tourné
+    cohere: boolean;              // vert seulement quand tout ce qui peut être reranké l'est
+    cohere_partial?: boolean;     // une partie seulement : ambre, avec le compte
     cohere_configured?: boolean;  // clé présente (distingue "pas de clé" de "pas encore")
   };
 }
@@ -3150,11 +3155,29 @@ export async function fetchUserScenarioEmbeddingStatus(
   return r.json();
 }
 
+/** Un scoring en cours ou terminé, tel que le serveur le décrit. */
+export interface RerankJob {
+  /** idle | running | done | error | stalled (en cours, mais sans signe de vie). */
+  status: string;
+  /** cosine (similarité) puis rerank (Cohere), pendant le scoring. */
+  phase?: string;
+  updated?: number;
+  error?: string;
+  reranked?: number;
+  rerank_candidates?: number;
+  rerank_batches_ok?: number;
+  rerank_batches_failed?: number;
+  rerank_skipped_no_key?: boolean;
+  /** Le dernier refus du fournisseur, et pourquoi le balayage s'est arrêté avant la fin. */
+  rerank_last_error?: string | null;
+  rerank_stopped?: string | null;
+}
+
 export async function triggerRerank(
   scenarioId: string,
   query?: string,
   missingOnly = false,
-): Promise<{ status: string; scenario_id: string; query?: string }> {
+): Promise<{ status: string; scenario_id: string; query?: string; job?: RerankJob }> {
   const p = new URLSearchParams();
   if (query) p.set('query', query);
   if (missingOnly) p.set('missing_only', 'true');
@@ -3166,12 +3189,10 @@ export async function triggerRerank(
 
 export async function getRerankStatus(
   scenarioId: string,
-): Promise<{
-  status: string; updated?: number; error?: string;
+): Promise<RerankJob & {
   /** Read from the database, not from the in-memory job: "idle" used to mean "I have
    *  forgotten", since every deploy wipes the job. These say what is true now. */
   scorable?: number; missing?: number; unscorable?: number;
-  reranked?: number; rerank_batches_failed?: number; rerank_skipped_no_key?: boolean;
 }> {
   const r = await safeFetch(`${API_BASE_URL}/scenarios/${scenarioId}/rerank/status`);
   if (!r.ok) throw new Error(httpMessage(r.status));

@@ -2787,10 +2787,13 @@ def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict
                 if _ce_res.get("skipped_no_key"):
                     update_step("cross_encoder", "skipped", reason="Clé Cohere non configurée")
                 else:
+                    # `stopped` : le fournisseur a refusé et le balayage s'est arrêté avant
+                    # la fin (les articles non notés restent sans score, donc gardés).
                     update_step("cross_encoder", "done",
                                 scored=_ce_res.get("scored", 0),
                                 candidates=_ce_res.get("candidates", 0),
-                                batches_failed=_ce_res.get("batches_failed", 0))
+                                batches_failed=_ce_res.get("batches_failed", 0),
+                                stopped=_ce_res.get("stopped"))
             else:
                 update_step("cross_encoder", "skipped", reason="Clé Cohere non configurée")
         except Exception as _ce_ex:

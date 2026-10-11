@@ -478,16 +478,54 @@ _ACCENT_FROM = "àáâãäåçèéêëìíîïñòóôõöùúûüýÿ"
 _ACCENT_TO = "aaaaaaceeeeiiiinooooouuuuyy"
 
 
+def _corpus_haystack_sql(doc: str = "d") -> str:
+    """Le texte où l'on cherche : les sept champs, en minuscules, accents repliés."""
+    fields = (f"{doc}.title", f"{doc}.abstract", f"{doc}.authors", f"{doc}.journal",
+              f"{doc}.keywords", f"{doc}.doi", f"{doc}.pmid")
+    folded = " || ' ' || ".join(f"COALESCE({f}, '')" for f in fields)
+    return f"translate(lower({folded}), '{_ACCENT_FROM}', '{_ACCENT_TO}')"
+
+
 def corpus_search_sql(param: str, doc: str = "d") -> str:
     """Le prédicat SQL d'UN terme de recherche dans le corpus, pour un WHERE.
 
     `param` est le nom du paramètre lié qui porte le motif (déjà en minuscules, accents
-    repliés, encadré de %). Pur : aucune connexion, testable hors base."""
-    fields = (f"{doc}.title", f"{doc}.abstract", f"{doc}.authors", f"{doc}.journal",
-              f"{doc}.keywords", f"{doc}.doi", f"{doc}.pmid")
-    folded = " || ' ' || ".join(f"COALESCE({f}, '')" for f in fields)
-    return (f"translate(lower({folded}), '{_ACCENT_FROM}', '{_ACCENT_TO}')"
-            f" LIKE :{param}")
+    repliés, encadré de %). Pur : aucune connexion, testable hors base.
+
+    À ne pas poser tel quel dans une jointure avec la bibliothèque entière : voir
+    `corpus_search_ids_sql`, que l'onglet Corpus emploie."""
+    return f"{_corpus_haystack_sql(doc)} LIKE :{param}"
+
+
+def corpus_search_ids_sql(params: list[str], scope_where: str) -> str:
+    """Les identifiants des articles DU SCÉNARIO qui portent tous les termes, en UNE
+    instruction. Pur.
+
+    Le prédicat d'un terme replie sept champs par ligne, résumé compris. Postgres le
+    chiffre comme une comparaison ordinaire et juge un LIKE très sélectif : posé dans le
+    WHERE de la jointure, il pouvait donc filtrer d'abord les 494 213 articles de la
+    bibliothèque, puis joindre le scénario. Sur HPAI_last (15 660 articles), « poultry
+    cats » avec « Pertinents seulement » prenait 208 secondes en production, et le même
+    texte sans ce filtre 8 secondes, répété dans quatre requêtes.
+
+    Ici le texte replié n'est calculé que dans une CTE MATERIALIZED, une barrière que
+    l'optimiseur ne traverse pas : elle ne contient que les liens du scénario qui passent
+    déjà les filtres bon marché (`scope_where` : doublons, années, source, porte de
+    pertinence), une fois par ligne et non une fois par terme. Le LIKE ne s'applique
+    qu'après. L'appelant pose ensuite `d.id = ANY(...)` dans ses requêtes.
+
+    `scope_where` lit les alias `d` (literature_document) et `ars` (article_scenarios)
+    et le paramètre `:sid` ; `params` nomme les paramètres liés qui portent les termes."""
+    likes = " AND ".join(f"hay LIKE :{p}" for p in params) or "TRUE"
+    return f"""
+        WITH scope AS MATERIALIZED (
+            SELECT d.id, {_corpus_haystack_sql("d")} AS hay
+            FROM literature_document d
+            JOIN article_scenarios ars ON ars.document_id = d.id AND ars.scenario_id = :sid
+            WHERE {scope_where}
+        )
+        SELECT id FROM scope WHERE {likes}
+    """
 
 
 def corpus_search_terms(query: str, max_terms: int = 8) -> list[str]:

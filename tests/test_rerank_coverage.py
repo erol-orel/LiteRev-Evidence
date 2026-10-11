@@ -133,7 +133,7 @@ def seeded(db_conn, monkeypatch):
 
 
 def _fake_cohere(calls):
-    def _f(query, docs, model="rerank-v3.5"):
+    def _f(query, docs, model="rerank-v3.5", **_kw):
         calls.append(len(docs))
         return [0.5] * len(docs)
     return _f
@@ -178,7 +178,7 @@ def test_a_failing_batch_does_not_lose_the_others(seeded, db_conn, monkeypatch):
     """Avant : une erreur rendait 0 et rien n'était écrit, pour tout le corpus."""
     seen = {"n": 0}
 
-    def _flaky(query, docs, model="rerank-v3.5"):
+    def _flaky(query, docs, model="rerank-v3.5", **_kw):
         seen["n"] += 1
         if seen["n"] == 2:
             return None                    # le deuxième lot échoue
@@ -331,3 +331,191 @@ def test_retries_are_bounded(monkeypatch):
     monkeypatch.setattr(_rq, "post", _post)
     assert RR._cohere_rerank("q", ["a"]) is None
     assert calls["n"] == 4, "une tentative initiale plus trois reprises"
+
+
+# ─── Un balayage qui ne finit pas doit le dire, et s'arrêter ────────────────
+# Vu en production sur HPAI_last : « Noter les 15 560 manquants » affichait « Lancement du
+# scoring... » pendant des heures, le compte restait à 100 articles rerankés sur 15 660, et
+# un second clic, trois minutes plus tard, lançait un second balayage en parallèle du
+# premier. Chaque lot refusé coûtait deux minutes de reprises : 157 lots, plus de cinq
+# heures, sans un mot à l'écran.
+
+class _HttpResp(_Resp):
+    """Comme `requests.Response` : son raise_for_status lève une RequestException."""
+
+    def raise_for_status(self):
+        import requests as _rq
+        if self.status_code >= 400:
+            raise _rq.exceptions.HTTPError(f"HTTP {self.status_code}")
+
+
+def _post_returning(resp, calls):
+    def _post(url, headers=None, json=None, timeout=None):
+        calls["n"] += 1
+        return resp
+    return _post
+
+
+def test_a_refused_key_is_not_retried_and_says_why(monkeypatch):
+    """Le 401 passait par raise_for_status, dont l'exception est une RequestException,
+    attrapée par la branche « panne réseau » : il était réessayé cinq fois."""
+    import api.relevance as RR
+    import requests as _rq
+    monkeypatch.setenv("COHERE_API_KEY", "k")
+    monkeypatch.setattr(RR, "_RERANK_BACKOFF_S", 0.0)
+    calls = {"n": 0}
+    monkeypatch.setattr(_rq, "post", _post_returning(
+        _HttpResp(401, {"message": "invalid api token"}), calls))
+    failure: dict = {}
+    assert RR._cohere_rerank("q", ["a"], failure=failure) is None
+    assert calls["n"] == 1, "une clé refusée a été réessayée"
+    assert failure == {"status": 401, "message": "invalid api token", "permanent": True}
+
+
+def test_an_exhausted_monthly_quota_is_not_retried(monkeypatch):
+    import api.relevance as RR
+    import requests as _rq
+    monkeypatch.setenv("COHERE_API_KEY", "k")
+    monkeypatch.setattr(RR, "_RERANK_BACKOFF_S", 0.0)
+    calls = {"n": 0}
+    msg = "You are using a Trial key, which is limited to 1000 API calls / month."
+    monkeypatch.setattr(_rq, "post", _post_returning(_HttpResp(429, {"message": msg}), calls))
+    failure: dict = {}
+    assert RR._cohere_rerank("q", ["a"], failure=failure) is None
+    assert calls["n"] == 1
+    assert failure["status"] == 429 and failure["permanent"] is True and "month" in failure["message"]
+
+
+def test_a_per_minute_limit_is_still_retried(monkeypatch):
+    import api.relevance as RR
+    import requests as _rq
+    monkeypatch.setenv("COHERE_API_KEY", "k")
+    monkeypatch.setattr(RR, "_RERANK_BACKOFF_S", 0.0)
+    monkeypatch.setattr(RR, "_RERANK_RETRIES", 2)
+    calls = {"n": 0}
+    msg = "You are using a Trial key, which is limited to 10 API calls / minute."
+    monkeypatch.setattr(_rq, "post", _post_returning(
+        _HttpResp(429, {"message": msg}, headers={"Retry-After": "0"}), calls))
+    failure: dict = {}
+    assert RR._cohere_rerank("q", ["a"], failure=failure) is None
+    assert calls["n"] == 3, "une limite par minute doit être réessayée"
+    assert failure["permanent"] is False and failure["status"] == 429
+
+
+def _refusing(calls, permanent):
+    def _f(query, docs, model="rerank-v3.5", failure=None, **_kw):
+        calls.append(len(docs))
+        if failure is not None:
+            failure.update({"status": 401 if permanent else 503, "message": "no", "permanent": permanent})
+        return None
+    return _f
+
+
+def test_a_permanent_refusal_stops_the_sweep_at_once(seeded, db_conn, monkeypatch):
+    calls: list[int] = []
+    monkeypatch.setattr(R, "_cohere_rerank", _refusing(calls, permanent=True))
+    monkeypatch.setattr(R, "_RERANK_BATCH", 5)
+    monkeypatch.setattr(R, "_RERANK_PAUSE_S", 0.0)
+    out = R._run_cross_encoder_rerank(SID, "hpai")
+    assert calls == [5], f"le balayage a continué après un refus définitif : {calls}"
+    assert out["batches_failed"] == 1 and out["scored"] == 0
+    assert out["stopped"] == "Cohere 401: no" == out["last_error"]
+    assert _scored(db_conn) == 0
+
+
+def test_repeated_transient_refusals_stop_the_sweep(seeded, monkeypatch):
+    calls: list[int] = []
+    monkeypatch.setattr(R, "_cohere_rerank", _refusing(calls, permanent=False))
+    monkeypatch.setattr(R, "_RERANK_BATCH", 5)
+    monkeypatch.setattr(R, "_RERANK_PAUSE_S", 0.0)
+    out = R._run_cross_encoder_rerank(SID, "hpai")
+    assert len(calls) == R._RERANK_MAX_CONSECUTIVE_FAILURES == 3
+    assert out["stopped"] and out["batches_failed"] == 3
+
+
+def test_a_success_resets_the_count_of_refusals(seeded, db_conn, monkeypatch):
+    """Échec, échec, succès, échec, échec : cinq lots tentés, aucun arrêt."""
+    seen = {"n": 0}
+
+    def _f(query, docs, model="rerank-v3.5", failure=None, **_kw):
+        seen["n"] += 1
+        if seen["n"] == 3:
+            return [0.5] * len(docs)
+        if failure is not None:
+            failure.update({"status": 503, "message": "busy", "permanent": False})
+        return None
+
+    monkeypatch.setattr(R, "_cohere_rerank", _f)
+    monkeypatch.setattr(R, "_RERANK_BATCH", 5)
+    monkeypatch.setattr(R, "_RERANK_PAUSE_S", 0.0)
+    out = R._run_cross_encoder_rerank(SID, "hpai")
+    assert seen["n"] == 5 and out["stopped"] is None
+    assert out["batches_ok"] == 1 and out["batches_failed"] == 4 and _scored(db_conn) == 5
+
+
+def test_the_sweep_reports_its_progress_after_each_batch(seeded, monkeypatch):
+    seen: list[dict] = []
+    monkeypatch.setattr(R, "_cohere_rerank", _fake_cohere([]))
+    monkeypatch.setattr(R, "_RERANK_BATCH", 10)
+    monkeypatch.setattr(R, "_RERANK_PAUSE_S", 0.0)
+    R._run_cross_encoder_rerank(SID, "hpai", progress=seen.append)
+    assert [p["scored"] for p in seen] == [0, 10, 20, 25]
+    assert all(p["candidates"] == 25 for p in seen)
+
+
+# ─── Un seul balayage à la fois, et un statut qui dit où il en est ───────────
+
+def test_a_second_launch_is_refused_while_the_first_is_alive(monkeypatch):
+    monkeypatch.setattr(R, "_RERANK_JOBS", {})
+    first = R._claim_rerank_job("x")
+    assert first is not None
+    assert R._claim_rerank_job("x") is None, "un second balayage a pu démarrer"
+
+
+def test_a_long_job_that_reports_progress_is_not_stale(monkeypatch):
+    """Les 180 secondes communes comptaient depuis le départ : au bout de trois minutes,
+    un balayage vivant était « mort » et le clic suivant en lançait un autre."""
+    import time
+    monkeypatch.setattr(R, "_RERANK_JOBS", {})
+    job = R._claim_rerank_job("x")
+    R._RERANK_JOBS["x"]["started_at"] = time.time() - 3 * 3600   # parti il y a 3 heures
+    R._rerank_job_update("x", job, reranked=500)                 # mais vivant
+    assert R._rerank_job_active("x")
+    assert R._claim_rerank_job("x") is None
+
+
+def test_a_silent_job_reads_stalled_and_can_be_replaced(monkeypatch):
+    import time
+    monkeypatch.setattr(R, "_RERANK_JOBS", {})
+    old = R._claim_rerank_job("x")
+    R._RERANK_JOBS["x"]["heartbeat"] = time.time() - R._RERANK_STALE_S - 5
+    monkeypatch.setattr(R, "_rerank_coverage", lambda sid, conn=None: {})
+    assert R.get_rerank_status("x")["status"] == "stalled"
+    new = R._claim_rerank_job("x")
+    assert new is not None and new != old
+    # L'ancien fil, s'il se réveille, n'écrit pas dans l'entrée du nouveau job.
+    R._rerank_job_update("x", old, reranked=999)
+    R._rerank_job_finish("x", old, {"status": "done"})
+    assert R._RERANK_JOBS["x"]["job"] == new
+    assert R._RERANK_JOBS["x"]["status"] == "running"
+    assert "reranked" not in R._RERANK_JOBS["x"]
+
+
+def test_a_sweep_stopped_by_a_refusal_ends_as_an_error_not_as_done():
+    """« done » avec 100 articles sur 15 660 se lisait comme un succès."""
+    entry = R._rerank_final_entry(0, {"scored": 100, "candidates": 15560, "batches_ok": 1,
+                                      "batches_failed": 3, "stopped": "Cohere 429: quota"})
+    assert entry["status"] == "error" and entry["error"] == "Cohere 429: quota"
+    assert entry["reranked"] == 100 and entry["rerank_candidates"] == 15560
+    assert R._rerank_final_entry(5, {"scored": 10, "candidates": 10})["status"] == "done"
+
+
+def test_a_click_during_a_sweep_gets_its_progress(seeded, monkeypatch):
+    monkeypatch.setattr(R, "_RERANK_JOBS", {})
+    # SID ne commence pas par « usr- » : la route le lit comme un scénario GESICA.
+    monkeypatch.setattr(R, "_get_db_gesica_scenario_or_404", lambda sid: {"nl_queries": ["hpai"]})
+    job = R._claim_rerank_job(SID)
+    R._rerank_job_update(SID, job, phase="rerank", reranked=300, rerank_candidates=15560)
+    got = R.trigger_rerank(SID, missing_only=True)
+    assert got["status"] == "already_running"
+    assert got["job"]["reranked"] == 300 and got["job"]["rerank_candidates"] == 15560
