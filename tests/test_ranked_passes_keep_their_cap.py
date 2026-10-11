@@ -173,11 +173,23 @@ def test_the_openalex_full_text_pass_stops_at_its_ranked_cap(federation, exhaust
     assert (job.get("source_outcomes") or {}).get("openalex") != "error", job.get("source_outcomes")
 
 
-def test_the_prisma_card_says_crossref_has_its_own_cap(federation):
+@pytest.mark.parametrize("exhaustive", [False, True])
+def test_the_prisma_card_says_which_passes_keep_their_own_cap(federation, monkeypatch, exhaustive):
     run, _fake, P = federation
-    job = run(False)
-    caps = (job.get("prisma_identification") or {}).get("source_caps") or {}
+    job = run(exhaustive)
+    ident = job.get("prisma_identification") or {}
+    caps = ident.get("source_caps") or {}
     assert caps.get("crossref") == RANKED_DEFAULT, caps
+    # En standard, le seul passage d'OpenAlex est le passage classé ; en exhaustif, son
+    # passage titre et résumé a le plafond commun.
+    assert caps.get("openalex") == (None if exhaustive else RANKED_DEFAULT), caps
+    # Et l'écran de recherche annonce, avant la recherche, ce que la carte dira après.
+    from api import sources as S
+    monkeypatch.setattr(S, "LIVE_MAX_PER_SOURCE", P.LIVE_MAX_PER_SOURCE)
+    limits = S.search_limits()
+    assert ident.get("per_source_cap") == limits["exhaustive_per_source" if exhaustive
+                                                 else "standard_per_source"], (ident, limits)
+    assert caps.get("crossref") == limits["ranked_per_source"], (caps, limits)
 
 
 def test_the_ranked_cap_never_passes_the_apis_own_bound(monkeypatch):

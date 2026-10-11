@@ -1203,8 +1203,9 @@ export interface ScenarioPrisma {
      *  order. "exhaustive": every record each database applying the boolean returned.
      *  Absent on figures stored before the mode existed (they are standard). */
     search_mode?: "standard" | "exhaustive";
-    /** The cap actually applied to a source when it differs from `per_source_cap`: in an
-     *  exhaustive search Crossref, which ranks keywords, keeps the standard cap. */
+    /** The cap actually applied to a source when it differs from `per_source_cap`: the
+     *  relevance-ranked passes keep their own (RANKED_PASS_MAX, 2,000 by default), Crossref
+     *  in both modes and OpenAlex in a standard search; PubMed returns at most 10,000. */
     source_caps?: Record<string, number>;
     /** Sources searched in titles and abstracts only (OpenAlex in an exhaustive search). */
     title_abstract_sources?: string[];
@@ -2896,6 +2897,32 @@ export async function fetchActivity(): Promise<{ running: ActivityItem[]; count:
  *  apparie, jusqu'à 20 000 par base ; false : les 2 000 plus pertinentes par base),
  *  enregistré sur le scénario par le serveur ; absent, le scénario garde le sien.
  *  `maxResults` absent : le serveur applique son plafond par source (LIVE_MAX_PER_SOURCE). */
+/** The per-source caps this server applies to a search launched from the screen: they
+ *  come from its environment (production lifts the standard cap to 100,000), so the
+ *  screen reads them instead of writing 2,000 and 20,000. */
+export interface SearchLimits {
+  standard_per_source: number;
+  exhaustive_per_source: number;
+  /** Crossref and OpenAlex's full-text pass, which rank by relevance and never run dry. */
+  ranked_per_source: number;
+}
+
+/** null when the server cannot say (older API, network): the screen keeps its defaults. */
+export async function fetchSearchLimits(): Promise<SearchLimits | null> {
+  try {
+    const r = await safeFetch(`${API_BASE_URL}/search/limits`);
+    if (!r.ok) return null;
+    const j = await r.json();
+    const ok = (v: unknown) => typeof v === 'number' && Number.isFinite(v) && v > 0;
+    if (!ok(j?.standard_per_source) || !ok(j?.exhaustive_per_source) || !ok(j?.ranked_per_source)) {
+      return null;
+    }
+    return j as SearchLimits;
+  } catch {
+    return null;
+  }
+}
+
 export async function populateUserScenario(
   scenarioId: string,
   opts?: { includeLive?: boolean; maxResults?: number; excludePreprints?: boolean; exhaustive?: boolean },

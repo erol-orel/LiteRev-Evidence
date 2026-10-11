@@ -2200,13 +2200,17 @@ def _run_user_scenario_populate(
                 keyword_fallback_queries=(dict(_fallback_queries) if include_live else {}),
                 source_error_reasons=(dict(_fetcher_errors) if include_live else {}),
                 source_totals=(_totals_snapshot if include_live else {}),
-                # Le mode, et le plafond de chaque source quand il diffère : en exhaustif,
-                # Crossref garde le plafond standard, et PubMed ne rend pas plus de 10 000
-                # identifiants par recherche.
+                # Le mode, et le plafond de chaque source quand il diffère : les passages
+                # classés par pertinence gardent le leur (RANKED_PASS_MAX), Crossref dans les
+                # deux modes et OpenAlex en standard, où c'est son seul passage (en
+                # exhaustif, son passage titre et résumé a le plafond commun) ; PubMed ne
+                # rend pas plus de 10 000 identifiants par recherche.
                 search_mode=_search_mode,
                 # Et l'endpoint classique de Semantic Scholar, qui ne rend pas plus de
                 # 1 000 notices, dans les deux modes.
-                source_caps=(({"crossref": int(_cap_ranked)} if _cap_ranked < int(_cap_strategy) else {})
+                source_caps=((({"crossref": int(_cap_ranked)}
+                               | ({} if exhaustive else {"openalex": int(_cap_ranked)}))
+                              if _cap_ranked < int(_cap_strategy) else {})
                              | ({"pubmed": min(int(_cap_strategy), 10000)} if exhaustive else {})
                              | dict(_source_caps_run)
                              if include_live else {}),
