@@ -361,3 +361,117 @@ def test_the_digest_keeps_its_old_wording_when_the_kind_is_not_known():
         "s1", [{"title": "A", "year": 2026}], 1,
         signals=[{"code": "epidemic_parameters", "n": 1, "detail": "R0"}])
     assert "model specification is worth rereading" in body
+
+
+# ── What is NEW: the date the article joined the scenario, not the library ────
+# "New" meant `d.created_at > last_notified_at`: created in the LIBRARY since the last
+# digest. An article already in the library that a later search or living review links to
+# the scenario, the most common arrival in a library of half a million documents, was never
+# reported. The link carries its date now (`assigned_at`, defaulted at insertion).
+SID_LINK = "usr-alerts-linktime"
+IDS_LINK = (9701, 9702, 9703, 9704, 9705)
+
+
+@pytest.fixture
+def linked_corpus(db_conn):
+    from conftest import ensure_document_columns
+
+    try:
+        with main.engine.connect():
+            pass
+    except Exception:                                    # noqa: BLE001
+        pytest.skip("main.engine cannot reach the database")
+    with db_conn.cursor() as cur:
+        cur.execute("SELECT to_regclass('user_scenarios') IS NULL")
+        if cur.fetchone()[0]:
+            main._ensure_user_scenarios_table()
+        cur.execute("CREATE TABLE IF NOT EXISTS literature_document (id BIGINT PRIMARY KEY)")
+        cur.execute("CREATE TABLE IF NOT EXISTS article_scenarios ("
+                    "scenario_id TEXT, document_id BIGINT, PRIMARY KEY (scenario_id, document_id))")
+        created_chunk_table = ensure_document_columns(cur)
+        for col, typ in (("title", "TEXT"), ("abstract", "TEXT"), ("doi", "TEXT"),
+                         ("scenario_type", "VARCHAR(128)"), ("is_duplicate", "BOOLEAN DEFAULT FALSE")):
+            cur.execute(f"ALTER TABLE literature_document ADD COLUMN IF NOT EXISTS {col} {typ}")
+        cur.execute("ALTER TABLE article_scenarios ADD COLUMN IF NOT EXISTS "
+                    "similarity_score DOUBLE PRECISION")
+        cur.execute("SELECT to_regclass('scenario_settings') IS NULL")
+        if cur.fetchone()[0]:
+            main._ensure_scenario_settings_table()
+    # The boot DDL that gives the link its date (idempotent, safe to run again).
+    main._ensure_user_scenarios_table()
+
+    def _clean(cur):
+        cur.execute("DELETE FROM article_scenarios WHERE scenario_id = %s", (SID_LINK,))
+        cur.execute("DELETE FROM literature_document WHERE id = ANY(%s)", (list(IDS_LINK),))
+
+    with db_conn.cursor() as cur:
+        _clean(cur)
+        # (id, created in the library, scenario_type, linked at; None = no link, "legacy" =
+        # a link made before the column had a default)
+        rows = (
+            (9701, "2025-01-01", None, "2026-10-01"),     # old paper, linked after: NEW
+            (9702, "2026-09-20", None, "legacy"),         # new paper, legacy link: NEW
+            (9703, "2025-01-01", None, "2026-08-01"),     # linked before: not new
+            (9704, "2025-01-01", SID_LINK, "2026-10-01"),  # in the scenario since 2025: not new
+            (9705, "2026-09-25", SID_LINK, None),         # typed, never linked: NEW, unlinked
+        )
+        for doc_id, created, stype, linked in rows:
+            cur.execute("INSERT INTO literature_document (id, title, abstract, year, source, "
+                        "project_context, created_at, scenario_type) VALUES (%s, %s, %s, 2025, "
+                        "'pubmed', 'literev', %s, %s)",
+                        (doc_id, f"Article {doc_id}", "an abstract long enough to be read",
+                         created, stype))
+            if linked == "legacy":
+                cur.execute("INSERT INTO article_scenarios (document_id, scenario_id, "
+                            "similarity_score, assigned_at) VALUES (%s, %s, 0.9, NULL)",
+                            (doc_id, SID_LINK))
+            elif linked:
+                cur.execute("INSERT INTO article_scenarios (document_id, scenario_id, "
+                            "similarity_score, assigned_at) VALUES (%s, %s, 0.9, %s)",
+                            (doc_id, SID_LINK, linked))
+    yield db_conn
+    with db_conn.cursor() as cur:
+        _clean(cur)
+        if created_chunk_table:
+            cur.execute("DROP TABLE IF EXISTS document_chunk")
+
+
+def test_an_article_linked_after_the_last_digest_is_new(linked_corpus):
+    from datetime import datetime
+    since = datetime(2026, 9, 1)
+    with main.engine.connect() as conn:
+        listed = main._new_articles_for_scenario(conn, SID_LINK, since)
+        total = main._count_new_articles_for_scenario(conn, SID_LINK, since)
+        n_linked = main._count_new_linked_articles(conn, SID_LINK, since)
+        relevant = main._new_relevant_rows(conn, SID_LINK, since, 0.45)
+    # Ordered by the date each one joined the scenario, newest first.
+    assert [a["id"] for a in listed] == [9701, 9705, 9702]
+    assert total == 3
+    assert n_linked == 2, "the typed article without a link cannot be scored"
+    assert sorted(r["id"] for r in relevant) == [9701, 9702]
+
+
+def test_a_first_digest_still_lists_everything_by_arrival(linked_corpus):
+    with main.engine.connect() as conn:
+        listed = main._new_articles_for_scenario(conn, SID_LINK, None)
+        assert main._count_new_articles_for_scenario(conn, SID_LINK, None) == 5
+    assert [a["id"] for a in listed][:3] == [9701, 9705, 9702]
+    assert sorted(a["id"] for a in listed) == list(IDS_LINK)
+
+
+def test_a_new_link_is_dated_by_default(linked_corpus):
+    from datetime import datetime
+    with linked_corpus.cursor() as cur:
+        cur.execute("UPDATE literature_document SET created_at = '2024-01-01' WHERE id = 9703")
+        cur.execute("DELETE FROM article_scenarios WHERE scenario_id = %s AND document_id = 9703",
+                    (SID_LINK,))
+        # The insert every search and the living review use: no assigned_at in it.
+        cur.execute("INSERT INTO article_scenarios (document_id, scenario_id, similarity_score) "
+                    "VALUES (9703, %s, NULL)", (SID_LINK,))
+        cur.execute("SELECT assigned_at FROM article_scenarios WHERE scenario_id = %s "
+                    "AND document_id = 9703", (SID_LINK,))
+        assigned = cur.fetchone()[0]
+    assert assigned is not None
+    with main.engine.connect() as conn:
+        listed = main._new_articles_for_scenario(conn, SID_LINK, datetime(2026, 9, 1))
+    assert 9703 in [a["id"] for a in listed], "an old paper linked today is news"

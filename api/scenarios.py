@@ -155,6 +155,12 @@ def _ensure_user_scenarios_table() -> None:
             # cosinus pour ORDONNER le sous-ensemble pertinent (sélection = cosinus
             # >= seuil ; ordre = rerank_score quand présent).
             "ALTER TABLE article_scenarios ADD COLUMN IF NOT EXISTS rerank_score FLOAT",
+            # La DATE DU LIEN d'un article à un scénario, posée par défaut à l'insertion :
+            # les alertes décident par elle de ce qui est nouveau (api/alerts.py). La
+            # colonne existait sans que rien ne l'écrive, et un article déjà en
+            # bibliothèque lié plus tard au scénario n'était jamais signalé.
+            "ALTER TABLE article_scenarios ADD COLUMN IF NOT EXISTS assigned_at TIMESTAMP",
+            "ALTER TABLE article_scenarios ALTER COLUMN assigned_at SET DEFAULT now()",
             # Borne anti « lot empoisonné » : nb d'échecs d'embedding pour un chunk.
             # Au-delà de 3, il est exclu du worker / du compteur « en attente » / de
             # /admin/embed-pending - sinon un chunk que l'API refuse (contenu invalide)

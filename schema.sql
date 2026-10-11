@@ -149,7 +149,7 @@ CREATE TABLE IF NOT EXISTS article_scenarios (
     reviewer_2_reason  TEXT,
     kappa_resolved     BOOLEAN DEFAULT FALSE,
     kappa_final_status VARCHAR(20),
-    assigned_at        TIMESTAMP,
+    assigned_at        TIMESTAMP DEFAULT now(),  -- date du lien (nouveauté des alertes)
     CONSTRAINT article_scenarios_pkey PRIMARY KEY (scenario_id, document_id)
 );
 
