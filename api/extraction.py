@@ -46,6 +46,7 @@ from .digest import _rows
 from .scenario_store import (_get_scenario_threshold, _get_user_scenario_or_404,
                              relevant_gate_sql, screening_status_sql)
 from .schema_boot import _exec_ddl_isolated
+from llm_usage import LLMTruncated
 from llm_usage import json_content as _json_content
 from llm_usage import model_for as _model
 
@@ -59,6 +60,20 @@ _EXTRACTION_WORKERS = _env_int("EXTRACTION_WORKERS", 4, 1)
 _MAX_ATTEMPTS = 3
 _MAX_OBSERVATIONS = 120
 _MIN_ABSTRACT_CHARS = 80
+#: The answer's ceiling, in tokens. The prompt allows 120 observations with quotes of up to
+#: 300 characters, about twice what fits: a rich paper (a meta-analysis, a serology table, a
+#: KAP survey) had its answer cut mid-JSON, failed identically at every attempt (temperature
+#: 0, fixed seed) and was given up. On HPAI_last no extracted article held more than 72 rows,
+#: and the 8 articles that failed three times were among the richest for the review.
+_EXTRACTION_MAX_TOKENS = 8000
+#: When the answer is cut, ONE more call asks for a condensed answer that fits.
+_CONDENSED_MAX_OBSERVATIONS = 50
+_CONDENSED_RULE = (
+    "\n\nTHIS PAPER HOLDS MORE DATA THAN ONE ANSWER CAN CARRY: a first answer was cut off. "
+    "Return at most " + str(_CONDENSED_MAX_OBSERVATIONS) + " observations, each quote at most "
+    "150 characters. Keep first every sex, gender, age, occupation, knowledge-attitude-"
+    "practice and protective-equipment result, then the results that give counts."
+)
 
 SHEETS = ("human_susc", "human_exp", "env", "animal", "vector")
 SOURCE_KINDS = ("table", "figure", "text")
@@ -331,18 +346,31 @@ def extract_article(client, row: dict, source_text: str, source: str, truncated:
     caller counts an attempt instead of caching an empty result as if it were an answer."""
     system = system or _EXTRACTION_SYSTEM
     payload = {"disease_of_interest": disease_hint or None, "text_is": source, "text": source_text}
-    resp = client.chat.completions.create(
-        model=_model("bulk"),
-        messages=[{"role": "system", "content": system},
-                  {"role": "user", "content": json.dumps(payload, ensure_ascii=False)}],
-        temperature=0, seed=42, max_tokens=8000,
-        response_format={"type": "json_object"},
-    )
-    parsed = parse_extraction(json.loads(_json_content(resp, f"extraction {row.get('id')}")),
-                              source_text)
+
+    def _ask(system_prompt: str):
+        return client.chat.completions.create(
+            model=_model("bulk"),
+            messages=[{"role": "system", "content": system_prompt},
+                      {"role": "user", "content": json.dumps(payload, ensure_ascii=False)}],
+            temperature=0, seed=42, max_tokens=_EXTRACTION_MAX_TOKENS,
+            response_format={"type": "json_object"},
+        )
+
+    # An answer cut at its ceiling is no answer (json_content raises), and asking the same
+    # question again gives the same cut. The paper is asked once more for a condensed answer,
+    # and the extraction says so: fewer rows were kept than the paper reports.
+    condensed = False
+    try:
+        content = _json_content(_ask(system), f"extraction {row.get('id')}")
+    except LLMTruncated:
+        system = system + _CONDENSED_RULE
+        condensed = True
+        content = _json_content(_ask(system), f"extraction {row.get('id')} (condensed)")
+    parsed = parse_extraction(json.loads(content), source_text)
     # The record of how this was made: the model, the prompt, and when. An extraction that
     # cannot say which model and prompt produced it cannot be reproduced or compared.
     parsed.update({"v": EXTRACTION_VERSION, "source": source, "truncated": truncated,
+                   "condensed": condensed,
                    "n_chars": len(source_text), "model": _model("bulk"),
                    "prompt_sha": hashlib.sha256(system.encode("utf-8")).hexdigest()[:10],
                    "extracted_at": datetime.now(timezone.utc).isoformat(timespec="seconds")})
@@ -485,6 +513,20 @@ def start_extraction(scenario_id: str, disease_hint: str | None = None, max_arti
     return {"status": "started"}
 
 
+def reset_given_up(scenario_id: str) -> int:
+    """Give back their attempts to the scenario's relevant articles that failed three times
+    and hold no extraction. Returns how many."""
+    ids = [int(r["id"]) for r in _relevant_rows(scenario_id)
+           if int(r.get("extraction_attempts") or 0) >= _MAX_ATTEMPTS
+           and not isinstance(r.get("extraction_json"), dict)]
+    if not ids:
+        return 0
+    with engine.begin() as conn:
+        conn.execute(text("UPDATE literature_document SET extraction_attempts = 0 "
+                          "WHERE id = ANY(CAST(:ids AS bigint[]))"), {"ids": ids})
+    return len(ids)
+
+
 def extraction_status(scenario_id: str) -> dict[str, Any]:
     """Where the scenario stands, counted over ALL its relevant articles."""
     rows = _relevant_rows(scenario_id)
@@ -502,6 +544,8 @@ def extraction_status(scenario_id: str) -> dict[str, Any]:
         "n_observations": sum(len(r["extraction_json"].get("observations") or []) for r in done),
         "n_given_up": sum(1 for r in rows if int(r.get("extraction_attempts") or 0) >= _MAX_ATTEMPTS
                           and not isinstance(r.get("extraction_json"), dict)),
+        # Read through the condensed retry: at most _CONDENSED_MAX_OBSERVATIONS rows kept.
+        "n_condensed": sum(1 for r in done if r["extraction_json"].get("condensed") is True),
         "running": bool(job.get("running")),
         "job": {k: job.get(k, 0) for k in ("total", "done", "failed")} if job else None,
         "version": EXTRACTION_VERSION,
@@ -825,13 +869,20 @@ def build_long_csv(articles: list[dict], id_prefix: str = "LR", index=None, revi
 # Endpoints
 # ─────────────────────────────────────────────────────────────────────────────
 @app.post("/user-scenarios/{scenario_id}/extraction/run")
-def run_scenario_extraction(scenario_id: str, max_articles: int = 0,
+def run_scenario_extraction(scenario_id: str, max_articles: int = 0, retry_given_up: bool = False,
                             _: None = Depends(require_api_key)) -> dict[str, Any]:
     """Extract, in the background, every relevant article that has no extraction yet (or
     whose full text arrived since an abstract-only pass). No cap unless `max_articles` or
-    EXTRACTION_MAX_ARTICLES says so."""
+    EXTRACTION_MAX_ARTICLES says so.
+
+    `retry_given_up` first gives the articles left alone after three failures their
+    attempts back, for when the cause of the failures has been fixed (the answer ceiling
+    that cut the richest papers, for one). Only this scenario's relevant articles."""
     scenario = _get_user_scenario_or_404(scenario_id)
+    n_reset = reset_given_up(scenario_id) if retry_given_up else 0
     out = start_extraction(scenario_id, scenario.get("name"), max(0, int(max_articles or 0)))
+    if retry_given_up:
+        out = {**out, "n_reset": n_reset}
     return {**out, **{k: v for k, v in extraction_status(scenario_id).items()
                       if k in ("n_relevant", "n_pending")}}
 
@@ -965,6 +1016,7 @@ def list_scenario_extraction_articles(scenario_id: str, limit: int = EXTRACTION_
                    COALESCE(jsonb_typeof(d.extraction_json) = 'object', FALSE) AS has_extraction,
                    d.extraction_json->>'source' AS source,
                    COALESCE(d.extraction_json->>'truncated', 'false') = 'true' AS text_truncated,
+                   COALESCE(d.extraction_json->>'condensed', 'false') = 'true' AS condensed,
                    d.extraction_json->'coverage' AS coverage,
                    jsonb_array_length({obs}) AS n_observations,
                    (SELECT COUNT(*) FROM jsonb_array_elements({obs}) o

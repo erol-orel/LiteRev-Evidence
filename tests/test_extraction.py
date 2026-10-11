@@ -172,10 +172,46 @@ def test_one_article_goes_through_one_call_and_comes_back_stamped():
 
 
 def test_a_truncated_or_failed_call_raises_instead_of_caching_an_empty_answer():
+    seen: list = []
     with pytest.raises(Exception):
-        extraction.extract_article(_fake_client(_raw(), finish="length"), {"id": 1}, PAPER, "abstract", False)
+        extraction.extract_article(_fake_client(_raw(), finish="length", seen=seen), {"id": 1}, PAPER, "abstract", False)
+    assert len(seen) == 2, "a cut answer gets one condensed retry, and no more"
     with pytest.raises(RuntimeError):
         extraction.extract_article(_fake_client(boom=RuntimeError("down")), {"id": 1}, PAPER, "abstract", False)
+
+
+# A rich paper (a meta-analysis, a serology table, a KAP survey) asked for up to 120 rows
+# with 300-character quotes overflowed the 8,000-token answer: cut mid-JSON, the same cut at
+# every attempt, given up after three. On HPAI_last the 8 articles that failed that way were
+# among the richest for the review, and no extracted article held more than 72 rows.
+
+def _seq_client(finishes, seen):
+    """A client whose successive answers end with the given finish reasons."""
+    def create(**kw):
+        seen.append(kw)
+        finish = finishes[min(len(seen), len(finishes)) - 1]
+        msg = types.SimpleNamespace(content=json.dumps(_raw()))
+        return types.SimpleNamespace(choices=[types.SimpleNamespace(message=msg, finish_reason=finish)])
+    return types.SimpleNamespace(chat=types.SimpleNamespace(completions=types.SimpleNamespace(create=create)))
+
+
+def test_a_cut_answer_is_asked_again_condensed_and_says_so():
+    seen: list = []
+    out = extraction.extract_article(_seq_client(["length", "stop"], seen), {"id": 1}, PAPER, "fulltext", False)
+    assert len(seen) == 2
+    first, second = seen[0]["messages"][0]["content"], seen[1]["messages"][0]["content"]
+    assert second == first + extraction._CONDENSED_RULE
+    assert "at most 50 observations" in second and chr(0x2014) not in second
+    assert seen[0]["max_tokens"] == seen[1]["max_tokens"] == extraction._EXTRACTION_MAX_TOKENS
+    assert out["condensed"] is True
+    # The record names the prompt that actually produced the rows.
+    assert out["prompt_sha"] != extraction.PROMPT_SHA
+
+
+def test_an_answer_that_fits_is_not_condensed():
+    seen: list = []
+    out = extraction.extract_article(_seq_client(["stop"], seen), {"id": 1}, PAPER, "fulltext", False)
+    assert len(seen) == 1 and out["condensed"] is False and out["prompt_sha"] == extraction.PROMPT_SHA
 
 
 # ── The template workbook ───────────────────────────────────────────────────
@@ -544,6 +580,33 @@ def test_the_article_list_has_every_relevant_article_extracted_ones_first(extrac
     assert by_id[9701]["source"] == "fulltext" and by_id[9703]["source"] == "abstract"
     assert by_id[9702]["coverage"]["age"] is True and by_id[9702]["coverage"]["ppe"] is False
     assert set(by_id[9702]["coverage"]) == set(extraction.COVERAGE_KEYS)
+
+
+def test_the_list_and_the_status_say_which_articles_were_condensed(extracted):
+    from fastapi.testclient import TestClient
+    with extracted.cursor() as cur:
+        cur.execute("UPDATE literature_document SET extraction_json = extraction_json || "
+                    "'{\"condensed\": true}'::jsonb WHERE id = 9701")
+    c = TestClient(main.app)
+    by_id = {a["id"]: a for a in c.get(f"/user-scenarios/{SID}/extraction/articles").json()["articles"]}
+    assert by_id[9701]["condensed"] is True and by_id[9702]["condensed"] is False
+    assert extraction.extraction_status(SID)["n_condensed"] == 1
+
+
+def test_articles_given_up_can_be_tried_again_in_their_scenario_only(extracted):
+    """After the cause is fixed: the relevant, unextracted article gets its attempts back;
+    the one below the threshold keeps its count."""
+    with extracted.cursor() as cur:
+        cur.execute("UPDATE literature_document SET extraction_attempts = 3 WHERE id IN (9704, 9706)")
+        cur.execute("UPDATE literature_document SET extraction_json = NULL WHERE id = 9704")
+    assert extraction.extraction_status(SID)["n_given_up"] == 1
+    assert extraction.reset_given_up(SID) == 1
+    with extracted.cursor() as cur:
+        cur.execute("SELECT id, extraction_attempts FROM literature_document WHERE id IN (9704, 9706) ORDER BY id")
+        assert cur.fetchall() == [(9704, 3), (9706, 0)]
+    st = extraction.extraction_status(SID)
+    assert st["n_given_up"] == 0 and st["n_pending"] >= 1
+    assert extraction.reset_given_up(SID) == 0
 
 
 def test_the_article_list_pages_and_says_whether_more_remain(extracted):

@@ -104,12 +104,13 @@ export function ExtractionSection({ scenarioId }: { scenarioId: string }) {
     return () => window.clearInterval(id);
   }, [running, scenarioId, reload]);
 
-  const run = async () => {
+  const run = async (retryGivenUp = false) => {
     if (!status) return;
-    if (!window.confirm(T("confirmRun").replace("{n}", String(status.n_pending)))) return;
+    const n = retryGivenUp ? status.n_given_up : status.n_pending;
+    if (!window.confirm(T("confirmRun").replace("{n}", String(n)))) return;
     setNotice(null);
     try {
-      const r = await startExtraction(scenarioId);
+      const r = await startExtraction(scenarioId, retryGivenUp);
       if (r.status === "no_llm") setNotice(T("runNoLlm"));
       else setStatus(await fetchExtractionStatus(scenarioId));
     } catch (e) {
@@ -219,7 +220,7 @@ export function ExtractionSection({ scenarioId }: { scenarioId: string }) {
                 .replace("{total}", String(status.job?.total ?? status.n_pending))}
             </span>
           ) : status.n_pending > 0 && hasApiKey() ? (
-            <button onClick={run}
+            <button onClick={() => run()}
               className="flex items-center gap-1.5 rounded-xl border border-brand-500/40 bg-brand-500/15 px-3 py-1.5 text-[11px] font-medium text-brand-300 hover:bg-brand-500/25 transition">
               <Sparkles size={12} />{T("runPending").replace("{n}", String(status.n_pending))}
             </button>
@@ -245,7 +246,18 @@ export function ExtractionSection({ scenarioId }: { scenarioId: string }) {
         </div>
         {notice && <p className="text-[11px] text-rose-300">{notice}</p>}
         {status.n_given_up > 0 && (
-          <p className="text-[10px] text-white/40">{T("givenUp").replace("{n}", String(status.n_given_up))}</p>
+          <p className="text-[10px] text-white/40">
+            {T("givenUp").replace("{n}", String(status.n_given_up))}
+            {/* Once the cause of the failures is fixed, they can be tried again. */}
+            {!status.running && hasApiKey() && (
+              <button onClick={() => run(true)} className="ml-2 underline text-brand-300 hover:text-brand-200">
+                {T("retryGivenUp")}
+              </button>
+            )}
+          </p>
+        )}
+        {(status.n_condensed ?? 0) > 0 && (
+          <p className="text-[10px] text-white/40">{T("condensedCount").replace("{n}", String(status.n_condensed))}</p>
         )}
       </div>
 
@@ -397,6 +409,7 @@ export function ExtractionSection({ scenarioId }: { scenarioId: string }) {
                       {a.source === "abstract" && <span className="rounded-md bg-gold-400/10 border border-gold-400/20 px-1.5 py-0.5 text-gold-400">{T("sourceAbstract")}</span>}
                       {!a.source && <span className="text-white/25">{T("sourceNone")}</span>}
                       {a.text_truncated && <span className="ml-1 text-white/35" title={T("textTruncated")}>…</span>}
+                      {a.condensed && <span className="ml-1 text-gold-300/80" title={T("condensed")}>{T("condensedShort")}</span>}
                     </td>
                     <td className="px-3 py-2">
                       <div className="flex flex-wrap gap-1">
