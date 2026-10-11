@@ -223,3 +223,38 @@ def test_the_workbook_and_csv_carry_the_codebook_label(extracted):
     assert {"sex_gender > male", "sex_gender > female"} <= labels
     csv_text = c.get(f"/user-scenarios/{SID}/extraction/export?format=csv").text
     assert "l1,l2" in csv_text.splitlines()[0] and "sex_gender,male" in csv_text
+
+
+# ── Synonyms beyond the limit are refused, never dropped ────────────────────
+def test_a_node_takes_200_synonyms_and_the_201st_is_refused_with_its_count():
+    """The import kept the first 40 synonyms of a node and dropped the rest without a word."""
+    syn = "|".join(f"label number {i}" for i in range(200))
+    ok = codebook.validate_nodes([{"sheet": "human_exp", "l1": "occupation", "l2": "farmer", "synonyms": syn}])
+    assert codebook._MAX_SYNONYMS == 200 and len(ok[0]["synonyms"]) == 200
+    with pytest.raises(ValueError, match="201 distinct synonyms; the maximum is 200"):
+        codebook.validate_nodes([{"sheet": "human_exp", "l1": "occupation", "l2": "farmer", "synonyms": syn + "|one more"}])
+    # A sheet written another way is the sheet it names.
+    assert codebook.sheet_key("Human_Susc") == "human_susc" and codebook.sheet_key("Environment") == "env"
+    assert codebook.sheet_key("ANIMALorRESERVOIR_COV") == "animal" and codebook.sheet_key("lab") is None
+
+
+def test_the_import_and_the_mapping_refuse_instead_of_cutting(extracted):
+    c = _client()
+    many = "|".join(f"job {i}" for i in range(201))
+    r = c.post(f"/user-scenarios/{SID}/codebook/import", headers=HDR,
+               content=f"sheet,level1,level2,synonyms\nhuman_exp,occupation,,\nhuman_exp,occupation,farmer,{many}\n")
+    assert r.status_code == 422 and "the maximum is 200" in r.json()["detail"]
+    full = "|".join(f"job {i}" for i in range(200))
+    assert c.post(f"/user-scenarios/{SID}/codebook/import", headers=HDR,
+                  content=f"sheet,level1,level2,synonyms\nhuman_exp,occupation,,\nhuman_exp,occupation,farmer,{full}\n").status_code == 200
+    # The node is full: a new label is refused with a reason, not appended then cut with a 200.
+    add = c.post(f"/user-scenarios/{SID}/codebook/synonym", headers=HDR,
+                 json={"sheet": "HUMAN_EXP", "l1": "occupation", "l2": "farmer", "label": "Granjeros"})
+    assert add.status_code == 422 and "already has 200 synonyms" in add.json()["detail"]
+    nodes = c.get(f"/user-scenarios/{SID}/codebook").json()["nodes"]
+    farmer = next(n for n in nodes if n.get("l2") == "farmer")
+    assert len(farmer["synonyms"]) == 200 and "granjero" not in farmer["synonyms"]
+    # A label it already holds is not refused.
+    assert c.post(f"/user-scenarios/{SID}/codebook/synonym", headers=HDR,
+                  json={"sheet": "human_exp", "l1": "occupation", "l2": "farmer", "label": "job 7"}).status_code == 200
+    c.delete(f"/user-scenarios/{SID}/codebook", headers=HDR)

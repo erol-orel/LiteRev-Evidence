@@ -292,3 +292,56 @@ def test_invalid_and_missing_counts_are_reported_not_silently_dropped(pool_corpu
 def test_unknown_scenario_is_a_404():
     from fastapi.testclient import TestClient
     assert TestClient(main.app).get("/user-scenarios/nope/extraction/pooled").status_code == 404
+
+
+# ── Every comparison is computed, counted and downloadable ──────────────────
+def _many_labels(n_labels, papers=3, group="occupation", sheet="human_exp"):
+    rows = []
+    for lab in range(n_labels):
+        for aid in range(1, papers + 1):
+            rows.append(_row(aid, 2 + lab % 3, 20 + aid, label=f"job{lab:02d}", group=group, sheet=sheet))
+    return rows
+
+
+def test_every_pair_of_a_group_is_computed_and_the_listed_page_says_what_it_left_out():
+    """Occupation has 55 possible pairs by default. The cap of 6 per group was applied before
+    anything was counted: the seventh odds ratio of a group was never computed, and no count
+    said so."""
+    comps = P.pooled_comparisons(_many_labels(8), {})
+    assert len(comps) == 28                                           # 8 labels: every one of the 28 pairs
+    listed, over = P._listed_comparisons(comps)
+    assert P._MAX_PAIRS_PER_GROUP == 15 and len(listed) == 15 and over == 13
+    many = P.pooled_comparisons(_many_labels(8) + _many_labels(8, group="species", sheet="animal")
+                                + _many_labels(8, group="contact_type"), {})
+    listed, over = P._listed_comparisons(many)
+    assert len(many) == 84 and len(listed) == P._MAX_PAIRS == 40 and over == 84 - 45
+
+
+def test_the_served_page_counts_everything_and_full_returns_everything(pool_corpus, monkeypatch):
+    monkeypatch.setattr(P, "_MAX_PAIRS", 0)
+    monkeypatch.setattr(P, "_MAX_GROUPS", 1)
+    body = _get().json()
+    assert body["comparisons"] == [] and body["comparisons_total"] >= 1 and body["comparisons_truncated"] is True
+    assert body["groups_returned"] == 1 and body["groups_total"] > 1 and body["full"] is False
+    full = _get(full="true").json()
+    assert len(full["comparisons"]) == full["comparisons_total"] and len(full["pooled"]) == full["groups_total"]
+    assert full["comparisons_truncated"] is False and full["groups_truncated"] is False and full["full"] is True
+
+
+def test_the_download_carries_every_label_and_every_comparison(pool_corpus, monkeypatch):
+    import csv
+    import io
+    monkeypatch.setattr(P, "_MAX_PAIRS", 0)                           # the panel lists none: the file has them all
+    r = _get("/export")
+    assert r.status_code == 200 and r.headers["content-type"].startswith("text/csv")
+    rows = list(csv.DictReader(io.StringIO(r.content.decode("utf-8-sig"))))
+    assert {row["kind"] for row in rows} == {"proportion", "odds_ratio"}
+    male = next(row for row in rows if row["kind"] == "proportion" and row["label"] == "male" and row["disease"] == "hpai a h5n1")
+    assert male["studies"] == "6" and male["pooled"] == "Y" and float(male["estimate"]) > 0 and "Smith" in male["study_list"]
+    assert any(row["kind"] == "proportion" and row["pooled"] == "N" for row in rows), "too few studies: in the file too"
+    cmp_ = next(row for row in rows if row["kind"] == "odds_ratio")
+    assert (cmp_["label"], cmp_["label_b"], cmp_["studies"]) == ("male", "female", "6") and " vs " in cmp_["study_list"]
+    assert int(r.headers["x-comparisons"]) == sum(1 for row in rows if row["kind"] == "odds_ratio")
+    assert _get("/export", min_studies=1).status_code == 422
+    from fastapi.testclient import TestClient
+    assert TestClient(main.app).get("/user-scenarios/nope/extraction/pooled/export").status_code == 404

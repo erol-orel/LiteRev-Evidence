@@ -11,13 +11,16 @@ import re
 import threading
 from typing import Any
 
-from fastapi import Query
+from fastapi import Depends, Query
 from sqlalchemy import text
 
-from .core import app, engine, logger
+from .core import (_is_openai_quota_error, _openai_in_cooldown, _trip_openai_cooldown, app, engine, logger,
+                   require_api_key)
 from .scenario_store import (_get_scenario_threshold, _get_user_scenario_or_404,
                              relevance_order_sql, relevant_gate_tail_sql, screening_status_sql)
 from .clustering import _load_viz_cache, _save_viz_cache
+from llm_usage import LLMTruncated, ProviderWatch, is_transient_llm_error
+from llm_usage import json_content as _json_content
 from llm_usage import model_for as _model
 
 # ─── KNOWLEDGE GRAPH (réseau de similarité sémantique) ───────────────────────
@@ -342,13 +345,18 @@ CONCEPTS_VERSION = 2
 # navigateur ; l'interface dit combien elle en liste sur combien.
 ARTICLES_PER_NODE = 40
 ARTICLES_PER_EDGE = 20
-# Plafond d'articles normalisés par le LLM en une passe (15 par appel → ≈ 100 appels).
+# Plafond d'articles normalisés par le LLM en une passe (8 par appel).
 # Aucun plafond par défaut : les concepts sont normalisés pour TOUS les articles
 # pertinents, une seule fois par article (cache `concepts_json`), donc le coût est ponctuel
 # et incrémental. CONCEPT_MAX_ARTICLES > 0 en pose un pour une passe (secours budgétaire).
 CONCEPT_MAX_ARTICLES = int(os.getenv("CONCEPT_MAX_ARTICLES", "0") or 0)
-_CONCEPT_BATCH = 15
+# 8 par appel : à 15, la réponse (huit concepts bilingues par article) frôlait son plafond
+# de 4 000 jetons, et une réponse coupée faisait perdre le lot entier.
+_CONCEPT_BATCH = 8
 _CONCEPT_WORKERS = 6
+# Le résumé est envoyé EN PLUS du PICO, et non plus seulement à défaut, coupé à 900 : une
+# issue énoncée au-delà ne pouvait pas entrer dans l'index, qui sert aussi au filtrage.
+_CONCEPT_ABSTRACT_CHARS = 3000
 
 # Vocabulaire des devis d'étude (repli sans LLM et normalisation des champs libres).
 # L'ordre compte : « systematic review » avant « review », « randomi » avant « cohort ».
@@ -819,11 +827,37 @@ def _concept_rows(scenario_id: str) -> tuple[list[dict], int]:
     return rows, int(n_total)
 
 
+def _concepts_textless_count(scenario_id: str) -> int:
+    """Articles pertinents sans aucun texte (ni résumé, donc ni PICO) et sans concepts : aucun
+    passage ne peut les annoter. Ils sortaient de la carte ET de son dénominateur, si bien que
+    « tout est annoté » pouvait se lire sur un corpus dont une partie n'avait jamais été lue."""
+    try:
+        thr = _get_scenario_threshold(scenario_id)
+        with engine.connect() as conn:
+            return int(conn.execute(text(
+                "SELECT COUNT(*) FROM literature_document d JOIN article_scenarios ars ON ars.document_id = d.id "
+                "WHERE ars.scenario_id = :sid AND d.is_duplicate IS NOT TRUE AND d.abstract IS NULL "
+                "AND d.concepts_json IS NULL AND " + f"{relevant_gate_tail_sql('d', 'ars', ':thr')}"
+            ), {"sid": scenario_id, "thr": thr}).scalar() or 0)
+    except Exception as e:                                       # noqa: BLE001 - a count never breaks the map
+        logger.warning(f"concepts textless count {scenario_id}: {e}")
+        return 0
+
+
 def _compute_concept_graph(scenario_id: str) -> dict[str, Any]:
-    """Carte des concepts d'un scénario à partir de ce qui est déjà en base (rapide, sans LLM)."""
+    """Carte des concepts d'un scénario à partir de ce qui est déjà en base (rapide, sans LLM).
+
+    Elle dit aussi où en est l'annotation : `n_missing_concepts` articles qu'un passage peut
+    encore annoter, `n_unannotatable` qu'aucun ne peut (dont `n_concepts_given_up` après
+    CONCEPTS_MAX_ATTEMPTS échecs, que l'on peut rendre, et `n_without_text`, sans aucun texte)."""
     rows, n_total = _concept_rows(scenario_id)
-    payload = _build_concept_graph(rows, n_total=n_total)
+    n_textless = _concepts_textless_count(scenario_id)
+    payload = _build_concept_graph(rows, n_total=n_total + n_textless)
     payload["scenario_id"] = scenario_id
+    payload["n_without_text"] = n_textless
+    payload["n_unannotatable"] = int(payload.get("n_unannotatable") or 0) + n_textless
+    payload["n_concepts_given_up"] = sum(1 for r in rows if not r.get("concepts_json")
+                                         and int(r.get("concepts_attempts") or 0) >= CONCEPTS_MAX_ATTEMPTS)
     return payload
 
 
@@ -841,7 +875,12 @@ _CONCEPT_SYSTEM = (
 
 
 def _llm_concepts_for_batch(client, batch: list[dict]) -> dict[int, list[dict]]:
-    """Un appel LLM pour un lot d'articles → {id: [concepts]}. Robuste : lot perdu = {}."""
+    """Un appel LLM pour un lot d'articles → {id: [concepts]}, pour les seuls articles DU LOT
+    que la réponse couvre (un id qui n'était pas demandé n'est jamais écrit).
+
+    Lève au lieu de rendre {} pour tout le lot : `LLMTruncated` quand la réponse est coupée à
+    son plafond (l'appelant coupe le lot en deux), l'erreur transitoire telle quelle (panne,
+    quota, appel refusé : aucune tentative n'est comptée), ValueError pour une réponse illisible."""
     items = []
     for r in batch:
         pj = r.get("pico_json") if isinstance(r.get("pico_json"), dict) else {}
@@ -850,25 +889,26 @@ def _llm_concepts_for_batch(client, batch: list[dict]) -> dict[int, list[dict]]:
             "title": (r.get("title") or "")[:300],
             "P": str(pj.get("P") or "")[:300], "I": str(pj.get("I") or "")[:300],
             "O": str(pj.get("O") or "")[:300], "design": str(pj.get("study_design") or "")[:80],
-            "abstract": "" if pj else (r.get("abstract") or "")[:900],
+            "abstract": (r.get("abstract") or "")[:_CONCEPT_ABSTRACT_CHARS],
         })
-    try:
-        resp = client.chat.completions.create(
-            model=_model("bulk"),
-            messages=[{"role": "system", "content": _CONCEPT_SYSTEM},
-                      {"role": "user", "content": json.dumps({"articles": items}, ensure_ascii=False)}],
-            temperature=0, seed=42, max_tokens=4000,
-            response_format={"type": "json_object"},
-        )
-        data = json.loads(resp.choices[0].message.content)
-    except Exception as e:
-        logger.warning(f"concept extraction batch: {e}")
-        return {}
+    resp = client.chat.completions.create(
+        model=_model("bulk"),
+        messages=[{"role": "system", "content": _CONCEPT_SYSTEM},
+                  {"role": "user", "content": json.dumps({"articles": items}, ensure_ascii=False)}],
+        temperature=0, seed=42, max_tokens=4000,
+        response_format={"type": "json_object"},
+    )
+    data = json.loads(_json_content(resp, f"concepts ({len(batch)} articles)"))
+    if not isinstance(data, dict):
+        raise ValueError("the concept answer is not a JSON object")
+    asked = {int(r["id"]) for r in batch}
     out: dict[int, list[dict]] = {}
-    for a in (data.get("articles") or []) if isinstance(data, dict) else []:
+    for a in data.get("articles") or []:
         try:
             aid = int(a.get("id"))
         except Exception:
+            continue
+        if aid not in asked:
             continue
         clean = []
         for c in a.get("concepts") or []:
@@ -907,10 +947,59 @@ def _concepts_annotatable(row: dict) -> bool:
                 or (row.get("abstract") and len(row["abstract"]) > 80))
 
 
+def _concepts_ask(client, batch: list[dict], watch: ProviderWatch, split: bool = True) -> tuple[dict[int, list[dict]], list[int]]:
+    """(concepts par article, articles à qui compter une tentative) pour un lot.
+
+    Une tentative n'est comptée qu'à un article absent d'une réponse valide, ou d'une réponse
+    qui reste illisible ou coupée : c'est ce qui se répète à l'identique (température 0). Une
+    panne, un quota, un appel refusé ne coûtent rien à l'article (`watch` les compte, et arrête
+    la passe quand le fournisseur semble tombé). Une réponse coupée fait couper le lot en deux,
+    chaque moitié essayée une fois : la tentative était comptée aux quinze articles du lot,
+    quelle que fût la cause, et au bout de trois un article n'était plus jamais annoté."""
+    ids = [int(r["id"]) for r in batch]
+    if watch.stopped():
+        return {}, []
+    try:
+        res = _llm_concepts_for_batch(client, batch)
+    except LLMTruncated as e:
+        watch.success()
+        if split and len(batch) > 1:
+            logger.warning(f"concept extraction batch of {len(batch)} cut off, asked again in two halves: {e}")
+            half = (len(batch) + 1) // 2
+            out: dict[int, list[dict]] = {}
+            charge: list[int] = []
+            for part in (batch[:half], batch[half:]):
+                got, missed = _concepts_ask(client, part, watch, split=False)
+                out.update(got)
+                charge += missed
+            return out, charge
+        logger.warning(f"concept extraction batch of {len(batch)} still cut off: {e}")
+        return {}, ids
+    except Exception as e:                                       # noqa: BLE001 - one batch never stops the pass
+        if is_transient_llm_error(e):
+            if _is_openai_quota_error(e):
+                _trip_openai_cooldown()
+            watch.failure(e)
+            logger.warning(f"concept extraction batch: {e} (transient: no attempt charged)")
+            return {}, []
+        watch.success()
+        logger.warning(f"concept extraction batch: {e}")
+        return {}, ids
+    watch.success()
+    return res, [i for i in ids if i not in res]
+
+
+#: L'état de la dernière passe d'annotation par scénario (dans ce processus) : ce que la carte
+#: dit d'une passe arrêtée parce que le fournisseur ne répondait plus.
+_concept_pass_state: dict[str, dict[str, Any]] = {}
+
+
 def _extract_concepts_for_scenario(scenario_id: str, max_articles: int | None = None) -> int:
     """Normalise par le LLM les concepts des articles pertinents qui n'en ont pas encore
     (`concepts_json`), une fois pour toutes - les autres scénarios les réutilisent.
-    Renvoie le nombre d'articles annotés. Sans clé OpenAI : 0, sans erreur."""
+    Renvoie le nombre d'articles annotés. Sans clé OpenAI : 0, sans erreur. Ne lance aucun
+    appel quand l'interrupteur, le budget ou le disjoncteur de quota l'interdisent, et s'arrête
+    (état `paused`) quand le fournisseur tombe en cours de route."""
     if not os.getenv("OPENAI_API_KEY"):
         return 0
     from concurrent.futures import ThreadPoolExecutor
@@ -922,24 +1011,27 @@ def _extract_concepts_for_scenario(scenario_id: str, max_articles: int | None = 
         todo = todo[:_cap]
     if not todo:
         return 0
+    watch = ProviderWatch(cooldown=_openai_in_cooldown)
+    if watch.preflight("concepts"):
+        _concept_pass_state[scenario_id] = {"status": "paused", "reason": watch.reason, "annotated": 0,
+                                            "charged": 0, "pending": len(todo)}
+        logger.warning(f"Concepts {scenario_id}: no call made, {watch.reason}")
+        return 0
     client = _OAI(timeout=120.0)
     batches = [todo[i:i + _CONCEPT_BATCH] for i in range(0, len(todo), _CONCEPT_BATCH)]
-    done = 0
+    done = charged = 0
 
-    def _work(batch):
-        res = _llm_concepts_for_batch(client, batch)
+    def _work(batch) -> tuple[int, int]:
+        res, charge = _concepts_ask(client, batch, watch)
         n = 0
         try:
             with engine.begin() as conn:
-                # La tentative est comptée pour TOUS les articles du lot, qu'ils soient
-                # revenus ou non : un article que le modèle ne sait pas annoter restait
-                # sinon « manquant » pour toujours et relançait un passage payant à
-                # chaque affichage de la carte.
-                conn.execute(text("""
-                    UPDATE literature_document
-                    SET concepts_attempts = COALESCE(concepts_attempts, 0) + 1
-                    WHERE id = ANY(CAST(:ids AS bigint[]))
-                """), {"ids": [int(a["id"]) for a in batch]})
+                if charge:
+                    conn.execute(text("""
+                        UPDATE literature_document
+                        SET concepts_attempts = COALESCE(concepts_attempts, 0) + 1
+                        WHERE id = ANY(CAST(:ids AS bigint[]))
+                    """), {"ids": charge})
                 for aid, concepts in (res or {}).items():
                     conn.execute(text(
                         "UPDATE literature_document SET concepts_json = CAST(:c AS jsonb) WHERE id = :id"
@@ -948,13 +1040,31 @@ def _extract_concepts_for_scenario(scenario_id: str, max_articles: int | None = 
                     n += 1
         except Exception as e:
             logger.warning(f"concepts_json write: {e}")
-        return n
+        return n, len(charge)
 
     with ThreadPoolExecutor(max_workers=_CONCEPT_WORKERS) as ex:
-        for n in ex.map(_work, batches):
+        for n, c in ex.map(_work, batches):
             done += n
-    logger.info(f"Concepts {scenario_id}: {done}/{len(todo)} articles annotés ({len(batches)} appels).")
+            charged += c
+    _concept_pass_state[scenario_id] = {"status": "paused" if watch.reason else "done", "reason": watch.reason,
+                                        "annotated": done, "charged": charged, "transient": watch.n_transient,
+                                        "pending": len(todo) - done - charged}
+    logger.info(f"Concepts {scenario_id}: {done}/{len(todo)} articles annotés ({len(batches)} lots)"
+                + (f", passe arrêtée : {watch.reason}" if watch.reason else "") + ".")
     return done
+
+
+def reset_concepts_given_up(scenario_id: str) -> int:
+    """Rend leurs tentatives aux articles pertinents du scénario laissés de côté après
+    CONCEPTS_MAX_ATTEMPTS échecs, sans concepts. Renvoie combien."""
+    rows, _ = _concept_rows(scenario_id)
+    ids = [int(r["id"]) for r in rows
+           if not r.get("concepts_json") and int(r.get("concepts_attempts") or 0) >= CONCEPTS_MAX_ATTEMPTS]
+    if ids:
+        with engine.begin() as conn:
+            conn.execute(text("UPDATE literature_document SET concepts_attempts = 0 "
+                              "WHERE id = ANY(CAST(:ids AS bigint[]))"), {"ids": ids})
+    return len(ids)
 
 
 _concept_jobs_lock = threading.Lock()
@@ -998,22 +1108,23 @@ def _start_concept_enrichment(scenario_id: str) -> bool:
 
 def get_user_scenario_concept_graph_payload(scenario_id: str, refresh: bool = False) -> dict[str, Any]:
     """Cache DB d'abord (précalculé par le pipeline et après chaque recherche) ; sinon calcul
-    rapide sur ce qui est en base, et annotation LLM des articles manquants en arrière-plan
-    (`enriching` = true → l'interface re-lit le graphe quand c'est fini)."""
+    rapide sur ce qui est en base. Une lecture ne lance JAMAIS la passe payante : elle relançait
+    l'annotation à chaque affichage, en ne vérifiant que la clé (ni l'interrupteur, ni le
+    budget, ni le disjoncteur de quota). Elle dit combien d'articles restent à annoter
+    (`n_missing_concepts`) et combien ne peuvent pas l'être (`n_unannotatable`) ; la passe
+    tourne dans le pipeline et sur demande (POST .../concept-graph/annotate). `enriching` = une
+    passe tourne → l'interface re-lit le graphe quand c'est fini ; `annotation` = la dernière."""
     _get_user_scenario_or_404(scenario_id)
     if not refresh:
         cached = _load_viz_cache(scenario_id, "concepts")
         if cached and cached.get("kind") == "concepts" and cached.get("version") == CONCEPTS_VERSION:
             cached["enriching"] = scenario_id in _concept_jobs_running
-            if cached["enriching"] is False and cached.get("n_missing_concepts", 0) > 0 \
-                    and cached.get("n_articles", 0) > 0 and os.getenv("OPENAI_API_KEY"):
-                cached["enriching"] = _start_concept_enrichment(scenario_id)
+            cached["annotation"] = _concept_pass_state.get(scenario_id)
             return cached
     payload = _compute_concept_graph(scenario_id)
     _save_viz_cache(scenario_id, "concepts", payload)
-    payload["enriching"] = False
-    if payload.get("n_missing_concepts", 0) > 0 and payload.get("n_articles", 0) > 0:
-        payload["enriching"] = _start_concept_enrichment(scenario_id)
+    payload["enriching"] = scenario_id in _concept_jobs_running
+    payload["annotation"] = _concept_pass_state.get(scenario_id)
     return payload
 
 
@@ -1021,3 +1132,29 @@ def get_user_scenario_concept_graph_payload(scenario_id: str, refresh: bool = Fa
 def get_user_scenario_concept_graph(scenario_id: str, refresh: bool = False) -> dict[str, Any]:
     """Carte des concepts du corpus pertinent (voir le commentaire de section)."""
     return get_user_scenario_concept_graph_payload(scenario_id, refresh)
+
+
+@app.post("/user-scenarios/{scenario_id}/concept-graph/annotate")
+def annotate_user_scenario_concepts(scenario_id: str, retry_given_up: bool = False,
+                                    _: None = Depends(require_api_key)) -> dict[str, Any]:
+    """Lance l'annotation des concepts des articles pertinents qui n'en ont pas, en arrière-plan,
+    puis reconstruit la carte. `retry_given_up` rend d'abord leurs tentatives aux articles
+    laissés de côté après trois échecs. Rien n'est lancé sans clé (`no_llm`) ni quand aucun
+    appel ne peut partir (`paused` et la raison : interrupteur, budget, disjoncteur de quota)."""
+    _get_user_scenario_or_404(scenario_id)
+    n_reset = reset_concepts_given_up(scenario_id) if retry_given_up else 0
+    if n_reset:
+        _precompute_concept_graph(scenario_id, extract=False)        # les comptes servis suivent
+    if not os.getenv("OPENAI_API_KEY"):
+        out: dict[str, Any] = {"status": "no_llm"}
+    else:
+        probe = ProviderWatch(cooldown=_openai_in_cooldown)
+        if probe.preflight("concepts"):
+            out = {"status": "paused", "reason": probe.reason}
+        else:
+            running = scenario_id in _concept_jobs_running
+            out = {"status": "running" if running else ("started" if _start_concept_enrichment(scenario_id)
+                                                        else "no_llm")}
+    if retry_given_up:
+        out["n_reset"] = n_reset
+    return out
