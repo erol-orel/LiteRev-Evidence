@@ -14,6 +14,7 @@ from fastapi import Depends, HTTPException
 from sqlalchemy import text
 
 from .core import (
+    _OPENAI_QUOTA_COOLDOWN_UNTIL,
     _env_int,
     _is_openai_quota_error,
     _job_is_active,
@@ -24,18 +25,21 @@ from .core import (
     logger,
     require_api_key,
 )
+from .documents import _truncate_to_tokens
 from .scenario_store import (
-    CORPUS_DERIVED_CACHE_RESET,
     DEFAULT_RERANK_THRESHOLD,
-    DEFAULT_SIMILARITY_THRESHOLD,
     _get_scenario_rerank_threshold,
     _get_scenario_threshold,
     _get_user_scenario_or_404,
     relevance_order_sql,
     relevant_gate_sql,
+    reset_corpus_derived_caches,
     scenario_rerank_threshold_sql,
+    scenario_threshold_info,
     scenario_threshold_sql,
+    scenario_unscored_count,
     screening_status_sql,
+    unscored_sql,
 )
 from .search import (
     _boolean_corpus_ids,
@@ -72,92 +76,289 @@ def embedding_text_for_query(query: str) -> str:
     return text_[:EMBED_QUERY_MAX_CHARS]
 
 
-def _run_semantic_rerank_inline(scenario_id: str, query: str) -> int:
-    """Score sémantique (cosinus requête↔article) du corpus, mis dans similarity_score.
+#: Articles par appel d'embedding dans le repli OpenAI du scoring.
+_FALLBACK_BATCH = 100
+#: Lots d'affilée sans un seul article scoré avant d'arrêter le repli. Un lot qui échoue
+#: est sauté et le suivant tente sa chance ; trois de suite, c'est une panne qui dure
+#: (réseau, modèle refusé) et continuer ne ferait que la répéter. Le reste est dit, et
+#: le scoring automatique repassera (cf. _autoscore_note).
+_FALLBACK_MAX_STALLED = 3
 
-    Optimisé : on RÉUTILISE les embeddings pgvector déjà stockés
-    (document_chunk.embedding) et on calcule le cosinus EN BASE en UNE requête
-    (au lieu de ré-embedder chaque résumé via OpenAI + cosinus Python + une
-    transaction par article - ce qui rendait l'étape très lente). On ne ré-embedde
-    via OpenAI QUE les articles fraîchement ingérés dont les chunks ne sont pas
-    encore vectorisés (minorité)."""
+
+def title_abstract_text(title: str | None, abstract: str | None) -> str:
+    """Le texte d'un chunk `title_abstract` tel que l'ingestion l'écrit (api/sources.py,
+    living_review_scheduler.py) : le titre, une ligne vide, le résumé. PUR."""
+    return f"{title or ''}\n\n{abstract or ''}".strip()
+
+
+def _scorable_text_sql(doc: str = "ld") -> str:
+    """Un article a-t-il assez de texte pour porter un chunk `title_abstract`, donc un
+    score ? La règle de `_backfill_title_abstract_chunks`, la même ici, pour qu'un article
+    ne soit pas scorable par un chemin et pas par l'autre."""
+    return f"length(btrim(coalesce({doc}.title, '') || ' ' || coalesce({doc}.abstract, ''))) >= 30"
+
+
+def _fallback_text(row: dict) -> str:
+    """Le texte que le repli plonge pour un article : EXACTEMENT celui que le worker plonge
+    pour son chunk `title_abstract` (documents._embed_one_call : le contenu du chunk, coupé
+    par jetons). Le chunk en base quand il existe, sinon le même texte reconstruit.
+
+    Le repli plongeait `titre + résumé[:1500]` quand le worker plonge le résumé entier : un
+    même article recevait deux cosinus selon le chemin pris, face à un seuil dur."""
+    return _truncate_to_tokens(row.get("chunk_text") or title_abstract_text(row.get("title"),
+                                                                           row.get("abstract")))
+
+
+def _retryable_unscored(scenario_id: str) -> int:
+    """Les articles sans score qu'un nouveau passage peut scorer : ceux qui ont du texte.
+    Un article sans titre ni résumé exploitables n'en aura jamais, inutile de relancer pour
+    lui."""
+    with engine.connect() as conn:
+        return int(conn.execute(text(f"""
+            SELECT COUNT(*) FROM article_scenarios asn
+            JOIN literature_document ld ON ld.id = asn.document_id
+            WHERE asn.scenario_id = :sid AND ld.is_duplicate IS NOT TRUE
+              AND {unscored_sql('ld', 'asn')} AND {_scorable_text_sql('ld')}
+        """), {"sid": scenario_id}).scalar() or 0)
+
+
+def _run_semantic_rerank_inline(scenario_id: str, query: str, report: dict | None = None,
+                                missing_only: bool = False) -> int:
+    """Score sémantique (cosinus requête↔article) du corpus, mis dans similarity_score.
+    Renvoie le nombre de scores écrits ; `report`, s'il est fourni, reçoit le détail.
+
+    LE SCORE EST CELUI DU TITRE ET DU RÉSUMÉ. Il était le MAXIMUM sur tous les chunks de
+    l'article, résumé ET sections du texte intégral : un article en texte intégral tirait
+    trente fois, un article réduit à son résumé une seule, si bien qu'à seuil égal le texte
+    intégral passait la porte plus facilement, et que récupérer un texte intégral ne
+    pouvait que monter un score. Sur HPAI_last, 869 des 1 043 pertinents ont un texte
+    intégral, contre 4 176 des 15 660 du corpus. Les chunks du texte intégral servent
+    toujours la recherche (assistant, extraits), pas la porte.
+
+    Deux chemins, un seul texte :
+      1. rapide : le cosinus pgvector EN BASE, en une requête, pour les articles dont le
+         chunk `title_abstract` est déjà vectorisé ;
+      2. repli OpenAI pour les autres, qui plonge le MÊME texte que le worker
+         (`_fallback_text`), par lots, en parcourant les identifiants (`ld.id > dernier`) :
+         plus de plafond (il était de 200 lots de 100, soit 20 000 articles par passage),
+         un lot en échec est sauté et compté au lieu d'arrêter tout, et trois lots d'affilée
+         sans progrès arrêtent le repli. Pendant la pause OpenAI (quota), le passage
+         s'arrête « partiel » au lieu de ne rien dire, et le scoring automatique est
+         réarmé pour la fin de la pause.
+
+    `missing_only` : le repli ne traite que les articles sans score (le passage
+    automatique). Sinon il reprend aussi ceux dont le score ne vient pas du chunk vectorisé
+    (calculé par l'ancienne règle) : c'est un RE-scoring. Un article qui n'a ni chunk
+    vectorisé ni texte exploitable perd alors son ancien score, qu'aucune règle actuelle ne
+    peut plus produire (`cleared`).
+
+    Ce que dit `report` : `fast` et `fallback` (scores écrits par chaque chemin),
+    `newly_scored`, `changed` (scores qui ont bougé), `crossed_threshold` (articles passés
+    d'un côté à l'autre du seuil), `cleared`, `fallback_failed` (articles des lots en
+    échec), `partial` et `partial_reason` (`cooldown`, `failures`, `fast_path` ou
+    `query_embedding`),
+    `retry_after_s`, `unscored` (articles qui attendent un score pour entrer) et
+    `retryable` (ceux qu'un nouveau passage peut scorer)."""
+    rep = report if report is not None else {}
+    rep.update({"fast": 0, "fallback": 0, "newly_scored": 0, "changed": 0,
+                "crossed_threshold": 0, "cleared": 0, "fallback_failed": 0,
+                "fallback_batches_failed": 0, "partial": False, "partial_reason": None,
+                "retry_after_s": None, "unscored": None, "retryable": None, "error": None})
     try:
         from llm_usage import MeteredOpenAI as _OAI
         _client = _OAI(timeout=90.0)
         q_emb = _client.embeddings.create(model=_model("embedding"),
                                           input=embedding_text_for_query(query)).data[0].embedding
         q_str = str(q_emb)
-
-        # 1) Rapide : cosinus pgvector en base pour tous les docs déjà vectorisés.
-        with engine.begin() as _c:
-            n_fast = _c.execute(text("""
-                UPDATE article_scenarios asn
-                SET similarity_score = sub.sim
-                FROM (
-                    SELECT c.document_id,
-                           MAX(1 - (c.embedding <=> CAST(:q AS vector))) AS sim
-                    FROM document_chunk c
-                    JOIN article_scenarios a
-                      ON a.document_id = c.document_id AND a.scenario_id = :sid
-                    WHERE c.embedding IS NOT NULL
-                      AND c.chunk_type IN ('title_abstract', 'fulltext_section')
-                    GROUP BY c.document_id
-                ) sub
-                WHERE asn.scenario_id = :sid AND asn.document_id = sub.document_id
-            """), {"q": q_str, "sid": scenario_id}).rowcount or 0
-
-        # 2) Repli OpenAI pour les articles encore non scorés (chunks pas encore
-        #    vectorisés). On boucle par lots de 100 jusqu'à épuisement (PLUS de
-        #    plafond à 1000) pour qu'AUCUN article pertinent ne reste non scoré ;
-        #    chaque lot ré-interroge les NULL restants. Borne de sécurité pour
-        #    éviter une boucle infinie si un lot ne parvenait pas à s'écrire.
-        n_slow = 0
-        if not _openai_in_cooldown():
-            import numpy as _np
-            _q = _np.asarray(q_emb, dtype=float)
-            _qn = float(_np.linalg.norm(_q)) or 1.0
-            _MAX_FALLBACK_BATCHES = 200  # 200 × 100 = 20 000 articles / scénario
-            for _bi in range(_MAX_FALLBACK_BATCHES):
-                if _openai_in_cooldown():
-                    break
-                with engine.connect() as _conn:
-                    batch = _conn.execute(text("""
-                        SELECT ld.id, ld.title, ld.abstract
-                        FROM literature_document ld
-                        JOIN article_scenarios asn ON asn.document_id = ld.id AND asn.scenario_id = :sid
-                        WHERE asn.similarity_score IS NULL
-                          AND ld.abstract IS NOT NULL AND length(ld.abstract) > 30
-                        ORDER BY ld.id LIMIT 100
-                    """), {"sid": scenario_id}).mappings().fetchall()
-                if not batch:
-                    break
-                texts = [f"{r['title']}\n\n{(r['abstract'] or '')[:1500]}" for r in batch]
-                try:
-                    emb = _client.embeddings.create(model=_model("embedding"), input=texts).data
-                    ups = []
-                    for j, e in enumerate(emb):
-                        _d = _np.asarray(e.embedding, dtype=float)
-                        sim = float(_q @ _d) / (_qn * (float(_np.linalg.norm(_d)) or 1.0))
-                        ups.append({"score": max(0.0, min(1.0, sim)), "doc_id": batch[j]["id"], "sid": scenario_id})
-                    with engine.begin() as _c:
-                        _c.execute(text("""
-                            UPDATE article_scenarios SET similarity_score = :score
-                            WHERE document_id = :doc_id AND scenario_id = :sid
-                        """), ups)
-                    n_slow += len(ups)
-                except Exception as _e:
-                    logger.warning(f"Rerank fallback batch {_bi}: {_e}")
-                    if _is_openai_quota_error(_e):
-                        _trip_openai_cooldown()
-                    break  # toute erreur : on arrête (évite une boucle infinie)
-            else:
-                logger.warning(f"Rerank {scenario_id}: plafond de repli atteint "
-                               f"({_MAX_FALLBACK_BATCHES * 100} articles) - certains peuvent rester non scorés.")
-        logger.info(f"Rerank {scenario_id}: {n_fast} via pgvector + {n_slow} via OpenAI (fallback).")
-        return n_fast + n_slow
+        thr = _get_scenario_threshold(scenario_id)
     except Exception as _e:
         logger.error(f"Rerank inline {scenario_id} fatal: {_e}", exc_info=True)
+        rep["error"] = f"{type(_e).__name__}: {_e}"
+        # Rien n'a été scoré : le passage le dit, et le scoring automatique repassera.
+        rep["partial"], rep["partial_reason"] = True, "query_embedding"
+        if _is_openai_quota_error(_e):
+            _trip_openai_cooldown()
+        _close_scoring_report(scenario_id, rep)
         return 0
+
+    # 1) Rapide : cosinus pgvector en base, sur le chunk title_abstract SEUL. L'ancien score
+    #    est relu dans la même instruction : le passage dit combien de scores ont bougé.
+    try:
+        with engine.begin() as _c:
+            fast = _c.execute(text("""
+                WITH upd AS (
+                    UPDATE article_scenarios asn
+                    SET similarity_score = sub.sim
+                    FROM (
+                        SELECT c.document_id,
+                               MAX(1 - (c.embedding <=> CAST(:q AS vector))) AS sim,
+                               MAX(a.similarity_score) AS old
+                        FROM document_chunk c
+                        JOIN article_scenarios a
+                          ON a.document_id = c.document_id AND a.scenario_id = :sid
+                        WHERE c.embedding IS NOT NULL
+                          AND c.chunk_type = 'title_abstract'
+                        GROUP BY c.document_id
+                    ) sub
+                    WHERE asn.scenario_id = :sid AND asn.document_id = sub.document_id
+                    RETURNING sub.old AS old, sub.sim AS new
+                )
+                SELECT COUNT(*) AS n,
+                       COUNT(*) FILTER (WHERE old IS NULL) AS newly,
+                       COUNT(*) FILTER (WHERE old IS NOT NULL AND abs(old - new) > 1e-6) AS changed,
+                       COUNT(*) FILTER (WHERE (COALESCE(old, 0) >= :thr) <> (new >= :thr)) AS crossed
+                FROM upd
+            """), {"q": q_str, "sid": scenario_id, "thr": thr}).mappings().first() or {}
+        rep["fast"] = int(fast.get("n") or 0)
+        rep["newly_scored"] += int(fast.get("newly") or 0)
+        rep["changed"] += int(fast.get("changed") or 0)
+        rep["crossed_threshold"] += int(fast.get("crossed") or 0)
+    except Exception as _e:
+        # Le repli ne dépend pas de pgvector : il passe quand même, et le passage se dit
+        # partiel au lieu de rendre 0 pour tout le corpus.
+        logger.warning(f"Rerank {scenario_id}: cosinus pgvector en échec ({_e}), repli seul.")
+        rep["partial"], rep["partial_reason"] = True, "fast_path"
+
+    # 2) Un ancien score qu'aucune règle actuelle ne peut plus produire : ni chunk
+    #    title_abstract vectorisé, ni texte pour le repli. Il venait du texte intégral.
+    if not missing_only:
+        try:
+            with engine.begin() as _c:
+                rep["cleared"] = int(_c.execute(text(f"""
+                    WITH clr AS (
+                        UPDATE article_scenarios asn SET similarity_score = NULL
+                        FROM literature_document ld
+                        WHERE asn.scenario_id = :sid AND ld.id = asn.document_id
+                          AND asn.similarity_score IS NOT NULL
+                          AND NOT ({_scorable_text_sql('ld')})
+                          AND NOT EXISTS (
+                              SELECT 1 FROM document_chunk c
+                              WHERE c.document_id = ld.id AND c.chunk_type = 'title_abstract'
+                                AND c.embedding IS NOT NULL)
+                        RETURNING 1
+                    )
+                    SELECT COUNT(*) FROM clr
+                """), {"sid": scenario_id}).scalar() or 0)
+        except Exception as _e:
+            logger.warning(f"Rerank {scenario_id}: anciens scores non effacés ({_e}).")
+
+    # 3) Repli OpenAI : le même texte que le worker, par lots, sans plafond.
+    _need = ("asn.similarity_score IS NULL" if missing_only else
+             "(asn.similarity_score IS NULL OR NOT EXISTS ("
+             " SELECT 1 FROM document_chunk c WHERE c.document_id = ld.id"
+             " AND c.chunk_type = 'title_abstract' AND c.embedding IS NOT NULL))")
+    import numpy as _np
+    _q = _np.asarray(q_emb, dtype=float)
+    _qn = float(_np.linalg.norm(_q)) or 1.0
+    after, stalled = 0, 0
+    while True:
+        try:
+            with engine.connect() as _conn:
+                batch = _conn.execute(text(f"""
+                    SELECT ld.id, ld.title, ld.abstract, asn.similarity_score AS old,
+                           (SELECT c.content FROM document_chunk c
+                             WHERE c.document_id = ld.id AND c.chunk_type = 'title_abstract'
+                             ORDER BY c.id LIMIT 1) AS chunk_text
+                    FROM literature_document ld
+                    JOIN article_scenarios asn ON asn.document_id = ld.id AND asn.scenario_id = :sid
+                    WHERE ld.id > :after
+                      AND ld.is_duplicate IS NOT TRUE
+                      AND {_need}
+                      AND {_scorable_text_sql('ld')}
+                    ORDER BY ld.id LIMIT :n
+                """), {"sid": scenario_id, "after": after, "n": _FALLBACK_BATCH}).mappings().fetchall()
+        except Exception as _e:
+            logger.warning(f"Rerank fallback {scenario_id}: lecture du lot en échec ({_e}).")
+            rep["partial"], rep["partial_reason"] = True, "failures"
+            break
+        if not batch:
+            break
+        if _openai_in_cooldown():
+            # La pause OpenAI (quota) : le passage s'arrête PARTIEL, dit combien restent
+            # sans score, et le scoring automatique est réarmé pour la fin de la pause.
+            # Il sautait le repli sans un mot, et ces articles restaient à 0 pour la porte.
+            import time as _t
+            rep["partial"], rep["partial_reason"] = True, "cooldown"
+            rep["retry_after_s"] = max(0, int(_OPENAI_QUOTA_COOLDOWN_UNTIL[0] - _t.time()) + 1)
+            break
+        after = int(batch[-1]["id"])
+        try:
+            data = _client.embeddings.create(model=_model("embedding"),
+                                             input=[_fallback_text(dict(r)) for r in batch]).data
+            by_index = {int(getattr(e, "index", j)): e.embedding for j, e in enumerate(data)}
+            ups = []
+            for j, r in enumerate(batch):
+                if j not in by_index:
+                    continue
+                _d = _np.asarray(by_index[j], dtype=float)
+                sim = max(0.0, min(1.0, float(_q @ _d) / (_qn * (float(_np.linalg.norm(_d)) or 1.0))))
+                ups.append({"score": sim, "doc_id": r["id"], "sid": scenario_id})
+                old = r["old"]
+                if old is None:
+                    rep["newly_scored"] += 1
+                elif abs(float(old) - sim) > 1e-6:
+                    rep["changed"] += 1
+                if (float(old or 0) >= thr) != (sim >= thr):
+                    rep["crossed_threshold"] += 1
+            if ups:
+                with engine.begin() as _c:
+                    _c.execute(text("""
+                        UPDATE article_scenarios SET similarity_score = :score
+                        WHERE document_id = :doc_id AND scenario_id = :sid
+                    """), ups)
+            rep["fallback"] += len(ups)
+            rep["fallback_failed"] += len(batch) - len(ups)
+            stalled = 0 if ups else stalled + 1
+        except Exception as _e:
+            # Le lot est SAUTÉ (le curseur a déjà avancé) et compté ; les suivants tentent
+            # leur chance. Il arrêtait tout le repli, si bien qu'une erreur passagère
+            # laissait le reste du corpus sans score, à 0 pour la porte.
+            logger.warning(f"Rerank fallback {scenario_id} (lot après l'id {after}): {_e}")
+            rep["fallback_failed"] += len(batch)
+            rep["fallback_batches_failed"] += 1
+            stalled += 1
+            if _is_openai_quota_error(_e):
+                _trip_openai_cooldown()
+        if stalled >= _FALLBACK_MAX_STALLED:
+            rep["partial"], rep["partial_reason"] = True, "failures"
+            break
+
+    _close_scoring_report(scenario_id, rep)
+    return rep["fast"] + rep["fallback"]
+
+
+def _close_scoring_report(scenario_id: str, rep: dict) -> None:
+    """La fin de tout passage de scoring cosinus, réussi ou non : ce qui reste sans score,
+    une ligne de journal qui dit ce qui a changé, les cartes périmées quand le
+    sous-ensemble pertinent a bougé, et la date à laquelle le scoring automatique pourra
+    repasser. Jamais d'erreur : c'est un compte rendu."""
+    try:
+        rep["unscored"] = scenario_unscored_count(scenario_id)
+        rep["retryable"] = _retryable_unscored(scenario_id)
+    except Exception as _e:
+        logger.warning(f"Rerank {scenario_id}: compte des non scorés impossible ({_e}).")
+    if rep.get("fallback_failed") and rep.get("retryable"):
+        # Des lots sautés ont laissé des articles qu'un nouvel essai peut scorer : le passage
+        # est partiel même s'il est allé au bout, et le dit.
+        rep["partial"] = True
+        if rep.get("partial_reason") in (None, "fast_path"):
+            rep["partial_reason"] = "failures"
+    logger.info(f"Rerank {scenario_id}: {rep.get('fast', 0)} via pgvector + {rep.get('fallback', 0)} "
+                f"via OpenAI (fallback) ; {rep.get('changed', 0)} scores modifiés, "
+                f"{rep.get('newly_scored', 0)} nouveaux, {rep.get('cleared', 0)} effacés, "
+                f"{rep.get('crossed_threshold', 0)} ont changé de côté du seuil ; "
+                f"{rep.get('fallback_failed', 0)} en échec, {rep.get('unscored')} sans score"
+                + (f" (partiel : {rep.get('partial_reason')})" if rep.get("partial") else "") + ".")
+    if rep.get("newly_scored") or rep.get("changed") or rep.get("cleared"):
+        try:
+            with engine.begin() as _c:
+                reset_corpus_derived_caches(_c, scenario_id)
+        except Exception as _e:
+            logger.warning(f"Rerank {scenario_id}: caches dérivés non invalidés ({_e}).")
+    try:
+        _autoscore_note(scenario_id, rep)
+    except Exception as _e:                                  # noqa: BLE001
+        logger.warning(f"Rerank {scenario_id}: réarmement du scoring automatique ({_e}).")
 
 
 #: Le rerank est limité en débit côté fournisseur, et le dépassement est la panne
@@ -165,6 +366,42 @@ def _run_semantic_rerank_inline(scenario_id: str, query: str) -> int:
 #: d'affilée après une vingtaine de succès. Sans reprise, un rattrapage ne finit jamais.
 _RERANK_RETRIES = _env_int("RERANK_RETRIES", 5, 0)
 _RERANK_BACKOFF_S = 4.0
+
+#: Caractères envoyés au cross-encoder par article (titre, ligne vide, résumé). Le résumé
+#: était coupé à 1 500 caractères : un résumé structuré y perdait ses résultats et ses
+#: conclusions, c'est-à-dire ce qui dit si l'article répond à la question, avant d'être
+#: jugé. Cohere facture la requête et ses documents, et découpe au-delà de 500 jetons
+#: (requête comprise) : le coût croît à peu près linéairement avec cette borne.
+RERANK_DOC_MAX_CHARS = _env_int("RERANK_DOC_MAX_CHARS", 4000, 200)
+#: La requête envoyée au cross-encoder, au plus. Bien au-dessus d'une question, et d'une
+#: requête booléenne une fois ses tags de champ retirés ; si elle est coupée, le journal
+#: le dit.
+RERANK_QUERY_MAX_CHARS = 4000
+
+
+def rerank_document_text(title: str | None, abstract: str | None) -> str:
+    """Le texte d'un article tel que le cross-encoder le reçoit. PUR."""
+    return title_abstract_text(title, abstract)[:RERANK_DOC_MAX_CHARS]
+
+
+def rerank_query_text(query: str | None, scenario_id: str | None = None) -> str:
+    """La requête telle que le cross-encoder la reçoit : sans les tags de champ PubMed,
+    blancs repliés, bornée à RERANK_QUERY_MAX_CHARS.
+
+    Elle partait brute, coupée à 4 000 caractères AVEC ses `[tiab]` et `[mh]` : une longue
+    requête booléenne perdait sa fin, le défaut exact que décrit EMBED_QUERY_MAX_CHARS pour
+    l'ancienne coupe du plongement, et cela se voyait dans l'ordre du rerank et dans sa
+    porte. Retirer les tags d'abord rend la place ; ce qui reste coupé est journalisé
+    quand `scenario_id` est donné (une fois par balayage, pas par lot)."""
+    from .search import _strip_field_tags
+    text_ = " ".join(_strip_field_tags(query or "").split())
+    if len(text_) > RERANK_QUERY_MAX_CHARS:
+        if scenario_id is not None:
+            logger.warning(f"Cross-encoder rerank {scenario_id}: requête de {len(text_)} caractères "
+                           f"(sans les tags de champ) coupée à {RERANK_QUERY_MAX_CHARS} : la fin "
+                           f"n'est pas vue par le cross-encoder.")
+        text_ = text_[:RERANK_QUERY_MAX_CHARS]
+    return text_
 
 
 def _cohere_error_text(resp) -> str:
@@ -221,7 +458,8 @@ def _cohere_rerank(query: str, docs: list[str], model: str = "rerank-v3.5",
             resp = _rq.post(
                 "https://api.cohere.com/v2/rerank",
                 headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
-                json={"model": model, "query": query[:4000], "documents": docs, "top_n": len(docs)},
+                json={"model": model, "query": rerank_query_text(query), "documents": docs,
+                      "top_n": len(docs)},
                 timeout=60,
             )
         except _rq.exceptions.RequestException as _e:
@@ -353,13 +591,15 @@ def _run_cross_encoder_rerank(scenario_id: str, query: str, top_k: int | None = 
             return out
         import time as _t_batch
         consecutive = 0
+        # Préparée une fois : la coupe éventuelle est dite une fois, pas à chaque lot.
+        _query = rerank_query_text(query, scenario_id)
         for _b in range(0, len(rows), _RERANK_BATCH):
             if _b:
                 _t_batch.sleep(_RERANK_PAUSE_S)
             chunk = rows[_b:_b + _RERANK_BATCH]
-            docs = [f"{r['title']}\n\n{(r['abstract'] or '')[:1500]}" for r in chunk]
+            docs = [rerank_document_text(r["title"], r["abstract"]) for r in chunk]
             failure: dict[str, Any] = {}
-            scores = _cohere_rerank(query, docs, failure=failure)
+            scores = _cohere_rerank(_query, docs, failure=failure)
             ups = [{"s": s, "doc_id": r["id"], "sid": scenario_id}
                    for r, s in zip(chunk, scores or []) if s is not None]
             if not ups:
@@ -460,12 +700,47 @@ def _rerank_job_finish(scenario_id: str, job_id: str, entry: dict) -> None:
             _RERANK_JOBS[scenario_id] = {**entry, "job": job_id}
 
 
-def _rerank_final_entry(n_cosine: int, ce: dict) -> dict:
+def _cosine_left_behind(cos: dict | None) -> bool:
+    """Le passage cosinus a laissé sans score des articles qu'un nouvel essai PEUT scorer :
+    c'est ce que « partial » veut dire dans un statut. Un passage dont seul le chemin
+    pgvector a échoué, mais dont le repli a tout rattrapé, n'a rien laissé derrière lui."""
+    return bool(cos and cos.get("partial") and int(cos.get("retryable") or 0) > 0)
+
+
+def _cosine_entry(cos: dict | None) -> dict:
+    """Ce que le passage cosinus laisse à lire dans le statut d'un job : combien d'articles
+    restent sans score, combien ont échoué, et ce que le RE-scoring a changé. Vide sans
+    compte rendu (le rattrapage du seul rerank ne fait pas de cosinus)."""
+    if not cos:
+        return {}
+    out = {
+        "unscored": cos.get("unscored"),
+        "unscored_retryable": cos.get("retryable"),
+        "cosine_failed": cos.get("fallback_failed", 0),
+        "cosine_changed": cos.get("changed", 0),
+        "cosine_newly_scored": cos.get("newly_scored", 0),
+        "cosine_cleared": cos.get("cleared", 0),
+        "cosine_crossed_threshold": cos.get("crossed_threshold", 0),
+        "cosine_partial": bool(cos.get("partial")),
+        "cosine_partial_reason": cos.get("partial_reason"),
+        "retry_after_s": cos.get("retry_after_s"),
+    }
+    if _cosine_left_behind(cos):
+        out["message"] = (f"{cos.get('unscored') or 0} article(s) sans score, "
+                          f"nouvel essai automatique ({cos.get('partial_reason')}).")
+    return out
+
+
+def _rerank_final_entry(n_cosine: int, ce: dict, cos: dict | None = None) -> dict:
     """Ce qu'un scoring terminé laisse à lire : le cosinus, le cross-encoder, et, quand le
     fournisseur a refusé, pourquoi. Un balayage arrêté par un refus finit en « error » :
-    finir en « done » avec 100 articles sur 15 660 se lisait comme un succès."""
+    finir en « done » avec 100 articles sur 15 660 se lisait comme un succès. Un cosinus
+    PARTIEL (pause OpenAI, lots en échec) finit en « partial » : des articles restent hors
+    de la porte faute de score, le statut le dit avec leur nombre, et un nouvel essai est
+    prévu."""
     entry = {
-        "status": "error" if ce.get("stopped") else "done",
+        "status": ("error" if ce.get("stopped")
+                   else "partial" if _cosine_left_behind(cos) else "done"),
         "updated": n_cosine,
         "reranked": ce.get("scored", 0),
         "rerank_candidates": ce.get("candidates", 0),
@@ -474,6 +749,7 @@ def _rerank_final_entry(n_cosine: int, ce: dict) -> dict:
         "rerank_skipped_no_key": bool(ce.get("skipped_no_key")),
         "rerank_last_error": ce.get("last_error"),
         "rerank_stopped": ce.get("stopped"),
+        **_cosine_entry(cos),
     }
     if ce.get("stopped"):
         entry["error"] = ce["stopped"]
@@ -481,12 +757,19 @@ def _rerank_final_entry(n_cosine: int, ce: dict) -> dict:
 
 
 def _ensure_scenario_settings_table():
-    """Table pour stocker les paramètres par scénario (seuil, etc.)."""
+    """Table pour stocker les paramètres par scénario (seuil, etc.).
+
+    `similarity_threshold` n'a PLUS de valeur par défaut : la DDL écrivait 0.45 dans toute
+    ligne créée pour une autre raison (cache de visualisation, seuil de rerank, découpage),
+    si bien que « jamais choisi » se lisait « choisi 0.45 », et qu'un changement du seuil
+    de départ n'aurait jamais atteint ces scénarios. Rien n'est stocké tant qu'une personne
+    n'a pas réglé le seuil, et `similarity_threshold_set_at` date ce réglage (cf.
+    scenario_store.threshold_chosen_sql)."""
     with engine.begin() as conn:
         conn.execute(text("""
             CREATE TABLE IF NOT EXISTS scenario_settings (
                 scenario_id     VARCHAR(80) PRIMARY KEY,
-                similarity_threshold FLOAT DEFAULT 0.45,
+                similarity_threshold FLOAT,
                 rerank_threshold     FLOAT DEFAULT 0,
                 evidence_brief_json  JSONB DEFAULT NULL,
                 brief_generated_at   TIMESTAMP DEFAULT NULL,
@@ -501,6 +784,14 @@ def _ensure_scenario_settings_table():
         # porte d'avant, pour tous les scénarios déjà là.
         conn.execute(text(
             "ALTER TABLE scenario_settings ADD COLUMN IF NOT EXISTS rerank_threshold FLOAT DEFAULT 0"))
+        # Idempotent : sans défaut, DROP DEFAULT ne fait rien.
+        conn.execute(text(
+            "ALTER TABLE scenario_settings ALTER COLUMN similarity_threshold DROP DEFAULT"))
+        conn.execute(text(
+            "ALTER TABLE scenario_settings ADD COLUMN IF NOT EXISTS similarity_threshold_set_at TIMESTAMP"))
+        # La taille de l'échantillon d'audit du double aveugle, pris sous le seuil (0 = éteint).
+        conn.execute(text(
+            "ALTER TABLE scenario_settings ADD COLUMN IF NOT EXISTS double_blind_below_sample INTEGER DEFAULT 0"))
     logger.info("Table scenario_settings vérifiée/créée.")
 
 try:
@@ -642,11 +933,16 @@ def _get_above_threshold_articles(scenario_id: str, threshold: float | None = No
                            {relevance_order_sql('ld', 'asn', ':threshold')}) AS rn
                 FROM literature_document ld
                 JOIN article_scenarios asn ON asn.document_id = ld.id AND asn.scenario_id = :sid
-                WHERE ld.project_context = 'literev'
-                  -- La porte de pertinence, appelée et non recopiée : jamais un doublon,
-                  -- jamais un article exclu par un relecteur, sinon inclus à la main OU
-                  -- au-dessus des deux seuils. Un article non scoré compte pour 0.
-                  AND {relevant_gate_sql('ld', 'asn', ':threshold')}
+                -- La porte de pertinence, appelée et non recopiée : jamais un doublon,
+                -- jamais un article exclu par un relecteur, sinon inclus à la main OU
+                -- au-dessus des deux seuils. Un article non scoré compte pour 0.
+                --
+                -- Et RIEN d'autre : un filtre `project_context = 'literev'` vivait ici, et
+                -- nulle part ailleurs. Les compteurs, la PRISMA, les graphes, les
+                -- découpages et le double aveugle comptaient pertinent un article d'un
+                -- autre contexte que ce chargeur, donc les exports et les extractions,
+                -- ne rendaient jamais. « Pertinent » veut dire la même chose partout.
+                WHERE {relevant_gate_sql('ld', 'asn', ':threshold')}
                   {"AND ld.pico_json IS NOT NULL" if require_pico else ""}
             ) ranked
             ORDER BY rn
@@ -703,14 +999,17 @@ def trigger_rerank(scenario_id: str, missing_only: bool = False,
     def _run():
         try:
             n = 0
+            _cos: dict[str, Any] | None = None
             if not missing_only:
                 _rerank_job_update(scenario_id, job_id, phase="cosine")
                 _backfill_title_abstract_chunks(scenario_id)  # docs sans chunk -> searchable
-                n = _run_semantic_rerank_inline(scenario_id, query)
+                _cos = {}
+                n = _run_semantic_rerank_inline(scenario_id, query, report=_cos)
             # Recalcul COMPLET : après le cosinus, relancer AUSSI le cross-encoder Cohere
             # sur le sous-ensemble pertinent - sinon « Recalculer scores » ne rafraîchissait
             # que le cosinus et les rerank_score restaient figés/partiels.
-            _rerank_job_update(scenario_id, job_id, phase="rerank", updated=n)
+            _rerank_job_update(scenario_id, job_id, phase="rerank", updated=n,
+                               **_cosine_entry(_cos))
             _ce: dict[str, Any] = {"scored": 0, "candidates": 0, "batches_failed": 0,
                                    "skipped_no_key": 0}
             try:
@@ -726,10 +1025,11 @@ def trigger_rerank(scenario_id: str, missing_only: bool = False,
             except Exception as _ece:
                 logger.warning(f"cross-encoder (recalcul manuel) {scenario_id}: {_ece}")
                 _ce["stopped"] = f"{type(_ece).__name__}: {_ece}"
+            _maps_follow_rerank(scenario_id, _ce)
             # Le job disait « done » avec le seul compte du cosinus, quoi qu'ait fait le
             # cross-encoder : un échec total ressortait identique à un succès. Il porte
             # maintenant les deux, dit si des lots ont échoué, et pourquoi il s'est arrêté.
-            _rerank_job_finish(scenario_id, job_id, _rerank_final_entry(n, _ce))
+            _rerank_job_finish(scenario_id, job_id, _rerank_final_entry(n, _ce, _cos))
         except Exception as e:
             # Sans ce filet, une exception laisse le job en "running" pour toujours
             # (→ "already_running" + badge "recalcul en cours" figé jusqu'au restart).
@@ -738,6 +1038,19 @@ def trigger_rerank(scenario_id: str, missing_only: bool = False,
 
     threading.Thread(target=_run, daemon=True).start()
     return {"status": "started", "scenario_id": scenario_id, "query": query}
+
+
+def _maps_follow_rerank(scenario_id: str, ce: dict | None) -> None:
+    """Des scores de rerank viennent d'être écrits : ils déplacent la porte quand un seuil
+    de rerank est posé, et l'ordre des cartes plafonnées dans tous les cas. Ce qui avait
+    été calculé sur l'état d'avant est périmé (reset_corpus_derived_caches)."""
+    if not (ce or {}).get("scored"):
+        return
+    try:
+        with engine.begin() as _c:
+            reset_corpus_derived_caches(_c, scenario_id)
+    except Exception as _e:                                  # noqa: BLE001
+        logger.warning(f"Rerank {scenario_id}: caches dérivés non invalidés ({_e}).")
 
 
 @app.get("/scenarios/{scenario_id}/rerank/status")
@@ -759,6 +1072,8 @@ def get_rerank_status(scenario_id: str) -> dict[str, Any]:
         out["status"] = "stalled"
     try:
         out.update(_rerank_coverage(scenario_id))
+        # Et la similarité : les articles qui attendent un score pour pouvoir entrer.
+        out["similarity_unscored"] = scenario_unscored_count(scenario_id)
     except Exception as _e:
         logger.warning(f"rerank coverage {scenario_id}: {_e}")
     return out
@@ -854,6 +1169,11 @@ def rebuild_corpus(scenario_id: str, _: None = Depends(require_api_key)) -> dict
             n_corpus = _set_scenario_corpus(scenario_id, ids)  # fixe l'appartenance
             _n_dup_rows = _dedup_scenario_links(scenario_id)   # un seul lien / article distinct
             n_corpus -= _n_dup_rows
+            # L'appartenance vient de changer : les cartes décrivaient l'ancien corpus, et
+            # le scoring qui suit ne voit pas les articles RETIRÉS. Elles restaient servies
+            # jusqu'à 30 jours. (Le scoring périme de nouveau ce qu'il change lui-même.)
+            with engine.begin() as _c:
+                reset_corpus_derived_caches(_c, scenario_id)
             # PRISMA : une reconstruction n'interroge AUCUNE source. Elle rejoue la
             # requête booléenne sur la bibliothèque locale, et ses doublons sont les
             # lignes fusionnées par la dédup.
@@ -878,8 +1198,9 @@ def rebuild_corpus(scenario_id: str, _: None = Depends(require_api_key)) -> dict
             _store_prisma_identification(scenario_id, _figs)
             _rerank_job_update(scenario_id, job_id, phase="cosine")
             _backfill_title_abstract_chunks(scenario_id)       # chunks résumé manquants
-            n = _run_semantic_rerank_inline(scenario_id, query or boolean)  # cosinus pgvector
-            _rerank_job_update(scenario_id, job_id, phase="rerank", updated=n)
+            _cos: dict[str, Any] = {}
+            n = _run_semantic_rerank_inline(scenario_id, query or boolean, report=_cos)
+            _rerank_job_update(scenario_id, job_id, phase="rerank", updated=n, **_cosine_entry(_cos))
             _ce: dict[str, Any] = {}
             try:
                 _ce = _run_cross_encoder_rerank(                             # Cohere (si clé)
@@ -892,7 +1213,9 @@ def rebuild_corpus(scenario_id: str, _: None = Depends(require_api_key)) -> dict
             except Exception as _ece:
                 logger.warning(f"rebuild-corpus cross-encoder {scenario_id}: {_ece}")
                 _ce = {"stopped": f"{type(_ece).__name__}: {_ece}"}
-            _rerank_job_finish(scenario_id, job_id, {**_rerank_final_entry(n, _ce), "corpus": n_corpus})
+            _maps_follow_rerank(scenario_id, _ce)
+            _rerank_job_finish(scenario_id, job_id,
+                               {**_rerank_final_entry(n, _ce, _cos), "corpus": n_corpus})
             logger.info(f"Rebuild corpus {scenario_id}: {n_corpus} liens, {n} scorés.")
         except Exception as _e:
             _rerank_job_finish(scenario_id, job_id, {"status": "error", "error": str(_e)})
@@ -938,14 +1261,83 @@ def _backfill_title_abstract_chunks(scenario_id: str | None = None) -> int:
         return 0
 
 
+# ── Le scoring automatique, réarmé tant qu'il reste des articles sans score ──────
+# Il ne passait qu'UNE fois par processus : un statut « done » le bloquait jusqu'au
+# redémarrage suivant. Les articles liés ou vectorisés après coup (living review, worker)
+# restaient sans score, donc à 0 pour la porte, jusqu'à un pipeline, un redémarrage ou un
+# recalcul à la main. Il repasse maintenant tant qu'il reste des articles qu'un passage
+# PEUT scorer (`_retryable_unscored`), borné dans le temps : au plus un passage par
+# intervalle, et l'intervalle double à chaque passage qui n'avance pas (jusqu'à six
+# heures). Jamais une boucle serrée.
+
+#: Délai minimal entre deux passages automatiques sur un même scénario (secondes).
+AUTOSCORE_RETRY_S = _env_int("AUTOSCORE_RETRY_S", 600, 60)
+_AUTOSCORE_MAX_RETRY_S = 6 * 3600
+#: Passages d'affilée sans un article scoré avant de cesser de se réarmer tout seul. La
+#: page du corpus peut encore le relancer, à l'intervalle le plus long.
+_AUTOSCORE_MAX_STALLS = 8
+_AUTOSCORE: dict[str, dict] = {}
+_autoscore_lock = threading.Lock()
+
+
+def _schedule_autoscore(scenario_id: str, delay_s: float) -> threading.Timer:
+    """Un passage automatique dans `delay_s` secondes (fil démon)."""
+    timer = threading.Timer(delay_s, _maybe_autorerank, args=(scenario_id,))
+    timer.daemon = True
+    timer.start()
+    return timer
+
+
+def _autoscore_note(scenario_id: str, rep: dict) -> None:
+    """Après chaque passage de scoring cosinus, automatique ou non : quand le prochain
+    passage automatique est permis, et s'il faut le programmer.
+
+    Il est programmé quand le passage a fini PARTIEL (pause OpenAI, lots en échec) et
+    qu'il reste des articles scorables : « N sans score, nouvel essai à la fin de la
+    pause ». Un passage qui a avancé remet l'intervalle au minimum ; un passage qui n'a
+    rien pu faire de ce qu'il restait double le suivant, et au-delà de
+    `_AUTOSCORE_MAX_STALLS` passages stériles d'affilée il ne se reprogramme plus."""
+    import time as _t
+    retryable = int(rep.get("retryable") or 0)
+    progressed = int(rep.get("newly_scored") or 0) > 0
+    with _autoscore_lock:
+        st = _AUTOSCORE.setdefault(scenario_id, {"interval": AUTOSCORE_RETRY_S, "stalls": 0})
+        if progressed or retryable == 0:
+            st["interval"], st["stalls"] = AUTOSCORE_RETRY_S, 0
+        # Pas avant la fin de la pause OpenAI, s'il y en a une.
+        delay = max(float(st["interval"]), float(rep.get("retry_after_s") or 0) + 5.0)
+        st["not_before"] = _t.time() + delay
+        if not progressed and retryable > 0:
+            st["interval"] = min(_AUTOSCORE_MAX_RETRY_S, st["interval"] * 2)
+            st["stalls"] += 1
+        timer = st.get("timer")
+        if (rep.get("partial") and retryable > 0 and st["stalls"] <= _AUTOSCORE_MAX_STALLS
+                and not (timer is not None and timer.is_alive()) and _openai_configured()):
+            st["timer"] = _schedule_autoscore(scenario_id, delay + 1.0)
+
+
+def _openai_configured() -> bool:
+    """Ce processus peut-il appeler OpenAI ? Sans clé, ou avec OPENAI_ENABLED=0, un nouvel
+    essai programmé ne pourrait pas réussir avant un redémarrage, qui relance de toute façon
+    le scoring : rien n'est programmé (la page du corpus peut encore le relancer)."""
+    if not os.getenv("OPENAI_API_KEY"):
+        return False
+    try:
+        import llm_usage
+        return bool(llm_usage.openai_enabled())
+    except Exception:                                        # noqa: BLE001
+        return True
+
+
 def _maybe_autorerank(scenario_id: str) -> bool:
     """
-    Lance le scoring sémantique en arrière-plan si jamais effectué (auto-score),
-    et complète au passage les chunks title_abstract manquants (recherche + compteurs).
-    Ne se déclenche qu'une fois par scénario (tant que le process vit) : si le
-    job est déjà 'running' ou 'done', on ne relance pas. Renvoie True si lancé.
+    Lance le scoring sémantique en arrière-plan quand des articles du scénario attendent
+    un score qu'un passage peut leur donner (auto-score), et complète au passage les chunks
+    title_abstract manquants (recherche + compteurs). Pas plus d'un passage par intervalle
+    (cf. _autoscore_note). Renvoie True si lancé.
     """
     import threading
+    import time as _t
 
     # `_job_is_active`, comme les autres gardes : lire `status == "running"` nu
     # traitait une entrée laissée par un fil tué au redémarrage comme vivante (donc
@@ -953,7 +1345,7 @@ def _maybe_autorerank(scenario_id: str) -> bool:
     # second scoring concurrent du même scénario).
     if _rerank_job_active(scenario_id):
         return False
-    if _RERANK_JOBS.get(scenario_id, {}).get("status") == "done":
+    if _t.time() < (_AUTOSCORE.get(scenario_id) or {}).get("not_before", 0.0):
         return False
     try:
         if scenario_id.startswith("usr-"):
@@ -963,9 +1355,16 @@ def _maybe_autorerank(scenario_id: str) -> bool:
             meta = _get_db_gesica_scenario_or_404(scenario_id)
             nl = meta.get("nl_queries") or []
             query = nl[0] if nl else _gesica_title(meta)
+        if not query:
+            return False
+        if _retryable_unscored(scenario_id) == 0:
+            # Rien qu'un passage puisse scorer : pas de job, et pas de nouvelle lecture
+            # avant l'intervalle (la page du corpus appelle ceci à chaque affichage).
+            with _autoscore_lock:
+                _AUTOSCORE.setdefault(scenario_id, {"interval": AUTOSCORE_RETRY_S, "stalls": 0})[
+                    "not_before"] = _t.time() + AUTOSCORE_RETRY_S
+            return False
     except Exception:
-        return False
-    if not query:
         return False
 
     job_id = _claim_rerank_job(scenario_id)
@@ -976,8 +1375,11 @@ def _maybe_autorerank(scenario_id: str) -> bool:
         try:
             _rerank_job_update(scenario_id, job_id, phase="cosine")
             _backfill_title_abstract_chunks(scenario_id)  # docs sans chunk résumé -> searchable
-            n = _run_semantic_rerank_inline(scenario_id, query)
-            _rerank_job_finish(scenario_id, job_id, {"status": "done", "updated": n})
+            _cos: dict[str, Any] = {}
+            n = _run_semantic_rerank_inline(scenario_id, query, report=_cos, missing_only=True)
+            _rerank_job_finish(scenario_id, job_id, {
+                "status": "partial" if _cosine_left_behind(_cos) else "done", "updated": n,
+                **_cosine_entry(_cos)})
             logger.info(f"Auto-rerank {scenario_id}: {n} articles scorés.")
         except Exception as e:
             logger.warning(f"Auto-rerank {scenario_id}: {e}")
@@ -1012,34 +1414,51 @@ def get_scenario_settings(scenario_id: str) -> dict[str, Any]:
     Les artefacts JSON en cache (brief, variables, clustering, graphe, actions) ne sont
     PAS renvoyés : chacun a son endpoint. Avec `SELECT *`, la page scénario téléchargeait
     à chaque ouverture, pour lire un seul seuil, le clustering complet et le graphe de
-    connaissances (2,5 Mo pour 25 000 articles). Seule leur présence est indiquée."""
+    connaissances (2,5 Mo pour 25 000 articles). Seule leur présence est indiquée.
+
+    `similarity_threshold` est le seuil EN VIGUEUR (jamais un NULL ni une valeur stockée
+    d'office), et `threshold_chosen` dit si une personne l'a réglé : un seuil de départ
+    ne se présente pas comme un choix."""
     with engine.connect() as conn:
         row = conn.execute(text("""
             SELECT * FROM scenario_settings WHERE scenario_id = :sid
         """), {"sid": scenario_id}).mappings().first()
+    info = scenario_threshold_info(scenario_id)
     if not row:
         return {
             "scenario_id": scenario_id,
-            "similarity_threshold": DEFAULT_SIMILARITY_THRESHOLD,
+            "similarity_threshold": info["threshold"],
+            "threshold_chosen": False,
+            "similarity_threshold_set_at": None,
             "rerank_threshold": DEFAULT_RERANK_THRESHOLD,
+            "double_blind_below_sample": 0,
             "brief_generated_at": None,
             "variables_validated": False,
             "variables_generated_at": None,
             "cached": {_blob_key(c): False for c in _SETTINGS_BLOB_COLUMNS},
         }
     out = {k: v for k, v in dict(row).items() if k not in _SETTINGS_BLOB_COLUMNS}
+    out["similarity_threshold"] = info["threshold"]
+    out["threshold_chosen"] = info["chosen"]
     # NULL en base veut dire « jamais réglé », et la porte le lit comme 0. L'interface doit
     # lire la même chose, sans quoi le curseur s'afficherait vide sur un corpus non filtré.
     if out.get("rerank_threshold") is None:
         out["rerank_threshold"] = DEFAULT_RERANK_THRESHOLD
+    out["double_blind_below_sample"] = int(out.get("double_blind_below_sample") or 0)
     out["cached"] = {_blob_key(c): bool(row.get(c)) for c in _SETTINGS_BLOB_COLUMNS if c in row}
     return out
 
 
 @app.patch("/scenarios/{scenario_id}/settings")
 def update_scenario_settings(scenario_id: str, payload: dict[str, Any], _: None = Depends(require_api_key)) -> dict[str, Any]:
-    """Met à jour les paramètres du scénario (seuil, variables validées, etc.)."""
-    allowed = {"similarity_threshold", "rerank_threshold", "variables_json", "variables_validated"}
+    """Met à jour les paramètres du scénario (seuil, variables validées, etc.).
+
+    Régler `similarity_threshold` est un CHOIX, daté (`similarity_threshold_set_at`) : le
+    seuil cesse alors d'être « par défaut, non choisi » dans les rapports et les exports.
+    `double_blind_below_sample` règle l'échantillon d'audit du double aveugle (0 l'éteint)."""
+    from .double_blind import AUDIT_SAMPLE_MAX              # lazy: même ordre que les autres
+    allowed = {"similarity_threshold", "rerank_threshold", "variables_json", "variables_validated",
+               "double_blind_below_sample"}
     updates = {k: v for k, v in payload.items() if k in allowed}
     if not updates:
         raise HTTPException(status_code=422, detail="Aucun champ valide à mettre à jour")
@@ -1054,6 +1473,15 @@ def update_scenario_settings(scenario_id: str, payload: dict[str, Any], _: None 
             if not (0.0 <= _v <= 1.0):
                 raise HTTPException(status_code=422, detail=f"{_k} doit être compris entre 0 et 1")
             updates[_k] = _v
+    if "double_blind_below_sample" in updates:
+        try:
+            _n = int(updates["double_blind_below_sample"])
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=422, detail="double_blind_below_sample doit être un entier")
+        if not (0 <= _n <= AUDIT_SAMPLE_MAX):
+            raise HTTPException(status_code=422, detail=(
+                f"double_blind_below_sample doit être compris entre 0 et {AUDIT_SAMPLE_MAX}"))
+        updates["double_blind_below_sample"] = _n
 
     with engine.begin() as conn:
         # Upsert
@@ -1067,8 +1495,10 @@ def update_scenario_settings(scenario_id: str, payload: dict[str, Any], _: None 
             import json as _json
             if isinstance(val, (dict, list)):
                 val = _json.dumps(val)
+            # Le seuil de similarité réglé ici est choisi par une personne : on le date.
+            _set_at = ", similarity_threshold_set_at = NOW()" if key == "similarity_threshold" else ""
             conn.execute(text(f"""
-                UPDATE scenario_settings SET {key} = :val, updated_at = NOW()
+                UPDATE scenario_settings SET {key} = :val{_set_at}, updated_at = NOW()
                 WHERE scenario_id = :sid
             """), {"val": val, "sid": scenario_id})
 
@@ -1087,11 +1517,9 @@ def update_scenario_settings(scenario_id: str, payload: dict[str, Any], _: None 
             # continuait donc de servir, indéfiniment, des actions tirées du corpus
             # PRÉCÉDENT, présentées comme celles du corpus actuel. La liste est partagée
             # avec la living review (CORPUS_DERIVED_CACHE_RESET) pour qu'un artefact
-            # ajouté demain ne soit pas oublié d'un côté.
-            conn.execute(text(f"""
-                UPDATE scenario_settings SET {CORPUS_DERIVED_CACHE_RESET}
-                WHERE scenario_id = :sid
-            """), {"sid": scenario_id})
+            # ajouté demain ne soit pas oublié d'un côté ; reset_corpus_derived_caches
+            # l'applique, et oublie aussi le clustering gardé en mémoire.
+            reset_corpus_derived_caches(conn, scenario_id)
         if "variables_json" in updates:
             conn.execute(text("""
                 UPDATE scenario_settings
@@ -1103,17 +1531,25 @@ def update_scenario_settings(scenario_id: str, payload: dict[str, Any], _: None 
     # Retourner l'objet settings complet mis à jour
     with engine.connect() as conn:
         updated_row = conn.execute(text("""
-            SELECT scenario_id, similarity_threshold, rerank_threshold, brief_generated_at,
+            SELECT scenario_id, rerank_threshold, brief_generated_at, double_blind_below_sample,
                    variables_validated, variables_generated_at, updated_at
             FROM scenario_settings WHERE scenario_id = :sid
         """), {"sid": scenario_id}).mappings().first()
     if updated_row:
+        # Le seuil EN VIGUEUR et s'il a été choisi, par la même lecture que partout : plus
+        # de repli sur un littéral 0.45 qui ne se distinguait pas d'un choix.
+        info = scenario_threshold_info(scenario_id)
         return {
             "status": "updated",
             "scenario_id": scenario_id,
             "updated": list(updates.keys()),
-            "similarity_threshold": float(updated_row["similarity_threshold"]) if updated_row["similarity_threshold"] is not None else 0.45,
-            "rerank_threshold": float(updated_row["rerank_threshold"]) if updated_row["rerank_threshold"] is not None else 0.0,
+            "similarity_threshold": info["threshold"],
+            "threshold_chosen": info["chosen"],
+            "similarity_threshold_set_at": info["set_at"],
+            "rerank_threshold": (float(updated_row["rerank_threshold"])
+                                 if updated_row["rerank_threshold"] is not None
+                                 else DEFAULT_RERANK_THRESHOLD),
+            "double_blind_below_sample": int(updated_row["double_blind_below_sample"] or 0),
             "variables_validated": bool(updated_row["variables_validated"]),
             "updated_at": updated_row["updated_at"].isoformat() if updated_row["updated_at"] else None,
         }
@@ -1322,8 +1758,13 @@ def get_threshold_curve(scenario_id: str, target: int | None = None,
     # les articles que le rerank n'a pas encore jugés. La courbe les ajoute à chaque
     # point, exactement comme la porte les laissera passer.
     free = included + (data["unscored"] if data["unscored_are_kept"] else 0)
-    current = (_get_scenario_rerank_threshold(scenario_id) if score == "rerank"
-               else _get_scenario_threshold(scenario_id))
+    if score == "rerank":
+        current, current_chosen = _get_scenario_rerank_threshold(scenario_id), None
+    else:
+        # Le seuil de similarité peut n'être qu'un point de départ : la courbe le dit, pour
+        # qu'un 0.45 jamais choisi ne se lise pas comme la décision de la revue.
+        _info = scenario_threshold_info(scenario_id)
+        current, current_chosen = _info["threshold"], _info["chosen"]
     targets = list(_CURVE_TARGETS)
     if target is not None:
         t = int(target)
@@ -1335,6 +1776,7 @@ def get_threshold_curve(scenario_id: str, target: int | None = None,
         "scenario_id": scenario_id,
         "score": score,
         "current_threshold": current,
+        "current_threshold_chosen": current_chosen,
         "candidates": len(rows),
         "included": included,
         "unscored": data["unscored"],

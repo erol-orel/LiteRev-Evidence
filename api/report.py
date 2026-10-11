@@ -36,7 +36,7 @@ from sqlalchemy import text
 
 from .core import _norm_lang, app, engine, logger
 from .scenario_store import (_get_scenario_rerank_threshold, _get_scenario_threshold,
-                             _get_user_scenario_or_404)
+                             _get_user_scenario_or_404, threshold_provenance)
 from .study_design import level_label
 
 #: `[12]` or `[12, 34]`: what the brief's prompt asks the model to place in its prose. A
@@ -103,6 +103,9 @@ _REPORT_STRINGS = {
                      "citer."),
         "rerank": (" et, quand il a été calculé, dont le score de reclassement (cross-encoder) "
                    "atteint {r}"),
+        "threshold_default": "par défaut, non choisi",
+        "unscored": ("Sans score de similarité : {n} (hors du sous-ensemble pertinent tant "
+                     "qu'ils ne sont pas scorés, sauf inclusion à la main)"),
         "warning": ("> **Avertissement** : le calcul des agrégats a échoué, les totaux "
                     "ci-dessus ne décrivent pas le corpus complet."),
         "years": "Années : {a} à {b}",
@@ -167,6 +170,9 @@ _REPORT_STRINGS = {
                      "sampling. The articles reproduced in full in the generator's prompt serve "
                      "only for quotation."),
         "rerank": " and, where it was computed, whose reranking (cross-encoder) score reaches {r}",
+        "threshold_default": "default, not chosen",
+        "unscored": ("Without a similarity score: {n} (outside the relevant set until scored, "
+                     "unless included by hand)"),
         "warning": ("> **Warning**: the aggregation failed; the totals above do not describe "
                     "the complete corpus."),
         "years": "Years: {a} to {b}",
@@ -376,12 +382,18 @@ def _rerank_clause(rerank_threshold: float | None, lang: str | None = "fr") -> s
 def build_report(brief: dict, digest: dict, matrix: dict | None, funnel: dict | None,
                  articles_by_id: dict, scenario_name: str, query: str | None,
                  threshold: float, rerank_threshold: float | None = None,
-                 lang: str | None = "fr") -> dict[str, Any]:
+                 lang: str | None = "fr", threshold_chosen: bool | None = None,
+                 unscored: int | None = None) -> dict[str, Any]:
     """The whole document as markdown, plus what could not be resolved. Pure.
 
     Figures are numbered in the order they appear, as a paper numbers them, so the text
     can refer to "figure 2" and mean it. `lang` is the language of the document around
-    the brief's own prose (French by default, as before)."""
+    the brief's own prose (French by default, as before).
+
+    `threshold_chosen=False` prints the threshold as "default, not chosen": a starting
+    value nobody set must not read as a methods decision. `unscored` is the number of
+    articles left out of the relevant set for want of a score; both are omitted when
+    unknown (None)."""
     from .evidence import brief_level                       # lazy: evidence imports widely
 
     key = _lang_key(lang)
@@ -406,10 +418,11 @@ def build_report(brief: dict, digest: dict, matrix: dict | None, funnel: dict | 
     # ── Méthodes ─────────────────────────────────────────────────────────────
     lines += [s["methods"], ""]
     n_relevant = digest.get("n_articles") or 0
+    _thr_shown = f"{threshold:.2f}" + (f", {s['threshold_default']}" if threshold_chosen is False else "")
     lines += [
         s["query"].format(query=query or s["query_missing"]),
         "",
-        s["relevant"].format(threshold=f"{threshold:.2f}",
+        s["relevant"].format(threshold=_thr_shown,
                              rerank=_rerank_clause(rerank_threshold, key), n=n_relevant),
         "",
     ]
@@ -424,6 +437,8 @@ def build_report(brief: dict, digest: dict, matrix: dict | None, funnel: dict | 
         facts.append(s["with_pico"].format(n=digest["n_with_pico"]))
     if digest.get("n_with_fulltext") is not None:
         facts.append(s["with_fulltext"].format(n=digest["n_with_fulltext"]))
+    if unscored is not None:
+        facts.append(s["unscored"].format(n=unscored))
     if funnel:
         # Clés de `corpus_stats` (api/evidence.py), pas inventées ici.
         for fkey in ("total", "duplicates", "excluded", "pending"):
@@ -599,9 +614,12 @@ def evidence_report(scenario_id: str, download: bool = Query(False),
 
     # La langue du document : celle demandée, sinon celle du brief, sinon le français.
     _lang = _norm_lang(lang) or str((llm.get("_meta") or {}).get("lang") or "") or "fr"
+    # Le seuil était-il choisi, et combien d'articles restent dehors faute de score.
+    _prov = threshold_provenance(scenario_id)
     out = build_report(llm, digest, matrix, funnel, by_id, name, query, threshold,
                        rerank_threshold=_get_scenario_rerank_threshold(scenario_id),
-                       lang=_lang)
+                       lang=_lang, threshold_chosen=_prov["threshold_chosen"],
+                       unscored=_prov["unscored"])
     if download:
         return PlainTextResponse(
             out["markdown"], media_type="text/markdown; charset=utf-8",

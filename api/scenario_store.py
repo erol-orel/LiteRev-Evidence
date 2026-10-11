@@ -10,7 +10,7 @@ from typing import Any, Optional
 from fastapi import HTTPException
 from sqlalchemy import text
 
-from .core import engine
+from .core import engine, logger
 
 # ── Helpers internes ──────────────────────────────────────────────────────────
 
@@ -28,7 +28,24 @@ def _get_user_scenario_or_404(scenario_id: str) -> dict[str, Any]:
         raise HTTPException(status_code=404, detail=f"Scénario utilisateur '{scenario_id}' non trouvé")
     return dict(row)
 
+#: Le seuil de DÉPART, celui qu'on applique tant que personne n'en a choisi un. Rien ne
+#: l'écrit en base : il est lu ici au moment de servir, de sorte qu'un changement de
+#: cette constante atteint tous les scénarios auxquels personne n'a touché.
+#:
+#: Ce n'est pas une valeur défendable en soi, et le code le mesure lui-même (ci-dessous) :
+#: sur le corpus HPAI, les articles hors sujet ont une similarité médiane PLUS HAUTE que
+#: les articles aviaires, si bien qu'aucune coupe fixe du cosinus ne tient d'un sujet à
+#: l'autre. D'où `threshold_chosen`, que les rapports et les exports impriment : « 0.45,
+#: par défaut, non choisi » ne se lit pas comme un choix de méthode.
 DEFAULT_SIMILARITY_THRESHOLD = 0.45
+
+#: La valeur que la DDL écrivait d'office (`similarity_threshold FLOAT DEFAULT 0.45`)
+#: dans TOUTE ligne de réglages, créée pour n'importe quelle raison : un cache de
+#: visualisation, un seuil de rerank, un découpage. Une ligne antérieure à
+#: `similarity_threshold_set_at` qui porte cette valeur ne dit donc rien d'un choix. Figée
+#: ici, et non lue sur DEFAULT_SIMILARITY_THRESHOLD : c'est l'histoire de la base, pas le
+#: réglage d'aujourd'hui.
+_LEGACY_DDL_THRESHOLD = 0.45
 
 # Le rerank juge la PERTINENCE À LA QUESTION, le cosinus la proximité de vocabulaire, et
 # sur un corpus thématique les deux ne disent pas du tout la même chose. Mesuré sur le
@@ -43,13 +60,49 @@ DEFAULT_SIMILARITY_THRESHOLD = 0.45
 DEFAULT_RERANK_THRESHOLD = 0.0
 
 
-def _get_scenario_threshold(scenario_id: str) -> float:
-    """Retourne le seuil de similarité configuré pour ce scénario."""
+def threshold_chosen_sql(ss: str = "ss") -> str:
+    """Vrai quand une PERSONNE a choisi le seuil de similarité de cette ligne de réglages.
+
+    `ss` est l'alias de scenario_settings. Choisi veut dire : posé par le PATCH du seuil
+    (`similarity_threshold_set_at` renseigné), ou, pour une ligne d'avant cette colonne,
+    une valeur stockée autre que celle que la DDL écrivait d'office. Pur : la règle est
+    écrite ICI, une fois, et lue aussi bien par le SQL que par `scenario_threshold_info`."""
+    return (f"({ss}.similarity_threshold IS NOT NULL"
+            f" AND ({ss}.similarity_threshold_set_at IS NOT NULL"
+            f" OR {ss}.similarity_threshold <> {_LEGACY_DDL_THRESHOLD}))")
+
+
+def scenario_threshold_chosen_sql(sid: str = ":sid") -> str:
+    """Le seuil de ce scénario a-t-il été choisi ? Lu DANS la requête, faux sans ligne."""
+    return (f"COALESCE((SELECT {threshold_chosen_sql('ss')} FROM scenario_settings ss"
+            f" WHERE ss.scenario_id = {sid}), FALSE)")
+
+
+def scenario_threshold_info(scenario_id: str) -> dict[str, Any]:
+    """Le seuil de similarité EN VIGUEUR et s'il a été choisi, en une lecture.
+
+    Toute lecture du seuil passe par ici (ou par `scenario_threshold_sql`, qui applique la
+    même règle dans une requête) : un seuil jamais choisi vaut DEFAULT_SIMILARITY_THRESHOLD,
+    quoi que la ligne de réglages porte. Le repli silencieux sur un littéral 0.45, recopié
+    dans quatre modules, ne se distinguait pas d'un choix."""
     with engine.connect() as conn:
-        row = conn.execute(text("""
-            SELECT similarity_threshold FROM scenario_settings WHERE scenario_id = :sid
+        row = conn.execute(text(f"""
+            SELECT {scenario_threshold_sql(':sid')} AS thr,
+                   {scenario_threshold_chosen_sql(':sid')} AS chosen,
+                   (SELECT similarity_threshold_set_at FROM scenario_settings
+                     WHERE scenario_id = :sid) AS set_at
         """), {"sid": scenario_id}).mappings().first()
-    return float(row["similarity_threshold"]) if row and row["similarity_threshold"] is not None else DEFAULT_SIMILARITY_THRESHOLD
+    thr = row["thr"] if row else None
+    return {
+        "threshold": float(thr) if thr is not None else DEFAULT_SIMILARITY_THRESHOLD,
+        "chosen": bool(row["chosen"]) if row else False,
+        "set_at": row["set_at"].isoformat() if row and row["set_at"] else None,
+    }
+
+
+def _get_scenario_threshold(scenario_id: str) -> float:
+    """Retourne le seuil de similarité EN VIGUEUR pour ce scénario (cf. scenario_threshold_info)."""
+    return scenario_threshold_info(scenario_id)["threshold"]
 
 
 def _get_scenario_rerank_threshold(scenario_id: str) -> float:
@@ -144,12 +197,17 @@ def relevance_order_sql(doc: str = "d", link: str = "ars", thr: str | None = Non
     au fichier qu'il vient de télécharger ne retrouvait pas ses dix premiers articles.
 
     `thr` : quand un seuil est donné, les articles qui le passent viennent d'abord,
-    comme sur l'écran. Sans seuil, l'ordre est le même, sans cette première coupe."""
+    comme sur l'écran. Sans seuil, l'ordre est le même, sans cette première coupe.
+
+    `IS TRUE` : un article jamais jugé a un statut NULL, et `NULL = 'included'` vaut NULL,
+    que PostgreSQL range EN TÊTE d'un tri décroissant. Les inclusions à la main passaient
+    donc après tous les articles jamais jugés, c'est-à-dire presque tout le corpus, au lieu
+    d'ouvrir la liste."""
     status = screening_status_sql(doc, link)
     head = (f"CASE WHEN COALESCE({link}.similarity_score, 0) >= {thr} THEN 0 ELSE 1 END ASC, "
             if thr else "")
     return (head
-            + f"({status} = 'included') DESC, "
+            + f"({status} = 'included') IS TRUE DESC, "
             + f"({link}.rerank_score IS NOT NULL) DESC, "
             + f"{link}.rerank_score DESC NULLS LAST, "
             + f"{link}.similarity_score DESC NULLS LAST, "
@@ -345,9 +403,13 @@ def set_scenario_exclude_preprints(scenario_id: str, exclude: bool) -> None:
 
 def scenario_threshold_sql(sid: str = ":sid") -> str:
     """Le seuil du scénario, LU DANS la requête plutôt que passé en paramètre, pour
-    que le lot et le compteur qui l'annonce voient le même instantané."""
-    return (f"COALESCE((SELECT ss.similarity_threshold FROM scenario_settings ss"
-            f" WHERE ss.scenario_id = {sid}), {DEFAULT_SIMILARITY_THRESHOLD})")
+    que le lot et le compteur qui l'annonce voient le même instantané.
+
+    Même règle que `scenario_threshold_info` : une valeur stockée sans avoir été choisie
+    (`threshold_chosen_sql`) ne compte pas, c'est le seuil de départ qui s'applique."""
+    return (f"COALESCE((SELECT CASE WHEN {threshold_chosen_sql('ss')} THEN ss.similarity_threshold END"
+            f" FROM scenario_settings ss WHERE ss.scenario_id = {sid}),"
+            f" {DEFAULT_SIMILARITY_THRESHOLD})")
 
 
 def scenario_scope_sql(scope: str, doc: str = "ld", link: str = "asn",
@@ -387,7 +449,7 @@ def scenario_scope_sql(scope: str, doc: str = "ld", link: str = "asn",
 def scenario_counts_sql() -> str:
     """L'instruction unique qui compte le corpus d'un scénario. Pure : aucune
     connexion, testable hors base. Paramètres liés : `sid`, et `thr` (seuil forcé,
-    NULL → le seuil enregistré du scénario, à défaut 0.45)."""
+    NULL → le seuil en vigueur du scénario, cf. scenario_threshold_sql)."""
     status = screening_status_sql("d", "ars")
     fulltext = ("EXISTS (SELECT 1 FROM document_chunk c"
                 " WHERE c.document_id = d.id AND c.chunk_type = 'fulltext_section')")
@@ -396,9 +458,7 @@ def scenario_counts_sql() -> str:
     return f"""
         WITH s AS (
             SELECT COALESCE(CAST(:thr AS double precision),
-                            (SELECT similarity_threshold FROM scenario_settings
-                              WHERE scenario_id = :sid),
-                            {DEFAULT_SIMILARITY_THRESHOLD}) AS thr,
+                            {scenario_threshold_sql(':sid')}) AS thr,
                    (SELECT created_at FROM user_scenarios WHERE id = :sid) AS screated
         )
         SELECT
@@ -461,6 +521,51 @@ def scenario_counts(scenario_id: str, threshold: float | None = None,
     out["year_min"] = int(row["year_min"]) if row and row["year_min"] is not None else None
     out["year_max"] = int(row["year_max"]) if row and row["year_max"] is not None else None
     return out
+
+
+# ── Les articles que le scoring n'a pas (encore) atteints ────────────────────
+def unscored_sql(doc: str = "d", link: str = "ars") -> str:
+    """Un article SANS score de similarité. La porte le compte pour 0 : il reste hors du
+    sous-ensemble pertinent tant qu'il n'est pas scoré, sauf inclusion à la main.
+
+    UNE expression, que lisent le rapport, les exports, le brief et le re-scoring
+    automatique. C'est ici, et seulement ici, qu'on l'étend pour sortir de ce compte une
+    catégorie d'articles qui ne peut pas devenir pertinente par son score (les notices
+    sans résumé, par exemple) : `doc` est l'alias de literature_document, prêt pour cela.
+    La partition de `scenario_counts` (au-dessus + en dessous + non scorés = total) ne la
+    lit pas, puisqu'elle doit rester une partition."""
+    return f"{link}.similarity_score IS NULL"
+
+
+def scenario_unscored_count(scenario_id: str, conn: Any = None) -> int:
+    """Combien d'articles du corpus attendent un score pour pouvoir entrer : ni doublon, ni
+    décidés à la main (un exclu ne rentrera pas, un inclus est déjà dedans)."""
+    status = screening_status_sql("d", "ars")
+    sql = text(f"""
+        SELECT COUNT(*) FROM article_scenarios ars
+        JOIN literature_document d ON d.id = ars.document_id
+        WHERE ars.scenario_id = :sid AND d.is_duplicate IS NOT TRUE
+          AND {status} IS DISTINCT FROM 'excluded' AND {status} IS DISTINCT FROM 'included'
+          AND {unscored_sql('d', 'ars')}
+    """)
+    if conn is not None:
+        return int(conn.execute(sql, {"sid": scenario_id}).scalar() or 0)
+    with engine.connect() as _c:
+        return int(_c.execute(sql, {"sid": scenario_id}).scalar() or 0)
+
+
+def threshold_provenance(scenario_id: str) -> dict[str, Any]:
+    """Ce qu'un produit de la revue (brief, rapport, export) dit de son seuil : s'il a été
+    choisi, et combien d'articles restent hors du sous-ensemble faute de score.
+
+    Jamais d'erreur : une ligne de provenance qui ne peut pas être lue devient `None`
+    (« inconnu »), elle ne fait pas tomber le document qu'elle accompagne."""
+    try:
+        return {"threshold_chosen": scenario_threshold_info(scenario_id)["chosen"],
+                "unscored": scenario_unscored_count(scenario_id)}
+    except Exception as e:                                   # noqa: BLE001
+        logger.warning(f"threshold_provenance {scenario_id}: {e}")
+        return {"threshold_chosen": None, "unscored": None}
 
 
 # ── Chercher DANS un corpus ──────────────────────────────────────────────────
@@ -583,3 +688,27 @@ CORPUS_DERIVED_CACHE_RESET = """
     actions_generated_at = NULL,
     seir_projection_json = NULL, seir_projection_generated_at = NULL
 """
+
+
+def reset_corpus_derived_caches(conn, scenario_id: str) -> None:
+    """Périme, dans la transaction de l'appelant, tout ce qui a été calculé sur le
+    sous-ensemble pertinent de CE scénario : la liste partagée ci-dessus, plus le
+    clustering que le processus garde en mémoire.
+
+    Le seuil, les découpages et la living review le faisaient ; une décision de screening
+    article par article et une reconstruction du corpus, non. Or une inclusion à la main
+    change le sous-ensemble autant qu'un seuil : elle restait absente des cartes pendant
+    les 30 jours du cache, sans que rien ne le signale.
+
+    La copie EN MÉMOIRE du dernier clustering est oubliée aussi : `/clustering` la sert
+    quand la base n'a plus rien, si bien qu'un cache vidé en base renaissait de là (la
+    même résurrection que l'ancienne copie /tmp, cf. _persist_clustering_result). Sans
+    ligne de réglages, il n'y a rien à vider : pas d'INSERT."""
+    conn.execute(text(f"""
+        UPDATE scenario_settings SET {CORPUS_DERIVED_CACHE_RESET} WHERE scenario_id = :sid
+    """), {"sid": scenario_id})
+    try:
+        from .clustering import _forget_clustering_result   # lazy: clustering se charge après
+        _forget_clustering_result(scenario_id)
+    except Exception as e:                                   # noqa: BLE001 - jamais bloquant
+        logger.warning(f"reset_corpus_derived_caches {scenario_id}: {e}")

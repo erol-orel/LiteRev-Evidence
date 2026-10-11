@@ -16,7 +16,7 @@ from sqlalchemy import text
 
 from .core import app, engine, logger
 from .scenario_store import (_get_scenario_threshold, _get_user_scenario_or_404,
-                             relevant_gate_tail_sql, screening_status_sql)
+                             relevance_order_sql, relevant_gate_tail_sql, screening_status_sql)
 from .clustering import _load_viz_cache, _save_viz_cache
 from llm_usage import model_for as _model
 
@@ -209,14 +209,22 @@ def _build_knowledge_graph(
 # SQL partagé : un embedding par article, les plus PERTINENTS d'abord. Le tri se faisait
 # sur quality_score : les 400 nœuds dessinés n'étaient donc pas les 400 que l'utilisateur
 # obtient en triant son corpus par pertinence, alors que le sous-titre annonce « les N
-# articles les plus pertinents ». Inclus d'abord, puis rerank, puis score sémantique.
+# articles les plus pertinents ».
+#
+# L'ordre est celui de l'application, par la fonction partagée (`relevance_order_sql`).
+# Il était `COALESCE(rerank, similarité, 0)`, qui compare deux échelles qui n'ont rien de
+# commun : un article non reranké à 0.50 de cosinus passait devant un article reranké à
+# 0.40, alors que l'onglet Corpus, l'export et les extractions classent le second avant.
+# Les colonnes que l'ordre lit sont reprises sous leur nom, et l'ordre est appliqué à
+# `sub` comme document ET comme lien.
 _KG_NODE_SQL = f"""
     SELECT * FROM (
         SELECT DISTINCT ON (d.id)
             d.id, d.title, d.year, d.journal, d.study_design, d.quality_score,
+            d.citation_count,
             c.embedding::text AS emb_str,
-            ({screening_status_sql('d', 'ars')} = 'included') AS is_included,
-            COALESCE(ars.rerank_score, ars.similarity_score, 0) AS relevance,
+            {screening_status_sql('d', 'ars')} AS screening_status,
+            ars.rerank_score, ars.similarity_score,
             COALESCE((d.pico_json->>'study_design'), d.study_design, 'unknown') AS design
         FROM literature_document d
         {{join}}
@@ -226,8 +234,7 @@ _KG_NODE_SQL = f"""
           AND d.abstract IS NOT NULL
         ORDER BY d.id, (c.chunk_type = 'title_abstract') DESC, c.id
     ) sub
-    ORDER BY is_included DESC, relevance DESC NULLS LAST,
-             quality_score DESC NULLS LAST, year DESC NULLS LAST
+    ORDER BY {relevance_order_sql('sub', 'sub')}
     LIMIT :max_nodes
 """
 

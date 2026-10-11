@@ -20,7 +20,7 @@ from sqlalchemy import text
 from .core import app, engine, logger
 from .scenario_store import (_get_scenario_rerank_threshold, _get_scenario_threshold,
                              _get_user_scenario_or_404, relevance_order_sql,
-                             screening_status_sql)
+                             screening_status_sql, threshold_provenance)
 from .relevance import _get_above_threshold_articles
 
 EXPORT_FORMATS = ("csv", "xlsx", "ris", "bibtex", "json", "md")
@@ -325,10 +325,16 @@ def provenance_lines(meta: dict | None) -> list[str]:
         out.append(f"Subset: {m['subset_label']} ({m.get('n_articles', 0)} articles)")
     _thr, _rthr = m.get("similarity_threshold"), m.get("rerank_threshold")
     if _thr is not None:
+        # Un seuil que personne n'a réglé est le point de départ de l'outil, pas une
+        # décision de la revue : le fichier le dit.
         out.append(f"Similarity threshold: {_thr}"
+                   + (" (default, not chosen)" if m.get("threshold_chosen") is False else "")
                    + (f" | rerank threshold: {_rthr}" if _rthr else "")
                    + (" | WARNING: threshold 0 means the WHOLE corpus, not a relevant subset"
                       if (_thr == 0 and not _rthr) else ""))
+    if m.get("unscored") is not None:
+        out.append(f"Unscored: {m['unscored']} articles without a similarity score "
+                   f"(outside the relevant set until scored, unless included by hand)")
     if m.get("include_abstract") is False:
         out.append("Abstracts: not included in this file")
     if m.get("coverage"):
@@ -464,10 +470,16 @@ def articles_export_response(scenario_id: str, fmt: str, articles: list[dict],
     # rien dans le fichier ne permettait de s'en apercevoir.
     _thr = _get_scenario_threshold(scenario_id) if threshold is None else float(threshold)
     _rthr = _get_scenario_rerank_threshold(scenario_id)
+    # Choisi : posé par une personne, ou donné explicitement à cet export. Et combien
+    # d'articles restent hors du sous-ensemble faute de score.
+    _prov = threshold_provenance(scenario_id)
+    if threshold is not None:
+        _prov["threshold_chosen"] = True
     meta = {"scenario_id": scenario_id, "scenario": title, "query": row.get("query"),
             "n_articles": len(rows), "format": fmt,
             "subset": subset, "subset_label": subset_label,
             "similarity_threshold": _thr, "rerank_threshold": _rthr,
+            "threshold_chosen": _prov["threshold_chosen"], "unscored": _prov["unscored"],
             "include_abstract": bool(include_abstract),
             "generated_at": _dt.now(_tz.utc).isoformat(timespec="seconds")}
     if coverage:
@@ -567,12 +579,16 @@ def export_scenario_cluster(
     _name = str(match.get("cluster_name") or f"cluster-{cluster_id}")
     _n_clustered = int(cache.get("n_docs") or 0)
     _n_eligible = int(cache.get("n_docs_total") or _n_clustered)
+    # Le total du cache est le sous-ensemble pertinent ENTIER, articles sans résumé
+    # compris : ceux-là ne peuvent pas être placés sur la carte, et le fichier le dit.
+    _no_abs = int(cache.get("n_docs_no_abstract") or 0)
     coverage = (
         f"Articles du cluster « {_name} » ({len(articles)}). Le clustering porte sur "
-        f"{_n_clustered} articles sur {_n_eligible} éligibles : c'est une projection "
+        f"{_n_clustered} articles sur {_n_eligible} pertinents : c'est une projection "
         f"plafonnée à CLUSTER_MAX_DOCS={CLUSTER_MAX_DOCS} (les plus pertinents), pas le "
-        f"corpus entier. Pour la liste complète des articles pertinents, utilisez "
-        f"l'export du corpus."
+        f"corpus entier"
+        + (f", et {_no_abs} article(s) sans résumé n'y figurent pas" if _no_abs else "")
+        + ". Pour la liste complète des articles pertinents, utilisez l'export du corpus."
     )
     return articles_export_response(
         scenario_id, format, articles, include_abstract,

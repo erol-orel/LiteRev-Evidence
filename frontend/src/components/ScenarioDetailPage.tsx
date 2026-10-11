@@ -5710,6 +5710,9 @@ function ArticleSimilarityGraph({ scenarioId }: { scenarioId: string }) {
 // Reviewer code storage key
 const REVIEWER_CODE_KEY = 'literev_reviewer_code';
 const REVIEWER_ROLE_KEY = 'literev_reviewer_role';
+/** Taille de l'échantillon d'audit quand on l'allume, MIROIR de `AUDIT_SAMPLE_DEFAULT`
+ *  dans api/double_blind.py. */
+const AUDIT_SAMPLE_SIZE = 100;
 
 function DoubleBlindSection({ scenarioId }: { scenarioId: string }) {
   const { t } = useI18n();
@@ -5728,6 +5731,7 @@ function DoubleBlindSection({ scenarioId }: { scenarioId: string }) {
   const [codeInput, setCodeInput] = React.useState('');
   const [codeError, setCodeError] = React.useState('');
   const [queue, setQueue] = React.useState<DoubleBlindQueue | null>(null);
+  const [auditError, setAuditError] = React.useState<string | null>(null);
   const reviewer: 1|2 = reviewerRole ?? 1;
 
   // Le rôle est demandé AU SERVEUR, qui le tient par scénario. Il était calculé ici,
@@ -5801,11 +5805,29 @@ function DoubleBlindSection({ scenarioId }: { scenarioId: string }) {
     }
   };
 
+  // Allumer ou éteindre l'échantillon d'audit : une option du scénario, enregistrée par
+  // le serveur (clé d'écriture), le même échantillon pour les deux relecteurs.
+  const toggleAudit = async (on: boolean) => {
+    setAuditError(null);
+    try {
+      await patchScenarioSettings(scenarioId, { double_blind_below_sample: on ? AUDIT_SAMPLE_SIZE : 0 });
+      reload();
+    } catch {
+      setAuditError(t("scenarioDetail.doubleBlind.auditToggleFailed"));
+    }
+  };
+
   if (loading) return <LoadingSpinner text={t("scenarioDetail.doubleBlind.loading")} />;
 
   const kappaColor = !kappa?.kappa ? 'text-white/40'
     : kappa.kappa >= 0.61 ? 'text-brand-300'
     : kappa.kappa >= 0.41 ? 'text-gold-400'
+    : 'text-rose-300';
+  const audit = kappa?.strata?.audit_sample ?? null;
+  const auditSize = kappa?.audit_sample_size ?? 0;
+  const auditColor = !audit?.kappa ? 'text-white/40'
+    : audit.kappa >= 0.61 ? 'text-brand-300'
+    : audit.kappa >= 0.41 ? 'text-gold-400'
     : 'text-rose-300';
 
   return (
@@ -5856,7 +5878,14 @@ function DoubleBlindSection({ scenarioId }: { scenarioId: string }) {
         </div>
       )}
 
-      {/* Score Kappa */}
+      {/* Score Kappa. Les chiffres de tête sont ceux du sous-ensemble pertinent : ils
+          ne mesurent l'accord que sur ce que la machine a retenu, et le panneau le dit. */}
+      {kappa && (
+        <div className="space-y-0.5">
+          <p className="text-[10px] font-bold uppercase tracking-wider text-white/50">{t("scenarioDetail.doubleBlind.strataRelevant")}</p>
+          <p className="text-[10px] text-white/35">{t("scenarioDetail.doubleBlind.strataRelevantNote")}</p>
+        </div>
+      )}
       {kappa && (
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
           {[
@@ -5881,9 +5910,51 @@ function DoubleBlindSection({ scenarioId }: { scenarioId: string }) {
           </div>
         </div>
       )}
-      {kappa?.n_evaluated === 0 && (
+      {kappa?.n_evaluated === 0 && (audit?.n_evaluated ?? 0) === 0 && (
         <div className="rounded-xl border border-gold-500/20 bg-gold-500/5 p-3 text-xs text-gold-300">
           {t("scenarioDetail.doubleBlind.noEvaluationYet")}
+        </div>
+      )}
+
+      {/* L'échantillon d'audit : des articles que la machine a ÉCARTÉS, jugés aussi par
+          les deux relecteurs. Sans lui, l'exclusion automatique n'était jamais contrôlée.
+          Son kappa est à part : il ne porte pas sur la même population. */}
+      {kappa && (
+        <div className="rounded-2xl border border-white/8 bg-white/2 px-4 py-3 space-y-2">
+          <label className="flex items-start gap-2 text-xs text-white/70 cursor-pointer">
+            <input type="checkbox" checked={auditSize > 0}
+              onChange={e => toggleAudit(e.target.checked)}
+              className="accent-brand-500 mt-0.5 shrink-0" />
+            <span>
+              {t("scenarioDetail.doubleBlind.auditToggle").replace("{n}", String(auditSize || AUDIT_SAMPLE_SIZE))}
+              <span className="block text-[10px] text-white/35">{t("scenarioDetail.doubleBlind.auditToggleHint")}</span>
+            </span>
+          </label>
+          {auditError && <p className="text-[10px] text-rose-400">{auditError}</p>}
+          {audit && (auditSize > 0 || audit.n_evaluated > 0) && (
+            <div className="space-y-2">
+              <p className="text-[10px] font-bold uppercase tracking-wider text-white/50">
+                {t("scenarioDetail.doubleBlind.strataAudit").replace("{n}", String(auditSize || AUDIT_SAMPLE_SIZE))}
+              </p>
+              {audit.n_evaluated === 0 ? (
+                <p className="text-[10px] text-white/35">{t("scenarioDetail.doubleBlind.strataAuditEmpty")}</p>
+              ) : (
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                  {[
+                    {label: t("scenarioDetail.doubleBlind.statEvaluated"), value: audit.n_evaluated, color: 'text-white'},
+                    {label: t("scenarioDetail.doubleBlind.statKappa"), value: audit.kappa != null ? audit.kappa.toFixed(3) : 'N/A', color: auditColor},
+                    {label: t("scenarioDetail.doubleBlind.statAgreement"), value: audit.po_observed != null ? Math.round(audit.po_observed * 100) + '%' : 'N/A', color: 'text-brand-300'},
+                    {label: t("scenarioDetail.doubleBlind.statConflicts"), value: audit.conflicts, color: audit.conflicts > 0 ? 'text-gold-400' : 'text-white/40'},
+                  ].map(s => (
+                    <div key={s.label} className="rounded-2xl border border-white/5 bg-white/3 p-3 text-center">
+                      <div className={`text-xl font-bold ${s.color}`}>{s.value}</div>
+                      <div className="text-[10px] text-white/35 mt-0.5">{s.label}</div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
         </div>
       )}
 
@@ -5896,6 +5967,12 @@ function DoubleBlindSection({ scenarioId }: { scenarioId: string }) {
           <p className="text-[10px] font-bold uppercase tracking-wider text-brand-300">
             {t("scenarioDetail.doubleBlind.toScreen")
               .replace("{remaining}", queue.remaining.toLocaleString())}
+            {(queue.remaining_audit ?? 0) > 0 && (
+              <span className="ml-1 normal-case font-normal text-gold-300/80">
+                ({t("scenarioDetail.doubleBlind.toScreenSplit")
+                  .replace("{audit}", (queue.remaining_audit ?? 0).toLocaleString())})
+              </span>
+            )}
           </p>
           {queue.articles.length === 0 ? (
             <p className="text-[10px] text-white/35">{t("scenarioDetail.doubleBlind.queueEmpty")}</p>
@@ -5913,6 +5990,9 @@ function DoubleBlindSection({ scenarioId }: { scenarioId: string }) {
                       : art.similarity_score != null
                         ? <span>sim {art.similarity_score.toFixed(3)}</span>
                         : null}
+                    {art.audit_sample
+                      ? <span className="rounded bg-gold-500/15 border border-gold-500/30 px-1.5 text-gold-300">{t("scenarioDetail.doubleBlind.auditBadge")}</span>
+                      : null}
                   </div>
                   <div className="flex gap-2">
                     <button onClick={() => decide(art.id, 'included')} disabled={submitting === art.id}
@@ -6365,6 +6445,13 @@ function SeuilSection({ scenarioId, onSaved, onThresholdChange, incoming }: {
   // Le second seuil. 0 = pas de filtrage, donc la porte d'avant, pour tout scénario
   // auquel personne n'a touché.
   const [rerankThreshold, setRerankThreshold] = React.useState<number>(0);
+  // Le seuil de similarité a-t-il été CHOISI par quelqu'un ? Tant que non, c'est la
+  // valeur de départ de l'outil, et l'écran le dit comme le font les rapports. Une API
+  // qui ne le précise pas ne vaut pas « non choisi » : pas d'étiquette.
+  const [thresholdChosen, setThresholdChosen] = React.useState<boolean>(true);
+  // Les deux seuils tels qu'ils sont enregistrés, pour savoir ce que l'utilisateur a bougé.
+  const [savedThresholds, setSavedThresholds] =
+    React.useState<{ similarity: number; rerank: number } | null>(null);
   const [saving, setSaving] = React.useState(false);
   const [saved, setSaved] = React.useState(false);
   const [rerankStatus, setRerankStatus] = React.useState<string | null>(null);
@@ -6415,6 +6502,11 @@ function SeuilSection({ scenarioId, onSaved, onThresholdChange, incoming }: {
           }
           setRerankStatus(msg);
           setTimeout(() => setRerankStatus(null), 8000);
+        } else if (s.status === "partial") {
+          // Ni un succès ni une panne : des articles restent sans score, donc hors du
+          // corpus pertinent, et le serveur a prévu un nouvel essai.
+          setRerankStatus(t("scenarioDetail.seuil.scoringPartial")
+            .replace("{n}", (s.unscored ?? 0).toLocaleString()));
         } else {
           setRerankStatus(null);
           setRerankError(s.status === "stalled"
@@ -6436,8 +6528,12 @@ function SeuilSection({ scenarioId, onSaved, onThresholdChange, incoming }: {
   React.useEffect(() => {
     getScenarioSettings(scenarioId)
       .then(s => {
-        setThreshold(s.similarity_threshold ?? DEFAULT_SIMILARITY_THRESHOLD);
-        setRerankThreshold(s.rerank_threshold ?? 0);
+        const similarity = s.similarity_threshold ?? DEFAULT_SIMILARITY_THRESHOLD;
+        const rerank = s.rerank_threshold ?? 0;
+        setThreshold(similarity);
+        setRerankThreshold(rerank);
+        setThresholdChosen(s.threshold_chosen ?? true);
+        setSavedThresholds({ similarity, rerank });
       })
       .catch(() => {});
     getRerankStatus(scenarioId)
@@ -6465,10 +6561,19 @@ function SeuilSection({ scenarioId, onSaved, onThresholdChange, incoming }: {
   const handleSave = async () => {
     setSaving(true);
     setSaved(false);
+    // Le seuil de similarité ne part que s'il est un choix : déjà choisi, déplacé, ou
+    // appliqué tel quel (rien d'autre n'a bougé). Régler le seul seuil de rerank ne
+    // transforme pas le seuil de départ en décision de la revue.
+    const similarityMoved = savedThresholds === null || threshold !== savedThresholds.similarity;
+    const rerankMoved = savedThresholds !== null && rerankThreshold !== savedThresholds.rerank;
+    const sendSimilarity = thresholdChosen || similarityMoved || !rerankMoved;
     try {
       await patchScenarioSettings(scenarioId, {
-        similarity_threshold: threshold, rerank_threshold: rerankThreshold,
+        ...(sendSimilarity ? { similarity_threshold: threshold } : {}),
+        rerank_threshold: rerankThreshold,
       });
+      if (sendSimilarity) setThresholdChosen(true);
+      setSavedThresholds({ similarity: threshold, rerank: rerankThreshold });
       setSaved(true);
       setTimeout(() => setSaved(false), 2000);
       setCurveKey(k => k + 1);          // sinon la courbe garde l'ancien « seuil actuel »
@@ -6528,6 +6633,13 @@ function SeuilSection({ scenarioId, onSaved, onThresholdChange, incoming }: {
           aria-label={t("scenarioDetail.seuil.thresholdLabel")}
           className="w-20 rounded-lg border border-white/10 bg-white/5 px-1.5 py-0.5 font-mono text-brand-300 text-center"
         />
+        {/* Le seuil de départ n'est pas un choix : dit tant que personne ne l'a réglé et
+            que le curseur n'a pas bougé. */}
+        {!thresholdChosen && savedThresholds !== null && threshold === savedThresholds.similarity && (
+          <span className="text-[10px] text-gold-400/80" title={t("scenarioDetail.seuil.notChosenHint")}>
+            {t("scenarioDetail.seuil.notChosen")}
+          </span>
+        )}
       </div>
       <div className="flex items-center gap-2 text-xs text-white/60"
            title={t("scenarioDetail.seuil.rerankHelp")}>
