@@ -52,21 +52,62 @@ def test_reports_query_is_json_safe_and_always_sorted():
     assert "title" in q["fields"]["include"] and "date.original" in q["fields"]["include"]
 
 
+def _conds(q):
+    f = q.get("filter") or {}
+    return f["conditions"] if "conditions" in f else ([f] if f else [])
+
+
 def test_reports_query_combines_the_editorial_tag_with_a_keyword_sweep():
-    """Tagging lags the outbreak, so the tag alone is systematically late."""
-    q = rw.build_reports_query()
-    assert q["query"]["fields"] == ["title^5", "body"]
-    assert "cholera" in q["query"]["value"] and "mpox" in q["query"]["value"]
-    assert '"yellow fever"' in q["query"]["value"]        # multiword terms are quoted
-    conds = q["filter"]["conditions"] if "conditions" in q["filter"] else [q["filter"]]
+    """Tagging lags the outbreak, so the tag alone is systematically late: the sweep is
+    the tag OR the pathogen terms. The API ANDs `filter` and `query`, so one body holding
+    both returned only reports tagged AND naming a pathogen - the untagged early reports
+    the terms exist for were excluded. The OR is two searches, made disjoint."""
+    assert rw.reports_branches() == (rw.BRANCH_TAG, rw.BRANCH_TERMS)
+    tag = rw.build_reports_query(branch=rw.BRANCH_TAG)
+    terms = rw.build_reports_query(branch=rw.BRANCH_TERMS)
+    # The tag branch: the editorial tag, no free-text query.
+    assert "query" not in tag
     assert any(c.get("field") == "disaster_type.name" and c.get("value") == "Epidemic"
-               for c in conds)
+               and not c.get("negate") for c in _conds(tag))
+    # The terms branch: the sweep, and NOT the tag, so no report is fetched twice and the
+    # two totals add up to the union.
+    assert terms["query"]["fields"] == ["title^5", "body"]
+    assert "cholera" in terms["query"]["value"] and "mpox" in terms["query"]["value"]
+    assert '"yellow fever"' in terms["query"]["value"]    # multiword terms are quoted
+    assert any(c.get("field") == "disaster_type.name" and c.get("value") == "Epidemic"
+               and c.get("negate") is True for c in _conds(terms))
+    # No body ever ANDs a positive tag with the terms again.
+    for q in (tag, terms):
+        assert not ("query" in q and any(c.get("field") == "disaster_type.name"
+                                         and not c.get("negate") for c in _conds(q)))
+
+
+def test_without_the_tag_the_sweep_is_the_terms_alone():
+    assert rw.reports_branches(include_epidemic_tag=False) == (rw.BRANCH_TERMS,)
+    q = rw.build_reports_query(include_epidemic_tag=False, pathogens=["cholera"])
+    assert q["query"]["value"] == "cholera"
+    assert not any(c.get("field") == "disaster_type.name" for c in _conds(q))
+    with pytest.raises(ValueError):
+        rw.build_reports_query(branch=rw.BRANCH_TAG, include_epidemic_tag=False)
+    with pytest.raises(ValueError):
+        rw.build_reports_query(branch="both")
+
+
+def test_every_language_and_the_largest_page_by_default():
+    """English-only excluded the French, Spanish and Arabic reports that are often the
+    first (a WHO AFRO bulletin, a ministry alert); a language can still be asked for. The
+    quota counts calls, so a page of 100 bought a tenth of the reports for the same cost."""
+    for branch in rw.reports_branches():
+        q = rw.build_reports_query(branch=branch)
+        assert q["limit"] == rw.MAX_LIMIT_PER_CALL == 1000
+        assert not any(c.get("field") == "language.code" for c in _conds(q))
+    q = rw.build_reports_query(languages=["fr", "en"], branch=rw.BRANCH_TAG)
+    assert {"field": "language.code", "value": ["fr", "en"]} in _conds(q)
 
 
 def test_reports_query_never_emits_a_value_less_filter():
     """A filter with a field but NO value tests EXISTENCE, not equality - it would
     silently match every record that merely has the field."""
-    q = rw.build_reports_query(countries=None, languages=None, pathogens=["ebola"])
     def walk(node):
         if isinstance(node, dict):
             if "field" in node and "conditions" not in node:
@@ -76,7 +117,10 @@ def test_reports_query_never_emits_a_value_less_filter():
         elif isinstance(node, list):
             for v in node:
                 walk(v)
-    walk(q.get("filter", {}))
+    for branch in rw.reports_branches():
+        q = rw.build_reports_query(countries=None, languages=None, pathogens=["ebola"],
+                                   branch=branch)
+        walk(q.get("filter", {}))
 
 
 def test_reports_query_limit_is_capped_at_the_documented_maximum():
@@ -86,13 +130,20 @@ def test_reports_query_limit_is_capped_at_the_documented_maximum():
 
 def test_country_and_date_and_changed_filters():
     q = rw.build_reports_query(countries=["COD", "SDN"], date_from="2026-01-01",
-                               date_to="2026-06-30", changed_since="2026-06-01")
+                               date_to="2026-06-30", changed_since="2026-06-01",
+                               languages=["en"])
     conds = q["filter"]["conditions"]
     by_field = {c["field"]: c for c in conds if "field" in c}
     assert by_field["primary_country.iso3"]["value"] == ["cod", "sdn"]
     assert by_field["date.original"]["value"] == {"from": "2026-01-01", "to": "2026-06-30"}
     assert by_field["date.changed"]["value"] == {"from": "2026-06-01"}
     assert by_field["language.code"]["value"] == ["en"]
+    # The same filters on both halves of the sweep: only the tag condition differs.
+    tag = rw.build_reports_query(countries=["COD", "SDN"], date_from="2026-01-01",
+                                 date_to="2026-06-30", changed_since="2026-06-01",
+                                 languages=["en"], branch=rw.BRANCH_TAG)
+    strip = lambda cs: [c for c in cs if c.get("field") != "disaster_type.name"]  # noqa: E731
+    assert strip(tag["filter"]["conditions"]) == strip(conds)
 
 
 def test_disasters_query_needs_the_analysis_preset_for_archived_events():
@@ -197,6 +248,33 @@ def test_dedupe_can_keep_several_per_series_when_asked():
         _item(str(i), f"DRC: Cholera Situation Report No. {i}",
               original=f"2026-03-{i:02d}T00:00:00+00:00") for i in range(1, 6)]))
     assert len(rw.dedupe(reports, keep_per_series=3)) == 3
+
+
+def test_dedupe_can_keep_a_whole_series():
+    """The older reports of a series carry the figures of their own date: an outbreak's
+    history. 0 (or None) keeps them all; the default still keeps the newest only."""
+    reports, _ = rw.parse_reports(_payload([
+        _item(str(i), f"DRC: Cholera Situation Report No. {i}",
+              original=f"2026-03-{i:02d}T00:00:00+00:00") for i in range(1, 6)]))
+    assert len(rw.dedupe(reports, keep_per_series=0)) == 5
+    assert len(rw.dedupe(reports, keep_per_series=None)) == 5
+    assert len(rw.dedupe(reports)) == 1
+
+
+def test_dedupe_keeps_the_same_title_from_two_organisations():
+    """The title alone was the key: two organisations' reports sharing a title collapsed
+    into one. The same title from the same organisation still does."""
+    reports, _ = rw.parse_reports(_payload([
+        _item("1", "Cholera Outbreak Response", sources=("WHO",),
+              original="2026-03-01T00:00:00+00:00"),
+        _item("2", "Cholera Outbreak Response", sources=("UNICEF",),
+              original="2026-03-01T00:00:00+00:00"),
+        _item("3", "Cholera outbreak response!", sources=("WHO",),
+              original="2026-02-01T00:00:00+00:00"),
+    ]))
+    kept = rw.dedupe(reports, keep_per_series=0)
+    assert sorted(r.rw_id for r in kept) == ["1", "2"]
+    assert {r.sources[0] for r in kept} == {"WHO", "UNICEF"}
 
 
 def test_dedupe_of_nothing_is_nothing():

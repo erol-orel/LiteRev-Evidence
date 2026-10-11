@@ -157,6 +157,14 @@ def series_key(title, source_names=None) -> str:
 
 
 # ── query building ───────────────────────────────────────────────────────────
+#: The two halves of "Epidemic tag OR pathogen terms". The API applies `filter` AND
+#: `query` together and offers no OR between them, so the union is run as two searches,
+#: made DISJOINT by negating the tag in the second: every record is fetched once, and the
+#: two totals add up to the size of the union.
+BRANCH_TAG = "tag"
+BRANCH_TERMS = "terms"
+
+
 def _cond(field_name: str, value=None, negate: bool = False) -> dict:
     """One filter condition. NOTE: omitting `value` tests FIELD EXISTENCE, not equality -
     an easy silent bug when a caller passes None, so we never emit a value-less filter
@@ -169,38 +177,61 @@ def _cond(field_name: str, value=None, negate: bool = False) -> dict:
     return c
 
 
+def reports_branches(include_epidemic_tag: bool = True) -> tuple[str, ...]:
+    """The searches whose union is the epidemic-intelligence sweep. PURE."""
+    return (BRANCH_TAG, BRANCH_TERMS) if include_epidemic_tag else (BRANCH_TERMS,)
+
+
 def build_reports_query(
     *,
     pathogens: tuple | list | None = None,
     countries: tuple | list | None = None,
     date_from: str | None = None,
     date_to: str | None = None,
-    limit: int = 100,
+    limit: int = MAX_LIMIT_PER_CALL,
     offset: int = 0,
-    languages: tuple | list | None = ("en",),
+    languages: tuple | list | None = None,
     include_epidemic_tag: bool = True,
     changed_since: str | None = None,
+    branch: str = BRANCH_TERMS,
 ) -> dict:
-    """POST body for /v2/reports, targeted at epidemic-intelligence content.
+    """POST body for /v2/reports: ONE branch of the epidemic-intelligence sweep.
 
-    Combines the editorial tag (`disaster_type = Epidemic`) OR a pathogen free-text sweep,
-    because the tag lags the outbreak. Always emits an explicit `sort`: the docs warn that
-    "if there is no sort specified, results may not be consistent", and paginating an
-    unsorted result set silently skips and repeats records. PURE - no network."""
+    The sweep is the editorial tag (`disaster_type = Epidemic`) OR a pathogen free-text
+    sweep, because the tag lags the outbreak. One body put the tag in `filter` and the
+    terms in `query`, which the API ANDs: only reports both tagged and naming a pathogen
+    came back, so the untagged early reports the terms exist for were excluded. The OR is
+    therefore two searches (`reports_branches`), disjoint:
+
+      branch="tag"    the tag alone, no free-text query;
+      branch="terms"  the pathogen terms, minus the tagged reports (negated tag filter),
+                      or the terms alone when `include_epidemic_tag` is False.
+
+    `languages=None` asks for every language: a French-only WHO AFRO bulletin or a
+    Spanish PAHO alert is exactly the early report this stream is for, and English-only
+    excluded them. `limit` defaults to the documented maximum: the quota counts calls,
+    not records, so a smaller page only buys fewer reports for the same cost.
+
+    Always emits an explicit `sort`: the docs warn that "if there is no sort specified,
+    results may not be consistent", and paginating an unsorted result set silently skips
+    and repeats records. PURE - no network."""
+    if branch not in (BRANCH_TAG, BRANCH_TERMS):
+        raise ValueError(f"unknown branch {branch!r}")
+    if branch == BRANCH_TAG and not include_epidemic_tag:
+        raise ValueError("the tag branch needs include_epidemic_tag")
     limit = max(0, min(int(limit), MAX_LIMIT_PER_CALL))
     conditions: list[dict] = []
 
-    topic: list[dict] = []
-    if include_epidemic_tag:
-        topic.append(_cond("disaster_type.name", "Epidemic"))
-    terms = list(pathogens) if pathogens else list(PATHOGEN_TERMS)
     query_block = None
-    if terms:
+    if branch == BRANCH_TAG:
+        conditions.append(_cond("disaster_type.name", "Epidemic"))
+    else:
+        terms = list(pathogens) if pathogens else list(PATHOGEN_TERMS)
         query_block = {"value": " OR ".join(f'"{t}"' if " " in t else t for t in terms),
                        "fields": ["title^5", "body"], "operator": "OR"}
-    if topic:
-        conditions.append(topic[0] if len(topic) == 1
-                          else {"operator": "OR", "conditions": topic})
+        if include_epidemic_tag:
+            # Disjoint from the tag branch: a tagged report is that branch's record.
+            conditions.append(_cond("disaster_type.name", "Epidemic", negate=True))
     if countries:
         conditions.append(_cond("primary_country.iso3", [str(c).lower() for c in countries]))
     if languages:
@@ -387,15 +418,22 @@ def parse_reports(payload: dict) -> tuple[list[Report], int]:
     return reports, total
 
 
-def dedupe(reports, keep_per_series: int = 1) -> list[Report]:
+def dedupe(reports, keep_per_series: int | None = 1) -> list[Report]:
     """Collapse ReliefWeb's structural duplication. PURE.
 
     4,000+ sources cover one event and the SAME document exists as separate EN/FR/ES/AR
     records, so raw report volume is a publication cadence, not an epidemic signal.
-    Removes exact `rw_id` repeats and identical titles, then keeps at most
-    `keep_per_series` of any recurring series (most recent first, most credible first)."""
+    Removes exact `rw_id` repeats and the same title from the same organisation, then
+    keeps at most `keep_per_series` of any recurring series (most recent first, most
+    credible first). `keep_per_series` 0 or None keeps every report of a series: its
+    history, sitrep No. 1 to No. N, each with the figures of its own date.
+
+    The title alone used to be the key, so two organisations' reports that share a title
+    ("Cholera Outbreak - Situation Report") collapsed into whichever came first. The key
+    is now (first listed source, normalised title), the organisation `series_key` uses."""
     seen_id: set[str] = set()
-    seen_title: set[str] = set()
+    seen_title: set[tuple[str, str]] = set()
+    cap = int(keep_per_series or 0)
     ordered = sorted(
         reports or [],
         key=lambda r: (r.published_at or r.created_at or "", r.credibility),
@@ -406,23 +444,25 @@ def dedupe(reports, keep_per_series: int = 1) -> list[Report]:
     for r in ordered:
         if r.rw_id in seen_id:
             continue
-        if r.title_norm and r.title_norm in seen_title:
+        title_key = (_norm((r.sources or [""])[0]), r.title_norm) if r.title_norm else None
+        if title_key and title_key in seen_title:
             continue
-        if r.series_key:
+        if r.series_key and cap > 0:
             n = per_series.get(r.series_key, 0)
-            if n >= max(1, int(keep_per_series)):
+            if n >= cap:
                 continue
             per_series[r.series_key] = n + 1
         seen_id.add(r.rw_id)
-        if r.title_norm:
-            seen_title.add(r.title_norm)
+        if title_key:
+            seen_title.add(title_key)
         out.append(r)
     return out
 
 
 # ── HTTP seams (the only impure part) ────────────────────────────────────────
-def _http_post_json(url: str, body: dict, timeout: int = 30) -> dict:
-    """POST a query to the ReliefWeb API. Isolated so tests replace it (no network)."""
+def _http_post_json(url: str, body: dict, timeout: int = 60) -> dict:
+    """POST a query to the ReliefWeb API. Isolated so tests replace it (no network).
+    60 s: a page is now the documented maximum of 1000 reports, bodies included."""
     import requests
     r = requests.post(url, json=body, timeout=timeout,
                       headers={"Content-Type": "application/json"})
@@ -502,6 +542,7 @@ __all__ = [
     "BASE_URL", "QUOTA_CALLS_PER_DAY", "MAX_LIMIT_PER_CALL", "PATHOGEN_TERMS",
     "EPI_FORMATS", "MAX_CREDIBILITY", "DEFAULT_CREDIBILITY", "Report",
     "credibility", "strip_markdown", "normalize_title", "series_key",
+    "BRANCH_TAG", "BRANCH_TERMS", "reports_branches",
     "build_reports_query", "build_disasters_query", "parse_report", "parse_reports",
     "dedupe", "fetch_reports", "fetch_disasters", "endpoint", "plan_pagination",
     "summarise_ingest", "as_json",
