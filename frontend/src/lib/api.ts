@@ -1868,15 +1868,18 @@ export interface GeoCountry {
   n_rows: number;
   regions: GeoRegion[];
 }
+/** Why a place resolves to no country; the last is the one worth fixing in the table. */
+export type GeoUnresolvedReason = "no_place" | "several_countries" | "multi_country_area" | "not_recognised";
 export interface GeographyResponse {
   scenario_id: string;
   n_papers: number;
   n_resolved: number;
   n_unresolved: number;
   n_several_countries: number;
+  unresolved_by_reason: Record<GeoUnresolvedReason, number>;
   nuts_source: "builtin" | "loaded";
   countries: GeoCountry[];
-  unresolved: { location: string; n: number }[];
+  unresolved: { location: string; n: number; reason: GeoUnresolvedReason }[];
 }
 
 export async function fetchGeography(scenarioId: string): Promise<GeographyResponse> {
