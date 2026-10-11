@@ -184,3 +184,21 @@ def test_a_rescoring_says_how_many_scores_moved(vector_corpus, monkeypatch):
     # Only 97103 changed side: unscored (0 for the gate) before, 0.6 now. 97101 moved but
     # stayed above the 0.45 starting threshold.
     assert rep["crossed_threshold"] == 1
+
+
+def test_the_automatic_pass_scores_only_the_unscored(vector_corpus, monkeypatch):
+    """The automatic scoring (missing_only) fills what has no score and leaves every stored
+    score alone: an existing scenario keeps the scores of the old rule until someone asks
+    for a rescoring, even when one of its articles was waiting for a score."""
+    with vector_corpus.cursor() as cur:
+        cur.execute("UPDATE article_scenarios SET similarity_score = 1.0"
+                    " WHERE scenario_id = %s AND document_id = 97101", (SID,))
+    import llm_usage
+    monkeypatch.setattr(llm_usage, "MeteredOpenAI", _fake_openai(_unit(1.0), _unit(0.6, 0.8), []))
+    rep: dict = {}
+    R._run_semantic_rerank_inline(SID, "the question", report=rep, missing_only=True)
+    scores = _scores(vector_corpus)
+    assert scores[97101] == pytest.approx(1.0, abs=1e-4), "a stored score was rewritten"
+    assert scores[97102] == pytest.approx(1.0, abs=1e-4)
+    assert scores[97103] == pytest.approx(0.6, abs=1e-4)
+    assert rep["changed"] == 0 and rep["newly_scored"] == 2

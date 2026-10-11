@@ -184,6 +184,11 @@ def _run_semantic_rerank_inline(scenario_id: str, query: str, report: dict | Non
     # 1) Rapide : cosinus pgvector en base, sur le chunk title_abstract SEUL. L'ancien score
     #    est relu dans la même instruction : le passage dit combien de scores ont bougé.
     try:
+        # `missing_only` (le scoring automatique) ne touche QUE les articles sans score : sans
+        # cette borne, le passage rapide réécrivait tous les scores du scénario à la nouvelle
+        # règle, et un scénario existant changeait de sous-ensemble pertinent parce qu'un
+        # seul de ses articles attendait un score.
+        _only_missing = " AND asn.similarity_score IS NULL" if missing_only else ""
         with engine.begin() as _c:
             fast = _c.execute(text("""
                 WITH upd AS (
@@ -200,7 +205,7 @@ def _run_semantic_rerank_inline(scenario_id: str, query: str, report: dict | Non
                           AND c.chunk_type = 'title_abstract'
                         GROUP BY c.document_id
                     ) sub
-                    WHERE asn.scenario_id = :sid AND asn.document_id = sub.document_id
+                    WHERE asn.scenario_id = :sid AND asn.document_id = sub.document_id""" + _only_missing + """
                     RETURNING sub.old AS old, sub.sim AS new
                 )
                 SELECT COUNT(*) AS n,
