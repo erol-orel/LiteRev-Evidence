@@ -1015,10 +1015,11 @@ export const fr = {
       subscribeButton: "S'abonner aux alertes",
       livingReviewPipeline: "Pipeline Living Review",
       livingReviewDesc:
-        "La Living Review interroge PubMed avec la requête de ce scénario sur les N derniers jours et insère les articles qu'elle ne détient pas déjà. Elle n'interroge PAS les autres sources fédérées, et ne produit ni embeddings, ni PICO, ni textes intégraux : le worker d'arrière-plan et l'onglet Enrichissement s'en chargent ensuite. Les vues dérivées (clustering, graphe, carte des concepts, actions recommandées, projection SEIR) sont invalidées pour les scénarios qui ont réellement gagné un article.",
+        "La Living Review interroge PubMed avec la requête de ce scénario sur les N derniers jours, lit toutes les notices de cette fenêtre, ajoute à la bibliothèque les articles qu'elle ne détient pas déjà et les lie à ce scénario. Elle n'interroge PAS les autres sources fédérées, et ne produit ni embeddings, ni PICO, ni textes intégraux : le worker d'arrière-plan et l'onglet Enrichissement s'en chargent ensuite. Les vues dérivées (clustering, graphe, carte des concepts, actions recommandées, projection SEIR) sont invalidées pour les scénarios qui ont réellement gagné un article.",
       stepMultiSource:
-        "Requête : PubMed (scénario utilisateur) ; PubMed plus bioRxiv/medRxiv pour les six scénarios GESICA qui portent des termes de prépublication",
-      stepInsert: "Insertion des articles non déjà détenus (dédupliqués sur l'identifiant externe et la source)",
+        "Requête : PubMed (scénario utilisateur) ; PubMed plus les préprints (bioRxiv, medRxiv et d'autres, via Europe PMC) pour les scénarios GESICA dont le planificateur a les requêtes",
+      stepInsert:
+        "Insertion dans la bibliothèque des articles non déjà détenus (dédupliqués comme par une recherche : identifiant, DOI ou titre), et lien à ce scénario",
       stepInvalidate:
         "Invalidation des vues dérivées du corpus, pour les scénarios qui ont gagné un article",
       stepAfterwards:

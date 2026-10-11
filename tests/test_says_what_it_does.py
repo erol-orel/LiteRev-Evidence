@@ -165,9 +165,11 @@ def test_moving_the_threshold_drops_every_artefact_computed_from_the_old_corpus(
     threshold_path = inspect.getsource(relevance.update_scenario_settings)
     assert "CORPUS_DERIVED_CACHE_RESET" in threshold_path
 
-    from api import living_review
+    # The living review invalidates where it creates the links, in the scheduler, so that
+    # a run started by cron invalidates too; the API trigger only launches it.
+    import living_review_scheduler
 
-    assert "CORPUS_DERIVED_CACHE_RESET" in inspect.getsource(living_review.trigger_living_review)
+    assert "CORPUS_DERIVED_CACHE_RESET" in inspect.getsource(living_review_scheduler._corpus_changed)
 
 
 # ── data_connectors: the module docstring lists the connectors that exist ────
