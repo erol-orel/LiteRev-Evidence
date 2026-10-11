@@ -251,8 +251,9 @@ def _engine_ok() -> bool:
 
 @pytest.fixture()
 def seeded(db_conn):
-    """8601 and 8602 above the threshold (8602 without an abstract, with a full text), 8603
-    included by hand below it, 8604 below it, 8605 excluded, 8606 above it and already
+    """8601 above the threshold, 8602 without an abstract but with a full text (relevant only
+    because a reviewer included it: a record without an abstract never enters on its score),
+    8603 included by hand below it, 8604 below it, 8605 excluded, 8606 above it and already
     carrying its finding. 8601-8605 hold a PICO written before the finding existed."""
     if not _engine_ok():
         pytest.skip("main.engine cannot reach the database")
@@ -285,8 +286,9 @@ def seeded(db_conn):
         for i, abstract in ((8601, "Workers exposed to sick birds were tested for antibodies."),
                             (8602, None),
                             (8603, "A cohort of veterinarians followed for two seasons."),
-                            (8604, "Below the threshold."), (8605, "Set aside by a reviewer."),
-                            (8606, "Already carries its finding.")):
+                            (8604, "Below the threshold, so never read for its finding."),
+                            (8605, "Set aside by a reviewer after reading the abstract."),
+                            (8606, "Already carries its finding from an earlier pass.")):
             cur.execute("INSERT INTO literature_document (id, title, abstract, year, source, "
                         "project_context, is_duplicate, pico_json) VALUES "
                         "(%s, %s, %s, 2025, 'pubmed', 'literev', false, %s)",
@@ -294,7 +296,7 @@ def seeded(db_conn):
         cur.execute("UPDATE literature_document SET pico_json = pico_json || %s::jsonb WHERE id = 8606",
                     (json.dumps({"key_finding": "Known.", "finding_direction": "mixed"}),))
         cur.execute("INSERT INTO article_scenarios (scenario_id, document_id, similarity_score, screening_status) VALUES "
-                    "(%s, 8601, 0.90, NULL), (%s, 8602, 0.80, NULL), (%s, 8603, 0.10, 'included'),"
+                    "(%s, 8601, 0.90, NULL), (%s, 8602, 0.80, 'included'), (%s, 8603, 0.10, 'included'),"
                     "(%s, 8604, 0.10, NULL), (%s, 8605, 0.95, 'excluded'), (%s, 8606, 0.70, NULL)", (SID,) * 6)
         cur.execute("INSERT INTO scenario_settings (scenario_id, similarity_threshold) VALUES (%s, 0.45) "
                     "ON CONFLICT (scenario_id) DO UPDATE SET similarity_threshold = 0.45", (SID,))
@@ -434,8 +436,10 @@ def test_the_cap_takes_the_most_relevant_first(seeded, monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "test-key")
     patch_app(monkeypatch, "_findings_client", lambda: fake)
     assert main.run_findings_pass(SID, max_articles=1)["total"] == 1
-    assert _pico_of(seeded, 8601)[0]["finding_direction"] == "mixed"
-    assert "finding_direction" not in _pico_of(seeded, 8602)[0]
+    # The app's relevance order puts hand inclusions first: 8602 (included, 0.80) before
+    # 8601 (0.90 by score alone).
+    assert _pico_of(seeded, 8602)[0]["finding_direction"] == "mixed"
+    assert "finding_direction" not in _pico_of(seeded, 8601)[0]
 
 
 def test_the_endpoints_need_the_write_key_to_spend(seeded, monkeypatch):

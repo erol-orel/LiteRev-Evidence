@@ -104,7 +104,7 @@ def seeded(db_conn):
                     "VALUES (%s, 'Avian influenza', 'h5n1', 'boolean', '{}')", (SID,))
         for doc_id in IDS:
             cur.execute("INSERT INTO literature_document (id, title, abstract, year, source, project_context, "
-                        "is_duplicate) VALUES (%s, 'Poultry workers and H5N1', 'Workers were tested.', 2025, "
+                        "is_duplicate) VALUES (%s, 'Poultry workers and H5N1', 'Poultry workers were tested for H5N1 antibodies.', 2025, "
                         "'pubmed', 'literev', false)", (doc_id,))
             cur.execute("INSERT INTO article_scenarios (scenario_id, document_id, similarity_score) "
                         "VALUES (%s, %s, 0.9)", (SID, doc_id))

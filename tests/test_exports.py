@@ -446,7 +446,7 @@ def test_the_whole_corpus_export_has_every_article_and_says_which_are_relevant(d
                                     (9212, 0.90, "excluded", False), (9213, 0.20, "included", False),
                                     (9214, 0.95, None, True)):
             cur.execute("INSERT INTO literature_document (id, title, abstract, year, source, "
-                        "project_context, is_duplicate) VALUES (%s,%s,'abstract',2024,'pubmed',"
+                        "project_context, is_duplicate) VALUES (%s,%s,'an abstract long enough to count',2024,'pubmed',"
                         "'literev',%s)", (i, f"Corpus paper {i}", dup))
             cur.execute("INSERT INTO article_scenarios (document_id, scenario_id, similarity_score, "
                         "screening_status) VALUES (%s,%s,%s,%s)", (i, SID_CORPUS, sim, status))

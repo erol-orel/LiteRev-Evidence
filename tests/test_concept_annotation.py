@@ -167,7 +167,9 @@ def test_an_article_without_any_text_counts_as_unannotatable(concept_corpus):
     with concept_corpus.cursor() as cur:
         cur.execute("INSERT INTO literature_document (id, title, abstract, source, is_duplicate, project_context) "
                     "VALUES (9718, 'A title and nothing else', NULL, 'pubmed', false, 'literev')")
-        cur.execute("INSERT INTO article_scenarios (scenario_id, document_id, similarity_score) VALUES (%s, 9718, 0.9)", (SID,))
+        # Without an abstract a record never enters on its score: a reviewer's hand brings it in.
+        cur.execute("INSERT INTO article_scenarios (scenario_id, document_id, similarity_score, screening_status)"
+                    " VALUES (%s, 9718, 0.9, 'included')", (SID,))
     g = KG._compute_concept_graph(SID)
     assert g["n_without_text"] == 1 and g["n_unannotatable"] >= 1
     assert g["n_total"] == g["n_articles"] + 1, "the denominator holds the article the map cannot read"
