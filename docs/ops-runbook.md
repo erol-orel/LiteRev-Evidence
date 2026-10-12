@@ -363,3 +363,34 @@ Then:
 - hard-reload the browser once before presenting when a deploy happened since the
   last visit, and record a short screen capture of the flows as a network fallback.
 
+
+---
+
+## 10. Keys: where each one lives (names only, never a value)
+
+The API reads `/etc/literev-api.env`, the canonical file the systemd unit passes it.
+Every other file on the search path (`env_files.SEARCH_PATH`) is still read, after it,
+for a variable the canonical file does not define. Checked on 12 October 2026 with the
+env audit (names and fingerprints only):
+
+| File | Defines |
+|---|---|
+| `/etc/literev-api.env` | `DB_URL`, `OPENAI_API_KEY`, `WRITE_API_KEY`, `CDS_API_KEY`, `COHERE_API_KEY`, `NCBI_API_KEY`, `RELIEFWEB_APPNAME`, and from the next deploy `SEMANTIC_SCHOLAR_API_KEY`, `LIVE_MAX_PER_SOURCE`, `POPULATE_FEDERATION_BUDGET` |
+| `/opt/literev-api/.env` | `OPEN_API_KEY` (an OpenAI key under a misspelt name, read by nothing) |
+| `/opt/literev-api/secrets.env` | stale copies of `OPENAI_API_KEY`, `DB_URL`, `WRITE_API_KEY`, `CDS_API_KEY`, plus `CORE_API_KEY` and the mail settings |
+
+GitHub holds the keys that reach the server through a workflow:
+
+- **environment "production"** (Settings > Secrets and variables > Actions > Environment
+  secrets): `SEMANTIC_SCHOLAR_API_KEY`, and `COHERE_API_KEY` once a paid key exists.
+  The deploy job (`deploy.yml`, step "Install the API keys kept in this environment")
+  writes them into the canonical file on every deploy, before the restart. A secret
+  the environment does not hold leaves the server's line as it is.
+- the manual **server command** (`server-command.yml`) runs in the environment
+  "production-admin": it sees `NCBI_API_KEY` and the SSH deploy secrets, and NOT the
+  production environment's secrets. Its `set-s2-key` therefore finds the Semantic
+  Scholar key empty; the deploy is the path that works.
+
+Checking a key without seeing it: `GET /sources/health` (`config.*_api_key`: true or
+false), or on the server `sudo python3 scripts/env_audit.py --live`. A workflow log shows
+a secret it can read as `***`, and an empty one as blank.
