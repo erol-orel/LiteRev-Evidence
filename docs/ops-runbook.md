@@ -375,17 +375,24 @@ env audit (names and fingerprints only):
 
 | File | Defines |
 |---|---|
-| `/etc/literev-api.env` | `DB_URL`, `OPENAI_API_KEY`, `WRITE_API_KEY`, `CDS_API_KEY`, `COHERE_API_KEY`, `NCBI_API_KEY`, `RELIEFWEB_APPNAME`, and from the next deploy `SEMANTIC_SCHOLAR_API_KEY`, `LIVE_MAX_PER_SOURCE`, `POPULATE_FEDERATION_BUDGET` |
+| `/etc/literev-api.env` | `DB_URL`, `OPENAI_API_KEY`, `WRITE_API_KEY`, `CDS_API_KEY`, `COHERE_API_KEY`, `NCBI_API_KEY`, `RELIEFWEB_APPNAME`, `LIVE_MAX_PER_SOURCE` and `POPULATE_FEDERATION_BUDGET` (moved there by the deploy of #353), and `SEMANTIC_SCHOLAR_API_KEY` once the deploy finds it |
 | `/opt/literev-api/.env` | `OPEN_API_KEY` (an OpenAI key under a misspelt name, read by nothing) |
 | `/opt/literev-api/secrets.env` | stale copies of `OPENAI_API_KEY`, `DB_URL`, `WRITE_API_KEY`, `CDS_API_KEY`, plus `CORE_API_KEY` and the mail settings |
 
 GitHub holds the keys that reach the server through a workflow:
 
 - **environment "production"** (Settings > Secrets and variables > Actions > Environment
-  secrets): `SEMANTIC_SCHOLAR_API_KEY`, and `COHERE_API_KEY` once a paid key exists.
+  secrets): the Semantic Scholar key, and the Cohere key once a paid one exists.
   The deploy job (`deploy.yml`, step "Install the API keys kept in this environment")
-  writes them into the canonical file on every deploy, before the restart. A secret
-  the environment does not hold leaves the server's line as it is.
+  writes them into the canonical file on every deploy, before the restart, as
+  `SEMANTIC_SCHOLAR_API_KEY` and `COHERE_API_KEY`, reading the first of their usual
+  names that is set, as a secret or a variable (`SEMANTIC_SCHOLAR_API_KEY`,
+  `SEMANTIC_SCHOLAR_KEY`, `SEMANTICSCHOLAR_API_KEY`, `S2_API_KEY`, `S2_KEY`;
+  `COHERE_API_KEY`, `COHERE_KEY`, `CO_API_KEY`). A key the environment does not hold
+  leaves the server's line as it is. The step's log lists the NAMES of the secrets and
+  variables the environment holds, never a value: the deploy of #353 found no
+  `SEMANTIC_SCHOLAR_API_KEY` there although the key had been saved in that environment,
+  and that list is how its real name is read.
 - the manual **server command** (`server-command.yml`) runs in the environment
   "production-admin": it sees `NCBI_API_KEY` and the SSH deploy secrets, and NOT the
   production environment's secrets. Its `set-s2-key` therefore finds the Semantic

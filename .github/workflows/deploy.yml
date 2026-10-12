@@ -139,12 +139,37 @@ jobs:
           SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
           DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
           DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
-          SEMANTIC_SCHOLAR_API_KEY: ${{ secrets.SEMANTIC_SCHOLAR_API_KEY }}
-          COHERE_API_KEY: ${{ secrets.COHERE_API_KEY }}
+          # Every secret and variable of this environment, as JSON, read below for their
+          # NAMES only: the deploy of #353 found no secret called SEMANTIC_SCHOLAR_API_KEY
+          # here although the key was saved in this environment, under a name nobody could
+          # see from outside (the API that lists names is closed to the sessions).
+          ALL_SECRETS: ${{ toJSON(secrets) }}
+          ALL_VARS: ${{ toJSON(vars) }}
         run: |
           mkdir -p ~/.ssh
           printf '%s\n' "$SSH_KEY" > ~/.ssh/deploy_key
           chmod 600 ~/.ssh/deploy_key
+          # The names this environment holds (never a value), and the key under the first of
+          # its usual names that is set, secret or variable.
+          eval "$(python3 - <<'PY'
+          import json, os, shlex
+          secrets = json.loads(os.environ.get("ALL_SECRETS") or "{}")
+          variables = json.loads(os.environ.get("ALL_VARS") or "{}")
+          print("echo " + shlex.quote("Secret names here: " + (", ".join(sorted(secrets)) or "none")) + " ;")
+          print("echo " + shlex.quote("Variable names here: " + (", ".join(sorted(variables)) or "none")) + " ;")
+          aliases = {"SEMANTIC_SCHOLAR_API_KEY": ("SEMANTIC_SCHOLAR_API_KEY", "SEMANTIC_SCHOLAR_KEY", "SEMANTICSCHOLAR_API_KEY",
+                                                  "S2_API_KEY", "S2_KEY"),
+                     "COHERE_API_KEY": ("COHERE_API_KEY", "COHERE_KEY", "CO_API_KEY")}
+          for target, names in aliases.items():
+              for n in names:
+                  value = secrets.get(n) or variables.get(n)
+                  if value:
+                      print(f"export {target}={shlex.quote(value)} ;")
+                      print("echo " + shlex.quote(f"{target}: read from {n}") + " ;")
+                      break
+          PY
+          )"
+          unset ALL_SECRETS ALL_VARS
           {
             for name in SEMANTIC_SCHOLAR_API_KEY COHERE_API_KEY; do
               if [ -n "${!name:-}" ]; then printf 'export %s=%q\n' "$name" "${!name}"; fi
