@@ -28,6 +28,45 @@ def _msg(lang, fr: str, en: str) -> str:
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("literev-api")
 
+# ─── Aucune clé d'API dans un message ────────────────────────────────────────────────
+#: Les réglages dont la clé voyage dans l'URL : OpenAlex la prend en paramètre `api_key`.
+#: Une erreur HTTP de requests cite son URL, et la raison d'échec d'une source est
+#: enregistrée avec la recherche puis servie par sa carte PRISMA, sans clé d'API.
+URL_KEY_SETTINGS = ("OPENALEX_API_KEY",)
+_URL_KEY_PARAM_RE = re.compile(r"(?i)\b(api_key=)[^&\s'\"<>]+")
+
+
+def redact_keys(text: object) -> str:
+    """`text` sans aucune valeur de clé : le paramètre `api_key` d'une URL, et la valeur de
+    chaque réglage de URL_KEY_SETTINGS où qu'elle apparaisse, brute ou encodée pour une
+    URL. À appliquer AVANT de tronquer : une clé coupée en deux ne se reconnaît plus."""
+    from urllib.parse import quote, quote_plus
+    out = _URL_KEY_PARAM_RE.sub(r"\1<redacted>", "" if text is None else str(text))
+    for name in URL_KEY_SETTINGS:
+        value = (os.getenv(name) or "").strip()
+        if len(value) >= 8:
+            for form in {value, quote(value, safe=""), quote_plus(value)}:
+                out = out.replace(form, f"<{name}>")
+    return out
+
+
+class _RedactKeysFilter(logging.Filter):
+    """Les lignes du journal de l'API passent par `redact_keys` : un message d'exception de
+    requests cite l'URL appelée, clé comprise."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            message = record.getMessage()
+        except Exception:                                   # noqa: BLE001 - jamais bloquant
+            return True
+        clean = redact_keys(message)
+        if clean != message:
+            record.msg, record.args = clean, None
+        return True
+
+
+logger.addFilter(_RedactKeysFilter())
+
 # ─── Chargement .env ─────────────────────────────────────────────────────────────────
 # La liste des fichiers, leur ordre et leur analyse vivent dans env_files, et c'est le SEUL
 # chargeur du dépôt. Il y en avait sept, chacun avec sa liste dans son ordre, et

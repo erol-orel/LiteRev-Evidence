@@ -155,6 +155,12 @@ jobs:
           C2_COHERE_KEY: ${{ secrets.COHERE_KEY }}
           C3_CO_API_KEY: ${{ secrets.CO_API_KEY }}
           C4_COHERE_API_KEY_VAR: ${{ vars.COHERE_API_KEY }}
+          # OpenAlex meters its API: without a key a call draws on a small daily budget shared
+          # by the server's IP address, and answers 429 "Insufficient budget" once it is spent.
+          # A free key (openalex.org/settings/api) gives the server a budget of its own.
+          O1_OPENALEX_API_KEY: ${{ secrets.OPENALEX_API_KEY }}
+          O2_OPENALEX_KEY: ${{ secrets.OPENALEX_KEY }}
+          O3_OPENALEX_API_KEY_VAR: ${{ vars.OPENALEX_API_KEY }}
         run: |
           mkdir -p ~/.ssh
           printf '%s\n' "$SSH_KEY" > ~/.ssh/deploy_key
@@ -170,14 +176,15 @@ jobs:
           pick SEMANTIC_SCHOLAR_API_KEY K1_SEMANTIC_SCHOLAR_API_KEY K2_SEMANTIC_SCHOLAR_KEY K3_SEMANTICSCHOLAR_API_KEY \
             K4_S2_API_KEY K5_S2_KEY K6_SEMANTIC_SCHOLAR_API_KEY_VAR K7_S2_API_KEY_VAR
           pick COHERE_API_KEY C1_COHERE_API_KEY C2_COHERE_KEY C3_CO_API_KEY C4_COHERE_API_KEY_VAR
+          pick OPENALEX_API_KEY O1_OPENALEX_API_KEY O2_OPENALEX_KEY O3_OPENALEX_API_KEY_VAR
           {
-            for name in SEMANTIC_SCHOLAR_API_KEY COHERE_API_KEY; do
+            for name in SEMANTIC_SCHOLAR_API_KEY COHERE_API_KEY OPENALEX_API_KEY; do
               if [ -n "${!name:-}" ]; then printf 'export %s=%q\n' "$name" "${!name}"; fi
             done
             cat <<'REMOTE'
           set -e
           f=/etc/literev-api.env
-          for name in SEMANTIC_SCHOLAR_API_KEY COHERE_API_KEY; do
+          for name in SEMANTIC_SCHOLAR_API_KEY COHERE_API_KEY OPENALEX_API_KEY; do
             if [ -z "${!name:-}" ]; then echo "$name: no secret in this environment, server line left as it is"; continue; fi
             tmp=$(mktemp)
             grep -v "^${name}=" "$f" > "$tmp" || true

@@ -14,7 +14,7 @@ from fastapi import Depends, Query
 from sqlalchemy import text, bindparam
 
 from .core import (EXHAUSTIVE_FEDERATION_BUDGET, POPULATE_FEDERATION_BUDGET, _norm_lang, app,
-                   engine, logger, require_api_key)
+                   engine, logger, redact_keys, require_api_key)
 from .documents import (
     METADATA_UPDATE_SQL,
     _llm_lang_directive,
@@ -67,6 +67,7 @@ from .search import (
     _source_label,
     _split_boolean,
     _store_prisma_identification,
+    _strategy_to_store,
     source_record_keys,
     _strip_field_tags,
     _tokenize_boolean,
@@ -74,12 +75,17 @@ from .search import (
 )
 from .sources import (
     EPMC_SEARCH_URL,
+    NCBI_ESEARCH_CEILING,
     _NCBI_LAST,
     _NCBI_LOCK,
     _NCBI_MIN_INTERVAL,
     _ingest_doc_direct,
     _ncbi_get,
     epmc_query,
+    openalex_params,
+    pubmed_esearch_by_years,
+    pubmed_year_bounds,
+    pubmed_years_term,
     _parse_arxiv,
     _parse_arxiv_total,
     _parse_clinicaltrials,
@@ -263,13 +269,13 @@ def _unpaywall_email() -> str:
     return os.getenv("UNPAYWALL_EMAIL", "literev@gesica.ch")
 
 
-def _ft_get(url, params=None, timeout=20):
+def _ft_get(url, params=None, timeout=20, headers=None):
     import time as _time
     import requests as _requests
     for _att in range(3):
         try:
             _r = _requests.get(url, params=params, timeout=timeout,
-                               headers={"User-Agent": "LiteRev-Evidence/1.0"})
+                               headers={"User-Agent": "LiteRev-Evidence/1.0", **(headers or {})})
             if _r.status_code == 429:
                 _time.sleep(int(_r.headers.get("Retry-After", 10)))
                 continue
@@ -453,10 +459,15 @@ def _note_oa_link(doc_id: int, url: str) -> None:
         logger.debug(f"oa_url doc {doc_id}: {_e}")
 
 
+#: Le lien de téléchargement de CORE, que sa notice porte en `url` : le PDF en accès ouvert.
+_CORE_DOWNLOAD_RE = re.compile(r"^https?://core\.ac\.uk/download/", re.I)
+
+
 def _fulltext_of(row) -> tuple[str | None, str | None, list[str]]:
     """Le texte intégral en accès ouvert d'un article, sa provenance, et pourquoi chaque
     source a échoué : PMC (Europe PMC puis NCBI, en XML), Unpaywall, bioRxiv/medRxiv,
-    Semantic Scholar, OpenAlex (PDF lus par pdftotext)."""
+    Semantic Scholar, OpenAlex, puis la copie de CORE pour une notice venue de CORE (PDF lus
+    par pdftotext)."""
     _ext_id = row["external_id"] or ""
     _doi = _normalize_doi(row["doi"] or "") or ""
     _pmid = row["pmid"] or ""
@@ -545,11 +556,18 @@ def _fulltext_of(row) -> tuple[str | None, str | None, list[str]]:
 
     # Source 4 : Semantic Scholar
     if not _fulltext:
+        # Une notice venue de Semantic Scholar sans DOI ni PMID se cherche par son propre
+        # identifiant (`s2:<paperId>`), que l'API lit tel quel.
         _ss_id = (f"DOI:{_doi}" if _doi else f"PMID:{_pmid}" if _pmid
-                  else f"PMCID:{_ext_id}" if _ext_id and _ext_id.upper().startswith("PMC") else None)
+                  else f"PMCID:{_ext_id}" if _ext_id and _ext_id.upper().startswith("PMC")
+                  else _ext_id[3:] if _ext_id.startswith("s2:") and len(_ext_id) > 3 else None)
         if _ss_id:
+            # La clé de Semantic Scholar quand le serveur en a une, comme la recherche :
+            # sans elle, l'appel puise dans le quota anonyme, souvent épuisé (429).
+            _s2_key = (os.getenv("SEMANTIC_SCHOLAR_API_KEY") or "").strip()
             _r_ss = _ft_get(f"https://api.semanticscholar.org/graph/v1/paper/{_ss_id}",
-                            params={"fields": "openAccessPdf,abstract"})
+                            params={"fields": "openAccessPdf,abstract"},
+                            headers=({"x-api-key": _s2_key} if _s2_key else None))
             if _r_ss and _r_ss.status_code == 200:
                 try:
                     _oa_pdf = _r_ss.json().get("openAccessPdf")
@@ -573,7 +591,7 @@ def _fulltext_of(row) -> tuple[str | None, str | None, list[str]]:
     if not _fulltext and (_ext_id.startswith("W") or _doi):
         _oa_work_url = (f"https://api.openalex.org/works/{_ext_id}" if _ext_id.startswith("W")
                         else f"https://api.openalex.org/works/doi:{_doi}")
-        _r_oa = _ft_get(_oa_work_url, params={"select": "open_access"})
+        _r_oa = _ft_get(_oa_work_url, params=openalex_params({"select": "open_access"}))
         if _r_oa and _r_oa.status_code == 200:
             try:
                 _oa_info = _r_oa.json().get("open_access", {})
@@ -591,6 +609,19 @@ def _fulltext_of(row) -> tuple[str | None, str | None, list[str]]:
                 _fail.append(f"openalex:parse_error:{_oa_e}")
         elif _r_oa:
             _fail.append(f"openalex:http_{_r_oa.status_code}")
+
+    # Source 6 : la copie que CORE a moissonnée, pour une notice venue de CORE. CORE agrège
+    # des dépôts en accès ouvert et son lien de téléchargement est le PDF lui-même ; ces
+    # notices n'ont souvent ni DOI ni PMID, si bien qu'aucune source ci-dessus ne les
+    # trouvait (41 des 536 articles pertinents sans texte de HPAI_last, le 12 octobre 2026).
+    _own_url = str((row.get("url") if hasattr(row, "get") else None) or "")
+    if not _fulltext and _CORE_DOWNLOAD_RE.match(_own_url):
+        _fulltext = _extract_pdf_text_ft(_own_url)
+        if _fulltext and len(_fulltext) > 500:
+            _source_used = "core"
+        else:
+            _fulltext = None
+            _fail.append("core:pdf_empty")
     return (_fulltext if _source_used else None), _source_used, _fail
 
 
@@ -626,7 +657,7 @@ def rows_without_fulltext(scenario_id: str, scope: str, limit: int | None = None
     donnée (`relevant` : le sous-ensemble pertinent, `all` : tout le scénario)."""
     with engine.connect() as conn:
         return [dict(r) for r in conn.execute(text(f"""
-            SELECT ld.id, ld.external_id, ld.doi, ld.pmid, ld.source
+            SELECT ld.id, ld.external_id, ld.doi, ld.pmid, ld.source, ld.url
             FROM literature_document ld
             JOIN article_scenarios asn ON asn.document_id = ld.id AND asn.scenario_id = :sid
             WHERE ld.project_context = 'literev'
@@ -706,6 +737,10 @@ def _ensure_source_query_cache() -> None:
             # plafonnée, et la carte PRISMA de HPAI_last n'en nommait aucune alors que
             # quatre l'étaient (Europe PMC 1 996 sur 13 810).
             _c.execute(text("ALTER TABLE source_query_cache ADD COLUMN IF NOT EXISTS totals JSONB"))
+            # Ce que la carte doit encore dire d'une réponse rejouée : les tranches d'années
+            # de PubMed au-delà de 10 000 notices. Sans elles, la même recherche relancée
+            # depuis le cache affichait plus de 10 000 notices PubMed sans dire comment.
+            _c.execute(text("ALTER TABLE source_query_cache ADD COLUMN IF NOT EXISTS meta JSONB"))
     except Exception as _e:                                  # noqa: BLE001 - never blocks boot
         logger.warning(f"_ensure_source_query_cache: {_e}")
 
@@ -731,56 +766,61 @@ def _source_query_hash(query: str, filters: dict | None, max_results: int,
 
 
 def _load_source_cache(query_hash: str, ttl_s: int | None = None) -> dict[str, dict]:
-    """{fetcher: {links: [[doc_id, source, boolean_native], ...], n_records, totals, age_s}}
-    pour les entrées plus fraîches que le TTL. Vide (jamais d'erreur) si la table manque.
-    `totals` : {source: total annoncé par l'API}, {} pour une entrée antérieure à la colonne."""
+    """{fetcher: {links: [[doc_id, source, boolean_native], ...], n_records, totals, meta,
+    age_s}} pour les entrées plus fraîches que le TTL. Vide (jamais d'erreur) si la table
+    manque. `totals` : {source: total annoncé par l'API}, {} pour une entrée antérieure à la
+    colonne ; `meta` : ce que la carte doit encore en dire (les tranches d'années de
+    PubMed), {} de même."""
     ttl = SOURCE_CACHE_TTL_S if ttl_s is None else ttl_s
     if ttl <= 0:
         return {}
     out: dict[str, dict] = {}
     try:
+        rows = []
         with engine.connect() as _c:
-            try:
-                rows = _c.execute(text(
-                    "SELECT fetcher, links, n_records, totals, "
-                    "EXTRACT(EPOCH FROM (NOW() - fetched_at)) AS age_s "
-                    "FROM source_query_cache WHERE query_hash = :h"
-                ), {"h": query_hash}).mappings().all()
-            except Exception:                            # noqa: BLE001 - colonne pas encore là
-                _c.rollback()
-                rows = _c.execute(text(
-                    "SELECT fetcher, links, n_records, NULL AS totals, "
-                    "EXTRACT(EPOCH FROM (NOW() - fetched_at)) AS age_s "
-                    "FROM source_query_cache WHERE query_hash = :h"
-                ), {"h": query_hash}).mappings().all()
+            # Du plus récent au plus ancien schéma : une colonne pas encore là n'empêche pas
+            # de rejouer les liens.
+            for _cols in ("totals, meta", "totals, NULL AS meta", "NULL AS totals, NULL AS meta"):
+                try:
+                    rows = _c.execute(text(
+                        f"SELECT fetcher, links, n_records, {_cols}, "
+                        "EXTRACT(EPOCH FROM (NOW() - fetched_at)) AS age_s "
+                        "FROM source_query_cache WHERE query_hash = :h"
+                    ), {"h": query_hash}).mappings().all()
+                    break
+                except Exception:                        # noqa: BLE001 - colonne pas encore là
+                    _c.rollback()
         for r in rows:
             age = float(r["age_s"] or 0)
             if age > ttl:
                 continue
             links = r["links"] if isinstance(r["links"], list) else json.loads(r["links"] or "[]")
             totals = r["totals"] if isinstance(r["totals"], dict) else json.loads(r["totals"] or "{}")
+            meta = r["meta"] if isinstance(r["meta"], dict) else json.loads(r["meta"] or "{}")
             out[r["fetcher"]] = {"links": [tuple(x) for x in links if isinstance(x, list) and len(x) == 3],
                                  "n_records": int(r["n_records"] or 0), "age_s": age,
                                  "totals": {str(k): int(v) for k, v in (totals or {}).items()
-                                            if isinstance(v, (int, float)) and not isinstance(v, bool)}}
+                                            if isinstance(v, (int, float)) and not isinstance(v, bool)},
+                                 "meta": meta if isinstance(meta, dict) else {}}
     except Exception as _e:                                  # noqa: BLE001
         logger.warning(f"_load_source_cache: {_e}")
     return out
 
 
 def _save_source_cache(fetcher: str, query_hash: str, query: str, links: list,
-                       totals: dict | None = None) -> None:
+                       totals: dict | None = None, meta: dict | None = None) -> None:
     try:
         with engine.begin() as _c:
             _c.execute(text("""
-                INSERT INTO source_query_cache (fetcher, query_hash, query, links, n_records, totals, fetched_at)
-                VALUES (:f, :h, :q, CAST(:l AS jsonb), :n, CAST(:t AS jsonb), NOW())
+                INSERT INTO source_query_cache (fetcher, query_hash, query, links, n_records, totals,
+                                                meta, fetched_at)
+                VALUES (:f, :h, :q, CAST(:l AS jsonb), :n, CAST(:t AS jsonb), CAST(:m AS jsonb), NOW())
                 ON CONFLICT (fetcher, query_hash) DO UPDATE
                 SET links = CAST(:l AS jsonb), n_records = :n, query = :q,
-                    totals = CAST(:t AS jsonb), fetched_at = NOW()
+                    totals = CAST(:t AS jsonb), meta = CAST(:m AS jsonb), fetched_at = NOW()
             """), {"f": fetcher, "h": query_hash, "q": (query or "")[:4000],
                    "l": json.dumps([list(x) for x in links]), "n": len(links),
-                   "t": json.dumps(dict(totals or {}))})
+                   "t": json.dumps(dict(totals or {})), "m": json.dumps(dict(meta or {}))})
     except Exception as _e:                                  # noqa: BLE001
         logger.warning(f"_save_source_cache {fetcher}: {_e}")
 from .scenarios import _scenario_counts, _user_scenario_pipeline_jobs, _user_scenario_populate_jobs
@@ -977,7 +1017,7 @@ def _run_user_scenario_populate(
         _f = getattr(_tls, "fetcher", None)
         if _f:
             with _counter_lock:
-                _fetcher_errors[_f] = (str(reason)[:200] if reason is not None
+                _fetcher_errors[_f] = (redact_keys(reason)[:200] if reason is not None
                                        else _fetcher_errors.get(_f) or "")
 
     def _mark_source_skipped(reason: str):
@@ -1209,6 +1249,21 @@ def _run_user_scenario_populate(
     # Le plafond RÉELLEMENT appliqué à une source quand il diffère du plafond commun :
     # l'endpoint classique de Semantic Scholar (offset + limit ≤ 1 000).
     _source_caps_run: dict[str, int] = {}
+    # PubMed : sa requête AVANT les bornes d'années et l'exclusion des préprints, et ces
+    # bornes. Le découpage par années (au-delà de 10 000 notices) réécrit la requête tranche
+    # par tranche à partir d'elles. Liés ici, hors du try, parce que `_fetch_pubmed` les lit.
+    _pubmed_base = query
+    _pubmed_years = pubmed_year_bounds(filters)
+    # Les tranches d'années de PubMed, quand il a fallu découper : dites sur la carte PRISMA.
+    _year_slices: dict[str, list[str]] = {}
+    _year_slices_capped: dict[str, dict[str, int]] = {}
+
+    def _pubmed_term(lo: int | None, hi: int | None) -> str:
+        """La requête PubMed d'une tranche d'années (None, None : toutes les années du
+        scénario), l'exclusion des préprints en dernier sur CHAQUE tranche."""
+        _t = pubmed_years_term(_pubmed_base, lo, hi)
+        return f"({_t}) NOT preprint[pt]" if _no_preprints else _t
+
     try:
         # Le corpus = résultat de la REQUÊTE BOOLÉENNE (générée par LLM). On
         # récupère search_strategy.general ; à défaut on la génère depuis la requête.
@@ -1234,13 +1289,15 @@ def _run_user_scenario_populate(
                 _pubmed_q = _strat.get("pubmed") or _strat["general"]
             else:
                 # Absent ou dégradé (cache empoisonné pendant une panne quota) → régénérer.
+                # Une stratégie saisie reste la requête saisie : une correction proposée
+                # n'est jamais appliquée ici, ni enregistrée (l'écran de recherche la propose).
                 _gen = _generate_search_strategy(query)
                 _boolean = _gen.get("general") or query
                 _pubmed_q = _gen.get("pubmed") or _boolean
                 if not _strategy_is_degraded(_gen, query):
                     with engine.begin() as _sc2:
                         _sc2.execute(text("UPDATE user_scenarios SET search_strategy = CAST(:s AS jsonb) WHERE id = :id"),
-                                     {"s": json.dumps(_gen), "id": scenario_id})
+                                     {"s": json.dumps(_strategy_to_store(_gen)), "id": scenario_id})
         except Exception as _be:
             logger.warning(f"Populate {scenario_id} boolean strategy: {_be}")
         # Facettes UNIES (OU) d'une recherche multi-facettes : fédérées AUSSI, en
@@ -1440,8 +1497,15 @@ def _run_user_scenario_populate(
         # type de publication « Preprint » de PubMed, la collection PPR d'Europe PMC), et le
         # total qu'elles annoncent est celui de la recherche réellement faite. Les autres
         # bases n'ont pas de filtre sûr ; leurs préprints sont retirés à l'assemblage.
+        # Les années du scénario partent AUSSI dans la requête PubMed ([dp]). Elles n'y
+        # étaient pas : PubMed rendait ses plus pertinentes TOUTES années confondues, et
+        # l'assemblage jetait ensuite celles d'hors période, si bien qu'une recherche bornée
+        # perdait des notices de sa période au-delà des 10 000 premières, et annonçait le
+        # total de toutes les années. Le découpage par années reste dans ces bornes.
+        # L'assemblage garde son propre filtre d'années, inchangé.
+        _pubmed_base = _pubmed_q
+        _pubmed_q = _pubmed_term(*_pubmed_years)
         if _no_preprints:
-            _pubmed_q = f"({_pubmed_q}) NOT preprint[pt]"
             _epmc_q = f"({_epmc_q}) NOT SRC:PPR"
             _preprints_at_source[:] = ["pubmed", "europepmc"]
         # Le MÊME helper que l'assemblage final (ligne ~1290) et que la recherche :
@@ -1505,27 +1569,66 @@ def _run_user_scenario_populate(
             # sans rien télécharger ; seuls les inconnus passent par efetch. Avant, chaque
             # relance retéléchargeait les notices complètes de tout le résultat pour
             # n'insérer aucune ligne (ON CONFLICT) : la quasi-totalité du trafic PubMed.
-            r = _with_retries(lambda: _ncbi_get(
-                f"{ENTREZ_BASE}/esearch.fcgi",
-                # `sort=relevance` (le « Best Match » de PubMed) : au plafond par source, on
-                # garde les plus PERTINENTS, comme OpenAlex et Europe PMC. Trié par date
-                # jusqu'ici, PubMed plafonné gardait les 2 000 plus récents et perdait la
-                # littérature H5N1 de 2004 à 2012 ; même plafond, deux politiques. Décision
-                # de méthode prise par le propriétaire du projet, pas un correctif.
-                # eutils ne rend pas plus de 10 000 identifiants par esearch : c'est aussi
-                # le plafond de PubMed en recherche exhaustive (dit sur la carte s'il mord).
-                {"db": "pubmed", "term": _pubmed_q, "retmax": max(0, min(_cap_strategy, 10000)),
-                 "sort": "relevance", "retmode": "json", "email": EMAIL},
-                timeout=30,
-            ), "PubMed")
-            r.raise_for_status()
-            search_result = r.json()["esearchresult"]
+            def _esearch(term: str, retstart: int, retmax: int) -> dict:
+                """Une page d'identifiants (ou le seul compte, retmax=0), ou une exception."""
+                _r = _with_retries(lambda: _ncbi_get(
+                    f"{ENTREZ_BASE}/esearch.fcgi",
+                    # `sort=relevance` (le « Best Match » de PubMed) : au plafond par source,
+                    # on garde les plus PERTINENTS, comme OpenAlex et Europe PMC. Trié par date
+                    # jusqu'ici, PubMed plafonné gardait les 2 000 plus récents et perdait la
+                    # littérature H5N1 de 2004 à 2012 ; même plafond, deux politiques. Décision
+                    # de méthode prise par le propriétaire du projet, pas un correctif.
+                    {"db": "pubmed", "term": term, "retstart": retstart, "retmax": retmax,
+                     "sort": "relevance", "retmode": "json", "email": EMAIL},
+                    timeout=30,
+                ), "PubMed")
+                _r.raise_for_status()
+                return _r.json()["esearchresult"]
+
+            # eutils ne rend pas plus de 10 000 identifiants par recherche : la requête
+            # entière d'abord, qui donne son vrai total et, sous 10 000, toute sa réponse.
+            _ceiling = int(NCBI_ESEARCH_CEILING)
+            _first_n = max(0, min(_cap_strategy, _ceiling))
+            search_result = _esearch(_pubmed_q, 0, _first_n)
             total_found = int(search_result.get("count", 0))
             _note_total("pubmed", total_found)
             if _pipeline_callback:
                 _pipeline_callback("pubmed_found", total_found)
             _pmids = [str(p).strip() for p in (search_result.get("idlist") or []) if str(p).strip()]
-            _pmids = _pmids[:max(0, min(_cap_strategy, 10000))]
+            _pmids = _pmids[:_first_n]
+            # Au-delà, quand le plafond par source en demande davantage : la MÊME requête par
+            # tranches d'années de publication, coupées en deux jusqu'à tenir sous 10 000
+            # chacune (décision du propriétaire du produit). Une requête qui en annonçait
+            # 23 000 n'en rapportait que 10 000. Le total de la carte reste celui de la
+            # requête entière, lu ci-dessus, et non la somme des tranches, qui compterait
+            # deux fois les notices à cheval sur deux années.
+            if total_found > _ceiling and _cap_strategy > _ceiling:
+                _split = pubmed_esearch_by_years(
+                    _esearch, _pubmed_term, total=total_found, cap=_cap_strategy,
+                    year_min=_pubmed_years[0], year_max=_pubmed_years[1],
+                    ceiling=_ceiling, stop=_budget_exhausted)
+                if _split["error"]:
+                    _mark_source_error(f"PubMed, découpage par années : {_split['error']}")
+                if _split["slices"]:
+                    with _counter_lock:
+                        _year_slices["pubmed"] = [s["years"] for s in _split["slices"]]
+                        _over = {s["years"]: int(s["count"]) for s in _split["slices"] if s["capped"]}
+                        if _over:
+                            _year_slices_capped["pubmed"] = _over
+                # Les tranches d'abord, puis ce que la requête entière a déjà rendu : un
+                # découpage qui n'a pas pu aller au bout garde au moins ces 10 000-là.
+                _merged: list[str] = []
+                _seen_pm: set[str] = set()
+                for _pm in list(_split["ids"]) + _pmids:
+                    if _pm not in _seen_pm:
+                        _seen_pm.add(_pm)
+                        _merged.append(_pm)
+                _pmids = _merged[:max(0, int(_cap_strategy))]
+                logger.info(f"PubMed populate {scenario_id}: {total_found} résultats annoncés, "
+                            f"requête découpée en {len(_split['slices'])} tranche(s) d'années "
+                            f"({', '.join(s['years'] for s in _split['slices'])}) ; "
+                            f"{len(_split['ids'])} PMID distincts"
+                            + ("" if _split["complete"] else " (découpage incomplet)"))
             _pmid_set = set(_pmids)
             _known: dict[str, int] = {}
             for _ki in range(0, len(_pmids), 1000):
@@ -1703,14 +1806,15 @@ def _run_user_scenario_populate(
                         # garde les 2000 LES PLUS PERTINENTS (BM25 OpenAlex) et non les plus
                         # récents. `per-page`, avec un TRAIT D'UNION : c'est le nom du
                         # paramètre chez OpenAlex ; `per_page` était refusé.
-                        _oa_params = {"search": _ox_q, "per-page": _oa_batch, "page": _oa_page,
-                                      "sort": "relevance_score:desc", "mailto": "literev@gesica.ch"}
+                        _oa_params = openalex_params({"search": _ox_q, "per-page": _oa_batch, "page": _oa_page,
+                                                      "sort": "relevance_score:desc"})
                     else:
                         # Pas de virgule dans un filtre OpenAlex : elle y sépare deux filtres.
                         _oa_params = ({"filter": "title_and_abstract.search:" + _ox_q.replace(",", " ")}
                                       if _pass == "scoped" else {"search": _ox_q})
-                        _oa_params.update({"per-page": _oa_batch, "cursor": _oa_cursor,
-                                           "mailto": "literev@gesica.ch"})
+                        # `mailto`, et la clé OpenAlex quand le serveur en a une (`openalex_params`).
+                        _oa_params = openalex_params({**_oa_params, "per-page": _oa_batch,
+                                                      "cursor": _oa_cursor})
                     oa_resp = _with_retries(lambda: _requests.get("https://api.openalex.org/works",
                                                                   params=_oa_params, timeout=20), "OpenAlex")
                     if (_oa_fetched == 0 and 400 <= oa_resp.status_code < 500 and oa_resp.status_code != 429
@@ -2369,6 +2473,16 @@ def _run_user_scenario_populate(
             # dire qu'elle a été plafonnée.
             for _src, _tot in (_entry.get("totals") or {}).items():
                 _note_total(_src, _tot)
+            # Et les tranches d'années de PubMed, quand il a fallu découper.
+            _meta = _entry.get("meta") or {}
+            with _counter_lock:
+                for _src, _sl in (_meta.get("year_slices") or {}).items():
+                    if isinstance(_sl, list) and _sl:
+                        _year_slices[str(_src)] = [str(x) for x in _sl]
+                for _src, _ov in (_meta.get("year_slices_capped") or {}).items():
+                    if isinstance(_ov, dict) and _ov:
+                        _year_slices_capped[str(_src)] = {str(k): int(v) for k, v in _ov.items()
+                                                          if isinstance(v, (int, float))}
             if _pipeline_callback is None:
                 with _counter_lock:
                     _job = _user_scenario_populate_jobs.get(scenario_id)
@@ -2404,7 +2518,7 @@ def _run_user_scenario_populate(
                     except Exception as _fe:
                         logger.warning(f"Populate {scenario_id} source future error: {_fe}")
                         with _counter_lock:
-                            _fetcher_errors[_fname] = str(_fe)[:200]
+                            _fetcher_errors[_fname] = redact_keys(_fe)[:200]
             # CRITIQUE - sur Python <3.11, as_completed lève
             # concurrent.futures.TimeoutError (≠ TimeoutError natif). Sans
             # _FuturesTimeout dans le except, l'exception remontait, le bloc
@@ -2430,7 +2544,10 @@ def _run_user_scenario_populate(
             with _counter_lock:
                 _links_now = list(_run_links.get(_fname, []))
                 _totals_now = dict(_fetcher_totals.get(_fname) or {})
-            _save_source_cache(_fname, _qhash, query, _links_now, totals=_totals_now)
+                _meta_now = ({"year_slices": {"pubmed": list(_year_slices["pubmed"])},
+                              "year_slices_capped": {"pubmed": dict(_year_slices_capped.get("pubmed") or {})}}
+                             if _fname == "_fetch_pubmed" and _year_slices.get("pubmed") else {})
+            _save_source_cache(_fname, _qhash, query, _links_now, totals=_totals_now, meta=_meta_now)
         # ── L'issue de CHAQUE source, nommée ─────────────────────────────────
         # `_queried` ne distinguait pas « a répondu » de « a échoué » : un fetcher qui
         # lève est tout de même passé par la boucle, donc la ligne de couverture
@@ -2631,6 +2748,8 @@ def _run_user_scenario_populate(
                 _recs_snapshot = dict(_ident_records)
                 _totals_snapshot = dict(_source_totals)
                 _ids_snapshot = list(_ident_docs)
+                _year_slices_snapshot = {k: list(v) for k, v in _year_slices.items()}
+                _year_slices_capped_snapshot = {k: dict(v) for k, v in _year_slices_capped.items()}
             # Ventilation des documents identifiés mais ABSENTS du corpus : préprints quand
             # la recherche les exclut (écartés avant la dédup), ou non liés (source par
             # mots-clés hors requête booléenne, ou ligne fusionnée par la dédup, d'où la
@@ -2683,20 +2802,24 @@ def _run_user_scenario_populate(
                 # Le mode, et le plafond de chaque source quand il diffère : les passages
                 # classés par pertinence gardent le leur (RANKED_PASS_MAX), Crossref dans les
                 # deux modes et OpenAlex en standard, où c'est son seul passage (en
-                # exhaustif, son passage titre et résumé a le plafond commun) ; PubMed ne
-                # rend pas plus de 10 000 identifiants par recherche.
+                # exhaustif, son passage titre et résumé a le plafond commun). PubMed n'en a
+                # plus de propre : au-delà des 10 000 identifiants qu'eutils rend par
+                # recherche, sa requête est découpée par années (`year_slices`).
                 search_mode=_search_mode,
                 # Et l'endpoint classique de Semantic Scholar, qui ne rend pas plus de
                 # 1 000 notices, dans les deux modes.
                 source_caps=((({"crossref": int(_cap_ranked)}
                                | ({} if exhaustive else {"openalex": int(_cap_ranked)}))
                               if _cap_ranked < int(_cap_strategy) else {})
-                             | ({"pubmed": min(int(_cap_strategy), 10000)} if exhaustive else {})
                              | dict(_source_caps_run)
                              if include_live else {}),
                 title_abstract_sources=(sorted(_title_abstract_sources) if include_live else []),
                 unranked_sources=(sorted(_unranked_sources) if include_live else []),
                 split_queries=(dict(_split_queries) if include_live else {}),
+                # PubMed au-delà de 10 000 notices : ses tranches d'années, et celles d'une
+                # seule année encore au-delà (gardées à 10 000, leurs plus pertinentes).
+                year_slices=(_year_slices_snapshot if include_live else {}),
+                year_slices_capped=(_year_slices_capped_snapshot if include_live else {}),
                 # L'exclusion des préprints, et ses trois moyens : serveurs non interrogés,
                 # exclusion dans la requête, retrait avant le screening.
                 preprints_excluded=_no_preprints,

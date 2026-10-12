@@ -1216,7 +1216,8 @@ export interface ScenarioPrisma {
     search_mode?: "standard" | "exhaustive";
     /** The cap actually applied to a source when it differs from `per_source_cap`: the
      *  relevance-ranked passes keep their own (RANKED_PASS_MAX, 2,000 by default), Crossref
-     *  in both modes and OpenAlex in a standard search; PubMed returns at most 10,000. */
+     *  in both modes and OpenAlex in a standard search. PubMed has none of its own: past the
+     *  10,000 records eutils returns per query, it is read in year slices (`year_slices`). */
     source_caps?: Record<string, number>;
     /** Sources searched in titles and abstracts only (OpenAlex in an exhaustive search). */
     title_abstract_sources?: string[];
@@ -1225,6 +1226,14 @@ export interface ScenarioPrisma {
     unranked_sources?: string[];
     /** Sources that received the whole boolean split into several short queries. */
     split_queries?: Record<string, string[]>;
+    /** Sources whose query announced more than the 10,000 records eutils returns per
+     *  query (PubMed), read whole in publication-year slices ("≤1962", "1963-1994",
+     *  "2021", "≥2023"). Each record counted once; the source's total stays the whole
+     *  query's. */
+    year_slices?: Record<string, string[]>;
+    /** Among those slices, the single years still over 10,000, with what they announced:
+     *  only their 10,000 most relevant could be read. */
+    year_slices_capped?: Record<string, Record<string, number>>;
     /** "populate" = sources were searched; "rebuild" = the boolean query was replayed
      *  over the local library and nothing was searched. The panel called both a search. */
     method?: string;
@@ -4607,14 +4616,32 @@ export interface SearchStrategy {
   truncated?: boolean;
   degraded_reason?: string;
   reason?: string;
+  /** The query as the user entered it. A Boolean strategy is used exactly as entered:
+   *  `general` and `pubmed` are this text, however long. */
+  entered_query?: string;
+  /** "boolean": a strategy kept as entered; "natural": a sentence translated. */
+  input_kind?: "boolean" | "natural";
+  /** A correction PROPOSED for a query used as entered (unbalanced parentheses or quotes,
+   *  operators that make no sense, a misused field tag...). Never applied by the server:
+   *  the user accepts it, or keeps the query as entered. */
+  proposed_query?: string | null;
+  /** Why, in one or two sentences, in the interface language. */
+  proposal_reason?: string | null;
+  proposal_reasons?: Record<string, string> | null;
+  /** What was found: "unclosed_parenthesis", "unmatched_closing_parenthesis",
+   *  "unpaired_quote", "typographic_quotes", and "model" when the model proposed it. */
+  proposal_issues?: string[];
 }
 
-/** Traduit une requête en langage naturel en stratégie booléenne (LLM). */
+/** Traduit une requête en langage naturel en stratégie booléenne (LLM), ou garde telle
+ *  quelle une stratégie booléenne saisie et la vérifie : une erreur réelle revient en
+ *  correction PROPOSÉE (`proposed_query`), jamais appliquée. */
 export async function fetchSearchStrategy(query: string): Promise<SearchStrategy> {
   const r = await safeFetch(`${API_BASE_URL}/search-strategy`, {
     method: 'POST',
     headers: authHeaders({ "Content-Type": "application/json" }),
-    body: JSON.stringify({ query }),
+    // La langue de l'interface : celle de l'explication d'une correction proposée.
+    body: JSON.stringify({ query, lang: currentLang() }),
   });
   if (!r.ok) throw new Error(httpMessage(r.status));
   return r.json();

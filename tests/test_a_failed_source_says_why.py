@@ -48,8 +48,9 @@ def test_the_reasons_are_kept_by_source_not_counted():
     assert "_fetcher_errors: dict[str, str] = {}" in SRC, (
         "_fetcher_errors est encore un ensemble, qui ne peut porter aucune raison")
     assert "_fetcher_errors.add(" not in SRC
-    # La future en échec, dans la boucle as_completed, porte aussi sa raison.
-    assert "_fetcher_errors[_fname] = str(_fe)[:200]" in SRC
+    # La future en échec, dans la boucle as_completed, porte aussi sa raison, sans clé :
+    # une erreur de requests cite son URL, et celle d'OpenAlex porte sa clé (`redact_keys`).
+    assert "_fetcher_errors[_fname] = redact_keys(_fe)[:200]" in SRC
 
 
 def test_a_second_failure_on_the_same_source_does_not_erase_the_first_reason():
