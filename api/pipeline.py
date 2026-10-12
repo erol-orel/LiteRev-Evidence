@@ -32,13 +32,18 @@ from .search import (
     EXHAUSTIVE_MAX_PER_SOURCE,
     LIVE_MAX_PER_SOURCE,
     OPENAIRE_MAX_OPERATORS,
+    OPENALEX_BISECT_DEPTH,
+    OPENALEX_MAX_OPERATORS,
+    OPENALEX_SPLIT_MAX_PARTS,
     RANKED_PASS_MAX,
     SOURCE_OUTCOMES_COUNTED,
     URL_QUERY_MAX_ENCODED,
     _url_encoded_len,
     _boolean_corpus_ids,
+    _bisect_boolean,
     _boolean_to_arxiv,
     _boolean_to_s2,
+    _count_operators,
     _clean_boolean,
     _dedup_scenario_links,
     _facet_ops,
@@ -1327,10 +1332,19 @@ def _run_user_scenario_populate(
         if exhaustive and _bool_is_real and _clean_bool and not _send_bool:
             _url_parts = _split_boolean(_portable_bool, URL_QUERY_MAX_ENCODED, measure=_url_encoded_len)
             if _url_parts:
-                _openalex_parts[:] = _url_parts
                 _ct_parts[:] = _url_parts
-                _split_queries["openalex"] = list(_url_parts)
                 _split_queries["clinicaltrials"] = list(_url_parts)
+        # OpenAlex refuse aussi une requête de TROP D'OPÉRATEURS, même courte : le morceau de
+        # 60 opérateurs du scénario T2.4 exposition/transmission (400), quand ceux de 23 à 47
+        # passaient. Ses morceaux sont donc bornés en longueur ET en opérateurs, et un booléen
+        # qui tient dans l'URL mais dépasse OPENALEX_MAX_OPERATORS est découpé lui aussi.
+        if exhaustive and _bool_is_real and _clean_bool and (
+                not _send_bool or _count_operators(_clean_bool) > OPENALEX_MAX_OPERATORS):
+            _oa_parts = _split_boolean(_portable_bool, URL_QUERY_MAX_ENCODED, measure=_url_encoded_len,
+                                       max_operators=OPENALEX_MAX_OPERATORS, max_parts=OPENALEX_SPLIT_MAX_PARTS)
+            if _oa_parts:
+                _openalex_parts[:] = _oa_parts
+                _split_queries["openalex"] = list(_oa_parts)
         # Les sources qui n'ont PAS reçu le booléen entier, à DIRE : PRISMA-S demande la
         # stratégie réellement soumise à chaque base, et le tableau d'identification
         # présentait leurs notices comme le produit d'une recherche booléenne. Un booléen
@@ -1670,6 +1684,11 @@ def _run_user_scenario_populate(
         else:
             _passes = [("fulltext_all", _bool_query, _send_bool, _cap_strategy)]
         _seen: set = set()
+        # Un morceau qu'OpenAlex refuse (4xx à sa première page) est coupé en deux et relancé,
+        # jusqu'à OPENALEX_BISECT_DEPTH fois : un seul morceau refusé faisait échouer toute la
+        # source (le 400 levait), et les morceaux suivants n'étaient jamais demandés.
+        _oa_depth: dict[str, int] = {}
+        _oa_bisected = [False]
         try:
             while _passes:
                 _pass, _ox_q, _ox_native, _oa_limit = _passes.pop(0)
@@ -1694,6 +1713,25 @@ def _run_user_scenario_populate(
                                            "mailto": "literev@gesica.ch"})
                     oa_resp = _with_retries(lambda: _requests.get("https://api.openalex.org/works",
                                                                   params=_oa_params, timeout=20), "OpenAlex")
+                    if (_oa_fetched == 0 and 400 <= oa_resp.status_code < 500 and oa_resp.status_code != 429
+                            and _oa_depth.get(_ox_q, 0) < OPENALEX_BISECT_DEPTH):
+                        _halves = _bisect_boolean(_ox_q)
+                        if len(_halves) == 2:
+                            for _h in _halves:
+                                _oa_depth[_h] = _oa_depth.get(_ox_q, 0) + 1
+                            _share = max(1, math.ceil(_oa_limit / 2)) if _pass == "fulltext_top" else _oa_limit
+                            _passes[:0] = [(_pass, _h, _ox_native, _share) for _h in _halves]
+                            with _counter_lock:
+                                _sq = _split_queries.setdefault("openalex", [])
+                                if _ox_q in _sq:
+                                    _sq[_sq.index(_ox_q):_sq.index(_ox_q) + 1] = _halves
+                                else:
+                                    _sq.extend(h for h in _halves if h not in _sq)
+                                _no_cache.add("_fetch_openalex")
+                            _oa_bisected[0] = True
+                            logger.warning(f"OpenAlex populate {scenario_id}: requête refusée ({oa_resp.status_code}, "
+                                           f"{_count_operators(_ox_q)} opérateurs) ; coupée en deux et relancée")
+                            break
                     if _pass == "scoped" and _oa_fetched == 0 and 400 <= oa_resp.status_code < 500:
                         # Le filtre titre+résumé refusé : toute la recherche par défaut, et
                         # la carte ne dit plus « titre et résumé ». Pas de mise en cache :
@@ -1713,7 +1751,7 @@ def _run_user_scenario_populate(
                     # prend tout ; le passage « comme en standard » n'en est qu'un ajout.
                     # Celui d'un booléen découpé n'est pas la somme des morceaux (ils se
                     # recoupent) : il n'est pas annoncé, comme pour DOAJ.
-                    if not (exhaustive and _pass == "fulltext_top") and not _oa_split:
+                    if not (exhaustive and _pass == "fulltext_top") and not _oa_split and not _oa_bisected[0]:
                         _note_total("openalex", (_oa_json.get("meta") or {}).get("count"))
                     _oa_results = _oa_json.get("results", [])
                     if not _oa_results:

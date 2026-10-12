@@ -727,6 +727,57 @@ def _shorten_boolean(portable: str, limit: int = 1200, render=None,
 #: on garde alors sa requête réduite, et la carte le dit comme avant.
 SPLIT_MAX_PARTS = 16
 
+#: OpenAlex refuse (400) une requête de trop d'opérateurs, même courte : sur la stratégie
+#: exposition/transmission du scénario T2.4 HPAI, découpée en quatre morceaux à la limite
+#: d'URL, celui de 60 opérateurs (1 548 caractères) a été refusé et les trois autres (23 à
+#: 47 opérateurs) sont passés. La borne est prise sous le plus grand qui passe, avec de la
+#: marge ; un morceau refusé quand même est coupé en deux et relancé (`_bisect_boolean`).
+OPENALEX_MAX_OPERATORS = 40
+#: Les morceaux d'OpenAlex, bornés en opérateurs, sont plus nombreux que ceux d'une simple
+#: limite d'URL.
+OPENALEX_SPLIT_MAX_PARTS = 24
+#: Combien de fois un morceau refusé est recoupé en deux : 60 opérateurs en 8 morceaux d'environ
+#: 8 au bout de trois coupes, et un refus qui tient à autre chose (un filtre) n'insiste pas.
+OPENALEX_BISECT_DEPTH = 3
+
+
+def _halves(children: list) -> list:
+    """Deux moitiés d'une liste de termes OU, chacune un nœud (un terme seul reste lui-même)."""
+    mid = len(children) // 2
+    return [h[0] if len(h) == 1 else ("or", h) for h in (children[:mid], children[mid:])]
+
+
+def _split_node_once(node, render) -> list | None:
+    """Le nœud en DEUX morceaux dont l'union est le nœud, par la distributivité : un OU coupé
+    en deux, ou sous un ET le plus large de ses blocs OU coupé en deux. None si rien ne se
+    coupe (un terme seul, ou un ET sans bloc OU de plus d'un terme)."""
+    if not isinstance(node, tuple) or node[0] not in ("and", "or"):
+        return None
+    kids = list(node[1])
+    if node[0] == "or":
+        return _halves(kids) if len(kids) >= 2 else None
+    ors = [i for i, k in enumerate(kids) if isinstance(k, tuple) and k[0] == "or" and len(k[1]) > 1]
+    if not ors:
+        return None
+    widest = max(ors, key=lambda i: len(render(kids[i]) or ""))
+    return [("and", kids[:widest] + [half] + kids[widest + 1:]) for half in _halves(list(kids[widest][1]))]
+
+
+def _bisect_boolean(query: str, render=None) -> list[str]:
+    """Une requête booléenne en DEUX dont l'union est la requête, exclusions gardées sur les
+    deux : ce qu'on relance quand une source refuse un morceau. [] si rien ne se coupe.
+    PUR/testable."""
+    render = render or _boolean_to_generic
+    try:
+        ast = _positive_boolean(_parse_boolean_ast(_tokenize_boolean(query or "")), keep_not=True)
+    except Exception:                                    # noqa: BLE001
+        return []
+    pieces = _split_node_once(ast, render) if ast is not None else None
+    if not pieces:
+        return []
+    out = [render(p) for p in pieces]
+    return out if all(out) else []
+
 
 def _split_boolean(portable: str, limit: int, render=None,
                    max_parts: int = SPLIT_MAX_PARTS, measure=None,
@@ -760,28 +811,12 @@ def _split_boolean(portable: str, limit: int, render=None,
         return (bool(out) and measure(out) <= limit
                 and (max_operators is None or _count_operators(out) <= max_operators))
 
-    def _halves(children: list) -> list:
-        mid = len(children) // 2
-        return [h[0] if len(h) == 1 else ("or", h) for h in (children[:mid], children[mid:])]
-
     def _split(node) -> list | None:
         if _fits(node):
             return [node]
-        if not isinstance(node, tuple) or node[0] not in ("and", "or"):
-            return None                                  # un terme seul trop long
-        kids = list(node[1])
-        if node[0] == "or":
-            if len(kids) < 2:
-                return None
-            pieces = _halves(kids)
-        else:
-            ors = [i for i, k in enumerate(kids)
-                   if isinstance(k, tuple) and k[0] == "or" and len(k[1]) > 1]
-            if not ors:
-                return None
-            widest = max(ors, key=lambda i: len(render(kids[i]) or ""))
-            pieces = [("and", kids[:widest] + [half] + kids[widest + 1:])
-                      for half in _halves(list(kids[widest][1]))]
+        pieces = _split_node_once(node, render)      # None : un terme seul trop long
+        if pieces is None:
+            return None
         out: list = []
         for piece in pieces:
             sub = _split(piece)
