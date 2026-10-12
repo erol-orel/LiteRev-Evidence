@@ -14,7 +14,7 @@ from fastapi import Depends, Query
 from sqlalchemy import text
 
 from .core import RELIEFWEB_APPNAME, app, engine, logger, require_api_key
-from .documents import _normalize_doi, _normalize_title, sanitize_db_text
+from .documents import _normalize_doi, _normalize_title, same_work_doi_match, sanitize_db_text
 from .scenario_store import (_get_scenario_threshold, _get_user_scenario_or_404,
                              has_abstract_sql, relevant_gate_tail_sql)
 from .search import (EXHAUSTIVE_MAX_PER_SOURCE, LIVE_MAX_PER_SOURCE, RANKED_PASS_MAX,
@@ -1189,11 +1189,11 @@ def _ingest_doc_direct(
     # sinon par DOI, sinon par TITRE normalisé - capte les doublons sans DOI (préprints,
     # essais). Titres < 20 car. normalisés ignorés (faux positifs). Le try/except couvre
     # le cas d'une colonne title_norm absente (migration).
-    # Le titre ne réunit JAMAIS deux notices qui portent chacune un DOI, différent : dix
-    # éditions d'un « Avian influenza situation update » ou deux « Correction » de même
-    # libellé sont des travaux distincts, et la seconde arrivée était repliée sur la
-    # première sans laisser de trace. Un DOI manquant d'un côté, ou le même DOI, réunit
-    # encore (cf. _TITLE_MATCH_SQL et l'index uq_litdoc_title_norm_doi).
+    # Le titre ne réunit JAMAIS deux DOI de revue différents : dix éditions d'un « Avian
+    # influenza situation update » ou deux « Correction » de même libellé sont des travaux
+    # distincts, et la seconde arrivée était repliée sur la première sans laisser de trace.
+    # Un DOI manquant d'un côté, ou le même DOI, réunit encore (cf. _TITLE_MATCH_SQL et
+    # l'index uq_litdoc_title_norm_doi) ; deux DOI du même travail aussi (plus bas).
     _has_tn = bool(title_norm and len(title_norm) >= 20)
     _match_params = {"ctx": project_context, "eid": external_id,
                      "tn": title_norm, "has_tn": _has_tn,
@@ -1215,6 +1215,22 @@ def _ingest_doc_direct(
                 "SELECT id FROM literature_document "
                 "WHERE external_id = :eid AND project_context = :ctx LIMIT 1"
             ), {"eid": external_id, "ctx": project_context}).scalar()
+    if not existing and _has_tn and doi:
+        # Même titre long, autre DOI : un autre travail, SAUF si les deux DOI désignent le
+        # même (une version /v2, une figure figshare ou un préprint d'un article publié sous
+        # ce titre ; cf. documents.same_work_doi_match). Sans cela, chaque source qui
+        # renvoie une autre version ajoutait une notice, et l'étude comptait deux fois.
+        try:
+            with engine.connect() as _c:
+                _same_title = _c.execute(text("""
+                    SELECT id, doi FROM literature_document
+                    WHERE project_context = :ctx AND title_norm = :tn
+                      AND NULLIF(btrim(doi), '') IS NOT NULL
+                    ORDER BY id LIMIT 200
+                """), {"ctx": project_context, "tn": title_norm}).all()
+            existing = same_work_doi_match(doi, [(r[0], r[1]) for r in _same_title])
+        except Exception as _se:
+            logger.warning(f"_ingest_doc_direct même travail {doi}: {_se}")
     if existing:
         # ── La notice retrouvée peut être MEILLEURE que celle en base ────────
         # Le document existait, donc on le renvoyait tel quel et on jetait le reste.
