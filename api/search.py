@@ -17,7 +17,7 @@ from sqlalchemy import text, bindparam
 import lexical_search as _lex
 
 from .core import app, engine, logger, require_api_key
-from .documents import _strategy_is_degraded
+from .documents import _strategy_is_degraded, same_work_survivors
 from .scenario_store import _get_user_scenario_or_404, has_abstract_sql
 from llm_usage import model_for as _model
 
@@ -1280,14 +1280,19 @@ def _dedup_scenario_links(scenario_id: str) -> int:
     comble que ses trous, et le choix du canonique ne change pas (même règle que
     `scripts/_softdedup.py`, donc aucun glissement quand la dédup globale tournera).
 
-    Le titre ne réunit JAMAIS deux notices qui portent chacune un DOI, différent : deux
-    articles au titre générique (« Avian influenza update », dix éditions) sont deux
-    travaux, et la clé met le DOI en tête. Une notice SANS DOI, elle, rejoint la notice
-    de même titre long quand une seule valeur de DOI le porte dans le scénario : c'est la
-    règle de l'ingestion (`_ingest_doc_direct`), un DOI manquant ne sépare pas.
+    Le titre ne réunit JAMAIS deux DOI de revue différents : deux articles au titre
+    générique (« Avian influenza update », dix éditions) sont deux travaux. Mais la clé
+    est le DOI du TRAVAIL (`documents.same_work_survivors`) : la ponctuation finale, la
+    casse et les versions (/v1, /v2) ne séparent plus, et sous un même titre long un
+    préprint ou une figure déposée sur figshare rejoint la version publiée. Sur la
+    recherche HPAI du 12 octobre, 40 paires d'un même article entraient ainsi deux fois
+    dans le sous-ensemble pertinent, et l'extraction comptait l'étude deux fois. Une
+    notice SANS DOI rejoint le travail de même titre long quand il n'y en a qu'un : c'est
+    la règle de l'ingestion (`_ingest_doc_direct`), un DOI manquant ne sépare pas.
 
-    Le survivant reste le plus petit identifiant, comme la dédup globale. Les notices
-    sans résumé ne sortent plus du corpus avant la dédup : quand le survivant n'a pas de
+    Le survivant est la version publiée plutôt que le préprint ou le dépôt, puis le plus
+    petit identifiant, comme la dédup globale. Les notices sans résumé ne sortent plus du
+    corpus avant la dédup : quand le survivant n'a pas de
     résumé et qu'un de ses doublons en a un, le résumé est recopié sur le survivant (on
     comble un champ vide, on ne remplace rien), et son chunk titre+résumé reconstruit."""
     from .sources import _refresh_title_abstract_chunks  # lazy: sources is loaded after this module
@@ -1295,52 +1300,34 @@ def _dedup_scenario_links(scenario_id: str) -> int:
                "screening_notes", "screened_at", "reviewer_1_status", "reviewer_1_reason",
                "reviewer_2_status", "reviewer_2_reason", "kappa_final_status",
                "cluster_id", "cluster_label")
-    # La clé d'identité d'un article dans CE scénario, écrite une fois pour les trois
-    # instructions : DOI › DOI unique du même titre long (notice sans DOI) › external_id
-    # normalisé › titre normalisé ≥ 20 › id.
-    _KEYED = """
-        title_doi AS (
-            SELECT d.title_norm, MIN(lower(btrim(d.doi))) AS doi
-            FROM article_scenarios a
-            JOIN literature_document d ON d.id = a.document_id
-            WHERE a.scenario_id = :sid
-              AND NULLIF(btrim(d.doi), '') IS NOT NULL
-              AND d.title_norm IS NOT NULL AND length(d.title_norm) >= 20
-            GROUP BY d.title_norm
-            HAVING COUNT(DISTINCT lower(btrim(d.doi))) = 1
-        ),
-        keyed AS (
-            SELECT a.document_id,
-                   COALESCE(
-                     NULLIF(lower(btrim(d.doi)), ''),
-                     td.doi,
-                     NULLIF('ext:' || lower(btrim(
-                         regexp_replace(d.external_id, '^(pmid|pmcid):', '', 'i')
-                     )), 'ext:'),
-                     CASE WHEN d.title_norm IS NOT NULL
-                           AND length(d.title_norm) >= 20
-                          THEN 'tn:' || d.title_norm END,
-                     'id:' || a.document_id::text
-                   ) AS k
-            FROM article_scenarios a
-            JOIN literature_document d ON d.id = a.document_id
-            LEFT JOIN title_doi td
-              ON td.title_norm = d.title_norm AND NULLIF(btrim(d.doi), '') IS NULL
-            WHERE a.scenario_id = :sid
-        ),
+    # Le survivant de chaque doublon, calculé une fois en Python (la règle du travail ne
+    # s'écrit pas en SQL), puis servi aux trois instructions comme une table.
+    _RANKED = """
         ranked AS (
-            SELECT document_id, k, MIN(document_id) OVER (PARTITION BY k) AS keep_id
-            FROM keyed
+            SELECT x.document_id, x.keep_id
+            FROM jsonb_to_recordset(CAST(:pairs AS jsonb)) AS x(document_id bigint, keep_id bigint)
         )
     """
     try:
+        with engine.connect() as _r:
+            _rows = _r.execute(text("""
+                SELECT a.document_id AS id, d.doi, d.title_norm, d.external_id
+                FROM article_scenarios a
+                JOIN literature_document d ON d.id = a.document_id
+                WHERE a.scenario_id = :sid
+            """), {"sid": scenario_id}).mappings().all()
+        _survivor = same_work_survivors(_rows)
+        if not _survivor:
+            return 0
+        _p = {"sid": scenario_id, "pairs": json.dumps(
+            [{"document_id": d, "keep_id": k} for d, k in sorted(_survivor.items())])}
         with engine.begin() as _c:
             # ── Fusion AVANT suppression ─────────────────────────────────────
             # Un seul donneur par survivant : celui qui porte le plus d'information
             # (une décision de screening d'abord, puis un score de rerank, puis un
             # score de similarité), pour que deux doublons ne se contredisent pas.
             _c.execute(text(f"""
-                WITH {_KEYED},
+                WITH {_RANKED},
                 donor AS (
                     SELECT DISTINCT ON (r.keep_id) r.keep_id, a.*
                     FROM ranked r
@@ -1358,10 +1345,10 @@ def _dedup_scenario_links(scenario_id: str) -> int:
                 SET {", ".join(f"{c} = COALESCE(k.{c}, donor.{c})" for c in _MERGED)}
                 FROM donor
                 WHERE k.scenario_id = :sid AND k.document_id = donor.keep_id
-            """), {"sid": scenario_id})
+            """), _p)
             # ── Le résumé d'un doublon comble celui du survivant ─────────────
             _filled = _c.execute(text(f"""
-                WITH {_KEYED},
+                WITH {_RANKED},
                 src AS (
                     SELECT DISTINCT ON (r.keep_id) r.keep_id, d.abstract
                     FROM ranked r
@@ -1374,20 +1361,20 @@ def _dedup_scenario_links(scenario_id: str) -> int:
                 FROM src
                 WHERE k.id = src.keep_id AND NOT {has_abstract_sql('k')}
                 RETURNING k.id
-            """), {"sid": scenario_id}).scalars().all()
+            """), _p).scalars().all()
             if _filled:
                 _refresh_title_abstract_chunks(_c, _filled)
             n = _c.execute(text(f"""
-                WITH {_KEYED}
+                WITH {_RANKED}
                 DELETE FROM article_scenarios a
                 USING ranked r
                 WHERE a.scenario_id = :sid
                   AND a.document_id = r.document_id
                   AND r.document_id <> r.keep_id
-            """), {"sid": scenario_id}).rowcount
+            """), _p).rowcount
         if n:
             logger.info(f"Dédup intra-scénario {scenario_id}: {n} lien(s) doublon(s) "
-                        f"supprimé(s) (même DOI/PMID/titre).")
+                        f"supprimé(s) (même travail : DOI, PMID ou titre).")
         return n or 0
     except Exception as _e:
         logger.warning(f"Dédup intra-scénario {scenario_id}: {_e}")

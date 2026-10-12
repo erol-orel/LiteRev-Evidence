@@ -197,9 +197,12 @@ _PUB_TYPE_CASE = """CASE
 # Pydantic models
 # ─────────────────────────────────────────────────────────────────────────────
 def _normalize_doi(doi: str | None) -> str | None:
-    """Normalise un DOI en retirant les préfixes URL courants.
+    """Normalise un DOI en retirant les préfixes URL courants et la ponctuation finale.
     Exemples : 'https://doi.org/10.1016/...' → '10.1016/...'
                'http://dx.doi.org/10.1016/...' → '10.1016/...'
+               '10.1371/journal.pone.0073200.' → '10.1371/journal.pone.0073200'
+    Le point final vient d'une phrase recopiée (CORE en livre) : gardé, il faisait de
+    l'article et de sa copie deux travaux de DOI différents.
     """
     if not doi:
         return doi
@@ -207,8 +210,189 @@ def _normalize_doi(doi: str | None) -> str | None:
     for prefix in ("https://doi.org/", "http://doi.org/",
                    "https://dx.doi.org/", "http://dx.doi.org/"):
         if doi.lower().startswith(prefix):
-            return doi[len(prefix):]
-    return doi
+            doi = doi[len(prefix):]
+            break
+    return doi.rstrip(".,; ")
+
+
+# ── Un travail, plusieurs DOI ────────────────────────────────────────────────
+# Deux notices de même titre et de DOI différents sont deux travaux (dix éditions d'un
+# « situation update », deux « Correction ») : la dédup ne les réunit plus. Mais sur la
+# recherche HPAI du 12 octobre, la plupart des DOI différents d'un même titre n'étaient
+# pas deux travaux : un préprint et sa version publiée, des versions (/v1, /v2), des
+# figures déposées sur figshare sous le titre de l'article. Ils entraient chacun dans le
+# corpus et l'extraction comptait la même étude deux fois. Ce qui suit dit quand deux DOI
+# désignent le même travail ; deux DOI de revue de racines différentes restent deux.
+
+#: Les serveurs de préprints : un DOI ici est une version d'un travail, que sa version
+#: publiée (un DOI de revue de même titre) remplace.
+PREPRINT_DOI_PREFIXES = (
+    "10.1101/",     # bioRxiv, medRxiv
+    "10.64898/",    # bioRxiv, préfixe de 2025
+    "10.21203/",    # Research Square
+    "10.22541/",    # Authorea
+    "10.2139/",     # SSRN
+    "10.20944/",    # Preprints.org
+    "10.31219/",    # OSF Preprints
+    "10.31234/",    # PsyArXiv
+    "10.31222/",    # MetaArXiv
+    "10.32942/",    # EcoEvoRxiv
+    "10.26434/",    # ChemRxiv
+    "10.36227/",    # TechRxiv
+    "10.48550/",    # arXiv
+    "10.13140/",    # ResearchGate
+    "10.1590/scielopreprints.",
+    "10.2196/preprints.",
+)
+#: Les dépôts de données : figures, tableaux et jeux de données déposés sous le titre de
+#: l'article (figshare en dépose une par figure). Jamais un travail à part de l'article.
+DATA_DOI_PREFIXES = (
+    "10.6084/",     # figshare
+    "10.25387/",    # figshare (revues de la GSA)
+    "10.32920/",    # figshare (institutionnel)
+    "10.5281/",     # Zenodo
+    "10.5061/",     # Dryad
+    "10.17632/",    # Mendeley Data
+    "10.7910/",     # Harvard Dataverse
+    "10.3886/",     # ICPSR
+    "10.15482/",    # USDA Ag Data Commons
+)
+
+
+def doi_work_key(doi: str | None) -> str | None:
+    """Le DOI d'un TRAVAIL : normalisé, en minuscules, sans suffixe de version.
+
+    '10.21203/rs.2.14161/v2' et '/v1' → '10.21203/rs.2.14161' ; '...figshare.1528105.v1'
+    → '...figshare.1528105' ; les revues F1000 (10.12688) numérotent leurs versions en
+    '.1', '.2'. Un suffixe numérique sans « v » n'est PAS une version ailleurs : deux
+    éditions '…upd.1' et '…upd.2' restent deux travaux."""
+    d = _normalize_doi(doi)
+    if not d:
+        return None
+    d = d.strip().lower()
+    d = re.sub(r"(?:/v|\.v)\d+$", "", d)
+    if d.startswith("10.12688/"):
+        d = re.sub(r"\.\d+$", "", d)
+    return d or None
+
+
+def doi_kind(doi: str | None) -> str | None:
+    """« journal », « preprint » ou « data » ; None sans DOI."""
+    d = doi_work_key(doi)
+    if not d:
+        return None
+    if d.startswith(DATA_DOI_PREFIXES):
+        return "data"
+    if d.startswith(PREPRINT_DOI_PREFIXES):
+        return "preprint"
+    return "journal"
+
+
+def same_work_doi_match(doi: str | None, candidates) -> int | None:
+    """L'id, parmi `candidates` ([(id, doi)] de même titre long), de la notice qui porte
+    le même travail que `doi`, ou None.
+
+    Même DOI de travail (ponctuation, casse, version) : la même notice. Un préprint ou un
+    dépôt de données rejoint la version publiée quand le titre n'en a qu'UNE. Un DOI de
+    revue n'est jamais replié sur un préprint : il garde sa notice, et la dédup du
+    scénario garde la version publiée (`same_work_survivors`)."""
+    key = doi_work_key(doi)
+    if not key:
+        return None
+    rows = [(cid, doi_work_key(cdoi)) for cid, cdoi in candidates]
+    for cid, ckey in rows:
+        if ckey == key:
+            return cid
+    if doi_kind(key) == "journal":
+        return None
+    journals: dict[str, int] = {}
+    for cid, ckey in sorted(rows):
+        if ckey and doi_kind(ckey) == "journal":
+            journals.setdefault(ckey, cid)
+    return next(iter(journals.values())) if len(journals) == 1 else None
+
+
+_KIND_RANK = {"journal": 0, "preprint": 1, "data": 2, None: 3}
+
+
+def _external_key(external_id: str | None) -> str | None:
+    """L'external_id sans préfixe pmid/pmcid, en minuscules (la clé de la dédup SQL)."""
+    if not external_id:
+        return None
+    k = re.sub(r"^(pmid|pmcid):", "", external_id, flags=re.I).strip().lower()
+    return k or None
+
+
+def same_work_survivors(records) -> dict[int, int]:
+    """{id: id du survivant} pour chaque notice qui double une autre notice du lot.
+
+    `records` : des dict id, doi, title_norm, external_id (les liens d'un scénario). Une
+    clé par notice, comme la dédup SQL d'avant (DOI › DOI du même titre long › external_id
+    › titre long › id), mais le DOI y est celui du TRAVAIL :
+      - même DOI de travail : ponctuation, casse, préfixe d'URL, version ;
+      - sous un même titre long (20 caractères normalisés au moins), les préprints et les
+        dépôts de données rejoignent la version publiée quand il n'y en a qu'une, et se
+        rejoignent entre eux quand il n'y en a aucune ;
+      - une notice sans DOI rejoint le travail de même titre long quand il n'y en a qu'un.
+    Deux DOI de revue de racines différentes restent deux travaux, même titre ou non.
+    Le survivant est la version publiée, puis le préprint, puis le dépôt, puis la notice
+    sans DOI ; à rang égal le plus petit id, la règle de `scripts/_softdedup.py`."""
+    from collections import defaultdict
+
+    recs = [r for r in records if r.get("id") is not None]
+    parent: dict[str, str] = {}
+
+    def find(x: str) -> str:
+        parent.setdefault(x, x)
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def union(a: str, b: str) -> None:
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[max(ra, rb)] = min(ra, rb)
+
+    wk = {r["id"]: doi_work_key(r.get("doi")) for r in recs}
+    by_title: dict[str, set[str]] = defaultdict(set)
+    for r in recs:
+        tn = r.get("title_norm") or ""
+        if wk[r["id"]]:
+            find("w:" + wk[r["id"]])
+            if len(tn) >= 20:
+                by_title[tn].add(wk[r["id"]])
+    for keys in by_title.values():
+        journals = sorted(k for k in keys if doi_kind(k) == "journal")
+        others = sorted(k for k in keys if doi_kind(k) != "journal")
+        anchor = journals[0] if len(journals) == 1 else (others[0] if not journals and others else None)
+        if anchor:
+            for k in others:
+                union("w:" + anchor, "w:" + k)
+
+    def key(r: dict) -> str:
+        if wk[r["id"]]:
+            return find("w:" + wk[r["id"]])
+        tn = r.get("title_norm") or ""
+        if len(tn) >= 20:
+            roots = {find("w:" + k) for k in by_title.get(tn, ())}
+            if len(roots) == 1:
+                return next(iter(roots))
+        ext = _external_key(r.get("external_id"))
+        if ext:
+            return "ext:" + ext
+        return "tn:" + tn if len(tn) >= 20 else f"id:{r['id']}"
+
+    groups: dict[str, list[dict]] = defaultdict(list)
+    for r in recs:
+        groups[key(r)].append(r)
+    out: dict[int, int] = {}
+    for members in groups.values():
+        if len(members) < 2:
+            continue
+        keep = min(members, key=lambda r: (_KIND_RANK[doi_kind(wk[r["id"]])], r["id"]))["id"]
+        out.update({r["id"]: keep for r in members if r["id"] != keep})
+    return out
 
 
 def _normalize_title(title: str | None) -> str:
