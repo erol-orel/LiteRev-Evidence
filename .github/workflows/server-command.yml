@@ -19,7 +19,7 @@ on:
           - logs                # 100 dernières lignes du service
           - deploy              # bash deploy.sh (déploiement complet)
           - pipeline-status     # état du pipeline fulltext + stats DB
-          - set-s2-key          # écrit le secret SEMANTIC_SCHOLAR_API_KEY dans /etc/literev-api.env + restart
+          - set-s2-key          # écrit SEMANTIC_SCHOLAR_API_KEY s'il est visible ici (normalement installé par deploy.yml)
           - custom              # commande libre (champ custom_command)
       custom_command:
         description: "Commande libre (utilisée seulement si command = custom)"
@@ -65,7 +65,7 @@ jobs:
             # Écrite dans le fichier canonique (env_files.CANONICAL), puis redémarrage :
             # le processus lit l'environnement au démarrage. ATTENTION : un redémarrage
             # coupe les recherches en cours (relancées au démarrage).
-            set-s2-key) echo 'cmd=set -e; if [ -z "${SEMANTIC_SCHOLAR_API_KEY:-}" ]; then echo "le secret SEMANTIC_SCHOLAR_API_KEY n'"'"'est pas défini dans le dépôt (Settings > Secrets and variables > Actions)"; exit 1; fi; f=/etc/literev-api.env; if grep -q "^SEMANTIC_SCHOLAR_API_KEY=" "$f"; then sed -i "s|^SEMANTIC_SCHOLAR_API_KEY=.*|SEMANTIC_SCHOLAR_API_KEY=$SEMANTIC_SCHOLAR_API_KEY|" "$f"; else printf "SEMANTIC_SCHOLAR_API_KEY=%s\n" "$SEMANTIC_SCHOLAR_API_KEY" >> "$f"; fi; systemctl restart literev-api; sleep 3; curl -fsS http://localhost:8000/health >/dev/null; echo "SEMANTIC_SCHOLAR_API_KEY écrite dans $f, service redémarré"' >> "$GITHUB_OUTPUT" ;;
+            set-s2-key) echo 'cmd=set -e; if [ -z "${SEMANTIC_SCHOLAR_API_KEY:-}" ]; then echo "SEMANTIC_SCHOLAR_API_KEY est vide ici : ce workflow tourne dans l'"'"'environnement production-admin, et la clé est un secret de l'"'"'environnement production, que chaque déploiement installe (deploy.yml)"; exit 1; fi; f=/etc/literev-api.env; if grep -q "^SEMANTIC_SCHOLAR_API_KEY=" "$f"; then sed -i "s|^SEMANTIC_SCHOLAR_API_KEY=.*|SEMANTIC_SCHOLAR_API_KEY=$SEMANTIC_SCHOLAR_API_KEY|" "$f"; else printf "SEMANTIC_SCHOLAR_API_KEY=%s\n" "$SEMANTIC_SCHOLAR_API_KEY" >> "$f"; fi; systemctl restart literev-api; sleep 3; curl -fsS http://localhost:8000/health >/dev/null; echo "SEMANTIC_SCHOLAR_API_KEY écrite dans $f, service redémarré"' >> "$GITHUB_OUTPUT" ;;
             custom)
               if [ -z "$CUSTOM_CMD" ]; then
                 echo "custom_command est vide" >&2; exit 1
