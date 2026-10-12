@@ -28,6 +28,8 @@ def test_places_fold_to_plain_ascii_words():
     assert G.fold("Baden-Württemberg, Germany") == "baden wurttemberg germany"
     assert G.fold("Valle d'Aosta") == "valle d aosta" and G.fold(None) == ""
     assert G.fold("Trinidad & Tobago") == "trinidad and tobago"                              # "&" joins a list, as "and"
+    assert G.fold("Hong Kong; China") == "hong kong and china"                                  # so does ";"
+    assert G.fold("Valle d\u2019Aosta") == G.fold("Valle d'Aosta")                               # a typographic apostrophe
 
 
 def test_every_country_with_a_nuts_code_is_known_and_two_codes_differ_from_iso():
@@ -43,10 +45,30 @@ def test_a_country_is_recognised_in_several_languages():
         assert _r(place)["country"] == iso, place
 
 
-def test_turkey_the_bird_is_never_a_country():
+def test_turkey_the_bird_is_not_turkiye_the_country():
     assert _r("a commercial farm keeping turkeys and ducks")["country"] is None
     assert _r("Turkey")["country"] is None
     assert _r("Ankara, Türkiye")["country"] == "TR" and _r("Republic of Turkey")["country"] == "TR"
+    # Written as a country, it is one: the 2006 human cases of Dogubeyazit and Van were unresolved.
+    assert _r("Dogubeyazit and Van, Turkey")["country"] == "TR" and _r("Dogubayazit and Van, Eastern Turkey")["country"] == "TR"
+    assert _r("Azerbaijan, Indonesia, Pakistan and Turkey")["several_countries"] is True
+    # Still the bird: first word, a bird word before it, any word after it.
+    for place, iso in (("Turkey farms, Minnesota", "US"), ("commercial Turkey farms, Minnesota", "US"), ("Iowa, Turkey Creek", "US"),
+                       ("wild Turkey, Ohio", "US")):
+        assert _r(place)["country"] == iso, place
+
+
+def test_a_semicolon_lists_places_and_a_typographic_apostrophe_is_an_apostrophe():
+    assert _r("Hong Kong; China")["several_countries"] is True and _r("Hong Kong, China")["country"] == "HK"
+    assert _r("Lao People\u2019s Democratic Republic")["country"] == "LA"
+
+
+def test_the_cities_and_places_named_in_the_hpai_scenarios_resolve():
+    for place, iso in (("Baiyin City", "CN"), ("Yangquan", "CN"), ("Nanchong City", "CN"), ("Zhaoqing", "CN"), ("Yangjiang City", "CN"),
+                       ("Taipei City", "TW"), ("Kowloon", "HK"), ("Inner Niger Delta", "ML"), ("West Azerbaijan Province", "IR"),
+                       ("Jamaica Bay, New York", "US")):
+        assert _r(place)["country"] == iso, place
+    assert _r("Jordan Valley")["reason"] == "multi_country_area" and _r("Bermuda grass pastures")["country"] is None
 
 
 def test_two_countries_are_several_countries_not_a_guess():

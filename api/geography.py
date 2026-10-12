@@ -63,9 +63,13 @@ except Exception as _e:                                       # noqa: BLE001 - n
 
 
 def fold(s: Any) -> str:
-    """ASCII, lower case, "&" as "and" (it joins a list), anything else that is not a letter or a
-    digit as one space."""
-    t = unicodedata.normalize("NFKD", str(s or "")).encode("ascii", "ignore").decode().lower().replace("&", " and ")
+    """ASCII, lower case, "&" and ";" as "and" (they join a list: "Hong Kong; China" is two places,
+    "Hong Kong, China" one), anything else that is not a letter or a digit as one space. A
+    typographic apostrophe separates like a plain one ("Lao People’s Democratic Republic"
+    folds as "Lao People's ..." does, where it was read as "peoples")."""
+    t = re.sub("[\u2018\u2019\u02bc]", "'", str(s or ""))
+    t = unicodedata.normalize("NFKD", t).encode("ascii", "ignore").decode().lower()
+    t = t.replace("&", " and ").replace(";", " and ")
     return re.sub(r"[^a-z0-9]+", " ", t).strip()
 
 
@@ -236,7 +240,7 @@ _SUBDIVISIONS: dict[str, tuple[str, ...]] = {
            "South Dakota", "Tennessee", "Texas", "Utah", "Vermont", "Virginia", "Washington", "West Virginia", "Wisconsin",
            "Wyoming", "District of Columbia",
            # not states, but holding another country's name (England, Jersey, Yukon)
-           "New England", "Jersey City", "Jersey Shore", "Yukon-Kuskokwim Delta", "Yukon Delta", "Yukon Flats"),
+           "New England", "Jersey City", "Jersey Shore", "Yukon-Kuskokwim Delta", "Yukon Delta", "Yukon Flats", "Jamaica Bay"),
     "CA": ("Alberta", "British Columbia", "Manitoba", "New Brunswick", "Newfoundland and Labrador", "Newfoundland", "Labrador",
            "Nova Scotia", "Ontario", "Prince Edward Island", "Quebec", "Saskatchewan", "Northwest Territories", "Nunavut", "Yukon"),
     # The provinces, autonomous regions and municipalities (Hong Kong, Macao and Taiwan have their own
@@ -248,7 +252,10 @@ _SUBDIVISIONS: dict[str, tuple[str, ...]] = {
            "Shaoxing", "Jinhua", "Nanjing", "Suzhou", "Wuxi", "Changzhou", "Yangzhou", "Yancheng", "Wuhan", "Changsha", "Chengdu",
            "Kunming", "Fuzhou", "Xiamen", "Quanzhou", "Jinan", "Qingdao", "Yantai", "Shenyang", "Dalian", "Harbin", "Changchun",
            "Hefei", "Nanchang", "Zhengzhou", "Shijiazhuang", "Taiyuan", "Hohhot", "Xi'an", "Xian", "Lanzhou", "Xining", "Yinchuan",
-           "Urumqi", "Lhasa", "Nanning", "Guilin", "Haikou", "Sanya", "Guiyang"),
+           "Urumqi", "Lhasa", "Nanning", "Guilin", "Haikou", "Sanya", "Guiyang",
+           # named as study sites in the three HPAI scenarios (12 October 2026) and left unresolved
+           "Baiyin", "Yangquan", "Nanchong", "Zhaoqing", "Yangjiang"),
+    "TW": ("Taipei", "Kaohsiung", "Taichung", "Tainan"), "HK": ("Kowloon",),
     "AU": ("New South Wales", "Queensland", "Tasmania", "Northern Territory", "Australian Capital Territory", "Western Australia",
            "South Australia"),
     # Not subdivisions, but places whose name holds another country's, or a region's, which they
@@ -256,7 +263,9 @@ _SUBDIVISIONS: dict[str, tuple[str, ...]] = {
     "FR": ("Maine-et-Loire", "French Antilles", "French West Indies"),
     "MX": ("Baja California", "Baja California Sur", "Gulf of California"),
     "GR": ("Central Macedonia", "Western Macedonia", "West Macedonia", "Eastern Macedonia and Thrace", "East Macedonia and Thrace"),
-    "NG": ("Niger Delta", "Niger State", "Benin City"),
+    "NG": ("Niger Delta", "Niger State", "Benin City"), "ML": ("Inner Niger Delta",),
+    "IR": ("West Azerbaijan", "East Azerbaijan"), "BE": ("Luxembourg Province", "Province of Luxembourg"),
+    "ID": ("West Timor",), "ZA": ("Lake St Lucia", "Lake Saint Lucia", "St Lucia Estuary"), "GT": ("Antigua Guatemala",),
     "PG": ("New Ireland",),
 }
 #: A name that is a place in more than one country: the country it is taken in by default, then
@@ -281,7 +290,7 @@ _AREAS = (
     "Baltic states", "Baltic Sea", "Balkans", "Iberian Peninsula", "Benelux", "British Isles", "Mediterranean", "Black Sea",
     "North Sea", "Wadden Sea", "Caucasus", "Strait of Gibraltar",
     "Africa", "Sub-Saharan Africa", "Sahel", "Sahara", "Maghreb", "Horn of Africa", "Great Lakes", "Lake Victoria", "Lake Malawi",
-    "Lake Chad", "Gulf of Guinea", "Niger River", "River Niger", "Senegal River", "Congo Basin",
+    "Lake Chad", "Gulf of Guinea", "Niger River", "River Niger", "Senegal River", "Congo Basin", "Jordan Valley", "Jordan River",
     "Asia", "Southeast Asia", "South-East Asia", "South Asia", "East Asia", "Central Asia", "Western Asia", "Middle East",
     "Near East", "Far East", "Levant", "Arabian Peninsula", "Persian Gulf", "Arabian Gulf", "Gulf states", "Gulf Cooperation Council",
     "GCC", "Indian subcontinent", "Himalaya", "Himalayas", "Indochina", "Indo-China", "Greater Mekong Subregion", "Mekong region",
@@ -297,7 +306,8 @@ _AREAS = (
 #: nothing, and so is the name inside them.
 _NOT_PLACES = (
     "Turkey",                                                # a bird, in this literature ("Türkiye" is the country)
-    "Guinea fowl", "Guinea fowls", "Guinea pig", "Guinea pigs", "Guinea worm", "Canada goose", "Canada geese",
+    "Guinea fowl", "Guinea fowls", "Guinea pig", "Guinea pigs", "Guinea worm", "Guinea grass", "Bermuda grass", "Canada goose",
+    "Canada geese",
     "Jersey cattle", "Jersey cow", "Jersey cows", "Jersey Giant", "Jersey Giants", "Guernsey cattle", "Guernsey cow", "Guernsey cows",
     "Rhode Island Red", "Rhode Island Reds", "Rhode Island White", "Rhode Island Whites", "New Hampshire Red", "New Hampshire Reds",
     "Hong Kong flu", "Hong Kong influenza", "cochon d'Inde", "cochons d'Inde",
@@ -380,6 +390,14 @@ def _scan(words: list[str]) -> list[_Hit]:
         else:
             i += 1
     return hits
+
+
+#: "Turkey" is the country when the place is written that way: a capital, after a comma, a
+#: semicolon, a bracket, "and" or a compass word, and nothing after it but punctuation ("Van,
+#: Turkey", "eastern Turkey", "Pakistan and Turkey"). "Turkey" alone, "Turkey farms" or "wild
+#: Turkey" stay the bird: the place resolves as if the word were not there.
+_TURKEY_THE_COUNTRY = re.compile(r"(?:[,;(]|\band|(?i:\b(?:eastern|western|northern|southern|central|north|south|east|west)))"
+                                 r"\s*Turkey\s*(?:[,;.)]|$)")
 
 
 def _countries_named(folded: str, hint: str | None) -> tuple[set[str], bool]:
@@ -517,6 +535,8 @@ def resolve_location(place: Any, article_country: Any = None, index: NutsIndex |
     hint = _COUNTED_IN_ISO.get(hint, hint)                         # Reunion (RE) is counted in France
     hint = hint if hint in COUNTRY_NAME else None
     named, area = _countries_named(folded, hint) if folded else (set(), False)
+    if isinstance(place, str) and _TURKEY_THE_COUNTRY.search(place):
+        named = named | {"TR"}
     out: dict[str, Any] = {"country": None, "nuts0": None, "nuts1": None, "nuts2": None, "nuts3": None, "level": None,
                            "method": "unresolved", "several_countries": False, "reason": None}
     if len(named) > 1:
