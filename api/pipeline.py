@@ -459,10 +459,15 @@ def _note_oa_link(doc_id: int, url: str) -> None:
         logger.debug(f"oa_url doc {doc_id}: {_e}")
 
 
+#: Le lien de téléchargement de CORE, que sa notice porte en `url` : le PDF en accès ouvert.
+_CORE_DOWNLOAD_RE = re.compile(r"^https?://core\.ac\.uk/download/", re.I)
+
+
 def _fulltext_of(row) -> tuple[str | None, str | None, list[str]]:
     """Le texte intégral en accès ouvert d'un article, sa provenance, et pourquoi chaque
     source a échoué : PMC (Europe PMC puis NCBI, en XML), Unpaywall, bioRxiv/medRxiv,
-    Semantic Scholar, OpenAlex (PDF lus par pdftotext)."""
+    Semantic Scholar, OpenAlex, puis la copie de CORE pour une notice venue de CORE (PDF lus
+    par pdftotext)."""
     _ext_id = row["external_id"] or ""
     _doi = _normalize_doi(row["doi"] or "") or ""
     _pmid = row["pmid"] or ""
@@ -551,8 +556,11 @@ def _fulltext_of(row) -> tuple[str | None, str | None, list[str]]:
 
     # Source 4 : Semantic Scholar
     if not _fulltext:
+        # Une notice venue de Semantic Scholar sans DOI ni PMID se cherche par son propre
+        # identifiant (`s2:<paperId>`), que l'API lit tel quel.
         _ss_id = (f"DOI:{_doi}" if _doi else f"PMID:{_pmid}" if _pmid
-                  else f"PMCID:{_ext_id}" if _ext_id and _ext_id.upper().startswith("PMC") else None)
+                  else f"PMCID:{_ext_id}" if _ext_id and _ext_id.upper().startswith("PMC")
+                  else _ext_id[3:] if _ext_id.startswith("s2:") and len(_ext_id) > 3 else None)
         if _ss_id:
             # La clé de Semantic Scholar quand le serveur en a une, comme la recherche :
             # sans elle, l'appel puise dans le quota anonyme, souvent épuisé (429).
@@ -601,6 +609,19 @@ def _fulltext_of(row) -> tuple[str | None, str | None, list[str]]:
                 _fail.append(f"openalex:parse_error:{_oa_e}")
         elif _r_oa:
             _fail.append(f"openalex:http_{_r_oa.status_code}")
+
+    # Source 6 : la copie que CORE a moissonnée, pour une notice venue de CORE. CORE agrège
+    # des dépôts en accès ouvert et son lien de téléchargement est le PDF lui-même ; ces
+    # notices n'ont souvent ni DOI ni PMID, si bien qu'aucune source ci-dessus ne les
+    # trouvait (41 des 536 articles pertinents sans texte de HPAI_last, le 12 octobre 2026).
+    _own_url = str((row.get("url") if hasattr(row, "get") else None) or "")
+    if not _fulltext and _CORE_DOWNLOAD_RE.match(_own_url):
+        _fulltext = _extract_pdf_text_ft(_own_url)
+        if _fulltext and len(_fulltext) > 500:
+            _source_used = "core"
+        else:
+            _fulltext = None
+            _fail.append("core:pdf_empty")
     return (_fulltext if _source_used else None), _source_used, _fail
 
 
@@ -636,7 +657,7 @@ def rows_without_fulltext(scenario_id: str, scope: str, limit: int | None = None
     donnée (`relevant` : le sous-ensemble pertinent, `all` : tout le scénario)."""
     with engine.connect() as conn:
         return [dict(r) for r in conn.execute(text(f"""
-            SELECT ld.id, ld.external_id, ld.doi, ld.pmid, ld.source
+            SELECT ld.id, ld.external_id, ld.doi, ld.pmid, ld.source, ld.url
             FROM literature_document ld
             JOIN article_scenarios asn ON asn.document_id = ld.id AND asn.scenario_id = :sid
             WHERE ld.project_context = 'literev'

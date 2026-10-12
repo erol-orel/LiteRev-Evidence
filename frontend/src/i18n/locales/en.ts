@@ -1139,7 +1139,7 @@ export const en: Translations = {
         "Fills in study type, sample size, country and risk of bias via LLM.",
       fulltextLabel: "Open-access full texts",
       fulltextDesc:
-        "Downloads the open-access text of each article that has none (PMC, Europe PMC, Unpaywall, bioRxiv/medRxiv, Semantic Scholar, OpenAlex) and stores it. The next extraction reads the articles that gained a text again.",
+        "Downloads the open-access text of each article that has none (PMC, Europe PMC, Unpaywall, bioRxiv/medRxiv, Semantic Scholar, OpenAlex, CORE) and stores it. The next extraction reads the articles that gained a text again.",
       title: "LLM Enrichment",
       subtitle: "Run automatic enrichments across the whole corpus",
       subtitleScenario: "Run the enrichments on this scenario",

@@ -1139,7 +1139,7 @@ export const fr = {
         "Complète le type d'étude, la taille d'échantillon, le pays, le risque de biais via LLM.",
       fulltextLabel: "Textes intégraux en accès ouvert",
       fulltextDesc:
-        "Télécharge le texte en accès ouvert de chaque article qui n'en a pas (PMC, Europe PMC, Unpaywall, bioRxiv/medRxiv, Semantic Scholar, OpenAlex) et le range. La prochaine extraction relit les articles qui ont gagné un texte.",
+        "Télécharge le texte en accès ouvert de chaque article qui n'en a pas (PMC, Europe PMC, Unpaywall, bioRxiv/medRxiv, Semantic Scholar, OpenAlex, CORE) et le range. La prochaine extraction relit les articles qui ont gagné un texte.",
       title: "Enrichissement LLM",
       subtitle: "Lancez les enrichissements automatiques sur l'ensemble du corpus",
       subtitleScenario: "Lancez les enrichissements sur ce scénario",
