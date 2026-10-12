@@ -89,6 +89,20 @@ def test_wrong_language_and_broken_prisma_arithmetic_fail():
     assert levels["clustering language"] == "FAIL" and levels["prisma arithmetic"] == "FAIL"
 
 
+def test_kept_links_count_in_the_arithmetic_and_an_incomplete_search_is_flagged():
+    """Links a search did not match but kept (an incomplete federation, a reviewer decision)
+    are among the screened: without their lines every such scenario read as a FAIL."""
+    p = _payloads(corpus=200, card=200, screened=200)
+    p[f"/user-scenarios/{SID}/prisma"]["identification"].update(
+        {"removed_not_matching": 15, "kept_previous_links": 9, "kept_reviewed_links": 3,
+         "kept_previous_failed_sources": ["europepmc", "preprints"]})
+    rc, levels = _run(p)
+    assert rc == 0 and levels["prisma arithmetic"] == "OK"
+    assert levels["prisma kept from the previous search"] == "WARN"
+    p[f"/user-scenarios/{SID}/prisma"]["identification"]["kept_reviewed_links"] = 4
+    assert _run(p)[1]["prisma arithmetic"] == "FAIL"
+
+
 def test_missing_endpoint_is_reported_not_raised():
     p = _payloads(corpus=200, card=200, screened=200)
     del p[f"/user-scenarios/{SID}/prisma"]
