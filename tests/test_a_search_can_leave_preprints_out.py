@@ -120,10 +120,11 @@ def test_biorxiv_and_medrxiv_are_no_longer_searched_directly():
     for gone in ("_parse_biorxiv", "_live_fetch_biorxiv", "_live_fetch_medrxiv",
                  "_live_fetch_preprint_server"):
         assert not hasattr(S, gone), f"{gone} is dead code"
-    # The full-text step still asks the bioRxiv API for a preprint, by DOI.
-    from api.pipeline import _run_user_scenario_full_pipeline
+    # The full-text download still asks the bioRxiv API for a preprint, by DOI (it is the
+    # module-level `_fulltext_of` now, shared by the pipeline and the enrichment panel).
+    from api.pipeline import _fulltext_of
     import inspect
-    assert "api.biorxiv.org/details/{_srv}/{_doi}/na/json" in inspect.getsource(_run_user_scenario_full_pipeline)
+    assert "api.biorxiv.org/details/{_srv}/{_doi}/na/json" in inspect.getsource(_fulltext_of)
 
 
 def test_the_preprint_facet_ranks_by_relevance_and_says_its_total():
