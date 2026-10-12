@@ -137,3 +137,40 @@ describe("PooledPanel diseases", () => {
     expect(screen.queryByText("(not stated)")).toBeNull();
   });
 });
+
+// ── Both at once: a pool that merged spellings and holds rows that split a sample ──
+const GROUP_SPELT = [{ spelling: "HPAI H5N1", n: 2 }, { spelling: "H5N1", n: 1 }];
+const CMP_SPELT = [{ spelling: "HPAI H5N1", n: 2 }, { spelling: "Influenza A(H5N1)", n: 1 }];
+const both: PooledResponse = {
+  ...composed,
+  pooled: composed.pooled.map((g) => ({ ...g, disease_spellings: GROUP_SPELT })),
+  comparisons: composed.comparisons.map((c) => ({ ...c, disease_spellings: CMP_SPELT })),
+};
+
+describe("PooledPanel composition and diseases together", () => {
+  it("marks the composition beside the label and gives the spellings beside the disease", async () => {
+    renderPanel("en", both);
+    const line = await screen.findByText("As written: HPAI H5N1 (2) · H5N1 (1)");
+    expect(line.parentElement!.firstChild?.textContent).toBe("A(H5N1)");
+    expect(screen.getByText(/composition of the sample in 2 of 3/)).toBeInTheDocument();
+    // The comparison names its disease, with its own spellings on hover, and the papers it left out.
+    expect(screen.getByTitle("As written: HPAI H5N1 (2) · Influenza A(H5N1) (1)")).toHaveTextContent("A(H5N1)");
+    expect(screen.getByText(/3 papers, 2 left out as the composition of one sample/)).toBeInTheDocument();
+    expect(screen.getByText(new RegExp(`${P.excl.composition} 5\\.`))).toBeInTheDocument();
+    // Opened, the label names the studies that split a sample and gives its spellings again.
+    fireEvent.click(screen.getByText(/sex gender > male/));
+    expect(screen.getByText("Give the composition of their sample, not a group with its cases: Whitlow 2025, Charania 2025.")).toBeInTheDocument();
+    expect(screen.getAllByText("As written: HPAI H5N1 (2) · H5N1 (1)")).toHaveLength(2);
+    // Opened, the comparison gives its own spellings under its forest plot.
+    fireEvent.click(screen.getByText(/3 papers, 2 left out/));
+    expect(screen.getByText("As written: HPAI H5N1 (2) · Influenza A(H5N1) (1)")).toBeInTheDocument();
+  });
+
+  it("says both in French", async () => {
+    renderPanel("fr", both);
+    await screen.findByText("Tel qu'écrit : HPAI H5N1 (2) · H5N1 (1)");
+    expect(screen.getByText(/composition de l'échantillon dans 2 sur 3/)).toBeInTheDocument();
+    expect(screen.getByText(/3 articles, 2 écartés comme composition d'un échantillon/)).toBeInTheDocument();
+    expect(screen.getByTitle("Tel qu'écrit : HPAI H5N1 (2) · Influenza A(H5N1) (1)")).toHaveTextContent("A(H5N1)");
+  });
+});

@@ -62,21 +62,25 @@ export function mergedSpellings(disease: string | null, spellings: DiseaseSpelli
   return sp.length === 1 && foldDisease(sp[0].spelling) === foldDisease(disease) ? [] : sp;
 }
 
-/** "HPAI H5N1 (5) · H5N1 (3)": each spelling with the number of studies that wrote it. */
-export function spellingsText(spellings: DiseaseSpelling[]): string {
-  return spellings.map((s) => `${s.spelling} (${s.n})`).join(" · ");
+/** "HPAI H5N1 (5) · H5N1 (3)": each spelling with the number of studies that wrote it. A table
+ *  cell joins them with "; ", as the server's exports do. */
+export function spellingsText(spellings: DiseaseSpelling[], sep = " · "): string {
+  return spellings.map((s) => `${s.spelling} (${s.n})`).join(sep);
 }
 
 /** The pooled table as CSV. `k_composition` says how many of the k studies give the composition
- *  of their sample: a file read away from the panel must not pass a share of men for a rate. */
+ *  of their sample: a file read away from the panel must not pass a share of men for a rate.
+ *  `disease_as_written`, last, gives the spellings each pool merged under its disease, as the
+ *  server's pooled CSV does. */
 export function csvOfPooled(groups: PooledGroup[]): string {
   const q = (s: string | null) => `"${(s ?? "").replace(/"/g, '""')}"`;
   const head = ["sheet", "group", "label", "disease", "k", "n_total", "events_total", "pooled_p", "ci_low", "ci_high",
-    "pi_low", "pi_high", "I2", "tau2", "heterogeneity", "k_composition"];
+    "pi_low", "pi_high", "I2", "tau2", "heterogeneity", "k_composition", "disease_as_written"];
   const rows = groups.map((g) => [
     g.sheet, g.group, g.label, g.disease ?? "", g.k, g.n_total, g.events_total,
     g.pooled?.p ?? "", g.pooled?.ci_low ?? "", g.pooled?.ci_high ?? "", g.pooled?.pi_low ?? "", g.pooled?.pi_high ?? "",
     g.heterogeneity?.I2 ?? "", g.heterogeneity?.tau2 ?? "", g.heterogeneity?.band ?? "", g.k_composition ?? "",
+    spellingsText(g.disease_spellings ?? [], "; "),
   ].map((v) => (typeof v === "string" && v !== "" ? q(v) : v)).join(","));
   return [head.join(","), ...rows].join("\n");
 }

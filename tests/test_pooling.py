@@ -307,6 +307,80 @@ def test_a_paper_s_count_of_cases_is_kept_over_its_table_of_who_was_studied():
     assert (female["n"], female["composition"]) == (225, True)
 
 
+# ── The composition of a sample, within one disease however spelt ───────────
+def test_one_row_per_paper_label_and_disease_a_count_of_cases_first_then_the_largest_population():
+    # One paper writes A(H5N1) four ways: its table of who was studied (142 men and 81 women among
+    # 225) and its cases among the men and the women (3 of 142, 2 of 81) are all one disease. The
+    # counts of cases are kept though their populations are smaller, and the two others dropped.
+    rows = [_row(1, 142, 225, disease="H5N1"), _row(1, 81, 225, label="female", disease="HPAI H5N1"),
+            _row(1, 3, 142, disease="Influenza A(H5N1)"), _row(1, 2, 81, label="female", disease="HPAI A(H5N1)")]
+    for aid in range(2, 4):
+        rows += [_row(aid, 4 + aid, 30, disease="H5N1"), _row(aid, 3 + aid, 32, label="female", disease="avian influenza A (H5N1)")]
+    groups, dropped = P.build_groups(rows)
+    assert {k[3] for k in groups} == {"A(H5N1)"} and dropped == 2
+    kept = {k[2]: next(r for r in items if r["article_id"] == 1) for k, items in groups.items()}
+    assert (kept["male"]["x"], kept["male"]["n"], kept["male"]["composition"]) == (3, 142, False)
+    assert (kept["female"]["x"], kept["female"]["n"], kept["female"]["composition"]) == (2, 81, False)
+    (cmp_,) = P.pooled_comparisons(rows, SEX)
+    assert (cmp_["disease"], cmp_["k"], cmp_["excluded_composition"]) == ("A(H5N1)", 3, 0)
+    assert next(s for s in cmp_["studies"] if s["article_id"] == 1)["x1"] == 3
+    # Two rows alike on that score: the larger population, whatever the spelling of either.
+    same = [_row(1, 3, 20, disease="H5N1"), _row(1, 6, 50, disease="HPAI H5N1"), _row(1, 5, 40, disease="Influenza A(H5N1)")]
+    groups, dropped = P.build_groups(same)
+    ((only,),) = groups.values()
+    assert dropped == 2 and (only["n"], only["composition"]) == (50, False)
+
+
+def test_rows_of_two_diseases_that_share_a_denominator_are_not_one_sample():
+    # 142 men and 83 women among 225 add up, but the men's row is A(H5N1) and the women's A(H9N2):
+    # two diseases, two samples, whether the pools keep diseases apart or merge them on request.
+    two = [_row(1, 142, 225, disease="HPAI H5N1"), _row(1, 83, 225, label="female", disease="H9N2")]
+    # The same rows with one disease written two ways are one sample split by sex.
+    one = [_row(1, 142, 225, disease="HPAI H5N1"), _row(1, 83, 225, label="female", disease="Influenza A(H5N1)")]
+    for split in (True, False):
+        groups, _ = P.build_groups(two, split_disease=split)
+        assert not any(r["composition"] for items in groups.values() for r in items), split
+        assert P.composition_pairs(groups) == 0
+        groups, _ = P.build_groups(one, split_disease=split)
+        assert all(r["composition"] for items in groups.values() for r in items), split
+        assert P.composition_pairs(groups) == 1
+    # Three such papers merged on request: their pairs are not left out as a composition.
+    across = []
+    for aid, (men, women, n) in enumerate(SPLIT[:3], 31):
+        across += [_row(aid, men, n, disease="H5N1"), _row(aid, women, n, label="female", disease="H9N2")]
+    assert P.pooled_comparisons(across, SEX) == []                     # kept apart: one label per disease
+    (merged,) = P.pooled_comparisons(across, SEX, split_disease=False)
+    assert (merged["disease"], merged["k"], merged["excluded_composition"]) == (None, 3, 0)
+
+
+def test_a_comparison_of_one_disease_leaves_out_the_papers_that_split_one_sample_however_spelt():
+    # Within A(H5N1): three papers with two groups and their cases, and two whose men and women
+    # split one sample, each row spelt its own way. A(H9N2) makes a comparison of its own.
+    rows = []
+    for aid, (m, f) in enumerate((("HPAI H5N1", "H5N1"), ("Influenza A(H5N1)", "HPAI A(H5N1)"), ("H5N1", "H5N1")), 1):
+        rows += [_row(aid, 4 + aid, 30, disease=m), _row(aid, 3 + aid, 32, label="female", disease=f)]
+    for aid, (men, women, n) in enumerate(SPLIT[:2], 11):
+        rows += [_row(aid, men, n, disease="H5N1 avian influenza"), _row(aid, women, n, label="female", disease="HPAI H5N1")]
+    for aid in range(21, 24):
+        rows += [_row(aid, 2 + aid % 3, 40, disease="H9N2"), _row(aid, 1 + aid % 3, 44, label="female", disease="LPAI H9N2")]
+    by_disease = {c["disease"]: c for c in P.pooled_comparisons(rows, SEX)}
+    assert set(by_disease) == {"A(H5N1)", "A(H9N2)"}
+    h5, h9 = by_disease["A(H5N1)"], by_disease["A(H9N2)"]
+    assert (h5["k"], h5["excluded_composition"]) == (3, 2) and {s["article_id"] for s in h5["studies"]} == {1, 2, 3}
+    assert (h9["k"], h9["excluded_composition"]) == (3, 0)
+    # The spellings are those of the papers pooled, not of the two left out.
+    assert h5["disease_spellings"] == [{"spelling": "H5N1", "n": 2}, {"spelling": "HPAI A(H5N1)", "n": 1},
+                                       {"spelling": "HPAI H5N1", "n": 1}, {"spelling": "Influenza A(H5N1)", "n": 1}]
+    assert P.composition_pairs(P.build_groups(rows)[0]) == 2
+    # The proportions keep the rows that split a sample, marked, in the pool of their disease.
+    male = next(g for g in P.pooled_groups(rows) if g["label"] == "male" and g["disease"] == "A(H5N1)")
+    assert (male["k"], male["k_composition"]) == (5, 2)
+    assert {s["spelling"] for s in male["disease_spellings"]} == {"HPAI H5N1", "Influenza A(H5N1)", "H5N1", "H5N1 avian influenza"}
+    # Merged on request, the diseases share one comparison and the same two papers are left out.
+    (merged,) = P.pooled_comparisons(rows, SEX, split_disease=False)
+    assert (merged["disease"], merged["k"], merged["excluded_composition"]) == (None, 6, 2)
+
+
 # ── Endpoint ────────────────────────────────────────────────────────────────
 MALE = [(12, 40), (5, 30), (20, 60), (8, 25), (15, 50), (9, 35)]
 FEMALE = [(10, 45), (6, 38), (14, 55), (7, 30), (11, 48), (8, 40)]
@@ -602,3 +676,70 @@ def test_a_comparison_beside_them_keeps_its_real_contrasts_and_counts_what_it_le
     male = _group(body, "male", "A(H5N1)")
     assert (male["k"], male["k_composition"]) == (11, 5)
     assert body["excluded"]["composition"] == 5
+
+
+# ── One sample split by sex, each row spelling the disease its own way ──────
+#: The SPLIT papers again, each writing A(H5N1) one way on the men's row and another on the
+#: women's: one disease, so still one sample. The first also counts its cases among the men
+#: (3 of 142), in a third spelling.
+SPLIT_SPELT = [("H5N1", "HPAI H5N1"), ("Influenza A(H5N1)", "avian influenza A (H5N1)"), ("HPAI A(H5N1)", "H5N1 clade 2.3.4.4b"),
+               ("A/H5N1", "HPAI H5N1"), ("H5N1 avian influenza", "Influenza A(H5N1)")]
+SPLIT_SPELT_IDS = list(range(9761, 9761 + len(SPLIT)))
+
+
+@pytest.fixture()
+def spelt_split_corpus(extracted):
+    def doc(i, rows):
+        return json.dumps({"v": 1, "source": "fulltext", "coverage": {}, "observations": [
+            {"sheet": "human_susc", "group": "sex", "covariate": lab, "value": None, "n_cases": x, "pop_risk": n,
+             "disease": disease, "quote": f"{lab} {x} of {n} study {i}", "quote_verified": True} for lab, x, n, disease in rows]})
+    with extracted.cursor() as cur:
+        for k, (i, (men, women, n), (m_spelt, f_spelt)) in enumerate(zip(SPLIT_SPELT_IDS, SPLIT, SPLIT_SPELT)):
+            rows = [("Males", men, n, m_spelt), ("Females", women, n, f_spelt)]
+            rows += [("Males", 3, men, "Influenza A(H5N1)")] if k == 0 else []
+            cur.execute("INSERT INTO literature_document (id, title, abstract, authors, year, source, is_duplicate, project_context, "
+                        "extraction_json) VALUES (%s,%s,'Who was tested, by sex, among people exposed to infected poultry.',"
+                        "'Hinjoy S; Doe A',2023,'pubmed',false,'literev',%s::jsonb)",
+                        (i, f"Spelt split paper {i}", doc(i, rows)))
+            cur.execute("INSERT INTO article_scenarios (scenario_id, document_id, similarity_score) VALUES (%s,%s,0.9)", (SID, i))
+    yield extracted
+    with extracted.cursor() as cur:
+        cur.execute("DELETE FROM extraction_review WHERE document_id = ANY(%s)", (SPLIT_SPELT_IDS,))
+        cur.execute("DELETE FROM article_scenarios WHERE document_id = ANY(%s)", (SPLIT_SPELT_IDS,))
+        cur.execute("DELETE FROM literature_document WHERE id = ANY(%s)", (SPLIT_SPELT_IDS,))
+
+
+def test_one_sample_split_by_sex_is_found_however_each_row_spells_the_disease(spelt_split_corpus):
+    body = _get().json()
+    assert [c for c in body["comparisons"] if c["disease"] == "A(H5N1)"] == []
+    # Five pairs left out, one per paper; the first paper's table of who was studied gives way to
+    # its count of cases among the men, and is the one row dropped.
+    assert body["excluded"]["composition"] == 5 and body["n_duplicate_rows_dropped"] == 1
+    male, female = _group(body, "male", "A(H5N1)"), _group(body, "female", "A(H5N1)")
+    first = next(s for s in male["studies"] if s["article_id"] == SPLIT_SPELT_IDS[0])
+    assert (first["x"], first["n"], first["composition"]) == (3, 142, False)
+    assert (male["k"], male["k_composition"]) == (5, 4) and (female["k"], female["k_composition"]) == (5, 5)
+    assert {s["spelling"] for s in female["disease_spellings"]} == {f for _m, f in SPLIT_SPELT}
+
+
+def test_the_comparison_of_one_disease_leaves_out_its_split_samples_however_spelt(pool_corpus, spelt_split_corpus):
+    body = _get().json()
+    cmp_ = next(c for c in body["comparisons"] if c["disease"] == "A(H5N1)")
+    # The five papers join the A(H5N1) comparison whatever they wrote, and are left out of it.
+    assert (cmp_["a"], cmp_["b"], cmp_["k"], cmp_["excluded_composition"]) == ("male", "female", 6, 5)
+    assert sorted(s["article_id"] for s in cmp_["studies"]) == EXTRA
+    assert cmp_["disease_spellings"] == [{"spelling": "HPAI A(H5N1)", "n": 6}]       # the papers pooled, only
+    assert (_group(body, "male", "A(H5N1)")["k"], _group(body, "male", "A(H5N1)")["k_composition"]) == (11, 4)
+
+
+def test_the_download_says_what_the_panel_marks_beside_each_number(pool_corpus, spelt_split_corpus):
+    import csv
+    import io
+    rows = list(csv.DictReader(io.StringIO(_get("/export").content.decode("utf-8-sig"))))
+    assert list(rows[0])[-3:] == ["k_composition", "excluded_composition", "disease_as_written"]
+    male = next(r for r in rows if r["kind"] == "proportion" and r["label"] == "male" and r["disease"] == "A(H5N1)")
+    assert (male["studies"], male["k_composition"], male["excluded_composition"]) == ("11", "4", "")
+    assert male["disease_as_written"] == "HPAI A(H5N1) (7); Influenza A(H5N1) (2); A/H5N1 (1); H5N1 avian influenza (1)"
+    cmp_ = next(r for r in rows if r["kind"] == "odds_ratio" and r["disease"] == "A(H5N1)")
+    assert (cmp_["studies"], cmp_["k_composition"], cmp_["excluded_composition"]) == ("6", "", "5")
+    assert cmp_["disease_as_written"] == "HPAI A(H5N1) (6)"

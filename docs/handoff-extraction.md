@@ -60,7 +60,7 @@ unchecked reading.
 | Codebook (label normalisation at read time, never rewrites stored labels) | `api/codebook.py` | `CodebookPanel.tsx` |
 | Disease names (one key per disease at read time: A(H5N1) for HPAI H5N1, influenza A(H5N1), H5N1...; other diseases as written) | `api/diseases.py` | `PooledPanel.tsx` (Disease column, with the spellings each pool merged) |
 | Reviewer decisions (accept, edit, reject, clear; Cohen's kappa) in table `extraction_review` | `api/extraction_review.py` | `ObservationPanel.tsx`, `ReviewSummaryCard.tsx` |
-| Pooled estimates (logit, DerSimonian-Laird, Hartung-Knapp CI, prediction interval, min 3 studies) | `api/pooling.py` | `PooledPanel.tsx` (forest plots) |
+| Pooled estimates (logit, DerSimonian-Laird, Hartung-Knapp CI, prediction interval, min 3 studies; rows that split one sample, 142 men and 81 women among 225 of one disease, are marked in the proportions and left out of the odds ratios) | `api/pooling.py` | `PooledPanel.tsx` (forest plots) |
 | Report as Markdown, Word, PDF | `api/extraction_report.py` | download buttons |
 | Country and NUTS region of each study (`geo_nuts` table, Eurostat CSV import) | `api/geography.py` | `GeographyPanel.tsx` |
 | Source text drawer ("View in the paper") | `/user-scenarios/{sid}/articles/{aid}/text` | `SourceTextDrawer.tsx` |
@@ -198,8 +198,6 @@ answer (at most 50 rows) and is marked `condensed`.
 - **`ref.first_author` is filled on 115 of 601 rows (19.1%)**, so some report citations read "? 2013".
 - **The pooled panel lists at most 120 groups** (`api/pooling.py`), now flagged as capped in the
   payload. On HPAI_last 2 580 labels exist and 45 reach the minimum of three studies.
-- **Comparisons between groups often contrast the two shares of one sample** (men and women of the
-  same 200 people), a composition, not a risk (PR #339, open).
 - **The report's country table stops at 25** of the 41 countries.
 - **The Excel export is not byte-reproducible.** Successive downloads differ by a byte or two and have
   different checksums, since openpyxl writes a zip with varying metadata. Never quote an exact size;

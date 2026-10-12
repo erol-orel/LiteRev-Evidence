@@ -14,7 +14,7 @@ pytest.importorskip("fastapi")
 import main  # noqa: E402
 from api import extraction_report as R  # noqa: E402
 from test_extraction import HDR, SID, extracted, seeded  # noqa: E402,F401
-from test_pooling import composition_corpus, pool_corpus  # noqa: E402,F401
+from test_pooling import composition_corpus, pool_corpus, spelt_split_corpus  # noqa: E402,F401
 
 
 def _client():
@@ -96,6 +96,39 @@ def test_the_report_says_which_rows_give_the_composition_of_a_sample(composition
     fr = _get("md", "fr").text
     assert "5 paires de lignes ont été écartées des odds ratios" in fr
     assert "composition de l'échantillon dans 5 études sur 5" in fr and chr(0x2014) not in md + fr
+
+
+def test_the_report_marks_a_split_sample_and_names_its_spellings_in_one_line(spelt_split_corpus):
+    md = _get("md").text
+    # The five papers split one sample however each row spells A(H5N1): their pairs are left out
+    # of the odds ratios, and each label carries its mark and the spellings behind its disease.
+    assert "5 pairs of rows were left out of the odds ratios" in md
+    assert "| sex gender > male (composition of the sample in 4 of 5 studies) | A(H5N1) | 5 |" in md
+    assert ("sex gender > female (A(H5N1)), composition of the sample in 5 of 5 studies. As written: HPAI H5N1 (2); "
+            "avian influenza A (H5N1) (1); H5N1 clade 2.3.4.4b (1); Influenza A(H5N1) (1)") in md
+    fr = _get("md", "fr").text
+    assert ("sex gender > female (A(H5N1)), composition de l'échantillon dans 5 études sur 5. Tel qu'écrit : HPAI H5N1 (2); "
+            "avian influenza A (H5N1) (1)") in fr
+    assert "5 paires de lignes ont été écartées des odds ratios" in fr and chr(0x2014) not in md + fr
+
+
+def test_the_workbook_counts_the_split_samples_beside_each_pool_and_comparison(pool_corpus, spelt_split_corpus):
+    openpyxl = pytest.importorskip("openpyxl")
+    wb = openpyxl.load_workbook(io.BytesIO(_client().get(f"/user-scenarios/{SID}/extraction/export").content))
+
+    def table(sheet):
+        head = [c.value for c in wb[sheet][1]]
+        return head, [dict(zip(head, (c.value for c in r))) for r in wb[sheet].iter_rows(min_row=2)]
+
+    head, pooled = table("POOLED")
+    assert head[-2:] == ["Studies giving the composition of the sample", "Disease as written (studies)"]
+    male = next(r for r in pooled if r["Label"] == "male" and r["Disease"] == "A(H5N1)")
+    assert (male["Studies"], male["Studies giving the composition of the sample"]) == (11, 4)
+    head, comps = table("COMPARISONS")
+    assert head[-2:] == ["Papers left out (composition of the sample)", "Disease as written (studies)"]
+    cmp_ = next(r for r in comps if r["Disease"] == "A(H5N1)")
+    assert (cmp_["Papers"], cmp_["Papers left out (composition of the sample)"], cmp_["Disease as written (studies)"]) == \
+        (6, 5, "HPAI A(H5N1) (6)")
 
 
 def test_the_word_report_opens_and_holds_the_tables(pool_corpus):
